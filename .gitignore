@@ -35,3 +35,4 @@ changelog-pending.md
 # Claude / Kiro CLI（本地开发工具配置，不提交）
 .claude/
 CLAUDE.md
+AGENTS.md
