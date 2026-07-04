@@ -87,7 +87,7 @@ src/aistock_agent/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/agent/chat/message` | 对话消息（非流式） |
-| GET | `/api/agent/briefing/morning` | 晨报（支持 Redis 缓存） |
+| GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，支持 Redis 缓存） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | 健康检查 |
 
