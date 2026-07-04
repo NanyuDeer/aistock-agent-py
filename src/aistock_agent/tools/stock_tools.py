@@ -1,7 +1,5 @@
 """个股行情工具 — 通过 Node.js /internal/* API 获取 A 股数据"""
 
-from typing import Any
-
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
@@ -46,7 +44,7 @@ async def get_profit_forecast(symbol: str) -> str:
     return _format_forecast(data)
 
 
-def _format_quote(data: dict[str, Any]) -> str:
+def _format_quote(data: dict[str, object]) -> str:
     """格式化行情数据"""
     name = data.get("name", "未知")
     price = data.get("price", "-")
@@ -60,7 +58,7 @@ def _format_quote(data: dict[str, Any]) -> str:
     )
 
 
-def _format_capital_flow(data: dict[str, Any]) -> str:
+def _format_capital_flow(data: dict[str, object]) -> str:
     """格式化资金流向数据"""
     main_in = data.get("main_inflow", "-")
     main_out = data.get("main_outflow", "-")
@@ -71,7 +69,7 @@ def _format_capital_flow(data: dict[str, Any]) -> str:
     )
 
 
-def _format_forecast(data: dict[str, Any]) -> str:
+def _format_forecast(data: dict[str, object]) -> str:
     """格式化盈利预测数据"""
     year = data.get("year", "-")
     eps_forecast = data.get("eps_forecast", "-")

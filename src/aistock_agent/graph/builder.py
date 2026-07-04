@@ -3,9 +3,8 @@
 图拓扑层：只管骨架，不含节点实现逻辑。
 """
 
-from typing import Any
-
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.agents import (
     event_analyst,
@@ -52,6 +51,6 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def compile_graph() -> Any:
+def compile_graph() -> CompiledStateGraph:
     """编译图（可直接调用 invoke / stream）"""
     return build_graph().compile()

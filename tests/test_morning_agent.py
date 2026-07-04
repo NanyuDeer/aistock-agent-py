@@ -1,6 +1,7 @@
 """morning_agent 测试"""
-import pytest
 from datetime import date
+
+import pytest
 
 from aistock_agent.agents.morning_agent import is_trading_day
 

@@ -7,11 +7,10 @@
 
 from collections.abc import AsyncGenerator
 from datetime import date, datetime
-from typing import Any
 
 import redis.asyncio as aioredis
 from chinese_calendar import is_workday  # type: ignore[import-untyped]
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.agents.base import get_deep_think
@@ -28,7 +27,7 @@ TOOL_LABELS: dict[str, str] = {
 }
 
 
-async def stream(state: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
+async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], None]:
     """晨报 SSE 流：缓存命中直接返回，未命中走 ReAct + astream_events"""
     today = datetime.now().strftime("%Y年%m月%d日")
 
@@ -62,7 +61,7 @@ async def stream(state: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
 
             if event_type == "on_tool_start":
                 label = TOOL_LABELS.get(tool_name, tool_name)
-                tool_event: dict[str, Any] = {
+                tool_event: dict[str, object] = {
                     "type": "tool_start",
                     "tool": tool_name,
                     "label": label,
@@ -101,7 +100,7 @@ async def stream(state: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
     yield {"type": "done"}
 
 
-async def run(state: AgentState) -> dict[str, Any]:
+async def run(state: AgentState) -> dict[str, object]:
     """晨报分析：宏观策略4步框架"""
     today = datetime.now().strftime("%Y年%m月%d日")
 
@@ -126,8 +125,8 @@ async def run(state: AgentState) -> dict[str, Any]:
     # 提取最终响应
     final_response = ""
     for msg in reversed(result.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-            final_response = msg.content
+        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
+            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
     # 缓存结果

@@ -1,8 +1,9 @@
 """routes /briefing/morning SSE 端点测试"""
 import json
-import pytest
-import httpx
 from unittest.mock import patch
+
+import httpx
+import pytest
 
 from aistock_agent.main import app
 

@@ -1,9 +1,10 @@
 """news_tools 测试"""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from aistock_agent.tools.news_tools import search_cls_news, get_news_fulltext, get_cls_news
+import pytest
+
+from aistock_agent.tools.news_tools import get_news_fulltext, search_cls_news
 
 
 @pytest.mark.asyncio

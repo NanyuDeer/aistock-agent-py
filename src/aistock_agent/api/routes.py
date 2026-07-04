@@ -2,7 +2,6 @@
 
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -42,7 +41,7 @@ async def chat_message(req: ChatRequest) -> ChatResponse:
 
     session_id = req.session_id or f"session_{id(req)}"
 
-    initial_state: dict[str, Any] = {
+    initial_state: dict[str, object] = {
         "messages": [{"role": "user", "content": req.message}],
         "session_id": session_id,
         "user_id": req.user_id,
@@ -63,7 +62,7 @@ async def chat_message(req: ChatRequest) -> ChatResponse:
 @router.get("/briefing/morning")
 async def morning_briefing() -> EventSourceResponse:
     """晨报（SSE 流式，支持 Redis 缓存）"""
-    state: dict[str, Any] = {
+    state: dict[str, object] = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
         "session_id": "briefing_morning",
         "user_id": None,
@@ -89,7 +88,7 @@ async def morning_briefing() -> EventSourceResponse:
 
 
 @router.get("/skills")
-async def list_skills() -> dict[str, Any]:
+async def list_skills() -> dict[str, list[dict[str, str]]]:
     """已注册工具列表"""
     from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
     from aistock_agent.tools.news_tools import get_cls_news, get_news_fulltext, search_cls_news

@@ -1,9 +1,10 @@
 """stock_tools 测试 — mock Node.js API 调用"""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from aistock_agent.tools.stock_tools import get_quote, get_capital_flow, get_profit_forecast
+import pytest
+
+from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
 
 
 @pytest.mark.asyncio

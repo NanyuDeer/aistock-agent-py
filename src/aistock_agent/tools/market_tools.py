@@ -3,9 +3,8 @@
 这些工具在 Python 侧直接调用，Node.js 无对应实现。
 """
 
-import json
 
-import yfinance as yf
+import yfinance as yf  # type: ignore[import-untyped]
 from langchain_core.tools import tool
 
 from aistock_agent.config import settings
@@ -65,9 +64,9 @@ async def tavily_finance_search(query: str) -> str:
         query: 搜索关键词，如"美联储利率决议"、"中国PMI数据"
     """
     try:
-        from tavily import TavilyClient
+        from tavily import TavilyClient  # type: ignore[import-untyped]
 
-        client = TavilyClient(api_key=settings.tavily_api_key)
+        client = TavilyClient(api_key=settings.get_tavily_key())
         result = client.search(query=query, topic="news", max_results=5)
 
         if not result.get("results"):

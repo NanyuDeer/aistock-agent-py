@@ -1,7 +1,5 @@
 """FastAPI 应用入口"""
 
-from typing import Any
-
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +41,7 @@ app.include_router(ws_router, prefix="/api/agent", tags=["websocket"])
 
 
 @app.get("/health")
-async def health() -> dict[str, Any]:
+async def health() -> dict[str, str]:
     """健康检查"""
     return {"status": "ok", "service": "aistock-agent"}
 
