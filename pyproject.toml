@@ -1,0 +1,56 @@
+[project]
+name = "aistock-agent"
+version = "1.0.0"
+description = "AiStock Agent Service — LangGraph multi-agent orchestration"
+requires-python = ">=3.11"
+
+dependencies = [
+    # LangGraph 核心
+    "langgraph==0.2.74",
+    "langchain-core==0.3.58",
+    "langchain-openai==0.2.14",
+
+    # FastAPI 服务层
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.2",
+    "sse-starlette==2.2.1",
+
+    # 数据获取（Python侧直接调用）
+    "yfinance==0.2.54",        # 境外市场数据（美股/亚太/大宗/汇率）
+    "tavily-python==0.5.0",    # 全网财经新闻搜索
+
+    # 数据调用 & 配置
+    "httpx==0.28.1",            # 异步HTTP → Node.js /internal/* API
+    "redis==5.2.1",             # 会话持久化 / 晨报缓存
+    "pydantic==2.11.5",
+    "pydantic-settings==2.8.1",
+    "python-dotenv==1.1.0",
+    "structlog==25.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.5",
+    "pytest-asyncio==0.25.3",
+    "pytest-mock==3.14.0",
+    "mypy==1.15.0",
+    "ruff==0.11.12",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
