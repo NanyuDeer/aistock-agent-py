@@ -6,8 +6,11 @@
 """
 
 import json
-from datetime import datetime
+from collections.abc import AsyncGenerator
+from datetime import date, datetime
 
+import redis.asyncio as aioredis
+from chinese_calendar import is_workday
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -58,8 +61,6 @@ async def run(state: AgentState) -> dict:
 async def _get_cached_briefing() -> str | None:
     """从 Redis 获取缓存晨报"""
     try:
-        import redis.asyncio as aioredis
-
         client = aioredis.from_url(settings.redis_url)
         today = datetime.now().strftime("%Y-%m-%d")
         cache_key = f"briefing:morning:{today}"
@@ -75,8 +76,6 @@ async def _get_cached_briefing() -> str | None:
 async def _set_cached_briefing(content: str, ttl: int = 7200) -> None:
     """缓存晨报到 Redis，TTL=2小时"""
     try:
-        import redis.asyncio as aioredis
-
         client = aioredis.from_url(settings.redis_url)
         today = datetime.now().strftime("%Y-%m-%d")
         cache_key = f"briefing:morning:{today}"
@@ -84,3 +83,8 @@ async def _set_cached_briefing(content: str, ttl: int = 7200) -> None:
         await client.aclose()
     except Exception:
         pass
+
+
+def is_trading_day(d: date | None = None) -> bool:
+    """判断是否为 A 股交易日（排除周末和法定节假日）"""
+    return is_workday(d or date.today())
