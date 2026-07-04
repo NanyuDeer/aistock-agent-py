@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 from datetime import date, datetime
 
 import redis.asyncio as aioredis
-from chinese_calendar import is_workday
+from chinese_calendar import is_workday  # type: ignore[import-untyped]
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -165,4 +165,4 @@ async def _set_cached_briefing(content: str, ttl: int = 7200) -> None:
 
 def is_trading_day(d: date | None = None) -> bool:
     """判断是否为 A 股交易日（排除周末和法定节假日）"""
-    return is_workday(d or date.today())
+    return bool(is_workday(d or date.today()))

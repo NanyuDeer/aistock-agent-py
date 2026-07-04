@@ -1,10 +1,13 @@
 """REST 接口 — 对话消息、晨报、工具列表"""
 
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
+from aistock_agent.agents import morning_agent
 from aistock_agent.config import settings
 from aistock_agent.graph.builder import compile_graph
 
@@ -57,11 +60,9 @@ async def chat_message(req: ChatRequest) -> ChatResponse:
 
 
 @router.get("/briefing/morning")
-async def morning_briefing() -> dict:
-    """晨报（非流式，支持 Redis 缓存）"""
-    graph = compile_graph()
-
-    initial_state = {
+async def morning_briefing() -> EventSourceResponse:
+    """晨报（SSE 流式，支持 Redis 缓存）"""
+    state = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
         "session_id": "briefing_morning",
         "user_id": None,
@@ -73,10 +74,17 @@ async def morning_briefing() -> dict:
         "final_response": None,
     }
 
-    result = await graph.ainvoke(initial_state)
+    async def generator():
+        try:
+            async for event in morning_agent.stream(state):
+                yield {"data": json.dumps(event, ensure_ascii=False)}
+        except Exception as e:
+            yield {"data": json.dumps(
+                {"type": "error", "message": str(e)},
+                ensure_ascii=False,
+            )}
 
-    content = result.get("final_response") or "晨报生成失败，请稍后重试。"
-    return {"content": content}
+    return EventSourceResponse(generator())
 
 
 @router.get("/skills")

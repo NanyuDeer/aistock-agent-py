@@ -4,6 +4,19 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _reset_sse_appstatus():
+    """每个测试前重置 sse-starlette 的类级 AppStatus。
+
+    AppStatus.should_exit_event 是类级单例，首个 SSE 响应会创建绑定到当前事件循环的
+    anyio.Event；后续测试在新事件循环上复用会触发 "bound to a different event loop"。
+    """
+    from sse_starlette.sse import AppStatus
+    AppStatus.should_exit = False
+    AppStatus.should_exit_event = None
+    yield
+
+
 @pytest.fixture
 def mock_node_api():
     """mock NodeApiClient.get，返回预设数据"""
