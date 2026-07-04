@@ -1,7 +1,8 @@
 """pytest 配置 — 共享 fixtures"""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -35,8 +36,12 @@ def mock_yfinance():
 
 @pytest.fixture
 def mock_tavily():
-    """mock TavilyClient"""
-    with patch("aistock_agent.tools.market_tools.TavilyClient") as mock_cls:
+    """mock TavilyClient。
+
+    patch 源模块 tavily.TavilyClient，因 market_tools 在函数内
+    ``from tavily import TavilyClient``，模块级 patch 无效。
+    """
+    with patch("tavily.TavilyClient") as mock_cls:
         yield mock_cls
 
 

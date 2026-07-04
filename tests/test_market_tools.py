@@ -1,7 +1,8 @@
 """market_tools 测试 — mock yfinance 和 Tavily"""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
 
@@ -38,7 +39,7 @@ async def test_tavily_finance_search_success():
         ]
     }
 
-    with patch("aistock_agent.tools.market_tools.TavilyClient", return_value=mock_tavily_instance):
+    with patch("tavily.TavilyClient", return_value=mock_tavily_instance):
         result = await tavily_finance_search.ainvoke({"query": "美联储利率决议"})
         assert "美联储" in result
 
@@ -49,6 +50,6 @@ async def test_tavily_finance_search_no_results():
     mock_tavily_instance = MagicMock()
     mock_tavily_instance.search.return_value = {"results": []}
 
-    with patch("aistock_agent.tools.market_tools.TavilyClient", return_value=mock_tavily_instance):
+    with patch("tavily.TavilyClient", return_value=mock_tavily_instance):
         result = await tavily_finance_search.ainvoke({"query": "测试关键词"})
         assert "未找到" in result
