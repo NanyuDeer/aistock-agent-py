@@ -1,7 +1,8 @@
 """REST 接口 — 对话消息、晨报、工具列表"""
 
 import json
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -17,8 +18,8 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     """对话请求"""
     message: str
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
+    session_id: str | None = None
+    user_id: str | None = None
     favorites: list[str] = []
 
 
@@ -28,7 +29,7 @@ class ChatResponse(BaseModel):
     session_id: str
 
 
-def _verify_internal_token(x_internal_token: Optional[str] = Header(None)) -> None:
+def _verify_internal_token(x_internal_token: str | None = Header(None)) -> None:
     """验证内网鉴权 token"""
     if x_internal_token != settings.internal_api_token:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -41,7 +42,7 @@ async def chat_message(req: ChatRequest) -> ChatResponse:
 
     session_id = req.session_id or f"session_{id(req)}"
 
-    initial_state = {
+    initial_state: dict[str, Any] = {
         "messages": [{"role": "user", "content": req.message}],
         "session_id": session_id,
         "user_id": req.user_id,
@@ -62,7 +63,7 @@ async def chat_message(req: ChatRequest) -> ChatResponse:
 @router.get("/briefing/morning")
 async def morning_briefing() -> EventSourceResponse:
     """晨报（SSE 流式，支持 Redis 缓存）"""
-    state = {
+    state: dict[str, Any] = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
         "session_id": "briefing_morning",
         "user_id": None,
@@ -74,7 +75,7 @@ async def morning_briefing() -> EventSourceResponse:
         "final_response": None,
     }
 
-    async def generator():
+    async def generator() -> AsyncGenerator[dict[str, str], None]:
         try:
             async for event in morning_agent.stream(state):
                 yield {"data": json.dumps(event, ensure_ascii=False)}
@@ -88,7 +89,7 @@ async def morning_briefing() -> EventSourceResponse:
 
 
 @router.get("/skills")
-async def list_skills() -> dict:
+async def list_skills() -> dict[str, Any]:
     """已注册工具列表"""
     from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
     from aistock_agent.tools.news_tools import get_cls_news, get_news_fulltext, search_cls_news

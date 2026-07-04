@@ -3,6 +3,8 @@
 工具集：get_quote, get_capital_flow, get_profit_forecast, search_cls_news
 """
 
+from typing import Any
+
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -13,7 +15,7 @@ from aistock_agent.tools.news_tools import search_cls_news
 from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
 
 
-async def run(state: AgentState) -> dict:
+async def run(state: AgentState) -> dict[str, Any]:
     """个股分析：行情 + 资金流向 + 机构预测 + 相关新闻"""
     symbol = state.get("symbol")
     if not symbol:

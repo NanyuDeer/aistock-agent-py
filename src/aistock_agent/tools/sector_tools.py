@@ -1,5 +1,7 @@
 """板块工具 — 通过 Node.js /internal/* API 获取板块数据"""
 
+from typing import Any
+
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
@@ -18,7 +20,7 @@ async def get_leader_stocks(tag_code: str) -> str:
     return _format_leaders(data)
 
 
-def _format_leaders(data: dict) -> str:
+def _format_leaders(data: dict[str, Any]) -> str:
     """格式化龙头股数据"""
     tag_name = data.get("tag_name", "未知板块")
     leaders = data.get("leaders", [])

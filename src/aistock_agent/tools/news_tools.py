@@ -1,5 +1,7 @@
 """新闻工具 — 通过 Node.js /internal/* API + Tavily 获取财经新闻"""
 
+from typing import Any
+
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
@@ -46,7 +48,7 @@ async def get_cls_news(limit: int = 10) -> str:
     return _format_news_list(data)
 
 
-def _format_news_list(data: dict) -> str:
+def _format_news_list(data: dict[str, Any]) -> str:
     """格式化新闻列表"""
     news_list = data.get("items", data.get("news", []))
     if isinstance(data, list):

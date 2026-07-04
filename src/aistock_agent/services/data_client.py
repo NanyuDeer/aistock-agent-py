@@ -3,7 +3,7 @@
 Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 """
 
-from typing import Any, Optional
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -20,7 +20,7 @@ class NodeApiClient:
         self._base_url = settings.node_api_base_url.rstrip("/")
         self._token = settings.internal_api_token
 
-    async def get(self, path: str) -> Optional[dict[str, Any]]:
+    async def get(self, path: str) -> dict[str, Any] | None:
         """GET 请求 Node.js 内部 API
 
         Args:
@@ -33,7 +33,7 @@ class NodeApiClient:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
-                return resp.json()
+                return cast(dict[str, Any], resp.json())
         except httpx.HTTPStatusError as e:
             logger.error("node_api_http_error", url=url, status=e.response.status_code)
         except httpx.RequestError as e:

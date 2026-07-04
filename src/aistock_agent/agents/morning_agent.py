@@ -7,6 +7,7 @@
 
 from collections.abc import AsyncGenerator
 from datetime import date, datetime
+from typing import Any
 
 import redis.asyncio as aioredis
 from chinese_calendar import is_workday  # type: ignore[import-untyped]
@@ -27,7 +28,7 @@ TOOL_LABELS: dict[str, str] = {
 }
 
 
-async def stream(state: dict) -> AsyncGenerator[dict, None]:
+async def stream(state: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
     """晨报 SSE 流：缓存命中直接返回，未命中走 ReAct + astream_events"""
     today = datetime.now().strftime("%Y年%m月%d日")
 
@@ -61,7 +62,7 @@ async def stream(state: dict) -> AsyncGenerator[dict, None]:
 
             if event_type == "on_tool_start":
                 label = TOOL_LABELS.get(tool_name, tool_name)
-                tool_event: dict = {
+                tool_event: dict[str, Any] = {
                     "type": "tool_start",
                     "tool": tool_name,
                     "label": label,
@@ -100,7 +101,7 @@ async def stream(state: dict) -> AsyncGenerator[dict, None]:
     yield {"type": "done"}
 
 
-async def run(state: AgentState) -> dict:
+async def run(state: AgentState) -> dict[str, Any]:
     """晨报分析：宏观策略4步框架"""
     today = datetime.now().strftime("%Y年%m月%d日")
 
@@ -139,7 +140,7 @@ async def run(state: AgentState) -> dict:
 async def _get_cached_briefing() -> str | None:
     """从 Redis 获取缓存晨报"""
     try:
-        client = aioredis.from_url(settings.redis_url)
+        client = aioredis.from_url(settings.redis_url)  # type: ignore[no-untyped-call]
         today = datetime.now().strftime("%Y-%m-%d")
         cache_key = f"briefing:morning:{today}"
         cached = await client.get(cache_key)
@@ -154,7 +155,7 @@ async def _get_cached_briefing() -> str | None:
 async def _set_cached_briefing(content: str, ttl: int = 7200) -> None:
     """缓存晨报到 Redis，TTL=2小时"""
     try:
-        client = aioredis.from_url(settings.redis_url)
+        client = aioredis.from_url(settings.redis_url)  # type: ignore[no-untyped-call]
         today = datetime.now().strftime("%Y-%m-%d")
         cache_key = f"briefing:morning:{today}"
         await client.setex(cache_key, ttl, content)

@@ -3,6 +3,8 @@
 图拓扑层：只管骨架，不含节点实现逻辑。
 """
 
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 
 from aistock_agent.agents import (
@@ -40,12 +42,16 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges("supervisor", route_by_intent)
 
     # 各 Agent → END
-    for node in ["morning_agent", "stock_analyst", "sector_analyst", "event_analyst", "general_agent"]:
+    agent_nodes = [
+        "morning_agent", "stock_analyst", "sector_analyst",
+        "event_analyst", "general_agent",
+    ]
+    for node in agent_nodes:
         graph.add_edge(node, END)
 
     return graph
 
 
-def compile_graph():
+def compile_graph() -> Any:
     """编译图（可直接调用 invoke / stream）"""
     return build_graph().compile()

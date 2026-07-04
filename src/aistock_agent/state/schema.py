@@ -3,7 +3,7 @@
 所有数据通过 AgentState 流转，禁止节点间隐式传递。
 """
 
-from typing import Annotated, Optional
+from typing import Annotated, Any
 
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -24,15 +24,15 @@ class AgentState(TypedDict):
         final_response: 最终响应文本
     """
 
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list[Any], add_messages]
     session_id: str
-    user_id: Optional[str]
+    user_id: str | None
     favorites: list[str]
     # 路由信息（supervisor 写入）
-    intent: Optional[str]  # stock | sector | event | morning | general
-    symbol: Optional[str]
-    tag_code: Optional[str]
+    intent: str | None  # stock | sector | event | morning | general
+    symbol: str | None
+    tag_code: str | None
     # 分析报告累积
     analysis_reports: dict[str, str]
     # 最终响应
-    final_response: Optional[str]
+    final_response: str | None
