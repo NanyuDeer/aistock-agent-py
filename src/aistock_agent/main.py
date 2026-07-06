@@ -1,5 +1,8 @@
 """FastAPI 应用入口"""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,10 +24,19 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """应用生命周期：启动日志（替代已弃用的 on_event）"""
+    logger.info("agent_service_started", host=settings.host, port=settings.port)
+    yield
+
+
 app = FastAPI(
     title="AiStock Agent Service",
     version="1.0.0",
     description="LangGraph 多Agent智能体服务",
+    lifespan=lifespan,
 )
 
 # CORS（Node.js 反代时需要）
@@ -44,8 +56,3 @@ app.include_router(ws_router, prefix="/api/agent", tags=["websocket"])
 async def health() -> dict[str, str]:
     """健康检查"""
     return {"status": "ok", "service": "aistock-agent"}
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    logger.info("agent_service_started", host=settings.host, port=settings.port)
