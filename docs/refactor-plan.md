@@ -1,6 +1,6 @@
 # AiStock Agent — Python/LangGraph 重构设计文档
 
-> 版本：v1.1 | 日期：2026-07-04 | 状态：Phase 3 进行中
+> 版本：v2.0 | 日期：2026-07-06 | 状态：Phase 3 进行中
 
 ---
 
@@ -21,10 +21,28 @@ orchestrator.ts → AgentRegistry(LLM路由) → Agent.handle() → Skill.execut
 ### 重构目标
 
 1. 将 Agent 推理层迁移至 Python，使用 **LangGraph** 构建多Agent状态机
-2. 支持**晨报Agent**（预市宏观分析，最高优先级）
-3. 支持**个股/板块/事件**分析对话
-4. 保持 Node.js 作为数据层和 HTTP 接入层，Python 服务专注推理
-5. 重构后输出 Agent 开发标准文档
+2. **产品功能驱动**：Agent 命名和职责对齐 App 产品功能（晨报/风口/事件传导/异动/十倍股/业绩预测/复盘），而非技术分类
+3. 支持**晨报Agent**（预市宏观分析，最高优先级）
+4. 支持**个股/风口/事件传导**分析对话
+5. 支持**异动提醒/十倍股评分/业绩预测**等产品功能
+6. 保持 Node.js 作为数据层和 HTTP 接入层，Python 服务专注推理
+7. 重构后输出 Agent 开发标准文档
+
+### 产品功能 → Agent 映射
+
+| 产品功能 | 对应 Agent | 网页端已有功能 | 涨乐AI参考 |
+|---------|-----------|-------------|-----------|
+| 早点听/晨报 | morning_agent | 无 | 早点听/盘前播报 |
+| 个股分析 | stock_analyst | StockCardList + 详情页 | AI对话 |
+| 长线风口/风口龙头 | wind_leader_agent | WindLeaderPanel | 涨停猎手/热点捕手 |
+| 事件传导链 | event_chain_agent | AiGraph（AI产业链图谱）| 事件捕手/事件传导 |
+| 异动提醒/持仓监控 | alert_agent | StockMonitorView | 特别提醒/持仓陪伴 |
+| 机构调研热门股 | hot_burst_agent | HotBurstView | - |
+| 十倍股/趋势股评分 | tenx_agent | TenxScoreView | - |
+| 业绩预测 | forecast_agent | PerformanceForecastView | 研报精读/业绩解读 |
+| 交易复盘 | review_agent | 无 | 交易复盘 |
+| **播报生成** | **broadcast_agent** | 无 | **双人播报（AI分析师+AI主持人）** |
+| 兜底对话 | general_agent | 无 | 任务助手 |
 
 ---
 
@@ -141,23 +159,33 @@ aistock-agent-py/
         │   ├── edges.py         # 所有条件边函数
         │   └── builder.py       # StateGraph构建 + compile()
         │
-        ├── agents/              # 每个Agent一个文件，含节点函数
+        ├── agents/              # 每个Agent一个文件，含节点函数（产品功能驱动命名）
         │   ├── base.py          # 双模型工厂（quick_think/deep_think）
         │   ├── supervisor.py    # 意图分类节点（quick_think）
         │   ├── morning_agent.py # 晨报节点（ReAct + deep_think）★优先
         │   ├── stock_analyst.py # 个股分析节点
-        │   ├── sector_analyst.py# 板块分析节点
-        │   ├── event_analyst.py # 事件传导链节点
-        │   └── general_agent.py # 兜底节点
+        │   ├── wind_leader_agent.py  # 长线风口/风口龙头节点
+        │   ├── event_chain_agent.py  # 事件传导链节点
+        │   ├── alert_agent.py        # 异动提醒/持仓监控节点
+        │   ├── hot_burst_agent.py    # 机构调研热门股节点
+        │   ├── tenx_agent.py         # 十倍股/趋势股评分节点
+        │   ├── forecast_agent.py     # 业绩预测节点（后续）
+        │   ├── review_agent.py       # 交易复盘节点（P2）
+        │   ├── broadcast_agent.py    # 播报生成节点（双人播报）
+        │   └── general_agent.py      # 兜底节点
         │
         ├── tools/               # LangChain @tool，按数据域分组
         │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
-        │   ├── sector_tools.py  # get_leader_stocks
+        │   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
         │   ├── news_tools.py    # search_cls_news, get_news_fulltext
-        │   └── market_tools.py  # get_global_markets（yfinance）, tavily_finance_search
+        │   ├── market_tools.py  # get_global_markets（yfinance）, tavily_finance_search
+        │   ├── monitor_tools.py # get_stock_monitor（异动数据）, get_alert_history
+        │   └── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks
         │
         ├── prompts/             # 所有提示词集中管理
         │   ├── morning.py       # 晨报宏观分析提示词（4步框架）
+        │   ├── event_chain.py   # 事件传导链分析提示词
+        │   ├── tenx.py          # 十倍股评分提示词
         │   ├── routing.py       # 路由分类提示词
         │   └── system.py        # 通用系统提示词
         │
@@ -187,7 +215,7 @@ class AgentState(TypedDict):
     user_id: Optional[str]
     favorites: list[str]           # 用户自选股列表
     # 路由信息（supervisor写入）
-    intent: Optional[str]          # stock | sector | event | morning | general
+    intent: Optional[str]          # morning | stock | wind_leader | event_chain | alert | tenx | forecast | review | general
     symbol: Optional[str]          # 提取的股票代码
     tag_code: Optional[str]        # 提取的板块代码
     # 分析报告累积（多步分析时复用，参考TradingAgents）
@@ -200,6 +228,8 @@ class AgentState(TypedDict):
 
 ## 6. Graph 设计
 
+### 6.1 主流程 Graph
+
 ```
 START
   │
@@ -207,22 +237,64 @@ START
 supervisor（quick_think）
   │ 写入 state.intent
   │
-  ├─── intent="morning"  ──▶  morning_agent   ★ 最高优先
-  ├─── intent="stock"    ──▶  stock_analyst
-  ├─── intent="sector"   ──▶  sector_analyst
-  ├─── intent="event"    ──▶  event_analyst
-  └─── intent="general"  ──▶  general_agent
+  ├─── intent="morning"       ──▶  morning_agent
+  ├─── intent="stock"         ──▶  stock_analyst
+  ├─── intent="wind_leader"   ──▶  wind_leader_agent
+  ├─── intent="event_chain"   ──▶  event_chain_agent
+  ├─── intent="alert"         ──▶  alert_agent
+  ├─── intent="hot_burst"     ──▶  hot_burst_agent
+  ├─── intent="tenx"          ──▶  tenx_agent
+  ├─── intent="forecast"      ──▶  forecast_agent
+  ├─── intent="review"        ──▶  review_agent
+  └─── intent="general"       ──▶  general_agent
+                │
+                ▼
+          broadcast_agent（播报生成）
                 │
                 ▼
                END
 ```
 
-### 条件边（graph/edges.py）
+### 6.2 多专家 Agent 协作体系（参考涨乐AI）
+
+```
+用户请求（如"早点听"、"异动提醒播报"）
+       │
+       ▼
+   supervisor（意图理解与任务调度）
+       │
+       ├──→ morning_agent：宏观分析（避险需求、利率、政策等）
+       │
+       ├──→ wind_leader_agent：长线风口与龙头筛选
+       │
+       ├──→ alert_agent：异动识别与风险监控
+       │
+       ├──→ hot_burst_agent：机构调研共振检测
+       │
+       ├──→ event_chain_agent：事件传导链路分析
+       │
+       ├──→ tenx_agent：十倍股评分与趋势判断
+       │
+       ├──→ forecast_agent：业绩预测与机构预期
+       │
+       └──→ stock_analyst：个股深度分析
+              │
+              ▼
+       broadcast_agent（多 Agent 结果汇聚 → 播报生成）
+              │
+              ├──→ 输出双人对话格式（AI分析师 + AI主持人）
+              └──→ 前端 TTS 语音合成 + 播报播放
+```
+
+### 6.3 条件边（graph/edges.py）
 
 ```python
 def route_by_intent(state: AgentState) -> str:
     intent = state.get("intent", "general")
-    valid = {"morning", "stock", "sector", "event", "general"}
+    valid = {
+        "morning", "stock", "wind_leader", "event_chain",
+        "alert", "hot_burst", "tenx", "forecast", "review", "general"
+    }
     return intent if intent in valid else "general"
 ```
 
@@ -235,8 +307,9 @@ def route_by_intent(state: AgentState) -> str:
 - **模型**：quick_think（gpt-4o-mini）
 - **职责**：意图分类，写入 `state.intent` 和 `state.symbol` / `state.tag_code`
 - **不调用任何工具**，纯LLM分类
+- **路由意图列表**：morning / stock / wind_leader / event_chain / alert / tenx / forecast / review / general
 
-### 7.2 Morning Agent（晨报）★
+### 7.2 Morning Agent（早点听/晨报）★
 
 - **模型**：deep_think（gpt-4o / claude-opus-4-8）
 - **模式**：`create_react_agent`，LLM自主决定搜索策略
@@ -260,29 +333,166 @@ def route_by_intent(state: AgentState) -> str:
 | 大宗 | GC=F（黄金）、CL=F（原油）|
 | 汇率 | USDCNY=X（美元/人民币）|
 
-### 7.3 Stock Analyst Agent
+### 7.3 Stock Analyst Agent（个股分析）
 
 - **模型**：deep_think
 - **工具集**：`get_quote` + `get_capital_flow` + `get_profit_forecast` + `search_cls_news`
 - **能力**：个股行情 + 资金流向 + 机构预测 + 相关新闻综合分析
+- **产品对应**：App 个股详情页 + AI 对话个股问答
 
-### 7.4 Sector Analyst Agent
+### 7.4 Wind Leader Agent（长线风口/风口龙头）
 
 - **模型**：deep_think
-- **工具集**：`get_leader_stocks` + `get_capital_flow`
-- **能力**：板块龙头筛选 + 板块资金动向分析
+- **工具集**：`get_leader_stocks` + `get_wind_leaders` + `get_capital_flow`
+- **能力**：板块龙头筛选 + 风口持续性研判 + 板块资金动向分析
+- **产品对应**：App 长线风口页（泡泡图 + 龙头卡列表）
+- **网页端参考**：WindLeaderPanel（风口龙头面板，含AI研判持续性评分）
+- **涨乐AI参考**：涨停猎手/热点捕手的板块龙头筛选逻辑
 
-### 7.5 Event Analyst Agent
+### 7.5 Event Chain Agent（事件传导链）
 
 - **模型**：deep_think
 - **工具集**：`search_cls_news` + `get_news_fulltext` + `get_quote` + `tavily_finance_search`
-- **能力**：事件传导链分析（事件→行业→个股）
+- **能力**：事件识别 → 重要性评分(5级) → 传导链分析（事件→行业→个股）→ 历史回溯
+- **产品对应**：App 事件传导页（因果链可视化 + RelationGraph 组件）
+- **网页端参考**：AiGraph（AI产业链图谱，提供行业-个股关联脉络数据）
+- **涨乐AI参考**：事件捕手/事件传导的5级评分和因果链可视化
 
-### 7.6 General Agent（兜底）
+**事件传导链分析框架：**
+1. 事件识别：LLM从新闻中提取核心事件
+2. 重要性评分：5-4-3-2-1分制（5=国家级政策，1=日常经营动态）
+3. 传导路径推演：事件 → 受影响行业 → 受影响个股（结合AiGraph产业链图谱数据）
+4. 定量+定性分析：估算事件对个股净利润的弹性影响
+5. 历史回溯：标注类似历史事件在股价对应时间点的涨跌
+
+### 7.6 Alert Agent（异动提醒/持仓监控）
+
+- **模型**：quick_think（异动识别不需要深度推理，快速分类即可）
+- **工具集**：`get_stock_monitor` + `get_quote` + `get_capital_flow` + `search_cls_news`
+- **能力**：自选股/持仓股异动检测 → 异动类型分类 → AI简短解读 → 应对建议
+- **产品对应**：App 特别提醒页（异动时间线 + 便签式提醒）
+- **网页端参考**：StockMonitorView（个股异动监控）
+- **涨乐AI参考**：特别提醒的便签式设计（发生了什么→为什么→怎么办）
+
+**异动检测类型：**
+- 价格异动：5分钟涨跌幅超阈值 / 量比异常
+- 资金异动：主力资金大额进出
+- 基本面异动：业绩预告 / 重大公告 / 监管问询
+- 事件异动：关联重大事件触发
+
+### 7.7 Tenx Agent（十倍股/趋势股评分）
+
+- **模型**：deep_think
+- **工具集**：`get_tenx_score` + `get_quote` + `get_capital_flow` + `get_profit_forecast`
+- **能力**：多维度评分（6维度18指标）→ 趋势起始点判断 → 潜力排序
+- **产品对应**：App 十倍股评分页 + 趋势股发现
+- **网页端参考**：TenxScoreView（6维度18指标评分体系）
+- **团队关联**：陈菲负责的"趋势股起始点判断逻辑"研究
+
+**评分维度（参考网页端已有体系）：**
+1. 成长空间：行业增速、新业务占比、市场空间
+2. 竞争格局：行业集中度、市占率变化
+3. 经营绩效：ROE、营收增速、资产负债率
+4. 资金面：主力资金持续流入、机构持仓变化
+5. 技术面：趋势突破信号、量价配合
+6. 催化剂：政策/事件/业绩等催化因素
+
+### 7.8 Hot Burst Agent（机构调研热门股）
+
+- **模型**：deep_think（共振模型判断需要深度推理）
+- **工具集**：`get_hot_burst` + `get_hot_burst_history` + `get_quote` + `tavily_finance_search`
+- **能力**：四信号源共振检测 → AI解读共振原因 → 持续性判断
+- **产品对应**：App 机构调研热门股页
+- **网页端参考**：HotBurstView（聚合格隆汇/财联社快讯 + 同花顺热点掘金 + 研报验证）
+- **后端参考**：HotBurstService.ts（现有三步检测和四信号源共振模型）
+- **团队关联**：吴涵晶负责的 Agent + App 前端接入
+
+**四信号源共振模型（现有后端已实现）**：
+1. 格隆汇/财联社快讯（媒体关注度）
+2. 同花顺热点掘金（平台热度）
+3. 飞书研报验证（机构背书）
+4. 股价异动（市场反应）
+
+**Agent 增强点**：
+- 在现有共振检测基础上增加 AI 解读能力
+- 解读共振原因（为什么这只股票被多方关注）
+- 判断持续性（是短期炒作还是长期风口）
+
+### 7.9 Forecast Agent（业绩预测）— 后续
+
+- **模型**：quick_think（数据整理为主，不需要深度推理）
+- **工具集**：`get_profit_forecast` + `get_quote` + `search_cls_news`
+- **能力**：业绩预告/预测数据聚合 → AI提炼核心要点 → 机构一致预期整理
+- **产品对应**：App 业绩预测页
+- **网页端参考**：PerformanceForecastView（业绩预测列表+搜索+排序）
+- **团队关联**：后续开发，不安排本周
+
+**输出格式：**
+- 股票名称、代码、预测EPS、评级、机构数量
+- 业绩预告AI提炼（把冗长公告变成几句话）
+- 机构一致预期 vs 实际业绩偏差分析
+
+### 7.10 Review Agent（交易复盘）— P2
+
+- **模型**：deep_think
+- **工具集**：`get_quote` + 历史交易数据接口（待设计）
+- **能力**：交易行为分析 → 高光/待改进标记 → 优化建议
+- **产品对应**：App 交易复盘页
+- **涨乐AI参考**：交易复盘的操作合理性评估和优化空间识别
+- **说明**：P2 优先级，依赖历史交易数据接口，Phase 5+ 实现
+
+### 7.11 General Agent（兜底对话）
 
 - **模型**：quick_think
 - **工具集**：`get_quote`（基础行情）
 - **能力**：关键词触发基础查询，兜底未匹配意图
+
+### 7.12 Broadcast Agent（播报生成）★ 核心特色
+
+- **模型**：deep_think（需要深度推理生成对话式播报）
+- **职责**：汇聚各 Agent 分析结果 → 生成双人对话格式播报内容
+- **能力**：多 Agent 结果整合 → 对话式解读 → 播报脚本生成
+- **产品对应**：App 早点听播报 / 异动提醒播报 / 各类播报场景
+- **涨乐AI参考**：双人播报（AI分析师 + AI主持人对话式解读）
+- **团队关联**：组长负责设计 + App 播报效果实现
+
+**播报格式设计**（双人对话式）：
+```json
+{
+  "title": "晨报播报 - 2026-07-06",
+  "segments": [
+    {
+      "role": "host",
+      "content": "各位投资者早上好，今天有哪些重要信息需要关注？"
+    },
+    {
+      "role": "analyst",
+      "content": "昨晚美股三大指数集体收涨，S&P500涨1.2%，纳指涨1.5%..."
+    },
+    {
+      "role": "host",
+      "content": "这对A股开盘有什么影响？"
+    },
+    {
+      "role": "analyst",
+      "content": "预计A股开盘偏暖，但需关注..."
+    }
+  ],
+  "audio_urls": [],  // TTS 生成的音频链接（可选）
+  "duration": "3min"
+}
+```
+
+**播报场景覆盖**：
+- 晨报播报（morning_agent 结果）
+- 异动提醒播报（alert_agent 结果）
+- 风口龙头播报（wind_leader_agent 结果）
+- 事件传导播报（event_chain_agent 结果）
+
+**前端联动**：
+- 前端拿到播报 JSON 后，调用 TTS API 生成语音
+- 分角色朗读（AI分析师声音 + AI主持人声音）
+- 支持暂停/快进/倍速播放
 
 ---
 
@@ -297,6 +507,14 @@ GET /internal/leader/:tagCode        → TushareTagLeaderService.getLeaderStocks
 GET /internal/news/search/:symbol    → ClsStockNewsService.getStockNews()
 GET /internal/news/fulltext/:id      → ClsStockNewsService.getNewsFulltext()
 GET /internal/forecast/:symbol       → ThsService.getProfitForecast()
+GET /internal/wind-leaders           → WindLeaderService.getWindLeaders()          ★ 新增
+GET /internal/monitor/:symbol        → StockMonitorService.getMonitorData()        ★ 新增
+GET /internal/tenx/score/:symbol     → TenxScoreService.getScore()                 ★ 新增
+GET /internal/tenx/top               → TenxScoreService.getTopStocks()             ★ 新增
+GET /internal/graph/concepts         → IndustryKGService.getConcepts()              ★ 新增
+GET /internal/graph/:concept         → IndustryKGService.getGraphByConcept()        ★ 新增
+GET /internal/institution-research   → HotBurstService.getHotBurst()               ★ 新增
+GET /internal/institution-research/history → HotBurstService.getHotBurstHistory() ★ 新增
 ```
 
 这些接口仅供Python服务内部调用，不对外暴露，建议加内网鉴权（IP白名单或固定Header）。
@@ -310,6 +528,11 @@ GET /internal/forecast/:symbol       → ThsService.getProfitForecast()
 | POST | `/chat/message` | 对话消息（非流式） |
 | POST | `/chat/stream` | 对话消息（SSE流式） |
 | GET | `/briefing/morning` | 晨报（SSE流式，支持Redis缓存）|
+| GET | `/alert/list` | 异动提醒列表 ★ 新增 |
+| GET | `/tenx/score/:symbol` | 十倍股评分 ★ 新增 |
+| GET | `/tenx/top` | 十倍股排行 ★ 新增 |
+| GET | `/forecast/list` | 业绩预测列表 ★ 新增 |
+| GET | `/event/chain/:id` | 事件传导链详情 ★ 新增 |
 | GET | `/skills` | 已注册工具列表 |
 | GET | `/health` | 健康检查 |
 
@@ -324,8 +547,10 @@ Node.js侧将 `/api/agent/*` 的请求反代到Python服务对应路径。
 | **1** | 项目骨架 | pyproject.toml / config / AgentState / FastAPI `/health` | `uvicorn`启动，`/health` 返回200 | ✅ 完成 |
 | **2** | Node.js内部API + Python Tools层 | 6个`/internal/*`接口 + 5个`@tool` | 每个tool有pytest，独立可调用 | ✅ 完成 |
 | **3** | Morning Agent | `agents/morning_agent.py` + Redis缓存 + SSE接口 | `/briefing/morning` SSE流式返回4步分析 | 🔄 进行中 |
-| **4** | 对话Agent层 | supervisor + stock/sector/event/general agent + graph builder | 完整消息流程：输入→路由→工具调用→回复 | ⏳ 待开始 |
-| **5** | Node.js接入 + 标准文档 | Express反代 + `AGENT_STANDARDS.md` | 端到端测试通过，文档覆盖所有扩展场景 | ⏳ 待开始 |
+| **4** | 核心对话Agent层 | supervisor + stock/wind_leader/event_chain/general agent + graph builder | 完整消息流程：输入→路由→工具调用→回复 | ⏳ 待开始 |
+| **5** | Node.js接入 + 新增Internal API | Express反代 + 新增6个`/internal/*`接口 + 对应Tools | 端到端测试通过 | ⏳ 待开始 |
+| **6** | 产品功能Agent | alert + tenx + forecast agent | 各Agent独立可调用，有pytest | ⏳ 待开始 |
+| **7** | 交易复盘 + 标准文档 | review_agent + `AGENT_STANDARDS.md` | 全部Agent可用，文档覆盖所有扩展场景 | ⏳ 待开始 |
 
 ---
 

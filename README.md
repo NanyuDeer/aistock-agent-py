@@ -65,11 +65,15 @@ mypy src/
 
 ```
 START → supervisor(quick_think)
-  ├── intent="morning"  → morning_agent(deep_think)
-  ├── intent="stock"    → stock_analyst(deep_think)
-  ├── intent="sector"   → sector_analyst(deep_think)
-  ├── intent="event"    → event_analyst(deep_think)
-  └── intent="general"  → general_agent(quick_think)
+  ├── intent="morning"       → morning_agent(deep_think)
+  ├── intent="stock"         → stock_analyst(deep_think)
+  ├── intent="wind_leader"   → wind_leader_agent(deep_think)
+  ├── intent="event_chain"   → event_chain_agent(deep_think)
+  ├── intent="alert"         → alert_agent(quick_think)
+  ├── intent="tenx"          → tenx_agent(deep_think)
+  ├── intent="forecast"      → forecast_agent(quick_think)
+  ├── intent="review"        → review_agent(deep_think)
+  └── intent="general"       → general_agent(quick_think)
 → END
 ```
 
@@ -92,22 +96,30 @@ src/aistock_agent/
 │   ├── edges.py         # 条件边（route_by_intent）
 │   └── builder.py       # StateGraph 构建 + compile()
 ├── agents/
-│   ├── base.py          # 双模型工厂（quick_think / deep_think）
-│   ├── supervisor.py    # 意图分类节点
-│   ├── morning_agent.py # 晨报 Agent（ReAct + Redis 缓存）
-│   ├── stock_analyst.py # 个股分析 Agent
-│   ├── sector_analyst.py# 板块分析 Agent
-│   ├── event_analyst.py # 事件传导 Agent
-│   └── general_agent.py # 兜底 Agent
+│   ├── base.py               # 双模型工厂（quick_think / deep_think）
+│   ├── supervisor.py         # 意图分类节点
+│   ├── morning_agent.py      # 晨报 Agent（ReAct + Redis 缓存）
+│   ├── stock_analyst.py      # 个股分析 Agent
+│   ├── wind_leader_agent.py  # 长线风口 Agent
+│   ├── event_chain_agent.py  # 事件传导链 Agent
+│   ├── alert_agent.py        # 异动提醒 Agent
+│   ├── tenx_agent.py         # 十倍股评分 Agent
+│   ├── forecast_agent.py     # 业绩预测 Agent
+│   ├── review_agent.py       # 交易复盘 Agent
+│   └── general_agent.py      # 兜底 Agent
 ├── tools/
-│   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
-│   ├── sector_tools.py  # get_leader_stocks
-│   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
-│   └── market_tools.py  # get_global_markets(yfinance), tavily_finance_search
+│   ├── stock_tools.py        # get_quote, get_capital_flow, get_profit_forecast
+│   ├── sector_tools.py       # get_leader_stocks, get_wind_leaders
+│   ├── news_tools.py         # search_cls_news, get_news_fulltext, get_cls_news
+│   ├── market_tools.py       # get_global_markets(yfinance), tavily_finance_search
+│   ├── monitor_tools.py      # get_stock_monitor, get_alert_history
+│   └── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks
 ├── prompts/
-│   ├── morning.py       # 晨报4步框架提示词
-│   ├── routing.py       # 路由分类提示词
-│   └── system.py        # 通用系统提示词
+│   ├── morning.py            # 晨报4步框架提示词
+│   ├── event_chain.py        # 事件传导链分析提示词
+│   ├── tenx.py               # 十倍股评分提示词
+│   ├── routing.py            # 路由分类提示词
+│   └── system.py             # 通用系统提示词
 ├── services/
 │   └── data_client.py   # httpx → Node.js /internal/* API
 └── api/
