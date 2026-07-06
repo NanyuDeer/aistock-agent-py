@@ -18,15 +18,17 @@ async def get_leader_stocks(tag_code: str) -> str:
     return _format_leaders(data)
 
 
-def _format_leaders(data: dict) -> str:
-    """格式化龙头股数据"""
-    tag_name = data.get("tag_name", "未知板块")
-    leaders = data.get("leaders", [])
-    if not leaders:
+def _format_leaders(data: dict[str, object]) -> str:
+    """格式化龙头股数据（Tushare 返回 tag_code + leaders 数组）"""
+    tag_name = data.get("tag_code", data.get("tag_name", "未知板块"))
+    leaders_raw = data.get("leaders", [])
+    if not isinstance(leaders_raw, list) or not leaders_raw:
         return f"板块【{tag_name}】暂无龙头股数据"
 
     lines = [f"板块【{tag_name}】龙头股："]
-    for i, stock in enumerate(leaders[:5], 1):
+    for i, stock in enumerate(leaders_raw[:5], 1):
+        if not isinstance(stock, dict):
+            continue
         name = stock.get("name", "-")
         code = stock.get("code", "-")
         change_pct = stock.get("change_pct", "-")

@@ -3,7 +3,7 @@
 工具集：get_quote, get_capital_flow, get_profit_forecast, search_cls_news
 """
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.agents.base import get_deep_think
@@ -13,7 +13,7 @@ from aistock_agent.tools.news_tools import search_cls_news
 from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
 
 
-async def run(state: AgentState) -> dict:
+async def run(state: AgentState) -> dict[str, object]:
     """个股分析：行情 + 资金流向 + 机构预测 + 相关新闻"""
     symbol = state.get("symbol")
     if not symbol:
@@ -26,8 +26,8 @@ async def run(state: AgentState) -> dict:
     # 取用户消息
     user_message = ""
     for msg in reversed(state.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "human":
-            user_message = msg.content
+        if isinstance(msg, BaseMessage) and msg.type == "human":
+            user_message = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
     result = await agent.ainvoke(
@@ -41,8 +41,8 @@ async def run(state: AgentState) -> dict:
 
     final_response = ""
     for msg in reversed(result.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-            final_response = msg.content
+        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
+            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
     return {"final_response": final_response}

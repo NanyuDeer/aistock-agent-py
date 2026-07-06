@@ -1,7 +1,8 @@
 """sector_tools 测试"""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from aistock_agent.tools.sector_tools import get_leader_stocks
 

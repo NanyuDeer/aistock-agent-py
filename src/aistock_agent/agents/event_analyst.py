@@ -3,7 +3,7 @@
 工具集：search_cls_news, get_news_fulltext, get_quote, tavily_finance_search
 """
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.agents.base import get_deep_think
@@ -14,7 +14,7 @@ from aistock_agent.tools.news_tools import get_news_fulltext, search_cls_news
 from aistock_agent.tools.stock_tools import get_quote
 
 
-async def run(state: AgentState) -> dict:
+async def run(state: AgentState) -> dict[str, object]:
     """事件传导链分析：事件→行业→个股"""
     llm = get_deep_think()
     tools = [search_cls_news, get_news_fulltext, get_quote, tavily_finance_search]
@@ -31,8 +31,8 @@ async def run(state: AgentState) -> dict:
 
     final_response = ""
     for msg in reversed(result.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-            final_response = msg.content
+        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
+            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
     return {"final_response": final_response}

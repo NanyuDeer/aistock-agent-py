@@ -18,6 +18,7 @@ dependencies = [
     # 数据获取（Python侧直接调用）
     "yfinance==0.2.54",        # 境外市场数据（美股/亚太/大宗/汇率）
     "tavily-python==0.5.0",    # 全网财经新闻搜索
+    "chinese-calendar==1.11.0", # A 股交易日判断（1.11.0 增加 2026 年数据）
 
     # 数据调用 & 配置
     "httpx==0.28.1",            # 异步HTTP → Node.js /internal/* API
@@ -43,6 +44,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 target-version = "py311"

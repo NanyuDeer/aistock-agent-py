@@ -4,22 +4,22 @@
 不调用任何工具，纯 LLM 分类。
 """
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 
 from aistock_agent.agents.base import get_quick_think
 from aistock_agent.prompts.routing import ROUTING_PROMPT
 from aistock_agent.state.schema import AgentState
 
 
-async def run(state: AgentState) -> dict:
+async def run(state: AgentState) -> dict[str, object]:
     """意图分类：分析用户消息，写入 intent / symbol / tag_code"""
     llm = get_quick_think()
 
     # 取最后一条用户消息
     user_message = ""
     for msg in reversed(state.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "human":
-            user_message = msg.content
+        if isinstance(msg, BaseMessage) and msg.type == "human":
+            user_message = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
         if isinstance(msg, dict) and msg.get("role") == "user":
             user_message = msg.get("content", "")
@@ -36,11 +36,13 @@ async def run(state: AgentState) -> dict:
     )
 
     # 解析 LLM 输出为结构化意图
-    result = _parse_intent(response.content, user_message)
+    # response.content 可能是 str 或 list[str | dict]（多模态内容），统一转 str
+    content = response.content if isinstance(response.content, str) else str(response.content)
+    result = _parse_intent(content, user_message)
     return result
 
 
-def _parse_intent(llm_output: str, user_message: str) -> dict:
+def _parse_intent(llm_output: str, user_message: str) -> dict[str, object]:
     """解析 LLM 分类输出为 state 字段"""
     output = llm_output.strip().lower()
 

@@ -1,6 +1,6 @@
 # AiStock Agent — Python/LangGraph 重构设计文档
 
-> 版本：v1.0 | 日期：2026-07-04 | 状态：规划确认
+> 版本：v1.1 | 日期：2026-07-04 | 状态：Phase 3 进行中
 
 ---
 
@@ -319,13 +319,13 @@ Node.js侧将 `/api/agent/*` 的请求反代到Python服务对应路径。
 
 ## 10. 分阶段实施计划
 
-| Phase | 内容 | 核心产出 | 验收标准 |
-|-------|------|----------|----------|
-| **1** | 项目骨架 | pyproject.toml / config / AgentState / FastAPI `/health` | `uvicorn`启动，`/health` 返回200 |
-| **2** | Node.js内部API + Python Tools层 | 6个`/internal/*`接口 + 5个`@tool` | 每个tool有pytest（mock data），独立可调用 |
-| **3** | Morning Agent | `agents/morning_agent.py` + Redis缓存 + SSE接口 | `/briefing/morning`返回完整4步分析 |
-| **4** | 对话Agent层 | supervisor + stock/sector/event/general agent + graph builder | 完整消息流程：输入→路由→工具调用→回复 |
-| **5** | Node.js接入 + 标准文档 | Express反代 + `AGENT_STANDARDS.md` | 端到端测试通过，文档覆盖所有扩展场景 |
+| Phase | 内容 | 核心产出 | 验收标准 | 状态 |
+|-------|------|----------|----------|------|
+| **1** | 项目骨架 | pyproject.toml / config / AgentState / FastAPI `/health` | `uvicorn`启动，`/health` 返回200 | ✅ 完成 |
+| **2** | Node.js内部API + Python Tools层 | 6个`/internal/*`接口 + 5个`@tool` | 每个tool有pytest，独立可调用 | ✅ 完成 |
+| **3** | Morning Agent | `agents/morning_agent.py` + Redis缓存 + SSE接口 | `/briefing/morning` SSE流式返回4步分析 | 🔄 进行中 |
+| **4** | 对话Agent层 | supervisor + stock/sector/event/general agent + graph builder | 完整消息流程：输入→路由→工具调用→回复 | ⏳ 待开始 |
+| **5** | Node.js接入 + 标准文档 | Express反代 + `AGENT_STANDARDS.md` | 端到端测试通过，文档覆盖所有扩展场景 | ⏳ 待开始 |
 
 ---
 
@@ -346,10 +346,10 @@ Node.js侧将 `/api/agent/*` 的请求反代到Python服务对应路径。
 
 ## 12. 待确认事项
 
-- [ ] Python服务端口（Node.js当前端口？）
-- [ ] Redis地址（与Node.js共用还是独立实例？）
-- [ ] Tavily API Key申请
-- [ ] 服务器Python环境（3.11+）
+- [x] Python 服务端口：8000（已在 .env.example 确认）
+- [x] Redis：与 Node.js 共用，`redis://localhost:6379/1`
+- [x] Tavily API Key：7 Key 轮换池，已在 config.py + .env.example 实现
+- [x] 服务器 Python 环境：3.11
 
 ---
 

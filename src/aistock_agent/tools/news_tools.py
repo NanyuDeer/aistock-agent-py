@@ -46,20 +46,19 @@ async def get_cls_news(limit: int = 10) -> str:
     return _format_news_list(data)
 
 
-def _format_news_list(data: dict) -> str:
+def _format_news_list(data: dict[str, object]) -> str:
     """格式化新闻列表"""
     news_list = data.get("items", data.get("news", []))
-    if isinstance(data, list):
-        news_list = data
-
-    if not news_list:
+    if not isinstance(news_list, list) or not news_list:
         return "暂无相关新闻"
 
-    lines = []
+    lines: list[str] = []
     for item in news_list[:10]:
+        if not isinstance(item, dict):
+            continue
         title = item.get("title", "无标题")
         time_str = item.get("time", item.get("ctime", ""))
-        brief = item.get("brief", item.get("content", ""))[:100]
-        news_id = item.get("id", "")
+        brief_raw = item.get("brief", item.get("content", ""))
+        brief = str(brief_raw)[:100]
         lines.append(f"- [{time_str}] {title}\n  {brief}...")
     return "\n".join(lines)

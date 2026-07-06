@@ -44,38 +44,37 @@ async def get_profit_forecast(symbol: str) -> str:
     return _format_forecast(data)
 
 
-def _format_quote(data: dict) -> str:
-    """格式化行情数据"""
-    name = data.get("name", "未知")
-    price = data.get("price", "-")
-    change = data.get("change", "-")
-    change_pct = data.get("change_pct", "-")
-    volume = data.get("volume", "-")
-    turnover = data.get("turnover", "-")
-    return (
-        f"【{name}】当前价: {price}  涨跌: {change} ({change_pct}%)\n"
-        f"成交量: {volume}  成交额: {turnover}"
-    )
+def _format_quote(data: dict[str, object]) -> str:
+    """格式化行情数据（腾讯数据源，中文 key）"""
+    name = data.get("股票简称", "未知")
+    price = data.get("最新价", "-")
+    change_pct = data.get("涨跌幅", "-")
+    return f"【{name}】最新价: {price}  涨跌幅: {change_pct}%"
 
 
-def _format_capital_flow(data: dict) -> str:
-    """格式化资金流向数据"""
-    main_in = data.get("main_inflow", "-")
-    main_out = data.get("main_outflow", "-")
-    net = data.get("main_net", "-")
+def _format_capital_flow(data: dict[str, object]) -> str:
+    """格式化资金流向数据（新浪字段：r0_*=主力, netamount=净额）"""
+    main_in = data.get("r0_in", "-")
+    main_out = data.get("r0_out", "-")
+    net = data.get("netamount", "-")
     return (
         f"主力流入: {main_in}  主力流出: {main_out}\n"
         f"主力净流入: {net}"
     )
 
 
-def _format_forecast(data: dict) -> str:
-    """格式化盈利预测数据"""
-    year = data.get("year", "-")
-    eps_forecast = data.get("eps_forecast", "-")
-    rating = data.get("rating", "-")
-    org_count = data.get("org_count", "-")
-    return (
-        f"年度: {year}  预测EPS: {eps_forecast}\n"
-        f"评级: {rating}  机构数: {org_count}"
-    )
+def _format_forecast(data: dict[str, object]) -> str:
+    """格式化盈利预测数据（同花顺返回摘要 + 详细指标表）"""
+    summary = data.get("摘要", "")
+    detail = data.get("业绩预测详表_详细指标预测", [])
+    lines = [summary] if summary else []
+    if isinstance(detail, list):
+        for row in detail:
+            if not isinstance(row, dict):
+                continue
+            # 每行是 {预测指标, 2023-实际值, 2024-实际值, ..., 预测2026-平均, ...}
+            indicator = row.get("预测指标", "")
+            avg_2026 = row.get("预测2026-平均", "-")
+            avg_2027 = row.get("预测2027-平均", "-")
+            lines.append(f"  {indicator}: 2026预测={avg_2026}  2027预测={avg_2027}")
+    return "\n".join(lines) if lines else "无盈利预测数据"
