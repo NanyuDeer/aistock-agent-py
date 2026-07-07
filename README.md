@@ -23,6 +23,10 @@ uvicorn aistock_agent.main:app --reload --port 8000
 # 运行测试
 pytest tests/ -v
 
+# 晨报定时测试（生成落盘到 docs/agent-outputs/morning/）
+# Windows PowerShell
+$env:PYTHONPATH = "src"; python scripts/run_morning_test.py
+
 # 代码检查
 ruff check src/
 mypy src/
@@ -126,6 +130,11 @@ src/aistock_agent/
     ├── routes.py        # REST 接口
     └── ws.py            # WebSocket 流式接口
 ```
+
+### 输出归档
+
+- 晨报 Agent 的测试输出默认归档到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`
+- 使用 `python scripts/run_morning_test.py` 可直接生成并落盘，文件头包含生成时间、耗时、交易日、缓存命中等元数据
 
 ## API 接口
 
