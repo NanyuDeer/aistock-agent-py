@@ -32,7 +32,10 @@ async def chat_message(
         favorites=req.favorites,
     )
 
-    result = await graph.ainvoke(initial_state)
+    result = await graph.ainvoke(
+        initial_state,
+        config={"configurable": {"thread_id": session_id}},
+    )
 
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     return ChatResponse(content=content, session_id=session_id)
