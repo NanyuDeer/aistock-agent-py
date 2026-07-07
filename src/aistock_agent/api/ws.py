@@ -40,7 +40,12 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             # 流式输出
             try:
-                async for event in graph.astream(initial_state):
+                # checkpointer 已默认挂载（Task 5），必须传 thread_id 否则
+                # LangGraph 抛 ValueError: Checkpointer requires ... configurable keys
+                async for event in graph.astream(
+                    initial_state,
+                    config={"configurable": {"thread_id": session_id}},
+                ):
                     # 逐步推送各节点输出
                     for node_name, node_output in event.items():
                         if isinstance(node_output, dict) and node_output.get("final_response"):
