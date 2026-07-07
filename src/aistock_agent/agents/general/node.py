@@ -4,13 +4,14 @@
 工具集：get_quote（基础行情）
 """
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.general.system import GENERAL_PROMPT
 from aistock_agent.services.llm import get_quick_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.stock_tools import get_quote
+from aistock_agent.utils.message import extract_final_ai_response
 
 
 async def run(state: AgentState) -> dict[str, object]:
@@ -28,10 +29,6 @@ async def run(state: AgentState) -> dict[str, object]:
         }
     )
 
-    final_response = ""
-    for msg in reversed(result.get("messages", [])):
-        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
-            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
+    final_response = extract_final_ai_response(result.get("messages", []))
 
     return {"final_response": final_response}

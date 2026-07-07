@@ -3,7 +3,7 @@
 工具集：get_leader_stocks, get_capital_flow
 """
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.sector import SECTOR_ANALYST_PROMPT
@@ -11,6 +11,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.sector_tools import get_leader_stocks
 from aistock_agent.tools.stock_tools import get_capital_flow
+from aistock_agent.utils.message import extract_final_ai_response
 
 
 async def run(state: AgentState) -> dict[str, object]:
@@ -28,10 +29,6 @@ async def run(state: AgentState) -> dict[str, object]:
         }
     )
 
-    final_response = ""
-    for msg in reversed(result.get("messages", [])):
-        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
-            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
+    final_response = extract_final_ai_response(result.get("messages", []))
 
     return {"final_response": final_response}

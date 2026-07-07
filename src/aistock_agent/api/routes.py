@@ -4,28 +4,15 @@ import json
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.config import settings
+from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
+from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 
 router = APIRouter()
-
-
-class ChatRequest(BaseModel):
-    """对话请求"""
-    message: str
-    session_id: str | None = None
-    user_id: str | None = None
-    favorites: list[str] = []
-
-
-class ChatResponse(BaseModel):
-    """对话响应"""
-    content: str
-    session_id: str
 
 
 def _verify_internal_token(x_internal_token: str | None = Header(None)) -> None:
@@ -80,7 +67,7 @@ async def morning_briefing() -> EventSourceResponse:
                 yield {"data": json.dumps(event, ensure_ascii=False)}
         except Exception as e:
             yield {"data": json.dumps(
-                {"type": "error", "message": str(e)},
+                {"type": SSEEventType.ERROR, "message": str(e)},
                 ensure_ascii=False,
             )}
 
