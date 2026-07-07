@@ -11,6 +11,7 @@ from aistock_agent.api.deps import build_initial_state, verify_internal_token
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 router = APIRouter()
 
@@ -39,6 +40,67 @@ async def chat_message(
 
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     return ChatResponse(content=content, session_id=session_id)
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    req: ChatRequest,
+    _: None = Depends(verify_internal_token),
+) -> EventSourceResponse:
+    """对话消息（SSE 流式）
+
+    走 ``graph.astream_events(version="v2")``，用 ``map_langgraph_event_to_sse``
+    统一映射。相比 ``morning_agent.stream`` 多一层节点过滤：supervisor 节点产出
+    的是意图分类 JSON（非用户回复），不应作为 TEXT 转发给前端。
+    """
+    graph = compile_graph()
+
+    session_id = req.session_id or f"session_{id(req)}"
+    initial_state = build_initial_state(
+        message=req.message,
+        session_id=session_id,
+        user_id=req.user_id,
+        favorites=req.favorites,
+    )
+
+    async def generator() -> AsyncGenerator[dict[str, str], None]:
+        _llm_started = False
+        try:
+            async for event in graph.astream_events(
+                initial_state,
+                version="v2",
+                config={"configurable": {"thread_id": session_id}},
+            ):
+                # 过滤 supervisor 节点事件（意图分类输出不给前端）
+                node = event.get("metadata", {}).get("langgraph_node")
+                if node == "supervisor":
+                    continue
+
+                sse_event = map_langgraph_event_to_sse(event)
+                if sse_event is None:
+                    continue
+
+                event_t = sse_event.get("type")
+                if event_t in (SSEEventType.TOOL_START, SSEEventType.TOOL_END):
+                    yield {"data": json.dumps(sse_event, ensure_ascii=False)}
+                elif event_t == SSEEventType.TEXT:
+                    # llm_start 仅在首个文本 chunk 时发射一次（有状态，保留在 generator 内）
+                    if not _llm_started:
+                        _llm_started = True
+                        yield {"data": json.dumps(
+                            {"type": SSEEventType.LLM_START, "label": "正在生成回复"},
+                            ensure_ascii=False,
+                        )}
+                    yield {"data": json.dumps(sse_event, ensure_ascii=False)}
+
+            yield {"data": json.dumps({"type": SSEEventType.DONE}, ensure_ascii=False)}
+        except Exception as e:
+            yield {"data": json.dumps(
+                {"type": SSEEventType.ERROR, "message": str(e)},
+                ensure_ascii=False,
+            )}
+
+    return EventSourceResponse(generator())
 
 
 @router.get("/briefing/morning")
