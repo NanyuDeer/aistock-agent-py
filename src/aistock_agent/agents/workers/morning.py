@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 
 import redis.asyncio as aioredis
+import structlog
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -22,6 +23,8 @@ from aistock_agent.tools.news_tools import get_cls_news
 from aistock_agent.utils.date import is_trading_day  # 亦作为模块属性供 test_morning_agent.py patch
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
+
+logger = structlog.get_logger()
 
 
 async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], None]:
@@ -85,34 +88,44 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
 
 async def run(state: AgentState) -> dict[str, object]:
     """晨报分析：宏观策略4步框架"""
-    today = datetime.now().strftime("%Y年%m月%d日")
+    try:
+        today = datetime.now().strftime("%Y年%m月%d日")
 
-    # 检查缓存
-    cached = await _get_cached_briefing()
-    if cached:
-        return {"final_response": cached}
+        # 检查缓存
+        cached = await _get_cached_briefing()
+        if cached:
+            return {"final_response": cached}
 
-    # 构建提示词
-    system_prompt = MORNING_PROMPT.replace("{{DATE}}", today)
+        # 构建提示词
+        system_prompt = MORNING_PROMPT.replace("{{DATE}}", today)
 
-    # 创建 ReAct Agent
-    llm = get_deep_think()
-    tools = [tavily_finance_search, get_global_markets, get_cls_news]
-    agent = create_react_agent(llm, tools)
+        # 创建 ReAct Agent
+        llm = get_deep_think()
+        tools = [tavily_finance_search, get_global_markets, get_cls_news]
+        agent = create_react_agent(llm, tools)
 
-    # 执行
-    result = await agent.ainvoke(
-        {"messages": [SystemMessage(content=system_prompt)]},
-    )
+        # 执行
+        result = await agent.ainvoke(
+            {"messages": [SystemMessage(content=system_prompt)]},
+        )
 
-    # 提取最终响应（与其他 4 个 agent 统一使用 extract_final_ai_response）
-    final_response = extract_final_ai_response(result.get("messages", []))
+        # 提取最终响应（与其他 4 个 agent 统一使用 extract_final_ai_response）
+        final_response = extract_final_ai_response(result.get("messages", []))
 
-    # 缓存结果
-    if final_response:
-        await _set_cached_briefing(final_response)
+        # 缓存结果
+        if final_response:
+            await _set_cached_briefing(final_response)
 
-    return {"final_response": final_response}
+        return {"final_response": final_response}
+    except Exception as e:
+        # agent 层最后防线：捕获 LLM/Graph 框架异常（工具异常已被 safe_tool_call 降级）
+        logger.error(
+            "agent_run_failed",
+            agent="morning",
+            error=str(e),
+            exc_info=True,
+        )
+        return {"final_response": "晨报生成暂时不可用，请稍后重试"}
 
 
 async def _get_cached_briefing() -> str | None:
