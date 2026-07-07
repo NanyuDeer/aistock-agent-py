@@ -3,11 +3,11 @@
 import json
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.agents.workers import morning as morning_agent
-from aistock_agent.config import settings
+from aistock_agent.api.deps import build_initial_state, verify_internal_token
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
@@ -15,30 +15,22 @@ from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 router = APIRouter()
 
 
-def _verify_internal_token(x_internal_token: str | None = Header(None)) -> None:
-    """验证内网鉴权 token"""
-    if x_internal_token != settings.internal_api_token:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-
 @router.post("/chat/message", response_model=ChatResponse)
-async def chat_message(req: ChatRequest) -> ChatResponse:
+async def chat_message(
+    req: ChatRequest,
+    _: None = Depends(verify_internal_token),
+) -> ChatResponse:
     """对话消息（非流式）"""
     graph = compile_graph()
 
     session_id = req.session_id or f"session_{id(req)}"
 
-    initial_state: dict[str, object] = {
-        "messages": [{"role": "user", "content": req.message}],
-        "session_id": session_id,
-        "user_id": req.user_id,
-        "favorites": req.favorites,
-        "intent": None,
-        "symbol": None,
-        "tag_code": None,
-        "analysis_reports": {},
-        "final_response": None,
-    }
+    initial_state = build_initial_state(
+        message=req.message,
+        session_id=session_id,
+        user_id=req.user_id,
+        favorites=req.favorites,
+    )
 
     result = await graph.ainvoke(initial_state)
 
