@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from aistock_agent.constants import WSEventType
 from aistock_agent.graph.builder import compile_graph
 
 router = APIRouter()
@@ -21,7 +22,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             favorites = data.get("favorites", [])
 
             if not message:
-                await websocket.send_json({"type": "error", "content": "消息不能为空"})
+                await websocket.send_json({"type": WSEventType.ERROR, "content": "消息不能为空"})
                 continue
 
             graph = compile_graph()
@@ -50,14 +51,14 @@ async def ws_chat(websocket: WebSocket) -> None:
                     for node_name, node_output in event.items():
                         if isinstance(node_output, dict) and node_output.get("final_response"):
                             await websocket.send_json({
-                                "type": "agent_response",
+                                "type": WSEventType.AGENT_RESPONSE,
                                 "node": node_name,
                                 "content": node_output["final_response"],
                             })
 
-                await websocket.send_json({"type": "done"})
+                await websocket.send_json({"type": WSEventType.DONE})
             except Exception as e:
-                await websocket.send_json({"type": "error", "content": str(e)})
+                await websocket.send_json({"type": WSEventType.ERROR, "content": str(e)})
 
     except WebSocketDisconnect:
         pass

@@ -32,6 +32,18 @@ class LangGraphEventType:
     ON_CHAT_MODEL_STREAM = "on_chat_model_stream"
 
 
+class WSEventType:
+    """WebSocket 事件类型常量（字符串常量类）。
+
+    被 ``api.ws.ws_chat`` 引用，禁止在业务代码中写 magic string。
+    与 ``SSEEventType`` 语义独立（WS 协议 vs SSE 协议），不复用。
+    """
+
+    AGENT_RESPONSE = "agent_response"
+    DONE = "done"
+    ERROR = "error"
+
+
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
 INTENT_SET = frozenset({"morning", "stock", "sector", "event", "general"})
 
