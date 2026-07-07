@@ -23,13 +23,6 @@ async def run(state: AgentState) -> dict[str, object]:
     tools = [get_quote, get_capital_flow, get_profit_forecast, search_cls_news]
     agent = create_react_agent(llm, tools)
 
-    # 取用户消息
-    user_message = ""
-    for msg in reversed(state.get("messages", [])):
-        if isinstance(msg, BaseMessage) and msg.type == "human":
-            user_message = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
-
     result = await agent.ainvoke(
         {
             "messages": [

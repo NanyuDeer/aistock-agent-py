@@ -15,8 +15,6 @@ from aistock_agent.tools.stock_tools import get_capital_flow
 
 async def run(state: AgentState) -> dict[str, object]:
     """板块分析：龙头筛选 + 资金动向"""
-    tag_code = state.get("tag_code") or "BK0475"  # 默认白酒板块
-
     llm = get_deep_think()
     tools = [get_leader_stocks, get_capital_flow]
     agent = create_react_agent(llm, tools)

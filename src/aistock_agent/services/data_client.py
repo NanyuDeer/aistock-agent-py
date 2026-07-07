@@ -3,8 +3,6 @@
 Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 """
 
-from typing import cast
-
 import httpx
 import structlog
 
