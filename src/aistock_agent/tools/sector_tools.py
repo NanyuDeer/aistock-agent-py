@@ -3,9 +3,11 @@
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.tools.base import safe_tool_call
 
 
 @tool
+@safe_tool_call
 async def get_leader_stocks(tag_code: str) -> str:
     """查询板块龙头股
 
