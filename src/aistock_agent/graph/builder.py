@@ -6,15 +6,13 @@
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from aistock_agent.agents import (
-    event_analyst,
-    general_agent,
-    morning_agent,
-    sector_analyst,
-    stock_analyst,
-    supervisor,
-)
-from aistock_agent.graph.edges import route_by_intent
+from aistock_agent.agents.general import node as general_agent
+from aistock_agent.agents.supervisor import node as supervisor
+from aistock_agent.agents.workers import event as event_analyst
+from aistock_agent.agents.workers import morning as morning_agent
+from aistock_agent.agents.workers import sector as sector_analyst
+from aistock_agent.agents.workers import stock as stock_analyst
+from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.state.schema import AgentState
 
 

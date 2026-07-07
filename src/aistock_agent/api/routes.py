@@ -7,7 +7,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from aistock_agent.agents import morning_agent
+from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.config import settings
 from aistock_agent.graph.builder import compile_graph
 

@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from aistock_agent.agents.morning_agent import is_trading_day
+from aistock_agent.agents.workers.morning import is_trading_day
 
 
 def test_is_trading_day_weekday():
@@ -30,7 +30,7 @@ def test_is_trading_day_no_arg_returns_bool():
 # ── stream() 测试 ──────────────────────────────────────────────────
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aistock_agent.agents import morning_agent
+from aistock_agent.agents.workers import morning as morning_agent
 
 
 async def _async_iter(items):
@@ -70,9 +70,9 @@ async def test_stream_tool_events_mapped(mock_redis):
     mock_agent = MagicMock()
     mock_agent.astream_events = lambda *a, **kw: _async_iter(raw_events)
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                return_value=mock_agent):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=True):
             events = [e async for e in morning_agent.stream({})]
 
@@ -111,9 +111,9 @@ async def test_stream_filters_tool_call_chunks(mock_redis):
     mock_agent = MagicMock()
     mock_agent.astream_events = lambda *a, **kw: _async_iter(raw_events)
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                return_value=mock_agent):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=True):
             events = [e async for e in morning_agent.stream({})]
 
@@ -141,9 +141,9 @@ async def test_stream_non_trading_day_injects_prompt(mock_redis):
         mock_inner.astream_events = fake_astream
         return mock_inner
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                side_effect=fake_create):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=False):
             _ = [e async for e in morning_agent.stream({})]
 

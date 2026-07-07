@@ -1,30 +1,29 @@
-"""Sector Analyst Agent — 板块分析
+"""Event Analyst Agent — 事件传导链分析
 
-工具集：get_leader_stocks, get_capital_flow
+工具集：search_cls_news, get_news_fulltext, get_quote, tavily_finance_search
 """
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from aistock_agent.agents.base import get_deep_think
-from aistock_agent.prompts.system import SECTOR_ANALYST_PROMPT
+from aistock_agent.prompts.workers.event import EVENT_ANALYST_PROMPT
+from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.sector_tools import get_leader_stocks
-from aistock_agent.tools.stock_tools import get_capital_flow
+from aistock_agent.tools.market_tools import tavily_finance_search
+from aistock_agent.tools.news_tools import get_news_fulltext, search_cls_news
+from aistock_agent.tools.stock_tools import get_quote
 
 
 async def run(state: AgentState) -> dict[str, object]:
-    """板块分析：龙头筛选 + 资金动向"""
-    tag_code = state.get("tag_code") or "BK0475"  # 默认白酒板块
-
+    """事件传导链分析：事件→行业→个股"""
     llm = get_deep_think()
-    tools = [get_leader_stocks, get_capital_flow]
+    tools = [search_cls_news, get_news_fulltext, get_quote, tavily_finance_search]
     agent = create_react_agent(llm, tools)
 
     result = await agent.ainvoke(
         {
             "messages": [
-                SystemMessage(content=SECTOR_ANALYST_PROMPT),
+                SystemMessage(content=EVENT_ANALYST_PROMPT),
                 *state.get("messages", [])[-5:],
             ]
         }

@@ -6,8 +6,8 @@
 
 from langchain_core.messages import BaseMessage, SystemMessage
 
-from aistock_agent.agents.base import get_quick_think
-from aistock_agent.prompts.routing import ROUTING_PROMPT
+from aistock_agent.prompts.supervisor.routing import ROUTING_PROMPT
+from aistock_agent.services.llm import get_quick_think
 from aistock_agent.state.schema import AgentState
 
 

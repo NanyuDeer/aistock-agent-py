@@ -48,7 +48,7 @@ def mock_tavily():
 @pytest.fixture
 def mock_redis():
     """mock redis.asyncio"""
-    with patch("aistock_agent.agents.morning_agent.aioredis") as mock_aioredis:
+    with patch("aistock_agent.agents.workers.morning.aioredis") as mock_aioredis:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=None)
         mock_client.setex = AsyncMock()

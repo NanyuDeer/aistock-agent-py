@@ -13,9 +13,9 @@ from chinese_calendar import is_workday  # type: ignore[import-untyped]
 from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from aistock_agent.agents.base import get_deep_think
 from aistock_agent.config import settings
-from aistock_agent.prompts.morning import MORNING_PROMPT
+from aistock_agent.prompts.workers.morning import MORNING_PROMPT
+from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
 from aistock_agent.tools.news_tools import get_cls_news

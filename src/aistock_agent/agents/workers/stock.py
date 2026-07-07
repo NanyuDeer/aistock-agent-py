@@ -6,8 +6,8 @@
 from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from aistock_agent.agents.base import get_deep_think
-from aistock_agent.prompts.system import STOCK_ANALYST_PROMPT
+from aistock_agent.prompts.workers.stock import STOCK_ANALYST_PROMPT
+from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.news_tools import search_cls_news
 from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
