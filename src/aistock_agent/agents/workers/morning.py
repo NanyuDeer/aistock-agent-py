@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 
 import redis.asyncio as aioredis
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.config import settings
@@ -20,6 +20,7 @@ from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
 from aistock_agent.tools.news_tools import get_cls_news
 from aistock_agent.utils.date import is_trading_day  # 亦作为模块属性供 test_morning_agent.py patch
+from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 
@@ -104,12 +105,8 @@ async def run(state: AgentState) -> dict[str, object]:
         {"messages": [SystemMessage(content=system_prompt)]},
     )
 
-    # 提取最终响应
-    final_response = ""
-    for msg in reversed(result.get("messages", [])):
-        if isinstance(msg, BaseMessage) and msg.type == "ai" and msg.content:
-            final_response = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
+    # 提取最终响应（与其他 4 个 agent 统一使用 extract_final_ai_response）
+    final_response = extract_final_ai_response(result.get("messages", []))
 
     # 缓存结果
     if final_response:
