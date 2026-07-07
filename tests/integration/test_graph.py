@@ -15,7 +15,6 @@ mock 节点函数签名：
 """
 
 from contextlib import ExitStack, contextmanager
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -59,7 +58,7 @@ def _reset_checkpointer_singleton():
     cp_module._checkpointer = None
 
 
-def _build_initial_state(user_message: str = "分析一下") -> dict[str, Any]:
+def _build_initial_state(user_message: str = "分析一下") -> dict[str, object]:
     """构造合法的 AgentState 初始值。"""
     return {
         "messages": [{"role": "user", "content": user_message}],
@@ -93,7 +92,7 @@ def _patch_nodes(supervisor_return: dict[str, object]):
         yield mocks
 
 
-async def _invoke(intent_supervisor_return: dict[str, object], thread_id: str) -> tuple[dict[str, Any], dict[str, AsyncMock]]:
+async def _invoke(intent_supervisor_return: dict[str, object], thread_id: str) -> tuple[dict[str, object], dict[str, AsyncMock]]:
     """在 patch 块内 compile_graph + ainvoke，返回 (result, mocks)。"""
     with _patch_nodes(intent_supervisor_return) as mocks:
         graph = compile_graph()

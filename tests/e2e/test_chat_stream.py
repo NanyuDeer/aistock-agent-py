@@ -14,7 +14,6 @@ mock astream_events 用 async generator function（CD6），不能用 AsyncMock(
 """
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -28,9 +27,9 @@ _STREAM_URL = "/api/agent/chat/stream"
 _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
 
-def _parse_sse(text: str) -> list[dict[str, Any]]:
+def _parse_sse(text: str) -> list[dict[str, object]]:
     """解析 SSE 响应文本为事件列表（每行 ``data: {json}``）"""
-    events: list[dict[str, Any]] = []
+    events: list[dict[str, object]] = []
     for line in text.split("\n"):
         if line.startswith("data: "):
             events.append(json.loads(line[6:]))
@@ -42,21 +41,21 @@ def _make_chunk(content: str) -> Mock:
     return Mock(content=content, tool_calls=None, tool_call_chunks=None)
 
 
-def _make_stream(events: list[dict[str, Any]]) -> Any:
+def _make_stream(events: list[dict[str, object]]) -> object:
     """把事件列表包装为 async generator function（mock astream_events）"""
-    async def _gen(*args: Any, **kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
+    async def _gen(*args: object, **kwargs: object) -> AsyncGenerator[dict[str, object], None]:
         for e in events:
             yield e
     return _gen
 
 
-async def _empty_stream(*args: Any, **kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
+async def _empty_stream(*args: object, **kwargs: object) -> AsyncGenerator[dict[str, object], None]:
     """空 async generator（流立即结束）"""
     return
     yield  # 标记为 async generator（不会执行到此处）
 
 
-async def _boom_stream(*args: Any, **kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
+async def _boom_stream(*args: object, **kwargs: object) -> AsyncGenerator[dict[str, object], None]:
     """抛异常的 async generator（首次迭代即抛 RuntimeError）"""
     raise RuntimeError("graph boom")
     yield  # 标记为 async generator（不会执行到此处）
@@ -70,7 +69,7 @@ async def _read_sse(resp: httpx.Response) -> str:
     return text
 
 
-_FIXTURE_STOCK_EVENTS: list[dict[str, Any]] = [
+_FIXTURE_STOCK_EVENTS: list[dict[str, object]] = [
     {
         "event": "on_tool_start",
         "name": "get_quote",
@@ -98,7 +97,7 @@ _FIXTURE_STOCK_EVENTS: list[dict[str, Any]] = [
     },
 ]
 
-_FIXTURE_GENERAL_EVENTS: list[dict[str, Any]] = [
+_FIXTURE_GENERAL_EVENTS: list[dict[str, object]] = [
     {
         "event": "on_chat_model_stream",
         "name": "ChatOpenAI",

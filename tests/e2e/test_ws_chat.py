@@ -13,7 +13,6 @@ Task 5 给 ``compile_graph()`` 默认挂载 MemorySaver checkpointer 后，LangG
 使用 Starlette ``TestClient.websocket_connect``（同步，无需 ``httpx-ws`` 额外依赖），
 mock ``compile_graph`` 返回伪图，捕获 ``astream`` 的 ``config`` 入参。
 """
-from typing import Any
 from unittest.mock import patch
 
 from starlette.testclient import TestClient
@@ -25,9 +24,9 @@ class _MockGraph:
     """伪图：捕获 astream 入参并 yield 单个带 final_response 的节点输出。"""
 
     def __init__(self) -> None:
-        self.captured: dict[str, Any] = {}
+        self.captured: dict[str, object] = {}
 
-    async def astream(self, state: dict[str, Any], config: Any = None) -> Any:
+    async def astream(self, state: dict[str, object], config: object = None) -> object:
         self.captured["state"] = state
         self.captured["config"] = config
         yield {"general_agent": {"final_response": "mocked 流式回复"}}

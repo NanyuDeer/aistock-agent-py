@@ -13,7 +13,6 @@ mock 策略（与 tests/integration/test_{stock,general,supervisor}_agent.py 一
 """
 
 from contextlib import ExitStack
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -136,7 +135,7 @@ async def test_general_fallback_on_llm_failure():
 # ── graph 不中断测试 ─────────────────────────────────────────────
 
 
-def _build_initial_state(user_message: str = "分析一下 600519") -> dict[str, Any]:
+def _build_initial_state(user_message: str = "分析一下 600519") -> dict[str, object]:
     """构造合法的 AgentState 初始值（与 test_graph.py 一致）。"""
     return {
         "messages": [{"role": "user", "content": user_message}],
