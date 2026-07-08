@@ -41,6 +41,9 @@ def build_initial_state(
     原样抽出 ``routes.chat_message`` 内联的 state 构造：字段名、messages
     格式、默认值（intent/symbol/tag_code=None、analysis_reports={}、
     final_response=None）均与重构前一致。
+
+    Phase 5 新增预加载字段：wind_leaders_data、institution_research_data，
+    初始为 None，Agent 按需通过 node_api 加载。
     """
     return {
         "messages": [{"role": "user", "content": message}],
@@ -51,6 +54,8 @@ def build_initial_state(
         "symbol": None,
         "tag_code": None,
         "analysis_reports": {},
+        "wind_leaders_data": None,  # 预加载字段（Agent按需加载）
+        "institution_research_data": None,  # 预加载字段（Agent按需加载）
         "final_response": None,
     }
 

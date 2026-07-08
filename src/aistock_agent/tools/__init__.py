@@ -7,9 +7,13 @@
 
 # 导入所有含 @tool 工具的模块，触发 register() 调用
 from aistock_agent.tools import (  # noqa: F401
+    graph_tools,
+    hot_burst_tools,
     market_tools,
+    monitor_tools,
     news_tools,
     search_tools,
     sector_tools,
     stock_tools,
+    tenx_tools,
 )

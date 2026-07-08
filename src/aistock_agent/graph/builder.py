@@ -10,10 +10,12 @@ from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.agents.general import node as general_agent
 from aistock_agent.agents.supervisor import node as supervisor
+from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import event as event_analyst
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.agents.workers import sector as sector_analyst
 from aistock_agent.agents.workers import stock as stock_analyst
+from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.memory.checkpointer import get_checkpointer
 from aistock_agent.observability.callback import get_default_callbacks
@@ -45,6 +47,8 @@ def build_graph() -> StateGraph:
     graph.add_node("stock_analyst", stock_analyst.run)
     graph.add_node("sector_analyst", sector_analyst.run)
     graph.add_node("event_analyst", event_analyst.run)
+    graph.add_node("wind_leader_agent", wind_leader_agent.run)
+    graph.add_node("broadcast_agent", broadcast_agent.run)
     graph.add_node("general_agent", general_agent.run)
 
     # 边：START → supervisor
@@ -56,7 +60,7 @@ def build_graph() -> StateGraph:
     # 各 Agent → END
     agent_nodes = [
         "morning_agent", "stock_analyst", "sector_analyst",
-        "event_analyst", "general_agent",
+        "event_analyst", "wind_leader_agent", "broadcast_agent", "general_agent",
     ]
     for node in agent_nodes:
         graph.add_edge(node, END)

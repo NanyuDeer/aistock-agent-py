@@ -85,3 +85,5 @@ def _format_wind_leaders(data: dict[str, object]) -> str:
 from aistock_agent.tools.registry import register  # noqa: E402
 
 register("sector", get_leader_stocks)
+register("sector", get_wind_leaders)
+register("wind_leader", get_wind_leaders)

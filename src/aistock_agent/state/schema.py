@@ -22,6 +22,8 @@ class AgentState(TypedDict):
         symbol: 提取的股票代码
         tag_code: 提取的板块代码
         analysis_reports: 多步分析报告累积（key=报告类型, value=内容）
+        wind_leaders_data: 长线风口数据（Python入口预加载，wind_leader_agent读取）
+        institution_research_data: 机构调研数据（Python入口预加载）
         final_response: 最终响应文本
     """
 
@@ -30,10 +32,13 @@ class AgentState(TypedDict):
     user_id: str | None
     favorites: list[str]
     # 路由信息（supervisor 写入）
-    intent: str | None  # stock | sector | event | morning | general
+    intent: str | None  # stock | sector | event | morning | wind_leader | broadcast | general
     symbol: str | None
     tag_code: str | None
-    # 分析报告累积
+    # 分析报告累积（broadcast_agent读取）
     analysis_reports: dict[str, str]
+    # 预加载字段（Python入口写入，Agent读取）
+    wind_leaders_data: dict | None  # 长线风口数据
+    institution_research_data: dict | None  # 机构调研数据
     # 最终响应
     final_response: str | None
