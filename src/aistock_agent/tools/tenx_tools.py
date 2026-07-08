@@ -83,3 +83,10 @@ def _format_top_stocks(data: dict[str, object]) -> str:
         label = stock.get("label", "-")
         lines.append(f"  {i}. {name}({code}) 评分: {score}  等级: {label}")
     return "\n".join(lines)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("general", get_tenx_score)
+register("general", get_tenx_top_stocks)

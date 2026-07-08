@@ -249,8 +249,8 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 1. 在 `tools/` 对应文件中定义 `@tool` + `@safe_tool_call` 装饰的 async 函数
 2. 参数必须定义类型注解和 docstring（供 LLM 理解工具用途）
 3. 通过 `services/data_client.py` 的 `NodeApiClient` 调用 Node.js `/internal/*` 接口
-4. 在定义该 tool 的文件底部调用 `register("category", tool)` 自注册（无需编辑 registry.py，自动注册机制）
-5. 在 `api/routes.py` 的 `all_tools` 列表中注册（供 `/skills` 接口枚举）
+4. 在定义该 tool 的文件底部调用 `register("category", tool)` 自注册（无需编辑 registry.py）
+5. 默认 `expose=True`，自动出现在 `GET /api/agent/skills`；如需隐藏，加 `expose=False`
 6. 必须编写 mock 测试（正常 + 异常降级，`tests/unit/` 目录）
 
 ### 新增 Agent 流程

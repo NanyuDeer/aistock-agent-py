@@ -4,12 +4,13 @@
 - get_tools("category") 按 category 返回工具集
 - get_tools() 不传参数返回全部工具（去重）
 - 直接 import 具体工具名
+- register(expose=False) 控制 /skills 接口暴露
 
 注意：自动注册机制下工具顺序由模块导入顺序决定，
 测试使用集合断言（set）而非列表断言，避免顺序依赖。
 """
 
-from aistock_agent.tools.registry import get_all_tools, get_tools
+from aistock_agent.tools.registry import get_all_tools, get_exposed_skills, get_tools
 
 
 def test_get_tools_by_category_morning():
@@ -79,6 +80,35 @@ def test_get_tools_iterate_category_empty():
     """get_tools('iterate') 返回空列表（迭代 agent 无工具）"""
     tools = get_tools("iterate")
     assert tools == []
+
+
+def test_get_exposed_skills_deduplicated():
+    """get_exposed_skills 返回按注册顺序去重的工具"""
+    exposed = get_exposed_skills()
+    names = [t.name for t in exposed]
+    assert len(names) == len(set(names))
+
+
+def test_get_exposed_skills_excludes_non_exposed():
+    """register(expose=False) 的工具不出现在 get_exposed_skills 中"""
+    from langchain_core.tools import tool as tool_decorator
+
+    from aistock_agent.tools.registry import register
+
+    @tool_decorator
+    def _internal_tool_for_test() -> str:
+        """内部测试工具，不应暴露给 /skills"""
+        return "internal"
+
+    # 注册到一个临时 category，不暴露
+    register("__test_internal", _internal_tool_for_test, expose=False)
+
+    exposed_names = {t.name for t in get_exposed_skills()}
+    assert "_internal_tool_for_test" not in exposed_names
+
+    # 但 get_tools 能拿到
+    tools = get_tools("__test_internal")
+    assert len(tools) == 1
 
 
 def test_get_tools_returns_same_object_references():

@@ -19,6 +19,10 @@ agent 只需声明 category，即可获取完整工具列表，
     ``tools/__init__.py`` 导入所有 tool 模块触发注册。
     新增工具只需在定义它的 tool 文件底部加一行 ``register()``，
     **不需要编辑本文件**，避免多人合并冲突。
+
+前端 /skills 接口暴露：
+    ``register()`` 默认 ``expose=True``，工具会出现在 ``GET /api/agent/skills``。
+    内部工具可设 ``expose=False``，只给 agent 用，不暴露给前端。
 """
 
 from langchain_core.tools import BaseTool
@@ -26,11 +30,15 @@ from langchain_core.tools import BaseTool
 # 运行时注册表（由各 tool 模块通过 register() 填充）
 _REGISTRY: dict[str, list[BaseTool]] = {}
 
+# 暴露给前端 /skills 接口的工具（按注册顺序，自动去重）
+_EXPOSED_SKILLS: list[BaseTool] = []
+_EXPOSED_NAMES: set[str] = set()
+
 # 预声明空 category（迭代 agent 无工具）
 _EMPTY_CATEGORIES: set[str] = {"iterate"}
 
 
-def register(category: str, tool: BaseTool) -> None:
+def register(category: str, tool: BaseTool, *, expose: bool = True) -> None:
     """将工具注册到指定 category
 
     每个 tool 模块在底部调用此函数自注册。
@@ -40,12 +48,27 @@ def register(category: str, tool: BaseTool) -> None:
     Args:
         category: 工具分类名（如 "morning"、"stock"、"event"）
         tool: 已装饰的 ``@tool`` 工具对象
+        expose: 是否暴露给 ``GET /api/agent/skills`` 接口（默认 True）
     """
     if category not in _REGISTRY:
         _REGISTRY[category] = []
     # 去重：同一对象不重复追加
     if tool not in _REGISTRY[category]:
         _REGISTRY[category].append(tool)
+
+    # 暴露给 /skills 接口
+    if expose and tool.name not in _EXPOSED_NAMES:
+        _EXPOSED_NAMES.add(tool.name)
+        _EXPOSED_SKILLS.append(tool)
+
+
+def get_exposed_skills() -> list[BaseTool]:
+    """获取暴露给前端 /skills 接口的工具列表
+
+    Returns:
+        按注册顺序排列的去重工具列表
+    """
+    return _EXPOSED_SKILLS.copy()
 
 
 def get_all_tools() -> list[BaseTool]:

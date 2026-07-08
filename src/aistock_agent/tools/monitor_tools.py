@@ -64,3 +64,10 @@ def _format_events(events: list[dict[str, object]], *, title: str) -> str:
         ev_time = event.get("event_time", "")
         lines.append(f"  - [{ev_time}] {stock_name} [{change_type}/{level}] {ev_title}")
     return "\n".join(lines)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("general", get_stock_monitor)
+register("general", get_alert_history)

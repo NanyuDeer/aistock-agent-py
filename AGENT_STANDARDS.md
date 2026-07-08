@@ -228,13 +228,27 @@ agent = create_react_agent(llm, tools)
 **注意**：集成测试使用**集合断言**（`set(t.name for t in tools) == EXPECTED_TOOL_NAMES`），
 不依赖工具顺序，多人新增工具不会互相影响。
 
+### 暴露给 `/skills` 接口
+
+`register()` 默认 `expose=True`，工具会自动出现在 `GET /api/agent/skills`：
+
+```python
+# tools/review_tools.py
+register("review", get_market_summary)                  # 前端可见
+register("review", get_sector_performance, expose=False)  # 仅 agent 内部使用
+```
+
+`api/routes.py` 的 `list_skills` 不再手动维护 `all_tools`，直接调用 `get_exposed_skills()`。
+
 ### 绑定到 Agent
 
 Tool 创建后，在对应 worker agent 的 `run()` 中绑定到 `create_react_agent`：
 
 ```python
 # agents/workers/stock.py
-tools = [get_quote, get_capital_flow, get_profit_forecast, search_cls_news]
+from aistock_agent.tools.registry import get_tools
+
+tools = get_tools("stock")
 agent = create_react_agent(llm, tools)
 ```
 
