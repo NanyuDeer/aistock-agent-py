@@ -4,6 +4,8 @@
 实际 API 调用委托给 services/tavily.py 的 TavilyService。
 """
 
+from typing import cast
+
 from langchain_core.tools import tool
 
 from aistock_agent.services.tavily import TavilyService
@@ -25,7 +27,9 @@ async def tavily_finance_search(query: str) -> str:
             return f"未找到关于「{query}」的相关新闻"
 
         lines = []
-        for item in result["results"]:
+        # TavilyService.search 返回 dict[str, object]，cast 声明 results 为列表
+        results = cast(list[dict[str, str]], result["results"])
+        for item in results:
             title = item.get("title", "无标题")
             content = item.get("content", "")[:200]
             url = item.get("url", "")

@@ -12,8 +12,8 @@
 from datetime import date
 
 import structlog
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from aistock_agent.config import settings
 from aistock_agent.state.schema import AgentState

@@ -19,6 +19,8 @@ agent 只需声明 category，即可获取完整工具列表，
 断言（含顺序）。修改顺序前请同步更新对应集成测试。
 """
 
+from langchain_core.tools import BaseTool
+
 from aistock_agent.tools.market_tools import get_global_markets
 from aistock_agent.tools.news_tools import get_cls_news, get_news_fulltext, search_cls_news
 from aistock_agent.tools.search_tools import tavily_finance_search
@@ -27,7 +29,7 @@ from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecas
 
 # 按 category 分组
 # 顺序必须与各 agent 中原 tools 列表顺序一致（集成测试含顺序断言）
-TOOL_REGISTRY: dict[str, list] = {
+TOOL_REGISTRY: dict[str, list[BaseTool]] = {
     "morning": [tavily_finance_search, get_global_markets, get_cls_news],
     "stock": [get_quote, get_capital_flow, get_profit_forecast, search_cls_news],
     "sector": [get_leader_stocks, get_capital_flow],
@@ -52,14 +54,14 @@ __all__ = [
 ]
 
 
-def get_all_tools() -> list:
+def get_all_tools() -> list[BaseTool]:
     """获取全部工具（去重）
 
     Returns:
         去重后的全部工具列表，顺序按 TOOL_REGISTRY 遍历顺序
     """
     seen: set[int] = set()
-    result: list = []
+    result: list[BaseTool] = []
     for tools in TOOL_REGISTRY.values():
         for tool in tools:
             if id(tool) not in seen:
@@ -68,7 +70,7 @@ def get_all_tools() -> list:
     return result
 
 
-def get_tools(category: str | None = None) -> list:
+def get_tools(category: str | None = None) -> list[BaseTool]:
     """获取工具集
 
     Args:

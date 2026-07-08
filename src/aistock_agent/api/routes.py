@@ -145,9 +145,9 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
     from aistock_agent.tools.graph_tools import get_concepts, get_graph_by_concept
     from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
     from aistock_agent.tools.market_tools import get_global_markets
-    from aistock_agent.tools.search_tools import tavily_finance_search
     from aistock_agent.tools.monitor_tools import get_alert_history, get_stock_monitor
     from aistock_agent.tools.news_tools import get_cls_news, get_news_fulltext, search_cls_news
+    from aistock_agent.tools.search_tools import tavily_finance_search
     from aistock_agent.tools.sector_tools import get_leader_stocks, get_wind_leaders
     from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
     from aistock_agent.tools.tenx_tools import get_tenx_score, get_tenx_top_stocks
