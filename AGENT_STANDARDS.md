@@ -181,23 +181,6 @@ return _format_events(data, title=f"【{symbol}】监控事件")
 
 这两类是 Node.js 无对应实现的例外。**A 股数据禁止在 Python 侧重复实现获取逻辑**（项目硬约束）。
 
-### 注册到 `/skills`
-
-新增 tool 后，必须在 `src/aistock_agent/api/routes.py` 的 `list_skills` 中注册，否则不出现在
-`GET /api/agent/skills` 工具列表中：
-
-```python
-@router.get("/skills")
-async def list_skills() -> dict[str, list[dict[str, str]]]:
-    from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
-    # ... 其他 import
-    all_tools = [
-        get_quote, get_capital_flow, get_profit_forecast,
-        # ... 新增 tool 加到这里
-    ]
-    return {"tools": [{"name": t.name, "description": t.description} for t in all_tools]}
-```
-
 ### 注册到 Tool Registry（自动注册）
 
 新增 tool 后，在**定义该 tool 的文件底部**调用 `register()` 自注册，**不需要编辑 `registry.py`**：
