@@ -7,7 +7,7 @@
   （403 + detail="Forbidden"），改为用 FastAPI ``Depends`` 注入。
 - ``build_initial_state``：从 ``/chat/message`` handler 抽出的 initial state 构造，
   字段名与默认值与原内联实现完全一致。
-- ``get_redis_client``：暂用 ``aioredis.from_url``，Phase 5 改 lifespan 池。
+- ``get_redis_client``：从 lifespan 管理的 ``RedisPool`` 获取客户端单例。
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 from fastapi import Header, HTTPException
 
 from aistock_agent.config import settings
+from aistock_agent.services.redis_pool import RedisPool
 
 
 def verify_internal_token(
@@ -54,10 +55,10 @@ def build_initial_state(
     }
 
 
-def get_redis_client() -> aioredis.Redis:
-    """获取 Redis 客户端（暂用 from_url，Phase 5 改 lifespan 池）。
+async def get_redis_client() -> aioredis.Redis:
+    """获取 Redis 客户端（从 lifespan 管理的连接池单例）。
 
-    与 ``agents/workers/morning.py`` 的 ``aioredis.from_url(settings.redis_url)``
-    方式保持一致。
+    与 ``services.cache`` 共享同一个 ``RedisPool`` 客户端实例，
+    由 ``main.lifespan`` 在启动时初始化。
     """
-    return aioredis.from_url(settings.redis_url)  # type: ignore[no-untyped-call, no-any-return]
+    return await RedisPool.get_client()

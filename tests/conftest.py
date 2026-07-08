@@ -47,11 +47,16 @@ def mock_tavily():
 
 @pytest.fixture
 def mock_redis():
-    """mock redis.asyncio"""
-    with patch("aistock_agent.agents.workers.morning.aioredis") as mock_aioredis:
+    """mock Redis client（通过 RedisPool 注入到 services.cache）。
+
+    morning_agent 的 _get/_set_cached_briefing 委托给 services.cache，
+    services.cache 通过 RedisPool.get_client() 获取客户端。
+    此 fixture patch services.cache.RedisPool，注入 mock_client。
+    """
+    with patch("aistock_agent.services.cache.RedisPool") as mock_pool:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=None)
         mock_client.setex = AsyncMock()
         mock_client.aclose = AsyncMock()
-        mock_aioredis.from_url.return_value = mock_client
+        mock_pool.get_client = AsyncMock(return_value=mock_client)
         yield mock_client

@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aistock_agent.tools.sector_tools import get_leader_stocks
+from aistock_agent.tools.base import DEGRADED_MESSAGE
+from aistock_agent.tools.sector_tools import get_leader_stocks, get_wind_leaders
 
 
 @pytest.mark.asyncio
@@ -33,3 +34,40 @@ async def test_get_leader_stocks_empty():
         mock_api.get = AsyncMock(return_value=mock_data)
         result = await get_leader_stocks.ainvoke({"tag_code": "BK0475"})
         assert "暂无龙头股" in result
+
+
+# ── get_wind_leaders ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_wind_leaders_success():
+    """get_wind_leaders 正常返回风口龙头板块及龙头股"""
+    mock_data = {
+        "update_time": "2026-07-08 09:30",
+        "hot_sectors": [
+            {
+                "name": "半导体",
+                "today_change": 3.2,
+                "leading_stock": "中芯国际",
+                "leading_change": 8.5,
+                "main_stocks": [
+                    {"code": "688981", "name": "中芯国际", "change_pct": 8.5, "reason": "国产替代加速"},
+                ],
+            },
+        ],
+    }
+    with patch("aistock_agent.tools.sector_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value=mock_data)
+        result = await get_wind_leaders.ainvoke({})
+        assert "半导体" in result
+        assert "中芯国际" in result
+        mock_api.get.assert_called_once_with("/internal/wind-leaders")
+
+
+@pytest.mark.asyncio
+async def test_get_wind_leaders_degradation():
+    """get_wind_leaders 异常时返回降级文本"""
+    with patch("aistock_agent.tools.sector_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(side_effect=RuntimeError("node api down"))
+        result = await get_wind_leaders.ainvoke({})
+        assert result == DEGRADED_MESSAGE
