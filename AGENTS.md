@@ -1,6 +1,11 @@
 # AGENTS.md - aistock-agent-py
 
 > 本文档是 AI Agent 的入口地图，开发时 AI 必读。
+>
+> **新增 Agent / Tool 时必读**：[AGENT_STANDARDS.md](./AGENT_STANDARDS.md) — 覆盖 8 个核心
+> 开发规范（State-first / Tool / Agent / 提示词 / 错误处理 / 双模型 / 缓存 / 测试）+ 4 个补充
+> 规范（可观测性 / API / 配置 / 代码风格）+ 目录结构与常用命令速查。本文件不重复其内容，
+> 仅保留入口地图、目录结构速览与异常降级规范。
 
 ## 项目概述
 
@@ -152,6 +157,9 @@ src/aistock_agent/
 ```
 
 ## 开发规范
+
+> 完整规范见 [AGENT_STANDARDS.md](./AGENT_STANDARDS.md)。以下为速览，新增 Agent / Tool
+> 时以 AGENT_STANDARDS.md 为准。
 
 ### State-first 原则
 - 所有数据通过 AgentState 流转，禁止节点间隐式传递

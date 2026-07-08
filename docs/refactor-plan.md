@@ -1,6 +1,6 @@
 # AiStock Agent — Python/LangGraph 重构设计文档
 
-> 版本：v2.1 | 日期：2026-07-07 | 状态：Phase 4 完成
+> 版本：v2.2 | 日期：2026-07-08 | 状态：Phase 5 完成（AGENT_STANDARDS.md 已补写）
 
 ---
 
@@ -142,7 +142,7 @@ aistock-agent-py/
 ├── pyproject.toml
 ├── .env.example
 ├── Dockerfile
-├── AGENT_STANDARDS.md          # Phase 5 完成后补写
+├── AGENT_STANDARDS.md          # Agent 开发标准（Phase 5 Task 10 已补写）
 ├── docs/
 │   └── refactor-plan.md        # 本文档
 │
@@ -566,24 +566,31 @@ Node.js侧将 `/api/agent/*` 的请求反代到Python服务对应路径。
 | **2** | Node.js内部API + Python Tools层 | 6个`/internal/*`接口 + 5个`@tool` | 每个tool有pytest，独立可调用 | ✅ 完成 |
 | **3** | Morning Agent | `agents/workers/morning.py`（Phase 4 迁移） + Redis缓存 + SSE接口 | `/briefing/morning` SSE流式返回4步分析 | ✅ 完成 |
 | **4** | 核心对话Agent层 | 物理分层重构（agents/services/graph/prompts/utils/schemas/memory/errors）+ supervisor + stock/sector/event/general/morning agent + graph builder + checkpointer 持久化 + 异常降级 + /chat/stream SSE + 三层测试 | 完整消息流程：输入→路由→工具调用→回复；多轮对话可恢复；146 测试全绿 | ✅ 完成 |
-| **5** | Node.js接入 + 新增Internal API | Express反代 + 新增6个`/internal/*`接口 + 对应Tools | 端到端测试通过 | ⏳ 待开始 |
+| **5** | Node.js接入 + 新增Internal API | Express反代 + 新增6个`/internal/*`接口 + 对应Tools | 端到端测试通过 | ✅ 完成（Task 1-10 全部完成；lifespan/config/health/observability/middleware/9 internal API/9 tools/Express 反代/E2E 测试/AGENT_STANDARDS.md） |
 | **6** | 产品功能Agent | alert + tenx + forecast agent | 各Agent独立可调用，有pytest | ⏳ 待开始 |
-| **7** | 交易复盘 + 标准文档 | review_agent + `AGENT_STANDARDS.md` | 全部Agent可用，文档覆盖所有扩展场景 | ⏳ 待开始 |
+| **7** | 交易复盘 + 标准文档 | review_agent + `AGENT_STANDARDS.md` | 全部Agent可用，文档覆盖所有扩展场景 | ⏳ 待开始（`AGENT_STANDARDS.md` 已在 Phase 5 Task 10 提前补写） |
 
 ---
 
-## 11. Agent 开发标准（大纲，Phase 5补写）
+## 11. Agent 开发标准（已补写，见 AGENT_STANDARDS.md）
 
-`AGENT_STANDARDS.md` 将覆盖以下内容：
+> ✅ 已在 Phase 5 Task 10 落地：[`AGENT_STANDARDS.md`](../AGENT_STANDARDS.md)。
+> 文档基于代码库实际模式（非前瞻性建议）编写，覆盖以下 8 个核心规范 + 4 个补充规范 + 2 个附录：
 
-1. **State-first原则**：所有数据通过AgentState流转，禁止节点间隐式传递
-2. **新增Tool流程**：命名规范 / 参数校验 / 错误处理 / pytest要求
-3. **新增Agent流程**：注册到graph/edges.py / 路由条件声明 / 工具绑定规则
-4. **提示词管理**：统一存放`prompts/` / 版本注释 / 日期等动态内容注入规范
-5. **错误处理规范**：工具失败降级策略 / 不允许抛异常中断图执行
-6. **双模型使用规则**：何时用deep_think，何时用quick_think
-7. **缓存规范**：哪类结果应缓存，TTL设置原则
-8. **测试覆盖要求**：每个tool必须有mock测试，每个Agent有集成测试
+`AGENT_STANDARDS.md` 覆盖以下内容：
+
+1. **State-first原则**：所有数据通过AgentState流转，禁止节点间隐式传递；新增状态字段修改 `state/schema.py`（含节点返回值 dict patch 契约）
+2. **新增Tool流程**：命名规范（`get_xxx`/`search_xxx`）/ 参数类型注解 + docstring + `Args:` / `@tool`+`@safe_tool_call` 装饰器顺序 / `node_api.get` vs `get_list` / 在 `/skills` 注册 / pytest mock 要求
+3. **新增Agent流程**：放 `agents/workers/<name>.py` / 实现 `async def run(state) -> dict` / 在 `graph/builder.py` 注册节点 / 在 `graph/routers/intent_router.py` 加路由条件 / 模型由 `run()` 调 `services/llm.py` 工厂决定 / 在 `prompts/workers/<name>.py` 放提示词（6 步流程示例）
+4. **提示词管理**：统一放 `prompts/` 对应子目录 / `SYSTEM_PROMPT` 基础常量 + 派生模式 / 日期等动态内容用 `{{PLACEHOLDER}}` 占位运行时 `.replace()` / 禁止代码内硬编码长提示词 / 版本变更加注释
+5. **错误处理规范**：两层降级体系（Tool 层 `@safe_tool_call` 返回 `DEGRADED_MESSAGE` + Agent 层 `run()` 顶层 try-catch 返回降级文本）/ 禁止异常中断图执行 / 降级文本标注"暂不可用" / 只 catch `Exception` 不做分类（`errors/exceptions.py` 当前为预留 dead code）
+6. **双模型使用规则**：`quick_think`（意图分类/兜底/异动/业绩预测）/ `deep_think`（晨报/个股/风口/事件/十倍股/播报）/ temperature/max_tokens 从 config 读取 / 模型工厂在 `services/llm.py`
+7. **缓存规范**：晨报 Redis TTL=2h / 缓存 key 格式 `<domain>:<sub>:<date>` / 走 `services/cache.py`+`RedisPool` 单例 / 幂等性分析（仅晨报缓存，实时数据不缓存）/ 缓存异常不崩溃
+8. **测试覆盖要求**：三层分层（`tests/unit/` + `tests/integration/` + `tests/e2e/`）/ 每个 tool 有 mock 测试 / 每个 Agent 有集成测试 / 路由有端到端测试 / 测试不依赖真实网络/LLM/Redis（`FakeToolCallingLLM` + `ASGITransport` 模式）
+
+**补充规范**：可观测性标准（structlog `get_logger` + callback 零侵入 + `MetricsCollector` 单例）/ API 接口标准（鉴权 `Depends(verify_internal_token)` + 双健康检查 + SSE + checkpointer thread_id）/ 配置标准（`pydantic-settings` + 字段分类 + 新增流程）/ 代码风格（Python ≥ 3.11 + 禁止 `any` 用 `object` + ruff+mypy strict）。
+
+**附录**：目录结构速查（Phase 4/5 重构后的实际目录树）/ 常用命令速查（uvicorn / pytest 分层 / ruff / mypy / git changer 策略）。
 
 ---
 
