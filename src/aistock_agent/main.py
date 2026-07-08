@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from aistock_agent.api.routes import router as api_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
+from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.redis_pool import RedisPool
 
 structlog.configure(
     processors=[
@@ -27,9 +29,31 @@ logger = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期：启动日志（替代已弃用的 on_event）"""
+    """应用生命周期：启动初始化资源池，关闭优雅释放。
+
+    启动时初始化 Redis 连接池和 httpx AsyncClient，
+    任一初始化失败不崩溃（降级运行，由调用方处理异常）。
+    关闭时无条件关闭两个池（close 幂等）。
+    """
     logger.info("agent_service_started", host=settings.host, port=settings.port)
+
+    # 启动：初始化连接池（异常不崩溃，降级运行）
+    try:
+        await RedisPool.init(settings.redis_url)
+    except Exception:
+        logger.error("redis_pool_init_failed", exc_info=True)
+
+    try:
+        await HttpClientPool.init()
+    except Exception:
+        logger.error("http_client_pool_init_failed", exc_info=True)
+
     yield
+
+    # 关闭：优雅释放（close 幂等，未初始化也安全）
+    await RedisPool.close()
+    await HttpClientPool.close()
+    logger.info("agent_service_stopped")
 
 
 app = FastAPI(

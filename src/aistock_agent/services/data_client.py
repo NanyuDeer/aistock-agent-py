@@ -1,12 +1,14 @@
 """数据客户端 — httpx AsyncClient → Node.js /internal/* API
 
 Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
+httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
 import httpx
 import structlog
 
 from aistock_agent.config import settings
+from aistock_agent.services.http_client import HttpClientPool
 
 logger = structlog.get_logger()
 
@@ -31,10 +33,10 @@ class NodeApiClient:
         headers = {"X-Internal-Token": self._token}
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, headers=headers)
-                resp.raise_for_status()
-                payload = resp.json()
+            client = await HttpClientPool.get_client()
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
 
             # Node.js 约定返回 { code: 200, data: {...} }，解包 data 字段
             if not isinstance(payload, dict):
