@@ -66,3 +66,12 @@ def _format_news_list(data: dict[str, object]) -> str:
         brief = str(brief_raw)[:100]
         lines.append(f"- [{time_str}] {title}\n  {brief}...")
     return "\n".join(lines)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("morning", get_cls_news)
+register("stock", search_cls_news)
+register("event", search_cls_news)
+register("event", get_news_fulltext)

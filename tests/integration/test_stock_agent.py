@@ -14,14 +14,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from aistock_agent.agents.workers.stock import run
 from aistock_agent.prompts.workers.stock import STOCK_ANALYST_PROMPT
-from aistock_agent.tools.news_tools import search_cls_news
-from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.stock.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.stock.get_deep_think"
 
-# 期望绑定的工具集（与 stock.py 中 tools 列表顺序一致）
-EXPECTED_TOOLS = [get_quote, get_capital_flow, get_profit_forecast, search_cls_news]
+# 期望绑定的工具集（集合断言，不依赖顺序）
+EXPECTED_TOOL_NAMES = {"get_quote", "get_capital_flow", "get_profit_forecast", "search_cls_news"}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -42,7 +40,7 @@ async def test_stock_agent_tools_bound_correctly():
     mock_create.assert_called_once()
     # create_react_agent(llm, tools) 位置参数：[0]=llm, [1]=tools
     tools_arg = mock_create.call_args[0][1]
-    assert tools_arg == EXPECTED_TOOLS
+    assert {t.name for t in tools_arg} == EXPECTED_TOOL_NAMES
 
 
 @pytest.mark.asyncio

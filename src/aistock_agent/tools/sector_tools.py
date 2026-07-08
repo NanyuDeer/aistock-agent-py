@@ -79,3 +79,9 @@ def _format_wind_leaders(data: dict[str, object]) -> str:
                 s_change = stock.get("change_pct", "-")
                 lines.append(f"      - {s_name}({s_code}) 涨跌: {s_change}%")
     return "\n".join(lines)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("sector", get_leader_stocks)

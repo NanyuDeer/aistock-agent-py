@@ -72,3 +72,9 @@ def _market_display_name(key: str) -> str:
         "usdcny": "美元/人民币",
     }
     return names.get(key, key)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("morning", get_global_markets)

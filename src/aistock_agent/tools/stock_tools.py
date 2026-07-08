@@ -82,3 +82,15 @@ def _format_forecast(data: dict[str, object]) -> str:
             avg_2027 = row.get("预测2027-平均", "-")
             lines.append(f"  {indicator}: 2026预测={avg_2026}  2027预测={avg_2027}")
     return "\n".join(lines) if lines else "无盈利预测数据"
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("stock", get_quote)
+register("stock", get_capital_flow)
+register("stock", get_profit_forecast)
+# get_quote 也被 event agent 使用
+register("event", get_quote)
+# get_capital_flow 也被 sector agent 使用
+register("sector", get_capital_flow)

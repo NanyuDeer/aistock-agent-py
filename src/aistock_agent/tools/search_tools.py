@@ -37,3 +37,10 @@ async def tavily_finance_search(query: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Tavily 搜索失败: {e}"
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("morning", tavily_finance_search)
+register("event", tavily_finance_search)

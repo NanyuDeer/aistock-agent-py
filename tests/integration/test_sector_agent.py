@@ -14,13 +14,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from aistock_agent.agents.workers.sector import run
 from aistock_agent.prompts.workers.sector import SECTOR_ANALYST_PROMPT
-from aistock_agent.tools.sector_tools import get_leader_stocks
-from aistock_agent.tools.stock_tools import get_capital_flow
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.sector.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.sector.get_deep_think"
 
-EXPECTED_TOOLS = [get_leader_stocks, get_capital_flow]
+EXPECTED_TOOL_NAMES = {"get_leader_stocks", "get_capital_flow"}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -40,7 +38,7 @@ async def test_sector_agent_tools_bound_correctly():
 
     mock_create.assert_called_once()
     tools_arg = mock_create.call_args[0][1]
-    assert tools_arg == EXPECTED_TOOLS
+    assert {t.name for t in tools_arg} == EXPECTED_TOOL_NAMES
 
 
 @pytest.mark.asyncio

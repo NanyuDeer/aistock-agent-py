@@ -198,24 +198,35 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
     return {"tools": [{"name": t.name, "description": t.description} for t in all_tools]}
 ```
 
-### 注册到 Tool Registry
+### 注册到 Tool Registry（自动注册）
 
-新增 tool 后，还必须在 `tools/registry.py` 的 `TOOL_REGISTRY` 中按 category 注册：
+新增 tool 后，在**定义该 tool 的文件底部**调用 `register()` 自注册，**不需要编辑 `registry.py`**：
 
 ```python
-# tools/registry.py
-from langchain_core.tools import BaseTool
+# tools/stock_tools.py — 文件底部
+from aistock_agent.tools.registry import register
 
-TOOL_REGISTRY: dict[str, list[BaseTool]] = {
-    "morning": [tavily_finance_search, get_global_markets, get_cls_news],
-    "stock": [get_quote, get_capital_flow, get_profit_forecast, search_cls_news],
-    "sector": [get_leader_stocks, get_capital_flow],
-    "event": [search_cls_news, get_news_fulltext, get_quote, tavily_finance_search],
-    "iterate": [],  # 迭代agent无工具
-}
+register("stock", get_quote)           # 主 category
+register("stock", get_capital_flow)
+register("stock", get_profit_forecast)
+register("event", get_quote)           # 跨 category 共享
+register("sector", get_capital_flow)   # 跨 category 共享
 ```
 
-Agent 通过 `get_tools("category")` 获取工具集，不再手动 import + 拼接。工具顺序必须与对应 agent 中原 tools 列表顺序一致（集成测试含顺序断言）。
+`register()` 会在模块加载时自动执行（`tools/__init__.py` 导入所有 tool 模块触发）。
+同一工具可注册到多个 category，重复注册同一 category 会自动去重。
+
+Agent 通过 `get_tools("category")` 获取工具集，不再手动 import + 拼接：
+
+```python
+# agents/workers/stock.py
+from aistock_agent.tools.registry import get_tools
+tools = get_tools("stock")
+agent = create_react_agent(llm, tools)
+```
+
+**注意**：集成测试使用**集合断言**（`set(t.name for t in tools) == EXPECTED_TOOL_NAMES`），
+不依赖工具顺序，多人新增工具不会互相影响。
 
 ### 绑定到 Agent
 

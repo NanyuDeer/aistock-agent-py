@@ -12,57 +12,51 @@ agent 只需声明 category，即可获取完整工具列表，
     tools = get_tools("morning")
 
     # 方式3：直接 import 具体工具名
-    from aistock_agent.tools.registry import get_global_markets
+    from aistock_agent.tools.stock_tools import get_quote
 
-工具顺序约束：每个 category 的工具顺序必须与对应 agent 中
-原 tools 列表顺序一致，因为集成测试使用 ``tools == EXPECTED_TOOLS``
-断言（含顺序）。修改顺序前请同步更新对应集成测试。
+自动注册机制：
+    每个 tool 模块在底部调用 ``register("category", tool)`` 自注册。
+    ``tools/__init__.py`` 导入所有 tool 模块触发注册。
+    新增工具只需在定义它的 tool 文件底部加一行 ``register()``，
+    **不需要编辑本文件**，避免多人合并冲突。
 """
 
 from langchain_core.tools import BaseTool
 
-from aistock_agent.tools.market_tools import get_global_markets
-from aistock_agent.tools.news_tools import get_cls_news, get_news_fulltext, search_cls_news
-from aistock_agent.tools.search_tools import tavily_finance_search
-from aistock_agent.tools.sector_tools import get_leader_stocks
-from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
+# 运行时注册表（由各 tool 模块通过 register() 填充）
+_REGISTRY: dict[str, list[BaseTool]] = {}
 
-# 按 category 分组
-# 顺序必须与各 agent 中原 tools 列表顺序一致（集成测试含顺序断言）
-TOOL_REGISTRY: dict[str, list[BaseTool]] = {
-    "morning": [tavily_finance_search, get_global_markets, get_cls_news],
-    "stock": [get_quote, get_capital_flow, get_profit_forecast, search_cls_news],
-    "sector": [get_leader_stocks, get_capital_flow],
-    "event": [search_cls_news, get_news_fulltext, get_quote, tavily_finance_search],
-    # review / iterate category 在复盘/迭代 agent 实现时注册
-    "iterate": [],  # 迭代agent无工具，纯读文件+LLM推理
-}
+# 预声明空 category（迭代 agent 无工具）
+_EMPTY_CATEGORIES: set[str] = {"iterate"}
 
-__all__ = [
-    "get_global_markets",
-    "tavily_finance_search",
-    "get_cls_news",
-    "search_cls_news",
-    "get_news_fulltext",
-    "get_quote",
-    "get_capital_flow",
-    "get_profit_forecast",
-    "get_leader_stocks",
-    "get_tools",
-    "get_all_tools",
-    "TOOL_REGISTRY",
-]
+
+def register(category: str, tool: BaseTool) -> None:
+    """将工具注册到指定 category
+
+    每个 tool 模块在底部调用此函数自注册。
+    同一工具可注册到多个 category（如 get_quote 同时属于 stock 和 event）。
+    重复注册同一工具到同一 category 会被自动忽略（去重）。
+
+    Args:
+        category: 工具分类名（如 "morning"、"stock"、"event"）
+        tool: 已装饰的 ``@tool`` 工具对象
+    """
+    if category not in _REGISTRY:
+        _REGISTRY[category] = []
+    # 去重：同一对象不重复追加
+    if tool not in _REGISTRY[category]:
+        _REGISTRY[category].append(tool)
 
 
 def get_all_tools() -> list[BaseTool]:
     """获取全部工具（去重）
 
     Returns:
-        去重后的全部工具列表，顺序按 TOOL_REGISTRY 遍历顺序
+        去重后的全部工具列表，顺序按 _REGISTRY 遍历顺序
     """
     seen: set[int] = set()
     result: list[BaseTool] = []
-    for tools in TOOL_REGISTRY.values():
+    for tools in _REGISTRY.values():
         for tool in tools:
             if id(tool) not in seen:
                 seen.add(id(tool))
@@ -83,4 +77,9 @@ def get_tools(category: str | None = None) -> list[BaseTool]:
     """
     if category is None:
         return get_all_tools()
-    return TOOL_REGISTRY.get(category, [])
+    return _REGISTRY.get(category, [])
+
+
+# 预填充空 category
+for _cat in _EMPTY_CATEGORIES:
+    _REGISTRY[_cat] = []

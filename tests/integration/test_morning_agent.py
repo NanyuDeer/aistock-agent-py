@@ -157,17 +157,13 @@ from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from aistock_agent.tools.market_tools import get_global_markets
-from aistock_agent.tools.search_tools import tavily_finance_search
-from aistock_agent.tools.news_tools import get_cls_news
-
 _MORNING_GET_CACHED = "aistock_agent.agents.workers.morning._get_cached_briefing"
 _MORNING_SET_CACHED = "aistock_agent.agents.workers.morning._set_cached_briefing"
 _MORNING_CREATE_AGENT = "aistock_agent.agents.workers.morning.create_react_agent"
 _MORNING_GET_DEEP = "aistock_agent.agents.workers.morning.get_deep_think"
 
-# run() 期望绑定的工具集（与 morning.py run 中 tools 列表顺序一致）
-_MORNING_EXPECTED_TOOLS = [tavily_finance_search, get_global_markets, get_cls_news]
+# run() 期望绑定的工具集（集合断言，不依赖顺序）
+_MORNING_EXPECTED_TOOL_NAMES = {"tavily_finance_search", "get_global_markets", "get_cls_news"}
 
 
 def _make_mock_morning_agent(messages: list) -> MagicMock:
@@ -200,7 +196,7 @@ async def test_morning_run_cache_miss_invokes_agent():
 
     mock_create.assert_called_once()
     tools_arg = mock_create.call_args[0][1]
-    assert tools_arg == _MORNING_EXPECTED_TOOLS
+    assert {t.name for t in tools_arg} == _MORNING_EXPECTED_TOOL_NAMES
 
 
 @pytest.mark.asyncio

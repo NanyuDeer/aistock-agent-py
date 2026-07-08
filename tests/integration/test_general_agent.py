@@ -14,12 +14,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from aistock_agent.agents.general.node import run
 from aistock_agent.prompts.general.system import GENERAL_PROMPT
-from aistock_agent.tools.stock_tools import get_quote
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.general.node.create_react_agent"
 _GET_QUICK_THINK = "aistock_agent.agents.general.node.get_quick_think"
 
-EXPECTED_TOOLS = [get_quote]
+EXPECTED_TOOL_NAMES = {"get_quote"}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -39,7 +38,7 @@ async def test_general_agent_tools_bound_correctly():
 
     mock_create.assert_called_once()
     tools_arg = mock_create.call_args[0][1]
-    assert tools_arg == EXPECTED_TOOLS
+    assert {t.name for t in tools_arg} == EXPECTED_TOOL_NAMES
 
 
 @pytest.mark.asyncio
