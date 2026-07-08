@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 from contextlib import ExitStack
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -81,7 +80,7 @@ class FakeToolCallingLLM(BaseChatModel):
         messages: object,
         stop: list[str] | None = None,
         run_manager: object = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> ChatResult:
         return ChatResult(generations=[ChatGeneration(message=self._next())])
 
@@ -90,7 +89,7 @@ class FakeToolCallingLLM(BaseChatModel):
         messages: object,
         stop: list[str] | None = None,
         run_manager: object = None,
-        **kwargs: Any,
+        **kwargs: object,
     ):
         msg = self._next()
         tcc: list[dict[str, object]] = []
@@ -112,7 +111,7 @@ class FakeToolCallingLLM(BaseChatModel):
     def _llm_type(self) -> str:
         return "fake-tool-calling"
 
-    def bind_tools(self, tools: object, **kwargs: Any) -> FakeToolCallingLLM:
+    def bind_tools(self, tools: object, **kwargs: object) -> FakeToolCallingLLM:
         """返回 self —— 假模型不需要真正绑定工具 schema。"""
         return self
 
