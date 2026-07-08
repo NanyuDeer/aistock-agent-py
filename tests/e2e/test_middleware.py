@@ -129,6 +129,39 @@ async def test_request_id_different_per_request():
     assert id1 != id2
 
 
+@pytest.mark.asyncio
+async def test_request_id_present_on_500_response():
+    """未处理异常产生的 500 响应也携带 X-Request-ID header。
+
+    全局异常处理器（global_exception_handler）注册在 ExceptionMiddleware 内，
+    捕获异常后返回 JSONResponse，该响应正常流回 request_id_middleware，
+    X-Request-ID header 被注入。若未注册该 handler，异常会穿透到
+    ServerErrorMiddleware（用户中间件栈外），500 响应将缺少此 header。
+
+    使用独立的 test_app 避免向生产 app 注入会抛异常的测试路由。
+    """
+    from fastapi import FastAPI
+
+    test_app = FastAPI()
+    setup_middleware(test_app)
+
+    @test_app.get("/raise")
+    async def _raise() -> dict[str, str]:
+        raise RuntimeError("intentional test error")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=test_app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/raise", headers={REQUEST_ID_HEADER: "error-trace-id"},
+        )
+
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": "Internal Server Error"}
+    # 关键断言：500 响应必须携带 X-Request-ID
+    assert resp.headers.get(REQUEST_ID_HEADER) == "error-trace-id"
+
+
 # ── CORS ──────────────────────────────────────────────────────────
 
 
@@ -153,6 +186,8 @@ async def test_cors_preflight_options():
     assert "GET" in allow_methods
     allow_headers = resp.headers.get("access-control-allow-headers", "")
     assert "content-type" in allow_headers.lower()
+    # CORS 预检请求也必须注入 X-Request-ID（request_id_middleware 在最外层）
+    assert resp.headers.get("x-request-id") is not None
 
 
 @pytest.mark.asyncio
@@ -237,15 +272,24 @@ async def test_contextvar_cleanup_after_middleware():
 
 @pytest.mark.asyncio
 async def test_contextvar_cleanup_even_on_exception():
-    """call_next 抛异常时，finally 仍清理 contextvar。"""
+    """call_next 抛异常时，中间件捕获并返回 500 响应，finally 仍清理 contextvar。
+
+    request_id_middleware 捕获未处理异常并返回 500 JSONResponse（携带
+    X-Request-ID），而非 re-raise。这确保 500 响应流经本中间件并注入 header。
+    finally 块无条件清理 contextvar，即使异常被捕获也执行。
+    """
     request = _make_request(headers={REQUEST_ID_HEADER: "exc-id"})
 
     async def call_next(_request: Request) -> Response:
         raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        await request_id_middleware(request, call_next)
+    response = await request_id_middleware(request, call_next)
 
+    # 异常被捕获，返回 500 响应（携带 X-Request-ID）
+    assert response.status_code == 500
+    assert response.headers.get(REQUEST_ID_HEADER) == "exc-id"
+
+    # 中间件完成后，contextvar 应被清理（finally 无条件执行）
     ctx = structlog.contextvars.get_contextvars()
     assert "request_id" not in ctx
 

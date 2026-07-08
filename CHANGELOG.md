@@ -2,6 +2,23 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-08 — Task 5 review fix: X-Request-ID on 500 responses + OPTIONS assertion
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/api/middleware.py`：`request_id_middleware` 新增 try/except 捕获未处理异常，返回 500 JSONResponse 并注入 X-Request-ID header（主修复）。根因：Starlette 的 ExceptionMiddleware 跳过 Exception 类型 handler（由 ServerErrorMiddleware 处理），而 ServerErrorMiddleware 位于用户中间件栈外，其 500 响应不流经 request_id_middleware
+- `src/aistock_agent/api/middleware.py`：新增 `global_exception_handler` 防御性全局异常处理器（注册到 ServerErrorMiddleware），确保边缘场景返回 JSON 而非纯文本
+- `tests/e2e/test_middleware.py`：`test_cors_preflight_options` 新增 X-Request-ID 断言（Finding 2）
+- `tests/e2e/test_middleware.py`：新增 `test_request_id_present_on_500_response` 验证 500 响应携带 X-Request-ID
+- `tests/e2e/test_middleware.py`：更新 `test_contextvar_cleanup_even_on_exception` 适配新的异常捕获行为
+
+### 验证
+- `pytest tests/ -v`：250/250 通过
+- `ruff check src/`：All checks passed
+- `mypy src/`：Success, no issues found in 66 source files
+
+---
+
 ## [changer] 2026-07-06 — 清理晨报工具注释并将测试输出归档到 docs
 **开发者**: changer-collab
 
