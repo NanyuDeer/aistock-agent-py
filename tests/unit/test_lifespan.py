@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 
+from aistock_agent.config import settings
 from aistock_agent.main import lifespan
 
 
@@ -86,3 +87,24 @@ async def test_lifespan_http_init_failure_does_not_crash():
 
         mock_redis.close.assert_awaited_once()
         mock_http.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_passes_config_to_pools():
+    """lifespan 传递 config 参数到 RedisPool.init 和 HttpClientPool.init"""
+    with patch("aistock_agent.main.RedisPool") as mock_redis, \
+         patch("aistock_agent.main.HttpClientPool") as mock_http:
+        mock_redis.init = AsyncMock()
+        mock_http.init = AsyncMock()
+        mock_redis.close = AsyncMock()
+        mock_http.close = AsyncMock()
+
+        app = FastAPI()
+        async with lifespan(app):
+            mock_redis.init.assert_awaited_once_with(
+                settings.redis_url,
+                max_connections=settings.redis_max_connections,
+            )
+            mock_http.init.assert_awaited_once_with(
+                timeout=settings.http_timeout_seconds,
+            )

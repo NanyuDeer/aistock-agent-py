@@ -207,9 +207,18 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `OPENAI_BASE_URL` | OpenAI API 基础 URL | `https://api.openai.com/v1` |
 | `QUICK_THINK_MODEL` | 快速模型名称 | `gpt-4o-mini` |
 | `DEEP_THINK_MODEL` | 深度模型名称 | `gpt-4o` |
+| `QUICK_THINK_TEMPERATURE` | 快速模型 temperature | `0.1` |
+| `QUICK_THINK_MAX_TOKENS` | 快速模型 max_tokens | `2000` |
+| `DEEP_THINK_TEMPERATURE` | 深度模型 temperature | `0.3` |
+| `DEEP_THINK_MAX_TOKENS` | 深度模型 max_tokens | `4000` |
 | `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/1` |
+| `REDIS_MAX_CONNECTIONS` | Redis 连接池最大连接数 | `10` |
+| `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
+| `LANGSMITH_ENABLED` | LangSmith 追踪开关 | `false` |
+| `LANGSMITH_API_KEY` | LangSmith API 密钥 | - |
+| `LANGSMITH_PROJECT` | LangSmith 项目名 | `aistock-agent` |
 
 ## Vibecoding 工作流
 

@@ -17,7 +17,9 @@ def get_quick_think() -> ChatOpenAI:
         model=settings.quick_think_model,
         api_key=SecretStr(settings.openai_api_key),
         base_url=settings.openai_base_url,
-        temperature=0.1,
+        temperature=settings.quick_think_temperature,
+        # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
+        max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
     )
 
 
@@ -27,5 +29,7 @@ def get_deep_think() -> ChatOpenAI:
         model=settings.deep_think_model,
         api_key=SecretStr(settings.openai_api_key),
         base_url=settings.openai_base_url,
-        temperature=0.3,
+        temperature=settings.deep_think_temperature,
+        # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
+        max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]
     )

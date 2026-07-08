@@ -39,12 +39,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # 启动：初始化连接池（异常不崩溃，降级运行）
     try:
-        await RedisPool.init(settings.redis_url)
+        await RedisPool.init(
+            settings.redis_url,
+            max_connections=settings.redis_max_connections,
+        )
     except Exception:
         logger.error("redis_pool_init_failed", exc_info=True)
 
     try:
-        await HttpClientPool.init()
+        await HttpClientPool.init(timeout=settings.http_timeout_seconds)
     except Exception:
         logger.error("http_client_pool_init_failed", exc_info=True)
 
