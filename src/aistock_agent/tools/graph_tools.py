@@ -91,3 +91,10 @@ def _append_industries(lines: list[str], industries: list[object]) -> None:
                     parts.append(f"{s.get('name', '-')}({s.get('code', '-')})")
             stock_str = "  龙头: " + ", ".join(parts) if parts else ""
         lines.append(f"    - {name}{stock_str}")
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("general", get_concepts)
+register("general", get_graph_by_concept)

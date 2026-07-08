@@ -17,8 +17,7 @@ from aistock_agent.prompts.workers.morning import MORNING_PROMPT
 from aistock_agent.services.cache import get_cached_briefing, set_cached_briefing
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
-from aistock_agent.tools.news_tools import get_cls_news
+from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.date import is_trading_day  # 亦作为模块属性供 test_morning_agent.py patch
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -44,7 +43,7 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         )
 
     llm = get_deep_think()
-    tools = [tavily_finance_search, get_global_markets, get_cls_news]
+    tools = get_tools("morning")
     react_agent = create_react_agent(llm, tools)
 
     _llm_started = False
@@ -100,7 +99,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # 创建 ReAct Agent
         llm = get_deep_think()
-        tools = [tavily_finance_search, get_global_markets, get_cls_news]
+        tools = get_tools("morning")
         agent = create_react_agent(llm, tools)
 
         # 执行

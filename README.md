@@ -67,22 +67,41 @@ mypy src/
 
 ### Graph 拓扑
 
-```
-START → supervisor(quick_think)
-  ├── intent="morning"       → morning_agent(deep_think)
-  ├── intent="stock"         → stock_analyst(deep_think)
-  ├── intent="wind_leader"   → wind_leader_agent(deep_think)
-  ├── intent="event_chain"   → event_chain_agent(deep_think)
-  ├── intent="alert"         → alert_agent(quick_think)
-  ├── intent="hot_burst"     → hot_burst_agent(deep_think)
-  ├── intent="tenx"          → tenx_agent(deep_think)
-  ├── intent="forecast"      → forecast_agent(quick_think)
-  ├── intent="review"        → review_agent(deep_think)
-  └── intent="general"       → general_agent(quick_think)
-END
+```mermaid
+graph TB
+    subgraph 主流程["主流程（用户触发）"]
+        S[START] --> SUP[supervisor<br/>quick_think]
+        SUP -->|morning| M[morning_agent<br/>deep_think]
+        SUP -->|stock| ST[stock_analyst]
+        SUP -->|sector| SE[sector_analyst]
+        SUP -->|event| EV[event_analyst]
+        SUP -->|general| GE[general_agent]
+        M --> E1[END]
+        ST --> E1
+        SE --> E1
+        EV --> E1
+        GE --> E1
+    end
+
+    subgraph 复盘流水线["复盘流水线（定时触发，交易日15:30，规划中）"]
+        T[定时调度] --> RV[review_agent<br/>deep_think]
+        RV --> SB[快照生成器<br/>代码+LLM]
+        SB --> IA[迭代agent<br/>deep_think]
+    end
+
+    M -.->|当日报告| SB
+    RV -.->|当日报告| SB
+    SB -->|snapshot_T| IA
+    SB -->|rolling_stats| IA
+
+    IA -.->|优化建议<br/>人工审核| M
+
+    style IA fill:#fff3cd,stroke:#856404
+    style SB fill:#d1ecf1,stroke:#0c5460
+    style RV fill:#d4edda,stroke:#155724
 ```
 
-> 注：当前已实现的 worker 为 morning / stock / sector / event，其余为规划中（Phase 5+）。
+> 注：主流程已实现的 worker 为 morning / stock / sector / event + general 兜底；复盘流水线（review / snapshot / iterate）为规划中，由定时调度触发，不经过 supervisor 路由。
 
 ### 双模型策略
 
@@ -91,14 +110,27 @@ END
 | 意图分类/路由 | quick_think（gpt-4o-mini） | 低延迟，成本低 |
 | 深度分析/晨报/事件 | deep_think（gpt-4o） | 推理质量优先 |
 
+### 定时调度
+
+`services/scheduler.py` 基于 APScheduler `AsyncIOScheduler` 集成，交易日自动执行（非交易日通过 `utils/date.is_trading_day()` 自动跳过）。调度器在 `main.py` lifespan 中启动/关闭，与 RedisPool / HttpClientPool 同生命周期。
+
+| 时间 | 任务 | job_id | 说明 |
+|------|------|--------|------|
+| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存，用户打开 App 命中缓存 |
+| 15:30 | 复盘生成 | `review_report` | 收盘后归因分析（规划中） |
+| 15:35 | 快照生成 | `snapshot_build` | 晨报 vs 复盘偏差评估（规划中） |
+| 15:40 | 迭代分析 | `iterate_analysis` | 偏差分析报告 + 优化建议（规划中） |
+
+> 注：review / snapshot / iterate 三个任务已注册 job 并完成交易日过滤，但具体执行逻辑待对应 agent / 快照生成器实现后接入。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
+
 ### 目录结构
 
 > Phase 4 物理分层 + Phase 5 基础设施增强后的结构（2026-07-08）。
 
 ```
 src/aistock_agent/
-├── main.py              # FastAPI 入口（lifespan 管理 RedisPool + HttpClientPool）
-├── config.py            # pydantic-settings 配置（多模型/连接池/LangSmith/CORS）
+├── main.py              # FastAPI 入口（lifespan 管理 RedisPool + HttpClientPool + Scheduler）
+├── config.py            # pydantic-settings 配置（多模型/连接池/LangSmith/CORS/调度）
 ├── constants.py         # SSE 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
 ├── state/
 │   └── schema.py        # AgentState TypedDict
@@ -133,10 +165,12 @@ src/aistock_agent/
 │       └── event.py     # 事件传导链
 ├── tools/
 │   ├── base.py               # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
+│   ├── registry.py           # 工具注册中心：get_tools(category) / get_all_tools()（新增）
 │   ├── stock_tools.py        # get_quote, get_capital_flow, get_profit_forecast
 │   ├── sector_tools.py       # get_leader_stocks, get_wind_leaders
 │   ├── news_tools.py         # search_cls_news, get_news_fulltext, get_cls_news
-│   ├── market_tools.py       # get_global_markets(yfinance), tavily_finance_search
+│   ├── market_tools.py       # get_global_markets（yfinance 境外行情，回归纯 yfinance）
+│   ├── search_tools.py       # tavily_finance_search（Tavily 全网搜索，从 market_tools 拆出）
 │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── graph_tools.py        # get_concepts, get_graph_by_concept（Phase 5）
@@ -150,7 +184,9 @@ src/aistock_agent/
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
 │   ├── cache.py         # 晨报缓存服务（基于 RedisPool）
-│   └── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
+│   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
+│   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
+│   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/15:30/15:35/15:40）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
@@ -213,14 +249,17 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 1. 在 `tools/` 对应文件中定义 `@tool` + `@safe_tool_call` 装饰的 async 函数
 2. 参数必须定义类型注解和 docstring（供 LLM 理解工具用途）
 3. 通过 `services/data_client.py` 的 `NodeApiClient` 调用 Node.js `/internal/*` 接口
-4. 在 `api/routes.py` 的 `all_tools` 列表中注册
-5. 必须编写 mock 测试（正常 + 异常降级，`tests/unit/` 目录）
+4. 在定义该 tool 的文件底部调用 `register("category", tool)` 自注册（无需编辑 registry.py）
+5. 默认 `expose=True`，自动出现在 `GET /api/agent/skills`；如需隐藏，加 `expose=False`
+6. 必须编写 mock 测试（正常 + 异常降级，`tests/unit/` 目录）
 
 ### 新增 Agent 流程
 1. 在 `agents/workers/` 新增文件，实现 `async def run(state: AgentState) -> dict`
 2. 在 `graph/builder.py` 注册节点
 3. 在 `graph/routers/intent_router.py` 添加路由条件（如果需要新 intent）
-4. 在 `services/llm.py` 绑定对应的工具集（quick_think / deep_think）
+4. 在该 agent 使用的 tool 文件底部调用 `register("category", tool)` 注册到对应 category（如已有工具复用现有 category，无需新增）
+5. agent 内通过 `from aistock_agent.tools.registry import get_tools` + `get_tools("<category>")` 获取工具集，禁止手动 import + 拼接工具列表
+6. 在 `services/llm.py` 绑定对应的工具集（quick_think / deep_think）
 
 ### 提示词管理
 - 统一存放 `prompts/` 目录
@@ -272,6 +311,12 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `LANGSMITH_ENABLED` | LangSmith 追踪开关 | `false` |
 | `LANGSMITH_API_KEY` | LangSmith API 密钥 | - |
 | `LANGSMITH_PROJECT` | LangSmith 项目名 | `aistock-agent` |
+| `SCHEDULER_ENABLED` | 定时调度开关（关闭后 lifespan 不启动调度器） | `true` |
+| `SCHEDULER_TIMEZONE` | 调度时区 | `Asia/Shanghai` |
+| `SCHEDULER_MORNING_CRON` | 晨报生成 cron（工作日 08:50） | `50 8 * * 1-5` |
+| `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30，规划中） | `30 15 * * 1-5` |
+| `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35，规划中） | `35 15 * * 1-5` |
+| `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40，规划中） | `40 15 * * 1-5` |
 
 ## Vibecoding 工作流
 

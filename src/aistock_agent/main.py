@@ -13,6 +13,7 @@ from aistock_agent.config import settings
 from aistock_agent.observability.logging import get_logger, setup_logging
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.scheduler import shutdown_scheduler, start_scheduler
 
 # 配置 structlog JSON 日志（应用启动前；输出含 timestamp/level/event/request_id）
 setup_logging(settings.log_level)
@@ -44,9 +45,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.error("http_client_pool_init_failed", exc_info=True)
 
+    # 启动定时调度（在连接池初始化之后；异常不崩溃，降级为无调度运行）
+    try:
+        start_scheduler()
+    except Exception:
+        logger.error("scheduler_start_failed", exc_info=True)
+
     yield
 
-    # 关闭：优雅释放（close 幂等，未初始化也安全）
+    # 关闭：优雅释放（先停调度器，再关连接池——晨报任务依赖 Redis 缓存）
+    shutdown_scheduler()
     await RedisPool.close()
     await HttpClientPool.close()
     logger.info("agent_service_stopped")

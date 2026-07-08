@@ -10,8 +10,7 @@ from langgraph.prebuilt import create_react_agent
 from aistock_agent.prompts.workers.stock import STOCK_ANALYST_PROMPT
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.news_tools import search_cls_news
-from aistock_agent.tools.stock_tools import get_capital_flow, get_profit_forecast, get_quote
+from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
 
 logger = structlog.get_logger()
@@ -25,7 +24,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
     try:
         llm = get_deep_think()
-        tools = [get_quote, get_capital_flow, get_profit_forecast, search_cls_news]
+        tools = get_tools("stock")
         agent = create_react_agent(llm, tools)
 
         result = await agent.ainvoke(

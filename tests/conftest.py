@@ -38,10 +38,13 @@ def mock_yfinance():
 def mock_tavily():
     """mock TavilyClient。
 
-    patch 源模块 tavily.TavilyClient，因 market_tools 在函数内
-    ``from tavily import TavilyClient``，模块级 patch 无效。
+    patch services/tavily.py 模块级 ``from tavily import TavilyClient`` 绑定的
+    ``TavilyClient`` 名称。tavily_finance_search 已迁移到 tools/search_tools.py，
+    实际调用委托给 services.tavily.TavilyService.search()，后者在模块级引用
+    TavilyClient，因此必须 patch ``aistock_agent.services.tavily.TavilyClient``
+    而非源模块 ``tavily.TavilyClient``。
     """
-    with patch("tavily.TavilyClient") as mock_cls:
+    with patch("aistock_agent.services.tavily.TavilyClient") as mock_cls:
         yield mock_cls
 
 

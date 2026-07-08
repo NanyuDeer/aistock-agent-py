@@ -87,3 +87,10 @@ def _format_history(data: dict[str, object]) -> str:
             f"共振: {resonance}源  推荐价: {price}"
         )
     return "\n".join(lines)
+
+
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("general", get_hot_burst)
+register("general", get_hot_burst_history)

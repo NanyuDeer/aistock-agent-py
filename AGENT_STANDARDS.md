@@ -177,7 +177,7 @@ return _format_events(data, title=f"【{symbol}】监控事件")
 只有两类工具可在 Python 侧直连第三方，**不走 Node.js**：
 
 1. **yfinance**（境外市场数据，美股/亚太/大宗/汇率）——见 `tools/market_tools.py` 的 `get_global_markets`。
-2. **Tavily**（全网财经新闻搜索）——见 `tools/market_tools.py` 的 `tavily_finance_search`。
+2. **Tavily**（全网财经新闻搜索）——见 `tools/search_tools.py` 的 `tavily_finance_search`（底层调用 `services/tavily.py` 的 `TavilyService`）。
 
 这两类是 Node.js 无对应实现的例外。**A 股数据禁止在 Python 侧重复实现获取逻辑**（项目硬约束）。
 
@@ -198,13 +198,57 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
     return {"tools": [{"name": t.name, "description": t.description} for t in all_tools]}
 ```
 
+### 注册到 Tool Registry（自动注册）
+
+新增 tool 后，在**定义该 tool 的文件底部**调用 `register()` 自注册，**不需要编辑 `registry.py`**：
+
+```python
+# tools/stock_tools.py — 文件底部
+from aistock_agent.tools.registry import register
+
+register("stock", get_quote)           # 主 category
+register("stock", get_capital_flow)
+register("stock", get_profit_forecast)
+register("event", get_quote)           # 跨 category 共享
+register("sector", get_capital_flow)   # 跨 category 共享
+```
+
+`register()` 会在模块加载时自动执行（`tools/__init__.py` 导入所有 tool 模块触发）。
+同一工具可注册到多个 category，重复注册同一 category 会自动去重。
+
+Agent 通过 `get_tools("category")` 获取工具集，不再手动 import + 拼接：
+
+```python
+# agents/workers/stock.py
+from aistock_agent.tools.registry import get_tools
+tools = get_tools("stock")
+agent = create_react_agent(llm, tools)
+```
+
+**注意**：集成测试使用**集合断言**（`set(t.name for t in tools) == EXPECTED_TOOL_NAMES`），
+不依赖工具顺序，多人新增工具不会互相影响。
+
+### 暴露给 `/skills` 接口
+
+`register()` 默认 `expose=True`，工具会自动出现在 `GET /api/agent/skills`：
+
+```python
+# tools/review_tools.py
+register("review", get_market_summary)                  # 前端可见
+register("review", get_sector_performance, expose=False)  # 仅 agent 内部使用
+```
+
+`api/routes.py` 的 `list_skills` 不再手动维护 `all_tools`，直接调用 `get_exposed_skills()`。
+
 ### 绑定到 Agent
 
 Tool 创建后，在对应 worker agent 的 `run()` 中绑定到 `create_react_agent`：
 
 ```python
 # agents/workers/stock.py
-tools = [get_quote, get_capital_flow, get_profit_forecast, search_cls_news]
+from aistock_agent.tools.registry import get_tools
+
+tools = get_tools("stock")
 agent = create_react_agent(llm, tools)
 ```
 
@@ -740,7 +784,7 @@ Graph 集成）、`tests/e2e/`（HTTP 端到端）。测试不依赖真实网络
   或 `unittest.mock.MagicMock` mock `get_quick_think` / `get_deep_think`。
 - **不依赖真实 Redis**：mock `services.cache.RedisPool`（`tests/conftest.py:mock_redis`）。
 - **不依赖真实 Node.js**：mock `node_api.get` / `node_api.get_list`。
-- **不依赖真实 yfinance / Tavily**：mock `tools.market_tools.yf` / `tavily.TavilyClient`。
+- **不依赖真实 yfinance / Tavily**：mock `tools.market_tools.yf` / `aistock_agent.services.tavily.TavilyClient`。
 
 ### Tool 单元测试模式
 
@@ -813,7 +857,7 @@ Redis 缓存命中。
 
 - `mock_node_api`：patch `NodeApiClient`，返回预设数据。
 - `mock_yfinance`：patch `tools.market_tools.yf`。
-- `mock_tavily`：patch `tavily.TavilyClient`（函数内 import，patch 源模块）。
+- `mock_tavily`：patch `aistock_agent.services.tavily.TavilyClient`（TavilyService 模块级 import，patch 服务层）。
 - `mock_redis`：patch `services.cache.RedisPool`，注入 mock client。
 
 ### 异步测试配置
@@ -1170,7 +1214,9 @@ aistock-agent-py/
         │   ├── stock_tools.py        # get_quote, get_capital_flow, get_profit_forecast
         │   ├── sector_tools.py       # get_leader_stocks, get_wind_leaders
         │   ├── news_tools.py         # search_cls_news, get_news_fulltext, get_cls_news
-        │   ├── market_tools.py       # get_global_markets(yfinance), tavily_finance_search
+        │   ├── market_tools.py       # get_global_markets（yfinance 境外行情）
+        │   ├── search_tools.py       # tavily_finance_search（Tavily 全网搜索，调 services/tavily.py）
+        │   ├── registry.py           # 工具注册中心（get_tools / get_all_tools）
         │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history
         │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks
         │   ├── graph_tools.py        # get_concepts, get_graph_by_concept
@@ -1186,7 +1232,9 @@ aistock-agent-py/
         │   ├── data_client.py        # NodeApiClient（node_api 单例）
         │   ├── redis_pool.py         # Redis 连接池单例（lifespan 管理）
         │   ├── http_client.py        # httpx AsyncClient 单例（lifespan 管理）
-        │   └── cache.py              # 晨报缓存（基于 RedisPool）
+        │   ├── cache.py              # 晨报缓存（基于 RedisPool）
+        │   ├── tavily.py             # Tavily 客户端封装（TavilyService.search）
+        │   └── scheduler.py          # APScheduler 定时调度（08:50晨报/15:30复盘/15:35快照/15:40迭代）
         │
         ├── observability/            # 可观测性（零侵入业务）
         │   ├── logging.py            # structlog JSON 日志（setup_logging / get_logger）
