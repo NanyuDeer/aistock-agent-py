@@ -68,10 +68,10 @@ tests/
 
 ```
 src/aistock_agent/
-├── tools/registry.py              # 新增 "review" category
+├── tools/registry.py              # 无需改动（自动注册机制）
 ├── services/cache.py              # 新增 get_cached_review / set_cached_review
 ├── services/scheduler.py          # 接入 _run_review_task / _run_snapshot_task / _run_iterate_task
-├── api/routes.py                  # /skills 注册新工具
+├── api/routes.py                  # 无需改动（/skills 自动获取暴露工具）
 └── constants.py                   # 无需改动（review/iterate 不走 supervisor 路由）
 
 docs/agent-outputs/
@@ -85,17 +85,16 @@ AGENT_STANDARDS.md                  # 复盘/迭代 agent 模式 + 快照生成�
 
 ---
 
-## Task 1: 复盘工具 + Registry 更新
+## Task 1: 复盘工具 + Registry 自注册
 
 **Files:**
 - Create: `src/aistock_agent/tools/review_tools.py`
-- Modify: `src/aistock_agent/tools/registry.py`
-- Modify: `src/aistock_agent/api/routes.py`（list_skills 注册新工具）
+- Modify: `src/aistock_agent/tools/__init__.py`（导入 review_tools 触发自注册）
 - Test: `tests/unit/test_review_tools.py`
 
 **Interfaces:**
 - Consumes: `node_api.get`（Node.js `/internal/wind-leaders`），yfinance A股指数 Tickers
-- Produces: `get_market_summary() -> str`，`get_sector_performance() -> str`，registry `"review"` category（通过 `register()` 自注册）
+- Produces: `get_market_summary() -> str`，`get_sector_performance() -> str`，registry `"review"` category（通过 `register()` 自注册，无需编辑 registry.py）
 
 **设计决策：**
 - `get_market_summary`：用 yfinance 获取 A 股主要指数（上证综指 `000001.SS`、深证成指 `399001.SZ`、创业板指 `399006.SZ`、科创50 `000688.SS`）。yfinance 支持 `.SS`/`.SZ` 后缀获取 A 股数据，无需新增 Node.js 端点。
@@ -286,7 +285,7 @@ async def test_get_sector_performance_empty(mock_node_api):
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/test_review_tools.py -v`
 Expected: PASS (4 tests)
 
-- [ ] **Step 6: Update registry.py — add "review" category**
+- [ ] **Step 6: Add self-registration to review_tools.py**
 
 In `src/aistock_agent/tools/review_tools.py`, at the bottom of the file, add self-registration:
 ```python
@@ -302,26 +301,33 @@ register("review", get_sector_performance)
 
 Note: `tavily_finance_search`, `get_global_markets`, `get_cls_news` are already registered to their own categories by their respective modules. Re-registering them to "review" is expected — `register()` handles cross-category sharing automatically.
 
-- [ ] **Step 7: Update routes.py — register new tools in /skills**
+**重要**：`register()` 默认 `expose=True`，新增工具会自动出现在 `GET /api/agent/skills`。
+如需隐藏（仅 agent 内部使用），加 `expose=False`：`register("review", some_tool, expose=False)`。
+**不需要编辑 `registry.py` 或 `routes.py`**。
 
-Modify `src/aistock_agent/api/routes.py` `list_skills` function:
+- [ ] **Step 7: Add review_tools to __init__.py**
 
-Add import: `from aistock_agent.tools.review_tools import get_market_summary, get_sector_performance`
+Modify `src/aistock_agent/tools/__init__.py`, add `review_tools` to the import list:
 
-Add to `all_tools` list:
 ```python
-        # review_tools
-        get_market_summary, get_sector_performance,
+from aistock_agent.tools import (  # noqa: F401
+    market_tools,
+    news_tools,
+    review_tools,
+    search_tools,
+    sector_tools,
+    stock_tools,
+)
 ```
 
 - [ ] **Step 8: Run registry + existing tests to verify no regression**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/test_registry.py tests/unit/test_review_tools.py -v`
-Expected: PASS (9 registry + 4 review_tools = 13 tests)
+Expected: PASS (11 registry + 4 review_tools = 15 tests)
 
 - [ ] **Step 9: Lint check**
 
-Run: `.venv\Scripts\python.exe -m ruff check src/aistock_agent/tools/review_tools.py src/aistock_agent/tools/registry.py src/aistock_agent/api/routes.py`
+Run: `.venv\Scripts\python.exe -m ruff check src/aistock_agent/tools/review_tools.py src/aistock_agent/tools/__init__.py`
 Expected: All checks passed
 
 Run: `.venv\Scripts\python.exe -m mypy src/aistock_agent/tools/review_tools.py`
@@ -330,7 +336,7 @@ Expected: Success, no issues
 - [ ] **Step 10: Commit**
 
 ```powershell
-git add src/aistock_agent/tools/review_tools.py src/aistock_agent/tools/registry.py src/aistock_agent/api/routes.py tests/unit/test_review_tools.py
+git add src/aistock_agent/tools/review_tools.py src/aistock_agent/tools/__init__.py tests/unit/test_review_tools.py
 git commit -m "feat: add review tools (get_market_summary + get_sector_performance) and register in registry"
 ```
 
