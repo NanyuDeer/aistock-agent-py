@@ -71,6 +71,57 @@ async def test_get_alert_history_success():
 
 
 @pytest.mark.asyncio
+async def test_get_alert_history_symbol_filtering():
+    """get_alert_history 传入 symbol 时客户端过滤只返回对应股票的事件
+
+    覆盖 stock_code / symbol 两种字段匹配，确保过滤分支被实际执行。
+    """
+    mock_data = {
+        "total": 3,
+        "events": [
+            {
+                "event_id": "stock_info:300750-1",
+                "stock_code": "300750",
+                "stock_name": "宁德时代",
+                "change_type_name": "新闻研判",
+                "level": "重大利好",
+                "title": "宁德时代发布固态电池突破",
+                "event_time": "2026-07-08 10:00",
+            },
+            {
+                "event_id": "stock_info:600519-1",
+                "stock_code": "600519",
+                "stock_name": "贵州茅台",
+                "change_type_name": "公告研判",
+                "level": "利好",
+                "title": "贵州茅台发布2026年半年报",
+                "event_time": "2026-07-08 08:30",
+            },
+            {
+                "event_id": "stock_info:300750-2",
+                "symbol": "300750",
+                "stock_name": "宁德时代",
+                "change_type_name": "异动研判",
+                "level": "关注",
+                "title": "宁德时代股价异动",
+                "event_time": "2026-07-08 11:00",
+            },
+        ],
+    }
+    with patch("aistock_agent.tools.monitor_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value=mock_data)
+        result = await get_alert_history.ainvoke({"symbol": "300750", "days": 7})
+        # 只包含 300750 的事件，不包含 600519
+        assert "宁德时代" in result
+        assert "固态电池" in result
+        assert "股价异动" in result
+        assert "贵州茅台" not in result
+        assert "半年报" not in result
+        # symbol 仅用于客户端过滤，不透传给 Node.js；days 透传
+        mock_api.get.assert_called_once_with("/internal/monitor/alerts?days=7")
+
+
+@pytest.mark.asyncio
 async def test_alert_history_degradation():
     """get_alert_history 异常时返回降级文本"""
     with patch("aistock_agent.tools.monitor_tools.node_api") as mock_api:
