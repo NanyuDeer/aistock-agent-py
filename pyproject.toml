@@ -27,6 +27,9 @@ dependencies = [
     "pydantic-settings==2.8.1",
     "python-dotenv==1.1.0",
     "structlog==25.3.0",
+
+    # 定时调度
+    "apscheduler==3.10.4",      # AsyncIOScheduler — 交易日定时任务（晨报/复盘/快照/迭代）
 ]
 
 [project.optional-dependencies]
