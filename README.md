@@ -136,7 +136,8 @@ src/aistock_agent/
 │   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
 └── api/
     ├── routes.py        # REST 接口 + 健康检查（/health、/health/ready）
-    └── ws.py            # WebSocket 流式接口
+    ├── ws.py            # WebSocket 流式接口
+    └── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）
 ```
 
 ### 输出归档
@@ -232,6 +233,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
+| `CORS_ORIGINS` | CORS 允许的源列表（逗号分隔或 JSON 数组） | `*` |
 | `HEALTH_CHECK_LLM` | `/health/ready` 是否探测 LLM 连通性（默认跳过避免消耗 token） | `false` |
 | `LOG_LEVEL` | structlog 日志级别（DEBUG/INFO/WARNING/ERROR） | `INFO` |
 | `LANGSMITH_ENABLED` | LangSmith 追踪开关 | `false` |

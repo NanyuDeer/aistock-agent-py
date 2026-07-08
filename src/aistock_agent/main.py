@@ -4,8 +4,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
+from aistock_agent.api.middleware import setup_middleware
 from aistock_agent.api.routes import health_router
 from aistock_agent.api.routes import router as api_router
 from aistock_agent.api.ws import router as ws_router
@@ -59,13 +59,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS（Node.js 反代时需要）
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 注册中间件：request_id（最外层）→ access_log → CORS（最内层）
+setup_middleware(app)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/agent", tags=["agent"])

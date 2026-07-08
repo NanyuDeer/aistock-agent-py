@@ -1,8 +1,11 @@
 """应用配置 — pydantic-settings 读取环境变量"""
 
+import json
 import random
+from typing import Annotated
 
-from pydantic_settings import BaseSettings
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
@@ -43,6 +46,11 @@ class Settings(BaseSettings):
     # 内网鉴权
     internal_api_token: str = "change-me-in-production"
 
+    # CORS 允许的源列表（api/middleware.py setup_middleware 读取）
+    # 支持逗号分隔（CORS_ORIGINS=http://a,http://b）或 JSON 数组格式（CORS_ORIGINS=["a","b"]）
+    # NoDecode 阻止 pydantic-settings 预先 JSON 解析，交给 _parse_cors_origins 统一处理
+    cors_origins: Annotated[list[str], NoDecode] = ["*"]
+
     # 健康检查：是否在 /health/ready 中探测 LLM 连通性。
     # 默认关闭——避免 readiness 探针每次消耗 token；需探测时设 HEALTH_CHECK_LLM=true。
     health_check_llm: bool = False
@@ -60,6 +68,27 @@ class Settings(BaseSettings):
     sqlite_path: str = ".langgraph.db"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: object) -> object:
+        """支持逗号分隔和 JSON 数组两种环境变量格式。
+
+        NoDecode 阻止 pydantic-settings 预先 JSON 解析，原始字符串传入此
+        before-validator。此处先尝试 JSON 解析（处理 ["a","b"] 格式），
+        失败则按逗号分割（处理 http://a,http://b 格式）。
+        """
+        if isinstance(v, str):
+            # 先尝试 JSON 数组格式（CORS_ORIGINS=["http://a","http://b"]）
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+            # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
 
     def get_tavily_key(self) -> str:
         """从 API 池中随机选取一个可用的 Tavily Key。

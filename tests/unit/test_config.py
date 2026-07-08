@@ -9,10 +9,7 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from aistock_agent.config import Settings
-
 
 # =============================================================================
 # 默认值测试
@@ -62,6 +59,11 @@ class TestConfigDefaults:
         """node_api_base_url 已存在，验证默认值不变"""
         s = Settings()
         assert s.node_api_base_url == "http://localhost:3000"
+
+    def test_cors_origins_default(self):
+        """cors_origins 默认值为 ["*"]（允许所有源）"""
+        s = Settings()
+        assert s.cors_origins == ["*"]
 
     def test_log_level_exists(self):
         """log_level 已存在，验证可访问；默认值必须为大写 INFO。
@@ -118,6 +120,24 @@ class TestConfigEnvOverride:
     def test_langsmith_project_override(self, monkeypatch):
         monkeypatch.setenv("LANGSMITH_PROJECT", "my-project")
         assert Settings().langsmith_project == "my-project"
+
+    def test_cors_origins_override_comma_separated(self, monkeypatch):
+        """逗号分隔格式：CORS_ORIGINS=http://a,http://b → ["http://a", "http://b"]"""
+        monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173")
+        assert Settings().cors_origins == [
+            "http://localhost:3000",
+            "http://localhost:5173",
+        ]
+
+    def test_cors_origins_override_json_array(self, monkeypatch):
+        """JSON 数组格式：CORS_ORIGINS=["http://a"] → ["http://a"]"""
+        monkeypatch.setenv("CORS_ORIGINS", '["http://localhost:3000"]')
+        assert Settings().cors_origins == ["http://localhost:3000"]
+
+    def test_cors_origins_override_single_value(self, monkeypatch):
+        """单个值（无逗号）：CORS_ORIGINS=http://a → ["http://a"]"""
+        monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
+        assert Settings().cors_origins == ["http://localhost:3000"]
 
 
 # =============================================================================
