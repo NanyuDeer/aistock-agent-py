@@ -2,6 +2,49 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-08 — SDD 基础设施：Tavily 拆分 + Tool Registry + APScheduler 定时调度
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/services/tavily.py`：Tavily 客户端封装层（TavilyService.search），从 market_tools 抽出，支持多 key 轮换
+- `src/aistock_agent/tools/search_tools.py`：`tavily_finance_search` 从 market_tools 迁移，底层委托 TavilyService
+- `src/aistock_agent/tools/registry.py`：Tool Registry 工具注册中心，按 category 分组（morning/stock/sector/event/iterate），支持 `get_tools("category")` / `get_tools()` 全量 / 直接 import 三种模式
+- `src/aistock_agent/services/scheduler.py`：APScheduler AsyncIOScheduler 定时调度，4 个交易日任务（08:50 晨报 / 15:30 复盘 / 15:35 快照 / 15:40 迭代），非交易日自动跳过
+- `tests/unit/test_tavily_service.py`：3 个 mock 测试
+- `tests/unit/test_search_tools.py`：3 个测试（成功/空结果/异常）
+- `tests/unit/test_registry.py`：9 个测试（category/去重/引用一致性/事件工具集）
+- `tests/unit/test_scheduler.py`：4 个测试（单例/job 注册/非交易日跳过/交易日执行）
+- `docs/superpowers/specs/2026-07-08-review-iterate-agent-design.md`：复盘/迭代 agent 设计规范
+- `docs/superpowers/plans/2026-07-08-infra-tavily-registry-scheduler.md`：基础设施实现计划
+
+### 重构
+- `src/aistock_agent/tools/market_tools.py`：移除 `tavily_finance_search`，回归纯 yfinance 行情职责
+- `src/aistock_agent/agents/workers/morning.py`：工具列表改为 `get_tools("morning")`
+- `src/aistock_agent/agents/workers/stock.py`：工具列表改为 `get_tools("stock")`
+- `src/aistock_agent/agents/workers/sector.py`：工具列表改为 `get_tools("sector")`
+- `src/aistock_agent/agents/workers/event.py`：工具列表改为 `get_tools("event")`
+
+### 改进
+- `src/aistock_agent/main.py`：lifespan 集成 start_scheduler/shutdown_scheduler
+- `src/aistock_agent/config.py`：新增 6 个调度配置项（scheduler_enabled + 4 cron + timezone）
+- `src/aistock_agent/api/routes.py`：list_skills import 排序修正
+- `pyproject.toml`：dependencies 新增 apscheduler==3.10.4
+- `README.md`：Mermaid 拓扑图、工具注册中心、调度器章节、环境变量表更新
+- `AGENT_STANDARDS.md`：Tavily 归属更新、Tool Registry 注册规范、mock 路径更新、目录结构更新、类型注解同步
+
+### 修复
+- `ruff I001`：routes.py list_skills 函数内 import 排序（monitor → news → search）
+- `mypy type-arg`：registry.py 4 处 bare `list` → `list[BaseTool]`
+- `mypy attr-defined`：search_tools.py `result["results"]` cast 为 `list[dict[str, str]]`
+- `mypy import-untyped`：scheduler.py apscheduler 2 处 import 加 `# type: ignore`
+
+### 验证
+- `ruff check src/`：All checks passed
+- `mypy src/`：Success, no issues in 74 source files
+- `pytest tests/`：293 passed in 3.68s
+
+---
+
 ## [changer] 2026-07-08 — Task 5 review fix: X-Request-ID on 500 responses + OPTIONS assertion
 **开发者**: 37588
 
