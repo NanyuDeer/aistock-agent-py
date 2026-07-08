@@ -3,7 +3,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -11,21 +10,14 @@ from aistock_agent.api.routes import health_router
 from aistock_agent.api.routes import router as api_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
+from aistock_agent.observability.logging import get_logger, setup_logging
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
 
-structlog.configure(
-    processors=[
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
-        structlog.processors.StackInfoRenderer(),
-        structlog.dev.set_exc_info,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.dev.ConsoleRenderer(),
-    ],
-)
+# 配置 structlog JSON 日志（应用启动前；输出含 timestamp/level/event/request_id）
+setup_logging(settings.log_level)
 
-logger = structlog.get_logger()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager

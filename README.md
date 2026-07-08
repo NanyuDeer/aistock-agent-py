@@ -125,9 +125,17 @@ src/aistock_agent/
 │   ├── routing.py            # 路由分类提示词
 │   └── system.py             # 通用系统提示词
 ├── services/
-│   └── data_client.py   # httpx → Node.js /internal/* API
+│   ├── data_client.py   # httpx → Node.js /internal/* API
+│   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
+│   ├── http_client.py   # httpx AsyncClient 连接池单例
+│   ├── cache.py         # 晨报缓存服务（基于 RedisPool）
+│   └── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
+├── observability/
+│   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
+│   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
+│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
 └── api/
-    ├── routes.py        # REST 接口
+    ├── routes.py        # REST 接口 + 健康检查（/health、/health/ready）
     └── ws.py            # WebSocket 流式接口
 ```
 
@@ -193,6 +201,13 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 - 晨报结果缓存 Redis TTL=2小时
 - 缓存 key 格式：`briefing:morning:YYYY-MM-DD`
 
+### 可观测性
+- 日志：`observability.logging.setup_logging()` 在应用启动前配置 structlog JSON 输出（timestamp/level/event，支持 contextvars request_id）
+- 指标：`MetricsCollector` 线程安全计数器，通过 `get_metrics()` 获取 token 用量、调用次数、错误率
+- 回调：`TokenUsageCallback` / `AgentTraceCallback` 挂载在 ChatOpenAI 实例上，自动统计 token 和追踪 agent 步骤
+- LangSmith：`LANGSMITH_ENABLED=true` 时自动启用 LangChain 追踪（默认关闭，仅调试用）
+- **硬约束**：可观测性通过 callback/middleware 解耦，agent 节点和工具函数零侵入（禁止在业务逻辑中直接调用 structlog）
+
 ### 关键约束
 - 禁止在 Python 重复实现 A 股数据获取逻辑
 - LLM 调用失败时返回降级文本，不重试
@@ -218,6 +233,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
 | `HEALTH_CHECK_LLM` | `/health/ready` 是否探测 LLM 连通性（默认跳过避免消耗 token） | `false` |
+| `LOG_LEVEL` | structlog 日志级别（DEBUG/INFO/WARNING/ERROR） | `INFO` |
 | `LANGSMITH_ENABLED` | LangSmith 追踪开关 | `false` |
 | `LANGSMITH_API_KEY` | LangSmith API 密钥 | - |
 | `LANGSMITH_PROJECT` | LangSmith 项目名 | `aistock-agent` |

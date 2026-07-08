@@ -3,6 +3,7 @@
 图拓扑层：只管骨架，不含节点实现逻辑。
 """
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -64,6 +65,7 @@ def build_graph() -> StateGraph:
 
 def compile_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> CompiledStateGraph:
     """编译图（可直接调用 invoke / stream）。
 
@@ -72,9 +74,18 @@ def compile_graph(
             - 不传（默认）：挂载 ``get_checkpointer()``，启用多轮对话恢复。
             - 传 ``None``：显式跳过 checkpointer（无多轮恢复）。
             - 传 saver 实例：使用该 saver。
+        callbacks: 可选的 LangChain 回调 handler 列表，绑定到编译后的图，
+            用于图级可观测性（on_chain_start/end 等）。LLM/工具级回调已在
+            ``services/llm.py`` 挂载到 ChatOpenAI 实例，无需在此重复传入；
+            此参数供需要图级追踪的调用方按需使用。
 
     build_graph() 保持纯拓扑、不挂载 checkpointer；只有 compile_graph() 挂载。
     """
     if isinstance(checkpointer, _Default):
         checkpointer = get_checkpointer()
-    return build_graph().compile(checkpointer=checkpointer)
+    compiled = build_graph().compile(checkpointer=checkpointer)
+    if callbacks:
+        # LangGraph compile() 不支持 callbacks 参数；通过 with_config 绑定图级回调。
+        # 返回 RunnableBinding，运行时兼容 ainvoke/astream/astream_events。
+        return compiled.with_config(callbacks=callbacks)
+    return compiled

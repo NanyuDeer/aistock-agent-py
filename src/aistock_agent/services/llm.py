@@ -3,12 +3,43 @@
 根据用途选择不同模型：
 - quick_think：意图分类/路由，低延迟低成本
 - deep_think：深度分析/晨报/事件，推理质量优先
+
+可观测性：通过 ``callbacks=`` 挂载 TokenUsageCallback / AgentTraceCallback，
+不侵入业务逻辑（agent 节点 / 工具函数不感知回调存在）；
+若开启 ``langsmith_enabled`` 则设置 LangChain 追踪环境变量。
 """
 
+import os
+
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from aistock_agent.config import settings
+from aistock_agent.observability.callback import get_default_callbacks
+
+
+def _setup_langsmith_tracing() -> None:
+    """若启用 LangSmith，设置 LangChain 追踪环境变量。
+
+    LangChain 在回调管理器初始化时读取这些环境变量，自动注入 LangChainTracer。
+    幂等：使用 setdefault，不覆盖已有值。默认关闭（langsmith_enabled=False），
+    仅在需要调试/追踪时通过环境变量开启。
+    """
+    if not settings.langsmith_enabled or not settings.langsmith_api_key:
+        return
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGCHAIN_API_KEY", settings.langsmith_api_key)
+    os.environ.setdefault("LANGCHAIN_PROJECT", settings.langsmith_project)
+
+
+# 模块加载时一次性配置 LangSmith（幂等，默认 no-op）
+_setup_langsmith_tracing()
+
+
+def _get_observability_callbacks() -> list[BaseCallbackHandler]:
+    """返回可观测性回调列表（token 用量统计 + agent 追踪）。"""
+    return get_default_callbacks()
 
 
 def get_quick_think() -> ChatOpenAI:
@@ -20,6 +51,8 @@ def get_quick_think() -> ChatOpenAI:
         temperature=settings.quick_think_temperature,
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
+        # 可观测性回调：token 用量统计 + agent 追踪（不侵入业务逻辑）
+        callbacks=_get_observability_callbacks(),
     )
 
 
@@ -32,4 +65,5 @@ def get_deep_think() -> ChatOpenAI:
         temperature=settings.deep_think_temperature,
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]
+        callbacks=_get_observability_callbacks(),
     )
