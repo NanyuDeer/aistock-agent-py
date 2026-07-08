@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # 服务（Python 8000 / Node.js 3000）
     host: str = "0.0.0.0"
     port: int = 8000
-    log_level: str = "info"
+    log_level: str = "INFO"
 
     # 内网鉴权
     internal_api_token: str = "change-me-in-production"

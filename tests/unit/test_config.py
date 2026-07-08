@@ -64,9 +64,15 @@ class TestConfigDefaults:
         assert s.node_api_base_url == "http://localhost:3000"
 
     def test_log_level_exists(self):
-        """log_level 已存在，验证可访问"""
+        """log_level 已存在，验证可访问；默认值必须为大写 INFO。
+
+        Python 的 logging.basicConfig(level=...) 对级别名大小写敏感，
+        小写 "info" 会导致级别解析失败（logging.getLevelName("info") 返回字符串而非整数）。
+        Task 4 的 structlog 配置也期望大写级别名，故默认值必须为 "INFO"。
+        """
         s = Settings()
         assert isinstance(s.log_level, str)
+        assert s.log_level == "INFO"
 
 
 # =============================================================================
