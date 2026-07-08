@@ -204,7 +204,9 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
 
 ```python
 # tools/registry.py
-TOOL_REGISTRY: dict[str, list] = {
+from langchain_core.tools import BaseTool
+
+TOOL_REGISTRY: dict[str, list[BaseTool]] = {
     "morning": [tavily_finance_search, get_global_markets, get_cls_news],
     "stock": [get_quote, get_capital_flow, get_profit_forecast, search_cls_news],
     "sector": [get_leader_stocks, get_capital_flow],
