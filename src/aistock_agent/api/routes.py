@@ -1,19 +1,27 @@
-"""REST 接口 — 对话消息、晨报、工具列表"""
+"""REST 接口 — 对话消息、晨报、工具列表、健康检查"""
 
 import json
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends
+import structlog
+from fastapi import APIRouter, Depends, Response
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.api.deps import build_initial_state, verify_internal_token
+from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 router = APIRouter()
+
+# 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
+health_router = APIRouter(tags=["health"])
+_health_logger = structlog.get_logger()
 
 
 @router.post("/chat/message", response_model=ChatResponse)
@@ -152,3 +160,70 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
             for t in all_tools
         ]
     }
+
+
+# ── 健康检查 ──────────────────────────────────────────────────────
+
+
+@health_router.get("/health")
+async def liveness() -> dict[str, str]:
+    """Liveness probe — 进程存活即返回 200（K8s livenessProbe 用）。
+
+    不检查任何依赖：liveness 只回答"进程是否活着"，依赖连通性由
+    ``/health/ready``（readinessProbe）负责。这样依赖抖动不会导致
+    K8s 重启一个本来健康的进程。
+    """
+    return {"status": "ok"}
+
+
+@health_router.get("/health/ready")
+async def readiness(response: Response) -> dict[str, object]:
+    """Readiness probe — 检查 Redis / Node.js API / LLM 连通性。
+
+    - redis：``RedisPool.get_client().ping()``
+    - node_api：``HttpClientPool.get_client().get("{node_api_base_url}/internal/health")``
+    - llm：可选，env ``HEALTH_CHECK_LLM=true`` 时才探测（默认跳过，避免每次探针消耗 token）
+
+    任一启用的检查失败 → 503 + ``status=degraded``；全部 ok → 200 + ``status=ok``。
+    "skipped" 的检查项不计入失败（LLM 默认 skipped）。
+    """
+    checks: dict[str, str] = {}
+
+    # Redis
+    try:
+        redis_client = await RedisPool.get_client()
+        await redis_client.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        _health_logger.warning("health_check_redis_failed", error=str(e))
+        checks["redis"] = f"error: {e}"
+
+    # Node.js API
+    try:
+        http_client = await HttpClientPool.get_client()
+        resp = await http_client.get(f"{settings.node_api_base_url}/internal/health")
+        resp.raise_for_status()
+        checks["node_api"] = "ok"
+    except Exception as e:
+        _health_logger.warning("health_check_node_api_failed", error=str(e))
+        checks["node_api"] = f"error: {e}"
+
+    # LLM（可选，默认跳过——避免 readiness 探针频繁消耗 token）
+    if settings.health_check_llm:
+        try:
+            # 惰性导入：未启用时不加载 langchain_openai，保持 /health/ready 轻量
+            from aistock_agent.services.llm import get_quick_think
+            await get_quick_think().ainvoke("ping")
+            checks["llm"] = "ok"
+        except Exception as e:
+            _health_logger.warning("health_check_llm_failed", error=str(e))
+            checks["llm"] = f"error: {e}"
+    else:
+        checks["llm"] = "skipped"
+
+    # "skipped" 不算失败，只有非 ok/非 skipped 的检查项才判定 degraded
+    degraded = any(v not in ("ok", "skipped") for v in checks.values())
+    if degraded:
+        response.status_code = 503
+        return {"status": "degraded", "checks": checks}
+    return {"status": "ok", "checks": checks}

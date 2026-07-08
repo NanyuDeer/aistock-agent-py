@@ -143,7 +143,8 @@ src/aistock_agent/
 | POST | `/api/agent/chat/message` | 对话消息（非流式） |
 | GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，支持 Redis 缓存） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
-| GET | `/health` | 健康检查 |
+| GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
+| GET | `/health/ready` | Readiness 健康检查（检查 Redis/Node.js/LLM 连通性，失败返回 503 + degraded） |
 
 Node.js 侧将 `/api/agent/*` 的请求反代到 Python 服务对应路径。
 
@@ -216,6 +217,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
+| `HEALTH_CHECK_LLM` | `/health/ready` 是否探测 LLM 连通性（默认跳过避免消耗 token） | `false` |
 | `LANGSMITH_ENABLED` | LangSmith 追踪开关 | `false` |
 | `LANGSMITH_API_KEY` | LangSmith API 密钥 | - |
 | `LANGSMITH_PROJECT` | LangSmith 项目名 | `aistock-agent` |

@@ -7,6 +7,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from aistock_agent.api.routes import health_router
 from aistock_agent.api.routes import router as api_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
@@ -77,9 +78,5 @@ app.add_middleware(
 # 注册路由
 app.include_router(api_router, prefix="/api/agent", tags=["agent"])
 app.include_router(ws_router, prefix="/api/agent", tags=["websocket"])
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    """健康检查"""
-    return {"status": "ok", "service": "aistock-agent"}
+# 健康检查挂载到根路径：/health（liveness）、/health/ready（readiness）
+app.include_router(health_router)
