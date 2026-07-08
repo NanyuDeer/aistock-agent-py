@@ -371,6 +371,550 @@
 
 ---
 
+## Task 11: Tavily 搜索工具拆分（market_tools → search_tools + services/tavily）
+
+**目标:** 将 `tavily_finance_search` 从 `market_tools.py` 拆出，形成"客户端封装（services/tavily.py）+ 工具层（tools/search_tools.py）"两层结构。`market_tools.py` 回归纯 yfinance 行情职责。解决 `event.py` 依赖"市场工具"拿搜索功能的语义错位，为后续扩展通用搜索（`web_search`）铺路。
+
+**背景:** 当前 `market_tools.py` 同时承载 yfinance 行情查询（结构化数值）和 Tavily 全网搜索（非结构化文本），职责混杂。晨报 agent 和事件 agent 都要 `from ...market_tools import tavily_finance_search` 来获取搜索能力，命名与语义不一致。Phase 4 重构计划已规划 `services/tavily.py`，本 Task 完成客户端抽取 + 工具函数迁移。
+
+**Files:**
+- Create: `src/aistock_agent/services/tavily.py`
+  - `class TavilyService`：静态方法封装 TavilyClient，Key 轮换逻辑从 config 复用
+  - `@staticmethod def search(query, *, topic="news", max_results=5) -> dict`：统一搜索入口
+- Create: `src/aistock_agent/tools/search_tools.py`
+  - `tavily_finance_search(query: str) -> str`：从 `market_tools.py` 迁移，改调 `TavilyService.search`
+- Modify: `src/aistock_agent/tools/market_tools.py`
+  - 移除 `tavily_finance_search` 函数（第 63-86 行）
+  - 更新文件 docstring：去掉"+ Tavily 全网搜索"
+- Modify: `src/aistock_agent/agents/workers/morning.py`（第 21 行 import 改从 `search_tools`，第 48/104 行已引用变量名不变）
+- Modify: `src/aistock_agent/agents/workers/event.py`（第 13 行 import 改从 `search_tools`）
+- Modify: `src/aistock_agent/api/routes.py`（第 137/146 行 import 和引用改从 `search_tools`）
+- Create: `tests/unit/test_search_tools.py`（迁移 tavily 相关测试）
+- Modify: `tests/unit/test_market_tools.py`（移除 tavily 测试，只保留 yfinance 测试）
+- Modify: `tests/conftest.py`（`mock_tavily` fixture 注释更新）
+- Modify: `tests/integration/test_morning_agent.py`（第 160 行 import 改从 `search_tools`）
+- Modify: `tests/integration/test_event_agent.py`（第 17 行 import 改从 `search_tools`）
+- Modify: `README.md`（第 118 行目录树更新）
+- Modify: `AGENTS.md`（第 138/146 行目录树更新）
+
+**Interfaces:**
+- Consumes: `config.settings.get_tavily_key()`（已有，Key 轮换逻辑不变）
+- Consumes: `tools.base.safe_tool_call`（已有装饰器）
+- Produces: `services.tavily.TavilyService.search(query, *, topic, max_results) -> dict`
+- Produces: `tools.search_tools.tavily_finance_search`（`@tool` 函数，签名不变）
+
+**依赖:** Phase 4 完成（`services/` 目录结构就绪）；与 Task 7（新增 9 个 tools）无冲突，可并行
+
+---
+
+### Task 11 详细执行步骤
+
+#### 11.1 创建 services/tavily.py（客户端封装层）
+
+- [ ] **Step 1: 写失败测试 — TavilyService.search 正常返回**
+
+```python
+# tests/unit/test_search_tools.py（新建文件，先写 services 测试部分）
+
+"""search_tools + tavily service 测试 — mock TavilyClient"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_tavily_service_search_success():
+    """TavilyService.search 正常调用 TavilyClient 并返回 dict"""
+    from aistock_agent.services.tavily import TavilyService
+
+    mock_instance = MagicMock()
+    mock_instance.search.return_value = {
+        "results": [
+            {"title": "美联储维持利率不变", "content": "美联储决定...", "url": "https://example.com/1"},
+        ]
+    }
+
+    with patch("tavily.TavilyClient", return_value=mock_instance) as mock_cls:
+        result = TavilyService.search(query="美联储利率决议", topic="news", max_results=5)
+
+        assert result["results"][0]["title"] == "美联储维持利率不变"
+        mock_cls.assert_called_once()
+        mock_instance.search.assert_called_once_with(
+            query="美联储利率决议", topic="news", max_results=5
+        )
+```
+
+- [ ] **Step 2: 运行测试验证失败**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_search_tools.py::test_tavily_service_search_success -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'aistock_agent.services.tavily'`
+
+- [ ] **Step 3: 实现 services/tavily.py**
+
+```python
+"""Tavily 客户端封装 — Key 轮换 + 统一搜索入口
+
+将 Tavily SDK 的实例化 + Key 轮换逻辑集中在此，
+tools 层只负责 @tool 装饰和结果格式化，不直接接触 SDK。
+"""
+
+from tavily import TavilyClient  # type: ignore[import-untyped]
+
+from aistock_agent.config import settings
+
+
+class TavilyService:
+    """Tavily 搜索服务封装。
+
+    无状态静态方法设计，每次 search 调用时：
+    1. 从 settings.get_tavily_key() 随机选取一个 Key（多 Key 轮换池）
+    2. 实例化 TavilyClient
+    3. 执行 search 并返回原始 dict
+
+    选择无状态而非单例：TavilyClient 本身是轻量 HTTP 客户端，
+    每次 new 的开销可忽略，且避免了多 Key 轮换时单例缓存 Key 的问题。
+    """
+
+    @staticmethod
+    def search(
+        query: str,
+        *,
+        topic: str = "news",
+        max_results: int = 5,
+    ) -> dict:
+        """执行 Tavily 搜索。
+
+        Args:
+            query: 搜索关键词
+            topic: 搜索主题，默认 "news"（财经新闻）
+            max_results: 最大返回条数，默认 5
+
+        Returns:
+            Tavily API 原始返回 dict，含 "results" 列表
+        """
+        client = TavilyClient(api_key=settings.get_tavily_key())
+        return client.search(query=query, topic=topic, max_results=max_results)
+```
+
+- [ ] **Step 4: 运行测试验证通过**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_search_tools.py::test_tavily_service_search_success -v`
+Expected: PASS
+
+- [ ] **Step 5: 补充 TavilyService 异常测试**
+
+```python
+# 追加到 tests/unit/test_search_tools.py
+
+def test_tavily_service_search_raises_on_failure():
+    """TavilyClient.search 抛异常时 TavilyService.search 透传异常（由上层 safe_tool_call 捕获）"""
+    from aistock_agent.services.tavily import TavilyService
+
+    mock_instance = MagicMock()
+    mock_instance.search.side_effect = RuntimeError("API key invalid")
+
+    with patch("tavily.TavilyClient", return_value=mock_instance):
+        with pytest.raises(RuntimeError, match="API key invalid"):
+            TavilyService.search(query="测试")
+```
+
+- [ ] **Step 6: 运行测试验证通过**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_search_tools.py::test_tavily_service_search_raises_on_failure -v`
+Expected: PASS（异常透传，无需额外实现）
+
+- [ ] **Step 7: Commit**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add src/aistock_agent/services/tavily.py tests/unit/test_search_tools.py
+git commit -m "refactor(agent-py): extract TavilyService client wrapper to services/tavily.py
+
+- 新增 services/tavily.py：TavilyService.search() 封装 TavilyClient + Key 轮换
+- 新增 tests/unit/test_search_tools.py：TavilyService 正常/异常测试
+- 为 Task 11.2 search_tools 迁移提供客户端基础"
+```
+
+---
+
+#### 11.2 创建 tools/search_tools.py（工具层迁移）
+
+- [ ] **Step 8: 写失败测试 — tavily_finance_search 正常返回**
+
+```python
+# 追加到 tests/unit/test_search_tools.py
+
+@pytest.mark.asyncio
+async def test_tavily_finance_search_success():
+    """tavily_finance_search 正常返回格式化搜索结果"""
+    from aistock_agent.tools.search_tools import tavily_finance_search
+
+    mock_tavily_instance = MagicMock()
+    mock_tavily_instance.search.return_value = {
+        "results": [
+            {"title": "美联储维持利率不变", "content": "美联储决定维持当前利率水平...", "url": "https://example.com/1"},
+        ]
+    }
+
+    with patch("tavily.TavilyClient", return_value=mock_tavily_instance):
+        result = await tavily_finance_search.ainvoke({"query": "美联储利率决议"})
+        assert "美联储" in result
+        assert "https://example.com/1" in result
+
+
+@pytest.mark.asyncio
+async def test_tavily_finance_search_no_results():
+    """tavily_finance_search 无结果时返回提示文本"""
+    from aistock_agent.tools.search_tools import tavily_finance_search
+
+    mock_tavily_instance = MagicMock()
+    mock_tavily_instance.search.return_value = {"results": []}
+
+    with patch("tavily.TavilyClient", return_value=mock_tavily_instance):
+        result = await tavily_finance_search.ainvoke({"query": "测试关键词"})
+        assert "未找到" in result
+```
+
+- [ ] **Step 9: 运行测试验证失败**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_search_tools.py::test_tavily_finance_search_success tests/unit/test_search_tools.py::test_tavily_finance_search_no_results -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'aistock_agent.tools.search_tools'`
+
+- [ ] **Step 10: 实现 tools/search_tools.py**
+
+```python
+"""搜索工具 — 基于 Tavily 的全网财经搜索
+
+从 market_tools.py 拆出（Phase 5 Task 11），market_tools 回归纯 yfinance 行情职责。
+工具函数通过 services/tavily.py 的 TavilyService 间接调用 SDK，不直接 import tavily。
+"""
+
+from langchain_core.tools import tool
+
+from aistock_agent.services.tavily import TavilyService
+from aistock_agent.tools.base import safe_tool_call
+
+
+@tool
+@safe_tool_call
+async def tavily_finance_search(query: str) -> str:
+    """全网财经新闻搜索（Tavily），用于宏观事件/政策/经济数据搜索
+
+    Args:
+        query: 搜索关键词，如"美联储利率决议"、"中国PMI数据"
+    """
+    try:
+        result = TavilyService.search(query=query, topic="news", max_results=5)
+
+        if not result.get("results"):
+            return f"未找到关于「{query}」的相关新闻"
+
+        lines: list[str] = []
+        for item in result["results"]:
+            title = item.get("title", "无标题")
+            content = item.get("content", "")[:200]
+            url = item.get("url", "")
+            lines.append(f"- {title}\n  {content}...\n  来源: {url}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Tavily 搜索失败: {e}"
+```
+
+- [ ] **Step 11: 运行测试验证通过**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_search_tools.py -v`
+Expected: PASS（全部 4 个测试）
+
+- [ ] **Step 12: Commit**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add src/aistock_agent/tools/search_tools.py tests/unit/test_search_tools.py
+git commit -m "refactor(agent-py): create tools/search_tools.py, migrate tavily_finance_search
+
+- 新增 tools/search_tools.py：tavily_finance_search 迁移至独立文件
+- 工具函数改调 services/tavily.py 的 TavilyService.search()
+- market_tools.py 暂时保留旧函数（下一步删除）"
+```
+
+---
+
+#### 11.3 清理 market_tools.py（移除 tavily）
+
+- [ ] **Step 13: 从 market_tools.py 移除 tavily_finance_search 函数**
+
+修改 `src/aistock_agent/tools/market_tools.py`：
+- 删除第 61-86 行（`tavily_finance_search` 函数 + 其上方的 `@tool` `@safe_tool_call` 装饰器）
+- 更新文件 docstring（第 1 行）：`"""市场工具 — yfinance 境外市场 + Tavily 全网搜索` → `"""市场工具 — yfinance 境外市场行情`
+
+修改前：
+```python
+"""市场工具 — yfinance 境外市场 + Tavily 全网搜索
+
+这些工具在 Python 侧直接调用，Node.js 无对应实现。
+"""
+```
+
+修改后：
+```python
+"""市场工具 — yfinance 境外市场行情
+
+这些工具在 Python 侧直接调用，Node.js 无对应实现。
+Tavily 搜索已拆分至 tools/search_tools.py（Phase 5 Task 11）。
+"""
+```
+
+- [ ] **Step 14: 验证 market_tools 测试仍通过（tavily 测试已迁移）**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_market_tools.py -v`
+Expected: PASS — 只剩 `test_get_global_markets_success` 1 个测试（tavily 的 2 个已在 test_search_tools.py）
+
+- [ ] **Step 15: 移除 test_market_tools.py 中的 tavily 测试**
+
+修改 `tests/unit/test_market_tools.py`：
+- 更新文件 docstring：`"""market_tools 测试 — mock yfinance 和 Tavily"""` → `"""market_tools 测试 — mock yfinance"""`
+- 删除第 7 行 import 中的 `tavily_finance_search`：`from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search` → `from aistock_agent.tools.market_tools import get_global_markets`
+- 删除第 32-55 行（`test_tavily_finance_search_success` 和 `test_tavily_finance_search_no_results` 两个测试函数）
+
+- [ ] **Step 16: 再次运行 market_tools 测试**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/unit/test_market_tools.py -v`
+Expected: PASS — 1 个测试，无 import error
+
+- [ ] **Step 17: Commit**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add src/aistock_agent/tools/market_tools.py tests/unit/test_market_tools.py
+git commit -m "refactor(agent-py): remove tavily_finance_search from market_tools
+
+- market_tools.py 回归纯 yfinance 行情职责
+- 移除 tavily 相关测试（已迁移至 test_search_tools.py）"
+```
+
+---
+
+#### 11.4 更新所有 import 引用
+
+- [ ] **Step 18: 更新 agents/workers/morning.py**
+
+修改 `src/aistock_agent/agents/workers/morning.py`：
+
+第 21 行：
+```python
+# 修改前
+from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+
+# 修改后
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.search_tools import tavily_finance_search
+```
+
+第 4 行 docstring 无需改（工具集列表不变）。
+第 48 行 `tools = [tavily_finance_search, get_global_markets, get_cls_news]` 和第 104 行同——变量名不变，无需改。
+
+- [ ] **Step 19: 更新 agents/workers/event.py**
+
+修改 `src/aistock_agent/agents/workers/event.py`：
+
+第 13 行：
+```python
+# 修改前
+from aistock_agent.tools.market_tools import tavily_finance_search
+
+# 修改后
+from aistock_agent.tools.search_tools import tavily_finance_search
+```
+
+- [ ] **Step 20: 更新 api/routes.py**
+
+修改 `src/aistock_agent/api/routes.py`：
+
+第 137 行：
+```python
+# 修改前
+from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+
+# 修改后
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.search_tools import tavily_finance_search
+```
+
+第 146 行 `all_tools` 列表中 `get_global_markets, tavily_finance_search` 无需改（变量名不变）。
+
+- [ ] **Step 21: 运行全量单元测试 + 集成测试**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/ -v --tb=short`
+Expected: PASS — 所有测试通过，包括 `test_morning_agent.py` 和 `test_event_agent.py`（它们 import 了 tavily_finance_search，需要同步改）
+
+- [ ] **Step 22: 如有集成测试 import 失败，修复**
+
+修改 `tests/integration/test_morning_agent.py` 第 160 行：
+```python
+# 修改前
+from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+
+# 修改后
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.search_tools import tavily_finance_search
+```
+
+修改 `tests/integration/test_event_agent.py` 第 17 行：
+```python
+# 修改前
+from aistock_agent.tools.market_tools import tavily_finance_search
+
+# 修改后
+from aistock_agent.tools.search_tools import tavily_finance_search
+```
+
+- [ ] **Step 23: 再次运行全量测试**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/ -v --tb=short`
+Expected: PASS — 全绿
+
+- [ ] **Step 24: Commit**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add src/aistock_agent/agents/workers/morning.py src/aistock_agent/agents/workers/event.py src/aistock_agent/api/routes.py tests/integration/test_morning_agent.py tests/integration/test_event_agent.py
+git commit -m "refactor(agent-py): update all imports from market_tools to search_tools
+
+- morning.py / event.py / routes.py: tavily_finance_search import 改从 search_tools
+- test_morning_agent.py / test_event_agent.py: 同步更新 import
+- /skills 端点仍返回 9 个工具，数量不变"
+```
+
+---
+
+#### 11.5 更新 conftest.py fixture 注释
+
+- [ ] **Step 25: 更新 mock_tavily fixture 注释**
+
+修改 `tests/conftest.py` 第 37-45 行：
+
+```python
+# 修改前
+@pytest.fixture
+def mock_tavily():
+    """mock TavilyClient。
+
+    patch 源模块 tavily.TavilyClient，因 market_tools 在函数内
+    ``from tavily import TavilyClient``，模块级 patch 无效。
+    """
+    with patch("tavily.TavilyClient") as mock_cls:
+        yield mock_cls
+
+
+# 修改后
+@pytest.fixture
+def mock_tavily():
+    """mock TavilyClient。
+
+    patch 源模块 tavily.TavilyClient（class 级别），
+    services/tavily.py 在模块顶部 ``from tavily import TavilyClient``，
+    patch 源 class 可覆盖所有引用点，无需关心 import 位置。
+    """
+    with patch("tavily.TavilyClient") as mock_cls:
+        yield mock_cls
+```
+
+- [ ] **Step 26: 运行全量测试确认 fixture 无破坏**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/ -v --tb=short`
+Expected: PASS — 全绿
+
+- [ ] **Step 27: Commit**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add tests/conftest.py
+git commit -m "docs(agent-py): update mock_tavily fixture comment for search_tools refactor"
+```
+
+---
+
+#### 11.6 更新文档
+
+- [ ] **Step 28: 更新 README.md 目录树**
+
+修改 `README.md` 第 118 行：
+```
+# 修改前
+│   ├── market_tools.py       # get_global_markets(yfinance), tavily_finance_search
+
+# 修改后
+│   ├── market_tools.py       # get_global_markets(yfinance)
+│   ├── search_tools.py       # tavily_finance_search（Tavily 全网搜索）
+```
+
+- [ ] **Step 29: 更新 AGENTS.md 目录树**
+
+修改 `AGENTS.md` 第 138 行和第 146-147 行：
+
+第 138 行：
+```
+# 修改前
+│   ├── market_tools.py  # get_global_markets, tavily_finance_search
+
+# 修改后
+│   ├── market_tools.py  # get_global_markets
+│   ├── search_tools.py  # tavily_finance_search
+```
+
+第 145-147 行（services 区块）：
+```
+# 修改前
+├── services/
+│   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
+│   └── data_client.py   # httpx → Node.js /internal/* API
+
+# 修改后
+├── services/
+│   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
+│   ├── data_client.py   # httpx → Node.js /internal/* API
+│   └── tavily.py        # Tavily 客户端封装（Key 轮换 + search 入口）
+```
+
+- [ ] **Step 30: 更新 refactor-plan.md（如需）**
+
+检查 `docs/refactor-plan.md` 中对 `market_tools.py` 的描述，确认是否需要标注 tavily 已拆出。
+
+- [ ] **Step 31: 最终全量验证**
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m pytest tests/ -v --tb=short`
+Expected: PASS — 全绿
+
+Run: `cd D:\ai_stock_app\aistock-agent-py; python -m mypy src/`
+Expected: 无 error
+
+- [ ] **Step 32: Commit 文档更新**
+
+```powershell
+cd D:\ai_stock_app\aistock-agent-py
+git add README.md AGENTS.md
+git commit -m "docs(agent-py): update directory tree for search_tools + services/tavily split
+
+- README.md: market_tools 去掉 tavily，新增 search_tools 行
+- AGENTS.md: 同步更新 tools/ 和 services/ 目录树"
+```
+
+---
+
+**Task 11 验收标准:**
+- [ ] `services/tavily.py` 存在，`TavilyService.search()` 可独立调用
+- [ ] `tools/search_tools.py` 存在，`tavily_finance_search` 签名与行为不变
+- [ ] `market_tools.py` 不再包含 tavily 相关代码，docstring 已更新
+- [ ] `market_tools.py` 不再 import `tavily` 或 `TavilyClient`
+- [ ] `morning.py` / `event.py` / `routes.py` 的 import 从 `search_tools` 引入
+- [ ] `pytest tests/ -v` 全绿
+- [ ] `mypy src/` 无 error
+- [ ] `/skills` 端点仍返回 9 个工具（数量不变，只是来源文件变了）
+- [ ] README.md / AGENTS.md 目录树已更新
+
+---
+
 ## Phase 5 整体验收标准
 
 完成以下全部检查后，Phase 5 视为通过：
@@ -385,6 +929,7 @@
 - [ ] **反代链路**：`/api/agent/*` → Python 透传，SSE 流式无延迟
 - [ ] **端到端测试**：5 类意图 + 异常降级 + 缓存命中全链路验证
 - [ ] **标准文档**：`AGENT_STANDARDS.md` 覆盖 8 个规范
+- [ ] **工具拆分**：`tavily_finance_search` 从 `market_tools` 拆至 `search_tools` + `services/tavily`，`market_tools` 回归纯行情
 
 ---
 
@@ -432,9 +977,15 @@ Task 6 (Node.js /internal/*) ──┐                                          
 Task 7 (Python Tools)       ───┤ → Task 8 (Express 反代) → Task 9 (端到端) → Task 10 (文档)
                                │
                   （6 和 7 可并行）
+
+Task 11 (Tavily 拆分) ← 独立于 Task 1-10，可在任意时点执行（仅需 Phase 4 目录结构就绪）
 ```
 
-总工作量预估：10 个 Task，每个 Task 0.5-1.5 天，总计约 7-12 个工作日。
+> **Task 11 定位**：纯 Python 仓库内部重构，不涉及 Node.js、不依赖 Task 1-10 的任何产出。
+> 可在 Phase 5 的任意阶段插入执行，推荐在 Task 7（Python Tools）之前完成——趁 tools 层还没被
+> Task 7 大规模改动时先理顺结构，避免合并冲突。
+
+总工作量预估：11 个 Task，Task 1-10 每个 0.5-1.5 天（约 7-12 工作日），Task 11 约 0.5 天，总计约 7.5-12.5 个工作日。
 
 ---
 
