@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from aistock_agent.agents.morning_agent import is_trading_day
+from aistock_agent.agents.workers.morning import is_trading_day
 
 
 def test_is_trading_day_weekday():
@@ -30,7 +30,7 @@ def test_is_trading_day_no_arg_returns_bool():
 # ── stream() 测试 ──────────────────────────────────────────────────
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aistock_agent.agents import morning_agent
+from aistock_agent.agents.workers import morning as morning_agent
 
 
 async def _async_iter(items):
@@ -70,9 +70,9 @@ async def test_stream_tool_events_mapped(mock_redis):
     mock_agent = MagicMock()
     mock_agent.astream_events = lambda *a, **kw: _async_iter(raw_events)
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                return_value=mock_agent):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=True):
             events = [e async for e in morning_agent.stream({})]
 
@@ -111,9 +111,9 @@ async def test_stream_filters_tool_call_chunks(mock_redis):
     mock_agent = MagicMock()
     mock_agent.astream_events = lambda *a, **kw: _async_iter(raw_events)
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                return_value=mock_agent):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=True):
             events = [e async for e in morning_agent.stream({})]
 
@@ -141,12 +141,105 @@ async def test_stream_non_trading_day_injects_prompt(mock_redis):
         mock_inner.astream_events = fake_astream
         return mock_inner
 
-    with patch("aistock_agent.agents.morning_agent.create_react_agent",
+    with patch("aistock_agent.agents.workers.morning.create_react_agent",
                side_effect=fake_create):
-        with patch("aistock_agent.agents.morning_agent.is_trading_day",
+        with patch("aistock_agent.agents.workers.morning.is_trading_day",
                    return_value=False):
             _ = [e async for e in morning_agent.stream({})]
 
     messages = captured.get("messages", [])
     assert messages, "messages should not be empty"
     assert "非交易日" in messages[0].content
+
+
+# ── run() 测试 ────────────────────────────────────────────────────
+from datetime import datetime
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+from aistock_agent.tools.news_tools import get_cls_news
+
+_MORNING_GET_CACHED = "aistock_agent.agents.workers.morning._get_cached_briefing"
+_MORNING_SET_CACHED = "aistock_agent.agents.workers.morning._set_cached_briefing"
+_MORNING_CREATE_AGENT = "aistock_agent.agents.workers.morning.create_react_agent"
+_MORNING_GET_DEEP = "aistock_agent.agents.workers.morning.get_deep_think"
+
+# run() 期望绑定的工具集（与 morning.py run 中 tools 列表顺序一致）
+_MORNING_EXPECTED_TOOLS = [tavily_finance_search, get_global_markets, get_cls_news]
+
+
+def _make_mock_morning_agent(messages: list) -> MagicMock:
+    """构造 mock react agent：ainvoke 返回 {"messages": messages}。"""
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": messages})
+    return mock_agent
+
+
+@pytest.mark.asyncio
+async def test_morning_run_cache_hit_returns_cached():
+    """缓存命中：直接返回缓存内容，不调用 create_react_agent。"""
+    with patch(_MORNING_GET_CACHED, AsyncMock(return_value="cached content")):
+        with patch(_MORNING_CREATE_AGENT) as mock_create:
+            result = await morning_agent.run({})
+
+    assert result == {"final_response": "cached content"}
+    mock_create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_morning_run_cache_miss_invokes_agent():
+    """缓存未命中：调用 create_react_agent，tools 列表正确。"""
+    mock_agent = _make_mock_morning_agent([AIMessage(content="晨报内容")])
+    with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+        with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+            with patch(_MORNING_CREATE_AGENT, return_value=mock_agent) as mock_create:
+                with patch(_MORNING_SET_CACHED, AsyncMock()):
+                    result = await morning_agent.run({})
+
+    mock_create.assert_called_once()
+    tools_arg = mock_create.call_args[0][1]
+    assert tools_arg == _MORNING_EXPECTED_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_morning_run_system_message_injected():
+    """ainvoke 传入的 messages 首条为 SystemMessage，content 含今日日期。"""
+    today = datetime.now().strftime("%Y年%m月%d日")
+    captured: dict = {}
+    mock_agent = MagicMock()
+
+    async def fake_ainvoke(inp, **kw):
+        captured.update(inp)
+        return {"messages": [AIMessage(content="晨报")]}
+
+    mock_agent.ainvoke = fake_ainvoke
+
+    with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+        with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+            with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
+                with patch(_MORNING_SET_CACHED, AsyncMock()):
+                    await morning_agent.run({})
+
+    messages = captured["messages"]
+    assert isinstance(messages[0], SystemMessage)
+    assert today in messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_morning_run_extracts_and_caches_response():
+    """从 messages 提取最后一条 AI 回复作为 final_response，并写入缓存。"""
+    messages = [
+        HumanMessage(content="生成晨报"),
+        AIMessage(content="中间过程"),
+        AIMessage(content="最终晨报内容"),
+    ]
+    mock_agent = _make_mock_morning_agent(messages)
+    with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+        with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+            with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
+                with patch(_MORNING_SET_CACHED, AsyncMock()) as mock_set:
+                    result = await morning_agent.run({})
+
+    assert result == {"final_response": "最终晨报内容"}
+    mock_set.assert_awaited_once_with("最终晨报内容")

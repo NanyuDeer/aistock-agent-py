@@ -3,9 +3,11 @@
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.tools.base import safe_tool_call
 
 
 @tool
+@safe_tool_call
 async def search_cls_news(symbol: str) -> str:
     """搜索财联社个股相关新闻
 
@@ -19,6 +21,7 @@ async def search_cls_news(symbol: str) -> str:
 
 
 @tool
+@safe_tool_call
 async def get_news_fulltext(news_id: str) -> str:
     """获取财联社新闻全文
 
@@ -34,6 +37,7 @@ async def get_news_fulltext(news_id: str) -> str:
 
 
 @tool
+@safe_tool_call
 async def get_cls_news(limit: int = 10) -> str:
     """获取财联社最新快讯（晨报用）
 

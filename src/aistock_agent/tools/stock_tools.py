@@ -3,9 +3,11 @@
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.tools.base import safe_tool_call
 
 
 @tool
+@safe_tool_call
 async def get_quote(symbol: str) -> str:
     """查询 A 股个股实时行情
 
@@ -19,6 +21,7 @@ async def get_quote(symbol: str) -> str:
 
 
 @tool
+@safe_tool_call
 async def get_capital_flow(symbol: str) -> str:
     """查询个股资金流向
 
@@ -32,6 +35,7 @@ async def get_capital_flow(symbol: str) -> str:
 
 
 @tool
+@safe_tool_call
 async def get_profit_forecast(symbol: str) -> str:
     """查询个股机构盈利预测
 
@@ -65,9 +69,9 @@ def _format_capital_flow(data: dict[str, object]) -> str:
 
 def _format_forecast(data: dict[str, object]) -> str:
     """格式化盈利预测数据（同花顺返回摘要 + 详细指标表）"""
-    summary = data.get("摘要", "")
+    summary = str(data.get("摘要", ""))
     detail = data.get("业绩预测详表_详细指标预测", [])
-    lines = [summary] if summary else []
+    lines: list[str] = [summary] if summary else []
     if isinstance(detail, list):
         for row in detail:
             if not isinstance(row, dict):

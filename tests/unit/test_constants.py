@@ -1,0 +1,40 @@
+"""constants 模块测试 — SSE 事件类型 / 意图集合 / 错误码 / 工具标签"""
+
+from aistock_agent.constants import (
+    ERROR_CODES,
+    INTENT_SET,
+    TOOL_LABELS,
+    SSEEventType,
+)
+
+
+def test_sse_event_type_values():
+    # SSE 事件类型必须是约定的字符串字面量（前端按此解析）
+    assert SSEEventType.TOOL_START == "tool_start"
+    assert SSEEventType.TOOL_END == "tool_end"
+    assert SSEEventType.LLM_START == "llm_start"
+    assert SSEEventType.TEXT == "text"
+    assert SSEEventType.DONE == "done"
+    assert SSEEventType.ERROR == "error"
+
+
+def test_intent_set_contents():
+    # 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
+    assert INTENT_SET == frozenset({"morning", "stock", "sector", "event", "general"})
+
+
+def test_error_codes_distinct():
+    codes = {
+        ERROR_CODES.DATA_UNAVAILABLE,
+        ERROR_CODES.LLM_TIMEOUT,
+        ERROR_CODES.TOOL_EXECUTION,
+        ERROR_CODES.ROUTE,
+    }
+    assert len(codes) == 4
+
+
+def test_tool_labels_has_morning_tools():
+    # morning agent 的三个工具必须有中文标签（被 SSE tool_start 事件引用）
+    assert TOOL_LABELS["get_global_markets"] == "正在获取全球市场行情"
+    assert TOOL_LABELS["tavily_finance_search"] == "正在搜索财经新闻"
+    assert TOOL_LABELS["get_cls_news"] == "正在获取财联社资讯"

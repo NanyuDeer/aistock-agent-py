@@ -8,6 +8,7 @@ import yfinance as yf  # type: ignore[import-untyped]
 from langchain_core.tools import tool
 
 from aistock_agent.config import settings
+from aistock_agent.tools.base import safe_tool_call
 
 # yfinance Ticker 映射
 GLOBAL_MARKET_TICKERS = {
@@ -25,6 +26,7 @@ GLOBAL_MARKET_TICKERS = {
 
 
 @tool
+@safe_tool_call
 async def get_global_markets() -> str:
     """获取全球市场行情（美股/亚太/大宗/汇率），用于晨报宏观分析"""
     try:
@@ -57,6 +59,7 @@ async def get_global_markets() -> str:
 
 
 @tool
+@safe_tool_call
 async def tavily_finance_search(query: str) -> str:
     """全网财经新闻搜索（Tavily），用于宏观事件/政策/经济数据搜索
 

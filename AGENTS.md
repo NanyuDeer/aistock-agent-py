@@ -10,18 +10,19 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 | 产品功能 | Agent 文件 | 模型 | 优先级 |
 |---------|-----------|------|--------|
-| 意图路由 | supervisor.py | quick_think | P0 |
-| 早点听/晨报 | morning_agent.py | deep_think | P0 |
-| 个股分析 | stock_analyst.py | deep_think | P0 |
-| 长线风口/风口龙头 | wind_leader_agent.py | deep_think | P0 |
-| 事件传导链 | event_chain_agent.py | deep_think | P0 |
-| 异动提醒/持仓监控 | alert_agent.py | quick_think | P1 |
-| 机构调研热门股 | hot_burst_agent.py | deep_think | P1 |
-| 十倍股/趋势股评分 | tenx_agent.py | deep_think | P2 |
-| 业绩预测 | forecast_agent.py | quick_think | 后续 |
-| 交易复盘 | review_agent.py | deep_think | P2 |
-| **播报生成** | **broadcast_agent.py** | **deep_think** | **P0（核心特色）** |
-| 兜底对话 | general_agent.py | quick_think | P0 |
+| 意图路由 | agents/supervisor/node.py | quick_think | P0 |
+| 早点听/晨报 | agents/workers/morning.py | deep_think | P0 |
+| 个股分析 | agents/workers/stock.py | deep_think | P0 |
+| 板块分析 | agents/workers/sector.py | deep_think | P0 |
+| 事件传导链 | agents/workers/event.py | deep_think | P0 |
+| 长线风口/风口龙头 | workers/wind_leader.py（Phase 5+） | deep_think | P0 |
+| 异动提醒/持仓监控 | workers/alert.py（Phase 5+） | quick_think | P1 |
+| 机构调研热门股 | workers/hot_burst.py（Phase 5+） | deep_think | P1 |
+| 十倍股/趋势股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
+| 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
+| 交易复盘 | workers/review.py（Phase 5+） | deep_think | P2 |
+| **播报生成** | **workers/broadcast.py（Phase 5+）** | **deep_think** | **P0（核心特色）** |
+| 兜底对话 | agents/general/node.py | quick_think | P0 |
 
 ## 核心架构
 
@@ -91,47 +92,62 @@ START → supervisor(quick_think)
 
 ## 目录结构
 
+> Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
+
 ```
 src/aistock_agent/
 ├── main.py              # FastAPI 入口
 ├── config.py            # pydantic-settings 配置
+├── constants.py         # SSE 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
 ├── state/
 │   └── schema.py        # AgentState TypedDict
+├── schemas/             # 对外交互 Pydantic 数据模型
+│   ├── chat.py          # ChatRequest / ChatResponse
+│   ├── sse.py           # SSEEvent
+│   └── agents.py        # 各 Agent 输入/输出 schema
+├── memory/              # 持久化记忆模块
+│   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
+│   ├── session_store.py # 会话历史读写
+│   └── preferences.py   # 用户偏好/自选股记忆
+├── utils/               # 通用工具
+│   ├── sse.py           # LangGraph 事件 → SSE 事件映射
+│   ├── parser.py        # LLM 输出解析（parse_intent）
+│   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
+│   └── date.py          # 日期/交易日工具
+├── errors/              # 异常体系
+│   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
-│   ├── edges.py         # 条件边（route_by_intent）
-│   └── builder.py       # StateGraph 构建 + compile()
-├── agents/
-│   ├── base.py          # 双模型工厂
-│   ├── supervisor.py    # 意图分类
-│   ├── morning_agent.py # 晨报（ReAct + Redis 缓存）
-│   ├── stock_analyst.py # 个股分析
-│   ├── wind_leader_agent.py  # 长线风口
-│   ├── event_chain_agent.py  # 事件传导链
-│   ├── alert_agent.py        # 异动提醒
-│   ├── hot_burst_agent.py    # 机构调研热门股
-│   ├── tenx_agent.py         # 十倍股评分
-│   ├── forecast_agent.py     # 业绩预测（后续）
-│   ├── review_agent.py       # 交易复盘（P2）
-│   ├── broadcast_agent.py    # 播报生成（核心特色）
-│   └── general_agent.py      # 兜底
+│   ├── builder.py       # StateGraph 构建 + compile()（哨兵模式挂载 checkpointer）
+│   └── routers/
+│       └── intent_router.py  # route_by_intent（从 edges.py 迁入）
+├── agents/              # 物理分层：supervisor/ + general/ + workers/
+│   ├── supervisor/
+│   │   └── node.py      # 意图分类（quick_think）
+│   ├── general/
+│   │   └── node.py      # 兜底对话（quick_think）
+│   └── workers/
+│       ├── morning.py   # 晨报（ReAct + Redis 缓存）
+│       ├── stock.py     # 个股分析
+│       ├── sector.py    # 板块分析
+│       └── event.py     # 事件传导链
 ├── tools/
+│   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
-│   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
+│   ├── sector_tools.py  # get_leader_stocks
 │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
 │   ├── market_tools.py  # get_global_markets, tavily_finance_search
-│   ├── monitor_tools.py # get_stock_monitor, get_alert_history
-│   └── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks
-├── prompts/
-│   ├── morning.py       # 晨报4步框架
-│   ├── event_chain.py   # 事件传导链分析
-│   ├── tenx.py          # 十倍股评分
-│   ├── broadcast.py     # 双人播报提示词
-│   ├── routing.py       # 路由分类
-│   └── system.py        # 通用系统提示词
+│   ├── monitor_tools.py # 占位（Phase 5）
+│   └── tenx_tools.py    # 占位（Phase 5）
+├── prompts/             # 分层对应 agents 目录
+│   ├── supervisor/routing.py
+│   ├── general/system.py
+│   └── workers/{morning,stock,sector,event}.py
 ├── services/
+│   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   └── data_client.py   # httpx → Node.js /internal/* API
 └── api/
-    ├── routes.py        # REST 接口
+    ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills）
+    ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     └── ws.py            # WebSocket 流式接口
 ```
 
@@ -190,16 +206,54 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 ## 常用命令
 
 ```bash
-uvicorn aistock_agent.main:app --reload  # 开发模式
-pytest tests/ -v                          # 运行测试
-ruff check src/                           # 代码检查
-mypy src/                                 # 类型检查
+uvicorn aistock_agent.main:app --reload   # 开发模式
+pytest tests/ -v                           # 运行全部测试
+pytest tests/unit/ -v                      # 仅单元测试（工具函数）
+pytest tests/integration/ -v               # 仅集成测试（Agent + Graph）
+pytest tests/e2e/ -v                       # 仅端到端测试（HTTP 接口）
+$env:PYTHONPATH = "src"; python scripts/run_morning_test.py  # 晨报生成并落盘到 docs/agent-outputs/morning/
+ruff check src/                            # 代码检查
+mypy src/                                  # 类型检查
+python -c "from aistock_agent.graph.builder import compile_graph; compile_graph()"  # 验证图可编译
 ```
 
 ## 关键约束
 
 - 禁止在 Python 重复实现 A 股数据获取逻辑
+- **agents 物理分层**：`supervisor/` + `general/` + `workers/`，禁止混放（Phase 4 落地）
+- **各 agent run() 必须有顶层 try-catch**，返回降级文本不抛异常（见"异常降级规范"，Phase 4 落地）
+- **compile_graph() 默认挂 checkpointer**，graph.ainvoke/astream 必须传 `config={"configurable": {"thread_id": ...}}`（Phase 5 落地，不传会抛 ValueError）
+- **工具用 @safe_tool_call 装饰器**，返回降级文本不抛异常（Phase 4 落地）
 - LLM 调用失败时返回降级文本，不重试
 - yfinance 仅用于境外市场数据（美股/亚太/大宗/汇率）
 - 晨报 Agent 必须通过 Redis 缓存，同一天不重复调用 deep_think
 - 播报 Agent 是核心特色，所有分析 Agent 都需对接播报输出
+
+## 异常降级规范（Phase 4 落地）
+
+### 两层降级体系
+
+1. **工具层**（`tools/base.py` 的 `@safe_tool_call` 装饰器）：
+   - 捕获工具异常 → structlog 记录 → 返回 `DEGRADED_MESSAGE = "数据暂不可用，请稍后重试"`
+   - LLM 会看到降级文本作为 observation，按 prompts 要求在最终回复中标注"数据暂不可用"
+   - 不抛异常，graph 继续执行
+
+2. **Agent 层**（各 `run()` 的顶层 try-catch）：
+   - 捕获 LLM/Graph 框架异常（`get_deep_think()` 失败、`create_react_agent()` 失败、`ainvoke()` 失败）
+   - structlog 记录 → 返回符合 AGENTS.md 规范的降级文本（标注"暂不可用"，不猜测数据）
+   - 不抛异常，graph 不中断
+
+### 降级文本（每个 agent 不同，便于日志区分）
+
+| Agent | 降级文本 |
+|-------|---------|
+| supervisor | `{"intent": "general"}`（路由降级到 general 兜底） |
+| morning | `{"final_response": "晨报生成暂时不可用，请稍后重试"}` |
+| stock | `{"final_response": "个股分析暂时不可用，请稍后重试"}` |
+| sector | `{"final_response": "板块分析暂时不可用，请稍后重试"}` |
+| event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
+| general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
+
+### 不做异常分类 catch
+
+只 catch `Exception` 一层，不写 `except ToolExecutionError` / `except LLMTimeoutError`（当前无抛出点，是 dead code）。未来有显式抛出场景再补分类。

@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # 内网鉴权
     internal_api_token: str = "change-me-in-production"
 
+    # LangGraph checkpointer 后端（memory / sqlite / redis）
+    # memory=MemorySaver（开发默认，已可用）；sqlite/redis 需安装对应
+    # langgraph-checkpoint 子包，未安装时 get_checkpointer 优雅降级到 MemorySaver
+    checkpointer_backend: str = "memory"
+    # sqlite backend 的数据库路径（仅 checkpointer_backend="sqlite" 时使用）
+    sqlite_path: str = ".langgraph.db"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def get_tavily_key(self) -> str:

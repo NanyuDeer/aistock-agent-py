@@ -1,6 +1,6 @@
 # AiStock Agent — Python/LangGraph 重构设计文档
 
-> 版本：v2.0 | 日期：2026-07-06 | 状态：Phase 3 进行中
+> 版本：v2.1 | 日期：2026-07-07 | 状态：Phase 4 完成
 
 ---
 
@@ -151,50 +151,68 @@ aistock-agent-py/
         ├── __init__.py
         ├── main.py              # FastAPI app入口
         ├── config.py            # pydantic-settings，读取环境变量
+        ├── constants.py         # SSE 事件类型 / intent 集合 / 错误码 / TOOL_LABELS（Phase 4 新增）
         │
-        ├── state/               # 独立状态层（PrimoAgent模式）
+        ├── state/               # 独立状态层
         │   └── schema.py        # AgentState TypedDict
         │
-        ├── graph/               # 图拓扑层（只管骨架）
-        │   ├── edges.py         # 所有条件边函数
-        │   └── builder.py       # StateGraph构建 + compile()
+        ├── schemas/             # 对外交互 Pydantic 数据模型（Phase 4 新增）
+        │   ├── chat.py          # ChatRequest / ChatResponse
+        │   ├── sse.py           # SSEEvent
+        │   └── agents.py        # 各 Agent 输入/输出 schema
         │
-        ├── agents/              # 每个Agent一个文件，含节点函数（产品功能驱动命名）
-        │   ├── base.py          # 双模型工厂（quick_think/deep_think）
-        │   ├── supervisor.py    # 意图分类节点（quick_think）
-        │   ├── morning_agent.py # 晨报节点（ReAct + deep_think）★优先
-        │   ├── stock_analyst.py # 个股分析节点
-        │   ├── wind_leader_agent.py  # 长线风口/风口龙头节点
-        │   ├── event_chain_agent.py  # 事件传导链节点
-        │   ├── alert_agent.py        # 异动提醒/持仓监控节点
-        │   ├── hot_burst_agent.py    # 机构调研热门股节点
-        │   ├── tenx_agent.py         # 十倍股/趋势股评分节点
-        │   ├── forecast_agent.py     # 业绩预测节点（后续）
-        │   ├── review_agent.py       # 交易复盘节点（P2）
-        │   ├── broadcast_agent.py    # 播报生成节点（双人播报）
-        │   └── general_agent.py      # 兜底节点
+        ├── memory/              # 持久化记忆模块（Phase 4 新增）
+        │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认，Sqlite/Redis 可选）
+        │   ├── session_store.py # 会话历史读写
+        │   └── preferences.py   # 用户偏好/自选股记忆
+        │
+        ├── utils/               # 通用工具（Phase 4 新增）
+        │   ├── sse.py           # LangGraph 事件 → SSE 事件映射
+        │   ├── parser.py        # LLM 输出解析（parse_intent）
+        │   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
+        │   └── date.py          # 日期/交易日工具
+        │
+        ├── errors/              # 异常体系（Phase 4 新增）
+        │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
+        │
+        ├── graph/               # 图拓扑层
+        │   ├── builder.py       # StateGraph 构建 + compile()（哨兵模式挂载 checkpointer）
+        │   └── routers/         # 条件边路由函数集中（Phase 4 新增）
+        │       └── intent_router.py  # route_by_intent
+        │
+        ├── agents/              # Agent 节点（Phase 4 物理分层：supervisor/ + general/ + workers/）
+        │   ├── supervisor/      # 路由决策节点
+        │   │   └── node.py      # 从 agents/supervisor.py 迁入
+        │   ├── general/         # 兜底通用节点
+        │   │   └── node.py      # 从 agents/general_agent.py 迁入
+        │   └── workers/         # 深度业务专业智能体
+        │       ├── morning.py   # 从 morning_agent.py 迁入
+        │       ├── stock.py     # 从 stock_analyst.py 迁入
+        │       ├── sector.py    # 从 sector_analyst.py 迁入
+        │       └── event.py     # 从 event_analyst.py 迁入
         │
         ├── tools/               # LangChain @tool，按数据域分组
+        │   ├── base.py          # 通用 @tool 基类 + safe_tool_call 装饰器（Phase 4 新增）
         │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
-        │   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
-        │   ├── news_tools.py    # search_cls_news, get_news_fulltext
+        │   ├── sector_tools.py  # get_leader_stocks
+        │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
         │   ├── market_tools.py  # get_global_markets（yfinance）, tavily_finance_search
-        │   ├── monitor_tools.py # get_stock_monitor（异动数据）, get_alert_history
-        │   └── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks
+        │   ├── monitor_tools.py # 占位（Phase 5 实现）
+        │   └── tenx_tools.py    # 占位（Phase 5 实现）
         │
-        ├── prompts/             # 所有提示词集中管理
-        │   ├── morning.py       # 晨报宏观分析提示词（4步框架）
-        │   ├── event_chain.py   # 事件传导链分析提示词
-        │   ├── tenx.py          # 十倍股评分提示词
-        │   ├── routing.py       # 路由分类提示词
-        │   └── system.py        # 通用系统提示词
+        ├── prompts/             # 提示词集中管理（Phase 4 分层对应 agents 目录）
+        │   ├── supervisor/routing.py  # 从 routing.py 迁入
+        │   ├── general/system.py      # GENERAL_PROMPT
+        │   └── workers/               # morning.py / stock.py / sector.py / event.py
         │
-        ├── services/
+        ├── services/            # 全局资源封装
+        │   ├── llm.py           # 模型工厂（从 agents/base.py 迁移，Phase 4）
         │   └── data_client.py   # httpx AsyncClient → Node.js /internal/* API
         │
         └── api/
-            ├── routes.py        # REST接口
-            └── ws.py            # WebSocket流式接口
+            ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills）
+            ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）（Phase 4 新增）
+            └── ws.py            # WebSocket 流式接口
 ```
 
 ---
@@ -546,8 +564,8 @@ Node.js侧将 `/api/agent/*` 的请求反代到Python服务对应路径。
 |-------|------|----------|----------|------|
 | **1** | 项目骨架 | pyproject.toml / config / AgentState / FastAPI `/health` | `uvicorn`启动，`/health` 返回200 | ✅ 完成 |
 | **2** | Node.js内部API + Python Tools层 | 6个`/internal/*`接口 + 5个`@tool` | 每个tool有pytest，独立可调用 | ✅ 完成 |
-| **3** | Morning Agent | `agents/morning_agent.py` + Redis缓存 + SSE接口 | `/briefing/morning` SSE流式返回4步分析 | 🔄 进行中 |
-| **4** | 核心对话Agent层 | supervisor + stock/wind_leader/event_chain/general agent + graph builder | 完整消息流程：输入→路由→工具调用→回复 | ⏳ 待开始 |
+| **3** | Morning Agent | `agents/workers/morning.py`（Phase 4 迁移） + Redis缓存 + SSE接口 | `/briefing/morning` SSE流式返回4步分析 | ✅ 完成 |
+| **4** | 核心对话Agent层 | 物理分层重构（agents/services/graph/prompts/utils/schemas/memory/errors）+ supervisor + stock/sector/event/general/morning agent + graph builder + checkpointer 持久化 + 异常降级 + /chat/stream SSE + 三层测试 | 完整消息流程：输入→路由→工具调用→回复；多轮对话可恢复；146 测试全绿 | ✅ 完成 |
 | **5** | Node.js接入 + 新增Internal API | Express反代 + 新增6个`/internal/*`接口 + 对应Tools | 端到端测试通过 | ⏳ 待开始 |
 | **6** | 产品功能Agent | alert + tenx + forecast agent | 各Agent独立可调用，有pytest | ⏳ 待开始 |
 | **7** | 交易复盘 + 标准文档 | review_agent + `AGENT_STANDARDS.md` | 全部Agent可用，文档覆盖所有扩展场景 | ⏳ 待开始 |
