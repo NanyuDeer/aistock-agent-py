@@ -6,6 +6,7 @@
 - setup_logging 含 merge_contextvars（支持 request_id 注入）
 - get_logger 返回 BoundLogger
 - 实际日志输出为 JSON，含 timestamp/level/event 字段
+- bind_contextvars 绑定的 request_id 出现在 JSON 输出中（merge_contextvars 生效）
 - level 过滤：WARNING 时 debug 不输出，DEBUG 时输出
 - 无效 level 回退到 INFO
 """
@@ -93,6 +94,26 @@ def test_log_output_is_json_with_required_fields():
     assert data["level"] == "info"
     assert "timestamp" in data
     assert data["user_id"] == 42
+
+
+def test_log_output_includes_request_id_from_contextvars():
+    """bind_contextvars 绑定的 request_id 出现在 JSON 输出中（merge_contextvars 生效）。
+
+    全局约束要求 structlog JSON 输出含 timestamp/level/event/request_id 字段。
+    merge_contextvars 在处理器链中，但需验证：通过 contextvars 绑定的 request_id
+    确实被合并进最终 JSON 输出。
+    """
+    setup_logging("INFO")
+    structlog.contextvars.bind_contextvars(request_id="test-123")
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            get_logger("test").info("ctx_event")
+        data = json.loads(buf.getvalue().strip())
+        assert data["event"] == "ctx_event"
+        assert data["request_id"] == "test-123"
+    finally:
+        structlog.contextvars.clear_contextvars()
 
 
 def test_log_output_for_warning_level():

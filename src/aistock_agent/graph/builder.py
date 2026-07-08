@@ -16,6 +16,7 @@ from aistock_agent.agents.workers import sector as sector_analyst
 from aistock_agent.agents.workers import stock as stock_analyst
 from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.memory.checkpointer import get_checkpointer
+from aistock_agent.observability.callback import get_default_callbacks
 from aistock_agent.state.schema import AgentState
 
 
@@ -74,18 +75,23 @@ def compile_graph(
             - 不传（默认）：挂载 ``get_checkpointer()``，启用多轮对话恢复。
             - 传 ``None``：显式跳过 checkpointer（无多轮恢复）。
             - 传 saver 实例：使用该 saver。
-        callbacks: 可选的 LangChain 回调 handler 列表，绑定到编译后的图，
-            用于图级可观测性（on_chain_start/end 等）。LLM/工具级回调已在
-            ``services/llm.py`` 挂载到 ChatOpenAI 实例，无需在此重复传入；
-            此参数供需要图级追踪的调用方按需使用。
+        callbacks: LangChain 回调 handler 列表，绑定到编译后的图，用于图级
+            可观测性（on_chain_start/end 等）。不传（默认）时自动挂载
+            ``get_default_callbacks()``，使图级事件默认可追踪。LLM/工具级回调
+            已在 ``services/llm.py`` 挂载到 ChatOpenAI 实例；图级回调追踪链路
+            事件（on_chain_*），与 LLM 级回调（on_llm_*）事件类型不同，不会
+            重复计数 token 用量（on_llm_end 仅由 LLM 自身回调链触发）。
+            传 ``None`` 等价于默认——也会挂载默认回调；如需禁用图级回调，
+            传入空列表 ``[]``。
 
     build_graph() 保持纯拓扑、不挂载 checkpointer；只有 compile_graph() 挂载。
     """
     if isinstance(checkpointer, _Default):
         checkpointer = get_checkpointer()
+    if callbacks is None:
+        # 未显式传入回调时，自动挂载默认可观测性回调，追踪图级 on_chain_* 事件。
+        callbacks = get_default_callbacks()
     compiled = build_graph().compile(checkpointer=checkpointer)
-    if callbacks:
-        # LangGraph compile() 不支持 callbacks 参数；通过 with_config 绑定图级回调。
-        # 返回 RunnableBinding，运行时兼容 ainvoke/astream/astream_events。
-        return compiled.with_config(callbacks=callbacks)
-    return compiled
+    # LangGraph compile() 不支持 callbacks 参数；通过 with_config 绑定图级回调。
+    # 返回 RunnableBinding，运行时兼容 ainvoke/astream/astream_events。
+    return compiled.with_config(callbacks=callbacks)
