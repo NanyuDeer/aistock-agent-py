@@ -157,7 +157,8 @@ from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.search_tools import tavily_finance_search
 from aistock_agent.tools.news_tools import get_cls_news
 
 _MORNING_GET_CACHED = "aistock_agent.agents.workers.morning._get_cached_briefing"

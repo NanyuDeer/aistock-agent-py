@@ -17,7 +17,8 @@ from aistock_agent.prompts.workers.morning import MORNING_PROMPT
 from aistock_agent.services.cache import get_cached_briefing, set_cached_briefing
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.market_tools import get_global_markets, tavily_finance_search
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.search_tools import tavily_finance_search
 from aistock_agent.tools.news_tools import get_cls_news
 from aistock_agent.utils.date import is_trading_day  # 亦作为模块属性供 test_morning_agent.py patch
 from aistock_agent.utils.message import extract_final_ai_response

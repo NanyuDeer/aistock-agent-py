@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from aistock_agent.agents.workers.event import run
 from aistock_agent.prompts.workers.event import EVENT_ANALYST_PROMPT
-from aistock_agent.tools.market_tools import tavily_finance_search
+from aistock_agent.tools.search_tools import tavily_finance_search
 from aistock_agent.tools.news_tools import get_news_fulltext, search_cls_news
 from aistock_agent.tools.stock_tools import get_quote
 

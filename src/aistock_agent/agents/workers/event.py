@@ -10,7 +10,7 @@ from langgraph.prebuilt import create_react_agent
 from aistock_agent.prompts.workers.event import EVENT_ANALYST_PROMPT
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.market_tools import tavily_finance_search
+from aistock_agent.tools.search_tools import tavily_finance_search
 from aistock_agent.tools.news_tools import get_news_fulltext, search_cls_news
 from aistock_agent.tools.stock_tools import get_quote
 from aistock_agent.utils.message import extract_final_ai_response
