@@ -95,7 +95,7 @@ AGENT_STANDARDS.md                  # 复盘/迭代 agent 模式 + 快照生成�
 
 **Interfaces:**
 - Consumes: `node_api.get`（Node.js `/internal/wind-leaders`），yfinance A股指数 Tickers
-- Produces: `get_market_summary() -> str`，`get_sector_performance() -> str`，TOOL_REGISTRY `"review"` category
+- Produces: `get_market_summary() -> str`，`get_sector_performance() -> str`，registry `"review"` category（通过 `register()` 自注册）
 
 **设计决策：**
 - `get_market_summary`：用 yfinance 获取 A 股主要指数（上证综指 `000001.SS`、深证成指 `399001.SZ`、创业板指 `399006.SZ`、科创50 `000688.SS`）。yfinance 支持 `.SS`/`.SZ` 后缀获取 A 股数据，无需新增 Node.js 端点。
@@ -288,24 +288,19 @@ Expected: PASS (4 tests)
 
 - [ ] **Step 6: Update registry.py — add "review" category**
 
-Modify `src/aistock_agent/tools/registry.py`:
-
-In the imports section, add:
+In `src/aistock_agent/tools/review_tools.py`, at the bottom of the file, add self-registration:
 ```python
-from aistock_agent.tools.review_tools import get_market_summary, get_sector_performance
+# ── 自注册到 Tool Registry ──────────────────────────────────────────
+from aistock_agent.tools.registry import register  # noqa: E402
+
+register("review", tavily_finance_search)
+register("review", get_global_markets)
+register("review", get_cls_news)
+register("review", get_market_summary)
+register("review", get_sector_performance)
 ```
 
-In `TOOL_REGISTRY`, add the `"review"` key (before `"iterate"`):
-```python
-    "review": [tavily_finance_search, get_global_markets, get_cls_news,
-               get_market_summary, get_sector_performance],
-```
-
-In `__all__`, add:
-```python
-    "get_market_summary",
-    "get_sector_performance",
-```
+Note: `tavily_finance_search`, `get_global_markets`, `get_cls_news` are already registered to their own categories by their respective modules. Re-registering them to "review" is expected — `register()` handles cross-category sharing automatically.
 
 - [ ] **Step 7: Update routes.py — register new tools in /skills**
 
@@ -2511,7 +2506,7 @@ Add subsection describing snapshot builder pattern (code framework + LLM, two-le
 
 - [ ] **Step 7: Update AGENT_STANDARDS.md — registry "review" category**
 
-Update the TOOL_REGISTRY code example to include the "review" category.
+Update the registry code example to document the "review" category auto-registration pattern.
 
 - [ ] **Step 8: Run full verification**
 
@@ -2568,6 +2563,6 @@ git commit -m "docs: update README and AGENT_STANDARDS with review/iterate agent
 - `check_thresholds(snapshot, rolling) -> list[str]` — Task 6 定义并测试 ✓
 - `match_sectors_code_level(morning, review) -> tuple[list[str], list[str], list[str]]` — Task 3 测试，Task 4 实现 ✓
 - `llm_evaluate_dimensions(morning_text, review_text, unmatched_morning, unmatched_review) -> dict[str, Any]` — Task 5 定义并测试 ✓
-- `TOOL_REGISTRY["review"]` — Task 1 注册，Task 2 使用 `get_tools("review")` ✓
+- `register("review", ...)` — Task 1 自注册，Task 2 使用 `get_tools("review")` ✓
 - `get_cached_review() / set_cached_review()` — Task 2 定义并使用 ✓
 - 迭代 agent `run(state: AgentState) -> dict[str, object]` — Task 6 定义，Task 7 调用 ✓

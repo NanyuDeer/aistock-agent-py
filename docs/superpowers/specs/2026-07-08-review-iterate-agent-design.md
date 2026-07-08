@@ -449,45 +449,40 @@ Step 4: 复盘agent + 迭代agent + 快照生成器
 
 当前各agent手动import工具并内联组装列表，工具复用已在发生（如 `get_capital_flow` 被 stock 和 sector 共用）但无统一管理。Phase 5 Task 11 拆分 Tavily 后，工具文件职责清晰，正好建registry。
 
-**tools/registry.py**:
+**设计原则**：分布式自动注册，避免多人编辑同一文件导致合并冲突。
+
+**tools/registry.py**（注册中心，不含工具定义）:
 
 ```python
 """工具注册中心 — 按 category 集中管理工具集
 
 agent 只需声明 category，即可获取完整工具列表，
 不再手动 import + 拼接。
+
+自动注册机制：每个 tool 模块在底部调用 register() 自注册，
+tools/__init__.py 导入所有 tool 模块触发注册。
+新增工具只需在自己的 tool 文件底部加一行 register()，
+不需要编辑本文件。
 """
 
-from aistock_agent.tools.market_tools import get_global_markets
-from aistock_agent.tools.search_tools import tavily_finance_search
-from aistock_agent.tools.news_tools import get_cls_news, search_cls_news
-from aistock_agent.tools.stock_tools import get_quote, get_capital_flow, get_profit_forecast
-from aistock_agent.tools.sector_tools import get_leader_stocks
-from aistock_agent.tools.review_tools import get_market_summary, get_sector_performance
+from langchain_core.tools import BaseTool
 
-# 按 category 分组
-TOOL_REGISTRY: dict[str, list] = {
-    "morning": [tavily_finance_search, get_global_markets, get_cls_news],
-    "stock": [get_quote, get_capital_flow, get_profit_forecast, search_cls_news],
-    "sector": [get_leader_stocks, get_capital_flow],
-    "review": [tavily_finance_search, get_global_markets, get_cls_news,
-               get_market_summary, get_sector_performance],
-    "iterate": [],  # 迭代agent无工具，纯读文件+LLM推理
-}
-
-__all__ = [
-    "get_global_markets", "tavily_finance_search", "get_cls_news",
-    "search_cls_news", "get_quote", "get_capital_flow", "get_profit_forecast",
-    "get_leader_stocks", "get_market_summary", "get_sector_performance",
-    "get_tools", "get_all_tools",
-]
+_REGISTRY: dict[str, list[BaseTool]] = {}
 
 
-def get_all_tools() -> list:
+def register(category: str, tool: BaseTool) -> None:
+    """将工具注册到指定 category（自动去重）"""
+    if category not in _REGISTRY:
+        _REGISTRY[category] = []
+    if tool not in _REGISTRY[category]:
+        _REGISTRY[category].append(tool)
+
+
+def get_all_tools() -> list[BaseTool]:
     """获取全部工具（去重）"""
     seen: set[int] = set()
-    result = []
-    for tools in TOOL_REGISTRY.values():
+    result: list[BaseTool] = []
+    for tools in _REGISTRY.values():
         for tool in tools:
             if id(tool) not in seen:
                 seen.add(id(tool))
@@ -495,17 +490,24 @@ def get_all_tools() -> list:
     return result
 
 
-def get_tools(category: str | None = None) -> list:
-    """获取工具集
-
-    Args:
-        category: 工具分类名（如 "morning"、"review"）。
-                  不传或传 None → 返回全部工具（去重）。
-                  传具体名称 → 返回该分类的工具列表。
-    """
+def get_tools(category: str | None = None) -> list[BaseTool]:
+    """获取工具集"""
     if category is None:
         return get_all_tools()
-    return TOOL_REGISTRY.get(category, [])
+    return _REGISTRY.get(category, [])
+```
+
+**各 tool 文件底部自注册**（以 `stock_tools.py` 为例）:
+
+```python
+# tools/stock_tools.py — 文件底部
+from aistock_agent.tools.registry import register
+
+register("stock", get_quote)
+register("stock", get_capital_flow)
+register("stock", get_profit_forecast)
+register("event", get_quote)           # 跨 category 共享
+register("sector", get_capital_flow)   # 跨 category 共享
 ```
 
 三种使用方式：

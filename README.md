@@ -249,7 +249,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 1. 在 `tools/` 对应文件中定义 `@tool` + `@safe_tool_call` 装饰的 async 函数
 2. 参数必须定义类型注解和 docstring（供 LLM 理解工具用途）
 3. 通过 `services/data_client.py` 的 `NodeApiClient` 调用 Node.js `/internal/*` 接口
-4. 在 `tools/registry.py` 的 `TOOL_REGISTRY` 中按 category 注册工具（保持与 agent 原 tools 列表顺序一致，集成测试含顺序断言）
+4. 在定义该 tool 的文件底部调用 `register("category", tool)` 自注册（无需编辑 registry.py，自动注册机制）
 5. 在 `api/routes.py` 的 `all_tools` 列表中注册（供 `/skills` 接口枚举）
 6. 必须编写 mock 测试（正常 + 异常降级，`tests/unit/` 目录）
 
@@ -257,7 +257,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 1. 在 `agents/workers/` 新增文件，实现 `async def run(state: AgentState) -> dict`
 2. 在 `graph/builder.py` 注册节点
 3. 在 `graph/routers/intent_router.py` 添加路由条件（如果需要新 intent）
-4. 在 `tools/registry.py` 的 `TOOL_REGISTRY` 中声明该 agent 的 category（如已有工具复用现有 category，无需新增）
+4. 在该 agent 使用的 tool 文件底部调用 `register("category", tool)` 注册到对应 category（如已有工具复用现有 category，无需新增）
 5. agent 内通过 `from aistock_agent.tools.registry import get_tools` + `get_tools("<category>")` 获取工具集，禁止手动 import + 拼接工具列表
 6. 在 `services/llm.py` 绑定对应的工具集（quick_think / deep_think）
 
