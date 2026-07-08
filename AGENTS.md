@@ -136,23 +136,33 @@ src/aistock_agent/
 │       ├── sector.py    # 板块分析
 │       └── event.py     # 事件传导链
 ├── tools/
-│   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin
+│   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
-│   ├── sector_tools.py  # get_leader_stocks
+│   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
 │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
 │   ├── market_tools.py  # get_global_markets, tavily_finance_search
-│   ├── monitor_tools.py # 占位（Phase 5）
-│   └── tenx_tools.py    # 占位（Phase 5）
+│   ├── monitor_tools.py # get_stock_monitor, get_alert_history（Phase 5）
+│   ├── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks（Phase 5）
+│   ├── graph_tools.py   # get_concepts, get_graph_by_concept（Phase 5）
+│   └── hot_burst_tools.py # get_hot_burst, get_hot_burst_history（Phase 5）
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
 │   └── workers/{morning,stock,sector,event}.py
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
-│   └── data_client.py   # httpx → Node.js /internal/* API
+│   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
+│   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
+│   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
+│   └── cache.py         # 晨报缓存服务（基于 RedisPool）
+├── observability/       # 可观测性包（Phase 5）
+│   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
+│   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
+│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
 └── api/
-    ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills）
+    ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
+    ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
     └── ws.py            # WebSocket 流式接口
 ```
 
@@ -166,16 +176,17 @@ src/aistock_agent/
 - 新增状态字段必须修改 `state/schema.py`
 
 ### 新增 Tool 流程
-1. 在 `tools/` 对应文件中定义 `@tool` 函数
-2. 参数必须定义类型注解和 docstring
-3. 在 `api/routes.py` 的 `list_skills` 中注册
-4. 必须编写 mock 测试（`tests/` 目录）
+1. 在 `tools/` 对应文件中定义 `@tool` + `@safe_tool_call` 装饰的 async 函数
+2. 参数必须定义类型注解和 docstring（供 LLM 理解工具用途）
+3. 通过 `services/data_client.py` 的 `NodeApiClient` 调用 Node.js `/internal/*` 接口
+4. 在 `api/routes.py` 的 `all_tools` 列表中注册
+5. 必须编写 mock 测试（正常 + 异常降级，`tests/unit/` 目录）
 
 ### 新增 Agent 流程
-1. 在 `agents/` 新增文件，实现 `async def run(state: AgentState) -> dict`
+1. 在 `agents/workers/` 新增文件，实现 `async def run(state: AgentState) -> dict`
 2. 在 `graph/builder.py` 注册节点
-3. 在 `graph/edges.py` 添加路由条件（如果需要新 intent）
-4. 在 `agents/base.py` 绑定对应的工具集
+3. 在 `graph/routers/intent_router.py` 添加路由条件（如果需要新 intent）
+4. 在 `services/llm.py` 绑定对应的工具集（quick_think / deep_think）
 
 ### 提示词管理
 - 统一存放 `prompts/` 目录
