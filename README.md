@@ -174,7 +174,8 @@ src/aistock_agent/
 │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── graph_tools.py        # get_concepts, get_graph_by_concept（Phase 5）
-│   └── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history（Phase 5）
+│   ├── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history（Phase 5）
+│   └── review_tools.py       # get_market_summary, get_sector_performance（复盘流水线，review category）
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
