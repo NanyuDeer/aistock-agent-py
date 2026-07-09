@@ -27,6 +27,10 @@ pytest tests/ -v
 # Windows PowerShell
 $env:PYTHONPATH = "src"; python scripts/run_morning_test.py
 
+# 晨报缓存提取（从 Redis 提取到 docs/agent-outputs/morning/，不重新生成）
+$env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py
+$env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py --date 2026-07-09
+
 # 代码检查
 ruff check src/
 mypy src/
@@ -83,14 +87,14 @@ graph TB
         GE --> E1
     end
 
-    subgraph 复盘流水线["复盘流水线（定时触发，交易日15:30，规划中）"]
-        T[定时调度] --> RV[review_agent<br/>deep_think]
-        RV --> SB[快照生成器<br/>代码+LLM]
-        SB --> IA[迭代agent<br/>deep_think]
+    subgraph 复盘流水线["复盘流水线（定时触发，交易日 15:30 / 15:35 / 15:40）"]
+        T["定时调度<br/>15:30 → 15:35 → 15:40"] --> RV[review_agent<br/>deep_think]
+        RV --> SB[快照生成器<br/>代码 + LLM]
+        SB --> IA[iterate_agent<br/>deep_think]
     end
 
-    M -.->|当日报告| SB
-    RV -.->|当日报告| SB
+    M -.->|晨报文件| SB
+    RV -.->|复盘文件| SB
     SB -->|snapshot_T| IA
     SB -->|rolling_stats| IA
 
@@ -101,7 +105,7 @@ graph TB
     style RV fill:#d4edda,stroke:#155724
 ```
 
-> 注：主流程已实现的 worker 为 morning / stock / sector / event + general 兜底；复盘流水线（review / snapshot / iterate）为规划中，由定时调度触发，不经过 supervisor 路由。
+> 注：主流程 worker 为 morning / stock / sector / event + general 兜底，由 supervisor 路由；复盘流水线（review → snapshot → iterate）由定时调度触发，不经过 supervisor 路由。三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据（晨报/复盘报告 → 快照 JSON → 迭代分析），非 LangGraph 图内边。
 
 ### 双模型策略
 
@@ -117,11 +121,11 @@ graph TB
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
 | 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存，用户打开 App 命中缓存 |
-| 15:30 | 复盘生成 | `review_report` | 收盘后归因分析（规划中） |
-| 15:35 | 快照生成 | `snapshot_build` | 晨报 vs 复盘偏差评估（规划中） |
-| 15:40 | 迭代分析 | `iterate_analysis` | 偏差分析报告 + 优化建议（规划中） |
+| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` |
+| 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
+| 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> 注：review / snapshot / iterate 三个任务已注册 job 并完成交易日过滤，但具体执行逻辑待对应 agent / 快照生成器实现后接入。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
+复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
 ### 目录结构
 
@@ -132,12 +136,15 @@ src/aistock_agent/
 ├── main.py              # FastAPI 入口（lifespan 管理 RedisPool + HttpClientPool + Scheduler）
 ├── config.py            # pydantic-settings 配置（多模型/连接池/LangSmith/CORS/调度）
 ├── constants.py         # SSE 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
+├── data/                # 静态数据文件
+│   └── sector_aliases.json  # 板块别名字典（35 标准板块 → 别名列表，快照生成器第一级匹配用）
 ├── state/
 │   └── schema.py        # AgentState TypedDict
-├── schemas/             # 对外交互 Pydantic 数据模型
+├── schemas/             # 数据模型（Pydantic 对外交互 + TypedDict 内部结构）
 │   ├── chat.py          # ChatRequest / ChatResponse
 │   ├── sse.py           # SSEEvent
-│   └── agents.py        # 各 Agent 输入/输出 schema
+│   ├── agents.py        # 各 Agent 输入/输出 schema
+│   └── snapshot.py      # 快照数据模型（11 TypedDict：SnapshotData / RollingStatsData / ManifestData 等）
 ├── memory/              # 持久化记忆模块（Phase 4）
 │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
 │   ├── session_store.py # 会话历史读写
@@ -162,7 +169,9 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + Redis 缓存）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
-│       └── event.py     # 事件传导链
+│       ├── event.py     # 事件传导链
+│       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
+│       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
 ├── tools/
 │   ├── base.py               # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
 │   ├── registry.py           # 工具注册中心：get_tools(category) / get_all_tools()（新增）
@@ -179,7 +188,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event}.py
+│   └── workers/{morning,stock,sector,event,review,iterate}.py
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
@@ -204,6 +213,13 @@ src/aistock_agent/
 
 - 晨报 Agent 的测试输出默认归档到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`
 - 使用 `python scripts/run_morning_test.py` 可直接生成并落盘，文件头包含生成时间、耗时、交易日、缓存命中等元数据
+- 晨报 Redis 缓存提取归档到 `docs/agent-outputs/morning/YYYY-MM-DD-briefing.md`
+- 使用 `python scripts/extract_morning_cache.py` 从 Redis 缓存提取已生成的晨报（不触发 LLM 重新生成），支持 `--date YYYY-MM-DD` 指定日期，默认提取所有缓存报告
+- 复盘报告归档到 `docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md`（scheduler 15:30 触发，自动归档）
+- 快照 JSON 归档到 `docs/agent-outputs/snapshots/YYYY-MM-DD.json`（scheduler 15:35 触发，含 4 维度偏差评估）
+- 迭代分析报告归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`（scheduler 15:40 触发，JSON 格式）
+- 滚动统计归档到 `docs/agent-outputs/rolling_stats.json`（快照生成器维护，MA5/MA10/MA20）
+- 历史记录清单归档到 `docs/agent-outputs/manifest.json`（快照生成器维护，每日追加一条记录）
 
 ## API 接口
 
@@ -263,6 +279,8 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 5. agent 内通过 `from aistock_agent.tools.registry import get_tools` + `get_tools("<category>")` 获取工具集，禁止手动 import + 拼接工具列表
 6. 在 `services/llm.py` 绑定对应的工具集（quick_think / deep_think）
 
+> **例外：定时触发型 Agent**：review / iterate agent 不经过 supervisor 路由，不注册到 `graph/builder.py`，而是由 `services/scheduler.py` 的 `_run_review_task` / `_run_iterate_task` 直接调用 `agent.run(state)`。详见 `AGENT_STANDARDS.md` 规范 3。
+
 ### 提示词管理
 - 统一存放 `prompts/` 目录
 - 日期等动态内容用占位符（如 `{{DATE}}`），运行时替换
@@ -316,9 +334,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_ENABLED` | 定时调度开关（关闭后 lifespan 不启动调度器） | `true` |
 | `SCHEDULER_TIMEZONE` | 调度时区 | `Asia/Shanghai` |
 | `SCHEDULER_MORNING_CRON` | 晨报生成 cron（工作日 08:50） | `50 8 * * 1-5` |
-| `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30，规划中） | `30 15 * * 1-5` |
-| `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35，规划中） | `35 15 * * 1-5` |
-| `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40，规划中） | `40 15 * * 1-5` |
+| `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30） | `30 15 * * 1-5` |
+| `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35） | `35 15 * * 1-5` |
+| `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
 
 ## Vibecoding 工作流
 
