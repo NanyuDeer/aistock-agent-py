@@ -187,6 +187,7 @@ src/aistock_agent/
 │   ├── cache.py         # 晨报缓存服务（基于 RedisPool）
 │   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
+│   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配；LLM 维度 Task 5 接入）
 │   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/15:30/15:35/15:40）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
