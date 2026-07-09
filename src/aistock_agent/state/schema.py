@@ -38,7 +38,7 @@ class AgentState(TypedDict):
     # 分析报告累积（broadcast_agent读取）
     analysis_reports: dict[str, str]
     # 预加载字段（Python入口写入，Agent读取）
-    wind_leaders_data: NotRequired[dict[str, object] | None]  # 长线风口数据
-    institution_research_data: NotRequired[dict[str, object] | None]  # 机构调研数据
+    wind_leaders_data: NotRequired[dict[str, object] | None]  # 长线风口数据（通过工具按需加载，非入口预加载）
+    institution_research_data: NotRequired[dict[str, object] | None]  # 机构调研数据（通过工具按需加载，非入口预加载）
     # 最终响应
     final_response: str | None

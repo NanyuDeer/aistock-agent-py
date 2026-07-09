@@ -170,6 +170,7 @@ src/aistock_agent/
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
 │       ├── event.py     # 事件传导链
+│       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports，Phase 5）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
 ├── tools/
