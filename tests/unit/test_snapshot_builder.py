@@ -157,3 +157,71 @@ def test_llm_evaluate_dimensions_malformed(mock_get_llm):
     assert result["dimension_3"]["attribution_match_rate"] == 0.0
     # dimension_4 仍是合法结构，数值字段保留
     assert result["dimension_4"]["bias"] == 0.5
+
+
+@patch("aistock_agent.services.snapshot_builder._append_new_aliases")
+@patch("aistock_agent.services.snapshot_builder.get_deep_think")
+def test_llm_evaluate_dimensions_malformed_new_aliases(
+    mock_get_llm, mock_append_aliases
+):
+    """LLM 返回畸形 new_aliases（字符串而非列表）时由 _append_new_aliases 内部拒绝
+
+    ``new_aliases`` 不属于 4 个评估维度，未经 ``_validate_llm_dimension`` 校验，
+    因此畸形值会原样传递给 ``_append_new_aliases``。其内部校验（见下方直接测试）
+    确保 sector_aliases.json 不会被逐字符迭代损坏。
+    """
+    from aistock_agent.services.snapshot_builder import llm_evaluate_dimensions
+
+    mock_llm = mock_get_llm.return_value
+    mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+        "dimension_2": {
+            "direction_accuracy": 0.5, "mean_deviation": 0.3,
+            "abs_mean_deviation": 0.3,
+        },
+        "dimension_3": {"attribution_match_rate": 0.4},
+        "dimension_4": {
+            "morning_sentiment": 0.5, "review_sentiment": 0.3, "bias": 0.2,
+        },
+        "new_aliases": {"新能源": "绿色能源"},  # string instead of list
+    }))
+
+    result = llm_evaluate_dimensions("morning", "review", [], [])
+    # _append_new_aliases 被调用，原始值原样传入；校验在其内部完成
+    assert mock_append_aliases.call_count == 1
+    assert result["new_aliases"] == {"新能源": "绿色能源"}
+
+
+def test_append_new_aliases_rejects_non_list_values():
+    """_append_new_aliases 拒绝非 list 类型的别名值，不损坏 sector_aliases.json
+
+    若 ``{"新能源": "绿色能源"}`` 未被校验，``for alias in aliases`` 会逐字符
+    迭代，将 "绿"/"色"/"能"/"源" 四个单字写入字典。此测试验证该值被整体跳过。
+    """
+    from aistock_agent.services.snapshot_builder import _append_new_aliases
+
+    malformed = {"新能源": "绿色能源"}  # type: ignore[list-item]
+    with patch(
+        "aistock_agent.services.snapshot_builder._load_aliases", return_value={}
+    ), patch(
+        "aistock_agent.services.snapshot_builder.ALIASES_FILE"
+    ) as mock_file:
+        _append_new_aliases(malformed)  # type: ignore[arg-type]
+    # 无合法条目可写 → write_text 必须未被调用
+    mock_file.write_text.assert_not_called()
+
+
+def test_append_new_aliases_rejects_non_str_entries():
+    """_append_new_aliases 拒绝 list 中的非 str 别名，仅保留合法别名"""
+    from aistock_agent.services.snapshot_builder import _append_new_aliases
+
+    mixed = {"新能源": [123, "绿色能源"]}  # type: ignore[list-item]
+    with patch(
+        "aistock_agent.services.snapshot_builder._load_aliases", return_value={}
+    ), patch(
+        "aistock_agent.services.snapshot_builder.ALIASES_FILE"
+    ) as mock_file:
+        _append_new_aliases(mixed)  # type: ignore[arg-type]
+    # 仅合法 str 别名被写入
+    mock_file.write_text.assert_called_once()
+    written = json.loads(mock_file.write_text.call_args.args[0])
+    assert written == {"新能源": ["绿色能源"]}

@@ -1,6 +1,6 @@
 """复盘工具测试 — get_market_summary + get_sector_performance"""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -28,7 +28,14 @@ async def test_get_market_summary_success(mock_yf):
 @pytest.mark.asyncio
 @patch("aistock_agent.tools.review_tools.yf")
 async def test_get_market_summary_partial_failure(mock_yf):
-    """部分指数获取失败时，失败的标注"数据暂不可用"，其余正常"""
+    """部分指数获取失败时，失败的标注"数据暂不可用"，其余正常
+
+    用 PropertyMock 让 ``ticker.fast_info`` 属性访问抛异常（而非 side_effect，
+    后者只在 mock 被 *调用* 时触发，属性访问不会触发）。
+    用独立子类 ``_FailingTicker`` 挂载 PropertyMock，避免污染共享的 MagicMock
+    类型导致其他正常 ticker 也失败。提供全部 4 个 A 股指数 ticker，确保
+    走的是"部分失败"路径（fast_info 异常），而非"ticker 缺失"路径。
+    """
     from aistock_agent.tools.review_tools import get_market_summary
 
     mock_ticker_ok = MagicMock()
@@ -36,19 +43,32 @@ async def test_get_market_summary_partial_failure(mock_yf):
     mock_ticker_ok.fast_info.regular_market_change = 15.30
     mock_ticker_ok.fast_info.regular_market_change_percent = 0.48
 
-    mock_ticker_fail = MagicMock()
-    mock_ticker_fail.fast_info = MagicMock(side_effect=Exception("timeout"))
+    # PropertyMock 必须挂在 mock 的 type 上才能在属性访问时触发；
+    # 用独立子类隔离，避免污染共享 MagicMock 类型导致其他 ticker 也失败
+    class _FailingTicker(MagicMock):
+        pass
+
+    mock_ticker_fail = _FailingTicker()
+    type(mock_ticker_fail).fast_info = PropertyMock(
+        side_effect=Exception("timeout")
+    )
 
     mock_tickers = MagicMock()
     mock_tickers.tickers = {
-        "000001.SS": mock_ticker_ok,
-        "399001.SZ": mock_ticker_fail,
+        "000001.SS": mock_ticker_ok,   # 上证指数 — 正常
+        "399001.SZ": mock_ticker_fail,  # 深证成指 — fast_info 访问抛异常
+        "399006.SZ": mock_ticker_ok,   # 创业板指 — 正常
+        "000688.SS": mock_ticker_ok,   # 科创50  — 正常
     }
     mock_yf.Tickers.return_value = mock_tickers
 
     result = await get_market_summary.ainvoke({})
     assert "上证指数" in result
+    # 深证成指触发 fast_info 异常 → 标注暂不可用（确认走的是部分失败路径）
+    assert "深证成指: 数据暂不可用" in result
     assert "数据暂不可用" in result
+    # 其余正常指数应包含价格
+    assert "3200" in result
 
 
 @pytest.mark.asyncio

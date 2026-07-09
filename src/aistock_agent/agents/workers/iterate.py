@@ -25,9 +25,6 @@ logger = structlog.get_logger()
 # 存储路径
 SNAPSHOT_DIR = Path("docs/agent-outputs/snapshots")
 ROLLING_STATS_FILE = Path("docs/agent-outputs/rolling_stats.json")
-MANIFEST_FILE = Path("docs/agent-outputs/manifest.json")
-MORNING_DIR = Path("docs/agent-outputs/morning")
-REVIEW_DIR = Path("docs/agent-outputs/review")
 ITERATE_OUTPUT_DIR = Path("docs/agent-outputs/iterate")
 
 
@@ -226,7 +223,7 @@ def _load_rolling_stats() -> dict[str, object]:
 
 
 def _read_report_excerpt(filepath_str: str) -> str:
-    """读取报告摘录（前 2000 字符）"""
+    """读取报告全文（截断由调用方处理）"""
     if not filepath_str:
         return ""
     filepath = Path(filepath_str)

@@ -389,15 +389,38 @@ def llm_evaluate_dimensions(
 
 
 def _append_new_aliases(new_aliases: dict[str, list[str]]) -> None:
-    """将 LLM 发现的新别名追加到 sector_aliases.json"""
+    """将 LLM 发现的新别名追加到 sector_aliases.json
+
+    LLM 输出的 ``new_aliases`` 未经 ``_validate_llm_dimension`` 校验
+    （它不属于 4 个评估维度），因此必须在此处独立校验结构：
+      - 每个标准名对应的别名值必须是 ``list``，否则跳过该条目
+        （若为字符串，``for alias in aliases`` 会逐字符迭代，静默损坏字典）
+      - 每个别名必须是 ``str``，否则跳过该别名
+    校验失败时记录 warning，便于排查 LLM 输出质量问题。
+    """
     try:
         existing = _load_aliases()
         updated = False
         for standard, aliases in new_aliases.items():
+            if not isinstance(aliases, list):
+                # 非列表值（如字符串）会导致逐字符迭代，损坏字典，必须拒绝
+                logger.warning(
+                    "aliases_value_not_list",
+                    standard=standard,
+                    actual_type=type(aliases).__name__,
+                )
+                continue
             if standard not in existing:
                 existing[standard] = []
                 updated = True
             for alias in aliases:
+                if not isinstance(alias, str):
+                    logger.warning(
+                        "alias_not_str",
+                        standard=standard,
+                        actual_type=type(alias).__name__,
+                    )
+                    continue
                 if alias not in existing[standard]:
                     existing[standard].append(alias)
                     updated = True
