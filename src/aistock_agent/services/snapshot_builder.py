@@ -249,6 +249,67 @@ def update_rolling_stats(manifest: dict[str, object]) -> dict[str, object]:
     }
 
 
+# LLM 维度默认值（字段缺失或类型校验失败时降级使用）
+_DEFAULT_DIM2: dict[str, object] = {
+    "sectors": {},
+    "direction_accuracy": 0.0,
+    "mean_deviation": 0.0,
+    "abs_mean_deviation": 0.0,
+}
+_DEFAULT_DIM3: dict[str, object] = {
+    "sectors": {},
+    "attribution_match_rate": 0.0,
+}
+_DEFAULT_DIM4: dict[str, object] = {
+    "morning_sentiment": 0.0,
+    "review_sentiment": 0.0,
+    "bias": 0.0,
+}
+
+
+def _validate_llm_dimension(
+    parsed_value: object,
+    default: dict[str, object],
+    numeric_fields: list[str],
+) -> dict[str, object]:
+    """校验 LLM 返回的单个维度结构，类型不符则降级到默认值
+
+    全局约束要求"代码层做 JSON 解析 + schema 校验"。json.loads 只保证
+    是合法 JSON，不保证结构正确（如 dimension_2 可能是字符串而非 dict，
+    direction_accuracy 可能是字符串而非数值）。此函数做轻量 schema 校验：
+      - parsed_value 必须是 dict，否则整维降级
+      - numeric_fields 中的字段必须是 int/float（排除 bool，因为
+        isinstance(True, int) 为真，但布尔值用于数值字段属于结构错误），
+        否则该字段降级为默认值
+    任何校验失败均记录 warning，便于排查 LLM 输出质量问题。
+    """
+    if not isinstance(parsed_value, dict):
+        logger.warning(
+            "llm_dim_invalid_type",
+            expected="dict",
+            actual=type(parsed_value).__name__,
+        )
+        return dict(default)
+
+    # 用默认值补全缺失字段，再覆盖 LLM 返回值
+    merged: dict[str, object] = dict(default)
+    for key, value in parsed_value.items():
+        merged[key] = value
+
+    # 校验数值字段类型
+    for field in numeric_fields:
+        val = merged.get(field)
+        if not isinstance(val, int | float) or isinstance(val, bool):
+            logger.warning(
+                "llm_numeric_field_invalid",
+                field=field,
+                actual=type(val).__name__ if val is not None else "None",
+            )
+            merged[field] = default[field]
+
+    return merged
+
+
 def llm_evaluate_dimensions(
     morning_text: str,
     review_text: str,
@@ -288,23 +349,24 @@ def llm_evaluate_dimensions(
 
         parsed = json.loads(content)
 
-        # 补全缺失字段（parsed 来自 json.loads 返回 Any，赋值到 dict[str, object] 安全）
+        # schema 校验：每个维度必须是 dict，数值字段必须是数字，否则降级
+        # （parsed 来自 json.loads 返回 Any，传入 object 参数安全）
         result: dict[str, object] = {
-            "dimension_2": parsed.get("dimension_2", {
-                "sectors": {},
-                "direction_accuracy": 0.0,
-                "mean_deviation": 0.0,
-                "abs_mean_deviation": 0.0,
-            }),
-            "dimension_3": parsed.get("dimension_3", {
-                "sectors": {},
-                "attribution_match_rate": 0.0,
-            }),
-            "dimension_4": parsed.get("dimension_4", {
-                "morning_sentiment": 0.0,
-                "review_sentiment": 0.0,
-                "bias": 0.0,
-            }),
+            "dimension_2": _validate_llm_dimension(
+                parsed.get("dimension_2"),
+                _DEFAULT_DIM2,
+                ["direction_accuracy", "mean_deviation", "abs_mean_deviation"],
+            ),
+            "dimension_3": _validate_llm_dimension(
+                parsed.get("dimension_3"),
+                _DEFAULT_DIM3,
+                ["attribution_match_rate"],
+            ),
+            "dimension_4": _validate_llm_dimension(
+                parsed.get("dimension_4"),
+                _DEFAULT_DIM4,
+                ["morning_sentiment", "review_sentiment", "bias"],
+            ),
             "new_aliases": parsed.get("new_aliases", {}),
         }
 
@@ -318,21 +380,9 @@ def llm_evaluate_dimensions(
     except Exception as e:
         logger.warning("llm_evaluate_failed", error=str(e))
         return {
-            "dimension_2": {
-                "sectors": {},
-                "direction_accuracy": 0.0,
-                "mean_deviation": 0.0,
-                "abs_mean_deviation": 0.0,
-            },
-            "dimension_3": {
-                "sectors": {},
-                "attribution_match_rate": 0.0,
-            },
-            "dimension_4": {
-                "morning_sentiment": 0.0,
-                "review_sentiment": 0.0,
-                "bias": 0.0,
-            },
+            "dimension_2": dict(_DEFAULT_DIM2),
+            "dimension_3": dict(_DEFAULT_DIM3),
+            "dimension_4": dict(_DEFAULT_DIM4),
             "new_aliases": {},
             "error": str(e),
         }
@@ -436,9 +486,11 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
     new_coverage_rate = len(missing) / total_review if total_review > 0 else 0.0
 
     # LLM 4 维度评估（维度2/3/4 + 语义匹配）
+    # over_focused=晨报有但复盘没有=morning-only→unmatched_morning；
+    # missing=复盘有但晨报没有=review-only→unmatched_review
     llm_result = llm_evaluate_dimensions(
         morning_content, review_content,
-        missing, over_focused,  # 代码未匹配的进入 LLM 语义匹配
+        over_focused, missing,
     )
 
     # 组装完整快照

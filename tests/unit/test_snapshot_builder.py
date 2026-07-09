@@ -134,3 +134,26 @@ def test_llm_evaluate_dimensions_degraded(mock_get_llm):
     assert result["dimension_3"]["attribution_match_rate"] == 0.0
     assert result["dimension_4"]["bias"] == 0.0
     assert result.get("error") is not None
+
+
+@patch("aistock_agent.services.snapshot_builder.get_deep_think")
+def test_llm_evaluate_dimensions_malformed(mock_get_llm):
+    """LLM 返回畸形结构时降级"""
+    from aistock_agent.services.snapshot_builder import llm_evaluate_dimensions
+
+    mock_llm = mock_get_llm.return_value
+    mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+        "dimension_2": "not a dict",  # malformed
+        "dimension_3": {"attribution_match_rate": "high"},  # wrong type
+        "dimension_4": {"morning_sentiment": 0.6, "review_sentiment": 0.1, "bias": 0.5}
+    }))
+
+    result = llm_evaluate_dimensions("morning", "review", [], [])
+    # dimension_2 should fall back to default (not "not a dict")
+    assert isinstance(result["dimension_2"], dict)
+    assert result["dimension_2"]["direction_accuracy"] == 0.0
+    # dimension_3 should fall back for wrong-typed field
+    assert isinstance(result["dimension_3"], dict)
+    assert result["dimension_3"]["attribution_match_rate"] == 0.0
+    # dimension_4 仍是合法结构，数值字段保留
+    assert result["dimension_4"]["bias"] == 0.5
