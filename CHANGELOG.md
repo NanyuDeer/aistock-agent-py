@@ -2,6 +2,39 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-10 — Agent 报告持久化架构 + 机构调研/播报/风口 Agent + 空数据预检
+**开发者**: Aria
+
+### 新增 — Agent 报告持久化架构（Phase 1-3）
+- `src/aistock_agent/services/data_guard.py`：通用空数据预检模块（DataCheck dataclass + ensure_data_available 函数，3 次重试 + 调刷新接口）
+- `src/aistock_agent/services/volcengine_podcast.py`：火山引擎 TTS 播客服务（WebSocket v3 SAMI 二进制协议，双人对话语音合成）
+- `scripts/run_broadcast_test.py` / `run_broadcast_test.bat`：播报生成测试脚本（双人对话 + TTS 语音输出）
+- `scripts/test_volc_tts_*.py`（v2/v3/v4/connection）：火山引擎 TTS 连接和协议测试脚本
+
+### 改进 — Agent 持久化改造（Phase 2）
+- `src/aistock_agent/services/data_client.py`：扩展 node_api（save_analysis_report / get_analysis_report 方法）
+- `src/aistock_agent/state/schema.py`：AgentState 新增 trigger_source 和 report_date 字段（NotRequired）
+- `src/aistock_agent/agents/workers/morning.py`：scheduler 触发时持久化晨报到 DB
+- `src/aistock_agent/agents/workers/wind_leader.py`：持久化 + 空数据预检（ensure_data_available，3 次重试调刷新接口）
+- `src/aistock_agent/agents/workers/hot_burst.py`：scheduler 触发时持久化机构调研报告到 DB
+- `src/aistock_agent/agents/workers/review.py`：scheduler 触发时持久化复盘报告到 DB
+
+### 改进 — 播报链路改造（Phase 3）
+- `src/aistock_agent/agents/workers/broadcast.py`：双链路读取报告（scheduler 从 DB 读，实时请求降级到 state.analysis_reports）+ 火山引擎 TTS 双人语音
+- `src/aistock_agent/prompts/workers/broadcast.py`：播报提示词更新（双人对话格式）
+- `src/aistock_agent/services/scheduler.py`：新增 09:00 播报串行链路（morning→wind_leader→hot_burst→broadcast，trigger_source="scheduler"，异常独立捕获）
+- `src/aistock_agent/config.py`：新增 scheduler_broadcast_cron 配置（"0 9 * * 1-5"，9:10 前端可见）
+- `src/aistock_agent/constants.py`：INTENT_SET 新增 hot_burst + TOOL_LABELS 新增 get_hot_burst/get_hot_burst_history
+
+### 文档
+- `AGENT_STANDARDS.md`：新增规范 13 空数据预检（可选，hot_burst 和纯外部 API 的 agent 豁免）+ 目录结构添加 data_guard.py
+- `README.md`：播报 Agent 文档（发音人信息 + 音频路径 + VOLC_TTS_* 环境变量 + 测试命令 + 输出归档）；定时调度表新增 09:00 播报链路；目录结构新增 data_guard.py / volcengine_podcast.py
+- `AGENTS.md`：broadcast 状态改为"已实现"；降级文本表新增 review 和 broadcast 行
+- `.env.example`：新增 VOLC_TTS_* 环境变量
+- `scripts/run_morning_test.bat`：微调
+
+---
+
 ## [changer] 2026-07-09 — 复盘工具 + Registry 自注册（SDD Task 1）
 **开发者**: 37588
 

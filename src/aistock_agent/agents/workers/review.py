@@ -16,6 +16,7 @@ from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
 from aistock_agent.services.cache import get_cached_review, set_cached_review
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
@@ -67,6 +68,14 @@ async def run(state: AgentState) -> dict[str, object]:
         if final_response:
             await set_cached_review(final_response)
             _archive_review(final_response)
+            # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
+            if state.get("trigger_source") == "scheduler":
+                report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                await node_api.save_analysis_report(
+                    report_type="review",
+                    report_date=report_date,
+                    content={"text": final_response},
+                )
 
         return {"final_response": final_response}
     except Exception as e:

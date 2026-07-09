@@ -26,7 +26,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 十倍股/趋势股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 交易复盘 | workers/review.py（Phase 5+） | deep_think | P2 |
-| **播报生成** | **workers/broadcast.py（Phase 5+）** | **deep_think** | **P0（核心特色）** |
+| **播报生成** | **workers/broadcast.py（已实现）** | **deep_think** | **P0（核心特色）** |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
 
 ## 核心架构
@@ -271,7 +271,10 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 | stock | `{"final_response": "个股分析暂时不可用，请稍后重试"}` |
 | sector | `{"final_response": "板块分析暂时不可用，请稍后重试"}` |
 | wind_leader | `{"final_response": "长线风口分析暂时不可用，请稍后重试"}` |
+| hot_burst | `{"final_response": "机构调研热门股分析暂时不可用，请稍后重试"}` |
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
+| review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
+| broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 ### 不做异常分类 catch

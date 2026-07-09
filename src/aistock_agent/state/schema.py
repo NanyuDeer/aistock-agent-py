@@ -24,6 +24,8 @@ class AgentState(TypedDict):
         analysis_reports: 多步分析报告累积（key=报告类型, value=内容）
         wind_leaders_data: 长线风口数据（Python入口预加载，wind_leader_agent读取）
         institution_research_data: 机构调研数据（Python入口预加载）
+        trigger_source: 触发来源（scheduler=定时任务, user=用户对话）
+        report_date: 报告日期（YYYY-MM-DD，scheduler 写入，Agent 持久化用）
         final_response: 最终响应文本
     """
 
@@ -40,5 +42,8 @@ class AgentState(TypedDict):
     # 预加载字段（Python入口写入，Agent读取）
     wind_leaders_data: NotRequired[dict[str, object] | None]  # 长线风口数据（通过工具按需加载，非入口预加载）
     institution_research_data: NotRequired[dict[str, object] | None]  # 机构调研数据（通过工具按需加载，非入口预加载）
+    # 持久化控制（scheduler 写入，Agent 读取判断是否写数据库）
+    trigger_source: NotRequired[str | None]  # "scheduler" | "user"
+    report_date: NotRequired[str | None]  # YYYY-MM-DD
     # 最终响应
     final_response: str | None
