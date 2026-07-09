@@ -53,3 +53,41 @@ async def set_cached_briefing(content: str, ttl: int = 7200) -> None:
         await client.setex(cache_key, ttl, content)
     except Exception:
         logger.debug("set_cached_briefing_failed", exc_info=True)
+
+
+async def get_cached_review() -> str | None:
+    """从 Redis 获取缓存复盘报告。
+
+    缓存 key 格式：``briefing:review:{YYYY-MM-DD}``
+
+    Returns:
+        缓存的复盘文本，未命中或异常时返回 None。
+    """
+    try:
+        client = await RedisPool.get_client()
+        today = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"briefing:review:{today}"
+        cached = await client.get(cache_key)
+        if cached:
+            if isinstance(cached, bytes):
+                return cached.decode()
+            return str(cached)
+    except Exception:
+        logger.debug("get_cached_review_failed", exc_info=True)
+    return None
+
+
+async def set_cached_review(content: str, ttl: int = 7200) -> None:
+    """缓存复盘报告到 Redis。
+
+    Args:
+        content: 复盘文本。
+        ttl: 缓存过期秒数，默认 7200（2 小时）。
+    """
+    try:
+        client = await RedisPool.get_client()
+        today = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"briefing:review:{today}"
+        await client.setex(cache_key, ttl, content)
+    except Exception:
+        logger.debug("set_cached_review_failed", exc_info=True)
