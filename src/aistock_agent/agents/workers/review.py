@@ -55,9 +55,10 @@ async def run(state: AgentState) -> dict[str, object]:
         tools = get_tools("review")
         agent = create_react_agent(llm, tools)
 
-        # 执行
+        # 执行（5步归因 + 多次工具调用需更高递归限制）
         result = await agent.ainvoke(
             {"messages": [SystemMessage(content=system_prompt)]},
+            config={"recursion_limit": 100},
         )
 
         final_response = extract_final_ai_response(result.get("messages", []))
