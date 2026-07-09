@@ -120,7 +120,7 @@ graph TB
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存，用户打开 App 命中缓存 |
+| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
@@ -166,7 +166,7 @@ src/aistock_agent/
 │   ├── general/
 │   │   └── node.py      # 兜底对话（quick_think）
 │   └── workers/
-│       ├── morning.py   # 晨报（ReAct + Redis 缓存）
+│       ├── morning.py   # 晨报（ReAct + Redis 缓存 + 文件归档）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
 │       ├── event.py     # 事件传导链
@@ -211,7 +211,7 @@ src/aistock_agent/
 
 ### 输出归档
 
-- 晨报 Agent 的测试输出默认归档到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`
+- 晨报 Agent 的 `run()` 在生成后**自动归档**到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`（与 review agent 对称，供 snapshot_builder 读取）
 - 使用 `python scripts/run_morning_test.py` 可直接生成并落盘，文件头包含生成时间、耗时、交易日、缓存命中等元数据
 - 晨报 Redis 缓存提取归档到 `docs/agent-outputs/morning/YYYY-MM-DD-briefing.md`
 - 使用 `python scripts/extract_morning_cache.py` 从 Redis 缓存提取已生成的晨报（不触发 LLM 重新生成），支持 `--date YYYY-MM-DD` 指定日期，默认提取所有缓存报告

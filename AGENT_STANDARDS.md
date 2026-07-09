@@ -44,6 +44,13 @@ LangGraph 的状态机模型依赖 `AgentState` 在节点间传递数据。若�
 `src/aistock_agent/state/schema.py`：
 
 ```python
+from typing import Annotated
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+from typing_extensions import NotRequired, TypedDict
+
+
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage | dict[str, str]], add_messages]
     session_id: str
@@ -55,6 +62,9 @@ class AgentState(TypedDict):
     tag_code: str | None
     # 分析报告累积
     analysis_reports: dict[str, str]
+    # 预加载字段（Python入口写入，Agent读取；NotRequired 允许 scheduler state 省略）
+    wind_leaders_data: NotRequired[dict[str, object] | None]
+    institution_research_data: NotRequired[dict[str, object] | None]
     # 最终响应
     final_response: str | None
 ```
@@ -84,10 +94,11 @@ return {"final_response": "个股分析暂时不可用，请稍后重试"}
 ### 新增状态字段流程
 
 1. 在 `state/schema.py` 的 `AgentState` 中新增字段，附 `Attributes` 文档注释。
-2. 若新字段需要"追加而非覆盖"语义，用 `Annotated[T, <reducer>]`。
-3. 在 `api/deps.py` 的 `build_initial_state` 中补默认值（若字段由入口构造）。
-4. 检查所有 `morning_briefing` 等手写 state 字典（`api/routes.py:117`）是否需同步补字段。
-5. 更新 `tests/` 中所有构造 state 的测试 fixture。
+2. 若新字段并非所有调用方都需要传入（如 scheduler 构造的 state），用 `NotRequired[T]` 标记为可选（需 `from typing_extensions import NotRequired`）。
+3. 若新字段需要"追加而非覆盖"语义，用 `Annotated[T, <reducer>]`。
+4. 在 `api/deps.py` 的 `build_initial_state` 中补默认值（若字段由入口构造）。
+5. 检查所有 `morning_briefing` 等手写 state 字典（`api/routes.py:117`）是否需同步补字段。
+6. 更新 `tests/` 中所有构造 state 的测试 fixture。
 
 ### 禁止
 
@@ -1291,7 +1302,7 @@ aistock-agent-py/
         │   └── sector_aliases.json   # 板块别名字典（35 标准板块 → 别名列表，快照生成器第一级匹配）
         │
         ├── state/
-        │   └── schema.py             # AgentState TypedDict
+        │   └── schema.py             # AgentState TypedDict（预加载字段为 NotRequired）
         │
         ├── schemas/                  # 数据模型（Pydantic 对外交互 + TypedDict 内部结构）
         │   ├── chat.py               # ChatRequest / ChatResponse
@@ -1322,7 +1333,7 @@ aistock-agent-py/
         │   ├── supervisor/node.py    # 意图分类（quick_think）
         │   ├── general/node.py       # 兜底对话（quick_think）
         │   └── workers/
-        │       ├── morning.py        # 晨报（deep_think + ReAct + Redis 缓存）
+        │       ├── morning.py        # 晨报（deep_think + ReAct + Redis 缓存 + 文件归档，scheduler 触发）
         │       ├── stock.py          # 个股分析（deep_think）
         │       ├── sector.py         # 板块分析（deep_think）
         │       ├── event.py          # 事件传导链（deep_think）
