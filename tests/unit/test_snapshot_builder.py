@@ -1,9 +1,5 @@
 """快照生成器 core 测试 — 文件I/O、MA计算、manifest、板块匹配"""
-import json
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 
 def test_match_sectors_code_level_basic():
@@ -61,10 +57,21 @@ def test_update_manifest_append():
     assert updated["records"][-1]["date"] == "2026-07-08"
 
 
-def test_build_snapshot_degraded_when_files_missing(tmp_path):
-    """晨报/复盘文件不存在时，生成降级快照（标注 error）"""
+def test_build_snapshot_degraded_when_files_missing():
+    """晨报/复盘文件不存在时，生成降级快照（标注 error）
+
+    通过 mock _find_report 返回 None 隔离真实文件系统，确保降级路径稳定触发，
+    不依赖 docs/agent-outputs/{morning,review}/ 中是否恰好存在该日期的报告。
+    """
     from aistock_agent.services.snapshot_builder import build_snapshot
 
-    result = build_snapshot(date_str="2026-07-08")
+    with patch(
+        "aistock_agent.services.snapshot_builder._find_report",
+        return_value=None,
+    ):
+        result = build_snapshot(date_str="2026-07-08")
     assert result["date"] == "2026-07-08"
-    assert result.get("error") is not None or result.get("dimension_1_coverage", {}).get("hit_rate") == 0.0
+    assert (
+        result.get("error") is not None
+        or result.get("dimension_1_coverage", {}).get("hit_rate") == 0.0
+    )
