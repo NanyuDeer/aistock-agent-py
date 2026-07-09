@@ -3,10 +3,12 @@
 模式：create_react_agent，LLM 自主决定搜索策略
 工具集：tavily_finance_search, get_global_markets, get_cls_news
 缓存：Redis TTL=2小时（通过 services.cache → RedisPool 单例）
+归档：docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md
 """
 
 from collections.abc import AsyncGenerator
 from datetime import datetime
+from pathlib import Path
 
 import structlog
 from langchain_core.messages import SystemMessage
@@ -23,6 +25,9 @@ from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 logger = structlog.get_logger()
+
+# 晨报归档目录（供 snapshot_builder 读取）
+MORNING_OUTPUT_DIR = Path("docs/agent-outputs/morning")
 
 
 async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], None]:
@@ -110,9 +115,10 @@ async def run(state: AgentState) -> dict[str, object]:
         # 提取最终响应（与其他 4 个 agent 统一使用 extract_final_ai_response）
         final_response = extract_final_ai_response(result.get("messages", []))
 
-        # 缓存结果
+        # 缓存 + 归档（供 snapshot_builder 读取）
         if final_response:
             await _set_cached_briefing(final_response)
+            _archive_morning(final_response)
 
         return {"final_response": final_response}
     except Exception as e:
@@ -124,6 +130,19 @@ async def run(state: AgentState) -> dict[str, object]:
             exc_info=True,
         )
         return {"final_response": "晨报生成暂时不可用，请稍后重试"}
+
+
+def _archive_morning(content: str) -> None:
+    """将晨报报告归档到文件（供 snapshot_builder.build_snapshot() 读取）"""
+    try:
+        MORNING_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+        filepath = MORNING_OUTPUT_DIR / f"{timestamp}-briefing.md"
+        filepath.write_text(content, encoding="utf-8")
+        logger.info("morning_archived", path=str(filepath))
+    except Exception as e:
+        # 归档失败不阻塞主流程（review agent 同模式）
+        logger.warning("morning_archive_failed", error=str(e))
 
 
 async def _get_cached_briefing() -> str | None:

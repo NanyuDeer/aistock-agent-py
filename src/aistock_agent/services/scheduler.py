@@ -1,17 +1,13 @@
-"""定时调度服务 — APScheduler AsyncIOScheduler 集成
+"""定时任务调度器（APScheduler）
 
-调度任务（均为交易日执行，非交易日自动跳过）：
-  08:50  晨报生成（写Redis，用户打开App命中缓存）
-  15:30  复盘生成（复盘归因分析，归档到 docs/agent-outputs/review/）
-  15:35  快照生成（晨报×复盘对比快照，归档到 docs/agent-outputs/snapshots/）
-  15:40  迭代分析（阈值判断 + 偏差分析，归档到 docs/agent-outputs/iterate/）
-
-复盘 → 快照 → 迭代 是顺序依赖链（间隔 5 分钟），每个任务独立 try/except，
-前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。
-
-集成方式：在 main.py lifespan 中 start_scheduler() / shutdown_scheduler()
+在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
+- 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
+- 15:30 复盘 review：review agent（5步归因框架，缓存+落盘）
+- 15:35 快照 snapshot：build_snapshot（代码层匹配 + LLM 4维评估 → 落盘 JSON）
+- 15:40 迭代分析 iterate：iterate agent（硬编码阈值 + LLM 偏差分析 → JSON 输出）
 """
 
+import asyncio
 from datetime import date
 
 import structlog
@@ -183,7 +179,9 @@ async def _run_snapshot_task() -> None:
     from aistock_agent.services.snapshot_builder import build_snapshot
 
     try:
-        snapshot = build_snapshot()
+        # build_snapshot 是同步函数（含同步 llm.invoke()），
+        # 用 asyncio.to_thread 扔到线程池避免阻塞 AsyncIOScheduler 的事件循环
+        snapshot = await asyncio.to_thread(build_snapshot)
         logger.info(
             "scheduler_snapshot_done",
             date=snapshot.get("date"),
