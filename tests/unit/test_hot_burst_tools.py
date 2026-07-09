@@ -18,34 +18,39 @@ async def test_get_hot_burst_success():
         "update_time": "2026-07-08 10:00",
         "total_stocks_checked": 4500,
         "resonance_count": 3,
-        "ths_hot_sectors": [{"name": "人工智能", "rank": 1, "change_pct": 5.2}],
         "outbreaks": [
             {
                 "symbol": "300308",
                 "stockName": "中际旭创",
                 "resonanceCount": 4,
                 "resonanceLevel": "critical",
+                "resonanceScore": 88,
                 "price": 158.50,
                 "changePct": 12.3,
                 "sectorInfo": "光模块",
-                "articles": [{"title": "中际旭创业绩超预期", "source": "财联社", "time": "2026-07-08"}],
+                "triggerTags": ["光模块", "机构调研", "算力"],
             },
         ],
         "hot_concepts": [],
     }
     with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
         mock_api.get = AsyncMock(return_value=mock_data)
-        result = await get_hot_burst.ainvoke({"limit": 20})
+        result = await get_hot_burst.ainvoke(
+            {"hours": 6, "min_resonance_count": 2, "limit": 20}
+        )
         assert "中际旭创" in result
-        mock_api.get.assert_called_once_with("/internal/institution-research?limit=20")
+        mock_api.get.assert_called_once_with(
+            "/internal/institution-research?hours=6&min_resonance_count=2&limit=20"
+        )
 
 
 @pytest.mark.asyncio
 async def test_get_hot_burst_degradation():
-    """get_hot_burst 异常时返回降级文本"""
     with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
         mock_api.get = AsyncMock(side_effect=RuntimeError("node api down"))
-        result = await get_hot_burst.ainvoke({"limit": 20})
+        result = await get_hot_burst.ainvoke(
+            {"hours": 6, "min_resonance_count": 2, "limit": 20}
+        )
         assert result == DEGRADED_MESSAGE
 
 
@@ -54,32 +59,35 @@ async def test_get_hot_burst_degradation():
 
 @pytest.mark.asyncio
 async def test_get_hot_burst_history_success():
-    """get_hot_burst_history 正常返回历史记录"""
     mock_data = {
         "total": 2,
         "records": [
             {
-                "stock_code": "300308",
+                "symbol": "300308",
                 "stock_name": "中际旭创",
-                "push_date": "2026-07-01",
-                "theme": "光模块",
-                "resonance_count": 4,
-                "push_price": 145.20,
+                "detected_at": "2026-07-01T09:30:00Z",
+                "resonance_score": 88,
+                "resonance_level": "critical",
+                "keywords": "光模块、机构调研",
             },
         ],
     }
     with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
         mock_api.get = AsyncMock(return_value=mock_data)
-        result = await get_hot_burst_history.ainvoke({"days": 30})
+        result = await get_hot_burst_history.ainvoke(
+            {"limit": 50, "min_resonance_only": True, "days": 30, "offset": 0}
+        )
         assert "中际旭创" in result
         mock_api.get.assert_called_once_with(
-            "/internal/institution-research/history?days=30")
+            "/internal/institution-research/history?limit=50&min_resonance_only=true&days=30&offset=0"
+        )
 
 
 @pytest.mark.asyncio
 async def test_get_hot_burst_history_degradation():
-    """get_hot_burst_history 异常时返回降级文本"""
     with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
         mock_api.get = AsyncMock(side_effect=RuntimeError("node api down"))
-        result = await get_hot_burst_history.ainvoke({"days": 30})
+        result = await get_hot_burst_history.ainvoke(
+            {"limit": 50, "min_resonance_only": True, "days": 30, "offset": 0}
+        )
         assert result == DEGRADED_MESSAGE

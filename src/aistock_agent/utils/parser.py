@@ -32,6 +32,8 @@ def parse_intent(llm_output: str, user_message: str) -> dict[str, object]:
         intent = "sector"
     elif "stock" in output:
         intent = "stock"
+    elif "hot_burst" in output:
+        intent = "hot_burst"
 
     # 从原始消息提取股票代码和板块代码
     symbol_match = re.search(r"\b(\d{6})\b", user_message)
@@ -41,5 +43,10 @@ def parse_intent(llm_output: str, user_message: str) -> dict[str, object]:
     tag_match = re.search(r"BK\d+", user_message, re.IGNORECASE)
     if tag_match:
         tag_code = tag_match.group(0).upper()
+
+    if intent == "general":
+        hot_burst_keywords = ("机构调研", "热门股", "共振", "机构票", "调研热股")
+        if any(keyword in user_message for keyword in hot_burst_keywords):
+            intent = "hot_burst"
 
     return {"intent": intent, "symbol": symbol, "tag_code": tag_code}
