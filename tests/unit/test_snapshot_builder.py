@@ -1,5 +1,6 @@
 """快照生成器 core 测试 — 文件I/O、MA计算、manifest、板块匹配"""
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 
 def test_match_sectors_code_level_basic():
@@ -75,3 +76,61 @@ def test_build_snapshot_degraded_when_files_missing():
         result.get("error") is not None
         or result.get("dimension_1_coverage", {}).get("hit_rate") == 0.0
     )
+
+
+@patch("aistock_agent.services.snapshot_builder._append_new_aliases")
+@patch("aistock_agent.services.snapshot_builder.get_deep_think")
+def test_llm_evaluate_dimensions_success(mock_get_llm, mock_append_aliases):
+    """LLM 返回有效 JSON，4 维度全部填充"""
+    from aistock_agent.services.snapshot_builder import llm_evaluate_dimensions
+
+    mock_llm = mock_get_llm.return_value
+    mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+        "dimension_2": {
+            "sectors": {
+                "黄金": {"morning_score": 5, "review_score": 1, "deviation": -4}
+            },
+            "direction_accuracy": 0.5,
+            "mean_deviation": -2.0,
+            "abs_mean_deviation": 3.0
+        },
+        "dimension_3": {
+            "sectors": {
+                "黄金": {"similarity": 2, "morning_cause": "外盘大涨", "review_cause": "避险"}
+            },
+            "attribution_match_rate": 0.33
+        },
+        "dimension_4": {
+            "morning_sentiment": 0.6,
+            "review_sentiment": 0.1,
+            "bias": 0.5
+        },
+        "new_aliases": {"新能源": ["绿色能源"]}
+    }))
+
+    morning_text = "黄金板块值得关注"
+    review_text = "黄金板块涨幅3.5%"
+    code_unmatched_morning = ["新能源"]
+    code_unmatched_review = ["绿色能源"]
+
+    result = llm_evaluate_dimensions(
+        morning_text, review_text,
+        code_unmatched_morning, code_unmatched_review
+    )
+
+    assert result["dimension_2"]["sectors"]["黄金"]["deviation"] == -4
+    assert result["dimension_3"]["attribution_match_rate"] == 0.33
+    assert result["dimension_4"]["bias"] == 0.5
+    assert "new_aliases" in result
+
+
+@patch("aistock_agent.services.snapshot_builder.get_deep_think", side_effect=Exception("LLM down"))
+def test_llm_evaluate_dimensions_degraded(mock_get_llm):
+    """LLM 异常时返回降级结果（零值）"""
+    from aistock_agent.services.snapshot_builder import llm_evaluate_dimensions
+
+    result = llm_evaluate_dimensions("morning", "review", [], [])
+    assert result["dimension_2"]["direction_accuracy"] == 0.0
+    assert result["dimension_3"]["attribution_match_rate"] == 0.0
+    assert result["dimension_4"]["bias"] == 0.0
+    assert result.get("error") is not None

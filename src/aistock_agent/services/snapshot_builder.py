@@ -28,6 +28,9 @@ from pathlib import Path
 from typing import cast
 
 import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from aistock_agent.services.llm import get_deep_think
 
 logger = structlog.get_logger()
 
@@ -40,6 +43,54 @@ REVIEW_DIR = Path("docs/agent-outputs/review")
 
 # 板块别名字典路径
 ALIASES_FILE = Path("src/aistock_agent/data/sector_aliases.json")
+
+# LLM 4 维度评估 prompt（{{ }} 为 JSON 字面量大括号，str.format 不替换）
+_LLM_EVALUATION_PROMPT = """你是量化分析助手。对比晨报和复盘报告，
+按以下4个维度评估，返回严格JSON格式。
+
+## 输入
+晨报报告：
+{morning_text}
+
+复盘报告：
+{review_text}
+
+代码未匹配的晨报板块：{unmatched_morning}
+代码未匹配的复盘板块：{unmatched_review}
+
+## 输出要求（严格JSON，不要有其他文本）
+
+{{
+  "dimension_2": {{
+    "sectors": {{
+      "<板块名>": {{"morning_score": <int>, "review_score": <int>, "deviation": <int>}}
+    }},
+    "direction_accuracy": <float 0到1>,
+    "mean_deviation": <float>,
+    "abs_mean_deviation": <float>
+  }},
+  "dimension_3": {{
+    "sectors": {{
+      "<板块名>": {{"similarity": <int>, "morning_cause": "<str>", "review_cause": "<str>"}}
+    }},
+    "attribution_match_rate": <float 0到1>
+  }},
+  "dimension_4": {{
+    "morning_sentiment": <float -1到1>,
+    "review_sentiment": <float -1到1>,
+    "bias": <float 晨报减复盘>
+  }},
+  "new_aliases": {{
+    "<标准板块名>": ["<别名1>", "<别名2>"]
+  }}
+}}
+
+## 评分标准
+- morning_score/review_score: -5(极度看空) 到 +5(极度看多)
+- similarity: 1(完全不同) 到 5(完全一致)
+- sentiment: -1(极度悲观) 到 +1(极度乐观)
+- new_aliases: 代码未匹配的板块中，语义等价的板块对（用于扩充字典）
+"""
 
 
 def _load_aliases() -> dict[str, list[str]]:
@@ -198,11 +249,124 @@ def update_rolling_stats(manifest: dict[str, object]) -> dict[str, object]:
     }
 
 
-def build_snapshot(date_str: str | None = None) -> dict[str, object]:
-    """构建当日快照（core 层，不含 LLM 评估）
+def llm_evaluate_dimensions(
+    morning_text: str,
+    review_text: str,
+    unmatched_morning: list[str],
+    unmatched_review: list[str],
+) -> dict[str, object]:
+    """LLM 4 维度评估（维度2/3/4 + 板块语义匹配第二级）
 
-    本函数实现代码层职责：文件I/O、板块匹配、JSON组装。
-    LLM 4维度评估在 Task 5 中扩展（本版本返回降级快照）。
+    维度1（板块重叠度）由代码层完成，不在此函数中。
+
+    Args:
+        morning_text: 晨报全文
+        review_text: 复盘全文
+        unmatched_morning: 代码层未匹配的晨报板块（供 LLM 语义匹配）
+        unmatched_review: 代码层未匹配的复盘板块（供 LLM 语义匹配）
+
+    Returns:
+        包含 dimension_2/3/4 和 new_aliases 的字典。
+        LLM 失败时返回降级结果（零值 + error 标记）。
+    """
+    try:
+        prompt = _LLM_EVALUATION_PROMPT.format(
+            morning_text=morning_text[:3000],
+            review_text=review_text[:3000],
+            unmatched_morning=str(unmatched_morning),
+            unmatched_review=str(unmatched_review),
+        )
+
+        llm = get_deep_think()
+        response = llm.invoke([
+            SystemMessage(content="你是量化分析助手。"),
+            HumanMessage(content=prompt),
+        ])
+        # response.content 类型为 str | list[str | dict[...]]，json.loads 需要 str
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        content = raw_content if isinstance(raw_content, str) else str(raw_content)
+
+        parsed = json.loads(content)
+
+        # 补全缺失字段（parsed 来自 json.loads 返回 Any，赋值到 dict[str, object] 安全）
+        result: dict[str, object] = {
+            "dimension_2": parsed.get("dimension_2", {
+                "sectors": {},
+                "direction_accuracy": 0.0,
+                "mean_deviation": 0.0,
+                "abs_mean_deviation": 0.0,
+            }),
+            "dimension_3": parsed.get("dimension_3", {
+                "sectors": {},
+                "attribution_match_rate": 0.0,
+            }),
+            "dimension_4": parsed.get("dimension_4", {
+                "morning_sentiment": 0.0,
+                "review_sentiment": 0.0,
+                "bias": 0.0,
+            }),
+            "new_aliases": parsed.get("new_aliases", {}),
+        }
+
+        # 追加新别名到字典文件
+        new_aliases = cast(dict[str, list[str]], result["new_aliases"])
+        if new_aliases:
+            _append_new_aliases(new_aliases)
+
+        return result
+
+    except Exception as e:
+        logger.warning("llm_evaluate_failed", error=str(e))
+        return {
+            "dimension_2": {
+                "sectors": {},
+                "direction_accuracy": 0.0,
+                "mean_deviation": 0.0,
+                "abs_mean_deviation": 0.0,
+            },
+            "dimension_3": {
+                "sectors": {},
+                "attribution_match_rate": 0.0,
+            },
+            "dimension_4": {
+                "morning_sentiment": 0.0,
+                "review_sentiment": 0.0,
+                "bias": 0.0,
+            },
+            "new_aliases": {},
+            "error": str(e),
+        }
+
+
+def _append_new_aliases(new_aliases: dict[str, list[str]]) -> None:
+    """将 LLM 发现的新别名追加到 sector_aliases.json"""
+    try:
+        existing = _load_aliases()
+        updated = False
+        for standard, aliases in new_aliases.items():
+            if standard not in existing:
+                existing[standard] = []
+                updated = True
+            for alias in aliases:
+                if alias not in existing[standard]:
+                    existing[standard].append(alias)
+                    updated = True
+        if updated:
+            ALIASES_FILE.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("aliases_updated", new_count=len(new_aliases))
+    except Exception as e:
+        logger.warning("append_aliases_failed", error=str(e))
+
+
+def build_snapshot(date_str: str | None = None) -> dict[str, object]:
+    """构建当日快照（代码层 + LLM 评估）
+
+    本函数实现代码层职责：文件I/O、板块匹配、JSON组装、持久化。
+    成功路径（晨报+复盘都存在）调用 llm_evaluate_dimensions 填充维度2/3/4。
+    降级路径（文件缺失）返回零值快照，不调用 LLM。
 
     Args:
         date_str: 日期字符串 YYYY-MM-DD，默认今天
@@ -271,7 +435,13 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
     hit_rate = len(overlap) / total_morning if total_morning > 0 else 0.0
     new_coverage_rate = len(missing) / total_review if total_review > 0 else 0.0
 
-    # 组装降级快照（LLM 维度在 Task 5 填充）
+    # LLM 4 维度评估（维度2/3/4 + 语义匹配）
+    llm_result = llm_evaluate_dimensions(
+        morning_content, review_content,
+        missing, over_focused,  # 代码未匹配的进入 LLM 语义匹配
+    )
+
+    # 组装完整快照
     snapshot: dict[str, object] = {
         "date": date_str,
         "morning_file": str(morning_file),
@@ -283,21 +453,9 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
             "hit_rate": round(hit_rate, 4),
             "new_coverage_rate": round(new_coverage_rate, 4),
         },
-        "dimension_2_direction": {
-            "sectors": {},
-            "direction_accuracy": 0.0,
-            "mean_deviation": 0.0,
-            "abs_mean_deviation": 0.0,
-        },
-        "dimension_3_attribution": {
-            "sectors": {},
-            "attribution_match_rate": 0.0,
-        },
-        "dimension_4_sentiment": {
-            "morning_sentiment": 0.0,
-            "review_sentiment": 0.0,
-            "bias": 0.0,
-        },
+        "dimension_2_direction": llm_result["dimension_2"],
+        "dimension_3_attribution": llm_result["dimension_3"],
+        "dimension_4_sentiment": llm_result["dimension_4"],
     }
 
     # 持久化
