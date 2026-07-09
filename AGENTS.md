@@ -270,6 +270,7 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 | morning | `{"final_response": "晨报生成暂时不可用，请稍后重试"}` |
 | stock | `{"final_response": "个股分析暂时不可用，请稍后重试"}` |
 | sector | `{"final_response": "板块分析暂时不可用，请稍后重试"}` |
+| wind_leader | `{"final_response": "长线风口分析暂时不可用，请稍后重试"}` |
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 

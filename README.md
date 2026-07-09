@@ -27,6 +27,9 @@ pytest tests/ -v
 # Windows PowerShell
 $env:PYTHONPATH = "src"; python scripts/run_morning_test.py
 
+# 风口分析定时测试（生成落盘到 docs/agent-outputs/wind_leader/）
+$env:PYTHONPATH = "src"; python scripts/run_wind_leader_test.py
+
 # 晨报缓存提取（从 Redis 提取到 docs/agent-outputs/morning/，不重新生成）
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py --date 2026-07-09
