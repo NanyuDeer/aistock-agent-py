@@ -32,7 +32,7 @@ class AgentState(TypedDict):
     user_id: str | None
     favorites: list[str]
     # 路由信息（supervisor 写入）
-    intent: str | None  # stock | sector | event | morning | wind_leader | broadcast | general
+    intent: str | None  # stock | sector | event | morning | wind_leader | broadcast | hot_burst | general
     symbol: str | None
     tag_code: str | None
     # 分析报告累积（broadcast_agent读取）
