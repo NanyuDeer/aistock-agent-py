@@ -541,26 +541,73 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
 
 
 def _extract_sectors(content: str) -> list[str]:
-    """从报告文本中提取板块名称（简单正则，匹配表格行首列或列表项）
+    """从报告文本中提取板块名称（简单正则 + 黑名单过滤）
 
-    策略：匹配 Markdown 表格中第一列（| 板块名称 |...）和列表项（- 板块名：）
+    策略：
+    1. 匹配 Markdown 表格中板块列（| 板块名称 |...）
+    2. 匹配列表项（- 板块名）
+    3. 过滤表格表头/章节序号/非板块噪音词
     """
+    # 已被其他正则覆盖的常见噪音词（章节标题、表头、序号等）
+    _noise_terms: set[str] = {
+        "维度", "板块", "板块名称", "指数", "事件名称",
+        "序号", "强势方向", "承压方向", "噪音事件",
+        "品种", "事件", "指标", "市场",
+        "**涨停结构**", "**焦点个股**", "**债市信号**", "**ETF异动**",
+        "涨停结构", "焦点个股", "债市信号", "ETF异动",
+        "整体指数层面", "与外盘联动弱",
+        # 晨报全球市场表格常见词（非A股板块）
+        "标普500", "纳斯达克", "道琼斯", "日经225", "韩国KOSPI",
+        "MSCI亚太指数", "恒生指数",
+        "黄金", "原油", "布伦特", "WTI",
+        "美元", "美元/人民币", "美元指数",
+        "日元", "欧元",
+        "北向资金", "融资融券",
+        "地缘风险", "亚太早盘情绪", "全球宏观预期",
+    }
+
+    def _is_noise(name: str) -> bool:
+        """判断提取到的名称是否为噪音"""
+        stripped = name.strip()
+        if not stripped:
+            return True
+        # Markdown 加粗包裹 → 比较前后 strip('* ')
+        cleaned = stripped.strip("* ").strip()
+        if cleaned in _noise_terms:
+            return True
+        # 排除纯序号/符号：**①**、1、2、--
+        if len(cleaned) <= 2 and not any("\u4e00" <= c <= "\u9fff" for c in cleaned):
+            return True
+        # 排除分隔符行（表格 |---|）
+        if cleaned.startswith("---"):
+            return True
+        return False
+
+    seen: set[str] = set()
     sectors: list[str] = []
 
     # 匹配表格行：| 板块名称 | 涨跌幅 | ...
     table_pattern = r"^\|\s*([^|]+?)\s*\|"
     for match in re.finditer(table_pattern, content, re.MULTILINE):
         name = match.group(1).strip()
-        # 排除表头和分隔行
-        if name and not name.startswith("---") and name not in ("板块名称", "指数", "事件名称"):
-            sectors.append(name)
+        if _is_noise(name):
+            continue
+        # 去 Markdown 加粗包裹：**半导体/存储芯片** → 半导体/存储芯片
+        cleaned = name.strip("* ").strip()
+        if cleaned not in seen and len(cleaned) <= 15:  # 板块名不超过15字
+            seen.add(cleaned)
+            sectors.append(cleaned)
 
     # 匹配列表项：- 板块名：或 - 板块名（
     list_pattern = r"^-\s*([^\s：()（）]+)"
     for match in re.finditer(list_pattern, content, re.MULTILINE):
         name = match.group(1).strip()
-        if name and len(name) <= 10:  # 板块名通常不超过 10 字
-            sectors.append(name)
+        if _is_noise(name):
+            continue
+        cleaned = name.strip("* ").strip()
+        if cleaned and len(cleaned) <= 10 and cleaned not in seen:
+            seen.add(cleaned)
+            sectors.append(cleaned)
 
     return sectors
 
