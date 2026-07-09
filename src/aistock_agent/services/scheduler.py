@@ -1,14 +1,13 @@
-"""定时调度服务 — APScheduler AsyncIOScheduler 集成
+"""定时任务调度器（APScheduler）
 
-调度任务（均为交易日执行，非交易日自动跳过）：
-  08:50  晨报生成（写Redis，用户打开App命中缓存）
-  15:30  复盘生成（复盘 agent 实现后接入）
-  15:35  快照生成（快照生成器实现后接入）
-  15:40  迭代分析（迭代 agent 实现后接入）
-
-集成方式：在 main.py lifespan 中 start_scheduler() / shutdown_scheduler()
+在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
+- 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
+- 15:30 复盘 review：review agent（5步归因框架，缓存+落盘）
+- 15:35 快照 snapshot：build_snapshot（代码层匹配 + LLM 4维评估 → 落盘 JSON）
+- 15:40 迭代分析 iterate：iterate agent（硬编码阈值 + LLM 偏差分析 → JSON 输出）
 """
 
+import asyncio
 from datetime import date
 
 import structlog
@@ -53,7 +52,7 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 复盘生成：工作日 15:30（agent 实现后激活）
+    # 复盘生成：工作日 15:30
     scheduler.add_job(
         _run_review_task,
         CronTrigger.from_crontab(settings.scheduler_review_cron),
@@ -62,7 +61,7 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 快照生成：工作日 15:35（快照生成器实现后激活）
+    # 快照生成：工作日 15:35
     scheduler.add_job(
         _run_snapshot_task,
         CronTrigger.from_crontab(settings.scheduler_snapshot_cron),
@@ -71,7 +70,7 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 迭代分析：工作日 15:40（迭代 agent 实现后激活）
+    # 迭代分析：工作日 15:40
     scheduler.add_job(
         _run_iterate_task,
         CronTrigger.from_crontab(settings.scheduler_iterate_cron),
@@ -140,39 +139,84 @@ async def _run_morning_task() -> None:
 
 
 async def _run_review_task() -> None:
-    """复盘生成任务（交易日 15:30）— 复盘 agent 实现后激活"""
+    """复盘生成任务（交易日 15:30）"""
     if not is_trading_day():
         logger.info("scheduler_skip_non_trading_day", task="review")
         return
 
     logger.info("scheduler_review_start")
-    # TODO: 复盘 agent 实现后接入
-    # from aistock_agent.agents.workers.review import run as review_run
-    # ...
-    logger.info("scheduler_review_not_implemented_yet")
+    from aistock_agent.agents.workers import review as review_agent
+
+    state: AgentState = {
+        "messages": [],
+        "session_id": f"scheduled_review_{date.today().isoformat()}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+    }
+
+    try:
+        result = await review_agent.run(state)
+        logger.info(
+            "scheduler_review_done",
+            has_response=bool(result.get("final_response")),
+        )
+    except Exception as e:
+        logger.error("scheduler_review_failed", error=str(e), exc_info=True)
 
 
 async def _run_snapshot_task() -> None:
-    """快照生成任务（交易日 15:35）— 快照生成器实现后激活"""
+    """快照生成任务（交易日 15:35）"""
     if not is_trading_day():
         logger.info("scheduler_skip_non_trading_day", task="snapshot")
         return
 
     logger.info("scheduler_snapshot_start")
-    # TODO: 快照生成器实现后接入
-    # from aistock_agent.services.snapshot_builder import build_snapshot
-    # ...
-    logger.info("scheduler_snapshot_not_implemented_yet")
+    from aistock_agent.services.snapshot_builder import build_snapshot
+
+    try:
+        # build_snapshot 是同步函数（含同步 llm.invoke()），
+        # 用 asyncio.to_thread 扔到线程池避免阻塞 AsyncIOScheduler 的事件循环
+        snapshot = await asyncio.to_thread(build_snapshot)
+        logger.info(
+            "scheduler_snapshot_done",
+            date=snapshot.get("date"),
+            has_error=bool(snapshot.get("error")),
+        )
+    except Exception as e:
+        logger.error("scheduler_snapshot_failed", error=str(e), exc_info=True)
 
 
 async def _run_iterate_task() -> None:
-    """迭代分析任务（交易日 15:40）— 迭代 agent 实现后激活"""
+    """迭代分析任务（交易日 15:40）"""
     if not is_trading_day():
         logger.info("scheduler_skip_non_trading_day", task="iterate")
         return
 
     logger.info("scheduler_iterate_start")
-    # TODO: 迭代 agent 实现后接入
-    # from aistock_agent.agents.workers.iterate import run as iterate_run
-    # ...
-    logger.info("scheduler_iterate_not_implemented_yet")
+    from aistock_agent.agents.workers import iterate as iterate_agent
+
+    state: AgentState = {
+        "messages": [],
+        "session_id": f"scheduled_iterate_{date.today().isoformat()}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+    }
+
+    try:
+        result = await iterate_agent.run(state)
+        logger.info(
+            "scheduler_iterate_done",
+            has_response=bool(result.get("final_response")),
+        )
+    except Exception as e:
+        logger.error("scheduler_iterate_failed", error=str(e), exc_info=True)

@@ -44,6 +44,13 @@ LangGraph 的状态机模型依赖 `AgentState` 在节点间传递数据。若�
 `src/aistock_agent/state/schema.py`：
 
 ```python
+from typing import Annotated
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+from typing_extensions import NotRequired, TypedDict
+
+
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage | dict[str, str]], add_messages]
     session_id: str
@@ -55,6 +62,9 @@ class AgentState(TypedDict):
     tag_code: str | None
     # 分析报告累积
     analysis_reports: dict[str, str]
+    # 预加载字段（Python入口写入，Agent读取；NotRequired 允许 scheduler state 省略）
+    wind_leaders_data: NotRequired[dict[str, object] | None]
+    institution_research_data: NotRequired[dict[str, object] | None]
     # 最终响应
     final_response: str | None
 ```
@@ -84,10 +94,11 @@ return {"final_response": "个股分析暂时不可用，请稍后重试"}
 ### 新增状态字段流程
 
 1. 在 `state/schema.py` 的 `AgentState` 中新增字段，附 `Attributes` 文档注释。
-2. 若新字段需要"追加而非覆盖"语义，用 `Annotated[T, <reducer>]`。
-3. 在 `api/deps.py` 的 `build_initial_state` 中补默认值（若字段由入口构造）。
-4. 检查所有 `morning_briefing` 等手写 state 字典（`api/routes.py:117`）是否需同步补字段。
-5. 更新 `tests/` 中所有构造 state 的测试 fixture。
+2. 若新字段并非所有调用方都需要传入（如 scheduler 构造的 state），用 `NotRequired[T]` 标记为可选（需 `from typing_extensions import NotRequired`）。
+3. 若新字段需要"追加而非覆盖"语义，用 `Annotated[T, <reducer>]`。
+4. 在 `api/deps.py` 的 `build_initial_state` 中补默认值（若字段由入口构造）。
+5. 检查所有 `morning_briefing` 等手写 state 字典（`api/routes.py:117`）是否需同步补字段。
+6. 更新 `tests/` 中所有构造 state 的测试 fixture。
 
 ### 禁止
 
@@ -216,10 +227,21 @@ agent = create_react_agent(llm, tools)
 `register()` 默认 `expose=True`，工具会自动出现在 `GET /api/agent/skills`：
 
 ```python
-# tools/review_tools.py
-register("review", get_market_summary)                  # 前端可见
-register("review", get_sector_performance, expose=False)  # 仅 agent 内部使用
+# tools/review_tools.py — 跨 category 注册示例
+# 复盘工具集是跨 category 组合：复用其他 category 的工具 + 新增专属工具
+from aistock_agent.tools.market_tools import get_global_markets
+from aistock_agent.tools.news_tools import get_cls_news
+from aistock_agent.tools.search_tools import tavily_finance_search
+
+register("review", tavily_finance_search)    # 跨 category 共享（原属 search）
+register("review", get_global_markets)       # 跨 category 共享（原属 market）
+register("review", get_cls_news)             # 跨 category 共享（原属 news）
+register("review", get_market_summary)       # review 专属（expose=True，前端可见）
+register("review", get_sector_performance)   # review 专属（expose=True，前端可见）
+# 如需隐藏某工具不出现在 /skills：register("review", tool, expose=False)
 ```
+
+**跨 category 注册要点**：同一工具可注册到多个 category（如 `tavily_finance_search` 同时属于 `"search"` 和 `"review"`），`register()` 自动去重。复盘 agent 通过 `get_tools("review")` 一次性获取全部 5 个工具，无需手动 import + 拼接。
 
 `api/routes.py` 的 `list_skills` 不再手动维护 `all_tools`，直接调用 `get_exposed_skills()`。
 
@@ -393,6 +415,112 @@ node_map = {
 每个 agent 绑定专属模型。模型选择由 agent 自身的 `run()` 决定（调哪个工厂函数）。
 新增模型参数（temperature / max_tokens）走 config，详见[补充规范 11](#补充规范-11配置标准)。
 
+### 例外模式 A：定时触发型 ReAct Agent（复盘 review）
+
+复盘 agent（`agents/workers/review.py`）与标准 worker 有三点关键差异：
+
+| 维度 | 标准 worker（如 stock） | 复盘 worker（review） |
+|------|------------------------|----------------------|
+| 触发方式 | supervisor 路由（用户请求） | scheduler 定时触发（交易日 15:30） |
+| 图注册 | `graph/builder.py` 注册节点 | **不注册到图**，scheduler 直接调 `review.run(state)` |
+| 路由条件 | `intent_router.py` 加 intent | **无 intent**，不经过 supervisor |
+
+**其余完全遵循标准 worker 模式**：ReAct 架构（`create_react_agent`）、`get_tools("review")` 获取工具集、顶层 try-catch 降级、`extract_final_ai_response` 提取响应。
+
+```python
+# agents/workers/review.py — 核心逻辑
+async def run(state: AgentState) -> dict[str, object]:
+    try:
+        cached = await get_cached_review()      # Redis 缓存（briefing:review:YYYY-MM-DD）
+        if cached:
+            return {"final_response": cached}
+
+        llm = get_deep_think()
+        tools = get_tools("review")              # 跨 category 工具集
+        agent = create_react_agent(llm, tools)
+        result = await agent.ainvoke({"messages": [SystemMessage(content=system_prompt)]})
+
+        final_response = extract_final_ai_response(result.get("messages", []))
+        if final_response:
+            await set_cached_review(final_response)  # 写 Redis 缓存
+            _archive_review(final_response)           # 归档到文件
+        return {"final_response": final_response}
+    except Exception as e:
+        logger.error("agent_run_failed", agent="review", error=str(e), exc_info=True)
+        return {"final_response": "复盘生成暂时不可用，请稍后重试"}
+```
+
+**5 步归因 prompt**（`prompts/workers/review.py`）：步骤 1 罗列核心变量（事实层）→ 步骤 2 匹配行情特征（数据层）→ 步骤 3 剔除噪音（排除层）→ 步骤 4 输出核心结论（归因层）→ 步骤 5 **强制输出标准化行情事实附录**（供迭代 agent 解析，表格格式）。
+
+**工具集注册**（`tools/review_tools.py`）：复盘工具集是跨 category 组合——复用 `tavily_finance_search`（search category）、`get_global_markets`（market category）、`get_cls_news`（news category）+ 新增 `get_market_summary`、`get_sector_performance`（review category），全部注册到 `"review"` category：
+
+```python
+# tools/review_tools.py — 文件底部
+register("review", tavily_finance_search)    # 跨 category 共享
+register("review", get_global_markets)       # 跨 category 共享
+register("review", get_cls_news)             # 跨 category 共享
+register("review", get_market_summary)       # review 专属
+register("review", get_sector_performance)   # review 专属
+```
+
+**缓存 + 归档**：Redis key `briefing:review:YYYY-MM-DD`（TTL=2h，与晨报同域），文件归档到 `docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md`。
+
+### 例外模式 B：定时触发型 Pipeline + LLM Agent（迭代 iterate）
+
+迭代 agent（`agents/workers/iterate.py`）是最特殊的 worker——**不是 ReAct agent**，是纯流水线 + LLM：
+
+```
+读快照文件 → 读 rolling_stats → 代码判断阈值 → 全正常则返回 / 触发则 LLM 生成分析 → 归档
+```
+
+| 维度 | 标准 worker | 迭代 worker（iterate） |
+|------|------------|----------------------|
+| 架构 | `create_react_agent`（ReAct） | **无 ReAct**，直接 `llm.invoke()` |
+| 工具 | `get_tools()` 绑定工具集 | **无工具**，纯 LLM 单次调用 |
+| 触发 | supervisor / scheduler | scheduler 定时触发（交易日 15:40） |
+| 输入 | `state["messages"]` | **读文件**（snapshot JSON + rolling_stats JSON） |
+| 输出 | `{"final_response": <str>}` | `{"final_response": <JSON string>}` |
+| 权限 | 读写 state | **只读 + 建议**，禁止修改任何文件 |
+
+**硬编码阈值**（`check_thresholds` 函数，LLM 不可改）：
+
+| 维度 | 触发条件 | 回看窗口 |
+|------|----------|----------|
+| 维度一（关注点重叠） | `hit_rate < 0.5` 或 `new_coverage_rate > 0.4` | MA5 |
+| 维度二（方向-强度） | `abs(mean_deviation) > 3` 或 MA10 均值偏差 `> 1.5` | 当日 + MA10 |
+| 维度三（归因一致性） | `attribution_match_rate < 0.3` | 当日 + MA5 |
+| 维度四（情绪基调） | MA20 `abs(sentiment_bias) > 0.15` | MA20 |
+
+阈值判断由代码完成（`check_thresholds` 返回触发的维度列表），仅当有维度触发时才调用 LLM 生成偏差分析报告。全部正常时返回 `{"status": "normal"}`，不消耗 LLM token。
+
+**JSON 输出**：迭代 agent 返回结构化 JSON（`status` / `triggered_dimensions` / `analysis` / `optimization_suggestions`），归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`。LLM 输出非 JSON 时包装为 `raw_text` 降级。
+
+**只读约束**：prompt 明确约束"你只能读取数据和生成建议，不能修改任何文件"。优化建议产出后由人工审核，不自动回写 prompt / 代码 / 数据文件。
+
+### 例外模式 C：快照生成器（非 Agent，service 层代码 + LLM 混合）
+
+快照生成器（`services/snapshot_builder.py`）**不是 agent**，是 service 层的流水线中间件。代码控制流程，LLM 只做语义判断。
+
+**代码层 / LLM 层职责边界**（核心设计原则）：
+
+| 层 | 职责 | 可确定性 |
+|----|------|----------|
+| 代码层 | 文件读写、JSON 组装、MA 计算、manifest 维护、板块字典第一级匹配、异常降级 | 确定性，不可被 LLM 覆盖 |
+| LLM 层 | 板块语义匹配（第二级）、方向-强度打分、归因相似度、情绪分析 | 语义判断，有降级默认值 |
+
+**两级板块匹配机制**：
+
+1. **第一级（代码层，`match_sectors_code_level`）**：使用 `data/sector_aliases.json`（35 标准板块 → 别名列表）做别名映射，将晨报和复盘的板块列表匹配。采用标准名集合求交（一个别名可能对应多个标准名，如"贵金属"同时归属黄金与白银），避免 last-write-wins 字典在别名碰撞时丢失映射。
+2. **第二级（LLM 层，`llm_evaluate_dimensions`）**：代码层未匹配的板块交由 LLM 做语义等价判断，发现的新别名自动追加到 `sector_aliases.json`（`_append_new_aliases`），实现字典自学习。
+
+**MA 计算**（`calculate_ma`）：基于 manifest 历史记录计算 MA5/MA10/MA20 滑动平均，指标包括 `hit_rate` / `direction_accuracy` / `mean_deviation` / `attribution_match_rate` / `sentiment_bias`。
+
+**Manifest 维护**：每次生成快照后，向 `docs/agent-outputs/manifest.json` 追加一条记录（日期 + 5 个核心指标），并更新 `docs/agent-outputs/rolling_stats.json`（MA5/MA10/MA20）。
+
+**LLM 输出校验**（`_validate_llm_dimension`）：LLM 返回的 JSON 经 `json.loads` 后做轻量 schema 校验——每个维度必须是 dict，数值字段必须是 int/float（排除 bool），校验失败降级到默认零值。LLM 整体失败时返回全零值快照 + `error` 标记，不中断流水线。
+
+**降级路径**：晨报或复盘文件缺失时返回零值快照（标注 `error: "missing_reports"`），不调用 LLM。
+
 ---
 
 ## 规范 4：提示词管理
@@ -564,6 +692,8 @@ async def run(state: AgentState) -> dict[str, object]:
 | stock | `{"final_response": "个股分析暂时不可用，请稍后重试"}` |
 | sector | `{"final_response": "板块分析暂时不可用，请稍后重试"}` |
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
+| review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
+| iterate | `{"final_response": '{"date":"...","status":"error","summary":"迭代分析失败: ..."}'}`（JSON 格式） |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 新增 worker agent 必须遵循同一格式：`"<功能名>暂时不可用，请稍后重试"`。
@@ -608,6 +738,8 @@ agent 层 try-catch 都是单次捕获，无 retry 逻辑。
 | stock（个股分析） | deep_think | 多维度综合分析 |
 | sector（板块分析） | deep_think | 龙头筛选 + 资金研判 |
 | event（事件传导链） | deep_think | 5级评分 + 传导路径推演 |
+| review（复盘归因） | deep_think | 5步归因分析 + 标准化行情事实附录 |
+| iterate（迭代分析） | deep_think | 偏差分析 + 优化建议（仅阈值触发时调用 LLM） |
 | tenx（十倍股评分） | deep_think | 6维度18指标评分 |
 | broadcast（播报生成） | deep_think | 对话式播报生成 |
 
@@ -659,7 +791,7 @@ def get_deep_think() -> ChatOpenAI:
 
 ### 当前缓存实现
 
-`src/aistock_agent/services/cache.py` 提供晨报缓存：
+`src/aistock_agent/services/cache.py` 提供晨报 + 复盘缓存：
 
 ```python
 async def get_cached_briefing() -> str | None:
@@ -674,6 +806,13 @@ async def set_cached_briefing(content: str, ttl: int = 7200) -> None:  # TTL=720
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"briefing:morning:{today}"
     await client.setex(cache_key, ttl, content)
+
+# 复盘缓存（结构完全对称，key 域名 briefing:review:）
+async def get_cached_review() -> str | None:
+    ...   # briefing:review:{YYYY-MM-DD}
+
+async def set_cached_review(content: str, ttl: int = 7200) -> None:
+    ...   # briefing:review:{YYYY-MM-DD}
 ```
 
 ### Key 格式规范
@@ -683,6 +822,7 @@ async def set_cached_briefing(content: str, ttl: int = 7200) -> None:  # TTL=720
 | 业务 | key 示例 | TTL |
 |------|----------|-----|
 | 晨报 | `briefing:morning:2026-07-08` | 7200s（2h） |
+| 复盘 | `briefing:review:2026-07-08` | 7200s（2h） |
 | （未来）异动播报 | `broadcast:alert:2026-07-08` | 按业务定 |
 | （未来）风口播报 | `broadcast:wind:2026-07-08` | 按业务定 |
 
@@ -708,13 +848,14 @@ client = aioredis.from_url(settings.redis_url)  # 每次请求创建连接，性
 | 业务 | 是否缓存 | 理由 |
 |------|----------|------|
 | 晨报（morning） | ✅ 缓存 2h | 同一交易日的晨报内容幂等；deep_think 成本高（6000-8000 token/次） |
+| 复盘（review） | ✅ 缓存 2h | 同一交易日的复盘内容幂等；deep_think 成本高 |
 | 个股分析（stock） | ❌ 不缓存 | 行情实时变化，缓存会误导 |
 | 事件传导（event） | ❌ 不缓存 | 新闻时效性强，缓存价值低 |
 | 板块分析（sector） | ❌ 不缓存 | 龙头/资金实时变化 |
 | 异动提醒（alert） | ❌ 不缓存 | 异动定义就是"实时变化" |
 
-**判断原则**：仅缓存"同一输入在同一时间段内结果幂等"且"生成成本高"的业务。晨报满足
-（同一天宏观分析内容稳定 + deep_think 贵），其他实时数据业务都不满足。
+**判断原则**：仅缓存"同一输入在同一时间段内结果幂等"且"生成成本高"的业务。晨报和复盘满足
+（同一天分析内容稳定 + deep_think 贵），其他实时数据业务都不满足。
 
 ### 缓存异常不崩溃
 
@@ -732,10 +873,11 @@ async def get_cached_briefing() -> str | None:
 
 ### 缓存命中跳过 LLM
 
-晨报 `run()` 和 `stream()` 都先查缓存，命中直接返回，不调用 LLM（零 token 消耗）：
+晨报 `run()` 和 `stream()` 都先查缓存，命中直接返回，不调用 LLM（零 token 消耗）。复盘
+`run()` 同理，先查 `get_cached_review()`，命中跳过 `get_deep_think()`：
 
 ```python
-cached = await _get_cached_briefing()
+cached = await get_cached_briefing()  # 晨报（或 get_cached_review() 复盘）
 if cached:
     return {"final_response": cached}  # 跳过 get_deep_think()
 ```
@@ -1156,13 +1298,17 @@ aistock-agent-py/
         ├── config.py                 # pydantic-settings 配置
         ├── constants.py              # SSE/WS 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
         │
-        ├── state/
-        │   └── schema.py             # AgentState TypedDict
+        ├── data/                     # 静态数据文件
+        │   └── sector_aliases.json   # 板块别名字典（35 标准板块 → 别名列表，快照生成器第一级匹配）
         │
-        ├── schemas/                  # 对外交互 Pydantic 数据模型
+        ├── state/
+        │   └── schema.py             # AgentState TypedDict（预加载字段为 NotRequired）
+        │
+        ├── schemas/                  # 数据模型（Pydantic 对外交互 + TypedDict 内部结构）
         │   ├── chat.py               # ChatRequest / ChatResponse
         │   ├── sse.py                # SSEEvent
-        │   └── agents.py             # 各 Agent 输入/输出 schema
+        │   ├── agents.py             # 各 Agent 输入/输出 schema
+        │   └── snapshot.py           # 快照数据模型（11 TypedDict：SnapshotData / RollingStatsData / ManifestData）
         │
         ├── memory/                   # 持久化记忆模块
         │   ├── checkpointer.py       # LangGraph checkpointer 工厂（MemorySaver 默认）
@@ -1187,10 +1333,12 @@ aistock-agent-py/
         │   ├── supervisor/node.py    # 意图分类（quick_think）
         │   ├── general/node.py       # 兜底对话（quick_think）
         │   └── workers/
-        │       ├── morning.py        # 晨报（deep_think + ReAct + Redis 缓存）
+        │       ├── morning.py        # 晨报（deep_think + ReAct + Redis 缓存 + 文件归档，scheduler 触发）
         │       ├── stock.py          # 个股分析（deep_think）
         │       ├── sector.py         # 板块分析（deep_think）
-        │       └── event.py          # 事件传导链（deep_think）
+        │       ├── event.py          # 事件传导链（deep_think）
+        │       ├── review.py         # 复盘归因（deep_think + ReAct + Redis 缓存 + 文件归档，scheduler 触发）
+        │       └── iterate.py        # 迭代分析（deep_think，非 ReAct，pipeline + LLM，只读，scheduler 触发）
         │
         ├── tools/                    # LangChain @tool，按数据域分组
         │   ├── base.py               # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
@@ -1203,21 +1351,23 @@ aistock-agent-py/
         │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history
         │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks
         │   ├── graph_tools.py        # get_concepts, get_graph_by_concept
-        │   └── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history
+        │   ├── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history
+        │   └── review_tools.py       # get_market_summary, get_sector_performance（复盘流水线，review category）
         │
         ├── prompts/                  # 分层对应 agents 目录
         │   ├── supervisor/routing.py
         │   ├── general/system.py     # SYSTEM_PROMPT + GENERAL_PROMPT
-        │   └── workers/{morning,stock,sector,event}.py
+        │   └── workers/{morning,stock,sector,event,review,iterate}.py
         │
         ├── services/                 # 全局资源封装
         │   ├── llm.py                # 双模型工厂（get_quick_think / get_deep_think）
         │   ├── data_client.py        # NodeApiClient（node_api 单例）
         │   ├── redis_pool.py         # Redis 连接池单例（lifespan 管理）
         │   ├── http_client.py        # httpx AsyncClient 单例（lifespan 管理）
-        │   ├── cache.py              # 晨报缓存（基于 RedisPool）
+        │   ├── cache.py              # 晨报 + 复盘缓存（基于 RedisPool，get/set_cached_briefing + get/set_cached_review）
         │   ├── tavily.py             # Tavily 客户端封装（TavilyService.search）
-        │   └── scheduler.py          # APScheduler 定时调度（08:50晨报/15:30复盘/15:35快照/15:40迭代）
+        │   ├── snapshot_builder.py   # 快照生成器（代码框架 + LLM 4维评估，文件I/O + MA + manifest + 板块匹配）
+        │   └── scheduler.py          # APScheduler 定时调度（08:50晨报 / 15:30复盘 / 15:35快照 / 15:40迭代）
         │
         ├── observability/            # 可观测性（零侵入业务）
         │   ├── logging.py            # structlog JSON 日志（setup_logging / get_logger）

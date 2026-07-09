@@ -2,6 +2,26 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-09 — 复盘工具 + Registry 自注册（SDD Task 1）
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/tools/review_tools.py`：复盘专用工具模块
+  - `get_market_summary`：yfinance 获取 A 股主要指数（上证指数/深证成指/创业板指/科创50）行情，用于收盘复盘
+  - `get_sector_performance`：调用 Node.js `/internal/wind-leaders` 获取热门板块涨幅 + 龙头股，用于复盘板块归因
+  - 底部 `register("review", ...)` 自注册：跨分类复用 `tavily_finance_search` / `get_global_markets` / `get_cls_news` + 两个新工具
+- `tests/unit/test_review_tools.py`：4 个单元测试（mock yfinance / mock node_api），覆盖成功/部分失败/空数据场景
+
+### 改进
+- `src/aistock_agent/tools/__init__.py`：导入列表新增 `review_tools`（按字母序，位于 `news_tools` 与 `search_tools` 之间），触发 review category 自注册
+
+### 验证
+- ruff check：All checks passed
+- mypy：Success，2 source files 无问题
+- pytest：test_registry.py (11) + test_review_tools.py (4) = 15 passed；全量 306 passed（2 个预存失败与本次无关：test_constants / test_sector_agent 的 wind_leader/broadcast 意图）
+
+---
+
 ## [changer] 2026-07-08 — SDD 基础设施：Tavily 拆分 + Tool Registry + APScheduler 定时调度
 **开发者**: 37588
 
