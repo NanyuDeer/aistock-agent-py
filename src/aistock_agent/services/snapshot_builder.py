@@ -541,14 +541,30 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
 
 
 def _extract_sectors(content: str) -> list[str]:
-    """从报告文本中提取板块名称（简单正则 + 黑名单过滤）
+    """从报告文本中提取板块名称
 
-    策略：
-    1. 匹配 Markdown 表格中板块列（| 板块名称 |...）
-    2. 匹配列表项（- 板块名）
-    3. 过滤表格表头/章节序号/非板块噪音词
+    策略（按优先级）：
+    1. 优先解析 `<!--SECTOR_LIST_START-->...<!--SECTOR_LIST_END-->` 标记块（review prompt 附录E）
+    2. 回退到正则匹配 Markdown 表格 + 列表项 + 黑名单过滤
     """
-    # 已被其他正则覆盖的常见噪音词（章节标题、表头、序号等）
+    seen: set[str] = set()
+    sectors: list[str] = []
+
+    # --- 优先路径：结构化板块清单（review prompt 附录E） ---
+    sector_list_match = re.search(
+        r"<!--SECTOR_LIST_START-->\s*\n(.*?)\n\s*<!--SECTOR_LIST_END-->",
+        content, re.DOTALL,
+    )
+    if sector_list_match:
+        for line in sector_list_match.group(1).split("\n"):
+            name = line.strip().lstrip("- ").strip("* ").strip()
+            if name and name not in seen and len(name) <= 15:
+                seen.add(name)
+                sectors.append(name)
+        if sectors:
+            return sectors
+
+    # --- 回退路径：正则 + 黑名单过滤 ---
     _noise_terms: set[str] = {
         "维度", "板块", "板块名称", "指数", "事件名称",
         "序号", "强势方向", "承压方向", "噪音事件",
@@ -582,9 +598,6 @@ def _extract_sectors(content: str) -> list[str]:
         if cleaned.startswith("---"):
             return True
         return False
-
-    seen: set[str] = set()
-    sectors: list[str] = []
 
     # 匹配表格行：| 板块名称 | 涨跌幅 | ...
     table_pattern = r"^\|\s*([^|]+?)\s*\|"
