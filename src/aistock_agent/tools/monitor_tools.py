@@ -71,3 +71,5 @@ from aistock_agent.tools.registry import register  # noqa: E402
 
 register("general", get_stock_monitor)
 register("general", get_alert_history)
+register("alert", get_stock_monitor)
+register("alert", get_alert_history)

@@ -94,3 +94,6 @@ register("stock", get_profit_forecast)
 register("event", get_quote)
 # get_capital_flow 也被 sector agent 使用
 register("sector", get_capital_flow)
+# alert agent 工具
+register("alert", get_quote)
+register("alert", get_capital_flow)

@@ -2,6 +2,32 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [junliang] 2026-07-09 — 新增 alert_agent（异动提醒 Agent）
+**开发者**: yueqili778-arch
+
+### 新增
+- `agents/workers/alert.py`：alert_agent，三步异动分析框架（发生了什么→为什么→怎么办），按短/中/长线分类，deep_think + ReAct
+- `prompts/workers/alert.py`：ALERT_ANALYST_PROMPT，定义三步框架 + 周期分类 + 输出要求
+- `api/routes.py`：新增 `GET /briefing/alert?symbol=xxx&cycle=short` SSE 流式端点
+- `tests/integration/test_alert_agent.py`：5 个集成测试（工具绑定/提示词注入/响应提取/入口校验/deep_think 验证）
+
+### 修改
+- `tools/monitor_tools.py`：追加 `register("alert", ...)` 注册
+- `tools/stock_tools.py`：追加 `register("alert", get_quote)`、`register("alert", get_capital_flow)`
+- `tools/news_tools.py`：追加 `register("alert", search_cls_news)`
+- `graph/builder.py`：注册 `alert_agent` 节点并加入 END 链路
+- `graph/routers/intent_router.py`：添加 `alert` 意图 + 路由映射
+- `prompts/supervisor/routing.py`：添加 alert 意图描述
+- `constants.py`：INTENT_SET 补 alert/hot_burst，TOOL_LABELS 补 alert 工具标签
+- `tests/unit/test_constants.py`：同步 INTENT_SET 断言
+
+### 验证
+- `pytest tests/integration/test_alert_agent.py`：5/5 通过
+- `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
+- `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
+
+---
+
 ## [changer] 2026-07-09 — 复盘工具 + Registry 自注册（SDD Task 1）
 **开发者**: 37588
 
