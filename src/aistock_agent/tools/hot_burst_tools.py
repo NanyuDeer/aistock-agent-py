@@ -126,3 +126,6 @@ register("hot_burst", get_hot_burst)
 register("hot_burst", get_hot_burst_history)
 register("general", get_hot_burst)
 register("general", get_hot_burst_history)
+# advisor agent 复用
+register("advisor", get_hot_burst)
+register("advisor", get_hot_burst_history)

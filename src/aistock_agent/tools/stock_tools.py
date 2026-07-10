@@ -97,3 +97,8 @@ register("sector", get_capital_flow)
 # alert agent 工具
 register("alert", get_quote)
 register("alert", get_capital_flow)
+# advisor agent 复用
+register("advisor", get_quote)
+register("advisor", get_capital_flow)
+register("advisor", get_profit_forecast)
+register("advisor", search_cls_news)

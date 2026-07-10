@@ -45,7 +45,7 @@ class WSEventType:
 
 
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
-INTENT_SET = frozenset({"morning", "stock", "sector", "event", "wind_leader", "hot_burst", "broadcast", "alert", "general"})
+INTENT_SET = frozenset({"morning", "stock", "sector", "event", "wind_leader", "hot_burst", "broadcast", "alert", "ai_advisor", "general"})
 
 
 class ErrorCodes:
