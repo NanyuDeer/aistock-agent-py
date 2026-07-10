@@ -695,6 +695,7 @@ async def run(state: AgentState) -> dict[str, object]:
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
 | iterate | `{"final_response": '{"date":"...","status":"error","summary":"迭代分析失败: ..."}'}`（JSON 格式） |
+| alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 新增 worker agent 必须遵循同一格式：`"<功能名>暂时不可用，请稍后重试"`。
@@ -733,7 +734,7 @@ agent 层 try-catch 都是单次捕获，无 retry 逻辑。
 |-------|------|------|
 | supervisor（意图分类） | quick_think | 低延迟，成本低 |
 | general（兜底对话） | quick_think | 简单问答 |
-| alert（异动识别） | quick_think | 异动分类不需要深度推理 |
+| alert（异动提醒） | deep_think | 三步异动分析（什么→为什么→怎么办）需要跨工具综合推理 |
 | forecast（业绩预测） | quick_think | 数据整理为主 |
 | morning（晨报） | deep_think | 4步宏观策略分析 |
 | stock（个股分析） | deep_think | 多维度综合分析 |

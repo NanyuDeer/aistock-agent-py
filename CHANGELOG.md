@@ -2,20 +2,17 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
-## [main] 2026-07-10 — Agent 报告持久化架构 + 机构调研/播报/风口 Agent + 空数据预检
-**开发者**: Aria
+## [main] 2026-07-09 — Agent 报告持久化架构 + 机构调研/播报/风口 Agent + 空数据预检
 
-### 新增 — Agent 报告持久化架构（Phase 1-3）
+### 新增
 - `src/aistock_agent/services/data_guard.py`：通用空数据预检模块（DataCheck dataclass + ensure_data_available 函数，3 次重试 + 调刷新接口）
 - `src/aistock_agent/services/volcengine_podcast.py`：火山引擎 TTS 播客服务（WebSocket v3 SAMI 二进制协议，双人对话语音合成）
 - `scripts/run_broadcast_test.py` / `run_broadcast_test.bat`：播报生成测试脚本（双人对话 + TTS 语音输出）
 - `scripts/test_volc_tts_*.py`（v2/v3/v4/connection）：火山引擎 TTS 连接和协议测试脚本
 
-### 改进 — Agent 持久化改造（Phase 2）
-- `src/aistock_agent/services/data_client.py`：扩展 node_api（save_analysis_report / get_analysis_report 方法）
-- `src/aistock_agent/state/schema.py`：AgentState 新增 trigger_source 和 report_date 字段（NotRequired）
+### 修改 — Agent 报告持久化（Phase 2）
 - `src/aistock_agent/agents/workers/morning.py`：scheduler 触发时持久化晨报到 DB
-- `src/aistock_agent/agents/workers/wind_leader.py`：持久化 + 空数据预检（ensure_data_available，3 次重试调刷新接口）
+- `src/aistock_agent/agents/workers/wind_leader.py`：scheduler 触发时持久化风口报告到 DB
 - `src/aistock_agent/agents/workers/hot_burst.py`：scheduler 触发时持久化机构调研报告到 DB
 - `src/aistock_agent/agents/workers/review.py`：scheduler 触发时持久化复盘报告到 DB
 
@@ -32,6 +29,30 @@
 - `AGENTS.md`：broadcast 状态改为"已实现"；降级文本表新增 review 和 broadcast 行
 - `.env.example`：新增 VOLC_TTS_* 环境变量
 - `scripts/run_morning_test.bat`：微调
+
+## [junliang] 2026-07-09 — 新增 alert_agent（异动提醒 Agent）
+**开发者**: yueqili778-arch
+
+### 新增
+- `agents/workers/alert.py`：alert_agent，三步异动分析框架（发生了什么→为什么→怎么办），按短/中/长线分类，deep_think + ReAct
+- `prompts/workers/alert.py`：ALERT_ANALYST_PROMPT，定义三步框架 + 周期分类 + 输出要求
+- `api/routes.py`：新增 `GET /briefing/alert?symbol=xxx&cycle=short` SSE 流式端点
+- `tests/integration/test_alert_agent.py`：5 个集成测试（工具绑定/提示词注入/响应提取/入口校验/deep_think 验证）
+
+### 修改
+- `tools/monitor_tools.py`：追加 `register("alert", ...)` 注册
+- `tools/stock_tools.py`：追加 `register("alert", get_quote)`、`register("alert", get_capital_flow)`
+- `tools/news_tools.py`：追加 `register("alert", search_cls_news)`
+- `graph/builder.py`：注册 `alert_agent` 节点并加入 END 链路
+- `graph/routers/intent_router.py`：添加 `alert` 意图 + 路由映射
+- `prompts/supervisor/routing.py`：添加 alert 意图描述
+- `constants.py`：INTENT_SET 补 alert/hot_burst，TOOL_LABELS 补 alert 工具标签
+- `tests/unit/test_constants.py`：同步 INTENT_SET 断言
+
+### 验证
+- `pytest tests/integration/test_alert_agent.py`：5/5 通过
+- `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
+- `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
 
 ---
 

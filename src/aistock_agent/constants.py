@@ -45,7 +45,7 @@ class WSEventType:
 
 
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
-INTENT_SET = frozenset({"morning", "stock", "sector", "event", "wind_leader", "hot_burst", "broadcast", "general"})
+INTENT_SET = frozenset({"morning", "stock", "sector", "event", "wind_leader", "hot_burst", "broadcast", "alert", "general"})
 
 
 class ErrorCodes:
@@ -81,4 +81,7 @@ TOOL_LABELS: dict[str, str] = {
     # hot_burst agent 工具
     "get_hot_burst": "正在获取机构调研热门股",
     "get_hot_burst_history": "正在获取机构调研历史记录",
+    # alert agent 工具
+    "get_stock_monitor": "正在获取个股异动数据",
+    "get_alert_history": "正在获取异动历史",
 }

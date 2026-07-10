@@ -271,6 +271,7 @@ src/aistock_agent/
 |------|------|------|
 | POST | `/api/agent/chat/message` | 对话消息（非流式） |
 | GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，支持 Redis 缓存） |
+| GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
 | GET | `/health/ready` | Readiness 健康检查（检查 Redis/Node.js/LLM 连通性，失败返回 503 + degraded） |
