@@ -118,7 +118,22 @@ async def run(state: AgentState) -> dict[str, object]:
                 exc_info=True,
             )
 
-        # Step 3: 返回结果
+        # Step 3: 持久化到数据库（scheduler 触发时，供前端读取）
+        if state.get("trigger_source") == "scheduler" and report_date:
+            try:
+                await node_api.save_analysis_report(
+                    report_type="broadcast",
+                    report_date=report_date,
+                    content={
+                        "text": dialogue_text,
+                        "audio_path": audio_path,
+                    },
+                )
+                logger.info("broadcast_report_persisted", report_date=report_date)
+            except Exception as persist_err:
+                logger.error("broadcast_persist_failed", error=str(persist_err))
+
+        # Step 4: 返回结果
         final_response = dialogue_text
         if audio_path:
             final_response += f"\n\n🎧 双人语音播报已生成：{audio_path}"
