@@ -1,6 +1,6 @@
 """播报 Agent 测试脚本
 
-测试播报 agent 的双人对话生成和火山引擎 TTS 调用。
+测试播报 agent 的双人对话生成和 Node.js TTS 调用。
 """
 
 import asyncio
@@ -93,7 +93,7 @@ async def test_broadcast_agent():
         if result.get("audio_path"):
             print(f"\n✅ 双人语音播报已生成：{result['audio_path']}")
         else:
-            print("\n⚠️ 双人语音播报未生成（可能缺少火山引擎配置）")
+            print("\n⚠️ 双人语音播报未生成（请检查 Node.js TTS 服务）")
 
         print("\n" + "=" * 60)
         print("✅ 测试完成")

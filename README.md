@@ -30,7 +30,7 @@ $env:PYTHONPATH = "src"; python scripts/run_morning_test.py
 # 风口分析定时测试（生成落盘到 docs/agent-outputs/wind_leader/）
 $env:PYTHONPATH = "src"; python scripts/run_wind_leader_test.py
 
-# 播报生成测试（双人对话 + 火山引擎TTS语音，输出到 docs/agent-outputs/podcast/）
+# 播报生成测试（双人对话 + Node.js TTS 语音）
 $env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py
 
 # 晨报缓存提取（从 Redis 提取到 docs/agent-outputs/morning/，不重新生成）
@@ -133,11 +133,11 @@ graph TB
 - **输入**：晨报Agent + 风口Agent + 机构调研Agent的分析结果
   - scheduler 链路：从数据库 `agent_analysis_reports` 表读取（`report_date` 匹配当天）
   - 实时请求：从 `state.analysis_reports` 读取（数据库未命中时降级）
-- **输出**：双人对话文本 + 火山引擎TTS生成的语音播客（MP3格式）
+- **输出**：双人对话文本 + Node.js 生成的语音播客（MP3格式）
 - **模型**：deep_think（对话式播报生成）
-- **语音引擎**：火山引擎播客API（WebSocket v3 SAMI 二进制协议）
+- **语音引擎**：由 Node.js 封装火山引擎播客 API，Python 仅调用内部接口
 - **发音人**：黑猫侦探社咪仔系列（男：`zh_male_dayixiansheng_v2_saturn_bigtts`，女：`zh_female_mizaitongxue_v2_saturn_bigtts`）
-- **音频输出**：`docs/agent-outputs/podcast/YYYY-MM-DD-HHMM.mp3`
+- **音频输出**：Node.js 写入 `AGENT_AUDIO_DIR`，并回写公开的 `audio_path`
 - **测试**：`scripts\run_broadcast_test.bat` 或 `$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py`
 
 ### 机构调研热门股Agent
@@ -210,7 +210,7 @@ src/aistock_agent/
 │       ├── event.py     # 事件传导链
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档）
-│       ├── broadcast.py # 播报生成（deep_think + 火山引擎TTS双人播客）
+│       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
 ├── tools/
@@ -238,7 +238,6 @@ src/aistock_agent/
 │   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）
-│   ├── volcengine_podcast.py # 火山引擎播客服务（WebSocket协议，双人TTS语音生成）
 │   ├── data_guard.py    # 空数据预检（ensure_data_available + DataCheck，规范13，scheduler触发时预检Node.js数据源）
 │   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/09:00/15:30/15:35/15:40）
 ├── observability/       # 可观测性包（Phase 5）
@@ -259,7 +258,7 @@ src/aistock_agent/
 - 晨报 Redis 缓存提取归档到 `docs/agent-outputs/morning/YYYY-MM-DD-briefing.md`
 - 使用 `python scripts/extract_morning_cache.py` 从 Redis 缓存提取已生成的晨报（不触发 LLM 重新生成），支持 `--date YYYY-MM-DD` 指定日期，默认提取所有缓存报告
 - 复盘报告归档到 `docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md`（scheduler 15:30 触发，自动归档）
-- 播客音频归档到 `docs/agent-outputs/podcast/YYYY-MM-DD-HHMM.mp3`（播报Agent生成，双人TTS语音）
+- 播客音频由 Node.js 写入 `AGENT_AUDIO_DIR`，报告仅保存公开的 `audio_path`
 - 快照 JSON 归档到 `docs/agent-outputs/snapshots/YYYY-MM-DD.json`（scheduler 15:35 触发，含 4 维度偏差评估）
 - 迭代分析报告归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`（scheduler 15:40 触发，JSON 格式）
 - 滚动统计归档到 `docs/agent-outputs/rolling_stats.json`（快照生成器维护，MA5/MA10/MA20）
@@ -300,6 +299,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
+| `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `GET /internal/health` | - | 轻量健康探针（供 Python `/health/ready` 探测，Phase 5） |
 
 ## 开发规范
@@ -382,10 +382,6 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30） | `30 15 * * 1-5` |
 | `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35） | `35 15 * * 1-5` |
 | `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
-| `VOLC_TTS_API_KEY` | 火山引擎 TTS API Key（新版控制台） | - |
-| `VOLC_TTS_APP_ID` | 火山引擎 TTS App ID（旧版控制台） | - |
-| `VOLC_TTS_ACCESS_TOKEN` | 火山引擎 TTS Access Token（旧版控制台） | - |
-| `VOLC_TTS_SECRET_KEY` | 火山引擎 TTS Secret Key（旧版控制台） | - |
 
 ## Vibecoding 工作流
 

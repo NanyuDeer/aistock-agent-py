@@ -52,7 +52,13 @@ class NodeApiClient:
             return [item for item in data if isinstance(item, dict)]
         return None
 
-    async def post(self, path: str, json_body: object) -> dict[str, object] | None:
+    async def post(
+        self,
+        path: str,
+        json_body: object,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, object] | None:
         """POST 请求 Node.js 内部 API
 
         Args:
@@ -60,22 +66,28 @@ class NodeApiClient:
             json_body: 请求体（dict，httpx 自动序列化为 JSON）
 
         Returns:
-            业务数据（已解包 `data` 字段）；请求失败或业务码非 200/201 返回 None。
+            业务数据（已解包 `data` 字段）；请求失败或业务码非 0/200/201 返回 None。
         """
         url = f"{self._base_url}{path}"
         headers = {"X-Internal-Token": self._token}
 
         try:
             client = await HttpClientPool.get_client()
-            resp = await client.post(url, headers=headers, json=json_body)
+            if timeout is None:
+                resp = await client.post(url, headers=headers, json=json_body)
+            else:
+                resp = await client.post(url, headers=headers, json=json_body, timeout=timeout)
             resp.raise_for_status()
             payload = resp.json()
 
             if not isinstance(payload, dict):
-                logger.error("node_api_post_unexpected_payload", url=url, payload=str(payload)[:200])
+                logger.error(
+                    "node_api_post_unexpected_payload",
+                    url=url,
+                    payload=str(payload)[:200],
+                )
                 return None
-            # POST 成功状态码可能是 200 或 201
-            if payload.get("code") not in (200, 201):
+            if payload.get("code") not in (0, 200, 201):
                 logger.error("node_api_post_business_error", url=url, code=payload.get("code"),
                              message=payload.get("message"))
                 return None
@@ -243,9 +255,8 @@ class NodeApiClient:
             已删除的报告数量（失败返回 0）
         """
         result = await self.delete("/internal/analysis-reports/cleanup")
-        if result and isinstance(result.get("deleted_count"), int):
-            return int(result["deleted_count"])
-        return 0
+        deleted_count = result.get("deleted_count") if result else None
+        return deleted_count if isinstance(deleted_count, int) else 0
 
 
 # 全局单例

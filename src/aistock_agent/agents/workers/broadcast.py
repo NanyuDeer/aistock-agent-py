@@ -1,7 +1,7 @@
 """播报 Agent — 双人对话播报生成
 
 从数据库（scheduler 链路）或 state.analysis_reports（实时请求）集合各 Agent 分析结果，
-生成 host + analyst 对话，并调用火山引擎播客 API 生成双人语音。
+生成 host + analyst 对话，并通过 Node.js 内部接口生成双人语音。
 模型：deep_think（对话式播报生成）
 """
 
@@ -11,7 +11,6 @@ from aistock_agent.observability.logging import get_logger
 from aistock_agent.prompts.workers.broadcast import BROADCAST_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
-from aistock_agent.services.volcengine_podcast import get_podcast_service
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.message import extract_final_ai_response
 
@@ -29,8 +28,9 @@ async def _fetch_report_from_db(report_type: str, report_date: str) -> str | Non
         报告文本内容，或 None（不存在）
     """
     data = await node_api.get_analysis_report(report_type, report_date)
-    if data and isinstance(data.get("content"), dict):
-        text = data["content"].get("text")
+    content = data.get("content") if data else None
+    if isinstance(content, dict):
+        text = content.get("text")
         if isinstance(text, str) and text:
             return text
     return None
@@ -43,7 +43,7 @@ async def run(state: AgentState) -> dict[str, object]:
     1. scheduler 触发时从数据库读取晨报、风口、机构调研报告；
        实时请求时从 state.analysis_reports 读取
     2. 调用 deep_think 生成双人对话文本
-    3. 调用火山引擎播客 API 生成双人语音（MVP 功能）
+    3. scheduler 链路通过 Node.js 生成双人语音
     4. 返回对话文本 + 音频路径
 
     Returns:
@@ -104,46 +104,37 @@ async def run(state: AgentState) -> dict[str, object]:
         dialogue_text = extract_final_ai_response([response])
         logger.info("broadcast_dialogue_generated", dialogue_length=len(dialogue_text))
 
-        # Step 2: 调用火山引擎播客 API 生成双人语音
-        audio_path = None
-        try:
-            podcast_service = get_podcast_service()
-            audio_path = await podcast_service.generate_podcast(dialogue_text)
-            logger.info("broadcast_audio_generated", audio_path=audio_path)
-        except Exception as e:
-            # 火山引擎失败不影响对话文本返回，记录错误后降级
-            logger.error(
-                "broadcast_tts_failed",
-                error=str(e),
-                exc_info=True,
-            )
-
-        # Step 3: 持久化到数据库（scheduler 触发时，供前端读取）
+        # Step 2: scheduler 链路先持久化文本，再由 Node.js 生成音频
+        audio_path: str | None = None
         if state.get("trigger_source") == "scheduler" and report_date:
             try:
-                await node_api.save_analysis_report(
+                saved = await node_api.save_analysis_report(
                     report_type="broadcast",
                     report_date=report_date,
-                    content={
-                        "text": dialogue_text,
-                        "audio_path": audio_path,
-                    },
+                    content={"text": dialogue_text},
                 )
-                logger.info("broadcast_report_persisted", report_date=report_date)
+                if saved is not None:
+                    audio_data = await node_api.post(
+                        "/internal/briefing/generate-audio",
+                        {"date": report_date},
+                        timeout=300.0,
+                    )
+                    raw_audio_path = audio_data.get("audio_path") if audio_data else None
+                    if isinstance(raw_audio_path, str):
+                        audio_path = raw_audio_path
+                logger.info(
+                    "broadcast_report_persisted",
+                    report_date=report_date,
+                    audio_generated=bool(audio_path),
+                )
             except Exception as persist_err:
                 logger.error("broadcast_persist_failed", error=str(persist_err))
 
-        # Step 4: 返回结果
-        final_response = dialogue_text
-        if audio_path:
-            final_response += f"\n\n🎧 双人语音播报已生成：{audio_path}"
-
         return {
-            "final_response": final_response,
+            "final_response": dialogue_text,
             "dialogue_text": dialogue_text,
             "audio_path": audio_path,
         }
-
     except Exception as e:
         logger.error("agent_run_failed", agent="broadcast", error=str(e), exc_info=True)
         return {"final_response": "播报生成暂时不可用，请稍后重试"}
