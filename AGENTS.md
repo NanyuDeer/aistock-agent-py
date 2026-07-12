@@ -26,7 +26,8 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 十倍股/趋势股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 交易复盘 | workers/review.py（Phase 5+） | deep_think | P2 |
-| **播报生成** | **workers/broadcast.py（Phase 5+）** | **deep_think** | **P0（核心特色）** |
+| **播报生成** | **workers/broadcast.py（已实现）** | **deep_think** | **P0（核心特色）** |
+| **智能投顾** | **workers/ai_advisor.py（已实现）** | **deep_think** | **P0** |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
 
 ## 核心架构
@@ -35,12 +36,14 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 ```
 START → supervisor(quick_think)
-  ├── intent="morning"       → morning_agent
-  ├── intent="stock"         → stock_analyst
-  ├── intent="wind_leader"   → wind_leader_agent
-  ├── intent="event_chain"   → event_chain_agent
+  ├── intent="morning"       → morning_agent（scheduler）/ ai_advisor_agent（user）
+  ├── intent="stock"         → stock_analyst（scheduler）/ ai_advisor_agent（user）
+  ├── intent="wind_leader"   → wind_leader_agent（scheduler）/ ai_advisor_agent（user）
+  ├── intent="event_chain"   → event_chain_agent（scheduler）/ ai_advisor_agent（user）
   ├── intent="alert"         → alert_agent
-  ├── intent="hot_burst"     → hot_burst_agent
+  ├── intent="hot_burst"     → hot_burst_agent（scheduler）/ ai_advisor_agent（user）
+  ├── intent="broadcast"     → broadcast_agent
+  ├── intent="ai_advisor"    → ai_advisor_agent
   ├── intent="tenx"          → tenx_agent
   ├── intent="forecast"      → forecast_agent
   ├── intent="review"        → review_agent
@@ -81,7 +84,7 @@ START → supervisor(quick_think)
        broadcast_agent（多 Agent 结果汇聚 → 播报生成）
               │
               ├──→ 输出双人对话格式（AI分析师 + AI主持人）
-              └──→ 前端 TTS 语音合成 + 播报播放
+              └──→ Node.js TTS 语音合成 + 前端播报播放
 ```
 
 ### 数据流
@@ -221,6 +224,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 
 ## 常用命令
 
@@ -270,7 +274,12 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 | morning | `{"final_response": "晨报生成暂时不可用，请稍后重试"}` |
 | stock | `{"final_response": "个股分析暂时不可用，请稍后重试"}` |
 | sector | `{"final_response": "板块分析暂时不可用，请稍后重试"}` |
+| wind_leader | `{"final_response": "长线风口分析暂时不可用，请稍后重试"}` |
+| hot_burst | `{"final_response": "机构调研热门股分析暂时不可用，请稍后重试"}` |
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
+| review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
+| ai_advisor | `{"final_response": "智能投顾暂时不可用，请稍后重试"}` |
+| broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 ### 不做异常分类 catch

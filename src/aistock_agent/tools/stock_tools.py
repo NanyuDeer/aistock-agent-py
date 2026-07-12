@@ -100,3 +100,7 @@ register("alert", get_capital_flow)
 # alert 子 Agent 工具（Phase 6 拆分）
 register("alert_risk", get_quote)
 register("alert_risk", get_capital_flow)
+# advisor agent 复用
+register("advisor", get_quote)
+register("advisor", get_capital_flow)
+register("advisor", get_profit_forecast)

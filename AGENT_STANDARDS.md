@@ -23,6 +23,7 @@
 - [补充规范 10：API 接口标准](#补充规范-10api-接口标准)
 - [补充规范 11：配置标准](#补充规范-11配置标准)
 - [补充规范 12：代码风格](#补充规范-12代码风格)
+- [补充规范 13：空数据预检](#补充规范-13空数据预检)
 - [附录 A：目录结构速查](#附录-a目录结构速查)
 - [附录 B：常用命令速查](#附录-b常用命令速查)
 
@@ -1276,6 +1277,100 @@ mypy 无 plugin 无法识别，用 `# type: ignore[call-arg]` 抑制（见 `serv
 
 ---
 
+## 补充规范 13：空数据预检
+
+**核心规则**：依赖 Node.js 后端预计算数据的 Agent，在 `run()` 调用 `create_react_agent`
+之前应预检数据可用性。空数据时调用刷新接口重试（最多3次），3次后仍空返回降级文本，
+不调用 LLM（节省 token）。
+
+### 适用范围
+
+| 场景 | 是否预检 | 原因 |
+|------|----------|------|
+| Agent 依赖 Node.js 预计算数据 + 有刷新接口 | ✅ 预检 | 数据可能尚未生成，刷新可触发计算 |
+| Agent 依赖 Node.js 数据但无刷新接口 | ⏭️ 可选 | 仅重试查询，效果有限 |
+| Agent 仅依赖外部 API（Tavily/yfinance） | ❌ 豁免 | 无法通过 Node.js 预检 |
+| Agent 空数据有业务意义（如 hot_burst） | ❌ 豁免 | 空数据是正常结果 |
+
+### 预检函数
+
+`services/data_guard.py` 提供通用的 `ensure_data_available` 函数和 `DataCheck` 数据类：
+
+```python
+from aistock_agent.services.data_guard import DataCheck, ensure_data_available
+
+# 定义检查项
+checks = [
+    DataCheck(
+        check_path="/internal/wind-leaders",        # 查询路径
+        refresh_path="/api/cn/wind-leaders/refresh", # 刷新路径（可选）
+        empty_checker=_is_data_empty,                # 空数据判定函数
+        name="wind_leaders",                         # 日志名称
+    )
+]
+
+# 预检（最多重试3次，每次间隔2秒）
+if not await ensure_data_available(checks):
+    return {"final_response": "XXX暂时不可用：后端数据源为空，请稍后重试"}
+```
+
+### 标准模板
+
+参考 `agents/workers/wind_leader.py`：
+
+```python
+def _is_wind_leaders_empty(data: dict[str, object] | None) -> bool:
+    """检查风口龙头数据是否为空"""
+    if not data:
+        return True
+    sectors = data.get("hot_sectors")
+    return not isinstance(sectors, list) or len(sectors) == 0
+
+
+async def run(state: AgentState) -> dict[str, object]:
+    try:
+        # 预检：仅 scheduler 触发时执行（用户实时请求不等待）
+        if state.get("trigger_source") == "scheduler":
+            checks = [
+                DataCheck(
+                    check_path="/internal/wind-leaders",
+                    refresh_path="/api/cn/wind-leaders/refresh",
+                    empty_checker=_is_wind_leaders_empty,
+                    name="wind_leaders",
+                )
+            ]
+            if not await ensure_data_available(checks):
+                return {"final_response": "长线风口分析暂时不可用：后端数据源为空，请稍后重试"}
+
+        # 数据就绪，走 ReAct
+        llm = get_deep_think()
+        ...
+```
+
+### 设计要点
+
+1. **仅 scheduler 触发时预检**：用户实时请求不等待（避免6秒延迟），工具本身有空数据降级处理。
+2. **empty_checker 自定义**：每个 Agent 的"空数据"定义不同，需自定义检查函数。
+3. **refresh_path 可选**：无刷新接口时设为 None，仅重试查询。
+4. **重试间隔2秒**：给后端足够时间生成数据。
+5. **预检失败不调用 LLM**：直接返回降级文本，节省 token。
+
+### 新增 Agent 预检流程
+
+1. 确认 Agent 是否依赖 Node.js 预计算数据（有 `/internal/*` 查询路径）。
+2. 确认是否有对应的刷新接口（`/api/cn/*/refresh`）。
+3. 编写 `_is_xxx_empty` 空数据判定函数。
+4. 在 `run()` 开头添加预检代码（仅 scheduler 触发时）。
+5. 更新本规范适用范围表。
+
+### 禁止
+
+- 对依赖外部 API 的 Agent 强行预检（Tavily/yfinance 无法通过 Node.js 预检）。
+- 对空数据有业务意义的 Agent 预检（如 hot_burst）。
+- 在用户实时请求时预检（避免等待延迟）。
+
+---
+
 ## 附录 A：目录结构速查
 
 ```
@@ -1363,6 +1458,7 @@ aistock-agent-py/
         ├── services/                 # 全局资源封装
         │   ├── llm.py                # 双模型工厂（get_quick_think / get_deep_think）
         │   ├── data_client.py        # NodeApiClient（node_api 单例）
+        │   ├── data_guard.py         # 空数据预检（ensure_data_available + DataCheck，规范13）
         │   ├── redis_pool.py         # Redis 连接池单例（lifespan 管理）
         │   ├── http_client.py        # httpx AsyncClient 单例（lifespan 管理）
         │   ├── cache.py              # 晨报 + 复盘缓存（基于 RedisPool，get/set_cached_briefing + get/set_cached_review）

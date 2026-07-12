@@ -27,6 +27,12 @@ pytest tests/ -v
 # Windows PowerShell
 $env:PYTHONPATH = "src"; python scripts/run_morning_test.py
 
+# 风口分析定时测试（生成落盘到 docs/agent-outputs/wind_leader/）
+$env:PYTHONPATH = "src"; python scripts/run_wind_leader_test.py
+
+# 播报生成测试（双人对话 + Node.js TTS 语音）
+$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py
+
 # 晨报缓存提取（从 Redis 提取到 docs/agent-outputs/morning/，不重新生成）
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py --date 2026-07-09
@@ -79,11 +85,17 @@ graph TB
         SUP -->|stock| ST[stock_analyst]
         SUP -->|sector| SE[sector_analyst]
         SUP -->|event| EV[event_analyst]
+        SUP -->|wind_leader| WL[wind_leader_agent<br/>deep_think]
+        SUP -->|hot_burst| HB[hot_burst_agent<br/>deep_think]
+        SUP -->|broadcast| BC[broadcast_agent<br/>deep_think]
         SUP -->|general| GE[general_agent]
         M --> E1[END]
         ST --> E1
         SE --> E1
         EV --> E1
+        WL --> E1
+        HB --> E1
+        BC --> E1
         GE --> E1
     end
 
@@ -112,7 +124,32 @@ graph TB
 | 用途 | 模型 | 原因 |
 |------|------|------|
 | 意图分类/路由 | quick_think（gpt-4o-mini） | 低延迟，成本低 |
-| 深度分析/晨报/事件 | deep_think（gpt-4o） | 推理质量优先 |
+| 深度分析/晨报/事件/播报 | deep_think（gpt-4o） | 推理质量优先 |
+
+### 播报Agent（核心特色）
+
+播报Agent是AI Stock的核心特色功能，负责将多个Agent的分析结果汇总并生成双人对话播报：
+
+- **输入**：晨报Agent + 风口Agent + 机构调研Agent的分析结果
+  - scheduler 链路：从数据库 `agent_analysis_reports` 表读取（`report_date` 匹配当天）
+  - 实时请求：从 `state.analysis_reports` 读取（数据库未命中时降级）
+- **输出**：双人对话文本 + Node.js 生成的语音播客（MP3格式）
+- **模型**：deep_think（对话式播报生成）
+- **语音引擎**：由 Node.js 封装火山引擎播客 API，Python 仅调用内部接口
+- **发音人**：黑猫侦探社咪仔系列（男：`zh_male_dayixiansheng_v2_saturn_bigtts`，女：`zh_female_mizaitongxue_v2_saturn_bigtts`）
+- **音频输出**：Node.js 写入 `AGENT_AUDIO_DIR`，并回写公开的 `audio_path`
+- **测试**：`scripts\run_broadcast_test.bat` 或 `$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py`
+
+### 机构调研热门股Agent
+
+机构调研热门股Agent基于四信号源共振模型，自动检测机构调研热门股：
+
+- **工具**：`get_hot_burst`（实时共振检测）、`get_hot_burst_history`（历史记录查询）
+- **数据源**：Node.js `/internal/institution-research*` 接口
+- **模型**：deep_think（ReAct 模式）
+- **输出**：写入 `state.analysis_reports["hot_burst"]`，供播报Agent读取
+- **路由**：intent=`hot_burst` → `hot_burst_agent`
+- **降级文本**：`"机构调研热门股分析暂时不可用，请稍后重试"`
 
 ### 定时调度
 
@@ -120,8 +157,9 @@ graph TB
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取） |
-| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` |
+| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取）+ 写数据库 |
+| 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
+| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
@@ -170,7 +208,9 @@ src/aistock_agent/
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
 │       ├── event.py     # 事件传导链
-│       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports，Phase 5）
+│       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
+│       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档）
+│       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
 ├── tools/
@@ -189,7 +229,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,review,iterate}.py
+│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,review,iterate}.py
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
@@ -198,7 +238,8 @@ src/aistock_agent/
 │   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）
-│   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/15:30/15:35/15:40）
+│   ├── data_guard.py    # 空数据预检（ensure_data_available + DataCheck，规范13，scheduler触发时预检Node.js数据源）
+│   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/09:00/15:30/15:35/15:40）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
@@ -217,6 +258,7 @@ src/aistock_agent/
 - 晨报 Redis 缓存提取归档到 `docs/agent-outputs/morning/YYYY-MM-DD-briefing.md`
 - 使用 `python scripts/extract_morning_cache.py` 从 Redis 缓存提取已生成的晨报（不触发 LLM 重新生成），支持 `--date YYYY-MM-DD` 指定日期，默认提取所有缓存报告
 - 复盘报告归档到 `docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md`（scheduler 15:30 触发，自动归档）
+- 播客音频由 Node.js 写入 `AGENT_AUDIO_DIR`，报告仅保存公开的 `audio_path`
 - 快照 JSON 归档到 `docs/agent-outputs/snapshots/YYYY-MM-DD.json`（scheduler 15:35 触发，含 4 维度偏差评估）
 - 迭代分析报告归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`（scheduler 15:40 触发，JSON 格式）
 - 滚动统计归档到 `docs/agent-outputs/rolling_stats.json`（快照生成器维护，MA5/MA10/MA20）
@@ -257,6 +299,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
+| `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `GET /internal/health` | - | 轻量健康探针（供 Python `/health/ready` 探测，Phase 5） |
 
 ## 开发规范

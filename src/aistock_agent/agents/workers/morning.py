@@ -17,6 +17,7 @@ from langgraph.prebuilt import create_react_agent
 from aistock_agent.constants import SSEEventType
 from aistock_agent.prompts.workers.morning import MORNING_PROMPT
 from aistock_agent.services.cache import get_cached_briefing, set_cached_briefing
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
@@ -119,6 +120,14 @@ async def run(state: AgentState) -> dict[str, object]:
         if final_response:
             await _set_cached_briefing(final_response)
             _archive_morning(final_response)
+            # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
+            if state.get("trigger_source") == "scheduler":
+                report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                await node_api.save_analysis_report(
+                    report_type="morning",
+                    report_date=report_date,
+                    content={"text": final_response},
+                )
 
         return {"final_response": final_response}
     except Exception as e:
