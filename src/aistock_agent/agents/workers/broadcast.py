@@ -13,26 +13,40 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.message import extract_final_ai_response
+from aistock_agent.utils.report_parser import extract_podcast_brief, extract_display_report
 
 logger = get_logger(__name__)
 
 
 async def _fetch_report_from_db(report_type: str, report_date: str) -> str | None:
-    """从数据库读取分析报告内容
+    """从数据库读取分析报告的播报摘要
+
+    优先读取 podcast_brief（schema_version 2.0 双层结构），
+    如果没有则降级读取 display_report（兼容 1.0 单层结构）。
 
     Args:
         report_type: 报告类型 (morning/wind_leader/hot_burst)
         report_date: 报告日期 (YYYY-MM-DD)
 
     Returns:
-        报告文本内容，或 None（不存在）
+        播报摘要文本，或 None（不存在）
     """
     data = await node_api.get_analysis_report(report_type, report_date)
     content = data.get("content") if data else None
-    if isinstance(content, dict):
-        text = content.get("text")
-        if isinstance(text, str) and text:
-            return text
+    if not isinstance(content, dict):
+        return None
+
+    # 优先读取 podcast_brief（2.0 双层结构）
+    brief = extract_podcast_brief(content)
+    if brief:
+        return brief
+
+    # 降级读取 display_report（兼容 1.0 单层 text 字段）
+    display = extract_display_report(content)
+    if display:
+        # 截取前 500 字作为降级播报材料，避免 token 过多
+        return display[:500] if len(display) > 500 else display
+
     return None
 
 

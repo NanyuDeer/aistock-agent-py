@@ -104,11 +104,15 @@ async def test_run_exception_returns_fallback(monkeypatch):
     """异常时返回降级文本"""
     from aistock_agent.agents.workers.ai_advisor import run
 
+    async def mock_get_report(report_type: str, report_date: str, **kwargs):
+        return None
+
     def _raise(exc):
         raise exc
 
     import aistock_agent.agents.workers.ai_advisor as mod
-    monkeypatch.setattr(mod.node_api, "get_analysis_report", lambda *a, **kw: _raise(Exception("DB down")))
+    monkeypatch.setattr(mod.node_api, "get_analysis_report", mock_get_report)
+    monkeypatch.setattr(mod, "get_deep_think", lambda: _raise(Exception("LLM down")))
 
     state = _make_state(intent="morning")
     result = await run(state)

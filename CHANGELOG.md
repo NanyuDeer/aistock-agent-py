@@ -2,6 +2,35 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-12 — Agent 报告双层输出改造 + 文档同步 + 单测修复
+**开发者**: 尹辰
+
+### 新增
+- `src/aistock_agent/utils/report_parser.py`：双层报告解析工具，兼容 schema_version 1.0（单层 text）和 2.0（双层 display_report + podcast_brief），提供 4 个函数（parse_report_content / extract_podcast_brief / extract_display_report / parse_dual_layer_response）
+- `tests/unit/test_report_parser.py`：20 个单测全部通过
+- `docs/superpowers/plans/2026-07-12-agent-report-persistence.md`：持久化实施计划
+
+### 修改 — Agent 报告双层输出改造
+- `src/aistock_agent/prompts/workers/wind_leader.py`：提示词增加双层 JSON 输出格式要求
+- `src/aistock_agent/agents/workers/wind_leader.py`：持久化 content 从 `{"text": final_response}` 改为 `parse_dual_layer_response(final_response)` 双层结构
+- `src/aistock_agent/agents/workers/broadcast.py`：`_fetch_report_from_db` 优先读取 podcast_brief，降级读取 display_report（兼容旧数据）
+- `src/aistock_agent/agents/workers/ai_advisor.py`：`_fetch_relevant_reports` 使用 `extract_display_report` 读取展示文本（兼容旧数据）
+- `src/aistock_agent/tools/news_tools.py`：补上 `search_cls_news` 的 advisor 分类注册
+
+### 修复
+- `src/aistock_agent/config.py`：`model_config` 添加 `"extra": "ignore"`，解决 git pull 删除 volc_tts_* 字段后环境变量中仍有旧变量导致 pydantic 验证错误的问题
+- `tests/unit/test_ai_advisor.py`：`test_run_exception_returns_fallback` 改为 mock `get_deep_think` 抛出异常（因 `_fetch_relevant_reports` 内部 try-catch 会吞掉 node_api 异常，无法触发顶层 try-catch）
+
+### 文档
+- `README.md`：新增"智能投顾Agent（ai_advisor_agent）"章节、"报告双层输出（schema_version 2.0）"章节；更新播报Agent章节说明消费 podcast_brief；更新目录结构添加 ai_advisor.py、alert.py、report_parser.py
+- `AGENTS.md`：降级文本表补充 alert；产品功能映射表更新 alert_agent 状态为"已实现"
+- `AGENT_STANDARDS.md`：新增"补充规范 14：报告双层输出"章节（content 结构、字段用途、解析工具、LLM 输出要求、持久化/消费方改造模板、改造状态、禁止项）；目录添加规范14链接；附录A目录结构更新
+
+### 验证
+- 25 个单测全部通过（20个 report_parser + 5个 ai_advisor）
+
+---
+
 ## [main] 2026-07-09 — Agent 报告持久化架构 + 机构调研/播报/风口 Agent + 空数据预检
 
 ### 新增

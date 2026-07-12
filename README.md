@@ -131,14 +131,62 @@ graph TB
 播报Agent是AI Stock的核心特色功能，负责将多个Agent的分析结果汇总并生成双人对话播报：
 
 - **输入**：晨报Agent + 风口Agent + 机构调研Agent的分析结果
-  - scheduler 链路：从数据库 `agent_analysis_reports` 表读取（`report_date` 匹配当天）
+  - scheduler 链路：从数据库 `agent_analysis_reports` 表读取（`report_date` 匹配当天），**优先读取 `podcast_brief`（150-200字播报摘要），降级读取 `display_report`（兼容旧数据，截取前500字）**
   - 实时请求：从 `state.analysis_reports` 读取（数据库未命中时降级）
 - **输出**：双人对话文本 + Node.js 生成的语音播客（MP3格式）
 - **模型**：deep_think（对话式播报生成）
 - **语音引擎**：由 Node.js 封装火山引擎播客 API，Python 仅调用内部接口
 - **发音人**：黑猫侦探社咪仔系列（男：`zh_male_dayixiansheng_v2_saturn_bigtts`，女：`zh_female_mizaitongxue_v2_saturn_bigtts`）
 - **音频输出**：Node.js 写入 `AGENT_AUDIO_DIR`，并回写公开的 `audio_path`
+- **双层输出消费**：通过 `utils/report_parser.py` 的 `extract_podcast_brief` / `extract_display_report` 函数读取双层结构内容，兼容 schema_version 1.0（单层 text）和 2.0（双层 display_report + podcast_brief）
 - **测试**：`scripts\run_broadcast_test.bat` 或 `$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py`
+
+### 智能投顾Agent（ai_advisor_agent）
+
+智能投顾Agent负责回应用户的自然语言提问，优先从数据库读取已有分析报告整理汇总，降级使用工具获取数据：
+
+- **触发条件**：`trigger_source="user"` 且 intent 不是 general/broadcast 时路由到 ai_advisor_agent
+- **输入**：用户对话消息 + 数据库已有分析报告（morning/wind_leader/hot_burst 等）
+- **报告读取**：通过 `utils/report_parser.py` 的 `extract_display_report` 读取展示文本（兼容 1.0 单层 text 和 2.0 双层 display_report）
+- **降级策略**：DB 无报告时调用 advisor 工具集（get_quote、get_capital_flow、get_profit_forecast、search_cls_news、get_cls_news、get_global_markets、get_leader_stocks、get_hot_burst、get_hot_burst_history、tavily_finance_search）获取数据
+- **输出**：简洁要点式回复（200字以内），直接展示在对话气泡中
+- **模型**：deep_think
+- **路由**：`intent="ai_advisor"` → `ai_advisor_agent`
+
+### 报告双层输出（schema_version 2.0）
+
+所有 Agent 持久化到数据库的 `content` 字段采用双层结构。
+
+**为什么要做双层输出？（两个核心原因）**
+
+1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+
+双层结构定义如下：
+
+```python
+content = {
+    "display_report": {
+        "summary": "结论一句话（20字以内）",
+        "details": "完整分析内容（500-1500字）",
+        "stocks": ["股票代码"],   # 可选
+        "risks": ["风险提示"]      # 可选
+    },
+    "podcast_brief": "150-200字的播报摘要，只含主题、事实、判断、风险",
+    "schema_version": "2.0"
+}
+```
+
+**消费方**：
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
+- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+
+**兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
+
+**LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
+
+**已改造 Agent**：wind_leader、broadcast、ai_advisor
+**待改造 Agent**：morning、hot_burst、alert
 
 ### 机构调研热门股Agent
 
@@ -191,6 +239,7 @@ src/aistock_agent/
 │   ├── sse.py           # LangGraph 事件 → SSE 事件映射
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取工具
+│   ├── report_parser.py # 双层报告解析（兼容 schema_version 1.0/2.0，extract_podcast_brief/extract_display_report/parse_dual_layer_response）
 │   └── date.py          # 日期/交易日工具
 ├── errors/              # 异常体系（Phase 4）
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
@@ -209,8 +258,10 @@ src/aistock_agent/
 │       ├── sector.py    # 板块分析
 │       ├── event.py     # 事件传导链
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
-│       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档）
-│       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客）
+│       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
+│       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
+│       ├── ai_advisor.py # 智能投顾（消费 display_report，对话气泡展示）
+│       ├── alert.py     # 异动提醒（deep_think + 三步框架 + cycle 短中长线分类）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
 ├── tools/
@@ -229,7 +280,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,review,iterate}.py
+│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,alert,review,iterate}.py
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）

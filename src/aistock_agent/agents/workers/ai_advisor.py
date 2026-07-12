@@ -17,6 +17,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
+from aistock_agent.utils.report_parser import extract_display_report
 
 logger = structlog.get_logger()
 
@@ -68,9 +69,10 @@ async def _fetch_relevant_reports(
         try:
             data = await node_api.get_analysis_report(report_type, report_date)
             if data and isinstance(data.get("content"), dict):
-                text = data["content"].get("text")
-                if isinstance(text, str) and text:
-                    reports[report_type] = text
+                # 使用 extract_display_report 提取展示文本（兼容 1.0 单层 text 和 2.0 双层 display_report）
+                display_text = extract_display_report(data["content"])
+                if display_text:
+                    reports[report_type] = display_text
         except Exception as e:
             logger.warning(
                 "advisor_report_fetch_failed",

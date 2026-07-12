@@ -19,6 +19,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
+from aistock_agent.utils.report_parser import parse_dual_layer_response
 
 logger = get_logger(__name__)
 
@@ -73,10 +74,11 @@ async def run(state: AgentState) -> dict[str, object]:
             # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
             if state.get("trigger_source") == "scheduler":
                 report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                dual_layer_content = parse_dual_layer_response(final_response)
                 await node_api.save_analysis_report(
                     report_type="wind_leader",
                     report_date=report_date,
-                    content={"text": final_response},
+                    content=dual_layer_content,
                 )
 
         # 写入 analysis_reports 供 broadcast_agent 使用
