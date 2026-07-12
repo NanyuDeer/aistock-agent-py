@@ -84,4 +84,7 @@ TOOL_LABELS: dict[str, str] = {
     # alert agent 工具
     "get_stock_monitor": "正在获取个股异动数据",
     "get_alert_history": "正在获取异动历史",
+    # alert 子 Agent 工具（Phase 6）
+    "get_concepts": "正在加载产业链概念列表",
+    "get_graph_by_concept": "正在查询产业链上下游",
 }

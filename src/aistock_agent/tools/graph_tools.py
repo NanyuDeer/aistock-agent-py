@@ -98,3 +98,5 @@ from aistock_agent.tools.registry import register  # noqa: E402
 
 register("general", get_concepts)
 register("general", get_graph_by_concept)
+register("alert_graph", get_concepts)
+register("alert_graph", get_graph_by_concept)
