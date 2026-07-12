@@ -6,9 +6,7 @@
 
 ### 新增
 - `src/aistock_agent/services/data_guard.py`：通用空数据预检模块（DataCheck dataclass + ensure_data_available 函数，3 次重试 + 调刷新接口）
-- `src/aistock_agent/services/volcengine_podcast.py`：火山引擎 TTS 播客服务（WebSocket v3 SAMI 二进制协议，双人对话语音合成）
 - `scripts/run_broadcast_test.py` / `run_broadcast_test.bat`：播报生成测试脚本（双人对话 + TTS 语音输出）
-- `scripts/test_volc_tts_*.py`（v2/v3/v4/connection）：火山引擎 TTS 连接和协议测试脚本
 
 ### 修改 — Agent 报告持久化（Phase 2）
 - `src/aistock_agent/agents/workers/morning.py`：scheduler 触发时持久化晨报到 DB
@@ -17,7 +15,7 @@
 - `src/aistock_agent/agents/workers/review.py`：scheduler 触发时持久化复盘报告到 DB
 
 ### 改进 — 播报链路改造（Phase 3）
-- `src/aistock_agent/agents/workers/broadcast.py`：双链路读取报告（scheduler 从 DB 读，实时请求降级到 state.analysis_reports）+ 火山引擎 TTS 双人语音
+- `src/aistock_agent/agents/workers/broadcast.py`：双链路读取报告（scheduler 从 DB 读，实时请求降级到 state.analysis_reports）+ Node.js 内部 TTS 调用
 - `src/aistock_agent/prompts/workers/broadcast.py`：播报提示词更新（双人对话格式）
 - `src/aistock_agent/services/scheduler.py`：新增 09:00 播报串行链路（morning→wind_leader→hot_burst→broadcast，trigger_source="scheduler"，异常独立捕获）
 - `src/aistock_agent/config.py`：新增 scheduler_broadcast_cron 配置（"0 9 * * 1-5"，9:10 前端可见）
@@ -25,9 +23,8 @@
 
 ### 文档
 - `AGENT_STANDARDS.md`：新增规范 13 空数据预检（可选，hot_burst 和纯外部 API 的 agent 豁免）+ 目录结构添加 data_guard.py
-- `README.md`：播报 Agent 文档（发音人信息 + 音频路径 + VOLC_TTS_* 环境变量 + 测试命令 + 输出归档）；定时调度表新增 09:00 播报链路；目录结构新增 data_guard.py / volcengine_podcast.py
+- `README.md`：播报 Agent 文档（音频路径 + 测试命令）；定时调度表新增 09:00 播报链路；目录结构新增 data_guard.py
 - `AGENTS.md`：broadcast 状态改为"已实现"；降级文本表新增 review 和 broadcast 行
-- `.env.example`：新增 VOLC_TTS_* 环境变量
 - `scripts/run_morning_test.bat`：微调
 
 ## [junliang] 2026-07-09 — 新增 alert_agent（异动提醒 Agent）

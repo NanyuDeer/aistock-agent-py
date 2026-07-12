@@ -67,19 +67,6 @@ class Settings(BaseSettings):
     # sqlite backend 的数据库路径（仅 checkpointer_backend="sqlite" 时使用）
     sqlite_path: str = ".langgraph.db"
 
-    # 火山引擎 TTS（双人播客生成）
-    # 新版控制台使用 API Key 鉴权（推荐）
-    volc_tts_api_key: str = ""
-    # 旧版控制台使用 App ID + Access Token + Secret Key 鉴权（兼容）
-    volc_tts_app_id: str = ""
-    volc_tts_access_token: str = ""
-    volc_tts_secret_key: str = ""
-    # 播客 API 端点（默认值，无需修改）
-    volc_tts_podcast_url: str = "wss://openspeech.bytedance.com/api/v3/sami/podcasttts"
-    # 音色选择：播客专属音色（默认使用黑猫侦探社咪仔系列）
-    volc_tts_host_voice: str = "zh_female_mizaitongxue_v2_saturn_bigtts"      # 主持人音色
-    volc_tts_analyst_voice: str = "zh_male_dayixiansheng_v2_saturn_bigtts"    # 分析师音色
-
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）
     scheduler_enabled: bool = True
@@ -87,7 +74,8 @@ class Settings(BaseSettings):
     scheduler_review_cron: str = "30 15 * * 1-5"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 1-5"     # 快照：工作日 15:35
     scheduler_iterate_cron: str = "40 15 * * 1-5"      # 迭代：工作日 15:40
-    scheduler_broadcast_cron: str = "0 9 * * 1-5"      # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast，9:10前端可见）
+    # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
+    scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

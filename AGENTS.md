@@ -84,7 +84,7 @@ START → supervisor(quick_think)
        broadcast_agent（多 Agent 结果汇聚 → 播报生成）
               │
               ├──→ 输出双人对话格式（AI分析师 + AI主持人）
-              └──→ 前端 TTS 语音合成 + 播报播放
+              └──→ Node.js TTS 语音合成 + 前端播报播放
 ```
 
 ### 数据流
@@ -224,6 +224,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 
 ## 常用命令
 
