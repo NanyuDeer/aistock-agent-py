@@ -44,3 +44,4 @@ from aistock_agent.tools.registry import register  # noqa: E402
 
 register("morning", tavily_finance_search)
 register("event", tavily_finance_search)
+register("alert_news", tavily_finance_search)

@@ -1,95 +1,80 @@
-"""alert_agent run() 集成测试 — 异动提醒分析
+"""alert_agent run() 集成测试 — 异动提醒多维分析
 
-mock create_react_agent，验证：
-- 工具集绑定（get_stock_monitor, get_alert_history, get_quote, get_capital_flow, search_cls_news）
-- SystemMessage 注入（ALERT_ANALYST_PROMPT）
-- final_response 提取
-- symbol 缺失时返回提示文本（入口校验）
-- 使用 get_deep_think（非 quick_think）
+mock create_react_agent + asyncio.gather，验证：
+- 3 个子 Agent 工具集绑定（alert_news/alert_risk/alert_graph）
+- 子 Agent 异常降级不中断整体流程
+- Master Agent 汇聚子结果
+- symbol 缺失时返回提示文本
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from aistock_agent.agents.workers.alert import run
-from aistock_agent.prompts.workers.alert import ALERT_ANALYST_PROMPT
 
-_CREATE_REACT_AGENT = "aistock_agent.agents.workers.alert.create_react_agent"
-_GET_DEEP_THINK = "aistock_agent.agents.workers.alert.get_deep_think"
-
-EXPECTED_TOOL_NAMES = {
-    "get_stock_monitor", "get_alert_history",
-    "get_quote", "get_capital_flow", "search_cls_news",
-}
+_CREATE_REACT = "aistock_agent.agents.workers.alert.create_react_agent"
+_GET_DEEP = "aistock_agent.agents.workers.alert.get_deep_think"
+_GET_QUICK = "aistock_agent.agents.workers.alert.get_quick_think"
 
 
-def _make_mock_agent(messages: list) -> MagicMock:
-    """构造 mock react agent：ainvoke 返回 {"messages": messages}。"""
+def _make_mock_agent(*responses: str) -> MagicMock:
+    """构造 mock react agent，每次 ainvoke 返回下一个 response。"""
+    calls = list(responses)
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": messages})
+
+    async def fake_ainvoke(_input, **kw):
+        msg = calls.pop(0) if calls else "done"
+        return {"messages": [AIMessage(content=msg)]}
+
+    mock_agent.ainvoke = fake_ainvoke
     return mock_agent
 
 
-@pytest.mark.asyncio
-async def test_alert_agent_tools_bound_correctly():
-    """create_react_agent 被调用时 tools 参数为正确的 5 个工具。"""
-    mock_agent = _make_mock_agent([AIMessage(content="异动分析完成")])
-    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
-        with patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create:
-            await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
-
-    mock_create.assert_called_once()
-    tools_arg = mock_create.call_args[0][1]
-    assert {t.name for t in tools_arg} == EXPECTED_TOOL_NAMES
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# 子 Agent 工具注册验证
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_alert_agent_system_message_injected():
-    """ainvoke 传入的 messages 首条为 SystemMessage，内容为 ALERT_ANALYST_PROMPT。"""
-    captured: dict = {}
-    mock_agent = MagicMock()
-
-    async def fake_ainvoke(inp, **kw):
-        captured.update(inp)
-        return {"messages": [AIMessage(content="done")]}
-
-    mock_agent.ainvoke = fake_ainvoke
-
-    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
-        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
-            await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
-
-    messages = captured["messages"]
-    assert isinstance(messages[0], SystemMessage)
-    assert messages[0].content == ALERT_ANALYST_PROMPT
+async def test_alert_news_tools_registered():
+    """alert_news 类注册了 search_cls_news + tavily_finance_search 两个工具。"""
+    from aistock_agent.tools.registry import get_tools
+    tools = get_tools("alert_news")
+    names = {t.name for t in tools}
+    assert names == {"search_cls_news", "tavily_finance_search"}
 
 
 @pytest.mark.asyncio
-async def test_alert_agent_extracts_final_ai_response():
-    """从多条消息中提取最后一条 AI 回复作为 final_response。"""
-    messages = [
-        HumanMessage(content="分析 600519 异动"),
-        AIMessage(content="中间分析过程"),
-        AIMessage(content=" 发生了什么：贵州茅台近期异动事件如下..."),
-    ]
-    mock_agent = _make_mock_agent(messages)
-    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
-        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
-            result = await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
-
-    assert result == {"final_response": " 发生了什么：贵州茅台近期异动事件如下..."}
+async def test_alert_risk_tools_registered():
+    """alert_risk 类注册了 get_quote + get_capital_flow 两个工具。"""
+    from aistock_agent.tools.registry import get_tools
+    tools = get_tools("alert_risk")
+    names = {t.name for t in tools}
+    assert names == {"get_quote", "get_capital_flow"}
 
 
 @pytest.mark.asyncio
-async def test_alert_agent_symbol_missing_returns_hint():
+async def test_alert_graph_tools_registered():
+    """alert_graph 类注册了 get_concepts + get_graph_by_concept 两个工具。"""
+    from aistock_agent.tools.registry import get_tools
+    tools = get_tools("alert_graph")
+    names = {t.name for t in tools}
+    assert names == {"get_concepts", "get_graph_by_concept"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Agent 行为测试
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_symbol_missing_returns_hint():
     """symbol 缺失时返回提示文本，不调用 LLM。"""
     mock_llm = MagicMock()
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock()
-    with patch(_GET_DEEP_THINK, return_value=mock_llm) as mock_llm_factory:
-        with patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create:
+    with patch(_GET_DEEP, return_value=mock_llm) as mock_llm_factory:
+        with patch(_CREATE_REACT, return_value=mock_agent) as mock_create:
             result = await run({"messages": [HumanMessage(content="有什么异动")]})
 
     assert result == {"final_response": "请提供股票代码，例如：分析一下 600519 的异动"}
@@ -98,11 +83,68 @@ async def test_alert_agent_symbol_missing_returns_hint():
 
 
 @pytest.mark.asyncio
-async def test_alert_agent_uses_deep_think_llm():
-    """alert agent 使用 get_deep_think（非 quick_think）。"""
-    mock_agent = _make_mock_agent([AIMessage(content="done")])
-    with patch(_GET_DEEP_THINK, return_value=MagicMock()) as mock_deep:
-        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
-            await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
+async def test_master_synthesizes_sub_agent_results():
+    """3 个子 Agent 各自返回结果，Master 拿到全部结果后生成最终报告。"""
+    mock_agent = _make_mock_agent("Master 合成报告")
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+    ):
+        mock_sub.side_effect = [
+            "资讯情报分析结果",
+            "盘口风控分析结果",
+            "图谱发散分析结果",
+        ]
 
-    mock_deep.assert_called_once()
+        result = await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
+
+    # 3 个子 Agent 各被调用一次
+    assert mock_sub.call_count == 3
+    assert result == {"final_response": "Master 合成报告"}
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_failure_not_crash():
+    """某个子 Agent 失败时返回降级文本，不中断整体流程。"""
+    mock_agent = _make_mock_agent("降级后的 Master 报告")
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+    ):
+        # 模拟盘口风控子 Agent 降级
+        mock_sub.side_effect = [
+            "资讯情报分析结果",
+            "[盘口风控] 分析暂时不可用",
+            "图谱发散分析结果",
+        ]
+
+        result = await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
+
+    assert result["final_response"] == "降级后的 Master 报告"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_both_llm_types():
+    """alert_agent run() 中 Master 使用 get_deep_think，子 Agent 按分工分配模型。"""
+    mock_agent = _make_mock_agent("result")
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()) as mock_deep,
+        patch(_GET_QUICK, return_value=MagicMock()) as mock_quick,
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+    ):
+        mock_sub.return_value = "子Agent结果"
+
+        await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
+
+    assert mock_deep.call_count >= 1  # Master Agent 用了 deep_think
+    # 验证 3 个子 Agent 调用：资讯情报(quick) + 盘口风控(deep) + 图谱发散(quick)
+    assert mock_sub.call_count == 3
+    actual_calls = [c.kwargs for c in mock_sub.call_args_list]
+    assert any(c["name"] == "资讯情报" and c["model_type"] == "quick" for c in actual_calls)
+    assert any(c["name"] == "盘口风控" and c["model_type"] == "deep" for c in actual_calls)
+    assert any(c["name"] == "图谱发散" and c["model_type"] == "quick" for c in actual_calls)
