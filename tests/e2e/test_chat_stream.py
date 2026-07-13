@@ -1,20 +1,20 @@
-"""routes /chat/stream SSE 端点测试
+"""routes /chat/stream/messages + /chat/stream/updates SSE 端点测试
 
-验证 Task 10 新增的 SSE 流式对话接口：
-- Content-Type 为 text/event-stream
-- stock 意图事件序列（tool_start/llm_start/text/done），supervisor 事件被过滤
-- general 意图（无 tool_start，只有 llm_start/text/done）
+验证 Task 4 新增的双流 SSE 接口：
+- /chat/stream/messages: Content-Type text/event-stream, 仅 TEXT + LLM_START + DONE
+- /chat/stream/updates: 仅 TOOL_START/END + AGENT_SWITCH + DONE
+- supervisor 节点事件被过滤
 - astream_events 抛异常 → SSE error 事件
 - 缺失 X-Internal-Token → 403
 
 测试风格与 tests/e2e/test_chat_message_auth.py、test_briefing_morning.py 一致，
 使用 httpx.AsyncClient + ASGITransport，mock compile_graph 避免真实 LLM 调用。
-mock astream_events 用 async generator function（CD6），不能用 AsyncMock(side_effect=...)
+mock astream_events 用 async generator function，不能用 AsyncMock(side_effect=...)
 因为 astream_events 是 async generator 不是 coroutine。
 """
 import json
 from collections.abc import AsyncGenerator
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
@@ -23,7 +23,8 @@ from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.main import app
 
-_STREAM_URL = "/api/agent/chat/stream"
+_MESSAGES_URL = "/api/agent/chat/stream/messages"
+_UPDATES_URL = "/api/agent/chat/stream/updates"
 _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
 
@@ -69,6 +70,19 @@ async def _read_sse(resp: httpx.Response) -> str:
     return text
 
 
+def _make_mock_graph(
+    astream_events_fn: object,
+    final_response: str = "mocked 最终回复",
+) -> MagicMock:
+    """构造 mock graph（astream_events + aget_state）"""
+    mock_graph = MagicMock()
+    mock_graph.astream_events = astream_events_fn
+    mock_final = MagicMock()
+    mock_final.values = {"final_response": final_response, "analysis_reports": {}}
+    mock_graph.aget_state = AsyncMock(return_value=mock_final)
+    return mock_graph
+
+
 _FIXTURE_STOCK_EVENTS: list[dict[str, object]] = [
     {
         "event": "on_tool_start",
@@ -107,61 +121,71 @@ _FIXTURE_GENERAL_EVENTS: list[dict[str, object]] = [
 ]
 
 
+# ── /chat/stream/messages 测试 ──
+
+
 @pytest.mark.asyncio
-async def test_chat_stream_content_type():
+async def test_chat_stream_messages_content_type():
     """Content-Type 为 text/event-stream"""
-    mock_graph = AsyncMock()
-    mock_graph.astream_events = _empty_stream
+    mock_graph = _make_mock_graph(_empty_stream)
     with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
             async with client.stream(
-                "POST", _STREAM_URL, json={"message": "你好"}, headers=_VALID_HEADERS,
+                "POST", _MESSAGES_URL, json={"message": "你好"}, headers=_VALID_HEADERS,
             ) as resp:
                 assert resp.status_code == 200
                 assert "text/event-stream" in resp.headers["content-type"]
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_stock_intent_events():
-    """stock 意图：过滤 supervisor 事件，转发 tool_start/llm_start/text/done"""
-    mock_graph = AsyncMock()
-    mock_graph.astream_events = _make_stream(_FIXTURE_STOCK_EVENTS)
+async def test_chat_stream_messages_stock_intent_events():
+    """stock 意图 messages 流：过滤 supervisor + tool 事件，仅 llm_start/text/done"""
+    mock_graph = _make_mock_graph(
+        _make_stream(_FIXTURE_STOCK_EVENTS),
+        final_response="茅台分析完成",
+    )
     with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
             async with client.stream(
-                "POST", _STREAM_URL, json={"message": "分析 600519"},
+                "POST", _MESSAGES_URL, json={"message": "分析 600519"},
                 headers=_VALID_HEADERS,
             ) as resp:
                 text = await _read_sse(resp)
     events = _parse_sse(text)
     types = [e["type"] for e in events]
-    assert SSEEventType.TOOL_START in types
+    # messages 流：不含 tool 事件（filter_type="text"）
+    assert SSEEventType.TOOL_START not in types
+    assert SSEEventType.TOOL_END not in types
     assert SSEEventType.LLM_START in types
     assert SSEEventType.TEXT in types
     assert events[-1]["type"] == SSEEventType.DONE
+    # done 携带 final_response
+    assert events[-1]["final_response"] == "茅台分析完成"
     # supervisor 事件被过滤：不应出现 intent JSON 文本
     text_contents = [e.get("content", "") for e in events if e["type"] == SSEEventType.TEXT]
     assert not any("intent" in c for c in text_contents)
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_general_intent_events():
-    """general 意图：只有 llm_start/text/done，无 tool_start"""
-    mock_graph = AsyncMock()
-    mock_graph.astream_events = _make_stream(_FIXTURE_GENERAL_EVENTS)
+async def test_chat_stream_messages_general_intent_events():
+    """general 意图 messages 流：只有 llm_start/text/done，无 tool_start"""
+    mock_graph = _make_mock_graph(
+        _make_stream(_FIXTURE_GENERAL_EVENTS),
+        final_response="这是通用回复",
+    )
     with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
             async with client.stream(
-                "POST", _STREAM_URL, json={"message": "你好"},
+                "POST", _MESSAGES_URL, json={"message": "你好"},
                 headers=_VALID_HEADERS,
             ) as resp:
                 text = await _read_sse(resp)
@@ -174,17 +198,16 @@ async def test_chat_stream_general_intent_events():
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_error_event():
+async def test_chat_stream_messages_error_event():
     """astream_events 抛异常 → SSE error 事件"""
-    mock_graph = AsyncMock()
-    mock_graph.astream_events = _boom_stream
+    mock_graph = _make_mock_graph(_boom_stream)
     with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
             async with client.stream(
-                "POST", _STREAM_URL, json={"message": "你好"},
+                "POST", _MESSAGES_URL, json={"message": "你好"},
                 headers=_VALID_HEADERS,
             ) as resp:
                 text = await _read_sse(resp)
@@ -193,7 +216,7 @@ async def test_chat_stream_error_event():
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_missing_token_403():
+async def test_chat_stream_messages_missing_token_403():
     """缺失 X-Internal-Token → 403"""
     with patch("aistock_agent.api.routes.compile_graph",
                side_effect=AssertionError("auth should block")):
@@ -201,5 +224,65 @@ async def test_chat_stream_missing_token_403():
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
-            resp = await client.post(_STREAM_URL, json={"message": "你好"})
+            resp = await client.post(_MESSAGES_URL, json={"message": "你好"})
+    assert resp.status_code == 403
+
+
+# ── /chat/stream/updates 测试 ──
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_updates_tool_events():
+    """updates 流：仅 TOOL_START/END + AGENT_SWITCH + DONE，无 TEXT"""
+    # updates 流只读 queue（不触发 graph），需预填充事件
+    # 通过 patch _ensure_queue 让 updates 能读到事件
+    from aistock_agent.api import routes as routes_mod
+
+    mock_graph = _make_mock_graph(_make_stream(_FIXTURE_STOCK_EVENTS))
+
+    session_id = "test-updates-e2e"
+    routes_mod._event_queues.pop(session_id, None)
+
+    # 预填充 queue（模拟 messages 流已触发 graph 执行后的事件）
+    queue, _ = routes_mod._ensure_queue(session_id)
+    for event in _FIXTURE_STOCK_EVENTS:
+        await queue.put(event)
+    await queue.put(None)  # 哨兵
+
+    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph), \
+         patch("aistock_agent.api.routes._ensure_queue",
+               return_value=(queue, False)):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            async with client.stream(
+                "POST", _UPDATES_URL,
+                json={"message": "分析 600519", "session_id": session_id},
+                headers=_VALID_HEADERS,
+            ) as resp:
+                text = await _read_sse(resp)
+
+    events = _parse_sse(text)
+    types = [e["type"] for e in events]
+    # updates 流：不含 text 事件（filter_type="tool"）
+    assert SSEEventType.TEXT not in types
+    assert SSEEventType.TOOL_START in types
+    assert SSEEventType.TOOL_END in types
+    assert SSEEventType.AGENT_SWITCH in types
+    assert types[-1] == SSEEventType.DONE
+
+    routes_mod._event_queues.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_updates_missing_token_403():
+    """updates 流缺失 X-Internal-Token → 403"""
+    with patch("aistock_agent.api.routes.compile_graph",
+               side_effect=AssertionError("auth should block")):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(_UPDATES_URL, json={"message": "你好"})
     assert resp.status_code == 403
