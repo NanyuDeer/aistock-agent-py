@@ -118,6 +118,7 @@ src/aistock_agent/
 │   ├── sse.py           # LangGraph 事件 → SSE 事件映射
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
+│   ├── output_parser.py # Event Agent 双层输出解析（display_report + podcast_brief）
 │   └── date.py          # 日期/交易日工具
 ├── errors/              # 异常体系
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
@@ -134,7 +135,7 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + Redis 缓存）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
-│       └── event.py     # 事件传导链
+│       └── event.py     # 事件传导链（v2：Redis 缓存 + 双层输出解析 + 持久化）
 ├── tools/
 │   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
