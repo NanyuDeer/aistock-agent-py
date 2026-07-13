@@ -138,12 +138,26 @@ def _reset_checkpointer():
 
     与 tests/integration/test_graph.py 保持一致。compile_graph() 复用单例
     MemorySaver；不同 thread_id 已隔离数据，这里再重置仅为测试卫生。
+
+    同时清理 /briefing/morning 的 Queue，避免 Task 4 双流
+    架构的 _message_queues/_update_queues 跨测试残留。
+    session_id 现在是随机的 f"briefing_morning_{hex}"，需清理所有
+    briefing_morning 前缀的队列。
     """
+    from aistock_agent.api import routes as routes_mod
     from aistock_agent.memory import checkpointer as cp_module
 
+    def _purge_briefing_queues():
+        for d in (routes_mod._message_queues, routes_mod._update_queues):
+            keys = [k for k in d if k.startswith("briefing_morning")]
+            for k in keys:
+                d.pop(k, None)
+
     cp_module._checkpointer = None
+    _purge_briefing_queues()
     yield
     cp_module._checkpointer = None
+    _purge_briefing_queues()
 
 
 # 被 5 个 agent 用到的、走 node_api 的 tool 模块（market_tools 走 yfinance/tavily，单独 mock）
@@ -187,12 +201,16 @@ def _patch_llms(
     quick = FakeToolCallingLLM(responses=quick_responses or [])
     deep = FakeToolCallingLLM(responses=deep_responses or [])
     stack = ExitStack()
-    # quick_think：supervisor + general_agent 顺序消费同一实例
+    # quick_think：supervisor + general_agent + event(understanding/history/investment/podcast)
+    # 顺序消费同一实例
     stack.enter_context(
         patch("aistock_agent.agents.supervisor.node.get_quick_think", return_value=quick)
     )
     stack.enter_context(
         patch("aistock_agent.agents.general.node.get_quick_think", return_value=quick)
+    )
+    stack.enter_context(
+        patch("aistock_agent.agents.workers.event.get_quick_think", return_value=quick)
     )
     # deep_think：各 worker 模块顺序消费同一实例
     for mod in (
@@ -280,30 +298,74 @@ async def test_full_flow_sector(mock_node_api):
 
 @pytest.mark.asyncio
 async def test_full_flow_event(mock_node_api):
-    """event 意图全链路：supervisor → event_analyst → get_news_fulltext。
+    """event 意图全链路：supervisor → event_analyst v3 → get_news_fulltext。
 
-    event_analyst 工具集含 search_cls_news/get_news_fulltext/get_quote/tavily。
-    本测试让 LLM 调 get_news_fulltext（走 node_api），验证事件链路工具真实执行。
+    v3 拆分为 5 个 LLM 调用：
+    - Call 1 understanding (flash): 事件理解 JSON
+    - Call 2 transmission (deep, ReAct): 调 get_news_fulltext → 传导 JSON
+    - Call 3 history (flash, ReAct): 历史 JSON 数组（无工具调用）
+    - Call 4 investment (flash): 投资建议 JSON
+    - Call 5 podcast (flash): 播报文本
+
+    quick LLM 消费顺序：supervisor → understanding → history → investment → podcast
+    deep LLM 消费顺序：transmission(ReAct tool_call) → transmission(ReAct final JSON)
     """
     mock_node_api.get.return_value = {
         "title": "美联储维持利率不变",
         "content": "美联储7月议息会议决定维持联邦基金利率目标区间不变。",
     }
+    _understanding = json.dumps({
+        "summary": "美联储维持利率不变",
+        "coreChanges": [{"variable": "利率", "before": "不确定", "after": "维持不变"}],
+    })
+    _transmission = json.dumps({
+        "mechanism": "利率维持不变，市场流动性预期稳定",
+        "variables": [{"name": "利率", "direction": "neutral", "strength": 0.5,
+                        "explanation": "维持不变"}],
+        "coreIndustry": {"name": "科技", "impact": "中性偏正", "reason": "低利率环境利好成长股"},
+        "chain": [{"industry": "科技", "relation": "核心行业", "level": 1,
+                    "direction": "bullish", "impactStrength": 0.6, "reason": "低利率利好"}],
+    })
+    _history = json.dumps([{
+        "historyId": "h001", "year": "2024", "title": "上次维持利率",
+        "eventType": "市场动态", "sentiment": "neutral",
+        "industryChange": "市场波动不大", "changePercentage": 0.5,
+    }])
+    _investment = json.dumps({
+        "conclusion": "美联储维持利率不变，A股整体偏中性，关注科技板块。",
+        "keyPoints": ["利率不变"],
+        "focusIndustries": [{"name": "科技", "direction": "positive",
+                              "reason": "利率稳定利好成长股"}],
+        "opportunities": ["科技板块"],
+        "risks": ["外部不确定性"],
+        "rating": "neutral",
+    })
     with _patch_llms(
-        quick_responses=[_text("event")],
+        quick_responses=[
+            _text("event"),           # supervisor 意图分类
+            _text(_understanding),     # Call 1: understanding (flash, no tools)
+            _text(_history),           # Call 3: history (flash, ReAct, no tool calls)
+            _text(_investment),        # Call 4: investment (flash, no tools)
+            _text("美联储维持利率不变，对A股整体偏中性，关注科技板块。"),  # Call 5: podcast
+        ],
         deep_responses=[
-            _tc("get_news_fulltext", {"news_id": "20260708"}),
-            _text("美联储维持利率不变，对A股整体偏中性，关注科技板块。"),
+            _tc("get_news_fulltext", {"news_id": "20260708"}),  # Call 2: transmission ReAct
+            _text(_transmission),     # Call 2: transmission final JSON
         ],
     )[0]:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.post(
-                _CHAT_URL,
-                json={"message": "分析美联储加息的影响", "session_id": "e2e-event"},
-                headers=_VALID_HEADERS,
-            )
+        with patch("aistock_agent.agents.workers.event.get_cached_event",
+                   AsyncMock(return_value=None)):
+            with patch("aistock_agent.agents.workers.event.set_cached_event", AsyncMock()):
+                with patch("aistock_agent.agents.workers.event.persist_event_report",
+                           AsyncMock()):
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://test",
+                    ) as client:
+                        resp = await client.post(
+                            _CHAT_URL,
+                            json={"message": "分析美联储加息的影响", "session_id": "e2e-event"},
+                            headers=_VALID_HEADERS,
+                        )
 
     assert resp.status_code == 200
     body = resp.json()
@@ -360,15 +422,18 @@ async def _read_sse(resp: httpx.Response) -> str:
 
 @pytest.mark.asyncio
 async def test_full_flow_morning(mock_node_api):
-    """晨报 SSE 全链路：morning_agent.stream → create_react_agent → get_cls_news 真实执行。
+    """晨报 SSE 全链路：graph → supervisor(意图分类) → morning_agent → get_cls_news 真实执行。
 
-    /briefing/morning 不经 supervisor/graph，直接调 morning_agent.stream。
-    mock Redis 缓存未命中，让真实 ReAct + astream_events 跑通，验证 SSE 事件序列
-    含 tool_start/tool_end/llm_start/text/done（与 brief 验收标准一致）。
+    Task 4 重构后 /briefing/morning 走 graph 转发（_stream_messages, filter_type="text"），
+    SSE 事件序列含 text/done（tool 事件被过滤，在 /chat/stream/updates 中）。
+    需额外 patch supervisor 的 get_quick_think 以分类意图为 "morning"。
     """
     mock_node_api.get.return_value = {
         "items": [{"title": "美联储维持利率不变", "time": "2026-07-08"}],
     }
+    # supervisor 意图分类 LLM
+    quick = FakeToolCallingLLM(responses=[_text("morning")])
+    # morning_agent ReAct LLM
     deep = FakeToolCallingLLM(
         responses=[
             _tc("get_cls_news", {}, call_id="m1"),
@@ -380,6 +445,7 @@ async def test_full_flow_morning(mock_node_api):
     mock_redis.setex = AsyncMock()
 
     with patch("aistock_agent.services.cache.RedisPool") as mock_pool, \
+         patch("aistock_agent.agents.supervisor.node.get_quick_think", return_value=quick), \
          patch("aistock_agent.agents.workers.morning.get_deep_think", return_value=deep), \
          patch("aistock_agent.agents.workers.morning.is_trading_day", return_value=True), \
          patch("aistock_agent.tools.market_tools.yf"), \
@@ -395,11 +461,14 @@ async def test_full_flow_morning(mock_node_api):
 
     events = _parse_sse(text)
     types = [e.get("type") for e in events]
-    # brief 验收：SSE 事件序列含 tool_start/tool_end/text/done
-    assert SSEEventType.TOOL_START in types, f"missing tool_start, got {types}"
-    assert SSEEventType.TOOL_END in types, f"missing tool_end, got {types}"
+    # 新双流架构：/briefing/morning 走 _stream_messages (filter_type="text")
+    # messages 流只含 text + done，tool 事件被过滤
     assert SSEEventType.TEXT in types, f"missing text, got {types}"
     assert types[-1] == SSEEventType.DONE, f"last should be done, got {types}"
+    assert SSEEventType.TOOL_START not in types
+    # done 携带 final_response
+    done_events = [e for e in events if e.get("type") == SSEEventType.DONE]
+    assert done_events and "晨报" in done_events[0].get("final_response", "")
     # 工具真实执行：node_api 打到 /internal/news/latest
     mock_node_api.get.assert_any_await("/internal/news/latest?limit=10")
 
@@ -446,21 +515,27 @@ async def test_full_flow_tool_failure_degradation(mock_node_api):
 
 @pytest.mark.asyncio
 async def test_full_flow_redis_cache_hit():
-    """Redis 缓存命中：morning_agent.stream 直接返回缓存，不调用 LLM。
+    """Redis 缓存命中：morning_agent.run 直接返回缓存，不调用 deep LLM。
 
-    mock Redis get 返回缓存文本，get_deep_think 设为「被调用即失败」的哨兵，
-    验证缓存命中路径完全跳过 LLM（零 token 消耗）。
+    Task 4 重构后 /briefing/morning 走 graph 转发。缓存命中时 morning_agent.run
+    直接返回缓存内容（不调 LLM），supervisor 的 text 事件被过滤（node=="supervisor"），
+    SSE 输出仅 done 事件（携带 final_response = 缓存内容）。
+    需额外 patch supervisor 的 get_quick_think 以分类意图为 "morning"。
     """
     cached_content = "缓存晨报：昨日市场震荡收涨，今日关注数据发布。"
     mock_redis = AsyncMock()
     mock_redis.get = AsyncMock(return_value=cached_content.encode("utf-8"))
     mock_redis.setex = AsyncMock()
 
+    # supervisor 意图分类 LLM
+    quick = FakeToolCallingLLM(responses=[_text("morning")])
     # 哨兵：缓存命中时 get_deep_think 不应被调用
     deep_sentinel = MagicMock(side_effect=AssertionError("LLM must not be called on cache hit"))
 
     with patch("aistock_agent.services.cache.RedisPool") as mock_pool, \
-         patch("aistock_agent.agents.workers.morning.get_deep_think", new=deep_sentinel):
+         patch("aistock_agent.agents.supervisor.node.get_quick_think", return_value=quick), \
+         patch("aistock_agent.agents.workers.morning.get_deep_think", new=deep_sentinel), \
+         patch("aistock_agent.agents.workers.morning.is_trading_day", return_value=True):
         mock_pool.get_client = AsyncMock(return_value=mock_redis)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
@@ -471,12 +546,11 @@ async def test_full_flow_redis_cache_hit():
 
     events = _parse_sse(text)
     types = [e.get("type") for e in events]
-    # 缓存命中：只产出 text + done，无 tool_start/llm_start
-    assert SSEEventType.TEXT in types
+    # 缓存命中：仅 done 事件，无 tool/text（supervisor text 被过滤，morning 未调 LLM）
     assert types[-1] == SSEEventType.DONE
     assert SSEEventType.TOOL_START not in types
-    # 缓存内容回传
-    text_events = [e for e in events if e.get("type") == SSEEventType.TEXT]
-    assert text_events and text_events[0].get("content") == cached_content
+    # done 携带 final_response（缓存内容）
+    done_events = [e for e in events if e.get("type") == SSEEventType.DONE]
+    assert done_events and done_events[0].get("final_response") == cached_content
     # LLM 未被调用（哨兵未触发 AssertionError 即证明）
     deep_sentinel.assert_not_called()

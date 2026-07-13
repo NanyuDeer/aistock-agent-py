@@ -740,7 +740,7 @@ agent 层 try-catch 都是单次捕获，无 retry 逻辑。
 | morning（晨报） | deep_think | 4步宏观策略分析 |
 | stock（个股分析） | deep_think | 多维度综合分析 |
 | sector（板块分析） | deep_think | 龙头筛选 + 资金研判 |
-| event（事件传导链） | deep_think | 5级评分 + 传导路径推演 |
+| event（事件传导链） | deep_think | 6步传导链 + pgvector 语义匹配 + 双层输出（display_report + podcast_brief） |
 | review（复盘归因） | deep_think | 5步归因分析 + 标准化行情事实附录 |
 | iterate（迭代分析） | deep_think | 偏差分析 + 优化建议（仅阈值触发时调用 LLM） |
 | tenx（十倍股评分） | deep_think | 6维度18指标评分 |
@@ -853,7 +853,7 @@ client = aioredis.from_url(settings.redis_url)  # 每次请求创建连接，性
 | 晨报（morning） | ✅ 缓存 2h | 同一交易日的晨报内容幂等；deep_think 成本高（6000-8000 token/次） |
 | 复盘（review） | ✅ 缓存 2h | 同一交易日的复盘内容幂等；deep_think 成本高 |
 | 个股分析（stock） | ❌ 不缓存 | 行情实时变化，缓存会误导 |
-| 事件传导（event） | ❌ 不缓存 | 新闻时效性强，缓存价值低 |
+| 事件传导（event） | ✅ 缓存 30min | 同一事件 30 分钟内结果幂等（MD5 key）；deep_think 成本高 |
 | 板块分析（sector） | ❌ 不缓存 | 龙头/资金实时变化 |
 | 异动提醒（alert） | ❌ 不缓存 | 异动定义就是"实时变化" |
 

@@ -8,7 +8,7 @@
 
 mock 策略（与 tests/integration/test_{stock,general,supervisor}_agent.py 一致）：
 - patch 各 agent 模块内的 get_deep_think / get_quick_think 抛 Exception
-- morning 额外 patch _get_cached_briefing 返回 None（避免缓存短路 + 避免真实 Redis）
+- morning 额外 patch get_cached_briefing 返回 None（避免缓存短路 + 避免真实 Redis）
 - stock 的 state 含 symbol="600519"（避免 if not symbol 早返回）
 """
 
@@ -28,11 +28,13 @@ from aistock_agent.graph.builder import compile_graph
 
 # patch 路径（与各 agent 测试文件一致）
 _GET_QUICK_SUPERVISOR = "aistock_agent.agents.supervisor.node.get_quick_think"
-_GET_CACHED_MORNING = "aistock_agent.agents.workers.morning._get_cached_briefing"
+_GET_CACHED_MORNING = "aistock_agent.agents.workers.morning.get_cached_briefing"
 _GET_DEEP_MORNING = "aistock_agent.agents.workers.morning.get_deep_think"
 _GET_DEEP_STOCK = "aistock_agent.agents.workers.stock.get_deep_think"
 _GET_DEEP_SECTOR = "aistock_agent.agents.workers.sector.get_deep_think"
 _GET_DEEP_EVENT = "aistock_agent.agents.workers.event.get_deep_think"
+_GET_QUICK_EVENT = "aistock_agent.agents.workers.event.get_quick_think"
+_GET_CACHED_EVENT = "aistock_agent.agents.workers.event.get_cached_event"
 _GET_QUICK_GENERAL = "aistock_agent.agents.general.node.get_quick_think"
 
 # 降级文本（与各 agent run() except 块一致）
@@ -85,12 +87,12 @@ async def test_supervisor_fallback_on_llm_failure():
 async def test_morning_fallback_on_llm_failure():
     """morning.run: get_deep_think 抛异常 → 降级返回晨报不可用文本。
 
-    额外 patch _get_cached_briefing 返回 None，避免缓存命中短路。
+    额外 patch get_cached_briefing 返回 None，避免缓存命中短路。
     """
     with patch(_GET_CACHED_MORNING, AsyncMock(return_value=None)):
         with patch(_GET_DEEP_MORNING, side_effect=Exception("LLM boom")):
             result = await morning_run({})
-    assert result == {"final_response": _MORNING_FALLBACK}
+    assert result["final_response"] == _MORNING_FALLBACK
 
 
 @pytest.mark.asyncio
@@ -116,11 +118,17 @@ async def test_sector_fallback_on_llm_failure():
 
 @pytest.mark.asyncio
 async def test_event_fallback_on_llm_failure():
-    """event.run: get_deep_think 抛异常 → 降级返回事件分析不可用文本。"""
+    """event.run: get_quick_think 抛异常 → 降级返回事件分析不可用文本。
+
+    v3 拆分为 5 个 LLM 调用，第一个调用（understanding）使用 get_quick_think。
+    patch get_cached_event 返回 None 避免缓存短路 + 避免真实 Redis。
+    """
     state = {"messages": [HumanMessage(content="分析美联储加息")]}
-    with patch(_GET_DEEP_EVENT, side_effect=Exception("LLM boom")):
-        result = await event_run(state)
-    assert result == {"final_response": _EVENT_FALLBACK}
+    with patch(_GET_CACHED_EVENT, AsyncMock(return_value=None)):
+        with patch(_GET_QUICK_EVENT, side_effect=Exception("LLM boom")):
+            with patch(_GET_DEEP_EVENT, side_effect=Exception("LLM boom")):
+                result = await event_run(state)
+    assert result["final_response"] == _EVENT_FALLBACK
 
 
 @pytest.mark.asyncio

@@ -205,11 +205,13 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取）+ 写数据库 |
+| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取）+ 写数据库；完成后自动并行触发 event agent 分析 major_events（fire-and-forget） |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
+
+> **事件传导分析（event conduction）**：不单独注册 cron job，而是嵌入 morning 任务中——晨报完成后提取 `major_events`，对 impact_score ≥ 4 的事件通过 `asyncio.create_task` 并行触发 `event_agent.run()`。每个事件独立运行，fire-and-forget 模式，失败不影响其他事件或后续复盘流水线。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
@@ -236,10 +238,11 @@ src/aistock_agent/
 │   ├── session_store.py # 会话历史读写
 │   └── preferences.py   # 用户偏好/自选股记忆
 ├── utils/               # 通用工具（Phase 4）
-│   ├── sse.py           # LangGraph 事件 → SSE 事件映射
+│   ├── sse.py           # LangGraph 事件 → SSE 事件映射（支持 filter_type 双流分流）
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取工具
 │   ├── report_parser.py # 双层报告解析（兼容 schema_version 1.0/2.0，extract_podcast_brief/extract_display_report/parse_dual_layer_response）
+│   ├── output_parser.py # _parse_json + transform_to_frontend（事件 Agent v3 前端对齐）+ extract_major_events
 │   └── date.py          # 日期/交易日工具
 ├── errors/              # 异常体系（Phase 4）
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
@@ -256,7 +259,7 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + Redis 缓存 + 文件归档）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
-│       ├── event.py     # 事件传导链
+│       ├── event.py     # 事件传导链（v3：模块化架构 + 双层输出 + 持久化）
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
 │       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
@@ -275,6 +278,7 @@ src/aistock_agent/
 │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── graph_tools.py        # get_concepts, get_graph_by_concept（Phase 5）
+│   ├── industry_vector_search.py  # match_industry_by_keywords（pgvector 语义匹配，event 工具集）
 │   ├── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history（Phase 5）
 │   └── review_tools.py       # get_market_summary, get_sector_performance（复盘流水线，review category）
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
@@ -319,8 +323,10 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/agent/chat/message` | 对话消息（非流式） |
-| GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，支持 Redis 缓存） |
+| POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
+| POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
+| POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |
+| GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，graph 转发，支持 Redis 缓存） |
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |

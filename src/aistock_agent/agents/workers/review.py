@@ -8,13 +8,13 @@
 """
 
 from datetime import datetime
-from pathlib import Path
 
 import structlog
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
+from aistock_agent.services.archiver import archive_review
 from aistock_agent.services.cache import get_cached_review, set_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
@@ -23,9 +23,6 @@ from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
 
 logger = structlog.get_logger()
-
-# 复盘报告归档目录
-REVIEW_OUTPUT_DIR = Path("docs/agent-outputs/review")
 
 
 async def run(state: AgentState) -> dict[str, object]:
@@ -67,7 +64,7 @@ async def run(state: AgentState) -> dict[str, object]:
         # 缓存 + 归档
         if final_response:
             await set_cached_review(final_response)
-            _archive_review(final_response)
+            archive_review(final_response)
             # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
             if state.get("trigger_source") == "scheduler":
                 report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
@@ -86,15 +83,3 @@ async def run(state: AgentState) -> dict[str, object]:
             exc_info=True,
         )
         return {"final_response": "复盘生成暂时不可用，请稍后重试"}
-
-
-def _archive_review(content: str) -> None:
-    """将复盘报告归档到文件"""
-    try:
-        REVIEW_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
-        filepath = REVIEW_OUTPUT_DIR / f"{timestamp}-review.md"
-        filepath.write_text(content, encoding="utf-8")
-        logger.info("review_archived", path=str(filepath))
-    except Exception as e:
-        logger.warning("review_archive_failed", error=str(e))
