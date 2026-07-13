@@ -134,6 +134,22 @@ async def _run_morning_task() -> None:
             "scheduler_morning_done",
             has_response=bool(result.get("final_response")),
         )
+
+        # 提取重大事件列表，并行触发事件传导分析（fire-and-forget）
+        # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
+        major_events: list[dict[str, object]] = result.get("analysis_reports", {}).get("major_events", [])  # type: ignore[assignment]
+        if major_events:
+            event_tasks = [
+                asyncio.create_task(_run_event_task(event))
+                for event in major_events
+                if isinstance(event, dict) and event.get("title")
+            ]
+            logger.info(
+                "scheduler_event_triggered",
+                total=len(event_tasks),
+                titles=[e.get("title", "")[:30] for e in major_events if isinstance(e, dict)],
+            )
+            # fire-and-forget: 各个事件 task 独立在后台运行，错误由 _run_event_task 内部捕获
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
@@ -220,3 +236,58 @@ async def _run_iterate_task() -> None:
         )
     except Exception as e:
         logger.error("scheduler_iterate_failed", error=str(e), exc_info=True)
+
+
+async def _run_event_task(event: dict[str, object]) -> None:
+    """单个事件传导分析任务。
+
+    由 morning 任务完成后触发，每个 major_event 一个独立 task，
+    所有事件并行执行（asyncio.create_task）。失败不影响其他事件。
+
+    Args:
+        event: major_event dict，含 title/summary/url/impact_score/direction/involved_keywords
+    """
+    title = str(event.get("title", "未知事件"))
+    summary = str(event.get("summary", ""))
+    url = str(event.get("url", ""))
+
+    logger.info("scheduler_event_start", title=title[:50])
+
+    # 构建事件分析的用户消息
+    user_message = f"请分析以下重大事件：{title}"
+    if summary:
+        user_message += f"\n\n事件概述：{summary}"
+    if url:
+        user_message += f"\n\n原文链接：{url}"
+
+    state: AgentState = {
+        "messages": [{"role": "user", "content": user_message}],
+        "session_id": f"scheduled_event_{date.today().isoformat()}_{title[:20]}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "event",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+    }
+
+    try:
+        from aistock_agent.agents.workers import event as event_agent
+
+        result = await event_agent.run(state)
+        logger.info(
+            "scheduler_event_done",
+            title=title[:50],
+            has_response=bool(result.get("final_response")),
+            has_display_report=bool(
+                result.get("analysis_reports", {}).get("event_display_report")
+            ),
+        )
+    except Exception as e:
+        logger.error(
+            "scheduler_event_failed",
+            title=title[:50],
+            error=str(e),
+            exc_info=True,
+        )
