@@ -4,7 +4,7 @@ import pytest
 
 def test_threshold_normal_all_within_range():
     """所有指标在阈值内 → status=normal"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.2},
@@ -24,7 +24,7 @@ def test_threshold_normal_all_within_range():
 
 def test_threshold_dim1_hit_rate_low():
     """维度一 hit_rate < 0.5 → 触发"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.3, "new_coverage_rate": 0.2},
@@ -39,7 +39,7 @@ def test_threshold_dim1_hit_rate_low():
 
 def test_threshold_dim1_new_coverage_high():
     """维度一 new_coverage_rate > 0.4 → 触发"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.5},
@@ -54,7 +54,7 @@ def test_threshold_dim1_new_coverage_high():
 
 def test_threshold_dim2_abs_deviation_high():
     """维度二 abs(mean_deviation) > 3 → 触发"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.2},
@@ -69,7 +69,7 @@ def test_threshold_dim2_abs_deviation_high():
 
 def test_threshold_dim2_ma10_mean_deviation_high():
     """维度二 MA10 均值偏差 > 1.5 → 触发"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.2},
@@ -84,7 +84,7 @@ def test_threshold_dim2_ma10_mean_deviation_high():
 
 def test_threshold_dim3_similarity_low():
     """维度三 attribution_match_rate < 0.3 → 触发（similarity < 3 近似）"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.2},
@@ -99,7 +99,7 @@ def test_threshold_dim3_similarity_low():
 
 def test_threshold_dim4_ma20_bias_high():
     """维度四 MA20 sentiment_bias > 0.15 → 触发"""
-    from aistock_agent.agents.workers.iterate import check_thresholds
+    from aistock_agent.services.iterate_analyzer import check_thresholds
 
     snapshot = {
         "dimension_1_coverage": {"hit_rate": 0.7, "new_coverage_rate": 0.2},

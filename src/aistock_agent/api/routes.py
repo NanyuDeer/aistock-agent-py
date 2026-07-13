@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, Response
@@ -55,22 +56,35 @@ async def chat_message(
     return ChatResponse(content=content, session_id=session_id)
 
 
-# ── session_id → asyncio.Queue 扇出映射 ──
-# messages 流和 updates 流共享同一个 graph 执行结果，graph 只跑一次。
-_event_queues: dict[str, asyncio.Queue[object | None]] = {}
+# ── session_id → asyncio.Queue 双队列扇出 ──
+# messages 流和 updates 流各自拥有独立 Queue，graph 只跑一次。
+# 每个事件同时推入两个 Queue，两条流独立消费、互不竞争。
+_message_queues: dict[str, asyncio.Queue[object | None]] = {}
+_update_queues: dict[str, asyncio.Queue[object | None]] = {}
 
 
-def _ensure_queue(session_id: str) -> tuple[asyncio.Queue[object | None], bool]:
-    """获取或创建 session 对应的事件队列。
+def _ensure_message_queue(session_id: str) -> tuple[asyncio.Queue[object | None], bool]:
+    """获取或创建 message 队列，同时确保 update 队列也已创建。
+
+    graph 执行前两个队列必须同时存在，否则 _run_graph_to_queue 推入
+    update 队列的事件会丢失。故首次创建 message 队列时同步创建 update 队列。
 
     Returns:
-        (queue, is_new): queue 实例 + 是否为新创建（首次调用时为 True，
-        后续 updates 连接时为 False）。
+        (queue, is_new): message 队列 + 是否为新创建（首次调用时为 True，
+        后续 messages 重连或 updates 连接时为 False）。
     """
-    is_new = session_id not in _event_queues
+    is_new = session_id not in _message_queues
     if is_new:
-        _event_queues[session_id] = asyncio.Queue()
-    return _event_queues[session_id], is_new
+        _message_queues[session_id] = asyncio.Queue()
+        _update_queues.setdefault(session_id, asyncio.Queue())
+    return _message_queues[session_id], is_new
+
+
+def _ensure_update_queue(session_id: str) -> asyncio.Queue[object | None]:
+    """获取或创建 update 队列（不触发 graph 执行）。"""
+    if session_id not in _update_queues:
+        _update_queues[session_id] = asyncio.Queue()
+    return _update_queues[session_id]
 
 
 async def _run_graph_to_queue(
@@ -78,22 +92,29 @@ async def _run_graph_to_queue(
     initial_state: dict[str, object],
     session_id: str,
 ) -> None:
-    """后台执行 graph，所有 ``astream_events`` 事件推入共享 Queue。
+    """后台执行 graph，所有 ``astream_events`` 事件推入两个独立 Queue（fan-out）。
 
-    仅由 messages generator 的首次连接触发，updates generator 不启动。
+    每个事件同时放入 message queue 和 update queue，
+    两条流各自独立消费、互不竞争。仅由 messages generator 的首次连接触发。
     """
-    queue, _ = _ensure_queue(session_id)
+    msg_q, _ = _ensure_message_queue(session_id)
+    upd_q = _ensure_update_queue(session_id)
     try:
         async for event in graph.astream_events(
             initial_state, version="v2",
             config={"configurable": {"thread_id": session_id}},
         ):
-            await queue.put(event)
+            await msg_q.put(event)
+            await upd_q.put(event)
     except Exception as exc:
-        await queue.put({"__error__": str(exc)})
+        error_event = {"__error__": str(exc)}
+        await msg_q.put(error_event)
+        await upd_q.put(error_event)
     finally:
-        await queue.put(None)  # 哨兵：事件流结束
-        _event_queues.pop(session_id, None)
+        await msg_q.put(None)  # 哨兵：事件流结束
+        await upd_q.put(None)
+        _message_queues.pop(session_id, None)
+        _update_queues.pop(session_id, None)
 
 
 async def _stream_messages(
@@ -101,8 +122,8 @@ async def _stream_messages(
     initial_state: dict[str, object],
     session_id: str,
 ) -> AsyncGenerator[dict[str, object], None]:
-    """messages 流 — 从共享 Queue 读事件，发射 TEXT + LLM_START + DONE"""
-    queue, is_new = _ensure_queue(session_id)
+    """messages 流 — 从 message Queue 读事件，发射 TEXT + LLM_START + DONE"""
+    queue, is_new = _ensure_message_queue(session_id)
 
     # 首次 messages 连接触发 graph 执行，updates 连接只读
     if is_new:
@@ -147,12 +168,10 @@ async def _stream_messages(
 
 
 async def _stream_updates(
-    graph: CompiledStateGraph,
-    initial_state: dict[str, object],
     session_id: str,
 ) -> AsyncGenerator[dict[str, object], None]:
-    """updates 流 — 从共享 Queue 读事件，发射 TOOL_START/END + AGENT_SWITCH + DONE"""
-    queue, _ = _ensure_queue(session_id)
+    """updates 流 — 从 update Queue 读事件，发射 TOOL_START/END + AGENT_SWITCH + DONE"""
+    queue = _ensure_update_queue(session_id)
     _prev_node: str | None = None
 
     try:
@@ -221,21 +240,14 @@ async def chat_stream_updates(
 ) -> EventSourceResponse:
     """对话进度（SSE 流式，仅工具事件）— 侧边栏/状态栏
 
-    与 ``/chat/stream/messages`` 共享同一次 graph 执行（asyncio.Queue 扇出）。
+    与 ``/chat/stream/messages`` 共享同一次 graph 执行（双 Queue fan-out）。
+    updates 流仅从 _update_queues 读取，不启动 graph 执行、不编译 graph。
     yields: agent_switch → tool_start/tool_end/... → done
     """
-    graph = compile_graph()
-
     session_id = req.session_id or f"session_{id(req)}"
-    initial_state = build_initial_state(
-        message=req.message,
-        session_id=session_id,
-        user_id=req.user_id,
-        favorites=req.favorites,
-    )
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
-        async for sse_event in _stream_updates(graph, initial_state, session_id):
+        async for sse_event in _stream_updates(session_id):
             yield {"data": json.dumps(sse_event, ensure_ascii=False)}
 
     return EventSourceResponse(generator())
@@ -249,7 +261,7 @@ async def morning_briefing() -> EventSourceResponse:
     缓存命中时 supervisor 花 ~0.5s 分类后立即返回；缓存未命中时逐 token 流式。
     """
     graph = compile_graph()
-    session_id = "briefing_morning"
+    session_id = f"briefing_morning_{uuid4().hex[:8]}"
 
     initial_state = build_initial_state(
         message="生成今日晨报",

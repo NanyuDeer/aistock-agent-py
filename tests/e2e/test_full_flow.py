@@ -139,17 +139,25 @@ def _reset_checkpointer():
     与 tests/integration/test_graph.py 保持一致。compile_graph() 复用单例
     MemorySaver；不同 thread_id 已隔离数据，这里再重置仅为测试卫生。
 
-    同时清理 /briefing/morning 固定 session_id 的 Queue，避免 Task 4 双流
-    架构的 _event_queues 跨测试残留。
+    同时清理 /briefing/morning 的 Queue，避免 Task 4 双流
+    架构的 _message_queues/_update_queues 跨测试残留。
+    session_id 现在是随机的 f"briefing_morning_{hex}"，需清理所有
+    briefing_morning 前缀的队列。
     """
     from aistock_agent.api import routes as routes_mod
     from aistock_agent.memory import checkpointer as cp_module
 
+    def _purge_briefing_queues():
+        for d in (routes_mod._message_queues, routes_mod._update_queues):
+            keys = [k for k in d if k.startswith("briefing_morning")]
+            for k in keys:
+                d.pop(k, None)
+
     cp_module._checkpointer = None
-    routes_mod._event_queues.pop("briefing_morning", None)
+    _purge_briefing_queues()
     yield
     cp_module._checkpointer = None
-    routes_mod._event_queues.pop("briefing_morning", None)
+    _purge_briefing_queues()
 
 
 # 被 5 个 agent 用到的、走 node_api 的 tool 模块（market_tools 走 yfinance/tavily，单独 mock）

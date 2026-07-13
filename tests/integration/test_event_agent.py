@@ -142,18 +142,29 @@ async def test_run_no_human_message() -> None:
 
 @pytest.mark.asyncio
 async def test_run_cache_hit() -> None:
-    """缓存命中 → 直接返回缓存结果，不调用 LLM。"""
+    """缓存命中 → 直接返回缓存结果，不调用 LLM。
+
+    缓存存储的是完整 analysis_reports dict（与 transform_to_frontend 输出一致），
+    包含 event_understanding / event_transmission / event_history / event_investment /
+    event_podcast_brief 等键，保证缓存命中/未命中时前端收到相同的数据结构。
+    """
     cached_data: dict[str, object] = {
-        "display_report": {"event_title": "缓存事件"},
-        "podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "缓存事件理解"},
+        "event_transmission": {"mechanism": "缓存传导路径"},
+        "event_history": [],
+        "event_investment": {"conclusion": "缓存投资建议"},
+        "event_podcast_brief": "缓存播报文本",
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
             result = await run({"messages": [HumanMessage(content="测试事件")]})  # type: ignore[arg-type]
 
     mock_u.assert_not_called()
+    # final_response 是缓存的播报文本
     assert result["final_response"] == "缓存播报文本"
-    assert result["analysis_reports"]["event_display_report"] == {"event_title": "缓存事件"}
+    # analysis_reports 包含缓存的完整结构（与新鲜执行一致）
+    assert result["analysis_reports"]["event_understanding"] == {"summary": "缓存事件理解"}
+    assert result["analysis_reports"]["event_transmission"] == {"mechanism": "缓存传导路径"}
     assert result["analysis_reports"]["event_podcast_brief"] == "缓存播报文本"
 
 

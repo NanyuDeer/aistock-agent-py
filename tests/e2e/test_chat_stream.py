@@ -234,34 +234,29 @@ async def test_chat_stream_messages_missing_token_403():
 @pytest.mark.asyncio
 async def test_chat_stream_updates_tool_events():
     """updates 流：仅 TOOL_START/END + AGENT_SWITCH + DONE，无 TEXT"""
-    # updates 流只读 queue（不触发 graph），需预填充事件
-    # 通过 patch _ensure_queue 让 updates 能读到事件
+    # updates 流只读 update queue（不触发 graph），需预填充事件
     from aistock_agent.api import routes as routes_mod
 
-    mock_graph = _make_mock_graph(_make_stream(_FIXTURE_STOCK_EVENTS))
-
     session_id = "test-updates-e2e"
-    routes_mod._event_queues.pop(session_id, None)
+    routes_mod._message_queues.pop(session_id, None)
+    routes_mod._update_queues.pop(session_id, None)
 
-    # 预填充 queue（模拟 messages 流已触发 graph 执行后的事件）
-    queue, _ = routes_mod._ensure_queue(session_id)
+    # 预填充 update queue（模拟 messages 流已触发 graph 执行后的事件副本）
+    queue = routes_mod._ensure_update_queue(session_id)
     for event in _FIXTURE_STOCK_EVENTS:
         await queue.put(event)
     await queue.put(None)  # 哨兵
 
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph), \
-         patch("aistock_agent.api.routes._ensure_queue",
-               return_value=(queue, False)):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://test",
-        ) as client:
-            async with client.stream(
-                "POST", _UPDATES_URL,
-                json={"message": "分析 600519", "session_id": session_id},
-                headers=_VALID_HEADERS,
-            ) as resp:
-                text = await _read_sse(resp)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        async with client.stream(
+            "POST", _UPDATES_URL,
+            json={"message": "分析 600519", "session_id": session_id},
+            headers=_VALID_HEADERS,
+        ) as resp:
+            text = await _read_sse(resp)
 
     events = _parse_sse(text)
     types = [e["type"] for e in events]
@@ -272,7 +267,8 @@ async def test_chat_stream_updates_tool_events():
     assert SSEEventType.AGENT_SWITCH in types
     assert types[-1] == SSEEventType.DONE
 
-    routes_mod._event_queues.pop(session_id, None)
+    routes_mod._message_queues.pop(session_id, None)
+    routes_mod._update_queues.pop(session_id, None)
 
 
 @pytest.mark.asyncio

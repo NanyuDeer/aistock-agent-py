@@ -10,6 +10,7 @@
 5. Podcast     (flash, no tools)         → 播报摘要
 """
 
+import hashlib
 import json
 from typing import cast
 
@@ -213,12 +214,14 @@ async def run(state: AgentState) -> dict[str, object]:
         cached = await get_cached_event(user_msg)
         if cached:
             logger.info("event_cache_hit", event_preview=user_msg[:50])
+            # 缓存存储的是完整 analysis_reports dict（与 transform_to_frontend 输出一致），
+            # 直接返回，保证缓存命中/未命中时前端收到相同的数据结构。
+            podcast_brief = str(cached.get("event_podcast_brief", ""))
             return {
-                "final_response": cached.get("podcast_brief", ""),
+                "final_response": podcast_brief,
                 "analysis_reports": {
                     **state.get("analysis_reports", {}),
-                    "event_display_report": cached.get("display_report", {}),
-                    "event_podcast_brief": cached.get("podcast_brief", ""),
+                    **cached,
                 },
             }
 
@@ -250,7 +253,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # ── 构建前端对齐的 analysis_reports ──
         event_meta: dict[str, object] = {
-            "eventId": f"evt_{hash(user_msg) & 0xFFFFFFFF:08x}",
+            "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
             "title": user_msg[:50],
             "source": "",
         }
@@ -264,8 +267,10 @@ async def run(state: AgentState) -> dict[str, object]:
         analysis_reports["event_podcast_brief"] = podcast_brief
 
         # 缓存 & 持久化
+        # 缓存存储完整 analysis_reports（含 event_understanding/transmission/history/
+        # investment/podcast_brief），保证缓存命中时前端数据结构与新鲜执行一致。
         display_report: dict[str, object] = investment if investment else {}
-        await set_cached_event(user_msg, display_report, podcast_brief)
+        await set_cached_event(user_msg, analysis_reports)
         await persist_event_report(user_msg, display_report, podcast_brief)
 
         return {

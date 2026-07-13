@@ -23,9 +23,9 @@ async def test_review_run_success(mock_get_tools, mock_get_llm, mock_set_cache, 
     }
     mock_get_tools.return_value = []
 
-    # patch create_react_agent
+    # patch create_react_agent + archive_review（已迁至 services/archiver.py）
     with patch("aistock_agent.agents.workers.review.create_react_agent", return_value=mock_agent):
-        with patch.object(review_agent, "_archive_review"):
+        with patch("aistock_agent.agents.workers.review.archive_review"):
             state = {
                 "messages": [],
                 "session_id": "test",

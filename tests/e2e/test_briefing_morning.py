@@ -79,11 +79,22 @@ _BRIEFING_EVENTS: list[dict[str, object]] = [
 
 @pytest.fixture(autouse=True)
 def _cleanup_briefing_queue():
-    """清理 /briefing/morning 固定 session_id 的队列，避免跨测试干扰。"""
+    """清理 /briefing/morning 队列，避免跨测试干扰。
+
+    session_id 现在是随机的 f"briefing_morning_{hex}"，需清理所有
+    briefing_morning 前缀的 message/update 队列。
+    """
     from aistock_agent.api import routes as routes_mod
-    routes_mod._event_queues.pop("briefing_morning", None)
+
+    def _purge():
+        for d in (routes_mod._message_queues, routes_mod._update_queues):
+            keys = [k for k in d if k.startswith("briefing_morning")]
+            for k in keys:
+                d.pop(k, None)
+
+    _purge()
     yield
-    routes_mod._event_queues.pop("briefing_morning", None)
+    _purge()
 
 
 @pytest.mark.asyncio
