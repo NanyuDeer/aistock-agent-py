@@ -193,12 +193,16 @@ def _patch_llms(
     quick = FakeToolCallingLLM(responses=quick_responses or [])
     deep = FakeToolCallingLLM(responses=deep_responses or [])
     stack = ExitStack()
-    # quick_think：supervisor + general_agent 顺序消费同一实例
+    # quick_think：supervisor + general_agent + event(understanding/history/investment/podcast)
+    # 顺序消费同一实例
     stack.enter_context(
         patch("aistock_agent.agents.supervisor.node.get_quick_think", return_value=quick)
     )
     stack.enter_context(
         patch("aistock_agent.agents.general.node.get_quick_think", return_value=quick)
+    )
+    stack.enter_context(
+        patch("aistock_agent.agents.workers.event.get_quick_think", return_value=quick)
     )
     # deep_think：各 worker 模块顺序消费同一实例
     for mod in (
@@ -286,30 +290,74 @@ async def test_full_flow_sector(mock_node_api):
 
 @pytest.mark.asyncio
 async def test_full_flow_event(mock_node_api):
-    """event 意图全链路：supervisor → event_analyst → get_news_fulltext。
+    """event 意图全链路：supervisor → event_analyst v3 → get_news_fulltext。
 
-    event_analyst 工具集含 search_cls_news/get_news_fulltext/get_quote/tavily。
-    本测试让 LLM 调 get_news_fulltext（走 node_api），验证事件链路工具真实执行。
+    v3 拆分为 5 个 LLM 调用：
+    - Call 1 understanding (flash): 事件理解 JSON
+    - Call 2 transmission (deep, ReAct): 调 get_news_fulltext → 传导 JSON
+    - Call 3 history (flash, ReAct): 历史 JSON 数组（无工具调用）
+    - Call 4 investment (flash): 投资建议 JSON
+    - Call 5 podcast (flash): 播报文本
+
+    quick LLM 消费顺序：supervisor → understanding → history → investment → podcast
+    deep LLM 消费顺序：transmission(ReAct tool_call) → transmission(ReAct final JSON)
     """
     mock_node_api.get.return_value = {
         "title": "美联储维持利率不变",
         "content": "美联储7月议息会议决定维持联邦基金利率目标区间不变。",
     }
+    _understanding = json.dumps({
+        "summary": "美联储维持利率不变",
+        "coreChanges": [{"variable": "利率", "before": "不确定", "after": "维持不变"}],
+    })
+    _transmission = json.dumps({
+        "mechanism": "利率维持不变，市场流动性预期稳定",
+        "variables": [{"name": "利率", "direction": "neutral", "strength": 0.5,
+                        "explanation": "维持不变"}],
+        "coreIndustry": {"name": "科技", "impact": "中性偏正", "reason": "低利率环境利好成长股"},
+        "chain": [{"industry": "科技", "relation": "核心行业", "level": 1,
+                    "direction": "bullish", "impactStrength": 0.6, "reason": "低利率利好"}],
+    })
+    _history = json.dumps([{
+        "historyId": "h001", "year": "2024", "title": "上次维持利率",
+        "eventType": "市场动态", "sentiment": "neutral",
+        "industryChange": "市场波动不大", "changePercentage": 0.5,
+    }])
+    _investment = json.dumps({
+        "conclusion": "美联储维持利率不变，A股整体偏中性，关注科技板块。",
+        "keyPoints": ["利率不变"],
+        "focusIndustries": [{"name": "科技", "direction": "positive",
+                              "reason": "利率稳定利好成长股"}],
+        "opportunities": ["科技板块"],
+        "risks": ["外部不确定性"],
+        "rating": "neutral",
+    })
     with _patch_llms(
-        quick_responses=[_text("event")],
+        quick_responses=[
+            _text("event"),           # supervisor 意图分类
+            _text(_understanding),     # Call 1: understanding (flash, no tools)
+            _text(_history),           # Call 3: history (flash, ReAct, no tool calls)
+            _text(_investment),        # Call 4: investment (flash, no tools)
+            _text("美联储维持利率不变，对A股整体偏中性，关注科技板块。"),  # Call 5: podcast
+        ],
         deep_responses=[
-            _tc("get_news_fulltext", {"news_id": "20260708"}),
-            _text("美联储维持利率不变，对A股整体偏中性，关注科技板块。"),
+            _tc("get_news_fulltext", {"news_id": "20260708"}),  # Call 2: transmission ReAct
+            _text(_transmission),     # Call 2: transmission final JSON
         ],
     )[0]:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.post(
-                _CHAT_URL,
-                json={"message": "分析美联储加息的影响", "session_id": "e2e-event"},
-                headers=_VALID_HEADERS,
-            )
+        with patch("aistock_agent.agents.workers.event.get_cached_event",
+                   AsyncMock(return_value=None)):
+            with patch("aistock_agent.agents.workers.event.set_cached_event", AsyncMock()):
+                with patch("aistock_agent.agents.workers.event.persist_event_report",
+                           AsyncMock()):
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://test",
+                    ) as client:
+                        resp = await client.post(
+                            _CHAT_URL,
+                            json={"message": "分析美联储加息的影响", "session_id": "e2e-event"},
+                            headers=_VALID_HEADERS,
+                        )
 
     assert resp.status_code == 200
     body = resp.json()

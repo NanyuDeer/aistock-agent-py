@@ -3,11 +3,13 @@
 从 Phase 4 各模块内联的 ``aioredis.from_url()`` 迁移到 lifespan 管理的
 连接池，消除每次请求创建/销毁连接的开销。
 
-目前提供晨报缓存（get/set），后续可扩展为通用缓存接口。
+提供晨报/复盘/事件缓存（get/set）。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 
 import structlog
@@ -91,3 +93,61 @@ async def set_cached_review(content: str, ttl: int = 7200) -> None:
         await client.setex(cache_key, ttl, content)
     except Exception:
         logger.debug("set_cached_review_failed", exc_info=True)
+
+
+def _event_cache_key(user_input: str) -> str:
+    """生成事件缓存 key：event:{md5}"""
+    digest = hashlib.md5(user_input.encode()).hexdigest()
+    return f"event:{digest}"
+
+
+async def get_cached_event(user_input: str) -> dict[str, object] | None:
+    """从 Redis 获取缓存的事件分析结果。
+
+    缓存 key 基于事件内容 MD5，TTL 30 分钟（写入时设定）。
+    与晨报/复盘不同，事件缓存是 struct 而非纯文本。
+
+    Args:
+        user_input: 用户输入的事件描述文本。
+
+    Returns:
+        缓存的事件分析结果（含 display_report / podcast_brief），未命中或异常返回 None。
+    """
+    try:
+        client = await RedisPool.get_client()
+        key = _event_cache_key(user_input)
+        cached = await client.get(key)
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        logger.debug("event_cache_check_failed", exc_info=True)
+    return None
+
+
+async def set_cached_event(
+    user_input: str,
+    display_report: dict[str, object] | None,
+    podcast_brief: str,
+    ttl: int = 1800,
+) -> None:
+    """缓存事件分析结果到 Redis。
+
+    Args:
+        user_input: 用户输入的事件描述文本（用于生成 MD5 key）。
+        display_report: 展示层报告 dict。
+        podcast_brief: 播报摘要文本。
+        ttl: 缓存过期秒数，默认 1800（30 分钟）。
+    """
+    try:
+        client = await RedisPool.get_client()
+        key = _event_cache_key(user_input)
+        value = json.dumps({
+            "display_report": display_report,
+            "podcast_brief": podcast_brief,
+        }, ensure_ascii=False)
+        await client.setex(key, ttl, value)
+    except Exception:
+        logger.debug("event_cache_set_failed", exc_info=True)
