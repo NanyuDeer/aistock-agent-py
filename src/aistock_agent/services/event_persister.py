@@ -33,7 +33,7 @@ async def persist_event_report(
                 "display_report": display_report,
                 "podcast_brief": podcast_brief,
             },
-            "data_source": "event_agent_v2",
+            "data_source": "event_agent_v3",
             "status": "completed",
         })
         logger.info("event_report_persisted", date=report_date)
