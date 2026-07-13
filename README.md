@@ -120,7 +120,7 @@ graph TB
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取） |
+| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`；完成后自动并行触发 event agent 分析 major_events（fire-and-forget） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |

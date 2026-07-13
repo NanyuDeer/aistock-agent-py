@@ -2,6 +2,7 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
+  → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
 - 15:30 复盘 review：review agent（5步归因框架，缓存+落盘）
 - 15:35 快照 snapshot：build_snapshot（代码层匹配 + LLM 4维评估 → 落盘 JSON）
 - 15:40 迭代分析 iterate：iterate agent（硬编码阈值 + LLM 偏差分析 → JSON 输出）
