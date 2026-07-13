@@ -152,10 +152,10 @@ src/aistock_agent/
 │   ├── session_store.py # 会话历史读写
 │   └── preferences.py   # 用户偏好/自选股记忆
 ├── utils/               # 通用工具（Phase 4）
-│   ├── sse.py           # LangGraph 事件 → SSE 事件映射
+│   ├── sse.py           # LangGraph 事件 → SSE 事件映射（支持 filter_type 双流分流）
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取工具
-│   ├── output_parser.py # Event Agent 双层输出解析（display_report + podcast_brief）
+│   ├── output_parser.py # _parse_json + transform_to_frontend（事件 Agent v3 前端对齐）+ extract_major_events
 │   └── date.py          # 日期/交易日工具
 ├── errors/              # 异常体系（Phase 4）
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
@@ -230,8 +230,10 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/agent/chat/message` | 对话消息（非流式） |
-| GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，支持 Redis 缓存） |
+| POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
+| POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
+| POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |
+| GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，graph 转发，支持 Redis 缓存） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
 | GET | `/health/ready` | Readiness 健康检查（检查 Redis/Node.js/LLM 连通性，失败返回 503 + degraded） |
