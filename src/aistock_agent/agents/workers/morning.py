@@ -6,6 +6,8 @@
 归档：docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md
 """
 
+import json
+import re
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from pathlib import Path
@@ -97,7 +99,14 @@ async def run(state: AgentState) -> dict[str, object]:
         # 检查缓存
         cached = await _get_cached_briefing()
         if cached:
-            return {"final_response": cached}
+            major_events = _extract_major_events(cached)
+            return {
+                "final_response": cached,
+                "analysis_reports": {
+                    **state.get("analysis_reports", {}),
+                    "major_events": major_events,
+                },
+            }
 
         # 构建提示词
         system_prompt = MORNING_PROMPT.replace("{{DATE}}", today)
@@ -115,12 +124,27 @@ async def run(state: AgentState) -> dict[str, object]:
         # 提取最终响应（与其他 4 个 agent 统一使用 extract_final_ai_response）
         final_response = extract_final_ai_response(result.get("messages", []))
 
+        # --- 新增：提取 major_events ---
+        major_events = _extract_major_events(final_response)
+        if major_events:
+            logger.info(
+                "morning_major_events_extracted",
+                count=len(major_events),
+                titles=[e.get("title", "")[:30] for e in major_events],
+            )
+
         # 缓存 + 归档（供 snapshot_builder 读取）
         if final_response:
             await _set_cached_briefing(final_response)
             _archive_morning(final_response)
 
-        return {"final_response": final_response}
+        return {
+            "final_response": final_response,
+            "analysis_reports": {
+                **state.get("analysis_reports", {}),
+                "major_events": major_events,
+            },
+        }
     except Exception as e:
         # agent 层最后防线：捕获 LLM/Graph 框架异常（工具异常已被 safe_tool_call 降级）
         logger.error(
@@ -153,3 +177,31 @@ async def _get_cached_briefing() -> str | None:
 async def _set_cached_briefing(content: str, ttl: int = 7200) -> None:
     """缓存晨报到 Redis，TTL=2小时（委托给 services.cache → RedisPool）"""
     await set_cached_briefing(content, ttl)
+
+
+def _extract_major_events(text: str) -> list[dict[str, object]]:
+    """从晨报文本中提取 <!--MAJOR_EVENTS_START-->...<!--MAJOR_EVENTS_END-->"""
+    match = re.search(
+        r'<!--MAJOR_EVENTS_START-->\s*\n?(.*?)\n?\s*<!--MAJOR_EVENTS_END-->',
+        text, re.DOTALL
+    )
+    if not match:
+        # 兼容：尝试找 JSON 数组
+        json_match = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
+        if json_match:
+            try:
+                events = json.loads(json_match.group(0))
+                if isinstance(events, list):
+                    return [e for e in events if isinstance(e, dict)]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return []
+
+    try:
+        events = json.loads(match.group(1))
+        if isinstance(events, list):
+            return [e for e in events if isinstance(e, dict)]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return []
