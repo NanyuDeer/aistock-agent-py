@@ -9,6 +9,7 @@
 from aistock_agent.tools import (  # noqa: F401
     graph_tools,
     hot_burst_tools,
+    industry_vector_search,
     market_tools,
     monitor_tools,
     news_tools,
