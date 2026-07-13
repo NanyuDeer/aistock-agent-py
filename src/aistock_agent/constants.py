@@ -19,6 +19,8 @@ class SSEEventType:
     TEXT = "text"
     DONE = "done"
     ERROR = "error"
+    AGENT_SWITCH = "agent_switch"
+    INTERMEDIATE = "intermediate"
 
 
 class LangGraphEventType:
