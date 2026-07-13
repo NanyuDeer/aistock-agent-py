@@ -125,6 +125,8 @@ graph TB
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
+> **事件传导分析（event conduction）**：不单独注册 cron job，而是嵌入 morning 任务中——晨报完成后提取 `major_events`，对 impact_score ≥ 4 的事件通过 `asyncio.create_task` 并行触发 `event_agent.run()`。每个事件独立运行，fire-and-forget 模式，失败不影响其他事件或后续复盘流水线。
+
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
 ### 目录结构
@@ -185,6 +187,7 @@ src/aistock_agent/
 │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── graph_tools.py        # get_concepts, get_graph_by_concept（Phase 5）
+│   ├── industry_vector_search.py  # match_industry_by_keywords（pgvector 语义匹配，event 工具集）
 │   ├── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history（Phase 5）
 │   └── review_tools.py       # get_market_summary, get_sector_performance（复盘流水线，review category）
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
