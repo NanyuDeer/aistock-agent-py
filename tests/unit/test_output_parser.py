@@ -8,7 +8,11 @@ import json
 import pytest
 from langchain_core.messages import AIMessage
 
-from aistock_agent.utils.output_parser import parse_event_output
+from aistock_agent.utils.output_parser import (
+    _parse_json,
+    parse_event_output,
+    transform_to_frontend,
+)
 
 
 # ── parse_event_output 核心路径 ──
@@ -203,3 +207,131 @@ def test_parse_unicode_chinese():
     assert isinstance(display, dict)
     assert display["event_title"] == "美国加征关税"
     assert "新能源汽车" in brief
+
+
+# ── _parse_json 测试 ──
+
+
+def test_parse_json_simple_dict():
+    """纯 JSON 对象 → 正确解析"""
+    result = _parse_json('{"key": "value"}')
+    assert isinstance(result, dict)
+    assert result == {"key": "value"}
+
+
+def test_parse_json_simple_list():
+    """纯 JSON 数组 → 正确解析"""
+    result = _parse_json('[{"a": 1}, {"b": 2}]')
+    assert isinstance(result, list)
+    assert len(result) == 2
+
+
+def test_parse_json_markdown_code_block():
+    """```json ... ``` 包裹 → 正确解析"""
+    result = _parse_json('```json\n{"key": "value"}\n```')
+    assert isinstance(result, dict)
+    assert result == {"key": "value"}
+
+
+def test_parse_json_bare_code_block():
+    """``` ... ``` 包裹 → 正确解析"""
+    result = _parse_json('```\n{"key": "value"}\n```')
+    assert isinstance(result, dict)
+    assert result == {"key": "value"}
+
+
+def test_parse_json_nested_in_text():
+    """JSON 嵌在文本中 → 正则匹配提取"""
+    result = _parse_json('前面有文字\n{"key": "value"}\n后面也有文字')
+    assert isinstance(result, dict)
+    assert result == {"key": "value"}
+
+
+def test_parse_json_invalid():
+    """无效文本 → 返回 None"""
+    result = _parse_json('这不是 JSON')
+    assert result is None
+
+
+def test_parse_json_empty():
+    """空字符串 → 返回 None"""
+    result = _parse_json('')
+    assert result is None
+
+
+# ── transform_to_frontend 测试 ──
+
+
+def test_transform_to_frontend_full():
+    """4 模块全有 → 完整映射"""
+    understanding = {
+        "summary": "政策延续至2027年",
+        "coreChanges": [
+            {"variable": "补贴预期", "before": "不确定", "after": "明确延续"}
+        ]
+    }
+    transmission = {
+        "mechanism": "补贴延续降低购车门槛",
+        "variables": [
+            {"name": "补贴金额", "direction": "bullish", "strength": 0.85, "explanation": "单辆最高1.5万"}
+        ],
+        "coreIndustry": {"name": "新能源汽车", "impact": "直接利好", "reason": "终端销量预期上调"},
+        "chain": [
+            {"industry": "动力电池", "relation": "上游传导", "level": 1, "direction": "bullish", "impactStrength": 0.72, "reason": "销量拉动电池需求"}
+        ]
+    }
+    history = [
+        {"historyId": "hist_001", "year": "2023", "title": "类似政策", "eventType": "产业政策", "sentiment": "bullish", "industryChange": "普涨15%", "changePercentage": 15.0}
+    ]
+    investment = {
+        "conclusion": "新能源汽车产业链受益，中期景气改善",
+        "keyPoints": ["补贴延续刺激终端需求"],
+        "focusIndustries": [{"name": "新能源汽车", "direction": "positive", "reason": "直接受益"}],
+        "opportunities": ["终端销量增长"],
+        "risks": ["补贴依赖风险"],
+        "rating": "positive"
+    }
+    meta = {"eventId": "evt_001", "title": "补贴延续", "source": "新华社"}
+
+    result = transform_to_frontend(understanding, transmission, history, investment, meta)
+
+    assert result["event_understanding"]["summary"] == "政策延续至2027年"
+    assert len(result["event_understanding"]["coreChanges"]) == 1
+    assert result["event_transmission"]["mechanism"] == "补贴延续降低购车门槛"
+    assert result["event_transmission"]["variables"][0]["direction"] == "bullish"
+    assert result["event_transmission"]["variables"][0]["strength"] == 0.85
+    assert result["event_transmission"]["coreIndustry"]["name"] == "新能源汽车"
+    assert len(result["event_transmission"]["chain"]) == 1
+    assert result["event_transmission"]["chain"][0]["level"] == 1
+    assert len(result["event_history"]) == 1
+    assert result["event_history"][0]["changePercentage"] == 15.0
+    assert result["event_investment"]["conclusion"] == "新能源汽车产业链受益，中期景气改善"
+    assert result["event_investment"]["rating"] == "positive"
+
+
+def test_transform_to_frontend_null_modules():
+    """部分模块为 None → 对应位置为 None 或空数组"""
+    meta = {"eventId": "evt_002", "title": "测试", "source": ""}
+
+    result = transform_to_frontend(None, None, None, None, meta)
+
+    assert result["event_understanding"] is None
+    assert result["event_transmission"] is None
+    assert result["event_history"] == []
+    assert result["event_investment"] is None
+
+
+def test_transform_to_frontend_chinese_direction():
+    """LLM 输出中文方向值 → 正确映射为英文"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [{"name": "x", "direction": "利好", "strength": 0.5, "explanation": ""}],
+        "coreIndustry": {"name": "x", "impact": "", "reason": ""},
+        "chain": [{"industry": "x", "relation": "核心行业", "level": 1, "direction": "利空", "impactStrength": 0.3, "reason": ""}]
+    }
+    meta = {"eventId": "evt_003", "title": "", "source": ""}
+
+    result = transform_to_frontend({"summary": "", "coreChanges": []}, transmission, [], None, meta)
+
+    assert result["event_transmission"]["variables"][0]["direction"] == "bullish"
+    assert result["event_transmission"]["chain"][0]["direction"] == "bearish"
