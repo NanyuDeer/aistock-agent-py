@@ -2,6 +2,21 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-14 — Event Agent v3 持久化重构：event_id 隔离 + 完整 analysis_reports 写入
+**开发者**: 37588
+
+### 改进
+- `src/aistock_agent/services/event_persister.py`：重构 `persist_event_report()`，改为以 event_id 作为隔离键（复用 Node.js user_id 列），同日不同事件分别保存、同一事件重跑 upsert；写入完整事件元数据（eventId/title/source/publishTime/event）和完整 analysis_reports（四模块），data_source 升级为 event_agent_v3
+- `src/aistock_agent/agents/workers/event.py`：`run()` 中调用 `persist_event_report()` 改为传递 event_id、event_meta、analysis_reports，删除废弃的 display_report 变量
+
+### 新增
+- `tests/unit/test_event_persister.py`：event_persister 单元测试
+
+### 文档
+- `README.md`：目录结构注释 event.py v2→v3，新增 event_persister.py，data_client.py 标注 post 支持
+
+---
+
 ## [changer] 2026-07-14 — 晨报双层输出与公共报告持久化
 **开发者**: 37588
 

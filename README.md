@@ -172,7 +172,7 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + 双层输出 + Redis 缓存 + 持久化 + 文件归档）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
-│       ├── event.py     # 事件传导链（v2：Redis 缓存 + 双层输出解析 + 持久化）
+│       ├── event.py     # 事件传导链（v3：Redis 缓存 + 双层输出解析 + 完整 analysis_reports 持久化 + event_id 隔离）
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports，Phase 5）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
@@ -195,11 +195,12 @@ src/aistock_agent/
 │   ├── general/system.py
 │   └── workers/{morning,stock,sector,event,review,iterate}.py
 ├── services/
-│   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
+│   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
 │   ├── cache.py         # 晨报缓存服务（基于 RedisPool，存储双层 JSON）
 │   ├── morning_persister.py  # 晨报持久化服务（→ Node.js /internal/analysis-reports，公共报告）
+│   ├── event_persister.py    # 事件持久化服务（→ Node.js /internal/analysis-reports，event_id 隔离 + 完整 analysis_reports）
 │   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）

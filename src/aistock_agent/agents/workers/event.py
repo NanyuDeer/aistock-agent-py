@@ -288,9 +288,9 @@ async def run(state: AgentState) -> dict[str, object]:
         # 缓存 & 持久化
         # 缓存存储完整 analysis_reports（含 event_understanding/transmission/history/
         # investment/podcast_brief），保证缓存命中时前端数据结构与新鲜执行一致。
-        display_report: dict[str, object] = investment if investment else {}
         await set_cached_event(user_msg, analysis_reports)
-        await persist_event_report(user_msg, display_report, podcast_brief)
+        event_id = str(event_meta.get("eventId", ""))
+        await persist_event_report(event_id, event_meta, user_msg, analysis_reports)
 
         return {
             "final_response": podcast_brief,
