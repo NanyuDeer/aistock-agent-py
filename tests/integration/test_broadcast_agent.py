@@ -3,14 +3,15 @@
 覆盖：提示词占位符替换 + 响应提取 + 异常降级
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from aistock_agent.agents.workers.broadcast import run
 
 _GET_DEEP_THINK = "aistock_agent.agents.workers.broadcast.get_deep_think"
+_NODE_API = "aistock_agent.agents.workers.broadcast.node_api"
 
 
 def _make_mock_llm(response_content: str) -> MagicMock:
@@ -61,6 +62,63 @@ async def test_broadcast_response_extraction():
         })
 
     assert result["final_response"] == expected
+
+
+@pytest.mark.asyncio
+async def test_broadcast_persists_text_then_triggers_audio():
+    """播报稿入库成功后，才调用 Node.js 生成音频。"""
+    expected = "主持人：大家好。分析师：今天关注市场主线。"
+    mock_llm = _make_mock_llm(expected)
+    mock_node_api = MagicMock()
+    mock_node_api.get_analysis_report = AsyncMock(return_value=None)
+    mock_node_api.save_analysis_report = AsyncMock(return_value={"id": 1})
+    mock_node_api.post = AsyncMock(return_value={"audio_path": "/audio.mp3"})
+
+    with (
+        patch(_GET_DEEP_THINK, return_value=mock_llm),
+        patch(_NODE_API, mock_node_api),
+    ):
+        result = await run({
+            "messages": [],
+            "analysis_reports": {},
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-11",
+        })
+
+    mock_node_api.save_analysis_report.assert_awaited_once_with(
+        report_type="broadcast",
+        report_date="2026-07-11",
+        content={"text": expected},
+    )
+    mock_node_api.post.assert_awaited_once_with(
+        "/internal/briefing/generate-audio",
+        {"date": "2026-07-11"},
+        timeout=300.0,
+    )
+    assert result["audio_path"] == "/audio.mp3"
+
+
+@pytest.mark.asyncio
+async def test_broadcast_does_not_generate_audio_when_persistence_fails():
+    mock_llm = _make_mock_llm("播报内容")
+    mock_node_api = MagicMock()
+    mock_node_api.get_analysis_report = AsyncMock(return_value=None)
+    mock_node_api.save_analysis_report = AsyncMock(return_value=None)
+    mock_node_api.post = AsyncMock()
+
+    with (
+        patch(_GET_DEEP_THINK, return_value=mock_llm),
+        patch(_NODE_API, mock_node_api),
+    ):
+        await run({
+            "messages": [],
+            "analysis_reports": {},
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-11",
+        })
+
+    mock_node_api.save_analysis_report.assert_awaited_once()
+    mock_node_api.post.assert_not_awaited()
 
 
 @pytest.mark.asyncio

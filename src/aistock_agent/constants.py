@@ -49,7 +49,8 @@ class WSEventType:
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
 INTENT_SET = frozenset({
     "morning", "stock", "sector", "event",
-    "wind_leader", "broadcast", "general",
+    "wind_leader", "hot_burst", "broadcast",
+    "alert", "ai_advisor", "general",
 })
 
 
@@ -83,4 +84,13 @@ TOOL_LABELS: dict[str, str] = {
     "get_news_fulltext": "正在获取新闻全文",
     # wind_leader agent 工具
     "get_wind_leaders": "正在获取风口龙头数据",
+    # hot_burst agent 工具
+    "get_hot_burst": "正在获取机构调研热门股",
+    "get_hot_burst_history": "正在获取机构调研历史记录",
+    # alert agent 工具
+    "get_stock_monitor": "正在获取个股异动数据",
+    "get_alert_history": "正在获取异动历史",
+    # alert 子 Agent 工具（Phase 6）
+    "get_concepts": "正在加载产业链概念列表",
+    "get_graph_by_concept": "正在查询产业链上下游",
 }

@@ -87,3 +87,5 @@ from aistock_agent.tools.registry import register  # noqa: E402
 register("sector", get_leader_stocks)
 register("sector", get_wind_leaders)
 register("wind_leader", get_wind_leaders)
+# advisor agent 复用
+register("advisor", get_leader_stocks)

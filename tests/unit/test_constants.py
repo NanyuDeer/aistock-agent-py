@@ -20,7 +20,7 @@ def test_sse_event_type_values():
 
 def test_intent_set_contents():
     # 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
-    assert INTENT_SET == frozenset({"morning", "stock", "sector", "event", "general"})
+    assert INTENT_SET == frozenset({"morning", "stock", "sector", "event", "wind_leader", "broadcast", "hot_burst", "alert", "general"})
 
 
 def test_error_codes_distinct():

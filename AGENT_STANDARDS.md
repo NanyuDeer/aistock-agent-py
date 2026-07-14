@@ -23,6 +23,8 @@
 - [补充规范 10：API 接口标准](#补充规范-10api-接口标准)
 - [补充规范 11：配置标准](#补充规范-11配置标准)
 - [补充规范 12：代码风格](#补充规范-12代码风格)
+- [补充规范 13：空数据预检](#补充规范-13空数据预检)
+- [补充规范 14：报告双层输出](#补充规范-14报告双层输出)
 - [附录 A：目录结构速查](#附录-a目录结构速查)
 - [附录 B：常用命令速查](#附录-b常用命令速查)
 
@@ -706,6 +708,7 @@ async def run(state: AgentState) -> dict[str, object]:
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
 | iterate | `{"final_response": '{"date":"...","status":"error","summary":"迭代分析失败: ..."}'}`（JSON 格式） |
+| alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 新增 worker agent 必须遵循同一格式：`"<功能名>暂时不可用，请稍后重试"`。
@@ -744,7 +747,7 @@ agent 层 try-catch 都是单次捕获，无 retry 逻辑。
 |-------|------|------|
 | supervisor（意图分类） | quick_think | 低延迟，成本低 |
 | general（兜底对话） | quick_think | 简单问答 |
-| alert（异动识别） | quick_think | 异动分类不需要深度推理 |
+| alert（异动提醒） | deep_think | 三步异动分析（什么→为什么→怎么办）需要跨工具综合推理 |
 | forecast（业绩预测） | quick_think | 数据整理为主 |
 | morning（晨报） | deep_think | 4步宏观策略分析 |
 | stock（个股分析） | deep_think | 多维度综合分析 |
@@ -1287,6 +1290,235 @@ mypy 无 plugin 无法识别，用 `# type: ignore[call-arg]` 抑制（见 `serv
 
 ---
 
+## 补充规范 13：空数据预检
+
+**核心规则**：依赖 Node.js 后端预计算数据的 Agent，在 `run()` 调用 `create_react_agent`
+之前应预检数据可用性。空数据时调用刷新接口重试（最多3次），3次后仍空返回降级文本，
+不调用 LLM（节省 token）。
+
+### 适用范围
+
+| 场景 | 是否预检 | 原因 |
+|------|----------|------|
+| Agent 依赖 Node.js 预计算数据 + 有刷新接口 | ✅ 预检 | 数据可能尚未生成，刷新可触发计算 |
+| Agent 依赖 Node.js 数据但无刷新接口 | ⏭️ 可选 | 仅重试查询，效果有限 |
+| Agent 仅依赖外部 API（Tavily/yfinance） | ❌ 豁免 | 无法通过 Node.js 预检 |
+| Agent 空数据有业务意义（如 hot_burst） | ❌ 豁免 | 空数据是正常结果 |
+
+### 预检函数
+
+`services/data_guard.py` 提供通用的 `ensure_data_available` 函数和 `DataCheck` 数据类：
+
+```python
+from aistock_agent.services.data_guard import DataCheck, ensure_data_available
+
+# 定义检查项
+checks = [
+    DataCheck(
+        check_path="/internal/wind-leaders",        # 查询路径
+        refresh_path="/api/cn/wind-leaders/refresh", # 刷新路径（可选）
+        empty_checker=_is_data_empty,                # 空数据判定函数
+        name="wind_leaders",                         # 日志名称
+    )
+]
+
+# 预检（最多重试3次，每次间隔2秒）
+if not await ensure_data_available(checks):
+    return {"final_response": "XXX暂时不可用：后端数据源为空，请稍后重试"}
+```
+
+### 标准模板
+
+参考 `agents/workers/wind_leader.py`：
+
+```python
+def _is_wind_leaders_empty(data: dict[str, object] | None) -> bool:
+    """检查风口龙头数据是否为空"""
+    if not data:
+        return True
+    sectors = data.get("hot_sectors")
+    return not isinstance(sectors, list) or len(sectors) == 0
+
+
+async def run(state: AgentState) -> dict[str, object]:
+    try:
+        # 预检：仅 scheduler 触发时执行（用户实时请求不等待）
+        if state.get("trigger_source") == "scheduler":
+            checks = [
+                DataCheck(
+                    check_path="/internal/wind-leaders",
+                    refresh_path="/api/cn/wind-leaders/refresh",
+                    empty_checker=_is_wind_leaders_empty,
+                    name="wind_leaders",
+                )
+            ]
+            if not await ensure_data_available(checks):
+                return {"final_response": "长线风口分析暂时不可用：后端数据源为空，请稍后重试"}
+
+        # 数据就绪，走 ReAct
+        llm = get_deep_think()
+        ...
+```
+
+### 设计要点
+
+1. **仅 scheduler 触发时预检**：用户实时请求不等待（避免6秒延迟），工具本身有空数据降级处理。
+2. **empty_checker 自定义**：每个 Agent 的"空数据"定义不同，需自定义检查函数。
+3. **refresh_path 可选**：无刷新接口时设为 None，仅重试查询。
+4. **重试间隔2秒**：给后端足够时间生成数据。
+5. **预检失败不调用 LLM**：直接返回降级文本，节省 token。
+
+### 新增 Agent 预检流程
+
+1. 确认 Agent 是否依赖 Node.js 预计算数据（有 `/internal/*` 查询路径）。
+2. 确认是否有对应的刷新接口（`/api/cn/*/refresh`）。
+3. 编写 `_is_xxx_empty` 空数据判定函数。
+4. 在 `run()` 开头添加预检代码（仅 scheduler 触发时）。
+5. 更新本规范适用范围表。
+
+### 禁止
+
+- 对依赖外部 API 的 Agent 强行预检（Tavily/yfinance 无法通过 Node.js 预检）。
+- 对空数据有业务意义的 Agent 预检（如 hot_burst）。
+- 在用户实时请求时预检（避免等待延迟）。
+
+---
+
+## 补充规范 14：报告双层输出
+
+**核心规则**：所有 Agent 持久化到数据库的 `content` 字段采用双层结构（schema_version 2.0），
+一次 LLM 调用同时生成 `display_report`（前端展示）和 `podcast_brief`（播报摘要），
+节省播报模型 token 消耗。
+
+### 为什么
+
+**两个核心原因：**
+
+1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
+2. **省 token**：双人播报语音生成费用较高，不能把完整长报告喂给播报模型。传统单层 `{"text": "..."}` 结构导致 broadcast_agent 必须读取完整报告（500-1500字），token 消耗大。双层输出让 broadcast_agent 只读取 150-200 字的 `podcast_brief`，大幅降低成本。同理，ai_advisor_agent 读取 `display_report` 而非整份报告，也降低 token 消耗。
+
+### content 字段结构
+
+```python
+content = {
+    "display_report": {
+        "summary": "结论一句话（20字以内）",
+        "details": "完整分析内容（500-1500字）",
+        "stocks": ["股票代码"],   # 可选
+        "risks": ["风险提示"]      # 可选
+    },
+    "podcast_brief": "150-200字的播报摘要，只含主题、事实、判断、风险",
+    "schema_version": "2.0"
+}
+```
+
+### 字段用途
+
+| 字段 | 用途 | 字数要求 | 消费方 |
+|------|------|---------|-------|
+| `display_report` | 前端完整展示 | 无限制（500-1500字） | 前端页面直接读取 + `ai_advisor_agent` |
+| `podcast_brief` | 播报原材料 | 150-200字/份 | `broadcast_agent` 汇总后生成双人对话 |
+
+**关键约束**：`podcast_brief` 只保留主题、核心事实、判断结论、风险提示，不包含长篇分析。
+
+### 解析工具
+
+`utils/report_parser.py` 提供 4 个函数，自动兼容 schema_version 1.0（单层 `text`）和 2.0（双层）：
+
+| 函数 | 用途 |
+|------|------|
+| `parse_report_content(content)` | 统一解析，返回 `{"display_report": str, "podcast_brief": str}` |
+| `extract_podcast_brief(content)` | 提取播报摘要（优先 podcast_brief，降级取 display_report 前500字） |
+| `extract_display_report(content)` | 提取展示文本（优先 display_report.details，降级取 text） |
+| `parse_dual_layer_response(llm_response)` | 解析 LLM 的 JSON 双层输出，解析失败时降级为单层 |
+
+### LLM 输出要求
+
+Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。参考 `prompts/workers/wind_leader.py`：
+
+```python
+**最终输出格式**（完成工具调用后，最终回复必须严格按以下 JSON 格式返回，不要包含 ```json 标记）：
+
+{
+  "display_report": {
+    "summary": "风口结论一句话（20字以内）",
+    "details": "完整风口分析内容（500-1000字）",
+    "stocks": ["龙头股代码1", "龙头股代码2"],
+    "risks": ["风险提示1", "风险提示2"]
+  },
+  "podcast_brief": "150-200字的播报摘要"
+}
+```
+
+`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（`display_report.details = 原文本`），
+不中断 Agent 流程。
+
+### 持久化改造模板
+
+参考 `agents/workers/wind_leader.py`：
+
+```python
+from aistock_agent.utils.report_parser import parse_dual_layer_response
+
+# 持久化时使用 parse_dual_layer_response 解析 LLM 输出
+dual_layer_content = parse_dual_layer_response(final_response)
+await node_api.save_analysis_report(
+    report_type="wind_leader",
+    report_date=report_date,
+    content=dual_layer_content,
+)
+```
+
+### 消费方改造模板
+
+参考 `agents/workers/broadcast.py` 和 `agents/workers/ai_advisor.py`：
+
+```python
+# broadcast_agent：优先读取 podcast_brief
+from aistock_agent.utils.report_parser import extract_podcast_brief, extract_display_report
+
+brief = extract_podcast_brief(content)
+if brief:
+    return brief
+# 降级读取 display_report（兼容旧数据）
+display = extract_display_report(content)
+if display:
+    return display[:500] if len(display) > 500 else display
+
+# ai_advisor_agent：读取 display_report
+from aistock_agent.utils.report_parser import extract_display_report
+
+display_text = extract_display_report(data["content"])
+if display_text:
+    reports[report_type] = display_text
+```
+
+### 兼容性
+
+- `report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构
+- 旧报告无需迁移，消费方代码自动降级处理
+- `schema_version` 字段用于标识版本，1.0 无此字段（视为单层）
+
+### 改造状态
+
+| Agent | 状态 | 负责人 |
+|-------|------|--------|
+| wind_leader | ✅ 已改造 | 尹辰 |
+| broadcast | ✅ 已改造（消费方） | 尹辰 |
+| ai_advisor | ✅ 已改造（消费方） | 尹辰 |
+| morning | ⏳ 待改造 | 王昌泽 |
+| hot_burst | ⏳ 待改造 | 吴涵晶 |
+| alert | ⏳ 待改造 | 李俊良 |
+
+### 禁止
+
+- 在 `podcast_brief` 中包含长篇分析（必须控制在 150-200 字）
+- 直接把完整长报告喂给播报模型（必须使用 `podcast_brief`）
+- 手动解析 content 字段（必须使用 `report_parser.py` 的函数）
+- 在 Agent 代码中硬编码 JSON 解析逻辑（必须使用 `parse_dual_layer_response`）
+
+---
+
 ## 附录 A：目录结构速查
 
 ```
@@ -1331,6 +1563,7 @@ aistock-agent-py/
         │   ├── sse.py                # LangGraph 事件 → SSE 事件映射
         │   ├── parser.py             # LLM 输出解析（parse_intent）
         │   ├── message.py            # 消息提取
+        │   ├── report_parser.py      # 双层报告解析（兼容 schema_version 1.0/2.0，规范14）
         │   └── date.py               # 日期/交易日工具
         │
         ├── errors/
@@ -1349,6 +1582,11 @@ aistock-agent-py/
         │       ├── stock.py          # 个股分析（deep_think）
         │       ├── sector.py         # 板块分析（deep_think）
         │       ├── event.py          # 事件传导链（deep_think）
+        │       ├── hot_burst.py      # 机构调研热门股（deep_think + ReAct）
+        │       ├── wind_leader.py    # 长线风口龙头（deep_think + 定时触发 + 双层输出）
+        │       ├── broadcast.py      # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
+        │       ├── ai_advisor.py     # 智能投顾（deep_think + 消费 display_report）
+        │       ├── alert.py          # 异动提醒（deep_think + 三步框架 + cycle 短中长线分类）
         │       ├── review.py         # 复盘归因（deep_think + ReAct + Redis 缓存 + 文件归档，scheduler 触发）
         │       └── iterate.py        # 迭代分析（deep_think，非 ReAct，pipeline + LLM，只读，scheduler 触发）
         │
@@ -1374,6 +1612,7 @@ aistock-agent-py/
         ├── services/                 # 全局资源封装
         │   ├── llm.py                # 双模型工厂（get_quick_think / get_deep_think）
         │   ├── data_client.py        # NodeApiClient（node_api 单例）
+        │   ├── data_guard.py         # 空数据预检（ensure_data_available + DataCheck，规范13）
         │   ├── redis_pool.py         # Redis 连接池单例（lifespan 管理）
         │   ├── http_client.py        # httpx AsyncClient 单例（lifespan 管理）
         │   ├── cache.py              # 晨报 + 复盘缓存（基于 RedisPool，get/set_cached_briefing + get/set_cached_review）

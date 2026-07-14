@@ -3,6 +3,7 @@
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
   → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
+- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→broadcast（报告写DB+双人语音，9:10前端可见）
 - 15:30 复盘 review：review agent（5步归因框架，缓存+落盘）
 - 15:35 快照 snapshot：build_snapshot（代码层匹配 + LLM 4维评估 → 落盘 JSON）
 - 15:40 迭代分析 iterate：iterate agent（硬编码阈值 + LLM 偏差分析 → JSON 输出）
@@ -50,6 +51,15 @@ def start_scheduler() -> None:
         CronTrigger.from_crontab(settings.scheduler_morning_cron),
         id="morning_briefing",
         name="晨报生成",
+        replace_existing=True,
+    )
+
+    # 播报链路：工作日 09:00（串行 morning→wind_leader→hot_burst→broadcast，9:10前端可见）
+    scheduler.add_job(
+        _run_broadcast_task,
+        CronTrigger.from_crontab(settings.scheduler_broadcast_cron),
+        id="broadcast_chain",
+        name="播报链路",
         replace_existing=True,
     )
 
@@ -237,6 +247,87 @@ async def _run_iterate_task() -> None:
         )
     except Exception as e:
         logger.error("scheduler_iterate_failed", error=str(e), exc_info=True)
+
+
+async def _run_broadcast_task() -> None:
+    """播报链路任务（交易日 09:00）。
+
+    串行执行：morning → wind_leader → hot_burst → broadcast。
+    每个 Agent 设置 trigger_source="scheduler" + report_date，使报告写入数据库。
+    broadcast 从数据库读取报告生成双人语音播报。
+
+    每个 Agent 异常独立捕获，不影响后续 Agent 执行。
+    morning 在 08:50 已执行过，此处命中缓存快速返回（或重新生成）。
+    """
+    if not is_trading_day():
+        logger.info("scheduler_skip_non_trading_day", task="broadcast")
+        return
+
+    today = date.today().isoformat()
+    logger.info("scheduler_broadcast_chain_start", report_date=today)
+
+    # 函数内 import：延迟加载重依赖
+    from aistock_agent.agents.workers import morning as morning_agent
+    from aistock_agent.agents.workers import wind_leader as wind_leader_agent
+    from aistock_agent.agents.workers import hot_burst as hot_burst_agent
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+
+    def _make_state(intent: str | None = None) -> AgentState:
+        """构造 scheduler 触发的 AgentState"""
+        return {
+            "messages": [],
+            "session_id": f"scheduled_broadcast_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": intent,
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "scheduler",
+            "report_date": today,
+        }
+
+    # Step 1: 晨报（08:50 已执行过，命中缓存快速返回）
+    try:
+        morning_result = await morning_agent.run(_make_state("morning"))
+        logger.info(
+            "scheduler_broadcast_morning_done",
+            has_response=bool(morning_result.get("final_response")),
+        )
+    except Exception as e:
+        logger.error("scheduler_broadcast_morning_failed", error=str(e), exc_info=True)
+
+    # Step 2: 风口分析
+    try:
+        wind_result = await wind_leader_agent.run(_make_state())
+        logger.info(
+            "scheduler_broadcast_wind_leader_done",
+            has_response=bool(wind_result.get("final_response")),
+        )
+    except Exception as e:
+        logger.error("scheduler_broadcast_wind_leader_failed", error=str(e), exc_info=True)
+
+    # Step 3: 机构调研热门股
+    try:
+        burst_result = await hot_burst_agent.run(_make_state())
+        logger.info(
+            "scheduler_broadcast_hot_burst_done",
+            has_response=bool(burst_result.get("final_response")),
+        )
+    except Exception as e:
+        logger.error("scheduler_broadcast_hot_burst_failed", error=str(e), exc_info=True)
+
+    # Step 4: 播报生成（从数据库读取报告）
+    try:
+        broadcast_result = await broadcast_agent.run(_make_state())
+        logger.info(
+            "scheduler_broadcast_done",
+            has_response=bool(broadcast_result.get("final_response")),
+            has_audio=bool(broadcast_result.get("audio_path")),
+        )
+    except Exception as e:
+        logger.error("scheduler_broadcast_final_failed", error=str(e), exc_info=True)
 
 
 async def _run_event_task(event: dict[str, object]) -> None:

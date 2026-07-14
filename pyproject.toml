@@ -23,7 +23,7 @@ dependencies = [
     # 数据调用 & 配置
     "httpx==0.28.1",            # 异步HTTP → Node.js /internal/* API
     "redis==5.2.1",             # 会话持久化 / 晨报缓存
-    "pydantic==2.11.5",
+    "pydantic>=2.11",
     "pydantic-settings==2.8.1",
     "python-dotenv==1.1.0",
     "structlog==25.3.0",

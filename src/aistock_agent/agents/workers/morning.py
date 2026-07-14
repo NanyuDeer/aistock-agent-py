@@ -22,6 +22,7 @@ from langgraph.prebuilt import create_react_agent
 from aistock_agent.prompts.workers.morning import MORNING_PROMPT
 from aistock_agent.services.archiver import archive_morning
 from aistock_agent.services.cache import get_cached_briefing, set_cached_briefing
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.morning_persister import persist_morning_report
 from aistock_agent.state.schema import AgentState

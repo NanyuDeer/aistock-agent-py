@@ -51,6 +51,87 @@
 
 ---
 
+## [main] 2026-07-12 — Agent 报告双层输出改造 + 文档同步 + 单测修复
+**开发者**: 尹辰
+
+### 新增
+- `src/aistock_agent/utils/report_parser.py`：双层报告解析工具，兼容 schema_version 1.0（单层 text）和 2.0（双层 display_report + podcast_brief），提供 4 个函数（parse_report_content / extract_podcast_brief / extract_display_report / parse_dual_layer_response）
+- `tests/unit/test_report_parser.py`：20 个单测全部通过
+- `docs/superpowers/plans/2026-07-12-agent-report-persistence.md`：持久化实施计划
+
+### 修改 — Agent 报告双层输出改造
+- `src/aistock_agent/prompts/workers/wind_leader.py`：提示词增加双层 JSON 输出格式要求
+- `src/aistock_agent/agents/workers/wind_leader.py`：持久化 content 从 `{"text": final_response}` 改为 `parse_dual_layer_response(final_response)` 双层结构
+- `src/aistock_agent/agents/workers/broadcast.py`：`_fetch_report_from_db` 优先读取 podcast_brief，降级读取 display_report（兼容旧数据）
+- `src/aistock_agent/agents/workers/ai_advisor.py`：`_fetch_relevant_reports` 使用 `extract_display_report` 读取展示文本（兼容旧数据）
+- `src/aistock_agent/tools/news_tools.py`：补上 `search_cls_news` 的 advisor 分类注册
+
+### 修复
+- `src/aistock_agent/config.py`：`model_config` 添加 `"extra": "ignore"`，解决 git pull 删除 volc_tts_* 字段后环境变量中仍有旧变量导致 pydantic 验证错误的问题
+- `tests/unit/test_ai_advisor.py`：`test_run_exception_returns_fallback` 改为 mock `get_deep_think` 抛出异常（因 `_fetch_relevant_reports` 内部 try-catch 会吞掉 node_api 异常，无法触发顶层 try-catch）
+
+### 文档
+- `README.md`：新增"智能投顾Agent（ai_advisor_agent）"章节、"报告双层输出（schema_version 2.0）"章节；更新播报Agent章节说明消费 podcast_brief；更新目录结构添加 ai_advisor.py、alert.py、report_parser.py
+- `AGENTS.md`：降级文本表补充 alert；产品功能映射表更新 alert_agent 状态为"已实现"
+- `AGENT_STANDARDS.md`：新增"补充规范 14：报告双层输出"章节（content 结构、字段用途、解析工具、LLM 输出要求、持久化/消费方改造模板、改造状态、禁止项）；目录添加规范14链接；附录A目录结构更新
+
+### 验证
+- 25 个单测全部通过（20个 report_parser + 5个 ai_advisor）
+
+---
+
+## [main] 2026-07-09 — Agent 报告持久化架构 + 机构调研/播报/风口 Agent + 空数据预检
+
+### 新增
+- `src/aistock_agent/services/data_guard.py`：通用空数据预检模块（DataCheck dataclass + ensure_data_available 函数，3 次重试 + 调刷新接口）
+- `scripts/run_broadcast_test.py` / `run_broadcast_test.bat`：播报生成测试脚本（双人对话 + TTS 语音输出）
+
+### 修改 — Agent 报告持久化（Phase 2）
+- `src/aistock_agent/agents/workers/morning.py`：scheduler 触发时持久化晨报到 DB
+- `src/aistock_agent/agents/workers/wind_leader.py`：scheduler 触发时持久化风口报告到 DB
+- `src/aistock_agent/agents/workers/hot_burst.py`：scheduler 触发时持久化机构调研报告到 DB
+- `src/aistock_agent/agents/workers/review.py`：scheduler 触发时持久化复盘报告到 DB
+
+### 改进 — 播报链路改造（Phase 3）
+- `src/aistock_agent/agents/workers/broadcast.py`：双链路读取报告（scheduler 从 DB 读，实时请求降级到 state.analysis_reports）+ Node.js 内部 TTS 调用
+- `src/aistock_agent/prompts/workers/broadcast.py`：播报提示词更新（双人对话格式）
+- `src/aistock_agent/services/scheduler.py`：新增 09:00 播报串行链路（morning→wind_leader→hot_burst→broadcast，trigger_source="scheduler"，异常独立捕获）
+- `src/aistock_agent/config.py`：新增 scheduler_broadcast_cron 配置（"0 9 * * 1-5"，9:10 前端可见）
+- `src/aistock_agent/constants.py`：INTENT_SET 新增 hot_burst + TOOL_LABELS 新增 get_hot_burst/get_hot_burst_history
+
+### 文档
+- `AGENT_STANDARDS.md`：新增规范 13 空数据预检（可选，hot_burst 和纯外部 API 的 agent 豁免）+ 目录结构添加 data_guard.py
+- `README.md`：播报 Agent 文档（音频路径 + 测试命令）；定时调度表新增 09:00 播报链路；目录结构新增 data_guard.py
+- `AGENTS.md`：broadcast 状态改为"已实现"；降级文本表新增 review 和 broadcast 行
+- `scripts/run_morning_test.bat`：微调
+
+## [junliang] 2026-07-09 — 新增 alert_agent（异动提醒 Agent）
+**开发者**: yueqili778-arch
+
+### 新增
+- `agents/workers/alert.py`：alert_agent，三步异动分析框架（发生了什么→为什么→怎么办），按短/中/长线分类，deep_think + ReAct
+- `prompts/workers/alert.py`：ALERT_ANALYST_PROMPT，定义三步框架 + 周期分类 + 输出要求
+- `api/routes.py`：新增 `GET /briefing/alert?symbol=xxx&cycle=short` SSE 流式端点
+- `tests/integration/test_alert_agent.py`：5 个集成测试（工具绑定/提示词注入/响应提取/入口校验/deep_think 验证）
+
+### 修改
+- `tools/monitor_tools.py`：追加 `register("alert", ...)` 注册
+- `tools/stock_tools.py`：追加 `register("alert", get_quote)`、`register("alert", get_capital_flow)`
+- `tools/news_tools.py`：追加 `register("alert", search_cls_news)`
+- `graph/builder.py`：注册 `alert_agent` 节点并加入 END 链路
+- `graph/routers/intent_router.py`：添加 `alert` 意图 + 路由映射
+- `prompts/supervisor/routing.py`：添加 alert 意图描述
+- `constants.py`：INTENT_SET 补 alert/hot_burst，TOOL_LABELS 补 alert 工具标签
+- `tests/unit/test_constants.py`：同步 INTENT_SET 断言
+
+### 验证
+- `pytest tests/integration/test_alert_agent.py`：5/5 通过
+- `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
+- `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
+>>>>>>> origin/main
+
+---
+
 ## [changer] 2026-07-09 — 复盘工具 + Registry 自注册（SDD Task 1）
 **开发者**: 37588
 

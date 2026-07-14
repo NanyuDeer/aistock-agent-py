@@ -78,3 +78,5 @@ def _market_display_name(key: str) -> str:
 from aistock_agent.tools.registry import register  # noqa: E402
 
 register("morning", get_global_markets)
+# advisor agent 复用
+register("advisor", get_global_markets)

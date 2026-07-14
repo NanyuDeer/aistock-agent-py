@@ -277,6 +277,44 @@ async def morning_briefing() -> EventSourceResponse:
     return EventSourceResponse(generator())
 
 
+@router.get("/briefing/alert")
+async def alert_briefing(
+    symbol: str,
+    cycle: str = "",
+) -> EventSourceResponse:
+    """异动提醒（SSE 流式）
+
+    参数：
+        symbol: 6位股票代码（必填），如 600519
+        cycle: 周期筛选（选填），short=短线 / mid=中线 / long=长线
+    """
+    from aistock_agent.agents.workers import alert as alert_agent
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": f"分析 {symbol} 的异动情况"}],
+        "session_id": f"briefing_alert_{symbol}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "alert",
+        "symbol": symbol,
+        "tag_code": cycle,
+        "analysis_reports": {},
+        "final_response": None,
+    }
+
+    async def generator() -> AsyncGenerator[dict[str, str], None]:
+        try:
+            async for event in alert_agent.stream(state):
+                yield {"data": json.dumps(event, ensure_ascii=False)}
+        except Exception as e:
+            yield {"data": json.dumps(
+                {"type": SSEEventType.ERROR, "message": str(e)},
+                ensure_ascii=False,
+            )}
+
+    return EventSourceResponse(generator())
+
+
 @router.get("/skills")
 async def list_skills() -> dict[str, list[dict[str, str]]]:
     """已注册工具列表

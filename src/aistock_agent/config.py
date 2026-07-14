@@ -74,9 +74,11 @@ class Settings(BaseSettings):
     scheduler_review_cron: str = "30 15 * * 1-5"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 1-5"     # 快照：工作日 15:35
     scheduler_iterate_cron: str = "40 15 * * 1-5"      # 迭代：工作日 15:40
+    # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
+    scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @field_validator("cors_origins", mode="before")
     @classmethod

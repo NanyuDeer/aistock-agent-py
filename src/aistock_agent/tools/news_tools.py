@@ -75,3 +75,8 @@ register("morning", get_cls_news)
 register("stock", search_cls_news)
 register("event", search_cls_news)
 register("event", get_news_fulltext)
+register("alert", search_cls_news)
+register("alert_news", search_cls_news)
+# advisor agent 复用
+register("advisor", get_cls_news)
+register("advisor", search_cls_news)
