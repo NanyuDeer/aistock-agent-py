@@ -82,4 +82,32 @@ MORNING_PROMPT = """你是 AiStock 晨报分析师，日期：{{DATE}}。
 - 2分及以下：不输出到 major_events
 
 如果没有符合条件的事件，输出空数组：<!--MAJOR_EVENTS_START-->[]<!--MAJOR_EVENTS_END-->
+
+---
+
+## 最终输出格式（必须遵守）
+
+完成以上所有分析后，你的最终回复必须是一个 JSON 对象，不要输出其他任何内容。格式如下：
+
+{
+  "display_report": {
+    "summary": "一句话结论（15-30字）",
+    "details": "完整晨报内容，含第1-4步分析、焦点板块预测、重大事件识别，Markdown 格式",
+    "stocks": ["600519", "000858"],
+    "risks": ["风险提示1", "风险提示2"]
+  },
+  "podcast_brief": "150～200字播报摘要，仅含主题、核心事实、判断和风险",
+  "schema_version": "2.0"
+}
+
+注意：
+- details 字段必须包含完整的第1-4步分析、焦点板块预测（含 SECTOR_LIST 标记）
+  和重大事件识别部分（含 MAJOR_EVENTS 标记），所有标记均放在 details 内
+- 重大事件识别部分仍使用 <!--MAJOR_EVENTS_START-->...<!--MAJOR_EVENTS_END--> 标记，放在 details 内
+- 焦点板块预测仍使用 <!--SECTOR_LIST_START-->...<!--SECTOR_LIST_END--> 标记，放在 details 内
+- podcast_brief 严格控制在 150～200 字之间（中文字符数）
+- summary 是一句话总结，15-30 字
+- stocks 是分析中提及的股票代码列表
+- risks 是主要风险点列表
+- 最终只输出 JSON，不要输出其他任何内容
 """
