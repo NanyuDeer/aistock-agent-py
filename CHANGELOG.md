@@ -2,6 +2,55 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-14 — Event Agent v3 持久化重构：event_id 隔离 + 完整 analysis_reports 写入
+**开发者**: 37588
+
+### 改进
+- `src/aistock_agent/services/event_persister.py`：重构 `persist_event_report()`，改为以 event_id 作为隔离键（复用 Node.js user_id 列），同日不同事件分别保存、同一事件重跑 upsert；写入完整事件元数据（eventId/title/source/publishTime/event）和完整 analysis_reports（四模块），data_source 升级为 event_agent_v3
+- `src/aistock_agent/agents/workers/event.py`：`run()` 中调用 `persist_event_report()` 改为传递 event_id、event_meta、analysis_reports，删除废弃的 display_report 变量
+
+### 新增
+- `tests/unit/test_event_persister.py`：event_persister 单元测试
+
+### 文档
+- `README.md`：目录结构注释 event.py v2→v3，新增 event_persister.py，data_client.py 标注 post 支持
+
+---
+
+## [changer] 2026-07-14 — 晨报双层输出与公共报告持久化
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/services/morning_persister.py`：`persist_morning_report()` 调用 Node.js `/internal/analysis-reports` 持久化晨报（report_type=morning, user_id=null），非关键路径失败静默跳过
+
+### 改进
+- `src/aistock_agent/prompts/workers/morning.py`：追加「最终输出格式」指令，要求 LLM 输出 JSON 双层结构（display_report + podcast_brief + schema_version），details 内保留 MAJOR_EVENTS/SECTOR_LIST 标记
+- `src/aistock_agent/agents/workers/morning.py`：全量重写 `run()`，复用 `parse_event_output()` 解析双层 JSON；`_ensure_dual_layer()` 兼容缓存中旧纯文本；`_validate_podcast_brief()` 校验 150-200 字；新增 `persist_morning_report()` 调用；归档改为 details 文本
+- `tests/integration/test_morning_agent.py`：全量重写，24 个测试覆盖双层生成、podcast_brief 字数、持久化参数、缓存命中、JSON 解析失败降级等
+- `README.md`：更新晨报调度说明、目录结构、输出归档说明
+
+### 验证
+- `pytest tests/integration/test_morning_agent.py -v` → 24 passed
+- `ruff check` 4 个变更文件 → All checks passed
+
+---
+
+## [changer] 2026-07-14 — 迭代 Agent 输出契约优化：确定性评分卡 + LLM 输出清洗
+**开发者**: 37588
+
+### 改进
+- `src/aistock_agent/services/iterate_analyzer.py`：新增 `build_scorecard()` 构建四维确定性评分卡；新增 `_sanitize_llm_output()` 以 `check_thresholds()` 为唯一真相清洗 LLM 输出；`analyze()` normal/alert 路径均注入 scorecard
+- `src/aistock_agent/prompts/workers/iterate.py`：重写 ITERATE_PROMPT，约束 LLM 只分析已触发维度；suggestions 要求标注 dimension 字段；新增 observations 字段
+- `tests/unit/test_iterate_threshold.py`：新增 8 个测试覆盖 build_scorecard 和 _sanitize_llm_output
+- `tests/integration/test_iterate_agent.py`：新增 3 个测试覆盖 normal/alert scorecard 和核心过滤降级场景
+- `AGENT_STANDARDS.md`：更新迭代 agent 输出契约，新增确定性评分卡 + 输出清洗规则表
+
+### 验证
+- `pytest tests/unit/test_iterate_threshold.py tests/integration/test_iterate_agent.py -v` → 21 passed
+- `ruff check` → All checks passed
+
+---
+
 ## [main] 2026-07-12 — Agent 报告双层输出改造 + 文档同步 + 单测修复
 **开发者**: 尹辰
 
@@ -79,6 +128,7 @@
 - `pytest tests/integration/test_alert_agent.py`：5/5 通过
 - `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
 - `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
+>>>>>>> origin/main
 
 ---
 

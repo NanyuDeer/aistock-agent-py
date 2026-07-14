@@ -12,7 +12,7 @@
 
 import hashlib
 import json
-from typing import cast
+from typing import Literal, cast, overload
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -41,14 +41,37 @@ _TOOL_GROUP = "event"
 # ── 内部辅助函数 ──
 
 
+@overload
 async def _call_llm_no_tools(
     system_prompt: str,
     user_msg: str,
     model: str = "flash",
-) -> dict[str, object] | None:
-    """调用 LLM（不带工具），返回解析后的 dict 或 None。
+    *,
+    raw_text: Literal[True],
+) -> str | None: ...
+
+
+@overload
+async def _call_llm_no_tools(
+    system_prompt: str,
+    user_msg: str,
+    model: str = "flash",
+    *,
+    raw_text: Literal[False] = False,
+) -> dict[str, object] | None: ...
+
+
+async def _call_llm_no_tools(
+    system_prompt: str,
+    user_msg: str,
+    model: str = "flash",
+    *,
+    raw_text: bool = False,
+) -> dict[str, object] | str | None:
+    """调用 LLM（不带工具），返回解析后的 dict、原始文本或 None。
 
     使用 flash 模型做快速理解/投资/播报；deep 模型仅在需要时使用。
+    raw_text=True 时跳过 JSON 解析，直接返回原始文本（供播报等非 JSON 场景）。
     """
     try:
         llm = get_deep_think() if model == "deep" else get_quick_think()
@@ -59,6 +82,8 @@ async def _call_llm_no_tools(
             ]
         )
         text = cast(str, result.content) if hasattr(result, "content") else str(result)
+        if raw_text:
+            return text
         parsed = _parse_json(text)
         if isinstance(parsed, dict):
             return parsed
@@ -173,19 +198,13 @@ async def _generate_podcast(
         .replace("{understanding_summary}", summary)
         .replace("{conclusion}", conclusion)
     )
-    try:
-        llm = get_quick_think()
-        result = await llm.ainvoke(
-            [
-                SystemMessage(content=prompt),
-                HumanMessage(content="生成播报摘要"),
-            ]
-        )
-        text = cast(str, result.content) if hasattr(result, "content") else str(result)
+    text = await _call_llm_no_tools(
+        prompt, "生成播报摘要", model="flash", raw_text=True
+    )
+    if isinstance(text, str) and text.strip():
         return text.strip()
-    except Exception:
-        logger.exception("podcast_generation_failed")
-        return "事件播报生成失败，请稍后重试"
+    logger.warning("podcast_generation_failed")
+    return "事件播报生成失败，请稍后重试"
 
 
 # ── 主入口 ──
@@ -269,9 +288,9 @@ async def run(state: AgentState) -> dict[str, object]:
         # 缓存 & 持久化
         # 缓存存储完整 analysis_reports（含 event_understanding/transmission/history/
         # investment/podcast_brief），保证缓存命中时前端数据结构与新鲜执行一致。
-        display_report: dict[str, object] = investment if investment else {}
         await set_cached_event(user_msg, analysis_reports)
-        await persist_event_report(user_msg, display_report, podcast_brief)
+        event_id = str(event_meta.get("eventId", ""))
+        await persist_event_report(event_id, event_meta, user_msg, analysis_reports)
 
         return {
             "final_response": podcast_brief,

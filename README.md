@@ -205,7 +205,7 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 写 Redis 缓存 + 落盘到 `docs/agent-outputs/morning/`（供 snapshot 读取）+ 写数据库；完成后自动并行触发 event agent 分析 major_events（fire-and-forget） |
+| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动并行触发 event agent 分析 major_events（fire-and-forget） |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
@@ -256,10 +256,10 @@ src/aistock_agent/
 │   ├── general/
 │   │   └── node.py      # 兜底对话（quick_think）
 │   └── workers/
-│       ├── morning.py   # 晨报（ReAct + Redis 缓存 + 文件归档）
+│       ├── morning.py   # 晨报（ReAct + 双层输出 + Redis 缓存 + 持久化 + 文件归档）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
-│       ├── event.py     # 事件传导链（v3：模块化架构 + 双层输出 + 持久化）
+│       ├── event.py     # 事件传导链（v3：Redis 缓存 + 双层输出解析 + 完整 analysis_reports 持久化 + event_id 隔离）
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
 │       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
@@ -286,10 +286,12 @@ src/aistock_agent/
 │   ├── general/system.py
 │   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,alert,review,iterate}.py
 ├── services/
-│   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
+│   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
-│   ├── cache.py         # 晨报缓存服务（基于 RedisPool）
+│   ├── cache.py         # 晨报缓存服务（基于 RedisPool，存储双层 JSON）
+│   ├── morning_persister.py  # 晨报持久化服务（→ Node.js /internal/analysis-reports，公共报告）
+│   ├── event_persister.py    # 事件持久化服务（→ Node.js /internal/analysis-reports，event_id 隔离 + 完整 analysis_reports）
 │   ├── llm.py           # 双模型工厂（quick_think / deep_think + 可观测性回调）
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）
@@ -308,7 +310,9 @@ src/aistock_agent/
 
 ### 输出归档
 
-- 晨报 Agent 的 `run()` 在生成后**自动归档**到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`（与 review agent 对称，供 snapshot_builder 读取）
+- 晨报 Agent 的 `run()` 在生成后**自动归档**到 `docs/agent-outputs/morning/YYYY-MM-DD-HHMM-briefing.md`（归档内容为双层报告 `display_report.details` 的 Markdown 文本，供 snapshot_builder 读取）
+- 晨报输出为双层结构：`display_report`（summary/details/stocks/risks）+ `podcast_brief`（150～200字播报摘要）+ `schema_version`；Redis 缓存存储完整双层 JSON，读取侧兼容旧 schema 1.0 纯文本
+- 晨报同时持久化到 Node.js `/internal/analysis-reports`（公共报告，`report_type=morning`、`user_id=null`，前端公开接口可读取）
 - 使用 `python scripts/run_morning_test.py` 可直接生成并落盘，文件头包含生成时间、耗时、交易日、缓存命中等元数据
 - 晨报 Redis 缓存提取归档到 `docs/agent-outputs/morning/YYYY-MM-DD-briefing.md`
 - 使用 `python scripts/extract_morning_cache.py` 从 Redis 缓存提取已生成的晨报（不触发 LLM 重新生成），支持 `--date YYYY-MM-DD` 指定日期，默认提取所有缓存报告
@@ -393,8 +397,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 - Agent 节点必须 try-catch 包裹
 
 ### 缓存规范
-- 晨报结果缓存 Redis TTL=2小时
+- 晨报结果缓存 Redis TTL=2小时，存储双层 JSON（display_report + podcast_brief + schema_version）
 - 缓存 key 格式：`briefing:morning:YYYY-MM-DD`
+- 读取侧兼容旧纯文本缓存（schema_version="1.0" 自动包装为双层）
 
 ### 可观测性
 - 日志：`observability.logging.setup_logging()` 在应用启动前配置 structlog JSON 输出（timestamp/level/event，支持 contextvars request_id）
