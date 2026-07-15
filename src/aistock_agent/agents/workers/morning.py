@@ -92,11 +92,45 @@ def _ensure_dual_layer(text: str) -> dict[str, object]:
 
 
 def _validate_podcast_brief(brief: str | None) -> str:
-    """校验播报摘要字数，不满足 150-200 时返回降级文案。"""
-    if brief and _PODCAST_BRIEF_MIN <= len(brief) <= _PODCAST_BRIEF_MAX:
+    """校验播报摘要字数，不满足约束时智能截断或降级。
+
+    - 150～200 字：直接通过
+    - 超过 200 字：在句号/分号/逗号处截断到 200 字以内（尽量找 150+ 的断句点）
+    - 不足 150 字或为空：返回降级文案
+    """
+    if not brief:
+        return _PODCAST_BRIEF_FALLBACK
+
+    brief_len = len(brief)
+    if _PODCAST_BRIEF_MIN <= brief_len <= _PODCAST_BRIEF_MAX:
         return brief
-    if brief:
-        logger.warning("podcast_brief_length_invalid", length=len(brief))
+
+    # 超过上限：智能截断——在 200 字范围内找最近的句号/分号断句
+    if brief_len > _PODCAST_BRIEF_MAX:
+        truncated = brief[:_PODCAST_BRIEF_MAX]
+        best_cut = -1
+        for sep in ("。", "；"):
+            last_sep = truncated.rfind(sep)
+            if last_sep >= _PODCAST_BRIEF_MIN and last_sep > best_cut:
+                best_cut = last_sep
+        if best_cut > 0:
+            result = truncated[:best_cut + 1]
+            logger.info(
+                "podcast_brief_truncated",
+                original_length=brief_len,
+                truncated_length=len(result),
+            )
+            return result
+        # 无合适断句点，硬截断到 200
+        logger.info(
+            "podcast_brief_truncated_hard",
+            original_length=brief_len,
+            truncated_length=_PODCAST_BRIEF_MAX,
+        )
+        return truncated
+
+    # 不足 150 字
+    logger.warning("podcast_brief_too_short", length=brief_len)
     return _PODCAST_BRIEF_FALLBACK
 
 
@@ -186,9 +220,10 @@ async def run(state: AgentState) -> dict[str, object]:
         tools = get_tools("morning")
         agent = create_react_agent(llm, tools)
 
-        # 执行
+        # 执行（recursion_limit=50，晨报需要大量工具调用）
         result = await agent.ainvoke(
             {"messages": [SystemMessage(content=system_prompt)]},
+            config={"recursion_limit": 50},
         )
 
         # 解析双层报告（复用 output_parser.parse_event_output）

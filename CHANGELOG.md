@@ -2,7 +2,24 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
-## [changer] 2026-07-14 — Event Agent v3 持久化重构：event_id 隔离 + 完整 analysis_reports 写入
+## [changer] 2026-07-15 — podcast_brief 确定性校验 + title 清洗 + 持久化门控
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/agents/workers/event.py`：新增 `_validate_podcast_brief()` 确定性校验（len() 150-200），超限智能截断/不足从事实补齐，不可修复时跳过持久化；新增 `_truncate_at_sentence_boundary()` 句尾截断；`_generate_podcast()` 失败回退为空字符串（非降级占位文本）
+- `src/aistock_agent/agents/workers/event.py`：title 来源改为 `understanding.summary`（纯业务标题），缺失时降级为空并跳过持久化；新增 `can_persist` 门控（title 非空 + brief ∈ [150,200] 才缓存+持久化）
+- `src/aistock_agent/agents/workers/morning.py`：`_validate_podcast_brief()` 增强为智能截断（在句号/分号处断句），超限优先找 150+ 字符的断句点
+- `src/aistock_agent/agents/workers/morning.py`：agent.ainvoke 新增 `recursion_limit=50`（晨报需大量工具调用）
+- `src/aistock_agent/prompts/workers/morning.py`：新增 podcast_brief 字数硬约束说明（150-200）+ 参考示例
+
+### 改进
+- `src/aistock_agent/data/sector_aliases.json`：新增"科技"板块别名映射（存储芯片/光刻机/先进封装/第三代半导体/光刻胶/汽车芯片/国家大基金持股）
+- `scripts/run_morning_test.py`：手动初始化 RedisPool + HttpClientPool，finally 块释放连接
+
+### 测试
+- `tests/integration/test_event_agent.py`：重写测试，新增 P1 用例（brief 校验边界/句尾截断/从事实补齐/不可持久化/标题清洗/空标题门控）
+
+---
 **开发者**: 37588
 
 ### 改进
