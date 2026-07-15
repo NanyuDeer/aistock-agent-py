@@ -111,6 +111,13 @@ def _format_detail(data: dict[str, object]) -> str:
                 lines.append(f"  60日线位置: {indicators.get('ma60Position', '-')}  趋势: {indicators.get('ma60Trend', '-')}")
                 lines.append(f"  250日新高: {indicators.get('isNewHigh250', '-')}  120日新高: {indicators.get('isNewHigh120', '-')}")
                 lines.append(f"  最大回撤: {indicators.get('maxDrawdown', '-')}%")
+            # 龙头股加成
+            is_leader = detail.get("isLeader", False)
+            leader_board_name = detail.get("leaderBoardName", "")
+            if is_leader:
+                lines.append(f"  龙头股加成: 是(+8分){f'  最佳板块龙头: {leader_board_name}' if leader_board_name else ''}")
+            else:
+                lines.append("  龙头股加成: 否")
             concept = detail.get("conceptKline", {})
             if isinstance(concept, dict):
                 lines.append(f"  概念板块: {concept.get('name', '-')}")
