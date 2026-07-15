@@ -241,7 +241,7 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动并行触发 event agent 分析 major_events（fire-and-forget） |
+| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）+ 并行触发 event agent 分析 major_events |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
@@ -402,6 +402,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
+| `POST /internal/push/market-event` | 微信+飞书推送 | 市场事件重磅推送（Python morning_agent 触发，fire-and-forget） |
 | `GET /internal/health` | - | 轻量健康探针（供 Python `/health/ready` 探测，Phase 5） |
 
 ## 开发规范
@@ -485,6 +486,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30） | `30 15 * * 1-5` |
 | `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35） | `35 15 * * 1-5` |
 | `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
+| `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
+| `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
+| `MARKET_EVENT_MAX_PUSHES` | 每次晨报最多推送条数 | `2` |
 
 ## Vibecoding 工作流
 

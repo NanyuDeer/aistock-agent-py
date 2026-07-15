@@ -31,9 +31,54 @@ MORNING_PROMPT = """你是 AiStock 晨报分析师，日期：{{DATE}}。
 - 可能受影响的板块和个股方向
 - 操作策略建议（仅供参考，不构成投资建议）
 
----
+## 第5步：重磅市场事件推送识别（新增，必须输出）
 
-## 今日焦点板块预测（机器解析专用，禁止省略）
+从第1步隔夜外盘回顾和亚太市场早况中，识别值得向用户单独推送的重磅市场事件。
+每个事件必须满足以下**全部**条件：
+
+**硬性条件（缺一不可，否则输出空数组）**：
+1. **指数涨跌结果必须已发生**：不得预测或推测未来走势，只可填写已收市指数的实际涨跌幅
+2. **涨跌幅度显著**：纳入推送的指数当日涨跌幅绝对值应 ≥ 1.5%
+   （仅为 LLM 参考阈值，程序侧另做精确过滤）
+3. **主导原因有可确认的事实来源**：cause 必须由本晨报检索到的新闻、
+   公告或宏观数据直接支持，禁止"市场情绪""投资者反应"等空泛归因
+4. **原因与行情方向一致**：上涨事件的原因应为正面消息，下跌事件的原因应为负面消息
+5. **一条事件对应一个市场驱动**：不把多个无关原因拼成一条
+
+**输出规范**（放在 details 末尾，独立于 MAJOR_EVENTS）：
+- each item 必须包含：market, direction, indices, cause,
+  evidence_url, evidence_summary, title, event_time, confidence
+- direction: "up"（涨）或 "down"（跌）
+- indices: 至少一个 {name, change_pct} 对象，change_pct 为百分比数值
+  （如 1.8 表示涨 1.8%，-2.1 表示跌 2.1%）
+- cause: 一句话（20字以内）主导导火索，必须基于已检索的新闻/公告/经济数据
+- evidence_url: 支撑 cause 的来源链接（从工具调用结果中提取），无可用链接填 ""
+- evidence_summary: 用于确认原因的事实摘要（30字以内），禁止为空
+- title: 推送标题（20字以内），如 "纳斯达克大涨2%"、"日经225重挫2.5%"
+- event_time: 事件时间 ISO8601 格式
+- confidence: 原因和行情方向确定性足够高时填 "high"，否则不输出该事件
+
+**仅输出美股和亚太主要市场/指数的事件**，不做 A 股个股异动监控。
+
+**无法确认主导原因时，输出空数组**：<!--MARKET_EVENT_PUSHES_START-->[]<!--MARKET_EVENT_PUSHES_END-->
+
+<!--MARKET_EVENT_PUSHES_START-->
+[
+  {
+    "market": "美股",
+    "direction": "up",
+    "indices": [{"name": "纳斯达克", "change_pct": 1.8}],
+    "cause": "美联储暗示年内降息",
+    "evidence_url": "https://...",
+    "evidence_summary": "鲍威尔Jackson Hole讲话确认通胀回落路径",
+    "title": "纳指大涨1.8%",
+    "event_time": "2026-07-15T05:30:00Z",
+    "confidence": "high"
+  }
+]
+<!--MARKET_EVENT_PUSHES_END-->
+
+---
 
 **你必须输出本章节**。从上面的分析中提取你预测今日会受关注的所有板块名称，
 每行一个，只写板块名（不要加粗、不要括弧说明、不要评分）：
@@ -109,8 +154,9 @@ MORNING_PROMPT = """你是 AiStock 晨报分析师，日期：{{DATE}}。
   "隔夜美股三大指数涨跌互现，科技股承压而能源板块走强；中东局势持续升温推动国际油价攀升至年内新高。国内方面，6月出口数据超预期增长，AI相关产品出口成为新增长引擎；北向资金连续三日净流入，市场情绪边际回暖。需关注地缘冲突升级风险以及美联储后续政策路径的不确定性，短期建议防御为主，适度关注能源安全和自主可控主线。"
 
 注意：
-- details 字段必须包含完整的第1-4步分析、焦点板块预测（含 SECTOR_LIST 标记）
-  和重大事件识别部分（含 MAJOR_EVENTS 标记），所有标记均放在 details 内
+- details 字段必须包含完整的第1-5步分析、焦点板块预测（含 SECTOR_LIST 标记）
+  和重大事件识别部分（含 MAJOR_EVENTS 标记）、重磅市场事件推送（含 MARKET_EVENT_PUSHES 标记），
+  所有标记均放在 details 内
 - 重大事件识别部分仍使用 <!--MAJOR_EVENTS_START-->...<!--MAJOR_EVENTS_END--> 标记，放在 details 内
 - 焦点板块预测仍使用 <!--SECTOR_LIST_START-->...<!--SECTOR_LIST_END--> 标记，放在 details 内
 - summary 是一句话总结，15-30 字

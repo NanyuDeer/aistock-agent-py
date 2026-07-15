@@ -130,6 +130,58 @@ async def get_cached_event(user_input: str) -> dict[str, object] | None:
     return None
 
 
+async def try_set_cached_market_push_sent(market: str, event_hash: str) -> bool:
+    """原子尝试标记市场事件已推送（SET NX EX）。
+
+    使用 Redis ``SET key value NX EX ttl`` 原子操作，
+    并发场景下只有一个调用者能成功设置标记。
+
+    Args:
+        market: 市场标识，如 "美股"、"亚太"
+        event_hash: 事件稳定摘要的 MD5 前 12 位
+
+    Returns:
+        True 表示标记成功（首次推送），False 表示已被其他调用者标记或 Redis 不可用。
+    """
+    try:
+        client = await RedisPool.get_client()
+        today = datetime.now().strftime("%Y-%m-%d")
+        key = f"market_push_sent:{today}:{market}:{event_hash}"
+        result = await client.set(key, "1", nx=True, ex=86400)
+        return result is True
+    except Exception:
+        logger.debug("try_set_cached_market_push_sent_failed", exc_info=True)
+    return False
+
+
+async def set_cached_market_push_sent(market: str, event_hash: str) -> None:
+    """标记某条市场事件已成功推送（用于 _dispatch_market_event_push 成功后）。
+
+    内部委托给 :func:`try_set_cached_market_push_sent`。
+
+    Args:
+        market: 市场标识
+        event_hash: 事件稳定摘要的 MD5 前 12 位
+    """
+    await try_set_cached_market_push_sent(market, event_hash)
+
+
+async def release_cached_market_push_sent(market: str, event_hash: str) -> None:
+    """释放市场事件推送预占（推送失败时调用，允许后续补发）。
+
+    Args:
+        market: 市场标识
+        event_hash: 事件稳定摘要的 MD5 前 12 位
+    """
+    try:
+        client = await RedisPool.get_client()
+        today = datetime.now().strftime("%Y-%m-%d")
+        key = f"market_push_sent:{today}:{market}:{event_hash}"
+        await client.delete(key)
+    except Exception:
+        logger.debug("release_cached_market_push_sent_failed", exc_info=True)
+
+
 async def set_cached_event(
     user_input: str,
     analysis_reports: dict[str, object],

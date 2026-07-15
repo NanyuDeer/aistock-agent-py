@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
 
+    # 市场事件推送阈值（晨报生成后自动识别重大涨跌并推送）
+    # 对称阈值：上涨 >= 阈值 或 下跌 <= -阈值 才视为"重磅"
+    market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
+    market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
+    market_event_max_pushes: int = 2            # 每次晨报最多推送条数
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @field_validator("cors_origins", mode="before")

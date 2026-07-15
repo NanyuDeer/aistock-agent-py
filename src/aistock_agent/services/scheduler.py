@@ -267,10 +267,10 @@ async def _run_broadcast_task() -> None:
     logger.info("scheduler_broadcast_chain_start", report_date=today)
 
     # 函数内 import：延迟加载重依赖
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+    from aistock_agent.agents.workers import hot_burst as hot_burst_agent
     from aistock_agent.agents.workers import morning as morning_agent
     from aistock_agent.agents.workers import wind_leader as wind_leader_agent
-    from aistock_agent.agents.workers import hot_burst as hot_burst_agent
-    from aistock_agent.agents.workers import broadcast as broadcast_agent
 
     def _make_state(intent: str | None = None) -> AgentState:
         """构造 scheduler 触发的 AgentState"""

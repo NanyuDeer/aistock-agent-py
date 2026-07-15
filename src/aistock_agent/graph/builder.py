@@ -10,15 +10,15 @@ from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.agents.general import node as general_agent
 from aistock_agent.agents.supervisor import node as supervisor
-from aistock_agent.agents.workers import alert as alert_agent
 from aistock_agent.agents.workers import ai_advisor as ai_advisor_agent
+from aistock_agent.agents.workers import alert as alert_agent
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import event as event_analyst
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.agents.workers import sector as sector_analyst
 from aistock_agent.agents.workers import stock as stock_analyst
-from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 from aistock_agent.agents.workers import trend_score as trend_score_agent
+from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 from aistock_agent.agents.workers.hot_burst import run as hot_burst_agent_run
 from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.memory.checkpointer import get_checkpointer
