@@ -20,6 +20,8 @@
 - `tests/integration/test_event_agent.py`：重写测试，新增 P1 用例（brief 校验边界/句尾截断/从事实补齐/不可持久化/标题清洗/空标题门控）
 
 ---
+
+## [changer] 2026-07-14 — Event Agent v3 持久化重构：event_id 隔离 + 完整 analysis_reports 写入
 **开发者**: 37588
 
 ### 改进
