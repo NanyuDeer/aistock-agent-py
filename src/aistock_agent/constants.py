@@ -51,6 +51,7 @@ INTENT_SET = frozenset({
     "morning", "stock", "sector", "event",
     "wind_leader", "hot_burst", "broadcast",
     "alert", "ai_advisor", "general",
+    "trend_score",
 })
 
 
@@ -93,4 +94,8 @@ TOOL_LABELS: dict[str, str] = {
     # alert 子 Agent 工具（Phase 6）
     "get_concepts": "正在加载产业链概念列表",
     "get_graph_by_concept": "正在查询产业链上下游",
+    # trend_score agent 工具
+    "get_trend_score": "正在查询趋势股评分",
+    "get_trend_score_detail": "正在获取趋势股评分详情",
+    "get_trend_top_stocks": "正在查询趋势股排行",
 }
