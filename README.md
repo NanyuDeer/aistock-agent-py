@@ -79,45 +79,73 @@ mypy src/
 
 ```mermaid
 graph TB
-    subgraph 主流程["主流程（用户触发）"]
-        S[START] --> SUP[supervisor<br/>quick_think]
+    subgraph 用户流程["用户流程（API/SSE 触发）"]
+        S[START] --> SUP[supervisor<br/>quick_think<br/>意图路由]
         SUP -->|morning| M[morning_agent<br/>deep_think]
-        SUP -->|stock| ST[stock_analyst]
-        SUP -->|sector| SE[sector_analyst]
-        SUP -->|event| EV[event_analyst]
+        SUP -->|stock| ST[stock_analyst<br/>deep_think]
+        SUP -->|sector| SE[sector_analyst<br/>deep_think]
+        SUP -->|event| EV[event_analyst<br/>deep_think<br/>v3模块化]
         SUP -->|wind_leader| WL[wind_leader_agent<br/>deep_think]
         SUP -->|hot_burst| HB[hot_burst_agent<br/>deep_think]
+        SUP -->|alert| AL[alert_agent<br/>deep_think]
         SUP -->|broadcast| BC[broadcast_agent<br/>deep_think]
-        SUP -->|general| GE[general_agent]
+        SUP -->|ai_advisor| AI[ai_advisor_agent<br/>deep_think]
+        SUP -->|trend_score| TS[trend_score_agent<br/>deep_think]
+        SUP -->|general| GE[general_agent<br/>quick_think]
+
         M --> E1[END]
         ST --> E1
         SE --> E1
         EV --> E1
         WL --> E1
         HB --> E1
+        AL --> E1
         BC --> E1
+        AI --> E1
         GE --> E1
     end
 
-    subgraph 复盘流水线["复盘流水线（定时触发，交易日 15:30 / 15:35 / 15:40）"]
-        T["定时调度<br/>15:30 → 15:35 → 15:40"] --> RV[review_agent<br/>deep_think]
-        RV --> SB[快照生成器<br/>代码 + LLM]
-        SB --> IA[iterate_agent<br/>deep_think]
+    subgraph 用户对话路由["用户对话路由（trigger_source=user）"]
+        SUP2["intent ≠ general/broadcast"] --> AI2[ai_advisor_agent<br/>DB报告→整理回复]
     end
 
-    M -.->|晨报文件| SB
+    subgraph 晨报链路["晨报链路（08:50 定时触发）"]
+        T1["⏰ 08:50"] --> M2[morning_agent<br/>缓存+归档+写DB]
+        M2 -->|major_events| EV2[event_analyst<br/>并行 fire-and-forget]
+    end
+
+    subgraph 播报链路["播报链路（09:00 定时触发）"]
+        T2["⏰ 09:00"] --> M3[morning_agent<br/>命中缓存]
+        M3 --> WL2[wind_leader_agent<br/>写DB+双层输出]
+        WL2 --> HB2[hot_burst_agent<br/>写DB]
+        HB2 --> BC2[broadcast_agent<br/>读DB→双人语音播报]
+    end
+
+    subgraph 复盘流水线["复盘流水线（15:30/15:35/15:40 定时触发）"]
+        T3["⏰ 15:30"] --> RV[review_agent<br/>deep_think<br/>缓存+归档+写DB]
+        T4["⏰ 15:35"] --> SB[快照生成器<br/>代码+LLM 4维评估]
+        T5["⏰ 15:40"] --> IA[iterate_agent<br/>阈值判断+偏差分析]
+    end
+
+    M2 -.->|晨报文件| SB
     RV -.->|复盘文件| SB
-    SB -->|snapshot_T| IA
-    SB -->|rolling_stats| IA
+    SB -->|snapshot| IA
+    IA -.->|优化建议<br/>人工审核| M2
 
-    IA -.->|优化建议<br/>人工审核| M
-
-    style IA fill:#fff3cd,stroke:#856404
+    style BC2 fill:#e8d5f5,stroke:#6f42c1
+    style AI2 fill:#fff3cd,stroke:#856404
+    style EV2 fill:#d1ecf1,stroke:#0c5460
     style SB fill:#d1ecf1,stroke:#0c5460
     style RV fill:#d4edda,stroke:#155724
+    style M2 fill:#d4edda,stroke:#155724
 ```
 
-> 注：主流程 worker 为 morning / stock / sector / event + general 兜底，由 supervisor 路由；复盘流水线（review → snapshot → iterate）由定时调度触发，不经过 supervisor 路由。三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据（晨报/复盘报告 → 快照 JSON → 迭代分析），非 LangGraph 图内边。
+> **架构说明**：
+> - **用户流程**：supervisor 意图路由后分发到各 Agent，各 Agent 独立返回 END
+> - **用户对话路由**：当 `trigger_source="user"` 且 intent 非 general/broadcast 时，统一路由到 ai_advisor_agent（从 DB 读取已有报告整理回复，省 token）
+> - **晨报链路**：08:50 定时触发 morning_agent → 提取 major_events → 并行 fire-and-forget 触发 event_analyst
+> - **播报链路**：09:00 串行执行 morning→wind_leader→hot_burst→broadcast，各 Agent 写 DB，broadcast 从 DB 读取报告生成双人语音播报（9:10 前端可见）
+> - **复盘流水线**：15:30 review→15:35 snapshot→15:40 iterate，通过文件 I/O 传递数据，间隔 5 分钟顺序执行
 
 ### 双模型策略
 
@@ -199,6 +227,14 @@ content = {
 - **路由**：intent=`hot_burst` → `hot_burst_agent`
 - **降级文本**：`"机构调研热门股分析暂时不可用，请稍后重试"`
 
+### 趋势股评分Agent（trend_score）
+
+- **工具**：`get_trend_score`（评分概览）、`get_trend_score_detail`（展开详情含K线/概念板块/新闻）、`get_trend_top_stocks`（Top排行）
+- **模型**：deep_think（ReAct 模式）
+- **输出**：写入 `state.analysis_reports["trend_score"]`，scheduler 触发时写 DB（双层输出 display_report + podcast_brief）
+- **路由**：intent=`trend_score` → `trend_score_agent`（用户对话走 ai_advisor 省 token，scheduler 触发走 trend_score_agent）
+- **降级文本**：`"趋势股评分分析暂时不可用，请稍后重试"`
+
 ### 定时调度
 
 `services/scheduler.py` 基于 APScheduler `AsyncIOScheduler` 集成，交易日自动执行（非交易日通过 `utils/date.is_trading_day()` 自动跳过）。调度器在 `main.py` lifespan 中启动/关闭，与 RedisPool / HttpClientPool 同生命周期。
@@ -264,6 +300,7 @@ src/aistock_agent/
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
 │       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
 │       ├── ai_advisor.py # 智能投顾（消费 display_report，对话气泡展示）
+│       ├── trend_score.py # 趋势股评分（ReAct + 4维度评分解读 + 文件归档 + 双层输出）
 │       ├── alert.py     # 异动提醒（deep_think + 三步框架 + cycle 短中长线分类）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
 │       └── iterate.py   # 迭代分析（非 ReAct，pipeline + LLM，只读，scheduler 触发）
@@ -277,6 +314,7 @@ src/aistock_agent/
 │   ├── search_tools.py       # tavily_finance_search（Tavily 全网搜索，从 market_tools 拆出）
 │   ├── monitor_tools.py      # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py         # get_tenx_score, get_tenx_top_stocks（Phase 5）
+│   ├── trend_tools.py        # get_trend_score, get_trend_score_detail, get_trend_top_stocks
 │   ├── graph_tools.py        # get_concepts, get_graph_by_concept（Phase 5）
 │   ├── industry_vector_search.py  # match_industry_by_keywords（pgvector 语义匹配，event 工具集）
 │   ├── hot_burst_tools.py    # get_hot_burst, get_hot_burst_history（Phase 5）
@@ -284,7 +322,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,alert,review,iterate}.py
+│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
@@ -356,6 +394,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/monitor/alerts` | 异动引擎 | 预警历史（Phase 5） |
 | `GET /internal/tenx/score/:symbol` | 十倍股评分 | 评分详情（Phase 5） |
 | `GET /internal/tenx/top` | 十倍股评分 | 排行列表（Phase 5） |
+| `GET /internal/trend/score/:symbol` | 趋势股评分 | 评分详情（4维度） |
+| `GET /internal/trend/score/:symbol/detail` | 趋势股评分 | 评分展开详情（含K线、新闻等） |
+| `GET /internal/trend/top` | 趋势股评分 | 排行列表 |
 | `GET /internal/graph/concepts` | 知识图谱 | 产业链概念列表（Phase 5） |
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
