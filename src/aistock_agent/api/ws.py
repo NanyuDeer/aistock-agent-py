@@ -37,6 +37,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                 "tag_code": None,
                 "analysis_reports": {},
                 "final_response": None,
+                "trigger_source": "user",  # 标记用户请求来源，使 intent_router 能路由到 ai_advisor
             }
 
             # 流式输出
