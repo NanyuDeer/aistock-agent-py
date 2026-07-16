@@ -169,7 +169,7 @@ src/aistock_agent/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
-    └── ws.py            # WebSocket 流式接口
+    └── ws.py            # WebSocket 流式接口（astream_events v2，7 种事件类型 + 节点标签映射）
 ```
 
 ## 开发规范

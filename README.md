@@ -365,6 +365,7 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，7 种事件：intermediate/llm_start/text/tool_start/tool_end/done/error） |
 | POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
 | POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
 | POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |
