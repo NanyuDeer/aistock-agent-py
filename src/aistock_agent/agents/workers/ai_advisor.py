@@ -124,14 +124,19 @@ async def run(state: AgentState) -> dict[str, object]:
         prompt = AI_ADVISOR_PROMPT.replace("{{AVAILABLE_REPORTS}}", available_reports_text)
 
         if reports:
-            # 有报告：直接用 LLM 整理汇总（省 token，快速响应）
+            # 有报告：用 LLM 流式整理汇总（省 token，快速响应，支持逐 token 输出）
             llm = get_deep_think()
-            response = await llm.ainvoke([
+            response_chunks: list[str] = []
+            async for chunk in llm.astream([
                 SystemMessage(content=prompt),
                 *state.get("messages", [])[-5:],
-            ])
+            ]):
+                if chunk.content:
+                    response_chunks.append(
+                        chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    )
 
-            final_response = response.content if isinstance(response.content, str) else str(response.content)
+            final_response = "".join(response_chunks)
             logger.info("advisor_response_from_reports", has_report=True, intent=intent)
         else:
             # 无报告：用 ReAct Agent 调用工具获取数据
