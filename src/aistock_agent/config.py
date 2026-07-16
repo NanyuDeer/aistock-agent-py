@@ -1,6 +1,7 @@
 """应用配置 — pydantic-settings 读取环境变量"""
 
 import json
+import os
 import random
 from typing import Annotated
 
@@ -9,15 +10,19 @@ from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
-    """全局配置，从 .env 或环境变量读取"""
+    """全局配置，从 .env.{APP_ENV} 或环境变量读取"""
 
     # Node.js 后端地址
     node_api_base_url: str = "http://localhost:3000"
 
-    # LLM
+    # LLM — quick_think（默认 API）
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     quick_think_model: str = "gpt-4o-mini"
+    # LLM — deep_think（可使用不同 API，如 DeepSeek 直连）
+    # 若未配置则 fallback 到 openai_api_key / openai_base_url
+    deep_think_api_key: str = ""
+    deep_think_base_url: str = ""
     deep_think_model: str = "gpt-4o"
     # 双模型参数 — 从配置读取，避免硬编码（services/llm.py 引用）
     quick_think_temperature: float = 0.1
@@ -84,7 +89,11 @@ class Settings(BaseSettings):
     market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
     market_event_max_pushes: int = 2            # 每次晨报最多推送条数
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     @field_validator("cors_origins", mode="before")
     @classmethod

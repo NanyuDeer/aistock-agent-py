@@ -229,7 +229,7 @@ content = {
 
 ### 趋势股评分Agent（trend_score）
 
-- **工具**：`get_trend_score`（评分概览）、`get_trend_score_detail`（展开详情含K线/概念板块/新闻）、`get_trend_top_stocks`（Top排行）
+- **工具**：`get_trend_score`（评分概览）、`get_trend_score_detail`（展开详情含K线/概念板块/龙头股加成/新闻）、`get_trend_top_stocks`（Top排行）
 - **模型**：deep_think（ReAct 模式）
 - **输出**：写入 `state.analysis_reports["trend_score"]`，scheduler 触发时写 DB（双层输出 display_report + podcast_brief）
 - **路由**：intent=`trend_score` → `trend_score_agent`（用户对话走 ai_advisor 省 token，scheduler 触发走 trend_score_agent）
@@ -365,6 +365,7 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，7 种事件：intermediate/llm_start/text/tool_start/tool_end/done/error） |
 | POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
 | POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
 | POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |

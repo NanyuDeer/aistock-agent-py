@@ -57,11 +57,17 @@ def get_quick_think() -> ChatOpenAI:
 
 
 def get_deep_think() -> ChatOpenAI:
-    """深度模型，用于复杂分析和推理"""
+    """深度模型，用于复杂分析和推理
+
+    支持独立 API 配置（DEEP_THINK_API_KEY / DEEP_THINK_BASE_URL），
+    若未配置则 fallback 到默认 OPENAI_API_KEY / OPENAI_BASE_URL。
+    """
+    api_key = settings.deep_think_api_key or settings.openai_api_key
+    base_url = settings.deep_think_base_url or settings.openai_base_url
     return ChatOpenAI(
         model=settings.deep_think_model,
-        api_key=SecretStr(settings.openai_api_key),
-        base_url=settings.openai_base_url,
+        api_key=SecretStr(api_key),
+        base_url=base_url,
         temperature=settings.deep_think_temperature,
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]

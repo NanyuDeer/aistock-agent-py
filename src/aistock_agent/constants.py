@@ -42,6 +42,11 @@ class WSEventType:
     """
 
     AGENT_RESPONSE = "agent_response"
+    INTERMEDIATE = "intermediate"  # 中间进度（如"正在理解你的问题..."）
+    LLM_START = "llm_start"        # LLM 开始生成
+    TEXT = "text"                  # 逐 token 文本
+    TOOL_START = "tool_start"      # 工具调用开始
+    TOOL_END = "tool_end"          # 工具调用结束
     DONE = "done"
     ERROR = "error"
 

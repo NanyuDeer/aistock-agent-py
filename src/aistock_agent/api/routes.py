@@ -300,6 +300,7 @@ async def alert_briefing(
         "tag_code": cycle,
         "analysis_reports": {},
         "final_response": None,
+        "trigger_source": "user",  # 标记用户请求来源
     }
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
