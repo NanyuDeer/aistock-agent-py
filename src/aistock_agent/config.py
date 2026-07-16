@@ -15,10 +15,14 @@ class Settings(BaseSettings):
     # Node.js 后端地址
     node_api_base_url: str = "http://localhost:3000"
 
-    # LLM
+    # LLM — quick_think（默认 API）
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     quick_think_model: str = "gpt-4o-mini"
+    # LLM — deep_think（可使用不同 API，如 DeepSeek 直连）
+    # 若未配置则 fallback 到 openai_api_key / openai_base_url
+    deep_think_api_key: str = ""
+    deep_think_base_url: str = ""
     deep_think_model: str = "gpt-4o"
     # 双模型参数 — 从配置读取，避免硬编码（services/llm.py 引用）
     quick_think_temperature: float = 0.1
