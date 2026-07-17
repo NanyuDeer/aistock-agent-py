@@ -45,6 +45,18 @@ async def test_get_hot_burst_success():
 
 
 @pytest.mark.asyncio
+async def test_get_hot_burst_uses_18_hour_default_window():
+    """未显式指定时，Agent 工具应覆盖早间检测与定时报告之间的时间差。"""
+    with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"outbreaks": []})
+        await get_hot_burst.ainvoke({})
+
+    mock_api.get.assert_called_once_with(
+        "/internal/institution-research?hours=18&min_resonance_count=2&limit=20"
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_hot_burst_degradation():
     with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
         mock_api.get = AsyncMock(side_effect=RuntimeError("node api down"))
