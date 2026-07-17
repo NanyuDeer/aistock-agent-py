@@ -195,8 +195,8 @@ async def test_hot_burst_empty_data_skips_llm_and_persists_empty_report():
 
 
 @pytest.mark.asyncio
-async def test_hot_burst_source_failure_skips_llm_and_degrades():
-    """数据源失败时不调用 LLM，也不把失败误认为正常空数据。"""
+async def test_hot_burst_null_data_skips_llm_and_returns_empty_report():
+    """Node 返回 data:null 代表正常空数据，不调用 LLM。"""
     with (
         patch(_NODE_API) as mock_api,
         patch(_CREATE_REACT_AGENT) as mock_create,
@@ -207,7 +207,9 @@ async def test_hot_burst_source_failure_skips_llm_and_degrades():
 
     mock_llm.assert_not_called()
     mock_create.assert_not_called()
-    assert "数据源获取失败" in str(result["final_response"])
+    content = json.loads(str(result["final_response"]))
+    assert content["schema_version"] == "2.0"
+    assert content["display_report"]["stocks"] == []
 
 
 @pytest.mark.asyncio
