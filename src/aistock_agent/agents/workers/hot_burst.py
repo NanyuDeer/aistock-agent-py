@@ -106,16 +106,9 @@ async def run(state: AgentState) -> dict[str, object]:
     """机构调研热门股分析节点"""
     try:
         source_data = await node_api.get(_HOT_BURST_CHECK_PATH)
-        if source_data is None:
-            degraded = "机构调研热门股分析暂时不可用：数据源获取失败，请稍后重试"
-            return {
-                "analysis_reports": {
-                    **state.get("analysis_reports", {}),
-                    "hot_burst": degraded,
-                },
-                "final_response": degraded,
-            }
-        if not _has_hot_burst_data(source_data):
+        # Node 端在当前没有检测结果时返回 ``{ code: 200, data: null }``。
+        # 这属于正常空数据，不应误报为数据源故障，也不能因此调用 LLM。
+        if source_data is None or not _has_hot_burst_data(source_data):
             empty_content = _empty_report_content()
             await _persist_report(state, empty_content)
             empty_response = json.dumps(empty_content, ensure_ascii=False)
