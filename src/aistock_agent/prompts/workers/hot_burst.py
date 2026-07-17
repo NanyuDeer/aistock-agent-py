@@ -1,4 +1,4 @@
-"""机构调研热门股分析师提示词。"""
+"""机构调研热门股分析师提示词 — v2.0 双层输出"""
 
 from aistock_agent.prompts.general.system import SYSTEM_PROMPT
 

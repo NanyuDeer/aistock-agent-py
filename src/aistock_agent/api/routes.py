@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from datetime import date
 from uuid import uuid4
 
 import structlog
@@ -277,6 +278,58 @@ async def morning_briefing() -> EventSourceResponse:
     return EventSourceResponse(generator())
 
 
+@router.post("/briefing/morning/trigger")
+async def trigger_morning_briefing() -> dict[str, object]:
+    """手动触发晨报生成（非流式，供管理员 curl 触发）
+
+    直接调用 morning_agent.run()，不走 graph SSE 流。
+    返回 JSON 含 success / message / report_date / cached。
+    管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
+    """
+    from aistock_agent.agents.workers import morning as morning_agent
+
+    today = date.today().isoformat()
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_morning_start", report_date=today)
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成今日晨报"}],
+        "session_id": f"trigger_morning_{today}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "morning",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+    }
+
+    try:
+        result = await morning_agent.run(state)
+        has_response = bool(result.get("final_response"))
+        has_major_events = bool(result.get("analysis_reports", {}).get("major_events"))
+        logger.info(
+            "manual_trigger_morning_done",
+            has_response=has_response,
+            has_major_events=has_major_events,
+        )
+        return {
+            "success": True,
+            "message": "晨报生成完成" if has_response else "晨报生成完成（无内容）",
+            "report_date": today,
+            "cached": result.get("analysis_reports", {}).get("cached", False),
+            "has_major_events": has_major_events,
+        }
+    except Exception as e:
+        logger.error("manual_trigger_morning_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"晨报生成失败: {str(e)}",
+            "report_date": today,
+        }
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
@@ -333,6 +386,40 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
             for t in exposed_tools
         ]
     }
+
+
+# ── 今日 AI 分析报告 ──────────────────────────────────────────────
+
+
+@router.get("/reports/list")
+async def list_reports(date: str = "") -> dict[str, object]:
+    """今日可用的 AI 分析报告列表
+
+    返回格式: { "date": "2026-07-15", "items": [{report_type, label, icon}, ...] }
+    """
+    from datetime import date as dt
+
+    from aistock_agent.services.report_cache import list_reports as cache_list
+
+    report_date = date or dt.today().isoformat()
+    items = cache_list(report_date)
+    return {"date": report_date, "items": items}
+
+
+@router.get("/report/{report_type}/{report_date}")
+async def get_report(report_type: str, report_date: str) -> dict[str, object]:
+    """获取单个已缓存的分析报告
+
+    URL 参数：
+        report_type: morning / wind_leader / hot_burst / alert / broadcast / review
+        report_date: YYYY-MM-DD
+    """
+    from aistock_agent.services.report_cache import get_report as cache_get
+
+    r = cache_get(report_type, report_date)
+    if r:
+        return {"code": 200, "data": r}
+    return {"code": 404, "message": "报告未生成", "data": None}
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────

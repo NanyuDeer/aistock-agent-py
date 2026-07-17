@@ -1,4 +1,4 @@
-"""Hot Burst Agent — 机构调研热门股 AI 解读"""
+"""Hot Burst Agent — 机构调研热门股 AI 解读（v2.0 双层输出）"""
 
 import json
 from datetime import datetime
@@ -103,19 +103,12 @@ async def _persist_report(state: AgentState, content: dict[str, object]) -> None
 
 
 async def run(state: AgentState) -> dict[str, object]:
-    """机构调研热门股分析节点"""
+    """机构调研热门股分析节点（v2.0 双层输出）"""
     try:
         source_data = await node_api.get(_HOT_BURST_CHECK_PATH)
-        if source_data is None:
-            degraded = "机构调研热门股分析暂时不可用：数据源获取失败，请稍后重试"
-            return {
-                "analysis_reports": {
-                    **state.get("analysis_reports", {}),
-                    "hot_burst": degraded,
-                },
-                "final_response": degraded,
-            }
-        if not _has_hot_burst_data(source_data):
+        # Node 端在当前没有检测结果时返回 ``{ code: 200, data: null }``。
+        # 这属于正常空数据，不应误报为数据源故障，也不能因此调用 LLM。
+        if source_data is None or not _has_hot_burst_data(source_data):
             empty_content = _empty_report_content()
             await _persist_report(state, empty_content)
             empty_response = json.dumps(empty_content, ensure_ascii=False)
@@ -142,9 +135,26 @@ async def run(state: AgentState) -> dict[str, object]:
 
         final_response = extract_final_ai_response(result.get("messages", []))
 
+        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+
         if final_response:
-            content = _normalize_report(parse_dual_layer_response(final_response))
-            await _persist_report(state, content)
+            # 解析双层输出
+            dual = parse_dual_layer_response(final_response)
+
+            # 缓存到本地（前端报告列表查询用）
+            try:
+                from aistock_agent.services.report_cache import set_report
+                set_report("hot_burst", report_date, dual)
+            except Exception:
+                pass
+
+            # 持久化到数据库（scheduler 触发时）
+            if state.get("trigger_source") == "scheduler":
+                await node_api.save_analysis_report(
+                    report_type="hot_burst",
+                    report_date=report_date,
+                    content=dual,
+                )
 
         return {
             "analysis_reports": {
