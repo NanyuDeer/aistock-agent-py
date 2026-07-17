@@ -388,6 +388,40 @@ async def list_skills() -> dict[str, list[dict[str, str]]]:
     }
 
 
+# ── 今日 AI 分析报告 ──────────────────────────────────────────────
+
+
+@router.get("/reports/list")
+async def list_reports(date: str = "") -> dict[str, object]:
+    """今日可用的 AI 分析报告列表
+
+    返回格式: { "date": "2026-07-15", "items": [{report_type, label, icon}, ...] }
+    """
+    from datetime import date as dt
+
+    from aistock_agent.services.report_cache import list_reports as cache_list
+
+    report_date = date or dt.today().isoformat()
+    items = cache_list(report_date)
+    return {"date": report_date, "items": items}
+
+
+@router.get("/report/{report_type}/{report_date}")
+async def get_report(report_type: str, report_date: str) -> dict[str, object]:
+    """获取单个已缓存的分析报告
+
+    URL 参数：
+        report_type: morning / wind_leader / hot_burst / alert / broadcast / review
+        report_date: YYYY-MM-DD
+    """
+    from aistock_agent.services.report_cache import get_report as cache_get
+
+    r = cache_get(report_type, report_date)
+    if r:
+        return {"code": 200, "data": r}
+    return {"code": 404, "message": "报告未生成", "data": None}
+
+
 # ── 健康检查 ──────────────────────────────────────────────────────
 
 
