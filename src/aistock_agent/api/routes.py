@@ -330,6 +330,89 @@ async def trigger_morning_briefing() -> dict[str, object]:
         }
 
 
+@router.post("/briefing/event/trigger")
+async def trigger_event_briefing(
+    body: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """手动触发事件传导分析（非流式，供管理员 curl 触发）
+
+    直接调用 event_agent.run()，不走 graph supervisor（避免被路由到 ai_advisor）。
+    返回 JSON 含 success / message / event_id / has_display_report。
+    与 scheduler 的 _run_event_task 行为一致，但同步等待结果。
+    """
+    from aistock_agent.agents.workers import event as event_agent
+
+    today = date.today().isoformat()
+    logger = structlog.get_logger()
+
+    # 构建事件消息：优先用请求体的 event_title，否则用默认事件描述
+    event_title = (body or {}).get("event_title", "").strip() if body else ""
+    event_summary = (body or {}).get("event_summary", "").strip() if body else ""
+    event_url = (body or {}).get("event_url", "").strip() if body else ""
+
+    if event_title:
+        user_message = f"请分析以下重大事件：{event_title}"
+        if event_summary:
+            user_message += f"\n\n事件概述：{event_summary}"
+        if event_url:
+            user_message += f"\n\n原文链接：{event_url}"
+        session_suffix = event_title[:20]
+    else:
+        user_message = "请分析最新的重大市场事件"
+        session_suffix = "default"
+
+    logger.info("manual_trigger_event_start", event_title=event_title[:50] or "default")
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": user_message}],
+        "session_id": f"trigger_event_{today}_{session_suffix}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "event",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+    }
+
+    try:
+        result = await event_agent.run(state)
+        has_response = bool(result.get("final_response"))
+        analysis_reports = result.get("analysis_reports", {})
+        has_display_report = bool(analysis_reports.get("event_display_report"))
+        event_id = ""
+        if isinstance(analysis_reports.get("event_display_report"), dict):
+            event_id = str(
+                analysis_reports["event_display_report"].get("eventId", "")
+            )
+        logger.info(
+            "manual_trigger_event_done",
+            event_title=event_title[:50] or "default",
+            has_response=has_response,
+            has_display_report=has_display_report,
+        )
+        return {
+            "success": True,
+            "message": "事件分析完成" if has_response else "事件分析完成（无内容）",
+            "event_id": event_id,
+            "has_display_report": has_display_report,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_event_failed",
+            event_title=event_title[:50] or "default",
+            error=str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"事件分析失败: {str(e)}",
+            "event_id": "",
+            "has_display_report": False,
+        }
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
