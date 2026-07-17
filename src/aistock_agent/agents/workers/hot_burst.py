@@ -17,7 +17,7 @@ from aistock_agent.utils.report_parser import parse_dual_layer_response
 
 logger = structlog.get_logger()
 
-_HOT_BURST_CHECK_PATH = "/internal/institution-research?hours=6&min_resonance_count=2&limit=20"
+_HOT_BURST_CHECK_PATH = "/internal/institution-research?hours=18&min_resonance_count=2&limit=20"
 _PODCAST_BRIEF_MIN = 150
 _PODCAST_BRIEF_MAX = 200
 _PODCAST_BRIEF_FALLBACK = (

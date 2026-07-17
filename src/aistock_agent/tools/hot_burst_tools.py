@@ -14,7 +14,7 @@ from aistock_agent.tools.base import safe_tool_call
 @tool
 @safe_tool_call
 async def get_hot_burst(
-    hours: int = 6,
+    hours: int = 18,
     min_resonance_count: int = 2,
     limit: int = 20,
 ) -> str:
