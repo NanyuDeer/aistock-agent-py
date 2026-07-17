@@ -8,7 +8,7 @@ import inspect
 
 import pytest
 
-from aistock_agent.tools.base import safe_tool_call
+from aistock_agent.tools.base import DEGRADED_MESSAGE, safe_tool_call
 
 
 @pytest.mark.asyncio
@@ -48,7 +48,7 @@ async def test_safe_tool_call_catches_exception_and_returns_degraded():
         mp.setattr("aistock_agent.tools.base.logger", _SpyLogger())
         result = await failing_tool("600519")
 
-    assert "数据暂不可用" in result
+    assert "实时连接受限" in result
     assert len(calls) == 1
     _args, kwargs = calls[0]
     # 日志应包含工具名与错误信息，便于排障
@@ -104,4 +104,4 @@ async def test_safe_tool_call_degraded_message_is_stable():
         mp.setattr("aistock_agent.tools.base.logger", type("L", (), {"error": lambda self, *a, **k: None})())
         result = await always_fail()
 
-    assert result == "数据暂不可用，请稍后重试"
+    assert result == DEGRADED_MESSAGE

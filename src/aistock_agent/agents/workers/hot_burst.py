@@ -1,4 +1,4 @@
-"""Hot Burst Agent — 机构调研热门股 AI 解读"""
+"""Hot Burst Agent — 机构调研热门股 AI 解读（v2.0 双层输出）"""
 
 from datetime import datetime
 
@@ -12,12 +12,13 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
 from aistock_agent.utils.message import extract_final_ai_response
+from aistock_agent.utils.report_parser import parse_dual_layer_response
 
 logger = structlog.get_logger()
 
 
 async def run(state: AgentState) -> dict[str, object]:
-    """机构调研热门股分析节点"""
+    """机构调研热门股分析节点（v2.0 双层输出）"""
     try:
         llm = get_deep_think()
         tools = [get_hot_burst, get_hot_burst_history]
@@ -34,14 +35,26 @@ async def run(state: AgentState) -> dict[str, object]:
 
         final_response = extract_final_ai_response(result.get("messages", []))
 
-        # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
-        if final_response and state.get("trigger_source") == "scheduler":
-            report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
-            await node_api.save_analysis_report(
-                report_type="hot_burst",
-                report_date=report_date,
-                content={"text": final_response},
-            )
+        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+
+        if final_response:
+            # 解析双层输出
+            dual = parse_dual_layer_response(final_response)
+
+            # 缓存到本地（前端报告列表查询用）
+            try:
+                from aistock_agent.services.report_cache import set_report
+                set_report("hot_burst", report_date, dual)
+            except Exception:
+                pass
+
+            # 持久化到数据库（scheduler 触发时）
+            if state.get("trigger_source") == "scheduler":
+                await node_api.save_analysis_report(
+                    report_type="hot_burst",
+                    report_date=report_date,
+                    content=dual,
+                )
 
         return {
             "analysis_reports": {"hot_burst": final_response},

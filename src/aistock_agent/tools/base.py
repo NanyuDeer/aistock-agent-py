@@ -22,7 +22,7 @@ logger = structlog.get_logger()
 P = ParamSpec("P")
 
 #: 工具异常降级文本（稳定不变，前端/测试可据此断言）
-DEGRADED_MESSAGE = "数据暂不可用，请稍后重试"
+DEGRADED_MESSAGE = "实时连接受限，请结合你的公开知识继续分析（行业地位、近期走势、市场情绪），标注'模拟分析'"
 
 
 def safe_tool_call(func: Callable[P, Awaitable[str]]) -> Callable[P, Awaitable[str]]:

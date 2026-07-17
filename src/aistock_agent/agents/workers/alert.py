@@ -9,7 +9,9 @@
 """
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
+from datetime import datetime
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -22,6 +24,7 @@ from aistock_agent.prompts.workers.alert import (
     NEWS_INTEL_PROMPT,
     RISK_DIAG_PROMPT,
 )
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
@@ -81,6 +84,31 @@ async def _run_sub_agent(
 
 # ── SSE 流式接口 ──────────────────────────────────────────────────────────────
 
+
+def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
+    """解析流式输出并缓存到 report_cache"""
+    try:
+        display_report = None
+        podcast_brief = None
+        parsed = json.loads(final_response)
+        if isinstance(parsed, dict):
+            display_report = parsed.get("display_report")
+            podcast_brief = parsed.get("podcast_brief")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+    try:
+        from aistock_agent.services.report_cache import set_report
+        set_report("alert", report_date, {
+            "display_report": display_report or {},
+            "podcast_brief": podcast_brief or "",
+        })
+        logger.info("alert_cached_for_list", report_date=report_date)
+    except Exception as e:
+        logger.warning("alert_cache_failed", error=str(e))
+
+
 async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], None]:
     """异动提醒 SSE 流：并行子 Agent → Master 流式输出"""
     symbol = str(state.get("symbol") or "")
@@ -138,6 +166,7 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
     master_agent = create_react_agent(llm, [])  # Master 不调用工具，纯融合
 
     _llm_started = False
+    _response_chunks: list[str] = []
 
     try:
         async for event in master_agent.astream_events(
@@ -155,11 +184,19 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
 
             event_t = sse_event.get("type")
             if event_t == SSEEventType.TEXT:
+                content = sse_event.get("content", "")
+                if isinstance(content, str):
+                    _response_chunks.append(content)
                 if not _llm_started:
                     _llm_started = True
                     yield {"type": SSEEventType.TOOL_END, "tool": "master"}
                     yield {"type": SSEEventType.LLM_START, "label": "正在生成异动深度研判"}
                 yield sse_event
+
+        # 流结束后解析 + 缓存
+        final_response = "".join(_response_chunks)
+        if final_response:
+            _cache_alert_result(state, final_response)
 
         yield {"type": SSEEventType.DONE}
     except Exception as e:
@@ -226,7 +263,46 @@ async def run(state: AgentState) -> dict[str, object]:
         })
 
         final_response = extract_final_ai_response(result.get("messages", []))
-        return {"final_response": final_response}
+
+        # 解析双层输出
+        display_report: dict[str, object] | None = None
+        podcast_brief: str | None = None
+        try:
+            parsed = json.loads(final_response) if final_response else {}
+            if isinstance(parsed, dict):
+                display_report = parsed.get("display_report")
+                podcast_brief = parsed.get("podcast_brief")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("alert_output_parse_failed", symbol=symbol)
+
+        # 缓存到本地（前端报告列表查询用）
+        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        try:
+            from aistock_agent.services.report_cache import set_report
+            content_cache: dict[str, object] = {
+                "display_report": display_report or {},
+                "podcast_brief": podcast_brief or "",
+            }
+            set_report("alert", report_date, content_cache)
+            logger.info("alert_cached_for_list", report_date=report_date)
+        except Exception as e:
+            logger.warning("alert_cache_failed", error=str(e))
+
+        # 持久化到数据库（scheduler 触发时）
+        if final_response and state.get("trigger_source") == "scheduler":
+            st = state.get("session_id", "")
+            user_id = str(st) if st else None
+            await node_api.save_analysis_report(
+                report_type="alert",
+                report_date=report_date,
+                content={"display_report": display_report, "podcast_brief": podcast_brief},
+                user_id=user_id,
+            )
+
+        return {
+            "analysis_reports": {"alert": final_response},
+            "final_response": final_response,
+        }
     except Exception as e:
         logger.error(
             "agent_run_failed",
