@@ -16,8 +16,12 @@ env/
 .idea/
 *.swp
 
-# 环境变量
+# 环境变量（不提交，本地维护）
 .env
+.env.development
+.env.production
+# 仅提交模板
+!.env.example
 
 # 日志
 *.log

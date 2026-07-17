@@ -3,11 +3,11 @@
 所有数据通过 AgentState 流转，禁止节点间隐式传递。
 """
 
-from typing import Annotated
+from typing import Annotated, NotRequired
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 
 class AgentState(TypedDict):

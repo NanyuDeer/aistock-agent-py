@@ -12,7 +12,7 @@
 
 import hashlib
 import json
-from typing import cast
+from typing import Literal, cast, overload
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -41,14 +41,37 @@ _TOOL_GROUP = "event"
 # ── 内部辅助函数 ──
 
 
+@overload
 async def _call_llm_no_tools(
     system_prompt: str,
     user_msg: str,
     model: str = "flash",
-) -> dict[str, object] | None:
-    """调用 LLM（不带工具），返回解析后的 dict 或 None。
+    *,
+    raw_text: Literal[True],
+) -> str | None: ...
+
+
+@overload
+async def _call_llm_no_tools(
+    system_prompt: str,
+    user_msg: str,
+    model: str = "flash",
+    *,
+    raw_text: Literal[False] = False,
+) -> dict[str, object] | None: ...
+
+
+async def _call_llm_no_tools(
+    system_prompt: str,
+    user_msg: str,
+    model: str = "flash",
+    *,
+    raw_text: bool = False,
+) -> dict[str, object] | str | None:
+    """调用 LLM（不带工具），返回解析后的 dict、原始文本或 None。
 
     使用 flash 模型做快速理解/投资/播报；deep 模型仅在需要时使用。
+    raw_text=True 时跳过 JSON 解析，直接返回原始文本（供播报等非 JSON 场景）。
     """
     try:
         llm = get_deep_think() if model == "deep" else get_quick_think()
@@ -59,6 +82,8 @@ async def _call_llm_no_tools(
             ]
         )
         text = cast(str, result.content) if hasattr(result, "content") else str(result)
+        if raw_text:
+            return text
         parsed = _parse_json(text)
         if isinstance(parsed, dict):
             return parsed
@@ -173,19 +198,110 @@ async def _generate_podcast(
         .replace("{understanding_summary}", summary)
         .replace("{conclusion}", conclusion)
     )
-    try:
-        llm = get_quick_think()
-        result = await llm.ainvoke(
-            [
-                SystemMessage(content=prompt),
-                HumanMessage(content="生成播报摘要"),
-            ]
-        )
-        text = cast(str, result.content) if hasattr(result, "content") else str(result)
+    text = await _call_llm_no_tools(
+        prompt, "生成播报摘要", model="flash", raw_text=True
+    )
+    if isinstance(text, str) and text.strip():
         return text.strip()
-    except Exception:
-        logger.exception("podcast_generation_failed")
-        return "事件播报生成失败，请稍后重试"
+    logger.warning("podcast_generation_failed")
+    return ""
+
+
+# ── 播报摘要校验（总函数） ──
+
+
+def _truncate_at_sentence_boundary(text: str, max_len: int) -> str:
+    """在句子边界截断文本。
+
+    在 max_len 范围内查找最后一个句子结束符（。！？），
+    若找到则截断至该位置；否则原样返回（由调用方判断是否有效）。
+    """
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    for sep in ("。", "！", "？"):
+        idx = truncated.rfind(sep)
+        if idx > 0:
+            return truncated[: idx + 1]
+    return truncated
+
+
+def _validate_podcast_brief(
+    brief: str,
+    understanding: dict[str, object] | None,
+    conclusion: str,
+) -> tuple[str, bool]:
+    """总函数：确保 podcast_brief len() ∈ [150, 200]。
+
+    确定性策略（无 LLM 重试）：
+    - [150, 200] → (原样, True)
+    - > 200 → 句子边界截断；若截断后<150 → (截断, False)
+    - < 150 → 用 understanding.summary + conclusion 从事实扩充
+      - 扩充后在 [150, 200] → (扩充, True)
+      - 仍 < 150 → (扩充, False)，不持久化为 completed 演示记录
+      - 扩充后 > 200 → 句子边界截断后重新判断
+    - 无上下文可扩充 → (原文本, False)
+
+    Returns:
+        (validated_brief, can_persist):
+        can_persist=False 表示摘要无法确定性地满足 [150,200]，
+        不应作为合格 completed 演示数据持久化。
+    """
+    brief_len = len(brief)
+
+    if 150 <= brief_len <= 200:
+        return brief, True
+
+    if brief_len > 200:
+        truncated = _truncate_at_sentence_boundary(brief, 200)
+        if len(truncated) >= 150:
+            logger.warning(
+                "podcast_brief_truncated",
+                original_len=brief_len, final_len=len(truncated),
+            )
+            return truncated, True
+        logger.warning(
+            "podcast_brief_truncated_below_range",
+            original=brief_len, truncated=len(truncated),
+        )
+        return truncated, False
+
+    # brief_len < 150: 从已有事件事实扩充
+    summary = str(understanding.get("summary", "")) if understanding else ""
+    parts = [brief]
+    if summary:
+        parts.append(f"事件概要：{summary}")
+    if conclusion:
+        parts.append(f"投资判断：{conclusion}")
+
+    padded = "。".join(p for p in parts if p)
+    padded_len = len(padded)
+
+    if 150 <= padded_len <= 200:
+        logger.warning("podcast_brief_padded", original_len=brief_len, final_len=padded_len)
+        return padded, True
+
+    if padded_len > 200:
+        truncated = _truncate_at_sentence_boundary(padded, 200)
+        if len(truncated) >= 150:
+            logger.warning(
+                "podcast_brief_padded_truncated",
+                original_len=brief_len, final_len=len(truncated),
+            )
+            return truncated, True
+        logger.warning(
+            "podcast_brief_unfixable_truncated",
+            original=brief_len, truncated=len(truncated),
+        )
+        return truncated, False
+
+    # padded_len < 150: 无法用已有事实补足
+    logger.warning(
+        "podcast_brief_unfixable",
+        original_len=brief_len,
+        padded_len=padded_len,
+    )
+    return padded, False
 
 
 # ── 主入口 ──
@@ -214,8 +330,6 @@ async def run(state: AgentState) -> dict[str, object]:
         cached = await get_cached_event(user_msg)
         if cached:
             logger.info("event_cache_hit", event_preview=user_msg[:50])
-            # 缓存存储的是完整 analysis_reports dict（与 transform_to_frontend 输出一致），
-            # 直接返回，保证缓存命中/未命中时前端收到相同的数据结构。
             podcast_brief = str(cached.get("event_podcast_brief", ""))
             return {
                 "final_response": podcast_brief,
@@ -250,11 +364,21 @@ async def run(state: AgentState) -> dict[str, object]:
         if investment and isinstance(investment, dict):
             conclusion = str(investment.get("conclusion", ""))
         podcast_brief = await _generate_podcast(understanding, conclusion)
+        podcast_brief, can_persist = _validate_podcast_brief(
+            podcast_brief, understanding, conclusion
+        )
 
         # ── 构建前端对齐的 analysis_reports ──
+        # 标题严格来自 understanding.summary（纯业务标题），
+        # 缺失时显式降级为空字符串，绝不回退到 user_msg 或指令前缀。
+        title = (
+            str(understanding.get("summary", ""))
+            if understanding and isinstance(understanding, dict)
+            else ""
+        )
         event_meta: dict[str, object] = {
             "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
-            "title": user_msg[:50],
+            "title": title[:50] if title else "",
             "source": "",
         }
         analysis_reports = transform_to_frontend(
@@ -266,12 +390,28 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         analysis_reports["event_podcast_brief"] = podcast_brief
 
-        # 缓存 & 持久化
-        # 缓存存储完整 analysis_reports（含 event_understanding/transmission/history/
-        # investment/podcast_brief），保证缓存命中时前端数据结构与新鲜执行一致。
-        display_report: dict[str, object] = investment if investment else {}
-        await set_cached_event(user_msg, analysis_reports)
-        await persist_event_report(user_msg, display_report, podcast_brief)
+        # can_persist: brief ∈ [150,200] AND title 非空
+        # title 缺失时不得以 completed 状态持久化
+        if not title:
+            logger.warning(
+                "event_title_missing_cannot_persist",
+                event_id=event_meta.get("eventId", ""),
+            )
+            can_persist = False
+
+        # 缓存仅写入可持久化数据（不可持久化时允许同输入重新生成）
+        # 持久化仅当 can_persist=True
+        event_id = str(event_meta.get("eventId", ""))
+        if can_persist:
+            await set_cached_event(user_msg, analysis_reports)
+            await persist_event_report(event_id, event_meta, user_msg, analysis_reports)
+        else:
+            logger.warning(
+                "event_not_persisted",
+                event_id=event_id,
+                brief_len=len(podcast_brief),
+                title_empty=not title,
+            )
 
         return {
             "final_response": podcast_brief,

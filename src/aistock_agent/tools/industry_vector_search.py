@@ -3,8 +3,8 @@
 注册到 "event" 工具集，供 event_agent 在 Step 3（首层行业定位）使用。
 """
 
-from openai import OpenAI
 from langchain_core.tools import tool
+from openai import OpenAI
 
 from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api

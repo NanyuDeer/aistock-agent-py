@@ -10,13 +10,14 @@ from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.agents.general import node as general_agent
 from aistock_agent.agents.supervisor import node as supervisor
-from aistock_agent.agents.workers import alert as alert_agent
 from aistock_agent.agents.workers import ai_advisor as ai_advisor_agent
+from aistock_agent.agents.workers import alert as alert_agent
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import event as event_analyst
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.agents.workers import sector as sector_analyst
 from aistock_agent.agents.workers import stock as stock_analyst
+from aistock_agent.agents.workers import trend_score as trend_score_agent
 from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 from aistock_agent.agents.workers.hot_burst import run as hot_burst_agent_run
 from aistock_agent.graph.routers.intent_router import route_by_intent
@@ -56,6 +57,7 @@ def build_graph() -> StateGraph:
     graph.add_node("hot_burst_agent", hot_burst_agent_run)
     graph.add_node("alert_agent", alert_agent.run)
     graph.add_node("ai_advisor_agent", ai_advisor_agent.run)
+    graph.add_node("trend_score_agent", trend_score_agent.run)
 
     # 边：START → supervisor
     graph.add_edge(START, "supervisor")
@@ -68,6 +70,7 @@ def build_graph() -> StateGraph:
         "morning_agent", "stock_analyst", "sector_analyst",
         "event_analyst", "wind_leader_agent", "broadcast_agent", "general_agent",
         "hot_burst_agent", "alert_agent", "ai_advisor_agent",
+        "trend_score_agent",
     ]
     for node in agent_nodes:
         graph.add_edge(node, END)

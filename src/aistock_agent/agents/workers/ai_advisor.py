@@ -13,7 +13,7 @@ from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.ai_advisor import AI_ADVISOR_PROMPT
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.llm import get_deep_think
+from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
@@ -22,12 +22,13 @@ from aistock_agent.utils.report_parser import extract_display_report
 logger = structlog.get_logger()
 
 # intent → report_type 映射
+# sector（板块/龙头股）映射到 wind_leader（长线风口报告包含龙头股分析）
 INTENT_REPORT_MAP: dict[str, str] = {
     "morning": "morning",
     "wind_leader": "wind_leader",
     "hot_burst": "hot_burst",
     "stock": "stock",
-    "sector": "sector",
+    "sector": "wind_leader",
 }
 
 # 综合咨询时查询的公共报告类型
@@ -61,7 +62,11 @@ async def _fetch_relevant_reports(
     reports: dict[str, str] = {}
 
     if intent in INTENT_REPORT_MAP:
-        report_types_to_query = [INTENT_REPORT_MAP[intent]]
+        primary_type = INTENT_REPORT_MAP[intent]
+        report_types_to_query = [primary_type]
+        # stock 意图不需要通用报告 fallback
+        if intent != "stock":
+            report_types_to_query += _GENERAL_REPORT_TYPES
     else:
         report_types_to_query = _GENERAL_REPORT_TYPES
 
@@ -124,29 +129,13 @@ async def run(state: AgentState) -> dict[str, object]:
         prompt = AI_ADVISOR_PROMPT.replace("{{AVAILABLE_REPORTS}}", available_reports_text)
 
         if reports:
-            # 有报告：直接用 LLM 整理汇总（省 token，快速响应）
-            llm = get_deep_think()
-            response = await llm.ainvoke([
-                SystemMessage(content=prompt),
-                *state.get("messages", [])[-5:],
-            ])
-
-            final_response = response.content if isinstance(response.content, str) else str(response.content)
+            # 有报告：用 LLM 流式整理汇总（省 token，快速响应，支持逐 token 输出）
+            # 优先 deep_think，失败时降级 quick_think（deep_think 可能有 thinking mode 兼容问题）
+            final_response = await _stream_llm_with_fallback(prompt, state)
             logger.info("advisor_response_from_reports", has_report=True, intent=intent)
         else:
             # 无报告：用 ReAct Agent 调用工具获取数据
-            llm = get_deep_think()
-            tools = get_tools("advisor")
-            agent = create_react_agent(llm, tools)
-
-            result = await agent.ainvoke({
-                "messages": [
-                    SystemMessage(content=prompt),
-                    *state.get("messages", [])[-5:],
-                ]
-            })
-
-            final_response = extract_final_ai_response(result.get("messages", []))
+            final_response = await _react_agent_with_fallback(prompt, state)
             logger.info("advisor_response_from_tools", has_report=False, intent=intent)
 
         return {"final_response": final_response}
@@ -159,3 +148,46 @@ async def run(state: AgentState) -> dict[str, object]:
             exc_info=True,
         )
         return {"final_response": "智能投顾暂时不可用，请稍后重试"}
+
+
+async def _stream_llm_with_fallback(prompt: str, state: AgentState) -> str:
+    """流式 LLM 调用，deep_think 失败时降级 quick_think"""
+    messages = [
+        SystemMessage(content=prompt),
+        *state.get("messages", [])[-5:],
+    ]
+    for llm_factory, label in [(get_deep_think, "deep"), (get_quick_think, "quick")]:
+        try:
+            llm = llm_factory()
+            response_chunks: list[str] = []
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    response_chunks.append(
+                        chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    )
+            return "".join(response_chunks)
+        except Exception as e:
+            logger.warning("advisor_llm_failed", tier=label, error=str(e))
+            if label == "quick":
+                raise
+    return ""
+
+
+async def _react_agent_with_fallback(prompt: str, state: AgentState) -> str:
+    """ReAct Agent 调用，deep_think 失败时降级 quick_think"""
+    tools = get_tools("advisor")
+    messages = [
+        SystemMessage(content=prompt),
+        *state.get("messages", [])[-5:],
+    ]
+    for llm_factory, label in [(get_deep_think, "deep"), (get_quick_think, "quick")]:
+        try:
+            llm = llm_factory()
+            agent = create_react_agent(llm, tools)
+            result = await agent.ainvoke({"messages": messages})
+            return extract_final_ai_response(result.get("messages", []))
+        except Exception as e:
+            logger.warning("advisor_react_failed", tier=label, error=str(e))
+            if label == "quick":
+                raise
+    return ""

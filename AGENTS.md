@@ -20,14 +20,15 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 个股分析 | agents/workers/stock.py | deep_think | P0 |
 | 板块分析 | agents/workers/sector.py | deep_think | P0 |
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
-| 长线风口/风口龙头 | workers/wind_leader.py（Phase 5+） | deep_think | P0 |
-| 异动提醒/持仓监控 | **workers/alert.py（已实现）** | **deep_think** | **P1** |
-| 机构调研热门股 | workers/hot_burst.py（Phase 5+） | deep_think | P1 |
-| 十倍股/趋势股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
+| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
+| 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
+| 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
+| 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
+| 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
+| 交易复盘 | workers/review.py | deep_think | P2 |
+| 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
+| 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
-| 交易复盘 | workers/review.py（Phase 5+） | deep_think | P2 |
-| **播报生成** | **workers/broadcast.py（已实现）** | **deep_think** | **P0（核心特色）** |
-| **智能投顾** | **workers/ai_advisor.py（已实现）** | **deep_think** | **P0** |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
 
 ## 核心架构
@@ -35,25 +36,27 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 ### Graph 拓扑
 
 ```
-START → supervisor(quick_think)
-  ├── intent="morning"       → morning_agent（scheduler）/ ai_advisor_agent（user）
-  ├── intent="stock"         → stock_analyst（scheduler）/ ai_advisor_agent（user）
-  ├── intent="wind_leader"   → wind_leader_agent（scheduler）/ ai_advisor_agent（user）
-  ├── intent="event_chain"   → event_chain_agent（scheduler）/ ai_advisor_agent（user）
-  ├── intent="alert"         → alert_agent
-  ├── intent="hot_burst"     → hot_burst_agent（scheduler）/ ai_advisor_agent（user）
-  ├── intent="broadcast"     → broadcast_agent
-  ├── intent="ai_advisor"    → ai_advisor_agent
-  ├── intent="tenx"          → tenx_agent
-  ├── intent="forecast"      → forecast_agent
-  ├── intent="review"        → review_agent
-  └── intent="general"       → general_agent
-        │
-        ▼
-  broadcast_agent（播报生成）
+START → supervisor(quick_think, 意图路由)
+  ├── intent="morning"       → morning_agent（deep_think）
+  ├── intent="stock"         → stock_analyst（deep_think）
+  ├── intent="sector"        → sector_analyst（deep_think）
+  ├── intent="event"         → event_analyst（deep_think, v3模块化）
+  ├── intent="wind_leader"   → wind_leader_agent（deep_think）
+  ├── intent="hot_burst"     → hot_burst_agent（deep_think）
+  ├── intent="alert"         → alert_agent（deep_think）
+  ├── intent="broadcast"     → broadcast_agent（deep_think）
+  ├── intent="ai_advisor"    → ai_advisor_agent（deep_think）
+  ├── intent="trend_score"   → trend_score_agent（deep_think）
+  ├── intent="general"       → general_agent（quick_think）
+  └── [user触发, intent≠general/broadcast] → ai_advisor_agent（DB报告→整理回复）
         │
         ▼
        END
+
+定时链路（APScheduler, 非LangGraph图内边）：
+  08:50 morning_agent → 提取major_events → 并行event_analyst(fire-and-forget)
+  09:00 morning(缓存)→wind_leader→hot_burst→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
+  15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
 ```
 
 ### 多专家 Agent 协作体系（参考涨乐AI）
@@ -65,6 +68,7 @@ START → supervisor(quick_think)
    supervisor（意图理解与任务调度）
        │
        ├──→ morning_agent：宏观分析（避险需求、利率、政策等）
+       │      └──→ major_events → event_analyst（并行传导分析）
        │
        ├──→ wind_leader_agent：长线风口与龙头筛选
        │
@@ -72,16 +76,13 @@ START → supervisor(quick_think)
        │
        ├──→ hot_burst_agent：机构调研共振检测
        │
-       ├──→ event_chain_agent：事件传导链路分析
+       ├──→ event_analyst：事件传导链路分析（v3模块化+双层输出）
        │
-       ├──→ tenx_agent：十倍股评分与趋势判断
+       ├──→ stock_analyst：个股深度分析
        │
-       ├──→ forecast_agent：业绩预测与机构预期
+       ├──→ ai_advisor_agent：智能投顾（DB报告→整理回复）
        │
-       └──→ stock_analyst：个股深度分析
-              │
-              ▼
-       broadcast_agent（多 Agent 结果汇聚 → 播报生成）
+       └──→ broadcast_agent：播报生成
               │
               ├──→ 输出双人对话格式（AI分析师 + AI主持人）
               └──→ Node.js TTS 语音合成 + 前端播报播放
@@ -147,12 +148,13 @@ src/aistock_agent/
 │   ├── market_tools.py  # get_global_markets, tavily_finance_search
 │   ├── monitor_tools.py # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks（Phase 5）
+│   ├── trend_tools.py   # get_trend_score, get_trend_score_detail, get_trend_top_stocks
 │   ├── graph_tools.py   # get_concepts, get_graph_by_concept（Phase 5）
 │   └── hot_burst_tools.py # get_hot_burst, get_hot_burst_history（Phase 5）
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event}.py
+│   └── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -167,7 +169,7 @@ src/aistock_agent/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
-    └── ws.py            # WebSocket 流式接口
+    └── ws.py            # WebSocket 流式接口（astream_events v2，7 种事件类型 + 节点标签映射）
 ```
 
 ## 开发规范
@@ -221,6 +223,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/monitor/:symbol` | 异动引擎 | 个股异动数据 |
 | `GET /internal/tenx/score/:symbol` | 十倍股评分 | 评分详情 |
 | `GET /internal/tenx/top` | 十倍股评分 | 排行列表 |
+| `GET /internal/trend/score/:symbol` | 趋势股评分 | 评分详情（4维度） |
+| `GET /internal/trend/score/:symbol/detail` | 趋势股评分 | 评分展开详情（含K线、新闻等） |
+| `GET /internal/trend/top` | 趋势股评分 | 排行列表 |
 | `GET /internal/graph/concepts` | 知识图谱 | 产业链概念列表 |
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
@@ -282,6 +287,7 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 | alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
 | ai_advisor | `{"final_response": "智能投顾暂时不可用，请稍后重试"}` |
 | broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
+| trend_score | `{"final_response": "趋势股评分分析暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
 
 ### 不做异常分类 catch

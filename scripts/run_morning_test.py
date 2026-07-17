@@ -21,6 +21,10 @@ from datetime import datetime
 from pathlib import Path
 
 from aistock_agent.agents.workers import morning as morning_agent
+from aistock_agent.config import settings
+from aistock_agent.services.cache import get_cached_briefing
+from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.state.schema import AgentState
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "docs" / "agent-outputs" / "morning"
@@ -33,28 +37,35 @@ async def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 预先检查缓存命中情况，便于在元数据中记录
-    cached_before = await morning_agent._get_cached_briefing()
-    cache_hit = cached_before is not None
-
-    # 构造最小 AgentState 调用 run()
-    state: AgentState = {
-        "messages": [],
-        "session_id": f"morning_test_{start_at.strftime('%Y%m%d%H%M%S')}",
-        "user_id": None,
-        "favorites": [],
-        "intent": "morning",
-        "symbol": None,
-        "tag_code": None,
-        "analysis_reports": {},
-        "final_response": None,
-    }
+    # 初始化连接池（独立脚本需要手动 init）
+    await RedisPool.init(settings.redis_url, max_connections=settings.redis_max_connections)
+    await HttpClientPool.init(timeout=settings.http_timeout_seconds)
 
     try:
+        # 预先检查缓存命中情况，便于在元数据中记录
+        cached_before = await get_cached_briefing()
+        cache_hit = cached_before is not None
+
+        # 构造最小 AgentState 调用 run()
+        state: AgentState = {
+            "messages": [],
+            "session_id": f"morning_test_{start_at.strftime('%Y%m%d%H%M%S')}",
+            "user_id": None,
+            "favorites": [],
+            "intent": "morning",
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+        }
+
         result = await morning_agent.run(state)
     except Exception as exc:
         print(f"[morning-test] 生成失败: {exc}", file=sys.stderr)
         return 1
+    finally:
+        await HttpClientPool.close()
+        await RedisPool.close()
 
     end_at = datetime.now()
     duration = (end_at - start_at).total_seconds()

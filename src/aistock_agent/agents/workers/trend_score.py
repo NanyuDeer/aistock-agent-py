@@ -1,0 +1,80 @@
+"""趋势股评分 Agent — K线趋势分析 + 4维度评分解读
+
+工具集：get_trend_score, get_trend_score_detail, get_trend_top_stocks
+模型：deep_think（多维度趋势研判）
+归档：docs/agent-outputs/trend_score/YYYY-MM-DD-HHMM-analysis.md
+"""
+
+from datetime import datetime
+from pathlib import Path
+
+from langchain_core.messages import SystemMessage
+from langgraph.prebuilt import create_react_agent
+
+from aistock_agent.observability.logging import get_logger
+from aistock_agent.prompts.workers.trend_score import TREND_SCORE_ANALYST_PROMPT
+from aistock_agent.services.data_client import node_api
+from aistock_agent.services.llm import get_deep_think
+from aistock_agent.state.schema import AgentState
+from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.message import extract_final_ai_response
+from aistock_agent.utils.report_parser import parse_dual_layer_response
+
+logger = get_logger(__name__)
+
+# 趋势股分析归档目录
+TREND_SCORE_OUTPUT_DIR = Path("docs/agent-outputs/trend_score")
+
+
+async def run(state: AgentState) -> dict[str, object]:
+    """趋势股评分分析：4维度评分 + K线趋势解读"""
+    try:
+        llm = get_deep_think()
+        tools = get_tools("trend_score")
+        agent = create_react_agent(llm, tools)
+
+        result = await agent.ainvoke(
+            {
+                "messages": [
+                    SystemMessage(content=TREND_SCORE_ANALYST_PROMPT),
+                    *state.get("messages", [])[-5:],
+                ]
+            }
+        )
+
+        final_response = extract_final_ai_response(result.get("messages", []))
+
+        # 归档到文件（供后续复盘分析使用）
+        if final_response:
+            _archive_trend_score(final_response)
+            # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
+            if state.get("trigger_source") == "scheduler":
+                report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                dual_layer_content = parse_dual_layer_response(final_response)
+                await node_api.save_analysis_report(
+                    report_type="trend_score",
+                    report_date=report_date,
+                    content=dual_layer_content,
+                )
+
+        # 写入 analysis_reports 供 broadcast_agent 使用
+        return {
+            "final_response": final_response,
+            "analysis_reports": {**state.get("analysis_reports", {}), "trend_score": final_response},
+        }
+    except Exception as e:
+        logger.error("agent_run_failed", agent="trend_score", error=str(e), exc_info=True)
+        return {"final_response": "趋势股评分分析暂时不可用，请稍后重试"}
+
+
+def _archive_trend_score(content: str) -> None:
+    """将趋势股分析报告归档到文件（供后续复盘分析使用）"""
+    try:
+        TREND_SCORE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+        filepath = TREND_SCORE_OUTPUT_DIR / f"{timestamp}-analysis.md"
+        filepath.write_text(content, encoding="utf-8")
+        logger.info("trend_score_archived", path=str(filepath))
+    except Exception as e:
+        # 归档失败不阻塞主流程
+        logger.warning("trend_score_archive_failed", error=str(e))

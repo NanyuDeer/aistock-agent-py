@@ -493,9 +493,21 @@ register("review", get_sector_performance)   # review 专属
 | 维度三（归因一致性） | `attribution_match_rate < 0.3` | 当日 + MA5 |
 | 维度四（情绪基调） | MA20 `abs(sentiment_bias) > 0.15` | MA20 |
 
-阈值判断由代码完成（`check_thresholds` 返回触发的维度列表），仅当有维度触发时才调用 LLM 生成偏差分析报告。全部正常时返回 `{"status": "normal"}`，不消耗 LLM token。
+阈值判断由代码完成（`check_thresholds` 返回触发的维度列表），仅当有维度触发时才调用 LLM 生成偏差分析报告。全部正常时返回 `{"status": "normal"}`（仍包含四维评分卡），不消耗 LLM token。
 
-**JSON 输出**：迭代 agent 返回结构化 JSON（`status` / `triggered_dimensions` / `analysis` / `optimization_suggestions`），归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`。LLM 输出非 JSON 时包装为 `raw_text` 降级。
+**确定性评分卡**（`build_scorecard` 函数，LLM 不可改）：无论是否触发阈值，输出始终包含 `scorecard` 字段，覆盖全部四个维度，每个维度记录实际指标值（`metrics`）、阈值描述（`thresholds`）、是否触发（`triggered`）。
+
+**JSON 输出与输出清洗**：迭代 agent 返回结构化 JSON，归档到 `docs/agent-outputs/iterate/YYYY-MM-DD.json`。LLM 输出经 `_sanitize_llm_output` 清洗后归档，清洗规则：
+
+| 字段 | 来源 | 清洗规则 |
+|------|------|----------|
+| `triggered_dimensions` | `check_thresholds()` 确定性结果 | 始终覆盖 LLM 返回值，LLM 不可改 |
+| `scorecard` | `build_scorecard()` 确定性结果 | 始终由代码生成，LLM 不可改 |
+| `analysis` | LLM 生成 | 只保留已触发维度；未触发维度的分析降级到 `observations` |
+| `optimization_suggestions` | LLM 生成 | 每条需标注 `dimension` 字段；只保留基于已触发维度的建议，未触发的降级到 `observations` |
+| `observations` | 代码降级 | 低优先级区域，存放从 `analysis`/`suggestions` 降级的未触发维度内容，标注来源和降级原因 |
+
+LLM 输出非 JSON 时包装为 `raw_text` 降级。
 
 **只读约束**：prompt 明确约束"你只能读取数据和生成建议，不能修改任何文件"。优化建议产出后由人工审核，不自动回写 prompt / 代码 / 数据文件。
 

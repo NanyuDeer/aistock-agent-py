@@ -13,7 +13,7 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import extract_podcast_brief, extract_display_report
+from aistock_agent.utils.report_parser import extract_display_report, extract_podcast_brief
 
 logger = get_logger(__name__)
 
