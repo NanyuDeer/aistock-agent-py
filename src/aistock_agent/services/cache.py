@@ -41,12 +41,12 @@ async def get_cached_briefing() -> str | None:
     return None
 
 
-async def set_cached_briefing(content: str, ttl: int = 7200) -> None:
+async def set_cached_briefing(content: str, ttl: int = 86400) -> None:
     """缓存晨报到 Redis。
 
     Args:
         content: 晨报文本。
-        ttl: 缓存过期秒数，默认 7200（2 小时）。
+        ttl: 缓存过期秒数，默认 86400（每日更新语义）。
     """
     try:
         client = await RedisPool.get_client()
@@ -79,12 +79,12 @@ async def get_cached_review() -> str | None:
     return None
 
 
-async def set_cached_review(content: str, ttl: int = 7200) -> None:
+async def set_cached_review(content: str, ttl: int = 86400) -> None:
     """缓存复盘报告到 Redis。
 
     Args:
         content: 复盘文本。
-        ttl: 缓存过期秒数，默认 7200（2 小时）。
+        ttl: 缓存过期秒数，默认 86400（每日更新语义）。
     """
     try:
         client = await RedisPool.get_client()
@@ -186,7 +186,7 @@ async def set_cached_event(
     user_input: str,
     analysis_reports: dict[str, object],
     ttl: int = 1800,
-) -> None:
+) -> bool:
     """缓存事件分析结果到 Redis（完整 analysis_reports）。
 
     缓存存储的是完整的 ``analysis_reports`` dict（transform_to_frontend 的输出 +
@@ -196,11 +196,17 @@ async def set_cached_event(
         user_input: 用户输入的事件描述文本（用于生成 MD5 key）。
         analysis_reports: 完整的前端对齐 analysis_reports dict。
         ttl: 缓存过期秒数，默认 1800（30 分钟）。
+
+    Returns:
+        True 表示 Redis 实际写入成功；False 表示写入失败（保留降级日志）。
+        调用方据此设置 event_cached，避免缓存异常被吞掉却误报已缓存。
     """
     try:
         client = await RedisPool.get_client()
         key = _event_cache_key(user_input)
         value = json.dumps(analysis_reports, ensure_ascii=False)
         await client.setex(key, ttl, value)
+        return True
     except Exception:
         logger.debug("event_cache_set_failed", exc_info=True)
+        return False

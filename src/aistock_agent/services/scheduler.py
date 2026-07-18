@@ -3,7 +3,8 @@
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
   → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
-- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→broadcast（报告写DB+双人语音，9:10前端可见）
+- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→broadcast
+  （报告写DB+双人语音，9:10前端可见）
 - 15:30 复盘 review：review agent（5步归因框架，缓存+落盘）
 - 15:35 快照 snapshot：build_snapshot（代码层匹配 + LLM 4维评估 → 落盘 JSON）
 - 15:40 迭代分析 iterate：iterate agent（硬编码阈值 + LLM 偏差分析 → JSON 输出）
@@ -148,7 +149,10 @@ async def _run_morning_task() -> None:
 
         # 提取重大事件列表，并行触发事件传导分析（fire-and-forget）
         # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
-        major_events: list[dict[str, object]] = result.get("analysis_reports", {}).get("major_events", [])  # type: ignore[assignment]
+        analysis_reports = result.get("analysis_reports", {})
+        major_events: list[dict[str, object]] = analysis_reports.get(  # type: ignore[assignment]
+            "major_events", []
+        )
         if major_events:
             event_tasks = [
                 asyncio.create_task(_run_event_task(event))
@@ -174,15 +178,18 @@ async def _run_review_task() -> None:
     logger.info("scheduler_review_start")
     from aistock_agent.agents.workers import review as review_agent
 
+    today = date.today().isoformat()
     state: AgentState = {
         "messages": [],
         "session_id": f"scheduled_review_{date.today().isoformat()}",
         "user_id": None,
         "favorites": [],
-        "intent": None,
+        "intent": "review",
         "symbol": None,
         "tag_code": None,
         "analysis_reports": {},
+        "trigger_source": "scheduler",
+        "report_date": today,
         "final_response": None,
     }
 
@@ -336,50 +343,23 @@ async def _run_event_task(event: dict[str, object]) -> None:
     由 morning 任务完成后触发，每个 major_event 一个独立 task，
     所有事件并行执行（asyncio.create_task）。失败不影响其他事件。
 
+    委托给 services.event_conduction.run_single_event_conduction，
+    避免在 scheduler 中重复 state 构造逻辑。
+
     Args:
         event: major_event dict，含 title/summary/url/impact_score/direction/involved_keywords
     """
-    title = str(event.get("title", "未知事件"))
-    summary = str(event.get("summary", ""))
-    url = str(event.get("url", ""))
+    from aistock_agent.services.event_conduction import run_single_event_conduction
 
+    title = str(event.get("title", "未知事件"))
     logger.info("scheduler_event_start", title=title[:50])
 
-    # 构建事件分析的用户消息
-    user_message = f"请分析以下重大事件：{title}"
-    if summary:
-        user_message += f"\n\n事件概述：{summary}"
-    if url:
-        user_message += f"\n\n原文链接：{url}"
-
-    state: AgentState = {
-        "messages": [{"role": "user", "content": user_message}],
-        "session_id": f"scheduled_event_{date.today().isoformat()}_{title[:20]}",
-        "user_id": None,
-        "favorites": [],
-        "intent": "event",
-        "symbol": None,
-        "tag_code": None,
-        "analysis_reports": {},
-        "final_response": None,
-    }
-
-    try:
-        from aistock_agent.agents.workers import event as event_agent
-
-        result = await event_agent.run(state)
-        logger.info(
-            "scheduler_event_done",
-            title=title[:50],
-            has_response=bool(result.get("final_response")),
-            has_display_report=bool(
-                result.get("analysis_reports", {}).get("event_display_report")
-            ),
-        )
-    except Exception as e:
-        logger.error(
-            "scheduler_event_failed",
-            title=title[:50],
-            error=str(e),
-            exc_info=True,
-        )
+    result = await run_single_event_conduction(event)
+    logger.info(
+        "scheduler_event_done",
+        title=title[:50],
+        success=result.success,
+        event_generated=result.event_generated,
+        persisted=result.persisted,
+        error=result.error,
+    )

@@ -81,7 +81,7 @@ async def test_get_cached_briefing_error_returns_none():
 
 @pytest.mark.asyncio
 async def test_set_cached_briefing_writes():
-    """缓存写入：调用 setex with correct key and TTL"""
+    """缓存写入：调用 setex with correct key and TTL=86400（每日更新语义）"""
     mock_client = AsyncMock()
     mock_client.setex = AsyncMock()
 
@@ -91,7 +91,23 @@ async def test_set_cached_briefing_writes():
 
     today = datetime.now().strftime("%Y-%m-%d")
     mock_client.setex.assert_awaited_once_with(
-        f"briefing:morning:{today}", 7200, "briefing content",
+        f"briefing:morning:{today}", 86400, "briefing content",
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_cached_review_writes():
+    """复盘缓存写入：key=briefing:review:{date}，TTL=86400（每日更新语义）"""
+    mock_client = AsyncMock()
+    mock_client.setex = AsyncMock()
+
+    with patch("aistock_agent.services.cache.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(return_value=mock_client)
+        await cache.set_cached_review("review content")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    mock_client.setex.assert_awaited_once_with(
+        f"briefing:review:{today}", 86400, "review content",
     )
 
 

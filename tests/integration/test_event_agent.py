@@ -147,7 +147,7 @@ def _mock_run(
         new_callable=AsyncMock, return_value=podcast_text,
     ))
     mock_set_cache = stack.enter_context(
-        patch(_SET_CACHED_EVENT, new_callable=AsyncMock),
+        patch(_SET_CACHED_EVENT, new_callable=AsyncMock, return_value=True),
     )
     mock_persist = stack.enter_context(
         patch(_PERSIST_EVENT_REPORT, new_callable=AsyncMock),
@@ -161,7 +161,10 @@ def _mock_run(
 @pytest.mark.asyncio
 async def test_run_no_user_message() -> None:
     result = await run({"messages": []})  # type: ignore[arg-type]
-    assert result == {"final_response": "请提供需要分析的事件描述。", "analysis_reports": {}}
+    assert result["final_response"] == "请提供需要分析的事件描述。"
+    assert result["analysis_reports"]["event_generated"] is False
+    assert result["analysis_reports"]["event_persisted"] is False
+    assert result["analysis_reports"]["event_cached"] is False
 
 
 @pytest.mark.asyncio
@@ -178,6 +181,9 @@ async def test_run_cache_hit() -> None:
         "event_history": [],
         "event_investment": {"conclusion": "缓存结论"},
         "event_podcast_brief": "缓存播报文本",
+        "event_generated": True,
+        "event_persisted": True,
+        "event_id": "evt_cached1",
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
@@ -186,6 +192,8 @@ async def test_run_cache_hit() -> None:
     mock_u.assert_not_called()
     assert result["final_response"] == "缓存播报文本"
     assert result["analysis_reports"]["event_podcast_brief"] == "缓存播报文本"
+    assert result["analysis_reports"]["event_cached"] is True
+    assert result["analysis_reports"]["event_generated"] is True
 
 
 @pytest.mark.asyncio
@@ -193,7 +201,10 @@ async def test_run_understanding_failure() -> None:
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=None):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock, return_value=None):
             result = await run({"messages": [HumanMessage(content="测试事件")]})  # type: ignore[arg-type]
-    assert result == {"final_response": "事件分析暂时不可用，请稍后重试", "analysis_reports": {}}
+    assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
+    assert result["analysis_reports"]["event_generated"] is False
+    assert result["analysis_reports"]["event_persisted"] is False
+    assert result["analysis_reports"]["event_cached"] is False
 
 
 @pytest.mark.asyncio
@@ -224,7 +235,10 @@ async def test_run_full_success() -> None:
 async def test_run_exception_fallback() -> None:
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, side_effect=RuntimeError("Redis 不可用")):
         result = await run({"messages": [HumanMessage(content="测试事件")]})  # type: ignore[arg-type]
-    assert result == {"final_response": "事件分析暂时不可用，请稍后重试", "analysis_reports": {}}
+    assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
+    assert result["analysis_reports"]["event_generated"] is False
+    assert result["analysis_reports"]["event_persisted"] is False
+    assert result["analysis_reports"]["event_cached"] is False
 
 
 @pytest.mark.asyncio
@@ -513,6 +527,59 @@ async def test_run_title_no_summary_degrades_to_empty() -> None:
     mock_set_cache.assert_not_called(), "空 title 不应缓存"
 
 
+# ── dict message 契约测试（scheduler / 手动入口传 dict，非 HumanMessage）──
+
+
+@pytest.mark.asyncio
+async def test_run_dict_message_cache_hit() -> None:
+    """dict message（{"role":"user","content":"..."}）也应命中缓存。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "缓存事件"},
+        "event_generated": True,
+        "event_persisted": True,
+        "event_id": "evt_dict_cache",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            result = await run(
+                {"messages": [{"role": "user", "content": "美联储加息"}]}  # type: ignore[arg-type]
+            )
+
+    mock_u.assert_not_called()
+    assert result["final_response"] == "缓存播报文本"
+    assert result["analysis_reports"]["event_cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_dict_message_full_success() -> None:
+    """dict message 也应走完整 5 步 LLM 流程并持久化。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding(),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    with s:
+        result = await run(
+            {"messages": [{"role": "user", "content": "美联储加息影响"}]}  # type: ignore[arg-type]
+        )
+
+    assert result["final_response"] == brief_ok
+    mock_persist.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_dict_message_wrong_role_returns_empty() -> None:
+    """dict message role != 'user' → 空消息降级。"""
+    result = await run(
+        {"messages": [{"role": "assistant", "content": "AI 回复"}]}  # type: ignore[arg-type]
+    )
+    assert result["final_response"] == "请提供需要分析的事件描述。"
+
+
 @pytest.mark.asyncio
 async def test_run_unpersistable_not_cached() -> None:
     """P1: can_persist=False → 既不持久化也不写 Redis 缓存。"""
@@ -549,6 +616,380 @@ async def test_run_title_no_event_prefix() -> None:
     title = str(mock_persist.call_args.args[1].get("title", ""))
     assert not title.startswith("事件："), f"title 不应以 '事件：' 开头: '{title}'"
     assert "天际股份" in title
+
+
+# ── 显式状态契约测试（event_generated/event_persisted/event_cached/event_id）──
+
+
+@pytest.mark.asyncio
+async def test_run_full_success_has_explicit_status() -> None:
+    """成功路径必须提供显式状态：event_generated=True, event_persisted, event_cached, event_id。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding("美联储加息"),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    mock_persist.return_value = True
+    with s:
+        result = await run({"messages": [HumanMessage(content="美联储加息影响")]})
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_generated"] is True, "成功路径 event_generated 必须为 True"
+    assert analysis_reports["event_persisted"] is True
+    assert analysis_reports["event_cached"] is True
+    assert isinstance(analysis_reports.get("event_id"), str)
+    assert analysis_reports["event_id"].startswith("evt_")
+    # 禁止存在 event_display_report 虚构字段
+    assert "event_display_report" not in analysis_reports
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_has_explicit_status() -> None:
+    """缓存命中路径必须提供显式状态：event_cached=True, event_id。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "缓存事件"},
+        "event_id": "evt_cached123",
+        "event_persisted": True,
+        "event_generated": True,
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            result = await run(
+                {"messages": [{"role": "user", "content": "美联储加息"}]}  # type: ignore[arg-type]
+            )
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_cached"] is True
+    assert analysis_reports["event_generated"] is True
+    assert analysis_reports["event_id"] == "evt_cached123"
+    mock_u.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_degraded_understanding_failure_has_explicit_status() -> None:
+    """understanding 失败降级路径必须提供显式状态：event_generated=False。"""
+    s, _, _ = _mock_run(
+        understanding=None,
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text="A" * 150,
+    )
+    with s:
+        result = await run({"messages": [HumanMessage(content="测试事件")]})
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_generated"] is False
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is False
+    assert "event_id" in analysis_reports
+
+
+@pytest.mark.asyncio
+async def test_run_exception_has_explicit_status() -> None:
+    """异常路径必须提供显式状态：event_generated=False。"""
+    with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock, side_effect=RuntimeError("LLM 不可用")):
+        result = await run({"messages": [HumanMessage(content="测试事件")]})
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_generated"] is False
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_empty_message_has_explicit_status() -> None:
+    """空消息降级路径必须提供显式状态：event_generated=False。"""
+    result = await run({"messages": []})
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_generated"] is False
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_persist_failure_reports_not_persisted() -> None:
+    """持久化失败时 event_persisted=False，但 event_generated=True。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding("美联储加息"),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    mock_persist.return_value = False
+    with s:
+        result = await run({"messages": [HumanMessage(content="美联储加息影响")]})
+
+    analysis_reports = result["analysis_reports"]
+    assert analysis_reports["event_generated"] is True
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is True  # 缓存仍写入
+
+
+@pytest.mark.asyncio
+async def test_run_analysis_reports_has_real_production_structure() -> None:
+    """成功路径 analysis_reports 必须包含真实生产结构字段，禁止依赖 event_display_report。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding(),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    mock_persist.return_value = True
+    with s:
+        result = await run({"messages": [HumanMessage(content="美联储加息")]})
+
+    analysis_reports = result["analysis_reports"]
+    # 真实生产结构字段
+    assert "event_understanding" in analysis_reports
+    assert "event_transmission" in analysis_reports
+    assert "event_history" in analysis_reports
+    assert "event_investment" in analysis_reports
+    assert "event_podcast_brief" in analysis_reports
+    # 禁止虚构字段
+    assert "event_display_report" not in analysis_reports
+
+
+# ── 缓存补偿测试：首次落库失败后缓存命中补写成功 ──
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_idempotent_repersist_after_failure() -> None:
+    """首次落库失败 → 缓存命中时执行幂等补写，成功后 event_persisted=True。"""
+    # 缓存中保存了首次生成结果但 event_persisted=False
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "测试事件"},
+        "event_generated": True,
+        "event_persisted": False,  # 首次落库失败
+        "event_id": "evt_retry1",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+                with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock) as mock_set_cache:
+                    result = await run(
+                        {"messages": [HumanMessage(content="测试事件")]}
+                    )
+
+    mock_u.assert_not_called()  # 缓存命中，不调 LLM
+    mock_persist.assert_called_once()  # 幂等补写被触发
+    assert result["analysis_reports"]["event_persisted"] is True
+    assert result["analysis_reports"]["event_cached"] is True
+    assert result["analysis_reports"]["event_generated"] is True
+    # 缓存被更新为 persisted=True
+    mock_set_cache.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_repersist_still_fails() -> None:
+    """幂等补写仍失败 → event_persisted=False，但不影响 event_generated=True。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "测试事件"},
+        "event_generated": True,
+        "event_persisted": False,
+        "event_id": "evt_retry2",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=False):
+                result = await run(
+                    {"messages": [HumanMessage(content="测试事件")]}
+                )
+
+    mock_u.assert_not_called()
+    assert result["analysis_reports"]["event_persisted"] is False
+    assert result["analysis_reports"]["event_generated"] is True
+    assert result["analysis_reports"]["event_cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_old_cache_without_persisted_field() -> None:
+    """旧缓存无 event_persisted 字段 → 视为 False，触发幂等补写。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "旧缓存播报文本",
+        "event_understanding": {"summary": "旧事件"},
+        "event_generated": True,
+        # 注意：没有 event_persisted 字段
+        "event_id": "evt_old1",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+                result = await run(
+                    {"messages": [HumanMessage(content="旧事件")]}
+                )
+
+    mock_u.assert_not_called()
+    mock_persist.assert_called_once()  # 旧缓存无 persisted → 补写
+    assert result["analysis_reports"]["event_persisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_already_persisted_no_repersist() -> None:
+    """缓存中 event_persisted=True → 不触发幂等补写。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "已持久化缓存",
+        "event_understanding": {"summary": "已持久化事件"},
+        "event_generated": True,
+        "event_persisted": True,  # 已持久化
+        "event_id": "evt_done1",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock) as mock_persist:
+                result = await run(
+                    {"messages": [HumanMessage(content="已持久化事件")]}
+                )
+
+    mock_u.assert_not_called()
+    mock_persist.assert_not_called()  # 已持久化，不补写
+    assert result["analysis_reports"]["event_persisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_degraded_cache_not_repersisted() -> None:
+    """缓存中 event_generated=False（降级缓存）→ 不触发幂等补写。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "降级缓存",
+        "event_generated": False,  # 降级
+        "event_persisted": False,
+        "event_id": "evt_deg1",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock) as mock_persist:
+                result = await run(
+                    {"messages": [HumanMessage(content="降级事件")]}
+                )
+
+    mock_u.assert_not_called()
+    mock_persist.assert_not_called()  # 降级缓存不补写
+    assert result["analysis_reports"]["event_persisted"] is False
+    assert result["analysis_reports"]["event_generated"] is False
+
+
+# ── 旧缓存兼容（无运行时状态字段）+ event_generated/event_cached 状态准确性 ──
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_legacy_cache_without_any_status_fields() -> None:
+    """真实旧缓存完全不包含 event_generated/event_persisted/event_cached/event_id
+    任何运行时状态字段，仅含业务结构（event_understanding/event_podcast_brief 等）。
+
+    不得因为缺 event_generated 就判为生成失败：按真实业务结构校验为有效旧缓存，
+    event_generated 视为 True，event_persisted 缺失视为 False → 触发幂等补写。
+    （禁止在本测试中预置 event_generated=True。）
+    """
+    # 真实旧缓存结构：只有业务字段，没有任何 event_* 运行时状态
+    legacy_cache: dict[str, object] = {
+        "event_understanding": {"summary": "美联储紧急降息50基点"},
+        "event_transmission": {"mechanism": "流动性宽松"},
+        "event_history": [],
+        "event_investment": {"conclusion": "风险资产受益"},
+        "event_podcast_brief": "美联储紧急降息50基点，市场流动性大幅宽松，风险资产短期受益。",
+        # 注意：以下字段一律不预置 —— event_generated/event_persisted/event_cached/event_id
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=legacy_cache):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+                with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock, return_value=True):
+                    result = await run(
+                        {"messages": [HumanMessage(content="美联储紧急降息50基点")]}
+                    )
+
+    # 旧缓存命中，不调 LLM
+    mock_u.assert_not_called()
+    # event_persisted 缺失 → 视为 False → 触发幂等补写
+    mock_persist.assert_called_once()
+    # 按业务结构校验为有效 → event_generated=True
+    assert result["analysis_reports"]["event_generated"] is True
+    assert result["analysis_reports"]["event_persisted"] is True
+    assert result["analysis_reports"]["event_cached"] is True
+    # event_id 缺失 → 从 user_msg 重新计算
+    assert isinstance(result["analysis_reports"].get("event_id"), str)
+    assert result["analysis_reports"]["event_id"].startswith("evt_")
+
+
+@pytest.mark.asyncio
+async def test_run_empty_title_event_generated_false() -> None:
+    """标题为空（understanding 无 summary）时 event_generated 必须为 False，
+    不得计入生成成功（即使 brief 合规）。"""
+    understanding_no_summary: dict[str, object] = {"coreChanges": []}
+    s, mock_persist, _ = _mock_run(
+        understanding=understanding_no_summary,
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text="B" * 150,  # brief 合规，但 title 为空
+    )
+    with s:
+        result = await run({"messages": [HumanMessage(content="某重大事件")]})
+
+    analysis_reports = result["analysis_reports"]
+    # 标题为空 → event_generated=False（即使 brief 合规）
+    assert analysis_reports["event_generated"] is False
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is False
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_invalid_podcast_event_generated_false() -> None:
+    """播报校验失败（brief 过短且无可扩充事实）→ event_generated 必须为 False，
+    不得计入生成成功。"""
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding("某事件"),  # title 非空
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(""),
+        podcast_text="A" * 10,  # 远低于 150，且 conclusion 为空难以扩充
+    )
+    with s:
+        result = await run({"messages": [HumanMessage(content="某重大事件")]})
+
+    analysis_reports = result["analysis_reports"]
+    # 播报校验失败 → event_generated=False
+    assert analysis_reports["event_generated"] is False
+    assert analysis_reports["event_persisted"] is False
+    assert analysis_reports["event_cached"] is False
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_cache_write_failure_event_cached_false() -> None:
+    """set_cached_event 返回 False（Redis 写入失败）→ event_cached=False，
+    即使后续持久化成功。覆盖 event_cached 写入失败场景。"""
+    brief_ok = "B" * 150
+    s, mock_persist, mock_set_cache = _mock_run(
+        understanding=_mock_understanding("美联储加息"),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    mock_set_cache.return_value = False  # Redis 写入失败
+    mock_persist.return_value = True
+    with s:
+        result = await run({"messages": [HumanMessage(content="美联储加息影响")]})
+
+    analysis_reports = result["analysis_reports"]
+    # 报告结构有效、brief 合规、title 非空 → event_generated=True
+    assert analysis_reports["event_generated"] is True
+    # 持久化成功
+    assert analysis_reports["event_persisted"] is True
+    # 但缓存写入失败 → event_cached=False
+    assert analysis_reports["event_cached"] is False
 
 
 # ── P1: podcast_brief 总函数 + 不可持久化 集成测试 ──
@@ -649,3 +1090,77 @@ async def test_run_brief_padded_from_understanding_facts() -> None:
     mock_persist.assert_called_once()
     brief = str(result["analysis_reports"].get("event_podcast_brief", ""))
     assert 150 <= len(brief) <= 200, f"实际: {len(brief)}"
+
+
+# ── 来源元数据传导：event_source → event_meta.source ──
+
+
+@pytest.mark.asyncio
+async def test_run_event_source_from_state_in_event_meta() -> None:
+    """event_source 从初始 state.analysis_reports 传入 event_meta.source，
+    持久化时携带真实来源 URL（而非硬编码空字符串）。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding(),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    source_url = "https://news.example.com/fed-rate-hike"
+    with s:
+        await run({
+            "messages": [HumanMessage(content="美联储加息影响")],
+            "analysis_reports": {"event_source": source_url},
+        })  # type: ignore[arg-type]
+
+    mock_persist.assert_called_once()
+    event_meta = mock_persist.call_args.args[1]
+    assert event_meta.get("source") == source_url
+
+
+@pytest.mark.asyncio
+async def test_run_no_event_source_defaults_empty() -> None:
+    """初始 state 无 event_source → event_meta.source 为空字符串（兼容旧调用方）。"""
+    brief_ok = "B" * 150
+    s, mock_persist, _ = _mock_run(
+        understanding=_mock_understanding(),
+        transmission=_mock_transmission(),
+        history=_mock_history(),
+        investment=_mock_investment(),
+        podcast_text=brief_ok,
+    )
+    with s:
+        await run({
+            "messages": [HumanMessage(content="美联储加息影响")],
+        })  # type: ignore[arg-type]
+
+    mock_persist.assert_called_once()
+    event_meta = mock_persist.call_args.args[1]
+    assert event_meta.get("source") == ""
+
+
+@pytest.mark.asyncio
+async def test_run_cache_hit_repersist_uses_event_source() -> None:
+    """缓存命中幂等补写时，cached_meta.source 也从初始 state 读取真实来源。"""
+    cached_data: dict[str, object] = {
+        "event_podcast_brief": "缓存播报文本",
+        "event_understanding": {"summary": "测试事件"},
+        "event_generated": True,
+        "event_persisted": False,
+        "event_id": "evt_retry_source",
+    }
+    source_url = "https://news.example.com/event-source"
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
+            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+                with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock):
+                    await run({
+                        "messages": [HumanMessage(content="测试事件")],
+                        "analysis_reports": {"event_source": source_url},
+                    })  # type: ignore[arg-type]
+
+    mock_u.assert_not_called()
+    mock_persist.assert_called_once()
+    event_meta = mock_persist.call_args.args[1]
+    assert event_meta.get("source") == source_url

@@ -127,3 +127,137 @@ async def test_scheduler_iterate_task_calls_iterate_agent(mock_trading):
         mock_run.return_value = {"final_response": '{"status": "normal"}'}
         await _run_iterate_task()
     mock_run.assert_called_once()
+
+
+# ── 事件传导：major_events → event agent ──
+
+
+@pytest.mark.asyncio
+async def test_morning_task_triggers_event_conduction_for_major_events():
+    """scheduler morning → major_events → event agent 传导"""
+    import asyncio
+
+    from aistock_agent.services.event_conduction import EventConductionResult
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    major_events = [
+        {"title": "美联储加息", "summary": "加息25bp"},
+        {"title": "通胀数据公布", "summary": "CPI 3.2%"},
+    ]
+    morning_result = {
+        "final_response": '{"display_report": {}}',
+        "analysis_reports": {"major_events": major_events},
+    }
+
+    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+        with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+            mock_agent.run = AsyncMock(return_value=morning_result)
+            with patch(
+                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                new_callable=AsyncMock,
+            ) as mock_event:
+                mock_event.return_value = EventConductionResult(
+                    success=True,
+                    event_id="evt_test",
+                    title="test",
+                    event_generated=True,
+                    persisted=True,
+                )
+                await _run_morning_task()
+                # fire-and-forget tasks 需要等事件循环处理
+                await asyncio.sleep(0.1)
+
+    # 验证每个 major_event 都触发了事件传导
+    assert mock_event.call_count == 2
+    called_events = [call.args[0] for call in mock_event.call_args_list]
+    called_titles = [e["title"] for e in called_events]
+    assert "美联储加息" in called_titles
+    assert "通胀数据公布" in called_titles
+
+
+@pytest.mark.asyncio
+async def test_morning_task_no_major_events_no_conduction():
+    """无 major_events 时不触发事件传导"""
+    import asyncio
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    morning_result = {
+        "final_response": '{"display_report": {}}',
+        "analysis_reports": {"major_events": []},
+    }
+
+    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+        with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+            mock_agent.run = AsyncMock(return_value=morning_result)
+            with patch(
+                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                new_callable=AsyncMock,
+            ) as mock_event:
+                await _run_morning_task()
+                await asyncio.sleep(0.1)
+
+    mock_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_morning_task_single_event_failure_does_not_block():
+    """单个事件失败不阻断其他事件"""
+    import asyncio
+
+    from aistock_agent.services.event_conduction import EventConductionResult
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    major_events = [
+        {"title": "正常事件"},
+        {"title": "崩溃事件"},
+        {"title": "另一个正常事件"},
+    ]
+    morning_result = {
+        "final_response": '{"display_report": {}}',
+        "analysis_reports": {"major_events": major_events},
+    }
+
+    call_count = [0]
+
+    async def mock_conduction(event):
+        call_count[0] += 1
+        if event["title"] == "崩溃事件":
+            raise RuntimeError("模拟崩溃")
+        return EventConductionResult(
+            success=True,
+            event_id=f"evt_{call_count[0]}",
+            title=event["title"],
+            event_generated=True,
+            persisted=True,
+        )
+
+    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+        with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+            mock_agent.run = AsyncMock(return_value=morning_result)
+            with patch(
+                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                side_effect=mock_conduction,
+            ):
+                await _run_morning_task()
+                await asyncio.sleep(0.2)
+
+    # 3 个事件都被调用了（崩溃的不影响其他）
+    assert call_count[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_scheduler_review_task_passes_persistence_context():
+    from datetime import date
+
+    from aistock_agent.agents.workers import review as review_module
+    from aistock_agent.services.scheduler import _run_review_task
+
+    with patch.object(review_module, "run", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = {"final_response": "复盘报告"}
+        with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+            await _run_review_task()
+
+    state = mock_run.await_args.args[0]
+    assert state["trigger_source"] == "scheduler"
+    assert state["report_date"] == date.today().isoformat()

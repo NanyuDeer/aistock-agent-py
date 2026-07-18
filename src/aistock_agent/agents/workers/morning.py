@@ -484,11 +484,17 @@ async def run(state: AgentState) -> dict[str, object]:
             # 缓存命中时也解析市场事件推送（补发未成功事件）
             await _safe_process_market_push(details)
 
+            # 幂等补写：缓存命中不假设已持久化，执行真实落库并用结果返回状态
+            morning_persisted = await persist_morning_report(report, report_date)
+
             return {
                 "final_response": json.dumps(report, ensure_ascii=False),
                 "analysis_reports": {
                     **state.get("analysis_reports", {}),
                     "major_events": major_events,
+                    "cached": True,
+                    "morning_generated": True,
+                    "morning_persisted": morning_persisted,
                 },
             }
 
@@ -532,7 +538,7 @@ async def run(state: AgentState) -> dict[str, object]:
         archive_morning(details)
 
         # 持久化到 Node.js /internal/analysis-reports（公共报告，user_id=null）
-        await persist_morning_report(report, report_date)
+        morning_persisted = await persist_morning_report(report, report_date)
 
         # 市场事件推送（不阻塞主链路，超时/失败均不抛异常）
         await _safe_process_market_push(details)
@@ -542,6 +548,9 @@ async def run(state: AgentState) -> dict[str, object]:
             "analysis_reports": {
                 **state.get("analysis_reports", {}),
                 "major_events": major_events,
+                "cached": False,
+                "morning_generated": True,
+                "morning_persisted": morning_persisted,
             },
         }
     except Exception as e:
@@ -552,4 +561,11 @@ async def run(state: AgentState) -> dict[str, object]:
             error=str(e),
             exc_info=True,
         )
-        return {"final_response": "晨报生成暂时不可用，请稍后重试"}
+        return {
+            "final_response": "晨报生成暂时不可用，请稍后重试",
+            "analysis_reports": {
+                "morning_generated": False,
+                "cached": False,
+                "morning_persisted": False,
+            },
+        }

@@ -2,6 +2,41 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-18 — 修复 Morning→Event 传导链路：鉴权绕过、假成功与持久化问题
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/agents/workers/event.py`：新增 `_is_valid_cached_event_report`（旧缓存按业务结构校验）；`event_generated=can_persist`；`event_cached` 取 `set_cached_event` 返回值；缓存命中执行幂等补写；用 `extract_last_human_message()` 替换手动消息遍历，支持 dict message
+- `src/aistock_agent/services/cache.py`：`set_cached_event` 返回 bool，仅 Redis 写入成功返回 True
+- `src/aistock_agent/services/event_conduction.py`（新增）：可复用事件执行函数 `run_single_event_conduction` + `run_event_conduction_batch`；`EventConductionResult` 增加 `cached` 字段
+- `src/aistock_agent/services/event_persister.py`：检查 `node_api.post()` 返回值，None 时返回 False；deepcopy 后剥离 `event_generated/event_persisted/event_cached` 临时状态再落库
+- `src/aistock_agent/services/morning_persister.py`：检查 `node_api.post()` 返回值，None 时返回 False；返回类型 None→bool
+- `src/aistock_agent/agents/workers/morning.py`：缓存命中执行幂等补写而非硬编码 True；返回显式状态字段（cached/morning_generated/morning_persisted）
+- `src/aistock_agent/agents/workers/review.py`：适配显式状态字段
+- `src/aistock_agent/api/routes.py`：trigger 路由补 auth（`Depends(verify_internal_token)`）；空 body 构造非空默认标题实际调用 conduction；`event_cached` 读 `result.cached`；morning trigger 增加 `event_persisted_count`/`event_persist_failed_count`
+- `src/aistock_agent/services/scheduler.py`：`_run_event_task` 改用共享函数；适配 `EventConductionResult` 新字段；修复 E501
+- `src/aistock_agent/data/sector_aliases.json`：石油石化板块新增煤炭/油气映射；新增 AI手机/消费电子板块
+
+### 跨仓库
+- `aistock-app-api/src/modules/agent/agent.proxy.ts`：循环 `decodeURIComponent`+规范化后用正则 `^/briefing/[^/]+/trigger(/.*)?$` 阻断；解码失败 fail closed（详见 api 仓库本日 CHANGELOG）
+
+### 测试
+- `tests/integration/test_event_agent.py`：显式状态测试 + 缓存补偿测试（幂等补写/旧缓存/降级缓存）+ dict message 测试
+- `tests/integration/test_morning_agent.py`：缓存命中改幂等补写断言
+- `tests/integration/test_review_agent.py`：适配显式状态字段
+- `tests/test_routes_briefing.py`：event trigger 复用测试 + persist 统计测试 + 空 body 测试重写
+- `tests/unit/test_cache.py`：适配 set_cached_event 返回 bool
+- `tests/unit/test_scheduler.py`：适配新字段 + 事件传导触发测试
+- `tests/unit/test_event_conduction_service.py`（新增）：移除 `has_display_report`，改用 `event_generated`；cached 传播断言
+- `tests/unit/test_persister_post_check.py`（新增）：post=None/异常/成功测试 + 落库内容剥离断言
+- `tests/unit/test_review_report.py`（新增）
+
+### 其他
+- `.gitignore`：新增 `data/audio/` 忽略音频产物
+- `scripts/manual_event_conduction.py`（新增）：手动调试事件传导脚本
+
+---
+
 ## [changer] 2026-07-16 — 板块别名扩展
 **开发者**: 37588
 
