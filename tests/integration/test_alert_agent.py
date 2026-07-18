@@ -102,7 +102,8 @@ async def test_master_synthesizes_sub_agent_results():
 
     # 3 个子 Agent 各被调用一次
     assert mock_sub.call_count == 3
-    assert result == {"final_response": "Master 合成报告"}
+    assert result["final_response"] == "Master 合成报告"
+    assert "analysis_reports" in result
 
 
 @pytest.mark.asyncio

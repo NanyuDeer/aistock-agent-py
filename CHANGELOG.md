@@ -37,6 +37,14 @@
 
 ---
 
+## [main] 2026-07-17 — 修复 CHANGELOG.md 残留 git 冲突标记
+**开发者**: Aria
+
+### 修复
+- `CHANGELOG.md`：移除第 158 行孤立的 `>>>>>>> origin/main` 冲突标记（合并时遗留）
+
+---
+
 ## [changer] 2026-07-16 — 板块别名扩展
 **开发者**: 37588
 
@@ -190,7 +198,6 @@
 - `pytest tests/integration/test_alert_agent.py`：5/5 通过
 - `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
 - `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
->>>>>>> origin/main
 
 ---
 
