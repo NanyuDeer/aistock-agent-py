@@ -470,3 +470,45 @@ async def test_scheduler_persist_failure_keeps_review_response(mocker):
 
     assert "主因果链" in result["final_response"]
     save.assert_awaited_once()
+
+
+# ============================================================================
+# Step 3 额外断言 — 主因选择与证据不足场景
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_review_primary_selects_supported_when_global_risk_rejected(mocker):
+    """global_risk rejected + domestic_macro supported → 主因是 domestic_macro。"""
+    def _reject_global_risk(trace: dict) -> None:
+        for c in trace["candidates"]:
+            if c["id"] == "global_risk_liquidity":
+                c["status"] = "rejected"
+                c["chain"] = None
+        trace["alternative_chain_id"] = None
+
+    mock_set_cache = _patch_snapshot_and_llm(mocker, _trace_json_with(_reject_global_risk))
+
+    result = await review_agent.run(SCHEDULER_STATE)
+
+    assert "domestic_macro_policy" in result["final_response"]
+    assert "央行降准释放流动性是主因" in result["final_response"]
+    mock_set_cache.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_review_all_insufficient_reports_evidence_insufficient(mocker):
+    """所有候选标记 insufficient → 报告明确'证据不足，未确认主因'，不选择最像的解释。"""
+    def _all_insufficient(trace: dict) -> None:
+        for c in trace["candidates"]:
+            c["status"] = "insufficient"
+            c["chain"] = None
+        trace["primary_chain_id"] = None
+        trace["alternative_chain_id"] = None
+
+    mock_set_cache = _patch_snapshot_and_llm(mocker, _trace_json_with(_all_insufficient))
+
+    result = await review_agent.run(SCHEDULER_STATE)
+
+    assert "证据不足" in result["final_response"] or "未确认主因" in result["final_response"]
+    mock_set_cache.assert_called_once()

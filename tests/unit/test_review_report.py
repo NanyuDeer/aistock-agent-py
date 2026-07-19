@@ -13,6 +13,7 @@ from aistock_agent.schemas.market_trace import (
     DominantPhenomenon,
     MarketTraceResult,
     MarketTraceSnapshot,
+    ReviewArtifact,
     SourceRecord,
 )
 
@@ -41,26 +42,32 @@ REVIEW_MARKDOWN = """# A股收盘溯源｜2026-07-17
 
 
 def test_build_review_report_uses_schema_v2_and_keeps_markdown():
-    report = review._build_review_report(REVIEW_MARKDOWN)
-    assert report == {
-        "display_report": {
-            "summary": "类型：broad_rally",
-            "details": REVIEW_MARKDOWN,
-            "stocks": [],
-            "sectors": ["半导体", "AI算力"],
-            "risks": [],
-        },
-        "podcast_brief": "",
-        "schema_version": "2.0",
-    }
+    artifact = ReviewArtifact(
+        schema_version="1.0",
+        snapshot=_RENDER_SNAPSHOT,
+        trace=_make_render_trace(),
+        markdown=REVIEW_MARKDOWN,
+        trace_summary="市场风险偏好改善，科技板块领涨。",
+        sectors=["半导体", "AI算力"],
+    )
+    report = review._build_review_report(artifact)
+    assert report["display_report"]["summary"] == "市场风险偏好改善，科技板块领涨。"
+    assert report["display_report"]["details"] == REVIEW_MARKDOWN
+    assert report["display_report"]["stocks"] == []
+    assert report["display_report"]["sectors"] == ["半导体", "AI算力"]
+    assert report["display_report"]["risks"] == ["降准对银行净息差的长期影响尚不明确"]
+    assert report["podcast_brief"] == ""
+    assert report["schema_version"] == "2.0"
+    assert report["snapshot_id"] == "trace-20260717"
+    assert "snapshot" in report["market_trace"]
+    assert "trace" in report["market_trace"]
 
 
-def test_build_review_report_falls_back_to_appendix_b_fixture():
+def test_extract_review_sectors_falls_back_to_appendix_b_fixture():
+    """_extract_review_sectors 无 SECTOR_LIST 标记时回退到附录B 表格第一列。"""
     markdown = Path("tests/fixtures/sample_review_report.md").read_text(encoding="utf-8")
-    report = review._build_review_report(markdown)
-    # fixture 无 ## 主导现象 / ## 步骤4 段，回退到首个有效行（标题剥除 # 后的内容）
-    assert report["display_report"]["summary"] == "复盘 2026-07-08"
-    assert report["display_report"]["sectors"] == ["黄金", "贵金属", "半导体", "新能源车"]
+    sectors = review._extract_review_sectors(markdown)
+    assert sectors == ["黄金", "贵金属", "半导体", "新能源车"]
 
 
 # ============================================================================

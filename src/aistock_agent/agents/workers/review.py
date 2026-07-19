@@ -78,14 +78,21 @@ def _strip_code_fences(text: str) -> str:
 def validate_selected_chain_ids(trace: MarketTraceResult) -> None:
     """检查 primary_chain_id / alternative_chain_id 指向的候选存在且 status 符合要求。
 
-    - primary_chain_id 必须指向 status="supported" 的候选，不得为 null
+    - 存在 supported 候选时，primary_chain_id 必须指向其中之一，不得为 null
+    - 无 supported 候选时（全部 insufficient/rejected），primary_chain_id 必须为 null
     - alternative_chain_id 必须指向不同的 supported 或 weak 候选；null 允许
     - primary 与 alternative 不得相同
     """
     candidate_by_id = {c.id: c for c in trace.candidates}
+    has_supported = any(c.status == "supported" for c in trace.candidates)
 
     if trace.primary_chain_id is None:
-        raise ValueError("primary_chain_id must not be null")
+        if has_supported:
+            raise ValueError(
+                "primary_chain_id must not be null when supported candidates exist"
+            )
+        # 无 supported 候选（全部 insufficient/rejected）：primary_chain_id=null 正确
+        return
 
     primary = candidate_by_id.get(trace.primary_chain_id)
     if primary is None:
@@ -115,14 +122,15 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
     """primary 和非空 alternative 指向的 chain 必须恰好包含 6 个阶段（按顺序）。
 
     rejected/insufficient 候选可以没有 chain（chain=None）。
+    当 primary_chain_id=None（所有候选 insufficient）时跳过 chain 校验。
     """
     candidate_by_id = {c.id: c for c in trace.candidates}
 
-    primary = (
-        candidate_by_id.get(trace.primary_chain_id)
-        if trace.primary_chain_id
-        else None
-    )
+    if trace.primary_chain_id is None:
+        # 所有候选 insufficient/rejected：无 primary chain 需要校验
+        return
+
+    primary = candidate_by_id.get(trace.primary_chain_id)
     if primary is None or primary.chain is None:
         raise ValueError("primary candidate has no chain")
     primary_stages = [n.stage for n in primary.chain.nodes]
@@ -299,7 +307,7 @@ def render_market_trace_markdown(
     if primary:
         lines.extend(_render_candidate(primary))
     else:
-        lines.append("- 未选定主因。")
+        lines.append("- 证据不足，未确认主因。")
     lines.append("")
 
     # 备选解释

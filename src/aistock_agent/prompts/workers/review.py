@@ -46,7 +46,8 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    时间顺序、明确机制和相符结果；反证或缺口必须降为 medium 或 low。
 7. 主因（primary_chain_id）只能选 status="supported" 的候选；
    备选（alternative_chain_id）只能选不同的 supported 或 weak 候选；
-   无法确认则返回 null。
+   若所有候选均为 insufficient 或 rejected（无 supported 候选），
+   primary_chain_id 和 alternative_chain_id 均设为 null，不要勉强选择最像的解释。
 
 【CandidateExplanation 字段约束】
 - id: 必须与 category 同名（例如 id="global_risk_liquidity", category="global_risk_liquidity"）
