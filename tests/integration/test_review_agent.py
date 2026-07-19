@@ -19,7 +19,9 @@ from langchain_core.messages import AIMessage
 from aistock_agent.agents.workers import review as review_agent
 from aistock_agent.schemas.market_trace import (
     DominantPhenomenon,
+    MarketTraceResult,
     MarketTraceSnapshot,
+    ReviewArtifact,
     SourceRecord,
 )
 
@@ -195,6 +197,18 @@ VALID_TRACE_DICT: dict[str, object] = {
 VALID_TRACE_JSON = json.dumps(VALID_TRACE_DICT, ensure_ascii=False)
 
 
+def _make_cached_artifact(markdown: str) -> ReviewArtifact:
+    """构建缓存命中测试用的最小合法 ReviewArtifact。"""
+    return ReviewArtifact(
+        schema_version="1.0",
+        snapshot=TRACE_SNAPSHOT,
+        trace=MarketTraceResult.model_validate(VALID_TRACE_DICT),
+        markdown=markdown,
+        trace_summary="cached summary",
+        sectors=["半导体"],
+    )
+
+
 def _trace_json_with(modifier: object) -> str:
     """深拷贝 VALID_TRACE_DICT，应用 modifier(trace_dict)，返回 JSON 字符串。"""
     trace = copy.deepcopy(VALID_TRACE_DICT)
@@ -204,11 +218,14 @@ def _trace_json_with(modifier: object) -> str:
 
 
 def _patch_snapshot_and_llm(mocker, llm_content: str | Exception) -> object:
-    """统一 mock build_market_trace_snapshot + get_deep_think，返回 mock_set_cache。"""
+    """统一 mock build_market_trace_snapshot + get_deep_think + archive，返回 mock_set_cache。"""
     async def build_snapshot(_date: str):
         return TRACE_SNAPSHOT
 
     mocker.patch.object(review_agent, "build_market_trace_snapshot", build_snapshot)
+    # 避免归档写盘影响测试隔离
+    mocker.patch.object(review_agent, "archive_market_trace_snapshot")
+    mocker.patch.object(review_agent, "archive_review")
     llm = AsyncMock()
     if isinstance(llm_content, Exception):
         llm.ainvoke.side_effect = llm_content
@@ -232,6 +249,9 @@ async def test_review_freezes_snapshot_before_single_structured_llm_call(mocker)
         return TRACE_SNAPSHOT
 
     mocker.patch.object(review_agent, "build_market_trace_snapshot", build_snapshot)
+    # 避免归档写盘影响测试隔离
+    mocker.patch.object(review_agent, "archive_market_trace_snapshot")
+    mocker.patch.object(review_agent, "archive_review")
     llm = AsyncMock()
     llm.ainvoke.side_effect = lambda _messages: order.append("llm") or AIMessage(content=VALID_TRACE_JSON)
     mocker.patch.object(review_agent, "get_deep_think", return_value=llm)
@@ -352,7 +372,7 @@ async def test_review_returns_degraded_when_llm_raises(mocker):
 @patch(
     "aistock_agent.agents.workers.review.get_cached_review",
     new_callable=AsyncMock,
-    return_value="cached review",
+    return_value=_make_cached_artifact("cached review").model_dump(mode="json"),
 )
 async def test_review_run_cache_hit(_mock_cache):
     """缓存命中：直接返回缓存内容，不调用 LLM。"""
@@ -375,7 +395,7 @@ async def test_review_run_cache_hit(_mock_cache):
 @patch(
     "aistock_agent.agents.workers.review.get_cached_review",
     new_callable=AsyncMock,
-    return_value="cached scheduler review",
+    return_value=_make_cached_artifact("cached scheduler review").model_dump(mode="json"),
 )
 async def test_cached_scheduler_review_is_still_persisted(_mock_cache):
     """scheduler 触发 + 缓存命中：仍需按 schema v2 持久化（供下游读取）。"""
@@ -408,7 +428,7 @@ async def test_cached_scheduler_review_is_still_persisted(_mock_cache):
 @patch(
     "aistock_agent.agents.workers.review.get_cached_review",
     new_callable=AsyncMock,
-    return_value="cached manual review",
+    return_value=_make_cached_artifact("cached manual review").model_dump(mode="json"),
 )
 async def test_cached_manual_review_is_not_persisted(_mock_cache):
     """手动触发（无 trigger_source='scheduler'）+ 缓存命中：不调用持久化。"""

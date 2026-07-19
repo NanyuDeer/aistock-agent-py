@@ -19,8 +19,12 @@ from aistock_agent.prompts.workers.review import REVIEW_PROMPT
 from aistock_agent.schemas.market_trace import (
     MarketTraceResult,
     MarketTraceSnapshot,
+    ReviewArtifact,
 )
-from aistock_agent.services.archiver import archive_review
+from aistock_agent.services.archiver import (
+    archive_market_trace_snapshot,
+    archive_review,
+)
 from aistock_agent.services.cache import get_cached_review, set_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
@@ -350,7 +354,7 @@ def render_market_trace_markdown(
 
 
 # ============================================================================
-# 持久化辅助（保留：schema v2，Task 4 不动，Task 5 会精炼）
+# 持久化辅助 — Task 5：先归档事实，再缓存/持久化
 # ============================================================================
 
 # --- markdown 解析辅助：纯文本正则，不引入 LLM 调用 ---
@@ -388,6 +392,27 @@ def _first_effective_line(text: str) -> str:
     return ""
 
 
+def _extract_trace_summary(markdown: str) -> str:
+    """从复盘 markdown 提取摘要（主导现象段首个有效行）。
+
+    摘要提取顺序：
+    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
+    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
+    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    """
+    summary = ""
+    m = _DOMINANT_PHENOMENON_RE.search(markdown)
+    if m:
+        summary = _first_effective_line(m.group(1))
+    if not summary:
+        m = _STEP_FOUR_RE.search(markdown)
+        if m:
+            summary = _first_effective_line(m.group(1))
+    if not summary:
+        summary = _first_effective_line(markdown)
+    return summary
+
+
 def _extract_review_sectors(markdown: str) -> list[str]:
     """从 markdown 提取板块列表：优先 SECTOR_LIST 标记；退化到附录B 表格第一列。"""
     m = _SECTOR_LIST_RE.search(markdown)
@@ -414,42 +439,36 @@ def _extract_review_sectors(markdown: str) -> list[str]:
     return []
 
 
-def _build_review_report(markdown: str) -> dict[str, object]:
-    """把 LLM 产出的 markdown 封装成 schema v2 的持久化结构。
+def _build_review_report(artifact: ReviewArtifact) -> dict[str, object]:
+    """把已验证的 ReviewArtifact 封装成 schema v2 的持久化结构。
 
-    schema v2：display_report 提供前端直接消费的字段，details 保留原始 markdown。
-    不触发任何 LLM 调用——所有摘要/板块均通过正则从 markdown 中提取。
-
-    摘要提取顺序：
-    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
-    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
-    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    schema v2：display_report 提供前端直接消费的字段，details 保留原始 markdown，
+    market_trace 提供完整的事实快照与归因 trace，供下游快照构建器复用。
+    不触发任何 LLM 调用——所有摘要/板块均从 artifact 中直接取值。
     """
-    summary = ""
-    m = _DOMINANT_PHENOMENON_RE.search(markdown)
-    if m:
-        summary = _first_effective_line(m.group(1))
-    if not summary:
-        m = _STEP_FOUR_RE.search(markdown)
-        if m:
-            summary = _first_effective_line(m.group(1))
-    if not summary:
-        summary = _first_effective_line(markdown)
-
-    return {
+    content: dict[str, object] = {
         "display_report": {
-            "summary": summary,
-            "details": markdown,
+            "summary": artifact.trace_summary,
+            "details": artifact.markdown,
             "stocks": [],
-            "sectors": _extract_review_sectors(markdown),
-            "risks": [],
+            "sectors": artifact.sectors,
+            "risks": artifact.trace.unresolved_questions,
         },
         "podcast_brief": "",
         "schema_version": "2.0",
+        "snapshot_id": artifact.snapshot.snapshot_id,
+        "market_trace": {
+            "snapshot": artifact.snapshot.model_dump(mode="json"),
+            "trace": artifact.trace.model_dump(mode="json"),
+        },
     }
+    return content
 
 
-async def _persist_review_report(state: AgentState, markdown: str) -> None:
+async def _persist_review_report(
+    state: AgentState,
+    artifact: ReviewArtifact,
+) -> None:
     """按 schema v2 把复盘写入 Node 端 analysis_reports；仅 scheduler 触发时写库。
 
     任何持久化异常都只打日志、不向上抛，保证复盘主流程的返回值不受影响。
@@ -458,7 +477,7 @@ async def _persist_review_report(state: AgentState, markdown: str) -> None:
         return
     try:
         report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
-        content = _build_review_report(markdown)
+        content = _build_review_report(artifact)
         await node_api.save_analysis_report(
             report_type="review",
             report_date=report_date,
@@ -478,27 +497,39 @@ async def _persist_review_report(state: AgentState, markdown: str) -> None:
 
 
 async def run(state: AgentState) -> dict[str, object]:
-    """收盘溯源：冻结事实 → 单次 LLM 推理 → 校验 → 渲染 → 缓存/持久化。
+    """收盘溯源：冻结事实 → 归档事实 → 单次 LLM 推理 → 校验 → 渲染 → 归档/缓存/持久化。
 
-    流程：
-    1. 缓存命中 → 直接返回（scheduler 触发时仍持久化）
-    2. build_market_trace_snapshot(report_date) 冻结事实
-    3. get_deep_think().ainvoke([SystemMessage, HumanMessage(snapshot_json)])
-    4. 剥离代码围栏 → MarketTraceResult.model_validate_json
-    5. validate_trace_against_snapshot 跨对象校验
-    6. 校验失败 → 返回降级文本，不写缓存
-    7. 校验通过 → render_market_trace_markdown → 缓存 + 归档 + 持久化
+    严格顺序（未命中路径）：
+    1. build_market_trace_snapshot(report_date) 冻结事实
+    2. archive_market_trace_snapshot(snapshot) 归档不可变 facts.json
+    3. get_deep_think().ainvoke → 解析 → 跨对象校验
+    4. render_market_trace_markdown 渲染展示层
+    5. archive_review(markdown, snapshot_id) 归档复盘报告
+    6. set_cached_review(report_date, artifact) 缓存完整工件
+    7. save_analysis_report 持久化到 DB
+
+    缓存命中路径：仅校验工件（ReviewArtifact.model_validate）、确保报告已落库、
+    返回 artifact.markdown。缓存命中时不请求 yfinance、财联社、Tavily 或 LLM。
+
+    任一前置步骤失败都返回降级文本，不跳到后一步。
     """
     report_date = (
         state.get("report_date")
         or datetime.now().strftime("%Y-%m-%d")
     )
 
-    # 1. 缓存检查（命中则直接返回）
-    cached = await get_cached_review()
-    if cached:
-        await _persist_review_report(state, cached)
-        return {"final_response": cached}
+    # 1. 缓存检查（命中则校验工件、持久化、返回）
+    cached = await get_cached_review(report_date)
+    if cached is not None:
+        try:
+            artifact = ReviewArtifact.model_validate(cached)
+        except Exception:
+            logger.debug("cached_review_artifact_invalid", exc_info=True)
+            artifact = None
+        if artifact is not None:
+            await _persist_review_report(state, artifact)
+            return {"final_response": artifact.markdown}
+        # 缓存内容无效（如旧纯文本），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
     try:
@@ -512,7 +543,19 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 3-5. 单次 LLM 调用 + 解析 + 跨对象校验
+    # 3. 归档不可变事实快照（在 LLM 推理前，保证事实先于展示层落盘）
+    try:
+        archive_market_trace_snapshot(snapshot)
+    except Exception as e:
+        logger.error(
+            "review_archive_snapshot_failed",
+            agent="review",
+            error=str(e),
+            exc_info=True,
+        )
+        return {"final_response": DEGRADED_RESPONSE}
+
+    # 4. 单次 LLM 调用 + 解析 + 跨对象校验
     try:
         llm = get_deep_think()
         snapshot_json = snapshot.model_dump_json(indent=2)
@@ -540,10 +583,24 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 6-7. 渲染 Markdown + 缓存 + 归档 + 持久化（校验通过才写缓存）
+    # 5. 渲染 Markdown + 构造 ReviewArtifact
     markdown = render_market_trace_markdown(trace, snapshot)
-    await set_cached_review(markdown)
-    archive_review(markdown)
-    await _persist_review_report(state, markdown)
+    artifact = ReviewArtifact(
+        schema_version="1.0",
+        snapshot=snapshot,
+        trace=trace,
+        markdown=markdown,
+        trace_summary=_extract_trace_summary(markdown),
+        sectors=_extract_review_sectors(markdown),
+    )
+
+    # 6. 归档复盘报告（仅在 facts.json 存在时创建 Markdown）
+    archive_review(markdown, snapshot.snapshot_id)
+
+    # 7. 缓存完整工件（model_dump(mode="json") 保证 JSON 可序列化）
+    await set_cached_review(report_date, artifact.model_dump(mode="json"))
+
+    # 8. 持久化到 DB（仅 scheduler 触发）
+    await _persist_review_report(state, artifact)
 
     return {"final_response": markdown}
