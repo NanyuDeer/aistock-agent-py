@@ -108,14 +108,23 @@ def _format_detail(data: dict[str, object]) -> str:
             indicators = detail.get("indicators", {})
             if isinstance(indicators, dict):
                 lines.append(f"  低点以来涨幅: {indicators.get('lowPointGain', '-')}%")
-                lines.append(f"  60日线位置: {indicators.get('ma60Position', '-')}  趋势: {indicators.get('ma60Trend', '-')}")
-                lines.append(f"  250日新高: {indicators.get('isNewHigh250', '-')}  120日新高: {indicators.get('isNewHigh120', '-')}")
+                lines.append(
+                    f"  60日线位置: {indicators.get('ma60Position', '-')}"
+                    f"  趋势: {indicators.get('ma60Trend', '-')}"
+                )
+                lines.append(
+                    f"  250日新高: {indicators.get('isNewHigh250', '-')}"
+                    f"  120日新高: {indicators.get('isNewHigh120', '-')}"
+                )
                 lines.append(f"  最大回撤: {indicators.get('maxDrawdown', '-')}%")
             # 龙头股加成
             is_leader = detail.get("isLeader", False)
             leader_board_name = detail.get("leaderBoardName", "")
             if is_leader:
-                lines.append(f"  龙头股加成: 是(+8分){f'  最佳板块龙头: {leader_board_name}' if leader_board_name else ''}")
+                lines.append(
+                    f"  龙头股加成: 是(+8分)"
+                    f"{f'  最佳板块龙头: {leader_board_name}' if leader_board_name else ''}"
+                )
             else:
                 lines.append("  龙头股加成: 否")
             concept = detail.get("conceptKline", {})
@@ -142,14 +151,20 @@ def _format_detail(data: dict[str, object]) -> str:
             if isinstance(news, list):
                 for item in news[:5]:
                     if isinstance(item, dict):
-                        lines.append(f"  新闻: {item.get('title', '-')} ({item.get('publishTime', '-')})")
+                        lines.append(
+                            f"  新闻: {item.get('title', '-')}"
+                            f" ({item.get('publishTime', '-')})"
+                        )
 
         elif d_name == "基本面":
             sub_dims = detail.get("subDimensions", [])
             if isinstance(sub_dims, list):
                 for sub in sub_dims:
                     if isinstance(sub, dict):
-                        lines.append(f"  {sub.get('name', '-')}({sub.get('weight', '-')}%): {sub.get('score', '-')}分")
+                        lines.append(
+                            f"  {sub.get('name', '-')}({sub.get('weight', '-')}%)"
+                            f": {sub.get('score', '-')}分"
+                        )
 
     return "\n".join(lines)
 
@@ -169,7 +184,10 @@ def _format_top_stocks(data: list[dict[str, object]]) -> str:
         label = stock.get("label", "-")
         expected = stock.get("expectedMultiple", "-")
         industry = stock.get("industry", "-")
-        lines.append(f"  {i}. {name}({code})  评分: {score}  等级: {label}  预期: {expected}  行业: {industry}")
+        lines.append(
+            f"  {i}. {name}({code})  评分: {score}  等级: {label}"
+            f"  预期: {expected}  行业: {industry}"
+        )
     return "\n".join(lines)
 
 
