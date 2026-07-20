@@ -84,6 +84,10 @@ def validate_selected_chain_ids(trace: MarketTraceResult) -> None:
     - 无 supported 候选时（全部 insufficient/rejected），primary_chain_id 必须为 null
     - alternative_chain_id 必须指向不同的 supported 或 weak 候选；null 允许
     - primary 与 alternative 不得相同
+
+    修复：无论 primary 是否为 null，非空 alternative 都必须验证 ID 存在 + status
+    合法（supported/weak）。旧实现 primary=null 时直接 return，跳过 alternative
+    校验，导致 alternative 指向 rejected/insufficient 候选且链条完整时仍能通过。
     """
     candidate_by_id = {c.id: c for c in trace.candidates}
     has_supported = any(c.status == "supported" for c in trace.candidates)
@@ -94,17 +98,19 @@ def validate_selected_chain_ids(trace: MarketTraceResult) -> None:
                 "primary_chain_id must not be null when supported candidates exist"
             )
         # 无 supported 候选（全部 insufficient/rejected）：primary_chain_id=null 正确
-        return
+        # 不再 return —— alternative 仍需校验（下方统一处理）
+    else:
+        primary = candidate_by_id.get(trace.primary_chain_id)
+        if primary is None:
+            raise ValueError(f"unknown primary_chain_id: {trace.primary_chain_id}")
+        if primary.status != "supported":
+            raise ValueError(
+                f"primary_chain_id points to non-supported candidate: "
+                f"{primary.id} ({primary.status})"
+            )
 
-    primary = candidate_by_id.get(trace.primary_chain_id)
-    if primary is None:
-        raise ValueError(f"unknown primary_chain_id: {trace.primary_chain_id}")
-    if primary.status != "supported":
-        raise ValueError(
-            f"primary_chain_id points to non-supported candidate: "
-            f"{primary.id} ({primary.status})"
-        )
-
+    # 无论 primary 是否为 null，非空 alternative 都必须验证：
+    # - ID 存在；status 只能是 supported 或 weak；不得与 primary 相同。
     if trace.alternative_chain_id is not None:
         if trace.alternative_chain_id == trace.primary_chain_id:
             raise ValueError("alternative_chain_id equals primary_chain_id")
@@ -176,7 +182,13 @@ def validate_trace_against_snapshot(
     ):
         raise ValueError("candidate categories are incomplete")
 
-    # 1. trace.dominant_phenomenon 与 snapshot.dominant_phenomenon 一致
+    # 1. trace.dominant_phenomenon 必须严格绑定 snapshot.dominant_phenomenon 的冻结事实：
+    #    - 两者同时为 null 或同时非 null
+    #    - kind 必须一致
+    #    - fact_ids 必须完全一致（顺序无关，作为集合比较）
+    #    - score 必须一致
+    #    旧实现只校验 kind 一致 + fact_ids 存在于 snapshot.sources，模型可把 fact_ids
+    #    改成另一个存在但无关的 source_id（如 NEWS_001），从而篡改冻结的市场事实。
     snapshot_dp = snapshot.dominant_phenomenon
     trace_dp = trace.dominant_phenomenon
     if trace_dp is None and snapshot_dp is not None:
@@ -193,7 +205,25 @@ def validate_trace_against_snapshot(
                 f"trace.dominant_phenomenon.kind {trace_dp.kind} != "
                 f"snapshot.dominant_phenomenon.kind {snapshot_dp.kind}"
             )
-        # 2. dominant_phenomenon.fact_ids 必须全部存在于 snapshot.sources
+        # fact_ids 必须与 snapshot 完全一致（作为集合），禁止篡改冻结事实依据。
+        # 旧实现只校验 fact_ids 存在于 snapshot.sources，模型可换成另一个存在但无关
+        # 的 source_id（如把 INDEX_000001_SH 换成 NEWS_001），绕过冻结事实。
+        trace_fact_set = set(trace_dp.fact_ids)
+        snapshot_fact_set = set(snapshot_dp.fact_ids)
+        if trace_fact_set != snapshot_fact_set:
+            raise ValueError(
+                f"trace.dominant_phenomenon.fact_ids {sorted(trace_fact_set)} != "
+                f"snapshot.dominant_phenomenon.fact_ids {sorted(snapshot_fact_set)} "
+                f"(frozen facts must not be tampered)"
+            )
+        # score 必须与 snapshot 完全一致，禁止篡改冻结评分。
+        if trace_dp.score != snapshot_dp.score:
+            raise ValueError(
+                f"trace.dominant_phenomenon.score {trace_dp.score} != "
+                f"snapshot.dominant_phenomenon.score {snapshot_dp.score}"
+            )
+        # fact_ids 全部必须存在于 snapshot.sources（绑定一致性已校验集合相等，
+        # 但仍校验存在性以防御 snapshot 自身 fact_ids 引用未知 source 的边缘情况）
         for fact_id in trace_dp.fact_ids:
             if fact_id not in snapshot.sources:
                 raise ValueError(
@@ -374,10 +404,12 @@ def render_market_trace_markdown(
     lines.append(f"快照编号：{snapshot.snapshot_id}")
     lines.append("")
 
-    # 主导现象
+    # 主导现象 — 以 snapshot 为事实来源，避免模型文本覆盖冻结事实。
+    # validate_trace_against_snapshot 已强制 trace.dominant_phenomenon 与 snapshot
+    # 完全一致（kind/fact_ids/score），但渲染仍以 snapshot 为权威，防止任何绕过。
     lines.append("## 主导现象")
-    if trace.dominant_phenomenon:
-        dp = trace.dominant_phenomenon
+    if snapshot.dominant_phenomenon:
+        dp = snapshot.dominant_phenomenon
         lines.append(f"- 类型：{dp.kind}")
         lines.append(f"- 摘要：{dp.summary}")
         lines.append(f"- 评分：{dp.score}")

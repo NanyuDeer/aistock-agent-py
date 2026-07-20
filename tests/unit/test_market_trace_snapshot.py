@@ -459,6 +459,59 @@ async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker):
     assert snapshot.trade_date == "2026-07-19"
 
 
+@pytest.mark.asyncio
+async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
+    """Node trade_date 与 report_date 不一致时，不调用任何外部数据源。
+
+    场景：周末/节假日调用时 Node 没有当日数据，trade_date 仍是上一交易日。
+    修复前：trade_date 校验在 collect_global_market_facts、node 新闻接口和
+    Tavily 调用之后才执行，浪费外部 API 配额；修复后：日期不一致时立即抛
+    MarketTraceSnapshotUnavailable，不调用任何外部数据源。
+
+    注意：node_api.get("/internal/market/close-snapshot") 仍会被调用一次
+    （因为 trade_date 来自 close-snapshot 响应），但不应被调用第二次
+    （用于 /internal/news/latest）。
+    """
+    stale = {**COMPLETE_CLOSE, "trade_date": "20260717"}
+    # 用 side_effect 记录调用顺序；如果日期校验前置，第二次 node_api.get 不应被调用
+    node_get_calls: list[str] = []
+
+    async def _node_get_side_effect(path: str, **_kwargs):
+        node_get_calls.append(path)
+        if path == "/internal/market/close-snapshot":
+            return stale
+        return {"items": []}
+
+    mocker.patch.object(node_api, "get", side_effect=_node_get_side_effect)
+
+    # 这些 mock 不应被调用；用 side_effect 抛异常以放大任何意外调用
+    def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError(
+            "collect_global_market_facts must not be called when trade_date mismatches"
+        )
+
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        side_effect=_unexpected_call,
+    )
+
+    def _unexpected_tavily(*_args, **_kwargs):
+        raise AssertionError(
+            "TavilyService.search must not be called when trade_date mismatches"
+        )
+
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        side_effect=_unexpected_tavily,
+    )
+
+    with pytest.raises(MarketTraceSnapshotUnavailable):
+        await build_market_trace_snapshot("2026-07-19")
+
+    # 只应调用过 close-snapshot，不应调用 news/latest
+    assert node_get_calls == ["/internal/market/close-snapshot"]
+
+
 # ============================================================================
 # Task 5 review 修复 — snapshot_id 必须支持同日失败后的安全重试
 # ============================================================================

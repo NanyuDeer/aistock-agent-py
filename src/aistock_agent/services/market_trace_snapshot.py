@@ -437,7 +437,28 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             "Node close-snapshot coverage.previous_daily.complete is not True"
         )
 
-    # ── 2. 收集外部来源（同一 captured_at）──
+    # ── 2. 校验 Node trade_date 与 report_date 一致 ──
+    # 必须在 collect_global_market_facts、node 新闻接口和 Tavily 调用之前完成，
+    # 不一致时立即抛 MarketTraceSnapshotUnavailable，避免浪费外部 API 配额。
+    # 场景：周末/节假日调用时 Node 没有当日数据，trade_date 仍是上一交易日；
+    # 不能把旧事实写入新日期快照。
+    trade_date_node = _safe_str(close_data.get("trade_date"))
+    trade_date_dt = _parse_yyyymmdd(trade_date_node)
+
+    trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
+    if trade_date_normalized is None:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node close-snapshot trade_date is not a valid YYYYMMDD/YYYY-MM-DD: "
+            f"{trade_date_node!r}"
+        )
+    if trade_date_normalized != report_date:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node close-snapshot trade_date {trade_date_normalized} != report_date "
+            f"{report_date}; refusing to write stale facts into a new-date snapshot"
+        )
+
+    # ── 3. 收集外部来源（同一 captured_at）──
+    # 只有 status/coverage/date 三重校验全部通过，才允许调用 yfinance、财联社、Tavily。
 
     # 境外行情（同步函数，用 asyncio.to_thread 避免阻塞事件循环）
     try:
@@ -475,26 +496,9 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         logger.warning("tavily_search_2_failed", error=str(e))
         tavily_result_2 = {}
 
-    # ── 3. 归一化为 SourceRecord ──
+    # ── 4. 归一化为 SourceRecord ──
     sources: dict[str, SourceRecord] = {}
     missing_fields: list[str] = []
-
-    trade_date_node = _safe_str(close_data.get("trade_date"))
-    trade_date_dt = _parse_yyyymmdd(trade_date_node)
-
-    # 校验 Node trade_date 与 report_date 一致 — 不一致时降级，
-    # 不能把旧事实写入新日期快照（如周末/节假日 Node 返回上一交易日 trade_date）。
-    trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
-    if trade_date_normalized is None:
-        raise MarketTraceSnapshotUnavailable(
-            f"Node close-snapshot trade_date is not a valid YYYYMMDD/YYYY-MM-DD: "
-            f"{trade_date_node!r}"
-        )
-    if trade_date_normalized != report_date:
-        raise MarketTraceSnapshotUnavailable(
-            f"Node close-snapshot trade_date {trade_date_normalized} != report_date "
-            f"{report_date}; refusing to write stale facts into a new-date snapshot"
-        )
 
     # A 股指数事实
     indexes_list = close_data.get("indexes")

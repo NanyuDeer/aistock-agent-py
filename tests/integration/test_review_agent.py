@@ -637,6 +637,79 @@ async def test_review_primary_null_alternative_valid_succeeds(mocker):
     mock_set_cache.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_review_degraded_when_primary_null_and_alternative_status_invalid(mocker):
+    """primary=null + alternative 指向 rejected 候选（6 阶段完整）→ 必须降级。
+
+    场景：所有 supported 候选改成 rejected/insufficient，primary=null；
+    alternative 仍指向 global_risk_liquidity，但其 status 改成 rejected，
+    chain 保留完整 6 阶段。修复前：validate_selected_chain_ids 在 primary=null
+    时直接 return，不校验 alternative 的 status；validate_chain_stages 只校验
+    阶段顺序，不校验 status → 错误通过。修复后：无论 primary 是否为 null，
+    非空 alternative 的 status 必须是 supported 或 weak。
+    """
+    def _modify_primary_null_rejected_alt(trace: dict) -> None:
+        # 让所有候选变 insufficient（无 supported），primary 必须为 null
+        for c in trace["candidates"]:
+            c["status"] = "insufficient"
+            c["chain"] = None
+        # global_risk_liquidity 改成 rejected 但保留完整 6 阶段 chain
+        for c in trace["candidates"]:
+            if c["id"] == "global_risk_liquidity":
+                c["status"] = "rejected"
+                c["chain"] = {"nodes": _alternative_chain_nodes()}  # 完整 6 阶段
+        trace["primary_chain_id"] = None
+        trace["alternative_chain_id"] = "global_risk_liquidity"
+
+    mock_set_cache = _patch_snapshot_and_llm(
+        mocker, _trace_json_with(_modify_primary_null_rejected_alt)
+    )
+    result = await review_agent.run(SCHEDULER_STATE)
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    mock_set_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_review_degraded_when_dominant_phenomenon_fact_ids_swap_to_unrelated_existing_source(
+    mocker,
+):
+    """trace.dominant_phenomenon.fact_ids 篡改为存在但无关的 source_id → 必须降级。
+
+    场景：snapshot.dominant_phenomenon.fact_ids=["INDEX_000001_SH"]（市场事实），
+    模型把 trace.dominant_phenomenon.fact_ids 改成 ["NEWS_001"]（存在但属于事件证据，
+    不是主导现象绑定的市场事实）。修复前：只校验 fact_ids 存在于 snapshot.sources，
+    NEWS_001 存在 → 通过；修复后：trace.dominant_phenomenon.fact_ids 必须与
+    snapshot.dominant_phenomenon.fact_ids 完全一致（顺序无关），不允许篡改冻结事实。
+    """
+    def _modify_dp_swap_fact_id(trace: dict) -> None:
+        if trace.get("dominant_phenomenon"):
+            # 把 fact_ids 从 ["INDEX_000001_SH"] 改成 ["NEWS_001"]（存在但无关）
+            trace["dominant_phenomenon"]["fact_ids"] = ["NEWS_001"]
+
+    mock_set_cache = _patch_snapshot_and_llm(mocker, _trace_json_with(_modify_dp_swap_fact_id))
+    result = await review_agent.run(SCHEDULER_STATE)
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    mock_set_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_review_degraded_when_dominant_phenomenon_score_swapped(mocker):
+    """trace.dominant_phenomenon.score 与 snapshot 不一致 → 必须降级。
+
+    场景：snapshot.dominant_phenomenon.score=3，模型把 trace 的 score 改成 5。
+    修复前：只校验 kind 和 fact_ids 存在性，score 不校验 → 通过；
+    修复后：score 必须与 snapshot 完全一致，禁止篡改冻结评分。
+    """
+    def _modify_dp_score(trace: dict) -> None:
+        if trace.get("dominant_phenomenon"):
+            trace["dominant_phenomenon"]["score"] = 5  # snapshot 是 3
+
+    mock_set_cache = _patch_snapshot_and_llm(mocker, _trace_json_with(_modify_dp_score))
+    result = await review_agent.run(SCHEDULER_STATE)
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    mock_set_cache.assert_not_called()
+
+
 # ============================================================================
 # Task 5 review 修复 — 缓存命中后重新执行语义校验 + 校验缓存日期
 # ============================================================================
