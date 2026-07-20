@@ -2,6 +2,16 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-20 — 移除十倍股工具 — tenx_tools.py 已被 trend_tools.py 替代
+**开发者**: Aria
+
+### 重构
+- 删除 `src/aistock_agent/tools/tenx_tools.py`（get_tenx_score / get_tenx_top_stocks 工具）
+- `src/aistock_agent/tools/__init__.py`：移除 `tenx_tools` 导入项
+- 后端 `/internal/tenx/*` 路由已同步移除，趋势股评分 `/internal/trend/*` 路由已完全替代
+
+---
+
 ## [changer] 2026-07-18 — 修复 Morning→Event 传导链路：鉴权绕过、假成功与持久化问题
 **开发者**: 37588
 

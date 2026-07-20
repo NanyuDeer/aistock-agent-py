@@ -17,6 +17,5 @@ from aistock_agent.tools import (  # noqa: F401
     search_tools,
     sector_tools,
     stock_tools,
-    tenx_tools,
     trend_tools,
 )
