@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from datetime import date
 from uuid import uuid4
@@ -279,18 +280,24 @@ async def morning_briefing() -> EventSourceResponse:
 
 
 @router.post("/briefing/morning/trigger")
-async def trigger_morning_briefing() -> dict[str, object]:
+async def trigger_morning_briefing(
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
     """手动触发晨报生成（非流式，供管理员 curl 触发）
 
     直接调用 morning_agent.run()，不走 graph SSE 流。
-    返回 JSON 含 success / message / report_date / cached。
+    晨报完成后自动提取 major_events 并行执行事件传导分析，等待全部完成。
+    返回 JSON 含 success / message / report_date / cached / 事件统计。
     管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
     """
     from aistock_agent.agents.workers import morning as morning_agent
+    from aistock_agent.services.event_conduction import run_event_conduction_batch
 
     today = date.today().isoformat()
     logger = structlog.get_logger()
     logger.info("manual_trigger_morning_start", report_date=today)
+
+    start = time.time()
 
     state: dict[str, object] = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
@@ -307,19 +314,70 @@ async def trigger_morning_briefing() -> dict[str, object]:
 
     try:
         result = await morning_agent.run(state)
-        has_response = bool(result.get("final_response"))
-        has_major_events = bool(result.get("analysis_reports", {}).get("major_events"))
+        analysis_reports = result.get("analysis_reports", {})
+        if not isinstance(analysis_reports, dict):
+            analysis_reports = {}
+
+        # 显式状态字段，禁止用 bool(final_response) 推断
+        morning_generated = bool(analysis_reports.get("morning_generated", False))
+        cached = bool(analysis_reports.get("cached", False))
+        morning_persisted = bool(analysis_reports.get("morning_persisted", False))
+        major_events = analysis_reports.get("major_events", [])
+        if not isinstance(major_events, list):
+            major_events = []
+        has_major_events = bool(major_events)
+
+        # 事件传导统计
+        major_event_count = len(major_events)
+        event_triggered_count = 0
+        event_succeeded_count = 0
+        event_failed_count = 0
+        event_persisted_count = 0
+        event_persist_failed_count = 0
+
+        # 晨报成功生成（非降级）且有重大事件 → 触发事件传导
+        if morning_generated and has_major_events:
+            event_results = await run_event_conduction_batch(major_events)
+            event_triggered_count = len(event_results)
+            event_succeeded_count = sum(1 for r in event_results if r.event_generated)
+            event_failed_count = event_triggered_count - event_succeeded_count
+            # 只统计生成成功的事件的持久化状态
+            event_persisted_count = sum(
+                1 for r in event_results if r.event_generated and r.persisted
+            )
+            event_persist_failed_count = event_succeeded_count - event_persisted_count
+
+        elapsed = time.time() - start
+
         logger.info(
             "manual_trigger_morning_done",
-            has_response=has_response,
+            morning_generated=morning_generated,
+            cached=cached,
+            morning_persisted=morning_persisted,
             has_major_events=has_major_events,
+            major_event_count=major_event_count,
+            event_triggered=event_triggered_count,
+            event_succeeded=event_succeeded_count,
+            event_failed=event_failed_count,
+            event_persisted=event_persisted_count,
+            event_persist_failed=event_persist_failed_count,
         )
+
         return {
-            "success": True,
-            "message": "晨报生成完成" if has_response else "晨报生成完成（无内容）",
+            "success": morning_generated,
+            "message": "晨报生成完成" if morning_generated else "晨报生成失败（降级）",
             "report_date": today,
-            "cached": result.get("analysis_reports", {}).get("cached", False),
+            "cached": cached,
+            "morning_generated": morning_generated,
+            "morning_persisted": morning_persisted,
             "has_major_events": has_major_events,
+            "major_event_count": major_event_count,
+            "event_triggered_count": event_triggered_count,
+            "event_succeeded_count": event_succeeded_count,
+            "event_failed_count": event_failed_count,
+            "event_persisted_count": event_persisted_count,
+            "event_persist_failed_count": event_persist_failed_count,
+            "elapsed_seconds": round(elapsed, 2),
         }
     except Exception as e:
         logger.error("manual_trigger_morning_failed", error=str(e), exc_info=True)
@@ -327,6 +385,102 @@ async def trigger_morning_briefing() -> dict[str, object]:
             "success": False,
             "message": f"晨报生成失败: {str(e)}",
             "report_date": today,
+            "morning_generated": False,
+            "cached": False,
+            "morning_persisted": False,
+            "has_major_events": False,
+            "major_event_count": 0,
+            "event_triggered_count": 0,
+            "event_succeeded_count": 0,
+            "event_failed_count": 0,
+            "event_persisted_count": 0,
+            "event_persist_failed_count": 0,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/briefing/event/trigger")
+async def trigger_event_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发事件传导分析（非流式，供管理员 curl 触发）
+
+    复用 ``run_single_event_conduction()``，与 scheduler 共享同一执行路径。
+    返回 JSON 含 success / message / event_id / event_generated / event_persisted / event_cached。
+    禁止硬编码 success=True，只读取显式状态。
+    """
+    from aistock_agent.services.event_conduction import run_single_event_conduction
+
+    logger = structlog.get_logger()
+
+    # 构建事件 dict：优先用请求体的 event_title，否则用默认事件描述
+    event_title = (body or {}).get("event_title", "").strip() if body else ""
+    event_summary = (body or {}).get("event_summary", "").strip() if body else ""
+    event_url = (body or {}).get("event_url", "").strip() if body else ""
+
+    if event_title:
+        event_dict: dict[str, object] = {
+            "title": event_title,
+            "summary": event_summary,
+            "url": event_url,
+        }
+    else:
+        # 无 title 时构造非空默认事件，实际调用 run_single_event_conduction()
+        # （恢复上一版本"分析最新重大市场事件"的行为，不因空标题提前失败）
+        event_dict = {
+            "title": "最新重大市场事件",
+            "summary": "请分析最新的重大市场事件",
+            "url": "",
+        }
+
+    logger.info("manual_trigger_event_start", event_title=event_title[:50] or "default")
+
+    try:
+        result = await run_single_event_conduction(event_dict)
+
+        logger.info(
+            "manual_trigger_event_done",
+            event_title=event_title[:50] or "default",
+            event_generated=result.event_generated,
+            persisted=result.persisted,
+            cached=result.cached,
+            success=result.success,
+        )
+
+        if result.success:
+            return {
+                "success": True,
+                "message": "事件分析完成",
+                "event_id": result.event_id,
+                "event_generated": result.event_generated,
+                "event_persisted": result.persisted,
+                # 从 event_agent 显式状态读取，禁止硬编码 False
+                "event_cached": result.cached,
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"事件分析失败: {result.error or '未知错误'}",
+                "event_id": result.event_id,
+                "event_generated": result.event_generated,
+                "event_persisted": result.persisted,
+                "event_cached": result.cached,
+            }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_event_failed",
+            event_title=event_title[:50] or "default",
+            error=str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"事件分析失败: {str(e)}",
+            "event_id": "",
+            "event_generated": False,
+            "event_persisted": False,
+            "event_cached": False,
         }
 
 

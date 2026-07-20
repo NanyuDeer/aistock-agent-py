@@ -30,6 +30,7 @@ from aistock_agent.services.event_persister import persist_event_report
 from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.message import extract_last_human_message
 from aistock_agent.utils.output_parser import _parse_json, transform_to_frontend
 
 logger = structlog.get_logger()
@@ -304,6 +305,31 @@ def _validate_podcast_brief(
     return padded, False
 
 
+def _is_valid_cached_event_report(cached: dict[str, object]) -> bool:
+    """判断缓存是否为有效事件报告，兼容无 ``event_generated`` 字段的旧缓存。
+
+    修改前的真实旧缓存不包含 event_generated / event_persisted / event_cached /
+    event_id 任何运行时状态字段，仅含业务结构（event_understanding、
+    event_transmission、event_podcast_brief 等）。直接把缺 event_generated 判为
+    生成失败会导致旧缓存无法走幂等补写。
+
+    判定规则：
+    1. 显式 ``event_generated`` 存在时以其值为准（新缓存）。
+    2. 否则按真实业务结构校验：event_understanding 为非空 dict，
+       且 event_podcast_brief 为非空字符串 —— 视为有效旧缓存（event_generated=True）。
+    """
+    if "event_generated" in cached:
+        return bool(cached["event_generated"])
+    # 旧缓存：按真实业务结构校验其是否为有效报告
+    understanding = cached.get("event_understanding")
+    if not isinstance(understanding, dict) or not understanding:
+        return False
+    brief = cached.get("event_podcast_brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return False
+    return True
+
+
 # ── 主入口 ──
 
 
@@ -311,19 +337,48 @@ async def run(state: AgentState) -> dict[str, object]:
     """事件分析 Agent 主入口。
 
     5 个 LLM 调用 → transform_to_frontend → 返回 analysis_reports。
+
+    所有返回路径提供显式状态：
+    - event_generated: 生成了结构完整、非降级的事件报告
+    - event_persisted: 落库成功
+    - event_cached: 缓存命中或写入成功
+    - event_id: 事件唯一标识（evt_xxxxxxxx）
     """
     messages = state.get("messages", [])
     if not messages:
-        return {"final_response": "请提供需要分析的事件描述。", "analysis_reports": {}}
+        return {
+            "final_response": "请提供需要分析的事件描述。",
+            "analysis_reports": {
+                "event_generated": False,
+                "event_persisted": False,
+                "event_cached": False,
+                "event_id": "",
+            },
+        }
 
-    # 提取用户消息文本
-    user_msg = ""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content.strip():
-            user_msg = msg.content.strip()
-            break
+    # 提取用户消息文本——复用 utils/message.py，同时支持 HumanMessage 和 dict
+    # （scheduler 和手动入口传 {"role":"user","content":"..."} dict）
+    user_msg = extract_last_human_message(messages).strip()
     if not user_msg:
-        return {"final_response": "请提供需要分析的事件描述。", "analysis_reports": {}}
+        return {
+            "final_response": "请提供需要分析的事件描述。",
+            "analysis_reports": {
+                "event_generated": False,
+                "event_persisted": False,
+                "event_cached": False,
+                "event_id": "",
+            },
+        }
+
+    # 从初始 state 读取来源元数据（由 event_conduction 从 major_events.url 传入），
+    # 用于 event_meta.source 落库真实来源 URL，而非硬编码空字符串。
+    initial_reports = state.get("analysis_reports", {})
+    event_source = ""
+    if isinstance(initial_reports, dict):
+        event_source = str(initial_reports.get("event_source", ""))
+
+    # 预生成 event_id（即使降级也提供，便于追踪）
+    event_id = f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}"
 
     try:
         # 缓存检查
@@ -331,11 +386,40 @@ async def run(state: AgentState) -> dict[str, object]:
         if cached:
             logger.info("event_cache_hit", event_preview=user_msg[:50])
             podcast_brief = str(cached.get("event_podcast_brief", ""))
+            # 从缓存恢复 event_id（旧缓存可能没有）
+            cached_event_id = str(cached.get("event_id", event_id))
+            cached_persisted = bool(cached.get("event_persisted", False))
+            # 兼容旧缓存：缺 event_generated 时按真实业务结构校验有效性，
+            # 不能直接把缺字段判为生成失败（旧缓存根本没有该字段）
+            cached_generated = _is_valid_cached_event_report(cached)
+
+            # 幂等补写：旧缓存缺少 event_persisted 或值为 False 时，重试落库
+            if cached_generated and not cached_persisted:
+                logger.info("event_cache_idempotent_repersist", event_id=cached_event_id)
+                # 从缓存重建 event_meta 用于补写
+                cached_meta: dict[str, object] = {
+                    "eventId": cached_event_id,
+                    "title": str(cached.get("event_understanding", {}).get("summary", ""))[:50]
+                    if isinstance(cached.get("event_understanding"), dict)
+                    else "",
+                    "source": event_source,
+                }
+                cached_persisted = await persist_event_report(
+                    cached_event_id, cached_meta, user_msg, cached
+                )
+                # 更新缓存中的 persisted 状态
+                cached["event_persisted"] = cached_persisted
+                await set_cached_event(user_msg, cached)
+
             return {
                 "final_response": podcast_brief,
                 "analysis_reports": {
                     **state.get("analysis_reports", {}),
                     **cached,
+                    "event_cached": True,
+                    "event_generated": cached_generated,
+                    "event_persisted": cached_persisted,
+                    "event_id": cached_event_id,
                 },
             }
 
@@ -347,7 +431,12 @@ async def run(state: AgentState) -> dict[str, object]:
             logger.warning("event_understanding_failed", event_preview=user_msg[:50])
             return {
                 "final_response": "事件分析暂时不可用，请稍后重试",
-                "analysis_reports": {},
+                "analysis_reports": {
+                    "event_generated": False,
+                    "event_persisted": False,
+                    "event_cached": False,
+                    "event_id": event_id,
+                },
             }
 
         # Call 2: 传导路径（deep, ReAct + tools）
@@ -379,7 +468,7 @@ async def run(state: AgentState) -> dict[str, object]:
         event_meta: dict[str, object] = {
             "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
             "title": title[:50] if title else "",
-            "source": "",
+            "source": event_source,
         }
         analysis_reports = transform_to_frontend(
             understanding,
@@ -402,9 +491,24 @@ async def run(state: AgentState) -> dict[str, object]:
         # 缓存仅写入可持久化数据（不可持久化时允许同输入重新生成）
         # 持久化仅当 can_persist=True
         event_id = str(event_meta.get("eventId", ""))
+        event_persisted = False
+        event_cached = False
         if can_persist:
-            await set_cached_event(user_msg, analysis_reports)
-            await persist_event_report(event_id, event_meta, user_msg, analysis_reports)
+            # 在缓存中保存 event_persisted 状态，便于下次命中时判断是否需要幂等补写
+            analysis_reports["event_id"] = event_id
+            analysis_reports["event_generated"] = True
+            analysis_reports["event_persisted"] = False  # 先写 False，落库成功后更新
+            # event_cached 只有在 Redis 实际写入成功时才为 True
+            event_cached = await set_cached_event(user_msg, analysis_reports)
+            event_persisted = await persist_event_report(
+                event_id, event_meta, user_msg, analysis_reports
+            )
+            # 落库后更新缓存中的 persisted 状态
+            analysis_reports["event_persisted"] = event_persisted
+            if event_persisted:
+                # 更新缓存：若再次写入成功则确保 event_cached=True
+                if await set_cached_event(user_msg, analysis_reports):
+                    event_cached = True
         else:
             logger.warning(
                 "event_not_persisted",
@@ -418,11 +522,23 @@ async def run(state: AgentState) -> dict[str, object]:
             "analysis_reports": {
                 **state.get("analysis_reports", {}),
                 **analysis_reports,
+                # event_generated 只表示报告结构有效、标题有效、播报校验通过且非降级结果
+                # （can_persist = brief ∈ [150,200] AND title 非空；
+                #   understanding 失败已在前置 return 中标记为 False）
+                "event_generated": can_persist,
+                "event_persisted": event_persisted,
+                "event_cached": event_cached,
+                "event_id": event_id,
             },
         }
     except Exception:
         logger.exception("agent_run_failed", agent="event_analyst_v3")
         return {
             "final_response": "事件分析暂时不可用，请稍后重试",
-            "analysis_reports": {},
+            "analysis_reports": {
+                "event_generated": False,
+                "event_persisted": False,
+                "event_cached": False,
+                "event_id": event_id,
+            },
         }

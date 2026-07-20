@@ -194,13 +194,26 @@ async def test_morning_run_cache_hit_legacy_text():
 
 
 @pytest.mark.asyncio
-async def test_morning_run_cache_hit_does_not_persist():
-    """缓存命中时不调用持久化。"""
+async def test_morning_run_cache_hit_idempotent_repersist():
+    """缓存命中时执行幂等补写，并返回真实 morning_persisted（不再跳过持久化）。
+
+    旧断言"缓存命中不持久化"已不再适用：缓存命中也调用 persist_morning_report
+    以保证数据库最终一致（幂等 upsert），但不再调用 LLM。
+    """
     cached_json = _make_valid_dual_layer_json()
     with patch(_MORNING_GET_CACHED, AsyncMock(return_value=cached_json)):
-        with patch(_MORNING_PERSIST, AsyncMock()) as mock_persist:
-            await morning_agent.run({})
-    mock_persist.assert_not_called()
+        with patch(_MORNING_CREATE_AGENT) as mock_create:
+            with patch(_MORNING_PERSIST, AsyncMock(return_value=True)) as mock_persist:
+                result = await morning_agent.run({})
+
+    # 不调 LLM（缓存命中）
+    mock_create.assert_not_called()
+    # 缓存命中执行幂等补写
+    mock_persist.assert_called_once()
+    # 返回真实 morning_persisted
+    assert result["analysis_reports"]["morning_persisted"] is True
+    assert result["analysis_reports"]["morning_generated"] is True
+    assert result["analysis_reports"]["cached"] is True
 
 
 # ── run() 新生成测试 ────────────────────────────────────────────
