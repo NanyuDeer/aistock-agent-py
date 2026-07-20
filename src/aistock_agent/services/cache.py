@@ -89,7 +89,7 @@ async def set_cached_review(
     report_date: str,
     artifact: dict[str, object],
     ttl: int = 86400,
-) -> None:
+) -> bool:
     """缓存复盘工件到 Redis。
 
     Args:
@@ -97,14 +97,20 @@ async def set_cached_review(
         artifact: ReviewArtifact 的 ``model_dump(mode="json")`` 输出，
             包含 snapshot / trace / markdown / trace_summary / sectors 等字段。
         ttl: 缓存过期秒数，默认 86400（每日更新语义）。
+
+    Returns:
+        True 表示 Redis 实际写入成功；False 表示写入失败（保留降级日志）。
+        调用方据此决定是否继续后续持久化步骤。
     """
     try:
         client = await RedisPool.get_client()
         cache_key = f"briefing:review:{report_date}"
         value = json.dumps(artifact, ensure_ascii=False)
         await client.setex(cache_key, ttl, value)
+        return True
     except Exception:
         logger.debug("set_cached_review_failed", exc_info=True)
+        return False
 
 
 def _event_cache_key(user_input: str) -> str:

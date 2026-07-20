@@ -17,9 +17,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
 from aistock_agent.schemas.market_trace import (
+    CandidateExplanation,
     MarketTraceResult,
     MarketTraceSnapshot,
     ReviewArtifact,
+    SourceRecord,
 )
 from aistock_agent.services.archiver import (
     archive_market_trace_snapshot,
@@ -122,23 +124,25 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
     """primary 和非空 alternative 指向的 chain 必须恰好包含 6 个阶段（按顺序）。
 
     rejected/insufficient 候选可以没有 chain（chain=None）。
-    当 primary_chain_id=None（所有候选 insufficient）时跳过 chain 校验。
+    无论 primary 是否为 null，非空 alternative 都必须通过 6 阶段校验：
+    - primary_chain_id=None 时跳过 primary chain 校验；
+    - alternative_chain_id 非空时仍校验 alternative chain 的 6 阶段顺序。
     """
     candidate_by_id = {c.id: c for c in trace.candidates}
 
-    if trace.primary_chain_id is None:
-        # 所有候选 insufficient/rejected：无 primary chain 需要校验
-        return
+    if trace.primary_chain_id is not None:
+        primary = candidate_by_id.get(trace.primary_chain_id)
+        if primary is None or primary.chain is None:
+            raise ValueError("primary candidate has no chain")
+        primary_stages = [n.stage for n in primary.chain.nodes]
+        if primary_stages != REQUIRED_CHAIN_STAGES:
+            raise ValueError(
+                f"primary chain stages mismatch: {primary_stages} != {REQUIRED_CHAIN_STAGES}"
+            )
 
-    primary = candidate_by_id.get(trace.primary_chain_id)
-    if primary is None or primary.chain is None:
-        raise ValueError("primary candidate has no chain")
-    primary_stages = [n.stage for n in primary.chain.nodes]
-    if primary_stages != REQUIRED_CHAIN_STAGES:
-        raise ValueError(
-            f"primary chain stages mismatch: {primary_stages} != {REQUIRED_CHAIN_STAGES}"
-        )
-
+    # 无论 primary 是否为 null，非空 alternative 都必须通过 6 阶段校验。
+    # 修复前：primary_chain_id=None 时直接 return，跳过 alternative 校验，
+    # 导致 primary=null + alternative 链条不完整的非法 trace 通过校验。
     if trace.alternative_chain_id is not None:
         alt = candidate_by_id.get(trace.alternative_chain_id)
         if alt is None or alt.chain is None:
@@ -155,7 +159,15 @@ def validate_trace_against_snapshot(
     trace: MarketTraceResult,
     snapshot: MarketTraceSnapshot,
 ) -> None:
-    """跨对象校验：候选完整性、source_id 存在性、chain 选择与阶段。"""
+    """跨对象校验：候选完整性、source_id 存在性、chain 选择与阶段、归因一致性。
+
+    新增 4 类校验（Task 5 review 修复）：
+    1. trace.dominant_phenomenon 与 snapshot.dominant_phenomenon 一致；
+       两者同时为 null 或同时非 null 且 kind 一致。
+    2. dominant_phenomenon.fact_ids 必须全部存在于 snapshot.sources。
+    3. 每个因果节点的 evidence_ids 不得为空，且全部存在于 snapshot.sources。
+    4. observable_result 节点必须至少引用一个 kind="market_fact" 的事实。
+    """
     categories = {candidate.category for candidate in trace.candidates}
     if (
         len(trace.candidates) != 4
@@ -163,17 +175,90 @@ def validate_trace_against_snapshot(
         or {candidate.id for candidate in trace.candidates} != categories
     ):
         raise ValueError("candidate categories are incomplete")
+
+    # 1. trace.dominant_phenomenon 与 snapshot.dominant_phenomenon 一致
+    snapshot_dp = snapshot.dominant_phenomenon
+    trace_dp = trace.dominant_phenomenon
+    if trace_dp is None and snapshot_dp is not None:
+        raise ValueError(
+            "trace.dominant_phenomenon is null but snapshot.dominant_phenomenon is not"
+        )
+    if trace_dp is not None and snapshot_dp is None:
+        raise ValueError(
+            "trace.dominant_phenomenon is not null but snapshot.dominant_phenomenon is null"
+        )
+    if trace_dp is not None and snapshot_dp is not None:
+        if trace_dp.kind != snapshot_dp.kind:
+            raise ValueError(
+                f"trace.dominant_phenomenon.kind {trace_dp.kind} != "
+                f"snapshot.dominant_phenomenon.kind {snapshot_dp.kind}"
+            )
+        # 2. dominant_phenomenon.fact_ids 必须全部存在于 snapshot.sources
+        for fact_id in trace_dp.fact_ids:
+            if fact_id not in snapshot.sources:
+                raise ValueError(
+                    f"trace.dominant_phenomenon.fact_ids references unknown source_id: {fact_id}"
+                )
+
+    # 3. 每个候选的证据引用必须存在；每个非空 chain 节点必须有至少 1 个证据
     ids = set(snapshot.sources)
     for candidate in trace.candidates:
         for source_id in (
             candidate.supporting_evidence_ids
             + candidate.counter_evidence_ids
-            + [item for node in (candidate.chain.nodes if candidate.chain else []) for item in node.evidence_ids]  # noqa: E501
         ):
             if source_id not in ids:
                 raise ValueError(f"unknown source_id: {source_id}")
+        if candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                if not node.evidence_ids:
+                    raise ValueError(
+                        f"candidate {candidate.id} node {node.stage} has empty evidence_ids"
+                    )
+                for source_id in node.evidence_ids:
+                    if source_id not in ids:
+                        raise ValueError(f"unknown source_id: {source_id}")
+
+    # 4. observable_result 节点必须至少引用一个 kind="market_fact" 的事实
+    #    （仅对 primary 和非空 alternative 指向的 chain 校验；
+    #     rejected/insufficient 候选可以没有 chain）
+    candidate_by_id = {c.id: c for c in trace.candidates}
+    chains_to_check: list[tuple[str, CandidateExplanation]] = []
+    if trace.primary_chain_id is not None:
+        primary = candidate_by_id.get(trace.primary_chain_id)
+        if primary is not None and primary.chain is not None:
+            chains_to_check.append(("primary", primary))
+    if trace.alternative_chain_id is not None:
+        alt = candidate_by_id.get(trace.alternative_chain_id)
+        if alt is not None and alt.chain is not None:
+            chains_to_check.append(("alternative", alt))
+    for label, candidate in chains_to_check:
+        chain = candidate.chain
+        if chain is None:
+            continue
+        for node in chain.nodes:
+            if node.stage == "observable_result":
+                has_market_fact = any(
+                    _source_kind(snapshot.sources, sid) == "market_fact"
+                    for sid in node.evidence_ids
+                )
+                if not has_market_fact:
+                    raise ValueError(
+                        f"{label} candidate {candidate.id} observable_result must "
+                        f"reference at least one market_fact source"
+                    )
+
     validate_selected_chain_ids(trace)
     validate_chain_stages(trace)
+
+
+def _source_kind(
+    sources: dict[str, SourceRecord],
+    source_id: str,
+) -> str | None:
+    """安全取 SourceRecord.kind 的字符串值，找不到时返回 None。"""
+    record = sources.get(source_id)
+    return record.kind if record is not None else None
 
 
 # ============================================================================
@@ -209,7 +294,7 @@ def _extract_sectors_from_snapshot(snapshot: MarketTraceSnapshot) -> list[str]:
     return result
 
 
-def _format_source_time(source) -> str:
+def _format_source_time(source: SourceRecord) -> str:
     """格式化 SourceRecord.occurred_at 为可读时间。"""
     if source.occurred_at is None:
         return "未知时间"
@@ -219,7 +304,7 @@ def _format_source_time(source) -> str:
         return str(source.occurred_at)
 
 
-def _render_candidate(candidate, indent: str = "") -> list[str]:
+def _render_candidate(candidate: CandidateExplanation, indent: str = "") -> list[str]:
     """渲染单个 CandidateExplanation 为 Markdown 行列表。"""
     lines: list[str] = []
     lines.append(f"{indent}### {candidate.category}（{candidate.status}）")
@@ -512,12 +597,14 @@ async def run(state: AgentState) -> dict[str, object]:
     2. archive_market_trace_snapshot(snapshot) 归档不可变 facts.json
     3. get_deep_think().ainvoke → 解析 → 跨对象校验
     4. render_market_trace_markdown 渲染展示层
-    5. archive_review(markdown, snapshot_id) 归档复盘报告
-    6. set_cached_review(report_date, artifact) 缓存完整工件
+    5. archive_review(markdown, snapshot_id) 归档复盘报告（返回 bool）
+    6. set_cached_review(report_date, artifact) 缓存完整工件（返回 bool）
     7. save_analysis_report 持久化到 DB
 
-    缓存命中路径：仅校验工件（ReviewArtifact.model_validate）、确保报告已落库、
-    返回 artifact.markdown。缓存命中时不请求 yfinance、财联社、Tavily 或 LLM。
+    缓存命中路径：除 ReviewArtifact.model_validate 外，还要重新执行
+    validate_trace_against_snapshot 跨对象校验，并校验缓存日期与快照日期一致；
+    任一不通过视为未命中，走完整路径。缓存命中时不请求 yfinance、财联社、
+    Tavily 或 LLM。
 
     任一前置步骤失败都返回降级文本，不跳到后一步。
     """
@@ -526,18 +613,36 @@ async def run(state: AgentState) -> dict[str, object]:
         or datetime.now().strftime("%Y-%m-%d")
     )
 
-    # 1. 缓存检查（命中则校验工件、持久化、返回）
+    # 1. 缓存检查（命中则校验工件 + 跨对象校验 + 日期一致、持久化、返回）
     cached = await get_cached_review(report_date)
     if cached is not None:
+        artifact: ReviewArtifact | None = None
         try:
             artifact = ReviewArtifact.model_validate(cached)
         except Exception:
             logger.debug("cached_review_artifact_invalid", exc_info=True)
             artifact = None
+        # 缓存命中后必须重新执行语义校验 + 校验缓存日期与快照日期一致，
+        # 防止缓存里存了旧日期/非法语义的 artifact 被当作今日报告返回。
+        if artifact is not None:
+            try:
+                if artifact.snapshot.trade_date != report_date:
+                    raise ValueError(
+                        f"cached snapshot trade_date {artifact.snapshot.trade_date} "
+                        f"!= report_date {report_date}"
+                    )
+                validate_trace_against_snapshot(artifact.trace, artifact.snapshot)
+            except Exception:
+                logger.warning(
+                    "cached_review_artifact_semantic_invalid",
+                    report_date=report_date,
+                    exc_info=True,
+                )
+                artifact = None
         if artifact is not None:
             await _persist_review_report(state, artifact)
             return {"final_response": artifact.markdown}
-        # 缓存内容无效（如旧纯文本），视为未命中，继续走完整路径
+        # 缓存内容无效（如旧纯文本、日期不一致或语义非法），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
     try:
@@ -603,10 +708,24 @@ async def run(state: AgentState) -> dict[str, object]:
     )
 
     # 6. 归档复盘报告（仅在 facts.json 存在时创建 Markdown）
-    archive_review(markdown, snapshot.snapshot_id)
+    #    严格失败顺序：归档失败 → 返回降级，不写 Redis / DB。
+    if not archive_review(markdown, snapshot.snapshot_id):
+        logger.error(
+            "review_archive_review_failed",
+            agent="review",
+            snapshot_id=snapshot.snapshot_id,
+        )
+        return {"final_response": DEGRADED_RESPONSE}
 
     # 7. 缓存完整工件（model_dump(mode="json") 保证 JSON 可序列化）
-    await set_cached_review(report_date, artifact.model_dump(mode="json"))
+    #    严格失败顺序：缓存失败 → 返回降级，不写 DB。
+    if not await set_cached_review(report_date, artifact.model_dump(mode="json")):
+        logger.error(
+            "review_cache_set_failed",
+            agent="review",
+            report_date=report_date,
+        )
+        return {"final_response": DEGRADED_RESPONSE}
 
     # 8. 持久化到 DB（仅 scheduler 触发）
     await _persist_review_report(state, artifact)

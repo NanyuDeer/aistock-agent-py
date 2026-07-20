@@ -141,3 +141,41 @@ def test_archive_review_markdown_keeps_review_suffix(review_dir: Path):
     assert len(review_files) == 1
     # 文件名形如 2026-07-19-1530-review.md，snapshot_builder._find_report 按日期前缀匹配
     assert review_files[0].name.endswith("-review.md")
+
+
+# ============================================================================
+# Task 5 review 修复 — archive_review 必须返回 bool，让 review 流程感知归档成败
+# ============================================================================
+
+
+def test_archive_review_returns_true_on_success(review_dir: Path):
+    """facts.json 存在且 Markdown 写入成功 → 返回 True。"""
+    snapshot = _make_snapshot()
+    archiver.archive_market_trace_snapshot(snapshot)
+    ok = archiver.archive_review(_SECTOR_MARKDOWN, snapshot.snapshot_id)
+    assert ok is True
+    review_files = list(review_dir.glob("*-review.md"))
+    assert len(review_files) == 1
+
+
+def test_archive_review_returns_false_when_facts_absent(review_dir: Path):
+    """facts.json 不存在 → 返回 False，不创建 Markdown。"""
+    ok = archiver.archive_review(_SECTOR_MARKDOWN, "nonexistent-snapshot")
+    assert ok is False
+    review_files = list(review_dir.glob("*-review.md"))
+    assert review_files == []
+
+
+def test_archive_review_returns_false_on_write_failure(
+    review_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """facts.json 存在但 write_text 抛异常 → 返回 False，不向上抛。"""
+    snapshot = _make_snapshot()
+    archiver.archive_market_trace_snapshot(snapshot)
+
+    def _raise(_content: str, *_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(review_dir.__class__, "write_text", _raise)
+    ok = archiver.archive_review(_SECTOR_MARKDOWN, snapshot.snapshot_id)
+    assert ok is False

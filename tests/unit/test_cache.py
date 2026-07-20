@@ -211,3 +211,30 @@ async def test_legacy_markdown_review_cache_is_a_miss():
     with patch("aistock_agent.services.cache.RedisPool") as pool:
         pool.get_client = AsyncMock(return_value=client)
         assert await get_cached_review("2026-07-19") is None
+
+
+# ============================================================================
+# Task 5 review 修复 — set_cached_review 必须返回 bool，让 review 流程感知缓存成败
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_set_cached_review_returns_true_on_success():
+    """Redis 写入成功 → 返回 True。"""
+    mock_client = AsyncMock()
+    mock_client.setex = AsyncMock()
+    artifact = {"snapshot": {"snapshot_id": "x"}, "markdown": "review content"}
+    with patch("aistock_agent.services.cache.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(return_value=mock_client)
+        ok = await cache.set_cached_review("2026-07-19", artifact)
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_set_cached_review_returns_false_on_redis_failure():
+    """Redis 异常 → 返回 False（不向上抛，但调用方据此返回降级文本）。"""
+    artifact = {"snapshot": {"snapshot_id": "x"}, "markdown": "review content"}
+    with patch("aistock_agent.services.cache.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(side_effect=RuntimeError("pool not init"))
+        ok = await cache.set_cached_review("2026-07-19", artifact)
+    assert ok is False

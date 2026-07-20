@@ -63,7 +63,7 @@ def archive_market_trace_snapshot(snapshot: MarketTraceSnapshot) -> Path:
     return facts_path
 
 
-def archive_review(markdown: str, snapshot_id: str) -> None:
+def archive_review(markdown: str, snapshot_id: str) -> bool:
     """将复盘报告归档到文件。
 
     仅在 ``<snapshot_id>-facts.json`` 存在时才创建 Markdown，确保事实先于
@@ -71,11 +71,16 @@ def archive_review(markdown: str, snapshot_id: str) -> None:
     ``YYYY-MM-DD-HHMM-review.md`` 命名后缀以兼容
     ``snapshot_builder._find_report`` 的日期前缀匹配。
 
-    失败不抛异常，不阻塞主流程。
+    失败不抛异常，但通过返回值让 review 流程感知归档成败：
+    - True：facts.json 存在且 Markdown 写入成功；
+    - False：facts.json 不存在或写入异常。
 
     Args:
         markdown: ``render_market_trace_markdown`` 渲染出的复盘 Markdown。
         snapshot_id: 关联的事实快照编号，用于校验 facts.json 存在并写入报告头部。
+
+    Returns:
+        归档是否成功。
     """
     try:
         REVIEW_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,11 +90,13 @@ def archive_review(markdown: str, snapshot_id: str) -> None:
                 "review_archive_skipped_no_facts",
                 snapshot_id=snapshot_id,
             )
-            return
+            return False
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
         filepath = REVIEW_OUTPUT_DIR / f"{timestamp}-review.md"
         content = f"快照编号：{snapshot_id}\n{markdown}"
         filepath.write_text(content, encoding="utf-8")
         logger.info("review_archived", path=str(filepath))
+        return True
     except Exception as e:
         logger.warning("review_archive_failed", error=str(e))
+        return False

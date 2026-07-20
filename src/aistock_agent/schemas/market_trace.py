@@ -5,9 +5,18 @@
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel
+
+# 主导现象 kind 的 Literal 别名，供服务层 cast 使用，避免 type: ignore。
+DominantPhenomenonKind: TypeAlias = Literal[
+    "broad_rally",
+    "broad_decline",
+    "style_divergence",
+    "sector_concentration",
+    "sentiment_extreme",
+]
 
 
 class SourceRecord(BaseModel):
@@ -23,13 +32,7 @@ class SourceRecord(BaseModel):
 
 
 class DominantPhenomenon(BaseModel):
-    kind: Literal[
-        "broad_rally",
-        "broad_decline",
-        "style_divergence",
-        "sector_concentration",
-        "sentiment_extreme",
-    ]
+    kind: DominantPhenomenonKind
     summary: str
     fact_ids: list[str]
     score: int

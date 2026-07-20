@@ -72,6 +72,23 @@ primary_chain_id 和非空 alternative_chain_id 指向的 chain 必须按顺序�
 - claim: 该节点的因果主张（一句话）
 - evidence_ids: 引用的 source_id 列表（每个节点至少 1 个）
 
+【repricing 阶段专用约束】
+repricing（预期差与再定价）节点的 claim 只能基于以下 5 类机制描述：
+1. 盈利预期（EPS/业绩预期上修或下修）
+2. 风险溢价（ERP/股权风险溢价上升或下降）
+3. 折现率（无风险利率或加权资本成本变动）
+4. 仓位（机构/外资/杠杆资金仓位调整）
+5. 流动性（市场流动性、换手、成交结构变化）
+
+不得在 repricing 中引入上述 5 类机制以外的主张（如政治猜测、未公开信息、
+情绪揣测）。若证据不足以判断具体机制，claim 必须以"未证实"开头并说明缺何种证据，
+evidence_ids 仍须至少引用一项相关 source_id；不得编造未在 sources 中出现的事实。
+
+【未证实原则】
+任何节点的 claim 若无 sources 中可追溯的证据支撑，必须显式写"未证实"，
+不得用推测性措辞（"可能"、"或许"、"据传"等）替代证据。
+unresolved_questions 中也只允许列出 sources 无法回答的问题，禁止猜测性陈述。
+
 【DominantPhenomenon 字段约束】
 - kind: "broad_rally" | "broad_decline" | "style_divergence" |
   "sector_concentration" | "sentiment_extreme"

@@ -3,6 +3,7 @@
 TDD RED -> GREEN: 先写失败测试，锁定"事实而非因果"的契约。
 """
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -381,3 +382,133 @@ def test_dominant_phenomenon_returns_none_for_empty_input():
     """空输入返回 None。"""
     assert select_dominant_phenomenon({}) is None
     assert select_dominant_phenomenon({"indexes": []}) is None
+
+
+# ============================================================================
+# Task 5 review 修复 — 同时校验 previous_daily.complete + trade_date/report_date 一致性
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_snapshot_raises_when_previous_daily_incomplete(mocker):
+    """coverage.previous_daily.complete 非 True 时抛出异常。
+
+    Node 当日 facts 必须与 previous_daily 共同完整；只校验 current_daily 会放过
+    Node 把"今日已收盘"伪装成 complete、但 previous_daily 仍滞后的场景。
+    """
+    incomplete = {
+        **COMPLETE_CLOSE,
+        "coverage": {
+            "current_daily": {"complete": True, "reason": "ok"},
+            "previous_daily": {"complete": False, "reason": "empty"},
+        },
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=incomplete))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    with pytest.raises(MarketTraceSnapshotUnavailable):
+        await build_market_trace_snapshot("2026-07-19")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_raises_when_trade_date_mismatches_report_date(mocker):
+    """Node trade_date 与 report_date 不一致时降级，不把旧事实写入新日期快照。
+
+    场景：周末/节假日调用时 Node 没有当日数据，trade_date 仍是上一交易日。
+    若不严格校验，会把上一交易日的 facts 伪装成"今日"快照写入。
+    """
+    # Node 返回的 trade_date 是 20260717（上一交易日），但 report_date 是 2026-07-19
+    stale = {**COMPLETE_CLOSE, "trade_date": "20260717"}
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=stale))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    with pytest.raises(MarketTraceSnapshotUnavailable):
+        await build_market_trace_snapshot("2026-07-19")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker):
+    """trade_date 既支持 YYYYMMDD 也支持 YYYY-MM-DD，规范化后与 report_date 比较。"""
+    # Node 用 YYYY-MM-DD 形式返回 trade_date；report_date 也是 YYYY-MM-DD
+    normalized = {
+        **COMPLETE_CLOSE,
+        "trade_date": "2026-07-19",
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=normalized))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+    assert snapshot.trade_date == "2026-07-19"
+
+
+# ============================================================================
+# Task 5 review 修复 — snapshot_id 必须支持同日失败后的安全重试
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_snapshot_id_includes_captured_at_for_safe_retry(mocker):
+    """同日失败后的重试必须产生不同 snapshot_id，避免 facts.json FileExistsError 永久阻断。
+
+    场景：首次 LLM/校验失败后，归档目录已有 trace-{trade_date}-facts.json。
+    若 snapshot_id 仅基于 trade_date，重试时 archive_market_trace_snapshot 会抛
+    FileExistsError，永久阻断后续重试。修复方案：snapshot_id 包含 captured_at 时间戳，
+    不同 captured_at 产生不同 snapshot_id，facts 文件仍不可覆盖但允许同日新建。
+    """
+    fixed_now_1 = datetime(2026, 7, 19, 7, 31, 0, tzinfo=UTC)
+    fixed_now_2 = datetime(2026, 7, 19, 7, 35, 30, tzinfo=UTC)
+
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    real_datetime = datetime
+    time_queue = [fixed_now_1, fixed_now_2]
+
+    class _FakeDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if time_queue:
+                return time_queue.pop(0)
+            return real_datetime.now(tz)
+
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.datetime",
+        _FakeDateTime,
+    )
+
+    snapshot_1 = await build_market_trace_snapshot("2026-07-19")
+    snapshot_2 = await build_market_trace_snapshot("2026-07-19")
+
+    # 同一天 trade_date 必须相同
+    assert snapshot_1.trade_date == snapshot_2.trade_date == "2026-07-19"
+    # 不同 captured_at 必须产生不同 snapshot_id
+    assert snapshot_1.captured_at != snapshot_2.captured_at
+    assert snapshot_1.snapshot_id != snapshot_2.snapshot_id
+    # snapshot_id 仍以 trace-{trade_date_yyyymmdd}- 开头，便于按日期检索
+    assert snapshot_1.snapshot_id.startswith("trace-20260719-")
+    assert snapshot_2.snapshot_id.startswith("trace-20260719-")

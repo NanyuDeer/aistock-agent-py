@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import cast
 
 import structlog
 
 from aistock_agent.schemas.market_trace import (
     DominantPhenomenon,
+    DominantPhenomenonKind,
     MarketTraceSnapshot,
     SourceRecord,
 )
@@ -93,6 +95,39 @@ def _safe_str(value: object, default: str = "") -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _safe_optional_str(value: object) -> str | None:
+    """安全转换为 ``str | None``。
+
+    配合 mypy 类型收窄：直接 ``item.get("url") if isinstance(item.get("url"), str) else None``
+    会让 mypy 推断为 ``object | None``（因为两次 ``get`` 调用结果分别判定），
+    通过本函数一次性收窄，避免 ``type: ignore``。
+    """
+    return value if isinstance(value, str) else None
+
+
+def _normalize_date_yyyymmdd(value: object) -> str | None:
+    """把 YYYYMMDD 或 YYYY-MM-DD 字符串规范化为 ``YYYY-MM-DD``，无效时返回 None。
+
+    Node 端 ``trade_date`` 可能是 ``20260719`` 或 ``2026-07-19``；
+    本函数统一为 ``YYYY-MM-DD`` 形式，便于与 ``report_date`` 比较。
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+    if (
+        len(s) == 10
+        and s[0:4].isdigit()
+        and s[4] == "-"
+        and s[5:7].isdigit()
+        and s[7] == "-"
+        and s[8:10].isdigit()
+    ):
+        return s
+    return None
 
 
 # ============================================================================
@@ -179,6 +214,8 @@ def select_dominant_phenomenon(
     ]
 
     # ── 逐 kind 打分 ──
+    # candidates 元组第二个字段为分数；第三个字段为绝对指数中位数，用于平局打破。
+    # kind 字段为 Literal 字符串字面量，mypy 需要显式标注才能接受为 Literal。
     candidates: list[tuple[str, int, float]] = []
     # (kind, score, index_median_abs) — 平局打破用
 
@@ -349,7 +386,7 @@ def select_dominant_phenomenon(
     }
 
     return DominantPhenomenon(
-        kind=winning_kind,
+        kind=cast(DominantPhenomenonKind, winning_kind),
         summary=summaries[winning_kind],
         fact_ids=fact_ids,
         score=winning_score,
@@ -390,6 +427,14 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     if current_daily_dict.get("complete") is not True:
         raise MarketTraceSnapshotUnavailable(
             "Node close-snapshot coverage.current_daily.complete is not True"
+        )
+    # 同时校验 previous_daily.complete — 防止 Node 把"今日已收盘"伪装成 complete、
+    # 但 previous_daily 仍滞后的场景；当日 facts 必须与 previous_daily 共同完整。
+    previous_daily = coverage_dict.get("previous_daily")
+    previous_daily_dict = previous_daily if isinstance(previous_daily, dict) else {}
+    if previous_daily_dict.get("complete") is not True:
+        raise MarketTraceSnapshotUnavailable(
+            "Node close-snapshot coverage.previous_daily.complete is not True"
         )
 
     # ── 2. 收集外部来源（同一 captured_at）──
@@ -436,6 +481,20 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
 
     trade_date_node = _safe_str(close_data.get("trade_date"))
     trade_date_dt = _parse_yyyymmdd(trade_date_node)
+
+    # 校验 Node trade_date 与 report_date 一致 — 不一致时降级，
+    # 不能把旧事实写入新日期快照（如周末/节假日 Node 返回上一交易日 trade_date）。
+    trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
+    if trade_date_normalized is None:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node close-snapshot trade_date is not a valid YYYYMMDD/YYYY-MM-DD: "
+            f"{trade_date_node!r}"
+        )
+    if trade_date_normalized != report_date:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node close-snapshot trade_date {trade_date_normalized} != report_date "
+            f"{report_date}; refusing to write stale facts into a new-date snapshot"
+        )
 
     # A 股指数事实
     indexes_list = close_data.get("indexes")
@@ -596,7 +655,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             provider="cls",
             title=_safe_str(item.get("title"), "无标题"),
             content=_safe_str(item.get("brief", item.get("content", "")))[:500],
-            url=item.get("url") if isinstance(item.get("url"), str) else None,
+            url=_safe_optional_str(item.get("url")),
             occurred_at=occurred_at,
             captured_at=captured_at,
             source_level="reporting",
@@ -630,7 +689,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
                 provider="tavily",
                 title=_safe_str(item.get("title"), "无标题"),
                 content=_safe_str(item.get("content", ""))[:500],
-                url=item.get("url") if isinstance(item.get("url"), str) else None,
+                url=_safe_optional_str(item.get("url")),
                 occurred_at=occurred_at,
                 captured_at=captured_at,
                 source_level="reporting",
@@ -640,7 +699,12 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     dominant = select_dominant_phenomenon(close_data)
 
     # ── 5. 返回事实快照 ──
-    snapshot_id = f"trace-{trade_date_node}"
+    # snapshot_id 包含 captured_at 时间戳（微秒精度），支持同日失败后的安全重试：
+    # 同一 captured_at 的重试产生相同 snapshot_id → facts 文件不可覆盖（FileExistsError），
+    # 不同 captured_at 的重试产生不同 snapshot_id → 允许新建 facts 文件，不阻断后续重试。
+    trade_date_yyyymmdd = trade_date_node.replace("-", "")
+    captured_at_suffix = captured_at.strftime("%Y%m%dT%H%M%S%fZ")
+    snapshot_id = f"trace-{trade_date_yyyymmdd}-{captured_at_suffix}"
 
     return MarketTraceSnapshot(
         snapshot_id=snapshot_id,
