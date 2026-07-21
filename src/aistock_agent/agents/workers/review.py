@@ -611,7 +611,7 @@ async def _persist_review_report(
 
     任何持久化异常都只打日志、不向上抛，保证复盘主流程的返回值不受影响。
     """
-    if state.get("trigger_source") != "scheduler":
+    if state.get("trigger_source") not in {"scheduler", "manual"}:
         return
     try:
         report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
@@ -661,7 +661,12 @@ async def run(state: AgentState) -> dict[str, object]:
     )
 
     # 1. 缓存检查（命中则校验工件 + 跨对象校验 + 日期一致、持久化、返回）
-    cached = await get_cached_review(report_date)
+    # state.skip_cache 为真时跳过缓存，强制完整流水线（管理员手动触发用）
+    if not state.get("skip_cache"):
+        cached = await get_cached_review(report_date)
+    else:
+        cached = None
+        logger.info("review_skip_cache", report_date=report_date)
     if cached is not None:
         artifact: ReviewArtifact | None = None
         try:

@@ -484,6 +484,71 @@ async def trigger_event_briefing(
         }
 
 
+@router.post("/briefing/review/trigger")
+async def trigger_review_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发复盘溯源生成（非流式，供管理员 curl 触发）
+
+    直接调用 review_agent.run()，不走 graph SSE 流。
+    返回 JSON 含 success / message / report_date / cached / elapsed_seconds。
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import review as review_agent
+
+    # 支持指定历史日期（如 ?report_date=2026-07-18），默认今天
+    report_date = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_review_start", report_date=report_date)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成今日复盘溯源"}],
+        "session_id": f"trigger_review_{report_date}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "review",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+        "report_date": report_date,
+    }
+
+    try:
+        result = await review_agent.run(state)
+        final_response = result.get("final_response")
+        generated = (
+            isinstance(final_response, str)
+            and final_response != "收盘溯源生成暂时不可用，请稍后重试"
+        )
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_review_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "复盘溯源生成完成" if generated else "复盘溯源生成失败（降级）",
+            "report_date": report_date,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_review_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"复盘溯源生成失败: {str(e)}",
+            "report_date": report_date,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
