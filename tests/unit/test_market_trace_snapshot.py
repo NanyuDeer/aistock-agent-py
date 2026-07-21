@@ -471,6 +471,10 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
     注意：node_api.get("/internal/market/close-snapshot") 仍会被调用一次
     （因为 trade_date 来自 close-snapshot 响应），但不应被调用第二次
     （用于 /internal/news/latest）。
+
+    强断言：旧实现用 side_effect 抛 AssertionError 的 mock 检查 yfinance/Tavily
+    未调用，但生产代码 try/except Exception 会吞掉 AssertionError，存在假阳性。
+    这里保留 mock 引用，在异常断言后用 assert_not_called() 明确断言。
     """
     stale = {**COMPLETE_CLOSE, "trade_date": "20260717"}
     # 用 side_effect 记录调用顺序；如果日期校验前置，第二次 node_api.get 不应被调用
@@ -484,30 +488,24 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
 
     mocker.patch.object(node_api, "get", side_effect=_node_get_side_effect)
 
-    # 这些 mock 不应被调用；用 side_effect 抛异常以放大任何意外调用
-    def _unexpected_call(*_args, **_kwargs):
-        raise AssertionError(
-            "collect_global_market_facts must not be called when trade_date mismatches"
-        )
-
-    mocker.patch(
+    # 保留 global market 和 Tavily mock 的引用，用于 assert_not_called() 强断言。
+    # 不再使用 side_effect 抛 AssertionError，因为生产代码 try/except Exception
+    # 会吞掉该异常，导致假阳性。
+    global_market_mock = mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        side_effect=_unexpected_call,
+        return_value=[],
     )
-
-    def _unexpected_tavily(*_args, **_kwargs):
-        raise AssertionError(
-            "TavilyService.search must not be called when trade_date mismatches"
-        )
-
-    mocker.patch(
+    tavily_search_mock = mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
-        side_effect=_unexpected_tavily,
+        return_value={"results": []},
     )
 
     with pytest.raises(MarketTraceSnapshotUnavailable):
         await build_market_trace_snapshot("2026-07-19")
 
+    # 日期不一致时不得调用任何外部数据源。
+    global_market_mock.assert_not_called()
+    tavily_search_mock.assert_not_called()
     # 只应调用过 close-snapshot，不应调用 news/latest
     assert node_get_calls == ["/internal/market/close-snapshot"]
 

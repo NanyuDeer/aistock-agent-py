@@ -123,10 +123,12 @@ def _primary_chain_nodes() -> list[dict[str, object]]:
     return [
         {"stage": "structural_root", "claim": "国内货币政策宽松周期", "evidence_ids": ["NEWS_001"]},
         {"stage": "trigger", "claim": "央行宣布降准0.5个百分点", "evidence_ids": ["NEWS_001"]},
-        {"stage": "transmission", "claim": "银行间流动性宽松传导至权益", "evidence_ids": ["NEWS_001"]},
+        {"stage": "transmission", "claim": "银行间流动性宽松传导至权益",
+         "evidence_ids": ["NEWS_001"]},
         {"stage": "exposure", "claim": "金融板块直接受益", "evidence_ids": ["INDEX_000001_SH"]},
         {"stage": "repricing", "claim": "市场情绪回暖", "evidence_ids": ["INDEX_000001_SH"]},
-        {"stage": "observable_result", "claim": "上证指数上涨0.5%", "evidence_ids": ["INDEX_000001_SH"]},
+        {"stage": "observable_result", "claim": "上证指数上涨0.5%",
+         "evidence_ids": ["INDEX_000001_SH"]},
     ]
 
 
@@ -138,7 +140,8 @@ def _alternative_chain_nodes() -> list[dict[str, object]]:
         {"stage": "transmission", "claim": "外资流入新兴市场", "evidence_ids": ["GLOBAL_001"]},
         {"stage": "exposure", "claim": "北向资金净流入", "evidence_ids": ["INDEX_000001_SH"]},
         {"stage": "repricing", "claim": "权重股估值抬升", "evidence_ids": ["INDEX_000001_SH"]},
-        {"stage": "observable_result", "claim": "上证指数上涨0.5%", "evidence_ids": ["INDEX_000001_SH"]},
+        {"stage": "observable_result", "claim": "上证指数上涨0.5%",
+         "evidence_ids": ["INDEX_000001_SH"]},
     ]
 
 
@@ -256,7 +259,9 @@ async def test_review_freezes_snapshot_before_single_structured_llm_call(mocker)
     # set_cached_review 必须返回 True，否则严格失败顺序会返回降级文本
     mocker.patch.object(review_agent, "set_cached_review", new=AsyncMock(return_value=True))
     llm = AsyncMock()
-    llm.ainvoke.side_effect = lambda _messages: order.append("llm") or AIMessage(content=VALID_TRACE_JSON)
+    llm.ainvoke.side_effect = lambda _messages: (
+        order.append("llm") or AIMessage(content=VALID_TRACE_JSON)
+    )
     mocker.patch.object(review_agent, "get_deep_think", return_value=llm)
 
     result = await review_agent.run(SCHEDULER_STATE)
@@ -367,7 +372,7 @@ async def test_review_returns_degraded_when_llm_raises(mocker):
 
 
 # ============================================================================
-# 缓存命中 — 直接返回，不调用 LLM
+# 缓存命中 — 基于 trace+snapshot 重新渲染，不调用 LLM
 # ============================================================================
 
 
@@ -378,7 +383,12 @@ async def test_review_returns_degraded_when_llm_raises(mocker):
     return_value=_make_cached_artifact("cached review").model_dump(mode="json"),
 )
 async def test_review_run_cache_hit(_mock_cache):
-    """缓存命中：直接返回缓存内容，不调用 LLM。"""
+    """缓存命中：基于 trace+snapshot 重新渲染，不调用 LLM。
+
+    P1：缓存里的 markdown 文本不得直接返回；必须基于 artifact.trace +
+    artifact.snapshot 重新调用 render_market_trace_markdown，以冻结 snapshot
+    为事实来源重建展示层。
+    """
     state = {
         "messages": [],
         "session_id": "test",
@@ -392,7 +402,9 @@ async def test_review_run_cache_hit(_mock_cache):
         "report_date": "2026-07-17",
     }
     result = await review_agent.run(state)
-    assert result["final_response"] == "cached review"
+    # 重新渲染的 Markdown 包含 snapshot 的主导现象事实，不包含缓存里的旧文本。
+    assert "## 主导现象" in result["final_response"]
+    assert "cached review" not in result["final_response"]
 
 
 @pytest.mark.asyncio
@@ -419,13 +431,16 @@ async def test_cached_scheduler_review_is_still_persisted(_mock_cache):
         }
         result = await review_agent.run(state)
 
-    assert result["final_response"] == "cached scheduler review"
+    # P1：返回与持久化的都是重新渲染的 Markdown，不是缓存里的旧文本。
+    assert "## 主导现象" in result["final_response"]
+    assert "cached scheduler review" not in result["final_response"]
     save.assert_awaited_once()
     kwargs = save.await_args.kwargs
     assert kwargs["report_type"] == "review"
     assert kwargs["report_date"] == "2026-07-17"
     assert kwargs["content"]["schema_version"] == "2.0"
-    assert kwargs["content"]["display_report"]["details"] == "cached scheduler review"
+    assert "## 主导现象" in kwargs["content"]["display_report"]["details"]
+    assert "cached scheduler review" not in kwargs["content"]["display_report"]["details"]
 
 
 @pytest.mark.asyncio
@@ -451,7 +466,9 @@ async def test_cached_manual_review_is_not_persisted(_mock_cache):
         }
         result = await review_agent.run(state)
 
-    assert result["final_response"] == "cached manual review"
+    # P1：返回的是重新渲染的 Markdown，不是缓存里的旧文本。
+    assert "## 主导现象" in result["final_response"]
+    assert "cached manual review" not in result["final_response"]
     save.assert_not_awaited()
 
 
@@ -463,7 +480,7 @@ async def test_cached_manual_review_is_not_persisted(_mock_cache):
 @pytest.mark.asyncio
 async def test_scheduler_persist_failure_keeps_review_response(mocker):
     """scheduler 持久化失败不应影响复盘正常返回（降级吞掉异常）。"""
-    mock_set_cache = _patch_snapshot_and_llm(mocker, VALID_TRACE_JSON)
+    _patch_snapshot_and_llm(mocker, VALID_TRACE_JSON)
     mocker.patch.object(review_agent, "archive_review")
 
     with patch.object(
@@ -475,6 +492,76 @@ async def test_scheduler_persist_failure_keeps_review_response(mocker):
 
     assert "主因果链" in result["final_response"]
     save.assert_awaited_once()
+
+
+# ============================================================================
+# P1 回归 — 缓存命中必须基于 trace+snapshot 重新渲染，不返回缓存里的展示层文本
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_re_renders_from_frozen_snapshot_not_cached_markdown(mocker):
+    """P1 回归：缓存命中不得绕过冻结快照渲染。
+
+    构造一个 kind/fact_ids/score 合法（通过 validate_trace_against_snapshot）、
+    但 trace.dominant_phenomenon.summary 和缓存 markdown 都被改写的缓存工件。
+    缓存命中路径必须：
+    - 基于 artifact.trace + artifact.snapshot 重新调用 render_market_trace_markdown
+    - 返回的 Markdown 包含 snapshot 的主导现象事实摘要
+    - 返回的 Markdown 不包含被改写的缓存文本
+    - 不调用 fresh snapshot / LLM
+    """
+    # 1. 构造被污染的缓存工件：trace.summary 被改写，markdown 被改写。
+    #    kind/fact_ids/score 保持与 snapshot 一致，确保 validate_trace_against_snapshot 通过。
+    tampered_trace_dict = copy.deepcopy(VALID_TRACE_DICT)
+    tampered_trace_dict["dominant_phenomenon"]["summary"] = "TAMPERED_TRACE_SUMMARY"
+    tampered_artifact = ReviewArtifact(
+        schema_version="1.0",
+        snapshot=TRACE_SNAPSHOT,
+        trace=MarketTraceResult.model_validate(tampered_trace_dict),
+        markdown="TAMPERED_CACHED_MARKDOWN",
+        trace_summary="tampered cached summary",
+        sectors=["tampered_sector"],
+    )
+
+    # 2. mock get_cached_review 返回被污染的工件
+    mocker.patch.object(
+        review_agent,
+        "get_cached_review",
+        new=AsyncMock(return_value=tampered_artifact.model_dump(mode="json")),
+    )
+
+    # 3. mock fresh snapshot 和 LLM 以断言缓存命中路径未调用它们
+    fresh_snapshot = mocker.patch.object(
+        review_agent,
+        "build_market_trace_snapshot",
+        new=AsyncMock(),
+    )
+    fresh_llm = mocker.patch.object(review_agent, "get_deep_think")
+
+    # 4. 手动触发（非 scheduler），避免 save_analysis_report 网络调用
+    state = {
+        "messages": [],
+        "session_id": "test",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "report_date": "2026-07-17",
+    }
+    result = await review_agent.run(state)
+
+    # 5. 返回的 Markdown 必须包含 snapshot 的主导现象事实摘要
+    assert "多个核心指数同步上涨，市场广度偏强" in result["final_response"]
+    # 6. 返回的 Markdown 不得包含被改写的缓存文本或被改写的 trace summary
+    assert "TAMPERED_CACHED_MARKDOWN" not in result["final_response"]
+    assert "TAMPERED_TRACE_SUMMARY" not in result["final_response"]
+    # 7. fresh snapshot 和 LLM 均未被调用
+    fresh_snapshot.assert_not_called()
+    fresh_llm.assert_not_called()
 
 
 # ============================================================================

@@ -636,7 +636,9 @@ async def run(state: AgentState) -> dict[str, object]:
     缓存命中路径：除 ReviewArtifact.model_validate 外，还要重新执行
     validate_trace_against_snapshot 跨对象校验，并校验缓存日期与快照日期一致；
     任一不通过视为未命中，走完整路径。缓存命中时不请求 yfinance、财联社、
-    Tavily 或 LLM。
+    Tavily 或 LLM。命中后基于 artifact.trace + artifact.snapshot 重新调用
+    render_market_trace_markdown 重建展示层（markdown / trace_summary / sectors），
+    不直接使用缓存里的展示层文本，避免旧缓存或污染缓存绕过冻结快照渲染。
 
     任一前置步骤失败都返回降级文本，不跳到后一步。
     """
@@ -672,8 +674,26 @@ async def run(state: AgentState) -> dict[str, object]:
                 )
                 artifact = None
         if artifact is not None:
-            await _persist_review_report(state, artifact)
-            return {"final_response": artifact.markdown}
+            # P1：缓存命中不得绕过冻结快照渲染。
+            # artifact.markdown / trace_summary / sectors 是缓存里的展示层文本，
+            # 可能被旧缓存或污染缓存改写。这里基于 artifact.trace + artifact.snapshot
+            # 重新调用 render_market_trace_markdown，以冻结 snapshot 为事实来源重建
+            # 展示层字段，再传给 _persist_review_report 并返回。
+            # 该路径禁止请求 Node 收盘数据、yfinance、财联社、Tavily 或 LLM；
+            # 也不重写 Redis 缓存（命中即用，重写无收益且会增加风险）。
+            rendered_markdown = render_market_trace_markdown(
+                artifact.trace, artifact.snapshot
+            )
+            rebuilt_artifact = ReviewArtifact(
+                schema_version=artifact.schema_version,
+                snapshot=artifact.snapshot,
+                trace=artifact.trace,
+                markdown=rendered_markdown,
+                trace_summary=_extract_trace_summary(rendered_markdown),
+                sectors=_extract_review_sectors(rendered_markdown),
+            )
+            await _persist_review_report(state, rebuilt_artifact)
+            return {"final_response": rendered_markdown}
         # 缓存内容无效（如旧纯文本、日期不一致或语义非法），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
