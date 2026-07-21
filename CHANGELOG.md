@@ -2,6 +2,27 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-21 — 市场溯源：冻结事实 → 竞争归因 → 不可变归档 → 缓存抗污染
+
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/schemas/market_trace.py`：Pydantic 严格契约（SourceRecord / DominantPhenomenon / CausalChain / CandidateExplanation / MarketTraceResult / MarketTraceSnapshot / ReviewArtifact）
+- `src/aistock_agent/services/market_trace_snapshot.py`：构建冻结事实快照、规则选择主导现象、境外行情/财联社/Tavily 证据收集
+- `tests/unit/test_market_trace_snapshot.py`：快照归一化、缺失降级、规则确定性、occurred_at 日期格式回归
+- `tests/unit/test_archiver.py`：不可变归档顺序、重复 snapshot_id 拒绝、事實先于展示层
+
+### 修复
+- `src/aistock_agent/agents/workers/review.py`：Review Agent 从 ReAct 改为单次 JSON 推理；冻结事实先于 LLM 调用；校验 Candidate/chain/source_id/stage/dominant_phenomenon；Counter 多重集拒绝重复 fact_ids；primary=null 归因链拒绝；缓存命中由 snapshot+trace 重建 Markdown/summary/sectors
+- `src/aistock_agent/services/cache.py`：review 缓存改为完整 JSON artifact（dict），旧纯文本视为未命中
+- `src/aistock_agent/services/archiver.py`：新增 `archive_market_trace_snapshot`（Path.open("x") 不可覆盖），`archive_review` 校验 facts.json 先存在
+- `tests/integration/test_review_agent.py`：91 项集成测试覆盖完整时序、缓存抗污染、重复 ID 拒绝、归因一致性
+
+### 删除
+- `src/aistock_agent/tools/review_tools.py`：移除 yfinance A 股取数和过时 ReAct Tool 注册
+
+---
+
 ## [main] 2026-07-20 — 移除十倍股工具 — tenx_tools.py 已被 trend_tools.py 替代
 **开发者**: Aria
 

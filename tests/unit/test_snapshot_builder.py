@@ -225,3 +225,22 @@ def test_append_new_aliases_rejects_non_str_entries():
     mock_file.write_text.assert_called_once()
     written = json.loads(mock_file.write_text.call_args.args[0])
     assert written == {"新能源": ["绿色能源"]}
+
+
+# ============================================================================
+# brief Task 5 Step 5 — 回归：render_market_trace_markdown 的 SECTOR_LIST 标记
+# 可被 _extract_sectors 正确提取
+# ============================================================================
+
+
+def test_snapshot_builder_reads_sector_list_from_market_trace_markdown():
+    from aistock_agent.services.snapshot_builder import _extract_sectors
+
+    markdown = (
+        "# A股收盘溯源\n"
+        "<!--SECTOR_LIST_START-->\n"
+        "- 半导体\n"
+        "- 贵金属\n"
+        "<!--SECTOR_LIST_END-->\n"
+    )
+    assert _extract_sectors(markdown) == ["半导体", "贵金属"]

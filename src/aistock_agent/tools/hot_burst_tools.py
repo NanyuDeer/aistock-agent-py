@@ -114,7 +114,8 @@ def _format_history(data: dict[str, object]) -> str:
         detected_at = item.get("detected_at", item.get("detectedAt", item.get("push_date", "-")))
         keywords = item.get("keywords", item.get("theme", "-"))
         lines.append(
-            f"- {detected_at} | {stock_name}({symbol}) | 等级={level} | 分数={score} | 关键词={keywords}"
+            f"- {detected_at} | {stock_name}({symbol}) | 等级={level}"
+            f" | 分数={score} | 关键词={keywords}"
         )
     return "\n".join(lines)
 
