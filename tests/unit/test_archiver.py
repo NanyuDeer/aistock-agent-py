@@ -8,7 +8,7 @@
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,7 +20,6 @@ from aistock_agent.schemas.market_trace import (
 )
 from aistock_agent.services import archiver
 
-
 # ============================================================================
 # fixtures — 最小合法 MarketTraceSnapshot + tmp_path 重定向 REVIEW_OUTPUT_DIR
 # ============================================================================
@@ -31,7 +30,7 @@ def _make_snapshot(snapshot_id: str = "trace-20260719") -> MarketTraceSnapshot:
     return MarketTraceSnapshot(
         snapshot_id=snapshot_id,
         trade_date="2026-07-19",
-        captured_at=datetime(2026, 7, 19, 15, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 7, 19, 15, 0, tzinfo=UTC),
         a_share={
             "sectors": {
                 "top_gainers": [{"name": "半导体"}],
@@ -48,8 +47,8 @@ def _make_snapshot(snapshot_id: str = "trace-20260719") -> MarketTraceSnapshot:
                 title="上证指数",
                 content="close=3200.0, pct_chg=0.5",
                 url=None,
-                occurred_at=datetime(2026, 7, 17, 15, 0, tzinfo=timezone.utc),
-                captured_at=datetime(2026, 7, 17, 15, 30, tzinfo=timezone.utc),
+                occurred_at=datetime(2026, 7, 17, 15, 0, tzinfo=UTC),
+                captured_at=datetime(2026, 7, 17, 15, 30, tzinfo=UTC),
                 source_level="market_data",
             ),
         },

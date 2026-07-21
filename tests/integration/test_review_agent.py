@@ -1091,3 +1091,62 @@ async def test_full_success_sequence_is_snapshot_facts_llm_markdown_redis_db(moc
         "redis_cache",
         "db_persist",
     ]
+
+
+@pytest.mark.asyncio
+async def test_review_degraded_when_dominant_phenomenon_fact_ids_are_duplicated(mocker):
+    """新鲜 trace 的重复主导事实 ID 不得绕过冻结快照绑定。"""
+    def _duplicate_dominant_fact_id(trace: dict) -> None:
+        trace["dominant_phenomenon"]["fact_ids"] = [
+            "INDEX_000001_SH",
+            "INDEX_000001_SH",
+        ]
+
+    mock_set_cache = _patch_snapshot_and_llm(
+        mocker,
+        _trace_json_with(_duplicate_dominant_fact_id),
+    )
+
+    result = await review_agent.run(SCHEDULER_STATE)
+
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    mock_set_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_with_duplicate_dominant_fact_ids_is_not_persisted(mocker):
+    """缓存语义校验失败时，不得持久化该工件的 market_trace。"""
+    duplicated_trace = copy.deepcopy(VALID_TRACE_DICT)
+    duplicated_trace["dominant_phenomenon"]["fact_ids"] = [
+        "INDEX_000001_SH",
+        "INDEX_000001_SH",
+    ]
+    cached_artifact = ReviewArtifact(
+        schema_version="1.0",
+        snapshot=TRACE_SNAPSHOT,
+        trace=MarketTraceResult.model_validate(duplicated_trace),
+        markdown="invalid cached review",
+        trace_summary="invalid cached summary",
+        sectors=[],
+    )
+    mocker.patch.object(
+        review_agent,
+        "get_cached_review",
+        new=AsyncMock(return_value=cached_artifact.model_dump(mode="json")),
+    )
+    fresh_snapshot = mocker.patch.object(
+        review_agent,
+        "build_market_trace_snapshot",
+        new=AsyncMock(side_effect=RuntimeError("fresh snapshot unavailable")),
+    )
+    save = mocker.patch.object(
+        review_agent.node_api,
+        "save_analysis_report",
+        new=AsyncMock(),
+    )
+
+    result = await review_agent.run(SCHEDULER_STATE)
+
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    fresh_snapshot.assert_awaited_once_with("2026-07-17")
+    save.assert_not_awaited()

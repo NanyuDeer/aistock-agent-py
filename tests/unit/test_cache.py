@@ -10,7 +10,7 @@
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,7 +22,6 @@ from aistock_agent.schemas.market_trace import (
 )
 from aistock_agent.services import cache
 from aistock_agent.services.cache import get_cached_review, set_cached_review
-
 
 # ============================================================================
 # 测试 fixture — REVIEW_ARTIFACT（最小合法 ReviewArtifact 实例）
@@ -47,7 +46,7 @@ REVIEW_ARTIFACT = _SerializableReviewArtifact(
     snapshot=MarketTraceSnapshot(
         snapshot_id="trace-20260719",
         trade_date="2026-07-19",
-        captured_at=datetime(2026, 7, 19, 15, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 7, 19, 15, 0, tzinfo=UTC),
         a_share={},
         sources={},
         missing_fields=[],
@@ -160,7 +159,7 @@ async def test_set_cached_review_writes():
         await cache.set_cached_review("2026-07-19", artifact)
 
     mock_client.setex.assert_awaited_once_with(
-        f"briefing:review:2026-07-19", 86400, json.dumps(artifact, ensure_ascii=False),
+        "briefing:review:2026-07-19", 86400, json.dumps(artifact, ensure_ascii=False),
     )
 
 

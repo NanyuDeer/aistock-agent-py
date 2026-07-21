@@ -439,12 +439,13 @@ async def test_snapshot_raises_when_trade_date_mismatches_report_date(mocker):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker):
+@pytest.mark.parametrize("trade_date", ["20260719", "2026-07-19"])
+async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker, trade_date):
     """trade_date 既支持 YYYYMMDD 也支持 YYYY-MM-DD，规范化后与 report_date 比较。"""
-    # Node 用 YYYY-MM-DD 形式返回 trade_date；report_date 也是 YYYY-MM-DD
+    # Node trade_date 支持 YYYYMMDD 和 YYYY-MM-DD；report_date 固定为 YYYY-MM-DD。
     normalized = {
         **COMPLETE_CLOSE,
-        "trade_date": "2026-07-19",
+        "trade_date": trade_date,
     }
     mocker.patch.object(node_api, "get", AsyncMock(return_value=normalized))
     mocker.patch(

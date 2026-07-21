@@ -10,6 +10,7 @@ build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推�
 """
 
 import re
+from collections import Counter
 from datetime import datetime
 
 import structlog
@@ -205,15 +206,15 @@ def validate_trace_against_snapshot(
                 f"trace.dominant_phenomenon.kind {trace_dp.kind} != "
                 f"snapshot.dominant_phenomenon.kind {snapshot_dp.kind}"
             )
-        # fact_ids 必须与 snapshot 完全一致（作为集合），禁止篡改冻结事实依据。
+        # fact_ids 必须与 snapshot 完全一致（作为多重集），禁止篡改冻结事实依据。
         # 旧实现只校验 fact_ids 存在于 snapshot.sources，模型可换成另一个存在但无关
         # 的 source_id（如把 INDEX_000001_SH 换成 NEWS_001），绕过冻结事实。
-        trace_fact_set = set(trace_dp.fact_ids)
-        snapshot_fact_set = set(snapshot_dp.fact_ids)
-        if trace_fact_set != snapshot_fact_set:
+        trace_fact_counts = Counter(trace_dp.fact_ids)
+        snapshot_fact_counts = Counter(snapshot_dp.fact_ids)
+        if trace_fact_counts != snapshot_fact_counts:
             raise ValueError(
-                f"trace.dominant_phenomenon.fact_ids {sorted(trace_fact_set)} != "
-                f"snapshot.dominant_phenomenon.fact_ids {sorted(snapshot_fact_set)} "
+                f"trace.dominant_phenomenon.fact_ids {sorted(trace_fact_counts.items())} != "
+                f"snapshot.dominant_phenomenon.fact_ids {sorted(snapshot_fact_counts.items())} "
                 f"(frozen facts must not be tampered)"
             )
         # score 必须与 snapshot 完全一致，禁止篡改冻结评分。
