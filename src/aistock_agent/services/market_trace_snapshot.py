@@ -443,12 +443,16 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # 场景：周末/节假日调用时 Node 没有当日数据，trade_date 仍是上一交易日；
     # 不能把旧事实写入新日期快照。
     trade_date_node = _safe_str(close_data.get("trade_date"))
-    trade_date_dt = _parse_yyyymmdd(trade_date_node)
-
     trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
     if trade_date_normalized is None:
         raise MarketTraceSnapshotUnavailable(
             f"Node close-snapshot trade_date is not a valid YYYYMMDD/YYYY-MM-DD: "
+            f"{trade_date_node!r}"
+        )
+    trade_date_dt = _parse_yyyymmdd(trade_date_normalized.replace("-", ""))
+    if trade_date_dt is None:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node close-snapshot trade_date is not a valid calendar date: "
             f"{trade_date_node!r}"
         )
     if trade_date_normalized != report_date:

@@ -281,6 +281,18 @@ def validate_trace_against_snapshot(
     validate_selected_chain_ids(trace)
     validate_chain_stages(trace)
 
+    # 无主导现象时只能保留候选调查结果，不能选择任何归因链。
+    # 放在既有选链和阶段校验之后，确保 primary=null 时的非空 alternative
+    # 仍会经过 ID、status、chain 和 6 阶段校验。
+    if snapshot_dp is None and (
+        trace.primary_chain_id is not None
+        or trace.alternative_chain_id is not None
+    ):
+        raise ValueError(
+            "primary_chain_id and alternative_chain_id must be null when "
+            "snapshot.dominant_phenomenon is null"
+        )
+
 
 def _source_kind(
     sources: dict[str, SourceRecord],

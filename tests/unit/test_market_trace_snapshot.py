@@ -457,6 +457,16 @@ async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker):
     )
     snapshot = await build_market_trace_snapshot("2026-07-19")
     assert snapshot.trade_date == "2026-07-19"
+    expected_occurred_at = datetime(2026, 7, 19, tzinfo=UTC)
+    for source_id in (
+        "INDEX_000001_SH",
+        "BREADTH_ALL",
+        "TURNOVER_ALL",
+        "LIMITS_ALL",
+        "MAIN_FORCE_ALL",
+        "SECTORS_ALL",
+    ):
+        assert snapshot.sources[source_id].occurred_at == expected_occurred_at
 
 
 @pytest.mark.asyncio

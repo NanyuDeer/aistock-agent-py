@@ -220,10 +220,16 @@ def _trace_json_with(modifier: object) -> str:
     return json.dumps(trace, ensure_ascii=False)
 
 
-def _patch_snapshot_and_llm(mocker, llm_content: str | Exception) -> object:
+def _patch_snapshot_and_llm(
+    mocker,
+    llm_content: str | Exception,
+    snapshot: MarketTraceSnapshot | None = None,
+) -> object:
     """统一 mock build_market_trace_snapshot + get_deep_think + archive，返回 mock_set_cache。"""
+    snapshot_for_test = snapshot if snapshot is not None else TRACE_SNAPSHOT
+
     async def build_snapshot(_date: str):
-        return TRACE_SNAPSHOT
+        return snapshot_for_test
 
     mocker.patch.object(review_agent, "build_market_trace_snapshot", build_snapshot)
     # 避免归档写盘影响测试隔离；archive_review 和 set_cached_review 必须返回 True，
@@ -621,6 +627,28 @@ async def test_review_degraded_when_trace_dominant_phenomenon_mismatches_snapsho
 
     mock_set_cache = _patch_snapshot_and_llm(mocker, _trace_json_with(_modify_dp_kind))
     result = await review_agent.run(SCHEDULER_STATE)
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    mock_set_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_review_degraded_when_no_dominant_phenomenon_selects_chains(mocker):
+    """无主导现象时不得选择 primary 或 alternative 因果链。"""
+    no_dominant_snapshot = TRACE_SNAPSHOT.model_copy(
+        update={"dominant_phenomenon": None}
+    )
+
+    def _remove_trace_dominant_phenomenon(trace: dict) -> None:
+        trace["dominant_phenomenon"] = None
+
+    mock_set_cache = _patch_snapshot_and_llm(
+        mocker,
+        _trace_json_with(_remove_trace_dominant_phenomenon),
+        snapshot=no_dominant_snapshot,
+    )
+
+    result = await review_agent.run(SCHEDULER_STATE)
+
     assert result["final_response"] == review_agent.DEGRADED_RESPONSE
     mock_set_cache.assert_not_called()
 
