@@ -159,6 +159,26 @@ async def test_hot_burst_scheduler_persists_schema_v2():
 
 
 @pytest.mark.asyncio
+async def test_hot_burst_scheduler_extracts_json_wrapped_in_explanation():
+    """The persisted report must use JSON inside an explanatory code block."""
+    wrapped_response = f"Analysis complete.\n\n```json\n{_VALID_RESPONSE}\n```"
+    with (
+        patch(_NODE_API) as mock_api,
+        patch(_CREATE_REACT_AGENT, return_value=_mock_agent(wrapped_response)),
+        patch(_GET_DEEP_THINK, return_value=MagicMock()),
+    ):
+        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": 5})
+        await run(_state(scheduler=True))
+
+    persisted = mock_api.save_analysis_report.await_args.kwargs["content"]
+    assert persisted["display_report"]["summary"] == "算力与高端制造关注度较高"
+    assert persisted["display_report"]["details"] == "重点分析热门程度、板块逻辑、持续性和风险。"
+    assert persisted["display_report"]["stocks"] == ["300308", "300124"]
+    assert persisted["podcast_brief"] == _VALID_BRIEF
+
+
+@pytest.mark.asyncio
 async def test_hot_burst_user_request_does_not_persist():
     """普通用户实时调用只返回报告，不执行 scheduler 持久化。"""
     with (
