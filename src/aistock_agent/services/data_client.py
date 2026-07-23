@@ -4,6 +4,10 @@ Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
+from dataclasses import dataclass
+from datetime import date
+from typing import Literal
+
 import httpx
 import structlog
 
@@ -11,6 +15,15 @@ from aistock_agent.config import settings
 from aistock_agent.services.http_client import HttpClientPool
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class ReviewReportReadResult:
+    """市场复盘工件读取结果，仅供 market_trace_qa 使用。"""
+
+    status: Literal["found", "not_found", "unavailable"]
+    report: dict[str, object] | None = None
+
 
 
 class NodeApiClient:
@@ -291,6 +304,62 @@ class NodeApiClient:
             path = f"/internal/analysis-reports/{report_type}/{report_date}"
 
         return await self.get(path)
+
+
+    async def get_review_analysis_report(
+        self,
+        report_date: date,
+    ) -> ReviewReportReadResult:
+        """读取已持久化的 review 工件并保留不存在与服务失败的差异。
+
+        该接口故意只接受 ``datetime.date``，并通过 ``isoformat`` 固定构造路径，
+        防止调用方输入进入 URL 路径后发生目录穿越。它不改变通用
+        :meth:`get_analysis_report` 的 ``None`` 兼容语义。
+        """
+        if type(report_date) is not date:
+            raise TypeError("report_date 必须是 datetime.date")
+
+        url = (
+            f"{self._base_url}/internal/analysis-reports/review/"
+            f"{report_date.isoformat()}"
+        )
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("review_report_read_request_error", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+        except Exception as exc:
+            logger.error("review_report_read_unexpected_error", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+
+        if response.status_code == 404:
+            return ReviewReportReadResult("not_found")
+        if response.status_code != 200:
+            logger.error(
+                "review_report_read_http_error",
+                url=url,
+                status=response.status_code,
+            )
+            return ReviewReportReadResult("unavailable")
+
+        try:
+            payload = response.json()
+        except Exception as exc:
+            logger.error("review_report_read_invalid_json", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            logger.error("review_report_read_invalid_response", url=url)
+            return ReviewReportReadResult("unavailable")
+        report = payload.get("data")
+        if not isinstance(report, dict):
+            logger.error("review_report_read_invalid_data", url=url)
+            return ReviewReportReadResult("unavailable")
+        return ReviewReportReadResult("found", report)
+
 
     async def cleanup_expired_reports(self) -> int:
         """清理过期报告

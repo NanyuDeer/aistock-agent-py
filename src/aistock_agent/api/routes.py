@@ -17,6 +17,7 @@ from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -639,6 +640,28 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     if r:
         return {"code": 200, "data": r}
     return {"code": 404, "message": "报告未生成", "data": None}
+
+
+# ── 市场复盘问答 ─────────────────────────────────────────────────
+
+
+@router.post("/market-trace-qa/message")
+async def market_trace_qa_message(
+    req: MarketTraceQaRequest,
+    _: None = Depends(verify_internal_token),
+) -> MarketTraceQaResponse:
+    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
+
+    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
+    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
+    """
+    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
+
+    return await answer_market_trace_qa(
+        message=req.message,
+        report_date=req.report_date,
+        session_id=req.session_id,
+    )
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────
