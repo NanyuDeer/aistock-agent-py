@@ -103,3 +103,15 @@ async def test_get_hot_burst_history_degradation():
             {"limit": 50, "min_resonance_only": True, "days": 30, "offset": 0}
         )
         assert result == DEGRADED_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_get_hot_burst_history_supports_min_resonance():
+    with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"records": []})
+        await get_hot_burst_history.ainvoke(
+            {"limit": 50, "days": 1, "min_resonance": 2, "offset": 0}
+        )
+        mock_api.get.assert_called_once_with(
+            "/internal/institution-research/history?limit=50&min_resonance_only=true&days=1&min_resonance=2&offset=0"
+        )

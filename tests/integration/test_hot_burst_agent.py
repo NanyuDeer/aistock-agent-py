@@ -16,8 +16,8 @@ _NODE_API = "aistock_agent.agents.workers.hot_burst.node_api"
 _EXAMPLE_PATH = Path(__file__).parents[2] / "docs/agent-outputs/hot_burst/hot_burst-dual-layer-report.json"
 
 _SOURCE_DATA = {
-    "update_time": "2026-07-15 09:00",
-    "outbreaks": [{"symbol": "300308", "stockName": "中际旭创"}],
+    "total": 1,
+    "records": [{"symbol": "300308", "stock_name": "中际旭创"}],
 }
 _VALID_BRIEF = (
     "今日机构调研热门方向集中在算力基础设施与高端制造。中际旭创和汇川技术在近期调研关注、板块消息及市场反馈中表现较突出，"
@@ -83,9 +83,12 @@ async def test_hot_burst_agent_generates_dual_layer_response():
     assert result["analysis_reports"]["hot_burst"] == result["final_response"]
 
     tools = mock_create.call_args.args[1]
-    assert {tool.name for tool in tools} == {"get_hot_burst", "get_hot_burst_history"}
+    assert {tool.name for tool in tools} == {"get_hot_burst_history"}
     messages = mock_agent.ainvoke.call_args.args[0]["messages"]
     assert messages[0].content == HOT_BURST_ANALYST_PROMPT
+    mock_api.get.assert_awaited_once_with(
+        "/internal/institution-research/history?days=1&min_resonance=2&limit=50&offset=0"
+    )
 
 
 def test_hot_burst_prompt_uses_user_friendly_terms():
@@ -201,7 +204,7 @@ async def test_hot_burst_empty_data_skips_llm_and_persists_empty_report():
         patch(_CREATE_REACT_AGENT) as mock_create,
         patch(_GET_DEEP_THINK) as mock_llm,
     ):
-        mock_api.get = AsyncMock(return_value={"outbreaks": []})
+        mock_api.get = AsyncMock(return_value={"records": []})
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 2})
         result = await run(_state(scheduler=True))
 
