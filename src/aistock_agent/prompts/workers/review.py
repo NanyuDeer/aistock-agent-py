@@ -67,6 +67,21 @@ primary_chain_id 和非空 alternative_chain_id 指向的 chain 必须按顺序�
 - repricing（预期差与再定价）
 - observable_result（可观测结果）
 
+**chain 的 JSON 格式示例：**
+{
+  "chain": {
+    "nodes": [
+      {"stage": "structural_root", "claim": "...", "evidence_ids": ["EVID_001"]},
+      {"stage": "trigger", "claim": "...", "evidence_ids": ["EVID_002"]},
+      {"stage": "transmission", "claim": "...", "evidence_ids": ["EVID_003"]},
+      {"stage": "exposure", "claim": "...", "evidence_ids": ["EVID_004"]},
+      {"stage": "repricing", "claim": "...", "evidence_ids": ["EVID_005"]},
+      {"stage": "observable_result", "claim": "...", "evidence_ids": ["EVID_006"]}
+    ]
+  }
+}
+**重要：nodes 必须是数组（list），每个元素是一个 CausalNode 对象，不能是字典/对象形式（如 {structural_root: {...}, trigger: {...}}）。**
+
 【CausalNode 字段约束】
 - stage: 上述 6 个之一
 - claim: 该节点的因果主张（一句话）

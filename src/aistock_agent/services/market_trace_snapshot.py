@@ -221,7 +221,13 @@ def select_dominant_phenomenon(
 
     # --- broad_rally ---
     rally_count = sum(1 for r in returns_list if r >= 0.8)
-    base_rally = rally_count >= 4 and advance_ratio >= 0.65
+    # 基础信号双路径：
+    # 路径 A（广度驱动）：≥4 指数涨 ≥0.8% 且上涨家数占比 ≥55%
+    # 路径 B（集中驱动）：全部 6 指数涨 ≥1.5%（权重股领涨，即使广度不足）
+    base_rally = (
+        (rally_count >= 4 and advance_ratio >= 0.55)
+        or all(r >= 1.5 for r in returns_list)
+    )
     bonus_rally_1 = limit_up >= limit_down + 20
     bonus_rally_2 = turnover_change_pct >= 10
     score_rally = (
@@ -234,7 +240,11 @@ def select_dominant_phenomenon(
 
     # --- broad_decline ---
     decline_idx_count = sum(1 for r in returns_list if r <= -0.8)
-    base_decline = decline_idx_count >= 4 and decline_ratio >= 0.65
+    # 基础信号双路径（与 broad_rally 对称）：
+    base_decline = (
+        (decline_idx_count >= 4 and decline_ratio >= 0.55)
+        or all(r <= -1.5 for r in returns_list)
+    )
     bonus_decline_1 = limit_down >= limit_up + 20
     bonus_decline_2 = turnover_change_pct >= 10
     score_decline = (

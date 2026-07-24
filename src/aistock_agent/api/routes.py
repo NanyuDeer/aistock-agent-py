@@ -17,6 +17,7 @@ from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -484,6 +485,71 @@ async def trigger_event_briefing(
         }
 
 
+@router.post("/briefing/review/trigger")
+async def trigger_review_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发复盘溯源生成（非流式，供管理员 curl 触发）
+
+    直接调用 review_agent.run()，不走 graph SSE 流。
+    返回 JSON 含 success / message / report_date / cached / elapsed_seconds。
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import review as review_agent
+
+    # 支持指定历史日期（如 ?report_date=2026-07-18），默认今天
+    report_date = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_review_start", report_date=report_date)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成今日复盘溯源"}],
+        "session_id": f"trigger_review_{report_date}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "review",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+        "report_date": report_date,
+    }
+
+    try:
+        result = await review_agent.run(state)
+        final_response = result.get("final_response")
+        generated = (
+            isinstance(final_response, str)
+            and final_response != "收盘溯源生成暂时不可用，请稍后重试"
+        )
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_review_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "复盘溯源生成完成" if generated else "复盘溯源生成失败（降级）",
+            "report_date": report_date,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_review_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"复盘溯源生成失败: {str(e)}",
+            "report_date": report_date,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
@@ -574,6 +640,28 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     if r:
         return {"code": 200, "data": r}
     return {"code": 404, "message": "报告未生成", "data": None}
+
+
+# ── 市场复盘问答 ─────────────────────────────────────────────────
+
+
+@router.post("/market-trace-qa/message")
+async def market_trace_qa_message(
+    req: MarketTraceQaRequest,
+    _: None = Depends(verify_internal_token),
+) -> MarketTraceQaResponse:
+    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
+
+    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
+    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
+    """
+    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
+
+    return await answer_market_trace_qa(
+        message=req.message,
+        report_date=req.report_date,
+        session_id=req.session_id,
+    )
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────

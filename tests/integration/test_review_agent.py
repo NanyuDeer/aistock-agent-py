@@ -506,19 +506,9 @@ async def test_scheduler_persist_failure_keeps_review_response(mocker):
 
 
 @pytest.mark.asyncio
-async def test_cache_hit_re_renders_from_frozen_snapshot_not_cached_markdown(mocker):
-    """P1 回归：缓存命中不得绕过冻结快照渲染。
-
-    构造一个 kind/fact_ids/score 合法（通过 validate_trace_against_snapshot）、
-    但 trace.dominant_phenomenon.summary 和缓存 markdown 都被改写的缓存工件。
-    缓存命中路径必须：
-    - 基于 artifact.trace + artifact.snapshot 重新调用 render_market_trace_markdown
-    - 返回的 Markdown 包含 snapshot 的主导现象事实摘要
-    - 返回的 Markdown 不包含被改写的缓存文本
-    - 不调用 fresh snapshot / LLM
-    """
-    # 1. 构造被污染的缓存工件：trace.summary 被改写，markdown 被改写。
-    #    kind/fact_ids/score 保持与 snapshot 一致，确保 validate_trace_against_snapshot 通过。
+async def test_cache_hit_with_tampered_dominant_summary_is_rejected(mocker):
+    """P1 回归：被篡改的冻结主导摘要不能作为缓存命中继续使用。"""
+    # 构造 kind/fact_ids/score 一致、但 summary 被篡改的缓存工件。
     tampered_trace_dict = copy.deepcopy(VALID_TRACE_DICT)
     tampered_trace_dict["dominant_phenomenon"]["summary"] = "TAMPERED_TRACE_SUMMARY"
     tampered_artifact = ReviewArtifact(
@@ -537,11 +527,11 @@ async def test_cache_hit_re_renders_from_frozen_snapshot_not_cached_markdown(moc
         new=AsyncMock(return_value=tampered_artifact.model_dump(mode="json")),
     )
 
-    # 3. mock fresh snapshot 和 LLM 以断言缓存命中路径未调用它们
+    # 3. 缓存校验失败后会回退到新快照；此处让新快照失败以验证最终降级。
     fresh_snapshot = mocker.patch.object(
         review_agent,
         "build_market_trace_snapshot",
-        new=AsyncMock(),
+        new=AsyncMock(side_effect=RuntimeError("fresh snapshot unavailable")),
     )
     fresh_llm = mocker.patch.object(review_agent, "get_deep_think")
 
@@ -560,19 +550,16 @@ async def test_cache_hit_re_renders_from_frozen_snapshot_not_cached_markdown(moc
     }
     result = await review_agent.run(state)
 
-    # 5. 返回的 Markdown 必须包含 snapshot 的主导现象事实摘要
-    assert "多个核心指数同步上涨，市场广度偏强" in result["final_response"]
-    # 6. 返回的 Markdown 不得包含被改写的缓存文本或被改写的 trace summary
-    assert "TAMPERED_CACHED_MARKDOWN" not in result["final_response"]
-    assert "TAMPERED_TRACE_SUMMARY" not in result["final_response"]
-    # 7. fresh snapshot 和 LLM 均未被调用
-    fresh_snapshot.assert_not_called()
+    assert result["final_response"] == review_agent.DEGRADED_RESPONSE
+    fresh_snapshot.assert_awaited_once_with("2026-07-17")
     fresh_llm.assert_not_called()
 
 
 # ============================================================================
 # Step 3 额外断言 — 主因选择与证据不足场景
 # ============================================================================
+
+
 
 
 @pytest.mark.asyncio

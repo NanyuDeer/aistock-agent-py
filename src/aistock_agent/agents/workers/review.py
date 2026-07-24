@@ -170,7 +170,7 @@ def validate_trace_against_snapshot(
 
     新增 4 类校验（Task 5 review 修复）：
     1. trace.dominant_phenomenon 与 snapshot.dominant_phenomenon 一致；
-       两者同时为 null 或同时非 null 且 kind 一致。
+       两者同时为 null 或同时非 null 且 kind/summary 一致。
     2. dominant_phenomenon.fact_ids 必须全部存在于 snapshot.sources。
     3. 每个因果节点的 evidence_ids 不得为空，且全部存在于 snapshot.sources。
     4. observable_result 节点必须至少引用一个 kind="market_fact" 的事实。
@@ -185,7 +185,7 @@ def validate_trace_against_snapshot(
 
     # 1. trace.dominant_phenomenon 必须严格绑定 snapshot.dominant_phenomenon 的冻结事实：
     #    - 两者同时为 null 或同时非 null
-    #    - kind 必须一致
+    #    - kind/summary 必须一致
     #    - fact_ids 必须完全一致（顺序无关，作为集合比较）
     #    - score 必须一致
     #    旧实现只校验 kind 一致 + fact_ids 存在于 snapshot.sources，模型可把 fact_ids
@@ -205,6 +205,11 @@ def validate_trace_against_snapshot(
             raise ValueError(
                 f"trace.dominant_phenomenon.kind {trace_dp.kind} != "
                 f"snapshot.dominant_phenomenon.kind {snapshot_dp.kind}"
+            )
+        if trace_dp.summary != snapshot_dp.summary:
+            raise ValueError(
+                f"trace.dominant_phenomenon.summary {trace_dp.summary!r} != "
+                f"snapshot.dominant_phenomenon.summary {snapshot_dp.summary!r}"
             )
         # fact_ids 必须与 snapshot 完全一致（作为多重集），禁止篡改冻结事实依据。
         # 旧实现只校验 fact_ids 存在于 snapshot.sources，模型可换成另一个存在但无关
@@ -419,7 +424,7 @@ def render_market_trace_markdown(
 
     # 主导现象 — 以 snapshot 为事实来源，避免模型文本覆盖冻结事实。
     # validate_trace_against_snapshot 已强制 trace.dominant_phenomenon 与 snapshot
-    # 完全一致（kind/fact_ids/score），但渲染仍以 snapshot 为权威，防止任何绕过。
+    # 完全一致（kind/summary/fact_ids/score），但渲染仍以 snapshot 为权威，防止任何绕过。
     lines.append("## 主导现象")
     if snapshot.dominant_phenomenon:
         dp = snapshot.dominant_phenomenon
@@ -611,7 +616,7 @@ async def _persist_review_report(
 
     任何持久化异常都只打日志、不向上抛，保证复盘主流程的返回值不受影响。
     """
-    if state.get("trigger_source") != "scheduler":
+    if state.get("trigger_source") not in {"scheduler", "manual"}:
         return
     try:
         report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
@@ -661,7 +666,12 @@ async def run(state: AgentState) -> dict[str, object]:
     )
 
     # 1. 缓存检查（命中则校验工件 + 跨对象校验 + 日期一致、持久化、返回）
-    cached = await get_cached_review(report_date)
+    # state.skip_cache 为真时跳过缓存，强制完整流水线（管理员手动触发用）
+    if not state.get("skip_cache"):
+        cached = await get_cached_review(report_date)
+    else:
+        cached = None
+        logger.info("review_skip_cache", report_date=report_date)
     if cached is not None:
         artifact: ReviewArtifact | None = None
         try:
