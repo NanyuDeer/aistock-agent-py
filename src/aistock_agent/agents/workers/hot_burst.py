@@ -1,6 +1,7 @@
 """Hot Burst Agent — 机构调研热门股 AI 解读（v2.0 双层输出）"""
 
 import json
+import re
 from datetime import datetime
 
 import structlog
@@ -55,6 +56,22 @@ def _empty_report_content() -> dict[str, object]:
         "podcast_brief": _EMPTY_PODCAST_BRIEF,
         "schema_version": "2.0",
     }
+
+
+def _parse_hot_burst_response(final_response: str) -> dict[str, object]:
+    """Extract a valid hot-burst report when the model adds a JSON code block."""
+    for block in re.findall(
+        r"```(?:json)?\s*([\s\S]*?)```",
+        final_response,
+        flags=re.IGNORECASE,
+    ):
+        try:
+            content = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(content, dict) and isinstance(content.get("display_report"), dict):
+            return content
+    return parse_dual_layer_response(final_response)
 
 
 def _normalize_report(content: dict[str, object]) -> dict[str, object]:
@@ -139,7 +156,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
         if final_response:
             # 解析双层输出
-            dual = parse_dual_layer_response(final_response)
+            dual = _normalize_report(_parse_hot_burst_response(final_response))
 
             # 缓存到本地（前端报告列表查询用）
             try:
