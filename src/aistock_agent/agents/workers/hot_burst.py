@@ -12,13 +12,16 @@ from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
+from aistock_agent.tools.hot_burst_tools import get_hot_burst_history
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.report_parser import parse_dual_layer_response
 
 logger = structlog.get_logger()
 
-_HOT_BURST_CHECK_PATH = "/internal/institution-research?hours=18&min_resonance_count=2&limit=20"
+_HOT_BURST_CHECK_PATH = (
+    "/internal/institution-research/history"
+    "?days=1&min_resonance=2&limit=50&offset=0"
+)
 _PODCAST_BRIEF_MIN = 150
 _PODCAST_BRIEF_MAX = 200
 _PODCAST_BRIEF_FALLBACK = (
@@ -36,9 +39,9 @@ _EMPTY_PODCAST_BRIEF = (
 
 
 def _has_hot_burst_data(data: dict[str, object]) -> bool:
-    """判断预检结果是否包含可供分析的热门股。"""
-    outbreaks = data.get("outbreaks")
-    return isinstance(outbreaks, list) and len(outbreaks) > 0
+    """判断历史预检结果是否包含可供分析的热门股记录。"""
+    records = data.get("records")
+    return isinstance(records, list) and len(records) > 0
 
 
 def _empty_report_content() -> dict[str, object]:
@@ -138,7 +141,7 @@ async def run(state: AgentState) -> dict[str, object]:
             }
 
         llm = get_deep_think()
-        tools = [get_hot_burst, get_hot_burst_history]
+        tools = [get_hot_burst_history]
         agent = create_react_agent(llm, tools)
 
         result = await agent.ainvoke(
