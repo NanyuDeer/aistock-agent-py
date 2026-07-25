@@ -2,6 +2,18 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-25 — 新增 broadcast/trend-score 手动触发端点
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/api/routes.py`：新增 `POST /briefing/broadcast/trigger` 手动触发完整播报链路（morning→wind_leader→hot_burst→trend_score→broadcast），绕过交易日检查，返回各步骤状态
+- `src/aistock_agent/api/routes.py`：新增 `POST /briefing/trend-score/trigger` 单独触发趋势股评分 Agent 报告生成
+
+### 文档
+- `README.md`：API 端点表补充 5 个 trigger 端点（morning/event/review/broadcast/trend-score）
+
+---
+
 ## [main] 2026-07-24 — 趋势股评分接入每日定时播报链路
 **开发者**: Aria
 

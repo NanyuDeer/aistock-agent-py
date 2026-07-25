@@ -550,6 +550,207 @@ async def trigger_review_briefing(
         }
 
 
+@router.post("/briefing/broadcast/trigger")
+async def trigger_broadcast_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发完整播报链路（非流式，供管理员 curl 触发）
+
+    串行执行：morning → wind_leader → hot_burst → trend_score → broadcast。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+    每个 Agent 异常独立捕获，不影响后续 Agent 执行。
+    返回 JSON 含整体 success / message / 各步骤状态 / elapsed_seconds。
+
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 100`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+    from aistock_agent.agents.workers import hot_burst as hot_burst_agent
+    from aistock_agent.agents.workers import morning as morning_agent
+    from aistock_agent.agents.workers import trend_score as trend_score_agent
+    from aistock_agent.agents.workers import wind_leader as wind_leader_agent
+
+    # 支持指定历史日期（如 {"report_date": "2026-07-18"}），默认今天
+    today = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_broadcast_start", report_date=today)
+
+    start = time.time()
+
+    def _make_state(intent: str | None = None) -> dict[str, object]:
+        """构造 manual 触发的 AgentState（trigger_source=manual 使报告写DB）"""
+        return {
+            "messages": [],
+            "session_id": f"manual_broadcast_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": intent,
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "manual",
+            "report_date": today,
+        }
+
+    steps: list[dict[str, object]] = []
+
+    def _record(step: str, success: bool, elapsed: float, error: str = "") -> None:
+        steps.append({
+            "step": step,
+            "success": success,
+            "elapsed_seconds": round(elapsed, 2),
+            "error": error,
+        })
+
+    # Step 1: 晨报
+    step_start = time.time()
+    try:
+        morning_result = await morning_agent.run(_make_state("morning"))
+        morning_ok = bool(morning_result.get("final_response"))
+        _record("morning", morning_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_morning_done", success=morning_ok)
+    except Exception as e:
+        _record("morning", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_morning_failed", error=str(e), exc_info=True)
+
+    # Step 2: 风口分析
+    step_start = time.time()
+    try:
+        wind_result = await wind_leader_agent.run(_make_state())
+        wind_ok = bool(wind_result.get("final_response"))
+        _record("wind_leader", wind_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_wind_done", success=wind_ok)
+    except Exception as e:
+        _record("wind_leader", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_wind_failed", error=str(e), exc_info=True)
+
+    # Step 3: 机构调研热门股
+    step_start = time.time()
+    try:
+        burst_result = await hot_burst_agent.run(_make_state())
+        burst_ok = bool(burst_result.get("final_response"))
+        _record("hot_burst", burst_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_burst_done", success=burst_ok)
+    except Exception as e:
+        _record("hot_burst", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_burst_failed", error=str(e), exc_info=True)
+
+    # Step 3.5: 趋势股评分分析（写DB供 broadcast 消费 + 前端查询）
+    step_start = time.time()
+    try:
+        trend_result = await trend_score_agent.run(_make_state())
+        trend_ok = bool(trend_result.get("final_response"))
+        _record("trend_score", trend_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_trend_done", success=trend_ok)
+    except Exception as e:
+        _record("trend_score", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_trend_failed", error=str(e), exc_info=True)
+
+    # Step 4: 播报生成（从数据库读取报告）
+    step_start = time.time()
+    try:
+        broadcast_result = await broadcast_agent.run(_make_state())
+        broadcast_ok = bool(broadcast_result.get("final_response"))
+        _record("broadcast", broadcast_ok, time.time() - step_start)
+        logger.info(
+            "manual_trigger_broadcast_final_done",
+            success=broadcast_ok,
+            has_audio=bool(broadcast_result.get("audio_path")),
+        )
+    except Exception as e:
+        _record("broadcast", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_final_failed", error=str(e), exc_info=True)
+
+    elapsed = time.time() - start
+    succeeded = sum(1 for s in steps if s["success"])
+    total = len(steps)
+
+    logger.info(
+        "manual_trigger_broadcast_done",
+        succeeded=succeeded,
+        total=total,
+        elapsed_seconds=round(elapsed, 2),
+    )
+
+    return {
+        "success": succeeded == total,
+        "message": f"播报链路完成: {succeeded}/{total} 步成功",
+        "report_date": today,
+        "steps": steps,
+        "succeeded": succeeded,
+        "total": total,
+        "elapsed_seconds": round(elapsed, 2),
+    }
+
+
+@router.post("/briefing/trend-score/trigger")
+async def trigger_trend_score(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发趋势股评分 Agent 报告生成（非流式，供管理员 curl 触发）
+
+    直接调用 trend_score_agent.run()，生成 AI 分析报告并写入数据库。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+    前提：趋势股评分数据已由 Node.js TrendBatchService 计算完成（可先调
+    ``POST /api/internal/trigger-trend-batch`` 补数据）。
+
+    返回 JSON 含 success / message / report_date / elapsed_seconds。
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import trend_score as trend_score_agent
+
+    today = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_trend_score_start", report_date=today)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成趋势股评分分析报告"}],
+        "session_id": f"manual_trend_score_{today}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+        "report_date": today,
+    }
+
+    try:
+        result = await trend_score_agent.run(state)
+        final_response = result.get("final_response")
+        generated = bool(final_response)
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_trend_score_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "趋势股评分报告生成完成" if generated else "趋势股评分报告生成失败（降级）",
+            "report_date": today,
+            "has_response": generated,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_trend_score_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"趋势股评分报告生成失败: {str(e)}",
+            "report_date": today,
+            "has_response": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
