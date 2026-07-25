@@ -71,16 +71,19 @@ async def run(state: AgentState) -> dict[str, object]:
         morning_report = None
         wind_leader_report = None
         hot_burst_report = None
+        trend_score_report = None
         if report_date:
             morning_report = await _fetch_report_from_db("morning", report_date)
             wind_leader_report = await _fetch_report_from_db("wind_leader", report_date)
             hot_burst_report = await _fetch_report_from_db("hot_burst", report_date)
+            trend_score_report = await _fetch_report_from_db("trend_score", report_date)
             logger.info(
                 "broadcast_reports_from_db",
                 report_date=report_date,
                 has_morning=bool(morning_report),
                 has_wind_leader=bool(wind_leader_report),
                 has_hot_burst=bool(hot_burst_report),
+                has_trend_score=bool(trend_score_report),
             )
 
         # 降级到 state.analysis_reports（实时请求或数据库未命中）
@@ -90,6 +93,8 @@ async def run(state: AgentState) -> dict[str, object]:
             wind_leader_report = analysis_reports.get("wind_leader", "暂无长线风口分析")
         if not hot_burst_report:
             hot_burst_report = analysis_reports.get("hot_burst", "暂无机构调研分析")
+        if not trend_score_report:
+            trend_score_report = analysis_reports.get("trend_score", "暂无趋势股评分分析")
 
         logger.info(
             "broadcast_agent_start",
@@ -97,6 +102,7 @@ async def run(state: AgentState) -> dict[str, object]:
             has_morning=bool(morning_report),
             has_wind_leader=bool(wind_leader_report),
             has_hot_burst=bool(hot_burst_report),
+            has_trend_score=bool(trend_score_report),
         )
 
         # 构造提示词（占位符替换）
@@ -106,6 +112,8 @@ async def run(state: AgentState) -> dict[str, object]:
             "{{WIND_LEADER}}", wind_leader_report
         ).replace(
             "{{HOT_BURST}}", hot_burst_report
+        ).replace(
+            "{{TREND_SCORE}}", trend_score_report
         )
 
         # Step 1: 生成双人对话文本

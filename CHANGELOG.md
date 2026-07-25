@@ -2,6 +2,17 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-24 — 趋势股评分接入每日定时播报链路
+**开发者**: Aria
+
+### 改进
+- trend_score Agent 接入 APScheduler 定时调度（_run_broadcast_task Step 3.5）
+- scheduler 触发时数据预检：检查 /internal/trend/top 列表是否为空
+- broadcast Agent 读取 trend_score 报告并注入提示词占位符 {{TREND_SCORE}}
+- 定时链路拓扑更新：morning→wind_leader→hot_burst→trend_score→broadcast
+
+---
+
 ## [changer] 2026-07-21 — 市场溯源：冻结事实 → 竞争归因 → 不可变归档 → 缓存抗污染
 
 **开发者**: 37588
