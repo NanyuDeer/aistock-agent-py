@@ -35,11 +35,57 @@ async def test_post_sends_json_and_internal_token() -> None:
     response.raise_for_status.assert_called_once_with()
 
 
+@pytest.mark.asyncio
+async def test_list_analysis_reports_reads_the_type_date_list_endpoint() -> None:
+    response = MagicMock()
+    response.json.return_value = {"code": 200, "data": [{"id": 1}]}
+    client = AsyncMock()
+    client.get.return_value = response
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        reports = await NodeApiClient().list_analysis_reports(
+            "event_conduction", "2026-07-24"
+        )
+
+    assert reports == [{"id": 1}]
+    url = client.get.await_args.args[0]
+    assert url.endswith("/internal/analysis-reports/event_conduction/2026-07-24/list")
+
+
 def _response(status_code: int, payload: object | None = None) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
     response.json.return_value = payload
     return response
+
+
+@pytest.mark.asyncio
+async def test_get_hot_burst_data_distinguishes_null_data_from_unavailable_source() -> None:
+    """成功的 data:null 是正常空结果；请求失败则必须保留为不可用。"""
+    empty_client = AsyncMock()
+    empty_client.get.return_value = _response(200, {"code": 200, "data": None})
+    unavailable_client = AsyncMock()
+    unavailable_client.get.side_effect = httpx.ConnectError("connection failed")
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(side_effect=[empty_client, unavailable_client]),
+    ):
+        node_client = NodeApiClient()
+        empty_result = await node_client.get_hot_burst_data(
+            "/internal/institution-research?hours=18"
+        )
+        unavailable_result = await node_client.get_hot_burst_data(
+            "/internal/institution-research?hours=18"
+        )
+
+    assert empty_result.status == "empty"
+    assert empty_result.data is None
+    assert unavailable_result.status == "unavailable"
+    assert unavailable_result.data is None
 
 
 @pytest.mark.asyncio
@@ -149,3 +195,169 @@ async def test_get_review_analysis_report_uses_iso_date_and_rejects_path_input()
     assert url.endswith("/internal/analysis-reports/review/2026-07-17")
     assert "/quote/" not in url
     assert client.get.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_industry_chain_returns_found_data_and_source() -> None:
+    client = AsyncMock()
+    client.get.return_value = _response(
+        200,
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [],
+                "downstream": [],
+                "graphVersion": None,
+                "updatedAt": "2026-07-22T00:00:00Z",
+                "source": "IndustryKGService",
+            },
+        },
+    )
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_industry_chain("半导体/设备")
+
+    assert result.status == "found"
+    assert result.source == "IndustryKGService"
+    assert result.data is not None
+    url = client.get.await_args.args[0]
+    assert url.endswith(
+        "/internal/industry/%E5%8D%8A%E5%AF%BC%E4%BD%93%2F%E8%AE%BE%E5%A4%87/chain?depth=1"
+    )
+    assert client.get.await_args.kwargs["headers"]["X-Internal-Token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_status"),
+    [
+        (404, "not_found"),
+        (403, "authentication_failed"),
+        (502, "upstream_failed"),
+    ],
+)
+async def test_get_industry_chain_classifies_http_errors(
+    status_code: int,
+    expected_status: str,
+) -> None:
+    client = AsyncMock()
+    client.get.return_value = _response(status_code)
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_industry_chain("半导体")
+
+    assert result.status == expected_status
+    assert result.data is None
+    assert result.source is None
+
+
+@pytest.mark.asyncio
+async def test_get_industry_chain_classifies_read_timeout() -> None:
+    client = AsyncMock()
+    client.get.side_effect = httpx.ReadTimeout("timed out")
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_industry_chain("半导体")
+
+    assert result.status == "timeout"
+    assert result.data is None
+    assert result.source is None
+
+
+@pytest.mark.asyncio
+async def test_get_industry_chain_classifies_request_error() -> None:
+    client = AsyncMock()
+    client.get.side_effect = httpx.ConnectError("connection failed")
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_industry_chain("半导体")
+
+    assert result.status == "request_failed"
+    assert result.data is None
+    assert result.source is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [],
+                "downstream": [],
+            },
+        },
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "", "name": "半导体"},
+                "upstream": [],
+                "downstream": [],
+                "source": "IndustryKGService",
+            },
+        },
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [
+                    {"id": "", "name": "电子化学品", "leadingStocks": []}
+                ],
+                "downstream": [],
+                "source": "IndustryKGService",
+            },
+        },
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [],
+                "downstream": [
+                    {
+                        "id": "881301.TI",
+                        "name": "计算机设备",
+                        "leadingStocks": {},
+                    }
+                ],
+                "source": "IndustryKGService",
+            },
+        },
+        {
+            "code": 200,
+            "data": {
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [],
+                "downstream": [],
+                "source": "OtherIndustryService",
+            },
+        },
+    ],
+)
+async def test_get_industry_chain_rejects_invalid_success_payload(payload: object) -> None:
+    client = AsyncMock()
+    client.get.return_value = _response(200, payload)
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_industry_chain("半导体")
+
+    assert result.status == "invalid_response"
+    assert result.data is None
+    assert result.source is None

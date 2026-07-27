@@ -25,6 +25,7 @@ _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 # 节点函数 patch 路径（与 src/aistock_agent/graph/builder.py 导入路径一致）
 NODE_PATHS: dict[str, str] = {
     "supervisor": "aistock_agent.agents.supervisor.node.run",
+    "advisor": "aistock_agent.agents.workers.ai_advisor.run",
     "morning": "aistock_agent.agents.workers.morning.run",
     "stock": "aistock_agent.agents.workers.stock.run",
     "sector": "aistock_agent.agents.workers.sector.run",
@@ -61,17 +62,56 @@ def _patch_all_agents(
     return stack
 
 
+def _patch_user_advisor(
+    supervisor_return: dict[str, object],
+    advisor_return: dict[str, object],
+) -> ExitStack:
+    """用户对话的非通用意图必须路由到 ai_advisor。"""
+    stack = ExitStack()
+    stack.enter_context(
+        patch(NODE_PATHS["supervisor"], new=AsyncMock(return_value=supervisor_return))
+    )
+    stack.enter_context(
+        patch(NODE_PATHS["advisor"], new=AsyncMock(return_value=advisor_return))
+    )
+    for name in ("morning", "stock", "sector", "event"):
+        stack.enter_context(
+            patch(
+                NODE_PATHS[name],
+                new=AsyncMock(
+                    side_effect=AssertionError(f"用户对话不应直达 {name} worker")
+                ),
+            )
+        )
+    return stack
+
+
 # ── 5 类意图端到端 ────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_chat_message_stock_intent():
-    """stock 意图端到端：supervisor→stock_analyst→final_response→ChatResponse"""
-    with _patch_all_agents(
+    """stock 用户意图经 ai_advisor 返回固定 stock_trace 降级。"""
+    trace = {
+        "schema_version": "advisor_trace.v1",
+        "subquestions": [
+            {
+                "intent": "stock",
+                "reports": [],
+                "sources": [],
+                "as_of": None,
+                "missing_sources": ["stock_trace"],
+                "degraded": True,
+            }
+        ],
+        "missing_sources": ["stock_trace"],
+        "degraded": True,
+    }
+    with _patch_user_advisor(
         supervisor_return={"intent": "stock", "symbol": "600519"},
-        worker_returns={
-            **_DEFAULT_WORKER_RETURNS,
-            "stock": {"final_response": "mocked stock 回复"},
+        advisor_return={
+            "final_response": "mocked stock 降级回复",
+            "advisor_trace": trace,
         },
     ):
         async with httpx.AsyncClient(
@@ -85,19 +125,17 @@ async def test_chat_message_stock_intent():
             )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["content"] == "mocked stock 回复"
+    assert body["content"] == "mocked stock 降级回复"
+    assert body["advisor_trace"] == trace
     assert "session_id" in body
 
 
 @pytest.mark.asyncio
 async def test_chat_message_sector_intent():
-    """sector 意图端到端：supervisor→sector_analyst→final_response→ChatResponse"""
-    with _patch_all_agents(
+    """sector 用户意图经 ai_advisor 读取持久化 wind_leader 报告。"""
+    with _patch_user_advisor(
         supervisor_return={"intent": "sector", "tag_code": "BK0475"},
-        worker_returns={
-            **_DEFAULT_WORKER_RETURNS,
-            "sector": {"final_response": "mocked sector 回复"},
-        },
+        advisor_return={"final_response": "mocked sector 回复"},
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -116,13 +154,10 @@ async def test_chat_message_sector_intent():
 
 @pytest.mark.asyncio
 async def test_chat_message_event_intent():
-    """event 意图端到端：supervisor→event_analyst→final_response→ChatResponse"""
-    with _patch_all_agents(
+    """event 用户意图经 ai_advisor 读取持久化 event_conduction 报告。"""
+    with _patch_user_advisor(
         supervisor_return={"intent": "event"},
-        worker_returns={
-            **_DEFAULT_WORKER_RETURNS,
-            "event": {"final_response": "mocked event 回复"},
-        },
+        advisor_return={"final_response": "mocked event 回复"},
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -141,13 +176,10 @@ async def test_chat_message_event_intent():
 
 @pytest.mark.asyncio
 async def test_chat_message_morning_intent():
-    """morning 意图端到端：supervisor→morning_agent→final_response→ChatResponse"""
-    with _patch_all_agents(
+    """morning 用户意图经 ai_advisor 读取持久化晨报。"""
+    with _patch_user_advisor(
         supervisor_return={"intent": "morning"},
-        worker_returns={
-            **_DEFAULT_WORKER_RETURNS,
-            "morning": {"final_response": "mocked morning 回复"},
-        },
+        advisor_return={"final_response": "mocked morning 回复"},
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),

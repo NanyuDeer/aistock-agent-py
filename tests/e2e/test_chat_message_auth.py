@@ -73,3 +73,30 @@ async def test_chat_message_valid_token_passes_auth():
     body = resp.json()
     assert body["content"] == "mocked 回复"
     assert "session_id" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_message_returns_advisor_trace():
+    trace = {
+        "schema_version": "advisor_trace.v1",
+        "subquestions": [
+            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": [], "degraded": False},
+            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": ["stock_trace"], "degraded": True},
+        ],
+        "missing_sources": ["stock_trace"],
+        "degraded": True,
+    }
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke = AsyncMock(return_value={"final_response": "降级", "advisor_trace": trace})
+
+    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                _CHAT_URL, json={"message": "个股 600519"}, headers=_VALID_HEADERS
+            )
+
+    assert resp.json()["advisor_trace"] == trace

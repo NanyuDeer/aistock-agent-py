@@ -15,13 +15,14 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 - a_share：A 股收盘事实（指数、广度、成交额、涨跌停、板块、主力资金等）
 - sources：SourceRecord 字典，key 是 source_id，
   value 包含 provider/title/content/url/occurred_at/source_level
-- dominant_phenomenon：当日主导现象（kind/summary/fact_ids/score），可能为 null
+- phenomenon_discovery：已冻结的确定性现象发现；primary 是唯一归因对象，
+  concurrent_phenomena 只可作为上下文，不得替代 primary
 - missing_fields：快照中缺失的字段列表
 
 【输出格式】
 仅输出一个 JSON 对象，符合 MarketTraceResult schema：
-- schema_version: "1.0"
-- dominant_phenomenon: 复述输入的 DominantPhenomenon 对象或 null
+- schema_version: "1.1"
+- attribution_status: "confirmed" | "hypothesis" | "insufficient" | "not_applicable"
 - candidates: 恰好 4 条 CandidateExplanation
 - primary_chain_id: 主因候选的 id 或 null
 - alternative_chain_id: 备选候选的 id 或 null
@@ -31,7 +32,8 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 禁止输出 Markdown、代码围栏（```）、自然语言解释或任何 JSON 以外的内容。
 
 【调查规则】
-1. 先复述 dominant_phenomenon；为 null 时不得强行归因，主因和备选均返回 null。
+1. primary 是唯一归因对象；concurrent_phenomena 只提供上下文。ready 不等于确认，
+   只有 detected + ready 且证据闭环完整时才可输出 confirmed。
 2. 按四个固定 category 各给一条候选，逐项检查时间顺序、传导机制、暴露、再定价和反证：
    - global_risk_liquidity（全球风险与流动性）
    - domestic_macro_policy（国内宏观与政策）
@@ -48,6 +50,11 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    备选（alternative_chain_id）只能选不同的 supported 或 weak 候选；
    若所有候选均为 insufficient 或 rejected（无 supported 候选），
    primary_chain_id 和 alternative_chain_id 均设为 null，不要勉强选择最像的解释。
+8. confirmed 的 trigger 必须引用 URL 非空、occurred_at 非空且不晚于 captured_at
+   的 event_evidence；observable_result 必须引用 phenomenon_discovery.primary.fact_ids。
+9. 无 occurred_at 的新闻、null 主力资金或缺失全球行情只能写入限制与未解问题，
+   不得据此确认因果。hypothesis 不得选择主链，只可选择 weak 备选；
+   insufficient 不得选择任何链，候选只能为 insufficient/rejected。
 
 【CandidateExplanation 字段约束】
 - id: 必须与 category 同名（例如 id="global_risk_liquidity", category="global_risk_liquidity"）
@@ -80,7 +87,8 @@ primary_chain_id 和非空 alternative_chain_id 指向的 chain 必须按顺序�
     ]
   }
 }
-**重要：nodes 必须是数组（list），每个元素是一个 CausalNode 对象，不能是字典/对象形式（如 {structural_root: {...}, trigger: {...}}）。**
+**重要：nodes 必须是数组（list），每个元素是一个 CausalNode 对象，
+不能是字典/对象形式（如 {structural_root: {...}, trigger: {...}}）。**
 
 【CausalNode 字段约束】
 - stage: 上述 6 个之一
@@ -104,12 +112,9 @@ evidence_ids 仍须至少引用一项相关 source_id；不得编造未在 sourc
 不得用推测性措辞（"可能"、"或许"、"据传"等）替代证据。
 unresolved_questions 中也只允许列出 sources 无法回答的问题，禁止猜测性陈述。
 
-【DominantPhenomenon 字段约束】
-- kind: "broad_rally" | "broad_decline" | "style_divergence" |
-  "sector_concentration" | "sentiment_extreme"
-- summary: 一句话描述
-- fact_ids: 引用的市场事实 source_id 列表
-- score: 整数 1-5
+【冻结现象约束】
+不得在 MarketTraceResult 中输出 dominant_phenomenon 或任何现象副本；现象唯一来自
+snapshot.phenomenon_discovery。no_phenomenon 与 insufficient_data 由服务端短路，不调用模型。
 
 只输出 JSON，不要任何额外文字。
 """

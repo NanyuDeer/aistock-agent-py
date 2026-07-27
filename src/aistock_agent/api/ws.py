@@ -72,6 +72,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             try:
                 llm_started = False
                 final_response = ""
+                advisor_trace: dict[str, object] | None = None
                 seen_nodes: set[str] = set()
 
                 async for event in graph.astream_events(
@@ -93,7 +94,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                             })
 
                     # --- LLM 开始生成 ---
-                    elif event_type == "on_chat_model_start" and not llm_started and name != "supervisor":
+                    elif (
+                        event_type == "on_chat_model_start"
+                        and not llm_started
+                        and name != "supervisor"
+                    ):
                         llm_started = True
                         await websocket.send_json({
                             "type": WSEventType.LLM_START,
@@ -113,7 +118,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                             or getattr(chunk, "tool_call_chunks", None)
                         )
                         if has_text and not has_tool_calls:
-                            text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                            text = (
+                                chunk.content
+                                if isinstance(chunk.content, str)
+                                else str(chunk.content)
+                            )
                             if text.strip():
                                 await websocket.send_json({
                                     "type": WSEventType.TEXT,
@@ -139,11 +148,14 @@ async def ws_chat(websocket: WebSocket) -> None:
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and output.get("final_response"):
                             final_response = output["final_response"]
+                            trace = output.get("advisor_trace")
+                            advisor_trace = trace if isinstance(trace, dict) else None
 
                 # 发送完成事件
                 await websocket.send_json({
                     "type": WSEventType.DONE,
                     "content": final_response,
+                    "advisor_trace": advisor_trace,
                 })
 
             except Exception as e:

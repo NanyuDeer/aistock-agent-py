@@ -4,15 +4,18 @@
 - _build_review_report（保留：schema v2 持久化用，Task 4 不动）
 - render_market_trace_markdown（新增：brief Step 4 的展示层 Markdown 模板）
 """
+
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from aistock_agent.agents.workers import review
 from aistock_agent.schemas.market_trace import (
-    DominantPhenomenon,
+    DataReadiness,
+    DetectedPhenomenon,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
     SourceRecord,
 )
@@ -26,12 +29,12 @@ from aistock_agent.schemas.market_trace import (
 REVIEW_MARKDOWN = """# A股收盘溯源｜2026-07-17
 快照编号：trace-20260717
 
-## 主导现象
+## 确认的市场现象
 - 类型：broad_rally
 - 摘要：市场风险偏好改善，科技板块领涨。
 - 评分：3
 
-## 主因果链
+## 归因结论
 - 未选定主因。
 
 <!--SECTOR_LIST_START-->
@@ -43,7 +46,7 @@ REVIEW_MARKDOWN = """# A股收盘溯源｜2026-07-17
 
 def test_build_review_report_uses_schema_v2_and_keeps_markdown():
     artifact = ReviewArtifact(
-        schema_version="1.0",
+        schema_version="1.1",
         snapshot=_RENDER_SNAPSHOT,
         trace=_make_render_trace(),
         markdown=REVIEW_MARKDOWN,
@@ -139,61 +142,69 @@ _RENDER_SNAPSHOT = MarketTraceSnapshot(
         ),
     },
     missing_fields=[],
-    dominant_phenomenon=DominantPhenomenon(
-        kind="broad_rally",
-        summary="多个核心指数同步上涨，市场广度偏强",
-        fact_ids=["INDEX_000001_SH"],
-        score=3,
+    phenomenon_discovery=PhenomenonDiscoveryResult(
+        status="detected",
+        primary=DetectedPhenomenon(
+            kind="broad_rally",
+            summary="多个核心指数同步上涨，市场广度偏强",
+            fact_ids=["INDEX_000001_SH"],
+            tags=["broad_rally"],
+            severity="high",
+        ),
+        concurrent_phenomena=[],
+        data_readiness=DataReadiness(
+            market_data="complete",
+            attribution_inputs="complete",
+            causal_evidence="ready",
+        ),
+        diagnostics=[],
     ),
 )
 
 
 _RENDER_TRACE_DICT: dict[str, object] = {
-    "schema_version": "1.0",
-    "dominant_phenomenon": {
-        "kind": "broad_rally",
-        "summary": "多个核心指数同步上涨，市场广度偏强",
-        "fact_ids": ["INDEX_000001_SH"],
-        "score": 3,
-    },
+    "schema_version": "1.1",
+    "attribution_status": "confirmed",
     "candidates": [
         {
             "id": "global_risk_liquidity",
             "category": "global_risk_liquidity",
             "status": "weak",
             "verdict": "全球风险偏好改善但非主因",
-            "chain": {"nodes": [
-                {
-                    "stage": "structural_root",
-                    "claim": "美联储维持利率",
-                    "evidence_ids": ["SEARCH_001"],
-                },
-                {
-                    "stage": "trigger",
-                    "claim": "全球流动性宽松预期",
-                    "evidence_ids": ["GLOBAL_001"],
-                },
-                {
-                    "stage": "transmission",
-                    "claim": "外资流入新兴市场",
-                    "evidence_ids": ["GLOBAL_001"],
-                },
-                {
-                    "stage": "exposure",
-                    "claim": "北向资金净流入",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-                {
-                    "stage": "repricing",
-                    "claim": "权重股估值抬升",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-                {
-                    "stage": "observable_result",
-                    "claim": "上证指数上涨0.5%",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-            ]},
+            "chain": {
+                "nodes": [
+                    {
+                        "stage": "structural_root",
+                        "claim": "美联储维持利率",
+                        "evidence_ids": ["SEARCH_001"],
+                    },
+                    {
+                        "stage": "trigger",
+                        "claim": "全球流动性宽松预期",
+                        "evidence_ids": ["GLOBAL_001"],
+                    },
+                    {
+                        "stage": "transmission",
+                        "claim": "外资流入新兴市场",
+                        "evidence_ids": ["GLOBAL_001"],
+                    },
+                    {
+                        "stage": "exposure",
+                        "claim": "北向资金净流入",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                    {
+                        "stage": "repricing",
+                        "claim": "权重股估值抬升",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                    {
+                        "stage": "observable_result",
+                        "claim": "上证指数上涨0.5%",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                ]
+            },
             "supporting_evidence_ids": ["GLOBAL_001", "SEARCH_001"],
             "counter_evidence_ids": [],
         },
@@ -202,38 +213,40 @@ _RENDER_TRACE_DICT: dict[str, object] = {
             "category": "domestic_macro_policy",
             "status": "supported",
             "verdict": "央行降准释放流动性是主因",
-            "chain": {"nodes": [
-                {
-                    "stage": "structural_root",
-                    "claim": "国内货币政策宽松周期",
-                    "evidence_ids": ["NEWS_001"],
-                },
-                {
-                    "stage": "trigger",
-                    "claim": "央行宣布降准0.5个百分点",
-                    "evidence_ids": ["NEWS_001"],
-                },
-                {
-                    "stage": "transmission",
-                    "claim": "银行间流动性宽松传导至权益",
-                    "evidence_ids": ["NEWS_001"],
-                },
-                {
-                    "stage": "exposure",
-                    "claim": "金融板块直接受益",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-                {
-                    "stage": "repricing",
-                    "claim": "市场情绪回暖",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-                {
-                    "stage": "observable_result",
-                    "claim": "上证指数上涨0.5%",
-                    "evidence_ids": ["INDEX_000001_SH"],
-                },
-            ]},
+            "chain": {
+                "nodes": [
+                    {
+                        "stage": "structural_root",
+                        "claim": "国内货币政策宽松周期",
+                        "evidence_ids": ["NEWS_001"],
+                    },
+                    {
+                        "stage": "trigger",
+                        "claim": "央行宣布降准0.5个百分点",
+                        "evidence_ids": ["NEWS_001"],
+                    },
+                    {
+                        "stage": "transmission",
+                        "claim": "银行间流动性宽松传导至权益",
+                        "evidence_ids": ["NEWS_001"],
+                    },
+                    {
+                        "stage": "exposure",
+                        "claim": "金融板块直接受益",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                    {
+                        "stage": "repricing",
+                        "claim": "市场情绪回暖",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                    {
+                        "stage": "observable_result",
+                        "claim": "上证指数上涨0.5%",
+                        "evidence_ids": ["INDEX_000001_SH"],
+                    },
+                ]
+            },
             "supporting_evidence_ids": ["NEWS_001", "INDEX_000001_SH"],
             "counter_evidence_ids": [],
         },
@@ -264,9 +277,7 @@ _RENDER_TRACE_DICT: dict[str, object] = {
 
 
 def _make_render_trace() -> MarketTraceResult:
-    return MarketTraceResult.model_validate_json(
-        json.dumps(_RENDER_TRACE_DICT, ensure_ascii=False)
-    )
+    return MarketTraceResult.model_validate_json(json.dumps(_RENDER_TRACE_DICT, ensure_ascii=False))
 
 
 def test_render_market_trace_markdown_includes_required_sections():
@@ -276,10 +287,10 @@ def test_render_market_trace_markdown_includes_required_sections():
 
     assert "# A股收盘溯源｜2026-07-17" in markdown
     assert "快照编号：trace-20260717" in markdown
-    assert "## 主导现象" in markdown
-    assert "## 主因果链" in markdown
-    assert "## 备选解释" in markdown
-    assert "## 已排除或证据不足的解释" in markdown
+    assert "## 确认的市场现象" in markdown
+    assert "## 归因结论" in markdown
+    assert "## 候选解释与反证" in markdown
+    assert "## 缺失证据" in markdown
     assert "## 证据索引" in markdown
     assert "## 未解问题" in markdown
 
@@ -355,37 +366,37 @@ def test_render_market_trace_markdown_renders_dominant_phenomenon():
     assert "多个核心指数同步上涨，市场广度偏强" in markdown
 
 
-def test_render_market_trace_markdown_handles_null_dominant_phenomenon():
-    """snapshot.dominant_phenomenon 为 None 时不强行归因。
-
-    renderer 以 snapshot 为权威：当 snapshot.dominant_phenomenon 为 None 时，
-    即使 trace.dominant_phenomenon 非空，也必须渲染“无明确主导现象”。
-    （validate_trace_against_snapshot 会在 run() 路径上拒绝二者不一致，
-    但 render_market_trace_markdown 本身仍以 snapshot 为事实来源。）
-    """
-    snapshot = _RENDER_SNAPSHOT.model_copy(update={"dominant_phenomenon": None})
-    trace = _make_render_trace()
+def test_render_market_trace_markdown_handles_no_phenomenon():
+    """no_phenomenon 使用服务端固定业务文本。"""
+    discovery = PhenomenonDiscoveryResult(
+        status="no_phenomenon",
+        primary=None,
+        concurrent_phenomena=[],
+        data_readiness=_RENDER_SNAPSHOT.phenomenon_discovery.data_readiness,
+        diagnostics=[],
+    )
+    snapshot = _RENDER_SNAPSHOT.model_copy(update={"phenomenon_discovery": discovery})
+    trace = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="not_applicable",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="low",
+        unresolved_questions=["未检测到明确的市场主导现象"],
+    )
     markdown = review.render_market_trace_markdown(trace, snapshot)
 
-    assert "## 主导现象" in markdown
-    assert "无明确主导现象" in markdown
-    # snapshot 已无主导现象，render 不应输出 trace 那份被改写过的字段。
-    assert "broad_rally" not in markdown.split("## 主导现象", 1)[1].split("##", 1)[0]
+    assert "## 确认的市场现象" in markdown
+    assert "行情完整，未发现显著市场现象" in markdown
+    assert "未检测到明确的市场主导现象" in markdown
+    assert "不适用因果归因" in markdown
 
 
-def test_render_market_trace_markdown_uses_snapshot_dominant_phenomenon_text():
-    """trace 与 snapshot 主导现象文本不同时，Markdown 仍使用 snapshot 的事实。
-
-    场景：缓存或模型改写了 trace.dominant_phenomenon.summary，但
-    snapshot.dominant_phenomenon 保持冻结事实。renderer 必须以 snapshot 为权威，
-    不让被改写的 trace 文本进入展示层 Markdown。
-    """
-    trace_dict = json.loads(json.dumps(_RENDER_TRACE_DICT, ensure_ascii=False))
-    trace_dict["dominant_phenomenon"]["summary"] = "被模型改写的污染文本"
-    trace = MarketTraceResult.model_validate(trace_dict)
+def test_render_market_trace_markdown_uses_snapshot_discovery_text():
+    """现象文本只来自冻结 snapshot.discovery。"""
+    trace = _make_render_trace()
     markdown = review.render_market_trace_markdown(trace, _RENDER_SNAPSHOT)
 
-    # snapshot 的 summary 出现在 Markdown 中。
     assert "多个核心指数同步上涨，市场广度偏强" in markdown
-    # 被改写的 trace summary 不得出现在 Markdown 中。
-    assert "被模型改写的污染文本" not in markdown
+    assert "dominant_phenomenon" not in MarketTraceResult.model_fields

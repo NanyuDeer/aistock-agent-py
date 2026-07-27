@@ -65,6 +65,7 @@ async def run(state: AgentState) -> dict[str, object]:
                     report_type="trend_score",
                     report_date=report_date,
                     content=dual_layer_content,
+                    data_source="trend_score_agent",
                 )
 
         # 写入 analysis_reports 供 broadcast_agent 使用

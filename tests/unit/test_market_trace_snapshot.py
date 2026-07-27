@@ -1,18 +1,25 @@
-"""市场溯源事实快照测试 — 事实与因果分离、来源归一化、主导现象确定性。
+"""市场溯源事实快照测试 — 事实与因果分离、来源归一化、现象发现确定性。
 
 TDD RED -> GREEN: 先写失败测试，锁定"事实而非因果"的契约。
 """
 
+import copy
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
+from aistock_agent.schemas.market_trace import (
+    DataReadiness,
+    MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.market_trace_snapshot import (
     MarketTraceSnapshotUnavailable,
     build_market_trace_snapshot,
-    select_dominant_phenomenon,
+    normalize_a_share,
 )
 
 # ============================================================================
@@ -177,22 +184,32 @@ TAVILY_RESULT: dict[str, object] = {
     ],
 }
 
-# 触发 broad_rally 的 a_share 事实（用于主导现象确定性测试）
-RALLY_FACTS: dict[str, object] = {
-    "indexes": [
-        {"ts_code": "000001.SH", "pct_chg": 1.2},
-        {"ts_code": "399001.SZ", "pct_chg": 1.5},
-        {"ts_code": "399006.SZ", "pct_chg": 1.8},
-        {"ts_code": "000300.SH", "pct_chg": 1.0},
-        {"ts_code": "000905.SH", "pct_chg": 0.9},
-        {"ts_code": "000852.SH", "pct_chg": 1.1},
-    ],
-    "breadth": {"advance_ratio": 0.75, "total_count": 5000, "decline_count": 1000},
-    "limits": {"up_count": 50, "down_count": 10, "broken_count": 5, "highest_board": 3},
-    "turnover": {"change_pct": 15.0},
-    "sectors": {"top_gainers": [], "top_losers": []},
-    "main_force": {"large_and_extra_large_net_yuan": 5_000_000_000},
-}
+
+def test_snapshot_requires_frozen_phenomenon_discovery() -> None:
+    """旧快照不得以缺失 discovery 的形式通过 Pydantic 解析。"""
+    payload = MarketTraceSnapshot(
+        snapshot_id="trace-test",
+        trade_date="2026-07-19",
+        captured_at=datetime(2026, 7, 19, tzinfo=UTC),
+        a_share={},
+        sources={},
+        missing_fields=[],
+        phenomenon_discovery=PhenomenonDiscoveryResult(
+            status="no_phenomenon",
+            primary=None,
+            concurrent_phenomena=[],
+            data_readiness=DataReadiness(
+                market_data="complete",
+                attribution_inputs="missing",
+                causal_evidence="not_ready",
+            ),
+            diagnostics=[],
+        ),
+    ).model_dump(mode="json")
+    payload.pop("phenomenon_discovery", None)
+
+    with pytest.raises(ValidationError, match="phenomenon_discovery"):
+        MarketTraceSnapshot.model_validate(payload)
 
 
 # ============================================================================
@@ -219,6 +236,239 @@ async def test_snapshot_keeps_facts_and_evidence_separate(mocker):
     assert snapshot.sources["GLOBAL_001"].kind == "market_fact"
     assert snapshot.sources["NEWS_001"].kind == "event_evidence"
     assert not hasattr(snapshot, "cause")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_normalizes_a_share_indexes_without_mutating_node_payload(mocker):
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    indexes = close_data["indexes"]
+    assert isinstance(indexes, list)
+    indexes.append({"ts_code": "../../invalid", "pct_chg": 9.9})
+    original = copy.deepcopy(close_data)
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert close_data == original
+    normalized_indexes = snapshot.a_share["indexes"]
+    assert isinstance(normalized_indexes, dict)
+    assert list(normalized_indexes) == [
+        "SH000001",
+        "SZ399001",
+        "SZ399006",
+        "SH000300",
+        "SH000905",
+        "SH000852",
+    ]
+    shanghai = normalized_indexes["SH000001"]
+    assert shanghai["ts_code"] == "000001.SH"
+    assert shanghai["change_pct"] == 0.5
+    assert shanghai["source_id"] == "INDEX_000001_SH"
+    assert "pct_chg" not in shanghai
+    assert "../../invalid" not in normalized_indexes
+    assert "INDEX_000001_SH" in snapshot.sources
+    assert snapshot.phenomenon_discovery.data_readiness.market_data == "complete"
+
+
+def test_normalize_a_share_keeps_already_normalized_index_change_pct():
+    close_data = {
+        "indexes": [
+            {
+                "ts_code": "000001.SH",
+                "change_pct": -1.2,
+            }
+        ]
+    }
+
+    normalized = normalize_a_share(close_data)
+
+    indexes = normalized["indexes"]
+    assert isinstance(indexes, dict)
+    assert indexes["SH000001"]["change_pct"] == -1.2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "missing_value", "source_id", "missing_field"),
+    [
+        (
+            "turnover",
+            {
+                "amount_yuan": None,
+                "previous_amount_yuan": None,
+                "change_pct": None,
+                "source": "tushare:daily",
+            },
+            "TURNOVER_ALL",
+            "a_share.turnover",
+        ),
+        (
+            "limits",
+            {
+                "up_count": None,
+                "down_count": None,
+                "broken_count": None,
+                "highest_board": None,
+            },
+            "LIMITS_ALL",
+            "a_share.limits",
+        ),
+        (
+            "main_force",
+            {
+                "large_and_extra_large_net_yuan": None,
+                "source": "tushare:moneyflow_ths",
+            },
+            "MAIN_FORCE_ALL",
+            "a_share.main_force.large_and_extra_large_net_yuan",
+        ),
+    ],
+)
+async def test_snapshot_omits_aggregate_source_without_real_numeric_facts(
+    mocker,
+    field: str,
+    missing_value: dict[str, object],
+    source_id: str,
+    missing_field: str,
+) -> None:
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    indexes = close_data["indexes"]
+    assert isinstance(indexes, list)
+    for index in indexes:
+        assert isinstance(index, dict)
+        index["pct_chg"] = 1.2
+    close_data["breadth"] = {
+        "total_count": 5000,
+        "advance_count": 3750,
+        "decline_count": 1000,
+        "flat_count": 250,
+        "advance_ratio": 0.75,
+        "source": "tushare:daily",
+    }
+    close_data["turnover"] = {
+        "amount_yuan": 110_000_000_000,
+        "previous_amount_yuan": 90_000_000_000,
+        "change_pct": 15.0,
+        "source": "tushare:daily",
+    }
+    close_data["limits"] = {
+        "up_count": 50,
+        "down_count": 10,
+        "broken_count": 5,
+        "highest_board": 3,
+    }
+    close_data[field] = missing_value
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert snapshot.phenomenon_discovery.status == "detected"
+    primary = snapshot.phenomenon_discovery.primary
+    assert primary is not None
+    assert source_id not in snapshot.sources
+    assert source_id not in primary.fact_ids
+    assert missing_field in snapshot.missing_fields
+
+
+@pytest.mark.asyncio
+async def test_snapshot_omits_breadth_source_without_real_numeric_facts(mocker) -> None:
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    indexes = close_data["indexes"]
+    assert isinstance(indexes, list)
+    for index in indexes:
+        assert isinstance(index, dict)
+        index["pct_chg"] = 1.5
+    close_data["breadth"] = {
+        "advance_ratio": None,
+        "decline_ratio": None,
+        "source": "tushare:daily",
+    }
+    close_data["turnover"] = {
+        "amount_yuan": 110_000_000_000,
+        "previous_amount_yuan": 90_000_000_000,
+        "change_pct": 15.0,
+        "source": "tushare:daily",
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert snapshot.phenomenon_discovery.status == "detected"
+    detected = [
+        snapshot.phenomenon_discovery.primary,
+        *snapshot.phenomenon_discovery.concurrent_phenomena,
+    ]
+    fact_ids = {fact_id for phenomenon in detected if phenomenon for fact_id in phenomenon.fact_ids}
+    assert "BREADTH_ALL" not in snapshot.sources
+    assert "BREADTH_ALL" not in fact_ids
+    assert "a_share.breadth" in snapshot.missing_fields
+
+
+@pytest.mark.asyncio
+async def test_snapshot_omits_sectors_source_when_all_rankings_are_empty(mocker) -> None:
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    indexes = close_data["indexes"]
+    assert isinstance(indexes, list)
+    for index in indexes:
+        assert isinstance(index, dict)
+        index["pct_chg"] = 1.5
+    close_data["sectors"] = {
+        "top_gainers": [],
+        "top_losers": [],
+        "top_inflows": [],
+        "top_outflows": [],
+    }
+    close_data["turnover"] = {
+        "amount_yuan": 110_000_000_000,
+        "previous_amount_yuan": 90_000_000_000,
+        "change_pct": 15.0,
+        "source": "tushare:daily",
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert snapshot.phenomenon_discovery.status == "detected"
+    detected = [
+        snapshot.phenomenon_discovery.primary,
+        *snapshot.phenomenon_discovery.concurrent_phenomena,
+    ]
+    fact_ids = {fact_id for phenomenon in detected if phenomenon for fact_id in phenomenon.fact_ids}
+    assert "SECTORS_ALL" not in snapshot.sources
+    assert "SECTORS_ALL" not in fact_ids
+    assert "a_share.sectors" in snapshot.missing_fields
 
 
 # ============================================================================
@@ -346,42 +596,6 @@ async def test_future_news_excluded_from_snapshot(mocker):
     # 未来事件被过滤，正常事件获得 NEWS_001
     assert snapshot.sources["NEWS_001"].title == "正常事件"
     assert "NEWS_002" not in snapshot.sources
-
-
-# ============================================================================
-# 主导现象确定性 — 相同输入每次选择相同结果
-# ============================================================================
-
-
-def test_dominant_phenomenon_is_deterministic():
-    """相同 a_share_facts 输入每次返回相同的 dominant_phenomenon。"""
-    result1 = select_dominant_phenomenon(RALLY_FACTS)
-    result2 = select_dominant_phenomenon(RALLY_FACTS)
-    assert result1 is not None
-    assert result2 is not None
-    assert result1.kind == result2.kind
-    assert result1.score == result2.score
-    assert result1.fact_ids == result2.fact_ids
-
-
-def test_dominant_phenomenon_returns_broad_rally_for_rally_facts():
-    """RALLY_FACTS 触发 broad_rally（基础 + 两项加分）。"""
-    result = select_dominant_phenomenon(RALLY_FACTS)
-    assert result is not None
-    assert result.kind == "broad_rally"
-    assert result.score >= 2
-
-
-def test_dominant_phenomenon_returns_none_when_no_rule_qualifies():
-    """COMPLETE_CLOSE 的盘面数据平淡，无规则达到两项信号。"""
-    result = select_dominant_phenomenon(COMPLETE_CLOSE)
-    assert result is None
-
-
-def test_dominant_phenomenon_returns_none_for_empty_input():
-    """空输入返回 None。"""
-    assert select_dominant_phenomenon({}) is None
-    assert select_dominant_phenomenon({"indexes": []}) is None
 
 
 # ============================================================================

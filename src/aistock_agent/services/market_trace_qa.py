@@ -13,6 +13,7 @@ from aistock_agent.agents.workers.review import validate_trace_against_snapshot
 from aistock_agent.prompts.workers.market_trace_qa import MARKET_TRACE_QA_PROMPT
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
+    MarketPhenomenonKind,
     MarketTraceResult,
     MarketTraceSnapshot,
     SourceRecord,
@@ -37,9 +38,10 @@ class _MarketTraceQaSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     answer_type: Literal[
-        "candidate", "dominant_phenomenon", "unresolved_questions", "out_of_scope"
+        "candidate", "phenomenon_discovery", "unresolved_questions", "out_of_scope"
     ]
     candidate_id: StrictStr | None
+    phenomenon_kind: MarketPhenomenonKind | None
     source_ids: list[StrictStr]
 
     @model_validator(mode="after")
@@ -48,6 +50,10 @@ class _MarketTraceQaSelection(BaseModel):
             raise ValueError("candidate 回答必须指定 candidate_id")
         if self.answer_type != "candidate" and self.candidate_id is not None:
             raise ValueError("非 candidate 回答不能指定 candidate_id")
+        if self.answer_type == "phenomenon_discovery" and self.phenomenon_kind is None:
+            raise ValueError("phenomenon_discovery 回答必须指定 phenomenon_kind")
+        if self.answer_type != "phenomenon_discovery" and self.phenomenon_kind is not None:
+            raise ValueError("非 phenomenon_discovery 回答不能指定 phenomenon_kind")
         if len(self.source_ids) != len(set(self.source_ids)):
             raise ValueError("source_ids 不能重复")
         return self
@@ -85,33 +91,42 @@ def _build_sources_summary(
     ]
 
 
-def _candidate_source_ids(candidate: CandidateExplanation) -> set[str]:
+def _candidate_source_ids(
+    candidate: CandidateExplanation, snapshot: MarketTraceSnapshot
+) -> list[str]:
     source_ids = set(candidate.supporting_evidence_ids) | set(candidate.counter_evidence_ids)
     if candidate.chain:
         for node in candidate.chain.nodes:
             source_ids.update(node.evidence_ids)
-    return source_ids
+    return [source_id for source_id in snapshot.sources if source_id in source_ids]
 
 
 def _render_selection(
     selection: _MarketTraceQaSelection,
     snapshot: MarketTraceSnapshot,
     trace: MarketTraceResult,
-) -> tuple[str, set[str]]:
-    """将已验证的选择确定性渲染为内容，并给出可引用的来源集合。"""
+) -> tuple[str, list[str]]:
+    """将已验证的选择确定性渲染为内容，并给出完整有序来源。"""
     if selection.answer_type == "out_of_scope":
-        return "当前复盘数据中未涵盖此问题。", set()
+        return "当前复盘数据中未涵盖此问题。", []
 
     if selection.answer_type == "unresolved_questions":
         if not trace.unresolved_questions:
             raise ValueError("工件没有未解问题")
-        return "未解问题：" + "；".join(trace.unresolved_questions), set()
+        return "未解问题：" + "；".join(trace.unresolved_questions), []
 
-    if selection.answer_type == "dominant_phenomenon":
-        phenomenon = snapshot.dominant_phenomenon
-        if phenomenon is None:
-            raise ValueError("工件没有主导现象")
-        return f"主导现象：{phenomenon.summary}", set(phenomenon.fact_ids)
+    if selection.answer_type == "phenomenon_discovery":
+        discovery = snapshot.phenomenon_discovery
+        phenomena = ([discovery.primary] if discovery.primary is not None else []) + list(
+            discovery.concurrent_phenomena
+        )
+        matches = [
+            phenomenon for phenomenon in phenomena if phenomenon.kind == selection.phenomenon_kind
+        ]
+        if len(matches) != 1:
+            raise ValueError("phenomenon_kind 不在冻结 discovery 中或不唯一")
+        phenomenon = matches[0]
+        return f"市场现象：{phenomenon.summary}", list(phenomenon.fact_ids)
 
     candidates = [
         candidate for candidate in trace.candidates if candidate.id == selection.candidate_id
@@ -130,7 +145,7 @@ def _render_selection(
         f"复盘候选（{status_label}）：{candidate.verdict}。"
         "这是已归档复盘中的证据归因，不等同于确认因果关系。"
     )
-    return content, _candidate_source_ids(candidate)
+    return content, _candidate_source_ids(candidate, snapshot)
 
 
 def _parse_selection(raw_text: str) -> _MarketTraceQaSelection:
@@ -176,6 +191,8 @@ async def answer_market_trace_qa(
     if report_result.status != "found" or not isinstance(report_result.report, dict):
         return _degraded_response(session, artifact_id, "报告服务读取失败/暂不可用")
     report = report_result.report
+    report_id = report.get("id")
+    artifact_id = report_id.strip() if isinstance(report_id, str) and report_id.strip() else ""
     if report.get("status") != "completed":
         return _degraded_response(session, artifact_id, "复盘报告未完成")
 
@@ -199,11 +216,6 @@ async def answer_market_trace_qa(
 
     if any(source_id != record.source_id for source_id, record in snapshot.sources.items()):
         return _degraded_response(session, artifact_id, "复盘报告来源映射不一致")
-    try:
-        validate_trace_against_snapshot(trace, snapshot)
-    except ValueError:
-        logger.exception("market_trace_qa_validation_failed", report_date=trade_date)
-        return _degraded_response(session, artifact_id, "复盘报告校验失败")
     if snapshot.trade_date != trade_date:
         logger.warning(
             "market_trace_qa_date_mismatch",
@@ -211,13 +223,32 @@ async def answer_market_trace_qa(
             report_date=trade_date,
         )
         return _degraded_response(session, artifact_id, "复盘报告日期不匹配")
-
-    report_id = report.get("id")
-    artifact_id = (
-        report_id.strip()
-        if isinstance(report_id, str) and report_id.strip()
-        else snapshot.snapshot_id
-    )
+    try:
+        validate_trace_against_snapshot(trace, snapshot)
+    except ValueError:
+        logger.exception("market_trace_qa_validation_failed", report_date=trade_date)
+        return _degraded_response(session, artifact_id, "复盘报告校验失败")
+    if snapshot.phenomenon_discovery.status in {
+        "no_phenomenon",
+        "insufficient_data",
+    }:
+        content_by_status = {
+            "no_phenomenon": "行情完整，未发现显著市场现象",
+            "insufficient_data": "行情数据不足，无法可靠判断市场现象",
+        }
+        return MarketTraceQaResponse(
+            content=content_by_status[snapshot.phenomenon_discovery.status],
+            session_id=session,
+            trace=MarketTraceQaTrace(
+                artifact_id=artifact_id,
+                sources=[],
+                as_of=snapshot.captured_at.isoformat(),
+                confidence=trace.confidence,
+                uncertainty=trace.unresolved_questions,
+                degraded=False,
+                degraded_reason=None,
+            ),
+        )
 
     snapshot_json = snapshot.model_dump_json(indent=2)
     trace_json = trace.model_dump_json(indent=2)
@@ -242,23 +273,20 @@ async def answer_market_trace_qa(
     raw_text = result.content if isinstance(result.content, str) else ""
     try:
         selection = _parse_selection(raw_text)
-        response_content, allowed_source_ids = _render_selection(selection, snapshot, trace)
+        response_content, computed_source_ids = _render_selection(selection, snapshot, trace)
     except (json.JSONDecodeError, ValidationError, ValueError):
         logger.warning("market_trace_qa_llm_selection_invalid", output=raw_text[:200])
         return _degraded_response(session, artifact_id, "模型选择格式非法或范围不合法")
 
-    source_ids = selection.source_ids
-    if not set(source_ids).issubset(allowed_source_ids):
-        return _degraded_response(session, artifact_id, "模型选择了不匹配的来源")
-    if not set(source_ids).issubset(snapshot.sources):
-        return _degraded_response(session, artifact_id, "模型选择了未知来源")
+    if selection.source_ids != computed_source_ids:
+        return _degraded_response(session, artifact_id, "模型选择了不完整或乱序的来源")
 
     return MarketTraceQaResponse(
         content=response_content,
         session_id=session,
         trace=MarketTraceQaTrace(
             artifact_id=artifact_id,
-            sources=_build_sources_summary(snapshot.sources, source_ids),
+            sources=_build_sources_summary(snapshot.sources, computed_source_ids),
             as_of=snapshot.captured_at.isoformat(),
             confidence=trace.confidence,
             uncertainty=trace.unresolved_questions,

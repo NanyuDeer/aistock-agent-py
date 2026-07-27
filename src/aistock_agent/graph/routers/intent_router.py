@@ -6,7 +6,10 @@
 
 from aistock_agent.state.schema import AgentState
 
-VALID_INTENTS = {"morning", "stock", "sector", "event", "wind_leader", "broadcast", "hot_burst", "alert", "ai_advisor", "general", "trend_score"}
+VALID_INTENTS = {
+    "morning", "stock", "sector", "event", "wind_leader", "broadcast",
+    "hot_burst", "alert", "ai_advisor", "general", "trend_score", "review",
+}
 
 
 def route_by_intent(state: AgentState) -> str:
@@ -42,5 +45,6 @@ def route_by_intent(state: AgentState) -> str:
         "alert": "alert_agent",
         "ai_advisor": "ai_advisor_agent",
         "trend_score": "trend_score_agent",
+        "review": "ai_advisor_agent",
     }
     return node_map[intent]

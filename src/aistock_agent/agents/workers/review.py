@@ -10,7 +10,6 @@ build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推�
 """
 
 import re
-from collections import Counter
 from datetime import datetime
 
 import structlog
@@ -21,6 +20,7 @@ from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
     SourceRecord,
 )
@@ -32,6 +32,7 @@ from aistock_agent.services.cache import get_cached_review, set_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
+from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.state.schema import AgentState
 
 logger = structlog.get_logger()
@@ -95,9 +96,7 @@ def validate_selected_chain_ids(trace: MarketTraceResult) -> None:
 
     if trace.primary_chain_id is None:
         if has_supported:
-            raise ValueError(
-                "primary_chain_id must not be null when supported candidates exist"
-            )
+            raise ValueError("primary_chain_id must not be null when supported candidates exist")
         # 无 supported 候选（全部 insufficient/rejected）：primary_chain_id=null 正确
         # 不再 return —— alternative 仍需校验（下方统一处理）
     else:
@@ -117,9 +116,7 @@ def validate_selected_chain_ids(trace: MarketTraceResult) -> None:
             raise ValueError("alternative_chain_id equals primary_chain_id")
         alternative = candidate_by_id.get(trace.alternative_chain_id)
         if alternative is None:
-            raise ValueError(
-                f"unknown alternative_chain_id: {trace.alternative_chain_id}"
-            )
+            raise ValueError(f"unknown alternative_chain_id: {trace.alternative_chain_id}")
         if alternative.status not in {"supported", "weak"}:
             raise ValueError(
                 f"alternative_chain_id points to invalid status: "
@@ -157,24 +154,79 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
         alt_stages = [n.stage for n in alt.chain.nodes]
         if alt_stages != REQUIRED_CHAIN_STAGES:
             raise ValueError(
-                f"alternative chain stages mismatch: "
-                f"{alt_stages} != {REQUIRED_CHAIN_STAGES}"
+                f"alternative chain stages mismatch: {alt_stages} != {REQUIRED_CHAIN_STAGES}"
             )
+
+
+def validate_snapshot_discovery(snapshot: MarketTraceSnapshot) -> None:
+    """重算冻结 discovery，并校验所有事实引用都是真实 market_fact。"""
+    for source_id, record in snapshot.sources.items():
+        if source_id != record.source_id:
+            raise ValueError(f"source map key mismatch: {source_id} != {record.source_id}")
+    recomputed = discover_market_phenomenon(
+        snapshot.a_share,
+        snapshot.sources,
+        snapshot.captured_at,
+        snapshot.missing_fields,
+    )
+    if recomputed.model_dump(mode="json") != snapshot.phenomenon_discovery.model_dump(mode="json"):
+        raise ValueError("snapshot phenomenon discovery does not match recomputation")
+    phenomena = []
+    if snapshot.phenomenon_discovery.primary is not None:
+        phenomena.append(snapshot.phenomenon_discovery.primary)
+    phenomena.extend(snapshot.phenomenon_discovery.concurrent_phenomena)
+    fact_ids = [fact_id for item in phenomena for fact_id in item.fact_ids]
+    fact_ids.extend(
+        fact_id
+        for diagnostic in snapshot.phenomenon_discovery.diagnostics
+        for fact_id in diagnostic.evidence_ids
+    )
+    for fact_id in fact_ids:
+        source = snapshot.sources.get(fact_id)
+        if source is None or source.kind != "market_fact":
+            raise ValueError(f"discovery fact_id is not a market_fact: {fact_id}")
+
+
+def _readiness_questions(
+    discovery: PhenomenonDiscoveryResult,
+    missing_fields: list[str],
+) -> list[str]:
+    """把确定性 discovery 的就绪状态转换为 QA 可见的未解问题。"""
+    questions: list[str] = []
+    if discovery.status == "no_phenomenon":
+        questions.append("未检测到明确的市场主导现象")
+    elif discovery.status == "insufficient_data":
+        questions.append("市场数据不足以支撑归因分析")
+    if discovery.data_readiness.causal_evidence != "ready":
+        questions.append("因果证据充分性不足，依赖 partial 或 not_ready 来源")
+    if missing_fields:
+        questions.append(f"快照缺少 {len(missing_fields)} 个字段")
+    return questions if questions else ["无需归因分析"]
 
 
 def validate_trace_against_snapshot(
     trace: MarketTraceResult,
     snapshot: MarketTraceSnapshot,
 ) -> None:
-    """跨对象校验：候选完整性、source_id 存在性、chain 选择与阶段、归因一致性。
+    """校验 discovery、来源引用、归因状态、选链与六阶段链。"""
+    validate_snapshot_discovery(snapshot)
+    discovery = snapshot.phenomenon_discovery
+    if discovery.status in {"no_phenomenon", "insufficient_data"}:
+        expected = "not_applicable" if discovery.status == "no_phenomenon" else "insufficient"
+        if (
+            trace.attribution_status != expected
+            or trace.candidates
+            or trace.primary_chain_id is not None
+            or trace.alternative_chain_id is not None
+            or trace.confidence != "low"
+            or trace.unresolved_questions
+            != _readiness_questions(discovery, snapshot.missing_fields)
+        ):
+            raise ValueError("deterministic empty trace shape mismatch")
+        return
+    if trace.attribution_status == "not_applicable":
+        raise ValueError("detected phenomenon cannot be not_applicable")
 
-    新增 4 类校验（Task 5 review 修复）：
-    1. trace.dominant_phenomenon 与 snapshot.dominant_phenomenon 一致；
-       两者同时为 null 或同时非 null 且 kind/summary 一致。
-    2. dominant_phenomenon.fact_ids 必须全部存在于 snapshot.sources。
-    3. 每个因果节点的 evidence_ids 不得为空，且全部存在于 snapshot.sources。
-    4. observable_result 节点必须至少引用一个 kind="market_fact" 的事实。
-    """
     categories = {candidate.category for candidate in trace.candidates}
     if (
         len(trace.candidates) != 4
@@ -183,66 +235,34 @@ def validate_trace_against_snapshot(
     ):
         raise ValueError("candidate categories are incomplete")
 
-    # 1. trace.dominant_phenomenon 必须严格绑定 snapshot.dominant_phenomenon 的冻结事实：
-    #    - 两者同时为 null 或同时非 null
-    #    - kind/summary 必须一致
-    #    - fact_ids 必须完全一致（顺序无关，作为集合比较）
-    #    - score 必须一致
-    #    旧实现只校验 kind 一致 + fact_ids 存在于 snapshot.sources，模型可把 fact_ids
-    #    改成另一个存在但无关的 source_id（如 NEWS_001），从而篡改冻结的市场事实。
-    snapshot_dp = snapshot.dominant_phenomenon
-    trace_dp = trace.dominant_phenomenon
-    if trace_dp is None and snapshot_dp is not None:
-        raise ValueError(
-            "trace.dominant_phenomenon is null but snapshot.dominant_phenomenon is not"
-        )
-    if trace_dp is not None and snapshot_dp is None:
-        raise ValueError(
-            "trace.dominant_phenomenon is not null but snapshot.dominant_phenomenon is null"
-        )
-    if trace_dp is not None and snapshot_dp is not None:
-        if trace_dp.kind != snapshot_dp.kind:
-            raise ValueError(
-                f"trace.dominant_phenomenon.kind {trace_dp.kind} != "
-                f"snapshot.dominant_phenomenon.kind {snapshot_dp.kind}"
+    if trace.attribution_status == "confirmed":
+        if discovery.data_readiness.causal_evidence != "ready":
+            raise ValueError("confirmed attribution requires ready causal evidence")
+        if trace.primary_chain_id is None:
+            raise ValueError("confirmed attribution requires a supported primary chain")
+    elif trace.attribution_status == "hypothesis":
+        if trace.primary_chain_id is not None:
+            raise ValueError("hypothesis must not select a primary chain")
+        if any(candidate.status == "supported" for candidate in trace.candidates):
+            raise ValueError("hypothesis cannot contain supported candidates")
+        if trace.alternative_chain_id is not None:
+            alternative = next(
+                (c for c in trace.candidates if c.id == trace.alternative_chain_id), None
             )
-        if trace_dp.summary != snapshot_dp.summary:
-            raise ValueError(
-                f"trace.dominant_phenomenon.summary {trace_dp.summary!r} != "
-                f"snapshot.dominant_phenomenon.summary {snapshot_dp.summary!r}"
-            )
-        # fact_ids 必须与 snapshot 完全一致（作为多重集），禁止篡改冻结事实依据。
-        # 旧实现只校验 fact_ids 存在于 snapshot.sources，模型可换成另一个存在但无关
-        # 的 source_id（如把 INDEX_000001_SH 换成 NEWS_001），绕过冻结事实。
-        trace_fact_counts = Counter(trace_dp.fact_ids)
-        snapshot_fact_counts = Counter(snapshot_dp.fact_ids)
-        if trace_fact_counts != snapshot_fact_counts:
-            raise ValueError(
-                f"trace.dominant_phenomenon.fact_ids {sorted(trace_fact_counts.items())} != "
-                f"snapshot.dominant_phenomenon.fact_ids {sorted(snapshot_fact_counts.items())} "
-                f"(frozen facts must not be tampered)"
-            )
-        # score 必须与 snapshot 完全一致，禁止篡改冻结评分。
-        if trace_dp.score != snapshot_dp.score:
-            raise ValueError(
-                f"trace.dominant_phenomenon.score {trace_dp.score} != "
-                f"snapshot.dominant_phenomenon.score {snapshot_dp.score}"
-            )
-        # fact_ids 全部必须存在于 snapshot.sources（绑定一致性已校验集合相等，
-        # 但仍校验存在性以防御 snapshot 自身 fact_ids 引用未知 source 的边缘情况）
-        for fact_id in trace_dp.fact_ids:
-            if fact_id not in snapshot.sources:
-                raise ValueError(
-                    f"trace.dominant_phenomenon.fact_ids references unknown source_id: {fact_id}"
-                )
+            if alternative is None or alternative.status != "weak":
+                raise ValueError("hypothesis alternative must be weak")
+    elif trace.attribution_status == "insufficient":
+        if trace.primary_chain_id is not None or trace.alternative_chain_id is not None:
+            raise ValueError("insufficient attribution cannot select chains")
+        if any(
+            candidate.status not in {"insufficient", "rejected"} for candidate in trace.candidates
+        ):
+            raise ValueError("insufficient attribution has invalid candidate status")
 
     # 3. 每个候选的证据引用必须存在；每个非空 chain 节点必须有至少 1 个证据
     ids = set(snapshot.sources)
     for candidate in trace.candidates:
-        for source_id in (
-            candidate.supporting_evidence_ids
-            + candidate.counter_evidence_ids
-        ):
+        for source_id in candidate.supporting_evidence_ids + candidate.counter_evidence_ids:
             if source_id not in ids:
                 raise ValueError(f"unknown source_id: {source_id}")
         if candidate.chain is not None:
@@ -255,9 +275,6 @@ def validate_trace_against_snapshot(
                     if source_id not in ids:
                         raise ValueError(f"unknown source_id: {source_id}")
 
-    # 4. observable_result 节点必须至少引用一个 kind="market_fact" 的事实
-    #    （仅对 primary 和非空 alternative 指向的 chain 校验；
-    #     rejected/insufficient 候选可以没有 chain）
     candidate_by_id = {c.id: c for c in trace.candidates}
     chains_to_check: list[tuple[str, CandidateExplanation]] = []
     if trace.primary_chain_id is not None:
@@ -268,45 +285,36 @@ def validate_trace_against_snapshot(
         alt = candidate_by_id.get(trace.alternative_chain_id)
         if alt is not None and alt.chain is not None:
             chains_to_check.append(("alternative", alt))
+    validate_selected_chain_ids(trace)
+    validate_chain_stages(trace)
+
+    primary_phenomenon = discovery.primary
+    if primary_phenomenon is None:
+        raise ValueError("detected discovery has no primary phenomenon")
+    primary_fact_ids = set(primary_phenomenon.fact_ids)
     for label, candidate in chains_to_check:
         chain = candidate.chain
         if chain is None:
             continue
-        for node in chain.nodes:
-            if node.stage == "observable_result":
-                has_market_fact = any(
-                    _source_kind(snapshot.sources, sid) == "market_fact"
-                    for sid in node.evidence_ids
-                )
-                if not has_market_fact:
-                    raise ValueError(
-                        f"{label} candidate {candidate.id} observable_result must "
-                        f"reference at least one market_fact source"
-                    )
-
-    validate_selected_chain_ids(trace)
-    validate_chain_stages(trace)
-
-    # 无主导现象时只能保留候选调查结果，不能选择任何归因链。
-    # 放在既有选链和阶段校验之后，确保 primary=null 时的非空 alternative
-    # 仍会经过 ID、status、chain 和 6 阶段校验。
-    if snapshot_dp is None and (
-        trace.primary_chain_id is not None
-        or trace.alternative_chain_id is not None
-    ):
-        raise ValueError(
-            "primary_chain_id and alternative_chain_id must be null when "
-            "snapshot.dominant_phenomenon is null"
-        )
-
-
-def _source_kind(
-    sources: dict[str, SourceRecord],
-    source_id: str,
-) -> str | None:
-    """安全取 SourceRecord.kind 的字符串值，找不到时返回 None。"""
-    record = sources.get(source_id)
-    return record.kind if record is not None else None
+        trigger = next(node for node in chain.nodes if node.stage == "trigger")
+        if label == "primary" and trace.attribution_status == "confirmed":
+            valid_trigger = any(
+                (source := snapshot.sources[source_id]).kind == "event_evidence"
+                and bool(source.url and source.url.strip())
+                and source.occurred_at is not None
+                and source.occurred_at <= snapshot.captured_at
+                for source_id in trigger.evidence_ids
+            )
+            if not valid_trigger:
+                raise ValueError("confirmed trigger requires traceable event evidence")
+        observable = next(node for node in chain.nodes if node.stage == "observable_result")
+        if not any(
+            source_id in primary_fact_ids and snapshot.sources[source_id].kind == "market_fact"
+            for source_id in observable.evidence_ids
+        ):
+            raise ValueError(
+                f"{label} observable_result must reference primary phenomenon fact_ids"
+            )
 
 
 # ============================================================================
@@ -363,13 +371,9 @@ def _render_candidate(candidate: CandidateExplanation, indent: str = "") -> list
             if node.evidence_ids:
                 lines.append(f"{indent}  - 证据：{', '.join(node.evidence_ids)}")
     if candidate.supporting_evidence_ids:
-        lines.append(
-            f"{indent}- 支持证据：{', '.join(candidate.supporting_evidence_ids)}"
-        )
+        lines.append(f"{indent}- 支持证据：{', '.join(candidate.supporting_evidence_ids)}")
     if candidate.counter_evidence_ids:
-        lines.append(
-            f"{indent}- 反证：{', '.join(candidate.counter_evidence_ids)}"
-        )
+        lines.append(f"{indent}- 反证：{', '.join(candidate.counter_evidence_ids)}")
     return lines
 
 
@@ -378,9 +382,7 @@ def _collect_referenced_source_ids(trace: MarketTraceResult) -> list[str]:
     referenced: list[str] = []
     seen: set[str] = set()
     for candidate in trace.candidates:
-        for sid in (
-            candidate.supporting_evidence_ids + candidate.counter_evidence_ids
-        ):
+        for sid in candidate.supporting_evidence_ids + candidate.counter_evidence_ids:
             if sid not in seen:
                 seen.add(sid)
                 referenced.append(sid)
@@ -401,84 +403,69 @@ def render_market_trace_markdown(
 
     Markdown 是展示层，不是事实源。固定章节来自 brief Step 4。
     """
-    candidate_by_id = {c.id: c for c in trace.candidates}
-    primary = (
-        candidate_by_id.get(trace.primary_chain_id)
-        if trace.primary_chain_id
-        else None
-    )
-    alternative = (
-        candidate_by_id.get(trace.alternative_chain_id)
-        if trace.alternative_chain_id
-        else None
-    )
-    selected_ids = {trace.primary_chain_id, trace.alternative_chain_id}
-    rejected_or_insufficient = [
-        c for c in trace.candidates if c.id not in selected_ids
-    ]
-
+    candidate_by_id = {candidate.id: candidate for candidate in trace.candidates}
+    primary_candidate = candidate_by_id.get(trace.primary_chain_id or "")
     lines: list[str] = []
     lines.append(f"# A股收盘溯源｜{snapshot.trade_date}")
     lines.append(f"快照编号：{snapshot.snapshot_id}")
     lines.append("")
 
-    # 主导现象 — 以 snapshot 为事实来源，避免模型文本覆盖冻结事实。
-    # validate_trace_against_snapshot 已强制 trace.dominant_phenomenon 与 snapshot
-    # 完全一致（kind/summary/fact_ids/score），但渲染仍以 snapshot 为权威，防止任何绕过。
-    lines.append("## 主导现象")
-    if snapshot.dominant_phenomenon:
-        dp = snapshot.dominant_phenomenon
-        lines.append(f"- 类型：{dp.kind}")
-        lines.append(f"- 摘要：{dp.summary}")
-        lines.append(f"- 评分：{dp.score}")
-        if dp.fact_ids:
-            lines.append(f"- 事实 ID：{', '.join(dp.fact_ids)}")
+    lines.append("## 确认的市场现象")
+    discovery = snapshot.phenomenon_discovery
+    if discovery.status == "detected" and discovery.primary is not None:
+        phenomenon = discovery.primary
+        lines.append(f"- 类型：{phenomenon.kind}")
+        lines.append(f"- 摘要：{phenomenon.summary}")
+        lines.append(f"- 严重度：{phenomenon.severity}")
+        lines.append(f"- 事实 ID：{', '.join(phenomenon.fact_ids)}")
+    elif discovery.status == "no_phenomenon":
+        lines.append("- 行情完整，未发现显著市场现象")
     else:
-        lines.append("- 无明确主导现象，未强行归因。")
+        lines.append("- 行情数据不足，无法可靠判断市场现象")
     lines.append("")
 
-    # 主因果链
-    lines.append("## 主因果链")
-    if primary:
-        lines.extend(_render_candidate(primary))
+    lines.append("## 归因结论")
+    if trace.attribution_status == "confirmed" and primary_candidate is not None:
+        lines.extend(_render_candidate(primary_candidate))
+    elif trace.attribution_status == "not_applicable":
+        lines.append("- 不适用因果归因。")
+    elif discovery.status == "insufficient_data":
+        lines.append("- 行情数据不足，无法可靠判断市场现象")
     else:
         lines.append("- 证据不足，未确认主因。")
     lines.append("")
 
-    # 备选解释
-    lines.append("## 备选解释")
-    if alternative:
-        lines.extend(_render_candidate(alternative))
-    else:
-        lines.append("- 无备选解释。")
-    lines.append("")
-
-    # 已排除或证据不足的解释
-    lines.append("## 已排除或证据不足的解释")
-    if rejected_or_insufficient:
-        for c in rejected_or_insufficient:
-            lines.extend(_render_candidate(c))
+    lines.append("## 候选解释与反证")
+    if trace.candidates:
+        for candidate in trace.candidates:
+            lines.extend(_render_candidate(candidate))
     else:
         lines.append("- 无。")
     lines.append("")
 
-    # 证据索引
+    lines.append("## 缺失证据")
+    if snapshot.missing_fields:
+        for field in snapshot.missing_fields:
+            lines.append(f"- {field}")
+    else:
+        lines.append("- 无。")
+    lines.append("")
+
     lines.append("## 证据索引")
     referenced_ids = _collect_referenced_source_ids(trace)
+    if discovery.primary is not None:
+        referenced_ids = list(dict.fromkeys(discovery.primary.fact_ids + referenced_ids))
     if referenced_ids:
         for sid in referenced_ids:
             source = snapshot.sources.get(sid)
             if source:
                 occurred = _format_source_time(source)
                 url = source.url or "无 URL"
-                lines.append(
-                    f"- [{sid}] {source.provider}｜{source.title}｜{occurred}｜{url}"
-                )
+                lines.append(f"- [{sid}] {source.provider}｜{source.title}｜{occurred}｜{url}")
     else:
         lines.append("- 无引用证据。")
     lines.append("")
 
-    # 未解问题
     lines.append("## 未解问题")
     if trace.unresolved_questions:
         for q in trace.unresolved_questions:
@@ -504,7 +491,7 @@ def render_market_trace_markdown(
 # 主导现象（新 markdown 格式：render_market_trace_markdown 产出的 ## 主导现象 段，
 # 标题行之后到下一个 '## ' 标题前的内容作为摘要来源）
 _DOMINANT_PHENOMENON_RE = re.compile(
-    r"##\s*主导现象[^\n]*\n(.*?)(?=\n##\s|\Z)",
+    r"##\s*(?:确认的市场现象|主导现象)[^\n]*\n(.*?)(?=\n##\s|\Z)",
     re.DOTALL,
 )
 # 步骤4：输出核心结论（旧 markdown 格式，保留以兼容已缓存的旧报告）
@@ -520,7 +507,7 @@ _SECTOR_LIST_RE = re.compile(
 # 附录B 板块表现矩阵：跳过表头与分隔行，取数据行第一列（板块名称）
 _APPENDIX_B_RE = re.compile(
     r"##\s*附录\s*B[：:：]?\s*板块表现矩阵[^\n]*\n"
-    r"(?:\|[^\n]*\|\n)?"                 # 可选的表头行
+    r"(?:\|[^\n]*\|\n)?"  # 可选的表头行
     r"(?:\s*\|?\s*[-: ]+\s*\|[^\n]*\n)?"  # 分隔行（|---|---|...）
     r"((?:\|[^\n]+\n?)+)",
 )
@@ -624,6 +611,7 @@ async def _persist_review_report(
         await node_api.save_analysis_report(
             report_type="review",
             report_date=report_date,
+            data_source="review_agent",
             content=content,
         )
     except Exception as e:
@@ -660,10 +648,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
     任一前置步骤失败都返回降级文本，不跳到后一步。
     """
-    report_date = (
-        state.get("report_date")
-        or datetime.now().strftime("%Y-%m-%d")
-    )
+    report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
 
     # 1. 缓存检查（命中则校验工件 + 跨对象校验 + 日期一致、持久化、返回）
     # state.skip_cache 为真时跳过缓存，强制完整流水线（管理员手动触发用）
@@ -704,9 +689,7 @@ async def run(state: AgentState) -> dict[str, object]:
             # 展示层字段，再传给 _persist_review_report 并返回。
             # 该路径禁止请求 Node 收盘数据、yfinance、财联社、Tavily 或 LLM；
             # 也不重写 Redis 缓存（命中即用，重写无收益且会增加风险）。
-            rendered_markdown = render_market_trace_markdown(
-                artifact.trace, artifact.snapshot
-            )
+            rendered_markdown = render_market_trace_markdown(artifact.trace, artifact.snapshot)
             rebuilt_artifact = ReviewArtifact(
                 schema_version=artifact.schema_version,
                 snapshot=artifact.snapshot,
@@ -731,7 +714,13 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 3. 归档不可变事实快照（在 LLM 推理前，保证事实先于展示层落盘）
+    # 3. 先校验冻结快照，再归档不可变事实（保证非法来源映射不落盘）
+    try:
+        validate_snapshot_discovery(snapshot)
+    except ValueError as e:
+        logger.error("review_discovery_validation_failed", error=str(e), exc_info=True)
+        return {"final_response": DEGRADED_RESPONSE}
+
     try:
         archive_market_trace_snapshot(snapshot)
     except Exception as e:
@@ -743,24 +732,42 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 4. 单次 LLM 调用 + 解析 + 跨对象校验
-    try:
-        llm = get_deep_think()
-        snapshot_json = snapshot.model_dump_json(indent=2)
-        messages = [
-            SystemMessage(content=REVIEW_PROMPT),
-            HumanMessage(content=snapshot_json),
-        ]
-        ai_message = await llm.ainvoke(messages)
-        raw_text = (
-            ai_message.content
-            if isinstance(ai_message.content, str)
-            else str(ai_message.content)
+    discovery_status = snapshot.phenomenon_discovery.status
+    if discovery_status in {"no_phenomenon", "insufficient_data"}:
+        trace = MarketTraceResult(
+            schema_version="1.1",
+            attribution_status=(
+                "not_applicable" if discovery_status == "no_phenomenon" else "insufficient"
+            ),
+            candidates=[],
+            primary_chain_id=None,
+            alternative_chain_id=None,
+            confidence="low",
+            unresolved_questions=_readiness_questions(
+                snapshot.phenomenon_discovery,
+                snapshot.missing_fields,
+            ),
         )
+    else:
+        trace = None
 
-        # 剥离代码围栏 + 解析 + 跨对象校验
-        cleaned = _strip_code_fences(raw_text)
-        trace = MarketTraceResult.model_validate_json(cleaned)
+    # 4. detected 时单次 LLM 调用 + 解析 + 跨对象校验
+    try:
+        if trace is None:
+            llm = get_deep_think()
+            snapshot_json = snapshot.model_dump_json(indent=2)
+            messages = [
+                SystemMessage(content=REVIEW_PROMPT),
+                HumanMessage(content=snapshot_json),
+            ]
+            ai_message = await llm.ainvoke(messages)
+            raw_text = (
+                ai_message.content
+                if isinstance(ai_message.content, str)
+                else str(ai_message.content)
+            )
+            cleaned = _strip_code_fences(raw_text)
+            trace = MarketTraceResult.model_validate_json(cleaned)
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
@@ -774,7 +781,7 @@ async def run(state: AgentState) -> dict[str, object]:
     # 5. 渲染 Markdown + 构造 ReviewArtifact
     markdown = render_market_trace_markdown(trace, snapshot)
     artifact = ReviewArtifact(
-        schema_version="1.0",
+        schema_version="1.1",
         snapshot=snapshot,
         trace=trace,
         markdown=markdown,

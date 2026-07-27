@@ -7,10 +7,10 @@
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
-# 主导现象 kind 的 Literal 别名，供服务层 cast 使用，避免 type: ignore。
-DominantPhenomenonKind: TypeAlias = Literal[
+# 市场现象 kind 的 Literal 别名。
+MarketPhenomenonKind: TypeAlias = Literal[
     "broad_rally",
     "broad_decline",
     "style_divergence",
@@ -31,11 +31,47 @@ class SourceRecord(BaseModel):
     source_level: Literal["primary", "reporting", "market_data"]
 
 
-class DominantPhenomenon(BaseModel):
-    kind: DominantPhenomenonKind
+class DataReadiness(BaseModel):
+    market_data: Literal["complete", "incomplete"]
+    attribution_inputs: Literal["complete", "partial", "missing"]
+    causal_evidence: Literal["ready", "partial", "not_ready"]
+
+
+class RuleDiagnostic(BaseModel):
+    rule: str
+    matched: bool
+    evidence_ids: list[str]
+
+
+class DetectedPhenomenon(BaseModel):
+    kind: MarketPhenomenonKind
     summary: str
     fact_ids: list[str]
-    score: int
+    tags: list[str]
+    severity: Literal["low", "medium", "high"]
+
+    @model_validator(mode="after")
+    def _require_fact_ids(self) -> "DetectedPhenomenon":
+        if not self.fact_ids:
+            raise ValueError("detected phenomenon fact_ids must not be empty")
+        return self
+
+
+class PhenomenonDiscoveryResult(BaseModel):
+    status: Literal["detected", "no_phenomenon", "insufficient_data"]
+    primary: DetectedPhenomenon | None
+    concurrent_phenomena: list[DetectedPhenomenon]
+    data_readiness: DataReadiness
+    diagnostics: list[RuleDiagnostic]
+
+    @model_validator(mode="after")
+    def _validate_status_shape(self) -> "PhenomenonDiscoveryResult":
+        if self.status == "detected":
+            if self.primary is None:
+                raise ValueError("detected discovery requires primary")
+        elif self.primary is not None or self.concurrent_phenomena:
+            raise ValueError("non-detected discovery must not contain phenomena")
+        return self
 
 
 class CausalNode(BaseModel):
@@ -71,8 +107,10 @@ class CandidateExplanation(BaseModel):
 
 
 class MarketTraceResult(BaseModel):
-    schema_version: Literal["1.0"]
-    dominant_phenomenon: DominantPhenomenon | None
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.1"]
+    attribution_status: Literal["confirmed", "hypothesis", "insufficient", "not_applicable"]
     candidates: list[CandidateExplanation]
     primary_chain_id: str | None
     alternative_chain_id: str | None
@@ -81,17 +119,19 @@ class MarketTraceResult(BaseModel):
 
 
 class MarketTraceSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     snapshot_id: str
     trade_date: str
     captured_at: datetime
     a_share: dict[str, object]
     sources: dict[str, SourceRecord]
     missing_fields: list[str]
-    dominant_phenomenon: DominantPhenomenon | None
+    phenomenon_discovery: PhenomenonDiscoveryResult
 
 
 class ReviewArtifact(BaseModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.1"]
     snapshot: MarketTraceSnapshot
     trace: MarketTraceResult
     markdown: str

@@ -5,6 +5,7 @@
 - 正确 token -> 200，返回结构化响应（含 content/session_id/trace）
 - 降级响应透传正常
 """
+
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -135,7 +136,7 @@ async def test_market_trace_qa_degraded_response_passthrough():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "report_date",
-    ["../../quote/600519", "2026/07/17", "..", "2026-02-30"],
+    ["../../quote/600519", "2026/07/17", "20260717", "..", "2026-02-30"],
 )
 async def test_market_trace_qa_rejects_invalid_report_date_before_service(report_date: str):
     """非法日期必须在请求模型层拦截，不能进入服务或触发实时读取。"""

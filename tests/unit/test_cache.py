@@ -16,8 +16,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.schemas.market_trace import (
+    DataReadiness,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
 )
 from aistock_agent.services import cache
@@ -42,7 +44,7 @@ class _SerializableReviewArtifact(ReviewArtifact):
 
 
 REVIEW_ARTIFACT = _SerializableReviewArtifact(
-    schema_version="1.0",
+    schema_version="1.1",
     snapshot=MarketTraceSnapshot(
         snapshot_id="trace-20260719",
         trade_date="2026-07-19",
@@ -50,11 +52,21 @@ REVIEW_ARTIFACT = _SerializableReviewArtifact(
         a_share={},
         sources={},
         missing_fields=[],
-        dominant_phenomenon=None,
+        phenomenon_discovery=PhenomenonDiscoveryResult(
+            status="insufficient_data",
+            primary=None,
+            concurrent_phenomena=[],
+            data_readiness=DataReadiness(
+                market_data="incomplete",
+                attribution_inputs="missing",
+                causal_evidence="not_ready",
+            ),
+            diagnostics=[],
+        ),
     ),
     trace=MarketTraceResult(
-        schema_version="1.0",
-        dominant_phenomenon=None,
+        schema_version="1.1",
+        attribution_status="insufficient",
         candidates=[],
         primary_chain_id=None,
         alternative_chain_id=None,
@@ -143,7 +155,9 @@ async def test_set_cached_briefing_writes():
 
     today = datetime.now().strftime("%Y-%m-%d")
     mock_client.setex.assert_awaited_once_with(
-        f"briefing:morning:{today}", 86400, "briefing content",
+        f"briefing:morning:{today}",
+        86400,
+        "briefing content",
     )
 
 
@@ -159,7 +173,9 @@ async def test_set_cached_review_writes():
         await cache.set_cached_review("2026-07-19", artifact)
 
     mock_client.setex.assert_awaited_once_with(
-        "briefing:review:2026-07-19", 86400, json.dumps(artifact, ensure_ascii=False),
+        "briefing:review:2026-07-19",
+        86400,
+        json.dumps(artifact, ensure_ascii=False),
     )
 
 
@@ -175,7 +191,9 @@ async def test_set_cached_briefing_custom_ttl():
 
     today = datetime.now().strftime("%Y-%m-%d")
     mock_client.setex.assert_awaited_once_with(
-        f"briefing:morning:{today}", 3600, "content",
+        f"briefing:morning:{today}",
+        3600,
+        "content",
     )
 
 

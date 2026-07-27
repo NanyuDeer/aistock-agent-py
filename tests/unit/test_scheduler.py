@@ -19,6 +19,7 @@ mock 路径说明：
   aistock_agent.services.scheduler.is_trading_day。
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -51,8 +52,8 @@ async def test_start_scheduler_initializes_jobs():
     """start_scheduler 注册了 4 个定时任务"""
     from aistock_agent.services.scheduler import (
         get_scheduler,
-        start_scheduler,
         shutdown_scheduler,
+        start_scheduler,
     )
 
     start_scheduler()
@@ -60,10 +61,31 @@ async def test_start_scheduler_initializes_jobs():
     jobs = scheduler.get_jobs()
     job_ids = [j.id for j in jobs]
     assert "morning_briefing" in job_ids
-    assert "review_report" in job_ids
-    assert "snapshot_build" in job_ids
-    assert "iterate_analysis" in job_ids
+    assert "broadcast_chain" in job_ids
+    assert "evening_chain" in job_ids
+    assert "review_report" not in job_ids
+    assert "snapshot_build" not in job_ids
+    assert "iterate_analysis" not in job_ids
+    assert {str(job.trigger.timezone) for job in jobs} == {"Asia/Shanghai"}
     shutdown_scheduler()
+
+
+def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None:
+    """CronTrigger 必须显式绑定调度配置时区，不能依赖进程本地时区。"""
+    from aistock_agent.services import scheduler
+
+    with patch.object(
+        scheduler.CronTrigger,
+        "from_crontab",
+        wraps=scheduler.CronTrigger.from_crontab,
+    ) as from_crontab:
+        scheduler.start_scheduler()
+
+    assert from_crontab.call_count == 3
+    assert all(
+        call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
+        for call in from_crontab.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -92,10 +114,31 @@ async def test_morning_task_runs_on_trading_day():
 
 
 @pytest.mark.asyncio
+async def test_morning_task_passes_the_same_shanghai_date_to_session_and_report():
+    """交易日判断和晨报状态必须使用同一个上海自然日。"""
+    from datetime import date
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    shanghai_date = date(2026, 7, 24)
+    with (
+        patch("aistock_agent.services.scheduler.shanghai_today", return_value=shanghai_date),
+        patch("aistock_agent.services.scheduler.is_trading_day", return_value=True),
+        patch("aistock_agent.agents.workers.morning", create=True) as mock_agent,
+    ):
+        mock_agent.run = AsyncMock(return_value={"final_response": "晨报内容"})
+        await _run_morning_task()
+
+    state = mock_agent.run.await_args.args[0]
+    assert state["session_id"] == "scheduled_morning_2026-07-24"
+    assert state["report_date"] == "2026-07-24"
+
+
+@pytest.mark.asyncio
 async def test_scheduler_review_task_calls_review_agent():
     """_run_review_task 调用 review.run()"""
-    from aistock_agent.services.scheduler import _run_review_task
     from aistock_agent.agents.workers import review as review_module
+    from aistock_agent.services.scheduler import _run_review_task
 
     with patch.object(review_module, "run", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {"final_response": "复盘报告"}
@@ -120,13 +163,453 @@ async def test_scheduler_snapshot_task_calls_build_snapshot(mock_trading, mock_b
 @patch("aistock_agent.services.scheduler.is_trading_day", return_value=True)
 async def test_scheduler_iterate_task_calls_iterate_agent(mock_trading):
     """_run_iterate_task 调用 iterate.run()"""
-    from aistock_agent.services.scheduler import _run_iterate_task
     from aistock_agent.agents.workers import iterate as iterate_module
+    from aistock_agent.services.scheduler import _run_iterate_task
 
     with patch.object(iterate_module, "run", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {"final_response": '{"status": "normal"}'}
         await _run_iterate_task()
     mock_run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_persists_each_artifact_before_next_step() -> None:
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            {
+                "id": 1,
+                "report_type": "review",
+                "status": "completed",
+                "data_source": "review_agent",
+                "created_at": "2026-07-24T15:30:00+08:00",
+                "content": {"text": "saved"},
+            },
+            {
+                "id": 2,
+                "report_type": "market_snapshot",
+                "status": "completed",
+                "data_source": "snapshot_builder",
+                "created_at": "2026-07-24T15:35:00+08:00",
+                "content": {"text": "snapshot"},
+            },
+            {
+                "id": 3,
+                "report_type": "iterate",
+                "status": "completed",
+                "data_source": "iterate_analyzer",
+                "created_at": "2026-07-24T15:40:00+08:00",
+                "content": {"text": '{"status": "normal"}'},
+            },
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24", "summary": "snapshot"},
+        ) as snapshot,
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(return_value={"final_response": '{"status": "normal"}'}),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(
+            broadcast,
+            "run",
+            new=AsyncMock(return_value={"final_response": "broadcast"}),
+        ) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    snapshot.assert_called_once_with("2026-07-24")
+    assert api.save_analysis_report.await_args_list[0].kwargs["report_type"] == "market_snapshot"
+    assert api.save_analysis_report.await_args_list[1].kwargs["report_type"] == "iterate"
+    assert api.save_analysis_report.await_args_list[0].kwargs["data_source"] == "snapshot_builder"
+    assert api.save_analysis_report.await_args_list[1].kwargs["data_source"] == "iterate_analyzer"
+    assert [call.args[0] for call in api.get_analysis_report.await_args_list] == [
+        "review",
+        "market_snapshot",
+        "iterate",
+    ]
+    build_brief.assert_awaited_once_with("evening", "2026-07-24")
+    state = run_broadcast.await_args.args[0]
+    assert state["brief_type"] == "evening"
+    assert state["report_date"] == "2026-07-24"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "review_report",
+    [
+        None,
+        {
+            "id": 1,
+            "report_type": "review",
+            "status": "completed",
+            "data_source": "review_agent",
+            "created_at": "2026-07-24T15:30:00+08:00",
+            "content": {},
+        },
+    ],
+)
+async def test_evening_chain_stops_when_review_is_missing_or_incomplete(
+    review_report: object,
+) -> None:
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(return_value=review_report)
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch("aistock_agent.services.snapshot_builder.build_snapshot") as snapshot,
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(
+            broadcast,
+            "run",
+            new=AsyncMock(return_value={"final_response": "broadcast"}),
+        ) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    snapshot.assert_not_called()
+    build_brief.assert_not_awaited()
+    run_broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_skips_snapshot_when_review_artifact_is_not_traceable() -> None:
+    """失败的复盘记录不是可驱动快照的已完成工件。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        return_value={
+            "id": 42,
+            "report_type": "review",
+            "status": "failed",
+            "data_source": "review_agent",
+            "created_at": "2026-07-24T15:30:00+08:00",
+            "content": {"text": "review"},
+        }
+    )
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch("aistock_agent.services.snapshot_builder.build_snapshot") as snapshot,
+        patch.object(iterate, "run", new=AsyncMock()) as run_iterate,
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(broadcast, "run", new=AsyncMock()) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    snapshot.assert_not_called()
+    run_iterate.assert_not_awaited()
+    build_brief.assert_not_awaited()
+    run_broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_morning_broadcast_chain_persists_brief_before_broadcast() -> None:
+    from datetime import date
+
+    from aistock_agent.agents.workers import broadcast, hot_burst, morning, wind_leader
+    from aistock_agent.services import scheduler
+
+    build_brief = AsyncMock(return_value=True)
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(morning, "run", new=AsyncMock(return_value={"final_response": "morning"})),
+        patch.object(wind_leader, "run", new=AsyncMock(return_value={"final_response": "wind"})),
+        patch.object(hot_burst, "run", new=AsyncMock(return_value={"final_response": "burst"})),
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(
+            broadcast,
+            "run",
+            new=AsyncMock(return_value={"final_response": "broadcast"}),
+        ) as run_broadcast,
+    ):
+        await scheduler._run_broadcast_task()
+
+    build_brief.assert_awaited_once_with("morning", "2026-07-24")
+    state = run_broadcast.await_args.args[0]
+    assert state["brief_type"] == "morning"
+    assert state["report_date"] == "2026-07-24"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("iterate_status", ("error", "skip"))
+async def test_evening_chain_does_not_persist_invalid_iterate_artifact(
+    iterate_status: str,
+) -> None:
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            {
+                "id": 1,
+                "report_type": "review",
+                "status": "completed",
+                "data_source": "review_agent",
+                "created_at": "2026-07-24T15:30:00+08:00",
+                "content": {"text": "review"},
+            },
+            {
+                "id": 2,
+                "report_type": "market_snapshot",
+                "status": "completed",
+                "data_source": "snapshot_builder",
+                "created_at": "2026-07-24T15:35:00+08:00",
+                "content": {"text": "snapshot"},
+            },
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24"},
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(return_value={"final_response": f'{{"status": "{iterate_status}"}}'}),
+        ),
+        patch.object(
+            scheduler, "build_and_persist_brief", new=AsyncMock(return_value=True)
+        ) as build_brief,
+        patch.object(broadcast, "run", new=AsyncMock()) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    persisted_types = [
+        call.kwargs["report_type"] for call in api.save_analysis_report.await_args_list
+    ]
+    assert persisted_types == ["market_snapshot"]
+    build_brief.assert_not_awaited()
+    run_broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_skips_error_snapshot_and_iterate() -> None:
+    """缺少上游事实的快照不能持久化为有效工件，也不能驱动迭代。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        return_value={
+            "id": 1,
+            "report_type": "review",
+            "status": "completed",
+            "data_source": "review_agent",
+            "created_at": "2026-07-24T15:30:00+08:00",
+            "content": {"text": "review"},
+        }
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"error": "missing_reports"},
+        ),
+        patch.object(iterate, "run", new=AsyncMock()) as run_iterate,
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+    ):
+        await scheduler._run_evening_chain_task()
+
+    api.save_analysis_report.assert_not_awaited()
+    run_iterate.assert_not_awaited()
+    build_brief.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", [None, {"id": 2}])
+async def test_evening_chain_stops_when_snapshot_is_not_traceable(
+    saved: object,
+) -> None:
+    """快照保存失败或回读后不可追溯时，不生成晚报。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    review_report = {
+        "id": 1,
+        "report_type": "review",
+        "status": "completed",
+        "data_source": "review_agent",
+        "created_at": "2026-07-24T15:30:00+08:00",
+        "content": {"text": "review"},
+    }
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(side_effect=[review_report, None])
+    api.save_analysis_report = AsyncMock(return_value=saved)
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24", "summary": "snapshot"},
+        ),
+        patch.object(iterate, "run", new=AsyncMock()) as run_iterate,
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(broadcast, "run", new=AsyncMock()) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    run_iterate.assert_not_awaited()
+    build_brief.assert_not_awaited()
+    run_broadcast.assert_not_awaited()
+    expected_reads = 1 if saved is None else 2
+    assert api.get_analysis_report.await_count == expected_reads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", [None, {"id": 3}])
+async def test_evening_chain_stops_when_iterate_is_not_traceable(
+    saved: object,
+) -> None:
+    """迭代保存失败或回读后不可追溯时，不生成晚报。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            {
+                "id": 1,
+                "report_type": "review",
+                "status": "completed",
+                "data_source": "review_agent",
+                "created_at": "2026-07-24T15:30:00+08:00",
+                "content": {"text": "review"},
+            },
+            {
+                "id": 2,
+                "report_type": "market_snapshot",
+                "status": "completed",
+                "data_source": "snapshot_builder",
+                "created_at": "2026-07-24T15:35:00+08:00",
+                "content": {"text": "snapshot"},
+            },
+            None,
+        ]
+    )
+    api.save_analysis_report = AsyncMock(side_effect=[{"id": 2}, saved])
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24", "summary": "snapshot"},
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(return_value={"final_response": '{"status": "normal"}'}),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(broadcast, "run", new=AsyncMock()) as run_broadcast,
+    ):
+        await scheduler._run_evening_chain_task()
+
+    build_brief.assert_not_awaited()
+    run_broadcast.assert_not_awaited()
+    expected_reads = 2 if saved is None else 3
+    assert api.get_analysis_report.await_count == expected_reads
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("id", 0),
+        ("report_type", "wrong"),
+        ("status", "failed"),
+        ("data_source", ""),
+        ("created_at", ""),
+        ("content", {}),
+    ],
+)
+def test_traceable_report_validation_rejects_invalid_required_fields(
+    field: str,
+    invalid_value: object,
+) -> None:
+    from aistock_agent.services.scheduler import _is_traceable_completed_report
+
+    report: dict[str, object] = {
+        "id": 1,
+        "report_type": "iterate",
+        "status": "completed",
+        "data_source": "iterate_analyzer",
+        "created_at": "2026-07-24T15:40:00+08:00",
+        "content": {"text": "iterate"},
+    }
+    report[field] = invalid_value
+
+    assert _is_traceable_completed_report(report, "iterate") is False
 
 
 # ── 事件传导：major_events → event agent ──
@@ -261,3 +744,228 @@ async def test_scheduler_review_task_passes_persistence_context():
     state = mock_run.await_args.args[0]
     assert state["trigger_source"] == "scheduler"
     assert state["report_date"] == date.today().isoformat()
+
+
+# ── schema 2.0 持久化契约：market_snapshot / iterate 不得写入原始 JSON ──
+
+
+def _traceable_report(
+    report_type: str, report_id: int, content: dict[str, object]
+) -> dict[str, object]:
+    """构造可追溯的已完成持久化行。"""
+    return {
+        "id": report_id,
+        "report_type": report_type,
+        "status": "completed",
+        "data_source": f"{report_type}_source",
+        "created_at": "2026-07-24T15:30:00+08:00",
+        "content": content,
+    }
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_persists_market_snapshot_with_controlled_brief_summary() -> None:
+    """market_snapshot 只能持久化由允许指标构造的 brief_summary.v1。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    snapshot_payload = {
+        "date": "2026-07-24",
+        "dimension_1_coverage": {
+            "hit_rate": 0.72,
+            "new_coverage_rate": 0.15,
+            "overlap_hits": [],
+            "missing_in_morning": [],
+            "over_focused": [],
+        },
+    }
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            _traceable_report("review", 1, {"text": "review"}),
+            _traceable_report("market_snapshot", 2, {"text": "should-not-be-used"}),
+            _traceable_report("iterate", 3, {"text": '{"status": "normal"}'}),
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value=snapshot_payload,
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(
+                return_value={"final_response": '{"status": "normal", "summary": "今日无显著异常"}'}
+            ),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", new=AsyncMock(return_value=True)),
+        patch.object(broadcast, "run", new=AsyncMock()),
+    ):
+        await scheduler._run_evening_chain_task()
+
+    snapshot_call = api.save_analysis_report.await_args_list[0]
+    assert snapshot_call.kwargs["report_type"] == "market_snapshot"
+    content = snapshot_call.kwargs["content"]
+    summary = content["brief_summary"]
+    assert summary["schema_version"] == "brief_summary.v1"
+    assert summary["summary"] == "市场快照（2026-07-24）：板块命中率 0.72，新覆盖率 0.15"
+    assert content["snapshot"] == snapshot_payload
+    assert "text" not in content
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_persists_iterate_with_controlled_brief_summary() -> None:
+    """iterate 只能持久化由状态和合法维度构造的 brief_summary.v1。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    iterate_summary = "维度二方向-强度偏差触发，建议复核晨报板块打分"
+    iterate_payload = {
+        "date": "2026-07-24",
+        "status": "alert",
+        "summary": iterate_summary,
+        "triggered_dimensions": ["dimension_2"],
+    }
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            _traceable_report("review", 1, {"text": "review"}),
+            _traceable_report("market_snapshot", 2, {"text": "snapshot"}),
+            _traceable_report("iterate", 3, {"text": "should-not-be-used"}),
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={
+                "date": "2026-07-24",
+                "dimension_1_coverage": {"hit_rate": 0.5, "new_coverage_rate": 0.1},
+            },
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(
+                return_value={"final_response": json.dumps(iterate_payload, ensure_ascii=False)}
+            ),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", new=AsyncMock(return_value=True)),
+        patch.object(broadcast, "run", new=AsyncMock()),
+    ):
+        await scheduler._run_evening_chain_task()
+
+    iterate_call = api.save_analysis_report.await_args_list[1]
+    assert iterate_call.kwargs["report_type"] == "iterate"
+    content = iterate_call.kwargs["content"]
+    assert content["brief_summary"]["schema_version"] == "brief_summary.v1"
+    assert content["brief_summary"]["summary"] == "检测到异常维度：dimension_2"
+    assert content["iterate_payload"] == iterate_payload
+    assert "text" not in content
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_ignores_missing_llm_summary_for_legal_iterate_alert() -> None:
+    """合法 alert 不依赖 LLM summary，仍由受控维度产生 Brief 摘要。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    iterate_payload = {
+        "date": "2026-07-24",
+        "status": "alert",
+        "triggered_dimensions": ["dimension_2"],
+    }
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            _traceable_report("review", 1, {"text": "review"}),
+            _traceable_report("market_snapshot", 2, {"text": "snapshot"}),
+            _traceable_report("iterate", 3, {"text": "should-not-be-used"}),
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={
+                "date": "2026-07-24",
+                "dimension_1_coverage": {"hit_rate": 0.5, "new_coverage_rate": 0.1},
+            },
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(
+                return_value={"final_response": json.dumps(iterate_payload, ensure_ascii=False)}
+            ),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", new=AsyncMock(return_value=True)),
+        patch.object(broadcast, "run", new=AsyncMock()),
+    ):
+        await scheduler._run_evening_chain_task()
+
+    iterate_call = api.save_analysis_report.await_args_list[1]
+    content = iterate_call.kwargs["content"]
+    assert content["brief_summary"]["summary"] == "检测到异常维度：dimension_2"
+    assert "text" not in content
+
+
+def test_extract_snapshot_summary_returns_empty_for_invalid_payload() -> None:
+    """缺少 dimension_1_coverage 或指标类型不对时返回空字符串，触发 Brief 降级。"""
+    from aistock_agent.services.scheduler import _extract_snapshot_summary
+
+    assert _extract_snapshot_summary(None) == ""
+    assert _extract_snapshot_summary({"date": "2026-07-24"}) == ""
+    assert _extract_snapshot_summary({
+        "date": "2026-07-24",
+        "dimension_1_coverage": {},
+    }) == ""
+    assert _extract_snapshot_summary({
+        "date": "2026-07-24",
+        "dimension_1_coverage": {"hit_rate": "not-a-number", "new_coverage_rate": 0.1},
+    }) == ""
+    # bool 不是合法指标（Python 中 bool 是 int 子类，需显式排除）
+    assert _extract_snapshot_summary({
+        "date": "2026-07-24",
+        "dimension_1_coverage": {"hit_rate": True, "new_coverage_rate": 0.1},
+    }) == ""
+
+
+def test_extract_iterate_summary_ignores_llm_summary_and_rejects_invalid_state() -> None:
+    """iterate normal 固定摘要，未知状态或非法维度不得构成 Brief 事实。"""
+    from aistock_agent.services.scheduler import _extract_iterate_summary
+
+    assert _extract_iterate_summary(None) == ""
+    assert _extract_iterate_summary({"status": "alert"}) == ""
+    assert _extract_iterate_summary({"status": "normal", "summary": ""}) == ""
+    assert _extract_iterate_summary(
+        {"status": "normal", "summary": "LLM 改写", "triggered_dimensions": []}
+    ) == "今日无显著异常"
+    assert _extract_iterate_summary({"status": "skip", "summary": "今日无显著异常"}) == ""
+    assert _extract_iterate_summary({"status": "alert", "triggered_dimensions": ["unknown"]}) == ""

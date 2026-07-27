@@ -12,8 +12,29 @@ class ChatRequest(BaseModel):
     favorites: list[str] = Field(default_factory=list, description="用户自选股代码列表")
 
 
+class AdvisorSubquestionTrace(BaseModel):
+    """单个投顾子问题的来源和降级状态。"""
+
+    intent: str
+    reports: list[dict[str, object]]
+    sources: list[dict[str, object]]
+    as_of: str | None
+    missing_sources: list[str]
+    degraded: bool
+
+
+class AdvisorTrace(BaseModel):
+    """投顾回答的结构化可追溯状态。"""
+
+    schema_version: str
+    subquestions: list[AdvisorSubquestionTrace]
+    missing_sources: list[str]
+    degraded: bool
+
+
 class ChatResponse(BaseModel):
     """对话响应。"""
 
     content: str
     session_id: str
+    advisor_trace: AdvisorTrace | None = None

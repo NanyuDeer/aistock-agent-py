@@ -14,8 +14,10 @@ from pathlib import Path
 import pytest
 
 from aistock_agent.schemas.market_trace import (
-    DominantPhenomenon,
+    DataReadiness,
+    DetectedPhenomenon,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     SourceRecord,
 )
 from aistock_agent.services import archiver
@@ -53,11 +55,22 @@ def _make_snapshot(snapshot_id: str = "trace-20260719") -> MarketTraceSnapshot:
             ),
         },
         missing_fields=[],
-        dominant_phenomenon=DominantPhenomenon(
-            kind="broad_rally",
-            summary="多个核心指数同步上涨",
-            fact_ids=["INDEX_000001_SH"],
-            score=3,
+        phenomenon_discovery=PhenomenonDiscoveryResult(
+            status="detected",
+            primary=DetectedPhenomenon(
+                kind="broad_rally",
+                summary="多个核心指数同步上涨",
+                fact_ids=["INDEX_000001_SH"],
+                tags=["broad_rally"],
+                severity="high",
+            ),
+            concurrent_phenomena=[],
+            data_readiness=DataReadiness(
+                market_data="complete",
+                attribution_inputs="missing",
+                causal_evidence="partial",
+            ),
+            diagnostics=[],
         ),
     )
 
@@ -72,11 +85,7 @@ def review_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 _SECTOR_MARKDOWN = (
-    "# A股收盘溯源\n"
-    "<!--SECTOR_LIST_START-->\n"
-    "- 半导体\n"
-    "- 贵金属\n"
-    "<!--SECTOR_LIST_END-->\n"
+    "# A股收盘溯源\n<!--SECTOR_LIST_START-->\n- 半导体\n- 贵金属\n<!--SECTOR_LIST_END-->\n"
 )
 
 
