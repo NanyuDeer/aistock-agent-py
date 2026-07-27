@@ -20,8 +20,8 @@ _EXAMPLE_PATH = (
 )
 
 _SOURCE_DATA = {
-    "update_time": "2026-07-15 09:00",
-    "outbreaks": [{"symbol": "300308", "stockName": "中际旭创"}],
+    "total": 1,
+    "records": [{"symbol": "300308", "stock_name": "中际旭创"}],
 }
 _VALID_BRIEF = (
     "今日机构调研热门方向集中在算力基础设施与高端制造。中际旭创和汇川技术在近期调研关注、板块消息及市场反馈中表现较突出，"
@@ -215,7 +215,7 @@ async def test_hot_burst_empty_data_skips_llm_and_persists_empty_report():
         patch(_GET_DEEP_THINK) as mock_llm,
     ):
         mock_api.get_hot_burst_data = AsyncMock(
-            return_value=HotBurstReadResult("available", {"outbreaks": []})
+            return_value=HotBurstReadResult("available", {"records": []})
         )
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 2})
         result = await run(_state(scheduler=True))

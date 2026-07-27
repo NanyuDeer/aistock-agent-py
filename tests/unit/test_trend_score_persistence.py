@@ -22,6 +22,11 @@ async def test_scheduler_persists_trend_score_with_data_source(monkeypatch):
     monkeypatch.setattr(trend_score, "get_tools", lambda _: [])
     monkeypatch.setattr(trend_score, "create_react_agent", lambda *_: agent)
     monkeypatch.setattr(trend_score, "_archive_trend_score", lambda _: None)
+    monkeypatch.setattr(
+        trend_score.node_api,
+        "get_list",
+        AsyncMock(return_value=[{"symbol": "600519"}]),
+    )
     monkeypatch.setattr(trend_score.node_api, "save_analysis_report", save_report)
 
     await trend_score.run({

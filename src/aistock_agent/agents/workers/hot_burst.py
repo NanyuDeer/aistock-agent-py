@@ -138,7 +138,7 @@ async def run(state: AgentState) -> dict[str, object]:
                 "final_response": _SOURCE_UNAVAILABLE_MESSAGE,
             }
 
-        source_data = source_result.data or {"outbreaks": []}
+        source_data = source_result.data or {"records": []}
         if not _has_hot_burst_data(source_data):
             empty_content = _empty_report_content()
             await _persist_report(state, empty_content)
