@@ -43,6 +43,9 @@ def get_scheduler() -> AsyncIOScheduler:
 
 def start_scheduler() -> None:
     """注册早报、早间播报与单一晚间串行链路。"""
+    if settings.qa_mode_enabled:
+        logger.info("scheduler_disabled_by_qa_mode")
+        return
     if not settings.scheduler_enabled:
         logger.info("scheduler_disabled_by_config")
         return

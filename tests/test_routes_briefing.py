@@ -422,6 +422,102 @@ class TestTriggerReviewBriefing:
         mock_run.assert_not_called()
 
 
+# ── QA fixed-date runner ──
+
+
+class TestQaBriefingRunner:
+    """POST /api/agent/qa/briefing/run 只能在隔离 QA 进程中使用。"""
+
+    def test_qa_runner_is_hidden_outside_qa_mode(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "")
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 404
+        mock_run.assert_not_awaited()
+
+    def test_qa_runner_forwards_only_matching_run_and_fixed_date(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true", raising=False)
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a", raising=False)
+        expected = {
+            "success": True,
+            "run_id": "run-20260724-a",
+            "brief_type": "morning",
+            "report_date": "2026-07-24",
+            "audio_path": "/api/agent/audio/broadcast-morning-2026-07-24.mp3",
+        }
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+            create=True,
+            return_value=expected,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == expected
+        mock_run.assert_awaited_once_with("morning", "2026-07-24", "run-20260724-a")
+
+    def test_qa_runner_rejects_mismatched_run_before_calling_chain(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true", raising=False)
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a", raising=False)
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+            create=True,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "other-run",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 403
+        mock_run.assert_not_awaited()
+
+    def test_qa_runner_rejects_missing_fixed_date_before_calling_chain(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true")
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a")
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                },
+            )
+
+        assert resp.status_code == 422
+        mock_run.assert_not_awaited()
+
+
 # ── Event trigger ──
 
 

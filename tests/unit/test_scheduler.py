@@ -88,6 +88,19 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
     )
 
 
+def test_qa_mode_hard_disables_scheduler_even_if_scheduler_enabled(monkeypatch) -> None:
+    """QA_MODE=true 不得依赖另一个环境变量才能避免真实上游任务。"""
+    from aistock_agent.services import scheduler
+
+    monkeypatch.setattr(scheduler.settings, "qa_mode", "true")
+    monkeypatch.setattr(scheduler.settings, "scheduler_enabled", True)
+
+    scheduler.start_scheduler()
+
+    assert scheduler.get_scheduler().get_jobs() == []
+    assert scheduler.get_scheduler().running is False
+
+
 @pytest.mark.asyncio
 async def test_morning_task_skips_non_trading_day():
     """非交易日跳过晨报生成"""

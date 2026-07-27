@@ -19,6 +19,11 @@ from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.qa_briefing import (
+    QaBriefingPrerequisiteError,
+    QaBriefingRunError,
+    run_qa_brief_chain,
+)
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -43,6 +48,13 @@ def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
     if parsed_date.isoformat() != report_date:
         raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD")
     return report_date
+
+
+def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
+    """QA runner 必须显式指定固定上海日期，禁止回退到当天。"""
+    if not body or "report_date" not in body:
+        raise HTTPException(status_code=422, detail="QA runner 必须提供 report_date")
+    return _resolve_manual_report_date(body)
 
 
 @router.post("/chat/message", response_model=ChatResponse)
@@ -777,6 +789,34 @@ async def trigger_trend_score(
             "has_response": False,
             "elapsed_seconds": round(time.time() - start, 2),
         }
+
+
+@router.post("/qa/briefing/run")
+async def run_qa_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """以固定日期已审核工件生成 QA Brief、播报和音频。"""
+    if not settings.qa_mode_enabled:
+        raise HTTPException(status_code=404, detail="QA runner 不可用")
+    if not settings.qa_run_id:
+        raise HTTPException(status_code=503, detail="QA_RUN_ID 未配置")
+
+    run_id = body.get("run_id") if body else None
+    if not isinstance(run_id, str) or run_id != settings.qa_run_id:
+        raise HTTPException(status_code=403, detail="QA run_id 不匹配")
+
+    brief_type = body.get("brief_type") if body else None
+    if brief_type not in {"morning", "evening"}:
+        raise HTTPException(status_code=422, detail="brief_type 必须是 morning 或 evening")
+
+    report_date = _resolve_qa_report_date(body)
+    try:
+        return await run_qa_brief_chain(brief_type, report_date, run_id)
+    except QaBriefingPrerequisiteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QaBriefingRunError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/briefing/alert")

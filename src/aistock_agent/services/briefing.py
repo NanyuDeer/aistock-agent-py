@@ -177,15 +177,10 @@ async def build_brief(
                 if len(items) >= 5:
                     break
 
-    as_ofs: list[str] = []
-    for item in items:
-        as_of = item.get("as_of")
-        if isinstance(as_of, str):
-            as_ofs.append(as_of)
     return {
         "schema_version": "brief.v1",
         "brief_type": brief_type,
-        "as_of": max(as_ofs) if as_ofs else report_date,
+        "as_of": f"{report_date}T00:00:00+08:00",
         "items": items,
         "degraded": bool(missing_sources) or len(items) < 3,
         "missing_sources": missing_sources,

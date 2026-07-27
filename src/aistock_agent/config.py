@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
 
+    # 隔离 QA：保留原始字符串，再由 qa_mode_enabled 做与 Node 一致的严格判断。
+    # QA_RUN_ID 绑定单次隔离资源，避免误把任意日期任务写入 QA 库。
+    qa_mode: str = ""
+    qa_run_id: str = ""
+
     # 市场事件推送阈值（晨报生成后自动识别重大涨跌并推送）
     # 对称阈值：上涨 >= 阈值 或 下跌 <= -阈值 才视为"重磅"
     market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
@@ -115,6 +120,11 @@ class Settings(BaseSettings):
             # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    @property
+    def qa_mode_enabled(self) -> bool:
+        """仅接受与 Node 一致的精确 ``QA_MODE=true``。"""
+        return self.qa_mode == "true"
 
     def get_tavily_key(self) -> str:
         """从 API 池中随机选取一个可用的 Tavily Key。

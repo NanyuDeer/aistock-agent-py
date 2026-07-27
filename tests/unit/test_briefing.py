@@ -168,6 +168,25 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
 
 
 @pytest.mark.asyncio
+async def test_brief_as_of_is_anchored_to_requested_shanghai_date() -> None:
+    """导入时间不能改变固定日期 Brief 的 as_of 日期。"""
+    from aistock_agent.services.briefing import build_brief
+
+    api = AsyncMock()
+    reports = {
+        "morning": _report("morning", 11, created_at="2026-07-23T16:00:00.000Z"),
+        "wind_leader": _report("wind_leader", 12, created_at="2026-07-23T16:01:00.000Z"),
+        "hot_burst": _report("hot_burst", 13, created_at="2026-07-23T16:02:00.000Z"),
+    }
+    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.list_analysis_reports.return_value = []
+
+    brief = await build_brief("morning", "2026-07-24", api=api)
+
+    assert brief["as_of"] == "2026-07-24T00:00:00+08:00"
+
+
+@pytest.mark.asyncio
 async def test_morning_brief_reads_event_intent_from_persisted_event_conduction_only() -> None:
     from aistock_agent.services.briefing import build_brief
 
