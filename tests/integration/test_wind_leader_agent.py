@@ -74,6 +74,33 @@ async def test_wind_leader_analysis_reports_written():
 
 
 @pytest.mark.asyncio
+async def test_wind_leader_scheduler_persists_real_source():
+    """scheduler 产出的风口工件必须记录真实生产者来源。"""
+    expected = "风口分析结果"
+    mock_agent = _make_mock_agent([AIMessage(content=expected)])
+    with (
+        patch(_GET_DEEP_THINK, return_value=MagicMock()),
+        patch(_CREATE_REACT_AGENT, return_value=mock_agent),
+        patch(
+            "aistock_agent.agents.workers.wind_leader.ensure_data_available",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("aistock_agent.agents.workers.wind_leader._archive_wind_leader"),
+        patch("aistock_agent.agents.workers.wind_leader.node_api") as mock_api,
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": 1})
+        await run({
+            "messages": [],
+            "analysis_reports": {},
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-24",
+        })
+
+    assert mock_api.save_analysis_report.await_args.kwargs["data_source"] == "wind_leader_agent"
+
+
+@pytest.mark.asyncio
 async def test_wind_leader_exception_degradation():
     """验证 LLM 异常时返回降级文本"""
     with patch(_GET_DEEP_THINK, side_effect=Exception("LLM error")):

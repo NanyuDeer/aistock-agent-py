@@ -7,6 +7,7 @@
 import json
 import re
 from collections.abc import Sequence
+from typing import cast
 
 import structlog
 from langchain_core.messages import BaseMessage
@@ -178,6 +179,241 @@ def _as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
 
+_INDUSTRY_GRAPH_MISSING_BOUNDARY = "本次未取得 IndustryKG 图谱事实，上下游关系未展开，不能补造。"
+_INDUSTRY_GRAPH_DIRECT_RELATION_BOUNDARY = (
+    "仅一跳直接关系，方向和强度是分析推断，不构成确定因果。"
+)
+_INDUSTRY_GRAPH_DEGRADED_STATUSES = {
+    "not_queried",
+    "invalid_input",
+    "not_found",
+    "authentication_failed",
+    "upstream_failed",
+    "timeout",
+    "request_failed",
+    "invalid_response",
+}
+
+
+def _degraded_industry_graph_evidence(
+    status: str,
+    missing_boundary: object = None,
+) -> dict[str, object]:
+    """构造未取得 IndustryKG 事实时的统一证据边界。"""
+    if isinstance(missing_boundary, str) and missing_boundary.strip():
+        boundary = missing_boundary
+    else:
+        boundary = _INDUSTRY_GRAPH_MISSING_BOUNDARY
+    return {
+        "status": status,
+        "degraded": True,
+        "scope": "one_hop",
+        "source": None,
+        "industry": None,
+        "upstream": None,
+        "downstream": None,
+        "graphVersion": None,
+        "updatedAt": None,
+        "missingBoundary": boundary,
+    }
+
+
+def _normalize_industry_graph_evidence(value: object) -> list[dict[str, object]]:
+    """规范化仅由 Transmission 工具消息注入的 IndustryKG 证据。"""
+    raw_evidence = value if isinstance(value, list) else []
+    evidence: list[dict[str, object]] = []
+
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status == "found":
+            source = item.get("source")
+            industry = item.get("industry")
+            upstream = item.get("upstream")
+            downstream = item.get("downstream")
+            if _is_valid_found_industry_graph_evidence(
+                item, industry, upstream, downstream
+            ):
+                evidence.append(
+                    {
+                        "status": "found",
+                        "degraded": False,
+                        "scope": "one_hop",
+                        "source": source,
+                        "industry": industry,
+                        "upstream": upstream,
+                        "downstream": downstream,
+                        "graphVersion": item.get("graphVersion"),
+                        "updatedAt": item.get("updatedAt"),
+                        "missingBoundary": None,
+                    }
+                )
+                continue
+            evidence.append(_degraded_industry_graph_evidence("invalid_response"))
+            continue
+
+        normalized_status = (
+            status if isinstance(status, str) and status in _INDUSTRY_GRAPH_DEGRADED_STATUSES
+            else "invalid_response"
+        )
+        evidence.append(
+            _degraded_industry_graph_evidence(
+                normalized_status,
+                item.get("missingBoundary"),
+            )
+        )
+
+    return evidence or [_degraded_industry_graph_evidence("not_queried")]
+
+
+def _is_valid_found_industry_graph_evidence(
+    evidence: dict[object, object],
+    industry: object,
+    upstream: object,
+    downstream: object,
+) -> bool:
+    """校验可用于约束链路的 IndustryKG 一跳 found 证据。"""
+    if (
+        evidence.get("scope") != "one_hop"
+        or evidence.get("degraded") is not False
+        or evidence.get("source") != "IndustryKGService"
+        or not isinstance(upstream, list)
+        or not isinstance(downstream, list)
+    ):
+        return False
+    return (
+        _is_valid_industry_node(industry)
+        and all(_is_valid_industry_node(node, requires_leading_stocks=True) for node in upstream)
+        and all(
+            _is_valid_industry_node(node, requires_leading_stocks=True)
+            for node in downstream
+        )
+    )
+
+
+def _is_valid_industry_node(value: object, *, requires_leading_stocks: bool = False) -> bool:
+    """校验 IndustryKG 行业节点的最小身份字段。"""
+    if not isinstance(value, dict):
+        return False
+    industry_id = value.get("id")
+    name = value.get("name")
+    if not (
+        isinstance(industry_id, str)
+        and industry_id.strip()
+        and isinstance(name, str)
+        and name.strip()
+    ):
+        return False
+    return not requires_leading_stocks or isinstance(value.get("leadingStocks"), list)
+
+
+def _industry_names(nodes: object) -> set[str]:
+    """从一侧 IndustryKG 节点提取可验证的行业名称。"""
+    if not isinstance(nodes, list):
+        return set()
+    return {
+        name
+        for node in nodes
+        if isinstance(node, dict)
+        for name in [node.get("name")]
+        if isinstance(name, str) and name
+    }
+
+
+def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
+    """将 JSON 对象收窄为字符串键的字典。"""
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        return None
+    return value
+
+
+def _constrain_chain_by_industry_graph(
+    chain: list[object],
+    evidence: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """用一跳图谱事实约束模型输出的行业链节。"""
+    found_evidence = [item for item in evidence if item["status"] == "found"]
+    if not found_evidence:
+        core_chain: list[dict[str, object]] = []
+        for raw_item in chain:
+            item = _as_string_keyed_dict(raw_item)
+            if item is not None and item.get("relation") == "核心行业":
+                core_chain.append({**item, "relation": "核心行业", "level": 1})
+        return core_chain
+
+    # 按中心行业 ID 建立一跳邻接表；名称仅用于将 LLM 展示名称解析为唯一 ID。
+    # 不再把多个中心的上下游合并成全局集合，否则 B 的邻接行业会被误判成 A 的直接关系，
+    # 造成多中心归属串链。
+    center_adjacency: dict[str, dict[str, set[str]]] = {}
+    center_ids_by_name: dict[str, set[str]] = {}
+    for item in found_evidence:
+        industry = item["industry"]
+        if not isinstance(industry, dict):
+            continue
+        center_id = industry.get("id")
+        center_name = industry.get("name")
+        if not (
+            isinstance(center_id, str)
+            and center_id
+            and isinstance(center_name, str)
+            and center_name
+        ):
+            continue
+        center_adjacency[center_id] = {
+            "upstream": _industry_names(item["upstream"]),
+            "downstream": _industry_names(item["downstream"]),
+        }
+        center_ids_by_name.setdefault(center_name, set()).add(center_id)
+
+    constrained: list[dict[str, object]] = []
+    # 当前归属的中心行业 ID。每遇到核心行业先无条件清空，避免未验证核心
+    # 让后续邻接沿用上一中心；同名中心映射多个 ID 时也必须 fail-closed。
+    current_center_id: str | None = None
+    for raw_item in chain:
+        item = _as_string_keyed_dict(raw_item)
+        if item is None:
+            continue
+        if item.get("relation") == "核心行业":
+            current_center_id = None
+            industry_name = item.get("industry")
+            center_ids = (
+                center_ids_by_name.get(industry_name)
+                if isinstance(industry_name, str)
+                else None
+            )
+            if center_ids is not None and len(center_ids) == 1:
+                current_center_id = next(iter(center_ids))
+                constrained.append({**item, "relation": "核心行业", "level": 1})
+            continue
+
+        industry = item.get("industry")
+        if not isinstance(industry, str) or current_center_id is None:
+            # 没有前置中心行业证据支持，丢弃该邻接行业。
+            continue
+        adjacency = center_adjacency[current_center_id]
+        if industry in adjacency["upstream"]:
+            constrained.append(
+                {
+                    **item,
+                    "relation": "图谱上游（直接关系）",
+                    "level": 2,
+                    "reason": _INDUSTRY_GRAPH_DIRECT_RELATION_BOUNDARY,
+                }
+            )
+        elif industry in adjacency["downstream"]:
+            constrained.append(
+                {
+                    **item,
+                    "relation": "图谱下游（直接关系）",
+                    "level": 2,
+                    "reason": _INDUSTRY_GRAPH_DIRECT_RELATION_BOUNDARY,
+                }
+            )
+        # 既不是当前中心行业的上游也不是下游：丢弃，避免把别的中心的邻接行业串到当前中心。
+    return constrained
+
+
 # ── 字段映射 ──
 
 
@@ -228,7 +464,13 @@ def transform_to_frontend(
     # ── event_transmission ──
     if transmission and isinstance(transmission, dict):
         variables = _as_list(transmission.get("variables", []))
-        chain = _as_list(transmission.get("chain", []))
+        industry_graph_evidence = _normalize_industry_graph_evidence(
+            transmission.get("industryGraphEvidence")
+        )
+        chain = _constrain_chain_by_industry_graph(
+            _as_list(transmission.get("chain", [])),
+            industry_graph_evidence,
+        )
         core_industry = transmission.get("coreIndustry", {})
 
         reports["event_transmission"] = {
@@ -251,15 +493,18 @@ def transform_to_frontend(
                 "impact": str(core_industry.get("impact", "")),
                 "reason": str(core_industry.get("reason", "")),
             } if isinstance(core_industry, dict) else {"name": "", "impact": "", "reason": ""},
+            "industryGraphEvidence": industry_graph_evidence,
             "chain": [
                 {
                     "industry": str(c.get("industry", "")),
                     "relation": str(c.get("relation", "核心行业")),
-                    "level": int(c.get("level", 1)),
+                    "level": int(cast(str | float | int, c.get("level", 1))),
                     "direction": _normalize_direction(
                         str(c.get("direction", "")), "chain.direction"
                     ),
-                    "impactStrength": float(c.get("impactStrength", 0)),
+                    "impactStrength": float(
+                        cast(str | float | int, c.get("impactStrength", 0))
+                    ),
                     "reason": str(c.get("reason", "")),
                 }
                 for c in chain

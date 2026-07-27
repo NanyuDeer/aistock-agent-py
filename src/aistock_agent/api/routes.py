@@ -8,7 +8,7 @@ from datetime import date
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from langgraph.graph.state import CompiledStateGraph
 from sse_starlette.sse import EventSourceResponse
 
@@ -16,10 +16,16 @@ from aistock_agent.api.deps import build_initial_state, verify_internal_token
 from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
-from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.qa_briefing import (
+    QaBriefingPrerequisiteError,
+    QaBriefingRunError,
+    run_qa_brief_chain,
+)
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 router = APIRouter()
@@ -27,6 +33,28 @@ router = APIRouter()
 # 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
 health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
+
+
+def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
+    """缺省使用上海当天；显式日期必须是有效的 YYYY-MM-DD。"""
+    if not body or "report_date" not in body:
+        return shanghai_today().isoformat()
+
+    report_date = body["report_date"]
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != report_date:
+        raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD")
+    return report_date
+
+
+def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
+    """QA runner 必须显式指定固定上海日期，禁止回退到当天。"""
+    if not body or "report_date" not in body:
+        raise HTTPException(status_code=422, detail="QA runner 必须提供 report_date")
+    return _resolve_manual_report_date(body)
 
 
 @router.post("/chat/message", response_model=ChatResponse)
@@ -56,7 +84,16 @@ async def chat_message(
     )
 
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    return ChatResponse(content=content, session_id=session_id)
+    advisor_trace = result.get("advisor_trace")
+    return ChatResponse(
+        content=content,
+        session_id=session_id,
+        advisor_trace=(
+            AdvisorTrace.model_validate(advisor_trace)
+            if isinstance(advisor_trace, dict)
+            else None
+        ),
+    )
 
 
 # ── session_id → asyncio.Queue 双队列扇出 ──
@@ -145,6 +182,7 @@ async def _stream_messages(
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
+                    "advisor_trace": final_state.values.get("advisor_trace"),
                 }
                 break
             if not isinstance(event, dict):
@@ -282,6 +320,7 @@ async def morning_briefing() -> EventSourceResponse:
 
 @router.post("/briefing/morning/trigger")
 async def trigger_morning_briefing(
+    body: dict[str, str] | None = None,
     _: None = Depends(verify_internal_token),
 ) -> dict[str, object]:
     """手动触发晨报生成（非流式，供管理员 curl 触发）
@@ -294,15 +333,15 @@ async def trigger_morning_briefing(
     from aistock_agent.agents.workers import morning as morning_agent
     from aistock_agent.services.event_conduction import run_event_conduction_batch
 
-    today = date.today().isoformat()
+    report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
-    logger.info("manual_trigger_morning_start", report_date=today)
+    logger.info("manual_trigger_morning_start", report_date=report_date)
 
     start = time.time()
 
     state: dict[str, object] = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
-        "session_id": f"trigger_morning_{today}",
+        "session_id": f"trigger_morning_{report_date}",
         "user_id": None,
         "favorites": [],
         "intent": "morning",
@@ -311,6 +350,7 @@ async def trigger_morning_briefing(
         "analysis_reports": {},
         "final_response": None,
         "trigger_source": "manual",
+        "report_date": report_date,
     }
 
     try:
@@ -367,7 +407,7 @@ async def trigger_morning_briefing(
         return {
             "success": morning_generated,
             "message": "晨报生成完成" if morning_generated else "晨报生成失败（降级）",
-            "report_date": today,
+            "report_date": report_date,
             "cached": cached,
             "morning_generated": morning_generated,
             "morning_persisted": morning_persisted,
@@ -385,7 +425,7 @@ async def trigger_morning_briefing(
         return {
             "success": False,
             "message": f"晨报生成失败: {str(e)}",
-            "report_date": today,
+            "report_date": report_date,
             "morning_generated": False,
             "cached": False,
             "morning_persisted": False,
@@ -498,8 +538,8 @@ async def trigger_review_briefing(
     """
     from aistock_agent.agents.workers import review as review_agent
 
-    # 支持指定历史日期（如 ?report_date=2026-07-18），默认今天
-    report_date = (body or {}).get("report_date", date.today().isoformat())
+    # 支持指定历史日期，默认上海当天
+    report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
     logger.info("manual_trigger_review_start", report_date=report_date)
 
@@ -749,6 +789,34 @@ async def trigger_trend_score(
             "has_response": False,
             "elapsed_seconds": round(time.time() - start, 2),
         }
+
+
+@router.post("/qa/briefing/run")
+async def run_qa_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """以固定日期已审核工件生成 QA Brief、播报和音频。"""
+    if not settings.qa_mode_enabled:
+        raise HTTPException(status_code=404, detail="QA runner 不可用")
+    if not settings.qa_run_id:
+        raise HTTPException(status_code=503, detail="QA_RUN_ID 未配置")
+
+    run_id = body.get("run_id") if body else None
+    if not isinstance(run_id, str) or run_id != settings.qa_run_id:
+        raise HTTPException(status_code=403, detail="QA run_id 不匹配")
+
+    brief_type = body.get("brief_type") if body else None
+    if brief_type not in {"morning", "evening"}:
+        raise HTTPException(status_code=422, detail="brief_type 必须是 morning 或 evening")
+
+    report_date = _resolve_qa_report_date(body)
+    try:
+        return await run_qa_brief_chain(brief_type, report_date, run_id)
+    except QaBriefingPrerequisiteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QaBriefingRunError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/briefing/alert")

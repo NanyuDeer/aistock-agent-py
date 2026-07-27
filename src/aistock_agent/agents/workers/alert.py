@@ -290,13 +290,16 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # 持久化到数据库（scheduler 触发时）
         if final_response and state.get("trigger_source") == "scheduler":
-            st = state.get("session_id", "")
-            user_id = str(st) if st else None
             await node_api.save_analysis_report(
                 report_type="alert",
                 report_date=report_date,
-                content={"display_report": display_report, "podcast_brief": podcast_brief},
-                user_id=user_id,
+                content={
+                    "symbol": symbol,
+                    "display_report": display_report,
+                    "podcast_brief": podcast_brief,
+                },
+                user_id=symbol,
+                data_source="alert_agent",
             )
 
         return {

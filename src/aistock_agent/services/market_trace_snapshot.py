@@ -1,6 +1,6 @@
-"""市场溯源事实快照构建服务 — 冻结事实、来源与主导现象。
+"""市场溯源事实快照构建服务 — 冻结事实、来源与现象发现。
 
-本模块只做事实冻结和确定性主导现象识别，不调用 LLM，不输出因果判断。
+本模块只做事实冻结和确定性现象发现，不调用 LLM，不输出因果判断。
 因果归因由后续 Task 4 的 review agent 在 JSON 契约约束下完成。
 
 设计要点：
@@ -10,24 +10,19 @@
 - ``TavilyService`` 同理，mock 路径
   ``aistock_agent.services.market_trace_snapshot.TavilyService.search`` 可拦截。
 - ``build_market_trace_snapshot`` 不 import 任何 Agent 模块，不调用 LLM。
-- ``select_dominant_phenomenon`` 为纯函数，同输入同输出。
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
-from typing import cast
 
 import structlog
 
-from aistock_agent.schemas.market_trace import (
-    DominantPhenomenon,
-    DominantPhenomenonKind,
-    MarketTraceSnapshot,
-    SourceRecord,
-)
+from aistock_agent.schemas.market_trace import MarketTraceSnapshot, SourceRecord
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.services.tavily import TavilyService
 from aistock_agent.tools.market_tools import collect_global_market_facts
 
@@ -74,20 +69,6 @@ def _parse_datetime(value: object) -> datetime | None:
         return None
 
 
-def _safe_float(value: object, default: float = 0.0) -> float:
-    """安全转换为 float。"""
-    if isinstance(value, int | float):
-        return float(value)
-    return default
-
-
-def _safe_int(value: object, default: int = 0) -> int:
-    """安全转换为 int。"""
-    if isinstance(value, int | float):
-        return int(value)
-    return default
-
-
 def _safe_str(value: object, default: str = "") -> str:
     """安全转换为 str。"""
     if isinstance(value, str):
@@ -105,6 +86,29 @@ def _safe_optional_str(value: object) -> str | None:
     通过本函数一次性收窄，避免 ``type: ignore``。
     """
     return value if isinstance(value, str) else None
+
+
+def _has_numeric_fields(record: dict[str, object], fields: tuple[str, ...]) -> bool:
+    """仅当一组聚合事实的关键数值全部真实存在时返回 True。"""
+    return all(
+        isinstance(record.get(field), int | float) and not isinstance(record.get(field), bool)
+        for field in fields
+    )
+
+
+def _has_any_numeric_field(record: dict[str, object], fields: tuple[str, ...]) -> bool:
+    """至少一个关键字段包含真实数值时返回 True。"""
+    return any(
+        isinstance(record.get(field), int | float) and not isinstance(record.get(field), bool)
+        for field in fields
+    )
+
+
+def _sector_item_count(record: dict[str, object], field: str) -> int:
+    items = record.get(field)
+    if not isinstance(items, list):
+        return 0
+    return sum(isinstance(item, dict) and bool(item) for item in items)
 
 
 def _normalize_date_yyyymmdd(value: object) -> str | None:
@@ -130,277 +134,31 @@ def _normalize_date_yyyymmdd(value: object) -> str | None:
     return None
 
 
-# ============================================================================
-# 主导现象选择 — 纯函数，确定性打分
-# ============================================================================
+_TS_CODE_RE = re.compile(r"^(\d{6})\.(SH|SZ)$")
 
 
-def select_dominant_phenomenon(
-    a_share_facts: dict[str, object],
-) -> DominantPhenomenon | None:
-    """确定性主导现象识别。
-
-    按 brief Step 5 打分表对 5 种 kind 打分：
-    - 每种 kind 有 1 个基础信号（基础条件全部满足）和若干加分信号（各自独立）。
-    - 信号总数 >= 2 时该 kind 成为候选。
-    - 平局打破顺序：分数降序 → 绝对指数中位数降序 → 固定 kind 顺序。
-    - 无候选时返回 None。
-
-    本函数不决定原因，只决定需要调查的盘面异常。
-    """
-    indexes_raw = a_share_facts.get("indexes")
-    if not isinstance(indexes_raw, list) or len(indexes_raw) < 6:
-        return None
-
-    # ── 提取 6 个指数的 pct_chg ──
-    index_returns: dict[str, float] = {}
-    for idx in indexes_raw:
-        if not isinstance(idx, dict):
-            continue
-        ts_code = _safe_str(idx.get("ts_code"))
-        pct_chg = idx.get("pct_chg")
-        if ts_code and isinstance(pct_chg, int | float):
-            index_returns[ts_code] = float(pct_chg)
-
-    if len(index_returns) < 6:
-        return None
-
-    returns_list = list(index_returns.values())
-    abs_returns_sorted = sorted(abs(r) for r in returns_list)
-    # 6 个值的中位数 = (sorted[2] + sorted[3]) / 2
-    index_median_abs = (abs_returns_sorted[2] + abs_returns_sorted[3]) / 2
-
-    # 市场指数中位数（带符号）
-    returns_sorted = sorted(returns_list)
-    market_median = (returns_sorted[2] + returns_sorted[3]) / 2
-
-    # ── 市场广度 ──
-    breadth = a_share_facts.get("breadth")
-    breadth_dict = breadth if isinstance(breadth, dict) else {}
-    advance_ratio = _safe_float(breadth_dict.get("advance_ratio"))
-    total_count = _safe_int(breadth_dict.get("total_count"))
-    decline_count = _safe_int(breadth_dict.get("decline_count"))
-    decline_ratio = decline_count / total_count if total_count > 0 else 0.0
-
-    # ── 涨跌停 ──
-    limits = a_share_facts.get("limits")
-    limits_dict = limits if isinstance(limits, dict) else {}
-    limit_up = _safe_int(limits_dict.get("up_count"))
-    limit_down = _safe_int(limits_dict.get("down_count"))
-    broken_count = _safe_int(limits_dict.get("broken_count"))
-    highest_board = _safe_int(limits_dict.get("highest_board"))
-
-    # ── 成交额 ──
-    turnover = a_share_facts.get("turnover")
-    turnover_dict = turnover if isinstance(turnover, dict) else {}
-    turnover_change_pct = _safe_float(turnover_dict.get("change_pct"))
-
-    # ── 板块 ──
-    sectors = a_share_facts.get("sectors")
-    sectors_dict = sectors if isinstance(sectors, dict) else {}
-    top_gainers = sectors_dict.get("top_gainers")
-    top_gainers_list = top_gainers if isinstance(top_gainers, list) else []
-    top_losers = sectors_dict.get("top_losers")
-    top_losers_list = top_losers if isinstance(top_losers, list) else []
-
-    # ── 主力资金 ──
-    main_force = a_share_facts.get("main_force")
-    main_force_dict = main_force if isinstance(main_force, dict) else {}
-    main_force_net = _safe_float(main_force_dict.get("large_and_extra_large_net_yuan"))
-
-    # ── 6 个核心指数的 ts_code（用于 fact_ids）──
-    index_fact_ids = [
-        f"INDEX_{ts_code.replace('.', '_')}" for ts_code in index_returns
-    ]
-
-    # ── 逐 kind 打分 ──
-    # candidates 元组第二个字段为分数；第三个字段为绝对指数中位数，用于平局打破。
-    # kind 字段为 Literal 字符串字面量，mypy 需要显式标注才能接受为 Literal。
-    candidates: list[tuple[str, int, float]] = []
-    # (kind, score, index_median_abs) — 平局打破用
-
-    # --- broad_rally ---
-    rally_count = sum(1 for r in returns_list if r >= 0.8)
-    # 基础信号双路径：
-    # 路径 A（广度驱动）：≥4 指数涨 ≥0.8% 且上涨家数占比 ≥55%
-    # 路径 B（集中驱动）：全部 6 指数涨 ≥1.5%（权重股领涨，即使广度不足）
-    base_rally = (
-        (rally_count >= 4 and advance_ratio >= 0.55)
-        or all(r >= 1.5 for r in returns_list)
-    )
-    bonus_rally_1 = limit_up >= limit_down + 20
-    bonus_rally_2 = turnover_change_pct >= 10
-    score_rally = (
-        (1 if base_rally else 0)
-        + (1 if bonus_rally_1 else 0)
-        + (1 if bonus_rally_2 else 0)
-    )
-    if score_rally >= 2:
-        candidates.append(("broad_rally", score_rally, index_median_abs))
-
-    # --- broad_decline ---
-    decline_idx_count = sum(1 for r in returns_list if r <= -0.8)
-    # 基础信号双路径（与 broad_rally 对称）：
-    base_decline = (
-        (decline_idx_count >= 4 and decline_ratio >= 0.55)
-        or all(r <= -1.5 for r in returns_list)
-    )
-    bonus_decline_1 = limit_down >= limit_up + 20
-    bonus_decline_2 = turnover_change_pct >= 10
-    score_decline = (
-        (1 if base_decline else 0)
-        + (1 if bonus_decline_1 else 0)
-        + (1 if bonus_decline_2 else 0)
-    )
-    if score_decline >= 2:
-        candidates.append(("broad_decline", score_decline, index_median_abs))
-
-    # --- style_divergence ---
-    # 基础：任意两个核心指数收益率差绝对值 >= 1.5% 且方向相反
-    returns_items = list(index_returns.values())
-    base_divergence = False
-    for i in range(len(returns_items)):
-        for j in range(i + 1, len(returns_items)):
-            r1 = returns_items[i]
-            r2 = returns_items[j]
-            if abs(r1 - r2) >= 1.5 and r1 * r2 < 0:
-                base_divergence = True
-                break
-        if base_divergence:
-            break
-    # 加分 1：中证 1000 与沪深 300 方向相反
-    csi1000 = index_returns.get("000852.SH", 0.0)
-    csi300 = index_returns.get("000300.SH", 0.0)
-    bonus_divergence_1 = csi1000 * csi300 < 0
-    # 加分 2：板块涨跌前三与后三方向相反
-    gainers_avg = (
-        sum(_safe_float(s.get("pct_change")) for s in top_gainers_list[:3] if isinstance(s, dict))
-        / max(len(top_gainers_list[:3]), 1)
-    )
-    losers_avg = (
-        sum(_safe_float(s.get("pct_change")) for s in top_losers_list[:3] if isinstance(s, dict))
-        / max(len(top_losers_list[:3]), 1)
-    )
-    bonus_divergence_2 = gainers_avg * losers_avg < 0
-    score_divergence = (
-        (1 if base_divergence else 0)
-        + (1 if bonus_divergence_1 else 0)
-        + (1 if bonus_divergence_2 else 0)
-    )
-    if score_divergence >= 2:
-        candidates.append(("style_divergence", score_divergence, index_median_abs))
-
-    # --- sector_concentration ---
-    # 基础：最强或最弱概念板块绝对涨跌幅 >= 3%，且方向与大盘中位数相反
-    strongest_pct = (
-        _safe_float(top_gainers_list[0].get("pct_change"))
-        if top_gainers_list and isinstance(top_gainers_list[0], dict)
-        else 0.0
-    )
-    weakest_pct = (
-        _safe_float(top_losers_list[0].get("pct_change"))
-        if top_losers_list and isinstance(top_losers_list[0], dict)
-        else 0.0
-    )
-    base_concentration = False
-    concentration_direction = 0  # 1=正, -1=负
-    if abs(strongest_pct) >= 3 and strongest_pct * market_median < 0:
-        base_concentration = True
-        concentration_direction = 1 if strongest_pct > 0 else -1
-    elif abs(weakest_pct) >= 3 and weakest_pct * market_median < 0:
-        base_concentration = True
-        concentration_direction = 1 if weakest_pct > 0 else -1
-    # 加分 1：该方向的前三板块净额同向
-    if concentration_direction > 0:
-        relevant = top_gainers_list[:3]
-        bonus_concentration_1 = all(
-            _safe_float(s.get("net_amount")) > 0
-            for s in relevant
-            if isinstance(s, dict)
-        ) and len(relevant) > 0
-    elif concentration_direction < 0:
-        relevant = top_losers_list[:3]
-        bonus_concentration_1 = all(
-            _safe_float(s.get("net_amount")) < 0
-            for s in relevant
-            if isinstance(s, dict)
-        ) and len(relevant) > 0
-    else:
-        bonus_concentration_1 = False
-    # 加分 2：市场广度处于 0.40 到 0.60
-    bonus_concentration_2 = 0.40 <= advance_ratio <= 0.60
-    score_concentration = (
-        (1 if base_concentration else 0)
-        + (1 if bonus_concentration_1 else 0)
-        + (1 if bonus_concentration_2 else 0)
-    )
-    if score_concentration >= 2:
-        candidates.append(("sector_concentration", score_concentration, index_median_abs))
-
-    # --- sentiment_extreme ---
-    # 基础：涨停数 >= 50 或跌停数 >= 30，且炸板数 >= 涨停数的 0.35
-    if limit_up > 0:
-        base_sentiment = (limit_up >= 50 or limit_down >= 30) and (
-            broken_count >= limit_up * 0.35
-        )
-    else:
-        # limit_up == 0 时炸板条件平凡为真
-        base_sentiment = limit_down >= 30
-    # 加分 1：最高连板 >= 5
-    bonus_sentiment_1 = highest_board >= 5
-    # 加分 2：大单加特大单净额与指数方向一致
-    bonus_sentiment_2 = (
-        (market_median > 0 and main_force_net > 0)
-        or (market_median < 0 and main_force_net < 0)
-    )
-    score_sentiment = (
-        (1 if base_sentiment else 0)
-        + (1 if bonus_sentiment_1 else 0)
-        + (1 if bonus_sentiment_2 else 0)
-    )
-    if score_sentiment >= 2:
-        candidates.append(("sentiment_extreme", score_sentiment, index_median_abs))
-
-    # ── 无候选 → None ──
-    if not candidates:
-        return None
-
-    # ── 平局打破：分数降序 → 绝对指数中位数降序 → 固定 kind 顺序 ──
-    kind_order = [
-        "broad_rally",
-        "broad_decline",
-        "style_divergence",
-        "sector_concentration",
-        "sentiment_extreme",
-    ]
-    candidates.sort(key=lambda c: (-c[1], -c[2], kind_order.index(c[0])))
-
-    winning_kind, winning_score, _ = candidates[0]
-
-    # ── 构建 fact_ids ──
-    aggregate_by_kind: dict[str, list[str]] = {
-        "broad_rally": ["BREADTH_ALL", "LIMITS_ALL", "TURNOVER_ALL"],
-        "broad_decline": ["BREADTH_ALL", "LIMITS_ALL", "TURNOVER_ALL"],
-        "style_divergence": ["SECTORS_ALL"],
-        "sector_concentration": ["SECTORS_ALL", "BREADTH_ALL"],
-        "sentiment_extreme": ["LIMITS_ALL", "MAIN_FORCE_ALL"],
-    }
-    fact_ids = index_fact_ids + aggregate_by_kind.get(winning_kind, [])
-
-    summaries: dict[str, str] = {
-        "broad_rally": "多个核心指数同步上涨，市场广度偏强",
-        "broad_decline": "多个核心指数同步下跌，市场广度偏弱",
-        "style_divergence": "核心指数方向背离，风格分化明显",
-        "sector_concentration": "概念板块集中异动，与大盘方向相反",
-        "sentiment_extreme": "涨跌停或炸板情绪指标极端",
-    }
-
-    return DominantPhenomenon(
-        kind=cast(DominantPhenomenonKind, winning_kind),
-        summary=summaries[winning_kind],
-        fact_ids=fact_ids,
-        score=winning_score,
-    )
+def normalize_a_share(close_data: dict[str, object]) -> dict[str, object]:
+    """复制并规范化 Node A 股快照，不修改调用方持有的原始对象。"""
+    normalized = dict(close_data)
+    normalized_indexes: dict[str, dict[str, object]] = {}
+    raw_indexes = close_data.get("indexes")
+    if isinstance(raw_indexes, list):
+        for raw_index in raw_indexes:
+            if not isinstance(raw_index, dict):
+                continue
+            ts_code = raw_index.get("ts_code")
+            match = _TS_CODE_RE.fullmatch(ts_code) if isinstance(ts_code, str) else None
+            if match is None:
+                continue
+            code, exchange = match.groups()
+            normalized_index = dict(raw_index)
+            normalized_index["change_pct"] = normalized_index.pop(
+                "pct_chg", normalized_index.get("change_pct")
+            )
+            normalized_index["source_id"] = f"INDEX_{code}_{exchange}"
+            normalized_indexes[f"{exchange}{code}"] = normalized_index
+    normalized["indexes"] = normalized_indexes
+    return normalized
 
 
 # ============================================================================
@@ -415,7 +173,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     1. 获取 Node 收盘快照；没有 status=complete 时立即失败。
     2. 以同一个 captured_at 收集境外行情、财联社快讯和两组固定 Tavily 检索。
     3. 将所有输入归一化为 SourceRecord，递增 source_id，不可用项写入 missing_fields。
-    4. 只用 a_share 字段调用 select_dominant_phenomenon。
+    4. 只用规范化 a_share、真实 sources 和缺失字段运行确定性 discovery。
     5. 返回事实快照；不调用 LLM，不输出因果判断。
     """
     captured_at = datetime.now(UTC)
@@ -462,14 +220,15 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     trade_date_dt = _parse_yyyymmdd(trade_date_normalized.replace("-", ""))
     if trade_date_dt is None:
         raise MarketTraceSnapshotUnavailable(
-            f"Node close-snapshot trade_date is not a valid calendar date: "
-            f"{trade_date_node!r}"
+            f"Node close-snapshot trade_date is not a valid calendar date: {trade_date_node!r}"
         )
     if trade_date_normalized != report_date:
         raise MarketTraceSnapshotUnavailable(
             f"Node close-snapshot trade_date {trade_date_normalized} != report_date "
             f"{report_date}; refusing to write stale facts into a new-date snapshot"
         )
+
+    normalized_a_share = normalize_a_share(close_data)
 
     # ── 3. 收集外部来源（同一 captured_at）──
     # 只有 status/coverage/date 三重校验全部通过，才允许调用 yfinance、财联社、Tavily。
@@ -496,16 +255,12 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
     try:
-        tavily_result_1 = TavilyService.search(
-            query=tavily_query_1, topic="news", max_results=5
-        )
+        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
     except Exception as e:
         logger.warning("tavily_search_1_failed", error=str(e))
         tavily_result_1 = {}
     try:
-        tavily_result_2 = TavilyService.search(
-            query=tavily_query_2, topic="news", max_results=5
-        )
+        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
     except Exception as e:
         logger.warning("tavily_search_2_failed", error=str(e))
         tavily_result_2 = {}
@@ -515,9 +270,9 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
 
     # A 股指数事实
-    indexes_list = close_data.get("indexes")
-    if isinstance(indexes_list, list):
-        for idx in indexes_list:
+    indexes_map = normalized_a_share.get("indexes")
+    if isinstance(indexes_map, dict):
+        for idx in indexes_map.values():
             if not isinstance(idx, dict):
                 continue
             ts_code = _safe_str(idx.get("ts_code"))
@@ -532,7 +287,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
                 content=(
                     f"trade_date={idx.get('trade_date')}, "
                     f"close={idx.get('close')}, "
-                    f"pct_chg={idx.get('pct_chg')}, "
+                    f"change_pct={idx.get('change_pct')}, "
                     f"amount={idx.get('amount')}"
                 ),
                 url=None,
@@ -542,7 +297,18 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             )
 
     # A 股聚合事实（市场广度、成交额、涨跌停、主力资金、板块）
-    if isinstance(breadth_dict := close_data.get("breadth"), dict) and breadth_dict:
+    breadth_dict = normalized_a_share.get("breadth")
+    if isinstance(breadth_dict, dict) and _has_any_numeric_field(
+        breadth_dict,
+        (
+            "total_count",
+            "advance_count",
+            "decline_count",
+            "flat_count",
+            "advance_ratio",
+            "decline_ratio",
+        ),
+    ):
         sources["BREADTH_ALL"] = SourceRecord(
             source_id="BREADTH_ALL",
             kind="market_fact",
@@ -560,8 +326,14 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             captured_at=captured_at,
             source_level="market_data",
         )
+    else:
+        missing_fields.append("a_share.breadth")
 
-    if isinstance(turnover_dict := close_data.get("turnover"), dict) and turnover_dict:
+    turnover_dict = normalized_a_share.get("turnover")
+    if isinstance(turnover_dict, dict) and _has_numeric_fields(
+        turnover_dict,
+        ("amount_yuan", "previous_amount_yuan", "change_pct"),
+    ):
         sources["TURNOVER_ALL"] = SourceRecord(
             source_id="TURNOVER_ALL",
             kind="market_fact",
@@ -577,8 +349,14 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             captured_at=captured_at,
             source_level="market_data",
         )
+    else:
+        missing_fields.append("a_share.turnover")
 
-    if isinstance(limits_dict := close_data.get("limits"), dict) and limits_dict:
+    limits_dict = normalized_a_share.get("limits")
+    if isinstance(limits_dict, dict) and _has_numeric_fields(
+        limits_dict,
+        ("up_count", "down_count", "broken_count", "highest_board"),
+    ):
         sources["LIMITS_ALL"] = SourceRecord(
             source_id="LIMITS_ALL",
             kind="market_fact",
@@ -595,8 +373,14 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             captured_at=captured_at,
             source_level="market_data",
         )
+    else:
+        missing_fields.append("a_share.limits")
 
-    if isinstance(main_force_dict := close_data.get("main_force"), dict) and main_force_dict:
+    main_force_dict = normalized_a_share.get("main_force")
+    if isinstance(main_force_dict, dict) and _has_numeric_fields(
+        main_force_dict,
+        ("large_and_extra_large_net_yuan",),
+    ):
         sources["MAIN_FORCE_ALL"] = SourceRecord(
             source_id="MAIN_FORCE_ALL",
             kind="market_fact",
@@ -611,24 +395,32 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             captured_at=captured_at,
             source_level="market_data",
         )
+    else:
+        missing_fields.append("a_share.main_force.large_and_extra_large_net_yuan")
 
-    if isinstance(sectors_dict := close_data.get("sectors"), dict) and sectors_dict:
+    sectors_dict = normalized_a_share.get("sectors")
+    sector_fields = ("top_gainers", "top_losers", "top_inflows", "top_outflows")
+    if isinstance(sectors_dict, dict) and any(
+        _sector_item_count(sectors_dict, field) > 0 for field in sector_fields
+    ):
         sources["SECTORS_ALL"] = SourceRecord(
             source_id="SECTORS_ALL",
             kind="market_fact",
             provider="tushare:moneyflow_cnt_ths",
             title="概念板块涨跌与资金流排序",
             content=(
-                f"top_gainers_count={len(sectors_dict.get('top_gainers', []))}, "
-                f"top_losers_count={len(sectors_dict.get('top_losers', []))}, "
-                f"top_inflows_count={len(sectors_dict.get('top_inflows', []))}, "
-                f"top_outflows_count={len(sectors_dict.get('top_outflows', []))}"
+                f"top_gainers_count={_sector_item_count(sectors_dict, 'top_gainers')}, "
+                f"top_losers_count={_sector_item_count(sectors_dict, 'top_losers')}, "
+                f"top_inflows_count={_sector_item_count(sectors_dict, 'top_inflows')}, "
+                f"top_outflows_count={_sector_item_count(sectors_dict, 'top_outflows')}"
             ),
             url=None,
             occurred_at=trade_date_dt,
             captured_at=captured_at,
             source_level="market_data",
         )
+    else:
+        missing_fields.append("a_share.sectors")
 
     # 境外行情事实
     global_counter = 0
@@ -713,8 +505,13 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
                 source_level="reporting",
             )
 
-    # ── 4. 选择主导现象（只用 a_share 字段）──
-    dominant = select_dominant_phenomenon(close_data)
+    # ── 5. 在冻结事实和真实来源上确定性发现市场现象 ──
+    discovery = discover_market_phenomenon(
+        normalized_a_share,
+        sources,
+        captured_at,
+        missing_fields,
+    )
 
     # ── 5. 返回事实快照 ──
     # snapshot_id 包含 captured_at 时间戳（微秒精度），支持同日失败后的安全重试：
@@ -728,8 +525,8 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         snapshot_id=snapshot_id,
         trade_date=report_date,
         captured_at=captured_at,
-        a_share=close_data,
+        a_share=normalized_a_share,
         sources=sources,
         missing_fields=missing_fields,
-        dominant_phenomenon=dominant,
+        phenomenon_discovery=discovery,
     )

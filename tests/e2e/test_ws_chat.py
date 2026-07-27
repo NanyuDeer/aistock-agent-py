@@ -7,11 +7,11 @@ Task 5 给 ``compile_graph()`` 默认挂载 MemorySaver checkpointer 后，LangG
     ValueError: Checkpointer requires one or more of the following 'configurable' keys: []
 
 ``routes.py`` 的 ``/chat/message`` 已在 Task 5 同步修复（走 ``ainvoke``），
-但 ``ws.py`` 的 ``astream`` 调用遗漏，本测试锁定该回归：
-验证 ``ws.py`` 调用 ``graph.astream`` 时传入了含 ``thread_id`` 的 ``config``。
+但 ``ws.py`` 的 ``astream_events`` 调用遗漏，本测试锁定该回归：
+验证 ``ws.py`` 调用 ``graph.astream_events`` 时传入了含 ``thread_id`` 的 ``config``。
 
 使用 Starlette ``TestClient.websocket_connect``（同步，无需 ``httpx-ws`` 额外依赖），
-mock ``compile_graph`` 返回伪图，捕获 ``astream`` 的 ``config`` 入参。
+mock ``compile_graph`` 返回伪图，捕获 ``astream_events`` 的 ``config`` 入参。
 """
 from unittest.mock import patch
 
@@ -21,36 +21,32 @@ from aistock_agent.main import app
 
 
 class _MockGraph:
-    """伪图：捕获 astream 入参并 yield 单个带 final_response 的节点输出。"""
+    """伪图：捕获 astream_events 入参并产出最终节点输出。"""
 
     def __init__(self) -> None:
         self.captured: dict[str, object] = {}
 
-    async def astream(self, state: dict[str, object], config: object = None) -> object:
+    async def astream_events(
+        self, state: dict[str, object], config: object = None, **kwargs: object
+    ) -> object:
         self.captured["state"] = state
         self.captured["config"] = config
-        yield {"general_agent": {"final_response": "mocked 流式回复"}}
+        yield {"event": "on_chain_end", "data": {"output": {"final_response": "mocked 流式回复"}}}
 
 
 def test_ws_chat_passes_thread_id_config() -> None:
-    """ws.py 调用 graph.astream 时必须传 config[configurable][thread_id]"""
+    """ws.py 调用 graph.astream_events 时必须传 config[configurable][thread_id]"""
     mock_graph = _MockGraph()
     with patch("aistock_agent.api.ws.compile_graph", return_value=mock_graph):
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "你好", "session_id": "ws_test_001"})
             agent_msg = ws.receive_json()
-            done_msg = ws.receive_json()
 
     config = mock_graph.captured.get("config")
-    assert config is not None, "astream 未收到 config（checkpointer 回归未修复）"
+    assert config is not None, "astream_events 未收到 config（checkpointer 回归未修复）"
     assert config["configurable"]["thread_id"] == "ws_test_001"
-    assert agent_msg == {
-        "type": "agent_response",
-        "node": "general_agent",
-        "content": "mocked 流式回复",
-    }
-    assert done_msg == {"type": "done"}
+    assert agent_msg == {"type": "done", "content": "mocked 流式回复", "advisor_trace": None}
 
 
 def test_ws_chat_default_session_id_when_missing() -> None:
@@ -60,7 +56,6 @@ def test_ws_chat_default_session_id_when_missing() -> None:
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "你好"})
-            ws.receive_json()  # agent_response
             ws.receive_json()  # done
 
     config = mock_graph.captured.get("config")
@@ -68,3 +63,31 @@ def test_ws_chat_default_session_id_when_missing() -> None:
     thread_id = config["configurable"]["thread_id"]
     assert isinstance(thread_id, str)
     assert thread_id.startswith("ws_")
+
+
+def test_ws_done_returns_advisor_trace() -> None:
+    trace = {
+        "schema_version": "advisor_trace.v1",
+        "subquestions": [
+            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": [], "degraded": False},
+            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": ["stock_trace"], "degraded": True},
+        ],
+        "missing_sources": ["stock_trace"],
+        "degraded": True,
+    }
+
+    class _TraceGraph:
+        async def astream_events(self, state: dict[str, object], **kwargs: object) -> object:
+            yield {"event": "on_chain_end", "data": {"output": {
+                "final_response": "降级", "advisor_trace": trace,
+            }}}
+
+    with patch("aistock_agent.api.ws.compile_graph", return_value=_TraceGraph()):
+        client = TestClient(app)
+        with client.websocket_connect("/api/agent/ws/chat") as ws:
+            ws.send_json({"message": "个股 600519"})
+            done = ws.receive_json()
+
+    assert done == {"type": "done", "content": "降级", "advisor_trace": trace}

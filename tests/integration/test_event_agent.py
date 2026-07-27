@@ -15,7 +15,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 
 from aistock_agent.agents.workers.event import (
     _analyze_history,
@@ -29,6 +30,8 @@ from aistock_agent.agents.workers.event import (
     _validate_podcast_brief,
     run,
 )
+from aistock_agent.services.data_client import IndustryChainReadResult
+from aistock_agent.utils.output_parser import transform_to_frontend
 
 # ── Patch targets ──
 
@@ -46,6 +49,7 @@ EXPECTED_TOOL_NAMES = {
     "get_quote",
     "tavily_finance_search",
     "match_industry_by_keywords",
+    "get_industry_chain",
 }
 
 # ── Mock data fixtures ──
@@ -70,6 +74,27 @@ def _mock_transmission() -> dict[str, object]:
             "industry": "银行", "relation": "核心行业", "level": 1,
             "direction": "bullish", "impactStrength": 0.7, "reason": "息差扩大",
         }],
+    }
+
+
+def _verified_cached_transmission() -> dict[str, object]:
+    """可复用缓存必须带有可审计的 IndustryKG 一跳事实。"""
+    return {
+        **_mock_transmission(),
+        "industry_graph_boundary_version": "one_hop_v1",
+        "industryGraphEvidence": [
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "bank", "name": "银行"},
+                "upstream": [],
+                "downstream": [],
+                "graphVersion": "kg-v1",
+                "updatedAt": "2026-07-25T00:00:00Z",
+            }
+        ],
     }
 
 
@@ -104,6 +129,39 @@ def _make_react_agent_mock(content: str) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content=content)]})
     return mock_agent
+
+
+class _ToolInvokingAgent:
+    """测试用 ReAct agent：实际调用传入的 IndustryKG 工具。"""
+
+    def __init__(self, tools: list[BaseTool], final_content: str) -> None:
+        self._tools = {tool.name: tool for tool in tools}
+        self._final_content = final_content
+
+    async def ainvoke(self, _input: object) -> dict[str, object]:
+        evidence = await self._tools["get_industry_chain"].ainvoke(
+            {"industry_name": "半导体"}
+        )
+        return {
+            "messages": [
+                ToolMessage(
+                    content=evidence,
+                    tool_call_id="kg-1",
+                    name="get_industry_chain",
+                ),
+                AIMessage(content=self._final_content),
+            ]
+        }
+
+
+class _FinalOnlyAgent:
+    """测试用 ReAct agent：只给最终模型文本，不产生工具消息。"""
+
+    def __init__(self, final_content: str) -> None:
+        self._final_content = final_content
+
+    async def ainvoke(self, _input: object) -> dict[str, object]:
+        return {"messages": [AIMessage(content=self._final_content)]}
 
 
 # ── 公共 mock helper：单次 run() 所需全部外部依赖 ──
@@ -177,7 +235,7 @@ async def test_run_no_human_message() -> None:
 async def test_run_cache_hit() -> None:
     cached_data: dict[str, object] = {
         "event_understanding": {"summary": "缓存事件"},
-        "event_transmission": {"mechanism": "缓存机制"},
+        "event_transmission": _verified_cached_transmission(),
         "event_history": [],
         "event_investment": {"conclusion": "缓存结论"},
         "event_podcast_brief": "缓存播报文本",
@@ -194,6 +252,55 @@ async def test_run_cache_hit() -> None:
     assert result["analysis_reports"]["event_podcast_brief"] == "缓存播报文本"
     assert result["analysis_reports"]["event_cached"] is True
     assert result["analysis_reports"]["event_generated"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_regenerates_cache_without_verifiable_graph_boundary() -> None:
+    """旧缓存缺少一跳版本或 found 证据时不得复用其派生结论。"""
+    cached_data: dict[str, object] = {
+        "event_understanding": {"summary": "缓存事件"},
+        "event_transmission": {
+            "eventId": "evt_legacy_kg",
+            "mechanism": "缓存机制",
+            "variables": [],
+            "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+            "chain": [
+                {
+                    "industry": "半导体",
+                    "relation": "核心行业",
+                    "level": 1,
+                    "direction": "bullish",
+                    "impactStrength": 0.7,
+                    "reason": "事件变量推断",
+                },
+                {
+                    "industry": "旧缓存虚构行业",
+                    "relation": "上游传导",
+                    "level": 2,
+                    "direction": "bearish",
+                    "impactStrength": 0.8,
+                    "reason": "旧模型输出",
+                },
+            ],
+        },
+        "event_history": [],
+        "event_investment": {"conclusion": "缓存结论"},
+        "event_podcast_brief": "缓存播报文本",
+        "event_generated": True,
+        "event_persisted": True,
+        "event_id": "evt_legacy_kg",
+    }
+    with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
+        with patch(
+            f"{_MODULE}._analyze_understanding",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_u:
+            result = await run({"messages": [HumanMessage(content="测试事件")]})  # type: ignore[arg-type]
+
+    mock_u.assert_awaited_once()
+    assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
+    assert result["analysis_reports"]["event_cached"] is False
 
 
 @pytest.mark.asyncio
@@ -226,9 +333,94 @@ async def test_run_full_success() -> None:
     assert reports["event_podcast_brief"] == brief_ok
     assert reports["event_understanding"]["summary"] == "美联储加息25个基点"
     assert reports["event_transmission"]["mechanism"] == "加息提高资金成本"
+    assert reports["event_transmission"]["industry_graph_boundary_version"] == "one_hop_v1"
     assert len(reports["event_history"]) == 1
     assert reports["event_investment"]["conclusion"] == "银行板块受益，中期景气改善"
     mock_persist.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_constrains_graph_chain_before_downstream_derivations() -> None:
+    """投资、播报和持久化只能消费真实一跳证据约束后的传导链。"""
+    raw_transmission = {
+        **_mock_transmission(),
+        "chain": [
+            {"industry": "半导体", "relation": "核心行业", "level": 1},
+            {"industry": "电子化学品", "relation": "上游传导", "level": 2},
+            {"industry": "钢铁", "relation": "上游传导", "level": 2},
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found", "degraded": False, "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "semi", "name": "半导体"},
+                "upstream": [{"id": "chem", "name": "电子化学品", "leadingStocks": []}],
+                "downstream": [],
+            }
+        ],
+    }
+
+    async def investment_from_constrained_chain(
+        _understanding: dict[str, object] | None,
+        transmission: dict[str, object] | None,
+        _history: list[object] | None,
+    ) -> dict[str, object]:
+        assert transmission is not None
+        assert [item["industry"] for item in transmission["chain"]] == [
+            "半导体", "电子化学品"
+        ]
+        return _mock_investment("仅基于一跳事实的结论")
+
+    brief = "B" * 150
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=None)
+        )
+        stack.enter_context(
+            patch(
+                f"{_MODULE}._analyze_understanding",
+                new_callable=AsyncMock,
+                return_value=_mock_understanding(),
+            )
+        )
+        stack.enter_context(
+            patch(
+                f"{_MODULE}._analyze_transmission",
+                new_callable=AsyncMock,
+                return_value=raw_transmission,
+            )
+        )
+        stack.enter_context(
+            patch(
+                f"{_MODULE}._analyze_history",
+                new_callable=AsyncMock,
+                return_value=_mock_history(),
+            )
+        )
+        stack.enter_context(
+            patch(
+                f"{_MODULE}._analyze_investment",
+                new_callable=AsyncMock,
+                side_effect=investment_from_constrained_chain,
+            )
+        )
+        stack.enter_context(
+            patch(f"{_MODULE}._generate_podcast", new_callable=AsyncMock, return_value=brief)
+        )
+        mock_persist = stack.enter_context(
+            patch(_PERSIST_EVENT_REPORT, new_callable=AsyncMock, return_value=True)
+        )
+        stack.enter_context(
+            patch(_SET_CACHED_EVENT, new_callable=AsyncMock, return_value=True)
+        )
+        result = await run({"messages": [HumanMessage(content="测试事件")]})
+
+    persisted = mock_persist.await_args.args[3]
+    expected_chain = ["半导体", "电子化学品"]
+    persisted_chain = persisted["event_transmission"]["chain"]
+    report_chain = result["analysis_reports"]["event_transmission"]["chain"]
+    assert [item["industry"] for item in persisted_chain] == expected_chain
+    assert [item["industry"] for item in report_chain] == expected_chain
 
 
 @pytest.mark.asyncio
@@ -286,8 +478,10 @@ async def test_call_llm_with_tools_success() -> None:
     with patch(_GET_QUICK_THINK, return_value=MagicMock()):
         with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
             result = await _call_llm_with_tools("system prompt", "user msg", model="flash")
-    assert isinstance(result, dict)
-    assert result["mechanism"] == "测试传导"
+    assert result is not None
+    assert isinstance(result.parsed, dict)
+    assert result.parsed["mechanism"] == "测试传导"
+    assert result.industry_graph_evidence == []
 
 
 @pytest.mark.asyncio
@@ -333,6 +527,291 @@ async def test_analyze_transmission_uses_deep() -> None:
                 await _analyze_transmission("测试事件", {"summary": "测试"})
     mock_deep.assert_called_once()
     mock_quick.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_captures_real_industry_graph_tool_evidence() -> None:
+    """Transmission 必须消费实际工具调用产生的 JSON 图谱证据。"""
+    final_content = json.dumps(_mock_transmission(), ensure_ascii=False)
+    read_result = IndustryChainReadResult(
+        "found",
+        {
+            "industry": {"id": "881121.TI", "name": "半导体"},
+            "upstream": [],
+            "downstream": [],
+            "graphVersion": "kg-2026-07-22",
+            "updatedAt": "2026-07-22T09:00:00Z",
+        },
+        "IndustryKGService",
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(
+            "aistock_agent.agents.workers.event.create_react_agent",
+            side_effect=lambda _llm, tools: _ToolInvokingAgent(tools, final_content),
+        ):
+            with patch(
+                "aistock_agent.tools.graph_tools.node_api.get_industry_chain",
+                new=AsyncMock(return_value=read_result),
+            ) as mock_get_industry_chain:
+                result = await _analyze_transmission(
+                    "半导体需求增长", _mock_understanding()
+                )
+
+    assert isinstance(result, dict)
+    evidence = result["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "found"
+    assert evidence[0]["source"] == "IndustryKGService"
+    mock_get_industry_chain.assert_awaited_once_with("半导体")
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_does_not_trust_llm_graph_evidence_without_tool_call() -> None:
+    """没有 ToolMessage 时，模型自称已验证的图谱事实必须被替换为 not_queried。"""
+    transmission = _mock_transmission()
+    transmission["industryGraphEvidence"] = [{"status": "found", "degraded": False}]
+    final_content = json.dumps(transmission, ensure_ascii=False)
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(
+            "aistock_agent.agents.workers.event.create_react_agent",
+            return_value=_FinalOnlyAgent(final_content),
+        ):
+            result = await _analyze_transmission("测试事件", _mock_understanding())
+
+    assert isinstance(result, dict)
+    evidence = result["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "not_queried"
+    assert evidence[0]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_marks_graph_not_queried_when_react_fails() -> None:
+    """整个 ReAct 调用失败时必须保留未查询边界且不生成链路。"""
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(_CREATE_REACT_AGENT, side_effect=RuntimeError("Agent 不可用")):
+            transmission = await _analyze_transmission("测试事件", _mock_understanding())
+
+    reports = transform_to_frontend(
+        _mock_understanding(),
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_react_error", "title": "测试", "source": ""},
+    )
+    mapped = reports["event_transmission"]
+    assert isinstance(mapped, dict)
+    assert mapped["industryGraphEvidence"][0]["status"] == "not_queried"
+    assert mapped["industryGraphEvidence"][0]["degraded"] is True
+    assert mapped["chain"] == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_ignores_malformed_industry_graph_tool_message() -> None:
+    """格式错误的图谱工具内容必须显式标记为无效响应。"""
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(
+        return_value={
+            "messages": [
+                ToolMessage(
+                    content="not-json",
+                    tool_call_id="kg-invalid",
+                    name="get_industry_chain",
+                ),
+                AIMessage(content=json.dumps(_mock_transmission(), ensure_ascii=False)),
+            ]
+        }
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
+            result = await _analyze_transmission("测试事件", _mock_understanding())
+
+    assert isinstance(result, dict)
+    evidence = result["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "invalid_response"
+    assert evidence[0]["degraded"] is True
+    assert evidence[0]["missingBoundary"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_marks_empty_graph_tool_json_as_invalid_response() -> None:
+    """合法 JSON 但缺少图谱证据骨架时不能被视为已查询事实。"""
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(
+        return_value={
+            "messages": [
+                ToolMessage(
+                    content="{}",
+                    tool_call_id="kg-empty",
+                    name="get_industry_chain",
+                ),
+                AIMessage(content=json.dumps(_mock_transmission(), ensure_ascii=False)),
+            ]
+        }
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
+            result = await _analyze_transmission("测试事件", _mock_understanding())
+
+    assert isinstance(result, dict)
+    evidence = result["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "invalid_response"
+    assert evidence[0]["degraded"] is True
+    assert evidence[0]["missingBoundary"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_rejects_found_graph_evidence_with_malformed_nodes() -> None:
+    """found 图谱证据缺少行业节点身份字段时必须降级。"""
+    forged_evidence = {
+        "status": "found",
+        "degraded": False,
+        "scope": "one_hop",
+        "source": "IndustryKGService",
+        "industry": {},
+        "upstream": [{"name": "伪造行业"}],
+        "downstream": [],
+    }
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(
+        return_value={
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(forged_evidence, ensure_ascii=False),
+                    tool_call_id="kg-forged",
+                    name="get_industry_chain",
+                ),
+                AIMessage(content=json.dumps(_mock_transmission(), ensure_ascii=False)),
+            ]
+        }
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
+            result = await _analyze_transmission("测试事件", _mock_understanding())
+
+    assert isinstance(result, dict)
+    evidence = result["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "invalid_response"
+    assert evidence[0]["degraded"] is True
+    assert evidence[0]["missingBoundary"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_transmission_preserves_degraded_tool_evidence_when_invalid_json() -> None:
+    """最终 AI JSON 无效时仍保留真实工具降级证据，且不伪造链路。"""
+    tool_evidence = {
+        "status": "authentication_failed",
+        "degraded": True,
+        "scope": "one_hop",
+        "source": None,
+        "industry": None,
+        "upstream": None,
+        "downstream": None,
+        "graphVersion": None,
+        "updatedAt": None,
+        "missingBoundary": "鉴权失败，未取得图谱事实。",
+    }
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(
+        return_value={
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(tool_evidence, ensure_ascii=False),
+                    tool_call_id="kg-auth-failed",
+                    name="get_industry_chain",
+                ),
+                AIMessage(content="not-json"),
+            ]
+        }
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(_CREATE_REACT_AGENT, return_value=mock_agent):
+            transmission = await _analyze_transmission("测试事件", _mock_understanding())
+
+    reports = transform_to_frontend(
+        _mock_understanding(),
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_auth", "title": "测试", "source": ""},
+    )
+    mapped = reports["event_transmission"]
+    assert isinstance(mapped, dict)
+    assert mapped["industryGraphEvidence"][0]["status"] == "authentication_failed"
+    assert mapped["industryGraphEvidence"][0]["missingBoundary"] == "鉴权失败，未取得图谱事实。"
+    assert mapped["chain"] == []
+
+
+@pytest.mark.asyncio
+async def test_transform_to_frontend_keeps_only_core_chain_when_graph_is_degraded() -> None:
+    """图谱降级时，模型虚构的非核心行业不得进入前端链路。"""
+    final_content = json.dumps(
+        {
+            **_mock_transmission(),
+            "chain": [
+                {
+                    "industry": "银行",
+                    "relation": "核心行业",
+                    "level": 1,
+                    "direction": "bullish",
+                    "impactStrength": 0.7,
+                    "reason": "事件变量推断",
+                },
+                {
+                    "industry": "虚构行业",
+                    "relation": "上游传导",
+                    "level": 2,
+                    "direction": "bearish",
+                    "impactStrength": 0.9,
+                    "reason": "模型补造",
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    with patch(_GET_DEEP_THINK, return_value=MagicMock()):
+        with patch(
+            "aistock_agent.agents.workers.event.create_react_agent",
+            side_effect=lambda _llm, tools: _ToolInvokingAgent(tools, final_content),
+        ):
+            with patch(
+                "aistock_agent.tools.graph_tools.node_api.get_industry_chain",
+                new=AsyncMock(
+                    return_value=IndustryChainReadResult("authentication_failed")
+                ),
+            ):
+                transmission = await _analyze_transmission(
+                    "半导体需求增长", _mock_understanding()
+                )
+
+    reports = transform_to_frontend(
+        _mock_understanding(),
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_kg", "title": "测试", "source": ""},
+    )
+    mapped = reports["event_transmission"]
+    assert isinstance(mapped, dict)
+    evidence = mapped["industryGraphEvidence"]
+    assert isinstance(evidence, list)
+    assert evidence[0]["status"] == "authentication_failed"
+    assert evidence[0]["degraded"] is True
+    chain = mapped["chain"]
+    assert isinstance(chain, list)
+    assert all(item["relation"] == "核心行业" for item in chain)
+    assert all(item["level"] == 1 for item in chain)
+    assert {item["industry"] for item in chain} == {"银行"}
 
 
 @pytest.mark.asyncio
@@ -536,6 +1015,7 @@ async def test_run_dict_message_cache_hit() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "缓存播报文本",
         "event_understanding": {"summary": "缓存事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         "event_persisted": True,
         "event_id": "evt_dict_cache",
@@ -652,6 +1132,7 @@ async def test_run_cache_hit_has_explicit_status() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "缓存播报文本",
         "event_understanding": {"summary": "缓存事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_id": "evt_cached123",
         "event_persisted": True,
         "event_generated": True,
@@ -692,7 +1173,11 @@ async def test_run_degraded_understanding_failure_has_explicit_status() -> None:
 @pytest.mark.asyncio
 async def test_run_exception_has_explicit_status() -> None:
     """异常路径必须提供显式状态：event_generated=False。"""
-    with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock, side_effect=RuntimeError("LLM 不可用")):
+    with patch(
+        f"{_MODULE}._analyze_understanding",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("LLM 不可用"),
+    ):
         result = await run({"messages": [HumanMessage(content="测试事件")]})
 
     analysis_reports = result["analysis_reports"]
@@ -769,13 +1254,18 @@ async def test_run_cache_hit_idempotent_repersist_after_failure() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "缓存播报文本",
         "event_understanding": {"summary": "测试事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         "event_persisted": False,  # 首次落库失败
         "event_id": "evt_retry1",
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
-            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+            with patch(
+                f"{_MODULE}.persist_event_report",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_persist:
                 with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock) as mock_set_cache:
                     result = await run(
                         {"messages": [HumanMessage(content="测试事件")]}
@@ -796,13 +1286,18 @@ async def test_run_cache_hit_repersist_still_fails() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "缓存播报文本",
         "event_understanding": {"summary": "测试事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         "event_persisted": False,
         "event_id": "evt_retry2",
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
-            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=False):
+            with patch(
+                f"{_MODULE}.persist_event_report",
+                new_callable=AsyncMock,
+                return_value=False,
+            ):
                 result = await run(
                     {"messages": [HumanMessage(content="测试事件")]}
                 )
@@ -819,13 +1314,18 @@ async def test_run_cache_hit_old_cache_without_persisted_field() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "旧缓存播报文本",
         "event_understanding": {"summary": "旧事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         # 注意：没有 event_persisted 字段
         "event_id": "evt_old1",
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
-            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+            with patch(
+                f"{_MODULE}.persist_event_report",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_persist:
                 result = await run(
                     {"messages": [HumanMessage(content="旧事件")]}
                 )
@@ -841,6 +1341,7 @@ async def test_run_cache_hit_already_persisted_no_repersist() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "已持久化缓存",
         "event_understanding": {"summary": "已持久化事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         "event_persisted": True,  # 已持久化
         "event_id": "evt_done1",
@@ -862,6 +1363,7 @@ async def test_run_cache_hit_degraded_cache_not_repersisted() -> None:
     """缓存中 event_generated=False（降级缓存）→ 不触发幂等补写。"""
     cached_data: dict[str, object] = {
         "event_podcast_brief": "降级缓存",
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": False,  # 降级
         "event_persisted": False,
         "event_id": "evt_deg1",
@@ -883,15 +1385,8 @@ async def test_run_cache_hit_degraded_cache_not_repersisted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_cache_hit_legacy_cache_without_any_status_fields() -> None:
-    """真实旧缓存完全不包含 event_generated/event_persisted/event_cached/event_id
-    任何运行时状态字段，仅含业务结构（event_understanding/event_podcast_brief 等）。
-
-    不得因为缺 event_generated 就判为生成失败：按真实业务结构校验为有效旧缓存，
-    event_generated 视为 True，event_persisted 缺失视为 False → 触发幂等补写。
-    （禁止在本测试中预置 event_generated=True。）
-    """
-    # 真实旧缓存结构：只有业务字段，没有任何 event_* 运行时状态
+async def test_run_rejects_legacy_cache_without_any_status_fields() -> None:
+    """无审计一跳边界的旧缓存不得复用其 investment 或 podcast。"""
     legacy_cache: dict[str, object] = {
         "event_understanding": {"summary": "美联储紧急降息50基点"},
         "event_transmission": {"mechanism": "流动性宽松"},
@@ -901,24 +1396,29 @@ async def test_run_cache_hit_legacy_cache_without_any_status_fields() -> None:
         # 注意：以下字段一律不预置 —— event_generated/event_persisted/event_cached/event_id
     }
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=legacy_cache):
-        with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
-            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
-                with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock, return_value=True):
+        with patch(
+            f"{_MODULE}._analyze_understanding",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_u:
+            with patch(
+                f"{_MODULE}.persist_event_report",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_persist:
+                with patch(
+                    f"{_MODULE}.set_cached_event",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ):
                     result = await run(
                         {"messages": [HumanMessage(content="美联储紧急降息50基点")]}
                     )
 
-    # 旧缓存命中，不调 LLM
-    mock_u.assert_not_called()
-    # event_persisted 缺失 → 视为 False → 触发幂等补写
-    mock_persist.assert_called_once()
-    # 按业务结构校验为有效 → event_generated=True
-    assert result["analysis_reports"]["event_generated"] is True
-    assert result["analysis_reports"]["event_persisted"] is True
-    assert result["analysis_reports"]["event_cached"] is True
-    # event_id 缺失 → 从 user_msg 重新计算
-    assert isinstance(result["analysis_reports"].get("event_id"), str)
-    assert result["analysis_reports"]["event_id"].startswith("evt_")
+    mock_u.assert_awaited_once()
+    mock_persist.assert_not_called()
+    assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
+    assert result["analysis_reports"]["event_cached"] is False
 
 
 @pytest.mark.asyncio
@@ -1146,6 +1646,7 @@ async def test_run_cache_hit_repersist_uses_event_source() -> None:
     cached_data: dict[str, object] = {
         "event_podcast_brief": "缓存播报文本",
         "event_understanding": {"summary": "测试事件"},
+        "event_transmission": _verified_cached_transmission(),
         "event_generated": True,
         "event_persisted": False,
         "event_id": "evt_retry_source",
@@ -1153,7 +1654,11 @@ async def test_run_cache_hit_repersist_uses_event_source() -> None:
     source_url = "https://news.example.com/event-source"
     with patch(_GET_CACHED_EVENT, new_callable=AsyncMock, return_value=cached_data):
         with patch(f"{_MODULE}._analyze_understanding", new_callable=AsyncMock) as mock_u:
-            with patch(f"{_MODULE}.persist_event_report", new_callable=AsyncMock, return_value=True) as mock_persist:
+            with patch(
+                f"{_MODULE}.persist_event_report",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_persist:
                 with patch(f"{_MODULE}.set_cached_event", new_callable=AsyncMock):
                     await run({
                         "messages": [HumanMessage(content="测试事件")],

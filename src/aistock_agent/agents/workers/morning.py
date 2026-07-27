@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import date
 
 import structlog
 from langchain_core.messages import SystemMessage
@@ -36,7 +36,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.morning_persister import persist_morning_report
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
-from aistock_agent.utils.date import is_trading_day
+from aistock_agent.utils.date import is_trading_day, shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.output_parser import extract_major_events, parse_event_output
 
@@ -48,6 +48,16 @@ _PODCAST_BRIEF_FALLBACK = "晨报播报摘要暂不可用，请查看完整报�
 # 播报摘要字数约束
 _PODCAST_BRIEF_MIN = 150
 _PODCAST_BRIEF_MAX = 200
+
+
+def _resolve_report_date(value: object) -> str:
+    """优先采用状态中的合法日期，其他情况回退上海自然日。"""
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    return shanghai_today().isoformat()
 
 
 def _ensure_dual_layer(text: str) -> dict[str, object]:
@@ -98,6 +108,15 @@ def _ensure_dual_layer(text: str) -> dict[str, object]:
         "podcast_brief": "",
         "schema_version": "1.0",
     }
+
+
+def _report_details(report: dict[str, object]) -> str:
+    """从标准化报告中安全提取展示正文。"""
+    display = report.get("display_report")
+    if not isinstance(display, dict):
+        return ""
+    details = display.get("details")
+    return details if isinstance(details, str) else str(details or "")
 
 
 def _validate_podcast_brief(brief: str | None) -> str:
@@ -465,14 +484,14 @@ async def run(state: AgentState) -> dict[str, object]:
     阈值过滤后通过 Node.js Internal API 触发微信+飞书推送。
     """
     try:
-        today = datetime.now().strftime("%Y年%m月%d日")
-        report_date = datetime.now().strftime("%Y-%m-%d")
+        report_date = _resolve_report_date(state.get("report_date"))
+        today = date.fromisoformat(report_date).strftime("%Y年%m月%d日")
 
         # 检查缓存
         cached = await get_cached_briefing()
         if cached:
             report = _ensure_dual_layer(cached)
-            details = str(report["display_report"]["details"])
+            details = _report_details(report)
             major_events = extract_major_events(details)
             if major_events:
                 logger.info(
@@ -500,7 +519,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # 构建提示词
         system_prompt = MORNING_PROMPT.replace("{{DATE}}", today)
-        if not is_trading_day():
+        if not is_trading_day(date.fromisoformat(report_date)):
             system_prompt += (
                 "\n\n注意：今日为非交易日（周末或节假日），"
                 "请在报告开头注明，分析可聚焦于下一交易日前瞻。"

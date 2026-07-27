@@ -12,10 +12,11 @@
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Literal, cast, overload
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.event import (
@@ -37,6 +38,25 @@ logger = structlog.get_logger()
 
 # 前端对齐的工具集名称
 _TOOL_GROUP = "event"
+_INDUSTRY_GRAPH_MISSING_BOUNDARY = "本次未取得 IndustryKG 图谱事实，上下游关系未展开，不能补造。"
+_INDUSTRY_GRAPH_DEGRADED_STATUSES = {
+    "invalid_input",
+    "not_found",
+    "authentication_failed",
+    "upstream_failed",
+    "timeout",
+    "request_failed",
+    "invalid_response",
+}
+_INDUSTRY_GRAPH_BOUNDARY_VERSION = "one_hop_v1"
+
+
+@dataclass(frozen=True)
+class _ToolCallResult:
+    """ReAct 最终文本及 Transmission 可审计工具证据。"""
+
+    parsed: dict[str, object] | list[object] | None
+    industry_graph_evidence: list[dict[str, object]]
 
 
 # ── 内部辅助函数 ──
@@ -95,12 +115,115 @@ async def _call_llm_no_tools(
         return None
 
 
+def _extract_industry_graph_evidence(messages: object) -> list[dict[str, object]]:
+    """只从 IndustryKG 工具消息提取结构化图谱证据。"""
+    if not isinstance(messages, list):
+        return []
+
+    evidence: list[dict[str, object]] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) or message.name != "get_industry_chain":
+            continue
+        if not isinstance(message.content, str):
+            evidence.append(_invalid_industry_graph_evidence())
+            continue
+        try:
+            parsed = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            evidence.append(_invalid_industry_graph_evidence())
+            continue
+        if isinstance(parsed, dict) and _is_valid_industry_graph_evidence(parsed):
+            evidence.append(parsed)
+        else:
+            evidence.append(_invalid_industry_graph_evidence())
+    return evidence
+
+
+def _is_valid_industry_graph_evidence(evidence: dict[str, object]) -> bool:
+    """校验 Transmission 可消费的 IndustryKG 一跳证据骨架。"""
+    status = evidence.get("status")
+    missing_boundary = evidence.get("missingBoundary")
+    if not isinstance(status, str) or evidence.get("scope") != "one_hop":
+        return False
+
+    if status == "found":
+        industry = evidence.get("industry")
+        upstream = evidence.get("upstream")
+        downstream = evidence.get("downstream")
+        if (
+            evidence.get("degraded") is not False
+            or evidence.get("source") != "IndustryKGService"
+            or not isinstance(upstream, list)
+            or not isinstance(downstream, list)
+        ):
+            return False
+        return (
+            _is_valid_industry_node(industry)
+            and all(
+                _is_valid_industry_node(node, requires_leading_stocks=True)
+                for node in upstream
+            )
+            and all(
+                _is_valid_industry_node(node, requires_leading_stocks=True)
+                for node in downstream
+            )
+        )
+
+    return (
+        status in _INDUSTRY_GRAPH_DEGRADED_STATUSES
+        and evidence.get("degraded") is True
+        and evidence.get("source") is None
+        and evidence.get("industry") is None
+        and evidence.get("upstream") is None
+        and evidence.get("downstream") is None
+        and isinstance(missing_boundary, str)
+        and bool(missing_boundary.strip())
+    )
+
+
+def _is_valid_industry_node(value: object, *, requires_leading_stocks: bool = False) -> bool:
+    """校验 IndustryKG 行业节点的最小身份字段。"""
+    if not isinstance(value, dict):
+        return False
+    industry_id = value.get("id")
+    name = value.get("name")
+    if not (
+        isinstance(industry_id, str)
+        and industry_id.strip()
+        and isinstance(name, str)
+        and name.strip()
+    ):
+        return False
+    return not requires_leading_stocks or isinstance(value.get("leadingStocks"), list)
+
+
+def _not_queried_industry_graph_evidence() -> dict[str, object]:
+    """在 Transmission 未调用图谱工具时标明事实边界。"""
+    return {
+        "status": "not_queried",
+        "degraded": True,
+        "scope": "one_hop",
+        "source": None,
+        "industry": None,
+        "upstream": None,
+        "downstream": None,
+        "graphVersion": None,
+        "updatedAt": None,
+        "missingBoundary": _INDUSTRY_GRAPH_MISSING_BOUNDARY,
+    }
+
+
+def _invalid_industry_graph_evidence() -> dict[str, object]:
+    """在已调用图谱工具但响应不可解析时标明无效响应边界。"""
+    return {**_not_queried_industry_graph_evidence(), "status": "invalid_response"}
+
+
 async def _call_llm_with_tools(
     system_prompt: str,
     user_msg: str,
     model: str = "flash",
-) -> dict[str, object] | list[object] | None:
-    """调用 ReAct agent（带工具），返回解析后的 dict/list 或 None。
+) -> _ToolCallResult | None:
+    """调用 ReAct agent（带工具），返回最终 JSON 与 IndustryKG 工具证据。
 
     Transmission 使用 deep 模型；History 使用 flash 模型。
     """
@@ -116,14 +239,18 @@ async def _call_llm_with_tools(
                 ]
             }
         )
+        messages = result.get("messages", [])
         # ReAct agent 返回 messages 列表，取最后一条 AI 消息
         text = ""
-        for msg in reversed(result.get("messages", [])):
+        for msg in reversed(messages) if isinstance(messages, list) else []:
             if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
                 text = msg.content
                 break
         parsed = _parse_json(text)
-        return parsed  # dict | list | None
+        return _ToolCallResult(
+            parsed=parsed,
+            industry_graph_evidence=_extract_industry_graph_evidence(messages),
+        )
     except Exception:
         logger.exception("llm_call_with_tools_failed", model=model)
         return None
@@ -141,10 +268,16 @@ async def _analyze_transmission(
     ud = json.dumps(understanding, ensure_ascii=False)
     prompt = EVENT_TRANSMISSION_PROMPT.replace("{understanding}", ud)
     result = await _call_llm_with_tools(prompt, user_msg, model="deep")
-    if isinstance(result, dict):
-        return result
+    if result:
+        evidence = result.industry_graph_evidence or [_not_queried_industry_graph_evidence()]
+        if isinstance(result.parsed, dict):
+            transmission = dict(result.parsed)
+            transmission["industryGraphEvidence"] = evidence
+            return transmission
+        logger.warning("transmission_not_dict")
+        return {"industryGraphEvidence": evidence, "chain": []}
     logger.warning("transmission_not_dict")
-    return None
+    return {"industryGraphEvidence": [_not_queried_industry_graph_evidence()], "chain": []}
 
 
 async def _analyze_history(
@@ -153,7 +286,8 @@ async def _analyze_history(
     """Call 3: 历史复盘（flash 模型，ReAct + 工具）。"""
     ud = json.dumps(understanding, ensure_ascii=False)
     prompt = EVENT_HISTORY_PROMPT.replace("{understanding}", ud)
-    result = await _call_llm_with_tools(prompt, user_msg, model="flash")
+    tool_call_result = await _call_llm_with_tools(prompt, user_msg, model="flash")
+    result = tool_call_result.parsed if tool_call_result else None
     if isinstance(result, list):
         return result
     if isinstance(result, dict):
@@ -330,6 +464,73 @@ def _is_valid_cached_event_report(cached: dict[str, object]) -> bool:
     return True
 
 
+def _normalize_cached_event_transmission(
+    cached: dict[str, object],
+    event_id: str,
+    event_source: str,
+) -> None:
+    """让旧缓存的传导链也遵循当前 IndustryKG 证据边界。"""
+    transmission = cached.get("event_transmission")
+    if not isinstance(transmission, dict):
+        return
+
+    normalized = transform_to_frontend(
+        None,
+        transmission,
+        None,
+        None,
+        {"eventId": event_id, "title": "", "source": event_source},
+    ).get("event_transmission")
+    if isinstance(normalized, dict):
+        cached["event_transmission"] = normalized
+
+
+def _has_verifiable_cached_graph_boundary(cached: dict[str, object]) -> bool:
+    """缓存只有可审计的一跳图谱版本时才能复用其派生结论。"""
+    transmission = cached.get("event_transmission")
+    if not isinstance(transmission, dict):
+        return False
+    if transmission.get("industry_graph_boundary_version") != _INDUSTRY_GRAPH_BOUNDARY_VERSION:
+        return False
+
+    normalized = transform_to_frontend(
+        None,
+        transmission,
+        None,
+        None,
+        {"eventId": "", "title": "", "source": ""},
+    ).get("event_transmission")
+    evidence = normalized.get("industryGraphEvidence") if isinstance(normalized, dict) else None
+    if not isinstance(evidence, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("status") == "found"
+        and item.get("degraded") is False
+        and item.get("scope") == "one_hop"
+        and item.get("source") == "IndustryKGService"
+        and isinstance(item.get("graphVersion"), str)
+        and bool(item["graphVersion"].strip())
+        for item in evidence
+    )
+
+
+def _constrain_transmission_for_downstream(
+    transmission: dict[str, object] | None,
+    event_id: str,
+    event_source: str,
+) -> dict[str, object] | None:
+    """将传导结果先收敛到图谱事实边界，再交给后续派生步骤。"""
+    normalized = transform_to_frontend(
+        None,
+        transmission,
+        None,
+        None,
+        {"eventId": event_id, "title": "", "source": event_source},
+    ).get("event_transmission")
+    return normalized if isinstance(normalized, dict) else None
+
+
 # ── 主入口 ──
 
 
@@ -383,7 +584,7 @@ async def run(state: AgentState) -> dict[str, object]:
     try:
         # 缓存检查
         cached = await get_cached_event(user_msg)
-        if cached:
+        if cached and _has_verifiable_cached_graph_boundary(cached):
             logger.info("event_cache_hit", event_preview=user_msg[:50])
             podcast_brief = str(cached.get("event_podcast_brief", ""))
             # 从缓存恢复 event_id（旧缓存可能没有）
@@ -392,15 +593,21 @@ async def run(state: AgentState) -> dict[str, object]:
             # 兼容旧缓存：缺 event_generated 时按真实业务结构校验有效性，
             # 不能直接把缺字段判为生成失败（旧缓存根本没有该字段）
             cached_generated = _is_valid_cached_event_report(cached)
+            _normalize_cached_event_transmission(
+                cached,
+                cached_event_id,
+                event_source,
+            )
 
             # 幂等补写：旧缓存缺少 event_persisted 或值为 False 时，重试落库
             if cached_generated and not cached_persisted:
                 logger.info("event_cache_idempotent_repersist", event_id=cached_event_id)
                 # 从缓存重建 event_meta 用于补写
+                cached_understanding = cached.get("event_understanding")
                 cached_meta: dict[str, object] = {
                     "eventId": cached_event_id,
-                    "title": str(cached.get("event_understanding", {}).get("summary", ""))[:50]
-                    if isinstance(cached.get("event_understanding"), dict)
+                    "title": str(cached_understanding.get("summary", ""))[:50]
+                    if isinstance(cached_understanding, dict)
                     else "",
                     "source": event_source,
                 }
@@ -422,6 +629,8 @@ async def run(state: AgentState) -> dict[str, object]:
                     "event_id": cached_event_id,
                 },
             }
+        if cached:
+            logger.info("event_cache_boundary_unverified", event_preview=user_msg[:50])
 
         # ── 5 个独立 LLM 调用 ──
 
@@ -441,12 +650,21 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # Call 2: 传导路径（deep, ReAct + tools）
         transmission = await _analyze_transmission(user_msg, understanding)
+        constrained_transmission = _constrain_transmission_for_downstream(
+            transmission,
+            event_id,
+            event_source,
+        )
 
         # Call 3: 历史复盘（flash, ReAct + tools）
         history = await _analyze_history(user_msg, understanding)
 
         # Call 4: 投资建议（flash, no tools, 注入前 3 步结果）
-        investment = await _analyze_investment(understanding, transmission, history)
+        investment = await _analyze_investment(
+            understanding,
+            constrained_transmission,
+            history,
+        )
 
         # Call 5: 播报摘要（flash, no tools, 注入理解摘要 + 投资结论）
         conclusion = ""
@@ -472,12 +690,17 @@ async def run(state: AgentState) -> dict[str, object]:
         }
         analysis_reports = transform_to_frontend(
             understanding,
-            transmission,
+            constrained_transmission,
             history,
             investment,
             event_meta,
         )
         analysis_reports["event_podcast_brief"] = podcast_brief
+        event_transmission = analysis_reports.get("event_transmission")
+        if isinstance(event_transmission, dict):
+            event_transmission["industry_graph_boundary_version"] = (
+                _INDUSTRY_GRAPH_BOUNDARY_VERSION
+            )
 
         # can_persist: brief ∈ [150,200] AND title 非空
         # title 缺失时不得以 completed 状态持久化

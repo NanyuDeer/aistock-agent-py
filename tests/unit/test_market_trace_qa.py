@@ -6,6 +6,7 @@
 - 各种失败路径返回 degraded=true 响应
 - 不编造结论（无当日复盘时返回降级）
 """
+
 import json
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +15,6 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from aistock_agent.schemas.market_trace import (
-    DominantPhenomenon,
     MarketTraceResult,
     MarketTraceSnapshot,
     SourceRecord,
@@ -22,10 +22,12 @@ from aistock_agent.schemas.market_trace import (
 from aistock_agent.services import market_trace_qa as market_trace_qa_service
 from aistock_agent.services.data_client import ReviewReportReadResult
 from aistock_agent.services.market_trace_qa import (
+    _candidate_source_ids,
     _MarketTraceQaSelection,
     _render_selection,
     answer_market_trace_qa,
 )
+from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 
 # ============================================================================
 # 测试数据 - 复用 review_agent 测试的数据结构
@@ -56,55 +58,76 @@ def _make_source(source_id: str, **overrides: object) -> SourceRecord:
     return SourceRecord(**defaults)  # type: ignore[arg-type]
 
 
+_A_SHARE: dict[str, object] = {
+    "indexes": {
+        "SH000001": {"ts_code": "000001.SH", "pct_chg": 1.2},
+        "SZ399001": {"ts_code": "399001.SZ", "pct_chg": 1.5},
+        "SZ399006": {"ts_code": "399006.SZ", "pct_chg": 1.8},
+        "SH000300": {"ts_code": "000300.SH", "pct_chg": 1.0},
+        "SH000905": {"ts_code": "000905.SH", "pct_chg": 0.9},
+        "SH000852": {"ts_code": "000852.SH", "pct_chg": 1.1},
+    },
+    "breadth": {"advance_ratio": 0.75, "total_count": 5000, "decline_count": 1000},
+    "turnover": {"change_pct": 15.0},
+    "limits": {"up_count": 50, "down_count": 10, "broken_count": 5, "highest_board": 3},
+    "main_force": {"large_and_extra_large_net_yuan": 5_000_000_000},
+    "sectors": {
+        "top_gainers": [{"name": "半导体"}],
+        "top_losers": [{"name": "房地产"}],
+    },
+}
+
+_SOURCES = {
+    "INDEX_000001_SH": _make_source(
+        "INDEX_000001_SH",
+        provider="tushare:index_daily",
+        title="上证指数",
+        content="close=3200.0, pct_chg=0.5",
+    ),
+    "INDEX_399001_SZ": _make_source("INDEX_399001_SZ"),
+    "INDEX_399006_SZ": _make_source("INDEX_399006_SZ"),
+    "INDEX_000300_SH": _make_source("INDEX_000300_SH"),
+    "INDEX_000905_SH": _make_source("INDEX_000905_SH"),
+    "INDEX_000852_SH": _make_source("INDEX_000852_SH"),
+    "BREADTH_ALL": _make_source("BREADTH_ALL"),
+    "TURNOVER_ALL": _make_source("TURNOVER_ALL"),
+    "LIMITS_ALL": _make_source("LIMITS_ALL"),
+    "MAIN_FORCE_ALL": _make_source("MAIN_FORCE_ALL"),
+    "SECTORS_ALL": _make_source("SECTORS_ALL"),
+    "NEWS_001": _make_source(
+        "NEWS_001",
+        kind="event_evidence",
+        provider="cls",
+        title="央行宣布降准",
+        content="中国人民银行决定下调存款准备金率0.5个百分点",
+        url="https://www.cls.cn/news/1",
+        source_level="reporting",
+    ),
+    "GLOBAL_001": _make_source(
+        "GLOBAL_001",
+        provider="yfinance",
+        title="标普500",
+        content="price=5500.0, change_pct=0.36",
+    ),
+    "SEARCH_001": _make_source(
+        "SEARCH_001",
+        kind="event_evidence",
+        provider="tavily",
+        title="美联储维持利率不变",
+        content="美联储在最新议息会议上决定维持联邦基金利率目标区间不变",
+        url="https://example.com/fed",
+        source_level="reporting",
+    ),
+}
+
 SNAPSHOT = MarketTraceSnapshot(
     snapshot_id="trace-20260717",
     trade_date=_REPORT_DATE,
     captured_at=_CAPTURED_AT,
-    a_share={
-        "sectors": {
-            "top_gainers": [{"name": "半导体"}],
-            "top_losers": [{"name": "房地产"}],
-        },
-    },
-    sources={
-        "INDEX_000001_SH": _make_source(
-            "INDEX_000001_SH",
-            provider="tushare:index_daily",
-            title="上证指数",
-            content="close=3200.0, pct_chg=0.5",
-        ),
-        "NEWS_001": _make_source(
-            "NEWS_001",
-            kind="event_evidence",
-            provider="cls",
-            title="央行宣布降准",
-            content="中国人民银行决定下调存款准备金率0.5个百分点",
-            url="https://www.cls.cn/news/1",
-            source_level="reporting",
-        ),
-        "GLOBAL_001": _make_source(
-            "GLOBAL_001",
-            provider="yfinance",
-            title="标普500",
-            content="price=5500.0, change_pct=0.36",
-        ),
-        "SEARCH_001": _make_source(
-            "SEARCH_001",
-            kind="event_evidence",
-            provider="tavily",
-            title="美联储维持利率不变",
-            content="美联储在最新议息会议上决定维持联邦基金利率目标区间不变",
-            url="https://example.com/fed",
-            source_level="reporting",
-        ),
-    },
+    a_share=_A_SHARE,
+    sources=_SOURCES,
     missing_fields=[],
-    dominant_phenomenon=DominantPhenomenon(
-        kind="broad_rally",
-        summary="多个核心指数同步上涨，市场广度偏强",
-        fact_ids=["INDEX_000001_SH"],
-        score=3,
-    ),
+    phenomenon_discovery=discover_market_phenomenon(_A_SHARE, _SOURCES, _CAPTURED_AT, []),
 )
 
 
@@ -143,13 +166,8 @@ def _alt_chain_nodes() -> list[dict[str, object]]:
 
 
 VALID_TRACE_DICT: dict[str, object] = {
-    "schema_version": "1.0",
-    "dominant_phenomenon": {
-        "kind": "broad_rally",
-        "summary": "多个核心指数同步上涨，市场广度偏强",
-        "fact_ids": ["INDEX_000001_SH"],
-        "score": 3,
-    },
+    "schema_version": "1.1",
+    "attribution_status": "confirmed",
     "candidates": [
         {
             "id": "global_risk_liquidity",
@@ -219,10 +237,12 @@ def _make_llm_response(
     answer_type: str,
     source_ids: list[str],
     candidate_id: str | None = None,
+    phenomenon_kind: str | None = None,
 ) -> AIMessage:
     selection: dict[str, object] = {
         "answer_type": answer_type,
         "candidate_id": candidate_id,
+        "phenomenon_kind": phenomenon_kind,
         "source_ids": source_ids,
     }
     return AIMessage(content=json.dumps(selection))
@@ -242,19 +262,20 @@ async def test_happy_path_returns_structured_response_with_trace():
         "status": "completed",
     }
     llm_resp = _make_llm_response(
-        "candidate", ["NEWS_001", "INDEX_000001_SH"], "domestic_macro_policy"
+        "candidate", ["INDEX_000001_SH", "NEWS_001"], "domestic_macro_policy"
     )
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
-        result = await answer_market_trace_qa(
-            "大盘为何涨跌", _REPORT_DATE, "mtqa_test"
-        )
+        result = await answer_market_trace_qa("大盘为何涨跌", _REPORT_DATE, "mtqa_test")
 
     assert result.content == (
         "复盘候选（已支持）：央行降准释放流动性是主因。"
@@ -267,8 +288,178 @@ async def test_happy_path_returns_structured_response_with_trace():
     assert "降准对银行净息差的长期影响尚不明确" in result.trace.uncertainty
     # source_ids 验证：只保留冻结 sources 中存在的
     assert len(result.trace.sources) == 2
-    source_ids = {s.source_id for s in result.trace.sources}
-    assert source_ids == {"NEWS_001", "INDEX_000001_SH"}
+    source_ids = [source.source_id for source in result.trace.sources]
+    assert source_ids == ["INDEX_000001_SH", "NEWS_001"]
+
+
+def test_candidate_source_ids_are_complete_and_follow_snapshot_order() -> None:
+    trace = MarketTraceResult.model_validate(VALID_TRACE_DICT)
+    candidate = next(item for item in trace.candidates if item.id == "domestic_macro_policy")
+
+    assert _candidate_source_ids(candidate, SNAPSHOT) == [
+        "INDEX_000001_SH",
+        "NEWS_001",
+    ]
+
+
+def test_qa_prompt_requires_strict_selection_and_complete_ordered_sources() -> None:
+    prompt = market_trace_qa_service.MARKET_TRACE_QA_PROMPT
+    assert "phenomenon_discovery" in prompt
+    assert "phenomenon_kind" in prompt
+    assert "完整、有序、逐字照抄" in prompt
+    assert "禁止自由事实" in prompt
+    assert "实时结论" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_ids",
+    [
+        ["NEWS_001", "INDEX_000001_SH"],
+        ["INDEX_000001_SH"],
+        ["INDEX_000001_SH", "NEWS_001", "GLOBAL_001"],
+    ],
+)
+async def test_candidate_requires_exact_complete_ordered_source_ids(
+    source_ids: list[str],
+) -> None:
+    report = {"content": _make_report_content(), "status": "completed"}
+    llm_response = _make_llm_response("candidate", source_ids, "domestic_macro_policy")
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_response)),
+        ),
+    ):
+        result = await answer_market_trace_qa("大盘为何上涨", _REPORT_DATE, None)
+
+    assert result.trace.degraded is True
+    assert result.trace.degraded_reason == "模型选择了不完整或乱序的来源"
+
+
+@pytest.mark.asyncio
+async def test_found_report_without_valid_id_keeps_artifact_id_empty() -> None:
+    report = {"content": _make_report_content(), "status": "completed"}
+    llm_response = _make_llm_response("out_of_scope", [])
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_response)),
+        ),
+    ):
+        result = await answer_market_trace_qa("范围外问题", _REPORT_DATE, None)
+
+    assert result.trace.degraded is False
+    assert result.trace.artifact_id == ""
+
+
+@pytest.mark.asyncio
+async def test_no_phenomenon_returns_fixed_business_answer_without_llm() -> None:
+    calm_a_share = json.loads(json.dumps(_A_SHARE))
+    indexes = calm_a_share["indexes"]
+    for index in indexes.values():
+        index["pct_chg"] = 0.1
+    calm_a_share["breadth"] = {
+        "advance_ratio": 0.5,
+        "total_count": 5000,
+        "decline_count": 2400,
+    }
+    calm_a_share["turnover"] = {"change_pct": 1.0}
+    calm_a_share["limits"] = {
+        "up_count": 10,
+        "down_count": 8,
+        "broken_count": 1,
+        "highest_board": 2,
+    }
+    discovery = discover_market_phenomenon(calm_a_share, _SOURCES, _CAPTURED_AT, [])
+    snapshot = SNAPSHOT.model_copy(
+        update={"a_share": calm_a_share, "phenomenon_discovery": discovery}
+    )
+    empty_trace = {
+        "schema_version": "1.1",
+        "attribution_status": "not_applicable",
+        "candidates": [],
+        "primary_chain_id": None,
+        "alternative_chain_id": None,
+        "confidence": "low",
+        "unresolved_questions": ["未检测到明确的市场主导现象"],
+    }
+    content = _make_report_content()
+    market_trace = content["market_trace"]
+    assert isinstance(market_trace, dict)
+    market_trace["snapshot"] = snapshot.model_dump(mode="json")
+    market_trace["trace"] = empty_trace
+    report = {"content": content, "status": "completed"}
+    llm_factory = MagicMock()
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch("aistock_agent.services.market_trace_qa.get_deep_think", llm_factory),
+    ):
+        result = await answer_market_trace_qa("市场发生了什么", _REPORT_DATE, None)
+
+    assert result.trace.degraded is False
+    assert result.trace.sources == []
+    assert result.content == "行情完整，未发现显著市场现象"
+    assert result.trace.uncertainty == ["未检测到明确的市场主导现象"]
+    llm_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_insufficient_data_returns_fixed_answer_and_readiness_uncertainty() -> None:
+    missing_fields = ["a_share.indexes"]
+    discovery = discover_market_phenomenon({}, {}, _CAPTURED_AT, missing_fields)
+    snapshot = SNAPSHOT.model_copy(
+        update={
+            "a_share": {},
+            "sources": {},
+            "missing_fields": missing_fields,
+            "phenomenon_discovery": discovery,
+        }
+    )
+    empty_trace = {
+        "schema_version": "1.1",
+        "attribution_status": "insufficient",
+        "candidates": [],
+        "primary_chain_id": None,
+        "alternative_chain_id": None,
+        "confidence": "low",
+        "unresolved_questions": [
+            "市场数据不足以支撑归因分析",
+            "因果证据充分性不足，依赖 partial 或 not_ready 来源",
+            "快照缺少 1 个字段",
+        ],
+    }
+    content = _make_report_content()
+    market_trace = content["market_trace"]
+    assert isinstance(market_trace, dict)
+    market_trace["snapshot"] = snapshot.model_dump(mode="json")
+    market_trace["trace"] = empty_trace
+    report = {"content": content, "status": "completed"}
+    llm_factory = MagicMock()
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch("aistock_agent.services.market_trace_qa.get_deep_think", llm_factory),
+    ):
+        result = await answer_market_trace_qa("市场发生了什么", _REPORT_DATE, None)
+
+    assert result.trace.degraded is False
+    assert result.content == "行情数据不足，无法可靠判断市场现象"
+    assert result.trace.uncertainty == empty_trace["unresolved_questions"]
+    llm_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -278,9 +469,7 @@ async def test_no_report_returns_degraded():
         "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
         new=AsyncMock(return_value=ReviewReportReadResult("not_found")),
     ):
-        result = await answer_market_trace_qa(
-            "大盘为何涨跌", _REPORT_DATE, None
-        )
+        result = await answer_market_trace_qa("大盘为何涨跌", _REPORT_DATE, None)
 
     assert result.trace.degraded is True
     assert result.trace.artifact_id == ""
@@ -314,7 +503,11 @@ async def test_date_mismatch_returns_degraded():
         if isinstance(snap, dict):
             snap["trade_date"] = "2026-07-16"
 
-    report = {"content": bad_content, "status": "completed"}
+    report = {
+        "id": "date-mismatch-artifact",
+        "content": bad_content,
+        "status": "completed",
+    }
 
     with patch(
         "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
@@ -323,7 +516,37 @@ async def test_date_mismatch_returns_degraded():
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
     assert result.trace.degraded is True
+    assert result.trace.artifact_id == "date-mismatch-artifact"
     assert "日期不匹配" in (result.trace.degraded_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_source_mapping_mismatch_keeps_found_report_artifact_id() -> None:
+    content = _make_report_content()
+    market_trace = content["market_trace"]
+    assert isinstance(market_trace, dict)
+    snapshot = market_trace["snapshot"]
+    assert isinstance(snapshot, dict)
+    sources = snapshot["sources"]
+    assert isinstance(sources, dict)
+    news = sources["NEWS_001"]
+    assert isinstance(news, dict)
+    news["source_id"] = "NEWS_MISMATCH"
+    report = {
+        "id": "mapping-mismatch-artifact",
+        "content": content,
+        "status": "completed",
+    }
+
+    with patch(
+        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+        new=AsyncMock(return_value=_found_review_report(report)),
+    ):
+        result = await answer_market_trace_qa("test", _REPORT_DATE, None)
+
+    assert result.trace.degraded is True
+    assert result.trace.artifact_id == "mapping-mismatch-artifact"
+    assert "来源映射不一致" in (result.trace.degraded_reason or "")
 
 
 @pytest.mark.asyncio
@@ -331,12 +554,15 @@ async def test_llm_failure_returns_degraded():
     """LLM 调用失败 -> degraded。"""
     report = {"content": _make_report_content(), "status": "completed"}
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(side_effect=Exception("LLM timeout"))),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(side_effect=Exception("LLM timeout"))),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -349,13 +575,14 @@ async def test_invalid_llm_output_returns_degraded():
     """LLM 输出非法 JSON -> degraded。"""
     report = {"content": _make_report_content(), "status": "completed"}
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(
-            ainvoke=AsyncMock(return_value=AIMessage(content="这不是JSON"))
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=AIMessage(content="这不是JSON"))),
         ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
@@ -372,16 +599,20 @@ async def test_llm_output_with_code_fences_parsed():
         content=(
             "```json\n"
             '{"answer_type":"candidate","candidate_id":"domestic_macro_policy",'
-            '"source_ids":["NEWS_001"]}\n```'
+            '"phenomenon_kind":null,'
+            '"source_ids":["INDEX_000001_SH","NEWS_001"]}\n```'
         )
     )
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -390,8 +621,10 @@ async def test_llm_output_with_code_fences_parsed():
         "复盘候选（已支持）：央行降准释放流动性是主因。"
         "这是已归档复盘中的证据归因，不等同于确认因果关系。"
     )
-    assert len(result.trace.sources) == 1
-    assert result.trace.sources[0].source_id == "NEWS_001"
+    assert [source.source_id for source in result.trace.sources] == [
+        "INDEX_000001_SH",
+        "NEWS_001",
+    ]
 
 
 @pytest.mark.asyncio
@@ -404,12 +637,15 @@ async def test_unknown_source_id_returns_degraded():
         "domestic_macro_policy",
     )
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -429,12 +665,15 @@ async def test_default_report_date_uses_shanghai_timezone():
         captured_dates.append(report_date.isoformat())
         return _found_review_report(report)
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=mock_get,
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=mock_get,
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
         await answer_market_trace_qa("test", None, None)
 
@@ -477,6 +716,42 @@ async def test_invalid_trace_data_returns_degraded():
 
 
 @pytest.mark.asyncio
+async def test_legacy_snapshot_without_discovery_returns_technical_degradation():
+    """QA 读取不含 discovery 的持久化工件时必须技术降级。"""
+    content = _make_report_content()
+    market_trace = content["market_trace"]
+    assert isinstance(market_trace, dict)
+    snapshot = market_trace["snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot.pop("phenomenon_discovery", None)
+    report = {
+        "id": "legacy-artifact",
+        "content": content,
+        "status": "completed",
+    }
+
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(
+                ainvoke=AsyncMock(return_value=_make_llm_response("out_of_scope", []))
+            ),
+        ),
+    ):
+        response = await answer_market_trace_qa("市场情况如何", _REPORT_DATE, None)
+
+    assert response.trace.degraded is True
+    assert response.trace.artifact_id == "legacy-artifact"
+    assert response.trace.as_of == ""
+    assert response.trace.sources == []
+    assert response.trace.degraded_reason == "复盘报告数据解析失败"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [
@@ -496,12 +771,17 @@ async def test_invalid_llm_selection_returns_degraded_without_as_of(payload: obj
     """顶层、字段类型、重复来源或意外字段均不可被宽松接受。"""
     report = {"content": _make_report_content(), "status": "completed"}
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=AIMessage(content=json.dumps(payload)))),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(
+                ainvoke=AsyncMock(return_value=AIMessage(content=json.dumps(payload)))
+            ),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -521,16 +801,17 @@ async def test_source_map_key_must_match_source_record_id():
     assert isinstance(sources, dict)
     sources["FORGED_KEY"] = sources.pop("NEWS_001")
     report = {"content": content, "status": "completed"}
-    llm_resp = _make_llm_response(
-        "candidate", ["FORGED_KEY"], "domestic_macro_policy"
-    )
+    llm_resp = _make_llm_response("candidate", ["FORGED_KEY"], "domestic_macro_policy")
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -579,12 +860,15 @@ async def test_llm_free_answer_is_rejected_not_returned():
         )
     )
 
-    with patch(
-        "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
-        new=AsyncMock(return_value=_found_review_report(report)),
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
     ):
         result = await answer_market_trace_qa("test", _REPORT_DATE, None)
 
@@ -599,18 +883,22 @@ async def test_invalid_direct_report_date_never_calls_node_or_realtime_reader():
     dedicated_reader = AsyncMock()
     realtime_reader = AsyncMock()
 
-    with patch.object(
-        market_trace_qa_service.node_api,
-        "get_analysis_report",
-        new=legacy_reader,
-    ), patch.object(
-        market_trace_qa_service.node_api,
-        "get_review_analysis_report",
-        new=dedicated_reader,
-    ), patch.object(
-        market_trace_qa_service.node_api,
-        "get",
-        new=realtime_reader,
+    with (
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_analysis_report",
+            new=legacy_reader,
+        ),
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_review_analysis_report",
+            new=dedicated_reader,
+        ),
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get",
+            new=realtime_reader,
+        ),
     ):
         result = await answer_market_trace_qa("大盘为何涨跌", "../../quote/600519", None)
 
@@ -622,32 +910,38 @@ async def test_invalid_direct_report_date_never_calls_node_or_realtime_reader():
 
 
 @pytest.mark.asyncio
-async def test_tampered_dominant_summary_is_rejected_before_llm():
-    """持久化 trace 的主导摘要被篡改时，校验必须阻断模型调用。"""
+async def test_tampered_discovery_summary_is_rejected_before_llm():
+    """持久化 discovery 被篡改时，校验必须阻断模型调用。"""
     content = _make_report_content()
     market_trace = content["market_trace"]
     assert isinstance(market_trace, dict)
-    trace = market_trace["trace"]
-    assert isinstance(trace, dict)
-    dominant = trace["dominant_phenomenon"]
-    assert isinstance(dominant, dict)
-    dominant["summary"] = "TAMPERED_TRACE_SUMMARY"
+    snapshot = market_trace["snapshot"]
+    assert isinstance(snapshot, dict)
+    discovery = snapshot["phenomenon_discovery"]
+    assert isinstance(discovery, dict)
+    primary = discovery["primary"]
+    assert isinstance(primary, dict)
+    primary["summary"] = "TAMPERED_DISCOVERY_SUMMARY"
     report = {"content": content, "status": "completed"}
     legacy_reader = AsyncMock(return_value=report)
     dedicated_reader = AsyncMock(return_value=ReviewReportReadResult("found", report))
     llm_factory = MagicMock()
 
-    with patch.object(
-        market_trace_qa_service.node_api,
-        "get_analysis_report",
-        new=legacy_reader,
-    ), patch.object(
-        market_trace_qa_service.node_api,
-        "get_review_analysis_report",
-        new=dedicated_reader,
-    ), patch(
-        "aistock_agent.services.market_trace_qa.get_deep_think",
-        llm_factory,
+    with (
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_analysis_report",
+            new=legacy_reader,
+        ),
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_review_analysis_report",
+            new=dedicated_reader,
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            llm_factory,
+        ),
     ):
         result = await answer_market_trace_qa("主导现象是什么", _REPORT_DATE, None)
 
@@ -664,14 +958,17 @@ async def test_unavailable_report_service_is_not_reported_as_missing():
     legacy_reader = AsyncMock(return_value=None)
     dedicated_reader = AsyncMock(return_value=ReviewReportReadResult("unavailable"))
 
-    with patch.object(
-        market_trace_qa_service.node_api,
-        "get_analysis_report",
-        new=legacy_reader,
-    ), patch.object(
-        market_trace_qa_service.node_api,
-        "get_review_analysis_report",
-        new=dedicated_reader,
+    with (
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_analysis_report",
+            new=legacy_reader,
+        ),
+        patch.object(
+            market_trace_qa_service.node_api,
+            "get_review_analysis_report",
+            new=dedicated_reader,
+        ),
     ):
         result = await answer_market_trace_qa("大盘为何涨跌", _REPORT_DATE, None)
 
@@ -681,22 +978,19 @@ async def test_unavailable_report_service_is_not_reported_as_missing():
     dedicated_reader.assert_awaited_once()
 
 
-def test_render_dominant_phenomenon_uses_snapshot_summary() -> None:
-    """渲染层独立于校验层时，仍只使用冻结 snapshot 的主导摘要。"""
-    tampered_trace = dict(VALID_TRACE_DICT)
-    tampered_dominant = dict(tampered_trace["dominant_phenomenon"])
-    tampered_dominant["summary"] = "TAMPERED_TRACE_SUMMARY"
-    tampered_trace["dominant_phenomenon"] = tampered_dominant
-    trace = MarketTraceResult.model_validate(tampered_trace)
+def test_render_phenomenon_discovery_uses_snapshot_summary() -> None:
+    """现象选择只能渲染冻结 snapshot.discovery。"""
+    trace = MarketTraceResult.model_validate(VALID_TRACE_DICT)
+    primary = SNAPSHOT.phenomenon_discovery.primary
+    assert primary is not None
     selection = _MarketTraceQaSelection(
-        answer_type="dominant_phenomenon",
+        answer_type="phenomenon_discovery",
         candidate_id=None,
-        source_ids=["INDEX_000001_SH"],
+        phenomenon_kind=primary.kind,
+        source_ids=primary.fact_ids,
     )
 
     content, source_ids = _render_selection(selection, SNAPSHOT, trace)
 
-    assert SNAPSHOT.dominant_phenomenon is not None
-    assert SNAPSHOT.dominant_phenomenon.summary in content
-    assert "TAMPERED_TRACE_SUMMARY" not in content
-    assert source_ids == {"INDEX_000001_SH"}
+    assert primary.summary in content
+    assert source_ids == primary.fact_ids

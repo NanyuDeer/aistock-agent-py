@@ -7,6 +7,7 @@
 - 正确 token 优先级
 """
 
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -296,6 +297,225 @@ class TestTriggerMorningBriefing:
         body = resp.json()
         assert "elapsed_seconds" in body
         assert isinstance(body["elapsed_seconds"], (int, float))
+
+    def test_default_date_uses_shanghai_calendar_day_and_matches_worker_state(self, client):
+        """UTC 2026-07-25 17:00 已是上海 2026-07-26，晨报必须全程使用后者。"""
+        morning_result = self._mock_morning_result(major_events=[])
+        with patch(
+            "aistock_agent.api.routes.shanghai_today",
+            return_value=date(2026, 7, 26),
+        ):
+            with patch(
+                "aistock_agent.agents.workers.morning.run",
+                new_callable=AsyncMock,
+                return_value=morning_result,
+            ) as mock_run:
+                resp = client.post(
+                    "/api/agent/briefing/morning/trigger",
+                    headers=AUTH_HEADERS,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["report_date"] == "2026-07-26"
+        assert mock_run.await_args.args[0]["report_date"] == "2026-07-26"
+
+    def test_explicit_date_overrides_shanghai_default_and_matches_worker_state(self, client):
+        """显式日期优先，响应和晨报 worker 共享同一日期。"""
+        morning_result = self._mock_morning_result(major_events=[])
+        with patch(
+            "aistock_agent.api.routes.shanghai_today",
+            return_value=date(2026, 7, 26),
+        ):
+            with patch(
+                "aistock_agent.agents.workers.morning.run",
+                new_callable=AsyncMock,
+                return_value=morning_result,
+            ) as mock_run:
+                resp = client.post(
+                    "/api/agent/briefing/morning/trigger",
+                    json={"report_date": "2026-07-24"},
+                    headers=AUTH_HEADERS,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["report_date"] == "2026-07-24"
+        assert mock_run.await_args.args[0]["report_date"] == "2026-07-24"
+
+    @pytest.mark.parametrize("report_date", ["not-a-date", "20260724", "2026-02-30"])
+    def test_invalid_explicit_date_is_rejected_without_calling_worker(self, client, report_date):
+        """晨报只接受真实日历日，非法显式值不得交给 worker 回退。"""
+        with patch(
+            "aistock_agent.agents.workers.morning.run",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/briefing/morning/trigger",
+                json={"report_date": report_date},
+                headers=AUTH_HEADERS,
+            )
+
+        assert resp.status_code == 422
+        mock_run.assert_not_called()
+
+
+# ── Review trigger ──
+
+
+class TestTriggerReviewBriefing:
+    """POST /api/agent/briefing/review/trigger"""
+
+    def test_default_date_uses_shanghai_calendar_day_and_matches_worker_state(self, client):
+        """UTC 2026-07-25 17:00 已是上海 2026-07-26，复盘必须全程使用后者。"""
+        with patch(
+            "aistock_agent.api.routes.shanghai_today",
+            return_value=date(2026, 7, 26),
+        ):
+            with patch(
+                "aistock_agent.agents.workers.review.run",
+                new_callable=AsyncMock,
+                return_value={"final_response": "复盘完成"},
+            ) as mock_run:
+                resp = client.post(
+                    "/api/agent/briefing/review/trigger",
+                    headers=AUTH_HEADERS,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["report_date"] == "2026-07-26"
+        assert mock_run.await_args.args[0]["report_date"] == "2026-07-26"
+
+    def test_explicit_date_overrides_shanghai_default_and_matches_worker_state(self, client):
+        """显式复盘日期优先，响应和 worker 使用同一日期。"""
+        with patch(
+            "aistock_agent.api.routes.shanghai_today",
+            return_value=date(2026, 7, 26),
+        ):
+            with patch(
+                "aistock_agent.agents.workers.review.run",
+                new_callable=AsyncMock,
+                return_value={"final_response": "复盘完成"},
+            ) as mock_run:
+                resp = client.post(
+                    "/api/agent/briefing/review/trigger",
+                    json={"report_date": "2026-07-24"},
+                    headers=AUTH_HEADERS,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["report_date"] == "2026-07-24"
+        assert mock_run.await_args.args[0]["report_date"] == "2026-07-24"
+
+    @pytest.mark.parametrize("report_date", ["not-a-date", "20260724", "2026-02-30"])
+    def test_invalid_explicit_date_is_rejected_without_calling_worker(self, client, report_date):
+        """复盘只接受真实日历日，非法显式值不得交给 worker 回退。"""
+        with patch(
+            "aistock_agent.agents.workers.review.run",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/briefing/review/trigger",
+                json={"report_date": report_date},
+                headers=AUTH_HEADERS,
+            )
+
+        assert resp.status_code == 422
+        mock_run.assert_not_called()
+
+
+# ── QA fixed-date runner ──
+
+
+class TestQaBriefingRunner:
+    """POST /api/agent/qa/briefing/run 只能在隔离 QA 进程中使用。"""
+
+    def test_qa_runner_is_hidden_outside_qa_mode(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "")
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 404
+        mock_run.assert_not_awaited()
+
+    def test_qa_runner_forwards_only_matching_run_and_fixed_date(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true", raising=False)
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a", raising=False)
+        expected = {
+            "success": True,
+            "run_id": "run-20260724-a",
+            "brief_type": "morning",
+            "report_date": "2026-07-24",
+            "audio_path": "/api/agent/audio/broadcast-morning-2026-07-24.mp3",
+        }
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+            create=True,
+            return_value=expected,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == expected
+        mock_run.assert_awaited_once_with("morning", "2026-07-24", "run-20260724-a")
+
+    def test_qa_runner_rejects_mismatched_run_before_calling_chain(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true", raising=False)
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a", raising=False)
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+            create=True,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "other-run",
+                    "brief_type": "morning",
+                    "report_date": "2026-07-24",
+                },
+            )
+
+        assert resp.status_code == 403
+        mock_run.assert_not_awaited()
+
+    def test_qa_runner_rejects_missing_fixed_date_before_calling_chain(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "qa_mode", "true")
+        monkeypatch.setattr(settings, "qa_run_id", "run-20260724-a")
+        with patch(
+            "aistock_agent.api.routes.run_qa_brief_chain",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            resp = client.post(
+                "/api/agent/qa/briefing/run",
+                headers=AUTH_HEADERS,
+                json={
+                    "run_id": "run-20260724-a",
+                    "brief_type": "morning",
+                },
+            )
+
+        assert resp.status_code == 422
+        mock_run.assert_not_awaited()
 
 
 # ── Event trigger ──

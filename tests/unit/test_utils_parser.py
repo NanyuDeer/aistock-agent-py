@@ -1,5 +1,7 @@
 """utils.parser 测试 — LLM 意图分类输出解析（从 supervisor._parse_intent 抽出）"""
 
+import pytest
+
 from aistock_agent.utils.parser import parse_intent
 
 
@@ -11,6 +13,25 @@ def test_morning_intent():
 def test_event_intent():
     result = parse_intent("event", "分析事件")
     assert result["intent"] == "event"
+
+
+def test_ai_advisor_intent_for_multi_angle_request():
+    """多角度投顾请求保留 supervisor 的 ai_advisor 路由结果。"""
+    result = parse_intent("ai_advisor", "请同时看晨报、风口和机构调研")
+    assert result["intent"] == "ai_advisor"
+
+
+def test_trend_score_intent_keeps_persisted_report_route():
+    """趋势评分必须保留为可映射的投顾意图。"""
+    result = parse_intent("trend_score", "看看趋势股评分")
+    assert result["intent"] == "trend_score"
+
+
+@pytest.mark.parametrize("intent", ("review", "alert", "wind_leader"))
+def test_persisted_report_intents_are_not_downgraded_to_general(intent: str):
+    """投顾可映射的旧单意图必须保持路由，不得掉回通用报告。"""
+    result = parse_intent(intent, "请读取已持久化报告")
+    assert result["intent"] == intent
 
 
 def test_sector_intent_with_tag_code():
