@@ -42,3 +42,38 @@ async def test_report_lookup_miss_returns_degraded():
         ev = await report_lookup({"report_type": "review", "date": "1999-01-01"}, _goal())
     assert ev.degraded is True
     assert "未找到" in (ev.degraded_reason or "") or "miss" in (ev.degraded_reason or "").lower()
+
+
+from aistock_agent.skills.stock_snapshot import stock_snapshot
+
+
+@pytest.mark.asyncio
+async def test_stock_snapshot_normal():
+    fake_quote = "600519 当前价 1800.00 涨跌幅 +2.5%"
+    with patch(
+        "aistock_agent.skills.stock_snapshot.get_quote",
+        new=AsyncMock(return_value=fake_quote),
+    ):
+        ev = await stock_snapshot(
+            {"symbol": "600519"},
+            InsightGoal(question="茅台现在多少钱", intent="stock_snapshot", symbols=["600519"]),
+        )
+    assert ev.skill_name == "stock_snapshot"
+    assert ev.degraded is False
+    assert any("1800" in f or "2.5" in f for f in ev.facts)
+    assert ev.symbols == ["600519"]
+
+
+@pytest.mark.asyncio
+async def test_stock_snapshot_tool_exception_degraded():
+    """工具内部异常被 @skill 装饰器捕获 → degraded。"""
+    with patch(
+        "aistock_agent.skills.stock_snapshot.get_quote",
+        new=AsyncMock(side_effect=RuntimeError("network timeout")),
+    ):
+        ev = await stock_snapshot(
+            {"symbol": "600519"},
+            InsightGoal(question="x", intent="stock_snapshot", symbols=["600519"]),
+        )
+    assert ev.degraded is True
+    assert "stock_snapshot" in (ev.degraded_reason or "")
