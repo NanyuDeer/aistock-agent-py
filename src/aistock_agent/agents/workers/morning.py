@@ -239,6 +239,70 @@ def _is_degraded_report(report: dict[str, object]) -> bool:
     return False
 
 
+async def _run_agent_once(
+    system_prompt: str,
+    recursion_limit: int,
+) -> dict[str, object]:
+    """单次执行 morning agent 并构建双层报告。
+
+    封装 create_react_agent 调用、parse_event_output 解析、_build_dual_layer_report 构建。
+    参数化 recursion_limit 供 _invoke_morning_agent 重试时调整。
+
+    Args:
+        system_prompt: 系统提示词（已替换 {{DATE}} 等占位符）。
+        recursion_limit: LangGraph recursion_limit。
+
+    Returns:
+        标准化双层报告 dict。
+    """
+    llm = get_deep_think()
+    tools = get_tools("morning")
+    agent = create_react_agent(llm, tools)
+
+    result = await agent.ainvoke(
+        {"messages": [SystemMessage(content=system_prompt)]},
+        config={"recursion_limit": recursion_limit},
+    )
+
+    display_report, podcast_brief = parse_event_output(result.get("messages", []))
+    raw_text = extract_final_ai_response(result.get("messages", []))
+    return _build_dual_layer_report(display_report, podcast_brief, raw_text)
+
+
+async def _invoke_morning_agent(system_prompt: str) -> dict[str, object]:
+    """调用 morning agent，降级时重试一次。
+
+    策略：
+    1. 首次 recursion_limit=50（与原逻辑一致）
+    2. 若 _is_degraded_report 判定降级，重试 recursion_limit=80
+    3. 重试仍降级则返回降级报告（由 run() 决定是否 persist/cache）
+
+    morning agent 每天仅 1 次调度，重试增加的 LLM 成本可接受。
+
+    Args:
+        system_prompt: 系统提示词（已替换 {{DATE}} 等占位符）。
+
+    Returns:
+        标准化双层报告 dict（首次成功 / 重试成功 / 重试仍降级）。
+    """
+    # 首次尝试：recursion_limit=50
+    report = await _run_agent_once(system_prompt, recursion_limit=50)
+    if not _is_degraded_report(report):
+        logger.info("morning_agent_success_first_try")
+        return report
+
+    logger.warning("morning_agent_degraded_first_try", reason="retrying with higher limit")
+
+    # 重试：recursion_limit=80
+    report = await _run_agent_once(system_prompt, recursion_limit=80)
+    if not _is_degraded_report(report):
+        logger.info("morning_agent_success_on_retry")
+        return report
+
+    logger.warning("morning_agent_degraded_after_retry")
+    return report
+
+
 # ─── 市场事件推送模块 ────────────────────────────────────────────
 
 _MARKET_EVENT_MARKER_RE = re.compile(
@@ -576,7 +640,7 @@ async def run(state: AgentState) -> dict[str, object]:
         report = _build_dual_layer_report(display_report, podcast_brief, raw_text)
 
         # 提取 major_events（供 event agent 消费）
-        details = str(report["display_report"]["details"])
+        details = str(report["display_report"]["details"])  # type: ignore[index]
         major_events = extract_major_events(details)
         if major_events:
             logger.info(
