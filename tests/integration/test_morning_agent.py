@@ -570,7 +570,7 @@ async def test_persist_morning_report_calls_node_api():
     from aistock_agent.services.morning_persister import persist_morning_report
 
     report = {
-        "display_report": {"summary": "测试", "details": "内容", "stocks": [], "risks": []},
+        "display_report": {"summary": "测试", "details": "内容", "stocks": ["600519"], "risks": []},
         "podcast_brief": "摘要",
         "schema_version": "2.0",
     }
