@@ -24,7 +24,7 @@ from aistock_agent.observability.metrics import get_metrics_collector as _get_me
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.config import settings
-from aistock_agent.constants import SSEEventType
+from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
@@ -271,6 +271,7 @@ async def _stream_updates(
                     "type": SSEEventType.AGENT_SWITCH,
                     "from_node": _prev_node,
                     "to_node": node,
+                    "label": CHAT_NODE_LABELS.get(node, node),
                 }
                 _prev_node = node
 

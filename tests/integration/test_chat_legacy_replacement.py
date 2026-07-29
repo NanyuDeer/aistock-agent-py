@@ -152,3 +152,64 @@ async def test_stream_messages_filters_qa_router_node(chat_enabled):
     # 新子图无 analysis_reports / advisor_trace，应为默认值
     assert done_events[0]["analysis_reports"] == {}
     assert done_events[0]["advisor_trace"] is None
+
+
+@pytest.mark.asyncio
+async def test_stream_updates_emits_label_for_chat_nodes(chat_enabled):
+    """_stream_updates 在新子图节点切换时发射带 label 的 AGENT_SWITCH 事件。"""
+    import asyncio
+    from aistock_agent.api.routes import (
+        _stream_updates,
+        _message_queues,
+        _update_queues,
+    )
+    from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
+
+    # 构造事件序列：qa_router → skill_executor → synth_answer → None 哨兵
+    events = [
+        {
+            "event": "on_chain_start",
+            "name": "qa_router",
+            "metadata": {"langgraph_node": "qa_router"},
+            "data": {},
+        },
+        {
+            "event": "on_chain_start",
+            "name": "skill_executor",
+            "metadata": {"langgraph_node": "skill_executor"},
+            "data": {},
+        },
+        {
+            "event": "on_chain_start",
+            "name": "synth_answer",
+            "metadata": {"langgraph_node": "synth_answer"},
+            "data": {},
+        },
+        None,
+    ]
+
+    session_id = "test_session_updates_label"
+    _update_queues[session_id] = asyncio.Queue()
+    for ev in events:
+        await _update_queues[session_id].put(ev)
+
+    sse_events = []
+    async for sse in _stream_updates(session_id):
+        sse_events.append(sse)
+
+    agent_switches = [e for e in sse_events if e.get("type") == SSEEventType.AGENT_SWITCH]
+    assert len(agent_switches) == 3
+
+    # 验证每个 AGENT_SWITCH 包含 label 字段，且与 CHAT_NODE_LABELS 一致
+    assert agent_switches[0]["to_node"] == "qa_router"
+    assert agent_switches[0]["label"] == CHAT_NODE_LABELS["qa_router"]
+
+    assert agent_switches[1]["to_node"] == "skill_executor"
+    assert agent_switches[1]["label"] == CHAT_NODE_LABELS["skill_executor"]
+
+    assert agent_switches[2]["to_node"] == "synth_answer"
+    assert agent_switches[2]["label"] == CHAT_NODE_LABELS["synth_answer"]
+
+    # DONE 事件
+    done_events = [e for e in sse_events if e.get("type") == SSEEventType.DONE]
+    assert len(done_events) == 1
