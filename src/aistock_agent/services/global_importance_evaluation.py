@@ -1,15 +1,17 @@
-"""全局重要性评估服务 — 多事件横向比较
+"""全局重要性评估服务 — 投资者视角焦点事件识别
 
 职责：
 1. 查询近 7 天 event_conduction 报告（_load_recent_event_reports）
 2. 提取关键字段，构建 Global Importance Prompt 所需输入结构（build_global_importance_input）
-3. 调用 LLM 完成多事件横向比较排序（run_global_importance_evaluation）
-4. 下一阶段：持久化结果到 DB 并按排序修改前端 API
+3. 调用 LLM 识别两个独立的焦点事件（run_global_importance_evaluation）：
+   - current_focus_event：当前最值得关注的事件（新事件优先）
+   - ongoing_significant_event：仍在影响市场的持续事件
+4. 持久化结果到 DB
 """
 
 import asyncio
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -51,6 +53,26 @@ def _safe_list(value: object) -> list[Any]:
 def _safe_dict(value: object) -> dict[str, Any]:
     """安全提取字典。"""
     return value if isinstance(value, dict) else {}
+
+
+def _calc_event_age_days(publish_time_str: str) -> int:
+    """计算事件距今的天数。
+
+    根据 publishTime 计算到今天的差距（天）。
+    无法解析时默认返回 7（超出默认查询范围的旧事件）。
+    """
+    if not publish_time_str:
+        return _DEFAULT_LOOKBACK_DAYS
+    try:
+        # 兼容 ISO 格式（2026-07-23T08:56:04.512755）和日期格式（2026-07-23）
+        if "T" in publish_time_str:
+            pub_dt = datetime.fromisoformat(publish_time_str.split(".")[0])
+        else:
+            pub_dt = datetime.strptime(publish_time_str, "%Y-%m-%d")
+        delta = date.today() - pub_dt.date()
+        return max(0, delta.days)
+    except (ValueError, TypeError):
+        return _DEFAULT_LOOKBACK_DAYS
 
 
 def _extract_event_input(content: dict[str, object]) -> dict[str, object] | None:
@@ -139,8 +161,14 @@ def _extract_event_input(content: dict[str, object]) -> dict[str, object] | None
         )
         return None
 
+    # ── 事件时间字段 ──
+    publish_time_str = _safe_str(content.get("publishTime"))
+    event_age_days = _calc_event_age_days(publish_time_str)
+
     return {
         "event_id": event_id,
+        "event_time": publish_time_str,
+        "event_age_days": event_age_days,
         "summary": summary,
         "original_event": original_event,
         "impact_industries": impact_industries,
@@ -227,6 +255,8 @@ async def build_global_importance_input(
             "events": [
                 {
                     "event_id": "evt_xxxxxxxx",
+                    "event_time": "2026-07-23T08:56:04",
+                    "event_age_days": 0,
                     "summary": "...",
                     "original_event": "...",
                     "impact_industries": [...],
@@ -262,21 +292,27 @@ async def run_global_importance_evaluation(
     1. 调用 build_global_importance_input() 获取近 N 天事件集合
     2. events 为空时直接返回，不调用 LLM
     3. 构造 Prompt → 调用 quick_think
-    4. 解析 LLM JSON 结果 → 返回排序
+    4. 解析 LLM JSON 结果 → 识别两个焦点事件 + 构建向后兼容 events
 
     Args:
         lookback_days: 回看天数，默认 7 天。
 
     Returns:
-        成功：{"events": [{"event_id": "...", "rank": 1, ...}, ...]}
-        失败/空：{"events": [], "error": "..."}
+        {
+            "as_of": "...",
+            "total_events": 2,
+            "summary": "...",
+            "current_focus_event": {...} | None,       # 新 Schema
+            "ongoing_significant_event": {...} | None,  # 新 Schema
+            "events": [{...}, ...],                     # 向后兼容
+        }
     """
     # ── 步骤 1: 获取近 N 天事件集合 ──
     global_input = await build_global_importance_input(lookback_days)
     events = global_input.get("events", [])
     if not isinstance(events, list) or not events:
         logger.warning("global_importance_skip_empty", days=lookback_days)
-        return {"events": []}
+        return {"events": [], "current_focus_event": None, "ongoing_significant_event": None}
 
     logger.info(
         "global_importance_start",
@@ -286,7 +322,7 @@ async def run_global_importance_evaluation(
 
     # ── 步骤 2: 构造 Prompt ──
     input_json = json.dumps(global_input, ensure_ascii=False, indent=2)
-    user_message = f"请对以下事件进行重要性排序：\n\n{input_json}"
+    user_message = f"请识别当前最值得关注的焦点事件：\n\n{input_json}"
 
     # ── 步骤 3: 调用 LLM ──
     try:
@@ -298,7 +334,12 @@ async def run_global_importance_evaluation(
         text = str(result.content) if hasattr(result, "content") else str(result)
     except Exception as e:
         logger.error("global_importance_llm_failed", error=str(e), exc_info=True)
-        return {"events": [], "error": f"LLM 调用失败: {str(e)}"}
+        return {
+            "events": [],
+            "current_focus_event": None,
+            "ongoing_significant_event": None,
+            "error": f"LLM 调用失败: {str(e)}",
+        }
 
     # ── 步骤 4: 解析 JSON ──
     try:
@@ -308,44 +349,75 @@ async def run_global_importance_evaluation(
                 "global_importance_parse_not_dict",
                 text_preview=text[:300],
             )
-            return {"events": [], "error": "LLM 返回非 dict 结构"}
+            return {
+                "events": [],
+                "current_focus_event": None,
+                "ongoing_significant_event": None,
+                "error": "LLM 返回非 dict 结构",
+            }
 
-        rankings = parsed.get("rankings")
-        if not isinstance(rankings, list):
-            logger.warning(
-                "global_importance_no_rankings",
-                keys=list(parsed.keys()),
-            )
-            return {"events": [], "error": "LLM 返回缺少 rankings 数组"}
+        summary = str(parsed.get("summary", ""))
 
-        # 标准化输出字段
-        normalized: list[dict[str, object]] = []
-        for item in rankings:
-            if not isinstance(item, dict):
-                continue
-            normalized.append({
-                "event_id": str(item.get("event_id", "")),
-                "rank": int(item.get("rank", 0)),
-                "importance_score": float(item.get("importance_score", 0)),
+        # ── 提取新 Schema 字段：current_focus_event ──
+        raw_focus = parsed.get("current_focus_event")
+        current_focus_event: dict[str, object] | None = None
+        if isinstance(raw_focus, dict) and raw_focus.get("event_id"):
+            current_focus_event = {
+                "event_id": str(raw_focus.get("event_id", "")),
+                "importance_level": str(raw_focus.get("importance_level", "")),
+                "impact_scope": str(raw_focus.get("impact_scope", "")),
+                "direction": str(raw_focus.get("direction", "")),
+                "reason": str(raw_focus.get("reason", "")),
+                "selection_reason": str(raw_focus.get("selection_reason", "")),
+            }
+
+        # ── 提取新 Schema 字段：ongoing_significant_event ──
+        raw_ongoing = parsed.get("ongoing_significant_event")
+        ongoing_significant_event: dict[str, object] | None = None
+        if isinstance(raw_ongoing, dict) and raw_ongoing.get("event_id"):
+            ongoing_significant_event = {
+                "event_id": str(raw_ongoing.get("event_id", "")),
+                "importance_level": str(raw_ongoing.get("importance_level", "")),
+                "impact_scope": str(raw_ongoing.get("impact_scope", "")),
+                "direction": str(raw_ongoing.get("direction", "")),
+                "reason": str(raw_ongoing.get("reason", "")),
+                "selection_reason": str(raw_ongoing.get("selection_reason", "")),
+            }
+
+        # ── 构建向后兼容的 events 数组 ──
+        backward_events: list[dict[str, object]] = []
+        for idx, item in enumerate(
+            filter(None, [current_focus_event, ongoing_significant_event]),
+            start=1,
+        ):
+            backward_events.append({
+                "event_id": str(item["event_id"]),
+                "rank": idx,
+                "importance_score": _score_from_level(
+                    str(item.get("importance_level", "")),
+                ),
                 "importance_level": str(item.get("importance_level", "")),
                 "impact_scope": str(item.get("impact_scope", "")),
-                "impact_period": str(item.get("impact_period", "")),
+                "impact_period": "",
                 "direction": str(item.get("direction", "")),
                 "reason": str(item.get("reason", "")),
             })
 
-        summary = str(parsed.get("summary", ""))
-
+        total = len(backward_events)
         logger.info(
             "global_importance_done",
-            total_events=len(rankings),
+            total_events=total,
+            has_focus=current_focus_event is not None,
+            has_ongoing=ongoing_significant_event is not None,
         )
 
         return {
             "as_of": date.today().isoformat(),
-            "total_events": len(normalized),
+            "total_events": total,
             "summary": summary,
-            "events": normalized,
+            "current_focus_event": current_focus_event,
+            "ongoing_significant_event": ongoing_significant_event,
+            "events": backward_events,
         }
     except Exception as e:
         logger.error(
@@ -354,7 +426,18 @@ async def run_global_importance_evaluation(
             text_preview=text[:500],
             exc_info=True,
         )
-        return {"events": [], "error": f"解析失败: {str(e)}"}
+        return {
+            "events": [],
+            "current_focus_event": None,
+            "ongoing_significant_event": None,
+            "error": f"解析失败: {str(e)}",
+        }
+
+
+def _score_from_level(level: str) -> float:
+    """将 importance_level 转换为 importance_score（向后兼容用）。"""
+    mapping = {"critical": 9.0, "important": 6.0, "notable": 3.0}
+    return mapping.get(level, 0.0)
 
 
 # ── 持久化 ──
@@ -385,6 +468,8 @@ async def save_global_importance_report(
         "as_of": str(result.get("as_of", report_date)),
         "total_events": result.get("total_events", 0),
         "summary": str(result.get("summary", "")),
+        "current_focus_event": result.get("current_focus_event"),
+        "ongoing_significant_event": result.get("ongoing_significant_event"),
         "events": result.get("events", []),
     }
 
@@ -429,14 +514,15 @@ async def persist_global_importance_evaluation(
     """
     result = await run_global_importance_evaluation(lookback_days)
 
-    events = result.get("events", [])
+    has_focus = result.get("current_focus_event") is not None
+    has_ongoing = result.get("ongoing_significant_event") is not None
     error = result.get("error", "")
 
     if error:
         logger.warning("global_importance_persist_skip_error", error=error)
         return {**result, "persisted": False}
 
-    if not isinstance(events, list) or not events:
+    if not has_focus and not has_ongoing:
         logger.warning("global_importance_persist_skip_empty")
         return {**result, "persisted": False}
 
@@ -458,27 +544,45 @@ async def _test_run() -> None:
 
     result = await run_global_importance_evaluation(lookback_days=7)
 
-    events = result.get("events", [])
     error = result.get("error", "")
 
     if error:
         print(f"\n❌ 错误: {error}")
         return
 
-    if not events:
-        print("\n⚠️  近 7 天没有可评估的事件")
-        return
+    print(f"\n📝 摘要: {result.get('summary', '')}")
 
-    print(f"\n📊 成功评估 {len(events)} 个事件")
-    if result.get("summary"):
-        print(f"\n📝 摘要: {result['summary']}")
+    # ── 当前焦点事件 ──
+    focus = result.get("current_focus_event")
+    print("\n🎯 当前焦点事件 (current_focus_event):")
+    if focus:
+        print(f"  event_id: {focus.get('event_id')}")
+        print(f"  level: {focus.get('importance_level')}")
+        print(f"  scope: {focus.get('impact_scope')}")
+        print(f"  direction: {focus.get('direction')}")
+        print(f"  reason: {focus.get('reason')}")
+        print(f"  selection_reason: {focus.get('selection_reason')}")
+    else:
+        print("  (null)")
 
-    print("\n📋 排序结果:")
-    print("-" * 60)
-    for ev in sorted(events, key=lambda x: x.get("rank", 999)):
+    # ── 重大持续事件 ──
+    ongoing = result.get("ongoing_significant_event")
+    print("\n🔄 重大持续事件 (ongoing_significant_event):")
+    if ongoing:
+        print(f"  event_id: {ongoing.get('event_id')}")
+        print(f"  level: {ongoing.get('importance_level')}")
+        print(f"  scope: {ongoing.get('impact_scope')}")
+        print(f"  direction: {ongoing.get('direction')}")
+        print(f"  reason: {ongoing.get('reason')}")
+        print(f"  selection_reason: {ongoing.get('selection_reason')}")
+    else:
+        print("  (null)")
+
+    print("\n📋 向后兼容 events 数组:")
+    for ev in result.get("events", []):
         print(
             f"  #{ev.get('rank')} | score={ev.get('importance_score'):.1f} | "
-            f"{ev.get('impact_scope')}/{ev.get('impact_period')} | "
+            f"{ev.get('impact_scope')} | "
             f"{ev.get('direction')} | {ev.get('event_id')}"
         )
         if ev.get("reason"):
