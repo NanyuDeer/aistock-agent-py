@@ -92,7 +92,9 @@ async def test_event_persist_post_returns_none_returns_false() -> None:
 @pytest.mark.asyncio
 async def test_event_persist_post_raises_returns_false() -> None:
     """post() 抛异常 → False。"""
-    with patch(f"{_NODE_API_EVENT}.post", new_callable=AsyncMock, side_effect=RuntimeError("网络错误")):
+    with patch(
+        f"{_NODE_API_EVENT}.post", new_callable=AsyncMock, side_effect=RuntimeError("网络错误")
+    ):
         result = await persist_event_report(
             "evt_test",
             {"title": "测试"},
@@ -124,6 +126,89 @@ async def test_morning_persist_post_returns_none_returns_false() -> None:
 @pytest.mark.asyncio
 async def test_morning_persist_post_raises_returns_false() -> None:
     """post() 抛异常 → False。"""
-    with patch(f"{_NODE_API_MORNING}.post", new_callable=AsyncMock, side_effect=RuntimeError("网络错误")):
+    with patch(
+        f"{_NODE_API_MORNING}.post", new_callable=AsyncMock, side_effect=RuntimeError("网络错误")
+    ):
         result = await persist_morning_report({"display_report": {}})
     assert result is False
+
+
+# ── persist_morning_report 降级校验 ──
+
+
+@pytest.mark.asyncio
+async def test_morning_persist_skipped_for_known_degraded_text() -> None:
+    """包含 'Sorry, need more steps' → 不调用 node_api.post，返回 False。"""
+    degraded_report = {
+        "display_report": {
+            "summary": "",
+            "details": "Sorry, need more steps to process this request.",
+            "stocks": [],
+            "risks": [],
+        },
+        "podcast_brief": "",
+        "schema_version": "1.0",
+    }
+    with patch(f"{_NODE_API_MORNING}.post", new_callable=AsyncMock) as mock_post:
+        result = await persist_morning_report(degraded_report)
+    assert result is False
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_morning_persist_skipped_for_schema_1_0_short_content() -> None:
+    """schema 1.0 且 details 过短 → 不调用 node_api.post，返回 False。"""
+    degraded_report = {
+        "display_report": {
+            "summary": "",
+            "details": "短",
+            "stocks": [],
+            "risks": [],
+        },
+        "podcast_brief": "",
+        "schema_version": "1.0",
+    }
+    with patch(f"{_NODE_API_MORNING}.post", new_callable=AsyncMock) as mock_post:
+        result = await persist_morning_report(degraded_report)
+    assert result is False
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_morning_persist_skipped_for_schema_2_0_empty_fields() -> None:
+    """schema 2.0 但 stocks/risks 均空 → 不调用 node_api.post，返回 False。"""
+    degraded_report = {
+        "display_report": {
+            "summary": "摘要",
+            "details": "足够长的内容" * 30,
+            "stocks": [],
+            "risks": [],
+        },
+        "podcast_brief": "播报",
+        "schema_version": "2.0",
+    }
+    with patch(f"{_NODE_API_MORNING}.post", new_callable=AsyncMock) as mock_post:
+        result = await persist_morning_report(degraded_report)
+    assert result is False
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_morning_persist_normal_report_calls_post() -> None:
+    """正常报告 → 调用 node_api.post，返回 True。"""
+    normal_report = {
+        "display_report": {
+            "summary": "摘要",
+            "details": "正常晨报内容" * 30,
+            "stocks": ["600519"],
+            "risks": ["风险1"],
+        },
+        "podcast_brief": "播报摘要",
+        "schema_version": "2.0",
+    }
+    with patch(
+        f"{_NODE_API_MORNING}.post", new_callable=AsyncMock, return_value={"ok": True}
+    ) as mock_post:
+        result = await persist_morning_report(normal_report)
+    assert result is True
+    mock_post.assert_awaited_once()
