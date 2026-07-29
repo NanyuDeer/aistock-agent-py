@@ -205,6 +205,40 @@ def _build_dual_layer_report(
     }
 
 
+def _is_degraded_report(report: dict[str, object]) -> bool:
+    """检测报告是否为 LLM 解析失败的降级内容。
+
+    判定规则（满足任一即视为降级）：
+    1. display_report.details 包含已知降级文本 "Sorry, need more steps"
+    2. schema_version="1.0" 且 details 长度 < 100（旧格式纯文本过短）
+    3. schema_version="2.0" 但 stocks 和 risks 均为空（解析成功但内容缺失）
+    4. display_report 字段缺失或类型异常（容错降级）
+
+    被 persist_morning_report 和 morning.run 缓存写入前调用，避免降级内容污染数据库/缓存。
+    """
+    display = report.get("display_report")
+    if not isinstance(display, dict):
+        return True
+
+    details = str(display.get("details", ""))
+    if "Sorry, need more steps" in details:
+        return True
+
+    schema_version = str(report.get("schema_version", ""))
+
+    # schema 1.0 且内容过短 → 降级
+    if schema_version == "1.0" and len(details) < 100:
+        return True
+
+    # schema 2.0 但 stocks 和 risks 都为空 → 降级
+    stocks = display.get("stocks", [])
+    risks = display.get("risks", [])
+    if schema_version == "2.0" and not stocks and not risks:
+        return True
+
+    return False
+
+
 # ─── 市场事件推送模块 ────────────────────────────────────────────
 
 _MARKET_EVENT_MARKER_RE = re.compile(
