@@ -156,3 +156,36 @@ async def test_trace_lookup_miss_degraded():
         )
     assert ev.degraded is True
     assert "未生成" in (ev.degraded_reason or "") or "miss" in (ev.degraded_reason or "").lower()
+
+
+# ── industry_relation ──────────────────────────────────────────────────────
+from aistock_agent.skills.industry_relation import industry_relation
+
+
+@pytest.mark.asyncio
+async def test_industry_relation_normal():
+    fake_result = "白酒 → 上下游: 食品饮料、包装；龙头: 贵州茅台、五粮液"
+    with patch(
+        "aistock_agent.skills.industry_relation.match_industry_by_keywords",
+        new=AsyncMock(return_value=fake_result),
+    ):
+        ev = await industry_relation(
+            {"keywords": ["白酒"], "tag_codes": []},
+            InsightGoal(question="白酒板块上下游", intent="industry_relation", tag_codes=["baijiu"]),
+        )
+    assert ev.skill_name == "industry_relation"
+    assert ev.degraded is False
+    assert any("白酒" in f or "茅台" in f for f in ev.facts)
+
+
+@pytest.mark.asyncio
+async def test_industry_relation_exception_degraded():
+    with patch(
+        "aistock_agent.skills.industry_relation.match_industry_by_keywords",
+        new=AsyncMock(side_effect=RuntimeError("vector db down")),
+    ):
+        ev = await industry_relation(
+            {"keywords": ["白酒"]},
+            InsightGoal(question="x", intent="industry_relation"),
+        )
+    assert ev.degraded is True
