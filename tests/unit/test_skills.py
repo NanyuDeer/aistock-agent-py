@@ -110,3 +110,49 @@ async def test_stock_news_exception_degraded():
             InsightGoal(question="x", intent="stock_news", symbols=["600519"]),
         )
     assert ev.degraded is True
+
+
+# ── trace_lookup ─────────────────────────────────────────────────────────
+from aistock_agent.skills.trace_lookup import trace_lookup
+
+
+@pytest.mark.asyncio
+async def test_trace_lookup_normal():
+    """trace_lookup 复用 load_validated_trace，不调 LLM。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    fake_snapshot = MagicMock(name="MarketTraceSnapshot")
+    fake_trace = MagicMock(name="MarketTraceResult")
+    fake_trace.candidates = []
+    fake_trace.primary_chain_id = None
+    fake_trace.attribution_status = "not_applicable"
+    fake_trace.confidence = "low"
+    fake_trace.unresolved_questions = []
+
+    with patch(
+        "aistock_agent.skills.trace_lookup.load_validated_trace",
+        new=AsyncMock(return_value=(fake_snapshot, fake_trace)),
+    ):
+        ev = await trace_lookup(
+            {"date": "2026-07-28"},
+            InsightGoal(question="今天为什么涨", intent="trace_lookup"),
+        )
+    assert ev.skill_name == "trace_lookup"
+    assert ev.degraded is False
+    assert any(s.kind == "trace" for s in ev.sources)
+
+
+@pytest.mark.asyncio
+async def test_trace_lookup_miss_degraded():
+    """load_validated_trace 返回 None（报告未生成）→ degraded。"""
+    with patch(
+        "aistock_agent.skills.trace_lookup.load_validated_trace",
+        new=AsyncMock(return_value=None),
+    ):
+        ev = await trace_lookup(
+            {"date": "1999-01-01"},
+            InsightGoal(question="x", intent="trace_lookup"),
+        )
+    assert ev.degraded is True
+    assert "未生成" in (ev.degraded_reason or "") or "miss" in (ev.degraded_reason or "").lower()

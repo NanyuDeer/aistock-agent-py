@@ -294,3 +294,66 @@ async def answer_market_trace_qa(
             degraded_reason=None,
         ),
     )
+
+
+async def load_validated_trace(
+    date_str: str,
+) -> tuple["MarketTraceSnapshot", "MarketTraceResult"] | None:
+    """加载并校验已持久化的 ReviewArtifact 中的 trace + snapshot。
+
+    供 trace_lookup Skill 与 market_trace_qa 端点共用，跳过 LLM 选择步骤。
+    失败时返回 None，由调用方决定如何 degraded。
+
+    Args:
+        date_str: 报告日期 YYYY-MM-DD。
+
+    Returns:
+        (snapshot, trace) 元组；报告不存在或校验失败时返回 None。
+    """
+    from datetime import date as date_type
+
+    from aistock_agent.agents.workers.review import validate_trace_against_snapshot
+    from aistock_agent.schemas.market_trace import (
+        MarketTraceResult,
+        MarketTraceSnapshot,
+    )
+    from aistock_agent.services.data_client import NodeApiClient
+
+    try:
+        report_date = date_type.fromisoformat(date_str)
+    except ValueError:
+        logger.warning("load_validated_trace_bad_date", date_str=date_str)
+        return None
+
+    client = NodeApiClient()
+    read_result = await client.get_review_analysis_report(report_date)
+
+    # 检查 status 和 report（ReviewReportReadResult 无 ok/content 字段）
+    if read_result.status != "found" or not isinstance(read_result.report, dict):
+        logger.info(
+            "load_validated_trace_not_found",
+            date_str=date_str,
+            status=read_result.status,
+        )
+        return None
+
+    # 使用 report 字段代替 content
+    content = read_result.report
+    market_trace = content.get("market_trace") or {}
+    snapshot_data = market_trace.get("snapshot")
+    trace_data = market_trace.get("trace")
+    if not snapshot_data or not trace_data:
+        return None
+
+    try:
+        snapshot = MarketTraceSnapshot.model_validate(snapshot_data)
+        trace = MarketTraceResult.model_validate(trace_data)
+        validate_trace_against_snapshot(trace, snapshot)
+        return snapshot, trace
+    except Exception as exc:
+        logger.warning(
+            "load_validated_trace_validate_failed",
+            date_str=date_str,
+            err=str(exc),
+        )
+        return None
