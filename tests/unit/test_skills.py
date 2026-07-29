@@ -77,3 +77,36 @@ async def test_stock_snapshot_tool_exception_degraded():
         )
     assert ev.degraded is True
     assert "stock_snapshot" in (ev.degraded_reason or "")
+
+
+# ── stock_news ──────────────────────────────────────────────────────────
+from aistock_agent.skills.stock_news import stock_news
+
+
+@pytest.mark.asyncio
+async def test_stock_news_normal():
+    fake_news = "1. 茅台发布半年报\n2. 茅台召开投资者交流会"
+    with patch(
+        "aistock_agent.skills.stock_news.search_cls_news",
+        new=AsyncMock(return_value=fake_news),
+    ):
+        ev = await stock_news(
+            {"symbol": "600519", "limit": 10},
+            InsightGoal(question="茅台最近新闻", intent="stock_news", symbols=["600519"]),
+        )
+    assert ev.skill_name == "stock_news"
+    assert ev.degraded is False
+    assert any("半年报" in f or "交流会" in f for f in ev.facts)
+
+
+@pytest.mark.asyncio
+async def test_stock_news_exception_degraded():
+    with patch(
+        "aistock_agent.skills.stock_news.search_cls_news",
+        new=AsyncMock(side_effect=RuntimeError("cls api down")),
+    ):
+        ev = await stock_news(
+            {"symbol": "600519"},
+            InsightGoal(question="x", intent="stock_news", symbols=["600519"]),
+        )
+    assert ev.degraded is True
