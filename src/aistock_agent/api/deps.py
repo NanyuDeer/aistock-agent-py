@@ -17,6 +17,10 @@ from fastapi import Header, HTTPException
 from aistock_agent.config import settings
 from aistock_agent.services.redis_pool import RedisPool
 
+from langchain_core.messages import HumanMessage
+
+from aistock_agent.state.chat_schema import QuestionState
+
 
 def verify_internal_token(
     x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
@@ -58,6 +62,25 @@ def build_initial_state(
         "institution_research_data": None,  # 预加载字段（Agent按需加载）
         "final_response": None,
         "trigger_source": "user",  # 标记用户请求来源，使 intent_router 能路由到 ai_advisor
+    }
+
+
+def build_chat_initial_state(message: str) -> QuestionState:
+    """构造 /chat/* 路由切换到新 CHAT 子图时的初始状态。
+
+    与 /qa 端点的 initial_state 结构对齐（routes.py 的 qa_endpoint）。
+    /chat/* 路由的 session_id 通过 thread_id（config 参数）传递给 checkpointer，
+    不放入 QuestionState（新子图不使用该字段）。
+    """
+    return {
+        "messages": [HumanMessage(content=message)],
+        "goal": None,
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
     }
 
 

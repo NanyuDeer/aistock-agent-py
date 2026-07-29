@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # 默认关闭——避免 readiness 探针每次消耗 token；需探测时设 HEALTH_CHECK_LLM=true。
     health_check_llm: bool = False
 
+    # 是否将 /chat/* 路由切换到新 CHAT 子图（compile_chat_graph）。
+    # 默认 False 走老路径；上线时切 True，出问题立即切回。
+    chat_graph_enabled: bool = False
+
     # LangSmith 追踪（默认关闭，生产按需开启）
     langsmith_enabled: bool = False
     langsmith_api_key: str | None = None

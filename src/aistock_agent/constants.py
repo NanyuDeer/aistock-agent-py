@@ -104,3 +104,10 @@ TOOL_LABELS: dict[str, str] = {
     "get_trend_score_detail": "正在获取趋势股评分详情",
     "get_trend_top_stocks": "正在查询趋势股排行",
 }
+
+# CHAT QA 子图节点名 → 中文标签（供 AGENT_SWITCH 事件展示给前端）
+CHAT_NODE_LABELS: dict[str, str] = {
+    "qa_router": "正在理解你的问题",
+    "skill_executor": "正在收集证据",
+    "synth_answer": "正在综合回答",
+}
