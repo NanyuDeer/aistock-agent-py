@@ -213,3 +213,84 @@ async def test_stream_updates_emits_label_for_chat_nodes(chat_enabled):
     # DONE 事件
     done_events = [e for e in sse_events if e.get("type") == SSEEventType.DONE]
     assert len(done_events) == 1
+
+
+def test_chat_message_legacy_path_when_disabled(client, chat_disabled):
+    """开关关闭时，/chat/message 走老路径，advisor_trace 来自老路径结果。"""
+    # mock compile_graph 返回的 graph 的 ainvoke
+    async def mock_ainvoke(state, config=None):
+        return {
+            "final_response": "老路径回复",
+            "advisor_trace": {
+                "schema_version": "1.0",
+                "subquestions": [],
+                "missing_sources": [],
+                "degraded": False,
+            },
+        }
+
+    with patch("aistock_agent.api.routes.compile_graph") as mock_compile:
+        mock_graph = mock_compile.return_value
+        mock_graph.ainvoke = mock_ainvoke
+
+        response = client.post(
+            "/api/agent/chat/message",
+            json={"message": "测试问题"},
+            headers={"X-Internal-Token": settings.internal_api_token},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["content"] == "老路径回复"
+    # 老路径应返回非 None 的 advisor_trace
+    assert data["advisor_trace"] is not None
+    assert data["advisor_trace"]["schema_version"] == "1.0"
+
+
+def test_fallback_to_legacy_after_disabling(client, monkeypatch):
+    """开关开启后关闭，老路径恢复正常。"""
+    # 先开启
+    monkeypatch.setattr(settings, "chat_graph_enabled", True)
+
+    async def mock_chat_ainvoke(state, config=None):
+        return {"final_response": "新子图回复", "insight": None, "trace": None}
+
+    with patch("aistock_agent.api.routes.compile_chat_graph") as mock_chat_compile:
+        mock_chat_graph = mock_chat_compile.return_value
+        mock_chat_graph.ainvoke = mock_chat_ainvoke
+
+        response = client.post(
+            "/api/agent/chat/message",
+            json={"message": "测试"},
+            headers={"X-Internal-Token": settings.internal_api_token},
+        )
+        assert response.status_code == 200
+        assert response.json()["content"] == "新子图回复"
+        assert response.json()["advisor_trace"] is None
+
+    # 关闭开关
+    monkeypatch.setattr(settings, "chat_graph_enabled", False)
+
+    async def mock_legacy_ainvoke(state, config=None):
+        return {
+            "final_response": "老路径回复",
+            "advisor_trace": {
+                "schema_version": "1.0",
+                "subquestions": [],
+                "missing_sources": [],
+                "degraded": False,
+            },
+        }
+
+    with patch("aistock_agent.api.routes.compile_graph") as mock_legacy_compile:
+        mock_legacy_graph = mock_legacy_compile.return_value
+        mock_legacy_graph.ainvoke = mock_legacy_ainvoke
+
+        response = client.post(
+            "/api/agent/chat/message",
+            json={"message": "测试"},
+            headers={"X-Internal-Token": settings.internal_api_token},
+        )
+        assert response.status_code == 200
+        assert response.json()["content"] == "老路径回复"
+        assert response.json()["advisor_trace"] is not None
