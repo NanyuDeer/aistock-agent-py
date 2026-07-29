@@ -267,12 +267,14 @@ async def _stream_updates(
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
             if node and node != _prev_node:
-                yield {
+                event: dict[str, object] = {
                     "type": SSEEventType.AGENT_SWITCH,
                     "from_node": _prev_node,
                     "to_node": node,
-                    "label": CHAT_NODE_LABELS.get(node, node),
                 }
+                if node in CHAT_NODE_LABELS:
+                    event["label"] = CHAT_NODE_LABELS[node]
+                yield event
                 _prev_node = node
 
             sse = map_langgraph_event_to_sse(event, filter_type="tool")
