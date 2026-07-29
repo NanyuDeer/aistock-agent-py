@@ -623,21 +623,8 @@ async def run(state: AgentState) -> dict[str, object]:
                 "请在报告开头注明，分析可聚焦于下一交易日前瞻。"
             )
 
-        # 创建 ReAct Agent
-        llm = get_deep_think()
-        tools = get_tools("morning")
-        agent = create_react_agent(llm, tools)
-
-        # 执行（recursion_limit=50，晨报需要大量工具调用）
-        result = await agent.ainvoke(
-            {"messages": [SystemMessage(content=system_prompt)]},
-            config={"recursion_limit": 50},
-        )
-
-        # 解析双层报告（复用 output_parser.parse_event_output）
-        display_report, podcast_brief = parse_event_output(result.get("messages", []))
-        raw_text = extract_final_ai_response(result.get("messages", []))
-        report = _build_dual_layer_report(display_report, podcast_brief, raw_text)
+        # 调用 morning agent（含降级重试逻辑）
+        report = await _invoke_morning_agent(system_prompt)
 
         # 提取 major_events（供 event agent 消费）
         details = str(report["display_report"]["details"])  # type: ignore[index]
@@ -649,10 +636,13 @@ async def run(state: AgentState) -> dict[str, object]:
                 titles=[str(e.get("title", ""))[:30] for e in major_events],
             )
 
-        # 缓存 + 归档（供 snapshot_builder 读取）
+        # 缓存 + 归档（仅正常报告写入；降级内容不污染缓存/归档）
         report_json = json.dumps(report, ensure_ascii=False)
-        await set_cached_briefing(report_json)
-        archive_morning(details)
+        if not _is_degraded_report(report):
+            await set_cached_briefing(report_json)
+            archive_morning(details)
+        else:
+            logger.warning("morning_cache_skipped_degraded", date=report_date)
 
         # 持久化到 Node.js /internal/analysis-reports（公共报告，user_id=null）
         morning_persisted = await persist_morning_report(report, report_date)
