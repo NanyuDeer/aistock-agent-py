@@ -2,6 +2,69 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-29 — 早报 Agent LLM 降级内容污染修复
+
+**开发者**: 37588
+
+### 新增
+- `_is_degraded_report`：检测 LLM 降级输出（"Sorry, need more steps"、schema 1.0 短内容、schema 2.0 空字段/风险）
+- `_run_agent_once`：封装单次 agent 调用，参数化 recursion_limit
+- `_invoke_morning_agent`：降级时重试一次（recursion_limit 50→80），双重降级则返回降级报告
+- 单元测试 `tests/unit/test_morning_degraded.py`：10 个测试覆盖降级检测 + 重试逻辑
+- persister 降级校验：`persist_morning_report` 写入前调用 `_is_degraded_report`，跳过污染数据持久化
+
+### 修复
+- `run()` 缓存写入前校验 `_is_degraded_report`：降级内容不写入 Redis 缓存、不归档
+- `persist_morning_report` 双层防护：降级内容不调用 `node_api.post`，返回 False
+- 预存测试数据修复：`test_persist_morning_report_calls_node_api` 补 stocks 字段使其通过降级检测
+
+### 重构
+- `run()` 内联 agent 调用段替换为 `_invoke_morning_agent`，消除重复的 create_react_agent + parse_event_output 代码
+
+---
+
+## [changer] 2026-07-29 — CHAT QA 链路 P0 收尾 + P1.4 老路径替换（SSE+WS）
+
+**开发者**: 37588
+
+### P0 收尾（全部完成）
+- `tests/integration/test_chat_e2e_compose.py`：compose 多意图组合路径集成测试（2+ Skill 并行/串行、depends_on 链）
+- `tests/integration/test_chat_multiturn.py`：多轮对话集成测试（thread_id 复用、checkpointer 状态恢复）
+- `src/aistock_agent/observability/metrics.py`：扩展 MetricsCollector，新增 CHAT QA 链路指标（qa_router/synth_answer/e2e 延迟、skill 延迟/降级、synth 降级）
+- `src/aistock_agent/skills/base.py`：@skill 装饰器接入 skill 延迟和降级指标
+- `src/aistock_agent/graph/nodes/qa_router.py`：接入 qa_router 节点延迟指标
+- `src/aistock_agent/graph/nodes/synth_answer.py`：接入 synth_answer 节点延迟和降级指标
+- `src/aistock_agent/api/routes.py`：/qa 端点接入 e2e 延迟指标
+- `tests/unit/test_chat_qa_metrics.py`：CHAT QA 指标收集逻辑单元测试
+
+### P1.4 老路径替换 — SSE 端点（完成）
+- `src/aistock_agent/config.py`：新增 `chat_graph_enabled` 开关（默认 False）
+- `src/aistock_agent/api/deps.py`：新增 `build_chat_initial_state()` 构造新子图 state
+- `src/aistock_agent/constants.py`：新增 `CHAT_NODE_LABELS` 常量
+- `src/aistock_agent/api/routes.py`：新增 `_select_graph()`，`/chat/message`、`/chat/stream/messages`、`/chat/stream/updates` 按开关切换 graph；`_stream_messages` 过滤 `qa_router`；`_stream_updates` AGENT_SWITCH 新增 label 字段
+- 修复 bug：`_stream_updates` 变量遮蔽导致 `tool_start` 事件被吞掉
+- `tests/unit/test_chat_legacy_replacement.py` + `tests/integration/test_chat_legacy_replacement.py`：10 个测试
+
+### P1.4.1 老路径替换 — WS 端点（完成）
+- **背景**：调研发现前端 chat 实际用 WebSocket `/ws/chat`，不用 SSE。P1.4 的 SSE 改造对前端无效，需补齐 WS 端点的开关接入。
+- `src/aistock_agent/api/ws.py`：复用 `_select_graph()` + `build_chat_initial_state()`；`_NODE_LABELS` 加入 `qa_router`/`skill_executor`/`synth_answer`；事件过滤 `qa_router`（与 SSE 一致）
+- `tests/unit/test_ws_chat_replacement.py` + `tests/integration/test_ws_chat_replacement.py`：7 个测试（3 单元 + 4 集成）
+- 前端兼容性已确认：`agent_switch` 忽略、`advisor_trace=null` 静默跳过、`tool_start` 缺失静默降级
+
+### 文档
+- `docs/chat-qa-mvp-followups.md`：更新状态总览，P0 全部完成，P1.4 + P1.4.1 完成
+- `docs/superpowers/specs/2026-07-29-chat-ws-replacement-design.md`：WS 改造设计文档
+- `docs/superpowers/plans/2026-07-29-chat-ws-replacement.md`：WS 改造实施计划
+- `docs/superpowers/plans/2026-07-29-chat-legacy-replacement.md`：SSE 改造实施计划
+- `docs/chat-ws-manual-verification-checklist.md`：真实 LLM 端到端验证清单
+
+### 待办
+- 风险4：真实 LLM 端到端验证（开发环境手动验证）
+- P1.5：新增 3 个 Skills（evidence_resolver / sector_snapshot / market_snapshot）
+- P1.6：trace_lookup 单元测试
+
+---
+
 ## [main] 2026-07-25 — 新增 broadcast/trend-score 手动触发端点
 **开发者**: Aria
 

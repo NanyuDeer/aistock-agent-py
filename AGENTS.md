@@ -253,9 +253,9 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 - **各 agent run() 必须有顶层 try-catch**，返回降级文本不抛异常（见"异常降级规范"，Phase 4 落地）
 - **compile_graph() 默认挂 checkpointer**，graph.ainvoke/astream 必须传 `config={"configurable": {"thread_id": ...}}`（Phase 5 落地，不传会抛 ValueError）
 - **工具用 @safe_tool_call 装饰器**，返回降级文本不抛异常（Phase 4 落地）
-- LLM 调用失败时返回降级文本，不重试
+- LLM 调用失败时返回降级文本，不重试（晨报 Agent 例外：检测到 LLM degraded 输出时重试一次 recursion_limit 50→80，重试仍降级则跳过缓存/持久化）
 - yfinance 仅用于境外市场数据（美股/亚太/大宗/汇率）
-- 晨报 Agent 必须通过 Redis 缓存，同一天不重复调用 deep_think
+- 晨报 Agent 必须通过 Redis 缓存，同一天不重复调用 deep_think；缓存写入前校验 `_is_degraded_report`，仅正常报告写入缓存
 - 播报 Agent 是核心特色，所有分析 Agent 都需对接播报输出
 
 ## 异常降级规范（Phase 4 落地）
