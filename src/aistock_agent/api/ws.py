@@ -4,8 +4,10 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from aistock_agent.api.deps import build_chat_initial_state
+from aistock_agent.api.routes import _select_graph
+from aistock_agent.config import settings
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
-from aistock_agent.graph.builder import compile_graph
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,7 @@ router = APIRouter()
 
 # 节点名 → 用户可读的进度标签
 _NODE_LABELS: dict[str, str] = {
+    # 老路径节点
     "supervisor": "正在理解你的问题...",
     "ai_advisor_agent": "正在查阅分析报告...",
     "morning_agent": "正在生成晨报...",
@@ -25,6 +28,10 @@ _NODE_LABELS: dict[str, str] = {
     "broadcast_agent": "正在生成播报...",
     "alert_agent": "正在分析异动...",
     "general_agent": "正在思考...",
+    # 新 CHAT 子图节点
+    "qa_router": "正在理解你的问题",
+    "skill_executor": "正在收集证据",
+    "synth_answer": "正在综合回答",
 }
 
 
@@ -54,20 +61,23 @@ async def ws_chat(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": WSEventType.ERROR, "content": "消息不能为空"})
                 continue
 
-            graph = compile_graph()
+            graph = _select_graph()
 
-            initial_state = {
-                "messages": [{"role": "user", "content": message}],
-                "session_id": session_id,
-                "user_id": user_id,
-                "favorites": favorites,
-                "intent": None,
-                "symbol": None,
-                "tag_code": None,
-                "analysis_reports": {},
-                "final_response": None,
-                "trigger_source": "user",
-            }
+            if settings.chat_graph_enabled:
+                initial_state = build_chat_initial_state(message)
+            else:
+                initial_state = {
+                    "messages": [{"role": "user", "content": message}],
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "favorites": favorites,
+                    "intent": None,
+                    "symbol": None,
+                    "tag_code": None,
+                    "analysis_reports": {},
+                    "final_response": None,
+                    "trigger_source": "user",
+                }
 
             try:
                 llm_started = False
@@ -97,7 +107,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                     elif (
                         event_type == "on_chat_model_start"
                         and not llm_started
-                        and name != "supervisor"
+                        and name not in ("supervisor", "qa_router")
                     ):
                         llm_started = True
                         await websocket.send_json({
@@ -107,7 +117,7 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 逐 token 文本 ---
                     elif event_type == LangGraphEventType.ON_CHAT_MODEL_STREAM:
-                        if name == "supervisor":
+                        if name in ("supervisor", "qa_router"):
                             continue
                         chunk = event.get("data", {}).get("chunk")
                         if not chunk:
