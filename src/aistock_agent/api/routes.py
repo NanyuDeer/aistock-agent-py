@@ -14,8 +14,13 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from sse_starlette.sse import EventSourceResponse
 
-from aistock_agent.api.deps import build_initial_state, verify_internal_token
+from aistock_agent.api.deps import (
+    build_chat_initial_state,
+    build_initial_state,
+    verify_internal_token,
+)
 from aistock_agent.graph.chat_builder import compile_chat_graph
+from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.config import settings
@@ -33,11 +38,24 @@ from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
+
+def _select_graph() -> CompiledStateGraph:
+    """按特性开关选择 graph。
+
+    开关开启时返回 compile_chat_graph()（新 CHAT 子图），
+    关闭时返回 compile_graph()（老路径）。
+    """
+    if settings.chat_graph_enabled:
+        return compile_chat_graph()
+    return compile_graph()
+
+
 router = APIRouter()
 
 # 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
 health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
+_metrics = _get_metrics_collector()
 _qa_logger = structlog.get_logger()
 
 
@@ -73,10 +91,23 @@ async def chat_message(
     @deprecated: use POST /chat/stream/messages instead.
     保留兼容，前端全部切到双流后清理。
     """
-    graph = compile_graph()
-
+    graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
 
+    if settings.chat_graph_enabled:
+        initial_state = build_chat_initial_state(req.message)
+        result = await graph.ainvoke(
+            initial_state,
+            config={"configurable": {"thread_id": session_id}},
+        )
+        content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+        return ChatResponse(
+            content=content,
+            session_id=session_id,
+            advisor_trace=None,
+        )
+
+    # 老路径保留
     initial_state = build_initial_state(
         message=req.message,
         session_id=session_id,
@@ -1031,6 +1062,9 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
 
     async def event_stream():
+        import time as _time
+
+        e2e_start = _time.monotonic()
         try:
             graph = compile_chat_graph()
             async for event in graph.astream_events(
@@ -1067,6 +1101,8 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         except Exception as exc:
             _qa_logger.error("qa_endpoint.failed", err=str(exc), exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            _metrics.record_chat_qa_latency("e2e", int((_time.monotonic() - e2e_start) * 1000))
 
     return StreamingResponse(
         event_stream(),
