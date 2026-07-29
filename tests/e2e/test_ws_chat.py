@@ -11,7 +11,7 @@ Task 5 给 ``compile_graph()`` 默认挂载 MemorySaver checkpointer 后，LangG
 验证 ``ws.py`` 调用 ``graph.astream_events`` 时传入了含 ``thread_id`` 的 ``config``。
 
 使用 Starlette ``TestClient.websocket_connect``（同步，无需 ``httpx-ws`` 额外依赖），
-mock ``compile_graph`` 返回伪图，捕获 ``astream_events`` 的 ``config`` 入参。
+mock ``_select_graph`` 返回伪图，捕获 ``astream_events`` 的 ``config`` 入参。
 """
 from unittest.mock import patch
 
@@ -37,7 +37,7 @@ class _MockGraph:
 def test_ws_chat_passes_thread_id_config() -> None:
     """ws.py 调用 graph.astream_events 时必须传 config[configurable][thread_id]"""
     mock_graph = _MockGraph()
-    with patch("aistock_agent.api.ws.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "你好", "session_id": "ws_test_001"})
@@ -52,7 +52,7 @@ def test_ws_chat_passes_thread_id_config() -> None:
 def test_ws_chat_default_session_id_when_missing() -> None:
     """未传 session_id 时，thread_id 回退为 ws_<id> 形式，仍需透传给 astream"""
     mock_graph = _MockGraph()
-    with patch("aistock_agent.api.ws.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "你好"})
@@ -84,7 +84,7 @@ def test_ws_done_returns_advisor_trace() -> None:
                 "final_response": "降级", "advisor_trace": trace,
             }}}
 
-    with patch("aistock_agent.api.ws.compile_graph", return_value=_TraceGraph()):
+    with patch("aistock_agent.api.ws._select_graph", return_value=_TraceGraph()):
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "个股 600519"})
