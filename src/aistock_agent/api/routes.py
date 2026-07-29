@@ -230,7 +230,7 @@ async def _stream_messages(
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
-            if node == "supervisor":
+            if node in ("supervisor", "qa_router"):
                 continue
 
             sse = map_langgraph_event_to_sse(event, filter_type="text")
@@ -294,15 +294,18 @@ async def chat_stream_messages(
     与 ``/chat/stream/updates`` 共享同一次 graph 执行（asyncio.Queue 扇出）。
     yields: llm_start → text/text/... → done（带 final_response + analysis_reports）
     """
-    graph = compile_graph()
-
+    graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
-    initial_state = build_initial_state(
-        message=req.message,
-        session_id=session_id,
-        user_id=req.user_id,
-        favorites=req.favorites,
-    )
+
+    if settings.chat_graph_enabled:
+        initial_state = build_chat_initial_state(req.message)
+    else:
+        initial_state = build_initial_state(
+            message=req.message,
+            session_id=session_id,
+            user_id=req.user_id,
+            favorites=req.favorites,
+        )
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
