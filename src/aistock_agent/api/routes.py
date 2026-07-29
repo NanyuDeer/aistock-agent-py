@@ -10,9 +10,14 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from langgraph.graph.state import CompiledStateGraph
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.api.deps import build_initial_state, verify_internal_token
+from aistock_agent.graph.chat_builder import compile_chat_graph
+from aistock_agent.schemas.qa_api import QARequest
+from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
@@ -33,6 +38,7 @@ router = APIRouter()
 # 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
 health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
+_qa_logger = structlog.get_logger()
 
 
 def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
@@ -998,3 +1004,72 @@ async def readiness(response: Response) -> dict[str, object]:
         response.status_code = 503
         return {"status": "degraded", "checks": checks}
     return {"status": "ok", "checks": checks}
+
+
+# ── CHAT QA ────────────────────────────────────────────────────────
+
+
+@router.post("/qa")
+async def qa_endpoint(req: QARequest) -> StreamingResponse:
+    """CHAT QA 链路 SSE 端点。
+
+    事件类型：evidence / token / insight / error / done
+    """
+    thread_id = req.thread_id or str(uuid4())
+
+    initial_state: QuestionState = {
+        "messages": [HumanMessage(content=req.message)],
+        "goal": None,
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
+
+    async def event_stream():
+        try:
+            graph = compile_chat_graph()
+            async for event in graph.astream_events(
+                initial_state, config=config, version="v2"
+            ):
+                event_name = event.get("event", "")
+                node_name = event.get("name", "")
+
+                # skill_executor 完成时推送 evidence
+                if event_name == "on_chain_end" and node_name == "skill_executor":
+                    output = event.get("data", {}).get("output", {})
+                    evidences = (
+                        output.get("evidences", [])
+                        if isinstance(output, dict)
+                        else []
+                    )
+                    for ev in evidences:
+                        yield f"event: evidence\ndata: {json.dumps(ev.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+
+                # synth_answer 流式 token
+                elif event_name == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        yield f"event: token\ndata: {json.dumps({'delta': chunk.content}, ensure_ascii=False)}\n\n"
+
+                # synth_answer 完成时推送 insight
+                elif event_name == "on_chain_end" and node_name == "synth_answer":
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict) and output.get("insight"):
+                        insight = output["insight"]
+                        yield f"event: insight\ndata: {json.dumps(insight.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            _qa_logger.error("qa_endpoint.failed", err=str(exc), exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
