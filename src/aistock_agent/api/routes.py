@@ -10,11 +10,21 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from langgraph.graph.state import CompiledStateGraph
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from sse_starlette.sse import EventSourceResponse
 
-from aistock_agent.api.deps import build_initial_state, verify_internal_token
+from aistock_agent.api.deps import (
+    build_chat_initial_state,
+    build_initial_state,
+    verify_internal_token,
+)
+from aistock_agent.graph.chat_builder import compile_chat_graph
+from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
+from aistock_agent.schemas.qa_api import QARequest
+from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.config import settings
-from aistock_agent.constants import SSEEventType
+from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
@@ -28,11 +38,25 @@ from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
+
+def _select_graph() -> CompiledStateGraph:
+    """按特性开关选择 graph。
+
+    开关开启时返回 compile_chat_graph()（新 CHAT 子图），
+    关闭时返回 compile_graph()（老路径）。
+    """
+    if settings.chat_graph_enabled:
+        return compile_chat_graph()
+    return compile_graph()
+
+
 router = APIRouter()
 
 # 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
 health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
+_metrics = _get_metrics_collector()
+_qa_logger = structlog.get_logger()
 
 
 def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
@@ -67,10 +91,23 @@ async def chat_message(
     @deprecated: use POST /chat/stream/messages instead.
     保留兼容，前端全部切到双流后清理。
     """
-    graph = compile_graph()
-
+    graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
 
+    if settings.chat_graph_enabled:
+        initial_state = build_chat_initial_state(req.message)
+        result = await graph.ainvoke(
+            initial_state,
+            config={"configurable": {"thread_id": session_id}},
+        )
+        content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+        return ChatResponse(
+            content=content,
+            session_id=session_id,
+            advisor_trace=None,
+        )
+
+    # 老路径保留
     initial_state = build_initial_state(
         message=req.message,
         session_id=session_id,
@@ -193,7 +230,7 @@ async def _stream_messages(
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
-            if node == "supervisor":
+            if node in ("supervisor", "qa_router"):
                 continue
 
             sse = map_langgraph_event_to_sse(event, filter_type="text")
@@ -230,11 +267,14 @@ async def _stream_updates(
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
             if node and node != _prev_node:
-                yield {
+                event: dict[str, object] = {
                     "type": SSEEventType.AGENT_SWITCH,
                     "from_node": _prev_node,
                     "to_node": node,
                 }
+                if node in CHAT_NODE_LABELS:
+                    event["label"] = CHAT_NODE_LABELS[node]
+                yield event
                 _prev_node = node
 
             sse = map_langgraph_event_to_sse(event, filter_type="tool")
@@ -257,15 +297,18 @@ async def chat_stream_messages(
     与 ``/chat/stream/updates`` 共享同一次 graph 执行（asyncio.Queue 扇出）。
     yields: llm_start → text/text/... → done（带 final_response + analysis_reports）
     """
-    graph = compile_graph()
-
+    graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
-    initial_state = build_initial_state(
-        message=req.message,
-        session_id=session_id,
-        user_id=req.user_id,
-        favorites=req.favorites,
-    )
+
+    if settings.chat_graph_enabled:
+        initial_state = build_chat_initial_state(req.message)
+    else:
+        initial_state = build_initial_state(
+            message=req.message,
+            session_id=session_id,
+            user_id=req.user_id,
+            favorites=req.favorites,
+        )
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
@@ -998,3 +1041,77 @@ async def readiness(response: Response) -> dict[str, object]:
         response.status_code = 503
         return {"status": "degraded", "checks": checks}
     return {"status": "ok", "checks": checks}
+
+
+# ── CHAT QA ────────────────────────────────────────────────────────
+
+
+@router.post("/qa")
+async def qa_endpoint(req: QARequest) -> StreamingResponse:
+    """CHAT QA 链路 SSE 端点。
+
+    事件类型：evidence / token / insight / error / done
+    """
+    thread_id = req.thread_id or str(uuid4())
+
+    initial_state: QuestionState = {
+        "messages": [HumanMessage(content=req.message)],
+        "goal": None,
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
+
+    async def event_stream():
+        import time as _time
+
+        e2e_start = _time.monotonic()
+        try:
+            graph = compile_chat_graph()
+            async for event in graph.astream_events(
+                initial_state, config=config, version="v2"
+            ):
+                event_name = event.get("event", "")
+                node_name = event.get("name", "")
+
+                # skill_executor 完成时推送 evidence
+                if event_name == "on_chain_end" and node_name == "skill_executor":
+                    output = event.get("data", {}).get("output", {})
+                    evidences = (
+                        output.get("evidences", [])
+                        if isinstance(output, dict)
+                        else []
+                    )
+                    for ev in evidences:
+                        yield f"event: evidence\ndata: {json.dumps(ev.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+
+                # synth_answer 流式 token
+                elif event_name == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        yield f"event: token\ndata: {json.dumps({'delta': chunk.content}, ensure_ascii=False)}\n\n"
+
+                # synth_answer 完成时推送 insight
+                elif event_name == "on_chain_end" and node_name == "synth_answer":
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict) and output.get("insight"):
+                        insight = output["insight"]
+                        yield f"event: insight\ndata: {json.dumps(insight.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            _qa_logger.error("qa_endpoint.failed", err=str(exc), exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            _metrics.record_chat_qa_latency("e2e", int((_time.monotonic() - e2e_start) * 1000))
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
