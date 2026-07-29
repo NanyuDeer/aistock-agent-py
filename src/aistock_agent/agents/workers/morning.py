@@ -205,6 +205,104 @@ def _build_dual_layer_report(
     }
 
 
+def _is_degraded_report(report: dict[str, object]) -> bool:
+    """检测报告是否为 LLM 解析失败的降级内容。
+
+    判定规则（满足任一即视为降级）：
+    1. display_report.details 包含已知降级文本 "Sorry, need more steps"
+    2. schema_version="1.0" 且 details 长度 < 100（旧格式纯文本过短）
+    3. schema_version="2.0" 但 stocks 和 risks 均为空（解析成功但内容缺失）
+    4. display_report 字段缺失或类型异常（容错降级）
+
+    被 persist_morning_report 和 morning.run 缓存写入前调用，避免降级内容污染数据库/缓存。
+    """
+    display = report.get("display_report")
+    if not isinstance(display, dict):
+        return True
+
+    details = str(display.get("details", ""))
+    if "Sorry, need more steps" in details:
+        return True
+
+    schema_version = str(report.get("schema_version", ""))
+
+    # schema 1.0 且内容过短 → 降级
+    if schema_version == "1.0" and len(details) < 100:
+        return True
+
+    # schema 2.0 但 stocks 和 risks 都为空 → 降级
+    stocks = display.get("stocks", [])
+    risks = display.get("risks", [])
+    if schema_version == "2.0" and not stocks and not risks:
+        return True
+
+    return False
+
+
+async def _run_agent_once(
+    system_prompt: str,
+    recursion_limit: int,
+) -> dict[str, object]:
+    """单次执行 morning agent 并构建双层报告。
+
+    封装 create_react_agent 调用、parse_event_output 解析、_build_dual_layer_report 构建。
+    参数化 recursion_limit 供 _invoke_morning_agent 重试时调整。
+
+    Args:
+        system_prompt: 系统提示词（已替换 {{DATE}} 等占位符）。
+        recursion_limit: LangGraph recursion_limit。
+
+    Returns:
+        标准化双层报告 dict。
+    """
+    llm = get_deep_think()
+    tools = get_tools("morning")
+    agent = create_react_agent(llm, tools)
+
+    result = await agent.ainvoke(
+        {"messages": [SystemMessage(content=system_prompt)]},
+        config={"recursion_limit": recursion_limit},
+    )
+
+    display_report, podcast_brief = parse_event_output(result.get("messages", []))
+    raw_text = extract_final_ai_response(result.get("messages", []))
+    return _build_dual_layer_report(display_report, podcast_brief, raw_text)
+
+
+async def _invoke_morning_agent(system_prompt: str) -> dict[str, object]:
+    """调用 morning agent，降级时重试一次。
+
+    策略：
+    1. 首次 recursion_limit=50（与原逻辑一致）
+    2. 若 _is_degraded_report 判定降级，重试 recursion_limit=80
+    3. 重试仍降级则返回降级报告（由 run() 决定是否 persist/cache）
+
+    morning agent 每天仅 1 次调度，重试增加的 LLM 成本可接受。
+
+    Args:
+        system_prompt: 系统提示词（已替换 {{DATE}} 等占位符）。
+
+    Returns:
+        标准化双层报告 dict（首次成功 / 重试成功 / 重试仍降级）。
+    """
+    # 首次尝试：recursion_limit=50
+    report = await _run_agent_once(system_prompt, recursion_limit=50)
+    if not _is_degraded_report(report):
+        logger.info("morning_agent_success_first_try")
+        return report
+
+    logger.warning("morning_agent_degraded_first_try", reason="retrying with higher limit")
+
+    # 重试：recursion_limit=80
+    report = await _run_agent_once(system_prompt, recursion_limit=80)
+    if not _is_degraded_report(report):
+        logger.info("morning_agent_success_on_retry")
+        return report
+
+    logger.warning("morning_agent_degraded_after_retry")
+    return report
+
+
 # ─── 市场事件推送模块 ────────────────────────────────────────────
 
 _MARKET_EVENT_MARKER_RE = re.compile(
@@ -525,24 +623,11 @@ async def run(state: AgentState) -> dict[str, object]:
                 "请在报告开头注明，分析可聚焦于下一交易日前瞻。"
             )
 
-        # 创建 ReAct Agent
-        llm = get_deep_think()
-        tools = get_tools("morning")
-        agent = create_react_agent(llm, tools)
-
-        # 执行（recursion_limit=50，晨报需要大量工具调用）
-        result = await agent.ainvoke(
-            {"messages": [SystemMessage(content=system_prompt)]},
-            config={"recursion_limit": 50},
-        )
-
-        # 解析双层报告（复用 output_parser.parse_event_output）
-        display_report, podcast_brief = parse_event_output(result.get("messages", []))
-        raw_text = extract_final_ai_response(result.get("messages", []))
-        report = _build_dual_layer_report(display_report, podcast_brief, raw_text)
+        # 调用 morning agent（含降级重试逻辑）
+        report = await _invoke_morning_agent(system_prompt)
 
         # 提取 major_events（供 event agent 消费）
-        details = str(report["display_report"]["details"])
+        details = str(report["display_report"]["details"])  # type: ignore[index]
         major_events = extract_major_events(details)
         if major_events:
             logger.info(
@@ -551,10 +636,13 @@ async def run(state: AgentState) -> dict[str, object]:
                 titles=[str(e.get("title", ""))[:30] for e in major_events],
             )
 
-        # 缓存 + 归档（供 snapshot_builder 读取）
+        # 缓存 + 归档（仅正常报告写入；降级内容不污染缓存/归档）
         report_json = json.dumps(report, ensure_ascii=False)
-        await set_cached_briefing(report_json)
-        archive_morning(details)
+        if not _is_degraded_report(report):
+            await set_cached_briefing(report_json)
+            archive_morning(details)
+        else:
+            logger.warning("morning_cache_skipped_degraded", date=report_date)
 
         # 持久化到 Node.js /internal/analysis-reports（公共报告，user_id=null）
         morning_persisted = await persist_morning_report(report, report_date)

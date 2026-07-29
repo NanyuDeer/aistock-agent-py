@@ -570,7 +570,7 @@ async def test_persist_morning_report_calls_node_api():
     from aistock_agent.services.morning_persister import persist_morning_report
 
     report = {
-        "display_report": {"summary": "测试", "details": "内容", "stocks": [], "risks": []},
+        "display_report": {"summary": "测试", "details": "内容", "stocks": ["600519"], "risks": []},
         "podcast_brief": "摘要",
         "schema_version": "2.0",
     }
@@ -603,3 +603,100 @@ async def test_persist_morning_report_silent_failure():
         mock_node_api.post = AsyncMock(side_effect=Exception("Network error"))
         # 不应抛异常
         await persist_morning_report(report, "2026-07-14")
+
+
+# ── run() 降级路径：不缓存、不归档、persist 返回 False ──
+
+
+@pytest.mark.asyncio
+async def test_run_skips_cache_and_persist_when_degraded():
+    """LLM 两次均降级 → 不写缓存、不归档、persist_morning_report 返回 False。"""
+    degraded_report = {
+        "display_report": {
+            "summary": "",
+            "details": "Sorry, need more steps to process this request.",
+            "stocks": [],
+            "risks": [],
+        },
+        "podcast_brief": "",
+        "schema_version": "1.0",
+    }
+
+    state = {"report_date": "2026-07-29", "analysis_reports": {}}
+
+    with patch(
+        "aistock_agent.agents.workers.morning.get_cached_briefing",
+        new_callable=AsyncMock, return_value=None,
+    ), patch(
+        "aistock_agent.agents.workers.morning._invoke_morning_agent",
+        new_callable=AsyncMock, return_value=degraded_report,
+    ), patch(
+        "aistock_agent.agents.workers.morning.set_cached_briefing",
+        new_callable=AsyncMock,
+    ) as mock_set_cache, patch(
+        "aistock_agent.agents.workers.morning.archive_morning",
+    ) as mock_archive, patch(
+        "aistock_agent.agents.workers.morning.persist_morning_report",
+        new_callable=AsyncMock, return_value=False,
+    ) as mock_persist, patch(
+        "aistock_agent.agents.workers.morning._safe_process_market_push",
+        new_callable=AsyncMock,
+    ), patch(
+        "aistock_agent.agents.workers.morning.extract_major_events",
+        return_value=[],
+    ):
+        result = await morning_agent.run(state)
+
+    # 不写缓存
+    mock_set_cache.assert_not_called()
+    # 不归档
+    mock_archive.assert_not_called()
+    # persist 被调用（内部会因降级返回 False）
+    mock_persist.assert_awaited_once()
+    # 最终状态：morning_persisted=False
+    assert result["analysis_reports"]["morning_persisted"] is False
+    assert result["analysis_reports"]["morning_generated"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_caches_and_persists_when_normal():
+    """LLM 正常 → 写缓存、归档、persist 调用。"""
+    normal_report = {
+        "display_report": {
+            "summary": "摘要",
+            "details": "正常晨报内容" * 30,
+            "stocks": ["600519"],
+            "risks": ["风险1"],
+        },
+        "podcast_brief": "播报摘要",
+        "schema_version": "2.0",
+    }
+
+    state = {"report_date": "2026-07-29", "analysis_reports": {}}
+
+    with patch(
+        "aistock_agent.agents.workers.morning.get_cached_briefing",
+        new_callable=AsyncMock, return_value=None,
+    ), patch(
+        "aistock_agent.agents.workers.morning._invoke_morning_agent",
+        new_callable=AsyncMock, return_value=normal_report,
+    ), patch(
+        "aistock_agent.agents.workers.morning.set_cached_briefing",
+        new_callable=AsyncMock,
+    ) as mock_set_cache, patch(
+        "aistock_agent.agents.workers.morning.archive_morning",
+    ) as mock_archive, patch(
+        "aistock_agent.agents.workers.morning.persist_morning_report",
+        new_callable=AsyncMock, return_value=True,
+    ) as mock_persist, patch(
+        "aistock_agent.agents.workers.morning._safe_process_market_push",
+        new_callable=AsyncMock,
+    ), patch(
+        "aistock_agent.agents.workers.morning.extract_major_events",
+        return_value=[],
+    ):
+        result = await morning_agent.run(state)
+
+    mock_set_cache.assert_awaited_once()
+    mock_archive.assert_called_once()
+    assert result["analysis_reports"]["morning_persisted"] is True
