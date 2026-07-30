@@ -9,11 +9,7 @@
 
 import asyncio
 import json
-import logging
 from abc import ABC, abstractmethod
-from datetime import date
-from typing import Any
-
 from structlog import get_logger
 
 from aistock_agent.agents.workers import broadcast as broadcast_agent
@@ -37,7 +33,7 @@ CHANNEL_BROADCAST = "broadcast"
 class ConsumerContext:
     """消费者共享上下文。"""
 
-    def __init__(self, event_bus: EventBus, node_api_client: Any = None) -> None:
+    def __init__(self, event_bus: EventBus, node_api_client: object = None) -> None:
         self.event_bus = event_bus
         self.node_api = node_api_client or node_api
 
@@ -69,7 +65,7 @@ class ReviewQuickConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        result = await run_review(
+        await run_review(
             report_date=report_date,
             snapshot_kind="quick",
             trace_id=trace_id,
@@ -98,7 +94,7 @@ class ReviewFullConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        result = await run_review(
+        await run_review(
             report_date=report_date,
             snapshot_kind="full",
             trace_id=trace_id,
