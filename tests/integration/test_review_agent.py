@@ -1405,3 +1405,115 @@ async def test_cache_hit_with_duplicate_discovery_fact_ids_is_not_persisted(mock
     assert result["final_response"] == review_agent.DEGRADED_RESPONSE
     fresh_snapshot.assert_awaited_once_with("2026-07-17")
     save.assert_not_awaited()
+
+
+# ============================================================================
+# run_review 入口 — quick/full 双模式、覆盖检查、快照失败降级
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_review_quick_success(mocker):
+    """run_review(snapshot_kind=quick) 成功：调 build_quick_snapshot + 持久化。"""
+    mocker.patch.object(
+        review_agent.node_api, "get_analysis_report", new=AsyncMock(return_value=None)
+    )
+    mocker.patch.object(review_agent.node_api, "save_analysis_report", new=AsyncMock())
+    mocker.patch.object(review_agent, "archive_market_trace_snapshot")
+    mocker.patch.object(review_agent, "archive_review", return_value=True)
+    mocker.patch.object(review_agent, "set_cached_review", new=AsyncMock(return_value=True))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.build_quick_snapshot",
+        new=AsyncMock(return_value=TRACE_SNAPSHOT),
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AIMessage(content=VALID_TRACE_JSON)
+    mocker.patch.object(review_agent, "get_deep_think", return_value=llm)
+
+    result = await review_agent.run_review(
+        report_date="2026-07-17",
+        snapshot_kind="quick",
+        trace_id="test-run-review-quick-001",
+    )
+
+    assert result.status == "ok"
+    assert result.snapshot_kind == "quick"
+    assert result.markdown
+
+
+@pytest.mark.asyncio
+async def test_run_review_quick_skipped_when_full_exists(mocker):
+    """run_review(quick) 在已有 full 报告时返回 status=skipped。"""
+    mocker.patch.object(
+        review_agent.node_api,
+        "get_analysis_report",
+        new=AsyncMock(
+            return_value={
+                "report_type": "review",
+                "data_source": "review_agent_full",
+                "content": {},
+            }
+        ),
+    )
+
+    result = await review_agent.run_review(
+        report_date="2026-07-17",
+        snapshot_kind="quick",
+        trace_id="test-run-review-skipped-001",
+    )
+
+    assert result.status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_run_review_full_success(mocker):
+    """run_review(snapshot_kind=full) 成功：调 build_market_trace_snapshot + 持久化。"""
+    mocker.patch.object(
+        review_agent.node_api, "get_analysis_report", new=AsyncMock(return_value=None)
+    )
+    save = mocker.patch.object(
+        review_agent.node_api, "save_analysis_report", new=AsyncMock()
+    )
+    mocker.patch.object(review_agent, "archive_market_trace_snapshot")
+    mocker.patch.object(review_agent, "archive_review", return_value=True)
+    mocker.patch.object(review_agent, "set_cached_review", new=AsyncMock(return_value=True))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.build_market_trace_snapshot",
+        new=AsyncMock(return_value=TRACE_SNAPSHOT),
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AIMessage(content=VALID_TRACE_JSON)
+    mocker.patch.object(review_agent, "get_deep_think", return_value=llm)
+
+    result = await review_agent.run_review(
+        report_date="2026-07-17",
+        snapshot_kind="full",
+        trace_id="test-run-review-full-001",
+    )
+
+    assert result.status == "ok"
+    assert result.snapshot_kind == "full"
+    save.assert_awaited_once()
+    call_kwargs = save.await_args.kwargs
+    assert call_kwargs["data_source"] == "review_agent_full"
+
+
+@pytest.mark.asyncio
+async def test_run_review_degraded_on_snapshot_failure(mocker):
+    """快照构建失败时返回 degraded。"""
+    mocker.patch.object(
+        review_agent.node_api, "get_analysis_report", new=AsyncMock(return_value=None)
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.build_quick_snapshot",
+        new=AsyncMock(side_effect=Exception("snapshot unavailable")),
+    )
+
+    result = await review_agent.run_review(
+        report_date="2026-07-17",
+        snapshot_kind="quick",
+        trace_id="test-run-review-degraded-001",
+    )
+
+    assert result.status == "degraded"
+    assert review_agent.DEGRADED_RESPONSE in result.markdown
