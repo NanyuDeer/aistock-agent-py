@@ -22,6 +22,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
 | 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
+| 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
@@ -328,4 +329,3 @@ content = {
 
 **已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）、ai_advisor（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
-

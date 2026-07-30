@@ -231,7 +231,12 @@ class NodeApiClient:
                 return None
             return payload.get("data")
         except httpx.HTTPStatusError as e:
-            logger.error("node_api_post_http_error", url=url, status=e.response.status_code)
+            logger.error(
+                "node_api_post_http_error",
+                url=url,
+                status=e.response.status_code,
+                response_body=e.response.text[:500],
+            )
         except httpx.RequestError as e:
             logger.error("node_api_post_request_error", url=url, error=str(e))
         except Exception as e:
@@ -270,6 +275,28 @@ class NodeApiClient:
         except Exception as e:
             logger.error("node_api_delete_unexpected_error", url=url, error=str(e))
 
+        return None
+
+    async def patch(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
+        """PATCH Node 内部 API，并返回已解包的对象 data。"""
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.patch(url, json=body, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("node_api_patch_business_error", url=url)
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, dict) else None
+        except httpx.HTTPStatusError as exc:
+            logger.error("node_api_patch_http_error", url=url, status=exc.response.status_code)
+        except httpx.RequestError as exc:
+            logger.error("node_api_patch_request_error", url=url, error=str(exc))
+        except Exception as exc:
+            logger.error("node_api_patch_unexpected_error", url=url, error=str(exc))
         return None
 
     async def _request(self, path: str) -> object | None:
