@@ -410,6 +410,17 @@ class NodeApiClient:
         """
         return await self.get("/internal/market/quick-snapshot")
 
+    async def get_last_close_snapshot(self) -> dict[str, object] | None:
+        """拉取最近一个已完成交易日的收盘快照（跳过时钟门禁）。
+
+        在盘中或开盘前（如凌晨）需要昨日收盘数据时调用，close-snapshot
+        返回 409 时可降级到此接口。
+
+        Returns:
+            dict（status='complete'），或 None（数据不可用/服务异常）。
+        """
+        return await self.get("/internal/market/last-close-snapshot")
+
     async def get_review_analysis_report(
         self,
         report_date: date,
