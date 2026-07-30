@@ -4,9 +4,12 @@
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
+from typing_extensions import Annotated
+
+from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
@@ -18,9 +21,12 @@ from aistock_agent.schemas.chat_contract import (
 
 
 class QuestionState(TypedDict, total=False):
-    """CHAT QA 链路状态。"""
+    """CHAT QA 链路状态。
 
-    messages: list[BaseMessage]
+    messages 使用 add_messages reducer，支持 checkpointer 多轮对话累积历史。
+    """
+
+    messages: Annotated[list[BaseMessage], add_messages]
     goal: InsightGoal | None
     plan: Literal["direct", "compose"]
     skill_calls: list[SkillCall]
