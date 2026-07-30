@@ -31,6 +31,15 @@ class MetricsCollector:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._total_tokens = 0
+        # CHAT QA 链路指标
+        self._chat_qa_latency: dict[str, dict[str, int]] = {
+            "qa_router": {"sum": 0, "count": 0},
+            "synth_answer": {"sum": 0, "count": 0},
+            "e2e": {"sum": 0, "count": 0},
+        }
+        self._skill_latency: dict[str, dict[str, int]] = {}
+        self._skill_degraded: dict[str, int] = {}
+        self._synth_degraded = 0
 
     def record_llm_start(self, model: str = "") -> None:
         """记录一次 LLM 调用开始（调用次数 +1）。
@@ -80,12 +89,55 @@ class MetricsCollector:
         with self._lock:
             self._tool_errors += 1
 
+    # ---- CHAT QA 链路指标 ----
+
+    def record_chat_qa_latency(self, node: str, ms: int) -> None:
+        """记录 CHAT QA 节点延迟（qa_router / synth_answer / e2e）。
+
+        Args:
+            node: 节点名，可选 "qa_router" / "synth_answer" / "e2e"。
+            ms: 延迟毫秒数。
+        """
+        with self._lock:
+            if node not in self._chat_qa_latency:
+                return
+            self._chat_qa_latency[node]["sum"] += ms
+            self._chat_qa_latency[node]["count"] += 1
+
+    def record_skill_latency(self, skill_name: str, ms: int) -> None:
+        """记录单个 Skill 的延迟（按 skill_name 分桶）。
+
+        Args:
+            skill_name: Skill 名称。
+            ms: 延迟毫秒数。
+        """
+        with self._lock:
+            if skill_name not in self._skill_latency:
+                self._skill_latency[skill_name] = {"sum": 0, "count": 0}
+            self._skill_latency[skill_name]["sum"] += ms
+            self._skill_latency[skill_name]["count"] += 1
+
+    def record_skill_degraded(self, skill_name: str) -> None:
+        """记录单个 Skill 降级一次（按 skill_name 分桶）。
+
+        Args:
+            skill_name: Skill 名称。
+        """
+        with self._lock:
+            self._skill_degraded[skill_name] = self._skill_degraded.get(skill_name, 0) + 1
+
+    def record_synth_degraded(self) -> None:
+        """记录 synth_answer 降级一次。"""
+        with self._lock:
+            self._synth_degraded += 1
+
     def get_metrics(self) -> dict[str, object]:
         """返回当前累计指标快照。
 
         Returns:
             含 llm_calls/llm_errors/llm_error_rate/tool_calls/tool_errors/
-            prompt_tokens/completion_tokens/total_tokens 的字典。
+            prompt_tokens/completion_tokens/total_tokens 的字典，
+            外加 chat_qa 嵌套字段（CHAT QA 链路延迟与降级指标）。
         """
         with self._lock:
             llm_calls = self._llm_calls
@@ -95,7 +147,21 @@ class MetricsCollector:
             prompt_tokens = self._prompt_tokens
             completion_tokens = self._completion_tokens
             total_tokens = self._total_tokens
+            chat_qa_latency = {
+                node: {"sum": v["sum"], "count": v["count"]}
+                for node, v in self._chat_qa_latency.items()
+            }
+            skill_latency = {
+                name: {"sum": v["sum"], "count": v["count"]}
+                for name, v in self._skill_latency.items()
+            }
+            skill_degraded = dict(self._skill_degraded)
+            synth_degraded = self._synth_degraded
         error_rate = (llm_errors / llm_calls) if llm_calls > 0 else 0.0
+
+        def _avg(bucket: dict[str, int]) -> float:
+            return (bucket["sum"] / bucket["count"]) if bucket["count"] > 0 else 0.0
+
         return {
             "llm_calls": llm_calls,
             "llm_errors": llm_errors,
@@ -105,6 +171,16 @@ class MetricsCollector:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "chat_qa": {
+                "qa_router_latency_ms_avg": _avg(chat_qa_latency["qa_router"]),
+                "synth_latency_ms_avg": _avg(chat_qa_latency["synth_answer"]),
+                "e2e_latency_ms_avg": _avg(chat_qa_latency["e2e"]),
+                "skill_latency_ms_avg": {
+                    name: _avg(v) for name, v in skill_latency.items()
+                },
+                "skill_degraded_total": skill_degraded,
+                "synth_degraded_total": synth_degraded,
+            },
         }
 
     def reset(self) -> None:
@@ -117,6 +193,14 @@ class MetricsCollector:
             self._prompt_tokens = 0
             self._completion_tokens = 0
             self._total_tokens = 0
+            self._chat_qa_latency = {
+                "qa_router": {"sum": 0, "count": 0},
+                "synth_answer": {"sum": 0, "count": 0},
+                "e2e": {"sum": 0, "count": 0},
+            }
+            self._skill_latency = {}
+            self._skill_degraded = {}
+            self._synth_degraded = 0
 
 
 # 模块级单例：全局共享，回调 handler 与端点读取同一实例。

@@ -11,6 +11,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
 from aistock_agent.services.llm import get_quick_think
 from aistock_agent.state.chat_schema import QuestionState
@@ -83,14 +84,19 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
 
 async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     """QA Router 节点入口。"""
-    message = extract_last_human_message(state.get("messages", [])) or ""
+    import time
+
+    start = time.monotonic()
+    metrics = get_metrics_collector()
+    messages = state.get("messages", [])
+    message = extract_last_human_message(messages) or ""
 
     try:
         llm = get_quick_think()
         structured_llm = llm.with_structured_output(QARouterOutput)
-        output: QARouterOutput = await structured_llm.ainvoke(
-            [HumanMessage(content=SYSTEM_PROMPT), HumanMessage(content=message)]
-        )
+        # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
+        llm_messages = [HumanMessage(content=SYSTEM_PROMPT)] + list(messages)
+        output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
 
         # 校验：direct 时 skill_calls 长度必须=1
         if output.plan == "direct" and len(output.skill_calls) != 1:
@@ -108,6 +114,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             plan=output.plan,
             skill_calls=len(output.skill_calls),
         )
+        metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": output.goal,
             "plan": output.plan,
@@ -136,6 +143,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             intent=goal.intent,
             skill=fallback_call.skill_name,
         )
+        metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": goal,
             "plan": "direct",

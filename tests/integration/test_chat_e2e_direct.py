@@ -76,7 +76,7 @@ async def test_e2e_report_lookup():
         "aistock_agent.skills.report_lookup.get_cached_review",
         new=AsyncMock(return_value={"markdown": "晨报内容", "trace_summary": "震荡"}),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="今天晨报说了什么")],
             "goal": None,
@@ -117,7 +117,7 @@ async def test_e2e_stock_snapshot():
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(return_value="600519 当前价 1800"),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="茅台现在多少钱")],
             "goal": None,
@@ -156,7 +156,7 @@ async def test_e2e_stock_news():
         "aistock_agent.skills.stock_news.search_cls_news",
         new=AsyncMock(return_value="茅台发布半年报"),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="茅台最近新闻")],
             "goal": None,
@@ -203,7 +203,7 @@ async def test_e2e_trace_lookup():
         "aistock_agent.skills.trace_lookup.load_validated_trace",
         new=AsyncMock(return_value=(fake_snapshot, fake_trace)),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="今天为什么涨")],
             "goal": None,
@@ -241,7 +241,7 @@ async def test_e2e_industry_relation():
         "aistock_agent.skills.industry_relation.match_industry_by_keywords",
         new=AsyncMock(return_value="白酒 → 食品饮料"),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="白酒板块上下游")],
             "goal": None,

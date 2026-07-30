@@ -51,7 +51,7 @@ async def test_degraded_skill_exception_recovers():
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(side_effect=RuntimeError("network timeout")),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="茅台现在多少钱")],
             "goal": None,
@@ -107,7 +107,7 @@ async def test_degraded_qa_router_fallback():
         "aistock_agent.skills.report_lookup.get_cached_review",
         new=AsyncMock(return_value={"markdown": "晨报", "trace_summary": "震荡"}),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="今天晨报说了什么")],
             "goal": None,
@@ -155,7 +155,7 @@ async def test_degraded_synth_failure_returns_low_confidence():
         "aistock_agent.skills.report_lookup.get_cached_review",
         new=AsyncMock(return_value={"markdown": "晨报内容", "trace_summary": "震荡"}),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
             "messages": [HumanMessage(content="今天晨报说了什么")],
             "goal": None,

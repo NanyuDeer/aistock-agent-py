@@ -10,9 +10,10 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 import structlog
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict
 
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
     Evidence,
@@ -129,11 +130,17 @@ def _build_degraded_insight(
 
 async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
     """synth_answer 节点入口。"""
+    import time
+
+    start = time.monotonic()
+    metrics = get_metrics_collector()
     goal: InsightGoal | None = state.get("goal")
     evidences: list[Evidence] = state.get("evidences", [])
 
     if goal is None:
         logger.error("synth_answer.no_goal")
+        metrics.record_synth_degraded()
+        metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
         return {
             "insight": _build_degraded_insight(
                 InsightGoal(question="", intent="report_lookup"),
@@ -143,6 +150,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             ),
             "final_response": "内部错误：缺少目标",
             "trace": None,
+            "messages": [AIMessage(content="内部错误：缺少目标")],
         }
 
     mode = _infer_answer_mode(goal, evidences)
@@ -186,10 +194,12 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             confidence=insight.confidence,
             uncertainty_count=len(insight.uncertainty),
         )
+        metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
         return {
             "insight": insight,
             "final_response": final_response,
             "trace": trace,
+            "messages": [AIMessage(content=final_response)],
         }
 
     except Exception as exc:
@@ -202,8 +212,11 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             evidences=evidences,
             actual_mode="validate",
         )
+        metrics.record_synth_degraded()
+        metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
         return {
             "insight": insight,
             "final_response": insight.conclusion,
             "trace": trace,
+            "messages": [AIMessage(content=insight.conclusion)],
         }

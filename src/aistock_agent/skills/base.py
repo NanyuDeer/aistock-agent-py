@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 import structlog
 
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import Evidence, InsightGoal
 
 logger = structlog.get_logger()
@@ -36,9 +37,13 @@ def skill(
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Evidence:
         start = time.monotonic()
+        metrics = get_metrics_collector()
         try:
             ev = await func(*args, **kwargs)
             ms = int((time.monotonic() - start) * 1000)
+            metrics.record_skill_latency(func.__name__, ms)
+            if ev.degraded:
+                metrics.record_skill_degraded(func.__name__)
             logger.info(
                 "skill.ok",
                 skill=func.__name__,
@@ -48,6 +53,8 @@ def skill(
             return ev
         except Exception as exc:
             ms = int((time.monotonic() - start) * 1000)
+            metrics.record_skill_latency(func.__name__, ms)
+            metrics.record_skill_degraded(func.__name__)
             logger.warning(
                 "skill.fail",
                 skill=func.__name__,
