@@ -401,6 +401,15 @@ class NodeApiClient:
         path = f"/internal/analysis-reports/{report_type}/{report_date}/list"
         return await self.get_list(path) or []
 
+    async def get_quick_snapshot(self) -> dict[str, object] | None:
+        """拉取 Node 端 quick snapshot（15:30 腾讯实时行情版）。
+
+        Returns:
+            dict（snapshot_kind='quick'），或 None（未就绪/服务不可用）。
+            与 get("/internal/market/close-snapshot") 不同，此接口 15:30 后立即可用。
+        """
+        return await self.get("/internal/market/quick-snapshot")
+
     async def get_review_analysis_report(
         self,
         report_date: date,

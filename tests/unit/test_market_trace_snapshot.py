@@ -788,3 +788,93 @@ async def test_snapshot_id_includes_captured_at_for_safe_retry(mocker):
     # snapshot_id 仍以 trace-{trade_date_yyyymmdd}- 开头，便于按日期检索
     assert snapshot_1.snapshot_id.startswith("trace-20260719-")
     assert snapshot_2.snapshot_id.startswith("trace-20260719-")
+
+
+# ============================================================================
+# Quick Snapshot 测试（15:30 腾讯实时行情）
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_success(mocker):
+    """quick snapshot 成功构建：Node 返回 quick 数据 + 外部来源正常。"""
+    from aistock_agent.services.market_trace_snapshot import (
+        MarketTraceSnapshotUnavailable,
+        build_quick_snapshot,
+    )
+
+    quick_data: dict[str, object] = {
+        "status": "complete",
+        "trade_date": "20260730",
+        "indexes": [
+            {
+                "ts_code": "000001.SH",
+                "name": "上证指数",
+                "close": 3200,
+                "pct_chg": 1.2,
+                "amount": 3000000000,
+            }
+        ],
+        "breadth": {
+            "total_count": 4000,
+            "advance_count": 2000,
+            "decline_count": 1500,
+            "flat_count": 500,
+        },
+        "coverage": {"current_daily": {"complete": False}},
+    }
+
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+    assert snapshot.trade_date == "2026-07-30"
+    assert snapshot.snapshot_id.startswith("trace-quick-")
+    assert snapshot.phenomenon_discovery is not None
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_raises_when_node_returns_none(mocker):
+    """Node quick-snapshot 返回 None 时抛出 MarketTraceSnapshotUnavailable。"""
+    from aistock_agent.services.market_trace_snapshot import (
+        MarketTraceSnapshotUnavailable,
+        build_quick_snapshot,
+    )
+
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=None))
+
+    with pytest.raises(MarketTraceSnapshotUnavailable, match="returned None"):
+        await build_quick_snapshot("2026-07-30")
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_raises_on_trade_date_mismatch(mocker):
+    """trade_date 不匹配时抛出异常。"""
+    from aistock_agent.services.market_trace_snapshot import (
+        MarketTraceSnapshotUnavailable,
+        build_quick_snapshot,
+    )
+
+    mocker.patch.object(
+        node_api,
+        "get_quick_snapshot",
+        AsyncMock(
+            return_value={
+                "status": "complete",
+                "trade_date": "20260729",
+                "indexes": [],
+                "breadth": {},
+                "coverage": {},
+            }
+        ),
+    )
+
+    with pytest.raises(MarketTraceSnapshotUnavailable, match="trade_date"):
+        await build_quick_snapshot("2026-07-30")
