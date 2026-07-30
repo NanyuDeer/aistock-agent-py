@@ -3,8 +3,8 @@
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
   → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
-- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
-  （报告写DB+双人语音，9:10前端可见）
+- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→global_importance→broadcast
+  （global_importance 生成双榜单后写入 DB，broadcast 从 DB 读取报告）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
 """
 
@@ -549,9 +549,9 @@ async def _run_iterate_task() -> None:
 async def _run_broadcast_task() -> None:
     """播报链路任务（交易日 09:00）。
 
-    串行执行：morning → wind_leader → hot_burst → trend_score → broadcast。
+    串行执行：morning → wind_leader → hot_burst → trend_score → global_importance → broadcast。
     每个 Agent 设置 trigger_source="scheduler" + report_date，使报告写入数据库。
-    broadcast 从数据库读取报告生成双人语音播报。
+    global_importance 生成双榜单后落库，broadcast 从数据库读取报告生成双人语音播报。
 
     每个 Agent 异常独立捕获，不影响后续 Agent 执行。
     morning 在 08:50 已执行过，此处命中缓存快速返回（或重新生成）。
@@ -625,6 +625,36 @@ async def _run_broadcast_task() -> None:
         )
     except Exception as e:
         logger.error("scheduler_broadcast_trend_score_failed", error=str(e), exc_info=True)
+
+    # Step 3.6: 全局重要性评估（复用前七天的 event_conduction 数据）
+    try:
+        from aistock_agent.services.global_importance_evaluation import (  # type: ignore[import-untyped]  # noqa: PLC0415
+            persist_global_importance_evaluation,
+        )
+
+        gi_start = asyncio.get_running_loop().time()
+        gi_result = await persist_global_importance_evaluation(lookback_days=7)
+        gi_elapsed = round(asyncio.get_running_loop().time() - gi_start, 2)
+
+        has_focus = gi_result.get("current_focus_event") is not None
+        has_ongoing = gi_result.get("ongoing_significant_event") is not None
+        total = gi_result.get("total_events", 0)
+        persisted = gi_result.get("persisted", False)
+
+        logger.info(
+            "scheduler_broadcast_gi_done",
+            elapsed_seconds=gi_elapsed,
+            total_events=total,
+            has_current_focus=has_focus,
+            has_ongoing_significant=has_ongoing,
+            persisted=persisted,
+        )
+    except Exception as e:
+        logger.warning(
+            "scheduler_broadcast_gi_failed",
+            error=str(e),
+            exc_info=True,
+        )
 
     # Step 4: 播报生成（从数据库读取报告）
     try:
