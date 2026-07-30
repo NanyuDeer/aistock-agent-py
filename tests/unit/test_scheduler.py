@@ -982,3 +982,84 @@ def test_extract_iterate_summary_ignores_llm_summary_and_rejects_invalid_state()
     ) == "今日无显著异常"
     assert _extract_iterate_summary({"status": "skip", "summary": "今日无显著异常"}) == ""
     assert _extract_iterate_summary({"status": "alert", "triggered_dimensions": ["unknown"]}) == ""
+
+
+# ── 事件驱动 evening_chain 重构测试 ──
+
+
+@pytest.mark.asyncio
+async def test_publish_review_quick_event_publishes_to_event_bus():
+    """_publish_review_quick_event 成功发布事件。"""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from aistock_agent.services.scheduler import _publish_review_quick_event
+
+    mock_bus = AsyncMock()
+    mock_bus.publish = AsyncMock(return_value="evt-1")
+
+    with patch("aistock_agent.services.scheduler._get_event_bus", new_callable=AsyncMock, return_value=mock_bus):
+        with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+            with patch("aistock_agent.services.scheduler.shanghai_today") as mock_today:
+                from datetime import date
+                mock_today.return_value = date(2026, 7, 30)
+                await _publish_review_quick_event()
+
+    mock_bus.publish.assert_called_once()
+    call_args = mock_bus.publish.call_args
+    assert call_args[0][0] == "review_quick"
+    assert call_args[1]["payload"]["report_date"] == "2026-07-30"
+
+
+@pytest.mark.asyncio
+async def test_publish_review_quick_event_skips_non_trading_day():
+    """非交易日跳过。"""
+    from unittest.mock import patch
+    from aistock_agent.services.scheduler import _publish_review_quick_event
+
+    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=False):
+        await _publish_review_quick_event()  # 不应抛异常
+
+
+def test_start_scheduler_registers_quick_full_crons_when_enabled():
+    """quick_snapshot_enabled=True 时注册 review_quick/review_full cron。"""
+    from unittest.mock import MagicMock, patch
+    from aistock_agent.services.scheduler import start_scheduler
+
+    mock_scheduler = MagicMock()
+    with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
+        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
+            mock_settings.qa_mode_enabled = False
+            mock_settings.scheduler_enabled = True
+            mock_settings.quick_snapshot_enabled = True
+            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
+            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
+            mock_settings.scheduler_review_quick_cron = "30 15 * * 1-5"
+            mock_settings.scheduler_review_full_cron = "30 20 * * 1-5"
+            mock_settings.scheduler_timezone = "Asia/Shanghai"
+            start_scheduler()
+
+    job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
+    assert "review_quick" in job_ids
+    assert "review_full" in job_ids
+    assert "evening_chain" not in job_ids
+
+
+def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
+    """quick_snapshot_enabled=False 时保留旧 evening_chain。"""
+    from unittest.mock import MagicMock, patch
+    from aistock_agent.services.scheduler import start_scheduler
+
+    mock_scheduler = MagicMock()
+    with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
+        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
+            mock_settings.qa_mode_enabled = False
+            mock_settings.scheduler_enabled = True
+            mock_settings.quick_snapshot_enabled = False
+            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
+            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
+            mock_settings.scheduler_review_cron = "30 15 * * 1-5"
+            mock_settings.scheduler_timezone = "Asia/Shanghai"
+            start_scheduler()
+
+    job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
+    assert "evening_chain" in job_ids
+    assert "review_quick" not in job_ids
