@@ -14,7 +14,7 @@ from structlog import get_logger
 
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
-from aistock_agent.agents.workers.review import run as run_review
+from aistock_agent.agents.workers.review import run_review
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import EventBus, Event

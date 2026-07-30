@@ -9,7 +9,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+
 
 import redis.asyncio as aioredis
 from structlog import get_logger
@@ -22,7 +22,7 @@ class Event:
     """事件载体。"""
     event_id: str
     channel: str
-    payload: dict[str, Any]
+    payload: dict[str, object]
     retry_count: int = 0
 
 
@@ -47,7 +47,7 @@ class EventBus:
     async def publish(
         self,
         channel: str,
-        payload: dict[str, Any],
+        payload: dict[str, object],
         *,
         event_id: str | None = None,
     ) -> str:
