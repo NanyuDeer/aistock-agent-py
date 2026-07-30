@@ -1043,6 +1043,83 @@ async def readiness(response: Response) -> dict[str, object]:
     return {"status": "ok", "checks": checks}
 
 
+# ── 管理员手动触发（Gap 1: 灰度验证用） ──────────────────────────────
+
+
+@router.post("/admin/trigger/review_quick")
+async def trigger_review_quick(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发 quick review（15:30 腾迅实时行情版）。
+    供管理员灰度验证用。绕过 is_trading_day() 检查。
+    """
+    from aistock_agent.agents.workers.review import run_review
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-quick-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_review_quick", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await run_review(
+            report_date=report_date,
+            snapshot_kind="quick",
+            trace_id=trace_id,
+        )
+        elapsed = round(time.time() - start, 2)
+        logger.info("manual_trigger_review_quick_done", status=result.status, elapsed=elapsed, trace_id=trace_id)
+        return {
+            "status": result.status,
+            "report_date": result.report_date,
+            "snapshot_kind": result.snapshot_kind,
+            "trace_id": result.trace_id,
+            "elapsed_seconds": elapsed,
+            "markdown_preview": result.markdown[:200] if result.markdown else "",
+        }
+    except Exception as e:
+        logger.error("manual_trigger_review_quick_failed", error=str(e), exc_info=True, trace_id=trace_id)
+        raise HTTPException(status_code=502, detail=f"review_quick trigger failed: {e}")
+
+
+@router.post("/admin/trigger/review_full")
+async def trigger_review_full(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发 full review（20:30 Tushare 完整数据版）。
+    供管理员灰度验证用。绕过 is_trading_day() 检查。
+    """
+    from aistock_agent.agents.workers.review import run_review
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-full-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_review_full", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await run_review(
+            report_date=report_date,
+            snapshot_kind="full",
+            trace_id=trace_id,
+        )
+        elapsed = round(time.time() - start, 2)
+        logger.info("manual_trigger_review_full_done", status=result.status, elapsed=elapsed, trace_id=trace_id)
+        return {
+            "status": result.status,
+            "report_date": result.report_date,
+            "snapshot_kind": result.snapshot_kind,
+            "trace_id": result.trace_id,
+            "elapsed_seconds": elapsed,
+            "markdown_preview": result.markdown[:200] if result.markdown else "",
+        }
+    except Exception as e:
+        logger.error("manual_trigger_review_full_failed", error=str(e), exc_info=True, trace_id=trace_id)
+        raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
+
+
 # ── CHAT QA ────────────────────────────────────────────────────────
 
 
