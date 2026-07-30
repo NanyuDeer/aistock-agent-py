@@ -12,6 +12,7 @@ from datetime import datetime
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -36,7 +37,7 @@ async def persist_morning_report(
         检查 node_api.post() 返回值：None 或业务失败均返回 False，不记录成功日志。
     """
     if report_date is None:
-        report_date = datetime.now().strftime("%Y-%m-%d")
+        report_date = shanghai_today().isoformat()
 
     # 降级内容保护：不污染数据库（延迟导入避免与 morning.py 的持久化导入循环引用）
     from aistock_agent.agents.workers.morning import _is_degraded_report

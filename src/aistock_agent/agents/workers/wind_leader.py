@@ -12,6 +12,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.observability.logging import get_logger
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.prompts.workers.wind_leader import WIND_LEADER_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.data_guard import DataCheck, ensure_data_available
@@ -73,7 +74,7 @@ async def run(state: AgentState) -> dict[str, object]:
             _archive_wind_leader(final_response)
             # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
             if state.get("trigger_source") == "scheduler":
-                report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                report_date = state.get("report_date") or shanghai_today().isoformat()
                 dual_layer_content = parse_dual_layer_response(final_response)
                 await node_api.save_analysis_report(
                     report_type="wind_leader",

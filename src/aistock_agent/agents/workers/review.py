@@ -18,6 +18,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
     MarketTraceResult,
@@ -619,7 +620,7 @@ async def _persist_review_report(
     if state.get("trigger_source") not in {"scheduler", "manual"}:
         return
     try:
-        report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+        report_date = state.get("report_date") or shanghai_today().isoformat()
         content = _build_review_report(artifact)
         await node_api.save_analysis_report(
             report_type="review",
@@ -661,7 +662,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
     任一前置步骤失败都返回降级文本，不跳到后一步。
     """
-    report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+    report_date = state.get("report_date") or shanghai_today().isoformat()
 
     # 1. 缓存检查（命中则校验工件 + 跨对象校验 + 日期一致、持久化、返回）
     # state.skip_cache 为真时跳过缓存，强制完整流水线（管理员手动触发用）

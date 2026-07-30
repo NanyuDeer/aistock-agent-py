@@ -9,6 +9,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
@@ -115,7 +116,7 @@ async def _persist_report(state: AgentState, content: dict[str, object]) -> None
     """scheduler 触发时按日期持久化公共报告。"""
     if state.get("trigger_source") != "scheduler":
         return
-    report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+    report_date = state.get("report_date") or shanghai_today().isoformat()
     await node_api.save_analysis_report(
         report_type="hot_burst",
         report_date=report_date,

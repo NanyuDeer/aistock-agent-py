@@ -66,11 +66,23 @@ async def test_broadcast_response_extraction():
 
 @pytest.mark.asyncio
 async def test_broadcast_persists_text_then_triggers_audio():
-    """播报稿入库成功后，才调用 Node.js 生成音频。"""
+    """播报稿入库成功后，才调用 Node.js 生成音频。
+
+    契约要求：保存 broadcast.v1 schema（含 dialogue 数组 + source_brief），
+    report_type 为 broadcast_{brief_type}，generate-audio 携带 brief_type。
+    """
     expected = "主持人：大家好。分析师：今天关注市场主线。"
     mock_llm = _make_mock_llm(expected)
     mock_node_api = MagicMock()
-    mock_node_api.get_analysis_report = AsyncMock(return_value=None)
+    # 模拟 brief_morning 报告存在
+    mock_node_api.get_analysis_report = AsyncMock(return_value={
+        "id": 42,
+        "content": {
+            "as_of": "2026-07-11T00:00:00+08:00",
+            "degraded": False,
+            "missing_sources": [],
+        },
+    })
     mock_node_api.save_analysis_report = AsyncMock(return_value={"id": 1})
     mock_node_api.post = AsyncMock(return_value={"audio_path": "/audio.mp3"})
 
@@ -83,16 +95,24 @@ async def test_broadcast_persists_text_then_triggers_audio():
             "analysis_reports": {},
             "trigger_source": "scheduler",
             "report_date": "2026-07-11",
+            "brief_type": "morning",
         })
 
-    mock_node_api.save_analysis_report.assert_awaited_once_with(
-        report_type="broadcast",
-        report_date="2026-07-11",
-        content={"text": expected},
-    )
+    # 校验保存的 report_type 和 content schema
+    save_call = mock_node_api.save_analysis_report.await_args
+    assert save_call.kwargs["report_type"] == "broadcast_morning"
+    assert save_call.kwargs["report_date"] == "2026-07-11"
+    content = save_call.kwargs["content"]
+    assert content["schema_version"] == "broadcast.v1"
+    assert content["brief_type"] == "morning"
+    assert isinstance(content["dialogue"], list) and len(content["dialogue"]) >= 1
+    assert all(d["role"] in ("host", "analyst") for d in content["dialogue"])
+    assert content["source_brief"]["id"] == 42
+    assert content["source_brief"]["report_type"] == "brief_morning"
+    assert content["degraded"] is False
     mock_node_api.post.assert_awaited_once_with(
         "/internal/briefing/generate-audio",
-        {"date": "2026-07-11"},
+        {"date": "2026-07-11", "brief_type": "morning"},
         timeout=300.0,
     )
     assert result["audio_path"] == "/audio.mp3"
