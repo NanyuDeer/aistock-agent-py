@@ -86,6 +86,18 @@ class Settings(BaseSettings):
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
+    # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
+    # quick review：15:30 收盘后基于腾讯实时行情立即产出
+    scheduler_review_quick_cron: str = "30 15 * * 1-5"
+    # full review：20:30 Tushare 完整数据覆盖 quick
+    scheduler_review_full_cron: str = "30 20 * * 1-5"
+    # EventBus 配置
+    event_bus_max_retries: int = 3
+    event_bus_deadletter_prefix: str = "dlq:"
+    event_bus_consumer_group: str = "evening_chain"
+    event_stream_max_len: int = 10000
+    # Feature Flag：quick snapshot 开关（false 时走旧 _run_evening_chain_task）
+    quick_snapshot_enabled: bool = False
 
     # 隔离 QA：保留原始字符串，再由 qa_mode_enabled 做与 Node 一致的严格判断。
     # QA_RUN_ID 绑定单次隔离资源，避免误把任意日期任务写入 QA 库。

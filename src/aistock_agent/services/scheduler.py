@@ -42,7 +42,11 @@ def get_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler() -> None:
-    """注册早报、早间播报与单一晚间串行链路。"""
+    """注册早报、早间播报与晚间链路。
+
+    quick_snapshot_enabled=true 时注册 review_quick/review_full 两个 cron，
+    并启动事件消费者；false 时保留旧 _run_evening_chain_task 串行链路。
+    """
     if settings.qa_mode_enabled:
         logger.info("scheduler_disabled_by_qa_mode")
         return
@@ -71,16 +75,44 @@ def start_scheduler() -> None:
         name="morning broadcast chain",
         replace_existing=True,
     )
-    scheduler.add_job(
-        _run_evening_chain_task,
-        CronTrigger.from_crontab(
-            settings.scheduler_review_cron,
-            timezone=settings.scheduler_timezone,
-        ),
-        id="evening_chain",
-        name="evening report chain",
-        replace_existing=True,
-    )
+
+    if settings.quick_snapshot_enabled:
+        # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
+        scheduler.add_job(
+            _publish_review_quick_event,
+            CronTrigger.from_crontab(
+                settings.scheduler_review_quick_cron,
+                timezone=settings.scheduler_timezone,
+            ),
+            id="review_quick",
+            name="quick review (event-driven)",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _publish_review_full_event,
+            CronTrigger.from_crontab(
+                settings.scheduler_review_full_cron,
+                timezone=settings.scheduler_timezone,
+            ),
+            id="review_full",
+            name="full review (event-driven)",
+            replace_existing=True,
+        )
+        logger.info("scheduler_quick_snapshot_enabled")
+    else:
+        # 旧串行链路（保留向后兼容）
+        scheduler.add_job(
+            _run_evening_chain_task,
+            CronTrigger.from_crontab(
+                settings.scheduler_review_cron,
+                timezone=settings.scheduler_timezone,
+            ),
+            id="evening_chain",
+            name="evening report chain (legacy)",
+            replace_existing=True,
+        )
+        logger.info("scheduler_legacy_evening_chain")
+
     scheduler.start()
     logger.info("scheduler_started", jobs=[job.id for job in scheduler.get_jobs()])
 
@@ -354,6 +386,77 @@ async def _run_evening_chain_task() -> None:
             await broadcast_agent.run(_make_scheduled_state(report_date, brief_type="evening"))
         except Exception as exc:
             logger.error("scheduler_evening_broadcast_failed", error=str(exc), exc_info=True)
+
+
+# ─── 事件驱动：EventBus 发布函数 ───
+
+
+async def _publish_review_quick_event() -> None:
+    """15:30 cron 触发：发布 review_quick 事件到 EventBus。"""
+    report_day = shanghai_today()
+    if not is_trading_day(report_day):
+        logger.info("scheduler_skip_non_trading_day", task="review_quick")
+        return
+
+    report_date = report_day.isoformat()
+    trace_id = f"sched-quick-{report_date}-{int(asyncio.get_event_loop().time())}"
+
+    try:
+        event_bus = await _get_event_bus()
+        if event_bus is None:
+            logger.error("scheduler_event_bus_unavailable", task="review_quick")
+            return
+        await event_bus.publish(
+            "review_quick",
+            payload={"report_date": report_date, "trace_id": trace_id},
+            event_id=f"review_quick_{report_date}",
+        )
+        logger.info("scheduler_review_quick_published", report_date=report_date, trace_id=trace_id)
+    except Exception as exc:
+        logger.error("scheduler_review_quick_publish_failed", error=str(exc), exc_info=True)
+
+
+async def _publish_review_full_event() -> None:
+    """20:30 cron 触发：发布 review_full 事件到 EventBus。"""
+    report_day = shanghai_today()
+    if not is_trading_day(report_day):
+        logger.info("scheduler_skip_non_trading_day", task="review_full")
+        return
+
+    report_date = report_day.isoformat()
+    trace_id = f"sched-full-{report_date}-{int(asyncio.get_event_loop().time())}"
+
+    try:
+        event_bus = await _get_event_bus()
+        if event_bus is None:
+            logger.error("scheduler_event_bus_unavailable", task="review_full")
+            return
+        await event_bus.publish(
+            "review_full",
+            payload={"report_date": report_date, "trace_id": trace_id},
+            event_id=f"review_full_{report_date}",
+        )
+        logger.info("scheduler_review_full_published", report_date=report_date, trace_id=trace_id)
+    except Exception as exc:
+        logger.error("scheduler_review_full_publish_failed", error=str(exc), exc_info=True)
+
+
+async def _get_event_bus():
+    """获取全局 EventBus 实例（由 main.py lifespan 初始化）。"""
+    from aistock_agent.services.event_bus import EventBus
+    from aistock_agent.services.redis_pool import RedisPool
+
+    try:
+        redis = await RedisPool.get_client()
+        return EventBus(
+            redis,
+            max_retries=settings.event_bus_max_retries,
+            deadletter_prefix=settings.event_bus_deadletter_prefix,
+            consumer_group=settings.event_bus_consumer_group,
+            stream_max_len=settings.event_stream_max_len,
+        )
+    except RuntimeError:
+        return None
 
 
 async def _run_review_task() -> None:

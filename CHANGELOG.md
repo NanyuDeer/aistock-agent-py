@@ -2,6 +2,72 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-30 — evening_chain 事件驱动重构（Redis Stream 事件总线 + quick/full 双模复盘）
+
+**开发者**: 37588
+
+### 背景
+原 `_run_evening_chain_task` 在 scheduler 进程内串行调用 review→snapshot→iterate→broadcast，存在三类问题：
+1. 单步失败阻塞整条链路，无重试/死信机制
+2. 15:30 收盘后只能等 Tushare 完整数据，无法基于腾讯实时行情立即产出
+3. 链路扩展需改动 scheduler，耦合度高
+
+本次按 spec 2026-07-29 引入 Redis Stream 事件总线，将晚间链路拆为 5 个独立消费者，并新增 quick/full 双模复盘。
+
+### 新增 — 事件总线
+- `src/aistock_agent/services/event_bus.py`：基于 Redis Stream 的 EventBus，`publish`/`consume`/`ack`/`retry`/`mark_deadletter` 全套能力
+  - XADD/XREADGROUP/XACK 实现 at-least-once 语义
+  - 消费者组（consumer group）支持多消费者负载均衡
+  - 幂等检查（`SET NX EX` 24h TTL）防重复处理
+  - 超过 `max_retries` 移入死信队列 `dlq:<channel>`
+  - XADD `maxlen` 限制 Stream 长度，防内存溢出
+  - `_ensure_group` 使用 `mkstream=True`，流不存在时自动创建，避免 `NOGROUP` 错误
+- `Event` dataclass：`event_id` / `channel` / `payload` / `retry_count`
+
+### 新增 — 5 个事件消费者
+- `src/aistock_agent/services/event_consumers.py`：定义 `BaseConsumer` + 5 个消费者，构成完整事件链
+  - `ReviewQuickConsumer`（15:30）→ quick review → 触发 quick snapshot
+  - `ReviewFullConsumer`（20:30）→ full review → 触发 full snapshot → iterate → broadcast
+  - `SnapshotConsumer`：quick 只存快照，full 继续触发 iterate
+  - `IterateConsumer`：完成后触发 broadcast
+  - `BroadcastConsumer`：链路终点
+  - `start_all_consumers` / `stop_all_consumers` 管理生命周期，`_consumer_loop` 统一 retry
+  - `_make_consumer_state` 构造 AgentState（`trigger_source=scheduler` 使报告写 DB）
+
+### 新增 — quick/full 双模复盘
+- `src/aistock_agent/agents/workers/review.py`：新增 `run_review()` 直接调用入口（区别于 LangGraph 节点 `run(state)`）
+  - `snapshot_kind="quick"`：调用 `build_quick_snapshot`（腾讯实时行情，15:30 可用）
+  - `snapshot_kind="full"`：调用 `build_market_trace_snapshot`（Tushare 完整数据，20:30 可用）
+  - **覆盖逻辑**：quick 时先检查是否已有 full 报告，若已有 full 则跳过持久化（quick 不覆盖 full），返回 `status="skipped"`
+- `src/aistock_agent/services/snapshot_builder.py`：新增 `build_quick_snapshot` 基于实时行情
+- `src/aistock_agent/services/data_client.py` + `market_trace_snapshot.py`：补齐 quick snapshot 数据通道
+
+### 新增 — 管理端手动触发
+- `src/aistock_agent/api/routes.py`：新增 `POST /admin/trigger/review_quick` 和 `POST /admin/trigger/review_full`，便于灰度验证和测试
+
+### 改进 — 调度器与 lifespan 集成
+- `src/aistock_agent/services/scheduler.py`：新增 `_publish_review_quick_event` / `_publish_review_full_event`；`start_scheduler` 在 `quick_snapshot_enabled=True` 时注册两个新 cron job（替换旧 `_run_evening_chain_task`）
+- `src/aistock_agent/main.py`：lifespan 集成 EventBus 初始化 + `start_all_consumers` / `stop_all_consumers`
+- `src/aistock_agent/config.py`：新增 evening_chain 配置项
+  - `scheduler_review_quick_cron`（默认 `30 15 * * 1-5`）
+  - `scheduler_review_full_cron`（默认 `30 20 * * 1-5`）
+  - `event_bus_max_retries` / `event_bus_deadletter_prefix` / `event_bus_consumer_group` / `event_stream_max_len`
+  - `quick_snapshot_enabled` Feature Flag（默认 False，灰度切换）
+
+### 测试
+- `tests/integration/test_evening_chain.py`：事件驱动集成测试
+- `tests/e2e/test_evening_chain_e2e.py`：端到端测试
+- 覆盖 publish/consume/ack/retry/deadletter 全链路、quick 覆盖逻辑、消费者生命周期
+
+### 修复（最终审查）
+- `event_consumers.py`：`Event` 类型注解 `Any` → `object`；删除未使用的 import 和变量；`run_review` 导入路径修正
+
+### Feature Flag 说明
+- `quick_snapshot_enabled=False`（默认）→ 走旧 `_run_evening_chain_task` 串行链路
+- `quick_snapshot_enabled=True` → 走新事件驱动链路，scheduler 发布 review_quick/review_full 事件，5 个消费者异步消费
+
+---
+
 ## [changer] 2026-07-29 — 早报 Agent LLM 降级内容污染修复
 
 **开发者**: 37588

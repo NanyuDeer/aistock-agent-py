@@ -166,6 +166,295 @@ def normalize_a_share(close_data: dict[str, object]) -> dict[str, object]:
 # ============================================================================
 
 
+# ============================================================================
+# 归一化辅助函数（从 build_market_trace_snapshot 内联逻辑提取，
+# 供 build_market_trace_snapshot 和 build_quick_snapshot 共用）
+# ============================================================================
+
+
+def _normalize_index_facts(
+    normalized_a_share: dict[str, object],
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    trade_date_dt: datetime,
+    captured_at: datetime,
+) -> None:
+    """A 股指数事实 → SourceRecord"""
+    indexes_map = normalized_a_share.get("indexes")
+    if isinstance(indexes_map, dict):
+        for idx in indexes_map.values():
+            if not isinstance(idx, dict):
+                continue
+            ts_code = _safe_str(idx.get("ts_code"))
+            if not ts_code:
+                continue
+            source_id = f"INDEX_{ts_code.replace('.', '_')}"
+            sources[source_id] = SourceRecord(
+                source_id=source_id,
+                kind="market_fact",
+                provider=_safe_str(idx.get("source"), "tushare:index_daily"),
+                title=_safe_str(idx.get("name"), ts_code),
+                content=(
+                    f"trade_date={idx.get('trade_date')}, "
+                    f"close={idx.get('close')}, "
+                    f"change_pct={idx.get('change_pct')}, "
+                    f"amount={idx.get('amount')}"
+                ),
+                url=None,
+                occurred_at=trade_date_dt,
+                captured_at=captured_at,
+                source_level="market_data",
+            )
+
+
+def _normalize_aggregate_facts(
+    normalized_a_share: dict[str, object],
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    trade_date_dt: datetime,
+    captured_at: datetime,
+) -> None:
+    """A 股聚合事实（广度/成交额/涨跌停/主力资金/板块）→ SourceRecord"""
+    # 市场广度
+    breadth_dict = normalized_a_share.get("breadth")
+    if isinstance(breadth_dict, dict) and _has_any_numeric_field(
+        breadth_dict,
+        (
+            "total_count",
+            "advance_count",
+            "decline_count",
+            "flat_count",
+            "advance_ratio",
+            "decline_ratio",
+        ),
+    ):
+        sources["BREADTH_ALL"] = SourceRecord(
+            source_id="BREADTH_ALL",
+            kind="market_fact",
+            provider=_safe_str(breadth_dict.get("source"), "tushare:daily"),
+            title="全市场涨跌家数",
+            content=(
+                f"total={breadth_dict.get('total_count')}, "
+                f"advance={breadth_dict.get('advance_count')}, "
+                f"decline={breadth_dict.get('decline_count')}, "
+                f"flat={breadth_dict.get('flat_count')}, "
+                f"advance_ratio={breadth_dict.get('advance_ratio')}"
+            ),
+            url=None,
+            occurred_at=trade_date_dt,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    else:
+        missing_fields.append("a_share.breadth")
+
+    # 成交额
+    turnover_dict = normalized_a_share.get("turnover")
+    if isinstance(turnover_dict, dict) and _has_numeric_fields(
+        turnover_dict,
+        ("amount_yuan", "previous_amount_yuan", "change_pct"),
+    ):
+        sources["TURNOVER_ALL"] = SourceRecord(
+            source_id="TURNOVER_ALL",
+            kind="market_fact",
+            provider=_safe_str(turnover_dict.get("source"), "tushare:daily"),
+            title="全市场成交额",
+            content=(
+                f"amount_yuan={turnover_dict.get('amount_yuan')}, "
+                f"previous_amount_yuan={turnover_dict.get('previous_amount_yuan')}, "
+                f"change_pct={turnover_dict.get('change_pct')}"
+            ),
+            url=None,
+            occurred_at=trade_date_dt,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    else:
+        missing_fields.append("a_share.turnover")
+
+    # 涨跌停与连板
+    limits_dict = normalized_a_share.get("limits")
+    if isinstance(limits_dict, dict) and _has_numeric_fields(
+        limits_dict,
+        ("up_count", "down_count", "broken_count", "highest_board"),
+    ):
+        sources["LIMITS_ALL"] = SourceRecord(
+            source_id="LIMITS_ALL",
+            kind="market_fact",
+            provider="tushare:limit_list_ths",
+            title="涨跌停与连板统计",
+            content=(
+                f"up_count={limits_dict.get('up_count')}, "
+                f"down_count={limits_dict.get('down_count')}, "
+                f"broken_count={limits_dict.get('broken_count')}, "
+                f"highest_board={limits_dict.get('highest_board')}"
+            ),
+            url=None,
+            occurred_at=trade_date_dt,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    else:
+        missing_fields.append("a_share.limits")
+
+    # 主力资金
+    main_force_dict = normalized_a_share.get("main_force")
+    if isinstance(main_force_dict, dict) and _has_numeric_fields(
+        main_force_dict,
+        ("large_and_extra_large_net_yuan",),
+    ):
+        sources["MAIN_FORCE_ALL"] = SourceRecord(
+            source_id="MAIN_FORCE_ALL",
+            kind="market_fact",
+            provider=_safe_str(main_force_dict.get("source"), "tushare:moneyflow_ths"),
+            title="大单加特大单净额",
+            content=(
+                f"large_and_extra_large_net_yuan="
+                f"{main_force_dict.get('large_and_extra_large_net_yuan')}"
+            ),
+            url=None,
+            occurred_at=trade_date_dt,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    else:
+        missing_fields.append("a_share.main_force.large_and_extra_large_net_yuan")
+
+    # 板块
+    sectors_dict = normalized_a_share.get("sectors")
+    sector_fields = ("top_gainers", "top_losers", "top_inflows", "top_outflows")
+    if isinstance(sectors_dict, dict) and any(
+        _sector_item_count(sectors_dict, field) > 0 for field in sector_fields
+    ):
+        sources["SECTORS_ALL"] = SourceRecord(
+            source_id="SECTORS_ALL",
+            kind="market_fact",
+            provider="tushare:moneyflow_cnt_ths",
+            title="概念板块涨跌与资金流排序",
+            content=(
+                f"top_gainers_count={_sector_item_count(sectors_dict, 'top_gainers')}, "
+                f"top_losers_count={_sector_item_count(sectors_dict, 'top_losers')}, "
+                f"top_inflows_count={_sector_item_count(sectors_dict, 'top_inflows')}, "
+                f"top_outflows_count={_sector_item_count(sectors_dict, 'top_outflows')}"
+            ),
+            url=None,
+            occurred_at=trade_date_dt,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    else:
+        missing_fields.append("a_share.sectors")
+
+
+def _normalize_global_facts(
+    global_facts: list[dict[str, object]],
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    captured_at: datetime,
+) -> None:
+    """境外行情事实 → SourceRecord"""
+    global_counter = 0
+    for fact in global_facts:
+        if not isinstance(fact, dict):
+            continue
+        global_counter += 1
+        source_id = f"GLOBAL_{global_counter:03d}"
+        occurred_at = _parse_datetime(fact.get("observed_at"))
+        sources[source_id] = SourceRecord(
+            source_id=source_id,
+            kind="market_fact",
+            provider="yfinance",
+            title=_safe_str(fact.get("name"), _safe_str(fact.get("ticker"))),
+            content=(
+                f"ticker={fact.get('ticker')}, "
+                f"price={fact.get('price')}, "
+                f"change_pct={fact.get('change_pct')}, "
+                f"observed_at={fact.get('observed_at')}"
+            ),
+            url=None,
+            occurred_at=occurred_at,
+            captured_at=captured_at,
+            source_level="market_data",
+        )
+    if not global_facts:
+        missing_fields.append("global_markets")
+
+
+def _normalize_news_facts(
+    news_data: dict[str, object] | None,
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    captured_at: datetime,
+) -> None:
+    """财联社快讯 → SourceRecord（event_evidence）"""
+    news_items: list[dict[str, object]] = []
+    if isinstance(news_data, dict):
+        raw_items = news_data.get("items", news_data.get("news", []))
+        if isinstance(raw_items, list):
+            news_items = [item for item in raw_items if isinstance(item, dict)]
+
+    news_counter = 0
+    for item in news_items:
+        time_str = item.get("time", item.get("ctime", ""))
+        occurred_at = _parse_datetime(time_str)
+        if occurred_at is not None and occurred_at > captured_at:
+            continue
+        news_counter += 1
+        source_id = f"NEWS_{news_counter:03d}"
+        sources[source_id] = SourceRecord(
+            source_id=source_id,
+            kind="event_evidence",
+            provider="cls",
+            title=_safe_str(item.get("title"), "无标题"),
+            content=_safe_str(item.get("brief", item.get("content", "")))[:500],
+            url=_safe_optional_str(item.get("url")),
+            occurred_at=occurred_at,
+            captured_at=captured_at,
+            source_level="reporting",
+        )
+    if not news_items:
+        missing_fields.append("cls_news")
+
+
+def _normalize_search_facts(
+    tavily_result_1: dict[str, object],
+    tavily_result_2: dict[str, object],
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    captured_at: datetime,
+) -> None:
+    """Tavily 检索结果 → SourceRecord（event_evidence）"""
+    search_counter = 0
+    for label, tavily_result in [
+        ("tavily_search_1", tavily_result_1),
+        ("tavily_search_2", tavily_result_2),
+    ]:
+        results = tavily_result.get("results") if isinstance(tavily_result, dict) else None
+        if not isinstance(results, list) or not results:
+            missing_fields.append(label)
+            continue
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            pub_date = item.get("published_date", item.get("publishedDate", ""))
+            occurred_at = _parse_datetime(pub_date)
+            if occurred_at is not None and occurred_at > captured_at:
+                continue
+            search_counter += 1
+            source_id = f"SEARCH_{search_counter:03d}"
+            sources[source_id] = SourceRecord(
+                source_id=source_id,
+                kind="event_evidence",
+                provider="tavily",
+                title=_safe_str(item.get("title"), "无标题"),
+                content=_safe_str(item.get("content", ""))[:500],
+                url=_safe_optional_str(item.get("url")),
+                occurred_at=occurred_at,
+                captured_at=captured_at,
+                source_level="reporting",
+            )
+
+
 async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     """构建市场溯源事实快照。
 
@@ -240,14 +529,10 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         logger.warning("collect_global_market_facts_failed", error=str(e))
         global_facts = []
 
-    # 财联社最新快讯（Node /internal/news/latest，返回 dict 含 items 键）
-    news_items: list[dict[str, object]] = []
+    # 财联社最新快讯（Node /internal/news/latest）
+    news_data = None
     try:
         news_data = await node_api.get("/internal/news/latest")
-        if isinstance(news_data, dict):
-            raw_items = news_data.get("items", news_data.get("news", []))
-            if isinstance(raw_items, list):
-                news_items = [item for item in raw_items if isinstance(item, dict)]
     except Exception as e:
         logger.warning("cls_news_fetch_failed", error=str(e))
 
@@ -269,241 +554,11 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     sources: dict[str, SourceRecord] = {}
     missing_fields: list[str] = []
 
-    # A 股指数事实
-    indexes_map = normalized_a_share.get("indexes")
-    if isinstance(indexes_map, dict):
-        for idx in indexes_map.values():
-            if not isinstance(idx, dict):
-                continue
-            ts_code = _safe_str(idx.get("ts_code"))
-            if not ts_code:
-                continue
-            source_id = f"INDEX_{ts_code.replace('.', '_')}"
-            sources[source_id] = SourceRecord(
-                source_id=source_id,
-                kind="market_fact",
-                provider=_safe_str(idx.get("source"), "tushare:index_daily"),
-                title=_safe_str(idx.get("name"), ts_code),
-                content=(
-                    f"trade_date={idx.get('trade_date')}, "
-                    f"close={idx.get('close')}, "
-                    f"change_pct={idx.get('change_pct')}, "
-                    f"amount={idx.get('amount')}"
-                ),
-                url=None,
-                occurred_at=trade_date_dt,
-                captured_at=captured_at,
-                source_level="market_data",
-            )
-
-    # A 股聚合事实（市场广度、成交额、涨跌停、主力资金、板块）
-    breadth_dict = normalized_a_share.get("breadth")
-    if isinstance(breadth_dict, dict) and _has_any_numeric_field(
-        breadth_dict,
-        (
-            "total_count",
-            "advance_count",
-            "decline_count",
-            "flat_count",
-            "advance_ratio",
-            "decline_ratio",
-        ),
-    ):
-        sources["BREADTH_ALL"] = SourceRecord(
-            source_id="BREADTH_ALL",
-            kind="market_fact",
-            provider=_safe_str(breadth_dict.get("source"), "tushare:daily"),
-            title="全市场涨跌家数",
-            content=(
-                f"total={breadth_dict.get('total_count')}, "
-                f"advance={breadth_dict.get('advance_count')}, "
-                f"decline={breadth_dict.get('decline_count')}, "
-                f"flat={breadth_dict.get('flat_count')}, "
-                f"advance_ratio={breadth_dict.get('advance_ratio')}"
-            ),
-            url=None,
-            occurred_at=trade_date_dt,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    else:
-        missing_fields.append("a_share.breadth")
-
-    turnover_dict = normalized_a_share.get("turnover")
-    if isinstance(turnover_dict, dict) and _has_numeric_fields(
-        turnover_dict,
-        ("amount_yuan", "previous_amount_yuan", "change_pct"),
-    ):
-        sources["TURNOVER_ALL"] = SourceRecord(
-            source_id="TURNOVER_ALL",
-            kind="market_fact",
-            provider=_safe_str(turnover_dict.get("source"), "tushare:daily"),
-            title="全市场成交额",
-            content=(
-                f"amount_yuan={turnover_dict.get('amount_yuan')}, "
-                f"previous_amount_yuan={turnover_dict.get('previous_amount_yuan')}, "
-                f"change_pct={turnover_dict.get('change_pct')}"
-            ),
-            url=None,
-            occurred_at=trade_date_dt,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    else:
-        missing_fields.append("a_share.turnover")
-
-    limits_dict = normalized_a_share.get("limits")
-    if isinstance(limits_dict, dict) and _has_numeric_fields(
-        limits_dict,
-        ("up_count", "down_count", "broken_count", "highest_board"),
-    ):
-        sources["LIMITS_ALL"] = SourceRecord(
-            source_id="LIMITS_ALL",
-            kind="market_fact",
-            provider="tushare:limit_list_ths",
-            title="涨跌停与连板统计",
-            content=(
-                f"up_count={limits_dict.get('up_count')}, "
-                f"down_count={limits_dict.get('down_count')}, "
-                f"broken_count={limits_dict.get('broken_count')}, "
-                f"highest_board={limits_dict.get('highest_board')}"
-            ),
-            url=None,
-            occurred_at=trade_date_dt,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    else:
-        missing_fields.append("a_share.limits")
-
-    main_force_dict = normalized_a_share.get("main_force")
-    if isinstance(main_force_dict, dict) and _has_numeric_fields(
-        main_force_dict,
-        ("large_and_extra_large_net_yuan",),
-    ):
-        sources["MAIN_FORCE_ALL"] = SourceRecord(
-            source_id="MAIN_FORCE_ALL",
-            kind="market_fact",
-            provider=_safe_str(main_force_dict.get("source"), "tushare:moneyflow_ths"),
-            title="大单加特大单净额",
-            content=(
-                f"large_and_extra_large_net_yuan="
-                f"{main_force_dict.get('large_and_extra_large_net_yuan')}"
-            ),
-            url=None,
-            occurred_at=trade_date_dt,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    else:
-        missing_fields.append("a_share.main_force.large_and_extra_large_net_yuan")
-
-    sectors_dict = normalized_a_share.get("sectors")
-    sector_fields = ("top_gainers", "top_losers", "top_inflows", "top_outflows")
-    if isinstance(sectors_dict, dict) and any(
-        _sector_item_count(sectors_dict, field) > 0 for field in sector_fields
-    ):
-        sources["SECTORS_ALL"] = SourceRecord(
-            source_id="SECTORS_ALL",
-            kind="market_fact",
-            provider="tushare:moneyflow_cnt_ths",
-            title="概念板块涨跌与资金流排序",
-            content=(
-                f"top_gainers_count={_sector_item_count(sectors_dict, 'top_gainers')}, "
-                f"top_losers_count={_sector_item_count(sectors_dict, 'top_losers')}, "
-                f"top_inflows_count={_sector_item_count(sectors_dict, 'top_inflows')}, "
-                f"top_outflows_count={_sector_item_count(sectors_dict, 'top_outflows')}"
-            ),
-            url=None,
-            occurred_at=trade_date_dt,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    else:
-        missing_fields.append("a_share.sectors")
-
-    # 境外行情事实
-    global_counter = 0
-    for fact in global_facts:
-        if not isinstance(fact, dict):
-            continue
-        global_counter += 1
-        source_id = f"GLOBAL_{global_counter:03d}"
-        occurred_at = _parse_datetime(fact.get("observed_at"))
-        sources[source_id] = SourceRecord(
-            source_id=source_id,
-            kind="market_fact",
-            provider="yfinance",
-            title=_safe_str(fact.get("name"), _safe_str(fact.get("ticker"))),
-            content=(
-                f"ticker={fact.get('ticker')}, "
-                f"price={fact.get('price')}, "
-                f"change_pct={fact.get('change_pct')}, "
-                f"observed_at={fact.get('observed_at')}"
-            ),
-            url=None,
-            occurred_at=occurred_at,
-            captured_at=captured_at,
-            source_level="market_data",
-        )
-    if not global_facts:
-        missing_fields.append("global_markets")
-
-    # 财联社快讯（事件证据）
-    news_counter = 0
-    for item in news_items:
-        time_str = item.get("time", item.get("ctime", ""))
-        occurred_at = _parse_datetime(time_str)
-        # 发生时间晚于 captured_at 的新闻不得进入快照
-        if occurred_at is not None and occurred_at > captured_at:
-            continue
-        news_counter += 1
-        source_id = f"NEWS_{news_counter:03d}"
-        sources[source_id] = SourceRecord(
-            source_id=source_id,
-            kind="event_evidence",
-            provider="cls",
-            title=_safe_str(item.get("title"), "无标题"),
-            content=_safe_str(item.get("brief", item.get("content", "")))[:500],
-            url=_safe_optional_str(item.get("url")),
-            occurred_at=occurred_at,
-            captured_at=captured_at,
-            source_level="reporting",
-        )
-    if not news_items:
-        missing_fields.append("cls_news")
-
-    # Tavily 检索结果（事件证据）
-    search_counter = 0
-    for label, tavily_result in [
-        ("tavily_search_1", tavily_result_1),
-        ("tavily_search_2", tavily_result_2),
-    ]:
-        results = tavily_result.get("results") if isinstance(tavily_result, dict) else None
-        if not isinstance(results, list) or not results:
-            missing_fields.append(label)
-            continue
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            pub_date = item.get("published_date", item.get("publishedDate", ""))
-            occurred_at = _parse_datetime(pub_date)
-            # 发生时间晚于 captured_at 的检索结果不得进入快照
-            if occurred_at is not None and occurred_at > captured_at:
-                continue
-            search_counter += 1
-            source_id = f"SEARCH_{search_counter:03d}"
-            sources[source_id] = SourceRecord(
-                source_id=source_id,
-                kind="event_evidence",
-                provider="tavily",
-                title=_safe_str(item.get("title"), "无标题"),
-                content=_safe_str(item.get("content", ""))[:500],
-                url=_safe_optional_str(item.get("url")),
-                occurred_at=occurred_at,
-                captured_at=captured_at,
-                source_level="reporting",
-            )
+    _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_aggregate_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
+    _normalize_news_facts(news_data, sources, missing_fields, captured_at)
+    _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
 
     # ── 5. 在冻结事实和真实来源上确定性发现市场现象 ──
     discovery = discover_market_phenomenon(
@@ -520,6 +575,115 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     trade_date_yyyymmdd = trade_date_node.replace("-", "")
     captured_at_suffix = captured_at.strftime("%Y%m%dT%H%M%S%fZ")
     snapshot_id = f"trace-{trade_date_yyyymmdd}-{captured_at_suffix}"
+
+    return MarketTraceSnapshot(
+        snapshot_id=snapshot_id,
+        trade_date=report_date,
+        captured_at=captured_at,
+        a_share=normalized_a_share,
+        sources=sources,
+        missing_fields=missing_fields,
+        phenomenon_discovery=discovery,
+    )
+
+
+# ============================================================================
+# Quick Snapshot（15:30 腾讯实时行情）
+# ============================================================================
+
+
+async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
+    """构建 quick 版市场溯源事实快照（15:30 腾讯实时行情）。
+
+    与 build_market_trace_snapshot 的区别：
+    - 调用 /internal/market/quick-snapshot（腾讯行情）而非 /internal/market/close-snapshot（Tushare）
+    - 不校验 coverage.current_daily.complete（quick 版 coverage 不完整是正常的）
+    - 不校验 previous_daily（quick 版无前日数据）
+    - 其余归一化、discovery 逻辑与 full 版一致
+
+    Raises:
+        MarketTraceSnapshotUnavailable: Node quick-snapshot 不可用或 trade_date 不匹配。
+    """
+    captured_at = datetime.now(UTC)
+
+    # ── 1. 获取 Node quick snapshot ──
+    close_data = await node_api.get_quick_snapshot()
+    if close_data is None:
+        raise MarketTraceSnapshotUnavailable(
+            "Node quick-snapshot returned None (market not closed or service unavailable)"
+        )
+    if close_data.get("status") != "complete":
+        raise MarketTraceSnapshotUnavailable(
+            f"Node quick-snapshot status is not complete: {close_data.get('status')}"
+        )
+
+    # ── 2. 校验 trade_date ──
+    trade_date_node = _safe_str(close_data.get("trade_date"))
+    trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
+    if trade_date_normalized is None:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node quick-snapshot trade_date invalid: {trade_date_node!r}"
+        )
+    trade_date_dt = _parse_yyyymmdd(trade_date_normalized.replace("-", ""))
+    if trade_date_dt is None:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node quick-snapshot trade_date is not a valid calendar date: {trade_date_node!r}"
+        )
+    if trade_date_normalized != report_date:
+        raise MarketTraceSnapshotUnavailable(
+            f"Node quick-snapshot trade_date {trade_date_normalized} != report_date {report_date}"
+        )
+
+    normalized_a_share = normalize_a_share(close_data)
+
+    # ── 3. 收集外部来源（与 full 版相同逻辑）──
+    try:
+        global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
+    except Exception as e:
+        logger.warning("collect_global_market_facts_failed", error=str(e))
+        global_facts = []
+
+    news_data = None
+    try:
+        news_data = await node_api.get("/internal/news/latest")
+    except Exception as e:
+        logger.warning("cls_news_fetch_failed", error=str(e))
+
+    tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
+    tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
+    try:
+        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
+    except Exception as e:
+        logger.warning("tavily_search_1_failed", error=str(e))
+        tavily_result_1 = {}
+    try:
+        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
+    except Exception as e:
+        logger.warning("tavily_search_2_failed", error=str(e))
+        tavily_result_2 = {}
+
+    # ── 4. 归一化为 SourceRecord（复用 full 版归一化逻辑）──
+    sources: dict[str, SourceRecord] = {}
+    missing_fields: list[str] = []
+
+    _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_aggregate_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
+    _normalize_news_facts(news_data, sources, missing_fields, captured_at)
+    _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
+
+    # ── 5. 确定性 discovery ──
+    discovery = discover_market_phenomenon(
+        normalized_a_share,
+        sources,
+        captured_at,
+        missing_fields,
+    )
+
+    # ── 6. 返回事实快照 ──
+    trade_date_yyyymmdd = trade_date_node.replace("-", "")
+    captured_at_suffix = captured_at.strftime("%Y%m%dT%H%M%S%fZ")
+    snapshot_id = f"trace-quick-{trade_date_yyyymmdd}-{captured_at_suffix}"
 
     return MarketTraceSnapshot(
         snapshot_id=snapshot_id,

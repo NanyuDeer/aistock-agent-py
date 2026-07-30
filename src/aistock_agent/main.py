@@ -51,9 +51,38 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.error("scheduler_start_failed", exc_info=True)
 
+    # 启动事件消费者（quick_snapshot_enabled 时）
+    if settings.quick_snapshot_enabled:
+        try:
+            from aistock_agent.services.event_bus import EventBus
+            from aistock_agent.services.event_consumers import ConsumerContext, start_all_consumers
+            from aistock_agent.services.redis_pool import RedisPool as _RP
+
+            redis = await _RP.get_client()
+            event_bus = EventBus(
+                redis,
+                max_retries=settings.event_bus_max_retries,
+                deadletter_prefix=settings.event_bus_deadletter_prefix,
+                consumer_group=settings.event_bus_consumer_group,
+                stream_max_len=settings.event_stream_max_len,
+            )
+            ctx = ConsumerContext(event_bus)
+            start_all_consumers(ctx)
+            logger.info("event_consumers_started")
+        except Exception:
+            logger.error("event_consumers_start_failed", exc_info=True)
+
     yield
 
-    # 关闭：优雅释放（先停调度器，再关连接池——晨报任务依赖 Redis 缓存）
+    # 关闭：先停消费者，再停调度器，最后关连接池
+    if settings.quick_snapshot_enabled:
+        try:
+            from aistock_agent.services.event_consumers import stop_all_consumers
+
+            await stop_all_consumers()
+        except Exception:
+            logger.error("event_consumers_stop_failed", exc_info=True)
+
     shutdown_scheduler()
     await RedisPool.close()
     await HttpClientPool.close()

@@ -10,7 +10,9 @@ build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推�
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -36,6 +38,17 @@ from aistock_agent.services.phenomenon_discovery import discover_market_phenomen
 from aistock_agent.state.schema import AgentState
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class ReviewRunResult:
+    """run_review 的返回值。"""
+
+    status: Literal["ok", "degraded", "skipped"]
+    report_date: str
+    snapshot_kind: Literal["quick", "full"]
+    trace_id: str
+    markdown: str
 
 # ============================================================================
 # 常量
@@ -813,3 +826,252 @@ async def run(state: AgentState) -> dict[str, object]:
     await _persist_review_report(state, artifact)
 
     return {"final_response": markdown}
+
+
+# ============================================================================
+# run_review — 事件驱动直接调用入口（Gap 2）
+# ============================================================================
+
+
+async def run_review(
+    *,
+    report_date: str,
+    snapshot_kind: Literal["quick", "full"],
+    trace_id: str,
+) -> ReviewRunResult:
+    """收盘溯源直接调用入口（供 scheduler 和 trigger 端点使用）。
+
+    与 run(state) 的区别：
+    - run(state) 是 LangGraph 节点入口，返回 {"final_response": markdown}
+    - run_review 是直接调用入口，返回 ReviewRunResult（含 status/metadata）
+
+    snapshot_kind 决定使用 quick 还是 full 快照：
+    - quick: 调用 build_quick_snapshot（腾讯实时行情，15:30 可用）
+    - full:  调用 build_market_trace_snapshot（Tushare 完整数据，20:30 可用）
+
+    覆盖逻辑：snapshot_kind="quick" 时先检查是否已有 full 报告。
+    如果已有 full，跳过持久化（quick 不覆盖 full），返回 status="skipped"。
+    """
+    logger.info(
+        "run_review_start",
+        report_date=report_date,
+        snapshot_kind=snapshot_kind,
+        trace_id=trace_id,
+    )
+
+    # 覆盖检查：quick 时如果已有 full 报告，跳过
+    if snapshot_kind == "quick":
+        existing = await node_api.get_analysis_report("review", report_date)
+        if _is_full_report(existing):
+            logger.info(
+                "run_review_skipped_quick_overridden_by_full",
+                report_date=report_date,
+                trace_id=trace_id,
+            )
+            return ReviewRunResult(
+                status="skipped",
+                report_date=report_date,
+                snapshot_kind=snapshot_kind,
+                trace_id=trace_id,
+                markdown="",
+            )
+
+    # 选择快照构建函数
+    if snapshot_kind == "quick":
+        from aistock_agent.services.market_trace_snapshot import (
+            build_quick_snapshot,
+        )
+
+        build_fn = build_quick_snapshot
+    else:
+        from aistock_agent.services.market_trace_snapshot import (
+            build_market_trace_snapshot,
+        )
+
+        build_fn = build_market_trace_snapshot
+
+    # 冻结事实快照
+    try:
+        snapshot = await build_fn(report_date)
+    except Exception as e:
+        logger.error(
+            "run_review_snapshot_failed",
+            error=str(e),
+            exc_info=True,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    # 校验 + 归档
+    try:
+        validate_snapshot_discovery(snapshot)
+    except ValueError as e:
+        logger.error(
+            "run_review_discovery_validation_failed",
+            error=str(e),
+            exc_info=True,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    try:
+        archive_market_trace_snapshot(snapshot)
+    except Exception as e:
+        logger.error(
+            "run_review_archive_snapshot_failed",
+            error=str(e),
+            exc_info=True,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    # discovery 为空时构造空 trace
+    discovery_status = snapshot.phenomenon_discovery.status
+    if discovery_status in {"no_phenomenon", "insufficient_data"}:
+        trace = MarketTraceResult(
+            schema_version="1.1",
+            attribution_status=(
+                "not_applicable" if discovery_status == "no_phenomenon" else "insufficient"
+            ),
+            candidates=[],
+            primary_chain_id=None,
+            alternative_chain_id=None,
+            confidence="low",
+            unresolved_questions=_readiness_questions(
+                snapshot.phenomenon_discovery,
+                snapshot.missing_fields,
+            ),
+        )
+    else:
+        trace = None
+
+    # LLM 推理 + 校验
+    try:
+        if trace is None:
+            llm = get_deep_think()
+            snapshot_json = snapshot.model_dump_json(indent=2)
+            messages = [
+                SystemMessage(content=REVIEW_PROMPT),
+                HumanMessage(content=snapshot_json),
+            ]
+            ai_message = await llm.ainvoke(messages)
+            raw_text = (
+                ai_message.content
+                if isinstance(ai_message.content, str)
+                else str(ai_message.content)
+            )
+            cleaned = _strip_code_fences(raw_text)
+            trace = MarketTraceResult.model_validate_json(cleaned)
+        validate_trace_against_snapshot(trace, snapshot)
+    except Exception as e:
+        logger.error(
+            "run_review_trace_validation_failed",
+            error=str(e),
+            exc_info=True,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    # 渲染 + 构造 artifact
+    markdown = render_market_trace_markdown(trace, snapshot)
+    artifact = ReviewArtifact(
+        schema_version="1.1",
+        snapshot=snapshot,
+        trace=trace,
+        markdown=markdown,
+        trace_summary=_extract_trace_summary(markdown),
+        sectors=_extract_review_sectors(markdown),
+    )
+
+    # 归档 + 缓存
+    if not archive_review(markdown, snapshot.snapshot_id):
+        logger.error(
+            "run_review_archive_review_failed",
+            snapshot_id=snapshot.snapshot_id,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    if not await set_cached_review(report_date, artifact.model_dump(mode="json")):
+        logger.error(
+            "run_review_cache_set_failed",
+            report_date=report_date,
+            trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=DEGRADED_RESPONSE,
+        )
+
+    # 持久化到 DB
+    try:
+        content = _build_review_report(artifact)
+        await node_api.save_analysis_report(
+            report_type="review",
+            report_date=report_date,
+            data_source=f"review_agent_{snapshot_kind}",
+            content=content,
+        )
+    except Exception as e:
+        logger.warning(
+            "run_review_persist_failed",
+            error=str(e),
+            exc_info=True,
+            trace_id=trace_id,
+        )
+
+    logger.info(
+        "run_review_done",
+        status="ok",
+        report_date=report_date,
+        snapshot_kind=snapshot_kind,
+        trace_id=trace_id,
+    )
+    return ReviewRunResult(
+        status="ok",
+        report_date=report_date,
+        snapshot_kind=snapshot_kind,
+        trace_id=trace_id,
+        markdown=markdown,
+    )
+
+
+def _is_full_report(report: dict[str, object] | None) -> bool:
+    """检查已存在的 review 报告是否为 full 版（data_source 含 'full'）。"""
+    if not report or not isinstance(report, dict):
+        return False
+    data_source = str(report.get("data_source") or "")
+    return "full" in data_source
