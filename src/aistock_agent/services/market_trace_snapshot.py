@@ -134,7 +134,20 @@ def _normalize_date_yyyymmdd(value: object) -> str | None:
     return None
 
 
-_TS_CODE_RE = re.compile(r"^(\d{6})\.(SH|SZ)$")
+_TUSHARE_INDEX_CODE_RE = re.compile(r"^(\d{6})\.(SH|SZ)$", re.IGNORECASE)
+_TENCENT_INDEX_CODE_RE = re.compile(r"^(sh|sz)(\d{6})$", re.IGNORECASE)
+
+
+def _parse_index_ts_code(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str):
+        return None
+    if match := _TUSHARE_INDEX_CODE_RE.fullmatch(value):
+        code, exchange = match.groups()
+        return code, exchange.upper()
+    if match := _TENCENT_INDEX_CODE_RE.fullmatch(value):
+        exchange, code = match.groups()
+        return code, exchange.upper()
+    return None
 
 
 def normalize_a_share(close_data: dict[str, object]) -> dict[str, object]:
@@ -147,11 +160,12 @@ def normalize_a_share(close_data: dict[str, object]) -> dict[str, object]:
             if not isinstance(raw_index, dict):
                 continue
             ts_code = raw_index.get("ts_code")
-            match = _TS_CODE_RE.fullmatch(ts_code) if isinstance(ts_code, str) else None
-            if match is None:
+            parsed_code = _parse_index_ts_code(ts_code)
+            if parsed_code is None:
                 continue
-            code, exchange = match.groups()
+            code, exchange = parsed_code
             normalized_index = dict(raw_index)
+            normalized_index["ts_code"] = f"{code}.{exchange}"
             normalized_index["change_pct"] = normalized_index.pop(
                 "pct_chg", normalized_index.get("change_pct")
             )

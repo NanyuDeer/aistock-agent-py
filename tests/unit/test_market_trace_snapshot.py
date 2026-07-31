@@ -295,6 +295,14 @@ def test_normalize_a_share_keeps_already_normalized_index_change_pct():
     assert indexes["SH000001"]["change_pct"] == -1.2
 
 
+def test_normalize_a_share_accepts_legacy_tencent_index_code():
+    result = normalize_a_share({"indexes": [{"ts_code": "sh000001", "pct_chg": 0.5}]})
+
+    index = result["indexes"]["SH000001"]
+    assert index["ts_code"] == "000001.SH"
+    assert index["source_id"] == "INDEX_000001_SH"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "missing_value", "source_id", "missing_field"),
