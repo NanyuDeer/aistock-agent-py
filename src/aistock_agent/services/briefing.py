@@ -12,13 +12,14 @@ from aistock_agent.utils.report_parser import extract_podcast_brief
 BriefType = Literal["morning", "evening"]
 
 _REQUIRED_TYPES: dict[BriefType, tuple[str, ...]] = {
-    "morning": ("morning", "wind_leader", "hot_burst"),
+    "morning": ("morning", "wind_leader", "hot_burst", "trend_score"),
     "evening": ("review", "market_snapshot", "iterate"),
 }
 _TITLES = {
     "morning": "晨间市场展望",
     "wind_leader": "长期风口与龙头",
     "hot_burst": "机构调研热点",
+    "trend_score": "趋势股评分",
     "event_conduction": "事件传导分析",
     "review": "收盘复盘",
     "market_snapshot": "市场快照",
