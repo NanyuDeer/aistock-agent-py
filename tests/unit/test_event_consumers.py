@@ -74,11 +74,24 @@ async def test_snapshot_consumer_publishes_iterate_for_full_kind(mock_event_bus,
     consumer = SnapshotConsumer(ctx)
     event = Event(event_id="evt-3", channel="snapshot", payload={"report_date": "2026-07-30", "snapshot_kind": "full"})
 
-    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value={"date": "2026-07-30", "data": {}}) as mock_snap:
+    snapshot = {
+        "date": "2026-07-30",
+        "dimension_1_coverage": {"hit_rate": 0.85, "new_coverage_rate": 0.32},
+        "data": {},
+    }
+    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot) as mock_snap:
         await consumer.handle(event)
 
     # full snapshot 完成后触发 iterate
     mock_event_bus.publish.assert_called_once_with("iterate", payload={"report_date": "2026-07-30"})
+    # 持久化 content 必须携带受控 brief_summary，否则 brief_evening 会降级
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "market_snapshot"
+    brief_summary = kwargs["content"]["brief_summary"]
+    assert brief_summary is not None
+    assert brief_summary["schema_version"] == "brief_summary.v1"
+    assert brief_summary["report_type"] == "market_snapshot"
+    assert "市场快照" in brief_summary["summary"]
 
 
 @pytest.mark.asyncio
@@ -87,11 +100,20 @@ async def test_snapshot_consumer_skips_iterate_for_quick_kind(mock_event_bus, mo
     consumer = SnapshotConsumer(ctx)
     event = Event(event_id="evt-4", channel="snapshot", payload={"report_date": "2026-07-30", "snapshot_kind": "quick"})
 
-    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value={"date": "2026-07-30", "data": {}}) as mock_snap:
+    snapshot = {
+        "date": "2026-07-30",
+        "dimension_1_coverage": {"hit_rate": 0.85, "new_coverage_rate": 0.32},
+        "data": {},
+    }
+    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot) as mock_snap:
         await consumer.handle(event)
 
     # quick snapshot 不触发 iterate
     mock_event_bus.publish.assert_not_called()
+    # quick snapshot 同样持久化 brief_summary（晚间 brief 依赖）
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "market_snapshot"
+    assert kwargs["content"]["brief_summary"] is not None
 
 
 @pytest.mark.asyncio
@@ -101,10 +123,18 @@ async def test_iterate_consumer_publishes_broadcast(mock_event_bus, mock_node_ap
     event = Event(event_id="evt-5", channel="iterate", payload={"report_date": "2026-07-30"})
 
     with patch("aistock_agent.agents.workers.iterate.run", new_callable=AsyncMock) as mock_iter:
-        mock_iter.return_value = {"final_response": '{"status":"ok"}'}
+        mock_iter.return_value = {"final_response": '{"status":"normal","triggered_dimensions":[]}'}
         await consumer.handle(event)
 
     mock_event_bus.publish.assert_called_once_with("broadcast", payload={"report_date": "2026-07-30"})
+    # 持久化 content 必须携带受控 brief_summary，否则 brief_evening 会降级
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "iterate"
+    brief_summary = kwargs["content"]["brief_summary"]
+    assert brief_summary is not None
+    assert brief_summary["schema_version"] == "brief_summary.v1"
+    assert brief_summary["report_type"] == "iterate"
+    assert brief_summary["summary"] == "今日无显著异常"
 
 
 @pytest.mark.asyncio

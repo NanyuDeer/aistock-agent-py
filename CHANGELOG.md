@@ -2,6 +2,18 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-08-01 — 事件驱动晚报链路 brief_summary 缺失修复
+
+**开发者**: 37588
+
+### 修复
+- `services/event_consumers.py`：`SnapshotConsumer` / `IterateConsumer` 持久化 content 补上 `brief_summary`（复用 `brief_contract.build_market_snapshot_brief_summary` / `build_iterate_brief_summary`，与 scheduler 旧串行链路一致），修复每个交易日 15:30 后 `brief_evening`/`broadcast_evening` 因 `missing_sources=['market_snapshot','iterate']` 降级的问题
+
+### 测试
+- `tests/unit/test_event_consumers.py`：3 个测试补 `brief_summary` 断言（TDD 红→绿），消费者单测 6/6 通过
+- 集成 `tests/integration/test_evening_chain_event_driven.py` 4/4 通过；ruff 无新增告警
+
+---
 ## [changer] 2026-07-31 — CHAT QA 全线降级修复（4 项）
 
 **开发者**: 37588
