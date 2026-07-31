@@ -107,7 +107,22 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 {evidence_text}
 
 请基于以上证据，按 {mode} 模式生成回答。
-输出 Insight 结构：conclusion（直接回答）、basis（引用的 Evidence 索引列表）、confidence（high/medium/low）、uncertainty（不确定项列表）、answer_mode（必须为 {mode}）。
+严格按下方 JSON 输出契约返回，唯一顶层包装：
+
+{{
+  "insight": {{
+    "conclusion": "直接回答用户问题的结论",
+    "basis": [],
+    "confidence": "low",
+    "uncertainty": [],
+    "answer_mode": "{mode}"
+  }}
+}}
+
+字段约束：
+- 顶层只能有 insight 一个字段，禁止输出裸 conclusion、basis 等字段
+- basis 必须是完整 Evidence 对象列表，逐条对应上面的证据条目，禁止只写索引数字
+- answer_mode 必须为 {mode}
 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
