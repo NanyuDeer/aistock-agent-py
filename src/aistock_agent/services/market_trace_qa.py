@@ -192,7 +192,7 @@ async def answer_market_trace_qa(
         return _degraded_response(session, artifact_id, "报告服务读取失败/暂不可用")
     report = report_result.report
     report_id = report.get("id")
-    artifact_id = report_id.strip() if isinstance(report_id, str) and report_id.strip() else ""
+    artifact_id = str(report_id).strip() if report_id is not None else ""
     if report.get("status") != "completed":
         return _degraded_response(session, artifact_id, "复盘报告未完成")
 

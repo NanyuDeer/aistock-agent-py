@@ -316,6 +316,33 @@ async def test_happy_path_returns_structured_response_with_trace():
     assert source_ids == ["INDEX_000001_SH", "NEWS_001"]
 
 
+@pytest.mark.asyncio
+async def test_numeric_report_id_is_returned_as_trace_artifact_id() -> None:
+    """Persisted numeric report IDs must remain visible at the QA trace boundary."""
+    report = {
+        "id": 69,
+        "content": _make_report_content(),
+        "status": "completed",
+    }
+    llm_resp = _make_llm_response(
+        "candidate", ["INDEX_000001_SH", "NEWS_001"], "domestic_macro_policy"
+    )
+
+    with (
+        patch(
+            "aistock_agent.services.market_trace_qa.node_api.get_review_analysis_report",
+            new=AsyncMock(return_value=_found_review_report(report)),
+        ),
+        patch(
+            "aistock_agent.services.market_trace_qa.get_deep_think",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=llm_resp)),
+        ),
+    ):
+        response = await answer_market_trace_qa("大盘为何涨跌", _REPORT_DATE, "test")
+
+    assert response.trace.artifact_id == "69"
+
+
 def test_candidate_source_ids_are_complete_and_follow_snapshot_order() -> None:
     trace = MarketTraceResult.model_validate(VALID_TRACE_DICT)
     candidate = next(item for item in trace.candidates if item.id == "domestic_macro_policy")
