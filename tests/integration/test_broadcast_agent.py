@@ -51,6 +51,50 @@ async def test_broadcast_default_placeholders():
 
 
 @pytest.mark.asyncio
+async def test_evening_broadcast_uses_controlled_evening_brief_in_prompt():
+    """晚报仅将受控 brief_evening 条目作为模型事实输入。"""
+    mock_llm = _make_mock_llm("播报内容")
+    mock_node_api = MagicMock()
+    evening_brief = {
+        "content": {
+            "schema_version": "brief.v1",
+            "items": [
+                {"title": "收盘复盘", "conclusion": "沪指收涨，成交额温和放大。"},
+                {"title": "市场快照", "conclusion": "科技板块领涨，资金分化延续。"},
+                {"title": "迭代分析", "conclusion": "关注量能能否持续改善。"},
+            ],
+        },
+    }
+
+    async def get_evening_brief(report_type: str, report_date: str):
+        assert report_type == "brief_evening"
+        assert report_date == "2026-07-31"
+        return evening_brief
+
+    mock_node_api.get_analysis_report = AsyncMock(side_effect=get_evening_brief)
+
+    with (
+        patch(_GET_DEEP_THINK, return_value=mock_llm),
+        patch(_NODE_API, mock_node_api),
+    ):
+        await run({
+            "messages": [],
+            "analysis_reports": {},
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-31",
+            "brief_type": "evening",
+        })
+
+    invoke_args = mock_llm.ainvoke.call_args[0][0]
+    system_msg = invoke_args[0]
+    assert "收盘播报" in system_msg.content
+    assert "收盘复盘：沪指收涨，成交额温和放大。" in system_msg.content
+    assert "市场快照：科技板块领涨，资金分化延续。" in system_msg.content
+    assert "迭代分析：关注量能能否持续改善。" in system_msg.content
+    assert "晨报：" not in system_msg.content
+
+
+@pytest.mark.asyncio
 async def test_broadcast_response_extraction():
     """验证 final_response 正确提取"""
     expected = "主持人：大家好...分析师：今日风口..."
