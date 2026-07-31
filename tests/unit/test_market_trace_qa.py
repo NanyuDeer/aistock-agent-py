@@ -460,7 +460,9 @@ async def test_no_phenomenon_returns_fixed_business_answer_without_llm() -> None
         result = await answer_market_trace_qa("市场发生了什么", _REPORT_DATE, None)
 
     assert result.trace.degraded is False
-    assert result.trace.sources == []
+    assert [source.source_id for source in result.trace.sources] == [
+        source_id for source_id in _SOURCES if source_id.startswith("INDEX_") or source_id == "BREADTH_ALL"
+    ]
     assert result.content == "行情完整，未发现显著市场现象"
     assert result.trace.uncertainty == ["未检测到明确的市场主导现象"]
     llm_factory.assert_not_called()
