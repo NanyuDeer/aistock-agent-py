@@ -19,6 +19,7 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.market_trace_snapshot import (
     MarketTraceSnapshotUnavailable,
     build_market_trace_snapshot,
+    build_quick_snapshot,
     normalize_a_share,
 )
 
@@ -807,7 +808,6 @@ async def test_snapshot_id_includes_captured_at_for_safe_retry(mocker):
 async def test_build_quick_snapshot_success(mocker):
     """quick snapshot 成功构建：Node 返回 quick 数据 + 外部来源正常。"""
     from aistock_agent.services.market_trace_snapshot import (
-        MarketTraceSnapshotUnavailable,
         build_quick_snapshot,
     )
 
@@ -886,3 +886,227 @@ async def test_build_quick_snapshot_raises_on_trade_date_mismatch(mocker):
 
     with pytest.raises(MarketTraceSnapshotUnavailable, match="trade_date"):
         await build_quick_snapshot("2026-07-30")
+
+
+# ============================================================================
+# Task 2 — quick availability and source-collection diagnostics
+# ============================================================================
+
+
+def _quick_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "complete",
+        "trade_date": "20260730",
+        "indexes": [
+            {
+                "ts_code": "000001.SH",
+                "name": "上证指数",
+                "close": 3200.0,
+                "pct_chg": 1.2,
+                "amount": 3_000_000_000,
+            }
+        ],
+        "breadth": {
+            "total_count": 10,
+            "advance_count": 8,
+            "decline_count": 2,
+            "flat_count": 0,
+            "advance_ratio": 0.8,
+        },
+        "quick_data_availability": {
+            "breadth": {"state": "available"},
+            "turnover": {"state": "unavailable", "reason": "prior_day_amount_unavailable"},
+            "limits": {
+                "state": "partial",
+                "available_fields": ["up_count", "down_count"],
+                "approximate": True,
+            },
+            "sectors": {"state": "unavailable", "reason": "provider_empty"},
+            "main_force": {"state": "unavailable", "reason": "moneyflow_ths_unavailable"},
+        },
+        "coverage": {"current_daily": {"complete": False}},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_snapshot_diagnostics_defaults_preserve_historical_report_parsing() -> None:
+    snapshot = MarketTraceSnapshot(
+        snapshot_id="trace-legacy",
+        trade_date="2026-07-19",
+        captured_at=datetime(2026, 7, 19, tzinfo=UTC),
+        a_share={},
+        sources={},
+        missing_fields=[],
+        phenomenon_discovery=PhenomenonDiscoveryResult(
+            status="no_phenomenon",
+            primary=None,
+            concurrent_phenomena=[],
+            data_readiness=DataReadiness(
+                market_data="complete",
+                attribution_inputs="missing",
+                causal_evidence="not_ready",
+            ),
+            diagnostics=[],
+        ),
+    )
+
+    assert snapshot.data_availability == {}
+    assert snapshot.collection_status == {}
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_uses_canonical_breadth_ratio(mocker) -> None:
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=_quick_payload()))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+
+    assert "BREADTH_ALL" in snapshot.sources
+    assert "advance_ratio=0.8" in snapshot.sources["BREADTH_ALL"].content
+    assert snapshot.data_availability["breadth"].state == "available"
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_omits_unavailable_zero_placeholder_facts(mocker) -> None:
+    quick_data = _quick_payload(
+        turnover={"amount_yuan": 0, "previous_amount_yuan": 0, "change_pct": 0},
+        limits={"up_count": 0, "down_count": 0, "broken_count": 0, "highest_board": 0},
+        main_force={"large_and_extra_large_net_yuan": 0},
+        sectors={"top_gainers": [], "top_losers": [], "top_inflows": [], "top_outflows": []},
+    )
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+
+    assert "TURNOVER_ALL" not in snapshot.sources
+    assert "MAIN_FORCE_ALL" not in snapshot.sources
+    assert "SECTORS_ALL" not in snapshot.sources
+    assert "LIMITS_ALL" in snapshot.sources
+    assert "approximate=true" in snapshot.sources["LIMITS_ALL"].content
+    assert snapshot.data_availability["turnover"].state == "unavailable"
+    assert snapshot.data_availability["limits"].state == "partial"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_persists_empty_and_invalid_source_collection_statuses(mocker) -> None:
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=_quick_payload()))
+    mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        side_effect=[
+            {"results": [{"title": "无 URL", "published_date": "2020-01-01T00:00:00Z"}]},
+            {"results": []},
+        ],
+    )
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+
+    assert snapshot.collection_status["global_markets"].model_dump() == {
+        "state": "empty",
+        "provider": "yfinance",
+        "item_count": 0,
+        "reason": "provider_returned_no_items",
+    }
+    assert snapshot.collection_status["cls_news"].state == "empty"
+    assert snapshot.collection_status["tavily_domestic_policy"].model_dump() == {
+        "state": "invalid_for_causality",
+        "provider": "tavily",
+        "item_count": 1,
+        "reason": "items_missing_url_or_occurred_at",
+    }
+    assert snapshot.collection_status["tavily_global_risk"].state == "empty"
+    assert snapshot.sources["SEARCH_001"].url is None
+
+
+@pytest.mark.asyncio
+async def test_quick_partial_limits_preserve_any_declared_numeric_field_and_safe_reason(
+    mocker,
+) -> None:
+    quick_data = _quick_payload(
+        limits={"broken_count": 0},
+        quick_data_availability={
+            "breadth": {"state": "available"},
+            "turnover": {
+                "state": "unavailable",
+                "reason": "Authorization: Bearer secret-token",
+            },
+            "limits": {
+                "state": "partial",
+                "available_fields": ["broken_count"],
+                "approximate": True,
+            },
+            "sectors": {"state": "unavailable", "reason": "provider_empty"},
+            "main_force": {"state": "unavailable", "reason": "moneyflow_ths_unavailable"},
+        },
+    )
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
+    mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+
+    assert snapshot.sources["LIMITS_ALL"].content == "broken_count=0, approximate=true"
+    assert snapshot.data_availability["limits"].state == "partial"
+    assert snapshot.data_availability["turnover"].reason == "provider_reported_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_quick_available_zero_market_observations_remain_facts(mocker) -> None:
+    quick_data = _quick_payload(
+        turnover={"amount_yuan": 0, "previous_amount_yuan": 0, "change_pct": 0},
+        limits={"up_count": 0, "down_count": 0, "broken_count": 0, "highest_board": 0},
+        main_force={"large_and_extra_large_net_yuan": 0},
+        quick_data_availability={
+            "breadth": {"state": "available"},
+            "turnover": {"state": "available"},
+            "limits": {"state": "available"},
+            "sectors": {"state": "unavailable", "reason": "provider_empty"},
+            "main_force": {"state": "available"},
+        },
+    )
+    mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
+    mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_quick_snapshot("2026-07-30")
+
+    assert {"TURNOVER_ALL", "LIMITS_ALL", "MAIN_FORCE_ALL"}.issubset(snapshot.sources)
+    assert "a_share.turnover" not in snapshot.missing_fields
+    assert "a_share.limits" not in snapshot.missing_fields
+    assert "a_share.main_force.large_and_extra_large_net_yuan" not in snapshot.missing_fields

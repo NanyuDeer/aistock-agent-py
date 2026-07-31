@@ -7,7 +7,7 @@
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # 市场现象 kind 的 Literal 别名。
 MarketPhenomenonKind: TypeAlias = Literal[
@@ -35,6 +35,28 @@ class DataReadiness(BaseModel):
     market_data: Literal["complete", "incomplete"]
     attribution_inputs: Literal["complete", "partial", "missing"]
     causal_evidence: Literal["ready", "partial", "not_ready"]
+
+
+class DataAvailability(BaseModel):
+    """Availability of a market fact in the frozen snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["available", "partial", "unavailable"]
+    available_fields: list[str] = Field(default_factory=list)
+    approximate: bool = False
+    reason: str | None = None
+
+
+class SourceCollectionStatus(BaseModel):
+    """Outcome of collecting one auxiliary source family."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["available", "empty", "unavailable", "invalid_for_causality"]
+    provider: str
+    item_count: int = 0
+    reason: str | None = None
 
 
 class RuleDiagnostic(BaseModel):
@@ -128,6 +150,8 @@ class MarketTraceSnapshot(BaseModel):
     sources: dict[str, SourceRecord]
     missing_fields: list[str]
     phenomenon_discovery: PhenomenonDiscoveryResult
+    data_availability: dict[str, DataAvailability] = Field(default_factory=dict)
+    collection_status: dict[str, SourceCollectionStatus] = Field(default_factory=dict)
 
 
 class ReviewArtifact(BaseModel):
