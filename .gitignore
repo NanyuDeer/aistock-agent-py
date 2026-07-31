@@ -43,6 +43,9 @@ changelog-pending.md
 # Superpowers SDD 工作目录（brief/report/diff 临时文件）
 .superpowers/
 
+# Isolated local Git worktrees
+.worktrees/
+
 # Agent 运行时输出（晨报等动态生成，不提交）
 docs/agent-outputs/
 data/audio/
