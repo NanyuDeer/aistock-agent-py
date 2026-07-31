@@ -12,19 +12,24 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.observability.logging import get_logger
-from aistock_agent.utils.date import shanghai_today
 from aistock_agent.prompts.workers.trend_score import TREND_SCORE_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
+from aistock_agent.utils.report_parser import (
+    is_dual_layer_valid,
+    parse_dual_layer_response,
+    repair_dual_layer_with_llm,
+)
 
 logger = get_logger(__name__)
 
 # 趋势股分析归档目录
 TREND_SCORE_OUTPUT_DIR = Path("docs/agent-outputs/trend_score")
+PERSISTED_TRIGGER_SOURCES = frozenset({"manual", "scheduler"})
 
 
 async def run(state: AgentState) -> dict[str, object]:
@@ -58,8 +63,8 @@ async def run(state: AgentState) -> dict[str, object]:
         # 归档到文件（供后续复盘分析使用）
         if final_response:
             _archive_trend_score(final_response)
-            # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
-            if state.get("trigger_source") == "scheduler":
+            # 持久化到数据库（手动或 scheduler 触发时，供 broadcast_agent 等下游读取）
+            if state.get("trigger_source") in PERSISTED_TRIGGER_SOURCES:
                 report_date = state.get("report_date") or shanghai_today().isoformat()
                 dual_layer_content = parse_dual_layer_response(final_response)
                 if not is_dual_layer_valid(dual_layer_content):
