@@ -91,7 +91,9 @@ def _safe_optional_str(value: object) -> str | None:
     会让 mypy 推断为 ``object | None``（因为两次 ``get`` 调用结果分别判定），
     通过本函数一次性收窄，避免 ``type: ignore``。
     """
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _has_numeric_fields(record: dict[str, object], fields: tuple[str, ...]) -> bool:
@@ -322,7 +324,18 @@ def _normalize_aggregate_facts(
         _availability_allows_fact(breadth_availability, is_quick)
         and isinstance(breadth_dict, dict)
         and _has_numeric_fields(breadth_dict, breadth_fields)
+        and all(
+            math.isfinite(float(breadth_dict[field]))
+            and float(breadth_dict[field]).is_integer()
+            and float(breadth_dict[field]) >= 0
+            for field in ("total_count", "advance_count", "decline_count", "flat_count")
+        )
         and float(breadth_dict["total_count"]) > 0
+        and float(breadth_dict["advance_count"]) <= float(breadth_dict["total_count"])
+        and float(breadth_dict["decline_count"]) <= float(breadth_dict["total_count"])
+        and float(breadth_dict["flat_count"]) <= float(breadth_dict["total_count"])
+        and math.isfinite(float(breadth_dict["advance_ratio"]))
+        and 0 <= float(breadth_dict["advance_ratio"]) <= 1
         and float(breadth_dict["advance_count"])
         + float(breadth_dict["decline_count"])
         + float(breadth_dict["flat_count"])
