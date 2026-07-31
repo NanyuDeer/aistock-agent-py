@@ -2,6 +2,32 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-31 — P1.5 三个新 Skills + P0 阻塞修复（chat-qa json_mode + 澄清兜底）
+
+**开发者**: 37588
+
+### 新增 — P1.5 Skills
+- `skills/evidence_resolver.py`：只读已持久化 ReviewArtifact 证据（缓存未命中按既定策略补齐）
+- `skills/sector_snapshot.py`：板块强弱与风口龙头快照
+- `skills/market_snapshot.py`：大盘概览与全球市场快照
+- 三个 Skill 注册进 `skill_executor.SKILL_REGISTRY`，`qa_router` 的 SYSTEM_PROMPT 与关键词兜底表同步支持（`chat_contract` 的 `SkillCall`/`InsightGoal` Literal 扩展）
+- `skills/trace_lookup.py` 重构为复用 `evidence_resolver.resolve_trace_evidence`（保留 `skill_name="trace_lookup"` / `ChatSource.kind="trace"` 契约）
+- 单元测试：`test_evidence_resolver` / `test_market_snapshot` / `test_sector_snapshot`；图内集成：`test_chat_e2e_direct`
+
+### 修复 — P0 上线阻塞（CHAT QA）
+- `services/llm.py` 新增 `with_chat_structured_output()` helper（固定 `method="json_mode"`），`qa_router` / `synth_answer` 统一换用，消除 DeepSeek thinking mode 的 `tool_choice` 报错
+- `graph/nodes/qa_router.py`：关键词兜底仅对六位股票代码返回个股 SkillCall（`_extract_stock_symbol`），缺失时写入 `clarification` 状态
+- `graph/nodes/synth_answer.py`：澄清状态短路返回「请提供 6 位股票代码后重试。」，不触发 deep LLM
+- `QuestionState` / `build_chat_initial_state()` / `/qa` 初始状态声明 `clarification: str | None`
+- 测试：单元（test_llm / test_qa_router / test_synth_answer / test_chat_legacy_replacement）+ 集成（test_chat_degraded / test_chat_legacy_replacement / test_ws_chat_replacement）共 52 passed
+
+### 新增 — 其他
+- `api/routes.py`：`/trace/stock/trigger` 端点（个股异动 Trace 触发：Node StockInfoPushService → alert.run → 持久化，每窗口每 symbol 一次）
+- `schemas/stock_trace.py`、`agents/workers/alert.py` 扩展（stock_trace 触发源）
+- 历史现象发现规则配置（`config.py` 的 `phenomenon_*` 阈值项）与 `services/phenomenon_discovery.py` 增强
+
+---
+
 ## [changer] 2026-07-30 — evening_chain 事件驱动重构（Redis Stream 事件总线 + quick/full 双模复盘）
 
 **开发者**: 37588
