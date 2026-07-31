@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -65,9 +66,21 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
+_STOCK_SYMBOL_RE = re.compile(r"(?<!\d)(?:sh|sz)?(\d{6})(?!\d)", re.IGNORECASE)
+_STOCK_SYMBOL_CLARIFICATION = "请提供 6 位股票代码后重试。"
 
-def route_by_keyword_fallback(message: str) -> SkillCall:
-    """关键词规则兜底：返回最匹配的 SkillCall。"""
+
+def _extract_stock_symbol(message: str) -> str | None:
+    match = _STOCK_SYMBOL_RE.search(message)
+    return match.group(1) if match else None
+
+
+def route_by_keyword_fallback(message: str) -> SkillCall | None:
+    """关键词规则兜底：返回最匹配的 SkillCall。
+
+    个股类（stock_snapshot/stock_news）未命中 6 位代码时返回 None，
+    由上层写澄清状态，避免空 symbol 触发 Skill 异常。
+    """
     for keywords, skill_name in KEYWORD_FALLBACK:
         if any(kw in message for kw in keywords):
             return _build_default_skill_call(skill_name, message)
@@ -75,8 +88,8 @@ def route_by_keyword_fallback(message: str) -> SkillCall:
     return _build_default_skill_call("report_lookup", message)
 
 
-def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
-    """构建兜底 SkillCall，args 用合理默认值。"""
+def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None:
+    """构建兜底 SkillCall，args 用合理默认值；个股类缺失代码时返回 None。"""
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     if skill_name == "report_lookup":
         return SkillCall(
@@ -84,9 +97,15 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
             args={"report_type": "review", "date": today},
         )
     if skill_name == "stock_snapshot":
-        return SkillCall(skill_name="stock_snapshot", args={"symbol": ""})
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="stock_snapshot", args={"symbol": symbol})
     if skill_name == "stock_news":
-        return SkillCall(skill_name="stock_news", args={"symbol": "", "limit": 10})
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="stock_news", args={"symbol": symbol, "limit": 10})
     if skill_name == "trace_lookup":
         return SkillCall(skill_name="trace_lookup", args={"date": today})
     if skill_name == "evidence_resolver":
@@ -101,7 +120,7 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
     if skill_name == "industry_relation":
         return SkillCall(
             skill_name="industry_relation",
-            args={"keywords": [message[:10]]},
+            args={"keywords": [message.strip()]},
         )
     return SkillCall(skill_name="report_lookup", args={})
 
@@ -149,6 +168,21 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         logger.warning("qa_router.llm_failed", err=str(exc), exc_info=True)
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
+        # 个股意图但缺失 6 位代码：不执行空参 Skill，写澄清状态让 synth_answer 短路
+        if fallback_call is None:
+            goal = InsightGoal(
+                question=message,
+                intent="report_lookup",
+                constraints={"router_fallback": "true"},
+            )
+            logger.info("qa_router.fallback.clarification", reason="missing_stock_symbol")
+            metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+            return {
+                "goal": goal,
+                "plan": "direct",
+                "skill_calls": [],
+                "clarification": _STOCK_SYMBOL_CLARIFICATION,
+            }
         # 推断 intent
         intent_map = {
             "evidence_resolver": "evidence_resolver",

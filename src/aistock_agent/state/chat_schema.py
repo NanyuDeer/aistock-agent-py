@@ -32,3 +32,4 @@ class QuestionState(TypedDict, total=False):
     insight: Insight | None
     final_response: str
     trace: AnswerTrace | None
+    clarification: str | None

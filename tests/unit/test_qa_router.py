@@ -32,13 +32,15 @@ def test_route_by_keyword_fallback_report():
 
 
 def test_route_by_keyword_fallback_stock():
-    call = route_by_keyword_fallback("茅台现在多少钱")
+    call = route_by_keyword_fallback("600519 现在多少钱")
     assert call.skill_name == "stock_snapshot"
+    assert call.args == {"symbol": "600519"}
 
 
 def test_route_by_keyword_fallback_news():
-    call = route_by_keyword_fallback("茅台最近新闻")
+    call = route_by_keyword_fallback("sh600519 最近新闻")
     assert call.skill_name == "stock_news"
+    assert call.args == {"symbol": "600519", "limit": 10}
 
 
 def test_route_by_keyword_fallback_trace():
@@ -145,3 +147,19 @@ async def test_qa_router_llm_failure_market_snapshot():
     assert result["skill_calls"][0].skill_name == "market_snapshot"
     assert result["goal"].intent == "market_snapshot"
     assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+def test_keyword_fallback_stock_news_extracts_six_digit_symbol() -> None:
+    call = route_by_keyword_fallback("600519 最近新闻")
+    assert call is not None
+    assert call.args == {"symbol": "600519", "limit": 10}
+
+
+def test_keyword_fallback_stock_news_without_symbol_returns_none() -> None:
+    assert route_by_keyword_fallback("茅台最近新闻") is None
+
+
+def test_keyword_fallback_industry_keeps_keyword_list() -> None:
+    call = route_by_keyword_fallback("白酒板块上下游")
+    assert call is not None
+    assert call.args["keywords"] == ["白酒板块上下游"]

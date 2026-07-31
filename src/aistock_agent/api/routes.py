@@ -1242,6 +1242,7 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         "insight": None,
         "final_response": "",
         "trace": None,
+        "clarification": None,
     }
 
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}

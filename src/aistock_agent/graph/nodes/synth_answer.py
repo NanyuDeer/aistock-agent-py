@@ -153,6 +153,29 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content="内部错误：缺少目标")],
         }
 
+    # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
+    clarification = state.get("clarification")
+    if clarification:
+        insight = Insight(
+            conclusion=clarification,
+            basis=[],
+            confidence="low",
+            uncertainty=["需要股票代码才能执行个股查询"],
+            answer_mode="validate",
+        )
+        return {
+            "insight": insight,
+            "final_response": clarification,
+            "trace": AnswerTrace(
+                goal=goal,
+                plan="direct",
+                skill_calls=[],
+                evidences=[],
+                actual_mode="validate",
+            ),
+            "messages": [AIMessage(content=clarification)],
+        }
+
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
 

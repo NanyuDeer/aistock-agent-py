@@ -79,6 +79,7 @@ def build_chat_initial_state(message: str) -> QuestionState:
         "insight": None,
         "final_response": "",
         "trace": None,
+        "clarification": None,
     }
 
 
