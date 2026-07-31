@@ -583,7 +583,9 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
 
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
-    _normalize_aggregate_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_aggregate_facts(
+        normalized_a_share, sources, missing_fields, trade_date_dt, captured_at
+    )
     _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
     _normalize_news_facts(news_data, sources, missing_fields, captured_at)
     _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
@@ -624,7 +626,8 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     """构建 quick 版市场溯源事实快照（15:30 腾讯实时行情）。
 
     与 build_market_trace_snapshot 的区别：
-    - 调用 /internal/market/quick-snapshot（腾讯行情）而非 /internal/market/close-snapshot（Tushare）
+    - 调用 /internal/market/quick-snapshot（腾讯行情）而非
+      /internal/market/close-snapshot（Tushare）
     - 不校验 coverage.current_daily.complete（quick 版 coverage 不完整是正常的）
     - 不校验 previous_daily（quick 版无前日数据）
     - 其余归一化、discovery 逻辑与 full 版一致
@@ -695,7 +698,9 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
 
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
-    _normalize_aggregate_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
+    _normalize_aggregate_facts(
+        normalized_a_share, sources, missing_fields, trade_date_dt, captured_at
+    )
     _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
     _normalize_news_facts(news_data, sources, missing_fields, captured_at)
     _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
