@@ -19,6 +19,7 @@ class InsightGoal(BaseModel):
     tag_codes: list[str] = []
     time_range: Literal["realtime", "today", "recent", "history"] = "today"
     intent: Literal[
+        "capital_flow",
         "evidence_resolver",
         "industry_relation",
         "market_snapshot",
@@ -40,7 +41,7 @@ class ChatSource(BaseModel):
     """CHAT 专用 Source 类型，不与 PROD 的 SourceRecord 双源。"""
 
     source_id: str
-    kind: Literal["db_report", "realtime_quote", "news", "trace", "industry"]
+    kind: Literal["db_report", "realtime_quote", "news", "trace", "industry", "capital_flow"]
     title: str
     url: str | None = None
     snippet: str
@@ -81,6 +82,7 @@ class SkillCall(BaseModel):
     """QA Router 产出的计划项。"""
 
     skill_name: Literal[
+        "capital_flow",
         "evidence_resolver",
         "industry_relation",
         "market_snapshot",

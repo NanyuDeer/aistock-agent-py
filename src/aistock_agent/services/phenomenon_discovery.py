@@ -92,11 +92,12 @@ def _index_returns(
 
 
 def _ordered_real_fact_ids(sources: dict[str, SourceRecord], wanted: set[str]) -> list[str]:
-    return [
+    result = [
         source_id
         for source_id, record in sources.items()
         if source_id in wanted and record.kind == "market_fact"
     ]
+    return sorted(result)
 
 
 def _score_rules(

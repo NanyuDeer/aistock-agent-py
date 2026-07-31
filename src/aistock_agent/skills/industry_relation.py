@@ -20,7 +20,7 @@ async def industry_relation(args: dict[str, Any], goal: InsightGoal) -> Evidence
     if not keywords:
         raise ValueError("industry_relation requires 'keywords' in args or goal.tag_codes")
 
-    result_text = await match_industry_by_keywords(keywords)
+    result_text = await match_industry_by_keywords.ainvoke({"keywords": keywords})
     now = datetime.now(UTC)
 
     facts = [line.strip() for line in result_text.splitlines() if line.strip()]
