@@ -145,14 +145,14 @@ def _score_rules(
     rally_score = 0
     if rally_base:
         rally_score = (
-            1
+            settings.phenomenon_min_match_score
             + int(limit_up >= limit_down + settings.phenomenon_broad_limit_count_gap)
             + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
         )
     decline_score = 0
     if decline_base:
         decline_score = (
-            1
+            settings.phenomenon_min_match_score
             + int(limit_down >= limit_up + settings.phenomenon_broad_limit_count_gap)
             + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
         )
