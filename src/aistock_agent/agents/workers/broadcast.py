@@ -7,11 +7,15 @@
 
 import json
 import re
+from typing import Literal
 
 from langchain_core.messages import SystemMessage
 
 from aistock_agent.observability.logging import get_logger
-from aistock_agent.prompts.workers.broadcast import BROADCAST_ANALYST_PROMPT
+from aistock_agent.prompts.workers.broadcast import (
+    BROADCAST_ANALYST_PROMPT,
+    EVENING_BROADCAST_ANALYST_PROMPT,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
@@ -19,6 +23,36 @@ from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.report_parser import extract_display_report, extract_podcast_brief
 
 logger = get_logger(__name__)
+
+
+def _scheduled_brief_type(state: AgentState) -> Literal["morning", "evening"]:
+    """Return the scheduler brief type, defaulting invalid values to morning."""
+    return "evening" if state.get("brief_type") == "evening" else "morning"
+
+
+def _format_evening_brief_for_prompt(report: dict[str, object] | None) -> str:
+    """Format valid controlled evening-brief items as prompt facts."""
+    unavailable = "晚报事实输入暂不可用；请明确说明当前数据不足以判断。"
+    if not isinstance(report, dict):
+        return unavailable
+
+    content = report.get("content")
+    if not isinstance(content, dict) or content.get("schema_version") != "brief.v1":
+        return unavailable
+
+    items = content.get("items")
+    if not isinstance(items, list):
+        return unavailable
+
+    pairs: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        conclusion = item.get("conclusion")
+        if isinstance(title, str) and title.strip() and isinstance(conclusion, str) and conclusion.strip():
+            pairs.append(f"{title.strip()}：{conclusion.strip()}")
+    return "\n".join(pairs) if pairs else unavailable
 
 
 def _parse_dialogue(text: str) -> list[dict[str, str]]:
@@ -150,13 +184,22 @@ async def run(state: AgentState) -> dict[str, object]:
     try:
         report_date = state.get("report_date")
         analysis_reports = state.get("analysis_reports", {})
+        scheduled_brief_type = _scheduled_brief_type(state)
 
         # scheduler 链路：从数据库读取报告
         morning_report = None
         wind_leader_report = None
         hot_burst_report = None
         trend_score_report = None
-        if report_date:
+        evening_brief_report: dict[str, object] | None = None
+        if report_date and scheduled_brief_type == "evening":
+            evening_brief_report = await node_api.get_analysis_report("brief_evening", report_date)
+            logger.info(
+                "broadcast_evening_brief_from_db",
+                report_date=report_date,
+                has_evening_brief=bool(evening_brief_report),
+            )
+        elif report_date:
             morning_report = await _fetch_report_from_db("morning", report_date)
             wind_leader_report = await _fetch_report_from_db("wind_leader", report_date)
             hot_burst_report = await _fetch_report_from_db("hot_burst", report_date)
@@ -170,15 +213,18 @@ async def run(state: AgentState) -> dict[str, object]:
                 has_trend_score=bool(trend_score_report),
             )
 
-        # 降级到 state.analysis_reports（实时请求或数据库未命中）
-        if not morning_report:
-            morning_report = analysis_reports.get("morning", "暂无晨报")
-        if not wind_leader_report:
-            wind_leader_report = analysis_reports.get("wind_leader", "暂无长线风口分析")
-        if not hot_burst_report:
-            hot_burst_report = analysis_reports.get("hot_burst", "暂无机构调研分析")
-        if not trend_score_report:
-            trend_score_report = analysis_reports.get("trend_score", "暂无趋势股评分分析")
+        if scheduled_brief_type == "evening":
+            evening_brief = _format_evening_brief_for_prompt(evening_brief_report)
+        else:
+            # 降级到 state.analysis_reports（实时请求或数据库未命中）
+            if not morning_report:
+                morning_report = analysis_reports.get("morning", "暂无晨报")
+            if not wind_leader_report:
+                wind_leader_report = analysis_reports.get("wind_leader", "暂无长线风口分析")
+            if not hot_burst_report:
+                hot_burst_report = analysis_reports.get("hot_burst", "暂无机构调研分析")
+            if not trend_score_report:
+                trend_score_report = analysis_reports.get("trend_score", "暂无趋势股评分分析")
 
         logger.info(
             "broadcast_agent_start",
@@ -189,22 +235,27 @@ async def run(state: AgentState) -> dict[str, object]:
             has_trend_score=bool(trend_score_report),
         )
 
-        # 构造提示词（占位符替换）
-        prompt = BROADCAST_ANALYST_PROMPT.replace(
-            "{{MORNING_BRIEF}}", morning_report
-        ).replace(
-            "{{WIND_LEADER}}", wind_leader_report
-        ).replace(
-            "{{HOT_BURST}}", hot_burst_report
-        ).replace(
-            "{{TREND_SCORE}}", trend_score_report
-        )
+        if scheduled_brief_type == "evening":
+            prompt = EVENING_BROADCAST_ANALYST_PROMPT.replace("{{EVENING_BRIEF}}", evening_brief)
+            user_content = "生成今日收盘播报"
+        else:
+            # 构造提示词（占位符替换）
+            prompt = BROADCAST_ANALYST_PROMPT.replace(
+                "{{MORNING_BRIEF}}", morning_report
+            ).replace(
+                "{{WIND_LEADER}}", wind_leader_report
+            ).replace(
+                "{{HOT_BURST}}", hot_burst_report
+            ).replace(
+                "{{TREND_SCORE}}", trend_score_report
+            )
+            user_content = "生成今日盘前播报"
 
         # Step 1: 生成双人对话文本
         llm = get_deep_think()
         response = await llm.ainvoke([
             SystemMessage(content=prompt),
-            {"role": "user", "content": "生成今日播报"},
+            {"role": "user", "content": user_content},
         ])
 
         dialogue_text = extract_final_ai_response([response])
@@ -221,9 +272,7 @@ async def run(state: AgentState) -> dict[str, object]:
         # 详见 aistock-app-api/src/core/routes/internal.ts:1168-1213, 1274-1301
         audio_path: str | None = None
         if state.get("trigger_source") == "scheduler" and report_date:
-            brief_type = state.get("brief_type", "morning")
-            if brief_type not in ("morning", "evening"):
-                brief_type = "morning"
+            brief_type = scheduled_brief_type
             report_type = f"broadcast_{brief_type}"
             try:
                 # 查询源 brief 报告，获取 source_brief 必需字段
@@ -267,6 +316,7 @@ async def run(state: AgentState) -> dict[str, object]:
                     report_type=report_type,
                     report_date=report_date,
                     content=content,
+                    data_source="broadcast_agent",
                 )
                 if saved is not None:
                     audio_data = await node_api.post(
