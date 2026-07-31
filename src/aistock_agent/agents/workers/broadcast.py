@@ -316,6 +316,7 @@ async def run(state: AgentState) -> dict[str, object]:
                     report_type=report_type,
                     report_date=report_date,
                     content=content,
+                    data_source="broadcast_agent",
                 )
                 if saved is not None:
                     audio_data = await node_api.post(

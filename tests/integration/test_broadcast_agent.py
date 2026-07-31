@@ -95,6 +95,35 @@ async def test_evening_broadcast_uses_controlled_evening_brief_in_prompt():
 
 
 @pytest.mark.asyncio
+async def test_evening_broadcast_keeps_closing_context_when_brief_is_missing():
+    """晚报 brief 缺失时仍保留收盘提示词和事实不足声明。"""
+    mock_llm = _make_mock_llm('[{"role":"host","content":"收盘数据暂不足。"}]')
+    mock_node_api = MagicMock()
+    mock_node_api.get_analysis_report = AsyncMock(return_value=None)
+    mock_node_api.save_analysis_report = AsyncMock(return_value=None)
+    mock_node_api.post = AsyncMock()
+
+    with (
+        patch(_GET_DEEP_THINK, return_value=mock_llm),
+        patch(_NODE_API, mock_node_api),
+    ):
+        await run({
+            "messages": [],
+            "analysis_reports": {},
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-31",
+            "brief_type": "evening",
+        })
+
+    system_msg = mock_llm.ainvoke.call_args[0][0][0]
+    assert "收盘播报" in system_msg.content
+    assert "晚报事实输入暂不可用；请明确说明当前数据不足以判断。" in system_msg.content
+    assert mock_node_api.get_analysis_report.await_args_list[0].args == (
+        "brief_evening", "2026-07-31"
+    )
+
+
+@pytest.mark.asyncio
 async def test_broadcast_response_extraction():
     """验证 final_response 正确提取"""
     expected = "主持人：大家好...分析师：今日风口..."
@@ -146,6 +175,7 @@ async def test_broadcast_persists_text_then_triggers_audio():
     save_call = mock_node_api.save_analysis_report.await_args
     assert save_call.kwargs["report_type"] == "broadcast_morning"
     assert save_call.kwargs["report_date"] == "2026-07-11"
+    assert save_call.kwargs["data_source"] == "broadcast_agent"
     content = save_call.kwargs["content"]
     assert content["schema_version"] == "broadcast.v1"
     assert content["brief_type"] == "morning"
