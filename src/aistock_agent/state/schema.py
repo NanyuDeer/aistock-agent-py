@@ -70,6 +70,7 @@ class AgentState(TypedDict):
     trigger_source: NotRequired[str | None]  # "scheduler" | "user"
     report_date: NotRequired[str | None]  # YYYY-MM-DD
     brief_type: NotRequired[str | None]  # "morning" | "evening"
+    trace_id: NotRequired[str | None]  # 个股或市场触发链路关联 ID
     # 最终响应
     final_response: str | None
     advisor_trace: NotRequired[AdvisorTrace]
