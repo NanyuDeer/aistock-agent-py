@@ -20,7 +20,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import parse_dual_layer_response
+from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
 
 logger = get_logger(__name__)
 
@@ -76,6 +76,14 @@ async def run(state: AgentState) -> dict[str, object]:
             if state.get("trigger_source") == "scheduler":
                 report_date = state.get("report_date") or shanghai_today().isoformat()
                 dual_layer_content = parse_dual_layer_response(final_response)
+                if not is_dual_layer_valid(dual_layer_content):
+                    logger.info("wind_leader_dual_layer_repair_attempt")
+                    repaired = await repair_dual_layer_with_llm(final_response)
+                    if repaired:
+                        dual_layer_content = repaired
+                        logger.info("wind_leader_dual_layer_repair_success")
+                    else:
+                        logger.warning("wind_leader_dual_layer_repair_failed")
                 await node_api.save_analysis_report(
                     report_type="wind_leader",
                     report_date=report_date,

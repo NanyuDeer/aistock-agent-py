@@ -15,7 +15,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.hot_burst_tools import get_hot_burst_history
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import parse_dual_layer_response
+from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
 
 logger = structlog.get_logger()
 
@@ -172,6 +172,14 @@ async def run(state: AgentState) -> dict[str, object]:
         if final_response:
             # 解析双层输出
             dual = _normalize_report(_parse_hot_burst_response(final_response))
+            if not is_dual_layer_valid(dual):
+                logger.info("hot_burst_dual_layer_repair_attempt")
+                repaired = await repair_dual_layer_with_llm(final_response)
+                if repaired:
+                    dual = _normalize_report(repaired)
+                    logger.info("hot_burst_dual_layer_repair_success")
+                else:
+                    logger.warning("hot_burst_dual_layer_repair_failed")
 
             # 缓存到本地（前端报告列表查询用）
             try:

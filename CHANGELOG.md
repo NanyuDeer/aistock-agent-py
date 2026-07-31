@@ -2,6 +2,18 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-31 — LLM 双层 JSON 修复 + briefing 结论兜底
+**开发者**: ARIA
+
+### 新增
+- `src/aistock_agent/utils/report_parser.py`：新增 `is_dual_layer_valid()` 检查双层结构 summary 是否非空；新增 `repair_dual_layer_with_llm()` 当 parse 失败（LLM 返回非 JSON 纯文本）时调用 quick_think LLM 重新转换为标准双层 JSON
+
+### 修复
+- `src/aistock_agent/agents/workers/hot_burst.py`、`trend_score.py`、`wind_leader.py`：parse 后增加有效性检查，无效则调用 `repair_dual_layer_with_llm` 修复，避免 LLM 偶发返回纯文本导致报告结构丢失
+- `src/aistock_agent/services/briefing.py`：`_content_conclusion` 新增从 `display_report.details` 读取结论的兜底逻辑（当 summary 和 podcast_brief 均空时，截取 details 前 200 字作为结论）
+
+---
+
 ## [changer] 2026-07-30 — evening_chain 事件驱动重构（Redis Stream 事件总线 + quick/full 双模复盘）
 
 **开发者**: 37588
