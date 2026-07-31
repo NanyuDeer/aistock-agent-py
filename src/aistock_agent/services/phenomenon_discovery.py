@@ -97,7 +97,7 @@ def _ordered_real_fact_ids(sources: dict[str, SourceRecord], wanted: set[str]) -
         for source_id, record in sources.items()
         if source_id in wanted and record.kind == "market_fact"
     ]
-    return sorted(result)
+    return result
 
 
 def _score_rules(
