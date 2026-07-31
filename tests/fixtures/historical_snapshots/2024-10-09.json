@@ -1,0 +1,290 @@
+{
+  "schema_version": "1.0",
+  "status": "complete",
+  "trade_date": "20241009",
+  "captured_at": "2024-10-09T08:00:00.000Z",
+  "indexes": [
+    {
+      "ts_code": "000001.SH",
+      "name": "上证指数",
+      "trade_date": "20241009",
+      "close": 3258.8578,
+      "pct_chg": -6.617,
+      "amount": 1264311454.4295,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399001.SZ",
+      "name": "深证成指",
+      "trade_date": "20241009",
+      "close": 10557.8117,
+      "pct_chg": -8.1538,
+      "amount": 909647244.41952,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399006.SZ",
+      "name": "创业板指",
+      "trade_date": "20241009",
+      "close": 2280.0963,
+      "pct_chg": -10.5941,
+      "amount": 372755964.71629,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000300.SH",
+      "name": "沪深300",
+      "trade_date": "20241009",
+      "close": 3955.9839,
+      "pct_chg": -7.0514,
+      "amount": 1029032062.1934,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000905.SH",
+      "name": "中证500",
+      "trade_date": "20241009",
+      "close": 5735.641,
+      "pct_chg": -6.8221,
+      "amount": 529447530.3637,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000852.SH",
+      "name": "中证1000",
+      "trade_date": "20241009",
+      "close": 5727.38,
+      "pct_chg": -7.6525,
+      "amount": 561178624.9817,
+      "source": "tushare:index_daily"
+    }
+  ],
+  "breadth": {
+    "total_count": 5341,
+    "advance_count": 295,
+    "decline_count": 5044,
+    "flat_count": 2,
+    "advance_ratio": 0.05523310241527804,
+    "source": "tushare:daily"
+  },
+  "turnover": {
+    "amount_yuan": 2969403446379,
+    "previous_amount_yuan": 3486522475468,
+    "change_pct": -14.83,
+    "source": "tushare:daily"
+  },
+  "limits": {
+    "up_count": 49,
+    "down_count": 854,
+    "broken_count": 50,
+    "highest_board": 0
+  },
+  "sectors": {
+    "top_gainers": [
+      {
+        "ts_code": "885982.TI",
+        "name": "华为欧拉",
+        "pct_change": -2.04,
+        "net_amount": -26,
+        "lead_stock": "艾融软件",
+        "company_num": 36,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885925.TI",
+        "name": "MCU芯片",
+        "pct_change": -2.14,
+        "net_amount": -20,
+        "lead_stock": "国民技术",
+        "company_num": 53,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885866.TI",
+        "name": "数字货币",
+        "pct_change": -2.76,
+        "net_amount": -79,
+        "lead_stock": "艾融软件",
+        "company_num": 78,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885893.TI",
+        "name": "国家大基金持股",
+        "pct_change": -2.9,
+        "net_amount": 41,
+        "lead_stock": "中芯国际",
+        "company_num": 50,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885945.TI",
+        "name": "汽车芯片",
+        "pct_change": -3.03,
+        "net_amount": -33,
+        "lead_stock": "华岭股份",
+        "company_num": 93,
+        "trade_date": "20241009"
+      }
+    ],
+    "top_losers": [
+      {
+        "ts_code": "886063.TI",
+        "name": "PEEK材料",
+        "pct_change": -12.32,
+        "net_amount": -7,
+        "lead_stock": "光启技术",
+        "company_num": 21,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "886068.TI",
+        "name": "Sora概念(文生视频)",
+        "pct_change": -12.07,
+        "net_amount": -21,
+        "lead_stock": "万兴科技",
+        "company_num": 28,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885874.TI",
+        "name": "云游戏",
+        "pct_change": -11.95,
+        "net_amount": -29,
+        "lead_stock": "大富科技",
+        "company_num": 25,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "886060.TI",
+        "name": "短剧游戏",
+        "pct_change": -11.83,
+        "net_amount": -32,
+        "lead_stock": "东方明珠",
+        "company_num": 43,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885737.TI",
+        "name": "电子竞技",
+        "pct_change": -11.67,
+        "net_amount": -23,
+        "lead_stock": "浙数文化",
+        "company_num": 33,
+        "trade_date": "20241009"
+      }
+    ],
+    "top_inflows": [
+      {
+        "ts_code": "885893.TI",
+        "name": "国家大基金持股",
+        "pct_change": -2.9,
+        "net_amount": 41,
+        "lead_stock": "中芯国际",
+        "company_num": 50,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885897.TI",
+        "name": "中芯国际概念",
+        "pct_change": -4.08,
+        "net_amount": 26,
+        "lead_stock": "凯德石英",
+        "company_num": 70,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "886064.TI",
+        "name": "小米汽车",
+        "pct_change": -9.34,
+        "net_amount": 5,
+        "lead_stock": "富特科技",
+        "company_num": 69,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "886009.TI",
+        "name": "先进封装",
+        "pct_change": -6.36,
+        "net_amount": 0,
+        "lead_stock": "华岭股份",
+        "company_num": 117,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885805.TI",
+        "name": "芬太尼",
+        "pct_change": -6.47,
+        "net_amount": 0,
+        "lead_stock": "国药现代",
+        "company_num": 7,
+        "trade_date": "20241009"
+      }
+    ],
+    "top_outflows": [
+      {
+        "ts_code": "885338.TI",
+        "name": "融资融券",
+        "pct_change": -9.28,
+        "net_amount": -1706,
+        "lead_stock": "成电光信",
+        "company_num": 3619,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885694.TI",
+        "name": "深股通",
+        "pct_change": -8.92,
+        "net_amount": -934,
+        "lead_stock": "蒙草生态",
+        "company_num": 1437,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "886021.TI",
+        "name": "国企改革",
+        "pct_change": -8.38,
+        "net_amount": -797,
+        "lead_stock": "益诺思",
+        "company_num": 2792,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885520.TI",
+        "name": "沪股通",
+        "pct_change": -7.7,
+        "net_amount": -700,
+        "lead_stock": "中芯国际",
+        "company_num": 1347,
+        "trade_date": "20241009"
+      },
+      {
+        "ts_code": "885806.TI",
+        "name": "华为概念",
+        "pct_change": -8.65,
+        "net_amount": -545,
+        "lead_stock": "艾融软件",
+        "company_num": 904,
+        "trade_date": "20241009"
+      }
+    ]
+  },
+  "main_force": {
+    "large_and_extra_large_net_yuan": 0,
+    "source": "tushare:moneyflow_ths"
+  },
+  "coverage": {
+    "current_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5341
+    },
+    "previous_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5341
+    }
+  }
+}

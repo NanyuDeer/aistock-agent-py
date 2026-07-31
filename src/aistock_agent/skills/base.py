@@ -6,9 +6,10 @@ Skill 实现只关心业务逻辑，不重复 try/except。
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from functools import wraps
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import structlog
 
@@ -65,7 +66,7 @@ def skill(
             return Evidence(
                 facts=[],
                 sources=[],
-                as_of=datetime.now(timezone.utc),
+                as_of=datetime.now(UTC),
                 degraded=True,
                 degraded_reason=f"{func.__name__}: {exc}",
                 skill_name=func.__name__,

@@ -168,6 +168,28 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
 
 
 @pytest.mark.asyncio
+async def test_morning_brief_includes_trend_score_when_the_report_is_available() -> None:
+    """晨间综合 Brief 应纳入当天已完成的趋势股评分，并保留真实证据来源。"""
+    from aistock_agent.services.briefing import build_brief
+
+    api = AsyncMock()
+    reports = {
+        "morning": _report("morning", 11),
+        "wind_leader": _report("wind_leader", 12),
+        "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14, summary="趋势股评分结论"),
+    }
+    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.list_analysis_reports.return_value = []
+
+    brief = await build_brief("morning", "2026-07-24", api=api)
+
+    types = [item["evidence"][0]["report_type"] for item in brief["items"]]
+    assert types == ["morning", "wind_leader", "hot_burst", "trend_score"]
+    assert brief["missing_sources"] == []
+
+
+@pytest.mark.asyncio
 async def test_brief_as_of_is_anchored_to_requested_shanghai_date() -> None:
     """导入时间不能改变固定日期 Brief 的 as_of 日期。"""
     from aistock_agent.services.briefing import build_brief

@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "case_id": "2024-09-24-broad-rally",
+      "report_date": "2024-09-24",
+      "snapshot_file": "2024-09-24.json",
+      "expected_status": "detected",
+      "expected_primary": "broad_rally",
+      "expected_concurrent": []
+    },
+    {
+      "case_id": "2024-09-30-broad-rally",
+      "report_date": "2024-09-30",
+      "snapshot_file": "2024-09-30.json",
+      "expected_status": "detected",
+      "expected_primary": "broad_rally",
+      "expected_concurrent": []
+    },
+    {
+      "case_id": "2024-10-08-broad-rally",
+      "report_date": "2024-10-08",
+      "snapshot_file": "2024-10-08.json",
+      "expected_status": "detected",
+      "expected_primary": "broad_rally",
+      "expected_concurrent": []
+    },
+    {
+      "case_id": "2024-10-09-broad-decline",
+      "report_date": "2024-10-09",
+      "snapshot_file": "2024-10-09.json",
+      "expected_status": "detected",
+      "expected_primary": "broad_decline",
+      "expected_concurrent": []
+    },
+    {
+      "case_id": "2025-04-07-broad-decline",
+      "report_date": "2025-04-07",
+      "snapshot_file": "2025-04-07.json",
+      "expected_status": "detected",
+      "expected_primary": "broad_decline",
+      "expected_concurrent": ["sector_concentration"]
+    },
+    {
+      "case_id": "synthetic-calm",
+      "report_date": "2026-07-30",
+      "close_snapshot": {
+        "schema_version": "1.0",
+        "status": "complete",
+        "trade_date": "20260730",
+        "captured_at": "2026-07-30T08:00:00.000Z",
+        "indexes": [
+          { "ts_code": "000001.SH", "name": "上证指数", "trade_date": "20260730", "close": 3200.0, "pct_chg": 0.0, "amount": 100000.0, "source": "tushare:index_daily" },
+          { "ts_code": "399001.SZ", "name": "深证成指", "trade_date": "20260730", "close": 10500.0, "pct_chg": 0.0, "amount": 120000.0, "source": "tushare:index_daily" },
+          { "ts_code": "399006.SZ", "name": "创业板指", "trade_date": "20260730", "close": 2100.0, "pct_chg": 0.0, "amount": 50000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000300.SH", "name": "沪深300", "trade_date": "20260730", "close": 3800.0, "pct_chg": 0.0, "amount": 80000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000905.SH", "name": "中证500", "trade_date": "20260730", "close": 5500.0, "pct_chg": 0.0, "amount": 60000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000852.SH", "name": "中证1000", "trade_date": "20260730", "close": 6000.0, "pct_chg": 0.0, "amount": 70000.0, "source": "tushare:index_daily" }
+        ],
+        "breadth": { "total_count": 5000, "advance_count": 2500, "decline_count": 2000, "flat_count": 500, "advance_ratio": 0.50, "source": "tushare:daily" },
+        "turnover": { "amount_yuan": 95000000000, "previous_amount_yuan": 90000000000, "change_pct": 0.0, "source": "tushare:daily" },
+        "limits": { "up_count": 10, "down_count": 10, "broken_count": 1, "highest_board": 2 },
+        "sectors": {
+          "top_gainers": [
+            { "ts_code": "881101", "name": "AI芯片", "pct_change": 2.5, "net_amount": 1000000000, "lead_stock": "寒武纪", "company_num": 50, "trade_date": "20260730" }
+          ],
+          "top_losers": [
+            { "ts_code": "881102", "name": "房地产", "pct_change": -2.0, "net_amount": -500000000, "lead_stock": "万科A", "company_num": 80, "trade_date": "20260730" }
+          ],
+          "top_inflows": [],
+          "top_outflows": []
+        },
+        "main_force": { "large_and_extra_large_net_yuan": 0, "source": "tushare:moneyflow_ths" },
+        "coverage": {
+          "current_daily": { "complete": true, "reason": "ok", "page_count": 5, "row_count": 5000 },
+          "previous_daily": { "complete": true, "reason": "ok", "page_count": 5, "row_count": 5000 }
+        }
+      },
+      "expected_status": "no_phenomenon",
+      "expected_primary": null,
+      "expected_concurrent": []
+    },
+    {
+      "case_id": "synthetic-broad-rally-below-threshold",
+      "report_date": "2026-07-30",
+      "close_snapshot": {
+        "schema_version": "1.0",
+        "status": "complete",
+        "trade_date": "20260730",
+        "captured_at": "2026-07-30T08:00:00.000Z",
+        "indexes": [
+          { "ts_code": "000001.SH", "name": "上证指数", "trade_date": "20260730", "close": 3200.0, "pct_chg": 0.79, "amount": 100000.0, "source": "tushare:index_daily" },
+          { "ts_code": "399001.SZ", "name": "深证成指", "trade_date": "20260730", "close": 10500.0, "pct_chg": 0.79, "amount": 120000.0, "source": "tushare:index_daily" },
+          { "ts_code": "399006.SZ", "name": "创业板指", "trade_date": "20260730", "close": 2100.0, "pct_chg": 0.79, "amount": 50000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000300.SH", "name": "沪深300", "trade_date": "20260730", "close": 3800.0, "pct_chg": 0.79, "amount": 80000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000905.SH", "name": "中证500", "trade_date": "20260730", "close": 5500.0, "pct_chg": 0.79, "amount": 60000.0, "source": "tushare:index_daily" },
+          { "ts_code": "000852.SH", "name": "中证1000", "trade_date": "20260730", "close": 6000.0, "pct_chg": 0.79, "amount": 70000.0, "source": "tushare:index_daily" }
+        ],
+        "breadth": { "total_count": 5000, "advance_count": 2700, "decline_count": 1800, "flat_count": 500, "advance_ratio": 0.54, "source": "tushare:daily" },
+        "turnover": { "amount_yuan": 99000000000, "previous_amount_yuan": 90000000000, "change_pct": 9.9, "source": "tushare:daily" },
+        "limits": { "up_count": 29, "down_count": 10, "broken_count": 0, "highest_board": 2 },
+        "sectors": {
+          "top_gainers": [
+            { "ts_code": "881101", "name": "AI芯片", "pct_change": 2.5, "net_amount": 1000000000, "lead_stock": "寒武纪", "company_num": 50, "trade_date": "20260730" }
+          ],
+          "top_losers": [
+            { "ts_code": "881102", "name": "房地产", "pct_change": -2.0, "net_amount": -500000000, "lead_stock": "万科A", "company_num": 80, "trade_date": "20260730" }
+          ],
+          "top_inflows": [],
+          "top_outflows": []
+        },
+        "main_force": { "large_and_extra_large_net_yuan": 0, "source": "tushare:moneyflow_ths" },
+        "coverage": {
+          "current_daily": { "complete": true, "reason": "ok", "page_count": 5, "row_count": 5000 },
+          "previous_daily": { "complete": true, "reason": "ok", "page_count": 5, "row_count": 5000 }
+        }
+      },
+      "expected_status": "no_phenomenon",
+      "expected_primary": null,
+      "expected_concurrent": []
+    }
+  ]
+}

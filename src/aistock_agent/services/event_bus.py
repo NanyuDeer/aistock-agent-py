@@ -7,9 +7,7 @@
 - XADD maxlen 限制 Stream 长度，防止内存溢出"""
 
 import json
-import logging
 from dataclasses import dataclass
-
 
 import redis.asyncio as aioredis
 from structlog import get_logger

@@ -8,7 +8,12 @@ from aistock_agent.agents.workers.stock_trace import (
     StockTraceWorkerOutcome,
     _recover_tool_payload,
 )
-from aistock_agent.schemas.stock_trace import StockTraceResult, StockTraceResultPayload
+from aistock_agent.schemas.stock_trace import (
+    StockTraceResult,
+    StockTraceResultPayload,
+    StockTraceTriggerRequest,
+    StockTraceTriggerResponse,
+)
 from aistock_agent.services.stock_trace_client import StockTraceNodeClient
 from aistock_agent.services.stock_trace_validator import (
     StockTraceValidationError,
@@ -250,3 +255,35 @@ async def test_consumer_writes_validated_result_then_acknowledges_job() -> None:
     assert redis_client.acked == [
         ("stock-trace.jobs", "stock-trace-workers", "1710000000000-0")
     ]
+
+
+def test_trigger_request_validates_symbol_and_optional_fields() -> None:
+    request = StockTraceTriggerRequest(
+        symbol="000001",
+        cycle="short",
+        report_date="2026-07-30",
+        trace_id="trace-001",
+    )
+    assert request.symbol == "000001"
+    assert request.cycle == "short"
+    assert request.report_date == "2026-07-30"
+    assert request.trace_id == "trace-001"
+
+
+def test_trigger_response_supports_completed_and_degraded() -> None:
+    completed = StockTraceTriggerResponse(
+        trace_id="trace-001",
+        symbol="000001",
+        report_date="2026-07-30",
+        status="completed",
+        report_id=42,
+    )
+    degraded = StockTraceTriggerResponse(
+        trace_id="trace-002",
+        symbol="600519",
+        report_date="2026-07-30",
+        status="degraded",
+        degraded_reason="LLM temporarily unavailable",
+    )
+    assert completed.report_id == 42
+    assert degraded.degraded_reason == "LLM temporarily unavailable"

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
@@ -21,7 +21,7 @@ async def industry_relation(args: dict[str, Any], goal: InsightGoal) -> Evidence
         raise ValueError("industry_relation requires 'keywords' in args or goal.tag_codes")
 
     result_text = await match_industry_by_keywords(keywords)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     facts = [line.strip() for line in result_text.splitlines() if line.strip()]
     if not facts:

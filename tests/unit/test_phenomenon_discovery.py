@@ -535,6 +535,61 @@ def test_discovery_never_uses_nonexistent_or_event_fact_ids() -> None:
     }
 
 
+def test_broad_rally_requires_index_and_breadth_base() -> None:
+    """辅助信号（涨跌停差、成交额变化）不能在 broad_rally 基础条件不成立时独立命中。"""
+    facts = _neutral_facts()
+    for key in ("SH000001", "SZ399001", "SZ399006", "SH000300", "SH000905", "SH000852"):
+        _set_index_change(facts, key, 0.1)
+    facts["limits"] = {"up_count": 50, "down_count": 10, "broken_count": 0, "highest_board": 3}
+    facts["turnover"] = {"change_pct": 15.0}
+
+    discovery = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+
+    diag = next(item for item in discovery.diagnostics if item.rule == "broad_rally")
+    assert diag.matched is False
+
+
+def test_sentiment_extreme_requires_limit_base() -> None:
+    """辅助信号（最高连板、同向资金）不能在 sentiment_extreme 基础条件不成立时独立命中。"""
+    facts = _neutral_facts()
+    for key in ("SH000001", "SZ399001", "SZ399006", "SH000300", "SH000905", "SH000852"):
+        _set_index_change(facts, key, 0.1)
+    facts["limits"] = {"up_count": 49, "down_count": 29, "broken_count": 0, "highest_board": 5}
+    facts["main_force"] = {"large_and_extra_large_net_yuan": 1}
+
+    discovery = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+
+    diag = next(item for item in discovery.diagnostics if item.rule == "sentiment_extreme")
+    assert diag.matched is False
+
+
+def test_phenomenon_thresholds_are_config_driven(monkeypatch) -> None:
+    """修改 config 阈值应改变检测结果—放宽 broad_rally 指数阈值后原不命中的 facts 变为 detected。"""
+    from aistock_agent.config import settings
+
+    facts = _neutral_facts()
+    for key in ("SH000001", "SZ399001", "SZ399006", "SH000300", "SH000905", "SH000852"):
+        _set_index_change(facts, key, 0.5)
+    facts["breadth"] = {
+        "advance_ratio": 0.60,
+        "total_count": 5000,
+        "decline_count": 2000,
+    }
+    facts["limits"] = {"up_count": 50, "down_count": 10, "broken_count": 0, "highest_board": 3}
+    facts["turnover"] = {"change_pct": 15.0}
+
+    # 默认阈值：index_change=0.8, index_count=4，指数 0.5 < 0.8，不命中
+    discovery = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+    diag = next(item for item in discovery.diagnostics if item.rule == "broad_rally")
+    assert diag.matched is False
+
+    # 放宽 index_change_pct 到 0.4，则 0.5 >= 0.4 且 count=6 >= 4，应命中
+    monkeypatch.setattr(settings, "phenomenon_broad_index_change_pct", 0.4)
+    discovery2 = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+    diag2 = next(item for item in discovery2.diagnostics if item.rule == "broad_rally")
+    assert diag2.matched is True
+
+
 def test_discovery_returns_insufficient_data_without_complete_market_facts() -> None:
     discovery = discover_market_phenomenon({}, {}, _CAPTURED_AT, ["a_share.indexes"])
 

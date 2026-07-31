@@ -121,11 +121,61 @@ class Settings(BaseSettings):
     market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
     market_event_max_pushes: int = 2            # 每次晨报最多推送条数
 
+    # 现象发现：同向指数异动与市场广度。
+    # broad_rally / broad_decline 基础条件：至少 N 个核心指数同向超过 change_pct，且广度比例达标。
+    phenomenon_broad_index_count: int = 4
+    phenomenon_broad_index_change_pct: float = 0.8
+    # 备选：全部核心指数大幅同向异动。
+    phenomenon_broad_all_index_change_pct: float = 1.5
+    # 上涨（下跌）家数与总家数之比的最小值。
+    phenomenon_broad_breadth_ratio: float = 0.55
+
+    # 现象发现：同向异动的辅助确认条件。
+    # 涨跌停家数差（用于 broad_rally / broad_decline 的辅助确认）。
+    phenomenon_broad_limit_count_gap: int = 20
+    # 成交额变化百分比（用于 broad_rally / broad_decline 的辅助确认）。
+    phenomenon_broad_turnover_change_pct: float = 10.0
+
+    # 现象发现：风格分化阈值。
+    # CSI300 与 CSI1000 反向涨跌幅阈值（方向相反且绝对值均超过此值）。
+    phenomenon_style_divergence_change_pct: float = 0.5
+
+    # 现象发现：板块集中异动阈值。
+    # 板块相对大盘中位数的绝对异动阈值。
+    phenomenon_sector_abs_change_pct: float = 3.0
+    # 板块集中时市场广度需在此区间内（中性）。
+    phenomenon_sector_neutral_breadth_min_ratio: float = 0.40
+    phenomenon_sector_neutral_breadth_max_ratio: float = 0.60
+
+    # 现象发现：情绪极端阈值。
+    # 涨停家数门槛。
+    phenomenon_sentiment_limit_up_count: int = 50
+    # 跌停家数门槛。
+    phenomenon_sentiment_limit_down_count: int = 30
+    # 炸板家数与涨停家数的最小比例。
+    phenomenon_sentiment_broken_ratio: float = 0.35
+    # 最高连板门槛（情绪确认条件）。
+    phenomenon_sentiment_highest_board: int = 5
+
+    # 现象发现：规则评分与严重度。
+    # 规则进入 detected 的最小评分。
+    phenomenon_min_match_score: int = 2
+    # severity=high 的最小评分。
+    phenomenon_high_severity_score: int = 3
+
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def validate_log_level_uppercase(cls, v: object) -> str:
+        """强制 log_level 为大写，防御 LOG_LEVEL=info 等环境变量小写覆盖。"""
+        if isinstance(v, str):
+            return v.upper()
+        return str(v)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

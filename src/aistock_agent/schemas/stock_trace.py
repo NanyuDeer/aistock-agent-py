@@ -149,3 +149,25 @@ class StockTraceResult(StockTraceResultPayload):
         if self.attribution_status == "confirmed" and not self.primary_chain_id:
             raise ValueError("confirmed result requires a primary chain")
         return self
+
+
+class StockTraceTriggerRequest(BaseModel):
+    """Node → Python 个股 Trace 触发请求。"""
+
+    symbol: str = Field(pattern=r"^\d{6}$")
+    cycle: Literal["short", "mid", "long"] | None = None
+    report_date: str | None = None
+    trace_id: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class StockTraceTriggerResponse(BaseModel):
+    """Python → Node 个股 Trace 触发响应。"""
+
+    trace_id: str
+    symbol: str
+    report_date: str
+    status: Literal["completed", "degraded"]
+    report_id: str | int | None = None
+    degraded_reason: str | None = None

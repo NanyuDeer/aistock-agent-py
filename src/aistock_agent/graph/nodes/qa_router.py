@@ -4,7 +4,8 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
-from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.message import extract_last_human_message
 
@@ -27,6 +28,9 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 - stock_snapshot：实时个股行情。入参 {symbol: "6位代码"}
 - stock_news：个股财联社资讯。入参 {symbol: "6位代码", limit: 10}
 - trace_lookup：市场溯源（只读已生成的复盘，不重跑）。入参 {date: "YYYY-MM-DD", topic: str|null}
+- evidence_resolver：只读市场 ReviewArtifact 证据（已持久化复盘，不重跑）。入参 {date: "YYYY-MM-DD"}
+- sector_snapshot：板块强弱与风口龙头。入参 {tag_code: str}，无 tag_code 时自动读风口数据
+- market_snapshot：大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）
 - industry_relation：行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}
 
 规则：
@@ -35,6 +39,8 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 3. 多意图组合 → plan=compose，skill_calls 长度≥2，用 depends_on 表达依赖
 4. symbols 必须是 6 位股票代码或 sha/sza 等指数代码
 5. time_range: realtime（实时行情）/ today（今日报告）/ recent（近几日）/ history
+6. evidence_resolver/sector_snapshot/market_snapshot 只读已有数据，不重跑市场 Trace
+7. 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
 
@@ -52,14 +58,29 @@ class QARouterOutput(BaseModel):
 KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["晨报", "复盘", "报告", "说了什么"], "report_lookup"),
     (["为什么涨", "为什么跌", "溯源", "动因", "原因"], "trace_lookup"),
+    (["证据", "依据", "佐证"], "evidence_resolver"),
+    (["板块强弱", "风口", "板块龙头"], "sector_snapshot"),
+    (["大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
+_STOCK_SYMBOL_RE = re.compile(r"(?<!\d)(?:sh|sz)?(\d{6})(?!\d)", re.IGNORECASE)
+_STOCK_SYMBOL_CLARIFICATION = "请提供 6 位股票代码后重试。"
 
-def route_by_keyword_fallback(message: str) -> SkillCall:
-    """关键词规则兜底：返回最匹配的 SkillCall。"""
+
+def _extract_stock_symbol(message: str) -> str | None:
+    match = _STOCK_SYMBOL_RE.search(message)
+    return match.group(1) if match else None
+
+
+def route_by_keyword_fallback(message: str) -> SkillCall | None:
+    """关键词规则兜底：返回最匹配的 SkillCall。
+
+    个股类（stock_snapshot/stock_news）未命中 6 位代码时返回 None，
+    由上层写澄清状态，避免空 symbol 触发 Skill 异常。
+    """
     for keywords, skill_name in KEYWORD_FALLBACK:
         if any(kw in message for kw in keywords):
             return _build_default_skill_call(skill_name, message)
@@ -67,18 +88,40 @@ def route_by_keyword_fallback(message: str) -> SkillCall:
     return _build_default_skill_call("report_lookup", message)
 
 
-def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
-    """构建兜底 SkillCall，args 用合理默认值。"""
+def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None:
+    """构建兜底 SkillCall，args 用合理默认值；个股类缺失代码时返回 None。"""
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     if skill_name == "report_lookup":
-        return SkillCall(skill_name="report_lookup", args={"report_type": "review", "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")})
+        return SkillCall(
+            skill_name="report_lookup",
+            args={"report_type": "review", "date": today},
+        )
     if skill_name == "stock_snapshot":
-        return SkillCall(skill_name="stock_snapshot", args={"symbol": ""})
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="stock_snapshot", args={"symbol": symbol})
     if skill_name == "stock_news":
-        return SkillCall(skill_name="stock_news", args={"symbol": "", "limit": 10})
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="stock_news", args={"symbol": symbol, "limit": 10})
     if skill_name == "trace_lookup":
-        return SkillCall(skill_name="trace_lookup", args={"date": datetime.now(timezone.utc).strftime("%Y-%m-%d")})
+        return SkillCall(skill_name="trace_lookup", args={"date": today})
+    if skill_name == "evidence_resolver":
+        return SkillCall(skill_name="evidence_resolver", args={"date": today})
+    if skill_name == "sector_snapshot":
+        return SkillCall(skill_name="sector_snapshot", args={})
+    if skill_name == "market_snapshot":
+        return SkillCall(
+            skill_name="market_snapshot",
+            args={"scope": "both", "snapshot_kind": "quick"},
+        )
     if skill_name == "industry_relation":
-        return SkillCall(skill_name="industry_relation", args={"keywords": [message[:10]]})
+        return SkillCall(
+            skill_name="industry_relation",
+            args={"keywords": [message.strip()]},
+        )
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -93,7 +136,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
 
     try:
         llm = get_quick_think()
-        structured_llm = llm.with_structured_output(QARouterOutput)
+        structured_llm = with_chat_structured_output(llm, QARouterOutput)
         # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
         llm_messages = [HumanMessage(content=SYSTEM_PROMPT)] + list(messages)
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
@@ -125,13 +168,31 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         logger.warning("qa_router.llm_failed", err=str(exc), exc_info=True)
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
+        # 个股意图但缺失 6 位代码：不执行空参 Skill，写澄清状态让 synth_answer 短路
+        if fallback_call is None:
+            goal = InsightGoal(
+                question=message,
+                intent="report_lookup",
+                constraints={"router_fallback": "true"},
+            )
+            logger.info("qa_router.fallback.clarification", reason="missing_stock_symbol")
+            metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+            return {
+                "goal": goal,
+                "plan": "direct",
+                "skill_calls": [],
+                "clarification": _STOCK_SYMBOL_CLARIFICATION,
+            }
         # 推断 intent
         intent_map = {
-            "report_lookup": "report_lookup",
-            "stock_snapshot": "stock_snapshot",
-            "stock_news": "stock_news",
-            "trace_lookup": "trace_lookup",
+            "evidence_resolver": "evidence_resolver",
             "industry_relation": "industry_relation",
+            "market_snapshot": "market_snapshot",
+            "report_lookup": "report_lookup",
+            "sector_snapshot": "sector_snapshot",
+            "stock_news": "stock_news",
+            "stock_snapshot": "stock_snapshot",
+            "trace_lookup": "trace_lookup",
         }
         goal = InsightGoal(
             question=message,

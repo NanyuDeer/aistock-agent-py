@@ -1,0 +1,290 @@
+{
+  "schema_version": "1.0",
+  "status": "complete",
+  "trade_date": "20250407",
+  "captured_at": "2025-04-07T08:00:00.000Z",
+  "indexes": [
+    {
+      "ts_code": "000001.SH",
+      "name": "上证指数",
+      "trade_date": "20250407",
+      "close": 3096.5762,
+      "pct_chg": -7.3438,
+      "amount": 735367327.4815,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399001.SZ",
+      "name": "深证成指",
+      "trade_date": "20250407",
+      "close": 9364.4976,
+      "pct_chg": -9.6591,
+      "amount": 401635880.45344,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399006.SZ",
+      "name": "创业板指",
+      "trade_date": "20250407",
+      "close": 1807.2061,
+      "pct_chg": -12.501,
+      "amount": 150500250.22429,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000300.SH",
+      "name": "沪深300",
+      "trade_date": "20250407",
+      "close": 3589.4406,
+      "pct_chg": -7.0455,
+      "amount": 512971787.7446,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000905.SH",
+      "name": "中证500",
+      "trade_date": "20250407",
+      "close": 5287.0333,
+      "pct_chg": -9.5539,
+      "amount": 267397400.6094,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000852.SH",
+      "name": "中证1000",
+      "trade_date": "20250407",
+      "close": 5496.4427,
+      "pct_chg": -11.3942,
+      "amount": 311471174.8146,
+      "source": "tushare:index_daily"
+    }
+  ],
+  "breadth": {
+    "total_count": 5391,
+    "advance_count": 106,
+    "decline_count": 5284,
+    "flat_count": 1,
+    "advance_ratio": 0.01966240029679095,
+    "source": "tushare:daily"
+  },
+  "turnover": {
+    "amount_yuan": 1617968460180,
+    "previous_amount_yuan": 1158224646164,
+    "change_pct": 39.69,
+    "source": "tushare:daily"
+  },
+  "limits": {
+    "up_count": 23,
+    "down_count": 2902,
+    "broken_count": 8,
+    "highest_board": 0
+  },
+  "sectors": {
+    "top_gainers": [
+      {
+        "ts_code": "885811.TI",
+        "name": "玉米",
+        "pct_change": 4.79,
+        "net_amount": 7,
+        "lead_stock": "秋乐种业",
+        "company_num": 26,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885877.TI",
+        "name": "转基因",
+        "pct_change": 4.44,
+        "net_amount": 7,
+        "lead_stock": "秋乐种业",
+        "company_num": 18,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885810.TI",
+        "name": "大豆",
+        "pct_change": 2.09,
+        "net_amount": 1,
+        "lead_stock": "秋乐种业",
+        "company_num": 13,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885995.TI",
+        "name": "粮食概念",
+        "pct_change": 0.47,
+        "net_amount": 4,
+        "lead_stock": "秋乐种业",
+        "company_num": 44,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885808.TI",
+        "name": "养鸡",
+        "pct_change": -0.91,
+        "net_amount": 1,
+        "lead_stock": "晓鸣股份",
+        "company_num": 23,
+        "trade_date": "20250407"
+      }
+    ],
+    "top_losers": [
+      {
+        "ts_code": "886040.TI",
+        "name": "MLOps概念",
+        "pct_change": -17.05,
+        "net_amount": -5,
+        "lead_stock": "传音控股",
+        "company_num": 18,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885982.TI",
+        "name": "华为欧拉",
+        "pct_change": -16.8,
+        "net_amount": -13,
+        "lead_stock": "中国软件",
+        "company_num": 45,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "886094.TI",
+        "name": "华为盘古",
+        "pct_change": -16.51,
+        "net_amount": -6,
+        "lead_stock": "润达医疗",
+        "company_num": 28,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "886049.TI",
+        "name": "空间计算",
+        "pct_change": -16.28,
+        "net_amount": -8,
+        "lead_stock": "蕾奥规划",
+        "company_num": 55,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885980.TI",
+        "name": "华为鲲鹏",
+        "pct_change": -15.66,
+        "net_amount": -28,
+        "lead_stock": "中国软件",
+        "company_num": 165,
+        "trade_date": "20250407"
+      }
+    ],
+    "top_inflows": [
+      {
+        "ts_code": "886075.TI",
+        "name": "同花顺出海50",
+        "pct_change": -10.01,
+        "net_amount": 33,
+        "lead_stock": "ST华通",
+        "company_num": 50,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885922.TI",
+        "name": "盐湖提锂",
+        "pct_change": -11.29,
+        "net_amount": 13,
+        "lead_stock": "争光股份",
+        "company_num": 42,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "886082.TI",
+        "name": "同花顺果指数",
+        "pct_change": -12.94,
+        "net_amount": 11,
+        "lead_stock": "领益智造",
+        "company_num": 20,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885811.TI",
+        "name": "玉米",
+        "pct_change": 4.79,
+        "net_amount": 7,
+        "lead_stock": "秋乐种业",
+        "company_num": 26,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885877.TI",
+        "name": "转基因",
+        "pct_change": 4.44,
+        "net_amount": 7,
+        "lead_stock": "秋乐种业",
+        "company_num": 18,
+        "trade_date": "20250407"
+      }
+    ],
+    "top_outflows": [
+      {
+        "ts_code": "885338.TI",
+        "name": "融资融券",
+        "pct_change": -12.56,
+        "net_amount": -790,
+        "lead_stock": "秋乐种业",
+        "company_num": 3681,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885520.TI",
+        "name": "沪股通",
+        "pct_change": -9.66,
+        "net_amount": -417,
+        "lead_stock": "连云港",
+        "company_num": 1298,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "886021.TI",
+        "name": "国企改革",
+        "pct_change": -9.7,
+        "net_amount": -374,
+        "lead_stock": "秋乐种业",
+        "company_num": 2842,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885694.TI",
+        "name": "深股通",
+        "pct_change": -11.92,
+        "net_amount": -314,
+        "lead_stock": "派林生物",
+        "company_num": 1375,
+        "trade_date": "20250407"
+      },
+      {
+        "ts_code": "885806.TI",
+        "name": "华为概念",
+        "pct_change": -13.91,
+        "net_amount": -170,
+        "lead_stock": "四方精创",
+        "company_num": 967,
+        "trade_date": "20250407"
+      }
+    ]
+  },
+  "main_force": {
+    "large_and_extra_large_net_yuan": null,
+    "source": "tushare:moneyflow_ths"
+  },
+  "coverage": {
+    "current_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5391
+    },
+    "previous_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5393
+    }
+  }
+}

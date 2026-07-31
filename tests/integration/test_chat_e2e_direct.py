@@ -174,6 +174,169 @@ async def test_e2e_stock_news():
 
 
 @pytest.mark.asyncio
+async def test_e2e_evidence_resolver():
+    """evidence_resolver direct E2E 路径。"""
+    from unittest.mock import MagicMock as _MagicMock
+
+    fake_snapshot = _MagicMock()
+    fake_trace = _MagicMock()
+    fake_trace.attribution_status = "confirmed"
+    fake_trace.confidence = "medium"
+    fake_trace.unresolved_questions = []
+    fake_trace.candidates = []
+    fake_trace.primary_chain_id = "chain_1"
+
+    qa_out, synth_out = _mock_llm_output(
+        "evidence_resolver", "evidence_resolver", "市场证据显示今日上涨有明确归因", "trace"
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        side_effect=[
+            MagicMock(ainvoke=AsyncMock(return_value=qa_out)),
+            MagicMock(ainvoke=AsyncMock(return_value=synth_out)),
+        ]
+    )
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.skills.evidence_resolver.load_validated_trace",
+        new=AsyncMock(return_value=(fake_snapshot, fake_trace)),
+    ):
+        graph = compile_chat_graph(checkpointer=None)
+        state: QuestionState = {
+            "messages": [HumanMessage(content="有什么证据说明今天市场走势")],
+            "goal": None,
+            "plan": "direct",
+            "skill_calls": [],
+            "evidences": [],
+            "insight": None,
+            "final_response": "",
+            "trace": None,
+        }
+        result = await graph.ainvoke(state)
+
+    assert result["insight"] is not None
+    assert len(result["evidences"]) == 1
+    assert result["evidences"][0].skill_name == "evidence_resolver"
+    assert result["evidences"][0].degraded is False
+
+
+@pytest.mark.asyncio
+async def test_e2e_sector_snapshot():
+    """sector_snapshot direct E2E 路径。"""
+    qa_out, synth_out = _mock_llm_output(
+        "sector_snapshot", "sector_snapshot", "今日半导体板块领涨", "trace",
+        skill_args={},
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        side_effect=[
+            MagicMock(ainvoke=AsyncMock(return_value=qa_out)),
+            MagicMock(ainvoke=AsyncMock(return_value=synth_out)),
+        ]
+    )
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.skills.sector_snapshot.node_api",
+    ) as mock_api:
+        mock_api.get = AsyncMock(return_value={
+            "update_time": "2026-07-30 10:30",
+            "hot_sectors": [
+                {"name": "半导体", "today_change": 3.2, "leading_stock": "中芯国际",
+                 "main_stocks": [{"code": "688981", "name": "中芯国际", "change_pct": 8.5}]},
+            ],
+        })
+        graph = compile_chat_graph(checkpointer=None)
+        state: QuestionState = {
+            "messages": [HumanMessage(content="板块强弱分析")],
+            "goal": None,
+            "plan": "direct",
+            "skill_calls": [],
+            "evidences": [],
+            "insight": None,
+            "final_response": "",
+            "trace": None,
+        }
+        result = await graph.ainvoke(state)
+
+    assert result["insight"] is not None
+    assert len(result["evidences"]) == 1
+    ev = result["evidences"][0]
+    assert ev.skill_name == "sector_snapshot"
+    assert ev.degraded is False
+    assert any("realtime_quote" == s.kind for s in ev.sources)
+    assert len(ev.facts) > 0
+    assert ev.raw != {}
+
+
+@pytest.mark.asyncio
+async def test_e2e_market_snapshot():
+    """market_snapshot direct E2E 路径。"""
+    qa_out, synth_out = _mock_llm_output(
+        "market_snapshot", "market_snapshot", "今日大盘震荡上行", "validate",
+        skill_args={"scope": "both", "snapshot_kind": "quick"},
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        side_effect=[
+            MagicMock(ainvoke=AsyncMock(return_value=qa_out)),
+            MagicMock(ainvoke=AsyncMock(return_value=synth_out)),
+        ]
+    )
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.skills.market_snapshot.node_api",
+    ) as mock_api, patch(
+        "aistock_agent.skills.market_snapshot.asyncio.to_thread",
+    ) as mock_to_thread:
+        mock_api.get_quick_snapshot = AsyncMock(return_value={
+            "schema_version": "1.0", "status": "complete", "snapshot_kind": "quick",
+            "trade_date": "20260730", "captured_at": "2026-07-30T07:30:00.000Z",
+            "indexes": [{"ts_code": "000001.SH", "name": "上证指数", "close": 3200.0,
+                         "pct_chg": 0.5, "amount": 100000.0}],
+            "breadth": {"total_count": 5000, "advance_count": 2500, "decline_count": 2000,
+                        "flat_count": 500, "advance_ratio": 0.5},
+            "turnover": {"amount_yuan": 95_000_000_000, "change_pct": 5.0},
+            "limits": {"up_count": 20, "down_count": 15, "broken_count": 5, "highest_board": 3},
+            "main_force": {"large_and_extra_large_net_yuan": 5_000_000_000},
+            "sectors": {"top_gainers": [], "top_losers": [], "top_inflows": [], "top_outflows": []},
+        })
+        mock_to_thread.side_effect = lambda fn, arg: [
+            {"ticker": "^GSPC", "name": "标普500", "price": 5500.0, "change_pct": 0.36},
+        ]
+
+        graph = compile_chat_graph(checkpointer=None)
+        state: QuestionState = {
+            "messages": [HumanMessage(content="大盘今天走势如何")],
+            "goal": None,
+            "plan": "direct",
+            "skill_calls": [],
+            "evidences": [],
+            "insight": None,
+            "final_response": "",
+            "trace": None,
+        }
+        result = await graph.ainvoke(state)
+
+    assert result["insight"] is not None
+    assert len(result["evidences"]) == 1
+    ev = result["evidences"][0]
+    assert ev.skill_name == "market_snapshot"
+    assert ev.degraded is False
+    assert any("realtime_quote" == s.kind for s in ev.sources)
+    assert len(ev.facts) > 0
+    assert ev.raw != {}
+
+
+@pytest.mark.asyncio
 async def test_e2e_trace_lookup():
     from unittest.mock import MagicMock as _MagicMock
 
@@ -200,7 +363,7 @@ async def test_e2e_trace_lookup():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
-        "aistock_agent.skills.trace_lookup.load_validated_trace",
+        "aistock_agent.skills.evidence_resolver.load_validated_trace",
         new=AsyncMock(return_value=(fake_snapshot, fake_trace)),
     ):
         graph = compile_chat_graph(checkpointer=None)

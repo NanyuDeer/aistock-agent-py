@@ -91,6 +91,43 @@ def test_ws_chat_uses_chat_graph_when_enabled(client, chat_enabled):
     assert done_events[0]["content"] == "测试回复"
 
 
+def test_ws_chat_clarification_when_enabled(client, chat_enabled):
+    """开关开启时，澄清路径 WS 返回澄清文本，所有事件 advisor_trace 为 None。"""
+    async def mock_astream_events(initial_state, config=None, version="v2"):
+        yield {
+            "event": "on_chain_start",
+            "name": "synth_answer",
+            "data": {},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        # synth_answer 的 on_chain_end 携带澄清 final_response
+        yield {
+            "event": "on_chain_end",
+            "name": "synth_answer",
+            "data": {"output": {"final_response": "请提供 6 位股票代码后重试。"}},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = mock_astream_events
+
+    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
+        with client.websocket_connect("/api/agent/ws/chat") as websocket:
+            websocket.send_json({"message": "茅台最近新闻", "session_id": "test_ws_clarification"})
+            messages = []
+            while True:
+                data = websocket.receive_json()
+                messages.append(data)
+                if data.get("type") == "done":
+                    break
+
+    done_events = [m for m in messages if m.get("type") == "done"]
+    assert len(done_events) == 1
+    assert done_events[0]["content"] == "请提供 6 位股票代码后重试。"
+    # 澄清路径无 advisor_trace，所有事件均为 None
+    assert all(m.get("advisor_trace") is None for m in messages)
+
+
 def test_ws_chat_filters_qa_router_tokens(client, chat_enabled):
     """qa_router 的 token 事件被过滤，不发送 text。"""
     async def mock_astream_events(initial_state, config=None, version="v2"):

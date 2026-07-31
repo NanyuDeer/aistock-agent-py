@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from aistock_agent.config import settings
 from aistock_agent.schemas.market_trace import (
     DataReadiness,
     DetectedPhenomenon,
@@ -129,19 +130,34 @@ def _score_rules(
     turnover_change = _number(turnover.get("change_pct"))
     main_force_net = _number(main_force.get("large_and_extra_large_net_yuan"))
 
-    rally_base = (sum(value >= 0.8 for value in values) >= 4 and advance_ratio >= 0.55) or all(
-        value >= 1.5 for value in values
-    )
-    decline_base = (sum(value <= -0.8 for value in values) >= 4 and decline_ratio >= 0.55) or all(
-        value <= -1.5 for value in values
-    )
+    rally_base = (
+        sum(value >= settings.phenomenon_broad_index_change_pct for value in values)
+        >= settings.phenomenon_broad_index_count
+        and advance_ratio >= settings.phenomenon_broad_breadth_ratio
+    ) or all(value >= settings.phenomenon_broad_all_index_change_pct for value in values)
+    decline_base = (
+        sum(value <= -settings.phenomenon_broad_index_change_pct for value in values)
+        >= settings.phenomenon_broad_index_count
+        and decline_ratio >= settings.phenomenon_broad_breadth_ratio
+    ) or all(value <= -settings.phenomenon_broad_all_index_change_pct for value in values)
+
+    rally_score = 0
+    if rally_base:
+        rally_score = (
+            1
+            + int(limit_up >= limit_down + settings.phenomenon_broad_limit_count_gap)
+            + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
+        )
+    decline_score = 0
+    if decline_base:
+        decline_score = (
+            1
+            + int(limit_down >= limit_up + settings.phenomenon_broad_limit_count_gap)
+            + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
+        )
     scores: dict[MarketPhenomenonKind, int] = {
-        "broad_rally": int(rally_base)
-        + int(limit_up >= limit_down + 20)
-        + int(turnover_change >= 10),
-        "broad_decline": int(decline_base)
-        + int(limit_down >= limit_up + 20)
-        + int(turnover_change >= 10),
+        "broad_rally": rally_score,
+        "broad_decline": decline_score,
         "style_divergence": 0,
         "sector_concentration": 0,
         "sentiment_extreme": 0,
@@ -154,32 +170,63 @@ def _score_rules(
     style_divergence = (
         csi300 is not None
         and csi1000 is not None
-        and ((csi300 >= 0.5 and csi1000 <= -0.5) or (csi300 <= -0.5 and csi1000 >= 0.5))
+        and (
+            (
+                csi300 >= settings.phenomenon_style_divergence_change_pct
+                and csi1000 <= -settings.phenomenon_style_divergence_change_pct
+            )
+            or (
+                csi300 <= -settings.phenomenon_style_divergence_change_pct
+                and csi1000 >= settings.phenomenon_style_divergence_change_pct
+            )
+        )
     )
     scores["style_divergence"] = 2 if style_divergence else 0
 
     strongest = _number(gainers[0].get("pct_change")) if gainers else 0.0
     weakest = _number(losers[0].get("pct_change")) if losers else 0.0
     direction = 0
-    if abs(strongest) >= 3 and strongest * market_median < 0:
+    if (
+        abs(strongest) >= settings.phenomenon_sector_abs_change_pct
+        and strongest * market_median < 0
+    ):
         direction = 1 if strongest > 0 else -1
-    elif abs(weakest) >= 3 and weakest * market_median < 0:
+    elif (
+        abs(weakest) >= settings.phenomenon_sector_abs_change_pct
+        and weakest * market_median < 0
+    ):
         direction = 1 if weakest > 0 else -1
     relevant = gainers[:3] if direction > 0 else losers[:3]
     flows_match = bool(relevant) and all(
         _number(item.get("net_amount")) * direction > 0 for item in relevant
     )
     scores["sector_concentration"] = (
-        int(direction != 0) + int(flows_match) + int(0.40 <= advance_ratio <= 0.60)
+        int(direction != 0)
+        + int(flows_match)
+        + int(
+            settings.phenomenon_sector_neutral_breadth_min_ratio
+            <= advance_ratio
+            <= settings.phenomenon_sector_neutral_breadth_max_ratio
+        )
     )
 
-    sentiment_base = (limit_up >= 50 or limit_down >= 30) and (
-        broken >= limit_up * 0.35 if limit_up else True
+    sentiment_base = (
+        limit_up >= settings.phenomenon_sentiment_limit_up_count
+        or limit_down >= settings.phenomenon_sentiment_limit_down_count
+    ) and (
+        broken >= limit_up * settings.phenomenon_sentiment_broken_ratio if limit_up else True
     )
     force_matches = (market_median > 0 and main_force_net > 0) or (
         market_median < 0 and main_force_net < 0
     )
-    scores["sentiment_extreme"] = int(sentiment_base) + int(highest_board >= 5) + int(force_matches)
+    sentiment_score = 0
+    if sentiment_base:
+        sentiment_score = (
+            1
+            + int(highest_board >= settings.phenomenon_sentiment_highest_board)
+            + int(force_matches)
+        )
+    scores["sentiment_extreme"] = sentiment_score
     return scores
 
 
@@ -189,9 +236,12 @@ def _rule_fact_ids(
     sources: dict[str, SourceRecord],
 ) -> list[str]:
     returns = _index_returns(a_share, sources)
+    threshold = settings.phenomenon_broad_index_change_pct
     if rule == "broad_rally":
         index_ids = {
-            f"INDEX_{code.replace('.', '_')}" for code, value in returns.items() if value >= 0.8
+            f"INDEX_{code.replace('.', '_')}"
+            for code, value in returns.items()
+            if value >= threshold
         }
         wanted = index_ids | {
             "BREADTH_ALL",
@@ -201,7 +251,9 @@ def _rule_fact_ids(
         }
     elif rule == "broad_decline":
         index_ids = {
-            f"INDEX_{code.replace('.', '_')}" for code, value in returns.items() if value <= -0.8
+            f"INDEX_{code.replace('.', '_')}"
+            for code, value in returns.items()
+            if value <= -threshold
         }
         wanted = index_ids | {
             "BREADTH_ALL",
@@ -245,7 +297,7 @@ def discover_market_phenomenon(
     diagnostics = [
         RuleDiagnostic(
             rule=rule,
-            matched=scores[rule] >= 2,
+            matched=scores[rule] >= settings.phenomenon_min_match_score,
             evidence_ids=_rule_fact_ids(rule, a_share, sources),
         )
         for rule in _RULE_ORDER
@@ -259,7 +311,7 @@ def discover_market_phenomenon(
             diagnostics=diagnostics,
         )
 
-    matched = [rule for rule in _RULE_ORDER if scores[rule] >= 2]
+    matched = [rule for rule in _RULE_ORDER if scores[rule] >= settings.phenomenon_min_match_score]
     if not matched:
         return PhenomenonDiscoveryResult(
             status="no_phenomenon",
@@ -277,7 +329,7 @@ def discover_market_phenomenon(
             summary=_SUMMARIES[rule],
             fact_ids=_rule_fact_ids(rule, a_share, sources),
             tags=[rule],
-            severity="high" if score >= 3 else "medium",
+            severity="high" if score >= settings.phenomenon_high_severity_score else "medium",
         )
 
     primary = detected(matched[0])
