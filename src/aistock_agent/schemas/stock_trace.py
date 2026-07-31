@@ -5,7 +5,7 @@ A 股数据，也不包含 LLM 调用。字段名采用 snake_case，对 Node �
 响应由 ``services.stock_trace_client`` 统一规范化。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -156,7 +156,7 @@ class StockTraceTriggerRequest(BaseModel):
 
     symbol: str = Field(pattern=r"^\d{6}$")
     cycle: Literal["short", "mid", "long"] | None = None
-    report_date: str | None = None
+    report_date: date | None = None
     trace_id: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -167,7 +167,7 @@ class StockTraceTriggerResponse(BaseModel):
 
     trace_id: str
     symbol: str
-    report_date: str
+    report_date: date
     status: Literal["completed", "degraded"]
     report_id: str | int | None = None
     degraded_reason: str | None = None

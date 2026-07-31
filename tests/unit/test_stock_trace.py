@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -266,7 +266,7 @@ def test_trigger_request_validates_symbol_and_optional_fields() -> None:
     )
     assert request.symbol == "000001"
     assert request.cycle == "short"
-    assert request.report_date == "2026-07-30"
+    assert request.report_date == date(2026, 7, 30)
     assert request.trace_id == "trace-001"
 
 
