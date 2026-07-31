@@ -13,6 +13,7 @@ import structlog
 
 from aistock_agent.schemas.chat_contract import Evidence, SkillCall
 from aistock_agent.skills.base import skill
+from aistock_agent.skills.capital_flow import capital_flow
 from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
@@ -27,6 +28,7 @@ logger = structlog.get_logger()
 
 # Skill 注册表：skill_name → 可调用对象
 SKILL_REGISTRY: dict[str, Any] = {
+    "capital_flow": capital_flow,
     "evidence_resolver": evidence_resolver,
     "industry_relation": industry_relation,
     "market_snapshot": market_snapshot,

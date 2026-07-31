@@ -18,7 +18,7 @@ async def stock_news(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if not symbol:
         raise ValueError("stock_news requires 'symbol' in args or goal.symbols")
 
-    news_text = await search_cls_news(symbol)
+    news_text = await search_cls_news.ainvoke({"symbol": symbol})
     now = datetime.now(UTC)
 
     # search_cls_news 返回多行文本，按行拆为 facts

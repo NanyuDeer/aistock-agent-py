@@ -27,6 +27,7 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 - report_lookup：读取已持久化的晨报/复盘报告。
   入参 {report_type: "morning"|"review", date: "YYYY-MM-DD"}
 - stock_snapshot：实时个股行情。入参 {symbol: "6位代码"}
+- capital_flow：个股资金流向。入参 {symbol: "6位代码"}
 - stock_news：个股财联社资讯。入参 {symbol: "6位代码", limit: 10}
 - trace_lookup：市场溯源（只读已生成的复盘，不重跑）。入参 {date: "YYYY-MM-DD", topic: str|null}
 - evidence_resolver：只读市场 ReviewArtifact 证据（已持久化复盘，不重跑）。入参 {date: "YYYY-MM-DD"}
@@ -66,7 +67,7 @@ JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
 
 字段约束：
 - 顶层只能有 goal、plan、skill_calls 三个字段，不得省略 goal
-- goal.intent 只能是 evidence_resolver/industry_relation/market_snapshot/report_lookup/
+- goal.intent 只能是 capital_flow/evidence_resolver/industry_relation/market_snapshot/report_lookup/
   sector_snapshot/stock_news/stock_snapshot/trace_lookup 之一
 - goal.question 必填；answer_mode 填 null（由下游推断）
 - 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
@@ -89,9 +90,10 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["晨报", "复盘", "报告", "说了什么"], "report_lookup"),
     (["为什么涨", "为什么跌", "溯源", "动因", "原因"], "trace_lookup"),
     (["证据", "依据", "佐证"], "evidence_resolver"),
-    (["板块强弱", "风口", "板块龙头"], "sector_snapshot"),
+    (["板块强弱", "风口", "板块龙头", "龙头"], "sector_snapshot"),
     (["大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
+    (["资金", "主力", "流入", "流出", "净流入"], "capital_flow"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
@@ -136,6 +138,11 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
         if symbol is None:
             return None
         return SkillCall(skill_name="stock_news", args={"symbol": symbol, "limit": 10})
+    if skill_name == "capital_flow":
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="capital_flow", args={"symbol": symbol})
     if skill_name == "trace_lookup":
         return SkillCall(skill_name="trace_lookup", args={"date": today})
     if skill_name == "evidence_resolver":
@@ -215,6 +222,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             }
         # 推断 intent
         intent_map = {
+            "capital_flow": "capital_flow",
             "evidence_resolver": "evidence_resolver",
             "industry_relation": "industry_relation",
             "market_snapshot": "market_snapshot",
