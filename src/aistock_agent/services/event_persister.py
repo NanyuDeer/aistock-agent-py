@@ -5,10 +5,12 @@
 
 import copy
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -38,7 +40,7 @@ async def persist_event_report(
         True 表示持久化成功，False 表示失败（调用方可据此上报 partial 状态）。
         检查 node_api.post() 返回值：None 或业务失败均返回 False，不记录成功日志。
     """
-    report_date = datetime.now().strftime("%Y-%m-%d")
+    report_date = shanghai_today().isoformat()
 
     # 深拷贝后剥离运行时状态字段：禁止原地修改调用方对象。
     persist_reports = copy.deepcopy(analysis_reports)
@@ -54,7 +56,7 @@ async def persist_event_report(
                 "eventId": event_id,
                 "title": event_meta.get("title", ""),
                 "source": event_meta.get("source", ""),
-                "publishTime": datetime.now().isoformat(),
+                "publishTime": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
                 "event": event_text,
                 "analysis_reports": persist_reports,
             },

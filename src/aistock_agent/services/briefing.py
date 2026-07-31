@@ -77,6 +77,13 @@ def _content_conclusion(report_type: str, content: object) -> str | None:
         cleaned_podcast = podcast.strip()
         if not _looks_like_raw_json(cleaned_podcast):
             return cleaned_podcast
+    # details 是 schema 2.0 的合法字段，当 summary 和 podcast_brief 均空时读取
+    if isinstance(display_report, dict):
+        details = display_report.get("details")
+        if isinstance(details, str) and details.strip():
+            cleaned_details = details.strip()
+            if not _looks_like_raw_json(cleaned_details):
+                return cleaned_details[:200] if len(cleaned_details) > 200 else cleaned_details
     return None
 
 

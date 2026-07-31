@@ -114,3 +114,57 @@ def parse_dual_layer_response(final_response: str) -> dict:
         "podcast_brief": "",
         "schema_version": "2.0",
     }
+
+
+def is_dual_layer_valid(content: dict) -> bool:
+    """检查双层结构是否有效（summary 非空）。
+
+    当 LLM 返回非 JSON 纯文本时，parse_dual_layer_response 降级生成
+    summary="" 的结构，此时返回 False，提示调用方进行 LLM 修复。
+    """
+    display = content.get("display_report")
+    if not isinstance(display, dict):
+        return False
+    summary = display.get("summary", "")
+    return isinstance(summary, str) and bool(summary.strip())
+
+
+_REPAIR_PROMPT = """将以下分析文本转换为标准 JSON 格式。严格按此结构返回，不要包含 markdown 标记或额外说明：
+
+{{
+  "display_report": {{
+    "summary": "20字以内的结论一句话",
+    "details": "完整分析内容原样保留",
+    "stocks": ["股票代码1"],
+    "risks": ["风险提示1"]
+  }},
+  "podcast_brief": "150-200字的播报摘要"
+}}
+
+待转换文本：
+{text}"""
+
+
+async def repair_dual_layer_with_llm(final_response: str) -> dict | None:
+    """当 parse_dual_layer_response 解析失败时，调用 quick_think LLM 将纯文本转为标准双层 JSON。
+
+    Returns:
+        修复后的双层 dict（summary 非空），或 None（修复失败）。
+    """
+    from langchain_core.messages import HumanMessage
+
+    from aistock_agent.services.llm import get_quick_think
+
+    try:
+        llm = get_quick_think()
+        result = await llm.ainvoke(
+            [HumanMessage(content=_REPAIR_PROMPT.format(text=final_response))]
+        )
+        repaired_text = result.content if hasattr(result, "content") else str(result)
+        repaired = parse_dual_layer_response(repaired_text)
+        if is_dual_layer_valid(repaired):
+            return repaired
+        logger.warning("repair_dual_layer_with_llm: repaired result still invalid")
+    except Exception as e:
+        logger.warning("repair_dual_layer_with_llm failed", error=str(e))
+    return None

@@ -5,6 +5,9 @@
 模型：deep_think（对话式播报生成）
 """
 
+import json
+import re
+
 from langchain_core.messages import SystemMessage
 
 from aistock_agent.observability.logging import get_logger
@@ -16,6 +19,87 @@ from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.report_parser import extract_display_report, extract_podcast_brief
 
 logger = get_logger(__name__)
+
+
+def _parse_dialogue(text: str) -> list[dict[str, str]]:
+    """解析 LLM 输出为 dialogue 数组（符合 broadcast.v1 schema）。
+
+    LLM prompt 要求输出 JSON 数组 [{"role":"host","content":"...","tone":"neutral"}, ...]。
+    本函数容错解析：
+    1. 尝试 JSON 解析（去除 markdown fence）
+    2. 失败则按"主持人/host/分析师/analyst"关键词分割纯文本为对话行
+    3. 都失败则整段作为 host 单行对话
+
+    后端校验要求：role ∈ {host, analyst}，content 非空字符串。
+    详见 aistock-app-api/src/core/routes/internal.ts isValidatedBroadcastReport。
+    """
+    if not text or not text.strip():
+        return [{"role": "host", "content": "今日播报暂无内容"}]
+
+    # 策略 1: JSON 解析（去除 markdown fence）
+    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text)
+    cleaned = re.sub(r'\n?\s*```', '', cleaned).strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list) and parsed:
+            dialogue: list[dict[str, str]] = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                role = item.get("role")
+                content = item.get("content")
+                if role in ("host", "analyst") and isinstance(content, str) and content.strip():
+                    dialogue.append({"role": role, "content": content.strip()})
+            if dialogue:
+                return dialogue
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 策略 2: 正则匹配 JSON 数组块
+    match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list) and parsed:
+                dialogue = []
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    role = item.get("role")
+                    content = item.get("content")
+                    if role in ("host", "analyst") and isinstance(content, str) and content.strip():
+                        dialogue.append({"role": role, "content": content.strip()})
+                if dialogue:
+                    return dialogue
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 策略 3: 纯文本按角色关键词分割（LLM 未输出 JSON 时的降级）
+    # 匹配 "主持人：xxx" 或 "host: xxx" 或 "分析师：xxx" 开头的段落
+    lines = re.split(r'(?=(?:主持人|host|分析师|analyst)[：:])', text, flags=re.IGNORECASE)
+    dialogue = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'(主持人|host|分析师|analyst)[：:]\s*(.*)', line, re.IGNORECASE | re.DOTALL)
+        if m:
+            role_raw = m.group(1).lower()
+            role = "analyst" if role_raw.startswith("分析") or role_raw.startswith("analyst") else "host"
+            content = m.group(2).strip()
+            if content:
+                dialogue.append({"role": role, "content": content})
+        else:
+            # 无角色前缀的行，归为 host
+            if dialogue:
+                dialogue[-1]["content"] += f"\n{line}"
+            else:
+                dialogue.append({"role": "host", "content": line})
+    if dialogue:
+        return dialogue
+
+    # 策略 4: 兜底，整段作为 host 单行
+    return [{"role": "host", "content": text.strip()[:500]}]
 
 
 async def _fetch_report_from_db(report_type: str, report_date: str) -> str | None:
@@ -127,18 +211,67 @@ async def run(state: AgentState) -> dict[str, object]:
         logger.info("broadcast_dialogue_generated", dialogue_length=len(dialogue_text))
 
         # Step 2: scheduler 链路先持久化文本，再由 Node.js 生成音频
+        # 必须构造 broadcast.v1 schema 以通过后端 isValidatedBroadcastReport 校验：
+        # - schema_version: "broadcast.v1"
+        # - brief_type: "morning"|"evening"
+        # - dialogue: [{role, content}, ...]
+        # - source_brief: {id, report_type, report_date, as_of}（来自 brief_{brief_type} 报告）
+        # - degraded / missing_sources：与源 brief 一致
+        # - audio_path: None（generate-audio 端点会 UPDATE 写入）
+        # 详见 aistock-app-api/src/core/routes/internal.ts:1168-1213, 1274-1301
         audio_path: str | None = None
         if state.get("trigger_source") == "scheduler" and report_date:
+            brief_type = state.get("brief_type", "morning")
+            if brief_type not in ("morning", "evening"):
+                brief_type = "morning"
+            report_type = f"broadcast_{brief_type}"
             try:
+                # 查询源 brief 报告，获取 source_brief 必需字段
+                source_brief_report = await node_api.get_analysis_report(
+                    f"brief_{brief_type}", report_date
+                )
+                # 解析 LLM 输出为 dialogue 数组
+                dialogue = _parse_dialogue(dialogue_text)
+
+                # 构造 broadcast.v1 content
+                content: dict[str, object] = {
+                    "schema_version": "broadcast.v1",
+                    "brief_type": brief_type,
+                    "dialogue": dialogue,
+                    "audio_path": None,
+                }
+
+                if source_brief_report and isinstance(source_brief_report.get("content"), dict):
+                    brief_content = source_brief_report["content"]
+                    content["source_brief"] = {
+                        "id": source_brief_report.get("id"),
+                        "report_type": f"brief_{brief_type}",
+                        "report_date": report_date,
+                        "as_of": brief_content.get("as_of"),
+                    }
+                    content["degraded"] = brief_content.get("degraded", False)
+                    missing = brief_content.get("missing_sources")
+                    content["missing_sources"] = missing if isinstance(missing, list) else []
+                else:
+                    # brief 报告不存在时，标记为降级
+                    content["source_brief"] = {
+                        "id": None,
+                        "report_type": f"brief_{brief_type}",
+                        "report_date": report_date,
+                        "as_of": None,
+                    }
+                    content["degraded"] = True
+                    content["missing_sources"] = [f"brief_{brief_type}"]
+
                 saved = await node_api.save_analysis_report(
-                    report_type="broadcast",
+                    report_type=report_type,
                     report_date=report_date,
-                    content={"text": dialogue_text},
+                    content=content,
                 )
                 if saved is not None:
                     audio_data = await node_api.post(
                         "/internal/briefing/generate-audio",
-                        {"date": report_date},
+                        {"date": report_date, "brief_type": brief_type},
                         timeout=300.0,
                     )
                     raw_audio_path = audio_data.get("audio_path") if audio_data else None
@@ -146,8 +279,10 @@ async def run(state: AgentState) -> dict[str, object]:
                         audio_path = raw_audio_path
                 logger.info(
                     "broadcast_report_persisted",
+                    report_type=report_type,
                     report_date=report_date,
                     audio_generated=bool(audio_path),
+                    has_source_brief=bool(source_brief_report),
                 )
             except Exception as persist_err:
                 logger.error("broadcast_persist_failed", error=str(persist_err))

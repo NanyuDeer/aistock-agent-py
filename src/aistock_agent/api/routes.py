@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from sse_starlette.sse import EventSourceResponse
 
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.api.deps import (
     build_chat_initial_state,
     build_initial_state,
@@ -655,7 +656,7 @@ async def trigger_broadcast_chain(
     from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 
     # 支持指定历史日期（如 {"report_date": "2026-07-18"}），默认今天
-    today = (body or {}).get("report_date", date.today().isoformat())
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
     logger = structlog.get_logger()
     logger.info("manual_trigger_broadcast_start", report_date=today)
 
@@ -785,7 +786,7 @@ async def trigger_trend_score(
     """
     from aistock_agent.agents.workers import trend_score as trend_score_agent
 
-    today = (body or {}).get("report_date", date.today().isoformat())
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
     logger = structlog.get_logger()
     logger.info("manual_trigger_trend_score_start", report_date=today)
 
@@ -1023,7 +1024,7 @@ async def list_reports(date: str = "") -> dict[str, object]:
 
     from aistock_agent.services.report_cache import list_reports as cache_list
 
-    report_date = date or dt.today().isoformat()
+    report_date = date or shanghai_today().isoformat()
     items = cache_list(report_date)
     return {"date": report_date, "items": items}
 

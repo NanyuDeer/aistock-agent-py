@@ -28,6 +28,9 @@ from aistock_agent.utils.date import is_trading_day, shanghai_today
 
 logger = structlog.get_logger()
 
+# 保持 fire-and-forget task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
+_pending_event_tasks: set[asyncio.Task] = set()
+
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
 _scheduler: AsyncIOScheduler | None = None
@@ -184,11 +187,13 @@ async def _run_morning_task() -> None:
             else []
         )
         if major_events:
-            event_tasks = [
-                asyncio.create_task(_run_event_task(event))
-                for event in major_events
-                if event.get("title")
-            ]
+            event_tasks = []
+            for event in major_events:
+                if event.get("title"):
+                    task = asyncio.create_task(_run_event_task(event))
+                    _pending_event_tasks.add(task)
+                    task.add_done_callback(_pending_event_tasks.discard)
+                    event_tasks.append(task)
             logger.info(
                 "scheduler_event_triggered",
                 total=len(event_tasks),

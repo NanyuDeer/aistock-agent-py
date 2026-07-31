@@ -12,6 +12,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.observability.logging import get_logger
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.prompts.workers.wind_leader import WIND_LEADER_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.data_guard import DataCheck, ensure_data_available
@@ -19,7 +20,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import parse_dual_layer_response
+from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
 
 logger = get_logger(__name__)
 
@@ -73,8 +74,16 @@ async def run(state: AgentState) -> dict[str, object]:
             _archive_wind_leader(final_response)
             # 持久化到数据库（scheduler 触发时，供 broadcast_agent 等下游读取）
             if state.get("trigger_source") == "scheduler":
-                report_date = state.get("report_date") or datetime.now().strftime("%Y-%m-%d")
+                report_date = state.get("report_date") or shanghai_today().isoformat()
                 dual_layer_content = parse_dual_layer_response(final_response)
+                if not is_dual_layer_valid(dual_layer_content):
+                    logger.info("wind_leader_dual_layer_repair_attempt")
+                    repaired = await repair_dual_layer_with_llm(final_response)
+                    if repaired:
+                        dual_layer_content = repaired
+                        logger.info("wind_leader_dual_layer_repair_success")
+                    else:
+                        logger.warning("wind_leader_dual_layer_repair_failed")
                 await node_api.save_analysis_report(
                     report_type="wind_leader",
                     report_date=report_date,

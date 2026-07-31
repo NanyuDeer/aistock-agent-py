@@ -230,10 +230,11 @@ def _is_degraded_report(report: dict[str, object]) -> bool:
     if schema_version == "1.0" and len(details) < 100:
         return True
 
-    # schema 2.0 但 stocks 和 risks 都为空 → 降级
+    # schema 2.0 且 details 过短 且 stocks 和 risks 都为空 → 降级
+    # 晨报主要是宏观分析，可能确实没有具体股票代码和风险列表，不应仅凭 stocks/risks 为空就降级
     stocks = display.get("stocks", [])
     risks = display.get("risks", [])
-    if schema_version == "2.0" and not stocks and not risks:
+    if schema_version == "2.0" and len(details) < 200 and not stocks and not risks:
         return True
 
     return False
