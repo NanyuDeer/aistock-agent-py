@@ -18,7 +18,7 @@ async def stock_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if not symbol:
         raise ValueError("stock_snapshot requires 'symbol' in args or goal.symbols")
 
-    quote_text = await get_quote(symbol)
+    quote_text = await get_quote.ainvoke({"symbol": symbol})
     now = datetime.now(UTC)
 
     return Evidence(

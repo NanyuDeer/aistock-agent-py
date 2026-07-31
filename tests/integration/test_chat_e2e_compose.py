@@ -14,10 +14,9 @@ from langchain_core.messages import HumanMessage
 
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.graph.nodes.qa_router import QARouterOutput
-from aistock_agent.graph.nodes.synth_answer import SynthOutput
+from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
 from aistock_agent.schemas.chat_contract import (
     Evidence,
-    Insight,
     InsightGoal,
     SkillCall,
 )
@@ -81,12 +80,9 @@ async def test_compose_parallel_two_skills():
         ],
     )
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion="茅台当前 1800 元，白酒板块上下游为食品饮料",
-            basis=[
-                _evidence("stock_snapshot", ["1800 元"], ["600519"]),
-                _evidence("industry_relation", ["食品饮料"]),
-            ],
+            basis_indices=[1, 2],
             confidence="medium",
             uncertainty=[],
             answer_mode="trace",
@@ -116,6 +112,8 @@ async def test_compose_parallel_two_skills():
     assert all(not ev.degraded for ev in result["evidences"])
     # synth 产出 Insight
     assert result["insight"] is not None
+    # basis 由服务端映射，与 skill_executor 的 Evidence 完全一致
+    assert result["insight"].basis == result["evidences"]
     assert result["trace"].plan == "compose"
     assert result["trace"].actual_mode == "trace"
 
@@ -140,12 +138,9 @@ async def test_compose_serial_with_depends_on():
         ],
     )
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion="茅台 1800 元，近期发布半年报",
-            basis=[
-                _evidence("stock_snapshot", ["1800 元"], ["600519"]),
-                _evidence("stock_news", ["半年报"], ["600519"]),
-            ],
+            basis_indices=[1, 2],
             confidence="medium",
             uncertainty=[],
             answer_mode="trace",
@@ -203,12 +198,9 @@ async def test_compose_partial_degraded():
     )
     # synth 应选 validate 模式（因有 degraded Evidence）
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion="茅台 1800 元，板块为食品饮料，新闻暂不可用",
-            basis=[
-                _evidence("stock_snapshot", ["1800 元"], ["600519"]),
-                _evidence("industry_relation", ["食品饮料"]),
-            ],
+            basis_indices=[1, 3],
             confidence="low",
             uncertainty=["stock_news 工具失败"],
             answer_mode="validate",

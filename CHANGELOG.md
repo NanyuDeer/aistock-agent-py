@@ -2,6 +2,40 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-07-31 — CHAT QA 全线降级修复（4 项）
+
+**开发者**: 37588
+
+### 修复
+- `skills/stock_snapshot.py` / `skills/stock_news.py` / `skills/industry_relation.py`：LangChain `StructuredTool` 调用方式修正 `await tool(param)` → `await tool.ainvoke({...})`，消除 `NotImplementedError: StructuredTool does not support sync invocation`（"行情"按钮恢复）
+- `services/phenomenon_discovery.py`：`_ordered_real_fact_ids` 返回值加 `sorted()`，消除 PostgreSQL jsonb 键重排对 `evidence_ids` 顺序的破坏，修复市场复盘 3 按钮全天 `validation_failed`（5-6ms 秒回、LLM 从未被调用）
+- `graph/nodes/qa_router.py`：关键词兜底表加 `"龙头"` 条目，修复"今天的龙头股有哪些"路由错误 fallback 到 `report_lookup` 的问题
+
+### 新增
+- `skills/capital_flow.py`：新增 `capital_flow` Skill（复用 `get_capital_flow` tool，`/internal/flow/{symbol}` 新浪+Tushare 数据源），"资金"按钮由 fallback 到 `report_lookup` 恢复为正确路由
+- 注册链同步：`graph/nodes/skill_executor.py` SKILL_REGISTRY、`graph/nodes/qa_router.py` SYSTEM_PROMPT + 关键词兜底表 + `intent_map` + `_build_default_skill_call`、`schemas/chat_contract.py` `InsightGoal`/`SkillCall`/`ChatSource` Literal 类型扩展
+
+### 文档
+- `docs/superpowers/specs/2026-07-31-chat-qa-degraded-diagnosis.md`：只读诊断报告（生产日志 + 生产工件 + 本地代码逐层复现，6 个按钮全部定位）
+
+---
+## [changer] 2026-07-31 — Task 2.2-b：synth_answer basis_indices 服务端映射 + P1 严格整数契约
+
+**开发者**: 37588
+
+### 修复 — CHAT QA（Task 2.2-b）
+- `graph/nodes/synth_answer.py`：新增内部 LLM DTO `SynthInsightOutput`（`basis_indices` 为 1 基证据序号），`SynthOutput.insight` 改用该 DTO；LLM 不再重建完整 Evidence
+- 新增 `_resolve_basis_indices()`：按 1 基序号从 `state.evidences` 映射正式 Evidence（服务端权威）；0 / 负数 / 越界 / 重复序号进入现有安全降级，不静默改写
+- P1 严格契约：`basis_indices` 改为必填 `list[StrictInt]`（无默认值），缺失 / str / float / bool 一律 `ValidationError` → 节点走既有安全降级
+- `_build_prompt` JSON 输出契约改为 `basis_indices`，并禁止输出完整证据对象数组 / `skill`-`reason` 旧字段
+- 冻结契约未变：`schemas/chat_contract.py`、`Insight`、`Evidence`、`ChatSource`、对外事件结构
+
+### 测试
+- 单元 `test_synth_answer`：严格整数契约 4 例（缺失 / `["1"]` / `[1.0]` / `[true]` → ValidationError）、节点级降级 4 例、带非空 `sources`/`as_of`/`raw` 的映射测试（断言 `insight.basis` 引用 `state.evidences` 原对象、字段未改写）、非法序号降级（0 / 负数 / 越界 / 重复）
+- 集成：`test_chat_e2e_direct` / `test_chat_e2e_compose` / `test_chat_degraded` / `test_chat_multiturn` 改用 `basis_indices` 契约，并新增 `insight.basis == state.evidences` 断言
+- 目标回归 + Task 2.1 回归共 113 passed；Ruff/Mypy 检查通过（改动文件范围）
+
+---
 ## [changer] 2026-07-31 — P1.5 三个新 Skills + P0 阻塞修复（chat-qa json_mode + 澄清兜底）
 
 **开发者**: 37588

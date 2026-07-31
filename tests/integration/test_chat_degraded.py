@@ -22,13 +22,12 @@ async def test_degraded_skill_exception_recovers():
     )
 
     # synth 也成功返回（但应选 validate 模式因 Evidence degraded）
-    from aistock_agent.graph.nodes.synth_answer import SynthOutput
-    from aistock_agent.schemas.chat_contract import Insight
+    from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
 
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion="行情数据暂不可用",
-            basis=[],
+            basis_indices=[],
             confidence="low",
             uncertainty=["行情工具失败"],
             answer_mode="validate",  # 应被推断为 validate
@@ -82,13 +81,12 @@ async def test_degraded_qa_router_fallback():
     )
 
     # synth 成功返回
-    from aistock_agent.graph.nodes.synth_answer import SynthOutput
-    from aistock_agent.schemas.chat_contract import Insight
+    from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
 
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion="今日晨报内容",
-            basis=[],
+            basis_indices=[],
             confidence="medium",
             uncertainty=[],
             answer_mode="validate",
