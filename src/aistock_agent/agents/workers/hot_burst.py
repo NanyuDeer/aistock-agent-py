@@ -1,6 +1,7 @@
 """Hot Burst Agent — 机构调研热门股 AI 解读（v2.0 双层输出）"""
 
 import json
+import re
 from datetime import datetime
 
 import structlog
@@ -11,13 +12,16 @@ from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
+from aistock_agent.tools.hot_burst_tools import get_hot_burst_history
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.report_parser import parse_dual_layer_response
 
 logger = structlog.get_logger()
 
-_HOT_BURST_CHECK_PATH = "/internal/institution-research?hours=6&min_resonance_count=2&limit=20"
+_HOT_BURST_CHECK_PATH = (
+    "/internal/institution-research/history"
+    "?days=1&min_resonance=2&limit=50&offset=0"
+)
 _PODCAST_BRIEF_MIN = 150
 _PODCAST_BRIEF_MAX = 200
 _PODCAST_BRIEF_FALLBACK = (
@@ -32,12 +36,13 @@ _EMPTY_PODCAST_BRIEF = (
     "若数据更新，热门程度与持续性判断也可能随之调整。市场热点变化较快，请注意控制风险，"
     "以上内容仅供参考，不构成投资建议。"
 )
+_SOURCE_UNAVAILABLE_MESSAGE = "机构调研热门股数据源暂时不可用，未生成可追溯报告"
 
 
 def _has_hot_burst_data(data: dict[str, object]) -> bool:
-    """判断预检结果是否包含可供分析的热门股。"""
-    outbreaks = data.get("outbreaks")
-    return isinstance(outbreaks, list) and len(outbreaks) > 0
+    """判断历史预检结果是否包含可供分析的热门股记录。"""
+    records = data.get("records")
+    return isinstance(records, list) and len(records) > 0
 
 
 def _empty_report_content() -> dict[str, object]:
@@ -55,6 +60,22 @@ def _empty_report_content() -> dict[str, object]:
         "podcast_brief": _EMPTY_PODCAST_BRIEF,
         "schema_version": "2.0",
     }
+
+
+def _parse_hot_burst_response(final_response: str) -> dict[str, object]:
+    """Extract a valid hot-burst report when the model adds a JSON code block."""
+    for block in re.findall(
+        r"```(?:json)?\s*([\s\S]*?)```",
+        final_response,
+        flags=re.IGNORECASE,
+    ):
+        try:
+            content = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(content, dict) and isinstance(content.get("display_report"), dict):
+            return content
+    return parse_dual_layer_response(final_response)
 
 
 def _normalize_report(content: dict[str, object]) -> dict[str, object]:
@@ -98,6 +119,7 @@ async def _persist_report(state: AgentState, content: dict[str, object]) -> None
     await node_api.save_analysis_report(
         report_type="hot_burst",
         report_date=report_date,
+        data_source="hot_burst_agent",
         content=content,
     )
 
@@ -105,16 +127,18 @@ async def _persist_report(state: AgentState, content: dict[str, object]) -> None
 async def run(state: AgentState) -> dict[str, object]:
     """机构调研热门股分析节点（v2.0 双层输出）"""
     try:
-        source_data = await node_api.get(_HOT_BURST_CHECK_PATH)
-        if source_data is None:
-            degraded = "机构调研热门股分析暂时不可用：数据源获取失败，请稍后重试"
+        source_result = await node_api.get_hot_burst_data(_HOT_BURST_CHECK_PATH)
+        if source_result.status == "unavailable":
+            logger.warning("hot_burst_source_unavailable")
             return {
                 "analysis_reports": {
                     **state.get("analysis_reports", {}),
-                    "hot_burst": degraded,
+                    "hot_burst": _SOURCE_UNAVAILABLE_MESSAGE,
                 },
-                "final_response": degraded,
+                "final_response": _SOURCE_UNAVAILABLE_MESSAGE,
             }
+
+        source_data = source_result.data or {"records": []}
         if not _has_hot_burst_data(source_data):
             empty_content = _empty_report_content()
             await _persist_report(state, empty_content)
@@ -128,7 +152,7 @@ async def run(state: AgentState) -> dict[str, object]:
             }
 
         llm = get_deep_think()
-        tools = [get_hot_burst, get_hot_burst_history]
+        tools = [get_hot_burst_history]
         agent = create_react_agent(llm, tools)
 
         result = await agent.ainvoke(
@@ -146,7 +170,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
         if final_response:
             # 解析双层输出
-            dual = parse_dual_layer_response(final_response)
+            dual = _normalize_report(_parse_hot_burst_response(final_response))
 
             # 缓存到本地（前端报告列表查询用）
             try:
@@ -160,6 +184,7 @@ async def run(state: AgentState) -> dict[str, object]:
                 await node_api.save_analysis_report(
                     report_type="hot_burst",
                     report_date=report_date,
+                    data_source="hot_burst_agent",
                     content=dual,
                 )
 

@@ -371,6 +371,11 @@ src/aistock_agent/
 | POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |
 | GET | `/api/agent/briefing/morning` | 晨报（SSE 流式，graph 转发，支持 Redis 缓存） |
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
+| POST | `/api/agent/briefing/morning/trigger` | 手动触发晨报生成（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/broadcast/trigger` | 手动触发完整播报链路：morning→wind_leader→hot_burst→trend_score→broadcast（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/trend-score/trigger` | 手动触发趋势股评分 Agent 报告生成（需 X-Internal-Token） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
 | GET | `/health/ready` | Readiness 健康检查（检查 Redis/Node.js/LLM 连通性，失败返回 503 + degraded） |

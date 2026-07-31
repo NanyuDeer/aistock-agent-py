@@ -194,13 +194,26 @@ async def test_morning_run_cache_hit_legacy_text():
 
 
 @pytest.mark.asyncio
-async def test_morning_run_cache_hit_does_not_persist():
-    """缓存命中时不调用持久化。"""
+async def test_morning_run_cache_hit_idempotent_repersist():
+    """缓存命中时执行幂等补写，并返回真实 morning_persisted（不再跳过持久化）。
+
+    旧断言"缓存命中不持久化"已不再适用：缓存命中也调用 persist_morning_report
+    以保证数据库最终一致（幂等 upsert），但不再调用 LLM。
+    """
     cached_json = _make_valid_dual_layer_json()
     with patch(_MORNING_GET_CACHED, AsyncMock(return_value=cached_json)):
-        with patch(_MORNING_PERSIST, AsyncMock()) as mock_persist:
-            await morning_agent.run({})
-    mock_persist.assert_not_called()
+        with patch(_MORNING_CREATE_AGENT) as mock_create:
+            with patch(_MORNING_PERSIST, AsyncMock(return_value=True)) as mock_persist:
+                result = await morning_agent.run({})
+
+    # 不调 LLM（缓存命中）
+    mock_create.assert_not_called()
+    # 缓存命中执行幂等补写
+    mock_persist.assert_called_once()
+    # 返回真实 morning_persisted
+    assert result["analysis_reports"]["morning_persisted"] is True
+    assert result["analysis_reports"]["morning_generated"] is True
+    assert result["analysis_reports"]["cached"] is True
 
 
 # ── run() 新生成测试 ────────────────────────────────────────────
@@ -349,6 +362,82 @@ async def test_morning_run_persists_with_morning_type_and_null_user_id():
     assert date_arg == today
 
 
+@pytest.mark.asyncio
+async def test_morning_run_uses_state_report_date_for_prompt_and_persistence():
+    """调度器传入的合法日期不能被宿主机当前时间覆盖。"""
+    captured: dict = {}
+    mock_agent = MagicMock()
+
+    async def fake_ainvoke(inp, **kw):
+        captured.update(inp)
+        return {"messages": [AIMessage(content=_make_valid_dual_layer_json())]}
+
+    mock_agent.ainvoke = fake_ainvoke
+    with patch.object(morning_agent, "datetime", create=True) as mock_datetime:
+        mock_datetime.now.return_value = datetime(2026, 7, 25)
+        with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+            with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+                with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
+                    with patch(_MORNING_SET_CACHED, AsyncMock()):
+                        with patch(_MORNING_ARCHIVE):
+                            with patch(_MORNING_PERSIST, AsyncMock()) as mock_persist:
+                                await morning_agent.run({"report_date": "2026-07-24"})
+
+    assert "2026年07月24日" in captured["messages"][0].content
+    assert mock_persist.await_args.args[1] == "2026-07-24"
+
+
+@pytest.mark.asyncio
+async def test_morning_run_uses_state_report_date_for_trading_day_prompt() -> None:
+    """历史报告的非交易日提示必须按其报告日期判断。"""
+    mock_agent = _make_mock_morning_agent([AIMessage(content=_make_valid_dual_layer_json())])
+
+    with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+        with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+            with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
+                with patch(_MORNING_SET_CACHED, AsyncMock()):
+                    with patch(_MORNING_ARCHIVE):
+                        with patch(_MORNING_PERSIST, AsyncMock()):
+                            with patch(
+                                _MORNING_IS_TRADING_DAY, return_value=True
+                            ) as mock_trading_day:
+                                await morning_agent.run({"report_date": "2026-07-24"})
+
+    mock_trading_day.assert_called_once_with(date(2026, 7, 24))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_date", (None, "not-a-date"))
+async def test_morning_run_falls_back_to_shanghai_date_when_state_date_missing_or_invalid(
+    report_date: str | None,
+):
+    """缺失或非法状态日期回退上海自然日，避免使用宿主机日期。"""
+    captured: dict = {}
+    mock_agent = MagicMock()
+
+    async def fake_ainvoke(inp, **kw):
+        captured.update(inp)
+        return {"messages": [AIMessage(content=_make_valid_dual_layer_json())]}
+
+    mock_agent.ainvoke = fake_ainvoke
+    state = {} if report_date is None else {"report_date": report_date}
+    with patch(
+        "aistock_agent.agents.workers.morning.shanghai_today",
+        return_value=date(2026, 7, 23),
+        create=True,
+    ):
+        with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
+            with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
+                with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
+                    with patch(_MORNING_SET_CACHED, AsyncMock()):
+                        with patch(_MORNING_ARCHIVE):
+                            with patch(_MORNING_PERSIST, AsyncMock()) as mock_persist:
+                                await morning_agent.run(state)
+
+    assert "2026年07月23日" in captured["messages"][0].content
+    assert mock_persist.await_args.args[1] == "2026-07-23"
+
+
 # ── run() 降级测试 ──────────────────────────────────────────────
 
 
@@ -487,7 +576,7 @@ async def test_persist_morning_report_calls_node_api():
     }
     with patch("aistock_agent.services.morning_persister.node_api") as mock_node_api:
         mock_node_api.post = AsyncMock(return_value={"id": 1})
-        await persist_morning_report(report, "2026-07-14")
+        persisted = await persist_morning_report(report, "2026-07-14")
 
     mock_node_api.post.assert_awaited_once()
     call_args = mock_node_api.post.call_args
@@ -499,7 +588,9 @@ async def test_persist_morning_report_calls_node_api():
     assert body["report_date"] == "2026-07-14"
     assert body["user_id"] is None
     assert body["content"] == report
+    assert body["data_source"] == "morning_agent"
     assert body["status"] == "completed"
+    assert persisted is True
 
 
 @pytest.mark.asyncio

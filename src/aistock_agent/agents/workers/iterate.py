@@ -10,12 +10,12 @@
 """
 
 import json
-from datetime import date
 
 import structlog
 
 from aistock_agent.services.iterate_analyzer import analyze
 from aistock_agent.state.schema import AgentState
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -26,7 +26,7 @@ async def run(state: AgentState) -> dict[str, object]:
     全部正常时输出 status=normal；触发阈值时调用 LLM 生成分析报告。
     业务逻辑委托给 ``services.iterate_analyzer.analyze()``。
     """
-    date_str = date.today().isoformat()
+    date_str = str(state.get("report_date") or shanghai_today().isoformat())
 
     try:
         result = await analyze(date_str)

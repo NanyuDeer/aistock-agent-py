@@ -4,6 +4,11 @@ Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
+from dataclasses import dataclass
+from datetime import date
+from typing import Literal
+from urllib.parse import quote
+
 import httpx
 import structlog
 
@@ -11,6 +16,65 @@ from aistock_agent.config import settings
 from aistock_agent.services.http_client import HttpClientPool
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class ReviewReportReadResult:
+    """市场复盘工件读取结果，仅供 market_trace_qa 使用。"""
+
+    status: Literal["found", "not_found", "unavailable"]
+    report: dict[str, object] | None = None
+
+
+HotBurstReadStatus = Literal["available", "empty", "unavailable"]
+
+
+@dataclass(frozen=True)
+class HotBurstReadResult:
+    """机构调研热门股读取结果，区分正常空结果与数据源不可用。"""
+
+    status: HotBurstReadStatus
+    data: dict[str, object] | None = None
+
+
+IndustryChainStatus = Literal[
+    "found",
+    "not_found",
+    "authentication_failed",
+    "upstream_failed",
+    "timeout",
+    "request_failed",
+    "invalid_response",
+]
+
+
+@dataclass(frozen=True)
+class IndustryChainReadResult:
+    """IndustryKG 行业链读取结果，保留失败原因供工具层展示。"""
+
+    status: IndustryChainStatus
+    data: dict[str, object] | None = None
+    source: str | None = None
+
+
+def _is_valid_industry_node(
+    node: object, *, requires_leading_stocks: bool = False
+) -> bool:
+    """验证 IndustryKG 节点的最小交付契约。"""
+    if not isinstance(node, dict):
+        return False
+
+    industry_id = node.get("id")
+    name = node.get("name")
+    if not (
+        isinstance(industry_id, str)
+        and industry_id.strip()
+        and isinstance(name, str)
+        and name.strip()
+    ):
+        return False
+
+    return not requires_leading_stocks or isinstance(node.get("leadingStocks"), list)
 
 
 class NodeApiClient:
@@ -52,6 +116,40 @@ class NodeApiClient:
             return [item for item in data if isinstance(item, dict)]
         return None
 
+    async def get_hot_burst_data(self, path: str) -> HotBurstReadResult:
+        """读取热门机构调研数据，保留成功空结果与读取失败的语义差异。"""
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("hot_burst_read_invalid_response", url=url)
+                return HotBurstReadResult("unavailable")
+
+            data = payload.get("data")
+            if data is None:
+                return HotBurstReadResult("empty")
+            if not isinstance(data, dict):
+                logger.error("hot_burst_read_invalid_data", url=url)
+                return HotBurstReadResult("unavailable")
+            return HotBurstReadResult("available", data)
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "hot_burst_read_http_error",
+                url=url,
+                status=exc.response.status_code,
+            )
+        except httpx.RequestError as exc:
+            logger.error("hot_burst_read_request_error", url=url, error=str(exc))
+        except Exception as exc:
+            logger.error("hot_burst_read_unexpected_error", url=url, error=str(exc))
+
+        return HotBurstReadResult("unavailable")
+
     async def post(
         self,
         path: str,
@@ -89,16 +187,18 @@ class NodeApiClient:
             匹配行业列表 [{code, name, similarity}]，失败返回空列表
         """
         data = await self.post("/internal/industries/semantic-search", {
-            "embedding": embedding,  # type: ignore[dict-item]
+            "embedding": embedding,
             "threshold": threshold,
             "limit": limit,
         })
-        if data and isinstance(data.get("industries"), list):
-            industries = data["industries"]
+        industries = data.get("industries") if data else None
+        if isinstance(industries, list):
             return [item for item in industries if isinstance(item, dict)]
         return []
 
-    async def _post_request(self, path: str, body: dict[str, object], *, timeout: float | None = None) -> object | None:
+    async def _post_request(
+        self, path: str, body: dict[str, object], *, timeout: float | None = None
+    ) -> object | None:
         """POST 请求 Node.js 内部 API，返回解包后的 data 字段。
 
         ``post`` 的共享实现：统一处理 HTTP 错误、业务码校验、payload 解包。
@@ -131,7 +231,12 @@ class NodeApiClient:
                 return None
             return payload.get("data")
         except httpx.HTTPStatusError as e:
-            logger.error("node_api_post_http_error", url=url, status=e.response.status_code)
+            logger.error(
+                "node_api_post_http_error",
+                url=url,
+                status=e.response.status_code,
+                response_body=e.response.text[:500],
+            )
         except httpx.RequestError as e:
             logger.error("node_api_post_request_error", url=url, error=str(e))
         except Exception as e:
@@ -170,6 +275,28 @@ class NodeApiClient:
         except Exception as e:
             logger.error("node_api_delete_unexpected_error", url=url, error=str(e))
 
+        return None
+
+    async def patch(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
+        """PATCH Node 内部 API，并返回已解包的对象 data。"""
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.patch(url, json=body, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("node_api_patch_business_error", url=url)
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, dict) else None
+        except httpx.HTTPStatusError as exc:
+            logger.error("node_api_patch_http_error", url=url, status=exc.response.status_code)
+        except httpx.RequestError as exc:
+            logger.error("node_api_patch_request_error", url=url, error=str(exc))
+        except Exception as exc:
+            logger.error("node_api_patch_unexpected_error", url=url, error=str(exc))
         return None
 
     async def _request(self, path: str) -> object | None:
@@ -254,10 +381,11 @@ class NodeApiClient:
             payload["error_message"] = error_message
 
         result = await self.post("/internal/analysis-reports", payload)
-        # 同步写入内存缓存（前端报告列表查询用）
+        # 同步写入内存缓存（前端报告列表查询用）。缓存值必须是 content，
+        # 不能是包含 report_type/status 的请求包装层。
         try:
             from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
-            set_report(report_type, report_date, payload)
+            set_report(report_type, report_date, content)
         except Exception:
             pass
         if result:
@@ -291,6 +419,132 @@ class NodeApiClient:
             path = f"/internal/analysis-reports/{report_type}/{report_date}"
 
         return await self.get(path)
+
+    async def list_analysis_reports(
+        self,
+        report_type: str,
+        report_date: str,
+    ) -> list[dict[str, object]]:
+        """读取同一交易日、同一类型的全部已持久化报告。"""
+        path = f"/internal/analysis-reports/{report_type}/{report_date}/list"
+        return await self.get_list(path) or []
+
+    async def get_review_analysis_report(
+        self,
+        report_date: date,
+    ) -> ReviewReportReadResult:
+        """读取已持久化的 review 工件并保留不存在与服务失败的差异。
+
+        该接口故意只接受 ``datetime.date``，并通过 ``isoformat`` 固定构造路径，
+        防止调用方输入进入 URL 路径后发生目录穿越。它不改变通用
+        :meth:`get_analysis_report` 的 ``None`` 兼容语义。
+        """
+        if type(report_date) is not date:
+            raise TypeError("report_date 必须是 datetime.date")
+
+        url = (
+            f"{self._base_url}/internal/analysis-reports/review/"
+            f"{report_date.isoformat()}"
+        )
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("review_report_read_request_error", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+        except Exception as exc:
+            logger.error("review_report_read_unexpected_error", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+
+        if response.status_code == 404:
+            return ReviewReportReadResult("not_found")
+        if response.status_code != 200:
+            logger.error(
+                "review_report_read_http_error",
+                url=url,
+                status=response.status_code,
+            )
+            return ReviewReportReadResult("unavailable")
+
+        try:
+            payload = response.json()
+        except Exception as exc:
+            logger.error("review_report_read_invalid_json", url=url, error=str(exc))
+            return ReviewReportReadResult("unavailable")
+
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            logger.error("review_report_read_invalid_response", url=url)
+            return ReviewReportReadResult("unavailable")
+        report = payload.get("data")
+        if not isinstance(report, dict):
+            logger.error("review_report_read_invalid_data", url=url)
+            return ReviewReportReadResult("unavailable")
+        return ReviewReportReadResult("found", report)
+
+    async def get_industry_chain(self, industry_name: str) -> IndustryChainReadResult:
+        """读取 IndustryKG 行业链，并保留 HTTP 与响应结构的失败分类。"""
+        encoded_name = quote(industry_name, safe="")
+        url = f"{self._base_url}/internal/industry/{encoded_name}/chain?depth=1"
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(url, headers=headers)
+            if response.status_code == 404:
+                return IndustryChainReadResult("not_found")
+            if response.status_code == 403:
+                return IndustryChainReadResult("authentication_failed")
+            if response.status_code != 200:
+                logger.error(
+                    "industry_chain_read_http_error",
+                    url=url,
+                    status=response.status_code,
+                )
+                return IndustryChainReadResult("upstream_failed")
+
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("industry_chain_read_invalid_response", url=url)
+                return IndustryChainReadResult("invalid_response")
+
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                logger.error("industry_chain_read_invalid_data", url=url)
+                return IndustryChainReadResult("invalid_response")
+
+            source = data.get("source")
+            industry = data.get("industry")
+            upstream = data.get("upstream")
+            downstream = data.get("downstream")
+            if (
+                source != "IndustryKGService"
+                or not isinstance(upstream, list)
+                or not isinstance(downstream, list)
+                or not _is_valid_industry_node(industry)
+                or not all(
+                    _is_valid_industry_node(item, requires_leading_stocks=True)
+                    for item in upstream
+                )
+                or not all(
+                    _is_valid_industry_node(item, requires_leading_stocks=True)
+                    for item in downstream
+                )
+            ):
+                logger.error("industry_chain_read_invalid_data", url=url)
+                return IndustryChainReadResult("invalid_response")
+
+            return IndustryChainReadResult("found", data, source)
+        except httpx.TimeoutException as exc:
+            logger.error("industry_chain_read_timeout", url=url, error=str(exc))
+            return IndustryChainReadResult("timeout")
+        except httpx.RequestError as exc:
+            logger.error("industry_chain_read_request_error", url=url, error=str(exc))
+            return IndustryChainReadResult("request_failed")
+        except Exception as exc:
+            logger.error("industry_chain_read_invalid_response", url=url, error=str(exc))
+            return IndustryChainReadResult("invalid_response")
 
     async def cleanup_expired_reports(self) -> int:
         """清理过期报告

@@ -1,6 +1,6 @@
 """iterate_agent 集成测试"""
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -8,6 +8,23 @@ from aistock_agent.agents.workers import iterate as iterate_agent
 
 # 函数迁至 services/iterate_analyzer.py 后的 patch 路径
 _ANALYZER = "aistock_agent.services.iterate_analyzer"
+
+
+@pytest.mark.asyncio
+async def test_iterate_uses_scheduler_report_date() -> None:
+    state = {
+        "messages": [], "session_id": "test", "user_id": None,
+        "favorites": [], "intent": None, "symbol": None, "tag_code": None,
+        "analysis_reports": {}, "report_date": "2026-07-23", "final_response": None,
+    }
+    with patch.object(
+        iterate_agent,
+        "analyze",
+        new=AsyncMock(return_value={"date": "2026-07-23", "status": "normal"}),
+    ) as analyze:
+        await iterate_agent.run(state)
+
+    analyze.assert_awaited_once_with("2026-07-23")
 
 
 @pytest.mark.asyncio

@@ -40,18 +40,18 @@ EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
 - 判断每个变量的变化方向（bullish 利好 / bearish 利空 / neutral 中性）
 
 **Step 2 — 首层行业定位**：
-- 使用 match_industry_by_keywords 工具匹配受影响行业
-- 从匹配结果中确定首层（直接影响）行业
-- 确保行业名称来自数据库（不允许凭空编造）
+- 必须先调用 match_industry_by_keywords 工具匹配受影响行业
+- 从匹配结果中确定首层（直接影响）行业，并确保行业名称来自数据库（不允许凭空编造）
+- 必须将 match_industry_by_keywords 返回的规范行业名称作为 get_industry_chain 的 industry_name 参数
 
 **Step 3 — 产业链扩散**：
-- 对首层行业，查询其上下游关系（Industry Relation）
-- 逐层遍历上下游，最多 3 层
-- 每一层说明传导原因
+- 必须对每个首层行业调用 get_industry_chain 查询上下游关系
+- get_industry_chain 固定返回 depth=1 的扁平集合；上游和下游仅可作为该首层行业的直接关系事实
+- 不得根据返回顺序把扁平集合串成多级因果链；查询无结果或降级时，可缺少更深层链路，不得补造行业关系
 
 **Step 4 — 影响强度计算**：
 - 综合评估每个行业的受影响程度（结合产业链距离、关联紧密程度）
-- 方向由传导关系决定：需求拉动为 bullish，成本传导为 bearish
+- direction、impactStrength、reason 是基于事件变量的分析推断，不是图谱关系本身的确定结论
 - impactStrength 取值 0-1
 
 ## 输出格式
@@ -87,7 +87,12 @@ EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
 ## 约束
 - mechanism ≤200 字
 - variables 2-5 条
-- chain 至少包含核心行业自身（level=1, relation="核心行业"），逐步扩散最多 3 层
+- chain 至少包含核心行业自身（level=1, relation="核心行业"）
+- 其他行业只能使用 get_industry_chain 返回的直接上游或下游行业
+- 不能以 depth=1 的扁平查询结果生成第 3 层或更深层行业，也不能把未查询到的行业关系写入 chain
+- 图谱的上游/下游只证明一跳直接关联，不证明事件一定沿该关系传导
+- 工具返回 degraded=true 或 status != found 时，只保留核心行业；不得补造关联
+- industryGraphEvidence 只保留工具返回的 missingBoundary，不得由模型伪造图谱事实
 - 方向值必须用英文：bullish / bearish / neutral
 - 只输出 JSON 对象，不要 markdown 代码块包裹，不要多余文字
 """

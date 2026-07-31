@@ -29,6 +29,16 @@ TREND_SCORE_OUTPUT_DIR = Path("docs/agent-outputs/trend_score")
 async def run(state: AgentState) -> dict[str, object]:
     """趋势股评分分析：4维度评分 + K线趋势解读"""
     try:
+        # 预检：scheduler 触发时确保趋势评分 Top 数据可用
+        # 用户实时请求不预检（避免等待），工具本身有空数据降级处理
+        # 注意：/internal/trend/top 返回列表，用 get_list 而非 get（get 仅接受 dict）
+        # 不重试不刷新：趋势评分是每日预计算的，无按需刷新接口
+        if state.get("trigger_source") == "scheduler":
+            top_data = await node_api.get_list("/internal/trend/top?limit=5")
+            if not top_data:
+                logger.warning("trend_score_data_unavailable")
+                return {"final_response": "趋势股评分分析暂时不可用：评分数据尚未生成，请稍后重试"}
+
         llm = get_deep_think()
         tools = get_tools("trend_score")
         agent = create_react_agent(llm, tools)
@@ -55,12 +65,16 @@ async def run(state: AgentState) -> dict[str, object]:
                     report_type="trend_score",
                     report_date=report_date,
                     content=dual_layer_content,
+                    data_source="trend_score_agent",
                 )
 
         # 写入 analysis_reports 供 broadcast_agent 使用
         return {
             "final_response": final_response,
-            "analysis_reports": {**state.get("analysis_reports", {}), "trend_score": final_response},
+            "analysis_reports": {
+                **state.get("analysis_reports", {}),
+                "trend_score": final_response,
+            },
         }
     except Exception as e:
         logger.error("agent_run_failed", agent="trend_score", error=str(e), exc_info=True)

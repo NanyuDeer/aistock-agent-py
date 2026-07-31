@@ -9,15 +9,19 @@ from langchain_core.messages import AIMessage
 
 from aistock_agent.agents.workers.hot_burst import run
 from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
+from aistock_agent.services.data_client import HotBurstReadResult
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.hot_burst.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.hot_burst.get_deep_think"
 _NODE_API = "aistock_agent.agents.workers.hot_burst.node_api"
-_EXAMPLE_PATH = Path(__file__).parents[2] / "docs/agent-outputs/hot_burst/hot_burst-dual-layer-report.json"
+_EXAMPLE_PATH = (
+    Path(__file__).parents[2]
+    / "docs/agent-outputs/hot_burst/hot_burst-dual-layer-report.json"
+)
 
 _SOURCE_DATA = {
-    "update_time": "2026-07-15 09:00",
-    "outbreaks": [{"symbol": "300308", "stockName": "中际旭创"}],
+    "total": 1,
+    "records": [{"symbol": "300308", "stock_name": "中际旭创"}],
 }
 _VALID_BRIEF = (
     "今日机构调研热门方向集中在算力基础设施与高端制造。中际旭创和汇川技术在近期调研关注、板块消息及市场反馈中表现较突出，"
@@ -72,7 +76,9 @@ async def test_hot_burst_agent_generates_dual_layer_response():
         patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create,
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         result = await run(_state())
 
     content = json.loads(str(result["final_response"]))
@@ -83,7 +89,7 @@ async def test_hot_burst_agent_generates_dual_layer_response():
     assert result["analysis_reports"]["hot_burst"] == result["final_response"]
 
     tools = mock_create.call_args.args[1]
-    assert {tool.name for tool in tools} == {"get_hot_burst", "get_hot_burst_history"}
+    assert {tool.name for tool in tools} == {"get_hot_burst_history"}
     messages = mock_agent.ainvoke.call_args.args[0]["messages"]
     assert messages[0].content == HOT_BURST_ANALYST_PROMPT
 
@@ -145,7 +151,9 @@ async def test_hot_burst_scheduler_persists_schema_v2():
         patch(_CREATE_REACT_AGENT, return_value=_mock_agent()),
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 1})
         await run(_state(scheduler=True))
 
@@ -153,9 +161,32 @@ async def test_hot_burst_scheduler_persists_schema_v2():
     call = mock_api.save_analysis_report.await_args.kwargs
     assert call["report_type"] == "hot_burst"
     assert call["report_date"] == "2026-07-15"
+    assert call["data_source"] == "hot_burst_agent"
     assert call["content"]["schema_version"] == "2.0"
     assert call["content"]["display_report"]["stocks"] == ["300308", "300124"]
     assert 150 <= len(call["content"]["podcast_brief"]) <= 200
+
+
+@pytest.mark.asyncio
+async def test_hot_burst_scheduler_extracts_json_wrapped_in_explanation():
+    """The persisted report must use JSON inside an explanatory code block."""
+    wrapped_response = f"Analysis complete.\n\n```json\n{_VALID_RESPONSE}\n```"
+    with (
+        patch(_NODE_API) as mock_api,
+        patch(_CREATE_REACT_AGENT, return_value=_mock_agent(wrapped_response)),
+        patch(_GET_DEEP_THINK, return_value=MagicMock()),
+    ):
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": 5})
+        await run(_state(scheduler=True))
+
+    persisted = mock_api.save_analysis_report.await_args.kwargs["content"]
+    assert persisted["display_report"]["summary"] == "算力与高端制造关注度较高"
+    assert persisted["display_report"]["details"] == "重点分析热门程度、板块逻辑、持续性和风险。"
+    assert persisted["display_report"]["stocks"] == ["300308", "300124"]
+    assert persisted["podcast_brief"] == _VALID_BRIEF
 
 
 @pytest.mark.asyncio
@@ -166,7 +197,9 @@ async def test_hot_burst_user_request_does_not_persist():
         patch(_CREATE_REACT_AGENT, return_value=_mock_agent()),
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         mock_api.save_analysis_report = AsyncMock()
         await run(_state())
 
@@ -181,7 +214,9 @@ async def test_hot_burst_empty_data_skips_llm_and_persists_empty_report():
         patch(_CREATE_REACT_AGENT) as mock_create,
         patch(_GET_DEEP_THINK) as mock_llm,
     ):
-        mock_api.get = AsyncMock(return_value={"outbreaks": []})
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", {"records": []})
+        )
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 2})
         result = await run(_state(scheduler=True))
 
@@ -195,19 +230,46 @@ async def test_hot_burst_empty_data_skips_llm_and_persists_empty_report():
 
 
 @pytest.mark.asyncio
-async def test_hot_burst_source_failure_skips_llm_and_degrades():
-    """数据源失败时不调用 LLM，也不把失败误认为正常空数据。"""
+async def test_hot_burst_null_data_is_normal_empty_result_and_is_persisted():
+    """成功 data:null 是正常空结果，必须落库为可追溯的空工件。"""
     with (
         patch(_NODE_API) as mock_api,
         patch(_CREATE_REACT_AGENT) as mock_create,
         patch(_GET_DEEP_THINK) as mock_llm,
     ):
-        mock_api.get = AsyncMock(return_value=None)
-        result = await run(_state())
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("empty")
+        )
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": 5})
+        result = await run(_state(scheduler=True))
 
     mock_llm.assert_not_called()
     mock_create.assert_not_called()
-    assert "数据源获取失败" in str(result["final_response"])
+    mock_api.get_hot_burst_data.assert_awaited_once()
+    content = json.loads(str(result["final_response"]))
+    assert content["display_report"]["stocks"] == []
+    mock_api.save_analysis_report.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hot_burst_unavailable_source_is_degraded_and_not_persisted():
+    """请求或业务失败必须保留为缺源，不能伪造“今日暂无”。"""
+    with (
+        patch(_NODE_API) as mock_api,
+        patch(_CREATE_REACT_AGENT) as mock_create,
+        patch(_GET_DEEP_THINK) as mock_llm,
+    ):
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("unavailable")
+        )
+        mock_api.save_analysis_report = AsyncMock()
+        result = await run(_state(scheduler=True))
+
+    mock_llm.assert_not_called()
+    mock_create.assert_not_called()
+    mock_api.get_hot_burst_data.assert_awaited_once()
+    mock_api.save_analysis_report.assert_not_awaited()
+    assert result["final_response"] == "机构调研热门股数据源暂时不可用，未生成可追溯报告"
 
 
 @pytest.mark.asyncio
@@ -225,7 +287,9 @@ async def test_hot_burst_invalid_brief_uses_compliant_fallback():
         patch(_CREATE_REACT_AGENT, return_value=_mock_agent(invalid_response)),
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 3})
         result = await run(_state(scheduler=True))
 
@@ -247,7 +311,9 @@ async def test_hot_burst_invalid_json_falls_back_without_crashing():
         patch(_CREATE_REACT_AGENT, return_value=_mock_agent("普通文本报告")),
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 4})
         result = await run(_state(scheduler=True))
 
@@ -266,7 +332,9 @@ async def test_hot_burst_agent_exception_degradation():
         patch(_NODE_API) as mock_api,
         patch(_GET_DEEP_THINK, side_effect=RuntimeError("LLM unavailable")),
     ):
-        mock_api.get = AsyncMock(return_value=_SOURCE_DATA)
+        mock_api.get_hot_burst_data = AsyncMock(
+            return_value=HotBurstReadResult("available", _SOURCE_DATA)
+        )
         result = await run(_state())
 
     assert result["final_response"] == "机构调研热门股分析暂时不可用，请稍后重试"

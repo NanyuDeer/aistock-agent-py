@@ -15,6 +15,7 @@ BROADCAST_ANALYST_PROMPT = SYSTEM_PROMPT + """
 - 晨报：{{MORNING_BRIEF}}
 - 长线风口：{{WIND_LEADER}}
 - 机构调研热门股：{{HOT_BURST}}
+- 趋势股评分：{{TREND_SCORE}}
 
 **输出格式**（JSON 数组）：
 [

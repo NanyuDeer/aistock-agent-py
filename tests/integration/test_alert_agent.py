@@ -107,6 +107,39 @@ async def test_master_synthesizes_sub_agent_results():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_persists_alert_with_symbol_bound_real_structure():
+    """调度产生的 alert 以股票代码作为实体键，并写入可校验的 content 结构。"""
+    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
+    mock_agent = _make_mock_agent(final_response)
+    save_report = AsyncMock()
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
+    ):
+        await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+            "trigger_source": "scheduler",
+            "report_date": "2026-07-10",
+        })
+
+    assert save_report.await_args.kwargs == {
+        "report_type": "alert",
+        "report_date": "2026-07-10",
+        "content": {
+            "symbol": "600519",
+            "display_report": {"summary": "异动结论"},
+            "podcast_brief": "异动摘要",
+        },
+        "user_id": "600519",
+        "data_source": "alert_agent",
+    }
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_failure_not_crash():
     """某个子 Agent 失败时返回降级文本，不中断整体流程。"""
     mock_agent = _make_mock_agent("降级后的 Master 报告")

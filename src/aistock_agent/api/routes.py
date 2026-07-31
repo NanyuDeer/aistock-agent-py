@@ -2,12 +2,13 @@
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from datetime import date
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from langgraph.graph.state import CompiledStateGraph
 from sse_starlette.sse import EventSourceResponse
 
@@ -15,9 +16,16 @@ from aistock_agent.api.deps import build_initial_state, verify_internal_token
 from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
 from aistock_agent.graph.builder import compile_graph
-from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
+from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.qa_briefing import (
+    QaBriefingPrerequisiteError,
+    QaBriefingRunError,
+    run_qa_brief_chain,
+)
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 router = APIRouter()
@@ -25,6 +33,28 @@ router = APIRouter()
 # 健康检查路由（在 main.py 挂载到根路径，不在 /api/agent 前缀下）
 health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
+
+
+def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
+    """缺省使用上海当天；显式日期必须是有效的 YYYY-MM-DD。"""
+    if not body or "report_date" not in body:
+        return shanghai_today().isoformat()
+
+    report_date = body["report_date"]
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != report_date:
+        raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD")
+    return report_date
+
+
+def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
+    """QA runner 必须显式指定固定上海日期，禁止回退到当天。"""
+    if not body or "report_date" not in body:
+        raise HTTPException(status_code=422, detail="QA runner 必须提供 report_date")
+    return _resolve_manual_report_date(body)
 
 
 @router.post("/chat/message", response_model=ChatResponse)
@@ -54,7 +84,16 @@ async def chat_message(
     )
 
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    return ChatResponse(content=content, session_id=session_id)
+    advisor_trace = result.get("advisor_trace")
+    return ChatResponse(
+        content=content,
+        session_id=session_id,
+        advisor_trace=(
+            AdvisorTrace.model_validate(advisor_trace)
+            if isinstance(advisor_trace, dict)
+            else None
+        ),
+    )
 
 
 # ── session_id → asyncio.Queue 双队列扇出 ──
@@ -143,6 +182,7 @@ async def _stream_messages(
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
+                    "advisor_trace": final_state.values.get("advisor_trace"),
                 }
                 break
             if not isinstance(event, dict):
@@ -279,22 +319,29 @@ async def morning_briefing() -> EventSourceResponse:
 
 
 @router.post("/briefing/morning/trigger")
-async def trigger_morning_briefing() -> dict[str, object]:
+async def trigger_morning_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
     """手动触发晨报生成（非流式，供管理员 curl 触发）
 
     直接调用 morning_agent.run()，不走 graph SSE 流。
-    返回 JSON 含 success / message / report_date / cached。
+    晨报完成后自动提取 major_events 并行执行事件传导分析，等待全部完成。
+    返回 JSON 含 success / message / report_date / cached / 事件统计。
     管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
     """
     from aistock_agent.agents.workers import morning as morning_agent
+    from aistock_agent.services.event_conduction import run_event_conduction_batch
 
-    today = date.today().isoformat()
+    report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
-    logger.info("manual_trigger_morning_start", report_date=today)
+    logger.info("manual_trigger_morning_start", report_date=report_date)
+
+    start = time.time()
 
     state: dict[str, object] = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
-        "session_id": f"trigger_morning_{today}",
+        "session_id": f"trigger_morning_{report_date}",
         "user_id": None,
         "favorites": [],
         "intent": "morning",
@@ -303,31 +350,473 @@ async def trigger_morning_briefing() -> dict[str, object]:
         "analysis_reports": {},
         "final_response": None,
         "trigger_source": "manual",
+        "report_date": report_date,
     }
 
     try:
         result = await morning_agent.run(state)
-        has_response = bool(result.get("final_response"))
-        has_major_events = bool(result.get("analysis_reports", {}).get("major_events"))
+        analysis_reports = result.get("analysis_reports", {})
+        if not isinstance(analysis_reports, dict):
+            analysis_reports = {}
+
+        # 显式状态字段，禁止用 bool(final_response) 推断
+        morning_generated = bool(analysis_reports.get("morning_generated", False))
+        cached = bool(analysis_reports.get("cached", False))
+        morning_persisted = bool(analysis_reports.get("morning_persisted", False))
+        major_events = analysis_reports.get("major_events", [])
+        if not isinstance(major_events, list):
+            major_events = []
+        has_major_events = bool(major_events)
+
+        # 事件传导统计
+        major_event_count = len(major_events)
+        event_triggered_count = 0
+        event_succeeded_count = 0
+        event_failed_count = 0
+        event_persisted_count = 0
+        event_persist_failed_count = 0
+
+        # 晨报成功生成（非降级）且有重大事件 → 触发事件传导
+        if morning_generated and has_major_events:
+            event_results = await run_event_conduction_batch(major_events)
+            event_triggered_count = len(event_results)
+            event_succeeded_count = sum(1 for r in event_results if r.event_generated)
+            event_failed_count = event_triggered_count - event_succeeded_count
+            # 只统计生成成功的事件的持久化状态
+            event_persisted_count = sum(
+                1 for r in event_results if r.event_generated and r.persisted
+            )
+            event_persist_failed_count = event_succeeded_count - event_persisted_count
+
+        elapsed = time.time() - start
+
         logger.info(
             "manual_trigger_morning_done",
-            has_response=has_response,
+            morning_generated=morning_generated,
+            cached=cached,
+            morning_persisted=morning_persisted,
             has_major_events=has_major_events,
+            major_event_count=major_event_count,
+            event_triggered=event_triggered_count,
+            event_succeeded=event_succeeded_count,
+            event_failed=event_failed_count,
+            event_persisted=event_persisted_count,
+            event_persist_failed=event_persist_failed_count,
         )
+
         return {
-            "success": True,
-            "message": "晨报生成完成" if has_response else "晨报生成完成（无内容）",
-            "report_date": today,
-            "cached": result.get("analysis_reports", {}).get("cached", False),
+            "success": morning_generated,
+            "message": "晨报生成完成" if morning_generated else "晨报生成失败（降级）",
+            "report_date": report_date,
+            "cached": cached,
+            "morning_generated": morning_generated,
+            "morning_persisted": morning_persisted,
             "has_major_events": has_major_events,
+            "major_event_count": major_event_count,
+            "event_triggered_count": event_triggered_count,
+            "event_succeeded_count": event_succeeded_count,
+            "event_failed_count": event_failed_count,
+            "event_persisted_count": event_persisted_count,
+            "event_persist_failed_count": event_persist_failed_count,
+            "elapsed_seconds": round(elapsed, 2),
         }
     except Exception as e:
         logger.error("manual_trigger_morning_failed", error=str(e), exc_info=True)
         return {
             "success": False,
             "message": f"晨报生成失败: {str(e)}",
+            "report_date": report_date,
+            "morning_generated": False,
+            "cached": False,
+            "morning_persisted": False,
+            "has_major_events": False,
+            "major_event_count": 0,
+            "event_triggered_count": 0,
+            "event_succeeded_count": 0,
+            "event_failed_count": 0,
+            "event_persisted_count": 0,
+            "event_persist_failed_count": 0,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/briefing/event/trigger")
+async def trigger_event_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发事件传导分析（非流式，供管理员 curl 触发）
+
+    复用 ``run_single_event_conduction()``，与 scheduler 共享同一执行路径。
+    返回 JSON 含 success / message / event_id / event_generated / event_persisted / event_cached。
+    禁止硬编码 success=True，只读取显式状态。
+    """
+    from aistock_agent.services.event_conduction import run_single_event_conduction
+
+    logger = structlog.get_logger()
+
+    # 构建事件 dict：优先用请求体的 event_title，否则用默认事件描述
+    event_title = (body or {}).get("event_title", "").strip() if body else ""
+    event_summary = (body or {}).get("event_summary", "").strip() if body else ""
+    event_url = (body or {}).get("event_url", "").strip() if body else ""
+
+    if event_title:
+        event_dict: dict[str, object] = {
+            "title": event_title,
+            "summary": event_summary,
+            "url": event_url,
+        }
+    else:
+        # 无 title 时构造非空默认事件，实际调用 run_single_event_conduction()
+        # （恢复上一版本"分析最新重大市场事件"的行为，不因空标题提前失败）
+        event_dict = {
+            "title": "最新重大市场事件",
+            "summary": "请分析最新的重大市场事件",
+            "url": "",
+        }
+
+    logger.info("manual_trigger_event_start", event_title=event_title[:50] or "default")
+
+    try:
+        result = await run_single_event_conduction(event_dict)
+
+        logger.info(
+            "manual_trigger_event_done",
+            event_title=event_title[:50] or "default",
+            event_generated=result.event_generated,
+            persisted=result.persisted,
+            cached=result.cached,
+            success=result.success,
+        )
+
+        if result.success:
+            return {
+                "success": True,
+                "message": "事件分析完成",
+                "event_id": result.event_id,
+                "event_generated": result.event_generated,
+                "event_persisted": result.persisted,
+                # 从 event_agent 显式状态读取，禁止硬编码 False
+                "event_cached": result.cached,
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"事件分析失败: {result.error or '未知错误'}",
+                "event_id": result.event_id,
+                "event_generated": result.event_generated,
+                "event_persisted": result.persisted,
+                "event_cached": result.cached,
+            }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_event_failed",
+            event_title=event_title[:50] or "default",
+            error=str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"事件分析失败: {str(e)}",
+            "event_id": "",
+            "event_generated": False,
+            "event_persisted": False,
+            "event_cached": False,
+        }
+
+
+@router.post("/briefing/review/trigger")
+async def trigger_review_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发复盘溯源生成（非流式，供管理员 curl 触发）
+
+    直接调用 review_agent.run()，不走 graph SSE 流。
+    返回 JSON 含 success / message / report_date / cached / elapsed_seconds。
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import review as review_agent
+
+    # 支持指定历史日期，默认上海当天
+    report_date = _resolve_manual_report_date(body)
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_review_start", report_date=report_date)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成今日复盘溯源"}],
+        "session_id": f"trigger_review_{report_date}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "review",
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+        "report_date": report_date,
+    }
+
+    try:
+        result = await review_agent.run(state)
+        final_response = result.get("final_response")
+        generated = (
+            isinstance(final_response, str)
+            and final_response != "收盘溯源生成暂时不可用，请稍后重试"
+        )
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_review_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "复盘溯源生成完成" if generated else "复盘溯源生成失败（降级）",
+            "report_date": report_date,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_review_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"复盘溯源生成失败: {str(e)}",
+            "report_date": report_date,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/briefing/broadcast/trigger")
+async def trigger_broadcast_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发完整播报链路（非流式，供管理员 curl 触发）
+
+    串行执行：morning → wind_leader → hot_burst → trend_score → broadcast。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+    每个 Agent 异常独立捕获，不影响后续 Agent 执行。
+    返回 JSON 含整体 success / message / 各步骤状态 / elapsed_seconds。
+
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 100`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+    from aistock_agent.agents.workers import hot_burst as hot_burst_agent
+    from aistock_agent.agents.workers import morning as morning_agent
+    from aistock_agent.agents.workers import trend_score as trend_score_agent
+    from aistock_agent.agents.workers import wind_leader as wind_leader_agent
+
+    # 支持指定历史日期（如 {"report_date": "2026-07-18"}），默认今天
+    today = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_broadcast_start", report_date=today)
+
+    start = time.time()
+
+    def _make_state(intent: str | None = None) -> dict[str, object]:
+        """构造 manual 触发的 AgentState（trigger_source=manual 使报告写DB）"""
+        return {
+            "messages": [],
+            "session_id": f"manual_broadcast_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": intent,
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "manual",
             "report_date": today,
         }
+
+    steps: list[dict[str, object]] = []
+
+    def _record(step: str, success: bool, elapsed: float, error: str = "") -> None:
+        steps.append({
+            "step": step,
+            "success": success,
+            "elapsed_seconds": round(elapsed, 2),
+            "error": error,
+        })
+
+    # Step 1: 晨报
+    step_start = time.time()
+    try:
+        morning_result = await morning_agent.run(_make_state("morning"))
+        morning_ok = bool(morning_result.get("final_response"))
+        _record("morning", morning_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_morning_done", success=morning_ok)
+    except Exception as e:
+        _record("morning", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_morning_failed", error=str(e), exc_info=True)
+
+    # Step 2: 风口分析
+    step_start = time.time()
+    try:
+        wind_result = await wind_leader_agent.run(_make_state())
+        wind_ok = bool(wind_result.get("final_response"))
+        _record("wind_leader", wind_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_wind_done", success=wind_ok)
+    except Exception as e:
+        _record("wind_leader", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_wind_failed", error=str(e), exc_info=True)
+
+    # Step 3: 机构调研热门股
+    step_start = time.time()
+    try:
+        burst_result = await hot_burst_agent.run(_make_state())
+        burst_ok = bool(burst_result.get("final_response"))
+        _record("hot_burst", burst_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_burst_done", success=burst_ok)
+    except Exception as e:
+        _record("hot_burst", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_burst_failed", error=str(e), exc_info=True)
+
+    # Step 3.5: 趋势股评分分析（写DB供 broadcast 消费 + 前端查询）
+    step_start = time.time()
+    try:
+        trend_result = await trend_score_agent.run(_make_state())
+        trend_ok = bool(trend_result.get("final_response"))
+        _record("trend_score", trend_ok, time.time() - step_start)
+        logger.info("manual_trigger_broadcast_trend_done", success=trend_ok)
+    except Exception as e:
+        _record("trend_score", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_trend_failed", error=str(e), exc_info=True)
+
+    # Step 4: 播报生成（从数据库读取报告）
+    step_start = time.time()
+    try:
+        broadcast_result = await broadcast_agent.run(_make_state())
+        broadcast_ok = bool(broadcast_result.get("final_response"))
+        _record("broadcast", broadcast_ok, time.time() - step_start)
+        logger.info(
+            "manual_trigger_broadcast_final_done",
+            success=broadcast_ok,
+            has_audio=bool(broadcast_result.get("audio_path")),
+        )
+    except Exception as e:
+        _record("broadcast", False, time.time() - step_start, str(e))
+        logger.error("manual_trigger_broadcast_final_failed", error=str(e), exc_info=True)
+
+    elapsed = time.time() - start
+    succeeded = sum(1 for s in steps if s["success"])
+    total = len(steps)
+
+    logger.info(
+        "manual_trigger_broadcast_done",
+        succeeded=succeeded,
+        total=total,
+        elapsed_seconds=round(elapsed, 2),
+    )
+
+    return {
+        "success": succeeded == total,
+        "message": f"播报链路完成: {succeeded}/{total} 步成功",
+        "report_date": today,
+        "steps": steps,
+        "succeeded": succeeded,
+        "total": total,
+        "elapsed_seconds": round(elapsed, 2),
+    }
+
+
+@router.post("/briefing/trend-score/trigger")
+async def trigger_trend_score(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发趋势股评分 Agent 报告生成（非流式，供管理员 curl 触发）
+
+    直接调用 trend_score_agent.run()，生成 AI 分析报告并写入数据库。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+    前提：趋势股评分数据已由 Node.js TrendBatchService 计算完成（可先调
+    ``POST /api/internal/trigger-trend-batch`` 补数据）。
+
+    返回 JSON 含 success / message / report_date / elapsed_seconds。
+    管理员触发后可通过 ``pm2 log aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import trend_score as trend_score_agent
+
+    today = (body or {}).get("report_date", date.today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_trend_score_start", report_date=today)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成趋势股评分分析报告"}],
+        "session_id": f"manual_trend_score_{today}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "manual",
+        "report_date": today,
+    }
+
+    try:
+        result = await trend_score_agent.run(state)
+        final_response = result.get("final_response")
+        generated = bool(final_response)
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_trend_score_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "趋势股评分报告生成完成" if generated else "趋势股评分报告生成失败（降级）",
+            "report_date": today,
+            "has_response": generated,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_trend_score_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"趋势股评分报告生成失败: {str(e)}",
+            "report_date": today,
+            "has_response": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/qa/briefing/run")
+async def run_qa_briefing(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """以固定日期已审核工件生成 QA Brief、播报和音频。"""
+    if not settings.qa_mode_enabled:
+        raise HTTPException(status_code=404, detail="QA runner 不可用")
+    if not settings.qa_run_id:
+        raise HTTPException(status_code=503, detail="QA_RUN_ID 未配置")
+
+    run_id = body.get("run_id") if body else None
+    if not isinstance(run_id, str) or run_id != settings.qa_run_id:
+        raise HTTPException(status_code=403, detail="QA run_id 不匹配")
+
+    brief_type = body.get("brief_type") if body else None
+    if brief_type not in {"morning", "evening"}:
+        raise HTTPException(status_code=422, detail="brief_type 必须是 morning 或 evening")
+
+    report_date = _resolve_qa_report_date(body)
+    try:
+        return await run_qa_brief_chain(brief_type, report_date, run_id)
+    except QaBriefingPrerequisiteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QaBriefingRunError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/briefing/alert")
@@ -420,6 +909,28 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     if r:
         return {"code": 200, "data": r}
     return {"code": 404, "message": "报告未生成", "data": None}
+
+
+# ── 市场复盘问答 ─────────────────────────────────────────────────
+
+
+@router.post("/market-trace-qa/message")
+async def market_trace_qa_message(
+    req: MarketTraceQaRequest,
+    _: None = Depends(verify_internal_token),
+) -> MarketTraceQaResponse:
+    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
+
+    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
+    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
+    """
+    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
+
+    return await answer_market_trace_qa(
+        message=req.message,
+        report_date=req.report_date,
+        session_id=req.session_id,
+    )
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────

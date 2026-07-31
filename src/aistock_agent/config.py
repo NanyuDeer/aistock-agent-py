@@ -3,7 +3,7 @@
 import json
 import os
 import random
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/1"
     # 连接池最大连接数（main.py lifespan 传给 RedisPool.init）
     redis_max_connections: int = 10
+    # Stock Trace 使用 Node Outbox 所在的 Redis DB；独立 Consumer 进程使用该连接。
+    stock_trace_redis_url: str = "redis://localhost:6379/2"
+    stock_trace_consumer_group: str = "stock-trace-workers"
+    stock_trace_consumer_block_ms: int = 1000
+    # Pending 消息达到该空闲时间后，可由任意 Consumer 接管重试。
+    stock_trace_pending_claim_idle_ms: int = 3000
+    stock_trace_max_attempts: int = 3
+    # Tool calling provides a schema-bound response across OpenAI-compatible models.
+    stock_trace_structured_output_method: Literal[
+        "function_calling", "json_mode", "json_schema"
+    ] = "function_calling"
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
@@ -83,6 +94,11 @@ class Settings(BaseSettings):
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
 
+    # 隔离 QA：保留原始字符串，再由 qa_mode_enabled 做与 Node 一致的严格判断。
+    # QA_RUN_ID 绑定单次隔离资源，避免误把任意日期任务写入 QA 库。
+    qa_mode: str = ""
+    qa_run_id: str = ""
+
     # 市场事件推送阈值（晨报生成后自动识别重大涨跌并推送）
     # 对称阈值：上涨 >= 阈值 或 下跌 <= -阈值 才视为"重磅"
     market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
@@ -115,6 +131,11 @@ class Settings(BaseSettings):
             # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    @property
+    def qa_mode_enabled(self) -> bool:
+        """仅接受与 Node 一致的精确 ``QA_MODE=true``。"""
+        return self.qa_mode == "true"
 
     def get_tavily_key(self) -> str:
         """从 API 池中随机选取一个可用的 Tavily Key。

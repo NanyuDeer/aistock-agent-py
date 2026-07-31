@@ -2,6 +2,103 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-07-25 — 新增 broadcast/trend-score 手动触发端点
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/api/routes.py`：新增 `POST /briefing/broadcast/trigger` 手动触发完整播报链路（morning→wind_leader→hot_burst→trend_score→broadcast），绕过交易日检查，返回各步骤状态
+- `src/aistock_agent/api/routes.py`：新增 `POST /briefing/trend-score/trigger` 单独触发趋势股评分 Agent 报告生成
+
+### 文档
+- `README.md`：API 端点表补充 5 个 trigger 端点（morning/event/review/broadcast/trend-score）
+
+---
+
+## [main] 2026-07-24 — 趋势股评分接入每日定时播报链路
+**开发者**: Aria
+
+### 改进
+- trend_score Agent 接入 APScheduler 定时调度（_run_broadcast_task Step 3.5）
+- scheduler 触发时数据预检：检查 /internal/trend/top 列表是否为空
+- broadcast Agent 读取 trend_score 报告并注入提示词占位符 {{TREND_SCORE}}
+- 定时链路拓扑更新：morning→wind_leader→hot_burst→trend_score→broadcast
+
+---
+
+## [changer] 2026-07-21 — 市场溯源：冻结事实 → 竞争归因 → 不可变归档 → 缓存抗污染
+
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/schemas/market_trace.py`：Pydantic 严格契约（SourceRecord / DominantPhenomenon / CausalChain / CandidateExplanation / MarketTraceResult / MarketTraceSnapshot / ReviewArtifact）
+- `src/aistock_agent/services/market_trace_snapshot.py`：构建冻结事实快照、规则选择主导现象、境外行情/财联社/Tavily 证据收集
+- `tests/unit/test_market_trace_snapshot.py`：快照归一化、缺失降级、规则确定性、occurred_at 日期格式回归
+- `tests/unit/test_archiver.py`：不可变归档顺序、重复 snapshot_id 拒绝、事實先于展示层
+
+### 修复
+- `src/aistock_agent/agents/workers/review.py`：Review Agent 从 ReAct 改为单次 JSON 推理；冻结事实先于 LLM 调用；校验 Candidate/chain/source_id/stage/dominant_phenomenon；Counter 多重集拒绝重复 fact_ids；primary=null 归因链拒绝；缓存命中由 snapshot+trace 重建 Markdown/summary/sectors
+- `src/aistock_agent/services/cache.py`：review 缓存改为完整 JSON artifact（dict），旧纯文本视为未命中
+- `src/aistock_agent/services/archiver.py`：新增 `archive_market_trace_snapshot`（Path.open("x") 不可覆盖），`archive_review` 校验 facts.json 先存在
+- `tests/integration/test_review_agent.py`：91 项集成测试覆盖完整时序、缓存抗污染、重复 ID 拒绝、归因一致性
+
+### 删除
+- `src/aistock_agent/tools/review_tools.py`：移除 yfinance A 股取数和过时 ReAct Tool 注册
+
+---
+
+## [main] 2026-07-20 — 移除十倍股工具 — tenx_tools.py 已被 trend_tools.py 替代
+**开发者**: Aria
+
+### 重构
+- 删除 `src/aistock_agent/tools/tenx_tools.py`（get_tenx_score / get_tenx_top_stocks 工具）
+- `src/aistock_agent/tools/__init__.py`：移除 `tenx_tools` 导入项
+- 后端 `/internal/tenx/*` 路由已同步移除，趋势股评分 `/internal/trend/*` 路由已完全替代
+
+---
+
+## [changer] 2026-07-18 — 修复 Morning→Event 传导链路：鉴权绕过、假成功与持久化问题
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/agents/workers/event.py`：新增 `_is_valid_cached_event_report`（旧缓存按业务结构校验）；`event_generated=can_persist`；`event_cached` 取 `set_cached_event` 返回值；缓存命中执行幂等补写；用 `extract_last_human_message()` 替换手动消息遍历，支持 dict message
+- `src/aistock_agent/services/cache.py`：`set_cached_event` 返回 bool，仅 Redis 写入成功返回 True
+- `src/aistock_agent/services/event_conduction.py`（新增）：可复用事件执行函数 `run_single_event_conduction` + `run_event_conduction_batch`；`EventConductionResult` 增加 `cached` 字段
+- `src/aistock_agent/services/event_persister.py`：检查 `node_api.post()` 返回值，None 时返回 False；deepcopy 后剥离 `event_generated/event_persisted/event_cached` 临时状态再落库
+- `src/aistock_agent/services/morning_persister.py`：检查 `node_api.post()` 返回值，None 时返回 False；返回类型 None→bool
+- `src/aistock_agent/agents/workers/morning.py`：缓存命中执行幂等补写而非硬编码 True；返回显式状态字段（cached/morning_generated/morning_persisted）
+- `src/aistock_agent/agents/workers/review.py`：适配显式状态字段
+- `src/aistock_agent/api/routes.py`：trigger 路由补 auth（`Depends(verify_internal_token)`）；空 body 构造非空默认标题实际调用 conduction；`event_cached` 读 `result.cached`；morning trigger 增加 `event_persisted_count`/`event_persist_failed_count`
+- `src/aistock_agent/services/scheduler.py`：`_run_event_task` 改用共享函数；适配 `EventConductionResult` 新字段；修复 E501
+- `src/aistock_agent/data/sector_aliases.json`：石油石化板块新增煤炭/油气映射；新增 AI手机/消费电子板块
+
+### 跨仓库
+- `aistock-app-api/src/modules/agent/agent.proxy.ts`：循环 `decodeURIComponent`+规范化后用正则 `^/briefing/[^/]+/trigger(/.*)?$` 阻断；解码失败 fail closed（详见 api 仓库本日 CHANGELOG）
+
+### 测试
+- `tests/integration/test_event_agent.py`：显式状态测试 + 缓存补偿测试（幂等补写/旧缓存/降级缓存）+ dict message 测试
+- `tests/integration/test_morning_agent.py`：缓存命中改幂等补写断言
+- `tests/integration/test_review_agent.py`：适配显式状态字段
+- `tests/test_routes_briefing.py`：event trigger 复用测试 + persist 统计测试 + 空 body 测试重写
+- `tests/unit/test_cache.py`：适配 set_cached_event 返回 bool
+- `tests/unit/test_scheduler.py`：适配新字段 + 事件传导触发测试
+- `tests/unit/test_event_conduction_service.py`（新增）：移除 `has_display_report`，改用 `event_generated`；cached 传播断言
+- `tests/unit/test_persister_post_check.py`（新增）：post=None/异常/成功测试 + 落库内容剥离断言
+- `tests/unit/test_review_report.py`（新增）
+
+### 其他
+- `.gitignore`：新增 `data/audio/` 忽略音频产物
+- `scripts/manual_event_conduction.py`（新增）：手动调试事件传导脚本
+
+---
+
+## [main] 2026-07-17 — 修复 CHANGELOG.md 残留 git 冲突标记
+**开发者**: Aria
+
+### 修复
+- `CHANGELOG.md`：移除第 158 行孤立的 `>>>>>>> origin/main` 冲突标记（合并时遗留）
+
+---
+
 ## [changer] 2026-07-16 — 板块别名扩展
 **开发者**: 37588
 
@@ -155,7 +252,6 @@
 - `pytest tests/integration/test_alert_agent.py`：5/5 通过
 - `ruff check src/aistock_agent/agents/workers/alert.py`：All checks passed
 - `mypy src/aistock_agent/agents/workers/alert.py`：Success, no issues found
->>>>>>> origin/main
 
 ---
 

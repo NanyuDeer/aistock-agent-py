@@ -78,13 +78,17 @@ async def run(state: AgentState) -> dict[str, object]:
                 await node_api.save_analysis_report(
                     report_type="wind_leader",
                     report_date=report_date,
+                    data_source="wind_leader_agent",
                     content=dual_layer_content,
                 )
 
         # 写入 analysis_reports 供 broadcast_agent 使用
         return {
             "final_response": final_response,
-            "analysis_reports": {**state.get("analysis_reports", {}), "wind_leader": final_response},
+            "analysis_reports": {
+                **state.get("analysis_reports", {}),
+                "wind_leader": final_response,
+            },
         }
     except Exception as e:
         logger.error("agent_run_failed", agent="wind_leader", error=str(e), exc_info=True)

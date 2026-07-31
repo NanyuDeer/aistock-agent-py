@@ -139,6 +139,17 @@ class TestConfigEnvOverride:
         monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
         assert Settings().cors_origins == ["http://localhost:3000"]
 
+    def test_qa_mode_only_accepts_exact_lowercase_true(self, monkeypatch):
+        """两端 QA_MODE 必须同义：仅精确字符串 true 才能开启。"""
+        monkeypatch.setenv("QA_MODE", "true")
+        assert Settings().qa_mode_enabled is True
+
+        monkeypatch.setenv("QA_MODE", "TRUE")
+        assert Settings().qa_mode_enabled is False
+
+        monkeypatch.setenv("QA_MODE", "1")
+        assert Settings().qa_mode_enabled is False
+
 
 # =============================================================================
 # LLM 工厂读取配置测试

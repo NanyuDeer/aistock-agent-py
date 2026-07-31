@@ -14,7 +14,7 @@ from aistock_agent.tools.base import safe_tool_call
 @tool
 @safe_tool_call
 async def get_hot_burst(
-    hours: int = 6,
+    hours: int = 18,
     min_resonance_count: int = 2,
     limit: int = 20,
 ) -> str:
@@ -37,6 +37,7 @@ async def get_hot_burst_history(
     limit: int = 50,
     min_resonance_only: bool = True,
     days: int = 30,
+    min_resonance: int | None = None,
     offset: int = 0,
 ) -> str:
     """查询机构调研热门股历史记录。"""
@@ -44,9 +45,14 @@ async def get_hot_burst_history(
     safe_days = min(max(days, 1), 365)
     safe_offset = max(offset, 0)
     flag = str(min_resonance_only).lower()
+    min_resonance_query = ""
+    if min_resonance is not None:
+        safe_min_resonance = min(max(min_resonance, 2), 4)
+        min_resonance_query = f"&min_resonance={safe_min_resonance}"
     data = await node_api.get(
         "/internal/institution-research/history"
-        f"?limit={safe_limit}&min_resonance_only={flag}&days={safe_days}&offset={safe_offset}"
+        f"?limit={safe_limit}&min_resonance_only={flag}&days={safe_days}"
+        f"{min_resonance_query}&offset={safe_offset}"
     )
     if not data:
         return "暂无机构调研热门股历史记录"
@@ -114,7 +120,8 @@ def _format_history(data: dict[str, object]) -> str:
         detected_at = item.get("detected_at", item.get("detectedAt", item.get("push_date", "-")))
         keywords = item.get("keywords", item.get("theme", "-"))
         lines.append(
-            f"- {detected_at} | {stock_name}({symbol}) | 等级={level} | 分数={score} | 关键词={keywords}"
+            f"- {detected_at} | {stock_name}({symbol}) | 等级={level}"
+            f" | 分数={score} | 关键词={keywords}"
         )
     return "\n".join(lines)
 

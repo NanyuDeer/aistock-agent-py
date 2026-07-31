@@ -10,6 +10,7 @@
 """
 
 import os
+from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
@@ -42,12 +43,20 @@ def _get_observability_callbacks() -> list[BaseCallbackHandler]:
     return get_default_callbacks()
 
 
+def _normalize_openai_base_url(base_url: str) -> str:
+    """把完整 chat completions 地址转换为 ChatOpenAI 所需的 API 根路径。"""
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized.removesuffix("/chat/completions")
+    return base_url
+
+
 def get_quick_think() -> ChatOpenAI:
     """快速模型，用于意图分类和简单任务"""
     return ChatOpenAI(
         model=settings.quick_think_model,
         api_key=SecretStr(settings.openai_api_key),
-        base_url=settings.openai_base_url,
+        base_url=_normalize_openai_base_url(settings.openai_base_url),
         temperature=settings.quick_think_temperature,
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
@@ -56,7 +65,7 @@ def get_quick_think() -> ChatOpenAI:
     )
 
 
-def get_deep_think() -> ChatOpenAI:
+def get_deep_think(*, extra_body: dict[str, Any] | None = None) -> ChatOpenAI:
     """深度模型，用于复杂分析和推理
 
     支持独立 API 配置（DEEP_THINK_API_KEY / DEEP_THINK_BASE_URL），
@@ -67,9 +76,10 @@ def get_deep_think() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.deep_think_model,
         api_key=SecretStr(api_key),
-        base_url=base_url,
+        base_url=_normalize_openai_base_url(base_url),
         temperature=settings.deep_think_temperature,
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]
         callbacks=_get_observability_callbacks(),
+        extra_body=extra_body,
     )

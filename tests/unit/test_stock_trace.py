@@ -1,0 +1,252 @@
+import asyncio
+from datetime import UTC, datetime
+
+import pytest
+
+from aistock_agent.agents.workers.stock_trace import (
+    StockTraceWorker,
+    StockTraceWorkerOutcome,
+    _recover_tool_payload,
+)
+from aistock_agent.schemas.stock_trace import StockTraceResult, StockTraceResultPayload
+from aistock_agent.services.stock_trace_client import StockTraceNodeClient
+from aistock_agent.services.stock_trace_validator import (
+    StockTraceValidationError,
+    validate_stock_trace_result,
+)
+from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
+
+NOW = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
+
+
+def snapshot_payload() -> dict[str, object]:
+    return {
+        "snapshotId": "snapshot-001",
+        "eventId": "mv:000004:2026-07-30:1:up",
+        "triggerRevision": 1,
+        "snapshotStage": "enriched",
+        "sourceRevisionHash": "a" * 64,
+        "triggerEvent": {
+            "eventId": "mv:000004:2026-07-30:1:up",
+            "triggerRevision": 1,
+            "symbol": "000004",
+            "stockName": "Test Stock",
+            "tradingDate": "2026-07-30",
+            "direction": "up",
+            "triggeredAt": NOW.isoformat(),
+            "windowStartAt": NOW.isoformat(),
+            "windowEndAt": NOW.isoformat(),
+            "latestPrice": 22.0,
+            "previousClose": 20.0,
+            "actualValue": 10.0,
+            "thresholdValue": 7.0,
+            "severity": "critical",
+            "ruleVersion": "price-v1",
+        },
+        "missingFields": [],
+        "dataReadiness": {"company": "complete", "sector": "partial", "market": "complete"},
+        "collectorVersions": {},
+        "capturedAt": NOW.isoformat(),
+        "sourceRecords": [
+            {
+                "sourceId": "announcement-1",
+                "kind": "announcement",
+                "provider": "test_exchange",
+                "sourceLevel": "A",
+                "title": "Material restructuring plan",
+                "contentExcerpt": "Official disclosure",
+                "occurredAt": NOW.isoformat(),
+                "capturedAt": NOW.isoformat(),
+                "payload": {"impact": "positive"},
+                "contentHash": "b" * 64,
+            },
+            {
+                "sourceId": "trigger-1",
+                "kind": "trigger_fact",
+                "provider": "detector",
+                "sourceLevel": "A",
+                "title": "Price trigger",
+                "contentExcerpt": "Price up 10%",
+                "occurredAt": NOW.isoformat(),
+                "capturedAt": NOW.isoformat(),
+                "payload": {},
+                "contentHash": "c" * 64,
+            },
+        ],
+    }
+
+
+class FakeNodeClient:
+    async def get(self, path: str) -> dict[str, object] | None:
+        return snapshot_payload() if "analysis-context" in path else None
+
+    async def post(self, _path: str, _body: dict[str, object]) -> dict[str, object] | None:
+        return {}
+
+    async def patch(self, _path: str, _body: dict[str, object]) -> dict[str, object] | None:
+        return {"attemptCount": 1}
+
+
+def valid_result() -> StockTraceResult:
+    stages = [
+        "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
+    ]
+    nodes = [
+        {
+            "node_id": f"node-{index}",
+            "stage": stage,
+            "stage_order": index,
+            "epistemic_type": (
+                "fact"
+                if stage in {"structural_root", "trigger", "observable_result"}
+                else "inference"
+            ),
+            "status": (
+                "established"
+                if stage in {"structural_root", "trigger", "observable_result"}
+                else "partial"
+            ),
+            "claim": f"{stage} claim",
+            "evidence_ids": (
+                ["trigger-1"]
+                if stage in {"trigger", "observable_result"}
+                else ["announcement-1"]
+            ),
+            "counter_evidence_ids": [],
+        }
+        for index, stage in enumerate(stages, start=1)
+    ]
+    return StockTraceResult.model_validate({
+        "schema_version": "stock-trace-result-v1",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "snapshot_id": "snapshot-001",
+        "analysis_version": "llm-stock-trace-v1",
+        "attribution_status": "confirmed",
+        "primary_chain_id": "chain-1",
+        "confidence_score": 0.8,
+        "confidence_level": "high",
+        "candidates": [{
+            "candidate_id": "candidate-1", "layer": "company", "rank": 1,
+            "status": "supported", "verdict": "Official disclosure supports the cause.",
+            "supporting_evidence_ids": ["announcement-1"], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-2", "layer": "sector", "rank": 1,
+            "status": "insufficient", "verdict": "No sector explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-3", "layer": "market", "rank": 1,
+            "status": "insufficient", "verdict": "No market explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }],
+        "chains": [{
+            "chain_id": "chain-1",
+            "candidate_id": "candidate-1",
+            "role": "primary",
+            "nodes": nodes,
+        }],
+        "suggested_actions": ["verify_announcement", "observe"],
+    })
+
+
+def test_node_client_normalizes_node_camel_case_analysis_context() -> None:
+    client = StockTraceNodeClient(FakeNodeClient())
+    snapshot = asyncio.run(client.get_analysis_context("mv:000004:2026-07-30:1:up", 1))
+    assert snapshot is not None
+    assert snapshot.trigger_event.event_id == snapshot.event_id
+    assert snapshot.source_records[0].source_level == "A"
+
+
+def test_validator_accepts_a_level_confirmed_company_cause() -> None:
+    snapshot = asyncio.run(
+        StockTraceNodeClient(FakeNodeClient()).get_analysis_context("mv:000004:2026-07-30:1:up", 1)
+    )
+    assert snapshot is not None
+    validate_stock_trace_result(valid_result(), snapshot)
+
+
+def test_validator_rejects_unknown_evidence() -> None:
+    snapshot = asyncio.run(
+        StockTraceNodeClient(FakeNodeClient()).get_analysis_context("mv:000004:2026-07-30:1:up", 1)
+    )
+    assert snapshot is not None
+    result = valid_result().model_copy(deep=True)
+    result.candidates[0].supporting_evidence_ids = ["missing"]
+    with pytest.raises(StockTraceValidationError, match="unknown source"):
+        validate_stock_trace_result(result, snapshot)
+
+
+class FakeLlm:
+    structured_schema: type[object] | None = None
+    structured_method: str | None = None
+
+    def with_structured_output(
+        self, schema: type[object], *, method: str, include_raw: bool = False
+    ) -> "FakeLlm":
+        self.__class__.structured_schema = schema
+        self.__class__.structured_method = method
+        return self
+
+    async def ainvoke(self, _messages: list[object]) -> StockTraceResultPayload:
+        return StockTraceResultPayload.model_validate(
+            valid_result().model_dump(
+                exclude={"schema_version", "event_id", "snapshot_id", "analysis_version"}
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_worker_returns_validated_structured_result() -> None:
+    worker = StockTraceWorker(StockTraceNodeClient(FakeNodeClient()), llm_factory=FakeLlm)
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "completed"
+    assert outcome.result is not None
+    assert outcome.result.attribution_status == "confirmed"
+    assert FakeLlm.structured_schema is StockTraceResultPayload
+    assert FakeLlm.structured_method == "function_calling"
+
+
+def test_recovers_single_trailing_brace_in_provider_tool_arguments() -> None:
+    arguments = valid_result().model_dump_json(
+        exclude={"schema_version", "event_id", "snapshot_id", "analysis_version"}
+    ) + "}"
+
+    class RawResponse:
+        additional_kwargs = {"tool_calls": [{"function": {"arguments": arguments}}]}
+
+    payload = _recover_tool_payload(RawResponse())
+    assert payload["attribution_status"] == "confirmed"
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.acked: list[tuple[str, str, str]] = []
+
+    async def xack(self, stream: str, group: str, message_id: str) -> int:
+        self.acked.append((stream, group, message_id))
+        return 1
+
+
+class CompletedWorker:
+    async def analyze(
+        self, _event_id: str, _trigger_revision: int, _analysis_version: str
+    ) -> StockTraceWorkerOutcome:
+        return StockTraceWorkerOutcome(status="completed", result=valid_result())
+
+
+@pytest.mark.asyncio
+async def test_consumer_writes_validated_result_then_acknowledges_job() -> None:
+    redis_client = FakeRedis()
+    consumer = StockTraceConsumer(
+        redis_client,  # type: ignore[arg-type]
+        StockTraceNodeClient(FakeNodeClient()),
+        CompletedWorker(),  # type: ignore[arg-type]
+    )
+    await consumer._consume_message("1710000000000-0", {
+        "job_id": "job-001",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "trigger_revision": "1",
+        "analysis_version": "llm-stock-trace-v1",
+    })
+    assert redis_client.acked == [
+        ("stock-trace.jobs", "stock-trace-workers", "1710000000000-0")
+    ]

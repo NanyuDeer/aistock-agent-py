@@ -5,7 +5,6 @@
 
 import json
 
-import pytest
 from langchain_core.messages import AIMessage
 
 from aistock_agent.utils.output_parser import (
@@ -13,7 +12,6 @@ from aistock_agent.utils.output_parser import (
     parse_event_output,
     transform_to_frontend,
 )
-
 
 # ── parse_event_output 核心路径 ──
 
@@ -273,15 +271,35 @@ def test_transform_to_frontend_full():
     transmission = {
         "mechanism": "补贴延续降低购车门槛",
         "variables": [
-            {"name": "补贴金额", "direction": "bullish", "strength": 0.85, "explanation": "单辆最高1.5万"}
+            {
+                "name": "补贴金额",
+                "direction": "bullish",
+                "strength": 0.85,
+                "explanation": "单辆最高1.5万",
+            }
         ],
         "coreIndustry": {"name": "新能源汽车", "impact": "直接利好", "reason": "终端销量预期上调"},
         "chain": [
-            {"industry": "动力电池", "relation": "上游传导", "level": 1, "direction": "bullish", "impactStrength": 0.72, "reason": "销量拉动电池需求"}
+            {
+                "industry": "新能源汽车",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.72,
+                "reason": "事件变量推断",
+            }
         ]
     }
     history = [
-        {"historyId": "hist_001", "year": "2023", "title": "类似政策", "eventType": "产业政策", "sentiment": "bullish", "industryChange": "普涨15%", "changePercentage": 15.0}
+        {
+            "historyId": "hist_001",
+            "year": "2023",
+            "title": "类似政策",
+            "eventType": "产业政策",
+            "sentiment": "bullish",
+            "industryChange": "普涨15%",
+            "changePercentage": 15.0,
+        }
     ]
     investment = {
         "conclusion": "新能源汽车产业链受益，中期景气改善",
@@ -327,7 +345,16 @@ def test_transform_to_frontend_chinese_direction():
         "mechanism": "测试",
         "variables": [{"name": "x", "direction": "利好", "strength": 0.5, "explanation": ""}],
         "coreIndustry": {"name": "x", "impact": "", "reason": ""},
-        "chain": [{"industry": "x", "relation": "核心行业", "level": 1, "direction": "利空", "impactStrength": 0.3, "reason": ""}]
+        "chain": [
+            {
+                "industry": "x",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "利空",
+                "impactStrength": 0.3,
+                "reason": "",
+            }
+        ]
     }
     meta = {"eventId": "evt_003", "title": "", "source": ""}
 
@@ -335,3 +362,443 @@ def test_transform_to_frontend_chinese_direction():
 
     assert result["event_transmission"]["variables"][0]["direction"] == "bullish"
     assert result["event_transmission"]["chain"][0]["direction"] == "bearish"
+
+
+def test_transform_to_frontend_constrains_chain_to_found_industry_graph() -> None:
+    """成功图谱只允许一跳邻接行业，并明确它们不是确定因果。"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {
+                "industry": "半导体",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.8,
+                "reason": "核心行业的事件变量推断",
+            },
+            {
+                "industry": "伪造核心行业",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.9,
+                "reason": "模型补造",
+            },
+            {
+                "industry": "电子化学品",
+                "relation": "上游传导",
+                "level": 3,
+                "direction": "bearish",
+                "impactStrength": 0.6,
+                "reason": "上下游关系证明其必然导致成本上涨",
+            },
+            {
+                "industry": "计算机设备",
+                "relation": "下游传导",
+                "level": 4,
+                "direction": "bullish",
+                "impactStrength": 0.5,
+                "reason": "上下游关系证明其必然导致成本上涨",
+            },
+            {
+                "industry": "虚构行业",
+                "relation": "下游传导",
+                "level": 2,
+                "direction": "bullish",
+                "impactStrength": 0.9,
+                "reason": "模型补造",
+            },
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [
+                    {"id": "881201.TI", "name": "电子化学品", "leadingStocks": []}
+                ],
+                "downstream": [
+                    {"id": "881301.TI", "name": "计算机设备", "leadingStocks": []}
+                ],
+                "graphVersion": "kg-2026-07-22",
+                "updatedAt": "2026-07-22T09:00:00Z",
+                "missingBoundary": None,
+            }
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []},
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_kg", "title": "测试", "source": ""},
+    )
+
+    mapped = result["event_transmission"]
+    assert mapped["industryGraphEvidence"][0]["status"] == "found"
+    chain = mapped["chain"]
+    assert [item["industry"] for item in chain] == ["半导体"]
+    assert [item["relation"] for item in chain] == ["核心行业"]
+    assert [item["level"] for item in chain] == [1]
+    assert chain[0]["reason"] == "核心行业的事件变量推断"
+
+
+def test_transform_to_frontend_multi_center_no_cross_chain_contamination() -> None:
+    """多中心行业：邻接行业只能挂在它真正直接相邻的中心行业下，不得串链。
+
+    场景：两个中心行业 半导体 / 汽车，各自有独立的上下游。
+    模型把汽车的上游"钢铁"放在半导体段、把半导体的下游"计算机设备"放在汽车段。
+    全局合并的旧实现会把它们误标为"图谱上游/下游"，串链；正确行为是丢弃这些
+    没有对应中心证据支持的链节。
+    """
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {
+                "industry": "半导体",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.8,
+                "reason": "核心行业",
+            },
+            # 半导体的真实上游 → 保留
+            {
+                "industry": "电子化学品",
+                "relation": "上游传导",
+                "level": 2,
+                "direction": "bearish",
+                "impactStrength": 0.6,
+                "reason": "半导体上游",
+            },
+            # 钢铁只是汽车的上游，挂在半导体段下 → 必须丢弃（串链）
+            {
+                "industry": "钢铁",
+                "relation": "上游传导",
+                "level": 2,
+                "direction": "bearish",
+                "impactStrength": 0.6,
+                "reason": "汽车上游被错挂到半导体",
+            },
+            {
+                "industry": "汽车",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.7,
+                "reason": "核心行业",
+            },
+            # 计算机设备只是半导体的下游，挂在汽车段下 → 必须丢弃（串链）
+            {
+                "industry": "计算机设备",
+                "relation": "下游传导",
+                "level": 2,
+                "direction": "bullish",
+                "impactStrength": 0.5,
+                "reason": "半导体下游被错挂到汽车",
+            },
+            # 汽车的真实下游 → 保留
+            {
+                "industry": "汽车零部件",
+                "relation": "下游传导",
+                "level": 2,
+                "direction": "bullish",
+                "impactStrength": 0.5,
+                "reason": "汽车下游",
+            },
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [
+                    {"id": "881201.TI", "name": "电子化学品", "leadingStocks": []}
+                ],
+                "downstream": [
+                    {"id": "881301.TI", "name": "计算机设备", "leadingStocks": []}
+                ],
+                "missingBoundary": None,
+            },
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "881161.TI", "name": "汽车"},
+                "upstream": [
+                    {"id": "881211.TI", "name": "钢铁", "leadingStocks": []}
+                ],
+                "downstream": [
+                    {"id": "881361.TI", "name": "汽车零部件", "leadingStocks": []}
+                ],
+                "missingBoundary": None,
+            },
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []},
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_multi", "title": "测试", "source": ""},
+    )
+
+    chain = result["event_transmission"]["chain"]
+    # 仅保留有对应中心证据支持的链节：钢铁/计算机设备的错挂链节必须被丢弃。
+    assert [item["industry"] for item in chain] == [
+        "半导体",
+        "电子化学品",
+        "汽车",
+        "汽车零部件",
+    ]
+    assert [item["relation"] for item in chain] == [
+        "核心行业",
+        "图谱上游（直接关系）",
+        "核心行业",
+        "图谱下游（直接关系）",
+    ]
+    # 显式断言串链行业不会出现
+    industry_names = {item["industry"] for item in chain}
+    assert "钢铁" not in industry_names, "汽车上游钢铁不得串到半导体段"
+    assert "计算机设备" not in industry_names, "半导体下游计算机设备不得串到汽车段"
+
+
+def test_transform_to_frontend_multi_center_same_name_direction_conflict() -> None:
+    """上下游同名冲突：同一行业名是一个中心的上游、另一个中心的下游。
+
+    场景：铜是半导体的上游、家电的下游。模型在半导体段把铜标为上游传导、
+    在家电段把铜标为下游传导。旧实现把上下游合并成全局集合后会两次都标成
+    "图谱上游"（if/elif 命中上游分支），丢失家电段的下游关系；正确行为是
+    按各自中心证据分别标注方向，不串链。
+    """
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {
+                "industry": "半导体",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.8,
+                "reason": "核心行业",
+            },
+            {
+                "industry": "铜",
+                "relation": "上游传导",
+                "level": 2,
+                "direction": "bearish",
+                "impactStrength": 0.6,
+                "reason": "半导体上游铜",
+            },
+            {
+                "industry": "家电",
+                "relation": "核心行业",
+                "level": 1,
+                "direction": "bullish",
+                "impactStrength": 0.7,
+                "reason": "核心行业",
+            },
+            {
+                "industry": "铜",
+                "relation": "下游传导",
+                "level": 2,
+                "direction": "bullish",
+                "impactStrength": 0.5,
+                "reason": "家电下游铜",
+            },
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "881121.TI", "name": "半导体"},
+                "upstream": [
+                    {"id": "881221.TI", "name": "铜", "leadingStocks": []}
+                ],
+                "downstream": [],
+                "missingBoundary": None,
+            },
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "881181.TI", "name": "家电"},
+                "upstream": [],
+                "downstream": [
+                    {"id": "881221.TI", "name": "铜", "leadingStocks": []}
+                ],
+                "missingBoundary": None,
+            },
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []},
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_conflict", "title": "测试", "source": ""},
+    )
+
+    chain = result["event_transmission"]["chain"]
+    # 两个"铜"都保留，但方向按各自中心证据分别标注，不串链。
+    assert [item["industry"] for item in chain] == ["半导体", "铜", "家电", "铜"]
+    assert [item["relation"] for item in chain] == [
+        "核心行业",
+        "图谱上游（直接关系）",
+        "核心行业",
+        "图谱下游（直接关系）",
+    ]
+
+
+def test_transform_to_frontend_rejects_found_evidence_from_non_industry_kg_source() -> None:
+    """found 证据来源不是 IndustryKGService 时必须降级为无效响应。"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [],
+        "industryGraphEvidence": [{
+            "status": "found",
+            "degraded": False,
+            "scope": "one_hop",
+            "source": "OtherIndustryService",
+            "industry": {"id": "881121.TI", "name": "半导体"},
+            "upstream": [],
+            "downstream": [],
+        }],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []}, transmission, [], None,
+        {"eventId": "evt_source", "title": "测试", "source": ""},
+    )
+
+    evidence = result["event_transmission"]["industryGraphEvidence"]
+    assert evidence[0]["status"] == "invalid_response"
+    assert evidence[0]["source"] is None
+
+
+def test_transform_to_frontend_rejects_found_evidence_with_malformed_nodes() -> None:
+    """畸形图谱节点不能支持模型的上下游链节。"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {
+                "industry": "伪造行业",
+                "relation": "上游传导",
+                "level": 2,
+                "direction": "bullish",
+                "impactStrength": 0.8,
+                "reason": "模型补造",
+            }
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found",
+                "degraded": False,
+                "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {},
+                "upstream": [{"name": "伪造行业"}],
+                "downstream": [],
+            }
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []},
+        transmission,
+        [],
+        None,
+        {"eventId": "evt_forged", "title": "测试", "source": ""},
+    )
+
+    mapped = result["event_transmission"]
+    assert mapped["industryGraphEvidence"][0]["status"] == "invalid_response"
+    assert mapped["chain"] == []
+
+
+def test_transform_to_frontend_clears_stale_center_after_unverified_core_industry() -> None:
+    """未验证核心必须清空前一中心，后续邻接不得继续挂接。"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {"industry": "半导体", "relation": "核心行业", "level": 1},
+            {"industry": "无证据核心", "relation": "核心行业", "level": 1},
+            {"industry": "电子化学品", "relation": "上游传导", "level": 2},
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found", "degraded": False, "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "semi", "name": "半导体"},
+                "upstream": [{"id": "chem", "name": "电子化学品", "leadingStocks": []}],
+                "downstream": [],
+            }
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []}, transmission, [], None,
+        {"eventId": "evt_stale", "title": "测试", "source": ""},
+    )
+
+    assert [item["industry"] for item in result["event_transmission"]["chain"]] == ["半导体"]
+
+
+def test_transform_to_frontend_rejects_ambiguous_same_name_centers() -> None:
+    """同名中心映射到多个 ID 时必须 fail-closed。"""
+    transmission = {
+        "mechanism": "测试",
+        "variables": [],
+        "coreIndustry": {"name": "新能源", "impact": "", "reason": ""},
+        "chain": [
+            {"industry": "新能源", "relation": "核心行业", "level": 1},
+            {"industry": "锂矿", "relation": "上游传导", "level": 2},
+        ],
+        "industryGraphEvidence": [
+            {
+                "status": "found", "degraded": False, "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "new-energy-a", "name": "新能源"},
+                "upstream": [{"id": "lithium", "name": "锂矿", "leadingStocks": []}],
+                "downstream": [],
+            },
+            {
+                "status": "found", "degraded": False, "scope": "one_hop",
+                "source": "IndustryKGService",
+                "industry": {"id": "new-energy-b", "name": "新能源"},
+                "upstream": [{"id": "copper", "name": "铜矿", "leadingStocks": []}],
+                "downstream": [],
+            },
+        ],
+    }
+
+    result = transform_to_frontend(
+        {"summary": "测试", "coreChanges": []}, transmission, [], None,
+        {"eventId": "evt_ambiguous", "title": "测试", "source": ""},
+    )
+
+    assert result["event_transmission"]["chain"] == []

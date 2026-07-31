@@ -198,6 +198,37 @@ async def test_chat_stream_messages_general_intent_events():
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_done_returns_advisor_trace():
+    trace = {
+        "schema_version": "advisor_trace.v1",
+        "subquestions": [
+            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": [], "degraded": False},
+            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
+             "missing_sources": ["stock_trace"], "degraded": True},
+        ],
+        "missing_sources": ["stock_trace"],
+        "degraded": True,
+    }
+    mock_graph = _make_mock_graph(_empty_stream)
+    mock_graph.aget_state = AsyncMock(return_value=MagicMock(values={
+        "final_response": "降级",
+        "analysis_reports": {},
+        "advisor_trace": trace,
+    }))
+    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            async with client.stream(
+                "POST", _MESSAGES_URL, json={"message": "个股 600519"}, headers=_VALID_HEADERS
+            ) as resp:
+                events = _parse_sse(await _read_sse(resp))
+
+    assert events[-1]["advisor_trace"] == trace
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_messages_error_event():
     """astream_events 抛异常 → SSE error 事件"""
     mock_graph = _make_mock_graph(_boom_stream)

@@ -45,6 +45,7 @@ changelog-pending.md
 
 # Agent 运行时输出（晨报等动态生成，不提交）
 docs/agent-outputs/
+data/audio/
 
 # Claude / Kiro CLI（本地开发工具配置，不提交）
 .claude/

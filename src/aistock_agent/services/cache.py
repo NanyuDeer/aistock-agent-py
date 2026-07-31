@@ -41,12 +41,12 @@ async def get_cached_briefing() -> str | None:
     return None
 
 
-async def set_cached_briefing(content: str, ttl: int = 7200) -> None:
+async def set_cached_briefing(content: str, ttl: int = 86400) -> None:
     """缓存晨报到 Redis。
 
     Args:
         content: 晨报文本。
-        ttl: 缓存过期秒数，默认 7200（2 小时）。
+        ttl: 缓存过期秒数，默认 86400（每日更新语义）。
     """
     try:
         client = await RedisPool.get_client()
@@ -57,42 +57,60 @@ async def set_cached_briefing(content: str, ttl: int = 7200) -> None:
         logger.debug("set_cached_briefing_failed", exc_info=True)
 
 
-async def get_cached_review() -> str | None:
-    """从 Redis 获取缓存复盘报告。
+async def get_cached_review(report_date: str) -> dict[str, object] | None:
+    """从 Redis 获取缓存复盘工件（ReviewArtifact 的 dict 表示）。
 
-    缓存 key 格式：``briefing:review:{YYYY-MM-DD}``
+    缓存 key 格式：``briefing:review:{report_date}``
+
+    Args:
+        report_date: 报告日期（``YYYY-MM-DD``）。传入显式日期而非
+            ``datetime.now()``，保证缓存命中路径不依赖系统时钟，
+            也便于在 review agent 中按报告日期查询。
 
     Returns:
-        缓存的复盘文本，未命中或异常时返回 None。
+        缓存的 ReviewArtifact dict，未命中或异常时返回 None。
+        旧纯文本缓存（非 JSON / 非 dict）视为未命中，返回 None。
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:review:{today}"
+        cache_key = f"briefing:review:{report_date}"
         cached = await client.get(cache_key)
         if cached:
-            if isinstance(cached, bytes):
-                return cached.decode()
-            return str(cached)
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
     except Exception:
         logger.debug("get_cached_review_failed", exc_info=True)
     return None
 
 
-async def set_cached_review(content: str, ttl: int = 7200) -> None:
-    """缓存复盘报告到 Redis。
+async def set_cached_review(
+    report_date: str,
+    artifact: dict[str, object],
+    ttl: int = 86400,
+) -> bool:
+    """缓存复盘工件到 Redis。
 
     Args:
-        content: 复盘文本。
-        ttl: 缓存过期秒数，默认 7200（2 小时）。
+        report_date: 报告日期（``YYYY-MM-DD``），用作缓存 key 的一部分。
+        artifact: ReviewArtifact 的 ``model_dump(mode="json")`` 输出，
+            包含 snapshot / trace / markdown / trace_summary / sectors 等字段。
+        ttl: 缓存过期秒数，默认 86400（每日更新语义）。
+
+    Returns:
+        True 表示 Redis 实际写入成功；False 表示写入失败（保留降级日志）。
+        调用方据此决定是否继续后续持久化步骤。
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:review:{today}"
-        await client.setex(cache_key, ttl, content)
+        cache_key = f"briefing:review:{report_date}"
+        value = json.dumps(artifact, ensure_ascii=False)
+        await client.setex(cache_key, ttl, value)
+        return True
     except Exception:
         logger.debug("set_cached_review_failed", exc_info=True)
+        return False
 
 
 def _event_cache_key(user_input: str) -> str:
@@ -186,7 +204,7 @@ async def set_cached_event(
     user_input: str,
     analysis_reports: dict[str, object],
     ttl: int = 1800,
-) -> None:
+) -> bool:
     """缓存事件分析结果到 Redis（完整 analysis_reports）。
 
     缓存存储的是完整的 ``analysis_reports`` dict（transform_to_frontend 的输出 +
@@ -196,11 +214,17 @@ async def set_cached_event(
         user_input: 用户输入的事件描述文本（用于生成 MD5 key）。
         analysis_reports: 完整的前端对齐 analysis_reports dict。
         ttl: 缓存过期秒数，默认 1800（30 分钟）。
+
+    Returns:
+        True 表示 Redis 实际写入成功；False 表示写入失败（保留降级日志）。
+        调用方据此设置 event_cached，避免缓存异常被吞掉却误报已缓存。
     """
     try:
         client = await RedisPool.get_client()
         key = _event_cache_key(user_input)
         value = json.dumps(analysis_reports, ensure_ascii=False)
         await client.setex(key, ttl, value)
+        return True
     except Exception:
         logger.debug("event_cache_set_failed", exc_info=True)
+        return False

@@ -22,6 +22,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
 | 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
+| 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
@@ -55,7 +56,7 @@ START → supervisor(quick_think, 意图路由)
 
 定时链路（APScheduler, 非LangGraph图内边）：
   08:50 morning_agent → 提取major_events → 并行event_analyst(fire-and-forget)
-  09:00 morning(缓存)→wind_leader→hot_burst→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
+  09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
 ```
 
@@ -328,4 +329,3 @@ content = {
 
 **已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）、ai_advisor（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
-
