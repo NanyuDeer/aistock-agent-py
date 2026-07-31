@@ -467,8 +467,20 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     """
     captured_at = datetime.now(UTC)
 
-    # ── 1. 获取 Node 收盘快照 ──
+    # ── 1. 获取 Node 收盘快照（带 last-close 降级） ──
+    # 先尝试 close-snapshot（要求 >= 15:30）；若不可用（盘中/凌晨），
+    # 降级到 last-close-snapshot（返回最近一个已完成交易日数据）。
     close_data = await node_api.get("/internal/market/close-snapshot")
+    used_last_close = False
+    if close_data is None:
+        close_data = await node_api.get_last_close_snapshot()
+        if close_data is not None:
+            used_last_close = True
+            logger.info(
+                "build_snapshot_fell_back_to_last_close",
+                report_date=report_date,
+                trade_date=close_data.get("trade_date"),
+            )
     if close_data is None:
         raise MarketTraceSnapshotUnavailable(
             "Node close-snapshot returned None (market not closed or service unavailable)"
@@ -499,6 +511,8 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # 不一致时立即抛 MarketTraceSnapshotUnavailable，避免浪费外部 API 配额。
     # 场景：周末/节假日调用时 Node 没有当日数据，trade_date 仍是上一交易日；
     # 不能把旧事实写入新日期快照。
+    # 例外：used_last_close=True 时 trade_date 是最近交易日而非 report_date，
+    # 此时 snapshot 以 Node 返回的 trade_date 为准。
     trade_date_node = _safe_str(close_data.get("trade_date"))
     trade_date_normalized = _normalize_date_yyyymmdd(trade_date_node)
     if trade_date_normalized is None:
@@ -511,7 +525,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         raise MarketTraceSnapshotUnavailable(
             f"Node close-snapshot trade_date is not a valid calendar date: {trade_date_node!r}"
         )
-    if trade_date_normalized != report_date:
+    if not used_last_close and trade_date_normalized != report_date:
         raise MarketTraceSnapshotUnavailable(
             f"Node close-snapshot trade_date {trade_date_normalized} != report_date "
             f"{report_date}; refusing to write stale facts into a new-date snapshot"
