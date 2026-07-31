@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import redis.asyncio as aioredis
 from fastapi import Header, HTTPException
+from langchain_core.messages import HumanMessage
 
 from aistock_agent.config import settings
 from aistock_agent.services.redis_pool import RedisPool
-
-from langchain_core.messages import HumanMessage
-
 from aistock_agent.state.chat_schema import QuestionState
 
 

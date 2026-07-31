@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -27,6 +27,9 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 - stock_snapshot：实时个股行情。入参 {symbol: "6位代码"}
 - stock_news：个股财联社资讯。入参 {symbol: "6位代码", limit: 10}
 - trace_lookup：市场溯源（只读已生成的复盘，不重跑）。入参 {date: "YYYY-MM-DD", topic: str|null}
+- evidence_resolver：只读市场 ReviewArtifact 证据（已持久化复盘，不重跑）。入参 {date: "YYYY-MM-DD"}
+- sector_snapshot：板块强弱与风口龙头。入参 {tag_code: str}，无 tag_code 时自动读风口数据
+- market_snapshot：大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）
 - industry_relation：行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}
 
 规则：
@@ -35,6 +38,7 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 3. 多意图组合 → plan=compose，skill_calls 长度≥2，用 depends_on 表达依赖
 4. symbols 必须是 6 位股票代码或 sha/sza 等指数代码
 5. time_range: realtime（实时行情）/ today（今日报告）/ recent（近几日）/ history
+6. evidence_resolver/sector_snapshot/market_snapshot 只读已有数据，不重跑市场 Trace
 """
 
 
@@ -52,6 +56,9 @@ class QARouterOutput(BaseModel):
 KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["晨报", "复盘", "报告", "说了什么"], "report_lookup"),
     (["为什么涨", "为什么跌", "溯源", "动因", "原因"], "trace_lookup"),
+    (["证据", "依据", "佐证"], "evidence_resolver"),
+    (["板块强弱", "风口", "板块龙头"], "sector_snapshot"),
+    (["大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
@@ -69,16 +76,32 @@ def route_by_keyword_fallback(message: str) -> SkillCall:
 
 def _build_default_skill_call(skill_name: str, message: str) -> SkillCall:
     """构建兜底 SkillCall，args 用合理默认值。"""
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     if skill_name == "report_lookup":
-        return SkillCall(skill_name="report_lookup", args={"report_type": "review", "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")})
+        return SkillCall(
+            skill_name="report_lookup",
+            args={"report_type": "review", "date": today},
+        )
     if skill_name == "stock_snapshot":
         return SkillCall(skill_name="stock_snapshot", args={"symbol": ""})
     if skill_name == "stock_news":
         return SkillCall(skill_name="stock_news", args={"symbol": "", "limit": 10})
     if skill_name == "trace_lookup":
-        return SkillCall(skill_name="trace_lookup", args={"date": datetime.now(timezone.utc).strftime("%Y-%m-%d")})
+        return SkillCall(skill_name="trace_lookup", args={"date": today})
+    if skill_name == "evidence_resolver":
+        return SkillCall(skill_name="evidence_resolver", args={"date": today})
+    if skill_name == "sector_snapshot":
+        return SkillCall(skill_name="sector_snapshot", args={})
+    if skill_name == "market_snapshot":
+        return SkillCall(
+            skill_name="market_snapshot",
+            args={"scope": "both", "snapshot_kind": "quick"},
+        )
     if skill_name == "industry_relation":
-        return SkillCall(skill_name="industry_relation", args={"keywords": [message[:10]]})
+        return SkillCall(
+            skill_name="industry_relation",
+            args={"keywords": [message[:10]]},
+        )
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -127,11 +150,14 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         fallback_call = route_by_keyword_fallback(message)
         # 推断 intent
         intent_map = {
-            "report_lookup": "report_lookup",
-            "stock_snapshot": "stock_snapshot",
-            "stock_news": "stock_news",
-            "trace_lookup": "trace_lookup",
+            "evidence_resolver": "evidence_resolver",
             "industry_relation": "industry_relation",
+            "market_snapshot": "market_snapshot",
+            "report_lookup": "report_lookup",
+            "sector_snapshot": "sector_snapshot",
+            "stock_news": "stock_news",
+            "stock_snapshot": "stock_snapshot",
+            "trace_lookup": "trace_lookup",
         }
         goal = InsightGoal(
             question=message,

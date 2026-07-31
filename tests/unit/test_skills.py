@@ -118,21 +118,29 @@ from aistock_agent.skills.trace_lookup import trace_lookup
 
 @pytest.mark.asyncio
 async def test_trace_lookup_normal():
-    """trace_lookup 复用 load_validated_trace，不调 LLM。"""
-    from datetime import date
-    from unittest.mock import MagicMock
+    """trace_lookup 复用 resolve_trace_evidence，skill_name 和 kind 不变。"""
+    from datetime import datetime, timezone
 
-    fake_snapshot = MagicMock(name="MarketTraceSnapshot")
-    fake_trace = MagicMock(name="MarketTraceResult")
-    fake_trace.candidates = []
-    fake_trace.primary_chain_id = None
-    fake_trace.attribution_status = "not_applicable"
-    fake_trace.confidence = "low"
-    fake_trace.unresolved_questions = []
+    from aistock_agent.schemas.chat_contract import ChatSource
 
+    fake_ev = Evidence(
+        facts=["交易日: 2026-07-28"],
+        sources=[
+            ChatSource(
+                source_id="trace:test",
+                kind="trace",
+                title="市场溯源 2026-07-28",
+                snippet="交易日: 2026-07-28",
+                captured_at=datetime.now(timezone.utc),
+            )
+        ],
+        as_of=datetime.now(timezone.utc),
+        degraded=False,
+        skill_name="trace_lookup",
+    )
     with patch(
-        "aistock_agent.skills.trace_lookup.load_validated_trace",
-        new=AsyncMock(return_value=(fake_snapshot, fake_trace)),
+        "aistock_agent.skills.trace_lookup.resolve_trace_evidence",
+        new=AsyncMock(return_value=fake_ev),
     ):
         ev = await trace_lookup(
             {"date": "2026-07-28"},
@@ -145,17 +153,35 @@ async def test_trace_lookup_normal():
 
 @pytest.mark.asyncio
 async def test_trace_lookup_miss_degraded():
-    """load_validated_trace 返回 None（报告未生成）→ degraded。"""
+    """resolve_trace_evidence 返回 degraded → trace_lookup 也是 degraded。"""
+    from datetime import datetime, timezone
+
+    fake_ev = Evidence(
+        facts=[],
+        sources=[],
+        as_of=datetime.now(timezone.utc),
+        degraded=True,
+        degraded_reason="no valid trace evidence for 1999-01-01",
+        skill_name="trace_lookup",
+    )
     with patch(
-        "aistock_agent.skills.trace_lookup.load_validated_trace",
-        new=AsyncMock(return_value=None),
+        "aistock_agent.skills.trace_lookup.resolve_trace_evidence",
+        new=AsyncMock(return_value=fake_ev),
     ):
         ev = await trace_lookup(
             {"date": "1999-01-01"},
             InsightGoal(question="x", intent="trace_lookup"),
         )
     assert ev.degraded is True
-    assert "未生成" in (ev.degraded_reason or "") or "miss" in (ev.degraded_reason or "").lower()
+    assert "no valid trace" in (ev.degraded_reason or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_trace_lookup_does_not_import_load_validated_trace():
+    """trace_lookup 不再直接导入 load_validated_trace。"""
+    import aistock_agent.skills.trace_lookup as tl
+
+    assert not hasattr(tl, "load_validated_trace"), "trace_lookup 不应再直接导入 load_validated_trace"
 
 
 # ── industry_relation ──────────────────────────────────────────────────────

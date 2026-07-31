@@ -5,7 +5,6 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from aistock_agent.graph.nodes.qa_router import (
-    KEYWORD_FALLBACK,
     QARouterOutput,
     qa_router_node,
     route_by_keyword_fallback,
@@ -52,6 +51,21 @@ def test_route_by_keyword_fallback_industry():
     assert call.skill_name == "industry_relation"
 
 
+def test_route_by_keyword_fallback_evidence():
+    call = route_by_keyword_fallback("有什么证据")
+    assert call.skill_name == "evidence_resolver"
+
+
+def test_route_by_keyword_fallback_sector():
+    call = route_by_keyword_fallback("板块强弱分析")
+    assert call.skill_name == "sector_snapshot"
+
+
+def test_route_by_keyword_fallback_market():
+    call = route_by_keyword_fallback("大盘今天怎么样")
+    assert call.skill_name == "market_snapshot"
+
+
 def test_route_by_keyword_fallback_default_report():
     """无匹配关键词 → 默认 report_lookup。"""
     call = route_by_keyword_fallback("随机问题xyz")
@@ -80,10 +94,54 @@ async def test_qa_router_llm_success_direct():
 async def test_qa_router_llm_failure_fallback():
     """LLM 异常 → 关键词兜底 + degraded 标记。"""
     mock_llm = MagicMock()
-    mock_llm.with_structured_output = MagicMock(return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down"))))
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
     with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
         result = await qa_router_node(_state("今天晨报说了什么"))
     assert result["plan"] == "direct"
     assert result["skill_calls"][0].skill_name == "report_lookup"
     # 兜底标记：goal.constraints 含 router_fallback
+    assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_evidence_resolver():
+    """LLM 异常 → evidence_resolver 关键词兜底。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("有什么证据证明"))
+    assert result["skill_calls"][0].skill_name == "evidence_resolver"
+    assert result["goal"].intent == "evidence_resolver"
+    assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_sector_snapshot():
+    """LLM 异常 → sector_snapshot 关键词兜底。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("板块强弱分析今天"))
+    assert result["skill_calls"][0].skill_name == "sector_snapshot"
+    assert result["goal"].intent == "sector_snapshot"
+    assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_market_snapshot():
+    """LLM 异常 → market_snapshot 关键词兜底。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("大盘今天走势如何"))
+    assert result["skill_calls"][0].skill_name == "market_snapshot"
+    assert result["goal"].intent == "market_snapshot"
     assert result["goal"].constraints.get("router_fallback") == "true"
