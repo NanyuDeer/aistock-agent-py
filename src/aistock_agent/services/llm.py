@@ -10,6 +10,7 @@
 """
 
 import os
+from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import Runnable
@@ -65,7 +66,7 @@ def get_quick_think() -> ChatOpenAI:
     )
 
 
-def get_deep_think() -> ChatOpenAI:
+def get_deep_think(*, extra_body: dict[str, Any] | None = None) -> ChatOpenAI:
     """深度模型，用于复杂分析和推理
 
     支持独立 API 配置（DEEP_THINK_API_KEY / DEEP_THINK_BASE_URL），
@@ -81,6 +82,7 @@ def get_deep_think() -> ChatOpenAI:
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]
         callbacks=_get_observability_callbacks(),
+        extra_body=extra_body,
     )
 
 

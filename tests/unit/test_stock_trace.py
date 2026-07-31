@@ -1,114 +1,289 @@
-"""stock_trace schema 单元测试
-
-验证：
-- StockTraceTriggerRequest 字段验证（symbol 必须 6 位数字）
-- 可选字段默认值（cycle=None, report_date=None, trace_id=None）
-- extra="forbid" 禁止额外字段
-- StockTraceTriggerResponse 字段类型
-"""
+import asyncio
+from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
 
-from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
+from aistock_agent.agents.workers.stock_trace import (
+    StockTraceWorker,
+    StockTraceWorkerOutcome,
+    _recover_tool_payload,
+)
+from aistock_agent.schemas.stock_trace import (
+    StockTraceResult,
+    StockTraceResultPayload,
+    StockTraceTriggerRequest,
+    StockTraceTriggerResponse,
+)
+from aistock_agent.services.stock_trace_client import StockTraceNodeClient
+from aistock_agent.services.stock_trace_validator import (
+    StockTraceValidationError,
+    validate_stock_trace_result,
+)
+from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
 
-
-class TestStockTraceTriggerRequest:
-    def test_valid_symbol(self):
-        """合法 6 位数字 symbol"""
-        req = StockTraceTriggerRequest(symbol="600519")
-        assert req.symbol == "600519"
-        assert req.cycle is None
-        assert req.report_date is None
-        assert req.trace_id is None
-
-    def test_valid_with_all_fields(self):
-        """全部可选字段都传"""
-        from datetime import date
-        req = StockTraceTriggerRequest(
-            symbol="000001",
-            cycle="short",
-            report_date=date(2026, 7, 30),
-            trace_id="my-trace-id",
-        )
-        assert req.symbol == "000001"
-        assert req.cycle == "short"
-        assert req.report_date == date(2026, 7, 30)
-        assert req.trace_id == "my-trace-id"
-
-    def test_invalid_symbol_too_short(self):
-        """symbol 不足 6 位"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="60051")
-
-    def test_invalid_symbol_too_long(self):
-        """symbol 超过 6 位"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="6005199")
-
-    def test_invalid_symbol_contains_letters(self):
-        """symbol 含字母"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="60051A")
-
-    def test_invalid_symbol_empty(self):
-        """symbol 为空"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="")
-
-    def test_extra_fields_forbidden(self):
-        """extra="forbid"：额外字段触发验证错误"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="600519", extra_field="should_not_pass")
-
-    def test_invalid_cycle(self):
-        """cycle 只能是 short/mid/long"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="600519", cycle="invalid")
-
-    def test_invalid_report_date(self):
-        """report_date 非日期字符串"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerRequest(symbol="600519", report_date="not-a-date")
+NOW = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
 
 
-class TestStockTraceTriggerResponse:
-    def test_valid_completed(self):
-        """completed 响应"""
-        from datetime import date
-        resp = StockTraceTriggerResponse(
-            trace_id="trace-123",
-            symbol="600519",
-            report_date=date(2026, 7, 30),
-            status="completed",
-            report_id=42,
-        )
-        assert resp.trace_id == "trace-123"
-        assert resp.symbol == "600519"
-        assert resp.report_date == date(2026, 7, 30)
-        assert resp.status == "completed"
-        assert resp.report_id == 42
-        assert resp.degraded_reason is None
+def snapshot_payload() -> dict[str, object]:
+    return {
+        "snapshotId": "snapshot-001",
+        "eventId": "mv:000004:2026-07-30:1:up",
+        "triggerRevision": 1,
+        "snapshotStage": "enriched",
+        "sourceRevisionHash": "a" * 64,
+        "triggerEvent": {
+            "eventId": "mv:000004:2026-07-30:1:up",
+            "triggerRevision": 1,
+            "symbol": "000004",
+            "stockName": "Test Stock",
+            "tradingDate": "2026-07-30",
+            "direction": "up",
+            "triggeredAt": NOW.isoformat(),
+            "windowStartAt": NOW.isoformat(),
+            "windowEndAt": NOW.isoformat(),
+            "latestPrice": 22.0,
+            "previousClose": 20.0,
+            "actualValue": 10.0,
+            "thresholdValue": 7.0,
+            "severity": "critical",
+            "ruleVersion": "price-v1",
+        },
+        "missingFields": [],
+        "dataReadiness": {"company": "complete", "sector": "partial", "market": "complete"},
+        "collectorVersions": {},
+        "capturedAt": NOW.isoformat(),
+        "sourceRecords": [
+            {
+                "sourceId": "announcement-1",
+                "kind": "announcement",
+                "provider": "test_exchange",
+                "sourceLevel": "A",
+                "title": "Material restructuring plan",
+                "contentExcerpt": "Official disclosure",
+                "occurredAt": NOW.isoformat(),
+                "capturedAt": NOW.isoformat(),
+                "payload": {"impact": "positive"},
+                "contentHash": "b" * 64,
+            },
+            {
+                "sourceId": "trigger-1",
+                "kind": "trigger_fact",
+                "provider": "detector",
+                "sourceLevel": "A",
+                "title": "Price trigger",
+                "contentExcerpt": "Price up 10%",
+                "occurredAt": NOW.isoformat(),
+                "capturedAt": NOW.isoformat(),
+                "payload": {},
+                "contentHash": "c" * 64,
+            },
+        ],
+    }
 
-    def test_valid_degraded(self):
-        """degraded 响应带 reason"""
-        resp = StockTraceTriggerResponse(
-            trace_id="trace-456",
-            symbol="000001",
-            report_date="2026-07-30",
-            status="degraded",
-            degraded_reason="LLM temporarily unavailable",
-        )
-        assert resp.status == "degraded"
-        assert resp.degraded_reason == "LLM temporarily unavailable"
-        assert resp.report_id is None
 
-    def test_invalid_status(self):
-        """status 必须是 completed/degraded"""
-        with pytest.raises(ValidationError):
-            StockTraceTriggerResponse(
-                trace_id="trace-789",
-                symbol="600519",
-                report_date="2026-07-30",
-                status="unknown",
+class FakeNodeClient:
+    async def get(self, path: str) -> dict[str, object] | None:
+        return snapshot_payload() if "analysis-context" in path else None
+
+    async def post(self, _path: str, _body: dict[str, object]) -> dict[str, object] | None:
+        return {}
+
+    async def patch(self, _path: str, _body: dict[str, object]) -> dict[str, object] | None:
+        return {"attemptCount": 1}
+
+
+def valid_result() -> StockTraceResult:
+    stages = [
+        "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
+    ]
+    nodes = [
+        {
+            "node_id": f"node-{index}",
+            "stage": stage,
+            "stage_order": index,
+            "epistemic_type": (
+                "fact"
+                if stage in {"structural_root", "trigger", "observable_result"}
+                else "inference"
+            ),
+            "status": (
+                "established"
+                if stage in {"structural_root", "trigger", "observable_result"}
+                else "partial"
+            ),
+            "claim": f"{stage} claim",
+            "evidence_ids": (
+                ["trigger-1"]
+                if stage in {"trigger", "observable_result"}
+                else ["announcement-1"]
+            ),
+            "counter_evidence_ids": [],
+        }
+        for index, stage in enumerate(stages, start=1)
+    ]
+    return StockTraceResult.model_validate({
+        "schema_version": "stock-trace-result-v1",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "snapshot_id": "snapshot-001",
+        "analysis_version": "llm-stock-trace-v1",
+        "attribution_status": "confirmed",
+        "primary_chain_id": "chain-1",
+        "confidence_score": 0.8,
+        "confidence_level": "high",
+        "candidates": [{
+            "candidate_id": "candidate-1", "layer": "company", "rank": 1,
+            "status": "supported", "verdict": "Official disclosure supports the cause.",
+            "supporting_evidence_ids": ["announcement-1"], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-2", "layer": "sector", "rank": 1,
+            "status": "insufficient", "verdict": "No sector explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-3", "layer": "market", "rank": 1,
+            "status": "insufficient", "verdict": "No market explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }],
+        "chains": [{
+            "chain_id": "chain-1",
+            "candidate_id": "candidate-1",
+            "role": "primary",
+            "nodes": nodes,
+        }],
+        "suggested_actions": ["verify_announcement", "observe"],
+    })
+
+
+def test_node_client_normalizes_node_camel_case_analysis_context() -> None:
+    client = StockTraceNodeClient(FakeNodeClient())
+    snapshot = asyncio.run(client.get_analysis_context("mv:000004:2026-07-30:1:up", 1))
+    assert snapshot is not None
+    assert snapshot.trigger_event.event_id == snapshot.event_id
+    assert snapshot.source_records[0].source_level == "A"
+
+
+def test_validator_accepts_a_level_confirmed_company_cause() -> None:
+    snapshot = asyncio.run(
+        StockTraceNodeClient(FakeNodeClient()).get_analysis_context("mv:000004:2026-07-30:1:up", 1)
+    )
+    assert snapshot is not None
+    validate_stock_trace_result(valid_result(), snapshot)
+
+
+def test_validator_rejects_unknown_evidence() -> None:
+    snapshot = asyncio.run(
+        StockTraceNodeClient(FakeNodeClient()).get_analysis_context("mv:000004:2026-07-30:1:up", 1)
+    )
+    assert snapshot is not None
+    result = valid_result().model_copy(deep=True)
+    result.candidates[0].supporting_evidence_ids = ["missing"]
+    with pytest.raises(StockTraceValidationError, match="unknown source"):
+        validate_stock_trace_result(result, snapshot)
+
+
+class FakeLlm:
+    structured_schema: type[object] | None = None
+    structured_method: str | None = None
+
+    def with_structured_output(
+        self, schema: type[object], *, method: str, include_raw: bool = False
+    ) -> "FakeLlm":
+        self.__class__.structured_schema = schema
+        self.__class__.structured_method = method
+        return self
+
+    async def ainvoke(self, _messages: list[object]) -> StockTraceResultPayload:
+        return StockTraceResultPayload.model_validate(
+            valid_result().model_dump(
+                exclude={"schema_version", "event_id", "snapshot_id", "analysis_version"}
             )
+        )
+
+
+@pytest.mark.asyncio
+async def test_worker_returns_validated_structured_result() -> None:
+    worker = StockTraceWorker(StockTraceNodeClient(FakeNodeClient()), llm_factory=FakeLlm)
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "completed"
+    assert outcome.result is not None
+    assert outcome.result.attribution_status == "confirmed"
+    assert FakeLlm.structured_schema is StockTraceResultPayload
+    assert FakeLlm.structured_method == "function_calling"
+
+
+def test_recovers_single_trailing_brace_in_provider_tool_arguments() -> None:
+    arguments = valid_result().model_dump_json(
+        exclude={"schema_version", "event_id", "snapshot_id", "analysis_version"}
+    ) + "}"
+
+    class RawResponse:
+        additional_kwargs = {"tool_calls": [{"function": {"arguments": arguments}}]}
+
+    payload = _recover_tool_payload(RawResponse())
+    assert payload["attribution_status"] == "confirmed"
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.acked: list[tuple[str, str, str]] = []
+
+    async def xack(self, stream: str, group: str, message_id: str) -> int:
+        self.acked.append((stream, group, message_id))
+        return 1
+
+
+class CompletedWorker:
+    async def analyze(
+        self, _event_id: str, _trigger_revision: int, _analysis_version: str
+    ) -> StockTraceWorkerOutcome:
+        return StockTraceWorkerOutcome(status="completed", result=valid_result())
+
+
+@pytest.mark.asyncio
+async def test_consumer_writes_validated_result_then_acknowledges_job() -> None:
+    redis_client = FakeRedis()
+    consumer = StockTraceConsumer(
+        redis_client,  # type: ignore[arg-type]
+        StockTraceNodeClient(FakeNodeClient()),
+        CompletedWorker(),  # type: ignore[arg-type]
+    )
+    await consumer._consume_message("1710000000000-0", {
+        "job_id": "job-001",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "trigger_revision": "1",
+        "analysis_version": "llm-stock-trace-v1",
+    })
+    assert redis_client.acked == [
+        ("stock-trace.jobs", "stock-trace-workers", "1710000000000-0")
+    ]
+
+
+def test_trigger_request_validates_symbol_and_optional_fields() -> None:
+    request = StockTraceTriggerRequest(
+        symbol="000001",
+        cycle="short",
+        report_date="2026-07-30",
+        trace_id="trace-001",
+    )
+    assert request.symbol == "000001"
+    assert request.cycle == "short"
+    assert request.report_date == "2026-07-30"
+    assert request.trace_id == "trace-001"
+
+
+def test_trigger_response_supports_completed_and_degraded() -> None:
+    completed = StockTraceTriggerResponse(
+        trace_id="trace-001",
+        symbol="000001",
+        report_date="2026-07-30",
+        status="completed",
+        report_id=42,
+    )
+    degraded = StockTraceTriggerResponse(
+        trace_id="trace-002",
+        symbol="600519",
+        report_date="2026-07-30",
+        status="degraded",
+        degraded_reason="LLM temporarily unavailable",
+    )
+    assert completed.report_id == 42
+    assert degraded.degraded_reason == "LLM temporarily unavailable"

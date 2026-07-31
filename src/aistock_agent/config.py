@@ -3,7 +3,7 @@
 import json
 import os
 import random
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/1"
     # 连接池最大连接数（main.py lifespan 传给 RedisPool.init）
     redis_max_connections: int = 10
+    # Stock Trace 使用 Node Outbox 所在的 Redis DB；独立 Consumer 进程使用该连接。
+    stock_trace_redis_url: str = "redis://localhost:6379/2"
+    stock_trace_consumer_group: str = "stock-trace-workers"
+    stock_trace_consumer_block_ms: int = 1000
+    # Pending 消息达到该空闲时间后，可由任意 Consumer 接管重试。
+    stock_trace_pending_claim_idle_ms: int = 3000
+    stock_trace_max_attempts: int = 3
+    # Tool calling provides a schema-bound response across OpenAI-compatible models.
+    stock_trace_structured_output_method: Literal[
+        "function_calling", "json_mode", "json_schema"
+    ] = "function_calling"
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
