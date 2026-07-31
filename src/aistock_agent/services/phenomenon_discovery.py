@@ -97,7 +97,7 @@ def _ordered_real_fact_ids(sources: dict[str, SourceRecord], wanted: set[str]) -
         for source_id, record in sources.items()
         if source_id in wanted and record.kind == "market_fact"
     ]
-    return sorted(result)
+    return result
 
 
 def _score_rules(
@@ -145,14 +145,14 @@ def _score_rules(
     rally_score = 0
     if rally_base:
         rally_score = (
-            1
+            settings.phenomenon_min_match_score
             + int(limit_up >= limit_down + settings.phenomenon_broad_limit_count_gap)
             + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
         )
     decline_score = 0
     if decline_base:
         decline_score = (
-            1
+            settings.phenomenon_min_match_score
             + int(limit_down >= limit_up + settings.phenomenon_broad_limit_count_gap)
             + int(turnover_change >= settings.phenomenon_broad_turnover_change_pct)
         )

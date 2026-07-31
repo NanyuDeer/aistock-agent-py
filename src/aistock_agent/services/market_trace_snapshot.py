@@ -15,12 +15,18 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from datetime import UTC, datetime
 
 import structlog
 
-from aistock_agent.schemas.market_trace import MarketTraceSnapshot, SourceRecord
+from aistock_agent.schemas.market_trace import (
+    DataAvailability,
+    MarketTraceSnapshot,
+    SourceCollectionStatus,
+    SourceRecord,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.services.tavily import TavilyService
@@ -85,7 +91,9 @@ def _safe_optional_str(value: object) -> str | None:
     会让 mypy 推断为 ``object | None``（因为两次 ``get`` 调用结果分别判定），
     通过本函数一次性收窄，避免 ``type: ignore``。
     """
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _has_numeric_fields(record: dict[str, object], fields: tuple[str, ...]) -> bool:
@@ -109,6 +117,76 @@ def _sector_item_count(record: dict[str, object], field: str) -> int:
     if not isinstance(items, list):
         return 0
     return sum(isinstance(item, dict) and bool(item) for item in items)
+
+
+def _append_missing(missing_fields: list[str], field: str) -> None:
+    if field not in missing_fields:
+        missing_fields.append(field)
+
+
+def _quick_availability(close_data: dict[str, object]) -> dict[str, DataAvailability]:
+    """Parse Node quick availability without trusting malformed metadata."""
+    raw_availability = close_data.get("quick_data_availability")
+    if not isinstance(raw_availability, dict):
+        return {}
+
+    availability: dict[str, DataAvailability] = {}
+    for field, raw_value in raw_availability.items():
+        if not isinstance(field, str) or not isinstance(raw_value, dict):
+            continue
+        try:
+            value = dict(raw_value)
+            if "reason" in value:
+                value["reason"] = _safe_availability_reason(value.get("reason"))
+            availability[field] = DataAvailability.model_validate(value)
+        except ValueError:
+            availability[field] = DataAvailability(
+                state="unavailable", reason="invalid_availability_metadata"
+            )
+    return availability
+
+
+_SAFE_AVAILABILITY_REASONS = {
+    "prior_day_amount_unavailable",
+    "limit_pool_unavailable",
+    "moneyflow_ths_unavailable",
+    "provider_empty",
+    "availability_not_declared",
+    "invalid_availability_metadata",
+}
+
+
+def _safe_availability_reason(value: object) -> str:
+    if isinstance(value, str) and value in _SAFE_AVAILABILITY_REASONS:
+        return value
+    return "provider_reported_unavailable"
+
+
+def _fact_is_usable(availability: DataAvailability | None) -> bool:
+    return availability is None or availability.state in {"available", "partial"}
+
+
+def _availability_allows_fact(availability: DataAvailability | None, is_quick: bool) -> bool:
+    if is_quick:
+        return availability is not None and _fact_is_usable(availability)
+    return _fact_is_usable(availability)
+
+
+def _finalize_fact_availability(
+    data_availability: dict[str, DataAvailability],
+    field: str,
+    usable: bool,
+    missing_fields: list[str],
+    missing_field: str,
+) -> None:
+    if usable:
+        data_availability.setdefault(field, DataAvailability(state="available"))
+        return
+    if data_availability.get(field) is None or data_availability[field].state != "unavailable":
+        data_availability[field] = DataAvailability(
+            state="unavailable", reason="aggregate_fact_invalid_or_missing"
+        )
+    _append_missing(missing_fields, missing_field)
 
 
 def _normalize_date_yyyymmdd(value: object) -> str | None:
@@ -227,21 +305,49 @@ def _normalize_aggregate_facts(
     missing_fields: list[str],
     trade_date_dt: datetime,
     captured_at: datetime,
+    data_availability: dict[str, DataAvailability],
+    *,
+    is_quick: bool,
 ) -> None:
     """A 股聚合事实（广度/成交额/涨跌停/主力资金/板块）→ SourceRecord"""
     # 市场广度
     breadth_dict = normalized_a_share.get("breadth")
-    if isinstance(breadth_dict, dict) and _has_any_numeric_field(
-        breadth_dict,
-        (
-            "total_count",
-            "advance_count",
-            "decline_count",
-            "flat_count",
-            "advance_ratio",
-            "decline_ratio",
-        ),
-    ):
+    breadth_availability = data_availability.get("breadth")
+    breadth_fields = (
+        "total_count",
+        "advance_count",
+        "decline_count",
+        "flat_count",
+        "advance_ratio",
+    )
+    valid_breadth = (
+        _availability_allows_fact(breadth_availability, is_quick)
+        and isinstance(breadth_dict, dict)
+        and _has_numeric_fields(breadth_dict, breadth_fields)
+        and all(
+            math.isfinite(float(breadth_dict[field]))
+            and float(breadth_dict[field]).is_integer()
+            and float(breadth_dict[field]) >= 0
+            for field in ("total_count", "advance_count", "decline_count", "flat_count")
+        )
+        and float(breadth_dict["total_count"]) > 0
+        and float(breadth_dict["advance_count"]) <= float(breadth_dict["total_count"])
+        and float(breadth_dict["decline_count"]) <= float(breadth_dict["total_count"])
+        and float(breadth_dict["flat_count"]) <= float(breadth_dict["total_count"])
+        and math.isfinite(float(breadth_dict["advance_ratio"]))
+        and 0 <= float(breadth_dict["advance_ratio"]) <= 1
+        and float(breadth_dict["advance_count"])
+        + float(breadth_dict["decline_count"])
+        + float(breadth_dict["flat_count"])
+        == float(breadth_dict["total_count"])
+        and math.isclose(
+            float(breadth_dict["advance_ratio"]),
+            float(breadth_dict["advance_count"]) / float(breadth_dict["total_count"]),
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        )
+    )
+    if valid_breadth and isinstance(breadth_dict, dict):
         sources["BREADTH_ALL"] = SourceRecord(
             source_id="BREADTH_ALL",
             kind="market_fact",
@@ -259,64 +365,115 @@ def _normalize_aggregate_facts(
             captured_at=captured_at,
             source_level="market_data",
         )
-    else:
-        missing_fields.append("a_share.breadth")
+    _finalize_fact_availability(
+        data_availability,
+        "breadth",
+        valid_breadth,
+        missing_fields,
+        "a_share.breadth",
+    )
 
     # 成交额
     turnover_dict = normalized_a_share.get("turnover")
-    if isinstance(turnover_dict, dict) and _has_numeric_fields(
-        turnover_dict,
-        ("amount_yuan", "previous_amount_yuan", "change_pct"),
-    ):
+    turnover_availability = data_availability.get("turnover")
+    turnover_fields = (
+        set(turnover_availability.available_fields)
+        if turnover_availability is not None and turnover_availability.state == "partial"
+        else {"amount_yuan", "previous_amount_yuan", "change_pct"}
+    )
+    valid_turnover = (
+        _availability_allows_fact(turnover_availability, is_quick)
+        and isinstance(turnover_dict, dict)
+        and any(
+            field in turnover_fields and _has_numeric_fields(turnover_dict, (field,))
+            for field in ("amount_yuan", "previous_amount_yuan", "change_pct")
+        )
+    )
+    if valid_turnover and isinstance(turnover_dict, dict):
+        turnover_content = ", ".join(
+            f"{field}={turnover_dict.get(field)}"
+            for field in ("amount_yuan", "previous_amount_yuan", "change_pct")
+            if field in turnover_fields and _has_numeric_fields(turnover_dict, (field,))
+        )
         sources["TURNOVER_ALL"] = SourceRecord(
             source_id="TURNOVER_ALL",
             kind="market_fact",
             provider=_safe_str(turnover_dict.get("source"), "tushare:daily"),
             title="全市场成交额",
-            content=(
-                f"amount_yuan={turnover_dict.get('amount_yuan')}, "
-                f"previous_amount_yuan={turnover_dict.get('previous_amount_yuan')}, "
-                f"change_pct={turnover_dict.get('change_pct')}"
-            ),
+            content=turnover_content,
             url=None,
             occurred_at=trade_date_dt,
             captured_at=captured_at,
             source_level="market_data",
         )
-    else:
-        missing_fields.append("a_share.turnover")
+    _finalize_fact_availability(
+        data_availability,
+        "turnover",
+        valid_turnover,
+        missing_fields,
+        "a_share.turnover",
+    )
 
     # 涨跌停与连板
     limits_dict = normalized_a_share.get("limits")
-    if isinstance(limits_dict, dict) and _has_numeric_fields(
-        limits_dict,
-        ("up_count", "down_count", "broken_count", "highest_board"),
-    ):
+    limits_availability = data_availability.get("limits")
+    limit_fields = (
+        set(limits_availability.available_fields)
+        if limits_availability is not None and limits_availability.state == "partial"
+        else {"up_count", "down_count", "broken_count", "highest_board"}
+    )
+    valid_limits = (
+        _availability_allows_fact(limits_availability, is_quick)
+        and isinstance(limits_dict, dict)
+        and any(
+            field in limit_fields and _has_numeric_fields(limits_dict, (field,))
+            for field in ("up_count", "down_count", "broken_count", "highest_board")
+        )
+    )
+    if valid_limits and isinstance(limits_dict, dict):
+        limit_content = ", ".join(
+            f"{field}={limits_dict.get(field)}"
+            for field in ("up_count", "down_count", "broken_count", "highest_board")
+            if field in limit_fields and _has_numeric_fields(limits_dict, (field,))
+        )
+        if limits_availability is not None and limits_availability.approximate:
+            limit_content += ", approximate=true"
         sources["LIMITS_ALL"] = SourceRecord(
             source_id="LIMITS_ALL",
             kind="market_fact",
             provider="tushare:limit_list_ths",
             title="涨跌停与连板统计",
-            content=(
-                f"up_count={limits_dict.get('up_count')}, "
-                f"down_count={limits_dict.get('down_count')}, "
-                f"broken_count={limits_dict.get('broken_count')}, "
-                f"highest_board={limits_dict.get('highest_board')}"
-            ),
+            content=limit_content,
             url=None,
             occurred_at=trade_date_dt,
             captured_at=captured_at,
             source_level="market_data",
         )
-    else:
-        missing_fields.append("a_share.limits")
+    _finalize_fact_availability(
+        data_availability,
+        "limits",
+        valid_limits,
+        missing_fields,
+        "a_share.limits",
+    )
 
     # 主力资金
     main_force_dict = normalized_a_share.get("main_force")
-    if isinstance(main_force_dict, dict) and _has_numeric_fields(
-        main_force_dict,
-        ("large_and_extra_large_net_yuan",),
-    ):
+    main_force_availability = data_availability.get("main_force")
+    valid_main_force = (
+        _availability_allows_fact(main_force_availability, is_quick)
+        and isinstance(main_force_dict, dict)
+        and (
+            main_force_availability is None
+            or main_force_availability.state != "partial"
+            or "large_and_extra_large_net_yuan" in main_force_availability.available_fields
+        )
+        and _has_numeric_fields(
+            main_force_dict,
+            ("large_and_extra_large_net_yuan",),
+        )
+    )
+    if valid_main_force and isinstance(main_force_dict, dict):
         sources["MAIN_FORCE_ALL"] = SourceRecord(
             source_id="MAIN_FORCE_ALL",
             kind="market_fact",
@@ -331,33 +488,55 @@ def _normalize_aggregate_facts(
             captured_at=captured_at,
             source_level="market_data",
         )
-    else:
-        missing_fields.append("a_share.main_force.large_and_extra_large_net_yuan")
+    _finalize_fact_availability(
+        data_availability,
+        "main_force",
+        valid_main_force,
+        missing_fields,
+        "a_share.main_force.large_and_extra_large_net_yuan",
+    )
 
     # 板块
     sectors_dict = normalized_a_share.get("sectors")
     sector_fields = ("top_gainers", "top_losers", "top_inflows", "top_outflows")
-    if isinstance(sectors_dict, dict) and any(
-        _sector_item_count(sectors_dict, field) > 0 for field in sector_fields
-    ):
+    sectors_availability = data_availability.get("sectors")
+    usable_sector_fields = (
+        set(sectors_availability.available_fields)
+        if sectors_availability is not None and sectors_availability.state == "partial"
+        else set(sector_fields)
+    )
+    valid_sectors = (
+        _availability_allows_fact(sectors_availability, is_quick)
+        and isinstance(sectors_dict, dict)
+        and any(
+            field in usable_sector_fields and _sector_item_count(sectors_dict, field) > 0
+            for field in sector_fields
+        )
+    )
+    if valid_sectors and isinstance(sectors_dict, dict):
+        sector_content = ", ".join(
+            f"{field}_count={_sector_item_count(sectors_dict, field)}"
+            for field in sector_fields
+            if field in usable_sector_fields
+        )
         sources["SECTORS_ALL"] = SourceRecord(
             source_id="SECTORS_ALL",
             kind="market_fact",
             provider="tushare:moneyflow_cnt_ths",
             title="概念板块涨跌与资金流排序",
-            content=(
-                f"top_gainers_count={_sector_item_count(sectors_dict, 'top_gainers')}, "
-                f"top_losers_count={_sector_item_count(sectors_dict, 'top_losers')}, "
-                f"top_inflows_count={_sector_item_count(sectors_dict, 'top_inflows')}, "
-                f"top_outflows_count={_sector_item_count(sectors_dict, 'top_outflows')}"
-            ),
+            content=sector_content,
             url=None,
             occurred_at=trade_date_dt,
             captured_at=captured_at,
             source_level="market_data",
         )
-    else:
-        missing_fields.append("a_share.sectors")
+    _finalize_fact_availability(
+        data_availability,
+        "sectors",
+        valid_sectors,
+        missing_fields,
+        "a_share.sectors",
+    )
 
 
 def _normalize_global_facts(
@@ -365,7 +544,8 @@ def _normalize_global_facts(
     sources: dict[str, SourceRecord],
     missing_fields: list[str],
     captured_at: datetime,
-) -> None:
+    fetch_error: Exception | None = None,
+) -> SourceCollectionStatus:
     """境外行情事实 → SourceRecord"""
     global_counter = 0
     for fact in global_facts:
@@ -390,8 +570,23 @@ def _normalize_global_facts(
             captured_at=captured_at,
             source_level="market_data",
         )
-    if not global_facts:
-        missing_fields.append("global_markets")
+    if fetch_error is not None:
+        _append_missing(missing_fields, "global_markets")
+        return SourceCollectionStatus(
+            state="unavailable",
+            provider="yfinance",
+            reason=type(fetch_error).__name__,
+        )
+    if global_counter == 0:
+        _append_missing(missing_fields, "global_markets")
+        return SourceCollectionStatus(
+            state="empty",
+            provider="yfinance",
+            reason="provider_returned_no_items",
+        )
+    return SourceCollectionStatus(
+        state="available", provider="yfinance", item_count=global_counter
+    )
 
 
 def _normalize_news_facts(
@@ -399,7 +594,8 @@ def _normalize_news_facts(
     sources: dict[str, SourceRecord],
     missing_fields: list[str],
     captured_at: datetime,
-) -> None:
+    fetch_error: Exception | None = None,
+) -> SourceCollectionStatus:
     """财联社快讯 → SourceRecord（event_evidence）"""
     news_items: list[dict[str, object]] = []
     if isinstance(news_data, dict):
@@ -408,11 +604,15 @@ def _normalize_news_facts(
             news_items = [item for item in raw_items if isinstance(item, dict)]
 
     news_counter = 0
+    causal_ready_count = 0
     for item in news_items:
         time_str = item.get("time", item.get("ctime", ""))
         occurred_at = _parse_datetime(time_str)
         if occurred_at is not None and occurred_at > captured_at:
             continue
+        if occurred_at is None:
+            continue
+        url = _safe_optional_str(item.get("url"))
         news_counter += 1
         source_id = f"NEWS_{news_counter:03d}"
         sources[source_id] = SourceRecord(
@@ -421,13 +621,34 @@ def _normalize_news_facts(
             provider="cls",
             title=_safe_str(item.get("title"), "无标题"),
             content=_safe_str(item.get("brief", item.get("content", "")))[:500],
-            url=_safe_optional_str(item.get("url")),
+            url=url,
             occurred_at=occurred_at,
             captured_at=captured_at,
             source_level="reporting",
         )
+        if url:
+            causal_ready_count += 1
+    if fetch_error is not None:
+        _append_missing(missing_fields, "cls_news")
+        return SourceCollectionStatus(
+            state="unavailable",
+            provider="cls",
+            reason=type(fetch_error).__name__,
+        )
     if not news_items:
-        missing_fields.append("cls_news")
+        _append_missing(missing_fields, "cls_news")
+        return SourceCollectionStatus(
+            state="empty", provider="cls", reason="provider_returned_no_items"
+        )
+    if causal_ready_count == 0:
+        _append_missing(missing_fields, "cls_news")
+        return SourceCollectionStatus(
+            state="invalid_for_causality",
+            provider="cls",
+            item_count=len(news_items),
+            reason="items_missing_url_or_occurred_at",
+        )
+    return SourceCollectionStatus(state="available", provider="cls", item_count=news_counter)
 
 
 def _normalize_search_facts(
@@ -436,25 +657,44 @@ def _normalize_search_facts(
     sources: dict[str, SourceRecord],
     missing_fields: list[str],
     captured_at: datetime,
-) -> None:
+    fetch_errors: tuple[Exception | None, Exception | None] = (None, None),
+) -> dict[str, SourceCollectionStatus]:
     """Tavily 检索结果 → SourceRecord（event_evidence）"""
     search_counter = 0
-    for label, tavily_result in [
-        ("tavily_search_1", tavily_result_1),
-        ("tavily_search_2", tavily_result_2),
+    statuses: dict[str, SourceCollectionStatus] = {}
+    for label, status_key, tavily_result, fetch_error in [
+        ("tavily_search_1", "tavily_domestic_policy", tavily_result_1, fetch_errors[0]),
+        ("tavily_search_2", "tavily_global_risk", tavily_result_2, fetch_errors[1]),
     ]:
         results = tavily_result.get("results") if isinstance(tavily_result, dict) else None
-        if not isinstance(results, list) or not results:
-            missing_fields.append(label)
+        if fetch_error is not None:
+            _append_missing(missing_fields, label)
+            statuses[status_key] = SourceCollectionStatus(
+                state="unavailable",
+                provider="tavily",
+                reason=type(fetch_error).__name__,
+            )
             continue
+        if not isinstance(results, list) or not results:
+            _append_missing(missing_fields, label)
+            statuses[status_key] = SourceCollectionStatus(
+                state="empty",
+                provider="tavily",
+                reason="provider_returned_no_items",
+            )
+            continue
+        source_count = 0
+        causal_ready_count = 0
         for item in results:
             if not isinstance(item, dict):
                 continue
             pub_date = item.get("published_date", item.get("publishedDate", ""))
             occurred_at = _parse_datetime(pub_date)
-            if occurred_at is not None and occurred_at > captured_at:
+            if occurred_at is None or occurred_at > captured_at:
                 continue
+            url = _safe_optional_str(item.get("url"))
             search_counter += 1
+            source_count += 1
             source_id = f"SEARCH_{search_counter:03d}"
             sources[source_id] = SourceRecord(
                 source_id=source_id,
@@ -462,11 +702,26 @@ def _normalize_search_facts(
                 provider="tavily",
                 title=_safe_str(item.get("title"), "无标题"),
                 content=_safe_str(item.get("content", ""))[:500],
-                url=_safe_optional_str(item.get("url")),
+                url=url,
                 occurred_at=occurred_at,
                 captured_at=captured_at,
                 source_level="reporting",
             )
+            if url:
+                causal_ready_count += 1
+        if causal_ready_count == 0:
+            _append_missing(missing_fields, label)
+            statuses[status_key] = SourceCollectionStatus(
+                state="invalid_for_causality",
+                provider="tavily",
+                item_count=len(results),
+                reason="items_missing_url_or_occurred_at",
+            )
+        else:
+            statuses[status_key] = SourceCollectionStatus(
+                state="available", provider="tavily", item_count=source_count
+            )
+    return statuses
 
 
 async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
@@ -551,44 +806,74 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # 只有 status/coverage/date 三重校验全部通过，才允许调用 yfinance、财联社、Tavily。
 
     # 境外行情（同步函数，用 asyncio.to_thread 避免阻塞事件循环）
+    global_fetch_error: Exception | None = None
     try:
         global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
     except Exception as e:
-        logger.warning("collect_global_market_facts_failed", error=str(e))
+        logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []
+        global_fetch_error = e
 
     # 财联社最新快讯（Node /internal/news/latest）
     news_data = None
+    news_fetch_error: Exception | None = None
     try:
         news_data = await node_api.get("/internal/news/latest")
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error=str(e))
+        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        news_fetch_error = e
 
     # 两组固定 Tavily 检索
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
+    tavily_error_1: Exception | None = None
+    tavily_error_2: Exception | None = None
     try:
         tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
     except Exception as e:
-        logger.warning("tavily_search_1_failed", error=str(e))
+        logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
+        tavily_error_1 = e
     try:
         tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
     except Exception as e:
-        logger.warning("tavily_search_2_failed", error=str(e))
+        logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}
+        tavily_error_2 = e
 
     # ── 4. 归一化为 SourceRecord ──
     sources: dict[str, SourceRecord] = {}
     missing_fields: list[str] = []
+    data_availability: dict[str, DataAvailability] = {}
 
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
-        normalized_a_share, sources, missing_fields, trade_date_dt, captured_at
+        normalized_a_share,
+        sources,
+        missing_fields,
+        trade_date_dt,
+        captured_at,
+        data_availability,
+        is_quick=False,
     )
-    _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
-    _normalize_news_facts(news_data, sources, missing_fields, captured_at)
-    _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
+    collection_status = {
+        "global_markets": _normalize_global_facts(
+            global_facts, sources, missing_fields, captured_at, global_fetch_error
+        ),
+        "cls_news": _normalize_news_facts(
+            news_data, sources, missing_fields, captured_at, news_fetch_error
+        ),
+    }
+    collection_status.update(
+        _normalize_search_facts(
+            tavily_result_1,
+            tavily_result_2,
+            sources,
+            missing_fields,
+            captured_at,
+            (tavily_error_1, tavily_error_2),
+        )
+    )
 
     # ── 5. 在冻结事实和真实来源上确定性发现市场现象 ──
     discovery = discover_market_phenomenon(
@@ -614,6 +899,8 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         sources=sources,
         missing_fields=missing_fields,
         phenomenon_discovery=discovery,
+        data_availability=data_availability,
+        collection_status=collection_status,
     )
 
 
@@ -668,42 +955,72 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     normalized_a_share = normalize_a_share(close_data)
 
     # ── 3. 收集外部来源（与 full 版相同逻辑）──
+    global_fetch_error: Exception | None = None
     try:
         global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
     except Exception as e:
-        logger.warning("collect_global_market_facts_failed", error=str(e))
+        logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []
+        global_fetch_error = e
 
     news_data = None
+    news_fetch_error: Exception | None = None
     try:
         news_data = await node_api.get("/internal/news/latest")
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error=str(e))
+        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        news_fetch_error = e
 
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
+    tavily_error_1: Exception | None = None
+    tavily_error_2: Exception | None = None
     try:
         tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
     except Exception as e:
-        logger.warning("tavily_search_1_failed", error=str(e))
+        logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
+        tavily_error_1 = e
     try:
         tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
     except Exception as e:
-        logger.warning("tavily_search_2_failed", error=str(e))
+        logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}
+        tavily_error_2 = e
 
     # ── 4. 归一化为 SourceRecord（复用 full 版归一化逻辑）──
     sources: dict[str, SourceRecord] = {}
     missing_fields: list[str] = []
+    data_availability = _quick_availability(close_data)
 
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
-        normalized_a_share, sources, missing_fields, trade_date_dt, captured_at
+        normalized_a_share,
+        sources,
+        missing_fields,
+        trade_date_dt,
+        captured_at,
+        data_availability,
+        is_quick=True,
     )
-    _normalize_global_facts(global_facts, sources, missing_fields, captured_at)
-    _normalize_news_facts(news_data, sources, missing_fields, captured_at)
-    _normalize_search_facts(tavily_result_1, tavily_result_2, sources, missing_fields, captured_at)
+    collection_status = {
+        "global_markets": _normalize_global_facts(
+            global_facts, sources, missing_fields, captured_at, global_fetch_error
+        ),
+        "cls_news": _normalize_news_facts(
+            news_data, sources, missing_fields, captured_at, news_fetch_error
+        ),
+    }
+    collection_status.update(
+        _normalize_search_facts(
+            tavily_result_1,
+            tavily_result_2,
+            sources,
+            missing_fields,
+            captured_at,
+            (tavily_error_1, tavily_error_2),
+        )
+    )
 
     # ── 5. 确定性 discovery ──
     discovery = discover_market_phenomenon(
@@ -726,4 +1043,6 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         sources=sources,
         missing_fields=missing_fields,
         phenomenon_discovery=discovery,
+        data_availability=data_availability,
+        collection_status=collection_status,
     )

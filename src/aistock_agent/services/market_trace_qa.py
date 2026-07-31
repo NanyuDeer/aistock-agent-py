@@ -101,6 +101,14 @@ def _candidate_source_ids(
     return [source_id for source_id in snapshot.sources if source_id in source_ids]
 
 
+def _market_fact_source_ids(snapshot: MarketTraceSnapshot) -> list[str]:
+    return [
+        source_id
+        for source_id, record in snapshot.sources.items()
+        if record.kind == "market_fact" and (source_id.startswith("INDEX_") or source_id == "BREADTH_ALL")
+    ]
+
+
 def _render_selection(
     selection: _MarketTraceQaSelection,
     snapshot: MarketTraceSnapshot,
@@ -228,7 +236,16 @@ async def answer_market_trace_qa(
     except ValueError:
         logger.exception("market_trace_qa_validation_failed", report_date=trade_date)
         return _degraded_response(session, artifact_id, "复盘报告校验失败")
-    if snapshot.phenomenon_discovery.status in {
+    discovery = snapshot.phenomenon_discovery
+    if discovery.status == "detected" and discovery.primary is not None and discovery.data_readiness.causal_evidence != "ready":
+        source_ids = list(discovery.primary.fact_ids)
+        return MarketTraceQaResponse(
+            content=(f"市场现象：{discovery.primary.summary}。"
+                     "已确认行情事实；当前缺少可验证的事件归因证据，不能确认驱动原因。"),
+            session_id=session,
+            trace=MarketTraceQaTrace(artifact_id=artifact_id, sources=_build_sources_summary(snapshot.sources, source_ids), as_of=snapshot.captured_at.isoformat(), confidence=trace.confidence, uncertainty=trace.unresolved_questions, degraded=False, degraded_reason=None),
+        )
+    if discovery.status in {
         "no_phenomenon",
         "insufficient_data",
     }:
@@ -237,11 +254,11 @@ async def answer_market_trace_qa(
             "insufficient_data": "行情数据不足，无法可靠判断市场现象",
         }
         return MarketTraceQaResponse(
-            content=content_by_status[snapshot.phenomenon_discovery.status],
+            content=content_by_status[discovery.status],
             session_id=session,
             trace=MarketTraceQaTrace(
                 artifact_id=artifact_id,
-                sources=[],
+                sources=_build_sources_summary(snapshot.sources, _market_fact_source_ids(snapshot)),
                 as_of=snapshot.captured_at.isoformat(),
                 confidence=trace.confidence,
                 uncertainty=trace.unresolved_questions,
