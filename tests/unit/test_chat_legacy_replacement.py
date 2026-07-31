@@ -27,6 +27,7 @@ def test_build_chat_initial_state_fields():
     assert state["insight"] is None
     assert state["final_response"] == ""
     assert state["trace"] is None
+    assert state["clarification"] is None
     # messages 包含一条 HumanMessage
     assert len(state["messages"]) == 1
     assert state["messages"][0].content == "茅台今天怎么样"

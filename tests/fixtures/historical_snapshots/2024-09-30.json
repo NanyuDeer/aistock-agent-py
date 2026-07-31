@@ -1,0 +1,290 @@
+{
+  "schema_version": "1.0",
+  "status": "complete",
+  "trade_date": "20240930",
+  "captured_at": "2024-09-30T08:00:00.000Z",
+  "indexes": [
+    {
+      "ts_code": "000001.SH",
+      "name": "上证指数",
+      "trade_date": "20240930",
+      "close": 3336.4974,
+      "pct_chg": 8.0637,
+      "amount": 1167772549.9904,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399001.SZ",
+      "name": "深证成指",
+      "trade_date": "20240930",
+      "close": 10529.7568,
+      "pct_chg": 10.6664,
+      "amount": 702536833.09519,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "399006.SZ",
+      "name": "创业板指",
+      "trade_date": "20240930",
+      "close": 2175.0865,
+      "pct_chg": 15.3593,
+      "amount": 222456926.51257,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000300.SH",
+      "name": "沪深300",
+      "trade_date": "20240930",
+      "close": 4017.8545,
+      "pct_chg": 8.4826,
+      "amount": 862528807.4192,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000905.SH",
+      "name": "中证500",
+      "trade_date": "20240930",
+      "close": 5743.217,
+      "pct_chg": 10.4111,
+      "amount": 418784669.5685,
+      "source": "tushare:index_daily"
+    },
+    {
+      "ts_code": "000852.SH",
+      "name": "中证1000",
+      "trade_date": "20240930",
+      "close": 5708.8258,
+      "pct_chg": 11.1436,
+      "amount": 484582504.0806,
+      "source": "tushare:index_daily"
+    }
+  ],
+  "breadth": {
+    "total_count": 5345,
+    "advance_count": 5337,
+    "decline_count": 8,
+    "flat_count": 0,
+    "advance_ratio": 0.9985032740879326,
+    "source": "tushare:daily"
+  },
+  "turnover": {
+    "amount_yuan": 2613160025848,
+    "previous_amount_yuan": 1456310604189,
+    "change_pct": 79.44,
+    "source": "tushare:daily"
+  },
+  "limits": {
+    "up_count": 693,
+    "down_count": 2,
+    "broken_count": 120,
+    "highest_board": 0
+  },
+  "sectors": {
+    "top_gainers": [
+      {
+        "ts_code": "885907.TI",
+        "name": "科创次新股",
+        "pct_change": 20.39,
+        "net_amount": 200000000,
+        "lead_stock": "合合信息",
+        "company_num": 15,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885598.TI",
+        "name": "新股与次新股",
+        "pct_change": 17.48,
+        "net_amount": 1100000000,
+        "lead_stock": "长联科技",
+        "company_num": 118,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885982.TI",
+        "name": "华为欧拉",
+        "pct_change": 17.34,
+        "net_amount": 300000000,
+        "lead_stock": "艾融软件",
+        "company_num": 36,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885771.TI",
+        "name": "智能音箱",
+        "pct_change": 16.88,
+        "net_amount": 1400000000,
+        "lead_stock": "无线传媒",
+        "company_num": 51,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "886040.TI",
+        "name": "MLOps概念",
+        "pct_change": 16.68,
+        "net_amount": -400000000,
+        "lead_stock": "东方国信",
+        "company_num": 18,
+        "trade_date": "20240930"
+      }
+    ],
+    "top_losers": [
+      {
+        "ts_code": "885699.TI",
+        "name": "ST板块",
+        "pct_change": 5,
+        "net_amount": -400000000,
+        "lead_stock": "ST汇金",
+        "company_num": 124,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "886045.TI",
+        "name": "同花顺中特估100",
+        "pct_change": 7.2,
+        "net_amount": -1100000000,
+        "lead_stock": "中航产融",
+        "company_num": 100,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885764.TI",
+        "name": "自由贸易港",
+        "pct_change": 7.48,
+        "net_amount": 300000000,
+        "lead_stock": "锦江在线",
+        "company_num": 33,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885792.TI",
+        "name": "赛马概念",
+        "pct_change": 7.54,
+        "net_amount": 100000000,
+        "lead_stock": "海南橡胶",
+        "company_num": 8,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885573.TI",
+        "name": "猪肉",
+        "pct_change": 7.55,
+        "net_amount": 200000000,
+        "lead_stock": "立华股份",
+        "company_num": 32,
+        "trade_date": "20240930"
+      }
+    ],
+    "top_inflows": [
+      {
+        "ts_code": "885338.TI",
+        "name": "融资融券",
+        "pct_change": 11.81,
+        "net_amount": 48700000000,
+        "lead_stock": "长联科技",
+        "company_num": 3619,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885694.TI",
+        "name": "深股通",
+        "pct_change": 11.06,
+        "net_amount": 33800000000,
+        "lead_stock": "蒙草生态",
+        "company_num": 1437,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885806.TI",
+        "name": "华为概念",
+        "pct_change": 12.72,
+        "net_amount": 20600000000,
+        "lead_stock": "无线传媒",
+        "company_num": 904,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885520.TI",
+        "name": "沪股通",
+        "pct_change": 9.72,
+        "net_amount": 20400000000,
+        "lead_stock": "云从科技",
+        "company_num": 1347,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885728.TI",
+        "name": "人工智能",
+        "pct_change": 13.05,
+        "net_amount": 15500000000,
+        "lead_stock": "无线传媒",
+        "company_num": 676,
+        "trade_date": "20240930"
+      }
+    ],
+    "top_outflows": [
+      {
+        "ts_code": "885570.TI",
+        "name": "期货概念",
+        "pct_change": 9.74,
+        "net_amount": -3200000000,
+        "lead_stock": "东方财富",
+        "company_num": 72,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885915.TI",
+        "name": "物业管理",
+        "pct_change": 8.57,
+        "net_amount": -2600000000,
+        "lead_stock": "汇金科技",
+        "company_num": 128,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "886045.TI",
+        "name": "同花顺中特估100",
+        "pct_change": 7.2,
+        "net_amount": -1100000000,
+        "lead_stock": "中航产融",
+        "company_num": 100,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "885758.TI",
+        "name": "租售同权",
+        "pct_change": 9.47,
+        "net_amount": -900000000,
+        "lead_stock": "三六五网",
+        "company_num": 20,
+        "trade_date": "20240930"
+      },
+      {
+        "ts_code": "886072.TI",
+        "name": "高股息精选",
+        "pct_change": 7.75,
+        "net_amount": -700000000,
+        "lead_stock": "朗鸿科技",
+        "company_num": 438,
+        "trade_date": "20240930"
+      }
+    ]
+  },
+  "main_force": {
+    "large_and_extra_large_net_yuan": 0,
+    "source": "tushare:moneyflow_ths"
+  },
+  "coverage": {
+    "current_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5345
+    },
+    "previous_daily": {
+      "complete": true,
+      "reason": "complete",
+      "page_count": 2,
+      "row_count": 5348
+    }
+  }
+}

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
@@ -19,7 +19,7 @@ async def stock_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         raise ValueError("stock_snapshot requires 'symbol' in args or goal.symbols")
 
     quote_text = await get_quote(symbol)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     return Evidence(
         facts=[quote_text],

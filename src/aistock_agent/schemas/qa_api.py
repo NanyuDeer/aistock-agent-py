@@ -1,8 +1,6 @@
 """QA API 请求/响应 schema。"""
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict
 
 

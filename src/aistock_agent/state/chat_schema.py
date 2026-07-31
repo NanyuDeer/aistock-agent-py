@@ -4,11 +4,9 @@
 """
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
-from typing_extensions import Annotated
-
 from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
@@ -34,3 +32,4 @@ class QuestionState(TypedDict, total=False):
     insight: Insight | None
     final_response: str
     trace: AnswerTrace | None
+    clarification: str | None

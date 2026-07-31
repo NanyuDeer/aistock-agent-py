@@ -277,30 +277,60 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # 缓存到本地（前端报告列表查询用）
         report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
-        try:
-            from aistock_agent.services.report_cache import set_report
-            content_cache: dict[str, object] = {
-                "display_report": display_report or {},
-                "podcast_brief": podcast_brief or "",
-            }
-            set_report("alert", report_date, content_cache)
-            logger.info("alert_cached_for_list", report_date=report_date)
-        except Exception as e:
-            logger.warning("alert_cache_failed", error=str(e))
+        trigger_source = state.get("trigger_source")
 
-        # 持久化到数据库（scheduler 触发时）
-        if final_response and state.get("trigger_source") == "scheduler":
-            await node_api.save_analysis_report(
-                report_type="alert",
-                report_date=report_date,
-                content={
-                    "symbol": symbol,
-                    "display_report": display_report,
-                    "podcast_brief": podcast_brief,
-                },
-                user_id=symbol,
-                data_source="alert_agent",
-            )
+        # stock_trace 不写按日无 symbol 的缓存，避免覆盖不同股票的 alert
+        if trigger_source != "stock_trace":
+            try:
+                from aistock_agent.services.report_cache import set_report
+                content_cache: dict[str, object] = {
+                    "display_report": display_report or {},
+                    "podcast_brief": podcast_brief or "",
+                }
+                set_report("alert", report_date, content_cache)
+                logger.info("alert_cached_for_list", report_date=report_date)
+            except Exception as e:
+                logger.warning("alert_cache_failed", error=str(e))
+
+        # 持久化到数据库
+        if final_response:
+            if trigger_source == "scheduler":
+                await node_api.save_analysis_report(
+                    report_type="alert",
+                    report_date=report_date,
+                    content={
+                        "symbol": symbol,
+                        "display_report": display_report,
+                        "podcast_brief": podcast_brief,
+                    },
+                    user_id=symbol,
+                    data_source="alert_agent",
+                )
+            elif trigger_source == "stock_trace":
+                trace_id = str(state.get("trace_id") or "")
+                save_result = await node_api.save_analysis_report(
+                    report_type="alert",
+                    report_date=report_date,
+                    user_id=str(symbol),
+                    data_source="stock_trace",
+                    content={
+                        "schema_version": "stock_trace.v1",
+                        "trace_id": trace_id,
+                        "symbol": symbol,
+                        "display_report": display_report,
+                        "podcast_brief": podcast_brief,
+                    },
+                )
+                report_id = save_result.get("id") if save_result else None
+                trace_persisted = report_id is not None
+
+                return {
+                    "analysis_reports": {"alert": final_response},
+                    "final_response": final_response,
+                    "trace_id": trace_id,
+                    "trace_persisted": trace_persisted,
+                    "report_id": report_id,
+                }
 
         return {
             "analysis_reports": {"alert": final_response},

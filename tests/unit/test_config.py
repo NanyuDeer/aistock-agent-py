@@ -78,12 +78,93 @@ class TestConfigDefaults:
 
 
 # =============================================================================
+# 现象发现阈值默认值测试
+# =============================================================================
+
+
+class TestPhenomenonThresholdDefaults:
+    """验证 16 个现象发现阈值字段的默认值"""
+
+    def test_phenomenon_broad_index_count_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_index_count == 4
+
+    def test_phenomenon_broad_index_change_pct_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_index_change_pct == 0.8
+
+    def test_phenomenon_broad_all_index_change_pct_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_all_index_change_pct == 1.5
+
+    def test_phenomenon_broad_breadth_ratio_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_breadth_ratio == 0.55
+
+    def test_phenomenon_broad_limit_count_gap_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_limit_count_gap == 20
+
+    def test_phenomenon_broad_turnover_change_pct_default(self):
+        s = Settings()
+        assert s.phenomenon_broad_turnover_change_pct == 10.0
+
+    def test_phenomenon_style_divergence_change_pct_default(self):
+        s = Settings()
+        assert s.phenomenon_style_divergence_change_pct == 0.5
+
+    def test_phenomenon_sector_abs_change_pct_default(self):
+        s = Settings()
+        assert s.phenomenon_sector_abs_change_pct == 3.0
+
+    def test_phenomenon_sector_neutral_breadth_min_ratio_default(self):
+        s = Settings()
+        assert s.phenomenon_sector_neutral_breadth_min_ratio == 0.40
+
+    def test_phenomenon_sector_neutral_breadth_max_ratio_default(self):
+        s = Settings()
+        assert s.phenomenon_sector_neutral_breadth_max_ratio == 0.60
+
+    def test_phenomenon_sentiment_limit_up_count_default(self):
+        s = Settings()
+        assert s.phenomenon_sentiment_limit_up_count == 50
+
+    def test_phenomenon_sentiment_limit_down_count_default(self):
+        s = Settings()
+        assert s.phenomenon_sentiment_limit_down_count == 30
+
+    def test_phenomenon_sentiment_broken_ratio_default(self):
+        s = Settings()
+        assert s.phenomenon_sentiment_broken_ratio == 0.35
+
+    def test_phenomenon_sentiment_highest_board_default(self):
+        s = Settings()
+        assert s.phenomenon_sentiment_highest_board == 5
+
+    def test_phenomenon_min_match_score_default(self):
+        s = Settings()
+        assert s.phenomenon_min_match_score == 2
+
+    def test_phenomenon_high_severity_score_default(self):
+        s = Settings()
+        assert s.phenomenon_high_severity_score == 3
+
+
+# =============================================================================
 # 环境变量覆盖测试
 # =============================================================================
 
 
 class TestConfigEnvOverride:
     """验证环境变量可覆盖默认值"""
+
+    def test_phenomenon_threshold_env_override(self, monkeypatch):
+        """验证现象发现阈值可通过环境变量覆盖"""
+        monkeypatch.setenv("PHENOMENON_BROAD_INDEX_CHANGE_PCT", "1.25")
+        monkeypatch.setenv("PHENOMENON_SENTIMENT_BROKEN_RATIO", "0.50")
+        s = Settings()
+        assert s.phenomenon_broad_index_change_pct == 1.25
+        assert s.phenomenon_sentiment_broken_ratio == 0.50
 
     def test_quick_think_temperature_override(self, monkeypatch):
         monkeypatch.setenv("QUICK_THINK_TEMPERATURE", "0.5")

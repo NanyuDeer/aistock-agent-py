@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
@@ -19,7 +19,7 @@ async def stock_news(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         raise ValueError("stock_news requires 'symbol' in args or goal.symbols")
 
     news_text = await search_cls_news(symbol)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # search_cls_news 返回多行文本，按行拆为 facts
     facts = [line.strip() for line in news_text.splitlines() if line.strip()]

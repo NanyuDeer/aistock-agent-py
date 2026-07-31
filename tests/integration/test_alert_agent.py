@@ -182,3 +182,74 @@ async def test_run_uses_both_llm_types():
     assert any(c["name"] == "资讯情报" and c["model_type"] == "quick" for c in actual_calls)
     assert any(c["name"] == "盘口风控" and c["model_type"] == "deep" for c in actual_calls)
     assert any(c["name"] == "图谱发散" and c["model_type"] == "quick" for c in actual_calls)
+
+
+@pytest.mark.asyncio
+async def test_stock_trace_saves_with_correct_contract():
+    """stock_trace trigger_source 以 symbol 为 user_id，写入 stock_trace.v1 payload。"""
+    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
+    mock_agent = _make_mock_agent(final_response)
+    save_report = AsyncMock(return_value={"id": 123})
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
+    ):
+        result = await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+            "trigger_source": "stock_trace",
+            "report_date": "2026-07-10",
+            "trace_id": "trace-abc-123",
+        })
+
+    # 保存语义：alert + report_date + user_id=symbol + stock_trace.v1
+    assert save_report.await_args.kwargs == {
+        "report_type": "alert",
+        "report_date": "2026-07-10",
+        "user_id": "600519",
+        "data_source": "stock_trace",
+        "content": {
+            "schema_version": "stock_trace.v1",
+            "trace_id": "trace-abc-123",
+            "symbol": "600519",
+            "display_report": {"summary": "异动结论"},
+            "podcast_brief": "异动摘要",
+        },
+    }
+    # 返回标记供 route 判断
+    assert result.get("trace_persisted") is True
+    assert result.get("report_id") == 123
+    assert result.get("trace_id") == "trace-abc-123"
+
+
+@patch("aistock_agent.services.report_cache.set_report")
+@pytest.mark.asyncio
+async def test_user_trigger_does_not_save_report(
+    mock_set_report: MagicMock,
+):
+    """trigger_source=user 时只缓存，不调用 save_analysis_report。"""
+    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
+    mock_agent = _make_mock_agent(final_response)
+    save_report = AsyncMock()
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, return_value=mock_agent),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
+    ):
+        result = await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+            "trigger_source": "user",
+            "report_date": "2026-07-10",
+        })
+
+    # user 不写入数据库
+    save_report.assert_not_called()
+    # user 写 report_cache（供列表查询）
+    assert mock_set_report.called
+    assert result.get("final_response") is not None

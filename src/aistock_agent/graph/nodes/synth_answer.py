@@ -6,8 +6,7 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
@@ -20,7 +19,7 @@ from aistock_agent.schemas.chat_contract import (
     Insight,
     InsightGoal,
 )
-from aistock_agent.services.llm import get_deep_think
+from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import QuestionState
 
 logger = structlog.get_logger()
@@ -109,6 +108,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 
 请基于以上证据，按 {mode} 模式生成回答。
 输出 Insight 结构：conclusion（直接回答）、basis（引用的 Evidence 索引列表）、confidence（high/medium/low）、uncertainty（不确定项列表）、answer_mode（必须为 {mode}）。
+只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
 
@@ -153,12 +153,35 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content="内部错误：缺少目标")],
         }
 
+    # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
+    clarification = state.get("clarification")
+    if clarification:
+        insight = Insight(
+            conclusion=clarification,
+            basis=[],
+            confidence="low",
+            uncertainty=["需要股票代码才能执行个股查询"],
+            answer_mode="validate",
+        )
+        return {
+            "insight": insight,
+            "final_response": clarification,
+            "trace": AnswerTrace(
+                goal=goal,
+                plan="direct",
+                skill_calls=[],
+                evidences=[],
+                actual_mode="validate",
+            ),
+            "messages": [AIMessage(content=clarification)],
+        }
+
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
 
     try:
         llm = get_deep_think()
-        structured_llm = llm.with_structured_output(SynthOutput)
+        structured_llm = with_chat_structured_output(llm, SynthOutput)
         prompt = _build_prompt(goal, evidences, mode)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
 

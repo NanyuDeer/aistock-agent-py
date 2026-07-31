@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
@@ -19,8 +19,8 @@ from aistock_agent.skills.base import skill
 @skill
 async def report_lookup(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     report_type = args.get("report_type", "review")
-    date_str = args.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    now = datetime.now(timezone.utc)
+    date_str = args.get("date") or datetime.now(UTC).strftime("%Y-%m-%d")
+    now = datetime.now(UTC)
 
     if report_type == "review":
         artifact = await get_cached_review(date_str)

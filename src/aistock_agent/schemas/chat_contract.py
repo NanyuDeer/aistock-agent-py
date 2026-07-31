@@ -19,11 +19,14 @@ class InsightGoal(BaseModel):
     tag_codes: list[str] = []
     time_range: Literal["realtime", "today", "recent", "history"] = "today"
     intent: Literal[
-        "report_lookup",
-        "stock_snapshot",
-        "stock_news",
-        "trace_lookup",
+        "evidence_resolver",
         "industry_relation",
+        "market_snapshot",
+        "report_lookup",
+        "sector_snapshot",
+        "stock_news",
+        "stock_snapshot",
+        "trace_lookup",
     ]
     # QA Router 不填，由 synth_answer 通过 _infer_answer_mode 推断
     answer_mode: Literal["predict", "trace", "validate"] | None = None
@@ -78,11 +81,14 @@ class SkillCall(BaseModel):
     """QA Router 产出的计划项。"""
 
     skill_name: Literal[
-        "report_lookup",
-        "stock_snapshot",
-        "stock_news",
-        "trace_lookup",
+        "evidence_resolver",
         "industry_relation",
+        "market_snapshot",
+        "report_lookup",
+        "sector_snapshot",
+        "stock_news",
+        "stock_snapshot",
+        "trace_lookup",
     ]
     args: dict[str, Any]
     depends_on: list[str] = []

@@ -6,14 +6,18 @@ direct 视为长度=1 的 compose 特例。无依赖并行，有依赖串行。
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from typing import Any
 
 import structlog
 
 from aistock_agent.schemas.chat_contract import Evidence, SkillCall
 from aistock_agent.skills.base import skill
+from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.industry_relation import industry_relation
+from aistock_agent.skills.market_snapshot import market_snapshot
 from aistock_agent.skills.report_lookup import report_lookup
+from aistock_agent.skills.sector_snapshot import sector_snapshot
 from aistock_agent.skills.stock_news import stock_news
 from aistock_agent.skills.stock_snapshot import stock_snapshot
 from aistock_agent.skills.trace_lookup import trace_lookup
@@ -23,11 +27,14 @@ logger = structlog.get_logger()
 
 # Skill 注册表：skill_name → 可调用对象
 SKILL_REGISTRY: dict[str, Any] = {
-    "report_lookup": report_lookup,
-    "stock_snapshot": stock_snapshot,
-    "stock_news": stock_news,
-    "trace_lookup": trace_lookup,
+    "evidence_resolver": evidence_resolver,
     "industry_relation": industry_relation,
+    "market_snapshot": market_snapshot,
+    "report_lookup": report_lookup,
+    "sector_snapshot": sector_snapshot,
+    "stock_news": stock_news,
+    "stock_snapshot": stock_snapshot,
+    "trace_lookup": trace_lookup,
 }
 
 
@@ -41,12 +48,12 @@ async def _execute_skill_safe(
     """
     skill_func = SKILL_REGISTRY.get(skill_call.skill_name)
     if skill_func is None:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         return Evidence(
             facts=[],
             sources=[],
-            as_of=datetime.now(timezone.utc),
+            as_of=datetime.now(UTC),
             degraded=True,
             degraded_reason=f"skill not registered: {skill_call.skill_name}",
             skill_name=skill_call.skill_name,
@@ -56,7 +63,7 @@ async def _execute_skill_safe(
     # （@skill 内部已处理异常，外层 try 不会触发）
     try:
         return await skill_func(skill_call.args, goal)
-    except Exception as exc:
+    except Exception:
         # 走到这里说明 SKILL_REGISTRY 注册的是裸函数（未装饰）
         # 用 @skill 临时包装后重试
         decorated = skill(skill_func)

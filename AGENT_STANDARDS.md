@@ -1206,7 +1206,7 @@ class Settings(BaseSettings):
 - `cors_origins`：用 `Annotated[list[str], NoDecode]` + `@field_validator(mode="before")`
   支持逗号分隔和 JSON 数组两种格式。
 - `tavily_api_keys`：多 key 池，`get_tavily_key()` 随机选取，支持多成员共享额度。
-- `log_level`：大小写不敏感，`_parse_level` 无效值回退 INFO。
+- `log_level`：大小写不敏感（config.py 的 `@field_validator(mode="before")` 强制转大写，防御 `LOG_LEVEL=info` 等小写环境变量覆盖）；`_parse_level` 无效值回退 INFO。
 
 ### 模块级单例
 
