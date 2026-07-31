@@ -93,6 +93,32 @@ def test_chat_message_returns_advisor_trace_none_when_enabled(
     assert data["advisor_trace"] is None
 
 
+def test_chat_message_clarification_when_enabled(client, chat_enabled):
+    """开关开启时，/chat/message 澄清路径返回澄清文本。"""
+    async def mock_ainvoke(state, config=None):
+        return {
+            "final_response": "请提供 6 位股票代码后重试。",
+            "insight": None,
+            "trace": None,
+        }
+
+    with patch("aistock_agent.api.routes.compile_chat_graph") as mock_compile:
+        mock_graph = mock_compile.return_value
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.aget_state = _mock_aget_state
+
+        response = client.post(
+            "/api/agent/chat/message",
+            json={"message": "茅台最近新闻"},
+            headers={"X-Internal-Token": settings.internal_api_token},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["content"] == "请提供 6 位股票代码后重试。"
+    assert data["advisor_trace"] is None
+
+
 @pytest.mark.asyncio
 async def test_stream_messages_filters_qa_router_node(chat_enabled):
     """_stream_messages 过滤 qa_router 节点的 on_chat_model_stream 事件。

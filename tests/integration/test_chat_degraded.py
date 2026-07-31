@@ -126,6 +126,48 @@ async def test_degraded_qa_router_fallback():
 
 
 @pytest.mark.asyncio
+async def test_clarification_when_stock_symbol_missing():
+    """澄清路径：quick LLM 失败 + 个股意图缺 6 位代码 → 写澄清，无 skill 调用、无二次 deep LLM。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+
+    # 澄清路径不应触发 deep LLM：若误触发，AssertionError 使最终断言失败
+    mock_deep = MagicMock()
+    mock_deep.with_structured_output = MagicMock(
+        return_value=MagicMock(
+            ainvoke=AsyncMock(
+                side_effect=AssertionError("clarification path must not call deep_think")
+            )
+        )
+    )
+
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_deep
+    ):
+        graph = compile_chat_graph(checkpointer=None)
+        state: QuestionState = {
+            "messages": [HumanMessage(content="茅台最近新闻")],
+            "goal": None,
+            "plan": "direct",
+            "skill_calls": [],
+            "evidences": [],
+            "insight": None,
+            "final_response": "",
+            "trace": None,
+            "clarification": None,
+        }
+        result = await graph.ainvoke(state)
+
+    assert result["skill_calls"] == []
+    assert result["evidences"] == []
+    assert result["final_response"] == "请提供 6 位股票代码后重试。"
+
+
+@pytest.mark.asyncio
 async def test_degraded_synth_failure_returns_low_confidence():
     """第 2 层：synth_answer LLM 失败 → 降级 validate + 拼接 facts + low。"""
     from aistock_agent.graph.nodes.qa_router import QARouterOutput
