@@ -325,10 +325,17 @@ async def load_validated_trace(
         logger.warning("load_validated_trace_bad_date", date_str=date_str)
         return None
 
-    client = NodeApiClient()
-    read_result = await client.get_review_analysis_report(report_date)
+    try:
+        client = NodeApiClient()
+        read_result = await client.get_review_analysis_report(report_date)
+    except Exception as exc:
+        logger.warning(
+            "load_validated_trace_read_failed",
+            date_str=date_str,
+            err=str(exc),
+        )
+        return None
 
-    # 检查 status 和 report（ReviewReportReadResult 无 ok/content 字段）
     if read_result.status != "found" or not isinstance(read_result.report, dict):
         logger.info(
             "load_validated_trace_not_found",
@@ -337,17 +344,34 @@ async def load_validated_trace(
         )
         return None
 
-    # 使用 report 字段代替 content
-    content = read_result.report
-    market_trace = content.get("market_trace") or {}
+    report = read_result.report
+    if report.get("status") != "completed":
+        logger.info("load_validated_trace_not_completed", date_str=date_str)
+        return None
+    content = report.get("content")
+    if not isinstance(content, dict):
+        logger.warning("load_validated_trace_invalid_content", date_str=date_str)
+        return None
+
+    market_trace = content.get("market_trace")
+    if not isinstance(market_trace, dict):
+        logger.warning("load_validated_trace_invalid_market_trace", date_str=date_str)
+        return None
     snapshot_data = market_trace.get("snapshot")
     trace_data = market_trace.get("trace")
-    if not snapshot_data or not trace_data:
+    if not isinstance(snapshot_data, dict) or not isinstance(trace_data, dict):
         return None
 
     try:
         snapshot = MarketTraceSnapshot.model_validate(snapshot_data)
         trace = MarketTraceResult.model_validate(trace_data)
+        if snapshot.trade_date != date_str:
+            logger.warning(
+                "load_validated_trace_date_mismatch",
+                date_str=date_str,
+                snapshot_date=snapshot.trade_date,
+            )
+            return None
         validate_trace_against_snapshot(trace, snapshot)
         return snapshot, trace
     except Exception as exc:

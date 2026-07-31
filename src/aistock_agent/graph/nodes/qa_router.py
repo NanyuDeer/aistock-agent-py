@@ -24,7 +24,8 @@ logger = structlog.get_logger()
 SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
 
 可用 Skills：
-- report_lookup：读取已持久化的晨报/复盘报告。入参 {report_type: "morning"|"review", date: "YYYY-MM-DD"}
+- report_lookup：读取已持久化的晨报/复盘报告。
+  入参 {report_type: "morning"|"review", date: "YYYY-MM-DD"}
 - stock_snapshot：实时个股行情。入参 {symbol: "6位代码"}
 - stock_news：个股财联社资讯。入参 {symbol: "6位代码", limit: 10}
 - trace_lookup：市场溯源（只读已生成的复盘，不重跑）。入参 {date: "YYYY-MM-DD", topic: str|null}
@@ -40,7 +41,36 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 4. symbols 必须是 6 位股票代码或 sha/sza 等指数代码
 5. time_range: realtime（实时行情）/ today（今日报告）/ recent（近几日）/ history
 6. evidence_resolver/sector_snapshot/market_snapshot 只读已有数据，不重跑市场 Trace
-7. 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
+7. 严格按下方 JSON 输出契约返回，只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
+
+JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
+{
+  "goal": {
+    "question": "原样复述用户问题",
+    "symbols": [],
+    "tag_codes": [],
+    "time_range": "today",
+    "intent": "report_lookup",
+    "answer_mode": null,
+    "constraints": {}
+  },
+  "plan": "direct",
+  "skill_calls": [
+    {
+      "skill_name": "stock_snapshot",
+      "args": {"symbol": "600519"},
+      "depends_on": []
+    }
+  ]
+}
+
+字段约束：
+- 顶层只能有 goal、plan、skill_calls 三个字段，不得省略 goal
+- goal.intent 只能是 evidence_resolver/industry_relation/market_snapshot/report_lookup/
+  sector_snapshot/stock_news/stock_snapshot/trace_lookup 之一
+- goal.question 必填；answer_mode 填 null（由下游推断）
+- 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
+- 禁止使用旧字段 skill、params（一律用 skill_name、args），禁止省略 goal
 """
 
 
