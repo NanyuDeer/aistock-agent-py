@@ -6,11 +6,11 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictInt
 
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import (
@@ -79,12 +79,58 @@ _MODE_PROMPTS: dict[str, str] = {
 }
 
 
+class SynthInsightOutput(BaseModel):
+    """synth_answer LLM 输出契约 — 内部 DTO（Task 2.2-b）。
+
+    LLM 只返回结论与 1 基证据序号 basis_indices，不再重建完整 Evidence。
+    完整 Evidence 由节点按序号从 state.evidences 映射生成（服务端权威）。
+    """
+
+    conclusion: str
+    # P1 严格契约：必填（无默认值）+ StrictInt。缺失 / str / float / bool
+    # 一律 ValidationError → 节点走既有安全降级；0/负数/越界/重复由
+    # _resolve_basis_indices 拒绝进入降级。
+    basis_indices: list[StrictInt]
+    confidence: Literal["high", "medium", "low"]
+    uncertainty: list[str] = []
+    answer_mode: Literal["predict", "trace", "validate"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SynthOutput(BaseModel):
     """synth_answer LLM 输出契约。"""
 
-    insight: Insight
+    insight: SynthInsightOutput
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _resolve_basis_indices(
+    basis_indices: list[int], evidences: list[Evidence]
+) -> tuple[list[Evidence] | None, str | None]:
+    """把 LLM 的 1 基 basis_indices 映射到 state.evidences。
+
+    - 合法：返回 (basis, None)，basis 直接引用服务端生成的 Evidence 对象
+    - 非法（0 / 负数 / 越界 / 重复）：返回 (None, reason)，由调用方走现有安全降级，
+      不得静默改写为全部证据
+    - 空证据：仅空序号合法（返回空数组），非空序号视为越界
+    """
+    if not evidences:
+        if basis_indices:
+            return None, "basis_indices given but no evidences collected"
+        return [], None
+
+    basis: list[Evidence] = []
+    seen: set[int] = set()
+    for idx in basis_indices:
+        if idx < 1 or idx > len(evidences):
+            return None, f"basis index out of range: {idx}"
+        if idx in seen:
+            return None, f"duplicate basis index: {idx}"
+        seen.add(idx)
+        basis.append(evidences[idx - 1])
+    return basis, None
 
 
 def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> str:
@@ -112,7 +158,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 {{
   "insight": {{
     "conclusion": "直接回答用户问题的结论",
-    "basis": [],
+    "basis_indices": [],
     "confidence": "low",
     "uncertainty": [],
     "answer_mode": "{mode}"
@@ -120,8 +166,10 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 }}
 
 字段约束：
-- 顶层只能有 insight 一个字段，禁止输出裸 conclusion、basis 等字段
-- basis 必须是完整 Evidence 对象列表，逐条对应上面的证据条目，禁止只写索引数字
+- 顶层只能有 insight 一个字段，禁止输出裸 conclusion、basis_indices 等字段
+- basis_indices 必须是 1 基整数列表，逐条对应上面的证据条目序号；没有证据时返回空数组
+- 禁止输出完整证据对象数组，禁止输出 skill/reason 等旧字段
+- 完整证据由服务端按序号引用生成，你只需要决定引用哪些证据条目
 - answer_mode 必须为 {mode}
 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
@@ -199,23 +247,33 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
         structured_llm = with_chat_structured_output(llm, SynthOutput)
         prompt = _build_prompt(goal, evidences, mode)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+        raw = output.insight
+
+        # LLM 只提供 1 基序号，正式 Evidence 由服务端从 state.evidences 映射
+        basis, basis_error = _resolve_basis_indices(raw.basis_indices, evidences)
+        if basis_error is not None:
+            logger.warning(
+                "synth_answer.basis_indices_invalid",
+                err=basis_error,
+                basis_indices=raw.basis_indices,
+            )
+            raise ValueError(basis_error)
+        assert basis is not None  # 合法时必有映射结果
 
         # 强制 answer_mode 与推断模式一致（防止 LLM 不遵守）
-        insight = output.insight
-        if insight.answer_mode != mode:
+        if raw.answer_mode != mode:
             logger.warning(
                 "synth_answer.mode_mismatch",
                 expected=mode,
-                actual=insight.answer_mode,
+                actual=raw.answer_mode,
             )
-            # 用模型重新构造以更新 answer_mode
-            insight = Insight(
-                conclusion=insight.conclusion,
-                basis=insight.basis,
-                confidence=insight.confidence,
-                uncertainty=insight.uncertainty,
-                answer_mode=mode,  # type: ignore[arg-type]
-            )
+        insight = Insight(
+            conclusion=raw.conclusion,
+            basis=basis,
+            confidence=raw.confidence,
+            uncertainty=raw.uncertainty,
+            answer_mode=mode,  # type: ignore[arg-type]
+        )
 
         final_response = insight.conclusion
         trace = AnswerTrace(
@@ -223,7 +281,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             plan=state.get("plan", "direct"),
             skill_calls=state.get("skill_calls", []),
             evidences=evidences,
-            actual_mode=mode,
+            actual_mode=mode,  # type: ignore[arg-type]
         )
 
         logger.info(
