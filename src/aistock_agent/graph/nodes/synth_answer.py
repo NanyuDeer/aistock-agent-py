@@ -19,7 +19,7 @@ from aistock_agent.schemas.chat_contract import (
     Insight,
     InsightGoal,
 )
-from aistock_agent.services.llm import get_deep_think
+from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import QuestionState
 
 logger = structlog.get_logger()
@@ -108,6 +108,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 
 请基于以上证据，按 {mode} 模式生成回答。
 输出 Insight 结构：conclusion（直接回答）、basis（引用的 Evidence 索引列表）、confidence（high/medium/low）、uncertainty（不确定项列表）、answer_mode（必须为 {mode}）。
+只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
 
@@ -157,7 +158,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
 
     try:
         llm = get_deep_think()
-        structured_llm = llm.with_structured_output(SynthOutput)
+        structured_llm = with_chat_structured_output(llm, SynthOutput)
         prompt = _build_prompt(goal, evidences, mode)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
 

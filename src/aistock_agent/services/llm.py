@@ -12,8 +12,9 @@
 import os
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from aistock_agent.config import settings
 from aistock_agent.observability.callback import get_default_callbacks
@@ -81,3 +82,16 @@ def get_deep_think() -> ChatOpenAI:
         max_tokens=settings.deep_think_max_tokens,  # type: ignore[call-arg]
         callbacks=_get_observability_callbacks(),
     )
+
+
+def with_chat_structured_output(
+    llm: ChatOpenAI,
+    schema: type[BaseModel],
+) -> Runnable:
+    """CHAT 链路专用结构化输出：固定 json_mode，避免 tool_choice。
+
+    DeepSeek thinking mode 不支持 tool_choice（报错 "Thinking mode does not support
+    this tool_choice"），而 ChatOpenAI 默认 method="function_calling" 会生成 tool_choice。
+    CHAT 节点（qa_router / synth_answer）必须走 json_mode 绕开该限制。
+    """
+    return llm.with_structured_output(schema, method="json_mode")

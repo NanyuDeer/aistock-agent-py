@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
-from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.message import extract_last_human_message
 
@@ -39,6 +39,7 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 4. symbols 必须是 6 位股票代码或 sha/sza 等指数代码
 5. time_range: realtime（实时行情）/ today（今日报告）/ recent（近几日）/ history
 6. evidence_resolver/sector_snapshot/market_snapshot 只读已有数据，不重跑市场 Trace
+7. 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
 
@@ -116,7 +117,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
 
     try:
         llm = get_quick_think()
-        structured_llm = llm.with_structured_output(QARouterOutput)
+        structured_llm = with_chat_structured_output(llm, QARouterOutput)
         # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
         llm_messages = [HumanMessage(content=SYSTEM_PROMPT)] + list(messages)
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
