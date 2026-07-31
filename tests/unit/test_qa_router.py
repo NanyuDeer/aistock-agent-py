@@ -3,8 +3,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 
 from aistock_agent.graph.nodes.qa_router import (
+    SYSTEM_PROMPT,
     QARouterOutput,
     qa_router_node,
     route_by_keyword_fallback,
@@ -83,7 +85,9 @@ async def test_qa_router_llm_success_direct():
         skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
     )
     mock_llm = MagicMock()
-    mock_llm.with_structured_output = MagicMock(return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output)))
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
     with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
         result = await qa_router_node(_state("茅台现在多少钱"))
     assert result["plan"] == "direct"
@@ -163,3 +167,56 @@ def test_keyword_fallback_industry_keeps_keyword_list() -> None:
     call = route_by_keyword_fallback("白酒板块上下游")
     assert call is not None
     assert call.args["keywords"] == ["白酒板块上下游"]
+
+
+def test_system_prompt_declares_full_json_contract() -> None:
+    """Prompt 声明完整 JSON 契约并明确禁止旧字段 skill/params。"""
+    assert '"goal"' in SYSTEM_PROMPT
+    assert '"plan"' in SYSTEM_PROMPT
+    assert '"skill_calls"' in SYSTEM_PROMPT
+    assert '"skill_name"' in SYSTEM_PROMPT
+    assert '"args"' in SYSTEM_PROMPT
+    assert '"depends_on"' in SYSTEM_PROMPT
+    assert "禁止使用旧字段 skill、params" in SYSTEM_PROMPT
+    assert "不得省略 goal" in SYSTEM_PROMPT
+
+
+def test_qarouter_output_rejects_legacy_top_level_skill_params() -> None:
+    """生产旧形状（顶层 skill/params、缺 goal）被 QARouterOutput 严格拒绝。"""
+    legacy_payload = {
+        "skill": "stock_snapshot",
+        "params": {"symbol": "600519"},
+        "plan": "direct",
+    }
+    with pytest.raises(ValidationError):
+        QARouterOutput.model_validate(legacy_payload)
+
+
+def test_qarouter_output_rejects_legacy_skill_call_fields() -> None:
+    """skill_calls 内使用旧字段 skill/params 同样被严格拒绝。"""
+    legacy_payload = {
+        "goal": InsightGoal(question="茅台现在多少钱", intent="stock_snapshot"),
+        "plan": "direct",
+        "skill_calls": [{"skill": "stock_snapshot", "params": {"symbol": "600519"}}],
+    }
+    with pytest.raises(ValidationError):
+        QARouterOutput.model_validate(legacy_payload)
+
+
+@pytest.mark.asyncio
+async def test_qa_router_parse_error_still_falls_back_safely() -> None:
+    """真实解析异常（Pydantic ValidationError）→ 关键词兜底，不中断图执行。"""
+
+    def _raise_parse_error(*args, **kwargs):
+        # 模拟 json_mode 对非契约输出的真实校验失败
+        QARouterOutput.model_validate({"plan": "direct"})  # 缺 goal/skill_calls
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=_raise_parse_error))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("今天晨报说了什么"))
+    assert result["plan"] == "direct"
+    assert result["skill_calls"][0].skill_name == "report_lookup"
+    assert result["goal"].constraints.get("router_fallback") == "true"
