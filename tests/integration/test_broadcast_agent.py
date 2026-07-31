@@ -9,6 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from aistock_agent.agents.workers.broadcast import run
+from aistock_agent.prompts.workers.broadcast import EVENING_BROADCAST_ANALYST_PROMPT
 
 _GET_DEEP_THINK = "aistock_agent.agents.workers.broadcast.get_deep_think"
 _NODE_API = "aistock_agent.agents.workers.broadcast.node_api"
@@ -19,6 +20,13 @@ def _make_mock_llm(response_content: str) -> MagicMock:
     mock_llm = MagicMock()
     mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=response_content))
     return mock_llm
+
+
+def test_evening_prompt_forbids_morning_language_and_requires_fixed_disclaimer():
+    """收盘播报必须排除盘前语境，并以标准投资风险提示结束。"""
+    assert "早上好" in EVENING_BROADCAST_ANALYST_PROMPT
+    assert "隔夜外围" in EVENING_BROADCAST_ANALYST_PROMPT
+    assert "仅供参考，不构成投资建议" in EVENING_BROADCAST_ANALYST_PROMPT
 
 
 @pytest.mark.asyncio
