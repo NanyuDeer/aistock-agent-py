@@ -9,9 +9,9 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
-from langgraph.graph.state import CompiledStateGraph
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from langgraph.graph.state import CompiledStateGraph
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.api.deps import (
@@ -19,15 +19,15 @@ from aistock_agent.api.deps import (
     build_initial_state,
     verify_internal_token,
 )
-from aistock_agent.graph.chat_builder import compile_chat_graph
-from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
-from aistock_agent.schemas.qa_api import QARequest
-from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.config import settings
 from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
+from aistock_agent.graph.chat_builder import compile_chat_graph
+from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
+from aistock_agent.schemas.qa_api import QARequest
+from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.qa_briefing import (
     QaBriefingPrerequisiteError,
@@ -35,6 +35,7 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
@@ -862,6 +863,95 @@ async def run_qa_briefing(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.post("/trace/stock/trigger")
+async def trigger_stock_trace(
+    req: StockTraceTriggerRequest,
+    _: None = Depends(verify_internal_token),
+) -> StockTraceTriggerResponse:
+    """触发个股 Trace 分析（Node StockInfoPushService → 本路由 → alert.run → 持久化）
+
+    每窗口每 symbol 最多触发一次。
+    失败返回 degraded 而非 HTTP 错误 — Node relay 据此分类日志。
+    """
+    from aistock_agent.agents.workers import alert as alert_agent
+
+    _trace_logger = structlog.get_logger()
+
+    symbol = req.symbol
+    trace_id = req.trace_id or uuid4().hex
+    report_date = req.report_date or shanghai_today()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": f"分析 {symbol} 的异动情况"}],
+        "session_id": f"stock_trace_{trace_id}",
+        "user_id": None,
+        "favorites": [],
+        "intent": "alert",
+        "symbol": symbol,
+        "tag_code": req.cycle,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "stock_trace",
+        "report_date": report_date.isoformat(),
+        "trace_id": trace_id,
+    }
+
+    _rd: date | None = report_date
+    if not isinstance(_rd, date):
+        _rd = date.fromisoformat(str(_rd))
+
+    try:
+        result = await alert_agent.run(state)
+
+        final_response = result.get("final_response", "")
+        if not final_response:
+            _trace_logger.warning("stock_trace_empty_response", symbol=symbol, trace_id=trace_id)
+            return StockTraceTriggerResponse(
+                trace_id=trace_id,
+                symbol=symbol,
+                report_date=_rd,
+                status="degraded",
+                degraded_reason="alert.run returned empty response",
+            )
+
+        trace_persisted = result.get("trace_persisted", False)
+        report_id = result.get("report_id")
+
+        if trace_persisted and report_id is not None:
+            _trace_logger.info(
+                "stock_trace_completed",
+                symbol=symbol, trace_id=trace_id, report_id=report_id,
+            )
+            return StockTraceTriggerResponse(
+                trace_id=trace_id,
+                symbol=symbol,
+                report_date=_rd,
+                status="completed",
+                report_id=report_id,
+            )
+        else:
+            _trace_logger.warning("stock_trace_save_failed", symbol=symbol, trace_id=trace_id)
+            return StockTraceTriggerResponse(
+                trace_id=trace_id,
+                symbol=symbol,
+                report_date=_rd,
+                status="degraded",
+                degraded_reason="failed to persist analysis report",
+            )
+    except Exception as e:
+        _trace_logger.error(
+            "stock_trace_trigger_failed",
+            symbol=symbol, trace_id=trace_id, error=str(e), exc_info=True,
+        )
+        return StockTraceTriggerResponse(
+            trace_id=trace_id,
+            symbol=symbol,
+            report_date=_rd if _rd is not None else shanghai_today(),
+            status="degraded",
+            degraded_reason=str(e),
+        )
+
+
 @router.get("/briefing/alert")
 async def alert_briefing(
     symbol: str,
@@ -1069,7 +1159,10 @@ async def trigger_review_quick(
             trace_id=trace_id,
         )
         elapsed = round(time.time() - start, 2)
-        logger.info("manual_trigger_review_quick_done", status=result.status, elapsed=elapsed, trace_id=trace_id)
+        logger.info(
+            "manual_trigger_review_quick_done",
+            status=result.status, elapsed=elapsed, trace_id=trace_id,
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1079,7 +1172,10 @@ async def trigger_review_quick(
             "markdown_preview": result.markdown[:200] if result.markdown else "",
         }
     except Exception as e:
-        logger.error("manual_trigger_review_quick_failed", error=str(e), exc_info=True, trace_id=trace_id)
+        logger.error(
+            "manual_trigger_review_quick_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
         raise HTTPException(status_code=502, detail=f"review_quick trigger failed: {e}")
 
 
@@ -1106,7 +1202,10 @@ async def trigger_review_full(
             trace_id=trace_id,
         )
         elapsed = round(time.time() - start, 2)
-        logger.info("manual_trigger_review_full_done", status=result.status, elapsed=elapsed, trace_id=trace_id)
+        logger.info(
+            "manual_trigger_review_full_done",
+            status=result.status, elapsed=elapsed, trace_id=trace_id,
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1116,7 +1215,10 @@ async def trigger_review_full(
             "markdown_preview": result.markdown[:200] if result.markdown else "",
         }
     except Exception as e:
-        logger.error("manual_trigger_review_full_failed", error=str(e), exc_info=True, trace_id=trace_id)
+        logger.error(
+            "manual_trigger_review_full_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
         raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
 
 
@@ -1165,20 +1267,29 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
                         else []
                     )
                     for ev in evidences:
-                        yield f"event: evidence\ndata: {json.dumps(ev.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                        yield (
+                            f"event: evidence\ndata: "
+                            f"{json.dumps(ev.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                        )
 
                 # synth_answer 流式 token
                 elif event_name == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        yield f"event: token\ndata: {json.dumps({'delta': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield (
+                            f"event: token\ndata: "
+                            f"{json.dumps({'delta': chunk.content}, ensure_ascii=False)}\n\n"
+                        )
 
                 # synth_answer 完成时推送 insight
                 elif event_name == "on_chain_end" and node_name == "synth_answer":
                     output = event.get("data", {}).get("output", {})
                     if isinstance(output, dict) and output.get("insight"):
                         insight = output["insight"]
-                        yield f"event: insight\ndata: {json.dumps(insight.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                        yield (
+                            f"event: insight\ndata: "
+                            f"{json.dumps(insight.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                        )
 
             yield "event: done\ndata: {}\n\n"
         except Exception as exc:
