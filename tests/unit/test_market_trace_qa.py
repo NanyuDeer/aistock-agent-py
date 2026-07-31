@@ -19,6 +19,7 @@ from aistock_agent.schemas.market_trace import (
     MarketTraceSnapshot,
     SourceRecord,
 )
+from aistock_agent.agents.workers.review import validate_snapshot_discovery
 from aistock_agent.services import market_trace_qa as market_trace_qa_service
 from aistock_agent.services.data_client import ReviewReportReadResult
 from aistock_agent.services.market_trace_qa import (
@@ -251,6 +252,29 @@ def _make_llm_response(
 # ============================================================================
 # 测试用例
 # ============================================================================
+
+
+def test_validation_accepts_jsonb_reordered_sources() -> None:
+    """JSONB source-map insertion order must not change discovery validity."""
+    reordered = dict(reversed(list(SNAPSHOT.sources.items())))
+    persisted = SNAPSHOT.model_copy(update={"sources": reordered})
+
+    validate_snapshot_discovery(persisted)
+
+
+def test_validation_rejects_duplicate_diagnostic_evidence_ids() -> None:
+    """Diagnostics must remain a duplicate-free reference set."""
+    diagnostic = SNAPSHOT.phenomenon_discovery.diagnostics[0]
+    duplicated = diagnostic.model_copy(
+        update={"evidence_ids": [diagnostic.evidence_ids[0], diagnostic.evidence_ids[0]]}
+    )
+    discovery = SNAPSHOT.phenomenon_discovery.model_copy(
+        update={"diagnostics": [duplicated, *SNAPSHOT.phenomenon_discovery.diagnostics[1:]]}
+    )
+    persisted = SNAPSHOT.model_copy(update={"phenomenon_discovery": discovery})
+
+    with pytest.raises(ValueError, match="duplicate diagnostic evidence ID"):
+        validate_snapshot_discovery(persisted)
 
 
 @pytest.mark.asyncio

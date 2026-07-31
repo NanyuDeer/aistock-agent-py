@@ -11,16 +11,15 @@ build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推�
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Literal
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
-from aistock_agent.utils.date import shanghai_today
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
+    DetectedPhenomenon,
     MarketTraceResult,
     MarketTraceSnapshot,
     PhenomenonDiscoveryResult,
@@ -37,6 +36,7 @@ from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.state.schema import AgentState
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -172,6 +172,44 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
             )
 
 
+def _normalize_discovery_for_comparison(
+    discovery: PhenomenonDiscoveryResult,
+) -> tuple[object, ...]:
+    """Canonicalize discovery references that JSONB may reorder."""
+
+    def normalize_phenomenon(
+        phenomenon: DetectedPhenomenon | None,
+    ) -> tuple[object, ...] | None:
+        if phenomenon is None:
+            return None
+        return (
+            phenomenon.kind,
+            phenomenon.summary,
+            tuple(sorted(phenomenon.fact_ids)),
+            tuple(phenomenon.tags),
+            phenomenon.severity,
+        )
+
+    diagnostics: list[tuple[str, bool, tuple[str, ...]]] = []
+    for diagnostic in discovery.diagnostics:
+        evidence_ids = diagnostic.evidence_ids
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError(f"duplicate diagnostic evidence ID: {diagnostic.rule}")
+        diagnostics.append((diagnostic.rule, diagnostic.matched, tuple(sorted(evidence_ids))))
+
+    return (
+        discovery.status,
+        normalize_phenomenon(discovery.primary),
+        tuple(normalize_phenomenon(item) for item in discovery.concurrent_phenomena),
+        (
+            discovery.data_readiness.market_data,
+            discovery.data_readiness.attribution_inputs,
+            discovery.data_readiness.causal_evidence,
+        ),
+        tuple(diagnostics),
+    )
+
+
 def validate_snapshot_discovery(snapshot: MarketTraceSnapshot) -> None:
     """重算冻结 discovery，并校验所有事实引用都是真实 market_fact。"""
     for source_id, record in snapshot.sources.items():
@@ -183,7 +221,9 @@ def validate_snapshot_discovery(snapshot: MarketTraceSnapshot) -> None:
         snapshot.captured_at,
         snapshot.missing_fields,
     )
-    if recomputed.model_dump(mode="json") != snapshot.phenomenon_discovery.model_dump(mode="json"):
+    if _normalize_discovery_for_comparison(
+        recomputed
+    ) != _normalize_discovery_for_comparison(snapshot.phenomenon_discovery):
         raise ValueError("snapshot phenomenon discovery does not match recomputation")
     phenomena = []
     if snapshot.phenomenon_discovery.primary is not None:
