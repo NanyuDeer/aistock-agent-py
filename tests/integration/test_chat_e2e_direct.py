@@ -1,6 +1,5 @@
 # tests/integration/test_chat_e2e_direct.py
 """CHAT QA 链路端到端测试 — direct 路径，5 种 intent 各 1 个用例。"""
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,21 +7,10 @@ from langchain_core.messages import HumanMessage
 
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.schemas.chat_contract import (
-    Evidence,
-    Insight,
     InsightGoal,
     SkillCall,
 )
 from aistock_agent.state.chat_schema import QuestionState
-
-
-def _evidence(skill: str, facts: list[str]) -> Evidence:
-    return Evidence(
-        facts=facts,
-        sources=[],
-        as_of=datetime.now(timezone.utc),
-        skill_name=skill,
-    )
 
 
 def _mock_llm_output(
@@ -36,7 +24,7 @@ def _mock_llm_output(
 ):
     """构造 mock 的 LLM 输出。"""
     from aistock_agent.graph.nodes.qa_router import QARouterOutput
-    from aistock_agent.graph.nodes.synth_answer import SynthOutput
+    from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
 
     goal = InsightGoal(question="test", intent=intent, **(goal_kwargs or {}))
     qa_output = QARouterOutput(
@@ -45,9 +33,9 @@ def _mock_llm_output(
         skill_calls=[SkillCall(skill_name=skill, args=skill_args or {})],
     )
     synth_output = SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion=conclusion,
-            basis=[_evidence(skill, ["fact1"])],
+            basis_indices=[1],
             confidence="medium",
             uncertainty=[],
             answer_mode=mode,
@@ -381,6 +369,8 @@ async def test_e2e_trace_lookup():
 
     assert result["insight"] is not None
     assert result["insight"].answer_mode == "trace"
+    # basis 由服务端从 state.evidences 映射，与 skill_executor 产出完全一致
+    assert result["insight"].basis == result["evidences"]
 
 
 @pytest.mark.asyncio

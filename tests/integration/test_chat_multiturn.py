@@ -6,7 +6,6 @@
 2. 上下文延续：qa_router 第二轮能读到第一轮的 HumanMessage + AIMessage
 3. synth_answer 追加 AIMessage 到 messages，形成完整对话历史
 """
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,23 +13,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.graph.nodes.qa_router import QARouterOutput
-from aistock_agent.graph.nodes.synth_answer import SynthOutput
+from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
 from aistock_agent.schemas.chat_contract import (
-    Evidence,
-    Insight,
     InsightGoal,
     SkillCall,
 )
 from aistock_agent.state.chat_schema import QuestionState
-
-
-def _evidence(skill: str, facts: list[str]) -> Evidence:
-    return Evidence(
-        facts=facts,
-        sources=[],
-        as_of=datetime.now(timezone.utc),
-        skill_name=skill,
-    )
 
 
 def _qa_output(intent: str, skill: str, args: dict | None = None, **goal_kwargs) -> QARouterOutput:
@@ -43,9 +31,9 @@ def _qa_output(intent: str, skill: str, args: dict | None = None, **goal_kwargs)
 
 def _synth_output(conclusion: str, mode: str = "validate") -> SynthOutput:
     return SynthOutput(
-        insight=Insight(
+        insight=SynthInsightOutput(
             conclusion=conclusion,
-            basis=[_evidence("test", ["fact"])],
+            basis_indices=[1],
             confidence="medium",
             uncertainty=[],
             answer_mode=mode,
