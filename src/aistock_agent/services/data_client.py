@@ -381,10 +381,11 @@ class NodeApiClient:
             payload["error_message"] = error_message
 
         result = await self.post("/internal/analysis-reports", payload)
-        # 同步写入内存缓存（前端报告列表查询用）
+        # 同步写入内存缓存（前端报告列表查询用）。缓存值必须是 content，
+        # 不能是包含 report_type/status 的请求包装层。
         try:
             from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
-            set_report(report_type, report_date, payload)
+            set_report(report_type, report_date, content)
         except Exception:
             pass
         if result:
