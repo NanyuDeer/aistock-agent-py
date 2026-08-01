@@ -2,6 +2,15 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-08-01 — wind_leader prompt 强制 details 结构化 markdown
+
+**开发者**: Aria
+
+### 改进
+- `src/aistock_agent/prompts/workers/wind_leader.py`：`WIND_LEADER_ANALYST_PROMPT` 新增 details 章节结构约束（风口概览/重点板块分析/龙头股推荐/风险提示/关注建议），强制使用 `##` 和 `###` 标题（禁止 `#` 一级和 `####` 四级标题），禁止 emoji/序号前缀/JSON 代码块/字段名/调试说明。配合前端 `agent-report.vue` 改用 mp-html 渲染 markdown，修复 LLM 偶发返回纯文本/段落结构导致 5 个结构化 Card 全不渲染的空页面问题
+
+---
+
 ## [main] 2026-08-01 — alert SSE 流结构化 result 事件 + 持久化到 DB
 
 **开发者**: Aria
