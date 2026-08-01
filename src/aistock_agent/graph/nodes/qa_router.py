@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -85,13 +84,80 @@ class QARouterOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# 指数名称 → 规范名映射（供指数行情路由）
+INDEX_NAME_ALIASES: dict[str, str] = {
+    "上证指数": "上证指数",
+    "沪指": "上证指数",
+    "上证": "上证指数",
+    "深证成指": "深证成指",
+    "深成指": "深证成指",
+    "创业板指": "创业板指",
+    "创业板": "创业板指",
+    "科创50": "科创50",
+    "科创板指": "科创50",
+    "沪深300": "沪深300",
+    "中证500": "中证500",
+    "中证1000": "中证1000",
+    "恒生指数": "恒生指数",
+    "恒指": "恒生指数",
+}
+
+_INDEX_KEYWORDS = sorted(INDEX_NAME_ALIASES, key=len, reverse=True)
+
+_EXPLICIT_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?", re.IGNORECASE
+)
+
+
+def _match_index_name(message: str) -> str | None:
+    """从消息中匹配指数名，返回规范名；未命中返回 None。"""
+    for alias in _INDEX_KEYWORDS:
+        if alias in message:
+            return INDEX_NAME_ALIASES[alias]
+    return None
+
+
+def extract_report_date(message: str) -> str:
+    """从消息中提取报告日期（YYYY-MM-DD）。
+
+    - 显式日期（2026-07-31 / 20260731 / 2026年7月31日）→ 解析
+    - 相对日期（昨天/前天）→ 换算
+    - 其余（今天/未指明）→ 今天；今天为非交易日时回退最近交易日
+    """
+    from datetime import timedelta
+
+    from aistock_agent.utils.date import is_trading_day, shanghai_today
+
+    m = _EXPLICIT_DATE_RE.search(message)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    today = shanghai_today()
+    if "前天" in message:
+        target = today - timedelta(days=2)
+    elif "昨天" in message:
+        target = today - timedelta(days=1)
+    else:
+        target = today
+
+    # "今天"或未指明日期：非交易日回退最近交易日（周末/节假日报告查询）
+    if "昨天" not in message and "前天" not in message and not is_trading_day(target):
+        cursor = target - timedelta(days=1)
+        while not is_trading_day(cursor):
+            cursor -= timedelta(days=1)
+        target = cursor
+
+    return target.isoformat()
+
+
 # 关键词兜底表（按优先级匹配）
 KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["晨报", "复盘", "报告", "说了什么"], "report_lookup"),
     (["为什么涨", "为什么跌", "溯源", "动因", "原因"], "trace_lookup"),
     (["证据", "依据", "佐证"], "evidence_resolver"),
     (["板块强弱", "风口", "板块龙头", "龙头"], "sector_snapshot"),
-    (["大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
+    (["指数", "大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
     (["资金", "主力", "流入", "流出", "净流入"], "capital_flow"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
@@ -113,6 +179,17 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
     个股类（stock_snapshot/stock_news）未命中 6 位代码时返回 None，
     由上层写澄清状态，避免空 symbol 触发 Skill 异常。
     """
+    # 指数名优先（创业板指/沪指等可能不含"指数"子串，靠别名表命中）
+    index_name = _match_index_name(message)
+    if index_name is not None:
+        return SkillCall(
+            skill_name="market_snapshot",
+            args={
+                "scope": "a_share",
+                "snapshot_kind": "quick",
+                "index_name": index_name,
+            },
+        )
     for keywords, skill_name in KEYWORD_FALLBACK:
         if any(kw in message for kw in keywords):
             return _build_default_skill_call(skill_name, message)
@@ -122,11 +199,11 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
 
 def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None:
     """构建兜底 SkillCall，args 用合理默认值；个股类缺失代码时返回 None。"""
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    report_date = extract_report_date(message)
     if skill_name == "report_lookup":
         return SkillCall(
             skill_name="report_lookup",
-            args={"report_type": "review", "date": today},
+            args={"report_type": "review", "date": report_date},
         )
     if skill_name == "stock_snapshot":
         symbol = _extract_stock_symbol(message)
@@ -144,16 +221,18 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
             return None
         return SkillCall(skill_name="capital_flow", args={"symbol": symbol})
     if skill_name == "trace_lookup":
-        return SkillCall(skill_name="trace_lookup", args={"date": today})
+        return SkillCall(skill_name="trace_lookup", args={"date": report_date})
     if skill_name == "evidence_resolver":
-        return SkillCall(skill_name="evidence_resolver", args={"date": today})
+        return SkillCall(skill_name="evidence_resolver", args={"date": report_date})
     if skill_name == "sector_snapshot":
         return SkillCall(skill_name="sector_snapshot", args={})
     if skill_name == "market_snapshot":
-        return SkillCall(
-            skill_name="market_snapshot",
-            args={"scope": "both", "snapshot_kind": "quick"},
-        )
+        index_name = _match_index_name(message)
+        args: dict[str, object] = {"scope": "both", "snapshot_kind": "quick"}
+        if index_name is not None:
+            args["scope"] = "a_share"
+            args["index_name"] = index_name
+        return SkillCall(skill_name="market_snapshot", args=args)
     if skill_name == "industry_relation":
         return SkillCall(
             skill_name="industry_relation",

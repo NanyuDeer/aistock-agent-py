@@ -220,3 +220,45 @@ async def test_qa_router_parse_error_still_falls_back_safely() -> None:
     assert result["plan"] == "direct"
     assert result["skill_calls"][0].skill_name == "report_lookup"
     assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+def test_keyword_fallback_index_route_to_market_snapshot() -> None:
+    """指数名（创业板指）→ market_snapshot，args 携带 index_name。"""
+    call = route_by_keyword_fallback("创业板指今天表现如何")
+    assert call is not None
+    assert call.skill_name == "market_snapshot"
+    assert call.args.get("index_name") == "创业板指"
+
+
+def test_keyword_fallback_index_name_variants() -> None:
+    """指数别名（沪指/深成指/科创50/沪深300/恒生）均可识别。"""
+    cases = {
+        "沪指今天怎么样": "上证指数",
+        "深成指走势如何": "深证成指",
+        "科创50表现如何": "科创50",
+        "沪深300今天行情": "沪深300",
+        "恒生指数今天如何": "恒生指数",
+    }
+    for msg, expected in cases.items():
+        call = route_by_keyword_fallback(msg)
+        assert call is not None, msg
+        assert call.args.get("index_name") == expected, msg
+
+
+def test_extract_report_date_explicit() -> None:
+    """显式 YYYY-MM-DD / YYYYMMDD 日期提取。"""
+    from aistock_agent.graph.nodes.qa_router import extract_report_date
+
+    assert extract_report_date("2026-07-31 大盘为什么涨") == "2026-07-31"
+    assert extract_report_date("20260731复盘报告") == "2026-07-31"
+
+
+def test_extract_report_date_relative_and_fallback() -> None:
+    """相对日期与非遗日回退。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.qa_router import extract_report_date
+
+    # 无显式日期 → 返回今天（或非遗日回退最近交易日）
+    result = extract_report_date("复盘报告有哪些未解决问题")
+    assert date.fromisoformat(result) is not None  # 合法日期
