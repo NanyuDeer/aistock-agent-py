@@ -174,7 +174,12 @@ async def test_degraded_synth_failure_returns_low_confidence():
     qa_output = QARouterOutput(
         goal=InsightGoal(question="今天晨报", intent="report_lookup"),
         plan="direct",
-        skill_calls=[SkillCall(skill_name="report_lookup", args={"report_type": "review", "date": "2026-07-28"})],
+        skill_calls=[
+            SkillCall(
+                skill_name="report_lookup",
+                args={"report_type": "review", "date": "2026-07-28"},
+            )
+        ],
     )
 
     mock_quick = MagicMock()
