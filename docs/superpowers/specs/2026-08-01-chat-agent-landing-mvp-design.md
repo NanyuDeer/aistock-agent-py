@@ -76,7 +76,27 @@ V1  部署验证            [运维]        代码更新 + Nginx WS 转发 + 流
 - 新增 `resolve_symbol(中文名) -> 代码 | None`，调 Node M4 端点（复用 stocks 表，已有"中际旭创→300308"先例）
 - 接入 `_build_default_skill_call` 和 LLM 成功路径的后处理
 
-### 3.4 后处理层（D27）—— LLM 成功路径参数确定性校验
+### 3.4 闸门全景与优先级（D33 + D25/D26）
+
+qa_router 按确定性短路到 LLM 模糊区排序（D33 完整优先级链）：
+
+```
+闸门 0  敏感合规（D29）：买/卖/建议/重仓/保本 → 合规话术，短路
+闸门 0.5 寒暄/能力询问（D32）：你好/在吗/你能做什么 → 固定话术，短路
+闸门 1  指数名（D26，现状已有 INDEX_NAME_ALIASES）→ market_snapshot 短路
+闸门 2  标的解析（D36）：名称→代码 resolve_symbol → 失败才澄清
+闸门 3  主线/风险 compose（D26，现状已有 build_compose_plan）→ 组合取数短路
+闸门 4  业务维度预筛（D30）→【MVP 后置 P4，与多意图一起】
+        预测/溯源/验证 × 个股/板块/大盘 候选集 → LLM 确认
+        注：answer_mode 打通现状已有（synth_answer._infer_answer_mode）
+LLM    LLM 模糊区：goal/plan/skill_calls 结构化输出
+后处理  D27 确定性校验/补全
+```
+
+- 闸门 1/3 现状已实现于关键词兜底（`route_by_keyword_fallback` / `build_compose_plan`），M1 确认其**短路语义**（命中即不进 LLM），不新增实现
+- 闸门 4（D30 维度预筛）**不阻塞 MVP**：维度分类与 answer_mode 的打通已在 synth_answer 侧完成，qa_router 侧预筛随 D34 多子目标一起落地（P4）
+
+### 3.5 后处理层（D27）—— LLM 成功路径参数确定性校验
 
 新增 `_postprocess_skill_calls(output, message) -> QARouterOutput`，在 LLM 成功返回后调用（替换现有只做 direct 长度校验的逻辑）：
 
@@ -167,12 +187,15 @@ GET /internal/stock/resolve?name=茅台
 
 | 阶段 | 内容 | 决策来源 |
 |---|---|---|
-| P1 | 深度升级：escalate 节点 + stock/sector/hot_burst 3 worker + 图外切换 | D1-D7 |
-| P2 | 落库与多轮：user_id 透传 + chat_analysis 落库 + last_deep_report | D2/D11-D17/D38-D39 |
+| P1 | 深度升级：escalate 节点 + stock/sector/hot_burst 3 worker + 图外切换；WorkerHandle 协议（A 起步留 C 接口）；D31 统一出口的 deep 分支（worker final_response 回流 synth_answer 代码加工）；**D5 能力层 C 分级**（简单工具 quote/flow/news/leader/global/tavily 自动适配 skill，复合能力 market/sector/evidence/report/trace/industry 保持手写，共享点下沉数据源访问层）；**D4 复杂度判定**（qa_router 输出 `complexity: light/deep`，前端"深度分析"按钮 `force_deep=true` 补救） | D1-D7 / D31 / D5 / D4 |
+| P2 | 落库与多轮：user_id 透传 + chat_analysis 落库 + last_deep_report（D38 未登录不落库 / D39 双写解耦）；**D14 追问复用**（qa_router 注入 last_deep_report 摘要 → report_lookup 读 DB → Evidence → synth_answer，不加新节点） | D2/D11-D17/D38-D39 / D14 |
 | P3 | 前端展示：单对话 tab 收敛 + summary 卡片 + 执行细节面板 | D9/D19-D21 |
-| P4 | 多意图：goal→goals 多子目标，synth_answer 分节回答 | D34-D35 |
-| P5 | 能力补齐：compare_stocks / stock_history / trend_ranking | D40-D42 |
-| P6 | 退役清理：ai_advisor、market-trace-qa 入口、advisor_trace、市场复盘 tab | D8/D9/D10 |
+| P4 | 多意图 + 维度预筛：goal→goals 多子目标，synth_answer 分节回答；D30 闸门 4 维度预筛；**D35 预测维 MVP 降级提示**（"预测功能开发中，可先查看当前趋势分析"） | D30/D34-D35 |
+| P5 | 能力补齐：compare_stocks / stock_history / trend_ranking（D42 排行复用 trend/top） | D40-D42 |
+| P6 | 退役清理：ai_advisor（D8 report_lookup 升级后）、market-trace-qa 入口、advisor_trace、市场复盘 tab | D8/D9/D10 |
+| P7 | 缺口治理机制（D37）：能力型缺口 → general/Tavily 兜底 + 标记 `skill-requests.md`，驱动后续补 skill；确定性缺口（名称/BK）直接补 | D37 |
+| P8 | 对话层增强（D32 后续）：科普问答（"什么是市盈率"）→ general quick_think 节点 | D32 |
+| P9 | 输入/交互侧补充（6.15 待补缺口）：自选股联动 skill（favorites 消费）、语音输入容错、checkpointer 持久化后端（sqlite/redis，防重启丢会话）、纠错/否定处理、反馈入口 | 6.15 |
 
 ## 11. 决策索引（本设计引用）
 
@@ -180,8 +203,12 @@ GET /internal/stock/resolve?name=茅台
 |---|---|---|
 | D10 | 入口路由替代开关 | M5 |
 | D22-D24 | sector 板块代码本地解析 + 回落 skill | M2 |
+| D25/D26 | 三层路由结构 + 闸门混合策略（闸门 1/3 短路语义确认） | M1 |
 | D27 | qa_router 后处理层参数校验 | M1.4 |
 | D28 | 风险段强制拼接 | M3 |
 | D29 | 敏感合规闸门 | M1.1 |
+| D30 | 业务三维度分叉（answer_mode 打通现状已有；闸门 4 预筛后置） | M1 标注 + P4 |
 | D32 | 寒暄/能力询问固定话术 | M1.2 |
+| D33 | 闸门优先级（敏感 > 寒暄 > 指数 > 标的 > compose > LLM） | M1 |
 | D36 | 名称→代码解析（Node 端点 + Python resolve_symbol） | M1.3 + M4 |
+| D37 | 缺口治理机制 | P7 |
