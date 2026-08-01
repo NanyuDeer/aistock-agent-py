@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -21,7 +20,8 @@ from aistock_agent.utils.message import extract_last_human_message
 logger = structlog.get_logger()
 
 
-SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
+SYSTEM_PROMPT = (
+    """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
 
 可用 Skills：
 - report_lookup：读取已持久化的晨报/复盘报告。
@@ -34,6 +34,9 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 - sector_snapshot：板块强弱与风口龙头。入参 {tag_code: str}，无 tag_code 时自动读风口数据
 - market_snapshot：大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）
 - industry_relation：行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}
+
+指数行情：问"沪指/深证成指/创业板指/科创50/沪深300/中证500/中证1000/恒生指数"等指数时"""
+    """路由 market_snapshot（scope=a_share），并在 goal.constraints 写入 index_name
 
 规则：
 1. 只生成计划，不取数据，不下结论
@@ -73,6 +76,7 @@ JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
 - 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
 - 禁止使用旧字段 skill、params（一律用 skill_name、args），禁止省略 goal
 """
+)
 
 
 class QARouterOutput(BaseModel):
@@ -85,13 +89,86 @@ class QARouterOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# 指数名称 → 规范名映射（供指数行情路由）
+INDEX_NAME_ALIASES: dict[str, str] = {
+    "上证指数": "上证指数",
+    "沪指": "上证指数",
+    "上证": "上证指数",
+    "深证成指": "深证成指",
+    "深成指": "深证成指",
+    "创业板指": "创业板指",
+    "创业板": "创业板指",
+    "科创50": "科创50",
+    "科创板指": "科创50",
+    "沪深300": "沪深300",
+    "中证500": "中证500",
+    "中证1000": "中证1000",
+    "恒生指数": "恒生指数",
+    "恒指": "恒生指数",
+}
+
+_INDEX_KEYWORDS = sorted(INDEX_NAME_ALIASES, key=len, reverse=True)
+
+_EXPLICIT_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?", re.IGNORECASE
+)
+
+
+def _match_index_name(message: str) -> str | None:
+    """从消息中匹配指数名，返回规范名；未命中返回 None。"""
+    for alias in _INDEX_KEYWORDS:
+        if alias in message:
+            return INDEX_NAME_ALIASES[alias]
+    return None
+
+
+def extract_report_date(message: str) -> str:
+    """从消息中提取报告日期（YYYY-MM-DD）。
+
+    - 显式日期（2026-07-31 / 20260731 / 2026年7月31日）→ 解析
+    - 相对日期（昨天/前天）→ 换算
+    - 其余（今天/未指明）→ 今天；今天为非交易日时回退最近交易日
+    """
+    from datetime import timedelta
+
+    from aistock_agent.utils.date import is_trading_day, shanghai_today
+
+    # 紧凑格式 YYYYMMDD（无分隔符），与分隔符格式互斥，需在分隔符分支之前命中
+    compact = re.search(r"(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)", message)
+    if compact:
+        year, month, day = int(compact.group(1)), int(compact.group(2)), int(compact.group(3))
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    m = _EXPLICIT_DATE_RE.search(message)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    today = shanghai_today()
+    if "前天" in message:
+        target = today - timedelta(days=2)
+    elif "昨天" in message:
+        target = today - timedelta(days=1)
+    else:
+        target = today
+
+    # "今天"或未指明日期：非交易日回退最近交易日（周末/节假日报告查询）
+    if "昨天" not in message and "前天" not in message and not is_trading_day(target):
+        cursor = target - timedelta(days=1)
+        while not is_trading_day(cursor):
+            cursor -= timedelta(days=1)
+        target = cursor
+
+    return target.isoformat()
+
+
 # 关键词兜底表（按优先级匹配）
 KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["晨报", "复盘", "报告", "说了什么"], "report_lookup"),
     (["为什么涨", "为什么跌", "溯源", "动因", "原因"], "trace_lookup"),
     (["证据", "依据", "佐证"], "evidence_resolver"),
     (["板块强弱", "风口", "板块龙头", "龙头"], "sector_snapshot"),
-    (["大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
+    (["指数", "大盘", "市场概览", "外盘", "全球市场"], "market_snapshot"),
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
     (["资金", "主力", "流入", "流出", "净流入"], "capital_flow"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
@@ -113,6 +190,17 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
     个股类（stock_snapshot/stock_news）未命中 6 位代码时返回 None，
     由上层写澄清状态，避免空 symbol 触发 Skill 异常。
     """
+    # 指数名优先（创业板指/沪指等可能不含"指数"子串，靠别名表命中）
+    index_name = _match_index_name(message)
+    if index_name is not None:
+        return SkillCall(
+            skill_name="market_snapshot",
+            args={
+                "scope": "a_share",
+                "snapshot_kind": "quick",
+                "index_name": index_name,
+            },
+        )
     for keywords, skill_name in KEYWORD_FALLBACK:
         if any(kw in message for kw in keywords):
             return _build_default_skill_call(skill_name, message)
@@ -122,11 +210,11 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
 
 def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None:
     """构建兜底 SkillCall，args 用合理默认值；个股类缺失代码时返回 None。"""
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    report_date = extract_report_date(message)
     if skill_name == "report_lookup":
         return SkillCall(
             skill_name="report_lookup",
-            args={"report_type": "review", "date": today},
+            args={"report_type": "review", "date": report_date},
         )
     if skill_name == "stock_snapshot":
         symbol = _extract_stock_symbol(message)
@@ -144,22 +232,39 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
             return None
         return SkillCall(skill_name="capital_flow", args={"symbol": symbol})
     if skill_name == "trace_lookup":
-        return SkillCall(skill_name="trace_lookup", args={"date": today})
+        return SkillCall(skill_name="trace_lookup", args={"date": report_date})
     if skill_name == "evidence_resolver":
-        return SkillCall(skill_name="evidence_resolver", args={"date": today})
+        return SkillCall(skill_name="evidence_resolver", args={"date": report_date})
     if skill_name == "sector_snapshot":
         return SkillCall(skill_name="sector_snapshot", args={})
     if skill_name == "market_snapshot":
-        return SkillCall(
-            skill_name="market_snapshot",
-            args={"scope": "both", "snapshot_kind": "quick"},
-        )
+        index_name = _match_index_name(message)
+        args: dict[str, object] = {"scope": "both", "snapshot_kind": "quick"}
+        if index_name is not None:
+            args["scope"] = "a_share"
+            args["index_name"] = index_name
+        return SkillCall(skill_name="market_snapshot", args=args)
     if skill_name == "industry_relation":
         return SkillCall(
             skill_name="industry_relation",
             args={"keywords": [message.strip()]},
         )
     return SkillCall(skill_name="report_lookup", args={})
+
+
+def build_compose_plan(message: str) -> list[SkillCall] | None:
+    """综合问题 → 多 Skill 组合计划；未命中返回 None。
+    命中场景：市场主线 / 风险提示 → market_snapshot + sector_snapshot 组合取数，
+    给 synth_answer 更充分证据。不命中保持单 Skill 兜底。
+    """
+    is_mainline = ("主线" in message) or ("市场主线" in message)
+    is_risk = ("风险提示" in message) or ("风险" in message and "风险提示" in message)
+    if not (is_mainline or is_risk):
+        return None
+    return [
+        SkillCall(skill_name="market_snapshot", args={"scope": "both", "snapshot_kind": "quick"}),
+        SkillCall(skill_name="sector_snapshot", args={}),
+    ]
 
 
 async def qa_router_node(state: QuestionState) -> dict[str, Any]:
@@ -203,6 +308,21 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
 
     except Exception as exc:
         logger.warning("qa_router.llm_failed", err=str(exc), exc_info=True)
+        # 综合问题优先 compose，避免落入单 Skill 兜底导致回答稀疏
+        compose_plan = build_compose_plan(message)
+        if compose_plan is not None:
+            goal = InsightGoal(
+                question=message,
+                intent="market_snapshot",
+                constraints={"router_fallback": "true"},
+            )
+            logger.info("qa_router.fallback.compose", skills=[c.skill_name for c in compose_plan])
+            metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+            return {
+                "goal": goal,
+                "plan": "compose",
+                "skill_calls": compose_plan,
+            }
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
         # 个股意图但缺失 6 位代码：不执行空参 Skill，写澄清状态让 synth_answer 短路
@@ -237,6 +357,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             intent=intent_map[fallback_call.skill_name],  # type: ignore[index]
             constraints={"router_fallback": "true"},
         )
+        # 指数行情兜底：SkillCall 携带 index_name 时透传到 goal.constraints（spec 3a 消费者）
+        if (
+            fallback_call.skill_name == "market_snapshot"
+            and isinstance(fallback_call.args, dict)
+            and fallback_call.args.get("index_name")
+        ):
+            goal.constraints["index_name"] = str(fallback_call.args["index_name"])
         logger.info(
             "qa_router.fallback",
             intent=goal.intent,
