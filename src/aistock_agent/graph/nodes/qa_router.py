@@ -241,9 +241,6 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
     return SkillCall(skill_name="report_lookup", args={})
 
 
-_COMPOSE_KEYWORD_MAP: list[tuple[list[str], list[SkillCall]]] = []
-
-
 def build_compose_plan(message: str) -> list[SkillCall] | None:
     """综合问题 → 多 Skill 组合计划；未命中返回 None。
     命中场景：市场主线 / 风险提示 → market_snapshot + sector_snapshot 组合取数，
