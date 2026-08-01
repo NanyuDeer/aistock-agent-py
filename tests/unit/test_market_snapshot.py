@@ -211,6 +211,7 @@ async def test_market_snapshot_a_share_fails_global_ok():
         ) as mock_to_thread,
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
         mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
@@ -243,6 +244,7 @@ async def test_market_snapshot_both_fail():
         ) as mock_to_thread,
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
         mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
@@ -386,3 +388,123 @@ async def test_market_snapshot_full_success():
     assert len(ev.sources) == 2
     mock_api.get.assert_called_once_with("/internal/market/close-snapshot")
     mock_api.get_quick_snapshot.assert_not_called()
+
+
+# ── Test 8: quick 失败 → last-close 降级回退 ─────────────────────────────
+
+# last-close snapshot（最近已完成交易日，full 格式带 coverage）
+LAST_CLOSE_OK: dict[str, object] = {
+    "schema_version": "1.0",
+    "status": "complete",
+    "snapshot_kind": "full",
+    "trade_date": "20260731",
+    "captured_at": "2026-07-31T12:31:00.000Z",
+    "indexes": [
+        {"ts_code": "000001.SH", "name": "上证指数", "close": 3804.69,
+         "pct_chg": -0.62, "amount": 100000.0},
+        {"ts_code": "399001.SZ", "name": "深证成指", "close": 10500.0,
+         "pct_chg": -2.73, "amount": 120000.0},
+    ],
+    "breadth": {"total_count": 5000, "advance_count": 1400, "decline_count": 3600,
+                "flat_count": 0, "advance_ratio": 0.28},
+    "turnover": {"amount_yuan": 234_000_000_000, "previous_amount_yuan": 200_000_000_000,
+                 "change_pct": 17.0},
+    "limits": {"up_count": 10, "down_count": 20, "broken_count": 5, "highest_board": 2},
+    "main_force": {"large_and_extra_large_net_yuan": -3_000_000_000},
+    "sectors": {"top_gainers": [], "top_losers": [], "top_inflows": [], "top_outflows": []},
+    "coverage": {
+        "current_daily": {"complete": True, "reason": "ok", "page_count": 5, "row_count": 5000},
+        "previous_daily": {"complete": True, "reason": "ok", "page_count": 5, "row_count": 5000},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_quick_fails_falls_back_to_last_close():
+    """quick-snapshot 失败（周末 409）→ 自动回退 last-close，degraded=False。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch(
+            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
+        ) as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=LAST_CLOSE_OK)
+        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
+
+        ev = await market_snapshot(
+            {"scope": "a_share", "snapshot_kind": "quick"},
+            _goal(),
+        )
+
+    # 有真实 last-close 数据 → 不算 degraded
+    assert ev.degraded is False
+    assert len(ev.sources) == 1
+    assert ev.sources[0].source_id.startswith("market:a_share:")
+    # source 标注最近交易日
+    assert "2026-07-31" in ev.sources[0].title or "20260731" in ev.sources[0].source_id
+    # facts 含真实指数数据
+    fact_text = " ".join(ev.facts)
+    assert "上证指数" in fact_text
+    assert "3804.69" in fact_text
+    # raw 标记降级来源
+    assert ev.raw.get("used_last_close") is True
+    assert ev.raw.get("trade_date") == "20260731"
+    mock_api.get_last_close_snapshot.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_quick_fails_last_close_incomplete_coverage():
+    """last-close coverage 不完整 → 仍 degraded（A 股）。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    bad_last_close = {**LAST_CLOSE_OK, "coverage": {
+        "current_daily": {"complete": False, "reason": "incomplete_daily_coverage"},
+        "previous_daily": {"complete": True, "reason": "ok"},
+    }}
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch(
+            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
+        ) as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=bad_last_close)
+        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
+
+        ev = await market_snapshot(
+            {"scope": "a_share", "snapshot_kind": "quick"},
+            _goal(),
+        )
+
+    assert ev.degraded is True
+    assert "A 股" in (ev.degraded_reason or "")
+    mock_api.get_last_close_snapshot.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_quick_and_last_close_both_fail():
+    """quick 与 last-close 均失败 → degraded，reason 说明当前与最近交易日均不可用。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch(
+            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
+        ) as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
+        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
+
+        ev = await market_snapshot(
+            {"scope": "a_share", "snapshot_kind": "quick"},
+            _goal(),
+        )
+
+    assert ev.degraded is True
+    assert "A 股" in (ev.degraded_reason or "")
+    assert len(ev.sources) == 0
+    mock_api.get_last_close_snapshot.assert_called_once()

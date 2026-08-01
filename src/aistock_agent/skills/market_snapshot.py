@@ -92,11 +92,21 @@ def _build_a_share_facts(normalized: dict[str, Any]) -> list[str]:
     return facts
 
 
+def _safe_str(value: object) -> str:
+    return str(value) if value is not None else ""
+
+
 def _build_a_share_source(
     raw_data: dict[str, Any],
     captured_at: datetime,
+    *,
+    used_last_close: bool = False,
 ) -> ChatSource:
-    """构建 A 股 ChatSource（kind=realtime_quote）。"""
+    """构建 A 股 ChatSource（kind=realtime_quote）。
+
+    used_last_close=True 表示数据来自最近交易日（非交易日降级回退），
+    title 标注数据日期，便于用户与综合回答模型区分"今天"与"最近交易日"。
+    """
     trade_date = raw_data.get("trade_date", "")
     snapshot_kind = raw_data.get("snapshot_kind", "full")
     snippet_parts: list[str] = []
@@ -109,10 +119,14 @@ def _build_a_share_source(
                 snippet_parts.append(f"{name}={close}")
     snippet = " ".join(snippet_parts) if snippet_parts else f"A股{snapshot_kind}快照"
     source_id = f"market:a_share:{snapshot_kind}:{trade_date}"
+    if used_last_close:
+        title = f"A 股最近交易日快照 ({trade_date})"
+    else:
+        title = f"A 股 {snapshot_kind} 快照 ({trade_date})"
     return ChatSource(
         source_id=source_id,
         kind="realtime_quote",
-        title=f"A 股 {snapshot_kind} 快照 ({trade_date})",
+        title=title,
         snippet=snippet,
         captured_at=captured_at,
     )
@@ -182,6 +196,8 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
     all_sources: list[ChatSource] = []
     a_share_success = False
     global_success = False
+    # 记录 A 股是否来自 last-close 降级回退（供 Evidence.raw 暴露）
+    a_share_meta: dict[str, object] = {}
 
     # ── 内部协程：获取 A 股 ──
     async def _fetch_a_share() -> tuple[str, list[str], list[ChatSource], bool]:
@@ -189,17 +205,25 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
         local_sources: list[ChatSource] = []
         try:
             a_share_raw: dict[str, Any] | None = None
+            used_last_close = False
             if snapshot_kind == "quick":
                 a_share_raw = await node_api.get_quick_snapshot()
+                if a_share_raw is None:
+                    # 非交易日/盘前：回退最近已完成交易日收盘快照（复用 market_trace 降级先例）
+                    a_share_raw = await node_api.get_last_close_snapshot()
+                    used_last_close = True
             else:
                 a_share_raw = await node_api.get("/internal/market/close-snapshot")
+                if a_share_raw is None:
+                    a_share_raw = await node_api.get_last_close_snapshot()
+                    used_last_close = True
 
             if a_share_raw is None:
-                degraded_reasons.append("A 股数据不可用（Node 返回 None）")
+                degraded_reasons.append("A 股当前与最近交易日数据均不可用（Node 返回 None）")
                 return "a_share", local_facts, local_sources, False
 
-            # Full snapshot 需要双重 coverage 校验
-            if snapshot_kind == "full":
+            # Full/last-close 快照需要双重 coverage 校验（quick 不校验）
+            if snapshot_kind == "full" or used_last_close:
                 coverage = a_share_raw.get("coverage")
                 coverage_dict = coverage if isinstance(coverage, dict) else {}
                 current_daily = coverage_dict.get("current_daily")
@@ -219,7 +243,14 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
 
             normalized = normalize_a_share(a_share_raw)
             local_facts.extend(_build_a_share_facts(normalized))
-            local_sources.append(_build_a_share_source(a_share_raw, captured_at))
+            local_sources.append(
+                _build_a_share_source(
+                    a_share_raw, captured_at, used_last_close=used_last_close
+                )
+            )
+            if used_last_close:
+                a_share_meta["used_last_close"] = True
+                a_share_meta["trade_date"] = _safe_str(a_share_raw.get("trade_date"))
             return "a_share", local_facts, local_sources, True
         except Exception as exc:
             degraded_reasons.append(f"A 股数据获取异常: {exc}")
@@ -284,5 +315,6 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
             "snapshot_kind": snapshot_kind,
             "a_share_success": a_share_success,
             "global_success": global_success,
+            **a_share_meta,
         },
     )
