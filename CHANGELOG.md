@@ -1,6 +1,21 @@
 # Changelog — aistock-agent-py
 
-> 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
+> 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
+
+## [main] 2026-08-01 — alert SSE 流结构化 result 事件 + 持久化到 DB
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/agents/workers/alert.py`：`stream()` Master Agent 的 `astream_events` 循环不再 yield `TEXT` 事件（原因：Master 输出是 JSON 双层结构 `{"display_report":..., "podcast_brief":...}`，流式吐 token 会让前端看到原始 JSON 文本含 stocks/risks 等内部字段）；改为流式过程只发进度事件，done 前 yield `{"type": "result", "display_report", "podcast_brief", "raw"}` 结构化事件
+
+### 新增
+- `src/aistock_agent/agents/workers/alert.py`：`stream()` 在 result 事件前新增 DB 持久化逻辑，调 `node_api.save_analysis_report(report_type='alert', user_id=symbol, data_source='user', content={symbol, display_report, podcast_brief})`，前端可按 symbol+date 查询缓存
+
+### 改进
+- `src/aistock_agent/agents/workers/alert.py`：`_cache_alert_result` 内存缓存 content 中新增 symbol 字段，避免同日多股票 alert 互相覆盖后无法区分
+
+---
 
 ## [main] 2026-08-01 — Stock Trace Consumer 集成到主进程 + PRD 对齐小改动
 
