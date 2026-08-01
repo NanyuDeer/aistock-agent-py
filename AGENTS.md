@@ -106,7 +106,8 @@ START → supervisor(quick_think, 意图路由)
 - quick/full 快照失败（如非交易日 quick 409）时自动回退 `/internal/market/last-close-snapshot`
 - 回退成功：degraded=False，source title 标注"最近交易日快照 (trade_date)"，raw 含 used_last_close/trade_date
 - 回退失败：degraded=True
-- global 部分无 last-close 回退源，失败仍 degraded；A 股部分可独立成功（不被 global 拖累）
+- degraded 为整体标志：任一数据源缺失即 True（global 无 last-close 回退源，失败仍 degraded）
+- A 股 last-close 成功但 global 失败 → degraded=True，但 facts 仍含 A 股真实数据（source 标注 trade_date）；A 股部分可独立成功，不被 global 拖累
 
 ### qa_router 增强：2026-08-01
 - 指数名（沪指/深成指/创业板指/科创50/沪深300/恒生等）→ market_snapshot（a_share + index_name）

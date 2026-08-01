@@ -20,7 +20,8 @@ from aistock_agent.utils.message import extract_last_human_message
 logger = structlog.get_logger()
 
 
-SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
+SYSTEM_PROMPT = (
+    """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
 
 可用 Skills：
 - report_lookup：读取已持久化的晨报/复盘报告。
@@ -33,6 +34,9 @@ SYSTEM_PROMPT = """你是 AI 投资助手的问答路由器。根据用户问题
 - sector_snapshot：板块强弱与风口龙头。入参 {tag_code: str}，无 tag_code 时自动读风口数据
 - market_snapshot：大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）
 - industry_relation：行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}
+
+指数行情：问"沪指/深证成指/创业板指/科创50/沪深300/中证500/中证1000/恒生指数"等指数时"""
+    """路由 market_snapshot（scope=a_share），并在 goal.constraints 写入 index_name
 
 规则：
 1. 只生成计划，不取数据，不下结论
@@ -72,6 +76,7 @@ JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
 - 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
 - 禁止使用旧字段 skill、params（一律用 skill_name、args），禁止省略 goal
 """
+)
 
 
 class QARouterOutput(BaseModel):
@@ -127,6 +132,12 @@ def extract_report_date(message: str) -> str:
     from datetime import timedelta
 
     from aistock_agent.utils.date import is_trading_day, shanghai_today
+
+    # 紧凑格式 YYYYMMDD（无分隔符），与分隔符格式互斥，需在分隔符分支之前命中
+    compact = re.search(r"(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)", message)
+    if compact:
+        year, month, day = int(compact.group(1)), int(compact.group(2)), int(compact.group(3))
+        return f"{year:04d}-{month:02d}-{day:02d}"
 
     m = _EXPLICIT_DATE_RE.search(message)
     if m:
@@ -346,6 +357,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             intent=intent_map[fallback_call.skill_name],  # type: ignore[index]
             constraints={"router_fallback": "true"},
         )
+        # 指数行情兜底：SkillCall 携带 index_name 时透传到 goal.constraints（spec 3a 消费者）
+        if (
+            fallback_call.skill_name == "market_snapshot"
+            and isinstance(fallback_call.args, dict)
+            and fallback_call.args.get("index_name")
+        ):
+            goal.constraints["index_name"] = str(fallback_call.args["index_name"])
         logger.info(
             "qa_router.fallback",
             intent=goal.intent,

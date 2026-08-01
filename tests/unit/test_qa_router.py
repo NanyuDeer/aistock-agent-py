@@ -153,6 +153,20 @@ async def test_qa_router_llm_failure_market_snapshot():
     assert result["goal"].constraints.get("router_fallback") == "true"
 
 
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_index_constraint() -> None:
+    """LLM 异常 → 指数问题兜底 market_snapshot，index_name 透传到 goal.constraints（spec 3a）。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("沪指今天怎么样"))
+    assert result["skill_calls"][0].skill_name == "market_snapshot"
+    assert result["skill_calls"][0].args.get("index_name") == "上证指数"
+    assert result["goal"].constraints.get("index_name") == "上证指数"
+
+
 def test_keyword_fallback_stock_news_extracts_six_digit_symbol() -> None:
     call = route_by_keyword_fallback("600519 最近新闻")
     assert call is not None
@@ -246,11 +260,16 @@ def test_keyword_fallback_index_name_variants() -> None:
 
 
 def test_extract_report_date_explicit() -> None:
-    """显式 YYYY-MM-DD / YYYYMMDD 日期提取。"""
+    """显式 YYYY-MM-DD / YYYYMMDD 日期提取（确定性验证，不受"今天"日期影响）。"""
+    from datetime import date
+
     from aistock_agent.graph.nodes.qa_router import extract_report_date
 
     assert extract_report_date("2026-07-31 大盘为什么涨") == "2026-07-31"
-    assert extract_report_date("20260731复盘报告") == "2026-07-31"
+    # 紧凑格式 YYYYMMDD：patch 日期源为交易日 2026-08-03（周一），
+    # 避免回退路径"恰好等于今天"的巧合性让测试假通过
+    with patch("aistock_agent.utils.date.shanghai_today", return_value=date(2026, 8, 3)):
+        assert extract_report_date("20260731复盘报告") == "2026-07-31"
 
 
 def test_extract_report_date_relative_and_fallback() -> None:
@@ -259,9 +278,10 @@ def test_extract_report_date_relative_and_fallback() -> None:
 
     from aistock_agent.graph.nodes.qa_router import extract_report_date
 
-    # 无显式日期 → 返回今天（或非遗日回退最近交易日）
-    result = extract_report_date("复盘报告有哪些未解决问题")
-    assert date.fromisoformat(result) is not None  # 合法日期
+    # 无显式日期且今天是周六（2026-08-01 非遗日）→ 回退最近交易日 2026-07-31
+    with patch("aistock_agent.utils.date.shanghai_today", return_value=date(2026, 8, 1)):
+        result = extract_report_date("复盘报告有哪些未解决问题")
+    assert result == "2026-07-31"
 
 
 def test_build_compose_plan_market_mainline() -> None:

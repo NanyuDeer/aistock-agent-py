@@ -508,3 +508,41 @@ async def test_market_snapshot_quick_and_last_close_both_fail():
     assert "A 股" in (ev.degraded_reason or "")
     assert len(ev.sources) == 0
     mock_api.get_last_close_snapshot.assert_called_once()
+
+
+# ── Test 9: scope=both，A 股 last-close 成功、global 失败 → per-source 降级语义 ─
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_both_last_close_ok_global_fails():
+    """scope=both：A 股 last-close 成功、global 失败 → degraded=True，facts 仍含 A 股真实数据。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch(
+            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
+        ) as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=None)
+        mock_api.get_last_close_snapshot = AsyncMock(return_value=LAST_CLOSE_OK)
+        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
+
+        ev = await market_snapshot(
+            {"scope": "both", "snapshot_kind": "quick"},
+            _goal(),
+        )
+
+    # degraded 为整体标志：global 缺失 → True
+    assert ev.degraded is True
+    assert "全球" in (ev.degraded_reason or "")
+    # facts 仍含 A 股真实数据（per-source 语义：A 股不被 global 拖累）
+    fact_text = " ".join(ev.facts)
+    assert "上证指数" in fact_text
+    assert "3804.69" in fact_text
+    # A 股 source 标注最近交易日 trade_date
+    a_share_sources = [s for s in ev.sources if s.source_id.startswith("market:a_share:")]
+    assert len(a_share_sources) == 1
+    assert "2026-07-31" in a_share_sources[0].title or "20260731" in a_share_sources[0].source_id
+    assert ev.raw.get("a_share_success") is True
+    assert ev.raw.get("global_success") is False
