@@ -20,6 +20,10 @@ from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.snapshot_builder import build_snapshot
+from aistock_agent.utils.brief_contract import (
+    build_iterate_brief_summary,
+    build_market_snapshot_brief_summary,
+)
 
 logger = get_logger()
 
@@ -128,12 +132,17 @@ class SnapshotConsumer(BaseConsumer):
         if not isinstance(snapshot, dict) or snapshot.get("error"):
             raise ValueError(f"snapshot build failed: {snapshot.get('error', 'invalid')}")
 
-        # 持久化快照
+        # 持久化快照。brief_summary 由受控构造函数生成（复用 scheduler 旧链路逻辑），
+        # briefing.py 对 market_snapshot 强制要求该字段，缺失则 brief_evening 降级。
         await self.ctx.node_api.save_analysis_report(
             report_type="market_snapshot",
             report_date=report_date,
             data_source="snapshot_builder",
-            content={"snapshot": snapshot, "snapshot_kind": snapshot_kind},
+            content={
+                "brief_summary": build_market_snapshot_brief_summary(snapshot),
+                "snapshot": snapshot,
+                "snapshot_kind": snapshot_kind,
+            },
         )
 
         # 仅 full snapshot 触发后续 iterate -> broadcast 链路
@@ -163,11 +172,17 @@ class IterateConsumer(BaseConsumer):
         if not isinstance(iterate_payload, dict):
             raise ValueError("iterate result is not valid JSON dict")
 
+        # 原始 LLM payload 仅用于链路诊断；brief 事实由受控构造函数生成
+        # （复用 scheduler 旧链路逻辑）。briefing.py 对 iterate 强制要求
+        # content.brief_summary，缺失会导致 brief_evening 降级。
         await self.ctx.node_api.save_analysis_report(
             report_type="iterate",
             report_date=report_date,
             data_source="iterate_analyzer",
-            content={"iterate_payload": iterate_payload},
+            content={
+                "brief_summary": build_iterate_brief_summary(iterate_payload),
+                "iterate_payload": iterate_payload,
+            },
         )
 
         await self.ctx.event_bus.publish(

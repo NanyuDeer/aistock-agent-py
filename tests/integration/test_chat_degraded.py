@@ -174,7 +174,12 @@ async def test_degraded_synth_failure_returns_low_confidence():
     qa_output = QARouterOutput(
         goal=InsightGoal(question="今天晨报", intent="report_lookup"),
         plan="direct",
-        skill_calls=[SkillCall(skill_name="report_lookup", args={"report_type": "review", "date": "2026-07-28"})],
+        skill_calls=[
+            SkillCall(
+                skill_name="report_lookup",
+                args={"report_type": "review", "date": "2026-07-28"},
+            )
+        ],
     )
 
     mock_quick = MagicMock()
@@ -214,3 +219,62 @@ async def test_degraded_synth_failure_returns_low_confidence():
     assert result["insight"].answer_mode == "validate"
     assert len(result["insight"].uncertainty) >= 1
     assert "综合失败" in result["insight"].uncertainty[0]
+
+
+@pytest.mark.asyncio
+async def test_synth_answer_out_of_range_basis_indices_degrades_structured() -> None:
+    """LLM 输出越界 basis_indices → 安全降级 + 分节结构降级文案。"""
+    from datetime import UTC, datetime
+
+    from aistock_agent.graph.nodes.synth_answer import (
+        SynthInsightOutput,
+        SynthOutput,
+        synth_answer_node,
+    )
+    from aistock_agent.schemas.chat_contract import Evidence, InsightGoal
+
+    goal = InsightGoal(question="宁德时代有什么最新新闻", intent="stock_news")
+    evidence = Evidence(
+        facts=["财联社7月31日电，宁德时代拟派现..."],
+        sources=[],
+        as_of=datetime.now(UTC),
+        degraded=False,
+        skill_name="stock_news",
+    )
+    state = {
+        "messages": [HumanMessage(content="宁德时代有什么最新新闻")],
+        "goal": goal,
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [evidence],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
+
+    # LLM 返回越界 basis_indices=[2]（仅 1 条证据）
+    fake = MagicMock()
+    fake.ainvoke = AsyncMock(
+        return_value=SynthOutput(
+            insight=SynthInsightOutput(
+                conclusion="宁德时代新闻",
+                basis_indices=[2],
+                confidence="low",
+                uncertainty=[],
+                answer_mode="trace",
+            )
+        )
+    )
+
+    with (
+        patch("aistock_agent.graph.nodes.synth_answer.get_deep_think"),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.with_chat_structured_output",
+            return_value=fake,
+        ),
+    ):
+        result = await synth_answer_node(state)
+
+    assert result["insight"].confidence == "low"
+    assert result["insight"].conclusion.startswith("## 核心结论")
+    assert "宁德" in result["insight"].conclusion

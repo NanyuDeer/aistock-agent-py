@@ -273,7 +273,7 @@ async def test_synth_answer_invalid_basis_indices_degrades(indices: list[int]) -
     with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
-    assert result["final_response"].startswith("综合回答生成失败")
+    assert result["final_response"].startswith("## 核心结论")
     assert result["insight"].confidence == "low"
     assert result["insight"].answer_mode == "validate"
     assert result["insight"].basis == [ev1, ev2]  # 降级仍引用服务端全部证据
@@ -330,7 +330,7 @@ async def test_synth_answer_invalid_basis_indices_type_degrades(insight_dict: di
     with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
         result = await synth_answer_node(_state_with_evidences([ev1]))
 
-    assert result["final_response"].startswith("综合回答生成失败")
+    assert result["final_response"].startswith("## 核心结论")
     assert result["insight"].confidence == "low"
     assert result["insight"].answer_mode == "validate"
     assert result["insight"].basis == [ev1]  # 降级仍引用服务端全部证据
@@ -397,7 +397,41 @@ async def test_synth_answer_parse_error_still_degrades_safely() -> None:
     with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
         result = await synth_answer_node(_state())
 
-    assert result["final_response"].startswith("综合回答生成失败")
+    assert result["final_response"].startswith("## 核心结论")
     assert result["insight"].confidence == "low"
     assert result["insight"].answer_mode == "validate"
     assert result["trace"].actual_mode == "validate"
+
+
+def test_build_prompt_requires_structured_sections() -> None:
+    """prompt 要求 Markdown 分节 + 结尾引导追问。"""
+    from aistock_agent.graph.nodes.synth_answer import _build_prompt
+
+    goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
+    prompt = _build_prompt(goal, [], "validate")
+
+    assert "## 核心结论" in prompt
+    assert "## 行情要点" in prompt
+    assert "## 数据说明" in prompt
+    assert "引导" in prompt or "继续问我" in prompt
+
+
+def test_build_degraded_insight_structured_conclusion() -> None:
+    """降级回答按分节结构输出，不输出一句"无法提供"。"""
+    from aistock_agent.graph.nodes.synth_answer import _build_degraded_insight
+
+    goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
+    evidence = Evidence(
+        facts=["上证指数: 3804.69 (-0.62%)"],
+        sources=[],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="quick-snapshot 不可用",
+        skill_name="market_snapshot",
+    )
+    insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+
+    assert insight.conclusion.startswith("## 核心结论")
+    assert "## 行情要点" in insight.conclusion
+    assert "上证指数" in insight.conclusion
+    assert "继续问我" in insight.conclusion
