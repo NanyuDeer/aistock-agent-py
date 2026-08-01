@@ -144,6 +144,18 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
     )
     return f"""{_MODE_PROMPTS[mode]}
 
+结构化输出要求（针对 conclusion 字段，必须遵守）：
+1. 使用 Markdown 分节组织回答，推荐结构：
+   ## 核心结论
+   （一句话直接回答用户问题）
+   ## 行情要点
+   （基于证据的要点列表，引用具体数据，如指数点位、涨跌幅、板块、个股）
+   ## 数据说明
+   （若证据 degraded 或为最近交易日数据，列出缺失项与数据日期；正常时简述数据时间范围）
+2. conclusion 结尾必须追加 1 句引导追问，基于用户意图自然生成，
+   例如"想深入了解某个板块或个股的表现，可以继续问我。"
+3. 即使证据 degraded 或仅有最近交易日数据，也要基于可用 facts 按正常结构回答，
+   缺失项写入"数据说明"，禁止输出一句"无法提供"后结束。
 用户问题: {goal.question}
 意图: {goal.intent}
 时间范围: {goal.time_range}
@@ -157,7 +169,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 
 {{
   "insight": {{
-    "conclusion": "直接回答用户问题的结论",
+    "conclusion": "直接回答用户问题的结论（Markdown 分节 + 结尾引导句）",
     "basis_indices": [],
     "confidence": "low",
     "uncertainty": [],
@@ -178,12 +190,27 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 def _build_degraded_insight(
     goal: InsightGoal, evidences: list[Evidence], mode: str, reason: str
 ) -> Insight:
-    """解析失败兜底：降级 validate + 拼接 Evidence.facts + confidence=low。"""
+    """解析失败兜底：降级 validate + 结构化拼接 Evidence.facts + confidence=low。
+    conclusion 按"核心结论/行情要点/数据说明"分节，即使降级也给出可用事实，
+    不输出一句"无法提供"。无 facts 时给出明确降级提示。
+    """
     all_facts: list[str] = []
     for ev in evidences:
         all_facts.extend(ev.facts)
+
+    if all_facts:
+        conclusion = (
+            "## 核心结论\n"
+            "综合回答生成受限，以下为当前可用的数据事实。\n\n"
+            "## 行情要点\n"
+            + "\n".join(f"- {fact}" for fact in all_facts)
+            + "\n\n## 数据说明\n"
+            f"综合回答生成失败（{reason}），已返回原始证据事实。"
+        )
+    else:
+        conclusion = "## 核心结论\n当前没有可用的数据事实，暂时无法回答该问题。"
     return Insight(
-        conclusion="综合回答生成失败，仅返回原始证据事实：\n" + "\n".join(all_facts),
+        conclusion=conclusion,
         basis=evidences,
         confidence="low",
         uncertainty=[f"综合失败: {reason}"],
