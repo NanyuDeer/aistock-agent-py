@@ -2,6 +2,16 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-08-01 — wind_leader/trend_score repair 失败降级修复
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/agents/workers/wind_leader.py`：repair_dual_layer_with_llm 失败时降级用 LLM 原文填充 summary（"长线风口分析（结构异常，详见下文）"），避免持久化无效结构导致前端 agent-report 空页面
+- `src/aistock_agent/agents/workers/trend_score.py`：同上修复（同样 bug：repair 失败仍持久化 summary='' 的无效结构）
+
+---
+
 ## [changer] 2026-08-01 — CHAT QA 周末降级回退 + 结构化回答 + 单项修复
 
 **开发者**: 37588
@@ -43,6 +53,7 @@
 - 集成 `tests/integration/test_evening_chain_event_driven.py` 4/4 通过；ruff 无新增告警
 
 ---
+
 ## [changer] 2026-07-31 — CHAT QA 全线降级修复（4 项）
 
 **开发者**: 37588

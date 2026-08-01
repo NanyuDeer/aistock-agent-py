@@ -74,7 +74,16 @@ async def run(state: AgentState) -> dict[str, object]:
                         dual_layer_content = repaired
                         logger.info("trend_score_dual_layer_repair_success")
                     else:
-                        logger.warning("trend_score_dual_layer_repair_failed")
+                        # repair 失败时降级：用 LLM 原文填充 summary，保证前端能渲染
+                        logger.warning("trend_score_dual_layer_repair_failed_fallback_to_text")
+                        dual_layer_content = {
+                            "display_report": {
+                                "summary": "趋势股评分分析（结构异常，详见下文）",
+                                "details": final_response,
+                            },
+                            "podcast_brief": "",
+                            "schema_version": "2.0",
+                        }
                 await node_api.save_analysis_report(
                     report_type="trend_score",
                     report_date=report_date,
