@@ -1,6 +1,50 @@
 # Changelog — aistock-agent-py
 
-> 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
+> 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
+
+## [main] 2026-08-01 — wind_leader prompt 强制 details 结构化 markdown
+
+**开发者**: Aria
+
+### 改进
+- `src/aistock_agent/prompts/workers/wind_leader.py`：`WIND_LEADER_ANALYST_PROMPT` 新增 details 章节结构约束（风口概览/重点板块分析/龙头股推荐/风险提示/关注建议），强制使用 `##` 和 `###` 标题（禁止 `#` 一级和 `####` 四级标题），禁止 emoji/序号前缀/JSON 代码块/字段名/调试说明。配合前端 `agent-report.vue` 改用 mp-html 渲染 markdown，修复 LLM 偶发返回纯文本/段落结构导致 5 个结构化 Card 全不渲染的空页面问题
+
+---
+
+## [main] 2026-08-01 — alert SSE 流结构化 result 事件 + 持久化到 DB
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/agents/workers/alert.py`：`stream()` Master Agent 的 `astream_events` 循环不再 yield `TEXT` 事件（原因：Master 输出是 JSON 双层结构 `{"display_report":..., "podcast_brief":...}`，流式吐 token 会让前端看到原始 JSON 文本含 stocks/risks 等内部字段）；改为流式过程只发进度事件，done 前 yield `{"type": "result", "display_report", "podcast_brief", "raw"}` 结构化事件
+
+### 新增
+- `src/aistock_agent/agents/workers/alert.py`：`stream()` 在 result 事件前新增 DB 持久化逻辑，调 `node_api.save_analysis_report(report_type='alert', user_id=symbol, data_source='user', content={symbol, display_report, podcast_brief})`，前端可按 symbol+date 查询缓存
+
+### 改进
+- `src/aistock_agent/agents/workers/alert.py`：`_cache_alert_result` 内存缓存 content 中新增 symbol 字段，避免同日多股票 alert 互相覆盖后无法区分
+
+---
+
+## [main] 2026-08-01 — Stock Trace Consumer 集成到主进程 + PRD 对齐小改动
+
+**开发者**: NanyuDeer
+
+### 新增
+- `deploy/ecosystem.config.json`：PM2 部署配置，环境变量 `STOCK_TRACE_CONSUMER_ENABLED=true`，一次 `pm2 restart aistock-agent` 同时刷新主服务 + consumer
+- `docs/异动捕手与溯源-逻辑分析与改进设计.md`：完整逻辑梳理 + 改进方案设计文档
+
+### 改进
+- `config.py`：新增 `stock_trace_consumer_enabled` 配置项（默认 `True`），控制 consumer 是否在主进程内启动
+- `main.py`：lifespan 集成 Stock Trace Consumer 启动/关闭逻辑 — 创建独立 `aioredis.Redis` 实例（db=2，不复用 RedisPool 单例 db=1），用 `asyncio.create_task` 启动；关闭时先 cancel task → 等待 CancelledError → 关闭独立 redis
+- `workers/stock_trace_consumer.py`：新增模块级心跳变量 `_stock_trace_consumer_enabled` / `_stock_trace_consumer_last_heartbeat`，`run_forever` 每次循环更新心跳，供 `/health/ready` 检查
+- `api/routes.py`：`/health/ready` 新增 `stock_trace_consumer` 心跳检查项（>60s 报 error，未启用 skipped，刚启动 pending）
+- `AGENTS.md`：新增"部署（华为云 PM2）"章节和"Stock Trace Consumer 集成模式"说明
+
+### 文档
+- `agents/workers/alert.py`：顶部 docstring 补充决策说明（按用户决策维持 Phase 6 架构，暂不收缩为适配层，归因走 stock_trace 链路）
+
+---
 
 ## [main] 2026-08-01 — wind_leader/trend_score repair 失败降级修复
 

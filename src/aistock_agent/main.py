@@ -1,8 +1,10 @@
 """FastAPI 应用入口"""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 from fastapi import FastAPI
 
 from aistock_agent.api.middleware import setup_middleware
@@ -72,9 +74,46 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.error("event_consumers_start_failed", exc_info=True)
 
+    # 启动 Stock Trace Consumer（集成模式：在主进程内运行，一次重启即可）
+    # 使用独立的 aioredis 实例（stock_trace_redis_url, db=2），不复用 RedisPool 单例（db=1）
+    stock_trace_consumer_task: asyncio.Task[None] | None = None
+    stock_trace_redis: aioredis.Redis | None = None
+    if settings.stock_trace_consumer_enabled:
+        try:
+            from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
+            import aistock_agent.workers.stock_trace_consumer as _stc_module
+
+            stock_trace_redis = aioredis.from_url(
+                settings.stock_trace_redis_url,
+                max_connections=settings.redis_max_connections,
+            )
+            consumer = StockTraceConsumer(stock_trace_redis)
+            stock_trace_consumer_task = asyncio.create_task(consumer.run_forever())
+            # 标记 consumer 已启用，供 /health/ready 检查心跳
+            _stc_module._stock_trace_consumer_enabled = True
+            logger.info("stock_trace_consumer_started_in_process")
+        except Exception:
+            logger.error("stock_trace_consumer_start_failed", exc_info=True)
+            # 启动失败时清理已创建的 redis 连接
+            if stock_trace_redis is not None:
+                await stock_trace_redis.aclose()
+                stock_trace_redis = None
+
     yield
 
-    # 关闭：先停消费者，再停调度器，最后关连接池
+    # 关闭：先停 Stock Trace Consumer，再停事件消费者，再停调度器，最后关连接池
+    if stock_trace_consumer_task is not None:
+        stock_trace_consumer_task.cancel()
+        try:
+            await stock_trace_consumer_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("stock_trace_consumer_stop_failed", exc_info=True)
+    if stock_trace_redis is not None:
+        await stock_trace_redis.aclose()
+        logger.info("stock_trace_consumer_stopped_in_process")
+
     if settings.quick_snapshot_enabled:
         try:
             from aistock_agent.services.event_consumers import stop_all_consumers

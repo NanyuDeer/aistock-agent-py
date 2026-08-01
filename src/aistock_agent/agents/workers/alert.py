@@ -6,6 +6,11 @@
   - SSE 流：子 Agent 完成后流式输出 Master 结果
 
 模式：asyncio.gather 并行子 Agent → Master ReAct agent → astream_events
+
+注意（2026-08-01）：
+  按异动捕手 PRD V1.3 / SPEC，本文件最终应收缩为"交付适配层"，归因逻辑
+  由 stock_trace.py（受限 LLM + Schema 校验）承担。当前维持 Phase 6 架构
+  不变（用户决策：已跑通，暂不收缩），新增异动归因请走 stock_trace 链路。
 """
 
 import asyncio
@@ -86,7 +91,8 @@ async def _run_sub_agent(
 
 
 def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
-    """解析流式输出并缓存到 report_cache"""
+    """解析流式输出并缓存到 report_cache（内存缓存，进程重启即丢失；DB 持久化在 stream/run 中完成）"""
+    symbol = str(state.get("symbol") or "")
     try:
         display_report = None
         podcast_brief = None
@@ -100,11 +106,13 @@ def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
     report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
     try:
         from aistock_agent.services.report_cache import set_report
+        # content 中记录 symbol，避免同日多股票 alert 互相覆盖后无法区分
         set_report("alert", report_date, {
+            "symbol": symbol,
             "display_report": display_report or {},
             "podcast_brief": podcast_brief or "",
         })
-        logger.info("alert_cached_for_list", report_date=report_date)
+        logger.info("alert_cached_for_list", symbol=symbol, report_date=report_date)
     except Exception as e:
         logger.warning("alert_cache_failed", error=str(e))
 
@@ -184,6 +192,10 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
 
             event_t = sse_event.get("type")
             if event_t == SSEEventType.TEXT:
+                # 收集 LLM 输出 chunk 用于后续解析，但不向前端 yield TEXT 事件
+                # 原因：Master 输出是 JSON 双层结构（display_report + podcast_brief），
+                # 流式吐 token 会让前端看到原始 JSON 文本（含 stocks/risks 等内部字段）。
+                # 改为：流式过程只发进度事件，done 前发 result 事件携带解析后结构。
                 content = sse_event.get("content", "")
                 if isinstance(content, str):
                     _response_chunks.append(content)
@@ -191,12 +203,48 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
                     _llm_started = True
                     yield {"type": SSEEventType.TOOL_END, "tool": "master"}
                     yield {"type": SSEEventType.LLM_START, "label": "正在生成异动深度研判"}
-                yield sse_event
 
         # 流结束后解析 + 缓存
         final_response = "".join(_response_chunks)
         if final_response:
             _cache_alert_result(state, final_response)
+
+            # 解析双层结构，通过 result 事件把结构化数据发给前端
+            display_report: dict[str, object] | None = None
+            podcast_brief: str | None = None
+            try:
+                parsed = json.loads(final_response)
+                if isinstance(parsed, dict):
+                    display_report = parsed.get("display_report")
+                    podcast_brief = parsed.get("podcast_brief")
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("alert_result_parse_failed", symbol=symbol)
+
+            # 持久化到数据库（user_id=symbol，前端可按 symbol+date 查询缓存）
+            # 与 run() 函数的 scheduler 分支一致，但 data_source 标记为 'user'
+            report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+            try:
+                await node_api.save_analysis_report(
+                    report_type="alert",
+                    report_date=report_date,
+                    user_id=symbol,
+                    data_source="user",
+                    content={
+                        "symbol": symbol,
+                        "display_report": display_report or {},
+                        "podcast_brief": podcast_brief or "",
+                    },
+                )
+                logger.info("alert_persisted_for_user", symbol=symbol, report_date=report_date)
+            except Exception as e:
+                logger.warning("alert_persist_failed", symbol=symbol, error=str(e))
+
+            yield {
+                "type": "result",
+                "display_report": display_report or {},
+                "podcast_brief": podcast_brief or "",
+                "raw": final_response,  # 兜底：解析失败时前端可用 raw 渲染
+            }
 
         yield {"type": SSEEventType.DONE}
     except Exception as e:
