@@ -241,6 +241,24 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
     return SkillCall(skill_name="report_lookup", args={})
 
 
+_COMPOSE_KEYWORD_MAP: list[tuple[list[str], list[SkillCall]]] = []
+
+
+def build_compose_plan(message: str) -> list[SkillCall] | None:
+    """综合问题 → 多 Skill 组合计划；未命中返回 None。
+    命中场景：市场主线 / 风险提示 → market_snapshot + sector_snapshot 组合取数，
+    给 synth_answer 更充分证据。不命中保持单 Skill 兜底。
+    """
+    is_mainline = ("主线" in message) or ("市场主线" in message)
+    is_risk = ("风险提示" in message) or ("风险" in message and "风险提示" in message)
+    if not (is_mainline or is_risk):
+        return None
+    return [
+        SkillCall(skill_name="market_snapshot", args={"scope": "both", "snapshot_kind": "quick"}),
+        SkillCall(skill_name="sector_snapshot", args={}),
+    ]
+
+
 async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     """QA Router 节点入口。"""
     import time
@@ -282,6 +300,21 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
 
     except Exception as exc:
         logger.warning("qa_router.llm_failed", err=str(exc), exc_info=True)
+        # 综合问题优先 compose，避免落入单 Skill 兜底导致回答稀疏
+        compose_plan = build_compose_plan(message)
+        if compose_plan is not None:
+            goal = InsightGoal(
+                question=message,
+                intent="market_snapshot",
+                constraints={"router_fallback": "true"},
+            )
+            logger.info("qa_router.fallback.compose", skills=[c.skill_name for c in compose_plan])
+            metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+            return {
+                "goal": goal,
+                "plan": "compose",
+                "skill_calls": compose_plan,
+            }
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
         # 个股意图但缺失 6 位代码：不执行空参 Skill，写澄清状态让 synth_answer 短路

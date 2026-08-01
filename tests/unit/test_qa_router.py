@@ -262,3 +262,46 @@ def test_extract_report_date_relative_and_fallback() -> None:
     # 无显式日期 → 返回今天（或非遗日回退最近交易日）
     result = extract_report_date("复盘报告有哪些未解决问题")
     assert date.fromisoformat(result) is not None  # 合法日期
+
+
+def test_build_compose_plan_market_mainline() -> None:
+    """市场主线 → market_snapshot + sector_snapshot compose。"""
+    from aistock_agent.graph.nodes.qa_router import build_compose_plan
+
+    plan = build_compose_plan("帮我梳理今天的市场主线")
+    assert plan is not None
+    assert len(plan) == 2
+    assert {c.skill_name for c in plan} == {"market_snapshot", "sector_snapshot"}
+    assert plan[0].depends_on == []
+
+
+def test_build_compose_plan_risk() -> None:
+    """风险提示 → market_snapshot + sector_snapshot compose。"""
+    from aistock_agent.graph.nodes.qa_router import build_compose_plan
+
+    plan = build_compose_plan("市场有哪些风险提示")
+    assert plan is not None
+    assert len(plan) == 2
+    assert {c.skill_name for c in plan} == {"market_snapshot", "sector_snapshot"}
+
+
+def test_build_compose_plan_none_for_normal_question() -> None:
+    """普通问题不触发 compose。"""
+    from aistock_agent.graph.nodes.qa_router import build_compose_plan
+
+    assert build_compose_plan("茅台今天行情怎么样") is None
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_compose_plan() -> None:
+    """LLM 异常 → 综合问题（市场主线）命中 compose 计划，优先于单 Skill 兜底。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("帮我梳理今天的市场主线"))
+    assert result["plan"] == "compose"
+    assert len(result["skill_calls"]) == 2
+    assert {c.skill_name for c in result["skill_calls"]} == {"market_snapshot", "sector_snapshot"}
+    assert result["goal"].constraints.get("router_fallback") == "true"
