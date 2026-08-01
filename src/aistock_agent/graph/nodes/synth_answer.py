@@ -206,9 +206,14 @@ def _build_degraded_insight(
             + "\n".join(f"- {fact}" for fact in all_facts)
             + "\n\n## 数据说明\n"
             f"综合回答生成失败（{reason}），已返回原始证据事实。"
+            + "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     else:
-        conclusion = "## 核心结论\n当前没有可用的数据事实，暂时无法回答该问题。"
+        conclusion = (
+            "## 核心结论\n"
+            "当前没有可用的数据事实，暂时无法回答该问题。"
+            "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
+        )
     return Insight(
         conclusion=conclusion,
         basis=evidences,

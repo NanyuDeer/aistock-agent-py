@@ -434,3 +434,4 @@ def test_build_degraded_insight_structured_conclusion() -> None:
     assert insight.conclusion.startswith("## 核心结论")
     assert "## 行情要点" in insight.conclusion
     assert "上证指数" in insight.conclusion
+    assert "继续问我" in insight.conclusion
