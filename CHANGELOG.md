@@ -2,6 +2,26 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [main] 2026-08-01 — Stock Trace Consumer 集成到主进程 + PRD 对齐小改动
+
+**开发者**: NanyuDeer
+
+### 新增
+- `deploy/ecosystem.config.json`：PM2 部署配置，环境变量 `STOCK_TRACE_CONSUMER_ENABLED=true`，一次 `pm2 restart aistock-agent` 同时刷新主服务 + consumer
+- `docs/异动捕手与溯源-逻辑分析与改进设计.md`：完整逻辑梳理 + 改进方案设计文档
+
+### 改进
+- `config.py`：新增 `stock_trace_consumer_enabled` 配置项（默认 `True`），控制 consumer 是否在主进程内启动
+- `main.py`：lifespan 集成 Stock Trace Consumer 启动/关闭逻辑 — 创建独立 `aioredis.Redis` 实例（db=2，不复用 RedisPool 单例 db=1），用 `asyncio.create_task` 启动；关闭时先 cancel task → 等待 CancelledError → 关闭独立 redis
+- `workers/stock_trace_consumer.py`：新增模块级心跳变量 `_stock_trace_consumer_enabled` / `_stock_trace_consumer_last_heartbeat`，`run_forever` 每次循环更新心跳，供 `/health/ready` 检查
+- `api/routes.py`：`/health/ready` 新增 `stock_trace_consumer` 心跳检查项（>60s 报 error，未启用 skipped，刚启动 pending）
+- `AGENTS.md`：新增"部署（华为云 PM2）"章节和"Stock Trace Consumer 集成模式"说明
+
+### 文档
+- `agents/workers/alert.py`：顶部 docstring 补充决策说明（按用户决策维持 Phase 6 架构，暂不收缩为适配层，归因走 stock_trace 链路）
+
+---
+
 ## [main] 2026-08-01 — wind_leader/trend_score repair 失败降级修复
 
 **开发者**: Aria

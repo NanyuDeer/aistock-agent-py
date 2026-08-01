@@ -1,0 +1,28 @@
+{
+  "apps": [
+    {
+      "name": "aistock-agent",
+      "script": "python",
+      "args": "-m uvicorn aistock_agent.main:app --host 0.0.0.0 --port 8000",
+      "cwd": "/home/aistock/aistock-agent-py",
+      "interpreter": "none",
+      "instances": 1,
+      "exec_mode": "fork",
+      "watch": false,
+      "autorestart": true,
+      "max_restarts": 0,
+      "restart_delay": 5000,
+      "env": {
+        "PYTHONPATH": "src",
+        "APP_ENV": "production",
+        "TZ": "Asia/Shanghai",
+        "STOCK_TRACE_CONSUMER_ENABLED": "true"
+      },
+      "error_file": "/home/aistock/logs/aistock-agent-error.log",
+      "out_file": "/home/aistock/logs/aistock-agent-out.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+      "merge_logs": true,
+      "max_memory_restart": "1G"
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import socket
+import time
 from collections.abc import Mapping
 
 import redis.asyncio as aioredis
@@ -18,6 +19,13 @@ from aistock_agent.services.stock_trace_client import StockTraceNodeClient
 STREAM = "stock-trace.jobs"
 DLQ_STREAM = "stock-trace.jobs.dlq"
 logger = structlog.get_logger()
+
+
+# 心跳可观测性：供 /health/ready 检查 consumer 是否卡死。
+# _enabled 在 main.py lifespan 启动 consumer 时置 True；
+# _last_heartbeat 在 run_forever 每次循环开头更新（含无消息的空转）。
+_stock_trace_consumer_enabled = False
+_stock_trace_consumer_last_heartbeat: float | None = None
 
 
 def _text(value: object) -> str:
@@ -144,7 +152,10 @@ class StockTraceConsumer:
         logger.warning("stock_trace_job_dead_letter", job_id=job_id, error_code=error_code)
 
     async def run_forever(self) -> None:
+        global _stock_trace_consumer_last_heartbeat
+        _stock_trace_consumer_last_heartbeat = time.time()
         while True:
+            _stock_trace_consumer_last_heartbeat = time.time()
             try:
                 await self.consume_once()
             except asyncio.CancelledError:

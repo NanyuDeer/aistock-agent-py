@@ -1126,8 +1126,26 @@ async def readiness(response: Response) -> dict[str, object]:
     else:
         checks["llm"] = "skipped"
 
-    # "skipped" 不算失败，只有非 ok/非 skipped 的检查项才判定 degraded
-    degraded = any(v not in ("ok", "skipped") for v in checks.values())
+    # Stock Trace Consumer 心跳（集成模式下检查；未启用或刚启动未消费过则 skipped/pending）
+    try:
+        import aistock_agent.workers.stock_trace_consumer as _stc_module
+
+        if not _stc_module._stock_trace_consumer_enabled:
+            checks["stock_trace_consumer"] = "skipped"
+        elif _stc_module._stock_trace_consumer_last_heartbeat is None:
+            checks["stock_trace_consumer"] = "pending"
+        else:
+            age = time.time() - _stc_module._stock_trace_consumer_last_heartbeat
+            if age > 60:
+                checks["stock_trace_consumer"] = f"error: heartbeat stale ({age:.0f}s)"
+            else:
+                checks["stock_trace_consumer"] = f"ok ({age:.0f}s)"
+    except Exception as e:
+        _health_logger.warning("health_check_stock_trace_consumer_failed", error=str(e))
+        checks["stock_trace_consumer"] = f"error: {e}"
+
+    # "skipped"/"pending" 不算失败，只有非 ok/非 skipped/非 pending 的检查项才判定 degraded
+    degraded = any(v not in ("ok", "skipped", "pending") and not v.startswith("ok ") for v in checks.values())
     if degraded:
         response.status_code = 503
         return {"status": "degraded", "checks": checks}

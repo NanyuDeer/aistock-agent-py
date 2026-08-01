@@ -262,6 +262,29 @@ mypy src/                                  # 类型检查
 python -c "from aistock_agent.graph.builder import compile_graph; compile_graph()"  # 验证图可编译
 ```
 
+## 部署（华为云服务器，PM2 管理）
+
+`deploy/ecosystem.config.json` 为 PM2 配置，主进程内集成 Stock Trace Consumer（无需独立进程）。
+
+```bash
+# 首次部署
+cd /home/aistock/aistock-agent-py
+pm2 start deploy/ecosystem.config.json
+pm2 save
+
+# 更新代码后重启（一次重启同时刷新主服务 + consumer）
+cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
+
+# 查看日志
+pm2 logs aistock-agent --lines 50
+```
+
+### Stock Trace Consumer 集成模式（2026-08-01）
+
+- `STOCK_TRACE_CONSUMER_ENABLED=true`（默认）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
+- `STOCK_TRACE_CONSUMER_ENABLED=false`：consumer 不启动，需独立进程运行 `python -m aistock_agent.workers.stock_trace_consumer`
+- 关闭顺序：lifespan 退出时先 `cancel()` consumer task → 等待 CancelledError → 关闭独立 redis 连接 → 再关 RedisPool / HttpClientPool
+
 ## 关键约束
 
 - 禁止在 Python 重复实现 A 股数据获取逻辑

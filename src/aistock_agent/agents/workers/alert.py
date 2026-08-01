@@ -6,6 +6,11 @@
   - SSE 流：子 Agent 完成后流式输出 Master 结果
 
 模式：asyncio.gather 并行子 Agent → Master ReAct agent → astream_events
+
+注意（2026-08-01）：
+  按异动捕手 PRD V1.3 / SPEC，本文件最终应收缩为"交付适配层"，归因逻辑
+  由 stock_trace.py（受限 LLM + Schema 校验）承担。当前维持 Phase 6 架构
+  不变（用户决策：已跑通，暂不收缩），新增异动归因请走 stock_trace 链路。
 """
 
 import asyncio
