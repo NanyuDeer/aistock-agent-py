@@ -2,6 +2,35 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间区间、开发者。
 
+## [changer] 2026-08-01 — CHAT QA 周末降级回退 + 结构化回答 + 单项修复
+
+**开发者**: 37588
+
+### 改进
+- `skills/market_snapshot.py`：非交易日/盘中 quick/full 快照失败时自动回退 `/internal/market/last-close-snapshot`，返回最近交易日真实指数/广度/成交额/涨跌停数据；有真实数据 `degraded=False`，source title 标注"最近交易日快照 (trade_date)"，raw 暴露 `used_last_close`/`trade_date`；global 无 last-close 回退源，失败仍 degraded，但 A 股可独立成功
+- `graph/nodes/synth_answer.py`：`conclusion` 强制 Markdown 分节输出（`## 核心结论` / `## 行情要点` / `## 数据说明`）+ 结尾引导追问句；降级兜底回答同样分节 + 引导句，不再一句"无法提供"
+
+### 新增
+- `graph/nodes/qa_router.py` 指数名识别：沪指/上证/深成指/创业板指/科创50/沪深300/中证500/中证1000/恒生等别名 → 路由 `market_snapshot`（`goal.constraints.index_name`），修复指数问题被当个股代码报"未找到股票代码"的问题
+- `graph/nodes/qa_router.py` 报告日期提取：支持显式 `YYYY-MM-DD`/`YYYYMMDD`/昨天/前天，非交易日"今天"自动回退最近交易日，用于 report_lookup/trace_lookup/evidence_resolver
+- `graph/nodes/qa_router.py` 综合问题 compose：市场主线/风险提示类问题生成 `market_snapshot + sector_snapshot` 组合取数计划
+
+### 修复
+- `extract_report_date` 的 YYYYMMDD 紧凑格式正则缺失（`20260731` 在交易日被静默解析为当天）——已补互斥紧凑分支 + 确定性日期断言测试
+
+### 测试
+- `tests/unit/test_market_snapshot.py`：last-close 降级 3 用例 + scope=both 周末语义用例（13→14 项）
+- `tests/unit/test_qa_router.py`：指数名/日期提取/日期回退用例（25→30 项）
+- `tests/unit/test_synth_answer.py`：结构化分节 + 降级分节用例（28→30 项）
+- `tests/integration/test_chat_degraded.py`：basis_indices 越界安全降级结构化验证（4→5 项）
+- 全部 79 项单元/集成测试通过，ruff 改动文件全绿
+
+### 文档
+- `AGENTS.md`：新增 CHAT QA 行为说明（market_snapshot 降级语义 / qa_router 指数与日期 / synth 结构化输出）
+- `project_memory.md`：新增经验教训 #13（CHAT QA 周末降级与结构化回答）
+
+---
+
 ## [changer] 2026-08-01 — 事件驱动晚报链路 brief_summary 缺失修复
 
 **开发者**: 37588
