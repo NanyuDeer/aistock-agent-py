@@ -517,6 +517,30 @@ def render_market_trace_markdown(
         lines.append("- 证据不足，未确认主因。")
     lines.append("")
 
+    # 预判对照章节
+    pv = trace.prediction_validation
+    lines.append("## 预判对照")
+    if pv is None or pv.status == "no_forecast":
+        lines.append("无晨报预测可对照。")
+    else:
+        status_map = {"hit": "全部命中", "partial": "部分命中", "miss": "全部偏离"}
+        lines.append(f"- 对照状态：{status_map.get(pv.status, pv.status)}")
+        if pv.sector_hits:
+            lines.append("- 板块方向对照：")
+            for hit in pv.sector_hits:
+                result_text = "命中" if hit.result == "hit" else "偏离"
+                line = f"  - {hit.sector}：晨报看{hit.morning_direction}，实际{hit.actual_direction}，{result_text}"
+                if hit.result == "miss" and hit.deviation_note:
+                    line += f"（原因：{hit.deviation_note}）"
+                lines.append(line)
+        if pv.event_hits:
+            lines.append("- 事件影响对照：")
+            for hit in pv.event_hits:
+                lines.append(f"  - {hit.event_title}：预期{hit.morning_direction}，实际{hit.actual_impact}，{hit.result}")
+        if pv.overall_note:
+            lines.append(f"- 整体结论：{pv.overall_note}")
+    lines.append("")
+
     lines.append("## 候选解释与反证")
     if trace.candidates:
         for candidate in trace.candidates:
