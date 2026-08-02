@@ -14,7 +14,6 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from sse_starlette.sse import EventSourceResponse
 
-from aistock_agent.utils.date import shanghai_today
 from aistock_agent.api.deps import (
     build_chat_initial_state,
     build_initial_state,
@@ -25,7 +24,7 @@ from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
-from aistock_agent.schemas.chat import AdvisorTrace, ChatRequest, ChatResponse
+from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
@@ -42,14 +41,13 @@ from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 
 def _select_graph() -> CompiledStateGraph:
-    """按特性开关选择 graph。
+    """按入口路由选择 graph：Chat 入口（/chat/*、/ws/chat）恒走 ChatAgent。
 
-    开关开启时返回 compile_chat_graph()（新 CHAT 子图），
-    关闭时返回 compile_graph()（老路径）。
+    报告入口（/briefing/*、trigger 类）不经过本函数，直接使用 compile_graph()。
+    ``chat_graph_enabled`` 字段保留在 config 中作回滚闸门，路由不再读取
+    （回滚时临时恢复读取该字段即可）。
     """
-    if settings.chat_graph_enabled:
-        return compile_chat_graph()
-    return compile_graph()
+    return compile_chat_graph()
 
 
 router = APIRouter()
@@ -95,43 +93,17 @@ async def chat_message(
     """
     graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
-
-    if settings.chat_graph_enabled:
-        initial_state = build_chat_initial_state(req.message)
-        result = await graph.ainvoke(
-            initial_state,
-            config={"configurable": {"thread_id": session_id}},
-        )
-        content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-        return ChatResponse(
-            content=content,
-            session_id=session_id,
-            advisor_trace=None,
-        )
-
-    # 老路径保留
-    initial_state = build_initial_state(
-        message=req.message,
-        session_id=session_id,
-        user_id=req.user_id,
-        favorites=req.favorites,
-    )
-
+    initial_state = build_chat_initial_state(req.message)
     result = await graph.ainvoke(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
     )
-
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    advisor_trace = result.get("advisor_trace")
+    # ChatAgent 无 advisor_trace（新子图），固定 None
     return ChatResponse(
         content=content,
         session_id=session_id,
-        advisor_trace=(
-            AdvisorTrace.model_validate(advisor_trace)
-            if isinstance(advisor_trace, dict)
-            else None
-        ),
+        advisor_trace=None,
     )
 
 
@@ -301,16 +273,7 @@ async def chat_stream_messages(
     """
     graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
-
-    if settings.chat_graph_enabled:
-        initial_state = build_chat_initial_state(req.message)
-    else:
-        initial_state = build_initial_state(
-            message=req.message,
-            session_id=session_id,
-            user_id=req.user_id,
-            favorites=req.favorites,
-        )
+    initial_state = build_chat_initial_state(req.message)
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
@@ -1020,8 +983,6 @@ async def list_reports(date: str = "") -> dict[str, object]:
 
     返回格式: { "date": "2026-07-15", "items": [{report_type, label, icon}, ...] }
     """
-    from datetime import date as dt
-
     from aistock_agent.services.report_cache import list_reports as cache_list
 
     report_date = date or shanghai_today().isoformat()
@@ -1145,7 +1106,10 @@ async def readiness(response: Response) -> dict[str, object]:
         checks["stock_trace_consumer"] = f"error: {e}"
 
     # "skipped"/"pending" 不算失败，只有非 ok/非 skipped/非 pending 的检查项才判定 degraded
-    degraded = any(v not in ("ok", "skipped", "pending") and not v.startswith("ok ") for v in checks.values())
+    degraded = any(
+        v not in ("ok", "skipped", "pending") and not v.startswith("ok ")
+        for v in checks.values()
+    )
     if degraded:
         response.status_code = 503
         return {"status": "degraded", "checks": checks}

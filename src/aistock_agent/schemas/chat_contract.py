@@ -21,6 +21,7 @@ class InsightGoal(BaseModel):
     intent: Literal[
         "capital_flow",
         "evidence_resolver",
+        "hot_burst",
         "industry_relation",
         "market_snapshot",
         "report_lookup",
@@ -73,7 +74,7 @@ class Insight(BaseModel):
     basis: list[Evidence]
     confidence: Literal["high", "medium", "low"]
     uncertainty: list[str] = []
-    answer_mode: Literal["predict", "trace", "validate"]
+    answer_mode: Literal["predict", "trace", "validate", "deep"]  # D31：deep 统一出口
 
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +85,7 @@ class SkillCall(BaseModel):
     skill_name: Literal[
         "capital_flow",
         "evidence_resolver",
+        "hot_burst",
         "industry_relation",
         "market_snapshot",
         "report_lookup",
@@ -105,6 +107,6 @@ class AnswerTrace(BaseModel):
     plan: Literal["direct", "compose"]
     skill_calls: list[SkillCall]
     evidences: list[Evidence]
-    actual_mode: Literal["predict", "trace", "validate"]
+    actual_mode: Literal["predict", "trace", "validate", "deep"]  # D31：deep 统一出口
 
     model_config = ConfigDict(extra="forbid")

@@ -9,13 +9,17 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
-from aistock_agent.utils.date import shanghai_today
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.hot_burst_tools import get_hot_burst_history
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
+from aistock_agent.utils.report_parser import (
+    is_dual_layer_valid,
+    parse_dual_layer_response,
+    repair_dual_layer_with_llm,
+)
 
 logger = structlog.get_logger()
 
@@ -181,12 +185,14 @@ async def run(state: AgentState) -> dict[str, object]:
                 else:
                     logger.warning("hot_burst_dual_layer_repair_failed")
 
-            # 缓存到本地（前端报告列表查询用）
-            try:
-                from aistock_agent.services.report_cache import set_report
-                set_report("hot_burst", report_date, dual)
-            except Exception:
-                pass
+            # 缓存到本地（前端报告列表查询用）— 仅 scheduler 写入，
+            # 防止对话结果污染前端"机构调研"报告列表（D7 语义一致）
+            if state.get("trigger_source") == "scheduler":
+                try:
+                    from aistock_agent.services.report_cache import set_report
+                    set_report("hot_burst", report_date, dual)
+                except Exception:
+                    pass
 
             # 持久化到数据库（scheduler 触发时）
             if state.get("trigger_source") == "scheduler":

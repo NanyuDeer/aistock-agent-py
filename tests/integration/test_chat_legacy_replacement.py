@@ -1,14 +1,14 @@
-"""P1.4 老路径替换 — 集成测试。
+"""P1.4 老路径替换 → M5 入口路由切换 — 集成测试。
 
-覆盖：
-- chat_message 在开关开启/关闭时的行为
-- chat_stream_messages 在开关开启时的 SSE 流
-- chat_stream_updates 在开关开启时的 AGENT_SWITCH 事件
-- 开关回退验证
+覆盖（M5 后 /chat/* 恒走 ChatAgent，开关退役）：
+- _select_graph() 恒返回 compile_chat_graph()（不读 chat_graph_enabled）
+- chat_message 恒走新子图，advisor_trace=None
+- chat_stream_messages 过滤 qa_router 节点
+- chat_stream_updates 发射 CHAT 节点 label
+- 报告入口（/briefing/*）仍走 compile_graph（回归不破）
 """
 
 import asyncio
-import json
 from unittest.mock import patch
 
 import pytest
@@ -16,8 +16,6 @@ from fastapi.testclient import TestClient
 
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.config import settings
-from aistock_agent.graph.builder import compile_graph
-from aistock_agent.graph.chat_builder import compile_chat_graph
 
 
 @pytest.fixture
@@ -27,34 +25,22 @@ def client():
     return TestClient(app)
 
 
-@pytest.fixture
-def chat_enabled(monkeypatch):
-    """临时开启 chat_graph_enabled 开关。"""
-    monkeypatch.setattr(settings, "chat_graph_enabled", True)
-    yield
-    monkeypatch.setattr(settings, "chat_graph_enabled", False)
+def test_select_graph_always_returns_chat_graph():
+    """_select_graph() 恒返回 compile_chat_graph()，不再读 chat_graph_enabled 开关。"""
+    with patch(
+        "aistock_agent.api.routes.compile_graph",
+        side_effect=AssertionError("compile_graph 不应被 chat 入口调用"),
+    ), patch("aistock_agent.api.routes.compile_chat_graph") as mock_chat:
+        mock_chat.return_value = object()
+        graph = _select_graph()
+    assert graph is mock_chat.return_value
 
 
-@pytest.fixture
-def chat_disabled(monkeypatch):
-    """确保 chat_graph_enabled 关闭（默认状态）。"""
-    monkeypatch.setattr(settings, "chat_graph_enabled", False)
-    yield
-
-
-def test_select_graph_returns_compile_graph_when_disabled(chat_disabled):
-    """开关关闭时，_select_graph 返回老路径 graph。"""
+def test_select_graph_returns_chat_graph_with_qa_router_node():
+    """_select_graph 返回真实 ChatAgent，节点包含 qa_router。"""
     graph = _select_graph()
     assert graph is not None
     assert hasattr(graph, "ainvoke")
-
-
-def test_select_graph_returns_compile_chat_graph_when_enabled(chat_enabled):
-    """开关开启时，_select_graph 返回新 CHAT 子图。"""
-    graph = _select_graph()
-    assert graph is not None
-    assert hasattr(graph, "ainvoke")
-    # 新子图的节点名应包含 qa_router
     assert "qa_router" in graph.nodes
 
 
@@ -65,10 +51,8 @@ async def _mock_aget_state(config=None):
     return _MockState()
 
 
-def test_chat_message_returns_advisor_trace_none_when_enabled(
-    client, chat_enabled, monkeypatch
-):
-    """开关开启时，/chat/message 走新子图，advisor_trace=None。"""
+def test_chat_message_returns_advisor_trace_none(client, monkeypatch):
+    """/chat/message 恒走新子图，advisor_trace=None。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "测试回复",
@@ -93,8 +77,8 @@ def test_chat_message_returns_advisor_trace_none_when_enabled(
     assert data["advisor_trace"] is None
 
 
-def test_chat_message_clarification_when_enabled(client, chat_enabled):
-    """开关开启时，/chat/message 澄清路径返回澄清文本。"""
+def test_chat_message_clarification(client):
+    """/chat/message 澄清路径返回澄清文本，advisor_trace=None。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "请提供 6 位股票代码后重试。",
@@ -120,14 +104,15 @@ def test_chat_message_clarification_when_enabled(client, chat_enabled):
 
 
 @pytest.mark.asyncio
-async def test_stream_messages_filters_qa_router_node(chat_enabled):
+async def test_stream_messages_filters_qa_router_node():
     """_stream_messages 过滤 qa_router 节点的 on_chat_model_stream 事件。
 
     qa_router 的 LLM 调用是内部意图识别，不应流式给用户。
     """
+    from langchain_core.messages import AIMessageChunk
+
     from aistock_agent.api.routes import _stream_messages
     from aistock_agent.constants import SSEEventType
-    from langchain_core.messages import AIMessageChunk
 
     # 构造 mock 事件队列：qa_router 的 token + synth_answer 的 token + None 哨兵
     qa_router_token_event = {
@@ -181,14 +166,11 @@ async def test_stream_messages_filters_qa_router_node(chat_enabled):
 
 
 @pytest.mark.asyncio
-async def test_stream_updates_emits_label_for_chat_nodes(chat_enabled):
+async def test_stream_updates_emits_label_for_chat_nodes():
     """_stream_updates 在新子图节点切换时发射带 label 的 AGENT_SWITCH 事件。"""
     import asyncio
-    from aistock_agent.api.routes import (
-        _stream_updates,
-        _message_queues,
-        _update_queues,
-    )
+
+    from aistock_agent.api.routes import _stream_updates, _update_queues
     from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 
     # 构造事件序列：qa_router → skill_executor → synth_answer → None 哨兵
@@ -241,82 +223,27 @@ async def test_stream_updates_emits_label_for_chat_nodes(chat_enabled):
     assert len(done_events) == 1
 
 
-def test_chat_message_legacy_path_when_disabled(client, chat_disabled):
-    """开关关闭时，/chat/message 走老路径，advisor_trace 来自老路径结果。"""
-    # mock compile_graph 返回的 graph 的 ainvoke
-    async def mock_ainvoke(state, config=None):
-        return {
-            "final_response": "老路径回复",
-            "advisor_trace": {
-                "schema_version": "1.0",
-                "subquestions": [],
-                "missing_sources": [],
-                "degraded": False,
-            },
-        }
-
-    with patch("aistock_agent.api.routes.compile_graph") as mock_compile:
+def test_briefing_still_uses_compile_graph(client):
+    """/briefing/morning 报告入口仍走 compile_graph（M5 回归不破）。"""
+    # 直接验证 morning_briefing 路由内部使用 compile_graph 而非 _select_graph
+    # （通过 mock compile_graph 断言被调用；compile_chat_graph 不应被调用）
+    with patch("aistock_agent.api.routes.compile_graph") as mock_compile, patch(
+        "aistock_agent.api.routes.compile_chat_graph",
+        side_effect=AssertionError("报告入口不应走 ChatAgent"),
+    ):
+        # 触发路由调用（TestClient 走 SSE；这里用 mock 图短路）
         mock_graph = mock_compile.return_value
-        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.astream_events = _empty_stream
+        mock_graph.aget_state = _mock_aget_state
 
-        response = client.post(
-            "/api/agent/chat/message",
-            json={"message": "测试问题"},
-            headers={"X-Internal-Token": settings.internal_api_token},
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["content"] == "老路径回复"
-    # 老路径应返回非 None 的 advisor_trace
-    assert data["advisor_trace"] is not None
-    assert data["advisor_trace"]["schema_version"] == "1.0"
-
-
-def test_fallback_to_legacy_after_disabling(client, monkeypatch):
-    """开关开启后关闭，老路径恢复正常。"""
-    # 先开启
-    monkeypatch.setattr(settings, "chat_graph_enabled", True)
-
-    async def mock_chat_ainvoke(state, config=None):
-        return {"final_response": "新子图回复", "insight": None, "trace": None}
-
-    with patch("aistock_agent.api.routes.compile_chat_graph") as mock_chat_compile:
-        mock_chat_graph = mock_chat_compile.return_value
-        mock_chat_graph.ainvoke = mock_chat_ainvoke
-
-        response = client.post(
-            "/api/agent/chat/message",
-            json={"message": "测试"},
+        response = client.get(
+            "/api/agent/briefing/morning",
             headers={"X-Internal-Token": settings.internal_api_token},
         )
         assert response.status_code == 200
-        assert response.json()["content"] == "新子图回复"
-        assert response.json()["advisor_trace"] is None
+        mock_compile.assert_called()
 
-    # 关闭开关
-    monkeypatch.setattr(settings, "chat_graph_enabled", False)
 
-    async def mock_legacy_ainvoke(state, config=None):
-        return {
-            "final_response": "老路径回复",
-            "advisor_trace": {
-                "schema_version": "1.0",
-                "subquestions": [],
-                "missing_sources": [],
-                "degraded": False,
-            },
-        }
-
-    with patch("aistock_agent.api.routes.compile_graph") as mock_legacy_compile:
-        mock_legacy_graph = mock_legacy_compile.return_value
-        mock_legacy_graph.ainvoke = mock_legacy_ainvoke
-
-        response = client.post(
-            "/api/agent/chat/message",
-            json={"message": "测试"},
-            headers={"X-Internal-Token": settings.internal_api_token},
-        )
-        assert response.status_code == 200
-        assert response.json()["content"] == "老路径回复"
-        assert response.json()["advisor_trace"] is not None
+async def _empty_stream(initial_state, config=None, version="v2"):
+    return
+    yield  # pragma: no cover

@@ -40,6 +40,8 @@ class MetricsCollector:
         self._skill_latency: dict[str, dict[str, int]] = {}
         self._skill_degraded: dict[str, int] = {}
         self._synth_degraded = 0
+        # T6：deep 升级率基础计数（按 worker 名分桶，D3）
+        self._chat_qa_escalations: dict[str, int] = {}
 
     def record_llm_start(self, model: str = "") -> None:
         """记录一次 LLM 调用开始（调用次数 +1）。
@@ -131,6 +133,17 @@ class MetricsCollector:
         with self._lock:
             self._synth_degraded += 1
 
+    def record_chat_qa_escalation(self, worker: str) -> None:
+        """记录一次 deep 升级（按 worker 名分桶，供升级率 deep/total 计算）。
+
+        Args:
+            worker: worker 名（"stock" / "sector" / "hot_burst"）。
+        """
+        with self._lock:
+            self._chat_qa_escalations[worker] = (
+                self._chat_qa_escalations.get(worker, 0) + 1
+            )
+
     def get_metrics(self) -> dict[str, object]:
         """返回当前累计指标快照。
 
@@ -157,6 +170,7 @@ class MetricsCollector:
             }
             skill_degraded = dict(self._skill_degraded)
             synth_degraded = self._synth_degraded
+            chat_qa_escalations = dict(self._chat_qa_escalations)
         error_rate = (llm_errors / llm_calls) if llm_calls > 0 else 0.0
 
         def _avg(bucket: dict[str, int]) -> float:
@@ -180,6 +194,7 @@ class MetricsCollector:
                 },
                 "skill_degraded_total": skill_degraded,
                 "synth_degraded_total": synth_degraded,
+                "escalation_total": chat_qa_escalations,
             },
         }
 
@@ -201,6 +216,7 @@ class MetricsCollector:
             self._skill_latency = {}
             self._skill_degraded = {}
             self._synth_degraded = 0
+            self._chat_qa_escalations = {}
 
 
 # 模块级单例：全局共享，回调 handler 与端点读取同一实例。

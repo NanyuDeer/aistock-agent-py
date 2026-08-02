@@ -91,7 +91,8 @@ async def _run_sub_agent(
 
 
 def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
-    """解析流式输出并缓存到 report_cache（内存缓存，进程重启即丢失；DB 持久化在 stream/run 中完成）"""
+    """解析流式输出并缓存到 report_cache
+    （内存缓存，进程重启即丢失；DB 持久化在 stream/run 中完成）"""
     symbol = str(state.get("symbol") or "")
     try:
         display_report = None
