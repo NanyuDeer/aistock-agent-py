@@ -56,6 +56,36 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    不得据此确认因果。hypothesis 不得选择主链，只可选择 weak 备选；
    insufficient 不得选择任何链，候选只能为 insufficient/rejected。
 
+【预判对照规则】
+若 snapshot.morning_forecast 非空，你必须：
+1. 对照 morning_forecast.sectors 中每个板块的方向判断与实际行情（a_share.sectors），
+   逐项判定 hit/miss，填入 prediction_validation.sector_hits。
+   - actual_direction 从 a_share.sectors.top_gainers/top_losers 推断
+   - 方向一致为 hit，不一致为 miss（deviation_note 必填）
+2. 对照 morning_forecast.major_events 中每个事件的预期方向与实际影响，
+   填入 prediction_validation.event_hits。
+   - 若事件影响可在 sources 中找到证据，判定 hit/miss
+   - 若无法验证，判定 unverifiable
+3. 在归因推理时，把"预测偏离的板块"作为重点解释对象：
+   若晨报看多但实际领跌，trigger/exposure/repricing 节点必须显式说明偏离原因。
+4. prediction_validation.status 判定：
+   - hit：全部板块方向一致
+   - partial：部分一致
+   - miss：全部偏离
+   - no_forecast：snapshot.morning_forecast 为空
+
+若 snapshot.morning_forecast 为空，prediction_validation 输出 {"status": "no_forecast"}。
+
+【外盘传导判定规则】
+global_risk_liquidity 候选的传导链必须显式区分：
+1. "外盘传导"：隔夜美股/亚太/欧洲股市变动通过情绪/资金渠道影响 A 股（需引用 GLOBAL_* 证据）
+2. "A 股独立行情"：全球市场平稳但 A 股独立波动（需说明独立性证据）
+
+若 snapshot.sources 中无 GLOBAL_* 证据或外盘数据缺失，
+global_risk_liquidity 不得获得 supported 状态，最多 weak。
+板块同步上涨时，不得仅凭"同期上涨"判定外盘传导，
+必须验证时间顺序（外盘先动 → A 股后动）和机制（资金/情绪/联动品种）。
+
 【CandidateExplanation 字段约束】
 - id: 必须与 category 同名（例如 id="global_risk_liquidity", category="global_risk_liquidity"）
 - category: 上述 4 个之一
