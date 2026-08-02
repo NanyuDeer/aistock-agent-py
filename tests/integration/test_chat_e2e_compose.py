@@ -170,7 +170,7 @@ async def test_compose_serial_with_depends_on():
         },
     ):
         graph = compile_chat_graph(checkpointer=None)
-        result = await graph.ainvoke(_build_state("茅台行情和新闻"))
+        result = await graph.ainvoke(_build_state("茅台行情和新闻 + 白酒板块"))
 
     # 两个 Skill 都执行
     assert len(result["evidences"]) == 2

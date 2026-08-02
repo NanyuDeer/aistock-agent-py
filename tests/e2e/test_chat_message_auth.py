@@ -24,9 +24,9 @@ _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 @pytest.mark.asyncio
 async def test_chat_message_missing_token_returns_403():
     """缺失 X-Internal-Token 时返回 403（鉴权在业务逻辑前拦截）"""
-    # compile_graph 不应被调用；若被调用说明鉴权未生效，让其显式报错
-    with patch("aistock_agent.api.routes.compile_graph",
-               side_effect=AssertionError("auth should block before compile_graph")):
+    # compile_chat_graph 不应被调用；若被调用说明鉴权未生效，让其显式报错
+    with patch("aistock_agent.api.routes.compile_chat_graph",
+               side_effect=AssertionError("auth should block before compile_chat_graph")):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -38,8 +38,8 @@ async def test_chat_message_missing_token_returns_403():
 @pytest.mark.asyncio
 async def test_chat_message_invalid_token_returns_403():
     """X-Internal-Token 不匹配时返回 403"""
-    with patch("aistock_agent.api.routes.compile_graph",
-               side_effect=AssertionError("auth should block before compile_graph")):
+    with patch("aistock_agent.api.routes.compile_chat_graph",
+               side_effect=AssertionError("auth should block before compile_chat_graph")):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -58,7 +58,7 @@ async def test_chat_message_valid_token_passes_auth():
     mock_graph = AsyncMock()
     mock_graph.ainvoke = AsyncMock(return_value={"final_response": "mocked 回复"})
 
-    with patch("aistock_agent.api.routes.compile_graph",
+    with patch("aistock_agent.api.routes.compile_chat_graph",
                return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -76,22 +76,18 @@ async def test_chat_message_valid_token_passes_auth():
 
 
 @pytest.mark.asyncio
-async def test_chat_message_returns_advisor_trace():
+async def test_chat_message_advisor_trace_always_none():
+    """M5 后 ChatAgent 无 advisor_trace，即使 graph 输出携带也固定返回 null。"""
     trace = {
         "schema_version": "advisor_trace.v1",
-        "subquestions": [
-            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": [], "degraded": False},
-            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": ["stock_trace"], "degraded": True},
-        ],
-        "missing_sources": ["stock_trace"],
-        "degraded": True,
+        "subquestions": [],
+        "missing_sources": [],
+        "degraded": False,
     }
     mock_graph = AsyncMock()
     mock_graph.ainvoke = AsyncMock(return_value={"final_response": "降级", "advisor_trace": trace})
 
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -99,4 +95,4 @@ async def test_chat_message_returns_advisor_trace():
                 _CHAT_URL, json={"message": "个股 600519"}, headers=_VALID_HEADERS
             )
 
-    assert resp.json()["advisor_trace"] == trace
+    assert resp.json()["advisor_trace"] is None

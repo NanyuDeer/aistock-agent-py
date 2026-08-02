@@ -6,7 +6,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from aistock_agent.api.deps import build_chat_initial_state
 from aistock_agent.api.routes import _select_graph
-from aistock_agent.config import settings
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 
 logger = logging.getLogger(__name__)
@@ -54,30 +53,18 @@ async def ws_chat(websocket: WebSocket) -> None:
             data = await websocket.receive_json()
             message = data.get("message", "")
             session_id = data.get("session_id", f"ws_{id(websocket)}")
-            user_id = data.get("user_id")
-            favorites = data.get("favorites", [])
+            # 入口解析字段保留（6.15 缺口）：user_id / favorites 不传入 QuestionState，
+            # 为 P2 user_id 透传、P9 自选股联动留口（_ 前缀：本阶段有意不消费）
+            _user_id = data.get("user_id")
+            _favorites = data.get("favorites", [])
 
             if not message:
                 await websocket.send_json({"type": WSEventType.ERROR, "content": "消息不能为空"})
                 continue
 
             graph = _select_graph()
-
-            if settings.chat_graph_enabled:
-                initial_state = build_chat_initial_state(message)
-            else:
-                initial_state = {
-                    "messages": [{"role": "user", "content": message}],
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "favorites": favorites,
-                    "intent": None,
-                    "symbol": None,
-                    "tag_code": None,
-                    "analysis_reports": {},
-                    "final_response": None,
-                    "trigger_source": "user",
-                }
+            # M5 D10：Chat 入口恒走 ChatAgent（/chat/* 与 /ws/chat 不再读开关）
+            initial_state = build_chat_initial_state(message)
 
             try:
                 llm_started = False

@@ -88,7 +88,8 @@ async def test_e2e_report_lookup():
 @pytest.mark.asyncio
 async def test_e2e_stock_snapshot():
     qa_out, synth_out = _mock_llm_output(
-        "stock_snapshot", "stock_snapshot", "茅台当前 1800 元", "validate"
+        "stock_snapshot", "stock_snapshot", "茅台当前 1800 元", "validate",
+        skill_args={"symbol": "600519"},
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -101,6 +102,9 @@ async def test_e2e_stock_snapshot():
         "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        new=AsyncMock(return_value="600519"),
     ), patch(
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(return_value="600519 当前价 1800"),
@@ -140,6 +144,9 @@ async def test_e2e_stock_news():
         "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        new=AsyncMock(return_value="600519"),
     ), patch(
         "aistock_agent.skills.stock_news.search_cls_news",
         new=AsyncMock(return_value="茅台发布半年报"),

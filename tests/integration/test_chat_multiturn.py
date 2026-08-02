@@ -81,6 +81,9 @@ async def test_multiturn_messages_accumulate():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
+        # 固定交易日环境：非交易日会前置提示，破坏 startswith 断言；本测试验证多轮累积
+        "aistock_agent.graph.nodes.synth_answer.is_trading_day", return_value=True
+    ), patch(
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(return_value="600519 当前价 1800"),
     ), patch(
@@ -92,7 +95,7 @@ async def test_multiturn_messages_accumulate():
 
         # 第 1 轮
         state1: QuestionState = {
-            "messages": [HumanMessage(content="茅台现在多少钱")],
+            "messages": [HumanMessage(content="600519 现在多少钱")],
             "goal": None,
             "plan": "direct",
             "skill_calls": [],
@@ -116,13 +119,13 @@ async def test_multiturn_messages_accumulate():
         }
         result2 = await graph.ainvoke(state2, config=config)
 
-    # 第 1 轮返回包含 AIMessage
+    # 第 1 轮返回包含 AIMessage（M3 起 conclusion 强制拼接风险段，用 startswith）
     assert result1["insight"] is not None
-    assert result1["final_response"] == "茅台当前 1800 元"
+    assert result1["final_response"].startswith("茅台当前 1800 元")
 
     # 第 2 轮返回包含 AIMessage
     assert result2["insight"] is not None
-    assert result2["final_response"] == "茅台近期发布半年报"
+    assert result2["final_response"].startswith("茅台近期发布半年报")
 
     # 验证 checkpointer 累积：最终 state.messages 应为 [H1, A1, H2, A2]
     final_messages = result2.get("messages", [])
@@ -133,7 +136,7 @@ async def test_multiturn_messages_accumulate():
     assert isinstance(final_messages[2], HumanMessage)
     assert isinstance(final_messages[3], AIMessage)
     # 内容校验
-    assert "茅台现在多少钱" in final_messages[0].content
+    assert "600519 现在多少钱" in final_messages[0].content
     assert "1800" in final_messages[1].content
     assert "它最近有什么新闻" in final_messages[2].content
     assert "半年报" in final_messages[3].content
@@ -142,9 +145,9 @@ async def test_multiturn_messages_accumulate():
 @pytest.mark.asyncio
 async def test_multiturn_different_threads_isolated():
     """不同 thread_id 的对话历史相互隔离。"""
-    qa_out = _qa_output("report_lookup", "report_lookup", {"report_type": "review", "date": "2026-07-28"})
-    synth_out = _synth_output("今日晨报内容")
-
+    qa_out = _qa_output(
+        "report_lookup", "report_lookup", {"report_type": "review", "date": "2026-07-28"}
+    )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
         return_value=MagicMock(ainvoke=AsyncMock(return_value=qa_out))
@@ -162,7 +165,7 @@ async def test_multiturn_different_threads_isolated():
 
         # thread A 第一轮
         state_a: QuestionState = {
-            "messages": [HumanMessage(content="thread A 问题")],
+            "messages": [HumanMessage(content="thread A 晨报怎么样")],
             "goal": None, "plan": "direct", "skill_calls": [], "evidences": [],
             "insight": None, "final_response": "", "trace": None,
         }
@@ -170,7 +173,7 @@ async def test_multiturn_different_threads_isolated():
 
         # thread B 第一轮（不同 thread_id）
         state_b: QuestionState = {
-            "messages": [HumanMessage(content="thread B 问题")],
+            "messages": [HumanMessage(content="thread B 晨报怎么样")],
             "goal": None, "plan": "direct", "skill_calls": [], "evidences": [],
             "insight": None, "final_response": "", "trace": None,
         }
@@ -187,7 +190,9 @@ async def test_multiturn_different_threads_isolated():
 @pytest.mark.asyncio
 async def test_multiturn_qa_router_receives_history():
     """第 2 轮 qa_router 收到的 messages 包含第 1 轮的完整历史。"""
-    qa_out_1 = _qa_output("stock_snapshot", "stock_snapshot", {"symbol": "600519"}, symbols=["600519"])
+    qa_out_1 = _qa_output(
+        "stock_snapshot", "stock_snapshot", {"symbol": "600519"}, symbols=["600519"]
+    )
     synth_out_1 = _synth_output("茅台 1800 元")
 
     # 第 2 轮 qa_router 用捕获
@@ -195,9 +200,9 @@ async def test_multiturn_qa_router_receives_history():
 
     async def capture_round2(messages):
         captured.extend(messages)
-        return _qa_output("stock_news", "stock_news", {"symbol": "600519"}, symbols=["600519"])
-
-    qa_out_2_mock = MagicMock()
+        return _qa_output(
+            "stock_news", "stock_news", {"symbol": "600519"}, symbols=["600519"]
+        )
 
     synth_out_2 = _synth_output("茅台半年报")
 
@@ -226,13 +231,29 @@ async def test_multiturn_qa_router_receives_history():
         config = {"configurable": {"thread_id": "multiturn-test-3"}}
 
         await graph.ainvoke(
-            {"messages": [HumanMessage(content="茅台现在多少钱")], "goal": None, "plan": "direct",
-             "skill_calls": [], "evidences": [], "insight": None, "final_response": "", "trace": None},
+            {
+                "messages": [HumanMessage(content="600519 现在多少钱")],
+                "goal": None,
+                "plan": "direct",
+                "skill_calls": [],
+                "evidences": [],
+                "insight": None,
+                "final_response": "",
+                "trace": None,
+            },
             config=config,
         )
         await graph.ainvoke(
-            {"messages": [HumanMessage(content="它最近有什么新闻")], "goal": None, "plan": "direct",
-             "skill_calls": [], "evidences": [], "insight": None, "final_response": "", "trace": None},
+            {
+                "messages": [HumanMessage(content="它最近有什么新闻")],
+                "goal": None,
+                "plan": "direct",
+                "skill_calls": [],
+                "evidences": [],
+                "insight": None,
+                "final_response": "",
+                "trace": None,
+            },
             config=config,
         )
 
@@ -241,6 +262,6 @@ async def test_multiturn_qa_router_receives_history():
     assert len(captured) >= 3  # SystemPrompt + H1 + A1 + H2 至少
     # 应包含第 1 轮的 HumanMessage 和 AIMessage
     contents = [m.content for m in captured if hasattr(m, "content")]
-    assert any("茅台现在多少钱" in c for c in contents)
+    assert any("600519 现在多少钱" in c for c in contents)
     assert any("1800" in c for c in contents)
     assert any("它最近有什么新闻" in c for c in contents)

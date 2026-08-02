@@ -47,6 +47,9 @@ async def test_degraded_skill_exception_recovers():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        new=AsyncMock(return_value="600519"),
+    ), patch(
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(side_effect=RuntimeError("network timeout")),
     ):

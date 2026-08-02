@@ -12,6 +12,10 @@ from aistock_agent.graph.nodes.synth_answer import (
     _resolve_basis_indices,
     synth_answer_node,
 )
+from aistock_agent.prompts.general.system import (
+    RISK_DISCLAIMER,
+    RISK_DISCLAIMER_STRONG,
+)
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.state.chat_schema import QuestionState
 
@@ -240,7 +244,7 @@ async def test_synth_answer_maps_basis_indices_to_evidences() -> None:
     with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
-    assert result["insight"].conclusion == "今日上涨由白酒带动"
+    assert result["insight"].conclusion.startswith("今日上涨由白酒带动")
     assert result["insight"].basis == [ev1, ev2]
     assert result["insight"].basis[0] is ev1
     assert result["insight"].basis[1] is ev2
@@ -294,7 +298,7 @@ async def test_synth_answer_empty_evidences_empty_indices_ok() -> None:
     with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
         result = await synth_answer_node(_state_with_evidences([]))
 
-    assert result["insight"].conclusion == "无证据结论"
+    assert result["insight"].conclusion.startswith("无证据结论")
     assert result["insight"].basis == []
 
 
@@ -429,9 +433,215 @@ def test_build_degraded_insight_structured_conclusion() -> None:
         degraded_reason="quick-snapshot 不可用",
         skill_name="market_snapshot",
     )
-    insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+    # 固定为交易日，避免测试依赖真实日期（非交易日会前导追加提示，破坏分节断言）
+    with patch("aistock_agent.graph.nodes.synth_answer.is_trading_day", return_value=True):
+        insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
 
     assert insight.conclusion.startswith("## 核心结论")
     assert "## 行情要点" in insight.conclusion
     assert "上证指数" in insight.conclusion
     assert "继续问我" in insight.conclusion
+
+
+# ─── 非交易日统一提示（2026-08-02 规范） ───
+
+
+def test_degraded_insight_non_trading_day_quote_hint() -> None:
+    """非交易日 + 行情类证据降级（sources 为空，靠 skill_name 判定）→ 提示 + 引导。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _build_degraded_insight
+
+    goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
+    # 全降级时 sources 为空（market_snapshot 无数据时不 append source），靠 skill_name 兜底
+    evidence = Evidence(
+        facts=[],
+        sources=[],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="quick-snapshot 不可用",
+        skill_name="market_snapshot",
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
+            return_value=False,
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+
+    assert "非交易日" in insight.conclusion
+    assert "2026-08-02" in insight.conclusion
+    assert "2026-07-31" in insight.conclusion
+    assert "周日" in insight.conclusion
+    assert "周五" in insight.conclusion
+
+
+def test_degraded_insight_non_trading_day_report_no_hint() -> None:
+    """非交易日但证据非行情类（无 realtime_quote）→ 不提示非交易日。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _build_degraded_insight
+
+    goal = InsightGoal(question="今天晨报说了什么?", intent="report_lookup")
+    evidence = Evidence(
+        facts=[],
+        sources=[
+            ChatSource(
+                source_id="report:review:2026-07-31",
+                kind="db_report",
+                title="复盘报告",
+                snippet="",
+                captured_at=datetime.now(UTC),
+            )
+        ],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="报告缺失",
+        skill_name="report_lookup",
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
+            return_value=False,
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+    ):
+        insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+
+    assert "非交易日" not in insight.conclusion
+
+
+def test_degraded_insight_trading_day_no_hint() -> None:
+    """交易日 + 行情类降级 → 不提示非交易日。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _build_degraded_insight
+
+    goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
+    evidence = Evidence(
+        facts=[],
+        sources=[
+            ChatSource(
+                source_id="market:a_share:quick",
+                kind="realtime_quote",
+                title="A 股快照",
+                snippet="",
+                captured_at=datetime.now(UTC),
+            )
+        ],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="数据异常",
+        skill_name="market_snapshot",
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
+            return_value=True,
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+
+    assert "非交易日" not in insight.conclusion
+
+
+# ─── M3 风险段（D28） ───
+
+
+@pytest.mark.asyncio
+async def test_conclusion_has_risk_disclaimer() -> None:
+    """LLM 成功路径 conclusion 结尾强制含固定风险段（代码拼接，不依赖 LLM）。"""
+    mock_llm = _mock_synth_llm(
+        {
+            "conclusion": "白酒板块今日表现活跃",
+            "basis_indices": [],
+            "confidence": "low",
+            "uncertainty": [],
+            "answer_mode": "validate",
+        }
+    )
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state("白酒板块今日表现活跃"))
+
+    assert RISK_DISCLAIMER in result["insight"].conclusion
+    assert result["insight"].conclusion.endswith(RISK_DISCLAIMER)
+    assert RISK_DISCLAIMER_STRONG not in result["insight"].conclusion
+
+
+@pytest.mark.asyncio
+async def test_conclusion_with_action_word_has_strong_disclaimer() -> None:
+    """用户问题含动作词（'买'）→ 风险段升级为强提示。"""
+    mock_llm = _mock_synth_llm(
+        {
+            "conclusion": "该标的近期走势良好",
+            "basis_indices": [],
+            "confidence": "medium",
+            "uncertainty": [],
+            "answer_mode": "validate",
+        }
+    )
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state("600519 现在能买吗"))
+
+    assert RISK_DISCLAIMER_STRONG in result["insight"].conclusion
+
+
+def test_degraded_insight_has_risk_disclaimer() -> None:
+    """降级路径 _build_degraded_insight 的 conclusion 也含风险段。"""
+    from aistock_agent.graph.nodes.synth_answer import _build_degraded_insight
+
+    goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
+    evidence = _evidence("market_snapshot", ["上证指数: 3804.69 (-0.62%)"])
+    insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
+
+    assert insight.conclusion.endswith(RISK_DISCLAIMER)
+
+
+@pytest.mark.asyncio
+async def test_risk_disclaimer_not_duplicated() -> None:
+    """LLM 已写风险段时不再重复拼接（去重）。"""
+    mock_llm = _mock_synth_llm(
+        {
+            "conclusion": f"白酒板块表现活跃\n\n{RISK_DISCLAIMER}",
+            "basis_indices": [],
+            "confidence": "low",
+            "uncertainty": [],
+            "answer_mode": "validate",
+        }
+    )
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state("白酒板块表现活跃"))
+
+    assert result["insight"].conclusion.count(RISK_DISCLAIMER) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_response_short_circuit_passthrough() -> None:
+    """qa_router 闸门写入 final_response → synth_answer 直接透出，不调 deep LLM、不叠加风险段。"""
+    st = _state("你好")
+    st["final_response"] = "我是 AI 投资助手，可以帮你查询行情和报告。"
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("deep LLM should not be called on final_response path"),
+    ):
+        result = await synth_answer_node(st)
+
+    assert result["final_response"] == "我是 AI 投资助手，可以帮你查询行情和报告。"
+    assert result["insight"].conclusion == "我是 AI 投资助手，可以帮你查询行情和报告。"
+    assert RISK_DISCLAIMER not in result["insight"].conclusion

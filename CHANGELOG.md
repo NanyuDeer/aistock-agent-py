@@ -2,6 +2,29 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-08-02 — ChatAgent 最小落地 M1-M5 完成 + 非交易日统一提示
+
+**开发者**: Aria
+
+### 新增
+- **M1 qa_router 护栏**：敏感合规闸门（D29）/ 寒暄与科普拦截（D32）/ 名称→代码解析 resolve_symbol（D36，调 Node M4）/ 后处理层 _postprocess_skill_calls（D27 五类参数校验）
+- **M2 sector 板块对齐**：`data/sector_tag_codes.json` + `services/sector_resolver.py` resolve_tag_code（标准名精确 + 别名反向兜底）
+- **M3 synth_answer 风险段**：D28 强制拼接 RISK_DISCLAIMER / RISK_DISCLAIMER_STRONG（LLM 成功 + 降级双路径，代码保证不依赖 LLM 自由裁量）
+- **M4 Node 名称解析端点**（aistock-app-api 侧）：`GET /internal/stock/resolve` + `resolveStockName` 导出
+- **M5 入口路由切换**：`_select_graph()` 恒走 ChatAgent，chat_graph_enabled 字段保留但不再读取（回滚闸门）；WS 保留 user_id/favorites 解析为 P2/P9 留口
+- **非交易日统一提示**（2026-08-02 用户拍板）：`utils/date.py` 新增 prev_trading_day；synth_answer 新增 `_append_non_trading_day_hint`（非交易日 + 行情类证据降级 → 前导提示 + 引导最近交易日）
+
+### 修复
+- 闸门 2 失败路径：resolve 未命中时首轮纯个股问句强制澄清（不进 LLM，防 LLM 幻觉假代码 000000）；二次修正大盘语义词防误伤（市场/A股/股市/大盘/指数）
+
+### 测试
+- 新增/适配：test_qa_router（+13）、test_synth_answer（+3 非交易日 + 修正日期脆弱断言）、test_utils_date（+3）、test_sector_resolver（+8）、集成适配（multiturn/degraded/e2e）；全量回归与基线一致（20 failed 均为基线既有）
+
+### 文档
+- `docs/superpowers/specs/2026-08-01-chat-agent-landing-mvp-design.md`、plan README 进度表更新；token 按量计费决策（P10）已记录（仅决策，未实现）
+
+---
+
 ## [main] 2026-08-01 — wind_leader prompt 强制 details 结构化 markdown
 
 **开发者**: Aria

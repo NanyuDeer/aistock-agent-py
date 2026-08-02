@@ -13,6 +13,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from aistock_agent.observability.metrics import get_metrics_collector
+from aistock_agent.prompts.general.system import (
+    ACTION_KEYWORDS,
+    RISK_DISCLAIMER,
+    RISK_DISCLAIMER_STRONG,
+)
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
     Evidence,
@@ -21,8 +26,17 @@ from aistock_agent.schemas.chat_contract import (
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import QuestionState
+from aistock_agent.utils.date import is_trading_day, prev_trading_day, shanghai_today
 
 logger = structlog.get_logger()
+
+# 中文星期名（周一 0 → 周日 6），非交易日提示用
+_CN_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+# 行情类 Skill（非交易日提示判定用；全降级时 sources 可能为空，需按 skill_name 兜底）
+_QUOTE_SKILLS = frozenset(
+    {"market_snapshot", "stock_snapshot", "sector_snapshot", "capital_flow"}
+)
 
 
 # intent -> 默认模式映射
@@ -187,6 +201,39 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 """
 
 
+def _append_non_trading_day_hint(
+    conclusion: str, evidences: list[Evidence]
+) -> str:
+    """非交易日统一提示：今天非交易日且行情类证据降级 → 前导提示 + 引导最近交易日。
+
+    仅当（1）今天是非交易日（2）存在 kind=realtime_quote 的降级证据时触发；
+    报告类/护栏类回答不加，避免误提示。已含"非交易日"时不重复叠加。
+    """
+    today = shanghai_today()
+    if is_trading_day(today):
+        return conclusion
+    quote_degraded = any(
+        ev.degraded
+        and (
+            ev.skill_name in _QUOTE_SKILLS
+            or any(src.kind == "realtime_quote" for src in ev.sources)
+        )
+        for ev in evidences
+    )
+    if not quote_degraded:
+        return conclusion
+    if "非交易日" in conclusion:
+        return conclusion
+    last = prev_trading_day(today)
+    hint = (
+        f"今天是 A 股非交易日（{today.isoformat()} "
+        f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。最近交易日为 "
+        f"{last.isoformat()}（{_CN_WEEKDAYS[last.weekday()]}），可以问我「"
+        f"{last.month}月{last.day}日大盘」或「上一交易日板块表现」查看该日行情。\n\n"
+    )
+    return hint + conclusion
+
+
 def _build_degraded_insight(
     goal: InsightGoal, evidences: list[Evidence], mode: str, reason: str
 ) -> Insight:
@@ -214,6 +261,12 @@ def _build_degraded_insight(
             "当前没有可用的数据事实，暂时无法回答该问题。"
             "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
+    # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
+    conclusion = _append_risk_disclaimer(
+        conclusion, strong=_contains_action_word(goal.question)
+    )
+    # 非交易日统一提示（2026-08-02 规范）：行情类降级时提示 + 引导最近交易日
+    conclusion = _append_non_trading_day_hint(conclusion, evidences)
     return Insight(
         conclusion=conclusion,
         basis=evidences,
@@ -221,6 +274,26 @@ def _build_degraded_insight(
         uncertainty=[f"综合失败: {reason}"],
         answer_mode="validate",  # 兜底始终 validate
     )
+
+
+def _contains_action_word(text: str) -> bool:
+    """用户问题是否含买卖建议类动作词（与 D29 敏感词表一致，M1 复用）。"""
+    return any(kw in text for kw in ACTION_KEYWORDS)
+
+
+def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
+    """在 conclusion 末尾强制追加风险段（去重：已含则跳过，纯字符串拼接）。
+
+    D28：风险提示不依赖 LLM 自由裁量，由代码保证结论必含风险段。
+    strong=True 时用强提示（用户问题含动作词，如"能买吗"）。
+    """
+    disclaimer = RISK_DISCLAIMER_STRONG if strong else RISK_DISCLAIMER
+    if disclaimer in conclusion:
+        return conclusion
+    # 已含另一档风险段时不重复叠加
+    if RISK_DISCLAIMER_STRONG in conclusion or RISK_DISCLAIMER in conclusion:
+        return conclusion
+    return f"{conclusion}\n\n{disclaimer}"
 
 
 async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
@@ -271,6 +344,30 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content=clarification)],
         }
 
+    # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
+    # 直接透出，不调 deep LLM、不叠加风险段（话术本身已是合规措辞）
+    shortcut = state.get("final_response")
+    if shortcut:
+        insight = Insight(
+            conclusion=shortcut,
+            basis=[],
+            confidence="low",
+            uncertainty=["guardrail short-circuit"],
+            answer_mode="validate",
+        )
+        return {
+            "insight": insight,
+            "final_response": shortcut,
+            "trace": AnswerTrace(
+                goal=goal,
+                plan=state.get("plan", "direct"),
+                skill_calls=state.get("skill_calls", []),
+                evidences=[],
+                actual_mode="validate",
+            ),
+            "messages": [AIMessage(content=shortcut)],
+        }
+
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
 
@@ -299,15 +396,19 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 expected=mode,
                 actual=raw.answer_mode,
             )
+        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量）
         insight = Insight(
-            conclusion=raw.conclusion,
+            conclusion=_append_risk_disclaimer(
+                raw.conclusion, strong=_contains_action_word(goal.question)
+            ),
             basis=basis,
             confidence=raw.confidence,
             uncertainty=raw.uncertainty,
             answer_mode=mode,  # type: ignore[arg-type]
         )
-
-        final_response = insight.conclusion
+        # 非交易日统一提示（2026-08-02 规范）：行情类证据降级时前导提示 + 引导
+        final_response = _append_non_trading_day_hint(insight.conclusion, evidences)
+        insight = insight.model_copy(update={"conclusion": final_response})
         trace = AnswerTrace(
             goal=goal,
             plan=state.get("plan", "direct"),
