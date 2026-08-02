@@ -128,6 +128,79 @@ class CandidateExplanation(BaseModel):
     counter_evidence_ids: list[str]
 
 
+# ============================================================================
+# 早报预测与预判对照模型（增量改进，全部 Optional 兼容旧缓存）
+# ============================================================================
+
+
+class MorningEvent(BaseModel):
+    """早报关注的事件（LLM 从 details 提取 + 推断方向）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    direction: Literal["bullish", "bearish", "neutral"]
+    affected_sectors: list[str] = Field(default_factory=list)
+
+
+class MorningSectorView(BaseModel):
+    """早报对单个板块的方向判断（LLM 从 details 全文推断）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sector: str
+    direction: Literal["bullish", "bearish", "neutral"]
+    note: str = ""
+
+
+class MorningForecast(BaseModel):
+    """早报预测结构化摘要，作为来源归因的预判线索。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    report_date: str
+    summary: str
+    major_events: list[MorningEvent] = Field(default_factory=list)
+    sectors: list[MorningSectorView] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    source_report_id: str | None = None
+
+
+class SectorHit(BaseModel):
+    """板块方向命中/偏离。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sector: str
+    morning_direction: Literal["bullish", "bearish", "neutral"]
+    actual_direction: Literal["bullish", "bearish", "neutral"]
+    result: Literal["hit", "miss"]
+    deviation_note: str = ""
+
+
+class EventHit(BaseModel):
+    """事件影响命中/偏离。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_title: str
+    morning_direction: Literal["bullish", "bearish", "neutral"]
+    actual_impact: str
+    result: Literal["hit", "miss", "unverifiable"]
+    note: str = ""
+
+
+class PredictionValidation(BaseModel):
+    """预判对照分析：早报预测 vs 实际行情。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["hit", "partial", "miss", "no_forecast"]
+    sector_hits: list[SectorHit] = Field(default_factory=list)
+    event_hits: list[EventHit] = Field(default_factory=list)
+    overall_note: str = ""
+
+
 class MarketTraceResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -138,6 +211,8 @@ class MarketTraceResult(BaseModel):
     alternative_chain_id: str | None
     confidence: Literal["high", "medium", "low"]
     unresolved_questions: list[str]
+    # 预判对照（增量字段，默认 None 兼容旧缓存）
+    prediction_validation: PredictionValidation | None = None
 
 
 class MarketTraceSnapshot(BaseModel):
@@ -152,6 +227,8 @@ class MarketTraceSnapshot(BaseModel):
     phenomenon_discovery: PhenomenonDiscoveryResult
     data_availability: dict[str, DataAvailability] = Field(default_factory=dict)
     collection_status: dict[str, SourceCollectionStatus] = Field(default_factory=dict)
+    # 早报预测（增量字段，默认 None 兼容旧缓存）
+    morning_forecast: MorningForecast | None = None
 
 
 class ReviewArtifact(BaseModel):
