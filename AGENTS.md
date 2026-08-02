@@ -26,11 +26,15 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
-| 交易复盘 | workers/review.py | deep_think | P2 |
+| 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
+
+> **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
+>
+> **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、财联社电报当日全量爬取（`/internal/news/telegraph` 优先，降级到 `/internal/news/latest`）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
 
 ## 核心架构
 
