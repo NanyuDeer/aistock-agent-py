@@ -370,6 +370,34 @@ def validate_trace_against_snapshot(
                 f"{label} observable_result must reference primary phenomenon fact_ids"
             )
 
+    # ── prediction_validation 校验 ──
+    morning_forecast = snapshot.morning_forecast
+    pv = trace.prediction_validation
+
+    if morning_forecast is not None:
+        if pv is None:
+            raise ValueError(
+                "prediction_validation 不得为 None：snapshot.morning_forecast 非空时必须输出预判对照"
+            )
+        if pv.status == "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 不得为 no_forecast：morning_forecast 非空"
+            )
+        if pv.status in {"hit", "partial", "miss"} and len(pv.sector_hits) == 0:
+            raise ValueError(
+                f"prediction_validation.status={pv.status} 时 sector_hits 不得为空"
+            )
+    else:
+        # morning_forecast 为空时，pv 必须为 None 或 status=no_forecast
+        if pv is not None and pv.status != "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 必须为 no_forecast：snapshot.morning_forecast 为空"
+            )
+        if pv is not None and (len(pv.sector_hits) > 0 or len(pv.event_hits) > 0):
+            raise ValueError(
+                "prediction_validation.status=no_forecast 时 sector_hits/event_hits 必须为空"
+            )
+
 
 # ============================================================================
 # Markdown 渲染 — 从已验证的 JSON 工件渲染展示层
