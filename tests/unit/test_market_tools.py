@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aistock_agent.tools.market_tools import collect_global_market_facts, get_global_markets
+from aistock_agent.tools.market_tools import (
+    GLOBAL_MARKET_TICKERS,
+    collect_global_market_facts,
+    get_global_markets,
+)
 
 
 @pytest.mark.asyncio
@@ -97,3 +101,42 @@ def test_collect_global_market_facts_skips_no_price():
         facts = collect_global_market_facts(captured_at)
 
     assert len(facts) == 0
+
+
+def test_global_market_tickers_contains_europe():
+    """GLOBAL_MARKET_TICKERS 包含欧洲股市 ticker。"""
+    assert "dax" in GLOBAL_MARKET_TICKERS
+    assert GLOBAL_MARKET_TICKERS["dax"] == "^GDAXI"
+    assert "ftse" in GLOBAL_MARKET_TICKERS
+    assert GLOBAL_MARKET_TICKERS["ftse"] == "^FTSE"
+
+
+def test_collect_global_market_facts_includes_europe():
+    """collect_global_market_facts 返回值含欧洲 ticker。"""
+    captured_at = datetime(2026, 8, 2, 7, 0, 0)
+
+    # Mock yfinance.Tickers，仅提供 dax 与 ftse 两个 ticker
+    mock_tickers = MagicMock()
+    mock_dax = MagicMock()
+    mock_dax.fast_info.last_price = 18000.0
+    mock_dax.fast_info.regular_market_change_percent = 0.5
+    mock_ftse = MagicMock()
+    mock_ftse.fast_info.last_price = 7500.0
+    mock_ftse.fast_info.regular_market_change_percent = -0.2
+
+    mock_tickers.tickers = {
+        "^GDAXI": mock_dax,
+        "^FTSE": mock_ftse,
+    }
+
+    with patch("aistock_agent.tools.market_tools.yf.Tickers", return_value=mock_tickers):
+        # 其他 ticker 因未在 mock 中提供会被跳过
+        facts = collect_global_market_facts(captured_at)
+
+    # 至少包含 dax 和 ftse 的 fact
+    dax_facts = [f for f in facts if f["ticker"] == "^GDAXI"]
+    ftse_facts = [f for f in facts if f["ticker"] == "^FTSE"]
+    assert len(dax_facts) == 1
+    assert dax_facts[0]["name"] == "德国DAX"
+    assert len(ftse_facts) == 1
+    assert ftse_facts[0]["name"] == "英国富时100"
