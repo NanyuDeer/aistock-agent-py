@@ -31,6 +31,7 @@ def _mock_llm_output(
         goal=goal,
         plan="direct",
         skill_calls=[SkillCall(skill_name=skill, args=skill_args or {})],
+        complexity="light",
     )
     synth_output = SynthOutput(
         insight=SynthInsightOutput(

@@ -28,22 +28,15 @@ from aistock_agent.utils.message import extract_last_human_message
 logger = structlog.get_logger()
 
 
-SYSTEM_PROMPT = (
-    """你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。
+# D5：系统提示词分两部分——Skill 清单由 registry 动态渲染（prompt_exposed=True），
+# 其余（指数行情/规则/JSON 契约/字段约束）保持字节不变。
+_SYSTEM_PROMPT_HEADER = (
+    "你是 AI 投资助手的问答路由器。根据用户问题生成路由计划。\n\n"
+    "可用 Skills：\n"
+)
 
-可用 Skills：
-- report_lookup：读取已持久化的晨报/复盘报告。
-  入参 {report_type: "morning"|"review", date: "YYYY-MM-DD"}
-- stock_snapshot：实时个股行情。入参 {symbol: "6位代码"}
-- capital_flow：个股资金流向。入参 {symbol: "6位代码"}
-- stock_news：个股财联社资讯。入参 {symbol: "6位代码", limit: 10}
-- trace_lookup：市场溯源（只读已生成的复盘，不重跑）。入参 {date: "YYYY-MM-DD", topic: str|null}
-- evidence_resolver：只读市场 ReviewArtifact 证据（已持久化复盘，不重跑）。入参 {date: "YYYY-MM-DD"}
-- sector_snapshot：板块强弱与风口龙头。入参 {tag_code: str}，无 tag_code 时自动读风口数据
-- market_snapshot：大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）
-- industry_relation：行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}
-
-指数行情：问"沪指/深证成指/创业板指/科创50/沪深300/中证500/中证1000/恒生指数"等指数时"""
+_SYSTEM_PROMPT_FOOTER = (
+    """\n指数行情：问"沪指/深证成指/创业板指/科创50/沪深300/中证500/中证1000/恒生指数"等指数时"""
     """路由 market_snapshot（scope=a_share），并在 goal.constraints 写入 index_name
 
 规则：
@@ -73,18 +66,36 @@ JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
       "args": {"symbol": "600519"},
       "depends_on": []
     }
-  ]
+  ],
+  "complexity": "light"
 }
 
 字段约束：
-- 顶层只能有 goal、plan、skill_calls 三个字段，不得省略 goal
-- goal.intent 只能是 capital_flow/evidence_resolver/industry_relation/market_snapshot/report_lookup/
-  sector_snapshot/stock_news/stock_snapshot/trace_lookup 之一
+- 顶层只能有 goal、plan、skill_calls、complexity 四个字段，不得省略 goal
+- goal.intent 只能是 capital_flow/evidence_resolver/hot_burst/industry_relation/market_snapshot/
+  report_lookup/sector_snapshot/stock_news/stock_snapshot/trace_lookup 之一
 - goal.question 必填；answer_mode 填 null（由下游推断）
 - 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
+- 顶层 complexity 只能是 light/deep 之一：单点取数（行情/新闻/资金/报告/溯源/证据/
+  板块强弱/市场概览）→ light；分析类诉求（深度分析/怎么看/对比/判断/为什么/值得）
+  或需多轮取数 → deep
 - 禁止使用旧字段 skill、params（一律用 skill_name、args），禁止省略 goal
 """
 )
+
+
+def _build_system_prompt() -> str:
+    """动态渲染系统提示词（D5）：Skill 清单来自 registry（prompt_exposed=True）。
+
+    延迟导入 registry 规避潜在循环依赖；清单按注册顺序渲染名称 + 描述。
+    """
+    from aistock_agent.skills.registry import skill_descriptions
+
+    skills_block = "".join(
+        f"- {name}：{description}\n"
+        for name, description in skill_descriptions().items()
+    )
+    return f"{_SYSTEM_PROMPT_HEADER}{skills_block}{_SYSTEM_PROMPT_FOOTER}"
 
 
 class QARouterOutput(BaseModel):
@@ -93,6 +104,8 @@ class QARouterOutput(BaseModel):
     goal: InsightGoal
     plan: Literal["direct", "compose"]
     skill_calls: list[SkillCall]
+    # P1（D4）：复杂度判定。必填（缺失 → ValidationError → 既有兜底链）
+    complexity: Literal["light", "deep"]
 
     model_config = ConfigDict(extra="forbid")
 
@@ -180,6 +193,8 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["板块", "上下游", "产业链", "行业"], "industry_relation"),
     (["资金", "主力", "流入", "流出", "净流入"], "capital_flow"),
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
+    # D6 前置：热门股/机构调研意图（兜底命中固定 deep，供 Task 2 escalate 消费）
+    (["机构调研", "热门股", "调研"], "hot_burst"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
@@ -219,6 +234,8 @@ _STOCK_NAME_STOPWORDS = (
     "个股", "可以", "会涨", "会跌", "怎么", "查询", "了解一下", "帮我看",
     "帮我", "介绍", "想", "看", "一下", "了解", "查", "呢", "啊", "了", "的",
     "吗", "我", "你",
+    # P1 遗留问题 1（D36）：分析类动词不进个股名候选（"分析一下贵州茅台" → "贵州茅台"）
+    "分析", "评价", "评估", "研判", "解读", "看看",
 )
 _STOPWORDS_SORTED = tuple(sorted(_STOCK_NAME_STOPWORDS, key=len, reverse=True))
 
@@ -306,7 +323,23 @@ def _short_circuit(message: str, reply: str, guardrail: str) -> dict[str, Any]:
         "plan": "direct",
         "skill_calls": [],
         "final_response": reply,
+        # D4：闸门短路固定 light（护栏优先，force_deep 不 bypass 闸门）
+        "complexity": "light",
     }
+
+
+def _infer_complexity_by_fallback(message: str, fallback_skill: str | None) -> str:
+    """LLM 失败时按意图 + 分析类词判定复杂度（D4 规则兜底）。
+
+    命中 stock/sector/hot_burst 意图且含分析类词 → deep，否则 light。
+    hot_burst 命中固定 deep 由调用方显式处理（无对应 skill，light 会空转）。
+    """
+    analysis_words = ("分析", "怎么看", "深度", "对比", "判断", "建议", "值得", "为什么")
+    if fallback_skill in ("stock_snapshot", "sector_snapshot", "hot_burst") and any(
+        w in message for w in analysis_words
+    ):
+        return "deep"
+    return "light"
 
 
 def route_by_keyword_fallback(message: str) -> SkillCall | None:
@@ -362,6 +395,8 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
         return SkillCall(skill_name="evidence_resolver", args={"date": report_date})
     if skill_name == "sector_snapshot":
         return SkillCall(skill_name="sector_snapshot", args={})
+    if skill_name == "hot_burst":
+        return SkillCall(skill_name="hot_burst", args={})
     if skill_name == "market_snapshot":
         index_name = _match_index_name(message)
         args: dict[str, object] = {"scope": "both", "snapshot_kind": "quick"}
@@ -494,6 +529,8 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     metrics = get_metrics_collector()
     messages = state.get("messages", [])
     message = extract_last_human_message(messages) or ""
+    # D4：force_deep 只在通过所有闸门、进入 LLM/兜底路径时生效（护栏优先）
+    force_deep = bool(state.get("force_deep"))
 
     # ── 闸门 0：敏感合规（D29）—— 优先于一切 ──
     if _match_keywords(message, _COMPLIANCE_KEYWORDS):
@@ -527,7 +564,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         )
         logger.info("qa_router.gate.index", index=index_name)
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-        return {"goal": goal, "plan": "direct", "skill_calls": [call]}
+        return {"goal": goal, "plan": "direct", "skill_calls": [call], "complexity": "light"}
 
     # ── 闸门 2：标的名称解析（D36）——中文名 → 代码，解析成功短路个股 Skill ──
     # 已显式给出 6 位代码时跳过（交由 LLM/后处理校验）
@@ -548,7 +585,12 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
                 logger.info("qa_router.gate.stock_resolve", name=candidate, symbol=resolved)
                 metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-                return {"goal": goal, "plan": "direct", "skill_calls": [call]}
+                return {
+                    "goal": goal,
+                    "plan": "direct",
+                    "skill_calls": [call],
+                    "complexity": "light",
+                }
             # D36 收口：resolve 未命中时，首轮纯个股问句强制澄清（不进 LLM，
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
             # 多轮（指代解析）或非个股意图（板块/行业/溯源/compose）放行
@@ -567,6 +609,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                     "plan": "direct",
                     "skill_calls": [],
                     "clarification": _STOCK_SYMBOL_CLARIFICATION,
+                    "complexity": "light",
                 }
 
     # ── 闸门 3：主线/风险 compose（D26）→ 组合取数短路，不进 LLM ──
@@ -579,7 +622,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         )
         logger.info("qa_router.gate.compose", skills=[c.skill_name for c in compose_plan])
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-        return {"goal": goal, "plan": "compose", "skill_calls": compose_plan}
+        return {"goal": goal, "plan": "compose", "skill_calls": compose_plan, "complexity": "light"}
 
     try:
         llm = get_quick_think()
@@ -608,19 +651,24 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "plan": "direct",
                 "skill_calls": [],
                 "clarification": _STOCK_SYMBOL_CLARIFICATION,
+                "complexity": "light",
             }
 
+        # D4：LLM 判定为主；force_deep=True 时强制升级为 deep（仅在未短路时生效）
+        complexity = "deep" if force_deep else output.complexity
         logger.info(
             "qa_router.ok",
             intent=output.goal.intent,
             plan=output.plan,
             skill_calls=len(output.skill_calls),
+            complexity=complexity,
         )
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": output.goal,
             "plan": output.plan,
             "skill_calls": output.skill_calls,
+            "complexity": complexity,
         }
 
     except Exception as exc:
@@ -639,6 +687,8 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "goal": goal,
                 "plan": "compose",
                 "skill_calls": compose_plan,
+                # compose 兜底仍走 skill_executor 组合取数，不升级
+                "complexity": "light",
             }
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
@@ -682,11 +732,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "plan": "direct",
                 "skill_calls": [],
                 "clarification": _STOCK_SYMBOL_CLARIFICATION,
+                "complexity": "light",
             }
         # 推断 intent
         intent_map = {
             "capital_flow": "capital_flow",
             "evidence_resolver": "evidence_resolver",
+            "hot_burst": "hot_burst",
             "industry_relation": "industry_relation",
             "market_snapshot": "market_snapshot",
             "report_lookup": "report_lookup",
@@ -707,14 +759,25 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             and fallback_call.args.get("index_name")
         ):
             goal.constraints["index_name"] = str(fallback_call.args["index_name"])
+        # D4：规则兜底判定复杂度；hot_burst 固定 deep（无对应 skill，light 会空转）
+        fallback_complexity = _infer_complexity_by_fallback(message, fallback_call.skill_name)
+        if fallback_call.skill_name == "hot_burst":
+            fallback_complexity = "deep"
         logger.info(
             "qa_router.fallback",
             intent=goal.intent,
             skill=fallback_call.skill_name,
+            complexity=fallback_complexity,
         )
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": goal,
             "plan": "direct",
             "skill_calls": [fallback_call],
+            "complexity": fallback_complexity,
         }
+
+
+# D5：Skill 清单由 registry 动态渲染（模块底部计算，规避导入环；导出名不变，
+# 既有调用方/tests 仍以 SYSTEM_PROMPT 引用）
+SYSTEM_PROMPT = _build_system_prompt()

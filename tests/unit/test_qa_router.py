@@ -39,6 +39,8 @@ def _state(message: str) -> QuestionState:
         "insight": None,
         "final_response": "",
         "trace": None,
+        "complexity": None,
+        "force_deep": None,
     }
 
 
@@ -97,6 +99,7 @@ async def test_qa_router_llm_success_direct():
         goal=InsightGoal(question="茅台现在多少钱", intent="stock_snapshot", symbols=["600519"]),
         plan="direct",
         skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -448,6 +451,7 @@ async def test_resolve_miss_sector_intent_goes_to_llm() -> None:
         goal=InsightGoal(question="白酒板块怎么样", intent="sector_snapshot"),
         plan="direct",
         skill_calls=[SkillCall(skill_name="sector_snapshot", args={})],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -471,6 +475,7 @@ async def test_resolve_miss_market_intent_goes_to_llm() -> None:
                 args={"scope": "both", "snapshot_kind": "quick"},
             )
         ],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -491,6 +496,7 @@ async def test_resolve_miss_multiturn_goes_to_llm() -> None:
         skill_calls=[
             SkillCall(skill_name="stock_news", args={"symbol": "600519", "limit": 10})
         ],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -523,6 +529,7 @@ async def test_postprocess_corrects_invalid_symbol() -> None:
         goal=InsightGoal(question="茅台今天怎么样", intent="stock_snapshot"),
         plan="direct",
         skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "茅台"})],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -543,6 +550,7 @@ async def test_postprocess_unresolvable_symbol_degrades_to_clarification() -> No
         goal=InsightGoal(question="茅台今天怎么样", intent="stock_snapshot"),
         plan="direct",
         skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "茅台"})],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -566,6 +574,7 @@ async def test_postprocess_overrides_date() -> None:
         skill_calls=[
             SkillCall(skill_name="trace_lookup", args={"date": "2026-07-01"})
         ],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -593,6 +602,7 @@ async def test_postprocess_resolves_tag_codes() -> None:
                 args={"tag_codes": ["白酒", "半导体"], "tag_code": "BK9999"},
             )
         ],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -612,6 +622,7 @@ async def test_postprocess_unresolvable_tag_codes_removed() -> None:
         skill_calls=[
             SkillCall(skill_name="sector_snapshot", args={"tag_codes": ["未知板块XYZ"]})
         ],
+        complexity="light",
     )
     mock_llm = MagicMock()
     mock_llm.with_structured_output = MagicMock(
@@ -620,3 +631,174 @@ async def test_postprocess_unresolvable_tag_codes_removed() -> None:
     with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
         result = await qa_router_node(_state("分析某个未知板块"))
     assert "tag_codes" not in result["skill_calls"][0].args
+
+
+# ─── D4 复杂度判定 + force_deep 入口（P1 Task 1） ───
+
+
+@pytest.mark.asyncio
+async def test_complexity_deep_for_stock_analysis() -> None:
+    """LLM 输出 complexity=deep + stock_snapshot 分析词 → state.complexity=deep。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(question="300750 深度分析", intent="stock_snapshot", symbols=["300750"]),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "300750"})],
+        complexity="deep",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("300750 深度分析"))
+    assert result["complexity"] == "deep"
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_complexity_light_for_quote() -> None:
+    """单点取数（行情/报告）→ complexity=light。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(question="600519 现在多少钱", intent="stock_snapshot", symbols=["600519"]),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("600519 现在多少钱"))
+    assert result["complexity"] == "light"
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_complexity_fallback_rule() -> None:
+    """LLM 失败 → 兜底：stock 意图 + 分析词 → deep；否则 light。"""
+    cases = [
+        ("600519 行情深度分析", "deep"),
+        ("600519 现在多少钱", "light"),
+    ]
+    for message, expected in cases:
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(
+            return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+        )
+        with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+            result = await qa_router_node(_state(message))
+        assert result["skill_calls"][0].skill_name == "stock_snapshot", message
+        assert result["complexity"] == expected, message
+        assert result["goal"].constraints.get("router_fallback") == "true", message
+
+
+@pytest.mark.asyncio
+async def test_force_deep_overrides_light() -> None:
+    """force_deep=True 且 LLM 判 light → 强制 deep。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(question="600519 现在多少钱", intent="stock_snapshot", symbols=["600519"]),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    state = _state("600519 现在多少钱")
+    state["force_deep"] = True
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(state)
+    assert result["complexity"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_force_deep_does_not_bypass_compliance() -> None:
+    """force_deep=True + 合规词（买）→ 仍合规话术短路，不 deep、LLM 不被调用。"""
+    mock_llm = MagicMock()
+    state = _state("茅台可以买吗")
+    state["force_deep"] = True
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(state)
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["final_response"] == COMPLIANCE_REPLY
+    assert result["skill_calls"] == []
+    assert result["goal"].constraints.get("guardrail") == "compliance"
+    assert result["complexity"] == "light"
+
+
+@pytest.mark.asyncio
+async def test_complexity_missing_falls_back() -> None:
+    """LLM 输出缺 complexity 字段 → ValidationError → 走既有兜底链（不崩溃）。"""
+
+    def _raise_missing_complexity(*args, **kwargs):
+        QARouterOutput.model_validate(
+            {
+                "goal": {"question": "600519 现在多少钱", "intent": "stock_snapshot"},
+                "plan": "direct",
+                "skill_calls": [{"skill_name": "stock_snapshot", "args": {"symbol": "600519"}}],
+            }
+        )
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=_raise_missing_complexity))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("600519 现在多少钱"))
+    assert result["plan"] == "direct"
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+    assert result["goal"].constraints.get("router_fallback") == "true"
+    assert result["complexity"] == "light"
+
+
+def test_route_by_keyword_fallback_hot_burst() -> None:
+    """'机构调研热门股' → 关键词兜底 skill_name=hot_burst。"""
+    call = route_by_keyword_fallback("机构调研热门股")
+    assert call is not None
+    assert call.skill_name == "hot_burst"
+    assert call.args == {}
+
+
+@pytest.mark.asyncio
+async def test_hot_burst_fallback_deep() -> None:
+    """'机构调研热门股' → 兜底 hot_burst + complexity=deep（供 escalate）。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("机构调研热门股"))
+    assert result["skill_calls"][0].skill_name == "hot_burst"
+    assert result["goal"].intent == "hot_burst"
+    assert result["goal"].constraints.get("router_fallback") == "true"
+    assert result["complexity"] == "deep"
+
+
+# ─── P1 遗留问题 1：D36 停用词补全（"分析一下贵州茅台" 不再误澄清） ───
+
+
+def test_extract_stock_name_candidate_removes_analysis_verbs():
+    """'分析一下贵州茅台' 去词后候选应为'贵州茅台'（不残留 '分析'）。"""
+    from aistock_agent.graph.nodes.qa_router import _extract_stock_name_candidate
+
+    assert _extract_stock_name_candidate("分析一下贵州茅台") == "贵州茅台"
+    assert _extract_stock_name_candidate("评价一下贵州茅台") == "贵州茅台"
+    assert _extract_stock_name_candidate("解读一下贵州茅台") == "贵州茅台"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_stock_name_with_analysis_verb_short_circuits_light(monkeypatch):
+    """'分析一下贵州茅台' resolve 命中 → 闸门 2 light 快答，不再澄清。"""
+    from aistock_agent.graph.nodes.qa_router import qa_router_node
+
+    monkeypatch.setattr(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    )
+    result = await qa_router_node(_state("分析一下贵州茅台"))
+    assert result["goal"].symbols == ["600519"]
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+    assert result["complexity"] == "light"
+    assert "clarification" not in result or result.get("clarification") is None

@@ -50,7 +50,12 @@ def _format_evening_brief_for_prompt(report: dict[str, object] | None) -> str:
             continue
         title = item.get("title")
         conclusion = item.get("conclusion")
-        if isinstance(title, str) and title.strip() and isinstance(conclusion, str) and conclusion.strip():
+        if (
+            isinstance(title, str)
+            and title.strip()
+            and isinstance(conclusion, str)
+            and conclusion.strip()
+        ):
             pairs.append(f"{title.strip()}：{conclusion.strip()}")
     return "\n".join(pairs) if pairs else unavailable
 
@@ -119,7 +124,11 @@ def _parse_dialogue(text: str) -> list[dict[str, str]]:
         m = re.match(r'(主持人|host|分析师|analyst)[：:]\s*(.*)', line, re.IGNORECASE | re.DOTALL)
         if m:
             role_raw = m.group(1).lower()
-            role = "analyst" if role_raw.startswith("分析") or role_raw.startswith("analyst") else "host"
+            role = (
+                "analyst"
+                if role_raw.startswith("分析") or role_raw.startswith("analyst")
+                else "host"
+            )
             content = m.group(2).strip()
             if content:
                 dialogue.append({"role": role, "content": content})

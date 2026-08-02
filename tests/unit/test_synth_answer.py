@@ -645,3 +645,149 @@ async def test_final_response_short_circuit_passthrough() -> None:
     assert result["final_response"] == "我是 AI 投资助手，可以帮你查询行情和报告。"
     assert result["insight"].conclusion == "我是 AI 投资助手，可以帮你查询行情和报告。"
     assert RISK_DISCLAIMER not in result["insight"].conclusion
+
+
+# ─── D31 deep 分支（Task 4：统一出口纯代码加工，零 LLM） ───
+
+# 注意：断言"LLM 不被调用"统一用 mock_llm.with_structured_output.assert_not_called()
+# （project_memory 经验 16：side_effect=AssertionError 会被节点 except Exception 吞掉）
+
+
+def _state_with_deep(
+    message: str = "茅台最近走势怎么样",
+    worker_text: str = (
+        "## 深度分析\n\n"
+        "白酒板块近期走势强劲，龙头股估值处于历史中位数，北向资金持续净流入。\n\n"
+        "**结论**：行业景气度回升，龙头基本面稳健。"
+    ),
+) -> QuestionState:
+    """构造 deep 态：deep_source 由 escalate 写入，final_response 为 worker 全文。"""
+
+    return {
+        "messages": [HumanMessage(content=message)],
+        "goal": InsightGoal(question=message, intent="stock_news"),
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [],
+        "insight": None,
+        "final_response": worker_text,
+        "trace": None,
+        "deep_source": "stock",
+    }
+
+
+@pytest.mark.asyncio
+async def test_deep_source_skips_llm() -> None:
+    """deep_source 非空 → 走 deep 分支，LLM 不被调用。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep())
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["insight"].answer_mode == "deep"
+
+
+@pytest.mark.asyncio
+async def test_deep_source_appends_risk_disclaimer() -> None:
+    """worker 全文 → D28 风险段强制拼接（conclusion 与 final_response 一致）。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep())
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["insight"].conclusion.endswith(RISK_DISCLAIMER)
+    assert result["final_response"] == result["insight"].conclusion
+    assert result["insight"].answer_mode == "deep"
+
+
+@pytest.mark.asyncio
+async def test_deep_source_risk_disclaimer_not_duplicated() -> None:
+    """worker 全文已含 D28 风险段 → 去重不叠加（仅出现 1 次）。"""
+    mock_llm = MagicMock()
+    worker = f"## 深度分析\n\n白酒板块近期走势强劲。\n\n{RISK_DISCLAIMER}"
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep(worker_text=worker))
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["insight"].conclusion.count(RISK_DISCLAIMER) == 1
+    assert result["insight"].conclusion.endswith(RISK_DISCLAIMER)
+    assert result["insight"].answer_mode == "deep"
+
+
+@pytest.mark.asyncio
+async def test_deep_source_strong_risk_for_action_words() -> None:
+    """用户问题含动作词（买）→ 风险段升级为强提示（RISK_DISCLAIMER_STRONG）。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep(message="茅台值得买吗"))
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert RISK_DISCLAIMER_STRONG in result["insight"].conclusion
+    assert RISK_DISCLAIMER not in result["insight"].conclusion
+    assert result["insight"].answer_mode == "deep"
+
+
+@pytest.mark.asyncio
+async def test_deep_source_empty_response_degraded() -> None:
+    """escalate 未回流 final_response → 降级文本兜底，不输出空串。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep(worker_text=""))
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["final_response"] != ""
+    assert "不可用" in result["final_response"]
+    assert result["insight"].answer_mode == "deep"
+
+
+@pytest.mark.asyncio
+async def test_deep_trace_actual_mode() -> None:
+    """trace.actual_mode == "deep"、insight.answer_mode == "deep"、basis/evidences 为空。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state_with_deep())
+
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["insight"].answer_mode == "deep"
+    assert result["trace"].actual_mode == "deep"
+    assert result["insight"].basis == []
+    assert result["trace"].evidences == []
+    assert result["messages"][0].content == result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_light_path_unchanged() -> None:
+    """无 deep_source → 现有 light LLM 路径不变（structured_llm.ainvoke 被调用）。"""
+    mock_llm = _mock_synth_llm(
+        {
+            "conclusion": "白酒板块今日表现活跃",
+            "basis_indices": [],
+            "confidence": "low",
+            "uncertainty": [],
+            "answer_mode": "validate",
+        }
+    )
+    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+        result = await synth_answer_node(_state("白酒板块今日表现活跃"))
+
+    mock_llm.with_structured_output.assert_called_once()
+    mock_llm.with_structured_output.return_value.ainvoke.assert_awaited()
+    assert result["insight"].answer_mode == "validate"
+
+
+@pytest.mark.asyncio
+async def test_gate_shortcut_unchanged() -> None:
+    """闸门 final_response 短路（无 deep_source）→ 透出行为不变：不调 LLM、不叠风险段。"""
+    st = _state("你好")
+    st["final_response"] = "我是 AI 投资助手，可以帮你查询行情和报告。"
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("deep LLM should not be called on gate shortcut path"),
+    ):
+        result = await synth_answer_node(st)
+
+    assert result["final_response"] == "我是 AI 投资助手，可以帮你查询行情和报告。"
+    assert result["insight"].conclusion == "我是 AI 投资助手，可以帮你查询行情和报告。"
+    assert result["insight"].answer_mode == "validate"
+    assert result["trace"].actual_mode == "validate"
+    assert RISK_DISCLAIMER not in result["insight"].conclusion

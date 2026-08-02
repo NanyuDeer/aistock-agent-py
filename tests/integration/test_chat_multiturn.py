@@ -26,6 +26,7 @@ def _qa_output(intent: str, skill: str, args: dict | None = None, **goal_kwargs)
         goal=InsightGoal(question="test", intent=intent, **goal_kwargs),
         plan="direct",
         skill_calls=[SkillCall(skill_name=skill, args=args or {})],
+        complexity="light",
     )
 
 

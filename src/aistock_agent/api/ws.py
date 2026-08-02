@@ -29,6 +29,7 @@ _NODE_LABELS: dict[str, str] = {
     "general_agent": "正在思考...",
     # 新 CHAT 子图节点
     "qa_router": "正在理解你的问题",
+    "escalate": "正在深度分析...",
     "skill_executor": "正在收集证据",
     "synth_answer": "正在综合回答",
 }
@@ -65,6 +66,9 @@ async def ws_chat(websocket: WebSocket) -> None:
             graph = _select_graph()
             # M5 D10：Chat 入口恒走 ChatAgent（/chat/* 与 /ws/chat 不再读开关）
             initial_state = build_chat_initial_state(message)
+            # D4：force_deep 由 ws.py 在构造 state 后追加（build_chat_initial_state 签名不变，
+            # §3.1 外部契约；qa_router 仅在未短路时生效）
+            initial_state["force_deep"] = bool(data.get("force_deep"))
 
             try:
                 llm_started = False

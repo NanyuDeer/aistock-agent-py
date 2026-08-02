@@ -6,7 +6,7 @@
 2. 多 Skill 串行（有 depends_on）
 3. 部分降级（1 个 Skill 异常，其余正常，Evidence 汇总含 degraded）
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,7 +27,7 @@ def _evidence(skill: str, facts: list[str], symbols: list[str] | None = None) ->
     return Evidence(
         facts=facts,
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         skill_name=skill,
         symbols=symbols or [],
     )
@@ -78,6 +78,7 @@ async def test_compose_parallel_two_skills():
             SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"}),
             SkillCall(skill_name="industry_relation", args={"keywords": ["白酒"]}),
         ],
+        complexity="light",
     )
     synth_output = SynthOutput(
         insight=SynthInsightOutput(
@@ -136,6 +137,7 @@ async def test_compose_serial_with_depends_on():
                 depends_on=["stock_snapshot"],
             ),
         ],
+        complexity="light",
     )
     synth_output = SynthOutput(
         insight=SynthInsightOutput(
@@ -165,7 +167,9 @@ async def test_compose_serial_with_depends_on():
     ), patch(
         "aistock_agent.graph.nodes.skill_executor.SKILL_REGISTRY",
         {
-            "stock_snapshot": AsyncMock(return_value=_evidence("stock_snapshot", ["1800 元"], ["600519"])),
+            "stock_snapshot": AsyncMock(
+                return_value=_evidence("stock_snapshot", ["1800 元"], ["600519"])
+            ),
             "stock_news": fake_stock_news,
         },
     ):
@@ -195,6 +199,7 @@ async def test_compose_partial_degraded():
             SkillCall(skill_name="stock_news", args={"symbol": "600519"}),
             SkillCall(skill_name="industry_relation", args={"keywords": ["白酒"]}),
         ],
+        complexity="light",
     )
     # synth 应选 validate 模式（因有 degraded Evidence）
     synth_output = SynthOutput(

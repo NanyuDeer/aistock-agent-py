@@ -296,6 +296,15 @@ def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
     return f"{conclusion}\n\n{disclaimer}"
 
 
+def _build_deep_degraded(deep_source: str) -> str:
+    """D31 空响应兜底：escalate 未回流 final_response 时的固定降级文本。
+
+    确保统一出口不输出空串；worker 名只进日志（文本固定，与 worker 解耦）。
+    """
+    logger.warning("synth_answer.deep_degraded", deep_source=deep_source)
+    return "深度分析暂时不可用，请稍后重试"
+
+
 async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
     """synth_answer 节点入口。"""
     import time
@@ -345,9 +354,13 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
         }
 
     # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
-    # 直接透出，不调 deep LLM、不叠加风险段（话术本身已是合规措辞）
+    # 直接透出，不调 deep LLM、不叠加风险段（话术本身已是合规措辞）。
+    # 守卫（D31）：deep 路径 escalate 也会回流 final_response（worker 全文），必须用 deep_source
+    # 区分——否则闸门会把 worker 全文当话术直接透出（漏叠 D28 风险段、answer_mode 错误），
+    # deep 分支永远不可达。闸门与 escalate 在真实流程互斥
+    # （闸门短路时 complexity=light，不路由 escalate）。
     shortcut = state.get("final_response")
-    if shortcut:
+    if shortcut and state.get("deep_source") is None:
         insight = Insight(
             conclusion=shortcut,
             basis=[],
@@ -366,6 +379,37 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="validate",
             ),
             "messages": [AIMessage(content=shortcut)],
+        }
+
+    # 3. D31 deep 分支（新增）：escalate 已产出 worker 全文，跳过 LLM 纯代码加工
+    deep_source = state.get("deep_source")
+    if deep_source is not None:
+        final_response = state.get("final_response", "")
+        if not final_response:
+            final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
+        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示）
+        processed = _append_risk_disclaimer(
+            final_response, strong=_contains_action_word(goal.question)
+        )
+        insight = Insight(
+            conclusion=processed,
+            basis=[],                     # deep 无 Evidence（worker 全流程产物）
+            confidence="medium",          # worker 已深度分析；失败降级时 low
+            uncertainty=[],               # P2 落库时再补数据说明
+            answer_mode="deep",
+        )
+        logger.info("synth_answer.deep_ok", deep_source=deep_source)
+        return {
+            "insight": insight,
+            "final_response": processed,
+            "trace": AnswerTrace(
+                goal=goal,
+                plan=state.get("plan", "direct"),
+                skill_calls=state.get("skill_calls", []),
+                evidences=state.get("evidences", []),
+                actual_mode="deep",
+            ),
+            "messages": [AIMessage(content=processed)],
         }
 
     mode = _infer_answer_mode(goal, evidences)

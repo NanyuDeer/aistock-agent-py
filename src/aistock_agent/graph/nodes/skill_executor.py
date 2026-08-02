@@ -13,31 +13,12 @@ import structlog
 
 from aistock_agent.schemas.chat_contract import Evidence, SkillCall
 from aistock_agent.skills.base import skill
-from aistock_agent.skills.capital_flow import capital_flow
-from aistock_agent.skills.evidence_resolver import evidence_resolver
-from aistock_agent.skills.industry_relation import industry_relation
-from aistock_agent.skills.market_snapshot import market_snapshot
-from aistock_agent.skills.report_lookup import report_lookup
-from aistock_agent.skills.sector_snapshot import sector_snapshot
-from aistock_agent.skills.stock_news import stock_news
-from aistock_agent.skills.stock_snapshot import stock_snapshot
-from aistock_agent.skills.trace_lookup import trace_lookup
+from aistock_agent.skills.registry import SKILL_REGISTRY
 from aistock_agent.state.chat_schema import QuestionState
 
 logger = structlog.get_logger()
 
-# Skill 注册表：skill_name → 可调用对象
-SKILL_REGISTRY: dict[str, Any] = {
-    "capital_flow": capital_flow,
-    "evidence_resolver": evidence_resolver,
-    "industry_relation": industry_relation,
-    "market_snapshot": market_snapshot,
-    "report_lookup": report_lookup,
-    "sector_snapshot": sector_snapshot,
-    "stock_news": stock_news,
-    "stock_snapshot": stock_snapshot,
-    "trace_lookup": trace_lookup,
-}
+# Skill 注册表：skill_name → 可调用对象（D5：统一读 skills/registry，行为不变）
 
 
 async def _execute_skill_safe(

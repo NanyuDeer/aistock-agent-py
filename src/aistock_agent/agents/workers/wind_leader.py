@@ -12,15 +12,19 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.observability.logging import get_logger
-from aistock_agent.utils.date import shanghai_today
 from aistock_agent.prompts.workers.wind_leader import WIND_LEADER_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.data_guard import DataCheck, ensure_data_available
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.report_parser import is_dual_layer_valid, parse_dual_layer_response, repair_dual_layer_with_llm
+from aistock_agent.utils.report_parser import (
+    is_dual_layer_valid,
+    parse_dual_layer_response,
+    repair_dual_layer_with_llm,
+)
 
 logger = get_logger(__name__)
 
