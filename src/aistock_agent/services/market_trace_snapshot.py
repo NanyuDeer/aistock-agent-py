@@ -596,8 +596,17 @@ def _normalize_news_facts(
     missing_fields: list[str],
     captured_at: datetime,
     fetch_error: Exception | None = None,
+    source_kind: str = "latest",
 ) -> SourceCollectionStatus:
-    """财联社快讯 → SourceRecord（event_evidence）"""
+    """财联社快讯 → SourceRecord（event_evidence）
+
+    支持两种数据结构（由 ``source_kind`` 标记，归一化时统一处理）：
+    - ``telegraph``: ``{items: [{id, title, content, time, timestamp}]}``（无 link 字段）
+    - ``latest``: ``{items: [{id, link, title, time, content}]}``（有 link 字段）
+
+    occurred_at 统一用 ``time`` 字段解析；URL 优先取 ``link``（latest 流），
+    兼容旧 ``url`` 字段；telegraph 流无 URL 字段时为 None。
+    """
     news_items: list[dict[str, object]] = []
     if isinstance(news_data, dict):
         raw_items = news_data.get("items", news_data.get("news", []))
@@ -613,7 +622,8 @@ def _normalize_news_facts(
             continue
         if occurred_at is None:
             continue
-        url = _safe_optional_str(item.get("url"))
+        # URL: latest 用 link 字段，telegraph 无 URL；同时兼容旧 url 字段
+        url = _safe_optional_str(item.get("link")) or _safe_optional_str(item.get("url"))
         news_counter += 1
         source_id = f"NEWS_{news_counter:03d}"
         sources[source_id] = SourceRecord(
@@ -815,14 +825,35 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         global_facts = []
         global_fetch_error = e
 
-    # 财联社最新快讯（Node /internal/news/latest）
+    # 财联社当日全量电报（优先），降级到最新快讯
+    # 电报接口返回当日全量快讯（含 timestamp 字段），适合溯源；
+    # 失败时降级到 latest（仅最近若干条，含 link 字段）。
     news_data = None
     news_fetch_error: Exception | None = None
+    news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
     try:
-        news_data = await node_api.get("/internal/news/latest")
+        telegraph_data = await node_api.get(
+            f"/internal/news/telegraph?date={report_date}&limit=200"
+        )
+        if telegraph_data is not None:
+            news_data = telegraph_data
+            news_source_kind = "telegraph"
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e
+
+    # 降级：电报接口失败或返回 None 时回退到最新快讯
+    if news_data is None:
+        try:
+            news_data = await node_api.get("/internal/news/latest")
+            news_source_kind = "latest"
+            # 电报失败但 latest 成功，清除电报阶段的错误标记，
+            # 避免 _normalize_news_facts 误判为 unavailable。
+            news_fetch_error = None
+            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+        except Exception as e:
+            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            news_fetch_error = e
 
     # 两组固定 Tavily 检索
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
@@ -874,7 +905,12 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
         "cls_news": _normalize_news_facts(
-            news_data, sources, missing_fields, captured_at, news_fetch_error
+            news_data,
+            sources,
+            missing_fields,
+            captured_at,
+            news_fetch_error,
+            source_kind=news_source_kind,
         ),
     }
     collection_status.update(
@@ -977,13 +1013,33 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         global_facts = []
         global_fetch_error = e
 
+    # 财联社当日全量电报（优先），降级到最新快讯（与 full 版相同逻辑）
     news_data = None
     news_fetch_error: Exception | None = None
+    news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
     try:
-        news_data = await node_api.get("/internal/news/latest")
+        telegraph_data = await node_api.get(
+            f"/internal/news/telegraph?date={report_date}&limit=200"
+        )
+        if telegraph_data is not None:
+            news_data = telegraph_data
+            news_source_kind = "telegraph"
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e
+
+    # 降级：电报接口失败或返回 None 时回退到最新快讯
+    if news_data is None:
+        try:
+            news_data = await node_api.get("/internal/news/latest")
+            news_source_kind = "latest"
+            # 电报失败但 latest 成功，清除电报阶段的错误标记，
+            # 避免 _normalize_news_facts 误判为 unavailable。
+            news_fetch_error = None
+            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+        except Exception as e:
+            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            news_fetch_error = e
 
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
@@ -1033,7 +1089,12 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
             global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
         "cls_news": _normalize_news_facts(
-            news_data, sources, missing_fields, captured_at, news_fetch_error
+            news_data,
+            sources,
+            missing_fields,
+            captured_at,
+            news_fetch_error,
+            source_kind=news_source_kind,
         ),
     }
     collection_status.update(
