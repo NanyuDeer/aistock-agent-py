@@ -1110,3 +1110,71 @@ async def test_quick_available_zero_market_observations_remain_facts(mocker) -> 
     assert "a_share.turnover" not in snapshot.missing_fields
     assert "a_share.limits" not in snapshot.missing_fields
     assert "a_share.main_force.large_and_extra_large_net_yuan" not in snapshot.missing_fields
+
+
+# ============================================================================
+# Task 3 — morning_forecast 注入 snapshot（成功注入 + 失败降级）
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_with_morning_forecast(mocker):
+    """snapshot 成功注入 morning_forecast。"""
+    from aistock_agent.schemas.market_trace import MorningForecast
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    mock_forecast = MorningForecast(
+        report_date="2026-07-19",
+        summary="A股震荡上行",
+        major_events=[],
+        sectors=[],
+        risks=[],
+        source_report_id="rpt_001",
+    )
+
+    # 复用现有 COMPLETE_CLOSE 作为 close-snapshot + news/latest 共用 mock
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=mock_forecast),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    assert snapshot.morning_forecast is not None
+    assert snapshot.morning_forecast.summary == "A股震荡上行"
+    assert snapshot.morning_forecast.source_report_id == "rpt_001"
+    # 成功时不应写入 missing_fields
+    assert "morning_forecast" not in snapshot.missing_fields
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_morning_failure_degraded(mocker):
+    """morning 提取失败时 snapshot.morning_forecast=None，写入 missing_fields。"""
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    # extract_morning_forecast 返回 None（报告缺失/提取失败）
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    assert snapshot.morning_forecast is None
+    assert "morning_forecast" in snapshot.missing_fields

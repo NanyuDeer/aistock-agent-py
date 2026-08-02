@@ -28,6 +28,7 @@ from aistock_agent.schemas.market_trace import (
     SourceRecord,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.morning_forecast_extractor import extract_morning_forecast
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.services.tavily import TavilyService
 from aistock_agent.tools.market_tools import collect_global_market_facts
@@ -846,6 +847,18 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
     data_availability: dict[str, DataAvailability] = {}
 
+    # ── 3.5. 读取当日晨报预测（失败不阻断）──
+    # 放在 missing_fields 初始化后，便于失败/缺失时直接写入 missing_fields。
+    # extract_morning_forecast 内部已处理缓存/Node 读取/LLM 提取的异常并返回 None，
+    # 这里再兜一层 try 防止未预期异常阻断 snapshot 构建。
+    morning_forecast = None
+    try:
+        morning_forecast = await extract_morning_forecast(report_date)
+    except Exception as e:
+        logger.warning("morning_forecast_inject_failed", error_class=type(e).__name__)
+    if morning_forecast is None:
+        _append_missing(missing_fields, "morning_forecast")
+
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
         normalized_a_share,
@@ -901,6 +914,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         phenomenon_discovery=discovery,
         data_availability=data_availability,
         collection_status=collection_status,
+        morning_forecast=morning_forecast,
     )
 
 
@@ -993,6 +1007,17 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
     data_availability = _quick_availability(close_data)
 
+    # ── 3.5. 读取当日晨报预测（失败不阻断，与 full 版保持一致）──
+    # quick 版与 full 版同样接入 morning_forecast，便于 15:30 quick snapshot
+    # 也带上预判线索；失败/缺失时仅写入 missing_fields，不阻断 snapshot 构建。
+    morning_forecast = None
+    try:
+        morning_forecast = await extract_morning_forecast(report_date)
+    except Exception as e:
+        logger.warning("morning_forecast_inject_failed", error_class=type(e).__name__)
+    if morning_forecast is None:
+        _append_missing(missing_fields, "morning_forecast")
+
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
         normalized_a_share,
@@ -1045,4 +1070,5 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         phenomenon_discovery=discovery,
         data_availability=data_availability,
         collection_status=collection_status,
+        morning_forecast=morning_forecast,
     )
