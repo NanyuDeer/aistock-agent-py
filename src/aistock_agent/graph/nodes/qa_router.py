@@ -1041,39 +1041,43 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 logger.warning("qa_router.fallback.goals_failed", exc_info=True)
                 fallback_goals = None
             if fallback_goals is not None:
-                sub_goals, sub_calls = fallback_goals
-                fbk_output = await _postprocess_skill_calls(
-                    QARouterOutput(
-                        goal=InsightGoal(
-                            question=message,
-                            intent="market_snapshot",
-                            # 与关键词兜底同一约定：兜底路径标记 router_fallback（后处理投影保留）
-                            constraints={"router_fallback": "true"},
+                try:
+                    sub_goals, sub_calls = fallback_goals
+                    fbk_output = await _postprocess_skill_calls(
+                        QARouterOutput(
+                            goal=InsightGoal(
+                                question=message,
+                                intent="market_snapshot",
+                                # 与关键词兜底同一约定：兜底路径标记 router_fallback（投影保留）
+                                constraints={"router_fallback": "true"},
+                            ),
+                            plan="compose",
+                            skill_calls=sub_calls,
+                            complexity="light",
+                            goals=sub_goals,
                         ),
-                        plan="compose",
-                        skill_calls=sub_calls,
-                        complexity="light",
-                        goals=sub_goals,
-                    ),
-                    message,
-                    state,
-                )
-                if fbk_output.skill_calls or fbk_output.goals:
-                    logger.info(
-                        "qa_router.fallback.goals",
-                        n_goals=len(fbk_output.goals or []),
-                        n_calls=len(fbk_output.skill_calls),
+                        message,
+                        state,
                     )
-                    metrics.record_chat_qa_latency(
-                        "qa_router", int((time.monotonic() - start) * 1000)
-                    )
-                    return {
-                        "goal": fbk_output.goal,
-                        "plan": "compose",
-                        "skill_calls": fbk_output.skill_calls,
-                        "complexity": "light",
-                        "goals": fbk_output.goals,
-                    }
+                    if fbk_output.skill_calls or fbk_output.goals:
+                        logger.info(
+                            "qa_router.fallback.goals",
+                            n_goals=len(fbk_output.goals or []),
+                            n_calls=len(fbk_output.skill_calls),
+                        )
+                        metrics.record_chat_qa_latency(
+                            "qa_router", int((time.monotonic() - start) * 1000)
+                        )
+                        return {
+                            "goal": fbk_output.goal,
+                            "plan": "compose",
+                            "skill_calls": fbk_output.skill_calls,
+                            "complexity": "light",
+                            "goals": fbk_output.goals,
+                        }
+                except Exception:
+                    # 后处理/构造异常：不 return，落到关键词兜底
+                    logger.warning("qa_router.fallback.goals_failed", exc_info=True)
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
         # 名称解析（D36）：个股类缺代码 / 默认 report_lookup 的纯名称问句 → 先解析再判定
