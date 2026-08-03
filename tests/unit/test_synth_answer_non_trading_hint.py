@@ -33,7 +33,8 @@ def test_pre_open_status_adds_prefix():
     with patch("aistock_agent.graph.nodes.synth_answer.trading_session_status",
                return_value=("pre_open", "今日开盘前（开盘时间 09:30）")):
         result = _append_non_trading_time_hint("## 核心结论\nok", [_evidence(True)])
-    assert result.startswith("当前为 A 股今日开盘前")
+    # P3-fix-3：pre_open 前缀文案统一为"今日尚未开盘…"
+    assert result.startswith("今日尚未开盘")
 
 
 def test_non_trading_day_adds_prefix():
