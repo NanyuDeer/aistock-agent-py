@@ -15,6 +15,7 @@ from aistock_agent.schemas.chat_contract import (
     Insight,
     InsightGoal,
     SkillCall,
+    SubGoal,
 )
 
 
@@ -66,3 +67,6 @@ class QuestionState(TypedDict, total=False):
     # P2（D12/D13/D39）：最近一次深度升级的引用（synth_answer deep 分支无条件写，
     # 与登录无关）；供 T5 qa_router 追问注入摘要；更早的靠 messages 历史兜底。
     last_deep_report: DeepReportRef | None
+    # P4（D34）：多子目标（多意图 compose 时非空；存量会话/单意图为 None）。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source）。
+    goals: list[SubGoal] | None

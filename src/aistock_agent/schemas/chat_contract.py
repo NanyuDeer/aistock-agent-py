@@ -38,6 +38,36 @@ class InsightGoal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SubGoal(BaseModel):
+    """D34 多子目标：组合问题的独立子目标。
+
+    id 是 skill_calls/evidence 归属引用的锚点（LLM 输出 g1..gN，
+    默认 g1，后处理层校验唯一性并按列表顺序重编号，见 qa_router §5.1）。
+    dimension 即 D30 业务维度，predict 子目标由 synth_answer 输出 D35 降级提示。
+    """
+
+    id: str = "g1"
+    question: str
+    intent: Literal[
+        "capital_flow",
+        "evidence_resolver",
+        "hot_burst",
+        "industry_relation",
+        "market_snapshot",
+        "report_lookup",
+        "sector_snapshot",
+        "stock_news",
+        "stock_snapshot",
+        "trace_lookup",
+    ]
+    dimension: Literal["predict", "trace", "validate"]
+    symbols: list[str] = []
+    tag_codes: list[str] = []
+    time_range: Literal["realtime", "today", "recent", "history"] = "today"
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ChatSource(BaseModel):
     """CHAT 专用 Source 类型，不与 PROD 的 SourceRecord 双源。"""
 
@@ -63,6 +93,8 @@ class Evidence(BaseModel):
     degraded_reason: str | None = None
     skill_name: str
     raw: dict[str, Any] = {}
+    # D34：skill_executor 从 SkillCall 透传；单意图恒为 None
+    goal_id: str | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -96,6 +128,8 @@ class SkillCall(BaseModel):
     ]
     args: dict[str, Any]
     depends_on: list[str] = []
+    # D34：归属子目标（goals 非空时引用 g1..gN；单意图恒为 None）
+    goal_id: str | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -108,5 +142,7 @@ class AnswerTrace(BaseModel):
     skill_calls: list[SkillCall]
     evidences: list[Evidence]
     actual_mode: Literal["predict", "trace", "validate", "deep"]  # D31：deep 统一出口
+    # D34：多子目标（透出调试/前端 trace 兼容；存量 None）
+    goals: list[SubGoal] | None = None
 
     model_config = ConfigDict(extra="forbid")

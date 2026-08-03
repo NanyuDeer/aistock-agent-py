@@ -17,7 +17,7 @@ from aistock_agent.prompts.general.system import (
     COMPLIANCE_REPLY,
     EDUCATION_REPLY,
 )
-from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
+from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall, SubGoal
 from aistock_agent.state.chat_schema import QuestionState
 
 
@@ -957,3 +957,34 @@ async def test_postprocess_drops_chat_analysis_without_ref(monkeypatch):
         _followup_output(), "刚才那个分析怎么样", QuestionState(messages=[])
     )
     assert out.skill_calls == []
+
+
+def test_qa_router_output_goals_default_none():
+    out = QARouterOutput(
+        goal=InsightGoal(question="茅台今天怎么样", intent="stock_snapshot"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    assert out.goals is None
+
+
+def test_qa_router_output_goals_parse():
+    out = QARouterOutput(
+        goal=InsightGoal(question="茅台明天会涨吗", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="g1",
+            )
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(question="当前表现", intent="stock_snapshot", dimension="validate"),
+            SubGoal(question="明日走势", intent="stock_snapshot", dimension="predict"),
+        ],
+    )
+    assert [g.dimension for g in out.goals] == ["validate", "predict"]
+    assert out.goals[0].id == "g1"  # 默认 id

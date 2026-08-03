@@ -18,7 +18,7 @@ from aistock_agent.prompts.general.system import (
     COMPLIANCE_REPLY,
     EDUCATION_REPLY,
 )
-from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
+from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall, SubGoal
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
@@ -127,6 +127,8 @@ class QARouterOutput(BaseModel):
     skill_calls: list[SkillCall]
     # P1（D4）：复杂度判定。必填（缺失 → ValidationError → 既有兜底链）
     complexity: Literal["light", "deep"]
+    # D34：多意图 compose 时 LLM 输出子目标列表；单意图为 None（缺省）
+    goals: list[SubGoal] | None = None
 
     model_config = ConfigDict(extra="forbid")
 
