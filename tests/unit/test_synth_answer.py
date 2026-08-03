@@ -242,7 +242,15 @@ async def test_synth_answer_maps_basis_indices_to_evidences() -> None:
             "answer_mode": "trace",
         }
     )
-    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+    # 固定为交易日：P3-fix-3 后 market_snapshot 证据 raw 为空（a_share_success 未知）视为
+    # "数据非今日"，非交易时段会前导追加提示，破坏 startswith 断言（避免依赖真实日期）
+    with (
+        patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
+        ),
+    ):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
     assert result["insight"].conclusion.startswith("今日上涨由白酒带动")
@@ -275,7 +283,15 @@ async def test_synth_answer_invalid_basis_indices_degrades(indices: list[int]) -
             "answer_mode": "trace",
         }
     )
-    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+    # 固定为交易日：P3-fix-3 后 market_snapshot 证据 raw 为空视为"数据非今日"，
+    # 非交易时段会前导追加提示，破坏 startswith 断言（避免依赖真实日期）
+    with (
+        patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
+        ),
+    ):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
     assert result["final_response"].startswith("## 核心结论")
@@ -914,3 +930,185 @@ async def test_deep_branch_last_deep_report_on_persist_failure(monkeypatch) -> N
 
     assert out["last_deep_report"] is not None
     assert out["last_deep_report"]["report_id"] is None
+
+
+# ─── P3-fix-3: 非交易时段引导确认提示（数据非今日即触发） ───
+
+
+def _quote_evidence(*, degraded: bool, raw: dict | None = None) -> Evidence:
+    """构造 market_snapshot 行情证据（sources 带 realtime_quote）。"""
+    return Evidence(
+        facts=["数据日期：07-31", "上证指数(07-31): 3832.26 (+0.72%)"],
+        sources=[
+            ChatSource(
+                source_id="market:a_share:quick:20260731",
+                kind="realtime_quote",
+                title="A 股最近交易日快照 (20260731)",
+                snippet="",
+                captured_at=datetime.now(UTC),
+            )
+        ],
+        as_of=datetime.now(UTC),
+        degraded=degraded,
+        skill_name="market_snapshot",
+        raw=raw or {},
+    )
+
+
+def test_non_trading_day_recent_close_triggers_guidance() -> None:
+    """非交易日 + 最近交易日回退成功（degraded=False, used_last_close=True）→ 触发引导确认。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={
+            "scope": "both",
+            "snapshot_kind": "quick",
+            "a_share_success": True,
+            "global_success": True,
+            "used_last_close": True,
+            "trade_date": "20260731",
+        },
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out.startswith("今天是 A 股非交易日")
+    assert "你说的是否是这个交易日（2026-07-31）的行情？" in out
+
+
+def test_pre_open_recent_close_triggers_guidance() -> None:
+    """开盘前 + 最近交易日回退 → 触发。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={
+            "scope": "both",
+            "a_share_success": True,
+            "used_last_close": True,
+            "trade_date": "20260731",
+        },
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("pre_open", "今日开盘前（开盘时间 09:30）"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 3),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert "今日尚未开盘" in out
+    assert "你说的是否是这个交易日的数据？" in out
+
+
+def test_closed_today_data_no_hint() -> None:
+    """交易日已收盘 + 今日真实数据（a_share_success=True, 无 used_last_close, 无 degraded）
+    不触发。
+    """
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={"scope": "both", "a_share_success": True, "global_success": True},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out == "## 核心结论\n正文"
+
+
+def test_closed_global_fail_a_share_today_no_hint() -> None:
+    """防误伤：global 失败使 degraded=True，但 A 股是今日数据（a_share_success=True）→ 不触发。"""
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=True,
+        raw={"scope": "both", "a_share_success": True, "global_success": False},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out == "## 核心结论\n正文"
+
+
+def test_non_trading_day_fallback_failed_triggers() -> None:
+    """非交易日回退也失败（a_share_success=False）→ 触发引导。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=True,
+        raw={"scope": "both", "a_share_success": False, "global_success": False},
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out.startswith("今天是 A 股非交易日")
+
+
+def test_closed_stock_snapshot_degraded_still_triggers() -> None:
+    """回归：closed + 其他行情 skill（stock_snapshot）degraded → 仍触发。"""
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = Evidence(
+        facts=["个股行情不可用"],
+        sources=[],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="非交易时段",
+        skill_name="stock_snapshot",
+        raw={"trading_status": "closed"},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert "你说的是否是这个交易日的数据？" in out

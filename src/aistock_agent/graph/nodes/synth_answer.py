@@ -206,48 +206,72 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 """
 
 
+def _quote_data_not_today(ev: Evidence) -> bool:
+    """行情证据的数据是否非"今日"（决定是否触发非交易时段引导提示）。
+
+    按证据类型区分，避免误伤：
+    - market_snapshot：A 股数据是否"今日真实收盘"由 raw 判定——used_last_close=True
+      （最近交易日回退）或 a_share_success 非 True（A 股失败/未请求/未知）均视为非今日；
+      scope=global（仅全球行情）不受 A 股日历门控，维持 degraded 判定。
+    - 其他行情 skill（stock_snapshot/capital_flow 等）：非交易时段/空数据 → degraded=True。
+    """
+    if ev.skill_name == "market_snapshot":
+        raw = ev.raw or {}
+        if raw.get("scope") == "global":
+            return ev.degraded
+        return raw.get("used_last_close") is True or raw.get("a_share_success") is not True
+    return ev.degraded
+
+
 def _append_non_trading_time_hint(
     conclusion: str, evidences: list[Evidence]
 ) -> str:
-    """非交易时段统一提示：5 种时段状态 + 行情类证据降级 → 前导提示。
+    """非交易时段统一提示：5 种时段状态 + 行情类证据数据非今日 → 前导提示。
 
-    时段状态（trading_session_status）：
-    - trading：交易时段，不加提示
-    - pre_open / lunch_break / closed：交易日内非交易时段，加"最近交易日数据"提示
-    - non_trading_day：非交易日，加"最近交易日"引导
-    仅当存在行情类降级证据时触发；报告类/护栏类回答不加。
-    已含"当前为 A 股"前缀时不重复叠加。
+    触发条件 = 时段状态非 trading 且存在行情类证据且其数据非"今日"（_quote_data_not_today）；
+    报告类/护栏类回答不加。已含"当前为 A 股"前缀时不重复叠加。
     """
-    status, hint = trading_session_status()
+    status, _ = trading_session_status()
     if status == "trading":
         return conclusion
 
-    quote_degraded = any(
-        ev.degraded
-        and (
-            ev.skill_name in _QUOTE_SKILLS
-            or any(src.kind == "realtime_quote" for src in ev.sources)
-        )
+    quote_evidence = [
+        ev
         for ev in evidences
-    )
-    if not quote_degraded:
+        if ev.skill_name in _QUOTE_SKILLS
+        or any(src.kind == "realtime_quote" for src in ev.sources)
+    ]
+    if not any(_quote_data_not_today(ev) for ev in quote_evidence):
         return conclusion
 
     # 已含提示不重复
     if conclusion.startswith("当前为 A 股") or conclusion.startswith("今天是 A 股非交易日"):
         return conclusion
 
+    today = shanghai_today()
+    last = prev_trading_day(today)
     if status == "non_trading_day":
-        today = shanghai_today()
-        last = prev_trading_day(today)
         prefix = (
             f"今天是 A 股非交易日（{today.isoformat()} "
-            f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。最近交易日为 "
-            f"{last.isoformat()}（{_CN_WEEKDAYS[last.weekday()]}），可以问我「"
-            f"{last.month}月{last.day}日大盘」或「上一交易日板块表现」查看该日行情。\n\n"
+            f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。以下为最近交易日（"
+            f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）数据。你说的是否是"
+            f"这个交易日（{last.isoformat()}）的行情？\n\n"
         )
-    else:
-        prefix = f"当前为 A 股{hint}，以下为最近交易日数据。\n\n"
+    elif status == "pre_open":
+        prefix = (
+            f"今日尚未开盘（开盘时间 09:30），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    elif status == "lunch_break":
+        prefix = (
+            f"当前为 A 股午间休市（13:00 复盘），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    else:  # closed：已收盘但当日数据尚未发布（空窗期回退）
+        prefix = (
+            f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
 
     return prefix + conclusion
 
