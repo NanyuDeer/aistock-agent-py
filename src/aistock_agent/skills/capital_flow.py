@@ -31,7 +31,7 @@ async def capital_flow(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if is_empty:
         degraded = True
         reason = f"数据源未返回（{status}）"
-        facts = [f"当前为{hint}，{symbol} 资金流向数据暂未返回。"]
+        facts = [f"当前为 {hint}，{symbol} 资金流向数据暂未返回。"]
     elif status != "trading":
         degraded = True
         reason = f"非交易时段（{status}）"

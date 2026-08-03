@@ -22,7 +22,7 @@ from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
-from aistock_agent.state.chat_schema import QuestionState
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 from aistock_agent.utils.message import extract_last_human_message
 
 logger = structlog.get_logger()
@@ -96,6 +96,27 @@ def _build_system_prompt() -> str:
         for name, description in skill_descriptions().items()
     )
     return f"{_SYSTEM_PROMPT_HEADER}{skills_block}{_SYSTEM_PROMPT_FOOTER}"
+
+
+def _build_followup_context(last_deep_report: DeepReportRef | None) -> str:
+    """D14：把上次深度分析摘要注入 prompt（SYSTEM_PROMPT 常量字节不变，节点内拼接）。
+
+    命中条件由 LLM 判定（"刚才那个/上次的分析/再详细说说"等引用语）；
+    未登录（report_id=None）时 LLM 仍可引用会话内摘要（D38 会话内可用）。
+    """
+    if last_deep_report is None:
+        return ""
+    worker = last_deep_report.get("worker") or ""
+    question = last_deep_report.get("question") or ""
+    summary = last_deep_report.get("summary") or ""
+    return (
+        "\n[用户上次深度分析上下文] 你之前对「" + question[:50]
+        + "」做过" + worker + "深度分析，结论摘要："
+        + summary[:200]
+        + "\n若用户引用上述分析（如“刚才那个分析/上次的深度分析/再分析一下”），"
+        + "必须路由 report_lookup(report_type=chat_analysis, date=今天)；"
+        + "不引用时忽略本段。\n"
+    )
 
 
 class QARouterOutput(BaseModel):
@@ -428,7 +449,7 @@ def build_compose_plan(message: str) -> list[SkillCall] | None:
 
 
 async def _postprocess_skill_calls(
-    output: QARouterOutput, message: str
+    output: QARouterOutput, message: str, state: QuestionState
 ) -> QARouterOutput:
     """LLM 成功后做确定性校验/补全（D27）。
 
@@ -495,9 +516,33 @@ async def _postprocess_skill_calls(
                 args["index_name"] = idx
                 args["scope"] = "a_share"
 
+        # 4.5 market_snapshot 参数白名单：LLM 可能输出非法 scope/snapshot_kind
+        #     （如 "all" / "quick_full"），market_snapshot 对非法值硬降级
+        #     （"无效 snapshot_kind"）→ 归一化回默认值，避免整个大盘回答降级
+        if call.skill_name == "market_snapshot":
+            if args.get("scope") not in ("a_share", "global", "both"):
+                args["scope"] = "both"
+            if args.get("snapshot_kind") not in ("quick", "full"):
+                args["snapshot_kind"] = "quick"
+
         # 5. 缺必填参数 → 修正为合理默认
         if call.skill_name == "report_lookup" and not args.get("report_type"):
             args["report_type"] = "review"
+
+        # 5.5 D14/D17：chat_analysis 追问——确定性注入 user_id（登录，读 DB）/
+        #     summary_fallback（未登录，D38 会话内摘要）
+        if call.skill_name == "report_lookup" and args.get("report_type") == "chat_analysis":
+            user_id = state.get("user_id")
+            if user_id:
+                args["user_id"] = user_id
+            else:
+                ref = state.get("last_deep_report")
+                summary = (ref or {}).get("summary") if ref else None
+                if summary:
+                    args["summary_fallback"] = summary
+                else:
+                    logger.warning("qa_router.postprocess.chat_analysis_no_ref")
+                    continue   # 无登录无摘要 → 移除该 call，走既有短路/兜底
 
         kept.append(call.model_copy(update={"args": args}))
 
@@ -627,8 +672,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     try:
         llm = get_quick_think()
         structured_llm = with_chat_structured_output(llm, QARouterOutput)
+        # D14：注入 last_deep_report 摘要（节点内拼接，SYSTEM_PROMPT 常量不变）
+        followup_context = _build_followup_context(state.get("last_deep_report"))
+        prompt = SYSTEM_PROMPT + followup_context
         # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
-        llm_messages = [HumanMessage(content=SYSTEM_PROMPT)] + list(messages)
+        llm_messages = [HumanMessage(content=prompt)] + list(messages)
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
 
         # 校验：direct 时 skill_calls 长度必须=1
@@ -642,7 +690,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             output.skill_calls = output.skill_calls[:1]
 
         # D27 后处理层：LLM 输出不可信，确定性校验/补全
-        output = await _postprocess_skill_calls(output, message)
+        output = await _postprocess_skill_calls(output, message, state)
         if not output.skill_calls and output.goal.constraints.get("postprocess_clarify"):
             logger.info("qa_router.postprocess.clarification", reason="stock_symbol_unresolved")
             metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))

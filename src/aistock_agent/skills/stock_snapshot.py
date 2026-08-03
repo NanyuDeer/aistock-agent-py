@@ -33,7 +33,7 @@ async def stock_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if is_empty:
         degraded = True
         reason = f"数据源未返回（{status}）"
-        facts = [f"当前为{hint}，{symbol} 实时行情暂未返回。"]
+        facts = [f"当前为 {hint}，{symbol} 实时行情暂未返回。"]
     elif status != "trading":
         degraded = True
         reason = f"非交易时段（{status}）"

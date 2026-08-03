@@ -46,7 +46,12 @@ def test_ws_chat_passes_thread_id_config() -> None:
     config = mock_graph.captured.get("config")
     assert config is not None, "astream_events 未收到 config（checkpointer 回归未修复）"
     assert config["configurable"]["thread_id"] == "ws_test_001"
-    assert agent_msg == {"type": "done", "content": "mocked 流式回复", "advisor_trace": None}
+    assert agent_msg == {
+        "type": "done",
+        "content": "mocked 流式回复",
+        "advisor_trace": None,
+        "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+    }
 
 
 def test_ws_chat_default_session_id_when_missing() -> None:
@@ -90,4 +95,9 @@ def test_ws_done_returns_advisor_trace() -> None:
             ws.send_json({"message": "个股 600519"})
             done = ws.receive_json()
 
-    assert done == {"type": "done", "content": "降级", "advisor_trace": trace}
+    assert done == {
+        "type": "done",
+        "content": "降级",
+        "advisor_trace": trace,
+        "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+    }

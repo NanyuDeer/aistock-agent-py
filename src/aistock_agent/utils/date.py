@@ -64,7 +64,7 @@ def trading_session_status(now: datetime | None = None) -> tuple[str, str]:
     if t <= time(11, 30):
         return "trading", ""
     if t < time(13, 0):
-        return "lunch_break", "午间休市，13:00 复盘"
+        return "lunch_break", "午间休市（13:00 复盘）"
     if t <= time(15, 0):
         return "trading", ""
     return "closed", "今日已收盘"

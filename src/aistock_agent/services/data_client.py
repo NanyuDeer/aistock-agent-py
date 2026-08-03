@@ -346,6 +346,7 @@ class NodeApiClient:
         generation_time_ms: int | None = None,
         model_version: str | None = None,
         error_message: str | None = None,
+        update_cache: bool = True,  # P2：chat_analysis 传 False（公共列表排除，D15）
     ) -> dict[str, object] | None:
         """持久化 Agent 分析报告（upsert）
 
@@ -359,6 +360,8 @@ class NodeApiClient:
             generation_time_ms: 生成耗时(毫秒)
             model_version: 模型版本
             error_message: 错误信息
+            update_cache: 是否同步写 Python report_cache（前端公共报告列表）。
+                默认 True 保持既有行为；chat_analysis 传 False（不进公共列表，D15 覆盖语义）。
 
         Returns:
             Node.js 返回的 { id, report_type, report_date, created_at } 或 None
@@ -381,12 +384,13 @@ class NodeApiClient:
             payload["error_message"] = error_message
 
         result = await self.post("/internal/analysis-reports", payload)
-        # 同步写入内存缓存（前端报告列表查询用）
-        try:
-            from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
-            set_report(report_type, report_date, payload)
-        except Exception:
-            pass
+        # 同步写入内存缓存（前端报告列表查询用）；chat_analysis 不进公共列表（D15 排除）
+        if update_cache:
+            try:
+                from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
+                set_report(report_type, report_date, payload)
+            except Exception:
+                pass
         if result:
             logger.info(
                 "analysis_report_saved",
