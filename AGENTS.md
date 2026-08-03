@@ -108,6 +108,8 @@ START → supervisor(quick_think, 意图路由)
 - 回退失败：degraded=True
 - degraded 为整体标志：任一数据源缺失即 True（global 无 last-close 回退源，失败仍 degraded）
 - A 股 last-close 成功但 global 失败 → degraded=True，但 facts 仍含 A 股真实数据（source 标注 trade_date）；A 股部分可独立成功，不被 global 拖累
+- **facts 日期标注（P3-fix-3，2026-08-03）**：facts 始终带交易日——首行锚点 `数据日期：MM-DD`，指数行 `名称(MM-DD): 收盘 (涨跌幅)`，LLM 无法把最近交易日误标"今日"。
+- **非交易时段引导提示（P3-fix-3）**：`synth_answer._append_non_trading_time_hint` 触发条件由"仅 degraded 行情"放宽为"行情类证据存在且数据非今日"（market_snapshot 看 `raw.used_last_close` / `raw.a_share_success`，其他行情 skill 看 `degraded`）；文案含"你说的是否是这个交易日的数据？"引导确认。数据确为今日（a_share_success=True 且无 used_last_close）时不触发。
 
 ### qa_router 增强：2026-08-01
 - 指数名（沪指/深成指/创业板指/科创50/沪深300/恒生等）→ market_snapshot（a_share + index_name）
@@ -120,7 +122,7 @@ START → supervisor(quick_think, 意图路由)
 **复杂度双模式（D4）**：
 - `QARouterOutput.complexity`（必填 Literal["light","deep"]）；`QuestionState` + `complexity`/`force_deep`/`deep_source`/`fallback_to_skill`（T1/T2）
 - 判定：LLM 结构化输出为主；LLM 失败按"意图（stock/sector/hot_burst）+ 分析类词"规则兜底（`_infer_complexity_by_fallback`）；hot_burst 兜底固定 deep
-- `force_deep`：ws.py 读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
+- `force_deep`：ws.py 与 routes.py（/chat/message、/chat/stream/messages，P3 对齐）读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变，先例 user_id）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
 - hot_burst 意图（D6 前置）：`InsightGoal.intent`/`SkillCall.skill_name` Literal 加 `"hot_burst"`；KEYWORD_FALLBACK 加（机构调研/热门股/调研）；hot_burst 无对应 skill，light 会 skill_executor 空转 → 固定 deep 走 escalate
 
 **图外切换 + 统一出口（D1/D3/D7/D31）**：
@@ -138,6 +140,28 @@ START → supervisor(quick_think, 意图路由)
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
+
+### CHAT QA 落库与多轮（P2，2026-08-02）：D11/D15-D18/D12/D13/D38/D39/D14 + checkpointer 持久化
+
+- **user_id 透传（D11）**：`QuestionState.user_id`；ws.py 与 routes.py（/chat/message、/chat/stream/messages）构造 state 后追加（`build_chat_initial_state` 签名不变）；前端 `useChatStream.ts` / `agent.ts` 补传；**未登录（缺省/空串）为 None**
+- **chat_analysis 落库（D15-D18）**：deep 分支 `_persist_chat_analysis`（`graph/nodes/synth_answer.py`）——登录守卫（D38）+ D18 双层 content（summary=前160字/details=全文/stocks/risks=[]/schema_version="2.0"）+ `save_analysis_report(update_cache=False)`（排除 report_cache 公共列表）+ 失败降级不抛异常（warning 日志）；Node 侧 `VALID_REPORT_TYPES` 已含 `chat_analysis`（三元组 upsert 覆盖，7 天 TTL）
+- **last_deep_report（D12/D13/D38/D39 双写解耦）**：`DeepReportRef` 单引用（worker/report_id/question/summary≤160/symbols/tag_codes/created_at）；**无条件写**（与登录无关）；report_id 由落库回填（失败/未登录=None）；ws DONE 负载携带（null 兼容，前端 P3 消费）
+- **追问复用（D14/D17）**：qa_router `_build_followup_context` 节点内拼接摘要（**`SYSTEM_PROMPT` 常量字节不变**）；`_postprocess_skill_calls(output, message, state)` 对 `report_lookup(chat_analysis)` 确定性注入 `user_id`（登录）/ `summary_fallback`（未登录）/ 无引用移除 call；`skills/report_lookup.py` chat_analysis 分支（登录读 DB 三元组 / 未登录会话内摘要，review/morning 分支不变）
+- **每轮 transient 归零（T6 跨任务修复）**：`deep_source`/`final_response` 是单轮路由信号，ws.py/routes.py 入口按轮置 None——否则 checkpointer 跨轮残留会让追问轮被 synth_answer deep 分支劫持（P1 起存在，T6 发现修复）
+- **checkpointer 持久化（P9 前置）**：`CHECKPOINTER_BACKEND=sqlite` → AsyncSqliteSaver + aiosqlite（chat 图 async 执行必须用 AsyncSqliteSaver，sync 版 NotImplementedError）；`get_checkpointer()` 同步入口经 `_run_coro_sync` 桥接；`_ensure_aiosqlite_compat` 补 is_alive；`threading._register_atexit` 退出关闭连接（防进程挂起）；redis 后端需 Redis 6.2+/RedisJSON；依赖钉版 `langgraph-checkpoint-sqlite==2.0.11` + `aiosqlite>=0.22,<0.23`（勿装 3.x/最新版）
+- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）；多 worker 共写 .langgraph.db 有 SQLITE_BUSY 风险（pm2 单实例无碍）
+
+### CHAT QA P3-fix（2026-08-03）：reasoning 思维链 + 交易时段 5 状态降级
+
+- **reasoning 事件流**：`WSEventType.REASONING = "reasoning"`；`graph/nodes/_reasoning.py::stream_reasoning(websocket, node, message)` 每节点 start 时经 `asyncio.create_task` 异步启动（fire-and-forget，不阻塞主图），`get_quick_think` 按节点模板（`prompts/chat/reasoning.py`，qa_router/skill_executor/synth_answer/escalate）生成 50-100 字「我在做什么 + 为什么」，流式 chunk 经 WS `reasoning` 事件转发；失败/超时（2s）/空 message → 静态兜底 label（`_FALLBACK_LABELS`），不抛异常。**关键**：直接接收用户原始 `message` 字符串，不读 state（`initial_state` 在 `on_chain_start` 时 stale，且 QuestionState 消息存 `state["messages"]`，`state.get("message")` 恒 None）。`api/ws.py::_sanitize_label` 过滤异常 JSON label（intermediate/tool_start 均应用，前端 buildExecTree 双保险）
+- **交易时段 5 状态提示**：`utils/date.py` 新增 `is_trading_time`（9:30-11:30 / 13:00-15:00 含边界）+ `trading_session_status`（trading/pre_open/lunch_break/closed/non_trading_day）；`_append_non_trading_day_hint` 演进为 `_append_non_trading_time_hint`（degraded 与 LLM 成功路径均接入，行情类降级证据才提示，已含前缀不重复；旧函数保留为弃用别名）
+- **skill 降级语义增强**：`stock_snapshot`/`capital_flow` 空数据（`_EMPTY_MARKERS`）**或**非交易时段 → `degraded=True` + facts 带时段提示 + `raw.trading_status`（与 market_snapshot「非交易日回退最近交易日 degraded=False」语义对照，勿混）
+
+### CHAT QA P3-fix-2（2026-08-03）：reasoning 时序修正 + 节点过滤修正
+
+- **reasoning task 防 GC + DONE 前 drain**：`api/ws.py` 用 `reasoning_tasks: list[asyncio.Task]` 列表持有 `asyncio.create_task` 返回的引用（fire-and-forget task 若不保存引用会被 GC 在执行前取消，官方文档明确警告）；DONE 前 `await _drain_reasoning_tasks(reasoning_tasks)`（`_REASONING_DRAIN_TIMEOUT_SEC=2.5` 略大于 `_reasoning.py` 的 2.0s，超时 cancel 未完成 task，不阻塞 DONE）。**WS 事件协议不变**（reasoning 类型/字段不变），仅时序演进为 DONE 前集中发送（P3-fix 的"节点 start 即时转发"描述已过时）。
+- **`current_node` 状态替代失效的 v2 name 过滤**：LangGraph `astream_events v2` 的 `name` 在 ON_CHAT_MODEL_STREAM 时是模型名而非节点名，旧 `name in ("supervisor","qa_router")` 过滤永远失效 → qa_router/synth_answer/supervisor 的结构化 JSON 泄漏进 text 流。修复：on_chain_start 每次更新 `current_node = name`（置于 seen_nodes 守卫外），ON_CHAT_MODEL_STREAM 用 `current_node in (qa_router, synth_answer, supervisor)` 过滤；`on_chain_end` **仅当 `name == current_node` 时清除**（v2 对每个嵌套 runnable 都发 on_chain_end，无条件清除会在节点内多次 LLM 调用时中途放行 JSON）。
+- **测试**：`tests/unit/test_ws_chat_replacement.py`（T1 reasoning 时序/过滤/drain 超时 + 前序 D11/T4 补齐）+ `tests/integration/test_ws_chat_replacement.py`（按新过滤语义重写，`stream_reasoning` 全部 patch 防真实 LLM）。
 
 ## 目录结构
 
@@ -163,7 +187,7 @@ src/aistock_agent/
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
 │   ├── output_parser.py # Event Agent 双层输出解析（display_report + podcast_brief）
-│   └── date.py          # 日期/交易日工具
+│   └── date.py          # 日期/交易日工具 + 交易时段判断（is_trading_time / trading_session_status 5 状态）
 ├── errors/              # 异常体系
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
@@ -194,7 +218,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -209,7 +234,7 @@ src/aistock_agent/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
-    └── ws.py            # WebSocket 流式接口（astream_events v2，7 种事件类型 + 节点标签映射）
+    └── ws.py            # WebSocket 流式接口（astream_events v2，8 种事件类型含 reasoning + _sanitize_label JSON 标签净化 + 节点标签映射）
 ```
 
 ## 开发规范
@@ -271,6 +296,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
+| `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
+| `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
+| `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
 
 ## 常用命令
 
