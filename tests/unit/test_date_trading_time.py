@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 
 from aistock_agent.utils.date import is_trading_time, trading_session_status
 
-
 SH = ZoneInfo("Asia/Shanghai")
 
 
