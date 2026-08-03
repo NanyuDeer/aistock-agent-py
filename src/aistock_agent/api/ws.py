@@ -227,8 +227,12 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 节点结束 → 捕获 final_response ---
                     elif event_type == "on_chain_end":
-                        # P3-fix-2 T1.2：节点结束清除 current_node，防节点间串扰（防御性）
-                        current_node = ""
+                        # P3-fix-2 T1.2：仅在当前节点自身的 on_chain_end 时清除 current_node。
+                        # v2 下 on_chain_end 对每个嵌套 runnable（LLM/tool）都会触发，
+                        # 无条件清除会在节点内部多次顺序 LLM 调用时中途放行 JSON（泄漏）；
+                        # 节点自身的 end 在其 LLM 流之后才触发，按 name 比对安全。
+                        if name == current_node:
+                            current_node = ""
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and output.get("final_response"):
                             final_response = output["final_response"]
