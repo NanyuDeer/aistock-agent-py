@@ -2,6 +2,15 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [feat/market-trace-improvement] 2026-08-03 — 板块别名补充：新增 AI/光模块/半导体
+
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/data/sector_aliases.json`：新增 "AI/光模块/半导体" 板块（光刻机 / 共封装光学(CPO) / 存储芯片 / 芯片概念 / 中芯国际概念 / F5G概念），补齐生产环境此前手动热修中有效的 AI 光模块/CPO 热点映射；误删的中医药/科创芯片ETF 等映射已随 main 合并恢复
+
+---
+
 ## [feat/market-trace-improvement] 2026-08-03 — 生产故障修复：手动触发链路 trigger_source 改 scheduler 使报告落库
 
 **开发者**: Aria
