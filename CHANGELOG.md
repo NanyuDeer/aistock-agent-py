@@ -2,6 +2,35 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-03 — P3-fix-3 大盘数据正确性最小补丁 + P2 落库/D27 归一化遗留
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\2026-08-03-p3-fix-3-market-data-correctness.md`
+
+### P3-fix-3 大盘数据正确性最小补丁
+- `src/aistock_agent/skills/market_snapshot.py`：facts 始终带交易日 — 新增 `_date_label()`（YYYYMMDD→MM-DD，异常 None）；`_build_a_share_facts(normalized, trade_date="")` 首位锚点 `数据日期：MM-DD` + 指数行 `名称(MM-DD): ...`；`_fetch_a_share` 传 `trade_date`（消除 LLM 把最近交易日误标"今日"）
+- `src/aistock_agent/graph/nodes/synth_answer.py`：新增 `_quote_data_not_today(ev)`（market_snapshot 按 `raw.scope/used_last_close/a_share_success` 判定，其他行情 skill 按 degraded；防误伤：A 股今日数据 + global 失败不触发）；`_append_non_trading_time_hint` 触发条件放宽为"时段非 trading + 行情证据 + 数据非今日"，四状态引导确认文案（含"你说的是否是这个交易日…"）
+
+### P2 落库 / D27 归一化（遗留一并提交）
+- `src/aistock_agent/memory/checkpointer.py`：chat 会话持久化（+147 行，落库）
+- `src/aistock_agent/api/routes.py`、`state/chat_schema.py`、`schemas/chat.py`：chat 落库接口与状态字段
+- `src/aistock_agent/graph/nodes/qa_router.py`（+56）、`utils/date.py`、`services/data_client.py`、`skills/capital_flow.py`、`skills/stock_snapshot.py`、`skills/report_lookup.py`（+100 新增 report_lookup）：D27 参数归一化
+- `pyproject.toml`、`.env.example`、`.gitignore`、`README.md`：配置与文档
+
+### 测试
+- P3-fix-3：`test_market_snapshot.py` +3、`test_synth_answer.py` +6 且迁移 2 个节点级测试（补 patch trading_session_status）、`test_synth_answer_non_trading_hint.py` 断言更新
+- P2 遗留：`test_chat_persist_followup.py`、`test_chat_state.py`、`test_report_lookup.py` 新增；`test_qa_router.py` +155、`test_chat_multiturn.py`、`test_chat_legacy_replacement.py`、`test_memory.py`、`test_ws_chat.py` 适配
+
+### 文档
+- `AGENTS.md`：Node.js 侧配合接口表 +3 行 market 端点；"market_snapshot Skill 降级语义"段 +2 条 P3-fix-3 bullet
+
+### 验证
+- 目标测试合计 86 passed；全量回归与基线一致（worktree A/B 对比失败集完全一致，新增失败清零）
+- ruff：改动文件 0 errors；SDD 审查：逐 Task Approved + 最终整分支审查 Ready to merge Yes
+
+---
+
 ## [main] 2026-08-02 — ChatAgent 最小落地 M1-M5 完成 + 非交易日统一提示
 
 **开发者**: Aria
