@@ -8,6 +8,10 @@ from pydantic import ValidationError
 from aistock_agent.graph.nodes.qa_router import (
     SYSTEM_PROMPT,
     QARouterOutput,
+    _build_dimension_candidates,
+    _build_fallback_goals,
+    _build_gate4_context,
+    _build_single_predict_goal,
     _postprocess_skill_calls,
     qa_router_node,
     route_by_keyword_fallback,
@@ -43,6 +47,11 @@ def _state(message: str) -> QuestionState:
         "complexity": None,
         "force_deep": None,
     }
+
+
+def _run_postprocess(output: QARouterOutput, message: str) -> QARouterOutput:
+    import asyncio
+    return asyncio.run(_postprocess_skill_calls(output, message, _state(message)))
 
 
 def test_route_by_keyword_fallback_report():
@@ -916,11 +925,12 @@ async def test_followup_injects_last_deep_report_context(monkeypatch):
     assert "report_type=chat_analysis" in prompt
     assert out["goal"].intent == "report_lookup"
 
-    # 无 last_deep_report → 不注入
+    # 无 last_deep_report → 不注入摘要段（P4 闸门 4 维度预筛段可正常追加——
+    # "刚才那个分析怎么样" 命中 validate 维度词；D14 断言聚焦"不注入上次分析上下文"）
     state2 = _state("刚才那个分析怎么样")
     state2["messages"] = base_messages
     await qa_router_node(state2)
-    assert captured["prompt"] == SYSTEM_PROMPT
+    assert captured["prompt"].startswith(SYSTEM_PROMPT)
     assert "上次深度分析" not in str(captured["prompt"])
 
 
@@ -988,3 +998,297 @@ def test_qa_router_output_goals_parse():
     )
     assert [g.dimension for g in out.goals] == ["validate", "predict"]
     assert out.goals[0].id == "g1"  # 默认 id
+
+
+# ── D30 候选集 ──
+def test_dimension_candidates_predict_auto_validate():
+    user_dims, candidates = _build_dimension_candidates("600519 明天会涨吗")
+    assert user_dims == ["predict"]
+    assert {d for d, _ in candidates} == {"predict", "validate"}  # predict 自动补 validate
+    assert candidates[0][1].kind == "stock"
+
+
+def test_dimension_candidates_trace_only():
+    user_dims, candidates = _build_dimension_candidates("今天为什么跌")
+    assert user_dims == ["trace"]
+    assert {d for d, _ in candidates} == {"trace"}
+
+
+def test_dimension_candidates_empty():
+    user_dims, candidates = _build_dimension_candidates("今天晨报说了什么")
+    assert user_dims == []
+    assert candidates == []
+
+
+def test_dimension_candidates_pure_predict_no_target():
+    user_dims, candidates = _build_dimension_candidates("明天会涨吗")
+    assert user_dims == ["predict"]
+    assert candidates[0][1] is None          # 无标的
+    assert candidates[1][1] is None          # 自动补 validate 同为 None
+
+
+def test_dimension_candidates_dedup_same_target():
+    _, candidates = _build_dimension_candidates("600519 今天怎么样，为什么涨")
+    keys = [(d, (t.kind, t.value)) for d, t in candidates]
+    assert len(keys) == len(set(keys))
+
+
+def test_gate4_context_contains_dimensions():
+    _, candidates = _build_dimension_candidates("600519 明天会涨吗")
+    ctx = _build_gate4_context(candidates)
+    assert "业务维度预筛" in ctx
+    assert "predict" in ctx
+    assert "validate" in ctx
+
+
+# ── D35 单意图预测附加（闸门 1/2 短路路径）──
+def test_single_predict_goal_hit():
+    sg = _build_single_predict_goal("600519 明天会涨吗", "stock_snapshot", ["600519"])
+    assert sg is not None
+    assert sg.dimension == "predict"
+    assert sg.question == "600519走势预测"
+
+
+def test_single_predict_goal_miss():
+    sg = _build_single_predict_goal("600519 今天怎么样", "stock_snapshot", ["600519"])
+    assert sg is None
+
+
+def test_single_predict_goal_index_label():
+    sg = _build_single_predict_goal("沪指明天会涨吗", "market_snapshot", [])
+    assert sg is not None
+    assert sg.question == "上证指数走势预测"
+
+
+# ── D27 后处理扩展 ──
+def test_postprocess_goal_renumber_and_goal_id_assign():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 明天会涨吗", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="gX",
+            ),
+            SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"}),
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(
+                id="gX",
+                question="当前表现",
+                intent="stock_snapshot",
+                dimension="validate",
+            ),
+            SubGoal(id="g2", question="明日走势", intent="stock_snapshot", dimension="predict"),
+        ],
+    )
+    out = _run_postprocess(output, "600519 明天会涨吗")
+    assert [sg.id for sg in out.goals] == ["g1", "g2"]
+    assert out.skill_calls[0].goal_id == "g1"  # 非法 gX → 归第一个子目标
+    assert out.skill_calls[1].goal_id == "g1"  # 缺失 → 归第一个子目标
+
+
+def test_postprocess_goal_projection_first_subgoal():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 明天会涨吗", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="g1",
+            )
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(
+                id="g1",
+                question="当前表现",
+                intent="stock_snapshot",
+                dimension="validate",
+                symbols=["600519"],
+            ),
+            SubGoal(id="g2", question="明日走势", intent="stock_snapshot", dimension="predict"),
+        ],
+    )
+    out = _run_postprocess(output, "600519 明天会涨吗")
+    assert out.goal.intent == "stock_snapshot"
+    assert out.goal.symbols == ["600519"]
+    assert out.goal.question == "当前表现"
+
+
+def test_postprocess_single_validate_collapses():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 今天怎么样", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="g1",
+            )
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(
+                id="g1",
+                question="当前表现",
+                intent="stock_snapshot",
+                dimension="validate",
+            )
+        ],
+    )
+    out = _run_postprocess(output, "600519 今天怎么样")
+    assert out.goals is None                 # 单非预测子目标 → 坍缩回单意图
+    assert out.skill_calls[0].goal_id is None
+
+
+def test_postprocess_single_predict_kept():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 明天会涨吗", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="g1",
+            )
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(
+                id="g1",
+                question="明日走势",
+                intent="stock_snapshot",
+                dimension="predict",
+            )
+        ],
+    )
+    out = _run_postprocess(output, "600519 明天会涨吗")
+    assert out.goals is not None
+    assert out.skill_calls[0].goal_id == "g1"
+
+
+# ── 关键词兜底增强（LLM 失败路径）──
+@pytest.mark.asyncio
+async def test_fallback_multi_dimension_compose():
+    user_dims, candidates = _build_dimension_candidates("600519 明天会涨吗")
+    fb = await _build_fallback_goals("600519 明天会涨吗", user_dims, candidates)
+    assert fb is not None
+    sub_goals, calls = fb
+    assert {g.dimension for g in sub_goals} == {"predict", "validate"}
+    assert any(c.goal_id == "g1" for c in calls)   # 预测子目标复用同标的 validate 取数
+    assert any(c.goal_id == "g2" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_fallback_pure_predict_no_data():
+    user_dims, candidates = _build_dimension_candidates("明天会涨吗")
+    fb = await _build_fallback_goals("明天会涨吗", user_dims, candidates)
+    assert fb is not None
+    sub_goals, calls = fb
+    assert [g.dimension for g in sub_goals] == ["predict"]
+    assert calls == []                             # 纯预测无 validate 候选 → 无数据源
+
+
+@pytest.mark.asyncio
+async def test_fallback_pure_predict_yields_to_keyword():
+    # "明天晨报有什么" 命中 predict"明天"，但关键词兜底 report_lookup 优先 → 让位
+    user_dims, candidates = _build_dimension_candidates("明天晨报有什么")
+    fb = await _build_fallback_goals("明天晨报有什么", user_dims, candidates)
+    assert fb is None
+
+
+@pytest.mark.asyncio
+async def test_fallback_single_validate_keeps_current():
+    user_dims, candidates = _build_dimension_candidates("600519 今天怎么样")
+    fb = await _build_fallback_goals("600519 今天怎么样", user_dims, candidates)
+    assert fb is None                              # 单维度非预测 → 维持现状兜底
+
+
+# ── node 级：LLM 多 goal + 闸门预测附加 ──
+@pytest.mark.asyncio
+async def test_qa_router_llm_returns_goals():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 明天会涨吗", intent="stock_snapshot"),
+        plan="compose",
+        skill_calls=[
+            SkillCall(
+                skill_name="stock_snapshot",
+                args={"symbol": "600519"},
+                goal_id="g1",
+            )
+        ],
+        complexity="light",
+        goals=[
+            SubGoal(id="g1", question="当前表现", intent="stock_snapshot", dimension="validate"),
+            SubGoal(id="g2", question="明日走势", intent="stock_snapshot", dimension="predict"),
+        ],
+    )
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=output)
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.with_chat_structured_output",
+        return_value=mock_llm,
+    ):
+        result = await qa_router_node(_state("600519 明天会涨吗"))
+    assert result["goals"] is not None
+    assert [g.id for g in result["goals"]] == ["g1", "g2"]
+    assert result["goal"].intent == "stock_snapshot"   # 投影第一个子目标
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_single_validate_collapses():
+    output = QARouterOutput(
+        goal=InsightGoal(question="600519 今天怎么样", intent="stock_snapshot"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
+        goals=[
+            SubGoal(
+                id="g1",
+                question="当前表现",
+                intent="stock_snapshot",
+                dimension="validate",
+            )
+        ],
+    )
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=output)
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.with_chat_structured_output",
+        return_value=mock_llm,
+    ):
+        result = await qa_router_node(_state("600519 今天怎么样"))
+    assert result["goals"] is None                      # 单 validate 子目标坍缩
+    assert result["skill_calls"][0].goal_id is None
+
+
+@pytest.mark.asyncio
+async def test_qa_router_gate1_index_predict_attaches_goals():
+    result = await qa_router_node(_state("沪指明天会涨吗"))
+    assert result["goals"] is not None                  # 闸门 1 短路 + D35 附加
+    assert result["goals"][0].dimension == "predict"
+    assert result["skill_calls"][0].goal_id == "g1"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_gate2_resolve_predict_attaches_goals():
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_state("茅台明天会涨吗"))
+    assert result["goals"] is not None                  # 闸门 2 解析成功 + D35 附加
+    assert result["goals"][0].dimension == "predict"
+    assert result["goal"].symbols == ["600519"]
+    assert result["skill_calls"][0].goal_id == "g1"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_gate1_no_predict_no_goals():
+    result = await qa_router_node(_state("沪指今天怎么样"))
+    assert result["goals"] is None                      # 无 predict 词 → 现状行为
+    assert result["skill_calls"][0].goal_id is None

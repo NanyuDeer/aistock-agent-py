@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
@@ -450,24 +451,275 @@ def build_compose_plan(message: str) -> list[SkillCall] | None:
     ]
 
 
+# ── P4（D30）：业务维度关键词（维度词命中即产生候选，零 LLM）──
+_DIMENSION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "predict": ("预测", "展望", "会涨", "会跌", "未来", "走势", "预期", "能否", "明天", "后市"),
+    "trace": ("为什么", "原因", "溯源", "动因", "归因", "怎么涨", "怎么跌", "逻辑"),
+    "validate": ("怎么样", "现在", "当前", "行情", "表现", "如何", "多少钱", "涨跌"),
+}
+
+# 无显式指数别名时的隐式大盘语义词（目标类型判定用）
+_IMPLICIT_MARKET_WORDS = ("大盘", "市场", "A股", "股市")
+
+
+@dataclass(frozen=True)
+class _DimTarget:
+    """D30 维度候选的标的（可空：无标的问句如"明天会涨吗"）。"""
+
+    kind: Literal["stock", "sector", "index"]
+    value: str
+
+
+def _extract_dim_target(message: str) -> _DimTarget | None:
+    """提取标的类型（确定性，零 LLM，不调 resolve）；未识别返回 None。"""
+    idx = _match_index_name(message)
+    if idx is not None:
+        return _DimTarget("index", idx)
+    if any(k in message for k in _IMPLICIT_MARKET_WORDS):
+        return _DimTarget("index", "大盘")
+    if "板块" in message or "行业" in message:
+        candidate = _extract_stock_name_candidate(message)
+        return _DimTarget("sector", candidate or "")
+    symbol = _extract_stock_symbol(message)
+    if symbol is not None:
+        return _DimTarget("stock", symbol)
+    candidate = _extract_stock_name_candidate(message)
+    if candidate is not None:
+        return _DimTarget("stock", candidate)
+    return None
+
+
+def _build_dimension_candidates(
+    message: str,
+) -> tuple[list[str], list[tuple[str, _DimTarget | None]]]:
+    """D30 候选集。返回 (用户命中维度, 候选集)。
+
+    - 维度词命中即产生候选，不依赖标的解析成功（target 可为 None）。
+    - predict 命中自动补同标的 validate（D35 "可先查看当前趋势分析"数据支撑）。
+    - 同维度同标的去重；候选集为空 → 不注入（走现状单意图路径）。
+    """
+    user_dims = [d for d, kws in _DIMENSION_KEYWORDS.items() if any(k in message for k in kws)]
+    if not user_dims:
+        return [], []
+    target = _extract_dim_target(message)
+    candidates: list[tuple[str, _DimTarget | None]] = [(d, target) for d in user_dims]
+    if "predict" in user_dims and "validate" not in user_dims:
+        candidates.append(("validate", target))
+    deduped: list[tuple[str, _DimTarget | None]] = []
+    seen: set[tuple[str, tuple[str, str] | None]] = set()
+    for d, t in candidates:
+        key = (d, (t.kind, t.value) if t else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((d, t))
+    return user_dims, deduped
+
+
+def _build_gate4_context(candidates: list[tuple[str, _DimTarget | None]]) -> str:
+    """D30 闸门 4 注入段：候选维度 → LLM 在 goals 中确认（不短路）。"""
+    lines = []
+    for d, t in candidates:
+        desc = t.value if t else "无明确标的"
+        if d == "predict":
+            lines.append(
+                f"- 维度: predict（预测），标的: {desc}（预测功能开发中，"
+                f"不指定预测 skill，可复用同标的现状取数）"
+            )
+        elif d == "trace":
+            lines.append(f"- 维度: trace（溯源），标的: {desc}")
+        else:
+            lines.append(f"- 维度: validate（验证），标的: {desc}")
+    return (
+        "\n[业务维度预筛] 用户问题疑似包含以下业务维度，请在 goals 中确认：\n"
+        + "\n".join(lines)
+        + "\n仅当确实组合了多个维度，或含 predict 意图时输出 goals；"
+        + "单意图（仅 validate/trace）时 goals 必须为 null。"
+        + "\ngoals 格式：[{\"id\": \"g1\", \"question\": \"子问题原文\", "
+        + "\"intent\": \"<intent>\", \"dimension\": \"validate\", "
+        + "\"symbols\": [], \"tag_codes\": [], \"time_range\": \"today\"}]"
+        + "\n每个 skill_calls 项用 goal_id 归属子目标（单意图时省略）。"
+        + "goal 字段仍必填，多意图时投影第一个子目标。\n"
+    )
+
+
+def _build_single_predict_goal(
+    message: str, intent: str, symbols: list[str], label: str = ""
+) -> SubGoal | None:
+    """D35 单意图预测：闸门 1/2 短路的个股/指数问题若含 predict 维度词，
+    附加 predict 子目标（不 bypass 闸门、不升级 deep），synth_answer 输出
+    D35 提示 + 现状趋势要点（spec §1.2 拍板：单意图预测问题纳入 D35）。
+    """
+    if not any(k in message for k in _DIMENSION_KEYWORDS["predict"]):
+        return None
+    if not label:
+        label = _match_index_name(message) or (symbols[0] if symbols else "")
+    return SubGoal(
+        id="g1",
+        question=f"{label}走势预测".strip(),
+        intent=intent,  # type: ignore[arg-type]
+        dimension="predict",
+        symbols=symbols,
+    )
+
+
+def _build_fallback_subgoal(
+    sg_id: str,
+    dimension: str,
+    target: _DimTarget | None,
+    symbols_extra: list[str] | None = None,
+) -> SubGoal:
+    """兜底子目标：question/意图由 维度+标的 确定性生成（LLM 失败路径）。"""
+    label = target.value if target else ""
+    if dimension == "predict":
+        question = f"{label}走势预测"
+    elif dimension == "trace":
+        question = f"{label}涨跌原因"
+    else:
+        question = f"{label}当前表现"
+    if target is None or target.kind == "index":
+        intent: str = "market_snapshot"
+    elif target.kind == "sector":
+        intent = "sector_snapshot"
+    else:
+        intent = "stock_snapshot"
+    symbols = list(symbols_extra or [])
+    if (
+        target
+        and target.kind == "stock"
+        and target.value.isdigit()
+        and target.value not in symbols
+    ):
+        symbols.append(target.value)
+    return SubGoal(
+        id=sg_id,
+        question=question.strip(),
+        intent=intent,  # type: ignore[arg-type]
+        dimension=dimension,  # type: ignore[arg-type]
+        symbols=symbols,
+    )
+
+
+async def _validate_call_for_target(
+    target: _DimTarget | None, message: str
+) -> SkillCall | None:
+    """validate 维度取数：目标 → 现状关键词兜底 skill（D35 支撑，供预测子目标复用）。"""
+    if target is None:
+        if any(k in message for k in _IMPLICIT_MARKET_WORDS) or _match_index_name(message):
+            return _build_default_skill_call("market_snapshot", message)
+        return None
+    if target.kind == "index":
+        return _build_default_skill_call("market_snapshot", message)
+    if target.kind == "sector":
+        return SkillCall(skill_name="sector_snapshot", args={})
+    # stock：6 位代码直接取；中文名异步 resolve（复用闸门 2 设施）
+    if target.value.isdigit():
+        return SkillCall(skill_name="stock_snapshot", args={"symbol": target.value})
+    resolved = await resolve_symbol(target.value)
+    if resolved is not None:
+        return SkillCall(skill_name="stock_snapshot", args={"symbol": resolved})
+    return None
+
+
+async def _build_fallback_goals(
+    message: str,
+    user_dims: list[str],
+    candidates: list[tuple[str, _DimTarget | None]],
+) -> tuple[list[SubGoal], list[SkillCall]] | None:
+    """§6 关键词兜底增强：候选集 → 多子目标 compose（LLM 失败路径）。
+
+    - ≥2 维度 → compose（每个非预测子目标 → 现状兜底 skill；预测子目标复用同标的
+      validate 取数作"当前趋势分析"依据）
+    - 单预测维度 → goals=[predict 子目标（携带同标的 validate 取数，若有）]
+    - 单非预测维度 → None（维持现状兜底，不引入 goals）
+    - 全部子目标无数据源（纯预测且无 validate 候选）→ 若命中非个股关键词意图
+      （如"明天晨报有什么"）让位关键词兜底（report_lookup），避免答非所问；
+      否则 (subgoals, [])，synth 仅输出 D35。
+    """
+    if len(user_dims) == 1 and user_dims[0] != "predict":
+        return None
+    subgoals: list[SubGoal] = []
+    calls: list[SkillCall] = []
+    # 先非预测子目标（validate/trace），后 predict（与 synth 分节顺序一致）
+    ordered = [c for c in candidates if c[0] != "predict"] + [
+        c for c in candidates if c[0] == "predict"
+    ]
+    for dim, target in ordered:
+        sg_id = f"g{len(subgoals) + 1}"
+        if dim == "predict":
+            subgoals.append(_build_fallback_subgoal(sg_id, dim, target))
+            vcall = await _validate_call_for_target(target, message)
+            if vcall is not None:
+                calls.append(vcall.model_copy(update={"goal_id": sg_id}))
+            continue
+        call = await _validate_call_for_target(target, message)
+        if call is None:
+            continue
+        # 解析后的 symbol 回填子目标（中文名 → 6 位代码，供 synth prompt"涉及标的"）
+        symbols = (
+            [str(call.args["symbol"])]
+            if call.skill_name == "stock_snapshot" and call.args.get("symbol")
+            else []
+        )
+        subgoals.append(_build_fallback_subgoal(sg_id, dim, target, symbols))
+        calls.append(call.model_copy(update={"goal_id": sg_id}))
+    if not subgoals:
+        return None
+    if not calls:
+        # 关键词兜底优先于纯预测（Global Constraints）
+        if _has_non_stock_intent(message):
+            return None
+        return subgoals, []
+    return subgoals, calls
+
+
 async def _postprocess_skill_calls(
     output: QARouterOutput, message: str, state: QuestionState
 ) -> QARouterOutput:
     """LLM 成功后做确定性校验/补全（D27）。
 
-    规则：
-    1. 个股类 skill 的 symbol 非 6 位 → resolve_symbol（M4）；仍失败 → 移除该 call
-    2. 报告类 skill 的 date ← extract_report_date(message) 强覆盖（LLM 输出不可信）
-    3. tag_codes 中文名 → resolve_tag_code（M2）；未命中 → 移除参数（skill 回落无 tag_code 模式）
-    4. market_snapshot 缺 index_name 但消息含指数名 → 补全
-    5. 缺必填参数 → 修正为合理默认
-
-    若全部 call 被移除（个股解析失败）→ skill_calls=[] 且 goal.constraints 标记
-    postprocess_clarify，由 qa_router_node 转澄清短路。
+    既有规则 1-5 字节不变；P4（D34）新增：
+    0. goals 处理（重编号/投影/坍缩）与 skill_calls.goal_id 归一
     """
     kept: list[SkillCall] = []
+    # D34：goals 预处理（§5.1-5.4）
+    # 空列表归一并入 None（LLM 可能输出 goals:[] → 按"无 goals"处理，goal_id 全置 None）
+    goals = output.goals or None
+    if goals:
+        # 5.1 子目标 id 重编号 g1..gN（LLM 输出不可信，重复/缺失 → 按列表顺序修正）
+        renumbered = [sg.model_copy(update={"id": f"g{i+1}"}) for i, sg in enumerate(goals)]
+        valid_ids = {sg.id for sg in renumbered}
+        # 5.3 单非预测子目标 → 坍缩回单意图（goals=None，goal_id 全 None；
+        #     必须同步更新 output.goals，否则最终 return 保留原 goals）
+        if len(renumbered) == 1 and renumbered[0].dimension != "predict":
+            goals = None
+            output = output.model_copy(update={"goals": None})
+        else:
+            # 5.2 goal 投影第一个子目标（确定性修正，goal 字段保持 required）
+            # 5.2' goals 局部变量同步为重编号列表（goal_id 归一按 g1..gN 归属）
+            first = renumbered[0]
+            goals = renumbered
+            output = output.model_copy(
+                update={
+                    "goals": renumbered,
+                    "goal": InsightGoal(
+                        question=first.question,
+                        symbols=first.symbols,
+                        tag_codes=first.tag_codes,
+                        time_range=first.time_range,
+                        intent=first.intent,
+                        constraints={**output.goal.constraints},
+                    ),
+                }
+            )
     for call in output.skill_calls:
         args = dict(call.args)
+        # 5.2 skill_calls.goal_id 归一：goals 保留时缺失/非法 → 归第一个子目标；
+        # 坍缩/空 goals 时 LLM 误输出的 goal_id → 全部置 None
+        if goals is not None and call.goal_id not in valid_ids:
+            call = call.model_copy(update={"goal_id": goals[0].id})
+        elif goals is None and call.goal_id is not None:
+            call = call.model_copy(update={"goal_id": None})
 
         # 1. symbol（个股类）：非 6 位 → goal.symbols 补全（compose depends_on 场景，
         #    args 缺 symbol 由 skill_executor 前置 Evidence 提供）→ resolve_symbol →
@@ -551,7 +803,10 @@ async def _postprocess_skill_calls(
     if kept:
         return output.model_copy(update={"skill_calls": kept})
 
-    # 全部被移除 → 标记澄清（个股解析失败）
+    # 全部被移除：goals 保留时不澄清（纯预测 D35 等场景，synth 输出提示段）；
+    # 否则标记澄清（个股解析失败）
+    if output.goals:
+        return output.model_copy(update={"skill_calls": []})
     goal = output.goal.model_copy(
         update={
             "constraints": {**output.goal.constraints, "postprocess_clarify": "true"}
@@ -609,9 +864,24 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             intent="market_snapshot",
             constraints={"index_name": index_name},
         )
-        logger.info("qa_router.gate.index", index=index_name)
+        # D35：单意图预测（闸门短路优先红线不变，仅附加 predict 子目标 → D35 提示 + 现状趋势）
+        predict_goal = _build_single_predict_goal(message, "market_snapshot", [])
+        if predict_goal is not None:
+            call = call.model_copy(update={"goal_id": "g1"})
+            index_plan: Literal["direct", "compose"] = "compose"
+            index_goals: list[SubGoal] | None = [predict_goal]
+        else:
+            index_plan = "direct"
+            index_goals = None
+        logger.info("qa_router.gate.index", index=index_name, predict=bool(predict_goal))
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-        return {"goal": goal, "plan": "direct", "skill_calls": [call], "complexity": "light"}
+        return {
+            "goal": goal,
+            "plan": index_plan,
+            "skill_calls": [call],
+            "complexity": "light",
+            "goals": index_goals,
+        }
 
     # ── 闸门 2：标的名称解析（D36）——中文名 → 代码，解析成功短路个股 Skill ──
     # 已显式给出 6 位代码时跳过（交由 LLM/后处理校验）
@@ -630,13 +900,30 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                     symbols=[resolved],
                 )
                 call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
-                logger.info("qa_router.gate.stock_resolve", name=candidate, symbol=resolved)
+                # D35：单意图预测（"茅台明天会涨吗" → resolve 成功 → 附加 predict 子目标）
+                predict_goal = _build_single_predict_goal(
+                    message, skill_name, [resolved], label=candidate
+                )
+                if predict_goal is not None:
+                    call = call.model_copy(update={"goal_id": "g1"})
+                    resolve_plan: Literal["direct", "compose"] = "compose"
+                    resolve_goals: list[SubGoal] | None = [predict_goal]
+                else:
+                    resolve_plan = "direct"
+                    resolve_goals = None
+                logger.info(
+                    "qa_router.gate.stock_resolve",
+                    name=candidate,
+                    symbol=resolved,
+                    predict=bool(predict_goal),
+                )
                 metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
                 return {
                     "goal": goal,
-                    "plan": "direct",
+                    "plan": resolve_plan,
                     "skill_calls": [call],
                     "complexity": "light",
+                    "goals": resolve_goals,
                 }
             # D36 收口：resolve 未命中时，首轮纯个股问句强制澄清（不进 LLM，
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
@@ -671,12 +958,16 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {"goal": goal, "plan": "compose", "skill_calls": compose_plan, "complexity": "light"}
 
+    # ── 闸门 4：业务维度预筛（D30）——不短路，候选集注入 LLM prompt 确认 ──
+    user_dims, candidates = _build_dimension_candidates(message)
+    gate4_context = _build_gate4_context(candidates) if candidates else ""
+
     try:
         llm = get_quick_think()
         structured_llm = with_chat_structured_output(llm, QARouterOutput)
         # D14：注入 last_deep_report 摘要（节点内拼接，SYSTEM_PROMPT 常量不变）
         followup_context = _build_followup_context(state.get("last_deep_report"))
-        prompt = SYSTEM_PROMPT + followup_context
+        prompt = SYSTEM_PROMPT + followup_context + gate4_context
         # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
         llm_messages = [HumanMessage(content=prompt)] + list(messages)
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
@@ -702,6 +993,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "skill_calls": [],
                 "clarification": _STOCK_SYMBOL_CLARIFICATION,
                 "complexity": "light",
+                "goals": None,
             }
 
         # D4：LLM 判定为主；force_deep=True 时强制升级为 deep（仅在未短路时生效）
@@ -719,6 +1011,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             "plan": output.plan,
             "skill_calls": output.skill_calls,
             "complexity": complexity,
+            "goals": output.goals,
         }
 
     except Exception as exc:
@@ -740,6 +1033,47 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 # compose 兜底仍走 skill_executor 组合取数，不升级
                 "complexity": "light",
             }
+        # P4（D30/D34）：候选集驱动多子目标兜底（≥2 维度或单预测），经 D27 后处理
+        if user_dims:
+            try:
+                fallback_goals = await _build_fallback_goals(message, user_dims, candidates)
+            except Exception:
+                logger.warning("qa_router.fallback.goals_failed", exc_info=True)
+                fallback_goals = None
+            if fallback_goals is not None:
+                sub_goals, sub_calls = fallback_goals
+                fbk_output = await _postprocess_skill_calls(
+                    QARouterOutput(
+                        goal=InsightGoal(
+                            question=message,
+                            intent="market_snapshot",
+                            # 与关键词兜底同一约定：兜底路径标记 router_fallback（后处理投影保留）
+                            constraints={"router_fallback": "true"},
+                        ),
+                        plan="compose",
+                        skill_calls=sub_calls,
+                        complexity="light",
+                        goals=sub_goals,
+                    ),
+                    message,
+                    state,
+                )
+                if fbk_output.skill_calls or fbk_output.goals:
+                    logger.info(
+                        "qa_router.fallback.goals",
+                        n_goals=len(fbk_output.goals or []),
+                        n_calls=len(fbk_output.skill_calls),
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return {
+                        "goal": fbk_output.goal,
+                        "plan": "compose",
+                        "skill_calls": fbk_output.skill_calls,
+                        "complexity": "light",
+                        "goals": fbk_output.goals,
+                    }
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
         # 名称解析（D36）：个股类缺代码 / 默认 report_lookup 的纯名称问句 → 先解析再判定
