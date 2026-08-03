@@ -47,8 +47,13 @@ async def test_stream_reasoning_llm_failure_falls_back_to_label():
     ws = MagicMock()
     ws.send_json = AsyncMock()
 
-    with patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm, \
-         patch("aistock_agent.graph.nodes._reasoning.render_reasoning_prompt", return_value="prompt"):
+    with (
+        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch(
+            "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
+            return_value="prompt",
+        ),
+    ):
         mock_llm.side_effect = RuntimeError("LLM down")
         await stream_reasoning(ws, "qa_router", "查 600519 的行情")
 
@@ -71,8 +76,13 @@ async def test_stream_reasoning_timeout_falls_back():
         await asyncio.sleep(5)
         yield MagicMock(content="never")  # type: ignore[unreachable]
 
-    with patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm, \
-         patch("aistock_agent.graph.nodes._reasoning.render_reasoning_prompt", return_value="prompt"):
+    with (
+        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch(
+            "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
+            return_value="prompt",
+        ),
+    ):
         mock_llm.return_value.astream = slow_astream
         # 把超时缩短到 0.1s 加速测试
         with patch("aistock_agent.graph.nodes._reasoning._REASONING_TIMEOUT_SEC", 0.1):

@@ -72,7 +72,7 @@ async def stream_reasoning(
                 await websocket.send_json({
                     "type": WSEventType.REASONING, "node": node, "chunk": text,
                 })
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("reasoning.timeout", node=node)
         await websocket.send_json({
             "type": WSEventType.REASONING, "node": node, "chunk": fallback,
