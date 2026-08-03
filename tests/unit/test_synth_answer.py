@@ -17,6 +17,7 @@ from aistock_agent.prompts.general.system import (
     RISK_DISCLAIMER_STRONG,
 )
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
+from aistock_agent.services.data_client import node_api
 from aistock_agent.state.chat_schema import QuestionState
 
 CLARIFICATION = "请提供 6 位股票代码后重试。"
@@ -434,7 +435,10 @@ def test_build_degraded_insight_structured_conclusion() -> None:
         skill_name="market_snapshot",
     )
     # 固定为交易日，避免测试依赖真实日期（非交易日会前导追加提示，破坏分节断言）
-    with patch("aistock_agent.graph.nodes.synth_answer.is_trading_day", return_value=True):
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("trading", ""),
+    ):
         insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
 
     assert insight.conclusion.startswith("## 核心结论")
@@ -464,8 +468,8 @@ def test_degraded_insight_non_trading_day_quote_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=False,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -510,8 +514,8 @@ def test_degraded_insight_non_trading_day_report_no_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=False,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("closed", "今日已收盘"),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -548,8 +552,8 @@ def test_degraded_insight_trading_day_no_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=True,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -660,6 +664,7 @@ def _state_with_deep(
         "白酒板块近期走势强劲，龙头股估值处于历史中位数，北向资金持续净流入。\n\n"
         "**结论**：行业景气度回升，龙头基本面稳健。"
     ),
+    user_id: str | None = None,
 ) -> QuestionState:
     """构造 deep 态：deep_source 由 escalate 写入，final_response 为 worker 全文。"""
 
@@ -673,6 +678,7 @@ def _state_with_deep(
         "final_response": worker_text,
         "trace": None,
         "deep_source": "stock",
+        "user_id": user_id,
     }
 
 
@@ -791,3 +797,120 @@ async def test_gate_shortcut_unchanged() -> None:
     assert result["insight"].answer_mode == "validate"
     assert result["trace"].actual_mode == "validate"
     assert RISK_DISCLAIMER not in result["insight"].conclusion
+
+
+# ─── P2（D15-D18）deep 分支落库 chat_analysis ───
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_persists_chat_analysis_for_logged_in(monkeypatch) -> None:
+    """登录用户 deep 升级 → save_analysis_report 被调（chat_analysis/today/user_id/D18 双层）。"""
+    saved: dict[str, object] = {}
+
+    async def fake_save(report_type, report_date, content, user_id=None, **kw):
+        saved.update(
+            report_type=report_type,
+            report_date=report_date,
+            user_id=user_id,
+            content=content,
+            update_cache=kw.get("update_cache"),
+        )
+        return {"id": "rep_1", "report_type": report_type, "report_date": report_date}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert saved["report_type"] == "chat_analysis"
+    assert saved["user_id"] == "u_42"
+    assert saved["update_cache"] is False
+    assert saved["content"]["schema_version"] == "2.0"
+    assert saved["content"]["display_report"]["details"] == out["final_response"]
+    assert len(saved["content"]["display_report"]["summary"]) <= 160
+    assert out["final_response"]  # 落库不影响回答
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_skips_persist_for_anonymous(monkeypatch) -> None:
+    """未登录（user_id 缺省/None）→ 不落库（D38），回答照常。"""
+    called = False
+
+    async def fake_save(*args, **kw):
+        nonlocal called
+        called = True
+        return {"id": "x"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id=None))
+
+    assert called is False
+    assert out["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_persist_failure_degrades_quietly(monkeypatch) -> None:
+    """落库抛异常 → 不抛、不阻断回答（降级 report_id=None）。"""
+
+    async def fake_save(*args, **kw):
+        raise RuntimeError("node down")
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert out["final_response"]
+
+
+# ─── Task 4（D12/D13/D38/D39）：last_deep_report 双写解耦 ───
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_writes_last_deep_report(monkeypatch) -> None:
+    """deep 升级（登录）→ last_deep_report 含 worker/question/summary/report_id/created_at。"""
+
+    async def fake_save(*args, **kw):
+        return {"id": "rep_1", "report_type": "chat_analysis", "report_date": "2026-08-02"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(
+        _state_with_deep(user_id="u_42", message="深度分析一下贵州茅台")
+    )
+    ref = out["last_deep_report"]
+    assert ref is not None
+    assert ref["worker"] == "stock"
+    assert ref["report_id"] == "rep_1"
+    assert ref["question"] == "深度分析一下贵州茅台"
+    assert len(ref["summary"]) <= 160
+    assert ref["symbols"] == []
+    assert ref["tag_codes"] == []
+    assert ref["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_writes_last_deep_report_anonymous(monkeypatch) -> None:
+    """未登录 → 不落库（save 不调）但 last_deep_report 仍写，report_id=None（D38/D39）。"""
+    called = False
+
+    async def fake_save(*args, **kw):
+        nonlocal called
+        called = True
+        return {"id": "x"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id=None))
+
+    assert called is False
+    assert out["last_deep_report"] is not None
+    assert out["last_deep_report"]["report_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_last_deep_report_on_persist_failure(monkeypatch) -> None:
+    """落库失败 → last_deep_report 仍写，report_id=None（降级不阻断）。"""
+
+    async def fake_save(*args, **kw):
+        raise RuntimeError("node down")
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert out["last_deep_report"] is not None
+    assert out["last_deep_report"]["report_id"] is None
