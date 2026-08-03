@@ -2,6 +2,35 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-04 — ChatAgent P4 多意图（D34 goal→goals）+ 维度预筛（D30 闸门 4）+ 预测维降级（D35）
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\2026-08-03-chat-agent-p4-multi-intent-dimension.md`
+
+### 新增
+- `src/aistock_agent/schemas/chat_contract.py`：`SubGoal`（id/question/intent/dimension/symbols/tag_codes/time_range，extra=forbid）；`SkillCall.goal_id` / `Evidence.goal_id` / `AnswerTrace.goals` / `QARouterOutput.goals`（默认 None）
+- `src/aistock_agent/graph/nodes/qa_router.py`：D30 闸门 4 维度预筛（`_DIMENSION_KEYWORDS` predict/trace/validate + 候选集提取 + prompt 注入 + LLM 失败兜底增强）；D27 goals 后处理（id 重编号 g1..gN、goal_id 归一、单非预测坍缩回单意图、goal 投影第一个子目标）；D35 单意图预测附加（闸门 1/2 短路命中 predict 词时附加 predict 子目标）
+- `src/aistock_agent/graph/nodes/skill_executor.py`：`SkillCall.goal_id` 透传到 `Evidence.goal_id`（None 不覆盖）
+- `src/aistock_agent/graph/nodes/synth_answer.py`：`state.goals` 非空时按子目标分节回答（先 validate/trace 现状数据后 predict 提示）；`_synth_multi_goal` / `_synth_section` / `_build_predict_section`；D35 预测降级提示（`PREDICT_DEGRADED_HINT` 代码生成、多个 predict 只输出一次、不编造预测）
+- `src/aistock_agent/prompts/general/system.py`：`PREDICT_DEGRADED_HINT = "预测功能开发中，可先查看当前趋势分析。"`
+- `src/aistock_agent/state/chat_schema.py`：`QuestionState.goals`；`api/ws.py` / `api/routes.py` 入口 goals 每轮归零（单轮 transient）
+
+### 修复
+- `qa_router.py` 兜底链整体 try-except（最终审查 M-1：异常回落关键词兜底，防二次抛异常中断图）
+
+### 测试
+- 契约/候选集/后处理/坍缩/兜底/透传/分节/D35 用例新增（test_qa_router +21、test_chat_contract +12、test_skill_executor +2、test_synth_answer +6）
+- 目标单测 6 文件 185 passed；chat 集成回归失败集与 TRUE BASE 逐断言一致；全量 pytest A/B：HEAD 28 failed ⊆ BASE 33 failed（新增失败清零）；ruff P4 改动文件 0 errors
+
+### 文档
+- `AGENTS.md`：CHAT QA P4 小节（多子目标/维度预筛/预测降级/兼容性）
+- roadmap §1 P4 行（✅ 5/5）、§2 P4 小节、§5.5 验证记录；P4 遗留优化挂入 §1 P5 行
+
+### 验证
+- SDD 逐 Task review Approved（5/5）+ 最终整分支审查 READY TO MERGE（0 Critical / 0 Important；M-1 已修）
+- Commits：00f879d / 997a858 / 44c354e / a6194f6 / 09f4fd8 / 250c00b
+
 ## [changer] 2026-08-03 — P3-fix-3 大盘数据正确性最小补丁 + P2 落库/D27 归一化遗留
 
 **开发者**: Aria
