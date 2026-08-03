@@ -2,6 +2,34 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [feat/market-trace-improvement] 2026-08-03 — 生产故障修复：手动触发链路 trigger_source 改 scheduler 使报告落库
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/api/routes.py`：4 个手动触发端点（morning/review/broadcast/trend-score）state 的 `trigger_source` 由 `"manual"` 改为 `"scheduler"`（与 09:00 调度任务语义一致），修复手动触发链路跑成功但 wind_leader/hot_burst/broadcast/review 因持久化门控 `== "scheduler"` 不落库的问题；stock_trace 端点保持 `"stock_trace"`、chat 端点保持 `"user"` 不动
+
+### 文档
+- 新增 `docs/superpowers/plans/2026-08-02-market-trace-review-improvement.md`、`docs/superpowers/specs/2026-08-02-market-trace-review-improvement-design.md`（大盘溯源改进方案/设计文档入库）
+
+---
+
+## [feat/market-trace-improvement] 2026-08-02 — 大盘溯源 Agent 改进
+
+**开发者**: Aria
+
+### 新增
+- schema：MorningForecast / PredictionValidation / SectorHit / EventHit 模型
+- service：morning_forecast_extractor 晨报结构化提取服务 + Redis 缓存（TTL=2h）
+- snapshot：build_market_trace_snapshot 接入 morning_forecast 注入；财联社数据源切换为 /internal/news/telegraph 当日全量电报
+- market_tools：GLOBAL_MARKET_TICKERS 新增欧洲股市 ticker（^GDAXI / ^FTSE / ^FCHI）
+- review：validate_trace_against_snapshot 预判对照校验 + render_market_trace_markdown 预判对照章节
+
+### 兼容性
+- MarketTraceResult.prediction_validation / MarketTraceSnapshot.morning_forecast 均 Optional 默认 None，兼容旧缓存
+
+---
+
 ## [main] 2026-08-01 — wind_leader prompt 强制 details 结构化 markdown
 
 **开发者**: Aria
