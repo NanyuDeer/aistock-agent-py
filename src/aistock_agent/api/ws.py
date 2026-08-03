@@ -56,6 +56,32 @@ def _sanitize_label(label: str | None) -> str:
     return label
 
 
+# P3-fix-2 T1.1：reasoning task 收集后 DONE 前的等待超时。
+# 略大于 _reasoning.py 的 _REASONING_TIMEOUT_SEC=2.0，保证兜底 label 有机会发出。
+_REASONING_DRAIN_TIMEOUT_SEC = 2.5
+
+
+async def _drain_reasoning_tasks(tasks: list[asyncio.Task]) -> None:
+    """等待所有 reasoning task 完成；超时则取消未完成 task，不阻塞 DONE。
+
+    根因：create_task 返回的 task 若不保存引用，会被垃圾回收而在执行前/中被取消
+    （Python 官方文档明确警告）。即使保存引用，DONE 前也必须等待，否则
+    快速短路场景下 DONE 已发、前端 ws.close()，reasoning 的 send_json 抛异常。
+    """
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=_REASONING_DRAIN_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        # 超时未完成的 task 不再等待（其 send_json 可能已部分发出）
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     """WebSocket 对话（流式输出 + 进度反馈）
@@ -109,6 +135,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 advisor_trace: dict[str, object] | None = None
                 last_deep_report: dict[str, object] | None = None
                 seen_nodes: set[str] = set()
+                # P3-fix-2 T1.1：本轮 reasoning task 引用集合（防 GC，DONE 前等待）
+                reasoning_tasks: list[asyncio.Task] = []
+                # P3-fix-2 T1.2：当前节点名（astream_events v2 的 on_chat_model_stream
+                # name 是模型名非节点名，须用 current_node 判断结构化 JSON 节点）
+                current_node: str = ""
 
                 async for event in graph.astream_events(
                     initial_state,
@@ -120,6 +151,9 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 节点启动 → intermediate 进度 ---
                     if event_type == "on_chain_start" and name in _NODE_LABELS:
+                        # P3-fix-2 T1.2：记录当前节点（必须在 seen_nodes 守卫外，
+                        # 每次节点 start 都更新，防止同一节点再次进入时 current_node 陈旧）
+                        current_node = name
                         if name not in seen_nodes:
                             seen_nodes.add(name)
                             label = _sanitize_label(_NODE_LABELS[name])
@@ -131,9 +165,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                             # 异步启动 reasoning 流式（不阻塞节点执行）；
                             # 关键：直接传 message 字符串，不传 initial_state
                             # （initial_state 在 on_chain_start 时是 stale 的）
-                            asyncio.create_task(
+                            # P3-fix-2 T1.1：必须保存 task 引用，否则被 GC 从未执行
+                            task = asyncio.create_task(
                                 stream_reasoning(websocket, name, message)
                             )
+                            reasoning_tasks.append(task)
 
                     # --- LLM 开始生成 ---
                     elif (
@@ -149,7 +185,11 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 逐 token 文本 ---
                     elif event_type == LangGraphEventType.ON_CHAT_MODEL_STREAM:
-                        if name in ("supervisor", "qa_router"):
+                        # P3-fix-2 T1.2：chat 子图的 qa_router / synth_answer 与老路径
+                        # supervisor 的 LLM 输出是结构化 JSON（意图/证据/结论），最终回复
+                        # 经 done.content（final_response）下发，不流式转发。
+                        # v2 事件 name 是模型名，必须用 current_node 判断（旧 name 过滤失效）。
+                        if current_node in ("qa_router", "synth_answer", "supervisor"):
                             continue
                         chunk = event.get("data", {}).get("chunk")
                         if not chunk:
@@ -187,6 +227,8 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 节点结束 → 捕获 final_response ---
                     elif event_type == "on_chain_end":
+                        # P3-fix-2 T1.2：节点结束清除 current_node，防节点间串扰（防御性）
+                        current_node = ""
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and output.get("final_response"):
                             final_response = output["final_response"]
@@ -194,6 +236,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                             advisor_trace = trace if isinstance(trace, dict) else None
                             # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
                             last_deep_report = output.get("last_deep_report")
+
+                # P3-fix-2 T1.1：DONE 前等待 reasoning task 完成（2.5s 超时兜底），
+                # 保证 reasoning 事件在 done 之前到达，前端可聚合后关闭连接
+                await _drain_reasoning_tasks(reasoning_tasks)
 
                 # 发送完成事件
                 await websocket.send_json({
