@@ -6,6 +6,7 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.prompts.general.system import (
     ACTION_KEYWORDS,
+    PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
     RISK_DISCLAIMER_STRONG,
 )
@@ -24,6 +26,7 @@ from aistock_agent.schemas.chat_contract import (
     Evidence,
     Insight,
     InsightGoal,
+    SubGoal,
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
@@ -52,6 +55,159 @@ _DEFAULT_MODE: dict[str, str] = {
     "trace_lookup": "trace",
     "industry_relation": "trace",
 }
+
+
+@dataclass
+class _SectionResult:
+    """单节综合回答结果（多子目标专用，Task 4）。"""
+
+    conclusion: str
+    basis: list[Evidence]
+    confidence: Literal["high", "medium", "low"]
+    uncertainty: list[str]
+    mode: str
+    degraded: bool = False
+
+
+async def _synth_section(goal: InsightGoal, evidences: list[Evidence]) -> _SectionResult:
+    """单节综合回答（多子目标分节复用）：复用现状 LLM 流程与契约。
+
+    与单意图路径的差异：不含风险段/非交易时段提示/AnswerTrace（多节外层统一处理）。
+    LLM 失败 → facts 拼接降级（不抛异常，"永不 500"铁律）。
+    """
+    mode = _infer_answer_mode(goal, evidences)
+    try:
+        llm = get_deep_think()
+        structured_llm = with_chat_structured_output(llm, SynthOutput)
+        prompt = _build_prompt(goal, evidences, mode)
+        output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+        raw = output.insight
+        basis, basis_error = _resolve_basis_indices(raw.basis_indices, evidences)
+        if basis_error is not None:
+            raise ValueError(basis_error)
+        assert basis is not None
+        if raw.answer_mode != mode:
+            logger.warning(
+                "synth_answer.section.mode_mismatch", expected=mode, actual=raw.answer_mode
+            )
+        return _SectionResult(raw.conclusion, basis, raw.confidence, raw.uncertainty, mode)
+    except Exception as exc:
+        logger.warning("synth_answer.section_failed", err=str(exc), exc_info=True)
+        all_facts = [f for ev in evidences for f in ev.facts]
+        if all_facts:
+            conclusion = "## 行情要点\n" + "\n".join(f"- {f}" for f in all_facts)
+        else:
+            conclusion = "当前没有可用的数据事实，暂时无法回答该问题。"
+        return _SectionResult(
+            conclusion, evidences, "low", [f"综合失败: {exc}"], "validate", degraded=True
+        )
+
+
+def _subgoal_to_goal(sg: SubGoal) -> InsightGoal:
+    """SubGoal → InsightGoal（dimension 通过 constraints.answer_mode 显式注入）。"""
+    return InsightGoal(
+        question=sg.question,
+        symbols=sg.symbols,
+        tag_codes=sg.tag_codes,
+        time_range=sg.time_range,
+        intent=sg.intent,
+        constraints={"answer_mode": sg.dimension},
+    )
+
+
+def _build_predict_section(
+    sg: SubGoal, evidences: list[Evidence], include_hint: bool
+) -> str:
+    """D35：预测子目标节——固定降级提示 + 当前趋势要点（facts 拼接，零 LLM）。"""
+    lines = [f"## {sg.question}"]
+    if include_hint:
+        lines.append(PREDICT_DEGRADED_HINT)
+    trend_evs = [ev for ev in evidences if ev.goal_id == sg.id]
+    facts: list[str] = []
+    for ev in trend_evs:
+        facts.extend(ev.facts)
+    if facts:
+        lines.append("当前趋势要点：")
+        lines.extend(f"- {f}" for f in facts[:10])
+    return "\n\n".join(lines)
+
+
+async def _synth_multi_goal(
+    state: QuestionState,
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    goals: list[SubGoal],
+) -> dict[str, Any]:
+    """D34 多子目标分节回答（先 validate/trace 现状数据，后 predict 提示）。
+
+    - 非 predict 子目标各一次 deep_think（复用 _synth_section，LLM 契约零变化）；
+    - predict 子目标代码生成 D35 提示段（多个只输出一次），附同子目标 validate 趋势要点；
+    - 全文末尾单次 D28 风险段；非交易时段提示按全量 evidence 判断一次、置于文首。
+    """
+    import time
+
+    start = time.monotonic()
+    metrics = get_metrics_collector()
+
+    non_predict = [g for g in goals if g.dimension != "predict"]
+    predict = [g for g in goals if g.dimension == "predict"]
+    sections: list[str] = []
+    basis: list[Evidence] = []
+    uncertainty: list[str] = []
+    any_degraded = False
+    mode: str = "predict"
+    for sg in non_predict:
+        sg_evs = [ev for ev in evidences if ev.goal_id == sg.id]
+        res = await _synth_section(_subgoal_to_goal(sg), sg_evs)
+        if res.degraded:
+            any_degraded = True
+        sections.append(f"## {sg.question[:40]}\n\n{res.conclusion}")
+        basis.extend(res.basis)
+        uncertainty.extend(res.uncertainty)
+        if mode == "predict":
+            mode = res.mode
+    hint_emitted = False
+    for sg in predict:
+        sections.append(_build_predict_section(sg, evidences, include_hint=not hint_emitted))
+        hint_emitted = True
+    if not sections:
+        sections.append(
+            f"## {goals[0].question[:40]}\n\n当前没有可用的数据事实，暂时无法回答该问题。"
+        )
+        any_degraded = True
+    combined = "\n\n".join(sections)
+    # D28：风险段全文单次（去重）
+    combined = _append_risk_disclaimer(combined, strong=_contains_action_word(goal.question))
+    # 非交易时段提示：按全量 evidence 判断一次、置于文首
+    combined = _append_non_trading_time_hint(combined, evidences)
+
+    if any_degraded:
+        metrics.record_synth_degraded()
+    confidence: Literal["high", "medium", "low"] = (
+        "low" if (any_degraded or not basis) else "medium"
+    )
+    insight = Insight(
+        conclusion=combined,
+        basis=basis or evidences,
+        confidence=confidence,
+        uncertainty=uncertainty,
+        answer_mode=mode,  # type: ignore[arg-type]
+    )
+    trace = AnswerTrace(
+        goal=goal,
+        plan=state.get("plan", "compose"),
+        skill_calls=state.get("skill_calls", []),
+        evidences=evidences,
+        actual_mode=mode,  # type: ignore[arg-type]
+        goals=goals,
+    )
+    metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
+    return {
+        "insight": insight,
+        "final_response": combined,
+        "trace": trace,
+        "messages": [AIMessage(content=combined)],
+    }
 
 
 def _infer_answer_mode(goal: InsightGoal, evidences: list[Evidence]) -> str:
@@ -545,6 +701,12 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content=processed)],
             "last_deep_report": last_deep_report,
         }
+
+    # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
+    # 与 deep 分支互斥（多意图 compose 保持 light，不升级 escalate）。
+    goals = state.get("goals")
+    if goals:
+        return await _synth_multi_goal(state, goal, evidences, goals)
 
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)

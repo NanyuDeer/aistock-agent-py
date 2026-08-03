@@ -1,5 +1,5 @@
 """synth_answer 节点单元测试。"""
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,15 +8,24 @@ from pydantic import ValidationError
 
 from aistock_agent.graph.nodes.synth_answer import (
     SynthOutput,
+    _build_predict_section,
     _build_prompt,
     _resolve_basis_indices,
+    _SectionResult,
+    _synth_multi_goal,
     synth_answer_node,
 )
 from aistock_agent.prompts.general.system import (
+    PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
     RISK_DISCLAIMER_STRONG,
 )
-from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
+from aistock_agent.schemas.chat_contract import (
+    ChatSource,
+    Evidence,
+    InsightGoal,
+    SubGoal,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.state.chat_schema import QuestionState
 
@@ -1112,3 +1121,133 @@ def test_closed_stock_snapshot_degraded_still_triggers() -> None:
         out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
 
     assert "你说的是否是这个交易日的数据？" in out
+
+
+# ─── P4（D34/D35）：多子目标分节回答 ───
+
+
+def _ev(goal_id: str, facts: list[str] | None = None) -> Evidence:
+    return Evidence(
+        facts=facts or [f"{goal_id}-fact"],
+        sources=[],
+        as_of=datetime.now(UTC),
+        skill_name="market_snapshot",
+        goal_id=goal_id,
+    )
+
+
+def _subgoal(goal_id: str, dimension: str, question: str) -> SubGoal:
+    return SubGoal(
+        id=goal_id,
+        question=question,
+        intent="market_snapshot",  # type: ignore[arg-type]
+        dimension=dimension,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_validate_then_predict() -> None:
+    """validate 子目标节在前、predict 子目标节在后，D35 提示与 LLM 结论共存。"""
+    evs = [_ev("g1"), _ev("g2")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现"), _subgoal("g2", "predict", "明日走势预测")]
+    state = {"plan": "compose", "skill_calls": []}
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer._synth_section",
+        new=AsyncMock(
+            return_value=_SectionResult(
+                "## 核心结论\n当前市场偏强", [evs[0]], "medium", [], "validate"
+            )
+        ),
+    ):
+        result = await _synth_multi_goal(
+            state, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    assert result["final_response"].index("大盘当前表现") < result["final_response"].index(
+        "明日走势预测"
+    )
+    assert PREDICT_DEGRADED_HINT in result["final_response"]
+    assert "当前市场偏强" in result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_predict_hint_once() -> None:
+    """多个 predict 子目标 → D35 提示全文仅输出一次。"""
+    evs = [_ev("g1"), _ev("g2")]
+    goals = [_subgoal("g1", "predict", "明日走势预测"), _subgoal("g2", "predict", "下周走势预测")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+    )  # type: ignore[arg-type]
+    assert result["final_response"].count(PREDICT_DEGRADED_HINT) == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_risk_once() -> None:
+    """风险段全文单次（不重复叠加）。"""
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现")]
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer._synth_section",
+        new=AsyncMock(return_value=_SectionResult("正常结论", [evs[0]], "medium", [], "validate")),
+    ):
+        result = await _synth_multi_goal(
+            {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    # 风险段全文单次（不重复叠加）
+    assert result["final_response"].count("不构成投资建议") == 1
+
+
+@pytest.mark.asyncio
+async def test_pure_predict_no_evidence_only_hint() -> None:
+    """纯 predict 子目标 + 无证据 → 只输出 D35 提示，不编造预测。"""
+    goals = [_subgoal("g1", "predict", "明天会涨吗")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="明天会涨吗", intent="market_snapshot"), [], goals
+    )  # type: ignore[arg-type]
+    assert PREDICT_DEGRADED_HINT in result["final_response"]
+    assert "明天会涨吗" in result["final_response"]
+    assert result["insight"].answer_mode == "predict"
+    assert result["trace"].goals is not None
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_non_trading_hint_prepended() -> None:
+    """非交易日 + 行情类证据 → 非交易时段提示置于文首（一次）。"""
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现")]
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer._synth_section",
+            new=AsyncMock(
+                return_value=_SectionResult(
+                    "## 核心结论\n正常结论", [evs[0]], "medium", [], "validate"
+                )
+            ),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", {}),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 3),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 8, 1),
+        ),
+    ):
+        result = await _synth_multi_goal(
+            {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    assert result["final_response"].startswith("今天是 A 股非交易日")
+
+
+def test_build_predict_section_hint_once_and_facts() -> None:
+    """D35 提示单次 + 趋势要点 facts 拼接（include_hint=False 时无提示）。"""
+    evs = [_ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])]
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    section = _build_predict_section(sg, evs, include_hint=True)
+    assert section.count(PREDICT_DEGRADED_HINT) == 1
+    assert "当前趋势：上证 3832.26" in section
+    section2 = _build_predict_section(sg, evs, include_hint=False)
+    assert PREDICT_DEGRADED_HINT not in section2
