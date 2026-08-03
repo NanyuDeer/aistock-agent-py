@@ -3,7 +3,7 @@
 from datetime import date
 from unittest.mock import patch
 
-from aistock_agent.utils.date import is_trading_day
+from aistock_agent.utils.date import is_trading_day, prev_trading_day
 
 
 def test_weekday_is_trading_day():
@@ -32,3 +32,18 @@ def test_national_holiday_not_trading_day():
 def test_no_arg_returns_bool():
     # 不传参数时调用 date.today()，验证不崩溃且返回 bool
     assert isinstance(is_trading_day(), bool)
+
+
+def test_prev_trading_day_skips_weekend():
+    """周六 → 前一个交易日为周五。"""
+    assert prev_trading_day(date(2026, 8, 2)) == date(2026, 7, 31)
+
+
+def test_prev_trading_day_skips_holiday():
+    """国庆节（2026-10-01 周四）→ 前一个交易日为 2026-09-30（周三）。"""
+    assert prev_trading_day(date(2026, 10, 1)) == date(2026, 9, 30)
+
+
+def test_prev_trading_day_from_weekday():
+    """周一 → 前一个交易日为上周五。"""
+    assert prev_trading_day(date(2026, 8, 3)) == date(2026, 7, 31)

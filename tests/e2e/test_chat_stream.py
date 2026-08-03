@@ -8,7 +8,7 @@
 - 缺失 X-Internal-Token → 403
 
 测试风格与 tests/e2e/test_chat_message_auth.py、test_briefing_morning.py 一致，
-使用 httpx.AsyncClient + ASGITransport，mock compile_graph 避免真实 LLM 调用。
+使用 httpx.AsyncClient + ASGITransport，mock compile_chat_graph 避免真实 LLM 调用。
 mock astream_events 用 async generator function，不能用 AsyncMock(side_effect=...)
 因为 astream_events 是 async generator 不是 coroutine。
 """
@@ -128,7 +128,7 @@ _FIXTURE_GENERAL_EVENTS: list[dict[str, object]] = [
 async def test_chat_stream_messages_content_type():
     """Content-Type 为 text/event-stream"""
     mock_graph = _make_mock_graph(_empty_stream)
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -147,7 +147,7 @@ async def test_chat_stream_messages_stock_intent_events():
         _make_stream(_FIXTURE_STOCK_EVENTS),
         final_response="茅台分析完成",
     )
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -179,7 +179,7 @@ async def test_chat_stream_messages_general_intent_events():
         _make_stream(_FIXTURE_GENERAL_EVENTS),
         final_response="这是通用回复",
     )
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -198,25 +198,14 @@ async def test_chat_stream_messages_general_intent_events():
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_done_returns_advisor_trace():
-    trace = {
-        "schema_version": "advisor_trace.v1",
-        "subquestions": [
-            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": [], "degraded": False},
-            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": ["stock_trace"], "degraded": True},
-        ],
-        "missing_sources": ["stock_trace"],
-        "degraded": True,
-    }
+async def test_chat_stream_done_advisor_trace_none():
+    """M5 后 ChatAgent 的 QuestionState 无 advisor_trace，DONE 事件保持 null。"""
     mock_graph = _make_mock_graph(_empty_stream)
     mock_graph.aget_state = AsyncMock(return_value=MagicMock(values={
         "final_response": "降级",
         "analysis_reports": {},
-        "advisor_trace": trace,
     }))
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -225,14 +214,14 @@ async def test_chat_stream_done_returns_advisor_trace():
             ) as resp:
                 events = _parse_sse(await _read_sse(resp))
 
-    assert events[-1]["advisor_trace"] == trace
+    assert events[-1]["advisor_trace"] is None
 
 
 @pytest.mark.asyncio
 async def test_chat_stream_messages_error_event():
     """astream_events 抛异常 → SSE error 事件"""
     mock_graph = _make_mock_graph(_boom_stream)
-    with patch("aistock_agent.api.routes.compile_graph", return_value=mock_graph):
+    with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -249,7 +238,7 @@ async def test_chat_stream_messages_error_event():
 @pytest.mark.asyncio
 async def test_chat_stream_messages_missing_token_403():
     """缺失 X-Internal-Token → 403"""
-    with patch("aistock_agent.api.routes.compile_graph",
+    with patch("aistock_agent.api.routes.compile_chat_graph",
                side_effect=AssertionError("auth should block")):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -305,7 +294,7 @@ async def test_chat_stream_updates_tool_events():
 @pytest.mark.asyncio
 async def test_chat_stream_updates_missing_token_403():
     """updates 流缺失 X-Internal-Token → 403"""
-    with patch("aistock_agent.api.routes.compile_graph",
+    with patch("aistock_agent.api.routes.compile_chat_graph",
                side_effect=AssertionError("auth should block")):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),

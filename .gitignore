@@ -50,6 +50,12 @@ changelog-pending.md
 docs/agent-outputs/
 data/audio/
 
+# Superpowers 计划/规格/审查文档（2026-08-02 决策：代码仓库只留代码，计划文档不跟踪）
+docs/superpowers/
+docs/outputs/
+docs/2026-08-01-chat-agent-architecture-discussion.md
+docs/2026-08-01-chat-agent-subagents-design.md
+
 # Claude / Kiro CLI（本地开发工具配置，不提交）
 .claude/
 CLAUDE.md

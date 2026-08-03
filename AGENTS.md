@@ -119,6 +119,30 @@ START → supervisor(quick_think, 意图路由)
 - 市场主线/风险提示 → compose（market_snapshot + sector_snapshot）
 - synth_answer conclusion 中 Markdown 分节（核心结论/行情要点/数据说明）+ 结尾引导追问
 
+### CHAT QA 深度升级（P1，2026-08-02）：D4/D1/D3/D7/D31/D5/D6
+
+**复杂度双模式（D4）**：
+- `QARouterOutput.complexity`（必填 Literal["light","deep"]）；`QuestionState` + `complexity`/`force_deep`/`deep_source`/`fallback_to_skill`（T1/T2）
+- 判定：LLM 结构化输出为主；LLM 失败按"意图（stock/sector/hot_burst）+ 分析类词"规则兜底（`_infer_complexity_by_fallback`）；hot_burst 兜底固定 deep
+- `force_deep`：ws.py 读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
+- hot_burst 意图（D6 前置）：`InsightGoal.intent`/`SkillCall.skill_name` Literal 加 `"hot_burst"`；KEYWORD_FALLBACK 加（机构调研/热门股/调研）；hot_burst 无对应 skill，light 会 skill_executor 空转 → 固定 deep 走 escalate
+
+**图外切换 + 统一出口（D1/D3/D7/D31）**：
+- 拓扑：`qa_router → conditional → (escalate | skill_executor) → synth_answer → END`（chat_builder.py 的 `route_after_router`/`route_after_escalate`）
+- `graph/nodes/escalate.py`：`WorkerHandle` Protocol（A 起步留 C 接口）+ `INTENT_TO_WORKER` + `ESCALATION_MAP`（stock/sector/hot_burst 裸 run 函数）；deep 分支直调 `worker.run()`（图外切换）
+- **ESCAPE_MAP 双形态调用**：`getattr(worker, "run", None) or worker`（裸函数直调 / WorkerHandle 形状走 .run，T6 验证发现并修复）
+- escalate 构造 AgentState 只填消费字段 + **`trigger_source="user_chat"` 固定**（D7：抑制 worker 内 scheduler 守卫的落库/缓存副作用）；sector 未命中 tag_code → `fallback_to_skill=True` 回落 skill_executor（D24）
+- worker 结果 `final_response` 回流 state → **synth_answer 统一出口**（D31）：`deep_source` 非空 → 跳过 LLM 纯代码加工（D28 风险段拼接，`answer_mode`/`actual_mode="deep"`，不落库 P2 边界）；闸门短路条件 `final_response 非空 and deep_source is None`
+- SSE 透传：worker 内 ReAct 事件（text/tool_start/tool_end）经 LangChain 嵌套 run 自动冒泡到顶层 astream_events（ws.py 零改动，T6 验证成立）；ws.py `_NODE_LABELS` 加 `escalate`→「正在深度分析...」
+- 升级率指标：`metrics.record_chat_qa_escalation(worker)` → `chat_qa.escalation_total`（escalate 成功路径接入）
+
+**能力层 C 分级（D5）**：
+- `skills/registry.py` 统一注册中心（手写 skill 优先，同名冲突拒绝适配覆盖）+ `skills/adapters.py`（tool→skill 适配：get_quote/get_capital_flow/search_cls_news/get_leader_stocks/get_global_markets/tavily_finance_search，Evidence.facts/sources/degraded/raw）
+- `skill_executor.SKILL_REGISTRY` 改从 registry 读取；qa_router SYSTEM_PROMPT Skill 清单由注册表动态渲染（方案 1：适配 skill 渲染入 prompt）
+- `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
+
+**3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。

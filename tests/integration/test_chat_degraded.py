@@ -19,6 +19,7 @@ async def test_degraded_skill_exception_recovers():
         goal=InsightGoal(question="茅台现在多少钱", intent="stock_snapshot", symbols=["600519"]),
         plan="direct",
         skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
     )
 
     # synth 也成功返回（但应选 validate 模式因 Evidence degraded）
@@ -46,6 +47,9 @@ async def test_degraded_skill_exception_recovers():
         "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        new=AsyncMock(return_value="600519"),
     ), patch(
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(side_effect=RuntimeError("network timeout")),
@@ -180,6 +184,7 @@ async def test_degraded_synth_failure_returns_low_confidence():
                 args={"report_type": "review", "date": "2026-07-28"},
             )
         ],
+        complexity="light",
     )
 
     mock_quick = MagicMock()
