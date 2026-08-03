@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from aistock_agent.api.deps import build_chat_initial_state
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
+from aistock_agent.graph.nodes._reasoning import stream_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +122,18 @@ async def ws_chat(websocket: WebSocket) -> None:
                     if event_type == "on_chain_start" and name in _NODE_LABELS:
                         if name not in seen_nodes:
                             seen_nodes.add(name)
+                            label = _sanitize_label(_NODE_LABELS[name])
                             await websocket.send_json({
                                 "type": WSEventType.INTERMEDIATE,
-                                "label": _NODE_LABELS[name],
+                                "label": label,
                                 "node": name,
                             })
+                            # 异步启动 reasoning 流式（不阻塞节点执行）；
+                            # 关键：直接传 message 字符串，不传 initial_state
+                            # （initial_state 在 on_chain_start 时是 stale 的）
+                            asyncio.create_task(
+                                stream_reasoning(websocket, name, message)
+                            )
 
                     # --- LLM 开始生成 ---
                     elif (
@@ -165,7 +173,7 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                     # --- 工具调用进度 ---
                     elif event_type == LangGraphEventType.ON_TOOL_START:
-                        label = TOOL_LABELS.get(name, name)
+                        label = _sanitize_label(TOOL_LABELS.get(name, name))
                         await websocket.send_json({
                             "type": WSEventType.TOOL_START,
                             "tool": name,
