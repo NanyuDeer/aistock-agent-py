@@ -1110,3 +1110,190 @@ async def test_quick_available_zero_market_observations_remain_facts(mocker) -> 
     assert "a_share.turnover" not in snapshot.missing_fields
     assert "a_share.limits" not in snapshot.missing_fields
     assert "a_share.main_force.large_and_extra_large_net_yuan" not in snapshot.missing_fields
+
+
+# ============================================================================
+# Task 3 — morning_forecast 注入 snapshot（成功注入 + 失败降级）
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_with_morning_forecast(mocker):
+    """snapshot 成功注入 morning_forecast。"""
+    from aistock_agent.schemas.market_trace import MorningForecast
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    mock_forecast = MorningForecast(
+        report_date="2026-07-19",
+        summary="A股震荡上行",
+        major_events=[],
+        sectors=[],
+        risks=[],
+        source_report_id="rpt_001",
+    )
+
+    # 复用现有 COMPLETE_CLOSE 作为 close-snapshot + news/latest 共用 mock
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=mock_forecast),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    assert snapshot.morning_forecast is not None
+    assert snapshot.morning_forecast.summary == "A股震荡上行"
+    assert snapshot.morning_forecast.source_report_id == "rpt_001"
+    # 成功时不应写入 missing_fields
+    assert "morning_forecast" not in snapshot.missing_fields
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_morning_failure_degraded(mocker):
+    """morning 提取失败时 snapshot.morning_forecast=None，写入 missing_fields。"""
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    # extract_morning_forecast 返回 None（报告缺失/提取失败）
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    assert snapshot.morning_forecast is None
+    assert "morning_forecast" in snapshot.missing_fields
+
+
+# ============================================================================
+# Task 5 — 财联社电报数据源 + 降级到 latest
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_with_telegraph(mocker):
+    """电报接口成功时，snapshot.sources 含 NEWS_* 来自电报。"""
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    telegraph_data = {
+        "date": "2026-07-19",
+        "items": [
+            {
+                "id": 1,
+                "title": "央行降准",
+                "content": "内容1",
+                "time": "2026-07-19 10:00:00",
+                "timestamp": 1752892800,
+            },
+            {
+                "id": 2,
+                "title": "美股收涨",
+                "content": "内容2",
+                "time": "2026-07-19 11:00:00",
+                "timestamp": 1752896400,
+            },
+        ],
+        "total": 2,
+        "degraded": False,
+    }
+
+    async def fake_get(path: str, **_kwargs):
+        if "/internal/news/telegraph" in path:
+            return telegraph_data
+        if "/internal/market/close-snapshot" in path:
+            return COMPLETE_CLOSE
+        return None
+
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=fake_get))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    # 避免 morning_forecast 干扰 news 测试
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    news_sources = [
+        s for s in snapshot.sources.values() if s.source_id.startswith("NEWS_")
+    ]
+    assert len(news_sources) == 2
+    assert news_sources[0].title == "央行降准"
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_telegraph_fallback_to_latest(mocker):
+    """电报接口失败时降级到 /internal/news/latest。"""
+    from aistock_agent.services import market_trace_snapshot as mts
+
+    latest_data = {
+        "stockName": "",
+        "keyword": "",
+        "total": 1,
+        "items": [
+            {
+                "id": 1,
+                "title": "最新快讯",
+                "content": "内容",
+                "time": "2026-07-19 14:00:00",
+                "link": "",
+            }
+        ],
+    }
+
+    call_log: list[str] = []
+
+    async def fake_get(path: str, **_kwargs):
+        call_log.append(path)
+        if "/internal/news/telegraph" in path:
+            raise RuntimeError("电报接口不可用")
+        if "/internal/news/latest" in path:
+            return latest_data
+        if "/internal/market/close-snapshot" in path:
+            return COMPLETE_CLOSE
+        return None
+
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=fake_get))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        return_value=[],
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+    # 避免 morning_forecast 干扰 news 测试
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    snapshot = await mts.build_market_trace_snapshot("2026-07-19")
+    # 验证调用了 telegraph 失败后回退 latest
+    assert any("telegraph" in p for p in call_log)
+    assert any("latest" in p for p in call_log)
+    news_sources = [
+        s for s in snapshot.sources.values() if s.source_id.startswith("NEWS_")
+    ]
+    assert len(news_sources) >= 1

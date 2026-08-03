@@ -370,6 +370,34 @@ def validate_trace_against_snapshot(
                 f"{label} observable_result must reference primary phenomenon fact_ids"
             )
 
+    # ── prediction_validation 校验 ──
+    morning_forecast = snapshot.morning_forecast
+    pv = trace.prediction_validation
+
+    if morning_forecast is not None:
+        if pv is None:
+            raise ValueError(
+                "prediction_validation 不得为 None：snapshot.morning_forecast 非空时必须输出预判对照"
+            )
+        if pv.status == "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 不得为 no_forecast：morning_forecast 非空"
+            )
+        if pv.status in {"hit", "partial", "miss"} and len(pv.sector_hits) == 0:
+            raise ValueError(
+                f"prediction_validation.status={pv.status} 时 sector_hits 不得为空"
+            )
+    else:
+        # morning_forecast 为空时，pv 必须为 None 或 status=no_forecast
+        if pv is not None and pv.status != "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 必须为 no_forecast：snapshot.morning_forecast 为空"
+            )
+        if pv is not None and (len(pv.sector_hits) > 0 or len(pv.event_hits) > 0):
+            raise ValueError(
+                "prediction_validation.status=no_forecast 时 sector_hits/event_hits 必须为空"
+            )
+
 
 # ============================================================================
 # Markdown 渲染 — 从已验证的 JSON 工件渲染展示层
@@ -487,6 +515,30 @@ def render_market_trace_markdown(
         lines.append("- 行情数据不足，无法可靠判断市场现象")
     else:
         lines.append("- 证据不足，未确认主因。")
+    lines.append("")
+
+    # 预判对照章节
+    pv = trace.prediction_validation
+    lines.append("## 预判对照")
+    if pv is None or pv.status == "no_forecast":
+        lines.append("无晨报预测可对照。")
+    else:
+        status_map = {"hit": "全部命中", "partial": "部分命中", "miss": "全部偏离"}
+        lines.append(f"- 对照状态：{status_map.get(pv.status, pv.status)}")
+        if pv.sector_hits:
+            lines.append("- 板块方向对照：")
+            for hit in pv.sector_hits:
+                result_text = "命中" if hit.result == "hit" else "偏离"
+                line = f"  - {hit.sector}：晨报看{hit.morning_direction}，实际{hit.actual_direction}，{result_text}"
+                if hit.result == "miss" and hit.deviation_note:
+                    line += f"（原因：{hit.deviation_note}）"
+                lines.append(line)
+        if pv.event_hits:
+            lines.append("- 事件影响对照：")
+            for hit in pv.event_hits:
+                lines.append(f"  - {hit.event_title}：预期{hit.morning_direction}，实际{hit.actual_impact}，{hit.result}")
+        if pv.overall_note:
+            lines.append(f"- 整体结论：{pv.overall_note}")
     lines.append("")
 
     lines.append("## 候选解释与反证")
