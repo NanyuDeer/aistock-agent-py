@@ -1,5 +1,7 @@
 """WebSocket 流式接口 — 支持 LLM 逐 token 输出 + 工具进度 + 中间步骤反馈"""
 
+import asyncio
+import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -35,6 +37,24 @@ _NODE_LABELS: dict[str, str] = {
 }
 
 
+def _sanitize_label(label: str | None) -> str:
+    """过滤异常 JSON label（根因未定位也安全）。
+
+    ExecStepsPanel / ReasoningCard 都依赖 label 是简短中文，不应该是序列化对象。
+    检测到合法 JSON 字符串时替换为通用文本。
+    """
+    if not label:
+        return "处理中..."
+    s = label.strip()
+    if s.startswith(("{", "[")) and s.endswith(("}", "]")):
+        try:
+            json.loads(s)
+            return "处理中..."
+        except Exception:
+            pass
+    return label
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     """WebSocket 对话（流式输出 + 进度反馈）
@@ -54,9 +74,8 @@ async def ws_chat(websocket: WebSocket) -> None:
             data = await websocket.receive_json()
             message = data.get("message", "")
             session_id = data.get("session_id", f"ws_{id(websocket)}")
-            # 入口解析字段保留（6.15 缺口）：user_id / favorites 不传入 QuestionState，
-            # 为 P2 user_id 透传、P9 自选股联动留口（_ 前缀：本阶段有意不消费）
-            _user_id = data.get("user_id")
+            # 入口解析字段保留（6.15 缺口）：favorites 不传入 QuestionState，
+            # 为 P9 自选股联动留口；user_id 已透传到 state（D11）。
             _favorites = data.get("favorites", [])
 
             if not message:
@@ -69,11 +88,25 @@ async def ws_chat(websocket: WebSocket) -> None:
             # D4：force_deep 由 ws.py 在构造 state 后追加（build_chat_initial_state 签名不变，
             # §3.1 外部契约；qa_router 仅在未短路时生效）
             initial_state["force_deep"] = bool(data.get("force_deep"))
+            # D11：user_id 构造 state 后追加（build_chat_initial_state 签名不变，
+            # §3.1 外部契约）；未登录为 None，作为 chat_analysis 落库登录守卫（D38）。
+            raw_user_id = data.get("user_id")
+            initial_state["user_id"] = (
+                str(raw_user_id) if raw_user_id not in (None, "") else None
+            )
+            # T6 集成修复：deep_source/final_response 是单轮 transient 路由信号，
+            # 只由本轮的 escalate（deep）或 qa_router 闸门写入。不在此处按轮
+            # 清空会经 checkpointer 跨轮残留：追问轮（complexity=light）读到上轮
+            # deep_source 会被 synth_answer deep 分支劫持（丢弃 Evidence、重写
+            # last_deep_report）。last_deep_report 本身是跨轮引用，不能清。
+            initial_state["deep_source"] = None
+            initial_state["final_response"] = None
 
             try:
                 llm_started = False
                 final_response = ""
                 advisor_trace: dict[str, object] | None = None
+                last_deep_report: dict[str, object] | None = None
                 seen_nodes: set[str] = set()
 
                 async for event in graph.astream_events(
@@ -151,16 +184,19 @@ async def ws_chat(websocket: WebSocket) -> None:
                             final_response = output["final_response"]
                             trace = output.get("advisor_trace")
                             advisor_trace = trace if isinstance(trace, dict) else None
+                            # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
+                            last_deep_report = output.get("last_deep_report")
 
                 # 发送完成事件
                 await websocket.send_json({
                     "type": WSEventType.DONE,
                     "content": final_response,
                     "advisor_trace": advisor_trace,
+                    "last_deep_report": last_deep_report,
                 })
 
             except Exception as e:
-                logger.error("ws_chat_error", error=str(e), exc_info=True)
+                logger.error("ws_chat_error: %s", e, exc_info=True)
                 await websocket.send_json({"type": WSEventType.ERROR, "content": str(e)})
 
     except WebSocketDisconnect:
