@@ -113,6 +113,47 @@ async def set_cached_review(
         return False
 
 
+async def get_cached_morning_forecast(report_date: str) -> dict[str, object] | None:
+    """从 Redis 获取缓存的晨报预测结构化摘要。
+
+    缓存 key 格式：``morning:forecast:{report_date}``
+    """
+    try:
+        client = await RedisPool.get_client()
+        cache_key = f"morning:forecast:{report_date}"
+        cached = await client.get(cache_key)
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        logger.debug("get_cached_morning_forecast_failed", exc_info=True)
+    return None
+
+
+async def set_cached_morning_forecast(
+    report_date: str,
+    forecast: dict[str, object],
+    ttl: int = 7200,
+) -> bool:
+    """缓存晨报预测结构化摘要到 Redis。
+
+    Args:
+        report_date: 报告日期 YYYY-MM-DD
+        forecast: MorningForecast 的 model_dump(mode="json") 输出
+        ttl: 缓存过期秒数，默认 7200（2 小时）
+    """
+    try:
+        client = await RedisPool.get_client()
+        cache_key = f"morning:forecast:{report_date}"
+        await client.setex(cache_key, ttl, json.dumps(forecast, ensure_ascii=False))
+        return True
+    except Exception:
+        logger.debug("set_cached_morning_forecast_failed", exc_info=True)
+        return False
+
+
 def _event_cache_key(user_input: str) -> str:
     """生成事件缓存 key：event:{md5}"""
     digest = hashlib.md5(user_input.encode()).hexdigest()
