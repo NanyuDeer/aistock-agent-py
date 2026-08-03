@@ -1,6 +1,7 @@
 """capital_flow Skill — 个股资金流向。
 
-复用 tools/stock_tools.py 的 get_capital_flow。非交易时段 / 数据源未返回 → degraded=True，facts 含时段提示。
+复用 tools/stock_tools.py 的 get_capital_flow。非交易时段 / 数据源未返回 → degraded=True，
+facts 含时段提示。
 """
 from __future__ import annotations
 

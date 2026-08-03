@@ -1,6 +1,7 @@
 """stock_snapshot Skill — 实时个股行情。
 
-复用 tools/stock_tools.py 的 get_quote。非交易时段 / 数据源未返回 → degraded=True，facts 含时段提示。
+复用 tools/stock_tools.py 的 get_quote。非交易时段 / 数据源未返回 → degraded=True，
+facts 含时段提示。
 """
 from __future__ import annotations
 
