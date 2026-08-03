@@ -10,6 +10,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     user_id: str | None = None
     favorites: list[str] = Field(default_factory=list, description="用户自选股代码列表")
+    force_deep: bool = Field(default=False, description="强制深度分析（对齐 ws.py，D4）")
 
 
 class AdvisorSubquestionTrace(BaseModel):

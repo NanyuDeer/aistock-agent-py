@@ -10,6 +10,11 @@ dependencies = [
     "langchain-core==0.3.58",
     "langchain-openai==0.2.14",
 
+    # ChatAgent P2：SQLite 持久化后端（langgraph-checkpoint-sqlite 2.x 兼容
+    # langgraph 0.2.74 / langgraph-checkpoint 2.1.2；禁止 3.x 拉取 checkpoint 4.x）
+    "langgraph-checkpoint-sqlite==2.0.11",
+    "aiosqlite>=0.22,<0.23",
+
     # FastAPI 服务层
     "fastapi==0.115.12",
     "uvicorn[standard]==0.34.2",

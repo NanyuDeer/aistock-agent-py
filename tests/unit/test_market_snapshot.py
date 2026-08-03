@@ -546,3 +546,62 @@ async def test_market_snapshot_both_last_close_ok_global_fails():
     assert "2026-07-31" in a_share_sources[0].title or "20260731" in a_share_sources[0].source_id
     assert ev.raw.get("a_share_success") is True
     assert ev.raw.get("global_success") is False
+
+
+# ── P3-fix-3: facts 始终带交易日 ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_quick_facts_include_trade_date():
+    """quick 路径：首行锚点'数据日期：' + 指数行带 (MM-DD)。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=QUICK_SNAPSHOT_OK)
+        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
+
+        ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "quick"}, _goal())
+
+    assert ev.facts[0] == "数据日期：07-30"
+    assert any(f.startswith("上证指数(07-30)") for f in ev.facts)
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_full_facts_include_trade_date():
+    """full 路径：同样带日期。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
+    ):
+        mock_api.get = AsyncMock(return_value=FULL_SNAPSHOT_OK)
+        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
+
+        ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "full"}, _goal())
+
+    assert ev.facts[0] == "数据日期：07-30"
+    assert any(f.startswith("上证指数(07-30)") for f in ev.facts)
+
+
+@pytest.mark.asyncio
+async def test_market_snapshot_facts_missing_trade_date_no_crash():
+    """trade_date 缺失/异常 → 不拼日期、不崩溃（防御）。"""
+    from aistock_agent.skills.market_snapshot import market_snapshot
+
+    broken = {**QUICK_SNAPSHOT_OK, "trade_date": ""}
+    with (
+        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
+    ):
+        mock_api.get_quick_snapshot = AsyncMock(return_value=broken)
+        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
+
+        ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "quick"}, _goal())
+
+    assert ev.degraded is False
+    assert any("上证指数" in f for f in ev.facts)
+    assert not any(f.startswith("数据日期") for f in ev.facts)

@@ -6,10 +6,12 @@
 2. 上下文延续：qa_router 第二轮能读到第一轮的 HumanMessage + AIMessage
 3. synth_answer 追加 AIMessage 到 messages，形成完整对话历史
 """
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
 
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.graph.nodes.qa_router import QARouterOutput
@@ -83,7 +85,8 @@ async def test_multiturn_messages_accumulate():
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
         # 固定交易日环境：非交易日会前置提示，破坏 startswith 断言；本测试验证多轮累积
-        "aistock_agent.graph.nodes.synth_answer.is_trading_day", return_value=True
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("trading", ""),
     ), patch(
         "aistock_agent.skills.stock_snapshot.get_quote",
         new=AsyncMock(return_value="600519 当前价 1800"),
@@ -91,8 +94,11 @@ async def test_multiturn_messages_accumulate():
         "aistock_agent.skills.stock_news.search_cls_news",
         new=AsyncMock(return_value="茅台发布半年报"),
     ):
-        graph = compile_chat_graph()
-        config = {"configurable": {"thread_id": "multiturn-test-1"}}
+        graph = compile_chat_graph(checkpointer=MemorySaver())
+        # 每次运行用唯一 thread_id + 独立 MemorySaver：不依赖全局 sqlite 单例
+        # （其 asyncio.Lock 跨 pytest-asyncio 事件循环复用会抛 "Lock bound to a
+        # different event loop"，且 .langgraph.db 跨运行累积会让消息数断言漂移）。
+        config = {"configurable": {"thread_id": uuid.uuid4().hex}}
 
         # 第 1 轮
         state1: QuestionState = {
@@ -162,7 +168,12 @@ async def test_multiturn_different_threads_isolated():
         "aistock_agent.skills.report_lookup.get_cached_review",
         new=AsyncMock(return_value={"markdown": "晨报", "trace_summary": "震荡"}),
     ):
-        graph = compile_chat_graph()
+        graph = compile_chat_graph(checkpointer=MemorySaver())
+
+        # 唯一 thread_id + 独立 MemorySaver：避免 sqlite 单例跨 loop 绑定与
+        # .langgraph.db 跨运行累积污染隔离断言
+        thread_a = uuid.uuid4().hex
+        thread_b = uuid.uuid4().hex
 
         # thread A 第一轮
         state_a: QuestionState = {
@@ -170,7 +181,7 @@ async def test_multiturn_different_threads_isolated():
             "goal": None, "plan": "direct", "skill_calls": [], "evidences": [],
             "insight": None, "final_response": "", "trace": None,
         }
-        await graph.ainvoke(state_a, config={"configurable": {"thread_id": "thread-A"}})
+        await graph.ainvoke(state_a, config={"configurable": {"thread_id": thread_a}})
 
         # thread B 第一轮（不同 thread_id）
         state_b: QuestionState = {
@@ -178,7 +189,7 @@ async def test_multiturn_different_threads_isolated():
             "goal": None, "plan": "direct", "skill_calls": [], "evidences": [],
             "insight": None, "final_response": "", "trace": None,
         }
-        result_b = await graph.ainvoke(state_b, config={"configurable": {"thread_id": "thread-B"}})
+        result_b = await graph.ainvoke(state_b, config={"configurable": {"thread_id": thread_b}})
 
     # thread B 的 messages 不应包含 thread A 的内容
     final_messages = result_b.get("messages", [])
@@ -228,8 +239,10 @@ async def test_multiturn_qa_router_receives_history():
         "aistock_agent.skills.stock_news.search_cls_news",
         new=AsyncMock(return_value="茅台半年报"),
     ):
-        graph = compile_chat_graph()
-        config = {"configurable": {"thread_id": "multiturn-test-3"}}
+        graph = compile_chat_graph(checkpointer=MemorySaver())
+        # 唯一 thread_id + 独立 MemorySaver：避免 sqlite 单例跨 loop 绑定与
+        # .langgraph.db 跨运行累积导致 captured 历史漂移
+        config = {"configurable": {"thread_id": uuid.uuid4().hex}}
 
         await graph.ainvoke(
             {

@@ -47,6 +47,7 @@ class WSEventType:
     TEXT = "text"                  # 逐 token 文本
     TOOL_START = "tool_start"      # 工具调用开始
     TOOL_END = "tool_end"          # 工具调用结束
+    REASONING = "reasoning"        # AI 思考文本（流式 chunk） → 新增此行
     DONE = "done"
     ERROR = "error"
 
