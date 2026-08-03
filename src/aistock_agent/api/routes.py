@@ -367,7 +367,7 @@ async def trigger_morning_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -573,7 +573,7 @@ async def trigger_review_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -636,7 +636,7 @@ async def trigger_broadcast_chain(
     start = time.time()
 
     def _make_state(intent: str | None = None) -> dict[str, object]:
-        """构造 manual 触发的 AgentState（trigger_source=manual 使报告写DB）"""
+        """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，与 09:00 调度任务一致）"""
         return {
             "messages": [],
             "session_id": f"manual_broadcast_{today}",
@@ -647,7 +647,7 @@ async def trigger_broadcast_chain(
             "tag_code": None,
             "analysis_reports": {},
             "final_response": None,
-            "trigger_source": "manual",
+            "trigger_source": "scheduler",
             "report_date": today,
         }
 
@@ -775,7 +775,7 @@ async def trigger_trend_score(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": today,
     }
 

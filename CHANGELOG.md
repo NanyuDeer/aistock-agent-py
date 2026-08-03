@@ -31,6 +31,27 @@
 - SDD 逐 Task review Approved（5/5）+ 最终整分支审查 READY TO MERGE（0 Critical / 0 Important；M-1 已修）
 - Commits：00f879d / 997a858 / 44c354e / a6194f6 / 09f4fd8 / 250c00b
 
+## [feat/market-trace-improvement] 2026-08-03 — 板块别名补充：新增 AI/光模块/半导体
+
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/data/sector_aliases.json`：新增 "AI/光模块/半导体" 板块（光刻机 / 共封装光学(CPO) / 存储芯片 / 芯片概念 / 中芯国际概念 / F5G概念），补齐生产环境此前手动热修中有效的 AI 光模块/CPO 热点映射；误删的中医药/科创芯片ETF 等映射已随 main 合并恢复
+
+---
+
+## [feat/market-trace-improvement] 2026-08-03 — 生产故障修复：手动触发链路 trigger_source 改 scheduler 使报告落库
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/api/routes.py`：4 个手动触发端点（morning/review/broadcast/trend-score）state 的 `trigger_source` 由 `"manual"` 改为 `"scheduler"`（与 09:00 调度任务语义一致），修复手动触发链路跑成功但 wind_leader/hot_burst/broadcast/review 因持久化门控 `== "scheduler"` 不落库的问题；stock_trace 端点保持 `"stock_trace"`、chat 端点保持 `"user"` 不动
+
+### 文档
+- 新增 `docs/superpowers/plans/2026-08-02-market-trace-review-improvement.md`、`docs/superpowers/specs/2026-08-02-market-trace-review-improvement-design.md`（大盘溯源改进方案/设计文档入库）
+
+---
+
 ## [changer] 2026-08-03 — P3-fix-3 大盘数据正确性最小补丁 + P2 落库/D27 归一化遗留
 
 **开发者**: Aria
@@ -57,6 +78,22 @@
 ### 验证
 - 目标测试合计 86 passed；全量回归与基线一致（worktree A/B 对比失败集完全一致，新增失败清零）
 - ruff：改动文件 0 errors；SDD 审查：逐 Task Approved + 最终整分支审查 Ready to merge Yes
+
+---
+
+## [feat/market-trace-improvement] 2026-08-02 — 大盘溯源 Agent 改进
+
+**开发者**: Aria
+
+### 新增
+- schema：MorningForecast / PredictionValidation / SectorHit / EventHit 模型
+- service：morning_forecast_extractor 晨报结构化提取服务 + Redis 缓存（TTL=2h）
+- snapshot：build_market_trace_snapshot 接入 morning_forecast 注入；财联社数据源切换为 /internal/news/telegraph 当日全量电报
+- market_tools：GLOBAL_MARKET_TICKERS 新增欧洲股市 ticker（^GDAXI / ^FTSE / ^FCHI）
+- review：validate_trace_against_snapshot 预判对照校验 + render_market_trace_markdown 预判对照章节
+
+### 兼容性
+- MarketTraceResult.prediction_validation / MarketTraceSnapshot.morning_forecast 均 Optional 默认 None，兼容旧缓存
 
 ---
 
