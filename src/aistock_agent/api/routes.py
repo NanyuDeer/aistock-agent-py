@@ -94,6 +94,10 @@ async def chat_message(
     graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
+    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
+    initial_state["final_response"] = None
     result = await graph.ainvoke(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
@@ -274,6 +278,10 @@ async def chat_stream_messages(
     graph = _select_graph()
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
+    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
+    initial_state["final_response"] = None
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):

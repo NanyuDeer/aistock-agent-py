@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from aistock_agent.graph.nodes.qa_router import (
     SYSTEM_PROMPT,
     QARouterOutput,
+    _postprocess_skill_calls,
     qa_router_node,
     route_by_keyword_fallback,
 )
@@ -168,6 +169,46 @@ async def test_qa_router_llm_failure_market_snapshot():
     assert result["skill_calls"][0].skill_name == "market_snapshot"
     assert result["goal"].intent == "market_snapshot"
     assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_normalizes_market_snapshot_args():
+    """D27：LLM 输出的非法 scope/snapshot_kind 归一化为默认值，避免 market_snapshot 硬降级。"""
+    output = QARouterOutput(
+        goal=InsightGoal(intent="market_snapshot", question="大盘怎么样"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(
+                skill_name="market_snapshot",
+                args={"scope": "all", "snapshot_kind": "quick_full"},
+            )
+        ],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(output, "大盘怎么样", _state("大盘怎么样"))
+    call = result.skill_calls[0]
+    assert call.args["scope"] == "both"
+    assert call.args["snapshot_kind"] == "quick"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_keeps_valid_market_snapshot_args():
+    """D27：合法 scope/snapshot_kind 不被改动。"""
+    output = QARouterOutput(
+        goal=InsightGoal(intent="market_snapshot", question="大盘怎么样"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(
+                skill_name="market_snapshot",
+                args={"scope": "a_share", "snapshot_kind": "full"},
+            )
+        ],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(output, "大盘怎么样", _state("大盘怎么样"))
+    call = result.skill_calls[0]
+    assert call.args["scope"] == "a_share"
+    assert call.args["snapshot_kind"] == "full"
 
 
 @pytest.mark.asyncio
@@ -802,3 +843,117 @@ async def test_qa_router_stock_name_with_analysis_verb_short_circuits_light(monk
     assert result["skill_calls"][0].skill_name == "stock_snapshot"
     assert result["complexity"] == "light"
     assert "clarification" not in result or result.get("clarification") is None
+
+
+# ─── P2 Task 5：D14/D17 追问复用（last_deep_report 注入 + chat_analysis 后处理） ───
+
+
+def _sample_ref() -> dict:
+    """构造 DeepReportRef 形状 dict（对齐 state/chat_schema.py）。"""
+    return {
+        "worker": "stock",
+        "report_id": "rep_1",
+        "question": "深度分析一下贵州茅台",
+        "summary": "贵州茅台基本面稳健，估值处于合理区间。",
+        "symbols": ["600519"],
+        "tag_codes": [],
+        "created_at": "2026-08-02T10:00:00+08:00",
+    }
+
+
+def _goal(question: str) -> InsightGoal:
+    return InsightGoal(
+        question=question,
+        intent="report_lookup",
+        symbols=[],
+        tag_codes=[],
+        time_range="today",
+    )
+
+
+def _followup_output() -> QARouterOutput:
+    return QARouterOutput(
+        goal=_goal("刚才那个分析怎么样"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(skill_name="report_lookup", args={"report_type": "chat_analysis"})
+        ],
+        complexity="light",
+    )
+
+
+@pytest.mark.asyncio
+async def test_followup_injects_last_deep_report_context(monkeypatch):
+    """有 last_deep_report → LLM prompt 含摘要段（注入为追加，SYSTEM_PROMPT 常量字节不变）；
+    无 → 不注入（prompt 即 SYSTEM_PROMPT 本身）。"""
+    captured: dict[str, object] = {}
+
+    async def fake_ainvoke(messages):
+        captured["prompt"] = messages[0].content
+        return _followup_output()
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=fake_ainvoke)
+    )
+    monkeypatch.setattr(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", lambda: mock_llm
+    )
+    # 多轮追问场景：3 条消息绕过闸门 2 澄清（resolve 失败时仅单轮强制澄清）
+    base_messages = [
+        HumanMessage(content="深度分析一下贵州茅台"),
+        AIMessage(content="已完成深度分析。"),
+        HumanMessage(content="刚才那个分析怎么样"),
+    ]
+
+    state = _state("刚才那个分析怎么样")
+    state["messages"] = base_messages
+    state["last_deep_report"] = _sample_ref()
+    out = await qa_router_node(state)
+    prompt = str(captured["prompt"])
+    assert prompt.startswith(SYSTEM_PROMPT)  # 常量字节不变，摘要段为追加
+    assert "上次深度分析" in prompt
+    assert "report_type=chat_analysis" in prompt
+    assert out["goal"].intent == "report_lookup"
+
+    # 无 last_deep_report → 不注入
+    state2 = _state("刚才那个分析怎么样")
+    state2["messages"] = base_messages
+    await qa_router_node(state2)
+    assert captured["prompt"] == SYSTEM_PROMPT
+    assert "上次深度分析" not in str(captured["prompt"])
+
+
+@pytest.mark.asyncio
+async def test_postprocess_injects_user_id_for_logged_in(monkeypatch):
+    """登录 → report_lookup(chat_analysis) 注入 user_id，不注入 summary_fallback。"""
+    out = await _postprocess_skill_calls(
+        _followup_output(),
+        "刚才那个分析怎么样",
+        QuestionState(messages=[], user_id="u_42", last_deep_report=_sample_ref()),
+    )
+    args = out.skill_calls[0].args
+    assert args["user_id"] == "u_42"
+    assert "summary_fallback" not in args
+
+
+@pytest.mark.asyncio
+async def test_postprocess_uses_summary_fallback_for_anonymous(monkeypatch):
+    """未登录但有 last_deep_report → 注入 summary_fallback，不注入 user_id。"""
+    out = await _postprocess_skill_calls(
+        _followup_output(),
+        "刚才那个分析怎么样",
+        QuestionState(messages=[], last_deep_report=_sample_ref()),
+    )
+    args = out.skill_calls[0].args
+    assert args["summary_fallback"] == _sample_ref()["summary"]
+    assert "user_id" not in args
+
+
+@pytest.mark.asyncio
+async def test_postprocess_drops_chat_analysis_without_ref(monkeypatch):
+    """未登录且无 last_deep_report → 移除该 call（走既有短路/兜底）。"""
+    out = await _postprocess_skill_calls(
+        _followup_output(), "刚才那个分析怎么样", QuestionState(messages=[])
+    )
+    assert out.skill_calls == []

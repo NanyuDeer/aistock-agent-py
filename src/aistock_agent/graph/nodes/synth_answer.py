@@ -6,6 +6,7 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -25,8 +26,12 @@ from aistock_agent.schemas.chat_contract import (
     InsightGoal,
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
-from aistock_agent.state.chat_schema import QuestionState
-from aistock_agent.utils.date import is_trading_day, prev_trading_day, shanghai_today
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.date import (
+    prev_trading_day,
+    shanghai_today,
+    trading_session_status,
+)
 
 logger = structlog.get_logger()
 
@@ -201,37 +206,79 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 """
 
 
-def _append_non_trading_day_hint(
+def _quote_data_not_today(ev: Evidence) -> bool:
+    """行情证据的数据是否非"今日"（决定是否触发非交易时段引导提示）。
+
+    按证据类型区分，避免误伤：
+    - market_snapshot：A 股数据是否"今日真实收盘"由 raw 判定——used_last_close=True
+      （最近交易日回退）或 a_share_success 非 True（A 股失败/未请求/未知）均视为非今日；
+      scope=global（仅全球行情）不受 A 股日历门控，维持 degraded 判定。
+    - 其他行情 skill（stock_snapshot/capital_flow 等）：非交易时段/空数据 → degraded=True。
+    """
+    if ev.skill_name == "market_snapshot":
+        raw = ev.raw or {}
+        if raw.get("scope") == "global":
+            return ev.degraded
+        return raw.get("used_last_close") is True or raw.get("a_share_success") is not True
+    return ev.degraded
+
+
+def _append_non_trading_time_hint(
     conclusion: str, evidences: list[Evidence]
 ) -> str:
-    """非交易日统一提示：今天非交易日且行情类证据降级 → 前导提示 + 引导最近交易日。
+    """非交易时段统一提示：5 种时段状态 + 行情类证据数据非今日 → 前导提示。
 
-    仅当（1）今天是非交易日（2）存在 kind=realtime_quote 的降级证据时触发；
-    报告类/护栏类回答不加，避免误提示。已含"非交易日"时不重复叠加。
+    触发条件 = 时段状态非 trading 且存在行情类证据且其数据非"今日"（_quote_data_not_today）；
+    报告类/护栏类回答不加。已含"当前为 A 股"前缀时不重复叠加。
     """
-    today = shanghai_today()
-    if is_trading_day(today):
+    status, _ = trading_session_status()
+    if status == "trading":
         return conclusion
-    quote_degraded = any(
-        ev.degraded
-        and (
-            ev.skill_name in _QUOTE_SKILLS
-            or any(src.kind == "realtime_quote" for src in ev.sources)
-        )
+
+    quote_evidence = [
+        ev
         for ev in evidences
-    )
-    if not quote_degraded:
+        if ev.skill_name in _QUOTE_SKILLS
+        or any(src.kind == "realtime_quote" for src in ev.sources)
+    ]
+    if not any(_quote_data_not_today(ev) for ev in quote_evidence):
         return conclusion
-    if "非交易日" in conclusion:
+
+    # 已含提示不重复
+    if conclusion.startswith("当前为 A 股") or conclusion.startswith("今天是 A 股非交易日"):
         return conclusion
+
+    today = shanghai_today()
     last = prev_trading_day(today)
-    hint = (
-        f"今天是 A 股非交易日（{today.isoformat()} "
-        f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。最近交易日为 "
-        f"{last.isoformat()}（{_CN_WEEKDAYS[last.weekday()]}），可以问我「"
-        f"{last.month}月{last.day}日大盘」或「上一交易日板块表现」查看该日行情。\n\n"
-    )
-    return hint + conclusion
+    if status == "non_trading_day":
+        prefix = (
+            f"今天是 A 股非交易日（{today.isoformat()} "
+            f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。以下为最近交易日（"
+            f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）数据。你说的是否是"
+            f"这个交易日（{last.isoformat()}）的行情？\n\n"
+        )
+    elif status == "pre_open":
+        prefix = (
+            f"今日尚未开盘（开盘时间 09:30），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    elif status == "lunch_break":
+        prefix = (
+            f"当前为 A 股午间休市（13:00 复盘），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    else:  # closed：已收盘但当日数据尚未发布（空窗期回退）
+        prefix = (
+            f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+
+    return prefix + conclusion
+
+
+# 向后兼容：旧入口仍可调用，内部转调新函数
+def _append_non_trading_day_hint(conclusion: str, evidences: list[Evidence]) -> str:
+    return _append_non_trading_time_hint(conclusion, evidences)
 
 
 def _build_degraded_insight(
@@ -265,8 +312,8 @@ def _build_degraded_insight(
     conclusion = _append_risk_disclaimer(
         conclusion, strong=_contains_action_word(goal.question)
     )
-    # 非交易日统一提示（2026-08-02 规范）：行情类降级时提示 + 引导最近交易日
-    conclusion = _append_non_trading_day_hint(conclusion, evidences)
+    # 非交易时段统一提示（2026-08-03 规范扩展）：5 种时段状态 + 行情类降级时提示
+    conclusion = _append_non_trading_time_hint(conclusion, evidences)
     return Insight(
         conclusion=conclusion,
         basis=evidences,
@@ -303,6 +350,75 @@ def _build_deep_degraded(deep_source: str) -> str:
     """
     logger.warning("synth_answer.deep_degraded", deep_source=deep_source)
     return "深度分析暂时不可用，请稍后重试"
+
+
+def _build_deep_report_ref(
+    worker: str,
+    question: str,
+    final_response: str,
+    symbols: list[str],
+    tag_codes: list[str],
+    report_id: str | None,
+    created_at: str,
+) -> DeepReportRef:
+    """D12/D13：引用 + 短摘要，单引用结构（summary=前160字，与 D18 一致）。"""
+    return DeepReportRef(
+        worker=worker,  # type: ignore[typeddict-item]  # 由 deep_source 保证合法
+        report_id=report_id,
+        question=question,
+        summary=final_response[:160],
+        symbols=symbols,
+        tag_codes=tag_codes,
+        created_at=created_at,
+    )
+
+
+async def _persist_chat_analysis(
+    user_id: str | None,
+    final_response: str,
+    worker: str,
+) -> str | None:
+    """deep 分支落库 chat_analysis（D15-D18）。
+
+    - 仅登录（user_id 非空）落库（D38）；未登录返回 None。
+    - D18 适配层：display_report 双层（summary=前160字, details=全文, stocks/risks=[]），零 LLM。
+    - update_cache=False：不写 Python report_cache（公共列表排除 chat_analysis）。
+    - 落库失败不抛异常：日志 + 返回 None（降级，不阻断回答）。
+    Returns: Node 返回的 report_id；未登录/失败为 None。
+    """
+    from aistock_agent.services.data_client import node_api
+    from aistock_agent.utils.date import shanghai_today
+
+    if not user_id:
+        return None
+    content: dict[str, object] = {
+        "display_report": {
+            "summary": final_response[:160],
+            "details": final_response,
+            "stocks": [],
+            "risks": [],
+        },
+        "schema_version": "2.0",
+    }
+    try:
+        result = await node_api.save_analysis_report(
+            report_type="chat_analysis",
+            report_date=shanghai_today().isoformat(),
+            content=content,
+            user_id=user_id,
+            status="completed",
+            update_cache=False,
+        )
+        if result and result.get("id"):
+            return str(result["id"])
+        return None
+    except Exception:
+        logger.warning(
+            "chat_analysis.persist_failed",
+            user_id=user_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
@@ -391,6 +507,23 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
         processed = _append_risk_disclaimer(
             final_response, strong=_contains_action_word(goal.question)
         )
+        # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
+        report_id = await _persist_chat_analysis(
+            state.get("user_id"), processed, deep_source
+        )
+        logger.info("chat_analysis.persisted", report_id=report_id)
+        # D12/D13/D38/D39：last_deep_report 无条件写（双写解耦，与登录无关）；
+        # report_id 回填（落库失败/未登录为 None）。
+        now_iso = datetime.now(UTC).isoformat()
+        last_deep_report = _build_deep_report_ref(
+            worker=deep_source,
+            question=goal.question or "",
+            final_response=processed,
+            symbols=goal.symbols,
+            tag_codes=goal.tag_codes,
+            report_id=report_id,
+            created_at=now_iso,
+        )
         insight = Insight(
             conclusion=processed,
             basis=[],                     # deep 无 Evidence（worker 全流程产物）
@@ -410,6 +543,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="deep",
             ),
             "messages": [AIMessage(content=processed)],
+            "last_deep_report": last_deep_report,
         }
 
     mode = _infer_answer_mode(goal, evidences)
@@ -450,8 +584,8 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             uncertainty=raw.uncertainty,
             answer_mode=mode,  # type: ignore[arg-type]
         )
-        # 非交易日统一提示（2026-08-02 规范）：行情类证据降级时前导提示 + 引导
-        final_response = _append_non_trading_day_hint(insight.conclusion, evidences)
+        # 非交易时段统一提示（2026-08-03 规范扩展）：行情类证据降级时前导提示 + 引导
+        final_response = _append_non_trading_time_hint(insight.conclusion, evidences)
         insight = insight.model_copy(update={"conclusion": final_response})
         trace = AnswerTrace(
             goal=goal,

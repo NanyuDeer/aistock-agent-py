@@ -279,7 +279,7 @@ src/aistock_agent/
 │   ├── message.py       # 消息提取工具
 │   ├── report_parser.py # 双层报告解析（兼容 schema_version 1.0/2.0，extract_podcast_brief/extract_display_report/parse_dual_layer_response）
 │   ├── output_parser.py # _parse_json + transform_to_frontend（事件 Agent v3 前端对齐）+ extract_major_events
-│   └── date.py          # 日期/交易日工具
+│   └── date.py          # 日期/交易日工具 + 交易时段判断（is_trading_time / trading_session_status 5 状态）
 ├── errors/              # 异常体系（Phase 4）
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
@@ -322,7 +322,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
@@ -365,7 +366,7 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，7 种事件：intermediate/llm_start/text/tool_start/tool_end/done/error） |
+| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，8 种事件：intermediate/llm_start/text/tool_start/tool_end/reasoning/done/error；reasoning = 节点推理过程流式，P3-fix） |
 | POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
 | POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
 | POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |

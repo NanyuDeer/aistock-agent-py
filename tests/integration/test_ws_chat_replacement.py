@@ -4,10 +4,10 @@
 - WS 恒用 build_chat_initial_state 构造状态（收到新子图节点 intermediate 事件）
 - qa_router 的 token 事件被过滤
 - DONE 事件 advisor_trace=null
-- 入口解析字段（user_id / favorites）保留但不传入 state
+- 入口解析字段：user_id 已透传到 state（D11），favorites 保留但不传入 state
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +20,7 @@ def client():
     return TestClient(app)
 
 
-def _assert_chat_initial_state(initial_state):
+def _assert_chat_initial_state(initial_state, expected_user_id=None):
     """断言 WS 传入的是 build_chat_initial_state 构造的 QuestionState
     （而非老路径完整 AgentState）。
     """
@@ -31,15 +31,20 @@ def _assert_chat_initial_state(initial_state):
     assert "clarification" in initial_state
     # 老路径专属字段不应出现
     assert "session_id" not in initial_state
-    assert "user_id" not in initial_state
     assert "favorites" not in initial_state
     assert "trigger_source" not in initial_state
+    # D11：user_id 已透传到 QuestionState（payload 无 user_id 时为 None）
+    assert initial_state.get("user_id") == expected_user_id
+    # T6：deep_source/final_response 是单轮 transient 信号，ws.py 每轮重置为 None
+    assert initial_state.get("deep_source") is None
+    assert initial_state.get("final_response") is None
 
 
 def test_ws_chat_uses_chat_graph(client):
     """WS 恒走 ChatAgent：收到新子图节点 intermediate 事件 + done。"""
     async def mock_astream_events(initial_state, config=None, version="v2"):
-        _assert_chat_initial_state(initial_state)
+        # payload 带 user_id → D11 已透传到 state
+        _assert_chat_initial_state(initial_state, expected_user_id="user_1")
         # 模拟新子图事件流：qa_router 启动 → skill_executor 启动 → synth_answer 启动 → token → end
         yield {
             "event": "on_chain_start",
@@ -70,7 +75,10 @@ def test_ws_chat_uses_chat_graph(client):
     mock_graph = MagicMock()
     mock_graph.astream_events = mock_astream_events
 
-    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
+    with (
+        patch("aistock_agent.api.ws._select_graph", return_value=mock_graph),
+        patch("aistock_agent.api.ws.stream_reasoning", new=AsyncMock()),
+    ):
         with client.websocket_connect("/api/agent/ws/chat") as websocket:
             websocket.send_json({
                 "message": "测试问题",
@@ -119,7 +127,10 @@ def test_ws_chat_clarification(client):
     mock_graph = MagicMock()
     mock_graph.astream_events = mock_astream_events
 
-    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
+    with (
+        patch("aistock_agent.api.ws._select_graph", return_value=mock_graph),
+        patch("aistock_agent.api.ws.stream_reasoning", new=AsyncMock()),
+    ):
         with client.websocket_connect("/api/agent/ws/chat") as websocket:
             websocket.send_json({"message": "茅台最近新闻", "session_id": "test_ws_clarification"})
             messages = []
@@ -137,41 +148,37 @@ def test_ws_chat_clarification(client):
 
 
 def test_ws_chat_filters_qa_router_tokens(client):
-    """qa_router 的 token 事件被过滤，不发送 text。"""
+    """qa_router / synth_answer 的 token 事件被过滤；非过滤节点（escalate）正常发送。"""
     async def mock_astream_events(initial_state, config=None, version="v2"):
-        # qa_router 的 token（应被过滤）
-        qa_chunk = MagicMock()
-        qa_chunk.content = "内部意图识别"
-        qa_chunk.tool_calls = []
-        qa_chunk.tool_call_chunks = []
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "qa_router",
-            "data": {"chunk": qa_chunk},
-            "metadata": {"langgraph_node": "qa_router"},
-        }
-        # synth_answer 的 token（应发送）
-        synth_chunk = MagicMock()
-        synth_chunk.content = "用户可见回复"
-        synth_chunk.tool_calls = []
-        synth_chunk.tool_call_chunks = []
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "synth_answer",
-            "data": {"chunk": synth_chunk},
-            "metadata": {"langgraph_node": "synth_answer"},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "synth_answer",
-            "data": {"output": {"final_response": "用户可见回复"}},
-            "metadata": {"langgraph_node": "synth_answer"},
-        }
+        def stream(name: str, content: str) -> dict:
+            chunk = MagicMock()
+            chunk.content = content
+            chunk.tool_calls = []
+            chunk.tool_call_chunks = []
+            return {"event": "on_chat_model_stream", "name": name,
+                    "data": {"chunk": chunk}, "metadata": {"langgraph_node": name}}
+        # P3-fix-2 T1.2：on_chain_start 先置 current_node，再流 token
+        yield {"event": "on_chain_start", "name": "qa_router", "data": {},
+               "metadata": {"langgraph_node": "qa_router"}}
+        yield stream("ChatOpenAI", "内部意图识别")    # qa_router 的 JSON → 过滤
+        yield {"event": "on_chain_start", "name": "escalate", "data": {},
+               "metadata": {"langgraph_node": "escalate"}}
+        yield stream("ChatOpenAI", "用户可见回复")    # escalate 的 worker 流 → 转发
+        yield {"event": "on_chain_start", "name": "synth_answer", "data": {},
+               "metadata": {"langgraph_node": "synth_answer"}}
+        yield stream("ChatOpenAI", "综合结论 JSON")   # synth_answer 的 JSON → 过滤
+        yield {"event": "on_chain_end", "name": "synth_answer",
+               "data": {"output": {"final_response": "用户可见回复"}},
+               "metadata": {"langgraph_node": "synth_answer"}}
 
     mock_graph = MagicMock()
     mock_graph.astream_events = mock_astream_events
 
-    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
+    with (
+        patch("aistock_agent.api.ws._select_graph", return_value=mock_graph),
+        # 修复后 DONE 前会 drain reasoning task，必须 patch 避免真实 LLM 调用
+        patch("aistock_agent.api.ws.stream_reasoning", new=AsyncMock()),
+    ):
         with client.websocket_connect("/api/agent/ws/chat") as websocket:
             websocket.send_json({"message": "测试", "session_id": "test_ws_filter"})
             messages = []
@@ -181,9 +188,9 @@ def test_ws_chat_filters_qa_router_tokens(client):
                 if data.get("type") == "done":
                     break
 
-    text_events = [m for m in messages if m.get("type") == "text"]
-    text_contents = [m.get("content") for m in text_events]
+    text_contents = [m.get("content") for m in messages if m.get("type") == "text"]
     assert "内部意图识别" not in text_contents
+    assert "综合结论 JSON" not in text_contents
     assert "用户可见回复" in text_contents
 
 
