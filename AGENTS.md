@@ -167,6 +167,13 @@ START → supervisor(quick_think, 意图路由)
 - **`current_node` 状态替代失效的 v2 name 过滤**：LangGraph `astream_events v2` 的 `name` 在 ON_CHAT_MODEL_STREAM 时是模型名而非节点名，旧 `name in ("supervisor","qa_router")` 过滤永远失效 → qa_router/synth_answer/supervisor 的结构化 JSON 泄漏进 text 流。修复：on_chain_start 每次更新 `current_node = name`（置于 seen_nodes 守卫外），ON_CHAT_MODEL_STREAM 用 `current_node in (qa_router, synth_answer, supervisor)` 过滤；`on_chain_end` **仅当 `name == current_node` 时清除**（v2 对每个嵌套 runnable 都发 on_chain_end，无条件清除会在节点内多次 LLM 调用时中途放行 JSON）。
 - **测试**：`tests/unit/test_ws_chat_replacement.py`（T1 reasoning 时序/过滤/drain 超时 + 前序 D11/T4 补齐）+ `tests/integration/test_ws_chat_replacement.py`（按新过滤语义重写，`stream_reasoning` 全部 patch 防真实 LLM）。
 
+### CHAT QA P4（2026-08-03）：多意图（D34）+ 维度预筛（D30）+ 预测降级提示（D35）
+
+- **多子目标（D34）**：`SubGoal`（id/question/intent/dimension/symbols/tag_codes/time_range）；`QARouterOutput.goals` + `SkillCall.goal_id` + `Evidence.goal_id`（skill_executor 透传）+ `QuestionState.goals` + `AnswerTrace.goals`；qa_router 在闸门 3 之后做维度候选集提取（`_DIMENSION_KEYWORDS`：predict/trace/validate，predict 自动补同标的 validate）并注入 prompt；LLM 输出 goals 经 D27 后处理（id 重编号 g1..gN、goal_id 归一、goal 投影第一个子目标、**单非预测子目标坍缩回单意图**）；synth_answer 在 `state.goals` 非空时按子目标分节回答（先 validate/trace 现状数据后 predict 提示，每非预测子目标一次 deep_think，风险段全文单次、非交易时段提示一次文首）
+- **维度预筛（D30 闸门 4）**：只做预筛辅助不短路；LLM 失败时按候选集构建多子目标 compose 兜底（≥2 维度或单预测），单非预测维持现状关键词兜底；纯预测且命中非个股关键词意图时让位关键词兜底
+- **预测维降级（D35）**：`PREDICT_DEGRADED_HINT = "预测功能开发中，可先查看当前趋势分析。"` 代码生成（多个 predict 子目标只输出一次），不编造预测；predict 子目标可携带同标的 validate 取数作"当前趋势分析"依据；**单意图预测问题（闸门 1/2 短路命中 predict 词，如"茅台明天会涨吗"/"沪指明天会涨吗"）同样附加 predict 子目标**（不 bypass 闸门、不升级 deep）
+- **兼容**：单意图路径字节不变（唯一例外为上述 D35 单意图预测附加）；`goals` 为单轮 transient（ws.py/routes.py 入口按轮归零）；WS/SSE 事件协议不变
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
