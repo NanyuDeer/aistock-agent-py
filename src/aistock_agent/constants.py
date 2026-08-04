@@ -56,7 +56,7 @@ class WSEventType:
 INTENT_SET = frozenset({
     "morning", "stock", "sector", "event",
     "wind_leader", "hot_burst", "broadcast",
-    "alert", "ai_advisor", "general", "review",
+    "alert", "general", "review",
     "trend_score",
 })
 

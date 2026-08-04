@@ -33,7 +33,6 @@ def test_node_labels_contains_chat_subgraph_nodes():
 def test_node_labels_preserves_legacy_nodes():
     """_NODE_LABELS 保留老路径节点（开关关闭时仍需用）。"""
     assert "supervisor" in _NODE_LABELS
-    assert "ai_advisor_agent" in _NODE_LABELS
     assert "stock_analyst" in _NODE_LABELS
 
 

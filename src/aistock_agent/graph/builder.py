@@ -10,7 +10,6 @@ from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.agents.general import node as general_agent
 from aistock_agent.agents.supervisor import node as supervisor
-from aistock_agent.agents.workers import ai_advisor as ai_advisor_agent
 from aistock_agent.agents.workers import alert as alert_agent
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import event as event_analyst
@@ -56,7 +55,6 @@ def build_graph() -> StateGraph:
     graph.add_node("general_agent", general_agent.run)
     graph.add_node("hot_burst_agent", hot_burst_agent_run)
     graph.add_node("alert_agent", alert_agent.run)
-    graph.add_node("ai_advisor_agent", ai_advisor_agent.run)
     graph.add_node("trend_score_agent", trend_score_agent.run)
 
     # 边：START → supervisor
@@ -69,7 +67,7 @@ def build_graph() -> StateGraph:
     agent_nodes = [
         "morning_agent", "stock_analyst", "sector_analyst",
         "event_analyst", "wind_leader_agent", "broadcast_agent", "general_agent",
-        "hot_burst_agent", "alert_agent", "ai_advisor_agent",
+        "hot_burst_agent", "alert_agent",
         "trend_score_agent",
     ]
     for node in agent_nodes:
