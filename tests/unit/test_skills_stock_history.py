@@ -11,9 +11,12 @@ from aistock_agent.skills.stock_history import stock_history
 
 def _rows() -> list[dict]:
     return [
-        {"trade_date": "2026-08-01", "open": 100.0, "high": 110.0, "low": 99.0, "close": 108.0, "pct_chg": 2.0},
-        {"trade_date": "2026-07-31", "open": 99.0, "high": 102.0, "low": 98.0, "close": 100.0, "pct_chg": -1.0},
-        {"trade_date": "2026-07-30", "open": 100.0, "high": 101.0, "low": 97.0, "close": 99.0, "pct_chg": 0.5},
+        {"trade_date": "2026-08-01", "open": 100.0, "high": 110.0,
+         "low": 99.0, "close": 108.0, "pct_chg": 2.0},
+        {"trade_date": "2026-07-31", "open": 99.0, "high": 102.0,
+         "low": 98.0, "close": 100.0, "pct_chg": -1.0},
+        {"trade_date": "2026-07-30", "open": 100.0, "high": 101.0,
+         "low": 97.0, "close": 99.0, "pct_chg": 0.5},
     ]
 
 
@@ -24,7 +27,9 @@ def _goal() -> InsightGoal:
 @pytest.mark.asyncio
 async def test_history_basic():
     client = AsyncMock()
-    client.get = AsyncMock(return_value={"symbol": "600519", "klt": 101, "days": 3, "rows": _rows()})
+    client.get = AsyncMock(
+        return_value={"symbol": "600519", "klt": 101, "days": 3, "rows": _rows()}
+    )
     with patch("aistock_agent.skills.stock_history.node_api", client):
         ev: Evidence = await stock_history({"symbol": "600519", "days": 30}, _goal())
     assert ev.skill_name == "stock_history"

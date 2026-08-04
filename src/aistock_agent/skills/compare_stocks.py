@@ -17,7 +17,9 @@ from aistock_agent.tools.stock_tools import get_quote
 MAX_COMPARE_SYMBOLS = 5
 
 # get_quote 输出格式：【名称】最新价: X  涨跌幅: Y%
-_QUOTE_RE = re.compile(r"【(?P<name>.+?)】最新价: (?P<price>\S+)  涨跌幅: (?P<pct>[+-]?\d+(?:\.\d+)?)%")
+_QUOTE_RE = re.compile(
+    r"【(?P<name>.+?)】最新价: (?P<price>\S+)  涨跌幅: (?P<pct>[+-]?\d+(?:\.\d+)?)%"
+)
 
 _EMPTY_MARKERS = ("未找到股票", "数据暂不可用")
 
@@ -67,7 +69,10 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if len(parsed) >= 2:
         best = max(parsed, key=lambda x: x[2])
         worst = min(parsed, key=lambda x: x[2])
-        facts.append(f"对比结论：{best[0]} 涨幅最高（{best[2]:+.2f}%），{worst[0]} 涨幅最低（{worst[2]:+.2f}%）")
+        facts.append(
+            f"对比结论：{best[0]} 涨幅最高（{best[2]:+.2f}%），"
+            f"{worst[0]} 涨幅最低（{worst[2]:+.2f}%）"
+        )
 
     degraded = bool(failed)
     return Evidence(

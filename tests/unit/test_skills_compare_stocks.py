@@ -54,7 +54,12 @@ async def test_compare_truncates_over_max():
 @pytest.mark.asyncio
 async def test_compare_partial_failure_degraded():
     fake = AsyncMock()
-    fake.ainvoke = AsyncMock(side_effect=[_quote_text("贵州茅台", "1500.0", "+1.2"), "未找到股票 000858 的行情数据"])
+    fake.ainvoke = AsyncMock(
+        side_effect=[
+            _quote_text("贵州茅台", "1500.0", "+1.2"),
+            "未找到股票 000858 的行情数据",
+        ]
+    )
     with patch("aistock_agent.skills.compare_stocks.get_quote", fake):
         ev = await compare_stocks({"symbols": ["600519", "000858"]}, _goal([]))
     assert ev.degraded is True

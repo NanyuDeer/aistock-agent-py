@@ -287,7 +287,9 @@ def _extract_multi_symbols(message: str) -> list[str]:
             found.append(code)
     # 中文名候选：仅在有对比词且代码候选不足 2 个时尝试
     # （避免"哪个强"等对比口语被误当标的；§2.6 指数名不进入）
-    if len(found) < 2 and any(k in message for k in ("对比", "哪个强", "谁更强", "谁强", "vs", "比较")):
+    if len(found) < 2 and any(
+        k in message for k in ("对比", "哪个强", "谁更强", "谁强", "vs", "比较")
+    ):
         cand = _extract_stock_name_candidate(message)
         if cand is not None and cand not in found:
             found.append(cand)
