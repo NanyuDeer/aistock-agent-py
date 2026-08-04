@@ -2,6 +2,25 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-04 — ChatAgent P6 退役清理（ai_advisor / market-trace-qa / advisor_trace）
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\2026-08-04-chat-agent-p6-retirement.md`
+
+### 重构
+- 退役 market-trace-qa 端点：`services/market_trace_qa.py`（400 行）原位瘦身改名 `services/trace_loader.py`（仅保留 `load_validated_trace`，供 trace_lookup skill 使用）；`schemas/market_trace_qa.py` / `prompts/workers/market_trace_qa.py` / `test_market_trace_qa.py`（unit+e2e）删除
+- 退役 ai_advisor worker / prompt / 路由 / constants（`agents/workers/ai_advisor.py` 477 行 + prompt + `test_ai_advisor.py` 924 行删除；`intent_router.py` VALID_INTENTS 收敛，未知意图 → general 兜底；旧图 `compile_graph()` 保留供 `/briefing/morning`）
+- 移除 `advisor_trace` 协议字段（**消失语义**，`"advisor_trace" not in payload`，非 null）+ 孤儿 `AdvisorTrace`/`AdvisorSubquestionTrace` TypedDict（T3 review 补删）
+
+### 测试
+- 全量 A/B 回归（worktree 6f51d89 + PYTHONPATH 覆盖 editable install，--ignore test_tenx_tools）：HEAD 27 failed ⊆ BASE 34 failed，**新增失败清零**；ruff P6 改动文件 0 errors（--no-cache）
+
+### 文档
+- AGENTS.md / README.md 零 ai_advisor 可达引用（图拓扑 / 产品映射表 / 目录结构 / 降级文本表 / 双层输出消费方）
+
+---
+
 ## [changer] 2026-08-04 — ChatAgent P5 能力补齐（D40-D42 三 skill + index_snapshot + P4 遗留优化）
 
 **开发者**: Aria
