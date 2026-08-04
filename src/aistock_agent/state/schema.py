@@ -47,7 +47,6 @@ class AgentState(TypedDict):
         trigger_source: 触发来源（scheduler=定时任务, user=用户对话）
         report_date: 报告日期（YYYY-MM-DD，scheduler 写入，Agent 持久化用）
         final_response: 最终响应文本
-        advisor_trace: 投顾子问题的报告来源与降级状态
     """
 
     messages: Annotated[list[BaseMessage | dict[str, str]], add_messages]
@@ -73,4 +72,3 @@ class AgentState(TypedDict):
     trace_id: NotRequired[str | None]  # 个股或市场触发链路关联 ID
     # 最终响应
     final_response: str | None
-    advisor_trace: NotRequired[AdvisorTrace]

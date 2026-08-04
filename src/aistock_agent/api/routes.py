@@ -103,11 +103,9 @@ async def chat_message(
         config={"configurable": {"thread_id": session_id}},
     )
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    # ChatAgent 无 advisor_trace（新子图），固定 None
     return ChatResponse(
         content=content,
         session_id=session_id,
-        advisor_trace=None,
     )
 
 
@@ -197,7 +195,6 @@ async def _stream_messages(
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
-                    "advisor_trace": final_state.values.get("advisor_trace"),
                 }
                 break
             if not isinstance(event, dict):

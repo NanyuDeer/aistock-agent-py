@@ -19,7 +19,6 @@ router = APIRouter()
 _NODE_LABELS: dict[str, str] = {
     # 老路径节点
     "supervisor": "正在理解你的问题...",
-    "ai_advisor_agent": "正在查阅分析报告...",
     "morning_agent": "正在生成晨报...",
     "stock_analyst": "正在分析个股...",
     "sector_analyst": "正在分析板块...",
@@ -133,7 +132,6 @@ async def ws_chat(websocket: WebSocket) -> None:
             try:
                 llm_started = False
                 final_response = ""
-                advisor_trace: dict[str, object] | None = None
                 last_deep_report: dict[str, object] | None = None
                 seen_nodes: set[str] = set()
                 # P3-fix-2 T1.1：本轮 reasoning task 引用集合（防 GC，DONE 前等待）
@@ -237,8 +235,6 @@ async def ws_chat(websocket: WebSocket) -> None:
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and output.get("final_response"):
                             final_response = output["final_response"]
-                            trace = output.get("advisor_trace")
-                            advisor_trace = trace if isinstance(trace, dict) else None
                             # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
                             last_deep_report = output.get("last_deep_report")
 
@@ -250,7 +246,6 @@ async def ws_chat(websocket: WebSocket) -> None:
                 await websocket.send_json({
                     "type": WSEventType.DONE,
                     "content": final_response,
-                    "advisor_trace": advisor_trace,
                     "last_deep_report": last_deep_report,
                 })
 

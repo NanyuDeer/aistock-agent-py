@@ -2,7 +2,7 @@
 
 覆盖（M5 后 /chat/* 恒走 ChatAgent，开关退役）：
 - _select_graph() 恒返回 compile_chat_graph()（不读 chat_graph_enabled）
-- chat_message 恒走新子图，advisor_trace=None
+- chat_message 恒走新子图，响应不含已退役字段
 - chat_stream_messages 过滤 qa_router 节点
 - chat_stream_updates 发射 CHAT 节点 label
 - 报告入口（/briefing/*）仍走 compile_graph（回归不破）
@@ -52,8 +52,8 @@ async def _mock_aget_state(config=None):
     return _MockState()
 
 
-def test_chat_message_returns_advisor_trace_none(client, monkeypatch):
-    """/chat/message 恒走新子图，advisor_trace=None。"""
+def test_chat_message_omits_trace_field(client, monkeypatch):
+    """/chat/message 恒走新子图，响应不含该字段。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "测试回复",
@@ -75,11 +75,11 @@ def test_chat_message_returns_advisor_trace_none(client, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["content"] == "测试回复"
-    assert data["advisor_trace"] is None
+    assert "advisor_trace" not in data
 
 
 def test_chat_message_clarification(client):
-    """/chat/message 澄清路径返回澄清文本，advisor_trace=None。"""
+    """/chat/message 澄清路径返回澄清文本，响应不含该字段。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "请提供 6 位股票代码后重试。",
@@ -101,7 +101,7 @@ def test_chat_message_clarification(client):
     assert response.status_code == 200
     data = response.json()
     assert data["content"] == "请提供 6 位股票代码后重试。"
-    assert data["advisor_trace"] is None
+    assert "advisor_trace" not in data
 
 
 @pytest.mark.asyncio
@@ -161,9 +161,9 @@ async def test_stream_messages_filters_qa_router_node():
     done_events = [e for e in sse_events if e.get("type") == SSEEventType.DONE]
     assert len(done_events) == 1
     assert done_events[0]["final_response"] == "用户可见回复"
-    # 新子图无 analysis_reports / advisor_trace，应为默认值
+    # 新子图无 analysis_reports（默认值），且响应不含已退役字段
     assert done_events[0]["analysis_reports"] == {}
-    assert done_events[0]["advisor_trace"] is None
+    assert "advisor_trace" not in done_events[0]
 
 
 @pytest.mark.asyncio

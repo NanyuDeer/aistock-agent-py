@@ -1,12 +1,11 @@
 """routes /chat/message 端到端测试 — M5 入口路由切换后
 
-M5 后 /chat/message 恒走 ChatAgent（compile_chat_graph），不再走老路径
-（supervisor + ai_advisor）。本文件验证：
-- 恒走 compile_chat_graph，返回 content + advisor_trace=null
+M5 后 /chat/message 恒走 ChatAgent（compile_chat_graph），不再走老路径。本文件验证：
+- 恒走 compile_chat_graph，返回 content（不含已退役字段）
 - 澄清路径 content 透出
 - 空 message 被 Pydantic 拦截（不触达 graph）
 
-老路径意图路由（supervisor/ai_advisor）由 tests/integration/test_graph.py 覆盖；
+老路径意图路由由 tests/integration/test_graph.py 覆盖；
 鉴权契约由 tests/e2e/test_chat_message_auth.py 覆盖。
 """
 from unittest.mock import MagicMock, patch
@@ -36,8 +35,8 @@ def _mock_chat_graph(final_response: str) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_chat_message_returns_content_and_null_advisor_trace():
-    """/chat/message 恒走 ChatAgent：content 透出、advisor_trace 固定 null。"""
+async def test_chat_message_returns_content_without_trace_field():
+    """/chat/message 恒走 ChatAgent：content 透出、响应不含该字段。"""
     with patch(
         "aistock_agent.api.routes.compile_chat_graph",
         return_value=_mock_chat_graph("ChatAgent 回复"),
@@ -54,13 +53,13 @@ async def test_chat_message_returns_content_and_null_advisor_trace():
     assert resp.status_code == 200
     body = resp.json()
     assert body["content"] == "ChatAgent 回复"
-    assert body["advisor_trace"] is None
+    assert "advisor_trace" not in body
     assert "session_id" in body
 
 
 @pytest.mark.asyncio
 async def test_chat_message_clarification_content():
-    """澄清路径（个股缺代码）content 透出，advisor_trace 仍为 null。"""
+    """澄清路径（个股缺代码）content 透出，响应不含该字段。"""
     with patch(
         "aistock_agent.api.routes.compile_chat_graph",
         return_value=_mock_chat_graph("请提供 6 位股票代码后重试。"),
@@ -77,7 +76,7 @@ async def test_chat_message_clarification_content():
     assert resp.status_code == 200
     body = resp.json()
     assert body["content"] == "请提供 6 位股票代码后重试。"
-    assert body["advisor_trace"] is None
+    assert "advisor_trace" not in body
 
 
 @pytest.mark.asyncio
