@@ -15,7 +15,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from aistock_agent.agents.workers.review import validate_trace_against_snapshot
+from aistock_agent.agents.workers.review import (
+    validate_snapshot_discovery,
+    validate_trace_against_snapshot,
+)
 from aistock_agent.schemas.market_trace import (
     MarketTraceResult,
     MarketTraceSnapshot,
@@ -144,6 +147,66 @@ def _make_valid_snapshot(
         phenomenon_discovery=discover_market_phenomenon(_A_SHARE, sources, _CAPTURED_AT, []),
         morning_forecast=morning_forecast,
     )
+
+
+# ============================================================================
+# SNAPSHOT fixture — 从已退役的 QA 服务测试迁移（validate_snapshot_discovery 用例依赖）
+# ============================================================================
+
+_REPORT_DATE = "2026-07-17"
+
+_SOURCES: dict[str, SourceRecord] = {
+    "INDEX_000001_SH": _make_source(
+        "INDEX_000001_SH",
+        provider="tushare:index_daily",
+        title="上证指数",
+        content="close=3200.0, pct_chg=0.5",
+    ),
+    "INDEX_399001_SZ": _make_source("INDEX_399001_SZ"),
+    "INDEX_399006_SZ": _make_source("INDEX_399006_SZ"),
+    "INDEX_000300_SH": _make_source("INDEX_000300_SH"),
+    "INDEX_000905_SH": _make_source("INDEX_000905_SH"),
+    "INDEX_000852_SH": _make_source("INDEX_000852_SH"),
+    "BREADTH_ALL": _make_source("BREADTH_ALL"),
+    "TURNOVER_ALL": _make_source("TURNOVER_ALL"),
+    "LIMITS_ALL": _make_source("LIMITS_ALL"),
+    "MAIN_FORCE_ALL": _make_source("MAIN_FORCE_ALL"),
+    "SECTORS_ALL": _make_source("SECTORS_ALL"),
+    "NEWS_001": _make_source(
+        "NEWS_001",
+        kind="event_evidence",
+        provider="cls",
+        title="央行宣布降准",
+        content="中国人民银行决定下调存款准备金率0.5个百分点",
+        url="https://www.cls.cn/news/1",
+        source_level="reporting",
+    ),
+    "GLOBAL_001": _make_source(
+        "GLOBAL_001",
+        provider="yfinance",
+        title="标普500",
+        content="price=5500.0, change_pct=0.36",
+    ),
+    "SEARCH_001": _make_source(
+        "SEARCH_001",
+        kind="event_evidence",
+        provider="tavily",
+        title="美联储维持利率不变",
+        content="美联储在最新议息会议上决定维持联邦基金利率目标区间不变",
+        url="https://example.com/fed",
+        source_level="reporting",
+    ),
+}
+
+SNAPSHOT = MarketTraceSnapshot(
+    snapshot_id="trace-20260717",
+    trade_date=_REPORT_DATE,
+    captured_at=_CAPTURED_AT,
+    a_share=_A_SHARE,
+    sources=_SOURCES,
+    missing_fields=[],
+    phenomenon_discovery=discover_market_phenomenon(_A_SHARE, _SOURCES, _CAPTURED_AT, []),
+)
 
 
 _VALID_TRACE_DICT: dict[str, object] = {
@@ -379,3 +442,31 @@ def test_validate_prediction_validation_none_passes_for_old_cache():
 
     # 期望不抛 ValueError
     validate_trace_against_snapshot(trace, snapshot)
+
+
+# ============================================================================
+# validate_snapshot_discovery 校验测试（从已退役的 QA 服务测试迁移）
+# ============================================================================
+
+
+def test_validation_accepts_jsonb_reordered_sources() -> None:
+    """JSONB source-map insertion order must not change discovery validity."""
+    reordered = dict(reversed(list(SNAPSHOT.sources.items())))
+    persisted = SNAPSHOT.model_copy(update={"sources": reordered})
+
+    validate_snapshot_discovery(persisted)
+
+
+def test_validation_rejects_duplicate_diagnostic_evidence_ids() -> None:
+    """Diagnostics must remain a duplicate-free reference set."""
+    diagnostic = SNAPSHOT.phenomenon_discovery.diagnostics[0]
+    duplicated = diagnostic.model_copy(
+        update={"evidence_ids": [diagnostic.evidence_ids[0], diagnostic.evidence_ids[0]]}
+    )
+    discovery = SNAPSHOT.phenomenon_discovery.model_copy(
+        update={"diagnostics": [duplicated, *SNAPSHOT.phenomenon_discovery.diagnostics[1:]]}
+    )
+    persisted = SNAPSHOT.model_copy(update={"phenomenon_discovery": discovery})
+
+    with pytest.raises(ValueError, match="duplicate diagnostic evidence ID"):
+        validate_snapshot_discovery(persisted)

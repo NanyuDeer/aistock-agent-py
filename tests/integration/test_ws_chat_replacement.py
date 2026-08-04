@@ -3,7 +3,7 @@
 覆盖（M5 后 /ws/chat 恒走 ChatAgent，开关退役）：
 - WS 恒用 build_chat_initial_state 构造状态（收到新子图节点 intermediate 事件）
 - qa_router 的 token 事件被过滤
-- DONE 事件 advisor_trace=null
+- DONE 事件不含已退役字段
 - 入口解析字段：user_id 已透传到 state（D11），favorites 保留但不传入 state
 """
 
@@ -107,7 +107,7 @@ def test_ws_chat_uses_chat_graph(client):
 
 
 def test_ws_chat_clarification(client):
-    """澄清路径 WS 返回澄清文本，所有事件 advisor_trace 为 None。"""
+    """澄清路径 WS 返回澄清文本，所有事件不含该字段。"""
     async def mock_astream_events(initial_state, config=None, version="v2"):
         _assert_chat_initial_state(initial_state)
         yield {
@@ -143,8 +143,8 @@ def test_ws_chat_clarification(client):
     done_events = [m for m in messages if m.get("type") == "done"]
     assert len(done_events) == 1
     assert done_events[0]["content"] == "请提供 6 位股票代码后重试。"
-    # 澄清路径无 advisor_trace，所有事件均为 None
-    assert all(m.get("advisor_trace") is None for m in messages)
+    # 澄清路径所有事件均不含该字段
+    assert all("advisor_trace" not in m for m in messages)
 
 
 def test_ws_chat_filters_qa_router_tokens(client):
@@ -194,8 +194,8 @@ def test_ws_chat_filters_qa_router_tokens(client):
     assert "用户可见回复" in text_contents
 
 
-def test_ws_chat_done_event_advisor_trace_none(client):
-    """DONE 事件的 advisor_trace=null。"""
+def test_ws_chat_done_omits_trace_field(client):
+    """DONE 事件不含该字段。"""
     async def mock_astream_events(initial_state, config=None, version="v2"):
         yield {
             "event": "on_chain_end",
@@ -219,5 +219,5 @@ def test_ws_chat_done_event_advisor_trace_none(client):
 
     done_events = [m for m in messages if m.get("type") == "done"]
     assert len(done_events) == 1
-    # 新子图无 advisor_trace，应为 null
-    assert done_events[0]["advisor_trace"] is None
+    # 新子图无该字段
+    assert "advisor_trace" not in done_events[0]

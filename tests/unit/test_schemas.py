@@ -41,24 +41,6 @@ def test_chat_response():
     assert resp.session_id == "s1"
 
 
-def test_chat_response_preserves_structured_advisor_trace():
-    trace = {
-        "schema_version": "advisor_trace.v1",
-        "subquestions": [{
-            "intent": "stock",
-            "reports": [],
-            "sources": [],
-            "as_of": None,
-            "missing_sources": ["stock_trace"],
-            "degraded": True,
-        }],
-        "missing_sources": ["stock_trace"],
-        "degraded": True,
-    }
-    resp = ChatResponse(content="降级", session_id="s1", advisor_trace=trace)
-    assert resp.advisor_trace.model_dump() == trace
-
-
 # ── SSEEvent ───────────────────────────────────────────────────────
 
 

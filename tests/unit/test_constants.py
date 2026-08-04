@@ -22,24 +22,24 @@ def test_intent_set_contents():
     # 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
     assert INTENT_SET == frozenset({
         "morning", "stock", "sector", "event", "wind_leader", "broadcast",
-        "hot_burst", "alert", "ai_advisor", "general", "trend_score", "review",
+        "hot_burst", "alert", "general", "trend_score", "review",
     })
 
 
-def test_user_review_intent_routes_to_ai_advisor_agent():
-    """用户查询盘后复盘时，路由到只消费持久化报告的投顾节点。"""
+def test_user_review_intent_routes_to_general_agent():
+    """用户查询盘后复盘时，路由到 general 兜底节点。"""
     from aistock_agent.graph.routers.intent_router import route_by_intent
 
-    assert route_by_intent({"intent": "review", "trigger_source": "user"}) == "ai_advisor_agent"
+    assert route_by_intent({"intent": "review", "trigger_source": "user"}) == "general_agent"
 
 
-def test_non_user_review_intent_routes_to_report_only_advisor_agent():
+def test_non_user_review_intent_routes_to_general_agent():
     """非用户路径也不能因 review 意图落入不存在的图节点。"""
     from aistock_agent.graph.routers.intent_router import route_by_intent
 
     assert (
         route_by_intent({"intent": "review", "trigger_source": "scheduler"})
-        == "ai_advisor_agent"
+        == "general_agent"
     )
 
 

@@ -89,7 +89,6 @@ graph TB
         SUP -->|hot_burst| HB[hot_burst_agent<br/>deep_think]
         SUP -->|alert| AL[alert_agent<br/>deep_think]
         SUP -->|broadcast| BC[broadcast_agent<br/>deep_think]
-        SUP -->|ai_advisor| AI[ai_advisor_agent<br/>deep_think]
         SUP -->|trend_score| TS[trend_score_agent<br/>deep_think]
         SUP -->|general| GE[general_agent<br/>quick_think]
 
@@ -101,12 +100,11 @@ graph TB
         HB --> E1
         AL --> E1
         BC --> E1
-        AI --> E1
         GE --> E1
     end
 
     subgraph 用户对话路由["用户对话路由（trigger_source=user）"]
-        SUP2["intent ≠ general/broadcast"] --> AI2[ai_advisor_agent<br/>DB报告→整理回复]
+        SUP2["intent 未匹配 specialist"] --> GE2[general_agent<br/>quick_think 兜底]
     end
 
     subgraph 晨报链路["晨报链路（08:50 定时触发）"]
@@ -133,7 +131,7 @@ graph TB
     IA -.->|优化建议<br/>人工审核| M2
 
     style BC2 fill:#e8d5f5,stroke:#6f42c1
-    style AI2 fill:#fff3cd,stroke:#856404
+    style GE2 fill:#fff3cd,stroke:#856404
     style EV2 fill:#d1ecf1,stroke:#0c5460
     style SB fill:#d1ecf1,stroke:#0c5460
     style RV fill:#d4edda,stroke:#155724
@@ -142,7 +140,7 @@ graph TB
 
 > **架构说明**：
 > - **用户流程**：supervisor 意图路由后分发到各 Agent，各 Agent 独立返回 END
-> - **用户对话路由**：当 `trigger_source="user"` 且 intent 非 general/broadcast 时，统一路由到 ai_advisor_agent（从 DB 读取已有报告整理回复，省 token）
+> - **用户对话路由**：用户对话（`trigger_source="user"`）中未匹配 specialist 意图时由 general_agent（quick_think）兜底；深度推理由 ChatAgent 子图（qa_router → escalate/skill_executor → synth_answer）承担
 > - **晨报链路**：08:50 定时触发 morning_agent → 提取 major_events → 并行 fire-and-forget 触发 event_analyst
 > - **播报链路**：09:00 串行执行 morning→wind_leader→hot_burst→broadcast，各 Agent 写 DB，broadcast 从 DB 读取报告生成双人语音播报（9:10 前端可见）
 > - **复盘流水线**：15:30 review→15:35 snapshot→15:40 iterate，通过文件 I/O 传递数据，间隔 5 分钟顺序执行
@@ -169,17 +167,14 @@ graph TB
 - **双层输出消费**：通过 `utils/report_parser.py` 的 `extract_podcast_brief` / `extract_display_report` 函数读取双层结构内容，兼容 schema_version 1.0（单层 text）和 2.0（双层 display_report + podcast_brief）
 - **测试**：`scripts\run_broadcast_test.bat` 或 `$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py`
 
-### 智能投顾Agent（ai_advisor_agent）
+### 用户对话（ChatAgent 子图承担）
 
-智能投顾Agent负责回应用户的自然语言提问，优先从数据库读取已有分析报告整理汇总，降级使用工具获取数据：
+用户自然语言对话（`trigger_source="user"`）由 **ChatAgent 子图**承担，不再走独立智能投顾 Agent：
 
-- **触发条件**：`trigger_source="user"` 且 intent 不是 general/broadcast 时路由到 ai_advisor_agent
-- **输入**：用户对话消息 + 数据库已有分析报告（morning/wind_leader/hot_burst 等）
-- **报告读取**：通过 `utils/report_parser.py` 的 `extract_display_report` 读取展示文本（兼容 1.0 单层 text 和 2.0 双层 display_report）
-- **降级策略**：DB 无报告时调用 advisor 工具集（get_quote、get_capital_flow、get_profit_forecast、search_cls_news、get_cls_news、get_global_markets、get_leader_stocks、get_hot_burst、get_hot_burst_history、tavily_finance_search）获取数据
-- **输出**：简洁要点式回复（200字以内），直接展示在对话气泡中
-- **模型**：deep_think
-- **路由**：`intent="ai_advisor"` → `ai_advisor_agent`
+- **入口**：ws.py / routes.py 构造 `QuestionState` → `qa_router` 意图拆解 → 闸门 0/0.5/1/2/3 短路（report_lookup / 行情问答 / 对比 / 多意图）→ 未命中时 escalate 升级到 specialist worker（stock/sector/hot_burst，图外切换）或 skill_executor 组合技能 → `synth_answer` 统一出口
+- **深度推理**：deep 分支直调 worker.run()，结果回流 state 经 synth_answer 加工，WS/SSE 透传 ReAct 事件
+- **detail 详见**：AGENTS.md「CHAT QA」系列段落（D1-D42 / P1-P5）
+- **模型**：quick_think（路由）+ deep_think（深度推理）
 
 ### 报告双层输出（schema_version 2.0）
 
@@ -188,7 +183,7 @@ graph TB
 **为什么要做双层输出？（两个核心原因）**
 
 1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
-2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
 
 双层结构定义如下：
 
@@ -206,14 +201,13 @@ content = {
 ```
 
 **消费方**：
-- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
-- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话；`podcast_brief` 缺失时降级读取 `display_report`（通过 `extract_display_report`，截取前 500 字）
 
 **兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
 
 **LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
 
-**已改造 Agent**：wind_leader、broadcast、ai_advisor
+**已改造 Agent**：wind_leader、broadcast
 **待改造 Agent**：morning、hot_burst、alert
 
 ### 机构调研热门股Agent
@@ -232,7 +226,7 @@ content = {
 - **工具**：`get_trend_score`（评分概览）、`get_trend_score_detail`（展开详情含K线/概念板块/龙头股加成/新闻）、`get_trend_top_stocks`（Top排行）
 - **模型**：deep_think（ReAct 模式）
 - **输出**：写入 `state.analysis_reports["trend_score"]`，scheduler 触发时写 DB（双层输出 display_report + podcast_brief）
-- **路由**：intent=`trend_score` → `trend_score_agent`（用户对话走 ai_advisor 省 token，scheduler 触发走 trend_score_agent）
+- **路由**：intent=`trend_score` → `trend_score_agent`（scheduler 触发；用户对话深度推理由 ChatAgent 子图承担）
 - **降级文本**：`"趋势股评分分析暂时不可用，请稍后重试"`
 
 ### 定时调度
@@ -299,7 +293,6 @@ src/aistock_agent/
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
 │       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
-│       ├── ai_advisor.py # 智能投顾（消费 display_report，对话气泡展示）
 │       ├── trend_score.py # 趋势股评分（ReAct + 4维度评分解读 + 文件归档 + 双层输出）
 │       ├── alert.py     # 异动提醒（deep_think + 三步框架 + cycle 短中长线分类）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
@@ -322,7 +315,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,trend_score,alert,review,iterate}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
