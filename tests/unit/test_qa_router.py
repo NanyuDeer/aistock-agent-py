@@ -1,4 +1,5 @@
 """QA Router 节点单元测试。"""
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -6,13 +7,15 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import ValidationError
 
 from aistock_agent.graph.nodes.qa_router import (
+    _STRONG_PREDICT_KEYWORDS,
     SYSTEM_PROMPT,
     QARouterOutput,
-    _STRONG_PREDICT_KEYWORDS,
     _build_dimension_candidates,
     _build_fallback_goals,
+    _build_fallback_subgoal,
     _build_gate4_context,
     _build_single_predict_goal,
+    _DimTarget,
     _postprocess_skill_calls,
     qa_router_node,
     route_by_keyword_fallback,
@@ -1181,7 +1184,7 @@ async def test_fallback_multi_dimension_compose():
     sub_goals, calls = fb
     assert {g.dimension for g in sub_goals} == {"predict", "validate"}
     assert any(c.goal_id == "g1" for c in calls)   # 预测子目标复用同标的 validate 取数
-    assert any(c.goal_id == "g2" for c in calls)
+    assert len(calls) == 1                          # D2 去重：同标的 validate+predict 只发一条取数
 
 
 @pytest.mark.asyncio
@@ -1314,3 +1317,49 @@ def test_single_predict_goal_weak_word_no_attach():
 
 def test_single_predict_goal_no_predict_word():
     assert _build_single_predict_goal("茅台今天怎么样", "stock_snapshot", ["600519"]) is None
+
+
+# ── P5（D2/D3）：兜底取数去重 + trace 维度走 trace_lookup ──
+def _call_key(call) -> tuple:
+    return (call.skill_name, json.dumps(call.args, sort_keys=True))
+
+
+@pytest.mark.asyncio
+async def test_fallback_goals_single_target_no_duplicate_call():
+    # 单标的 + 双维度(validate,predict)：只生成一条取数 call（去重）
+    target = _DimTarget("stock", "600519")
+    result = await _build_fallback_goals(
+        "600519明天会涨吗",
+        ["validate", "predict"],
+        [("validate", target), ("predict", target)],
+    )
+    assert result is not None
+    subgoals, calls = result
+    assert [sg.dimension for sg in subgoals] == ["validate", "predict"]
+    keys = [_call_key(c) for c in calls]
+    assert len(keys) == len(set(keys)), f"重复取数 call: {keys}"
+    assert all(c.skill_name == "stock_snapshot" for c in calls)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_trace_uses_trace_lookup():
+    # trace 维度 → trace_lookup skill（不再是 validate 快照 call）
+    target = _DimTarget("stock", "600519")
+    result = await _build_fallback_goals(
+        "600519为什么今天涨、明天会涨吗",
+        ["trace", "predict"],
+        [("trace", target), ("predict", target)],
+    )
+    assert result is not None
+    subgoals, calls = result
+    trace_sg = next(s for s in subgoals if s.dimension == "trace")
+    assert trace_sg.intent == "trace_lookup"
+    trace_call = next((c for c in calls if c.skill_name == "trace_lookup"), None)
+    assert trace_call is not None
+
+
+def test_fallback_subgoal_trace_intent_trace_lookup():
+    sg = _build_fallback_subgoal("g1", "trace", _DimTarget("stock", "600519"))
+    assert sg.intent == "trace_lookup"
+    assert sg.question == "600519涨跌原因"

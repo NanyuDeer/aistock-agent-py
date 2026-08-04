@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -581,7 +582,9 @@ def _build_fallback_subgoal(
         question = f"{label}涨跌原因"
     else:
         question = f"{label}当前表现"
-    if target is None or target.kind == "index":
+    if dimension == "trace":
+        intent = "trace_lookup"
+    elif target is None or target.kind == "index":
         intent: str = "market_snapshot"
     elif target.kind == "sector":
         intent = "sector_snapshot"
@@ -648,17 +651,32 @@ async def _build_fallback_goals(
     ordered = [c for c in candidates if c[0] != "predict"] + [
         c for c in candidates if c[0] == "predict"
     ]
+    # D2：同标的 validate+predict 会生成相同的取数 call（key=skill+args 序列化），
+    # 只发一条（predict 子目标复用 validate 取数作"当前趋势分析"依据，不再追加重复 call）
+    seen_calls: set[tuple[str, str]] = set()
     for dim, target in ordered:
         sg_id = f"g{len(subgoals) + 1}"
         if dim == "predict":
             subgoals.append(_build_fallback_subgoal(sg_id, dim, target))
             vcall = await _validate_call_for_target(target, message)
             if vcall is not None:
-                calls.append(vcall.model_copy(update={"goal_id": sg_id}))
+                key = (vcall.skill_name, json.dumps(vcall.args, sort_keys=True, ensure_ascii=False))
+                if key not in seen_calls:
+                    seen_calls.add(key)
+                    calls.append(vcall.model_copy(update={"goal_id": sg_id}))
+            continue
+        if dim == "trace":
+            # D3：trace 维度走 trace_lookup（溯源数据而非 validate 快照）
+            call = SkillCall(skill_name="trace_lookup", args={})
+            subgoals.append(_build_fallback_subgoal(sg_id, dim, target))
+            calls.append(call.model_copy(update={"goal_id": sg_id}))
             continue
         call = await _validate_call_for_target(target, message)
         if call is None:
             continue
+        # D2：validate 取数登记 key，后续 predict 同标的复查 seen_calls 跳过重复 call
+        key = (call.skill_name, json.dumps(call.args, sort_keys=True, ensure_ascii=False))
+        seen_calls.add(key)
         # 解析后的 symbol 回填子目标（中文名 → 6 位代码，供 synth prompt"涉及标的"）
         symbols = (
             [str(call.args["symbol"])]
