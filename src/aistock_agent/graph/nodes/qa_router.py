@@ -271,8 +271,21 @@ _STOCK_NAME_STOPWORDS = (
     "吗", "我", "你",
     # P1 遗留问题 1（D36）：分析类动词不进个股名候选（"分析一下贵州茅台" → "贵州茅台"）
     "分析", "评价", "评估", "研判", "解读", "看看",
+    # P5-fix（2026-08-05，问题 8）：对比口语词——"茅台和五粮液哪个更好"不再整句入候选
+    "哪个", "哪个更好", "哪个好", "哪个更强", "更好", "更强", "比较", "对比",
+    # P5-fix（2026-08-05，问题 11）：意图词/连接词——"宁德时代最近有什么新闻" → "宁德时代"；
+    # "我说的是宁德时代" → "宁德时代"（是/说 均去除）。注意：不加入"和/与"（由多标的切分处理）
+    "新闻", "资讯", "消息", "公告", "有", "是", "说", "它", "这", "那",
 )
 _STOPWORDS_SORTED = tuple(sorted(_STOCK_NAME_STOPWORDS, key=len, reverse=True))
+
+# P5-fix（2026-08-05，问题 8）：对比意图词（含口语"哪个更好/谁好"等）
+_COMPARE_KEYWORDS = (
+    "对比", "哪个强", "哪个更强", "哪个更好", "哪个好", "谁更强", "谁强",
+    "谁更好", "谁好", "vs", "比较", "更好",
+)
+# 中文名多标的切分分隔符（"茅台和五粮液哪个更好" → 茅台 | 五粮液）
+_MULTI_NAME_SEPARATORS = ("和", "与", "、", "，", ",", "vs", "对比", "还是")
 
 
 def _extract_stock_symbol(message: str) -> str | None:
@@ -296,6 +309,38 @@ def _extract_multi_symbols(message: str) -> list[str]:
         if cand is not None and cand not in found:
             found.append(cand)
     return found if len(found) >= 2 else []
+
+
+# P5-fix（2026-08-05，问题 8）：按对比分隔符切分消息，逐段提取中文名候选。
+# 与 _extract_stock_name_candidate（取最长段）互补：对比句需按"和/与/还是"切出多个标的。
+def _extract_multi_name_candidates(message: str) -> list[str]:
+    parts = re.split("|".join(_MULTI_NAME_SEPARATORS), message)
+    found: list[str] = []
+    for part in parts:
+        cand = _extract_stock_name_candidate(part)
+        if cand is not None and cand not in found:
+            found.append(cand)
+    return found
+
+
+async def _resolve_multi_symbols(message: str) -> list[str]:
+    """P5-fix（问题 8）：提取 ≥2 个标的（6 位代码优先，中文名按分隔符逐个 resolve）。
+
+    注意：_extract_multi_symbols 可能混入未 resolve 的中文名候选（如"和五粮液"），
+    必须过滤为纯 6 位代码，否则 compare_stocks 会拿到非代码 symbol。
+    """
+    symbols = [
+        s for s in _extract_multi_symbols(message) if s.isdigit() and len(s) == 6
+    ]
+    if len(symbols) >= 2:
+        return symbols[:5]
+    for name in _extract_multi_name_candidates(message):
+        if len(symbols) >= 2:
+            break
+        resolved = await resolve_symbol(name)
+        if resolved is not None and resolved not in symbols:
+            symbols.append(resolved)
+    return symbols[:5] if len(symbols) >= 2 else []
 
 
 # P9（线 1 Task 7）：纠错否定强否定词（用户拍板：仅强否定 + 有历史才触发）
@@ -529,9 +574,14 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
             # 继续后续匹配/交回上层 LLM
             if skill_name == "compare_stocks":
                 symbols = _extract_multi_symbols(message)
-                if not symbols:
-                    continue
-                return SkillCall(skill_name="compare_stocks", args={"symbols": symbols})
+                # P5-fix（问题 8）：仅接受纯 6 位代码——中文名候选未 resolve（同步
+                # 兜底无法异步调用），否则 compare_stocks 会拿到"和五粮液"等非代码
+                # symbol；中文名对比句由闸门 2.5（对比短路）处理
+                if len(symbols) >= 2 and all(
+                    s.isdigit() and len(s) == 6 for s in symbols
+                ):
+                    return SkillCall(skill_name="compare_stocks", args={"symbols": symbols})
+                continue
             return _build_default_skill_call(skill_name, message)
     # 默认走 report_lookup
     return _build_default_skill_call("report_lookup", message)
@@ -1153,6 +1203,31 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             "goals": index_goals,
         }
 
+    # ── 闸门 2.5（P5-fix 问题 8）：对比问句 → 多标的解析短路 compare_stocks ──
+    # 必须独立于闸门 2 且在其之前：含 6 位代码的对比句（"600519 和五粮液哪个更好"）
+    # 会跳过闸门 2（`_extract_stock_symbol` 非 None），若不在此短路则落 LLM 路径
+    # （LLM 偶发错乱）或兜底 `_extract_multi_symbols`（混入未 resolve 中文名）。
+    if _match_keywords(message, _COMPARE_KEYWORDS):
+        multi_symbols = await _resolve_multi_symbols(message)
+        if len(multi_symbols) >= 2:
+            goal = InsightGoal(
+                question=message,
+                intent="compare_stocks",
+                symbols=multi_symbols,
+                constraints={"router_compare": "true"},
+            )
+            call = SkillCall(skill_name="compare_stocks", args={"symbols": multi_symbols})
+            logger.info("qa_router.gate.compare", symbols=multi_symbols)
+            metrics.record_chat_qa_latency(
+                "qa_router", int((time.monotonic() - start) * 1000)
+            )
+            return {
+                "goal": goal,
+                "plan": "direct",
+                "skill_calls": [call],
+                "complexity": "light",
+            }
+
     # ── 闸门 2：标的名称解析（D36）——中文名 → 代码，解析成功短路个股 Skill ──
     # 已显式给出 6 位代码时跳过（交由 LLM/后处理校验）
     if _extract_stock_symbol(message) is None:
@@ -1384,6 +1459,45 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         # 个股意图但缺失 6 位代码（且名称解析失败）：不执行空参 Skill，
         # 写澄清状态让 synth_answer 短路
         if fallback_call is None:
+            # P5-fix（问题 14 前端复测，2026-08-05）：多轮指代兜底——LLM 失败路径下，
+            # 当前消息含指代词（它/这/那/该/其/刚才/上次）且上一轮 user 消息能解析出
+            # 个股标的时，复用上一轮 symbol（"它今天的成交量呢" → 上一轮"贵州茅台"→600519），
+            # 避免多轮指代落到"请提供 6 位股票代码"澄清（日志 llm_failed→clarification 链路）。
+            # 守卫：仅指代词 + 上一轮明确个股标的，防止"帮我推荐股票"等被误指代。
+            prev_message = (
+                extract_last_human_message(list(messages)[:-1]) if len(messages) >= 3 else ""
+            )
+            if prev_message and _match_keywords(
+                message, ("它", "这", "那", "该", "其", "刚才", "上次", "这只", "那只")
+            ):
+                prev_resolved = await _resolve_stock_from_message(prev_message)
+                if prev_resolved is not None:
+                    prev_skill = _infer_stock_skill(prev_message)
+                    prev_args: dict[str, Any] = {"symbol": prev_resolved}
+                    if prev_skill == "stock_news":
+                        prev_args["limit"] = 10
+                    goal = InsightGoal(
+                        question=message,
+                        intent=prev_skill,  # type: ignore[arg-type]
+                        symbols=[prev_resolved],
+                        constraints={"router_fallback": "true", "multiturn_ref": "true"},
+                    )
+                    logger.info(
+                        "qa_router.fallback.multiturn_ref",
+                        symbol=prev_resolved,
+                        skill=prev_skill,
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return {
+                        "goal": goal,
+                        "plan": "direct",
+                        "skill_calls": [
+                            SkillCall(skill_name=prev_skill, args=prev_args)  # type: ignore[arg-type]
+                        ],
+                        "complexity": "light",
+                    }
             # D37：能力型缺口（无关键词命中、无个股名称候选、非个股意图、或报告类问句）→
             # general/Tavily 兜底，不再无脑澄清"请提供股票代码"（答非所问）。
             # 用户拍板：仅确定性缺口；个股缺码澄清路径保持不变。
