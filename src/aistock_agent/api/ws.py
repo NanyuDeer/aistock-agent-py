@@ -128,6 +128,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             initial_state["deep_source"] = None
             initial_state["final_response"] = None
             initial_state["goals"] = None   # D34：单轮 transient 每轮归零（对齐 deep_source）
+            initial_state["general_source"] = None  # P7+P8：general 兜底同 transient 每轮归零
 
             try:
                 llm_started = False

@@ -70,3 +70,6 @@ class QuestionState(TypedDict, total=False):
     # P4（D34）：多子目标（多意图 compose 时非空；存量会话/单意图为 None）。
     # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source）。
     goals: list[SubGoal] | None
+    # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
+    general_source: Literal["science", "gap"] | None
