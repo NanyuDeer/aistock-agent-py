@@ -1391,3 +1391,55 @@ def test_route_by_keyword_fallback_compare_without_symbols_falls_through():
     call = route_by_keyword_fallback("茅台和五粮液哪个强")
     assert call is not None
     assert call.skill_name != "compare_stocks"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_compare_stocks_truncates_over_max():
+    """D27：compare_stocks 白名单——LLM 输出 6 个 symbols → 截断保留前 5 个。"""
+    output = QARouterOutput(
+        goal=InsightGoal(intent="compare_stocks", question="对比六只股票"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(
+                skill_name="compare_stocks",
+                args={
+                    "symbols": [
+                        "600001",
+                        "600002",
+                        "600003",
+                        "600004",
+                        "600005",
+                        "600006",
+                    ]
+                },
+            )
+        ],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(output, "对比六只股票", _state("对比六只股票"))
+    assert len(result.skill_calls) == 1
+    assert result.skill_calls[0].args["symbols"] == [
+        "600001",
+        "600002",
+        "600003",
+        "600004",
+        "600005",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_postprocess_compare_stocks_drops_single_symbol():
+    """D27：compare_stocks 白名单——仅 1 个 symbol → call 被移除（少于 2 个标的无对比意义）。"""
+    output = QARouterOutput(
+        goal=InsightGoal(intent="compare_stocks", question="对比一只股票"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(
+                skill_name="compare_stocks",
+                args={"symbols": ["600519"]},
+            )
+        ],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(output, "对比一只股票", _state("对比一只股票"))
+    assert result.skill_calls == []
