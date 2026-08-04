@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.tools.base import DEGRADED_MESSAGE
-from aistock_agent.tools.sector_tools import _format_wind_leaders, get_leader_stocks, get_wind_leaders
+from aistock_agent.tools.sector_tools import (
+    _format_wind_leaders,
+    get_leader_stocks,
+    get_wind_leaders,
+)
 
 
 @pytest.mark.asyncio
