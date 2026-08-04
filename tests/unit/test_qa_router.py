@@ -1504,6 +1504,69 @@ async def test_qa_router_days_regex_without_stock_goes_to_llm():
 
 
 @pytest.mark.asyncio
+async def test_qa_router_days_regex_not_short_circuit_with_news_intent():
+    """'600519 近5天新闻' 含 stock_news 意图词 → 不短路，交回 LLM 走 stock_news。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(question="600519 近5天新闻", intent="stock_news", symbols=["600519"]),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_news", args={"symbol": "600519", "limit": 10})],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("600519 近5天新闻"))
+    assert result["skill_calls"][0].skill_name == "stock_news"
+    assert "router_days" not in result["goal"].constraints
+
+
+@pytest.mark.asyncio
+async def test_qa_router_days_regex_not_short_circuit_with_compare_intent():
+    """'600519 近30天对比 000858' 含 compare_stocks 意图词 → 不短路，对比语义保留。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(
+            question="600519 近30天对比 000858",
+            intent="compare_stocks",
+            symbols=["600519", "000858"],
+        ),
+        plan="direct",
+        skill_calls=[
+            SkillCall(
+                skill_name="compare_stocks",
+                args={"symbols": ["600519", "000858"]},
+            )
+        ],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("600519 近30天对比 000858"))
+    assert result["skill_calls"][0].skill_name == "compare_stocks"
+    assert result["skill_calls"][0].args["symbols"] == ["600519", "000858"]
+    assert "router_days" not in result["goal"].constraints
+
+
+@pytest.mark.asyncio
+async def test_qa_router_days_regex_pure_history_short_circuits():
+    """'600519 近5天走势' 无其他意图词（纯历史）→ 仍确定性短路 stock_history。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=AssertionError("LLM should not be called on days gate"),
+    ):
+        result = await qa_router_node(_state("600519 近5天走势"))
+    assert result["plan"] == "direct"
+    assert result["skill_calls"][0].skill_name == "stock_history"
+    assert result["skill_calls"][0].args == {"symbol": "600519", "days": 5}
+    assert result["goal"].intent == "stock_history"
+    assert result["goal"].constraints.get("router_days") == "true"
+
+
+@pytest.mark.asyncio
 async def test_qa_router_llm_failure_stock_history_fallback():
     """LLM 异常 + '600519 历史行情' → 关键词兜底 stock_history（intent_map 可用）。"""
     mock_llm = MagicMock()

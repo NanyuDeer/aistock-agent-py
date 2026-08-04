@@ -300,6 +300,21 @@ def _match_keywords(message: str, keywords: tuple[str, ...]) -> bool:
     return any(kw in message for kw in keywords)
 
 
+def _match_other_skill_intent(message: str) -> bool:
+    """闸门 0.5c 守卫：消息是否命中 stock_history 之外的既有 skill 意图词条。
+
+    Task 6 修复（reviewer）：「近N天」确定性短路仅适用纯历史意图——若消息
+    命中其他 skill 的意图词（对比/新闻/资金/行情/大盘/报告/板块等），必须
+    交回 LLM 走既有词条语义，禁止被改写为 stock_history。
+    """
+    for keywords, skill_name in KEYWORD_FALLBACK:
+        if skill_name == "stock_history":
+            continue
+        if _match_keywords(message, tuple(keywords)):
+            return True
+    return False
+
+
 def _extract_stock_name_candidate(message: str) -> str | None:
     """从消息中提取候选股票中文名（去口语词后最长的 2-8 字中文段）。
 
@@ -927,8 +942,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     # 「近N天」命中且消息含个股（6 位代码或名称解析成功）→ 直接构造
     # stock_history(days=min(N,120)) 短路，不进 LLM；命中但无个股 →
     # 交回后续闸门/LLM（历史词条 KEYWORD_FALLBACK 作 LLM 失败兜底）
+    # Task 6 修复：短路前先排除其他 skill 意图词（_match_other_skill_intent）——
+    # 「近N天 + 个股 + 其他意图词」（如"近5天新闻/近30天对比/近10天资金流向/
+    # 近5天多少钱"）交回 LLM 走既有词条语义，仅纯历史意图才确定性短路
     days_match = _DAYS_RE.search(message)
-    if days_match is not None:
+    if days_match is not None and not _match_other_skill_intent(message):
         history_symbol = _extract_stock_symbol(message)
         if history_symbol is None:
             history_symbol = await _resolve_stock_from_message(message)
