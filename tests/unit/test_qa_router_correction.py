@@ -116,3 +116,33 @@ async def test_real_negation_no_history_no_correction() -> None:
     # 未触发纠错：goal 无 negation_correction 约束
     assert out["goal"].constraints.get("negation_correction") is None
     llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_real_negation_index_correction_routes_index_snapshot() -> None:
+    # 指数纠错（spec §2.5）："我说的是深成指" → 对齐闸门 1 消歧 →
+    # index_snapshot(symbols=["399001"])，不再构造个股 skill（stock_snapshot(symbol=指数名)）。
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    state: QuestionState = {
+        "messages": [
+            HumanMessage(content="深成指怎么样"),
+            AIMessage(content="已回答：深成指..."),
+            HumanMessage(content="我说的是深成指"),
+        ],
+        "force_deep": None,
+    }  # type: ignore[typeddict-item]
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(),
+    ) as resolve_mock, patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think"
+    ) as llm_mock:
+        out = await qa_router_node(state)
+    assert out["skill_calls"][0].skill_name == "index_snapshot"
+    assert out["skill_calls"][0].args["symbols"] == ["399001"]
+    assert out["goal"].intent == "index_snapshot"
+    assert out["goal"].constraints.get("negation_correction") == "true"
+    # 指数分支确定性构造，不调名称解析、不进 LLM
+    resolve_mock.assert_not_awaited()
+    llm_mock.assert_not_called()

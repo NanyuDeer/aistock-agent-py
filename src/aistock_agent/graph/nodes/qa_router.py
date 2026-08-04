@@ -345,16 +345,40 @@ async def _apply_negation_correction(
     prev_skill = _infer_stock_skill(prev_message)
     if prev_skill not in _STOCK_SKILLS:
         return None  # 上轮非个股意图 → 不纠错
-
+    if index_name:
+        # 指数纠错（spec §2.5）：对齐闸门 1 消歧——A 股五指数 → index_snapshot；
+        # 其余指数名（恒生/中证500 等）→ market_snapshot；不构造个股 skill。
+        index_code = _INDEX_SNAPSHOT_CODES.get(index_name)
+        if index_code is not None:
+            call = SkillCall(skill_name="index_snapshot", args={"symbols": [index_code]})
+            intent: str = "index_snapshot"
+            symbols_out: list[str] = []
+        else:
+            call = SkillCall(
+                skill_name="market_snapshot",
+                args={"scope": "a_share", "snapshot_kind": "quick", "index_name": index_name},
+            )
+            intent = "market_snapshot"
+            symbols_out = []
+        goal = InsightGoal(
+            question=message,
+            intent=intent,  # type: ignore[arg-type]
+            symbols=symbols_out,
+            constraints={"negation_correction": "true", "index_name": index_name},
+        )
+        logger.info("qa_router.correction", new_symbol=index_name, prev_skill="index")
+        return {
+            "goal": goal,
+            "plan": "direct",
+            "skill_calls": [call],
+            "complexity": "light",
+        }
+    # 个股路径（原代码保持不变）
     args: dict[str, Any] = {"symbol": new_symbol}
     if prev_skill == "stock_news":
         args["limit"] = 10
     constraints: dict[str, str] = {"negation_correction": "true"}
-    symbols_out: list[str] = []
-    if index_name:
-        constraints["index_name"] = index_name
-    else:
-        symbols_out = [str(new_symbol)]
+    symbols_out = [str(new_symbol)]
     goal = InsightGoal(
         question=message,
         intent=prev_skill,  # type: ignore[arg-type]
@@ -1002,7 +1026,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     """QA Router 节点入口。
 
     M1 护栏（D33 优先级链：敏感 > 寒暄 > 科普 > 指数 > 标的解析 > compose > LLM）：
-    - 闸门 0/0.5（含科普）命中 → 写 final_response 话术短路（§3.2 契约），零 LLM
+    - 闸门 0/0.5 命中 → 确定性短路（科普闸门置 science 信号，其余写 final_response 话术），零 LLM
     - 闸门 1 指数名 / 闸门 3 compose 命中 → 确定性取数短路，不进 LLM
     - 闸门 2 标的名称解析（D36）→ 中文名 → 代码，解析成功短路个股 Skill
     - LLM 成功路径 → D27 后处理层确定性校验/补全
@@ -1327,8 +1351,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
         # D37（P7+P8）：区分「关键词兜底无匹配」与「个股缺码解析失败」——
-        # 前者是能力型缺口 → general gap 模式；后者保持既有澄清路径。
-        keyword_miss = fallback_call is None
+        # route_by_keyword_fallback 无词表命中时返回默认 report_lookup（非 None）；
+        # 个股词条缺码时返回 None。故"无匹配"= 默认 report_lookup，而非 None。
+        keyword_miss = (
+            fallback_call is not None and fallback_call.skill_name == "report_lookup"
+        )
         # 名称解析（D36）：个股类缺代码 / 默认 report_lookup 的纯名称问句 → 先解析再判定
         if fallback_call is not None:
             needs_resolve = (
@@ -1357,11 +1384,12 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         # 个股意图但缺失 6 位代码（且名称解析失败）：不执行空参 Skill，
         # 写澄清状态让 synth_answer 短路
         if fallback_call is None:
-            # D37：能力型缺口（无关键词命中、无个股名称候选、或报告类问句）→
+            # D37：能力型缺口（无关键词命中、无个股名称候选、非个股意图、或报告类问句）→
             # general/Tavily 兜底，不再无脑澄清"请提供股票代码"（答非所问）。
             # 用户拍板：仅确定性缺口；个股缺码澄清路径保持不变。
             is_capability_gap = keyword_miss and (
                 _extract_stock_name_candidate(message) is None
+                or _has_non_stock_intent(message)
                 or _match_keywords(message, ("晨报", "复盘", "报告", "说了什么"))
             )
             if is_capability_gap:

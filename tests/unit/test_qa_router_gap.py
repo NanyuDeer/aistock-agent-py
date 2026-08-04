@@ -15,20 +15,21 @@ def _state(message: str) -> QuestionState:
 
 @pytest.mark.asyncio
 async def test_capability_gap_routes_to_gap_mode() -> None:
-    # 无关键词命中、无个股名称候选 → 能力型缺口 → general_source="gap"（不再澄清）
+    # 真实路径：LLM 故障 + 无关键词命中（route_by_keyword_fallback 返回默认
+    # report_lookup，非 None）→ keyword_miss=True；resolve 失败后靠
+    # _has_non_stock_intent（含"A股"）判为能力型缺口 → general_source="gap"。
+    # 只 mock LLM 失败与名称解析网络调用，不 mock 关键词/候选/意图判定。
     with patch(
-        "aistock_agent.graph.nodes.qa_router.route_by_keyword_fallback",
-        return_value=None,
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=RuntimeError("llm down"),
     ), patch(
-        "aistock_agent.graph.nodes.qa_router._extract_stock_name_candidate",
-        return_value=None,
-    ), patch("aistock_agent.graph.nodes.qa_router.get_quick_think") as llm_mock:
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value=None),
+    ):
         out = await qa_router_node(_state("美联储加息对A股有什么影响"))
     assert out.get("general_source") == "gap"
     assert out["skill_calls"] == []
     assert "clarification" not in out
-    # LLM 被尝试一次（mock 抛 TypeError 进入兜底链）；缺口/澄清判定本身确定性（关键词+名称候选决定）
-    llm_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
