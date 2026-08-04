@@ -25,6 +25,7 @@ from aistock_agent.skills.stock_history import stock_history
 from aistock_agent.skills.stock_news import stock_news
 from aistock_agent.skills.stock_snapshot import stock_snapshot
 from aistock_agent.skills.trace_lookup import trace_lookup
+from aistock_agent.skills.trend_ranking import trend_ranking
 
 logger = structlog.get_logger()
 
@@ -136,6 +137,11 @@ register_skill(
     "stock_history",
     stock_history,
     description='个股历史行情（日K线）。入参 {symbol: "6位代码", days: 30}',
+)
+register_skill(
+    "trend_ranking",
+    trend_ranking,
+    description="趋势股评分 Top 榜。入参 {limit: int}（默认 20，上限 50）",
 )
 # T1 契约：hot_burst 意图保留在路由词汇（无独立 skill 实现，见 _hot_burst_unimplemented）
 register_skill(

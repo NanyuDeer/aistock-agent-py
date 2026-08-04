@@ -224,6 +224,8 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["对比", "哪个强", "谁更强", "谁强", "vs", "比较"], "compare_stocks"),
     # P5（D41）：历史词条置于 compare_stocks 之后（"走势/历史行情/区间" → 历史行情）
     (["走势", "历史行情", "区间"], "stock_history"),
+    # P5（D42）：排行词条置于 stock_history 之后（"排名/排行/榜单/最强" → 趋势股Top榜）
+    (["排名", "排行", "榜单", "最强"], "trend_ranking"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
@@ -483,6 +485,8 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
             skill_name="industry_relation",
             args={"keywords": [message.strip()]},
         )
+    if skill_name == "trend_ranking":
+        return SkillCall(skill_name="trend_ranking", args={"limit": 20})
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -864,6 +868,13 @@ async def _postprocess_skill_calls(
                 args["days"] = min(max(int(raw_days), 1), 120)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 args["days"] = 30
+
+        # 4.8 P5（D42）：trend_ranking 参数白名单（limit 整数化：非法/缺失 → 20，上限 50）
+        if call.skill_name == "trend_ranking":
+            try:
+                args["limit"] = min(max(int(args.get("limit") or 20), 1), 50)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                args["limit"] = 20
 
         # 5. 缺必填参数 → 修正为合理默认
         if call.skill_name == "report_lookup" and not args.get("report_type"):
@@ -1255,6 +1266,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             "stock_snapshot": "stock_snapshot",
             "stock_history": "stock_history",
             "trace_lookup": "trace_lookup",
+            "trend_ranking": "trend_ranking",
         }
         goal = InsightGoal(
             question=message,

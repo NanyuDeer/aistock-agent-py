@@ -1598,3 +1598,46 @@ async def test_postprocess_stock_history_days_whitelist():
         output, "600519 近30天走势", _state("600519 近30天走势")
     )
     assert [c.args["days"] for c in result.skill_calls] == [30, 120]
+
+
+# ── P5（D42）：trend_ranking 触发（关键词兜底 + D27 limit 白名单）──
+def test_route_by_keyword_fallback_trend_ranking():
+    """'今天股票排名' → 关键词兜底 trend_ranking(limit=20)。"""
+    call = route_by_keyword_fallback("今天股票排名")
+    assert call is not None
+    assert call.skill_name == "trend_ranking"
+    assert call.args == {"limit": 20}
+
+
+@pytest.mark.asyncio
+async def test_qa_router_llm_failure_trend_ranking_fallback():
+    """LLM 异常 + '今天最强股榜单' → 关键词兜底 trend_ranking（intent_map 可用）。"""
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("llm down")))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("今天最强股榜单"))
+    assert result["plan"] == "direct"
+    assert result["skill_calls"][0].skill_name == "trend_ranking"
+    assert result["goal"].intent == "trend_ranking"
+    assert result["goal"].constraints.get("router_fallback") == "true"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_trend_ranking_limit_whitelist():
+    """D27：trend_ranking 白名单——limit 非法 → 20；超上限 → 截断 50。"""
+    output = QARouterOutput(
+        goal=InsightGoal(intent="trend_ranking", question="今天股票排名"),
+        plan="direct",
+        skill_calls=[
+            SkillCall(skill_name="trend_ranking", args={"limit": "abc"}),
+            SkillCall(skill_name="trend_ranking", args={"limit": 999}),
+            SkillCall(skill_name="trend_ranking", args={}),
+        ],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(
+        output, "今天股票排名", _state("今天股票排名")
+    )
+    assert [c.args["limit"] for c in result.skill_calls] == [20, 50, 20]
