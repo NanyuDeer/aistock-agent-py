@@ -64,10 +64,16 @@ def _format_wind_leaders(data: dict[str, object]) -> str:
     for i, sector in enumerate(sectors_raw[:8], 1):
         if not isinstance(sector, dict):
             continue
+        # cycle: long=长线风口（月线多头确认）/ short=短线风口（月线未确认），缺省按短线兼容存量数据
+        cycle = sector.get("cycle", "short")
+        cycle_label = "长线" if cycle == "long" else "短线"
         name = sector.get("name", "未知板块")
         today_change = sector.get("today_change", "-")
         leading_stock = sector.get("leading_stock", "-")
-        lines.append(f"  {i}. {name} 涨幅: {today_change}%  龙头: {leading_stock}")
+        lines.append(
+            f"  {i}. {name}[{cycle_label}风口] 涨幅: {today_change}%"
+            f"  龙头: {leading_stock}"
+        )
         # 列出该板块的核心推荐股
         main_stocks = sector.get("main_stocks", [])
         if isinstance(main_stocks, list):
