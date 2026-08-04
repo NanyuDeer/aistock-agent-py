@@ -163,3 +163,24 @@ def test_answer_trace_goals_default_none():
         actual_mode="validate",
     )
     assert trace.goals is None
+
+
+_NEW_SKILLS = ("compare_stocks", "stock_history", "trend_ranking", "index_snapshot")
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_insight_goal_intent_accepts_new_skills(skill):
+    g = InsightGoal(question="q", intent=skill)  # type: ignore[arg-type]
+    assert g.intent == skill
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_subgoal_intent_accepts_new_skills(skill):
+    sg = SubGoal(question="q", intent=skill, dimension="validate")  # type: ignore[arg-type]
+    assert sg.intent == skill
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_skill_call_accepts_new_skills(skill):
+    c = SkillCall(skill_name=skill, args={})  # type: ignore[arg-type]
+    assert c.skill_name == skill
