@@ -222,10 +222,14 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["机构调研", "热门股", "调研"], "hot_burst"),
     # P5（D40）：对比词条置于 stock_snapshot 之前（多标的对比优先于单标的行情）
     (["对比", "哪个强", "谁更强", "谁强", "vs", "比较"], "compare_stocks"),
+    # P5（D41）：历史词条置于 compare_stocks 之后（"走势/历史行情/区间" → 历史行情）
+    (["走势", "历史行情", "区间"], "stock_history"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
 _STOCK_SYMBOL_RE = re.compile(r"(?<!\d)(?:sh|sz)?(\d{6})(?!\d)", re.IGNORECASE)
+# D41（P5）：近N天 历史行情确定性短路正则（N 上限 1~3 位数字，截断到 120）
+_DAYS_RE = re.compile(r"近(\d{1,3})天")
 _STOCK_SYMBOL_CLARIFICATION = "请提供 6 位股票代码后重试。"
 
 # 个股类 Skill（symbol 必填 6 位代码）
@@ -439,6 +443,11 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
         if symbol is None:
             return None
         return SkillCall(skill_name="capital_flow", args={"symbol": symbol})
+    if skill_name == "stock_history":
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="stock_history", args={"symbol": symbol, "days": 30})
     if skill_name == "trace_lookup":
         return SkillCall(skill_name="trace_lookup", args={"date": report_date})
     if skill_name == "evidence_resolver":
@@ -833,6 +842,14 @@ async def _postprocess_skill_calls(
                 continue  # 移除 call（少于 2 个标的无对比意义）
             args["symbols"] = syms[:5]  # 超过 5 个截断前 5
 
+        # 4.7 P5（D41）：stock_history 参数白名单（days 整数化：非法 → 30，上限 120）
+        if call.skill_name == "stock_history":
+            raw_days = args.get("days")
+            try:
+                args["days"] = min(max(int(raw_days), 1), 120)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                args["days"] = 30
+
         # 5. 缺必填参数 → 修正为合理默认
         if call.skill_name == "report_lookup" and not args.get("report_type"):
             args["report_type"] = "review"
@@ -905,6 +922,36 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         logger.info("qa_router.guardrail.education")
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, EDUCATION_REPLY, "education")
+
+    # ── 闸门 0.5c（D41）：近N天 历史行情确定性短路（stock_history）──
+    # 「近N天」命中且消息含个股（6 位代码或名称解析成功）→ 直接构造
+    # stock_history(days=min(N,120)) 短路，不进 LLM；命中但无个股 →
+    # 交回后续闸门/LLM（历史词条 KEYWORD_FALLBACK 作 LLM 失败兜底）
+    days_match = _DAYS_RE.search(message)
+    if days_match is not None:
+        history_symbol = _extract_stock_symbol(message)
+        if history_symbol is None:
+            history_symbol = await _resolve_stock_from_message(message)
+        if history_symbol is not None:
+            days = min(int(days_match.group(1)), 120)
+            goal = InsightGoal(
+                question=message,
+                intent="stock_history",
+                symbols=[history_symbol],
+                constraints={"router_days": "true"},
+            )
+            call = SkillCall(
+                skill_name="stock_history",
+                args={"symbol": history_symbol, "days": days},
+            )
+            logger.info("qa_router.gate.days_history", symbol=history_symbol, days=days)
+            metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+            return {
+                "goal": goal,
+                "plan": "direct",
+                "skill_calls": [call],
+                "complexity": "light",
+            }
 
     # ── 闸门 1：指数名（D26）→ market_snapshot 短路，不进 LLM ──
     index_name = _match_index_name(message)
@@ -1188,6 +1235,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             "sector_snapshot": "sector_snapshot",
             "stock_news": "stock_news",
             "stock_snapshot": "stock_snapshot",
+            "stock_history": "stock_history",
             "trace_lookup": "trace_lookup",
         }
         goal = InsightGoal(

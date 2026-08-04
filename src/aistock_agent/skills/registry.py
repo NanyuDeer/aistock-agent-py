@@ -21,6 +21,7 @@ from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
 from aistock_agent.skills.report_lookup import report_lookup
 from aistock_agent.skills.sector_snapshot import sector_snapshot
+from aistock_agent.skills.stock_history import stock_history
 from aistock_agent.skills.stock_news import stock_news
 from aistock_agent.skills.stock_snapshot import stock_snapshot
 from aistock_agent.skills.trace_lookup import trace_lookup
@@ -130,6 +131,11 @@ register_skill(
     "compare_stocks",
     compare_stocks,
     description='多标的行情对比（个股 2~5 个）。入参 {symbols: ["6位代码", ...]}',
+)
+register_skill(
+    "stock_history",
+    stock_history,
+    description='个股历史行情（日K线）。入参 {symbol: "6位代码", days: 30}',
 )
 # T1 契约：hot_burst 意图保留在路由词汇（无独立 skill 实现，见 _hot_burst_unimplemented）
 register_skill(
