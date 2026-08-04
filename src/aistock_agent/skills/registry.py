@@ -17,6 +17,7 @@ from aistock_agent.schemas.chat_contract import Evidence
 from aistock_agent.skills.capital_flow import capital_flow
 from aistock_agent.skills.compare_stocks import compare_stocks
 from aistock_agent.skills.evidence_resolver import evidence_resolver
+from aistock_agent.skills.index_snapshot import index_snapshot
 from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
 from aistock_agent.skills.report_lookup import report_lookup
@@ -32,7 +33,7 @@ logger = structlog.get_logger()
 #: Skill 可调用类型：async (args, goal) -> Evidence（与 @skill 装饰函数同形）
 SkillCallable: TypeAlias = Callable[[dict[str, Any], Any], Awaitable[Evidence]]
 
-#: Skill 注册表：skill_name → 可调用对象（手写 9 + hot_burst 意图 + 适配器）
+#: Skill 注册表：skill_name → 可调用对象（手写 10 + hot_burst 意图 + 适配器）
 SKILL_REGISTRY: dict[str, SkillCallable] = {}
 
 #: 渲染进 qa_router 提示词的 skill 描述（注册顺序即渲染顺序）
@@ -78,7 +79,7 @@ async def _hot_burst_unimplemented(args: dict[str, Any], goal: Any) -> Evidence:
     )
 
 
-# ── 手写 9 skill（行为与既有 skill_executor.SKILL_REGISTRY 完全一致；
+# ── 手写 10 skill（行为与既有 skill_executor.SKILL_REGISTRY 完全一致；
 #    描述保持原 SYSTEM_PROMPT 文案逐字不变，LLM 路由行为不漂移）──
 register_skill(
     "report_lookup",
@@ -122,6 +123,15 @@ register_skill(
     "market_snapshot",
     market_snapshot,
     description="大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）",
+)
+# P5（工作线 B）：A 股指数快速快照（闸门 1 确定性路由目标，index_snapshot）
+register_skill(
+    "index_snapshot",
+    index_snapshot,
+    description=(
+        "A股指数快速快照（沪指/深成指/创业板指/科创50/沪深300）。"
+        '入参 {symbols: ["6位代码"]}'
+    ),
 )
 register_skill(
     "industry_relation",

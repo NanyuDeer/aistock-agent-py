@@ -519,6 +519,16 @@ _STRONG_PREDICT_KEYWORDS = ("会涨", "会跌", "预测", "展望", "后市", "�
 # 无显式指数别名时的隐式大盘语义词（目标类型判定用）
 _IMPLICIT_MARKET_WORDS = ("大盘", "市场", "A股", "股市")
 
+# P5（工作线 B）：A 股指数名 → 快速快照代码（spec §2.6：指数语义只由指数名触发；
+# 仅覆盖 A 股五指数，恒生/中证500 等海外/宽基维持 market_snapshot）
+_INDEX_SNAPSHOT_CODES: dict[str, str] = {
+    "沪指": "000001", "上证指数": "000001", "上证": "000001",
+    "深成指": "399001", "深证成指": "399001",
+    "创业板指": "399006", "创业板": "399006",
+    "科创50": "000688",
+    "沪深300": "000300",
+}
+
 
 @dataclass(frozen=True)
 class _DimTarget:
@@ -982,20 +992,29 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "complexity": "light",
             }
 
-    # ── 闸门 1：指数名（D26）→ market_snapshot 短路，不进 LLM ──
+    # ── 闸门 1：指数名（D26）→ 短路，不进 LLM ──
+    # P5（工作线 B）：A 股指数名（命中 _INDEX_SNAPSHOT_CODES）→ index_snapshot 快速快照
+    # （绕开 market_snapshot quick 全市场爬取慢路径；spec §2.6 指数语义只由指数名触发）；
+    # 不在映射的指数名（恒生/中证500 等海外/宽基）维持 market_snapshot（不迁移）
     index_name = _match_index_name(message)
     if index_name is not None:
-        call = SkillCall(
-            skill_name="market_snapshot",
-            args={"scope": "a_share", "snapshot_kind": "quick", "index_name": index_name},
-        )
+        index_code = _INDEX_SNAPSHOT_CODES.get(index_name)
+        if index_code is not None:
+            call = SkillCall(skill_name="index_snapshot", args={"symbols": [index_code]})
+            index_intent: Literal["index_snapshot", "market_snapshot"] = "index_snapshot"
+        else:
+            call = SkillCall(
+                skill_name="market_snapshot",
+                args={"scope": "a_share", "snapshot_kind": "quick", "index_name": index_name},
+            )
+            index_intent = "market_snapshot"
         goal = InsightGoal(
             question=message,
-            intent="market_snapshot",
+            intent=index_intent,
             constraints={"index_name": index_name},
         )
         # D35：单意图预测（闸门短路优先红线不变，仅附加 predict 子目标 → D35 提示 + 现状趋势）
-        predict_goal = _build_single_predict_goal(message, "market_snapshot", [])
+        predict_goal = _build_single_predict_goal(message, index_intent, [])
         if predict_goal is not None:
             call = call.model_copy(update={"goal_id": "g1"})
             index_plan: Literal["direct", "compose"] = "compose"

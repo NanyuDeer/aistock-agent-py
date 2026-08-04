@@ -227,15 +227,61 @@ async def test_postprocess_keeps_valid_market_snapshot_args():
 
 @pytest.mark.asyncio
 async def test_qa_router_index_gate_short_circuits() -> None:
-    """指数名 → 闸门 1 短路：不调 LLM、market_snapshot，index_name 透传 constraints。"""
+    """A股指数名（沪指）→ 闸门 1 短路 index_snapshot：不调 LLM，index_name 透传 constraints。"""
     with patch(
         "aistock_agent.graph.nodes.qa_router.get_quick_think",
         side_effect=AssertionError("LLM should not be called on index gate"),
     ):
         result = await qa_router_node(_state("沪指今天怎么样"))
-    assert result["skill_calls"][0].skill_name == "market_snapshot"
-    assert result["skill_calls"][0].args.get("index_name") == "上证指数"
+    assert result["skill_calls"][0].skill_name == "index_snapshot"
+    assert result["skill_calls"][0].args == {"symbols": ["000001"]}
+    assert result["goal"].intent == "index_snapshot"
     assert result["goal"].constraints.get("index_name") == "上证指数"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_index_gate_overseas_keeps_market_snapshot() -> None:
+    """海外指数（恒生）→ 闸门 1 仍短路 market_snapshot（index_snapshot 只覆盖 A 股，不迁移）。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=AssertionError("LLM should not be called on index gate"),
+    ):
+        result = await qa_router_node(_state("恒生指数今天怎么样"))
+    assert result["skill_calls"][0].skill_name == "market_snapshot"
+    assert result["skill_calls"][0].args.get("index_name") == "恒生指数"
+    assert result["goal"].intent == "market_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_qa_router_index_name_plus_code_index_wins() -> None:
+    """§2.6：指数名 + 裸代码并存（"沪指000001"）→ 指数名优先 → index_snapshot。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=AssertionError("LLM should not be called on index gate"),
+    ):
+        result = await qa_router_node(_state("沪指000001"))
+    assert result["skill_calls"][0].skill_name == "index_snapshot"
+    assert result["skill_calls"][0].args == {"symbols": ["000001"]}
+
+
+@pytest.mark.asyncio
+async def test_bare_code_not_index_semantics() -> None:
+    """§2.6：裸 6 位代码（000001）→ 个股语义 stock_snapshot，不因裸代码触发指数语义。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(question="000001 现在多少钱", intent="stock_snapshot", symbols=["000001"]),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "000001"})],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("000001 现在多少钱"))
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+    assert result["skill_calls"][0].args == {"symbol": "000001"}
+    assert result["goal"].intent == "stock_snapshot"
 
 
 def test_keyword_fallback_stock_news_extracts_six_digit_symbol() -> None:
@@ -1274,6 +1320,7 @@ async def test_qa_router_llm_single_validate_collapses():
 @pytest.mark.asyncio
 async def test_qa_router_gate1_index_predict_attaches_goals():
     result = await qa_router_node(_state("沪指明天会涨吗"))
+    assert result["skill_calls"][0].skill_name == "index_snapshot"
     assert result["goals"] is not None                  # 闸门 1 短路 + D35 附加
     assert result["goals"][0].dimension == "predict"
     assert result["skill_calls"][0].goal_id == "g1"
@@ -1295,6 +1342,7 @@ async def test_qa_router_gate2_resolve_predict_attaches_goals():
 @pytest.mark.asyncio
 async def test_qa_router_gate1_no_predict_no_goals():
     result = await qa_router_node(_state("沪指今天怎么样"))
+    assert result["skill_calls"][0].skill_name == "index_snapshot"
     assert result["goals"] is None                      # 无 predict 词 → 现状行为
     assert result["skill_calls"][0].goal_id is None
 
