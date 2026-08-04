@@ -18,7 +18,6 @@ from aistock_agent.prompts.general.system import (
     ACTION_KEYWORDS,
     CAPABILITY_REPLY,
     COMPLIANCE_REPLY,
-    EDUCATION_REPLY,
 )
 from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall, SubGoal
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
@@ -258,6 +257,9 @@ _GREETING_KEYWORDS = (
 
 # 科普问句前缀（6.15 缺口：修复科普问题兜底 report_lookup 答非所问）
 _EDUCATION_KEYWORDS = ("什么是", "啥是", "怎么算", "如何理解", "解释一下", "科普")
+# D32（P7+P8 线 1 Task 4）：产品内部概念不纳入科普（防误伤 compose 闸门——
+# "什么是今日主线" 是主线/风险 compose 意图，不能被科普词表劫持）
+_PRODUCT_CONCEPT_KEYWORDS = ("主线", "风险提示")
 
 # 名称候选提取要去除的口语/疑问词（按长度降序替换，避免子串误删）
 _STOCK_NAME_STOPWORDS = (
@@ -955,11 +957,25 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, CAPABILITY_REPLY, "greeting")
 
-    # ── 闸门 0.5b：科普问句拦截（6.15 缺口，修复科普问题兜底 report_lookup 答非所问）──
-    if _match_keywords(message, _EDUCATION_KEYWORDS):
+    # ── 闸门 0.5b：科普问句（D32 升级，P7+P8）→ 置 science 信号走 general 动态回答 ──
+    # 用户拍板：仅股票投资知识词表；产品内部概念不纳入（防误伤 compose）。
+    # 零 LLM（识别确定性），动态回答由 general_fallback 节点调 run_science 产生。
+    if _match_keywords(message, _EDUCATION_KEYWORDS) and not _match_keywords(
+        message, _PRODUCT_CONCEPT_KEYWORDS
+    ):
         logger.info("qa_router.guardrail.education")
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-        return _short_circuit(message, EDUCATION_REPLY, "education")
+        return {
+            "goal": InsightGoal(
+                question=message,
+                intent="report_lookup",
+                constraints={"guardrail": "education"},
+            ),
+            "plan": "direct",
+            "skill_calls": [],
+            "complexity": "light",
+            "general_source": "science",
+        }
 
     # ── 闸门 0.5c（D41）：近N天 历史行情确定性短路（stock_history）──
     # 「近N天」命中且消息含个股（6 位代码或名称解析成功）→ 直接构造
