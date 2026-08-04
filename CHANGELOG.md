@@ -2,6 +2,36 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-04 — ChatAgent P5 能力补齐（D40-D42 三 skill + index_snapshot + P4 遗留优化）
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\2026-08-04-chat-agent-p5-capability.md`
+
+### 新增
+- `src/aistock_agent/schemas/chat_contract.py`：`InsightGoal.intent` / `SubGoal.intent` / `SkillCall.skill_name` 3 Literal 各追加 `compare_stocks` / `stock_history` / `trend_ranking` / `index_snapshot`（extra="forbid" 不变）
+- `src/aistock_agent/skills/compare_stocks.py`：D40 多标的并发对比（`asyncio.gather` 并发 `get_quote.ainvoke`，2~5 标的，部分失败不整条丢弃，仅个股语义）
+- `src/aistock_agent/skills/stock_history.py`：D41 个股日 K 区间（`/internal/quote/{symbol}/kline`，`近N天` 确定性短路）
+- `src/aistock_agent/skills/trend_ranking.py`：D42 趋势股 Top 榜（`/internal/trend/top`，空榜 degraded）
+- `src/aistock_agent/skills/index_snapshot.py`：对话快速指数快照（`/internal/index/quotes`，绕开 quick 全市场 33s 慢路径，部分 null 不整体 degraded）
+- `src/aistock_agent/graph/nodes/qa_router.py`：KEYWORD_FALLBACK 对比/历史/排行词条 + `_extract_multi_symbols` + `_DAYS_RE 近N天` 短路（`_match_other_skill_intent` 排除其他意图词）+ 闸门 1 A 股指数名路由（`_INDEX_SNAPSHOT_CODES` → index_snapshot，恒生/大盘维持 market_snapshot）+ D27 白名单（compare/stock_history/trend_ranking 参数归一）
+- `src/aistock_agent/skills/registry.py`：注册 4 新 skill
+
+### 修复
+- P4 遗留 ①：闸门 1/2 单意图预测附加收紧为 `_STRONG_PREDICT_KEYWORDS`（弱词仅闸门 4 候选注入，消除"茅台明天的新闻"误附加）
+- P4 遗留 ②：兜底 `_build_fallback_goals` 同标的 validate+predict 只发一条取数 call（`seen_calls` 去重）
+- P4 遗留 ③：兜底 trace 子目标改走 `trace_lookup`（溯源数据而非 validate 快照）
+
+### 测试
+- 新建 test_skills_compare_stocks / test_skills_stock_history / test_skills_trend_ranking / test_skills_index_snapshot + test_qa_router 触发/迁移用例（§2.6 消歧五行全覆盖）
+- 目标单测 122 passed；全量 pytest A/B（worktree 24830c5 + PYTHONPATH）：HEAD 28 failed ⊆ BASE 28 failed（新增失败清零），passed 1440→1496；ruff 改动文件 0 errors
+
+### 文档
+- `AGENTS.md`：Node 配合接口表补 `/internal/quote/:symbol/kline` + `/internal/index/quotes`；CHAT QA P5 小节（4 skill + §2.6 消歧硬边界）
+- roadmap §1 P5 行（✅ 11/11）、§2 P5 小节、§5.5 验证记录、§4 两项调研遗留已完成
+
+---
+
 ## [changer] 2026-08-04 — ChatAgent P4 多意图（D34 goal→goals）+ 维度预筛（D30 闸门 4）+ 预测维降级（D35）
 
 **开发者**: Aria

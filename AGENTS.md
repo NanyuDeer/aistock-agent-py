@@ -174,6 +174,16 @@ START → supervisor(quick_think, 意图路由)
 - **预测维降级（D35）**：`PREDICT_DEGRADED_HINT = "预测功能开发中，可先查看当前趋势分析。"` 代码生成（多个 predict 子目标只输出一次），不编造预测；predict 子目标可携带同标的 validate 取数作"当前趋势分析"依据；**单意图预测问题（闸门 1/2 短路命中 predict 词，如"茅台明天会涨吗"/"沪指明天会涨吗"）同样附加 predict 子目标**（不 bypass 闸门、不升级 deep）
 - **兼容**：单意图路径字节不变（唯一例外为上述 D35 单意图预测附加）；`goals` 为单轮 transient（ws.py/routes.py 入口按轮归零）；WS/SSE 事件协议不变
 
+### CHAT QA P5（2026-08-04）：能力补齐（D40-D42）+ 快速指数快照 + P4 遗留优化
+
+- **4 个新 skill（契约 3 Literal 各追加 compare_stocks/stock_history/trend_ranking/index_snapshot）**：
+  - `compare_stocks`（D40）：`asyncio.gather` 并发 `get_quote.ainvoke`，2~5 标的，部分失败不整条丢弃（degraded + 标"数据暂不可用"），仅个股语义；`_extract_multi_symbols` + KEYWORD_FALLBACK 对比词条 + D27 白名单（<2 移除、>5 截断）
+  - `stock_history`（D41）：`node_api.get /internal/quote/{symbol}/kline`，`_DAYS_RE 近N天` 确定性短路（`_match_other_skill_intent` 排除其他意图词，防"600519 近5天新闻"被劫持）
+  - `trend_ranking`（D42）：`node_api.get_list /internal/trend/top`，空榜 degraded
+  - `index_snapshot`（工作线 B）：`/internal/index/quotes` 快速指数快照（几百 ms 绕开 quick 全市场 33s 慢路径），部分 null 不整体 degraded，失败不降级到 quick 全市场爬取
+- **§2.6 指数/个股消歧硬边界（单一事实源）**：指数语义**只由指数名触发**（沪指/上证指数/深成指/创业板指/科创50/沪深300 → index_snapshot）；裸 6 位代码（000001）恒为个股语义（平安银行）；指数名+代码并存（"沪指000001"）指数名优先；恒生/大盘/全市场词维持 `market_snapshot`（不变）
+- **P4 遗留 3 项**：闸门 1/2 单意图预测附加收紧为 `_STRONG_PREDICT_KEYWORDS = ("会涨","会跌","预测","展望","后市","未来")`（弱词仅闸门 4 候选注入）；兜底 validate+predict 同标的只发一条取数 call（`seen_calls` 去重）；兜底 trace 维度改走 `trace_lookup`
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
