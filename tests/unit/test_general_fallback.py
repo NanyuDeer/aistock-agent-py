@@ -47,6 +47,8 @@ async def test_missing_source_falls_back_to_gap_semantics() -> None:
     with patch(
         "aistock_agent.graph.nodes.general_fallback.run_gap",
         AsyncMock(return_value="兜底回答"),
+    ), patch(
+        "aistock_agent.graph.nodes.general_fallback._log_skill_request"
     ):
         out = await general_fallback_node(_state("gap"))
     assert out["final_response"] == "兜底回答"
