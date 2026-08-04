@@ -128,6 +128,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             # last_deep_report）。last_deep_report 本身是跨轮引用，不能清。
             initial_state["deep_source"] = None
             initial_state["final_response"] = None
+            initial_state["goals"] = None   # D34：单轮 transient 每轮归零（对齐 deep_source）
 
             try:
                 llm_started = False

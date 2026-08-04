@@ -11,6 +11,7 @@ from aistock_agent.schemas.chat_contract import (
     Insight,
     InsightGoal,
     SkillCall,
+    SubGoal,
 )
 
 
@@ -98,3 +99,88 @@ def test_skill_call_depends_on_default_empty():
 def test_answer_trace_required_fields():
     with pytest.raises(ValidationError):
         AnswerTrace()  # 缺 goal / plan / skill_calls / evidences / actual_mode
+
+
+def _ev(skill_name: str = "stock_snapshot") -> Evidence:
+    return Evidence(
+        facts=["f"],
+        sources=[],
+        as_of=datetime.now(timezone.utc),
+        skill_name=skill_name,
+    )
+
+
+def test_subgoal_required_fields():
+    with pytest.raises(ValidationError):
+        SubGoal()  # 缺 question / intent / dimension
+
+
+def test_subgoal_id_default_g1():
+    sg = SubGoal(question="明日走势", intent="stock_snapshot", dimension="predict")
+    assert sg.id == "g1"
+
+
+def test_subgoal_dimension_literal():
+    with pytest.raises(ValidationError):
+        SubGoal(question="x", intent="stock_snapshot", dimension="invalid")
+
+
+def test_subgoal_intent_literal():
+    with pytest.raises(ValidationError):
+        SubGoal(question="x", intent="invalid_intent", dimension="validate")
+
+
+def test_subgoal_extra_forbidden():
+    with pytest.raises(ValidationError):
+        SubGoal(question="x", intent="stock_snapshot", dimension="validate", extra="no")
+
+
+def test_skill_call_goal_id_optional():
+    call = SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})
+    assert call.goal_id is None
+
+
+def test_skill_call_goal_id_set():
+    call = SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"}, goal_id="g1")
+    assert call.goal_id == "g1"
+
+
+def test_evidence_goal_id_optional():
+    assert _ev().goal_id is None
+
+
+def test_evidence_goal_id_set():
+    assert _ev().model_copy(update={"goal_id": "g1"}).goal_id == "g1"
+
+
+def test_answer_trace_goals_default_none():
+    goal = InsightGoal(question="x", intent="stock_snapshot")
+    trace = AnswerTrace(
+        goal=goal,
+        plan="direct",
+        skill_calls=[],
+        evidences=[],
+        actual_mode="validate",
+    )
+    assert trace.goals is None
+
+
+_NEW_SKILLS = ("compare_stocks", "stock_history", "trend_ranking", "index_snapshot")
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_insight_goal_intent_accepts_new_skills(skill):
+    g = InsightGoal(question="q", intent=skill)  # type: ignore[arg-type]
+    assert g.intent == skill
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_subgoal_intent_accepts_new_skills(skill):
+    sg = SubGoal(question="q", intent=skill, dimension="validate")  # type: ignore[arg-type]
+    assert sg.intent == skill
+
+
+@pytest.mark.parametrize("skill", _NEW_SKILLS)
+def test_skill_call_accepts_new_skills(skill):
+    c = SkillCall(skill_name=skill, args={})  # type: ignore[arg-type]
+    assert c.skill_name == skill
