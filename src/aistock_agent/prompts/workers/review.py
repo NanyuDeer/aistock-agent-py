@@ -74,6 +74,32 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    - miss：全部偏离
    - no_forecast：snapshot.morning_forecast 为空
 
+【prediction_validation 输出格式（JSON 字段必须严格一致）】
+- sector_hits 是数组，每个元素字段：
+  {
+    "sector": "板块名称（与 morning_forecast.sectors 中的 name 一致）",
+    "morning_direction": "bullish" | "bearish" | "neutral",
+    "actual_direction": "bullish" | "bearish" | "neutral",
+    "result": "hit" | "miss",
+    "deviation_note": "偏离原因（result=miss 时必填）"
+  }
+  （不要输出 predicted_direction 等额外字段；actual_direction 必须是方向而非 hit/miss）
+- event_hits 是数组，每个元素字段：
+  {
+    "event_title": "事件标题",
+    "morning_direction": "bullish" | "bearish" | "neutral",
+    "actual_impact": "实际影响描述",
+    "result": "hit" | "miss" | "unverifiable",
+    "note": "备注（可选）"
+  }
+- prediction_validation 对象字段：
+  {
+    "status": "hit" | "partial" | "miss" | "no_forecast",
+    "sector_hits": [...],
+    "event_hits": [...],
+    "overall_note": "整体结论（可选）"
+  }
+
 若 snapshot.morning_forecast 为空，prediction_validation 输出 {"status": "no_forecast"}。
 
 【外盘传导判定规则】

@@ -143,6 +143,7 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
         "morning": _report("morning", 11, summary="morning conclusion"),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -153,7 +154,7 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
     assert brief["brief_type"] == "morning"
     assert brief["degraded"] is False
     assert brief["missing_sources"] == []
-    assert 3 <= len(brief["items"]) <= 5
+    assert len(brief["items"]) == 4
     first = brief["items"][0]
     assert first["conclusion"] == "morning conclusion"
     assert first["confidence"] == "unknown"
@@ -240,9 +241,10 @@ async def test_morning_brief_reads_event_intent_from_persisted_event_conduction_
 
     brief = await build_brief("morning", "2026-07-24", api=api)
 
+    # 4 个 required types（morning/wind_leader/hot_burst/trend_score）+ 1 个最新有效事件 = 5 items
     assert len(brief["items"]) == 5
-    event_ids = [item["evidence"][0]["id"] for item in brief["items"][3:]]
-    assert event_ids == ["20", "19"]
+    event_ids = [item["evidence"][0]["id"] for item in brief["items"][4:]]
+    assert event_ids == ["20"]
     api.list_analysis_reports.assert_awaited_once_with("event_conduction", "2026-07-24")
 
 
@@ -272,6 +274,7 @@ async def test_brief_marks_missing_data_source_without_fabricating_evidence() ->
         "morning": _report("morning", 11, data_source=""),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -280,7 +283,7 @@ async def test_brief_marks_missing_data_source_without_fabricating_evidence() ->
 
     assert brief["degraded"] is True
     assert brief["missing_sources"] == ["morning"]
-    assert len(brief["items"]) == 2
+    assert len(brief["items"]) == 3
     assert all(item["evidence"][0]["data_source"] for item in brief["items"])
 
 
@@ -294,6 +297,7 @@ async def test_brief_rejects_wrong_type_or_failed_persisted_rows() -> None:
         "morning": _report("morning", 11),
         "wind_leader": _report("hot_burst", 12),
         "hot_burst": _report("hot_burst", 13, status="failed"),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -302,7 +306,10 @@ async def test_brief_rejects_wrong_type_or_failed_persisted_rows() -> None:
 
     assert brief["degraded"] is True
     assert brief["missing_sources"] == ["wind_leader", "hot_burst"]
-    assert [item["evidence"][0]["report_type"] for item in brief["items"]] == ["morning"]
+    assert [item["evidence"][0]["report_type"] for item in brief["items"]] == [
+        "morning",
+        "trend_score",
+    ]
 
 
 @pytest.mark.asyncio
@@ -316,6 +323,7 @@ async def test_brief_rejects_untraceable_persisted_report_ids(report_id: object)
         "morning": _report("morning", 11),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     reports["morning"]["id"] = report_id
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
@@ -365,9 +373,10 @@ async def test_morning_brief_uses_nested_event_podcast_brief_and_skips_invalid_n
 
     brief = await build_brief("morning", "2026-07-24", api=api)
 
-    events = brief["items"][3:]
-    assert [item["evidence"][0]["id"] for item in events] == ["29", "28"]
-    assert [item["conclusion"] for item in events] == ["中间事件结论", "较早事件结论"]
+    # 4 个 required types + 最新有效事件（invalid_newest 被跳过）= 5 items
+    events = brief["items"][4:]
+    assert [item["evidence"][0]["id"] for item in events] == ["29"]
+    assert [item["conclusion"] for item in events] == ["中间事件结论"]
 
 
 @pytest.mark.asyncio
