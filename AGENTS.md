@@ -20,7 +20,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 个股分析 | agents/workers/stock.py | deep_think | P0 |
 | 板块分析 | agents/workers/sector.py | deep_think | P0 |
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
-| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
+| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0（报告区分短线/长线风口） |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
 | 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
