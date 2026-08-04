@@ -34,6 +34,7 @@ _NODE_LABELS: dict[str, str] = {
     "escalate": "正在深度分析...",
     "skill_executor": "正在收集证据",
     "synth_answer": "正在综合回答",
+    "general_fallback": "正在检索解答...",
 }
 
 

@@ -26,6 +26,7 @@ _FALLBACK_LABELS: dict[str, str] = {
     "skill_executor": "正在收集证据",
     "synth_answer": "正在综合回答",
     "escalate": "正在深度分析",
+    "general_fallback": "正在检索解答",
 }
 
 _REASONING_TIMEOUT_SEC = 2.0
