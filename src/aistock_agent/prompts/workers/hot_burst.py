@@ -39,7 +39,7 @@ HOT_BURST_ANALYST_PROMPT = (
 - display_report.summary 必须简洁，display_report.details 用于前端完整展示。
 - display_report.stocks 只填写报告实际提及的股票代码；没有则返回空数组。
 - display_report.risks 只填写报告中有依据的主要风险；没有则返回空数组。
-- podcast_brief 必须严格控制在 150-200 个中文字符，只包含主题、事实、判断、风险。
+- podcast_brief 会被程序按 len(brief.strip()) 精确校验，**必须严格控制在 150–200 个字符区间（含标点，含边界）**，只包含主题、事实、判断、风险。
 - podcast_brief 不得包含长篇背景、逐股重复分析、JSON 之外的解释或内部算法术语。
 - schema_version 必须固定填写 "2.0"。
 
