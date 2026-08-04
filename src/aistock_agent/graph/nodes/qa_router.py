@@ -458,6 +458,10 @@ _DIMENSION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "validate": ("怎么样", "现在", "当前", "行情", "表现", "如何", "多少钱", "涨跌"),
 }
 
+# P5（D1 收紧）：D35 单意图预测附加仅用强预测词；弱词（走势/预期/能否/明天等）
+# 只触发闸门 4 候选注入，不触发确定性附加（"茅台明天的新闻"不再误附加 predict）
+_STRONG_PREDICT_KEYWORDS = ("会涨", "会跌", "预测", "展望", "后市", "未来")
+
 # 无显式指数别名时的隐式大盘语义词（目标类型判定用）
 _IMPLICIT_MARKET_WORDS = ("大盘", "市场", "A股", "股市")
 
@@ -550,7 +554,7 @@ def _build_single_predict_goal(
     附加 predict 子目标（不 bypass 闸门、不升级 deep），synth_answer 输出
     D35 提示 + 现状趋势要点（spec §1.2 拍板：单意图预测问题纳入 D35）。
     """
-    if not any(k in message for k in _DIMENSION_KEYWORDS["predict"]):
+    if not any(k in message for k in _STRONG_PREDICT_KEYWORDS):
         return None
     if not label:
         label = _match_index_name(message) or (symbols[0] if symbols else "")

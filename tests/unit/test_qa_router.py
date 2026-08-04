@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from aistock_agent.graph.nodes.qa_router import (
     SYSTEM_PROMPT,
     QARouterOutput,
+    _STRONG_PREDICT_KEYWORDS,
     _build_dimension_candidates,
     _build_fallback_goals,
     _build_gate4_context,
@@ -1292,3 +1293,24 @@ async def test_qa_router_gate1_no_predict_no_goals():
     result = await qa_router_node(_state("沪指今天怎么样"))
     assert result["goals"] is None                      # 无 predict 词 → 现状行为
     assert result["skill_calls"][0].goal_id is None
+
+
+# ── P5（D1 收紧）：D35 单意图预测附加强词收紧 ──
+def test_strong_predict_keywords_exact_words():
+    assert _STRONG_PREDICT_KEYWORDS == ("会涨", "会跌", "预测", "展望", "后市", "未来")
+
+
+def test_single_predict_goal_strong_word_attaches():
+    sg = _build_single_predict_goal("茅台明天会涨吗", "stock_snapshot", ["600519"])
+    assert sg is not None
+    assert sg.dimension == "predict"
+
+
+def test_single_predict_goal_weak_word_no_attach():
+    # 弱词（明天/走势）不触发确定性附加（只触发闸门 4 候选注入）
+    assert _build_single_predict_goal("茅台明天的新闻", "stock_news", ["600519"]) is None
+    assert _build_single_predict_goal("茅台近期走势如何", "stock_snapshot", ["600519"]) is None
+
+
+def test_single_predict_goal_no_predict_word():
+    assert _build_single_predict_goal("茅台今天怎么样", "stock_snapshot", ["600519"]) is None
