@@ -15,6 +15,7 @@ import structlog
 
 from aistock_agent.schemas.chat_contract import Evidence
 from aistock_agent.skills.capital_flow import capital_flow
+from aistock_agent.skills.compare_stocks import compare_stocks
 from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
@@ -124,6 +125,11 @@ register_skill(
     "industry_relation",
     industry_relation,
     description="行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}",
+)
+register_skill(
+    "compare_stocks",
+    compare_stocks,
+    description='多标的行情对比（个股 2~5 个）。入参 {symbols: ["6位代码", ...]}',
 )
 # T1 契约：hot_burst 意图保留在路由词汇（无独立 skill 实现，见 _hot_burst_unimplemented）
 register_skill(

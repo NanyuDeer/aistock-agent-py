@@ -220,6 +220,8 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["新闻", "资讯", "消息", "公告"], "stock_news"),
     # D6 前置：热门股/机构调研意图（兜底命中固定 deep，供 Task 2 escalate 消费）
     (["机构调研", "热门股", "调研"], "hot_burst"),
+    # P5（D40）：对比词条置于 stock_snapshot 之前（多标的对比优先于单标的行情）
+    (["对比", "哪个强", "谁更强", "谁强", "vs", "比较"], "compare_stocks"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
@@ -268,6 +270,22 @@ _STOPWORDS_SORTED = tuple(sorted(_STOCK_NAME_STOPWORDS, key=len, reverse=True))
 def _extract_stock_symbol(message: str) -> str | None:
     match = _STOCK_SYMBOL_RE.search(message)
     return match.group(1) if match else None
+
+
+def _extract_multi_symbols(message: str) -> list[str]:
+    """P5（D40）：提取 ≥2 个个股候选（6 位代码或中文名）。指数名不进入（§2.6）。"""
+    found: list[str] = []
+    for m in _STOCK_SYMBOL_RE.finditer(message):
+        code = m.group(1)
+        if code not in found:
+            found.append(code)
+    # 中文名候选：仅在有对比词且代码候选不足 2 个时尝试
+    # （避免"哪个强"等对比口语被误当标的；§2.6 指数名不进入）
+    if len(found) < 2 and any(k in message for k in ("对比", "哪个强", "谁更强", "谁强", "vs", "比较")):
+        cand = _extract_stock_name_candidate(message)
+        if cand is not None and cand not in found:
+            found.append(cand)
+    return found if len(found) >= 2 else []
 
 
 def _is_valid_symbol_arg(symbol: object) -> bool:
@@ -386,6 +404,13 @@ def route_by_keyword_fallback(message: str) -> SkillCall | None:
         )
     for keywords, skill_name in KEYWORD_FALLBACK:
         if any(kw in message for kw in keywords):
+            # P5（D40）：对比词条命中但 <2 个标的 → 跳过该词条（不短路空 symbols），
+            # 继续后续匹配/交回上层 LLM
+            if skill_name == "compare_stocks":
+                symbols = _extract_multi_symbols(message)
+                if not symbols:
+                    continue
+                return SkillCall(skill_name="compare_stocks", args={"symbols": symbols})
             return _build_default_skill_call(skill_name, message)
     # 默认走 report_lookup
     return _build_default_skill_call("report_lookup", message)
@@ -801,6 +826,13 @@ async def _postprocess_skill_calls(
             if args.get("snapshot_kind") not in ("quick", "full"):
                 args["snapshot_kind"] = "quick"
 
+        # 4.6 P5（D40）：compare_stocks 参数白名单（仅个股语义，§2.6）
+        if call.skill_name == "compare_stocks":
+            syms = [s for s in (args.get("symbols") or []) if isinstance(s, str)]
+            if len(syms) < 2:
+                continue  # 移除 call（少于 2 个标的无对比意义）
+            args["symbols"] = syms[:5]  # 超过 5 个截断前 5
+
         # 5. 缺必填参数 → 修正为合理默认
         if call.skill_name == "report_lookup" and not args.get("report_type"):
             args["report_type"] = "review"
@@ -1147,6 +1179,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         # 推断 intent
         intent_map = {
             "capital_flow": "capital_flow",
+            "compare_stocks": "compare_stocks",
             "evidence_resolver": "evidence_resolver",
             "hot_burst": "hot_burst",
             "industry_relation": "industry_relation",

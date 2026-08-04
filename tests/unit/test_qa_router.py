@@ -16,6 +16,7 @@ from aistock_agent.graph.nodes.qa_router import (
     _build_gate4_context,
     _build_single_predict_goal,
     _DimTarget,
+    _extract_multi_symbols,
     _postprocess_skill_calls,
     qa_router_node,
     route_by_keyword_fallback,
@@ -1363,3 +1364,30 @@ def test_fallback_subgoal_trace_intent_trace_lookup():
     sg = _build_fallback_subgoal("g1", "trace", _DimTarget("stock", "600519"))
     assert sg.intent == "trace_lookup"
     assert sg.question == "600519涨跌原因"
+
+
+# ── P5（D40）：compare_stocks 触发（关键词兜底 + 多标的提取）──
+def test_extract_multi_symbols_two_codes():
+    """两个 6 位代码（含对比词）→ 去重保序返回两个候选。"""
+    assert _extract_multi_symbols("600519 vs 000858 哪个强") == ["600519", "000858"]
+
+
+def test_extract_multi_symbols_dedup_and_insufficient():
+    """去重；少于 2 个候选 → 空列表（不短路空 symbols）。"""
+    assert _extract_multi_symbols("600519 和 600519") == []
+    assert _extract_multi_symbols("茅台和五粮液哪个强") == []
+
+
+def test_route_by_keyword_fallback_compare_stocks():
+    """对比词 + 两个代码 → compare_stocks(symbols=[...])。"""
+    call = route_by_keyword_fallback("600519 vs 000858 哪个强")
+    assert call is not None
+    assert call.skill_name == "compare_stocks"
+    assert call.args == {"symbols": ["600519", "000858"]}
+
+
+def test_route_by_keyword_fallback_compare_without_symbols_falls_through():
+    """对比词命中但 <2 个标的 → 跳过 compare 词条，落默认 report_lookup（不短路空 symbols）。"""
+    call = route_by_keyword_fallback("茅台和五粮液哪个强")
+    assert call is not None
+    assert call.skill_name != "compare_stocks"
