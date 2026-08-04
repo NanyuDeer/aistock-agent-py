@@ -1247,6 +1247,9 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                     logger.warning("qa_router.fallback.goals_failed", exc_info=True)
         # 关键词兜底
         fallback_call = route_by_keyword_fallback(message)
+        # D37（P7+P8）：区分「关键词兜底无匹配」与「个股缺码解析失败」——
+        # 前者是能力型缺口 → general gap 模式；后者保持既有澄清路径。
+        keyword_miss = fallback_call is None
         # 名称解析（D36）：个股类缺代码 / 默认 report_lookup 的纯名称问句 → 先解析再判定
         if fallback_call is not None:
             needs_resolve = (
@@ -1275,6 +1278,29 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         # 个股意图但缺失 6 位代码（且名称解析失败）：不执行空参 Skill，
         # 写澄清状态让 synth_answer 短路
         if fallback_call is None:
+            # D37：能力型缺口（无关键词命中、无个股名称候选、或报告类问句）→
+            # general/Tavily 兜底，不再无脑澄清"请提供股票代码"（答非所问）。
+            # 用户拍板：仅确定性缺口；个股缺码澄清路径保持不变。
+            is_capability_gap = keyword_miss and (
+                _extract_stock_name_candidate(message) is None
+                or _match_keywords(message, ("晨报", "复盘", "报告", "说了什么"))
+            )
+            if is_capability_gap:
+                logger.info("qa_router.fallback.gap", reason="capability_gap")
+                metrics.record_chat_qa_latency(
+                    "qa_router", int((time.monotonic() - start) * 1000)
+                )
+                return {
+                    "goal": InsightGoal(
+                        question=message,
+                        intent="report_lookup",
+                        constraints={"router_fallback": "true", "gap": "true"},
+                    ),
+                    "plan": "direct",
+                    "skill_calls": [],
+                    "complexity": "light",
+                    "general_source": "gap",
+                }
             goal = InsightGoal(
                 question=message,
                 intent="report_lookup",
