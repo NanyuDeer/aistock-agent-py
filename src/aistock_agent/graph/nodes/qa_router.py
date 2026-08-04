@@ -298,6 +298,65 @@ def _extract_multi_symbols(message: str) -> list[str]:
     return found if len(found) >= 2 else []
 
 
+# P9（线 1 Task 7）：纠错否定强否定词（用户拍板：仅强否定 + 有历史才触发）
+_NEGATION_CORRECTION_KEYWORDS = ("不是", "我说的是", "错了", "改一下", "不对", "其实是")
+
+
+async def _apply_negation_correction(
+    messages: list[Any], message: str
+) -> dict[str, Any] | None:
+    """多轮纠错否定：命中返回短路路由 dict，否则 None。
+
+    触发条件（用户拍板）：强否定词 + 消息历史上一轮存在可替换标的。
+    行为：提取当前消息中的新标的（6 位代码 / 指数名 / 名称 resolve），
+    复用上一轮 user 消息的意图 skill（_infer_stock_skill），构造短路路由。
+    """
+    if not _match_keywords(message, _NEGATION_CORRECTION_KEYWORDS):
+        return None
+
+    # 新标的：当前消息中显式代码 > 指数名 > 名称 resolve
+    symbols = _extract_multi_symbols(message)
+    new_symbol = symbols[0] if symbols else None
+    index_name = _match_index_name(message)
+    if new_symbol is None and index_name is not None:
+        new_symbol = index_name  # 指数名作为标的目标（约束保留语义由下游 skill 处理）
+    if new_symbol is None:
+        candidate = _extract_stock_name_candidate(message)
+        if candidate is not None:
+            new_symbol = await resolve_symbol(candidate)
+    if new_symbol is None:
+        return None  # 新标的不明确 → 不纠错，交既有路由
+
+    # 上一轮 user 消息 → 意图 skill（个股类；指数/其他非个股意图不纠错标的）
+    prev_message = extract_last_human_message(list(messages)[:-1]) if len(messages) >= 3 else ""
+    prev_skill = _infer_stock_skill(prev_message) if prev_message else "stock_snapshot"
+    if prev_skill not in _STOCK_SKILLS:
+        return None  # 上轮非个股意图 → 不纠错
+
+    args: dict[str, Any] = {"symbol": new_symbol}
+    if prev_skill == "stock_news":
+        args["limit"] = 10
+    constraints: dict[str, str] = {"negation_correction": "true"}
+    symbols_out: list[str] = []
+    if index_name:
+        constraints["index_name"] = index_name
+    else:
+        symbols_out = [str(new_symbol)]
+    goal = InsightGoal(
+        question=message,
+        intent=prev_skill,  # type: ignore[arg-type]
+        symbols=symbols_out,
+        constraints=constraints,
+    )
+    logger.info("qa_router.correction", new_symbol=new_symbol, prev_skill=prev_skill)
+    return {
+        "goal": goal,
+        "plan": "direct",
+        "skill_calls": [SkillCall(skill_name=prev_skill, args=args)],  # type: ignore[arg-type]
+        "complexity": "light",
+    }
+
+
 def _is_valid_symbol_arg(symbol: object) -> bool:
     return isinstance(symbol, str) and symbol.isdigit() and len(symbol) == 6
 
@@ -950,6 +1009,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         logger.info("qa_router.guardrail.compliance")
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, COMPLIANCE_REPLY, "compliance")
+
+    # ── P9 纠错否定（线 1 Task 7）：强否定词 + 历史标的替换，优先于常规闸门 ──
+    correction = await _apply_negation_correction(list(messages), message)
+    if correction is not None:
+        logger.info("qa_router.guardrail.negation_correction")
+        metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+        return correction
 
     # ── 闸门 0.5：寒暄/能力询问（D32）──
     if _match_keywords(message, _GREETING_KEYWORDS):
