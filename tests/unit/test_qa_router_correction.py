@@ -66,3 +66,53 @@ async def test_no_history_does_not_correct() -> None:
     ), patch("aistock_agent.graph.nodes.qa_router.get_quick_think"):
         out = await qa_router_node(state)
     assert out.get("general_source") is None  # 交既有路由，不特殊处理
+
+
+# ── 以下为 T7 review 修复后新增的真实路径测试（不 mock _apply_negation_correction）──
+
+
+@pytest.mark.asyncio
+async def test_real_negation_swap_name_symbol() -> None:
+    # 旗舰示例："不是茅台，是五粮液" → 名称路径取句末"五粮液" → resolve 000858
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(side_effect=lambda name: "000858" if name == "五粮液" else None),
+    ), patch("aistock_agent.graph.nodes.qa_router.get_quick_think") as llm_mock:
+        out = await qa_router_node(_state("茅台怎么样", "不是茅台，是五粮液"))
+    # 纠错短路：无 general 信号、skill 直达新标的、goal 标记纠错
+    assert out.get("general_source") is None
+    assert out["skill_calls"][0].args["symbol"] == "000858"
+    assert out["goal"].symbols == ["000858"]
+    assert out["goal"].constraints.get("negation_correction") == "true"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_real_negation_single_code_no_resolve() -> None:
+    # 显式单个 6 位代码直接作新标的（FIX①a），不调 resolve_symbol
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(),
+    ) as resolve_mock, patch("aistock_agent.graph.nodes.qa_router.get_quick_think") as llm_mock:
+        out = await qa_router_node(_state("茅台怎么样", "不是茅台，是000858"))
+    assert out["skill_calls"][0].args["symbol"] == "000858"
+    resolve_mock.assert_not_awaited()
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_real_negation_no_history_no_correction() -> None:
+    # 无历史（仅一轮）→ 纠错短路被绕过（FIX②），走既有路由（个股名解析失败 → 澄清）
+    from langchain_core.messages import HumanMessage
+
+    state: QuestionState = {"messages": [HumanMessage(content="错了，看五粮液")]}  # type: ignore[typeddict-item]
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value=None),
+    ), patch("aistock_agent.graph.nodes.qa_router.get_quick_think") as llm_mock:
+        out = await qa_router_node(state)
+    assert out.get("general_source") is None
+    assert out["skill_calls"] == []
+    # 未触发纠错：goal 无 negation_correction 约束
+    assert out["goal"].constraints.get("negation_correction") is None
+    llm_mock.assert_not_called()

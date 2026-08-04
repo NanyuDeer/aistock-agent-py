@@ -313,23 +313,36 @@ async def _apply_negation_correction(
     """
     if not _match_keywords(message, _NEGATION_CORRECTION_KEYWORDS):
         return None
+    # 用户拍板：无历史（上一轮无 user 消息）→ 不触发纠错，交既有路由
+    prev_message = extract_last_human_message(list(messages)[:-1]) if len(messages) >= 3 else ""
+    if not prev_message:
+        return None
 
-    # 新标的：当前消息中显式代码 > 指数名 > 名称 resolve
+    # 新标的：当前消息中显式代码（单个或 ≥2 个）> 指数名 > 名称 resolve
     symbols = _extract_multi_symbols(message)
-    new_symbol = symbols[0] if symbols else None
+    new_symbol = _extract_stock_symbol(message) or (symbols[0] if symbols else None)
     index_name = _match_index_name(message)
     if new_symbol is None and index_name is not None:
         new_symbol = index_name  # 指数名作为标的目标（约束保留语义由下游 skill 处理）
     if new_symbol is None:
-        candidate = _extract_stock_name_candidate(message)
+        # 否定纠错中新标的多在句末：先剥否定词/"是"/口语词，再取最后一个中文段
+        # （"不是茅台，是五粮液" → "茅台，五粮液" → 末段"五粮液"；不能用
+        # _extract_stock_name_candidate 的 max(len) 首段，否则取到被否定的旧标的）
+        cleaned = message
+        for kw in _NEGATION_CORRECTION_KEYWORDS:
+            cleaned = cleaned.replace(kw, "")
+        cleaned = cleaned.replace("是", "")
+        for w in _STOPWORDS_SORTED:
+            cleaned = cleaned.replace(w, "")
+        runs = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
+        candidate = runs[-1] if runs else None  # 否定纠错中新标的多在句末
         if candidate is not None:
             new_symbol = await resolve_symbol(candidate)
     if new_symbol is None:
         return None  # 新标的不明确 → 不纠错，交既有路由
 
     # 上一轮 user 消息 → 意图 skill（个股类；指数/其他非个股意图不纠错标的）
-    prev_message = extract_last_human_message(list(messages)[:-1]) if len(messages) >= 3 else ""
-    prev_skill = _infer_stock_skill(prev_message) if prev_message else "stock_snapshot"
+    prev_skill = _infer_stock_skill(prev_message)
     if prev_skill not in _STOCK_SKILLS:
         return None  # 上轮非个股意图 → 不纠错
 
