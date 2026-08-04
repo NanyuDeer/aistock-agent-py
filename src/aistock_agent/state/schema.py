@@ -10,26 +10,6 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 
-class AdvisorSubquestionTrace(TypedDict):
-    """单个投顾子问题的持久化来源与降级状态。"""
-
-    intent: str
-    reports: list[dict[str, object]]
-    sources: list[dict[str, object]]
-    as_of: str | None
-    missing_sources: list[str]
-    degraded: bool
-
-
-class AdvisorTrace(TypedDict):
-    """投顾回答的可追溯状态，所有对话传输通道原样透传。"""
-
-    schema_version: str
-    subquestions: list[AdvisorSubquestionTrace]
-    missing_sources: list[str]
-    degraded: bool
-
-
 class AgentState(TypedDict):
     """LangGraph 全局状态
 
