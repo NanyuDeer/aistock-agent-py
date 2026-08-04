@@ -20,7 +20,7 @@ from aistock_agent.agents.workers.review import validate_trace_against_snapshot
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.schemas.market_trace import ReviewArtifact
 from aistock_agent.services.cache import get_cached_review
-from aistock_agent.services.market_trace_qa import load_validated_trace
+from aistock_agent.services.trace_loader import load_validated_trace
 from aistock_agent.skills.base import skill
 
 logger = structlog.get_logger()

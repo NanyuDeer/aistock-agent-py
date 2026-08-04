@@ -25,7 +25,6 @@ from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
-from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
 from aistock_agent.services.http_client import HttpClientPool
@@ -636,7 +635,8 @@ async def trigger_broadcast_chain(
     start = time.time()
 
     def _make_state(intent: str | None = None) -> dict[str, object]:
-        """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，与 09:00 调度任务一致）"""
+        """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，
+        与 09:00 调度任务一致）"""
         return {
             "messages": [],
             "session_id": f"manual_broadcast_{today}",
@@ -1014,28 +1014,6 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     if r:
         return {"code": 200, "data": r}
     return {"code": 404, "message": "报告未生成", "data": None}
-
-
-# ── 市场复盘问答 ─────────────────────────────────────────────────
-
-
-@router.post("/market-trace-qa/message")
-async def market_trace_qa_message(
-    req: MarketTraceQaRequest,
-    _: None = Depends(verify_internal_token),
-) -> MarketTraceQaResponse:
-    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
-
-    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
-    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
-    """
-    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
-
-    return await answer_market_trace_qa(
-        message=req.message,
-        report_date=req.report_date,
-        session_id=req.session_id,
-    )
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────

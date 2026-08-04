@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 @dataclass(frozen=True)
 class ReviewReportReadResult:
-    """市场复盘工件读取结果，仅供 market_trace_qa 使用。"""
+    """市场复盘工件读取结果，仅供 trace_loader 使用。"""
 
     status: Literal["found", "not_found", "unavailable"]
     report: dict[str, object] | None = None
