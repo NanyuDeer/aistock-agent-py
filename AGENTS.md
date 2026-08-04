@@ -25,7 +25,6 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
-| 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
@@ -50,10 +49,9 @@ START → supervisor(quick_think, 意图路由)
   ├── intent="hot_burst"     → hot_burst_agent（deep_think）
   ├── intent="alert"         → alert_agent（deep_think）
   ├── intent="broadcast"     → broadcast_agent（deep_think）
-  ├── intent="ai_advisor"    → ai_advisor_agent（deep_think）
   ├── intent="trend_score"   → trend_score_agent（deep_think）
   ├── intent="general"       → general_agent（quick_think）
-  └── [user触发, intent≠general/broadcast] → ai_advisor_agent（DB报告→整理回复）
+  └── [user触发, 未匹配 specialist intent] → general_agent（quick_think 兜底）
         │
         ▼
        END
@@ -84,8 +82,6 @@ START → supervisor(quick_think, 意图路由)
        ├──→ event_analyst：事件传导链路分析（v3模块化+双层输出）
        │
        ├──→ stock_analyst：个股深度分析
-       │
-       ├──→ ai_advisor_agent：智能投顾（DB报告→整理回复）
        │
        └──→ broadcast_agent：播报生成
               │
@@ -239,7 +235,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
@@ -397,7 +393,6 @@ pm2 logs aistock-agent --lines 50
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
 | alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
-| ai_advisor | `{"final_response": "智能投顾暂时不可用，请稍后重试"}` |
 | broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
 | trend_score | `{"final_response": "趋势股评分分析暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
@@ -413,7 +408,7 @@ pm2 logs aistock-agent --lines 50
 **为什么要做双层输出？（两个核心原因）**
 
 1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
-2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
 
 双层结构定义如下：
 
@@ -431,12 +426,11 @@ content = {
 ```
 
 **消费方**：
-- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
-- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话；`podcast_brief` 缺失时降级读取 `display_report`（通过 `extract_display_report`，截取前 500 字）
 
 **兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
 
 **LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
 
-**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）、ai_advisor（尹辰）
+**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
