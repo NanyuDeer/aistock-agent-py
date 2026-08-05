@@ -153,6 +153,37 @@ def _append_missing(missing_fields: list[str], field: str) -> None:
         missing_fields.append(field)
 
 
+def _log_telegraph_response(
+    telegraph_data: object, report_date: str, *, snapshot_kind: str
+) -> None:
+    """记录 telegraph 接口返回的条目数，便于定位 cls_news 缺失根因。
+
+    telegraph 接口返回 ``{date, items, total, degraded}``（app-api 侧），
+    也可能返回 ``{code, data}`` 包装（node_api 透传）。兼容两种结构。
+    """
+    if not isinstance(telegraph_data, dict):
+        logger.info(
+            "cls_telegraph_response",
+            snapshot_kind=snapshot_kind,
+            report_date=report_date,
+            item_count=0,
+            raw_type=type(telegraph_data).__name__,
+        )
+        return
+    items = telegraph_data.get("items")
+    if not isinstance(items, list) and isinstance(telegraph_data.get("data"), dict):
+        items = telegraph_data["data"].get("items")  # type: ignore[union-attr]
+    item_count = len(items) if isinstance(items, list) else 0
+    logger.info(
+        "cls_telegraph_response",
+        snapshot_kind=snapshot_kind,
+        report_date=report_date,
+        item_count=item_count,
+        total=telegraph_data.get("total") if isinstance(telegraph_data, dict) else None,
+        degraded=telegraph_data.get("degraded") if isinstance(telegraph_data, dict) else None,
+    )
+
+
 def _quick_availability(close_data: dict[str, object]) -> dict[str, DataAvailability]:
     """Parse Node quick availability without trusting malformed metadata."""
     raw_availability = close_data.get("quick_data_availability")
@@ -502,6 +533,18 @@ def _normalize_aggregate_facts(
             ("large_and_extra_large_net_yuan",),
         )
     )
+    if not valid_main_force:
+        # 诊断日志：定位 main_force 缺失的具体原因（quick 快照下 Tushare 数据未就绪属预期）
+        logger.info(
+            "main_force_invalid",
+            is_quick=is_quick,
+            availability_state=main_force_availability.state if main_force_availability else None,
+            availability_reason=main_force_availability.reason if main_force_availability else None,
+            has_dict=isinstance(main_force_dict, dict),
+            value=main_force_dict.get("large_and_extra_large_net_yuan")
+            if isinstance(main_force_dict, dict)
+            else None,
+        )
     if valid_main_force and isinstance(main_force_dict, dict):
         sources["MAIN_FORCE_ALL"] = SourceRecord(
             source_id="MAIN_FORCE_ALL",
@@ -643,6 +686,8 @@ def _normalize_news_facts(
 
     news_counter = 0
     causal_ready_count = 0
+    skipped_future = 0  # occurred_at > captured_at（未来数据）
+    skipped_no_time = 0  # occurred_at 解析失败
     for item in news_items:
         # 时间：telegraph 优先用 timestamp（unix 秒）；否则 time（上海无时区，按 UTC+8 解析）
         raw_ts = item.get("timestamp")
@@ -650,8 +695,10 @@ def _normalize_news_facts(
         if occurred_at is None:
             occurred_at = _parse_news_datetime(item.get("time", item.get("ctime", "")))
         if occurred_at is not None and occurred_at > captured_at:
+            skipped_future += 1
             continue
         if occurred_at is None:
+            skipped_no_time += 1
             continue
         # URL：latest 用 link 字段，telegraph 无 URL；同时兼容旧 url 字段。
         # telegraph 无 URL 时用财联社详情页兜底，保证可溯源（否则被判 invalid_for_causality）。
@@ -677,6 +724,12 @@ def _normalize_news_facts(
             causal_ready_count += 1
     if fetch_error is not None:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_fetch_error",
+            source_kind=source_kind,
+            raw_item_count=len(news_items),
+            error_class=type(fetch_error).__name__,
+        )
         return SourceCollectionStatus(
             state="unavailable",
             provider="cls",
@@ -684,17 +737,40 @@ def _normalize_news_facts(
         )
     if not news_items:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_empty",
+            source_kind=source_kind,
+            raw_item_count=0,
+        )
         return SourceCollectionStatus(
             state="empty", provider="cls", reason="provider_returned_no_items"
         )
     if causal_ready_count == 0:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_invalid_for_causality",
+            source_kind=source_kind,
+            raw_item_count=len(news_items),
+            kept_count=news_counter,
+            skipped_future=skipped_future,
+            skipped_no_time=skipped_no_time,
+            causal_ready_count=0,
+        )
         return SourceCollectionStatus(
             state="invalid_for_causality",
             provider="cls",
             item_count=len(news_items),
             reason="items_missing_url_or_occurred_at",
         )
+    logger.info(
+        "cls_news_available",
+        source_kind=source_kind,
+        raw_item_count=len(news_items),
+        kept_count=news_counter,
+        skipped_future=skipped_future,
+        skipped_no_time=skipped_no_time,
+        causal_ready_count=causal_ready_count,
+    )
     return SourceCollectionStatus(state="available", provider="cls", item_count=news_counter)
 
 
@@ -879,6 +955,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         if telegraph_data is not None:
             news_data = telegraph_data
             news_source_kind = "telegraph"
+            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="full")
     except Exception as e:
         logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e
@@ -1065,6 +1142,7 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         if telegraph_data is not None:
             news_data = telegraph_data
             news_source_kind = "telegraph"
+            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="quick")
     except Exception as e:
         logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e

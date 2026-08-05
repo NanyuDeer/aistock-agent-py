@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [master] 2026-08-05 — cls_news/main_force 缺失诊断日志（agent-py）
+
+**开发者**: NanyuDeer
+
+### 新增
+- `services/market_trace_snapshot.py` `_normalize_news_facts`：新增三种缺失场景结构化日志 `cls_news_missing_fetch_error` / `cls_news_missing_empty` / `cls_news_missing_invalid_for_causality`（含 raw_item_count、kept_count、skipped_future、skipped_no_time），成功时输出 `cls_news_available`
+- `services/market_trace_snapshot.py` `_normalize_aggregate_facts`：新增 `main_force_invalid` 日志（is_quick、availability_state、availability_reason、value），区分 quick 快照预期缺失（Tushare 未就绪）与异常缺失
+- `services/market_trace_snapshot.py` 新增 `_log_telegraph_response` 辅助函数：记录 telegraph 接口返回 item_count、total、degraded（兼容 `{date,items,total}` 与 `{code,data}` 两种结构），full/quick 两条路径均接入
+
+### 说明
+- 目的：解决 grep cls_news|main_force 无输出问题，后续运行可在 pm2 日志中定位确切根因
+
+---
+
 ## [master] 2026-08-05 — 测试同步：event_conduction 返回结构变更（PR #52 回归修复）
 
 **开发者**: NanyuDeer
