@@ -13,7 +13,6 @@ import structlog
 from redis.typing import EncodableT
 
 from aistock_agent.config import settings
-from aistock_agent.services.insight_client import InsightNodeClient
 
 STREAM = "watchlist-insight.jobs"
 DLQ_STREAM = "watchlist-insight.jobs.dlq"
@@ -55,7 +54,7 @@ class InsightWorkerOutcome:
 
 
 class InsightWorkerProtocol(Protocol):
-    """insight worker 接口（Task 11 接入真实 worker，本任务以占位可注入）。"""
+    """insight worker 接口（真实实现见 workers.insight_worker.InsightWorker）。"""
 
     async def report_job(
         self, job_id: str, status: str, error: str | None = None
@@ -64,32 +63,6 @@ class InsightWorkerProtocol(Protocol):
     async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome: ...
 
     async def write_result(self, result: object) -> None: ...
-
-
-class InsightWorker:
-    """归因 worker 占位实现 —— Task 11 替换为真实 worker。
-
-    本任务仅打通消费骨架与 Node 状态上报（report_job 委托 InsightNodeClient）；
-    analyze / write_result 尚未落地，显式抛错避免把消息误判为已完成。
-    """
-
-    def __init__(self, node_client: InsightNodeClient | None = None) -> None:
-        self._node_client = node_client or InsightNodeClient()
-
-    async def report_job(
-        self, job_id: str, status: str, error: str | None = None
-    ) -> dict[str, object] | None:
-        return await self._node_client.report_job(job_id, status, error)
-
-    async def analyze(
-        self, event_id: str, analysis_version: str
-    ) -> InsightWorkerOutcome:
-        raise NotImplementedError(
-            f"insight worker analyze 未实现（event_id={event_id}）— Task 11 接入"
-        )
-
-    async def write_result(self, result: object) -> None:
-        raise NotImplementedError("insight worker write_result 未实现 — Task 11 接入")
 
 
 class InsightConsumer:

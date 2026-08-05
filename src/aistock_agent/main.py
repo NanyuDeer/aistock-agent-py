@@ -100,15 +100,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 stock_trace_redis = None
 
     # 启动自选股洞察 Consumer（集成模式）：独立 aioredis 连接（insight_redis_url, db=3），
-    # 不复用 RedisPool 单例（db=1）。worker 当前为占位实现，Task 11 接入真实归因 worker。
+    # 不复用 RedisPool 单例（db=1）。worker 为真实归因 worker（Task 11，替换占位实现）。
     insight_consumer_task: asyncio.Task[None] | None = None
     insight_redis: aioredis.Redis | None = None
     if settings.insight_consumer_enabled:
         try:
-            from aistock_agent.workers.insight_consumer import (
-                InsightConsumer,
-                InsightWorker,
-            )
+            from aistock_agent.workers.insight_consumer import InsightConsumer
+            from aistock_agent.workers.insight_worker import InsightWorker
 
             insight_redis = aioredis.from_url(  # type: ignore[no-untyped-call]
                 settings.insight_redis_url,
