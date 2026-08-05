@@ -2,6 +2,56 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-05 — ChatAgent P10 线 2 用户计费（token_usage）+ P11 线 3 后端卡片（cards）
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\chat-agent-roadmap.md` §1 P10/P11 行
+
+### P10 线 2（用户维度计费，billing）
+- `services/token_usage.py`（新增）：contextvar 累加器 `TokenUsageAccumulator`/`TokenUsageContext` + 模块级 `reset_token_usage`/`get_token_usage`/`record_token_usage`；contextvar 随 `asyncio.create_task` 继承（`TokenUsageCallback` 挂在 ChatOpenAI callbacks= 无法访问节点 state，ws 后台图任务与节点内 LLM 调用同 context 副本）；`observability/callback.py` `on_llm_end` 在 record_llm_tokens 后追加 record_token_usage（非 chat 场景零副作用）
+- `graph/nodes/synth_answer.py`：原节点改名 `_synth_answer_node_core`，新增包装 `synth_answer_node` 统一附加 `result["token_usage"] = get_token_usage()`（与 cards 汇总块分居两层，合并友好）
+- `api/ws.py`：入口 `reset_token_usage()` 按轮重置；on_chain_end 一次性捕获 token_usage + cards；`_drain_reasoning_tasks` 后、DONE 前**落库（选项 A）**——user_id 非空且 token_usage 非空 → `node_api.save_token_usage`（try/except + warning 不阻断 DONE）；DONE 负载新增 `token_usage` + `cards`（None 默认）
+- `api/routes.py`：`chat_message` / `chat_stream_messages` 入口 `reset_token_usage()`；SSE DONE（`_stream_messages`）从 final_state.values 附带 token_usage + cards（仅展示不落库）；HTTP 非流式路径只重置不消费
+- `services/data_client.py`：`save_token_usage(*, user_id, session_id, prompt_tokens, completion_tokens, total_tokens, question=None)` → `POST /internal/usage/records`（app-api）
+
+### P11 线 3（后端卡片结构化，cards）
+- skills raw 结构化字段：stock_snapshot `raw["quote"]`（`_QUOTE_FIELD_MAP`）、capital_flow `raw["flow"]`（`_FLOW_FIELD_MAP`，flow_5d 恒 []）、market_snapshot `raw["a_share_card"]`（`_build_a_share_card`，仅 scope 含 a_share）、compare_stocks `raw["parsed"]`（available True/False 条目）；get_quote/get_capital_flow TEXT 输出冻结不变
+- `graph/nodes/synth_answer.py` `_synth_answer_node_core` 每个 return 带 cards：no_goal/澄清/闸门/异常 → None；deep → `_build_deep_card`；LLM 成功与 `_synth_multi_goal` → `_build_cards`（`_CARD_HANDLERS` 按 skill_name 分派 + 逐卡片 try-except 跳过）；包装 `synth_answer_node` 不动
+- 契约：`schemas/chat_contract.py` `ChatCard`（card_type Literal 5 值 + title + data，extra="forbid"）+ `QuestionState.cards`/`token_usage`（B-T1 定义，P11/P10 共享）
+
+### 测试
+- 新增：`test_token_usage` / `test_data_client_save_token_usage` / `test_synth_answer_token_usage` / `test_ws_token_usage_record` / `test_routes_sse_done_token_usage`（P10 线 2）；`test_chat_card_contract` / `test_stock_snapshot_raw` / `test_capital_flow_raw` / `test_market_snapshot_card` / `test_compare_stocks_parsed` / `test_synth_answer_cards`（P11 线 3）
+- 适配：`test_ws_chat_replacement` / `test_ws_chat`
+
+### 文档
+- AGENTS.md 补 CHAT QA P10+P11 段；CHANGELOG.md 本条目；project_memory.md 经验教训 #30
+
+### 验证
+- Commits：P10 线 2 `d3d772c`/`114ee07`/`da26a81`/`0e3b5b4`/`42a6524`/`d98692a`/`9142de3`；P11 线 3 `fcfcf5a`/`5f9d6ab`/`4c82bc8`/`fe56222`/`2b1ec00`/`83fea5d`；线间 merge `4d42fe7`
+
+---
+
+## [changer] 2026-08-05 — ChatAgent P5-fix 验收补丁（对比问句短路 / 名称候选净化 / 多轮指代兜底）
+
+**开发者**: Aria
+
+计划：`D:\ai_stock_app\docs\superpowers\plans\chat-agent-roadmap.md` §1 P5-fix 行 / §4 问题 8/11/14
+
+### 修复
+- 问题 8（对比问句被闸门 2 澄清拦截）：`_STOCK_NAME_STOPWORDS` 补对比口语词（哪个/更好/更强/比较/对比）；新增 `_COMPARE_KEYWORDS` 增强对比词表 + `_extract_multi_name_candidates`（按"和/与/还是/vs"分隔符切分逐段提取名称）+ async `_resolve_multi_symbols`（过滤非 6 位代码候选）；**对比闸门 2.5 独立于闸门 2 且在其之前**（含代码对比句"600519 和五粮液哪个更好"短路 compare_stocks，避免落 LLM flaky）；`route_by_keyword_fallback` 对比分支仅接受纯代码
+- 问题 11（候选名被口语词污染 resolve 404）：停用词补意图词/连接词（新闻/资讯/消息/公告/有/是/说/它/这/那，与 `_infer_stock_skill` 对齐）
+- 问题 14（多轮指代失效）：qa_router LLM 失败路径新增多轮指代兜底——`len(messages)>=3`（有上一轮）+ 当前消息含指代词（它/这/那/该/其/刚才/上次/这只/那只）时从上一轮 resolve symbol 复用（`_infer_stock_skill` 推断意图，`multiturn_ref` 约束标记），不落澄清；守卫防"帮我推荐股票"等误指代
+
+### 测试
+- 新增 `tests/unit/test_qa_router_fix.py` 12 项（对比闸门短路/名称净化/多轮兜底 3 守卫：复用/无标的守卫/首轮守卫）；qa_router 全量 137 passed；ruff 0 errors
+- WS 冒烟（真实后端）：宁德时代新闻 / 茅台五粮液对比 / 3 组多轮指代全部 clarified=false
+
+### 文档
+- AGENTS.md 补充 CHAT QA P5-fix 段（含"qa_router 单测必须 mock LLM 防 flaky"测试注意）
+
+---
+
 ## [changer] 2026-08-04 — ChatAgent P6 退役清理（ai_advisor / market-trace-qa / advisor_trace）
 
 **开发者**: Aria

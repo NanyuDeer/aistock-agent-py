@@ -40,11 +40,13 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     facts: list[str] = []
     sources: list[ChatSource] = []
     failed: list[str] = []
-    parsed: list[tuple[str, str, float]] = []
+    parsed: list[dict[str, object]] = []
 
     for symbol, raw in zip(symbols, results, strict=True):
         if isinstance(raw, BaseException) or any(m in str(raw) for m in _EMPTY_MARKERS):
             failed.append(symbol)
+            # P11（线 3）：失败标的标 available=False，无价格字段（spec §3.1）
+            parsed.append({"name": symbol, "code": symbol, "available": False})
             facts.append(f"{symbol}：数据暂不可用")
             continue
         text = str(raw)
@@ -62,16 +64,26 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         )
         if m:
             try:
-                parsed.append((name, symbol, float(m.group("pct"))))
+                parsed.append({
+                    "name": name,
+                    "code": symbol,
+                    "price": float(m.group("price")),
+                    "change_pct": float(m.group("pct")),
+                    "available": True,
+                })
             except ValueError:
-                pass
+                pass  # price/pct 文本非常规数值 → 不进入 parsed（与旧逻辑 float 失败跳过一致）
 
-    if len(parsed) >= 2:
-        best = max(parsed, key=lambda x: x[2])
-        worst = min(parsed, key=lambda x: x[2])
+    success = [
+        p for p in parsed
+        if p.get("available") is True and isinstance(p.get("change_pct"), int | float)
+    ]
+    if len(success) >= 2:
+        best = max(success, key=lambda p: float(p["change_pct"]))
+        worst = min(success, key=lambda p: float(p["change_pct"]))
         facts.append(
-            f"对比结论：{best[0]} 涨幅最高（{best[2]:+.2f}%），"
-            f"{worst[0]} 涨幅最低（{worst[2]:+.2f}%）"
+            f"对比结论：{best['name']} 涨幅最高（{best['change_pct']:+.2f}%），"
+            f"{worst['name']} 涨幅最低（{worst['change_pct']:+.2f}%）"
         )
 
     degraded = bool(failed)
@@ -83,5 +95,6 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         degraded=degraded,
         degraded_reason="部分标的行情不可用" if degraded else None,
         skill_name="compare_stocks",
-        raw={"quotes": [f for f in facts], "compared": symbols, "failed": failed},
+        raw={"quotes": [f for f in facts], "compared": symbols, "failed": failed,
+             "parsed": parsed},
     )

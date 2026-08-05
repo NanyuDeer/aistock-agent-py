@@ -24,7 +24,6 @@ from aistock_agent.graph.nodes.qa_router import (
 from aistock_agent.prompts.general.system import (
     CAPABILITY_REPLY,
     COMPLIANCE_REPLY,
-    EDUCATION_REPLY,
 )
 from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall, SubGoal
 from aistock_agent.state.chat_schema import QuestionState
@@ -474,15 +473,17 @@ async def test_guardrail_greeting_short_circuits() -> None:
 
 @pytest.mark.asyncio
 async def test_guardrail_education_short_circuits() -> None:
-    """科普问句（"什么是市盈率"）→ 科普引导话术，零 LLM、不兜底 report_lookup。"""
+    """科普问句（"什么是市盈率"）→ science 信号（general 动态回答），零 LLM、不兜底。"""
     with patch(
         "aistock_agent.graph.nodes.qa_router.get_quick_think",
         side_effect=AssertionError("LLM should not be called on education gate"),
     ):
         result = await qa_router_node(_state("什么是市盈率"))
-    assert result["final_response"] == EDUCATION_REPLY
+    assert result["general_source"] == "science"
     assert result["skill_calls"] == []
     assert result["goal"].constraints.get("guardrail") == "education"
+    assert result["complexity"] == "light"
+    assert "final_response" not in result
 
 
 @pytest.mark.asyncio

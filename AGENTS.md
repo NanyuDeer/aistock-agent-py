@@ -180,6 +180,35 @@ START → supervisor(quick_think, 意图路由)
 - **§2.6 指数/个股消歧硬边界（单一事实源）**：指数语义**只由指数名触发**（沪指/上证指数/深成指/创业板指/科创50/沪深300 → index_snapshot）；裸 6 位代码（000001）恒为个股语义（平安银行）；指数名+代码并存（"沪指000001"）指数名优先；恒生/大盘/全市场词维持 `market_snapshot`（不变）
 - **P4 遗留 3 项**：闸门 1/2 单意图预测附加收紧为 `_STRONG_PREDICT_KEYWORDS = ("会涨","会跌","预测","展望","后市","未来")`（弱词仅闸门 4 候选注入）；兜底 validate+predict 同标的只发一条取数 call（`seen_calls` 去重）；兜底 trace 维度改走 `trace_lookup`
 
+### CHAT QA P7+P8 合并 + P9 纠错否定（2026-08-04，线 1）
+
+- **general 图外切换模式（复用 escalate 先例）**：`qa_router` conditional 三出口（escalate / skill_executor / general_fallback）→ `general_fallback` 节点 → synth_answer；`general_source` 单轮 transient 信号（science/gap，ws.py/routes.py 按轮归零）
+- **D32 科普升级**：education gate 0.5b 命中科普词不再固定话术，置 `general_source="science"` → `agents/general/chat.py` run_science 单次 quick_think 动态回答；产品内部概念（市场主线/风险提示）不纳入（防误伤 compose）
+- **D37 能力缺口**：LLM 失败路径 keyword_miss 且非个股缺码澄清 → `general_source="gap"` → run_gap（ReAct + tavily_finance_search）+ `skill-requests.md` 标记（失败仅 warning）；个股缺码澄清路径不变
+- **P9 纠错否定**：强否定词（不是/我说的是/错了/改一下/不对/其实是）+ 上一轮有历史才触发；**无历史守卫必须前置**（无历史不触发）；新标的提取：显式代码 > 指数名 > 名称（剥否定词+是+停用词后取句末中文段）resolve
+- **降级**：双模式顶层 try-catch，返回规范降级文本（含"暂不可用"）不抛异常；WS/SSE reasoning label 与事件协议不变
+
+### CHAT QA P5-fix（2026-08-05）：对比问句短路 + 名称候选净化 + 前端会话持久化 + 多轮指代兜底
+
+- **问题 8（对比问句被闸门 2 澄清拦截）**：`_STOCK_NAME_STOPWORDS` 补对比口语词（哪个/更好/更强/比较/对比）；新增 `_COMPARE_KEYWORDS` 增强对比词表 + `_extract_multi_name_candidates`（按"和/与/还是/vs"分隔符切分逐段提取名称）+ async `_resolve_multi_symbols`（代码优先 + 中文名逐个 resolve，**过滤非 6 位代码候选**）；**对比闸门 2.5 独立于闸门 2 且在其之前**（含代码对比句"600519 和五粮液哪个更好"会跳过闸门 2，必须短路 compare_stocks 否则落 LLM flaky）；`route_by_keyword_fallback` 对比分支仅接受纯 6 位代码（同步兜底无法 resolve 中文名，交回 LLM/闸门 2.5）。注意：**"和/与"不进停用词**（由多标的切分处理，避免"贵州茅台宁德时代"粘连成单候选）
+- **问题 11（候选名被口语词污染 resolve 404）**：`_STOCK_NAME_STOPWORDS` 补意图词/连接词（新闻/资讯/消息/公告/有/是/说/它/这/那，与 `_infer_stock_skill` 意图词对齐）——"宁德时代最近有什么新闻" → 候选名"宁德时代" resolve 成功
+- **问题 14（多轮指代兜底，2026-08-05 前端复测补）**：`chatStore.setSessionId` + storage 持久化（`STORAGE_KEYS.CHAT_SESSION_ID`）+ `useChatStream` WS 路径首轮写回（前端 session_id 层）；**qa_router LLM 失败路径新增多轮指代兜底**——`len(messages)>=3`（有上一轮）且当前消息含指代词（它/这/那/该/其/刚才/上次/这只/那只）时，从上一轮 user 消息 resolve symbol 复用（`_infer_stock_skill` 推断意图，`multiturn_ref` 约束标记），不落澄清。**触发背景**：LLM 偶发输出非法 JSON（DeepSeek 非确定性）→ 关键词兜底解析不出当前消息名称 → 此前直接澄清"请提供 6 位代码"。守卫防"帮我推荐股票"等误指代
+- **测试注意**：时段敏感失败（test_chat_e2e_compose/test_chat_persist_followup/test_chat_escalate 等盘前 startswith 断言、AsyncMock coroutine 交互）为基线既有（git stash 已验证），与 P5-fix 无关；qa_router 单测必须 mock LLM（get_quick_think），否则真实 DeepSeek 偶发错乱导致 flaky（对比短路测试已稳定走闸门 2.5）
+
+### CHAT QA P10 线 2 + P11 线 3（2026-08-05）：token 计费采集 + 后端卡片结构化
+
+**P10 线 2（用户维度计费，billing）**：
+- **contextvar 采集层**：`services/token_usage.py`（新增）`TokenUsageAccumulator`/`TokenUsageContext` + 模块级 `reset_token_usage`/`get_token_usage`/`record_token_usage`。**为什么用 contextvar 而非 state 传参**：`TokenUsageCallback` 挂在 ChatOpenAI callbacks= 上（services/llm.py），回调层无法访问节点 state；contextvar 随 `asyncio.create_task` 继承（ws 后台图任务 `routes.py _run_graph_to_queue` 与节点内 LLM 调用发生在同一 context 副本），record 与读取天然对齐。`observability/callback.py` `on_llm_end` 在 record_llm_tokens 后追加 `record_token_usage`（非 chat 场景无读取方零副作用）
+- **synth_answer 收口**：原节点改名 `_synth_answer_node_core`，新增包装 `synth_answer_node`——core 任意 return 路径统一附加 `result["token_usage"] = get_token_usage()`（全 0/未采集为 None）；与 cards 汇总逻辑块（在 core 内）分居两层隔离，git 合并友好
+- **WS 计费落库（选项 A）**：ws.py 入口 `reset_token_usage()` 按轮重置；on_chain_end 一次性捕获 token_usage + cards；`_drain_reasoning_tasks` 后、发 DONE 前落库——仅 `user_id` 非空 **且** token_usage 非空时 `await node_api.save_token_usage(...)`（try/except + logger.warning，落库失败不阻断 DONE，"永不 500"）；DONE 负载新增 `token_usage` + `cards`（无则 None，null 兼容）
+- **HTTP/SSE 双通道**：routes.py `chat_message`（HTTP 非流式）+ `chat_stream_messages`（SSE）入口均 `reset_token_usage()` 按轮重置；SSE DONE（`_stream_messages`）从 final_state.values 附带 `token_usage` + `cards`（None 默认，仅展示不落库）；HTTP 非流式路径只重置不消费
+- **落库接口**：`NodeApiClient.save_token_usage(*, user_id, session_id, prompt_tokens, completion_tokens, total_tokens, question=None)` → `POST /internal/usage/records`（app-api）
+
+**P11 线 3（后端卡片结构化，cards）**：
+- **skills raw 结构化字段**：stock_snapshot `raw["quote"]`（`_QUOTE_FIELD_MAP` 中文键→英文键）、capital_flow `raw["flow"]`（`_FLOW_FIELD_MAP`，`flow_5d` 恒 []）、market_snapshot `raw["a_share_card"]`（`_build_a_share_card`，仅 scope 含 a_share 才写入）、compare_stocks `raw["parsed"]`（逐标的 `available` True/False 条目）；**get_quote/get_capital_flow 工具 TEXT 输出冻结不变**，结构化数据只在 raw（额外一次 /internal/quote、/internal/flow 取 dict）
+- **synth_answer cards 汇总**：`_synth_answer_node_core` 每个 return 都带 `cards`——no_goal/澄清/闸门短路/异常 → None；deep 分支 → `_build_deep_card(last_deep_report)`；LLM 成功与 `_synth_multi_goal` → `_build_cards(evidences)`（按 skill_name 经 `_CARD_HANDLERS` 分派 market_snapshot/stock_snapshot/capital_flow/compare_stocks，逐卡片 try-except 失败跳过该卡片，全部失败/无卡片化证据 → None 不破坏对话）；P10 包装 `synth_answer_node` 不动
+- **契约**：`schemas/chat_contract.py` `ChatCard`（card_type Literal[market_snapshot/stock_snapshot/capital_flow/deep/comparison] + title + data，extra="forbid"）；`QuestionState.cards`/`token_usage` 字段由 B-T1 定义（P11/P10 共享）
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
@@ -347,6 +376,10 @@ cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
 # 查看日志
 pm2 logs aistock-agent --lines 50
 ```
+
+### WS 网关待办（P9/P10/P11 部署前提，2026-08-05 方案 1 决策）
+
+外网 `wss://gupiao-api.yaozhineng.com/api/agent/ws/chat` 需 Caddy WS 转发修复（`flush_interval -1`，§roadmap 5.3）。未通期间：前端 WS→HTTP 非流式降级自动生效（`useChatStream` 3s 超时兜底，无需临时代码）；P10 计费仅 WS 路径落库（WS 修复后启用）；P11 cards 由线 5 前端消费（当前前端不渲染 cards，无损失）。
 
 ### Stock Trace Consumer 集成模式（2026-08-01）
 

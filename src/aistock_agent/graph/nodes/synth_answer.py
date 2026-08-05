@@ -23,12 +23,14 @@ from aistock_agent.prompts.general.system import (
 )
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
+    ChatCard,  # P11（线 3）：cards 卡片契约（T1 幂等补齐 / 计划 B 定义）
     Evidence,
     Insight,
     InsightGoal,
     SubGoal,
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
+from aistock_agent.services.token_usage import get_token_usage
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 from aistock_agent.utils.date import (
     prev_trading_day,
@@ -207,6 +209,7 @@ async def _synth_multi_goal(
         "final_response": combined,
         "trace": trace,
         "messages": [AIMessage(content=combined)],
+        "cards": _build_cards(evidences),
     }
 
 
@@ -499,6 +502,100 @@ def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
     return f"{conclusion}\n\n{disclaimer}"
 
 
+# P11（线 3）：cards 汇总（spec §3.2）。按 skill_name 分派，逐卡片 try-except，
+# 失败跳过该卡片（warning 日志）；全部失败/无卡片化证据 → None（不破坏对话）。
+
+
+def _card_from_market_snapshot(ev: Evidence) -> ChatCard | None:
+    """market_snapshot → market_snapshot 卡片（仅 scope 含 a_share 才产出）。"""
+    raw = ev.raw or {}
+    if raw.get("scope") not in ("a_share", "both"):
+        return None
+    a_share_card = raw.get("a_share_card")
+    if not isinstance(a_share_card, dict) or not a_share_card:
+        return None
+    return ChatCard(card_type="market_snapshot", title="A股市场概览", data=a_share_card)
+
+
+def _card_from_stock_snapshot(ev: Evidence) -> ChatCard | None:
+    """stock_snapshot → stock_snapshot 卡片（data 透传 raw.quote）。"""
+    quote = (ev.raw or {}).get("quote")
+    if not isinstance(quote, dict) or not quote:
+        return None
+    name = quote.get("name") or (ev.symbols[0] if ev.symbols else "")
+    return ChatCard(card_type="stock_snapshot", title=f"{name} 实时行情", data=quote)
+
+
+def _card_from_capital_flow(ev: Evidence) -> ChatCard | None:
+    """capital_flow → capital_flow 卡片（data 透传 raw.flow）。"""
+    flow = (ev.raw or {}).get("flow")
+    if not isinstance(flow, dict) or not flow:
+        return None
+    symbol = ev.symbols[0] if ev.symbols else ""
+    return ChatCard(card_type="capital_flow", title=f"{symbol} 资金流向", data=flow)
+
+
+def _card_from_comparison(ev: Evidence) -> ChatCard | None:
+    """compare_stocks → comparison 卡片（stocks 透传 raw.parsed；conclusion 拼接'对比结论'facts）。
+
+    data 结构：{stocks: list[parsed], conclusion: '对比结论' 行文本}。
+    """
+    raw = ev.raw or {}
+    parsed = raw.get("parsed")
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    data: dict[str, Any] = {"stocks": parsed}
+    conclusions = [
+        f for f in raw.get("quotes", [])
+        if isinstance(f, str) and f.startswith("对比结论")
+    ]
+    if conclusions:
+        data["conclusion"] = conclusions[0]
+    return ChatCard(card_type="comparison", title="个股行情对比", data=data)
+
+
+_CARD_HANDLERS = {
+    "market_snapshot": _card_from_market_snapshot,
+    "stock_snapshot": _card_from_stock_snapshot,
+    "capital_flow": _card_from_capital_flow,
+    "compare_stocks": _card_from_comparison,
+}
+
+
+def _build_cards(evidences: list[Evidence]) -> list[ChatCard] | None:
+    """从 evidences 按 skill_name 汇总 cards（spec §3.2）。
+
+    卡片生成失败（缺 raw 字段/异常）→ 跳过该卡片（warning 日志），其余卡片照常；
+    全部失败/无卡片化证据 → None（前端纯 markdown 降级，不破坏对话）。
+    """
+    cards: list[ChatCard] = []
+    for ev in evidences:
+        handler = _CARD_HANDLERS.get(ev.skill_name)
+        if handler is None:
+            continue
+        try:
+            card = handler(ev)
+        except Exception as exc:  # noqa: BLE001  # 卡片失败不阻断对话（"永不 500"铁律）
+            logger.warning(
+                "synth_answer.card_failed", skill_name=ev.skill_name, err=str(exc)
+            )
+            card = None
+        if card is not None:
+            cards.append(card)
+    return cards or None
+
+
+def _build_deep_card(last_deep_report: DeepReportRef | None) -> ChatCard | None:
+    """deep 分支卡片：复用 last_deep_report（DeepReportRef 字段全透传，spec §2.2）。"""
+    if not last_deep_report:
+        return None
+    try:
+        return ChatCard(card_type="deep", title="深度分析报告", data=dict(last_deep_report))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synth_answer.deep_card_failed", err=str(exc))
+        return None
+
+
 def _build_deep_degraded(deep_source: str) -> str:
     """D31 空响应兜底：escalate 未回流 final_response 时的固定降级文本。
 
@@ -577,8 +674,12 @@ async def _persist_chat_analysis(
         return None
 
 
-async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
-    """synth_answer 节点入口。"""
+async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2：原实现改名，逻辑零改动）。
+
+    计划 C（线 3）的 cards 汇总逻辑块在本函数内新增（消费
+    state["evidences"] 按 skill_name 汇总），与本计划隔离。
+    """
     import time
 
     start = time.monotonic()
@@ -600,6 +701,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "final_response": "内部错误：缺少目标",
             "trace": None,
             "messages": [AIMessage(content="内部错误：缺少目标")],
+            "cards": None,
         }
 
     # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
@@ -623,6 +725,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="validate",
             ),
             "messages": [AIMessage(content=clarification)],
+            "cards": None,
         }
 
     # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
@@ -651,6 +754,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="validate",
             ),
             "messages": [AIMessage(content=shortcut)],
+            "cards": None,
         }
 
     # 3. D31 deep 分支（新增）：escalate 已产出 worker 全文，跳过 LLM 纯代码加工
@@ -688,6 +792,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             answer_mode="deep",
         )
         logger.info("synth_answer.deep_ok", deep_source=deep_source)
+        deep_card = _build_deep_card(last_deep_report)
         return {
             "insight": insight,
             "final_response": processed,
@@ -700,6 +805,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             ),
             "messages": [AIMessage(content=processed)],
             "last_deep_report": last_deep_report,
+            "cards": [deep_card] if deep_card is not None else None,
         }
 
     # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
@@ -769,6 +875,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "final_response": final_response,
             "trace": trace,
             "messages": [AIMessage(content=final_response)],
+            "cards": _build_cards(evidences),
         }
 
     except Exception as exc:
@@ -788,4 +895,17 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "final_response": insight.conclusion,
             "trace": trace,
             "messages": [AIMessage(content=insight.conclusion)],
+            "cards": None,
         }
+
+
+async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2 包装：token_usage 一行收口）。
+
+    委托 _synth_answer_node_core（原实现），在任意 return 路径统一附加
+    token_usage = get_token_usage()（全 0/未采集为 None）。只加一行——
+    与计划 C 的 cards 汇总逻辑块（在 core 内）隔离，git 合并友好。
+    """
+    result = await _synth_answer_node_core(state)
+    result["token_usage"] = get_token_usage()
+    return result

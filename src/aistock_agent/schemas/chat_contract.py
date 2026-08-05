@@ -158,3 +158,18 @@ class AnswerTrace(BaseModel):
     goals: list[SubGoal] | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ChatCard(BaseModel):
+    """P11（线 3）卡片数据契约（spec §2.1）。
+
+    由 synth_answer 汇总写入 QuestionState.cards，供 ws.py DONE 附带（线 2）与前端卡片消费（线 5）。
+    """
+
+    card_type: Literal[
+        "market_snapshot", "stock_snapshot", "capital_flow", "deep", "comparison"
+    ]
+    title: str
+    data: dict[str, Any]
+
+    model_config = ConfigDict(extra="forbid")
