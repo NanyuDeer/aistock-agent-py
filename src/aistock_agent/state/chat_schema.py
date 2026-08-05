@@ -11,7 +11,7 @@ from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
-    ChatCard,  # P11（线 3）：cards 卡片契约（幂等，与计划 B 一致）
+    ChatCard,  # P11（线 3）：cards 卡片契约（B-T1 定义，与 P10 共享）
     Evidence,
     Insight,
     InsightGoal,
@@ -74,8 +74,7 @@ class QuestionState(TypedDict, total=False):
     # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
     # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
     general_source: Literal["science", "gap"] | None
-    # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3，本计划 T5）；
-    # token_usage 由计划 B（线 2）包装函数在 LLM callback 层写（本计划不动）。
-    # 幂等：若计划 B 已合入，跳过本步骤（字段已存在）。
+    # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3）；
+    # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
     cards: list[ChatCard] | None
     token_usage: dict[str, int] | None
