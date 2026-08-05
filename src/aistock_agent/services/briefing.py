@@ -17,7 +17,7 @@ _REQUIRED_TYPES: dict[BriefType, tuple[str, ...]] = {
 }
 _TITLES = {
     "morning": "晨间市场展望",
-    "wind_leader": "长期风口与龙头",
+    "wind_leader": "风口龙头",
     "hot_burst": "机构调研热点",
     "trend_score": "趋势股评分",
     "event_conduction": "事件传导分析",

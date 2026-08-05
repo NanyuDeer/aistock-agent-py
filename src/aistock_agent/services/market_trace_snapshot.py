@@ -14,10 +14,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import structlog
 
@@ -74,6 +73,35 @@ def _parse_datetime(value: object) -> datetime | None:
         return dt
     except (ValueError, TypeError):
         return None
+
+
+def _parse_news_datetime(value: object) -> datetime | None:
+    """解析财联社/新闻时间字段。
+
+    与 :func:`_parse_datetime` 的区别（为什么不能复用）：
+    财联社 telegraph 的 ``time`` 是**上海无时区**格式 ``"2026-08-05 14:30:00"``，
+    若按 UTC 解析会比真实 UTC 晚 8 小时，导致 ``occurred_at > captured_at``
+    被误判为未来数据而全部跳过（晚报 cls_news 失效根因之一）。
+
+    - unix 秒（telegraph 的 ``timestamp`` 字段）→ UTC datetime
+    - ISO 字符串：带时区直接解析；无时区按 Asia/Shanghai（UTC+8）解析
+    """
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            return None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        cleaned = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        # 财联社 time 为上海时钟；假设 UTC+8
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt
 
 
 def _safe_str(value: object, default: str = "") -> str:
@@ -558,7 +586,7 @@ def _normalize_global_facts(
         sources[source_id] = SourceRecord(
             source_id=source_id,
             kind="market_fact",
-            provider="yfinance",
+            provider="tencent:quote",
             title=_safe_str(fact.get("name"), _safe_str(fact.get("ticker"))),
             content=(
                 f"ticker={fact.get('ticker')}, "
@@ -575,18 +603,18 @@ def _normalize_global_facts(
         _append_missing(missing_fields, "global_markets")
         return SourceCollectionStatus(
             state="unavailable",
-            provider="yfinance",
+            provider="tencent:quote",
             reason=type(fetch_error).__name__,
         )
     if global_counter == 0:
         _append_missing(missing_fields, "global_markets")
         return SourceCollectionStatus(
             state="empty",
-            provider="yfinance",
+            provider="tencent:quote",
             reason="provider_returned_no_items",
         )
     return SourceCollectionStatus(
-        state="available", provider="yfinance", item_count=global_counter
+        state="available", provider="tencent:quote", item_count=global_counter
     )
 
 
@@ -616,14 +644,22 @@ def _normalize_news_facts(
     news_counter = 0
     causal_ready_count = 0
     for item in news_items:
-        time_str = item.get("time", item.get("ctime", ""))
-        occurred_at = _parse_datetime(time_str)
+        # 时间：telegraph 优先用 timestamp（unix 秒）；否则 time（上海无时区，按 UTC+8 解析）
+        raw_ts = item.get("timestamp")
+        occurred_at = _parse_news_datetime(raw_ts) if raw_ts is not None else None
+        if occurred_at is None:
+            occurred_at = _parse_news_datetime(item.get("time", item.get("ctime", "")))
         if occurred_at is not None and occurred_at > captured_at:
             continue
         if occurred_at is None:
             continue
-        # URL: latest 用 link 字段，telegraph 无 URL；同时兼容旧 url 字段
+        # URL：latest 用 link 字段，telegraph 无 URL；同时兼容旧 url 字段。
+        # telegraph 无 URL 时用财联社详情页兜底，保证可溯源（否则被判 invalid_for_causality）。
         url = _safe_optional_str(item.get("link")) or _safe_optional_str(item.get("url"))
+        if not url:
+            item_id = item.get("id")
+            if isinstance(item_id, str | int) and str(item_id).strip().isdigit():
+                url = f"https://www.cls.cn/detail/{item_id}"
         news_counter += 1
         source_id = f"NEWS_{news_counter:03d}"
         sources[source_id] = SourceRecord(
@@ -701,8 +737,13 @@ def _normalize_search_facts(
                 continue
             pub_date = item.get("published_date", item.get("publishedDate", ""))
             occurred_at = _parse_datetime(pub_date)
-            if occurred_at is None or occurred_at > captured_at:
+            # 未来数据防呆：published_date 有效且晚于捕获时刻才跳过
+            if occurred_at is not None and occurred_at > captured_at:
                 continue
+            # Tavily 结果常缺 published_date（2026-08 实测无该字段）；
+            # 不丢弃，用捕获时刻兜底（仅要求 URL 可溯源）。
+            if occurred_at is None:
+                occurred_at = captured_at
             url = _safe_optional_str(item.get("url"))
             search_counter += 1
             source_count += 1
@@ -726,7 +767,7 @@ def _normalize_search_facts(
                 state="invalid_for_causality",
                 provider="tavily",
                 item_count=len(results),
-                reason="items_missing_url_or_occurred_at",
+                reason="items_missing_url",
             )
         else:
             statuses[status_key] = SourceCollectionStatus(
@@ -816,10 +857,10 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 3. 收集外部来源（同一 captured_at）──
     # 只有 status/coverage/date 三重校验全部通过，才允许调用 yfinance、财联社、Tavily。
 
-    # 境外行情（同步函数，用 asyncio.to_thread 避免阻塞事件循环）
+    # 境外行情（异步函数，腾讯行情源经 app-api 聚合）
     global_fetch_error: Exception | None = None
     try:
-        global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
+        global_facts = await collect_global_market_facts(captured_at)
     except Exception as e:
         logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []
@@ -1007,7 +1048,7 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 3. 收集外部来源（与 full 版相同逻辑）──
     global_fetch_error: Exception | None = None
     try:
-        global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
+        global_facts = await collect_global_market_facts(captured_at)
     except Exception as e:
         logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []

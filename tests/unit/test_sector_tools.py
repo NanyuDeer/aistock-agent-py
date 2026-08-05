@@ -81,16 +81,51 @@ async def test_get_wind_leaders_degradation():
 
 
 def test_format_wind_leaders_cycle_label():
-    """验证 _format_wind_leaders 输出含 [长线风口]/[短线风口] 标注，缺省 cycle 兜底短线"""
+    """验证 _format_wind_leaders 双链分节，缺省 cycle 兜底短线"""
     data = {
         "update_time": "2026-08-04 09:00",
         "hot_sectors": [
-            {"name": "人工智能", "cycle": "long", "today_change": 3.2, "leading_stock": "科大讯飞"},
-            {"name": "白酒", "cycle": "short", "today_change": 1.1, "leading_stock": "贵州茅台"},
+            {"name": "人工智能", "cycle": "long", "today_change": 3.2, "leading_stock": "科大讯飞",
+             "ai_analysis": {"long_term_days": 45, "long_confidence": 0.8, "long_reason": "政策加码", "short_term_days": 0, "short_heat": 0, "short_reason": ""}},
+            {"name": "白酒", "cycle": "short", "today_change": 1.1, "leading_stock": "贵州茅台",
+             "ai_analysis": {"long_term_days": 0, "long_confidence": 0, "long_reason": "", "short_term_days": 3, "short_heat": 0.5, "short_reason": "换手过热"}},
             {"name": "无cycle字段板块", "today_change": 0.5, "leading_stock": "-"},
         ],
     }
     text = _format_wind_leaders(data)
-    assert "[长线风口]" in text
-    assert "[短线风口]" in text
-    assert "无cycle字段板块[短线风口]" in text  # 缺省兜底 short
+    assert "【长线链研判】" in text
+    assert "【短线链研判】" in text
+    assert "人工智能" in text.split("【短线链研判】")[0]       # long 只在长线节
+    assert "白酒" not in text.split("【短线链研判】")[0]       # short 不在长线节
+    assert "无cycle字段板块" in text.split("【短线链研判】")[1]  # 缺省兜底 short 进短线节
+
+
+def test_format_wind_leaders_dual_chain_brief():
+    """双链简报：长线节/短线节/both 归属/缺省"""
+    data = {
+        "update_time": "2026-08-05 09:30",
+        "hot_sectors": [
+            {"name": "半导体", "cycle": "long", "today_change": 2.1, "leading_stock": "中芯国际",
+             "ai_analysis": {"long_term_days": 45, "long_confidence": 0.8, "logic_type": "政策",
+                             "long_reason": "中央政策加码，月线多头", "heat_stage": "发酵期",
+                             "short_term_days": 5, "short_heat": 0.6, "short_reason": "连板高度支撑热度"}},
+            {"name": "光伏", "cycle": "both", "today_change": 1.5, "leading_stock": "隆基绿能",
+             "ai_analysis": {"long_term_days": 40, "long_confidence": 0.7, "logic_type": "政策",
+                             "long_reason": "政策+业绩双支撑", "heat_stage": "启动期",
+                             "short_term_days": 8, "short_heat": 0.7, "short_reason": "首次放量启动"}},
+            {"name": "白酒", "cycle": "short", "today_change": 0.8, "leading_stock": "贵州茅台",
+             "ai_analysis": {"long_term_days": 0, "long_confidence": 0, "logic_type": "无支撑",
+                             "long_reason": "", "heat_stage": "高潮期",
+                             "short_term_days": 3, "short_heat": 0.5, "short_reason": "换手过热见顶风险"}},
+            {"name": "旧数据", "today_change": 0.5, "leading_stock": "--"},
+        ],
+    }
+    result = _format_wind_leaders(data)
+    assert "【长线链研判】" in result
+    assert "【短线链研判】" in result
+    assert "半导体" in result.split("【短线链研判】")[0]      # 半导体(仅long)只在长线节
+    assert "光伏" in result.split("【长线链研判】")[1]       # both 进长线节
+    assert "光伏" in result.split("【短线链研判】")[1]       # both 也进短线节
+    assert "白酒" in result.split("【短线链研判】")[1]       # 白酒(short)只在短线节
+    assert "中央政策加码" in result and "首次放量启动" in result  # 理由字段透出
+    assert "旧数据" in result.split("【短线链研判】")[1]      # 缺省按 short 进短线节

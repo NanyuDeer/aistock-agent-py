@@ -113,4 +113,4 @@ async def test_wind_leader_exception_degradation():
     with patch(_GET_DEEP_THINK, side_effect=Exception("LLM error")):
         result = await run({"messages": [], "analysis_reports": {}})
 
-    assert result["final_response"] == "长线风口分析暂时不可用，请稍后重试"
+    assert result["final_response"] == "风口龙头分析暂时不可用，请稍后重试"
