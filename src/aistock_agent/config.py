@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     stock_trace_max_attempts: int = 3
     # Consumer 集成模式开关：true=在 agent-py 主进程 lifespan 内启动（一次重启即可），
     # false=需独立进程运行（python -m aistock_agent.workers.stock_trace_consumer）。
-    # 生产环境推荐 true；开发/测试可设 false 避免意外消费 Stream。
-    stock_trace_consumer_enabled: bool = True
+    # 自选股洞察上线后默认停用旧 stock_trace consumer；
+    # STOCK_TRACE_CONSUMER_ENABLED=true 可临时恢复。
+    stock_trace_consumer_enabled: bool = False
     # Tool calling provides a schema-bound response across OpenAI-compatible models.
     stock_trace_structured_output_method: Literal[
         "function_calling", "json_mode", "json_schema"
