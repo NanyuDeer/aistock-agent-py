@@ -194,6 +194,7 @@ async def _stream_messages(
                 final_state = await graph.aget_state(
                     config={"configurable": {"thread_id": session_id}}
                 )
+                final_cards = final_state.values.get("cards")
                 yield {
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
@@ -201,7 +202,8 @@ async def _stream_messages(
                     # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
                     # 仅供前端本地累加展示，本路径不落库）
                     "token_usage": final_state.values.get("token_usage"),
-                    "cards": final_state.values.get("cards"),
+                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，需 model_dump 转 dict
+                    "cards": [c.model_dump() for c in final_cards] if final_cards else None,
                 }
                 break
             if not isinstance(event, dict):
