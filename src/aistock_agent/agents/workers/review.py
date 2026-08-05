@@ -781,17 +781,27 @@ def _first_effective_line(text: str) -> str:
 
 
 def _extract_trace_summary(markdown: str) -> str:
-    """从复盘 markdown 提取摘要（主导现象段首个有效行）。
+    """从复盘 markdown 提取摘要（主导现象段的可读摘要）。
 
     摘要提取顺序：
-    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
-    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
-    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    1. ``## 确认的市场现象`` 段落中 ``- 摘要：xxx`` 行的内容（新 markdown 格式，
+       render_market_trace_markdown 产出；该行是 LLM 生成的现象描述，易读中文，
+       约 15-30 字，符合晨报结论字数参考）
+    2. 回退：``## 主导现象`` 段落的首个有效行（旧格式或摘要行缺失）
+    3. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
+    4. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
     """
     summary = ""
     m = _DOMINANT_PHENOMENON_RE.search(markdown)
     if m:
-        summary = _first_effective_line(m.group(1))
+        section = m.group(1)
+        # 优先取 "- 摘要：xxx" 行内容（LLM 生成的现象描述，避免取到
+        # "- 类型：broad_rally" 这类内部字段行）
+        summary_match = re.search(r"^\s*-\s*摘要[：:]\s*(.+)$", section, re.MULTILINE)
+        if summary_match:
+            summary = _first_effective_line(summary_match.group(1))
+        if not summary:
+            summary = _first_effective_line(section)
     if not summary:
         m = _STEP_FOUR_RE.search(markdown)
         if m:

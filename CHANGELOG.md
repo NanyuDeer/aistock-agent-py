@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-08-06 — 晚报结论重构：归因结论放头条，三条均为 30-40 字一句话（去冒号）
+
+**开发者**: Aria
+
+### 改进
+- `services/briefing.py`：晚报三条顺序调整为 归因结论（主因链）→ 市场快照 → 收盘复盘；归因结论去掉"触发：/传导：/结果："阶段标签与冒号，confirmed 句式"今日市场主因是{…}"、hypothesis 句式"今日市场可能受{…}等因素影响"；市场快照改为"今日X涨4.21%、…，Y跌2.13%、…"一句话（含"无显著领跌/领涨板块"降级分支）；删除不再使用的 `_STAGE_LABELS`
+- `services/phenomenon_discovery.py`：`_SUMMARIES` 五个现象文案扩写为 30-40 字一句话（收盘复盘条目摘要来源，无冒号）
+
+### 修复
+- `agents/workers/review.py`：`_extract_trace_summary` 优先提取"确认的市场现象"段的 `- 摘要：xxx` 行（易读中文现象描述），不再取到"类型：broad_rally"内部字段行；保留旧格式回退
+
+### 测试
+- `tests/unit/test_briefing.py`：更新 sectors/attribution 契约断言为无冒号一句话、`missing_sources` 顺序随新 variant 顺序调整、新增晚报头条顺序断言；`tests/unit/test_review_report.py` 新增 `_extract_trace_summary` 3 个测试；相关测试 60 passed
+
+---
+
 ## [master] 2026-08-05 — cls_news/main_force 缺失诊断日志（agent-py）
 
 **开发者**: NanyuDeer
