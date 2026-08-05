@@ -62,7 +62,7 @@ class InsightWorkerProtocol(Protocol):
 
     async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome: ...
 
-    async def write_result(self, result: object) -> None: ...
+    async def write_result(self, result: object) -> dict[str, object] | None: ...
 
 
 class InsightConsumer:
@@ -128,7 +128,16 @@ class InsightConsumer:
                 # 快照未就绪：不 ack，等 pending reclaim 重新执行
                 await self._worker.report_job(job_id, "queued")
                 return
-            await self._worker.write_result(outcome.result)
+            # Node 回写守卫（同 stock_trace）：post_result 内部捕获 HTTP/业务错误返回
+            # None 不抛异常，必须用 is None 判定（Node 成功返回 data: {}，空 dict 为
+            # falsy 但非失败）。回写失败时不 report completed、不 ack，交由 pending
+            # reclaim 重试，避免归因结果静默丢失。
+            writeback = await self._worker.write_result(outcome.result)
+            if writeback is None:
+                await self._handle_failure(
+                    job_id, message_id, fields, "NODE_WRITEBACK_FAILED"
+                )
+                return
             await self._worker.report_job(job_id, "completed")
             await self._redis.xack(STREAM, self._group, message_id)
             logger.info("insight_job_completed", job_id=job_id, event_id=event_id)

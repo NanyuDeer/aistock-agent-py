@@ -74,13 +74,23 @@ class CompletedWorker:
             result={"label": "行业题材", "category": "industry_theme"}
         )
 
-    async def write_result(self, result: object) -> None:
+    async def write_result(self, result: object) -> dict[str, object] | None:
         self.results.append(result)
+        # Node 成功回写返回空 dict（data: {}）——falsy 但非 None，消费端须用 is None 判断
+        return {}
 
 
 class FailingWorker(CompletedWorker):
     async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome:
         raise ValueError("LLM 不可用")
+
+
+class WritebackFailingWorker(CompletedWorker):
+    """Node 回写失败：post_result 内部捕获 HTTP/业务错误返回 None，不抛异常。"""
+
+    async def write_result(self, result: object) -> dict[str, object] | None:
+        self.results.append(result)
+        return None
 
 
 @pytest.mark.asyncio
@@ -98,6 +108,59 @@ async def test_consume_once_acknowledges_on_success() -> None:
     assert worker.results == [{"label": "行业题材", "category": "industry_theme"}]
     assert redis_client.acked == [(STREAM, GROUP, "1710000000000-0")]
     assert redis_client.dead_lettered == []
+
+
+@pytest.mark.asyncio
+async def test_consume_once_acknowledges_when_writeback_returns_empty_dict() -> None:
+    """Node 成功回写返回空 dict `{}`（falsy 但非 None）：仍 completed + ack（用 is None 判断）。"""
+    redis_client = FakeRedis(
+        new_entries=[("1710000000000-0", {"job_id": "job-001", "event_id": "evt-001"})]
+    )
+    worker = CompletedWorker()
+    consumer = InsightConsumer(redis_client, worker)  # type: ignore[arg-type]
+    await consumer.consume_once()
+    assert worker.statuses == [
+        ("job-001", "processing", None),
+        ("job-001", "completed", None),
+    ]
+    assert redis_client.acked == [(STREAM, GROUP, "1710000000000-0")]
+    assert redis_client.dead_lettered == []
+
+
+@pytest.mark.asyncio
+async def test_consume_once_writeback_none_goes_failure_path() -> None:
+    """Node 回写失败（write_result 返回 None）：不 report completed、不 ack，
+    走失败路径（report failed），留 pending 待 reclaim 重试。"""
+    redis_client = FakeRedis(
+        new_entries=[("1710000000000-0", {"job_id": "job-001", "event_id": "evt-001"})]
+    )
+    worker = WritebackFailingWorker({"attempt_count": 1})
+    consumer = InsightConsumer(redis_client, worker)  # type: ignore[arg-type]
+    await consumer.consume_once()
+    assert worker.statuses == [
+        ("job-001", "processing", None),
+        ("job-001", "failed", "NODE_WRITEBACK_FAILED"),
+    ]
+    assert redis_client.acked == []
+    assert redis_client.dead_lettered == []
+
+
+@pytest.mark.asyncio
+async def test_consume_once_writeback_none_dead_letters_after_max_attempts() -> None:
+    """回写失败且 Node 侧 attempt 已达上限：report failed 后进 DLQ（MAX_ATTEMPTS）。"""
+    redis_client = FakeRedis(
+        new_entries=[("1710000000000-0", {"job_id": "job-001", "event_id": "evt-001"})]
+    )
+    worker = WritebackFailingWorker({"attempt_count": 3})
+    consumer = InsightConsumer(redis_client, worker)  # type: ignore[arg-type]
+    await consumer.consume_once()
+    assert worker.statuses == [
+        ("job-001", "processing", None),
+        ("job-001", "failed", "NODE_WRITEBACK_FAILED"),
+    ]
+    assert redis_client.acked == [(STREAM, GROUP, "1710000000000-0")]
+    assert redis_client.dead_lettered[0][0] == DLQ_STREAM
+    assert redis_client.dead_lettered[0][1]["error_code"] == "MAX_ATTEMPTS"
 
 
 @pytest.mark.asyncio

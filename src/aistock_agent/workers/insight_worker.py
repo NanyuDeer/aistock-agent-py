@@ -231,9 +231,13 @@ class InsightWorker:
             "model_provider": settings.insight_llm_model,
         }
 
-    async def write_result(self, result: dict[str, object]) -> None:
-        """回传洞察归因结果给 Node 持久化。"""
-        await self._client.post_result(result)
+    async def write_result(self, result: dict[str, object]) -> dict[str, object] | None:
+        """回传洞察归因结果给 Node 持久化。
+
+        返回值必须透传：``post_result`` 内部捕获 HTTP/业务错误返回 None 不抛异常，
+        Consumer 依赖该返回值判定是否 report completed（None 时进入失败重试路径）。
+        """
+        return await self._client.post_result(result)
 
     async def report_job(
         self, job_id: str, status: str, error: str | None = None
