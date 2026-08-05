@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-06 — 自选股洞察：LLM 归因 category 字段兼容 + 归因链路联调修复
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/schemas/insight.py`：`DriverOutput` 增加可选 `category` 字段（LLM 常回传候选分类，此前 `extra=forbid` 直接拒绝导致归因全部回退规则兜底、LLM 路径失效）
+- `src/aistock_agent/services/insight_validator.py`：校验 LLM 回传的 `category` 与所选候选分类一致，不一致拒绝（分类权威在候选，防 LLM 注入分类）
+- `src/aistock_agent/prompts/workers/insight.py`：提示词新增第 6 条输出字段白名单（每个 driver 只允许 candidate_id/label/confidence/category）
+
+### 文档
+- `docs/自选股洞察-PRD.md`：更新事件归属规则——事件股票必须与标题主体股票一致，详情页推荐股票不建事件（修复事件挂错标的，如国投中鲁文章被挂到中芯国际事件）
+
+---
+
 ## [main] 2026-08-02 — ChatAgent 最小落地 M1-M5 完成 + 非交易日统一提示
 
 **开发者**: Aria

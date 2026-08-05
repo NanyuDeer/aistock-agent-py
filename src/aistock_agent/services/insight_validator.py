@@ -60,6 +60,9 @@ def _validate_driver(
         return False
     if not d.label or len(d.label) > settings.insight_label_max_chars:
         return False
+    # 分类权威在候选：LLM 若回传 category，必须与所选候选一致，否则拒绝（防 LLM 注入分类）。
+    if d.category is not None and d.category != cand.category:
+        return False
     # 证据锚定原文：候选的 evidence_quote 必须能在标题或正文中找到。
     # （label 为主题概括，允许概括生成，不要求逐字出现在原文。）
     return cand.evidence_quote in content or cand.evidence_quote in title

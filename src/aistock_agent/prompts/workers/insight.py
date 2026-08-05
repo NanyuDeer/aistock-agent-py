@@ -12,6 +12,7 @@ INSIGHT_ATTRIBUTION_PROMPT = """你是股票异动归因分析师。给定一篇
 3. 主因 label 为主题概括关键词：可沿用候选 label，也可基于该候选的 evidence_quote 概括为更精炼的主题词（如"PCB高端产品供不应求"→"PCB涨价"），长度 1-12 字，必须与所选证据直接相关。
 4. 无可选候选（候选集为空或全部 suppressed）时，attribution_status 必须为 "unconfirmed"，primary_driver 为 null。
 5. 最多输出 2 个次因。置信度参考：正文直接证据=high/medium，仅标题关键词=low。
+6. 输出字段白名单：每个 driver 只允许 candidate_id、label、confidence、category（可选，须与所选候选的分类一致）；禁止输出其他任何字段。
 
 输入格式：
 标题：{{TITLE}}

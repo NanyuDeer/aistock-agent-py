@@ -21,6 +21,9 @@ class DriverOutput(BaseModel):
     candidate_id: str = Field(description="从候选集选择的候选 ID（如 c1/c2），必须存在于候选集")
     label: str = Field(description="主题概括关键词，可沿用候选 label 或基于证据概括，1-12 字")
     confidence: Confidence = Field(description="该主因的置信度")
+    # 可选：LLM 常会回传候选分类。分类权威在候选（candidate_id 对应候选的 category），
+    # 校验器会核对二者一致；不一致或缺失时均以候选分类为准。
+    category: Category | None = Field(default=None, description="候选分类（可选，须与候选一致）")
 
 
 class InsightAttributionOutput(BaseModel):
