@@ -285,3 +285,50 @@ async def test_drain_reasoning_tasks_timeout_cancels_pending() -> None:
     with patch.object(ws_module, "_REASONING_DRAIN_TIMEOUT_SEC", 0.05):
         await ws_module._drain_reasoning_tasks([task])
     assert task.cancelled()
+
+
+# ── P10 线 2：DONE 附带 token_usage + cards + 计费落库 ────────────
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_done_payload_includes_token_usage_and_cards() -> None:
+    """P10 线 2（选项 A）：on_chain_end 输出含 token_usage/cards → DONE 携带。
+
+    注意：本用例 user_id 非空且输出含 token_usage → 会触发计费落库分支，
+    必须 patch node_api.save_token_usage 防真实网络调用（副作用隔离）。
+    """
+    ws = _FakeWebSocket([{"message": "分析 600519", "user_id": "u_42"}])
+    usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    with (
+        patch.object(
+            ws_module,
+            "_select_graph",
+            return_value=_DoneEventGraph(
+                {"final_response": "回复", "token_usage": usage, "cards": None}
+            ),
+        ),
+        patch.object(ws_module.node_api, "save_token_usage", new_callable=AsyncMock),
+    ):
+        await ws_chat(ws)  # type: ignore[arg-type]
+
+    done = [s for s in ws.sent if s.get("type") == "done"]
+    assert len(done) == 1
+    assert done[0]["token_usage"] == usage
+    assert done[0]["cards"] is None
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_done_payload_defaults_token_usage_cards_none() -> None:
+    """P10 线 2：输出无两字段（旧图/短路路径）→ DONE 为 None（null 兼容）。"""
+    ws = _FakeWebSocket([{"message": "你好"}])
+    with patch.object(
+        ws_module,
+        "_select_graph",
+        return_value=_DoneEventGraph({"final_response": "我是 AI 投资助手"}),
+    ):
+        await ws_chat(ws)  # type: ignore[arg-type]
+
+    done = [s for s in ws.sent if s.get("type") == "done"]
+    assert len(done) == 1
+    assert done[0]["token_usage"] is None
+    assert done[0]["cards"] is None

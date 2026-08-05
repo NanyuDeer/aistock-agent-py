@@ -34,6 +34,7 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.token_usage import reset_token_usage
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -91,6 +92,7 @@ async def chat_message(
     保留兼容，前端全部切到双流后清理。
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库不消费）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
@@ -196,6 +198,10 @@ async def _stream_messages(
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
+                    # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
+                    # 仅供前端本地累加展示，本路径不落库）
+                    "token_usage": final_state.values.get("token_usage"),
+                    "cards": final_state.values.get("cards"),
                 }
                 break
             if not isinstance(event, dict):
@@ -274,6 +280,7 @@ async def chat_stream_messages(
     yields: llm_start → text/text/... → done（带 final_response + analysis_reports）
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：SSE 路径按轮重置（DONE 从 state.values 读快照）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）

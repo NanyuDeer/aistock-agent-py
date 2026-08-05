@@ -20,6 +20,7 @@ from aistock_agent.observability.metrics import (
     MetricsCollector,
     get_metrics_collector,
 )
+from aistock_agent.services.token_usage import record_token_usage
 
 if TYPE_CHECKING:
     from langchain_core.agents import AgentAction, AgentFinish
@@ -90,6 +91,12 @@ class TokenUsageCallback(BaseCallbackHandler):
         usage = _extract_token_usage(response)
         if usage is not None:
             self._metrics.record_llm_tokens(**usage)
+            # P10 线 2：同步写入 contextvar 采集层（ws 图任务内累计，synth_answer 收口）
+            record_token_usage(
+                usage["prompt_tokens"],
+                usage["completion_tokens"],
+                usage["total_tokens"],
+            )
 
     def on_llm_error(
         self,

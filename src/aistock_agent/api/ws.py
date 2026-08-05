@@ -10,6 +10,9 @@ from aistock_agent.api.deps import build_chat_initial_state
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
+from aistock_agent.schemas.chat_contract import ChatCard
+from aistock_agent.services.data_client import node_api
+from aistock_agent.services.token_usage import reset_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +113,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
 
             graph = _select_graph()
+            # P10 线 2：每条消息处理开始时重置 token 采集（构造 state 前）
+            reset_token_usage()
             # M5 D10：Chat 入口恒走 ChatAgent（/chat/* 与 /ws/chat 不再读开关）
             initial_state = build_chat_initial_state(message)
             # D4：force_deep 由 ws.py 在构造 state 后追加（build_chat_initial_state 签名不变，
@@ -135,6 +140,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                 llm_started = False
                 final_response = ""
                 last_deep_report: dict[str, object] | None = None
+                # P10 线 2（选项 A）：本轮 token 用量快照 + 卡片（线 3 未产出恒 None）
+                token_usage: dict[str, int] | None = None
+                cards: list[ChatCard] | None = None
                 seen_nodes: set[str] = set()
                 # P3-fix-2 T1.1：本轮 reasoning task 引用集合（防 GC，DONE 前等待）
                 reasoning_tasks: list[asyncio.Task] = []
@@ -239,16 +247,44 @@ async def ws_chat(websocket: WebSocket) -> None:
                             final_response = output["final_response"]
                             # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
                             last_deep_report = output.get("last_deep_report")
+                            # P10 线 2（选项 A）：一次性捕获 token_usage + cards
+                            token_usage = output.get("token_usage")
+                            cards = output.get("cards")
 
                 # P3-fix-2 T1.1：DONE 前等待 reasoning task 完成（2.5s 超时兜底），
                 # 保证 reasoning 事件在 done 之前到达，前端可聚合后关闭连接
                 await _drain_reasoning_tasks(reasoning_tasks)
+
+                # P10 线 2：计费落库（仅 WS 路径；HTTP/SSE 降级路径不落库）。
+                # 条件：登录（user_id 非空）且本轮采集到非全 0 token 用量。
+                # node_api.save_token_usage 内部 post 已吞异常返回 None，这里
+                # 再包一层 try/except——落库失败仅 warning，不阻断 DONE（永不 500）。
+                user_id_for_billing = initial_state.get("user_id")
+                if user_id_for_billing and token_usage:
+                    try:
+                        await node_api.save_token_usage(
+                            user_id=user_id_for_billing,
+                            session_id=session_id,
+                            prompt_tokens=token_usage["prompt_tokens"],
+                            completion_tokens=token_usage["completion_tokens"],
+                            total_tokens=token_usage["total_tokens"],
+                            question=message,
+                        )
+                    except Exception:
+                        # ws.py 用 stdlib logging，不能用 structlog 的 key=value 风格
+                        logger.warning(
+                            "token_usage.save_failed user_id=%s", user_id_for_billing,
+                            exc_info=True,
+                        )
 
                 # 发送完成事件
                 await websocket.send_json({
                     "type": WSEventType.DONE,
                     "content": final_response,
                     "last_deep_report": last_deep_report,
+                    # P10 线 2（选项 A）：DONE 一次性加 token_usage + cards（无则 None）
+                    "token_usage": token_usage,
+                    "cards": cards,
                 })
 
             except Exception as e:

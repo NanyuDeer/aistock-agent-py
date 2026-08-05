@@ -50,6 +50,8 @@ def test_ws_chat_passes_thread_id_config() -> None:
         "type": "done",
         "content": "mocked 流式回复",
         "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+        "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
+        "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
     }
 
 
@@ -82,5 +84,7 @@ def test_ws_done_omits_trace_field() -> None:
         "type": "done",
         "content": "mocked 流式回复",
         "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+        "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
+        "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
     }
     assert "advisor_trace" not in done

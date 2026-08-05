@@ -400,6 +400,43 @@ class NodeApiClient:
             )
         return result
 
+    async def save_token_usage(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        question: str | None = None,
+    ) -> dict[str, object] | None:
+        """记录一次对话 token 用量（P10 线 2，ws.py 计费回调）。
+
+        与 save_analysis_report 同模式：``post`` 已吞异常返回 None，
+        调用方再包一层 try/except 记日志即可——落库失败不阻断对话
+        （"永不 500"铁律）。
+
+        Returns:
+            Node 返回的 {id} 或 None（失败）。
+        """
+        payload: dict[str, object] = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "question": question,
+        }
+        result = await self.post("/internal/usage/records", payload)
+        if result:
+            logger.info(
+                "token_usage.saved",
+                user_id=user_id,
+                session_id=session_id,
+                total_tokens=total_tokens,
+            )
+        return result
+
     async def get_analysis_report(
         self,
         report_type: str,

@@ -163,7 +163,6 @@ class AnswerTrace(BaseModel):
 class ChatCard(BaseModel):
     """P11（线 3）卡片数据契约（spec §2.1）。
 
-    与计划 B（线 2）T1 定义一致（幂等：若 B 已合入则跳过本步骤）。
     由 synth_answer 汇总写入 QuestionState.cards，供 ws.py DONE 附带（线 2）与前端卡片消费（线 5）。
     """
 
