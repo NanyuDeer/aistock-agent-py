@@ -53,37 +53,34 @@ def _format_leaders(data: dict[str, object]) -> str:
 
 
 def _format_wind_leaders(data: dict[str, object]) -> str:
-    """格式化风口龙头数据（WindLeaderService 返回 update_time + hot_sectors）"""
+    """格式化风口龙头数据 → 长线链简报 + 短线链简报（供早上风口龙头 agent 生成综合报告）"""
     update_time = data.get("update_time", "")
     sectors_raw = data.get("hot_sectors", [])
     if not isinstance(sectors_raw, list) or not sectors_raw:
         return "暂无风口龙头数据"
+    lines = [f"风口龙头（更新: {update_time}）"] if update_time else ["风口龙头"]
+    long_board = [s for s in sectors_raw if isinstance(s, dict) and s.get("cycle") in ("long", "both")]
+    short_board = [s for s in sectors_raw if isinstance(s, dict) and (s.get("cycle") or "short") in ("short", "both")]
 
-    header = f"风口龙头（更新: {update_time}）" if update_time else "风口龙头"
-    lines: list[str] = [header]
-    for i, sector in enumerate(sectors_raw[:8], 1):
-        if not isinstance(sector, dict):
-            continue
-        # cycle: long=长线风口（月线多头确认）/ short=短线风口（月线未确认），缺省按短线兼容存量数据
-        cycle = sector.get("cycle", "short")
-        cycle_label = "长线" if cycle == "long" else "短线"
-        name = sector.get("name", "未知板块")
-        today_change = sector.get("today_change", "-")
-        leading_stock = sector.get("leading_stock", "-")
-        lines.append(
-            f"  {i}. {name}[{cycle_label}风口] 涨幅: {today_change}%"
-            f"  龙头: {leading_stock}"
-        )
-        # 列出该板块的核心推荐股
-        main_stocks = sector.get("main_stocks", [])
-        if isinstance(main_stocks, list):
-            for stock in main_stocks[:3]:
-                if not isinstance(stock, dict):
-                    continue
-                s_name = stock.get("name", "-")
-                s_code = stock.get("code", "-")
-                s_change = stock.get("change_pct", "-")
-                lines.append(f"      - {s_name}({s_code}) 涨跌: {s_change}%")
+    def fmt_sector(s: dict[str, object]) -> str:
+        ai = s.get("ai_analysis") or {}
+        if not isinstance(ai, dict):
+            ai = {}
+        name = s.get("name", "未知板块")
+        today = s.get("today_change", "-")
+        leader = s.get("leading_stock", "-")
+        return (f"{name} 今日涨幅{today}% 龙头{leader} "
+                f"长线{ai.get('long_term_days', 0)}天/置信{ai.get('long_confidence', 0)}：{ai.get('long_reason', '-')} "
+                f"短线{ai.get('short_term_days', 0)}天/热度{ai.get('short_heat', 0)}：{ai.get('short_reason', '-')}")
+
+    if long_board:
+        lines.append("【长线链研判】")
+        for i, s in enumerate(long_board[:8], 1):
+            lines.append(f"  {i}. {fmt_sector(s)}")
+    if short_board:
+        lines.append("【短线链研判】")
+        for i, s in enumerate(short_board[:8], 1):
+            lines.append(f"  {i}. {fmt_sector(s)}")
     return "\n".join(lines)
 
 
