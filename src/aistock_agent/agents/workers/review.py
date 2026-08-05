@@ -205,9 +205,16 @@ def _normalize_prediction_validation(raw_pv: dict[str, object]) -> dict[str, obj
 
 
 def _normalize_llm_trace_json(raw_json: str) -> str:
-    """解析 LLM 输出的 JSON，归一化 prediction_validation 字段名后返回。
+    """解析 LLM 输出的 JSON，归一化字段名与归因形态后返回。
 
     如果解析失败或无 prediction_validation，原样返回。
+    除字段名归一化外，还兜底修正 hypothesis 归因的非法形态：
+    - attribution_status="hypothesis" 时强制清空 primary_chain_id
+      （hypothesis 表示证据不足、未确认主因，禁止选择主链）
+    - hypothesis 时把 supported 候选降为 weak
+      （hypothesis 只允许 weak 备选；LLM 可能在证据未闭环时误标 supported）
+    否则 LLM 输出自相矛盾会被 validate_trace_against_snapshot 拒绝，
+    导致整份报告降级为"生成暂时不可用"。
     """
     try:
         data = json.loads(raw_json)
@@ -220,6 +227,15 @@ def _normalize_llm_trace_json(raw_json: str) -> str:
     pv = data.get("prediction_validation")
     if isinstance(pv, dict) and pv.get("status") != "no_forecast":
         data["prediction_validation"] = _normalize_prediction_validation(pv)
+
+    if data.get("attribution_status") == "hypothesis":
+        if data.get("primary_chain_id") is not None:
+            data["primary_chain_id"] = None
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("status") == "supported":
+                    candidate["status"] = "weak"
 
     return json.dumps(data, ensure_ascii=False)
 
