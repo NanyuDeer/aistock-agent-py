@@ -119,6 +119,32 @@ def _find_report(directory: Path, date_str: str) -> Path | None:
     return None
 
 
+def _norm_sector_name(name: str) -> str:
+    """去常见后缀（概念/板块/行业/指数）后的核心名，用于粗/细粒度包含匹配。"""
+    name = name.strip()
+    for suffix in ("概念", "板块", "行业", "指数"):
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+    return name.strip("/").strip()
+
+
+def _has_contains_match(name: str, norms: set[str]) -> bool:
+    """name 与任一规范化板块名存在双向包含关系（如 半导体 ↔ 半导体设备）。
+
+    仅作为别名字典匹配的补充兜底：morning 用粗粒度方向（AI/CPO/半导体），
+    review 用行情细粒度概念（存储芯片/光刻机），纯字典精确匹配会全部落空。
+    """
+    n = _norm_sector_name(name)
+    if len(n) < 2:
+        return False
+    for other in norms:
+        if len(other) < 2:
+            continue
+        if n in other or other in n:
+            return True
+    return False
+
+
 def match_sectors_code_level(
     morning_sectors: list[str],
     review_sectors: list[str],
@@ -162,17 +188,21 @@ def match_sectors_code_level(
     for s in review_sectors:
         review_all |= standards_for(s)
 
+    # 规范化名集合，用于粗/细粒度包含匹配兜底
+    morning_norms = {_norm_sector_name(s) for s in morning_sectors}
+    review_norms = {_norm_sector_name(s) for s in review_sectors}
+
     overlap: list[str] = []
     over_focused: list[str] = []
     for s in morning_sectors:
-        if standards_for(s) & review_all:
+        if (standards_for(s) & review_all) or _has_contains_match(s, review_norms):
             overlap.append(s)
         else:
             over_focused.append(s)
 
     missing: list[str] = []
     for s in review_sectors:
-        if not (standards_for(s) & morning_all):
+        if not (standards_for(s) & morning_all) and not _has_contains_match(s, morning_norms):
             missing.append(s)
 
     return overlap, missing, over_focused
