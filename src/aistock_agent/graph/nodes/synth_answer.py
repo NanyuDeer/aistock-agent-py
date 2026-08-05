@@ -29,6 +29,7 @@ from aistock_agent.schemas.chat_contract import (
     SubGoal,
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
+from aistock_agent.services.token_usage import get_token_usage
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 from aistock_agent.utils.date import (
     prev_trading_day,
@@ -577,8 +578,12 @@ async def _persist_chat_analysis(
         return None
 
 
-async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
-    """synth_answer 节点入口。"""
+async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2：原实现改名，逻辑零改动）。
+
+    计划 C（线 3）的 cards 汇总逻辑块在本函数内新增（消费
+    state["evidences"] 按 skill_name 汇总），与本计划隔离。
+    """
     import time
 
     start = time.monotonic()
@@ -789,3 +794,15 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "trace": trace,
             "messages": [AIMessage(content=insight.conclusion)],
         }
+
+
+async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2 包装：token_usage 一行收口）。
+
+    委托 _synth_answer_node_core（原实现），在任意 return 路径统一附加
+    token_usage = get_token_usage()（全 0/未采集为 None）。只加一行——
+    与计划 C 的 cards 汇总逻辑块（在 core 内）隔离，git 合并友好。
+    """
+    result = await _synth_answer_node_core(state)
+    result["token_usage"] = get_token_usage()
+    return result
