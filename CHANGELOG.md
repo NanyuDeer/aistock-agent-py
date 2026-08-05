@@ -2,6 +2,19 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [master] 2026-08-05 — 测试同步：event_conduction 返回结构变更（PR #52 回归修复）
+
+**开发者**: NanyuDeer
+
+### 修复
+- `tests/unit/test_event_conduction_service.py`：断言适配 `EventConductionOutput.status` 新结构（`result.success` → `result.status.success` 等），import 改为 `EventConductionOutput`
+- `tests/test_routes_briefing.py`：event conduction mock 返回改为 `EventConductionOutput(status=EventConductionResult(...))`（3 处），修复 PR #52（EventConductionOutput 包装类）引入的 8 个测试回归
+
+### 测试
+- `test_event_conduction_service.py` + `test_routes_briefing.py`：43 passed
+
+---
+
 ## [master] 2026-08-05 — market_snapshot 板块命中率失真修复（粗/细粒度名称对齐）
 
 **开发者**: Aria
