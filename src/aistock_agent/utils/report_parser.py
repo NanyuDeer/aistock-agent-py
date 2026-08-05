@@ -63,7 +63,7 @@ def extract_podcast_brief(content: dict) -> str:
 
 
 def extract_display_report(content: dict) -> str:
-    """只提取 display_report 文本（供 ai_advisor_agent 使用）
+    """只提取 display_report 文本（供 broadcast_agent 消费）
 
     1.0 版本返回 text 字段。
     """

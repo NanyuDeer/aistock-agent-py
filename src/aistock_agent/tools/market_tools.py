@@ -24,6 +24,9 @@ GLOBAL_MARKET_TICKERS = {
     "nikkei": "^N225",        # 日经
     "hsi": "^HSI",            # 恒生
     "kospi": "^KS11",         # 韩综
+    "dax": "^GDAXI",          # 德国DAX
+    "ftse": "^FTSE",          # 英国富时100
+    "cac": "^FCHI",           # 法国CAC40
     "gold": "GC=F",
     "crude": "CL=F",
     "usdcny": "USDCNY=X",
@@ -86,6 +89,9 @@ def _market_display_name(key: str) -> str:
         "nikkei": "日经225",
         "hsi": "恒生指数",
         "kospi": "韩国综合",
+        "dax": "德国DAX",
+        "ftse": "英国富时100",
+        "cac": "法国CAC40",
         "gold": "黄金",
         "crude": "原油",
         "usdcny": "美元/人民币",

@@ -9,6 +9,7 @@
 build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推理。
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -86,6 +87,141 @@ def _strip_code_fences(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+# ============================================================================
+# LLM 输出字段名归一化 — prompt 强化的兜底
+# ============================================================================
+
+# LLM 常见错误字段名 → schema 正确字段名
+_SECTOR_HIT_FIELD_MAP: dict[str, str] = {
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+}
+
+_EVENT_HIT_FIELD_MAP: dict[str, str] = {
+    "event": "event_title",
+    "title": "event_title",
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+    "verification": "result",
+    "actual_effect": "actual_impact",
+    "impact": "actual_impact",
+}
+
+# 需要删除的多余字段
+_FIELDS_TO_REMOVE: set[str] = {"evidence_ids"}
+
+# 合法方向值
+_DIRECTION_VALUES: set[str] = {"bullish", "bearish", "neutral"}
+# SectorHit result 合法值
+_SECTOR_RESULT_VALUES: set[str] = {"hit", "miss"}
+
+# 相反方向映射（用于从 result=miss 推断 actual_direction）
+_OPPOSITE_DIRECTION: dict[str, str] = {
+    "bullish": "bearish",
+    "bearish": "bullish",
+    "neutral": "neutral",
+}
+
+
+def _normalize_sector_hit(hit: dict[str, object]) -> dict[str, object]:
+    """归一化单个 SectorHit 字段名。"""
+    nh = dict(hit)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        nh.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _SECTOR_HIT_FIELD_MAP.items():
+        if wrong in nh:
+            if correct not in nh:
+                nh[correct] = nh[wrong]
+            nh.pop(wrong)
+    # 修正 actual_direction 被填入 result 值的情况（LLM 常犯错误）
+    actual = nh.get("actual_direction")
+    if actual and actual not in _DIRECTION_VALUES:
+        # actual_direction 被填成了 hit/miss，移动到 result
+        if actual in _SECTOR_RESULT_VALUES and "result" not in nh:
+            nh["result"] = actual
+        nh.pop("actual_direction", None)
+    # 如果 actual_direction 缺失但有 result，从 morning_direction + result 推断
+    if "result" in nh and "actual_direction" not in nh:
+        morning_val = nh.get("morning_direction", "neutral")
+        morning = morning_val if isinstance(morning_val, str) else "neutral"
+        if nh["result"] == "hit":
+            nh["actual_direction"] = morning
+        elif nh["result"] == "miss":
+            nh["actual_direction"] = _OPPOSITE_DIRECTION.get(morning, "neutral")
+        else:
+            nh["actual_direction"] = "neutral"
+    # 确保 deviation_note 存在
+    nh.setdefault("deviation_note", "")
+    return nh
+
+
+def _normalize_event_hit(evt: dict[str, object]) -> dict[str, object]:
+    """归一化单个 EventHit 字段名。"""
+    ne = dict(evt)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        ne.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _EVENT_HIT_FIELD_MAP.items():
+        if wrong in ne:
+            if correct not in ne:
+                ne[correct] = ne[wrong]
+            ne.pop(wrong)
+    # 确保 actual_impact 存在
+    ne.setdefault("actual_impact", "")
+    # 确保 note 存在
+    ne.setdefault("note", "")
+    return ne
+
+
+def _normalize_prediction_validation(raw_pv: dict[str, object]) -> dict[str, object]:
+    """归一化 LLM 输出的 prediction_validation 字段名和值。
+
+    LLM 经常用 predicted_direction/event/verification 等字段名，
+    而非 schema 要求的 morning_direction/event_title/result。
+    此函数在 model_validate 前做字段名映射，作为 prompt 强化的兜底。
+    """
+    pv = dict(raw_pv)
+
+    # 归一化 sector_hits
+    raw_hits = pv.get("sector_hits", [])
+    if isinstance(raw_hits, list):
+        pv["sector_hits"] = [
+            _normalize_sector_hit(h) for h in raw_hits if isinstance(h, dict)
+        ]
+
+    # 归一化 event_hits
+    raw_events = pv.get("event_hits", [])
+    if isinstance(raw_events, list):
+        pv["event_hits"] = [
+            _normalize_event_hit(e) for e in raw_events if isinstance(e, dict)
+        ]
+
+    return pv
+
+
+def _normalize_llm_trace_json(raw_json: str) -> str:
+    """解析 LLM 输出的 JSON，归一化 prediction_validation 字段名后返回。
+
+    如果解析失败或无 prediction_validation，原样返回。
+    """
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return raw_json
+
+    if not isinstance(data, dict):
+        return raw_json
+
+    pv = data.get("prediction_validation")
+    if isinstance(pv, dict) and pv.get("status") != "no_forecast":
+        data["prediction_validation"] = _normalize_prediction_validation(pv)
+
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ============================================================================
@@ -370,6 +506,34 @@ def validate_trace_against_snapshot(
                 f"{label} observable_result must reference primary phenomenon fact_ids"
             )
 
+    # ── prediction_validation 校验 ──
+    morning_forecast = snapshot.morning_forecast
+    pv = trace.prediction_validation
+
+    if morning_forecast is not None:
+        if pv is None:
+            raise ValueError(
+                "prediction_validation 不得为 None：snapshot.morning_forecast 非空时必须输出预判对照"
+            )
+        if pv.status == "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 不得为 no_forecast：morning_forecast 非空"
+            )
+        if pv.status in {"hit", "partial", "miss"} and len(pv.sector_hits) == 0:
+            raise ValueError(
+                f"prediction_validation.status={pv.status} 时 sector_hits 不得为空"
+            )
+    else:
+        # morning_forecast 为空时，pv 必须为 None 或 status=no_forecast
+        if pv is not None and pv.status != "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 必须为 no_forecast：snapshot.morning_forecast 为空"
+            )
+        if pv is not None and (len(pv.sector_hits) > 0 or len(pv.event_hits) > 0):
+            raise ValueError(
+                "prediction_validation.status=no_forecast 时 sector_hits/event_hits 必须为空"
+            )
+
 
 # ============================================================================
 # Markdown 渲染 — 从已验证的 JSON 工件渲染展示层
@@ -487,6 +651,30 @@ def render_market_trace_markdown(
         lines.append("- 行情数据不足，无法可靠判断市场现象")
     else:
         lines.append("- 证据不足，未确认主因。")
+    lines.append("")
+
+    # 预判对照章节
+    pv = trace.prediction_validation
+    lines.append("## 预判对照")
+    if pv is None or pv.status == "no_forecast":
+        lines.append("无晨报预测可对照。")
+    else:
+        status_map = {"hit": "全部命中", "partial": "部分命中", "miss": "全部偏离"}
+        lines.append(f"- 对照状态：{status_map.get(pv.status, pv.status)}")
+        if pv.sector_hits:
+            lines.append("- 板块方向对照：")
+            for hit in pv.sector_hits:
+                result_text = "命中" if hit.result == "hit" else "偏离"
+                line = f"  - {hit.sector}：晨报看{hit.morning_direction}，实际{hit.actual_direction}，{result_text}"
+                if hit.result == "miss" and hit.deviation_note:
+                    line += f"（原因：{hit.deviation_note}）"
+                lines.append(line)
+        if pv.event_hits:
+            lines.append("- 事件影响对照：")
+            for hit in pv.event_hits:
+                lines.append(f"  - {hit.event_title}：预期{hit.morning_direction}，实际{hit.actual_impact}，{hit.result}")
+        if pv.overall_note:
+            lines.append(f"- 整体结论：{pv.overall_note}")
     lines.append("")
 
     lines.append("## 候选解释与反证")
@@ -821,7 +1009,9 @@ async def run(state: AgentState) -> dict[str, object]:
                 else str(ai_message.content)
             )
             cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
+            trace = MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
@@ -1020,7 +1210,9 @@ async def run_review(
                 else str(ai_message.content)
             )
             cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
+            trace = MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(

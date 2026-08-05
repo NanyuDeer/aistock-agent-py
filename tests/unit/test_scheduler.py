@@ -1063,3 +1063,90 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
     assert "evening_chain" in job_ids
     assert "review_quick" not in job_ids
+
+
+# ── 手动补跑晚间链路（/admin/trigger/evening_chain 支持） ──
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_explicit_report_date_skips_trading_day_check() -> None:
+    """显式传 report_date 时跳过交易日检查（非交易日也执行完整链路）。"""
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            _traceable_report("review", 1, {"text": "review"}),
+            _traceable_report("market_snapshot", 2, {"text": "snapshot"}),
+            _traceable_report("iterate", 3, {"text": '{"status": "normal"}'}),
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        # 非交易日：只有显式传日期的手动补跑才允许执行
+        patch.object(scheduler, "is_trading_day", return_value=False),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24", "summary": "snapshot"},
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(return_value={"final_response": '{"status": "normal"}'}),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(broadcast, "run", new=AsyncMock()),
+    ):
+        result = await scheduler._run_evening_chain_task(report_date="2026-07-24")
+
+    assert result["status"] == "ok"
+    assert result["report_date"] == "2026-07-24"
+    assert result["stages"]["broadcast"] == "ok"
+    build_brief.assert_awaited_once_with("evening", "2026-07-24")
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_without_date_skips_non_trading_day() -> None:
+    """缺省日期且非交易日时返回 skipped（原调度行为保持）。"""
+    from datetime import date
+
+    from aistock_agent.services import scheduler
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=False),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 26)),
+    ):
+        result = await scheduler._run_evening_chain_task()
+
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_returns_failed_stage_when_review_invalid() -> None:
+    """review 产物不可追溯时返回 failed + stage=review。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(return_value=None)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+    ):
+        result = await scheduler._run_evening_chain_task()
+
+    assert result["status"] == "failed"
+    assert result["stage"] == "review"

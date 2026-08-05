@@ -25,7 +25,6 @@ from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
-from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
 from aistock_agent.services.http_client import HttpClientPool
@@ -35,6 +34,7 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.token_usage import reset_token_usage
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
@@ -92,18 +92,23 @@ async def chat_message(
     保留兼容，前端全部切到双流后清理。
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库不消费）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
+    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
+    initial_state["final_response"] = None
+    initial_state["goals"] = None                    # D34：同 transient 每轮归零
+    initial_state["general_source"] = None           # P7+P8：general 兜底同 transient 每轮归零
     result = await graph.ainvoke(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
     )
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    # ChatAgent 无 advisor_trace（新子图），固定 None
     return ChatResponse(
         content=content,
         session_id=session_id,
-        advisor_trace=None,
     )
 
 
@@ -189,11 +194,16 @@ async def _stream_messages(
                 final_state = await graph.aget_state(
                     config={"configurable": {"thread_id": session_id}}
                 )
+                final_cards = final_state.values.get("cards")
                 yield {
                     "type": SSEEventType.DONE,
                     "final_response": final_state.values.get("final_response", ""),
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
-                    "advisor_trace": final_state.values.get("advisor_trace"),
+                    # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
+                    # 仅供前端本地累加展示，本路径不落库）
+                    "token_usage": final_state.values.get("token_usage"),
+                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，需 model_dump 转 dict
+                    "cards": [c.model_dump() for c in final_cards] if final_cards else None,
                 }
                 break
             if not isinstance(event, dict):
@@ -272,8 +282,15 @@ async def chat_stream_messages(
     yields: llm_start → text/text/... → done（带 final_response + analysis_reports）
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：SSE 路径按轮重置（DONE 从 state.values 读快照）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
+    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
+    initial_state["final_response"] = None
+    initial_state["goals"] = None                    # D34：同 transient 每轮归零
+    initial_state["general_source"] = None           # P7+P8：general 兜底同 transient 每轮归零
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
@@ -357,7 +374,7 @@ async def trigger_morning_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -563,7 +580,7 @@ async def trigger_review_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -626,7 +643,8 @@ async def trigger_broadcast_chain(
     start = time.time()
 
     def _make_state(intent: str | None = None) -> dict[str, object]:
-        """构造 manual 触发的 AgentState（trigger_source=manual 使报告写DB）"""
+        """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，
+        与 09:00 调度任务一致）"""
         return {
             "messages": [],
             "session_id": f"manual_broadcast_{today}",
@@ -637,7 +655,7 @@ async def trigger_broadcast_chain(
             "tag_code": None,
             "analysis_reports": {},
             "final_response": None,
-            "trigger_source": "manual",
+            "trigger_source": "scheduler",
             "report_date": today,
         }
 
@@ -765,7 +783,7 @@ async def trigger_trend_score(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": today,
     }
 
@@ -1006,28 +1024,6 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     return {"code": 404, "message": "报告未生成", "data": None}
 
 
-# ── 市场复盘问答 ─────────────────────────────────────────────────
-
-
-@router.post("/market-trace-qa/message")
-async def market_trace_qa_message(
-    req: MarketTraceQaRequest,
-    _: None = Depends(verify_internal_token),
-) -> MarketTraceQaResponse:
-    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
-
-    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
-    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
-    """
-    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
-
-    return await answer_market_trace_qa(
-        message=req.message,
-        report_date=req.report_date,
-        session_id=req.session_id,
-    )
-
-
 # ── 健康检查 ──────────────────────────────────────────────────────
 
 
@@ -1203,6 +1199,50 @@ async def trigger_review_full(
             error=str(e), exc_info=True, trace_id=trace_id,
         )
         raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
+
+
+@router.post("/admin/trigger/evening_chain")
+async def trigger_evening_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast）。
+
+    供管理员在错过 15:30 调度或灰度验证时使用。review 阶段命中 Redis 缓存
+    （TTL 2h）时快速返回；显式传入 report_date 时跳过交易日检查。
+    返回各阶段状态，供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_evening_chain_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-evening-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_evening_chain_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_evening_chain_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_evening_chain_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "stages": result.get("stages"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_evening_chain_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
 
 
 # ── CHAT QA ────────────────────────────────────────────────────────

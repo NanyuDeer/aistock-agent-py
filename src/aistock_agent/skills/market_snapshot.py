@@ -19,9 +19,69 @@ _VALID_SCOPES = frozenset({"a_share", "global", "both"})
 _VALID_KINDS = frozenset({"quick", "full"})
 
 
-def _build_a_share_facts(normalized: dict[str, Any]) -> list[str]:
-    """从归一化的 A 股数据中提取可读 facts。"""
+def _date_label(trade_date: object) -> str | None:
+    """YYYYMMDD → 'MM-DD' 展示标签；格式异常返回 None（防御：不拼日期、不崩溃）。"""
+    if isinstance(trade_date, str) and len(trade_date) == 8 and trade_date.isdigit():
+        return f"{trade_date[4:6]}-{trade_date[6:8]}"
+    return None
+
+
+def _build_a_share_card(
+    normalized: dict[str, Any], trade_date: object = ""
+) -> dict[str, object] | None:
+    """从 normalize_a_share 输出构造 a_share_card（供 raw.a_share_card / cards 消费）。
+
+    6 指数数组取自 normalized["indexes"]（dict，key=SH000001 形式），字段防御映射：
+    index_name←name / code←ts_code / value←close / change←change（Node 原始有才写）/
+    change_pct←change_pct；涨跌家数取自 normalized["breadth"]（advance_count→up_count、
+    flat_count→flat_count、decline_count→down_count）；trade_date 透传（缺失省略）。
+    无可用指数时返回 None（T5 据此跳过 market 卡片）。
+    """
+    indexes_map = normalized.get("indexes")
+    if not isinstance(indexes_map, dict):
+        return None
+    indices: list[dict[str, object]] = []
+    for idx in indexes_map.values():
+        if not isinstance(idx, dict):
+            continue
+        entry: dict[str, object] = {}
+        for src_key, dst_key in (
+            ("name", "index_name"),
+            ("ts_code", "code"),
+            ("close", "value"),
+            ("change", "change"),
+            ("change_pct", "change_pct"),
+        ):
+            value = idx.get(src_key)
+            if value is not None:
+                entry[dst_key] = value
+        if entry:
+            indices.append(entry)
+    if not indices:
+        return None
+    card: dict[str, object] = {"indices": indices}
+    breadth = normalized.get("breadth")
+    if isinstance(breadth, dict):
+        for src_key, dst_key in (
+            ("advance_count", "up_count"),
+            ("flat_count", "flat_count"),
+            ("decline_count", "down_count"),
+        ):
+            value = breadth.get(src_key)
+            if value is not None:
+                card[dst_key] = value
+    if trade_date:
+        card["trade_date"] = str(trade_date)
+    return card
+
+
+def _build_a_share_facts(normalized: dict[str, Any], trade_date: object = "") -> list[str]:
+    """从归一化的 A 股数据中提取可读 facts（始终带交易日，防止 LLM 误标"今日"）。"""
     facts: list[str] = []
+    date_label = _date_label(trade_date)
+    if date_label:
+        # 锚点行：覆盖成交额/涨跌停/板块等其余不带日期的行
+        facts.append(f"数据日期：{date_label}")
 
     # 指数
     indexes_map = normalized.get("indexes")
@@ -30,12 +90,13 @@ def _build_a_share_facts(normalized: dict[str, Any]) -> list[str]:
             if not isinstance(idx, dict):
                 continue
             name = idx.get("name", "")
+            display = f"{name}({date_label})" if date_label else name
             close = idx.get("close", "")
             change_pct = idx.get("change_pct")
             if change_pct is not None:
-                facts.append(f"{name}: {close} ({change_pct:+.2f}%)")
+                facts.append(f"{display}: {close} ({change_pct:+.2f}%)")
             elif close:
-                facts.append(f"{name}: {close}")
+                facts.append(f"{display}: {close}")
 
     # 市场广度
     breadth = normalized.get("breadth")
@@ -242,7 +303,12 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
                     return "a_share", local_facts, local_sources, False
 
             normalized = normalize_a_share(a_share_raw)
-            local_facts.extend(_build_a_share_facts(normalized))
+            local_facts.extend(_build_a_share_facts(normalized, a_share_raw.get("trade_date")))
+            # P11（线 3）：a_share_card 写入 a_share_meta（raw 构造时 **a_share_meta 合并）；
+            # scope 不含 a_share 时 _fetch_a_share 不执行 → raw 无 a_share_card。
+            a_share_card = _build_a_share_card(normalized, a_share_raw.get("trade_date"))
+            if a_share_card is not None:
+                a_share_meta["a_share_card"] = a_share_card
             local_sources.append(
                 _build_a_share_source(
                     a_share_raw, captured_at, used_last_close=used_last_close

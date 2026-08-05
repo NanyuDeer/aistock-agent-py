@@ -20,17 +20,20 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 个股分析 | agents/workers/stock.py | deep_think | P0 |
 | 板块分析 | agents/workers/sector.py | deep_think | P0 |
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
-| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
+| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0（报告区分短线/长线风口） |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
 | 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
-| 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
-| 交易复盘 | workers/review.py | deep_think | P2 |
+| 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
+
+> **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
+>
+> **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、财联社电报当日全量爬取（`/internal/news/telegraph` 优先，降级到 `/internal/news/latest`）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
 
 ## 核心架构
 
@@ -46,10 +49,9 @@ START → supervisor(quick_think, 意图路由)
   ├── intent="hot_burst"     → hot_burst_agent（deep_think）
   ├── intent="alert"         → alert_agent（deep_think）
   ├── intent="broadcast"     → broadcast_agent（deep_think）
-  ├── intent="ai_advisor"    → ai_advisor_agent（deep_think）
   ├── intent="trend_score"   → trend_score_agent（deep_think）
   ├── intent="general"       → general_agent（quick_think）
-  └── [user触发, intent≠general/broadcast] → ai_advisor_agent（DB报告→整理回复）
+  └── [user触发, 未匹配 specialist intent] → general_agent（quick_think 兜底）
         │
         ▼
        END
@@ -81,8 +83,6 @@ START → supervisor(quick_think, 意图路由)
        │
        ├──→ stock_analyst：个股深度分析
        │
-       ├──→ ai_advisor_agent：智能投顾（DB报告→整理回复）
-       │
        └──→ broadcast_agent：播报生成
               │
               ├──→ 输出双人对话格式（AI分析师 + AI主持人）
@@ -108,6 +108,8 @@ START → supervisor(quick_think, 意图路由)
 - 回退失败：degraded=True
 - degraded 为整体标志：任一数据源缺失即 True（global 无 last-close 回退源，失败仍 degraded）
 - A 股 last-close 成功但 global 失败 → degraded=True，但 facts 仍含 A 股真实数据（source 标注 trade_date）；A 股部分可独立成功，不被 global 拖累
+- **facts 日期标注（P3-fix-3，2026-08-03）**：facts 始终带交易日——首行锚点 `数据日期：MM-DD`，指数行 `名称(MM-DD): 收盘 (涨跌幅)`，LLM 无法把最近交易日误标"今日"。
+- **非交易时段引导提示（P3-fix-3）**：`synth_answer._append_non_trading_time_hint` 触发条件由"仅 degraded 行情"放宽为"行情类证据存在且数据非今日"（market_snapshot 看 `raw.used_last_close` / `raw.a_share_success`，其他行情 skill 看 `degraded`）；文案含"你说的是否是这个交易日的数据？"引导确认。数据确为今日（a_share_success=True 且无 used_last_close）时不触发。
 
 ### qa_router 增强：2026-08-01
 - 指数名（沪指/深成指/创业板指/科创50/沪深300/恒生等）→ market_snapshot（a_share + index_name）
@@ -120,7 +122,7 @@ START → supervisor(quick_think, 意图路由)
 **复杂度双模式（D4）**：
 - `QARouterOutput.complexity`（必填 Literal["light","deep"]）；`QuestionState` + `complexity`/`force_deep`/`deep_source`/`fallback_to_skill`（T1/T2）
 - 判定：LLM 结构化输出为主；LLM 失败按"意图（stock/sector/hot_burst）+ 分析类词"规则兜底（`_infer_complexity_by_fallback`）；hot_burst 兜底固定 deep
-- `force_deep`：ws.py 读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
+- `force_deep`：ws.py 与 routes.py（/chat/message、/chat/stream/messages，P3 对齐）读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变，先例 user_id）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
 - hot_burst 意图（D6 前置）：`InsightGoal.intent`/`SkillCall.skill_name` Literal 加 `"hot_burst"`；KEYWORD_FALLBACK 加（机构调研/热门股/调研）；hot_burst 无对应 skill，light 会 skill_executor 空转 → 固定 deep 走 escalate
 
 **图外切换 + 统一出口（D1/D3/D7/D31）**：
@@ -138,6 +140,74 @@ START → supervisor(quick_think, 意图路由)
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
+
+### CHAT QA 落库与多轮（P2，2026-08-02）：D11/D15-D18/D12/D13/D38/D39/D14 + checkpointer 持久化
+
+- **user_id 透传（D11）**：`QuestionState.user_id`；ws.py 与 routes.py（/chat/message、/chat/stream/messages）构造 state 后追加（`build_chat_initial_state` 签名不变）；前端 `useChatStream.ts` / `agent.ts` 补传；**未登录（缺省/空串）为 None**
+- **chat_analysis 落库（D15-D18）**：deep 分支 `_persist_chat_analysis`（`graph/nodes/synth_answer.py`）——登录守卫（D38）+ D18 双层 content（summary=前160字/details=全文/stocks/risks=[]/schema_version="2.0"）+ `save_analysis_report(update_cache=False)`（排除 report_cache 公共列表）+ 失败降级不抛异常（warning 日志）；Node 侧 `VALID_REPORT_TYPES` 已含 `chat_analysis`（三元组 upsert 覆盖，7 天 TTL）
+- **last_deep_report（D12/D13/D38/D39 双写解耦）**：`DeepReportRef` 单引用（worker/report_id/question/summary≤160/symbols/tag_codes/created_at）；**无条件写**（与登录无关）；report_id 由落库回填（失败/未登录=None）；ws DONE 负载携带（null 兼容，前端 P3 消费）
+- **追问复用（D14/D17）**：qa_router `_build_followup_context` 节点内拼接摘要（**`SYSTEM_PROMPT` 常量字节不变**）；`_postprocess_skill_calls(output, message, state)` 对 `report_lookup(chat_analysis)` 确定性注入 `user_id`（登录）/ `summary_fallback`（未登录）/ 无引用移除 call；`skills/report_lookup.py` chat_analysis 分支（登录读 DB 三元组 / 未登录会话内摘要，review/morning 分支不变）
+- **每轮 transient 归零（T6 跨任务修复）**：`deep_source`/`final_response` 是单轮路由信号，ws.py/routes.py 入口按轮置 None——否则 checkpointer 跨轮残留会让追问轮被 synth_answer deep 分支劫持（P1 起存在，T6 发现修复）
+- **checkpointer 持久化（P9 前置）**：`CHECKPOINTER_BACKEND=sqlite` → AsyncSqliteSaver + aiosqlite（chat 图 async 执行必须用 AsyncSqliteSaver，sync 版 NotImplementedError）；`get_checkpointer()` 同步入口经 `_run_coro_sync` 桥接；`_ensure_aiosqlite_compat` 补 is_alive；`threading._register_atexit` 退出关闭连接（防进程挂起）；redis 后端需 Redis 6.2+/RedisJSON；依赖钉版 `langgraph-checkpoint-sqlite==2.0.11` + `aiosqlite>=0.22,<0.23`（勿装 3.x/最新版）
+- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）；多 worker 共写 .langgraph.db 有 SQLITE_BUSY 风险（pm2 单实例无碍）
+
+### CHAT QA P3-fix（2026-08-03）：reasoning 思维链 + 交易时段 5 状态降级
+
+- **reasoning 事件流**：`WSEventType.REASONING = "reasoning"`；`graph/nodes/_reasoning.py::stream_reasoning(websocket, node, message)` 每节点 start 时经 `asyncio.create_task` 异步启动（fire-and-forget，不阻塞主图），`get_quick_think` 按节点模板（`prompts/chat/reasoning.py`，qa_router/skill_executor/synth_answer/escalate）生成 50-100 字「我在做什么 + 为什么」，流式 chunk 经 WS `reasoning` 事件转发；失败/超时（2s）/空 message → 静态兜底 label（`_FALLBACK_LABELS`），不抛异常。**关键**：直接接收用户原始 `message` 字符串，不读 state（`initial_state` 在 `on_chain_start` 时 stale，且 QuestionState 消息存 `state["messages"]`，`state.get("message")` 恒 None）。`api/ws.py::_sanitize_label` 过滤异常 JSON label（intermediate/tool_start 均应用，前端 buildExecTree 双保险）
+- **交易时段 5 状态提示**：`utils/date.py` 新增 `is_trading_time`（9:30-11:30 / 13:00-15:00 含边界）+ `trading_session_status`（trading/pre_open/lunch_break/closed/non_trading_day）；`_append_non_trading_day_hint` 演进为 `_append_non_trading_time_hint`（degraded 与 LLM 成功路径均接入，行情类降级证据才提示，已含前缀不重复；旧函数保留为弃用别名）
+- **skill 降级语义增强**：`stock_snapshot`/`capital_flow` 空数据（`_EMPTY_MARKERS`）**或**非交易时段 → `degraded=True` + facts 带时段提示 + `raw.trading_status`（与 market_snapshot「非交易日回退最近交易日 degraded=False」语义对照，勿混）
+
+### CHAT QA P3-fix-2（2026-08-03）：reasoning 时序修正 + 节点过滤修正
+
+- **reasoning task 防 GC + DONE 前 drain**：`api/ws.py` 用 `reasoning_tasks: list[asyncio.Task]` 列表持有 `asyncio.create_task` 返回的引用（fire-and-forget task 若不保存引用会被 GC 在执行前取消，官方文档明确警告）；DONE 前 `await _drain_reasoning_tasks(reasoning_tasks)`（`_REASONING_DRAIN_TIMEOUT_SEC=2.5` 略大于 `_reasoning.py` 的 2.0s，超时 cancel 未完成 task，不阻塞 DONE）。**WS 事件协议不变**（reasoning 类型/字段不变），仅时序演进为 DONE 前集中发送（P3-fix 的"节点 start 即时转发"描述已过时）。
+- **`current_node` 状态替代失效的 v2 name 过滤**：LangGraph `astream_events v2` 的 `name` 在 ON_CHAT_MODEL_STREAM 时是模型名而非节点名，旧 `name in ("supervisor","qa_router")` 过滤永远失效 → qa_router/synth_answer/supervisor 的结构化 JSON 泄漏进 text 流。修复：on_chain_start 每次更新 `current_node = name`（置于 seen_nodes 守卫外），ON_CHAT_MODEL_STREAM 用 `current_node in (qa_router, synth_answer, supervisor)` 过滤；`on_chain_end` **仅当 `name == current_node` 时清除**（v2 对每个嵌套 runnable 都发 on_chain_end，无条件清除会在节点内多次 LLM 调用时中途放行 JSON）。
+- **测试**：`tests/unit/test_ws_chat_replacement.py`（T1 reasoning 时序/过滤/drain 超时 + 前序 D11/T4 补齐）+ `tests/integration/test_ws_chat_replacement.py`（按新过滤语义重写，`stream_reasoning` 全部 patch 防真实 LLM）。
+
+### CHAT QA P4（2026-08-03）：多意图（D34）+ 维度预筛（D30）+ 预测降级提示（D35）
+
+- **多子目标（D34）**：`SubGoal`（id/question/intent/dimension/symbols/tag_codes/time_range）；`QARouterOutput.goals` + `SkillCall.goal_id` + `Evidence.goal_id`（skill_executor 透传）+ `QuestionState.goals` + `AnswerTrace.goals`；qa_router 在闸门 3 之后做维度候选集提取（`_DIMENSION_KEYWORDS`：predict/trace/validate，predict 自动补同标的 validate）并注入 prompt；LLM 输出 goals 经 D27 后处理（id 重编号 g1..gN、goal_id 归一、goal 投影第一个子目标、**单非预测子目标坍缩回单意图**）；synth_answer 在 `state.goals` 非空时按子目标分节回答（先 validate/trace 现状数据后 predict 提示，每非预测子目标一次 deep_think，风险段全文单次、非交易时段提示一次文首）
+- **维度预筛（D30 闸门 4）**：只做预筛辅助不短路；LLM 失败时按候选集构建多子目标 compose 兜底（≥2 维度或单预测），单非预测维持现状关键词兜底；纯预测且命中非个股关键词意图时让位关键词兜底
+- **预测维降级（D35）**：`PREDICT_DEGRADED_HINT = "预测功能开发中，可先查看当前趋势分析。"` 代码生成（多个 predict 子目标只输出一次），不编造预测；predict 子目标可携带同标的 validate 取数作"当前趋势分析"依据；**单意图预测问题（闸门 1/2 短路命中 predict 词，如"茅台明天会涨吗"/"沪指明天会涨吗"）同样附加 predict 子目标**（不 bypass 闸门、不升级 deep）
+- **兼容**：单意图路径字节不变（唯一例外为上述 D35 单意图预测附加）；`goals` 为单轮 transient（ws.py/routes.py 入口按轮归零）；WS/SSE 事件协议不变
+
+### CHAT QA P5（2026-08-04）：能力补齐（D40-D42）+ 快速指数快照 + P4 遗留优化
+
+- **4 个新 skill（契约 3 Literal 各追加 compare_stocks/stock_history/trend_ranking/index_snapshot）**：
+  - `compare_stocks`（D40）：`asyncio.gather` 并发 `get_quote.ainvoke`，2~5 标的，部分失败不整条丢弃（degraded + 标"数据暂不可用"），仅个股语义；`_extract_multi_symbols` + KEYWORD_FALLBACK 对比词条 + D27 白名单（<2 移除、>5 截断）
+  - `stock_history`（D41）：`node_api.get /internal/quote/{symbol}/kline`，`_DAYS_RE 近N天` 确定性短路（`_match_other_skill_intent` 排除其他意图词，防"600519 近5天新闻"被劫持）
+  - `trend_ranking`（D42）：`node_api.get_list /internal/trend/top`，空榜 degraded
+  - `index_snapshot`（工作线 B）：`/internal/index/quotes` 快速指数快照（几百 ms 绕开 quick 全市场 33s 慢路径），部分 null 不整体 degraded，失败不降级到 quick 全市场爬取
+- **§2.6 指数/个股消歧硬边界（单一事实源）**：指数语义**只由指数名触发**（沪指/上证指数/深成指/创业板指/科创50/沪深300 → index_snapshot）；裸 6 位代码（000001）恒为个股语义（平安银行）；指数名+代码并存（"沪指000001"）指数名优先；恒生/大盘/全市场词维持 `market_snapshot`（不变）
+- **P4 遗留 3 项**：闸门 1/2 单意图预测附加收紧为 `_STRONG_PREDICT_KEYWORDS = ("会涨","会跌","预测","展望","后市","未来")`（弱词仅闸门 4 候选注入）；兜底 validate+predict 同标的只发一条取数 call（`seen_calls` 去重）；兜底 trace 维度改走 `trace_lookup`
+
+### CHAT QA P7+P8 合并 + P9 纠错否定（2026-08-04，线 1）
+
+- **general 图外切换模式（复用 escalate 先例）**：`qa_router` conditional 三出口（escalate / skill_executor / general_fallback）→ `general_fallback` 节点 → synth_answer；`general_source` 单轮 transient 信号（science/gap，ws.py/routes.py 按轮归零）
+- **D32 科普升级**：education gate 0.5b 命中科普词不再固定话术，置 `general_source="science"` → `agents/general/chat.py` run_science 单次 quick_think 动态回答；产品内部概念（市场主线/风险提示）不纳入（防误伤 compose）
+- **D37 能力缺口**：LLM 失败路径 keyword_miss 且非个股缺码澄清 → `general_source="gap"` → run_gap（ReAct + tavily_finance_search）+ `skill-requests.md` 标记（失败仅 warning）；个股缺码澄清路径不变
+- **P9 纠错否定**：强否定词（不是/我说的是/错了/改一下/不对/其实是）+ 上一轮有历史才触发；**无历史守卫必须前置**（无历史不触发）；新标的提取：显式代码 > 指数名 > 名称（剥否定词+是+停用词后取句末中文段）resolve
+- **降级**：双模式顶层 try-catch，返回规范降级文本（含"暂不可用"）不抛异常；WS/SSE reasoning label 与事件协议不变
+
+### CHAT QA P5-fix（2026-08-05）：对比问句短路 + 名称候选净化 + 前端会话持久化 + 多轮指代兜底
+
+- **问题 8（对比问句被闸门 2 澄清拦截）**：`_STOCK_NAME_STOPWORDS` 补对比口语词（哪个/更好/更强/比较/对比）；新增 `_COMPARE_KEYWORDS` 增强对比词表 + `_extract_multi_name_candidates`（按"和/与/还是/vs"分隔符切分逐段提取名称）+ async `_resolve_multi_symbols`（代码优先 + 中文名逐个 resolve，**过滤非 6 位代码候选**）；**对比闸门 2.5 独立于闸门 2 且在其之前**（含代码对比句"600519 和五粮液哪个更好"会跳过闸门 2，必须短路 compare_stocks 否则落 LLM flaky）；`route_by_keyword_fallback` 对比分支仅接受纯 6 位代码（同步兜底无法 resolve 中文名，交回 LLM/闸门 2.5）。注意：**"和/与"不进停用词**（由多标的切分处理，避免"贵州茅台宁德时代"粘连成单候选）
+- **问题 11（候选名被口语词污染 resolve 404）**：`_STOCK_NAME_STOPWORDS` 补意图词/连接词（新闻/资讯/消息/公告/有/是/说/它/这/那，与 `_infer_stock_skill` 意图词对齐）——"宁德时代最近有什么新闻" → 候选名"宁德时代" resolve 成功
+- **问题 14（多轮指代兜底，2026-08-05 前端复测补）**：`chatStore.setSessionId` + storage 持久化（`STORAGE_KEYS.CHAT_SESSION_ID`）+ `useChatStream` WS 路径首轮写回（前端 session_id 层）；**qa_router LLM 失败路径新增多轮指代兜底**——`len(messages)>=3`（有上一轮）且当前消息含指代词（它/这/那/该/其/刚才/上次/这只/那只）时，从上一轮 user 消息 resolve symbol 复用（`_infer_stock_skill` 推断意图，`multiturn_ref` 约束标记），不落澄清。**触发背景**：LLM 偶发输出非法 JSON（DeepSeek 非确定性）→ 关键词兜底解析不出当前消息名称 → 此前直接澄清"请提供 6 位代码"。守卫防"帮我推荐股票"等误指代
+- **测试注意**：时段敏感失败（test_chat_e2e_compose/test_chat_persist_followup/test_chat_escalate 等盘前 startswith 断言、AsyncMock coroutine 交互）为基线既有（git stash 已验证），与 P5-fix 无关；qa_router 单测必须 mock LLM（get_quick_think），否则真实 DeepSeek 偶发错乱导致 flaky（对比短路测试已稳定走闸门 2.5）
+
+### CHAT QA P10 线 2 + P11 线 3（2026-08-05）：token 计费采集 + 后端卡片结构化
+
+**P10 线 2（用户维度计费，billing）**：
+- **contextvar 采集层**：`services/token_usage.py`（新增）`TokenUsageAccumulator`/`TokenUsageContext` + 模块级 `reset_token_usage`/`get_token_usage`/`record_token_usage`。**为什么用 contextvar 而非 state 传参**：`TokenUsageCallback` 挂在 ChatOpenAI callbacks= 上（services/llm.py），回调层无法访问节点 state；contextvar 随 `asyncio.create_task` 继承（ws 后台图任务 `routes.py _run_graph_to_queue` 与节点内 LLM 调用发生在同一 context 副本），record 与读取天然对齐。`observability/callback.py` `on_llm_end` 在 record_llm_tokens 后追加 `record_token_usage`（非 chat 场景无读取方零副作用）
+- **synth_answer 收口**：原节点改名 `_synth_answer_node_core`，新增包装 `synth_answer_node`——core 任意 return 路径统一附加 `result["token_usage"] = get_token_usage()`（全 0/未采集为 None）；与 cards 汇总逻辑块（在 core 内）分居两层隔离，git 合并友好
+- **WS 计费落库（选项 A）**：ws.py 入口 `reset_token_usage()` 按轮重置；on_chain_end 一次性捕获 token_usage + cards；`_drain_reasoning_tasks` 后、发 DONE 前落库——仅 `user_id` 非空 **且** token_usage 非空时 `await node_api.save_token_usage(...)`（try/except + logger.warning，落库失败不阻断 DONE，"永不 500"）；DONE 负载新增 `token_usage` + `cards`（无则 None，null 兼容）
+- **HTTP/SSE 双通道**：routes.py `chat_message`（HTTP 非流式）+ `chat_stream_messages`（SSE）入口均 `reset_token_usage()` 按轮重置；SSE DONE（`_stream_messages`）从 final_state.values 附带 `token_usage` + `cards`（None 默认，仅展示不落库）；HTTP 非流式路径只重置不消费
+- **落库接口**：`NodeApiClient.save_token_usage(*, user_id, session_id, prompt_tokens, completion_tokens, total_tokens, question=None)` → `POST /internal/usage/records`（app-api）
+
+**P11 线 3（后端卡片结构化，cards）**：
+- **skills raw 结构化字段**：stock_snapshot `raw["quote"]`（`_QUOTE_FIELD_MAP` 中文键→英文键）、capital_flow `raw["flow"]`（`_FLOW_FIELD_MAP`，`flow_5d` 恒 []）、market_snapshot `raw["a_share_card"]`（`_build_a_share_card`，仅 scope 含 a_share 才写入）、compare_stocks `raw["parsed"]`（逐标的 `available` True/False 条目）；**get_quote/get_capital_flow 工具 TEXT 输出冻结不变**，结构化数据只在 raw（额外一次 /internal/quote、/internal/flow 取 dict）
+- **synth_answer cards 汇总**：`_synth_answer_node_core` 每个 return 都带 `cards`——no_goal/澄清/闸门短路/异常 → None；deep 分支 → `_build_deep_card(last_deep_report)`；LLM 成功与 `_synth_multi_goal` → `_build_cards(evidences)`（按 skill_name 经 `_CARD_HANDLERS` 分派 market_snapshot/stock_snapshot/capital_flow/compare_stocks，逐卡片 try-except 失败跳过该卡片，全部失败/无卡片化证据 → None 不破坏对话）；P10 包装 `synth_answer_node` 不动
+- **契约**：`schemas/chat_contract.py` `ChatCard`（card_type Literal[market_snapshot/stock_snapshot/capital_flow/deep/comparison] + title + data，extra="forbid"）；`QuestionState.cards`/`token_usage` 字段由 B-T1 定义（P11/P10 共享）
 
 ## 目录结构
 
@@ -163,7 +233,7 @@ src/aistock_agent/
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
 │   ├── output_parser.py # Event Agent 双层输出解析（display_report + podcast_brief）
-│   └── date.py          # 日期/交易日工具
+│   └── date.py          # 日期/交易日工具 + 交易时段判断（is_trading_time / trading_session_status 5 状态）
 ├── errors/              # 异常体系
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
@@ -194,7 +264,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
+│   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -209,7 +280,7 @@ src/aistock_agent/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
-    └── ws.py            # WebSocket 流式接口（astream_events v2，7 种事件类型 + 节点标签映射）
+    └── ws.py            # WebSocket 流式接口（astream_events v2，8 种事件类型含 reasoning + _sanitize_label JSON 标签净化 + 节点标签映射）
 ```
 
 ## 开发规范
@@ -271,6 +342,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
+| `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
+| `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
+| `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
 
 ## 常用命令
 
@@ -302,6 +376,10 @@ cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
 # 查看日志
 pm2 logs aistock-agent --lines 50
 ```
+
+### WS 网关待办（P9/P10/P11 部署前提，2026-08-05 方案 1 决策）
+
+外网 `wss://gupiao-api.yaozhineng.com/api/agent/ws/chat` 需 Caddy WS 转发修复（`flush_interval -1`，§roadmap 5.3）。未通期间：前端 WS→HTTP 非流式降级自动生效（`useChatStream` 3s 超时兜底，无需临时代码）；P10 计费仅 WS 路径落库（WS 修复后启用）；P11 cards 由线 5 前端消费（当前前端不渲染 cards，无损失）。
 
 ### Stock Trace Consumer 集成模式（2026-08-01）
 
@@ -348,7 +426,6 @@ pm2 logs aistock-agent --lines 50
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
 | alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
-| ai_advisor | `{"final_response": "智能投顾暂时不可用，请稍后重试"}` |
 | broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
 | trend_score | `{"final_response": "趋势股评分分析暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
@@ -364,7 +441,7 @@ pm2 logs aistock-agent --lines 50
 **为什么要做双层输出？（两个核心原因）**
 
 1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
-2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
 
 双层结构定义如下：
 
@@ -382,12 +459,11 @@ content = {
 ```
 
 **消费方**：
-- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
-- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话；`podcast_brief` 缺失时降级读取 `display_report`（通过 `extract_display_report`，截取前 500 字）
 
 **兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
 
 **LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
 
-**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）、ai_advisor（尹辰）
+**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
