@@ -377,6 +377,10 @@ cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
 pm2 logs aistock-agent --lines 50
 ```
 
+### WS 网关待办（P9/P10/P11 部署前提，2026-08-05 方案 1 决策）
+
+外网 `wss://gupiao-api.yaozhineng.com/api/agent/ws/chat` 需 Caddy WS 转发修复（`flush_interval -1`，§roadmap 5.3）。未通期间：前端 WS→HTTP 非流式降级自动生效（`useChatStream` 3s 超时兜底，无需临时代码）；P10 计费仅 WS 路径落库（WS 修复后启用）；P11 cards 由线 5 前端消费（当前前端不渲染 cards，无损失）。
+
 ### Stock Trace Consumer 集成模式（2026-08-01）
 
 - `STOCK_TRACE_CONSUMER_ENABLED=true`（默认）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
