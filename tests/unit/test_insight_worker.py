@@ -173,6 +173,10 @@ async def test_empty_content_returns_unconfirmed() -> None:
     result = outcome.result
     assert result["attribution_status"] == "unconfirmed"
     assert result["validation_status"] == "rule_fallback"
+    # 空正文提前返回路径也必须注入身份字段：Node 侧 INSERT 的 event_id /
+    # analysis_version 为 NOT NULL，缺失会导致结果静默丢弃（前端永远 pending）
+    assert result["event_id"] == "evt1"
+    assert result["analysis_version"] == "watchlist-insight-v1"
     assert outcome.retryable_snapshot_not_ready is False
 
 

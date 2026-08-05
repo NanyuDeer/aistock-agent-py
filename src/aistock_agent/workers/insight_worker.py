@@ -107,11 +107,14 @@ class InsightWorker:
         content = str(ctx.get("content") or "")
         if not content:
             # 无正文：发布 unconfirmed（PRD §12：来源缺少正文，不生成主因结论）
-            return InsightOutcome(rule_fallback_select([], content, title))
-
-        candidates = extract_candidates(title, keywords, content)
-        payload = await self._llm_select(candidates, title, content)
-        result = self._resolve(payload, candidates, title, content)
+            result = rule_fallback_select([], content, title)
+        else:
+            candidates = extract_candidates(title, keywords, content)
+            payload = await self._llm_select(candidates, title, content)
+            result = self._resolve(payload, candidates, title, content)
+        # 身份字段统一注入（所有非 retryable 返回路径）：Node 侧 INSERT 的
+        # event_id / analysis_version 为 NOT NULL，缺失会导致 post_result 落库失败
+        # 且返回 None 不抛异常 → consumer 静默 ack → 结果被丢弃（前端永远 pending）
         result["event_id"] = event_id
         result["analysis_version"] = analysis_version
         return InsightOutcome(result)
