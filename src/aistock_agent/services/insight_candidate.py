@@ -9,9 +9,11 @@
 2. L1 正文"据XXX"事实引用 → source="body"，强度中
 3. L3 标题关键词（insight_keywords.json 词典分类）→ source="title"，强度低
 
-负向信号（NEGATIVE_SIGNALS，如"澄清/尚未/不存在"）命中正文时，正文派生的候选
-被标记 suppressed（原因未确认或被否认，不得作为事实呈现给下游）。类别枚举严格
-五类：industry_theme / company_event / earnings / market / trading_sentiment。
+负向信号（NEGATIVE_SIGNALS，如"澄清/尚未/不存在"）命中候选所在句时，正文派生的
+候选被标记 suppressed（原因未确认或被否认，不得作为事实呈现给下游）。信号集已收窄
+为强否定词、抑制判定按句级生效，避免"预计/风险提示"等例行词连带抑制正文候选、
+压低归因率（PRD 已确认"保障归因率"）。类别枚举严格五类：industry_theme /
+company_event / earnings / market / trading_sentiment。
 """
 
 from __future__ import annotations
@@ -35,19 +37,28 @@ CATEGORIES: tuple[str, ...] = (
     "trading_sentiment",
 )
 
-# 负向信号：命中正文即把相关候选标记 suppressed（异动原因被否认/尚未确认）
+# 负向信号：命中候选所在句即把该候选标记 suppressed（异动原因被否认/尚未确认）。
+# Task 8 审查（⚠️-1）收窄为强否定词：移除业绩预告正文几乎必现的"预计"与正文常驻的
+# "风险提示"，避免 earnings/company 类正文候选被整段连带抑制、压低归因率（PRD 已确认
+# "保障归因率"）。"不会"保留——"预计...不会对公司产生重大影响"类否认句中是有效否定信号。
 NEGATIVE_SIGNALS: tuple[str, ...] = (
     "澄清",
+    "否认",
     "不存在",
     "尚未",
     "不涉及",
-    "风险提示",
     "未取得",
-    "预计",
-    "不会",
     "无法确认",
-    "否认",
+    "不会",
 )
+
+# 全文级强否定词：仅对"公司自身相关"候选（company_event / earnings）做整段兜底——
+# 公司整体澄清/否认场景（如"公司澄清…不属实"）即使候选句内未命中也抑制。
+# 行业/市场等非公司主体候选不做整段兜底，避免行业原因句被其他句的公司否认连带抑制
+# （句级生效）。"尚未/未取得/不会/无法确认"全文较常见，不做整段兜底，仅句内生效。
+STRONG_DENIAL_SIGNALS: tuple[str, ...] = ("澄清", "否认", "不存在", "不涉及")
+
+_STRONG_DENIAL_CATEGORIES: frozenset[str] = frozenset({"company_event", "earnings"})
 
 # 正文结构信号：信号 → 主因分类（"行业原因：..." 等直接引用式正文）
 BODY_SIGNALS: dict[str, str] = {
@@ -101,22 +112,62 @@ def _is_suppressed(text: str) -> tuple[bool, str | None]:
     return False, None
 
 
+_SENTENCE_BREAK_RE = re.compile(r"[。！？；!?;]")
+
+
+def _sentence_around(text: str, start_idx: int) -> str:
+    """按句末标点（。！？；!?;）切句，返回包含 start_idx 所在的那一句。
+
+    整段无句末标点（单句）时返回整段；start_idx 越界时夹取到有效区间（防御，
+    调用方保证传入正文内位置）。
+    """
+    if not text:
+        return ""
+    if start_idx < 0:
+        start_idx = 0
+    if start_idx >= len(text):
+        start_idx = len(text) - 1
+    prev_end = 0
+    for m in _SENTENCE_BREAK_RE.finditer(text):
+        if m.end() <= start_idx:
+            prev_end = m.end()
+        else:
+            return text[prev_end : m.end()]
+    return text[prev_end:]
+
+
 def extract_candidates(title: str, keywords: list[str], content: str) -> list[CandidateFactor]:
     """三路候选：正文结构信号（L1）+ 正文事实引用（L1 弱）+ 标题关键词（L3）。
 
-    确定性规则，无 LLM 调用。负向信号命中正文时，正文派生的候选被 suppressed。
+    确定性规则，无 LLM 调用。负向信号命中候选所在句（或公司整体强否定兜底）时，
+    正文派生的候选被 suppressed。
     """
     cands: list[CandidateFactor] = []
     seen: set[str] = set()
 
-    def add(label: str, category: str, source: str, quote: str, strength: float) -> None:
+    def add(
+        label: str,
+        category: str,
+        source: str,
+        quote: str,
+        strength: float,
+        start_idx: int | None = None,
+    ) -> None:
         if label in seen:
             return
         seen.add(label)
-        # 负向信号出现在正文 ⇒ 该正文派生的因果候选未确认（单条异动原因文本粒度，
-        # 整段检查）；标题候选只查标题本身。
+        # 负向信号抑制（句级）：body 候选检查"证据起点所在句"（start_idx 定位），
+        # 无可靠起点时退化为候选自身文本；title 候选只查标题本身。
+        # 兜底：公司自身相关候选（company_event/earnings）全文含强否定词
+        # （澄清/否认/不存在/不涉及）时即使句内未命中也抑制（公司整体澄清场景）。
         if source == "body":
-            suppressed, reason = _is_suppressed(content)
+            target = quote if start_idx is None else _sentence_around(content, start_idx)
+            suppressed, reason = _is_suppressed(target)
+            if not suppressed and category in _STRONG_DENIAL_CATEGORIES:
+                for sig in STRONG_DENIAL_SIGNALS:
+                    if sig in content:
+                        suppressed, reason = True, f"negative_signal:{sig}"
+                        break
         else:
             suppressed, reason = _is_suppressed(quote)
         cands.append(
@@ -143,11 +194,19 @@ def extract_candidates(title: str, keywords: list[str], content: str) -> list[Ca
                 "body",
                 snippet[:120],
                 0.9 if signal in ("行业原因", "公司原因") else 0.7,
+                start_idx=idx,
             )
 
     # L1：正文"据XXX"事实引用（提取事实来源短语）
     for m in re.finditer(r"(据[^，。；;]{2,40})", content):
-        add(m.group(1)[:24], "company_event", "body", m.group(1)[:120], 0.6)
+        add(
+            m.group(1)[:24],
+            "company_event",
+            "body",
+            m.group(1)[:120],
+            0.6,
+            start_idx=m.start(),
+        )
 
     # L3：标题关键词（词典分类）
     for kw in keywords:

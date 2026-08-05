@@ -1,7 +1,9 @@
 """候选抽取确定性规则单测（自选股洞察）。
 
 覆盖简报 Step 3 三个用例（负向信号 suppressed / 正文结构信号产生 industry_theme /
-标题关键词分类）+ 少量边界：title/body 来源区分、词典未收录关键词、负向抑制原因。
+标题关键词分类）+ 少量边界：title/body 来源区分、词典未收录关键词、负向抑制原因，
+以及 Task 8 审查修复（⚠️-1）：NEGATIVE_SIGNALS 收窄为强否定词、抑制判定按句级生效，
+"预计/风险提示"等例行词不再连带抑制正文候选（保障归因率）。
 """
 
 from aistock_agent.services.insight_candidate import (
@@ -31,6 +33,39 @@ def test_negative_signal_suppress_reason_recorded() -> None:
         r is not None and r.startswith("negative_signal:")
         for r in (c.suppress_reason for c in suppressed)
     )
+
+
+def test_earnings_candidate_not_suppressed_by_yuji() -> None:
+    """业绩预告正文例行词"预计"不再触发负向抑制（回归修复：保障归因率）。"""
+    content = "据业绩预告，预计2026年公司净利润同比增长50%，主要受产品涨价带动。"
+    cands = extract_candidates("涨停雷达：某公司业绩预增", ["业绩"], content)
+    earnings = [c for c in cands if c.category == "earnings"]
+    assert earnings
+    assert all(not c.suppressed for c in earnings)
+
+
+def test_industry_candidate_not_suppressed_by_denial_in_other_sentence() -> None:
+    """正文行业原因句与公司否认句分离时，行业候选不被连带抑制（句级生效）。"""
+    content = (
+        "行业原因：AI算力需求持续增长，带动服务器产业链景气。"
+        "公司否认此前收购传闻，表示不存在应披露而未披露事项。"
+    )
+    cands = extract_candidates("涨停雷达：算力概念 某公司触及涨停", ["算力"], content)
+    industry = [c for c in cands if c.category == "industry_theme"]
+    assert industry
+    assert all(not c.suppressed for c in industry)
+
+
+def test_company_event_suppressed_by_fulltext_denial() -> None:
+    """公司整体否认兜底：company_event 候选句内未命中但全文含强否定词仍被抑制。"""
+    content = (
+        "据公告，公司中标5G基站项目，订单金额超亿元。"
+        "公司澄清：上述中标传闻不属实。"
+    )
+    cands = extract_candidates("涨停雷达：订单 某公司触及涨停", ["订单"], content)
+    company_events = [c for c in cands if c.category == "company_event"]
+    assert company_events
+    assert any(c.suppressed for c in company_events)
 
 
 def test_body_signal_produces_industry_candidate() -> None:
