@@ -158,3 +158,23 @@ class AnswerTrace(BaseModel):
     goals: list[SubGoal] | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ChatCard(BaseModel):
+    """P10 线 2/P11：DONE 负载卡片契约（本阶段 cards 恒 None，计划 C 才产出数据）。
+
+    card_type 5 类高价值卡片（P11 spec §2.1）；data 为各类型结构化 payload。
+    本计划只定义契约，不产出数据；计划 C 只消费不修改本类。
+    """
+
+    card_type: Literal[
+        "market_snapshot",
+        "stock_snapshot",
+        "capital_flow",
+        "deep",
+        "comparison",
+    ]
+    title: str
+    data: dict[str, Any]
+
+    model_config = ConfigDict(extra="forbid")

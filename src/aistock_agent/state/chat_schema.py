@@ -11,6 +11,7 @@ from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
+    ChatCard,
     Evidence,
     Insight,
     InsightGoal,
@@ -73,3 +74,8 @@ class QuestionState(TypedDict, total=False):
     # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
     # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
     general_source: Literal["science", "gap"] | None
+    # P10 线 2（扩展选项 A）：token 用量快照 + 卡片汇总（cards 本阶段恒 None，
+    # 计划 C 才产出）。synth_answer 包装写入，ws.py/routes.py DONE 附带。
+    # 单轮 transient：ws.py/routes.py 入口 reset 采集层，state 字段每轮由 synth_answer 重写。
+    token_usage: dict[str, int] | None
+    cards: list[ChatCard] | None
