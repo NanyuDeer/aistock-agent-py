@@ -50,6 +50,25 @@ class Settings(BaseSettings):
         "function_calling", "json_mode", "json_schema"
     ] = "function_calling"
 
+    # ===== 自选股洞察（watchlist insight）=====
+    # 独立 Redis db，与 stock_trace db=2 隔离
+    insight_redis_url: str = "redis://localhost:6379/3"
+    insight_consumer_group: str = "watchlist-insight-workers"
+    insight_consumer_block_ms: int = 1000
+    # Pending 消息达到该空闲时间后，可由任意 Consumer 接管重试。
+    insight_pending_claim_idle_ms: int = 3000
+    insight_max_attempts: int = 3
+    # Consumer 集成模式开关：true=在主进程 lifespan 内启动（同 stock_trace）
+    insight_consumer_enabled: bool = True
+    # 归因 LLM 受约束选择用 json_mode 结构化输出（PRD 第 9 节）
+    insight_structured_output_method: Literal[
+        "function_calling", "json_mode", "json_schema"
+    ] = "json_mode"
+    # 主因 label 主题概括关键词长度上限（PRD：建议 ≤12 字）
+    insight_label_max_chars: int = 12
+    # 归因任务轻，默认 quick_think
+    insight_llm_model: Literal["quick_think", "deep_think"] = "quick_think"
+
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
 
