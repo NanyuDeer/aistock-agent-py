@@ -284,7 +284,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                     "last_deep_report": last_deep_report,
                     # P10 线 2（选项 A）：DONE 一次性加 token_usage + cards（无则 None）
                     "token_usage": token_usage,
-                    "cards": cards,
+                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，
+                    # json.dumps 不可序列化 → model_dump() 转 dict（None 保持 null 兼容）
+                    "cards": [c.model_dump() for c in cards] if cards else None,
                 })
 
             except Exception as e:
