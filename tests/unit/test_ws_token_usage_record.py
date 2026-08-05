@@ -5,8 +5,9 @@
 mock 目标 = aistock_agent.api.ws.node_api.save_token_usage（ws.py 顶部
 import 的模块级 node_api 单例）。
 """
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from aistock_agent.api import ws as ws_module
 from aistock_agent.api.ws import ws_chat
