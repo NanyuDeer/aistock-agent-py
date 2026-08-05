@@ -405,11 +405,11 @@ async def trigger_morning_briefing(
         if morning_generated and has_major_events:
             event_results = await run_event_conduction_batch(major_events)
             event_triggered_count = len(event_results)
-            event_succeeded_count = sum(1 for r in event_results if r.event_generated)
+            event_succeeded_count = sum(1 for r in event_results if r.status.event_generated)
             event_failed_count = event_triggered_count - event_succeeded_count
             # 只统计生成成功的事件的持久化状态
             event_persisted_count = sum(
-                1 for r in event_results if r.event_generated and r.persisted
+                1 for r in event_results if r.status.event_generated and r.status.persisted
             )
             event_persist_failed_count = event_succeeded_count - event_persisted_count
 
@@ -508,30 +508,30 @@ async def trigger_event_briefing(
         logger.info(
             "manual_trigger_event_done",
             event_title=event_title[:50] or "default",
-            event_generated=result.event_generated,
-            persisted=result.persisted,
-            cached=result.cached,
-            success=result.success,
+            event_generated=result.status.event_generated,
+            persisted=result.status.persisted,
+            cached=result.status.cached,
+            success=result.status.success,
         )
 
-        if result.success:
+        if result.status.success:
             return {
                 "success": True,
                 "message": "事件分析完成",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
                 # 从 event_agent 显式状态读取，禁止硬编码 False
-                "event_cached": result.cached,
+                "event_cached": result.status.cached,
             }
         else:
             return {
                 "success": False,
-                "message": f"事件分析失败: {result.error or '未知错误'}",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
-                "event_cached": result.cached,
+                "message": f"事件分析失败: {result.status.error or '未知错误'}",
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
+                "event_cached": result.status.cached,
             }
     except Exception as e:
         logger.error(
