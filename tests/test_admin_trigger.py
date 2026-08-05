@@ -61,6 +61,38 @@ def test_trigger_review_full_returns_200(client):
     assert body["snapshot_kind"] == "full"
 
 
+def test_trigger_evening_chain_returns_200(client):
+    """POST /api/agent/admin/trigger/evening_chain 返回 200 + 链路状态。"""
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "aistock_agent.services.scheduler._run_evening_chain_task",
+        new_callable=AsyncMock,
+    ) as mock_chain:
+        mock_chain.return_value = {
+            "status": "ok",
+            "report_date": "2026-07-30",
+            "stages": {
+                "review": "ok",
+                "market_snapshot": "ok",
+                "iterate": "ok",
+                "brief": "ok",
+                "broadcast": "ok",
+            },
+        }
+        response = client.post(
+            "/api/agent/admin/trigger/evening_chain",
+            headers=AUTH_HEADERS,
+            json={"report_date": "2026-07-30"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["stages"]["broadcast"] == "ok"
+    mock_chain.assert_awaited_once()
+
+
 def test_trigger_review_quick_requires_auth(client):
     """无 token 返回 403。"""
     response = client.post("/api/agent/admin/trigger/review_quick", json={})

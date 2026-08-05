@@ -1201,6 +1201,50 @@ async def trigger_review_full(
         raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
 
 
+@router.post("/admin/trigger/evening_chain")
+async def trigger_evening_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast）。
+
+    供管理员在错过 15:30 调度或灰度验证时使用。review 阶段命中 Redis 缓存
+    （TTL 2h）时快速返回；显式传入 report_date 时跳过交易日检查。
+    返回各阶段状态，供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_evening_chain_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-evening-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_evening_chain_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_evening_chain_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_evening_chain_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "stages": result.get("stages"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_evening_chain_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
+
+
 # ── CHAT QA ────────────────────────────────────────────────────────
 
 

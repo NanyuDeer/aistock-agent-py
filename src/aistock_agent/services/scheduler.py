@@ -294,14 +294,20 @@ def _extract_iterate_summary(iterate_payload: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-async def _run_evening_chain_task() -> None:
-    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。"""
-    report_day = shanghai_today()
-    if not is_trading_day(report_day):
-        logger.info("scheduler_skip_non_trading_day", task="evening_chain")
-        return
+async def _run_evening_chain_task(report_date: str | None = None) -> dict[str, object]:
+    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。
 
-    report_date = report_day.isoformat()
+    report_date 缺省时使用上海当天并做交易日检查；显式传入时视为管理员
+    手动补跑（/admin/trigger/evening_chain），跳过交易日检查。
+    返回各阶段状态 dict，供手动触发端点透传给调用方。
+    """
+    if report_date is None:
+        report_day = shanghai_today()
+        if not is_trading_day(report_day):
+            logger.info("scheduler_skip_non_trading_day", task="evening_chain")
+            return {"status": "skipped", "reason": "non_trading_day"}
+        report_date = report_day.isoformat()
+
     from aistock_agent.agents.workers import broadcast as broadcast_agent
     from aistock_agent.agents.workers import iterate as iterate_agent
     from aistock_agent.agents.workers import review as review_agent
@@ -312,20 +318,27 @@ async def _run_evening_chain_task() -> None:
         review_report = await node_api.get_analysis_report("review", report_date)
         if not _is_traceable_completed_report(review_report, "review"):
             logger.error("scheduler_evening_review_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "review",
+                "error": "review report missing or incomplete",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_review_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "review", "error": str(exc)}
 
     try:
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         if not isinstance(snapshot, dict) or snapshot.get("error"):
+            error = (
+                snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"
+            )
             logger.error(
                 "scheduler_evening_snapshot_invalid",
                 report_date=report_date,
-                error=(snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"),
+                error=error,
             )
-            return
+            return {"status": "failed", "stage": "market_snapshot", "error": error}
 
         # Brief 仅消费代码构造且可重建验证的 brief_summary.v1，不能读取原始快照。
         snapshot_summary = build_market_snapshot_brief_summary(snapshot)
@@ -343,10 +356,14 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_snapshot_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {
+                "status": "failed",
+                "stage": "market_snapshot",
+                "error": "market_snapshot not traceable",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_snapshot_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "market_snapshot", "error": str(exc)}
 
     try:
         iterate_result = await iterate_agent.run(_make_scheduled_state(report_date))
@@ -357,7 +374,11 @@ async def _run_evening_chain_task() -> None:
             or iterate_payload.get("status") not in _PERSISTABLE_ITERATE_STATUSES
         ):
             logger.error("scheduler_evening_iterate_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "iterate",
+                "error": "iterate payload invalid or not persistable",
+            }
 
         # 原始 LLM payload 仅用于本次调度诊断；Brief 事实由代码受控构造。
         iterate_summary = build_iterate_brief_summary(iterate_payload)
@@ -375,22 +396,36 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_iterate_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {"status": "failed", "stage": "iterate", "error": "iterate not traceable"}
     except Exception as exc:
         logger.error("scheduler_evening_iterate_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "iterate", "error": str(exc)}
 
+    brief_saved = False
     try:
         brief_saved = await build_and_persist_brief("evening", report_date)
     except Exception as exc:
         logger.error("scheduler_evening_brief_failed", error=str(exc), exc_info=True)
-        brief_saved = False
 
+    broadcast_ok = False
     if brief_saved:
         try:
             await broadcast_agent.run(_make_scheduled_state(report_date, brief_type="evening"))
+            broadcast_ok = True
         except Exception as exc:
             logger.error("scheduler_evening_broadcast_failed", error=str(exc), exc_info=True)
+
+    return {
+        "status": "ok" if brief_saved else "partial",
+        "report_date": report_date,
+        "stages": {
+            "review": "ok",
+            "market_snapshot": "ok",
+            "iterate": "ok",
+            "brief": "ok" if brief_saved else "failed",
+            "broadcast": "ok" if broadcast_ok else ("skipped" if not brief_saved else "failed"),
+        },
+    }
 
 
 # ─── 事件驱动：EventBus 发布函数 ───

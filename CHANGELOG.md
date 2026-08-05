@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [master] 2026-08-05 — 新增"一键补跑完整晚间链路"端点
+
+**开发者**: Aria
+
+### 新增
+- `api/routes.py`：`POST /api/agent/admin/trigger/evening_chain`（内网 token 鉴权）——一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast），供错过 15:30 调度或灰度验证时使用；显式传 `report_date` 时跳过交易日检查；返回各阶段状态 `stages` 供诊断
+
+### 改进
+- `services/scheduler.py`：`_run_evening_chain_task` 增加可选 `report_date` 参数（缺省走原交易日检查逻辑，向后兼容）并返回各阶段状态 dict（review/market_snapshot/iterate/brief/broadcast 与失败 stage/error 信息）
+
+### 测试
+- `tests/test_admin_trigger.py`：新增 `test_trigger_evening_chain_returns_200`
+- `tests/unit/test_scheduler.py`：新增 3 个测试（显式日期跳过交易日检查 / 缺省日期非交易日返回 skipped / review 失败返回 failed+stage）
+
+---
+
 ## [changer] 2026-08-05 — ChatAgent P10 线 2 用户计费（token_usage）+ P11 线 3 后端卡片（cards）
 
 **开发者**: Aria
