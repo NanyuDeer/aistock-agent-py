@@ -58,12 +58,16 @@ class FakeRedis:
 
 
 class CompletedWorker:
-    def __init__(self) -> None:
+    def __init__(self, report_response: dict[str, object] | None = None) -> None:
         self.statuses: list[tuple[str, str, str | None]] = []
         self.results: list[object] = []
+        self._report_response = report_response
 
-    async def report_job(self, job_id: str, status: str, error: str | None = None) -> None:
+    async def report_job(
+        self, job_id: str, status: str, error: str | None = None
+    ) -> dict[str, object] | None:
         self.statuses.append((job_id, status, error))
+        return self._report_response
 
     async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome:
         return InsightWorkerOutcome(
@@ -72,6 +76,11 @@ class CompletedWorker:
 
     async def write_result(self, result: object) -> None:
         self.results.append(result)
+
+
+class FailingWorker(CompletedWorker):
+    async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome:
+        raise ValueError("LLM 不可用")
 
 
 @pytest.mark.asyncio
@@ -94,19 +103,10 @@ async def test_consume_once_acknowledges_on_success() -> None:
 @pytest.mark.asyncio
 async def test_consume_once_dead_letters_after_max_attempts() -> None:
     redis_client = FakeRedis(
-        new_entries=[
-            (
-                "1710000000000-0",
-                {"job_id": "job-001", "event_id": "evt-001", "attempt_count": "3"},
-            )
-        ]
+        new_entries=[("1710000000000-0", {"job_id": "job-001", "event_id": "evt-001"})]
     )
-
-    class FailingWorker(CompletedWorker):
-        async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome:
-            raise ValueError("LLM 不可用")
-
-    worker = FailingWorker()
+    # Node 侧 report_job("failed") 自增 attempt 后返回 3（= insight_max_attempts）
+    worker = FailingWorker({"attempt_count": 3})
     consumer = InsightConsumer(redis_client, worker)  # type: ignore[arg-type]
     await consumer.consume_once()
     assert worker.statuses == [
@@ -118,7 +118,23 @@ async def test_consume_once_dead_letters_after_max_attempts() -> None:
     payload = redis_client.dead_lettered[0][1]
     assert payload["error_code"] == "MAX_ATTEMPTS"
     assert payload["job_id"] == "job-001"
-    assert payload["attempt_count"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_consume_once_does_not_dead_letter_below_max_attempts() -> None:
+    """失败但未达 max_attempts：不进 DLQ、不 xack，等 pending reclaim 重试。"""
+    redis_client = FakeRedis(
+        new_entries=[("1710000000000-0", {"job_id": "job-001", "event_id": "evt-001"})]
+    )
+    worker = FailingWorker({"attempt_count": 1})
+    consumer = InsightConsumer(redis_client, worker)  # type: ignore[arg-type]
+    await consumer.consume_once()
+    assert worker.statuses == [
+        ("job-001", "processing", None),
+        ("job-001", "failed", "LLM 不可用"),
+    ]
+    assert redis_client.dead_lettered == []
+    assert redis_client.acked == []
 
 
 @pytest.mark.asyncio

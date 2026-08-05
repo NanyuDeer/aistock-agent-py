@@ -28,6 +28,24 @@ def _fields(value: Mapping[object, object]) -> dict[str, str]:
     return {_text(key): _text(item) for key, item in value.items()}
 
 
+def _attempt_count(resp: dict[str, object] | None) -> int:
+    """从 report_job PATCH 响应读取 Node 维护的 attempt_count（兜底 1）。
+
+    Node 的 insight Job PATCH 返回 snake_case ``attempt_count``（兼容旧式
+    ``attemptCount``）。Stream 消息只含 job_id/event_id/analysis_version，
+    不含 attempt 字段，必须从响应读取，否则失败消息会无限重试。
+    """
+    if not resp:
+        return 1
+    raw = resp.get("attempt_count", resp.get("attemptCount", 1))
+    if not isinstance(raw, int | str):
+        return 1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 1
+
+
 @dataclass
 class InsightWorkerOutcome:
     """``analyze`` 返回契约：快照未就绪可重试；result 为待写入的洞察结果。"""
@@ -41,7 +59,7 @@ class InsightWorkerProtocol(Protocol):
 
     async def report_job(
         self, job_id: str, status: str, error: str | None = None
-    ) -> None: ...
+    ) -> dict[str, object] | None: ...
 
     async def analyze(self, event_id: str, analysis_version: str) -> InsightWorkerOutcome: ...
 
@@ -60,8 +78,8 @@ class InsightWorker:
 
     async def report_job(
         self, job_id: str, status: str, error: str | None = None
-    ) -> None:
-        await self._node_client.report_job(job_id, status, error)
+    ) -> dict[str, object] | None:
+        return await self._node_client.report_job(job_id, status, error)
 
     async def analyze(
         self, event_id: str, analysis_version: str
@@ -150,13 +168,10 @@ class InsightConsumer:
     async def _handle_failure(
         self, job_id: str, message_id: str, fields: dict[str, str], error: str
     ) -> None:
-        await self._worker.report_job(job_id, "failed", error)
-        raw_attempt_count = fields.get("attempt_count", "1")
-        try:
-            attempt_count = int(raw_attempt_count)
-        except ValueError:
-            attempt_count = 1
-        if attempt_count >= settings.insight_max_attempts:
+        # report_job(status="failed") 触发 Node 侧 increment_attempt 并返回
+        # 自增后的 attempt_count；Stream 消息本身不含 attempt 字段。
+        resp = await self._worker.report_job(job_id, "failed", error)
+        if _attempt_count(resp) >= settings.insight_max_attempts:
             await self._dead_letter(message_id, "MAX_ATTEMPTS", fields)
 
     async def _dead_letter(
