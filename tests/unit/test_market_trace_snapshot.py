@@ -223,7 +223,7 @@ async def test_snapshot_keeps_facts_and_evidence_separate(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[GLOBAL_FACT],
+        new=AsyncMock(return_value=[GLOBAL_FACT]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -249,7 +249,7 @@ async def test_snapshot_normalizes_a_share_indexes_without_mutating_node_payload
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -378,7 +378,7 @@ async def test_snapshot_omits_aggregate_source_without_real_numeric_facts(
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -417,7 +417,7 @@ async def test_snapshot_omits_breadth_source_without_real_numeric_facts(mocker) 
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -460,7 +460,7 @@ async def test_snapshot_omits_sectors_source_when_all_rankings_are_empty(mocker)
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -491,7 +491,7 @@ async def test_snapshot_raises_when_node_returns_none(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=None))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -508,7 +508,7 @@ async def test_snapshot_raises_when_status_not_complete(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=incomplete))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -531,7 +531,7 @@ async def test_snapshot_raises_when_coverage_incomplete(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=incomplete))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -552,7 +552,7 @@ async def test_missing_external_sources_go_to_missing_fields(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],  # 无境外行情
+        new=AsyncMock(return_value=[]),  # 无境外行情
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -595,7 +595,7 @@ async def test_future_news_excluded_from_snapshot(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=close_with_future_news))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[GLOBAL_FACT],
+        new=AsyncMock(return_value=[GLOBAL_FACT]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -629,7 +629,7 @@ async def test_snapshot_raises_when_previous_daily_incomplete(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=incomplete))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -651,7 +651,7 @@ async def test_snapshot_raises_when_trade_date_mismatches_report_date(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=stale))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -673,7 +673,7 @@ async def test_snapshot_normalizes_trade_date_for_report_date_check(mocker, trad
     mocker.patch.object(node_api, "get", AsyncMock(return_value=normalized))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -727,7 +727,7 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
     # 会吞掉该异常，导致假阳性。
     global_market_mock = mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     tavily_search_mock = mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -764,7 +764,7 @@ async def test_snapshot_id_includes_captured_at_for_safe_retry(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -835,7 +835,7 @@ async def test_build_quick_snapshot_success(mocker):
     mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -960,7 +960,7 @@ async def test_build_quick_snapshot_uses_canonical_breadth_ratio(mocker) -> None
     mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=_quick_payload()))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -986,7 +986,7 @@ async def test_build_quick_snapshot_omits_unavailable_zero_placeholder_facts(moc
     mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1011,7 +1011,7 @@ async def test_snapshot_persists_empty_and_invalid_source_collection_statuses(mo
     mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1025,7 +1025,7 @@ async def test_snapshot_persists_empty_and_invalid_source_collection_statuses(mo
 
     assert snapshot.collection_status["global_markets"].model_dump() == {
         "state": "empty",
-        "provider": "yfinance",
+        "provider": "tencent:quote",
         "item_count": 0,
         "reason": "provider_returned_no_items",
     }
@@ -1034,7 +1034,7 @@ async def test_snapshot_persists_empty_and_invalid_source_collection_statuses(mo
         "state": "invalid_for_causality",
         "provider": "tavily",
         "item_count": 1,
-        "reason": "items_missing_url_or_occurred_at",
+        "reason": "items_missing_url",
     }
     assert snapshot.collection_status["tavily_global_risk"].state == "empty"
     assert snapshot.sources["SEARCH_001"].url is None
@@ -1065,7 +1065,7 @@ async def test_quick_partial_limits_preserve_any_declared_numeric_field_and_safe
     mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1097,7 +1097,7 @@ async def test_quick_available_zero_market_observations_remain_facts(mocker) -> 
     mocker.patch.object(node_api, "get", AsyncMock(return_value={"items": []}))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1136,7 +1136,7 @@ async def test_build_market_trace_snapshot_with_morning_forecast(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1163,7 +1163,7 @@ async def test_build_market_trace_snapshot_morning_failure_degraded(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(return_value=COMPLETE_CLOSE))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1222,7 +1222,7 @@ async def test_build_market_trace_snapshot_with_telegraph(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=fake_get))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",
@@ -1277,7 +1277,7 @@ async def test_build_market_trace_snapshot_telegraph_fallback_to_latest(mocker):
     mocker.patch.object(node_api, "get", AsyncMock(side_effect=fake_get))
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
-        return_value=[],
+        new=AsyncMock(return_value=[]),
     )
     mocker.patch(
         "aistock_agent.services.market_trace_snapshot.TavilyService.search",

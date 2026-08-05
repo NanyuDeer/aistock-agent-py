@@ -327,9 +327,7 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
         local_facts: list[str] = []
         local_sources: list[ChatSource] = []
         try:
-            global_facts = await asyncio.to_thread(
-                collect_global_market_facts, captured_at
-            )
+            global_facts = await collect_global_market_facts(captured_at)
             if global_facts:
                 local_facts.extend(_build_global_facts(global_facts))
                 local_sources.append(

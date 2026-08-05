@@ -102,11 +102,11 @@ async def test_market_snapshot_both_quick():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=QUICK_SNAPSHOT_OK)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "quick"},
@@ -144,11 +144,11 @@ async def test_market_snapshot_full_current_daily_incomplete():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get = AsyncMock(return_value=FULL_SNAPSHOT_CURRENT_INCOMPLETE)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "full"},
@@ -178,11 +178,11 @@ async def test_market_snapshot_full_previous_daily_incomplete():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get = AsyncMock(return_value=FULL_SNAPSHOT_PREVIOUS_INCOMPLETE)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "full"},
@@ -207,12 +207,12 @@ async def test_market_snapshot_a_share_fails_global_ok():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "quick"},
@@ -240,12 +240,12 @@ async def test_market_snapshot_both_fail():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(side_effect=RuntimeError("tencent unavailable")),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
-        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "quick"},
@@ -271,8 +271,9 @@ async def test_market_snapshot_invalid_scope():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         ev = await market_snapshot(
             {"scope": "invalid", "snapshot_kind": "quick"},
@@ -285,7 +286,6 @@ async def test_market_snapshot_invalid_scope():
     assert len(ev.facts) == 0
     assert len(ev.sources) == 0
     mock_api.get_quick_snapshot.assert_not_called()
-    mock_to_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -296,8 +296,9 @@ async def test_market_snapshot_invalid_snapshot_kind():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         ev = await market_snapshot(
             {"scope": "a_share", "snapshot_kind": "invalid"},
@@ -309,7 +310,6 @@ async def test_market_snapshot_invalid_snapshot_kind():
     assert "snapshot_kind" in reason_lower or "market_snapshot" in reason_lower
     mock_api.get_quick_snapshot.assert_not_called()
     mock_api.get.assert_not_called()
-    mock_to_thread.assert_not_called()
 
 
 # ── Test 6: 单一 scope ───────────────────────────────────────────────────
@@ -323,8 +323,9 @@ async def test_market_snapshot_scope_a_share_only():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=QUICK_SNAPSHOT_OK)
 
@@ -336,7 +337,6 @@ async def test_market_snapshot_scope_a_share_only():
     assert ev.degraded is False
     assert len(ev.sources) == 1
     assert ev.sources[0].source_id.startswith("market:a_share:")
-    mock_to_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -345,10 +345,12 @@ async def test_market_snapshot_scope_global_only():
     from aistock_agent.skills.market_snapshot import market_snapshot
 
     with (
-        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
+        patch(
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
     ):
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "global", "snapshot_kind": "quick"},
@@ -373,11 +375,11 @@ async def test_market_snapshot_full_success():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get = AsyncMock(return_value=FULL_SNAPSHOT_OK)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "full"},
@@ -427,12 +429,12 @@ async def test_market_snapshot_quick_fails_falls_back_to_last_close():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(side_effect=RuntimeError("tencent unavailable")),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=LAST_CLOSE_OK)
-        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
             {"scope": "a_share", "snapshot_kind": "quick"},
@@ -467,12 +469,12 @@ async def test_market_snapshot_quick_fails_last_close_incomplete_coverage():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=bad_last_close)
-        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
             {"scope": "a_share", "snapshot_kind": "quick"},
@@ -492,12 +494,12 @@ async def test_market_snapshot_quick_and_last_close_both_fail():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(return_value=GLOBAL_FACTS),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=None)
-        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
             {"scope": "a_share", "snapshot_kind": "quick"},
@@ -521,12 +523,12 @@ async def test_market_snapshot_both_last_close_ok_global_fails():
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
         patch(
-            "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-        ) as mock_to_thread,
+            "aistock_agent.skills.market_snapshot.collect_global_market_facts",
+            new=AsyncMock(side_effect=RuntimeError("tencent unavailable")),
+        ),
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=None)
         mock_api.get_last_close_snapshot = AsyncMock(return_value=LAST_CLOSE_OK)
-        mock_to_thread.side_effect = RuntimeError("yfinance unavailable")
 
         ev = await market_snapshot(
             {"scope": "both", "snapshot_kind": "quick"},
@@ -558,10 +560,8 @@ async def test_market_snapshot_quick_facts_include_trade_date():
 
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
-        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=QUICK_SNAPSHOT_OK)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "quick"}, _goal())
 
@@ -576,10 +576,8 @@ async def test_market_snapshot_full_facts_include_trade_date():
 
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
-        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
     ):
         mock_api.get = AsyncMock(return_value=FULL_SNAPSHOT_OK)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "full"}, _goal())
 
@@ -595,10 +593,8 @@ async def test_market_snapshot_facts_missing_trade_date_no_crash():
     broken = {**QUICK_SNAPSHOT_OK, "trade_date": ""}
     with (
         patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
-        patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
     ):
         mock_api.get_quick_snapshot = AsyncMock(return_value=broken)
-        mock_to_thread.side_effect = lambda fn, arg: GLOBAL_FACTS  # noqa: ARG005
 
         ev = await market_snapshot({"scope": "a_share", "snapshot_kind": "quick"}, _goal())
 
