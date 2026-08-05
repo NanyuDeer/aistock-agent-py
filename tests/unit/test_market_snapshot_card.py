@@ -64,7 +64,6 @@ def test_build_a_share_card_none_without_indexes():
 @pytest.mark.asyncio
 async def test_market_snapshot_a_share_scope_produces_card():
     """scope=a_share, quick → raw.a_share_card 存在。"""
-    from aistock_agent.services.market_trace_snapshot import normalize_a_share
 
     with patch("aistock_agent.skills.market_snapshot.node_api") as mock_api:
         mock_api.get_quick_snapshot = AsyncMock(return_value=QUICK_SNAPSHOT_OK)
@@ -82,7 +81,7 @@ async def test_market_snapshot_a_share_scope_produces_card():
 async def test_market_snapshot_global_scope_no_a_share_card():
     """scope=global（无 a_share）→ raw 无 a_share_card。"""
     with (
-        patch("aistock_agent.skills.market_snapshot.node_api") as mock_api,
+        patch("aistock_agent.skills.market_snapshot.node_api"),
         patch("aistock_agent.skills.market_snapshot.asyncio.to_thread") as mock_to_thread,
     ):
         mock_to_thread.side_effect = lambda fn, arg: [  # noqa: ARG005

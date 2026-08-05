@@ -16,8 +16,9 @@ from aistock_agent.utils.date import trading_session_status
 
 _EMPTY_MARKERS = ("未找到股票", "资金流向数据为空", "数据不可用")
 
-# P11（线 3）：/internal/flow/:symbol 新浪字段 → 英文键映射（r0_*=主力，netamount=净额，spec §3.1）。
-# 源字段缺失省略；r0_* 为数值型，防御转换（新浪 Number||0 已保证数值；Tushare 兜底无 r0_* 键）。
+# P11（线 3）：/internal/flow/:symbol 新浪字段映射（r0_*=主力，netamount=净额，spec §3.1）。
+# 源字段缺失省略；r0_* 数值防御转换（新浪 Number||0 保证数值；Tushare 兜底无 r0_*）。
+# flow_5d 恒 []；payload 为空（无任何源字段）时返回 None。
 _FLOW_FIELD_MAP: dict[str, str] = {
     "r0_in": "main_in",
     "r0_out": "main_out",

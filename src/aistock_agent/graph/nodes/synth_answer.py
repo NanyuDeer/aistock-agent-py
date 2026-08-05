@@ -536,7 +536,10 @@ def _card_from_capital_flow(ev: Evidence) -> ChatCard | None:
 
 
 def _card_from_comparison(ev: Evidence) -> ChatCard | None:
-    """compare_stocks → comparison 卡片（stocks 透传 raw.parsed；conclusion 拼接'对比结论'facts）。"""
+    """compare_stocks → comparison 卡片（stocks 透传 raw.parsed；conclusion 拼接'对比结论'facts）。
+
+    data 结构：{stocks: list[parsed], conclusion: '对比结论' 行文本}。
+    """
     raw = ev.raw or {}
     parsed = raw.get("parsed")
     if not isinstance(parsed, list) or not parsed:

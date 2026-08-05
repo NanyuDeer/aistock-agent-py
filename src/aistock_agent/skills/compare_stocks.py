@@ -76,7 +76,7 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
 
     success = [
         p for p in parsed
-        if p.get("available") is True and isinstance(p.get("change_pct"), (int, float))
+        if p.get("available") is True and isinstance(p.get("change_pct"), int | float)
     ]
     if len(success) >= 2:
         best = max(success, key=lambda p: float(p["change_pct"]))
