@@ -68,38 +68,162 @@ def _extract_fields(parsed: dict[str, object]) -> tuple[dict[str, object] | None
     return (display_dict, brief_str)
 
 
+# ── extract_major_events（晨报重大事件提取，含容错恢复） ──
+
+_MAJOR_EVENTS_BLOCK_RE = re.compile(
+    r"<!--MAJOR_EVENTS_START-->\s*\n?(.*?)\n?\s*<!--MAJOR_EVENTS_END-->",
+    re.DOTALL,
+)
+_MAJOR_EVENTS_ARRAY_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL)
+# 扁平 JSON 对象（major_event 不含嵌套花括号），用于整块解析失败时的逐对象恢复
+_JSON_FLAT_OBJECT_RE = re.compile(r"\{[^{}]*\}")
+
+_VALID_MAJOR_EVENT_DIRECTIONS = frozenset({"positive", "negative"})
+
+
+def _sanitize_major_event(raw: dict[str, object]) -> dict[str, object] | None:
+    """校验并规整单个 major_event；不合规返回 None（由调用方跳过）。
+
+    业务规则（与 Morning Prompt 保持一致）：
+    - title / summary 必须为非空字符串，缺失即视为坏事件
+    - direction 仅允许 positive / negative（大小写归一；neutral 等视为坏事件）
+    - impact_score 转换为 float（缺失/非法默认 0.0，不据此丢弃——价值判断归 LLM）
+    - url 允许为空字符串（保持兼容，不参与筛选）
+    - involved_keywords 缺失/非列表时默认空数组
+    """
+    title = raw.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+
+    score_raw = raw.get("impact_score", 0.0)
+    if isinstance(score_raw, bool):
+        score_raw = 0.0
+    try:
+        impact_score = float(cast(int | float | str, score_raw))
+    except (TypeError, ValueError):
+        impact_score = 0.0
+
+    direction = str(raw.get("direction", "")).strip().lower()
+    if direction not in _VALID_MAJOR_EVENT_DIRECTIONS:
+        return None
+
+    url = raw.get("url")
+    if not isinstance(url, str):
+        url = ""
+    keywords = raw.get("involved_keywords")
+    if not isinstance(keywords, list):
+        keywords = []
+
+    return {
+        "title": title.strip(),
+        "summary": summary.strip(),
+        "url": url,
+        "impact_score": impact_score,
+        "direction": direction,
+        "involved_keywords": keywords,
+    }
+
+
+def _sanitize_major_events(events: list[object]) -> list[dict[str, object]]:
+    """批量规整 major_event 列表，丢弃不合规事件。"""
+    result: list[dict[str, object]] = []
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        sane = _sanitize_major_event(raw)
+        if sane is not None:
+            result.append(sane)
+    return result
+
+
+def _recover_major_events_from_block(
+    block: str, *, source: str
+) -> list[dict[str, object]]:
+    """从 JSON 块中提取合法 major_event；整体解析失败时逐对象容错恢复。
+
+    核心目标：单个事件的格式问题（如 summary 含未转义中文引号）不得导致全量事件
+    丢失——能解析出的合法事件继续返回。恢复日志记录原始块摘要/失败原因/位置/
+    恢复数量，便于生产追踪。
+    """
+    recovery_info: dict[str, object] | None = None
+    try:
+        events = json.loads(block)
+        if isinstance(events, list):
+            sanitized = _sanitize_major_events(events)
+            if len(sanitized) < len(events):
+                logger.warning(
+                    "major_events_dropped_invalid",
+                    source=source,
+                    total=len(events),
+                    valid=len(sanitized),
+                )
+            return sanitized
+        return []
+    except (json.JSONDecodeError, TypeError) as exc:
+        # 记录失败详情，供逐对象恢复后的追踪日志使用
+        recovery_info = {
+            "error_type": type(exc).__name__,
+            "error_reason": str(exc)[:200],
+            "error_position": getattr(exc, "pos", None),
+            "error_line": getattr(exc, "lineno", None),
+        }
+
+    # 整体解析失败 → 按扁平对象逐个解析，仅保留可解析且字段合法的事件
+    recovered: list[dict[str, object]] = []
+    total = 0
+    broken = 0
+    for obj_text in _JSON_FLAT_OBJECT_RE.findall(block):
+        total += 1
+        try:
+            obj = json.loads(obj_text)
+        except (json.JSONDecodeError, TypeError):
+            broken += 1
+            continue
+        sane = _sanitize_major_event(obj) if isinstance(obj, dict) else None
+        if sane is None:
+            broken += 1
+            continue
+        recovered.append(sane)
+
+    logger.warning(
+        "major_events_partial_recovery",
+        source=source,
+        error_type=str(recovery_info.get("error_type", "")),
+        error_reason=str(recovery_info.get("error_reason", "")),
+        error_position=recovery_info.get("error_position"),
+        error_line=recovery_info.get("error_line"),
+        total_objects=total,
+        recovered=len(recovered),
+        broken=broken,
+        block_preview=block[:200],
+    )
+    return recovered
+
+
 def extract_major_events(text: str) -> list[dict[str, object]]:
     """从晨报文本中提取重大事件列表。
 
     解析策略（逐级回退）：
-    1. 查找 ``<!--MAJOR_EVENTS_START-->...<!--MAJOR_EVENTS_END-->`` 标记块，JSON 解析
-    2. 兼容：正则匹配 JSON 数组 ``[{...}]``
+    1. 查找 ``<!--MAJOR_EVENTS_START-->...<!--MAJOR_EVENTS_END-->`` 标记块
+       - 整体 JSON 解析成功 → 规整后返回
+       - 整体解析失败 → 逐对象容错恢复，丢弃格式损坏的事件，保留其余合法事件
+    2. 兼容：正则匹配 JSON 数组 ``[{...}]``（同样容错恢复）
     3. 都失败返回空列表
 
     从 ``agents/workers/morning.py`` 迁出，供 morning run() 和 snapshot_builder 复用。
     """
     # 策略 1: 标记块
-    match = re.search(
-        r'<!--MAJOR_EVENTS_START-->\s*\n?(.*?)\n?\s*<!--MAJOR_EVENTS_END-->',
-        text, re.DOTALL,
-    )
+    match = _MAJOR_EVENTS_BLOCK_RE.search(text)
     if match:
-        try:
-            events = json.loads(match.group(1))
-            if isinstance(events, list):
-                return [e for e in events if isinstance(e, dict)]
-        except (json.JSONDecodeError, TypeError):
-            pass
+        return _recover_major_events_from_block(match.group(1), source="marker_block")
 
     # 策略 2: 兼容 JSON 数组
-    json_match = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
+    json_match = _MAJOR_EVENTS_ARRAY_RE.search(text)
     if json_match:
-        try:
-            events = json.loads(json_match.group(0))
-            if isinstance(events, list):
-                return [e for e in events if isinstance(e, dict)]
-        except (json.JSONDecodeError, TypeError):
-            pass
+        return _recover_major_events_from_block(json_match.group(0), source="json_array")
 
     return []
 
