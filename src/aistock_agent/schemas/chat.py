@@ -18,3 +18,5 @@ class ChatResponse(BaseModel):
 
     content: str
     session_id: str
+    # P10 线 2 缺口修复：HTTP 非流式降级路径透出本轮 token 用量（graph 未采集时为 None，null 兼容）
+    token_usage: dict[str, int] | None = None

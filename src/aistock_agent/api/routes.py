@@ -109,6 +109,8 @@ async def chat_message(
     return ChatResponse(
         content=content,
         session_id=session_id,
+        # P10 线 2 缺口修复：透出本轮 token_usage（synth_answer_node 附加于 result；无则 None）
+        token_usage=result.get("token_usage"),
     )
 
 
