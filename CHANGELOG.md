@@ -23,6 +23,63 @@
 - `tests/unit/test_event_agent_run.py`（新增）：P0-1 / P1-1 / P1-2 状态字段可靠性
 - `tests/unit/test_event_analysis_pipeline.py`（新增）：P0-2 单事件超时透传 + GI 接线
 - `tests/unit/test_output_parser.py` / `test_event_conduction_service.py` / `test_event_persister.py`：补充容错恢复、超时、source_name/event_type 断言
+## [junliang] 2026-08-06 — 自选股洞察：LLM 归因 category 字段兼容 + 归因链路联调修复
+
+**开发者**: Aria
+
+### 修复
+- `src/aistock_agent/schemas/insight.py`：`DriverOutput` 增加可选 `category` 字段（LLM 常回传候选分类，此前 `extra=forbid` 直接拒绝导致归因全部回退规则兜底、LLM 路径失效）
+- `src/aistock_agent/services/insight_validator.py`：校验 LLM 回传的 `category` 与所选候选分类一致，不一致拒绝（分类权威在候选，防 LLM 注入分类）
+- `src/aistock_agent/prompts/workers/insight.py`：提示词新增第 6 条输出字段白名单（每个 driver 只允许 candidate_id/label/confidence/category）
+
+### 文档
+- `docs/自选股洞察-PRD.md`：更新事件归属规则——事件股票必须与标题主体股票一致，详情页推荐股票不建事件（修复事件挂错标的，如国投中鲁文章被挂到中芯国际事件）
+
+---
+
+## [main] 2026-08-06 — 修复存量 unit 测试失败 + 清理遗留测试文件
+
+**开发者**: Aria
+
+### 修复
+- `services/scheduler.py`：`_publish_review_quick_event` / `_publish_review_full_event` 的 trace_id 由 `asyncio.get_event_loop().time()` 改为 `time.monotonic()`，消除对"当前事件循环"的隐式依赖（同步/多线程场景无 loop 会抛 RuntimeError）
+- `graph/nodes/qa_router.py`：`_resolve_multi_symbols` 在 `_extract_multi_symbols` 返回空（候选 <2 约定返回 []）时按正则补全消息中显式给出的 6 位代码，修复 "600519 和五粮液哪个更好" 对比闸门无法短路的问题
+- `tests/unit/test_skills.py`：3 个 normal + 3 个 exception 测试改用 `mock.ainvoke.return_value / side_effect` 配置（原 `AsyncMock(return_value=...)` 只作用于 mock 自身，`.ainvoke` 子 mock 拿不到导致 degraded/coroutine 报错与假通过）；stock_snapshot normal 测试补充 node_api.get 与交易时段 mock，消除真实时间依赖
+- `tests/unit/test_qa_router.py`：`test_qa_router_llm_single_validate_collapses` 补充 `get_quick_think` mock（缺 mock 时真实调用 ChatOpenAI 抛 OpenAIError 走兜底，断言 KeyError）
+- `tests/unit/test_industry_vector_search.py`：2 处降级断言由旧文本"数据暂不可用"更新为当前 `DEGRADED_MESSAGE`（safe_tool_call 稳定契约）
+- `tests/unit/test_qa_briefing.py`：morning 前置报告补 `trend_score` mock（`_REQUIRED_TYPES["morning"]` 已含 trend_score）
+- `tests/unit/test_scheduler.py`：`test_start_scheduler_explicitly_passes_configured_timezone_to_cron` 显式创建/清理事件循环，消除全套运行时的 loop 顺序污染
+
+### 清理
+- 删除 `tests/unit/test_tenx_tools.py`（tenx_tools.py 已被 trend_tools.py 替代移除，遗留测试文件）
+- 清理 5 个测试文件的 ruff 存量警告（E402/E501/F401/I001 等，21 处）
+
+### 验证
+- `pytest tests/unit -q`：1171 passed（修复前 1162 passed + 9 failed + 1 collection error）
+- `pytest tests/e2e/test_chat_message.py -q`：4 passed
+- ruff：全部改动文件 All checks passed
+
+---
+
+## [changer] 2026-08-06 — WS 路径 token_usage 时序修复 + HTTP 降级补返回 + 服务端口 8000→8080 对齐
+
+**开发者**: Aria
+
+### 修复
+- `api/ws.py`：astream_events config 传入 `get_default_callbacks()`（astream_events 不触发 LLM 构造函数 callbacks=）；循环结束后 `await asyncio.sleep(0)` yield 事件循环让延迟 on_llm_end 回调执行，再从 contextvar 刷新 token_usage 覆盖 stale None——根因：LangGraph v2 异步回调延迟，synth_answer 节点执行期间 contextvar 尚未写入，DONE 事件恒 None
+- `observability/callback.py`：清理 DEBUG print；`_extract_token_usage` fallback 失败日志改为 `logger.debug`
+- `services/token_usage.py`：清理 DEBUG print
+- `api/routes.py` + `schemas/chat.py`：HTTP 非流式 `chat_message` 补返回 `token_usage`（降级路径用量缺口，P10 线 2；c926e9d + 8944635）；e2e 新增 `test_chat_message_returns_token_usage_when_graph_provides`
+
+### 改进
+- 服务端口 `8000`→`8080` 对齐 app-api `AGENT_PY_URL` 默认值（app-api 已在 2026-08-05 改 8080，agent-py config 落后导致反代错端口）
+- `config.py`：`port: int = 8080` + 注释
+- `Dockerfile`：`EXPOSE 8080` + `CMD --port 8080`
+- `README.md` / `AGENT_STANDARDS.md`：启动命令与 docker run 端口同步更新
+
+### 验证
+- WS 直连冒烟 `token_usage={'prompt_tokens': 455, 'completion_tokens': 353, 'total_tokens': 808}`（3 次 LLM 调用之和，非翻倍）
+- 43 单测全绿；HTTP 路径 e2e 回归通过
 
 ---
 

@@ -18,7 +18,7 @@ cp .env.example .env
 # 编辑 .env 填入实际配置
 
 # 启动开发服务
-uvicorn aistock_agent.main:app --reload --port 8000
+uvicorn aistock_agent.main:app --reload --port 8080
 
 # 运行测试
 pytest tests/ -v
@@ -503,7 +503,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 docker build -t aistock-agent .
 
 # 运行
-docker run -p 8000:8000 --env-file .env aistock-agent
+docker run -p 8080:8080 --env-file .env aistock-agent
 ```
 
 ## 相关项目

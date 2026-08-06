@@ -51,7 +51,8 @@ class TokenUsageContext:
     @staticmethod
     def reset_token_usage() -> None:
         """开启新一轮采集（ws.py/routes.py 每条消息入口调用）。"""
-        _usage_var.set(TokenUsageAccumulator())
+        acc = TokenUsageAccumulator()
+        _usage_var.set(acc)
 
     @staticmethod
     def get_token_usage() -> dict[str, int] | None:

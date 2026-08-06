@@ -1308,11 +1308,10 @@ async def test_qa_router_llm_single_validate_collapses():
         ],
     )
     mock_llm = MagicMock()
-    mock_llm.ainvoke = AsyncMock(return_value=output)
-    with patch(
-        "aistock_agent.graph.nodes.qa_router.with_chat_structured_output",
-        return_value=mock_llm,
-    ):
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=output))
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
         result = await qa_router_node(_state("600519 今天怎么样"))
     assert result["goals"] is None                      # 单 validate 子目标坍缩
     assert result["skill_calls"][0].goal_id is None

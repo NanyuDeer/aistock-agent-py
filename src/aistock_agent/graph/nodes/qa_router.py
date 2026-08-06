@@ -328,10 +328,17 @@ async def _resolve_multi_symbols(message: str) -> list[str]:
 
     注意：_extract_multi_symbols 可能混入未 resolve 的中文名候选（如"和五粮液"），
     必须过滤为纯 6 位代码，否则 compare_stocks 会拿到非代码 symbol。
+
+    补充（2026-08-06 复测）：_extract_multi_symbols 在候选 <2 时返回 []（约定为
+    "不短路空 symbols"），会丢弃消息中已显式给出的 6 位代码（如"600519 和五粮液
+    哪个更好"），导致对比闸门无法短路 → 按正则直接补全显式代码。
     """
     symbols = [
         s for s in _extract_multi_symbols(message) if s.isdigit() and len(s) == 6
     ]
+    if not symbols:
+        symbols = re.findall(r"(?<!\d)(?:sh|sz)?(\d{6})(?!\d)", message, re.IGNORECASE)
+        symbols = list(dict.fromkeys(symbols))
     if len(symbols) >= 2:
         return symbols[:5]
     for name in _extract_multi_name_candidates(message):

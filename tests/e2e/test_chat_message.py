@@ -20,14 +20,17 @@ _CHAT_URL = "/api/agent/chat/message"
 _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
 
-def _mock_chat_graph(final_response: str) -> MagicMock:
-    """mock compile_chat_graph 返回的 graph（ainvoke 返回固定 final_response）。"""
+def _mock_chat_graph(final_response: str, token_usage: dict | None = None) -> MagicMock:
+    """mock compile_chat_graph 返回的 graph（ainvoke 返回固定 final_response，可选 token_usage）。"""
     async def mock_ainvoke(state, config=None):
-        return {
+        result: dict = {
             "final_response": final_response,
             "insight": None,
             "trace": None,
         }
+        if token_usage is not None:
+            result["token_usage"] = token_usage
+        return result
 
     mock_graph = MagicMock()
     mock_graph.ainvoke = mock_ainvoke
@@ -55,6 +58,29 @@ async def test_chat_message_returns_content_without_trace_field():
     assert body["content"] == "ChatAgent 回复"
     assert "advisor_trace" not in body
     assert "session_id" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_message_returns_token_usage_when_graph_provides():
+    """/chat/message HTTP 降级路径透出 token_usage（P10 线 2 缺口修复：前端降级分支需读取）"""
+    usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    with patch(
+        "aistock_agent.api.routes.compile_chat_graph",
+        return_value=_mock_chat_graph("ChatAgent 回复", token_usage=usage),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                _CHAT_URL,
+                json={"message": "茅台今天怎么样"},
+                headers=_VALID_HEADERS,
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["token_usage"] == usage
+    assert body["token_usage"]["total_tokens"] == 30
 
 
 @pytest.mark.asyncio
