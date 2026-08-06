@@ -16,7 +16,9 @@
         "PYTHONPATH": "src",
         "APP_ENV": "production",
         "TZ": "Asia/Shanghai",
-        "STOCK_TRACE_CONSUMER_ENABLED": "true"
+        "INSIGHT_REDIS_URL": "",
+        "INSIGHT_CONSUMER_ENABLED": "true",
+        "STOCK_TRACE_CONSUMER_ENABLED": "false"
       },
       "error_file": "/home/aistock/logs/aistock-agent-error.log",
       "out_file": "/home/aistock/logs/aistock-agent-out.log",
