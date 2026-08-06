@@ -205,9 +205,16 @@ def _normalize_prediction_validation(raw_pv: dict[str, object]) -> dict[str, obj
 
 
 def _normalize_llm_trace_json(raw_json: str) -> str:
-    """解析 LLM 输出的 JSON，归一化 prediction_validation 字段名后返回。
+    """解析 LLM 输出的 JSON，归一化字段名与归因形态后返回。
 
     如果解析失败或无 prediction_validation，原样返回。
+    除字段名归一化外，还兜底修正 hypothesis 归因的非法形态：
+    - attribution_status="hypothesis" 时强制清空 primary_chain_id
+      （hypothesis 表示证据不足、未确认主因，禁止选择主链）
+    - hypothesis 时把 supported 候选降为 weak
+      （hypothesis 只允许 weak 备选；LLM 可能在证据未闭环时误标 supported）
+    否则 LLM 输出自相矛盾会被 validate_trace_against_snapshot 拒绝，
+    导致整份报告降级为"生成暂时不可用"。
     """
     try:
         data = json.loads(raw_json)
@@ -220,6 +227,15 @@ def _normalize_llm_trace_json(raw_json: str) -> str:
     pv = data.get("prediction_validation")
     if isinstance(pv, dict) and pv.get("status") != "no_forecast":
         data["prediction_validation"] = _normalize_prediction_validation(pv)
+
+    if data.get("attribution_status") == "hypothesis":
+        if data.get("primary_chain_id") is not None:
+            data["primary_chain_id"] = None
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("status") == "supported":
+                    candidate["status"] = "weak"
 
     return json.dumps(data, ensure_ascii=False)
 
@@ -765,17 +781,27 @@ def _first_effective_line(text: str) -> str:
 
 
 def _extract_trace_summary(markdown: str) -> str:
-    """从复盘 markdown 提取摘要（主导现象段首个有效行）。
+    """从复盘 markdown 提取摘要（主导现象段的可读摘要）。
 
     摘要提取顺序：
-    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
-    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
-    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    1. ``## 确认的市场现象`` 段落中 ``- 摘要：xxx`` 行的内容（新 markdown 格式，
+       render_market_trace_markdown 产出；该行是 LLM 生成的现象描述，易读中文，
+       约 15-30 字，符合晨报结论字数参考）
+    2. 回退：``## 主导现象`` 段落的首个有效行（旧格式或摘要行缺失）
+    3. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
+    4. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
     """
     summary = ""
     m = _DOMINANT_PHENOMENON_RE.search(markdown)
     if m:
-        summary = _first_effective_line(m.group(1))
+        section = m.group(1)
+        # 优先取 "- 摘要：xxx" 行内容（LLM 生成的现象描述，避免取到
+        # "- 类型：broad_rally" 这类内部字段行）
+        summary_match = re.search(r"^\s*-\s*摘要[：:]\s*(.+)$", section, re.MULTILINE)
+        if summary_match:
+            summary = _first_effective_line(summary_match.group(1))
+        if not summary:
+            summary = _first_effective_line(section)
     if not summary:
         m = _STEP_FOUR_RE.search(markdown)
         if m:

@@ -376,3 +376,109 @@ def test_normalize_llm_trace_json_correct_fields_passthrough():
     assert pv["sector_hits"][0]["morning_direction"] == "bullish"
     assert pv["sector_hits"][0]["actual_direction"] == "bullish"
     assert pv["sector_hits"][0]["result"] == "hit"
+
+
+def test_normalize_hypothesis_clears_primary_chain():
+    """hypothesis 归因带 primary_chain_id 时应强制清空（禁止选择主链）。"""
+    raw = json.dumps({
+        "schema_version": "1.1",
+        "attribution_status": "hypothesis",
+        "candidates": [
+            {
+                "id": "global_risk_liquidity",
+                "category": "global_risk_liquidity",
+                "status": "weak",
+                "verdict": "外盘传导无法验证",
+            },
+        ],
+        "primary_chain_id": "global_risk_liquidity",
+        "alternative_chain_id": None,
+        "confidence": "medium",
+        "unresolved_questions": [],
+    })
+    normalized = _normalize_llm_trace_json(raw)
+    data = json.loads(normalized)
+    assert data["attribution_status"] == "hypothesis"
+    assert data["primary_chain_id"] is None
+    assert data["candidates"][0]["status"] == "weak"
+
+
+def test_normalize_hypothesis_downgrades_supported_to_weak():
+    """hypothesis 归因含 supported 候选时应降级为 weak（hypothesis 只允许 weak）。"""
+    raw = json.dumps({
+        "schema_version": "1.1",
+        "attribution_status": "hypothesis",
+        "candidates": [
+            {
+                "id": "industry_technology_supply",
+                "category": "industry_technology_supply",
+                "status": "supported",
+                "verdict": "CPO 量产带动半导体",
+            },
+            {
+                "id": "domestic_macro_policy",
+                "category": "domestic_macro_policy",
+                "status": "insufficient",
+                "verdict": "无政策事件",
+            },
+        ],
+        "primary_chain_id": "industry_technology_supply",
+        "alternative_chain_id": None,
+        "confidence": "medium",
+        "unresolved_questions": [],
+    })
+    normalized = _normalize_llm_trace_json(raw)
+    data = json.loads(normalized)
+    assert data["primary_chain_id"] is None
+    statuses = {c["status"] for c in data["candidates"]}
+    assert statuses == {"weak", "insufficient"}
+    assert "supported" not in statuses
+
+
+def test_normalize_hypothesis_keeps_weak_alternative():
+    """hypothesis 归因已合法的 weak 备选不应被修改。"""
+    raw = json.dumps({
+        "schema_version": "1.1",
+        "attribution_status": "hypothesis",
+        "candidates": [
+            {
+                "id": "market_positioning_liquidity",
+                "category": "market_positioning_liquidity",
+                "status": "weak",
+                "verdict": "资金面数据缺失",
+            },
+        ],
+        "primary_chain_id": None,
+        "alternative_chain_id": "market_positioning_liquidity",
+        "confidence": "low",
+        "unresolved_questions": [],
+    })
+    normalized = _normalize_llm_trace_json(raw)
+    data = json.loads(normalized)
+    assert data["primary_chain_id"] is None
+    assert data["alternative_chain_id"] == "market_positioning_liquidity"
+    assert data["candidates"][0]["status"] == "weak"
+
+
+def test_normalize_confirmed_not_modified():
+    """confirmed 归因（含 primary_chain_id 与 supported 候选）不应被归一化。"""
+    raw = json.dumps({
+        "schema_version": "1.1",
+        "attribution_status": "confirmed",
+        "candidates": [
+            {
+                "id": "industry_technology_supply",
+                "category": "industry_technology_supply",
+                "status": "supported",
+                "verdict": "CPO 量产带动半导体",
+            },
+        ],
+        "primary_chain_id": "industry_technology_supply",
+        "alternative_chain_id": None,
+        "confidence": "high",
+        "unresolved_questions": [],
+    })
+    normalized = _normalize_llm_trace_json(raw)
+    data = json.loads(normalized)
+    assert data["primary_chain_id"] == "industry_technology_supply"
+    assert data["candidates"][0]["status"] == "supported"

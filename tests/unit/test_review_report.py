@@ -454,3 +454,38 @@ def test_render_markdown_prediction_validation_none_degraded():
 
     assert "## 预判对照" in markdown
     assert "无晨报预测可对照" in markdown
+
+
+def test_extract_trace_summary_prefers_summary_line_over_type_line():
+    """摘要应提取"- 摘要：xxx"行（易读中文），而非"- 类型：broad_rally"内部字段行。"""
+    summary = review._extract_trace_summary(REVIEW_MARKDOWN)
+    assert summary == "市场风险偏好改善，科技板块领涨。"
+
+
+def test_extract_trace_summary_falls_back_to_first_line_without_summary_line():
+    """现象段缺失摘要行时，回退到段落首个有效行（兼容旧 markdown）。"""
+    markdown = """# A股收盘溯源｜2026-07-17
+
+## 确认的市场现象
+- 类型：sector_rotation
+- 严重度：medium
+
+## 归因结论
+- 证据不足，未确认主因。
+"""
+    summary = review._extract_trace_summary(markdown)
+    assert summary == "类型：sector_rotation"
+
+
+def test_extract_trace_summary_falls_back_to_step_four_for_legacy_markdown():
+    """旧 markdown 无现象段时，回退到 ## 步骤4 段首个有效行。"""
+    legacy = """# A股收盘溯源｜2026-07-17
+
+## 步骤4 输出核心结论
+今日市场震荡上行，结构性机会明显。
+
+## 归因结论
+- 未选定主因。
+"""
+    summary = review._extract_trace_summary(legacy)
+    assert summary == "今日市场震荡上行，结构性机会明显。"

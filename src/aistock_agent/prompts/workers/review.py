@@ -53,8 +53,14 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 8. confirmed 的 trigger 必须引用 URL 非空、occurred_at 非空且不晚于 captured_at
    的 event_evidence；observable_result 必须引用 phenomenon_discovery.primary.fact_ids。
 9. 无 occurred_at 的新闻、null 主力资金或缺失全球行情只能写入限制与未解问题，
-   不得据此确认因果。hypothesis 不得选择主链，只可选择 weak 备选；
-   insufficient 不得选择任何链，候选只能为 insufficient/rejected。
+   不得据此确认因果。
+   ⚠️ attribution_status 与选链必须严格一致：
+   - hypothesis = 证据不足以确认主因，只能选 weak 备选（alternative_chain_id）；
+     禁止设置 primary_chain_id，禁止任何候选为 supported（只能 weak/rejected/insufficient）
+   - insufficient = 证据严重不足，不得选择任何链（primary/alternative 均 null），
+     候选只能为 insufficient/rejected
+   - confirmed = 证据闭环完整，必须设置 primary_chain_id 指向唯一 supported 候选
+   自相矛盾（如 hypothesis 却带 primary_chain_id 或 supported 候选）会导致报告被拒绝。
 
 【预判对照规则】
 若 snapshot.morning_forecast 非空，你必须：

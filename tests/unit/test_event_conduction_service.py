@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.services.event_conduction import (
-    EventConductionResult,
+    EventConductionOutput,
     run_event_conduction_batch,
     run_single_event_conduction,
 )
@@ -42,13 +42,13 @@ async def test_single_success() -> None:
             {"title": "美联储加息", "summary": "加息25bp", "url": "https://example.com"}
         )
 
-    assert isinstance(result, EventConductionResult)
-    assert result.success is True
-    assert result.title == "美联储加息"
-    assert result.event_generated is True
-    assert result.error is None
+    assert isinstance(result, EventConductionOutput)
+    assert result.status.success is True
+    assert result.status.title == "美联储加息"
+    assert result.status.event_generated is True
+    assert result.status.error is None
     # event_cached 从 event_agent 显式状态读取；mock 未提供 → False
-    assert result.cached is False
+    assert result.status.cached is False
 
 
 @pytest.mark.asyncio
@@ -57,10 +57,10 @@ async def test_single_agent_exception() -> None:
     with patch(_EVENT_RUN, new_callable=AsyncMock, side_effect=RuntimeError("LLM 不可用")):
         result = await run_single_event_conduction({"title": "测试事件"})
 
-    assert result.success is False
-    assert result.event_generated is False
-    assert result.error is not None
-    assert "LLM 不可用" in result.error
+    assert result.status.success is False
+    assert result.status.event_generated is False
+    assert result.status.error is not None
+    assert "LLM 不可用" in result.status.error
 
 
 @pytest.mark.asyncio
@@ -78,8 +78,8 @@ async def test_single_degraded_response() -> None:
     with patch(_EVENT_RUN, new_callable=AsyncMock, return_value=mock_result):
         result = await run_single_event_conduction({"title": "测试事件"})
 
-    assert result.success is False
-    assert result.event_generated is False
+    assert result.status.success is False
+    assert result.status.event_generated is False
 
 
 @pytest.mark.asyncio
@@ -89,8 +89,8 @@ async def test_single_empty_title_skipped() -> None:
         result = await run_single_event_conduction({"title": "", "summary": "无标题"})
 
     mock_run.assert_not_called()
-    assert result.success is False
-    assert "title" in (result.error or "").lower()
+    assert result.status.success is False
+    assert "title" in (result.status.error or "").lower()
 
 
 @pytest.mark.asyncio
@@ -110,10 +110,10 @@ async def test_single_cache_hit_counts_as_success() -> None:
     with patch(_EVENT_RUN, new_callable=AsyncMock, return_value=mock_result):
         result = await run_single_event_conduction({"title": "缓存事件"})
 
-    assert result.success is True
-    assert result.event_generated is True
+    assert result.status.success is True
+    assert result.status.event_generated is True
     # 缓存命中 → event_cached 从显式状态读取为 True
-    assert result.cached is True
+    assert result.status.cached is True
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_batch_multiple_events_parallel() -> None:
         results = await run_event_conduction_batch(events)
 
     assert len(results) == 3
-    assert all(r.success for r in results)
+    assert all(r.status.success for r in results)
 
 
 @pytest.mark.asyncio
@@ -235,8 +235,8 @@ async def test_batch_single_failure_does_not_block_others() -> None:
         results = await run_event_conduction_batch(events)
 
     assert len(results) == 3
-    successes = [r for r in results if r.success]
-    failures = [r for r in results if not r.success]
+    successes = [r for r in results if r.status.success]
+    failures = [r for r in results if not r.status.success]
     assert len(successes) == 2
     assert len(failures) == 1
 
@@ -277,5 +277,5 @@ async def test_batch_exception_does_not_block_others() -> None:
         results = await run_event_conduction_batch(events)
 
     assert len(results) == 2
-    assert results[0].success is False
-    assert results[1].success is True
+    assert results[0].status.success is False
+    assert results[1].status.success is True
