@@ -1,12 +1,20 @@
-"""全局重要性评估服务 — 投资者视角焦点事件识别
+"""全局重要性评估服务 — 投资者视角当日最大利好/最大利空事件识别
 
 职责：
-1. 查询近 7 天 event_conduction 报告（_load_recent_event_reports）
-2. 提取关键字段，构建 Global Importance Prompt 所需输入结构（build_global_importance_input）
-3. 调用 LLM 识别两个独立的焦点事件（run_global_importance_evaluation）：
-   - current_focus_event：当前最值得关注的事件（新事件优先）
-   - ongoing_significant_event：仍在影响市场的持续事件
+1. 接收当天 Event Conduction Pipeline 返回的已完成事件结果（外部注入）
+2. 构建 Global Importance Prompt 所需输入结构（build_global_importance_input）
+3. 调用 LLM 识别两个独立方向的焦点事件（eval_global_importance_from_events）：
+   - top_bullish_event：当日最大利好事件（direction=bullish）
+   - top_bearish_event：当日最大利空事件（direction=bearish）
 4. 持久化结果到 DB
+
+设计原则（2026-08-05 当天事件池重构）：
+    GI 只比较当天 Morning 产生并经过 Event Conduction 分析完成的事件，
+    禁止使用近 7 天 event_conduction 数据。
+    ``eval_global_importance_from_events(events)`` 是 pipeline 主入口，
+    入参 events 必须来自 event_analysis_pipeline 的当天传导结果。
+    ``persist_global_importance_evaluation(events=...)`` 向下兼容：
+    当 events 为 None 时回退到 DB 查询（用于 _test_run 手动调试）。
 """
 
 import asyncio
@@ -24,7 +32,7 @@ from aistock_agent.utils.output_parser import _parse_json
 
 logger = structlog.get_logger()
 
-# 查询近 N 天的 event_conduction 报告
+# 查询近 N 天的 event_conduction 报告（历史兼容，仅用于 _test_run 手动入口）
 _DEFAULT_LOOKBACK_DAYS = 7
 
 
@@ -185,6 +193,11 @@ async def _load_recent_event_reports(
 ) -> list[dict[str, object]]:
     """查询近 N 天的 event_conduction 报告。
 
+    .. deprecated::
+        自 2026-08-05 当天事件池重构起，此函数仅保留用于 ``_test_run`` 手动调试入口。
+        Pipeline 路径已改为 ``eval_global_importance_from_events(events)``，
+        直接接收当天 event_conduction pipeline 的外部注入结果，不再主动查询历史 DB。
+
     使用 node_api.list_analysis_reports 逐天查询，合并去重。
     只保留 status='completed' 且 event_generated 为 True 的有效报告。
 
@@ -284,40 +297,52 @@ async def build_global_importance_input(
 
 
 async def run_global_importance_evaluation(
+    events: list[dict[str, object]] | None = None,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
 ) -> dict[str, object]:
     """全局重要性评估主入口。
 
+    支持两种模式：
+    1. **当天事件池模式（推荐）**：events 非空时，仅使用该列表做 LLM 判断，
+       不查询 DB（当日事件必须由 pipeline 外部注入）。
+    2. **DB 查询模式（历史兼容）**：events=None 时回退到
+       build_global_importance_input(lookback_days) 查近 N 天 DB 报告。
+
     逻辑：
-    1. 调用 build_global_importance_input() 获取近 N 天事件集合
+    1. 获取事件集合（外部注入或 DB 查询）
     2. events 为空时直接返回，不调用 LLM
     3. 构造 Prompt → 调用 quick_think
-    4. 解析 LLM JSON 结果 → 识别两个焦点事件 + 构建向后兼容 events
+    4. 解析 LLM JSON 结果 → 识别最大利好/最大利空两个事件
 
     Args:
-        lookback_days: 回看天数，默认 7 天。
+        events: 当天 event_conduction pipeline 结果列表（由 eval_global_importance_from_events 传入）。
+                为 None 时回退 DB 查询。
+        lookback_days: DB 回看天数（仅在 events=None 时生效）。
 
     Returns:
         {
             "as_of": "...",
-            "total_events": 2,
             "summary": "...",
-            "current_focus_event": {...} | None,       # 新 Schema
-            "ongoing_significant_event": {...} | None,  # 新 Schema
-            "events": [{...}, ...],                     # 向后兼容
+            "top_bullish_event": {...} | None,   # 当日最大利好事件
+            "top_bearish_event": {...} | None,   # 当日最大利空事件
         }
     """
-    # ── 步骤 1: 获取近 N 天事件集合 ──
-    global_input = await build_global_importance_input(lookback_days)
-    events = global_input.get("events", [])
-    if not isinstance(events, list) or not events:
-        logger.warning("global_importance_skip_empty", days=lookback_days)
-        return {"events": [], "current_focus_event": None, "ongoing_significant_event": None}
+    # ── 步骤 1: 获取事件集合 ──
+    as_of = date.today().isoformat()
+    if events is not None:
+        global_input = {"as_of": as_of, "events": events}
+    else:
+        global_input = await build_global_importance_input(lookback_days)
+
+    event_list = global_input.get("events", [])
+    if not isinstance(event_list, list) or not event_list:
+        logger.warning("global_importance_skip_empty", days=lookback_days if events is None else 0)
+        return {"top_bullish_event": None, "top_bearish_event": None}
 
     logger.info(
         "global_importance_start",
-        event_count=len(events),
-        days=lookback_days,
+        event_count=len(event_list),
+        source="external_inject" if events is not None else "db_query",
     )
 
     # ── 步骤 2: 构造 Prompt ──
@@ -335,9 +360,8 @@ async def run_global_importance_evaluation(
     except Exception as e:
         logger.error("global_importance_llm_failed", error=str(e), exc_info=True)
         return {
-            "events": [],
-            "current_focus_event": None,
-            "ongoing_significant_event": None,
+            "top_bullish_event": None,
+            "top_bearish_event": None,
             "error": f"LLM 调用失败: {str(e)}",
         }
 
@@ -350,74 +374,46 @@ async def run_global_importance_evaluation(
                 text_preview=text[:300],
             )
             return {
-                "events": [],
-                "current_focus_event": None,
-                "ongoing_significant_event": None,
+                "top_bullish_event": None,
+                "top_bearish_event": None,
                 "error": "LLM 返回非 dict 结构",
             }
 
         summary = str(parsed.get("summary", ""))
 
-        # ── 提取新 Schema 字段：current_focus_event ──
-        raw_focus = parsed.get("current_focus_event")
-        current_focus_event: dict[str, object] | None = None
-        if isinstance(raw_focus, dict) and raw_focus.get("event_id"):
-            current_focus_event = {
-                "event_id": str(raw_focus.get("event_id", "")),
-                "importance_level": str(raw_focus.get("importance_level", "")),
-                "impact_scope": str(raw_focus.get("impact_scope", "")),
-                "direction": str(raw_focus.get("direction", "")),
-                "reason": str(raw_focus.get("reason", "")),
-                "selection_reason": str(raw_focus.get("selection_reason", "")),
+        # ── 提取新 Schema 字段：top_bullish_event（最大利好） ──
+        raw_bullish = parsed.get("top_bullish_event")
+        top_bullish_event: dict[str, object] | None = None
+        if isinstance(raw_bullish, dict) and raw_bullish.get("event_id"):
+            top_bullish_event = {
+                "event_id": str(raw_bullish.get("event_id", "")),
+                "direction": str(raw_bullish.get("direction", "")),
+                "importance_level": str(raw_bullish.get("importance_level", "")),
+                "reason": str(raw_bullish.get("reason", "")),
             }
 
-        # ── 提取新 Schema 字段：ongoing_significant_event ──
-        raw_ongoing = parsed.get("ongoing_significant_event")
-        ongoing_significant_event: dict[str, object] | None = None
-        if isinstance(raw_ongoing, dict) and raw_ongoing.get("event_id"):
-            ongoing_significant_event = {
-                "event_id": str(raw_ongoing.get("event_id", "")),
-                "importance_level": str(raw_ongoing.get("importance_level", "")),
-                "impact_scope": str(raw_ongoing.get("impact_scope", "")),
-                "direction": str(raw_ongoing.get("direction", "")),
-                "reason": str(raw_ongoing.get("reason", "")),
-                "selection_reason": str(raw_ongoing.get("selection_reason", "")),
+        # ── 提取新 Schema 字段：top_bearish_event（最大利空） ──
+        raw_bearish = parsed.get("top_bearish_event")
+        top_bearish_event: dict[str, object] | None = None
+        if isinstance(raw_bearish, dict) and raw_bearish.get("event_id"):
+            top_bearish_event = {
+                "event_id": str(raw_bearish.get("event_id", "")),
+                "direction": str(raw_bearish.get("direction", "")),
+                "importance_level": str(raw_bearish.get("importance_level", "")),
+                "reason": str(raw_bearish.get("reason", "")),
             }
 
-        # ── 构建向后兼容的 events 数组 ──
-        backward_events: list[dict[str, object]] = []
-        for idx, item in enumerate(
-            filter(None, [current_focus_event, ongoing_significant_event]),
-            start=1,
-        ):
-            backward_events.append({
-                "event_id": str(item["event_id"]),
-                "rank": idx,
-                "importance_score": _score_from_level(
-                    str(item.get("importance_level", "")),
-                ),
-                "importance_level": str(item.get("importance_level", "")),
-                "impact_scope": str(item.get("impact_scope", "")),
-                "impact_period": "",
-                "direction": str(item.get("direction", "")),
-                "reason": str(item.get("reason", "")),
-            })
-
-        total = len(backward_events)
         logger.info(
             "global_importance_done",
-            total_events=total,
-            has_focus=current_focus_event is not None,
-            has_ongoing=ongoing_significant_event is not None,
+            has_bullish=top_bullish_event is not None,
+            has_bearish=top_bearish_event is not None,
         )
 
         return {
-            "as_of": date.today().isoformat(),
-            "total_events": total,
+            "as_of": as_of,
             "summary": summary,
-            "current_focus_event": current_focus_event,
-            "ongoing_significant_event": ongoing_significant_event,
-            "events": backward_events,
+            "top_bullish_event": top_bullish_event,
+            "top_bearish_event": top_bearish_event,
         }
     except Exception as e:
         logger.error(
@@ -427,17 +423,46 @@ async def run_global_importance_evaluation(
             exc_info=True,
         )
         return {
-            "events": [],
-            "current_focus_event": None,
-            "ongoing_significant_event": None,
+            "top_bullish_event": None,
+            "top_bearish_event": None,
             "error": f"解析失败: {str(e)}",
         }
 
 
-def _score_from_level(level: str) -> float:
-    """将 importance_level 转换为 importance_score（向后兼容用）。"""
-    mapping = {"critical": 9.0, "important": 6.0, "notable": 3.0}
-    return mapping.get(level, 0.0)
+async def eval_global_importance_from_events(
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    """从当天事件传导结果评估 Global Importance（当天事件池入口）。
+
+    这是 pipeline 主入口，与 run_global_importance_evaluation 不同：
+    本函数接收外部注入的当天 event_conduction 结果，
+    对其进行排序过滤（仅保留当日事件），然后调用 LLM 评估。
+
+    **当天校验**：每个输入事件必须满足 event_age_days == 0（即 event_date == today）。
+    若 event_age_days != 0，直接过滤，防止未来出现历史事件污染。
+
+    Args:
+        events: 当天 event_conduction pipeline 的结果列表。
+            每个 dict 必须包含 event_id 等 GI 输入所需字段。
+
+    Returns:
+        {top_bullish_event, top_bearish_event, as_of, summary}
+    """
+    # ── 当天校验：仅保留 event_age_days == 0 的事件（event_date == today）──
+    today_events = [
+        e for e in events
+        if isinstance(e, dict) and e.get("event_age_days") == 0
+    ]
+    filtered_count = len(events) - len(today_events)
+    if filtered_count > 0:
+        logger.warning(
+            "global_importance_filtered_non_today",
+            total=len(events),
+            today_count=len(today_events),
+            filtered=filtered_count,
+        )
+
+    return await run_global_importance_evaluation(events=today_events)
 
 
 # ── 持久化 ──
@@ -466,11 +491,9 @@ async def save_global_importance_report(
 
     content: dict[str, object] = {
         "as_of": str(result.get("as_of", report_date)),
-        "total_events": result.get("total_events", 0),
         "summary": str(result.get("summary", "")),
-        "current_focus_event": result.get("current_focus_event"),
-        "ongoing_significant_event": result.get("ongoing_significant_event"),
-        "events": result.get("events", []),
+        "top_bullish_event": result.get("top_bullish_event"),
+        "top_bearish_event": result.get("top_bearish_event"),
     }
 
     try:
@@ -488,7 +511,6 @@ async def save_global_importance_report(
         logger.info(
             "global_importance_persisted",
             date=report_date,
-            total_events=content["total_events"],
         )
         return True
     except Exception:
@@ -497,32 +519,40 @@ async def save_global_importance_report(
 
 
 async def persist_global_importance_evaluation(
-    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    events: list[dict[str, object]] | None = None,
+    lookback_days: int | None = None,
 ) -> dict[str, object]:
     """组合入口：执行评估 → 判断结果 → 持久化。
 
+    # Global Importance only evaluates today's completed event conduction results.
+    当 ``events`` 非空时使用外部注入的当天事件；为 None 时回退 DB 查询（_test_run 兼容）。
+
     流程：
-    1. 调用 run_global_importance_evaluation()
+    1. 调用 run_global_importance_evaluation(events=events, lookback_days=lookback_days)
     2. 若 events 为空或错误 → 不写数据库
     3. 若正常 → 调用 save_global_importance_report()
 
     Args:
-        lookback_days: 回看天数，默认 7 天。
+        events: 当天 event_conduction pipeline 结果列表（推荐），为 None 且 lookback_days 为 None 时跳过评估。
+        lookback_days: DB 回看天数（仅在 events=None 时生效）。默认 None，不查历史数据。
 
     Returns:
         同 run_global_importance_evaluation() 的结构，增加 persisted 状态。
     """
-    result = await run_global_importance_evaluation(lookback_days)
+    result = await run_global_importance_evaluation(
+        events=events,
+        lookback_days=lookback_days if lookback_days is not None else _DEFAULT_LOOKBACK_DAYS,
+    )
 
-    has_focus = result.get("current_focus_event") is not None
-    has_ongoing = result.get("ongoing_significant_event") is not None
+    has_bullish = result.get("top_bullish_event") is not None
+    has_bearish = result.get("top_bearish_event") is not None
     error = result.get("error", "")
 
     if error:
         logger.warning("global_importance_persist_skip_error", error=error)
         return {**result, "persisted": False}
 
-    if not has_focus and not has_ongoing:
+    if not has_bullish and not has_bearish:
         logger.warning("global_importance_persist_skip_empty")
         return {**result, "persisted": False}
 
@@ -552,41 +582,27 @@ async def _test_run() -> None:
 
     print(f"\n📝 摘要: {result.get('summary', '')}")
 
-    # ── 当前焦点事件 ──
-    focus = result.get("current_focus_event")
-    print("\n🎯 当前焦点事件 (current_focus_event):")
-    if focus:
-        print(f"  event_id: {focus.get('event_id')}")
-        print(f"  level: {focus.get('importance_level')}")
-        print(f"  scope: {focus.get('impact_scope')}")
-        print(f"  direction: {focus.get('direction')}")
-        print(f"  reason: {focus.get('reason')}")
-        print(f"  selection_reason: {focus.get('selection_reason')}")
+    # ── 最大利好事件 ──
+    bullish = result.get("top_bullish_event")
+    print("\n📈 最大利好事件 (top_bullish_event):")
+    if bullish:
+        print(f"  event_id: {bullish.get('event_id')}")
+        print(f"  direction: {bullish.get('direction')}")
+        print(f"  level: {bullish.get('importance_level')}")
+        print(f"  reason: {bullish.get('reason')}")
     else:
         print("  (null)")
 
-    # ── 重大持续事件 ──
-    ongoing = result.get("ongoing_significant_event")
-    print("\n🔄 重大持续事件 (ongoing_significant_event):")
-    if ongoing:
-        print(f"  event_id: {ongoing.get('event_id')}")
-        print(f"  level: {ongoing.get('importance_level')}")
-        print(f"  scope: {ongoing.get('impact_scope')}")
-        print(f"  direction: {ongoing.get('direction')}")
-        print(f"  reason: {ongoing.get('reason')}")
-        print(f"  selection_reason: {ongoing.get('selection_reason')}")
+    # ── 最大利空事件 ──
+    bearish = result.get("top_bearish_event")
+    print("\n📉 最大利空事件 (top_bearish_event):")
+    if bearish:
+        print(f"  event_id: {bearish.get('event_id')}")
+        print(f"  direction: {bearish.get('direction')}")
+        print(f"  level: {bearish.get('importance_level')}")
+        print(f"  reason: {bearish.get('reason')}")
     else:
         print("  (null)")
-
-    print("\n📋 向后兼容 events 数组:")
-    for ev in result.get("events", []):
-        print(
-            f"  #{ev.get('rank')} | score={ev.get('importance_score'):.1f} | "
-            f"{ev.get('impact_scope')} | "
-            f"{ev.get('direction')} | {ev.get('event_id')}"
-        )
-        if ev.get("reason"):
-            print(f"     → {ev.get('reason')}")
     print("=" * 60)
 
 

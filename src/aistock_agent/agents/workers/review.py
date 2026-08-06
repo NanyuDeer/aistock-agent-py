@@ -9,6 +9,7 @@
 build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推理。
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -86,6 +87,157 @@ def _strip_code_fences(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+# ============================================================================
+# LLM 输出字段名归一化 — prompt 强化的兜底
+# ============================================================================
+
+# LLM 常见错误字段名 → schema 正确字段名
+_SECTOR_HIT_FIELD_MAP: dict[str, str] = {
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+}
+
+_EVENT_HIT_FIELD_MAP: dict[str, str] = {
+    "event": "event_title",
+    "title": "event_title",
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+    "verification": "result",
+    "actual_effect": "actual_impact",
+    "impact": "actual_impact",
+}
+
+# 需要删除的多余字段
+_FIELDS_TO_REMOVE: set[str] = {"evidence_ids"}
+
+# 合法方向值
+_DIRECTION_VALUES: set[str] = {"bullish", "bearish", "neutral"}
+# SectorHit result 合法值
+_SECTOR_RESULT_VALUES: set[str] = {"hit", "miss"}
+
+# 相反方向映射（用于从 result=miss 推断 actual_direction）
+_OPPOSITE_DIRECTION: dict[str, str] = {
+    "bullish": "bearish",
+    "bearish": "bullish",
+    "neutral": "neutral",
+}
+
+
+def _normalize_sector_hit(hit: dict[str, object]) -> dict[str, object]:
+    """归一化单个 SectorHit 字段名。"""
+    nh = dict(hit)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        nh.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _SECTOR_HIT_FIELD_MAP.items():
+        if wrong in nh:
+            if correct not in nh:
+                nh[correct] = nh[wrong]
+            nh.pop(wrong)
+    # 修正 actual_direction 被填入 result 值的情况（LLM 常犯错误）
+    actual = nh.get("actual_direction")
+    if actual and actual not in _DIRECTION_VALUES:
+        # actual_direction 被填成了 hit/miss，移动到 result
+        if actual in _SECTOR_RESULT_VALUES and "result" not in nh:
+            nh["result"] = actual
+        nh.pop("actual_direction", None)
+    # 如果 actual_direction 缺失但有 result，从 morning_direction + result 推断
+    if "result" in nh and "actual_direction" not in nh:
+        morning_val = nh.get("morning_direction", "neutral")
+        morning = morning_val if isinstance(morning_val, str) else "neutral"
+        if nh["result"] == "hit":
+            nh["actual_direction"] = morning
+        elif nh["result"] == "miss":
+            nh["actual_direction"] = _OPPOSITE_DIRECTION.get(morning, "neutral")
+        else:
+            nh["actual_direction"] = "neutral"
+    # 确保 deviation_note 存在
+    nh.setdefault("deviation_note", "")
+    return nh
+
+
+def _normalize_event_hit(evt: dict[str, object]) -> dict[str, object]:
+    """归一化单个 EventHit 字段名。"""
+    ne = dict(evt)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        ne.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _EVENT_HIT_FIELD_MAP.items():
+        if wrong in ne:
+            if correct not in ne:
+                ne[correct] = ne[wrong]
+            ne.pop(wrong)
+    # 确保 actual_impact 存在
+    ne.setdefault("actual_impact", "")
+    # 确保 note 存在
+    ne.setdefault("note", "")
+    return ne
+
+
+def _normalize_prediction_validation(raw_pv: dict[str, object]) -> dict[str, object]:
+    """归一化 LLM 输出的 prediction_validation 字段名和值。
+
+    LLM 经常用 predicted_direction/event/verification 等字段名，
+    而非 schema 要求的 morning_direction/event_title/result。
+    此函数在 model_validate 前做字段名映射，作为 prompt 强化的兜底。
+    """
+    pv = dict(raw_pv)
+
+    # 归一化 sector_hits
+    raw_hits = pv.get("sector_hits", [])
+    if isinstance(raw_hits, list):
+        pv["sector_hits"] = [
+            _normalize_sector_hit(h) for h in raw_hits if isinstance(h, dict)
+        ]
+
+    # 归一化 event_hits
+    raw_events = pv.get("event_hits", [])
+    if isinstance(raw_events, list):
+        pv["event_hits"] = [
+            _normalize_event_hit(e) for e in raw_events if isinstance(e, dict)
+        ]
+
+    return pv
+
+
+def _normalize_llm_trace_json(raw_json: str) -> str:
+    """解析 LLM 输出的 JSON，归一化字段名与归因形态后返回。
+
+    如果解析失败或无 prediction_validation，原样返回。
+    除字段名归一化外，还兜底修正 hypothesis 归因的非法形态：
+    - attribution_status="hypothesis" 时强制清空 primary_chain_id
+      （hypothesis 表示证据不足、未确认主因，禁止选择主链）
+    - hypothesis 时把 supported 候选降为 weak
+      （hypothesis 只允许 weak 备选；LLM 可能在证据未闭环时误标 supported）
+    否则 LLM 输出自相矛盾会被 validate_trace_against_snapshot 拒绝，
+    导致整份报告降级为"生成暂时不可用"。
+    """
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return raw_json
+
+    if not isinstance(data, dict):
+        return raw_json
+
+    pv = data.get("prediction_validation")
+    if isinstance(pv, dict) and pv.get("status") != "no_forecast":
+        data["prediction_validation"] = _normalize_prediction_validation(pv)
+
+    if data.get("attribution_status") == "hypothesis":
+        if data.get("primary_chain_id") is not None:
+            data["primary_chain_id"] = None
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("status") == "supported":
+                    candidate["status"] = "weak"
+
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ============================================================================
@@ -629,17 +781,27 @@ def _first_effective_line(text: str) -> str:
 
 
 def _extract_trace_summary(markdown: str) -> str:
-    """从复盘 markdown 提取摘要（主导现象段首个有效行）。
+    """从复盘 markdown 提取摘要（主导现象段的可读摘要）。
 
     摘要提取顺序：
-    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
-    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
-    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    1. ``## 确认的市场现象`` 段落中 ``- 摘要：xxx`` 行的内容（新 markdown 格式，
+       render_market_trace_markdown 产出；该行是 LLM 生成的现象描述，易读中文，
+       约 15-30 字，符合晨报结论字数参考）
+    2. 回退：``## 主导现象`` 段落的首个有效行（旧格式或摘要行缺失）
+    3. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
+    4. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
     """
     summary = ""
     m = _DOMINANT_PHENOMENON_RE.search(markdown)
     if m:
-        summary = _first_effective_line(m.group(1))
+        section = m.group(1)
+        # 优先取 "- 摘要：xxx" 行内容（LLM 生成的现象描述，避免取到
+        # "- 类型：broad_rally" 这类内部字段行）
+        summary_match = re.search(r"^\s*-\s*摘要[：:]\s*(.+)$", section, re.MULTILINE)
+        if summary_match:
+            summary = _first_effective_line(summary_match.group(1))
+        if not summary:
+            summary = _first_effective_line(section)
     if not summary:
         m = _STEP_FOUR_RE.search(markdown)
         if m:
@@ -873,7 +1035,9 @@ async def run(state: AgentState) -> dict[str, object]:
                 else str(ai_message.content)
             )
             cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
+            trace = MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
@@ -1072,7 +1236,9 @@ async def run_review(
                 else str(ai_message.content)
             )
             cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
+            trace = MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(

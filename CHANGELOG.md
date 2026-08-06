@@ -24,6 +24,78 @@
 
 ---
 
+## [main] 2026-08-06 — 晚报结论重构：归因结论放头条，三条均为 30-40 字一句话（去冒号）
+
+**开发者**: Aria
+
+### 改进
+- `services/briefing.py`：晚报三条顺序调整为 归因结论（主因链）→ 市场快照 → 收盘复盘；归因结论去掉"触发：/传导：/结果："阶段标签与冒号，confirmed 句式"今日市场主因是{…}"、hypothesis 句式"今日市场可能受{…}等因素影响"；市场快照改为"今日X涨4.21%、…，Y跌2.13%、…"一句话（含"无显著领跌/领涨板块"降级分支）；删除不再使用的 `_STAGE_LABELS`
+- `services/phenomenon_discovery.py`：`_SUMMARIES` 五个现象文案扩写为 30-40 字一句话（收盘复盘条目摘要来源，无冒号）
+
+### 修复
+- `agents/workers/review.py`：`_extract_trace_summary` 优先提取"确认的市场现象"段的 `- 摘要：xxx` 行（易读中文现象描述），不再取到"类型：broad_rally"内部字段行；保留旧格式回退
+
+### 测试
+- `tests/unit/test_briefing.py`：更新 sectors/attribution 契约断言为无冒号一句话、`missing_sources` 顺序随新 variant 顺序调整、新增晚报头条顺序断言；`tests/unit/test_review_report.py` 新增 `_extract_trace_summary` 3 个测试；相关测试 60 passed
+
+---
+
+## [master] 2026-08-05 — cls_news/main_force 缺失诊断日志（agent-py）
+
+**开发者**: NanyuDeer
+
+### 新增
+- `services/market_trace_snapshot.py` `_normalize_news_facts`：新增三种缺失场景结构化日志 `cls_news_missing_fetch_error` / `cls_news_missing_empty` / `cls_news_missing_invalid_for_causality`（含 raw_item_count、kept_count、skipped_future、skipped_no_time），成功时输出 `cls_news_available`
+- `services/market_trace_snapshot.py` `_normalize_aggregate_facts`：新增 `main_force_invalid` 日志（is_quick、availability_state、availability_reason、value），区分 quick 快照预期缺失（Tushare 未就绪）与异常缺失
+- `services/market_trace_snapshot.py` 新增 `_log_telegraph_response` 辅助函数：记录 telegraph 接口返回 item_count、total、degraded（兼容 `{date,items,total}` 与 `{code,data}` 两种结构），full/quick 两条路径均接入
+
+### 说明
+- 目的：解决 grep cls_news|main_force 无输出问题，后续运行可在 pm2 日志中定位确切根因
+
+---
+
+## [master] 2026-08-05 — 测试同步：event_conduction 返回结构变更（PR #52 回归修复）
+
+**开发者**: NanyuDeer
+
+### 修复
+- `tests/unit/test_event_conduction_service.py`：断言适配 `EventConductionOutput.status` 新结构（`result.success` → `result.status.success` 等），import 改为 `EventConductionOutput`
+- `tests/test_routes_briefing.py`：event conduction mock 返回改为 `EventConductionOutput(status=EventConductionResult(...))`（3 处），修复 PR #52（EventConductionOutput 包装类）引入的 8 个测试回归
+
+### 测试
+- `test_event_conduction_service.py` + `test_routes_briefing.py`：43 passed
+
+---
+
+## [master] 2026-08-05 — market_snapshot 板块命中率失真修复（粗/细粒度名称对齐）
+
+**开发者**: Aria
+
+### 修复
+- `services/snapshot_builder.py`：`match_sectors_code_level` 在别名字典精确匹配之外新增**双向包含匹配**（`_norm_sector_name` 去"概念/板块/行业/指数"后缀 + `_has_contains_match` 双向子串判断），解决 morning 粗粒度预测板块（AI/CPO/半导体）与 review 行情细粒度概念（存储芯片/光刻机）字面完全无交集导致的 hit_rate=0、new_coverage=1 失真
+- `data/sector_aliases.json`：补齐高频缺口——"AI/CPO/半导体"（映射到半导体/AI光模块）、"白酒概念"→白酒、"CRO/医药"、"医药电商"→医药、"MLCC概念"→电子元器件
+
+### 测试
+- `tests/unit/test_sector_matching.py`：新增 2026-08-05 实况回归（morning 5 板块 vs review 10 概念，命中率 0.00→0.40）+ 包含匹配兜底 + 不相关板块不误判；清理顶部未使用 import
+
+---
+
+## [master] 2026-08-05 — 新增"一键补跑完整晚间链路"端点
+
+**开发者**: Aria
+
+### 新增
+- `api/routes.py`：`POST /api/agent/admin/trigger/evening_chain`（内网 token 鉴权）——一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast），供错过 15:30 调度或灰度验证时使用；显式传 `report_date` 时跳过交易日检查；返回各阶段状态 `stages` 供诊断
+
+### 改进
+- `services/scheduler.py`：`_run_evening_chain_task` 增加可选 `report_date` 参数（缺省走原交易日检查逻辑，向后兼容）并返回各阶段状态 dict（review/market_snapshot/iterate/brief/broadcast 与失败 stage/error 信息）
+
+### 测试
+- `tests/test_admin_trigger.py`：新增 `test_trigger_evening_chain_returns_200`
+- `tests/unit/test_scheduler.py`：新增 3 个测试（显式日期跳过交易日检查 / 缺省日期非交易日返回 skipped / review 失败返回 failed+stage）
+
+---
+
 ## [changer] 2026-08-05 — ChatAgent P10 线 2 用户计费（token_usage）+ P11 线 3 后端卡片（cards）
 
 **开发者**: Aria

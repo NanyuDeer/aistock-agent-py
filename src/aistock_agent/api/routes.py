@@ -407,11 +407,11 @@ async def trigger_morning_briefing(
         if morning_generated and has_major_events:
             event_results = await run_event_conduction_batch(major_events)
             event_triggered_count = len(event_results)
-            event_succeeded_count = sum(1 for r in event_results if r.event_generated)
+            event_succeeded_count = sum(1 for r in event_results if r.status.event_generated)
             event_failed_count = event_triggered_count - event_succeeded_count
             # 只统计生成成功的事件的持久化状态
             event_persisted_count = sum(
-                1 for r in event_results if r.event_generated and r.persisted
+                1 for r in event_results if r.status.event_generated and r.status.persisted
             )
             event_persist_failed_count = event_succeeded_count - event_persisted_count
 
@@ -510,30 +510,30 @@ async def trigger_event_briefing(
         logger.info(
             "manual_trigger_event_done",
             event_title=event_title[:50] or "default",
-            event_generated=result.event_generated,
-            persisted=result.persisted,
-            cached=result.cached,
-            success=result.success,
+            event_generated=result.status.event_generated,
+            persisted=result.status.persisted,
+            cached=result.status.cached,
+            success=result.status.success,
         )
 
-        if result.success:
+        if result.status.success:
             return {
                 "success": True,
                 "message": "事件分析完成",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
                 # 从 event_agent 显式状态读取，禁止硬编码 False
-                "event_cached": result.cached,
+                "event_cached": result.status.cached,
             }
         else:
             return {
                 "success": False,
-                "message": f"事件分析失败: {result.error or '未知错误'}",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
-                "event_cached": result.cached,
+                "message": f"事件分析失败: {result.status.error or '未知错误'}",
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
+                "event_cached": result.status.cached,
             }
     except Exception as e:
         logger.error(
@@ -1201,6 +1201,50 @@ async def trigger_review_full(
             error=str(e), exc_info=True, trace_id=trace_id,
         )
         raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
+
+
+@router.post("/admin/trigger/evening_chain")
+async def trigger_evening_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast）。
+
+    供管理员在错过 15:30 调度或灰度验证时使用。review 阶段命中 Redis 缓存
+    （TTL 2h）时快速返回；显式传入 report_date 时跳过交易日检查。
+    返回各阶段状态，供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_evening_chain_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-evening-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_evening_chain_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_evening_chain_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_evening_chain_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "stages": result.get("stages"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_evening_chain_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
 
 
 # ── CHAT QA ────────────────────────────────────────────────────────

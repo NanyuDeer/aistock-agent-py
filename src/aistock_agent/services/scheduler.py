@@ -2,9 +2,10 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
-  → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
-- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→global_importance→broadcast
-  （global_importance 生成双榜单后写入 DB，broadcast 从 DB 读取报告）
+  → 完成后自动提取 major_events，fire-and-forget 触发事件分析流水线
+  （event_analysis_pipeline：Event Conduction 全部完成 → Global Importance 双榜单写 DB）
+- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
+  （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
 """
 
@@ -175,8 +176,10 @@ async def _run_morning_task() -> None:
             has_response=bool(result.get("final_response")),
         )
 
-        # 提取重大事件列表，并行触发事件传导分析（fire-and-forget）
+        # 提取重大事件列表，触发事件分析流水线（fire-and-forget）
         # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
+        # 流水线内部：Event Conduction 全部完成落库 → Global Importance，
+        # 不阻塞本任务返回，也不影响 09:00 broadcast 链路。
         analysis_reports = result.get("analysis_reports")
         raw_major_events = (
             analysis_reports.get("major_events", []) if isinstance(analysis_reports, dict) else []
@@ -187,25 +190,37 @@ async def _run_morning_task() -> None:
             else []
         )
         if major_events:
-            event_tasks = []
-            for event in major_events:
-                if event.get("title"):
-                    task = asyncio.create_task(_run_event_task(event))
-                    _pending_event_tasks.add(task)
-                    task.add_done_callback(_pending_event_tasks.discard)
-                    event_tasks.append(task)
+            task = asyncio.create_task(_run_event_analysis_pipeline_task(major_events))
+            _pending_event_tasks.add(task)
+            task.add_done_callback(_pending_event_tasks.discard)
             logger.info(
-                "scheduler_event_triggered",
-                total=len(event_tasks),
+                "scheduler_event_pipeline_triggered",
+                total=len(major_events),
                 titles=[
                     title[:30]
                     for event in major_events
                     if isinstance((title := event.get("title")), str)
                 ],
             )
-            # fire-and-forget: 各个事件 task 独立在后台运行，错误由 _run_event_task 内部捕获
+            # fire-and-forget: pipeline 在后台运行，错误由 pipeline 内部捕获
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
+
+
+async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]]) -> None:
+    """后台运行事件分析流水线（fire-and-forget 包装）。
+
+    委托给 services/event_analysis_pipeline.run_event_analysis_pipeline，
+    pipeline 内部完成 Event Conduction → Global Importance 全链路，
+    并自行处理超时/异常（不向上抛）。
+    """
+    from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
+        run_event_analysis_pipeline,
+    )
+
+    logger.info("scheduler_event_pipeline_start", event_count=len(major_events))
+    await run_event_analysis_pipeline(major_events)
+    logger.info("scheduler_event_pipeline_done", event_count=len(major_events))
 
 
 def _make_scheduled_state(
@@ -294,14 +309,20 @@ def _extract_iterate_summary(iterate_payload: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-async def _run_evening_chain_task() -> None:
-    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。"""
-    report_day = shanghai_today()
-    if not is_trading_day(report_day):
-        logger.info("scheduler_skip_non_trading_day", task="evening_chain")
-        return
+async def _run_evening_chain_task(report_date: str | None = None) -> dict[str, object]:
+    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。
 
-    report_date = report_day.isoformat()
+    report_date 缺省时使用上海当天并做交易日检查；显式传入时视为管理员
+    手动补跑（/admin/trigger/evening_chain），跳过交易日检查。
+    返回各阶段状态 dict，供手动触发端点透传给调用方。
+    """
+    if report_date is None:
+        report_day = shanghai_today()
+        if not is_trading_day(report_day):
+            logger.info("scheduler_skip_non_trading_day", task="evening_chain")
+            return {"status": "skipped", "reason": "non_trading_day"}
+        report_date = report_day.isoformat()
+
     from aistock_agent.agents.workers import broadcast as broadcast_agent
     from aistock_agent.agents.workers import iterate as iterate_agent
     from aistock_agent.agents.workers import review as review_agent
@@ -312,20 +333,27 @@ async def _run_evening_chain_task() -> None:
         review_report = await node_api.get_analysis_report("review", report_date)
         if not _is_traceable_completed_report(review_report, "review"):
             logger.error("scheduler_evening_review_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "review",
+                "error": "review report missing or incomplete",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_review_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "review", "error": str(exc)}
 
     try:
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         if not isinstance(snapshot, dict) or snapshot.get("error"):
+            error = (
+                snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"
+            )
             logger.error(
                 "scheduler_evening_snapshot_invalid",
                 report_date=report_date,
-                error=(snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"),
+                error=error,
             )
-            return
+            return {"status": "failed", "stage": "market_snapshot", "error": error}
 
         # Brief 仅消费代码构造且可重建验证的 brief_summary.v1，不能读取原始快照。
         snapshot_summary = build_market_snapshot_brief_summary(snapshot)
@@ -343,10 +371,14 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_snapshot_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {
+                "status": "failed",
+                "stage": "market_snapshot",
+                "error": "market_snapshot not traceable",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_snapshot_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "market_snapshot", "error": str(exc)}
 
     try:
         iterate_result = await iterate_agent.run(_make_scheduled_state(report_date))
@@ -357,7 +389,11 @@ async def _run_evening_chain_task() -> None:
             or iterate_payload.get("status") not in _PERSISTABLE_ITERATE_STATUSES
         ):
             logger.error("scheduler_evening_iterate_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "iterate",
+                "error": "iterate payload invalid or not persistable",
+            }
 
         # 原始 LLM payload 仅用于本次调度诊断；Brief 事实由代码受控构造。
         iterate_summary = build_iterate_brief_summary(iterate_payload)
@@ -375,22 +411,36 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_iterate_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {"status": "failed", "stage": "iterate", "error": "iterate not traceable"}
     except Exception as exc:
         logger.error("scheduler_evening_iterate_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "iterate", "error": str(exc)}
 
+    brief_saved = False
     try:
         brief_saved = await build_and_persist_brief("evening", report_date)
     except Exception as exc:
         logger.error("scheduler_evening_brief_failed", error=str(exc), exc_info=True)
-        brief_saved = False
 
+    broadcast_ok = False
     if brief_saved:
         try:
             await broadcast_agent.run(_make_scheduled_state(report_date, brief_type="evening"))
+            broadcast_ok = True
         except Exception as exc:
             logger.error("scheduler_evening_broadcast_failed", error=str(exc), exc_info=True)
+
+    return {
+        "status": "ok" if brief_saved else "partial",
+        "report_date": report_date,
+        "stages": {
+            "review": "ok",
+            "market_snapshot": "ok",
+            "iterate": "ok",
+            "brief": "ok" if brief_saved else "failed",
+            "broadcast": "ok" if broadcast_ok else ("skipped" if not brief_saved else "failed"),
+        },
+    }
 
 
 # ─── 事件驱动：EventBus 发布函数 ───
@@ -554,9 +604,11 @@ async def _run_iterate_task() -> None:
 async def _run_broadcast_task() -> None:
     """播报链路任务（交易日 09:00）。
 
-    串行执行：morning → wind_leader → hot_burst → trend_score → global_importance → broadcast。
+    串行执行：morning → wind_leader → hot_burst → trend_score → broadcast。
     每个 Agent 设置 trigger_source="scheduler" + report_date，使报告写入数据库。
-    global_importance 生成双榜单后落库，broadcast 从数据库读取报告生成双人语音播报。
+    本链路不依赖 event_conduction / global_importance：
+    Global Importance 由 08:50 morning 触发的事件分析流水线
+    （event_analysis_pipeline）在事件传导完成后生成。
 
     每个 Agent 异常独立捕获，不影响后续 Agent 执行。
     morning 在 08:50 已执行过，此处命中缓存快速返回（或重新生成）。
@@ -631,36 +683,6 @@ async def _run_broadcast_task() -> None:
     except Exception as e:
         logger.error("scheduler_broadcast_trend_score_failed", error=str(e), exc_info=True)
 
-    # Step 3.6: 全局重要性评估（复用前七天的 event_conduction 数据）
-    try:
-        from aistock_agent.services.global_importance_evaluation import (  # type: ignore[import-untyped]  # noqa: PLC0415
-            persist_global_importance_evaluation,
-        )
-
-        gi_start = asyncio.get_running_loop().time()
-        gi_result = await persist_global_importance_evaluation(lookback_days=7)
-        gi_elapsed = round(asyncio.get_running_loop().time() - gi_start, 2)
-
-        has_focus = gi_result.get("current_focus_event") is not None
-        has_ongoing = gi_result.get("ongoing_significant_event") is not None
-        total = gi_result.get("total_events", 0)
-        persisted = gi_result.get("persisted", False)
-
-        logger.info(
-            "scheduler_broadcast_gi_done",
-            elapsed_seconds=gi_elapsed,
-            total_events=total,
-            has_current_focus=has_focus,
-            has_ongoing_significant=has_ongoing,
-            persisted=persisted,
-        )
-    except Exception as e:
-        logger.warning(
-            "scheduler_broadcast_gi_failed",
-            error=str(e),
-            exc_info=True,
-        )
-
     # Step 4: 播报生成（从数据库读取报告）
     try:
         if not await build_and_persist_brief("morning", today):
@@ -675,30 +697,3 @@ async def _run_broadcast_task() -> None:
     except Exception as e:
         logger.error("scheduler_broadcast_final_failed", error=str(e), exc_info=True)
 
-
-async def _run_event_task(event: dict[str, object]) -> None:
-    """单个事件传导分析任务。
-
-    由 morning 任务完成后触发，每个 major_event 一个独立 task，
-    所有事件并行执行（asyncio.create_task）。失败不影响其他事件。
-
-    委托给 services.event_conduction.run_single_event_conduction，
-    避免在 scheduler 中重复 state 构造逻辑。
-
-    Args:
-        event: major_event dict，含 title/summary/url/impact_score/direction/involved_keywords
-    """
-    from aistock_agent.services.event_conduction import run_single_event_conduction
-
-    title = str(event.get("title", "未知事件"))
-    logger.info("scheduler_event_start", title=title[:50])
-
-    result = await run_single_event_conduction(event)
-    logger.info(
-        "scheduler_event_done",
-        title=title[:50],
-        success=result.success,
-        event_generated=result.event_generated,
-        persisted=result.persisted,
-        error=result.error,
-    )

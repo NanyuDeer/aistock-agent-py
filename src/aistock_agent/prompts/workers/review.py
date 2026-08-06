@@ -53,8 +53,14 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 8. confirmed 的 trigger 必须引用 URL 非空、occurred_at 非空且不晚于 captured_at
    的 event_evidence；observable_result 必须引用 phenomenon_discovery.primary.fact_ids。
 9. 无 occurred_at 的新闻、null 主力资金或缺失全球行情只能写入限制与未解问题，
-   不得据此确认因果。hypothesis 不得选择主链，只可选择 weak 备选；
-   insufficient 不得选择任何链，候选只能为 insufficient/rejected。
+   不得据此确认因果。
+   ⚠️ attribution_status 与选链必须严格一致：
+   - hypothesis = 证据不足以确认主因，只能选 weak 备选（alternative_chain_id）；
+     禁止设置 primary_chain_id，禁止任何候选为 supported（只能 weak/rejected/insufficient）
+   - insufficient = 证据严重不足，不得选择任何链（primary/alternative 均 null），
+     候选只能为 insufficient/rejected
+   - confirmed = 证据闭环完整，必须设置 primary_chain_id 指向唯一 supported 候选
+   自相矛盾（如 hypothesis 却带 primary_chain_id 或 supported 候选）会导致报告被拒绝。
 
 【预判对照规则】
 若 snapshot.morning_forecast 非空，你必须：
@@ -74,16 +80,31 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    - miss：全部偏离
    - no_forecast：snapshot.morning_forecast 为空
 
-【prediction_validation 输出格式（JSON 字段必须严格一致）】
+【prediction_validation 输出格式（字段名必须完全一致，禁止改名）】
+
+⚠️ 字段名对照表 — 左列是正确字段名，禁止使用右列的错误字段名：
+
+| 对象        | 正确字段名          | 禁止使用的错误字段名                        |
+|------------|-------------------|---------------------------------------------|
+| SectorHit  | morning_direction | predicted_direction, expected_direction     |
+| SectorHit  | actual_direction  | （必须是 bullish/bearish/neutral，不能填 hit/miss） |
+| SectorHit  | result            | verification                                |
+| SectorHit  | sector            | name                                        |
+| EventHit   | event_title       | event, title                                |
+| EventHit   | morning_direction | predicted_direction, expected_direction     |
+| EventHit   | result            | verification                                |
+| EventHit   | actual_impact     | actual_effect, impact                       |
+
+禁止输出 evidence_ids 等不在 schema 中的额外字段。
+
 - sector_hits 是数组，每个元素字段：
   {
-    "sector": "板块名称（与 morning_forecast.sectors 中的 name 一致）",
+    "sector": "板块名称",
     "morning_direction": "bullish" | "bearish" | "neutral",
     "actual_direction": "bullish" | "bearish" | "neutral",
     "result": "hit" | "miss",
     "deviation_note": "偏离原因（result=miss 时必填）"
   }
-  （不要输出 predicted_direction 等额外字段；actual_direction 必须是方向而非 hit/miss）
 - event_hits 是数组，每个元素字段：
   {
     "event_title": "事件标题",
@@ -99,6 +120,32 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
     "event_hits": [...],
     "overall_note": "整体结论（可选）"
   }
+
+完整示例：
+{
+  "prediction_validation": {
+    "status": "partial",
+    "sector_hits": [
+      {
+        "sector": "券商",
+        "morning_direction": "bullish",
+        "actual_direction": "bearish",
+        "result": "miss",
+        "deviation_note": "政策利好未兑现"
+      }
+    ],
+    "event_hits": [
+      {
+        "event_title": "美联储维持利率",
+        "morning_direction": "bullish",
+        "actual_impact": "市场反应平淡",
+        "result": "unverifiable",
+        "note": ""
+      }
+    ],
+    "overall_note": "板块方向部分偏离"
+  }
+}
 
 若 snapshot.morning_forecast 为空，prediction_validation 输出 {"status": "no_forecast"}。
 

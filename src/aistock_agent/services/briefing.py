@@ -13,17 +13,24 @@ BriefType = Literal["morning", "evening"]
 
 _REQUIRED_TYPES: dict[BriefType, tuple[str, ...]] = {
     "morning": ("morning", "wind_leader", "hot_burst", "trend_score"),
-    "evening": ("review", "market_snapshot", "iterate"),
+    # 晚报三条均从 review 报告的不同部分提取（现象摘要/板块行情/主因链），
+    # 在 build_brief 中特化处理，不遍历本元组。
+    "evening": ("review",),
 }
 _TITLES = {
     "morning": "晨间市场展望",
-    "wind_leader": "长期风口与龙头",
+    "wind_leader": "风口龙头",
     "hot_burst": "机构调研热点",
     "trend_score": "趋势股评分",
     "event_conduction": "事件传导分析",
     "review": "收盘复盘",
     "market_snapshot": "市场快照",
     "iterate": "迭代分析",
+}
+# 晚报各条目的标题（review 报告按展示维度拆分）
+_ITEM_TITLES: dict[tuple[str, str], str] = {
+    ("review", "sectors"): "市场快照",
+    ("review", "attribution"): "归因结论",
 }
 
 
@@ -51,7 +58,9 @@ class BriefingClient(Protocol):
     ) -> dict[str, object] | None: ...
 
 
-def _content_conclusion(report_type: str, content: object) -> str | None:
+def _content_conclusion(
+    report_type: str, content: object, variant: str = "default"
+) -> str | None:
     if not isinstance(content, dict):
         return None
     if report_type in {"market_snapshot", "iterate"}:
@@ -65,6 +74,10 @@ def _content_conclusion(report_type: str, content: object) -> str | None:
             return None
         cleaned_event_brief = event_brief.strip()
         return None if _looks_like_raw_json(cleaned_event_brief) else cleaned_event_brief or None
+    if report_type == "review" and variant == "attribution":
+        return _review_attribution_conclusion(content)
+    if report_type == "review" and variant == "sectors":
+        return _review_sector_changes_conclusion(content)
 
     display_report = content.get("display_report")
     if isinstance(display_report, dict):
@@ -86,6 +99,108 @@ def _content_conclusion(report_type: str, content: object) -> str | None:
             if not _looks_like_raw_json(cleaned_details):
                 return cleaned_details[:200] if len(cleaned_details) > 200 else cleaned_details
     return None
+
+
+def _review_attribution_conclusion(content: dict[str, object]) -> str | None:
+    """从 review 报告的 market_trace.trace 提取主因链，拼成一句无冒号结论。
+
+    只消费已验证的归因结果：attribution_status 为 confirmed/hypothesis 且
+    存在主因候选时，把因果链节点（claim）去掉阶段标签与冒号，用逗号连成
+    一句话总结（30-40 字，符合晚报结论展示规范）；其余情况返回"证据不足"
+    降级文案。
+    """
+    market_trace = content.get("market_trace")
+    if not isinstance(market_trace, dict):
+        return None
+    trace = market_trace.get("trace")
+    if not isinstance(trace, dict):
+        return None
+    status = trace.get("attribution_status")
+    candidates = trace.get("candidates")
+    primary_id = trace.get("primary_chain_id")
+    if status not in {"confirmed", "hypothesis"} or not isinstance(candidates, list):
+        return "今日证据不足，未确认主因"
+    primary: dict[str, object] | None = None
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("id") == primary_id:
+            primary = candidate
+            break
+    if primary is None:
+        return "今日证据不足，未确认主因"
+    chain = primary.get("chain")
+    nodes = chain.get("nodes") if isinstance(chain, dict) else None
+    claims: list[str] = []
+    if isinstance(nodes, list) and nodes:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            claim = node.get("claim")
+            if isinstance(claim, str) and claim.strip():
+                claims.append(claim.strip())
+    if not claims:
+        verdict = primary.get("verdict")
+        return (
+            verdict
+            if isinstance(verdict, str) and verdict.strip()
+            else "今日证据不足，未确认主因"
+        )
+    # 去掉"触发：/传导：/结果："式冒号与阶段标签，连成一句话；
+    # confirmed 加"主因是"前缀、hypothesis 用"或受…等因素影响"句式，凑足 30-40 字
+    if status == "confirmed":
+        return f"今日市场主因是{'，'.join(claims)}"
+    return f"今日市场可能受{'、'.join(claims)}等因素影响"
+
+
+def _review_sector_changes_conclusion(content: dict[str, object]) -> str | None:
+    """从 review 报告的 market_trace.snapshot.a_share.sectors 提取领涨/领跌板块。
+
+    sectors 结构（Node 收盘/腾讯快照）：
+      {"top_gainers": [{"name", "pct_change", ...}, ...],
+       "top_losers":  [{"name", "pct_change", ...}, ...]}
+    拼成一句无冒号的行情快照（30-40 字，符合晚报结论展示规范）。
+    """
+    market_trace = content.get("market_trace")
+    if not isinstance(market_trace, dict):
+        return None
+    snapshot = market_trace.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    a_share = snapshot.get("a_share")
+    if not isinstance(a_share, dict):
+        return None
+    sectors = a_share.get("sectors")
+    if not isinstance(sectors, dict):
+        return None
+
+    def _format_sectors(items: object, verb: str, limit: int = 2) -> list[str]:
+        parts: list[str] = []
+        if not isinstance(items, list):
+            return parts
+        for item in items:
+            if len(parts) >= limit:
+                break
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            pct = item.get("pct_change")
+            if (
+                isinstance(name, str)
+                and name.strip()
+                and isinstance(pct, int | float)
+                and not isinstance(pct, bool)
+            ):
+                parts.append(f"{name.strip()}{verb}{abs(pct):.2f}%")
+        return parts
+
+    gainers = _format_sectors(sectors.get("top_gainers"), "涨")
+    losers = _format_sectors(sectors.get("top_losers"), "跌")
+    if not gainers and not losers:
+        return None
+    if gainers and losers:
+        return f"今日{'、'.join(gainers)}，{'、'.join(losers)}"
+    if gainers:
+        return f"今日{'、'.join(gainers)}，无显著领跌板块"
+    return f"今日{'、'.join(losers)}，无显著领涨板块"
 
 
 def _looks_like_raw_json(text: str) -> bool:
@@ -119,12 +234,14 @@ def _is_valid_report_id(report_id: object) -> bool:
     )
 
 
-def _to_item(report_type: str, report: dict[str, object]) -> dict[str, object] | None:
+def _to_item(
+    report_type: str, report: dict[str, object], variant: str = "default"
+) -> dict[str, object] | None:
     report_id = report.get("id")
     persisted_type = report.get("report_type")
     status = report.get("status")
     created_at = _created_at(report)
-    conclusion = _content_conclusion(report_type, report.get("content"))
+    conclusion = _content_conclusion(report_type, report.get("content"), variant)
     source = report.get("data_source")
     if (
         not _is_valid_report_id(report_id)
@@ -138,7 +255,7 @@ def _to_item(report_type: str, report: dict[str, object]) -> dict[str, object] |
         return None
 
     return {
-        "title": _TITLES.get(report_type, report_type),
+        "title": _ITEM_TITLES.get((report_type, variant), _TITLES.get(report_type, report_type)),
         "conclusion": conclusion,
         "evidence": [{
             "report_type": report_type,
@@ -159,19 +276,32 @@ async def build_brief(
     api: BriefingClient = node_api,
 ) -> dict[str, object]:
     """仅从指定交易日的持久化报告构造可追溯 Brief。"""
-    required_types = _REQUIRED_TYPES[brief_type]
     items: list[dict[str, object]] = []
     missing_sources: list[str] = []
 
-    for report_type in required_types:
-        report = await api.get_analysis_report(report_type, report_date)
-        item = _to_item(report_type, report) if report else None
-        if item is None:
-            missing_sources.append(report_type)
+    if brief_type == "evening":
+        # 晚报三条均来自 review 报告的不同展示维度，
+        # 归因结论（主因链）作为头条放在第一条：
+        #   归因结论 / 市场快照（板块行情）/ 收盘复盘（现象摘要）
+        review_report = await api.get_analysis_report("review", report_date)
+        if review_report is None:
+            missing_sources.append("review")
         else:
-            items.append(item)
+            for variant in ("attribution", "sectors", "summary"):
+                item = _to_item("review", review_report, variant=variant)
+                if item is None:
+                    missing_sources.append(f"review.{variant}")
+                else:
+                    items.append(item)
+    else:
+        for report_type in _REQUIRED_TYPES["morning"]:
+            report = await api.get_analysis_report(report_type, report_date)
+            item = _to_item(report_type, report) if report else None
+            if item is None:
+                missing_sources.append(report_type)
+            else:
+                items.append(item)
 
-    if brief_type == "morning":
         events = await api.list_analysis_reports("event_conduction", report_date)
         ordered_events = sorted(
             events,
