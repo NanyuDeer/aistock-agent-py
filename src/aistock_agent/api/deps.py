@@ -59,7 +59,7 @@ def build_initial_state(
         "wind_leaders_data": None,  # 预加载字段（Agent按需加载）
         "institution_research_data": None,  # 预加载字段（Agent按需加载）
         "final_response": None,
-        "trigger_source": "user",  # 标记用户请求来源，使 intent_router 能路由到 ai_advisor
+        "trigger_source": "user",  # 标记用户请求来源（/briefing/morning 等旧图路径用）
     }
 
 

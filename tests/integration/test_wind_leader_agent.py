@@ -86,6 +86,13 @@ async def test_wind_leader_scheduler_persists_real_source():
             new_callable=AsyncMock,
             return_value=True,
         ),
+        # mock 响应非双层 JSON，会触发 repair_dual_layer_with_llm 的真实 LLM 调用；
+        # 这里固定返回 None 走降级分支，避免依赖 OPENAI_API_KEY 等外部环境
+        patch(
+            "aistock_agent.agents.workers.wind_leader.repair_dual_layer_with_llm",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         patch("aistock_agent.agents.workers.wind_leader._archive_wind_leader"),
         patch("aistock_agent.agents.workers.wind_leader.node_api") as mock_api,
     ):
@@ -106,4 +113,4 @@ async def test_wind_leader_exception_degradation():
     with patch(_GET_DEEP_THINK, side_effect=Exception("LLM error")):
         result = await run({"messages": [], "analysis_reports": {}})
 
-    assert result["final_response"] == "长线风口分析暂时不可用，请稍后重试"
+    assert result["final_response"] == "风口龙头分析暂时不可用，请稍后重试"

@@ -78,9 +78,9 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
-    # 服务（Python 8000 / Node.js 3000）
+    # 服务（Python 8080 / Node.js 3000）
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8080
     log_level: str = "INFO"
 
     # 内网鉴权
@@ -144,6 +144,10 @@ class Settings(BaseSettings):
     market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
     market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
     market_event_max_pushes: int = 2            # 每次晨报最多推送条数
+
+    # 事件分析流水线（event_analysis_pipeline）整体超时（秒）。
+    # 覆盖 Event Conduction → Global Importance 全链路，超时记录日志但不中断 broadcast。
+    event_analysis_pipeline_timeout_seconds: int = 900
 
     # 现象发现：同向指数异动与市场广度。
     # broad_rally / broad_decline 基础条件：至少 N 个核心指数同向超过 change_pct，且广度比例达标。

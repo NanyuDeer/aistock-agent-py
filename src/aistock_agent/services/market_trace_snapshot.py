@@ -14,10 +14,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import structlog
 
@@ -28,6 +27,7 @@ from aistock_agent.schemas.market_trace import (
     SourceRecord,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.morning_forecast_extractor import extract_morning_forecast
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.services.tavily import TavilyService
 from aistock_agent.tools.market_tools import collect_global_market_facts
@@ -73,6 +73,35 @@ def _parse_datetime(value: object) -> datetime | None:
         return dt
     except (ValueError, TypeError):
         return None
+
+
+def _parse_news_datetime(value: object) -> datetime | None:
+    """解析财联社/新闻时间字段。
+
+    与 :func:`_parse_datetime` 的区别（为什么不能复用）：
+    财联社 telegraph 的 ``time`` 是**上海无时区**格式 ``"2026-08-05 14:30:00"``，
+    若按 UTC 解析会比真实 UTC 晚 8 小时，导致 ``occurred_at > captured_at``
+    被误判为未来数据而全部跳过（晚报 cls_news 失效根因之一）。
+
+    - unix 秒（telegraph 的 ``timestamp`` 字段）→ UTC datetime
+    - ISO 字符串：带时区直接解析；无时区按 Asia/Shanghai（UTC+8）解析
+    """
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            return None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        cleaned = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        # 财联社 time 为上海时钟；假设 UTC+8
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt
 
 
 def _safe_str(value: object, default: str = "") -> str:
@@ -122,6 +151,37 @@ def _sector_item_count(record: dict[str, object], field: str) -> int:
 def _append_missing(missing_fields: list[str], field: str) -> None:
     if field not in missing_fields:
         missing_fields.append(field)
+
+
+def _log_telegraph_response(
+    telegraph_data: object, report_date: str, *, snapshot_kind: str
+) -> None:
+    """记录 telegraph 接口返回的条目数，便于定位 cls_news 缺失根因。
+
+    telegraph 接口返回 ``{date, items, total, degraded}``（app-api 侧），
+    也可能返回 ``{code, data}`` 包装（node_api 透传）。兼容两种结构。
+    """
+    if not isinstance(telegraph_data, dict):
+        logger.info(
+            "cls_telegraph_response",
+            snapshot_kind=snapshot_kind,
+            report_date=report_date,
+            item_count=0,
+            raw_type=type(telegraph_data).__name__,
+        )
+        return
+    items = telegraph_data.get("items")
+    if not isinstance(items, list) and isinstance(telegraph_data.get("data"), dict):
+        items = telegraph_data["data"].get("items")  # type: ignore[union-attr]
+    item_count = len(items) if isinstance(items, list) else 0
+    logger.info(
+        "cls_telegraph_response",
+        snapshot_kind=snapshot_kind,
+        report_date=report_date,
+        item_count=item_count,
+        total=telegraph_data.get("total") if isinstance(telegraph_data, dict) else None,
+        degraded=telegraph_data.get("degraded") if isinstance(telegraph_data, dict) else None,
+    )
 
 
 def _quick_availability(close_data: dict[str, object]) -> dict[str, DataAvailability]:
@@ -473,6 +533,18 @@ def _normalize_aggregate_facts(
             ("large_and_extra_large_net_yuan",),
         )
     )
+    if not valid_main_force:
+        # 诊断日志：定位 main_force 缺失的具体原因（quick 快照下 Tushare 数据未就绪属预期）
+        logger.info(
+            "main_force_invalid",
+            is_quick=is_quick,
+            availability_state=main_force_availability.state if main_force_availability else None,
+            availability_reason=main_force_availability.reason if main_force_availability else None,
+            has_dict=isinstance(main_force_dict, dict),
+            value=main_force_dict.get("large_and_extra_large_net_yuan")
+            if isinstance(main_force_dict, dict)
+            else None,
+        )
     if valid_main_force and isinstance(main_force_dict, dict):
         sources["MAIN_FORCE_ALL"] = SourceRecord(
             source_id="MAIN_FORCE_ALL",
@@ -557,7 +629,7 @@ def _normalize_global_facts(
         sources[source_id] = SourceRecord(
             source_id=source_id,
             kind="market_fact",
-            provider="yfinance",
+            provider="tencent:quote",
             title=_safe_str(fact.get("name"), _safe_str(fact.get("ticker"))),
             content=(
                 f"ticker={fact.get('ticker')}, "
@@ -574,18 +646,18 @@ def _normalize_global_facts(
         _append_missing(missing_fields, "global_markets")
         return SourceCollectionStatus(
             state="unavailable",
-            provider="yfinance",
+            provider="tencent:quote",
             reason=type(fetch_error).__name__,
         )
     if global_counter == 0:
         _append_missing(missing_fields, "global_markets")
         return SourceCollectionStatus(
             state="empty",
-            provider="yfinance",
+            provider="tencent:quote",
             reason="provider_returned_no_items",
         )
     return SourceCollectionStatus(
-        state="available", provider="yfinance", item_count=global_counter
+        state="available", provider="tencent:quote", item_count=global_counter
     )
 
 
@@ -595,8 +667,17 @@ def _normalize_news_facts(
     missing_fields: list[str],
     captured_at: datetime,
     fetch_error: Exception | None = None,
+    source_kind: str = "latest",
 ) -> SourceCollectionStatus:
-    """财联社快讯 → SourceRecord（event_evidence）"""
+    """财联社快讯 → SourceRecord（event_evidence）
+
+    支持两种数据结构（由 ``source_kind`` 标记，归一化时统一处理）：
+    - ``telegraph``: ``{items: [{id, title, content, time, timestamp}]}``（无 link 字段）
+    - ``latest``: ``{items: [{id, link, title, time, content}]}``（有 link 字段）
+
+    occurred_at 统一用 ``time`` 字段解析；URL 优先取 ``link``（latest 流），
+    兼容旧 ``url`` 字段；telegraph 流无 URL 字段时为 None。
+    """
     news_items: list[dict[str, object]] = []
     if isinstance(news_data, dict):
         raw_items = news_data.get("items", news_data.get("news", []))
@@ -605,14 +686,27 @@ def _normalize_news_facts(
 
     news_counter = 0
     causal_ready_count = 0
+    skipped_future = 0  # occurred_at > captured_at（未来数据）
+    skipped_no_time = 0  # occurred_at 解析失败
     for item in news_items:
-        time_str = item.get("time", item.get("ctime", ""))
-        occurred_at = _parse_datetime(time_str)
+        # 时间：telegraph 优先用 timestamp（unix 秒）；否则 time（上海无时区，按 UTC+8 解析）
+        raw_ts = item.get("timestamp")
+        occurred_at = _parse_news_datetime(raw_ts) if raw_ts is not None else None
+        if occurred_at is None:
+            occurred_at = _parse_news_datetime(item.get("time", item.get("ctime", "")))
         if occurred_at is not None and occurred_at > captured_at:
+            skipped_future += 1
             continue
         if occurred_at is None:
+            skipped_no_time += 1
             continue
-        url = _safe_optional_str(item.get("url"))
+        # URL：latest 用 link 字段，telegraph 无 URL；同时兼容旧 url 字段。
+        # telegraph 无 URL 时用财联社详情页兜底，保证可溯源（否则被判 invalid_for_causality）。
+        url = _safe_optional_str(item.get("link")) or _safe_optional_str(item.get("url"))
+        if not url:
+            item_id = item.get("id")
+            if isinstance(item_id, str | int) and str(item_id).strip().isdigit():
+                url = f"https://www.cls.cn/detail/{item_id}"
         news_counter += 1
         source_id = f"NEWS_{news_counter:03d}"
         sources[source_id] = SourceRecord(
@@ -630,6 +724,12 @@ def _normalize_news_facts(
             causal_ready_count += 1
     if fetch_error is not None:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_fetch_error",
+            source_kind=source_kind,
+            raw_item_count=len(news_items),
+            error_class=type(fetch_error).__name__,
+        )
         return SourceCollectionStatus(
             state="unavailable",
             provider="cls",
@@ -637,17 +737,40 @@ def _normalize_news_facts(
         )
     if not news_items:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_empty",
+            source_kind=source_kind,
+            raw_item_count=0,
+        )
         return SourceCollectionStatus(
             state="empty", provider="cls", reason="provider_returned_no_items"
         )
     if causal_ready_count == 0:
         _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "cls_news_missing_invalid_for_causality",
+            source_kind=source_kind,
+            raw_item_count=len(news_items),
+            kept_count=news_counter,
+            skipped_future=skipped_future,
+            skipped_no_time=skipped_no_time,
+            causal_ready_count=0,
+        )
         return SourceCollectionStatus(
             state="invalid_for_causality",
             provider="cls",
             item_count=len(news_items),
             reason="items_missing_url_or_occurred_at",
         )
+    logger.info(
+        "cls_news_available",
+        source_kind=source_kind,
+        raw_item_count=len(news_items),
+        kept_count=news_counter,
+        skipped_future=skipped_future,
+        skipped_no_time=skipped_no_time,
+        causal_ready_count=causal_ready_count,
+    )
     return SourceCollectionStatus(state="available", provider="cls", item_count=news_counter)
 
 
@@ -690,8 +813,13 @@ def _normalize_search_facts(
                 continue
             pub_date = item.get("published_date", item.get("publishedDate", ""))
             occurred_at = _parse_datetime(pub_date)
-            if occurred_at is None or occurred_at > captured_at:
+            # 未来数据防呆：published_date 有效且晚于捕获时刻才跳过
+            if occurred_at is not None and occurred_at > captured_at:
                 continue
+            # Tavily 结果常缺 published_date（2026-08 实测无该字段）；
+            # 不丢弃，用捕获时刻兜底（仅要求 URL 可溯源）。
+            if occurred_at is None:
+                occurred_at = captured_at
             url = _safe_optional_str(item.get("url"))
             search_counter += 1
             source_count += 1
@@ -715,7 +843,7 @@ def _normalize_search_facts(
                 state="invalid_for_causality",
                 provider="tavily",
                 item_count=len(results),
-                reason="items_missing_url_or_occurred_at",
+                reason="items_missing_url",
             )
         else:
             statuses[status_key] = SourceCollectionStatus(
@@ -805,23 +933,45 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 3. 收集外部来源（同一 captured_at）──
     # 只有 status/coverage/date 三重校验全部通过，才允许调用 yfinance、财联社、Tavily。
 
-    # 境外行情（同步函数，用 asyncio.to_thread 避免阻塞事件循环）
+    # 境外行情（异步函数，腾讯行情源经 app-api 聚合）
     global_fetch_error: Exception | None = None
     try:
-        global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
+        global_facts = await collect_global_market_facts(captured_at)
     except Exception as e:
         logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []
         global_fetch_error = e
 
-    # 财联社最新快讯（Node /internal/news/latest）
+    # 财联社当日全量电报（优先），降级到最新快讯
+    # 电报接口返回当日全量快讯（含 timestamp 字段），适合溯源；
+    # 失败时降级到 latest（仅最近若干条，含 link 字段）。
     news_data = None
     news_fetch_error: Exception | None = None
+    news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
     try:
-        news_data = await node_api.get("/internal/news/latest")
+        telegraph_data = await node_api.get(
+            f"/internal/news/telegraph?date={report_date}&limit=200"
+        )
+        if telegraph_data is not None:
+            news_data = telegraph_data
+            news_source_kind = "telegraph"
+            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="full")
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e
+
+    # 降级：电报接口失败或返回 None 时回退到最新快讯
+    if news_data is None:
+        try:
+            news_data = await node_api.get("/internal/news/latest")
+            news_source_kind = "latest"
+            # 电报失败但 latest 成功，清除电报阶段的错误标记，
+            # 避免 _normalize_news_facts 误判为 unavailable。
+            news_fetch_error = None
+            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+        except Exception as e:
+            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            news_fetch_error = e
 
     # 两组固定 Tavily 检索
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
@@ -846,6 +996,18 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
     data_availability: dict[str, DataAvailability] = {}
 
+    # ── 3.5. 读取当日晨报预测（失败不阻断）──
+    # 放在 missing_fields 初始化后，便于失败/缺失时直接写入 missing_fields。
+    # extract_morning_forecast 内部已处理缓存/Node 读取/LLM 提取的异常并返回 None，
+    # 这里再兜一层 try 防止未预期异常阻断 snapshot 构建。
+    morning_forecast = None
+    try:
+        morning_forecast = await extract_morning_forecast(report_date)
+    except Exception as e:
+        logger.warning("morning_forecast_inject_failed", error_class=type(e).__name__)
+    if morning_forecast is None:
+        _append_missing(missing_fields, "morning_forecast")
+
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
         normalized_a_share,
@@ -861,7 +1023,12 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
         "cls_news": _normalize_news_facts(
-            news_data, sources, missing_fields, captured_at, news_fetch_error
+            news_data,
+            sources,
+            missing_fields,
+            captured_at,
+            news_fetch_error,
+            source_kind=news_source_kind,
         ),
     }
     collection_status.update(
@@ -901,6 +1068,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         phenomenon_discovery=discovery,
         data_availability=data_availability,
         collection_status=collection_status,
+        morning_forecast=morning_forecast,
     )
 
 
@@ -957,19 +1125,40 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 3. 收集外部来源（与 full 版相同逻辑）──
     global_fetch_error: Exception | None = None
     try:
-        global_facts = await asyncio.to_thread(collect_global_market_facts, captured_at)
+        global_facts = await collect_global_market_facts(captured_at)
     except Exception as e:
         logger.warning("collect_global_market_facts_failed", error_class=type(e).__name__)
         global_facts = []
         global_fetch_error = e
 
+    # 财联社当日全量电报（优先），降级到最新快讯（与 full 版相同逻辑）
     news_data = None
     news_fetch_error: Exception | None = None
+    news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
     try:
-        news_data = await node_api.get("/internal/news/latest")
+        telegraph_data = await node_api.get(
+            f"/internal/news/telegraph?date={report_date}&limit=200"
+        )
+        if telegraph_data is not None:
+            news_data = telegraph_data
+            news_source_kind = "telegraph"
+            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="quick")
     except Exception as e:
-        logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
         news_fetch_error = e
+
+    # 降级：电报接口失败或返回 None 时回退到最新快讯
+    if news_data is None:
+        try:
+            news_data = await node_api.get("/internal/news/latest")
+            news_source_kind = "latest"
+            # 电报失败但 latest 成功，清除电报阶段的错误标记，
+            # 避免 _normalize_news_facts 误判为 unavailable。
+            news_fetch_error = None
+            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+        except Exception as e:
+            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            news_fetch_error = e
 
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
@@ -993,6 +1182,17 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     missing_fields: list[str] = []
     data_availability = _quick_availability(close_data)
 
+    # ── 3.5. 读取当日晨报预测（失败不阻断，与 full 版保持一致）──
+    # quick 版与 full 版同样接入 morning_forecast，便于 15:30 quick snapshot
+    # 也带上预判线索；失败/缺失时仅写入 missing_fields，不阻断 snapshot 构建。
+    morning_forecast = None
+    try:
+        morning_forecast = await extract_morning_forecast(report_date)
+    except Exception as e:
+        logger.warning("morning_forecast_inject_failed", error_class=type(e).__name__)
+    if morning_forecast is None:
+        _append_missing(missing_fields, "morning_forecast")
+
     _normalize_index_facts(normalized_a_share, sources, missing_fields, trade_date_dt, captured_at)
     _normalize_aggregate_facts(
         normalized_a_share,
@@ -1008,7 +1208,12 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
             global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
         "cls_news": _normalize_news_facts(
-            news_data, sources, missing_fields, captured_at, news_fetch_error
+            news_data,
+            sources,
+            missing_fields,
+            captured_at,
+            news_fetch_error,
+            source_kind=news_source_kind,
         ),
     }
     collection_status.update(
@@ -1045,4 +1250,5 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         phenomenon_discovery=discovery,
         data_availability=data_availability,
         collection_status=collection_status,
+        morning_forecast=morning_forecast,
     )

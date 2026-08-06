@@ -24,11 +24,11 @@ _RULE_ORDER: tuple[MarketPhenomenonKind, ...] = (
 )
 
 _SUMMARIES: dict[MarketPhenomenonKind, str] = {
-    "broad_rally": "多个核心指数同步上涨，市场广度偏强",
-    "broad_decline": "多个核心指数同步下跌，市场广度偏弱",
-    "style_divergence": "核心指数方向背离，风格分化明显",
-    "sector_concentration": "概念板块集中异动，与大盘方向相反",
-    "sentiment_extreme": "涨跌停或炸板情绪指标极端",
+    "broad_rally": "今日沪深核心指数同步上涨，市场广度明显偏强，放量上行显示做多情绪升温",
+    "broad_decline": "今日沪深核心指数同步下跌，市场广度明显偏弱，投资者情绪整体偏谨慎",
+    "style_divergence": "今日核心指数方向明显背离，市场风格分化加剧，成长与价值板块表现差异显著",
+    "sector_concentration": "今日概念板块集中异动且与大盘方向相反，行情结构分化，机会与风险并存",
+    "sentiment_extreme": "今日涨跌停与炸板情绪指标出现极端值，短线情绪剧烈波动，多空分歧明显",
 }
 
 

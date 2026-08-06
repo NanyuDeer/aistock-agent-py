@@ -1646,7 +1646,7 @@ tests/
 
 ```bash
 # 启动开发服务（热重载）
-uvicorn aistock_agent.main:app --reload --port 8000
+uvicorn aistock_agent.main:app --reload --port 8080
 
 # 设置 PYTHONPATH 后运行（如脚本直接 import aistock_agent）
 $env:PYTHONPATH = "src"; python scripts/run_morning_test.py
@@ -1698,7 +1698,7 @@ git rebase origin/main              # agent-py 主分支是 main
 
 ```bash
 docker build -t aistock-agent .
-docker run -p 8000:8000 --env-file .env aistock-agent
+docker run -p 8080:8080 --env-file .env aistock-agent
 ```
 
 ---

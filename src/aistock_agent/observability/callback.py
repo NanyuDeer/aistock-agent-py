@@ -20,6 +20,7 @@ from aistock_agent.observability.metrics import (
     MetricsCollector,
     get_metrics_collector,
 )
+from aistock_agent.services.token_usage import record_token_usage
 
 if TYPE_CHECKING:
     from langchain_core.agents import AgentAction, AgentFinish
@@ -52,7 +53,7 @@ class TokenUsageCallback(BaseCallbackHandler):
         metadata: dict[str, object] | None = None,
         **kwargs: object,
     ) -> None:
-        del parent_run_id, tags, metadata, kwargs  # 当前未使用
+        del parent_run_id, tags, metadata, kwargs
         self._metrics.record_llm_start(_extract_model_name(serialized))
 
     def on_chat_model_start(
@@ -90,6 +91,12 @@ class TokenUsageCallback(BaseCallbackHandler):
         usage = _extract_token_usage(response)
         if usage is not None:
             self._metrics.record_llm_tokens(**usage)
+            # P10 线 2：同步写入 contextvar 采集层（ws 图任务内累计，synth_answer 收口）
+            record_token_usage(
+                usage["prompt_tokens"],
+                usage["completion_tokens"],
+                usage["total_tokens"],
+            )
 
     def on_llm_error(
         self,
@@ -203,26 +210,49 @@ def _extract_tool_name(serialized: dict[str, object]) -> str:
 
 
 def _extract_token_usage(response: LLMResult) -> dict[str, int] | None:
-    """从 LLMResult.llm_output 提取 token 用量。
+    """从 LLMResult 提取 token 用量。
 
-    OpenAI 兼容接口返回结构：
-        llm_output = {"token_usage": {"prompt_tokens": N, ...}, "model_name": "..."}
+    主路径：llm_output.token_usage（graph.ainvoke 路径，llm_output 为 dict）
+    Fallback：generations[].message.usage_metadata（graph.astream_events 路径，
+    llm_output 为 None 但 ChatGeneration 的 AIMessage 带 usage_metadata）
 
     Returns:
         含 prompt_tokens/completion_tokens/total_tokens 的字典；
         若无 token_usage 则返回 None。
     """
+    # 主路径：llm_output.token_usage（ainvoke 路径）
     llm_output = response.llm_output
-    if not isinstance(llm_output, dict):
-        return None
-    usage = llm_output.get("token_usage")
-    if not isinstance(usage, dict):
-        return None
-    return {
-        "prompt_tokens": _to_int(usage.get("prompt_tokens", 0)),
-        "completion_tokens": _to_int(usage.get("completion_tokens", 0)),
-        "total_tokens": _to_int(usage.get("total_tokens", 0)),
-    }
+    if isinstance(llm_output, dict):
+        usage = llm_output.get("token_usage")
+        if isinstance(usage, dict):
+            return {
+                "prompt_tokens": _to_int(usage.get("prompt_tokens", 0)),
+                "completion_tokens": _to_int(usage.get("completion_tokens", 0)),
+                "total_tokens": _to_int(usage.get("total_tokens", 0)),
+            }
+
+    # Fallback：从 generations 提取 AIMessage.usage_metadata（astream_events 路径）
+    # astream_events 的 on_llm_end 回调 llm_output 为 None，但 generations 中的
+    # ChatGeneration 带 AIMessage，其 usage_metadata 含 input_tokens/output_tokens/total_tokens
+    for generation_list in response.generations or []:
+        for generation in generation_list:
+            message = getattr(generation, "message", None)
+            if message is None:
+                continue
+            usage_metadata = getattr(message, "usage_metadata", None)
+            if isinstance(usage_metadata, dict) and usage_metadata:
+                return {
+                    "prompt_tokens": _to_int(usage_metadata.get("input_tokens", 0)),
+                    "completion_tokens": _to_int(usage_metadata.get("output_tokens", 0)),
+                    "total_tokens": _to_int(usage_metadata.get("total_tokens", 0)),
+                }
+
+    logger.debug(
+        "token_usage_extraction_failed",
+        llm_output=response.llm_output,
+        gen_count=sum(len(g) for g in (response.generations or [])),
+    )
+    return None
 
 
 def _to_int(value: object) -> int:

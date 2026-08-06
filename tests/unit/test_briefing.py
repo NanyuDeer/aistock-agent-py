@@ -90,6 +90,73 @@ def _structured_iterate_report(
     }
 
 
+def _structured_review_report(
+    report_id: int = 31,
+    *,
+    summary: str = "收盘复盘结论",
+    attribution_status: str = "confirmed",
+    chain_nodes: list[tuple[str, str]] | None = None,
+    sectors: dict[str, object] | None = None,
+    created_at: str = "2026-07-24T07:00:00+00:00",
+) -> dict[str, object]:
+    """构造含 display_report + market_trace 的 review 报告（schema 2.0）。"""
+    chain_nodes = chain_nodes or [
+        ("trigger", "美联储降息预期升温"),
+        ("transmission", "北向资金净流入"),
+        ("observable_result", "券商领涨带动指数反弹"),
+    ]
+    sectors = sectors or {
+        "top_gainers": [
+            {"name": "AI算力", "pct_change": 4.21},
+            {"name": "券商", "pct_change": 3.05},
+        ],
+        "top_losers": [
+            {"name": "煤炭", "pct_change": -2.13},
+            {"name": "银行", "pct_change": -1.52},
+        ],
+    }
+    return {
+        "id": report_id,
+        "report_type": "review",
+        "created_at": created_at,
+        "data_source": "review_agent",
+        "status": "completed",
+        "content": {
+            "display_report": {
+                "summary": summary,
+                "details": "复盘详情",
+                "stocks": [],
+                "sectors": [],
+                "risks": [],
+            },
+            "schema_version": "2.0",
+            "market_trace": {
+                "snapshot": {
+                    "a_share": {"sectors": sectors},
+                    "missing_fields": [],
+                },
+                "trace": {
+                    "attribution_status": attribution_status,
+                    "primary_chain_id": "c1",
+                    "candidates": [
+                        {
+                            "id": "c1",
+                            "chain": {
+                                "nodes": [
+                                    {"stage": stage, "claim": claim}
+                                    for stage, claim in chain_nodes
+                                ]
+                            },
+                            "verdict": "主因确认",
+                        }
+                    ],
+                    "unresolved_questions": [],
+                },
+            },
+        },
+    }
+
+
 def _legacy_raw_json_snapshot_report(
     report_id: int = 41,
     *,
@@ -143,6 +210,7 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
         "morning": _report("morning", 11, summary="morning conclusion"),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -153,7 +221,7 @@ async def test_morning_brief_has_three_required_items_and_real_evidence() -> Non
     assert brief["brief_type"] == "morning"
     assert brief["degraded"] is False
     assert brief["missing_sources"] == []
-    assert 3 <= len(brief["items"]) <= 5
+    assert len(brief["items"]) == 4
     first = brief["items"][0]
     assert first["conclusion"] == "morning conclusion"
     assert first["confidence"] == "unknown"
@@ -240,14 +308,16 @@ async def test_morning_brief_reads_event_intent_from_persisted_event_conduction_
 
     brief = await build_brief("morning", "2026-07-24", api=api)
 
+    # 4 个 required types（morning/wind_leader/hot_burst/trend_score）+ 1 个最新有效事件 = 5 items
     assert len(brief["items"]) == 5
-    event_ids = [item["evidence"][0]["id"] for item in brief["items"][3:]]
-    assert event_ids == ["20", "19"]
+    event_ids = [item["evidence"][0]["id"] for item in brief["items"][4:]]
+    assert event_ids == ["20"]
     api.list_analysis_reports.assert_awaited_once_with("event_conduction", "2026-07-24")
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_is_degraded_and_names_missing_real_report_types() -> None:
+async def test_evening_brief_is_degraded_and_names_missing_review_dimensions() -> None:
+    """review 报告存在但缺 market_trace（板块/归因）时，晚报降级并标明缺失维度。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
@@ -259,8 +329,9 @@ async def test_evening_brief_is_degraded_and_names_missing_real_report_types() -
 
     assert brief["brief_type"] == "evening"
     assert brief["degraded"] is True
-    assert brief["missing_sources"] == ["market_snapshot", "iterate"]
+    assert brief["missing_sources"] == ["review.attribution", "review.sectors"]
     assert len(brief["items"]) == 1
+    assert brief["items"][0]["title"] == "收盘复盘"
 
 
 @pytest.mark.asyncio
@@ -272,6 +343,7 @@ async def test_brief_marks_missing_data_source_without_fabricating_evidence() ->
         "morning": _report("morning", 11, data_source=""),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -280,7 +352,7 @@ async def test_brief_marks_missing_data_source_without_fabricating_evidence() ->
 
     assert brief["degraded"] is True
     assert brief["missing_sources"] == ["morning"]
-    assert len(brief["items"]) == 2
+    assert len(brief["items"]) == 3
     assert all(item["evidence"][0]["data_source"] for item in brief["items"])
 
 
@@ -294,6 +366,7 @@ async def test_brief_rejects_wrong_type_or_failed_persisted_rows() -> None:
         "morning": _report("morning", 11),
         "wind_leader": _report("hot_burst", 12),
         "hot_burst": _report("hot_burst", 13, status="failed"),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []
@@ -302,7 +375,10 @@ async def test_brief_rejects_wrong_type_or_failed_persisted_rows() -> None:
 
     assert brief["degraded"] is True
     assert brief["missing_sources"] == ["wind_leader", "hot_burst"]
-    assert [item["evidence"][0]["report_type"] for item in brief["items"]] == ["morning"]
+    assert [item["evidence"][0]["report_type"] for item in brief["items"]] == [
+        "morning",
+        "trend_score",
+    ]
 
 
 @pytest.mark.asyncio
@@ -316,6 +392,7 @@ async def test_brief_rejects_untraceable_persisted_report_ids(report_id: object)
         "morning": _report("morning", 11),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     reports["morning"]["id"] = report_id
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
@@ -365,34 +442,32 @@ async def test_morning_brief_uses_nested_event_podcast_brief_and_skips_invalid_n
 
     brief = await build_brief("morning", "2026-07-24", api=api)
 
-    events = brief["items"][3:]
-    assert [item["evidence"][0]["id"] for item in events] == ["29", "28"]
-    assert [item["conclusion"] for item in events] == ["中间事件结论", "较早事件结论"]
+    # 4 个 required types + 最新有效事件（invalid_newest 被跳过）= 5 items
+    events = brief["items"][4:]
+    assert [item["evidence"][0]["id"] for item in events] == ["29"]
+    assert [item["conclusion"] for item in events] == ["中间事件结论"]
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_uses_only_same_trade_date_reports() -> None:
+async def test_evening_brief_uses_only_same_trade_date_review_report() -> None:
+    """晚报三条均从当日 review 报告提取，只查询 review 一次，归因结论放头条。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
-    reports = {
-        "review": _report("review", 40),
-        "market_snapshot": _structured_snapshot_report(),
-        "iterate": _structured_iterate_report(),
-    }
     api.get_analysis_report.side_effect = lambda report_type, report_date: (
-        reports.get(report_type) if report_date == "2026-07-24" else None
+        _structured_review_report(report_id=40) if report_date == "2026-07-24" else None
     )
 
     brief = await build_brief("evening", "2026-07-24", api=api)
 
     assert len(brief["items"]) == 3
     assert brief["degraded"] is False
-    assert [call.args[1] for call in api.get_analysis_report.await_args_list] == [
-        "2026-07-24",
-        "2026-07-24",
-        "2026-07-24",
+    assert [item["title"] for item in brief["items"]] == [
+        "归因结论",
+        "市场快照",
+        "收盘复盘",
     ]
+    api.get_analysis_report.assert_awaited_once_with("review", "2026-07-24")
 
 
 @pytest.mark.asyncio
@@ -475,12 +550,9 @@ async def test_evening_brief_items_never_carry_raw_json_conclusion() -> None:
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
-    reports = {
-        "review": _report("review", 31, summary="收盘三大指数涨跌互现"),
-        "market_snapshot": _structured_snapshot_report(),
-        "iterate": _structured_iterate_report(),
-    }
-    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.get_analysis_report.side_effect = lambda report_type, _date: (
+        _structured_review_report(report_id=31, summary="收盘三大指数涨跌互现")
+    )
 
     brief = await build_brief("evening", "2026-07-24", api=api)
 
@@ -491,104 +563,56 @@ async def test_evening_brief_items_never_carry_raw_json_conclusion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_reads_summary_from_structured_market_snapshot() -> None:
-    """schema 2.0 持久化的 market_snapshot，Brief conclusion 必须是可读 summary。"""
+async def test_evening_brief_shows_sector_changes_for_user() -> None:
+    """市场快照条目展示当日领涨/领跌板块（用户可读），不再展示晨报迭代命中率。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
-    reports = {
-        "review": _report("review", 31, summary="收盘复盘结论"),
-        "market_snapshot": _structured_snapshot_report(hit_rate=0.72, new_coverage_rate=0.15),
-        "iterate": _structured_iterate_report(summary="今日无显著异常"),
-    }
-    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.get_analysis_report.side_effect = lambda report_type, _date: _structured_review_report()
 
     brief = await build_brief("evening", "2026-07-24", api=api)
 
-    snapshot_item = next(
-        item for item in brief["items"]
-        if item["evidence"][0]["report_type"] == "market_snapshot"
+    sectors_item = next(item for item in brief["items"] if item["title"] == "市场快照")
+    assert sectors_item["conclusion"] == (
+        "今日AI算力涨4.21%、券商涨3.05%，煤炭跌2.13%、银行跌1.52%"
     )
-    conclusion = snapshot_item["conclusion"]
-    assert isinstance(conclusion, str)
-    assert "板块命中率" in conclusion and "新覆盖率" in conclusion
-    assert not conclusion.lstrip().startswith("{")
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_reads_summary_from_structured_iterate() -> None:
-    """schema 2.0 持久化的 iterate，Brief conclusion 必须是 iterate_payload.summary。"""
+async def test_evening_brief_shows_attribution_chain_for_user() -> None:
+    """归因结论条目展示主因链（触发→传导→结果），中文可读。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
-    iterate_summary = "模型伪造摘要，不得进入 Brief"
-    reports = {
-        "review": _report("review", 31, summary="收盘复盘结论"),
-        "market_snapshot": _structured_snapshot_report(),
-        "iterate": _structured_iterate_report(summary=iterate_summary, status="alert"),
-    }
-    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.get_analysis_report.side_effect = lambda report_type, _date: _structured_review_report()
 
     brief = await build_brief("evening", "2026-07-24", api=api)
 
-    iterate_item = next(
-        item for item in brief["items"]
-        if item["evidence"][0]["report_type"] == "iterate"
+    attribution_item = next(item for item in brief["items"] if item["title"] == "归因结论")
+    assert attribution_item["conclusion"] == (
+        "今日市场主因是美联储降息预期升温，北向资金净流入，券商领涨带动指数反弹"
     )
-    assert iterate_item["conclusion"] == "检测到异常维度：dimension_2"
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_degrades_when_market_snapshot_persisted_as_raw_json() -> None:
-    """旧 schema 1.0 把完整 snapshot JSON 写入 text —— Brief 必须降级，不得当作 conclusion。"""
+async def test_evening_brief_attribution_degrades_when_not_confirmed() -> None:
+    """归因未确认（not_applicable/insufficient）时，归因条目显示降级文案。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
-    reports = {
-        "review": _report("review", 31, summary="收盘复盘结论"),
-        "market_snapshot": _legacy_raw_json_snapshot_report(),
-        "iterate": _structured_iterate_report(),
-    }
-    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
+    api.get_analysis_report.side_effect = lambda report_type, _date: _structured_review_report(
+        attribution_status="not_applicable"
+    )
 
     brief = await build_brief("evening", "2026-07-24", api=api)
 
-    assert brief["degraded"] is True
-    assert "market_snapshot" in brief["missing_sources"]
-    types_in_items = [
-        item["evidence"][0]["report_type"] for item in brief["items"]
-    ]
-    assert "market_snapshot" not in types_in_items
-    for item in brief["items"]:
-        _assert_item_contract(item)
+    attribution_item = next(item for item in brief["items"] if item["title"] == "归因结论")
+    assert attribution_item["conclusion"] == "今日证据不足，未确认主因"
 
 
 @pytest.mark.asyncio
-async def test_evening_brief_degrades_when_iterate_persisted_as_raw_json() -> None:
-    """旧 schema 1.0 把完整 iterate JSON 写入 text —— Brief 必须降级，不得当作 conclusion。"""
-    from aistock_agent.services.briefing import build_brief
-
-    api = AsyncMock()
-    reports = {
-        "review": _report("review", 31, summary="收盘复盘结论"),
-        "market_snapshot": _structured_snapshot_report(),
-        "iterate": _legacy_raw_json_iterate_report(),
-    }
-    api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
-
-    brief = await build_brief("evening", "2026-07-24", api=api)
-
-    assert brief["degraded"] is True
-    assert "iterate" in brief["missing_sources"]
-    types_in_items = [
-        item["evidence"][0]["report_type"] for item in brief["items"]
-    ]
-    assert "iterate" not in types_in_items
-
-
-@pytest.mark.asyncio
-async def test_brief_rejects_json_event_conclusion_and_special_source_fallbacks() -> None:
-    """event JSON、snapshot/iterate 的 display/details 均不能绕过受控摘要。"""
+async def test_brief_rejects_json_event_conclusion() -> None:
+    """event JSON 不能绕过受控摘要进入 Brief。"""
     from aistock_agent.services.briefing import build_brief
 
     api = AsyncMock()
@@ -607,20 +631,3 @@ async def test_brief_rejects_json_event_conclusion_and_special_source_fallbacks(
         item["evidence"][0]["report_type"] != "event_conduction"
         for item in morning["items"]
     )
-
-    special_content = {
-        "display_report": {"summary": "伪摘要", "details": "完整详情"},
-        "snapshot": {"dimension_1_coverage": {"hit_rate": 0.9}},
-        "iterate_payload": {"status": "normal", "triggered_dimensions": []},
-    }
-    reports.update(
-        {
-            "review": _report("review", 31, summary="复盘结论"),
-            "market_snapshot": _report("market_snapshot", 32, summary="ignored"),
-            "iterate": _report("iterate", 33, summary="ignored"),
-        }
-    )
-    reports["market_snapshot"]["content"] = special_content
-    reports["iterate"]["content"] = special_content
-    evening = await build_brief("evening", "2026-07-24", api=api)
-    assert set(evening["missing_sources"]) == {"market_snapshot", "iterate"}

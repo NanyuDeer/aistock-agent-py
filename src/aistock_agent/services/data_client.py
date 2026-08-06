@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 @dataclass(frozen=True)
 class ReviewReportReadResult:
-    """市场复盘工件读取结果，仅供 market_trace_qa 使用。"""
+    """市场复盘工件读取结果，仅供 trace_loader 使用。"""
 
     status: Literal["found", "not_found", "unavailable"]
     report: dict[str, object] | None = None
@@ -346,6 +346,7 @@ class NodeApiClient:
         generation_time_ms: int | None = None,
         model_version: str | None = None,
         error_message: str | None = None,
+        update_cache: bool = True,  # P2：chat_analysis 传 False（公共列表排除，D15）
     ) -> dict[str, object] | None:
         """持久化 Agent 分析报告（upsert）
 
@@ -359,6 +360,8 @@ class NodeApiClient:
             generation_time_ms: 生成耗时(毫秒)
             model_version: 模型版本
             error_message: 错误信息
+            update_cache: 是否同步写 Python report_cache（前端公共报告列表）。
+                默认 True 保持既有行为；chat_analysis 传 False（不进公共列表，D15 覆盖语义）。
 
         Returns:
             Node.js 返回的 { id, report_type, report_date, created_at } 或 None
@@ -381,18 +384,56 @@ class NodeApiClient:
             payload["error_message"] = error_message
 
         result = await self.post("/internal/analysis-reports", payload)
-        # 同步写入内存缓存（前端报告列表查询用）
-        try:
-            from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
-            set_report(report_type, report_date, payload)
-        except Exception:
-            pass
+        # 同步写入内存缓存（前端报告列表查询用）；chat_analysis 不进公共列表（D15 排除）
+        if update_cache:
+            try:
+                from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
+                set_report(report_type, report_date, payload)
+            except Exception:
+                pass
         if result:
             logger.info(
                 "analysis_report_saved",
                 report_type=report_type,
                 report_date=report_date,
                 user_id=user_id,
+            )
+        return result
+
+    async def save_token_usage(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        question: str | None = None,
+    ) -> dict[str, object] | None:
+        """记录一次对话 token 用量（P10 线 2，ws.py 计费回调）。
+
+        与 save_analysis_report 同模式：``post`` 已吞异常返回 None，
+        调用方再包一层 try/except 记日志即可——落库失败不阻断对话
+        （"永不 500"铁律）。
+
+        Returns:
+            Node 返回的 {id} 或 None（失败）。
+        """
+        payload: dict[str, object] = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "question": question,
+        }
+        result = await self.post("/internal/usage/records", payload)
+        if result:
+            logger.info(
+                "token_usage.saved",
+                user_id=user_id,
+                session_id=session_id,
+                total_tokens=total_tokens,
             )
         return result
 

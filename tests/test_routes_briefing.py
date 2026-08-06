@@ -64,15 +64,20 @@ class TestTriggerMorningBriefing:
             }
 
     def _mock_event_result(self, success=True, title="测试事件", persisted=True):
-        from aistock_agent.services.event_conduction import EventConductionResult
+        from aistock_agent.services.event_conduction import (
+            EventConductionOutput,
+            EventConductionResult,
+        )
 
-        return EventConductionResult(
-            success=success,
-            event_id=f"evt_{title[:8]}",
-            title=title,
-            event_generated=success,
-            persisted=persisted if success else False,
-            error=None if success else "degraded",
+        return EventConductionOutput(
+            status=EventConductionResult(
+                success=success,
+                event_id=f"evt_{title[:8]}",
+                title=title,
+                event_generated=success,
+                persisted=persisted if success else False,
+                error=None if success else "degraded",
+            )
         )
 
     def test_no_major_events(self, client):
@@ -540,15 +545,20 @@ class TestTriggerEventBriefing:
             "aistock_agent.services.event_conduction.run_single_event_conduction",
             new_callable=AsyncMock,
         ) as mock_conduction:
-            from aistock_agent.services.event_conduction import EventConductionResult
+            from aistock_agent.services.event_conduction import (
+                EventConductionOutput,
+                EventConductionResult,
+            )
 
-            mock_conduction.return_value = EventConductionResult(
-                success=True,
-                event_id="evt_test123",
-                title="测试事件标题",
-                event_generated=True,
-                persisted=True,
-                cached=True,
+            mock_conduction.return_value = EventConductionOutput(
+                status=EventConductionResult(
+                    success=True,
+                    event_id="evt_test123",
+                    title="测试事件标题",
+                    event_generated=True,
+                    persisted=True,
+                    cached=True,
+                )
             )
             resp = client.post(
                 "/api/agent/briefing/event/trigger",
@@ -570,20 +580,25 @@ class TestTriggerEventBriefing:
     def test_empty_body_calls_conduction_with_nonempty_title(self, client):
         """空 body 时构造非空默认事件标题，实际调用 run_single_event_conduction，
         并按共享服务结果返回状态（不因空标题提前失败）。"""
-        from aistock_agent.services.event_conduction import EventConductionResult
+        from aistock_agent.services.event_conduction import (
+            EventConductionOutput,
+            EventConductionResult,
+        )
 
         with patch(
             "aistock_agent.services.event_conduction.run_single_event_conduction",
             new_callable=AsyncMock,
         ) as mock_conduction:
-            mock_conduction.return_value = EventConductionResult(
-                success=True,
-                event_id="evt_default",
-                title="最新重大市场事件",
-                event_generated=True,
-                persisted=True,
-                cached=True,
-                error=None,
+            mock_conduction.return_value = EventConductionOutput(
+                status=EventConductionResult(
+                    success=True,
+                    event_id="evt_default",
+                    title="最新重大市场事件",
+                    event_generated=True,
+                    persisted=True,
+                    cached=True,
+                    error=None,
+                )
             )
             resp = client.post(
                 "/api/agent/briefing/event/trigger",

@@ -13,7 +13,7 @@
     退出。未找到根因，未猜测性改配置；仅保留本诊断作为回归守护。
 
     已排除项：
-    - market_trace_qa 单元测试（25 项）→ 自然退出
+    - trace_loader 单元测试（tests/unit/test_trace_lookup.py，6 项）→ 自然退出
     - 全量 tests/unit/（531 项）→ 自然退出
     - 全量 tests/integration/（222 项）→ 自然退出
     - 全量 tests/e2e/（56 项）→ 自然退出
@@ -102,7 +102,7 @@ def test_cacheprovider_probe_passes_explicit_child_cache_dir(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     try:
-        _run_pytest_with_cacheprovider("tests/unit/test_market_trace_qa.py", child_cache_dir)
+        _run_pytest_with_cacheprovider("tests/unit/test_trace_lookup.py", child_cache_dir)
     except TypeError as error:
         pytest.fail(f"诊断 helper 必须接收显式 child_cache_dir：{error}")
 
@@ -110,8 +110,8 @@ def test_cacheprovider_probe_passes_explicit_child_cache_dir(
 
 
 @pytest.mark.timeout(_TIMEOUT_SECONDS + 10) if os.environ.get("PYTEST_TIMEOUT") else pytest.mark.skipif(False, reason="no pytest-timeout")
-def test_market_trace_qa_exits_naturally_with_cacheprovider(tmp_path: Path) -> None:
-    """cacheprovider 启用时 market_trace_qa 测试必须自然退出。
+def test_trace_loader_exits_naturally_with_cacheprovider(tmp_path: Path) -> None:
+    """cacheprovider 启用时 trace_loader 测试必须自然退出。
 
     失败模式：
     - subprocess.TimeoutExpired → 进程挂起（回归捕获目标）
@@ -120,7 +120,7 @@ def test_market_trace_qa_exits_naturally_with_cacheprovider(tmp_path: Path) -> N
     try:
         child_cache_dir = tmp_path / "child-pytest-cache"
         exit_code, elapsed, tail = _run_pytest_with_cacheprovider(
-            "tests/unit/test_market_trace_qa.py", child_cache_dir
+            "tests/unit/test_trace_lookup.py", child_cache_dir
         )
     except subprocess.TimeoutExpired:
         pytest.fail(

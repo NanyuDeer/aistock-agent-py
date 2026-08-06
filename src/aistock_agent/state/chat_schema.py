@@ -11,11 +11,30 @@ from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
+    ChatCard,  # P11（线 3）：cards 卡片契约（B-T1 定义，与 P10 共享）
     Evidence,
     Insight,
     InsightGoal,
     SkillCall,
+    SubGoal,
 )
+
+
+class DeepReportRef(TypedDict, total=False):
+    """D12/D13：最近一次深度升级的引用 + 短摘要（单引用，不存全文）。
+
+    worker 由 escalate 写入的 deep_source 保证合法（stock/sector/hot_burst）。
+    report_id 为 chat_analysis 落库后 Node 返回的 id；落库失败/未登录为 None（D38）。
+    summary ≤200 字（D18 约定 final_response 前 160 字截取）。
+    """
+
+    worker: Literal["stock", "sector", "hot_burst"]
+    report_id: str | None
+    question: str
+    summary: str
+    symbols: list[str]
+    tag_codes: list[str]
+    created_at: str
 
 
 class QuestionState(TypedDict, total=False):
@@ -43,3 +62,19 @@ class QuestionState(TypedDict, total=False):
     # LangGraph 通道机制必需声明（节点返回未声明键会触发 InvalidUpdateError）；
     # 不进 trace/insight，conditional 边消费后即弃。
     fallback_to_skill: bool | None
+    # P2（D11）：前端透传的用户身份。ws.py 写；chat_analysis 落库登录守卫（T3）与
+    # 追问复用 report_lookup（T5）消费；未登录为 None（D38 不落库）。
+    user_id: str | None
+    # P2（D12/D13/D39）：最近一次深度升级的引用（synth_answer deep 分支无条件写，
+    # 与登录无关）；供 T5 qa_router 追问注入摘要；更早的靠 messages 历史兜底。
+    last_deep_report: DeepReportRef | None
+    # P4（D34）：多子目标（多意图 compose 时非空；存量会话/单意图为 None）。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source）。
+    goals: list[SubGoal] | None
+    # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
+    general_source: Literal["science", "gap"] | None
+    # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3）；
+    # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
+    cards: list[ChatCard] | None
+    token_usage: dict[str, int] | None

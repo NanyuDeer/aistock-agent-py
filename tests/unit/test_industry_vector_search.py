@@ -163,7 +163,8 @@ async def test_match_industry_by_keywords_node_api_error():
             )
             result = await ivs.match_industry_by_keywords.ainvoke({"keywords": ["新能源汽车"]})
 
-    assert "数据暂不可用" in result
+    assert "实时连接受限" in result
+    assert "模拟分析" in result
 
 
 @pytest.mark.asyncio
@@ -179,7 +180,8 @@ async def test_match_industry_by_keywords_openai_embedding_error():
     with patch(_OPENAI_CLIENT, return_value=mock_openai):
         result = await ivs.match_industry_by_keywords.ainvoke({"keywords": ["新能源汽车"]})
 
-    assert "数据暂不可用" in result
+    assert "实时连接受限" in result
+    assert "模拟分析" in result
 
 
 @pytest.mark.asyncio
