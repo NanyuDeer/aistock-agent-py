@@ -12,7 +12,8 @@ from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
 from aistock_agent.schemas.chat_contract import ChatCard
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.token_usage import reset_token_usage
+from aistock_agent.observability.callback import get_default_callbacks
+from aistock_agent.services.token_usage import get_token_usage, reset_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,14 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                 async for event in graph.astream_events(
                     initial_state,
-                    config={"configurable": {"thread_id": session_id}},
+                    config={
+                        "configurable": {"thread_id": session_id},
+                        # astream_events 不触发 LLM 构造函数 callbacks=（仅 ainvoke 触发），
+                        # 须经 config 传入 callback 使 on_llm_end 在 WS 路径记录 token_usage。
+                        # generations fallback（callback.py _extract_token_usage）从
+                        # AIMessage.usage_metadata 提取用量（astream_events 路径 llm_output 为 None）。
+                        "callbacks": get_default_callbacks(),
+                    },
                     version="v2",
                 ):
                     event_type = event.get("event", "")
@@ -248,12 +256,24 @@ async def ws_chat(websocket: WebSocket) -> None:
                             # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
                             last_deep_report = output.get("last_deep_report")
                             # P10 线 2（选项 A）：一次性捕获 token_usage + cards
+                            # 注意：此处的 token_usage 来自 synth_answer 节点输出，
+                            # 在 astream_events 路径下为 stale None（on_llm_end 回调延迟触发），
+                            # 真实值在下方 asyncio.sleep(0) 后从 contextvar 刷新。
                             token_usage = output.get("token_usage")
                             cards = output.get("cards")
 
                 # P3-fix-2 T1.1：DONE 前等待 reasoning task 完成（2.5s 超时兜底），
                 # 保证 reasoning 事件在 done 之前到达，前端可聚合后关闭连接
                 await _drain_reasoning_tasks(reasoning_tasks)
+
+                # P10 线 2 修复：astream_events 路径下 on_llm_end 回调在 graph 结束后才
+                # 触发（LangGraph v2 异步回调延迟），synth_answer 节点输出的 token_usage
+                # 为 stale None。须显式 yield 让事件循环执行待处理的回调，再从 contextvar
+                # 读取最终累计值（多次 LLM 调用之和）。
+                await asyncio.sleep(0)
+                fresh_usage = get_token_usage()
+                if fresh_usage is not None:
+                    token_usage = fresh_usage
 
                 # P10 线 2：计费落库（仅 WS 路径；HTTP/SSE 降级路径不落库）。
                 # 条件：登录（user_id 非空）且本轮采集到非全 0 token 用量。
