@@ -2,6 +2,28 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-06 — WS 路径 token_usage 时序修复 + HTTP 降级补返回 + 服务端口 8000→8080 对齐
+
+**开发者**: Aria
+
+### 修复
+- `api/ws.py`：astream_events config 传入 `get_default_callbacks()`（astream_events 不触发 LLM 构造函数 callbacks=）；循环结束后 `await asyncio.sleep(0)` yield 事件循环让延迟 on_llm_end 回调执行，再从 contextvar 刷新 token_usage 覆盖 stale None——根因：LangGraph v2 异步回调延迟，synth_answer 节点执行期间 contextvar 尚未写入，DONE 事件恒 None
+- `observability/callback.py`：清理 DEBUG print；`_extract_token_usage` fallback 失败日志改为 `logger.debug`
+- `services/token_usage.py`：清理 DEBUG print
+- `api/routes.py` + `schemas/chat.py`：HTTP 非流式 `chat_message` 补返回 `token_usage`（降级路径用量缺口，P10 线 2；c926e9d + 8944635）；e2e 新增 `test_chat_message_returns_token_usage_when_graph_provides`
+
+### 改进
+- 服务端口 `8000`→`8080` 对齐 app-api `AGENT_PY_URL` 默认值（app-api 已在 2026-08-05 改 8080，agent-py config 落后导致反代错端口）
+- `config.py`：`port: int = 8080` + 注释
+- `Dockerfile`：`EXPOSE 8080` + `CMD --port 8080`
+- `README.md` / `AGENT_STANDARDS.md`：启动命令与 docker run 端口同步更新
+
+### 验证
+- WS 直连冒烟 `token_usage={'prompt_tokens': 455, 'completion_tokens': 353, 'total_tokens': 808}`（3 次 LLM 调用之和，非翻倍）
+- 43 单测全绿；HTTP 路径 e2e 回归通过
+
+---
+
 ## [main] 2026-08-06 — 晚报结论重构：归因结论放头条，三条均为 30-40 字一句话（去冒号）
 
 **开发者**: Aria

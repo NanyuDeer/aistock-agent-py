@@ -58,9 +58,9 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
-    # 服务（Python 8000 / Node.js 3000）
+    # 服务（Python 8080 / Node.js 3000）
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8080
     log_level: str = "INFO"
 
     # 内网鉴权

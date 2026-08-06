@@ -92,7 +92,7 @@ async def chat_message(
     保留兼容，前端全部切到双流后清理。
     """
     graph = _select_graph()
-    reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库不消费）
+    reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库，仅透出展示）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
@@ -109,6 +109,8 @@ async def chat_message(
     return ChatResponse(
         content=content,
         session_id=session_id,
+        # P10 线 2 缺口修复：透出本轮 token_usage（synth_answer_node 附加于 result；无则 None）
+        token_usage=result.get("token_usage"),
     )
 
 
