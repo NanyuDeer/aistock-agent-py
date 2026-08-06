@@ -2,6 +2,30 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-08-06 — 修复存量 unit 测试失败 + 清理遗留测试文件
+
+**开发者**: Aria
+
+### 修复
+- `services/scheduler.py`：`_publish_review_quick_event` / `_publish_review_full_event` 的 trace_id 由 `asyncio.get_event_loop().time()` 改为 `time.monotonic()`，消除对"当前事件循环"的隐式依赖（同步/多线程场景无 loop 会抛 RuntimeError）
+- `graph/nodes/qa_router.py`：`_resolve_multi_symbols` 在 `_extract_multi_symbols` 返回空（候选 <2 约定返回 []）时按正则补全消息中显式给出的 6 位代码，修复 "600519 和五粮液哪个更好" 对比闸门无法短路的问题
+- `tests/unit/test_skills.py`：3 个 normal + 3 个 exception 测试改用 `mock.ainvoke.return_value / side_effect` 配置（原 `AsyncMock(return_value=...)` 只作用于 mock 自身，`.ainvoke` 子 mock 拿不到导致 degraded/coroutine 报错与假通过）；stock_snapshot normal 测试补充 node_api.get 与交易时段 mock，消除真实时间依赖
+- `tests/unit/test_qa_router.py`：`test_qa_router_llm_single_validate_collapses` 补充 `get_quick_think` mock（缺 mock 时真实调用 ChatOpenAI 抛 OpenAIError 走兜底，断言 KeyError）
+- `tests/unit/test_industry_vector_search.py`：2 处降级断言由旧文本"数据暂不可用"更新为当前 `DEGRADED_MESSAGE`（safe_tool_call 稳定契约）
+- `tests/unit/test_qa_briefing.py`：morning 前置报告补 `trend_score` mock（`_REQUIRED_TYPES["morning"]` 已含 trend_score）
+- `tests/unit/test_scheduler.py`：`test_start_scheduler_explicitly_passes_configured_timezone_to_cron` 显式创建/清理事件循环，消除全套运行时的 loop 顺序污染
+
+### 清理
+- 删除 `tests/unit/test_tenx_tools.py`（tenx_tools.py 已被 trend_tools.py 替代移除，遗留测试文件）
+- 清理 5 个测试文件的 ruff 存量警告（E402/E501/F401/I001 等，21 处）
+
+### 验证
+- `pytest tests/unit -q`：1171 passed（修复前 1162 passed + 9 failed + 1 collection error）
+- `pytest tests/e2e/test_chat_message.py -q`：4 passed
+- ruff：全部改动文件 All checks passed
+
+---
+
 ## [changer] 2026-08-06 — WS 路径 token_usage 时序修复 + HTTP 降级补返回 + 服务端口 8000→8080 对齐
 
 **开发者**: Aria

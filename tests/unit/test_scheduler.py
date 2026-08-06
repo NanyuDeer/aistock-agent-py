@@ -72,20 +72,32 @@ async def test_start_scheduler_initializes_jobs():
 
 def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None:
     """CronTrigger 必须显式绑定调度配置时区，不能依赖进程本地时区。"""
+    import asyncio
+
     from aistock_agent.services import scheduler
 
-    with patch.object(
-        scheduler.CronTrigger,
-        "from_crontab",
-        wraps=scheduler.CronTrigger.from_crontab,
-    ) as from_crontab:
-        scheduler.start_scheduler()
+    # AsyncIOScheduler.start() 需要当前事件循环：同步测试里显式创建/清理，
+    # 避免依赖前面 async 测试遗留的 loop 状态（全套运行时无当前 loop 会抛
+    # "There is no current event loop"）。
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        with patch.object(
+            scheduler.CronTrigger,
+            "from_crontab",
+            wraps=scheduler.CronTrigger.from_crontab,
+        ) as from_crontab:
+            scheduler.start_scheduler()
 
-    assert from_crontab.call_count == 3
-    assert all(
-        call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
-        for call in from_crontab.call_args_list
-    )
+        assert from_crontab.call_count == 3
+        assert all(
+            call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
+            for call in from_crontab.call_args_list
+        )
+    finally:
+        scheduler.shutdown_scheduler()
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def test_qa_mode_hard_disables_scheduler_even_if_scheduler_enabled(monkeypatch) -> None:
@@ -990,13 +1002,18 @@ def test_extract_iterate_summary_ignores_llm_summary_and_rejects_invalid_state()
 @pytest.mark.asyncio
 async def test_publish_review_quick_event_publishes_to_event_bus():
     """_publish_review_quick_event 成功发布事件。"""
-    from unittest.mock import AsyncMock, MagicMock, patch
+    from unittest.mock import AsyncMock, patch
+
     from aistock_agent.services.scheduler import _publish_review_quick_event
 
     mock_bus = AsyncMock()
     mock_bus.publish = AsyncMock(return_value="evt-1")
 
-    with patch("aistock_agent.services.scheduler._get_event_bus", new_callable=AsyncMock, return_value=mock_bus):
+    with patch(
+        "aistock_agent.services.scheduler._get_event_bus",
+        new_callable=AsyncMock,
+        return_value=mock_bus,
+    ):
         with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
             with patch("aistock_agent.services.scheduler.shanghai_today") as mock_today:
                 from datetime import date
@@ -1013,6 +1030,7 @@ async def test_publish_review_quick_event_publishes_to_event_bus():
 async def test_publish_review_quick_event_skips_non_trading_day():
     """非交易日跳过。"""
     from unittest.mock import patch
+
     from aistock_agent.services.scheduler import _publish_review_quick_event
 
     with patch("aistock_agent.services.scheduler.is_trading_day", return_value=False):
@@ -1022,6 +1040,7 @@ async def test_publish_review_quick_event_skips_non_trading_day():
 def test_start_scheduler_registers_quick_full_crons_when_enabled():
     """quick_snapshot_enabled=True 时注册 review_quick/review_full cron。"""
     from unittest.mock import MagicMock, patch
+
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()
@@ -1046,6 +1065,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
 def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     """quick_snapshot_enabled=False 时保留旧 evening_chain。"""
     from unittest.mock import MagicMock, patch
+
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()

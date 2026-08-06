@@ -11,6 +11,7 @@
 
 import asyncio
 import json
+import time
 from datetime import date
 
 import structlog
@@ -454,7 +455,9 @@ async def _publish_review_quick_event() -> None:
         return
 
     report_date = report_day.isoformat()
-    trace_id = f"sched-quick-{report_date}-{int(asyncio.get_event_loop().time())}"
+    # 用单调时钟而非 asyncio.get_event_loop().time()：不隐式依赖"当前事件循环"
+    # （同步测试/多线程场景下可能无 loop 而抛 RuntimeError，trace_id 只需时间戳）
+    trace_id = f"sched-quick-{report_date}-{int(time.monotonic())}"
 
     try:
         event_bus = await _get_event_bus()
@@ -479,7 +482,7 @@ async def _publish_review_full_event() -> None:
         return
 
     report_date = report_day.isoformat()
-    trace_id = f"sched-full-{report_date}-{int(asyncio.get_event_loop().time())}"
+    trace_id = f"sched-full-{report_date}-{int(time.monotonic())}"
 
     try:
         event_bus = await _get_event_bus()
