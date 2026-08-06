@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 
 from aistock_agent.utils.output_parser import (
     _parse_json,
+    extract_major_events,
     parse_event_output,
     transform_to_frontend,
 )
@@ -802,3 +803,129 @@ def test_transform_to_frontend_rejects_ambiguous_same_name_centers() -> None:
     )
 
     assert result["event_transmission"]["chain"] == []
+
+
+# ── extract_major_events 容错解析测试（生产可靠性修复） ──
+
+
+def _major_events_text(events_raw: str) -> str:
+    """构造带 MAJOR_EVENTS 标记的晨报 details 文本（events_raw 为原始 JSON 块文本）。"""
+    return (
+        "## 重大事件识别\n\n"
+        "<!--MAJOR_EVENTS_START-->\n"
+        f"{events_raw}\n"
+        "<!--MAJOR_EVENTS_END-->\n"
+    )
+
+
+def _valid_event(title: str, **overrides: object) -> dict[str, object]:
+    event: dict[str, object] = {
+        "title": title,
+        "summary": f"{title}摘要",
+        "url": f"https://example.com/{title}",
+        "impact_score": 4.0,
+        "direction": "positive",
+        "involved_keywords": ["关键词"],
+    }
+    event.update(overrides)
+    return event
+
+
+def test_extract_major_events_full_valid_json():
+    """Case1：正常 JSON → 全量解析成功（回归保护）"""
+    events = [_valid_event(f"事件{i}") for i in range(1, 7)]
+    text = _major_events_text(json.dumps(events, ensure_ascii=False))
+
+    result = extract_major_events(text)
+
+    assert len(result) == 6
+    assert [e["title"] for e in result] == [f"事件{i}" for i in range(1, 7)]
+
+
+def test_extract_major_events_recovers_others_when_one_summary_has_unescaped_quotes():
+    """Case2：1 个事件 summary 含未转义中文引号 → 恢复其余 5 个，不允许返回空数组
+
+    复现生产故障：summary 中出现 `"小非农"` 这类未转义引号时，
+    旧的整块 json.loads 会抛 JSONDecodeError 并返回空数组，导致全量事件丢失。
+    """
+    raw = """[
+  {"title": "事件1", "summary": "事件1摘要", "url": "https://e.com/1", "impact_score": 4.5, "direction": "positive", "involved_keywords": ["a"]},
+  {"title": "事件2", "summary": "事件2摘要", "url": "https://e.com/2", "impact_score": 4.0, "direction": "negative", "involved_keywords": ["b"]},
+  {"title": "事件3", "summary": "事件3摘要", "url": "https://e.com/3", "impact_score": 3.5, "direction": "positive", "involved_keywords": ["c"]},
+  {"title": "事件4", "summary": "市场称其为"小非农"数据，该数据大幅不及预期", "url": "https://e.com/4", "impact_score": 3.0, "direction": "positive", "involved_keywords": ["d"]},
+  {"title": "事件5", "summary": "事件5摘要", "url": "https://e.com/5", "impact_score": 3.0, "direction": "negative", "involved_keywords": ["e"]},
+  {"title": "事件6", "summary": "事件6摘要", "url": "https://e.com/6", "impact_score": 2.5, "direction": "positive", "involved_keywords": ["f"]}
+]"""
+    text = _major_events_text(raw)
+
+    result = extract_major_events(text)
+
+    assert len(result) == 5, f"期望恢复 5 个事件，实际返回 {len(result)}"
+    titles = [e["title"] for e in result]
+    assert "事件4" not in titles, "含未转义引号的事件应被丢弃"
+    assert "事件1" in titles and "事件6" in titles
+
+
+def test_extract_major_events_skips_events_missing_required_fields():
+    """Case3：单个事件字段缺失（title 为空 / direction 非法）→ 跳过坏事件，保留其他事件"""
+    events = [
+        _valid_event("好事件1"),
+        {
+            "title": "",
+            "summary": "缺标题事件",
+            "url": "",
+            "impact_score": 3.0,
+            "direction": "positive",
+            "involved_keywords": [],
+        },
+        _valid_event("好事件2", direction="neutral"),
+    ]
+    text = _major_events_text(json.dumps(events, ensure_ascii=False))
+
+    result = extract_major_events(text)
+
+    assert [e["title"] for e in result] == ["好事件1"]
+
+
+def test_extract_major_events_normalizes_fields():
+    """字段校验：impact_score 转 float、direction 大小写归一、involved_keywords 默认空数组、url 允许空"""
+    events = [
+        {
+            "title": "事件",
+            "summary": "摘要",
+            "url": "",
+            "impact_score": "4.5",
+            "direction": "Positive",
+        }
+    ]
+    text = _major_events_text(json.dumps(events, ensure_ascii=False))
+
+    result = extract_major_events(text)
+
+    assert len(result) == 1
+    event = result[0]
+    assert event["impact_score"] == 4.5
+    assert isinstance(event["impact_score"], float)
+    assert event["direction"] == "positive"
+    assert event["url"] == ""
+    assert event["involved_keywords"] == []
+
+
+def test_extract_major_events_legacy_json_array_without_marker():
+    """无标记块但存在 JSON 数组 → 兼容路径正常解析（回归保护）"""
+    text = (
+        "以下是重大事件：\n"
+        '[{"title": "事件A", "summary": "摘要A", "url": "", '
+        '"impact_score": 3.0, "direction": "positive", "involved_keywords": []}]\n'
+        "以上。"
+    )
+
+    result = extract_major_events(text)
+
+    assert len(result) == 1
+    assert result[0]["title"] == "事件A"
+
+
+def test_extract_major_events_no_marker_returns_empty():
+    """无标记块也无 JSON 数组 → 返回空数组（回归保护）"""
+    assert extract_major_events("这是一段纯文本晨报，没有事件标记。") == []

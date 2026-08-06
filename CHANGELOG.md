@@ -2,6 +2,30 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [xusiyun] 2026-08-06 — 事件传导链路可靠性与 GI 稳定性优化
+
+**开发者**: Aria
+
+### 改进
+- `services/event_conduction.py`：P0-2 单事件独立超时（per_event_timeout），`asyncio.wait_for` 只取消超时事件，不再整批取消；新增 `error_type` 字段区分失败类型（TimeoutError / persist_failed / understanding_failed）
+- `services/event_analysis_pipeline.py`：移除批次级 `wait_for`，超时下沉到单个事件；GI 入口从 `eval_global_importance_from_events` 改为 `persist_global_importance_evaluation`（评估 + 落库），保证前端可读取当日 GI 数据
+- `services/global_importance_evaluation.py`：GI 模型从 quick_think（flash）切换为 deep_think（pro），每日仅一次优先推理稳定性；新增空响应 retry（2 次）+ JSON 解析失败重调 LLM；修复解析循环结构 bug（break 导致结果丢失）
+- `prompts/workers/global_importance.py`：新增"方向判断补充"约束——investment_rating 仅作参考、不强行选择争议事件、无足够影响力事件时返回 null、官员表态不得仅因热度入选
+- `prompts/workers/morning.py`：重大事件筛选补充——区分"实际变化"与"个人观点"（可能/预计/考虑等非确定性表述降级）、url 来源优先级约束
+- `prompts/workers/event.py`：EVENT_UNDERSTANDING_PROMPT 输出新增 `source_name`（来源名称）/ `event_type`（类型枚举）
+- `services/event_persister.py`：content JSONB 顶层新增 `source_name` / `event_type` 字段，随事件报告落库
+
+### 修复
+- `agents/workers/event.py`：P0-1 拆分 `event_generated`（分析完成）与 `can_persist`（展示完整性）——播报摘要不合规不再阻断完整 analysis_reports 落库；P1-1 understanding 失败重试 1 次并记录 `event_error`；P1-2 落库失败显式记录 `event_persist_error`，`success = event_generated AND persisted`
+- `utils/output_parser.py`：`extract_major_events` 容错恢复——整块 JSON 解析失败时逐对象恢复（`_recover_major_events_from_block`），单事件格式问题不再导致全量丢失；新增 `_sanitize_major_event` 字段级校验（title/summary/direction/impact_score）
+
+### 测试
+- `tests/unit/test_event_agent_run.py`（新增）：P0-1 / P1-1 / P1-2 状态字段可靠性
+- `tests/unit/test_event_analysis_pipeline.py`（新增）：P0-2 单事件超时透传 + GI 接线
+- `tests/unit/test_output_parser.py` / `test_event_conduction_service.py` / `test_event_persister.py`：补充容错恢复、超时、source_name/event_type 断言
+
+---
+
 ## [main] 2026-08-06 — 晚报结论重构：归因结论放头条，三条均为 30-40 字一句话（去冒号）
 
 **开发者**: Aria
