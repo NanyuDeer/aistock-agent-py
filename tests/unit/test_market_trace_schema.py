@@ -99,6 +99,37 @@ def test_market_trace_result_with_prediction_validation():
     assert restored.prediction_validation.status == "hit"
 
 
+def test_market_trace_result_attribution_summary_optional_default_none():
+    """attribution_summary 默认 None，兼容旧缓存。"""
+    result = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="insufficient",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="low",
+        unresolved_questions=[],
+    )
+    assert result.attribution_summary is None
+
+
+def test_market_trace_result_attribution_summary_roundtrip():
+    """带 attribution_summary 的 MarketTraceResult 可序列化。"""
+    result = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="confirmed",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="high",
+        unresolved_questions=[],
+        attribution_summary="AI算力与创新药业绩驱动CRO/PCB板块领涨",
+    )
+    raw = result.model_dump_json()
+    restored = MarketTraceResult.model_validate_json(raw)
+    assert restored.attribution_summary == "AI算力与创新药业绩驱动CRO/PCB板块领涨"
+
+
 def test_market_trace_snapshot_morning_forecast_optional_default_none():
     """snapshot.morning_forecast 默认 None，兼容旧缓存。"""
     # 用最小可用 snapshot（其他必填字段用占位），复用 test_market_trace_snapshot.py 的最小字段模式

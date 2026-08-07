@@ -28,6 +28,7 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 - alternative_chain_id: 备选候选的 id 或 null
 - confidence: "high" | "medium" | "low"
 - unresolved_questions: 未解问题字符串列表
+- attribution_summary: 综合主因的一句话结论（见下方【attribution_summary 约束】）
 
 禁止输出 Markdown、代码围栏（```）、自然语言解释或任何 JSON 以外的内容。
 
@@ -158,6 +159,13 @@ global_risk_liquidity 候选的传导链必须显式区分：
 global_risk_liquidity 不得获得 supported 状态，最多 weak。
 板块同步上涨时，不得仅凭"同期上涨"判定外盘传导，
 必须验证时间顺序（外盘先动 → A 股后动）和机制（资金/情绪/联动品种）。
+
+【attribution_summary 约束】
+- 仅当 attribution_status 为 confirmed 或 hypothesis 时生成，其余情况设为 null。
+- 一句话（30-40 字）综合当日主因，只讲主因本身（如"AI算力与创新药业绩驱动 CRO/PCB 板块领涨"），
+  不得混入现象描述、板块涨跌数据、事件罗列，不得以冒号或列表形式输出。
+- 语义应与主因候选（primary_chain_id）的结论一致，供前端早点听页面直接展示；
+  与 brief 归因结论（主因链拼接，供双人播报）相互独立，两者内容不需要相同。
 
 【CandidateExplanation 字段约束】
 - id: 必须与 category 同名（例如 id="global_risk_liquidity", category="global_risk_liquidity"）

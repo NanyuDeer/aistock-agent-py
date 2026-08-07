@@ -211,6 +211,10 @@ class MarketTraceResult(BaseModel):
     alternative_chain_id: str | None
     confidence: Literal["high", "medium", "low"]
     unresolved_questions: list[str]
+    # 综合主因的一句话结论（30-40 字，供前端早点听页面展示）。
+    # 仅 attribution_status 为 confirmed/hypothesis 时生成；其余情况为 None。
+    # 与 brief 归因结论（briefing.py 主因链拼接，供双人播报使用）相互独立。
+    attribution_summary: str | None = None
     # 预判对照（增量字段，默认 None 兼容旧缓存）
     prediction_validation: PredictionValidation | None = None
 
