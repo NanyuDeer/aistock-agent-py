@@ -752,6 +752,69 @@ async def trigger_broadcast_chain(
     }
 
 
+@router.post("/briefing/broadcast/only")
+async def trigger_broadcast_only(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """仅重新生成双人播报（不重跑 morning/wind_leader/hot_burst/trend_score 报告）。
+
+    broadcast_agent.run() 直接从数据库读取现有报告生成双人对话播报，
+    适合"报告已存在、仅播报失败/想重听"的场景。trigger_source=scheduler 使
+    播报文本写 DB + 生成双人音频（与 09:00 调度链路一致）。
+
+    请求体: {"report_date": "2026-08-07"}（可选，默认今天）
+    返回: {"success", "message", "report_date", "has_audio", "elapsed_seconds"}
+    """
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_broadcast_only_start", report_date=today)
+
+    start = time.time()
+    try:
+        state: dict[str, object] = {
+            "messages": [],
+            "session_id": f"manual_broadcast_only_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": "broadcast",
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "scheduler",  # 使播报写 DB + 生成音频
+            "report_date": today,
+        }
+        result = await broadcast_agent.run(state)
+        generated = bool(result.get("final_response"))
+        has_audio = bool(result.get("audio_path"))
+        elapsed = time.time() - start
+        logger.info(
+            "manual_trigger_broadcast_only_done",
+            generated=generated,
+            has_audio=has_audio,
+            elapsed_seconds=round(elapsed, 2),
+        )
+        return {
+            "success": generated,
+            "message": f"播报生成完成: 文本={'成功' if generated else '失败'} / 音频={'已生成' if has_audio else '未生成'}",
+            "report_date": today,
+            "has_audio": has_audio,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_broadcast_only_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"播报生成失败: {str(e)}",
+            "report_date": today,
+            "has_audio": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.post("/briefing/trend-score/trigger")
 async def trigger_trend_score(
     body: dict[str, str] | None = None,
