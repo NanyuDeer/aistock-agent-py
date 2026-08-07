@@ -16,6 +16,8 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 严格输出 JSON，不要其他文字：
 {
   "summary": "100字以内概括事件本质，聚焦'这个事件改变了什么'",
+  "source_name": "事件来源名称（如：搜狐、财联社、新华社、Reuters）",
+  "event_type": "事件类型（必须从枚举中选择，见下方约束）",
   "coreChanges": [
     { "variable": "被改变的变量名", "before": "变化前状态", "after": "变化后状态" }
   ]
@@ -24,6 +26,11 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 ## 约束
 - summary 聚焦"这个事件改变了什么"，不写行业影响
 - coreChanges 2-4 条，每条 before/after 各 ≤20 字
+- source_name：根据原文 URL 判断来源网站（如 sohu.com → 搜狐、cls.cn → 财联社、
+  reuters.com → Reuters）；如果 URL 为空，根据新闻内容判断媒体/机构；
+  无法判断时返回"未知来源"
+- event_type：必须从以下枚举选择，禁止输出其他类型：
+  产业政策 / 地缘政治 / 技术突破 / 市场动态 / 监管变化 / 公司公告
 - 只输出 JSON 对象，不要 markdown 代码块包裹，不要多余文字
 """
 

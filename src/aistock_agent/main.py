@@ -58,7 +58,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             from aistock_agent.services.event_bus import EventBus
             from aistock_agent.services.event_consumers import ConsumerContext, start_all_consumers
-            from aistock_agent.services.redis_pool import RedisPool as _RP
+            from aistock_agent.services.redis_pool import RedisPool as _RP  # noqa: N814
 
             redis = await _RP.get_client()
             event_bus = EventBus(
@@ -80,8 +80,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     stock_trace_redis: aioredis.Redis | None = None
     if settings.stock_trace_consumer_enabled:
         try:
-            from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
             import aistock_agent.workers.stock_trace_consumer as _stc_module
+            from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
 
             stock_trace_redis = aioredis.from_url(
                 settings.stock_trace_redis_url,
@@ -99,9 +99,47 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 await stock_trace_redis.aclose()
                 stock_trace_redis = None
 
+    # 启动自选股洞察 Consumer（集成模式）：独立 aioredis 连接（insight_redis_url, db=3），
+    # 不复用 RedisPool 单例（db=1）。worker 为真实归因 worker（Task 11，替换占位实现）。
+    insight_consumer_task: asyncio.Task[None] | None = None
+    insight_redis: aioredis.Redis | None = None
+    if settings.insight_consumer_enabled:
+        try:
+            from aistock_agent.workers.insight_consumer import InsightConsumer
+            from aistock_agent.workers.insight_worker import InsightWorker
+
+            insight_redis = aioredis.from_url(  # type: ignore[no-untyped-call]
+                settings.insight_redis_url,
+                max_connections=settings.redis_max_connections,
+            )
+            insight_consumer = InsightConsumer(
+                insight_redis, InsightWorker()  # type: ignore[arg-type]
+            )
+            insight_consumer_task = asyncio.create_task(insight_consumer.run_forever())
+            logger.info("insight_consumer_started_in_process")
+        except Exception:
+            logger.error("insight_consumer_start_failed", exc_info=True)
+            # 启动失败时清理已创建的 redis 连接
+            if insight_redis is not None:
+                await insight_redis.aclose()
+                insight_redis = None
+
     yield
 
-    # 关闭：先停 Stock Trace Consumer，再停事件消费者，再停调度器，最后关连接池
+    # 关闭：先停 insight Consumer，再停 Stock Trace Consumer，
+    # 再停事件消费者，再停调度器，最后关连接池
+    if insight_consumer_task is not None:
+        insight_consumer_task.cancel()
+        try:
+            await insight_consumer_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("insight_consumer_stop_failed", exc_info=True)
+    if insight_redis is not None:
+        await insight_redis.aclose()
+        logger.info("insight_consumer_stopped_in_process")
+
     if stock_trace_consumer_task is not None:
         stock_trace_consumer_task.cancel()
         try:

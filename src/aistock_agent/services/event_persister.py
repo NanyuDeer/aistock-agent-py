@@ -56,6 +56,8 @@ async def persist_event_report(
                 "eventId": event_id,
                 "title": event_meta.get("title", ""),
                 "source": event_meta.get("source", ""),
+                "source_name": event_meta.get("source_name", ""),
+                "event_type": event_meta.get("event_type", ""),
                 "publishTime": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
                 "event": event_text,
                 "analysis_reports": persist_reports,

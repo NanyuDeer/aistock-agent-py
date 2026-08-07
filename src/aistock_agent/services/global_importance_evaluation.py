@@ -27,7 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.prompts.workers.global_importance import GLOBAL_IMPORTANCE_PROMPT
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.llm import get_deep_think
 from aistock_agent.utils.output_parser import _parse_json
 
 logger = structlog.get_logger()
@@ -349,84 +349,131 @@ async def run_global_importance_evaluation(
     input_json = json.dumps(global_input, ensure_ascii=False, indent=2)
     user_message = f"请识别当前最值得关注的焦点事件：\n\n{input_json}"
 
-    # ── 步骤 3: 调用 LLM ──
-    try:
-        llm = get_quick_think()
-        result = await llm.ainvoke([
-            SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
-            HumanMessage(content=user_message),
-        ])
-        text = str(result.content) if hasattr(result, "content") else str(result)
-    except Exception as e:
-        logger.error("global_importance_llm_failed", error=str(e), exc_info=True)
+    # ── 步骤 3: 调用 LLM（deep_think，每日仅一次，优先稳定性；空响应 retry 1 次）──
+    text = ""
+    for attempt in range(2):
+        try:
+            llm = get_deep_think()
+            result = await llm.ainvoke([
+                SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
+                HumanMessage(content=user_message),
+            ])
+            text = str(result.content) if hasattr(result, "content") else str(result)
+        except Exception as e:
+            logger.error(
+                "global_importance_llm_failed",
+                error=str(e),
+                attempt=attempt + 1,
+                exc_info=True,
+            )
+            text = ""
+        if text:
+            break
+        logger.warning(
+            "global_importance_empty_response",
+            attempt=attempt + 1,
+            event_count=len(event_list),
+            retry=attempt < 1,
+        )
+    if not text:
         return {
             "top_bullish_event": None,
             "top_bearish_event": None,
-            "error": f"LLM 调用失败: {str(e)}",
+            "error": f"LLM 返回空响应（{2} 次尝试均失败）",
         }
 
     # ── 步骤 4: 解析 JSON ──
-    try:
-        parsed = _parse_json(text)
-        if not isinstance(parsed, dict):
-            logger.warning(
-                "global_importance_parse_not_dict",
-                text_preview=text[:300],
+    for attempt in range(2):
+        try:
+            parsed = _parse_json(text)
+            if not isinstance(parsed, dict):
+                if attempt < 1:
+                    logger.warning(
+                        "global_importance_parse_not_dict_retry",
+                        text_preview=text[:300],
+                        attempt=1,
+                    )
+                    # 重试：再次调用 LLM
+                    try:
+                        llm2 = get_deep_think()
+                        result2 = await llm2.ainvoke([
+                            SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
+                            HumanMessage(content=user_message),
+                        ])
+                        text = str(result2.content) if hasattr(result2, "content") else str(result2)
+                    except Exception as e2:
+                        logger.error("global_importance_retry_llm_failed", error=str(e2), exc_info=True)
+                    if not text:
+                        break
+                    continue
+                logger.warning(
+                    "global_importance_parse_not_dict",
+                    text_preview=text[:300],
+                    attempts=attempt + 1,
+                )
+                return {
+                    "top_bullish_event": None,
+                    "top_bearish_event": None,
+                    "error": f"LLM 返回非 dict 结构（{attempt + 1} 次尝试）",
+                    "raw_response_preview": text[:200],
+                }
+            summary = str(parsed.get("summary", ""))
+
+            # ── 提取新 Schema 字段：top_bullish_event（最大利好） ──
+            raw_bullish = parsed.get("top_bullish_event")
+            top_bullish_event: dict[str, object] | None = None
+            if isinstance(raw_bullish, dict) and raw_bullish.get("event_id"):
+                top_bullish_event = {
+                    "event_id": str(raw_bullish.get("event_id", "")),
+                    "direction": str(raw_bullish.get("direction", "")),
+                    "importance_level": str(raw_bullish.get("importance_level", "")),
+                    "reason": str(raw_bullish.get("reason", "")),
+                }
+
+            # ── 提取新 Schema 字段：top_bearish_event（最大利空） ──
+            raw_bearish = parsed.get("top_bearish_event")
+            top_bearish_event: dict[str, object] | None = None
+            if isinstance(raw_bearish, dict) and raw_bearish.get("event_id"):
+                top_bearish_event = {
+                    "event_id": str(raw_bearish.get("event_id", "")),
+                    "direction": str(raw_bearish.get("direction", "")),
+                    "importance_level": str(raw_bearish.get("importance_level", "")),
+                    "reason": str(raw_bearish.get("reason", "")),
+                }
+
+            logger.info(
+                "global_importance_done",
+                has_bullish=top_bullish_event is not None,
+                has_bearish=top_bearish_event is not None,
+            )
+
+            return {
+                "as_of": as_of,
+                "summary": summary,
+                "top_bullish_event": top_bullish_event,
+                "top_bearish_event": top_bearish_event,
+            }
+        except Exception as e:
+            if attempt < 1:
+                logger.warning("global_importance_parse_exception_retry", error=str(e))
+                continue
+            logger.error(
+                "global_importance_parse_failed",
+                error=str(e),
+                text_preview=text[:500],
+                exc_info=True,
             )
             return {
                 "top_bullish_event": None,
                 "top_bearish_event": None,
-                "error": "LLM 返回非 dict 结构",
+                "error": f"解析失败: {str(e)}",
             }
-
-        summary = str(parsed.get("summary", ""))
-
-        # ── 提取新 Schema 字段：top_bullish_event（最大利好） ──
-        raw_bullish = parsed.get("top_bullish_event")
-        top_bullish_event: dict[str, object] | None = None
-        if isinstance(raw_bullish, dict) and raw_bullish.get("event_id"):
-            top_bullish_event = {
-                "event_id": str(raw_bullish.get("event_id", "")),
-                "direction": str(raw_bullish.get("direction", "")),
-                "importance_level": str(raw_bullish.get("importance_level", "")),
-                "reason": str(raw_bullish.get("reason", "")),
-            }
-
-        # ── 提取新 Schema 字段：top_bearish_event（最大利空） ──
-        raw_bearish = parsed.get("top_bearish_event")
-        top_bearish_event: dict[str, object] | None = None
-        if isinstance(raw_bearish, dict) and raw_bearish.get("event_id"):
-            top_bearish_event = {
-                "event_id": str(raw_bearish.get("event_id", "")),
-                "direction": str(raw_bearish.get("direction", "")),
-                "importance_level": str(raw_bearish.get("importance_level", "")),
-                "reason": str(raw_bearish.get("reason", "")),
-            }
-
-        logger.info(
-            "global_importance_done",
-            has_bullish=top_bullish_event is not None,
-            has_bearish=top_bearish_event is not None,
-        )
-
-        return {
-            "as_of": as_of,
-            "summary": summary,
-            "top_bullish_event": top_bullish_event,
-            "top_bearish_event": top_bearish_event,
-        }
-    except Exception as e:
-        logger.error(
-            "global_importance_parse_failed",
-            error=str(e),
-            text_preview=text[:500],
-            exc_info=True,
-        )
-        return {
-            "top_bullish_event": None,
-            "top_bearish_event": None,
-            "error": f"解析失败: {str(e)}",
-        }
+    # end for attempt in range(2) — parse + retry loop
+    return {
+        "top_bullish_event": None,
+        "top_bearish_event": None,
+        "error": "GI 解析重试耗尽（unreachable fallback）",
+    }
 
 
 async def eval_global_importance_from_events(

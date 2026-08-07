@@ -279,3 +279,90 @@ async def test_batch_exception_does_not_block_others() -> None:
     assert len(results) == 2
     assert results[0].status.success is False
     assert results[1].status.success is True
+
+
+@pytest.mark.asyncio
+async def test_batch_per_event_timeout_isolates_slow_event() -> None:
+    """P0-2：单事件超时只影响该事件，其他事件正常完成且不丢失。"""
+    import asyncio
+
+    ok_result = {
+        "final_response": "A" * 150,
+        "analysis_reports": {
+            "event_understanding": {"summary": "ok"},
+            "event_generated": True,
+            "event_persisted": True,
+            "event_id": "evt_ok3",
+        },
+    }
+
+    async def side_effect(state):
+        content = state.get("messages", [{}])[0].get("content", "")
+        if "慢事件" in str(content):
+            await asyncio.sleep(10)  # 模拟超时挂起
+        return ok_result
+
+    events = [
+        {"title": "慢事件"},
+        {"title": "正常事件1"},
+        {"title": "正常事件2"},
+    ]
+    with patch(_EVENT_RUN, new_callable=AsyncMock, side_effect=side_effect):
+        results = await run_event_conduction_batch(events, per_event_timeout=0.5)
+
+    assert len(results) == 3
+    assert results[0].status.success is False
+    assert results[0].status.error_type == "TimeoutError"
+    assert results[0].status.error is not None
+    assert results[1].status.success is True
+    assert results[2].status.success is True
+
+
+@pytest.mark.asyncio
+async def test_single_persist_failure_sets_success_false() -> None:
+    """P1-2：分析成功（event_generated=True）但落库失败（event_persisted=False）
+    → success=False，该事件不得进入 GI（GI 输入=已落库事件）。"""
+    mock_result = {
+        "final_response": "A" * 150,
+        "analysis_reports": {
+            "event_understanding": {"summary": "ok"},
+            "event_podcast_brief": "A" * 150,
+            "event_generated": True,
+            "event_complete": True,
+            "can_persist": True,
+            "event_persisted": False,
+            "event_persist_error": {"stage": "persist", "reason": "node api failed"},
+            "event_id": "evt_pf1",
+        },
+    }
+    with patch(_EVENT_RUN, new_callable=AsyncMock, return_value=mock_result):
+        result = await run_single_event_conduction({"title": "测试事件"})
+
+    assert result.status.event_generated is True
+    assert result.status.persisted is False
+    assert result.status.success is False
+    assert result.status.error_type == "persist_failed"
+    assert result.status.error is not None
+
+
+@pytest.mark.asyncio
+async def test_single_can_persist_false_but_persisted_counts_success() -> None:
+    """P0-1：can_persist=False（如播报摘要不合规）但已成功落库 → 仍计成功进入 GI。"""
+    mock_result = {
+        "final_response": "太短",
+        "analysis_reports": {
+            "event_understanding": {"summary": "ok"},
+            "event_podcast_brief": "太短",
+            "event_generated": True,
+            "event_complete": True,
+            "can_persist": False,
+            "event_persisted": True,
+            "event_id": "evt_cp1",
+        },
+    }
+    with patch(_EVENT_RUN, new_callable=AsyncMock, return_value=mock_result):
+        result = await run_single_event_conduction({"title": "测试事件"})
+
+    assert result.status.event_generated is True
+    assert result.status.persisted is True
+    assert result.status.success is True

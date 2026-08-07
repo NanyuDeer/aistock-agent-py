@@ -76,6 +76,46 @@ class TestConfigDefaults:
         assert isinstance(s.log_level, str)
         assert s.log_level == "INFO"
 
+    # ---- 自选股洞察（watchlist insight）----
+    def test_insight_redis_url_default(self):
+        """insight 独立 Redis db=3，与 stock_trace db=2 隔离"""
+        s = Settings()
+        assert s.insight_redis_url == "redis://localhost:6379/3"
+
+    def test_insight_consumer_group_default(self):
+        s = Settings()
+        assert s.insight_consumer_group == "watchlist-insight-workers"
+
+    def test_insight_consumer_block_ms_default(self):
+        s = Settings()
+        assert s.insight_consumer_block_ms == 1000
+
+    def test_insight_pending_claim_idle_ms_default(self):
+        s = Settings()
+        assert s.insight_pending_claim_idle_ms == 3000
+
+    def test_insight_max_attempts_default(self):
+        s = Settings()
+        assert s.insight_max_attempts == 3
+
+    def test_insight_consumer_enabled_default(self):
+        s = Settings()
+        assert s.insight_consumer_enabled is True
+
+    def test_insight_structured_output_method_default(self):
+        """归因 LLM 结构化输出默认 json_mode"""
+        s = Settings()
+        assert s.insight_structured_output_method == "json_mode"
+
+    def test_insight_label_max_chars_default(self):
+        s = Settings()
+        assert s.insight_label_max_chars == 12
+
+    def test_insight_llm_model_default(self):
+        """归因任务轻，默认 quick_think"""
+        s = Settings()
+        assert s.insight_llm_model == "quick_think"
+
 
 # =============================================================================
 # 现象发现阈值默认值测试
