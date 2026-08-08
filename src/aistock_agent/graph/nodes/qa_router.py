@@ -225,6 +225,8 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["走势", "历史行情", "区间"], "stock_history"),
     # P5（D42）：排行词条置于 stock_history 之后（"排名/排行/榜单/最强" → 趋势股Top榜）
     (["排名", "排行", "榜单", "最强"], "trend_ranking"),
+    # douyin_video：抖音视频读取（下载→语音识别→文本）
+    (["抖音", "douyin", "博主视频", "视频里的"], "douyin_video"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
@@ -674,6 +676,10 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
         )
     if skill_name == "trend_ranking":
         return SkillCall(skill_name="trend_ranking", args={"limit": 20})
+    # douyin_video：词条命中即返回（链接提取由 Task 4 skill 注册时补全；args 留空防
+    # 误传消息全文当 link）
+    if skill_name == "douyin_video":
+        return SkillCall(skill_name="douyin_video", args={})
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -1576,6 +1582,7 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         intent_map = {
             "capital_flow": "capital_flow",
             "compare_stocks": "compare_stocks",
+            "douyin_video": "douyin_video",
             "evidence_resolver": "evidence_resolver",
             "hot_burst": "hot_burst",
             "industry_relation": "industry_relation",
