@@ -28,6 +28,20 @@
 
 ---
 
+## [main] 2026-08-07 — 大盘溯源报告：新增综合主因一句话结论 attribution_summary
+
+**开发者**: Aria
+
+### 新增
+- `schemas/market_trace.py`：`MarketTraceResult` 顶层新增 `attribution_summary: str | None = None`（Optional 兼容旧缓存）。仅 attribution_status 为 confirmed/hypothesis 时生成，供前端晚报页直接展示；与 brief 归因结论（briefing.py 主因链拼接，供双人播报）相互独立
+
+### 改进
+- `prompts/workers/review.py`：输出格式列表新增 attribution_summary 字段，并新增【attribution_summary 约束】段落——一句话（30-40 字）综合当日主因，只讲主因本身，不得混入现象描述/板块涨跌数据/事件罗列，不得以冒号或列表形式输出
+
+### 测试
+- `tests/unit/test_market_trace_schema.py`：新增 attribution_summary 可选默认 None 与 roundtrip 两个用例（与 test_review_validation 合计 14 passed）
+
+---
 ## [xusiyun] 2026-08-06 — 事件传导链路可靠性与 GI 稳定性优化
 
 **开发者**: Aria

@@ -752,6 +752,136 @@ async def trigger_broadcast_chain(
     }
 
 
+@router.post("/briefing/broadcast/only")
+async def trigger_broadcast_only(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """仅重新生成双人播报（不重跑 morning/wind_leader/hot_burst/trend_score 报告）。
+
+    broadcast_agent.run() 直接从数据库读取现有报告生成双人对话播报，
+    适合"报告已存在、仅播报失败/想重听"的场景。trigger_source=scheduler 使
+    播报文本写 DB + 生成双人音频（与 09:00 调度链路一致）。
+
+    请求体: {"report_date": "2026-08-07"}（可选，默认今天）
+    返回: {"success", "message", "report_date", "has_audio", "elapsed_seconds"}
+    """
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_broadcast_only_start", report_date=today)
+
+    start = time.time()
+    try:
+        state: dict[str, object] = {
+            "messages": [],
+            "session_id": f"manual_broadcast_only_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": "broadcast",
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "scheduler",  # 使播报写 DB + 生成音频
+            "report_date": today,
+        }
+        result = await broadcast_agent.run(state)
+        generated = bool(result.get("final_response"))
+        has_audio = bool(result.get("audio_path"))
+        elapsed = time.time() - start
+        logger.info(
+            "manual_trigger_broadcast_only_done",
+            generated=generated,
+            has_audio=has_audio,
+            elapsed_seconds=round(elapsed, 2),
+        )
+        return {
+            "success": generated,
+            "message": f"播报生成完成: 文本={'成功' if generated else '失败'} / 音频={'已生成' if has_audio else '未生成'}",
+            "report_date": today,
+            "has_audio": has_audio,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_broadcast_only_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"播报生成失败: {str(e)}",
+            "report_date": today,
+            "has_audio": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/briefing/wind-leader/trigger")
+async def trigger_wind_leader(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发风口龙头 Agent 报告生成（非流式，供管理员 curl 触发）
+
+    直接调用 wind_leader_agent.run()，生成 AI 分析报告并写入数据库。
+    trigger_source=scheduler 会先做数据预检：后端数据为空时自动调
+    ``POST /api/cn/wind-leaders/refresh`` 补数据，最多重试3次。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+
+    返回 JSON 含 success / message / report_date / has_response / elapsed_seconds。
+    管理员触发后可通过 ``pm2 logs aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import wind_leader as wind_leader_agent
+
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_wind_leader_start", report_date=today)
+
+    start = time.time()
+
+    state: dict[str, object] = {
+        "messages": [{"role": "user", "content": "生成风口龙头分析报告"}],
+        "session_id": f"manual_wind_leader_{today}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "scheduler",
+        "report_date": today,
+    }
+
+    try:
+        result = await wind_leader_agent.run(state)
+        final_response = result.get("final_response")
+        generated = bool(final_response)
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_wind_leader_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "风口龙头报告生成完成" if generated else "风口龙头报告生成失败（降级）",
+            "report_date": today,
+            "has_response": generated,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_wind_leader_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"风口龙头报告生成失败: {str(e)}",
+            "report_date": today,
+            "has_response": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.post("/briefing/trend-score/trigger")
 async def trigger_trend_score(
     body: dict[str, str] | None = None,

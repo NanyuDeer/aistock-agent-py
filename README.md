@@ -370,6 +370,8 @@ src/aistock_agent/
 | POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/trigger` | 手动触发完整播报链路：morning→wind_leader→hot_burst→trend_score→broadcast（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/broadcast/only` | 仅重新生成双人播报（不重跑报告，需 X-Internal-Token） |
+| POST | `/api/agent/briefing/wind-leader/trigger` | 手动触发风口龙头 Agent 报告生成（需 X-Internal-Token，数据为空时自动 refresh 补数据） |
 | POST | `/api/agent/briefing/trend-score/trigger` | 手动触发趋势股评分 Agent 报告生成（需 X-Internal-Token） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
