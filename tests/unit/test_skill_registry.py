@@ -106,9 +106,16 @@ def test_qa_router_prompt_renders_dynamic_list():
         "可用 Skills：\n- report_lookup："
     )
     assert SYSTEM_PROMPT.endswith("禁止省略 goal\n")
-    # 顺序：手写 9 → hot_burst → 适配 6；规则段紧随最后一个适配 skill
+    # 顺序：手写 9 → hot_burst → douyin_video（Task 5 注册）→ 适配 6；
+    # 规则段紧随最后一个适配 skill
     assert (
-        "- hot_burst：热门股/机构调研异动（深度分析诉求）。入参 {}\n- get_quote："
+        "- hot_burst：热门股/机构调研异动（深度分析诉求）。入参 {}\n- douyin_video："
+        in SYSTEM_PROMPT
+    )
+    # douyin_video（Task 2 契约）描述渲染
+    assert (
+        '- douyin_video：抖音视频读取：下载并语音识别为文本。'
+        '入参 {link: "抖音分享链接", save_video: false}\n'
         in SYSTEM_PROMPT
     )
     # 适配 skill 描述 = tool docstring 首行

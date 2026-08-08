@@ -38,7 +38,18 @@ def test_parse_share_url_extracts_video_info():
 
 
 def test_run_doctor_reports_missing_api_key():
-    result = dc.run_doctor(api_key="")
+    # 确定性：清空环境 + mock settings_obj（douyin_api_key 为空）→ key 缺失可复现，
+    # 不依赖宿主 .env.development 是否配置 DOUYIN_API_KEY（Fix Task 5）。
+    completed = type("Completed", (), {"returncode": 0})()
+    fake_settings = type("S", (), {"douyin_api_key": ""})()
+
+    with (
+        patch.dict(dc.os.environ, {}, clear=True),
+        patch.object(dc, "_load_ffmpeg", return_value=object()),
+        patch.object(dc.subprocess, "run", return_value=completed),
+    ):
+        result = dc.run_doctor(api_key="", settings_obj=fake_settings)
+
     assert result["ok"] is False
     names = [c["name"] for c in result["checks"]]
     assert names == ["API_KEY", "ffmpeg-python", "FFmpeg", "FFprobe"]
