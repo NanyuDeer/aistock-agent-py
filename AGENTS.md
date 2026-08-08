@@ -210,6 +210,13 @@ START → supervisor(quick_think, 意图路由)
 - **synth_answer cards 汇总**：`_synth_answer_node_core` 每个 return 都带 `cards`——no_goal/澄清/闸门短路/异常 → None；deep 分支 → `_build_deep_card(last_deep_report)`；LLM 成功与 `_synth_multi_goal` → `_build_cards(evidences)`（按 skill_name 经 `_CARD_HANDLERS` 分派 market_snapshot/stock_snapshot/capital_flow/compare_stocks，逐卡片 try-except 失败跳过该卡片，全部失败/无卡片化证据 → None 不破坏对话）；P10 包装 `synth_answer_node` 不动
 - **契约**：`schemas/chat_contract.py` `ChatCard`（card_type Literal[market_snapshot/stock_snapshot/capital_flow/deep/comparison] + title + data，extra="forbid"）；`QuestionState.cards`/`token_usage` 字段由 B-T1 定义（P11/P10 共享）
 
+### CHAT QA douyin_video（2026-08-08）：抖音视频读取 skill
+
+- **能力**：分享链接 → 解析无水印地址（`window._ROUTER_DATA`）→ 下载 mp4 → FFmpeg 抽音频（libmp3lame）→ 硅基流动 SenseVoice 转写 → Evidence（facts 含转写全文）+ 落盘 `data/douyin_transcripts/{video_id}/transcript.md`；skill 只做"视频 → 文本"，**不含分析**
+- **集成点**：`skills/registry.py` 注册（prompt_exposed 描述自动进 qa_router LLM 清单）+ `KEYWORD_FALLBACK` 词条 `["抖音", "douyin", "博主视频", "视频里的"]` + `chat_contract.py` 三处 Literal（InsightGoal/SubGoal/SkillCall）+ `_build_default_skill_call` douyin_video 分支（**返回空 args，防误传消息全文当 link**）+ `intent_map` 键
+- **工程要点**：① 阻塞 IO（下载/ffmpeg/转写）必须 `asyncio.to_thread` 包装防阻塞事件循环；② `requests` 必须显式 timeout（解析 30s/下载 120s/转写 300s），否则链接不可达时线程长期挂起耗尽线程池；③ FFmpeg/FFprobe 是**宿主二进制依赖**（ffmpeg-python 仅封装，底层仍走 cmd），生产需系统安装，WinError 5 权限隔离时提示路径配置；④ 依赖钉版 `requests==2.32.3` + `ffmpeg-python==0.2.0`；config 新增 `douyin_api_key`/`ffmpeg_binary`/`ffprobe_binary`
+- **数据源边界**：抖音/硅基流动属外部第三方内容服务，Python 直连**不违反**"禁止 Python 重复实现 A 股数据获取逻辑"硬约束（类比 yfinance/Tavily 直连先例）；A 股数据仍一律走 Node `/internal/*`
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
@@ -267,6 +274,12 @@ src/aistock_agent/
 │   ├── general/system.py
 │   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
+├── skills/              # CHAT QA Skill 注册中心 + 手写 skill
+│   ├── registry.py      # 统一注册中心（手写优先；douyin_video 等）
+│   ├── base.py          # @skill 装饰器（异常→degraded Evidence）
+│   ├── douyin_client.py # 抖音视频下载/转写客户端（requests + ffmpeg + SenseVoice）
+│   ├── douyin_video.py  # 抖音视频读取 skill（链接→转写文本）
+│   └── ...              # stock_snapshot/stock_news/market_snapshot 等既有 skill
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
