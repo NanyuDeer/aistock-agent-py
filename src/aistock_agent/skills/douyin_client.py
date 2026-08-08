@@ -55,7 +55,9 @@ def _describe_runtime_error(error: Exception) -> str:
     return message
 
 
-def _check_binary(name: str, env_var: str, settings_obj: Any) -> dict:
+def _check_binary(
+    name: str, env_var: str, settings_obj: object | None = None
+) -> dict[str, Any]:
     configured = (
         getattr(settings_obj, env_var.lower(), "")
         or os.getenv(env_var)
@@ -77,7 +79,9 @@ def _check_binary(name: str, env_var: str, settings_obj: Any) -> dict:
     return {"name": name, "ok": True, "detail": str(configured)}
 
 
-def run_doctor(api_key: str = "", settings_obj: Any = None) -> dict:
+def run_doctor(
+    api_key: str = "", settings_obj: object | None = None
+) -> dict[str, Any]:
     """检查转写所需依赖：API_KEY / ffmpeg-python / FFmpeg / FFprobe。"""
     if settings_obj is None:
         from aistock_agent.config import settings as _settings
@@ -88,7 +92,7 @@ def run_doctor(api_key: str = "", settings_obj: Any = None) -> dict:
         or os.getenv("DOUYIN_API_KEY")
         or getattr(settings_obj, "douyin_api_key", "")
     )
-    checks: list[dict] = [
+    checks: list[dict[str, Any]] = [
         {
             "name": "API_KEY",
             "ok": bool(resolved_key),
@@ -229,9 +233,10 @@ class DouyinClient:
         audio_path = self.extract_audio(video_path)
         try:
             text_content = self.transcribe_audio(audio_path)
-        finally:
-            # 清理临时下载文件（mp4/mp3），保留 transcript 产物
+        except Exception:
+            # 转写失败：清理临时下载文件（mp4/mp3）后重新抛出
             self._cleanup(video_path, audio_path)
+            raise
 
         video_folder = Path(output_dir) / video_info["video_id"]
         video_folder.mkdir(parents=True, exist_ok=True)
@@ -248,6 +253,9 @@ class DouyinClient:
 
         if save_video:
             shutil.copy2(video_path, video_folder / f"{video_info['video_id']}.mp4")
+
+        # 清理临时下载文件（mp4/mp3），保留 transcript 产物
+        self._cleanup(video_path, audio_path)
 
         return {
             "video_info": video_info,
