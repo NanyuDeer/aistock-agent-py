@@ -255,10 +255,20 @@ _GREETING_KEYWORDS = (
     "有什么功能",
 )
 
-# 科普问句前缀（6.15 缺口：修复科普问题兜底 report_lookup 答非所问）
-_EDUCATION_KEYWORDS = ("什么是", "啥是", "怎么算", "如何理解", "解释一下", "科普")
+# 科普问句词表（6.15 缺口：修复科普问题兜底 report_lookup 答非所问）
 # D32（P7+P8 线 1 Task 4）：产品内部概念不纳入科普（防误伤 compose 闸门——
 # "什么是今日主线" 是主线/风险 compose 意图，不能被科普词表劫持）
+# 2026-08-07（用户反馈"市盈率是什么"无回答）：词表原仅"什么是X"前缀句式，
+# 后置问法（"市盈率是什么"）全部漏过 → 被误判个股名称 → 错误澄清。补两层词表：
+#   prefix = 科普强信号词（科普专属，不与业务意图词冲突，直接命中）
+#   extra  = 通用问法词（"含义/指什么/干嘛"等），需 _is_education_question 防误伤
+_EDUCATION_PREFIX_KEYWORDS = ("什么是", "啥是", "怎么算", "如何理解", "解释一下", "科普")
+_EDUCATION_EXTRA_KEYWORDS = (
+    "怎么理解", "是什么意思", "啥意思", "是啥意思", "指什么", "含义", "干嘛", "是什么东西",
+)
+# 以"…是什么/是啥/是啥子"结尾的后置问法（"市盈率是什么？"）；
+# 防误伤："…是什么情况/是怎么回事/是什么原因"等业务句不以"是什么"结尾
+_EDUCATION_SUFFIX_RE = re.compile(r"(是什么|是啥|是啥子)[？?]?$")
 _PRODUCT_CONCEPT_KEYWORDS = ("主线", "风险提示")
 
 # 名称候选提取要去除的口语/疑问词（按长度降序替换，避免子串误删）
@@ -466,6 +476,26 @@ def _match_other_skill_intent(message: str) -> bool:
             continue
         if _match_keywords(message, tuple(keywords)):
             return True
+    return False
+
+
+def _is_education_question(message: str) -> bool:
+    """科普问句判定：前缀强信号词 OR 扩展词 OR 后缀句式（"…是什么"结尾）。
+
+    防误伤（2026-08-07 用户反馈"市盈率是什么"无回答后补全）：
+    - 产品内部概念（主线/风险提示）不纳入（D32，防误伤 compose）
+    - extra 词 / 后缀句式命中时，若消息还命中其他业务意图词（大盘/市场/资金/
+      新闻/行情…，见 KEYWORD_FALLBACK），放行交回后续路由——否则"今天大盘
+      是什么"/"大盘走势的含义"会被科普劫持，答非所问
+    """
+    if _match_keywords(message, _PRODUCT_CONCEPT_KEYWORDS):
+        return False
+    if _match_keywords(message, _EDUCATION_PREFIX_KEYWORDS):
+        return True
+    if _match_keywords(message, _EDUCATION_EXTRA_KEYWORDS):
+        return not _match_other_skill_intent(message)
+    if _EDUCATION_SUFFIX_RE.search(message):
+        return not _match_other_skill_intent(message)
     return False
 
 
@@ -1117,12 +1147,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, CAPABILITY_REPLY, "greeting")
 
-    # ── 闸门 0.5b：科普问句（D32 升级，P7+P8）→ 置 science 信号走 general 动态回答 ──
+    # ── 闸门 0.5b：科普问句（D32 升级，P7+P8；2026-08-07 补后缀句式）──
+    #   → 置 science 信号走 general 动态回答
     # 用户拍板：仅股票投资知识词表；产品内部概念不纳入（防误伤 compose）。
     # 零 LLM（识别确定性），动态回答由 general_fallback 节点调 run_science 产生。
-    if _match_keywords(message, _EDUCATION_KEYWORDS) and not _match_keywords(
-        message, _PRODUCT_CONCEPT_KEYWORDS
-    ):
+    if _is_education_question(message):
         logger.info("qa_router.guardrail.education")
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {

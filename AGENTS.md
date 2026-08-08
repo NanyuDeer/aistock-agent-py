@@ -184,6 +184,7 @@ START → supervisor(quick_think, 意图路由)
 
 - **general 图外切换模式（复用 escalate 先例）**：`qa_router` conditional 三出口（escalate / skill_executor / general_fallback）→ `general_fallback` 节点 → synth_answer；`general_source` 单轮 transient 信号（science/gap，ws.py/routes.py 按轮归零）
 - **D32 科普升级**：education gate 0.5b 命中科普词不再固定话术，置 `general_source="science"` → `agents/general/chat.py` run_science 单次 quick_think 动态回答；产品内部概念（市场主线/风险提示）不纳入（防误伤 compose）
+- **科普句式补全（2026-08-07，问题 16）**：词表原仅"什么是X"前缀句式，"市盈率是什么"等后置问法漏过科普闸门 → 被误判个股名称 → 错误澄清。重构为 `_is_education_question` 三层判定：prefix 强信号词 + extra 通用问法词（怎么理解/是什么意思/啥意思/指什么/含义/干嘛）+ 后缀正则 `(是什么|是啥|是啥子)[？?]?$`；extra/后缀命中且 `_match_other_skill_intent`（命中大盘/市场/资金/新闻/行情等业务意图词）→ 放行不劫持（防"今天大盘是什么"被科普劫持）
 - **D37 能力缺口**：LLM 失败路径 keyword_miss 且非个股缺码澄清 → `general_source="gap"` → run_gap（ReAct + tavily_finance_search）+ `skill-requests.md` 标记（失败仅 warning）；个股缺码澄清路径不变
 - **P9 纠错否定**：强否定词（不是/我说的是/错了/改一下/不对/其实是）+ 上一轮有历史才触发；**无历史守卫必须前置**（无历史不触发）；新标的提取：显式代码 > 指数名 > 名称（剥否定词+是+停用词后取句末中文段）resolve
 - **降级**：双模式顶层 try-catch，返回规范降级文本（含"暂不可用"）不抛异常；WS/SSE reasoning label 与事件协议不变
