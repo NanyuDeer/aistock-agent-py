@@ -16,6 +16,7 @@ import structlog
 from aistock_agent.schemas.chat_contract import Evidence
 from aistock_agent.skills.capital_flow import capital_flow
 from aistock_agent.skills.compare_stocks import compare_stocks
+from aistock_agent.skills.douyin_video import douyin_video
 from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.index_snapshot import index_snapshot
 from aistock_agent.skills.industry_relation import industry_relation
@@ -158,4 +159,13 @@ register_skill(
     "hot_burst",
     _hot_burst_unimplemented,
     description="热门股/机构调研异动（深度分析诉求）。入参 {}",
+)
+# T1 契约：douyin_video 抖音视频读取（Task 2 加入契约，本 Task 注册实现）
+register_skill(
+    "douyin_video",
+    douyin_video,
+    description=(
+        "抖音视频读取：下载并语音识别为文本。"
+        '入参 {link: "抖音分享链接", save_video: false}'
+    ),
 )
