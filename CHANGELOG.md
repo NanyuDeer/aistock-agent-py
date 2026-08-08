@@ -2,6 +2,32 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-08 — douyin_video 抖音视频读取 skill 接入
+
+**开发者**: changer-collab
+
+### 新增
+- `skills/douyin_client.py`：抖音视频客户端（分享链接解析 → 无水印地址 → 下载 mp4 → FFmpeg 抽音频 → 硅基流动 SenseVoice 转写 → 落盘 transcript.md）；出站 HTTP 显式 timeout（解析 30s/下载 120s/转写 300s）
+- `skills/douyin_video.py`：`@skill` 协议封装（入参 `{link, save_video?}`，返回 Evidence facts 含转写全文 + raw.transcript_path + doctor 自检），阻塞 IO 用 `asyncio.to_thread` 包装
+- `skills/registry.py`：注册 `douyin_video`（prompt_exposed 描述进 qa_router 动态清单）
+- 配置：`DOUYIN_API_KEY` / `FFMPEG_BINARY` / `FFPROBE_BINARY` 三个环境变量（config.py + .env.example）
+- 依赖：`requests==2.32.3` + `ffmpeg-python==0.2.0`
+
+### 改进
+- `schemas/chat_contract.py`：`InsightGoal.intent` / `SubGoal.intent` / `SkillCall.skill_name` 三处 Literal 增加 `douyin_video`
+- `graph/nodes/qa_router.py`：KEYWORD_FALLBACK 增加抖音词条（`["抖音", "douyin", "博主视频", "视频里的"]`）、`_build_default_skill_call` 增加 douyin_video 分支（空 args 防误传消息全文）、`intent_map` 补键、系统提示词 intent 枚举同步
+
+### 测试
+- `tests/unit/test_douyin_client.py`（新增）：链接解析 / doctor 依赖自检（mock 环境）/ save_video 复制顺序回归
+- `tests/unit/test_douyin_video.py`（新增）：Evidence 组装 / 缺 link degraded 兜底
+- `tests/unit/test_chat_contract.py` / `test_qa_router.py` / `test_skill_registry.py`：契约 Literal / 路由词条 / 动态清单断言同步
+
+### 文档
+- `README.md`：技术栈 + 环境变量表补充 douyin/ffmpeg 三项
+- `AGENTS.md`：新增「CHAT QA douyin_video」章节 + 目录树补 skills/
+
+---
+
 ## [xusiyun] 2026-08-06 — 事件传导链路可靠性与 GI 稳定性优化
 
 **开发者**: Aria
