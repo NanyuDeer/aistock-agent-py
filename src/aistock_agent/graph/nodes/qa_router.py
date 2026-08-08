@@ -74,7 +74,7 @@ JSON 输出契约（唯一、完整，字段名一字不差，直接照抄）：
 字段约束：
 - 顶层只能有 goal、plan、skill_calls、complexity 四个字段，不得省略 goal
 - goal.intent 只能是 capital_flow/evidence_resolver/hot_burst/industry_relation/market_snapshot/
-  report_lookup/sector_snapshot/stock_news/stock_snapshot/trace_lookup 之一
+  report_lookup/sector_snapshot/stock_news/stock_snapshot/trace_lookup/douyin_video 之一
 - goal.question 必填；answer_mode 填 null（由下游推断）
 - 每个 skill_calls 项只能有 skill_name、args、depends_on 三个字段
 - 顶层 complexity 只能是 light/deep 之一：单点取数（行情/新闻/资金/报告/溯源/证据/
