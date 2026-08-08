@@ -26,7 +26,7 @@ class _FakeResp:
 
 
 def test_parse_share_url_extracts_video_info():
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, **kwargs):
         return _FakeResp(text=SAMPLE_HTML)
 
     with patch.object(dc.requests, "get", side_effect=fake_get):

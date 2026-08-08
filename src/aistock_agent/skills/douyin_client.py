@@ -31,6 +31,13 @@ HEADERS = {
     )
 }
 
+#: 出站请求超时（秒）：解析 / 下载 / 转写。
+#: requests 默认无超时，链接不可达时 to_thread 线程会长期挂起、耗尽线程池，
+#: 必须显式传 timeout 防挂起。
+REQUEST_TIMEOUT_PARSE = 30
+REQUEST_TIMEOUT_DOWNLOAD = 120
+REQUEST_TIMEOUT_TRANSCRIBE = 300
+
 
 def _load_ffmpeg():
     try:
@@ -145,11 +152,15 @@ class DouyinClient:
         if not urls:
             raise ValueError("未找到有效的分享链接")
 
-        share_response = requests.get(urls[0], headers=HEADERS)
+        share_response = requests.get(
+            urls[0], headers=HEADERS, timeout=REQUEST_TIMEOUT_PARSE
+        )
         video_id = share_response.url.split("?")[0].strip("/").split("/")[-1]
         share_url = f"https://www.iesdouyin.com/share/video/{video_id}"
 
-        response = requests.get(share_url, headers=HEADERS)
+        response = requests.get(
+            share_url, headers=HEADERS, timeout=REQUEST_TIMEOUT_PARSE
+        )
         response.raise_for_status()
 
         pattern = re.compile(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
@@ -186,7 +197,13 @@ class DouyinClient:
             output_dir.mkdir(parents=True, exist_ok=True)
 
         filepath = output_dir / f"{video_info['video_id']}.mp4"
-        response = requests.get(video_info["url"], headers=HEADERS, stream=True)
+        response = requests.get(
+            video_info["url"],
+            headers=HEADERS,
+            stream=True,
+            # stream 请求 timeout 覆盖连接阶段，已足够防挂起
+            timeout=REQUEST_TIMEOUT_DOWNLOAD,
+        )
         response.raise_for_status()
 
         with open(filepath, "wb") as f:
@@ -219,7 +236,12 @@ class DouyinClient:
                 "model": (None, self.model),
             }
             headers = {"Authorization": f"Bearer {self.api_key}"}
-            response = requests.post(self.api_base_url, files=files, headers=headers)
+            response = requests.post(
+                self.api_base_url,
+                files=files,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT_TRANSCRIBE,
+            )
             response.raise_for_status()
             result = response.json()
         return result.get("text", response.text)
