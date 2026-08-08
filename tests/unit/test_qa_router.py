@@ -863,6 +863,18 @@ def test_route_by_keyword_fallback_hot_burst() -> None:
     assert call.args == {}
 
 
+def test_route_by_keyword_fallback_douyin_video() -> None:
+    """抖音视频问句 → 关键词兜底 skill_name=douyin_video。
+
+    Fix C1（Task 2 C1 补漏）：词条插入于 stock_snapshot 之前。断言消息避开
+    "说了什么"（report_lookup 首条词表会先行命中），改用纯"抖音"词命中。
+    """
+    call = route_by_keyword_fallback("这个抖音视频里的博主说了啥")
+    assert call is not None
+    assert call.skill_name == "douyin_video"
+    assert call.args == {}
+
+
 @pytest.mark.asyncio
 async def test_hot_burst_fallback_deep() -> None:
     """'机构调研热门股' → 兜底 hot_burst + complexity=deep（供 escalate）。"""

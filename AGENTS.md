@@ -184,6 +184,7 @@ START → supervisor(quick_think, 意图路由)
 
 - **general 图外切换模式（复用 escalate 先例）**：`qa_router` conditional 三出口（escalate / skill_executor / general_fallback）→ `general_fallback` 节点 → synth_answer；`general_source` 单轮 transient 信号（science/gap，ws.py/routes.py 按轮归零）
 - **D32 科普升级**：education gate 0.5b 命中科普词不再固定话术，置 `general_source="science"` → `agents/general/chat.py` run_science 单次 quick_think 动态回答；产品内部概念（市场主线/风险提示）不纳入（防误伤 compose）
+- **科普句式补全（2026-08-07，问题 16）**：词表原仅"什么是X"前缀句式，"市盈率是什么"等后置问法漏过科普闸门 → 被误判个股名称 → 错误澄清。重构为 `_is_education_question` 三层判定：prefix 强信号词 + extra 通用问法词（怎么理解/是什么意思/啥意思/指什么/含义/干嘛）+ 后缀正则 `(是什么|是啥|是啥子)[？?]?$`；extra/后缀命中且 `_match_other_skill_intent`（命中大盘/市场/资金/新闻/行情等业务意图词）→ 放行不劫持（防"今天大盘是什么"被科普劫持）
 - **D37 能力缺口**：LLM 失败路径 keyword_miss 且非个股缺码澄清 → `general_source="gap"` → run_gap（ReAct + tavily_finance_search）+ `skill-requests.md` 标记（失败仅 warning）；个股缺码澄清路径不变
 - **P9 纠错否定**：强否定词（不是/我说的是/错了/改一下/不对/其实是）+ 上一轮有历史才触发；**无历史守卫必须前置**（无历史不触发）；新标的提取：显式代码 > 指数名 > 名称（剥否定词+是+停用词后取句末中文段）resolve
 - **降级**：双模式顶层 try-catch，返回规范降级文本（含"暂不可用"）不抛异常；WS/SSE reasoning label 与事件协议不变
@@ -208,6 +209,13 @@ START → supervisor(quick_think, 意图路由)
 - **skills raw 结构化字段**：stock_snapshot `raw["quote"]`（`_QUOTE_FIELD_MAP` 中文键→英文键）、capital_flow `raw["flow"]`（`_FLOW_FIELD_MAP`，`flow_5d` 恒 []）、market_snapshot `raw["a_share_card"]`（`_build_a_share_card`，仅 scope 含 a_share 才写入）、compare_stocks `raw["parsed"]`（逐标的 `available` True/False 条目）；**get_quote/get_capital_flow 工具 TEXT 输出冻结不变**，结构化数据只在 raw（额外一次 /internal/quote、/internal/flow 取 dict）
 - **synth_answer cards 汇总**：`_synth_answer_node_core` 每个 return 都带 `cards`——no_goal/澄清/闸门短路/异常 → None；deep 分支 → `_build_deep_card(last_deep_report)`；LLM 成功与 `_synth_multi_goal` → `_build_cards(evidences)`（按 skill_name 经 `_CARD_HANDLERS` 分派 market_snapshot/stock_snapshot/capital_flow/compare_stocks，逐卡片 try-except 失败跳过该卡片，全部失败/无卡片化证据 → None 不破坏对话）；P10 包装 `synth_answer_node` 不动
 - **契约**：`schemas/chat_contract.py` `ChatCard`（card_type Literal[market_snapshot/stock_snapshot/capital_flow/deep/comparison] + title + data，extra="forbid"）；`QuestionState.cards`/`token_usage` 字段由 B-T1 定义（P11/P10 共享）
+
+### CHAT QA douyin_video（2026-08-08）：抖音视频读取 skill
+
+- **能力**：分享链接 → 解析无水印地址（`window._ROUTER_DATA`）→ 下载 mp4 → FFmpeg 抽音频（libmp3lame）→ 硅基流动 SenseVoice 转写 → Evidence（facts 含转写全文）+ 落盘 `data/douyin_transcripts/{video_id}/transcript.md`；skill 只做"视频 → 文本"，**不含分析**
+- **集成点**：`skills/registry.py` 注册（prompt_exposed 描述自动进 qa_router LLM 清单）+ `KEYWORD_FALLBACK` 词条 `["抖音", "douyin", "博主视频", "视频里的"]` + `chat_contract.py` 三处 Literal（InsightGoal/SubGoal/SkillCall）+ `_build_default_skill_call` douyin_video 分支（**返回空 args，防误传消息全文当 link**）+ `intent_map` 键
+- **工程要点**：① 阻塞 IO（下载/ffmpeg/转写）必须 `asyncio.to_thread` 包装防阻塞事件循环；② `requests` 必须显式 timeout（解析 30s/下载 120s/转写 300s），否则链接不可达时线程长期挂起耗尽线程池；③ FFmpeg/FFprobe 是**宿主二进制依赖**（ffmpeg-python 仅封装，底层仍走 cmd），生产需系统安装，WinError 5 权限隔离时提示路径配置；④ 依赖钉版 `requests==2.32.3` + `ffmpeg-python==0.2.0`；config 新增 `douyin_api_key`/`ffmpeg_binary`/`ffprobe_binary`
+- **数据源边界**：抖音/硅基流动属外部第三方内容服务，Python 直连**不违反**"禁止 Python 重复实现 A 股数据获取逻辑"硬约束（类比 yfinance/Tavily 直连先例）；A 股数据仍一律走 Node `/internal/*`
 
 ## 目录结构
 
@@ -266,6 +274,12 @@ src/aistock_agent/
 │   ├── general/system.py
 │   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
+├── skills/              # CHAT QA Skill 注册中心 + 手写 skill
+│   ├── registry.py      # 统一注册中心（手写优先；douyin_video 等）
+│   ├── base.py          # @skill 装饰器（异常→degraded Evidence）
+│   ├── douyin_client.py # 抖音视频下载/转写客户端（requests + ffmpeg + SenseVoice）
+│   ├── douyin_video.py  # 抖音视频读取 skill（链接→转写文本）
+│   └── ...              # stock_snapshot/stock_news/market_snapshot 等既有 skill
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）

@@ -50,6 +50,7 @@ mypy src/
 - 缓存: Redis（会话持久化 + 晨报缓存）
 - 境外数据: yfinance（美股/亚太/大宗/汇率）
 - 全网搜索: Tavily
+- 抖音视频转写: requests + ffmpeg-python（硅基流动 SenseVoice；FFmpeg/FFprobe 为宿主二进制依赖）
 - 配置: pydantic-settings
 
 ## 架构
@@ -491,6 +492,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
 | `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
 | `MARKET_EVENT_MAX_PUSHES` | 每次晨报最多推送条数 | `2` |
+| `DOUYIN_API_KEY` | 抖音视频转写（硅基流动 SenseVoice）API 密钥 | - |
+| `FFMPEG_BINARY` | 显式指定 ffmpeg 路径（默认走 PATH 查找） | - |
+| `FFPROBE_BINARY` | 显式指定 ffprobe 路径（默认走 PATH 查找） | - |
 
 ## Vibecoding 工作流
 

@@ -56,3 +56,66 @@ async def test_non_education_not_hijacked() -> None:
         out = await qa_router_node(_state("什么是今日主线"))
     assert out.get("general_source") is None
     assert out["plan"] == "compose"
+
+
+@pytest.mark.asyncio
+async def test_education_suffix_variants_trigger_science() -> None:
+    """后缀/其他科普句式（"X是什么/是啥/什么意思/怎么理解/含义"等）应触发 science。
+    此前词表仅覆盖"什么是X"前缀句式，这些问法全部漏过科普闸门，
+    被当作个股名称解析失败 → 错误澄清"请提供6位股票代码"（2026-08-07 用户反馈）。
+    """
+    for msg in (
+        "市盈率是什么",
+        "市盈率是啥",
+        "市盈率是什么意思",
+        "市盈率怎么理解",
+        "市盈率指什么",
+        "市盈率的含义",
+        "市盈率是干嘛的",
+        "PE是什么",
+        "换手率是什么？",
+    ):
+        with patch("aistock_agent.graph.nodes.qa_router.get_quick_think") as llm_mock:
+            out = await qa_router_node(_state(msg))
+        assert out.get("general_source") == "science", f"{msg} 未触发科普"
+        llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_education_suffix_not_hijack_market_questions() -> None:
+    """防误伤：以"…是什么"结尾但含行情意图词（大盘/市场）的问句不得被科普劫持。"""
+    for msg in ("今天大盘是什么", "今天大盘是什么情况"):
+        with (
+            patch(
+                "aistock_agent.graph.nodes.qa_router.get_quick_think",
+                side_effect=RuntimeError("llm down"),
+            ),
+            # 闸门 2 会对候选名"大盘"触发真实 resolve_symbol，必须隔离网络
+            patch(
+                "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            out = await qa_router_node(_state(msg))
+        assert out.get("general_source") is None, f"{msg} 不应走科普"
+        calls = out.get("skill_calls") or []
+        assert calls and calls[0].skill_name == "market_snapshot", f"{msg} 应走大盘行情"
+
+
+@pytest.mark.asyncio
+async def test_education_suffix_not_hijack_stock_questions() -> None:
+    """防误伤：真实个股问句（"宁德时代是什么情况"）不得被科普后缀句式劫持。"""
+    with (
+        patch(
+            "aistock_agent.graph.nodes.qa_router.get_quick_think",
+            side_effect=RuntimeError("llm down"),
+        ),
+        # 真实环境 resolve 成功走个股；单测隔离网络后自然落澄清路径
+        patch(
+            "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        out = await qa_router_node(_state("宁德时代是什么情况"))
+    assert out.get("general_source") is None  # 未被科普劫持
+    assert out.get("clarification") == "请提供 6 位股票代码后重试。"  # 个股语义路径

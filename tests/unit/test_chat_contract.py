@@ -184,3 +184,8 @@ def test_subgoal_intent_accepts_new_skills(skill):
 def test_skill_call_accepts_new_skills(skill):
     c = SkillCall(skill_name=skill, args={})  # type: ignore[arg-type]
     assert c.skill_name == skill
+
+
+def test_skill_call_accepts_douyin_video():
+    call = SkillCall(skill_name="douyin_video", args={"link": "https://v.douyin.com/xxx/"})
+    assert call.skill_name == "douyin_video"
