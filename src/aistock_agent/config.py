@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
+    # 抖音视频转写（硅基流动 SenseVoice；E:/changer_learning 已验证）
+    douyin_api_key: str = ""
+    # 可选：显式指定 ffmpeg/ffprobe 路径（默认走 PATH 查找）
+    ffmpeg_binary: str = ""
+    ffprobe_binary: str = ""
+
     # 服务（Python 8080 / Node.js 3000）
     host: str = "0.0.0.0"
     port: int = 8080
