@@ -359,6 +359,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
 | `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
+| `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates） |
+| `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描） |
+| `PUT /internal/predictions/:id/verification` | prediction_records | 回写单档位验证结果（horizon/result/actual/reason → 全档位覆盖自动置 verified） |
 
 ## 常用命令
 
