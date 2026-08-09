@@ -80,6 +80,16 @@ def start_scheduler() -> None:
         name="morning broadcast chain",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_prediction_validate_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_prediction_validate_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="prediction_validate",
+        name="prediction due validation",
+        replace_existing=True,
+    )
 
     if settings.quick_snapshot_enabled:
         # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
@@ -699,4 +709,18 @@ async def _run_broadcast_task() -> None:
         )
     except Exception as e:
         logger.error("scheduler_broadcast_final_failed", error=str(e), exc_info=True)
+
+
+async def _run_prediction_validate_task() -> None:
+    """预测到期验证任务（交易日 16:00，收盘后）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="prediction_validate")
+        return
+    from aistock_agent.services.prediction_validator import run_once  # noqa: PLC0415
+
+    try:
+        updated = await run_once()
+        logger.info("scheduler_prediction_validate_done", updated=updated)
+    except Exception as e:
+        logger.error("scheduler_prediction_validate_failed", error=str(e), exc_info=True)
 
