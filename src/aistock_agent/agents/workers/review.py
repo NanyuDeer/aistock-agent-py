@@ -36,6 +36,11 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
+from aistock_agent.services.prediction_service import (
+    PredictionRunResult,
+    render_prediction_markdown,
+    run_predict,
+)
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import shanghai_today
 
@@ -858,6 +863,11 @@ def _build_review_report(artifact: ReviewArtifact) -> dict[str, object]:
         "market_trace": {
             "snapshot": artifact.snapshot.model_dump(mode="json"),
             "trace": artifact.trace.model_dump(mode="json"),
+            "prediction": (
+                artifact.prediction.model_dump(mode="json")
+                if artifact.prediction is not None
+                else None
+            ),
         },
     }
     return content
@@ -885,6 +895,36 @@ async def _persist_review_report(
     except Exception as e:
         logger.warning(
             "review_persist_failed",
+            error=str(e),
+            exc_info=True,
+        )
+
+
+async def _persist_prediction_record(
+    state: AgentState,
+    run_result: PredictionRunResult | None,
+) -> None:
+    """预测记录落库；仅 scheduler/manual 触发时写，与 review 报告持久化对齐。
+
+    任何异常只打日志、不向上抛，保证溯源主流程不受影响。
+    """
+    if run_result is None:
+        return
+    if state.get("trigger_source") not in {"scheduler", "manual"}:
+        return
+    report_date = state.get("report_date") or shanghai_today().isoformat()
+    payload: dict[str, object] = {
+        "source_type": "market_trace",
+        "source_id": f"review:{report_date}",
+        "schema_version": run_result.prediction.schema_version,
+        "prediction": run_result.prediction.model_dump(mode="json"),
+        "due_dates": run_result.due_dates,
+    }
+    try:
+        await node_api.save_prediction(payload)
+    except Exception as e:
+        logger.warning(
+            "review_prediction_persist_failed",
             error=str(e),
             exc_info=True,
         )
@@ -957,7 +997,12 @@ async def run(state: AgentState) -> dict[str, object]:
             # 展示层字段，再传给 _persist_review_report 并返回。
             # 该路径禁止请求 Node 收盘数据、yfinance、财联社、Tavily 或 LLM；
             # 也不重写 Redis 缓存（命中即用，重写无收益且会增加风险）。
+            prediction = artifact.prediction
             rendered_markdown = render_market_trace_markdown(artifact.trace, artifact.snapshot)
+            if prediction is not None:
+                rendered_markdown = (
+                    rendered_markdown + "\n\n" + render_prediction_markdown(prediction)
+                )
             rebuilt_artifact = ReviewArtifact(
                 schema_version=artifact.schema_version,
                 snapshot=artifact.snapshot,
@@ -965,6 +1010,7 @@ async def run(state: AgentState) -> dict[str, object]:
                 markdown=rendered_markdown,
                 trace_summary=_extract_trace_summary(rendered_markdown),
                 sectors=_extract_review_sectors(rendered_markdown),
+                prediction=prediction,
             )
             await _persist_review_report(state, rebuilt_artifact)
             return {"final_response": rendered_markdown}
@@ -1048,8 +1094,17 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
+    # 4.5 预测能力：主因链确认后推演影响持续性（失败不阻断主流程）
+    run_result = None
+    try:
+        run_result = await run_predict(trace, snapshot)
+    except Exception:
+        logger.warning("review_predict_failed", exc_info=True)
+
     # 5. 渲染 Markdown + 构造 ReviewArtifact
     markdown = render_market_trace_markdown(trace, snapshot)
+    if run_result is not None:
+        markdown = markdown + "\n\n" + render_prediction_markdown(run_result.prediction)
     artifact = ReviewArtifact(
         schema_version="1.1",
         snapshot=snapshot,
@@ -1057,6 +1112,7 @@ async def run(state: AgentState) -> dict[str, object]:
         markdown=markdown,
         trace_summary=_extract_trace_summary(markdown),
         sectors=_extract_review_sectors(markdown),
+        prediction=run_result.prediction if run_result is not None else None,
     )
 
     # 6. 归档复盘报告（仅在 facts.json 存在时创建 Markdown）
@@ -1081,6 +1137,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
     # 8. 持久化到 DB（仅 scheduler 触发）
     await _persist_review_report(state, artifact)
+    await _persist_prediction_record(state, run_result)
 
     return {"final_response": markdown}
 
@@ -1255,8 +1312,17 @@ async def run_review(
             markdown=DEGRADED_RESPONSE,
         )
 
+    # 4.5 预测能力：主因链确认后推演影响持续性（失败不阻断主流程）
+    run_result = None
+    try:
+        run_result = await run_predict(trace, snapshot)
+    except Exception:
+        logger.warning("run_review_predict_failed", exc_info=True)
+
     # 渲染 + 构造 artifact
     markdown = render_market_trace_markdown(trace, snapshot)
+    if run_result is not None:
+        markdown = markdown + "\n\n" + render_prediction_markdown(run_result.prediction)
     artifact = ReviewArtifact(
         schema_version="1.1",
         snapshot=snapshot,
@@ -1264,6 +1330,7 @@ async def run_review(
         markdown=markdown,
         trace_summary=_extract_trace_summary(markdown),
         sectors=_extract_review_sectors(markdown),
+        prediction=run_result.prediction if run_result is not None else None,
     )
 
     # 归档 + 缓存
@@ -1311,6 +1378,15 @@ async def run_review(
             exc_info=True,
             trace_id=trace_id,
         )
+
+    # 预测记录与 review 报告同时落库（事件驱动入口总是写，不依赖 trigger_source）
+    try:
+        await _persist_prediction_record(
+            {"trigger_source": "scheduler", "report_date": report_date},
+            run_result,
+        )
+    except Exception as e:
+        logger.warning("run_review_prediction_persist_failed", error=str(e), exc_info=True)
 
     logger.info(
         "run_review_done",

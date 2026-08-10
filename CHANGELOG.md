@@ -2,6 +2,31 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-10 — B2 预测能力（影响持续性推演）+ 提示词机制约束
+
+**开发者**: 37588
+
+### 新增
+- `schemas/prediction.py`：PredictionResult 契约（PredictionHorizon/PredictionRisk，extra="forbid"，horizons 非空校验，prediction_status 三态）
+- `prompts/workers/prediction.py`：影响持续性推演思维链提示词（5 阶段：消化度评估→三档推演→量化预期→演化叙事→风险；evidence_ids 白名单约束；禁编造/禁交易指令）
+- `services/prediction_service.py`：`run_predict`（门禁 attribution_status∈{confirmed,hypothesis} → 输入包 → deep_think 单次调用 → PredictionResult 校验 → 确定性到期日 short+5/mid+20/long+120 交易日）+ `render_prediction_markdown`；失败降级 None 永不 500
+- `services/prediction_validator.py`：`run_once` 到期验证（扫描 pending 且 due≤今日 → `/internal/index/quotes` 涨跌幅符号 vs 方向 → hit/miss/insufficient 回写，非指数 target 记 insufficient）
+- `utils/date.py`：`add_trading_days`（从 d 起推进 n 交易日，跳周末/节假日）
+
+### 改进
+- `services/data_client.py`：`put` + `save_prediction`/`list_pending_predictions`/`update_prediction_verification`（post/put 吞异常，双保险"永不 500"）
+- `schemas/market_trace.py`：`ReviewArtifact.prediction: PredictionResult | None = None`（默认 None 兼容旧缓存）
+- `agents/workers/review.py`：内联 `run_predict` + `_persist_prediction_record`（scheduler/manual 触发落库）+ 报告追加"影响持续性预判"章节
+- `services/scheduler.py` + `config.py`：`prediction_validate` cron 任务（每日 16:00，非交易日跳过）
+- 提示词：`evolution_narrative` 增加"三档方向/强度切换须阐明驱动力主次更迭"约束（brainstorming 裁定吸收）
+
+### 测试
+- 新增 `test_prediction_schema.py`（4）/`test_prediction_prompt.py`（3）/`test_date_add_trading_days.py`（4）/`test_prediction_service.py`（5）/`test_data_client_prediction.py`（3）/`test_review_prediction.py`（5）/`test_prediction_validator.py`（3）；`test_scheduler.py` call_count 3→4 同步
+- 全量 A/B 回归：HEAD 17 failed ⊆ BASE 20 failed（新增失败清零）；ruff 改动文件 0 新增错误
+
+---
+
+
 ## [changer] 2026-08-08 — douyin_video 抖音视频读取 skill 接入
 
 **开发者**: changer-collab

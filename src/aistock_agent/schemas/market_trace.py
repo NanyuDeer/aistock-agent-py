@@ -9,6 +9,8 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aistock_agent.schemas.prediction import PredictionResult
+
 # 市场现象 kind 的 Literal 别名。
 MarketPhenomenonKind: TypeAlias = Literal[
     "broad_rally",
@@ -242,3 +244,5 @@ class ReviewArtifact(BaseModel):
     markdown: str
     trace_summary: str
     sectors: list[str]
+    # 影响持续性预判（增量字段，默认 None 兼容旧缓存；大盘溯源内联生成）
+    prediction: PredictionResult | None = None

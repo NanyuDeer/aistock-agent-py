@@ -1,0 +1,178 @@
+"""预测能力执行服务 — 影响持续性推演。
+
+独立可复用推理包：输入溯源结果 + 事实快照，输出 PredictionResult（含到期日）。
+大盘溯源（review）内联调用；个股溯源/事件传导后续接入同一入口。
+失败一律返回 None 不抛异常，保证调用方主流程不受阻断（"永不 500"）。
+"""
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import date
+
+import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from aistock_agent.prompts.workers.prediction import PREDICTION_PROMPT
+from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSnapshot
+from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+from aistock_agent.services.llm import get_deep_think
+from aistock_agent.utils.date import add_trading_days
+
+logger = structlog.get_logger()
+
+# horizon → 到期交易日偏移（确定性计算，LLM 不输出日期）
+HORIZON_TRADING_DAY_OFFSETS: dict[str, int] = {
+    "short": 5,
+    "mid": 20,
+    "long": 120,
+}
+
+# 代码围栏剥离 — 防御 LLM 可能包裹的 ```json ... ```
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class PredictionRunResult:
+    """预测执行结果：预测工件 + 各档位到期交易日。"""
+
+    prediction: PredictionResult
+    due_dates: dict[str, str]  # {horizon: YYYY-MM-DD}
+
+
+def _strip_code_fences(text: str) -> str:
+    m = _CODE_FENCE_RE.match(text.strip())
+    if m:
+        return m.group(1).strip()
+    return text.strip()
+
+
+def _collect_allowed_evidence_ids(
+    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+) -> set[str]:
+    """溯源结果中实际引用过的全部证据 ID + 快照已确认现象的 fact_ids（预测只能引用这些）。"""
+    ids: set[str] = set()
+    for candidate in trace.candidates:
+        ids.update(candidate.supporting_evidence_ids)
+        ids.update(candidate.counter_evidence_ids)
+        if candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                ids.update(node.evidence_ids)
+    discovery = snapshot.phenomenon_discovery
+    if discovery.primary is not None:
+        ids.update(discovery.primary.fact_ids)
+    for item in discovery.concurrent_phenomena:
+        ids.update(item.fact_ids)
+    return ids
+
+
+def _build_prediction_input(
+    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+) -> dict[str, object]:
+    """压缩溯源结果与快照关键字段为 LLM 输入包。"""
+    chains: list[dict[str, object]] = []
+    for candidate in trace.candidates:
+        if candidate.chain is None:
+            continue
+        chains.append({
+            "id": candidate.id,
+            "category": candidate.category,
+            "status": candidate.status,
+            "verdict": candidate.verdict,
+            "stages": [
+                {"stage": node.stage, "claim": node.claim, "evidence_ids": node.evidence_ids}
+                for node in candidate.chain.nodes
+            ],
+        })
+    return {
+        "attribution_status": trace.attribution_status,
+        "primary_chain_id": trace.primary_chain_id,
+        "alternative_chain_id": trace.alternative_chain_id,
+        "confidence": trace.confidence,
+        "unresolved_questions": trace.unresolved_questions,
+        "chains": chains,
+        "phenomenon_discovery": snapshot.phenomenon_discovery.model_dump(mode="json"),
+        "a_share": {
+            "indices": snapshot.a_share.get("indices"),
+            "sectors": snapshot.a_share.get("sectors"),
+        },
+        "trade_date": snapshot.trade_date,
+    }
+
+
+def _compute_due_dates(trade_date: str, horizons: list[PredictionHorizon]) -> dict[str, str]:
+    base = date.fromisoformat(trade_date)
+    return {
+        h.horizon: add_trading_days(base, HORIZON_TRADING_DAY_OFFSETS[h.horizon]).isoformat()
+        for h in horizons
+    }
+
+
+async def run_predict(
+    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+) -> PredictionRunResult | None:
+    """对已溯源的因果链推演影响持续性。
+
+    门禁：attribution_status ∈ {confirmed, hypothesis} 才预测；
+    insufficient/not_applicable 返回 None。任一失败返回 None（调用方降级为无预测章节）。
+    """
+    if trace.attribution_status not in {"confirmed", "hypothesis"}:
+        logger.info("prediction_skip_by_attribution_status", status=trace.attribution_status)
+        return None
+    try:
+        prompt_input = _build_prediction_input(trace, snapshot)
+        llm = get_deep_think()
+        messages = [
+            SystemMessage(content=PREDICTION_PROMPT),
+            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+        ]
+        ai_message = await llm.ainvoke(messages)
+        raw_text = (
+            ai_message.content
+            if isinstance(ai_message.content, str)
+            else str(ai_message.content)
+        )
+        prediction = PredictionResult.model_validate_json(_strip_code_fences(raw_text))
+        allowed = _collect_allowed_evidence_ids(trace, snapshot)
+        for sid in prediction.evidence_ids:
+            if sid not in allowed:
+                raise ValueError(f"prediction evidence not in trace: {sid}")
+        due_dates = _compute_due_dates(snapshot.trade_date, prediction.horizons)
+        return PredictionRunResult(prediction=prediction, due_dates=due_dates)
+    except Exception as exc:
+        logger.warning("prediction_run_failed", error=str(exc), exc_info=True)
+        return None
+
+
+def render_prediction_markdown(prediction: PredictionResult) -> str:
+    """从已验证的 PredictionResult 渲染展示层 Markdown（可复用于各 agent）。"""
+    status_map = {"confirmed": "已确认", "hypothesis": "假设推演", "insufficient": "证据不足"}
+    phase_map = {
+        "building": "影响形成",
+        "peaking": "影响高峰",
+        "decaying": "影响衰减",
+        "returning": "回归常态",
+    }
+    horizon_label = {"short": "短线(1-5交易日)", "mid": "中线(1-4周)", "long": "长线(1-6月)"}
+    lines: list[str] = []
+    lines.append("## 影响持续性预判")
+    lines.append(
+        f"- 预测状态：{status_map.get(prediction.prediction_status, prediction.prediction_status)}"
+    )
+    if prediction.attribution_summary:
+        lines.append(f"- 结论：{prediction.attribution_summary}")
+    for h in prediction.horizons:
+        label = horizon_label.get(h.horizon, h.horizon)
+        lines.append(
+            f"- **{label}**：{h.remaining_estimate}｜阶段：{phase_map.get(h.phase, h.phase)}"
+            f"｜方向：{h.direction}｜置信：{h.confidence}"
+        )
+        lines.append(f"  - 验证对象：{h.target}｜预期：{h.metric_projection}")
+    if prediction.evolution_narrative:
+        lines.append(f"- 演化路径：{prediction.evolution_narrative}")
+    if prediction.risks:
+        lines.append("- 风险因素：")
+        for risk in prediction.risks:
+            lines.append(f"  - {risk.factor}：{risk.invalidation}")
+    lines.append("")
+    return "\n".join(lines)

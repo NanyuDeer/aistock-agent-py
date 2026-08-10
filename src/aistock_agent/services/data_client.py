@@ -437,6 +437,60 @@ class NodeApiClient:
             )
         return result
 
+    async def put(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
+        """PUT Node 内部 API，并返回已解包的对象 data。"""
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.put(url, json=body, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("node_api_put_business_error", url=url)
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, dict) else None
+        except httpx.HTTPStatusError as exc:
+            logger.error("node_api_put_http_error", url=url, status=exc.response.status_code)
+        except httpx.RequestError as exc:
+            logger.error("node_api_put_request_error", url=url, error=str(exc))
+        except Exception as exc:
+            logger.error("node_api_put_unexpected_error", url=url, error=str(exc))
+        return None
+
+    # ─── 预测能力落库与验证（大盘溯源预测 → prediction_records）───
+
+    async def save_prediction(self, payload: dict[str, object]) -> dict[str, object] | None:
+        """持久化预测记录（POST /internal/predictions）。
+
+        与 save_analysis_report 同模式：``post`` 已吞异常返回 None，
+        调用方再包 try/except——落库失败不阻断溯源报告（"永不 500"）。
+        """
+        result = await self.post("/internal/predictions", payload)
+        if result:
+            logger.info(
+                "prediction.saved",
+                source_type=payload.get("source_type"),
+                source_id=payload.get("source_id"),
+            )
+        return result
+
+    async def list_pending_predictions(self) -> list[dict[str, object]]:
+        """读取全部 pending 预测记录（到期验证扫描用）。"""
+        return await self.get_list("/internal/predictions?status=pending") or []
+
+    async def update_prediction_verification(
+        self,
+        prediction_id: int,
+        horizon: str,
+        entry: dict[str, object],
+    ) -> dict[str, object] | None:
+        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。"""
+        body: dict[str, object] = {"horizon": horizon}
+        body.update(entry)
+        return await self.put(f"/internal/predictions/{prediction_id}/verification", body)
+
     async def get_analysis_report(
         self,
         report_type: str,

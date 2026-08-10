@@ -33,6 +33,23 @@ def prev_trading_day(d: date | None = None) -> date:
     return cursor
 
 
+def add_trading_days(d: date, n: int) -> date:
+    """从 d 起向后推进 n 个交易日（不含 d 本身）。
+
+    用于预测到期日确定性计算：horizon 分档 → 交易日偏移。
+    n 必须 >= 0；跨周末与法定节假日自动跳过。
+    """
+    if n < 0:
+        raise ValueError("n must be >= 0")
+    cursor = d
+    advanced = 0
+    while advanced < n:
+        cursor += timedelta(days=1)
+        if is_trading_day(cursor):
+            advanced += 1
+    return cursor
+
+
 def shanghai_today() -> date:
     """返回上海时区的自然日，作为报告交易日。"""
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
