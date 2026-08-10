@@ -168,7 +168,11 @@ def render_prediction_markdown(prediction: PredictionResult) -> str:
             f"｜方向：{h.direction}｜置信：{h.confidence}"
         )
         lines.append(f"  - 验证对象：{h.target}｜预期：{h.metric_projection}")
-    if prediction.evolution_narrative:
+    if prediction.evolution_steps:
+        lines.append("- 演化路径：")
+        for step in prediction.evolution_steps:
+            lines.append(f"  - {step.label}：{step.text}")
+    elif prediction.evolution_narrative:
         lines.append(f"- 演化路径：{prediction.evolution_narrative}")
     if prediction.risks:
         lines.append("- 风险因素：")

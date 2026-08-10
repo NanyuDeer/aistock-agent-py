@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-10 — 预测能力演化路径结构化（evolution_steps）
+
+**开发者**: 37588
+
+### 新增
+- `schemas/prediction.py`：`EvolutionStep`（label+text）+ `PredictionResult.evolution_steps`（默认空列表，兼容旧记录）
+- `prompts/workers/prediction.py`：要求 LLM 按档位（短→中→长）输出 `evolution_steps` 结构化步骤，覆盖 narrative 全部内容
+
+### 改进
+- `services/prediction_service.py`：`render_prediction_markdown` 优先渲染 `evolution_steps`，缺失回退 `evolution_narrative`
+
+### 测试
+- `test_prediction_prompt.py` 新增 `test_prompt_requires_structured_evolution_steps`；`test_prediction_service.py` 新增 steps 渲染用例；prediction 相关单测 25 通过
+
+---
+
 ## [changer] 2026-08-10 — B2 预测能力（影响持续性推演）+ 提示词机制约束
 
 **开发者**: 37588
