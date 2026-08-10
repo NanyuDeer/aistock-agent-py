@@ -25,6 +25,7 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
   - metric_projection：可量化的预期描述（如 "上证指数维持 3500-3600 区间"），供到期验证对照
   - confidence: "high" | "medium" | "low"
 - evolution_narrative：把三档串成时间线的演化路径叙事（如 "短线已兑现大半 → 中线板块轮动延续 → 长线政策效应衰减"）；若三档方向或强度发生切换，必须在叙事中阐明驱动力如何主次更迭（如"短线情绪宣泄后，市场转向关注财政补贴实际到账"）
+- evolution_steps：演化路径的结构化步骤数组（供前端时间轴渲染），每步包含 label（档位标签，如 "短线"/"中线"/"长线"）与 text（该档位演化描述，承接叙事中对应档位的要点）；steps 按时间先后排列（短→中→长），覆盖 evolution_narrative 表达的全部内容
 - risks：每条包含 factor（风险因素）与 invalidation（该风险出现时预测如何失效）
 - evidence_ids：只引用输入溯源结果中实际存在的证据 ID，禁止编造
 - attribution_summary：一句话预测结论（30-40 字，供展示）

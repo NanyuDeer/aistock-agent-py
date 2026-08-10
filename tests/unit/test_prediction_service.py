@@ -108,7 +108,7 @@ async def test_run_predict_falls_back_on_llm_error():
 
 
 def test_render_prediction_markdown():
-    from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult, PredictionRisk
+    from aistock_agent.schemas.prediction import EvolutionStep, PredictionHorizon, PredictionResult, PredictionRisk
 
     prediction = PredictionResult(
         schema_version="1.0",
@@ -131,3 +131,35 @@ def test_render_prediction_markdown():
     assert "## 影响持续性预判" in md
     assert "中线(1-4周)" in md
     assert "政策转向" in md
+    assert "- 演化路径：中线延续" in md
+
+
+def test_render_prediction_markdown_uses_evolution_steps_when_present():
+    # B2 结构化演化路径：有 evolution_steps 时逐条渲染，不再整段输出 narrative
+    from aistock_agent.schemas.prediction import EvolutionStep, PredictionHorizon, PredictionResult, PredictionRisk
+
+    prediction = PredictionResult(
+        schema_version="1.0",
+        prediction_status="confirmed",
+        horizons=[PredictionHorizon(
+            horizon="short",
+            remaining_estimate="1-3 日",
+            phase="decaying",
+            direction="bearish",
+            target="上证指数",
+            metric_projection="短线弱势震荡",
+            confidence="high",
+        )],
+        evolution_narrative="短线情绪宣泄后，市场转向关注财政补贴",
+        evolution_steps=[
+            EvolutionStep(label="短线", text="情绪宣泄后弱势震荡"),
+            EvolutionStep(label="中线", text="市场转向关注财政补贴实际到账"),
+        ],
+        risks=[],
+        evidence_ids=["m1"],
+    )
+    md = render_prediction_markdown(prediction)
+    assert "## 影响持续性预判" in md
+    assert "短线：情绪宣泄后弱势震荡" in md
+    assert "中线：市场转向关注财政补贴实际到账" in md
+    assert "- 演化路径：短线情绪宣泄后" not in md

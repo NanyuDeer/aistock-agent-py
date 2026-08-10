@@ -37,6 +37,15 @@ class PredictionRisk(BaseModel):
     invalidation: str
 
 
+class EvolutionStep(BaseModel):
+    """演化路径单步 — 按档位切分的时间轴节点（供前端直接渲染时间轴）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str  # 档位标签（如 "短线"/"中线"/"长线"）
+    text: str  # 该档位演化描述
+
+
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""
 
@@ -45,7 +54,8 @@ class PredictionResult(BaseModel):
     schema_version: Literal["1.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
-    evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归）
+    evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
+    evolution_steps: list[EvolutionStep] = Field(default_factory=list)  # 结构化演化步骤（前端时间轴）；旧记录可能为空
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）

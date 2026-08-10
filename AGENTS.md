@@ -363,6 +363,8 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描） |
 | `PUT /internal/predictions/:id/verification` | prediction_records | 回写单档位验证结果（horizon/result/actual/reason → 全档位覆盖自动置 verified） |
 
+> **B2 预测能力（影响持续性推演）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。`evolution_steps`（label+text 结构化演化步骤，供前端时间轴渲染）为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
+
 ## 常用命令
 
 ```bash
