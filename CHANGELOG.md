@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-11 — Chat Followup-1：澄清续跑 + 入口状态治理 + 统一实体清洗
+
+**开发者**: 37588
+
+### 新增
+- `state/chat_schema.py`：`QuestionState.pending_clarification`（M1 澄清续跑 pending 上下文，跨轮有意最长存活一轮，不进 reset_transient_state 归零清单）
+- `api/deps.py`：`reset_transient_state` + `_TRANSIENT_KEYS`（M3 入口初始化器，收口 ws.py/routes.py 三处复制粘贴的 transient 归零块；last_deep_report/pending_clarification 明确不入清单）
+- `graph/nodes/qa_router.py`：M1 澄清续跑——qa_router 写澄清两处（resolve-miss/postprocess）同时写 pending 快照，下轮用户补全代码/名称时用原问题上下文续跑；外层包装 `qa_router_node` 清空陈旧 pending（消费块置于 P9 纠错否定之后、闸门 0.5 之前，防绕过合规护栏 D33）；S1 统一名称实体清洗 `_clean_name_segments`（pre_strip + select="max"|"last" 参数化，替换 `_extract_stock_name_candidate` 与否定纠错清洗段的复制实现，行为零变化）
+
+### 测试
+- 新增 `tests/unit/test_chat_transient_reset.py`（3 用例）；`test_qa_router.py` 追加 M1 澄清续跑 5 用例 + S1 参数化/等价性守卫 5 节点；定向 150 passed；全量回归 HEAD 16 failed ⊆ BASE 19（新增清零）；ruff 改动文件 0 新增
+
+---
+
 ## [changer] 2026-08-10 — 预测能力演化路径结构化（evolution_steps）
 
 **开发者**: 37588

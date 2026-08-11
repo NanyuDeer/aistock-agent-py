@@ -74,6 +74,10 @@ class QuestionState(TypedDict, total=False):
     # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
     # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
     general_source: Literal["science", "gap"] | None
+    # M1（2026-08-11）：澄清续跑 pending 上下文。qa_router 写澄清时快照原问题上下文，
+    # 下一轮用户补全代码/名称时续跑原意图。跨轮有意（最长存活一轮：消费即清 /
+    # 下轮未消费由 qa_router_node 包装层清空），明确不在 reset_transient_state 归零清单内。
+    pending_clarification: dict | None
     # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3）；
     # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
     cards: list[ChatCard] | None

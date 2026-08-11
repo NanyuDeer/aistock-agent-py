@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from aistock_agent.api.deps import build_chat_initial_state
+from aistock_agent.api.deps import build_chat_initial_state, reset_transient_state
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
@@ -127,15 +127,9 @@ async def ws_chat(websocket: WebSocket) -> None:
             initial_state["user_id"] = (
                 str(raw_user_id) if raw_user_id not in (None, "") else None
             )
-            # T6 集成修复：deep_source/final_response 是单轮 transient 路由信号，
-            # 只由本轮的 escalate（deep）或 qa_router 闸门写入。不在此处按轮
-            # 清空会经 checkpointer 跨轮残留：追问轮（complexity=light）读到上轮
-            # deep_source 会被 synth_answer deep 分支劫持（丢弃 Evidence、重写
-            # last_deep_report）。last_deep_report 本身是跨轮引用，不能清。
-            initial_state["deep_source"] = None
-            initial_state["final_response"] = None
-            initial_state["goals"] = None   # D34：单轮 transient 每轮归零（对齐 deep_source）
-            initial_state["general_source"] = None  # P7+P8：general 兜底同 transient 每轮归零
+            # T6/M3：单轮 transient 路由信号每轮归零（详细语义见 reset_transient_state；
+            # last_deep_report / pending_clarification 跨轮保留，不入归零）
+            reset_transient_state(initial_state)
 
             try:
                 llm_started = False
