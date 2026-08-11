@@ -1,0 +1,29 @@
+{
+  "case_id": "case_20260731_us_market_surge",
+  "agent_id": "review",
+  "event_title": "隔夜美股暴涨，A股高开",
+  "event_time": "2026-07-31T09:30:00+08:00",
+  "window_before": {
+    "cls_telegraph": [
+      {
+        "time": "2026-07-31T09:00:00+08:00",
+        "title": "隔夜美股三大指数集体收涨",
+        "content": "纳斯达克涨 2.5%，标普 500 涨 1.8%",
+        "url": "https://cls.cn/detail/1"
+      }
+    ],
+    "market_snapshot": {
+      "trade_date": "2026-07-31",
+      "captured_at": "2026-07-31T15:35:00+08:00",
+      "indexes": {"sh": 1.2, "sz": 1.8, "cyb": 2.4},
+      "sectors": [{"name": "半导体", "change_pct": 3.2}],
+      "breadth": {"up": 3800, "down": 900}
+    },
+    "global_markets": [
+      {"ticker": "^DJI", "change_pct": 1.9, "asof": "2026-07-31T04:00:00+08:00"},
+      {"ticker": "^IXIC", "change_pct": 2.5, "asof": "2026-07-31T04:00:00+08:00"}
+    ]
+  },
+  "ground_truth_ref": "gt_20260731_us_market_surge",
+  "created_at": "2026-08-11T12:00:00+08:00"
+}
