@@ -486,3 +486,7 @@ content = {
 
 **已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
+
+### iterate（迭代 Agent 自动闭环）
+- 用途：自动迭代 review/event_analyst 等归因类 agent 的提示词/工作流/数据源
+- 约束：回放层为 monkeypatch 注入（不改待迭代 agent 的 run()）；回放子进程所有写副作用 no-op；数据目录 data/ 全部 gitignore；LLM 走 get_deep_think 唯一入口
