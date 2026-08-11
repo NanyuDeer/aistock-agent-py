@@ -69,6 +69,7 @@ async def run_case(
                 ground_truth,
                 _last_score(best),
                 str(best.get("gap_analysis", "")),
+                root,
             )
             written = apply_variant(variant, root)
             last_written = tuple(str(p.relative_to(root.resolve())) for p in written)
@@ -132,7 +133,18 @@ async def _run_baseline(
     )
 
     output = await _run_replay_subprocess(agent_id, case_id, "baseline")
-    score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
+    if output.get("timed_out"):
+        score = ScoreDetail(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            gap_analysis=(
+                f"回放子进程超时（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
+            ),
+        )
+    else:
+        score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
     record: dict[str, object] = {
         "case_id": case_id,
         "round": 1,

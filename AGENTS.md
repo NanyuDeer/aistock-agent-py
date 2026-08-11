@@ -490,6 +490,11 @@ content = {
 ### iterate（迭代 Agent 自动闭环）
 - 用途：自动迭代 review/event_analyst 等归因类 agent 的提示词/工作流/数据源
 - 约束：回放层为 monkeypatch 注入（不改待迭代 agent 的 run()）；回放子进程所有写副作用 no-op；数据目录 data/ 全部 gitignore；LLM 走 get_deep_think 唯一入口
+- `iterate/case_scanner.py`：迭代切片数据扫描器——`find_recent_trading_day()`（最近已收盘交易日，Node close-snapshot/last-close 降级）、`scan_major_events(days)`（电报关键词 + 30 分钟窗口聚类重大事件）
+- `iterate/gt_validator.py`：标准答案一致性校验——`validate_gt_against_case(gt, case)` 三条规则（方向/板块/驱动必须可由切片数据推导），返回违反列表
+- `iterate/ground_truth.py::generate_data_constrained_gt(case, *, data_dir=None)`：数据约束标准答案生成（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）
+- `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行
+- 已知限制（二期）：`scripts/build_iterate_cases.py` 按 `--agent` if/else 硬编码 review/event_analyst 两个 agent 的采集/构建流程，未消费 `adapter.data_deps` 声明；接入第三个 agent 时需抽「按 data_deps 采集 → build_case → 生成 GT → 校验」通用流水线（见 docs/superpowers/specs/2026-08-11-iterate-case-sourcing-design.md §1.1 目标 4）
 
 ### mail_sender（通用 SMTP 邮件发送）
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
