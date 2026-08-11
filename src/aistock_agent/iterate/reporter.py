@@ -1,23 +1,20 @@
-"""每日汇总报告 —— 聚合实验结果 + 待标注清单 + 系统状态，SMTP 发到 QQ 邮箱。"""
+"""每日汇总报告 —— 聚合实验结果 + 待标注清单 + 系统状态，SMTP 发到 QQ 邮箱。
 
+SMTP 发送复用 services/mail_sender（QQ 邮箱已验证模式：SSL + 授权码 + HTML 正文），
+报告以 HTML <pre> 正文发送，保留格式可读性。
+"""
+
+import html
 import json
-import smtplib
-import time
 from datetime import date
-from email.header import Header
-from email.mime.text import MIMEText
-from typing import cast
 
 import structlog
 
-from aistock_agent.config import settings
 from aistock_agent.iterate.case_builder import get_data_dir
 from aistock_agent.iterate.ground_truth import list_pending_review
+from aistock_agent.services.mail_sender import send_mail
 
 logger = structlog.get_logger()
-
-_SMTP_RETRIES = 3
-_SMTP_RETRY_DELAY_SECONDS = 2
 
 
 async def build_daily_report(report_date: date | None = None) -> str:
@@ -46,36 +43,15 @@ async def build_daily_report(report_date: date | None = None) -> str:
 
 
 def send_report_via_smtp(markdown: str, *, subject: str) -> bool:
-    """SMTP 发送；失败重试 3 次；最终失败写 data/reports/ 兜底。"""
-    if not (settings.iterate_smtp_host and settings.iterate_smtp_user and settings.iterate_mail_to):
-        logger.warning("iterate_smtp_not_configured")
-        return False
-
-    msg = MIMEText(markdown, "plain", "utf-8")
-    msg["Subject"] = cast("str", Header(subject, "utf-8"))
-    msg["From"] = settings.iterate_smtp_user
-    msg["To"] = settings.iterate_mail_to
-
-    for attempt in range(1, _SMTP_RETRIES + 1):
-        try:
-            with smtplib.SMTP_SSL(
-                settings.iterate_smtp_host, settings.iterate_smtp_port, timeout=15
-            ) as server:
-                server.login(settings.iterate_smtp_user, settings.iterate_smtp_password)
-                server.sendmail(
-                    settings.iterate_smtp_user,
-                    [settings.iterate_mail_to],
-                    msg.as_string(),
-                )
-            logger.info("iterate_report_sent", subject=subject)
-            return True
-        except (OSError, smtplib.SMTPException) as exc:  # noqa: PERF203
-            logger.warning("iterate_report_smtp_failed", attempt=attempt, error=str(exc))
-            if attempt < _SMTP_RETRIES:
-                time.sleep(_SMTP_RETRY_DELAY_SECONDS)
-
-    _write_report_fallback(markdown)
-    return False
+    """SMTP 发送（HTML 正文）；重试与配置解析由 mail_sender 负责；最终失败写兜底。"""
+    body_html = (
+        "<pre style='font-family:Menlo,Consolas,monospace;font-size:12px;"
+        f"white-space:pre-wrap'>{html.escape(markdown)}</pre>"
+    )
+    ok = send_mail(subject, body_html)
+    if not ok:
+        _write_report_fallback(markdown)
+    return ok
 
 
 async def run_daily_report() -> None:

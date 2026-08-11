@@ -1,4 +1,4 @@
-"""reporter —— 每日汇总报告构建与 SMTP 发送（重试 3 次）"""
+"""reporter —— 每日汇总报告构建与 SMTP 发送（复用 mail_sender）"""
 
 from collections.abc import Iterator
 from pathlib import Path
@@ -33,21 +33,34 @@ def smtp_settings() -> Iterator[None]:
 
 
 def test_send_report_via_smtp_success(smtp_settings: object) -> None:
-    with patch("aistock_agent.iterate.reporter.smtplib.SMTP_SSL") as mock_smtp:
+    """发送成功（mail_sender 返回 True）→ 返回 True 且不写兜底。"""
+    with patch(
+        "aistock_agent.iterate.reporter.send_mail", return_value=True
+    ) as mock_send:
         ok = send_report_via_smtp("# 迭代报告", subject="iterate daily")
     assert ok is True
-    mock_smtp.assert_called_once()
+    mock_send.assert_called_once()
+    # 正文是 HTML <pre> 包裹的转义 Markdown
+    body_html = mock_send.call_args.args[1]
+    assert body_html.startswith("<pre") and "# 迭代报告" in body_html
 
 
-def test_send_report_via_smtp_retries_then_fails(
+def test_send_report_via_smtp_failure_writes_fallback(
     smtp_settings: object, iterate_data_dir: object
 ) -> None:
+    """mail_sender 发送失败（返回 False）→ 返回 False 且写 data/reports/ 兜底。"""
+    from datetime import date
+
+    reports_dir = Path(iterate_data_dir) / "reports"  # type: ignore[arg-type]
     with patch(
-        "aistock_agent.iterate.reporter.smtplib.SMTP_SSL", side_effect=OSError("conn")
-    ) as mock_smtp:
+        "aistock_agent.iterate.reporter.send_mail", return_value=False
+    ) as mock_send:
         ok = send_report_via_smtp("# 迭代报告", subject="iterate daily")
     assert ok is False
-    assert mock_smtp.call_count == 3  # 重试 3 次
+    mock_send.assert_called_once()
+    fallback = reports_dir / f"{date.today().isoformat()}.md"
+    assert fallback.exists()
+    assert "# 迭代报告" in fallback.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
