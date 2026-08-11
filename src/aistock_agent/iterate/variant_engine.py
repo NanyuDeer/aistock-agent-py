@@ -192,9 +192,21 @@ async def run_experiment_round(
     case_id = str(case["case_id"])
     variant_hash = _content_hash(variant.new_content)
     output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
-    score = await evaluate_attribution(
-        str(output.get("final_response", "")), ground_truth
-    )
+    if output.get("timed_out"):
+        # 回放超时：不调用评估 LLM（无输出可评），记为超时失败轮。
+        score = ScoreDetail(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            gap_analysis=(
+                f"回放子进程超时（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
+            ),
+        )
+    else:
+        score = await evaluate_attribution(
+            str(output.get("final_response", "")), ground_truth
+        )
     record: dict[str, object] = {
         "case_id": case_id,
         "round": round_no,
@@ -235,20 +247,37 @@ async def _run_replay_subprocess(
         "REPLAY_AGENT": agent_id,
         "PYTHONPATH": src_dir,
     }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "aistock_agent.iterate.replay_runner",
-            agent_id,
-            case_id,
-            variant_hash,
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=settings.iterate_round_timeout_seconds,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "aistock_agent.iterate.replay_runner",
+                agent_id,
+                case_id,
+                variant_hash,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=settings.iterate_round_timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        # 超时不崩整个闭环：返回 timed_out 标记，调用侧记为超时失败轮（评分 0）。
+        # 之前裸抛 TimeoutExpired 导致 run_case 直接退出，多轮闭环无法继续。
+        logger.warning(
+            "iterate_replay_timed_out",
+            agent_id=agent_id,
+            case_id=case_id,
+            timeout=settings.iterate_round_timeout_seconds,
+        )
+        return {
+            "agent_id": agent_id,
+            "case_id": case_id,
+            "variant_hash": variant_hash,
+            "final_response": "",
+            "timed_out": True,
+        }
     if result.returncode != 0:
         raise RuntimeError(f"replay subprocess failed: {result.stderr[-500:]}")
     lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]

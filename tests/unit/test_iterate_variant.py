@@ -204,3 +204,48 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
     assert plan.type == "prompt_diff"
     new_content = plan.new_content["src/aistock_agent/prompts/workers/review.py"]
     assert new_content == 'REVIEW_PROMPT = "新"\n'
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_timed_out_is_failed_round(
+    iterate_data_dir: object,
+) -> None:
+    """回归：回放子进程超时不得崩整个闭环，应记为超时失败轮（评分 0 + 明确 gap）。
+
+    线上事故：event_analyst 回放 600s 超时，_run_replay_subprocess 裸抛
+    TimeoutExpired 导致 run_case 直接退出，多轮闭环无法继续。
+    """
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_timeout"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_timeout",
+        "attribution": {"direction": "bullish"},
+    }
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            return_value={
+                "agent_id": "review",
+                "case_id": "case_test_timeout",
+                "variant_hash": "h",
+                "final_response": "",
+                "timed_out": True,
+            }
+        ),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(side_effect=AssertionError("超时轮不应调用评估 LLM")),
+    ) as mocked_evaluate:
+        record = await run_experiment_round("review", case, 2, variant, gt)
+
+    mocked_evaluate.assert_not_awaited()
+    assert record["score"] == 0.0
+    assert "超时" in str(record["gap_analysis"])
