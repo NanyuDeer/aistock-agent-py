@@ -40,7 +40,7 @@ async def test_find_recent_trading_day_none_when_all_fail() -> None:
 
 @pytest.mark.asyncio
 async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
-    """事件聚类：关键词命中 + 30 分钟窗口合并 + time<=T 过滤。"""
+    """事件聚类：关键词命中 + 30 分钟窗口合并 + telegraph_records 取 [锚点, T] 窗口全部电报。"""
     records = [
         {
             "time": "2026-07-31T09:00:00+08:00",
@@ -50,7 +50,7 @@ async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
         },
         {
             "time": "2026-07-31T09:10:00+08:00",
-            "title": "美股三大指数集体大涨",
+            "title": "美股三大指数集体收涨",
             "content": "标普涨1.8%",
             "url": "u2",
         },
@@ -73,9 +73,10 @@ async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
     ):
         events = await scan_major_events(days=1)
 
-    # 09:00 与 09:10 同窗口合并为一个事件；10:00 无关键词不入选；11:00 央行入选
+    # 09:00 命中关键词 + 09:10 未命中但落在 [锚点, T] 窗口 → 合并为一个事件；
+    # 10:00 未命中关键词且超出窗口（09:10 之后）→ 不进任何事件；11:00 央行命中 → 独立事件
     assert len(events) == 2
     first = events[0]
     assert first["event_time"] == "2026-07-31T09:10:00+08:00"  # T = 末条电报时间
-    assert len(first["telegraph_records"]) == 2  # 整个簇（锚点起 30 分钟窗口内）
+    assert len(first["telegraph_records"]) == 2  # [锚点, T] 窗口内所有电报（含 09:10 未命中的报道）
     assert "暴涨" in str(first["event_title"])

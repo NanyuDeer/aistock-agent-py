@@ -77,14 +77,19 @@ async def scan_major_events(days: int) -> list[dict[str, object]]:
 
 
 def _cluster_events(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """按关键词 + 30 分钟窗口把电报聚类为事件。"""
-    hits = [r for r in records if _matches_keywords(str(r.get("title", "")))]
-    hits.sort(key=lambda r: str(r.get("time", "")))
+    """按关键词锚定 + 30 分钟链式窗口把电报聚类为事件。
+
+    簇以关键词命中的电报为锚点；锚点起 30 分钟链式窗口内的后续报道
+    （含未命中关键词的）吸收进簇，T = 簇末条电报时间，保证
+    telegraph_records 能取到完整事件语料（含未命中关键词的后续报道）。
+    """
+    ordered = sorted(records, key=lambda r: str(r.get("time", "")))
     clusters: list[list[dict[str, object]]] = []
-    for record in hits:
+    for record in ordered:
         if clusters and _within_window(clusters[-1][-1], record):
+            # 窗口内后续报道（含未命中关键词）吸收进簇，T 随末条报道延伸
             clusters[-1].append(record)
-        else:
+        elif _matches_keywords(str(record.get("title", ""))):
             clusters.append([record])
 
     events: list[dict[str, object]] = []
@@ -95,15 +100,30 @@ def _cluster_events(records: list[dict[str, object]]) -> list[dict[str, object]]
         # 簇首条/末条无 time 字段时无法确定 T，跳过该簇（避免 fromisoformat("") 崩溃）
         if not event_time:
             continue
+        # [锚点, T] 事件窗口：原始 records 中锚点时间 <= 记录时间 <= T 的所有电报
+        # （含未命中关键词的后续报道，供 agent 获取完整事件语料）。
+        window = [r for r in records if _in_event_window(cluster[0], r, event_time)]
         events.append(
             {
                 "event_title": str(cluster[0].get("title", "重大事件")),
                 "event_time": event_time,
-                # 整个簇：锚点起 30 分钟窗口内所有电报（含未命中关键词的后续报道）
-                "telegraph_records": list(cluster),
+                # telegraph_records 为 [锚点, T] 事件窗口内所有电报（含未命中关键词的后续报道）
+                "telegraph_records": window,
             }
         )
     return events
+
+
+def _in_event_window(
+    anchor: dict[str, object], record: dict[str, object], event_time: str
+) -> bool:
+    """记录时间落在 [锚点, T] 事件窗口内（含未命中关键词的后续报道）。"""
+    t1 = _parse_time(anchor.get("time"))
+    tr = _parse_time(record.get("time"))
+    t2 = _parse_time(event_time)
+    if t1 is None or tr is None or t2 is None:
+        return False
+    return t1 <= tr <= t2
 
 
 def _matches_keywords(title: str) -> bool:
