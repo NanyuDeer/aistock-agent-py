@@ -80,3 +80,38 @@ async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
     assert first["event_time"] == "2026-07-31T09:10:00+08:00"  # T = 末条电报时间
     assert len(first["telegraph_records"]) == 2  # [锚点, T] 窗口内所有电报（含 09:10 未命中的报道）
     assert "暴涨" in str(first["event_title"])
+
+
+@pytest.mark.asyncio
+async def test_event_window_bounded_to_anchor() -> None:
+    """锚点起 30 分钟窗口有界：窗口外记录不吸收、不延伸 T。"""
+    records = [
+        {
+            "time": "2026-07-31T09:00:00+08:00",
+            "title": "隔夜美股暴涨",
+            "content": "纳指涨2.5%",
+            "url": "u1",
+        },
+        {
+            "time": "2026-07-31T09:10:00+08:00",
+            "title": "美股三大指数集体收涨",
+            "content": "标普涨1.8%",
+            "url": "u2",
+        },
+        {
+            "time": "2026-07-31T09:35:00+08:00",
+            "title": "北向资金净买入",
+            "content": "50亿",
+            "url": "u3",
+        },
+    ]
+    with patch(
+        "aistock_agent.iterate.case_scanner.node_api.get_list",
+        AsyncMock(return_value=records),
+    ):
+        events = await scan_major_events(days=1)
+
+    assert len(events) == 1  # 09:35 距锚点 35min > 30min，不吸收进同一簇
+    first = events[0]
+    assert first["event_time"] == "2026-07-31T09:10:00+08:00"  # T 不延伸
+    assert len(first["telegraph_records"]) == 2  # 只含窗口内 09:00+09:10

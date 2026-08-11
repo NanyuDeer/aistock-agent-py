@@ -77,17 +77,19 @@ async def scan_major_events(days: int) -> list[dict[str, object]]:
 
 
 def _cluster_events(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """按关键词锚定 + 30 分钟链式窗口把电报聚类为事件。
+    """按关键词锚定 + 30 分钟窗口（相对锚点）把电报聚类为事件。
 
-    簇以关键词命中的电报为锚点；锚点起 30 分钟链式窗口内的后续报道
-    （含未命中关键词的）吸收进簇，T = 簇末条电报时间，保证
-    telegraph_records 能取到完整事件语料（含未命中关键词的后续报道）。
+    簇以关键词命中的电报为锚点；同 30 分钟窗口（相对锚点）合并，
+    锚点起 30 分钟内的后续报道（含未命中关键词的）吸收进簇，
+    T = 窗口末条电报时间，保证 telegraph_records 能取到完整事件语料
+    （含未命中关键词的后续报道）。窗口相对锚点而非簇末条，簇有界，
+    避免链式吸收让 T 无界漂移（I-review-3）。
     """
     ordered = sorted(records, key=lambda r: str(r.get("time", "")))
     clusters: list[list[dict[str, object]]] = []
     for record in ordered:
-        if clusters and _within_window(clusters[-1][-1], record):
-            # 窗口内后续报道（含未命中关键词）吸收进簇，T 随末条报道延伸
+        if clusters and _within_window(clusters[-1][0], record):
+            # 锚点起 30 分钟窗口内的后续报道（含未命中关键词）吸收进簇
             clusters[-1].append(record)
         elif _matches_keywords(str(record.get("title", ""))):
             clusters.append([record])

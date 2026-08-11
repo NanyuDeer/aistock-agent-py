@@ -89,3 +89,27 @@ def test_bullish_gt_rejected_when_snapshot_neutral() -> None:
 def test_empty_snapshot_rejects_all() -> None:
     violations = validate_gt_against_case(_gt(), _case({"a_share": {}, "sources": {}}))
     assert len(violations) >= 1
+
+
+def test_driver_traceable_via_global_markets() -> None:
+    case = {
+        "window_before": {
+            "market_snapshot": _snapshot(),
+            "cls_telegraph": [],
+            "global_markets": [
+                {"ticker": "^IXIC", "change_pct": 2.5, "asof": "2026-07-31T04:00:00+08:00"}
+            ],
+        }
+    }
+    gt = _gt(drivers=["外盘传导"])
+    assert validate_gt_against_case(gt, case) == []
+
+
+def test_no_index_skips_direction_check() -> None:
+    # 快照无 indexes（如 event case），GT direction 任意值不被方向规则拒绝
+    case = _case(
+        {"a_share": {"sectors": {"top_gainers": [], "top_losers": []}}, "sources": {}}
+    )
+    gt = _gt(direction="bearish", sectors=[], drivers=["隔夜美股暴涨"])
+    violations = validate_gt_against_case(gt, case)
+    assert not any("方向" in v for v in violations)
