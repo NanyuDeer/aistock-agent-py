@@ -25,14 +25,16 @@ def get_data_dir() -> Path:
     return Path(settings.iterate_data_dir)
 
 
-def _ensure_case_dirs() -> None:
+def _ensure_case_dirs(data_dir: Path | None = None) -> None:
+    base = data_dir or get_data_dir()
     for sub in ("cases", "ground_truths", "experiments", "reports"):
-        (get_data_dir() / sub).mkdir(parents=True, exist_ok=True)
+        (base / sub).mkdir(parents=True, exist_ok=True)
 
 
-def case_path(case_id: str) -> Path:
+def case_path(case_id: str, data_dir: Path | None = None) -> Path:
     """按 case_id 全目录搜索切片文件；找不到抛 FileNotFoundError。"""
-    for p in (get_data_dir() / "cases").rglob(f"{case_id}.json"):
+    base = (data_dir or get_data_dir()) / "cases"
+    for p in base.rglob(f"{case_id}.json"):
         return p
     raise FileNotFoundError(f"case not found: {case_id}")
 
@@ -57,10 +59,12 @@ async def build_case(
     event_time: datetime,
     telegraph_records: list[dict[str, object]],
     market_snapshot: dict[str, object] | None = None,
+    data_dir: Path | None = None,
 ) -> dict[str, object]:
     """生成并落盘一个历史切片。
 
     只保留 time <= event_time 的电报记录（T 窗口约束，防后验泄漏）。
+    data_dir 覆盖 iterate 数据根目录（测试隔离用）；None 走 get_data_dir()。
     """
     if event_time.tzinfo is None:
         event_time = event_time.replace(tzinfo=_TZ)
@@ -82,8 +86,9 @@ async def build_case(
         "ground_truth_ref": f"gt_{case_id}",
         "created_at": datetime.now(_TZ).isoformat(),
     }
-    _ensure_case_dirs()
-    path = get_data_dir() / "cases" / adapter.agent_id / f"{case_id}.json"
+    base = data_dir or get_data_dir()
+    _ensure_case_dirs(data_dir)
+    path = base / "cases" / adapter.agent_id / f"{case_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(case, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("iterate_case_built", case_id=case_id, agent_id=adapter.agent_id)
@@ -127,9 +132,9 @@ def _extract_global_markets(snapshot: dict[str, object] | None) -> list[dict[str
     return []
 
 
-def load_case(case_id: str) -> dict[str, object]:
+def load_case(case_id: str, data_dir: Path | None = None) -> dict[str, object]:
     """读取切片 JSON。"""
-    payload = json.loads(case_path(case_id).read_text(encoding="utf-8"))
+    payload = json.loads(case_path(case_id, data_dir=data_dir).read_text(encoding="utf-8"))
     return cast("dict[str, object]", payload)
 
 

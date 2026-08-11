@@ -33,8 +33,9 @@ _EXTRACT_PROMPT = """你是股票归因分析师。基于给定案例的异动�
 只输出 JSON，禁止 Markdown 或代码围栏。"""
 
 
-def load_ground_truth(gt_id: str) -> dict[str, object]:
-    path = get_data_dir() / "ground_truths" / f"{gt_id}.json"
+def load_ground_truth(gt_id: str, data_dir: Path | None = None) -> dict[str, object]:
+    base = data_dir or get_data_dir()
+    path = base / "ground_truths" / f"{gt_id}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     return cast("dict[str, object]", payload)
 
