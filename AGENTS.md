@@ -486,3 +486,12 @@ content = {
 
 **已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
+
+### iterate（迭代 Agent 自动闭环）
+- 用途：自动迭代 review/event_analyst 等归因类 agent 的提示词/工作流/数据源
+- 约束：回放层为 monkeypatch 注入（不改待迭代 agent 的 run()）；回放子进程所有写副作用 no-op；数据目录 data/ 全部 gitignore；LLM 走 get_deep_think 唯一入口
+
+### mail_sender（通用 SMTP 邮件发送）
+- 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
+- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → 环境变量 `QQ_SMTP_USER/AUTH/TO`（同事交接约定）；授权码只放本地 .env，不进 git
+- 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式

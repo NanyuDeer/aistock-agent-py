@@ -516,3 +516,11 @@ docker run -p 8080:8080 --env-file .env aistock-agent
 
 - [aistock-app-api](../aistock-app-api) — Node.js 后端（数据层 + HTTP 接入）
 - [aistock-app-frontend](../aistock-app-frontend) — App 前端
+
+## 迭代 Agent 自动闭环
+
+- 模块：`src/aistock_agent/iterate/`（adapters/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
+- 机制：历史切片（T 窗口固化）→ 标准答案（tavily + 置信度）→ 变体实验（git 恢复基线 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3）
+- 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
+- 触发：交易日 16:00 自动（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
+- 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter` 即可

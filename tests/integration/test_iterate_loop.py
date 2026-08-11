@@ -1,0 +1,96 @@
+"""集成测试 —— 单案例闭环：达标终止 / 连续两轮无改善 / 5 轮上限"""
+
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from aistock_agent.iterate.run_case import run_case
+from aistock_agent.iterate.variant_engine import restore_baseline as _real_restore
+
+FIXTURES = Path(__file__).parent.parent / "fixtures" / "iterate"
+
+
+def _write_case_fixture(iterate_data_dir: object) -> tuple[dict[str, object], dict[str, object]]:
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    case_dir = Path(iterate_data_dir) / "cases" / "review"  # type: ignore[arg-type]
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / f"{case['case_id']}.json").write_text(
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_dir = Path(iterate_data_dir) / "ground_truths"  # type: ignore[arg-type]
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    (gt_dir / f"{gt['gt_id']}.json").write_text(
+        json.dumps(gt, ensure_ascii=False), encoding="utf-8"
+    )
+    return case, gt
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_when_score_above_threshold(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    case, _gt = _write_case_fixture(iterate_data_dir)
+
+    # mock LLM：evaluate 内部先 extract（提取）后 judge（要素命中），用 side_effect 区分；
+    # 首轮即达标 → 后续不调用 generate_variant
+    extract_payload = {
+        "direction": "bullish",
+        "drivers": ["隔夜美股暴涨", "外盘传导"],
+        "sectors": ["半导体", "算力", "新能源"],
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps({"hit_count": 2, "total_count": 2})})(),
+            ]
+        )
+        # 子进程回放被替换为固定 agent 输出（避免真实跑 agent）
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "主因隔夜美股大涨，看多，半导体领涨"}),
+        ):
+            # I1：repo_root 必须指向临时沙盒，restore_baseline 不得触碰真实仓库
+            with patch(
+                "aistock_agent.iterate.run_case.restore_baseline",
+                side_effect=lambda *a, **k: _real_restore(*a, **k),
+            ) as spy:
+                result = await run_case(
+                    "review", str(case["case_id"]), max_rounds=3, repo_root=str(tmp_path)
+                )
+            assert spy.call_args.args[1] == tmp_path  # 恢复操作作用于沙盒而非真实仓库
+
+    assert result["best_score"] >= 0.8
+    assert result["stopped_reason"] == "score_reached"
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_when_no_improvement_two_rounds(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """连续两轮评分不升则终止。"""
+    case, _gt = _write_case_fixture(iterate_data_dir)
+
+    # 错误方向 → 低分不升
+    llm_payload = {"direction": "bearish", "drivers": [], "sectors": []}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type("R", (), {"content": json.dumps(llm_payload)})()
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "看空"}),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.restore_baseline",
+                side_effect=lambda *a, **k: _real_restore(*a, **k),
+            ) as spy:
+                result = await run_case(
+                    "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                )
+            assert spy.call_args.args[1] == tmp_path
+
+    assert result["stopped_reason"] in {"no_improvement", "max_rounds"}

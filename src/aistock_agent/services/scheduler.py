@@ -142,6 +142,12 @@ def start_scheduler() -> None:
         )
         logger.info("scheduler_legacy_evening_chain")
 
+    if settings.iterate_enabled:
+        from aistock_agent.iterate.scheduler import register_iterate_jobs
+
+        register_iterate_jobs(scheduler)
+        logger.info("iterate_jobs_registered_via_main_scheduler")
+
     # 触发时刻 event loop 若短暂繁忙，APScheduler 默认 misfire_grace_time=1s
     # 会直接跳过任务（表现为"cron 未触发"且无任何日志）。放宽到 1 小时，
     # 并在 loop 恢复后补跑；coalesce=False 保留每次错过的触发。

@@ -132,6 +132,24 @@ class Settings(BaseSettings):
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
+
+    # ===== 迭代 Agent 自动闭环（iterate）=====
+    # 默认关闭；服务器沙盒 .env 设 ITERATE_ENABLED=true 开启
+    iterate_enabled: bool = False
+    # 数据目录（切片/标准答案/实验/报告，均 gitignore）
+    iterate_data_dir: str = "data"
+    # 每日汇总：交易日 16:00（现有 iterate 15:40 之后）
+    iterate_cron: str = "0 16 * * 1-5"
+    iterate_max_rounds: int = 5            # 每案例变体轮数上限
+    iterate_target_score: float = 0.8      # 归因相似度达标值
+    iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
+    iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
+    # SMTP 报告（QQ 邮箱授权码）
+    iterate_smtp_host: str = ""
+    iterate_smtp_port: int = 465
+    iterate_smtp_user: str = ""
+    iterate_smtp_password: str = ""
+    iterate_mail_to: str = ""
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
     scheduler_review_quick_cron: str = "30 15 * * 1-5"
