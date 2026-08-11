@@ -1,5 +1,23 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [changer] 2026-08-11 — Phase 2 断点续传 + 打断/停止/重试（问题 15）
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/services/chat_task_manager.py`：ChatTaskManager 单例——`start(session_id, run_id, producer, user_id=None)`（同 session 活跃任务拒绝）/ `get`（done 且超 TTL 600s 惰性清理）/ `has_active` / `cancel(session_id)->bool`；`ChatRunState`（events 回放 / waiters.notify / done / cancelled / result 缓存 / user_id 归属）；`_runner` 显式 `except asyncio.CancelledError` → `{"type":"cancelled","content":"已停止生成"}`
+- 测试：`tests/unit/test_chat_task_manager.py`（7）、`tests/integration/test_ws_chat_resume.py`（7）
+
+### 改进
+- `src/aistock_agent/api/ws.py`：生成任务与 WS 连接解耦——生产者 `_run_chat_graph_to_events`（事件 sink 进 state.events + notify；`reset_token_usage` 在 create_task 前同 context；token 计费落库仅 warning 不阻断）+ 转发器 `_forward(state, send, replay)`（断连仅终止转发不取消任务）+ `_forward_until_done_or_cmd`（转发/接收并行，生成中可即时 stop）
+- 协议增量（向后兼容字节不变）：普通消息可选 `run_id`；控制消息 `{type:"resume",session_id}` → `resume_status`（none/running+run_id）/ done 直接补发终态 payload；`{type:"stop",session_id}` → `stop_status`（cancelled/not_found）；`cancelled` 终态经既有 `_forward` 终态路径下发
+- 归属校验 `_owns_run`（resume/stop 共用）：state None → True；双方 user_id 非空必须相等；任一 None → True；越权 → error "无权访问该会话" + WARN（不静默）
+- `src/aistock_agent/graph/nodes/_reasoning.py`：`stream_reasoning(websocket,...)` → `stream_reasoning(sink, node, message)`（sink 化解耦连接）
+- DONE 负载字段（content/last_deep_report/token_usage/cards）字节不变；闸门短路语义不受影响
+
+> 验证：定向 40/40 + ruff 改动文件 0；全量 A/B HEAD 22 failed ⊆ BASE 30（HEAD-only=0，修复 8 个基线失败）；三仓库整分支 review Ready to merge。
+
+---
+
 ## [changer] 2026-08-11 — P0 端口层封堵（uvicorn 改绑）+ 文档
 **开发者**: 37588
 
