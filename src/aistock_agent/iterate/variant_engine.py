@@ -34,6 +34,9 @@ _VALID_VARIANT_TYPES = {"prompt_diff", "workflow_diff", "data_source_diff"}
 
 #: 变体生成时喂给 LLM 的单个文件内容上限（超长截断，防止爆上下文）
 _MAX_VARIANT_FILE_CHARS = 8000
+# 变体生成输出 token 上限：new_content 需输出完整文件（含 JSON 转义），
+# 默认 deep_think_max_tokens=4000 会截断，这里按输出体量放大。
+_MAX_VARIANT_OUTPUT_TOKENS = 12000
 
 _GENERATE_PROMPT = """你是迭代优化工程师。目标是改进待迭代 Agent 的归因质量。
 以下是待迭代文件的当前完整内容（含路径；超长已截断并标注）：
@@ -99,7 +102,13 @@ async def generate_variant(
     )
     # LLM 注入沿用 evaluator 的已验证模式：模块级 import + get_deep_think()，
     # 避免 from-import 的绑定陷阱（模块内部状态变更时旧引用失效）。
-    llm = llm_service.get_deep_think()
+    # 变体生成要输出完整文件内容（可达数千字符），默认 deep_think_max_tokens=4000
+    # 且 DeepSeek 深度思考与输出共用 token 池，容易在 JSON 中途被截断；
+    # 这里显式加大 max_tokens 并关闭思考（生产走本地代理参数可能被剥离，大 token 兜底）。
+    llm = llm_service.get_deep_think(
+        max_tokens=_MAX_VARIANT_OUTPUT_TOKENS,
+        extra_body={"thinking": {"type": "disabled"}, "reasoning_effort": "none"},
+    )
     resp = await llm.ainvoke(
         [SystemMessage(content=prompt), HumanMessage(content=str(case["event_title"]))]
     )

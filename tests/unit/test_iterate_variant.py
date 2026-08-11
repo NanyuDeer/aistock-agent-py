@@ -195,6 +195,12 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
     assert 'REVIEW_PROMPT = "外盘传导优先"' in prompt_arg
     assert "async def run(state):" in prompt_arg
     assert "禁止删除/重命名已有函数、常量与入口" in prompt_arg
+    # 输出体量需要大 max_tokens + 关闭思考，防止 JSON 中途截断（线上事故复现）
+    assert factory.call_args.kwargs["max_tokens"] >= 8000
+    assert factory.call_args.kwargs["extra_body"] == {
+        "thinking": {"type": "disabled"},
+        "reasoning_effort": "none",
+    }
     assert plan.type == "prompt_diff"
     new_content = plan.new_content["src/aistock_agent/prompts/workers/review.py"]
     assert new_content == 'REVIEW_PROMPT = "新"\n'
