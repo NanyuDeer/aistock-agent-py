@@ -38,6 +38,20 @@ _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 _scheduler: AsyncIOScheduler | None = None
 
 
+async def _scheduler_heartbeat() -> None:
+    """调度器心跳（诊断）：验证运行进程内 cron 调度链路是否存活。
+
+    每 2 分钟触发一次并打印日志；若长时间无 heartbeat，
+    说明 AsyncIOScheduler 在 uvicorn 进程内未按时调度（misfire 或
+    event loop 阻塞），可据此定位定时任务不触发问题。
+    """
+    logger.info(
+        "scheduler_heartbeat",
+        jobs=[job.id for job in get_scheduler().get_jobs()],
+        report_date=shanghai_today().isoformat(),
+    )
+
+
 def get_scheduler() -> AsyncIOScheduler:
     """获取调度器单例（懒初始化，未 start 前仅创建实例）"""
     global _scheduler
@@ -127,6 +141,25 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
         logger.info("scheduler_legacy_evening_chain")
+
+    # 触发时刻 event loop 若短暂繁忙，APScheduler 默认 misfire_grace_time=1s
+    # 会直接跳过任务（表现为"cron 未触发"且无任何日志）。放宽到 1 小时，
+    # 并在 loop 恢复后补跑；coalesce=False 保留每次错过的触发。
+    for job in scheduler.get_jobs():
+        job.misfire_grace_time = 3600
+        job.coalesce = False
+
+    # 心跳 job：每 2 分钟验证调度链路存活（诊断定时任务不触发问题）
+    scheduler.add_job(
+        _scheduler_heartbeat,
+        CronTrigger.from_crontab(
+            "*/2 * * * *",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="scheduler_heartbeat",
+        name="scheduler heartbeat",
+        replace_existing=True,
+    )
 
     scheduler.start()
     logger.info("scheduler_started", jobs=[job.id for job in scheduler.get_jobs()])
