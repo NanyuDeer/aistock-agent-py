@@ -28,12 +28,26 @@ _REPLAY_PATCH_TARGETS: dict[str, str] = {
 # 注意：review.py 用 from-import 绑定这些名字，patch 必须指向
 # aistock_agent.agents.workers.review.<name>（绑定模块）而非源模块；
 # NodeApiClient 是类方法，replacement 必须接受任意参数（含 self）。
-_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
-    "aistock_agent.agents.workers.review.set_cached_review",
+# 分两类：
+# - sync 目标：archiver 的归档函数是同步函数，review.py 直接调用
+#   `archive_market_trace_snapshot(snapshot)` / `if not archive_review(...)`，
+#   用 async no-op 会产生未 await 的协程（RuntimeWarning 且恒真），必须同步替换。
+# - async 目标：`await set_cached_review(...)` / `await node_api.save_*`，异步替换。
+_SYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.archive_market_trace_snapshot",
     "aistock_agent.agents.workers.review.archive_review",
+)
+_ASYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
+    "aistock_agent.agents.workers.review.set_cached_review",
     "aistock_agent.services.data_client.NodeApiClient.save_analysis_report",
     "aistock_agent.services.data_client.NodeApiClient.save_token_usage",
+)
+
+# 缓存读隔离：回放必须强制走完整流水线。review.py:963 `await get_cached_review(report_date)`
+# 不在副作用表里，若真实 Redis 命中会让回放返回生产全量数据，破坏 T 窗口隔离承诺，
+# 因此 patch 为"无缓存"（返回 None）。同样 patch review 绑定名。
+_CACHE_READ_ISOLATION_TARGETS: tuple[str, ...] = (
+    "aistock_agent.agents.workers.review.get_cached_review",
 )
 
 _PATCHED_PATHS: set[str] = set()
@@ -77,8 +91,14 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
             continue  # 未声明回放的工具保持原逻辑（如知识图谱查询）
         _patch_async(target_path, _make_reader(field_name, snapshot, logic_name))
 
-    for target in _SIDE_EFFECT_TARGETS:
+    for target in _SYNC_SIDE_EFFECT_TARGETS:
+        _patch_sync(target, _make_sync_noop)
+
+    for target in _ASYNC_SIDE_EFFECT_TARGETS:
         _patch_async(target, _make_noop)
+
+    for target in _CACHE_READ_ISOLATION_TARGETS:
+        _patch_async(target, _make_no_cache)
 
     logger.info("iterate_replay_patches_applied", agent_id=adapter.agent_id)
 
@@ -115,6 +135,16 @@ def _import_owner(target_path: str) -> tuple[object, str]:
 
 
 def _patch_async(target_path: str, replacement: Callable[..., Awaitable[object]]) -> None:
+    """把 target_path 引用的函数替换为 async replacement，并保留原函数供恢复。"""
+    _patch(target_path, replacement)
+
+
+def _patch_sync(target_path: str, replacement: Callable[..., object]) -> None:
+    """把 target_path 引用的函数替换为 sync replacement，并保留原函数供恢复。"""
+    _patch(target_path, replacement)
+
+
+def _patch(target_path: str, replacement: Callable[..., object]) -> None:
     """把 target_path 引用的函数替换为 replacement，并保留原函数供恢复。"""
     owner, attr = _import_owner(target_path)
     original = getattr(owner, attr, None)
@@ -127,8 +157,31 @@ def _patch_async(target_path: str, replacement: Callable[..., Awaitable[object]]
     _PATCHED_PATHS.add(target_path)
 
 
-async def _make_noop(*args: object, **kwargs: object) -> object:
-    """副作用 no-op：接受任意参数（含实例方法 self），不执行任何写入。"""
+async def _make_noop(*args: object, **kwargs: object) -> bool:
+    """async 副作用 no-op：接受任意参数（含实例方法 self），返回 True 表示成功。
+
+    调用方用 `if not await set_cached_review(...)` 判断成败（review.py:1130），
+    返回 None 会被 `not None` 判为失败 → 回放降级，因此必须返回 True。
+    """
+    return True
+
+
+def _make_sync_noop(*args: object, **kwargs: object) -> bool:
+    """sync 副作用 no-op：archive_review / archive_market_trace_snapshot 是同步函数。
+
+    review.py 直接 `archive_market_trace_snapshot(snapshot)` 和
+    `if not archive_review(...)`（review.py:1039/1120），必须同步返回 True；
+    返回协程会产生 RuntimeWarning 且恒真（真值判断失效）。
+    """
+    return True
+
+
+async def _make_no_cache(*args: object, **kwargs: object) -> None:
+    """缓存读隔离 no-op：get_cached_review 恒返回 None（"无缓存"）。
+
+    review.py:963 先读缓存再决定是否走完整流水线；返回 None 强制走
+    完整回放路径，避免真实 Redis 命中引入生产数据破坏 T 窗口隔离。
+    """
     return None
 
 
@@ -173,13 +226,16 @@ def _format_global(raw: object) -> str:
 
 
 def _parse_market_snapshot(raw: object) -> object:
-    """把切片 market_snapshot JSON 解析为 MarketTraceSnapshot 实例（review 消费）。"""
+    """把切片 market_snapshot JSON 解析为 MarketTraceSnapshot 实例（review 消费）。
+
+    校验失败直接抛 ValueError 让回放快速失败——返回原始 dict 会在
+    validate_snapshot_discovery 处以隐晦的类型错误崩溃，难以定位。
+    """
     from aistock_agent.schemas.market_trace import MarketTraceSnapshot
 
     if not isinstance(raw, dict):
-        return raw
+        raise ValueError("replay market_snapshot must be a dict")
     try:
         return MarketTraceSnapshot.model_validate(raw)
-    except Exception:  # noqa: BLE001
-        logger.warning("iterate_replay_market_snapshot_invalid")
-        return raw
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"replay market_snapshot invalid: {e}") from e

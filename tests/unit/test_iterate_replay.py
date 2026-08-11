@@ -52,3 +52,23 @@ async def test_apply_patches_reads_slice(iterate_data_dir: object) -> None:
     out = await news_tools.get_cls_news(limit=10)  # 已替换为回放版本，读切片
     assert "隔夜美股" in out
     remove_replay_patches()
+
+
+@pytest.mark.asyncio
+async def test_noop_contracts(iterate_data_dir: object) -> None:
+    """no-op 契约：async 副作用 await 后为 True、缓存读返回 None、sync 归档同步返回 True。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    os.environ["REPLAY_AGENT"] = "review"
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.agents.workers import review as review_module
+
+    # Critical 回归：review.py `if not await set_cached_review(...)`，None 会被判为失败
+    assert await review_module.set_cached_review("2026-07-31", {}) is True
+    # Important 1 回归：sync 归档函数必须同步返回 True（非协程、非 None）
+    assert review_module.archive_review("md", "snap-1") is True
+    assert review_module.archive_market_trace_snapshot(object()) is True
+    # Important 2 回归：缓存读隔离返回 None（"无缓存"），强制完整回放路径
+    assert await review_module.get_cached_review("2026-07-31") is None
+    remove_replay_patches()
