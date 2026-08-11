@@ -244,6 +244,94 @@ async def _forward(
         pass
 
 
+def _owns_run(state: ChatRunState | None, data_user_id: str | None) -> bool:
+    """归属校验（spec §8.4，供 resume/stop 使用）。
+
+    - state 不存在 → True（调用方据此走 resume_status none / stop_status not_found）；
+    - 双方 user_id 均非空时必须相等，否则 False（越权拒绝）；
+    - 任一方为 None（未登录）→ True。
+    """
+    if state is None:
+        return True
+    if state.user_id is not None and data_user_id is not None:
+        return state.user_id == data_user_id
+    return True
+
+
+async def _forward_until_done_or_cmd(
+    state: ChatRunState,
+    websocket: WebSocket,
+    session_id: str,
+) -> None:
+    """转发与接收并行：生成期间可即时处理 stop 控制消息（stop 可打断的前提）。
+
+    转发协程（_forward，replay=True 从头转发：本轮 run 的 events 初始为空，
+    从 0 起不会漏掉快速完成场景下的早期事件；若用 replay=False，cursor 基准
+    len(state.events) 会因 producer 先于本函数内的转发 task 执行而跳过已产出事件）
+    与接收协程以 FIRST_COMPLETED 竞速：
+    - 转发完成（done/error/cancelled 终态已补发）→ 返回；
+    - 收到 stop → cancel 活跃 run + stop_status（越权显式 error，不静默）；
+    - 收到其他消息（含 resume）→ 并发防护提示，继续监听。
+    连接断开 → 仅停止监听，后台任务继续跑完。
+    """
+    send_task = asyncio.create_task(
+        _forward(state, websocket.send_json, replay=True)
+    )
+    recv_task = asyncio.create_task(websocket.receive_json())
+    try:
+        while not send_task.done():
+            done, _ = await asyncio.wait(
+                {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if send_task in done:
+                # 检索 recv_task 异常（若以 WebSocketDisconnect 结束时避免
+                # "Task exception was never retrieved" 日志噪声）
+                if recv_task.done() and not recv_task.cancelled():
+                    recv_task.exception()
+                if not recv_task.done():
+                    recv_task.cancel()
+                return
+            try:
+                msg = recv_task.result()
+            except (WebSocketDisconnect, RuntimeError):
+                # 连接断开（receive 侧）：仅停止监听；转发协程继续转发到本轮结束。
+                # 真实连接下 send 失败会让 _forward 自行退出；不能立即返回并 cancel
+                # send_task——否则快速完成场景/测试中事件会被丢弃（普通消息语义不变）。
+                await send_task
+                return
+            if msg.get("type") == "stop":
+                s = chat_task_manager.get(session_id)
+                if s is None:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+                elif not _owns_run(s, msg.get("user_id")):
+                    logger.warning("chat.stop.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                elif chat_task_manager.cancel(session_id):
+                    await websocket.send_json({
+                        "type": "stop_status", "status": "cancelled", "run_id": s.run_id,
+                    })
+                else:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+            elif msg.get("type") == "resume":
+                pass  # 生成中 resume 无意义（本轮已在本连接续流），忽略
+            else:
+                await websocket.send_json({
+                    "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
+                })
+            # 继续监听下一条
+            recv_task = asyncio.create_task(websocket.receive_json())
+    except (WebSocketDisconnect, RuntimeError):
+        # 连接断开：停止监听；转发协程（send_task）会因 send 失败自行退出，后台任务继续
+        pass
+    finally:
+        if not send_task.done():
+            send_task.cancel()
+        if recv_task is not None and not recv_task.done():
+            recv_task.cancel()
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     """WebSocket 对话（流式输出 + 进度反馈 + 断点续传 resume）。
@@ -265,6 +353,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 state = chat_task_manager.get(session_id)
                 if state is None:
                     await websocket.send_json({"type": "resume_status", "status": "none"})
+                elif not _owns_run(state, data.get("user_id")):
+                    logger.warning("chat.resume.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
                 elif state.done:
                     if state.result is not None:
                         await websocket.send_json(state.result)
@@ -273,6 +366,25 @@ async def ws_chat(websocket: WebSocket) -> None:
                         "type": "resume_status", "status": "running", "run_id": state.run_id,
                     })
                     await _forward(state, websocket.send_json, replay=True)
+                continue
+
+            # Part 2：stop 控制消息（生成中打断）。resume 路径在连接空闲期由外层
+            # receive 处理；生成中的 stop 由 _forward_until_done_or_cmd 内部处理。
+            if data.get("type") == "stop":
+                state = chat_task_manager.get(session_id)
+                if state is None:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+                elif not _owns_run(state, data.get("user_id")):
+                    logger.warning("chat.stop.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                elif chat_task_manager.cancel(session_id):
+                    await websocket.send_json({
+                        "type": "stop_status", "status": "cancelled", "run_id": state.run_id,
+                    })
+                else:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
                 continue
 
             message = data.get("message", "")
@@ -323,7 +435,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             ) -> dict | None:
                 return await _run_chat_graph_to_events(st, g, is_, m, sid, uid)
 
-            state = chat_task_manager.start(session_id, run_id, producer)
+            state = chat_task_manager.start(session_id, run_id, producer, user_id_for_billing)
             if state is None:
                 # start 返回 None：同 session 已有活跃任务（has_active 与 start 间
                 # 存在竞态窗口，双保险）
@@ -331,6 +443,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                     "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
                 })
                 continue
-            await _forward(state, websocket.send_json, replay=False)
+            # 转发与接收并行：生成期间可收到 stop 控制消息（stop 可打断的前提，spec §8.3）
+            await _forward_until_done_or_cmd(state, websocket, session_id)
     except WebSocketDisconnect:
         pass

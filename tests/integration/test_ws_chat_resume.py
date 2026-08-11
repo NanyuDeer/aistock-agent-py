@@ -20,6 +20,8 @@ class FakeRunState:
     def __init__(self, events, done, result):
         self.session_id = "s"
         self.run_id = "r1"
+        self.user_id = None          # Part 2：归属
+        self.cancelled = False       # Part 2：cancelled 终态标记
         self.events = events
         self.waiters = set()
         self.done = done
@@ -114,3 +116,106 @@ async def test_manager_done_resume_path():
     assert got.done is True
     assert got.result == {"type": "done", "content": "完整回答"}
     await manager._cleanup_for_test()
+
+
+"""--- Part 2：stop 控制消息 + 归属校验 ---"""
+
+
+class FakeCmdWs:
+    """最小 WebSocket 形状：send_json 记录；receive_json 按 inbox 出队，空则挂起。"""
+
+    def __init__(self, inbox: list[dict]):
+        self.sent: list[dict] = []
+        self._inbox = list(inbox)
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
+
+    async def receive_json(self) -> dict:
+        while not self._inbox:
+            await asyncio.sleep(0.02)
+        return self._inbox.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_owns_run_ownership_rules():
+    """归属校验规则（spec §8.4）：None state 放行；双方非空必须相等；任一方 None 放行。"""
+    from aistock_agent.api.ws import _owns_run
+
+    assert _owns_run(None, "o_x") is True      # 无记录 → 放行（走 none/not_found）
+    assert _owns_run(None, None) is True
+    state = FakeRunState(events=[], done=True, result=None)
+    state.user_id = "o_a"
+    assert _owns_run(state, "o_a") is True
+    assert _owns_run(state, "o_b") is False    # 越权
+    assert _owns_run(state, None) is True      # 未登录放行
+    state.user_id = None
+    assert _owns_run(state, "o_b") is True
+
+
+@pytest.mark.asyncio
+async def test_forward_until_done_or_cmd_stop_cancels_run():
+    """生成中收到 stop → cancel 活跃 run + stop_status cancelled + cancelled 终态。"""
+    from aistock_agent.api.ws import _forward_until_done_or_cmd
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+    started = asyncio.Event()
+
+    async def slow_producer(state):
+        started.set()
+        await asyncio.sleep(30)
+        return {"type": "done", "content": "x"}
+
+    # 注意：必须用模块级单例 chat_task_manager（_forward_until_done_or_cmd 内部
+    # 用同一单例 get/cancel，若用独立 ChatTaskManager() 实例会 miss 状态）
+    state = chat_task_manager.start("st1", "r1", slow_producer, "o_a")
+    assert state is not None
+    await started.wait()
+
+    ws = FakeCmdWs([{"type": "stop", "session_id": "st1", "user_id": "o_a"}])
+    await _forward_until_done_or_cmd(state, ws, "st1")
+    await state.task
+
+    assert state.done is True and state.cancelled is True
+    assert state.result == {"type": "cancelled", "content": "已停止生成"}
+    assert any(
+        s.get("type") == "stop_status" and s.get("status") == "cancelled"
+        for s in ws.sent
+    )
+    assert any(s.get("type") == "cancelled" for s in ws.sent)  # 经 _forward 终态路径下发
+    await chat_task_manager._cleanup_for_test()
+
+
+@pytest.mark.asyncio
+async def test_forward_until_done_or_cmd_ignores_unauthorized_stop():
+    """越权 stop（user_id 不一致）→ 不 cancel、显式 error，不静默。"""
+    from aistock_agent.api.ws import _forward_until_done_or_cmd
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+    started = asyncio.Event()
+
+    async def slow_producer(state):
+        started.set()
+        await asyncio.sleep(30)
+        return {"type": "done", "content": "x"}
+
+    state = chat_task_manager.start("st2", "r1", slow_producer, "o_a")
+    assert state is not None
+    await started.wait()
+
+    ws = FakeCmdWs([{"type": "stop", "session_id": "st2", "user_id": "o_b"}])
+    # 越权 stop 不应 cancel——先让内部处理越权 stop 分支，再手动结束 run（模拟后端最终收尾）
+    stop_task = asyncio.create_task(_forward_until_done_or_cmd(state, ws, "st2"))
+    await asyncio.sleep(0.05)  # 让内部处理越权 stop 分支
+    state.cancel()             # 手动取消 run 使转发协程退出（验证越权分支不 cancel）
+    await state.task
+    await stop_task
+
+    assert state.cancelled is True
+    assert any(
+        s.get("type") == "error" and s.get("content") == "无权访问该会话"
+        for s in ws.sent
+    )
+    await chat_task_manager._cleanup_for_test()
