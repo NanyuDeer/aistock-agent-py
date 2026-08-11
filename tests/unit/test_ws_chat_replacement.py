@@ -7,7 +7,7 @@
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -203,10 +203,10 @@ async def test_ws_chat_waits_for_reasoning_task_before_done() -> None:
     ws = _FakeWebSocket([{"message": "你好"}])
 
     async def fake_stream_reasoning(
-        websocket: object, node: str, message: str
+        sink: Callable[[dict], Awaitable[None]], node: str, message: str
     ) -> None:
         await asyncio.sleep(0.05)
-        await websocket.send_json({"type": "reasoning", "node": node, "chunk": "思考中"})  # type: ignore[attr-defined]
+        await sink({"type": "reasoning", "node": node, "chunk": "思考中"})
 
     events = [
         {"event": "on_chain_start", "name": "qa_router"},
