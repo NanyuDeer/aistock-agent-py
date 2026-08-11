@@ -23,9 +23,11 @@ def test_review_adapter_fields() -> None:
 def test_event_analyst_data_deps() -> None:
     adapter = get_adapter("event_analyst")
     assert adapter.module_path == "aistock_agent.agents.workers.event"
-    # C1：event_analyst 实际绑定 search_cls_news（event_news）与 tavily_finance_search（search），
-    # 三者均映射到切片 cls_telegraph 语料，回放时全部走切片、不发网络请求。
-    assert set(adapter.data_deps) == {"news", "event_news", "search"}
+    # C1（round 2）：event 工具经 registry 持有的 BaseTool 调用，模块属性 patch
+    # 拦截不到（search_cls_news 的 event_news 目标已删除）；回放隔离下沉到服务层
+    # （_SERVICE_ISOLATION_TARGETS 的 node_read/tavily_search），data_deps 仅保留
+    # cls_telegraph 映射文档（news/search 均读该切片字段）。
+    assert set(adapter.data_deps) == {"news", "search"}
     assert all(field == "cls_telegraph" for field in adapter.data_deps.values())
 
 

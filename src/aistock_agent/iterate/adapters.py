@@ -12,8 +12,10 @@ class IterableAgentAdapter:
     """可迭代 Agent 的统一描述。
 
     data_deps 键为回放逻辑名，值对应切片 window_before 的字段名：
-    - "news"       → "cls_telegraph"（财联社电报）
-    - "event_news" → "cls_telegraph"（event_analyst 绑定的 search_cls_news 个股新闻搜索）
+    - "news"       → "cls_telegraph"（财联社电报；event 服务层回放读
+                     （_SERVICE_ISOLATION_TARGETS 的 node_read）按 path 命中
+                     news/telegraph/search 时同样读该字段，news→cls_telegraph
+                     即服务层 reader 的映射）
     - "search"     → "cls_telegraph"（tavily_finance_search 的受限"可搜索"语料）
     - "market"     → "market_snapshot"（冻结快照，含 a_share 指数/板块/广度）
     - "global"     → "global_markets"（全球市场）
@@ -54,7 +56,6 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
         tool_categories=("event",),
         data_deps={
             "news": "cls_telegraph",
-            "event_news": "cls_telegraph",
             "search": "cls_telegraph",
         },
         ground_truth_kind="attribution",

@@ -16,41 +16,70 @@ from aistock_agent.iterate.case_builder import load_case
 
 logger = structlog.get_logger()
 
-# 逻辑名 → 可 patch 的模块路径（框架级工具映射，非 agent 特判）
-# - "event_news"：event_analyst 实际绑定 search_cls_news（news_tools），必须回放；
-# - "search"：tavily_finance_search 在回放模式下不发起网络请求，读切片语料（受限"可搜索"语料）。
+# 逻辑名 → 可 patch 的模块路径（框架级工具映射，非 agent 特判）。
+# 注意：这是"模块属性"patch，只对 agent 代码直接调用的模块级函数生效。
+# review/event 的工具经 registry 持有的 BaseTool 调用（原始函数在 import 时被捕获），
+# 模块属性 patch 拦截不到，真正的隔离在服务层（见 _SERVICE_ISOLATION_TARGETS）：
+# - review 的隔离由 market 绑定 patch（build_market_trace_snapshot）承担；
+# - news/global 目标对 review 是惰性的——review.py 从不直接调用
+#   get_cls_news / get_global_markets，保留仅为兼容直接调用路径；
+# - "search"：tavily_finance_search 直接调用时读切片语料（受限"可搜索"语料）。
 _REPLAY_PATCH_TARGETS: dict[str, str] = {
     "news": "aistock_agent.tools.news_tools.get_cls_news",
-    "event_news": "aistock_agent.tools.news_tools.search_cls_news",
     "market": "aistock_agent.agents.workers.review.build_market_trace_snapshot",
     "global": "aistock_agent.tools.market_tools.get_global_markets",
     "search": "aistock_agent.tools.search_tools.tavily_finance_search",
 }
 
+# 服务层隔离（C1 根因修复）：event 工具经 registry 持有的 BaseTool 调用，
+# 模块属性 patch 无法拦截其捕获的原始函数；但所有 event 工具的真实网络调用
+# 最终汇入服务层——NodeApiClient.get/get_list/post（data_client.py）与
+# TavilyService.search（tavily.py）。按类方法替换（实例调用同样命中，本代码库
+# 已用 NodeApiClient.save_analysis_report 验证）。值 = 替换实现 kind：
+# - "node_read"：get/get_list 通用回放读——path 含 news/telegraph/search 时返回
+#   切片 cls_telegraph 语料（与 news_tools 消费的响应形状一致），其余返回 None（隔离）；
+# - "node_noop"：post 写操作 no-op（返回 None，回放只读——None 让调用方走
+#   优雅降级路径，避免被误判为"写成功"）；
+# - "tavily_search"：TavilyService.search 是同步静态方法（tavily_finance_search
+#   直接 `result = TavilyService.search(...)` 无 await），必须同步替换，
+#   返回切片语料（受限"可搜索"语料），不发网络请求。
+_SERVICE_ISOLATION_TARGETS: dict[str, str] = {
+    "aistock_agent.services.data_client.NodeApiClient.get": "node_read",
+    "aistock_agent.services.data_client.NodeApiClient.get_list": "node_read",
+    "aistock_agent.services.data_client.NodeApiClient.post": "node_noop",
+    "aistock_agent.services.tavily.TavilyService.search": "tavily_search",
+}
+
 # 写副作用 → no-op（回放只读，禁止污染主数据）。
-# 注意：review.py 用 from-import 绑定这些名字，patch 必须指向
-# aistock_agent.agents.workers.review.<name>（绑定模块）而非源模块；
+# 注意：review.py / event.py 用 from-import 绑定这些名字（event.py:29-31
+# `from aistock_agent.services.cache import get_cached_event, set_cached_event` /
+# `from aistock_agent.services.event_persister import persist_event_report`），
+# patch 必须指向绑定模块 aistock_agent.agents.workers.<agent>.<name> 而非源模块；
 # NodeApiClient 是类方法，replacement 必须接受任意参数（含 self）。
 # 分两类：
 # - sync 目标：archiver 的归档函数是同步函数，review.py 直接调用
 #   `archive_market_trace_snapshot(snapshot)` / `if not archive_review(...)`，
 #   用 async no-op 会产生未 await 的协程（RuntimeWarning 且恒真），必须同步替换。
-# - async 目标：`await set_cached_review(...)` / `await node_api.save_*`，异步替换。
+# - async 目标：`await set_cached_review(...)` / `await set_cached_event(...)` /
+#   `await persist_event_report(...)` / `await node_api.save_*`，异步替换。
 _SYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.archive_market_trace_snapshot",
     "aistock_agent.agents.workers.review.archive_review",
 )
 _ASYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.set_cached_review",
+    "aistock_agent.agents.workers.event.set_cached_event",
+    "aistock_agent.agents.workers.event.persist_event_report",
     "aistock_agent.services.data_client.NodeApiClient.save_analysis_report",
     "aistock_agent.services.data_client.NodeApiClient.save_token_usage",
 )
 
 # 缓存读隔离：回放必须强制走完整流水线。review.py:963 `await get_cached_review(report_date)`
-# 不在副作用表里，若真实 Redis 命中会让回放返回生产全量数据，破坏 T 窗口隔离承诺，
-# 因此 patch 为"无缓存"（返回 None）。同样 patch review 绑定名。
+# 与 event.py:601 `await get_cached_event(user_msg)` 若真实 Redis 命中会返回生产全量数据，
+# 破坏 T 窗口隔离承诺，因此 patch 为"无缓存"（返回 None）。同样 patch 绑定模块名。
 _CACHE_READ_ISOLATION_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.get_cached_review",
+    "aistock_agent.agents.workers.event.get_cached_event",
 )
 
 _PATCHED_PATHS: set[str] = set()
@@ -93,6 +122,17 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
         if target_path is None:
             continue  # 未声明回放的工具保持原逻辑（如知识图谱查询）
         _patch_async(target_path, _make_reader(field_name, snapshot, logic_name))
+
+    # C1：event 工具经 registry 持有的 BaseTool 调用（模块属性 patch 拦截不到），
+    # 服务层隔离在此统一应用（对 review 也生效：review.py 的 run(state) 只调
+    # save_analysis_report/save_prediction，前者已 no-op、后者经 post 替换间接 no-op）。
+    for target, kind in _SERVICE_ISOLATION_TARGETS.items():
+        if kind == "node_read":
+            _patch_async(target, _make_service_node_reader(snapshot))
+        elif kind == "node_noop":
+            _patch_async(target, _make_none_noop)
+        else:  # tavily_search：同步替换（TavilyService.search 调用处无 await）
+            _patch_sync(target, _make_tavily_search_reader(snapshot))
 
     for target in _SYNC_SIDE_EFFECT_TARGETS:
         _patch_sync(target, _make_sync_noop)
@@ -169,6 +209,16 @@ async def _make_noop(*args: object, **kwargs: object) -> bool:
     return True
 
 
+async def _make_none_noop(*args: object, **kwargs: object) -> None:
+    """async 写操作 no-op（返回 None）：NodeApiClient.post 在回放下不发请求。
+
+    post 的真实调用方以 None 判定"未写入/请求失败"（如 event_persister.py:69
+    `if result is None: return False`），返回 None 保持优雅降级且不污染主数据；
+    不能返回 True——会被调用方误判为写成功。
+    """
+    return None
+
+
 def _make_sync_noop(*args: object, **kwargs: object) -> bool:
     """sync 副作用 no-op：archive_review / archive_market_trace_snapshot 是同步函数。
 
@@ -188,6 +238,84 @@ async def _make_no_cache(*args: object, **kwargs: object) -> None:
     return None
 
 
+def _is_news_service_path(path: str) -> bool:
+    """判断 NodeApiClient 路径是否命中回放语料（news/telegraph/search 端点）。"""
+    return any(marker in path for marker in ("news", "telegraph", "search"))
+
+
+def _make_service_node_reader(
+    snapshot: dict[str, object],
+) -> Callable[..., Awaitable[object]]:
+    """构造 NodeApiClient.get/get_list 的服务层回放读。
+
+    event 工具（search_cls_news / get_news_fulltext / get_quote 等）经 registry
+    持有的 BaseTool 调用 node_api.get(...)（实例方法，类补丁生效）。按 path 匹配：
+    - 含 news/telegraph/search：返回切片 cls_telegraph 语料，形状与 news_tools
+      消费的响应一致——search/latest 端点消费 {"items": [...]}（_format_news_list），
+      fulltext 端点消费 {"title", "content"}；
+    - 其余路径（如 /internal/quote/...）：返回 None（隔离，不发真实请求）。
+    """
+
+    async def reader(*args: object, **kwargs: object) -> object:
+        # 实例调用 node_api.get(path) 时普通函数会被绑定，self 落在 args[0]，
+        # 因此 path 在 args[1]；兼容类级/关键字调用（args[0] / kwargs["path"]）。
+        path_kwarg = kwargs.get("path")
+        if isinstance(path_kwarg, str):
+            path = path_kwarg
+        elif len(args) >= 2:
+            path = str(args[1])
+        elif args:
+            path = str(args[0])
+        else:
+            path = ""
+        logger.debug("iterate_replay_service_node_read_isolated", path=path)
+        if not _is_news_service_path(path):
+            return None
+        raw = snapshot.get("cls_telegraph")
+        records = raw if isinstance(raw, list) else []
+        if "fulltext" in path:
+            record = next((r for r in records if isinstance(r, dict)), None)
+            if record is None:
+                return None
+            return {"title": record.get("title", ""), "content": record.get("content", "")}
+        return {"items": [r for r in records if isinstance(r, dict)]}
+
+    return reader
+
+
+def _make_tavily_search_reader(
+    snapshot: dict[str, object],
+) -> Callable[..., dict[str, object]]:
+    """构造 TavilyService.search 的服务层回放替换：返回切片语料，不发网络请求。
+
+    TavilyService.search 是同步静态方法（tavily_finance_search 直接
+    `result = TavilyService.search(...)` 后 `result.get("results")`，无 await），
+    因此必须同步返回 dict；async 替换会产生未 await 的协程（同 _make_sync_noop
+    的坑）。类补丁对类级/实例调用均生效。返回 {"results": [切片记录]}，工具按
+    Tavily 形状消费（title/content/url），并显式声明"搜索数据受限"。
+    """
+
+    def reader(*args: object, **kwargs: object) -> dict[str, object]:
+        logger.debug("iterate_replay_tavily_search_isolated")
+        raw = snapshot.get("cls_telegraph")
+        records = raw if isinstance(raw, list) else []
+        results = [
+            {
+                "title": r.get("title", ""),
+                "content": r.get("content", ""),
+                "url": r.get("url", ""),
+            }
+            for r in records
+            if isinstance(r, dict)
+        ]
+        return {
+            "results": results,
+            "note": "回放模式：搜索数据受限（切片内 T 时刻前电报语料）",
+        }
+
+    return reader
+
+
 def _make_reader(
     field_name: str,
     snapshot: dict[str, object],
@@ -197,7 +325,7 @@ def _make_reader(
 
     async def reader(*args: object, **kwargs: object) -> object:
         raw = snapshot.get(field_name)
-        if logic_name in ("news", "event_news"):
+        if logic_name == "news":
             return _format_news(raw)
         if logic_name == "search":
             return _format_search(raw)
