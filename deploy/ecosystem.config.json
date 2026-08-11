@@ -2,7 +2,7 @@
   "apps": [
     {
       "name": "aistock-agent",
-      "script": "python",
+      "script": "./.venv/bin/python",
       "args": "-m uvicorn aistock_agent.main:app --host 0.0.0.0 --port 8080",
       "cwd": "/home/aistock/aistock-agent-py",
       "interpreter": "none",
@@ -16,7 +16,6 @@
         "PYTHONPATH": "src",
         "APP_ENV": "production",
         "TZ": "Asia/Shanghai",
-        "INSIGHT_REDIS_URL": "",
         "INSIGHT_CONSUMER_ENABLED": "true",
         "STOCK_TRACE_CONSUMER_ENABLED": "false"
       },

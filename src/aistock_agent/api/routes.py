@@ -28,6 +28,7 @@ from aistock_agent.observability.metrics import get_metrics_collector as _get_me
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
+from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.qa_briefing import (
     QaBriefingPrerequisiteError,
@@ -711,9 +712,15 @@ async def trigger_broadcast_chain(
         logger.error("manual_trigger_broadcast_trend_failed", error=str(e), exc_info=True)
 
     # Step 4: 播报生成（从数据库读取报告）
+    # 与 09:00 调度链路（scheduler._run_broadcast_task）保持一致：
+    # 先聚合持久化 brief_{brief_type}，再运行 broadcast agent 生成双人播报。
+    # 若缺这一步，brief_morning 报告不存在 → broadcast 报告降级
+    # （has_source_brief=false）→ 前端 briefing 页 getBrief 查询 404。
     step_start = time.time()
     try:
-        broadcast_result = await broadcast_agent.run(_make_state())
+        if not await build_and_persist_brief("morning", today):
+            raise RuntimeError("brief 聚合持久化失败")
+        broadcast_result = await broadcast_agent.run({**_make_state(), "brief_type": "morning"})
         broadcast_ok = bool(broadcast_result.get("final_response"))
         _record("broadcast", broadcast_ok, time.time() - step_start)
         logger.info(
