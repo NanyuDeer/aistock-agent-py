@@ -1,6 +1,6 @@
 """reasoning streamer 单测 — LLM 流式 + 失败兜底 + 超时。
 
-关键：stream_reasoning(websocket, node, message: str) 直接接收用户原始问题字符串，
+关键：stream_reasoning(sink, node, message: str) 直接接收用户原始问题字符串，
 不读 state。测试通过断言 render_reasoning_prompt 收到非空 message 来验证。
 """
 import asyncio
@@ -25,8 +25,8 @@ async def test_stream_reasoning_sends_chunks():
          patch("aistock_agent.graph.nodes._reasoning.render_reasoning_prompt") as mock_render:
         mock_render.return_value = "prompt"
         mock_llm.return_value.astream = fake_astream
-        # 直接传 message 字符串，不传 state
-        await stream_reasoning(ws, "qa_router", "查 600519 的行情")
+        # 直接传 message 字符串，不传 state；sink 传 ws.send_json
+        await stream_reasoning(ws.send_json, "qa_router", "查 600519 的行情")
 
     # 验证 render_reasoning_prompt 收到非空 question
     mock_render.assert_called_once()
@@ -55,7 +55,7 @@ async def test_stream_reasoning_llm_failure_falls_back_to_label():
         ),
     ):
         mock_llm.side_effect = RuntimeError("LLM down")
-        await stream_reasoning(ws, "qa_router", "查 600519 的行情")
+        await stream_reasoning(ws.send_json, "qa_router", "查 600519 的行情")
 
     # 至少发一个 reasoning 事件（兜底 label）
     assert ws.send_json.await_count >= 1
@@ -86,7 +86,7 @@ async def test_stream_reasoning_timeout_falls_back():
         mock_llm.return_value.astream = slow_astream
         # 把超时缩短到 0.1s 加速测试
         with patch("aistock_agent.graph.nodes._reasoning._REASONING_TIMEOUT_SEC", 0.1):
-            await stream_reasoning(ws, "qa_router", "查 600519 的行情")
+            await stream_reasoning(ws.send_json, "qa_router", "查 600519 的行情")
 
     assert ws.send_json.await_count >= 1
 
@@ -98,7 +98,7 @@ async def test_stream_reasoning_empty_message_uses_fallback():
     ws.send_json = AsyncMock()
 
     with patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm:
-        await stream_reasoning(ws, "qa_router", "")
+        await stream_reasoning(ws.send_json, "qa_router", "")
 
     # 不应调用 LLM
     mock_llm.assert_not_called()

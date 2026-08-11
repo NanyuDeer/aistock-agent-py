@@ -178,7 +178,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                             # （initial_state 在 on_chain_start 时是 stale 的）
                             # P3-fix-2 T1.1：必须保存 task 引用，否则被 GC 从未执行
                             task = asyncio.create_task(
-                                stream_reasoning(websocket, name, message)
+                                stream_reasoning(
+                                    lambda payload: websocket.send_json(payload),
+                                    name,
+                                    message,
+                                )
                             )
                             reasoning_tasks.append(task)
 
