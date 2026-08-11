@@ -23,7 +23,7 @@ _SMTP_RETRY_DELAY_SECONDS = 2
 async def build_daily_report(report_date: date | None = None) -> str:
     """构建每日汇总 Markdown。无重要结果也发（设计文档 9.1）。"""
     day = report_date or date.today()
-    experiments = _read_experiments()
+    experiments = _read_experiments(day)
     pending = list_pending_review()
 
     lines = [
@@ -87,21 +87,36 @@ async def run_daily_report() -> None:
         logger.error("iterate_report_final_failure", subject=subject)
 
 
-def _read_experiments() -> list[dict[str, object]]:
+def _read_experiments(report_date: date | None = None) -> list[dict[str, object]]:
+    """读取实验记录；report_date 非空时只保留 created_at 日期 == report_date 的记录。
+
+    向后兼容：无 created_at 字段的旧记录（本修复前写入）视为"当日"恒包含，
+    避免历史实验从报告中消失；有 created_at 的记录按 ISO 日期精确过滤。
+    """
     root = get_data_dir() / "experiments"
     if not root.exists():
         return []
     records: list[dict[str, object]] = []
+    day = report_date.isoformat() if report_date else None
     for p in sorted(root.glob("*.json")):
         try:
-            records.append(json.loads(p.read_text(encoding="utf-8")))
+            record = json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
+        created_at = record.get("created_at")
+        if day is not None and isinstance(created_at, str) and created_at != day:
+            continue
+        records.append(record)
     return records
 
 
 def _format_experiments(experiments: list[dict[str, object]]) -> str:
     if not experiments:
+        # 空切片库（无待迭代案例）与"今日无实验"区分展示，避免误读
+        from aistock_agent.iterate.case_builder import list_pending_cases
+
+        if not list_pending_cases():
+            return "（无待迭代案例，切片库为空或均已迭代）"
         return "（今日无实验）"
     lines = ["| 案例 | 轮次 | 变体 | 评分 | 差距分析 |", "|---|---|---|---|---|"]
     for e in experiments:

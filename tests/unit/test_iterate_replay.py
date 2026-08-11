@@ -55,6 +55,25 @@ async def test_apply_patches_reads_slice(iterate_data_dir: object) -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_patches_isolates_event_analyst_search(iterate_data_dir: object) -> None:
+    """C1 回归：event_analyst 绑定的 search_cls_news / tavily_finance_search
+    在回放模式下读切片 window_before 语料，不发网络请求。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    os.environ["REPLAY_AGENT"] = "event_analyst"
+    adapter = get_adapter("event_analyst")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.tools import news_tools, search_tools
+
+    news_out = await news_tools.search_cls_news("600519")  # 已替换为回放版本，读切片
+    assert "隔夜美股" in news_out
+    search_out = await search_tools.tavily_finance_search("外盘传导")  # 同上，受限语料
+    assert "隔夜美股" in search_out
+    assert "回放模式：搜索数据受限" in search_out
+    remove_replay_patches()
+
+
+@pytest.mark.asyncio
 async def test_noop_contracts(iterate_data_dir: object) -> None:
     """no-op 契约：async 副作用 await 后为 True、缓存读返回 None、sync 归档同步返回 True。"""
     os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"

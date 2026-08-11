@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from aistock_agent.config import settings
-from aistock_agent.iterate.case_builder import list_cases, load_case
+from aistock_agent.iterate.case_builder import list_cases, list_pending_cases, load_case
 from aistock_agent.iterate.reporter import run_daily_report
 from aistock_agent.iterate.run_case import run_case
 from aistock_agent.utils.date import is_trading_day, shanghai_today
@@ -32,23 +32,31 @@ def register_iterate_jobs(scheduler: AsyncIOScheduler) -> None:
 
 
 async def _run_iterate_daily_task() -> None:
-    """每日迭代任务：非交易日跳过；生成当日切片 + 消费历史队列 + 发报告。"""
+    """每日迭代任务：非交易日跳过；消费待迭代案例 + 发报告。
+
+    切片生成（build_case）明确列为二期，首版只消费沙盒内既有切片——
+    沙盒 data/cases/ 由人工/外部流程预置，本任务不做当日切片生成。
+    案例去重（I4）：只消费尚无实验记录的切片（data/experiments/ 下无
+    ``{case_id}_r`` 前缀文件），每个案例只迭代一次，避免每个交易日
+    反复重跑最新 N 个案例。
+    """
     today = shanghai_today()
     if not is_trading_day(today):
         logger.info("iterate_skip_non_trading_day", date=today.isoformat())
         return
 
-    # ① 当日重大异动切片（首版：从已有切片队列消费；生成逻辑见扩展说明）
-    # ② 消费历史案例（先进先出，每日最多 iterate_max_daily_cases 个）
-    cases = list_cases()
-    for case_id in cases[: settings.iterate_max_daily_cases]:
+    # 消费历史案例（先进先出，每日最多 iterate_max_daily_cases 个；只消费未迭代过的）
+    pending = list_pending_cases()
+    if not pending:
+        logger.info("iterate_no_pending_cases", case_count=len(list_cases()))
+    for case_id in pending[: settings.iterate_max_daily_cases]:
         case = load_case(case_id)
         try:
             await run_case(str(case["agent_id"]), case_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("iterate_case_failed", case_id=case_id, error=str(exc))
 
-    # ④ 每日汇总报告（无重要结果也发）
+    # 每日汇总报告（无重要结果也发；空案例库时报告会注明"无待迭代案例"）
     await run_daily_report()
 
 

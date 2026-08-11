@@ -11,7 +11,7 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.iterate.adapters import get_adapter
-from aistock_agent.iterate.case_builder import load_case
+from aistock_agent.iterate.case_builder import get_data_dir, load_case
 from aistock_agent.iterate.evaluator import ScoreDetail, evaluate_attribution
 from aistock_agent.iterate.ground_truth import load_ground_truth
 from aistock_agent.iterate.variant_engine import (
@@ -49,9 +49,13 @@ async def run_case(
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
     stalled = 0
     stopped_reason = "max_rounds"
+    # I2：上一轮 apply_variant 实际写过的文件（相对仓库根路径），下一轮开始时
+    # 连同 adapter 声明的文件一起 restore_baseline，防止 data_source_diff 改动
+    # tools/config 等未声明文件跨轮残留。
+    last_written: tuple[str, ...] = ()
 
     for round_no in range(1, limit + 1):
-        restore_baseline(adapter, root)
+        restore_baseline(adapter, root, extra_files=last_written)
 
         if round_no == 1:
             variant = None
@@ -66,7 +70,8 @@ async def run_case(
                 _last_score(best),
                 str(best.get("gap_analysis", "")),
             )
-            apply_variant(variant, root)
+            written = apply_variant(variant, root)
+            last_written = tuple(str(p.relative_to(root.resolve())) for p in written)
             record = await run_experiment_round(
                 adapter.agent_id, case, round_no, variant, ground_truth
             )
@@ -116,19 +121,38 @@ async def run_case(
 async def _run_baseline(
     agent_id: str, case_id: str, ground_truth: dict[str, object]
 ) -> dict[str, object]:
-    """round 1 基线：子进程回放 + 评分（复用 run_experiment_round 的记录逻辑）。"""
+    """round 1 基线：子进程回放 + 评分，并落盘实验记录（I5：基线轮也写入实验记录，
+    使每日报告能看到 round 1）。"""
     # 函数内 import：从 variant_engine 模块命名空间按名字取（而非 from-import 固定绑定），
     # 使测试 patch("aistock_agent.iterate.variant_engine._run_replay_subprocess") 生效。
-    from aistock_agent.iterate.variant_engine import _run_replay_subprocess
+    from aistock_agent.iterate.variant_engine import (
+        _content_hash,
+        _now_iso_date,
+        _run_replay_subprocess,
+    )
 
     output = await _run_replay_subprocess(agent_id, case_id, "baseline")
     score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
-    return {
-        "score": score.total,
-        "score_detail_obj": score,
-        "gap_analysis": score.gap_analysis,
+    record: dict[str, object] = {
+        "case_id": case_id,
+        "round": 1,
+        "agent_id": agent_id,
         "variant": {"type": "baseline", "files": [], "instructions": ""},
+        "score": score.total,
+        "score_detail": {
+            "direction": score.direction,
+            "drivers": score.drivers,
+            "sectors": score.sectors,
+        },
+        "gap_analysis": score.gap_analysis,
+        "duration_ms": 0,
+        "variant_hash": _content_hash({}),
+        "created_at": _now_iso_date(),
     }
+    path = get_data_dir() / "experiments" / f"{case_id}_r1_baseline.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**record, "score_detail_obj": score}
 
 
 def _last_score(best: dict[str, object]) -> ScoreDetail | None:

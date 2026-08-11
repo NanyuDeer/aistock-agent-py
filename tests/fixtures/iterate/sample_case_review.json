@@ -13,11 +13,31 @@
       }
     ],
     "market_snapshot": {
+      "snapshot_id": "trace-20260731-replay",
       "trade_date": "2026-07-31",
       "captured_at": "2026-07-31T15:35:00+08:00",
-      "indexes": {"sh": 1.2, "sz": 1.8, "cyb": 2.4},
-      "sectors": [{"name": "半导体", "change_pct": 3.2}],
-      "breadth": {"up": 3800, "down": 900}
+      "a_share": {},
+      "sources": {},
+      "missing_fields": ["a_share.indexes", "cls_news", "global_markets"],
+      "data_availability": {},
+      "collection_status": {},
+      "phenomenon_discovery": {
+        "status": "insufficient_data",
+        "primary": null,
+        "concurrent_phenomena": [],
+        "data_readiness": {
+          "market_data": "incomplete",
+          "attribution_inputs": "missing",
+          "causal_evidence": "not_ready"
+        },
+        "diagnostics": [
+          {"rule": "broad_rally", "matched": false, "evidence_ids": []},
+          {"rule": "broad_decline", "matched": false, "evidence_ids": []},
+          {"rule": "style_divergence", "matched": false, "evidence_ids": []},
+          {"rule": "sector_concentration", "matched": false, "evidence_ids": []},
+          {"rule": "sentiment_extreme", "matched": false, "evidence_ids": []}
+        ]
+      }
     },
     "global_markets": [
       {"ticker": "^DJI", "change_pct": 1.9, "asof": "2026-07-31T04:00:00+08:00"},

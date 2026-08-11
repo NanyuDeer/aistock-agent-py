@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Literal, cast
 
@@ -98,10 +99,18 @@ async def generate_variant(
 
 
 def apply_variant(variant: VariantPlan, repo_root: Path) -> list[Path]:
-    """把变体写盘（覆盖对应文件），返回实际改动文件列表。"""
+    """把变体写盘（覆盖对应文件），返回实际改动文件列表。
+
+    路径安全：rel 经过 lstrip("/") 后仍可能含 "../../" 逃逸出仓库根，
+    必须做包含性校验（resolve 后仍在 repo_root 内），否则变体可越权改写
+    沙盒外文件。
+    """
+    root = repo_root.resolve()
     written: list[Path] = []
     for rel, content in variant.new_content.items():
-        path = repo_root / rel.lstrip("/")
+        path = (root / rel.lstrip("/")).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"variant path escapes repo root: {rel}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(path)
@@ -109,9 +118,18 @@ def apply_variant(variant: VariantPlan, repo_root: Path) -> list[Path]:
     return written
 
 
-def restore_baseline(adapter: IterableAgentAdapter, repo_root: Path) -> None:
-    """git checkout -- 恢复 adapter 声明的提示词/工作流文件到基线。"""
-    files = list(adapter.prompt_files) + list(adapter.workflow_files)
+def restore_baseline(
+    adapter: IterableAgentAdapter,
+    repo_root: Path,
+    extra_files: tuple[str, ...] = (),
+) -> None:
+    """git checkout -- 恢复 adapter 声明的提示词/工作流文件到基线。
+
+    extra_files：上一轮 apply_variant 实际写过的相对路径（如 data_source_diff
+    改动 tools/config 文件，不在 adapter 声明内），一并恢复，防止跨轮残留。
+    非 git 目录（如测试 tmp_path）git checkout 失败仅告警，不阻塞。
+    """
+    files = list(adapter.prompt_files) + list(adapter.workflow_files) + list(extra_files)
     if not files:
         return
     result = subprocess.run(
@@ -133,10 +151,10 @@ async def run_experiment_round(
 ) -> dict[str, object]:
     """应用变体 → 子进程回放 → 评分 → 落盘实验记录。
 
-    返回 {score, score_detail, gap_analysis, agent_output, git_commit}。
+    返回 {score, score_detail, gap_analysis, agent_output, variant_hash}。
     """
     case_id = str(case["case_id"])
-    variant_hash = f"r{round_no}"
+    variant_hash = _content_hash(variant.new_content)
     output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
     score = await evaluate_attribution(
         str(output.get("final_response", "")), ground_truth
@@ -158,7 +176,8 @@ async def run_experiment_round(
         },
         "gap_analysis": score.gap_analysis,
         "duration_ms": 0,
-        "git_commit": f"exp-{agent_id}-{case_id}-r{round_no}",
+        "variant_hash": variant_hash,
+        "created_at": _now_iso_date(),
     }
     path = get_data_dir() / "experiments" / f"{case_id}_r{round_no}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,3 +234,16 @@ def _parse_json(text: str) -> dict[str, object]:
     except json.JSONDecodeError:
         logger.warning("iterate_variant_llm_invalid_json", snippet=raw[:200])
         return {}
+
+
+def _content_hash(new_content: dict[str, str]) -> str:
+    """变体内容的真实 sha256（json.dumps sorted keys），替代伪造的 git_commit。"""
+    import hashlib
+
+    payload = json.dumps(new_content, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _now_iso_date() -> str:
+    """实验记录 created_at：ISO 日期（YYYY-MM-DD，本地时区），供报告按日过滤。"""
+    return date.today().isoformat()

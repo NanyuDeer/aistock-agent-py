@@ -17,8 +17,11 @@ from aistock_agent.iterate.case_builder import load_case
 logger = structlog.get_logger()
 
 # 逻辑名 → 可 patch 的模块路径（框架级工具映射，非 agent 特判）
+# - "event_news"：event_analyst 实际绑定 search_cls_news（news_tools），必须回放；
+# - "search"：tavily_finance_search 在回放模式下不发起网络请求，读切片语料（受限"可搜索"语料）。
 _REPLAY_PATCH_TARGETS: dict[str, str] = {
     "news": "aistock_agent.tools.news_tools.get_cls_news",
+    "event_news": "aistock_agent.tools.news_tools.search_cls_news",
     "market": "aistock_agent.agents.workers.review.build_market_trace_snapshot",
     "global": "aistock_agent.tools.market_tools.get_global_markets",
     "search": "aistock_agent.tools.search_tools.tavily_finance_search",
@@ -194,8 +197,10 @@ def _make_reader(
 
     async def reader(*args: object, **kwargs: object) -> object:
         raw = snapshot.get(field_name)
-        if logic_name == "news":
+        if logic_name in ("news", "event_news"):
             return _format_news(raw)
+        if logic_name == "search":
+            return _format_search(raw)
         if logic_name == "global":
             return _format_global(raw)
         if logic_name == "market":
@@ -223,6 +228,25 @@ def _format_global(raw: object) -> str:
         if isinstance(r, dict)
     ]
     return "\n".join(lines) if lines else "暂无全球市场数据"
+
+
+def _format_search(raw: object) -> str:
+    """搜索类工具的回放版：不发网络请求，只返回切片内电报语料（受限"可搜索"语料）。
+
+    设计文档 6.2：搜索类工具加日期范围过滤（结果时间 ≤ T）。回放模式下
+    T 时刻后的搜索结果在切片生成时已被过滤，这里直接返回切片内语料即可，
+    显式声明"搜索数据受限"，避免 agent 误以为获得了全网搜索能力。
+    """
+    records = raw if isinstance(raw, list) else []
+    lines = [
+        f"- {r.get('title', '')}: {r.get('content', '')}（财联社电报 {r.get('time', '')}）"
+        for r in records
+        if isinstance(r, dict)
+    ]
+    header = "回放模式：搜索数据受限，以下为切片内 T 时刻前电报语料\n"
+    if not lines:
+        return "回放模式：搜索数据受限，暂无切片内语料"
+    return header + "\n".join(lines)
 
 
 def _parse_market_snapshot(raw: object) -> object:

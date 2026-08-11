@@ -65,6 +65,8 @@ async def build_case(
     if event_time.tzinfo is None:
         event_time = event_time.replace(tzinfo=_TZ)
     before = [r for r in telegraph_records if _record_time_le(r, event_time)]
+    if market_snapshot is not None:
+        _validate_market_snapshot(market_snapshot)
 
     case_id = f"case_{event_time.strftime('%Y%m%d')}_{adapter.agent_id}_{_slugify(event_title)}"
     case: dict[str, object] = {
@@ -91,6 +93,23 @@ async def build_case(
 def _record_time_le(record: dict[str, object], bound: datetime) -> bool:
     t = _parse_record_time(record)
     return t is None or t <= bound  # 无时间戳的记录保守保留（无法判定时序）
+
+
+def _validate_market_snapshot(snapshot: dict[str, object]) -> None:
+    """校验调用方提供的 market_snapshot 必须满足 MarketTraceSnapshot 契约（I3）。
+
+    回放时 review agent 会以 MarketTraceSnapshot 消费该字段并重算 discovery；
+    不合法的切片会在评估期才崩溃（评分恒 0），因此必须在生成期快速失败。
+    不自动补全缺失字段——调用方必须提供 schema-valid 的快照（全量 dump 形状）。
+    """
+    from aistock_agent.schemas.market_trace import MarketTraceSnapshot
+
+    try:
+        MarketTraceSnapshot.model_validate(snapshot)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(
+            f"market_snapshot 不符合 MarketTraceSnapshot 契约: {e}"
+        ) from e
 
 
 def _slugify(title: str) -> str:
@@ -123,3 +142,24 @@ def list_cases(agent_id: str | None = None) -> list[str]:
         return []
     ids = [p.stem for p in base.rglob("*.json") if p.stem.startswith("case_")]
     return sorted(ids, reverse=True)
+
+
+def list_pending_cases(agent_id: str | None = None) -> list[str]:
+    """列出尚无实验记录的切片 id（I4：每日任务只消费未迭代过的案例）。
+
+    判定：data/experiments/ 下存在文件名前缀 ``{case_id}_r`` 的实验记录
+    （含 {case_id}_r1_baseline.json 基线记录）即视为已迭代，不再重复消费。
+    无实验记录 → 视为待迭代。
+    """
+    cases = list_cases(agent_id)
+    if not cases:
+        return []
+    root = get_data_dir() / "experiments"
+    iterated: set[str] = set()
+    if root.exists():
+        for p in root.glob("*.json"):
+            for case_id in cases:
+                if p.stem.startswith(f"{case_id}_r"):
+                    iterated.add(case_id)
+                    break
+    return [case_id for case_id in cases if case_id not in iterated]
