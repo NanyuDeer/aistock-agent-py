@@ -392,14 +392,11 @@ async def _apply_negation_correction(
         # 否定纠错中新标的多在句末：先剥否定词/"是"/口语词，再取最后一个中文段
         # （"不是茅台，是五粮液" → "茅台，五粮液" → 末段"五粮液"；不能用
         # _extract_stock_name_candidate 的 max(len) 首段，否则取到被否定的旧标的）
-        cleaned = message
-        for kw in _NEGATION_CORRECTION_KEYWORDS:
-            cleaned = cleaned.replace(kw, "")
-        cleaned = cleaned.replace("是", "")
-        for w in _STOPWORDS_SORTED:
-            cleaned = cleaned.replace(w, "")
-        runs = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
-        candidate = runs[-1] if runs else None  # 否定纠错中新标的多在句末
+        candidate = _clean_name_segments(
+            message,
+            pre_strip=_NEGATION_CORRECTION_KEYWORDS + ("是",),
+            select="last",
+        )
         if candidate is not None:
             new_symbol = await resolve_symbol(candidate)
     if new_symbol is None:
@@ -501,19 +498,36 @@ def _is_education_question(message: str) -> bool:
     return False
 
 
+def _clean_name_segments(
+    text: str,
+    *,
+    pre_strip: tuple[str, ...] = (),
+    select: Literal["max", "last"] = "max",
+) -> str | None:
+    """统一实体清洗：剥 pre_strip + 停用词 → 取中文段 → 按 select 选择。
+
+    - pre_strip：调用方专属前缀剥除集（如否定纠错先剥否定词/"是"）
+    - select="max"：取最长段（名称候选默认，兼容 _extract_stock_name_candidate）
+    - select="last"：取末段（否定纠错专用，新标的多在句末）
+    """
+    cleaned = text
+    for w in pre_strip:
+        cleaned = cleaned.replace(w, "")
+    for w in _STOPWORDS_SORTED:
+        cleaned = cleaned.replace(w, "")
+    runs = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
+    if not runs:
+        return None
+    return max(runs, key=len) if select == "max" else runs[-1]
+
+
 def _extract_stock_name_candidate(message: str) -> str | None:
     """从消息中提取候选股票中文名（去口语词后最长的 2-8 字中文段）。
 
     供 D36 名称解析使用：先本地粗提取，再交 Node resolve_symbol 判定，
     避免把"市场主线"等非个股问句当股票解析（resolve 未命中自然回落）。
     """
-    cleaned = message
-    for w in _STOPWORDS_SORTED:
-        cleaned = cleaned.replace(w, "")
-    runs = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
-    if not runs:
-        return None
-    return max(runs, key=len)
+    return _clean_name_segments(message, select="max")
 
 
 def _infer_stock_skill(message: str) -> str:

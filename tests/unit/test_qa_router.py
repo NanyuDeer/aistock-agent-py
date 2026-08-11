@@ -1788,3 +1788,36 @@ async def test_postprocess_trend_ranking_limit_whitelist():
         output, "今天股票排名", _state("今天股票排名")
     )
     assert [c.args["limit"] for c in result.skill_calls] == [20, 50, 20]
+
+
+# ── S1（2026-08-11）：统一名称实体清洗 _clean_name_segments（行为零变化）──
+@pytest.mark.parametrize(
+    ("text", "pre_strip", "select", "expected"),
+    [
+        ("贵州茅台今天怎么样", (), "max", "贵州茅台"),
+        ("看看宁德时代最近有什么新闻", (), "max", "宁德时代"),
+        ("不是茅台，是五粮液", ("不是", "是"), "last", "五粮液"),
+        ("就是今天", (), "max", None),
+    ],
+)
+def test_clean_name_segments(
+    text: str,
+    pre_strip: tuple[str, ...],
+    select: str,
+    expected: str | None,
+) -> None:
+    """统一实体清洗：max 取最长段、last 取末段、pre_strip 前置剥除。"""
+    from aistock_agent.graph.nodes.qa_router import _clean_name_segments
+
+    assert _clean_name_segments(text, pre_strip=pre_strip, select=select) == expected
+
+
+def test_clean_name_segments_matches_extract_stock_name_candidate() -> None:
+    """等价性守卫：_extract_stock_name_candidate 行为与 max 策略一致。"""
+    from aistock_agent.graph.nodes.qa_router import (
+        _clean_name_segments,
+        _extract_stock_name_candidate,
+    )
+
+    for text in ("贵州茅台今天怎么样", "看看宁德时代最近有什么新闻", "就是今天"):
+        assert _clean_name_segments(text, select="max") == _extract_stock_name_candidate(text)
