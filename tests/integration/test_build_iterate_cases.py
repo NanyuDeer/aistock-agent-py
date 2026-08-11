@@ -86,6 +86,7 @@ async def test_build_review_case_end_to_end(tmp_path: Path) -> None:
         )
     assert result["case_id"].startswith("case_20260731")
     case = load_case(str(result["case_id"]), data_dir=tmp_path)
+    assert case["meta"] == {"snapshot_kind": "full", "t_window": "close"}
     snapshot_in_case = case["window_before"]["market_snapshot"]
     assert isinstance(snapshot_in_case, dict)
     assert snapshot_in_case["a_share"]["indexes"]["SH000001"]["change_pct"] == 1.2
@@ -122,4 +123,5 @@ async def test_build_event_cases_end_to_end(tmp_path: Path) -> None:
     assert result["generated"] == 1
     assert result["rejected"] == 0
     case = load_case(str(result["case_ids"][0]), data_dir=tmp_path)
+    assert case["meta"] == {"t_window": "event"}
     assert "美股暴涨" in str(case["event_title"])

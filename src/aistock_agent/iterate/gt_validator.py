@@ -28,13 +28,14 @@ def validate_gt_against_case(
     snapshot = window.get("market_snapshot") if isinstance(window, dict) else None
     snapshot = snapshot if isinstance(snapshot, dict) else {}
 
-    # 规则 1：方向
+    # 规则 1：方向（严格语义：GT 必须与快照推导方向完全相等，含 neutral）
     direction = str(attribution.get("direction", "neutral"))
     if direction not in _VALID_DIRECTIONS:
         violations.append(f"方向非法：{direction}")
     else:
         expected = _expected_direction(snapshot)
-        if expected in {"bullish", "bearish"} and direction != expected:
+        # 无指数数据时 expected 为 None，跳过强校验（无法推导就不强判）
+        if expected is not None and direction != expected:
             violations.append(
                 f"方向不可推导：快照指数{direction_desc(expected)}，GT={direction}"
             )
@@ -128,7 +129,11 @@ def _corpus_text(window: object) -> str:
     if isinstance(global_markets, list):
         for market in global_markets:
             if isinstance(market, dict):
-                parts.append(str(market.get("ticker", "")))
+                # 与 ground_truth._corpus_text 外盘格式一致（含 ticker + 涨跌幅），
+                # 避免「外盘传导」类驱动因语料缺少 change_pct 被误拒（I3）
+                parts.append(
+                    f"- 外盘 {market.get('ticker', '')} {market.get('change_pct', '')}%"
+                )
 
     return "\n".join(parts)
 
@@ -149,4 +154,6 @@ def _as_str_list(value: object) -> list[str]:
 
 
 def direction_desc(direction: str) -> str:
-    return {"bullish": "上涨", "bearish": "下跌"}.get(direction, direction)
+    return {"bullish": "上涨", "bearish": "下跌", "neutral": "neutral"}.get(
+        direction, direction
+    )

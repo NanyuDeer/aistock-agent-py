@@ -141,22 +141,31 @@ _DRIVER_PROMPT = """你是股票归因分析师。基于给定切片语料提取
 
 
 def _direction_from_snapshot(a_share: dict[str, object]) -> str:
-    """从快照指数涨跌幅确定性推导方向。"""
+    """从快照指数涨跌幅确定性推导方向。
+
+    与 gt_validator._expected_direction 语义一致：取首个含 change_pct 的
+    指数（全部遍历后无数据返回 neutral），再按阈值分档（>0.5 bullish、
+    <-0.5 bearish、否则 neutral）。
+    """
     indexes = a_share.get("indexes")
     if not isinstance(indexes, dict):
         return "neutral"
+    pct: float | None = None
     for value in indexes.values():
         if not isinstance(value, dict):
             continue
         raw = value.get("change_pct")
         try:
             pct = float(raw)  # type: ignore[arg-type]
+            break
         except (TypeError, ValueError):
             continue
-        if pct > _DIRECTION_UP_THRESHOLD:
-            return "bullish"
-        if pct < _DIRECTION_DOWN_THRESHOLD:
-            return "bearish"
+    if pct is None:
+        return "neutral"
+    if pct > _DIRECTION_UP_THRESHOLD:
+        return "bullish"
+    if pct < _DIRECTION_DOWN_THRESHOLD:
+        return "bearish"
     return "neutral"
 
 

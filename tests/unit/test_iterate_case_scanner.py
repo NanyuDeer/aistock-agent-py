@@ -50,7 +50,7 @@ async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
         },
         {
             "time": "2026-07-31T09:10:00+08:00",
-            "title": "美股三大指数集体收涨",
+            "title": "美股三大指数集体大涨",
             "content": "标普涨1.8%",
             "url": "u2",
         },
@@ -76,6 +76,6 @@ async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
     # 09:00 与 09:10 同窗口合并为一个事件；10:00 无关键词不入选；11:00 央行入选
     assert len(events) == 2
     first = events[0]
-    assert first["event_time"] == "2026-07-31T09:00:00+08:00"  # T = 首条电报时间
-    assert len(first["telegraph_records"]) == 2  # 合并窗口内
+    assert first["event_time"] == "2026-07-31T09:10:00+08:00"  # T = 末条电报时间
+    assert len(first["telegraph_records"]) == 2  # 整个簇（锚点起 30 分钟窗口内）
     assert "暴涨" in str(first["event_title"])

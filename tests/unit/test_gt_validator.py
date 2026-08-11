@@ -79,6 +79,13 @@ def test_neutral_direction_skips_strength_check() -> None:
     assert validate_gt_against_case(gt, _case(_snapshot(change_pct=-0.3))) == []
 
 
+def test_bullish_gt_rejected_when_snapshot_neutral() -> None:
+    # 严格语义：快照涨 0.3%（|.|<0.5 → neutral 场景），GT 却 bullish → 拒绝
+    gt = _gt(direction="bullish")
+    violations = validate_gt_against_case(gt, _case(_snapshot(change_pct=0.3)))
+    assert any("方向" in v for v in violations)
+
+
 def test_empty_snapshot_rejects_all() -> None:
     violations = validate_gt_against_case(_gt(), _case({"a_share": {}, "sources": {}}))
     assert len(violations) >= 1

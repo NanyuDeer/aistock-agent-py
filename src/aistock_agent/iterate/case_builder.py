@@ -59,11 +59,13 @@ async def build_case(
     event_time: datetime,
     telegraph_records: list[dict[str, object]],
     market_snapshot: dict[str, object] | None = None,
+    meta: dict[str, object] | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, object]:
     """生成并落盘一个历史切片。
 
     只保留 time <= event_time 的电报记录（T 窗口约束，防后验泄漏）。
+    meta 非空时并入 case 顶层（随切片落盘，供评估阶段识别切片来源与窗口类型）。
     data_dir 覆盖 iterate 数据根目录（测试隔离用）；None 走 get_data_dir()。
     """
     if event_time.tzinfo is None:
@@ -86,6 +88,8 @@ async def build_case(
         "ground_truth_ref": f"gt_{case_id}",
         "created_at": datetime.now(_TZ).isoformat(),
     }
+    if meta:
+        case["meta"] = meta
     base = data_dir or get_data_dir()
     _ensure_case_dirs(data_dir)
     path = base / "cases" / adapter.agent_id / f"{case_id}.json"

@@ -57,8 +57,8 @@ async def scan_major_events(days: int) -> list[dict[str, object]]:
 
     每个候选：{"event_title", "event_time"(ISO), "telegraph_records"}。
     启发式：标题含 _EVENT_KEYWORDS 的电报为候选；同 30 分钟窗口合并；
-    T = 窗口内首条电报时间；telegraph_records 为锚点起 30 分钟窗口内
-    所有电报（含未命中关键词的后续报道，供 agent 获取完整事件语料）。
+    T = 聚类窗口末条电报时间；telegraph_records 为聚类窗口内所有电报
+    （含未命中关键词的后续报道，供 agent 获取完整事件语料）。
     """
     today = datetime.now(UTC).date()
     candidates: list[dict[str, object]] = []
@@ -89,15 +89,18 @@ def _cluster_events(records: list[dict[str, object]]) -> list[dict[str, object]]
 
     events: list[dict[str, object]] = []
     for cluster in clusters:
-        event_time = str(cluster[0].get("time", ""))
+        # T = 簇内最后一条记录的时间：簇成员链式合并后全部 time <= T，
+        # 保证落盘时 build_case 的 time<=T 过滤不丢弃簇内后续报道（I2）。
+        event_time = str(cluster[-1].get("time", ""))
+        # 簇首条/末条无 time 字段时无法确定 T，跳过该簇（避免 fromisoformat("") 崩溃）
+        if not event_time:
+            continue
         events.append(
             {
                 "event_title": str(cluster[0].get("title", "重大事件")),
                 "event_time": event_time,
-                # 窗口内所有电报（含未命中关键词的），T = 锚点时间
-                "telegraph_records": [
-                    r for r in records if _within_window(cluster[0], r)
-                ],
+                # 整个簇：锚点起 30 分钟窗口内所有电报（含未命中关键词的后续报道）
+                "telegraph_records": list(cluster),
             }
         )
     return events

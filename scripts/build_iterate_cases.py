@@ -81,9 +81,9 @@ async def build_review_case(
         event_time=captured_at,
         telegraph_records=telegraph_records,
         market_snapshot=snapshot_dict,
+        meta={"snapshot_kind": "full", "t_window": "close"},
         data_dir=data_dir,
     )
-    case["meta"] = {"snapshot_kind": "full", "t_window": "close"}
 
     gt = await generate_data_constrained_gt(case, data_dir=data_dir)
     violations = validate_gt_against_case(gt, case)
@@ -117,9 +117,9 @@ async def build_event_cases(
             event_title=str(event["event_title"]),
             event_time=event_time,
             telegraph_records=cast("list[dict[str, object]]", event["telegraph_records"]),
+            meta={"t_window": "event"},
             data_dir=data_dir,
         )
-        case["meta"] = {"t_window": "event"}
         gt = await generate_data_constrained_gt(case, data_dir=data_dir)
         violations = validate_gt_against_case(gt, case)
         if violations and not force:
