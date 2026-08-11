@@ -83,6 +83,20 @@ def build_chat_initial_state(message: str) -> QuestionState:
     }
 
 
+# 单轮 transient 路由信号：每轮入口必须归零，否则经 checkpointer 跨轮残留
+# （P2 T6 教训：deep_source 残留会让追问轮被 synth_answer deep 分支劫持）。
+# 新增单轮 transient 字段必须登记于此。last_deep_report（跨轮引用，D12/D13）与
+# pending_clarification（M1，跨轮有意，最长存活一轮）明确不在清单内。
+_TRANSIENT_KEYS = ("deep_source", "final_response", "goals", "general_source")
+
+
+def reset_transient_state(state: QuestionState) -> QuestionState:
+    """每轮入口调用：归零单轮 transient 路由信号（对齐旧 ws.py/routes.py 三处内联块）。"""
+    for key in _TRANSIENT_KEYS:
+        state[key] = None
+    return state
+
+
 async def get_redis_client() -> aioredis.Redis:
     """获取 Redis 客户端（从 lifespan 管理的连接池单例）。
 

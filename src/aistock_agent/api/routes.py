@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from aistock_agent.api.deps import (
     build_chat_initial_state,
     build_initial_state,
+    reset_transient_state,
     verify_internal_token,
 )
 from aistock_agent.config import settings
@@ -97,10 +98,7 @@ async def chat_message(
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
-    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
-    initial_state["final_response"] = None
-    initial_state["goals"] = None                    # D34：同 transient 每轮归零
-    initial_state["general_source"] = None           # P7+P8：general 兜底同 transient 每轮归零
+    reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
     result = await graph.ainvoke(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
@@ -289,10 +287,7 @@ async def chat_stream_messages(
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
-    initial_state["deep_source"] = None              # T6：单轮 transient 每轮归零（对齐 ws.py）
-    initial_state["final_response"] = None
-    initial_state["goals"] = None                    # D34：同 transient 每轮归零
-    initial_state["general_source"] = None           # P7+P8：general 兜底同 transient 每轮归零
+    reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
