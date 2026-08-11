@@ -1115,15 +1115,11 @@ async def _postprocess_skill_calls(
     return output.model_copy(update={"goal": goal, "skill_calls": []})
 
 
-async def qa_router_node(state: QuestionState) -> dict[str, Any]:
-    """QA Router 节点入口。
+async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
+    """QA Router 节点核心（M1 改名）：解析用户问题，生成 InsightGoal + 计划。
 
-    M1 护栏（D33 优先级链：敏感 > 寒暄 > 科普 > 指数 > 标的解析 > compose > LLM）：
-    - 闸门 0/0.5 命中 → 确定性短路（科普闸门置 science 信号，其余写 final_response 话术），零 LLM
-    - 闸门 1 指数名 / 闸门 3 compose 命中 → 确定性取数短路，不进 LLM
-    - 闸门 2 标的名称解析（D36）→ 中文名 → 代码，解析成功短路个股 Skill
-    - LLM 成功路径 → D27 后处理层确定性校验/补全
-    - LLM 失败 → 关键词兜底（含名称解析补全）→ 澄清
+    不调数据工具，不输出结论。LLM 失败时用关键词规则兜底。
+    单轮 transient 路由信号由外层 qa_router_node 包装收口（pending 清空）。
     """
     import time
 
@@ -1146,6 +1142,47 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
         logger.info("qa_router.guardrail.negation_correction")
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return correction
+
+    # ── M1：澄清续跑（pending 上下文）—— 上一轮澄清（resolve 失败/postprocess）后，
+    # 本轮用户补全 6 位代码/名称 → 用 pending 的原始问题上下文续跑，不重新走闸门链。
+    # 消费条件严格：pending 意图为个股类 + 当前消息可解析出标的；否则交常规路由，
+    # 由外层包装清空陈旧 pending（最长存活一轮，防陈旧上下文误续跑）。
+    # 位置（D33 优先级链修正）：置于 P9 纠错否定之后、闸门 0.5 寒暄之前——
+    # 澄清轮后用户回复含合规/否定词时，仍由更高优先级的闸门 0/P9 拦截，不被续跑短路。
+    pending = state.get("pending_clarification")
+    if isinstance(pending, dict):
+        pending_intent = pending.get("intent")
+        if pending_intent in _STOCK_SKILLS:
+            pending_symbol = _extract_stock_symbol(message)
+            if pending_symbol is None:
+                pending_symbol = await _resolve_stock_from_message(message)
+            if pending_symbol is not None:
+                pending_args: dict[str, Any] = {"symbol": pending_symbol}
+                if pending_intent == "stock_news":
+                    pending_args["limit"] = 10
+                pending_goal = InsightGoal(
+                    question=str(pending.get("question") or message),
+                    intent=pending_intent,  # type: ignore[arg-type]
+                    symbols=[pending_symbol],
+                    constraints=dict(pending.get("constraints") or {}),
+                )
+                logger.info(
+                    "qa_router.pending_consumed",
+                    intent=pending_intent,
+                    symbol=pending_symbol,
+                )
+                metrics.record_chat_qa_latency(
+                    "qa_router", int((time.monotonic() - start) * 1000)
+                )
+                return {
+                    "goal": pending_goal,
+                    "plan": "direct",
+                    "skill_calls": [
+                        SkillCall(skill_name=pending_intent, args=pending_args)  # type: ignore[arg-type]
+                    ],
+                    "complexity": "light",
+                    "pending_clarification": None,
+                }
 
     # ── 闸门 0.5：寒暄/能力询问（D32）──
     if _match_keywords(message, _GREETING_KEYWORDS):
@@ -1331,6 +1368,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                     "skill_calls": [],
                     "clarification": _STOCK_SYMBOL_CLARIFICATION,
                     "complexity": "light",
+                    "pending_clarification": {
+                        "question": message,
+                        "intent": "stock_snapshot",
+                        "constraints": {"guardrail": "resolve_miss"},
+                    },
                 }
 
     # ── 闸门 3：主线/风险 compose（D26）→ 组合取数短路，不进 LLM ──
@@ -1381,6 +1423,11 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
                 "clarification": _STOCK_SYMBOL_CLARIFICATION,
                 "complexity": "light",
                 "goals": None,
+                "pending_clarification": {
+                    "question": output.goal.question,
+                    "intent": output.goal.intent,
+                    "constraints": dict(output.goal.constraints),
+                },
             }
 
         # D4：LLM 判定为主；force_deep=True 时强制升级为 deep（仅在未短路时生效）
@@ -1624,6 +1671,20 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
             "skill_calls": [fallback_call],
             "complexity": fallback_complexity,
         }
+
+
+async def qa_router_node(state: QuestionState) -> dict[str, Any]:
+    """QA Router 节点入口（M1 包装）：委托 _qa_router_node_core，统一清空陈旧 pending。
+
+    pending_clarification 最长存活一轮：core 消费时返回 pending_clarification=None
+    （键存在，包装层不再覆盖）；core 未消费（用户开新问题/解析不出标的）时本层补
+    pending_clarification=None，避免陈旧澄清上下文跨轮误续跑。
+    """
+    had_pending = state.get("pending_clarification") is not None
+    result = await _qa_router_node_core(state)
+    if had_pending and "pending_clarification" not in result:
+        result["pending_clarification"] = None
+    return result
 
 
 # D5：Skill 清单由 registry 动态渲染（模块底部计算，规避导入环；导出名不变，

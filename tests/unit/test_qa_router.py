@@ -546,6 +546,93 @@ async def test_resolve_miss_pure_stock_question_forces_clarification() -> None:
     assert result["skill_calls"] == []
 
 
+def _pending_state(
+    message: str,
+    *,
+    intent: str = "stock_snapshot",
+    question: str = "帮我看看这个票",
+) -> QuestionState:
+    """构造带 pending_clarification 的状态（M1 澄清续跑测试用）。"""
+    state = _state(message)
+    state["pending_clarification"] = {
+        "question": question,
+        "intent": intent,
+        "constraints": {},
+    }
+    return state
+
+
+@pytest.mark.asyncio
+async def test_pending_consumed_with_name_continues_original_question() -> None:
+    """澄清后用户补中文名 → 用 pending 原问题上下文续跑，不调 LLM。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=AssertionError("LLM should not be called on pending consume"),
+    ), patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_pending_state("就是贵州茅台"))
+    assert result["plan"] == "direct"
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+    assert result["skill_calls"][0].args == {"symbol": "600519"}
+    assert result["goal"].question == "帮我看看这个票"
+    assert result["goal"].symbols == ["600519"]
+    assert result["pending_clarification"] is None
+    assert "clarification" not in result
+
+
+@pytest.mark.asyncio
+async def test_pending_consumed_with_code_short_circuits() -> None:
+    """澄清后用户补 6 位代码 → 直接续跑，不调 LLM、不调 resolve。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=AssertionError("LLM should not be called"),
+    ):
+        result = await qa_router_node(_pending_state("600519"))
+    assert result["skill_calls"][0].args == {"symbol": "600519"}
+    assert result["pending_clarification"] is None
+
+
+@pytest.mark.asyncio
+async def test_pending_consumed_stock_news_keeps_limit() -> None:
+    """pending 意图 stock_news → 续跑带 limit=10。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="300750"),
+    ):
+        result = await qa_router_node(_pending_state("宁德时代", intent="stock_news"))
+    assert result["skill_calls"][0].skill_name == "stock_news"
+    assert result["skill_calls"][0].args == {"symbol": "300750", "limit": 10}
+
+
+@pytest.mark.asyncio
+async def test_pending_not_consumed_cleared_for_new_question() -> None:
+    """用户开新问题（解析不出标的）→ 不续跑，包装层清空 pending。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think",
+        side_effect=RuntimeError("llm down"),
+    ):
+        result = await qa_router_node(_pending_state("今天大盘怎么样"))
+    assert result["pending_clarification"] is None
+    assert result["skill_calls"][0].skill_name == "market_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_clarification_writes_pending_snapshot() -> None:
+    """resolve 未命中澄清 → 同时写 pending 快照供下一轮续跑。"""
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("不存在的股票名称xyz今天怎么样"))
+    mock_llm.with_structured_output.assert_not_called()
+    assert result["clarification"] == "请提供 6 位股票代码后重试。"
+    assert result["pending_clarification"] == {
+        "question": "不存在的股票名称xyz今天怎么样",
+        "intent": "stock_snapshot",
+        "constraints": {"guardrail": "resolve_miss"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_resolve_miss_sector_intent_goes_to_llm() -> None:
     """resolve 未命中但含板块意图（"白酒板块"）→ 不澄清，放行 LLM。"""
