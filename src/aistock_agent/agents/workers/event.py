@@ -27,6 +27,7 @@ from aistock_agent.prompts.workers.event import (
     EVENT_UNDERSTANDING_PROMPT,
 )
 from aistock_agent.services.cache import get_cached_event, set_cached_event
+from aistock_agent.services.event_graph_resolver import resolve_industry_graph_evidence
 from aistock_agent.services.event_persister import persist_event_report
 from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.state.schema import AgentState
@@ -262,14 +263,28 @@ async def _analyze_understanding(user_msg: str) -> dict[str, object] | None:
 
 
 async def _analyze_transmission(
-    user_msg: str, understanding: dict[str, object]
+    user_msg: str,
+    understanding: dict[str, object],
+    *,
+    external_evidence: list[dict[str, object]] | None = None,
 ) -> dict[str, object] | None:
-    """Call 2: 传导路径分析（deep 模型，ReAct + 工具）。"""
+    """Call 2: 传导路径分析（deep 模型，ReAct + 工具）。
+
+    external_evidence: 第一阶段产物——由代码确定性调用图谱后注入的证据。
+    若提供，则直接作为 industryGraphEvidence（不再依赖 ReAct 从 messages
+    提取），但 ReAct 仍可自主调用工具做补充查询。
+    """
     ud = json.dumps(understanding, ensure_ascii=False)
     prompt = EVENT_TRANSMISSION_PROMPT.replace("{understanding}", ud)
     result = await _call_llm_with_tools(prompt, user_msg, model="deep")
     if result:
-        evidence = result.industry_graph_evidence or [_not_queried_industry_graph_evidence()]
+        # 优先使用外部注入的证据（代码确定性图谱查询）；仅当
+        # 外部未提供时回退到 ReAct 从 messages 提取（兜底）。
+        evidence = (
+            external_evidence
+            if external_evidence is not None
+            else (result.industry_graph_evidence or [_not_queried_industry_graph_evidence()])
+        )
         if isinstance(result.parsed, dict):
             transmission = dict(result.parsed)
             transmission["industryGraphEvidence"] = evidence
@@ -661,7 +676,26 @@ async def run(state: AgentState) -> dict[str, object]:
             }
 
         # Call 2: 传导路径（deep, ReAct + tools）
-        transmission = await _analyze_transmission(user_msg, understanding)
+        # ── Phase 1 稳定性升级：代码确定性图谱查询 ──
+        # 从 understanding 提取核心行业名，强制调用后端 IndustryKG，
+        # 消除 LLM ReAct 跳过 get_industry_chain 导致 not_queried 的问题。
+        graph_evidence: list[dict[str, object]] | None = None
+        if understanding:
+            core_industry = str(understanding.get("coreIndustry", ""))
+            # 兼容 understanding 输出未必包含 coreIndustry 字段的场景
+            if not core_industry:
+                logger.info("event_no_core_industry_in_understanding",
+                            event_preview=user_msg[:50])
+            else:
+                evidence_item = await resolve_industry_graph_evidence(core_industry)
+                graph_evidence = [evidence_item]
+                logger.info("event_graph_resolver_called",
+                            coreIndustry=core_industry,
+                            kg_status=evidence_item.get("status"))
+        # ──────────────────────────────────────────
+        transmission = await _analyze_transmission(
+            user_msg, understanding, external_evidence=graph_evidence,
+        )
         constrained_transmission = _constrain_transmission_for_downstream(
             transmission,
             event_id,

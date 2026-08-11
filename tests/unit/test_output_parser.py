@@ -8,7 +8,9 @@ import json
 from langchain_core.messages import AIMessage
 
 from aistock_agent.utils.output_parser import (
+    _build_evidence_candidate_set,
     _parse_json,
+    _validate_chain_against_evidence,
     extract_major_events,
     parse_event_output,
     transform_to_frontend,
@@ -444,10 +446,14 @@ def test_transform_to_frontend_constrains_chain_to_found_industry_graph() -> Non
     mapped = result["event_transmission"]
     assert mapped["industryGraphEvidence"][0]["status"] == "found"
     chain = mapped["chain"]
-    assert [item["industry"] for item in chain] == ["半导体"]
-    assert [item["relation"] for item in chain] == ["核心行业"]
-    assert [item["level"] for item in chain] == [1]
-    assert chain[0]["reason"] == "核心行业的事件变量推断"
+    # Phase 1 fail-safe: "半导体" 名称匹配 → 正常保留；
+    # "伪造核心行业" 名称不匹配 → fail-safe 保留 + kg_unverified
+    industries = [item["industry"] for item in chain]
+    assert "半导体" in industries
+    # 伪造核心行业因名称不匹配图谱，标记 kg_unverified 但仍保留
+    assert [item.get("kg_unverified") for item in chain if item["industry"] == "伪造核心行业"] == [True]
+    # 虚构行业非核心、非邻接 → 仍被丢弃
+    assert "虚构行业" not in industries
 
 
 def test_transform_to_frontend_multi_center_no_cross_chain_contamination() -> None:
@@ -558,16 +564,17 @@ def test_transform_to_frontend_multi_center_no_cross_chain_contamination() -> No
 
     chain = result["event_transmission"]["chain"]
     # 仅保留有对应中心证据支持的链节：钢铁/计算机设备的错挂链节必须被丢弃。
+    # 注意：chain 已按 impactStrength 降序确定性排序（半导体0.8 → 汽车0.7 → 电子化学品0.6 → 汽车零部件0.5）。
     assert [item["industry"] for item in chain] == [
         "半导体",
-        "电子化学品",
         "汽车",
+        "电子化学品",
         "汽车零部件",
     ]
     assert [item["relation"] for item in chain] == [
         "核心行业",
-        "图谱上游（直接关系）",
         "核心行业",
+        "图谱上游（直接关系）",
         "图谱下游（直接关系）",
     ]
     # 显式断言串链行业不会出现
@@ -660,11 +667,12 @@ def test_transform_to_frontend_multi_center_same_name_direction_conflict() -> No
 
     chain = result["event_transmission"]["chain"]
     # 两个"铜"都保留，但方向按各自中心证据分别标注，不串链。
-    assert [item["industry"] for item in chain] == ["半导体", "铜", "家电", "铜"]
+    # 注意：chain 已按 impactStrength 降序确定性排序（半导体0.8 → 家电0.7 → 铜0.6 → 铜0.5）。
+    assert [item["industry"] for item in chain] == ["半导体", "家电", "铜", "铜"]
     assert [item["relation"] for item in chain] == [
         "核心行业",
-        "图谱上游（直接关系）",
         "核心行业",
+        "图谱上游（直接关系）",
         "图谱下游（直接关系）",
     ]
 
@@ -766,7 +774,15 @@ def test_transform_to_frontend_clears_stale_center_after_unverified_core_industr
         {"eventId": "evt_stale", "title": "测试", "source": ""},
     )
 
-    assert [item["industry"] for item in result["event_transmission"]["chain"]] == ["半导体"]
+    # Phase 1 fail-safe: 无证据核心被保留并标记 kg_unverified；
+    # 邻接行业因无中心证据仍被丢弃。
+    chain = result["event_transmission"]["chain"]
+    industries = [item["industry"] for item in chain]
+    assert "半导体" in industries
+    assert "无证据核心" in industries
+    core_unverified = [item for item in chain if item["industry"] == "无证据核心"]
+    assert core_unverified[0].get("kg_unverified") is True
+    assert "电子化学品" not in industries
 
 
 def test_transform_to_frontend_rejects_ambiguous_same_name_centers() -> None:
@@ -802,7 +818,13 @@ def test_transform_to_frontend_rejects_ambiguous_same_name_centers() -> None:
         {"eventId": "evt_ambiguous", "title": "测试", "source": ""},
     )
 
-    assert result["event_transmission"]["chain"] == []
+    # Phase 1 fail-safe: 同名多 ID 时仍保留核心行业并标记 kg_unverified；
+    # 邻接行业因无法确定归属仍被丢弃。
+    chain = result["event_transmission"]["chain"]
+    assert len(chain) == 1
+    assert chain[0]["industry"] == "新能源"
+    assert chain[0].get("kg_unverified") is True
+    assert "锂矿" not in [item["industry"] for item in chain]
 
 
 # ── extract_major_events 容错解析测试（生产可靠性修复） ──
@@ -929,3 +951,101 @@ def test_extract_major_events_legacy_json_array_without_marker():
 def test_extract_major_events_no_marker_returns_empty():
     """无标记块也无 JSON 数组 → 返回空数组（回归保护）"""
     assert extract_major_events("这是一段纯文本晨报，没有事件标记。") == []
+
+
+# ── Phase 2: _build_evidence_candidate_set ──────────────────────────
+
+
+def test_build_evidence_candidate_set_from_found_evidence() -> None:
+    """从 found 证据中提取候选行业名集合。"""
+    evidence: list[dict[str, object]] = [{
+        "status": "found",
+        "degraded": False,
+        "source": "IndustryKGService",
+        "industry": {"id": "881121.TI", "name": "半导体"},
+        "upstream": [
+            {"id": "881172.TI", "name": "电子化学品", "leadingStocks": []},
+        ],
+        "downstream": [
+            {"id": "884098.TI", "name": "消费电子零部件及组装", "leadingStocks": []},
+        ],
+    }]
+    candidates = _build_evidence_candidate_set(evidence)
+    assert "半导体" in candidates
+    assert "电子化学品" in candidates
+    assert "消费电子零部件及组装" in candidates
+    assert len(candidates) == 3
+
+
+def test_build_evidence_candidate_set_ignores_degraded() -> None:
+    """degraded/not_found 证据不贡献候选。"""
+    evidence: list[dict[str, object]] = [{
+        "status": "not_found",
+        "degraded": True,
+        "source": None,
+        "industry": None,
+        "upstream": None,
+        "downstream": None,
+    }]
+    assert _build_evidence_candidate_set(evidence) == set()
+
+
+def test_build_evidence_candidate_set_empty_list() -> None:
+    """空 evidence → 空候选集。"""
+    assert _build_evidence_candidate_set([]) == set()
+
+
+# ── Phase 2: _validate_chain_against_evidence ──────────────────────
+
+
+def test_validate_chain_no_evidence_returns_chain_unchanged() -> None:
+    """无有效证据候选集 → 不校验，chain 原样返回。"""
+    chain = [
+        {"industry": "半导体", "relation": "核心行业", "level": 1,
+         "direction": "bullish", "impactStrength": 0.9, "reason": "影响"},
+    ]
+    result = _validate_chain_against_evidence(chain, [])
+    assert len(result) == 1
+    assert result[0]["industry"] == "半导体"
+    assert result[0].get("kg_unverified") is None
+
+
+def test_validate_chain_marks_non_candidate() -> None:
+    """chain 中的行业不在候选集中 → 标记 kg_unverified。"""
+    evidence: list[dict[str, object]] = [{
+        "status": "found", "degraded": False, "source": "IndustryKGService",
+        "industry": {"id": "881121.TI", "name": "半导体"},
+        "upstream": [{"id": "881172.TI", "name": "电子化学品", "leadingStocks": []}],
+        "downstream": [],
+    }]
+    chain = [
+        {"industry": "半导体", "relation": "核心行业", "level": 1,
+         "direction": "bullish", "impactStrength": 0.9, "reason": "核心"},
+        {"industry": "虚构行业", "relation": "上游传导", "level": 2,
+         "direction": "bullish", "impactStrength": 0.5, "reason": "编造"},
+    ]
+    result = _validate_chain_against_evidence(chain, evidence)
+    assert len(result) == 2
+    # 半导体在候选集中，不应标记
+    assert result[0].get("kg_unverified") is None
+    # 虚构行业不在候选集中，必须标记
+    assert result[1].get("kg_unverified") is True
+    assert result[1]["industry"] == "虚构行业"
+
+
+def test_validate_chain_keeps_core_even_if_not_in_candidates() -> None:
+    """核心行业即使不在候选集中也保留，仅标记 kg_unverified。"""
+    evidence: list[dict[str, object]] = [{
+        "status": "found", "degraded": False, "source": "IndustryKGService",
+        "industry": {"id": "881121.TI", "name": "半导体"},
+        "upstream": [],
+        "downstream": [],
+    }]
+    chain = [
+        {"industry": "种植业", "relation": "核心行业", "level": 1,
+         "direction": "bearish", "impactStrength": 0.88, "reason": "影响"},
+    ]
+    result = _validate_chain_against_evidence(chain, evidence)
+    assert len(result) == 1
+    assert result[0]["industry"] == "种植业"  # 核心行业保留
+    assert result[0].get("kg_unverified") is True  # 但标记未验证
