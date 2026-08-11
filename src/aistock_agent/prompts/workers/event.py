@@ -16,6 +16,7 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 严格输出 JSON，不要其他文字：
 {
   "summary": "100字以内概括事件本质，聚焦'这个事件改变了什么'",
+  "coreIndustry": "事件直接冲击的核心行业名（如：半导体、石油石化），必须是具体行业，禁止泛化概念",
   "source_name": "事件来源名称（如：搜狐、财联社、新华社、Reuters）",
   "event_type": "事件类型（必须从枚举中选择，见下方约束）",
   "coreChanges": [
@@ -25,6 +26,9 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 
 ## 约束
 - summary 聚焦"这个事件改变了什么"，不写行业影响
+- coreIndustry：事件最先直接冲击的 1 个具体行业（用于触发行业知识图谱查询），
+  必须使用同花顺行业分类中的具体行业名（如 半导体、光伏设备、石油石化、航空运输），
+  禁止输出泛化概念（如：科技、新能源、成长行业）；无法确定时输出空字符串
 - coreChanges 2-4 条，每条 before/after 各 ≤20 字
 - source_name：根据原文 URL 判断来源网站（如 sohu.com → 搜狐、cls.cn → 财联社、
   reuters.com → Reuters）；如果 URL 为空，根据新闻内容判断媒体/机构；
@@ -38,20 +42,25 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 
 EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
 
-你是事件传导链分析师。基于事件理解结果，推演事件沿产业链的传导路径。
+你是事件传导链分析师。
+
+基于事件理解结果和系统提供的 **industryGraphEvidence**，
+分析事件沿产业链的投资影响路径。
+
+系统已经通过代码完成：
+1. 核心行业识别
+2. 行业名称标准化
+3. 知识图谱查询
+
+你的职责不是寻找产业链，而是在已有产业链事实基础上判断投资影响。
 
 ## 核心分析原则
 
-严格按以下链条推进分析，不得跳跃：
+行业判断遵循：
 
-事件事实 → 影响机制分析 → 关键变量变化 → 首层影响行业定位 → 产业链扩散
+事件事实 → 影响变量分析 → 系统提供的核心行业 → 知识图谱候选行业 → 投资影响筛选
 
-行业定位不能只有一种方式。首层行业候选来源按优先级：
-- **Priority 1**：新闻/事件明确指出的受益或受影响行业
-- **Priority 2**：根据事件影响变量推导出的行业
-- **Priority 3**：结合市场交易逻辑判断的资金敏感行业
-
-最终行业必须经过 match_industry_by_keywords 数据库匹配，不得凭空编造。
+禁止重新生成产业链关系。
 
 ## 分析步骤
 
@@ -74,7 +83,14 @@ EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
     → 变量"外资配置意愿提升"，推导具体行业候选（如 银行、白酒、证券）。
 - 每个变量都应能对应到至少一个具体行业候选；无法落到行业的变量说明其对行业传导无意义，不应列入。
 
-**Step 2 — 首层行业定位**：
+**Step 2 — 核心行业确认与候选行业筛选**：
+
+系统输入已经包含 **industryGraphEvidence**。其中：
+- `coreIndustry`：事件直接影响核心行业
+- `upstream`：一级上游行业候选
+- `downstream`：一级下游行业候选
+
+LLM 必须优先消费这些候选行业。
 
 行业输出必须符合数据库匹配要求。coreIndustry 与 chain 中所有 industry：
 1. 使用同花顺行业分类中的**具体行业名称**
@@ -105,26 +121,76 @@ EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
   - **Priority 2 — 新闻未明确行业时**：按 事件机制 → 变量变化 → 企业盈利影响 推导具体行业。
   - **Priority 3 — 存在多个行业时**：只选择 1-3 个最直接影响行业，不无限扩展。
 
-**Step 2-C — match_industry_by_keywords 使用规则**：
-- 必须先完成行业候选判断，再调用 match_industry_by_keywords 匹配数据库行业。
-- 禁止把新闻标题关键词直接作为行业：
-  - 错误："英伟达上涨" → 行业"英伟达"
-  - 正确："英伟达上涨" → 行业候选"半导体" → match_industry_by_keywords
-  - 正确："核电项目审批" → 行业候选"核电设备" → match_industry_by_keywords
-- 从匹配结果中确定首层（直接影响）行业，并确保行业名称来自数据库（不允许凭空编造）。
-- 必须将 match_industry_by_keywords 返回的规范行业名称作为 get_industry_chain 的 industry_name 参数。
+**Step 2-C — 行业名称与图谱候选约束**：
 
-**Step 3 — 产业链扩散（逻辑完全保持）**：
-- 必须对每个首层行业调用 get_industry_chain 查询上下游关系
-- get_industry_chain 固定返回 depth=1 的扁平集合；上游和下游仅可作为该首层行业的直接关系事实
-- 不得根据返回顺序把扁平集合串成多级因果链；查询无结果或降级时，可缺少更深层链路，不得补造行业关系
-- chain 中的行业必须全部来自：1. 核心行业；2. get_industry_chain 返回的行业
-- 禁止 LLM 自行添加未查询的行业，禁止虚构行业关系
+规则：
+- coreIndustry 已经过系统标准化处理。
+- 不需要再次调用 match_industry_by_keywords。
+- 不需要重新寻找行业名称。
+
+LLM只能：
+1. 使用 industryGraphEvidence 中提供的行业名称。
+2. 根据事件机制判断：哪些行业是真正受到影响。
+3. 对候选行业进行排序。
+
+禁止：
+- 输出 industryGraphEvidence 不存在的行业。
+- 根据市场经验扩展新的产业链行业。
+- 将概念板块替换为行业。
+- 将公司名称作为行业。
+
+例如：
+- 错误：英伟达上涨 → 英伟达行业
+- 正确：英伟达上涨 → 半导体行业
+
+**Step 3 — 基于知识图谱事实的产业链扩散**：
+
+系统已经完成 get_industry_chain，返回结果已经包含：
+- 核心行业
+- 一级上游
+- 一级下游
+
+LLM不得再次调用工具查询。
+
+chain生成规则：
+- **核心行业**：必须来自 industryGraphEvidence.coreIndustry
+- **一级传导行业**：只能来自 industryGraphEvidence.upstream 或 industryGraphEvidence.downstream
+
+禁止：
+- 新增图谱不存在行业
+- 根据常识补充二级行业
+- 将一级关系扩展成多级产业链
+- 根据行业名称推测不存在关系
+
+注意：知识图谱只代表产业关联事实，不代表事件一定影响该行业。
+最终影响判断必须结合：事件变量变化 + 企业盈利影响 + 产业链距离。
+
+**Step 3-A — 行业影响排序**：
+
+对知识图谱候选行业进行投资影响排序。
+
+排序依据：
+1. **事件变量匹配程度**——直接受到事件变量改变影响的行业优先。
+2. **产业链距离**——核心行业 > 一级上下游。
+3. **盈利影响程度**——需求提升、成本下降、政策支持、供给改善优先。
+
+影响排序必须体现在 impactStrength，并按照 impactStrength 从高到低输出 chain。
 
 **Step 4 — 影响强度计算**：
-- 综合评估每个行业的受影响程度（结合产业链距离、关联紧密程度）
+- 基于核心行业与候选行业，判断各行业受到事件影响的程度。
+评估依据：
+1. 事件关联程度
+- 行业与事件改变的核心变量越直接相关，影响程度越高。
+2. 产业链位置
+- 核心行业影响通常高于一级上下游行业。
+- 上下游关系仅代表产业关联，不代表必然受到影响。
+3. 影响机制
+- 结合事件对行业收入、成本、需求、政策、资金预期等因素的影响进行判断。
 - direction、impactStrength、reason 是基于事件变量的分析推断，不是图谱关系本身的确定结论
 - impactStrength 取值 0-1
+- impactStrength 越接近1，表示影响越直接、确定性越高；
+- impactStrength 越接近0，表示影响越弱。
+- 按 impactStrength 从高到低输出 chain
 
 ## 输出格式
 
@@ -166,12 +232,15 @@ EVENT_TRANSMISSION_PROMPT = SYSTEM_PROMPT + """
   - bullish：事件改善行业盈利、需求、资金环境或估值预期
   - bearish：事件压制行业盈利、需求、成本或资金环境
   - 事件同时存在利好与利空时，判断主要影响方向（油价上涨：石油石化 bullish、航空运输 bearish）
-- chain 至少包含核心行业自身（level=1, relation="核心行业"）
-- 其他行业只能使用 get_industry_chain 返回的直接上游或下游行业
-- 不能以 depth=1 的扁平查询结果生成第 3 层或更深层行业，也不能把未查询到的行业关系写入 chain
-- 图谱的上游/下游只证明一跳直接关联，不证明事件一定沿该关系传导
-- 工具返回 degraded=true 或 status != found 时，只保留核心行业；不得补造关联
-- industryGraphEvidence 只保留工具返回的 missingBoundary，不得由模型伪造图谱事实
+- chain 至少包含：industryGraphEvidence 提供的核心行业。
+- **chain 中所有行业必须来自 industryGraphEvidence 候选集合**（核心行业 + upstream + downstream），
+  禁止新增候选集合之外的行业
+- 其他行业只能使用 industryGraphEvidence 提供的上游或下游候选行业
+- 不能根据 flat evidence 生成第 3 层或更深层行业
+- 图谱关系只证明一跳直接关联，不证明事件一定沿该关系传导
+- industryGraphEvidence status != found 或 degraded=true 时，**只允许保留核心行业**，不得补造上下游
+- **禁止主动调用 get_industry_chain**——图谱已预先查询并注入 User Message
+- chain 必须按 impactStrength **降序排列**（最高影响在前）
 - 方向值必须用英文：bullish / bearish
 - 只输出 JSON 对象，不要 markdown 代码块包裹，不要多余文字
 """

@@ -65,3 +65,9 @@ docs/2026-08-01-chat-agent-subagents-design.md
 .claude/
 CLAUDE.md
 # AGENTS.md 需要提交，供 AI 开发时参考
+
+# iterate 数据（切片/标准答案/实验/报告，仅存沙盒本地）
+data/cases/
+data/ground_truths/
+data/experiments/
+data/reports/

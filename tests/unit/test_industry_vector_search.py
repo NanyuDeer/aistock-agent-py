@@ -44,13 +44,13 @@ def test_match_industry_by_keywords_has_docstring():
 
 
 def test_openai_client_lazy_init_singleton():
-    """_get_openai_client 懒初始化：首次调用创建，再次调用复用"""
-    from aistock_agent.tools.industry_vector_search import _get_openai_client
+    """_get_embedding_client 懒初始化：首次调用创建，再次调用复用"""
+    from aistock_agent.tools.industry_vector_search import _get_embedding_client
 
     mock_client = MagicMock()
     with patch(_OPENAI_CLIENT, return_value=mock_client):
-        client1 = _get_openai_client()
-        client2 = _get_openai_client()
+        client1 = _get_embedding_client()
+        client2 = _get_embedding_client()
 
     assert client1 is client2, "懒初始化应返回同一单例"
     assert client1 is mock_client
@@ -89,7 +89,7 @@ async def test_match_industry_by_keywords_normal_results():
     """正常关键词 → 调用 embedding API → node_api 搜索 → 返回格式化结果"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
     mock_results = [
         {"name": "新能源汽车", "similarity": 0.95},
@@ -116,7 +116,7 @@ async def test_match_industry_by_keywords_single_keyword():
     """单个关键词 → 正常匹配"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
     mock_results = [{"name": "半导体", "similarity": 0.91}]
 
@@ -137,7 +137,7 @@ async def test_match_industry_by_keywords_no_results():
     """node_api 返回空列表 → 返回"未找到匹配行业"提示"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
 
     with patch(_OPENAI_CLIENT, return_value=mock_openai):
@@ -153,7 +153,7 @@ async def test_match_industry_by_keywords_node_api_error():
     """node_api 抛出异常 → @safe_tool_call 捕获返回降级文本"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
 
     with patch(_OPENAI_CLIENT, return_value=mock_openai):
@@ -172,7 +172,7 @@ async def test_match_industry_by_keywords_openai_embedding_error():
     """OpenAI embedding API 失败 → @safe_tool_call 捕获返回降级文本"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
 
     mock_openai = MagicMock()
     mock_openai.embeddings.create.side_effect = RuntimeError("API quota exceeded")
@@ -189,7 +189,7 @@ async def test_match_industry_by_keywords_similarity_zero():
     """相似度为 0 → 仍正常格式化（不崩溃）"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
     mock_results = [{"name": "某行业", "similarity": 0.0}]
 
@@ -207,7 +207,7 @@ async def test_match_industry_by_keywords_missing_name_field():
     """返回结果缺 name 字段 → 显示"未知行业"（不崩溃）"""
     from aistock_agent.tools import industry_vector_search as ivs
 
-    ivs._openai_client = None
+    ivs._embedding_client = None
     mock_openai = _make_embedding_mock()
     mock_results = [{"similarity": 0.75}]
 
