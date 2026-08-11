@@ -69,6 +69,7 @@ async def run_case(
                 ground_truth,
                 _last_score(best),
                 str(best.get("gap_analysis", "")),
+                root,
             )
             written = apply_variant(variant, root)
             last_written = tuple(str(p.relative_to(root.resolve())) for p in written)

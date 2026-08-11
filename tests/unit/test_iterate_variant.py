@@ -10,8 +10,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aistock_agent.iterate.adapters import get_adapter
-from aistock_agent.iterate.variant_engine import VariantPlan, apply_variant, restore_baseline
+from aistock_agent.iterate.adapters import IterableAgentAdapter, get_adapter
+from aistock_agent.iterate.variant_engine import (
+    VariantPlan,
+    apply_variant,
+    generate_variant,
+    restore_baseline,
+)
 
 
 def _sample_variant() -> VariantPlan:
@@ -116,8 +121,12 @@ async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object)
         instructions="增加外盘传导因素优先指令",
         new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
     )
-    case = {"case_id": "case_test_variant_hash"}
-    gt = {"gt_id": "gt_test", "case_id": "case_test_variant_hash", "attribution": {}}
+    case: dict[str, object] = {"case_id": "case_test_variant_hash"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_variant_hash",
+        "attribution": {},
+    }
     score = SimpleNamespace(
         total=0.5, direction=0.1, drivers=0.2, sectors=0.2, gap_analysis="gap"
     )
@@ -140,3 +149,52 @@ async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object)
     assert path.exists()
     on_disk = _json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["variant_hash"] == expected
+
+
+@pytest.mark.asyncio
+async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> None:
+    """回归：变体生成必须把被迭代文件当前内容喂给 LLM（否则 LLM 凭空生成会丢 run 入口）。
+
+    直接复现线上事故：round 2 变体覆盖 review.py 后子进程报
+    `module has no attribute 'run'`——根因是 prompt 只有路径没有内容。
+    """
+    adapter = IterableAgentAdapter(
+        agent_id="review",
+        module_path="aistock_agent.agents.workers.review",
+        prompt_files=("src/aistock_agent/prompts/workers/review.py",),
+        workflow_files=("src/aistock_agent/agents/workers/review.py",),
+    )
+    prompt_file = tmp_path / "src/aistock_agent/prompts/workers/review.py"
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text('REVIEW_PROMPT = "外盘传导优先"\n', encoding="utf-8")
+    workflow_file = tmp_path / "src/aistock_agent/agents/workers/review.py"
+    workflow_file.parent.mkdir(parents=True, exist_ok=True)
+    workflow_file.write_text("async def run(state):\n    return {}\n", encoding="utf-8")
+
+    payload = {
+        "type": "prompt_diff",
+        "files": ["src/aistock_agent/prompts/workers/review.py"],
+        "instructions": "强化外盘传导",
+        "new_content": {"src/aistock_agent/prompts/workers/review.py": "REVIEW_PROMPT = \"新\"\n"},
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+        )
+        plan = await generate_variant(
+            adapter,
+            {"event_title": "事件", "event_time": "2026-07-31"},
+            {"gt_id": "gt", "attribution": {"direction": "bullish"}},
+            None,
+            "gap",
+            tmp_path,
+        )
+
+    prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
+    # 文件内容（而非只有路径）必须出现在 prompt 中
+    assert 'REVIEW_PROMPT = "外盘传导优先"' in prompt_arg
+    assert "async def run(state):" in prompt_arg
+    assert "禁止删除/重命名已有函数、常量与入口" in prompt_arg
+    assert plan.type == "prompt_diff"
+    new_content = plan.new_content["src/aistock_agent/prompts/workers/review.py"]
+    assert new_content == 'REVIEW_PROMPT = "新"\n'

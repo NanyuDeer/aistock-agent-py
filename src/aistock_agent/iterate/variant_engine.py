@@ -32,19 +32,46 @@ VariantType = Literal["prompt_diff", "workflow_diff", "data_source_diff"]
 
 _VALID_VARIANT_TYPES = {"prompt_diff", "workflow_diff", "data_source_diff"}
 
+#: 变体生成时喂给 LLM 的单个文件内容上限（超长截断，防止爆上下文）
+_MAX_VARIANT_FILE_CHARS = 8000
+
 _GENERATE_PROMPT = """你是迭代优化工程师。目标是改进待迭代 Agent 的归因质量。
-当前实现文件：{files}
+以下是待迭代文件的当前完整内容（含路径；超长已截断并标注）：
+{files_with_content}
 标准答案归因：{ground_truth}
 最近评分：{score}（满分 1.0），差距分析：{gap_analysis}
-请生成一个最小、可验证的变体方案，输出严格 JSON：
+请基于上述文件内容生成最小变体，输出严格 JSON：
 {{
   "type": "prompt_diff|workflow_diff|data_source_diff",
-  "files": ["相对仓库根路径的文件"],
+  "files": ["相对仓库根路径的被改文件"],
   "instructions": "改动思路一句话",
-  "new_content": {{"相对仓库根路径": "该文件的完整新内容"}}
+  "new_content": {{"相对仓库根路径": "被改文件的完整新内容"}}
 }}
-要求：只改与差距分析相关的部分；禁止引入无关重构；new_content 必须包含被改文件的完整内容。
+要求：
+- 必须基于给定的文件内容做针对性修改；new_content 必须是完整文件
+- 禁止删除/重命名已有函数、常量与入口（如 run 入口、REVIEW_PROMPT），否则 Agent 无法运行
+- 只改与差距分析相关的部分；禁止引入无关重构
 只输出 JSON。"""
+
+
+def _files_with_content(adapter: IterableAgentAdapter, repo_root: Path) -> str:
+    """读取 adapter 声明的提示词/工作流文件内容（相对仓库根），拼成 prompt 块。
+
+    超长文件截断到 _MAX_VARIANT_FILE_CHARS 并标注；文件不存在时如实说明，
+    避免 LLM 凭空生成（丢失 run 入口的根因）。
+    """
+    root = repo_root.resolve()
+    blocks: list[str] = []
+    for rel in list(adapter.prompt_files) + list(adapter.workflow_files):
+        path = (root / rel.lstrip("/")).resolve()
+        if not path.is_relative_to(root) or not path.exists():
+            blocks.append(f"{rel}:\n（文件不存在或不可读）")
+            continue
+        content = path.read_text(encoding="utf-8")
+        if len(content) > _MAX_VARIANT_FILE_CHARS:
+            content = content[:_MAX_VARIANT_FILE_CHARS] + "\n...（已截断）"
+        blocks.append(f"{rel}:\n{content}")
+    return "\n\n---\n\n".join(blocks)
 
 
 @dataclass
@@ -61,11 +88,11 @@ async def generate_variant(
     ground_truth: dict[str, object],
     current_score: ScoreDetail | None,
     gap_analysis: str,
+    repo_root: Path,
 ) -> VariantPlan:
-    """LLM 基于当前状态生成变体方案。"""
-    files = list(adapter.prompt_files) + list(adapter.workflow_files)
+    """LLM 基于当前文件内容生成变体方案。"""
     prompt = _GENERATE_PROMPT.format(
-        files=json.dumps(files, ensure_ascii=False),
+        files_with_content=_files_with_content(adapter, repo_root),
         ground_truth=json.dumps(ground_truth.get("attribution", {}), ensure_ascii=False),
         score=current_score.total if current_score else "N/A",
         gap_analysis=gap_analysis,
@@ -84,7 +111,7 @@ async def generate_variant(
     if isinstance(raw_files, list):
         plan_files = [str(f) for f in raw_files]
     else:
-        plan_files = files
+        plan_files = list(adapter.prompt_files) + list(adapter.workflow_files)
     raw_new_content = parsed.get("new_content")
     if isinstance(raw_new_content, dict):
         plan_new_content = {str(k): str(v) for k, v in raw_new_content.items()}
