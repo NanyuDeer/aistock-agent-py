@@ -57,7 +57,8 @@ async def scan_major_events(days: int) -> list[dict[str, object]]:
 
     每个候选：{"event_title", "event_time"(ISO), "telegraph_records"}。
     启发式：标题含 _EVENT_KEYWORDS 的电报为候选；同 30 分钟窗口合并；
-    T = 窗口内首条电报时间；telegraph_records 只保留 time <= T。
+    T = 窗口内首条电报时间；telegraph_records 为锚点起 30 分钟窗口内
+    所有电报（含未命中关键词的后续报道，供 agent 获取完整事件语料）。
     """
     today = datetime.now(UTC).date()
     candidates: list[dict[str, object]] = []
