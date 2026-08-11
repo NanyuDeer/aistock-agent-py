@@ -25,9 +25,11 @@ class ChatRunState:
     session_id: str
     run_id: str
     task: asyncio.Task
+    user_id: str | None = None  # 归属（P0 服务端注入值，未登录 None；resume/stop 越权校验用）
     events: list[dict] = field(default_factory=list)
     waiters: set[asyncio.Event] = field(default_factory=set)
     done: bool = False
+    cancelled: bool = False  # cancelled 终态标记（done 后为 True 表示被用户停止）
     result: dict | None = None
     created_at: float = field(default_factory=time.monotonic)
     done_at: float | None = None
@@ -36,6 +38,13 @@ class ChatRunState:
         """唤醒全部等待新事件的转发协程。"""
         for w in list(self.waiters):
             w.set()
+
+    def cancel(self) -> None:
+        """停止当前 run：置 cancelled 标记 + 取消后台任务。
+        done 的 task 调 cancel() 是 no-op，安全。"""
+        self.cancelled = True
+        if not self.task.done():
+            self.task.cancel()
 
 
 class ChatTaskManager:
@@ -48,11 +57,13 @@ class ChatTaskManager:
         session_id: str,
         run_id: str,
         producer: Callable[[ChatRunState], Awaitable[dict | None]],
+        user_id: str | None = None,
     ) -> ChatRunState | None:
         """启动后台生成任务。
 
         producer(state): 后台协程，负责执行 graph 并把 WS 事件 append 进
         state.events + state.notify()；结束返回终态 payload（DONE/ERROR dict）。
+        user_id: P0 服务端注入的归属（未登录 None），供 resume/stop 越权校验。
         返回 None 表示同 session 已有活跃任务（并发拒绝）。
         """
         self._cleanup()
@@ -63,6 +74,10 @@ class ChatTaskManager:
         async def _runner() -> None:
             try:
                 state.result = await producer(state)
+            except asyncio.CancelledError:
+                # 用户停止（stop → task.cancel()）：CancelledError 继承 BaseException，
+                # 不被 except Exception 捕获，必须显式处理并置 cancelled 终态（spec §8.2）
+                state.result = {"type": "cancelled", "content": "已停止生成"}
             except Exception:
                 logger.exception(
                     "chat_task_manager.producer_failed session_id=%s", session_id
@@ -78,6 +93,7 @@ class ChatTaskManager:
         state = ChatRunState(
             session_id=session_id,
             run_id=run_id,
+            user_id=user_id,
             task=asyncio.create_task(_runner()),
         )
         self._states[session_id] = state
@@ -96,6 +112,14 @@ class ChatTaskManager:
     def has_active(self, session_id: str) -> bool:
         s = self._states.get(session_id)
         return bool(s and not s.done)
+
+    def cancel(self, session_id: str) -> bool:
+        """停止 session 的活跃 run；无活跃 run 返回 False（stop_status not_found 依据）。"""
+        s = self._states.get(session_id)
+        if s is None or s.done:
+            return False
+        s.cancel()
+        return True
 
     def _cleanup(self) -> None:
         now = time.monotonic()

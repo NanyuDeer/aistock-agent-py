@@ -93,3 +93,59 @@ async def test_events_replay_and_waiter_notify():
     await state.task
     await collector
     assert [e["content"] for e in seen] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_active_run_yields_cancelled_terminal():
+    """cancel 活跃 run → done+cancelled=True，result 为 cancelled 终态 payload。"""
+    manager = chat_task_manager
+    await manager._cleanup_for_test()
+    started = asyncio.Event()
+
+    async def slow_producer(state):
+        started.set()
+        await asyncio.sleep(30)
+        return {"type": "done", "content": "x"}
+
+    state = manager.start("c1", "r1", slow_producer, "o_a")
+    assert state is not None
+    await started.wait()
+    assert manager.cancel("c1") is True
+    await state.task
+    assert state.done is True
+    assert state.cancelled is True
+    assert state.result == {"type": "cancelled", "content": "已停止生成"}
+    # done 后可再次 start（has_active 释放）
+    again = manager.start("c1", "r2", slow_producer, "o_a")
+    assert again is not None
+    # Py3.11：create_task 的协程未被事件循环驱动时 cancel() 直接把
+    # CancelledError 当作任务结果（协程体不执行，_runner 捕不到），
+    # 先 sleep(0) 让任务启动挂起（producer 在 sleep(30)），取消才能被正常捕获。
+    await asyncio.sleep(0)
+    again.cancel()
+    await again.task
+
+
+@pytest.mark.asyncio
+async def test_cancel_no_active_run_returns_false():
+    """无活跃 run → cancel 返回 False（stop_status not_found 依据）。"""
+    manager = chat_task_manager
+    await manager._cleanup_for_test()
+    assert manager.cancel("missing") is False
+
+
+@pytest.mark.asyncio
+async def test_start_records_user_id_for_ownership():
+    """start 记录 user_id 归属（resume/stop 越权校验的数据源）。"""
+    manager = chat_task_manager
+    await manager._cleanup_for_test()
+
+    async def producer(state):
+        return {"type": "done"}
+
+    state = manager.start("c3", "r1", producer, "o_owner")
+    assert state is not None
+    assert state.user_id == "o_owner"
+    await state.task
+    assert manager.get("c3") is not None
+    await manager._cleanup_for_test()
