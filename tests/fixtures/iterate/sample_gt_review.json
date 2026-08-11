@@ -1,0 +1,14 @@
+{
+  "gt_id": "gt_20260731_us_market_surge",
+  "case_id": "case_20260731_us_market_surge",
+  "confidence": "high",
+  "attribution": {
+    "direction": "bullish",
+    "drivers": ["隔夜美股暴涨", "外盘传导", "风险偏好回升"],
+    "transmission_path": ["美股 → A股高开 → 创业板/科创50领涨"],
+    "affected_sectors": ["半导体", "算力", "新能源"],
+    "source_notes": [
+      {"source": "财联社", "title": "隔夜美股三大指数集体收涨", "url": "https://cls.cn/detail/1"}
+    ]
+  }
+}

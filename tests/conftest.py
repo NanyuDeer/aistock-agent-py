@@ -72,7 +72,7 @@ def iterate_data_dir(tmp_path: Path) -> Path:
 
     分发规则：含 case_id 字段的切片 → data/cases/{agent_id}/{case_id}.json
     （切片按 agent 归档，并以 case_id 命名落盘，保证 case_path/list_cases 可定位）；
-    gt_*.json → data/ground_truths/（标准答案）。reporter/ground_truth 的
+    含 gt_id 字段的标准答案 → data/ground_truths/（标准答案）。reporter/ground_truth 的
     list_pending_review 只读 ground_truths/，不读 cases/，必须正确分发。
     """
     import json
@@ -86,14 +86,15 @@ def iterate_data_dir(tmp_path: Path) -> Path:
     if fixture_root.exists():
         for p in fixture_root.glob("*.json"):
             payload = json.loads(p.read_text(encoding="utf-8"))
-            if "case_id" in payload:
+            # 标准答案按 gt_id 字段识别（gt 文件也含 case_id，不能按 case_id 分流）
+            if "gt_id" in payload:
+                dest = tmp_path / "ground_truths"
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dest / p.name)
+            elif "case_id" in payload:
                 agent = payload.get("agent_id", "review")
                 dest = tmp_path / "cases" / str(agent)
                 dest.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(p, dest / f"{payload['case_id']}.json")
-            elif p.name.startswith("gt_"):
-                dest = tmp_path / "ground_truths"
-                dest.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(p, dest / p.name)
     yield tmp_path
     settings.iterate_data_dir = original
