@@ -3,7 +3,7 @@
     {
       "name": "aistock-agent",
       "script": "./.venv/bin/python",
-      "args": "-m uvicorn aistock_agent.main:app --host 0.0.0.0 --port 8080",
+      "args": "-m uvicorn aistock_agent.main:app --host 127.0.0.1 --port 8080",
       "cwd": "/home/aistock/aistock-agent-py",
       "interpreter": "none",
       "instances": 1,
