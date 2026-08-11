@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     deep_think_api_key: str = ""
     deep_think_base_url: str = ""
     deep_think_model: str = "gpt-4o"
+    # Embedding — 行业语义匹配（对齐硬约束：必须独立配置，禁用 LLM 端点做 embedding）
+    # 未配置时仅 fallback 到 openai_*（供测试）；生产必须显式配置支持 embedding 的服务。
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-3-small"
     # 双模型参数 — 从配置读取，避免硬编码（services/llm.py 引用）
     quick_think_temperature: float = 0.1
     quick_think_max_tokens: int = 2000

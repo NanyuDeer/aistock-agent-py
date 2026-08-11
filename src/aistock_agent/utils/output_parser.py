@@ -456,19 +456,33 @@ def _constrain_chain_by_industry_graph(
     chain: list[object],
     evidence: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """用一跳图谱事实约束模型输出的行业链节。"""
+    """用一跳图谱事实约束模型输出的行业链节。
+
+    Phase 1 fail-safe 规则：
+    - 核心行业在任何异常路径下必须保留（标注 kg_unverified=true）。
+    - 图谱成功时追加邻接行业（与当前逻辑一致）。
+    - relation 校验放宽：含"核心"或 level==1 均视为核心行业。
+    """
     found_evidence = [item for item in evidence if item["status"] == "found"]
+
+    # ── 分支 1：无有效图谱证据 → fail-safe 保留全部核心行业 ──
     if not found_evidence:
         core_chain: list[dict[str, object]] = []
         for raw_item in chain:
             item = _as_string_keyed_dict(raw_item)
-            if item is not None and item.get("relation") == "核心行业":
-                core_chain.append({**item, "relation": "核心行业", "level": 1})
+            if item is None:
+                continue
+            # 放宽 relation 匹配：核心行业 / 中心行业 / level==1 均视为核心
+            if _is_core_industry(item):
+                core_chain.append({
+                    **item,
+                    "relation": "核心行业",
+                    "level": 1,
+                    "kg_unverified": True,
+                })
         return core_chain
 
-    # 按中心行业 ID 建立一跳邻接表；名称仅用于将 LLM 展示名称解析为唯一 ID。
-    # 不再把多个中心的上下游合并成全局集合，否则 B 的邻接行业会被误判成 A 的直接关系，
-    # 造成多中心归属串链。
+    # ── 分支 2：有图谱证据 → 建立邻接表 + 约束邻接行业 ──
     center_adjacency: dict[str, dict[str, set[str]]] = {}
     center_ids_by_name: dict[str, set[str]] = {}
     for item in found_evidence:
@@ -491,14 +505,12 @@ def _constrain_chain_by_industry_graph(
         center_ids_by_name.setdefault(center_name, set()).add(center_id)
 
     constrained: list[dict[str, object]] = []
-    # 当前归属的中心行业 ID。每遇到核心行业先无条件清空，避免未验证核心
-    # 让后续邻接沿用上一中心；同名中心映射多个 ID 时也必须 fail-closed。
     current_center_id: str | None = None
     for raw_item in chain:
         item = _as_string_keyed_dict(raw_item)
         if item is None:
             continue
-        if item.get("relation") == "核心行业":
+        if _is_core_industry(item):
             current_center_id = None
             industry_name = item.get("industry")
             center_ids = (
@@ -507,13 +519,21 @@ def _constrain_chain_by_industry_graph(
                 else None
             )
             if center_ids is not None and len(center_ids) == 1:
+                # 名称唯一匹配 → 正常追加
                 current_center_id = next(iter(center_ids))
                 constrained.append({**item, "relation": "核心行业", "level": 1})
+            else:
+                # 名称不匹配或同名多 ID → fail-safe 保留核心行业并标记
+                constrained.append({
+                    **item,
+                    "relation": "核心行业",
+                    "level": 1,
+                    "kg_unverified": True,
+                })
             continue
 
         industry = item.get("industry")
         if not isinstance(industry, str) or current_center_id is None:
-            # 没有前置中心行业证据支持，丢弃该邻接行业。
             continue
         adjacency = center_adjacency[current_center_id]
         if industry in adjacency["upstream"]:
@@ -534,8 +554,88 @@ def _constrain_chain_by_industry_graph(
                     "reason": _INDUSTRY_GRAPH_DIRECT_RELATION_BOUNDARY,
                 }
             )
-        # 既不是当前中心行业的上游也不是下游：丢弃，避免把别的中心的邻接行业串到当前中心。
     return constrained
+
+
+def _is_core_industry(item: dict[str, object]) -> bool:
+    """判断 chain 条目是否为核心行业（兼容多种 relation 格式）。"""
+    relation = item.get("relation")
+    if isinstance(relation, str) and "核心" in relation:
+        return True
+    level = item.get("level")
+    if isinstance(level, int | float) and level == 1:
+        return True
+    return False
+
+
+def _build_evidence_candidate_set(
+    evidence: list[dict[str, object]],
+) -> set[str]:
+    """从 industryGraphEvidence 中提取合法的候选行业名集合。
+
+    用于事后校验 chain 中的行业是否全部来自图谱候选。
+    核心行业名也被纳入候选集（KG 查询时就是按它匹配的）。
+    """
+    candidates: set[str] = set()
+    for item in evidence:
+        if item.get("status") != "found":
+            continue
+        industry = item.get("industry")
+        if isinstance(industry, dict):
+            name = industry.get("name")
+            if isinstance(name, str) and name.strip():
+                candidates.add(name.strip())
+        for side in ("upstream", "downstream"):
+            side_list = item.get(side)
+            if not isinstance(side_list, list):
+                continue
+            for node in side_list:
+                if isinstance(node, dict):
+                    name = node.get("name")
+                    if isinstance(name, str) and name.strip():
+                        candidates.add(name.strip())
+    return candidates
+
+
+def _validate_chain_against_evidence(
+    chain: list[dict[str, object]],
+    evidence: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Phase 2 代码校验：标注 chain 中不在图谱候选集内的行业。
+
+    校验规则（非破坏性——核心行业永远保留）：
+    - 无 found 证据时跳过校验（Phase 1 fail-safe 已处理）。
+    - 有 found 证据时：核心行业不在候选集 → 标记 kg_unverified。
+    - 邻接行业不在候选集 → 标记 kg_unverified（不删除，保留 LLM 判断但标低置信度）。
+
+    返回：
+        可能附带了 kg_unverified 标记的 chain 副本。
+    """
+    candidates = _build_evidence_candidate_set(evidence)
+    if not candidates:
+        # 无有效证据候选集 → 不校验
+        return chain
+
+    validated: list[dict[str, object]] = []
+    for item in chain:
+        industry = item.get("industry")
+        if not isinstance(industry, str) or not industry.strip():
+            validated.append(item)
+            continue
+
+        in_candidates = industry.strip() in candidates
+        is_core = _is_core_industry(item)
+
+        if not in_candidates:
+            # 不在候选集中：标记 kg_unverified
+            validated.append({**item, "kg_unverified": True})
+        elif is_core and not item.get("kg_unverified", False):
+            # 核心行业在候选集中且未标记 → 确认无 kg_unverified
+            validated.append(item)
+        else:
+            validated.append(item)
+
+    return validated
 
 
 # ── 字段映射 ──
@@ -595,7 +695,31 @@ def transform_to_frontend(
             _as_list(transmission.get("chain", [])),
             industry_graph_evidence,
         )
+        # Phase 2 代码校验：标注不在图谱候选集内的行业为 kg_unverified
+        chain = _validate_chain_against_evidence(chain, industry_graph_evidence)
         core_industry = transmission.get("coreIndustry", {})
+
+        # 代码确定性排序：按 impactStrength 降序（不改变 impactStrength/reason，仅调整顺序）。
+        # 防止 LLM 输出顺序影响前端展示——前端第一行业一定是事件影响最大的行业。
+        chain_items: list[dict[str, object]] = [
+            {
+                "industry": str(c.get("industry", "")),
+                "relation": str(c.get("relation", "核心行业")),
+                "level": int(cast(str | float | int, c.get("level", 1))),
+                "direction": _normalize_direction(
+                    str(c.get("direction", "")), "chain.direction"
+                ),
+                "impactStrength": float(
+                    cast(str | float | int, c.get("impactStrength", 0))
+                ),
+                "reason": str(c.get("reason", "")),
+                # Phase 1 fail-safe：图谱未验证标记（前端可选消费）
+                "kg_unverified": bool(c.get("kg_unverified", False)),
+            }
+            for c in chain
+            if isinstance(c, dict)
+        ]
+        chain_items.sort(key=lambda item: item["impactStrength"], reverse=True)
 
         reports["event_transmission"] = {
             "eventId": event_meta.get("eventId", ""),
@@ -618,22 +742,7 @@ def transform_to_frontend(
                 "reason": str(core_industry.get("reason", "")),
             } if isinstance(core_industry, dict) else {"name": "", "impact": "", "reason": ""},
             "industryGraphEvidence": industry_graph_evidence,
-            "chain": [
-                {
-                    "industry": str(c.get("industry", "")),
-                    "relation": str(c.get("relation", "核心行业")),
-                    "level": int(cast(str | float | int, c.get("level", 1))),
-                    "direction": _normalize_direction(
-                        str(c.get("direction", "")), "chain.direction"
-                    ),
-                    "impactStrength": float(
-                        cast(str | float | int, c.get("impactStrength", 0))
-                    ),
-                    "reason": str(c.get("reason", "")),
-                }
-                for c in chain
-                if isinstance(c, dict)
-            ],
+            "chain": chain_items,
         }
     else:
         reports["event_transmission"] = None
