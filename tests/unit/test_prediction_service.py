@@ -316,3 +316,25 @@ async def test_run_chat_prediction_falls_back_on_llm_error():
     with patch("aistock_agent.services.prediction_service.get_quick_think", return_value=llm):
         result = await run_chat_prediction(_make_chat_snapshot(), [], {})
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_survives_due_dates_out_of_range():
+    """到期日计算超出交易日历范围（如 2027）→ best-effort 跳过，不阻断对话预测。
+
+    WS 冒烟根因：long 档 +120 交易日落在 2027，超出 holiday 日历 [2004, 2026]，
+    add_trading_days 抛 ValueError。chat 路径返回值无消费方（v1 不落库），
+    整条预测因未消费值失败是错的 → 应跳过并返回预测本身。
+    """
+    llm, structured_ainvoke = _make_chat_llm(prediction=_chat_prediction(_VALID_LLM_JSON))
+    with (
+        patch(
+            "aistock_agent.services.prediction_service.add_trading_days",
+            side_effect=ValueError("no available data for year 2027"),
+        ),
+        patch("aistock_agent.services.prediction_service.get_quick_think", return_value=llm),
+    ):
+        result = await run_chat_prediction(_make_chat_snapshot(), [], {})
+    assert result is not None
+    assert result.prediction_status == "hypothesis"
+    structured_ainvoke.assert_awaited()

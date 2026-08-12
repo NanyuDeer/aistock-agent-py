@@ -250,7 +250,8 @@ async def run_chat_prediction(
     通过门禁（指数场景，LLM 输入不携带 capital_flow 块，不编造指数资金流）。后处理：
     - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
     - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
-    - 到期日由 _compute_due_dates 确定性计算（LLM 不输出日期，与 run_predict 同源）。
+    - 到期日由 _compute_due_dates 确定性计算（LLM 不输出日期，与 run_predict 同源）；
+      best-effort——超出交易日历范围（如 2027 年）时仅 warning 跳过，不阻断预测。
     任一失败返回 None（"永不 500"铁律）。不产生交易指令。
     """
     gate_reason = _gate_chat_snapshot(snapshot)
@@ -277,8 +278,12 @@ async def run_chat_prediction(
                 "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
             }
         )
-        # 到期日确定性计算：校验 trade_date 与 horizon 档位映射（异常 → 降级 None）
-        _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # 到期日确定性计算：仅校验基准日与档位映射（best-effort，不阻断对话预测——
+        # v1 不落库、返回值无消费方；2027 起超出交易日历范围时降级跳过，仅 warning）
+        try:
+            _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        except Exception as exc:
+            logger.warning("chat_prediction.due_dates_skipped", error=str(exc))
         return prediction
     except Exception as exc:
         logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)
