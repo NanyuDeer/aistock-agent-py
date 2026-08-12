@@ -1450,6 +1450,11 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             metrics.record_chat_qa_latency(
                 "qa_router", int((time.monotonic() - start) * 1000)
             )
+            # A2 产品决策（2026-08-12 验收辩论，用户拍板）：对比问句不附加 prediction
+            # SkillCall。"茅台和五粮液哪个更好，会涨吗"（对比词"哪个更好" + 强预测词
+            # "会涨"）→ 对比短路 compare_stocks（现状对比），预测意图不叠加——与 B5
+            # 点位红线收口方向一致，避免新增预测渲染面。
+            # 行为由 test_qa_router_confirm.py::test_compare_with_predict_keywords_never_attaches_prediction 锁定。
             return {
                 "goal": goal,
                 "plan": "direct",

@@ -233,3 +233,30 @@ async def test_confirm_choice_does_not_bypass_greeting_gate() -> None:
     )
     assert result["final_response"] == CAPABILITY_REPLY
     assert result["goal"].constraints.get("guardrail") == "greeting"
+
+
+# ── A2（Phase 4 验收修复）：对比问句不附加 prediction ──────────────
+
+
+@pytest.mark.asyncio
+async def test_compare_with_predict_keywords_never_attaches_prediction() -> None:
+    """A2 锁定（2026-08-12 验收裁决）："茅台和五粮液哪个更好，会涨吗"
+    （"哪个更好"命中对比词表 + "会涨"为强预测词）→ 对比闸门 2.5 短路
+    仅 compare_stocks，不附加 prediction SkillCall。
+
+    注（裁决修正）：原示例句"茅台和五粮液哪个会涨"不命中 _COMPARE_KEYWORDS，
+    实际走闸门 2 名称解析 → confirm 交互消费附加 prediction（既有合理路径）。
+    """
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        _resolve_map({"茅台": "600519", "五粮液": "000858"}),
+    ):
+        result = await qa_router_node(_state("茅台和五粮液哪个更好，会涨吗"))
+
+    assert result["plan"] == "direct"
+    calls = result["skill_calls"]
+    assert len(calls) == 1
+    assert calls[0].skill_name == "compare_stocks"
+    assert calls[0].args == {"symbols": ["600519", "000858"]}
+    assert result["goal"].intent == "compare_stocks"
+    assert all(c.skill_name != "prediction" for c in calls)
