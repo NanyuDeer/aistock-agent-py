@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     insight_label_max_chars: int = 12
     # 归因任务轻，默认 quick_think
     insight_llm_model: Literal["quick_think", "deep_think"] = "quick_think"
+    # 午盘触发后补抓窗口（分钟，PRD §8：15-20 分钟；Node 侧 cron 使用）
+    insight_refetch_minutes: int = 20
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
