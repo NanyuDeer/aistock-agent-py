@@ -697,6 +697,13 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
     # 误传消息全文当 link）
     if skill_name == "douyin_video":
         return SkillCall(skill_name="douyin_video", args={})
+    # Phase 4-1：prediction（影响持续性推演）——无标的（非个股）不硬塞，返回 None
+    # 维持既有 compose/降级；有标的传 symbols（与同轮 validate 同标的，复用去重）
+    if skill_name == "prediction":
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="prediction", args={"symbols": [symbol]})
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -801,8 +808,8 @@ def _build_gate4_context(candidates: list[tuple[str, _DimTarget | None]]) -> str
         desc = t.value if t else "无明确标的"
         if d == "predict":
             lines.append(
-                f"- 维度: predict（预测），标的: {desc}（预测功能开发中，"
-                f"不指定预测 skill，可复用同标的现状取数）"
+                f"- 维度: predict（预测），标的: {desc}"
+                f"（影响持续性推演，可携带同标的现状取数作依据）"
             )
         elif d == "trace":
             lines.append(f"- 维度: trace（溯源），标的: {desc}")
@@ -1284,17 +1291,29 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         predict_goal = _build_single_predict_goal(message, index_intent, [])
         if predict_goal is not None:
             call = call.model_copy(update={"goal_id": "g1"})
+            # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据；
+            # 非快照指数（market_snapshot 分支）无 index_code → 不塞 prediction，维持 D35 降级）
+            index_calls = [call]
+            if index_code is not None:
+                index_calls.append(
+                    SkillCall(
+                        skill_name="prediction",
+                        args={"symbols": [index_code]},
+                        goal_id="g2",
+                    )
+                )
             index_plan: Literal["direct", "compose"] = "compose"
             index_goals: list[SubGoal] | None = [predict_goal]
         else:
             index_plan = "direct"
             index_goals = None
+            index_calls = [call]
         logger.info("qa_router.gate.index", index=index_name, predict=bool(predict_goal))
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": goal,
             "plan": index_plan,
-            "skill_calls": [call],
+            "skill_calls": index_calls,
             "complexity": "light",
             "goals": index_goals,
         }
@@ -1347,11 +1366,21 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
                 )
                 if predict_goal is not None:
                     call = call.model_copy(update={"goal_id": "g1"})
+                    # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据）
+                    resolve_calls = [
+                        call,
+                        SkillCall(
+                            skill_name="prediction",
+                            args={"symbols": [resolved]},
+                            goal_id="g2",
+                        ),
+                    ]
                     resolve_plan: Literal["direct", "compose"] = "compose"
                     resolve_goals: list[SubGoal] | None = [predict_goal]
                 else:
                     resolve_plan = "direct"
                     resolve_goals = None
+                    resolve_calls = [call]
                 logger.info(
                     "qa_router.gate.stock_resolve",
                     name=candidate,
@@ -1362,7 +1391,7 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
                 return {
                     "goal": goal,
                     "plan": resolve_plan,
-                    "skill_calls": [call],
+                    "skill_calls": resolve_calls,
                     "complexity": "light",
                     "goals": resolve_goals,
                 }
@@ -1651,6 +1680,7 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             "hot_burst": "hot_burst",
             "industry_relation": "industry_relation",
             "market_snapshot": "market_snapshot",
+            "prediction": "prediction",
             "report_lookup": "report_lookup",
             "sector_snapshot": "sector_snapshot",
             "stock_news": "stock_news",

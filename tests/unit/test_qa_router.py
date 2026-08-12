@@ -10,6 +10,7 @@ from aistock_agent.graph.nodes.qa_router import (
     _STRONG_PREDICT_KEYWORDS,
     SYSTEM_PROMPT,
     QARouterOutput,
+    _build_default_skill_call,
     _build_dimension_candidates,
     _build_fallback_goals,
     _build_fallback_subgoal,
@@ -1473,6 +1474,87 @@ def test_single_predict_goal_weak_word_no_attach():
 
 def test_single_predict_goal_no_predict_word():
     assert _build_single_predict_goal("茅台今天怎么样", "stock_snapshot", ["600519"]) is None
+
+
+# ── Phase 4-1 Task 3：predict 意图路由到 prediction skill ──
+@pytest.mark.asyncio
+async def test_gate1_index_predict_appends_prediction_call():
+    """闸门 1 指数短路 + 强预测词 → 附加 prediction SkillCall（goal_id=g2）。"""
+    result = await qa_router_node(_state("沪指明天会涨吗"))
+    calls = result["skill_calls"]
+    assert [c.skill_name for c in calls] == ["index_snapshot", "prediction"]
+    assert calls[0].goal_id == "g1"                     # 现状取数归属 g1（现状趋势）
+    assert calls[1].goal_id == "g2"                     # prediction 归属 g2（推演）
+    assert calls[1].args == {"symbols": ["000001"]}
+    assert result["plan"] == "compose"
+    assert result["goals"] is not None
+    assert result["goals"][0].dimension == "predict"
+
+
+@pytest.mark.asyncio
+async def test_gate2_resolve_predict_appends_prediction_call():
+    """闸门 2 名称解析短路 + 强预测词 → 附加 prediction SkillCall（goal_id=g2）。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_state("茅台明天会涨吗"))
+    calls = result["skill_calls"]
+    assert [c.skill_name for c in calls] == ["stock_snapshot", "prediction"]
+    assert calls[0].goal_id == "g1"
+    assert calls[1].goal_id == "g2"
+    assert calls[1].args == {"symbols": ["600519"]}
+    assert result["plan"] == "compose"
+
+
+@pytest.mark.asyncio
+async def test_gate1_overseas_index_predict_keeps_d35_no_prediction_call():
+    """非快照指数（恒指）+ 预测词 → 仅 D35 goal 附加，不塞 prediction（无代码可引）。"""
+    result = await qa_router_node(_state("恒指明天会涨吗"))
+    assert [c.skill_name for c in result["skill_calls"]] == ["market_snapshot"]
+    assert result["goals"] is not None
+    assert result["goals"][0].dimension == "predict"
+
+
+@pytest.mark.asyncio
+async def test_gate2_resolve_no_predict_no_prediction_call():
+    """闸门 2 无预测词 → 不附加 prediction（现有单意图行为不变）。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_state("茅台今天怎么样"))
+    assert [c.skill_name for c in result["skill_calls"]] == ["stock_snapshot"]
+    assert result["skill_calls"][0].goal_id is None
+    assert result["goals"] is None
+
+
+def test_build_default_skill_call_prediction_with_symbol():
+    call = _build_default_skill_call("prediction", "600519 明天会涨吗")
+    assert call is not None
+    assert call.skill_name == "prediction"
+    assert call.args == {"symbols": ["600519"]}
+
+
+def test_build_default_skill_call_prediction_no_symbol_returns_none():
+    """无标的 predict 问句：不硬塞 prediction（守卫返回 None，维持既有降级）。"""
+    assert _build_default_skill_call("prediction", "今年股市会怎样") is None
+    assert _build_default_skill_call("prediction", "明天会涨吗") is None
+
+
+def test_route_keyword_fallback_predict_question_not_hard_sold():
+    """keyword-fallback 路径：无标的 predict 问句维持 report_lookup，不落 prediction。"""
+    call = route_by_keyword_fallback("今年股市会怎样")
+    assert call is not None
+    assert call.skill_name == "report_lookup"
+
+
+def test_gate4_context_predict_no_suppression_wording():
+    """E1：gate4 context 不再包含"不指定预测 skill"抑制文案。"""
+    _, candidates = _build_dimension_candidates("600519 明天会涨吗")
+    ctx = _build_gate4_context(candidates)
+    assert "不指定预测 skill" not in ctx
+    assert "影响持续性推演" in ctx
 
 
 # ── P5（D2/D3）：兜底取数去重 + trace 维度走 trace_lookup ──
