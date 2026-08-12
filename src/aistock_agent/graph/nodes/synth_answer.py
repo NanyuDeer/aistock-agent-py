@@ -128,7 +128,8 @@ def _build_predict_section(
       ① 现状趋势：复用同子目标 validate facts（goal_id == sg.id，既有逻辑）；
       ② 影响持续性推演：渲染 prediction facts（跳过首行【…现状】输入上下文，
          三档/置信度/演化/风险/低置信提示原样保留，免责声明去重）；
-      ③ 免责声明：代码兜底恰好一次置尾。
+      ③ 免责声明：由 _synth_multi_goal 合并各节后统一追加恰好一次（A1②），
+         本节不再各自追加（多 predict 子目标不再各节重复）。
     - Evidence 缺失或 degraded → 维持 D35 降级提示（PREDICT_DEGRADED_HINT）+ 趋势要点。
     - 定位规则：仅按 skill_name=="prediction"（prediction skill 恒设置该名；不按 goal_id
       兜底——关键词兜底 compose 路径的 predict 子目标 g2 可能携带 goal_id="g2" 的
@@ -174,8 +175,6 @@ def _build_predict_section(
         lines.extend(
             f"- {f[2:]}" if f.startswith("- ") else f"- {f}" for f in pred_facts
         )
-    # ③ 免责声明：代码兜底恰好一次置尾
-    lines.append(DISCLAIMER)
     return "\n\n".join(lines)
 
 
@@ -230,6 +229,10 @@ async def _synth_multi_goal(
         )
         any_degraded = True
     combined = "\n\n".join(sections)
+    # A1②：免责声明合并后统一追加恰好一次（多 predict 子目标不再各节重复；
+    # predict 是 dimension 值，见 L207 过滤；追加位置在预测段之后、D28 风险段之前）
+    if predict and DISCLAIMER not in combined:
+        combined = f"{combined}\n\n{DISCLAIMER}"
     # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
     combined = _append_risk_disclaimer(
         combined,

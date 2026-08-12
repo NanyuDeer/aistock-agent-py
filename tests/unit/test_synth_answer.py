@@ -1300,7 +1300,8 @@ def test_build_predict_section_three_part_rendering() -> None:
     """非 degraded prediction Evidence → 三段式：现状趋势 + 影响持续性推演 + 免责声明。
 
     ① 现状趋势保留 validate facts；② 影响持续性推演渲染 prediction facts（首行
-    【…现状】输入上下文被跳过，不重复）；③ 免责声明恰好一次置尾；无 D35 降级提示。
+    【…现状】输入上下文被跳过，不重复）；③ 免责声明 A1② 起由 _synth_multi_goal
+    合并后统一追加，本节不再逐节追加；无 D35 降级提示。
     """
     sg = _subgoal("g1", "predict", "明日走势预测")
     validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
@@ -1316,9 +1317,8 @@ def test_build_predict_section_three_part_rendering() -> None:
     assert "演化路径" in section
     assert "风险提示" in section
     assert "【600519 现状】" not in section
-    # ③ 免责声明恰好一次置尾；无降级提示
-    assert section.count(DISCLAIMER) == 1
-    assert section.rstrip().endswith(DISCLAIMER)
+    # ③ 免责声明 A1② 起由合并层统一追加，本节不含；无降级提示
+    assert DISCLAIMER not in section
     assert PREDICT_DEGRADED_HINT not in section
 
 
@@ -1363,13 +1363,16 @@ def test_build_predict_section_g2_validate_not_mislabeled_as_prediction() -> Non
 
 
 def test_build_predict_section_low_confidence_hint() -> None:
-    """prediction facts 含低置信提示（confidence=low）→ 三段式输出中保留不确定性提示。"""
+    """prediction facts 含低置信提示（confidence=low）→ 三段式输出中保留不确定性提示。
+
+    免责声明 A1② 起由 _synth_multi_goal 合并后统一追加，本节不含。
+    """
     sg = _subgoal("g1", "predict", "明日走势预测")
     pred_ev = _prediction_evidence(low_confidence=True)
     section = _build_predict_section(sg, [pred_ev], include_hint=True)
     assert LOW_CONFIDENCE_HINT in section
     assert PREDICT_DEGRADED_HINT not in section
-    assert section.count(DISCLAIMER) == 1
+    assert DISCLAIMER not in section
 
 
 @pytest.mark.asyncio
@@ -1390,3 +1393,27 @@ async def test_multi_goal_predict_three_part_no_degraded_hint() -> None:
     assert "影响持续性推演：" in result["final_response"]
     assert "主力资金持续流入，短线延续强势" in result["final_response"]
     assert result["final_response"].count(DISCLAIMER) == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_predict_goals_disclaimer_once() -> None:
+    """A1②：两个 predict 子目标 → combined 中 DISCLAIMER 恰好出现一次（预测段末尾、风险段之前）。"""
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    goals = [
+        _subgoal("g1", "predict", "明日走势预测"),
+        _subgoal("g2", "predict", "下周走势预测"),
+    ]
+    result = await _synth_multi_goal(
+        {"plan": "compose"},
+        InsightGoal(question="x", intent="market_snapshot"),
+        [validate_ev, pred_ev],
+        goals,
+    )  # type: ignore[arg-type]
+    combined = result["final_response"]
+    # 免责声明全文恰好一次（不再每个 predict 子目标节各追加一次）
+    assert combined.count(DISCLAIMER) == 1
+    # 位于预测段（最后一个 predict 子目标节）之后
+    assert combined.index(DISCLAIMER) > combined.index("下周走势预测")
+    # 位于 D28 风险段之前
+    assert combined.index(DISCLAIMER) < combined.index(RISK_DISCLAIMER)
