@@ -90,3 +90,7 @@ class QuestionState(TypedDict, total=False):
     # 不写回图状态输出；由 ws.py 每轮入口归零（对齐 deep_source/goals 先例）。
     confirm_choice: dict | None = None
     confirm_timeout: bool | None = None
+    # Phase 4-3（改进 15）：用户画像（ws.py/routes.py 入口按 user_id 拉取注入）。
+    # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
+    # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
+    user_profile: dict | None = None

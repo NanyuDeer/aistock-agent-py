@@ -546,6 +546,12 @@ async def ws_chat(websocket: WebSocket) -> None:
             initial_state["user_id"] = (
                 str(raw_user_id) if raw_user_id not in (None, "") else None
             )
+            # Phase 4-3（改进 15）：user_profile 按 user_id 拉取注入（Redis 5min 缓存，
+            # 失败/空画像返回 None/{} 不阻断）；未登录不注入 → 零行为变化。
+            if initial_state.get("user_id"):
+                initial_state["user_profile"] = await node_api.get_user_profile(
+                    str(initial_state["user_id"])
+                )
             # T6/M3：单轮 transient 路由信号每轮归零（对齐 reset_transient_state；
             # last_deep_report / pending_clarification 跨轮保留，不入归零）。
             # Phase 4-2：confirm/confirm_choice/confirm_timeout 同为单轮 transient
@@ -603,6 +609,12 @@ async def ws_chat(websocket: WebSocket) -> None:
                 initial_state2["user_id"] = (
                     str(raw_user_id) if raw_user_id not in (None, "") else None
                 )
+                # Phase 4-3（改进 15）：阶段 2 重跑同 thread 同样注入（对齐阶段 1；
+                # 5min 缓存窗口内命中，不产生额外 HTTP）。
+                if initial_state2.get("user_id"):
+                    initial_state2["user_profile"] = await node_api.get_user_profile(
+                        str(initial_state2["user_id"])
+                    )
                 # Phase 4-2 修复：阶段 2 重跑同 session（thread_id）图时 messages 必须置空。
                 # build_chat_initial_state 携带的 [HumanMessage(message)]（无 id）经
                 # add_messages reducer 会被追加进 checkpoint 历史 → 线程消息变 [m1, m1]，

@@ -30,6 +30,7 @@ from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
 from aistock_agent.services.briefing import build_and_persist_brief
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.qa_briefing import (
     QaBriefingPrerequisiteError,
@@ -99,6 +100,11 @@ async def chat_message(
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    # Phase 4-3（改进 15）：HTTP 路径同样注入 user_profile（对齐 ws.py；未登录/失败不阻断）
+    if initial_state.get("user_id"):
+        initial_state["user_profile"] = await node_api.get_user_profile(
+            str(initial_state["user_id"])
+        )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
     result = await graph.ainvoke(
@@ -299,6 +305,11 @@ async def chat_stream_messages(
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
     initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
+    # Phase 4-3（改进 15）：SSE 路径同样注入 user_profile（对齐 ws.py；未登录/失败不阻断）
+    if initial_state.get("user_id"):
+        initial_state["user_profile"] = await node_api.get_user_profile(
+            str(initial_state["user_id"])
+        )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
 
