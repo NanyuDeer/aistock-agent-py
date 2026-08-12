@@ -224,3 +224,27 @@ def test_direction_param_ignored() -> None:
     )
     assert len(up) == 1
     assert len(down) == 1
+
+
+def test_time_factor_float_days_offset() -> None:
+    """days_offset 为浮点（JSON 数字）时不应抛错：3.0 → offset 3。"""
+    assert _time_factor({"time_bucket": "T1", "days_offset": 3.0}) == 0.5
+
+
+def test_news_keyword_hit_refines_category() -> None:
+    """news 标题命中词典关键词（业绩预增）→ 二次精化为 earnings。"""
+    cands = extract_candidates_from_evidence(
+        [
+            {
+                "source_type": "news",
+                "title": "公司业绩预增超预期",
+                "excerpt": "净利大幅增长",
+                "source_id": "n2",
+                "strength": 0.5,
+                "days_offset": 0,
+                "time_bucket": "T0",
+            }
+        ],
+        "up",
+    )
+    assert cands[0].category == "earnings"

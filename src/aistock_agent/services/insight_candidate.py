@@ -236,7 +236,8 @@ def _time_factor(item: dict[str, object]) -> float:
     返回 [0.1, 1.0] 区间值，乘以原始 strength 得到时效加权强度。
     """
     bucket = str(item.get("time_bucket", "T0"))
-    offset = int(str(item.get("days_offset", 0) or 0))
+    # days_offset 上游为 JSON 数字（int/float）：float(str()) 中转过 mypy，并兼容 3 / 3.0 / "3"
+    offset = int(float(str(item.get("days_offset", 0) or 0)))
     if bucket == "earnings":
         # 业绩特例：T-1 按 0.3，offset>=2 按 0.3→0.1 线性递减，下限 0.1
         return max(0.1, 0.3 - 0.2 * float(max(0, offset - 1)))
