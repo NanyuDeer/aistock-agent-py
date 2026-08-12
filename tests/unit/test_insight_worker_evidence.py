@@ -224,7 +224,7 @@ async def test_evidence_path_confidence_cap_earnings_far_low(
     mock_select: AsyncMock,
 ) -> None:
     """业绩远期（strength<0.3）：置信度上限 low（high → low）。"""
-    # 业绩远期：strength = 0.5 × 0.3(offset=3, earnings) = 0.15 < 0.3
+    # 业绩远期：earnings offset=3 → 系数 max(0.1, 0.3-0.2*2)=0.1，strength = 0.5 × 0.1 = 0.05 < 0.3
     mock_select.return_value = InsightAttributionOutput(
         attribution_status="confirmed",
         primary_driver=DriverOutput(

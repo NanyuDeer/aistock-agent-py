@@ -214,8 +214,11 @@ def _validate_driver_anchored_in_evidence(
     if d.category is not None and d.category != cand.category:
         return False
     # 按 candidate id 定位源证据条目（id 格式 e{idx+1}，idx 为证据包原始索引）
+    # 防护非数字后缀：校验器契约是"只返回 bool"，id 异常时视为未锚定而非抛错
     sid = cand.id
-    target = evidence[int(sid[1:]) - 1] if sid.startswith("e") else None
+    if not sid.startswith("e") or not sid[1:].isdigit():
+        return False
+    target = evidence[int(sid[1:]) - 1]
     if not isinstance(target, dict):
         return False
     title = str(target.get("title") or "")
