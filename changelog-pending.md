@@ -1,5 +1,22 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 Phase 4 验收修复（正反辩论裁决，changer 未 push）
+
+> 两轮正反辩论（正方 A1-A10 / 反方 B1-B10 / 追打 C1-C4）后用户拍板"先修必修缺口再复审"。本批为验收修复 commits：agent-py d486dbe..637efb1（10 commits）、app-api 2ac18b9..86e2d13（2）、app-frontend 5f00eb4..50bce70（4）。
+
+- **B2 resume×confirm 死端修复**：pending-confirm 独立缓存（ChatTaskManager `set/get/clear_pending_confirm`，TTL 600s，独立于 ChatRunState 防阶段 2 覆盖）；主循环消费 `confirm_response`（resume 补发后点选不再报"消息不能为空"）；`_normalize_confirm_choice` 单一事实源（同连接与 resume 两处共用，qa_router 只消费 dict 形状）；幂等（消费后 clear，重复→"确认已失效"）
+- **B7 确认等待期消息不静默**：`_wait_confirm_response` 返回 `ConfirmWaitResult`（choice/displaced/stopped 三互斥结局）；普通新消息→displaced 放弃确认按下一轮处理；stop→cancelled 终态（含越权校验）；request_id 不匹配仍忽略（B-1）
+- **B9 多连接竞态**：阶段 2 start None → ERROR 提示 + clear pending
+- **B5 点位红线代码级收口**：`_sanitize_metric_projection` 剥离绝对点位（负向前瞻排除周/天/月/年/倍；不含 ％；冗余清理），只作用于 chat 路径 `_render_facts`，`render_prediction_markdown` 不触碰（B2 溯源验证消费方）；`PREDICTION_CHAT_PROMPT` 硬性禁止绝对点位
+- **A3 死代码**：移除 chat 路径 `_compute_due_dates` 调用（v1 不落库无消费方），`run_predict` 不受影响
+- **A1② 免责恰好一次**：`_build_predict_section` 去逐节 append，`_synth_multi_goal` 合并后按 `predict`（dimension 过滤）追加一次
+- **A2 对比闸门**：注释 + 锁定用例（"茅台和五粮液哪个更好，会涨吗"→仅 compare_stocks 无 prediction；原句"哪个会涨"走 confirm 消费预测属既有路径）
+- **B8**：app-api `DELETE /api/user/profile`（PIPL 删除权）+ `delAgentProfileCache`（db=1 专用连接 DEL `user_profile:{userId}`，PUT/DELETE 双失效，工厂可注入）；app-frontend `deleteUserProfile()` + profile.vue"AI 个性化服务"说明与删除入口
+- **B3**：manifest.json mp-weixin 声明 WechatSI（0.3.5/wx069ba97219f66d99，发布前后台核验）
+- **B10**：`.env.server` 入 .gitignore；ConfirmSheet.vue 注释订正
+- 验证：agent-py 定向 153 passed + 全量 1796 passed/12 failed（integration 既有基线零交集）+ ruff 0 新增；app-api tsc 0 + profile 14/14；app-frontend type-check 0 + build:h5 ok + vitest 221 passed（2 suite 为 mp-html 既有编译基线）；逐任务审查全部 Approved + 最终整仓审查 **Ready with fixes → 已修**（E501 折行/注释行号/docblock/返回类型）
+- **验收状态**：Phase 4 **代码验收通过（修复后复审）**，待 V1 部署窗口生产验证（组成条件：问题 18 回归 + 三子项生产 WS 冒烟 + confirm/resume 变体时序 + B8 缓存失效实证 + B5 无点位冒烟）
+
 ## 2026-08-12 Phase 4 验收辩论数字口径修订（B6，验收裁决）
 - "test_prediction_service.py 复跑 76 passed" → 该文件实为 14 个 test 函数（gate 用例 parametrize 展开 17 cases）；
   Phase 4 定向复跑口径改为"10 个 Phase 4 测试文件合计 76 passed"
