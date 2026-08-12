@@ -330,3 +330,58 @@ async def test_collect_global_markets_fails_returns_empty():
     ):
         events = await collect_global_markets()
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_collect_cls_telegraph_scores_major_event():
+    """P0-1：cls 电报标题命中强事件词 → impact_score 5（过阈入库）。"""
+    raw_items = [
+        {
+            "id": "3001",
+            "title": "央行宣布降准0.5个百分点",
+            "content": "央行降准",
+            "time": "2026-08-12 09:30:00",
+        }
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"items": raw_items})
+        events = await collect_cls_telegraph("2026-08-12")
+    assert len(events) == 1
+    assert events[0]["impact_score"] == 5
+    assert events[0]["direction"] == "positive"
+
+
+@pytest.mark.asyncio
+async def test_collect_ths_original_scores_by_content():
+    """P0-1：ths 内容命中强负面词 → impact_score 5。"""
+    rows = [
+        {
+            "source_id": "s1",
+            "title": "某某公司公告",
+            "content": "控股股东拟减持不超过2%股份",
+            "keywords": [],
+            "published_at": "2026-08-12T02:00:00.000Z",
+        }
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"items": rows})
+        events = await collect_ths_original("2026-08-12")
+    assert len(events) == 1
+    assert events[0]["impact_score"] == 5
+    assert events[0]["direction"] == "negative"
+
+
+@pytest.mark.asyncio
+async def test_collect_tavily_neutral_scores_1():
+    """P0-1：tavily 无命中词 → impact_score 1（不过阈不入库，维持过滤面）。"""
+    with patch(
+        "aistock_agent.services.event_scrape_sources.asyncio.to_thread",
+        new=AsyncMock(
+            return_value={"results": [{"title": "市场综述", "content": "今日两市震荡", "url": "https://t/1"}]}
+        ),
+    ):
+        events = await collect_tavily("2026-08-12")
+    # 注：collect_tavily 遍历 2 个 query，各返回一条相同事件（同 content_hash，
+    # 同批内不去重，去重在落库阶段）→ 2 条，均应为中性 1 分
+    assert len(events) == 2
+    assert all(ev["impact_score"] == 1 for ev in events)

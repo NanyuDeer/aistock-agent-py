@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.event_scoring import apply_rule_score
 from aistock_agent.services.event_store import EventRecord, normalize_event
 from aistock_agent.utils.date import shanghai_today
 
@@ -104,6 +105,7 @@ async def collect_cls_telegraph(score_date: str) -> list[EventRecord]:
         raw: dict[str, Any] = dict(item)
         raw.setdefault("title", raw.get("content", ""))
         raw.setdefault("url", "")
+        apply_rule_score(raw, source="cls")
         event = normalize_event(raw, source="cls", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -208,6 +210,7 @@ async def collect_ths_original(score_date: str) -> list[EventRecord]:
                 raw["involved_keywords"] = []
         else:
             raw["involved_keywords"] = []
+        apply_rule_score(raw, source="ths_original")
         event = normalize_event(raw, source="ths_original", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -244,6 +247,7 @@ async def collect_tavily(score_date: str) -> list[EventRecord]:
                 "summary": str(hit.get("content", "")),
                 "url": str(hit.get("url", "")),
             }
+            apply_rule_score(raw, source="tavily")
             event = normalize_event(raw, source="tavily", score_date=score_date)
             if event is not None:
                 events.append(event)
