@@ -800,9 +800,11 @@ def _normalize_event_store_facts(
     当日数据时直接用事件库做 news_facts（读库优先），缺库才走原
     telegraph/latest 直采。
 
-    字段映射（简报 Step 3）：source_id=EVENT_序号、kind=event_evidence、
-    provider=source、title、content=summary[:500]（空则 title）、url、
-    occurred_at=scrape_at（解析失败兜底 captured_at）、source_level 映射。
+    字段映射（简报 Step 3）：source_id=EVENT_{event_id[:19]}（日期+hash 前 8 位，
+    可读且可追溯；不用序号——评审 Minor 1，事件库 event_id 可溯源）、
+    kind=event_evidence、provider=source、title、content=summary[:500]（空则
+    title）、url、occurred_at=scrape_at（解析失败兜底 captured_at）、
+    source_level 映射。
     """
     if not events:
         _append_missing(missing_fields, "cls_news")
@@ -814,7 +816,10 @@ def _normalize_event_store_facts(
     causal_ready_count = 0
     for ev in events:
         event_counter += 1
-        source_id = f"EVENT_{event_counter:03d}"
+        # event_id 形如 "{score_date}-{content_hash[:16]}"（event_store.normalize_event）；
+        # [:8] 只含日期段（"2026-07-"）同日全碰撞会互相覆盖，[:19] 保留日期 + hash 前 8 位，
+        # 兼顾可读与可追溯且唯一（Task 7 Fix Round Minor 1 偏差，见报告）。
+        source_id = f"EVENT_{ev['event_id'][:19]}"
         summary = ev["summary"]
         url = _safe_optional_str(ev["url"])
         occurred_at = _parse_news_datetime(ev["scrape_at"])
@@ -833,6 +838,23 @@ def _normalize_event_store_facts(
         )
         if url:
             causal_ready_count += 1
+    if causal_ready_count == 0:
+        # 事件非空但全部无 URL：与 _normalize_news_facts 语义对齐（评审 Important 1）。
+        # 事件库 occurred_at 必兜底 captured_at（非 None），故仅 URL 决定因果就绪。
+        # 防御性补强：正常数据事件库事件均有 URL（cls 无 URL 时 normalize 已兜底详情页），
+        # 该分支当前实际不可达，但状态语义必须与直采路径一致，避免误报 available。
+        _append_missing(missing_fields, "cls_news")
+        logger.warning(
+            "event_store_missing_invalid_for_causality",
+            item_count=event_counter,
+            causal_ready_count=0,
+        )
+        return SourceCollectionStatus(
+            state="invalid_for_causality",
+            provider="event_store",
+            item_count=event_counter,
+            reason="items_missing_url",
+        )
     logger.info(
         "review_event_store_used",
         item_count=event_counter,
