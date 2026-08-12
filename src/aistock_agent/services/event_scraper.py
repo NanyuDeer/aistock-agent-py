@@ -100,9 +100,13 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
     result = await event_store.save_event_scrape(major, score_date)
     # 落库成功且有新增重大事件 → 触发事件传导（Task 5：传导统一由中台负责，
-    # 晨报/scheduler 不再直接触发）。fire-and-forget：传导失败不阻断抓取结果返回。
-    if major and result.get("persisted", 0) > 0:
-        _spawn_conduction(major)
+    # 晨报/scheduler 不再直接触发）。I3：守卫用 added（本批真正新增数）而非
+    # persisted（合并后库中总数）——07:30 全量后每小时全去重批次 persisted>0
+    # 但 added=0，若用 persisted 会对整批重复触发传导（LLM 成本浪费）；
+    # 且只传 added_events（新增子集）给 _trigger_conduction。
+    # fire-and-forget：传导失败不阻断抓取结果返回。
+    if major and result.get("added", 0) > 0:
+        _spawn_conduction(result.get("added_events") or [])
     return result
 
 
@@ -115,9 +119,9 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
     ]
     logger.info("event_scrape_intraday", total=len(events))
     result = await event_store.save_event_scrape(events, score_date)
-    # 同上：入库成功且有重大事件才触发传导（fire-and-forget）
-    if events and result.get("persisted", 0) > 0:
-        _spawn_conduction(events)
+    # 同上（I3）：守卫用 added>0 且只传新增子集（全去重批次不重复触发传导）
+    if events and result.get("added", 0) > 0:
+        _spawn_conduction(result.get("added_events") or [])
     return result
 
 
@@ -129,21 +133,30 @@ async def scrape_event_triggered(event: dict[str, Any]) -> dict[str, Any]:
     只保留与标的关联的事件：symbol 命中 payload.symbol 或 involved_keywords
     （与 load_event_scrape_by_symbol 双匹配语义一致）。
     """
-    symbol = str(event.get("symbol", ""))
+    symbol = str(event.get("symbol", "")).strip()
+    if not symbol:
+        # M5 守卫：无 symbol 时无法关联标的，采集结果无意义；返回错误不落库
+        # （避免把全部东财事件无条件写入事件库污染当日证据源）
+        return {
+            "persisted": 0,
+            "deduped": 0,
+            "added": 0,
+            "added_events": [],
+            "error": "symbol required",
+        }
     score_date = str(event.get("score_date") or _today())
     events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
     # 只保留与标的关联的事件（symbol 命中 payload.symbol / involved_keywords）
-    if symbol:
-        lowered = symbol.lower()
-        events = [
-            ev
-            for ev in events
-            if lowered in str(ev.get("payload", {}).get("symbol", "")).lower()
-            or any(
-                lowered in str(k).lower()
-                for k in ev.get("involved_keywords", [])
-            )
-        ]
+    lowered = symbol.lower()
+    events = [
+        ev
+        for ev in events
+        if lowered in str(ev.get("payload", {}).get("symbol", "")).lower()
+        or any(
+            lowered in str(k).lower()
+            for k in ev.get("involved_keywords", [])
+        )
+    ]
     logger.info("event_scrape_triggered", symbol=symbol, count=len(events))
     return await event_store.save_event_scrape(events, score_date)
 

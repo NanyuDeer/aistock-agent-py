@@ -630,6 +630,7 @@ async def run(state: AgentState) -> dict[str, object]:
         event_store_events: list[dict[str, object]] = []
         try:
             from aistock_agent.services.event_store import (  # noqa: PLC0415
+                MAJOR_IMPACT_THRESHOLD,
                 load_event_scrape,
             )
 
@@ -687,14 +688,38 @@ async def run(state: AgentState) -> dict[str, object]:
 
         # 事件库有数据 → 注入 prompt；为空 → 保持自主抓取（缺库降级）
         if event_store_events:
-            system_prompt = system_prompt.replace(
-                "{{MAJOR_EVENTS_CONTEXT}}",
-                "\n".join(
-                    f"- {ev.get('title', '')}（{ev.get('summary', '')}）"
-                    for ev in event_store_events
-                    if ev.get("title")
-                ),
-            )
+            # M4：注入前按 is_major_event 过滤——event_triggered 分支豁免入库的
+            # impact_score=1 普通证据（stock_trace 溯源用）不进晨报上下文，
+            # 仅重大事件（>= MAJOR_IMPACT_THRESHOLD）作为当日市场事件背景
+            major_context = []
+            for ev in event_store_events:
+                if not ev.get("title"):
+                    continue
+                impact_score = ev.get("impact_score")
+                # 类型收窄：dict[str, object] 的 get 返回 object，需先 isinstance
+                # 再 int()（对齐 _event_records_to_major_events 同款模式）
+                score = (
+                    int(impact_score)
+                    if isinstance(impact_score, int | float)
+                    and not isinstance(impact_score, bool)
+                    else 0
+                )
+                if score >= MAJOR_IMPACT_THRESHOLD:
+                    major_context.append(ev)
+            if major_context:
+                system_prompt = system_prompt.replace(
+                    "{{MAJOR_EVENTS_CONTEXT}}",
+                    "\n".join(
+                        f"- {ev.get('title', '')}（{ev.get('summary', '')}）"
+                        for ev in major_context
+                    ),
+                )
+            else:
+                # 有数据但全为普通证据 → 仍按缺库降级（避免注入空列表）
+                system_prompt = system_prompt.replace(
+                    "{{MAJOR_EVENTS_CONTEXT}}",
+                    "（事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块）",
+                )
         else:
             # 缺库降级：保留原自主检索指令
             system_prompt = system_prompt.replace(

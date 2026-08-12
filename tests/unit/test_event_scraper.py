@@ -29,7 +29,15 @@ async def test_run_event_scrape_full_daily():
         new=AsyncMock(return_value=[]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 0, "deduped": 0, "error": None}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 0,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
     ):
         result = await run_event_scrape("full_daily", score_date="2026-08-12")
     assert result["scrape_mode"] == "full_daily"
@@ -56,7 +64,15 @@ async def test_scrape_intraday_only_persists_major_events():
     """intraday 分支：电报+东财含重大/普通事件 → 仅重大事件（impact_score>=4）落库。"""
     major = _make_event(title="重大公告", impact_score=5)
     normal = _make_event(title="普通公告", impact_score=1)
-    save = AsyncMock(return_value={"persisted": 1, "deduped": 0, "error": None})
+    save = AsyncMock(
+        return_value={
+            "persisted": 1,
+            "deduped": 0,
+            "added": 1,
+            "added_events": [major],
+            "error": None,
+        }
+    )
     with patch(
         "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
         new=AsyncMock(return_value=[normal]),
@@ -75,9 +91,39 @@ async def test_scrape_intraday_only_persists_major_events():
     assert len(saved) == 1
     assert saved[0]["impact_score"] == 5
     assert all(is_major_event(ev) for ev in saved)
-    # Task 5：入库成功（persisted>0）且有重大事件 → fire-and-forget 触发传导
+    # Task 5 + I3：入库有新增（added>0）且有重大事件 → fire-and-forget 触发传导，
+    # 且只传新增子集（added_events）
     mock_spawn.assert_called_once()
     assert mock_spawn.call_args.args[0][0]["title"] == "重大公告"
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_skips_conduction_when_all_deduped():
+    """I3：全去重批次（persisted>0 但 added=0）不重复触发传导（LLM 成本）。"""
+    major = _make_event(title="盘中异动公告", impact_score=5)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 10,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        await scrape_intraday("2026-08-12")
+    mock_spawn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -88,7 +134,15 @@ async def test_scrape_event_triggered_persists_all_evidence_unfiltered():
         title="异动研报", impact_score=1, involved_keywords=["600000 涨停"]
     )
     other = _make_event(title="别家公告", impact_score=5, symbol="000001")
-    save = AsyncMock(return_value={"persisted": 2, "deduped": 0, "error": None})
+    save = AsyncMock(
+        return_value={
+            "persisted": 2,
+            "deduped": 0,
+            "added": 2,
+            "added_events": [by_symbol, by_keyword],
+            "error": None,
+        }
+    )
     with patch(
         "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
         new=AsyncMock(return_value=[by_symbol, by_keyword, other]),
@@ -101,3 +155,25 @@ async def test_scrape_event_triggered_persists_all_evidence_unfiltered():
     assert len(saved) == 2  # 仅本标的关联事件保留（payload.symbol / involved_keywords 双匹配）
     assert all(ev["impact_score"] == 1 for ev in saved)  # 普通事件不被 is_major_event 过滤
     assert all(not is_major_event(ev) for ev in saved)
+
+
+@pytest.mark.asyncio
+async def test_scrape_event_triggered_requires_symbol():
+    """M5：symbol 为空时返回错误且不采集/不落库（避免全量东财事件污染当日事件库）。"""
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[_make_event(title="任意东财事件", impact_score=1)]),
+    ) as mock_collect, patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(),
+    ) as mock_save:
+        result = await scrape_event_triggered({})
+    assert result == {
+        "persisted": 0,
+        "deduped": 0,
+        "added": 0,
+        "added_events": [],
+        "error": "symbol required",
+    }
+    mock_collect.assert_not_awaited()
+    mock_save.assert_not_awaited()

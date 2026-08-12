@@ -71,13 +71,15 @@ async def test_morning_reads_event_store_first():
     with patch(
         "aistock_agent.services.event_store.node_api",
     ) as mock_api:
-        mock_api.get_analysis_report = AsyncMock(
+        mock_api.get_analysis_report_quiet = AsyncMock(
             return_value={"content": {"events": [{"event_id": "e1", "title": "事件A"}]}}
         )
         events = await load_event_scrape("2026-08-12")
         assert len(events) == 1
         assert events[0]["title"] == "事件A"
-        mock_api.get_analysis_report.assert_awaited_once_with("event_scrape", "2026-08-12")
+        mock_api.get_analysis_report_quiet.assert_awaited_once_with(
+            "event_scrape", "2026-08-12"
+        )
 
 
 # ── prompt 占位符 ──
@@ -161,6 +163,40 @@ async def test_morning_injects_event_store_events_into_prompt():
     assert "降准0.5个百分点" in prompt
     assert "{{MAJOR_EVENTS_CONTEXT}}" not in prompt
     assert "（事件库为空" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_morning_injects_only_major_events_into_prompt():
+    """M4：event_triggered 豁免入库的普通证据（impact_score<4）不进晨报上下文。"""
+    from aistock_agent.agents.workers.morning import run
+
+    major = _event_record(title="重大事件", impact_score=5, summary="重大摘要")
+    normal = _event_record(title="普通证据", impact_score=1, summary="普通摘要")
+    stack, mock_invoke = _patch_morning_run_deps([major, normal])
+    with stack:
+        result = await run({"analysis_reports": {}})
+
+    assert result["analysis_reports"]["morning_generated"] is True
+    prompt = mock_invoke.await_args.args[0]
+    assert "重大事件" in prompt
+    assert "普通证据" not in prompt
+    assert "{{MAJOR_EVENTS_CONTEXT}}" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_morning_injects_fallback_when_all_events_minor():
+    """M4 边界：事件库只有普通证据 → 降级为自主检索指令（不注入空列表）。"""
+    from aistock_agent.agents.workers.morning import run
+
+    normal = _event_record(title="普通证据", impact_score=1, summary="普通摘要")
+    stack, mock_invoke = _patch_morning_run_deps([normal])
+    with stack:
+        result = await run({"analysis_reports": {}})
+
+    assert result["analysis_reports"]["morning_generated"] is True
+    prompt = mock_invoke.await_args.args[0]
+    assert "普通证据" not in prompt
+    assert "（事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块）" in prompt
 
 
 @pytest.mark.asyncio

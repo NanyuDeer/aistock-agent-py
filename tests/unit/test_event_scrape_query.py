@@ -3,8 +3,9 @@
 覆盖：
 - load_event_scrape_by_symbol 回归保护（简报 Step 1）
   —— Task 1 已实现，本用例防"按标的过滤"逻辑回归；patch 目标按
-  test_event_store.py 先例用 node_api.get_analysis_report（内部实际方法，
-  简报字面 node_api.get 与实现不符，偏差记录见 task-6-report.md）
+  test_event_store.py 先例用 node_api.get_analysis_report_quiet（M2 起
+  load_event_scrape 走 404 静默方法，原 get_analysis_report 是内部实际方法，
+  偏差记录见 task-6-report.md）
 - GET /api/agent/event/scrape-list?date=YYYY-MM-DD → {"events": [...]}
 - GET /api/agent/event/scrape-by-symbol/:symbol?date=YYYY-MM-DD → {"events": [...]}
 - date 参数校验：非法格式/语义非法日期 → 400；缺失 → 422（FastAPI 自动）
@@ -35,7 +36,7 @@ def client() -> TestClient:
 
 
 def _report_with_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """构造 node_api.get_analysis_report 返回的报告形状。"""
+    """构造 node_api.get_analysis_report_quiet 返回的报告形状。"""
     return {"content": {"events": events}}
 
 
@@ -46,7 +47,7 @@ def _report_with_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 async def test_load_by_symbol_filters_payload() -> None:
     """按 payload.symbol 子串过滤（"000" 类短符号误命中为已知限制，Task 2 评审备注）。"""
     with patch("aistock_agent.services.event_store.node_api") as mock_api:
-        mock_api.get_analysis_report = AsyncMock(
+        mock_api.get_analysis_report_quiet = AsyncMock(
             return_value=_report_with_events(
                 [
                     {"event_id": "e1", "title": "A股事件", "payload": {"symbol": "600000"}},
@@ -63,7 +64,7 @@ async def test_load_by_symbol_filters_payload() -> None:
 async def test_load_by_symbol_filters_involved_keywords() -> None:
     """按 involved_keywords 子串匹配（与 payload.symbol 双匹配语义）。"""
     with patch("aistock_agent.services.event_store.node_api") as mock_api:
-        mock_api.get_analysis_report = AsyncMock(
+        mock_api.get_analysis_report_quiet = AsyncMock(
             return_value=_report_with_events(
                 [
                     {

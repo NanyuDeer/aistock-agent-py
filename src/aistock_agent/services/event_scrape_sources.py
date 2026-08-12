@@ -73,11 +73,14 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
     """东方财富公告/新闻（复用已 AI 研判结果，不重复分析）。
 
     读取 stock_info_judgements 表（个股情报管线已闭环）。
-    score_date 为当日时返回当日判定；接口按 updated_at 窗口查询。
+    Node 端 StockMonitorService.getEvents 返回 ``{"total": N, "events": [...]}``
+    （键名 events，非 items）；alerts 接口不支持按 published_at 窗口查询，
+    取最近 20 条跨全部日期，Python 侧按行 published_at/event_time 过滤，
+    仅保留与 score_date 同日的行（避免昨日/前日陈旧行被标记为当日事件反复入库）。
     """
     try:
         resp = await node_api.get("/internal/monitor/alerts?days=1")
-        rows = _extract_items(resp)
+        rows = _extract_items(resp, key="events")
     except Exception as exc:  # noqa: BLE001
         logger.exception("eastmoney_judgements_failed", error=str(exc))
         return []
@@ -87,6 +90,18 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
         if not isinstance(row, dict):
             continue
         raw: dict[str, Any] = dict(row)
+        # 当日窗口过滤（C1 修复后真实键名 events；I1 防跨日陈旧行误标当日）：
+        # 时间格式可能是 "2026-08-12 10:00:00" 或 "2026-08-12T10:00:00"，
+        # 统一按日期前缀 startswith(score_date) 判断；无时间字段的行保守保留
+        published = str(
+            raw.get("event_time") or raw.get("published_at") or ""
+        ).strip()
+        if published and not published.startswith(score_date):
+            continue
+        # 对齐字段：Node mapJudgementToEvent 输出 detail_url（非 url/link），
+        # normalize_event 只认 url/link → 这里补齐，否则东财事件 url 恒空
+        # （I2：大盘溯源 causal_ready_count 不计入、stock_trace canonicalUrl 缺失）
+        raw.setdefault("url", raw.get("detail_url") or "")
         # 对齐字段：ai_impact → direction 映射
         impact = str(raw.get("ai_impact", "")).strip()
         if "利好" in impact and "重大" in impact:

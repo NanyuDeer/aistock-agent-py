@@ -149,7 +149,7 @@ async def test_spawn_conduction_keeps_reference_and_discards_on_done():
 
 @pytest.mark.asyncio
 async def test_scrape_full_daily_triggers_conduction_when_persisted():
-    """full_daily：有重大事件且落库成功（persisted>0）→ 触发 _spawn_conduction。
+    """full_daily：有重大事件且本批有新增（added>0）→ 触发 _spawn_conduction。
 
     score_date 用 shanghai_today() 动态计算：collect_global_markets 仅在
     score_date == _today() 时才被采集（event_scraper.py:86-87），硬编码日期
@@ -175,7 +175,15 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
         new=AsyncMock(return_value=[major]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 1, "deduped": 0, "error": None}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [major],
+                "error": None,
+            }
+        ),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
@@ -186,7 +194,7 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
 
     assert result["persisted"] == 1
     mock_spawn.assert_called_once()
-    # 仅重大事件（impact_score>=4）传入触发
+    # 仅重大事件（impact_score>=4）传入触发，且只传新增子集（I3）
     passed = mock_spawn.call_args.args[0]
     assert len(passed) == 1
     assert passed[0]["title"] == "盘前重磅"
@@ -194,7 +202,7 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
 
 @pytest.mark.asyncio
 async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
-    """full_daily：落库失败/未新增（persisted=0）→ 不触发传导。"""
+    """full_daily：落库失败/未新增（added=0）→ 不触发传导。"""
     today = shanghai_today().isoformat()
     major = _make_event(title="盘前重磅", impact_score=5)
     with patch(
@@ -214,7 +222,15 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
         new=AsyncMock(return_value=[major]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 0, "deduped": 1, "error": None}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
@@ -223,6 +239,53 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
 
         await scrape_full_daily(today)
 
+    mock_spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_skips_conduction_when_all_deduped():
+    """I3 回归：全去重批次（合并后 persisted>0 但 added=0）→ 不触发传导。
+
+    模拟 07:30 全量落库后，每小时增量批次全为已有 content_hash：
+    旧守卫 persisted>0 会对整批重复触发传导（LLM 成本），added 守卫阻断。
+    """
+    today = shanghai_today().isoformat()
+    major = _make_event(title="盘前重磅", impact_score=5)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 5,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_full_daily
+
+        result = await scrape_full_daily(today)
+
+    assert result["persisted"] == 5  # 合并后总数（对外契约不变）
     mock_spawn.assert_not_called()
 
 
@@ -248,7 +311,15 @@ async def test_scrape_full_daily_skips_conduction_when_no_major_events():
         new=AsyncMock(return_value=[]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 1, "deduped": 0, "error": None}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [normal],
+                "error": None,
+            }
+        ),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
@@ -262,7 +333,7 @@ async def test_scrape_full_daily_skips_conduction_when_no_major_events():
 
 @pytest.mark.asyncio
 async def test_scrape_intraday_triggers_conduction_when_persisted():
-    """intraday：有重大事件且落库成功 → 触发 _spawn_conduction。"""
+    """intraday：有重大事件且本批有新增（added>0）→ 触发 _spawn_conduction。"""
     major = _make_event(title="盘中异动公告", impact_score=5)
     normal = _make_event(title="普通快讯", impact_score=1)
     with patch(
@@ -273,7 +344,15 @@ async def test_scrape_intraday_triggers_conduction_when_persisted():
         new=AsyncMock(return_value=[major]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 1, "deduped": 0, "error": None}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [major],
+                "error": None,
+            }
+        ),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
@@ -291,7 +370,7 @@ async def test_scrape_intraday_triggers_conduction_when_persisted():
 
 @pytest.mark.asyncio
 async def test_scrape_intraday_skips_conduction_when_nothing_persisted():
-    """intraday：落库失败/未新增（persisted=0）→ 不触发传导。"""
+    """intraday：落库失败/未新增（added=0）→ 不触发传导。"""
     major = _make_event(title="盘中异动公告", impact_score=5)
     with patch(
         "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
@@ -301,7 +380,15 @@ async def test_scrape_intraday_skips_conduction_when_nothing_persisted():
         new=AsyncMock(return_value=[major]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
-        new=AsyncMock(return_value={"persisted": 0, "deduped": 1, "error": "persist failed"}),
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": "persist failed",
+            }
+        ),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),

@@ -75,7 +75,9 @@ async def test_review_can_consume_event_store():
         # 现状适配（记录偏差）：Task 1 的 load_event_scrape 走 get_analysis_report
         # （内部再调 node_api.get）。直接 patch .get 不可达——MagicMock 对
         # get_analysis_report 自动创建子 mock，await 抛 TypeError 被吞后返回 []。
-        mock_api.get_analysis_report = AsyncMock(
+        # M2 修复后 load_event_scrape 改走 get_analysis_report_quiet（404 静默），
+        # patch 目标同步更新。
+        mock_api.get_analysis_report_quiet = AsyncMock(
             return_value={"content": {"events": [{"event_id": "e1", "title": "宏观事件"}]}}
         )
         events = await load_event_scrape("2026-08-12")

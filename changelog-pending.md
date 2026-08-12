@@ -1,5 +1,19 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 统一事件抓取中台 final whole-branch review 修复（C1 + I1-I4 + Minor）
+- **C1（Critical）**：`event_scrape_sources.py::collect_eastmoney_judgements` 响应键名 `"items"` → `"events"`（Node `StockMonitorService.getEvents` 返回 `{total, events}`）——修复东财三模式（full_daily/intraday/event_triggered）生产恒空；新增真实键名单测
+- **I1**：东财行按 `published_at`/`event_time` 日期前缀 `startswith(score_date)` 过滤（alerts 接口不支持日期窗口，取最近 20 条跨全部日期），防昨日/前日陈旧行以当日 score_date 反复入库；docstring 同步（不再写"接口按 updated_at 窗口查询"）
+- **I2**：`collect_eastmoney_judgements` 内 `raw.setdefault("url", raw.get("detail_url") or "")`——Node `mapJudgementToEvent` 输出 `detail_url` 非 `url`，修复东财事件 url 恒空（大盘溯源 causal_ready_count 不计入、stock_trace canonicalUrl 缺失）
+- **I3**：`save_event_scrape` 返回值增加 `added`（本批真正新增去重后事件数）与 `added_events`（新增子集），`persisted` 对外契约不变；`scrape_full_daily`/`scrape_intraday` 传导守卫 `persisted>0` → `added>0` 且只传 `added_events`——07:30 全量后每小时全去重批次不再重复触发整批传导（LLM 成本）
+- **I4**：`scheduler._run_morning_task` 加降级分支——当日事件库为空 且 morning 产出 major_events 时，fire-and-forget 兜底触发 `_run_event_analysis_pipeline_task`（恢复 `_pending_event_tasks` 强引用集合；注释说明"中台抓取失败时的兜底"）；M1 随之解决（`_run_event_analysis_pipeline_task` 重新有生产调用方）
+- **M2**：`data_client.py` 新增 `get_analysis_report_quiet`（404 静默返回 None 不打 error，不改全局 `_request` 行为）；`load_event_scrape` 改走该方法并对"读不到报告"降级 warning `event_scrape_report_not_found`（空事件库不再每次刷 error 级 404 日志）
+- **M4**：`morning.py` 晨报注入前按 `impact_score >= MAJOR_IMPACT_THRESHOLD` 过滤（event_triggered 豁免入库的 impact=1 普通证据不进晨报上下文；全普通时降级自主检索文案）
+- **M5**：`scrape_event_triggered` 加 symbol 空守卫——返回 `{"persisted":0,"deduped":0,"added":0,"added_events":[],"error":"symbol required"}` 不采集不落库（防全量东财事件污染当日事件库）
+- **M8**：盘中 cron `0 10-14 * * 1-5` → `0 10-11,13-14 * * 1-5`（避开 11:30-13:00 A 股午休），同步更新 config.py 默认值、scheduler 注释、README、project_memory
+- 测试：新增 14 条（C1 键名/兼容、I1 日期过滤+边界、I2 detail_url、I3 added/added_events/全去重不触发×3、I4 兜底触发+边界、M2 404 warning、M4 过滤+全普通降级、M5 symbol 守卫）；更新 patch 目标 `get_analysis_report` → `get_analysis_report_quiet`（test_event_store/test_event_scrape_query/test_market_trace_event_store/test_morning_event_store_integration）；scheduler 传导测试适配（事件库非空不触发 + 空库兜底触发）
+- 验证：定向 pytest 125 passed（8 文件）；全量单测 1465 passed / 6 既有失败（test_industry_vector_search API 依赖，基线一致零回归；git 相关 2 个 test_iterate_variant 为 PATH 环境问题，注入 D:\Git\cmd 后通过）；mypy 本次 5+1 文件 0 新增错误（scheduler.py 3 个 `_get_event_bus` 为基线存量，d339cf4 已存在）；ruff All checks passed；app-api 未改（无 tsc）
+- 文档：README.md（传导注/入库层/调度时间窗/trigger 信封）、project_memory.md（153/154 行）、AGENTS.md 未涉及
+
 ## 2026-08-12 统一事件抓取中台 Task 8：端到端联调验证 + 文档更新
 - 文档：README.md 新增「统一事件抓取中台」章节（架构分层/调度时间窗/事件模型/接口清单/下游消费与降级）+ API 表补 `POST /api/agent/briefing/event-scrape/trigger`；AGENTS.md 产品功能 → Agent 映射表新增 event_scraper 行（非 LLM Agent，pipeline）+ 定时链路精确化（`event_scrape_daily` 07:30 盘前全量 + `event_scrape_intraday` 10:00-14:00 每小时增量）
 - 验证：pytest tests/unit/ 1459 passed（含 hub 相关 119 用例；环境要求 git 入 PATH + 设 OPENAI_API_KEY 绕过 industry_vector_search 凭据短路——6 个基线失败经确认属环境）；app-api `npx tsc --noEmit` 0 错误；mypy 140 存量错误（merge-base main 基线 142，hub 分支净 -2 新增 0）；ruff 56 存量错误（hub 改动文件仅 prompt 文本 E501，与全仓基线同类）；静态核对 app.routes 3 个新端点、scheduler 双 job、晨报/大盘溯源读库降级、传导触发均在位

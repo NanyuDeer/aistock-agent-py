@@ -10,6 +10,9 @@ from aistock_agent.services.event_scrape_sources import (
     collect_ths_original,
 )
 from aistock_agent.tools.market_tools import GlobalMarketFetchError
+from aistock_agent.utils.date import shanghai_today
+
+_TODAY = shanghai_today().isoformat()
 
 
 @pytest.mark.asyncio
@@ -47,19 +50,90 @@ async def test_collect_cls_telegraph_falls_back_to_latest():
 
 @pytest.mark.asyncio
 async def test_collect_eastmoney_judgements_reads_existing_table():
+    """C1：Node getEvents 返回 {total, events}（键名 events 非 items），真实键名可读。"""
     rows = [
         {
             "title": "某公司重大资产重组",
             "ai_summary": "重组预案披露",
             "ai_impact": "重大利好",
             "symbol": "600000",
+            "published_at": f"{_TODAY} 09:30:00",
         }
     ]
     with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
-        mock_api.get = AsyncMock(return_value={"items": rows})
-        events = await collect_eastmoney_judgements("2026-08-12")
+        mock_api.get = AsyncMock(return_value={"total": 1, "events": rows})
+        events = await collect_eastmoney_judgements(_TODAY)
         assert len(events) == 1
         assert events[0]["source"] == "eastmoney"
+        # 真实键名：node_api.get 收到 alerts 请求（回归保护）
+        mock_api.get.assert_awaited_once_with("/internal/monitor/alerts?days=1")
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_reads_legacy_items_key():
+    """兼容兜底：若接口返回 items 键（历史响应）也不炸，返回空列表。"""
+    rows = [{"title": "历史事件", "published_at": f"{_TODAY} 10:00:00"}]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"items": rows})
+        events = await collect_eastmoney_judgements(_TODAY)
+        assert events == []
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_filters_stale_rows_by_date():
+    """I1：跨日陈旧行（昨日/前日 published_at）被过滤，仅保留当日行。"""
+    today_rows = [
+        {
+            "title": "当日事件",
+            "ai_summary": "x",
+            "published_at": f"{_TODAY} 10:00:00",
+        },
+        {
+            "title": "当日事件T格式",
+            "ai_summary": "x",
+            "event_time": f"{_TODAY}T10:00:00",
+        },
+    ]
+    stale_rows = [
+        {"title": "昨日事件", "ai_summary": "x", "published_at": "2026-08-11 23:00:00"},
+        {"title": "前日事件", "ai_summary": "x", "event_time": "2026-08-10T20:00:00"},
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(
+            return_value={"total": 4, "events": today_rows + stale_rows}
+        )
+        events = await collect_eastmoney_judgements(_TODAY)
+    titles = {ev["title"] for ev in events}
+    assert titles == {"当日事件", "当日事件T格式"}
+    assert all(ev["score_date"] == _TODAY for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_keeps_rows_without_time():
+    """I1 边界：行无时间字段（published_at/event_time 均缺）时保守保留。"""
+    rows = [{"title": "无时间字段事件", "ai_summary": "x"}]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"events": rows})
+        events = await collect_eastmoney_judgements(_TODAY)
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_maps_detail_url():
+    """I2：Node mapJudgementToEvent 输出 detail_url（非 url），归一化后 url 有值。"""
+    rows = [
+        {
+            "title": "带详情链接的事件",
+            "ai_summary": "x",
+            "detail_url": "https://em.example.com/detail/123",
+            "published_at": f"{_TODAY} 10:00:00",
+        }
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"total": 1, "events": rows})
+        events = await collect_eastmoney_judgements(_TODAY)
+    assert len(events) == 1
+    assert events[0]["url"] == "https://em.example.com/detail/123"
 
 
 @pytest.mark.asyncio
@@ -67,7 +141,7 @@ async def test_collect_eastmoney_judgements_fails_returns_empty():
     """异常降级：node_api.get 抛异常 → 返回 []（采集层永不 500）。"""
     with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
         mock_api.get = AsyncMock(side_effect=RuntimeError("node down"))
-        events = await collect_eastmoney_judgements("2026-08-12")
+        events = await collect_eastmoney_judgements(_TODAY)
         assert events == []
 
 

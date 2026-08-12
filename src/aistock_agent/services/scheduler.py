@@ -2,8 +2,9 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
-  （2026-08-12 起晨报不再触发事件传导；事件传导触发迁移到统一事件抓取中台
-  event_scrape 入库后，见 Task 5。_run_event_analysis_pipeline_task 保留供中台复用。）
+  （2026-08-12 起事件传导触发迁移到统一事件抓取中台 event_scrape 入库后，
+  见 Task 5；晨报仅在"当日事件库为空且 LLM 识别出 major_events"时降级兜底
+  触发 _run_event_analysis_pipeline_task，防中台抓取全失败时传导静默缺失，见 I4。）
 - 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
   （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
@@ -13,6 +14,7 @@ import asyncio
 import json
 import time
 from datetime import date
+from typing import Any
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -82,8 +84,9 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     # ── 统一事件抓取中台（2026-08-12） ──
-    # 盘前档（07:30 全量）与盘中档（10-14 点每小时增量）两档；
-    # 早间/午间/收盘若需独立档位，可复用同一 cron 配置体系追加。
+    # 盘前档（07:30 全量）与盘中档（10-11、13-14 点每小时增量，M8：避开
+    # 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑）；早间/收盘若需
+    # 独立档位，可复用同一 cron 配置体系追加。
     scheduler.add_job(
         _run_event_scrape_job,
         CronTrigger.from_crontab(
@@ -213,6 +216,11 @@ def shutdown_scheduler() -> None:
 
 # ─── 定时任务执行函数 ───
 
+# 保持 fire-and-forget 传导 task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
+# （Task 4 删除晨报直接触发后该集合一并移除；I4 兜底分支恢复使用，AGENTS.md
+# 明确警告 "fire-and-forget task 若不保存引用会被 GC 在执行前取消"）。
+_pending_event_tasks: set[asyncio.Task[Any]] = set()
+
 
 async def _run_morning_task() -> None:
     """晨报生成任务（交易日 08:50）。
@@ -250,9 +258,38 @@ async def _run_morning_task() -> None:
             has_response=bool(result.get("final_response")),
         )
         # 事件传导触发已迁移到统一事件抓取中台（2026-08-12）：
-        # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发；
-        # _run_event_analysis_pipeline_task 保留供中台复用，晨报不再直接触发。
-        # 注意：Task 5 落地前，major_events → 事件传导分析存在短暂断供窗口。
+        # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发。
+        # I4 兜底（中台抓取失败时的安全网）：当日事件库为空 且 晨报 LLM 仍
+        # 识别出 major_events（自主检索兜底产出）时，降级 fire-and-forget 触发
+        # 事件传导——恢复 Task 4 删除晨报触发前的语义，避免"当日抓取全部失败
+        # → 传导静默缺失且无告警"。事件库非空时中台已负责触发，此处不触发
+        # （防同批事件双跑）。
+        analysis_reports = result.get("analysis_reports")
+        raw_major_events = (
+            analysis_reports.get("major_events", [])
+            if isinstance(analysis_reports, dict)
+            else []
+        )
+        major_events: list[dict[str, object]] = (
+            [event for event in raw_major_events if isinstance(event, dict)]
+            if isinstance(raw_major_events, list)
+            else []
+        )
+        if major_events:
+            from aistock_agent.services.event_store import (  # noqa: PLC0415
+                load_event_scrape,
+            )
+
+            if not await load_event_scrape(report_date):
+                logger.warning(
+                    "morning_conduction_fallback_event_store_empty",
+                    event_count=len(major_events),
+                )
+                task = asyncio.create_task(
+                    _run_event_analysis_pipeline_task(major_events)
+                )
+                _pending_event_tasks.add(task)
+                task.add_done_callback(_pending_event_tasks.discard)
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
@@ -264,8 +301,9 @@ async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]
     pipeline 内部完成 Event Conduction → Global Importance 全链路，
     并自行处理超时/异常（不向上抛）。
 
-    2026-08-12 起不再由 _run_morning_task 触发：事件传导触发迁移到统一事件
-    抓取中台（Task 5 在 event_scrape 入库后调用），本函数保留供中台复用。
+    调用方：I4 兜底（_run_morning_task 事件库为空时）与中台复用
+    （event_scraper 入库后触发；M1：Task 4 曾删除晨报触发使其无生产调用方，
+    I4 兜底恢复后重新被调用）。
     """
     from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
         run_event_analysis_pipeline,

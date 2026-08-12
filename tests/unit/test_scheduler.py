@@ -637,12 +637,12 @@ def test_traceable_report_validation_rejects_invalid_required_fields(
     assert _is_traceable_completed_report(report, "iterate") is False
 
 
-# ── 事件传导触发归属：晨报不再直接触发（迁移到中台 Task 5） ──
+# ── 事件传导触发归属：中台为主，晨报仅事件库为空时兜底（I4） ──
 
 
 @pytest.mark.asyncio
 async def test_morning_task_no_longer_triggers_event_conduction():
-    """晨报任务不再直接触发事件传导（迁移到统一事件抓取中台 Task 5）。"""
+    """事件库非空时晨报不直接触发事件传导（中台负责，防同批事件双跑）。"""
     import asyncio
 
     from aistock_agent.services.scheduler import _run_morning_task
@@ -660,6 +660,9 @@ async def test_morning_task_no_longer_triggers_event_conduction():
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[{"event_id": "e1", "title": "存量重大事件"}]),
+            ), patch(
                 "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
             ) as mock_pipeline:
@@ -671,7 +674,7 @@ async def test_morning_task_no_longer_triggers_event_conduction():
 
 @pytest.mark.asyncio
 async def test_morning_task_no_major_events_no_conduction():
-    """无 major_events 时不触发事件传导"""
+    """无 major_events 时不触发事件传导（无论事件库是否为空）。"""
     import asyncio
 
     from aistock_agent.services.scheduler import _run_morning_task
@@ -685,13 +688,74 @@ async def test_morning_task_no_major_events_no_conduction():
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
-            ) as mock_event:
+            ) as mock_pipeline:
                 await _run_morning_task()
                 await asyncio.sleep(0.1)
 
-    mock_event.assert_not_called()
+    mock_pipeline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_morning_task_falls_back_to_conduction_when_event_store_empty():
+    """I4 兜底：当日事件库为空 且 晨报产出 major_events（自主检索兜底）→
+    降级 fire-and-forget 触发事件传导（中台抓取全部失败时的安全网）。"""
+    import asyncio
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    major_events = [
+        {"title": "美联储加息", "summary": "加息25bp"},
+        {"title": "通胀数据公布", "summary": "CPI 3.2%"},
+    ]
+    morning_result = {
+        "final_response": '{"display_report": {}}',
+        "analysis_reports": {"major_events": major_events},
+    }
+
+    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+        with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+            mock_agent.run = AsyncMock(return_value=morning_result)
+            with patch(
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
+                new_callable=AsyncMock,
+            ) as mock_pipeline:
+                await _run_morning_task()
+                # fire-and-forget：等待后台 task 完成再断言
+                await asyncio.sleep(0.1)
+
+    mock_pipeline.assert_awaited_once_with(major_events)
+
+
+@pytest.mark.asyncio
+async def test_morning_task_skips_fallback_when_major_events_not_list():
+    """I4 边界：analysis_reports 缺失 / major_events 非 list → 不触发兜底。"""
+    import asyncio
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    for analysis_reports in (None, {"major_events": "not-a-list"}):
+        morning_result = {
+            "final_response": '{"display_report": {}}',
+            "analysis_reports": analysis_reports,
+        }
+        with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+            with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+                mock_agent.run = AsyncMock(return_value=morning_result)
+                with patch(
+                    "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
+                    new_callable=AsyncMock,
+                ) as mock_pipeline:
+                    await _run_morning_task()
+                    await asyncio.sleep(0.1)
+        mock_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1010,7 +1074,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_review_full_cron = "30 20 * * 1-5"
             mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
             mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 1-5"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-11,13-14 * * 1-5"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1038,7 +1102,7 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_review_cron = "30 15 * * 1-5"
             mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
             mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 1-5"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-11,13-14 * * 1-5"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 

@@ -58,8 +58,8 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  07:30 event_scrape_daily（盘前全量）+ 10:00-14:00 每小时 event_scrape_intraday（统一事件抓取中台，入库后触发事件传导，Task 5）
-  08:50 morning_agent（读事件库优先、缺库自主检索；不再直接触发 event_analyst，2026-08-12 起）
+  07:30 event_scrape_daily（盘前全量）+ 10:00-11:00、13:00-14:00 每小时 event_scrape_intraday（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；避开 11:30-13:00 A 股午休）
+  08:50 morning_agent（读事件库优先、缺库自主检索；事件库为空且识别出 major_events 时降级兜底触发传导，I4，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
 ```

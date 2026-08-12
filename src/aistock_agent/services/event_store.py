@@ -138,15 +138,35 @@ async def save_event_scrape(
         score_date: 交易日（YYYY-MM-DD）。
 
     Returns:
-        {"persisted": int, "deduped": int, "error": str | None}
+        {"persisted": int, "deduped": int, "added": int,
+         "added_events": list[EventRecord], "error": str | None}
+        - persisted: 合并后库中事件总数（对外契约不变）。
+        - deduped: 本批中因重复被吸收的条数（同批内重复 + 与当日已有重复）。
+        - added: 本批真正新增去重后的事件数（不在当日已有 content_hash 集合），
+          供 event_scraper 传导触发守卫（全去重批次 added=0 不重复触发传导）。
+        - added_events: 本批新增子集（传导只对新增事件触发，降低 LLM 成本）。
     """
     if not events:
-        return {"persisted": 0, "deduped": 0, "error": None}
+        return {
+            "persisted": 0,
+            "deduped": 0,
+            "added": 0,
+            "added_events": [],
+            "error": None,
+        }
 
     existing = await load_event_scrape(score_date)
     existing_hashes = {e["content_hash"] for e in existing}
     merged = {e["content_hash"]: e for e in existing}
-    merged.update({ev["content_hash"]: ev for ev in events})
+    added_events: list[EventRecord] = []
+    seen_added: set[str] = set()
+    for ev in events:
+        h = ev["content_hash"]
+        if h in existing_hashes or h in seen_added:
+            continue
+        seen_added.add(h)
+        added_events.append(ev)
+        merged[h] = ev
     unique = list(merged.values())
 
     # 去重计数：本批中因重复被吸收的条数（同批内重复 + 与当日已有重复）
@@ -169,21 +189,38 @@ async def save_event_scrape(
             update_cache=False,
         )
         persisted = len(unique) if result is not None else 0
-        return {"persisted": persisted, "deduped": deduped, "error": None}
+        return {
+            "persisted": persisted,
+            "deduped": deduped,
+            "added": len(added_events),
+            "added_events": added_events,
+            "error": None,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_persist_failed", error=str(exc))
-        return {"persisted": 0, "deduped": deduped, "error": str(exc)}
+        return {
+            "persisted": 0,
+            "deduped": deduped,
+            "added": 0,
+            "added_events": [],
+            "error": str(exc),
+        }
 
 
 async def load_event_scrape(score_date: str) -> list[EventRecord]:
     """按日期读取当日抓取事件列表。
 
-    读公共报告（user_id=None）：GET /internal/analysis-reports/event_scrape/{score_date}，
-    node_api.get_analysis_report 已封装路径与解包。
+    读公共报告（user_id=None）：GET /internal/analysis-reports/event_scrape/{score_date}。
+    走 node_api.get_analysis_report_quiet（M2：空事件库是常态，404 降级为
+    warning 而非 error 级日志——原有 get_analysis_report 经 _request 对 404
+    打 error，每次空库读库都会刷 error 告警；不在 data_client 全局改，避免
+    影响其他调用方）。
     """
     try:
-        report = await node_api.get_analysis_report("event_scrape", score_date)
+        report = await node_api.get_analysis_report_quiet("event_scrape", score_date)
         if report is None:
+            # 读不到报告（空事件库 404 或接口异常）：降级为 warning 级别
+            logger.warning("event_scrape_report_not_found", date=score_date)
             return []
         content = report.get("content")
         if not isinstance(content, dict):
