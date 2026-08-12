@@ -50,26 +50,28 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
 
     从 aistock_agent.services.event_analysis_pipeline import run_event_analysis_pipeline
     （函数内 import 避免循环依赖：pipeline 依赖 event_conduction，本模块被 scheduler 引用）。
+    import 与映射推导式均置于 try 内：fire-and-forget task 的任何异常都必须被吞掉记日志，
+    避免以 "Task exception was never retrieved" 形式暴露（task 仅由 done_callback 移除引用）。
     """
     if not events:
         return
-    from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
-        run_event_analysis_pipeline,
-    )
-
-    major_events = [
-        {
-            "event_id": ev["event_id"],
-            "title": ev["title"],
-            "summary": ev["summary"],
-            "url": ev["url"],
-            "impact_score": ev["impact_score"],
-            "direction": ev["direction"],
-            "involved_keywords": ev["involved_keywords"],
-        }
-        for ev in events
-    ]
     try:
+        from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
+            run_event_analysis_pipeline,
+        )
+
+        major_events = [
+            {
+                "event_id": ev["event_id"],
+                "title": ev["title"],
+                "summary": ev["summary"],
+                "url": ev["url"],
+                "impact_score": ev["impact_score"],
+                "direction": ev["direction"],
+                "involved_keywords": ev["involved_keywords"],
+            }
+            for ev in events
+        ]
         await run_event_analysis_pipeline(major_events)
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_conduction_failed", error=str(exc))

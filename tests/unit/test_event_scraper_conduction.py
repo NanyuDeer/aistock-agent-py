@@ -15,6 +15,7 @@ import pytest
 
 from aistock_agent.services.event_scraper import _spawn_conduction, _trigger_conduction
 from aistock_agent.services.event_store import normalize_event
+from aistock_agent.utils.date import shanghai_today
 
 # patch 目标说明：`_trigger_conduction` 内函数级 `from event_analysis_pipeline import
 # run_event_analysis_pipeline`（运行期从源模块取属性），必须 patch 源模块属性
@@ -148,7 +149,13 @@ async def test_spawn_conduction_keeps_reference_and_discards_on_done():
 
 @pytest.mark.asyncio
 async def test_scrape_full_daily_triggers_conduction_when_persisted():
-    """full_daily：有重大事件且落库成功（persisted>0）→ 触发 _spawn_conduction。"""
+    """full_daily：有重大事件且落库成功（persisted>0）→ 触发 _spawn_conduction。
+
+    score_date 用 shanghai_today() 动态计算：collect_global_markets 仅在
+    score_date == _today() 时才被采集（event_scraper.py:86-87），硬编码日期
+    会在非当天运行必然失败（Task 5 评审 Important 1 日期依赖时间炸弹）。
+    """
+    today = shanghai_today().isoformat()
     major = _make_event(title="盘前重磅", impact_score=5)
     normal = _make_event(title="普通公告", impact_score=1)
     with patch(
@@ -175,7 +182,7 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
     ) as mock_spawn:
         from aistock_agent.services.event_scraper import scrape_full_daily
 
-        result = await scrape_full_daily("2026-08-12")
+        result = await scrape_full_daily(today)
 
     assert result["persisted"] == 1
     mock_spawn.assert_called_once()
@@ -188,6 +195,7 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
 @pytest.mark.asyncio
 async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
     """full_daily：落库失败/未新增（persisted=0）→ 不触发传导。"""
+    today = shanghai_today().isoformat()
     major = _make_event(title="盘前重磅", impact_score=5)
     with patch(
         "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
@@ -213,7 +221,7 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
     ) as mock_spawn:
         from aistock_agent.services.event_scraper import scrape_full_daily
 
-        await scrape_full_daily("2026-08-12")
+        await scrape_full_daily(today)
 
     mock_spawn.assert_not_called()
 
@@ -221,6 +229,7 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
 @pytest.mark.asyncio
 async def test_scrape_full_daily_skips_conduction_when_no_major_events():
     """full_daily：无重大事件（全普通）→ 不触发传导。"""
+    today = shanghai_today().isoformat()
     normal = _make_event(title="普通公告", impact_score=1)
     with patch(
         "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
@@ -246,7 +255,7 @@ async def test_scrape_full_daily_skips_conduction_when_no_major_events():
     ) as mock_spawn:
         from aistock_agent.services.event_scraper import scrape_full_daily
 
-        await scrape_full_daily("2026-08-12")
+        await scrape_full_daily(today)
 
     mock_spawn.assert_not_called()
 
