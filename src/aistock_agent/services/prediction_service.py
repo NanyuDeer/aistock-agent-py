@@ -19,7 +19,11 @@ from aistock_agent.prompts.workers.prediction import (
 )
 from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSnapshot
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
-from aistock_agent.services.llm import get_deep_think
+from aistock_agent.services.llm import (
+    get_deep_think,
+    get_quick_think,
+    with_chat_structured_output,
+)
 from aistock_agent.utils.date import add_trading_days
 
 logger = structlog.get_logger()
@@ -255,18 +259,17 @@ async def run_chat_prediction(
         return None
     try:
         prompt_input = _build_chat_prediction_input(snapshot, news, context)
-        llm = get_deep_think()
+        # P10 计费口径：对齐 skill_executor 其它 skill，用 quick_think 单次调用
+        # （deep_think 26-47s/次，chat UX 不可接受）；json_mode 结构化输出
+        # （DeepSeek thinking 兼容，项目记忆 lesson 8）直接产出已解析的
+        # PredictionResult，省去手动 raw 文本 + _strip_code_fences + validate。
+        llm = get_quick_think()
         messages = [
             SystemMessage(content=PREDICTION_CHAT_PROMPT),
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
-        ai_message = await llm.ainvoke(messages)
-        raw_text = (
-            ai_message.content
-            if isinstance(ai_message.content, str)
-            else str(ai_message.content)
-        )
-        prediction = PredictionResult.model_validate_json(_strip_code_fences(raw_text))
+        structured = with_chat_structured_output(llm, PredictionResult)
+        prediction = await structured.ainvoke(messages)
         allowed = _collect_chat_evidence_ids(snapshot, news)
         prediction = prediction.model_copy(
             update={

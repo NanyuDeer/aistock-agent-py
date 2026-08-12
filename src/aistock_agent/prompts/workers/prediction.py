@@ -48,6 +48,7 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
 按短（1-5 交易日）/ 中（1-4 周）/ 长（1-6 月）三档分别输出。
 
 必须输出合法的 PredictionResult JSON（不要输出自由文本、Markdown 或其他 JSON 结构）：
+- schema_version：固定为 "1.0"
 - prediction_status：恒为 "hypothesis"（无溯源因果链，预测一律视为推演）
 - horizons：每档包含
   - horizon: "short" | "mid" | "long"
