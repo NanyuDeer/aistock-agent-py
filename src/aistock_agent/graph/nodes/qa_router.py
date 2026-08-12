@@ -1292,13 +1292,15 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         if predict_goal is not None:
             call = call.model_copy(update={"goal_id": "g1"})
             # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据；
-            # 非快照指数（market_snapshot 分支）无 index_code → 不塞 prediction，维持 D35 降级）
+            # index_name 一并透传，prediction skill 据此走指数行情路径（get_quote("000001")
+            # 会命中平安银行个股，不能用于指数语义）；非快照指数（market_snapshot 分支）
+            # 无 index_code → 不塞 prediction，维持 D35 降级）
             index_calls = [call]
             if index_code is not None:
                 index_calls.append(
                     SkillCall(
                         skill_name="prediction",
-                        args={"symbols": [index_code]},
+                        args={"symbols": [index_code], "index_name": index_name},
                         goal_id="g2",
                     )
                 )

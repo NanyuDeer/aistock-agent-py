@@ -1485,7 +1485,7 @@ async def test_gate1_index_predict_appends_prediction_call():
     assert [c.skill_name for c in calls] == ["index_snapshot", "prediction"]
     assert calls[0].goal_id == "g1"                     # 现状取数归属 g1（现状趋势）
     assert calls[1].goal_id == "g2"                     # prediction 归属 g2（推演）
-    assert calls[1].args == {"symbols": ["000001"]}
+    assert calls[1].args == {"symbols": ["000001"], "index_name": "上证指数"}
     assert result["plan"] == "compose"
     assert result["goals"] is not None
     assert result["goals"][0].dimension == "predict"

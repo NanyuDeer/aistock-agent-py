@@ -148,17 +148,16 @@ async def run_predict(
 
 
 def _gate_chat_snapshot(snapshot: dict) -> str | None:
-    """对话内预测门禁：缺行情/资金关键字段返回原因（None = 通过）。
+    """对话内预测门禁：缺行情关键字段返回原因（None = 通过）。
 
-    - quote/flow 必须为非空 dict（行情/资金关键字段缺失 → synth 走既有 D35 降级提示）；
+    - quote 必须为非空 dict（行情关键字段缺失 → synth 走既有 D35 降级提示）；
+    - flow 不设门禁条件：缺失/为空 dict 均通过（指数无个股资金流，
+      属"不适用"而非"缺失"；flow_id 派生逻辑同样以"非空 dict"为准）；
     - trade_date 必须可解析（到期日确定性计算的基准日）。
     """
     quote = snapshot.get("quote")
     if not isinstance(quote, dict) or not quote:
         return "missing quote"
-    flow = snapshot.get("flow")
-    if not isinstance(flow, dict) or not flow:
-        return "missing flow"
     trade_date = snapshot.get("trade_date")
     if not isinstance(trade_date, str):
         return "missing trade_date"
@@ -169,17 +168,22 @@ def _gate_chat_snapshot(snapshot: dict) -> str | None:
     return None
 
 
-def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str, list[str | None]]:
+def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, list[str | None]]:
     """现状快照各输入项的 evidence_id（LLM 输入与后处理过滤共用同一套 id）。
 
-    - quote/flow：优先取快照自带 quote_evidence_id/flow_evidence_id，缺省
-      "quote:{symbol}" / "flow:{symbol}"（确定性）；
+    - quote：优先取快照自带 quote_evidence_id，缺省 "quote:{symbol}"（确定性）；
+    - flow：仅在快照携带非空 dict flow 时派生 flow_id，否则为 None
+      （指数无个股资金流 → LLM 输入不含 capital_flow 块，也不可被预测引用）；
     - news：逐项取 evidence_id/id/source_id 首个非空字符串，无 id 项为 None
       （不可被预测引用，LLM 输入中也不携带 evidence_id）。
     """
     symbol = str(snapshot.get("symbol", ""))
     quote_id = snapshot.get("quote_evidence_id") or f"quote:{symbol}"
-    flow_id = snapshot.get("flow_evidence_id") or f"flow:{symbol}"
+    flow = snapshot.get("flow")
+    if isinstance(flow, dict) and flow:
+        flow_id: str | None = snapshot.get("flow_evidence_id") or f"flow:{symbol}"
+    else:
+        flow_id = None
     news_ids: list[str | None] = []
     for item in news:
         nid = item.get("evidence_id") or item.get("id") or item.get("source_id")
@@ -190,13 +194,20 @@ def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str, list[str
 def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
     """输入快照/新闻中实际存在项的 evidence_id 集合（预测只能引用这些）。"""
     quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
-    return {quote_id, flow_id} | {nid for nid in news_ids if nid is not None}
+    ids = {quote_id}
+    if flow_id is not None:
+        ids.add(flow_id)
+    ids.update(nid for nid in news_ids if nid is not None)
+    return ids
 
 
 def _build_chat_prediction_input(
     snapshot: dict, news: list[dict], context: dict
 ) -> dict[str, object]:
-    """现状快照驱动的 LLM 输入包（行情/资金/新闻 + 上下文，无溯源因果链）。"""
+    """现状快照驱动的 LLM 输入包（行情/资金/新闻 + 上下文，无溯源因果链）。
+
+    指数场景（flow 缺失）→ 不携带 capital_flow 块（"不适用"而非"缺失"，不编造指数资金流）。
+    """
     quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
     news_blocks: list[dict[str, object]] = []
     for item, nid in zip(news, news_ids):
@@ -204,15 +215,17 @@ def _build_chat_prediction_input(
         if nid is not None:
             block["evidence_id"] = nid
         news_blocks.append(block)
-    return {
+    payload: dict[str, object] = {
         "input_mode": "snapshot_driven",
         "symbol": snapshot.get("symbol", ""),
         "trade_date": snapshot.get("trade_date"),
         "context": context,
         "quote": {"evidence_id": quote_id, "data": snapshot.get("quote")},
-        "capital_flow": {"evidence_id": flow_id, "data": snapshot.get("flow")},
         "news": news_blocks,
     }
+    if flow_id is not None:
+        payload["capital_flow"] = {"evidence_id": flow_id, "data": snapshot.get("flow")}
+    return payload
 
 
 async def run_chat_prediction(
@@ -223,12 +236,14 @@ async def run_chat_prediction(
     输入契约（Task 2+ 由 skill_executor 汇总 Evidence.raw 构造）：
     - snapshot：{"symbol", "trade_date", "quote"?, "flow"?,
       "quote_evidence_id"?, "flow_evidence_id"?}——quote/flow 分别对齐
-      stock_snapshot raw.quote / capital_flow raw.flow 结构；
+      stock_snapshot raw.quote / capital_flow raw.flow 结构；flow 为可选
+      （指数无个股资金流属"不适用"而非"缺失"）；
     - news：list[dict]，每项可选 evidence_id/id/source_id（无 id 项不可被引用）；
     - context：用户问题上下文（question/time_range 等），透传 LLM 参考。
 
-    门禁：快照缺行情/资金关键字段（quote/flow 非空 dict、trade_date 可解析）→
-    返回 None，由 synth_answer 走既有 D35 降级提示。后处理：
+    门禁：快照缺行情关键字段（quote 非空 dict、trade_date 可解析）→
+    返回 None，由 synth_answer 走既有 D35 降级提示；flow 缺失/为空 dict 均
+    通过门禁（指数场景，LLM 输入不携带 capital_flow 块，不编造指数资金流）。后处理：
     - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
     - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
     - 到期日由 _compute_due_dates 确定性计算（LLM 不输出日期，与 run_predict 同源）。

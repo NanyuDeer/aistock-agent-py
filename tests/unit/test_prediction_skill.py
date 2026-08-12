@@ -120,6 +120,41 @@ async def test_prediction_success():
 
 
 @pytest.mark.asyncio
+async def test_prediction_index_path_uses_index_quote():
+    """指数路径：symbol=000001 + index_name → node_api 指数行情，snapshot 无 flow。"""
+    run_mock = AsyncMock(return_value=_result())
+    index_data = {
+        "indices": [
+            {"name": "上证指数", "index": "000001", "price": 3800.0, "changePercent": 0.5}
+        ]
+    }
+    with _patch_tools(), patch(
+        "aistock_agent.skills.prediction.node_api.get",
+        new=AsyncMock(return_value=index_data),
+    ), patch(
+        "aistock_agent.skills.prediction.run_chat_prediction", run_mock
+    ):
+        ev: Evidence = await prediction(
+            {"symbols": ["000001"], "index_name": "上证指数"}, _goal(["000001"])
+        )
+
+    assert not ev.degraded
+    snapshot = run_mock.call_args.args[0]
+    assert "flow" not in snapshot          # 指数无个股资金流 → 快照不含 flow 键
+    assert "flow_evidence_id" not in snapshot
+    assert snapshot["quote"] == {
+        "name": "上证指数",
+        "code": "000001",
+        "price": 3800.0,
+        "change_pct": 0.5,
+    }
+    facts_text = "\n".join(ev.facts)
+    assert "上证指数" in facts_text
+    assert "资金：" not in facts_text       # 现状行不渲染空"资金："段
+    assert DISCLAIMER in facts_text
+
+
+@pytest.mark.asyncio
 async def test_prediction_news_passthrough():
     """args.news 存在时透传（无 id 项不可被引用由 run_chat_prediction 后处理保证）。"""
     run_mock = AsyncMock(return_value=_result())

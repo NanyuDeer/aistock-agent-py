@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
@@ -187,19 +188,50 @@ def _make_chat_snapshot(**overrides: object) -> dict:
     [
         {"quote": {}},
         {"quote": None},
-        {"flow": {}},
-        {"flow": None},
         {"trade_date": ""},
         {"trade_date": "not-a-date"},
     ],
 )
 async def test_run_chat_prediction_gate_returns_none_on_missing_key_fields(snapshot_kwargs):
-    """门禁：快照缺行情/资金关键字段（quote/flow 非空、trade_date 可解析）→ None 不调 LLM。"""
+    """门禁：快照缺行情关键字段（quote 非空、trade_date 可解析）→ None 不调 LLM。
+
+    flow 为可选（指数无个股资金流属"不适用"而非"缺失"），不再构成门禁字段。
+    """
     llm = AsyncMock()
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
         result = await run_chat_prediction(_make_chat_snapshot(**snapshot_kwargs), [], {})
     assert result is None
     llm.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_without_flow_passes_gate():
+    """指数快照（仅 quote、无 flow）→ 门禁通过、LLM 被调用、evidence 集合不含 flow id。"""
+    llm = AsyncMock()
+    chat_json = _VALID_LLM_JSON.replace('"m1"', '"quote:000001"')
+    llm.ainvoke.return_value = AsyncMock(content=chat_json)
+    snapshot = _make_chat_snapshot(symbol="000001")
+    snapshot.pop("flow", None)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(snapshot, [], {})
+    assert result is not None
+    assert result.prediction_status == "hypothesis"
+    assert result.evidence_ids == ["quote:000001"]
+    llm.ainvoke.assert_awaited()
+    prompt_input = json.loads(llm.ainvoke.await_args.args[0][1].content)
+    assert "capital_flow" not in prompt_input  # 指数无个股资金流 → LLM 输入不含 capital_flow 块
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_empty_flow_treated_as_absent():
+    """flow 存在但为空 dict → 视同缺失（指数场景），门禁通过不降级。"""
+    llm = AsyncMock()
+    chat_json = _VALID_LLM_JSON.replace('"m1"', '"quote:600519"')
+    llm.ainvoke.return_value = AsyncMock(content=chat_json)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(_make_chat_snapshot(flow={}), [], {})
+    assert result is not None
+    assert result.prediction_status == "hypothesis"
 
 
 @pytest.mark.asyncio
