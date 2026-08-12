@@ -18,7 +18,13 @@ from aistock_agent.schemas.prediction import (
     PredictionResult,
     PredictionRisk,
 )
-from aistock_agent.skills.prediction import DISCLAIMER, LOW_CONFIDENCE_HINT, prediction
+from aistock_agent.skills.prediction import (
+    DISCLAIMER,
+    LOW_CONFIDENCE_HINT,
+    _render_facts,
+    _sanitize_metric_projection,
+    prediction,
+)
 
 _QUOTE_TEXT = "【贵州茅台】最新价: 1500.0  涨跌幅: +1.20%"
 _FLOW_TEXT = "主力流入: 2.5亿  主力流出: 1.1亿\n主力净流入: 1.4亿"
@@ -95,7 +101,11 @@ async def test_prediction_success():
     assert DISCLAIMER in facts_text
     # 分档推演内容
     assert "2-4 周" in facts_text
-    assert "股价维持 1500-1550 区间" in facts_text
+    # B5：绝对点位渲染前剥离（"1500-1550 区间"→ 定性"相对当前区间"，不触碰时长字段；
+    # 行情现状行的真实最新价 1500.0 属快照展示，不在红线内）
+    horizon_line = next(f for f in ev.facts if f.startswith("- 短线"))
+    assert "1500" not in horizon_line
+    assert "相对当前区间" in horizon_line
     # raw 含 PredictionResult（供后续扩展）
     assert ev.raw["prediction"]["prediction_status"] == "hypothesis"
     assert ev.raw["prediction"]["evidence_ids"] == [f"quote:{_SYMBOL}", f"flow:{_SYMBOL}"]
@@ -252,3 +262,41 @@ async def test_prediction_missing_symbol_raises():
     """无 symbol → 裸函数抛 ValueError（@skill 会吞为 degraded，测试原函数守卫）。"""
     with pytest.raises(ValueError):
         await prediction.__wrapped__({}, _goal())
+
+
+# ---------- B5（2026-08-12 验收裁决）：点位红线代码级收口 ----------
+
+
+def test_render_facts_strips_absolute_point_projection():
+    """B5：LLM 输出含绝对点位（"股价维持 1500-1550 区间"/"涨至 10.5 元"）→
+    _render_facts 渲染后不含绝对区间/价格点位；免责声明仍在；时长字段（2-4 周）不受影响。"""
+    result = _result().model_copy(
+        update={
+            "horizons": [
+                PredictionHorizon(
+                    horizon="short",
+                    remaining_estimate="2-4 周",
+                    phase="peaking",
+                    direction="bullish",
+                    target="贵州茅台",
+                    metric_projection="股价维持 1500-1550 区间，短线看涨至 10.5 元",
+                    confidence="medium",
+                )
+            ]
+        }
+    )
+    facts = _render_facts(result, _SYMBOL, _QUOTE_TEXT, _FLOW_TEXT)
+    # 红线只针对推演行（metric_projection）；行情现状行"最新价 1500.0"是真实快照价，不在红线内
+    projection_line = next(f for f in facts if f.startswith("- 短线"))
+    assert "1500" not in projection_line
+    assert "10.5" not in projection_line
+    assert DISCLAIMER in "\n".join(facts)
+    assert "2-4 周" in projection_line  # 时长字段（remaining_estimate）不受净化影响
+    assert "相对当前区间" in projection_line  # 绝对区间 → 定性/相对口径兜底
+    assert "当前价位附近" in projection_line  # 价格点位（10.5 元）→ 相对口径兜底
+
+
+def test_sanitize_metric_projection_keeps_relative_phrase():
+    assert _sanitize_metric_projection("围绕当前价位窄幅整理") == "围绕当前价位窄幅整理"
+    assert "1500" not in _sanitize_metric_projection("股价维持 1500-1550 区间")
+    assert "10.5" not in _sanitize_metric_projection("预期涨至 10.5 元")

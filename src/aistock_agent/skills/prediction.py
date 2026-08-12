@@ -38,6 +38,27 @@ _QUOTE_RE = re.compile(
 # get_capital_flow 文本契约：主力流入: X  主力流出: Y\n主力净流入: Z
 _FLOW_RE = re.compile(r"主力流入: (\S+)  主力流出: (\S+)\n主力净流入: (\S+)")
 
+# B5（2026-08-12 验收裁决）：产品红线"影响持续性推演非点位预测"需代码级收口。
+# 只作用于 metric_projection（渲染前净化），不触碰 remaining_estimate（"2-4 周"时长）等字段。
+# reviewer M-2：百分比（"涨幅 5%"）属相对口径，不在红线内，正则不含 ％/%。
+# reviewer M-3：绝对区间正则加负向前瞻排除时长/倍数（"2-4 周"、"3-5 倍"）。
+_ABSOLUTE_POINT_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*[-~—至]\s*\d+(?:\.\d+)?(?!\s*(?:周|天|月|年|倍))"
+)  # 绝对数值区间（非时长/倍数）
+_PRICE_UNIT_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:元|点)")  # 价格/点位单位（百分比不在此红线）
+
+
+def _sanitize_metric_projection(text: str) -> str:
+    """渲染前剥离绝对点位（相对区间/方向保留；剥离后为空则回退定性描述）。"""
+    if not text:
+        return text
+    cleaned = _ABSOLUTE_POINT_RE.sub("相对当前区间", text)
+    cleaned = _PRICE_UNIT_RE.sub("当前价位附近", cleaned)
+    cleaned = cleaned.strip(" ，,。")
+    # reviewer M-6：剥离后可能残留"相对当前区间 区间"冗余（"1500-1550 区间"→"相对当前区间 区间"）
+    cleaned = cleaned.replace("相对当前区间 区间", "相对当前区间")
+    return cleaned or "以方向与阶段判断为主"
+
 _HORIZON_LABEL = {"short": "短线(1-5交易日)", "mid": "中线(1-4周)", "long": "长线(1-6月)"}
 _PHASE_LABEL = {
     "building": "影响形成",
@@ -102,7 +123,8 @@ def _render_facts(
             f"- {_HORIZON_LABEL.get(h.horizon, h.horizon)}（{h.remaining_estimate}）："
             f"阶段{_PHASE_LABEL.get(h.phase, h.phase)}，"
             f"方向{_DIRECTION_LABEL.get(h.direction, h.direction)}，"
-            f"置信{h.confidence}；验证对象 {h.target}，预期 {h.metric_projection}"
+            f"置信{h.confidence}；验证对象 {h.target}，"
+            f"预期 {_sanitize_metric_projection(h.metric_projection)}"
         )
         for h in result.horizons
     ]
