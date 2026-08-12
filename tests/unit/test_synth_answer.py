@@ -27,6 +27,7 @@ from aistock_agent.schemas.chat_contract import (
     SubGoal,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.skills.prediction import DISCLAIMER, LOW_CONFIDENCE_HINT
 from aistock_agent.state.chat_schema import QuestionState
 
 CLARIFICATION = "请提供 6 位股票代码后重试。"
@@ -1147,8 +1148,12 @@ def _subgoal(goal_id: str, dimension: str, question: str) -> SubGoal:
 
 @pytest.mark.asyncio
 async def test_multi_goal_validate_then_predict() -> None:
-    """validate 子目标节在前、predict 子目标节在后，D35 提示与 LLM 结论共存。"""
-    evs = [_ev("g1"), _ev("g2")]
+    """validate 子目标节在前、predict 子目标节在后，D35 提示与 LLM 结论共存。
+
+    Phase 4-1：goal_id="g2" 已被 prediction Evidence 占位（synth 定位兜底），
+    预测子目标无 prediction Evidence 即降级 → 仅保留 g1 validate 证据。
+    """
+    evs = [_ev("g1")]
     goals = [_subgoal("g1", "validate", "大盘当前表现"), _subgoal("g2", "predict", "明日走势预测")]
     state = {"plan": "compose", "skill_calls": []}
     with patch(
@@ -1172,7 +1177,7 @@ async def test_multi_goal_validate_then_predict() -> None:
 @pytest.mark.asyncio
 async def test_multi_goal_predict_hint_once() -> None:
     """多个 predict 子目标 → D35 提示全文仅输出一次。"""
-    evs = [_ev("g1"), _ev("g2")]
+    evs = [_ev("g1")]
     goals = [_subgoal("g1", "predict", "明日走势预测"), _subgoal("g2", "predict", "下周走势预测")]
     result = await _synth_multi_goal(
         {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
@@ -1251,3 +1256,119 @@ def test_build_predict_section_hint_once_and_facts() -> None:
     assert "当前趋势：上证 3832.26" in section
     section2 = _build_predict_section(sg, evs, include_hint=False)
     assert PREDICT_DEGRADED_HINT not in section2
+
+
+# ─── Phase 4-1（Task 4）：predict 子目标三段式渲染 ───
+
+
+def _prediction_evidence(
+    *,
+    degraded: bool = False,
+    low_confidence: bool = False,
+    goal_id: str = "g2",
+) -> Evidence:
+    """构造 prediction skill 风格 Evidence（facts 对齐 skills/prediction._render_facts）。"""
+    facts = [
+        (
+            "【600519 现状】行情：【贵州茅台】最新价: 1500.0  涨跌幅: +1.20%；"
+            "资金：主力流入: 2.5亿；主力流出: 1.1亿"
+        ),
+        "【影响持续性推演（假设推演）】主力资金持续流入，短线延续强势",
+        (
+            "- 短线(1-5交易日)（2-4 周）：阶段影响高峰，方向看多，置信medium；"
+            "验证对象 贵州茅台，预期 股价维持 1500-1550 区间"
+        ),
+        "演化路径：短线情绪延续 → 中线资金回补",
+        "风险提示：市场整体回撤——影响提前衰减",
+    ]
+    if low_confidence:
+        facts.append(LOW_CONFIDENCE_HINT)
+    facts.append(DISCLAIMER)
+    return Evidence(
+        facts=facts,
+        sources=[],
+        as_of=datetime.now(UTC),
+        symbols=["600519"],
+        degraded=degraded,
+        degraded_reason="prediction 不可用" if degraded else None,
+        skill_name="prediction",
+        goal_id=goal_id,
+    )
+
+
+def test_build_predict_section_three_part_rendering() -> None:
+    """非 degraded prediction Evidence → 三段式：现状趋势 + 影响持续性推演 + 免责声明。
+
+    ① 现状趋势保留 validate facts；② 影响持续性推演渲染 prediction facts（首行
+    【…现状】输入上下文被跳过，不重复）；③ 免责声明恰好一次置尾；无 D35 降级提示。
+    """
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    section = _build_predict_section(sg, [validate_ev, pred_ev], include_hint=True)
+    # ① 现状趋势（validate facts 原样保留）
+    assert "当前趋势要点：" in section
+    assert "当前趋势：上证 3832.26" in section
+    # ② 影响持续性推演（prediction facts；【…现状】首行被跳过）
+    assert "影响持续性推演：" in section
+    assert "主力资金持续流入，短线延续强势" in section
+    assert "短线(1-5交易日)" in section
+    assert "演化路径" in section
+    assert "风险提示" in section
+    assert "【600519 现状】" not in section
+    # ③ 免责声明恰好一次置尾；无降级提示
+    assert section.count(DISCLAIMER) == 1
+    assert section.rstrip().endswith(DISCLAIMER)
+    assert PREDICT_DEGRADED_HINT not in section
+
+
+def test_build_predict_section_degraded_prediction_keeps_hint() -> None:
+    """degraded prediction Evidence → 维持 D35 降级提示，不渲染三段式/不追加免责声明。"""
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence(degraded=True)
+    section = _build_predict_section(sg, [validate_ev, pred_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：上证 3832.26" in section
+    assert "影响持续性推演：" not in section
+    assert DISCLAIMER not in section
+
+
+def test_build_predict_section_missing_prediction_keeps_hint() -> None:
+    """无 prediction Evidence（skill_name 与 goal_id 均不命中）→ D35 降级提示。"""
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    section = _build_predict_section(sg, [validate_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：上证 3832.26" in section
+    assert "影响持续性推演：" not in section
+
+
+def test_build_predict_section_low_confidence_hint() -> None:
+    """prediction facts 含低置信提示（confidence=low）→ 三段式输出中保留不确定性提示。"""
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    pred_ev = _prediction_evidence(low_confidence=True)
+    section = _build_predict_section(sg, [pred_ev], include_hint=True)
+    assert LOW_CONFIDENCE_HINT in section
+    assert PREDICT_DEGRADED_HINT not in section
+    assert section.count(DISCLAIMER) == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_predict_three_part_no_degraded_hint() -> None:
+    """predict 子目标（g1）+ 非 degraded prediction Evidence → 全文三段式渲染。
+
+    对齐真实流程（闸门 1/2）：predict 子目标 id="g1"，validate 证据 goal_id="g1"，
+    prediction Evidence goal_id="g2"（定位哨兵，不属于任何子目标）。
+    """
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    evs = [validate_ev, pred_ev]
+    goals = [_subgoal("g1", "predict", "明日走势预测")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+    )  # type: ignore[arg-type]
+    assert PREDICT_DEGRADED_HINT not in result["final_response"]
+    assert "影响持续性推演：" in result["final_response"]
+    assert "主力资金持续流入，短线延续强势" in result["final_response"]
+    assert result["final_response"].count(DISCLAIMER) == 1

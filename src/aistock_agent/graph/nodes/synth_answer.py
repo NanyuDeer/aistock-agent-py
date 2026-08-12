@@ -31,6 +31,7 @@ from aistock_agent.schemas.chat_contract import (
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.services.token_usage import get_token_usage
+from aistock_agent.skills.prediction import DISCLAIMER
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 from aistock_agent.utils.date import (
     prev_trading_day,
@@ -120,17 +121,55 @@ def _subgoal_to_goal(sg: SubGoal) -> InsightGoal:
 def _build_predict_section(
     sg: SubGoal, evidences: list[Evidence], include_hint: bool
 ) -> str:
-    """D35：预测子目标节——固定降级提示 + 当前趋势要点（facts 拼接，零 LLM）。"""
-    lines = [f"## {sg.question}"]
-    if include_hint:
-        lines.append(PREDICT_DEGRADED_HINT)
+    """predict 子目标节：三段式渲染（现状趋势 + 影响持续性推演 + 免责声明）。
+
+    - prediction Evidence 存在且非 degraded → 三段式（零 LLM，facts 拼接）：
+      ① 现状趋势：复用同子目标 validate facts（goal_id == sg.id，既有逻辑）；
+      ② 影响持续性推演：渲染 prediction facts（跳过首行【…现状】输入上下文，
+         三档/置信度/演化/风险/低置信提示原样保留，免责声明去重）；
+      ③ 免责声明：代码兜底恰好一次置尾。
+    - Evidence 缺失或 degraded → 维持 D35 降级提示（PREDICT_DEGRADED_HINT）+ 趋势要点。
+    - 定位规则：primary=skill_name=="prediction"，fallback=goal_id=="g2"
+      （predict 子目标 id 为 g1，prediction Evidence 的 goal_id 为 g2，勿按 sg.id 匹配）。
+    """
+    pred_evs = [ev for ev in evidences if ev.skill_name == "prediction"] or [
+        ev for ev in evidences if ev.goal_id == "g2"
+    ]
+    pred_ev = next((ev for ev in pred_evs if not ev.degraded), None)
+
     trend_evs = [ev for ev in evidences if ev.goal_id == sg.id]
-    facts: list[str] = []
+    trend_facts: list[str] = []
     for ev in trend_evs:
-        facts.extend(ev.facts)
-    if facts:
+        trend_facts.extend(ev.facts)
+
+    if pred_ev is None:
+        # D35 降级路径（字节不变）：固定降级提示 + 当前趋势要点
+        lines = [f"## {sg.question}"]
+        if include_hint:
+            lines.append(PREDICT_DEGRADED_HINT)
+        if trend_facts:
+            lines.append("当前趋势要点：")
+            lines.extend(f"- {f}" for f in trend_facts[:10])
+        return "\n\n".join(lines)
+
+    # 三段式：① 现状趋势（同子目标 validate facts，既有逻辑）
+    lines = [f"## {sg.question}"]
+    if trend_facts:
         lines.append("当前趋势要点：")
-        lines.extend(f"- {f}" for f in facts[:10])
+        lines.extend(f"- {f}" for f in trend_facts[:10])
+    # ② 影响持续性推演：prediction facts 跳过首行【…现状】输入上下文；免责声明去重
+    pred_facts = pred_ev.facts
+    if pred_facts and "现状】" in pred_facts[0]:
+        pred_facts = pred_facts[1:]
+    pred_facts = [f for f in pred_facts if f != DISCLAIMER]
+    if pred_facts:
+        lines.append("影响持续性推演：")
+        # skill 的三档行自带 "- " 前缀，归一化避免双子弹
+        lines.extend(
+            f"- {f[2:]}" if f.startswith("- ") else f"- {f}" for f in pred_facts
+        )
+    # ③ 免责声明：代码兜底恰好一次置尾
+    lines.append(DISCLAIMER)
     return "\n\n".join(lines)
 
 
