@@ -265,6 +265,16 @@ START → supervisor(quick_think, 意图路由)
 - **教训（新增）**：① 阶段 2 重跑复用同 thread checkpoint 必须清 messages（add_messages 对无 id 消息是追加）；② 两阶段交互的任何一阶段状态（doneReceived）不复位 = 后续事件全丢，re-arm 是发送成功的原子动作；③ 前端点选后的续跑是"新一次运行"，run_id 需区分以正确归属 token/事件
 - 提交：c742a93..232e361（3 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
 
+### CHAT QA Phase 4-3 全局用户记忆（2026-08-12）：user_profile 注入 + 个性化消费（改进 15）
+
+- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（X-Internal-Token，agent-py 检索用；无记录 200 + 空对象）
+- **拉取（`services/data_client.py`）**：`get_user_profile(user_id)`——Redis 缓存 `user_profile:{user_id}` TTL 300s（失败/空画像同样缓存防每轮重复拉取）→ `GET /internal/user-profile/{user_id}`；非 dict → None（失败降级，warning 不阻断，"永不 500"）；空画像 `{}` 与失败 `None` 语义分离
+- **注入（`QuestionState.user_profile` 可选字段）**：ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）**无条件显式赋值**——`user_id` 非空拉取注入，匿名写 `None` 覆盖 checkpointer 旧值（**条件注入会跨轮污染画像：上一轮登录态画像残留到匿名轮，集成冒烟实证**；对齐 T6/messages 置空先例）
+- **消费**：qa_router `_build_user_profile_context(profile)` 在 LLM prompt 追加"称呼/投资偏好/风险偏好"参考段（profile 为 None 返回 ""，SYSTEM_PROMPT 常量字节不变，不改技能/闸门规则）；synth_answer 风险段三档——`RISK_DISCLAIMER_CONSERVATIVE`（conservative 强化"风险较高，谨慎对待"，优先级高于动作词 strong 档，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（stable，不改 evidence 的 goal_id 关联）
+- **验证**：全量 A/B HEAD 失败集 ⊆ BASE（归一化后新增 0）；ruff 改动文件 0 新增；tsc 0；profile 定向 15/15；**集成冒烟全绿**——登录态 PUT→GET→internal 链路 + 对话 conservative 风险段生效 + 匿名常规档零行为变化
+- **教训（新增）**：① node-postgres 对 JSONB 参数必须传 JSON 字符串（JS 数组直传 500 "类型json的输入语法无效"）——app-api PUT profile 集成冒烟实证；② LangGraph checkpointer 跨轮状态：入口构造 state 时**未提供的键沿用上一轮 checkpoint 值**——注入类字段必须无条件赋值（匿名显式 None），不能条件设置
+- 提交：app-api a709928+159edb9；agent-py 2445417（注入）+ d9be256（消费）+ 4393ad9（防污染 fix），changer 未 push；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
