@@ -34,6 +34,7 @@ from aistock_agent.services.llm import get_deep_think, with_chat_structured_outp
 from aistock_agent.services.token_usage import get_token_usage
 from aistock_agent.skills.prediction import DISCLAIMER
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.date import (
     prev_trading_day,
     shanghai_today,
@@ -370,8 +371,13 @@ def _resolve_basis_indices(
     return basis, None
 
 
-def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> str:
-    """构建综合回答 prompt。"""
+def _build_prompt(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    summary_context: str = "",
+) -> str:
+    """构建综合回答 prompt（summary_context 为 Phase 5 长会话摘要段，短会话为空串）。"""
     evidence_text = "\n".join(
         f"[{i+1}] skill={ev.skill_name} degraded={ev.degraded} reason={ev.degraded_reason}\n"
         f"    facts: {ev.facts}\n"
@@ -379,7 +385,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
         f"    as_of: {ev.as_of.isoformat()}"
         for i, ev in enumerate(evidences)
     )
-    return f"""{_MODE_PROMPTS[mode]}
+    return f"""{_MODE_PROMPTS[mode]}{summary_context}
 
 结构化输出要求（针对 conclusion 字段，必须遵守）：
 1. 使用 Markdown 分节组织回答，推荐结构：
@@ -930,7 +936,13 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        # Phase 5（Task 1）：注入超窗确定性摘要（qa_router 已写 messages_summary；
+        # 缺失时本地 trim_messages 重算，幂等等价）。短会话 → 空串，prompt 字节不变。
+        summary = state.get("messages_summary")
+        if summary is None:
+            _, summary = trim_messages(list(state.get("messages", [])))
+        summary_context = build_summary_context(summary)
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
 

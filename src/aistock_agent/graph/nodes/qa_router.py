@@ -24,6 +24,7 @@ from aistock_agent.services.llm import get_quick_think, with_chat_structured_out
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.message import extract_last_human_message
 
 logger = structlog.get_logger()
@@ -1604,9 +1605,17 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         # Phase 4-3（改进 15）：注入 user_profile 参考段（profile 为 None 时返回 ""，
         # prompt 字节不变；仅回答风格微调，不改技能/闸门规则）
         profile_context = _build_user_profile_context(state.get("user_profile"))
-        prompt = SYSTEM_PROMPT + followup_context + gate4_context + profile_context
-        # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
-        llm_messages = [HumanMessage(content=prompt)] + list(messages)
+        # Phase 5（Task 1）：长会话滑动窗口——LLM prompt 只喂最近 12 条（window），
+        # 超窗部分收敛为零 LLM 确定性摘要（此前对话摘要段）；短会话 summary=None →
+        # summary_context="" → prompt 字节不变。state.messages 保持全量（checkpointer
+        # P2 语义），此处仅裁剪 LLM prompt 输入。
+        window, summary = trim_messages(list(messages))
+        summary_context = build_summary_context(summary)
+        prompt = (
+            SYSTEM_PROMPT + followup_context + gate4_context + profile_context + summary_context
+        )
+        # 把窗口内对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
+        llm_messages = [HumanMessage(content=prompt)] + window
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
 
         # 校验：direct 时 skill_calls 长度必须=1
@@ -1893,6 +1902,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     result = await _qa_router_node_core(state)
     if had_pending and "pending_clarification" not in result:
         result["pending_clarification"] = None
+    # Phase 5（Task 1）：长会话超窗（summary 非 None）时写 messages_summary 随
+    # checkpointer 持久化；短会话（≤12 条）不写该键 → 零变化硬约束。trim_messages 是
+    # 纯函数，此处重算与 core 内 LLM 路径结果一致（幂等，覆盖短路/兜底返回路径）。
+    if "messages_summary" not in result:
+        _, summary = trim_messages(list(state.get("messages", [])))
+        if summary is not None:
+            result["messages_summary"] = summary
     return result
 
 
