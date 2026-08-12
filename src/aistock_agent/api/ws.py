@@ -302,6 +302,35 @@ class ConfirmWaitResult:
     stopped: bool = False
 
 
+def _normalize_confirm_choice(choice: object | None, options: list | None) -> dict | None:
+    """confirm_response 的 choice 归一化（单一事实源，两条消费路径共用）。
+
+    _wait_confirm_response（同连接等待）与主循环 resume 消费分支都调用本函数，
+    防止两路径对 choice 的解析漂移（复审修复：resume 路径此前原样透传 raw string
+    key → qa_router 只消费 dict 形状 → 落入 re-confirm/resolve 循环）：
+    - choice 为 None / "none" / 空 symbol → None（调用侧按 confirm_timeout 回退）
+    - dict 形状 {symbol/key, label} → 归一化为 {"symbol","label"}（空 symbol 也回 None）
+    - raw string key（6 位代码）→ {"symbol": key, "label": 从 options 反查，查不到用 key}
+    """
+    if choice is None or choice == "none":
+        return None
+    if isinstance(choice, dict):
+        symbol = str(choice.get("symbol") or choice.get("key") or "")
+        label = str(choice.get("label") or symbol)
+        if not symbol:
+            return None  # 空 choice → 按确认超时重跑
+        return {"symbol": symbol, "label": label}
+    symbol = str(choice)
+    if not symbol:
+        return None
+    label = symbol
+    for opt in options or []:
+        if isinstance(opt, dict) and opt.get("key") == symbol:
+            label = opt.get("label") or label
+            break
+    return {"symbol": symbol, "label": str(label)}
+
+
 async def _wait_confirm_response(
     state: ChatRunState | None,
     websocket: WebSocket,
@@ -379,26 +408,13 @@ async def _wait_confirm_response(
                 )
                 recv_task = asyncio.create_task(websocket.receive_json())
                 continue
-            choice = msg.get("choice")
-            if choice is None or choice == "none":
+            choice = _normalize_confirm_choice(
+                msg.get("choice"), confirm_payload.get("options")
+            )
+            if choice is None:
+                # 空 /「都不是」（none）/ 空 symbol → 按确认超时重跑
                 return ConfirmWaitResult()
-            # 归一化：协议 choice 为 key（6 位代码）；label 从阶段 1 options 反查，
-            # 兼容客户端直接回带 dict 形状（{"symbol":..., "label":...}）
-            if isinstance(choice, dict):
-                symbol = str(choice.get("symbol") or choice.get("key") or "")
-                label = str(choice.get("label") or symbol)
-                if not symbol:
-                    return ConfirmWaitResult()  # 空 choice → 按确认超时重跑
-                return ConfirmWaitResult(choice={"symbol": symbol, "label": label})
-            symbol = str(choice)
-            if not symbol:
-                return ConfirmWaitResult()
-            label = symbol
-            for opt in confirm_payload.get("options", []) or []:
-                if isinstance(opt, dict) and opt.get("key") == symbol:
-                    label = opt.get("label") or label
-                    break
-            return ConfirmWaitResult(choice={"symbol": symbol, "label": str(label)})
+            return ConfirmWaitResult(choice=choice)
     except (WebSocketDisconnect, RuntimeError):
         # 连接断开：停止监听，返回空结果（超时回退语义，不抛异常）
         logger.info("chat.confirm.disconnected session_id=%s", session_id)
@@ -503,8 +519,8 @@ async def _run_confirm_stage2(
     """交互式确认阶段 2：携带 confirm_choice / confirm_timeout 重跑同 session 图。
 
     原 ws_chat L610-661 抽出（Phase 4 验收修复后，resume 消费路径复用）。
-    choice 为 _wait_confirm_response 归一化 dict（或 None = 超时/「都不是」→ confirm_timeout）；
-    resume 消费路径按协议原样透传（dict 或 key 字符串均可）。
+    choice 为 _normalize_confirm_choice 归一化 dict（或 None = 超时/「都不是」→ confirm_timeout）；
+    两条消费路径（同连接 _wait_confirm_response、resume 主循环分支）均已归一化。
     开头 clear_pending_confirm 幂等兜底；start 返回 None（并发竞态）时发 ERROR 并清 pending。
     """
     chat_task_manager.clear_pending_confirm(session_id)
@@ -745,9 +761,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                         {"type": WSEventType.ERROR, "content": "无权访问该会话"}
                     )
                     continue
-                choice = data.get("choice")
-                if choice is None or choice == "none":
-                    choice = None
+                # 归一化后注入阶段 2（对齐 _wait_confirm_response；此前原样透传
+                # raw string key → qa_router 只消费 dict 形状 → 落入 re-confirm/resolve 循环）。
+                # None / "none" / 空 symbol → None → _run_confirm_stage2 走 confirm_timeout 回退。
+                choice = _normalize_confirm_choice(
+                    data.get("choice"),
+                    pending.get("options") if isinstance(pending, dict) else None,
+                )
                 chat_task_manager.clear_pending_confirm(session_id)
                 await _run_confirm_stage2(
                     websocket, session_id, pending.get("message") or "",

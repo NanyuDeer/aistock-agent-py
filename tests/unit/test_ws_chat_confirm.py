@@ -476,8 +476,11 @@ async def test_wait_confirm_response_wrong_request_id_still_ignored() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_after_confirm_then_confirm_response_is_consumed() -> None:
-    """B2 死端回归：confirm_request 落 pending → 断线 → resume 补发 → confirm_response
-    在主循环被消费并进入阶段 2（此前走主循环普通消息处理报"消息不能为空"）。"""
+    """B2 死端回归 + 复审修复（归一化）：confirm_request 落 pending → 断线 → resume
+    补发 → confirm_response 携带 raw string key（"600519"）→ 主循环消费并归一化为
+    {"symbol","label"} dict 注入阶段 2（此前走主循环普通消息处理报"消息不能为空"；
+    复审修复前 resume 路径原样透传字符串 → qa_router 只消费 dict 形状 → 落入
+    re-confirm/resolve 循环）。"""
     from aistock_agent.services.chat_task_manager import chat_task_manager
 
     await chat_task_manager._cleanup_for_test()
@@ -523,9 +526,10 @@ async def test_resume_after_confirm_then_confirm_response_is_consumed() -> None:
     assert "confirm_request" in types, f"resume 应补发 confirm_request: {types}"
     assert "error" not in types, f"不应报'消息不能为空': {types}"
     assert types[-1] == "done", f"confirm_response 应在主循环被消费并跑阶段 2: {types}"
-    # 阶段 2 initial_state：choice 注入（resume 消费路径按协议原样透传 choice）
+    # 复审修复：阶段 2 initial_state 收到的是归一化 dict（对齐 _wait_confirm_response），
+    # 而非 raw string key（qa_router 仅消费 dict 形状，字符串会被当作普通消息重新确认）
     assert len(captured) == 1
-    assert captured[0]["confirm_choice"] == "600519"
+    assert captured[0]["confirm_choice"] == {"symbol": "600519", "label": "贵州茅台(600519)"}
     assert captured[0].get("confirm_timeout") is None
     # pending 消费后清理
     assert chat_task_manager.get_pending_confirm("s_b2") is None
