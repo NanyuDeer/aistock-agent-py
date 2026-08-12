@@ -230,7 +230,7 @@ async def _synth_multi_goal(
         any_degraded = True
     combined = "\n\n".join(sections)
     # A1②：免责声明合并后统一追加恰好一次（多 predict 子目标不再各节重复；
-    # predict 是 dimension 值，见 L207 过滤；追加位置在预测段之后、D28 风险段之前）
+    # predict 按 dimension=="predict" 过滤（上方）；追加位置在预测段之后、D28 风险段之前）
     if predict and DISCLAIMER not in combined:
         combined = f"{combined}\n\n{DISCLAIMER}"
     # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
