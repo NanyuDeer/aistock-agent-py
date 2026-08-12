@@ -989,6 +989,14 @@ def test_extract_stock_name_candidate_removes_analysis_verbs():
     assert _extract_stock_name_candidate("解读一下贵州茅台") == "贵州茅台"
 
 
+def test_deep_analysis_symbol_extraction():
+    """用例 7（2026-08-11 生产暴露）：「深度分析贵州茅台」候选名应为「贵州茅台」，
+    不因「深度」未入停用词而被污染成「深度贵州茅台」→ resolve 404 → 错误澄清。"""
+    from aistock_agent.graph.nodes.qa_router import _extract_stock_name_candidate
+
+    assert _extract_stock_name_candidate("深度分析贵州茅台") == "贵州茅台"
+
+
 @pytest.mark.asyncio
 async def test_qa_router_stock_name_with_analysis_verb_short_circuits_light(monkeypatch):
     """'分析一下贵州茅台' resolve 命中 → 闸门 2 light 快答，不再澄清。"""

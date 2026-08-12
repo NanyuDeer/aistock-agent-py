@@ -52,8 +52,15 @@ def _normalize_openai_base_url(base_url: str) -> str:
     return base_url
 
 
-def get_quick_think() -> ChatOpenAI:
-    """快速模型，用于意图分类和简单任务"""
+def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
+    """快速模型，用于意图分类和简单任务。
+
+    Args:
+        observe: 是否纳入可观测性/计费。默认 True —— 挂载可观测性 callbacks
+            （token 用量统计 + agent 追踪），主链路计费依赖此行为，存量调用
+            无需改动；False —— 不挂 callbacks，用于 reasoning 旁路（问题 17，
+            2026-08-11 拍板），该旁路 token 不计入用户账单。
+    """
     return ChatOpenAI(
         model=settings.quick_think_model,
         api_key=SecretStr(settings.openai_api_key),
@@ -62,7 +69,8 @@ def get_quick_think() -> ChatOpenAI:
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
         # 可观测性回调：token 用量统计 + agent 追踪（不侵入业务逻辑）
-        callbacks=_get_observability_callbacks(),
+        # observe=False 时（reasoning 旁路）不挂，token 不计入用户账单（问题 17）
+        callbacks=_get_observability_callbacks() if observe else None,
     )
 
 
