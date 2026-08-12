@@ -603,6 +603,14 @@ async def ws_chat(websocket: WebSocket) -> None:
                 initial_state2["user_id"] = (
                     str(raw_user_id) if raw_user_id not in (None, "") else None
                 )
+                # Phase 4-2 修复：阶段 2 重跑同 session（thread_id）图时 messages 必须置空。
+                # build_chat_initial_state 携带的 [HumanMessage(message)]（无 id）经
+                # add_messages reducer 会被追加进 checkpoint 历史 → 线程消息变 [m1, m1]，
+                # 后续轮 qa_router 的 resolve-miss 澄清/确认分支受 len(messages) <= 1
+                # 守卫影响失效（跨轮污染，冒烟实证）。空列表对 add_messages 是 no-op →
+                # 历史保持 [m1] 不重复，图读取末条仍为 m1（原问题）重处理。阶段 2 恒在
+                # 阶段 1 之后（同线程已有 checkpoint），无"空历史"风险。
+                initial_state2["messages"] = []
                 reset_transient_state(initial_state2)
                 if choice is not None:
                     initial_state2["confirm_choice"] = choice

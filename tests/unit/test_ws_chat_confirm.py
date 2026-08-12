@@ -246,6 +246,12 @@ async def test_ws_chat_two_phase_confirm_choice_rerun() -> None:
 
     # 阶段 2 initial_state：携带 confirm_choice，transient 字段归零
     assert len(captured) == 2
+    # Phase 4-2 跨轮污染回归：阶段 2 重跑同 thread 的 initial_state messages
+    # 必须为空（空列表对 add_messages 是 no-op → checkpoint 历史保持 [m1] 不重复；
+    # 否则 [m1, m1] 让后续轮 qa_router 的 resolve-miss 澄清/确认分支失效）。
+    # 阶段 1 仍携带用户消息 m1。
+    assert len(captured[0]["messages"]) == 1
+    assert captured[1]["messages"] == []
     assert captured[0].get("confirm_choice") is None  # 阶段 1 无输入信号（入口归零）
     assert captured[1]["confirm_choice"] == {"symbol": "600519", "label": "贵州茅台(600519)"}
     assert captured[1].get("confirm_timeout") is None
