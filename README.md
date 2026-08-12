@@ -248,13 +248,14 @@ content = {
 
 ### 统一事件抓取中台（2026-08-12）
 
-统一事件抓取中台收敛"多源事件采集 → 归一化 → 筛选 → 入库 → 传导触发"全链路，为晨报、大盘溯源、stock_trace 提供统一事件库（`report_type=event_scrape`）证据源。
+统一事件抓取中台收敛"多源事件采集 → 规则评分 → 归一化 → 筛选 → 入库 → 传导触发"全链路，为晨报、大盘溯源、stock_trace 提供统一事件库（`report_type=event_scrape`）证据源。
 
 **架构分层**：
 
 | 层 | 模块 | 职责 |
 |----|------|------|
 | 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册** |
+| 规则评分层 | `services/event_scoring.py` | `apply_rule_score(raw, source=...)` 确定性规则评分（cls/ths/tavily 三源接入）：强词 5 分过阈 / 弱词 3 分不过阈 / 语境词降权防误判；已有有效 impact_score 不覆盖（eastmoney ai_impact 优先级更高） |
 | 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
 | 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
 | 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
