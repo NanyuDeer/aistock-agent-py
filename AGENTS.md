@@ -33,7 +33,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 > **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
 >
-> **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、财联社电报当日全量爬取（`/internal/news/telegraph` 优先，降级到 `/internal/news/latest`）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
+> **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、证据源读统一事件库优先（`load_event_scrape(report_date)`，有库用事件库做 event_evidence、缺库降级到财联社电报当日全量爬取 `/internal/news/telegraph`，再降级 `/internal/news/latest`，2026-08-12 起）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
 
 ## 核心架构
 

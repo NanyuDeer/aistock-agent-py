@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Literal
 
 import structlog
 
@@ -27,6 +28,7 @@ from aistock_agent.schemas.market_trace import (
     SourceRecord,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.event_store import EventRecord
 from aistock_agent.services.morning_forecast_extractor import extract_morning_forecast
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.services.tavily import TavilyService
@@ -172,7 +174,7 @@ def _log_telegraph_response(
         return
     items = telegraph_data.get("items")
     if not isinstance(items, list) and isinstance(telegraph_data.get("data"), dict):
-        items = telegraph_data["data"].get("items")  # type: ignore[union-attr]
+        items = telegraph_data["data"].get("items")
     item_count = len(items) if isinstance(items, list) else 0
     logger.info(
         "cls_telegraph_response",
@@ -774,6 +776,73 @@ def _normalize_news_facts(
     return SourceCollectionStatus(state="available", provider="cls", item_count=news_counter)
 
 
+def _map_event_store_source_level(level: str) -> Literal["primary", "reporting"]:
+    """事件库 source_level（A/B/C/D）→ review SourceRecord 档位。
+
+    事件库 A 级（官方/一手来源）→ primary；B/C/D → reporting。
+    review 的 ``SourceRecord.source_level`` 是
+    ``Literal[primary/reporting/market_data]``，与事件库 A/B/C/D 不是同一套
+    枚举——简报 Step 3 的"原样透传 source_level"在 Pydantic Literal 校验下
+    不可行（Task 7 记录偏差）。
+    """
+    return "primary" if level == "A" else "reporting"
+
+
+def _normalize_event_store_facts(
+    events: list[EventRecord],
+    sources: dict[str, SourceRecord],
+    missing_fields: list[str],
+    captured_at: datetime,
+) -> SourceCollectionStatus:
+    """统一事件库 → SourceRecord（event_evidence）
+
+    大盘溯源证据源优先读事件库（统一事件抓取中台，2026-08-12）：事件库有
+    当日数据时直接用事件库做 news_facts（读库优先），缺库才走原
+    telegraph/latest 直采。
+
+    字段映射（简报 Step 3）：source_id=EVENT_序号、kind=event_evidence、
+    provider=source、title、content=summary[:500]（空则 title）、url、
+    occurred_at=scrape_at（解析失败兜底 captured_at）、source_level 映射。
+    """
+    if not events:
+        _append_missing(missing_fields, "cls_news")
+        logger.warning("event_store_missing_empty", item_count=0)
+        return SourceCollectionStatus(
+            state="empty", provider="event_store", reason="provider_returned_no_items"
+        )
+    event_counter = 0
+    causal_ready_count = 0
+    for ev in events:
+        event_counter += 1
+        source_id = f"EVENT_{event_counter:03d}"
+        summary = ev["summary"]
+        url = _safe_optional_str(ev["url"])
+        occurred_at = _parse_news_datetime(ev["scrape_at"])
+        if occurred_at is None:
+            occurred_at = captured_at
+        sources[source_id] = SourceRecord(
+            source_id=source_id,
+            kind="event_evidence",
+            provider=_safe_str(ev["source"], "event_store"),
+            title=_safe_str(ev["title"], "无标题"),
+            content=summary[:500] if summary else _safe_str(ev["title"], "无标题"),
+            url=url,
+            occurred_at=occurred_at,
+            captured_at=captured_at,
+            source_level=_map_event_store_source_level(ev["source_level"]),
+        )
+        if url:
+            causal_ready_count += 1
+    logger.info(
+        "review_event_store_used",
+        item_count=event_counter,
+        causal_ready_count=causal_ready_count,
+    )
+    return SourceCollectionStatus(
+        state="available", provider="event_store", item_count=event_counter
+    )
+
+
 def _normalize_search_facts(
     tavily_result_1: dict[str, object],
     tavily_result_2: dict[str, object],
@@ -945,33 +1014,51 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # 财联社当日全量电报（优先），降级到最新快讯
     # 电报接口返回当日全量快讯（含 timestamp 字段），适合溯源；
     # 失败时降级到 latest（仅最近若干条，含 link 字段）。
+    # ── 统一事件抓取中台：证据源优先读事件库，缺库降级到直采（2026-08-12）──
+    # 事件库（report_type=event_scrape）有当日数据时，用事件库事实做
+    # news_facts（读库优先）；空/读失败（load_event_scrape 内部已吞异常返回
+    # []）时，完整回到原 telegraph/latest 直采（缺库降级，P0 功能保护）。
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    # 防御：load_event_scrape 内部已吞异常返回 []，此处再兜一层——
+    # 即使契约被违反（未预期异常），也降级到原直采，保证 P0 功能保护。
+    try:
+        event_store_events = await load_event_scrape(report_date)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("event_store_read_failed_fallback_to_direct", error_class=type(e).__name__)
+        event_store_events = []
     news_data = None
     news_fetch_error: Exception | None = None
     news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
-    try:
-        telegraph_data = await node_api.get(
-            f"/internal/news/telegraph?date={report_date}&limit=200"
-        )
-        if telegraph_data is not None:
-            news_data = telegraph_data
-            news_source_kind = "telegraph"
-            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="full")
-    except Exception as e:
-        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
-        news_fetch_error = e
-
-    # 降级：电报接口失败或返回 None 时回退到最新快讯
-    if news_data is None:
+    if event_store_events:
+        logger.info("review_event_store_used", count=len(event_store_events))
+        news_source_kind = "event_store"
+    else:
+        # 缺库降级：走原 telegraph/latest 直采
         try:
-            news_data = await node_api.get("/internal/news/latest")
-            news_source_kind = "latest"
-            # 电报失败但 latest 成功，清除电报阶段的错误标记，
-            # 避免 _normalize_news_facts 误判为 unavailable。
-            news_fetch_error = None
-            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+            telegraph_data = await node_api.get(
+                f"/internal/news/telegraph?date={report_date}&limit=200"
+            )
+            if telegraph_data is not None:
+                news_data = telegraph_data
+                news_source_kind = "telegraph"
+                _log_telegraph_response(telegraph_data, report_date, snapshot_kind="full")
         except Exception as e:
-            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
             news_fetch_error = e
+
+        # 降级：电报接口失败或返回 None 时回退到最新快讯
+        if news_data is None:
+            try:
+                news_data = await node_api.get("/internal/news/latest")
+                news_source_kind = "latest"
+                # 电报失败但 latest 成功，清除电报阶段的错误标记，
+                # 避免 _normalize_news_facts 误判为 unavailable。
+                news_fetch_error = None
+                logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+            except Exception as e:
+                logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+                news_fetch_error = e
 
     # 两组固定 Tavily 检索
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
@@ -1018,18 +1105,24 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         data_availability,
         is_quick=False,
     )
-    collection_status = {
-        "global_markets": _normalize_global_facts(
-            global_facts, sources, missing_fields, captured_at, global_fetch_error
-        ),
-        "cls_news": _normalize_news_facts(
+    if news_source_kind == "event_store":
+        cls_news_status = _normalize_event_store_facts(
+            event_store_events, sources, missing_fields, captured_at
+        )
+    else:
+        cls_news_status = _normalize_news_facts(
             news_data,
             sources,
             missing_fields,
             captured_at,
             news_fetch_error,
             source_kind=news_source_kind,
+        )
+    collection_status = {
+        "global_markets": _normalize_global_facts(
+            global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
+        "cls_news": cls_news_status,
     }
     collection_status.update(
         _normalize_search_facts(
@@ -1132,33 +1225,47 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         global_fetch_error = e
 
     # 财联社当日全量电报（优先），降级到最新快讯（与 full 版相同逻辑）
+    # ── 统一事件抓取中台：证据源优先读事件库，缺库降级到直采（2026-08-12）──
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    # 防御：同 full 版，load_event_scrape 意外抛异常也降级直采（P0 保护）。
+    try:
+        event_store_events = await load_event_scrape(report_date)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("event_store_read_failed_fallback_to_direct", error_class=type(e).__name__)
+        event_store_events = []
     news_data = None
     news_fetch_error: Exception | None = None
     news_source_kind: str = "telegraph"  # 标记数据来源，供归一化区分字段差异
-    try:
-        telegraph_data = await node_api.get(
-            f"/internal/news/telegraph?date={report_date}&limit=200"
-        )
-        if telegraph_data is not None:
-            news_data = telegraph_data
-            news_source_kind = "telegraph"
-            _log_telegraph_response(telegraph_data, report_date, snapshot_kind="quick")
-    except Exception as e:
-        logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
-        news_fetch_error = e
-
-    # 降级：电报接口失败或返回 None 时回退到最新快讯
-    if news_data is None:
+    if event_store_events:
+        logger.info("review_event_store_used", count=len(event_store_events))
+        news_source_kind = "event_store"
+    else:
+        # 缺库降级：走原 telegraph/latest 直采
         try:
-            news_data = await node_api.get("/internal/news/latest")
-            news_source_kind = "latest"
-            # 电报失败但 latest 成功，清除电报阶段的错误标记，
-            # 避免 _normalize_news_facts 误判为 unavailable。
-            news_fetch_error = None
-            logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+            telegraph_data = await node_api.get(
+                f"/internal/news/telegraph?date={report_date}&limit=200"
+            )
+            if telegraph_data is not None:
+                news_data = telegraph_data
+                news_source_kind = "telegraph"
+                _log_telegraph_response(telegraph_data, report_date, snapshot_kind="quick")
         except Exception as e:
-            logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+            logger.warning("cls_telegraph_fetch_failed", error_class=type(e).__name__)
             news_fetch_error = e
+
+        # 降级：电报接口失败或返回 None 时回退到最新快讯
+        if news_data is None:
+            try:
+                news_data = await node_api.get("/internal/news/latest")
+                news_source_kind = "latest"
+                # 电报失败但 latest 成功，清除电报阶段的错误标记，
+                # 避免 _normalize_news_facts 误判为 unavailable。
+                news_fetch_error = None
+                logger.info("cls_telegraph_fallback_to_latest", report_date=report_date)
+            except Exception as e:
+                logger.warning("cls_news_fetch_failed", error_class=type(e).__name__)
+                news_fetch_error = e
 
     tavily_query_1 = f"{report_date} 中国 资本市场 政策 产业 公告"
     tavily_query_2 = f"{report_date} 全球股市 利率 汇率 大宗商品 地缘风险"
@@ -1203,18 +1310,24 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         data_availability,
         is_quick=True,
     )
-    collection_status = {
-        "global_markets": _normalize_global_facts(
-            global_facts, sources, missing_fields, captured_at, global_fetch_error
-        ),
-        "cls_news": _normalize_news_facts(
+    if news_source_kind == "event_store":
+        cls_news_status = _normalize_event_store_facts(
+            event_store_events, sources, missing_fields, captured_at
+        )
+    else:
+        cls_news_status = _normalize_news_facts(
             news_data,
             sources,
             missing_fields,
             captured_at,
             news_fetch_error,
             source_kind=news_source_kind,
+        )
+    collection_status = {
+        "global_markets": _normalize_global_facts(
+            global_facts, sources, missing_fields, captured_at, global_fetch_error
         ),
+        "cls_news": cls_news_status,
     }
     collection_status.update(
         _normalize_search_facts(
