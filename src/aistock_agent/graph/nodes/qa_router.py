@@ -120,6 +120,34 @@ def _build_followup_context(last_deep_report: DeepReportRef | None) -> str:
     )
 
 
+def _build_user_profile_context(profile: dict | None) -> str:
+    """Phase 4-3（改进 15）：构造用户画像参考段（仅称呼/回答风格/优先级微调）。
+
+    只作 LLM 路由与回答风格的参考，不改变技能清单/闸门规则/JSON 输出契约；
+    profile 为 None 或无可用字段 → 返回 ""（prompt 字节不变，零行为变化）。
+    """
+    if not isinstance(profile, dict):
+        return ""
+    parts: list[str] = []
+    nickname = profile.get("nickname")
+    if isinstance(nickname, str) and nickname.strip():
+        parts.append(f"称呼：{nickname.strip()}")
+    prefs = profile.get("investment_preferences")
+    if isinstance(prefs, list):
+        clean = [str(p).strip() for p in prefs if isinstance(p, str) and p.strip()]
+        if clean:
+            parts.append("用户投资偏好：" + "、".join(clean))
+    risk = profile.get("risk_tolerance")
+    if risk in ("conservative", "balanced", "aggressive"):
+        parts.append(f"风险偏好：{risk}")
+    if not parts:
+        return ""
+    return (
+        "\n\n用户画像参考（仅作称呼/回答风格/优先级微调，"
+        + "不改变上述技能与闸门规则）：" + "；".join(parts) + "。"
+    )
+
+
 class QARouterOutput(BaseModel):
     """QA Router LLM 输出契约。"""
 
@@ -1567,7 +1595,10 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         structured_llm = with_chat_structured_output(llm, QARouterOutput)
         # D14：注入 last_deep_report 摘要（节点内拼接，SYSTEM_PROMPT 常量不变）
         followup_context = _build_followup_context(state.get("last_deep_report"))
-        prompt = SYSTEM_PROMPT + followup_context + gate4_context
+        # Phase 4-3（改进 15）：注入 user_profile 参考段（profile 为 None 时返回 ""，
+        # prompt 字节不变；仅回答风格微调，不改技能/闸门规则）
+        profile_context = _build_user_profile_context(state.get("user_profile"))
+        prompt = SYSTEM_PROMPT + followup_context + gate4_context + profile_context
         # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
         llm_messages = [HumanMessage(content=prompt)] + list(messages)
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)

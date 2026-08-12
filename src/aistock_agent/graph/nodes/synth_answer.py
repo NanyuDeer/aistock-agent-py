@@ -19,6 +19,7 @@ from aistock_agent.prompts.general.system import (
     ACTION_KEYWORDS,
     PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
+    RISK_DISCLAIMER_CONSERVATIVE,
     RISK_DISCLAIMER_STRONG,
 )
 from aistock_agent.schemas.chat_contract import (
@@ -195,7 +196,14 @@ async def _synth_multi_goal(
     start = time.monotonic()
     metrics = get_metrics_collector()
 
-    non_predict = [g for g in goals if g.dimension != "predict"]
+    # Phase 4-3（改进 15）：从 user_profile 提取个性化参数（None/缺字段 → 零行为变化）
+    _profile = state.get("user_profile") or {}
+    risk_tolerance = _profile.get("risk_tolerance")
+    investment_preferences = _profile.get("investment_preferences")
+
+    non_predict = _sort_goals_by_preferences(
+        [g for g in goals if g.dimension != "predict"], investment_preferences
+    )
     predict = [g for g in goals if g.dimension == "predict"]
     sections: list[str] = []
     basis: list[Evidence] = []
@@ -222,8 +230,12 @@ async def _synth_multi_goal(
         )
         any_degraded = True
     combined = "\n\n".join(sections)
-    # D28：风险段全文单次（去重）
-    combined = _append_risk_disclaimer(combined, strong=_contains_action_word(goal.question))
+    # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
+    combined = _append_risk_disclaimer(
+        combined,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
+    )
     # 非交易时段提示：按全量 evidence 判断一次、置于文首
     combined = _append_non_trading_time_hint(combined, evidences)
 
@@ -485,7 +497,11 @@ def _append_non_trading_day_hint(conclusion: str, evidences: list[Evidence]) -> 
 
 
 def _build_degraded_insight(
-    goal: InsightGoal, evidences: list[Evidence], mode: str, reason: str
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    reason: str,
+    risk_tolerance: str | None = None,
 ) -> Insight:
     """解析失败兜底：降级 validate + 结构化拼接 Evidence.facts + confidence=low。
     conclusion 按"核心结论/行情要点/数据说明"分节，即使降级也给出可用事实，
@@ -512,8 +528,11 @@ def _build_degraded_insight(
             "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
+    # Phase 4-3：conservative 档优先级高于 strong（risk_tolerance 由调用方传入）
     conclusion = _append_risk_disclaimer(
-        conclusion, strong=_contains_action_word(goal.question)
+        conclusion,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
     )
     # 非交易时段统一提示（2026-08-03 规范扩展）：5 种时段状态 + 行情类降级时提示
     conclusion = _append_non_trading_time_hint(conclusion, evidences)
@@ -531,19 +550,50 @@ def _contains_action_word(text: str) -> bool:
     return any(kw in text for kw in ACTION_KEYWORDS)
 
 
-def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
+def _append_risk_disclaimer(
+    conclusion: str, *, strong: bool = False, risk_tolerance: str | None = None
+) -> str:
     """在 conclusion 末尾强制追加风险段（去重：已含则跳过，纯字符串拼接）。
 
     D28：风险提示不依赖 LLM 自由裁量，由代码保证结论必含风险段。
     strong=True 时用强提示（用户问题含动作词，如"能买吗"）。
+    Phase 4-3（改进 15）：risk_tolerance=conservative 时用保守档强化提示
+    （优先级高于 strong 档；无 profile 时维持既有两档行为，字节不变）。
     """
-    disclaimer = RISK_DISCLAIMER_STRONG if strong else RISK_DISCLAIMER
-    if disclaimer in conclusion:
-        return conclusion
-    # 已含另一档风险段时不重复叠加
-    if RISK_DISCLAIMER_STRONG in conclusion or RISK_DISCLAIMER in conclusion:
+    if risk_tolerance == "conservative":
+        disclaimer = RISK_DISCLAIMER_CONSERVATIVE
+    elif strong:
+        disclaimer = RISK_DISCLAIMER_STRONG
+    else:
+        disclaimer = RISK_DISCLAIMER
+    # 已含任一档风险段时不重复叠加（三档互斥去重）
+    if any(
+        d in conclusion
+        for d in (RISK_DISCLAIMER, RISK_DISCLAIMER_STRONG, RISK_DISCLAIMER_CONSERVATIVE)
+    ):
         return conclusion
     return f"{conclusion}\n\n{disclaimer}"
+
+
+def _sort_goals_by_preferences(
+    goals: list[SubGoal], preferences: list[str] | None
+) -> list[SubGoal]:
+    """Phase 4-3（改进 15）：多子目标按用户投资偏好重排（偏好命中前置）。
+
+    - 偏好命中判定：偏好词是子目标 question 的子串；
+    - 稳定排序：未命中子目标保持原相对顺序，全部未命中 → 原序（字节不变）；
+    - 仅调整渲染顺序，不改变 evidence 的 goal_id 关联（证据约束不变）。
+    """
+    prefs = [p for p in (preferences or []) if isinstance(p, str) and p.strip()]
+    if not prefs:
+        return goals
+
+    def rank(g: SubGoal) -> int:
+        question = g.question or ""
+        hits = [i for i, p in enumerate(prefs) if p in question]
+        return -hits[0] if hits else len(prefs)
+
+    return sorted(goals, key=rank)
 
 
 # P11（线 3）：cards 汇总（spec §3.2）。按 skill_name 分派，逐卡片 try-except，
@@ -730,6 +780,8 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     metrics = get_metrics_collector()
     goal: InsightGoal | None = state.get("goal")
     evidences: list[Evidence] = state.get("evidences", [])
+    # Phase 4-3（改进 15）：user_profile 个性化参数（None/缺字段 → 零行为变化）
+    risk_tolerance = (state.get("user_profile") or {}).get("risk_tolerance")
 
     # Phase 4-2（改进 13）：confirm 短路——qa_router 触发交互式确认时，不渲染、
     # 不调 LLM，直接把 confirm 负载透出（ws.py 据此转 confirm_request 终态负载）。
@@ -748,6 +800,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
                 evidences,
                 "validate",
                 "missing goal",
+                risk_tolerance,
             ),
             "final_response": "内部错误：缺少目标",
             "trace": None,
@@ -814,9 +867,12 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
         final_response = state.get("final_response", "")
         if not final_response:
             final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
-        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示）
+        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示；
+        # Phase 4-3：conservative 档优先）
         processed = _append_risk_disclaimer(
-            final_response, strong=_contains_action_word(goal.question)
+            final_response,
+            strong=_contains_action_word(goal.question),
+            risk_tolerance=risk_tolerance,
         )
         # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
         report_id = await _persist_chat_analysis(
@@ -893,10 +949,13 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
                 expected=mode,
                 actual=raw.answer_mode,
             )
-        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量）
+        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量；
+        # Phase 4-3：conservative 档优先于 strong）
         insight = Insight(
             conclusion=_append_risk_disclaimer(
-                raw.conclusion, strong=_contains_action_word(goal.question)
+                raw.conclusion,
+                strong=_contains_action_word(goal.question),
+                risk_tolerance=risk_tolerance,
             ),
             basis=basis,
             confidence=raw.confidence,
@@ -931,7 +990,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
 
     except Exception as exc:
         logger.warning("synth_answer.failed", err=str(exc), exc_info=True)
-        insight = _build_degraded_insight(goal, evidences, mode, str(exc))
+        insight = _build_degraded_insight(goal, evidences, mode, str(exc), risk_tolerance)
         trace = AnswerTrace(
             goal=goal,
             plan=state.get("plan", "direct"),
