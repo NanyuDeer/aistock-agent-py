@@ -7,6 +7,7 @@ from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSna
 from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     render_prediction_markdown,
+    run_chat_prediction,
     run_predict,
 )
 
@@ -163,3 +164,75 @@ def test_render_prediction_markdown_uses_evolution_steps_when_present():
     assert "短线：情绪宣泄后弱势震荡" in md
     assert "中线：市场转向关注财政补贴实际到账" in md
     assert "- 演化路径：短线情绪宣泄后" not in md
+
+
+# ---------- run_chat_prediction（Phase 4-1 对话内预测，无溯源入口） ----------
+
+
+def _make_chat_snapshot(**overrides: object) -> dict:
+    """对话内预测输入快照（quote/flow 对齐 stock_snapshot/capital_flow raw 结构）。"""
+    snapshot = {
+        "symbol": "600519",
+        "trade_date": "2026-08-10",
+        "quote": {"name": "贵州茅台", "price": 1500.0, "change_pct": 2.5},
+        "flow": {"main_in": 120000000.0, "main_out": 80000000.0, "net_amount": 40000000.0},
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "snapshot_kwargs",
+    [
+        {"quote": {}},
+        {"quote": None},
+        {"flow": {}},
+        {"flow": None},
+        {"trade_date": ""},
+        {"trade_date": "not-a-date"},
+    ],
+)
+async def test_run_chat_prediction_gate_returns_none_on_missing_key_fields(snapshot_kwargs):
+    """门禁：快照缺行情/资金关键字段（quote/flow 非空、trade_date 可解析）→ None 不调 LLM。"""
+    llm = AsyncMock()
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(_make_chat_snapshot(**snapshot_kwargs), [], {})
+    assert result is None
+    llm.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_forces_hypothesis_status():
+    """后处理强制 hypothesis：LLM 输出 confirmed 也降为 hypothesis（无溯源链不得 confirmed）。"""
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)  # prediction_status=confirmed
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(_make_chat_snapshot(), [], {})
+    assert result is not None
+    assert result.prediction_status == "hypothesis"
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_filters_evidence_ids_to_input_items():
+    """evidence_ids 只取输入快照/新闻存在项：编造 id 被过滤，不抛错（run_predict 是 raise）。"""
+    chat_json = _VALID_LLM_JSON.replace(
+        '"m1"', '"quote:600519", "flow:600519", "news:1", "made-up-id"'
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=chat_json)
+    news = [{"evidence_id": "news:1", "title": "贵州茅台提价公告"}]
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(_make_chat_snapshot(), news, {})
+    assert result is not None
+    assert result.evidence_ids == ["quote:600519", "flow:600519", "news:1"]
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_falls_back_on_llm_error():
+    """LLM 失败 → None（'永不 500'铁律，与 run_predict 一致）。"""
+    llm = AsyncMock()
+    llm.ainvoke.side_effect = RuntimeError("llm down")
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_chat_prediction(_make_chat_snapshot(), [], {})
+    assert result is None

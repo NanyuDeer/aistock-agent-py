@@ -13,7 +13,10 @@ from datetime import date
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from aistock_agent.prompts.workers.prediction import PREDICTION_PROMPT
+from aistock_agent.prompts.workers.prediction import (
+    PREDICTION_CHAT_PROMPT,
+    PREDICTION_PROMPT,
+)
 from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSnapshot
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.llm import get_deep_think
@@ -141,6 +144,126 @@ async def run_predict(
         return PredictionRunResult(prediction=prediction, due_dates=due_dates)
     except Exception as exc:
         logger.warning("prediction_run_failed", error=str(exc), exc_info=True)
+        return None
+
+
+def _gate_chat_snapshot(snapshot: dict) -> str | None:
+    """对话内预测门禁：缺行情/资金关键字段返回原因（None = 通过）。
+
+    - quote/flow 必须为非空 dict（行情/资金关键字段缺失 → synth 走既有 D35 降级提示）；
+    - trade_date 必须可解析（到期日确定性计算的基准日）。
+    """
+    quote = snapshot.get("quote")
+    if not isinstance(quote, dict) or not quote:
+        return "missing quote"
+    flow = snapshot.get("flow")
+    if not isinstance(flow, dict) or not flow:
+        return "missing flow"
+    trade_date = snapshot.get("trade_date")
+    if not isinstance(trade_date, str):
+        return "missing trade_date"
+    try:
+        date.fromisoformat(trade_date)
+    except ValueError:
+        return "invalid trade_date"
+    return None
+
+
+def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str, list[str | None]]:
+    """现状快照各输入项的 evidence_id（LLM 输入与后处理过滤共用同一套 id）。
+
+    - quote/flow：优先取快照自带 quote_evidence_id/flow_evidence_id，缺省
+      "quote:{symbol}" / "flow:{symbol}"（确定性）；
+    - news：逐项取 evidence_id/id/source_id 首个非空字符串，无 id 项为 None
+      （不可被预测引用，LLM 输入中也不携带 evidence_id）。
+    """
+    symbol = str(snapshot.get("symbol", ""))
+    quote_id = snapshot.get("quote_evidence_id") or f"quote:{symbol}"
+    flow_id = snapshot.get("flow_evidence_id") or f"flow:{symbol}"
+    news_ids: list[str | None] = []
+    for item in news:
+        nid = item.get("evidence_id") or item.get("id") or item.get("source_id")
+        news_ids.append(nid if isinstance(nid, str) and nid else None)
+    return quote_id, flow_id, news_ids
+
+
+def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
+    """输入快照/新闻中实际存在项的 evidence_id 集合（预测只能引用这些）。"""
+    quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
+    return {quote_id, flow_id} | {nid for nid in news_ids if nid is not None}
+
+
+def _build_chat_prediction_input(
+    snapshot: dict, news: list[dict], context: dict
+) -> dict[str, object]:
+    """现状快照驱动的 LLM 输入包（行情/资金/新闻 + 上下文，无溯源因果链）。"""
+    quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
+    news_blocks: list[dict[str, object]] = []
+    for item, nid in zip(news, news_ids):
+        block = dict(item)
+        if nid is not None:
+            block["evidence_id"] = nid
+        news_blocks.append(block)
+    return {
+        "input_mode": "snapshot_driven",
+        "symbol": snapshot.get("symbol", ""),
+        "trade_date": snapshot.get("trade_date"),
+        "context": context,
+        "quote": {"evidence_id": quote_id, "data": snapshot.get("quote")},
+        "capital_flow": {"evidence_id": flow_id, "data": snapshot.get("flow")},
+        "news": news_blocks,
+    }
+
+
+async def run_chat_prediction(
+    snapshot: dict, news: list[dict], context: dict
+) -> PredictionResult | None:
+    """无溯源链的现状快照驱动预测入口（CHAT QA 对话内预测专用，Phase 4-1）。
+
+    输入契约（Task 2+ 由 skill_executor 汇总 Evidence.raw 构造）：
+    - snapshot：{"symbol", "trade_date", "quote"?, "flow"?,
+      "quote_evidence_id"?, "flow_evidence_id"?}——quote/flow 分别对齐
+      stock_snapshot raw.quote / capital_flow raw.flow 结构；
+    - news：list[dict]，每项可选 evidence_id/id/source_id（无 id 项不可被引用）；
+    - context：用户问题上下文（question/time_range 等），透传 LLM 参考。
+
+    门禁：快照缺行情/资金关键字段（quote/flow 非空 dict、trade_date 可解析）→
+    返回 None，由 synth_answer 走既有 D35 降级提示。后处理：
+    - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
+    - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
+    - 到期日由 _compute_due_dates 确定性计算（LLM 不输出日期，与 run_predict 同源）。
+    任一失败返回 None（"永不 500"铁律）。不产生交易指令。
+    """
+    gate_reason = _gate_chat_snapshot(snapshot)
+    if gate_reason is not None:
+        logger.info("chat_prediction.gate_skip", reason=gate_reason)
+        return None
+    try:
+        prompt_input = _build_chat_prediction_input(snapshot, news, context)
+        llm = get_deep_think()
+        messages = [
+            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+        ]
+        ai_message = await llm.ainvoke(messages)
+        raw_text = (
+            ai_message.content
+            if isinstance(ai_message.content, str)
+            else str(ai_message.content)
+        )
+        prediction = PredictionResult.model_validate_json(_strip_code_fences(raw_text))
+        allowed = _collect_chat_evidence_ids(snapshot, news)
+        prediction = prediction.model_copy(
+            update={
+                "prediction_status": "hypothesis",
+                "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
+            }
+        )
+        # 到期日确定性计算：校验 trade_date 与 horizon 档位映射（异常 → 降级 None）
+        _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        return prediction
+    except Exception as exc:
+        logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)
         return None
 
 
