@@ -1,5 +1,16 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 Phase 4-1 对话内预测打通（8 commits c4b1030..d29597d，changer 未 push）
+- 产品边界（2026-08-11 用户拍板）：影响持续性推演非点位预测 / 固定免责声明+低置信提示 / v1 不落库
+- 契约：`chat_contract.py` 三处 Literal 追加 "prediction"；`PredictionResult` 复用（extra="forbid"）
+- `prediction_service.py` 新增无溯源入口 `run_chat_prediction(snapshot, news, context)`：门禁 quote 必填/flow 可选（指数无资金流属"不适用"）；后处理强制 hypothesis + evidence_ids 过滤；到期日 best-effort（2027 超日历范围不阻断，v1 不落库无消费方）；**quick_think 单次调用（spec §3.4 P10 计费口径，deep_think 26-47s UX 不可接受）+ `with_chat_structured_output` json_mode（DeepSeek thinking 兼容）**
+- `skills/prediction.py`：并发 ainvoke get_quote/get_capital_flow 组快照（指数走 `/internal/index/quotes`，仅由显式 index_name 触发防 000001 平安银行误判）；三段式 facts + 免责声明 + low 置信提示；降级复用 PREDICT_DEGRADED_HINT；registry 末尾注册
+- `qa_router.py`：intent_map 加 prediction 键；`_build_default_skill_call` prediction 分支（无标的不硬塞）；**C2 闸门 1/2 短路主入口追加 prediction SkillCall（goal_id="g2"）**（"茅台会涨吗/上证后市如何"三段式可达）；**E1 `_build_gate4_context` 去掉"不指定预测 skill"压制文案**
+- `synth_answer.py`：`_build_predict_section` 重写——prediction Evidence（skill_name 定位，fallback goal_id="g2"）非 degraded → 三段式渲染（现状趋势[validate] + 影响持续性[三档/置信/风险] + 免责声明恰好一次）；degraded/缺失 → D35 降级字节不变；多 predict 子目标 hint 只一次
+- `prompts/workers/prediction.py`：新增 PREDICTION_CHAT_PROMPT（现状快照驱动 5 段思维链；required 字段含 schema_version:"1.0"——冒烟实测缺该字段恒降级）
+- 验证：全量 A/B HEAD 28 failed ⊆ BASE 28 failed（新增清零，1776→1807 passed）；ruff 改动文件 0 新增；WS 冒烟 4/4（个股/指数三段式 + 科普防误伤 + 非预测不变）；spec 验收 1-5 全满足
+- 辩论裁决回写：C2（闸门 1/2 主入口 prediction SkillCall）/ E1（gate4 去压制）均已落地并有 WS 实证
+
 ## 2026-08-11 迭代 Agent 架构实现
 - 新增 `src/aistock_agent/iterate/`：adapters/case_builder/ground_truth/replay_layer/replay_runner/evaluator/variant_engine/run_case/reporter/scheduler
 - `config.py` 新增 iterate_* 配置（默认关闭）；`.gitignore` 追加 data/ 数据目录

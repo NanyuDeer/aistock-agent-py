@@ -244,6 +244,17 @@ START → supervisor(quick_think, 意图路由)
 - **验证**：test_ws_chat_replacement.py 新增 `_RecvTrackingWebSocket`（模拟 uvicorn 并发 recv 防护）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done` 回归（断言返回时无挂起 recv、主循环可安全发起下次 receive）。
 - **经验教训**：`task.cancel()` 仅请求取消，不同步 await 收尾则底层 I/O（uvicorn 同连接 recv 并发防护）未释放；凡"取消后立即继续用同一 I/O 对象"必须 `await asyncio.gather(task, return_exceptions=True)`（同条已记 project_memory 45）。
 
+### CHAT QA Phase 4-1 对话内预测打通（2026-08-12）：三段式"影响持续性推演"
+
+- **产品边界（用户拍板 2026-08-11）**：影响持续性推演**非点位预测**；固定免责声明 + 低置信度提示；v1 不落库（对话预测量大标的杂、对照数据源仅指数可用，落库 ROI 低；`prediction_records` 表语义绑定溯源报告 source_type/source_id 不污染）
+- **无溯源入口**：`prediction_service.run_chat_prediction(snapshot, news, context) -> PredictionResult | None`——门禁 quote 必填非空 dict + trade_date 可解析，**flow 可选**（指数无个股资金流属"不适用"非"缺失"）；后处理强制 `prediction_status="hypothesis"`（无溯源链不得 confirmed）+ `evidence_ids` 只保留输入快照/新闻存在项（过滤而非 raise，区别于 run_predict）；**到期日 best-effort**（`add_trading_days` 日历仅覆盖至当前年份，2027+ long 档超范围时仅 warning 跳过不阻断——v1 不落库、返回值无消费方）；**LLM = `get_quick_think()` + `with_chat_structured_output(PredictionResult)`（json_mode）**——spec §3.4 P10 计费口径对齐 skill_executor 其它 skill（deep_think 26-47s/次 UX 不可接受）；prompt 必含 `schema_version:"1.0"` 指令（冒烟实测缺该字段恒降级）
+- **prediction skill**：并发 `get_quote`/`get_capital_flow` 组快照；**指数路径仅由显式 `index_name` 触发**（走 `/internal/index/quotes`，禁靠代码判定——000001 同时是上证指数与平安银行）；三段式 facts（现状 + 影响持续性推演[假设推演标注/三档/置信/风险/演化] + `DISCLAIMER="以上为模型推演，仅供参考，不构成投资建议。"`，low 置信追加"市场变化快，该判断不确定性较高。"）；降级复用 `PREDICT_DEGRADED_HINT`
+- **qa_router 路由（C2/E1 裁决回写）**：`intent_map` 加 prediction 键；`_build_default_skill_call` prediction 分支（`_extract_stock_symbol` 无标的不硬塞返回 None）；**闸门 1/2 短路主入口（"茅台会涨吗"/"上证后市如何"）追加 prediction SkillCall（goal_id="g2"，validate call 保持 g1）**——三段式可达的关键；`_build_gate4_context` predict 分支去掉"不指定预测 skill"压制文案（E1）；非快照指数（恒指等无 index_code）不塞 prediction 维持 D35
+- **synth_answer 渲染**：`_build_predict_section` 重写——prediction Evidence 定位（primary `skill_name=="prediction"`，fallback `goal_id=="g2"`，**不按 sg.id**：predict 子目标 id="g1"、prediction Evidence goal_id="g2"）；非 degraded → 三段式（现状趋势[validate g1 facts] + 影响持续性[跳过 facts 首行"【…现状】"防重复] + 免责声明恰好一次[skill facts 已含，过滤去重]）；degraded/缺失 → D35 降级字节不变；多 predict 子目标 hint 只输出一次
+- **验证**：全量 A/B HEAD 28 failed ⊆ BASE 28 failed（新增清零）；ruff 改动文件 0 新增；**WS 冒烟 4/4**——"茅台会涨吗"（gate2）/ "上证后市如何"（gate1，C2 验证点）三段式 + 免责声明 + 假设推演标注 / "市盈率是什么"科普防误伤 / "今日大盘怎么样"非预测不变；spec 验收 1-5 全满足
+- **教训（新增）**：① json_mode 结构化输出缺 required 字段时 pydantic 校验失败 → 降级——prompt required 字段清单必须与 Pydantic 契约逐字对齐（schema_version 案例）；② 无消费方的"校验副作用"（到期日）不应因超日历范围阻断主结果——best-effort + warning；③ 指数语义防误判只能靠显式上下文（index_name）不能靠代码集合（000001 双义）；④ WS 冒烟是唯一能发现"LLM 输出缺字段恒降级"与"到期日跨年崩溃"的验证手段——单测只锁语义不锁真实 LLM 输出
+- 提交：c4b1030..d29597d（8 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
