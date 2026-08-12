@@ -51,4 +51,16 @@
 ## 2026-08-12 CHAT QA Phase 3 快赢补丁（T1 859b91c + T2 1d31a47 + docs 验证记录）
 - 用例 7（T1 859b91c）：`qa_router._STOCK_NAME_STOPWORDS` 补「深度」——"深度分析贵州茅台" 候选名从"深度贵州茅台"（resolve 404 → 误澄清）修正为"贵州茅台"（resolve 命中）
 - 问题 17（T2 1d31a47）：`get_quick_think(*, observe=True)` 新增 observe 参数；`_reasoning.py::stream_reasoning` 以 `observe=False` 调用（不挂计费 callbacks）→ reasoning 旁路 token 不进用户账单；主链路默认 True 零破坏
-- 验证记录（T3 docs commit）：全量 A/B 回归（BASE 28 failed/1772 passed vs HEAD 28 failed/1775 passed，失败集逐项一致，**新增失败清零**）+ ruff 6 改动文件 0 新增 + 定向 135 passed；待部署验证（生产 WS 冒烟：用例 7 不再澄清 + 计费口径 total_tokens 仅主链路 2 次调用之和）
+- 验证记录（T3 docs commit）：全量 A/B 回归（BASE 28 failed/1772 passed vs HEAD 28 failed/1775 passed，失败集逐项一致，**新增失败清零**）+ ruff 6 改动文件 0 新增 + 定向 135 passed
+
+## 2026-08-12 CHAT QA Phase 3 生产部署验证（PR #65 → main 2e2bd34，git pull + pm2 restart）
+- 用例 7「深度分析贵州茅台」→ resolve 命中（贵州茅台/600519）→ 真实行情回答 + stock_snapshot card，**不再澄清**；确定性预期实证：走闸门 2 短路固定 light（last_deep_report=null），force_deep 对短路路径无效 = 预期结果（移交 roadmap force_deep ⏸️ 待评估）
+- 问题 17 计费实证：短路轮「你好」（137 reasoning 事件）/「我能买茅台吗」（153 reasoning 事件）reasoning 旁路实际运行但 `DONE.token_usage=null`（修复前必非零）→ reasoning 不计费；内容轮 token_usage 与主链路一致（9 行 chat_token_usage 落库 = usage summary API total 41076/turn_count 9 = DONE 之和）
+- 护栏 4 问句回归 + P11 5 类 cards（stock_snapshot/market_snapshot/capital_flow/comparison/deep，deep report_id=282 落库）+ P9 多轮上下文隔离（"它"→600519 指代命中）全通过
+- **新发现缺陷（待立项，非 Phase 3 回归）**：问题 18——Phase 2（PR #64）`_forward_until_done_or_cmd` recv_task.cancel() 未 await → done 后 WS 连接 1005 崩溃（9 轮全部实证）
+
+## 2026-08-12 问题 18 WS recv 竞态修复（Phase 2 回归补丁）
+- 根因：_forward_until_done_or_cmd（ws.py#L291-292）recv_task.cancel() 后未 await 收尾即 return，主循环随即 receive_json() → uvicorn RuntimeError "cannot call recv while another coroutine is already waiting" → 每轮 done 后 WS 连接崩溃（closeCode=1005，Phase 3 生产冒烟 9 轮全部实证）
+- 修复：cancel 后 await asyncio.gather(recv_task, return_exceptions=True) 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动
+- 测试：test_ws_chat_replacement.py 新增 _RecvTrackingWebSocket（模拟 uvicorn 并发 recv 防护）+ test_forward_until_done_or_cmd_clears_pending_recv_on_done（返回时无挂起 recv / 主循环可安全发起下次 receive / 不抛 RuntimeError）
+- 改动文件：src/aistock_agent/api/ws.py + tests/unit/test_ws_chat_replacement.py

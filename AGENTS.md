@@ -237,6 +237,13 @@ START → supervisor(quick_think, 意图路由)
 - **问题 17**：`get_quick_think(*, observe: bool = True)`（services/llm.py，observe=False 不挂计费 callbacks）；`graph/nodes/_reasoning.py::stream_reasoning` 改用 `observe=False` → reasoning 旁路 token 不进用户 contextvar 账单；主链路默认 True 零破坏；T2 1d31a47。
 - **验证**：全量 A/B 新增失败清零 + ruff 改动文件 0（2026-08-12，待部署验证，见 changelog）。
 
+### CHAT QA 问题 18 WS recv 竞态修复（2026-08-12）：done 后连接崩溃
+
+- **根因**：`_forward_until_done_or_cmd`（ws.py#L291-292）中 `recv_task.cancel()` 后未 await 收尾即 return，主循环随即 `websocket.receive_json()` → uvicorn `RuntimeError: cannot call recv while another coroutine is already waiting` → 每轮 done 后 WS 连接崩溃（closeCode=1005）；Phase 2（PR #64 断点续传）引入，Phase 3 生产冒烟 9 轮全部实证。
+- **修复**：cancel 后 `await asyncio.gather(recv_task, return_exceptions=True)` 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动。
+- **验证**：test_ws_chat_replacement.py 新增 `_RecvTrackingWebSocket`（模拟 uvicorn 并发 recv 防护）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done` 回归（断言返回时无挂起 recv、主循环可安全发起下次 receive）。
+- **经验教训**：`task.cancel()` 仅请求取消，不同步 await 收尾则底层 I/O（uvicorn 同连接 recv 并发防护）未释放；凡"取消后立即继续用同一 I/O 对象"必须 `await asyncio.gather(task, return_exceptions=True)`（同条已记 project_memory 45）。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
