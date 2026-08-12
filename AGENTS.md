@@ -231,6 +231,12 @@ START → supervisor(quick_think, 意图路由)
 - **转发/接收并行**：`_forward_until_done_or_cmd` 用 `asyncio.wait(FIRST_COMPLETED)` 竞速转发协程与接收协程——生成中收到 stop 即时 cancel（Task 3 的阻塞 `await _forward` 期间收不到控制消息，stop 必须依赖此结构）；live 转发传 `replay=True`（plan Task 9 文本一处 replay=False 以此修正为准——新轮起点 events 为空，回放语义与 live 无差异）。
 - **归属校验**：`_owns_run(state, data_user_id)`（resume/stop 共用）——双方 user_id 非空必须相等，任一 None 放行，None state 放行走 none/not_found；越权 → error "无权访问该会话" + WARN（绝不静默）。P0 后 `data.user_id` 为服务端注入可信值。
 
+### CHAT QA Phase 3 快赢补丁（2026-08-12）：用例 7 停用词 + 问题 17 reasoning 不计费
+
+- **用例 7**：`_STOCK_NAME_STOPWORDS` 补「深度」——「深度分析贵州茅台」→ 候选名"贵州茅台"（此前"深度贵州茅台" resolve 404 误澄清）；T1 859b91c。
+- **问题 17**：`get_quick_think(*, observe: bool = True)`（services/llm.py，observe=False 不挂计费 callbacks）；`graph/nodes/_reasoning.py::stream_reasoning` 改用 `observe=False` → reasoning 旁路 token 不进用户 contextvar 账单；主链路默认 True 零破坏；T2 1d31a47。
+- **验证**：全量 A/B 新增失败清零 + ruff 改动文件 0（2026-08-12，待部署验证，见 changelog）。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。

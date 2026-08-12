@@ -47,3 +47,8 @@
 - M6：`_cluster_events` 簇 T 为空时跳过（避免 fromisoformat("") 崩溃）
 - 测试：case_scanner 4、gt_validator 7、ground_truth 4、集成 2、全量 iterate 20 passed 全绿
 - I1 已知限制：`scripts/build_iterate_cases.py` 按 `--agent` if/else 硬编码 review/event_analyst 流程，未消费 `adapter.data_deps` 声明（final review 裁决本期不做通用化）；接入第三个 agent 时需抽「按 data_deps 采集 → build_case → 生成 GT → 校验」通用流水线
+
+## 2026-08-12 CHAT QA Phase 3 快赢补丁（T1 859b91c + T2 1d31a47 + docs 验证记录）
+- 用例 7（T1 859b91c）：`qa_router._STOCK_NAME_STOPWORDS` 补「深度」——"深度分析贵州茅台" 候选名从"深度贵州茅台"（resolve 404 → 误澄清）修正为"贵州茅台"（resolve 命中）
+- 问题 17（T2 1d31a47）：`get_quick_think(*, observe=True)` 新增 observe 参数；`_reasoning.py::stream_reasoning` 以 `observe=False` 调用（不挂计费 callbacks）→ reasoning 旁路 token 不进用户账单；主链路默认 True 零破坏
+- 验证记录（T3 docs commit）：全量 A/B 回归（BASE 28 failed/1772 passed vs HEAD 28 failed/1775 passed，失败集逐项一致，**新增失败清零**）+ ruff 6 改动文件 0 新增 + 定向 135 passed；待部署验证（生产 WS 冒烟：用例 7 不再澄清 + 计费口径 total_tokens 仅主链路 2 次调用之和）
