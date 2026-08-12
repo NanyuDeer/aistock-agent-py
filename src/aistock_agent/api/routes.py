@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncGenerator
 from datetime import date
@@ -25,6 +26,7 @@ from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.graph.nodes.qa_router import _STOCK_SYMBOL_CLARIFICATION
+from aistock_agent.memory.checkpointer import delete_thread
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 from aistock_agent.schemas.qa_api import QARequest
@@ -61,6 +63,10 @@ health_router = APIRouter(tags=["health"])
 _health_logger = structlog.get_logger()
 _metrics = _get_metrics_collector()
 _qa_logger = structlog.get_logger()
+
+# session_id 格式与 app-api SESSION_ID_RE 对齐：仅字母/数字/_/-，长度 1-64
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_chat_logger = structlog.get_logger()
 
 
 def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
@@ -340,6 +346,39 @@ async def chat_stream_updates(
             yield {"data": json.dumps(sse_event, ensure_ascii=False)}
 
     return EventSourceResponse(generator())
+
+
+# ── 会话 thread 管理（Phase 5：删会话联动删 checkpointer thread） ──
+
+
+@router.delete("/internal/chat/threads/{session_id}")
+async def delete_chat_thread(
+    session_id: str,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """删除 chat checkpointer thread（幂等；Phase 5 删会话联动删历史）。
+
+    app-api 在删除 chat_sessions 元数据成功后调用本端点，清理 sqlite
+    .langgraph.db 中按 thread_id（= session_id）存储的多轮检查点，避免
+    thread 成为孤儿、以及 session_id 复用导致的历史串扰。
+    - 鉴权：X-Internal-Token 缺失/不匹配 → 403；
+    - session_id 非法（非 [A-Za-z0-9_-]{1,64}）→ 400；
+    - thread 不存在 → 仍返回 200（幂等）；
+    - delete_thread 意外异常 → 500（"永不 500" 由 app-api 调用侧保证）。
+    """
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(
+            status_code=400,
+            detail="session_id 仅支持字母/数字/_/-，长度 1-64",
+        )
+    try:
+        delete_thread(session_id)
+    except Exception as exc:
+        _chat_logger.warning(
+            "delete_chat_thread_failed", session_id=session_id, error=str(exc)
+        )
+        raise HTTPException(status_code=500, detail="chat thread delete failed") from exc
+    return {"success": True, "message": "chat thread deleted"}
 
 
 @router.get("/briefing/morning")

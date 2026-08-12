@@ -189,3 +189,39 @@ def get_checkpointer() -> BaseCheckpointSaver[str]:
         logger.info("checkpointer_initialized", backend="memory")
 
     return _checkpointer
+
+
+def delete_thread(thread_id: str) -> None:
+    """删除指定 thread 的全部 checkpoint/writes（幂等；Phase 5 删会话联动）。
+
+    三个后端在 langgraph-checkpoint 2.1.2 下均确认有 ``adelete_thread``：
+    - sqlite（AsyncSqliteSaver）：DELETE FROM checkpoints/writes WHERE thread_id，
+      对不存在 thread 幂等不抛错；
+    - memory（MemorySaver）：storage/writes/blobs 字典按 thread_id 清除，幂等；
+    - redis（RedisSaver）：键按 thread 前缀清理，best-effort——异常吞掉 warning
+      （生产未用，见 get_checkpointer redis 分支）。
+
+    sqlite/memory 的意外异常向上抛（由路由 500 兜底，app-api 侧 catch warning，
+    "永不 500" 由调用侧保证）。async 方法统一经 ``_run_coro_sync`` 调度。
+    """
+    cp = get_checkpointer()
+    adelete = getattr(cp, "adelete_thread", None)
+    if adelete is None:
+        # 防御：未来后端无该方法时降级 no-op（无持久化能力时语义正确）
+        logger.warning(
+            "delete_thread_not_supported",
+            backend=settings.checkpointer_backend,
+            thread_id=thread_id,
+        )
+        return
+    try:
+        _run_coro_sync(adelete(thread_id))
+    except Exception:
+        if settings.checkpointer_backend == "redis":
+            logger.warning(
+                "delete_thread_failed_best_effort",
+                backend="redis",
+                thread_id=thread_id,
+            )
+            return
+        raise
