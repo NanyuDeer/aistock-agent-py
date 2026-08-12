@@ -129,15 +129,20 @@ def _build_predict_section(
          三档/置信度/演化/风险/低置信提示原样保留，免责声明去重）；
       ③ 免责声明：代码兜底恰好一次置尾。
     - Evidence 缺失或 degraded → 维持 D35 降级提示（PREDICT_DEGRADED_HINT）+ 趋势要点。
-    - 定位规则：primary=skill_name=="prediction"，fallback=goal_id=="g2"
-      （predict 子目标 id 为 g1，prediction Evidence 的 goal_id 为 g2，勿按 sg.id 匹配）。
+    - 定位规则：仅按 skill_name=="prediction"（prediction skill 恒设置该名；不按 goal_id
+      兜底——关键词兜底 compose 路径的 predict 子目标 g2 可能携带 goal_id="g2" 的
+      validate 证据但无 prediction call，按 goal_id 兜底会误标推演）。
     """
-    pred_evs = [ev for ev in evidences if ev.skill_name == "prediction"] or [
-        ev for ev in evidences if ev.goal_id == "g2"
-    ]
-    pred_ev = next((ev for ev in pred_evs if not ev.degraded), None)
+    pred_ev = next(
+        (ev for ev in evidences if ev.skill_name == "prediction" and not ev.degraded),
+        None,
+    )
 
-    trend_evs = [ev for ev in evidences if ev.goal_id == sg.id]
+    trend_evs = [
+        ev
+        for ev in evidences
+        if ev.goal_id == sg.id and ev.skill_name != "prediction"
+    ]
     trend_facts: list[str] = []
     for ev in trend_evs:
         trend_facts.extend(ev.facts)

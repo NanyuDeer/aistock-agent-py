@@ -1344,6 +1344,24 @@ def test_build_predict_section_missing_prediction_keeps_hint() -> None:
     assert "影响持续性推演：" not in section
 
 
+def test_build_predict_section_g2_validate_not_mislabeled_as_prediction() -> None:
+    """goal_id="g2" 的 validate 证据（无 prediction Evidence）→ 仍走 D35 降级。
+
+    最终整分支审查 Important 修复：关键词兜底 compose 路径（_build_fallback_goals
+    ≥2 维度含 predict 时）predict 子目标 sg_id="g2" 且 validate call goal_id="g2"、
+    但从不发 prediction call——若按 goal_id=="g2" 兜底定位，会把 validate 事实误标为
+    "影响持续性推演"并追加免责声明，取代诚实的 D35 降级提示。prediction Evidence
+    恒带 skill_name="prediction"，仅按 skill_name 定位即可，goal_id 兜底必须删除。
+    """
+    sg = _subgoal("g2", "predict", "白酒板块未来走势预测")
+    validate_ev = _ev("g2", ["当前趋势：白酒板块资金持续流入"])
+    section = _build_predict_section(sg, [validate_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：白酒板块资金持续流入" in section
+    assert "影响持续性推演：" not in section
+    assert DISCLAIMER not in section
+
+
 def test_build_predict_section_low_confidence_hint() -> None:
     """prediction facts 含低置信提示（confidence=low）→ 三段式输出中保留不确定性提示。"""
     sg = _subgoal("g1", "predict", "明日走势预测")
