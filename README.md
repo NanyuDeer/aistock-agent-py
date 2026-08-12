@@ -242,7 +242,7 @@ content = {
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> **事件传导分析（event conduction）**：2026-08-12 起触发归属迁移到统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库成功后由中台触发 `run_event_analysis_pipeline`（Task 5），晨报任务不再直接触发；`scheduler._run_event_analysis_pipeline_task` 保留供中台复用。迁移过渡期（Task 5 落地前）事件传导存在短暂断供窗口。
+> **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库成功（persisted>0）且有重大事件时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路）；晨报定时任务与手动晨报入口不再直接触发（避免同批事件双跑）。`scheduler._run_event_analysis_pipeline_task` 保留供中台复用。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 

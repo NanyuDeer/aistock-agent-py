@@ -349,12 +349,16 @@ async def trigger_morning_briefing(
     """手动触发晨报生成（非流式，供管理员 curl 触发）
 
     直接调用 morning_agent.run()，不走 graph SSE 流。
-    晨报完成后自动提取 major_events 并行执行事件传导分析，等待全部完成。
     返回 JSON 含 success / message / report_date / cached / 事件统计。
     管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
+
+    事件传导：2026-08-12（Task 5）起传导触发统一由事件抓取中台负责
+    （event_scrape 入库成功后触发 run_event_analysis_pipeline），本入口不再直接触发
+    event conduction——否则对同批事件（07:30 全量/每小时增量已触发）双跑
+    （Task 4 评审 M2）。响应中的 event_*_count 字段保留并恒为 0（接口契约，
+    Node 侧 morning_trigger_handler 消费）。
     """
     from aistock_agent.agents.workers import morning as morning_agent
-    from aistock_agent.services.event_conduction import run_event_conduction_batch
 
     report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
@@ -391,25 +395,16 @@ async def trigger_morning_briefing(
             major_events = []
         has_major_events = bool(major_events)
 
-        # 事件传导统计
+        # 事件传导统计：传导统一由中台负责（Task 5），本入口不再触发，
+        # 字段保留恒 0（响应契约：Node 侧 morning_trigger_handler.ts 消费
+        # event_triggered_count / event_succeeded_count / event_failed_count /
+        # event_persisted_count / event_persist_failed_count）。
         major_event_count = len(major_events)
         event_triggered_count = 0
         event_succeeded_count = 0
         event_failed_count = 0
         event_persisted_count = 0
         event_persist_failed_count = 0
-
-        # 晨报成功生成（非降级）且有重大事件 → 触发事件传导
-        if morning_generated and has_major_events:
-            event_results = await run_event_conduction_batch(major_events)
-            event_triggered_count = len(event_results)
-            event_succeeded_count = sum(1 for r in event_results if r.status.event_generated)
-            event_failed_count = event_triggered_count - event_succeeded_count
-            # 只统计生成成功的事件的持久化状态
-            event_persisted_count = sum(
-                1 for r in event_results if r.status.event_generated and r.status.persisted
-            )
-            event_persist_failed_count = event_succeeded_count - event_persisted_count
 
         elapsed = time.time() - start
 

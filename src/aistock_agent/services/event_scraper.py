@@ -27,10 +27,52 @@ logger = structlog.get_logger()
 
 VALID_MODES = frozenset({"full_daily", "intraday", "event_triggered"})
 
+# 保持 fire-and-forget 传导 task 的强引用，避免被 GC 回收导致传导分析静默丢失
+# （对齐 morning 时代 scheduler._pending_event_tasks 先例；AGENTS.md 明确警告
+# "fire-and-forget task 若不保存引用会被 GC 在执行前取消"）。
+_pending_conduction_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_conduction(events: list[event_store.EventRecord]) -> None:
+    """fire-and-forget 触发事件传导（失败不阻断抓取结果返回）。"""
+    task = asyncio.create_task(_trigger_conduction(events))
+    _pending_conduction_tasks.add(task)
+    task.add_done_callback(_pending_conduction_tasks.discard)
+
 
 def _today() -> str:
     """上海时区自然日（作为报告交易日，对齐 utils/date.py 惯例）。"""
     return shanghai_today().isoformat()
+
+
+async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
+    """对新增重大事件触发事件传导分析（fire-and-forget，失败不阻断）。
+
+    从 aistock_agent.services.event_analysis_pipeline import run_event_analysis_pipeline
+    （函数内 import 避免循环依赖：pipeline 依赖 event_conduction，本模块被 scheduler 引用）。
+    """
+    if not events:
+        return
+    from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
+        run_event_analysis_pipeline,
+    )
+
+    major_events = [
+        {
+            "event_id": ev["event_id"],
+            "title": ev["title"],
+            "summary": ev["summary"],
+            "url": ev["url"],
+            "impact_score": ev["impact_score"],
+            "direction": ev["direction"],
+            "involved_keywords": ev["involved_keywords"],
+        }
+        for ev in events
+    ]
+    try:
+        await run_event_analysis_pipeline(major_events)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event_scrape_conduction_failed", error=str(exc))
 
 
 async def scrape_full_daily(score_date: str) -> dict[str, Any]:
@@ -54,7 +96,12 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
 
     major = [ev for ev in events if event_store.is_major_event(ev)]
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
-    return await event_store.save_event_scrape(major, score_date)
+    result = await event_store.save_event_scrape(major, score_date)
+    # 落库成功且有新增重大事件 → 触发事件传导（Task 5：传导统一由中台负责，
+    # 晨报/scheduler 不再直接触发）。fire-and-forget：传导失败不阻断抓取结果返回。
+    if major and result.get("persisted", 0) > 0:
+        _spawn_conduction(major)
+    return result
 
 
 async def scrape_intraday(score_date: str) -> dict[str, Any]:
@@ -65,7 +112,11 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
         ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
     ]
     logger.info("event_scrape_intraday", total=len(events))
-    return await event_store.save_event_scrape(events, score_date)
+    result = await event_store.save_event_scrape(events, score_date)
+    # 同上：入库成功且有重大事件才触发传导（fire-and-forget）
+    if events and result.get("persisted", 0) > 0:
+        _spawn_conduction(events)
+    return result
 
 
 async def scrape_event_triggered(event: dict[str, Any]) -> dict[str, Any]:

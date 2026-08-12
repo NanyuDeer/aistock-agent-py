@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -66,12 +66,18 @@ async def test_scrape_intraday_only_persists_major_events():
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
         new=save,
-    ):
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
         await scrape_intraday("2026-08-12")
     saved = save.await_args.args[0]
     assert len(saved) == 1
     assert saved[0]["impact_score"] == 5
     assert all(is_major_event(ev) for ev in saved)
+    # Task 5：入库成功（persisted>0）且有重大事件 → fire-and-forget 触发传导
+    mock_spawn.assert_called_once()
+    assert mock_spawn.call_args.args[0][0]["title"] == "重大公告"
 
 
 @pytest.mark.asyncio
