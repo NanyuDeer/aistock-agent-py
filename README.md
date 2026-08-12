@@ -257,7 +257,7 @@ content = {
 | 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册** |
 | 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
 | 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
-| 入库层 | `services/event_store.py::persist_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped}` |
+| 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped}` |
 | 传导层 | `services/event_scraper.py` | 入库成功（persisted>0）且有重大事件时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路） |
 
 **调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
@@ -267,13 +267,13 @@ content = {
 | `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
 | `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时，intraday 增量抓取 |
 
-**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
+**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
 
 **接口清单**：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发抓取（需 X-Internal-Token；body `{"scrape_mode":"full_daily"}`，返回 `{"scrape_mode","persisted","deduped","error"}`；日志出现 `event_scrape_full_daily` / `event_scrape_done`） |
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发抓取（需 X-Internal-Token；body `{"scrape_mode":"full_daily"}`；返回信封 `{"success": true, "data": {"scrape_mode","persisted","deduped","error"}}`，失败 `{"success": false, "message": ...}`；日志出现 `event_scrape_full_daily` / `event_scrape_done`） |
 | GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（`date=YYYY-MM-DD` 必填） |
 | GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源，`date` 必填） |
 
