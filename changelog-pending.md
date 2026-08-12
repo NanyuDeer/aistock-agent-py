@@ -1,5 +1,37 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 Phase 4 验收辩论数字口径修订（B6，验收裁决）
+- "test_prediction_service.py 复跑 76 passed" → 该文件实为 14 个 test 函数（gate 用例 parametrize 展开 17 cases）；
+  Phase 4 定向复跑口径改为"10 个 Phase 4 测试文件合计 76 passed"
+- "profile 定向 15/15" → profile.spec.ts 实为 11 个 it()（GET 3 + PUT 8）
+- Phase 4-3 "HEAD 22 ⊆ BASE 30"：8 个失败差异为路径/内存地址文本差异归一化（BASE 30 中 8 个属
+  环境相关基线），HEAD 新增失败为 0——后续 A/B 记录必须附 BASE/HEAD commit 号与失败集明细
+- A/B 复现命令：git worktree add <wt> BASE_COMMIT；HEAD 与 BASE 分别
+  `$env:PYTHONPATH="<repo>/src"; python -m pytest tests/unit tests/integration --ignore tests/unit/test_tenx_tools -q`
+  后 diff 失败集（HEAD 失败集 ⊆ BASE 即新增清零）
+
+## 2026-08-12 Phase 4-3 全局用户记忆（user profile，3 commits 2445417 + d9be256 + 4393ad9，changer 未 push）
+- **Task 3 拉取+注入（2445417）**：`data_client.get_user_profile(user_id)`（Redis 缓存 `user_profile:{user_id}` TTL 300s → GET /internal/user-profile/{user_id}；失败 None 不阻断）；`QuestionState.user_profile` 可选字段；ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）入口注入
+- **Task 4 消费（d9be256）**：qa_router `_build_user_profile_context`（profile 存在时 prompt 追加称呼/投资偏好/风险偏好，None 字节不变）；synth_answer 风险段三档（`RISK_DISCLAIMER_CONSERVATIVE` conservative 强化，优先于 strong，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（不改 evidence 关联）
+- **fix 防跨轮污染（4393ad9）**：注入改为无条件显式赋值——匿名写 None 覆盖 checkpointer 旧值（条件注入会在同 thread 多轮间残留上一轮登录态画像，集成冒烟实证：匿名轮误出 conservative 风险段）
+- 测试：`test_data_client_user_profile.py`（4）、`test_ws_user_profile.py`（3）、`test_qa_router_user_profile.py`（7）、`test_synth_answer_user_profile.py`（11）全绿；相关回归 275 passed
+- 验证：全量 A/B HEAD 22 failed ⊆ BASE 30（路径/内存地址文本差异归一化后新增清零）；ruff 改动文件 0 新增；**集成冒烟 SMOKE_AGENT_OK**（登录态 conservative 风险段生效 / 匿名常规档零行为变化）
+
+## 2026-08-12 Phase 4-2 final review 修复（I-1，commit c19b9b9，changer 未 push）
+- **I-1 HTTP/SSE 降级路径 confirm 回归**：qa_router 触发 confirm 是传输无关的，但 confirm 两阶段协议是 WS 专属——`routes.py` `/chat/message` 与 `/chat/stream/messages` 的 DONE 原先不认识 `confirm` 终态 → 同消息在 HTTP 路径从"有用澄清"退化为"抱歉，我暂时无法处理您的请求。"（严格劣化回归）
+- 修复：两处处理器检测 `final_response` 为空且 `result/values.get("confirm")` 非空 → `final_response = _STOCK_SYMBOL_CLARIFICATION`（与 WS confirm_timeout 回退同文本）；import 自 qa_router
+- 测试：`tests/unit/test_routes_sse_done_token_usage.py` +2（SSE confirm 降级 / 无 confirm 原样透出）、`tests/e2e/test_chat_message.py` +1（HTTP confirm 降级）；TDD RED→GREEN
+- 验证：定向 51 passed；全量 A/B HEAD 失败集 = BASE（30=30）新增清零（1829→1832 passed）；ruff 改动文件 All checks passed；confirm WS 冒烟复测 5/5（case2「都不是」澄清回退即本路径）
+
+## 2026-08-12 Phase 4-2 交互式确认（改进 13，3 commits c742a93..232e361，changer 未 push）
+- 两阶段运行设计（spec §4.2 已按 Phase 2 实际协议修订）：阶段 1 图终态负载 `confirm_request`（替代 DONE）→ ws.py `_wait_confirm_response`（60s 单调时钟 deadline + FIRST_COMPLETED + ValueError 捕获 + `_owns_run` 归属）→ 阶段 2 携带 `confirm_choice` 重跑同 session → DONE；超时/「都不是」→ `confirm_timeout` 重跑回退既有澄清
+- `qa_router.py`：confirm 触发（闸门 2 resolve-miss + 多候选 ≥2 可 resolve → confirm，options=可解析名称 + 「都不是」；<2 维持澄清）+ 消费（confirm_choice 直接构造 SkillCall；confirm_timeout 经 `_resolve_miss_clarification` 无条件回退澄清，不依赖 `len(messages)` 守卫）+ transient 三字段归零
+- `synth_answer.py`：confirm 短路（在 goal is None 检查之前返回 confirm 不渲染）
+- `ws.py`：`_run_chat_graph_to_events` 加 run_id 参数 + confirm_request 终态早返回（跳过落库）；阶段 2 重跑 `initial_state2["messages"] = []`（空列表对 add_messages 是 no-op，防消息重复污染 checkpoint 历史）+ reset_transient_state + reset_token_usage + 新 run_id 后缀 `_confirm`
+- `deps.py`：`_TRANSIENT_KEYS` 补 confirm/confirm_choice/confirm_timeout（防 SSE 残留短路）
+- `chat_schema.py`：QuestionState 加 confirm 字段（dict | None）
+- 验证：定向 4 新测试文件全绿（test_chat_transient_reset/test_qa_router_confirm/test_synth_answer_confirm/test_ws_chat_confirm）；全量 A/B HEAD 失败集 = BASE（30=30，含 env 相关基线失败）**新增失败 0**（1808→1829 passed）；ruff 改动文件 All checks passed；WS confirm 冒烟 5/5（case1 点选续跑真实行情 / case2「都不是」澄清回退 / case3 非触发回归，每用例独立 session）
+
 ## 2026-08-12 Phase 4-1 对话内预测打通（8 commits c4b1030..d29597d，changer 未 push）
 - 产品边界（2026-08-11 用户拍板）：影响持续性推演非点位预测 / 固定免责声明+低置信提示 / v1 不落库
 - 契约：`chat_contract.py` 三处 Literal 追加 "prediction"；`PredictionResult` 复用（extra="forbid"）
