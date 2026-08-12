@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aistock_agent.constants import WSEventType
@@ -33,23 +34,23 @@ _REASONING_TIMEOUT_SEC = 2.0
 
 
 async def stream_reasoning(
-    websocket: Any, node: str, message: str
+    sink: Callable[[dict], Awaitable[None]], node: str, message: str
 ) -> None:
-    """异步流式生成 reasoning 文本并通过 WS 转发。
+    """异步流式生成 reasoning 文本并通过 sink 转发。
 
     Args:
-        websocket: WS 连接，调用 send_json 发送 reasoning 事件。
+        sink: async 回调，接收一个 WS 就绪 payload dict（与连接解耦，
+              由调用方决定写入队列/events 列表/直接发送）。
         node: 节点名（qa_router / skill_executor / synth_answer / escalate）。
-        message: 用户原始问题字符串（来自 ws.py 的 data.get("message", "")）。
-                 不读 state —— initial_state 在 on_chain_start 时是 stale 的。
+        message: 用户原始问题字符串。不读 state —— initial_state 在
+                 on_chain_start 时是 stale 的。
     - 节点 start 时由 ws.py 通过 asyncio.create_task 启动，不 await。
     - LLM 失败 / 超时 / message 为空 → 发送兜底 label，不抛异常。
     """
     fallback = _FALLBACK_LABELS.get(node, "处理中...")
 
-    # message 为空 → 直接兜底（不调用 LLM）
     if not message or not message.strip():
-        await websocket.send_json({
+        await sink({
             "type": WSEventType.REASONING, "node": node, "chunk": fallback,
         })
         return
@@ -60,7 +61,7 @@ async def stream_reasoning(
         )
     except Exception:
         logger.warning("reasoning.prompt_render_failed", node=node, exc_info=True)
-        await websocket.send_json({
+        await sink({
             "type": WSEventType.REASONING, "node": node, "chunk": fallback,
         })
         return
@@ -70,17 +71,17 @@ async def stream_reasoning(
         async for chunk in _with_timeout(llm.astream(prompt), _REASONING_TIMEOUT_SEC):
             text = getattr(chunk, "content", None)
             if isinstance(text, str) and text.strip():
-                await websocket.send_json({
+                await sink({
                     "type": WSEventType.REASONING, "node": node, "chunk": text,
                 })
     except TimeoutError:
         logger.warning("reasoning.timeout", node=node)
-        await websocket.send_json({
+        await sink({
             "type": WSEventType.REASONING, "node": node, "chunk": fallback,
         })
     except Exception:
         logger.warning("reasoning.stream_failed", node=node, exc_info=True)
-        await websocket.send_json({
+        await sink({
             "type": WSEventType.REASONING, "node": node, "chunk": fallback,
         })
 

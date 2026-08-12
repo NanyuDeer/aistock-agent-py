@@ -3,16 +3,20 @@
 import asyncio
 import json
 import logging
+import time
+from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from langgraph.graph.state import CompiledStateGraph
 
-from aistock_agent.api.deps import build_chat_initial_state, reset_transient_state
+from aistock_agent.api.deps import build_chat_initial_state
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
-from aistock_agent.schemas.chat_contract import ChatCard
-from aistock_agent.services.data_client import node_api
 from aistock_agent.observability.callback import get_default_callbacks
+from aistock_agent.schemas.chat_contract import ChatCard
+from aistock_agent.services.chat_task_manager import ChatRunState, chat_task_manager
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.token_usage import get_token_usage, reset_token_usage
 
 logger = logging.getLogger(__name__)
@@ -86,35 +90,318 @@ async def _drain_reasoning_tasks(tasks: list[asyncio.Task]) -> None:
                 t.cancel()
 
 
+async def _run_chat_graph_to_events(
+    state: ChatRunState,
+    graph: CompiledStateGraph,
+    initial_state: dict[str, object],
+    message: str,
+    session_id: str,
+    user_id: str | None,
+) -> dict | None:
+    """后台执行 chat 图，把 WS 就绪事件 append 进 state.events 并唤醒等待者。
+
+    与 WS 连接解耦：连接断开不影响本协程。结束返回终态 payload
+    （DONE / ERROR dict），由 ChatTaskManager 缓存供 resume 补发。
+    """
+
+    async def sink(payload: dict) -> None:
+        state.events.append(payload)
+        state.notify()
+
+    llm_started = False
+    final_response = ""
+    last_deep_report: dict[str, object] | None = None
+    token_usage: dict[str, int] | None = None
+    cards: list[ChatCard] | None = None
+    seen_nodes: set[str] = set()
+    reasoning_tasks: list[asyncio.Task] = []
+    current_node: str = ""
+    try:
+        async for event in graph.astream_events(
+            initial_state,
+            config={
+                "configurable": {"thread_id": session_id},
+                "callbacks": get_default_callbacks(),
+            },
+            version="v2",
+        ):
+            event_type = event.get("event", "")
+            name = event.get("name", "")
+
+            if event_type == "on_chain_start" and name in _NODE_LABELS:
+                current_node = name
+                if name not in seen_nodes:
+                    seen_nodes.add(name)
+                    label = _sanitize_label(_NODE_LABELS[name])
+                    await sink({"type": WSEventType.INTERMEDIATE, "label": label, "node": name})
+                    task = asyncio.create_task(
+                        stream_reasoning(sink, name, message)
+                    )
+                    reasoning_tasks.append(task)
+            elif (
+                event_type == "on_chat_model_start"
+                and not llm_started
+                and name not in ("supervisor", "qa_router")
+            ):
+                llm_started = True
+                await sink({"type": WSEventType.LLM_START, "label": "正在生成回复..."})
+            elif event_type == LangGraphEventType.ON_CHAT_MODEL_STREAM:
+                if current_node in ("qa_router", "synth_answer", "supervisor"):
+                    continue
+                chunk = event.get("data", {}).get("chunk")
+                if not chunk:
+                    continue
+                has_text = bool(chunk.content)
+                has_tool_calls = bool(
+                    getattr(chunk, "tool_calls", None)
+                    or getattr(chunk, "tool_call_chunks", None)
+                )
+                if has_text and not has_tool_calls:
+                    text = (
+                        chunk.content
+                        if isinstance(chunk.content, str)
+                        else str(chunk.content)
+                    )
+                    if text.strip():
+                        await sink({"type": WSEventType.TEXT, "content": text})
+            elif event_type == LangGraphEventType.ON_TOOL_START:
+                label = _sanitize_label(TOOL_LABELS.get(name, name))
+                await sink({"type": WSEventType.TOOL_START, "tool": name, "label": label})
+            elif event_type == LangGraphEventType.ON_TOOL_END:
+                await sink({"type": WSEventType.TOOL_END, "tool": name})
+            elif event_type == "on_chain_end":
+                if name == current_node:
+                    current_node = ""
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict) and output.get("final_response"):
+                    final_response = output["final_response"]
+                    last_deep_report = output.get("last_deep_report")
+                    token_usage = output.get("token_usage")
+                    cards = output.get("cards")
+
+        await _drain_reasoning_tasks(reasoning_tasks)
+        await asyncio.sleep(0)
+        fresh_usage = get_token_usage()
+        if fresh_usage is not None:
+            token_usage = fresh_usage
+
+        if user_id and token_usage:
+            try:
+                await node_api.save_token_usage(
+                    user_id=user_id,
+                    session_id=session_id,
+                    prompt_tokens=token_usage["prompt_tokens"],
+                    completion_tokens=token_usage["completion_tokens"],
+                    total_tokens=token_usage["total_tokens"],
+                    question=message,
+                )
+            except Exception:
+                logger.warning(
+                    "token_usage.save_failed user_id=%s", user_id, exc_info=True,
+                )
+
+        return {
+            "type": WSEventType.DONE,
+            "content": final_response,
+            "last_deep_report": last_deep_report,
+            "token_usage": token_usage,
+            "cards": [c.model_dump() for c in cards] if cards else None,
+        }
+    except Exception as exc:
+        logger.error("chat_resume.graph_failed: %s", exc, exc_info=True)
+        return {"type": WSEventType.ERROR, "content": str(exc)}
+
+
+async def _forward(
+    state: ChatRunState,
+    send: Callable[[dict], Awaitable[None]],
+    replay: bool,
+) -> None:
+    """把 state.events 转发到当前连接。
+
+    replay=True 从头回放（resume 语义）；replay=False 只转发新增（live 语义）。
+    state.done 时补发终态 payload（DONE/ERROR）后结束。
+    连接断开（send 抛异常）只终止转发，不影响后台任务。
+    """
+    cursor = 0 if replay else len(state.events)
+    try:
+        while True:
+            while cursor < len(state.events):
+                await send(state.events[cursor])
+                cursor += 1
+            if state.done:
+                if state.result is not None:
+                    await send(state.result)
+                return
+            waiter = asyncio.Event()
+            state.waiters.add(waiter)
+            try:
+                await waiter.wait()
+            finally:
+                state.waiters.discard(waiter)
+    except (WebSocketDisconnect, RuntimeError):
+        # 连接已断开：转发终止；后台任务（producer）不受影响继续跑完
+        pass
+
+
+def _owns_run(state: ChatRunState | None, data_user_id: str | None) -> bool:
+    """归属校验（spec §8.4，供 resume/stop 使用）。
+
+    - state 不存在 → True（调用方据此走 resume_status none / stop_status not_found）；
+    - 双方 user_id 均非空时必须相等，否则 False（越权拒绝）；
+    - 任一方为 None（未登录）→ True。
+    """
+    if state is None:
+        return True
+    if state.user_id is not None and data_user_id is not None:
+        return state.user_id == data_user_id
+    return True
+
+
+async def _forward_until_done_or_cmd(
+    state: ChatRunState,
+    websocket: WebSocket,
+    session_id: str,
+) -> None:
+    """转发与接收并行：生成期间可即时处理 stop 控制消息（stop 可打断的前提）。
+
+    转发协程（_forward，replay=True 从头转发：本轮 run 的 events 初始为空，
+    从 0 起不会漏掉快速完成场景下的早期事件；若用 replay=False，cursor 基准
+    len(state.events) 会因 producer 先于本函数内的转发 task 执行而跳过已产出事件）
+    与接收协程以 FIRST_COMPLETED 竞速：
+    - 转发完成（done/error/cancelled 终态已补发）→ 返回；
+    - 收到 stop → cancel 活跃 run + stop_status（越权显式 error，不静默）；
+    - 收到其他消息（含 resume）→ 并发防护提示，继续监听。
+    连接断开 → 仅停止监听，后台任务继续跑完。
+    """
+    send_task = asyncio.create_task(
+        _forward(state, websocket.send_json, replay=True)
+    )
+    recv_task = asyncio.create_task(websocket.receive_json())
+    try:
+        while not send_task.done():
+            done, _ = await asyncio.wait(
+                {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if send_task in done:
+                # 检索 recv_task 异常（若以 WebSocketDisconnect 结束时避免
+                # "Task exception was never retrieved" 日志噪声）
+                if recv_task.done() and not recv_task.cancelled():
+                    recv_task.exception()
+                if not recv_task.done():
+                    recv_task.cancel()
+                return
+            try:
+                msg = recv_task.result()
+            except (WebSocketDisconnect, RuntimeError):
+                # 连接断开（receive 侧）：仅停止监听；转发协程继续转发到本轮结束。
+                # 真实连接下 send 失败会让 _forward 自行退出；不能立即返回并 cancel
+                # send_task——否则快速完成场景/测试中事件会被丢弃（普通消息语义不变）。
+                await send_task
+                return
+            if msg.get("type") == "stop":
+                s = chat_task_manager.get(session_id)
+                if s is None:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+                elif not _owns_run(s, msg.get("user_id")):
+                    logger.warning("chat.stop.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                elif chat_task_manager.cancel(session_id):
+                    await websocket.send_json({
+                        "type": "stop_status", "status": "cancelled", "run_id": s.run_id,
+                    })
+                else:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+            elif msg.get("type") == "resume":
+                pass  # 生成中 resume 无意义（本轮已在本连接续流），忽略
+            else:
+                await websocket.send_json({
+                    "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
+                })
+            # 继续监听下一条
+            recv_task = asyncio.create_task(websocket.receive_json())
+    except (WebSocketDisconnect, RuntimeError):
+        # 连接断开：停止监听；转发协程（send_task）会因 send 失败自行退出，后台任务继续
+        pass
+    finally:
+        if not send_task.done():
+            send_task.cancel()
+        if recv_task is not None and not recv_task.done():
+            recv_task.cancel()
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
-    """WebSocket 对话（流式输出 + 进度反馈）
+    """WebSocket 对话（流式输出 + 进度反馈 + 断点续传 resume）。
 
-    事件类型:
-      - intermediate: 中间进度（如"正在理解你的问题..."）
-      - llm_start: LLM 开始生成回复
-      - text: 逐 token 文本片段
-      - tool_start / tool_end: 工具调用进度
-      - done: 完成（携带完整 final_response）
-      - error: 出错
+    控制消息 {type:"resume", session_id}：断线后回页补拉本轮结果。
+      - 命中已完成 run → 直接补发终态 payload（DONE/ERROR）
+      - 命中运行中 run → resume_status running + 从头回放事件并续流
+      - 无记录 → resume_status none（前端兜底重发）
     """
     await websocket.accept()
 
     try:
         while True:
             data = await websocket.receive_json()
-            message = data.get("message", "")
             session_id = data.get("session_id", f"ws_{id(websocket)}")
-            # 入口解析字段保留（6.15 缺口）：favorites 不传入 QuestionState，
-            # 为 P9 自选股联动留口；user_id 已透传到 state（D11）。
-            _favorites = data.get("favorites", [])
 
+            # 控制消息：resume（断线续传）
+            if data.get("type") == "resume":
+                state = chat_task_manager.get(session_id)
+                if state is None:
+                    await websocket.send_json({"type": "resume_status", "status": "none"})
+                elif not _owns_run(state, data.get("user_id")):
+                    logger.warning("chat.resume.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                elif state.done:
+                    if state.result is not None:
+                        await websocket.send_json(state.result)
+                else:
+                    await websocket.send_json({
+                        "type": "resume_status", "status": "running", "run_id": state.run_id,
+                    })
+                    await _forward(state, websocket.send_json, replay=True)
+                continue
+
+            # Part 2：stop 控制消息（生成中打断）。resume 路径在连接空闲期由外层
+            # receive 处理；生成中的 stop 由 _forward_until_done_or_cmd 内部处理。
+            if data.get("type") == "stop":
+                state = chat_task_manager.get(session_id)
+                if state is None:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+                elif not _owns_run(state, data.get("user_id")):
+                    logger.warning("chat.stop.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                elif chat_task_manager.cancel(session_id):
+                    await websocket.send_json({
+                        "type": "stop_status", "status": "cancelled", "run_id": state.run_id,
+                    })
+                else:
+                    await websocket.send_json({"type": "stop_status", "status": "not_found"})
+                continue
+
+            message = data.get("message", "")
             if not message:
                 await websocket.send_json({"type": WSEventType.ERROR, "content": "消息不能为空"})
                 continue
 
+            # 并发防护：同 session 已有活跃生成任务 → 拒绝
+            if chat_task_manager.has_active(session_id):
+                await websocket.send_json({
+                    "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
+                })
+                continue
+
             graph = _select_graph()
-            # P10 线 2：每条消息处理开始时重置 token 采集（构造 state 前）
+            # P10 线 2：每条消息处理开始时重置 token 采集（构造 state 前，且在
+            # create_task 之前 —— contextvar 会继承进后台任务，须先 reset）
             reset_token_usage()
             # M5 D10：Chat 入口恒走 ChatAgent（/chat/* 与 /ws/chat 不再读开关）
             initial_state = build_chat_initial_state(message)
@@ -127,185 +414,36 @@ async def ws_chat(websocket: WebSocket) -> None:
             initial_state["user_id"] = (
                 str(raw_user_id) if raw_user_id not in (None, "") else None
             )
-            # T6/M3：单轮 transient 路由信号每轮归零（详细语义见 reset_transient_state；
+            # T6/M3：单轮 transient 路由信号每轮归零（对齐 reset_transient_state；
             # last_deep_report / pending_clarification 跨轮保留，不入归零）
-            reset_transient_state(initial_state)
+            initial_state["deep_source"] = None
+            initial_state["final_response"] = None
+            initial_state["goals"] = None
+            initial_state["general_source"] = None
 
-            try:
-                llm_started = False
-                final_response = ""
-                last_deep_report: dict[str, object] | None = None
-                # P10 线 2（选项 A）：本轮 token 用量快照 + 卡片（线 3 未产出恒 None）
-                token_usage: dict[str, int] | None = None
-                cards: list[ChatCard] | None = None
-                seen_nodes: set[str] = set()
-                # P3-fix-2 T1.1：本轮 reasoning task 引用集合（防 GC，DONE 前等待）
-                reasoning_tasks: list[asyncio.Task] = []
-                # P3-fix-2 T1.2：当前节点名（astream_events v2 的 on_chat_model_stream
-                # name 是模型名非节点名，须用 current_node 判断结构化 JSON 节点）
-                current_node: str = ""
+            # 普通消息新增可选 run_id：前端断线重连后用它 + session_id 定位本轮
+            run_id = str(data.get("run_id") or f"run_{session_id}_{int(time.time() * 1000)}")
+            user_id_for_billing = initial_state.get("user_id")
 
-                async for event in graph.astream_events(
-                    initial_state,
-                    config={
-                        "configurable": {"thread_id": session_id},
-                        # astream_events 不触发 LLM 构造函数 callbacks=（仅 ainvoke 触发），
-                        # 须经 config 传入 callback 使 on_llm_end 在 WS 路径记录 token_usage。
-                        # generations fallback（callback.py _extract_token_usage）从
-                        # AIMessage.usage_metadata 提取用量（astream_events 路径 llm_output 为 None）。
-                        "callbacks": get_default_callbacks(),
-                    },
-                    version="v2",
-                ):
-                    event_type = event.get("event", "")
-                    name = event.get("name", "")
+            async def producer(
+                st: ChatRunState,
+                g: CompiledStateGraph = graph,
+                is_: dict[str, object] = initial_state,
+                m: str = message,
+                sid: str = session_id,
+                uid: str | None = user_id_for_billing,
+            ) -> dict | None:
+                return await _run_chat_graph_to_events(st, g, is_, m, sid, uid)
 
-                    # --- 节点启动 → intermediate 进度 ---
-                    if event_type == "on_chain_start" and name in _NODE_LABELS:
-                        # P3-fix-2 T1.2：记录当前节点（必须在 seen_nodes 守卫外，
-                        # 每次节点 start 都更新，防止同一节点再次进入时 current_node 陈旧）
-                        current_node = name
-                        if name not in seen_nodes:
-                            seen_nodes.add(name)
-                            label = _sanitize_label(_NODE_LABELS[name])
-                            await websocket.send_json({
-                                "type": WSEventType.INTERMEDIATE,
-                                "label": label,
-                                "node": name,
-                            })
-                            # 异步启动 reasoning 流式（不阻塞节点执行）；
-                            # 关键：直接传 message 字符串，不传 initial_state
-                            # （initial_state 在 on_chain_start 时是 stale 的）
-                            # P3-fix-2 T1.1：必须保存 task 引用，否则被 GC 从未执行
-                            task = asyncio.create_task(
-                                stream_reasoning(websocket, name, message)
-                            )
-                            reasoning_tasks.append(task)
-
-                    # --- LLM 开始生成 ---
-                    elif (
-                        event_type == "on_chat_model_start"
-                        and not llm_started
-                        and name not in ("supervisor", "qa_router")
-                    ):
-                        llm_started = True
-                        await websocket.send_json({
-                            "type": WSEventType.LLM_START,
-                            "label": "正在生成回复...",
-                        })
-
-                    # --- 逐 token 文本 ---
-                    elif event_type == LangGraphEventType.ON_CHAT_MODEL_STREAM:
-                        # P3-fix-2 T1.2：chat 子图的 qa_router / synth_answer 与老路径
-                        # supervisor 的 LLM 输出是结构化 JSON（意图/证据/结论），最终回复
-                        # 经 done.content（final_response）下发，不流式转发。
-                        # v2 事件 name 是模型名，必须用 current_node 判断（旧 name 过滤失效）。
-                        if current_node in ("qa_router", "synth_answer", "supervisor"):
-                            continue
-                        chunk = event.get("data", {}).get("chunk")
-                        if not chunk:
-                            continue
-                        has_text = bool(chunk.content)
-                        has_tool_calls = bool(
-                            getattr(chunk, "tool_calls", None)
-                            or getattr(chunk, "tool_call_chunks", None)
-                        )
-                        if has_text and not has_tool_calls:
-                            text = (
-                                chunk.content
-                                if isinstance(chunk.content, str)
-                                else str(chunk.content)
-                            )
-                            if text.strip():
-                                await websocket.send_json({
-                                    "type": WSEventType.TEXT,
-                                    "content": text,
-                                })
-
-                    # --- 工具调用进度 ---
-                    elif event_type == LangGraphEventType.ON_TOOL_START:
-                        label = _sanitize_label(TOOL_LABELS.get(name, name))
-                        await websocket.send_json({
-                            "type": WSEventType.TOOL_START,
-                            "tool": name,
-                            "label": label,
-                        })
-                    elif event_type == LangGraphEventType.ON_TOOL_END:
-                        await websocket.send_json({
-                            "type": WSEventType.TOOL_END,
-                            "tool": name,
-                        })
-
-                    # --- 节点结束 → 捕获 final_response ---
-                    elif event_type == "on_chain_end":
-                        # P3-fix-2 T1.2：仅在当前节点自身的 on_chain_end 时清除 current_node。
-                        # v2 下 on_chain_end 对每个嵌套 runnable（LLM/tool）都会触发，
-                        # 无条件清除会在节点内部多次顺序 LLM 调用时中途放行 JSON（泄漏）；
-                        # 节点自身的 end 在其 LLM 流之后才触发，按 name 比对安全。
-                        if name == current_node:
-                            current_node = ""
-                        output = event.get("data", {}).get("output")
-                        if isinstance(output, dict) and output.get("final_response"):
-                            final_response = output["final_response"]
-                            # T4（D12/D13/D39）：deep 升级引用随 DONE 下发（非 deep 为 None）
-                            last_deep_report = output.get("last_deep_report")
-                            # P10 线 2（选项 A）：一次性捕获 token_usage + cards
-                            # 注意：此处的 token_usage 来自 synth_answer 节点输出，
-                            # 在 astream_events 路径下为 stale None（on_llm_end 回调延迟触发），
-                            # 真实值在下方 asyncio.sleep(0) 后从 contextvar 刷新。
-                            token_usage = output.get("token_usage")
-                            cards = output.get("cards")
-
-                # P3-fix-2 T1.1：DONE 前等待 reasoning task 完成（2.5s 超时兜底），
-                # 保证 reasoning 事件在 done 之前到达，前端可聚合后关闭连接
-                await _drain_reasoning_tasks(reasoning_tasks)
-
-                # P10 线 2 修复：astream_events 路径下 on_llm_end 回调在 graph 结束后才
-                # 触发（LangGraph v2 异步回调延迟），synth_answer 节点输出的 token_usage
-                # 为 stale None。须显式 yield 让事件循环执行待处理的回调，再从 contextvar
-                # 读取最终累计值（多次 LLM 调用之和）。
-                await asyncio.sleep(0)
-                fresh_usage = get_token_usage()
-                if fresh_usage is not None:
-                    token_usage = fresh_usage
-
-                # P10 线 2：计费落库（仅 WS 路径；HTTP/SSE 降级路径不落库）。
-                # 条件：登录（user_id 非空）且本轮采集到非全 0 token 用量。
-                # node_api.save_token_usage 内部 post 已吞异常返回 None，这里
-                # 再包一层 try/except——落库失败仅 warning，不阻断 DONE（永不 500）。
-                user_id_for_billing = initial_state.get("user_id")
-                if user_id_for_billing and token_usage:
-                    try:
-                        await node_api.save_token_usage(
-                            user_id=user_id_for_billing,
-                            session_id=session_id,
-                            prompt_tokens=token_usage["prompt_tokens"],
-                            completion_tokens=token_usage["completion_tokens"],
-                            total_tokens=token_usage["total_tokens"],
-                            question=message,
-                        )
-                    except Exception:
-                        # ws.py 用 stdlib logging，不能用 structlog 的 key=value 风格
-                        logger.warning(
-                            "token_usage.save_failed user_id=%s", user_id_for_billing,
-                            exc_info=True,
-                        )
-
-                # 发送完成事件
+            state = chat_task_manager.start(session_id, run_id, producer, user_id_for_billing)
+            if state is None:
+                # start 返回 None：同 session 已有活跃任务（has_active 与 start 间
+                # 存在竞态窗口，双保险）
                 await websocket.send_json({
-                    "type": WSEventType.DONE,
-                    "content": final_response,
-                    "last_deep_report": last_deep_report,
-                    # P10 线 2（选项 A）：DONE 一次性加 token_usage + cards（无则 None）
-                    "token_usage": token_usage,
-                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，
-                    # json.dumps 不可序列化 → model_dump() 转 dict（None 保持 null 兼容）
-                    "cards": [c.model_dump() for c in cards] if cards else None,
+                    "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
                 })
-
-            except Exception as e:
-                logger.error("ws_chat_error: %s", e, exc_info=True)
-                await websocket.send_json({"type": WSEventType.ERROR, "content": str(e)})
-
+                continue
+            # 转发与接收并行：生成期间可收到 stop 控制消息（stop 可打断的前提，spec §8.3）
+            await _forward_until_done_or_cmd(state, websocket, session_id)
     except WebSocketDisconnect:
         pass

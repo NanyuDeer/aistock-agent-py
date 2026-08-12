@@ -217,6 +217,20 @@ START → supervisor(quick_think, 意图路由)
 - **工程要点**：① 阻塞 IO（下载/ffmpeg/转写）必须 `asyncio.to_thread` 包装防阻塞事件循环；② `requests` 必须显式 timeout（解析 30s/下载 120s/转写 300s），否则链接不可达时线程长期挂起耗尽线程池；③ FFmpeg/FFprobe 是**宿主二进制依赖**（ffmpeg-python 仅封装，底层仍走 cmd），生产需系统安装，WinError 5 权限隔离时提示路径配置；④ 依赖钉版 `requests==2.32.3` + `ffmpeg-python==0.2.0`；config 新增 `douyin_api_key`/`ffmpeg_binary`/`ffprobe_binary`
 - **数据源边界**：抖音/硅基流动属外部第三方内容服务，Python 直连**不违反**"禁止 Python 重复实现 A 股数据获取逻辑"硬约束（类比 yfinance/Tavily 直连先例）；A 股数据仍一律走 Node `/internal/*`
 
+### CHAT QA 断点续传（问题 15，2026-08-11）：生成任务与 WS 连接解耦
+
+- **根因**：ws.py 在 handler 内直接 `graph.astream_events`，连接断开即取消生成；light 结论仅 DONE 一次性下发，断连即丢。
+- **方案 B**：`services/chat_task_manager.py`（ChatTaskManager 单例）按 session 管理后台任务——`start(session_id, run_id, producer)`（同 session 活跃任务拒绝）、事件 append 进 `state.events` + `notify()`、终态 result 缓存 TTL 10 分钟（`get` 惰性清理）；`_run_chat_graph_to_events` 为生产者（跑图 + 事件 sink 进 events + token 计费收尾）；`_forward(state, send, replay)` 为转发器（断连仅终止转发不取消任务）。
+- **协议**：普通消息新增可选 `run_id`；控制消息 `{type:"resume", session_id}` → `resume_status`（none/running + run_id）/ done 直接补发终态 payload。`stream_reasoning` 签名改为 `(sink, node, message)`（sink 化解耦连接）。
+- **前端**：socket 模块级单例（页面生命周期不销毁连接）；`hasPendingRun()`（最后一条是 user）→ `onShow` 且断开时 `resume()`；`resume_status none` 自动重发最后一条 user 消息兜底。
+
+### CHAT QA 打断/停止/重试（Phase 2 Part 2，2026-08-11）：与 resume 共享 ChatTaskManager
+
+- **cancelled 终态**：`ChatRunState.cancelled`（done 后 True 表示被停止）+ `user_id` 归属字段；`_runner` 显式 `except asyncio.CancelledError` 置 `result={"type":"cancelled","content":"已停止生成"}`（CancelledError 继承 BaseException，默认不被 except Exception 捕获）。
+- **stop 协议**：请求 `{type:"stop", session_id}` → 响应 `stop_status`（cancelled / not_found）；cancelled 终态经 `_forward` 既有终态路径下发（DONE/ERROR/cancelled 三态统一）。
+- **转发/接收并行**：`_forward_until_done_or_cmd` 用 `asyncio.wait(FIRST_COMPLETED)` 竞速转发协程与接收协程——生成中收到 stop 即时 cancel（Task 3 的阻塞 `await _forward` 期间收不到控制消息，stop 必须依赖此结构）；live 转发传 `replay=True`（plan Task 9 文本一处 replay=False 以此修正为准——新轮起点 events 为空，回放语义与 live 无差异）。
+- **归属校验**：`_owns_run(state, data_user_id)`（resume/stop 共用）——双方 user_id 非空必须相等，任一 None 放行，None state 放行走 none/not_found；越权 → error "无权访问该会话" + WARN（绝不静默）。P0 后 `data.user_id` 为服务端注入可信值。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
