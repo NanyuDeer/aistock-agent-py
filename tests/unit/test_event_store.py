@@ -191,3 +191,21 @@ async def test_load_event_scrape_reads_by_date() -> None:
         assert len(events) == 1
         assert events[0]["event_id"] == "e1"
         mock_api.get_analysis_report.assert_awaited_once_with("event_scrape", "2026-08-12")
+
+
+@pytest.mark.asyncio
+async def test_load_event_scrape_skips_malformed_event_keeps_rest() -> None:
+    # Task 1 Minor 1 顺手修：单条事件 impact_score 畸形只跳过该条，不炸整批
+    good = _make_event()
+    malformed = {
+        "event_id": "bad",
+        "title": "畸形事件",
+        "impact_score": "not-a-number",
+    }
+    with patch("aistock_agent.services.event_store.node_api") as mock_api:
+        mock_api.get_analysis_report = AsyncMock(
+            return_value={"content": {"events": [malformed, good]}}
+        )
+        events = await load_event_scrape("2026-08-12")
+        assert len(events) == 1
+        assert events[0]["event_id"] == "e1"

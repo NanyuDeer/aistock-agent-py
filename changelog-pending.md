@@ -52,3 +52,21 @@
 - 新增 `src/aistock_agent/services/event_store.py`：EventRecord TypedDict（13 字段）；event_content_hash（sha1 of title|url）；normalize_event（title 缺失丢弃、impact_score 缺省 0、direction 三态归一、source_level A-D 校验、财联社无 URL 兜底详情页）；save_event_scrape（report_type=event_scrape 落库 + content_hash 同批去重，返回 persisted/deduped/error）；load_event_scrape / load_event_scrape_by_symbol（按标的从 payload.symbol / involved_keywords 过滤）
 - 新增 `tests/unit/test_event_store.py`：7 个用例（hash 稳定性 / normalize 字段保留 / 缺 title 丢弃 / impact_score 缺省 / 落库参数断言 / 同批去重 / 按日期读取），全部 mock node_api
 - 测试：pytest tests/unit/test_event_store.py → 7 passed（RED→GREEN）
+
+## 2026-08-12 统一事件抓取中台 Task 1 评审修复（4 Important + 3 Minor）
+- **Imp1 时区**：`_now_shanghai` 改显式 `ZoneInfo("Asia/Shanghai")`（对齐 utils/date.py），不再依赖系统本地时区
+- **Imp2 异常降级测试**：补 5 条用例——save_analysis_report 抛异常 → error 非空；返回 None → persisted 0 且 error None；load 报告 None/content 非 dict/events 非 list → 均返回 []
+- **Imp3 mypy strict**：`load_event_scrape` 改逐字段安全构造 EventRecord（去掉 `# type: ignore[misc]`），缺失字段兜默认值；测试文件补函数返回标注 + `_make_event` helper（cast 到 EventRecord）
+- **Imp4 同日多批合并**：`save_event_scrape` 改 load→merge→save（按 content_hash 合并当日已有事件，避免 Node 单行 upsert 整行覆盖丢前批）；`update_cache=False`（后台数据中台产物不进前端公共缓存，对齐 chat_analysis D15）；新增「第二次调用与已有事件合并」用例
+- **Minor1**：EventRecord 在测试中实际使用（`_make_event` 返回类型），消除 F401
+- **Minor2**：URL 兜底仅 `source == "cls"` 时拼 cls.cn 详情页，eastmoney/ths 不再拼错链接；新增 normalize URL 兜底区分 source 用例
+- 验证：pytest 14 passed；mypy（event_store.py + test_event_store.py）0 错误；ruff 0 项
+
+## 2026-08-12 统一事件抓取中台 Task 2：采集工具（数据源封装）与 scrape_mode 条件边路由
+- 新增 `src/aistock_agent/services/event_scrape_sources.py`：5 个数据源采集器——`collect_cls_telegraph`（/internal/news/telegraph 当日全量，degraded/空降级 /internal/news/latest）、`collect_eastmoney_judgements`（/internal/monitor/alerts?days=1 复用 stock_info_judgements 已 AI 研判，ai_impact→direction/impact_score 映射）、`collect_ths_original`（/internal/insight/sources?date= 读 watchlist_insight_sources）、`collect_tavily`（TavilyService.search 经 asyncio.to_thread 包装防阻塞）、`collect_global_markets`（复用 market_tools.collect_global_market_facts 结构化外盘事实）
+- 新增 `src/aistock_agent/services/event_scraper.py`：`run_event_scrape(scrape_mode, *, score_date, event)` 条件边路由入口（full_daily / intraday / event_triggered），`VALID_MODES` 校验未知模式抛 ValueError；full_daily 并发 gather 5 源、intraday 仅电报+东财、event_triggered 按 symbol 过滤东财事件；均经 is_major_event（impact_score>=4）筛选后 save_event_scrape 落库
+- 实现要点：采集函数经模块引用调用（`event_scrape_sources.`/`event_store.`），避免 from-import 绑定陷阱（patch 源模块无效，对齐 Task 4 备注2 先例）；`_extract_items` helper 收窄 node_api 响应类型（mypy strict object-not-iterable）
+- 顺手修 Task 1 Minor 1：`load_event_scrape` 单条事件 impact_score 畸形（非数值）只跳过该条并 warning，不再炸整批返回 []（影响 save_event_scrape 的 load→merge 幂等路径）；补 `test_load_event_scrape_skips_malformed_event_keeps_rest`
+- 新增测试：test_event_scrape_sources.py（3 用例，逐字简报）+ test_event_scraper.py（2 用例，逐字简报）；验证：pytest 20 passed（3 文件）、mypy Success（3 文件）、ruff All checks passed
+- Node 侧（app-api）：`src/modules/insight/internalRouter.ts` 新增 `GET /sources`（= /internal/insight/sources），查 watchlist_insight_sources 按 published_at::date 过滤，date 格式校验 + 502 降级；`npx tsc --noEmit` 0 错误
+- 偏差说明：① node_api.get 只收 path 字符串，query 参数拼在 path 里（telegraph?date=..&limit=200 / monitor/alerts?days=1）；② TavilyService.search 为同步方法，brief 的 `await` 改为 to_thread；③ brief 的 collect_global_markets 期望 get_global_markets 返回 dict 含 raw，实际是 @tool 包装的字符串输出，改复用同模块结构化事实函数 collect_global_market_facts

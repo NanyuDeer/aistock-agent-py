@@ -192,28 +192,47 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
         if not isinstance(events, list):
             return []
         # 逐字段安全构造：不依赖 EventRecord(**ev)（TypedDict 动态键 mypy 报
-        # typeddict-item），并对缺失/异常字段兜默认值，保证返回元素 schema 完整
-        return [
-            EventRecord(
-                event_id=str(ev.get("event_id", "")),
-                title=str(ev.get("title", "")),
-                summary=str(ev.get("summary", "")),
-                url=str(ev.get("url", "")),
-                impact_score=int(ev.get("impact_score", 0) or 0),
-                direction=str(ev.get("direction", "neutral")),
-                involved_keywords=[
-                    str(k) for k in ev.get("involved_keywords", []) if isinstance(k, str)
-                ],
-                source=str(ev.get("source", "")),
-                source_level=str(ev.get("source_level", "C")),
-                content_hash=str(ev.get("content_hash", "")),
-                scrape_at=str(ev.get("scrape_at", "")),
-                score_date=str(ev.get("score_date", "")),
-                payload=ev.get("payload", {}) if isinstance(ev.get("payload", {}), dict) else {},
+        # typeddict-item），并对缺失/异常字段兜默认值，保证返回元素 schema 完整。
+        # 单条事件字段畸形（如 impact_score 非数值）只跳过该条，不炸整批
+        # （Task 1 Minor 1 顺手修：load 单字段畸形级联）。
+        result: list[EventRecord] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            try:
+                impact_score = int(ev.get("impact_score", 0) or 0)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "event_scrape_load_skip_malformed",
+                    event_id=str(ev.get("event_id", ""))[:32],
+                )
+                continue
+            result.append(
+                EventRecord(
+                    event_id=str(ev.get("event_id", "")),
+                    title=str(ev.get("title", "")),
+                    summary=str(ev.get("summary", "")),
+                    url=str(ev.get("url", "")),
+                    impact_score=impact_score,
+                    direction=str(ev.get("direction", "neutral")),
+                    involved_keywords=[
+                        str(k)
+                        for k in ev.get("involved_keywords", [])
+                        if isinstance(k, str)
+                    ],
+                    source=str(ev.get("source", "")),
+                    source_level=str(ev.get("source_level", "C")),
+                    content_hash=str(ev.get("content_hash", "")),
+                    scrape_at=str(ev.get("scrape_at", "")),
+                    score_date=str(ev.get("score_date", "")),
+                    payload=(
+                        ev.get("payload", {})
+                        if isinstance(ev.get("payload", {}), dict)
+                        else {}
+                    ),
+                )
             )
-            for ev in events
-            if isinstance(ev, dict)
-        ]
+        return result
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_load_failed", error=str(exc))
         return []
