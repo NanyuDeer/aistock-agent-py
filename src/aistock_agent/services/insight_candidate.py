@@ -266,10 +266,14 @@ def extract_candidates_from_evidence(
 
     announcement/earnings → company_event/earnings；news/quant 按标题关键词词典二次分类。
     direction（'up'/'down'）当前预留，后续可用于方向过滤。
+
+    Attention: candidate ``id`` 使用 ``e{idx+1}`` 格式，其中 ``idx`` 为证据包原始索引
+    （非去重后的输出索引），保证下游 ``_validate_driver_anchored_in_evidence`` 通过
+    ``evidence[int(sid[1:]) - 1]`` 能正确定位到源证据条目。
     """
     cands: list[CandidateFactor] = []
     seen: set[str] = set()
-    for item in evidence:
+    for idx, item in enumerate(evidence):
         source_type = str(item.get("source_type") or "")
         title = str(item.get("title") or "")
         excerpt = str(item.get("excerpt") or "")
@@ -287,7 +291,7 @@ def extract_candidates_from_evidence(
             continue
         seen.add(label)
         cands.append(CandidateFactor(
-            id=f"e{len(cands) + 1}",
+            id=f"e{idx + 1}",
             label=label,
             category=category,
             # source 必须落在 _SOURCE_BASE_SCORE 已有键（body/quant/title）：文本证据按正文级 body，

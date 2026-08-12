@@ -9,7 +9,14 @@
 2. ``rule_fallback_select``：LLM 失败或校验不过时回退，按证据分层打分选主因
    （L1 正文 10.0 / L2 量化 6.0 / L3 标题 3.0，乘以强度），suppressed 候选 0 分；
    输出 ``InsightResultPayload`` 同构 dict（``validation_status="rule_fallback"``）。
+
+二期新增（证据包路径）：
+3. ``validate_attribution_from_evidence``：证据包路径专用校验，复用候选存在性/非
+   suppressed/label 长度规则，替换证据锚定判定为 ``_validate_driver_anchored_in_evidence``。
+4. ``confidence_cap_for_evidence`` / ``_apply_cap``：T1/T2 证据上限 medium，业绩远期上限 low。
 """
+
+import re
 
 from aistock_agent.config import settings
 from aistock_agent.schemas.insight import DriverOutput, InsightAttributionOutput
@@ -151,4 +158,106 @@ def _unconfirmed_text() -> str:
     return (
         "价格异动已确认，但在当前证据窗口内未找到可验证的主导因素；"
         "建议关注后续公告、行业联动及资金变化。"
+    )
+
+
+# ── 二期：证据包路径置信度联动 ──────────────────────────────────────────────────
+
+
+def confidence_cap_for_evidence(candidates: list[CandidateFactor]) -> str | None:
+    """主因证据来自 T1/T2 时置信度上限 medium；业绩特例远期（strength<0.3）上限 low（PRD §8 联动）。
+
+    依赖 ``extract_candidates_from_evidence`` 在 CandidateFactor 填充 ``time_bucket``。
+    """
+    for c in candidates:
+        if c.time_bucket in ("T1", "T2"):
+            return "medium"
+        if c.time_bucket == "earnings" and c.strength < 0.3:
+            return "low"
+    return None
+
+
+def _apply_cap(confidence: str, cap: str | None) -> str:
+    """置信度封顶：high → cap（medium/low），其余不变。
+
+    ``cap`` 为 None 时不封顶；置信度等级排序 low < medium < high。
+    """
+    if cap is None:
+        return confidence
+    rank = {"low": 0, "medium": 1, "high": 2}
+    return confidence if rank.get(confidence, 0) <= rank[cap] else cap
+
+
+# ── 二期：证据包路径校验器锚定 ──────────────────────────────────────────────────
+
+
+def _validate_driver_anchored_in_evidence(
+    d: DriverOutput,
+    by_id: dict[str, CandidateFactor],
+    evidence: list[dict[str, object]],
+) -> bool:
+    """证据包路径锚定：候选存在性/非 suppressed/label 合规 + 证据锚定。
+
+    一期 ``_validate_driver`` 的 evidence_quote 锚定判定（逐字检索原文）不适合量化候选
+    （source='quant'）—— 其 evidence_quote 来自结构化字段、不在聚合正文里，直接复用会
+    误判"未锚定"。
+
+    量化候选（source='quant'）：锚定规则 = quote 中的关键片段（板块名/数字/百分号）在
+    对应 source_type 证据的 title/excerpt 中可检索；文本候选（source='body'）：沿用
+    evidence_quote 在对应证据的 title/excerpt 中可检索。
+    """
+    cand = by_id.get(d.candidate_id)
+    if cand is None or cand.suppressed:
+        return False
+    if not d.label or len(d.label) > settings.insight_label_max_chars:
+        return False
+    if d.category is not None and d.category != cand.category:
+        return False
+    # 按 candidate id 定位源证据条目（id 格式 e{idx+1}，idx 为证据包原始索引）
+    sid = cand.id
+    target = evidence[int(sid[1:]) - 1] if sid.startswith("e") else None
+    if not isinstance(target, dict):
+        return False
+    title = str(target.get("title") or "")
+    excerpt = str(target.get("excerpt") or "")
+    if cand.source == "quant":
+        # 量化候选：提取 quote 中的关键 token（数字/百分号/汉字片段），任一可检索即锚定
+        quote = cand.evidence_quote
+        tokens = [
+            t
+            for t in re.findall(
+                r"\d+(?:\.\d+)?%?|[A-Za-z0-9\u4e00-\u9fa5]{2,}", quote
+            )
+            if t
+        ]
+        return any(tok in title or tok in excerpt for tok in tokens)
+    # 非量化候选：evidence_quote 在对应证据的 title/excerpt 中可检索
+    return cand.evidence_quote in title or cand.evidence_quote in excerpt
+
+
+def validate_attribution_from_evidence(
+    output: InsightAttributionOutput,
+    candidates: list[CandidateFactor],
+    evidence: list[dict[str, object]],
+) -> bool:
+    """证据包路径专用校验：替换 ``validate_attribution`` 的证据锚定判定。
+
+    - unconfirmed 语义：仅当候选集无有效候选时合法（同 ``validate_attribution``）。
+    - 主因/次因校验：复用候选存在性/非 suppressed/label 长度/分类一致性规则，
+      证据锚定改用 ``_validate_driver_anchored_in_evidence``。
+    - 一期 ``validate_attribution`` 保持不变（零回归）。
+    """
+    if output.attribution_status == "unconfirmed":
+        valid = [c for c in candidates if not c.suppressed]
+        return len(valid) == 0
+    if output.primary_driver is None:
+        return False
+    by_id = {c.id: c for c in candidates}
+    if not _validate_driver_anchored_in_evidence(
+        output.primary_driver, by_id, evidence
+    ):
+        return False
+    return all(
+        _validate_driver_anchored_in_evidence(d, by_id, evidence)
+        for d in output.secondary_drivers
     )
