@@ -583,8 +583,9 @@ def _event_records_to_major_events(
 
     过滤语义：仅保留重大事件（impact_score >= MAJOR_IMPACT_THRESHOLD），
     过滤 event_triggered 分支豁免入库的 impact=1 普通证据（stock_trace 溯源用），
-    对齐注入路径 :690-728 的同款过滤——否则缓存命中时 analysis_reports
-    major_events 混入普通证据，手动晨报端点 major_event_count 诊断计数失真。
+    对齐注入路径（事件库注入 {{MAJOR_EVENTS_CONTEXT}} 时的同款过滤语义）——
+    否则缓存命中时 analysis_reports major_events 混入普通证据，手动晨报端点
+    major_event_count 诊断计数失真。
     """
     # 函数级 import：与 run() 内 load_event_scrape 的引入方式一致（避免顶层
     # import 引入 event_store 的隐式依赖；MAJOR_IMPACT_THRESHOLD 阈值常量）

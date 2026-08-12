@@ -122,6 +122,23 @@ def test_scrape_list_missing_date_returns_422(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_scrape_list_degrades_on_node_error(client: TestClient) -> None:
+    """node 分析报告接口异常 → 服务层降级返回 []，路由 200 空列表（不 500）。
+
+    不 patch 服务层 load_event_scrape：真实调用链中 event_store 内部 try/except
+    已保证降级（捕获后返回 []）。patch node_api 真实调用路径
+    get_analysis_report_quiet（M2 起 load_event_scrape 走 404 静默方法，
+    对齐本文件头部 mock 路径说明），验证路由在 node 抛异常时不 500。
+    """
+    with patch(
+        "aistock_agent.services.event_store.node_api.get_analysis_report_quiet",
+        new=AsyncMock(side_effect=RuntimeError("node down")),
+    ):
+        resp = client.get("/api/agent/event/scrape-list", params={"date": "2026-08-12"})
+    assert resp.status_code == 200
+    assert resp.json() == {"events": []}
+
+
 # ── 路由层：GET /api/agent/event/scrape-by-symbol/:symbol ───────
 
 

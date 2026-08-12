@@ -63,7 +63,13 @@ async def test_event_scrape_job_skips_non_trading_day():
 
 @pytest.mark.asyncio
 async def test_event_scrape_job_calls_run_event_scrape_on_trading_day():
-    """交易日调用 run_event_scrape(full_daily, score_date=今天)。"""
+    """交易日调用 run_event_scrape(full_daily, score_date=今天)。
+
+    I1 回归保护（成功日志）：若代码被改回重复传 scrape_mode= 会因 TypeError
+    被下方 except 吞掉，仅靠 mock_run 断言可能失真；直接断言成功日志
+    event_scrape_job_done 恰好一次、失败日志 event_scrape_job_failed 未出现，
+    可从日志侧立刻报警。
+    """
     from aistock_agent.services import scheduler
 
     with (
@@ -74,14 +80,24 @@ async def test_event_scrape_job_calls_run_event_scrape_on_trading_day():
             # 真实返回形状：run_event_scrape 返回 {"scrape_mode", "persisted", "deduped", "error"}
             return_value={"scrape_mode": "full_daily", "persisted": 1, "deduped": 0, "error": None},
         ) as mock_run,
+        patch("aistock_agent.services.scheduler.logger") as mock_logger,
     ):
         await scheduler._run_event_scrape_job("full_daily")
     mock_run.assert_awaited_once_with("full_daily", score_date=shanghai_today().isoformat())
+    # I1 回归保护：成功日志事件断言 + 失败日志不出现
+    mock_logger.info.assert_called_once_with(
+        "event_scrape_job_done",
+        scrape_mode="full_daily",
+        persisted=1,
+        deduped=0,
+        error=None,
+    )
+    mock_logger.exception.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_event_scrape_job_passes_intraday_mode():
-    """盘中档透传 scrape_mode=intraday。"""
+    """盘中档透传 scrape_mode=intraday（同步断言成功日志，防失败被吞）。"""
     from aistock_agent.services import scheduler
 
     with (
@@ -91,14 +107,23 @@ async def test_event_scrape_job_passes_intraday_mode():
             new_callable=AsyncMock,
             return_value={"scrape_mode": "intraday", "persisted": 0, "deduped": 0, "error": None},
         ) as mock_run,
+        patch("aistock_agent.services.scheduler.logger") as mock_logger,
     ):
         await scheduler._run_event_scrape_job("intraday")
     mock_run.assert_awaited_once_with("intraday", score_date=shanghai_today().isoformat())
+    mock_logger.info.assert_called_once_with(
+        "event_scrape_job_done",
+        scrape_mode="intraday",
+        persisted=0,
+        deduped=0,
+        error=None,
+    )
+    mock_logger.exception.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_event_scrape_job_swallows_run_exception():
-    """run_event_scrape 抛异常时 job 不向上抛（记录日志）。"""
+    """run_event_scrape 抛异常时 job 不向上抛（记录 event_scrape_job_failed 失败日志）。"""
     from aistock_agent.services import scheduler
 
     with (
@@ -108,8 +133,15 @@ async def test_event_scrape_job_swallows_run_exception():
             new_callable=AsyncMock,
             side_effect=RuntimeError("scrape boom"),
         ),
+        patch("aistock_agent.services.scheduler.logger") as mock_logger,
     ):
         await scheduler._run_event_scrape_job("full_daily")  # 不应抛异常
+    # 失败日志事件断言：与 I1 成功日志断言成对，防止异常被静默吞掉
+    mock_logger.exception.assert_called_once_with(
+        "event_scrape_job_failed",
+        scrape_mode="full_daily",
+        error="scrape boom",
+    )
 
 
 # ── start_scheduler 注册集成检查 ──

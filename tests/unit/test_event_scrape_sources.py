@@ -156,6 +156,33 @@ async def test_collect_eastmoney_judgements_utc_maps_to_shanghai_date():
 
 
 @pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_explicit_utc_offset_converted():
+    """Min-1：非 Z 但带显式偏移（+00:00）的字符串按原偏移换算上海墙钟。
+
+    "2026-08-11T18:00:00+00:00" = UTC 18:00 = 上海 2026-08-12 02:00，
+    score_date=2026-08-12 当日事件必须保留；修复前 replace(tzinfo=上海)
+    覆盖原偏移不换算，被当作上海 8-11 18:00 误过滤为陈旧行。
+    """
+    rows = [
+        {
+            "title": "UTC偏移当日事件",
+            "ai_summary": "x",
+            "published_at": "2026-08-11T18:00:00+00:00",
+        },
+        {
+            "title": "UTC偏移昨日陈旧事件",
+            "ai_summary": "x",
+            "published_at": "2026-08-11T10:00:00+00:00",  # = 上海 8-11 18:00，真陈旧
+        },
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"total": 2, "events": rows})
+        events = await collect_eastmoney_judgements("2026-08-12")
+    titles = {ev["title"] for ev in events}
+    assert titles == {"UTC偏移当日事件"}
+
+
+@pytest.mark.asyncio
 async def test_collect_eastmoney_judgements_unparseable_time_filtered():
     """I1 边界：无法解析的时间字符串宽容回退（取前 10 字符比较），不崩溃。"""
     rows = [{"title": "异常时间事件", "ai_summary": "x", "published_at": "not-a-date"}]

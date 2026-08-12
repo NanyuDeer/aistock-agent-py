@@ -40,16 +40,20 @@ def _extract_items(resp: object, key: str = "items") -> list[Any]:
 def _event_shanghai_date(published: str) -> str:
     """把 Node 返回的事件时间字符串转成上海时区日期（YYYY-MM-DD）。
 
-    兼容两种格式：
+    兼容三种格式：
     - UTC ISO 带 Z：'2026-08-12T02:00:00.000Z'（Node published_at TIMESTAMPTZ
       toISOString 输出，强制 UTC）→ 转上海时区再取日期
+    - 带显式偏移但不以 Z 结尾：'2026-08-11T18:00:00+00:00' → 按原偏移换算
+      上海墙钟（astimezone），不能 replace(tzinfo=) 覆盖原偏移
     - 本地无时区：'2026-08-12 10:00:00' / '2026-08-12T10:00:00'
       → 显式绑定上海时区（本机时区可能非上海，保证确定性）
 
     Why：Node 端 toISOString 输出 UTC，北京 00:00-07:59 的当日事件 UTC 日期
     落前一日（如 2026-08-11T22:00:00.000Z = 北京 8-12 06:00），用 UTC 日期前缀
     startswith(score_date) 比较会误过滤当日事件；必须按上海时区日期归属判断。
-    解析失败时宽容回退取前 10 字符（原 startswith 语义等价）。
+    带显式偏移的字符串同理：UTC 18:00 若被 replace(tzinfo=上海) 直接当成上海
+    18:00，会错误落到前一日。解析失败时宽容回退取前 10 字符（原 startswith
+    语义等价）。
     """
     raw = str(published).strip()
     if not raw:
@@ -58,8 +62,15 @@ def _event_shanghai_date(published: str) -> str:
         if raw.endswith("Z"):
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             return dt.astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d")
-        dt = datetime.fromisoformat(raw).replace(tzinfo=_SHANGHAI_TZ)
-        return dt.astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is not None:
+            # 显式偏移（如 +00:00）：astimezone 按原偏移换算上海墙钟；
+            # replace(tzinfo=上海) 会覆盖原偏移而不换算，导致日期归属错误
+            dt = dt.astimezone(_SHANGHAI_TZ)
+        else:
+            # 本地无时区：显式绑定上海时区
+            dt = dt.replace(tzinfo=_SHANGHAI_TZ)
+        return dt.strftime("%Y-%m-%d")
     except ValueError:
         return raw[:10]
 

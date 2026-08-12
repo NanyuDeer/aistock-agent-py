@@ -152,8 +152,8 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
     """full_daily：有重大事件且本批有新增（added>0）→ 触发 _spawn_conduction。
 
     score_date 用 shanghai_today() 动态计算：collect_global_markets 仅在
-    score_date == _today() 时才被采集（event_scraper.py:86-87），硬编码日期
-    会在非当天运行必然失败（Task 5 评审 Important 1 日期依赖时间炸弹）。
+    score_date == 今日时才被采集，硬编码日期会在非当天运行必然失败
+    （Task 5 评审 Important 1 日期依赖时间炸弹）。
     """
     today = shanghai_today().isoformat()
     major = _make_event(title="盘前重磅", impact_score=5)

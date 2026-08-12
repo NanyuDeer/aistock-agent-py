@@ -624,7 +624,7 @@ async def event_scrape_list(date: str) -> dict[str, object]:
     """
     from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
 
-    _validate_scrape_date(date)
+    date = _validate_scrape_date(date)
     events = await load_event_scrape(date)
     return {"events": events}
 
@@ -644,7 +644,7 @@ async def event_scrape_by_symbol(symbol: str, date: str) -> dict[str, object]:
         load_event_scrape_by_symbol,
     )
 
-    _validate_scrape_date(date)
+    date = _validate_scrape_date(date)
     events = await load_event_scrape_by_symbol(symbol, date)
     return {"events": events}
 
