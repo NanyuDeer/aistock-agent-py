@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime
 from typing import Any, TypedDict
@@ -20,6 +21,12 @@ logger = structlog.get_logger()
 
 # 重大事件筛选阈值：仅保留 impact_score >= 4 的事件
 MAJOR_IMPACT_THRESHOLD = 4
+
+# 落库读-改-写临界区锁（P0-4）：save_event_scrape 先读当日已有事件再合并
+# 整行覆盖，load 与 save 之间跨 await，手动 trigger 与调度并发时后写覆盖
+# 先写导致丢批。单进程内 asyncio.Lock 串行化整个临界区；多 worker 并发
+# 属记录不裁决项（辩论裁决 D2），上多 worker 前需 DB 级并发控制。
+_save_lock = asyncio.Lock()
 
 
 class EventRecord(TypedDict):
@@ -155,56 +162,57 @@ async def save_event_scrape(
             "error": None,
         }
 
-    existing = await load_event_scrape(score_date)
-    existing_hashes = {e["content_hash"] for e in existing}
-    merged = {e["content_hash"]: e for e in existing}
-    added_events: list[EventRecord] = []
-    seen_added: set[str] = set()
-    for ev in events:
-        h = ev["content_hash"]
-        if h in existing_hashes or h in seen_added:
-            continue
-        seen_added.add(h)
-        added_events.append(ev)
-        merged[h] = ev
-    unique = list(merged.values())
+    async with _save_lock:
+        existing = await load_event_scrape(score_date)
+        existing_hashes = {e["content_hash"] for e in existing}
+        merged = {e["content_hash"]: e for e in existing}
+        added_events: list[EventRecord] = []
+        seen_added: set[str] = set()
+        for ev in events:
+            h = ev["content_hash"]
+            if h in existing_hashes or h in seen_added:
+                continue
+            seen_added.add(h)
+            added_events.append(ev)
+            merged[h] = ev
+        unique = list(merged.values())
 
-    # 去重计数：本批中因重复被吸收的条数（同批内重复 + 与当日已有重复）
-    seen = set(existing_hashes)
-    deduped = 0
-    for ev in events:
-        if ev["content_hash"] in seen:
-            deduped += 1
-        else:
-            seen.add(ev["content_hash"])
+        # 去重计数：本批中因重复被吸收的条数（同批内重复 + 与当日已有重复）
+        seen = set(existing_hashes)
+        deduped = 0
+        for ev in events:
+            if ev["content_hash"] in seen:
+                deduped += 1
+            else:
+                seen.add(ev["content_hash"])
 
-    try:
-        result = await node_api.save_analysis_report(
-            report_type="event_scrape",
-            report_date=score_date,
-            content={"events": unique, "schema_version": "1.0"},
-            user_id=None,
-            data_source="event_scraper",
-            # 后台数据中台产物不进前端公共报告缓存（对齐 chat_analysis D15 先例）
-            update_cache=False,
-        )
-        persisted = len(unique) if result is not None else 0
-        return {
-            "persisted": persisted,
-            "deduped": deduped,
-            "added": len(added_events),
-            "added_events": added_events,
-            "error": None,
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("event_scrape_persist_failed", error=str(exc))
-        return {
-            "persisted": 0,
-            "deduped": deduped,
-            "added": 0,
-            "added_events": [],
-            "error": str(exc),
-        }
+        try:
+            result = await node_api.save_analysis_report(
+                report_type="event_scrape",
+                report_date=score_date,
+                content={"events": unique, "schema_version": "1.0"},
+                user_id=None,
+                data_source="event_scraper",
+                # 后台数据中台产物不进前端公共报告缓存（对齐 chat_analysis D15 先例）
+                update_cache=False,
+            )
+            persisted = len(unique) if result is not None else 0
+            return {
+                "persisted": persisted,
+                "deduped": deduped,
+                "added": len(added_events),
+                "added_events": added_events,
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("event_scrape_persist_failed", error=str(exc))
+            return {
+                "persisted": 0,
+                "deduped": deduped,
+                "added": 0,
+                "added_events": [],
+                "error": str(exc),
+            }
 
 
 async def load_event_scrape(score_date: str) -> list[EventRecord]:

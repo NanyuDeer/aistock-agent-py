@@ -274,3 +274,55 @@ async def test_load_event_scrape_not_found_logs_warning(
     assert "event_scrape_report_not_found" in out
     # 404 不再以 error 级 node_api_http_error 刷屏
     assert "node_api_http_error" not in out
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_concurrent_batches_no_loss() -> None:
+    """P0-4：并发两批不同事件，读-改-写串行化后无丢批。
+
+    共享"库"由 mock 的 load/save 模拟：load 从 store 读、save 写 store。
+    无锁时两协程都先读到空库、各自 save 覆盖 → 库中仅 1 条；有锁时
+    第二个协程读到第一个的结果并合并 → 库中 2 条。
+    """
+    import asyncio
+
+    store: dict[str, list[dict[str, object]]] = {}
+
+    def _ev(event_id: str, content_hash: str) -> dict[str, object]:
+        return {
+            "event_id": event_id, "title": f"事件{event_id}", "summary": "s",
+            "url": f"https://example.com/{event_id}", "impact_score": 5,
+            "direction": "positive", "involved_keywords": [], "source": "cls",
+            "source_level": "A", "content_hash": content_hash,
+            "scrape_at": "2026-08-12 10:00:00", "score_date": "2026-08-12",
+            "payload": {},
+        }
+
+    async def fake_load(report_type: str, score_date: str) -> dict[str, object] | None:
+        # node_api.get_analysis_report_quiet 契约：返回报告 dict（含 content.events）；
+        # 空事件库（无当日报告）返回 None（404 降级语义）。
+        await asyncio.sleep(0.01)  # 制造交错点：两协程都先执行 load
+        events = store.get(score_date, [])
+        if not events:
+            return None
+        return {"content": {"events": events}}
+
+    async def fake_save(
+        report_type: str,
+        report_date: str,
+        content: dict[str, object],
+        **_: object,
+    ) -> dict[str, object]:
+        # 写窗口 sleep：让两协程的 load 都先于任一次 save 完成，无锁时确定性丢批（RED）
+        await asyncio.sleep(0.01)
+        store[report_date] = list(content["events"])  # type: ignore[arg-type]
+        return {"id": "r1"}
+
+    with patch("aistock_agent.services.event_store.node_api") as mock_api:
+        mock_api.get_analysis_report_quiet = AsyncMock(side_effect=fake_load)
+        mock_api.save_analysis_report = AsyncMock(side_effect=fake_save)
+        await asyncio.gather(
+            save_event_scrape([_ev("e1", "aaa")], "2026-08-12"),  # type: ignore[arg-type]
+            save_event_scrape([_ev("e2", "bbb")], "2026-08-12"),  # type: ignore[arg-type]
+        )
+    assert len(store["2026-08-12"]) == 2
