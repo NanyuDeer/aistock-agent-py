@@ -102,6 +102,7 @@ class CandidateFactor(BaseModel):
     strength: float  # 0-1
     suppressed: bool = False
     suppress_reason: str | None = None
+    time_bucket: str | None = None  # T0/T1/T2/earnings（二期：证据时效分层，供置信度联动直接读取）
 
 
 def _is_suppressed(text: str) -> tuple[bool, str | None]:
@@ -214,4 +215,86 @@ def extract_candidates(title: str, keywords: list[str], content: str) -> list[Ca
         if cat:
             add(kw, cat, "title", title, 0.3)
 
+    return cands
+
+
+# ── 二期：证据包多来源候选抽取 ──────────────────────────────────────────────
+
+# PRD §8 证据时效分层系数（参数经实证校准）：
+# T0: 当日 0.8 / T-1 1.0；T1: 0.6→0.3 递减；T2: 0.2；业绩特例 0.3→0.1（offset>=2 递减）
+TIME_BUCKET_FACTORS: dict[str, float] = {
+    "T0_today": 0.8,
+    "T0_prev1": 1.0,
+    "T1": 0.6,
+    "T2": 0.2,
+}
+
+
+def _time_factor(item: dict[str, object]) -> float:
+    """根据 evidence item 的 time_bucket 与 days_offset 计算时效系数。
+
+    返回 [0.1, 1.0] 区间值，乘以原始 strength 得到时效加权强度。
+    """
+    bucket = str(item.get("time_bucket", "T0"))
+    offset = int(str(item.get("days_offset", 0) or 0))
+    if bucket == "earnings":
+        # 业绩特例：T-1 按 0.3，offset>=2 按 0.3→0.1 线性递减，下限 0.1
+        return max(0.1, 0.3 - 0.2 * float(max(0, offset - 1)))
+    if bucket == "T0":
+        return TIME_BUCKET_FACTORS["T0_today"] if offset == 0 else TIME_BUCKET_FACTORS["T0_prev1"]
+    if bucket == "T1":
+        # offset 2..5 → 0.6..0.3 线性递减（0.6 - 0.1*(offset-2)）
+        return max(0.3, 0.6 - 0.1 * float(offset - 2))
+    return TIME_BUCKET_FACTORS["T2"]
+
+
+_SOURCE_TYPE_TO_CATEGORY: dict[str, str] = {
+    "announcement": "company_event",
+    "news": "industry_theme",
+    "earnings": "earnings",
+    "rating": "company_event",
+    "radar_article": "industry_theme",
+    "quant": "industry_theme",
+}
+
+
+def extract_candidates_from_evidence(
+    evidence: list[dict[str, object]], direction: str
+) -> list[CandidateFactor]:
+    """二期：证据包多来源候选抽取。每条证据 → 候选，strength 乘时效系数。
+
+    announcement/earnings → company_event/earnings；news/quant 按标题关键词词典二次分类。
+    direction（'up'/'down'）当前预留，后续可用于方向过滤。
+    """
+    cands: list[CandidateFactor] = []
+    seen: set[str] = set()
+    for item in evidence:
+        source_type = str(item.get("source_type") or "")
+        title = str(item.get("title") or "")
+        excerpt = str(item.get("excerpt") or "")
+        sid = str(item.get("source_id") or "")
+        base_strength = float(str(item.get("strength") or 0.5))
+        category = _SOURCE_TYPE_TO_CATEGORY.get(source_type, "industry_theme")
+        # news/quant 类：尝试用标题关键词词典精化分类
+        if source_type in ("news", "quant"):
+            for kw, cat in _load_keyword_map().items():
+                if kw in title:
+                    category = cat
+                    break
+        label = (title or excerpt)[:24] or sid
+        if label in seen:
+            continue
+        seen.add(label)
+        cands.append(CandidateFactor(
+            id=f"e{len(cands) + 1}",
+            label=label,
+            category=category,
+            # source 必须落在 _SOURCE_BASE_SCORE 已有键（body/quant/title）：文本证据按正文级 body，
+            # 量化证据按 quant，保证 rule_fallback_select 打分不出现 KeyError/NaN
+            source="body" if source_type != "quant" else "quant",
+            evidence_quote=(excerpt or title)[:120],
+            strength=round(base_strength * _time_factor(item), 3),
+            suppressed=False,
+            time_bucket=str(item.get("time_bucket") or "T0"),
+        ))
     return cands
