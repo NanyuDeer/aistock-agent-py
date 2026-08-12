@@ -731,6 +731,13 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     goal: InsightGoal | None = state.get("goal")
     evidences: list[Evidence] = state.get("evidences", [])
 
+    # Phase 4-2（改进 13）：confirm 短路——qa_router 触发交互式确认时，不渲染、
+    # 不调 LLM，直接把 confirm 负载透出（ws.py 据此转 confirm_request 终态负载）。
+    # 位于澄清短路/缺 goal 检查之前：confirm 分支不需要 goal/evidences，恒有
+    # state["confirm"]（qa_router 触发分支保证）。
+    if state.get("confirm"):
+        return {"final_response": "", "confirm": state["confirm"]}
+
     if goal is None:
         logger.error("synth_answer.no_goal")
         metrics.record_synth_degraded()

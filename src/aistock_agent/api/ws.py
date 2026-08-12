@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langgraph.graph.state import CompiledStateGraph
 
-from aistock_agent.api.deps import build_chat_initial_state
+from aistock_agent.api.deps import build_chat_initial_state, reset_transient_state
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.constants import TOOL_LABELS, LangGraphEventType, WSEventType
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
@@ -97,11 +97,15 @@ async def _run_chat_graph_to_events(
     message: str,
     session_id: str,
     user_id: str | None,
+    run_id: str = "",
 ) -> dict | None:
     """后台执行 chat 图，把 WS 就绪事件 append 进 state.events 并唤醒等待者。
 
     与 WS 连接解耦：连接断开不影响本协程。结束返回终态 payload
-    （DONE / ERROR dict），由 ChatTaskManager 缓存供 resume 补发。
+    （DONE / ERROR / CONFIRM_REQUEST dict），由 ChatTaskManager 缓存供 resume 补发。
+
+    run_id：本轮的 run 标识（Phase 4-2 阶段 1 的 confirm_request.request_id 同源，
+    供前端确认后原样带回校验匹配）；默认 "" 兼容既有测试调用。
     """
 
     async def sink(payload: dict) -> None:
@@ -116,6 +120,9 @@ async def _run_chat_graph_to_events(
     seen_nodes: set[str] = set()
     reasoning_tasks: list[asyncio.Task] = []
     current_node: str = ""
+    # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发 + synth_answer 短路透出；
+    # 捕获而非中途 return——让图正常跑完，终态再转 confirm_request，替代 DONE）
+    confirm_payload: dict | None = None
     try:
         async for event in graph.astream_events(
             initial_state,
@@ -173,6 +180,10 @@ async def _run_chat_graph_to_events(
                 if name == current_node:
                     current_node = ""
                 output = event.get("data", {}).get("output")
+                if isinstance(output, dict) and output.get("confirm"):
+                    # Phase 4-2（改进 13）：阶段 1 交互式确认——捕获确认负载，
+                    # 图正常跑完后作为终态负载返回（替代 DONE，不落阶段 1 计费）
+                    confirm_payload = output["confirm"]
                 if isinstance(output, dict) and output.get("final_response"):
                     final_response = output["final_response"]
                     last_deep_report = output.get("last_deep_report")
@@ -181,6 +192,19 @@ async def _run_chat_graph_to_events(
 
         await _drain_reasoning_tasks(reasoning_tasks)
         await asyncio.sleep(0)
+        if confirm_payload is not None:
+            logger.info(
+                "chat.confirm.request run_id=%s session_id=%s", run_id, session_id
+            )
+            if not isinstance(confirm_payload, dict):
+                confirm_payload = {}
+            return {
+                "type": WSEventType.CONFIRM_REQUEST,
+                "request_id": run_id,
+                "question": confirm_payload.get("question", ""),
+                "options": confirm_payload.get("options", []),
+                "context": {"session_id": session_id},
+            }
         fresh_usage = get_token_usage()
         if fresh_usage is not None:
             token_usage = fresh_usage
@@ -256,6 +280,94 @@ def _owns_run(state: ChatRunState | None, data_user_id: str | None) -> bool:
     if state.user_id is not None and data_user_id is not None:
         return state.user_id == data_user_id
     return True
+
+
+# Phase 4-2（改进 13）：阶段 1 confirm_request 后等待用户点选的超时（60s）。
+# 超时 → confirm_timeout 重跑 → qa_router 回退既有澄清（2026-08-11 用户拍板，
+# 不猜测用户意图）。模块级常量便于测试 mock 缩短。
+_CONFIRM_TIMEOUT_SEC = 60.0
+
+
+async def _wait_confirm_response(
+    state: ChatRunState | None,
+    websocket: WebSocket,
+    session_id: str,
+    run_id: str,
+    confirm_payload: dict,
+) -> dict | None:
+    """等待用户确认响应（交互式确认阶段 1 → 阶段 2 编排）。
+
+    竞速结构对齐 _forward_until_done_or_cmd（FIRST_COMPLETED + 超时）：
+    - 收到 {type:"confirm_response", request_id, choice}：
+      - request_id 必须 == run_id（阶段 1 的 run_id，前端原样带回），否则忽略继续等；
+      - _owns_run 不通过（越权）→ 发送 ERROR「无权访问该会话」继续等；
+      - choice == "none"（用户点「都不是」）→ 返回 None（按确认超时重跑）；
+      - 其余 → 归一化返回 {"symbol": key, "label": 从阶段 1 options 反查}；
+    - 60s 超时 / 连接断开 → 返回 None（qa_router 回退既有澄清，不猜测意图）。
+    问题 18 教训：cancel 后必须 await asyncio.gather(recv_task, return_exceptions=True)
+    收尾再 return，否则主循环下一次 receive_json 并发第二次 recv → 连接崩。
+    """
+    recv_task = asyncio.create_task(websocket.receive_json())
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {recv_task},
+                timeout=_CONFIRM_TIMEOUT_SEC,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                # 60s 超时：cancel 后 await 收尾（问题 18），按确认超时重跑
+                recv_task.cancel()
+                await asyncio.gather(recv_task, return_exceptions=True)
+                logger.warning(
+                    "chat.confirm.timeout session_id=%s run_id=%s", session_id, run_id
+                )
+                return None
+            msg = recv_task.result()
+            if (
+                msg.get("type") != WSEventType.CONFIRM_RESPONSE
+                or msg.get("request_id") != run_id
+            ):
+                # 非 confirm_response / request_id 不匹配 → 忽略继续等
+                recv_task = asyncio.create_task(websocket.receive_json())
+                continue
+            if not _owns_run(state, msg.get("user_id")):
+                logger.warning(
+                    "chat.confirm.ownership_rejected session_id=%s", session_id
+                )
+                await websocket.send_json(
+                    {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                )
+                recv_task = asyncio.create_task(websocket.receive_json())
+                continue
+            choice = msg.get("choice")
+            if choice is None or choice == "none":
+                return None
+            # 归一化：协议 choice 为 key（6 位代码）；label 从阶段 1 options 反查，
+            # 兼容客户端直接回带 dict 形状（{"symbol":..., "label":...}）
+            if isinstance(choice, dict):
+                symbol = str(choice.get("symbol") or choice.get("key") or "")
+                label = str(choice.get("label") or symbol)
+                if not symbol:
+                    return None  # 空 choice → 按确认超时重跑
+                return {"symbol": symbol, "label": label}
+            symbol = str(choice)
+            if not symbol:
+                return None
+            label = symbol
+            for opt in confirm_payload.get("options", []) or []:
+                if isinstance(opt, dict) and opt.get("key") == symbol:
+                    label = opt.get("label") or label
+                    break
+            return {"symbol": symbol, "label": str(label)}
+    except (WebSocketDisconnect, RuntimeError):
+        # 连接断开：停止监听，返回 None（超时回退语义，不抛异常）
+        logger.info("chat.confirm.disconnected session_id=%s", session_id)
+        return None
+    finally:
+        if not recv_task.done():
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
 
 
 async def _forward_until_done_or_cmd(
@@ -419,11 +531,16 @@ async def ws_chat(websocket: WebSocket) -> None:
                 str(raw_user_id) if raw_user_id not in (None, "") else None
             )
             # T6/M3：单轮 transient 路由信号每轮归零（对齐 reset_transient_state；
-            # last_deep_report / pending_clarification 跨轮保留，不入归零）
+            # last_deep_report / pending_clarification 跨轮保留，不入归零）。
+            # Phase 4-2：confirm/confirm_choice/confirm_timeout 同为单轮 transient
+            # （经 checkpointer 跨轮残留会误触发 synth_answer 短路 / qa_router 消费）。
             initial_state["deep_source"] = None
             initial_state["final_response"] = None
             initial_state["goals"] = None
             initial_state["general_source"] = None
+            initial_state["confirm"] = None
+            initial_state["confirm_choice"] = None
+            initial_state["confirm_timeout"] = None
 
             # 普通消息新增可选 run_id：前端断线重连后用它 + session_id 定位本轮
             run_id = str(data.get("run_id") or f"run_{session_id}_{int(time.time() * 1000)}")
@@ -436,8 +553,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                 m: str = message,
                 sid: str = session_id,
                 uid: str | None = user_id_for_billing,
+                rid: str = run_id,
             ) -> dict | None:
-                return await _run_chat_graph_to_events(st, g, is_, m, sid, uid)
+                return await _run_chat_graph_to_events(st, g, is_, m, sid, uid, rid)
 
             state = chat_task_manager.start(session_id, run_id, producer, user_id_for_billing)
             if state is None:
@@ -449,5 +567,57 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
             # 转发与接收并行：生成期间可收到 stop 控制消息（stop 可打断的前提，spec §8.3）
             await _forward_until_done_or_cmd(state, websocket, session_id)
+
+            # Phase 4-2（改进 13）：交互式确认两阶段编排。阶段 1 终态负载为
+            # confirm_request（替代 DONE）时，进入 _wait_confirm_response（60s 超时，
+            # FIRST_COMPLETED 竞速）等待用户点选；随后携带 confirm_choice /
+            # confirm_timeout 重跑同 session 图（fresh run，新 run_id，不 bypass 闸门）。
+            if (
+                state.result is not None
+                and state.result.get("type") == WSEventType.CONFIRM_REQUEST
+            ):
+                choice = await _wait_confirm_response(
+                    state, websocket, session_id, run_id, state.result
+                )
+                # 阶段 2 也是新一轮调用：重置 transient 字段（复用 reset_transient_state
+                # 对齐 M3 归零；confirm 需显式清——阶段 1 的 confirm 已写进 checkpointer，
+                # 不清会让 synth_answer 二次短路）；token 计费重置后正常落库。
+                initial_state2 = build_chat_initial_state(message)
+                initial_state2["force_deep"] = bool(data.get("force_deep"))
+                initial_state2["user_id"] = (
+                    str(raw_user_id) if raw_user_id not in (None, "") else None
+                )
+                reset_transient_state(initial_state2)
+                initial_state2["confirm"] = None
+                if choice is not None:
+                    initial_state2["confirm_choice"] = choice
+                else:
+                    # 超时 / 用户点「都不是」→ confirm_timeout 重跑 → 回退既有澄清
+                    initial_state2["confirm_timeout"] = True
+                reset_token_usage()
+                # 新 run_id：与阶段 1 的 request_id 区分（后缀 _confirm 防毫秒级撞号）
+                run_id2 = f"run_{session_id}_confirm_{int(time.time() * 1000)}"
+                user_id_for_billing2 = initial_state2.get("user_id")
+
+                async def producer2(
+                    st: ChatRunState,
+                    g: CompiledStateGraph = graph,
+                    is_: dict[str, object] = initial_state2,
+                    m: str = message,
+                    sid: str = session_id,
+                    uid: str | None = user_id_for_billing2,
+                    rid: str = run_id2,
+                ) -> dict | None:
+                    return await _run_chat_graph_to_events(st, g, is_, m, sid, uid, rid)
+
+                state2 = chat_task_manager.start(
+                    session_id, run_id2, producer2, user_id_for_billing2
+                )
+                if state2 is None:
+                    await websocket.send_json({
+                        "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
+                    })
+                else:
+                    await _forward_until_done_or_cmd(state2, websocket, session_id)
     except WebSocketDisconnect:
         pass

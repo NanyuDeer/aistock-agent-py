@@ -1214,6 +1214,66 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, CAPABILITY_REPLY, "greeting")
 
+    # ── Phase 4-2（改进 13）：confirm_choice 消费（阶段 2 续跑）──
+    # 用户点选确认项后，ws.py 携带 confirm_choice 重跑同 session 图（fresh run）。
+    # 本块位于闸门 0/0.5 之后（合规/寒暄短路优先级不变，不 bypass 闸门）：
+    # 跳过名称提取/resolve，直接用点选标的构造与闸门 2 resolve 成功分支一致的
+    # 短路结构（skill_calls=[stock_snapshot] + 强预测词附加 predict 子目标）。
+    # confirm_choice 是单轮 transient 输入信号，不写回图状态输出。
+    choice = state.get("confirm_choice")
+    if isinstance(choice, dict) and _is_valid_symbol_arg(
+        choice.get("symbol") or choice.get("key")
+    ):
+        choice_symbol = str(choice.get("symbol") or choice.get("key"))
+        choice_label = str(choice.get("label") or "")
+        choice_skill = _infer_stock_skill(message)
+        choice_args: dict[str, Any] = {"symbol": choice_symbol}
+        if choice_skill == "stock_news":
+            choice_args["limit"] = 10
+        choice_goal = InsightGoal(
+            question=message,
+            intent=choice_skill,  # type: ignore[arg-type]
+            symbols=[choice_symbol],
+        )
+        choice_call = SkillCall(skill_name=choice_skill, args=choice_args)  # type: ignore[arg-type]
+        # D35：单意图预测（对齐闸门 2 resolve 成功分支——强预测词才附加）；
+        # label 剥 "(代码)" 后缀取干净名称（对齐 gate2 传 candidate 的先例）
+        if "(" in choice_label:
+            choice_label = choice_label.split("(")[0]
+        predict_goal = _build_single_predict_goal(
+            message, choice_skill, [choice_symbol], label=choice_label
+        )
+        if predict_goal is not None:
+            choice_call = choice_call.model_copy(update={"goal_id": "g1"})
+            choice_calls = [
+                choice_call,
+                SkillCall(
+                    skill_name="prediction",
+                    args={"symbols": [choice_symbol]},
+                    goal_id="g2",
+                ),
+            ]
+            choice_plan: Literal["direct", "compose"] = "compose"
+            choice_goals: list[SubGoal] | None = [predict_goal]
+        else:
+            choice_plan = "direct"
+            choice_goals = None
+            choice_calls = [choice_call]
+        logger.info(
+            "qa_router.confirm_choice",
+            symbol=choice_symbol,
+            skill=choice_skill,
+            predict=bool(predict_goal),
+        )
+        metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+        return {
+            "goal": choice_goal,
+            "plan": choice_plan,
+            "skill_calls": choice_calls,
+            "complexity": "light",
+            "goals": choice_goals,
+        }
+
     # ── 闸门 0.5b：科普问句（D32 升级，P7+P8；2026-08-07 补后缀句式）──
     #   → 置 science 信号走 general 动态回答
     # 用户拍板：仅股票投资知识词表；产品内部概念不纳入（防误伤 compose）。
@@ -1401,6 +1461,42 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
             # 多轮（指代解析）或非个股意图（板块/行业/溯源/compose）放行
             elif len(messages) <= 1 and not _has_non_stock_intent(message):
+                # Phase 4-2（改进 13）：交互式确认触发——在走澄清之前，若消息含
+                # ≥2 个可 resolve 的多名称候选 → 发 confirm（替代澄清）；否则维持
+                # 既有澄清字节不变。confirm_timeout/confirm_choice 非空说明是阶段 2
+                # 重跑（用户点选/超时），跳过触发直接走既有澄清（防无限循环）。
+                if not state.get("confirm_timeout") and not state.get("confirm_choice"):
+                    multi = _extract_multi_name_candidates(message)
+                    if len(multi) >= 2:
+                        resolved_pairs: list[tuple[str, str]] = []
+                        for name in multi:
+                            sym = await resolve_symbol(name)
+                            if sym is not None:
+                                resolved_pairs.append((name, sym))
+                        if len(resolved_pairs) >= 2:
+                            options = [
+                                {"key": sym, "label": f"{name}({sym})"}
+                                for name, sym in resolved_pairs
+                            ] + [{"key": "none", "label": "都不是"}]
+                            confirm = {"question": message, "options": options}
+                            logger.info(
+                                "qa_router.gate.stock_resolve_confirm",
+                                options=[opt["label"] for opt in options],
+                            )
+                            metrics.record_chat_qa_latency(
+                                "qa_router", int((time.monotonic() - start) * 1000)
+                            )
+                            return {
+                                "goal": InsightGoal(
+                                    question=message,
+                                    intent="stock_snapshot",
+                                    constraints={"guardrail": "resolve_confirm"},
+                                ),
+                                "plan": "direct",
+                                "skill_calls": [],
+                                "confirm": confirm,
+                                "complexity": "light",
+                            }
                 logger.info(
                     "qa_router.gate.stock_resolve_miss",
                     name=candidate,
