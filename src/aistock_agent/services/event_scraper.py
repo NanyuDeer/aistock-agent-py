@@ -16,12 +16,12 @@ from-import 会让 patch 失效（from-import 绑定陷阱，对齐 Task 4 备�
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 from typing import Any
 
 import structlog
 
 from aistock_agent.services import event_scrape_sources, event_store
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -29,7 +29,8 @@ VALID_MODES = frozenset({"full_daily", "intraday", "event_triggered"})
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    """上海时区自然日（作为报告交易日，对齐 utils/date.py 惯例）。"""
+    return shanghai_today().isoformat()
 
 
 async def scrape_full_daily(score_date: str) -> dict[str, Any]:
@@ -68,16 +69,27 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
 
 
 async def scrape_event_triggered(event: dict[str, Any]) -> dict[str, Any]:
-    """事件触发采集：stock_trace 价格异动窗口的证据（新闻+公告）。"""
+    """事件触发采集：stock_trace 价格异动窗口的证据（新闻+公告）。
+
+    证据全量入库（用户裁决：stock_trace 溯源需普通事件作证据，
+    豁免 is_major_event 筛选，本分支不做 impact_score 过滤）。
+    只保留与标的关联的事件：symbol 命中 payload.symbol 或 involved_keywords
+    （与 load_event_scrape_by_symbol 双匹配语义一致）。
+    """
     symbol = str(event.get("symbol", ""))
     score_date = str(event.get("score_date") or _today())
     events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
-    # 只保留与标的关联的事件（symbol 命中 payload/involved_keywords）
+    # 只保留与标的关联的事件（symbol 命中 payload.symbol / involved_keywords）
     if symbol:
+        lowered = symbol.lower()
         events = [
             ev
             for ev in events
-            if symbol.lower() in str(ev.get("payload", {}).get("symbol", "")).lower()
+            if lowered in str(ev.get("payload", {}).get("symbol", "")).lower()
+            or any(
+                lowered in str(k).lower()
+                for k in ev.get("involved_keywords", [])
+            )
         ]
     logger.info("event_scrape_triggered", symbol=symbol, count=len(events))
     return await event_store.save_event_scrape(events, score_date)

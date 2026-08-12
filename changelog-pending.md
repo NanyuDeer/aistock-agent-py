@@ -70,3 +70,14 @@
 - 新增测试：test_event_scrape_sources.py（3 用例，逐字简报）+ test_event_scraper.py（2 用例，逐字简报）；验证：pytest 20 passed（3 文件）、mypy Success（3 文件）、ruff All checks passed
 - Node 侧（app-api）：`src/modules/insight/internalRouter.ts` 新增 `GET /sources`（= /internal/insight/sources），查 watchlist_insight_sources 按 published_at::date 过滤，date 格式校验 + 502 降级；`npx tsc --noEmit` 0 错误
 - 偏差说明：① node_api.get 只收 path 字符串，query 参数拼在 path 里（telegraph?date=..&limit=200 / monitor/alerts?days=1）；② TavilyService.search 为同步方法，brief 的 `await` 改为 to_thread；③ brief 的 collect_global_markets 期望 get_global_markets 返回 dict 含 raw，实际是 @tool 包装的字符串输出，改复用同模块结构化事实函数 collect_global_market_facts
+
+## 2026-08-12 统一事件抓取中台 Task 2 评审修复（3 Important + 5 Minor）
+- **Imp1 分级入库豁免**：`scrape_event_triggered` docstring 显式注明「证据全量入库（用户裁决：stock_trace 溯源需普通事件作证据，豁免 is_major_event 筛选）」；保留不过滤实现；补 `test_scrape_event_triggered_persists_all_evidence_unfiltered`（impact_score=1 普通事件仍落库）
+- **Imp2 外盘事实落库**：`collect_global_markets` impact_score 映射改 `5 if abs(pct) >= 1 else 1`（波动 >= 1% 记为重大事实过 is_major_event 落库，< 1% 普通事实被 full_daily 过滤）；补 `test_collect_global_markets_normalizes_facts`（1.5% → 5、0.5% → 1）
+- **Imp3 测试覆盖**：test_event_scrape_sources.py 补 7 条（ths_original 正常/JSON 字符串 keywords/异常降级、tavily 正常/异常、global_markets 正常/异常、eastmoney 异常降级）；test_event_scraper.py 补 2 条（intraday 仅重大落库、event_triggered 全量落库）。patch 目标：node_api/TavilyService/collect_global_market_facts 均按「函数内 from-import 绑定源」patch（tavily 模块 / market_tools 模块）
+- **Minor1**：`collect_ths_original` 显式映射 `raw["summary"]=content`、`raw["involved_keywords"]=keywords`（JSONB 防御：list 直接用，str json.loads 失败 → []）
+- **Minor2**：`scrape_event_triggered` 过滤补 involved_keywords 匹配（与 `load_event_scrape_by_symbol` 双匹配语义一致），docstring 与实现同步
+- **Minor3**：`_today()` 改 `shanghai_today()`（上海时区，对齐 utils/date.py）；`collect_global_markets` 的 score_date 同步改 shanghai_today（避免与 full_daily 判断基准不一致）
+- **Minor5**：`collect_global_markets` name/ticker 均空时 continue 跳过
+- **Minor6**：app-api `internalRouter.ts` `/sources` SQL 改 `WHERE trade_date = $1::date`（016 迁移已有 trade_date 列 + idx_insight_sources_trade_date 索引，避免 published_at::date 无法走索引）
+- 验证：pytest 30 passed（3 文件）；mypy 0 错误；ruff All checks passed；app-api `npx tsc --noEmit` 0 错误

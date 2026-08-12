@@ -7,13 +7,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_store import EventRecord, normalize_event
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -112,7 +114,7 @@ async def collect_ths_original(score_date: str) -> list[EventRecord]:
     """同花顺原创/涨停雷达（博主源，insight 模块已爬取）。
 
     读取 Node 新增接口 GET /internal/insight/sources?date=YYYY-MM-DD
-    （查 watchlist_insight_sources 表按 published_at 过滤，见 Step 3b Node 配合）。
+    （查 watchlist_insight_sources 表按 trade_date 过滤，见 Step 3b Node 配合）。
     """
     try:
         resp = await node_api.get(f"/internal/insight/sources?date={score_date}")
@@ -127,6 +129,25 @@ async def collect_ths_original(score_date: str) -> list[EventRecord]:
             continue
         raw: dict[str, Any] = dict(row)
         raw.setdefault("direction", "neutral")
+        # Min-1：显式映射 summary/involved_keywords（Node 源字段为 content/keywords）。
+        # keywords 是 JSONB，可能已解析为 list 或仍为 JSON 字符串，做防御解析。
+        raw["summary"] = str(raw.get("content") or raw.get("summary") or "").strip()
+        keywords = raw.get("keywords")
+        if isinstance(keywords, list):
+            raw["involved_keywords"] = [str(k) for k in keywords if isinstance(k, str)]
+        elif isinstance(keywords, str):
+            try:
+                parsed = json.loads(keywords)
+            except (TypeError, ValueError):
+                parsed = []
+            if isinstance(parsed, list):
+                raw["involved_keywords"] = [
+                    str(k) for k in parsed if isinstance(k, str)
+                ]
+            else:
+                raw["involved_keywords"] = []
+        else:
+            raw["involved_keywords"] = []
         event = normalize_event(raw, source="ths_original", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -175,15 +196,22 @@ async def collect_global_markets() -> list[EventRecord]:
     复用 market_tools.collect_global_market_facts（get_global_markets Tool 的
     结构化事实来源：[{ticker, name, price, change_pct, observed_at}]），
     不调 @tool 包装的字符串输出，保证 direction/impact_score 可计算。
+
+    分级入库（用户裁决）：波动 >= 1% 记为重大事实（impact_score=5）过
+    is_major_event 筛选落库；< 1% 记普通事实（impact_score=1），
+    在 full_daily 分支被 is_major_event 过滤不落库。
     """
     from aistock_agent.tools.market_tools import collect_global_market_facts
 
-    score_date = date.today().isoformat()
+    score_date = shanghai_today().isoformat()
     events: list[EventRecord] = []
     try:
         facts = await collect_global_market_facts(datetime.now(UTC))
         for fact in facts:
             name = str(fact.get("name") or fact.get("ticker") or "")
+            # Min-5：无名称（name/ticker 均为空）的行情事实无标题可归一化，跳过
+            if not name:
+                continue
             price = fact.get("price")
             change_pct = fact.get("change_pct")
             pct = 0.0
@@ -199,7 +227,9 @@ async def collect_global_markets() -> list[EventRecord]:
                 "direction": (
                     "positive" if pct > 0 else "negative" if pct < 0 else "neutral"
                 ),
-                "impact_score": 3 if abs(pct) >= 1 else 1,
+                # Important 2：波动 >= 1% 记为重大事实（impact_score=5）过
+                # is_major_event 落库；< 1% 为 1（full_daily 分支被过滤不落库）
+                "impact_score": 5 if abs(pct) >= 1 else 1,
             }
             event = normalize_event(raw, source="global_markets", score_date=score_date)
             if event is not None:
