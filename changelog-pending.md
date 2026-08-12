@@ -47,3 +47,8 @@
 - M6：`_cluster_events` 簇 T 为空时跳过（避免 fromisoformat("") 崩溃）
 - 测试：case_scanner 4、gt_validator 7、ground_truth 4、集成 2、全量 iterate 20 passed 全绿
 - I1 已知限制：`scripts/build_iterate_cases.py` 按 `--agent` if/else 硬编码 review/event_analyst 流程，未消费 `adapter.data_deps` 声明（final review 裁决本期不做通用化）；接入第三个 agent 时需抽「按 data_deps 采集 → build_case → 生成 GT → 校验」通用流水线
+
+## 2026-08-12 统一事件抓取中台 Task 1：EventRecord 模型 + event_store 服务
+- 新增 `src/aistock_agent/services/event_store.py`：EventRecord TypedDict（13 字段）；event_content_hash（sha1 of title|url）；normalize_event（title 缺失丢弃、impact_score 缺省 0、direction 三态归一、source_level A-D 校验、财联社无 URL 兜底详情页）；save_event_scrape（report_type=event_scrape 落库 + content_hash 同批去重，返回 persisted/deduped/error）；load_event_scrape / load_event_scrape_by_symbol（按标的从 payload.symbol / involved_keywords 过滤）
+- 新增 `tests/unit/test_event_store.py`：7 个用例（hash 稳定性 / normalize 字段保留 / 缺 title 丢弃 / impact_score 缺省 / 落库参数断言 / 同批去重 / 按日期读取），全部 mock node_api
+- 测试：pytest tests/unit/test_event_store.py → 7 passed（RED→GREEN）
