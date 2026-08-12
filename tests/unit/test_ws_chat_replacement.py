@@ -16,6 +16,7 @@ from fastapi import WebSocketDisconnect
 from aistock_agent.api import ws as ws_module
 from aistock_agent.api.routes import _select_graph
 from aistock_agent.api.ws import _NODE_LABELS, ws_chat
+from aistock_agent.services.chat_task_manager import ChatRunState
 
 
 def test_node_labels_contains_chat_subgraph_nodes():
@@ -332,3 +333,73 @@ async def test_ws_chat_done_payload_defaults_token_usage_cards_none() -> None:
     assert len(done) == 1
     assert done[0]["token_usage"] is None
     assert done[0]["cards"] is None
+
+
+# ── 问题 18（Phase 2 recv 竞态）：recv_task.cancel() 必须 await 收尾 ──────────
+
+
+class _RecvTrackingWebSocket:
+    """模拟 uvicorn 并发 recv 防护：挂起期间第二个 receive_json 抛同款 RuntimeError。
+
+    问题 18 根因（ws.py#L291-292）：`recv_task.cancel()` 后未 await 收尾即 return，
+    主循环随即 `receive_json()` → 同连接并发第二次 recv → uvicorn
+    RuntimeError("cannot call recv while another coroutine is already waiting for
+    the next message") → handler 崩溃 → 连接关（生产冒烟 9 轮全部 closeCode=1005）。
+    """
+
+    def __init__(self, payloads: list[dict] | None = None) -> None:
+        self._queue = list(payloads or [])
+        self.sent: list[dict] = []
+        self._recv_pending = False
+        self.concurrent_recv_raised = False
+        self._gate = asyncio.Event()  # 挂起接收的释放闸（测试可控，默认不释放）
+
+    @property
+    def recv_pending(self) -> bool:
+        return self._recv_pending
+
+    async def receive_json(self) -> dict:
+        if self._recv_pending:
+            self.concurrent_recv_raised = True
+            raise RuntimeError(
+                "cannot call recv while another coroutine is already waiting for the next message"
+            )
+        if self._queue:
+            return self._queue.pop(0)
+        self._recv_pending = True
+        try:
+            await self._gate.wait()
+            return {"type": "pong"}
+        finally:
+            self._recv_pending = False
+
+    async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+def _make_done_state(session_id: str = "s1") -> ChatRunState:
+    """构造已完成的 ChatRunState（send_task 会立即转发终态并返回）。"""
+    task = asyncio.create_task(asyncio.sleep(0))
+    state = ChatRunState(session_id=session_id, run_id="r1", task=task)
+    state.done = True
+    state.result = {"type": "done", "content": "hi"}
+    return state
+
+
+@pytest.mark.asyncio
+async def test_forward_until_done_or_cmd_clears_pending_recv_on_done() -> None:
+    """问题 18 回归：send 完成后 recv_task.cancel() 必须 await 收尾，不得遗留并发 recv。
+
+    修复前：cancel() 后未 await 即 return → `_recv_pending` 仍为 True → 主循环下一次
+    receive_json() 触发并发 recv RuntimeError → 连接崩。修复后：返回时旧 recv 已收尾。
+    """
+    state = _make_done_state()
+    ws = _RecvTrackingWebSocket()
+    await ws_module._forward_until_done_or_cmd(state, ws, "s1")
+    # 核心断言：返回时不得有挂起的 recv（否则主循环下一次 receive_json 并发冲突）
+    assert ws.recv_pending is False, "send 完成后遗留挂起 recv → 主循环并发 recv 崩溃"
+
+    # 主循环语义：能立即安全发起下一次 receive（挂起等待下一条，而非抛 RuntimeError）
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(ws.receive_json(), timeout=0.05)
+    assert not ws.concurrent_recv_raised

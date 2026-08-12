@@ -290,6 +290,10 @@ async def _forward_until_done_or_cmd(
                     recv_task.exception()
                 if not recv_task.done():
                     recv_task.cancel()
+                # 问题 18（Phase 2 recv 竞态）：cancel 后必须 await 收尾，否则底层
+                # uvicorn/websockets 同一连接上仍有旧 recv 挂起，主循环随即
+                # `while True: receive_json()` 并发第二次 recv → RuntimeError → 连接崩。
+                await asyncio.gather(recv_task, return_exceptions=True)
                 return
             try:
                 msg = recv_task.result()
