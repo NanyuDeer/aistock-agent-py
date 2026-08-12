@@ -57,7 +57,8 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  08:50 morning_agent → 提取major_events → 并行event_analyst(fire-and-forget)
+  07:30/每小时 event_scrape（统一事件抓取中台，入库后触发事件传导，Task 5）
+  08:50 morning_agent（读事件库优先、缺库自主检索；不再直接触发 event_analyst，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
 ```

@@ -236,13 +236,13 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）+ 并行触发 event agent 分析 major_events |
+| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）；事件来源读统一事件库（report_type=event_scrape，读库优先、缺库降级自主检索，2026-08-12 起） |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
 | 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> **事件传导分析（event conduction）**：不单独注册 cron job，而是嵌入 morning 任务中——晨报完成后提取 `major_events`，对 impact_score ≥ 4 的事件通过 `asyncio.create_task` 并行触发 `event_agent.run()`。每个事件独立运行，fire-and-forget 模式，失败不影响其他事件或后续复盘流水线。
+> **事件传导分析（event conduction）**：2026-08-12 起触发归属迁移到统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库成功后由中台触发 `run_event_analysis_pipeline`（Task 5），晨报任务不再直接触发；`scheduler._run_event_analysis_pipeline_task` 保留供中台复用。迁移过渡期（Task 5 落地前）事件传导存在短暂断供窗口。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 

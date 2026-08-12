@@ -573,6 +573,44 @@ async def _safe_process_market_push(details: str) -> None:
         logger.warning("market_event_push_unexpected_error", exc_info=True)
 
 
+def _event_records_to_major_events(
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """将事件库 EventRecord 转换为 major_events 结构（缓存命中路径消费）。
+
+    事件库字段（event_id/title/summary/url/impact_score/direction/
+    involved_keywords）与 MAJOR_EVENTS 标记块字段对齐；无 title 的条目跳过。
+    """
+    result: list[dict[str, object]] = []
+    for ev in events:
+        title = ev.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        impact_score = ev.get("impact_score")
+        keywords = ev.get("involved_keywords")
+        result.append(
+            {
+                "event_id": str(ev.get("event_id", "")),
+                "title": title,
+                "summary": str(ev.get("summary", "")),
+                "url": str(ev.get("url", "")),
+                "impact_score": (
+                    int(impact_score)
+                    if isinstance(impact_score, int | float)
+                    and not isinstance(impact_score, bool)
+                    else 0
+                ),
+                "direction": str(ev.get("direction", "neutral")),
+                "involved_keywords": (
+                    [str(k) for k in keywords if isinstance(k, str)]
+                    if isinstance(keywords, list)
+                    else []
+                ),
+            }
+        )
+    return result
+
+
 async def run(state: AgentState) -> dict[str, object]:
     """晨报分析：cache → create_react_agent → parse_event_output → cache+archive+persist
 
@@ -586,12 +624,35 @@ async def run(state: AgentState) -> dict[str, object]:
         report_date = _resolve_report_date(state.get("report_date"))
         today = date.fromisoformat(report_date).strftime("%Y年%m月%d日")
 
+        # 统一事件抓取中台：事件来源改为"事件库优先、自主抓取兜底"（2026-08-12）。
+        # 读取放在缓存检查之前，非缓存（注入 prompt）与缓存命中（major_events
+        # 优先事件库）两条路径共用同一份数据。
+        event_store_events: list[dict[str, object]] = []
+        try:
+            from aistock_agent.services.event_store import (  # noqa: PLC0415
+                load_event_scrape,
+            )
+
+            event_store_events = [dict(ev) for ev in await load_event_scrape(report_date)]
+            logger.info(
+                "morning_event_store_loaded",
+                count=len(event_store_events),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 读库异常不阻断晨报主链路，降级为自主检索
+            logger.warning("morning_event_store_load_failed", error=str(exc))
+            event_store_events = []
+
         # 检查缓存
         cached = await get_cached_briefing()
         if cached:
             report = _ensure_dual_layer(cached)
             details = _report_details(report)
-            major_events = extract_major_events(details)
+            # 缓存命中：major_events 也优先从事件库读取（统一事件源），
+            # 缺库时降级回 details 提取（既有行为不变）
+            major_events = _event_records_to_major_events(event_store_events)
+            if not major_events:
+                major_events = extract_major_events(details)
             if major_events:
                 logger.info(
                     "morning_major_events_extracted",
@@ -622,6 +683,23 @@ async def run(state: AgentState) -> dict[str, object]:
             system_prompt += (
                 "\n\n注意：今日为非交易日（周末或节假日），"
                 "请在报告开头注明，分析可聚焦于下一交易日前瞻。"
+            )
+
+        # 事件库有数据 → 注入 prompt；为空 → 保持自主抓取（缺库降级）
+        if event_store_events:
+            system_prompt = system_prompt.replace(
+                "{{MAJOR_EVENTS_CONTEXT}}",
+                "\n".join(
+                    f"- {ev.get('title', '')}（{ev.get('summary', '')}）"
+                    for ev in event_store_events
+                    if ev.get("title")
+                ),
+            )
+        else:
+            # 缺库降级：保留原自主检索指令
+            system_prompt = system_prompt.replace(
+                "{{MAJOR_EVENTS_CONTEXT}}",
+                "（事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块）",
             )
 
         # 调用 morning agent（含降级重试逻辑）

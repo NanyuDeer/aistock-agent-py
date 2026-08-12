@@ -637,15 +637,14 @@ def test_traceable_report_validation_rejects_invalid_required_fields(
     assert _is_traceable_completed_report(report, "iterate") is False
 
 
-# ── 事件传导：major_events → event agent ──
+# ── 事件传导触发归属：晨报不再直接触发（迁移到中台 Task 5） ──
 
 
 @pytest.mark.asyncio
-async def test_morning_task_triggers_event_conduction_for_major_events():
-    """scheduler morning → major_events → event agent 传导"""
+async def test_morning_task_no_longer_triggers_event_conduction():
+    """晨报任务不再直接触发事件传导（迁移到统一事件抓取中台 Task 5）。"""
     import asyncio
 
-    from aistock_agent.services.event_conduction import EventConductionResult
     from aistock_agent.services.scheduler import _run_morning_task
 
     major_events = [
@@ -661,26 +660,13 @@ async def test_morning_task_triggers_event_conduction_for_major_events():
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
-            ) as mock_event:
-                mock_event.return_value = EventConductionResult(
-                    success=True,
-                    event_id="evt_test",
-                    title="test",
-                    event_generated=True,
-                    persisted=True,
-                )
+            ) as mock_pipeline:
                 await _run_morning_task()
-                # fire-and-forget tasks 需要等事件循环处理
                 await asyncio.sleep(0.1)
 
-    # 验证每个 major_event 都触发了事件传导
-    assert mock_event.call_count == 2
-    called_events = [call.args[0] for call in mock_event.call_args_list]
-    called_titles = [e["title"] for e in called_events]
-    assert "美联储加息" in called_titles
-    assert "通胀数据公布" in called_titles
+    mock_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -709,49 +695,18 @@ async def test_morning_task_no_major_events_no_conduction():
 
 
 @pytest.mark.asyncio
-async def test_morning_task_single_event_failure_does_not_block():
-    """单个事件失败不阻断其他事件"""
-    import asyncio
+async def test_event_analysis_pipeline_task_delegates_to_pipeline():
+    """_run_event_analysis_pipeline_task 保留供中台复用：委托 pipeline 执行。"""
+    from aistock_agent.services.scheduler import _run_event_analysis_pipeline_task
 
-    from aistock_agent.services.event_conduction import EventConductionResult
-    from aistock_agent.services.scheduler import _run_morning_task
+    major_events = [{"title": "央行降准", "summary": "降准0.5个百分点"}]
+    with patch(
+        "aistock_agent.services.event_analysis_pipeline.run_event_analysis_pipeline",
+        new_callable=AsyncMock,
+    ) as mock_pipeline:
+        await _run_event_analysis_pipeline_task(major_events)
 
-    major_events = [
-        {"title": "正常事件"},
-        {"title": "崩溃事件"},
-        {"title": "另一个正常事件"},
-    ]
-    morning_result = {
-        "final_response": '{"display_report": {}}',
-        "analysis_reports": {"major_events": major_events},
-    }
-
-    call_count = [0]
-
-    async def mock_conduction(event):
-        call_count[0] += 1
-        if event["title"] == "崩溃事件":
-            raise RuntimeError("模拟崩溃")
-        return EventConductionResult(
-            success=True,
-            event_id=f"evt_{call_count[0]}",
-            title=event["title"],
-            event_generated=True,
-            persisted=True,
-        )
-
-    with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
-        with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
-            mock_agent.run = AsyncMock(return_value=morning_result)
-            with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
-                side_effect=mock_conduction,
-            ):
-                await _run_morning_task()
-                await asyncio.sleep(0.2)
-
-    # 3 个事件都被调用了（崩溃的不影响其他）
-    assert call_count[0] == 3
+    mock_pipeline.assert_awaited_once_with(major_events)
 
 
 @pytest.mark.asyncio

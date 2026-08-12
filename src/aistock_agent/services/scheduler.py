@@ -2,8 +2,8 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
-  → 完成后自动提取 major_events，fire-and-forget 触发事件分析流水线
-  （event_analysis_pipeline：Event Conduction 全部完成 → Global Importance 双榜单写 DB）
+  （2026-08-12 起晨报不再触发事件传导；事件传导触发迁移到统一事件抓取中台
+  event_scrape 入库后，见 Task 5。_run_event_analysis_pipeline_task 保留供中台复用。）
 - 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
   （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
@@ -29,9 +29,6 @@ from aistock_agent.utils.brief_contract import (
 from aistock_agent.utils.date import is_trading_day, shanghai_today
 
 logger = structlog.get_logger()
-
-# 保持 fire-and-forget task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
-_pending_event_tasks: set[asyncio.Task] = set()
 
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
@@ -252,34 +249,10 @@ async def _run_morning_task() -> None:
             "scheduler_morning_done",
             has_response=bool(result.get("final_response")),
         )
-
-        # 提取重大事件列表，触发事件分析流水线（fire-and-forget）
-        # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
-        # 流水线内部：Event Conduction 全部完成落库 → Global Importance，
-        # 不阻塞本任务返回，也不影响 09:00 broadcast 链路。
-        analysis_reports = result.get("analysis_reports")
-        raw_major_events = (
-            analysis_reports.get("major_events", []) if isinstance(analysis_reports, dict) else []
-        )
-        major_events: list[dict[str, object]] = (
-            [event for event in raw_major_events if isinstance(event, dict)]
-            if isinstance(raw_major_events, list)
-            else []
-        )
-        if major_events:
-            task = asyncio.create_task(_run_event_analysis_pipeline_task(major_events))
-            _pending_event_tasks.add(task)
-            task.add_done_callback(_pending_event_tasks.discard)
-            logger.info(
-                "scheduler_event_pipeline_triggered",
-                total=len(major_events),
-                titles=[
-                    title[:30]
-                    for event in major_events
-                    if isinstance((title := event.get("title")), str)
-                ],
-            )
-            # fire-and-forget: pipeline 在后台运行，错误由 pipeline 内部捕获
+        # 事件传导触发已迁移到统一事件抓取中台（2026-08-12）：
+        # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发；
+        # _run_event_analysis_pipeline_task 保留供中台复用，晨报不再直接触发。
+        # 注意：Task 5 落地前，major_events → 事件传导分析存在短暂断供窗口。
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
@@ -290,6 +263,9 @@ async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]
     委托给 services/event_analysis_pipeline.run_event_analysis_pipeline，
     pipeline 内部完成 Event Conduction → Global Importance 全链路，
     并自行处理超时/异常（不向上抛）。
+
+    2026-08-12 起不再由 _run_morning_task 触发：事件传导触发迁移到统一事件
+    抓取中台（Task 5 在 event_scrape 入库后调用），本函数保留供中台复用。
     """
     from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
         run_event_analysis_pipeline,
