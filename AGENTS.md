@@ -255,6 +255,16 @@ START → supervisor(quick_think, 意图路由)
 - **教训（新增）**：① json_mode 结构化输出缺 required 字段时 pydantic 校验失败 → 降级——prompt required 字段清单必须与 Pydantic 契约逐字对齐（schema_version 案例）；② 无消费方的"校验副作用"（到期日）不应因超日历范围阻断主结果——best-effort + warning；③ 指数语义防误判只能靠显式上下文（index_name）不能靠代码集合（000001 双义）；④ WS 冒烟是唯一能发现"LLM 输出缺字段恒降级"与"到期日跨年崩溃"的验证手段——单测只锁语义不锁真实 LLM 输出
 - 提交：c4b1030..d29597d（8 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
 
+### CHAT QA Phase 4-2 交互式确认（2026-08-12）：两阶段运行（改进 13）
+
+- **产品/协议（spec §4.2 按 Phase 2 实际协议修订）**：resolve-miss + 多候选（≥2 可 resolve 名称）时不再直接澄清——阶段 1 图终态负载 `confirm_request`（`{"confirm_request": {"request_id", "question", "options"}}` 替代 DONE，跳过落库）→ ws.py 等用户选择（60s 单调时钟 deadline）→ 阶段 2 携带 `confirm_choice` 重跑同 session → DONE；**超时 / 「都不是」→ `confirm_timeout` 重跑 → `_resolve_miss_clarification` 无条件回退既有澄清（不依赖 `len(messages)<=1` 守卫，该守卫是 D36 多轮设计约束）**；<2 候选维持澄清不弹窗
+- **ws.py 阶段 2 重跑**：`_run_chat_graph_to_events` 加 run_id 参数（阶段 2 新 run_id 后缀 `_confirm`）；`initial_state2["messages"] = []`（**空列表对 add_messages reducer 是 no-op**，防阶段 2 同 thread 重跑时无 id HumanMessage 追加进 checkpoint 历史造成消息重复污染）+ `reset_transient_state()` + `reset_token_usage()`；`_wait_confirm_response` 用 `asyncio.FIRST_COMPLETED` + 单调时钟（不用 `asyncio.wait_for` 防止 cancel 吞并响应竞态）+ `_owns_run` 归属校验 + recv 收尾 `await asyncio.gather(task, return_exceptions=True)`（问题 18 先例）
+- **qa_router**：confirm 触发（闸门 2 resolve-miss 分支）+ 消费（confirm_choice 直接构造 SkillCall 续跑；confirm_timeout 回退澄清）+ transient 三字段归零；**synth_answer confirm 短路在 goal is None 检查之前**（confirm 终态不渲染回答）
+- **前端（app-frontend）**：`useChatStream.ts` `case 'confirm_request'` 终态处理（doneReceived 置位 + pendingConfirm ref + 结算 send promise + 不 appendMessage）+ `sendConfirmResponse(request_id, choice)` **发送成功后 re-arm**（doneReceived=false/streaming=true/清 progressSteps/streamingText/currentRunReasoning/currentRunEvents——不复位则阶段 2 事件流被 doneReceived 丢弃，回答永不出现，review Critical 修复）；ConfirmSheet 弹框 submitted 防连点
+- **验证**：定向 4 新测试文件全绿；全量 A/B HEAD 失败集 = BASE（30=30）新增清零（1808→1829 passed）；ruff 改动文件 0 新增；**WS confirm 冒烟 5/5**（case1 点选续跑真实行情 / case2「都不是」澄清回退 / case3 非触发回归，每用例独立 session——同会话第 2 条消息不触发确认是 D36 设计守卫非缺陷）
+- **教训（新增）**：① 阶段 2 重跑复用同 thread checkpoint 必须清 messages（add_messages 对无 id 消息是追加）；② 两阶段交互的任何一阶段状态（doneReceived）不复位 = 后续事件全丢，re-arm 是发送成功的原子动作；③ 前端点选后的续跑是"新一次运行"，run_id 需区分以正确归属 token/事件
+- 提交：c742a93..232e361（3 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
