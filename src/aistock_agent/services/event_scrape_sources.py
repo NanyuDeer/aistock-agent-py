@@ -117,13 +117,18 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
 
     读取 stock_info_judgements 表（个股情报管线已闭环）。
     Node 端 StockMonitorService.getEvents 返回 ``{"total": N, "events": [...]}``
-    （键名 events，非 items）；alerts 接口不支持按 published_at 窗口查询，
-    取最近 20 条跨全部日期，Python 侧按行 published_at/event_time 过滤，
-    仅保留与 score_date 同日的行（按上海时区日期归属，兼容 Node UTC ISO 格式；
-    避免昨日/前日陈旧行被标记为当日事件反复入库）。
+    （键名 events，非 items）；P0-2 修复后 alerts 接口支持 dateFrom 参数，
+    按 ``published_at >= dateFrom``（上海 00:00）在 Node 端先过滤，Python 侧
+    再按行 published_at/event_time 过滤，仅保留与 score_date 同日的行
+    （按上海时区日期归属，兼容 Node UTC ISO 格式；避免昨日/前日陈旧行
+    被标记为当日事件反复入库）。
     """
     try:
-        resp = await node_api.get("/internal/monitor/alerts?days=1")
+        # P0-2：Node /internal/monitor/alerts 原忽略 days 参数只取最新 20 行；
+        # 改为显式 dateFrom 当日 00:00（上海）窗口，Node 端 published_at >= 过滤。
+        resp = await node_api.get(
+            f"/internal/monitor/alerts?dateFrom={score_date}T00:00:00%2B08:00"
+        )
         rows = _extract_items(resp, key="events")
     except Exception as exc:  # noqa: BLE001
         logger.exception("eastmoney_judgements_failed", error=str(exc))

@@ -67,7 +67,10 @@ async def test_collect_eastmoney_judgements_reads_existing_table():
         assert len(events) == 1
         assert events[0]["source"] == "eastmoney"
         # 真实键名：node_api.get 收到 alerts 请求（回归保护）
-        mock_api.get.assert_awaited_once_with("/internal/monitor/alerts?days=1")
+        # P0-2：URL 为 dateFrom 当日窗口（原 days=1 已被 Node 忽略，去除）
+        mock_api.get.assert_awaited_once_with(
+            f"/internal/monitor/alerts?dateFrom={_TODAY}T00:00:00%2B08:00"
+        )
 
 
 @pytest.mark.asyncio
@@ -385,3 +388,14 @@ async def test_collect_tavily_neutral_scores_1():
     # 同批内不去重，去重在落库阶段）→ 2 条，均应为中性 1 分
     assert len(events) == 2
     assert all(ev["impact_score"] == 1 for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_passes_date_from():
+    """P0-2：Node 忽略 days 参数的历史缺陷；改为显式 dateFrom 当日窗口。"""
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"events": []})
+        await collect_eastmoney_judgements("2026-08-12")
+    call_url = str(mock_api.get.call_args.args[0])
+    assert "dateFrom=2026-08-12T00:00:00%2B08:00" in call_url
+    assert "days=1" not in call_url
