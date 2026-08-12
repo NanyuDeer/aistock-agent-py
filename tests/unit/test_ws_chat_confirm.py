@@ -361,6 +361,34 @@ async def test_wait_confirm_response_rejects_unauthorized_user() -> None:
     assert errors[0]["content"] == "无权访问该会话"
 
 
+# ── ④' 越权 stop 拒绝（防御纵深：对齐 confirm_response 分支与主循环 stop 路径）─
+
+
+@pytest.mark.asyncio
+async def test_wait_confirm_response_rejects_unauthorized_stop() -> None:
+    """B7 复审修复：越权 stop（user_id 与 state 不符）→ ERROR「无权访问该会话」
+    且不返回 stopped（继续等；后续合法 choice 正常返回）。防御纵深对齐
+    confirm_response 分支与主循环 stop 路径的归属校验。"""
+    ws = _FakeWebSocket(
+        [
+            {"type": "stop", "user_id": "attacker"},
+            {
+                "type": "confirm_response",
+                "request_id": "r1",
+                "choice": "600519",
+                "user_id": "u_42",
+            },
+        ]
+    )
+    state = _owned_state("u_42")
+    result = await ws_module._wait_confirm_response(state, ws, "s1", "r1", CONFIRM)
+    assert not result.stopped, "越权 stop 不得取消等待（防御纵深修复）"
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
+    errors = [s for s in ws.sent if s.get("type") == "error"]
+    assert len(errors) == 1
+    assert errors[0]["content"] == "无权访问该会话"
+
+
 # ── ⑤ 60s 超时（mock 缩短）→ None + recv 收尾无残留 ──────────────────────
 
 

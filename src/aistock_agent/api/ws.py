@@ -382,12 +382,18 @@ async def _wait_confirm_response(
                 recv_task = asyncio.create_task(websocket.receive_json())
                 continue
             if msg.get("type") == "stop":
-                # B7：确认等待期 stop 与主循环 stop 语义一致 → 取消等待，cancelled 终态
+                # B7：确认等待期 stop 与主循环 stop 语义一致 → 取消等待，cancelled 终态。
+                # 越权校验对齐 confirm_response 分支与主循环 stop 路径（防御纵深）。
+                if not _owns_run(state, msg.get("user_id")):
+                    logger.warning("chat.confirm.stop.ownership_rejected session_id=%s", session_id)
+                    await websocket.send_json(
+                        {"type": WSEventType.ERROR, "content": "无权访问该会话"}
+                    )
+                    recv_task = asyncio.create_task(websocket.receive_json())
+                    continue
                 recv_task.cancel()
                 await asyncio.gather(recv_task, return_exceptions=True)
-                logger.warning(
-                    "chat.confirm.stopped session_id=%s run_id=%s", session_id, run_id
-                )
+                logger.warning("chat.confirm.stopped session_id=%s run_id=%s", session_id, run_id)
                 return ConfirmWaitResult(stopped=True)
             if msg.get("type") != WSEventType.CONFIRM_RESPONSE:
                 # B7：普通新消息 → 放弃确认（用户裁决：新消息优先级高于确认，不静默吞），
