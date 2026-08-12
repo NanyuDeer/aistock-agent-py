@@ -1,5 +1,58 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 统一事件抓取中台 Task 8：端到端联调验证 + 文档更新
+- 文档：README.md 新增「统一事件抓取中台」章节（架构分层/调度时间窗/事件模型/接口清单/下游消费与降级）+ API 表补 `POST /api/agent/briefing/event-scrape/trigger`；AGENTS.md 产品功能 → Agent 映射表新增 event_scraper 行（非 LLM Agent，pipeline）+ 定时链路精确化（`event_scrape_daily` 07:30 盘前全量 + `event_scrape_intraday` 10:00-14:00 每小时增量）
+- 验证：pytest tests/unit/ 1459 passed（含 hub 相关 119 用例；环境要求 git 入 PATH + 设 OPENAI_API_KEY 绕过 industry_vector_search 凭据短路——6 个基线失败经确认属环境）；app-api `npx tsc --noEmit` 0 错误；mypy 140 存量错误（merge-base main 基线 142，hub 分支净 -2 新增 0）；ruff 56 存量错误（hub 改动文件仅 prompt 文本 E501，与全仓基线同类）；静态核对 app.routes 3 个新端点、scheduler 双 job、晨报/大盘溯源读库降级、传导触发均在位
+- Minor-4 确认：简报未要求「命中但 <3 条仍补直采」阈值降级；现状语义——事件库命中（非空且含 URL）即整体替代直采，空/全无 URL/读失败才降级（评估结论见 task-8-report.md）
+- 局限：本机无 Node 服务（8080/3000 未监听）与 Redis（6379/16379），真实端到端（trigger→采集→入库→传导→下游读库）未执行，改为静态核对 + 单测覆盖，见 task-8-report.md
+
+## 2026-08-12 统一事件抓取中台 Task 7 评审修复（1 Important + 1 Minor，Fix Round）
+- `services/market_trace_snapshot.py` `_normalize_event_store_facts`：① 修 Important 1——事件非空但 `causal_ready_count == 0`（全部无 URL）时原返回 `available`，与 `_normalize_news_facts`（:750-766）在 `causal_ready_count == 0` 返回 `invalid_for_causality` + `missing_fields["cls_news"]` 语义不一致；改为对齐：`_append_missing(missing_fields, "cls_news")` + 返回 `invalid_for_causality`（reason=items_missing_url；事件库 occurred_at 必兜底 captured_at 非 None，故仅 URL 决定因果就绪）。分支当前实际不可达（cls 无 URL 时 normalize 已兜底详情页），为防御性一致补强
+- ② 修 Minor 1（source_id 可追溯性）：source_id 由 `EVENT_{序号}` 改为 `EVENT_{event_id[:19]}`（日期 + content_hash 前 8 位）。偏差：评审字面 `[:8]` 对真实 event_id 格式 `{score_date}-{content_hash[:16]}` 只切出日期段（"2026-07-"）同日全碰撞会互相覆盖丢失事件，改 `[:19]` 保留唯一性（见 task-7-report.md Fix Round）
+- 测试：`tests/unit/test_market_trace_event_store.py` 断言从 EVENT_001/EVENT_002 改为 EVENT_{event_id[:19]}；新增 `test_normalize_event_store_facts_all_missing_url_invalid_for_causality`（Important 1 行为锁定）
+- 验证：pytest 定向 40 passed（event_store 6 + snapshot 34）；mypy market_trace_snapshot.py Success；ruff All checks passed
+
+## 2026-08-12 统一事件抓取中台 Task 7：大盘溯源与 stock_trace 读库接入（读库优先、缺库降级）
+- `services/market_trace_snapshot.py`：`build_market_trace_snapshot` / `build_quick_snapshot` 新闻采集段改为「统一事件抓取中台：证据源优先读事件库，缺库降级到直采（2026-08-12）」——`load_event_scrape(report_date)`（函数内 from-import，异常兜一层防御降级 `[]`）有当日数据时用事件库做 news_facts（`news_source_kind="event_store"`），空/失败完整回到原 telegraph（`/internal/news/telegraph?date=&limit=200`）→ latest 直采；归一化侧新增 `_normalize_event_store_facts`（EVENT_序号 source_id、kind=event_evidence、provider=source、content=summary[:500] 空则 title、occurred_at=scrape_at 解析失败兜底 captured_at）+ `_map_event_store_source_level`（A→primary，B/C/D→reporting）；collection_status.cls_news 事件库命中时 provider=event_store/state=available
+- 顺手修存量：移除 `_log_telegraph_response` 中 mypy 报 unused 的 `# type: ignore[union-attr]`（mypy strict warn_unused_ignores 基线错误，改动前已存在）
+- 测试：新增 `tests/unit/test_market_trace_event_store.py`（5 用例：Task 1 回归保护 + full/quick 事件库优先不直采 + 空库/读库异常降级直采）
+- 文档：README.md 15:30 复盘生成行、AGENTS.md 大盘溯源「改进后能力」更新
+- 偏差：① 简报 Step 1 测试 patch `node_api.get` 与 Task 1 `load_event_scrape` 实际走 `get_analysis_report` 冲突（MagicMock 子 mock 不可 await），按 Task 1/4 先例 patch `get_analysis_report`，语义不变；② 简报 Step 3 `_collect_news_facts_original`/`news_facts` 为伪代码，按现状内联直采块 + `_normalize_event_store_facts` 落位；③ review `SourceRecord.source_level` 是 Literal[primary/reporting/market_data] 与事件库 A/B/C/D 非同套枚举，简报"原样透传"不可行，映射 A→primary、B/C/D→reporting
+- 验证：pytest 定向 39 passed（market_trace_snapshot 34 + 新文件 5）；全量单测 1452 passed / 6 基线失败（test_industry_vector_search，API/网络依赖，git stash 基线一致零回归）；mypy market_trace_snapshot.py Success（含顺手修 1 个存量 unused-ignore）；ruff 全过；app-api tsc 0 错误 + 7 测试 passed（新文件）
+
+## 2026-08-12 统一事件抓取中台 Task 6：事件查询接口（scrape-list / scrape-by-symbol）
+- `api/routes.py` 新增两个公开查询接口（相对路径，router 已挂 `/api/agent` 前缀）：
+  - `GET /api/agent/event/scrape-list?date=YYYY-MM-DD` → `{"events": [...]}`（`load_event_scrape` 按日期读当日抓取事件）
+  - `GET /api/agent/event/scrape-by-symbol/:symbol?date=YYYY-MM-DD` → `{"events": [...]}`（`load_event_scrape_by_symbol`，stock_trace 证据源）
+  - 新增 `_validate_scrape_date` 三层校验（正则 `\d{4}-\d{2}-\d{2}` → fromisoformat 语义 → isoformat 回写一致性），非法返回 400 `{"detail": "date 必须是有效的 YYYY-MM-DD"}`；缺 date 参数由 FastAPI 自动 422（必填校验）；两个接口均为函数内 from-import 服务层（对齐既有路由风格）
+- 测试：新增 `tests/unit/test_event_scrape_query.py`（8 用例：简报 Step 1 回归保护 ×2（payload.symbol / involved_keywords 双匹配，patch get_analysis_report）+ scrape-list 正常/非法格式 400/语义非法 400/缺参 422 + scrape-by-symbol 正常/非法 400）
+- 文档：README.md API 表新增 2 行查询接口
+- 偏差：① 简报 Step 3 字面路径 `/api/agent/event/...` 与 Task 3 双前缀教训冲突，按现状改相对路径 `/event/...`（最终 URL 与简报接口语义一致）；② 简报 Step 1 测试 patch `node_api.get` 与实际实现 `get_analysis_report` 不符，按 Task 1/4 先例适配，语义不变；③ 非法日期按任务说明返回 400（routes.py 其他日期校验 `_resolve_manual_report_date` 为 422，差异记录于 task-6-report.md）
+- 验证：定向 pytest 8 passed（新文件）+ 71 passed（相关 6 文件回归）；全量单测 1447 passed / 6 基线失败（test_industry_vector_search，API/网络依赖，基线一致零回归 +8）；mypy routes.py 17 个存量错误（git stash 基线对比一致，新增 0）+ test_event_scrape_query.py 0 错误；ruff 仅 1 个存量 E501（routes.py:851 长中文行，新增 0）
+
+## 2026-08-12 统一事件抓取中台 Task 5 评审修复（1 Important + 1 Minor，Fix Round）
+- `tests/unit/test_event_scraper_conduction.py`：修 Important 1（日期依赖时间炸弹）——`test_scrape_full_daily_triggers_conduction_when_persisted` 硬编码 `score_date="2026-08-12"`，唯一 major 事件来自 `collect_global_markets`（仅在 `score_date == _today()` 时采集），其他日期运行必失败；改用推荐方案 1——测试 import `shanghai_today`，三个 full_daily 传导测试的 score_date 均改 `today = shanghai_today().isoformat()` 动态计算（与生产 `_today()` 同源），断言语义不变
+- `services/event_scraper.py`：修 Minor 2（try 作用域）——`_trigger_conduction` 的函数内 from-import 与 major_events 映射推导式移入 try 块内，任何异常统一 `logger.exception("event_scrape_conduction_failed")` 吞掉记日志，避免以 "Task exception was never retrieved" 形式暴露（task 仅由 done_callback 移除引用）
+- 验证：pytest 定向 14 passed（conduction 10 + scraper 4，全绿）；日期无关性——临时脚本固定生产 `_today` 与测试 `shanghai_today` 到 2026-08-13（非 2026-08-12）重跑 3 个 full_daily 传导测试全过；mypy event_scraper.py Success；ruff All checks passed
+
+## 2026-08-12 统一事件抓取中台 Task 5：事件传导触发迁移到中台
+- `services/event_scraper.py`：新增 `_trigger_conduction(events: list[EventRecord])`（事件列表 → major_events 字段映射 → 函数内 import `event_analysis_pipeline.run_event_analysis_pipeline` 避免循环依赖；异常捕获记 `event_scrape_conduction_failed` 不向上抛）；新增 `_spawn_conduction` fire-and-forget 包装（持有 `_pending_conduction_tasks` 强引用防 GC 提前取消，done_callback 自动移除，对齐 morning 时代 scheduler._pending_event_tasks 先例）；`scrape_full_daily` / `scrape_intraday` 改为先落库再触发——`persisted>0` 且有重大事件时才 `_spawn_conduction(major/events)`，返回契约 `{"persisted","deduped","error"}` 不变
+- `api/routes.py` `trigger_morning_briefing`：移除 `run_event_conduction_batch` 传导触发（Task 4 评审 M2 双触发协调——同批事件在 07:30/每小时抓取入库时已由中台触发，手动入口再触发会双跑）；响应 `event_*_count` 字段保留恒 0 维持接口契约（Node 侧 morning_trigger_handler.ts 消费）；函数 docstring 同步
+- 测试：新增 `tests/unit/test_event_scraper_conduction.py`（10 用例：传导调用/字段映射/空列表跳过/流水线异常不抛 + `_spawn_conduction` 强引用与自动移除 + full_daily/intraday 触发与不触发条件）；`tests/test_routes_briefing.py` 3 条旧传导断言改写为新行为（字段恒 0 + batch 不被调用），删除失效的 `_mock_event_result` helper 与 4 条旧行为测试；`tests/unit/test_event_scraper.py` `test_scrape_intraday_only_persists_major_events` 补 `_spawn_conduction` patch + 触发断言（防真实传导副作用进测试）
+- 文档：README.md 事件传导分析注更新（Task 5 落地，移除过渡期断供提示；标注手动晨报入口不再直接触发）；scheduler.py `_run_event_analysis_pipeline_task` 保留复用（Task 4 已标注）
+- 偏差：① 简报 Step 1 测试 patch `event_scraper.run_event_analysis_pipeline` 与 Step 3 函数内 from-import 互斥（patch 不存在属性必 AttributeError），按 Task 4 §4.1 先例改 patch 源模块 `event_analysis_pipeline.run_event_analysis_pipeline`，语义不变；② 简报字面 `asyncio.create_task(...)` 不持引用，按 AGENTS.md 警告 + morning 时代先例补 `_pending_conduction_tasks` 强引用（记录见上）；③ 触发条件 `persisted>0` 为"当日库非空"保守守卫（`save_event_scrape` 的 persisted 是合并总数非本批新增数），全去重批次可能重复触发传导——传导输出按 event_id 幂等（evt_ 确定性 hash + event_persister upsert），重复运行无害，作为已知限制记录
+- 验证：pytest 定向 142 passed；全量单测 1439 passed / 6 基线失败（test_industry_vector_search，API/网络依赖，基线 1429→1439 零回归 +10）；mypy event_scraper.py 0 错误 / routes.py 17 存量错误（git stash 基线一致，新增 0）；ruff 4 文件 5 个存量错误（基线一致，新增 0）
+
+## 2026-08-12 统一事件抓取中台 Task 4：晨报改读事件库（读库优先、缺库降级）
+- `agents/workers/morning.py`：`run()` 在 `_resolve_report_date` 之后（缓存检查之前）读取事件库（`load_event_scrape(report_date)`，异常降级为 `[]` 不阻断主链路）；事件库有数据 → 注入 `{{MAJOR_EVENTS_CONTEXT}}` 占位符（`- title（summary）` 列表）；为空/异常 → 注入"事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块"降级文案；缓存命中路径 `major_events` 也改为事件库优先（新增 `_event_records_to_major_events` 转换 helper），缺库降级回 `extract_major_events(details)` 既有行为
+- `prompts/workers/morning.py`：新增 `MAJOR_EVENTS_CONTEXT_PLACEHOLDER = "{{MAJOR_EVENTS_CONTEXT}}"` 常量；MORNING_PROMPT 重大事件识别段（"你不是在做新闻排行榜…"之后、"第〇层交易时效判断"之前）插入"### 事件来源（优先事件库，缺库自主检索）"小节与占位符（MAJOR_EVENTS 输出标记不变）
+- `services/scheduler.py`：`_run_morning_task` 删除晨报完成后触发 `_run_event_analysis_pipeline_task` 的传导块（归属迁移到中台 Task 5）；`_run_event_analysis_pipeline_task` 保留供中台复用（docstring 标注）；移除不再使用的 `_pending_event_tasks` 强引用集合（顺带消 1 个存量 mypy type-arg 错误）；模块/函数 docstring 同步
+- 测试：新增 `tests/unit/test_morning_event_store_integration.py`（7 用例：读库回归 / prompt 占位符存在 / 事件注入 / 空库降级 / 读库异常降级 / 缓存命中 major_events 事件库优先 / 缓存命中缺库回退 details）；`tests/unit/test_scheduler.py` 3 处传导断言按新行为改写（`test_morning_task_no_longer_triggers_event_conduction` / `test_event_analysis_pipeline_task_delegates_to_pipeline` / 保留无 major_events 不触发）
+- 文档：README.md 08:50 晨报行 + 事件传导分析注、AGENTS.md 定时链路更新
+- 偏差：① 简报 Step 1 测试 patch `node_api.get`，但 `load_event_scrape`（Task 1）实际调 `node_api.get_analysis_report`（内部走 get），逐字执行必失败——按 Task 1 `test_event_store.py` 先例改 patch `get_analysis_report`，语义不变；② 缓存命中路径 major_events 事件库优先为需求说明明确要求（"缓存路径也改从事件库读"），简报 Step 3 代码未显式覆盖，一并实现；③ 传导触发删除后、Task 5 落地前事件传导短暂断供（简报明确要求删除，已在代码注释/README 标注临时状态）
+- 验证：pytest 全量单测 1429 passed / 6 基线失败（test_industry_vector_search，API/网络依赖，git stash 基线一致）；mypy 3 文件 3 个存量错误（scheduler.py `_get_event_bus`×2 + `no-untyped-def`×1，基线 4→3，新增 0）；ruff 10 个存量 E501（prompts 长中文行，行号平移，新增 0）
+
+
 ## 2026-08-12 统一事件抓取中台 Task 3 评审修复（Fix Round）
 - `services/scheduler.py` `_run_event_scrape_job`：① 修 Important 1——`logger.info("event_scrape_job_done", **result)`（`run_event_scrape` 返回已含 `scrape_mode` 键，原重复传 `scrape_mode=` 每次成功抓取都抛 TypeError 被吞成误报的 job_failed）；② 修 Minor 1——`date.today()` 改 `shanghai_today()`（对齐 `_run_morning_task` 上海时区）
 - `api/routes.py` `trigger_event_scrape`：① 修 Important 2——补 try/except 返回 `{"success": False, "message": ...}` 结构化错误体（原未捕获异常 → FastAPI 500）；② 修 Minor 2——`scrape_mode` allowlist 校验（复用 `event_scraper.VALID_MODES`），非法值结构化错误；③ 修 Minor 3——响应统一为 `{"success": True, "data": <结果>}` / `{"success": False, "message": <错误>}`（既有 trigger 接口为扁平 success+message+业务字段结构，无 data 键，差异已记录于 task-3-report.md §8.1 Minor 3；接口无前端消费方，无兼容影响）

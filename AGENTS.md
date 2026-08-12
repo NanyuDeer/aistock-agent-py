@@ -26,6 +26,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→归一化→筛选→入库→传导） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
@@ -57,7 +58,7 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  07:30/每小时 event_scrape（统一事件抓取中台，入库后触发事件传导，Task 5）
+  07:30 event_scrape_daily（盘前全量）+ 10:00-14:00 每小时 event_scrape_intraday（统一事件抓取中台，入库后触发事件传导，Task 5）
   08:50 morning_agent（读事件库优先、缺库自主检索；不再直接触发 event_analyst，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）

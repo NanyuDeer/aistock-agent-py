@@ -246,6 +246,43 @@ content = {
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
+### 统一事件抓取中台（2026-08-12）
+
+统一事件抓取中台收敛"多源事件采集 → 归一化 → 筛选 → 入库 → 传导触发"全链路，为晨报、大盘溯源、stock_trace 提供统一事件库（`report_type=event_scrape`）证据源。
+
+**架构分层**：
+
+| 层 | 模块 | 职责 |
+|----|------|------|
+| 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册** |
+| 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
+| 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
+| 入库层 | `services/event_store.py::persist_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped}` |
+| 传导层 | `services/event_scraper.py` | 入库成功（persisted>0）且有重大事件时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路） |
+
+**调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
+
+| job_id | cron | 说明 |
+|--------|------|------|
+| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
+| `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时，intraday 增量抓取 |
+
+**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
+
+**接口清单**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发抓取（需 X-Internal-Token；body `{"scrape_mode":"full_daily"}`，返回 `{"scrape_mode","persisted","deduped","error"}`；日志出现 `event_scrape_full_daily` / `event_scrape_done`） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（`date=YYYY-MM-DD` 必填） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源，`date` 必填） |
+
+**下游消费与降级**：
+
+- 晨报：`load_event_scrape(report_date)` 读库优先（日志 `morning_event_store_loaded`），缺库降级自主检索（不再直接触发 event_analyst）
+- 大盘溯源：`_normalize_event_store_facts` 读库优先（日志 `review_event_store_used`），缺库/空/读失败降级 telegraph/latest 直采
+- stock_trace（Node 侧）：`loadEventStoreEvidence` → Python `GET /api/agent/event/scrape-by-symbol/:symbol?date=当日`（`AGENT_PY_URL || PYTHON_AGENT_URL` + X-Internal-Token），空/失败降级原采集
+
 ### 目录结构
 
 > Phase 4 物理分层 + Phase 5 基础设施增强后的结构（2026-07-08）。
@@ -368,6 +405,7 @@ src/aistock_agent/
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | POST | `/api/agent/briefing/morning/trigger` | 手动触发晨报生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发统一事件抓取（事件抓取中台；body `{"scrape_mode":"full_daily"}`，需 X-Internal-Token） |
 | GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（事件抓取中台；date=YYYY-MM-DD 必填，非法返回 400） |
 | GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源；date=YYYY-MM-DD 必填，非法返回 400） |
 | POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
