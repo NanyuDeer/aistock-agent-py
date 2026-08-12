@@ -124,6 +124,39 @@ async def test_confirm_timeout_skips_trigger_goes_clarification() -> None:
     assert result["clarification"] == CLARIFICATION
 
 
+@pytest.mark.asyncio
+async def test_confirm_timeout_with_duplicated_messages_still_clarifies() -> None:
+    """阶段 2 同 session 重跑：checkpointer 的 add_messages 把同一 HumanMessage
+    追加进历史（messages=[m1,m1]）→ len(messages)<=1 守卫为 False。confirm_timeout
+    回退必须不依赖消息数，无条件返回既有澄清，不落 LLM（防 D36 幻觉假代码）。
+    """
+    with (
+        patch(
+            "aistock_agent.graph.nodes.qa_router.get_quick_think",
+            return_value=AsyncMock(),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.qa_router.with_chat_structured_output",
+            return_value=AsyncMock(),
+        ) as structured_mock,
+        patch(
+            "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+            _resolve_map({"贵州茅台": "600519", "五粮液": "000858"}),
+        ),
+    ):
+        m1 = HumanMessage(content="我想了解一下贵州茅台和五粮液")
+        state = _state("我想了解一下贵州茅台和五粮液", confirm_timeout=True)
+        state["messages"] = [m1, m1]  # 模拟 checkpointer 累积重复（run2）
+        result = await qa_router_node(state)
+
+    assert result["clarification"] == CLARIFICATION
+    assert "confirm" not in result
+    assert result["goal"].constraints.get("guardrail") == "resolve_miss"
+    # 不能靠 side_effect=AssertionError（被业务层 except 吞掉 → 兜底也可能出澄清）；
+    # 必须断言结构化 LLM 入口根本没被调用（落 LLM 即失败）。
+    structured_mock.assert_not_called()
+
+
 # ── ④ confirm_choice：阶段 2 续跑 → 直接构造 SkillCall（不 resolve）─────────
 
 

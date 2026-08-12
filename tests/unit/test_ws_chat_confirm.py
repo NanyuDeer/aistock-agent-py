@@ -9,8 +9,12 @@
 - ④ 归属拒绝（越权 user_id）→ 发送 ERROR「无权访问该会话」继续等
 - ⑤ 60s 超时（mock 缩短）→ 返回 None，recv 收尾无残留（问题 18）
 - ⑥ choice=="none" → 返回 None（按确认超时重跑）
+- ⑦ 坏 JSON（JSONDecodeError）→ 视为无效消息继续等（不崩溃、不 500）——
+     _wait_confirm_response 与 _forward_until_done_or_cmd 双路径
+- ⑧ 等待总期限（单调时钟）：不匹配消息持续到达不无限拉长等待
 """
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, patch
 
@@ -68,6 +72,45 @@ class _HangWebSocket:
             return {"type": "pong"}
         finally:
             self.recv_active = False
+
+    async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+class _BadJsonSocket:
+    """先按队列吐出 payload（Exception 项直接抛，模拟坏 JSON）再挂起的替身。"""
+
+    def __init__(self, payloads: list[object]) -> None:
+        self._queue = list(payloads)
+        self.sent: list[dict] = []
+        self.recv_active = False
+
+    async def receive_json(self) -> dict:
+        if not self._queue:
+            self.recv_active = True
+            try:
+                await asyncio.Event().wait()
+                return {"type": "pong"}
+            finally:
+                self.recv_active = False
+        item = self._queue.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+class _TrickleWrongIdSocket:
+    """持续返回 request_id 不匹配消息（间隔 < 超时），验证等待总期限不因循环重置。"""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def receive_json(self) -> dict:
+        await asyncio.sleep(0.02)
+        return {"type": "confirm_response", "request_id": "wrong", "choice": "600519"}
 
     async def send_json(self, data: dict) -> None:
         self.sent.append(data)
@@ -316,4 +359,73 @@ async def test_wait_confirm_response_choice_none_returns_none() -> None:
         [{"type": "confirm_response", "request_id": "r1", "choice": "none"}]
     )
     result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
+    assert result is None
+
+
+# ── ⑦ 坏 JSON：视为无效消息继续等（不崩溃、不 500）────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wait_confirm_response_tolerates_bad_json() -> None:
+    """坏 JSON（JSONDecodeError）→ 视为无效消息继续等；随后匹配 choice 正常返回。"""
+    ws = _BadJsonSocket(
+        [
+            json.JSONDecodeError("bad", "bad", 0),
+            {"type": "confirm_response", "request_id": "r1", "choice": "600519"},
+        ]
+    )
+    result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
+    assert result == {"symbol": "600519", "label": "贵州茅台(600519)"}
+
+
+@pytest.mark.asyncio
+async def test_forward_until_done_or_cmd_tolerates_bad_json() -> None:
+    """生成中收到坏 JSON → 不崩溃不 500，继续监听；随后 stop 仍正常取消。"""
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+    started = asyncio.Event()
+
+    async def slow_producer(state: ChatRunState) -> dict:
+        started.set()
+        await asyncio.sleep(30)
+        return {"type": "done", "content": "x"}
+
+    state = chat_task_manager.start("st_badjson", "r1", slow_producer, "o_a")
+    assert state is not None
+    await started.wait()
+
+    ws = _BadJsonSocket(
+        [
+            json.JSONDecodeError("bad", "bad", 0),
+            {"type": "stop", "session_id": "st_badjson", "user_id": "o_a"},
+        ]
+    )
+    await ws_module._forward_until_done_or_cmd(state, ws, "st_badjson")
+    await state.task
+
+    assert state.done is True and state.cancelled is True
+    assert any(
+        s.get("type") == "stop_status" and s.get("status") == "cancelled"
+        for s in ws.sent
+    )
+    await chat_task_manager._cleanup_for_test()
+
+
+# ── ⑧ 等待总期限（单调时钟）：不匹配消息持续到达不无限拉长等待 ────────────
+
+
+@pytest.mark.asyncio
+async def test_wait_confirm_response_deadline_not_reset_by_mismatch() -> None:
+    """总期限语义回归：request_id 不匹配消息持续到达（间隔 < 超时）→ 仍按时超时返回 None。
+
+    修复前 timeout 每次循环重置，垃圾消息会无限续期；修复后用单调时钟总期限，
+    0.3s 外层兜底内必须返回（否则 wait_for 抛 TimeoutError 视为失败）。
+    """
+    ws = _TrickleWrongIdSocket()
+    with patch.object(ws_module, "_CONFIRM_TIMEOUT_SEC", 0.05):
+        result = await asyncio.wait_for(
+            ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM),
+            timeout=0.3,
+        )
     assert result is None

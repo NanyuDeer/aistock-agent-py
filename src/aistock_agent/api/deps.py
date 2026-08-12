@@ -87,7 +87,19 @@ def build_chat_initial_state(message: str) -> QuestionState:
 # （P2 T6 教训：deep_source 残留会让追问轮被 synth_answer deep 分支劫持）。
 # 新增单轮 transient 字段必须登记于此。last_deep_report（跨轮引用，D12/D13）与
 # pending_clarification（M1，跨轮有意，最长存活一轮）明确不在清单内。
-_TRANSIENT_KEYS = ("deep_source", "final_response", "goals", "general_source")
+# Phase 4-2（改进 13）：confirm 三字段同为单轮 transient——阶段 1 的 confirm 经
+# checkpointer 写进 checkpoint，阶段 2 完成前同 session 的 SSE 请求会读到残留
+# confirm → synth_answer 二次短路；confirm_choice/confirm_timeout 残留会被
+# qa_router 误消费（重跑旧点选/误触发超时回退）。
+_TRANSIENT_KEYS = (
+    "deep_source",
+    "final_response",
+    "goals",
+    "general_source",
+    "confirm",
+    "confirm_choice",
+    "confirm_timeout",
+)
 
 
 def reset_transient_state(state: QuestionState) -> QuestionState:

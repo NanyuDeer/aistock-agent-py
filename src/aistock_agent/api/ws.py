@@ -306,24 +306,35 @@ async def _wait_confirm_response(
     - 60s 超时 / 连接断开 → 返回 None（qa_router 回退既有澄清，不猜测意图）。
     问题 18 教训：cancel 后必须 await asyncio.gather(recv_task, return_exceptions=True)
     收尾再 return，否则主循环下一次 receive_json 并发第二次 recv → 连接崩。
+    坏 JSON（JSONDecodeError 为 ValueError 子类）→ 视为无效消息继续等（不崩溃、不 500）。
     """
     recv_task = asyncio.create_task(websocket.receive_json())
+    # 60s 超时用单调时钟算总期限（reviewer Minor）：若按循环重置，收到不匹配消息
+    # continue 会让等待被垃圾消息无限拉长；总期限一过即按超时处理。
+    deadline = time.monotonic() + _CONFIRM_TIMEOUT_SEC
     try:
         while True:
             done, _ = await asyncio.wait(
                 {recv_task},
-                timeout=_CONFIRM_TIMEOUT_SEC,
+                timeout=max(0.0, deadline - time.monotonic()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                # 60s 超时：cancel 后 await 收尾（问题 18），按确认超时重跑
+                # 总期限耗尽：cancel 后 await 收尾（问题 18），按确认超时重跑
                 recv_task.cancel()
                 await asyncio.gather(recv_task, return_exceptions=True)
                 logger.warning(
                     "chat.confirm.timeout session_id=%s run_id=%s", session_id, run_id
                 )
                 return None
-            msg = recv_task.result()
+            try:
+                msg = recv_task.result()
+            except ValueError:
+                # 坏 JSON（JSONDecodeError 为 ValueError 子类）：视为无效消息继续等
+                # （不崩溃、不 500）；等待仍受总期限约束。
+                logger.info("chat.confirm.invalid_json session_id=%s", session_id)
+                recv_task = asyncio.create_task(websocket.receive_json())
+                continue
             if (
                 msg.get("type") != WSEventType.CONFIRM_RESPONSE
                 or msg.get("request_id") != run_id
@@ -415,6 +426,11 @@ async def _forward_until_done_or_cmd(
                 # send_task——否则快速完成场景/测试中事件会被丢弃（普通消息语义不变）。
                 await send_task
                 return
+            except ValueError:
+                # 坏 JSON（JSONDecodeError 为 ValueError 子类）：视为无效消息继续监听
+                # （不崩溃、不 500，语义对齐 _wait_confirm_response）。
+                recv_task = asyncio.create_task(websocket.receive_json())
+                continue
             if msg.get("type") == "stop":
                 s = chat_task_manager.get(session_id)
                 if s is None:
@@ -579,16 +595,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                 choice = await _wait_confirm_response(
                     state, websocket, session_id, run_id, state.result
                 )
-                # 阶段 2 也是新一轮调用：重置 transient 字段（复用 reset_transient_state
-                # 对齐 M3 归零；confirm 需显式清——阶段 1 的 confirm 已写进 checkpointer，
-                # 不清会让 synth_answer 二次短路）；token 计费重置后正常落库。
+                # 阶段 2 也是新一轮调用：重置 transient 字段（reset_transient_state
+                # 已含 confirm 三字段——阶段 1 的 confirm 已写进 checkpointer，不清会
+                # 让 synth_answer 二次短路）；token 计费重置后正常落库。
                 initial_state2 = build_chat_initial_state(message)
                 initial_state2["force_deep"] = bool(data.get("force_deep"))
                 initial_state2["user_id"] = (
                     str(raw_user_id) if raw_user_id not in (None, "") else None
                 )
                 reset_transient_state(initial_state2)
-                initial_state2["confirm"] = None
                 if choice is not None:
                     initial_state2["confirm_choice"] = choice
                 else:

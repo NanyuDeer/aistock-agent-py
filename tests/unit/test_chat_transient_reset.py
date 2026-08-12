@@ -11,6 +11,9 @@ def _sample_state() -> dict:
         "final_response": "深度报告全文",
         "goals": [{"id": "g1", "question": "q"}],
         "general_source": "gap",
+        "confirm": {"question": "q", "options": []},
+        "confirm_choice": {"symbol": "600519", "label": "贵州茅台(600519)"},
+        "confirm_timeout": True,
         "last_deep_report": {"worker": "stock", "summary": "s"},
         "pending_clarification": {"question": "q", "intent": "stock_snapshot"},
     }
@@ -34,4 +37,12 @@ def test_reset_transient_state_preserves_cross_turn_fields() -> None:
 def test_transient_keys_exclude_cross_turn_fields() -> None:
     assert "last_deep_report" not in _TRANSIENT_KEYS
     assert "pending_clarification" not in _TRANSIENT_KEYS
-    assert set(_TRANSIENT_KEYS) == {"deep_source", "final_response", "goals", "general_source"}
+    assert set(_TRANSIENT_KEYS) == {
+        "deep_source",
+        "final_response",
+        "goals",
+        "general_source",
+        "confirm",
+        "confirm_choice",
+        "confirm_timeout",
+    }

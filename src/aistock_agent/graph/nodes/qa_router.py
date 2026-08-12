@@ -593,6 +593,30 @@ def _short_circuit(message: str, reply: str, guardrail: str) -> dict[str, Any]:
     }
 
 
+def _resolve_miss_clarification(message: str) -> dict[str, Any]:
+    """D36 收口：resolve 未命中 → 既有澄清输出（resolve-miss 分支专用）。
+
+    首轮澄清与 confirm_timeout 回退共用同一输出形状（含 pending 快照，
+    供下一轮用户补全代码/名称时续跑原意图），保证"超时回退字节不变"。
+    """
+    return {
+        "goal": InsightGoal(
+            question=message,
+            intent="stock_snapshot",
+            constraints={"guardrail": "resolve_miss"},
+        ),
+        "plan": "direct",
+        "skill_calls": [],
+        "clarification": _STOCK_SYMBOL_CLARIFICATION,
+        "complexity": "light",
+        "pending_clarification": {
+            "question": message,
+            "intent": "stock_snapshot",
+            "constraints": {"guardrail": "resolve_miss"},
+        },
+    }
+
+
 def _infer_complexity_by_fallback(message: str, fallback_skill: str | None) -> str:
     """LLM 失败时按意图 + 分析类词判定复杂度（D4 规则兜底）。
 
@@ -1460,64 +1484,67 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             # D36 收口：resolve 未命中时，首轮纯个股问句强制澄清（不进 LLM，
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
             # 多轮（指代解析）或非个股意图（板块/行业/溯源/compose）放行
-            elif len(messages) <= 1 and not _has_non_stock_intent(message):
-                # Phase 4-2（改进 13）：交互式确认触发——在走澄清之前，若消息含
-                # ≥2 个可 resolve 的多名称候选 → 发 confirm（替代澄清）；否则维持
-                # 既有澄清字节不变。confirm_timeout/confirm_choice 非空说明是阶段 2
-                # 重跑（用户点选/超时），跳过触发直接走既有澄清（防无限循环）。
-                if not state.get("confirm_timeout") and not state.get("confirm_choice"):
-                    multi = _extract_multi_name_candidates(message)
-                    if len(multi) >= 2:
-                        resolved_pairs: list[tuple[str, str]] = []
-                        for name in multi:
-                            sym = await resolve_symbol(name)
-                            if sym is not None:
-                                resolved_pairs.append((name, sym))
-                        if len(resolved_pairs) >= 2:
-                            options = [
-                                {"key": sym, "label": f"{name}({sym})"}
-                                for name, sym in resolved_pairs
-                            ] + [{"key": "none", "label": "都不是"}]
-                            confirm = {"question": message, "options": options}
-                            logger.info(
-                                "qa_router.gate.stock_resolve_confirm",
-                                options=[opt["label"] for opt in options],
-                            )
-                            metrics.record_chat_qa_latency(
-                                "qa_router", int((time.monotonic() - start) * 1000)
-                            )
-                            return {
-                                "goal": InsightGoal(
-                                    question=message,
-                                    intent="stock_snapshot",
-                                    constraints={"guardrail": "resolve_confirm"},
-                                ),
-                                "plan": "direct",
-                                "skill_calls": [],
-                                "confirm": confirm,
-                                "complexity": "light",
-                            }
-                logger.info(
-                    "qa_router.gate.stock_resolve_miss",
-                    name=candidate,
-                )
-                metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-                return {
-                    "goal": InsightGoal(
-                        question=message,
-                        intent="stock_snapshot",
-                        constraints={"guardrail": "resolve_miss"},
-                    ),
-                    "plan": "direct",
-                    "skill_calls": [],
-                    "clarification": _STOCK_SYMBOL_CLARIFICATION,
-                    "complexity": "light",
-                    "pending_clarification": {
-                        "question": message,
-                        "intent": "stock_snapshot",
-                        "constraints": {"guardrail": "resolve_miss"},
-                    },
-                }
+            elif not _has_non_stock_intent(message):
+                # Phase 4-2（改进 13）confirm_timeout 回退：阶段 2 同 session 重跑时
+                # checkpointer 的 add_messages reducer 会把同一 HumanMessage 追加进
+                # 历史（实测 run1 messages=[m1] → run2 [m1,m1]）→ 下方 len(messages)<=1
+                # 守卫为 False，若超时回退依赖该守卫会被整体跳过 → 落 LLM 路径（正是
+                # D36 要防的"LLM 幻觉假代码"场景）。故超时回退必须不依赖消息数：
+                # 无条件返回与首轮澄清相同的输出。
+                if state.get("confirm_timeout"):
+                    logger.info(
+                        "qa_router.gate.stock_resolve_miss_timeout",
+                        name=candidate,
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return _resolve_miss_clarification(message)
+                if len(messages) <= 1:
+                    # Phase 4-2（改进 13）：交互式确认触发——在走澄清之前，若消息含
+                    # ≥2 个可 resolve 的多名称候选 → 发 confirm（替代澄清）；否则维持
+                    # 既有澄清字节不变。confirm_choice 非空说明是阶段 2 续跑（点选路径
+                    # 已在闸门 0/0.5 之后提前消费），跳过触发直接走既有澄清（防无限循环）。
+                    if not state.get("confirm_choice"):
+                        multi = _extract_multi_name_candidates(message)
+                        if len(multi) >= 2:
+                            resolved_pairs: list[tuple[str, str]] = []
+                            for name in multi:
+                                sym = await resolve_symbol(name)
+                                if sym is not None:
+                                    resolved_pairs.append((name, sym))
+                            if len(resolved_pairs) >= 2:
+                                options = [
+                                    {"key": sym, "label": f"{name}({sym})"}
+                                    for name, sym in resolved_pairs
+                                ] + [{"key": "none", "label": "都不是"}]
+                                confirm = {"question": message, "options": options}
+                                logger.info(
+                                    "qa_router.gate.stock_resolve_confirm",
+                                    options=[opt["label"] for opt in options],
+                                )
+                                metrics.record_chat_qa_latency(
+                                    "qa_router", int((time.monotonic() - start) * 1000)
+                                )
+                                return {
+                                    "goal": InsightGoal(
+                                        question=message,
+                                        intent="stock_snapshot",
+                                        constraints={"guardrail": "resolve_confirm"},
+                                    ),
+                                    "plan": "direct",
+                                    "skill_calls": [],
+                                    "confirm": confirm,
+                                    "complexity": "light",
+                                }
+                    logger.info(
+                        "qa_router.gate.stock_resolve_miss",
+                        name=candidate,
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return _resolve_miss_clarification(message)
 
     # ── 闸门 3：主线/风险 compose（D26）→ 组合取数短路，不进 LLM ──
     compose_plan = build_compose_plan(message)
