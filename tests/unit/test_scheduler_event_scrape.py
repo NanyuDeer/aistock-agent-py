@@ -12,12 +12,12 @@ mock 路径说明：
   aistock_agent.services.scheduler.is_trading_day。
 """
 
-from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aistock_agent.services.event_scraper import run_event_scrape
+from aistock_agent.utils.date import shanghai_today
 
 
 @pytest.fixture(autouse=True)
@@ -71,11 +71,12 @@ async def test_event_scrape_job_calls_run_event_scrape_on_trading_day():
         patch(
             "aistock_agent.services.event_scraper.run_event_scrape",
             new_callable=AsyncMock,
-            return_value={"persisted": 1, "deduped": 0, "error": None},
+            # 真实返回形状：run_event_scrape 返回 {"scrape_mode", "persisted", "deduped", "error"}
+            return_value={"scrape_mode": "full_daily", "persisted": 1, "deduped": 0, "error": None},
         ) as mock_run,
     ):
         await scheduler._run_event_scrape_job("full_daily")
-    mock_run.assert_awaited_once_with("full_daily", score_date=date.today().isoformat())
+    mock_run.assert_awaited_once_with("full_daily", score_date=shanghai_today().isoformat())
 
 
 @pytest.mark.asyncio
@@ -88,11 +89,11 @@ async def test_event_scrape_job_passes_intraday_mode():
         patch(
             "aistock_agent.services.event_scraper.run_event_scrape",
             new_callable=AsyncMock,
-            return_value={"persisted": 0, "deduped": 0, "error": None},
+            return_value={"scrape_mode": "intraday", "persisted": 0, "deduped": 0, "error": None},
         ) as mock_run,
     ):
         await scheduler._run_event_scrape_job("intraday")
-    mock_run.assert_awaited_once_with("intraday", score_date=date.today().isoformat())
+    mock_run.assert_awaited_once_with("intraday", score_date=shanghai_today().isoformat())
 
 
 @pytest.mark.asyncio

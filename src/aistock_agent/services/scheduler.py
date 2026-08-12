@@ -305,12 +305,17 @@ async def _run_event_scrape_job(scrape_mode: str) -> None:
     from aistock_agent.services.event_scraper import run_event_scrape
 
     try:
-        today = date.today().isoformat()
-        if not is_trading_day(date.fromisoformat(today)):
+        # 上海时区自然日（对齐 _run_morning_task；date.today() 用服务器本地时区，
+        # 跨时区部署时与交易日判定/score_date 语义不一致）
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if not is_trading_day(report_day):
             logger.info("event_scrape_skipped_non_trading_day", date=today)
             return
         result = await run_event_scrape(scrape_mode, score_date=today)
-        logger.info("event_scrape_job_done", scrape_mode=scrape_mode, **result)
+        # result 已含 scrape_mode 键（run_event_scrape 返回 {"scrape_mode", ...}），
+        # 重复传 scrape_mode= 会抛 TypeError，被下方 except 吞成误报的 job_failed
+        logger.info("event_scrape_job_done", **result)
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
 

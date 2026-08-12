@@ -557,19 +557,47 @@ async def trigger_event_scrape(
 
     body: {"scrape_mode": "full_daily|intraday|event_triggered",
            "score_date": "YYYY-MM-DD", "event": {...}}
-    """
-    from aistock_agent.services.event_scraper import run_event_scrape
 
+    返回契约（对齐既有 trigger 接口 success/message 风格）：
+    - 成功: {"success": True, "data": <run_event_scrape 结果>}
+    - 失败: {"success": False, "message": <错误说明>}
+      非法 scrape_mode 与 run_event_scrape 异常均走结构化错误体，不抛 500。
+    """
+    from aistock_agent.services.event_scraper import VALID_MODES, run_event_scrape
+
+    logger = structlog.get_logger()
     payload = body or {}
     scrape_mode = str(payload.get("scrape_mode", "full_daily"))
+    # allowlist 校验：非法值返回结构化错误，避免 run_event_scrape 抛 ValueError → 500
+    if scrape_mode not in VALID_MODES:
+        logger.warning(
+            "manual_trigger_event_scrape_invalid_mode",
+            scrape_mode=scrape_mode,
+            valid_modes=sorted(VALID_MODES),
+        )
+        return {
+            "success": False,
+            "message": f"未知 scrape_mode: {scrape_mode!r}，合法值: {sorted(VALID_MODES)}",
+        }
     score_date = payload.get("score_date")
     event = payload.get("event")
-    result = await run_event_scrape(
-        scrape_mode,
-        score_date=str(score_date) if score_date else None,
-        event=dict(event) if isinstance(event, dict) else None,
-    )
-    return result
+    logger.info("manual_trigger_event_scrape_start", scrape_mode=scrape_mode)
+    try:
+        result = await run_event_scrape(
+            scrape_mode,
+            score_date=str(score_date) if score_date else None,
+            event=dict(event) if isinstance(event, dict) else None,
+        )
+        logger.info("manual_trigger_event_scrape_done", **result)
+        return {"success": True, "data": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "manual_trigger_event_scrape_failed",
+            scrape_mode=scrape_mode,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"success": False, "message": f"事件抓取失败: {str(exc)}"}
 
 
 @router.post("/briefing/review/trigger")

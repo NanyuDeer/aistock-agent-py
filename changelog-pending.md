@@ -1,5 +1,12 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 统一事件抓取中台 Task 3 评审修复（Fix Round）
+- `services/scheduler.py` `_run_event_scrape_job`：① 修 Important 1——`logger.info("event_scrape_job_done", **result)`（`run_event_scrape` 返回已含 `scrape_mode` 键，原重复传 `scrape_mode=` 每次成功抓取都抛 TypeError 被吞成误报的 job_failed）；② 修 Minor 1——`date.today()` 改 `shanghai_today()`（对齐 `_run_morning_task` 上海时区）
+- `api/routes.py` `trigger_event_scrape`：① 修 Important 2——补 try/except 返回 `{"success": False, "message": ...}` 结构化错误体（原未捕获异常 → FastAPI 500）；② 修 Minor 2——`scrape_mode` allowlist 校验（复用 `event_scraper.VALID_MODES`），非法值结构化错误；③ 修 Minor 3——响应统一为 `{"success": True, "data": <结果>}` / `{"success": False, "message": <错误>}`（既有 trigger 接口为扁平 success+message+业务字段结构，无 data 键，差异已记录于 task-3-report.md §8.1 Minor 3；接口无前端消费方，无兼容影响）
+- 测试：`tests/unit/test_scheduler_event_scrape.py` 两处 mock 返回值补 `scrape_mode` 键（真实形状回归，防 Important 1 复发）、断言改 `shanghai_today()`；新增 `tests/unit/test_routes_event_scrape.py`（6 用例：正常契约/参数透传/未知模式/异常降级/无 token/错 token → 403）
+- 验证：定向 pytest 56 passed；全量回归 pytest 86 passed；mypy 21 存量错误（git stash 基线对比一致，新增 0）；ruff 1 个存量 E501（新增 0）
+
+
 ## 2026-08-12 统一事件抓取中台 Task 3：调度注册与手动触发接口
 - `config.py` 新增 `scheduler_event_scrape_cron`（默认 `"30 7 * * 1-5"` 盘前档 07:30）与 `scheduler_event_scrape_intraday_cron`（默认 `"0 10-14 * * 1-5"` 盘中档每小时）
 - `services/scheduler.py` 注册 `event_scrape_daily`（full_daily）与 `event_scrape_intraday`（intraday）两个 job（CronTrigger + settings 时区 + misfire_grace_time=3600 + replace_existing=True）；新增 `_run_event_scrape_job`（交易日守卫：非交易日跳过并记 `event_scrape_skipped_non_trading_day`；交易日调 `run_event_scrape(scrape_mode, score_date=today)`，异常捕获记 `event_scrape_job_failed` 不向上抛）
