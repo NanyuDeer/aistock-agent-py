@@ -28,9 +28,6 @@ DISCLAIMER = "以上为模型推演，仅供参考，不构成投资建议。"
 # 低置信提示（spec）：任意档位 confidence=low 时追加
 LOW_CONFIDENCE_HINT = "市场变化快，该判断不确定性较高。"
 
-# A 股指数代码（对齐 qa_router `_INDEX_SNAPSHOT_CODES` 的 values；指数语义只由指数名/代码触发）
-_INDEX_CODES = frozenset({"000001", "399001", "399006", "000688", "000300"})
-
 # 数据源未返回时的固定字样（与 stock_snapshot/capital_flow 的 _EMPTY_MARKERS 对齐）
 _EMPTY_MARKERS = ("未找到股票", "行情数据为空", "资金流向数据为空", "数据不可用")
 
@@ -135,7 +132,8 @@ async def prediction(args: dict[str, Any], goal: InsightGoal) -> Evidence:
 
     入参兼容 ``symbols: ["6位代码"]``（_build_default_skill_call 后续传入）与
     既有单标的 ``symbol``，并兜底 goal.symbols。news 可选透传。
-    指数路径（args.index_name 非空或代码命中 _INDEX_CODES）走 node_api 指数行情，
+    指数路径仅由显式 ``args.index_name`` 触发（闸门 1 指数短路透传；不能靠代码
+    判定——000001 同时是上证指数与平安银行），走 node_api 指数行情，
     不取个股资金流（指数无该数据，属"不适用"而非"缺失"）。
     """
     symbols = list(dict.fromkeys(args.get("symbols") or []))
@@ -146,7 +144,7 @@ async def prediction(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         raise ValueError("prediction requires 'symbol' in args or goal.symbols")
 
     index_name = args.get("index_name")
-    is_index = index_name is not None or symbol in _INDEX_CODES
+    is_index = index_name is not None
     quote_payload: dict[str, object]
     flow_payload: dict[str, object] | None = None
     quote_text: str

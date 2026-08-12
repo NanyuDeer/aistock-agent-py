@@ -155,6 +155,39 @@ async def test_prediction_index_path_uses_index_quote():
 
 
 @pytest.mark.asyncio
+async def test_prediction_symbol_000001_without_index_name_uses_stock_path():
+    """回归（平安银行）：symbol=000001 且无 index_name → 个股路径，非指数行情。
+
+    闸门 2 解析"平安银行"出 000001 时 prediction 不带 index_name；000001 同时是
+    上证指数代码，若按代码误判指数路径会去拉指数行情 → 本测试锁定走个股路径：
+    get_quote 被调用、node_api 指数接口不被调用、快照含 flow（个股资金流）。
+    """
+    run_mock = AsyncMock(return_value=_result())
+    fake_quote, fake_flow = _mock_tools()
+    index_get = AsyncMock(return_value={})  # 若误走指数路径 → matched 缺失 → 降级
+    with patch("aistock_agent.skills.prediction.get_quote", fake_quote), patch(
+        "aistock_agent.skills.prediction.get_capital_flow", fake_flow
+    ), patch("aistock_agent.skills.prediction.node_api.get", new=index_get), patch(
+        "aistock_agent.skills.prediction.run_chat_prediction", run_mock
+    ):
+        ev: Evidence = await prediction({"symbols": ["000001"]}, _goal(["000001"]))
+
+    assert not ev.degraded
+    fake_quote.ainvoke.assert_awaited_once_with({"symbol": "000001"})
+    fake_flow.ainvoke.assert_awaited_once()
+    index_get.assert_not_awaited()          # 指数行情接口未被调用
+    snapshot = run_mock.call_args.args[0]
+    assert snapshot["flow"] == {             # 个股路径 → 快照含资金流
+        "main_in": "2.5亿",
+        "main_out": "1.1亿",
+        "net_amount": "1.4亿",
+        "flow_5d": [],
+    }
+    assert snapshot["quote"]["name"] == "贵州茅台"  # 走 get_quote 个股行情
+    assert DISCLAIMER in "\n".join(ev.facts)
+
+
+@pytest.mark.asyncio
 async def test_prediction_news_passthrough():
     """args.news 存在时透传（无 id 项不可被引用由 run_chat_prediction 后处理保证）。"""
     run_mock = AsyncMock(return_value=_result())
