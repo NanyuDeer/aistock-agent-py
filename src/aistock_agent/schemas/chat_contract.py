@@ -34,6 +34,7 @@ class InsightGoal(BaseModel):
         "trend_ranking",
         "index_snapshot",
         "douyin_video",
+        "prediction",
     ]
     # QA Router 不填，由 synth_answer 通过 _infer_answer_mode 推断
     answer_mode: Literal["predict", "trace", "validate"] | None = None
@@ -69,6 +70,7 @@ class SubGoal(BaseModel):
         "trend_ranking",
         "index_snapshot",
         "douyin_video",
+        "prediction",
     ]
     dimension: Literal["predict", "trace", "validate"]
     symbols: list[str] = []
@@ -140,6 +142,7 @@ class SkillCall(BaseModel):
         "trend_ranking",
         "index_snapshot",
         "douyin_video",
+        "prediction",
     ]
     args: dict[str, Any]
     depends_on: list[str] = []

@@ -244,6 +244,37 @@ START → supervisor(quick_think, 意图路由)
 - **验证**：test_ws_chat_replacement.py 新增 `_RecvTrackingWebSocket`（模拟 uvicorn 并发 recv 防护）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done` 回归（断言返回时无挂起 recv、主循环可安全发起下次 receive）。
 - **经验教训**：`task.cancel()` 仅请求取消，不同步 await 收尾则底层 I/O（uvicorn 同连接 recv 并发防护）未释放；凡"取消后立即继续用同一 I/O 对象"必须 `await asyncio.gather(task, return_exceptions=True)`（同条已记 project_memory 45）。
 
+### CHAT QA Phase 4-1 对话内预测打通（2026-08-12）：三段式"影响持续性推演"
+
+- **产品边界（用户拍板 2026-08-11）**：影响持续性推演**非点位预测**；固定免责声明 + 低置信度提示；v1 不落库（对话预测量大标的杂、对照数据源仅指数可用，落库 ROI 低；`prediction_records` 表语义绑定溯源报告 source_type/source_id 不污染）
+- **无溯源入口**：`prediction_service.run_chat_prediction(snapshot, news, context) -> PredictionResult | None`——门禁 quote 必填非空 dict + trade_date 可解析，**flow 可选**（指数无个股资金流属"不适用"非"缺失"）；后处理强制 `prediction_status="hypothesis"`（无溯源链不得 confirmed）+ `evidence_ids` 只保留输入快照/新闻存在项（过滤而非 raise，区别于 run_predict）；**到期日 best-effort**（`add_trading_days` 日历仅覆盖至当前年份，2027+ long 档超范围时仅 warning 跳过不阻断——v1 不落库、返回值无消费方）；**LLM = `get_quick_think()` + `with_chat_structured_output(PredictionResult)`（json_mode）**——spec §3.4 P10 计费口径对齐 skill_executor 其它 skill（deep_think 26-47s/次 UX 不可接受）；prompt 必含 `schema_version:"1.0"` 指令（冒烟实测缺该字段恒降级）
+- **prediction skill**：并发 `get_quote`/`get_capital_flow` 组快照；**指数路径仅由显式 `index_name` 触发**（走 `/internal/index/quotes`，禁靠代码判定——000001 同时是上证指数与平安银行）；三段式 facts（现状 + 影响持续性推演[假设推演标注/三档/置信/风险/演化] + `DISCLAIMER="以上为模型推演，仅供参考，不构成投资建议。"`，low 置信追加"市场变化快，该判断不确定性较高。"）；降级复用 `PREDICT_DEGRADED_HINT`
+- **qa_router 路由（C2/E1 裁决回写）**：`intent_map` 加 prediction 键；`_build_default_skill_call` prediction 分支（`_extract_stock_symbol` 无标的不硬塞返回 None）；**闸门 1/2 短路主入口（"茅台会涨吗"/"上证后市如何"）追加 prediction SkillCall（goal_id="g2"，validate call 保持 g1）**——三段式可达的关键；`_build_gate4_context` predict 分支去掉"不指定预测 skill"压制文案（E1）；非快照指数（恒指等无 index_code）不塞 prediction 维持 D35
+- **synth_answer 渲染**：`_build_predict_section` 重写——prediction Evidence 定位（primary `skill_name=="prediction"`，fallback `goal_id=="g2"`，**不按 sg.id**：predict 子目标 id="g1"、prediction Evidence goal_id="g2"）；非 degraded → 三段式（现状趋势[validate g1 facts] + 影响持续性[跳过 facts 首行"【…现状】"防重复] + 免责声明恰好一次[skill facts 已含，过滤去重]）；degraded/缺失 → D35 降级字节不变；多 predict 子目标 hint 只输出一次
+- **验证**：全量 A/B HEAD 28 failed ⊆ BASE 28 failed（新增清零）；ruff 改动文件 0 新增；**WS 冒烟 4/4**——"茅台会涨吗"（gate2）/ "上证后市如何"（gate1，C2 验证点）三段式 + 免责声明 + 假设推演标注 / "市盈率是什么"科普防误伤 / "今日大盘怎么样"非预测不变；spec 验收 1-5 全满足
+- **教训（新增）**：① json_mode 结构化输出缺 required 字段时 pydantic 校验失败 → 降级——prompt required 字段清单必须与 Pydantic 契约逐字对齐（schema_version 案例）；② 无消费方的"校验副作用"（到期日）不应因超日历范围阻断主结果——best-effort + warning；③ 指数语义防误判只能靠显式上下文（index_name）不能靠代码集合（000001 双义）；④ WS 冒烟是唯一能发现"LLM 输出缺字段恒降级"与"到期日跨年崩溃"的验证手段——单测只锁语义不锁真实 LLM 输出
+- 提交：c4b1030..d29597d（8 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-2 交互式确认（2026-08-12）：两阶段运行（改进 13）
+
+- **产品/协议（spec §4.2 按 Phase 2 实际协议修订）**：resolve-miss + 多候选（≥2 可 resolve 名称）时不再直接澄清——阶段 1 图终态负载 `confirm_request`（`{"confirm_request": {"request_id", "question", "options"}}` 替代 DONE，跳过落库）→ ws.py 等用户选择（60s 单调时钟 deadline）→ 阶段 2 携带 `confirm_choice` 重跑同 session → DONE；**超时 / 「都不是」→ `confirm_timeout` 重跑 → `_resolve_miss_clarification` 无条件回退既有澄清（不依赖 `len(messages)<=1` 守卫，该守卫是 D36 多轮设计约束）**；<2 候选维持澄清不弹窗
+- **ws.py 阶段 2 重跑**：`_run_chat_graph_to_events` 加 run_id 参数（阶段 2 新 run_id 后缀 `_confirm`）；`initial_state2["messages"] = []`（**空列表对 add_messages reducer 是 no-op**，防阶段 2 同 thread 重跑时无 id HumanMessage 追加进 checkpoint 历史造成消息重复污染）+ `reset_transient_state()` + `reset_token_usage()`；`_wait_confirm_response` 用 `asyncio.FIRST_COMPLETED` + 单调时钟（不用 `asyncio.wait_for` 防止 cancel 吞并响应竞态）+ `_owns_run` 归属校验 + recv 收尾 `await asyncio.gather(task, return_exceptions=True)`（问题 18 先例）
+- **qa_router**：confirm 触发（闸门 2 resolve-miss 分支）+ 消费（confirm_choice 直接构造 SkillCall 续跑；confirm_timeout 回退澄清）+ transient 三字段归零；**synth_answer confirm 短路在 goal is None 检查之前**（confirm 终态不渲染回答）
+- **前端（app-frontend）**：`useChatStream.ts` `case 'confirm_request'` 终态处理（doneReceived 置位 + pendingConfirm ref + 结算 send promise + 不 appendMessage）+ `sendConfirmResponse(request_id, choice)` **发送成功后 re-arm**（doneReceived=false/streaming=true/清 progressSteps/streamingText/currentRunReasoning/currentRunEvents——不复位则阶段 2 事件流被 doneReceived 丢弃，回答永不出现，review Critical 修复）；ConfirmSheet 弹框 submitted 防连点
+- **验证**：定向 4 新测试文件全绿；全量 A/B HEAD 失败集 = BASE（30=30）新增清零（1808→1829 passed）；ruff 改动文件 0 新增；**WS confirm 冒烟 5/5**（case1 点选续跑真实行情 / case2「都不是」澄清回退 / case3 非触发回归，每用例独立 session——同会话第 2 条消息不触发确认是 D36 设计守卫非缺陷）
+- **教训（新增）**：① 阶段 2 重跑复用同 thread checkpoint 必须清 messages（add_messages 对无 id 消息是追加）；② 两阶段交互的任何一阶段状态（doneReceived）不复位 = 后续事件全丢，re-arm 是发送成功的原子动作；③ 前端点选后的续跑是"新一次运行"，run_id 需区分以正确归属 token/事件
+- 提交：c742a93..232e361（3 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-3 全局用户记忆（2026-08-12）：user_profile 注入 + 个性化消费（改进 15）
+
+- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（X-Internal-Token，agent-py 检索用；无记录 200 + 空对象）
+- **拉取（`services/data_client.py`）**：`get_user_profile(user_id)`——Redis 缓存 `user_profile:{user_id}` TTL 300s（失败/空画像同样缓存防每轮重复拉取）→ `GET /internal/user-profile/{user_id}`；非 dict → None（失败降级，warning 不阻断，"永不 500"）；空画像 `{}` 与失败 `None` 语义分离
+- **注入（`QuestionState.user_profile` 可选字段）**：ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）**无条件显式赋值**——`user_id` 非空拉取注入，匿名写 `None` 覆盖 checkpointer 旧值（**条件注入会跨轮污染画像：上一轮登录态画像残留到匿名轮，集成冒烟实证**；对齐 T6/messages 置空先例）
+- **消费**：qa_router `_build_user_profile_context(profile)` 在 LLM prompt 追加"称呼/投资偏好/风险偏好"参考段（profile 为 None 返回 ""，SYSTEM_PROMPT 常量字节不变，不改技能/闸门规则）；synth_answer 风险段三档——`RISK_DISCLAIMER_CONSERVATIVE`（conservative 强化"风险较高，谨慎对待"，优先级高于动作词 strong 档，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（stable，不改 evidence 的 goal_id 关联）
+- **验证**：全量 A/B HEAD 失败集 ⊆ BASE（归一化后新增 0）；ruff 改动文件 0 新增；tsc 0；profile 定向 15/15；**集成冒烟全绿**——登录态 PUT→GET→internal 链路 + 对话 conservative 风险段生效 + 匿名常规档零行为变化
+- **教训（新增）**：① node-postgres 对 JSONB 参数必须传 JSON 字符串（JS 数组直传 500 "类型json的输入语法无效"）——app-api PUT profile 集成冒烟实证；② LangGraph checkpointer 跨轮状态：入口构造 state 时**未提供的键沿用上一轮 checkpoint 值**——注入类字段必须无条件赋值（匿名显式 None），不能条件设置
+- 提交：app-api a709928+159edb9；agent-py 2445417（注入）+ d9be256（消费）+ 4393ad9（防污染 fix），changer 未 push；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。

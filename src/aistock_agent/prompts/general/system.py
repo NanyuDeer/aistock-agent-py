@@ -27,6 +27,11 @@ ACTION_KEYWORDS: tuple[str, ...] = ("买", "卖", "建议", "重仓", "保本")
 RISK_DISCLAIMER = "数据驱动洞见，不构成投资建议。市场有风险，投资需谨慎。"
 # 强风险段：用户问题含动作词时升级
 RISK_DISCLAIMER_STRONG = "以上内容不构成任何买卖建议，请结合自身风险承受能力独立决策。"
+# 保守风险偏好档（Phase 4-3 改进 15）：用户 risk_tolerance=conservative 时升级
+RISK_DISCLAIMER_CONSERVATIVE = (
+    "您当前风险偏好较为保守，上述内容仅供参考，"
+    "请结合自身风险承受能力谨慎对待，不构成投资建议。"
+)
 
 # 敏感合规话术（D29）：命中 买/卖/建议/重仓/保本 等动作词时短路输出
 COMPLIANCE_REPLY = (

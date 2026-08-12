@@ -4,6 +4,7 @@ Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -14,6 +15,7 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.redis_pool import RedisPool
 
 logger = structlog.get_logger()
 
@@ -669,6 +671,50 @@ class NodeApiClient:
         result = await self.delete("/internal/analysis-reports/cleanup")
         deleted_count = result.get("deleted_count") if result else None
         return deleted_count if isinstance(deleted_count, int) else 0
+
+    async def get_user_profile(self, user_id: str) -> dict[str, object] | None:
+        """按 user_id 拉取用户画像（Phase 4-3 全局用户记忆）。
+
+        调用 Node.js ``GET /internal/user-profile/{user_id}``；Redis TTL 5min
+        缓存（``user_profile:{user_id}``，JSON 序列化），防对话每轮重复拉取。
+
+        Args:
+            user_id: 用户 openid（P0 可信 user_id）。
+
+        Returns:
+            profile dict（nickname / investment_preferences / risk_tolerance /
+            updated_at）；空画像返回 ``{}``（区别于拉取失败）；失败返回 None
+            （"永不 500"：对话入口失败仅 warning 不阻断）。
+        """
+        cache_key = f"user_profile:{user_id}"
+        try:
+            client = await RedisPool.get_client()
+            cached = await client.get(cache_key)
+            if cached:
+                raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
+            logger.debug("get_user_profile_cache_miss", exc_info=True)
+
+        data = await self.get(f"/internal/user-profile/{user_id}")
+        if not isinstance(data, dict):
+            logger.warning("get_user_profile_failed", user_id=user_id)
+            return None
+
+        try:
+            client = await RedisPool.get_client()
+            await client.setex(
+                cache_key, _USER_PROFILE_TTL_SECONDS, json.dumps(data, ensure_ascii=False)
+            )
+        except Exception:
+            logger.debug("get_user_profile_cache_write_failed", exc_info=True)
+        return data
+
+
+# 用户画像缓存 TTL（5 分钟；失败/空画像同样缓存，避免每轮重复拉取）
+_USER_PROFILE_TTL_SECONDS = 300
 
 
 # 全局单例

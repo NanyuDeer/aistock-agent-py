@@ -82,3 +82,15 @@ class QuestionState(TypedDict, total=False):
     # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
     cards: list[ChatCard] | None
     token_usage: dict[str, int] | None
+    # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发写，synth_answer 短路透出，
+    # ws.py 转 confirm_request 终态）。单轮 transient，不落 trace/insight。
+    confirm: dict | None = None
+    # Phase 4-2：阶段 2 续跑输入信号（ws.py 写，qa_router 消费）——用户点选的标的
+    # （{"symbol": 6位代码, "label": 选项 label}）与确认超时标记。单轮 transient 输入，
+    # 不写回图状态输出；由 ws.py 每轮入口归零（对齐 deep_source/goals 先例）。
+    confirm_choice: dict | None = None
+    confirm_timeout: bool | None = None
+    # Phase 4-3（改进 15）：用户画像（ws.py/routes.py 入口按 user_id 拉取注入）。
+    # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
+    # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
+    user_profile: dict | None = None
