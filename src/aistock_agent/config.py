@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
     scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    # ── 统一事件抓取中台调度（2026-08-12） ──
+    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    scheduler_event_scrape_intraday_cron: str = "0 10-14 * * 1-5"  # 盘中档：每小时
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

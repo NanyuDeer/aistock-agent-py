@@ -84,6 +84,33 @@ def start_scheduler() -> None:
         name="morning briefing",
         replace_existing=True,
     )
+    # ── 统一事件抓取中台（2026-08-12） ──
+    # 盘前档（07:30 全量）与盘中档（10-14 点每小时增量）两档；
+    # 早间/午间/收盘若需独立档位，可复用同一 cron 配置体系追加。
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_daily",
+        name="event scrape daily",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_intraday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "intraday"},
+        id="event_scrape_intraday",
+        name="event scrape intraday",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
     scheduler.add_job(
         _run_broadcast_task,
         CronTrigger.from_crontab(
@@ -271,6 +298,21 @@ async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]
     logger.info("scheduler_event_pipeline_start", event_count=len(major_events))
     await run_event_analysis_pipeline(major_events)
     logger.info("scheduler_event_pipeline_done", event_count=len(major_events))
+
+
+async def _run_event_scrape_job(scrape_mode: str) -> None:
+    """定时执行事件抓取（交易日守卫 + fire-and-forget）。"""
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        today = date.today().isoformat()
+        if not is_trading_day(date.fromisoformat(today)):
+            logger.info("event_scrape_skipped_non_trading_day", date=today)
+            return
+        result = await run_event_scrape(scrape_mode, score_date=today)
+        logger.info("event_scrape_job_done", scrape_mode=scrape_mode, **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
 
 
 def _make_scheduled_state(

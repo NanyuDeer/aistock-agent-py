@@ -548,6 +548,30 @@ async def trigger_event_briefing(
         }
 
 
+@router.post("/briefing/event-scrape/trigger")
+async def trigger_event_scrape(
+    body: dict[str, object] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发统一事件抓取。
+
+    body: {"scrape_mode": "full_daily|intraday|event_triggered",
+           "score_date": "YYYY-MM-DD", "event": {...}}
+    """
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    payload = body or {}
+    scrape_mode = str(payload.get("scrape_mode", "full_daily"))
+    score_date = payload.get("score_date")
+    event = payload.get("event")
+    result = await run_event_scrape(
+        scrape_mode,
+        score_date=str(score_date) if score_date else None,
+        event=dict(event) if isinstance(event, dict) else None,
+    )
+    return result
+
+
 @router.post("/briefing/review/trigger")
 async def trigger_review_briefing(
     body: dict[str, str] | None = None,

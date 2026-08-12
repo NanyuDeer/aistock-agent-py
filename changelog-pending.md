@@ -1,5 +1,14 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-12 统一事件抓取中台 Task 3：调度注册与手动触发接口
+- `config.py` 新增 `scheduler_event_scrape_cron`（默认 `"30 7 * * 1-5"` 盘前档 07:30）与 `scheduler_event_scrape_intraday_cron`（默认 `"0 10-14 * * 1-5"` 盘中档每小时）
+- `services/scheduler.py` 注册 `event_scrape_daily`（full_daily）与 `event_scrape_intraday`（intraday）两个 job（CronTrigger + settings 时区 + misfire_grace_time=3600 + replace_existing=True）；新增 `_run_event_scrape_job`（交易日守卫：非交易日跳过并记 `event_scrape_skipped_non_trading_day`；交易日调 `run_event_scrape(scrape_mode, score_date=today)`，异常捕获记 `event_scrape_job_failed` 不向上抛）
+- `api/routes.py` 新增 `POST /api/agent/briefing/event-scrape/trigger`（X-Internal-Token 鉴权；body `{"scrape_mode","score_date","event"}`，缺省 full_daily）
+- 测试：新增 `tests/unit/test_scheduler_event_scrape.py`（6 用例：简报回归 + job 交易日守卫/模式透传/异常吞没 + job 注册集成）；`test_scheduler.py` 同步（from_crontab 次数 5→7、两个 mock-settings 测试补 cron 字段）
+- 验证：pytest 80 passed（相关 5 文件）/ 全量单测 1416 passed + 6 基线失败（test_industry_vector_search，git stash 验证与本次无关）；mypy 5 src 文件 21 个基线错误（改动前后一致，新增 0）；ruff 1 个基线 E501（改动前后一致，新增 0）
+- 偏差：① 路由装饰器用相对路径 `/briefing/event-scrape/trigger`（router 已挂 `/api/agent` 前缀，最终 URL 与简报接口语义一致，避免双前缀）；② job 注册补 `name`/`replace_existing=True`（对齐现有 job 幂等模式）；③ config 追加位置为 scheduler cron 配置块（`scheduler_prediction_validate_cron` 之后）
+
+
 ## 2026-08-11 迭代 Agent 架构实现
 - 新增 `src/aistock_agent/iterate/`：adapters/case_builder/ground_truth/replay_layer/replay_runner/evaluator/variant_engine/run_case/reporter/scheduler
 - `config.py` 新增 iterate_* 配置（默认关闭）；`.gitignore` 追加 data/ 数据目录

@@ -89,7 +89,7 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
         ) as from_crontab:
             scheduler.start_scheduler()
 
-        assert from_crontab.call_count == 5  # 4 个业务 job + scheduler_heartbeat
+        assert from_crontab.call_count == 7  # 6 个业务 job + scheduler_heartbeat
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1054,6 +1054,8 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_review_quick_cron = "30 15 * * 1-5"
             mock_settings.scheduler_review_full_cron = "30 20 * * 1-5"
             mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
+            mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 1-5"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1080,6 +1082,8 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
             mock_settings.scheduler_review_cron = "30 15 * * 1-5"
             mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
+            mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 1-5"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
