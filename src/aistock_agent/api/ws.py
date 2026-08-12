@@ -543,15 +543,18 @@ async def ws_chat(websocket: WebSocket) -> None:
             # D11：user_id 构造 state 后追加（build_chat_initial_state 签名不变，
             # §3.1 外部契约）；未登录为 None，作为 chat_analysis 落库登录守卫（D38）。
             raw_user_id = data.get("user_id")
-            initial_state["user_id"] = (
+            user_id_value = (
                 str(raw_user_id) if raw_user_id not in (None, "") else None
             )
+            initial_state["user_id"] = user_id_value
             # Phase 4-3（改进 15）：user_profile 按 user_id 拉取注入（Redis 5min 缓存，
-            # 失败/空画像返回 None/{} 不阻断）；未登录不注入 → 零行为变化。
-            if initial_state.get("user_id"):
-                initial_state["user_profile"] = await node_api.get_user_profile(
-                    str(initial_state["user_id"])
-                )
+            # 失败/空画像返回 None/{} 不阻断）。必须无条件赋值：匿名显式写 None 覆盖
+            # checkpointer 上一轮的旧值（条件注入会在同 thread 多轮间跨轮污染画像）。
+            initial_state["user_profile"] = (
+                await node_api.get_user_profile(user_id_value)
+                if user_id_value
+                else None
+            )
             # T6/M3：单轮 transient 路由信号每轮归零（对齐 reset_transient_state；
             # last_deep_report / pending_clarification 跨轮保留，不入归零）。
             # Phase 4-2：confirm/confirm_choice/confirm_timeout 同为单轮 transient
@@ -606,15 +609,17 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # 让 synth_answer 二次短路）；token 计费重置后正常落库。
                 initial_state2 = build_chat_initial_state(message)
                 initial_state2["force_deep"] = bool(data.get("force_deep"))
-                initial_state2["user_id"] = (
+                user_id_value2 = (
                     str(raw_user_id) if raw_user_id not in (None, "") else None
                 )
-                # Phase 4-3（改进 15）：阶段 2 重跑同 thread 同样注入（对齐阶段 1；
-                # 5min 缓存窗口内命中，不产生额外 HTTP）。
-                if initial_state2.get("user_id"):
-                    initial_state2["user_profile"] = await node_api.get_user_profile(
-                        str(initial_state2["user_id"])
-                    )
+                initial_state2["user_id"] = user_id_value2
+                # Phase 4-3（改进 15）：阶段 2 重跑同 thread 同样无条件注入（对齐阶段 1；
+                # 5min 缓存窗口内命中，不产生额外 HTTP；匿名显式 None 覆盖 checkpoint）。
+                initial_state2["user_profile"] = (
+                    await node_api.get_user_profile(user_id_value2)
+                    if user_id_value2
+                    else None
+                )
                 # Phase 4-2 修复：阶段 2 重跑同 session（thread_id）图时 messages 必须置空。
                 # build_chat_initial_state 携带的 [HumanMessage(message)]（无 id）经
                 # add_messages reducer 会被追加进 checkpoint 历史 → 线程消息变 [m1, m1]，

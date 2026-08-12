@@ -99,12 +99,13 @@ async def chat_message(
     reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库，仅透出展示）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
-    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
-    # Phase 4-3（改进 15）：HTTP 路径同样注入 user_profile（对齐 ws.py；未登录/失败不阻断）
-    if initial_state.get("user_id"):
-        initial_state["user_profile"] = await node_api.get_user_profile(
-            str(initial_state["user_id"])
-        )
+    user_id_value = req.user_id or None  # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["user_id"] = user_id_value
+    # Phase 4-3（改进 15）：无条件注入 user_profile（对齐 ws.py；匿名显式 None
+    # 覆盖 checkpoint 旧值防跨轮污染；拉取失败 None 不阻断）
+    initial_state["user_profile"] = (
+        await node_api.get_user_profile(user_id_value) if user_id_value else None
+    )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
     result = await graph.ainvoke(
@@ -304,12 +305,13 @@ async def chat_stream_messages(
     reset_token_usage()  # P10 线 2：SSE 路径按轮重置（DONE 从 state.values 读快照）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
-    initial_state["user_id"] = req.user_id or None   # D11：HTTP 降级路径透传（对齐 WS）
-    # Phase 4-3（改进 15）：SSE 路径同样注入 user_profile（对齐 ws.py；未登录/失败不阻断）
-    if initial_state.get("user_id"):
-        initial_state["user_profile"] = await node_api.get_user_profile(
-            str(initial_state["user_id"])
-        )
+    user_id_value = req.user_id or None  # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["user_id"] = user_id_value
+    # Phase 4-3（改进 15）：SSE 路径同样无条件注入 user_profile（对齐 ws.py；
+    # 匿名显式 None 覆盖 checkpoint 旧值防跨轮污染）
+    initial_state["user_profile"] = (
+        await node_api.get_user_profile(user_id_value) if user_id_value else None
+    )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
 
