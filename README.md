@@ -368,6 +368,8 @@ src/aistock_agent/
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | POST | `/api/agent/briefing/morning/trigger` | 手动触发晨报生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（事件抓取中台；date=YYYY-MM-DD 必填，非法返回 400） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源；date=YYYY-MM-DD 必填，非法返回 400） |
 | POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/trigger` | 手动触发完整播报链路：morning→wind_leader→hot_burst→trend_score→broadcast（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/only` | 仅重新生成双人播报（不重跑报告，需 X-Internal-Token） |

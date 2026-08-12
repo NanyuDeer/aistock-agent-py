@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncGenerator
 from datetime import date
@@ -74,6 +75,24 @@ def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
     if parsed_date.isoformat() != report_date:
         raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD")
     return report_date
+
+
+def _validate_scrape_date(date_str: str) -> str:
+    """校验事件抓取查询日期（YYYY-MM-DD），非法返回 400 结构化错误。
+
+    三层校验（对齐 Node 侧 /internal/analysis-reports 的日期校验惯例）：
+    正则格式 → fromisoformat 语义 → isoformat 回写一致性。非法格式与
+    语义非法日期（如 2026-13-45）均返回 400，避免把坏日期透传到事件库。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    try:
+        parsed_date = date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != date_str:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    return date_str
 
 
 def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
@@ -593,6 +612,41 @@ async def trigger_event_scrape(
             exc_info=True,
         )
         return {"success": False, "message": f"事件抓取失败: {str(exc)}"}
+
+
+@router.get("/event/scrape-list")
+async def event_scrape_list(date: str) -> dict[str, object]:
+    """按日期读取当日抓取事件列表（事件抓取中台查询接口）。
+
+    URL 参数：
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+    返回: {"events": [EventRecord, ...]}；当日无抓取事件返回空列表。
+    """
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    _validate_scrape_date(date)
+    events = await load_event_scrape(date)
+    return {"events": events}
+
+
+@router.get("/event/scrape-by-symbol/{symbol}")
+async def event_scrape_by_symbol(symbol: str, date: str) -> dict[str, object]:
+    """按标的读取当日抓取事件（stock_trace 证据源用）。
+
+    URL 参数：
+        symbol: 6 位股票代码（必填）。
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+    返回: {"events": [EventRecord, ...]}；按 payload.symbol / involved_keywords
+    子串过滤（"000" 类短符号可能误命中多股，对 stock_trace 证据源可接受，
+    Task 2 评审备注）。
+    """
+    from aistock_agent.services.event_store import (  # noqa: PLC0415
+        load_event_scrape_by_symbol,
+    )
+
+    _validate_scrape_date(date)
+    events = await load_event_scrape_by_symbol(symbol, date)
+    return {"events": events}
 
 
 @router.post("/briefing/review/trigger")
