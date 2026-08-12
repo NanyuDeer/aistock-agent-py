@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -116,6 +117,52 @@ async def test_collect_eastmoney_judgements_keeps_rows_without_time():
         mock_api.get = AsyncMock(return_value={"events": rows})
         events = await collect_eastmoney_judgements(_TODAY)
     assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_utc_maps_to_shanghai_date():
+    """I1 时区精度：Node UTC ISO（toISOString 强制 UTC）按上海时区日期归属过滤。
+
+    - 当日 UTC 02:00（上海当日 10:00，UTC 日期 == score_date）→ 保留
+    - 前一日 UTC 22:00（上海当日 06:00，北京 00:00-07:59 凌晨事件；修复前
+      startswith(score_date) 按 UTC 日期前缀会把当日事件误过滤）→ 保留
+    - 前一日 UTC 10:00（上海前一日 18:00，真陈旧行）→ 过滤
+    """
+    today = shanghai_today()
+    today_str = today.isoformat()
+    yesterday_str = (today - timedelta(days=1)).isoformat()
+    rows = [
+        {
+            "title": "UTC当日事件",
+            "ai_summary": "x",
+            "published_at": f"{today_str}T02:00:00.000Z",
+        },
+        {
+            "title": "北京凌晨当日事件",
+            "ai_summary": "x",
+            "published_at": f"{yesterday_str}T22:00:00.000Z",
+        },
+        {
+            "title": "昨日陈旧事件",
+            "ai_summary": "x",
+            "published_at": f"{yesterday_str}T10:00:00.000Z",
+        },
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"total": 3, "events": rows})
+        events = await collect_eastmoney_judgements(today_str)
+    titles = {ev["title"] for ev in events}
+    assert titles == {"UTC当日事件", "北京凌晨当日事件"}
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_judgements_unparseable_time_filtered():
+    """I1 边界：无法解析的时间字符串宽容回退（取前 10 字符比较），不崩溃。"""
+    rows = [{"title": "异常时间事件", "ai_summary": "x", "published_at": "not-a-date"}]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"events": rows})
+        events = await collect_eastmoney_judgements(_TODAY)
+    assert events == []
 
 
 @pytest.mark.asyncio

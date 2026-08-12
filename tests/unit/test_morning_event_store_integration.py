@@ -330,3 +330,103 @@ async def test_morning_cache_hit_falls_back_to_details_when_event_store_empty():
     major_events = result["analysis_reports"]["major_events"]
     titles = [str(ev.get("title", "")) for ev in major_events]
     assert "旧LLM事件" in titles
+
+
+# ── 缓存命中路径：major_events 只保留重大事件（impact >= MAJOR_IMPACT_THRESHOLD） ──
+
+
+def _cached_briefing_json() -> str:
+    """带旧 LLM MAJOR_EVENTS 标记的缓存晨报（details 提取降级用）。"""
+    return json.dumps(
+        {
+            "display_report": {
+                "summary": "摘要",
+                "details": (
+                    "昨日晨报正文\n<!--MAJOR_EVENTS_START-->"
+                    '[{"title": "旧LLM事件", "summary": "s", "url": "", '
+                    '"impact_score": 4, "direction": "positive", '
+                    '"involved_keywords": []}]'
+                    "<!--MAJOR_EVENTS_END-->"
+                ),
+                "stocks": [],
+                "risks": [],
+            },
+            "podcast_brief": "播报摘要",
+            "schema_version": "2.0",
+        },
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_morning_cache_hit_filters_minor_events_from_event_store():
+    """缓存命中：事件库混入普通证据（impact_score<4）时，major_events 仅保留重大事件。
+
+    （修复前 _event_records_to_major_events 不过滤 impact_score，缓存命中时
+    analysis_reports["major_events"] 混入 impact=1 普通证据，
+    手动晨报端点 major_event_count 诊断计数失真。）
+    """
+    from aistock_agent.agents.workers.morning import run
+
+    events = [
+        _event_record(title="重大事件A", event_id="e1", impact_score=5),
+        _event_record(title="普通证据B", event_id="e2", impact_score=1),
+    ]
+    with (
+        patch(
+            "aistock_agent.agents.workers.morning.get_cached_briefing",
+            new=AsyncMock(return_value=_cached_briefing_json()),
+        ),
+        patch(
+            "aistock_agent.services.event_store.load_event_scrape",
+            new=AsyncMock(return_value=events),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning._safe_process_market_push",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning.persist_morning_report",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await run({"analysis_reports": {}})
+
+    assert result["analysis_reports"]["cached"] is True
+    major_events = result["analysis_reports"]["major_events"]
+    titles = [str(ev.get("title", "")) for ev in major_events]
+    assert "重大事件A" in titles
+    assert "普通证据B" not in titles
+    assert "旧LLM事件" not in titles
+
+
+@pytest.mark.asyncio
+async def test_morning_cache_hit_falls_back_to_details_when_all_events_minor():
+    """缓存命中：事件库全为普通证据（过滤后为空）→ major_events 降级回 details 提取。"""
+    from aistock_agent.agents.workers.morning import run
+
+    events = [_event_record(title="普通证据B", event_id="e2", impact_score=1)]
+    with (
+        patch(
+            "aistock_agent.agents.workers.morning.get_cached_briefing",
+            new=AsyncMock(return_value=_cached_briefing_json()),
+        ),
+        patch(
+            "aistock_agent.services.event_store.load_event_scrape",
+            new=AsyncMock(return_value=events),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning._safe_process_market_push",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning.persist_morning_report",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await run({"analysis_reports": {}})
+
+    major_events = result["analysis_reports"]["major_events"]
+    titles = [str(ev.get("title", "")) for ev in major_events]
+    assert "普通证据B" not in titles
+    assert "旧LLM事件" in titles

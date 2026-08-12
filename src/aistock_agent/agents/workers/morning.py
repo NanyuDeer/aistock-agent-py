@@ -580,13 +580,31 @@ def _event_records_to_major_events(
 
     事件库字段（event_id/title/summary/url/impact_score/direction/
     involved_keywords）与 MAJOR_EVENTS 标记块字段对齐；无 title 的条目跳过。
+
+    过滤语义：仅保留重大事件（impact_score >= MAJOR_IMPACT_THRESHOLD），
+    过滤 event_triggered 分支豁免入库的 impact=1 普通证据（stock_trace 溯源用），
+    对齐注入路径 :690-728 的同款过滤——否则缓存命中时 analysis_reports
+    major_events 混入普通证据，手动晨报端点 major_event_count 诊断计数失真。
     """
+    # 函数级 import：与 run() 内 load_event_scrape 的引入方式一致（避免顶层
+    # import 引入 event_store 的隐式依赖；MAJOR_IMPACT_THRESHOLD 阈值常量）
+    from aistock_agent.services.event_store import MAJOR_IMPACT_THRESHOLD  # noqa: PLC0415
+
     result: list[dict[str, object]] = []
     for ev in events:
         title = ev.get("title")
         if not isinstance(title, str) or not title.strip():
             continue
         impact_score = ev.get("impact_score")
+        # 类型收窄：dict[str, object] 的 get 返回 object，需先 isinstance 再 int()
+        score = (
+            int(impact_score)
+            if isinstance(impact_score, int | float)
+            and not isinstance(impact_score, bool)
+            else 0
+        )
+        if score < MAJOR_IMPACT_THRESHOLD:
+            continue
         keywords = ev.get("involved_keywords")
         result.append(
             {
@@ -594,12 +612,7 @@ def _event_records_to_major_events(
                 "title": title,
                 "summary": str(ev.get("summary", "")),
                 "url": str(ev.get("url", "")),
-                "impact_score": (
-                    int(impact_score)
-                    if isinstance(impact_score, int | float)
-                    and not isinstance(impact_score, bool)
-                    else 0
-                ),
+                "impact_score": score,
                 "direction": str(ev.get("direction", "neutral")),
                 "involved_keywords": (
                     [str(k) for k in keywords if isinstance(k, str)]

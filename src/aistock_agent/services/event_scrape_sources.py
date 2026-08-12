@@ -10,6 +10,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -18,6 +19,8 @@ from aistock_agent.services.event_store import EventRecord, normalize_event
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
+
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _extract_items(resp: object, key: str = "items") -> list[Any]:
@@ -32,6 +35,33 @@ def _extract_items(resp: object, key: str = "items") -> list[Any]:
     if isinstance(value, list):
         return value
     return []
+
+
+def _event_shanghai_date(published: str) -> str:
+    """把 Node 返回的事件时间字符串转成上海时区日期（YYYY-MM-DD）。
+
+    兼容两种格式：
+    - UTC ISO 带 Z：'2026-08-12T02:00:00.000Z'（Node published_at TIMESTAMPTZ
+      toISOString 输出，强制 UTC）→ 转上海时区再取日期
+    - 本地无时区：'2026-08-12 10:00:00' / '2026-08-12T10:00:00'
+      → 显式绑定上海时区（本机时区可能非上海，保证确定性）
+
+    Why：Node 端 toISOString 输出 UTC，北京 00:00-07:59 的当日事件 UTC 日期
+    落前一日（如 2026-08-11T22:00:00.000Z = 北京 8-12 06:00），用 UTC 日期前缀
+    startswith(score_date) 比较会误过滤当日事件；必须按上海时区日期归属判断。
+    解析失败时宽容回退取前 10 字符（原 startswith 语义等价）。
+    """
+    raw = str(published).strip()
+    if not raw:
+        return ""
+    try:
+        if raw.endswith("Z"):
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt.astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d")
+        dt = datetime.fromisoformat(raw).replace(tzinfo=_SHANGHAI_TZ)
+        return dt.astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d")
+    except ValueError:
+        return raw[:10]
 
 
 async def collect_cls_telegraph(score_date: str) -> list[EventRecord]:
@@ -76,7 +106,8 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
     Node 端 StockMonitorService.getEvents 返回 ``{"total": N, "events": [...]}``
     （键名 events，非 items）；alerts 接口不支持按 published_at 窗口查询，
     取最近 20 条跨全部日期，Python 侧按行 published_at/event_time 过滤，
-    仅保留与 score_date 同日的行（避免昨日/前日陈旧行被标记为当日事件反复入库）。
+    仅保留与 score_date 同日的行（按上海时区日期归属，兼容 Node UTC ISO 格式；
+    避免昨日/前日陈旧行被标记为当日事件反复入库）。
     """
     try:
         resp = await node_api.get("/internal/monitor/alerts?days=1")
@@ -91,12 +122,15 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
             continue
         raw: dict[str, Any] = dict(row)
         # 当日窗口过滤（C1 修复后真实键名 events；I1 防跨日陈旧行误标当日）：
-        # 时间格式可能是 "2026-08-12 10:00:00" 或 "2026-08-12T10:00:00"，
-        # 统一按日期前缀 startswith(score_date) 判断；无时间字段的行保守保留
+        # 时间格式可能是本地无时区（"2026-08-12 10:00:00" / "2026-08-12T10:00:00"）
+        # 或 Node toISOString 输出的 UTC ISO（"2026-08-12T02:00:00.000Z"）。
+        # 统一转成上海时区日期再与 score_date 比较——北京 00:00-07:59 当日事件
+        # 的 UTC 日期落前一日（"2026-08-11T22:00:00.000Z" = 北京 8-12 06:00），
+        # 旧 startswith(score_date) 前缀匹配会误过滤；无时间字段的行保守保留
         published = str(
             raw.get("event_time") or raw.get("published_at") or ""
         ).strip()
-        if published and not published.startswith(score_date):
+        if published and _event_shanghai_date(published) != score_date:
             continue
         # 对齐字段：Node mapJudgementToEvent 输出 detail_url（非 url/link），
         # normalize_event 只认 url/link → 这里补齐，否则东财事件 url 恒空
