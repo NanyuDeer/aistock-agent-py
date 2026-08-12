@@ -22,7 +22,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from aistock_agent.api import ws as ws_module
-from aistock_agent.api.ws import ws_chat
+from aistock_agent.api.ws import ConfirmWaitResult, ws_chat
 from aistock_agent.services.chat_task_manager import ChatRunState
 
 CONFIRM = {
@@ -197,6 +197,24 @@ class _DoneEventGraph:
         }
 
 
+class _DoneCaptureGraph:
+    """产生单个 on_chain_end 事件（synth_answer 输出）并捕获 initial_state 的假图。"""
+
+    def __init__(self, output: dict[str, object], captured: list[dict]) -> None:
+        self._output = output
+        self._captured = captured
+
+    async def astream_events(
+        self, initial_state: dict[str, object], **kwargs: object
+    ) -> AsyncIterator[dict[str, object]]:
+        self._captured.append(initial_state)
+        yield {
+            "event": "on_chain_end",
+            "name": "synth_answer",
+            "data": {"output": self._output},
+        }
+
+
 def _owned_state(user_id: str) -> ChatRunState:
     """构造已归属的 ChatRunState（_wait_confirm_response 归属校验用）。"""
     task = asyncio.create_task(asyncio.sleep(0))
@@ -293,7 +311,8 @@ async def test_wait_confirm_response_returns_normalized_choice() -> None:
         [{"type": "confirm_response", "request_id": "r1", "choice": "600519"}]
     )
     result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
-    assert result == {"symbol": "600519", "label": "贵州茅台(600519)"}
+    assert result.displaced is None
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
 
 
 # ── ③ request_id 不匹配忽略 ──────────────────────────────────────────────
@@ -309,7 +328,7 @@ async def test_wait_confirm_response_ignores_wrong_request_id() -> None:
         ]
     )
     result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
-    assert result == {"symbol": "600519", "label": "贵州茅台(600519)"}
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
 
 
 # ── ④ 归属拒绝 ERROR ─────────────────────────────────────────────────────
@@ -336,7 +355,7 @@ async def test_wait_confirm_response_rejects_unauthorized_user() -> None:
     )
     state = _owned_state("u_42")
     result = await ws_module._wait_confirm_response(state, ws, "s1", "r1", CONFIRM)
-    assert result == {"symbol": "600519", "label": "贵州茅台(600519)"}
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
     errors = [s for s in ws.sent if s.get("type") == "error"]
     assert len(errors) == 1
     assert errors[0]["content"] == "无权访问该会话"
@@ -351,7 +370,8 @@ async def test_wait_confirm_response_timeout_returns_none() -> None:
     ws = _HangWebSocket([])
     with patch.object(ws_module, "_CONFIRM_TIMEOUT_SEC", 0.05):
         result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
-    assert result is None
+    assert result == ConfirmWaitResult()
+    assert result.choice is None and result.displaced is None and not result.stopped
     assert ws.recv_active is False, "超时后必须 await 收尾 cancel 的 recv（问题 18）"
 
 
@@ -365,7 +385,7 @@ async def test_wait_confirm_response_choice_none_returns_none() -> None:
         [{"type": "confirm_response", "request_id": "r1", "choice": "none"}]
     )
     result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
-    assert result is None
+    assert result == ConfirmWaitResult()
 
 
 # ── ⑦ 坏 JSON：视为无效消息继续等（不崩溃、不 500）────────────────────────
@@ -381,7 +401,7 @@ async def test_wait_confirm_response_tolerates_bad_json() -> None:
         ]
     )
     result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
-    assert result == {"symbol": "600519", "label": "贵州茅台(600519)"}
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
 
 
 @pytest.mark.asyncio
@@ -434,4 +454,140 @@ async def test_wait_confirm_response_deadline_not_reset_by_mismatch() -> None:
             ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM),
             timeout=0.3,
         )
-    assert result is None
+    assert result == ConfirmWaitResult()
+
+
+# ── Phase 4 验收修复（B2/B7）：resume 消费 + 等待期消息不静默 ────────────────
+
+
+@pytest.mark.asyncio
+async def test_wait_confirm_response_wrong_request_id_still_ignored() -> None:
+    """B-1 锁定：request_id 不匹配的 confirm_response → 忽略继续等（≠ displaced）。"""
+    ws = _FakeWebSocket(
+        [
+            {"type": "confirm_response", "request_id": "wrong", "choice": "600519"},
+            {"type": "confirm_response", "request_id": "r1", "choice": "600519"},
+        ]
+    )
+    result = await ws_module._wait_confirm_response(None, ws, "s1", "r1", CONFIRM)
+    assert result.displaced is None, "request_id 不匹配 ≠ displaced"
+    assert result.choice == {"symbol": "600519", "label": "贵州茅台(600519)"}
+
+
+@pytest.mark.asyncio
+async def test_resume_after_confirm_then_confirm_response_is_consumed() -> None:
+    """B2 死端回归：confirm_request 落 pending → 断线 → resume 补发 → confirm_response
+    在主循环被消费并进入阶段 2（此前走主循环普通消息处理报"消息不能为空"）。"""
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+
+    async def stage1_producer(st: ChatRunState) -> dict:
+        return {
+            "type": "confirm_request",
+            "request_id": "r1",
+            "question": CONFIRM["question"],
+            "options": CONFIRM["options"],
+            "context": {"session_id": "s_b2"},
+        }
+
+    state = chat_task_manager.start("s_b2", "r1", stage1_producer, "u_42")
+    assert state is not None
+    await state.task
+    chat_task_manager.set_pending_confirm("s_b2", {
+        "request_id": "r1", "question": CONFIRM["question"],
+        "options": CONFIRM["options"], "run_id": "r1",
+        "user_id": "u_42", "message": "我想了解一下贵州茅台和五粮液",
+    })
+
+    captured: list[dict] = []
+    ws = _FakeWebSocket(
+        [
+            {"type": "resume", "session_id": "s_b2", "user_id": "u_42"},
+            {
+                "type": "confirm_response", "request_id": "r1", "choice": "600519",
+                "session_id": "s_b2", "user_id": "u_42",
+            },
+        ]
+    )
+    with (
+        patch.object(
+            ws_module, "_select_graph",
+            return_value=_DoneCaptureGraph({"final_response": "阶段 2 回答"}, captured),
+        ),
+        patch.object(ws_module.node_api, "save_token_usage", new_callable=AsyncMock),
+    ):
+        await ws_chat(ws)  # type: ignore[arg-type]
+
+    types = [s.get("type") for s in ws.sent]
+    assert "confirm_request" in types, f"resume 应补发 confirm_request: {types}"
+    assert "error" not in types, f"不应报'消息不能为空': {types}"
+    assert types[-1] == "done", f"confirm_response 应在主循环被消费并跑阶段 2: {types}"
+    # 阶段 2 initial_state：choice 注入（resume 消费路径按协议原样透传 choice）
+    assert len(captured) == 1
+    assert captured[0]["confirm_choice"] == "600519"
+    assert captured[0].get("confirm_timeout") is None
+    # pending 消费后清理
+    assert chat_task_manager.get_pending_confirm("s_b2") is None
+    await chat_task_manager._cleanup_for_test()
+
+
+@pytest.mark.asyncio
+async def test_confirm_wait_new_message_aborts_confirm() -> None:
+    """B7：确认等待期收到普通消息 → 放弃确认（clear pending），新消息作为下一轮处理。"""
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+    captured: list[dict] = []
+    # _ScriptedConfirmSocket：call1=聊天消息 → call2=阶段 1 生成中挂起（recv 被 cancel）
+    # → call3=确认等待期才到达的普通新消息（时序对齐真实链路：confirm_request 发出前
+    # 用户无法发新消息；若用 _FakeWebSocket 队列，新消息会被阶段 1 的 recv 提前吞掉）。
+    ws = _ScriptedConfirmSocket(
+        {
+            "message": "我想了解一下贵州茅台和五粮液",
+            "session_id": "s_b7", "run_id": "r1", "user_id": "u_42",
+        },
+        {
+            "type": "chat", "message": "新问题：换成只问茅台",
+            "session_id": "s_b7", "run_id": "r2", "user_id": "u_42",
+        },
+    )
+    with patch.object(ws_module, "_select_graph", return_value=_TwoPhaseGraph(captured, CONFIRM)):
+        await ws_chat(ws)  # type: ignore[arg-type]
+
+    types = [s.get("type") for s in ws.sent]
+    assert "confirm_request" in types, f"阶段 1 应产出 confirm_request: {types}"
+    assert types[-1] == "done", f"新消息应作为下一轮处理（而非被静默吞）: {types}"
+    assert len(captured) == 2
+    # 新消息轮：无 confirm_choice / confirm_timeout（确认被放弃，不是超时重跑），消息为新问题
+    assert captured[1].get("confirm_timeout") is None, "确认被放弃而非 confirm_timeout 重跑"
+    assert captured[1].get("confirm_choice") is None
+    assert captured[1]["messages"][0].content == "新问题：换成只问茅台"
+    assert chat_task_manager.get_pending_confirm("s_b7") is None
+    await chat_task_manager._cleanup_for_test()
+
+
+@pytest.mark.asyncio
+async def test_confirm_wait_stop_returns_cancelled() -> None:
+    """B7：确认等待期收到 stop → cancelled 终态，不重跑。"""
+    from aistock_agent.services.chat_task_manager import chat_task_manager
+
+    await chat_task_manager._cleanup_for_test()
+    captured: list[dict] = []
+    # 同上：stop 经阶段 1 挂起 recv 后于确认等待期到达（confirm_request 发出前用户无法 stop）
+    ws = _ScriptedConfirmSocket(
+        {
+            "message": "我想了解一下贵州茅台和五粮液",
+            "session_id": "s_b7s", "run_id": "r1", "user_id": "u_42",
+        },
+        {"type": "stop", "session_id": "s_b7s", "user_id": "u_42"},
+    )
+    with patch.object(ws_module, "_select_graph", return_value=_TwoPhaseGraph(captured, CONFIRM)):
+        await ws_chat(ws)  # type: ignore[arg-type]
+
+    types = [s.get("type") for s in ws.sent]
+    assert "confirm_request" in types, f"阶段 1 应产出 confirm_request: {types}"
+    assert types[-1] == "cancelled", f"stop 应取消等待并进入 cancelled 终态: {types}"
+    assert len(captured) == 1, "stop 后不得重跑阶段 2"
+    assert chat_task_manager.get_pending_confirm("s_b7s") is None
+    await chat_task_manager._cleanup_for_test()

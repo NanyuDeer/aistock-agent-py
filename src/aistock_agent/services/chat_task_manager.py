@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 _RESULT_TTL_SEC = 600  # 完成后结果保留 10 分钟
 
+_CONFIRM_TTL_SEC = 600  # pending confirm 保留 10 分钟（对齐 result TTL；确认窗口 60s 远小于 TTL）
+
 # 事件 sink：接收一个 WS 就绪 payload dict
 EventSink = Callable[[dict], Awaitable[None]]
 
@@ -51,6 +53,26 @@ class ChatTaskManager:
     """session_id → ChatRunState 的后台任务管理器（模块级单例）。"""
 
     _states: dict[str, ChatRunState] = {}
+    # Phase 4 验收修复（B2/C2）：pending-confirm 独立缓存，keyed by session_id，
+    # 存活于 ChatRunState 之外——阶段 2 start() 会覆盖 _states[session_id]，
+    # 若只放 state 上会被新 run 冲掉；独立缓存才能支撑 resume 后补发/消费与幂等。
+    _pending_confirm: dict[str, dict] = {}
+
+    def set_pending_confirm(self, session_id: str, payload: dict) -> None:
+        payload["created_at"] = time.monotonic()
+        self._pending_confirm[session_id] = payload
+
+    def get_pending_confirm(self, session_id: str) -> dict | None:
+        p = self._pending_confirm.get(session_id)
+        if p is None:
+            return None
+        if time.monotonic() - p.get("created_at", 0.0) > _CONFIRM_TTL_SEC:
+            self._pending_confirm.pop(session_id, None)
+            return None
+        return p
+
+    def clear_pending_confirm(self, session_id: str) -> None:
+        self._pending_confirm.pop(session_id, None)
 
     def start(
         self,
@@ -129,10 +151,18 @@ class ChatTaskManager:
         ]
         for sid in expired:
             self._states.pop(sid, None)
+        now = time.monotonic()
+        expired_confirm = [
+            sid for sid, p in self._pending_confirm.items()
+            if now - p.get("created_at", 0.0) > _CONFIRM_TTL_SEC
+        ]
+        for sid in expired_confirm:
+            self._pending_confirm.pop(sid, None)
 
     async def _cleanup_for_test(self) -> None:
         """测试辅助：清空全部状态。"""
         self._states.clear()
+        self._pending_confirm.clear()
 
 
 chat_task_manager = ChatTaskManager()
