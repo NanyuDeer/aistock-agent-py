@@ -172,6 +172,21 @@ async def _run_chat_graph_to_events(
                     )
                     if text.strip():
                         await sink({"type": WSEventType.TEXT, "content": text})
+            elif event_type == "on_custom_event":
+                # 改进 17（Task 1）：捕获 synth_answer 分发的回答内容自定义事件
+                # （D9 节级伪流式，2026-08-13）。走独立事件名通道，不触碰上方
+                # ON_CHAT_MODEL_STREAM 过滤红线（spec §2.2 硬约束 1）；经统一
+                # sink 入 state.events，resume 回放兼容（硬约束 4）。
+                if name == "chat_content_delta":
+                    content = event.get("data", {}).get("content")
+                    if content is None:
+                        continue
+                    await sink({"type": WSEventType.CONTENT_DELTA, "content": content})
+                elif name == "chat_content_reset":
+                    content = event.get("data", {}).get("content")
+                    if content is None:
+                        continue
+                    await sink({"type": WSEventType.CONTENT_RESET, "content": content})
             elif event_type == LangGraphEventType.ON_TOOL_START:
                 label = _sanitize_label(TOOL_LABELS.get(name, name))
                 await sink({"type": WSEventType.TOOL_START, "tool": name, "label": label})
