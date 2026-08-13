@@ -1,15 +1,12 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
-## [changer] 2026-08-13 — B2 预测修复：PREDICTION_PROMPT 缺失 schema_version 致大盘溯源预测恒丢失
+## [changer] 2026-08-13 — 对话体验优化：深度分析触发修复
 **开发者**: 37588
 
 ### 修复
-- `src/aistock_agent/prompts/workers/prediction.py`：`PREDICTION_PROMPT`（`run_predict` 用）字段清单补 `- schema_version：固定为 "1.0"`——与对话内 `PREDICTION_CHAT_PROMPT` 对齐。此前 LLM 输出缺必填字段 `schema_version` → `PredictionResult.model_validate_json` pydantic 校验失败 → `run_predict` 返回 None → 大盘溯源报告 `market_trace.trace.prediction` 恒为 null（生产实测 2026-08-12 日志 `prediction_run_failed`、`prediction_records` 0 行、近 5 份 review 报告均无 prediction 字段）
+- 对话「深度分析」触发修复：此前使用股票中文名称提问（如"贵州茅台今天怎么样"）会被固定为轻量回答，「深度分析」入口无法生效；现支持在明确表达深度分析意图（如"深度分析贵州茅台"）或点击「深度分析」按钮时正确进入深度分析流程
 
-### 测试
-- `tests/unit/test_prediction_prompt.py` 新增 `test_prompt_instructs_schema_version`（TDD RED→GREEN）
-
-> 验证：预测相关 4 测试文件 31 passed；ruff 改动文件 0。修复后仅新生成报告生效（历史不回填），且仅 `attribution_status ∈ {confirmed, hypothesis}` 时触发（08-11/12 为 not_applicable 属设计行为）。待组长 merge 后部署验证。
+> 代码验收通过（待生产验证）。
 
 ---
 
@@ -19,7 +16,7 @@
 ### 新增
 - `src/aistock_agent/utils/context_window.py`：`trim_messages(messages, *, max_turns=6, summary_chars=200)` 纯函数——≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）；超窗 → LLM prompt 只喂最近 12 条，超窗部分收敛为零 LLM 确定性摘要（≤200 字，逐轮"用户：问句｜AI：回复片段"，幂等无累积）；`build_summary_context` 生成"此前对话摘要"注入段
 - `QuestionState.messages_summary` 可选字段（qa_router 超窗时写入随 checkpointer 持久化，write-only；synth_answer 消费侧从当前 messages 确定性重算，防跨轮陈旧残留）
-- `DELETE /api/agent/internal/chat/threads/:session_id`（X-Internal-Token 403 / 非法 400 / 幂等 200 / 异常 500）+ `checkpointer.delete_thread()`（AsyncSqliteSaver.adelete_thread，sqlite/memory 幂等、redis best-effort）
+- `DELETE /api/agent/internal/chat/threads/:session_id`（内部访问令牌 403 / 非法 400 / 幂等 200 / 异常 500）+ `checkpointer.delete_thread()`（AsyncSqliteSaver.adelete_thread，sqlite/memory 幂等、redis best-effort）
 - `config.py sqlite_busy_timeout=30.0` → `_build_async_sqlite_saver` 的 `aiosqlite.connect(timeout=...)`（多 worker 争用缓解）
 
 ### 改进
@@ -28,7 +25,7 @@
 ### 测试
 - `tests/unit/test_context_window.py`、`tests/unit/test_qa_router_summary.py`、`tests/unit/test_synth_answer_summary.py`、`tests/unit/test_checkpointer_busy_timeout.py`、`tests/e2e/test_chat_threads.py`、`tests/unit/test_checkpointer_delete_thread.py`、`tests/integration/test_phase5_long_session_smoke.py`
 
-> 验证：全量 A/B（BASE 1c35329 worktree + PYTHONPATH 覆盖）HEAD 失败集 ⊆ BASE（17=17 逐项一致，新增清零）；ruff 改动文件 0 新增；集成冒烟 2/2（7 轮 13 条 → 12 条窗口 + 摘要注入 + messages_summary 持久化 + 删会话 thread 消失；短会话字节不变）。代码验收通过（待生产验证），待组长 merge 后部署验证。
+> 验证：全量测试回归新增失败清零；ruff 改动文件 0 新增；集成冒烟 2/2（7 轮 13 条 → 12 条窗口 + 摘要注入 + messages_summary 持久化 + 删会话 thread 消失；短会话字节不变）。代码验收通过（待生产验证），待组长 merge 后部署验证。
 
 ---
 
@@ -39,7 +36,7 @@
 - `src/aistock_agent/api/ws.py`：`_forward_until_done_or_cmd` 的 send 完成分支在 `recv_task.cancel()` 后新增 `await asyncio.gather(recv_task, return_exceptions=True)` 收尾再 return——`task.cancel()` 仅请求取消，不同步 await 则底层 uvicorn/websockets 同连接 recv 并发防护未释放，主循环随即 `receive_json()` 触发 `RuntimeError: cannot call recv while another coroutine is already waiting` → 每轮 done 后 WS 连接 1005 崩溃（Phase 3 生产冒烟 9 轮实证，Phase 2 PR #64 引入）
 - 回归测试：`tests/unit/test_ws_chat_replacement.py` 新增 `_RecvTrackingWebSocket`（复刻 uvicorn 并发 recv 抛 RuntimeError 防护语义）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done`（断言返回时无挂起 recv、主循环可安全发起下次 receive、不抛 RuntimeError）
 
-> 验证：TDD RED→GREEN；单元 test_ws_chat_replacement.py 15/15 + 定向契约回归 22/22（chat_task_manager / ws 集成 / ws_resume / token_usage）；全量 A/B（对称 worktree 无 .env）失败节点 30/30 逐项一致（新增清零，+1 新增回归测试）；ruff 改动文件 0；真实 WS 冒烟同一连接连续 3 轮 done 全部送达、连接保持、主动关闭 code=1000（非 1005 崩溃）。不改 resume/stop/归属校验协议与事件协议，前端零改动。生产部署验证待 V1 部署窗口。
+> 验证：TDD RED→GREEN；单元 test_ws_chat_replacement.py 15/15 + 定向契约回归 22/22（chat_task_manager / ws 集成 / ws_resume / token_usage）；全量测试回归新增失败清零（+1 新增回归测试）；ruff 改动文件 0；真实 WS 冒烟同一连接连续 3 轮 done 全部送达、连接保持、主动关闭 code=1000（非 1005 崩溃）。不改 resume/stop/归属校验协议与事件协议，前端零改动。生产部署验证待 V1 部署窗口。
 
 ---
 
@@ -57,7 +54,7 @@
 - `src/aistock_agent/graph/nodes/_reasoning.py`：`stream_reasoning(websocket,...)` → `stream_reasoning(sink, node, message)`（sink 化解耦连接）
 - DONE 负载字段（content/last_deep_report/token_usage/cards）字节不变；闸门短路语义不受影响
 
-> 验证：定向 40/40 + ruff 改动文件 0；全量 A/B HEAD 22 failed ⊆ BASE 30（HEAD-only=0，修复 8 个基线失败）；三仓库整分支 review Ready to merge。
+> 验证：定向 40/40 + ruff 改动文件 0；全量测试回归新增失败清零（并修复 8 个基线失败）；三仓库整分支 review Ready to merge。
 
 ---
 
@@ -70,4 +67,4 @@
 ### 文档
 - AGENTS.md：user_id 信任边界由 P0 解决（app-api 验签注入，客户端自报失效）
 
-> 部署注意：勿用 `pm2 restart`（不重读配置），须 `pm2 delete aistock-agent && pm2 start deploy/ecosystem.config.json`，验证 `ss -tlnp | grep 8080` 显示 `127.0.0.1:8080`。
+> 部署注意：勿用 `pm2 restart`（不重读配置），须先 `pm2 delete` 再 `pm2 start deploy/ecosystem.config.json`，并验证端口仅监听本机回环地址。
