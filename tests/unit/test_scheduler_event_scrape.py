@@ -4,6 +4,8 @@
 - run_event_scrape(full_daily) 可被调度链调用（Task 2 回归保护）
 - _run_event_scrape_job 非交易日跳过、交易日调用 run_event_scrape
 - start_scheduler 注册 event_scrape_daily / event_scrape_intraday 两个 job
+- H5（Task 3，2026-08-13）：早间 08:45（intraday）与收盘 15:05（full_daily）
+  两个档位已注册（config 默认值 + job id event_scrape_early / event_scrape_close）
 
 mock 路径说明：
 - _run_event_scrape_job 在函数内 from-import run_event_scrape，
@@ -212,3 +214,31 @@ async def test_morning_fallback_triggers_when_conduction_missing_and_not_marked(
         # fire-and-forget：等待后台 task 完成再断言（对齐既有 I4 测试先例）
         await asyncio.sleep(0.1)
     mock_task.assert_awaited_once()
+
+
+# ── H5 五窗补齐（Task 3，2026-08-13）：早间 08:45 + 收盘 15:05 ──
+
+
+def test_event_scrape_jobs_registered_include_early_and_close():
+    """H5：早间刷新与收盘汇总档位已注册（config 默认值）。"""
+    from aistock_agent.config import settings
+
+    assert settings.scheduler_event_scrape_early_cron == "45 8 * * 1-5"
+    assert settings.scheduler_event_scrape_close_cron == "5 15 * * 1-5"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_registers_early_and_close_jobs():
+    from aistock_agent.services.scheduler import (
+        _run_event_scrape_job,
+        get_scheduler,
+        start_scheduler,
+    )
+
+    start_scheduler()
+    try:
+        ids = {job.id for job in get_scheduler().get_jobs()}
+        assert "event_scrape_early" in ids
+        assert "event_scrape_close" in ids
+    finally:
+        get_scheduler().remove_all_jobs()

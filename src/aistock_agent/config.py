@@ -159,6 +159,8 @@ class Settings(BaseSettings):
     # ── 统一事件抓取中台调度（2026-08-12） ──
     scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
     scheduler_event_scrape_intraday_cron: str = "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+    scheduler_event_scrape_early_cron: str = "45 8 * * 1-5"   # 早间刷新：08:45（晨报 08:50 前最后一刷）
+    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
     # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
     event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
     event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）

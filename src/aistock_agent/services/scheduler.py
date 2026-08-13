@@ -111,6 +111,32 @@ def start_scheduler() -> None:
         replace_existing=True,
         misfire_grace_time=3600,
     )
+    # 早间刷新（08:45）：晨报 08:50 读库前的最后一次事件刷新（H5，2026-08-13）
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_early_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "intraday"},
+        id="event_scrape_early",
+        name="event scrape early refresh",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 收盘汇总（15:05）：全天事件汇总补抓，供复盘/播报消费（H5，2026-08-13）
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_close",
+        name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
     scheduler.add_job(
         _run_broadcast_task,
         CronTrigger.from_crontab(
