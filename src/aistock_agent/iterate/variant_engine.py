@@ -378,6 +378,19 @@ async def run_experiment_round(
     case_id = str(case["case_id"])
     variant_hash = _compute_variant_hash(variant)
     output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
+    # 2026-08-13：回放偶发失败（超时/子进程失败/agent 降级输出）自动重试一次——
+    # LLM 波动容忍。变体轮 0 分事故根因：同变体两次回放一次成功一次超时/降级，
+    # 失败轮直接 0 分浪费迭代预算。重试有界（仅 1 次），仍失败才记失败轮。
+    if _needs_replay_retry(output):
+        logger.warning(
+            "iterate_replay_retry_once",
+            agent_id=agent_id,
+            case_id=case_id,
+            timed_out=bool(output.get("timed_out")),
+            subprocess_failed=bool(output.get("subprocess_failed")),
+            response_len=len(str(output.get("final_response", ""))),
+        )
+        output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
     if output.get("timed_out") or output.get("subprocess_failed"):
         # 回放超时/子进程失败：不调用评估 LLM（无输出可评），记为失败轮。
         score = ScoreDetail(
@@ -426,6 +439,20 @@ async def run_experiment_round(
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("iterate_experiment_recorded", case_id=case_id, round=round_no, score=score.total)
     return {**record, "score_detail_obj": score}
+
+
+#: 回放结果视为"可重试的偶发失败"的最小输出长度阈值（字符）。
+#: agent 降级文本（如 review 的"收盘溯源生成暂时不可用，请稍后重试"）与
+#: 空输出均 < 30 字符，正常归因输出远大于此；通用判断不依赖具体 agent 文本。
+_REPLAY_RETRY_MIN_OUTPUT_LEN = 30
+
+
+def _needs_replay_retry(output: dict[str, object]) -> bool:
+    """回放结果是否值得重试一次：超时/子进程失败/输出降级或过短（LLM 波动）。"""
+    if output.get("timed_out") or output.get("subprocess_failed"):
+        return True
+    response = str(output.get("final_response", "")).strip()
+    return len(response) < _REPLAY_RETRY_MIN_OUTPUT_LEN
 
 
 async def _run_replay_subprocess(

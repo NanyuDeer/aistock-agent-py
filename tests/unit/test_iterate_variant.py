@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter, get_adapter
+from aistock_agent.iterate.evaluator import ScoreDetail
 from aistock_agent.iterate.variant_engine import (
     VariantPlan,
     _apply_snippet_patch,
@@ -270,6 +271,136 @@ async def test_run_experiment_round_timed_out_is_failed_round(
     mocked_evaluate.assert_not_awaited()
     assert record["score"] == 0.0
     assert "超时" in str(record["gap_analysis"])
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_retries_timed_out_once(
+    iterate_data_dir: object,
+) -> None:
+    """回放超时自动重试一次（LLM 波动容忍），第二次成功则正常评分。
+
+    2026-08-13 变体轮 0 分根因：回放 LLM 波动（同变体两次回放一次成功一次
+    超时/降级），失败轮直接 0 分浪费迭代预算。重试一次提升稳定性。
+    """
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_retry_timeout"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_retry_timeout",
+        "attribution": {"direction": "bullish"},
+    }
+    ok_output = {
+        "agent_id": "review",
+        "case_id": "case_test_retry_timeout",
+        "variant_hash": "h",
+        "final_response": "大盘高开 1.2%，主因隔夜美股大涨。半导体板块领涨 3.2%。",
+    }
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            side_effect=[
+                {"final_response": "", "timed_out": True},
+                ok_output,
+            ]
+        ),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(return_value=ScoreDetail(0.2, 0.5, 0.1, 0.8)),
+    ) as mocked_evaluate:
+        record = await run_experiment_round("review", case, 2, variant, gt)
+
+    assert mocked_evaluate.await_count == 1  # 重试成功后只评估一次
+    assert record["score"] == 0.8
+    assert record["is_failure"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_retries_degraded_output(
+    iterate_data_dir: object,
+) -> None:
+    """回放输出降级文本（如'收盘溯源生成暂时不可用'）也重试一次。
+
+    agent 内部 LLM 波动（JSON 截断/校验失败）导致降级输出，extract 提取为空
+    → 0 分；与超时同属偶发失败，重试一次可显著提升变体轮稳定性。
+    """
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_retry_degraded"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_retry_degraded",
+        "attribution": {"direction": "bullish"},
+    }
+    ok_output = {
+        "agent_id": "review",
+        "case_id": "case_test_retry_degraded",
+        "variant_hash": "h",
+        "final_response": "大盘高开 1.2%，主因隔夜美股大涨。半导体板块领涨 3.2%。",
+    }
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            side_effect=[
+                {"final_response": "收盘溯源生成暂时不可用，请稍后重试"},
+                ok_output,
+            ]
+        ),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(return_value=ScoreDetail(0.2, 0.5, 0.1, 0.8)),
+    ) as mocked_evaluate:
+        record = await run_experiment_round("review", case, 2, variant, gt)
+
+    assert mocked_evaluate.await_count == 1
+    assert record["score"] == 0.8
+    assert record["is_failure"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_double_failure_is_failed_round(
+    iterate_data_dir: object,
+) -> None:
+    """两次回放都失败 → 失败轮；重试有界（仅 1 次），不无限重试。"""
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_retry_double"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_retry_double",
+        "attribution": {"direction": "bullish"},
+    }
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(return_value={"final_response": "", "timed_out": True}),
+    ) as mocked_replay, patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(side_effect=AssertionError("失败轮不应调用评估 LLM")),
+    ) as mocked_evaluate:
+        record = await run_experiment_round("review", case, 2, variant, gt)
+
+    assert mocked_replay.await_count == 2  # 首次 + 1 次重试，有界
+    mocked_evaluate.assert_not_awaited()
+    assert record["score"] == 0.0
+    assert record["is_failure"] is True
 
 
 """变体生成目标区域补丁（F6/C1/C2 修复）"""

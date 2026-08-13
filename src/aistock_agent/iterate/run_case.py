@@ -296,11 +296,16 @@ async def _run_baseline(
     # 使测试 patch("aistock_agent.iterate.variant_engine._run_replay_subprocess") 生效。
     from aistock_agent.iterate.variant_engine import (
         _content_hash,
+        _needs_replay_retry,
         _now_iso_date,
         _run_replay_subprocess,
     )
 
     output = await _run_replay_subprocess(agent_id, case_id, "baseline")
+    # 2026-08-13：基线回放偶发失败（LLM 波动）同样重试一次，与变体轮一致。
+    if _needs_replay_retry(output):
+        logger.warning("iterate_baseline_replay_retry_once", agent_id=agent_id, case_id=case_id)
+        output = await _run_replay_subprocess(agent_id, case_id, "baseline")
     if output.get("timed_out") or output.get("subprocess_failed"):
         # G14 修复：基线失败不落盘 r1_baseline.json——若落盘，list_pending_cases
         # 会按 {case_id}_r 前缀判"已迭代"，导致该 case 永久弃置。
