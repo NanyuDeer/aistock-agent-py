@@ -284,6 +284,15 @@ START → supervisor(quick_think, 意图路由)
 - **验证**：TDD（busy_timeout 参数断言 RED→GREEN）；全量 A/B HEAD 失败集 ⊆ BASE（逐项一致，新增清零）；ruff 改动文件 0 新增；app-api tsc 0 + chat 定向 18/18；**集成冒烟 2/2**（`tests/integration/test_phase5_long_session_smoke.py`：7 轮 13 条 → 12 条窗口 + "此前对话摘要"注入 + messages_summary 持久化 + 删会话 thread 消失；1 轮短会话 prompt 无摘要、messages_summary 不持久化）
 - 提交：686e7df（窗口+摘要）+ d11cdc6（synth_answer 多子目标路径注入修复）+ 34ec113（删会话联动）+ 5699737（busy_timeout + 集成冒烟），changer 未 push；详细记录 roadmap §2 Phase 5 行 + changelog-pending
 
+### CHAT QA 批次 1 force_deep 边界修复（2026-08-13）：闸门 2 放行
+
+- **问题**：中文名问句 resolve 命中被闸门 2 短路固定 `light`（`qa_router.py`），「深度分析」按钮（force_deep 重发中文名问句）与"深度分析贵州茅台"（用例 7 交互）的深度意图均不满足
+- **修复**：闸门 2 resolve 成功分支 `if not (force_deep or _match_keywords(message, _DEEP_INTENT_KEYWORDS)):` 才短路——命中放行（`logger.info("qa_router.gate.stock_resolve_bypass_short_circuit")` 不 return）继续走后续闸门/LLM 路径；force_deep 由 LLM 成功路径 `complexity = "deep" if force_deep else ...` 强制 deep，深度意图词仅放行、复杂度由 LLM 判定
+- **`_DEEP_INTENT_KEYWORDS`**：`("深度分析","深入分析","详细分析","深度","深入","详析")`——刻意排除"分析/分析一下"（既有测试锁定闸门 2 light 快答）、"对比"（闸门 2.5 已独立处理）、"为什么/原因"（溯源语义）
+- **红线不变**：闸门 0（合规）/0.5（寒暄/科普）/1（指数）短路永远优先于 force_deep（放行点位于闸门 2 内，前序闸门仍先拦截）
+- **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
+- **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
