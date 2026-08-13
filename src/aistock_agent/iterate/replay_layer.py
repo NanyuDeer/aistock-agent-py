@@ -315,13 +315,20 @@ def _make_report_read_degraded(
     函数内 import 结果类型：避免模块顶层依赖 data_client（保持 replay_layer
     对服务层数据结构的惰性加载，与 _make_industry_chain_degraded 同模式）。
     """
-    if target_path.endswith("get_hot_burst_data"):
-        from aistock_agent.services.data_client import HotBurstReadResult
+    # result_cls 显式联合类型标注（mypy strict 修复）：两条分支分别赋
+    # HotBurstReadResult / ReviewReportReadResult，不标注会被 mypy 推断为
+    # 前者类型而在第二处赋值报 incompatible assignment。两个结果类统一在
+    # 函数顶部惰性 import（模块顶层仍不依赖 data_client；F823 要求注解前
+    # 先绑定局部名，不能保留分支内 import）。分支逻辑与返回值不变。
+    from aistock_agent.services.data_client import (
+        HotBurstReadResult,
+        ReviewReportReadResult,
+    )
 
+    result_cls: type[ReviewReportReadResult] | type[HotBurstReadResult]
+    if target_path.endswith("get_hot_burst_data"):
         result_cls = HotBurstReadResult
     else:
-        from aistock_agent.services.data_client import ReviewReportReadResult
-
         result_cls = ReviewReportReadResult
 
     async def degraded(*args: object, **kwargs: object) -> object:
