@@ -35,6 +35,25 @@ _VALID_VARIANT_TYPES = {"prompt_diff", "workflow_diff", "data_source_diff"}
 
 #: 变体生成时喂给 LLM 的单个目标区域源码上限（符号地图 + 目标块，防止爆上下文）
 _MAX_VARIANT_TARGET_CHARS = 6000
+#: 每个文件喂给 LLM 的目标区域符号上限（入口优先排序后取前 N 个）
+_MAX_VARIANT_TARGET_SYMBOLS = 8
+#: 入口候选符号名：主入口函数 / 主 prompt 常量。命中者优先喂入（C1 修复：
+#: 真实仓库 run 常排在第 30+ 位（review 33 个符号中第 31、event 27 个中第 27），
+#: 固定取前 8 个会漏掉入口，LLM 看不到 run/REVIEW_PROMPT 只能臆造 old_snippet → 补丁必失配）。
+_ENTRY_SYMBOL_NAMES: frozenset[str] = frozenset(
+    {
+        "run",
+        "run_review",
+        "run_event",
+        "REVIEW_PROMPT",
+        "EVENT_PROMPT",
+        "EVENT_UNDERSTANDING_PROMPT",
+        "EVENT_TRANSMISSION_PROMPT",
+        "EVENT_HISTORY_PROMPT",
+        "EVENT_INVESTMENT_PROMPT",
+        "EVENT_PODCAST_PROMPT",
+    }
+)
 # 变体生成输出 token 上限：补丁模式输出 target_symbol/old_snippet/new_snippet，
 # 默认 deep_think_max_tokens=4000 会截断，这里按输出体量放大。
 _MAX_VARIANT_OUTPUT_TOKENS = 12000
@@ -46,6 +65,8 @@ _GENERATE_PROMPT = """你是迭代优化工程师。目标是改进待迭代 Age
 最近评分：{score}（满分 1.0），差距分析：{gap_analysis}
 请基于上述目标区域生成最小变体，输出严格 JSON：
 {{
+  "type": "prompt_diff|workflow_diff|data_source_diff",
+  "files": ["相对仓库根路径的被改文件（必须来自符号地图所在文件）"],
   "target_symbol": "被修改的函数/常量名",
   "old_snippet": "目标区域中被替换的原文片段（必须与给定源码逐字符一致）",
   "new_snippet": "替换后的新片段",
@@ -53,8 +74,10 @@ _GENERATE_PROMPT = """你是迭代优化工程师。目标是改进待迭代 Age
 }}
 要求：
 - target_symbol 必须存在于符号地图；old_snippet 必须从给定源码原样复制
+- files 必须且只能包含 target_symbol 所在文件
 - 只改与差距分析相关的部分；禁止引入无关重构
-- 若需新增独立函数，target_symbol 用 "__new__" 且 new_snippet 为完整新函数
+- 若需新增独立函数，target_symbol 用 "__new__" 且 new_snippet 为完整新函数；
+  old_snippet 必须省略（空字符串）
 只输出 JSON。"""
 
 
@@ -78,6 +101,11 @@ def _build_symbol_map(file_content: str) -> list[dict[str, int | str]]:
                 if isinstance(t, ast.Name):
                     symbols.append({"name": t.id, "line": node.lineno})
     return symbols
+
+
+def _is_entry_symbol(name: str) -> bool:
+    """符号名是否命中入口候选集合（入口优先喂入，保证 LLM 可见主入口源码）。"""
+    return name in _ENTRY_SYMBOL_NAMES
 
 
 def _extract_symbol_source(content: str, symbol: str) -> str | None:
@@ -182,11 +210,34 @@ def apply_variant(variant: VariantPlan, repo_root: Path) -> list[Path]:
     """把变体写盘（目标区域补丁或完整文件），返回实际改动文件列表。
 
     路径安全：rel 经 resolve 后必须仍在 repo_root 内，否则抛 ValueError。
+    __new__ 模式：新增独立函数，追加到第一个存在的目标文件末尾（I1 修复）。
     目标区域补丁：读原文 → _apply_snippet_patch（失败不崩，返回空列表）。
     完整文件模式（legacy new_content）：直接覆盖写，保持既有调用兼容。
     """
     root = repo_root.resolve()
     written: list[Path] = []
+    if variant.target_symbol == "__new__":
+        # I1 修复：LLM 按约定给 old_snippet=""（不落入补丁模式双守卫），
+        # 把 new_snippet 完整新函数追加到 variant.files 中第一个存在的文件末尾。
+        for rel in variant.files:
+            path = (root / rel.lstrip("/")).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError(f"variant path escapes repo root: {rel}")
+            if not path.exists():
+                logger.warning("iterate_variant_file_missing", file=str(path))
+                continue
+            original = path.read_text(encoding="utf-8")
+            if not original.endswith("\n"):
+                original += "\n"
+            path.write_text(original + variant.new_snippet, encoding="utf-8")
+            written.append(path)
+            logger.info(
+                "iterate_variant_applied",
+                file=str(path),
+                target=variant.target_symbol,
+            )
+            break  # 仅追加到第一个存在的文件
+        return written
     if variant.old_snippet and variant.new_snippet:
         # 目标区域补丁模式：需读原文做 search/replace，目标文件必须已存在
         for rel in variant.files:
@@ -226,8 +277,38 @@ def apply_variant(variant: VariantPlan, repo_root: Path) -> list[Path]:
     return written
 
 
+def _truncate_region(src: str, limit: int, start_line: int) -> tuple[str, bool]:
+    """按行截断超长目标区域：保留开头（含 def 签名）到截断点，标注未展示行号。
+
+    返回 (截断后的源码, 是否发生截断)。start_line 为符号在文件中的起始行号（1 起）。
+    """
+    if len(src) <= limit:
+        return src, False
+    lines = src.splitlines()
+    kept: list[str] = []
+    size = 0
+    for ln in lines:
+        if size + len(ln) + 1 > limit:
+            break
+        kept.append(ln)
+        size += len(ln) + 1
+    if not kept:  # 首行自身超长（极端）：至少保留签名行，保证 LLM 看到入口定义
+        kept = [lines[0]]
+    hidden_start = start_line + len(kept)
+    hidden_end = start_line + len(lines) - 1
+    return (
+        "\n".join(kept) + f"\n...（已截断，后续行号 {hidden_start}-{hidden_end} 未展示）",
+        True,
+    )
+
+
 def _target_regions(adapter: IterableAgentAdapter, repo_root: Path) -> str:
-    """为 adapter 声明的每个文件生成符号地图 + 目标区域源代码（截断到 6000 字符）。"""
+    """为 adapter 声明的每个文件生成符号地图 + 目标区域源代码。
+
+    符号选择入口优先：命中 _ENTRY_SYMBOL_NAMES 的符号排最前，其余按行号升序，
+    取前 _MAX_VARIANT_TARGET_SYMBOLS 个（C1 修复：run 排第 30+ 位仍被喂入）；
+    超长块按行截断并标注而非整块丢弃，保证 LLM 至少看到入口签名与开头逻辑。
+    """
     root = repo_root.resolve()
     blocks: list[str] = []
     for rel in list(adapter.prompt_files) + list(adapter.workflow_files):
@@ -237,11 +318,18 @@ def _target_regions(adapter: IterableAgentAdapter, repo_root: Path) -> str:
             continue
         content = path.read_text(encoding="utf-8")
         symbols = _build_symbol_map(content)
+        # 入口优先 + 行号兜底排序（稳定排序，其余符号保持原行号顺序）
+        selected = sorted(
+            symbols,
+            key=lambda s: (0 if _is_entry_symbol(str(s["name"])) else 1, int(s["line"])),
+        )[:_MAX_VARIANT_TARGET_SYMBOLS]
         regions: list[str] = []
-        for s in symbols[:8]:  # 首 8 个顶层符号（控制 token）
+        for s in selected:
             src = _extract_symbol_source(content, str(s["name"]))
-            if src and len(src) <= _MAX_VARIANT_TARGET_CHARS:
-                regions.append(f"### {s['name']} (line {s['line']})\n{src}")
+            if src is None:
+                continue
+            src, _ = _truncate_region(src, _MAX_VARIANT_TARGET_CHARS, int(s["line"]))
+            regions.append(f"### {s['name']} (line {s['line']})\n{src}")
         block = f"{rel}:\n符号地图: {[str(s['name']) for s in symbols]}\n\n"
         block += "\n\n".join(regions)
         blocks.append(block)

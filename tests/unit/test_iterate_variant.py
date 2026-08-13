@@ -16,6 +16,7 @@ from aistock_agent.iterate.variant_engine import (
     _apply_snippet_patch,
     _build_symbol_map,
     _extract_symbol_source,
+    _target_regions,
     apply_variant,
     generate_variant,
     restore_baseline,
@@ -174,7 +175,12 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
     prompt_file.write_text('REVIEW_PROMPT = "外盘传导优先"\n', encoding="utf-8")
     workflow_file = tmp_path / "src/aistock_agent/agents/workers/review.py"
     workflow_file.parent.mkdir(parents=True, exist_ok=True)
-    workflow_file.write_text("async def run(state):\n    return {}\n", encoding="utf-8")
+    # C1/I3 复现：run 排在第 31 位（前 30 个为无关顶层符号），入口优先排序必须仍喂入 run 源码
+    workflow_file.write_text(
+        "\n\n".join(f"def helper_{i}():\n    pass" for i in range(30))
+        + "\n\nasync def run(state):\n    return {}\n",
+        encoding="utf-8",
+    )
 
     payload = {
         "type": "prompt_diff",
@@ -201,6 +207,8 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
     # 目标区域模式：符号地图 + 目标区域源码（而非完整文件）必须出现在 prompt 中
     assert 'REVIEW_PROMPT = "外盘传导优先"' in prompt_arg
     assert "async def run(state):" in prompt_arg
+    # 入口优先（C1/I3 回归）：run 虽排在第 31 位，其目标区域仍排在 helper_0 之前
+    assert prompt_arg.index("### run") < prompt_arg.index("### helper_0")
     assert "符号地图" in prompt_arg
     assert "target_symbol" in prompt_arg
     # 输出体量需要大 max_tokens + 关闭思考，防止 JSON 中途截断（线上事故复现）
@@ -298,3 +306,105 @@ def test_apply_snippet_patch_exact_and_fuzzy() -> None:
     assert patched2 is not None and "B2" in patched2
     # 找不到 → None（不崩）
     assert _apply_snippet_patch(original, "ZZZ", "X") is None
+
+
+def test_target_regions_entry_first_ordering(tmp_path: Path) -> None:
+    """C1 回归：run 排在第 31 位时仍被入口优先排序排到喂入区域首位（而非按行号取前 8）。"""
+    adapter = IterableAgentAdapter(
+        agent_id="review",
+        module_path="aistock_agent.agents.workers.review",
+        prompt_files=(),
+        workflow_files=("src/aistock_agent/agents/workers/review.py",),
+    )
+    workflow_file = tmp_path / "src/aistock_agent/agents/workers/review.py"
+    workflow_file.parent.mkdir(parents=True, exist_ok=True)
+    workflow_file.write_text(
+        "\n\n".join(f"def helper_{i}():\n    pass" for i in range(30))
+        + "\n\nasync def run(state):\n    return {}\n",
+        encoding="utf-8",
+    )
+    out = _target_regions(adapter, tmp_path)
+    assert "async def run(state):" in out
+    # run 的目标区域排在 helper_0 之前（入口优先，而非固定前 8 个符号）
+    assert out.index("### run") < out.index("### helper_0")
+
+
+def test_target_regions_truncates_oversized_block_not_dropped(tmp_path: Path) -> None:
+    """C1 回归：超长目标块按行截断并标注，而非整块丢弃（LLM 至少看到入口签名）。"""
+    adapter = IterableAgentAdapter(
+        agent_id="review",
+        module_path="aistock_agent.agents.workers.review",
+        prompt_files=(),
+        workflow_files=("src/aistock_agent/agents/workers/review.py",),
+    )
+    workflow_file = tmp_path / "src/aistock_agent/agents/workers/review.py"
+    workflow_file.parent.mkdir(parents=True, exist_ok=True)
+    # run 函数体远超 _MAX_VARIANT_TARGET_CHARS（6000），必须被截断标注而非丢弃
+    workflow_file.write_text(
+        'async def run(state):\n    return "{}"\n'.format("x" * 8000),
+        encoding="utf-8",
+    )
+    out = _target_regions(adapter, tmp_path)
+    assert "async def run(state):" in out
+    assert "已截断" in out
+
+
+def test_apply_variant_new_symbol_appends_to_first_existing_file(tmp_path: Path) -> None:
+    """I1 回归：__new__ 约定把新函数追加到 variant.files 中第一个存在的文件末尾。"""
+    target = tmp_path / "src/aistock_agent/agents/workers/review.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("async def run(state):\n    return {}\n", encoding="utf-8")
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/agents/workers/review.py"],
+        instructions="新增独立函数",
+        target_symbol="__new__",
+        old_snippet="",  # I1 约定：old_snippet 必须省略（空字符串），不落入补丁模式
+        new_snippet="def new_fn():\n    pass\n",
+    )
+    written = apply_variant(variant, tmp_path)
+    assert written == [target]
+    content = target.read_text(encoding="utf-8")
+    assert content.endswith("def new_fn():\n    pass\n")
+    assert content.index("def new_fn") > content.index("async def run")
+
+
+@pytest.mark.asyncio
+async def test_generate_variant_parses_files_and_type(tmp_path: Path) -> None:
+    """I2 回归：generate_variant 解析 LLM 返回的 files/type 字段（补丁模式唯一目标文件）。"""
+    adapter = IterableAgentAdapter(
+        agent_id="review",
+        module_path="aistock_agent.agents.workers.review",
+        prompt_files=("src/aistock_agent/prompts/workers/review.py",),
+        workflow_files=("src/aistock_agent/agents/workers/review.py",),
+    )
+    prompt_file = tmp_path / "src/aistock_agent/prompts/workers/review.py"
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text('REVIEW_PROMPT = "外盘传导优先"\n', encoding="utf-8")
+    workflow_file = tmp_path / "src/aistock_agent/agents/workers/review.py"
+    workflow_file.parent.mkdir(parents=True, exist_ok=True)
+    workflow_file.write_text("async def run(state):\n    return {}\n", encoding="utf-8")
+
+    payload = {
+        "type": "workflow_diff",
+        "files": ["src/aistock_agent/agents/workers/review.py"],
+        "target_symbol": "run",
+        "old_snippet": "async def run(state):\n    return {}",
+        "new_snippet": "async def run(state):\n    return {'ok': True}",
+        "instructions": "增强入口返回",
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+        )
+        plan = await generate_variant(
+            adapter,
+            {"event_title": "事件", "event_time": "2026-07-31"},
+            {"gt_id": "gt", "attribution": {"direction": "bullish"}},
+            None,
+            "gap",
+            tmp_path,
+        )
+    assert plan.type == "workflow_diff"
+    assert plan.files == ["src/aistock_agent/agents/workers/review.py"]
+    assert plan.target_symbol == "run"
