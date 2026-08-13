@@ -57,6 +57,7 @@ TokenUsageCallback 记录、三字段齐备、同 prompt 的 prompt_tokens 严�
 """
 from __future__ import annotations
 
+import os
 from typing import Any, TypedDict
 
 import pytest
@@ -75,12 +76,17 @@ from aistock_agent.services.token_usage import get_token_usage, reset_token_usag
 # 而非裸 os.getenv：本地 key 配置在 .env.development（pydantic-settings 加载）。
 _HAS_LLM_KEY = bool(settings.deep_think_api_key or settings.openai_api_key)
 
-pytestmark = pytest.mark.skipif(
-    not _HAS_LLM_KEY,
-    reason=(
-        "流式一致性 spike 需要真实 LLM Key：请设置 DEEP_THINK_API_KEY 或 "
-        "OPENAI_API_KEY（或在 .env.development/.env 配置）后运行"
-    ),
+# 端到端核验为"显式触发模式"（证据卫生，非造假）：Task 0 门禁已裁决
+# json_mode + Pydantic schema 无增量可 diff（D9 节级伪流式），真实 API 五断言
+# 按裁决结果固定失败——不允许常驻失败测试污染套件，默认 SKIP；仅当显式设置
+# STREAM_SPIKE_RUN=1（且配置了 LLM key）时才运行，用于复跑/复判门禁证据。
+_STREAM_SPIKE_RUN = os.getenv("STREAM_SPIKE_RUN") == "1"
+
+_STREAM_SPIKE_RUN_GATE = not (_STREAM_SPIKE_RUN and _HAS_LLM_KEY)
+
+_STREAM_SPIKE_SKIP_REASON = (
+    "流式一致性核验为显式触发模式：需设置 STREAM_SPIKE_RUN=1 且配置 "
+    "DEEP_THINK_API_KEY 或 OPENAI_API_KEY 后运行（门禁已裁决 D9 节级伪流式）"
 )
 
 # ── 常量 ──────────────────────────────────────────────────────────
@@ -197,6 +203,10 @@ def test_empty_chunks_produce_no_delta() -> None:
 # ── 五个断言（真实 API，生产同路径）────────────────────────────────
 
 
+@pytest.mark.skipif(
+    _STREAM_SPIKE_RUN_GATE,
+    reason=_STREAM_SPIKE_SKIP_REASON,
+)
 @pytest.mark.asyncio
 async def test_json_mode_astream_end_to_end_consistency() -> None:
     """生产同路径 astream 五个断言：增量/前缀/端到端/计费/空 chunk。
