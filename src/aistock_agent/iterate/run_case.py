@@ -49,7 +49,8 @@ async def run_case(
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
     stalled = 0
-    # C11/N3：连续基础设施失败（轮级异常）计数，达 3 中止 case 防无限空转
+    # C11/N3/F1：连续基础设施失败（回放超时/子进程失败/轮级异常/补丁空写）计数，
+    # 达 3 中止 case 防无限空转
     infra_failures = 0
     stopped_reason = "max_rounds"
     # I2：上一轮 apply_variant 实际写过的文件（相对仓库根路径），下一轮开始时
@@ -77,12 +78,30 @@ async def run_case(
                 )
                 written = apply_variant(variant, root)
                 last_written = tuple(str(p.relative_to(root.resolve())) for p in written)
-                record = await run_experiment_round(
-                    adapter.agent_id, case, round_no, variant, ground_truth
-                )
-                score = record["score_detail_obj"]
+                # F1 修复：apply_variant 空写（补丁不匹配且非 __new__ 模式）视为失败轮，
+                # 不进入 run_experiment_round 评估，gap 挂"变体轮异常"前缀，
+                # 由下方失败轮判定处统一递增 infra_failures。
+                if not written and variant.target_symbol != "__new__":
+                    score = ScoreDetail(
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        gap_analysis="变体轮异常：补丁未应用",
+                    )
+                    record = {
+                        "score": 0.0,
+                        "score_detail_obj": score,
+                        "gap_analysis": score.gap_analysis,
+                    }
+                else:
+                    record = await run_experiment_round(
+                        adapter.agent_id, case, round_no, variant, ground_truth
+                    )
+                    score = record["score_detail_obj"]
             except Exception as exc:  # noqa: BLE001
-                # C11/N3 修复：轮级异常不崩整个闭环，计为失败轮（豁免 stalled）
+                # C11/N3 修复：轮级异常不崩整个闭环，计为失败轮（豁免 stalled）；
+                # infra_failures 在下方失败轮判定处统一递增（F1），此处不再单独计数。
                 logger.error(
                     "iterate_round_failed",
                     case_id=case_id,
@@ -101,15 +120,16 @@ async def run_case(
                     "score_detail_obj": score,
                     "gap_analysis": score.gap_analysis,
                 }
-                infra_failures += 1
 
         detail = score if isinstance(score, ScoreDetail) else None
         total = detail.total if detail else float(cast("float", record.get("score", 0.0)))
 
-        # N3 修复：失败轮不计入 rounds、不更新 best、不计入 stalled
-        # （不触发"连续两轮无改善"误终止），但连续 3 次基础设施失败中止 case
-        # （防无限空转）。置于 rounds.append/best 更新之前，保证失败轮零痕迹。
+        # N3/F1 修复：失败轮不计入 rounds、不更新 best、不计入 stalled
+        # （不触发"连续两轮无改善"误终止）；全部失败轮类型（回放超时/子进程失败/
+        # 轮级异常/补丁空写）统一递增 infra_failures，连续 3 次中止 case（防无限空转）。
+        # 置于 rounds.append/best 更新之前，保证失败轮零痕迹。
         if getattr(score, "gap_analysis", "").startswith(("回放子进程", "变体轮异常")):
+            infra_failures += 1
             if infra_failures >= 3:
                 stopped_reason = "infra_failures"
                 break

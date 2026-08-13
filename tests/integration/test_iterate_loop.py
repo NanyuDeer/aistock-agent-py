@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.iterate.run_case import run_case
-from aistock_agent.iterate.variant_engine import restore_baseline as _real_restore
+from aistock_agent.iterate.variant_engine import (
+    VariantPlan,
+)
+from aistock_agent.iterate.variant_engine import (
+    restore_baseline as _real_restore,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "iterate"
 
@@ -84,14 +89,21 @@ async def test_loop_stops_when_no_improvement_two_rounds(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(return_value={"final_response": "看空"}),
         ):
+            # F1 修复后 apply_variant 空写计为失败轮（不入 stalled、不计 rounds），
+            # 本用例要验证的是"连续两轮无改善"终止，故让 apply_variant 实际"写入"
+            # 沙盒文件 → 变体轮保持普通 0.0 轮，stalled 正常递增触发 no_improvement。
             with patch(
-                "aistock_agent.iterate.run_case.restore_baseline",
-                side_effect=lambda *a, **k: _real_restore(*a, **k),
-            ) as spy:
-                result = await run_case(
-                    "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
-                )
-            assert spy.call_args.args[1] == tmp_path
+                "aistock_agent.iterate.run_case.apply_variant",
+                return_value=[tmp_path / "variant.md"],
+            ):
+                with patch(
+                    "aistock_agent.iterate.run_case.restore_baseline",
+                    side_effect=lambda *a, **k: _real_restore(*a, **k),
+                ) as spy:
+                    result = await run_case(
+                        "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                    )
+                assert spy.call_args.args[1] == tmp_path
 
     assert result["stopped_reason"] in {"no_improvement", "max_rounds"}
 
@@ -159,12 +171,70 @@ async def test_run_case_writes_best_patch_file(
     assert best["score"] == result["best_score"]
 
 
-"""run_case 轮级兜底：坏变体不崩闭环、失败轮豁免 stalled、r1 失败不落盘（C11/G14/N3）"""
+"""run_case 轮级兜底：轮级异常/补丁空写不崩闭环、失败轮豁免 stalled、
+r1 失败不落盘（C11/F1/G14/N3）"""
 
 
 @pytest.mark.asyncio
-async def test_run_case_survives_variant_patch_failure(iterate_data_dir: object) -> None:
-    """补丁不匹配（apply_variant 空写）不崩闭环，该轮计为失败轮。"""
+async def test_run_case_survives_variant_patch_failure(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """apply_variant 抛异常不崩闭环：连续 3 次轮级异常触发 infra_failures 中止 case，
+    失败轮不计入 rounds、不更新 best（C11/N3 语义锁定）。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # mock LLM 仅覆盖基线轮（round 1）的 extract + judge 两次调用：generate_variant
+    # 一并 mock 返回占位变体，异常定点发生在 apply_variant，不进入
+    # run_experiment_round 的评估路径（避免 mock 消费序列失配导致异常路径从未激活）。
+    extract_payload = {"direction": "bullish", "drivers": ["隔夜美股暴涨"], "sectors": ["半导体"]}
+    judge_payload = {"hit_count": 1, "total_count": 1, "quotes": ["隔夜美股暴涨"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+            ]
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "x"}),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                with patch(
+                    "aistock_agent.iterate.run_case.apply_variant",
+                    side_effect=RuntimeError("patch boom"),
+                ):
+                    result = await run_case(
+                        "review",
+                        str(case["case_id"]),
+                        max_rounds=5,
+                        repo_root=str(tmp_path),
+                    )
+
+    assert result["stopped_reason"] == "infra_failures"  # 连续 3 次轮级异常触发中止
+    assert [r["round"] for r in result["rounds"]] == [1]  # 失败轮零痕迹，仅基线轮入册
+    assert result["best_round"] == 1  # 失败轮不更新 best（基线轮 0.4667 为 best）
+
+
+@pytest.mark.asyncio
+async def test_run_case_patch_miss_counts_as_failed_round(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """apply_variant 空写（补丁不匹配）计为失败轮（F1 修复）：不入 rounds、不计 stalled，
+    计入 infra_failures；max_rounds=3 仅 2 次空写未达阈值 → 以 max_rounds 正常结束。"""
     case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
     gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
     (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
@@ -182,22 +252,32 @@ async def test_run_case_survives_variant_patch_failure(iterate_data_dir: object)
             side_effect=[
                 type("R", (), {"content": json.dumps(extract_payload)})(),
                 type("R", (), {"content": json.dumps(judge_payload)})(),
-                type("R", (), {"content": json.dumps(extract_payload)})(),
-                type("R", (), {"content": json.dumps(judge_payload)})(),
             ]
         )
         with patch(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(return_value={"final_response": "x"}),
         ):
-            result = await run_case("review", str(case["case_id"]), max_rounds=2)
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                with patch("aistock_agent.iterate.run_case.apply_variant", return_value=[]):
+                    result = await run_case(
+                        "review", str(case["case_id"]), max_rounds=3, repo_root=str(tmp_path)
+                    )
 
-    assert result["stopped_reason"] in {"score_reached", "max_rounds"}
-    assert result["rounds"]
+    assert result["stopped_reason"] == "max_rounds"  # 2 次空写 < 3 阈值，跑满 max_rounds
+    assert [r["round"] for r in result["rounds"]] == [1]  # 空写轮为失败轮不入册
+    assert result["best_round"] == 1  # 失败轮不更新 best
 
 
 @pytest.mark.asyncio
-async def test_baseline_failure_does_not_write_r1_record(iterate_data_dir: object) -> None:
+async def test_baseline_failure_does_not_write_r1_record(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
     """基线轮子进程失败时不落盘 r1_baseline.json（G14 修复：防"已迭代"误判）。"""
     case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
     gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
@@ -215,7 +295,9 @@ async def test_baseline_failure_does_not_write_r1_record(iterate_data_dir: objec
         "aistock_agent.iterate.variant_engine._run_replay_subprocess",
         AsyncMock(return_value={"final_response": "", "timed_out": True}),
     ):
-        result = await run_case("review", str(case["case_id"]), max_rounds=1)
+        result = await run_case(
+            "review", str(case["case_id"]), max_rounds=1, repo_root=str(tmp_path)
+        )
 
     r1_path = get_data_dir() / "experiments" / f"{case['case_id']}_r1_baseline.json"
     assert not r1_path.exists()  # 基线失败不落盘
