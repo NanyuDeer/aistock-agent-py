@@ -93,3 +93,30 @@ async def _cache_set(content_hash: str, score: DeepScoreOutput) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.debug("event_score_cache_set_failed", hash=content_hash[:16])
+
+
+async def _quick_filter(events: list[event_store.EventRecord]) -> set[str]:
+    """quick_think 批量粗筛：返回应继续精评的 content_hash 集合。
+
+    按 EVENT_SCORING_QUICK_BATCH_SIZE 分批（1 次调用评 N 条）；异常时保守
+    返回全部（交 deep 单条兜底判定，避免误滤掉重大事件）。
+    """
+    keep: set[str] = set()
+    batch_size = max(1, settings.event_scoring_quick_batch_size)
+    for start in range(0, len(events), batch_size):
+        batch = events[start : start + batch_size]
+        payload = [
+            {"event_id": ev["event_id"], "title": ev["title"], "summary": ev["summary"]}
+            for ev in batch
+        ]
+        try:
+            llm = with_chat_structured_output(get_quick_think(), QuickFilterOutput)
+            output = await llm.ainvoke({"events": payload})
+            keep_flags = {item.event_id: item.keep for item in output.items}
+            kept = [ev for ev in batch if keep_flags.get(ev["event_id"], False)]
+            keep |= {ev["content_hash"] for ev in kept}
+            logger.info("event_score_quick_filter", batch=len(batch), kept=len(kept))
+        except Exception:  # noqa: BLE001
+            logger.warning("event_score_quick_filter_failed", batch=len(batch))
+            keep |= {ev["content_hash"] for ev in batch}
+    return keep

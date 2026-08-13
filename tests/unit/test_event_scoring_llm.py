@@ -10,6 +10,7 @@ from aistock_agent.services.event_scoring_llm import (
     QuickFilterOutput,
     _cache_get,
     _cache_set,
+    _quick_filter,
     apply_llm_scores,
 )
 
@@ -87,3 +88,69 @@ async def test_cache_set_writes_with_ttl():
     assert args[0] == "event_score:aaa"
     assert args[1] == 86400
     assert json.loads(args[2])["impact_score"] == 4
+
+
+class _FakeQuickRunnable:
+    def __init__(self, output: QuickFilterOutput) -> None:
+        self._output = output
+
+    async def ainvoke(self, payload: dict[str, Any]) -> QuickFilterOutput:
+        self.last_payload = payload
+        return self._output
+
+
+class _KeepAllQuickRunnable(_FakeQuickRunnable):
+    """按 ainvoke 收到的批次动态响应：全部 keep（分批用例专用）。
+
+    真实契约下 with_chat_structured_output 收到 (llm, schema) 两个参数，
+    批次 payload 只在 ainvoke 时可见，故不能在构造期生成输出。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(QuickFilterOutput(items=[]))
+
+    async def ainvoke(self, payload: dict[str, Any]) -> QuickFilterOutput:
+        self.last_payload = payload
+        return QuickFilterOutput(items=[
+            QuickFilterItem(event_id=item["event_id"], keep=True) for item in payload["events"]
+        ])
+
+
+@pytest.mark.asyncio
+async def test_quick_filter_keeps_only_marked():
+    ev1 = _ev("e1", "aaa")
+    ev2 = _ev("e2", "bbb")
+    fake = _FakeQuickRunnable(QuickFilterOutput(items=[
+        QuickFilterItem(event_id="e1", keep=True),
+        QuickFilterItem(event_id="e2", keep=False),
+    ]))
+    with patch("aistock_agent.services.event_scoring_llm.get_quick_think"), \
+            patch("aistock_agent.services.event_scoring_llm.with_chat_structured_output", return_value=fake):
+        result = await _quick_filter([ev1, ev2])
+    assert result == {"aaa"}
+
+
+@pytest.mark.asyncio
+async def test_quick_filter_failure_keeps_all():
+    ev1 = _ev("e1", "aaa")
+    with patch("aistock_agent.services.event_scoring_llm.get_quick_think"), \
+            patch("aistock_agent.services.event_scoring_llm.with_chat_structured_output", side_effect=RuntimeError("boom")):
+        result = await _quick_filter([ev1])
+    assert result == {"aaa"}
+
+
+@pytest.mark.asyncio
+async def test_quick_filter_batches_by_config():
+    events = [_ev(f"e{i}", f"h{i:03d}") for i in range(5)]
+    runnables: list[_KeepAllQuickRunnable] = []
+    with patch("aistock_agent.services.event_scoring_llm.get_quick_think"), \
+            patch("aistock_agent.services.event_scoring_llm.with_chat_structured_output") as mock_wrap:
+        def fake_runnable(*_args: Any) -> Any:
+            fake = _KeepAllQuickRunnable()
+            runnables.append(fake)
+            return fake
+        mock_wrap.side_effect = fake_runnable
+        with patch("aistock_agent.config.settings.event_scoring_quick_batch_size", 2):
+            result = await _quick_filter(events)
+    assert [len(r.last_payload["events"]) for r in runnables] == [2, 2, 1]  # 5 条按每批 2 分 3 批
+    assert len(result) == 5
