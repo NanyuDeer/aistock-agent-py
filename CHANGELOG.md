@@ -1,5 +1,24 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [changer] 2026-08-12 — Phase 5 长会话上下文管理
+**开发者**: 37588
+
+### 新增
+- `src/aistock_agent/utils/context_window.py`：`trim_messages(messages, *, max_turns=6, summary_chars=200)` 纯函数——≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）；超窗 → LLM prompt 只喂最近 12 条，超窗部分收敛为零 LLM 确定性摘要（≤200 字，逐轮"用户：问句｜AI：回复片段"，幂等无累积）；`build_summary_context` 生成"此前对话摘要"注入段
+- `QuestionState.messages_summary` 可选字段（qa_router 超窗时写入随 checkpointer 持久化，write-only；synth_answer 消费侧从当前 messages 确定性重算，防跨轮陈旧残留）
+- `DELETE /api/agent/internal/chat/threads/:session_id`（X-Internal-Token 403 / 非法 400 / 幂等 200 / 异常 500）+ `checkpointer.delete_thread()`（AsyncSqliteSaver.adelete_thread，sqlite/memory 幂等、redis best-effort）
+- `config.py sqlite_busy_timeout=30.0` → `_build_async_sqlite_saver` 的 `aiosqlite.connect(timeout=...)`（多 worker 争用缓解）
+
+### 改进
+- qa_router/synth_answer：窗口+摘要注入（SYSTEM_PROMPT 常量字节不变，节点内拼接），LLM 输入用 12 条窗口；多子目标 `_synth_multi_goal`/`_synth_section` 路径同步注入
+
+### 测试
+- `tests/unit/test_context_window.py`、`tests/unit/test_qa_router_summary.py`、`tests/unit/test_synth_answer_summary.py`、`tests/unit/test_checkpointer_busy_timeout.py`、`tests/e2e/test_chat_threads.py`、`tests/unit/test_checkpointer_delete_thread.py`、`tests/integration/test_phase5_long_session_smoke.py`
+
+> 验证：全量 A/B（BASE 1c35329 worktree + PYTHONPATH 覆盖）HEAD 失败集 ⊆ BASE（17=17 逐项一致，新增清零）；ruff 改动文件 0 新增；集成冒烟 2/2（7 轮 13 条 → 12 条窗口 + 摘要注入 + messages_summary 持久化 + 删会话 thread 消失；短会话字节不变）。代码验收通过（待生产验证），待组长 merge 后部署验证。
+
+---
+
 ## [changer] 2026-08-12 — 问题 18 WS recv 竞态修复（Phase 2 回归补丁）
 **开发者**: 37588
 
