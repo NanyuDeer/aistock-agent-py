@@ -12,52 +12,8 @@ from aistock_agent.iterate.ground_truth import (
     _direction_from_snapshot,
     _top_gainers,
     generate_data_constrained_gt,
-    generate_ground_truth,
     list_pending_review,
 )
-
-
-@pytest.mark.asyncio
-async def test_generate_ground_truth_high_confidence(iterate_data_dir: object) -> None:
-    case = json.loads(
-        (Path(__file__).parent.parent / "fixtures" / "iterate" / "sample_case_review.json")
-        .read_text(encoding="utf-8")
-    )
-    llm_payload = {
-        "confidence": "high",
-        "attribution": {
-            "direction": "bullish",
-            "drivers": ["隔夜美股暴涨"],
-            "transmission_path": ["美股 → A股高开"],
-            "affected_sectors": ["半导体"],
-            "source_notes": [{"source": "财联社", "title": "x", "url": "http://x"}],
-        },
-    }
-    with patch(
-        "aistock_agent.services.tavily.TavilyService.search",
-        return_value={
-            "results": [
-                {"title": "券商解读", "url": "http://x", "content": "隔夜美股带动 A 股高开"}
-            ]
-        },
-    ), patch("aistock_agent.services.llm.get_deep_think") as factory:
-        factory.return_value.ainvoke = AsyncMock(
-            return_value=type("R", (), {"content": json.dumps(llm_payload)})()
-        )
-        gt = await generate_ground_truth(case, max_results=3)
-
-    assert gt["case_id"] == case["case_id"]
-    assert gt["confidence"] == "high"
-    assert set(cast("dict[str, object]", gt["attribution"])) == {
-        "direction",
-        "drivers",
-        "transmission_path",
-        "affected_sectors",
-        "source_notes",
-    }
-    assert (
-        Path(str(iterate_data_dir)) / "ground_truths" / f"{gt['gt_id']}.json"
-    ).exists()
 
 
 def test_pending_review_lists_low_confidence(iterate_data_dir: object) -> None:
@@ -142,7 +98,7 @@ async def test_generate_data_constrained_gt_deterministic_fields(
 
 @pytest.mark.asyncio
 async def test_generate_data_constrained_gt_llm_fallback(tmp_path: Path) -> None:
-    """drivers LLM 失败时降级为确定性摘要（不崩）。"""
+    """drivers LLM 失败时兜底为空列表（不崩，且不制造"指数neutral"噪声驱动，A14/G3）。"""
     with patch("aistock_agent.services.llm.get_deep_think") as factory:
         factory.return_value.ainvoke = AsyncMock(
             return_value=SimpleNamespace(content="not json")
@@ -150,4 +106,32 @@ async def test_generate_data_constrained_gt_llm_fallback(tmp_path: Path) -> None
         gt = await generate_data_constrained_gt(_case(), data_dir=tmp_path)
     drivers = cast("dict[str, object]", gt["attribution"])["drivers"]
     assert isinstance(drivers, list)
-    assert drivers  # 非空
+    assert drivers == []
+
+
+"""死代码清理 + 驱动兜底删除（F5/A14/G3 修复）"""
+
+
+def test_tavily_mode_dead_code_removed() -> None:
+    """generate_ground_truth（Tavily 后验模式）已删除：导入即失败。"""
+    import importlib
+
+    with pytest.raises(AttributeError):
+        importlib.import_module("aistock_agent.iterate.ground_truth").generate_ground_truth
+
+
+@pytest.mark.asyncio
+async def test_driver_fallback_is_empty_not_index_neutral(iterate_data_dir: object) -> None:
+    """LLM 驱动提取失败时兜底为空列表（不再是"指数neutral"噪声驱动）。"""
+    from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
+
+    case = json.loads(
+        (Path(__file__).parent.parent / "fixtures" / "iterate" / "sample_case_review.json")
+        .read_text(encoding="utf-8")
+    )
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content="not json")
+        )
+        gt = await generate_data_constrained_gt(case)
+    assert gt["attribution"]["drivers"] == []
