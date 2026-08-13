@@ -23,6 +23,7 @@ logger = structlog.get_logger()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from aistock_agent.config import settings  # noqa: E402
 from aistock_agent.iterate.adapters import get_adapter  # noqa: E402
 from aistock_agent.iterate.case_builder import (  # noqa: E402
     build_case,
@@ -35,7 +36,9 @@ from aistock_agent.iterate.case_scanner import (  # noqa: E402
 )
 from aistock_agent.iterate.ground_truth import generate_data_constrained_gt  # noqa: E402
 from aistock_agent.iterate.gt_validator import validate_gt_against_case  # noqa: E402
+from aistock_agent.services.http_client import HttpClientPool  # noqa: E402
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot  # noqa: E402
+from aistock_agent.services.redis_pool import RedisPool  # noqa: E402
 
 
 def _source_to_record(source: dict[str, object]) -> dict[str, object]:
@@ -195,28 +198,38 @@ async def main(argv: list[str]) -> int:
     parser.add_argument("--data-dir", type=Path, default=None)
     args = parser.parse_args(argv)
 
+    # CLI 独立运行时初始化连接池（FastAPI 服务在 lifespan 初始化，脚本没有
+    # lifespan；node_api 依赖 HttpClientPool，晨报缓存/GT 生成依赖 RedisPool）。
+    # 修复：2026-08-13 服务器手动产片报 "HttpClientPool not initialized"。
+    await RedisPool.init(settings.redis_url, max_connections=settings.redis_max_connections)
+    await HttpClientPool.init(timeout=settings.http_timeout_seconds)
+
     data_dir = args.data_dir or get_data_dir()
 
-    if args.agent == "review":
-        result = await build_review_case(data_dir=data_dir, force=args.force)
-        print(
-            f"review case 生成：{result['case_id']}"
-            f"（校验{'拒绝' if result['rejected'] else '通过'}）"
-        )
-        if result["reasons"]:
-            print("原因：", *cast("list[str]", result["reasons"]), sep="\n  - ")
-    else:
-        events = await scan_major_events(args.window_days)
-        if not events:
-            print(f"近 {args.window_days} 天未发现重大事件")
-            return 0
-        result = await build_event_cases(
-            events=events, data_dir=data_dir, force=args.force
-        )
-        print(f"event case 生成：{result['generated']} 个，拒绝 {result['rejected']} 个")
-        for r in cast("list[str]", result["reasons"]):
-            print(f"  - {r}")
-    return 0
+    try:
+        if args.agent == "review":
+            result = await build_review_case(data_dir=data_dir, force=args.force)
+            print(
+                f"review case 生成：{result['case_id']}"
+                f"（校验{'拒绝' if result['rejected'] else '通过'}）"
+            )
+            if result["reasons"]:
+                print("原因：", *cast("list[str]", result["reasons"]), sep="\n  - ")
+        else:
+            events = await scan_major_events(args.window_days)
+            if not events:
+                print(f"近 {args.window_days} 天未发现重大事件")
+                return 0
+            result = await build_event_cases(
+                events=events, data_dir=data_dir, force=args.force
+            )
+            print(f"event case 生成：{result['generated']} 个，拒绝 {result['rejected']} 个")
+            for r in cast("list[str]", result["reasons"]):
+                print(f"  - {r}")
+        return 0
+    finally:
+        await HttpClientPool.close()
+        await RedisPool.close()
 
 
 if __name__ == "__main__":
