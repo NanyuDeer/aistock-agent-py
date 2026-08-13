@@ -242,7 +242,7 @@ content = {
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；H7 起中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。
+> **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；传导失败重试 1 次——`error` 非空或异常时重试，两次失败放弃并记 error 级日志不抛，H7，2026-08-13；中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
@@ -260,7 +260,7 @@ content = {
 | 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
 | 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
 | 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
-| 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集 |
+| 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集；传导失败重试 1 次（`error` 非空或异常时重试，仍失败记 error 日志不抛，H7，2026-08-13） |
 
 **调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
 
