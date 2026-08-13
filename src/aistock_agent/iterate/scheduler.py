@@ -93,9 +93,9 @@ async def _run_iterate_daily_task() -> None:
 
     切片生成由 16:30 产片 job（_run_iterate_build_task）负责（D16 修复），
     本任务只消费既有切片（data/cases/）并发送报告，产片失败不阻断消费。
-    案例去重（I4）：只消费尚无实验记录的切片（data/experiments/ 下无
-    ``{case_id}_r`` 前缀文件），每个案例只迭代一次，避免每个交易日
-    反复重跑最新 N 个案例。
+    案例去重（I4，D13 修复）：只消费尚未迭代的切片——已迭代判定基于
+    ``data/cases/{case_id}.iterated.json`` 标记文件（不再看 experiments ``_r``
+    前缀），每个案例只迭代一次，避免每个交易日反复重跑最新 N 个案例。
     """
     today = shanghai_today()
     if not is_trading_day(today):

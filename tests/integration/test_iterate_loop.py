@@ -461,3 +461,64 @@ async def test_score_then_stall_reports_peak_consistency(
     # 本用例构造 r1 达标即停 → score_reached（报告语义一致，不含 no_improvement）
     assert result["stopped_reason"] in {"score_reached", "score_then_stall", "max_rounds"}
     assert result["best_round"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_case_all_failed_does_not_write_best_file(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """基线失败（不落 r1）+ 变体轮 subprocess 全失败（落盘 0.0 失败记录）：
+    best.json 不得写入失败轮未应用补丁（final whole-branch review Important-1 修复）。
+
+    修复前：r2/r3 失败轮 0.0 记录被 _recompute_best 取"最高"（实为第一条）写
+    best.json，与 run_case 内存 best_round=0 报告不一致；修复后过滤失败轮 →
+    无有效记录 → 返回 None → best.json 不写。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from aistock_agent.iterate.case_builder import get_data_dir
+
+    case = _json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = _json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (_Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (_Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        _json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = _Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(_json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # 失败轮无输出可评、不进入评估，无需 LLM mock；子进程回放 r1 超时 → r2/r3 失败，
+    # 连续 3 次基础设施失败触发 infra_failures 中止（r2/r3 仍经 run_experiment_round
+    # 落盘 0.0 + "回放子进程..." gap 记录，构成 best.json 污染源）。
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            side_effect=[
+                {"final_response": "", "timed_out": True},
+                {"final_response": "", "subprocess_failed": True},
+                {"final_response": "", "subprocess_failed": True},
+            ]
+        ),
+    ):
+        with patch(
+            "aistock_agent.iterate.run_case.generate_variant",
+            AsyncMock(
+                return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+            ),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.apply_variant",
+                return_value=[tmp_path / "variant.md"],
+            ):
+                result = await run_case(
+                    "review", str(case["case_id"]), max_rounds=3, repo_root=str(tmp_path)
+                )
+
+    assert result["stopped_reason"] == "infra_failures"  # 连续 3 次基础设施失败中止
+    assert result["best_round"] == 0  # 全失败：内存 best 保持初始 0
+    exps = get_data_dir() / "experiments"
+    assert (exps / f"{case['case_id']}_r2.json").exists()  # 失败轮记录仍落盘（事实陈述）
+    best_path = exps / f"{case['case_id']}_best.json"
+    assert not best_path.exists()  # 失败轮未应用补丁不得写入 best.json

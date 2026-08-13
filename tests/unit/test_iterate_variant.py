@@ -456,3 +456,89 @@ async def test_experiment_record_includes_patch_spec(iterate_data_dir: object) -
     assert patch_spec["target_symbol"] == "run"
     assert patch_spec["old_snippet"] == "旧片段"
     assert patch_spec["new_snippet"] == "新片段"
+
+
+"""_recompute_best 失败轮过滤（final whole-branch review Important-1 修复）"""
+
+
+def _write_experiment_record(
+    iterate_data_dir: object, case_id: str, name: str, record: dict[str, object]
+) -> None:
+    from pathlib import Path as _Path
+
+    exps = _Path(iterate_data_dir) / "experiments"  # type: ignore[union-attr]
+    exps.mkdir(parents=True, exist_ok=True)
+    (exps / f"{case_id}_{name}.json").write_text(
+        json.dumps(record, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_recompute_best_excludes_failed_round_and_picks_r2(
+    iterate_data_dir: object,
+) -> None:
+    """失败轮（gap="回放子进程..."）不入 best 候选，正常 r2 记录胜出。
+
+    Important-1 回归：修复前失败轮 0.0 记录也会参与选 best（全失败时取第一条
+    失败轮 patch 写 best.json）；修复后 r2（score=0.6）必须被选中。
+    """
+    from aistock_agent.iterate.run_case import _recompute_best
+
+    case_id = "case_best_skip_failed"
+    _write_experiment_record(iterate_data_dir, case_id, "r1_baseline", {
+        "round": 1,
+        "score": 0.0,
+        "gap_analysis": "回放子进程超时（>600s），本轮视为失败",
+    })
+    r2_patch = {"target_symbol": "run", "old_snippet": "旧片段", "new_snippet": "新片段"}
+    _write_experiment_record(iterate_data_dir, case_id, "r2", {
+        "round": 2,
+        "score": 0.6,
+        "gap_analysis": "驱动覆盖不足",
+        "patch": r2_patch,
+    })
+    best = _recompute_best("review", case_id)
+    assert best is not None
+    assert best["score"] == 0.6
+    assert best["round"] == 2
+    assert best["patch"] == r2_patch
+
+
+def test_recompute_best_all_failed_returns_none(iterate_data_dir: object) -> None:
+    """基线失败（无 r1 落盘）+ 变体轮全失败（落盘 0.0 失败记录）：过滤后无有效记录
+    → 返回 None（best.json 不写，避免把失败轮未应用补丁当 best 合入）。"""
+    from aistock_agent.iterate.run_case import _recompute_best
+
+    case_id = "case_best_all_failed"
+    _write_experiment_record(iterate_data_dir, case_id, "r2", {
+        "round": 2,
+        "score": 0.0,
+        "gap_analysis": "回放子进程失败（>600s），本轮视为失败",
+        "patch": {"target_symbol": "run", "old_snippet": "旧片段", "new_snippet": "未应用"},
+    })
+    _write_experiment_record(iterate_data_dir, case_id, "r3", {
+        "round": 3,
+        "score": 0.0,
+        "gap_analysis": "变体轮异常：补丁未应用",
+    })
+    assert _recompute_best("review", case_id) is None
+
+
+def test_recompute_best_skips_non_numeric_score(iterate_data_dir: object) -> None:
+    """score 非数值记录跳过（float() 不抛 ValueError 中断 run_case），有效记录仍被选中。"""
+    from aistock_agent.iterate.run_case import _recompute_best
+
+    case_id = "case_best_bad_score"
+    _write_experiment_record(iterate_data_dir, case_id, "r1", {
+        "round": 1,
+        "score": "oops",
+        "gap_analysis": "脏记录",
+    })
+    _write_experiment_record(iterate_data_dir, case_id, "r2", {
+        "round": 2,
+        "score": 0.6,
+        "gap_analysis": "正常",
+        "patch": {"target_symbol": "run"},
+    })
+    best = _recompute_best("review", case_id)
+    assert best is not None
+    assert best["round"] == 2

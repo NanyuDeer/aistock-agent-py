@@ -204,7 +204,10 @@ async def run_case(
 def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
     """从 data/experiments/{case_id}_r*.json 记录重算 best 轮补丁。
 
-    返回 best 轮的 patch 规格；无任何实验记录返回 None。
+    返回 best 轮的 patch 规格；无任何有效实验记录返回 None（best.json 不写）。
+    Important-1（final review）：失败轮记录（gap 前缀"回放子进程"/"变体轮异常"）
+    不入 best 候选——其 score=0.0 且 patch 是未应用的 LLM 规格，写入 best.json
+    会误导合入；非数值 score 记录跳过（float() 不抛 ValueError 中断 run_case）。
     """
     root = get_data_dir() / "experiments"
     if not root.exists():
@@ -215,7 +218,13 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
             record = json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        score = float(cast("float", record.get("score", 0.0)))
+        # 失败轮不入 best 候选（与 run_case 内存失败轮判定同前缀约定）
+        if str(record.get("gap_analysis", "")).startswith(("回放子进程", "变体轮异常")):
+            continue
+        try:
+            score = float(cast("float", record.get("score", 0.0)))
+        except (TypeError, ValueError):
+            continue
         if best is None or score > float(cast("float", best.get("score", 0.0))):
             best = {"score": score, "round": record.get("round"), "patch": record.get("patch", {})}
     return best
