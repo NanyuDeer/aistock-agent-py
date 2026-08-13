@@ -72,7 +72,7 @@ async def build_case(
         event_time = event_time.replace(tzinfo=_TZ)
     before = [r for r in telegraph_records if _record_time_le(r, event_time)]
     if market_snapshot is not None:
-        _validate_market_snapshot(market_snapshot)
+        _validate_market_snapshot(market_snapshot, event_time)
 
     case_id = f"case_{event_time.strftime('%Y%m%d')}_{adapter.agent_id}_{_slugify(event_title)}"
     case: dict[str, object] = {
@@ -101,15 +101,19 @@ async def build_case(
 
 def _record_time_le(record: dict[str, object], bound: datetime) -> bool:
     t = _parse_record_time(record)
-    return t is None or t <= bound  # 无时间戳的记录保守保留（无法判定时序）
+    if t is None:
+        # 无时间戳记录：保守保留（无法判定时序）但打标记，评估端可剔除/降权（G10）
+        record["time_unknown"] = True
+        return True
+    return t <= bound
 
 
-def _validate_market_snapshot(snapshot: dict[str, object]) -> None:
-    """校验调用方提供的 market_snapshot 必须满足 MarketTraceSnapshot 契约（I3）。
+def _validate_market_snapshot(snapshot: dict[str, object], event_time: datetime) -> None:
+    """校验调用方提供的 market_snapshot 必须满足 MarketTraceSnapshot 契约（I3）
+    且 trade_date 不晚于 event_time 所在日期（B1/G9 修复：防 T 后收盘快照固化）。
 
     回放时 review agent 会以 MarketTraceSnapshot 消费该字段并重算 discovery；
     不合法的切片会在评估期才崩溃（评分恒 0），因此必须在生成期快速失败。
-    不自动补全缺失字段——调用方必须提供 schema-valid 的快照（全量 dump 形状）。
     """
     from aistock_agent.schemas.market_trace import MarketTraceSnapshot
 
@@ -119,6 +123,18 @@ def _validate_market_snapshot(snapshot: dict[str, object]) -> None:
         raise ValueError(
             f"market_snapshot 不符合 MarketTraceSnapshot 契约: {e}"
         ) from e
+
+    trade_date = snapshot.get("trade_date")
+    if isinstance(trade_date, str) and trade_date:
+        try:
+            day = datetime.fromisoformat(trade_date).date()
+        except ValueError as e:
+            raise ValueError(f"market_snapshot.trade_date 非法: {trade_date}") from e
+        if event_time.date() < day:
+            raise ValueError(
+                f"market_snapshot.trade_date({trade_date}) 晚于 event_time"
+                f"({event_time.isoformat()}) 所在日期：切片会固化 T 后数据"
+            )
 
 
 def _slugify(title: str) -> str:

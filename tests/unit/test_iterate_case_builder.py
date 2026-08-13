@@ -109,3 +109,65 @@ def test_case_roundtrip(iterate_data_dir: object) -> None:
 def test_list_cases(iterate_data_dir: object) -> None:
     ids = list_cases("review")
     assert any(cid == "case_20260731_us_market_surge" for cid in ids)
+
+
+# 切片时序断言 + 无时间戳标记（B1/G9/G10 修复）
+
+
+def _snapshot_with_trade_date(trade_date: str) -> dict[str, object]:
+    """schema-valid 快照但 trade_date/captured_at 指定（时序断言测试用）。"""
+    snap = dict(_valid_snapshot())
+    snap["trade_date"] = trade_date
+    snap["captured_at"] = f"{trade_date}T15:35:00+08:00"
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_build_case_rejects_post_event_snapshot(iterate_data_dir: object) -> None:
+    """market_snapshot.trade_date 晚于 event_time 时拒绝落盘（防 T 后快照固化）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    # trade_date=2026-08-01 > event_time 日期 2026-07-31 → 拒绝
+    with pytest.raises(ValueError, match="trade_date"):
+        await build_case(
+            adapter,
+            event_title="test",
+            event_time=t,
+            telegraph_records=[],
+            market_snapshot=_snapshot_with_trade_date("2026-08-01"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_case_accepts_same_day_snapshot(iterate_data_dir: object) -> None:
+    """trade_date == event_time 日期 → 通过（T 锚定正常）。"""
+    t = datetime(2026, 7, 31, 15, 35, tzinfo=TZ)
+    adapter = get_adapter("review")
+    case = await build_case(
+        adapter,
+        event_title="test",
+        event_time=t,
+        telegraph_records=[],
+        market_snapshot=_snapshot_with_trade_date("2026-07-31"),
+    )
+    assert case["case_id"]
+
+
+@pytest.mark.asyncio
+async def test_build_case_marks_unknown_time_records(iterate_data_dir: object) -> None:
+    """无时间戳记录打 time_unknown 标记（G10：评估端可剔除或降权）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    case = await build_case(
+        adapter,
+        event_title="test",
+        event_time=t,
+        telegraph_records=[
+            {"title": "无时间戳", "content": "x"},
+            {"time": "2026-07-31T09:00:00+08:00", "title": "正常", "content": "y"},
+        ],
+    )
+    records = case["window_before"]["cls_telegraph"]
+    unknown = [r for r in records if r.get("time_unknown")]
+    assert len(unknown) == 1
+    assert unknown[0]["title"] == "无时间戳"
