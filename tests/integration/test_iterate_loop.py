@@ -76,7 +76,8 @@ async def test_loop_stops_when_score_above_threshold(
 async def test_loop_stops_when_no_improvement_two_rounds(
     iterate_data_dir: object, tmp_path: Path
 ) -> None:
-    """连续两轮评分不升则终止。"""
+    """连续两轮评分不升不触发终止（Task 13：δ 校准前禁用 no_improvement），
+    由 max_rounds 兜底。函数名保留旧语义（历史断言锁定，行为已变）。"""
     case, _gt = _write_case_fixture(iterate_data_dir)
 
     # 错误方向 → 低分不升
@@ -90,8 +91,8 @@ async def test_loop_stops_when_no_improvement_two_rounds(
             AsyncMock(return_value={"final_response": "看空"}),
         ):
             # F1 修复后 apply_variant 空写计为失败轮（不入 stalled、不计 rounds），
-            # 本用例要验证的是"连续两轮无改善"终止，故让 apply_variant 实际"写入"
-            # 沙盒文件 → 变体轮保持普通 0.0 轮，stalled 正常递增触发 no_improvement。
+            # 故让 apply_variant 实际"写入"沙盒文件 → 变体轮保持普通 0.0 轮，
+            # stalled 正常累计（Task 13 起仅观测，不再触发 no_improvement 终止）。
             with patch(
                 "aistock_agent.iterate.run_case.apply_variant",
                 return_value=[tmp_path / "variant.md"],
@@ -105,7 +106,8 @@ async def test_loop_stops_when_no_improvement_two_rounds(
                     )
                 assert spy.call_args.args[1] == tmp_path
 
-    assert result["stopped_reason"] in {"no_improvement", "max_rounds"}
+    # Task 13：no_improvement 已删除，停滞轮由 max_rounds 兜底
+    assert result["stopped_reason"] in {"score_reached", "max_rounds"}
 
 
 """best 固化：r*.json 落盘后 recompute_best 原子写 best.json"""
@@ -368,3 +370,94 @@ async def test_baseline_failure_does_not_write_r1_record(
     r1_path = get_data_dir() / "experiments" / f"{case['case_id']}_r1_baseline.json"
     assert not r1_path.exists()  # 基线失败不落盘
     assert result["stopped_reason"] == "max_rounds"
+
+
+"""stalled 校准前禁用 + 终止三态（D4/A11/N11 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_no_improvement_does_not_terminate_before_calibration(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """δ 未校准时，评分停滞不触发 no_improvement 终止；由 max_rounds 兜底。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # 连续低分停滞：stalled 永远累计，但不得触发 no_improvement 终止。
+    # apply_variant 必须 mock 为"实际写入"：Task 11 F1 后空写（补丁为空 → 返回 []）
+    # 计为失败轮并累计 infra_failures，会让变异轮全部变失败轮而非普通低分轮，
+    # 测不到"停滞不终止"语义；repo_root 指向沙盒防 restore_baseline 触碰真实仓库。
+    low_payload = {"direction": "bearish", "drivers": [], "sectors": []}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type("R", (), {"content": json.dumps(low_payload)})()
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "看空"}),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.apply_variant",
+                return_value=[tmp_path / "variant.md"],
+            ):
+                result = await run_case(
+                    "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                )
+
+    assert result["stopped_reason"] == "max_rounds"  # 校准前不停滞终止
+    assert len(result["rounds"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_score_then_stall_reports_peak_consistency(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """曾达标 → 报告语义一致：stopped_reason=score_reached（达标即停，不谎报未达标）。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # r1 达标即停（score_reached 应立即终止）：方向 0.2 + 板块 3/3 全中 0.3 +
+    # 驱动 2/3 命中 0.3333（Task 7 固定分母 len(truth)=3）→ total=0.8333 ≥ 0.8。
+    # judge 自报 hit 1/1 已不足以达标（旧分母语义），必须 ≥2/3 命中。
+    extract_high = {
+        "direction": "bullish",
+        "drivers": ["隔夜美股暴涨"],
+        "sectors": ["半导体", "算力", "新能源"],
+    }
+    extract_low = {"direction": "bearish", "drivers": [], "sectors": []}
+    judge_high = {"hit_count": 2, "total_count": 3, "quotes": ["隔夜美股暴涨", "外盘传导"]}
+    judge_low = {"hit_count": 0, "total_count": 3, "quotes": []}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_high)})(),
+                type("R", (), {"content": json.dumps(judge_high)})(),
+                type("R", (), {"content": json.dumps(extract_low)})(),
+                type("R", (), {"content": json.dumps(judge_low)})(),
+            ]
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "x"}),
+        ):
+            result = await run_case(
+                "review", str(case["case_id"]), max_rounds=3, repo_root=str(tmp_path)
+            )
+
+    # 本用例构造 r1 达标即停 → score_reached（报告语义一致，不含 no_improvement）
+    assert result["stopped_reason"] in {"score_reached", "score_then_stall", "max_rounds"}
+    assert result["best_round"] == 1

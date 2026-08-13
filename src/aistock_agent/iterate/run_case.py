@@ -35,9 +35,11 @@ async def run_case(
     """对单个案例跑迭代闭环。
 
     终止条件：
-    - 评分 >= settings.iterate_target_score（0.8）
-    - 连续两轮评分未上升（no_improvement）
+    - 评分 >= settings.iterate_target_score（0.8）→ stopped_reason=score_reached
+    - best 评分曾达标但当前轮未持续 → stopped_reason=score_then_stall（报告语义修正）
     - 达到 max_rounds（默认 settings.iterate_max_rounds）
+    D4/N3：δ 校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，停滞判定
+    会误触发或永不触发；stalled 仅观测记录，终止性只依赖 score_reached 与 max_rounds。
     round 1 为基线（无变体），round 2+ 应用 LLM 变体。
     """
     adapter = get_adapter(agent_id)
@@ -48,7 +50,7 @@ async def run_case(
 
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
-    stalled = 0
+    stalled = 0  # D4/N3：δ 校准前禁用 no_improvement 终止，仅观测计数
     # C11/N3/F1：连续基础设施失败（回放超时/子进程失败/轮级异常/补丁空写）计数，
     # 达 3 中止 case 防无限空转
     infra_failures = 0
@@ -152,15 +154,25 @@ async def run_case(
             }
             stalled = 0
         else:
-            stalled += 1
+            stalled += 1  # 仅观测累计（D4/N3：不再触发任何终止）
 
-        logger.info("iterate_round_done", case_id=case_id, round=round_no, score=total)
+        logger.info(
+            "iterate_round_done",
+            case_id=case_id,
+            round=round_no,
+            score=total,
+            stalled=stalled,  # D4/N3：观测字段，随轮日志输出供校准期分析
+        )
 
+        # D4/N3 修复：δ 未校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，
+        # total > best 的停滞判定在噪声下会误触发或永不触发；终止性只依赖
+        # score_reached 与 max_rounds，stalled 仅观测记录。
         if total >= settings.iterate_target_score:
             stopped_reason = "score_reached"
             break
-        if stalled >= 2:
-            stopped_reason = "no_improvement"
+        if cast("float", best.get("score", 0.0)) >= settings.iterate_target_score:
+            # A11/N11 修复：曾达标但当前轮未持续 → 报告语义修正（不谎报"未达标"）
+            stopped_reason = "score_then_stall"
             break
 
     # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入
