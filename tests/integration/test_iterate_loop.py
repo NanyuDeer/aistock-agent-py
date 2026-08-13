@@ -233,8 +233,12 @@ async def test_run_case_survives_variant_patch_failure(
 async def test_run_case_patch_miss_counts_as_failed_round(
     iterate_data_dir: object, tmp_path: Path
 ) -> None:
-    """apply_variant 空写（补丁不匹配）计为失败轮（F1 修复）：不入 rounds、不计 stalled，
-    计入 infra_failures；max_rounds=3 仅 2 次空写未达阈值 → 以 max_rounds 正常结束。"""
+    """apply_variant 空写（补丁不匹配）计为失败轮（F1 修复）：不入 rounds、不计 stalled、
+    计入 infra_failures；max_rounds=4 下连续 3 次空写达阈值 → infra_failures 中止。
+
+    区分力：LLM mock 用无限 return_value（有效 extract payload）——修复前语义（d26daba：
+    空写轮正常评估入册）下 rounds 膨胀为 [1,2,3]，断言 rounds==[1] 与 stopped_reason
+    ==infra_failures 均失败，测试真能区分修复前后。"""
     case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
     gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
     (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
@@ -245,14 +249,13 @@ async def test_run_case_patch_miss_counts_as_failed_round(
     gt_path.parent.mkdir(parents=True, exist_ok=True)
     gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
 
-    extract_payload = {"direction": "bullish", "drivers": ["隔夜美股暴涨"], "sectors": ["半导体"]}
-    judge_payload = {"hit_count": 1, "total_count": 1, "quotes": ["隔夜美股暴涨"]}
+    # LLM mock 用无限 return_value（有效 extract payload，extract/judge 均返回同一 dict；
+    # judge 缺 hit_count → 驱动维 0 分，但基线轮仍正常入册 rounds=[1]）。修复前语义下
+    # 空写轮会进入 run_experiment_round 正常评估（mock 永不耗尽），入册膨胀使断言失败。
+    extract_payload = {"direction": "bullish", "drivers": ["x"], "sectors": ["半导体"]}
     with patch("aistock_agent.services.llm.get_deep_think") as factory:
         factory.return_value.ainvoke = AsyncMock(
-            side_effect=[
-                type("R", (), {"content": json.dumps(extract_payload)})(),
-                type("R", (), {"content": json.dumps(judge_payload)})(),
-            ]
+            return_value=type("R", (), {"content": json.dumps(extract_payload)})()
         )
         with patch(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
@@ -266,11 +269,74 @@ async def test_run_case_patch_miss_counts_as_failed_round(
             ):
                 with patch("aistock_agent.iterate.run_case.apply_variant", return_value=[]):
                     result = await run_case(
-                        "review", str(case["case_id"]), max_rounds=3, repo_root=str(tmp_path)
+                        "review", str(case["case_id"]), max_rounds=4, repo_root=str(tmp_path)
                     )
 
-    assert result["stopped_reason"] == "max_rounds"  # 2 次空写 < 3 阈值，跑满 max_rounds
+    assert result["stopped_reason"] == "infra_failures"  # 连续 3 次空写触发中止
     assert [r["round"] for r in result["rounds"]] == [1]  # 空写轮为失败轮不入册
+    assert result["best_round"] == 1  # 失败轮不更新 best（基线 0.3 为 best）
+
+
+@pytest.mark.asyncio
+async def test_three_subprocess_failures_abort_with_infra_failures(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """连续 3 次回放子进程失败 → infra_failures 中止（F1 修复锁定）：失败轮不评估 LLM、
+    不入 rounds、不更新 best；rounds 恒为 [1]（仅含基线轮）。
+
+    区分力：修复前语义（d26daba：subprocess 失败轮不递增 infra_failures）下失败轮无法
+    触发中止 → 跑满 max_rounds=5，stopped_reason=="max_rounds" 使断言失败。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # LLM mock 仅覆盖基线轮（round 1）extract + judge 两次调用：子进程失败轮在
+    # run_experiment_round 内短路（无输出可评，不进入评估），无需更多 mock。
+    extract_payload = {"direction": "bullish", "drivers": ["隔夜美股暴涨"], "sectors": ["半导体"]}
+    judge_payload = {"hit_count": 1, "total_count": 1, "quotes": ["隔夜美股暴涨"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+            ]
+        )
+        # 子进程回放：round 1 基线成功（rounds=[1]），rounds 2/3/4 连续 3 次失败。
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(
+                side_effect=[
+                    {"final_response": "主因隔夜美股大涨，看多，半导体领涨"},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                ]
+            ),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                # apply_variant 实际写入沙盒文件 → 变体轮进入 run_experiment_round，
+                # 由子进程失败标记触发失败轮（而非空写路径）。
+                with patch(
+                    "aistock_agent.iterate.run_case.apply_variant",
+                    return_value=[tmp_path / "variant.md"],
+                ):
+                    result = await run_case(
+                        "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                    )
+
+    assert result["stopped_reason"] == "infra_failures"  # 连续 3 次子进程失败触发中止
+    assert [r["round"] for r in result["rounds"]] == [1]  # 失败轮零痕迹，仅基线轮入册
     assert result["best_round"] == 1  # 失败轮不更新 best
 
 
