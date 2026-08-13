@@ -372,7 +372,7 @@ async def run_experiment_round(
     返回 {score, score_detail, gap_analysis, agent_output, variant_hash}。
     """
     case_id = str(case["case_id"])
-    variant_hash = _content_hash(variant.new_content)
+    variant_hash = _compute_variant_hash(variant)
     output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
     if output.get("timed_out") or output.get("subprocess_failed"):
         # 回放超时/子进程失败：不调用评估 LLM（无输出可评），记为失败轮。
@@ -511,6 +511,22 @@ def _content_hash(new_content: dict[str, str]) -> str:
 
     payload = json.dumps(new_content, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compute_variant_hash(variant: VariantPlan) -> str:
+    """计算变体的唯一 hash（T9 M3 修复）。
+
+    修复前：_content_hash(variant.new_content) 在补丁模式下恒为 sha256("{}")，
+    因为 new_content={}（目标区域补丁模式不写 full new_content）。
+    修复后：hash 包含 new_content + target_symbol/old_snippet/new_snippet，
+    不同补丁产生不同 hash，使 variant_hash 可参与去重/选择。
+    """
+    return _content_hash({
+        "new_content": variant.new_content,
+        "target_symbol": variant.target_symbol,
+        "old_snippet": variant.old_snippet,
+        "new_snippet": variant.new_snippet,
+    })
 
 
 def _now_iso_date() -> str:
