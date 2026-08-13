@@ -110,7 +110,13 @@ async def test_build_task_failure_does_not_break_report(iterate_data_dir: object
     """产片失败（Node 不可达）只告警，不中止每日迭代报告。"""
     from aistock_agent.iterate.scheduler import _run_iterate_build_task
 
+    # 日期无关（I1 审查修复）：_run_iterate_build_task 先执行真实日期判断
+    # （shanghai_today + chinese_calendar.is_workday），不 patch 时周末/节假日
+    # 提前 return，mock_build.assert_awaited() 必挂。参照同文件既有用例模式
+    # 显式 patch is_trading_day=True；shanghai_today 无需 patch（True 时继续到 try 块）。
     with patch(
+        "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
+    ), patch(
         "aistock_agent.iterate.scheduler.find_recent_trading_day",
         AsyncMock(return_value=None),
     ), patch(
