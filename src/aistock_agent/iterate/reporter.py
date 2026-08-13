@@ -148,8 +148,10 @@ def _format_improvements(experiments: list[dict[str, object]]) -> str:
             f"建议：{variant.get('instructions', '')}"
         )
         # 2026-08-14 用户反馈：正文信息不足，不知道 agent 改了什么——
-        # 附上 patch 摘要（old_snippet → new_snippet 关键行）
-        patch = variant.get("patch")
+        # 附上 patch 摘要（old_snippet → new_snippet 关键行）。
+        # 注意：patch 是实验记录顶层字段（run_experiment_round 写入结构），
+        # 不在 variant 内（variant 只含 type/files/instructions）。
+        patch = e.get("patch")
         if isinstance(patch, dict):
             old = str(patch.get("old_snippet", "")).replace("\n", "⏎")[:80]
             new = str(patch.get("new_snippet", "")).replace("\n", "⏎")[:120]

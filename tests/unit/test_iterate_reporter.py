@@ -137,7 +137,11 @@ async def test_build_daily_report_excludes_best_summary(
 
 
 def test_format_improvements_shows_patch_summary() -> None:
-    """改进建议展示变体 patch 摘要（old→new），让负责人知道"改了什么"。"""
+    """改进建议展示变体 patch 摘要（old→new），让负责人知道"改了什么"。
+
+    patch 是实验记录顶层字段（run_experiment_round 写入结构：variant 只含
+    type/files/instructions；patch 含 target_symbol/old_snippet/new_snippet）。
+    """
     from aistock_agent.iterate.reporter import _format_improvements
 
     experiments = [
@@ -148,11 +152,11 @@ def test_format_improvements_shows_patch_summary() -> None:
                 "type": "prompt_diff",
                 "files": ["src/aistock_agent/prompts/workers/review.py"],
                 "instructions": "增加外盘传导优先指令",
-                "patch": {
-                    "target_symbol": "REVIEW_PROMPT",
-                    "old_snippet": "【调查规则】\n1. primary 是唯一归因对象",
-                    "new_snippet": "【调查规则】\n1. primary 是唯一归因对象\n2. 强制列出板块清单",
-                },
+            },
+            "patch": {
+                "target_symbol": "REVIEW_PROMPT",
+                "old_snippet": "【调查规则】\n1. primary 是唯一归因对象",
+                "new_snippet": "【调查规则】\n1. primary 是唯一归因对象\n2. 强制列出板块清单",
             },
             "score": 0.7,
         },
