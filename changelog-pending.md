@@ -1,5 +1,12 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-13 — 迭代辩论裁决修复（P0+P1）
+- 回放隔离：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放拒绝 + 源模块双绑定
+- 评分体系：重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；删除 Tavily 死代码与"指数neutral"兜底
+- 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘
+- 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30/17:00）+ status=complete 检查
+- 收尾：Task 15 文档更新（README 迭代闭环章节 + AGENTS iterate 节）+ 全量回归 + 本记录提交
+
 ## 2026-08-13 — 迭代辩论裁决修复 Task 14（产片接线 + 双 job 错峰，D16/F4/N6）
 
 - `src/aistock_agent/config.py`：① `iterate_cron` 默认值 `"0 16 * * 1-5"` → `"0 17 * * 1-5"`（消费/报告 17:00，错开 16:00 prediction_validate，F4）；② 新增 `iterate_case_build_cron: str = "30 16 * * 1-5"`（产片 16:30，收盘快照 15:35 之后）

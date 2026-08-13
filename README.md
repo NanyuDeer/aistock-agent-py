@@ -565,7 +565,7 @@ docker run -p 8080:8080 --env-file .env aistock-agent
 ## 迭代 Agent 自动闭环
 
 - 模块：`src/aistock_agent/iterate/`（adapters/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
-- 机制：历史切片（T 窗口固化）→ 标准答案（tavily + 置信度）→ 变体实验（git 恢复基线 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3）
+- 机制：历史切片（T 窗口固化）→ 数据约束标准答案（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）→ 变体实验（目标区域补丁 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3，重归一化）+ iterated.json 去重
 - 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
-- 触发：交易日 16:00 自动（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
+- 触发：交易日 16:30 产片 + 17:00 消费/报告（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
 - 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter` 即可
