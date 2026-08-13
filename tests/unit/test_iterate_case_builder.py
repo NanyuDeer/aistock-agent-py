@@ -198,6 +198,10 @@ def test_list_pending_cases_uses_mark_not_experiments(iterate_data_dir: object) 
 
     data = _Path(iterate_data_dir)  # type: ignore[arg-type]
     (data / "cases" / "review").mkdir(parents=True, exist_ok=True)
+    # 清理 fixture 分发的既有切片（case_20260731_us_market_surge，无标记 → 也在
+    # pending），使下方精确集合断言不受 fixture 数据干扰（Task 12 Fix Round）
+    for leftover in (data / "cases" / "review").glob("*.json"):
+        leftover.unlink()
     (data / "cases" / "review" / "case_marked.json").write_text(
         _json.dumps({"case_id": "case_marked", "agent_id": "review"}), encoding="utf-8"
     )
@@ -213,8 +217,10 @@ def test_list_pending_cases_uses_mark_not_experiments(iterate_data_dir: object) 
         shutil.rmtree(exps)
 
     pending = list_pending_cases()
-    assert "case_pending" in pending
-    assert "case_marked" not in pending  # 标记文件仍在 → 不重跑
+    # 精确集合断言（Task 12 Fix Round）：若 list_cases 不排除 .iterated 标记文件，
+    # case_marked.iterated 会冒充 phantom id 进入 pending（is_iterated 查不到它的
+    # 标记文件）→ 本断言变红，保证"排除逻辑被移除"可被测试区分
+    assert set(pending) == {"case_pending"}  # 标记文件仍在 → 只 case_pending 待跑
 
 
 def test_migrate_iterated_marks_is_idempotent(iterate_data_dir: object) -> None:
@@ -236,3 +242,27 @@ def test_migrate_iterated_marks_is_idempotent(iterate_data_dir: object) -> None:
     (data / "experiments" / "case_old_r2.json").write_text("{}", encoding="utf-8")
     migrate_iterated_marks()
     assert is_iterated("case_old")
+
+
+def test_list_cases_excludes_iterated_marks(iterate_data_dir: object) -> None:
+    """D13 自审修复回归：{case_id}.iterated.json 标记文件不得冒充切片 id。
+
+    标记文件与切片同处 data/cases/ 且 stem 以 case_ 开头（case_real.iterated），
+    若 list_cases 不排除 .iterated 后缀，会被当作待迭代切片进入 pending，
+    调度器 load_case 将对其抛 FileNotFoundError（错误日志 + 浪费每日额度）。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    data = _Path(iterate_data_dir)  # type: ignore[arg-type]
+    (data / "cases" / "review").mkdir(parents=True, exist_ok=True)
+    (data / "cases" / "review" / "case_real.json").write_text(
+        _json.dumps({"case_id": "case_real", "agent_id": "review"}), encoding="utf-8"
+    )
+    mark_iterated("case_real")  # 与生产同路径生成 data/cases/case_real.iterated.json
+
+    ids = list_cases()
+    assert "case_real" in ids  # 切片本身照常列出
+    assert "case_real.iterated" not in ids  # 标记文件不得冒充切片 id
+    # case_real 前缀范围内精确集合：只映射到切片本身（"只含 case_real"）
+    assert {cid for cid in ids if cid.startswith("case_real")} == {"case_real"}

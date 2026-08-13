@@ -32,11 +32,16 @@ async def test_run_iterate_daily_skips_non_trading_day() -> None:
 @pytest.mark.asyncio
 async def test_run_iterate_daily_consumes_only_pending_cases(iterate_data_dir: object) -> None:
     """I4/D13 回归：已写 iterated.json 标记的案例不再被重复迭代（去重）。"""
-    from aistock_agent.iterate.case_builder import mark_iterated
+    from aistock_agent.iterate.case_builder import list_pending_cases, mark_iterated
     from aistock_agent.iterate.scheduler import _run_iterate_daily_task
 
     case_id = "case_20260731_us_market_surge"
     mark_iterated(case_id)
+    # Task 12 Fix Round：调度器消费的 pending 集合不得含 .iterated phantom id。
+    # 排除逻辑被移除时，标记文件 stem（case_id.iterated）会冒充切片 id 混入 pending，
+    # 且其 load_case 能命中标记文件自身、agent_id KeyError 又被 run_case 的 try/except
+    # 吞掉 → mock_run 仍不被 await，既有断言静默通过——必须显式锁定此断言才有区分力。
+    assert not any(cid.endswith(".iterated") for cid in list_pending_cases())
     with patch(
         "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
     ), patch(
