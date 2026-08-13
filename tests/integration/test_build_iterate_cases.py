@@ -96,6 +96,89 @@ async def test_build_review_case_end_to_end(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_review_case_rejects_insufficient_snapshot(tmp_path: Path) -> None:
+    """空壳快照（a_share 无数据）拒绝产片，避免空壳 case 进闭环浪费 LLM。
+
+    回归：case_20260731_us_market_surge 服务器全 0 分事故根因之一是产片
+    链路对快照数据完整性零检查——Node 返回 status=complete 但 indexes 等
+    字段缺失时，normalize_a_share 不校验照样产片，空壳 case 进闭环跑满
+    max_rounds 全部 0 分。force=False 时必须在 build_case 之前拒绝。
+    """
+    snapshot_dict = {
+        "snapshot_id": "trace-20260731-empty",
+        "trade_date": "2026-07-31",
+        "captured_at": "2026-07-31T15:35:00+08:00",
+        "a_share": {},
+        "sources": {},
+        "missing_fields": ["a_share.indexes", "cls_news", "global_markets"],
+        "data_availability": {},
+        "collection_status": {},
+        "phenomenon_discovery": {
+            "status": "insufficient_data",
+            "primary": None,
+            "concurrent_phenomena": [],
+            "data_readiness": {
+                "market_data": "incomplete",
+                "attribution_inputs": "missing",
+                "causal_evidence": "not_ready",
+            },
+            "diagnostics": [],
+        },
+    }
+    snapshot = SimpleNamespace(
+        trade_date="2026-07-31",
+        captured_at=datetime(2026, 7, 31, 15, 35, tzinfo=UTC),
+        phenomenon_discovery=SimpleNamespace(status="insufficient_data", primary=None),
+        model_dump=lambda mode: snapshot_dict,  # type: ignore[misc]
+    )
+    with pytest.raises(RuntimeError, match="数据不足"):
+        await build_review_case(snapshot=snapshot, data_dir=tmp_path, force=False)
+    # 拒绝产片后不应留下 case / GT 文件
+    assert list(tmp_path.glob("cases/*.json")) == []
+    assert list(tmp_path.glob("ground_truths/*.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_build_review_case_force_bypasses_sufficiency_check(tmp_path: Path) -> None:
+    """force=True 跳过数据完整性检查（手动强制产片/测试用）。"""
+    snapshot_dict = {
+        "snapshot_id": "trace-20260731-empty",
+        "trade_date": "2026-07-31",
+        "captured_at": "2026-07-31T15:35:00+08:00",
+        "a_share": {},
+        "sources": {},
+        "missing_fields": ["a_share.indexes", "cls_news", "global_markets"],
+        "data_availability": {},
+        "collection_status": {},
+        "phenomenon_discovery": {
+            "status": "insufficient_data",
+            "primary": None,
+            "concurrent_phenomena": [],
+            "data_readiness": {
+                "market_data": "incomplete",
+                "attribution_inputs": "missing",
+                "causal_evidence": "not_ready",
+            },
+            "diagnostics": [],
+        },
+    }
+    snapshot = SimpleNamespace(
+        trade_date="2026-07-31",
+        captured_at=datetime(2026, 7, 31, 15, 35, tzinfo=UTC),
+        phenomenon_discovery=SimpleNamespace(status="insufficient_data", primary=None),
+        model_dump=lambda mode: snapshot_dict,  # type: ignore[misc]
+    )
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content='{"drivers": []}')
+        )
+        result = await build_review_case(
+            snapshot=snapshot, data_dir=tmp_path, force=True  # type: ignore[arg-type]
+        )
+    assert result["case_id"].startswith("case_20260731")
+
+
+@pytest.mark.asyncio
 async def test_build_event_cases_end_to_end(tmp_path: Path) -> None:
     """event 全链路：电报事件 → build_case → GT。"""
     event = {
