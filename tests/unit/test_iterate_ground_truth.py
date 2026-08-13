@@ -135,3 +135,27 @@ async def test_driver_fallback_is_empty_not_index_neutral(iterate_data_dir: obje
         )
         gt = await generate_data_constrained_gt(case)
     assert gt["attribution"]["drivers"] == []
+
+
+"""T7 M1: corpus 字段写入测试（钉住 generate_data_constrained_gt 写入 corpus）"""
+
+
+@pytest.mark.asyncio
+async def test_generate_data_constrained_gt_writes_corpus(tmp_path: Path) -> None:
+    """generate_data_constrained_gt 必须将切片语料写入 attribution.corpus 字段，
+    供 evaluator judge 引用机械核验（N5 修复链路闭环）。
+
+    corpus 来源：_corpus_text 从 window_before.cls_telegraph + global_markets 拼接。
+    """
+    llm_payload = {"drivers": ["隔夜美股暴涨", "外盘传导"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content=json.dumps(llm_payload, ensure_ascii=False))
+        )
+        gt = await generate_data_constrained_gt(_case(), data_dir=tmp_path)
+
+    attribution = cast("dict[str, object]", gt["attribution"])
+    corpus = cast("str", attribution["corpus"])
+    assert corpus  # 非空
+    assert "隔夜美股暴涨" in corpus  # 含电报标题
+    assert "纳斯达克涨2.5%" in corpus  # 含电报内容

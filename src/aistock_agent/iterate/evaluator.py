@@ -86,7 +86,7 @@ async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object
     # 驱动维：truth 非空才参与
     truth_drivers = _as_str_list(attribution.get("drivers"))
     if truth_drivers:
-        corpus = str(attribution.get("corpus", ""))
+        corpus = attribution.get("corpus") or ""
         drivers_score = await _driver_hit_score(
             truth_drivers, extracted.get("drivers", []), corpus=corpus
         )

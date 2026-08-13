@@ -137,7 +137,7 @@ async def test_build_case_rejects_post_event_snapshot(iterate_data_dir: object) 
     t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
     adapter = get_adapter("review")
     # trade_date=2026-08-01 > event_time 日期 2026-07-31 → 拒绝
-    with pytest.raises(ValueError, match="trade_date"):
+    with pytest.raises(ValueError, match="晚于 event_time"):
         await build_case(
             adapter,
             event_title="test",
@@ -160,6 +160,23 @@ async def test_build_case_accepts_same_day_snapshot(iterate_data_dir: object) ->
         market_snapshot=_snapshot_with_trade_date("2026-07-31"),
     )
     assert case["case_id"]
+
+
+@pytest.mark.asyncio
+async def test_empty_trade_date_rejected(iterate_data_dir: object) -> None:
+    """空字符串 trade_date 必须被拒绝（T4 M1：删除 and trade_date guard 前空串绕过校验）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    snap = dict(_valid_snapshot())
+    snap["trade_date"] = ""  # captured_at 保持有效值，确保 schema 验证通过后到达时序断言
+    with pytest.raises(ValueError, match="非法"):
+        await build_case(
+            adapter,
+            event_title="test",
+            event_time=t,
+            telegraph_records=[],
+            market_snapshot=snap,
+        )
 
 
 @pytest.mark.asyncio

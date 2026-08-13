@@ -50,6 +50,10 @@ class WSEventType:
     REASONING = "reasoning"        # AI 思考文本（流式 chunk） → 新增此行
     DONE = "done"
     ERROR = "error"
+    # Phase 4-2（改进 13）：交互式确认——阶段 1 终态负载（替代 DONE，服务端 → 客户端）
+    CONFIRM_REQUEST = "confirm_request"
+    # 客户端 → 服务端控制消息（对齐 stop 协议：request_id 回带 + choice 点选）
+    CONFIRM_RESPONSE = "confirm_response"
 
 
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐

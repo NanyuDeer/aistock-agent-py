@@ -19,6 +19,7 @@ from aistock_agent.prompts.general.system import (
     ACTION_KEYWORDS,
     PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
+    RISK_DISCLAIMER_CONSERVATIVE,
     RISK_DISCLAIMER_STRONG,
 )
 from aistock_agent.schemas.chat_contract import (
@@ -31,7 +32,9 @@ from aistock_agent.schemas.chat_contract import (
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
 from aistock_agent.services.token_usage import get_token_usage
+from aistock_agent.skills.prediction import DISCLAIMER
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.date import (
     prev_trading_day,
     shanghai_today,
@@ -71,17 +74,22 @@ class _SectionResult:
     degraded: bool = False
 
 
-async def _synth_section(goal: InsightGoal, evidences: list[Evidence]) -> _SectionResult:
+async def _synth_section(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    summary_context: str = "",
+) -> _SectionResult:
     """单节综合回答（多子目标分节复用）：复用现状 LLM 流程与契约。
 
     与单意图路径的差异：不含风险段/非交易时段提示/AnswerTrace（多节外层统一处理）。
     LLM 失败 → facts 拼接降级（不抛异常，"永不 500"铁律）。
+    summary_context 为 Phase 5 长会话摘要段（短会话空串，由 _synth_multi_goal 统一传入）。
     """
     mode = _infer_answer_mode(goal, evidences)
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
         basis, basis_error = _resolve_basis_indices(raw.basis_indices, evidences)
@@ -120,17 +128,59 @@ def _subgoal_to_goal(sg: SubGoal) -> InsightGoal:
 def _build_predict_section(
     sg: SubGoal, evidences: list[Evidence], include_hint: bool
 ) -> str:
-    """D35：预测子目标节——固定降级提示 + 当前趋势要点（facts 拼接，零 LLM）。"""
-    lines = [f"## {sg.question}"]
-    if include_hint:
-        lines.append(PREDICT_DEGRADED_HINT)
-    trend_evs = [ev for ev in evidences if ev.goal_id == sg.id]
-    facts: list[str] = []
+    """predict 子目标节：三段式渲染（现状趋势 + 影响持续性推演 + 免责声明）。
+
+    - prediction Evidence 存在且非 degraded → 三段式（零 LLM，facts 拼接）：
+      ① 现状趋势：复用同子目标 validate facts（goal_id == sg.id，既有逻辑）；
+      ② 影响持续性推演：渲染 prediction facts（跳过首行【…现状】输入上下文，
+         三档/置信度/演化/风险/低置信提示原样保留，免责声明去重）；
+      ③ 免责声明：由 _synth_multi_goal 合并各节后统一追加恰好一次（A1②），
+         本节不再各自追加（多 predict 子目标不再各节重复）。
+    - Evidence 缺失或 degraded → 维持 D35 降级提示（PREDICT_DEGRADED_HINT）+ 趋势要点。
+    - 定位规则：仅按 skill_name=="prediction"（prediction skill 恒设置该名；不按 goal_id
+      兜底——关键词兜底 compose 路径的 predict 子目标 g2 可能携带 goal_id="g2" 的
+      validate 证据但无 prediction call，按 goal_id 兜底会误标推演）。
+    """
+    pred_ev = next(
+        (ev for ev in evidences if ev.skill_name == "prediction" and not ev.degraded),
+        None,
+    )
+
+    trend_evs = [
+        ev
+        for ev in evidences
+        if ev.goal_id == sg.id and ev.skill_name != "prediction"
+    ]
+    trend_facts: list[str] = []
     for ev in trend_evs:
-        facts.extend(ev.facts)
-    if facts:
+        trend_facts.extend(ev.facts)
+
+    if pred_ev is None:
+        # D35 降级路径（字节不变）：固定降级提示 + 当前趋势要点
+        lines = [f"## {sg.question}"]
+        if include_hint:
+            lines.append(PREDICT_DEGRADED_HINT)
+        if trend_facts:
+            lines.append("当前趋势要点：")
+            lines.extend(f"- {f}" for f in trend_facts[:10])
+        return "\n\n".join(lines)
+
+    # 三段式：① 现状趋势（同子目标 validate facts，既有逻辑）
+    lines = [f"## {sg.question}"]
+    if trend_facts:
         lines.append("当前趋势要点：")
-        lines.extend(f"- {f}" for f in facts[:10])
+        lines.extend(f"- {f}" for f in trend_facts[:10])
+    # ② 影响持续性推演：prediction facts 跳过首行【…现状】输入上下文；免责声明去重
+    pred_facts = pred_ev.facts
+    if pred_facts and "现状】" in pred_facts[0]:
+        pred_facts = pred_facts[1:]
+    pred_facts = [f for f in pred_facts if f != DISCLAIMER]
+    if pred_facts:
+        lines.append("影响持续性推演：")
+        # skill 的三档行自带 "- " 前缀，归一化避免双子弹
+        lines.extend(
+            f"- {f[2:]}" if f.startswith("- ") else f"- {f}" for f in pred_facts
+        )
     return "\n\n".join(lines)
 
 
@@ -139,19 +189,29 @@ async def _synth_multi_goal(
     goal: InsightGoal,
     evidences: list[Evidence],
     goals: list[SubGoal],
+    summary_context: str = "",
 ) -> dict[str, Any]:
     """D34 多子目标分节回答（先 validate/trace 现状数据，后 predict 提示）。
 
     - 非 predict 子目标各一次 deep_think（复用 _synth_section，LLM 契约零变化）；
     - predict 子目标代码生成 D35 提示段（多个只输出一次），附同子目标 validate 趋势要点；
     - 全文末尾单次 D28 风险段；非交易时段提示按全量 evidence 判断一次、置于文首。
+    - summary_context 为 Phase 5 长会话摘要段（由 synth_answer 核心入口统一重算传入，
+      短会话空串 → 各节 prompt 字节不变；不读 state.messages_summary 防跨轮残留）。
     """
     import time
 
     start = time.monotonic()
     metrics = get_metrics_collector()
 
-    non_predict = [g for g in goals if g.dimension != "predict"]
+    # Phase 4-3（改进 15）：从 user_profile 提取个性化参数（None/缺字段 → 零行为变化）
+    _profile = state.get("user_profile") or {}
+    risk_tolerance = _profile.get("risk_tolerance")
+    investment_preferences = _profile.get("investment_preferences")
+
+    non_predict = _sort_goals_by_preferences(
+        [g for g in goals if g.dimension != "predict"], investment_preferences
+    )
     predict = [g for g in goals if g.dimension == "predict"]
     sections: list[str] = []
     basis: list[Evidence] = []
@@ -160,7 +220,9 @@ async def _synth_multi_goal(
     mode: str = "predict"
     for sg in non_predict:
         sg_evs = [ev for ev in evidences if ev.goal_id == sg.id]
-        res = await _synth_section(_subgoal_to_goal(sg), sg_evs)
+        res = await _synth_section(
+            _subgoal_to_goal(sg), sg_evs, summary_context=summary_context
+        )
         if res.degraded:
             any_degraded = True
         sections.append(f"## {sg.question[:40]}\n\n{res.conclusion}")
@@ -178,8 +240,16 @@ async def _synth_multi_goal(
         )
         any_degraded = True
     combined = "\n\n".join(sections)
-    # D28：风险段全文单次（去重）
-    combined = _append_risk_disclaimer(combined, strong=_contains_action_word(goal.question))
+    # A1②：免责声明合并后统一追加恰好一次（多 predict 子目标不再各节重复；
+    # predict 按 dimension=="predict" 过滤（上方）；追加位置在预测段之后、D28 风险段之前）
+    if predict and DISCLAIMER not in combined:
+        combined = f"{combined}\n\n{DISCLAIMER}"
+    # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
+    combined = _append_risk_disclaimer(
+        combined,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
+    )
     # 非交易时段提示：按全量 evidence 判断一次、置于文首
     combined = _append_non_trading_time_hint(combined, evidences)
 
@@ -311,8 +381,13 @@ def _resolve_basis_indices(
     return basis, None
 
 
-def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> str:
-    """构建综合回答 prompt。"""
+def _build_prompt(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    summary_context: str = "",
+) -> str:
+    """构建综合回答 prompt（summary_context 为 Phase 5 长会话摘要段，短会话为空串）。"""
     evidence_text = "\n".join(
         f"[{i+1}] skill={ev.skill_name} degraded={ev.degraded} reason={ev.degraded_reason}\n"
         f"    facts: {ev.facts}\n"
@@ -320,7 +395,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
         f"    as_of: {ev.as_of.isoformat()}"
         for i, ev in enumerate(evidences)
     )
-    return f"""{_MODE_PROMPTS[mode]}
+    return f"""{_MODE_PROMPTS[mode]}{summary_context}
 
 结构化输出要求（针对 conclusion 字段，必须遵守）：
 1. 使用 Markdown 分节组织回答，推荐结构：
@@ -441,7 +516,11 @@ def _append_non_trading_day_hint(conclusion: str, evidences: list[Evidence]) -> 
 
 
 def _build_degraded_insight(
-    goal: InsightGoal, evidences: list[Evidence], mode: str, reason: str
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    reason: str,
+    risk_tolerance: str | None = None,
 ) -> Insight:
     """解析失败兜底：降级 validate + 结构化拼接 Evidence.facts + confidence=low。
     conclusion 按"核心结论/行情要点/数据说明"分节，即使降级也给出可用事实，
@@ -468,8 +547,11 @@ def _build_degraded_insight(
             "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
+    # Phase 4-3：conservative 档优先级高于 strong（risk_tolerance 由调用方传入）
     conclusion = _append_risk_disclaimer(
-        conclusion, strong=_contains_action_word(goal.question)
+        conclusion,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
     )
     # 非交易时段统一提示（2026-08-03 规范扩展）：5 种时段状态 + 行情类降级时提示
     conclusion = _append_non_trading_time_hint(conclusion, evidences)
@@ -487,19 +569,50 @@ def _contains_action_word(text: str) -> bool:
     return any(kw in text for kw in ACTION_KEYWORDS)
 
 
-def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
+def _append_risk_disclaimer(
+    conclusion: str, *, strong: bool = False, risk_tolerance: str | None = None
+) -> str:
     """在 conclusion 末尾强制追加风险段（去重：已含则跳过，纯字符串拼接）。
 
     D28：风险提示不依赖 LLM 自由裁量，由代码保证结论必含风险段。
     strong=True 时用强提示（用户问题含动作词，如"能买吗"）。
+    Phase 4-3（改进 15）：risk_tolerance=conservative 时用保守档强化提示
+    （优先级高于 strong 档；无 profile 时维持既有两档行为，字节不变）。
     """
-    disclaimer = RISK_DISCLAIMER_STRONG if strong else RISK_DISCLAIMER
-    if disclaimer in conclusion:
-        return conclusion
-    # 已含另一档风险段时不重复叠加
-    if RISK_DISCLAIMER_STRONG in conclusion or RISK_DISCLAIMER in conclusion:
+    if risk_tolerance == "conservative":
+        disclaimer = RISK_DISCLAIMER_CONSERVATIVE
+    elif strong:
+        disclaimer = RISK_DISCLAIMER_STRONG
+    else:
+        disclaimer = RISK_DISCLAIMER
+    # 已含任一档风险段时不重复叠加（三档互斥去重）
+    if any(
+        d in conclusion
+        for d in (RISK_DISCLAIMER, RISK_DISCLAIMER_STRONG, RISK_DISCLAIMER_CONSERVATIVE)
+    ):
         return conclusion
     return f"{conclusion}\n\n{disclaimer}"
+
+
+def _sort_goals_by_preferences(
+    goals: list[SubGoal], preferences: list[str] | None
+) -> list[SubGoal]:
+    """Phase 4-3（改进 15）：多子目标按用户投资偏好重排（偏好命中前置）。
+
+    - 偏好命中判定：偏好词是子目标 question 的子串；
+    - 稳定排序：未命中子目标保持原相对顺序，全部未命中 → 原序（字节不变）；
+    - 仅调整渲染顺序，不改变 evidence 的 goal_id 关联（证据约束不变）。
+    """
+    prefs = [p for p in (preferences or []) if isinstance(p, str) and p.strip()]
+    if not prefs:
+        return goals
+
+    def rank(g: SubGoal) -> int:
+        question = g.question or ""
+        hits = [i for i, p in enumerate(prefs) if p in question]
+        return -hits[0] if hits else len(prefs)
+
+    return sorted(goals, key=rank)
 
 
 # P11（线 3）：cards 汇总（spec §3.2）。按 skill_name 分派，逐卡片 try-except，
@@ -686,6 +799,15 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     metrics = get_metrics_collector()
     goal: InsightGoal | None = state.get("goal")
     evidences: list[Evidence] = state.get("evidences", [])
+    # Phase 4-3（改进 15）：user_profile 个性化参数（None/缺字段 → 零行为变化）
+    risk_tolerance = (state.get("user_profile") or {}).get("risk_tolerance")
+
+    # Phase 4-2（改进 13）：confirm 短路——qa_router 触发交互式确认时，不渲染、
+    # 不调 LLM，直接把 confirm 负载透出（ws.py 据此转 confirm_request 终态负载）。
+    # 位于澄清短路/缺 goal 检查之前：confirm 分支不需要 goal/evidences，恒有
+    # state["confirm"]（qa_router 触发分支保证）。
+    if state.get("confirm"):
+        return {"final_response": "", "confirm": state["confirm"]}
 
     if goal is None:
         logger.error("synth_answer.no_goal")
@@ -697,6 +819,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
                 evidences,
                 "validate",
                 "missing goal",
+                risk_tolerance,
             ),
             "final_response": "内部错误：缺少目标",
             "trace": None,
@@ -763,9 +886,12 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
         final_response = state.get("final_response", "")
         if not final_response:
             final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
-        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示）
+        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示；
+        # Phase 4-3：conservative 档优先）
         processed = _append_risk_disclaimer(
-            final_response, strong=_contains_action_word(goal.question)
+            final_response,
+            strong=_contains_action_word(goal.question),
+            risk_tolerance=risk_tolerance,
         )
         # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
         report_id = await _persist_chat_analysis(
@@ -811,8 +937,15 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
     # 与 deep 分支互斥（多意图 compose 保持 light，不升级 escalate）。
     goals = state.get("goals")
+    # Phase 5（Task 1 + review 修复）：从当前 messages 重算确定性摘要（纯函数幂等），
+    # 单意图与多子目标两条 LLM 路径统一注入同一 summary_context。不读
+    # state.messages_summary——跨轮残留场景（Phase 4-2 confirm 阶段 2 重跑把 messages
+    # 重置为 []，checkpointer 保留上一轮超窗摘要）会注入陈旧摘要；统一重算，
+    # 短会话 → summary None → 空串，prompt 字节不变。
+    _, summary = trim_messages(list(state.get("messages", [])))
+    summary_context = build_summary_context(summary)
     if goals:
-        return await _synth_multi_goal(state, goal, evidences, goals)
+        return await _synth_multi_goal(state, goal, evidences, goals, summary_context)
 
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
@@ -820,7 +953,9 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        # Phase 5（Task 1）：注入超窗确定性摘要（入口已统一从当前 messages 重算）。
+        # 短会话 → 空串，prompt 字节不变。
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
 
@@ -842,10 +977,13 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
                 expected=mode,
                 actual=raw.answer_mode,
             )
-        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量）
+        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量；
+        # Phase 4-3：conservative 档优先于 strong）
         insight = Insight(
             conclusion=_append_risk_disclaimer(
-                raw.conclusion, strong=_contains_action_word(goal.question)
+                raw.conclusion,
+                strong=_contains_action_word(goal.question),
+                risk_tolerance=risk_tolerance,
             ),
             basis=basis,
             confidence=raw.confidence,
@@ -880,7 +1018,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
 
     except Exception as exc:
         logger.warning("synth_answer.failed", err=str(exc), exc_info=True)
-        insight = _build_degraded_insight(goal, evidences, mode, str(exc))
+        insight = _build_degraded_insight(goal, evidences, mode, str(exc), risk_tolerance)
         trace = AnswerTrace(
             goal=goal,
             plan=state.get("plan", "direct"),

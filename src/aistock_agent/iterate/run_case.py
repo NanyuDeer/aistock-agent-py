@@ -48,6 +48,11 @@ async def run_case(
     limit = max_rounds or settings.iterate_max_rounds
     root = Path(repo_root) if repo_root else _default_repo_root()
 
+    # T10 Q1 修复：清理上次运行残留的实验记录，防止跨运行 r*.json 污染 best.json。
+    # 同一 case 多次运行时，旧 r*.json 会被 _recompute_best 纳入重算，
+    # 可能选中上次运行的高分记录写入 best.json（与本次运行不一致）。
+    _cleanup_stale_experiments(case_id)
+
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
     stalled = 0  # D4/N3：δ 校准前禁用 no_improvement 终止，仅观测计数
@@ -66,8 +71,31 @@ async def run_case(
         if round_no == 1:
             variant = None
             # 基线：直接回放评估（无变体）
-            record = await _run_baseline(adapter.agent_id, case_id, ground_truth)
-            score = record["score_detail_obj"]
+            # T11 M3 修复：基线轮纳入 try/except——returncode=0 但输出非 JSON 时
+            # _run_replay_subprocess 抛 RuntimeError，原代码不在 try/except 内会崩整个闭环。
+            try:
+                record = await _run_baseline(adapter.agent_id, case_id, ground_truth)
+                score = record["score_detail_obj"]
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "iterate_baseline_failed",
+                    case_id=case_id,
+                    round=round_no,
+                    error=str(exc),
+                )
+                score = ScoreDetail(
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    gap_analysis=f"回放子进程异常：{exc}",
+                )
+                record = {
+                    "score": 0.0,
+                    "score_detail_obj": score,
+                    "gap_analysis": score.gap_analysis,
+                    "is_failure": True,
+                }
         else:
             try:
                 variant = await generate_variant(
@@ -95,6 +123,7 @@ async def run_case(
                         "score": 0.0,
                         "score_detail_obj": score,
                         "gap_analysis": score.gap_analysis,
+                        "is_failure": True,
                     }
                 else:
                     record = await run_experiment_round(
@@ -121,6 +150,7 @@ async def run_case(
                     "score": 0.0,
                     "score_detail_obj": score,
                     "gap_analysis": score.gap_analysis,
+                    "is_failure": True,
                 }
 
         detail = score if isinstance(score, ScoreDetail) else None
@@ -128,14 +158,18 @@ async def run_case(
 
         # N3/F1 修复：失败轮不计入 rounds、不更新 best、不计入 stalled
         # （不触发"连续两轮无改善"误终止）；全部失败轮类型（回放超时/子进程失败/
-        # 轮级异常/补丁空写）统一递增 infra_failures，连续 3 次中止 case（防无限空转）。
-        # 置于 rounds.append/best 更新之前，保证失败轮零痕迹。
-        if getattr(score, "gap_analysis", "").startswith(("回放子进程", "变体轮异常")):
+        # 轮级异常/补丁空写/基线异常）统一递增 infra_failures，连续 3 次中止 case。
+        # T11 M1 修复：失败轮判定改用 record["is_failure"] 显式标记，
+        # 替代 gap_analysis 字符串前缀魔法耦合（run_case 与 _recompute_best 需同步前缀约定）。
+        # T11 M2 修复：infra_failures 是连续计数——成功轮重置为 0（散布失败不中止）。
+        if record.get("is_failure", False):
             infra_failures += 1
             if infra_failures >= 3:
                 stopped_reason = "infra_failures"
                 break
             continue
+
+        infra_failures = 0  # T11 M2：连续计数——成功轮重置
 
         rounds.append(
             {
@@ -201,13 +235,36 @@ async def run_case(
     }
 
 
+def _cleanup_stale_experiments(case_id: str) -> None:
+    """清理上次运行残留的实验记录（T10 Q1）。
+
+    删除 data/experiments/{case_id}_r*.json（含 _r1_baseline 和 _best），
+    防止跨运行残留记录被 _recompute_best 纳入重算污染 best.json。
+    """
+    root = get_data_dir() / "experiments"
+    if not root.exists():
+        return
+    for p in root.glob(f"{case_id}_r*.json"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    best = root / f"{case_id}_best.json"
+    if best.exists():
+        try:
+            best.unlink()
+        except OSError:
+            pass
+
+
 def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
     """从 data/experiments/{case_id}_r*.json 记录重算 best 轮补丁。
 
     返回 best 轮的 patch 规格；无任何有效实验记录返回 None（best.json 不写）。
-    Important-1（final review）：失败轮记录（gap 前缀"回放子进程"/"变体轮异常"）
-    不入 best 候选——其 score=0.0 且 patch 是未应用的 LLM 规格，写入 best.json
-    会误导合入；非数值 score 记录跳过（float() 不抛 ValueError 中断 run_case）。
+    Important-1（final review）：失败轮记录（is_failure=true）不入 best 候选——
+    其 score=0.0 且 patch 是未应用的 LLM 规格，写入 best.json 会误导合入；
+    非数值 score 记录跳过（float() 不抛 ValueError 中断 run_case）。
+    T11 M1 修复：失败轮判定改用 is_failure 显式标记，替代 gap_analysis 前缀约定。
     """
     root = get_data_dir() / "experiments"
     if not root.exists():
@@ -218,8 +275,8 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
             record = json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        # 失败轮不入 best 候选（与 run_case 内存失败轮判定同前缀约定）
-        if str(record.get("gap_analysis", "")).startswith(("回放子进程", "变体轮异常")):
+        # 失败轮不入 best 候选（T11 M1：按 is_failure 标记过滤）
+        if record.get("is_failure", False):
             continue
         try:
             score = float(cast("float", record.get("score", 0.0)))
@@ -259,6 +316,7 @@ async def _run_baseline(
         return {
             **{"score": 0.0, "score_detail_obj": score, "gap_analysis": score.gap_analysis},
             "variant": {"type": "baseline", "files": [], "instructions": ""},
+            "is_failure": True,
         }
     score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
     record: dict[str, object] = {
@@ -276,6 +334,7 @@ async def _run_baseline(
         "duration_ms": 0,
         "variant_hash": _content_hash({}),
         "created_at": _now_iso_date(),
+        "is_failure": False,
     }
     path = get_data_dir() / "experiments" / f"{case_id}_r1_baseline.json"
     path.parent.mkdir(parents=True, exist_ok=True)

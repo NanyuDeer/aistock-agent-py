@@ -522,3 +522,258 @@ async def test_run_case_all_failed_does_not_write_best_file(
     assert (exps / f"{case['case_id']}_r2.json").exists()  # 失败轮记录仍落盘（事实陈述）
     best_path = exps / f"{case['case_id']}_best.json"
     assert not best_path.exists()  # 失败轮未应用补丁不得写入 best.json
+
+
+"""T11 M3/M1/M2/M4 修复：基线轮兜底 + 失败轮显式标记 + 连续计数 + LLM 不评估加固"""
+
+
+def _setup_case_and_gt(iterate_data_dir: object) -> dict[str, object]:
+    """共用 fixture 写入：case + gt 到 iterate_data_dir。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    case_dir = Path(iterate_data_dir) / "cases" / "review"  # type: ignore[arg-type]
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / f"{case['case_id']}.json").write_text(
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+    return case
+
+
+@pytest.mark.asyncio
+async def test_baseline_runtime_error_does_not_crash_loop(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """基线轮 _run_replay_subprocess 抛 RuntimeError（returncode=0 但输出非 JSON）时，
+    不崩溃整个闭环——基线轮计为失败轮，max_rounds=1 下以 max_rounds 终止。
+
+    T11 M3 修复前：基线轮不在 try/except 内，RuntimeError 直接传播导致 run_case 崩溃。
+    """
+    case = _setup_case_and_gt(iterate_data_dir)
+
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(side_effect=RuntimeError("replay subprocess bad output")),
+    ):
+        with patch(
+            "aistock_agent.iterate.run_case.restore_baseline",
+            side_effect=lambda *a, **k: _real_restore(*a, **k),
+        ):
+            result = await run_case(
+                "review", str(case["case_id"]), max_rounds=1, repo_root=str(tmp_path)
+            )
+
+    assert result["stopped_reason"] == "max_rounds"
+    assert result["best_round"] == 0  # baseline failure → best stays at initial
+    assert result["rounds"] == []  # failure round not counted
+
+
+@pytest.mark.asyncio
+async def test_failed_round_records_have_is_failure_marker(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """失败轮实验记录含 is_failure=true（T11 M1：替代 gap_analysis 字符串前缀魔法耦合）。
+
+    _recompute_best 按 is_failure 过滤，不再依赖 gap_analysis 前缀约定。
+    """
+    from aistock_agent.iterate.case_builder import get_data_dir
+
+    case = _setup_case_and_gt(iterate_data_dir)
+
+    extract_payload = {"direction": "bullish", "drivers": ["隔夜美股暴涨"], "sectors": ["半导体"]}
+    judge_payload = {"hit_count": 1, "total_count": 1, "quotes": ["隔夜美股暴涨"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+            ]
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(
+                side_effect=[
+                    {"final_response": "x"},  # r1 baseline success
+                    {"final_response": "", "subprocess_failed": True},  # r2 fail
+                    {"final_response": "", "subprocess_failed": True},  # r3 fail
+                    {"final_response": "", "subprocess_failed": True},  # r4 fail → infra
+                ]
+            ),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                with patch(
+                    "aistock_agent.iterate.run_case.apply_variant",
+                    return_value=[tmp_path / "variant.md"],
+                ):
+                    result = await run_case(
+                        "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                    )
+
+    assert result["stopped_reason"] == "infra_failures"
+    # r2 失败轮落盘记录必须含 is_failure=true
+    r2_path = get_data_dir() / "experiments" / f"{case['case_id']}_r2.json"
+    assert r2_path.exists()
+    r2_record = json.loads(r2_path.read_text(encoding="utf-8"))
+    assert r2_record.get("is_failure") is True
+    # r1 基线成功记录必须含 is_failure=false
+    r1_path = get_data_dir() / "experiments" / f"{case['case_id']}_r1_baseline.json"
+    assert r1_path.exists()
+    r1_record = json.loads(r1_path.read_text(encoding="utf-8"))
+    assert r1_record.get("is_failure") is False
+
+
+@pytest.mark.asyncio
+async def test_non_consecutive_failures_do_not_abort(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """infra_failures 是连续计数（T11 M2）：成功轮重置计数器，散布失败不中止。
+
+    r1 成功 → r2 失败 → r3 成功（重置）→ r4 失败 → r5 成功（重置）→ r6 失败 → r7 成功
+    修复前（累计）：r2+r4+r6=3 → infra_failures 中止
+    修复后（连续）：每次成功重置，最大连续失败=1 → max_rounds 终止
+    """
+    case = _setup_case_and_gt(iterate_data_dir)
+
+    extract_payload = {"direction": "bullish", "drivers": ["x"], "sectors": ["半导体"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type("R", (), {"content": json.dumps(extract_payload)})()
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(
+                side_effect=[
+                    {"final_response": "x"},  # r1 success
+                    {"final_response": "", "subprocess_failed": True},  # r2 fail
+                    {"final_response": "x"},  # r3 success
+                    {"final_response": "", "subprocess_failed": True},  # r4 fail
+                    {"final_response": "x"},  # r5 success
+                    {"final_response": "", "subprocess_failed": True},  # r6 fail
+                    {"final_response": "x"},  # r7 success
+                ]
+            ),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                with patch(
+                    "aistock_agent.iterate.run_case.apply_variant",
+                    return_value=[tmp_path / "variant.md"],
+                ):
+                    with patch(
+                        "aistock_agent.iterate.run_case.restore_baseline",
+                        side_effect=lambda *a, **k: _real_restore(*a, **k),
+                    ):
+                        result = await run_case(
+                            "review", str(case["case_id"]), max_rounds=7, repo_root=str(tmp_path)
+                        )
+
+    assert result["stopped_reason"] == "max_rounds"  # 散布失败不中止
+    assert len(result["rounds"]) == 4  # r1, r3, r5, r7 (r2/r4/r6 是失败轮不入册)
+
+
+@pytest.mark.asyncio
+async def test_failed_rounds_do_not_evaluate_llm(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """失败轮不调用 evaluate_attribution（T11 M4：加固弱锁定）。
+
+    用 return_value + call_count 断言：子进程失败轮无输出可评，
+    evaluate_attribution 不应被调用。若未来误改导致失败轮也调 LLM，
+    call_count > 2 使断言失败。
+    """
+    case = _setup_case_and_gt(iterate_data_dir)
+
+    extract_payload = {"direction": "bullish", "drivers": ["x"], "sectors": ["半导体"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        mock_invoke = AsyncMock(
+            return_value=type("R", (), {"content": json.dumps(extract_payload)})()
+        )
+        factory.return_value.ainvoke = mock_invoke
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(
+                side_effect=[
+                    {"final_response": "x"},  # r1 baseline success
+                    {"final_response": "", "subprocess_failed": True},  # r2 fail
+                    {"final_response": "", "subprocess_failed": True},  # r3 fail
+                    {"final_response": "", "subprocess_failed": True},  # r4 fail → infra
+                ]
+            ),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.generate_variant",
+                AsyncMock(
+                    return_value=VariantPlan(type="prompt_diff", files=[], instructions="")
+                ),
+            ):
+                with patch(
+                    "aistock_agent.iterate.run_case.apply_variant",
+                    return_value=[tmp_path / "variant.md"],
+                ):
+                    result = await run_case(
+                        "review", str(case["case_id"]), max_rounds=5, repo_root=str(tmp_path)
+                    )
+
+    assert result["stopped_reason"] == "infra_failures"
+    assert mock_invoke.call_count == 2  # only baseline extract + judge
+
+
+"""T10 Q1 / T9 M3 修复：跨运行残留隔离 + variant_hash 真实补丁内容"""
+
+
+@pytest.mark.asyncio
+async def test_stale_experiment_records_cleaned_before_run(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    """run_case 开始前清理旧 r*.json 记录（T10 Q1）：跨运行残留不污染 best.json。
+
+    场景：同一 case 上次运行留下 r2（score=0.9）残留记录；
+    本次运行 max_rounds=1（仅基线），best.json 不应包含 0.9 残留分数。
+    """
+    from aistock_agent.iterate.case_builder import get_data_dir
+
+    case = _setup_case_and_gt(iterate_data_dir)
+
+    # 写入上次运行的残留 r2 记录（score=0.9，远高于本次基线分数）
+    exps = get_data_dir() / "experiments"
+    exps.mkdir(parents=True, exist_ok=True)
+    stale = {"round": 2, "score": 0.9, "patch": {"target_symbol": "stale"}}
+    (exps / f"{case['case_id']}_r2.json").write_text(
+        json.dumps(stale, ensure_ascii=False), encoding="utf-8"
+    )
+
+    extract_payload = {"direction": "bullish", "drivers": ["x"], "sectors": ["半导体"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type("R", (), {"content": json.dumps(extract_payload)})()
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "x"}),
+        ):
+            with patch(
+                "aistock_agent.iterate.run_case.restore_baseline",
+                side_effect=lambda *a, **k: _real_restore(*a, **k),
+            ):
+                result = await run_case(
+                    "review", str(case["case_id"]), max_rounds=1, repo_root=str(tmp_path)
+                )
+
+    # 残留 r2 记录应被清理
+    assert not (exps / f"{case['case_id']}_r2.json").exists()
+    # best.json 若存在，分数不应是残留的 0.9
+    best_path = exps / f"{case['case_id']}_best.json"
+    if best_path.exists():
+        best = json.loads(best_path.read_text(encoding="utf-8"))
+        assert best["score"] != 0.9  # 不含残留高分

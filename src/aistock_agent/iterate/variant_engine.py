@@ -415,6 +415,7 @@ async def run_experiment_round(
         "duration_ms": 0,
         "variant_hash": variant_hash,
         "created_at": _now_iso_date(),
+        "is_failure": bool(output.get("timed_out") or output.get("subprocess_failed")),
     }
     path = get_data_dir() / "experiments" / f"{case_id}_r{round_no}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

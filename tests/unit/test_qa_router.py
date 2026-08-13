@@ -10,6 +10,7 @@ from aistock_agent.graph.nodes.qa_router import (
     _STRONG_PREDICT_KEYWORDS,
     SYSTEM_PROMPT,
     QARouterOutput,
+    _build_default_skill_call,
     _build_dimension_candidates,
     _build_fallback_goals,
     _build_fallback_subgoal,
@@ -917,6 +918,82 @@ async def test_force_deep_does_not_bypass_compliance() -> None:
     assert result["complexity"] == "light"
 
 
+# ─── 批次 1（2026-08-13）：force_deep/深度意图词 放行闸门 2 短路（roadmap §2 force_deep 行） ───
+
+
+@pytest.mark.asyncio
+async def test_force_deep_gate2_resolve_hit_not_short_circuited(monkeypatch) -> None:
+    """批次 1：force_deep=True + 中文名问句 resolve 命中 → 闸门 2 不再短路固定 light。
+
+    修复前闸门 2 resolve 成功分支无条件短路 light，「深度分析」按钮（rerunDeep 重发
+    中文名问句带 force_deep）对其无效；修复后放行走 LLM 路径，force_deep 强制 deep。
+    """
+    fake_output = QARouterOutput(
+        goal=InsightGoal(
+            question="贵州茅台今天怎么样", intent="stock_snapshot", symbols=["600519"]
+        ),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    monkeypatch.setattr(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    )
+    state = _state("贵州茅台今天怎么样")
+    state["force_deep"] = True
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(state)
+    mock_llm.with_structured_output.assert_called()  # 走 LLM 路径而非闸门 2 短路
+    assert result["complexity"] == "deep"  # force_deep 强制 deep
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_deep_intent_keyword_gate2_resolve_hit_goes_deep(monkeypatch) -> None:
+    """批次 1（用例 7 交互回归）：「深度分析贵州茅台」resolve 命中 → 深度意图词 → 闸门 2
+    不再短路（走 LLM 路径且 LLM 判定 deep）——修复前被短路固定 light，深度意图不满足。"""
+    fake_output = QARouterOutput(
+        goal=InsightGoal(
+            question="深度分析贵州茅台", intent="stock_snapshot", symbols=["600519"]
+        ),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        complexity="deep",
+    )
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_output))
+    )
+    monkeypatch.setattr(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    )
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("深度分析贵州茅台"))
+    mock_llm.with_structured_output.assert_called()  # 深度意图词放行走 LLM
+    assert result["complexity"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_gate2_resolve_hit_without_deep_signal_still_short_circuits(monkeypatch) -> None:
+    """批次 1 回归：无 force_deep、无深度意图词的普通中文名问句 → 闸门 2 短路 light 不变。"""
+    monkeypatch.setattr(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    )
+    mock_llm = MagicMock()
+    with patch("aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm):
+        result = await qa_router_node(_state("贵州茅台今天怎么样"))
+    mock_llm.with_structured_output.assert_not_called()  # 仍短路，LLM 不被调用
+    assert result["complexity"] == "light"
+    assert result["skill_calls"][0].skill_name == "stock_snapshot"
+
+
 @pytest.mark.asyncio
 async def test_complexity_missing_falls_back() -> None:
     """LLM 输出缺 complexity 字段 → ValidationError → 走既有兜底链（不崩溃）。"""
@@ -987,6 +1064,14 @@ def test_extract_stock_name_candidate_removes_analysis_verbs():
     assert _extract_stock_name_candidate("分析一下贵州茅台") == "贵州茅台"
     assert _extract_stock_name_candidate("评价一下贵州茅台") == "贵州茅台"
     assert _extract_stock_name_candidate("解读一下贵州茅台") == "贵州茅台"
+
+
+def test_deep_analysis_symbol_extraction():
+    """用例 7（2026-08-11 生产暴露）：「深度分析贵州茅台」候选名应为「贵州茅台」，
+    不因「深度」未入停用词而被污染成「深度贵州茅台」→ resolve 404 → 错误澄清。"""
+    from aistock_agent.graph.nodes.qa_router import _extract_stock_name_candidate
+
+    assert _extract_stock_name_candidate("深度分析贵州茅台") == "贵州茅台"
 
 
 @pytest.mark.asyncio
@@ -1465,6 +1550,87 @@ def test_single_predict_goal_weak_word_no_attach():
 
 def test_single_predict_goal_no_predict_word():
     assert _build_single_predict_goal("茅台今天怎么样", "stock_snapshot", ["600519"]) is None
+
+
+# ── Phase 4-1 Task 3：predict 意图路由到 prediction skill ──
+@pytest.mark.asyncio
+async def test_gate1_index_predict_appends_prediction_call():
+    """闸门 1 指数短路 + 强预测词 → 附加 prediction SkillCall（goal_id=g2）。"""
+    result = await qa_router_node(_state("沪指明天会涨吗"))
+    calls = result["skill_calls"]
+    assert [c.skill_name for c in calls] == ["index_snapshot", "prediction"]
+    assert calls[0].goal_id == "g1"                     # 现状取数归属 g1（现状趋势）
+    assert calls[1].goal_id == "g2"                     # prediction 归属 g2（推演）
+    assert calls[1].args == {"symbols": ["000001"], "index_name": "上证指数"}
+    assert result["plan"] == "compose"
+    assert result["goals"] is not None
+    assert result["goals"][0].dimension == "predict"
+
+
+@pytest.mark.asyncio
+async def test_gate2_resolve_predict_appends_prediction_call():
+    """闸门 2 名称解析短路 + 强预测词 → 附加 prediction SkillCall（goal_id=g2）。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_state("茅台明天会涨吗"))
+    calls = result["skill_calls"]
+    assert [c.skill_name for c in calls] == ["stock_snapshot", "prediction"]
+    assert calls[0].goal_id == "g1"
+    assert calls[1].goal_id == "g2"
+    assert calls[1].args == {"symbols": ["600519"]}
+    assert result["plan"] == "compose"
+
+
+@pytest.mark.asyncio
+async def test_gate1_overseas_index_predict_keeps_d35_no_prediction_call():
+    """非快照指数（恒指）+ 预测词 → 仅 D35 goal 附加，不塞 prediction（无代码可引）。"""
+    result = await qa_router_node(_state("恒指明天会涨吗"))
+    assert [c.skill_name for c in result["skill_calls"]] == ["market_snapshot"]
+    assert result["goals"] is not None
+    assert result["goals"][0].dimension == "predict"
+
+
+@pytest.mark.asyncio
+async def test_gate2_resolve_no_predict_no_prediction_call():
+    """闸门 2 无预测词 → 不附加 prediction（现有单意图行为不变）。"""
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        AsyncMock(return_value="600519"),
+    ):
+        result = await qa_router_node(_state("茅台今天怎么样"))
+    assert [c.skill_name for c in result["skill_calls"]] == ["stock_snapshot"]
+    assert result["skill_calls"][0].goal_id is None
+    assert result["goals"] is None
+
+
+def test_build_default_skill_call_prediction_with_symbol():
+    call = _build_default_skill_call("prediction", "600519 明天会涨吗")
+    assert call is not None
+    assert call.skill_name == "prediction"
+    assert call.args == {"symbols": ["600519"]}
+
+
+def test_build_default_skill_call_prediction_no_symbol_returns_none():
+    """无标的 predict 问句：不硬塞 prediction（守卫返回 None，维持既有降级）。"""
+    assert _build_default_skill_call("prediction", "今年股市会怎样") is None
+    assert _build_default_skill_call("prediction", "明天会涨吗") is None
+
+
+def test_route_keyword_fallback_predict_question_not_hard_sold():
+    """keyword-fallback 路径：无标的 predict 问句维持 report_lookup，不落 prediction。"""
+    call = route_by_keyword_fallback("今年股市会怎样")
+    assert call is not None
+    assert call.skill_name == "report_lookup"
+
+
+def test_gate4_context_predict_no_suppression_wording():
+    """E1：gate4 context 不再包含"不指定预测 skill"抑制文案。"""
+    _, candidates = _build_dimension_candidates("600519 明天会涨吗")
+    ctx = _build_gate4_context(candidates)
+    assert "不指定预测 skill" not in ctx
+    assert "影响持续性推演" in ctx
 
 
 # ── P5（D2/D3）：兜底取数去重 + trace 维度走 trace_lookup ──

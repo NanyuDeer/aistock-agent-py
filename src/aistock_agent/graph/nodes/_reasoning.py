@@ -67,7 +67,8 @@ async def stream_reasoning(
         return
 
     try:
-        llm = get_quick_think()
+        # 问题 17：reasoning 旁路 token 不计入用户账单，故不挂计费 callbacks
+        llm = get_quick_think(observe=False)
         async for chunk in _with_timeout(llm.astream(prompt), _REASONING_TIMEOUT_SEC):
             text = getattr(chunk, "content", None)
             if isinstance(text, str) and text.strip():

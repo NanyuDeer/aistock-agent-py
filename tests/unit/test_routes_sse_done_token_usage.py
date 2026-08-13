@@ -67,3 +67,59 @@ async def test_sse_done_missing_fields_default_none() -> None:
     done_events = [e for e in events if e.get("type") == "done"]
     assert done_events[0]["token_usage"] is None
     assert done_events[0]["cards"] is None
+
+
+@pytest.mark.asyncio
+async def test_sse_done_confirm_falls_back_to_clarification() -> None:
+    """SSE 降级路径遇 confirm 终态（WS 专属两阶段交互）→ DONE.final_response 回退澄清文本。
+
+    Phase 4-2（改进 13）：confirm 是 WS 专属协议，SSE 无交互能力但 qa_router
+    仍可能触发（传输无关）；空 final_response + confirm 存在时必须降级为既有
+    澄清文本，避免前端拿到空回答（严格劣化回归）。
+    """
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=SimpleNamespace(
+            values={
+                "final_response": "",
+                "analysis_reports": {},
+                "confirm": {
+                    "request_id": "r1",
+                    "question": "您想了解哪只股票？",
+                    "options": [{"key": "600519", "label": "贵州茅台"}],
+                },
+            }
+        )
+    )
+    queue = _make_queue_with_done()
+    with patch.object(
+        routes_module, "_ensure_message_queue", return_value=(queue, False)
+    ):
+        events = [e async for e in _stream_messages(graph, {"messages": []}, "sse_1")]
+
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert len(done_events) == 1
+    assert done_events[0]["final_response"] == "请提供 6 位股票代码后重试。"
+
+
+@pytest.mark.asyncio
+async def test_sse_done_normal_response_unchanged_when_confirm_absent() -> None:
+    """无 confirm 时 DONE.final_response 原样透出（正常回答/既有澄清不受影响）。"""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=SimpleNamespace(
+            values={
+                "final_response": "贵州茅台今日走势震荡上行。",
+                "analysis_reports": {},
+            }
+        )
+    )
+    queue = _make_queue_with_done()
+    with patch.object(
+        routes_module, "_ensure_message_queue", return_value=(queue, False)
+    ):
+        events = [e async for e in _stream_messages(graph, {"messages": []}, "sse_1")]
+
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert len(done_events) == 1
+    assert done_events[0]["final_response"] == "贵州茅台今日走势震荡上行。"

@@ -149,3 +149,34 @@ async def test_start_records_user_id_for_ownership():
     await state.task
     assert manager.get("c3") is not None
     await manager._cleanup_for_test()
+
+
+# ── Phase 4 验收修复（B2/C2）：pending-confirm 独立缓存 ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pending_confirm_set_get_clear():
+    ctm = chat_task_manager
+    ctm.clear_pending_confirm("s1")
+    assert ctm.get_pending_confirm("s1") is None
+    ctm.set_pending_confirm(
+        "s1",
+        {"request_id": "r1", "question": "q", "options": [], "run_id": "r1", "user_id": None},
+    )
+    got = ctm.get_pending_confirm("s1")
+    assert got is not None and got["request_id"] == "r1"
+    ctm.clear_pending_confirm("s1")
+    assert ctm.get_pending_confirm("s1") is None
+
+
+@pytest.mark.asyncio
+async def test_pending_confirm_expires_after_ttl(monkeypatch):
+    import aistock_agent.services.chat_task_manager as m
+    ctm = m.ChatTaskManager()
+    ctm._pending_confirm = {}
+    monkeypatch.setattr(m, "_CONFIRM_TTL_SEC", -1.0)  # 已过期
+    ctm.set_pending_confirm(
+        "s1",
+        {"request_id": "r1", "question": "q", "options": [], "run_id": "r1", "user_id": None},
+    )
+    assert ctm.get_pending_confirm("s1") is None

@@ -21,6 +21,7 @@ from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.index_snapshot import index_snapshot
 from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
+from aistock_agent.skills.prediction import prediction
 from aistock_agent.skills.report_lookup import report_lookup
 from aistock_agent.skills.sector_snapshot import sector_snapshot
 from aistock_agent.skills.stock_history import stock_history
@@ -168,4 +169,10 @@ register_skill(
         "抖音视频读取：下载并语音识别为文本。"
         '入参 {link: "抖音分享链接", save_video: false}'
     ),
+)
+# Phase 4-1：对话内预测（影响持续性推演，非点位预测；prediction_status 恒 hypothesis）
+register_skill(
+    "prediction",
+    prediction,
+    description='影响持续性推演（非点位预测）。入参 {symbols: ["6位代码"]}',
 )

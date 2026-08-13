@@ -151,7 +151,7 @@ START → supervisor(quick_think, 意图路由)
 - **追问复用（D14/D17）**：qa_router `_build_followup_context` 节点内拼接摘要（**`SYSTEM_PROMPT` 常量字节不变**）；`_postprocess_skill_calls(output, message, state)` 对 `report_lookup(chat_analysis)` 确定性注入 `user_id`（登录）/ `summary_fallback`（未登录）/ 无引用移除 call；`skills/report_lookup.py` chat_analysis 分支（登录读 DB 三元组 / 未登录会话内摘要，review/morning 分支不变）
 - **每轮 transient 归零（T6 跨任务修复）**：`deep_source`/`final_response` 是单轮路由信号，ws.py/routes.py 入口按轮置 None——否则 checkpointer 跨轮残留会让追问轮被 synth_answer deep 分支劫持（P1 起存在，T6 发现修复）
 - **checkpointer 持久化（P9 前置）**：`CHECKPOINTER_BACKEND=sqlite` → AsyncSqliteSaver + aiosqlite（chat 图 async 执行必须用 AsyncSqliteSaver，sync 版 NotImplementedError）；`get_checkpointer()` 同步入口经 `_run_coro_sync` 桥接；`_ensure_aiosqlite_compat` 补 is_alive；`threading._register_atexit` 退出关闭连接（防进程挂起）；redis 后端需 Redis 6.2+/RedisJSON；依赖钉版 `langgraph-checkpoint-sqlite==2.0.11` + `aiosqlite>=0.22,<0.23`（勿装 3.x/最新版）
-- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；~~user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）~~ **已由 P0 解决（2026-08-11）**：app-api 验签 JWT 后注入 user_id（HTTP/WS 双面覆写，未登录 None），agent-py 侧 `data.get("user_id")` 恒为可信值，客户端自报失效；多 worker 共写 .langgraph.db 有 SQLITE_BUSY 风险（pm2 单实例无碍）
+- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；~~user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）~~ **已由 P0 解决（2026-08-11）**：app-api 验签 JWT 后注入 user_id（HTTP/WS 双面覆写，未登录 None），agent-py 侧 `data.get("user_id")` 恒为可信值，客户端自报失效；多 worker 并发写 SQLite checkpointer 有 SQLITE_BUSY 风险（单实例部署无碍）
 
 ### CHAT QA P3-fix（2026-08-03）：reasoning 思维链 + 交易时段 5 状态降级
 
@@ -232,6 +232,68 @@ START → supervisor(quick_think, 意图路由)
 - **stop 协议**：请求 `{type:"stop", session_id}` → 响应 `stop_status`（cancelled / not_found）；cancelled 终态经 `_forward` 既有终态路径下发（DONE/ERROR/cancelled 三态统一）。
 - **转发/接收并行**：`_forward_until_done_or_cmd` 用 `asyncio.wait(FIRST_COMPLETED)` 竞速转发协程与接收协程——生成中收到 stop 即时 cancel（Task 3 的阻塞 `await _forward` 期间收不到控制消息，stop 必须依赖此结构）；live 转发传 `replay=True`（plan Task 9 文本一处 replay=False 以此修正为准——新轮起点 events 为空，回放语义与 live 无差异）。
 - **归属校验**：`_owns_run(state, data_user_id)`（resume/stop 共用）——双方 user_id 非空必须相等，任一 None 放行，None state 放行走 none/not_found；越权 → error "无权访问该会话" + WARN（绝不静默）。P0 后 `data.user_id` 为服务端注入可信值。
+
+### CHAT QA Phase 3 快赢补丁（2026-08-12）：用例 7 停用词 + 问题 17 reasoning 不计费
+
+- **用例 7**：`_STOCK_NAME_STOPWORDS` 补「深度」——「深度分析贵州茅台」→ 候选名"贵州茅台"（此前"深度贵州茅台" resolve 404 误澄清）；T1 859b91c。
+- **问题 17**：`get_quick_think(*, observe: bool = True)`（services/llm.py，observe=False 不挂计费 callbacks）；`graph/nodes/_reasoning.py::stream_reasoning` 改用 `observe=False` → reasoning 旁路 token 不进用户 contextvar 账单；主链路默认 True 零破坏；T2 1d31a47。
+- **验证**：全量 A/B 新增失败清零 + ruff 改动文件 0（2026-08-12，待部署验证，见 changelog）。
+
+### CHAT QA 问题 18 WS recv 竞态修复（2026-08-12）：done 后连接崩溃
+
+- **根因**：`_forward_until_done_or_cmd`（ws.py#L291-292）中 `recv_task.cancel()` 后未 await 收尾即 return，主循环随即 `websocket.receive_json()` → uvicorn `RuntimeError: cannot call recv while another coroutine is already waiting` → 每轮 done 后 WS 连接崩溃（closeCode=1005）；Phase 2（PR #64 断点续传）引入，Phase 3 生产冒烟 9 轮全部实证。
+- **修复**：cancel 后 `await asyncio.gather(recv_task, return_exceptions=True)` 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动。
+- **验证**：test_ws_chat_replacement.py 新增 `_RecvTrackingWebSocket`（模拟 uvicorn 并发 recv 防护）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done` 回归（断言返回时无挂起 recv、主循环可安全发起下次 receive）。
+- **经验教训**：`task.cancel()` 仅请求取消，不同步 await 收尾则底层 I/O（uvicorn 同连接 recv 并发防护）未释放；凡"取消后立即继续用同一 I/O 对象"必须 `await asyncio.gather(task, return_exceptions=True)`（同条已记 project_memory 45）。
+
+### CHAT QA Phase 4-1 对话内预测打通（2026-08-12）：三段式"影响持续性推演"
+
+- **产品边界（用户拍板 2026-08-11）**：影响持续性推演**非点位预测**；固定免责声明 + 低置信度提示；v1 不落库（对话预测量大标的杂、对照数据源仅指数可用，落库 ROI 低；`prediction_records` 表语义绑定溯源报告 source_type/source_id 不污染）
+- **无溯源入口**：`prediction_service.run_chat_prediction(snapshot, news, context) -> PredictionResult | None`——门禁 quote 必填非空 dict + trade_date 可解析，**flow 可选**（指数无个股资金流属"不适用"非"缺失"）；后处理强制 `prediction_status="hypothesis"`（无溯源链不得 confirmed）+ `evidence_ids` 只保留输入快照/新闻存在项（过滤而非 raise，区别于 run_predict）；**到期日 best-effort**（`add_trading_days` 日历仅覆盖至当前年份，2027+ long 档超范围时仅 warning 跳过不阻断——v1 不落库、返回值无消费方）；**LLM = `get_quick_think()` + `with_chat_structured_output(PredictionResult)`（json_mode）**——spec §3.4 P10 计费口径对齐 skill_executor 其它 skill（deep_think 26-47s/次 UX 不可接受）；prompt 必含 `schema_version:"1.0"` 指令（冒烟实测缺该字段恒降级）
+- **prediction skill**：并发 `get_quote`/`get_capital_flow` 组快照；**指数路径仅由显式 `index_name` 触发**（走 `/internal/index/quotes`，禁靠代码判定——000001 同时是上证指数与平安银行）；三段式 facts（现状 + 影响持续性推演[假设推演标注/三档/置信/风险/演化] + `DISCLAIMER="以上为模型推演，仅供参考，不构成投资建议。"`，low 置信追加"市场变化快，该判断不确定性较高。"）；降级复用 `PREDICT_DEGRADED_HINT`
+- **qa_router 路由（C2/E1 裁决回写）**：`intent_map` 加 prediction 键；`_build_default_skill_call` prediction 分支（`_extract_stock_symbol` 无标的不硬塞返回 None）；**闸门 1/2 短路主入口（"茅台会涨吗"/"上证后市如何"）追加 prediction SkillCall（goal_id="g2"，validate call 保持 g1）**——三段式可达的关键；`_build_gate4_context` predict 分支去掉"不指定预测 skill"压制文案（E1）；非快照指数（恒指等无 index_code）不塞 prediction 维持 D35
+- **synth_answer 渲染**：`_build_predict_section` 重写——prediction Evidence 定位（primary `skill_name=="prediction"`，fallback `goal_id=="g2"`，**不按 sg.id**：predict 子目标 id="g1"、prediction Evidence goal_id="g2"）；非 degraded → 三段式（现状趋势[validate g1 facts] + 影响持续性[跳过 facts 首行"【…现状】"防重复] + 免责声明恰好一次[skill facts 已含，过滤去重]）；degraded/缺失 → D35 降级字节不变；多 predict 子目标 hint 只输出一次
+- **验证**：全量 A/B HEAD 28 failed ⊆ BASE 28 failed（新增清零）；ruff 改动文件 0 新增；**WS 冒烟 4/4**——"茅台会涨吗"（gate2）/ "上证后市如何"（gate1，C2 验证点）三段式 + 免责声明 + 假设推演标注 / "市盈率是什么"科普防误伤 / "今日大盘怎么样"非预测不变；spec 验收 1-5 全满足
+- **教训（新增）**：① json_mode 结构化输出缺 required 字段时 pydantic 校验失败 → 降级——prompt required 字段清单必须与 Pydantic 契约逐字对齐（schema_version 案例）；② 无消费方的"校验副作用"（到期日）不应因超日历范围阻断主结果——best-effort + warning；③ 指数语义防误判只能靠显式上下文（index_name）不能靠代码集合（000001 双义）；④ WS 冒烟是唯一能发现"LLM 输出缺字段恒降级"与"到期日跨年崩溃"的验证手段——单测只锁语义不锁真实 LLM 输出
+- 提交：c4b1030..d29597d（8 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-2 交互式确认（2026-08-12）：两阶段运行（改进 13）
+
+- **产品/协议（spec §4.2 按 Phase 2 实际协议修订）**：resolve-miss + 多候选（≥2 可 resolve 名称）时不再直接澄清——阶段 1 图终态负载 `confirm_request`（`{"confirm_request": {"request_id", "question", "options"}}` 替代 DONE，跳过落库）→ ws.py 等用户选择（60s 单调时钟 deadline）→ 阶段 2 携带 `confirm_choice` 重跑同 session → DONE；**超时 / 「都不是」→ `confirm_timeout` 重跑 → `_resolve_miss_clarification` 无条件回退既有澄清（不依赖 `len(messages)<=1` 守卫，该守卫是 D36 多轮设计约束）**；<2 候选维持澄清不弹窗
+- **ws.py 阶段 2 重跑**：`_run_chat_graph_to_events` 加 run_id 参数（阶段 2 新 run_id 后缀 `_confirm`）；`initial_state2["messages"] = []`（**空列表对 add_messages reducer 是 no-op**，防阶段 2 同 thread 重跑时无 id HumanMessage 追加进 checkpoint 历史造成消息重复污染）+ `reset_transient_state()` + `reset_token_usage()`；`_wait_confirm_response` 用 `asyncio.FIRST_COMPLETED` + 单调时钟（不用 `asyncio.wait_for` 防止 cancel 吞并响应竞态）+ `_owns_run` 归属校验 + recv 收尾 `await asyncio.gather(task, return_exceptions=True)`（问题 18 先例）
+- **qa_router**：confirm 触发（闸门 2 resolve-miss 分支）+ 消费（confirm_choice 直接构造 SkillCall 续跑；confirm_timeout 回退澄清）+ transient 三字段归零；**synth_answer confirm 短路在 goal is None 检查之前**（confirm 终态不渲染回答）
+- **前端（app-frontend）**：`useChatStream.ts` `case 'confirm_request'` 终态处理（doneReceived 置位 + pendingConfirm ref + 结算 send promise + 不 appendMessage）+ `sendConfirmResponse(request_id, choice)` **发送成功后 re-arm**（doneReceived=false/streaming=true/清 progressSteps/streamingText/currentRunReasoning/currentRunEvents——不复位则阶段 2 事件流被 doneReceived 丢弃，回答永不出现，review Critical 修复）；ConfirmSheet 弹框 submitted 防连点
+- **验证**：定向 4 新测试文件全绿；全量 A/B HEAD 失败集 = BASE（30=30）新增清零（1808→1829 passed）；ruff 改动文件 0 新增；**WS confirm 冒烟 5/5**（case1 点选续跑真实行情 / case2「都不是」澄清回退 / case3 非触发回归，每用例独立 session——同会话第 2 条消息不触发确认是 D36 设计守卫非缺陷）
+- **教训（新增）**：① 阶段 2 重跑复用同 thread checkpoint 必须清 messages（add_messages 对无 id 消息是追加）；② 两阶段交互的任何一阶段状态（doneReceived）不复位 = 后续事件全丢，re-arm 是发送成功的原子动作；③ 前端点选后的续跑是"新一次运行"，run_id 需区分以正确归属 token/事件
+- 提交：c742a93..232e361（3 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-3 全局用户记忆（2026-08-12）：user_profile 注入 + 个性化消费（改进 15）
+
+- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（内部访问令牌，agent-py 检索用；无记录 200 + 空对象）
+- **拉取（`services/data_client.py`）**：`get_user_profile(user_id)`——Redis 缓存 `user_profile:{user_id}` TTL 300s（失败/空画像同样缓存防每轮重复拉取）→ `GET /internal/user-profile/{user_id}`；非 dict → None（失败降级，warning 不阻断，"永不 500"）；空画像 `{}` 与失败 `None` 语义分离
+- **注入（`QuestionState.user_profile` 可选字段）**：ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）**无条件显式赋值**——`user_id` 非空拉取注入，匿名写 `None` 覆盖 checkpointer 旧值（**条件注入会跨轮污染画像：上一轮登录态画像残留到匿名轮，集成冒烟实证**；对齐 T6/messages 置空先例）
+- **消费**：qa_router `_build_user_profile_context(profile)` 在 LLM prompt 追加"称呼/投资偏好/风险偏好"参考段（profile 为 None 返回 ""，SYSTEM_PROMPT 常量字节不变，不改技能/闸门规则）；synth_answer 风险段三档——`RISK_DISCLAIMER_CONSERVATIVE`（conservative 强化"风险较高，谨慎对待"，优先级高于动作词 strong 档，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（stable，不改 evidence 的 goal_id 关联）
+- **验证**：全量 A/B HEAD 失败集 ⊆ BASE（归一化后新增 0）；ruff 改动文件 0 新增；tsc 0；profile 定向 15/15；**集成冒烟全绿**——登录态 PUT→GET→internal 链路 + 对话 conservative 风险段生效 + 匿名常规档零行为变化
+- **教训（新增）**：① node-postgres 对 JSONB 参数必须传 JSON 字符串（JS 数组直传 500 "类型json的输入语法无效"）——app-api PUT profile 集成冒烟实证；② LangGraph checkpointer 跨轮状态：入口构造 state 时**未提供的键沿用上一轮 checkpoint 值**——注入类字段必须无条件赋值（匿名显式 None），不能条件设置
+- 提交：app-api a709928+159edb9；agent-py 2445417（注入）+ d9be256（消费）+ 4393ad9（防污染 fix），changer 未 push；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 5（2026-08-12）：长会话上下文管理（窗口 + 零 LLM 摘要 + 删会话联动 + busy_timeout）
+
+- **窗口语义（G6，spec §2.3/§4）**：`trim_messages` 纯函数（`utils/context_window.py`，DEFAULT_MAX_TURNS=6 → 窗口 12 条，DEFAULT_SUMMARY_CHARS=200）——**≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）**；超窗 → LLM prompt 只喂最近 12 条（window），超窗部分收敛为**零 LLM 确定性摘要**（逐轮"用户：问句｜AI：回复片段"，AI 片段 ≤60 字，整体按 200 字截断，幂等无累积）；**state.messages 保持全量**（checkpointer 按 P2 语义全量持久化不裁剪），`messages_summary` 每轮由超窗部分确定性重算（不读上一轮值，防跨轮残留）
+- **注入点（D14 对齐）**：qa_router LLM prompt 与 synth_answer 各节 prompt 均在节点内拼接 `summary_context`（`build_summary_context`，None/空 → 空串），SYSTEM_PROMPT 常量字节不变；短会话 prompt 与 Phase 4 前逐字节一致
+- **删会话联动（Task 2）**：`DELETE /api/agent/internal/chat/threads/:session_id`（app-api 转发）→ `checkpointer.delete_thread()`（sqlite/memory 幂等，redis best-effort 吞异常）→ 该 thread 的 checkpoints/writes 全删；"永不 500"由调用侧保证
+- **busy_timeout（Task 3）**：`config.sqlite_busy_timeout`（默认 30s，sqlite3 默认 5.0）→ `_build_async_sqlite_saver` 的 `aiosqlite.connect(timeout=...)`，缓解多 worker 并发写 "database is locked"（低成本先行项；单实例默认仍不生效）
+- **验证**：TDD（busy_timeout 参数断言 RED→GREEN）；全量 A/B HEAD 失败集 ⊆ BASE（逐项一致，新增清零）；ruff 改动文件 0 新增；app-api tsc 0 + chat 定向 18/18；**集成冒烟 2/2**（`tests/integration/test_phase5_long_session_smoke.py`：7 轮 13 条 → 12 条窗口 + "此前对话摘要"注入 + messages_summary 持久化 + 删会话 thread 消失；1 轮短会话 prompt 无摘要、messages_summary 不持久化）
+- 提交：686e7df（窗口+摘要）+ d11cdc6（synth_answer 多子目标路径注入修复）+ 34ec113（删会话联动）+ 5699737（busy_timeout + 集成冒烟），changer 未 push；详细记录 roadmap §2 Phase 5 行 + changelog-pending
+
+### CHAT QA 批次 1 force_deep 边界修复（2026-08-13）：闸门 2 放行
+
+- **问题**：中文名问句 resolve 命中被闸门 2 短路固定 `light`（`qa_router.py`），「深度分析」按钮（force_deep 重发中文名问句）与"深度分析贵州茅台"（用例 7 交互）的深度意图均不满足
+- **修复**：闸门 2 resolve 成功分支 `if not (force_deep or _match_keywords(message, _DEEP_INTENT_KEYWORDS)):` 才短路——命中放行（`logger.info("qa_router.gate.stock_resolve_bypass_short_circuit")` 不 return）继续走后续闸门/LLM 路径；force_deep 由 LLM 成功路径 `complexity = "deep" if force_deep else ...` 强制 deep，深度意图词仅放行、复杂度由 LLM 判定
+- **`_DEEP_INTENT_KEYWORDS`**：`("深度分析","深入分析","详细分析","深度","深入","详析")`——刻意排除"分析/分析一下"（既有测试锁定闸门 2 light 快答）、"对比"（闸门 2.5 已独立处理）、"为什么/原因"（溯源语义）
+- **红线不变**：闸门 0（合规）/0.5（寒暄/科普）/1（指数）短路永远优先于 force_deep（放行点位于闸门 2 内，前序闸门仍先拦截）
+- **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
+- **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
 
 ## 目录结构
 
@@ -350,7 +412,7 @@ src/aistock_agent/
 
 ## Node.js 侧配合接口
 
-Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`）：
+Python 服务通过以下内部接口获取 A 股数据（需携带内部访问令牌）：
 
 | 接口 | 数据源 | 说明 |
 |------|--------|------|
@@ -401,13 +463,12 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 `deploy/ecosystem.config.json` 为 PM2 配置，主进程内集成 Stock Trace Consumer（无需独立进程）。
 
 ```bash
-# 首次部署
-cd /home/aistock/aistock-agent-py
+# 首次部署（在项目根目录执行）
 pm2 start deploy/ecosystem.config.json
 pm2 save
 
 # 更新代码后重启（一次重启同时刷新主服务 + consumer）
-cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
+git pull && pm2 restart aistock-agent
 
 # 查看日志
 pm2 logs aistock-agent --lines 50
@@ -519,5 +580,5 @@ content = {
 
 ### mail_sender（通用 SMTP 邮件发送）
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
-- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → 环境变量 `QQ_SMTP_USER/AUTH/TO`（同事交接约定）；授权码只放本地 .env，不进 git
+- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
 - 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式

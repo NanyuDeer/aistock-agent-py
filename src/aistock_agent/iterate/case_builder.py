@@ -126,7 +126,7 @@ def _validate_market_snapshot(snapshot: dict[str, object], event_time: datetime)
         ) from e
 
     trade_date = snapshot.get("trade_date")
-    if isinstance(trade_date, str) and trade_date:
+    if isinstance(trade_date, str):
         try:
             day = datetime.fromisoformat(trade_date).date()
         except ValueError as e:

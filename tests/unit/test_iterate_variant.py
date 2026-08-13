@@ -488,6 +488,7 @@ def test_recompute_best_excludes_failed_round_and_picks_r2(
         "round": 1,
         "score": 0.0,
         "gap_analysis": "回放子进程超时（>600s），本轮视为失败",
+        "is_failure": True,
     })
     r2_patch = {"target_symbol": "run", "old_snippet": "旧片段", "new_snippet": "新片段"}
     _write_experiment_record(iterate_data_dir, case_id, "r2", {
@@ -514,11 +515,13 @@ def test_recompute_best_all_failed_returns_none(iterate_data_dir: object) -> Non
         "score": 0.0,
         "gap_analysis": "回放子进程失败（>600s），本轮视为失败",
         "patch": {"target_symbol": "run", "old_snippet": "旧片段", "new_snippet": "未应用"},
+        "is_failure": True,
     })
     _write_experiment_record(iterate_data_dir, case_id, "r3", {
         "round": 3,
         "score": 0.0,
         "gap_analysis": "变体轮异常：补丁未应用",
+        "is_failure": True,
     })
     assert _recompute_best("review", case_id) is None
 
@@ -542,3 +545,47 @@ def test_recompute_best_skips_non_numeric_score(iterate_data_dir: object) -> Non
     best = _recompute_best("review", case_id)
     assert best is not None
     assert best["round"] == 2
+
+
+"""T9 M3 修复：variant_hash 用真实补丁内容计算（非恒定 sha256("{}")）"""
+
+
+def test_variant_hash_differs_for_different_patches() -> None:
+    """不同补丁产生不同 variant_hash（T9 M3）。
+
+    修复前：patch 模式下 new_content={} 恒定，_content_hash({}) 所有变体同值；
+    修复后：hash 包含 target_symbol/old_snippet/new_snippet，不同补丁产生不同 hash。
+    """
+    from aistock_agent.iterate.variant_engine import VariantPlan, _compute_variant_hash
+
+    plan_a = VariantPlan(
+        type="prompt_diff",
+        files=[],
+        instructions="",
+        target_symbol="run",
+        old_snippet="old",
+        new_snippet="new_a",
+    )
+    plan_b = VariantPlan(
+        type="prompt_diff",
+        files=[],
+        instructions="",
+        target_symbol="run",
+        old_snippet="old",
+        new_snippet="new_b",
+    )
+    plan_same = VariantPlan(
+        type="prompt_diff",
+        files=[],
+        instructions="",
+        target_symbol="run",
+        old_snippet="old",
+        new_snippet="new_a",
+    )
+
+    hash_a = _compute_variant_hash(plan_a)
+    hash_b = _compute_variant_hash(plan_b)
+    hash_same = _compute_variant_hash(plan_same)
+
+    assert hash_a != hash_b  # 不同补丁 → 不同 hash
+    assert hash_a == hash_same  # 相同补丁 → 相同 hash

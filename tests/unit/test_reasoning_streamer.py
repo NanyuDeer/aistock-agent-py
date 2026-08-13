@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aistock_agent.graph.nodes._reasoning import stream_reasoning
+from aistock_agent.services.token_usage import get_token_usage, reset_token_usage
 
 
 @pytest.mark.asyncio
@@ -107,3 +108,31 @@ async def test_stream_reasoning_empty_message_uses_fallback():
     call = ws.send_json.await_args_list[0].args[0]
     assert call["type"] == "reasoning"
     assert call["node"] == "qa_router"
+
+
+@pytest.mark.asyncio
+async def test_stream_reasoning_not_billed():
+    """reasoning 旁路 token 不进用户账单（问题 17）：
+    get_quick_think 以 observe=False 调用（不挂计费 callbacks），
+    token usage contextvar 不被累加。"""
+    ws = MagicMock()
+    ws.send_json = AsyncMock()
+
+    async def fake_astream(*_args, **_kwargs):
+        yield MagicMock(content="我在分析")
+
+    with (
+        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch(
+            "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
+            return_value="prompt",
+        ),
+    ):
+        mock_llm.return_value.astream = fake_astream
+        reset_token_usage()
+        await stream_reasoning(ws.send_json, "qa_router", "查 600519 的行情")
+
+    # reasoning 以 observe=False 调用 → 不挂计费 callbacks
+    mock_llm.assert_called_once_with(observe=False)
+    # contextvar 未被累加（无 LLM 用量记录 → snapshot 为 None）
+    assert get_token_usage() is None

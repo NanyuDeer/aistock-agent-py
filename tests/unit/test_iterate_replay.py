@@ -1,7 +1,6 @@
 """replay_layer —— 回放开关、数据注入与副作用隔离"""
 
 import json
-import os
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -187,9 +186,11 @@ def test_service_isolation_covers_all_public_network_methods() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_industry_chain_isolated_in_replay(iterate_data_dir: object) -> None:
+async def test_get_industry_chain_isolated_in_replay(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """回放模式下 get_industry_chain 返回 degraded 状态，绝不触网。"""
-    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
 
@@ -203,7 +204,9 @@ async def test_get_industry_chain_isolated_in_replay(iterate_data_dir: object) -
 
 
 @pytest.mark.asyncio
-async def test_put_delete_patch_noop_in_replay(iterate_data_dir: object) -> None:
+async def test_put_delete_patch_noop_in_replay(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """回放模式下 put/delete/patch 写操作 no-op 返回 None，且不触达真实网络实现。
 
     I-2 修复（原测试空洞）：本环境 HttpClientPool 未初始化，真实 put/delete/
@@ -214,7 +217,7 @@ async def test_put_delete_patch_noop_in_replay(iterate_data_dir: object) -> None
     实现），断言回放调用后 spy 未被触达——若补丁失效，真实实现（含真实网络
     入口 HttpClientPool.get_client）会被调用，assert_not_called 失败。
     """
-    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
 
     from aistock_agent.services.data_client import NodeApiClient, node_api
@@ -237,7 +240,9 @@ async def test_put_delete_patch_noop_in_replay(iterate_data_dir: object) -> None
 
 
 @pytest.mark.asyncio
-async def test_report_read_degraded_contracts_in_replay(iterate_data_dir: object) -> None:
+async def test_report_read_degraded_contracts_in_replay(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """report_read 分支降级契约（M-3/I-1 回归）：结构化方法返回 unavailable，quiet 返回 None。
 
     真实契约（data_client.py）：get_review_analysis_report 失败路径返回
@@ -248,7 +253,7 @@ async def test_report_read_degraded_contracts_in_replay(iterate_data_dir: object
     断言回放降级值类型与真实实现失败路径一致——若回放统一返回 None，
     get_review_analysis_report / get_hot_burst_data 的调用方会 AttributeError。
     """
-    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
 
@@ -299,9 +304,11 @@ def test_extract_symbol_and_news_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_node_reader_filters_by_symbol(iterate_data_dir: object) -> None:
+async def test_node_reader_filters_by_symbol(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """search_cls_news 按 symbol 过滤切片记录，不再返回全量。"""
-    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
 
@@ -380,9 +387,11 @@ async def test_node_reader_positive_symbol_and_id_matching(
 
 
 @pytest.mark.asyncio
-async def test_persist_event_report_returns_false_in_replay(iterate_data_dir: object) -> None:
+async def test_persist_event_report_returns_false_in_replay(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """回放模式下 persist_event_report 恒 False（如实报告未落库），不再恒 True。"""
-    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
 

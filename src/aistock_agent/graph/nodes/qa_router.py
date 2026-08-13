@@ -24,6 +24,7 @@ from aistock_agent.services.llm import get_quick_think, with_chat_structured_out
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.message import extract_last_human_message
 
 logger = structlog.get_logger()
@@ -117,6 +118,34 @@ def _build_followup_context(last_deep_report: DeepReportRef | None) -> str:
         + "\n若用户引用上述分析（如“刚才那个分析/上次的深度分析/再分析一下”），"
         + "必须路由 report_lookup(report_type=chat_analysis, date=今天)；"
         + "不引用时忽略本段。\n"
+    )
+
+
+def _build_user_profile_context(profile: dict | None) -> str:
+    """Phase 4-3（改进 15）：构造用户画像参考段（仅称呼/回答风格/优先级微调）。
+
+    只作 LLM 路由与回答风格的参考，不改变技能清单/闸门规则/JSON 输出契约；
+    profile 为 None 或无可用字段 → 返回 ""（prompt 字节不变，零行为变化）。
+    """
+    if not isinstance(profile, dict):
+        return ""
+    parts: list[str] = []
+    nickname = profile.get("nickname")
+    if isinstance(nickname, str) and nickname.strip():
+        parts.append(f"称呼：{nickname.strip()}")
+    prefs = profile.get("investment_preferences")
+    if isinstance(prefs, list):
+        clean = [str(p).strip() for p in prefs if isinstance(p, str) and p.strip()]
+        if clean:
+            parts.append("用户投资偏好：" + "、".join(clean))
+    risk = profile.get("risk_tolerance")
+    if risk in ("conservative", "balanced", "aggressive"):
+        parts.append(f"风险偏好：{risk}")
+    if not parts:
+        return ""
+    return (
+        "\n\n用户画像参考（仅作称呼/回答风格/优先级微调，"
+        + "不改变上述技能与闸门规则）：" + "；".join(parts) + "。"
     )
 
 
@@ -283,6 +312,9 @@ _STOCK_NAME_STOPWORDS = (
     "吗", "我", "你",
     # P1 遗留问题 1（D36）：分析类动词不进个股名候选（"分析一下贵州茅台" → "贵州茅台"）
     "分析", "评价", "评估", "研判", "解读", "看看",
+    # 用例 7（2026-08-11 生产暴露）："深度分析贵州茅台" 被污染为 "深度贵州茅台"
+    # → resolve 404 → 错误澄清；与"分析"等动作词同归类（spec §2.4：不扩大词表）
+    "深度",
     # P5-fix（2026-08-05，问题 8）：对比口语词——"茅台和五粮液哪个更好"不再整句入候选
     "哪个", "哪个更好", "哪个好", "哪个更强", "更好", "更强", "比较", "对比",
     # P5-fix（2026-08-05，问题 11）：意图词/连接词——"宁德时代最近有什么新闻" → "宁德时代"；
@@ -298,6 +330,12 @@ _COMPARE_KEYWORDS = (
 )
 # 中文名多标的切分分隔符（"茅台和五粮液哪个更好" → 茅台 | 五粮液）
 _MULTI_NAME_SEPARATORS = ("和", "与", "、", "，", ",", "vs", "对比", "还是")
+
+# 批次 1（2026-08-13）：深度意图词——闸门 2 resolve 命中 + 命中此表 → 放行走 LLM/deep 路径
+# （不再短路固定 light）。刻意排除"分析/分析一下"（既有测试锁定闸门 2 light 快答）、"对比"
+# （闸门 2.5 已独立处理）与"为什么/原因"（溯源语义，避免改变既有 trace 行为）；force_deep
+# （「深度分析」按钮）是独立放行条件，与意图词互不依赖。
+_DEEP_INTENT_KEYWORDS = ("深度分析", "深入分析", "详细分析", "深度", "深入", "详析")
 
 
 def _extract_stock_symbol(message: str) -> str | None:
@@ -590,6 +628,30 @@ def _short_circuit(message: str, reply: str, guardrail: str) -> dict[str, Any]:
     }
 
 
+def _resolve_miss_clarification(message: str) -> dict[str, Any]:
+    """D36 收口：resolve 未命中 → 既有澄清输出（resolve-miss 分支专用）。
+
+    首轮澄清与 confirm_timeout 回退共用同一输出形状（含 pending 快照，
+    供下一轮用户补全代码/名称时续跑原意图），保证"超时回退字节不变"。
+    """
+    return {
+        "goal": InsightGoal(
+            question=message,
+            intent="stock_snapshot",
+            constraints={"guardrail": "resolve_miss"},
+        ),
+        "plan": "direct",
+        "skill_calls": [],
+        "clarification": _STOCK_SYMBOL_CLARIFICATION,
+        "complexity": "light",
+        "pending_clarification": {
+            "question": message,
+            "intent": "stock_snapshot",
+            "constraints": {"guardrail": "resolve_miss"},
+        },
+    }
+
+
 def _infer_complexity_by_fallback(message: str, fallback_skill: str | None) -> str:
     """LLM 失败时按意图 + 分析类词判定复杂度（D4 规则兜底）。
 
@@ -694,6 +756,13 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
     # 误传消息全文当 link）
     if skill_name == "douyin_video":
         return SkillCall(skill_name="douyin_video", args={})
+    # Phase 4-1：prediction（影响持续性推演）——无标的（非个股）不硬塞，返回 None
+    # 维持既有 compose/降级；有标的传 symbols（与同轮 validate 同标的，复用去重）
+    if skill_name == "prediction":
+        symbol = _extract_stock_symbol(message)
+        if symbol is None:
+            return None
+        return SkillCall(skill_name="prediction", args={"symbols": [symbol]})
     return SkillCall(skill_name="report_lookup", args={})
 
 
@@ -798,8 +867,8 @@ def _build_gate4_context(candidates: list[tuple[str, _DimTarget | None]]) -> str
         desc = t.value if t else "无明确标的"
         if d == "predict":
             lines.append(
-                f"- 维度: predict（预测），标的: {desc}（预测功能开发中，"
-                f"不指定预测 skill，可复用同标的现状取数）"
+                f"- 维度: predict（预测），标的: {desc}"
+                f"（影响持续性推演，可携带同标的现状取数作依据）"
             )
         elif d == "trace":
             lines.append(f"- 维度: trace（溯源），标的: {desc}")
@@ -1204,6 +1273,66 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return _short_circuit(message, CAPABILITY_REPLY, "greeting")
 
+    # ── Phase 4-2（改进 13）：confirm_choice 消费（阶段 2 续跑）──
+    # 用户点选确认项后，ws.py 携带 confirm_choice 重跑同 session 图（fresh run）。
+    # 本块位于闸门 0/0.5 之后（合规/寒暄短路优先级不变，不 bypass 闸门）：
+    # 跳过名称提取/resolve，直接用点选标的构造与闸门 2 resolve 成功分支一致的
+    # 短路结构（skill_calls=[stock_snapshot] + 强预测词附加 predict 子目标）。
+    # confirm_choice 是单轮 transient 输入信号，不写回图状态输出。
+    choice = state.get("confirm_choice")
+    if isinstance(choice, dict) and _is_valid_symbol_arg(
+        choice.get("symbol") or choice.get("key")
+    ):
+        choice_symbol = str(choice.get("symbol") or choice.get("key"))
+        choice_label = str(choice.get("label") or "")
+        choice_skill = _infer_stock_skill(message)
+        choice_args: dict[str, Any] = {"symbol": choice_symbol}
+        if choice_skill == "stock_news":
+            choice_args["limit"] = 10
+        choice_goal = InsightGoal(
+            question=message,
+            intent=choice_skill,  # type: ignore[arg-type]
+            symbols=[choice_symbol],
+        )
+        choice_call = SkillCall(skill_name=choice_skill, args=choice_args)  # type: ignore[arg-type]
+        # D35：单意图预测（对齐闸门 2 resolve 成功分支——强预测词才附加）；
+        # label 剥 "(代码)" 后缀取干净名称（对齐 gate2 传 candidate 的先例）
+        if "(" in choice_label:
+            choice_label = choice_label.split("(")[0]
+        predict_goal = _build_single_predict_goal(
+            message, choice_skill, [choice_symbol], label=choice_label
+        )
+        if predict_goal is not None:
+            choice_call = choice_call.model_copy(update={"goal_id": "g1"})
+            choice_calls = [
+                choice_call,
+                SkillCall(
+                    skill_name="prediction",
+                    args={"symbols": [choice_symbol]},
+                    goal_id="g2",
+                ),
+            ]
+            choice_plan: Literal["direct", "compose"] = "compose"
+            choice_goals: list[SubGoal] | None = [predict_goal]
+        else:
+            choice_plan = "direct"
+            choice_goals = None
+            choice_calls = [choice_call]
+        logger.info(
+            "qa_router.confirm_choice",
+            symbol=choice_symbol,
+            skill=choice_skill,
+            predict=bool(predict_goal),
+        )
+        metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
+        return {
+            "goal": choice_goal,
+            "plan": choice_plan,
+            "skill_calls": choice_calls,
+            "complexity": "light",
+            "goals": choice_goals,
+        }
+
     # ── 闸门 0.5b：科普问句（D32 升级，P7+P8；2026-08-07 补后缀句式）──
     #   → 置 science 信号走 general 动态回答
     # 用户拍板：仅股票投资知识词表；产品内部概念不纳入（防误伤 compose）。
@@ -1281,17 +1410,31 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         predict_goal = _build_single_predict_goal(message, index_intent, [])
         if predict_goal is not None:
             call = call.model_copy(update={"goal_id": "g1"})
+            # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据；
+            # index_name 一并透传，prediction skill 据此走指数行情路径（get_quote("000001")
+            # 会命中平安银行个股，不能用于指数语义）；非快照指数（market_snapshot 分支）
+            # 无 index_code → 不塞 prediction，维持 D35 降级）
+            index_calls = [call]
+            if index_code is not None:
+                index_calls.append(
+                    SkillCall(
+                        skill_name="prediction",
+                        args={"symbols": [index_code], "index_name": index_name},
+                        goal_id="g2",
+                    )
+                )
             index_plan: Literal["direct", "compose"] = "compose"
             index_goals: list[SubGoal] | None = [predict_goal]
         else:
             index_plan = "direct"
             index_goals = None
+            index_calls = [call]
         logger.info("qa_router.gate.index", index=index_name, predict=bool(predict_goal))
         metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
         return {
             "goal": goal,
             "plan": index_plan,
-            "skill_calls": [call],
+            "skill_calls": index_calls,
             "complexity": "light",
             "goals": index_goals,
         }
@@ -1314,6 +1457,12 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             metrics.record_chat_qa_latency(
                 "qa_router", int((time.monotonic() - start) * 1000)
             )
+            # A2 产品决策（2026-08-12 验收辩论，用户拍板）：对比问句不附加 prediction
+            # SkillCall。"茅台和五粮液哪个更好，会涨吗"（对比词"哪个更好" + 强预测词
+            # "会涨"）→ 对比短路 compare_stocks（现状对比），预测意图不叠加——与 B5
+            # 点位红线收口方向一致，避免新增预测渲染面。
+            # 行为由 test_qa_router_confirm.py::test_compare_with_predict_keywords_
+            # never_attaches_prediction 锁定。
             return {
                 "goal": goal,
                 "plan": "direct",
@@ -1328,66 +1477,130 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         if candidate is not None:
             resolved = await resolve_symbol(candidate)
             if resolved is not None:
-                skill_name = _infer_stock_skill(message)
-                args: dict[str, Any] = {"symbol": resolved}
-                if skill_name == "stock_news":
-                    args["limit"] = 10
-                goal = InsightGoal(
-                    question=message,
-                    intent=skill_name,  # type: ignore[arg-type]
-                    symbols=[resolved],
-                )
-                call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
-                # D35：单意图预测（"茅台明天会涨吗" → resolve 成功 → 附加 predict 子目标）
-                predict_goal = _build_single_predict_goal(
-                    message, skill_name, [resolved], label=candidate
-                )
-                if predict_goal is not None:
-                    call = call.model_copy(update={"goal_id": "g1"})
-                    resolve_plan: Literal["direct", "compose"] = "compose"
-                    resolve_goals: list[SubGoal] | None = [predict_goal]
-                else:
-                    resolve_plan = "direct"
-                    resolve_goals = None
+                # 批次 1（2026-08-13）：force_deep/深度意图词放行闸门 2 短路（roadmap §2
+                # force_deep 观察项行）。中文名问句 resolve 命中默认短路固定 light（「深度分析」
+                # 按钮 force_deep 对其无效）；命中 force_deep 或深度意图词（如"深度分析贵州茅台"）
+                # 时不再短路，放行走 LLM/兜底路径——force_deep 由下方 LLM 成功路径强制 deep，
+                # 深度意图词由 LLM 判定复杂度。红线不变：闸门 0（合规）/0.5（寒暄/科普）/1（指数）
+                # 短路永远优先，本放行不影响其优先级。
+                if not (force_deep or _match_keywords(message, _DEEP_INTENT_KEYWORDS)):
+                    skill_name = _infer_stock_skill(message)
+                    args: dict[str, Any] = {"symbol": resolved}
+                    if skill_name == "stock_news":
+                        args["limit"] = 10
+                    goal = InsightGoal(
+                        question=message,
+                        intent=skill_name,  # type: ignore[arg-type]
+                        symbols=[resolved],
+                    )
+                    call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
+                    # D35：单意图预测（"茅台明天会涨吗" → resolve 成功 → 附加 predict 子目标）
+                    predict_goal = _build_single_predict_goal(
+                        message, skill_name, [resolved], label=candidate
+                    )
+                    if predict_goal is not None:
+                        call = call.model_copy(update={"goal_id": "g1"})
+                        # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据）
+                        resolve_calls = [
+                            call,
+                            SkillCall(
+                                skill_name="prediction",
+                                args={"symbols": [resolved]},
+                                goal_id="g2",
+                            ),
+                        ]
+                        resolve_plan: Literal["direct", "compose"] = "compose"
+                        resolve_goals: list[SubGoal] | None = [predict_goal]
+                    else:
+                        resolve_plan = "direct"
+                        resolve_goals = None
+                        resolve_calls = [call]
+                    logger.info(
+                        "qa_router.gate.stock_resolve",
+                        name=candidate,
+                        symbol=resolved,
+                        predict=bool(predict_goal),
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return {
+                        "goal": goal,
+                        "plan": resolve_plan,
+                        "skill_calls": resolve_calls,
+                        "complexity": "light",
+                        "goals": resolve_goals,
+                    }
                 logger.info(
-                    "qa_router.gate.stock_resolve",
+                    "qa_router.gate.stock_resolve_bypass_short_circuit",
                     name=candidate,
                     symbol=resolved,
-                    predict=bool(predict_goal),
+                    force_deep=force_deep,
                 )
-                metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-                return {
-                    "goal": goal,
-                    "plan": resolve_plan,
-                    "skill_calls": [call],
-                    "complexity": "light",
-                    "goals": resolve_goals,
-                }
             # D36 收口：resolve 未命中时，首轮纯个股问句强制澄清（不进 LLM，
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
             # 多轮（指代解析）或非个股意图（板块/行业/溯源/compose）放行
-            elif len(messages) <= 1 and not _has_non_stock_intent(message):
-                logger.info(
-                    "qa_router.gate.stock_resolve_miss",
-                    name=candidate,
-                )
-                metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-                return {
-                    "goal": InsightGoal(
-                        question=message,
-                        intent="stock_snapshot",
-                        constraints={"guardrail": "resolve_miss"},
-                    ),
-                    "plan": "direct",
-                    "skill_calls": [],
-                    "clarification": _STOCK_SYMBOL_CLARIFICATION,
-                    "complexity": "light",
-                    "pending_clarification": {
-                        "question": message,
-                        "intent": "stock_snapshot",
-                        "constraints": {"guardrail": "resolve_miss"},
-                    },
-                }
+            elif not _has_non_stock_intent(message):
+                # Phase 4-2（改进 13）confirm_timeout 回退：阶段 2 同 session 重跑时
+                # checkpointer 的 add_messages reducer 会把同一 HumanMessage 追加进
+                # 历史（实测 run1 messages=[m1] → run2 [m1,m1]）→ 下方 len(messages)<=1
+                # 守卫为 False，若超时回退依赖该守卫会被整体跳过 → 落 LLM 路径（正是
+                # D36 要防的"LLM 幻觉假代码"场景）。故超时回退必须不依赖消息数：
+                # 无条件返回与首轮澄清相同的输出。
+                if state.get("confirm_timeout"):
+                    logger.info(
+                        "qa_router.gate.stock_resolve_miss_timeout",
+                        name=candidate,
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return _resolve_miss_clarification(message)
+                if len(messages) <= 1:
+                    # Phase 4-2（改进 13）：交互式确认触发——在走澄清之前，若消息含
+                    # ≥2 个可 resolve 的多名称候选 → 发 confirm（替代澄清）；否则维持
+                    # 既有澄清字节不变。confirm_choice 非空说明是阶段 2 续跑（点选路径
+                    # 已在闸门 0/0.5 之后提前消费），跳过触发直接走既有澄清（防无限循环）。
+                    if not state.get("confirm_choice"):
+                        multi = _extract_multi_name_candidates(message)
+                        if len(multi) >= 2:
+                            resolved_pairs: list[tuple[str, str]] = []
+                            for name in multi:
+                                sym = await resolve_symbol(name)
+                                if sym is not None:
+                                    resolved_pairs.append((name, sym))
+                            if len(resolved_pairs) >= 2:
+                                options = [
+                                    {"key": sym, "label": f"{name}({sym})"}
+                                    for name, sym in resolved_pairs
+                                ] + [{"key": "none", "label": "都不是"}]
+                                confirm = {"question": message, "options": options}
+                                logger.info(
+                                    "qa_router.gate.stock_resolve_confirm",
+                                    options=[opt["label"] for opt in options],
+                                )
+                                metrics.record_chat_qa_latency(
+                                    "qa_router", int((time.monotonic() - start) * 1000)
+                                )
+                                return {
+                                    "goal": InsightGoal(
+                                        question=message,
+                                        intent="stock_snapshot",
+                                        constraints={"guardrail": "resolve_confirm"},
+                                    ),
+                                    "plan": "direct",
+                                    "skill_calls": [],
+                                    "confirm": confirm,
+                                    "complexity": "light",
+                                }
+                    logger.info(
+                        "qa_router.gate.stock_resolve_miss",
+                        name=candidate,
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return _resolve_miss_clarification(message)
 
     # ── 闸门 3：主线/风险 compose（D26）→ 组合取数短路，不进 LLM ──
     compose_plan = build_compose_plan(message)
@@ -1410,9 +1623,20 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         structured_llm = with_chat_structured_output(llm, QARouterOutput)
         # D14：注入 last_deep_report 摘要（节点内拼接，SYSTEM_PROMPT 常量不变）
         followup_context = _build_followup_context(state.get("last_deep_report"))
-        prompt = SYSTEM_PROMPT + followup_context + gate4_context
-        # 把完整对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
-        llm_messages = [HumanMessage(content=prompt)] + list(messages)
+        # Phase 4-3（改进 15）：注入 user_profile 参考段（profile 为 None 时返回 ""，
+        # prompt 字节不变；仅回答风格微调，不改技能/闸门规则）
+        profile_context = _build_user_profile_context(state.get("user_profile"))
+        # Phase 5（Task 1）：长会话滑动窗口——LLM prompt 只喂最近 12 条（window），
+        # 超窗部分收敛为零 LLM 确定性摘要（此前对话摘要段）；短会话 summary=None →
+        # summary_context="" → prompt 字节不变。state.messages 保持全量（checkpointer
+        # P2 语义），此处仅裁剪 LLM prompt 输入。
+        window, summary = trim_messages(list(messages))
+        summary_context = build_summary_context(summary)
+        prompt = (
+            SYSTEM_PROMPT + followup_context + gate4_context + profile_context + summary_context
+        )
+        # 把窗口内对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
+        llm_messages = [HumanMessage(content=prompt)] + window
         output: QARouterOutput = await structured_llm.ainvoke(llm_messages)
 
         # 校验：direct 时 skill_calls 长度必须=1
@@ -1648,6 +1872,7 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             "hot_burst": "hot_burst",
             "industry_relation": "industry_relation",
             "market_snapshot": "market_snapshot",
+            "prediction": "prediction",
             "report_lookup": "report_lookup",
             "sector_snapshot": "sector_snapshot",
             "stock_news": "stock_news",
@@ -1698,6 +1923,13 @@ async def qa_router_node(state: QuestionState) -> dict[str, Any]:
     result = await _qa_router_node_core(state)
     if had_pending and "pending_clarification" not in result:
         result["pending_clarification"] = None
+    # Phase 5（Task 1）：长会话超窗（summary 非 None）时写 messages_summary 随
+    # checkpointer 持久化；短会话（≤12 条）不写该键 → 零变化硬约束。trim_messages 是
+    # 纯函数，此处重算与 core 内 LLM 路径结果一致（幂等，覆盖短路/兜底返回路径）。
+    if "messages_summary" not in result:
+        _, summary = trim_messages(list(state.get("messages", [])))
+        if summary is not None:
+            result["messages_summary"] = summary
     return result
 
 
