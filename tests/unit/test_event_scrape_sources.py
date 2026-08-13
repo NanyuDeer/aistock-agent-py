@@ -10,6 +10,7 @@ from aistock_agent.services.event_scrape_sources import (
     collect_tavily,
     collect_ths_original,
 )
+from aistock_agent.services.event_store import event_content_hash
 from aistock_agent.tools.market_tools import GlobalMarketFetchError
 from aistock_agent.utils.date import shanghai_today
 
@@ -399,3 +400,32 @@ async def test_collect_eastmoney_judgements_passes_date_from():
     call_url = str(mock_api.get.call_args.args[0])
     assert "dateFrom=2026-08-12T00:00:00%2B08:00" in call_url
     assert "days=1" not in call_url
+
+
+@pytest.mark.asyncio
+async def test_collect_ths_original_keeps_url():
+    """H6：ths 源带 url（Node 已补 source_url AS url）→ 事件 url 非空、hash 含 url。
+
+    回归保护（Node 侧改动，Python 零改动消费）：normalize_event 读 raw["url"]，
+    content_hash = sha1(title|url)。修复前 Node SELECT 无 url，url="" 导致
+    跨源同题异文 content_hash 互相 dedup 误吞；本用例锁定 Node 补字段后的行为。
+    """
+    url = "https://www.10jqka.com.cn/detail/123"
+    rows = [
+        {
+            "source_id": "s1",
+            "title": "某某公司公告",
+            "content": "公司签订重大合同",
+            "keywords": [],
+            "url": url,
+            "published_at": "2026-08-13T02:00:00.000Z",
+        }
+    ]
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"items": rows})
+        events = await collect_ths_original("2026-08-13")
+    assert len(events) == 1
+    assert events[0]["url"] == url
+    # hash 精确等于 sha1(title|url)：与无 url 场景不同，跨源同题异文不再碰撞
+    assert events[0]["content_hash"] == event_content_hash("某某公司公告", url)
+    assert events[0]["content_hash"] != event_content_hash("某某公司公告", "")
