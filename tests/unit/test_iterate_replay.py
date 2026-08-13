@@ -73,7 +73,10 @@ async def test_apply_patches_isolates_event_analyst_registry_tools(
 
     BaseTool 在 import 时捕获原始函数，模块属性 patch 拦截不到；回放隔离
     必须在服务层（NodeApiClient.get / TavilyService.search）。断言工具输出
-    来自切片语料，且真实 HTTP 入口 NodeApiClient._request 未被调用。
+    来自服务层回放，且真实 HTTP 入口 NodeApiClient._request 未被调用。
+    注（Task 2 语义修正）：search_cls_news / get_news_fulltext 不再返回全量
+    切片——切片 fixture 记录无 symbol/id 字段 → fail-loud 返回"未找到"，
+    由工具自身兜底文案呈现（B6/B7/G5/G6）。
     """
     _enable_replay(monkeypatch, "event_analyst")
     adapter = get_adapter("event_analyst")
@@ -84,13 +87,15 @@ async def test_apply_patches_isolates_event_analyst_registry_tools(
 
     event_tools = {tool.name: tool for tool in get_tools("event")}
 
-    # search_cls_news → node_api.get("/internal/news/search/{symbol}") → 切片 {"items": [...]}
+    # search_cls_news → node_api.get("/internal/news/search/{symbol}") → 切片无 symbol
+    # 字段 → fail-loud None（B6/G5：个股查询不再静默退化全量电报）→ 工具兜底文案
     news_out = await event_tools["search_cls_news"].ainvoke({"symbol": "600519"})
-    assert "隔夜美股" in news_out
+    assert "未找到股票 600519 的相关新闻" in news_out
 
-    # get_news_fulltext → node_api.get("/internal/news/fulltext/{id}") → 切片 {"title","content"}
+    # get_news_fulltext → node_api.get("/internal/news/fulltext/{id}") → 切片无 id
+    # 字段 → fail-loud None（B7/G6：不再恒取第一条）→ 工具兜底文案
     fulltext_out = await event_tools["get_news_fulltext"].ainvoke({"news_id": "1"})
-    assert "隔夜美股" in fulltext_out
+    assert "未找到新闻 1 的全文" in fulltext_out
 
     # tavily_finance_search → TavilyService.search 服务层替换 → 切片语料
     search_out = await event_tools["tavily_finance_search"].ainvoke({"query": "外盘传导"})
@@ -258,4 +263,45 @@ async def test_report_read_degraded_contracts_in_replay(iterate_data_dir: object
     assert burst_result.data is None
 
     assert await node_api.get_analysis_report_quiet("review", "2026-07-31") is None
+    remove_replay_patches()
+
+
+"""node_read 精确路径前缀白名单 + 参数语义（B6/B7/G5/G6 修复）"""
+
+
+def test_news_path_matching_is_prefix_not_substring() -> None:
+    """非新闻路径（含 search/news 子串但非前缀）不得命中白名单。"""
+    from aistock_agent.iterate.replay_layer import _is_news_service_path
+
+    assert _is_news_service_path("/internal/news/search/600519")
+    assert _is_news_service_path("/internal/telegraph?date=2026-07-31")
+    assert not _is_news_service_path("/internal/stock/search")  # 子串误命中回归
+    assert not _is_news_service_path("/internal/analysis-reports/search")
+
+
+def test_extract_symbol_and_news_id() -> None:
+    from aistock_agent.iterate.replay_layer import (
+        _extract_news_id_from_path,
+        _extract_symbol_from_path,
+    )
+
+    assert _extract_symbol_from_path("/internal/news/search/600519") == "600519"
+    assert _extract_symbol_from_path("/internal/news/search/600519?limit=5") == "600519"
+    assert _extract_symbol_from_path("/internal/news/latest") is None
+    assert _extract_news_id_from_path("/internal/news/fulltext/abc123") == "abc123"
+    assert _extract_news_id_from_path("/internal/news/latest") is None
+
+
+@pytest.mark.asyncio
+async def test_node_reader_filters_by_symbol(iterate_data_dir: object) -> None:
+    """search_cls_news 按 symbol 过滤切片记录，不再返回全量。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.services.data_client import node_api
+
+    # 切片 fixture 中无 symbol 字段 → fail-loud 返回 None（不静默退化全量）
+    out = await node_api.get("/internal/news/search/600519")
+    assert out is None
     remove_replay_patches()

@@ -356,27 +356,50 @@ async def _make_no_cache(*args: object, **kwargs: object) -> None:
     return None
 
 
+#: node_read 命中的精确路径前缀（白名单制，杜绝子串误命中；未命中一律 fail-closed）
+_NEWS_PATH_PREFIXES: tuple[str, ...] = (
+    "/internal/news/",
+    "/internal/telegraph",
+    "/internal/search/",
+)
+_SEARCH_SYMBOL_PREFIX = "/internal/news/search/"
+_FULLTEXT_PREFIX = "/internal/news/fulltext/"
+
+
 def _is_news_service_path(path: str) -> bool:
-    """判断 NodeApiClient 路径是否命中回放语料（news/telegraph/search 端点）。"""
-    return any(marker in path for marker in ("news", "telegraph", "search"))
+    """判断 NodeApiClient 路径是否命中回放语料（精确前缀白名单）。"""
+    return any(path.startswith(prefix) for prefix in _NEWS_PATH_PREFIXES)
+
+
+def _extract_symbol_from_path(path: str) -> str | None:
+    """从 /internal/news/search/{symbol} 提取 symbol；非该前缀返回 None。"""
+    if path.startswith(_SEARCH_SYMBOL_PREFIX):
+        rest = path[len(_SEARCH_SYMBOL_PREFIX):]
+        return rest.split("?")[0] or None
+    return None
+
+
+def _extract_news_id_from_path(path: str) -> str | None:
+    """从 /internal/news/fulltext/{id} 提取 news_id；非该前缀返回 None。"""
+    if path.startswith(_FULLTEXT_PREFIX):
+        rest = path[len(_FULLTEXT_PREFIX):]
+        return rest.split("?")[0] or None
+    return None
 
 
 def _make_service_node_reader(
     snapshot: dict[str, object],
 ) -> Callable[..., Awaitable[object]]:
-    """构造 NodeApiClient.get/get_list 的服务层回放读。
+    """构造 NodeApiClient.get/get_list 的服务层回放读（精确前缀 + 参数语义）。
 
-    event 工具（search_cls_news / get_news_fulltext / get_quote 等）经 registry
-    持有的 BaseTool 调用 node_api.get(...)（实例方法，类补丁生效）。按 path 匹配：
-    - 含 news/telegraph/search：返回切片 cls_telegraph 语料，形状与 news_tools
-      消费的响应一致——search/latest 端点消费 {"items": [...]}（_format_news_list），
-      fulltext 端点消费 {"title", "content"}；
-    - 其余路径（如 /internal/quote/...）：返回 None（隔离，不发真实请求）。
+    - 前缀命中 /internal/news/、/internal/telegraph、/internal/search/ 才返回切片语料；
+    - search/{symbol}：切片记录含 symbol 字段时按 symbol 过滤；无该字段时 fail-loud 返回 None
+      （绝不静默退化为全量，避免个股新闻=全市场电报的语义错配）；
+    - fulltext/{id}：切片记录含 id 字段时按 id 精确匹配；无匹配/无 id 字段 → fail-loud None；
+    - 其余路径返回 None（隔离，不发真实请求）。
     """
 
     async def reader(*args: object, **kwargs: object) -> object:
-        # 实例调用 node_api.get(path) 时普通函数会被绑定，self 落在 args[0]，
-        # 因此 path 在 args[1]；兼容类级/关键字调用（args[0] / kwargs["path"]）。
         path_kwarg = kwargs.get("path")
         if isinstance(path_kwarg, str):
             path = path_kwarg
@@ -391,12 +414,37 @@ def _make_service_node_reader(
             return None
         raw = snapshot.get("cls_telegraph")
         records = raw if isinstance(raw, list) else []
-        if "fulltext" in path:
-            record = next((r for r in records if isinstance(r, dict)), None)
-            if record is None:
+        records = [r for r in records if isinstance(r, dict)]
+
+        symbol = _extract_symbol_from_path(path)
+        if symbol is not None:
+            # 按 symbol 过滤；切片记录无 symbol 字段 → fail-loud（不静默退化全量）
+            filtered = [r for r in records if str(r.get("symbol", "")) == symbol]
+            if not filtered and any("symbol" in r for r in records):
+                filtered = [
+                    r
+                    for r in records
+                    if symbol in str(r.get("title", ""))
+                    or symbol in str(r.get("content", ""))
+                ]
+            if not filtered:
+                logger.warning("iterate_replay_symbol_no_match", path=path, symbol=symbol)
                 return None
+            return {"items": filtered}
+
+        news_id = _extract_news_id_from_path(path)
+        if news_id is not None:
+            matched = [r for r in records if str(r.get("id", "")) == news_id]
+            if not matched:
+                logger.warning("iterate_replay_news_id_no_match", path=path, news_id=news_id)
+                return None
+            record = matched[0]
             return {"title": record.get("title", ""), "content": record.get("content", "")}
-        return {"items": [r for r in records if isinstance(r, dict)]}
+
+        if "fulltext" in path:
+            # 兼容：非 /internal/news/fulltext/ 前缀但含 fulltext 的路径，fail-closed
+            return None
+        return {"items": records}
 
     return reader
 
