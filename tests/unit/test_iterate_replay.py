@@ -1,6 +1,7 @@
 """replay_layer —— 回放开关、数据注入与副作用隔离"""
 
 import os
+from datetime import date
 from unittest import mock
 
 import pytest
@@ -136,26 +137,42 @@ async def test_noop_contracts(
     remove_replay_patches()
 
 
-# 服务层隔离清单制：NodeApiClient 全部公共网络方法必须登记隔离或豁免。
+# 服务层隔离清单制：NodeApiClient / TavilyService 全部公共方法必须登记隔离或豁免。
 
 
 def test_service_isolation_covers_all_public_network_methods() -> None:
-    """清单封闭：NodeApiClient 公共网络方法 ⊆ 隔离目标 ∪ 豁免名单（防未来新增方法漏登记）。"""
+    """清单封闭：NodeApiClient/TavilyService 全部公共方法 ⊆ 隔离目标 ∪ 显式豁免名单。
+
+    introspection 而非硬编码清单（I-3 修复）：原测试只断言 10 个硬编码方法
+    已登记，未来新增网络方法不会使测试失败（名不副实）。改为反射出两个类的
+    全部公共方法（非下划线开头 + callable/staticmethod），逐一断言在
+    _SERVICE_ISOLATION_TARGETS 中登记或列入 _ISOLATION_EXEMPT_METHODS 豁免
+    （豁免仅允许"经已登记方法间接隔离"的辅助方法，见 replay_layer 注释）。
+    """
+    import inspect
+
+    from aistock_agent.services.data_client import NodeApiClient
+    from aistock_agent.services.tavily import TavilyService
+
     isolated = set(replay_layer._SERVICE_ISOLATION_TARGETS)
-    # get/get_list/post 已在清单；get_industry_chain 等直接 httpx 方法必须登记
-    for name in (
-        "get",
-        "get_list",
-        "post",
-        "put",
-        "delete",
-        "patch",
-        "get_industry_chain",
-        "get_analysis_report_quiet",
-        "get_review_analysis_report",
-        "get_hot_burst_data",
-    ):
-        assert any(t.endswith(f".{name}") for t in isolated), f"{name} 未登记隔离"
+    exempt = replay_layer._ISOLATION_EXEMPT_METHODS
+
+    for cls in (NodeApiClient, TavilyService):
+        public_methods = {
+            name
+            for name, member in inspect.getmembers(cls)
+            if not name.startswith("_")
+            and (
+                inspect.isfunction(member)
+                or inspect.ismethod(member)
+                or isinstance(member, staticmethod | classmethod)
+            )
+        }
+        for name in sorted(public_methods):
+            qualified = f"{cls.__name__}.{name}"
+            assert any(t.endswith(f".{qualified}") for t in isolated) or (
+                qualified in exempt
+            ), f"{qualified} 未登记隔离或豁免"
 
 
 @pytest.mark.asyncio
@@ -176,14 +193,69 @@ async def test_get_industry_chain_isolated_in_replay(iterate_data_dir: object) -
 
 @pytest.mark.asyncio
 async def test_put_delete_patch_noop_in_replay(iterate_data_dir: object) -> None:
-    """回放模式下 put/delete/patch 写操作 no-op 返回 None。"""
+    """回放模式下 put/delete/patch 写操作 no-op 返回 None，且不触达真实网络实现。
+
+    I-2 修复（原测试空洞）：本环境 HttpClientPool 未初始化，真实 put/delete/
+    patch 吞异常返回 None（data_client.py:245/278/300），与回放 no-op 结果
+    巧合一致——只断言返回值无法区分补丁是否生效（RED 即通过）。
+    现参照 test_apply_patches_isolates_event_analyst_registry_tools 的
+    wraps= 哨兵模式：在 apply_replay_patches 之前 spy 各方法自身（wraps=真实
+    实现），断言回放调用后 spy 未被触达——若补丁失效，真实实现（含真实网络
+    入口 HttpClientPool.get_client）会被调用，assert_not_called 失败。
+    """
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    adapter = get_adapter("review")
+
+    from aistock_agent.services.data_client import NodeApiClient, node_api
+
+    # spy 必须建于 apply_replay_patches 之前：wraps=真实实现；apply 将其
+    # 覆盖为回放 no-op，故真实实现绝不触达。循环内 apply/remove 保证每个
+    # 方法都在"未打补丁"状态下建立 spy（I-2 修复前此处无 spy）。
+    for method_name, args in (
+        ("put", ("/x", {})),
+        ("delete", ("/x",)),
+        ("patch", ("/x", {})),
+    ):
+        with mock.patch.object(
+            NodeApiClient, method_name, wraps=getattr(NodeApiClient, method_name)
+        ) as spy:
+            apply_replay_patches(adapter)
+            assert await getattr(node_api, method_name)(*args) is None
+            spy.assert_not_called()  # 回放调用不触达真实网络实现
+            remove_replay_patches()
+
+
+@pytest.mark.asyncio
+async def test_report_read_degraded_contracts_in_replay(iterate_data_dir: object) -> None:
+    """report_read 分支降级契约（M-3/I-1 回归）：结构化方法返回 unavailable，quiet 返回 None。
+
+    真实契约（data_client.py）：get_review_analysis_report 失败路径返回
+    ReviewReportReadResult("unavailable")（614/617/627/633/637/641，永不 None）、
+    get_hot_burst_data 返回 HotBurstReadResult("unavailable")（131/138/151，
+    永不 None），调用方直接解引用 .status（trace_loader.py:49 / hot_burst.py:136）；
+    get_analysis_report_quiet 是纯 dict/None 契约（522，404 与失败均返回 None）。
+    断言回放降级值类型与真实实现失败路径一致——若回放统一返回 None，
+    get_review_analysis_report / get_hot_burst_data 的调用方会 AttributeError。
+    """
     os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
 
-    from aistock_agent.services.data_client import node_api
+    from aistock_agent.services.data_client import (
+        HotBurstReadResult,
+        ReviewReportReadResult,
+        node_api,
+    )
 
-    assert await node_api.put("/x", {}) is None
-    assert await node_api.delete("/x") is None
-    assert await node_api.patch("/x", {}) is None
+    review_result = await node_api.get_review_analysis_report(date(2026, 7, 31))
+    assert isinstance(review_result, ReviewReportReadResult)
+    assert review_result.status == "unavailable"
+    assert review_result.report is None
+
+    burst_result = await node_api.get_hot_burst_data("/internal/institution-research")
+    assert isinstance(burst_result, HotBurstReadResult)
+    assert burst_result.status == "unavailable"
+    assert burst_result.data is None
+
+    assert await node_api.get_analysis_report_quiet("review", "2026-07-31") is None
     remove_replay_patches()

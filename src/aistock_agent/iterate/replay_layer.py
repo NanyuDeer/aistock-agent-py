@@ -44,8 +44,13 @@ _REPLAY_PATCH_TARGETS: dict[str, str] = {
 #   status=upstream_failed，event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含该值），
 #   绝不触网，防止实时 IndustryKG 数据注入回放（B4 修复）；
 # - "report_read"：get_analysis_report_quiet / get_review_analysis_report /
-#   get_hot_burst_data 报告/行情类读隔离——返回 None，调用方走"无数据"降级
-#   （B4 修复，原实现直接 httpx 触网）；
+#   get_hot_burst_data 报告/行情类读隔离（B4 修复，原实现直接 httpx 触网）。
+#   降级值按目标方法契约区分（I-1 修复，不能统一返回 None）：
+#   get_analysis_report_quiet 是纯 dict/None 契约 → 返回 None（"无数据"）；
+#   get_review_analysis_report / get_hot_burst_data 是结构化结果契约
+#   （ReviewReportReadResult / HotBurstReadResult），调用方直接解引用
+#   .status（trace_loader.py:49 / hot_burst.py:136）→ 返回 ("unavailable")
+#   降级值，与真实实现失败路径语义一致；
 # - "tavily_search"：TavilyService.search 是同步静态方法（tavily_finance_search
 #   直接 `result = TavilyService.search(...)` 无 await），必须同步替换，
 #   返回切片语料（受限"可搜索"语料），不发网络请求。
@@ -64,6 +69,36 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     "aistock_agent.services.data_client.NodeApiClient.patch": "node_noop",
     "aistock_agent.services.tavily.TavilyService.search": "tavily_search",
 }
+
+# 显式豁免名单（I-3 清单封闭测试用）：NodeApiClient 中"经已登记方法间接调用、
+# 无独立网络入口"的公共方法。回放隔离在已登记方法处生效——post/put/delete/
+# get/get_list 被替换为 no-op/degraded 后，这些间接调用方拿到降级返回值自行
+# 优雅降级（如 save_prediction 拿 post 的 None、cleanup_expired_reports 拿
+# delete 的 None），无需逐个登记。
+# 硬约束：新增"直接 httpx 触网"的方法必须登记进 _SERVICE_ISOLATION_TARGETS，
+# 禁止以"间接隔离"为由加入本名单（否则回放会触达真实网络）。
+_ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
+    {
+        # 经 post 间接隔离（post → node_noop 返回 None）
+        "NodeApiClient.semantic_search_industries",
+        "NodeApiClient.save_prediction",
+        # 经 get 间接隔离（get → node_read 返回 None）
+        "NodeApiClient.get_analysis_report",
+        "NodeApiClient.get_quick_snapshot",
+        "NodeApiClient.get_last_close_snapshot",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）
+        "NodeApiClient.list_analysis_reports",
+        "NodeApiClient.list_pending_predictions",
+        # 经 put 间接隔离（put → node_noop 返回 None）
+        "NodeApiClient.update_prediction_verification",
+        # 经 delete 间接隔离（delete → node_noop 返回 None）
+        "NodeApiClient.cleanup_expired_reports",
+        # 写副作用由 _ASYNC_SIDE_EFFECT_TARGETS 单独隔离（_make_noop 返回
+        # True，调用方 `if not await save_analysis_report(...)` 判为成功）
+        "NodeApiClient.save_analysis_report",
+        "NodeApiClient.save_token_usage",
+    }
+)
 
 # 写副作用 → no-op（回放只读，禁止污染主数据）。
 # 注意：review.py / event.py 用 from-import 绑定这些名字（event.py:29-31
@@ -151,8 +186,17 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
             # （event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含 upstream_failed）
             _patch_async(target, _make_industry_chain_degraded)
         elif kind == "report_read":
-            # 报告/行情类读隔离：返回 None（调用方走"无数据"降级）
-            _patch_async(target, _make_none_noop)
+            # I-1 修复：按目标方法返回正确降级值，不能再统一返回 None——
+            # get_analysis_report_quiet 契约是纯 dict/None（data_client.py:522，
+            # 消费方 event_store.py:228 直接判 None），保持 None；
+            # get_review_analysis_report / get_hot_burst_data 是结构化结果契约
+            # （调用方直接解引用 .status/.report/.data，trace_loader.py:49 /
+            # hot_burst.py:136），回放返回 None 会 AttributeError 崩溃，必须
+            # 返回同型 ("unavailable") 降级值（与真实实现失败路径语义一致）。
+            if target.endswith("get_analysis_report_quiet"):
+                _patch_async(target, _make_none_noop)
+            else:
+                _patch_async(target, _make_report_read_degraded(target))
         else:  # tavily_search：同步替换（TavilyService.search 调用处无 await）
             _patch_sync(target, _make_tavily_search_reader(snapshot))
 
@@ -252,6 +296,38 @@ async def _make_industry_chain_degraded(*args: object, **kwargs: object) -> obje
     from aistock_agent.services.data_client import IndustryChainReadResult
 
     return IndustryChainReadResult(status="upstream_failed")
+
+
+def _make_report_read_degraded(
+    target_path: str,
+) -> Callable[..., Awaitable[object]]:
+    """构造 report_read 回放替换：按目标方法返回正确的结构化降级值。
+
+    为什么不能统一返回 None（I-1 修复）：get_review_analysis_report /
+    get_hot_burst_data 的真实契约是结构化结果（失败路径返回
+    ReviewReportReadResult("unavailable") / HotBurstReadResult("unavailable")，
+    data_client.py:614/151，永不返回 None），调用方直接解引用
+    .status/.report/.data（trace_loader.py:49 `read_result.status` /
+    hot_burst.py:136 `source_result.status`）；回放若返回 None 会在调用方处
+    AttributeError 崩溃（潜伏缺陷）。因此按目标方法返回同型 ("unavailable")
+    降级值，与真实实现失败语义一致，且绝不触网。
+
+    函数内 import 结果类型：避免模块顶层依赖 data_client（保持 replay_layer
+    对服务层数据结构的惰性加载，与 _make_industry_chain_degraded 同模式）。
+    """
+    if target_path.endswith("get_hot_burst_data"):
+        from aistock_agent.services.data_client import HotBurstReadResult
+
+        result_cls = HotBurstReadResult
+    else:
+        from aistock_agent.services.data_client import ReviewReportReadResult
+
+        result_cls = ReviewReportReadResult
+
+    async def degraded(*args: object, **kwargs: object) -> object:
+        return result_cls("unavailable")
+
+    return degraded
 
 
 def _make_sync_noop(*args: object, **kwargs: object) -> bool:
