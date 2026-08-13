@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 
 def test_register_iterate_jobs_adds_daily_job() -> None:
@@ -73,3 +74,49 @@ async def test_run_iterate_daily_consumes_case_without_experiment(
     case = mock_run.await_args.args
     assert case[1] == "case_20260731_us_market_surge"
     mock_report.assert_awaited_once()
+
+
+# ---- 产片接线 + 双 job 错峰（D16/F4/N6 修复）----
+
+
+def test_register_iterate_jobs_registers_two_jobs() -> None:
+    """注册两个 job：产片（16:30）+ 消费（17:00）。"""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from aistock_agent.config import settings
+    from aistock_agent.iterate.scheduler import register_iterate_jobs
+
+    scheduler = AsyncIOScheduler()
+    register_iterate_jobs(scheduler)
+    build_job = scheduler.get_job("iterate_case_build")
+    assert build_job is not None
+    assert scheduler.get_job("iterate_daily") is not None
+    # APScheduler 3.x 的 CronTrigger/BaseField 未实现 __eq__，逐字段序列化
+    # 表达式后与 settings.iterate_case_build_cron 重建的 trigger 比较。
+    assert _cron_exprs(build_job.trigger) == _cron_exprs(
+        CronTrigger.from_crontab(
+            settings.iterate_case_build_cron, timezone=settings.scheduler_timezone
+        )
+    )
+
+
+def _cron_exprs(trigger: CronTrigger) -> dict[str, str]:
+    """把 CronTrigger 各字段序列化为 {字段名: 表达式}，供触发规则比对。"""
+    return {f.name: ",".join(str(e) for e in f.expressions) for f in trigger.fields}
+
+
+@pytest.mark.asyncio
+async def test_build_task_failure_does_not_break_report(iterate_data_dir: object) -> None:
+    """产片失败（Node 不可达）只告警，不中止每日迭代报告。"""
+    from aistock_agent.iterate.scheduler import _run_iterate_build_task
+
+    with patch(
+        "aistock_agent.iterate.scheduler.find_recent_trading_day",
+        AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.iterate.scheduler._build_review_and_event_cases",
+        AsyncMock(side_effect=RuntimeError("node unreachable")),
+    ) as mock_build:
+        await _run_iterate_build_task()
+    mock_build.assert_awaited()
+    # 产片失败不抛异常（被内部 try/except 吸收）

@@ -138,8 +138,10 @@ class Settings(BaseSettings):
     iterate_enabled: bool = False
     # 数据目录（切片/标准答案/实验/报告，均 gitignore）
     iterate_data_dir: str = "data"
-    # 每日汇总：交易日 16:00（现有 iterate 15:40 之后）
-    iterate_cron: str = "0 16 * * 1-5"
+    # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
+    iterate_cron: str = "0 17 * * 1-5"
+    # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
+    iterate_case_build_cron: str = "30 16 * * 1-5"
     iterate_max_rounds: int = 5            # 每案例变体轮数上限
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
