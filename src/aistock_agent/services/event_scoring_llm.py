@@ -120,3 +120,19 @@ async def _quick_filter(events: list[event_store.EventRecord]) -> set[str]:
             logger.warning("event_score_quick_filter_failed", batch=len(batch))
             keep |= {ev["content_hash"] for ev in batch}
     return keep
+
+
+async def _deep_score(event: event_store.EventRecord) -> DeepScoreOutput | None:
+    """deep_think 逐条精评；异常/非法输出返回 None（保持规则评分）。"""
+    try:
+        llm = with_chat_structured_output(get_deep_think(), DeepScoreOutput)
+        # with_chat_structured_output 签名返回 Runnable[Any, Any]，ainvoke 结果为 Any；
+        # 实际 json_mode 已按 DeepScoreOutput schema 解析，异常由下方 except 兜底。
+        return await llm.ainvoke({  # type: ignore[no-any-return]
+            "event_id": event["event_id"],
+            "title": event["title"],
+            "summary": event["summary"],
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning("event_score_deep_failed", hash=event["content_hash"][:16])
+        return None

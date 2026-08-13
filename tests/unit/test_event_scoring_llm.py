@@ -10,6 +10,7 @@ from aistock_agent.services.event_scoring_llm import (
     QuickFilterOutput,
     _cache_get,
     _cache_set,
+    _deep_score,
     _quick_filter,
     apply_llm_scores,
 )
@@ -154,3 +155,39 @@ async def test_quick_filter_batches_by_config():
             result = await _quick_filter(events)
     assert [len(r.last_payload["events"]) for r in runnables] == [2, 2, 1]  # 5 条按每批 2 分 3 批
     assert len(result) == 5
+
+
+class _FakeDeepRunnable:
+    """模拟 get_deep_think() 返回的 runnable。
+
+    with_chat_structured_output 是真实包装（调用 llm.with_structured_output），
+    故 fake 需实现 with_structured_output 返回自身，包装后 ainvoke 返回 DeepScoreOutput。
+    """
+
+    def __init__(self, output: DeepScoreOutput | None) -> None:
+        self._output = output
+
+    def with_structured_output(self, schema: Any, method: str = "json_mode") -> "_FakeDeepRunnable":
+        return self
+
+    async def ainvoke(self, payload: dict[str, Any]) -> DeepScoreOutput | None:
+        self.last_payload = payload
+        return self._output
+
+
+@pytest.mark.asyncio
+async def test_deep_score_returns_output():
+    fake = _FakeDeepRunnable(DeepScoreOutput(impact_score=5, direction="positive", reason="重大利好"))
+    with patch("aistock_agent.services.event_scoring_llm.get_deep_think", return_value=fake):
+        result = await _deep_score(_ev("e1", "aaa", impact=5))
+    assert result is not None
+    assert result.impact_score == 5
+    assert result.reason == "重大利好"
+    assert fake.last_payload["event_id"] == "e1"
+
+
+@pytest.mark.asyncio
+async def test_deep_score_failure_returns_none():
+    with patch("aistock_agent.services.event_scoring_llm.get_deep_think", side_effect=RuntimeError("boom")):
+        result = await _deep_score(_ev("e1", "aaa", impact=5))
+    assert result is None
