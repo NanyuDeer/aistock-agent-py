@@ -49,7 +49,7 @@ def test_validate_rejects_out_of_order():
 
 def test_validate_rejects_missing_stage():
     chain = _chain(*TRACE_CHAIN_STAGES[:5])
-    with pytest.raises(TraceChainError):
+    with pytest.raises(TraceChainError, match="chain stages mismatch"):
         validate_chain_stages(chain.nodes)
 
 
@@ -78,3 +78,19 @@ def test_stock_trace_validator_uses_shared_stages():
     from aistock_agent.services.stock_trace_validator import STAGES
 
     assert tuple(STAGES) == TRACE_CHAIN_STAGES
+
+
+def test_shared_types_are_same_objects():
+    import aistock_agent.trace.chain as chain_mod
+    from aistock_agent.schemas.market_trace import CausalChain, CausalNode
+    from aistock_agent.schemas.stock_trace import ChainStage
+    from aistock_agent.services.stock_trace_validator import STAGES
+
+    assert ChainStage is chain_mod.ChainStage
+    assert CausalChain is chain_mod.CausalChain
+    assert CausalNode is chain_mod.CausalNode
+    assert STAGES is chain_mod.TRACE_CHAIN_STAGES
+
+
+def test_trace_chain_error_is_value_error_subclass():
+    assert issubclass(TraceChainError, ValueError)
