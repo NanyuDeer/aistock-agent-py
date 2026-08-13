@@ -574,7 +574,7 @@ content = {
 - `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行
 - 回放隔离（fail-closed，2026-08-13 辩论裁决修复）：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放显式拒绝（走 run() 入口）+ 源模块双绑定
 - 评分体系：归因相似度重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；Tavily 死代码与"指数neutral"兜底删除
-- 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘
+- 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘；`_compute_variant_hash` 含完整补丁规格（T9 M3）；`_cleanup_stale_experiments` 跨运行残留清理（T10 Q1）；失败轮 `is_failure` 显式标记 + `infra_failures` 连续计数（T11 M1/M2）；基线轮纳入 try/except（T11 M3）；`_recompute_best` 跳过 `is_failure` 记录（T11 M4）
 - 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30 产片 / 17:00 消费报告）+ status=complete 检查
 - 已知限制（二期）：`scripts/build_iterate_cases.py` 按 `--agent` if/else 硬编码 review/event_analyst 两个 agent 的采集/构建流程，未消费 `adapter.data_deps` 声明；接入第三个 agent 时需抽「按 data_deps 采集 → build_case → 生成 GT → 校验」通用流水线（见 docs/superpowers/specs/2026-08-11-iterate-case-sourcing-design.md §1.1 目标 4）
 

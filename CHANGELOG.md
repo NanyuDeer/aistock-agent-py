@@ -1,5 +1,24 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [feat/event-scrape-hub] 2026-08-13 — 迭代辩论裁决修复第二轮收尾（T9 M3/T10 Q1/T11 + 基线清理）
+**开发者**: Aria
+
+### 修复
+- `variant_engine.py`: `_content_hash` 参数类型从 `dict[str, str]` 放宽为 `dict[str, object]`，兼容 `_compute_variant_hash` 传入的嵌套 dict 补丁规格（T9 M3 补充修复）
+- `test_iterate_variant.py`: `test_experiment_record_has_real_variant_hash` 更新为用 `_compute_variant_hash` 计算预期值（适配 T9 M3）；移除未使用的 `hashlib` 导入
+- `test_iterate_loop.py`: `test_stale_experiment_records_cleaned_before_run` 添加 `result` 断言消除 ruff F841
+
+### 改进
+- `config.py`: 修复 2 个 E501 行过长（event_scrape 调度 cron 表达式换行）
+- `AGENTS.md`: iterate 模块描述补充 T9 M3/T10 Q1/T11 M1-M4 修复要点
+
+### 验证
+- pytest: 73 passed, 3 deselected（2 个依赖 git 可执行文件、1 个预存不相关失败）
+- ruff: All checks passed（iterate 模块 + 测试文件 + config.py）
+- mypy: 无错误（iterate 模块）
+
+---
+
 ## [changer] 2026-08-13 — 对话体验优化：深度分析触发修复
 **开发者**: 37588
 

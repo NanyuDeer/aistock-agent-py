@@ -1,6 +1,5 @@
 """variant_engine —— 变体生成/应用/恢复与实验记录"""
 
-import hashlib
 import json
 import subprocess
 from datetime import date
@@ -113,11 +112,14 @@ def test_restore_baseline_restores_extra_files(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object) -> None:
-    """I2 回归：实验记录的 variant_hash 是 new_content 的真实 sha256，不再伪造 git_commit。"""
+    """I2/T9 M3 回归：实验记录的 variant_hash 由 _compute_variant_hash 计算（含补丁规格）。"""
     import json as _json
     from pathlib import Path as _Path
 
-    from aistock_agent.iterate.variant_engine import run_experiment_round
+    from aistock_agent.iterate.variant_engine import (
+        _compute_variant_hash,
+        run_experiment_round,
+    )
 
     variant = VariantPlan(
         type="prompt_diff",
@@ -143,9 +145,9 @@ async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object)
     ):
         record = await run_experiment_round("review", case, 1, variant, gt)
 
-    expected = hashlib.sha256(
-        json.dumps(variant.new_content, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    # T9 M3：variant_hash 由 _compute_variant_hash 计算（含 target_symbol/old/new_snippet），
+    # 不再是仅 new_content 的 sha256
+    expected = _compute_variant_hash(variant)
     assert record["variant_hash"] == expected
     assert "git_commit" not in record
     assert record["created_at"] == date.today().isoformat()

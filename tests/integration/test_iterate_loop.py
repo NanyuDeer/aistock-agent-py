@@ -771,6 +771,7 @@ async def test_stale_experiment_records_cleaned_before_run(
                 )
 
     # 残留 r2 记录应被清理
+    assert result["stopped_reason"] in ("max_rounds", "score_reached")
     assert not (exps / f"{case['case_id']}_r2.json").exists()
     # best.json 若存在，分数不应是残留的 0.9
     best_path = exps / f"{case['case_id']}_best.json"

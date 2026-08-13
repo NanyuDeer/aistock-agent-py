@@ -505,8 +505,13 @@ def _parse_json(text: str) -> dict[str, object]:
         return {}
 
 
-def _content_hash(new_content: dict[str, str]) -> str:
-    """变体内容的真实 sha256（json.dumps sorted keys），替代伪造的 git_commit。"""
+def _content_hash(new_content: dict[str, object]) -> str:
+    """变体内容的真实 sha256（json.dumps sorted keys），替代伪造的 git_commit。
+
+    参数类型为 dict[str, object]：_compute_variant_hash 传入含嵌套 dict 的
+    补丁规格（new_content + target_symbol/old_snippet/new_snippet），
+    json.dumps 可序列化任意对象，无需限制为 dict[str, str]。
+    """
     import hashlib
 
     payload = json.dumps(new_content, sort_keys=True, ensure_ascii=False)
