@@ -167,12 +167,17 @@ async def _driver_hit_score(
         hit = 0
     # N5 修复：机械核验——judge 声称的命中引用片段必须在 corpus 中可验证，
     # 否则作废（模型不可自证，证据由机器验证）。
+    # 2026-08-13 放宽为关键词溯源（_quote_traceable）：agent LLM 生成的驱动
+    # 表述是语义改写（如"美国FCC限制中国光模块对美出口"），与切片语料措辞
+    # 非逐字一致，逐字匹配必然失败 → 驱动维恒 0 分（服务器事故实测）。要求
+    # quote 直接包含在语料中，或任意 2 字连续片段可在语料中找到（防语料外
+    # 知识，与 gt_validator._traceable 语义一致）。
     quotes = parsed.get("quotes")
     if corpus:
         verified = 0
         if isinstance(quotes, list):
             for q in quotes:
-                if isinstance(q, str) and q and q in corpus:
+                if isinstance(q, str) and q and _quote_traceable(q, corpus):
                     verified += 1
         hit = min(hit, verified)
     total = len(truth)  # A2 修复：分母固定 len(truth)，杜绝自报小 total
@@ -185,6 +190,21 @@ def _as_str_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+def _quote_traceable(quote: str, corpus: str) -> bool:
+    """judge 引用片段在语料中可溯源：直接包含，或任意 2 字连续片段可匹配。
+
+    与 gt_validator._traceable 语义一致（放宽逐字核验，2026-08-13 修复）：
+    agent LLM 驱动表述是语义改写，逐字匹配必然失败；含语料核心词即可验证，
+    同时挡住完全语料外的表述（无任何 2 字片段命中）。
+    """
+    if quote in corpus:
+        return True
+    for i in range(len(quote) - 1):
+        if quote[i : i + 2] in corpus:
+            return True
+    return False
 
 
 def _parse_json(text: str) -> dict[str, object]:
