@@ -262,6 +262,37 @@ async def test_driver_hit_rejects_unverifiable_quote() -> None:
     assert score.drivers == 0.0  # 引用无法在 corpus 验证 → 命中作废
 
 
+@pytest.mark.asyncio
+async def test_driver_hit_accepts_reworded_quote_with_keywords() -> None:
+    """agent 改写表述（含语料关键词、非逐字）通过机械核验。
+
+    2026-08-13 服务器驱动维全 0 根因：N5 逐字核验误杀语义改写——agent LLM
+    生成的驱动表述（如"美国FCC限制中国光模块对美出口"）与切片语料
+    （"美国拟限制含光模块的中国数据中心组件对美出口"）措辞不同，逐字
+    匹配必然失败 → verified=0 → 驱动维恒 0 分（即使语义完全等价）。
+    放宽为关键词溯源（任意 2 字连续片段在语料中即可验证）。
+    """
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["美国限制进口中国光模块"],
+            "affected_sectors": [],
+            # 语料含"美国""光模块""出口"等关键词，但与 agent 改写表述非逐字一致
+            "corpus": "财联社：美国拟限制含光模块的中国数据中心组件对美出口，光模块概念股下跌",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["美国FCC限制中国光模块对美出口"], []),
+                # judge 引用 agent 的改写表述（非语料逐字）
+                _mock_driver_judge(1, 1, quotes=["美国FCC限制中国光模块对美出口"]),
+            ]
+        )
+        score = await evaluate_attribution("美国FCC限制中国光模块对美出口", gt)
+    assert score.drivers == 0.5  # 含语料关键词（美国/光模块/出口）→ 核验通过，命中保留
+
+
 """T7 M3: corpus=None 防御（str(None)='None' 是 truthy，导致误触发核验）"""
 
 
