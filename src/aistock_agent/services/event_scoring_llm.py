@@ -66,3 +66,30 @@ def apply_llm_scores(
         )
         result.append({**ev, "impact_score": impact, "direction": direction})
     return result
+
+
+async def _cache_get(content_hash: str) -> DeepScoreOutput | None:
+    """读评分缓存（event_score:{hash}）。未命中/异常返回 None。"""
+    try:
+        client = await RedisPool.get_client()
+        cached = await client.get(f"{_CACHE_PREFIX}{content_hash}")
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            return DeepScoreOutput(**parsed)
+    except Exception:  # noqa: BLE001
+        logger.debug("event_score_cache_get_failed", hash=content_hash[:16])
+    return None
+
+
+async def _cache_set(content_hash: str, score: DeepScoreOutput) -> None:
+    """写评分缓存（TTL 由配置控制）。失败仅 warning。"""
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(
+            f"{_CACHE_PREFIX}{content_hash}",
+            settings.event_scoring_cache_ttl,
+            json.dumps(score.model_dump(), ensure_ascii=False),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("event_score_cache_set_failed", hash=content_hash[:16])

@@ -1,4 +1,6 @@
+import json
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -6,6 +8,8 @@ from aistock_agent.services.event_scoring_llm import (
     DeepScoreOutput,
     QuickFilterItem,
     QuickFilterOutput,
+    _cache_get,
+    _cache_set,
     apply_llm_scores,
 )
 
@@ -47,3 +51,39 @@ def test_apply_llm_scores_keeps_original_on_missing_or_invalid():
         {"aaa": DeepScoreOutput.model_construct(impact_score=5, direction="invalid")},
     )
     assert result2[0]["direction"] == "neutral"  # direction 非法 → 保留原值
+
+
+@pytest.mark.asyncio
+async def test_cache_get_hit_parses_score():
+    fake_client = AsyncMock()
+    fake_client.get = AsyncMock(return_value=json.dumps(
+        {"impact_score": 5, "direction": "positive", "reason": "r"}
+    ).encode())
+    with patch("aistock_agent.services.event_scoring_llm.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        result = await _cache_get("aaa")
+    assert result is not None
+    assert result.impact_score == 5
+    assert result.direction == "positive"
+
+
+@pytest.mark.asyncio
+async def test_cache_get_miss_returns_none():
+    fake_client = AsyncMock()
+    fake_client.get = AsyncMock(return_value=None)
+    with patch("aistock_agent.services.event_scoring_llm.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        result = await _cache_get("aaa")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_cache_set_writes_with_ttl():
+    fake_client = AsyncMock()
+    with patch("aistock_agent.services.event_scoring_llm.RedisPool") as mock_pool:
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        await _cache_set("aaa", DeepScoreOutput(impact_score=4, direction="negative"))
+    args, kwargs = fake_client.setex.await_args
+    assert args[0] == "event_score:aaa"
+    assert args[1] == 86400
+    assert json.loads(args[2])["impact_score"] == 4
