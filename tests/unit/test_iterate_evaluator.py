@@ -156,3 +156,50 @@ async def test_neutral_direction_excluded_from_denominator() -> None:
     # 可用权重 = drivers 0.5 + sectors 0.3 = 0.8；得分 = 0.5+0.3=0.8 → total=1.0
     assert score.total == 1.0
     assert score.available_weight == 0.8
+
+
+"""gap_analysis 感知 present 维度（Task 6 审查 Important 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_no_phantom_gap_when_all_dims_excluded() -> None:
+    """GT direction=neutral + sectors=[] + drivers=[]：三维全部被排除出评分，
+    gap_analysis 不得含假缺口——应为"无显著差距"（而非必报"方向不一致"等）。"""
+    gt = {
+        "attribution": {
+            "direction": "neutral",
+            "drivers": [],
+            "affected_sectors": [],
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        # extract 返回 neutral（与 GT 语义匹配）；drivers 空 → 不调 judge
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=_mock_llm_extract("neutral", [], [])
+        )
+        score = await evaluate_attribution("任何输出", gt)
+    assert "方向不一致" not in score.gap_analysis
+    assert "板块覆盖不足" not in score.gap_analysis
+    assert "驱动要素覆盖不足" not in score.gap_analysis
+    assert score.gap_analysis == "无显著差距"
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_reports_direction_only_when_present() -> None:
+    """GT direction=bullish + sectors=[] + drivers=[]：仅方向维参与评分，
+    方向不匹配应报"方向不一致"；被排除的板块/驱动两维不得报假缺口。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": [],
+            "affected_sectors": [],
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=_mock_llm_extract("bearish", ["国内政策收紧"], ["银行"])
+        )
+        score = await evaluate_attribution("偏空解读", gt)
+    assert "方向不一致" in score.gap_analysis
+    assert "板块覆盖不足" not in score.gap_analysis
+    assert "驱动要素覆盖不足" not in score.gap_analysis

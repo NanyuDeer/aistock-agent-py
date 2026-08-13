@@ -103,7 +103,14 @@ async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object
         else 0.0
     )
     gap_analysis = _build_gap_analysis(
-        direction_score, drivers_score, sectors_score, attribution, extracted
+        direction_score,
+        drivers_score,
+        sectors_score,
+        direction_present,
+        sectors_present,
+        drivers_present,
+        attribution,
+        extracted,
     )
     return ScoreDetail(
         direction=direction_score,
@@ -180,16 +187,25 @@ def _build_gap_analysis(
     direction_score: float,
     drivers_score: float,
     sectors_score: float,
+    direction_present: bool,
+    sectors_present: bool,
+    drivers_present: bool,
     attribution: dict[str, object],
     extracted: dict[str, object],
 ) -> str:
+    """构建差距分析：仅对参与评分（present）的维度做缺口判定。
+
+    为什么：重归一化后，被排除维度（GT direction=neutral / sectors=[] /
+    drivers=[]）得分恒为 0.0，若仍按原始阈值判断会产生假缺口（如 neutral
+    语义匹配却报"方向不一致"），误导下游 generate_variant 的提示输入。
+    """
     gaps: list[str] = []
-    if direction_score == 0.0:
+    if direction_present and direction_score == 0.0:
         gaps.append(f"方向不一致：标准答案={attribution.get('direction')}，agent={extracted.get('direction')}")
-    if sectors_score < 0.15:
+    if sectors_present and sectors_score < 0.15:
         gaps.append(
             f"板块覆盖不足：标准答案={attribution.get('affected_sectors')}，agent={extracted.get('sectors')}"
         )
-    if drivers_score < 0.25:
+    if drivers_present and drivers_score < 0.25:
         gaps.append(f"驱动要素覆盖不足：标准答案={attribution.get('drivers')}")
     return "；".join(gaps) if gaps else "无显著差距"
