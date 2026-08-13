@@ -87,3 +87,72 @@ async def test_extract_agent_attribution_returns_struct() -> None:
         )
         parsed = await extract_agent_attribution("大盘高开 1.2%")
     assert {"direction", "drivers", "sectors"} <= set(parsed)
+
+
+"""评分重归一化 + direction_present（A12/A15/A3 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_empty_ground_truth_scores_zero_not_full() -> None:
+    """空 GT（direction=neutral + sectors=[] + drivers=[]）不得满分：total=0.0。"""
+    gt = {
+        "attribution": {
+            "direction": "neutral",
+            "drivers": [],
+            "affected_sectors": [],
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        # extract 返回空结构；drivers 空 → 不调 judge
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type(
+                "R",
+                (),
+                {
+                    "content": json.dumps(
+                        {"direction": "neutral", "drivers": [], "sectors": []}
+                    )
+                },
+            )()
+        )
+        score = await evaluate_attribution("任何输出", gt)
+    assert score.total == 0.0
+    assert score.available_weight == 0.0  # 三维全部无对比对象
+
+
+@pytest.mark.asyncio
+async def test_neutral_direction_excluded_from_denominator() -> None:
+    """GT direction=neutral 时方向维不参与分母（direction_present=False），
+    板块+驱动全中仍可达 1.0（重归一化），但方向错误不再贡献 0.2 白给。"""
+    gt = {
+        "attribution": {
+            "direction": "neutral",
+            "drivers": ["外盘传导"],
+            "affected_sectors": ["半导体"],
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                # extract：direction=neutral（撞 GT）、drivers/sectors 全中
+                type(
+                    "R",
+                    (),
+                    {
+                        "content": json.dumps(
+                            {
+                                "direction": "neutral",
+                                "drivers": ["外盘传导"],
+                                "sectors": ["半导体"],
+                            }
+                        )
+                    },
+                )(),
+                # judge：hit=1 total=1
+                type("R", (), {"content": json.dumps({"hit_count": 1, "total_count": 1})})(),
+            ]
+        )
+        score = await evaluate_attribution("外盘传导，半导体领涨", gt)
+    # 可用权重 = drivers 0.5 + sectors 0.3 = 0.8；得分 = 0.5+0.3=0.8 → total=1.0
+    assert score.total == 1.0
+    assert score.available_weight == 0.8

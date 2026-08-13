@@ -37,6 +37,7 @@ class ScoreDetail:
     sectors: float
     total: float
     gap_analysis: str = field(default="")
+    available_weight: float = 1.0  # 无对比对象维度剔除后的可用权重和（A12 修复）
 
 
 async def extract_agent_attribution(text: str) -> dict[str, object]:
@@ -49,27 +50,58 @@ async def extract_agent_attribution(text: str) -> dict[str, object]:
 
 
 async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object]) -> ScoreDetail:
-    """对 agent 单次归因输出评分（0-1）。"""
+    """对 agent 单次归因输出评分（0-1，重归一化）。
+
+    重归一化（A12/A15 修复）：无对比对象维度排除出分母，空 GT 不得满分。
+    direction_present（A3/N3 修复）：GT direction=neutral 时方向维不参与。
+    """
     attribution = ground_truth.get("attribution")
     if not isinstance(attribution, dict):
         return ScoreDetail(0.0, 0.0, 0.0, 0.0, gap_analysis="ground_truth 缺少 attribution")
 
     extracted = await extract_agent_attribution(agent_output)
+
+    # 方向维：GT 非 neutral 才参与（direction_present）
     truth_dir = str(attribution.get("direction", "neutral"))
-    agent_dir = str(extracted.get("direction", "neutral"))
-    direction_score = (
-        0.2 if _normalize_direction(truth_dir) == _normalize_direction(agent_dir) else 0.0
-    )
+    truth_dir_norm = _normalize_direction(truth_dir)
+    if truth_dir_norm != "neutral":
+        agent_dir = str(extracted.get("direction", "neutral"))
+        direction_score = 0.2 if truth_dir_norm == _normalize_direction(agent_dir) else 0.0
+        direction_present = True
+    else:
+        direction_score = 0.0
+        direction_present = False
 
-    sectors_score = _sector_overlap_score(
-        attribution.get("affected_sectors", []), extracted.get("sectors", [])
-    )
+    # 板块维：truth 非空才参与
+    truth_sectors = _as_str_list(attribution.get("affected_sectors"))
+    if truth_sectors:
+        sectors_score = _sector_overlap_score(truth_sectors, extracted.get("sectors", []))
+        sectors_present = True
+    else:
+        sectors_score = 0.0
+        sectors_present = False
 
-    drivers_score = await _driver_hit_score(
-        attribution.get("drivers", []), extracted.get("drivers", [])
-    )
+    # 驱动维：truth 非空才参与
+    truth_drivers = _as_str_list(attribution.get("drivers"))
+    if truth_drivers:
+        drivers_score = await _driver_hit_score(
+            truth_drivers, extracted.get("drivers", [])
+        )
+        drivers_present = True
+    else:
+        drivers_score = 0.0
+        drivers_present = False
 
-    total = round(direction_score + drivers_score + sectors_score, 4)
+    available_weight = (
+        (0.2 if direction_present else 0.0)
+        + (0.3 if sectors_present else 0.0)
+        + (0.5 if drivers_present else 0.0)
+    )
+    total = (
+        round((direction_score + sectors_score + drivers_score) / available_weight, 4)
+        if available_weight > 0
+        else 0.0
+    )
     gap_analysis = _build_gap_analysis(
         direction_score, drivers_score, sectors_score, attribution, extracted
     )
@@ -79,6 +111,7 @@ async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object
         sectors=sectors_score,
         total=total,
         gap_analysis=gap_analysis,
+        available_weight=available_weight,
     )
 
 
