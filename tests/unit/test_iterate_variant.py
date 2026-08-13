@@ -408,3 +408,51 @@ async def test_generate_variant_parses_files_and_type(tmp_path: Path) -> None:
     assert plan.type == "workflow_diff"
     assert plan.files == ["src/aistock_agent/agents/workers/review.py"]
     assert plan.target_symbol == "run"
+
+
+"""new_content 落盘 + best 固化（C8/N2 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_experiment_record_includes_patch_spec(iterate_data_dir: object) -> None:
+    """实验记录必须包含可复现的补丁规格（target/old/new），不再只有 instructions。"""
+    from aistock_agent.iterate.case_builder import load_case
+    from aistock_agent.iterate.ground_truth import load_ground_truth
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="外盘优先",
+        target_symbol="run",
+        old_snippet="旧片段",
+        new_snippet="新片段",
+    )
+    case = load_case("case_20260731_us_market_surge")
+    # conftest 按 fixture 原文件名分发 ground_truths/sample_gt_review.json，
+    # 而 load_ground_truth 按 gt_id 定位——先按 gt_id 落一份再加载（C8 测试 setup）
+    import json as _json
+    from pathlib import Path as _Path
+
+    gt_src = _Path(iterate_data_dir) / "ground_truths" / "sample_gt_review.json"  # type: ignore[union-attr]
+    gt_payload = _json.loads(gt_src.read_text(encoding="utf-8"))
+    gt_dst = _Path(iterate_data_dir) / "ground_truths" / f"{gt_payload['gt_id']}.json"  # type: ignore[union-attr]
+    gt_dst.write_text(_json.dumps(gt_payload, ensure_ascii=False), encoding="utf-8")
+    gt = load_ground_truth(str(case["ground_truth_ref"]))
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(return_value={"final_response": "x"}),
+    ), patch("aistock_agent.services.llm.get_deep_think") as factory:
+        extract_payload = {"direction": "bullish", "drivers": [], "sectors": []}
+        judge_payload = {"hit_count": 0, "total_count": 0, "quotes": []}
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+            ]
+        )
+        record = await run_experiment_round("review", case, 2, variant, gt)
+    patch_spec = record["patch"]
+    assert patch_spec["target_symbol"] == "run"
+    assert patch_spec["old_snippet"] == "旧片段"
+    assert patch_spec["new_snippet"] == "新片段"

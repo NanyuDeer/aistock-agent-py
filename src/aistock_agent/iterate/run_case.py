@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import cast
@@ -108,6 +109,14 @@ async def run_case(
             stopped_reason = "no_improvement"
             break
 
+    # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入
+    best_patch = _recompute_best(adapter.agent_id, case_id)
+    if best_patch is not None:
+        best_path = get_data_dir() / "experiments" / f"{case_id}_best.json"
+        tmp = best_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, best_path)
+
     return {
         "agent_id": agent_id,
         "case_id": case_id,
@@ -117,6 +126,26 @@ async def run_case(
         "rounds": rounds,
         "stopped_reason": stopped_reason,
     }
+
+
+def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
+    """从 data/experiments/{case_id}_r*.json 记录重算 best 轮补丁。
+
+    返回 best 轮的 patch 规格；无任何实验记录返回 None。
+    """
+    root = get_data_dir() / "experiments"
+    if not root.exists():
+        return None
+    best: dict[str, object] | None = None
+    for p in sorted(root.glob(f"{case_id}_r*.json")):
+        try:
+            record = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        score = float(cast("float", record.get("score", 0.0)))
+        if best is None or score > float(cast("float", best.get("score", 0.0))):
+            best = {"score": score, "round": record.get("round"), "patch": record.get("patch", {})}
+    return best
 
 
 async def _run_baseline(

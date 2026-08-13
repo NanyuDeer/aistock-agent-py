@@ -398,6 +398,12 @@ async def run_experiment_round(
             "files": variant.files,
             "instructions": variant.instructions,
         },
+        # C8/N2 修复：补丁规格落盘，负责人可复现合入（不再只有一句话 instructions）
+        "patch": {
+            "target_symbol": variant.target_symbol,
+            "old_snippet": variant.old_snippet,
+            "new_snippet": variant.new_snippet,
+        },
         "score": score.total,
         "score_detail": {
             "direction": score.direction,

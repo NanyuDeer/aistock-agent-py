@@ -94,3 +94,66 @@ async def test_loop_stops_when_no_improvement_two_rounds(
             assert spy.call_args.args[1] == tmp_path
 
     assert result["stopped_reason"] in {"no_improvement", "max_rounds"}
+
+
+"""best 固化：r*.json 落盘后 recompute_best 原子写 best.json"""
+
+
+@pytest.mark.asyncio
+async def test_run_case_writes_best_patch_file(
+    iterate_data_dir: object, tmp_path: Path
+) -> None:
+    import json as _json
+    from pathlib import Path as _Path
+
+    from aistock_agent.iterate.case_builder import get_data_dir
+
+    case = _json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = _json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (_Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    case_path = _Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json"  # type: ignore[union-attr]
+    case_path.write_text(_json.dumps(case, ensure_ascii=False), encoding="utf-8")
+    gt_path = _Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(_json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    # 首轮即达标（方向+3驱动全中+3板块全中 → 总分 1.0）：循环第 1 轮后以
+    # score_reached 终止，best 轮即基线（r1_baseline 无 patch → {}，可接受语义），
+    # 且不会进入第 2 轮 apply_variant（避免对真实仓库写盘；brief 原 payload 只有
+    # 1/3 命中 → 0.4667 < 0.8 → 第 2 轮耗尽 mock 抛 StopAsyncIteration）。
+    extract_payload = {
+        "direction": "bullish",
+        "drivers": ["隔夜美股暴涨", "外盘传导", "风险偏好回升"],
+        "sectors": ["半导体", "算力", "新能源"],
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": _json.dumps(extract_payload)})(),
+                type(
+                    "R",
+                    (),
+                    {
+                        "content": _json.dumps(
+                            {
+                                "hit_count": 3,
+                                "total_count": 3,
+                                "quotes": ["隔夜美股暴涨", "外盘传导", "风险偏好回升"],
+                            }
+                        )
+                    },
+                )(),
+            ]
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "主因隔夜美股大涨，看多，半导体领涨"}),
+        ):
+            result = await run_case(
+                "review", str(case["case_id"]), max_rounds=2, repo_root=str(tmp_path)
+            )
+
+    best_path = get_data_dir() / "experiments" / f"{case['case_id']}_best.json"
+    assert best_path.exists()
+    best = _json.loads(best_path.read_text(encoding="utf-8"))
+    assert best["score"] == result["best_score"]
