@@ -315,6 +315,8 @@ src/aistock_agent/
 │   ├── chat.py          # ChatRequest / ChatResponse
 │   ├── sse.py           # SSEEvent
 │   └── agents.py        # 各 Agent 输入/输出 schema
+├── trace/               # 溯源共享推理核心（B1a）：6 阶段链枚举/节点schema/按序校验
+│   └── chain.py         # ChainStage / TRACE_CHAIN_STAGES / CausalNode / CausalChain / validate_chain_stages
 ├── memory/              # 持久化记忆模块
 │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
 │   ├── session_store.py # 会话历史读写
