@@ -54,10 +54,15 @@ def send_report_via_smtp(markdown: str, *, subject: str) -> bool:
     return ok
 
 
-async def run_daily_report() -> None:
-    """构建 + 发送每日报告（scheduler 调用）。"""
-    md = await build_daily_report()
-    subject = f"迭代Agent每日汇总 {date.today().isoformat()}"
+async def run_daily_report(report_date: date | None = None) -> None:
+    """构建 + 发送每日报告（scheduler 调用）。
+
+    report_date：手动补发历史日期的报告（2026-08-14 用户需求：主应用
+    scheduler 未运行时无自动发送，--once --date 补发）。
+    """
+    md = await build_daily_report(report_date)
+    day = report_date or date.today()
+    subject = f"迭代Agent每日汇总 {day.isoformat()}"
     ok = send_report_via_smtp(md, subject=subject)
     if not ok:
         logger.error("iterate_report_final_failure", subject=subject)

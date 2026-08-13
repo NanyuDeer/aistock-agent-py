@@ -1,9 +1,46 @@
 """iterate 调度 —— 注册 job 与手动触发"""
 
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+
+
+@pytest.mark.asyncio
+async def test_manual_once_with_date_sends_report_only() -> None:
+    """--once --date 补发模式：仅构建并发送指定日期报告，跳过消费与交易日检查。
+
+    2026-08-14 用户需求：迭代报告已生成但主应用 scheduler 未运行（无自动发送），
+    需手动触发补发。--date 允许补发历史日期的报告（含当日实验记录）。
+    """
+    from aistock_agent.iterate.scheduler import _manual_once
+
+    with patch(
+        "aistock_agent.iterate.scheduler.run_daily_report", AsyncMock()
+    ) as mock_report, patch(
+        "aistock_agent.iterate.scheduler._run_iterate_daily_task", AsyncMock()
+    ) as mock_daily:
+        await _manual_once(["--once", "--date", "2026-08-13"])
+
+    mock_report.assert_awaited_once_with(date(2026, 8, 13))
+    mock_daily.assert_not_awaited()  # 补发模式不消费案例、不受交易日限制
+
+
+@pytest.mark.asyncio
+async def test_manual_once_without_date_runs_daily_task() -> None:
+    """--once 无 --date：走完整每日任务（消费 + 当日报告）。"""
+    from aistock_agent.iterate.scheduler import _manual_once
+
+    with patch(
+        "aistock_agent.iterate.scheduler.run_daily_report", AsyncMock()
+    ) as mock_report, patch(
+        "aistock_agent.iterate.scheduler._run_iterate_daily_task", AsyncMock()
+    ) as mock_daily:
+        await _manual_once(["--once"])
+
+    mock_daily.assert_awaited_once()
+    mock_report.assert_not_awaited()
 
 
 def test_register_iterate_jobs_adds_daily_job() -> None:
