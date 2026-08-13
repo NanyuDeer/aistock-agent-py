@@ -178,10 +178,11 @@ async def generate_variant(
     )
     llm = llm_service.get_deep_think(
         max_tokens=_MAX_VARIANT_OUTPUT_TOKENS,
-        # reasoning_effort 用 "minimal"（非 "none"）：服务器 new-api 代理校验
-        # 合法值为 high/low/max/medium/minimal，"none" 会 400（2026-08-13 实测）；
-        # thinking disabled + minimal 双禁用推理，变体生成只需符号级补丁。
-        extra_body={"thinking": {"type": "disabled"}, "reasoning_effort": "minimal"},
+        # 只保留 thinking disabled（2026-08-13 实测：单独传 thinking disabled
+        # 成功；加 reasoning_effort 会撞上游模型与 new-api 代理的合法值不一致
+        # ——代理接受 minimal，deepseek 上游只接受 low/medium/high/xhigh/max，
+        # 且行为不稳定（round 2 400 / round 3 成功），移除该参数彻底规避）。
+        extra_body={"thinking": {"type": "disabled"}},
     )
     resp = await llm.ainvoke(
         [SystemMessage(content=prompt), HumanMessage(content=str(case["event_title"]))]

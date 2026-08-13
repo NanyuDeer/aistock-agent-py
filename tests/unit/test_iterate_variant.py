@@ -214,11 +214,10 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
     assert "符号地图" in prompt_arg
     assert "target_symbol" in prompt_arg
     # 输出体量需要大 max_tokens + 关闭思考，防止 JSON 中途截断（线上事故复现）；
-    # reasoning_effort 用 minimal（代理合法值，none 会 400，2026-08-13 实测）
+    # 只传 thinking disabled（reasoning_effort 与上游模型合法值不一致，2026-08-13 实测）
     assert factory.call_args.kwargs["max_tokens"] >= 8000
     assert factory.call_args.kwargs["extra_body"] == {
         "thinking": {"type": "disabled"},
-        "reasoning_effort": "minimal",
     }
     assert plan.type == "prompt_diff"
     # 补丁模式：解析出 target_symbol/old_snippet/new_snippet，不产出完整文件
