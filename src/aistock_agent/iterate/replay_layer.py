@@ -27,6 +27,11 @@ logger = structlog.get_logger()
 _REPLAY_PATCH_TARGETS: dict[str, str] = {
     "news": "aistock_agent.tools.news_tools.get_cls_news",
     "market": "aistock_agent.agents.workers.review.build_market_trace_snapshot",
+    # 源模块双绑定（B11）：review 函数体内 from-import 从源模块重新绑定原函数，
+    # 模块属性 patch 拦不到（与 apply_replay_patches 内双绑定代码呼应）。
+    "market_source": (
+        "aistock_agent.services.market_trace_snapshot.build_market_trace_snapshot"
+    ),
     "global": "aistock_agent.tools.market_tools.get_global_markets",
     "search": "aistock_agent.tools.search_tools.tavily_finance_search",
 }
@@ -173,6 +178,13 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
         if target_path is None:
             continue  # 未声明回放的工具保持原逻辑（如知识图谱查询）
         _patch_async(target_path, _make_reader(field_name, snapshot, logic_name))
+
+    # 源模块双绑定（B11/G11 修复）：review.run_review 在函数体内
+    # `from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot`
+    # 会从源模块重新绑定原函数，模块属性 patch 拦截不到；双绑定从根上消除该绕过面。
+    source_target = _REPLAY_PATCH_TARGETS.get("market_source")
+    if source_target and "market" in adapter.data_deps:
+        _patch_async(source_target, _make_reader("market_snapshot", snapshot, "market"))
 
     # C1：event 工具经 registry 持有的 BaseTool 调用（模块属性 patch 拦截不到），
     # 服务层隔离在此统一应用（对 review 也生效：review.py 的 run(state) 只调

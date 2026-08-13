@@ -391,3 +391,34 @@ async def test_persist_event_report_returns_false_in_replay(iterate_data_dir: ob
     result = await event_worker.persist_event_report({"event_id": "x"})
     assert result is False
     remove_replay_patches()
+
+
+"""run_review 回放拒绝 + 源模块双绑定（B11/G11 修复）"""
+
+
+def test_market_patch_targets_both_bindings() -> None:
+    """market patch 必须同时覆盖绑定模块与源模块（防函数体内 from-import 绕过）。"""
+    targets = set(replay_layer._REPLAY_PATCH_TARGETS.values())
+    assert "aistock_agent.agents.workers.review.build_market_trace_snapshot" in targets
+    assert "aistock_agent.services.market_trace_snapshot.build_market_trace_snapshot" in targets
+
+
+@pytest.mark.asyncio
+async def test_run_review_rejects_replay_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回放模式下 run_review 必须显式拒绝（B11/G11 修复）。
+
+    run_review 函数体内有 `from aistock_agent.services.market_trace_snapshot import
+    build_market_trace_snapshot` 等运行时 from-import，会从源模块重新绑定原函数、
+    绕过 iterate replay 的模块属性 patch；守卫在函数体开头（is_replay_mode 读 env
+    REPLAY_CASE_ID）直接抛错，防止未来委托接入时静默泄漏。
+    """
+    _enable_replay(monkeypatch, "review")
+
+    from aistock_agent.agents.workers.review import run_review
+
+    with pytest.raises(RuntimeError, match="run_review 禁止在 iterate 回放模式调用"):
+        await run_review(
+            report_date="2026-07-31",
+            snapshot_kind="quick",
+            trace_id="trace-test-replay-reject",
+        )
