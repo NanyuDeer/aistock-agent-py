@@ -7,6 +7,14 @@
 - 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30/17:00）+ status=complete 检查
 - 收尾：Task 15 文档更新（README 迭代闭环章节 + AGENTS iterate 节）+ 全量回归 + 本记录提交
 
+## 2026-08-13 — 迭代辩论裁决最终 whole-branch review Important-1 修复（_recompute_best 失败轮过滤）
+
+- `src/aistock_agent/iterate/run_case.py`（`_recompute_best`，~10 行）：① 跳过 gap 前缀为"回放子进程"/"变体轮异常"的失败轮记录（不入 best 候选——回放子进程失败/超时的变体轮仍经 run_experiment_round 落盘 score=0.0 + 未应用 LLM patch 规格，全失败场景修复前取第一条失败轮 patch 写 best.json，与 run_case 内存 best_round=0 报告不一致）；② `float()` 转换包 try/except（TypeError/ValueError → 跳过该记录，非数值 score 不再 ValueError 中断 run_case）；③ 过滤后无任何有效记录 → 返回 None（best.json 不写，避免误导）；docstring 同步更新
+- `src/aistock_agent/iterate/scheduler.py`：`_run_iterate_daily_task` docstring 去重语义由旧"experiments `_r` 前缀"更新为 iterated.json 标记语义（D13 后未同步的陈旧描述）
+- `tests/unit/test_iterate_variant.py`（末尾追加 3 用例）：`test_recompute_best_excludes_failed_round_and_picks_r2`（r1_baseline 失败 0.0 + r2 正常 0.6 → 返回 r2 patch）/ `test_recompute_best_all_failed_returns_none`（全失败轮含"变体轮异常"前缀 → None）/ `test_recompute_best_skips_non_numeric_score`（score="oops" 不抛 ValueError，有效 r2 仍被选中）
+- `tests/integration/test_iterate_loop.py`（末尾追加 1 用例）：`test_run_case_all_failed_does_not_write_best_file`——基线超时（无 r1 落盘）+ r2/r3 变体轮 subprocess 失败（落盘 0.0 失败记录）→ infra_failures 中止、best_round=0、best.json 不存在
+- 验证：TDD 红绿完整（RED：全失败轮被选中 + ValueError 中断 + best.json 被污染 3 failed → GREEN 4 passed）；全量回归 `tests/unit/test_iterate_*.py（11 文件）+ tests/integration/test_iterate_loop.py` 119 passed；ruff 2 文件 All checks passed；mypy strict run_case.py + scheduler.py Success；commit `fix(iterate): exclude failed rounds from best recompute and stale docstring`；本文件追加本记录（不提交，仅本地留痕）
+
 ## 2026-08-13 — 迭代辩论裁决修复 Task 14（产片接线 + 双 job 错峰，D16/F4/N6）
 
 - `src/aistock_agent/config.py`：① `iterate_cron` 默认值 `"0 16 * * 1-5"` → `"0 17 * * 1-5"`（消费/报告 17:00，错开 16:00 prediction_validate，F4）；② 新增 `iterate_case_build_cron: str = "30 16 * * 1-5"`（产片 16:30，收盘快照 15:35 之后）
