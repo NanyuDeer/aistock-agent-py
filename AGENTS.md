@@ -293,6 +293,13 @@ START → supervisor(quick_think, 意图路由)
 - **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
 - **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
 
+### CHAT QA 批次 2（2026-08-13）：回答内容流式（D9 节级伪流式）+ 事件通道
+
+- **立项门禁结论**：Task 0 spike（tests/unit/test_stream_spike.py，STREAM_SPIKE_RUN=1 显式触发）5 断言 3 失败——`with_chat_structured_output(json_mode)` 对 Pydantic schema 实际走 PydanticOutputParser，整段 JSON 完整才产出唯一实例（partials=1），**无逐字增量可 diff**；自定义事件传播机制单独验证通过（`adispatch_custom_event` 从节点内嵌套 LLM run 传播到顶层 `astream_events(version="v2")` on_custom_event 正常，langchain-core 0.3.58 的 adispatch_custom_event 不接受 version kwarg）。**用户裁决 D9 节级伪流式**。
+- **事件通道（Task 1）**：`WSEventType.CONTENT_DELTA="content_delta"` / `CONTENT_RESET="content_reset"`（constants.py）；ws.py `_run_chat_graph_to_events` 新增 `on_custom_event` 分支捕获 `chat_content_delta`/`chat_content_reset` → 统一 sink 入 state.events（resume 回放兼容）；**红线不动**：L156-158 `ON_CHAT_MODEL_STREAM` 过滤分支逐字节未改，新增事件只走显式事件名通道。
+- **节级伪流式（Task 2，synth_answer.py）**：维持 `ainvoke` 生产链（计费口径零变化，无新增 LLM 调用）；回答最终文本按 markdown 分节经 `adispatch_custom_event("chat_content_delta", {"content": 节文本})` 渐进下发（多子目标节标题先发、正文后发，DISCLAIMER/风险段最后统一补发）；**字节前缀契约**：dispatch 序列拼接 == final_response 逐字全等、任意累积为字节前缀（前端 done 前缀补尾）；**content_reset 统一语义**：凡流式已开始且终态文本非已流式内容前缀（结构化校验失败降级 / 节降级 / 流式中途异常降级全文）→ `adispatch_custom_event("chat_content_reset", {"content": 终态文本})` 整段替换；hint 单次取值（`trading_session_status` 只取一次），payload 恒 `{"content": str}`、空串/None 不分发。
+- **验证**：全量 A/B HEAD 失败集 = BASE（22=22，唯一差异 test_full_flow_stock 经 5 项证据判定为本地 sqlite checkpointer 跨次运行状态残留的环境卫生问题，全新 db 复测通过）+ ruff 改动文件 0 + 跨仓契约（事件名 ↔ ws.py ↔ 前端 case 标签）字段级一致。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
