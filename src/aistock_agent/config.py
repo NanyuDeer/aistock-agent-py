@@ -159,6 +159,11 @@ class Settings(BaseSettings):
     # ── 统一事件抓取中台调度（2026-08-12） ──
     scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
     scheduler_event_scrape_intraday_cron: str = "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+    # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
+    event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
+    event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
+    event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
+    event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
