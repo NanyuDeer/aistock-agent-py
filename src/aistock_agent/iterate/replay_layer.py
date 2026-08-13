@@ -40,6 +40,12 @@ _REPLAY_PATCH_TARGETS: dict[str, str] = {
 #   切片 cls_telegraph 语料（与 news_tools 消费的响应形状一致），其余返回 None（隔离）；
 # - "node_noop"：post 写操作 no-op（返回 None，回放只读——None 让调用方走
 #   优雅降级路径，避免被误判为"写成功"）；
+# - "industry_chain"：get_industry_chain 返回 degraded 状态（IndustryChainReadResult
+#   status=upstream_failed，event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含该值），
+#   绝不触网，防止实时 IndustryKG 数据注入回放（B4 修复）；
+# - "report_read"：get_analysis_report_quiet / get_review_analysis_report /
+#   get_hot_burst_data 报告/行情类读隔离——返回 None，调用方走"无数据"降级
+#   （B4 修复，原实现直接 httpx 触网）；
 # - "tavily_search"：TavilyService.search 是同步静态方法（tavily_finance_search
 #   直接 `result = TavilyService.search(...)` 无 await），必须同步替换，
 #   返回切片语料（受限"可搜索"语料），不发网络请求。
@@ -47,6 +53,15 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     "aistock_agent.services.data_client.NodeApiClient.get": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.get_list": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.post": "node_noop",
+    # 直接 httpx 的读方法（B4 修复）：报告/行情类读返回 None（隔离），行业图谱返回 degraded
+    "aistock_agent.services.data_client.NodeApiClient.get_industry_chain": "industry_chain",
+    "aistock_agent.services.data_client.NodeApiClient.get_analysis_report_quiet": "report_read",
+    "aistock_agent.services.data_client.NodeApiClient.get_review_analysis_report": "report_read",
+    "aistock_agent.services.data_client.NodeApiClient.get_hot_burst_data": "report_read",
+    # 写方法（B4 修复）：全部 no-op，返回 None 走调用方既有降级
+    "aistock_agent.services.data_client.NodeApiClient.put": "node_noop",
+    "aistock_agent.services.data_client.NodeApiClient.delete": "node_noop",
+    "aistock_agent.services.data_client.NodeApiClient.patch": "node_noop",
     "aistock_agent.services.tavily.TavilyService.search": "tavily_search",
 }
 
@@ -130,6 +145,13 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
         if kind == "node_read":
             _patch_async(target, _make_service_node_reader(snapshot))
         elif kind == "node_noop":
+            _patch_async(target, _make_none_noop)
+        elif kind == "industry_chain":
+            # 回放绝不触网：返回 degraded 状态
+            # （event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含 upstream_failed）
+            _patch_async(target, _make_industry_chain_degraded)
+        elif kind == "report_read":
+            # 报告/行情类读隔离：返回 None（调用方走"无数据"降级）
             _patch_async(target, _make_none_noop)
         else:  # tavily_search：同步替换（TavilyService.search 调用处无 await）
             _patch_sync(target, _make_tavily_search_reader(snapshot))
@@ -217,6 +239,19 @@ async def _make_none_noop(*args: object, **kwargs: object) -> None:
     不能返回 True——会被调用方误判为写成功。
     """
     return None
+
+
+async def _make_industry_chain_degraded(*args: object, **kwargs: object) -> object:
+    """get_industry_chain 回放替换：返回 degraded 状态，不发任何网络请求。
+
+    返回 IndustryChainReadResult(status="upstream_failed")：该状态在
+    event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 集合内，事件流水线走
+    既有 degraded 边界（event.py:174-180 判定），不会把实时 IndustryKG
+    数据（leadingStocks/graphVersion/updatedAt）注入回放。
+    """
+    from aistock_agent.services.data_client import IndustryChainReadResult
+
+    return IndustryChainReadResult(status="upstream_failed")
 
 
 def _make_sync_noop(*args: object, **kwargs: object) -> bool:

@@ -1,9 +1,11 @@
 """replay_layer —— 回放开关、数据注入与副作用隔离"""
 
+import os
 from unittest import mock
 
 import pytest
 
+from aistock_agent.iterate import replay_layer
 from aistock_agent.iterate.adapters import get_adapter
 from aistock_agent.iterate.replay_layer import (
     apply_replay_patches,
@@ -131,4 +133,57 @@ async def test_noop_contracts(
     assert await event_module.set_cached_event("some event text", {}) is True
     # event.py:629/784 `event_persisted = await persist_event_report(...)` → True
     assert await event_module.persist_event_report("evt_1", {}, "text", {}) is True
+    remove_replay_patches()
+
+
+# 服务层隔离清单制：NodeApiClient 全部公共网络方法必须登记隔离或豁免。
+
+
+def test_service_isolation_covers_all_public_network_methods() -> None:
+    """清单封闭：NodeApiClient 公共网络方法 ⊆ 隔离目标 ∪ 豁免名单（防未来新增方法漏登记）。"""
+    isolated = set(replay_layer._SERVICE_ISOLATION_TARGETS)
+    # get/get_list/post 已在清单；get_industry_chain 等直接 httpx 方法必须登记
+    for name in (
+        "get",
+        "get_list",
+        "post",
+        "put",
+        "delete",
+        "patch",
+        "get_industry_chain",
+        "get_analysis_report_quiet",
+        "get_review_analysis_report",
+        "get_hot_burst_data",
+    ):
+        assert any(t.endswith(f".{name}") for t in isolated), f"{name} 未登记隔离"
+
+
+@pytest.mark.asyncio
+async def test_get_industry_chain_isolated_in_replay(iterate_data_dir: object) -> None:
+    """回放模式下 get_industry_chain 返回 degraded 状态，绝不触网。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.services.data_client import IndustryChainReadResult, node_api
+
+    result = await node_api.get_industry_chain("半导体")
+    assert isinstance(result, IndustryChainReadResult)
+    assert result.status == "upstream_failed"
+    assert result.data is None
+    remove_replay_patches()
+
+
+@pytest.mark.asyncio
+async def test_put_delete_patch_noop_in_replay(iterate_data_dir: object) -> None:
+    """回放模式下 put/delete/patch 写操作 no-op 返回 None。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.services.data_client import node_api
+
+    assert await node_api.put("/x", {}) is None
+    assert await node_api.delete("/x") is None
+    assert await node_api.patch("/x", {}) is None
     remove_replay_patches()
