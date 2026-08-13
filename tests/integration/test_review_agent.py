@@ -21,6 +21,9 @@ from aistock_agent.agents.workers import review as review_agent
 from aistock_agent.schemas.market_trace import (
     MarketTraceResult,
     MarketTraceSnapshot,
+    MorningEvent,
+    MorningForecast,
+    MorningSectorView,
     ReviewArtifact,
     SourceRecord,
 )
@@ -1517,3 +1520,144 @@ async def test_run_review_degraded_on_snapshot_failure(mocker):
 
     assert result.status == "degraded"
     assert review_agent.DEGRADED_RESPONSE in result.markdown
+
+
+# ============================================================================
+# Task 11 端到端集成测试 — 含 morning_forecast 的完整归因流程
+# 验证 Task 1-10 改进点：晨报预判注入 + prediction_validation 输出 + 财联社电报来源
+# ============================================================================
+
+
+def _make_morning_forecast() -> MorningForecast:
+    """构建测试用 MorningForecast（模拟 morning_forecast_extractor 输出）。"""
+    return MorningForecast(
+        report_date="2026-07-17",
+        summary="央行降准释放流动性，看好金融与半导体板块",
+        major_events=[
+            MorningEvent(
+                title="央行宣布降准0.5个百分点",
+                direction="bullish",
+                affected_sectors=["银行", "金融"],
+            ),
+        ],
+        sectors=[
+            MorningSectorView(sector="半导体", direction="bullish"),
+            MorningSectorView(sector="银行", direction="bullish"),
+        ],
+        risks=["降准对银行净息差的长期影响尚不明确"],
+        source_report_id="morning-2026-07-17",
+    )
+
+
+def _trace_with_prediction_validation() -> str:
+    """在 VALID_TRACE_DICT 上追加 prediction_validation，返回 JSON 字符串。
+
+    morning_forecast 非空时，validate_trace_against_snapshot 要求 trace 必须含
+    prediction_validation，且 status ∈ {hit, partial, miss} 时 sector_hits 不得为空。
+    """
+    trace = copy.deepcopy(VALID_TRACE_DICT)
+    trace["prediction_validation"] = {
+        "status": "partial",
+        "sector_hits": [
+            {
+                "sector": "半导体",
+                "morning_direction": "bullish",
+                "actual_direction": "bullish",
+                "result": "hit",
+                "deviation_note": "",
+            },
+            {
+                "sector": "银行",
+                "morning_direction": "bullish",
+                "actual_direction": "neutral",
+                "result": "miss",
+                "deviation_note": "银行板块表现平淡，降准利好已被市场提前反映",
+            },
+        ],
+        "event_hits": [
+            {
+                "event_title": "央行宣布降准0.5个百分点",
+                "morning_direction": "bullish",
+                "actual_impact": "金融板块上涨但涨幅有限",
+                "result": "unverifiable",
+                "note": "降准兑现但强度不及预判",
+            },
+        ],
+        "overall_note": "板块方向部分命中，事件影响符合预期但强度不及预判",
+    }
+    return json.dumps(trace, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_review_agent_end_to_end_with_morning_forecast(mocker):
+    """端到端：含 morning_forecast 的完整归因流程。
+
+    验证 Task 1-10 改进点：
+    1. ReviewArtifact.trace.prediction_validation 非空
+    2. render_market_trace_markdown 含"预判对照"章节
+    3. validate_trace_against_snapshot 通过
+    4. snapshot.morning_forecast 非空
+    5. snapshot.sources 含 NEWS_* 来自财联社（cls provider）
+    """
+    # 1. 构造含 morning_forecast 的 snapshot（复用 TRACE_SNAPSHOT 冻结事实）
+    snapshot_with_forecast = TRACE_SNAPSHOT.model_copy(
+        update={"morning_forecast": _make_morning_forecast()}
+    )
+
+    # 2. 构造含 prediction_validation 的 trace JSON
+    trace_json = _trace_with_prediction_validation()
+
+    # 3. mock 整条 review_agent.run 流水线（沿用 _patch_snapshot_and_llm 模式）
+    mock_set_cache = _patch_snapshot_and_llm(
+        mocker, trace_json, snapshot=snapshot_with_forecast
+    )
+
+    # 4. 触发 review_agent.run
+    result = await review_agent.run(SCHEDULER_STATE)
+
+    # 5. 不降级
+    assert result["final_response"] != review_agent.DEGRADED_RESPONSE
+
+    # 6. 验证 render 含"预判对照"章节（Task 1-10 新增的展示层）
+    assert "## 预判对照" in result["final_response"]
+    assert "板块方向对照" in result["final_response"]
+    assert "事件影响对照" in result["final_response"]
+    assert "部分命中" in result["final_response"]
+
+    # 7. 验证 mock_set_cache 被调用，捕获写入的 artifact
+    mock_set_cache.assert_called_once()
+    cached_payload = mock_set_cache.await_args.args[1]
+    cached_artifact = ReviewArtifact.model_validate(cached_payload)
+
+    # 8. 验证 ReviewArtifact.trace.prediction_validation 非空
+    pv = cached_artifact.trace.prediction_validation
+    assert pv is not None
+    assert pv.status == "partial"
+    assert len(pv.sector_hits) == 2
+    assert len(pv.event_hits) == 1
+    # sector_hits 包含 hit 和 miss 两种结果
+    hit_results = {hit.result for hit in pv.sector_hits}
+    assert hit_results == {"hit", "miss"}
+
+    # 9. 验证 snapshot.morning_forecast 非空（晨报预判成功注入）
+    assert cached_artifact.snapshot.morning_forecast is not None
+    assert cached_artifact.snapshot.morning_forecast.report_date == "2026-07-17"
+    assert len(cached_artifact.snapshot.morning_forecast.sectors) == 2
+    assert len(cached_artifact.snapshot.morning_forecast.major_events) == 1
+
+    # 10. 验证 sources 含 NEWS_* 来自财联社（cls provider）
+    news_source_ids = [
+        sid
+        for sid, src in cached_artifact.snapshot.sources.items()
+        if sid.startswith("NEWS_")
+    ]
+    assert news_source_ids, "snapshot.sources 必须含 NEWS_* 来源"
+    for sid in news_source_ids:
+        news_src = cached_artifact.snapshot.sources[sid]
+        assert news_src.kind == "event_evidence"
+        assert news_src.provider == "cls"
+
+    # 11. 验证 validate_trace_against_snapshot 通过（重跑校验不应抛异常）
+    review_agent.validate_trace_against_snapshot(
+        cached_artifact.trace, cached_artifact.snapshot
+    )

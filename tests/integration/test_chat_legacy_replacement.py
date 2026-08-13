@@ -2,13 +2,14 @@
 
 覆盖（M5 后 /chat/* 恒走 ChatAgent，开关退役）：
 - _select_graph() 恒返回 compile_chat_graph()（不读 chat_graph_enabled）
-- chat_message 恒走新子图，advisor_trace=None
+- chat_message 恒走新子图，响应不含已退役字段
 - chat_stream_messages 过滤 qa_router 节点
 - chat_stream_updates 发射 CHAT 节点 label
 - 报告入口（/briefing/*）仍走 compile_graph（回归不破）
 """
 
 import asyncio
+import types
 from unittest.mock import patch
 
 import pytest
@@ -51,8 +52,8 @@ async def _mock_aget_state(config=None):
     return _MockState()
 
 
-def test_chat_message_returns_advisor_trace_none(client, monkeypatch):
-    """/chat/message 恒走新子图，advisor_trace=None。"""
+def test_chat_message_omits_trace_field(client, monkeypatch):
+    """/chat/message 恒走新子图，响应不含该字段。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "测试回复",
@@ -74,11 +75,11 @@ def test_chat_message_returns_advisor_trace_none(client, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["content"] == "测试回复"
-    assert data["advisor_trace"] is None
+    assert "advisor_trace" not in data
 
 
 def test_chat_message_clarification(client):
-    """/chat/message 澄清路径返回澄清文本，advisor_trace=None。"""
+    """/chat/message 澄清路径返回澄清文本，响应不含该字段。"""
     async def mock_ainvoke(state, config=None):
         return {
             "final_response": "请提供 6 位股票代码后重试。",
@@ -100,7 +101,7 @@ def test_chat_message_clarification(client):
     assert response.status_code == 200
     data = response.json()
     assert data["content"] == "请提供 6 位股票代码后重试。"
-    assert data["advisor_trace"] is None
+    assert "advisor_trace" not in data
 
 
 @pytest.mark.asyncio
@@ -160,9 +161,9 @@ async def test_stream_messages_filters_qa_router_node():
     done_events = [e for e in sse_events if e.get("type") == SSEEventType.DONE]
     assert len(done_events) == 1
     assert done_events[0]["final_response"] == "用户可见回复"
-    # 新子图无 analysis_reports / advisor_trace，应为默认值
+    # 新子图无 analysis_reports（默认值），且响应不含已退役字段
     assert done_events[0]["analysis_reports"] == {}
-    assert done_events[0]["advisor_trace"] is None
+    assert "advisor_trace" not in done_events[0]
 
 
 @pytest.mark.asyncio
@@ -247,3 +248,84 @@ def test_briefing_still_uses_compile_graph(client):
 async def _empty_stream(initial_state, config=None, version="v2"):
     return
     yield  # pragma: no cover
+
+
+def test_chat_message_force_deep_propagates_to_state(client, monkeypatch):
+    """force_deep=true → initial_state['force_deep'] is True（HTTP 对齐 WS）。"""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "aistock_agent.api.routes.build_chat_initial_state",
+        lambda message: captured,
+    )
+
+    async def fake_ainvoke(state, config=None):
+        return {"final_response": "ok", "insight": None, "trace": None}
+
+    monkeypatch.setattr(
+        "aistock_agent.api.routes._select_graph",
+        lambda: types.SimpleNamespace(ainvoke=fake_ainvoke),
+    )
+    resp = client.post(
+        "/api/agent/chat/message",
+        json={"message": "深度分析一下600519", "force_deep": True},
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+    assert resp.status_code == 200
+    assert captured["force_deep"] is True
+
+
+def test_chat_message_force_deep_default_false(client, monkeypatch):
+    """未传 force_deep → state 中为 False（缺省）。"""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "aistock_agent.api.routes.build_chat_initial_state",
+        lambda message: captured,
+    )
+
+    async def fake_ainvoke(state, config=None):
+        return {"final_response": "ok", "insight": None, "trace": None}
+
+    monkeypatch.setattr(
+        "aistock_agent.api.routes._select_graph",
+        lambda: types.SimpleNamespace(ainvoke=fake_ainvoke),
+    )
+    resp = client.post(
+        "/api/agent/chat/message",
+        json={"message": "你好"},
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+    assert resp.status_code == 200
+    assert captured["force_deep"] is False
+
+
+def test_chat_stream_messages_force_deep_propagates(client, monkeypatch):
+    """SSE 流路径同样透传 force_deep（consumes body 触发 generator）。"""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "aistock_agent.api.routes.build_chat_initial_state",
+        lambda message: captured,
+    )
+
+    async def fake_events(*args, **kwargs):
+        return
+        yield  # pragma: no cover  # async generator 空流
+
+    async def fake_aget_state(config=None):
+        return _mock_aget_state()
+
+    monkeypatch.setattr(
+        "aistock_agent.api.routes._select_graph",
+        lambda: types.SimpleNamespace(
+            astream_events=fake_events, aget_state=fake_aget_state
+        ),
+    )
+    with client.stream(
+        "POST",
+        "/api/agent/chat/stream/messages",
+        json={"message": "深度分析一下600519", "force_deep": True},
+        headers={"X-Internal-Token": settings.internal_api_token},
+    ) as resp:
+        assert resp.status_code == 200
+        for _ in resp.iter_lines():
+            pass
+    assert captured["force_deep"] is True

@@ -15,21 +15,27 @@ import structlog
 
 from aistock_agent.schemas.chat_contract import Evidence
 from aistock_agent.skills.capital_flow import capital_flow
+from aistock_agent.skills.compare_stocks import compare_stocks
+from aistock_agent.skills.douyin_video import douyin_video
 from aistock_agent.skills.evidence_resolver import evidence_resolver
+from aistock_agent.skills.index_snapshot import index_snapshot
 from aistock_agent.skills.industry_relation import industry_relation
 from aistock_agent.skills.market_snapshot import market_snapshot
+from aistock_agent.skills.prediction import prediction
 from aistock_agent.skills.report_lookup import report_lookup
 from aistock_agent.skills.sector_snapshot import sector_snapshot
+from aistock_agent.skills.stock_history import stock_history
 from aistock_agent.skills.stock_news import stock_news
 from aistock_agent.skills.stock_snapshot import stock_snapshot
 from aistock_agent.skills.trace_lookup import trace_lookup
+from aistock_agent.skills.trend_ranking import trend_ranking
 
 logger = structlog.get_logger()
 
 #: Skill 可调用类型：async (args, goal) -> Evidence（与 @skill 装饰函数同形）
 SkillCallable: TypeAlias = Callable[[dict[str, Any], Any], Awaitable[Evidence]]
 
-#: Skill 注册表：skill_name → 可调用对象（手写 9 + hot_burst 意图 + 适配器）
+#: Skill 注册表：skill_name → 可调用对象（手写 10 + hot_burst 意图 + 适配器）
 SKILL_REGISTRY: dict[str, SkillCallable] = {}
 
 #: 渲染进 qa_router 提示词的 skill 描述（注册顺序即渲染顺序）
@@ -75,7 +81,7 @@ async def _hot_burst_unimplemented(args: dict[str, Any], goal: Any) -> Evidence:
     )
 
 
-# ── 手写 9 skill（行为与既有 skill_executor.SKILL_REGISTRY 完全一致；
+# ── 手写 10 skill（行为与既有 skill_executor.SKILL_REGISTRY 完全一致；
 #    描述保持原 SYSTEM_PROMPT 文案逐字不变，LLM 路由行为不漂移）──
 register_skill(
     "report_lookup",
@@ -120,14 +126,53 @@ register_skill(
     market_snapshot,
     description="大盘概览与全球市场。入参 {scope, snapshot_kind}（默认 both/quick）",
 )
+# P5（工作线 B）：A 股指数快速快照（闸门 1 确定性路由目标，index_snapshot）
+register_skill(
+    "index_snapshot",
+    index_snapshot,
+    description=(
+        "A股指数快速快照（沪指/深成指/创业板指/科创50/沪深300）。"
+        '入参 {symbols: ["6位代码"]}'
+    ),
+)
 register_skill(
     "industry_relation",
     industry_relation,
     description="行业关系/上下游。入参 {keywords: list[str], tag_codes: list[str]}",
+)
+register_skill(
+    "compare_stocks",
+    compare_stocks,
+    description='多标的行情对比（个股 2~5 个）。入参 {symbols: ["6位代码", ...]}',
+)
+register_skill(
+    "stock_history",
+    stock_history,
+    description='个股历史行情（日K线）。入参 {symbol: "6位代码", days: 30}',
+)
+register_skill(
+    "trend_ranking",
+    trend_ranking,
+    description="趋势股评分 Top 榜。入参 {limit: int}（默认 20，上限 50）",
 )
 # T1 契约：hot_burst 意图保留在路由词汇（无独立 skill 实现，见 _hot_burst_unimplemented）
 register_skill(
     "hot_burst",
     _hot_burst_unimplemented,
     description="热门股/机构调研异动（深度分析诉求）。入参 {}",
+)
+# T1 契约：douyin_video 抖音视频读取（Task 2 加入契约，本 Task 注册实现）
+register_skill(
+    "douyin_video",
+    douyin_video,
+    description=(
+        "抖音视频读取：下载并语音识别为文本。"
+        '入参 {link: "抖音分享链接", save_video: false}'
+    ),
+)
+# Phase 4-1：对话内预测（影响持续性推演，非点位预测；prediction_status 恒 hypothesis）
+register_skill(
+    "prediction",
+    prediction,
+    description='影响持续性推演（非点位预测）。入参 {symbols: ["6位代码"]}',
 )

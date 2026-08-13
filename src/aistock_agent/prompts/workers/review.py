@@ -28,6 +28,7 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 - alternative_chain_id: 备选候选的 id 或 null
 - confidence: "high" | "medium" | "low"
 - unresolved_questions: 未解问题字符串列表
+- attribution_summary: 综合主因的一句话结论（见下方【attribution_summary 约束】）
 
 禁止输出 Markdown、代码围栏（```）、自然语言解释或任何 JSON 以外的内容。
 
@@ -53,8 +54,118 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 8. confirmed 的 trigger 必须引用 URL 非空、occurred_at 非空且不晚于 captured_at
    的 event_evidence；observable_result 必须引用 phenomenon_discovery.primary.fact_ids。
 9. 无 occurred_at 的新闻、null 主力资金或缺失全球行情只能写入限制与未解问题，
-   不得据此确认因果。hypothesis 不得选择主链，只可选择 weak 备选；
-   insufficient 不得选择任何链，候选只能为 insufficient/rejected。
+   不得据此确认因果。
+   ⚠️ attribution_status 与选链必须严格一致：
+   - hypothesis = 证据不足以确认主因，只能选 weak 备选（alternative_chain_id）；
+     禁止设置 primary_chain_id，禁止任何候选为 supported（只能 weak/rejected/insufficient）
+   - insufficient = 证据严重不足，不得选择任何链（primary/alternative 均 null），
+     候选只能为 insufficient/rejected
+   - confirmed = 证据闭环完整，必须设置 primary_chain_id 指向唯一 supported 候选
+   自相矛盾（如 hypothesis 却带 primary_chain_id 或 supported 候选）会导致报告被拒绝。
+
+【预判对照规则】
+若 snapshot.morning_forecast 非空，你必须：
+1. 对照 morning_forecast.sectors 中每个板块的方向判断与实际行情（a_share.sectors），
+   逐项判定 hit/miss，填入 prediction_validation.sector_hits。
+   - actual_direction 从 a_share.sectors.top_gainers/top_losers 推断
+   - 方向一致为 hit，不一致为 miss（deviation_note 必填）
+2. 对照 morning_forecast.major_events 中每个事件的预期方向与实际影响，
+   填入 prediction_validation.event_hits。
+   - 若事件影响可在 sources 中找到证据，判定 hit/miss
+   - 若无法验证，判定 unverifiable
+3. 在归因推理时，把"预测偏离的板块"作为重点解释对象：
+   若晨报看多但实际领跌，trigger/exposure/repricing 节点必须显式说明偏离原因。
+4. prediction_validation.status 判定：
+   - hit：全部板块方向一致
+   - partial：部分一致
+   - miss：全部偏离
+   - no_forecast：snapshot.morning_forecast 为空
+
+【prediction_validation 输出格式（字段名必须完全一致，禁止改名）】
+
+⚠️ 字段名对照表 — 左列是正确字段名，禁止使用右列的错误字段名：
+
+| 对象        | 正确字段名          | 禁止使用的错误字段名                        |
+|------------|-------------------|---------------------------------------------|
+| SectorHit  | morning_direction | predicted_direction, expected_direction     |
+| SectorHit  | actual_direction  | （必须是 bullish/bearish/neutral，不能填 hit/miss） |
+| SectorHit  | result            | verification                                |
+| SectorHit  | sector            | name                                        |
+| EventHit   | event_title       | event, title                                |
+| EventHit   | morning_direction | predicted_direction, expected_direction     |
+| EventHit   | result            | verification                                |
+| EventHit   | actual_impact     | actual_effect, impact                       |
+
+禁止输出 evidence_ids 等不在 schema 中的额外字段。
+
+- sector_hits 是数组，每个元素字段：
+  {
+    "sector": "板块名称",
+    "morning_direction": "bullish" | "bearish" | "neutral",
+    "actual_direction": "bullish" | "bearish" | "neutral",
+    "result": "hit" | "miss",
+    "deviation_note": "偏离原因（result=miss 时必填）"
+  }
+- event_hits 是数组，每个元素字段：
+  {
+    "event_title": "事件标题",
+    "morning_direction": "bullish" | "bearish" | "neutral",
+    "actual_impact": "实际影响描述",
+    "result": "hit" | "miss" | "unverifiable",
+    "note": "备注（可选）"
+  }
+- prediction_validation 对象字段：
+  {
+    "status": "hit" | "partial" | "miss" | "no_forecast",
+    "sector_hits": [...],
+    "event_hits": [...],
+    "overall_note": "整体结论（可选）"
+  }
+
+完整示例：
+{
+  "prediction_validation": {
+    "status": "partial",
+    "sector_hits": [
+      {
+        "sector": "券商",
+        "morning_direction": "bullish",
+        "actual_direction": "bearish",
+        "result": "miss",
+        "deviation_note": "政策利好未兑现"
+      }
+    ],
+    "event_hits": [
+      {
+        "event_title": "美联储维持利率",
+        "morning_direction": "bullish",
+        "actual_impact": "市场反应平淡",
+        "result": "unverifiable",
+        "note": ""
+      }
+    ],
+    "overall_note": "板块方向部分偏离"
+  }
+}
+
+若 snapshot.morning_forecast 为空，prediction_validation 输出 {"status": "no_forecast"}。
+
+【外盘传导判定规则】
+global_risk_liquidity 候选的传导链必须显式区分：
+1. "外盘传导"：隔夜美股/亚太/欧洲股市变动通过情绪/资金渠道影响 A 股（需引用 GLOBAL_* 证据）
+2. "A 股独立行情"：全球市场平稳但 A 股独立波动（需说明独立性证据）
+
+若 snapshot.sources 中无 GLOBAL_* 证据或外盘数据缺失，
+global_risk_liquidity 不得获得 supported 状态，最多 weak。
+板块同步上涨时，不得仅凭"同期上涨"判定外盘传导，
+必须验证时间顺序（外盘先动 → A 股后动）和机制（资金/情绪/联动品种）。
+
+【attribution_summary 约束】
+- 仅当 attribution_status 为 confirmed 或 hypothesis 时生成，其余情况设为 null。
+- 一句话（30-40 字）综合当日主因，只讲主因本身（如"AI算力与创新药业绩驱动 CRO/PCB 板块领涨"），
+  不得混入现象描述、板块涨跌数据、事件罗列，不得以冒号或列表形式输出。
+- 语义应与主因候选（primary_chain_id）的结论一致，供前端早点听页面直接展示；
+  与 brief 归因结论（主因链拼接，供双人播报）相互独立，两者内容不需要相同。
 
 【CandidateExplanation 字段约束】
 - id: 必须与 category 同名（例如 id="global_risk_liquidity", category="global_risk_liquidity"）

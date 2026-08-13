@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -82,7 +83,7 @@ async def test_historical_snapshot_matches_independent_label(
         raise AssertionError("unexpected Node path: " + path)
 
     monkeypatch.setattr(snapshot_module.node_api, "get", fake_get)
-    monkeypatch.setattr(snapshot_module, "collect_global_market_facts", lambda _at: [])
+    monkeypatch.setattr(snapshot_module, "collect_global_market_facts", AsyncMock(return_value=[]))
     monkeypatch.setattr(snapshot_module.TavilyService, "search", lambda **_kwargs: {})
 
     snapshot = await snapshot_module.build_market_trace_snapshot(str(case["report_date"]))

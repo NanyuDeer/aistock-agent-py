@@ -46,7 +46,13 @@ def test_ws_chat_passes_thread_id_config() -> None:
     config = mock_graph.captured.get("config")
     assert config is not None, "astream_events 未收到 config（checkpointer 回归未修复）"
     assert config["configurable"]["thread_id"] == "ws_test_001"
-    assert agent_msg == {"type": "done", "content": "mocked 流式回复", "advisor_trace": None}
+    assert agent_msg == {
+        "type": "done",
+        "content": "mocked 流式回复",
+        "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+        "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
+        "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
+    }
 
 
 def test_ws_chat_default_session_id_when_missing() -> None:
@@ -65,29 +71,20 @@ def test_ws_chat_default_session_id_when_missing() -> None:
     assert thread_id.startswith("ws_")
 
 
-def test_ws_done_returns_advisor_trace() -> None:
-    trace = {
-        "schema_version": "advisor_trace.v1",
-        "subquestions": [
-            {"intent": "morning", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": [], "degraded": False},
-            {"intent": "stock", "reports": [], "sources": [], "as_of": None,
-             "missing_sources": ["stock_trace"], "degraded": True},
-        ],
-        "missing_sources": ["stock_trace"],
-        "degraded": True,
-    }
-
-    class _TraceGraph:
-        async def astream_events(self, state: dict[str, object], **kwargs: object) -> object:
-            yield {"event": "on_chain_end", "data": {"output": {
-                "final_response": "降级", "advisor_trace": trace,
-            }}}
-
-    with patch("aistock_agent.api.ws._select_graph", return_value=_TraceGraph()):
+def test_ws_done_omits_trace_field() -> None:
+    """DONE 事件结构回归：不含已退役字段。"""
+    mock_graph = _MockGraph()
+    with patch("aistock_agent.api.ws._select_graph", return_value=mock_graph):
         client = TestClient(app)
         with client.websocket_connect("/api/agent/ws/chat") as ws:
             ws.send_json({"message": "个股 600519"})
             done = ws.receive_json()
 
-    assert done == {"type": "done", "content": "降级", "advisor_trace": trace}
+    assert done == {
+        "type": "done",
+        "content": "mocked 流式回复",
+        "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
+        "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
+        "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
+    }
+    assert "advisor_trace" not in done

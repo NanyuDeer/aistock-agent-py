@@ -108,3 +108,60 @@ async def test_skill_executor_skill_exception_isolated():
     degraded_evs = [ev for ev in result["evidences"] if ev.degraded]
     assert len(degraded_evs) == 1
     assert degraded_evs[0].skill_name == "stock_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_skill_executor_goal_id_passthrough():
+    """D34：SkillCall.goal_id 透传到 Evidence.goal_id（Task 4 按 goal_id 过滤证据）。"""
+    from aistock_agent.graph.nodes.skill_executor import skill_executor_node
+
+    async def fake_skill(args, goal):
+        return _evidence("stock_snapshot")
+
+    state: QuestionState = {
+        "messages": [],
+        "goal": InsightGoal(question="600519 明天会涨吗", intent="stock_snapshot"),
+        "plan": "direct",
+        "skill_calls": [
+            SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"}, goal_id="g1")
+        ],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
+    with patch(
+        "aistock_agent.graph.nodes.skill_executor.SKILL_REGISTRY",
+        {"stock_snapshot": fake_skill},
+    ):
+        result = await skill_executor_node(state)
+    assert len(result["evidences"]) == 1
+    assert result["evidences"][0].goal_id == "g1"
+
+
+@pytest.mark.asyncio
+async def test_skill_executor_goal_id_none_untouched():
+    """D34：skill_call.goal_id 为 None 时不覆盖 skill 内部自带的 goal_id。"""
+    from aistock_agent.graph.nodes.skill_executor import skill_executor_node
+
+    async def fake_skill(args, goal):
+        ev = _evidence("stock_snapshot")
+        ev.goal_id = "keep-me"  # 模拟 skill 内部自带 goal_id
+        return ev
+
+    state: QuestionState = {
+        "messages": [],
+        "goal": InsightGoal(question="600519 今天怎么样", intent="stock_snapshot"),
+        "plan": "direct",
+        "skill_calls": [SkillCall(skill_name="stock_snapshot", args={"symbol": "600519"})],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
+    with patch(
+        "aistock_agent.graph.nodes.skill_executor.SKILL_REGISTRY",
+        {"stock_snapshot": fake_skill},
+    ):
+        result = await skill_executor_node(state)
+    assert result["evidences"][0].goal_id == "keep-me"

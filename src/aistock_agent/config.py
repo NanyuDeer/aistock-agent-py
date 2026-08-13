@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     deep_think_api_key: str = ""
     deep_think_base_url: str = ""
     deep_think_model: str = "gpt-4o"
+    # Embedding — 行业语义匹配（对齐硬约束：必须独立配置，禁用 LLM 端点做 embedding）
+    # 未配置时仅 fallback 到 openai_*（供测试）；生产必须显式配置支持 embedding 的服务。
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-3-small"
     # 双模型参数 — 从配置读取，避免硬编码（services/llm.py 引用）
     quick_think_temperature: float = 0.1
     quick_think_max_tokens: int = 2000
@@ -80,9 +85,15 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
-    # 服务（Python 8000 / Node.js 3000）
+    # 抖音视频转写（硅基流动 SenseVoice；E:/changer_learning 已验证）
+    douyin_api_key: str = ""
+    # 可选：显式指定 ffmpeg/ffprobe 路径（默认走 PATH 查找）
+    ffmpeg_binary: str = ""
+    ffprobe_binary: str = ""
+
+    # 服务（Python 8080 / Node.js 3000）
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8080
     log_level: str = "INFO"
 
     # 内网鉴权
@@ -112,6 +123,9 @@ class Settings(BaseSettings):
     checkpointer_backend: str = "memory"
     # sqlite backend 的数据库路径（仅 checkpointer_backend="sqlite" 时使用）
     sqlite_path: str = ".langgraph.db"
+    # sqlite busy_timeout（秒；sqlite3 默认 5.0）。多 worker 并发写短暂争用时
+    # sqlite 抛 "database is locked"；30s 覆盖争用窗口（Phase 5 Task 3 低成本先行项）。
+    sqlite_busy_timeout: float = 30.0
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）
@@ -123,11 +137,46 @@ class Settings(BaseSettings):
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 1-5"
     scheduler_timezone: str = "Asia/Shanghai"
+
+    # ===== 迭代 Agent 自动闭环（iterate）=====
+    # 默认关闭；服务器沙盒 .env 设 ITERATE_ENABLED=true 开启
+    iterate_enabled: bool = False
+    # 数据目录（切片/标准答案/实验/报告，均 gitignore）
+    iterate_data_dir: str = "data"
+    # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
+    iterate_cron: str = "0 17 * * 1-5"
+    # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
+    iterate_case_build_cron: str = "30 16 * * 1-5"
+    iterate_max_rounds: int = 5            # 每案例变体轮数上限
+    iterate_target_score: float = 0.8      # 归因相似度达标值
+    iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
+    iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
+    # SMTP 报告（QQ 邮箱授权码）
+    iterate_smtp_host: str = ""
+    iterate_smtp_port: int = 465
+    iterate_smtp_user: str = ""
+    iterate_smtp_password: str = ""
+    iterate_mail_to: str = ""
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
     scheduler_review_quick_cron: str = "30 15 * * 1-5"
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
+    scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    # ── 统一事件抓取中台调度（2026-08-12） ──
+    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    scheduler_event_scrape_intraday_cron: str = (
+        "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+    )
+    scheduler_event_scrape_early_cron: str = (
+        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷）
+    )
+    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
+    event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
+    event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
+    event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
+    event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
@@ -146,6 +195,10 @@ class Settings(BaseSettings):
     market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
     market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
     market_event_max_pushes: int = 2            # 每次晨报最多推送条数
+
+    # 事件分析流水线（event_analysis_pipeline）整体超时（秒）。
+    # 覆盖 Event Conduction → Global Importance 全链路，超时记录日志但不中断 broadcast。
+    event_analysis_pipeline_timeout_seconds: int = 900
 
     # 现象发现：同向指数异动与市场广度。
     # broad_rally / broad_decline 基础条件：至少 N 个核心指数同向超过 change_pct，且广度比例达标。

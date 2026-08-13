@@ -20,8 +20,14 @@ env/
 .env
 .env.development
 .env.production
+.env.server
 # 仅提交模板
 !.env.example
+
+# LangGraph checkpointer sqlite 运行时数据库（checkpointer_backend=sqlite 时生成）
+.langgraph.db
+.langgraph.db-shm
+.langgraph.db-wal
 
 # 日志
 *.log
@@ -60,3 +66,9 @@ docs/2026-08-01-chat-agent-subagents-design.md
 .claude/
 CLAUDE.md
 # AGENTS.md 需要提交，供 AI 开发时参考
+
+# iterate 数据（切片/标准答案/实验/报告，仅存沙盒本地）
+data/cases/
+data/ground_truths/
+data/experiments/
+data/reports/

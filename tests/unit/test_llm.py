@@ -1,6 +1,7 @@
 from urllib.parse import urlsplit
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from pydantic import BaseModel
 
 from aistock_agent.services import llm
@@ -27,6 +28,18 @@ def test_model_factories_strip_chat_completions_suffix(
     model = factory()
 
     assert urlsplit(str(model.root_client.base_url)).path == "/v1/"
+
+
+def test_get_quick_think_observe_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """问题 17（2026-08-11 拍板）：observe=False 不挂 callbacks（reasoning 不计费）；
+    默认 True 挂（主链路计费，存量调用零破坏）。"""
+    monkeypatch.setattr(llm.settings, "openai_base_url", "https://models.example.test/v1")
+    monkeypatch.setattr(llm.settings, "openai_api_key", "not-a-secret")
+    # 非空 callbacks 列表，才能断言默认模式确实挂上了
+    monkeypatch.setattr(llm, "_get_observability_callbacks", lambda: [BaseCallbackHandler()])
+
+    assert llm.get_quick_think().callbacks  # 默认 observe=True → 挂 callbacks
+    assert llm.get_quick_think(observe=False).callbacks is None  # reasoning 旁路不挂
 
 
 class _CaptureLLM:

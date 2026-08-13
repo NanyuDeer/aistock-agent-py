@@ -27,6 +27,7 @@ from aistock_agent.prompts.workers.event import (
     EVENT_UNDERSTANDING_PROMPT,
 )
 from aistock_agent.services.cache import get_cached_event, set_cached_event
+from aistock_agent.services.event_graph_resolver import resolve_industry_graph_evidence
 from aistock_agent.services.event_persister import persist_event_report
 from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.state.schema import AgentState
@@ -262,14 +263,28 @@ async def _analyze_understanding(user_msg: str) -> dict[str, object] | None:
 
 
 async def _analyze_transmission(
-    user_msg: str, understanding: dict[str, object]
+    user_msg: str,
+    understanding: dict[str, object],
+    *,
+    external_evidence: list[dict[str, object]] | None = None,
 ) -> dict[str, object] | None:
-    """Call 2: 传导路径分析（deep 模型，ReAct + 工具）。"""
+    """Call 2: 传导路径分析（deep 模型，ReAct + 工具）。
+
+    external_evidence: 第一阶段产物——由代码确定性调用图谱后注入的证据。
+    若提供，则直接作为 industryGraphEvidence（不再依赖 ReAct 从 messages
+    提取），但 ReAct 仍可自主调用工具做补充查询。
+    """
     ud = json.dumps(understanding, ensure_ascii=False)
     prompt = EVENT_TRANSMISSION_PROMPT.replace("{understanding}", ud)
     result = await _call_llm_with_tools(prompt, user_msg, model="deep")
     if result:
-        evidence = result.industry_graph_evidence or [_not_queried_industry_graph_evidence()]
+        # 优先使用外部注入的证据（代码确定性图谱查询）；仅当
+        # 外部未提供时回退到 ReAct 从 messages 提取（兜底）。
+        evidence = (
+            external_evidence
+            if external_evidence is not None
+            else (result.industry_graph_evidence or [_not_queried_industry_graph_evidence()])
+        )
         if isinstance(result.parsed, dict):
             transmission = dict(result.parsed)
             transmission["industryGraphEvidence"] = evidence
@@ -635,21 +650,52 @@ async def run(state: AgentState) -> dict[str, object]:
         # ── 5 个独立 LLM 调用 ──
 
         # Call 1: 事件理解（flash, no tools）
+        # P1-1：understanding 失败重试一次，避免单次 LLM 抖动直接丢掉整个事件。
         understanding = await _analyze_understanding(user_msg)
+        understanding_retry = False
+        if not understanding:
+            logger.warning("event_understanding_failed_retry", event_preview=user_msg[:50])
+            understanding_retry = True
+            understanding = await _analyze_understanding(user_msg)
         if not understanding:
             logger.warning("event_understanding_failed", event_preview=user_msg[:50])
             return {
                 "final_response": "事件分析暂时不可用，请稍后重试",
                 "analysis_reports": {
                     "event_generated": False,
+                    "event_complete": False,
+                    "can_persist": False,
                     "event_persisted": False,
                     "event_cached": False,
                     "event_id": event_id,
+                    "event_error": {
+                        "stage": "understanding",
+                        "reason": "understanding LLM call failed after retry",
+                    },
                 },
             }
 
         # Call 2: 传导路径（deep, ReAct + tools）
-        transmission = await _analyze_transmission(user_msg, understanding)
+        # ── Phase 1 稳定性升级：代码确定性图谱查询 ──
+        # 从 understanding 提取核心行业名，强制调用后端 IndustryKG，
+        # 消除 LLM ReAct 跳过 get_industry_chain 导致 not_queried 的问题。
+        graph_evidence: list[dict[str, object]] | None = None
+        if understanding:
+            core_industry = str(understanding.get("coreIndustry", ""))
+            # 兼容 understanding 输出未必包含 coreIndustry 字段的场景
+            if not core_industry:
+                logger.info("event_no_core_industry_in_understanding",
+                            event_preview=user_msg[:50])
+            else:
+                evidence_item = await resolve_industry_graph_evidence(core_industry)
+                graph_evidence = [evidence_item]
+                logger.info("event_graph_resolver_called",
+                            coreIndustry=core_industry,
+                            kg_status=evidence_item.get("status"))
+        # ──────────────────────────────────────────
+        transmission = await _analyze_transmission(
+            user_msg, understanding, external_evidence=graph_evidence,
+        )
         constrained_transmission = _constrain_transmission_for_downstream(
             transmission,
             event_id,
@@ -687,6 +733,11 @@ async def run(state: AgentState) -> dict[str, object]:
             "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
             "title": title[:50] if title else "",
             "source": event_source,
+            # 事件元数据扩展：source_name（来源名称）/ event_type（事件类型枚举）
+            # 由 Understanding LLM 生成（见 EVENT_UNDERSTANDING_PROMPT）；
+            # source_name 缺失时兜底"未知来源"，不阻断分析结果保存。
+            "source_name": str(understanding.get("source_name", "")).strip() or "未知来源",
+            "event_type": str(understanding.get("event_type", "")).strip(),
         }
         analysis_reports = transform_to_frontend(
             understanding,
@@ -702,8 +753,11 @@ async def run(state: AgentState) -> dict[str, object]:
                 _INDUSTRY_GRAPH_BOUNDARY_VERSION
             )
 
-        # can_persist: brief ∈ [150,200] AND title 非空
-        # title 缺失时不得以 completed 状态持久化
+        # P0-1：拆分"分析完成"与"展示完整"
+        # event_generated / event_complete：事件分析流程是否完成
+        #   = understanding 成功（已前置校验）+ event_id 存在 + title 存在
+        # can_persist：仅表示前端展示完整性（podcast_brief ∈ [150,200] AND title 非空），
+        #   不再阻断分析结果保存——即使展示字段不合规，完整 analysis_reports 仍会落库。
         if not title:
             logger.warning(
                 "event_title_missing_cannot_persist",
@@ -711,44 +765,59 @@ async def run(state: AgentState) -> dict[str, object]:
             )
             can_persist = False
 
-        # 缓存仅写入可持久化数据（不可持久化时允许同输入重新生成）
-        # 持久化仅当 can_persist=True
         event_id = str(event_meta.get("eventId", ""))
+        event_generated = bool(event_id) and bool(title)
+        event_complete = event_generated
         event_persisted = False
         event_cached = False
-        if can_persist:
-            # 在缓存中保存 event_persisted 状态，便于下次命中时判断是否需要幂等补写
+        event_persist_error: dict[str, object] | None = None
+
+        if event_generated:
+            # 分析完成即保存完整 analysis_reports（不因展示字段缺失而丢弃）
             analysis_reports["event_id"] = event_id
             analysis_reports["event_generated"] = True
-            analysis_reports["event_persisted"] = False  # 先写 False，落库成功后更新
-            # event_cached 只有在 Redis 实际写入成功时才为 True
+            analysis_reports["event_complete"] = True
+            analysis_reports["can_persist"] = can_persist
+            analysis_reports["event_persisted"] = False
+            # 缓存写入，便于下次命中时判断是否需要幂等补写
             event_cached = await set_cached_event(user_msg, analysis_reports)
             event_persisted = await persist_event_report(
                 event_id, event_meta, user_msg, analysis_reports
             )
-            # 落库后更新缓存中的 persisted 状态
             analysis_reports["event_persisted"] = event_persisted
             if event_persisted:
-                # 更新缓存：若再次写入成功则确保 event_cached=True
+                # 落库成功后更新缓存中的 persisted 状态
                 if await set_cached_event(user_msg, analysis_reports):
                     event_cached = True
+            else:
+                # P1-2：落库失败必须显式记录，供 event_conduction 判定
+                # success=False（该事件不进入 GI），保证 GI 输入=已确认落库事件。
+                event_persist_error = {
+                    "stage": "persist",
+                    "reason": "persist_event_report returned False",
+                }
+                analysis_reports["event_persist_error"] = event_persist_error
         else:
             logger.warning(
-                "event_not_persisted",
+                "event_not_generated",
                 event_id=event_id,
-                brief_len=len(podcast_brief),
                 title_empty=not title,
+                brief_len=len(podcast_brief),
             )
+
+        if understanding_retry:
+            analysis_reports["understanding_retry"] = True
 
         return {
             "final_response": podcast_brief,
             "analysis_reports": {
                 **state.get("analysis_reports", {}),
                 **analysis_reports,
-                # event_generated 只表示报告结构有效、标题有效、播报校验通过且非降级结果
-                # （can_persist = brief ∈ [150,200] AND title 非空；
-                #   understanding 失败已在前置 return 中标记为 False）
-                "event_generated": can_persist,
+                # event_generated/event_complete：分析流程完成（understanding + event_id + title）
+                # can_persist：前端展示完整性（不阻断分析结果保存）
+                "event_generated": event_generated,
+                "event_complete": event_complete,
+                "can_persist": can_persist,
                 "event_persisted": event_persisted,
                 "event_cached": event_cached,
                 "event_id": event_id,
@@ -760,6 +829,8 @@ async def run(state: AgentState) -> dict[str, object]:
             "final_response": "事件分析暂时不可用，请稍后重试",
             "analysis_reports": {
                 "event_generated": False,
+                "event_complete": False,
+                "can_persist": False,
                 "event_persisted": False,
                 "event_cached": False,
                 "event_id": event_id,

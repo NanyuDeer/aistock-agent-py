@@ -63,7 +63,7 @@
 | Stock Trace | 新增领域模块，负责快照、证据、归因、校验、Artifact 和公共缓存 |
 | Market Trace/Review | 不修改流程、模型和存储；只参考其设计思想 |
 | Hot Burst | 明确排除，不作为异动候选原因或证据聚合模块 |
-| 个股情报/公告 | 继续独立存在，可作为 Stock Trace 证据来源 |
+| 自选股情报（原个股情报）/公告 | 继续独立存在，可作为 Stock Trace 证据来源 |
 | AI Advisor/播报 | 本期仅预留已验证 StockTraceArtifact 的只读查询接口，不接入消费链路；后续消费时不得重新生成归因 |
 
 ### 2.3 数据源

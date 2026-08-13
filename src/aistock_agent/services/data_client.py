@@ -4,6 +4,7 @@ Python 服务不拥有 A 股数据，通过回调 Node.js 获取。
 httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -14,13 +15,14 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.redis_pool import RedisPool
 
 logger = structlog.get_logger()
 
 
 @dataclass(frozen=True)
 class ReviewReportReadResult:
-    """市场复盘工件读取结果，仅供 market_trace_qa 使用。"""
+    """市场复盘工件读取结果，仅供 trace_loader 使用。"""
 
     status: Literal["found", "not_found", "unavailable"]
     report: dict[str, object] | None = None
@@ -346,6 +348,7 @@ class NodeApiClient:
         generation_time_ms: int | None = None,
         model_version: str | None = None,
         error_message: str | None = None,
+        update_cache: bool = True,  # P2：chat_analysis 传 False（公共列表排除，D15）
     ) -> dict[str, object] | None:
         """持久化 Agent 分析报告（upsert）
 
@@ -359,6 +362,8 @@ class NodeApiClient:
             generation_time_ms: 生成耗时(毫秒)
             model_version: 模型版本
             error_message: 错误信息
+            update_cache: 是否同步写 Python report_cache（前端公共报告列表）。
+                默认 True 保持既有行为；chat_analysis 传 False（不进公共列表，D15 覆盖语义）。
 
         Returns:
             Node.js 返回的 { id, report_type, report_date, created_at } 或 None
@@ -381,12 +386,13 @@ class NodeApiClient:
             payload["error_message"] = error_message
 
         result = await self.post("/internal/analysis-reports", payload)
-        # 同步写入内存缓存（前端报告列表查询用）
-        try:
-            from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
-            set_report(report_type, report_date, payload)
-        except Exception:
-            pass
+        # 同步写入内存缓存（前端报告列表查询用）；chat_analysis 不进公共列表（D15 排除）
+        if update_cache:
+            try:
+                from aistock_agent.services.report_cache import set_report  # noqa: PLC0415
+                set_report(report_type, report_date, payload)
+            except Exception:
+                pass
         if result:
             logger.info(
                 "analysis_report_saved",
@@ -395,6 +401,97 @@ class NodeApiClient:
                 user_id=user_id,
             )
         return result
+
+    async def save_token_usage(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        question: str | None = None,
+    ) -> dict[str, object] | None:
+        """记录一次对话 token 用量（P10 线 2，ws.py 计费回调）。
+
+        与 save_analysis_report 同模式：``post`` 已吞异常返回 None，
+        调用方再包一层 try/except 记日志即可——落库失败不阻断对话
+        （"永不 500"铁律）。
+
+        Returns:
+            Node 返回的 {id} 或 None（失败）。
+        """
+        payload: dict[str, object] = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "question": question,
+        }
+        result = await self.post("/internal/usage/records", payload)
+        if result:
+            logger.info(
+                "token_usage.saved",
+                user_id=user_id,
+                session_id=session_id,
+                total_tokens=total_tokens,
+            )
+        return result
+
+    async def put(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
+        """PUT Node 内部 API，并返回已解包的对象 data。"""
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.put(url, json=body, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 200:
+                logger.error("node_api_put_business_error", url=url)
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, dict) else None
+        except httpx.HTTPStatusError as exc:
+            logger.error("node_api_put_http_error", url=url, status=exc.response.status_code)
+        except httpx.RequestError as exc:
+            logger.error("node_api_put_request_error", url=url, error=str(exc))
+        except Exception as exc:
+            logger.error("node_api_put_unexpected_error", url=url, error=str(exc))
+        return None
+
+    # ─── 预测能力落库与验证（大盘溯源预测 → prediction_records）───
+
+    async def save_prediction(self, payload: dict[str, object]) -> dict[str, object] | None:
+        """持久化预测记录（POST /internal/predictions）。
+
+        与 save_analysis_report 同模式：``post`` 已吞异常返回 None，
+        调用方再包 try/except——落库失败不阻断溯源报告（"永不 500"）。
+        """
+        result = await self.post("/internal/predictions", payload)
+        if result:
+            logger.info(
+                "prediction.saved",
+                source_type=payload.get("source_type"),
+                source_id=payload.get("source_id"),
+            )
+        return result
+
+    async def list_pending_predictions(self) -> list[dict[str, object]]:
+        """读取全部 pending 预测记录（到期验证扫描用）。"""
+        return await self.get_list("/internal/predictions?status=pending") or []
+
+    async def update_prediction_verification(
+        self,
+        prediction_id: int,
+        horizon: str,
+        entry: dict[str, object],
+    ) -> dict[str, object] | None:
+        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。"""
+        body: dict[str, object] = {"horizon": horizon}
+        body.update(entry)
+        return await self.put(f"/internal/predictions/{prediction_id}/verification", body)
 
     async def get_analysis_report(
         self,
@@ -418,6 +515,50 @@ class NodeApiClient:
             path = f"/internal/analysis-reports/{report_type}/{report_date}"
 
         return await self.get(path)
+
+    async def get_analysis_report_quiet(
+        self,
+        report_type: str,
+        report_date: str,
+        user_id: str | None = None,
+    ) -> dict[str, object] | None:
+        """查询 Agent 分析报告（404 静默，供"空库是常态"的探测场景）。
+
+        与 get_analysis_report 的区别：报告不存在（HTTP 404）时返回 None 且
+        不打 error 级日志（调用方自行决定日志级别）。仅新增专用方法，不改
+        _request/get 的全局 404 行为，避免影响依赖 error 告警的其他调用方。
+        其他错误（业务码非 200 / HTTP 5xx / 网络异常）仍记 error 后返回 None。
+        """
+        if user_id:
+            path = f"/internal/analysis-reports/{report_type}/{report_date}/{user_id}"
+        else:
+            path = f"/internal/analysis-reports/{report_type}/{report_date}"
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                logger.error("node_api_unexpected_payload", url=url, payload=str(payload)[:200])
+                return None
+            if payload.get("code") != 200:
+                logger.error("node_api_business_error", url=url, code=payload.get("code"),
+                             message=payload.get("message"))
+                return None
+            return payload.get("data")
+        except httpx.HTTPStatusError as e:
+            logger.error("node_api_http_error", url=url, status=e.response.status_code)
+        except httpx.RequestError as e:
+            logger.error("node_api_request_error", url=url, error=str(e))
+        except Exception as e:
+            logger.error("node_api_unexpected_error", url=url, error=str(e))
+
+        return None
 
     async def list_analysis_reports(
         self,
@@ -574,6 +715,50 @@ class NodeApiClient:
         result = await self.delete("/internal/analysis-reports/cleanup")
         deleted_count = result.get("deleted_count") if result else None
         return deleted_count if isinstance(deleted_count, int) else 0
+
+    async def get_user_profile(self, user_id: str) -> dict[str, object] | None:
+        """按 user_id 拉取用户画像（Phase 4-3 全局用户记忆）。
+
+        调用 Node.js ``GET /internal/user-profile/{user_id}``；Redis TTL 5min
+        缓存（``user_profile:{user_id}``，JSON 序列化），防对话每轮重复拉取。
+
+        Args:
+            user_id: 用户 openid（P0 可信 user_id）。
+
+        Returns:
+            profile dict（nickname / investment_preferences / risk_tolerance /
+            updated_at）；空画像返回 ``{}``（区别于拉取失败）；失败返回 None
+            （"永不 500"：对话入口失败仅 warning 不阻断）。
+        """
+        cache_key = f"user_profile:{user_id}"
+        try:
+            client = await RedisPool.get_client()
+            cached = await client.get(cache_key)
+            if cached:
+                raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
+            logger.debug("get_user_profile_cache_miss", exc_info=True)
+
+        data = await self.get(f"/internal/user-profile/{user_id}")
+        if not isinstance(data, dict):
+            logger.warning("get_user_profile_failed", user_id=user_id)
+            return None
+
+        try:
+            client = await RedisPool.get_client()
+            await client.setex(
+                cache_key, _USER_PROFILE_TTL_SECONDS, json.dumps(data, ensure_ascii=False)
+            )
+        except Exception:
+            logger.debug("get_user_profile_cache_write_failed", exc_info=True)
+        return data
+
+
+# 用户画像缓存 TTL（5 分钟；失败/空画像同样缓存，避免每轮重复拉取）
+_USER_PROFILE_TTL_SECONDS = 300
 
 
 # 全局单例

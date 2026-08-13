@@ -6,6 +6,8 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -15,18 +17,29 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.prompts.general.system import (
     ACTION_KEYWORDS,
+    PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
+    RISK_DISCLAIMER_CONSERVATIVE,
     RISK_DISCLAIMER_STRONG,
 )
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
+    ChatCard,  # P11（线 3）：cards 卡片契约（T1 幂等补齐 / 计划 B 定义）
     Evidence,
     Insight,
     InsightGoal,
+    SubGoal,
 )
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
-from aistock_agent.state.chat_schema import QuestionState
-from aistock_agent.utils.date import is_trading_day, prev_trading_day, shanghai_today
+from aistock_agent.services.token_usage import get_token_usage
+from aistock_agent.skills.prediction import DISCLAIMER
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
+from aistock_agent.utils.date import (
+    prev_trading_day,
+    shanghai_today,
+    trading_session_status,
+)
 
 logger = structlog.get_logger()
 
@@ -47,6 +60,227 @@ _DEFAULT_MODE: dict[str, str] = {
     "trace_lookup": "trace",
     "industry_relation": "trace",
 }
+
+
+@dataclass
+class _SectionResult:
+    """单节综合回答结果（多子目标专用，Task 4）。"""
+
+    conclusion: str
+    basis: list[Evidence]
+    confidence: Literal["high", "medium", "low"]
+    uncertainty: list[str]
+    mode: str
+    degraded: bool = False
+
+
+async def _synth_section(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    summary_context: str = "",
+) -> _SectionResult:
+    """单节综合回答（多子目标分节复用）：复用现状 LLM 流程与契约。
+
+    与单意图路径的差异：不含风险段/非交易时段提示/AnswerTrace（多节外层统一处理）。
+    LLM 失败 → facts 拼接降级（不抛异常，"永不 500"铁律）。
+    summary_context 为 Phase 5 长会话摘要段（短会话空串，由 _synth_multi_goal 统一传入）。
+    """
+    mode = _infer_answer_mode(goal, evidences)
+    try:
+        llm = get_deep_think()
+        structured_llm = with_chat_structured_output(llm, SynthOutput)
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
+        output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+        raw = output.insight
+        basis, basis_error = _resolve_basis_indices(raw.basis_indices, evidences)
+        if basis_error is not None:
+            raise ValueError(basis_error)
+        assert basis is not None
+        if raw.answer_mode != mode:
+            logger.warning(
+                "synth_answer.section.mode_mismatch", expected=mode, actual=raw.answer_mode
+            )
+        return _SectionResult(raw.conclusion, basis, raw.confidence, raw.uncertainty, mode)
+    except Exception as exc:
+        logger.warning("synth_answer.section_failed", err=str(exc), exc_info=True)
+        all_facts = [f for ev in evidences for f in ev.facts]
+        if all_facts:
+            conclusion = "## 行情要点\n" + "\n".join(f"- {f}" for f in all_facts)
+        else:
+            conclusion = "当前没有可用的数据事实，暂时无法回答该问题。"
+        return _SectionResult(
+            conclusion, evidences, "low", [f"综合失败: {exc}"], "validate", degraded=True
+        )
+
+
+def _subgoal_to_goal(sg: SubGoal) -> InsightGoal:
+    """SubGoal → InsightGoal（dimension 通过 constraints.answer_mode 显式注入）。"""
+    return InsightGoal(
+        question=sg.question,
+        symbols=sg.symbols,
+        tag_codes=sg.tag_codes,
+        time_range=sg.time_range,
+        intent=sg.intent,
+        constraints={"answer_mode": sg.dimension},
+    )
+
+
+def _build_predict_section(
+    sg: SubGoal, evidences: list[Evidence], include_hint: bool
+) -> str:
+    """predict 子目标节：三段式渲染（现状趋势 + 影响持续性推演 + 免责声明）。
+
+    - prediction Evidence 存在且非 degraded → 三段式（零 LLM，facts 拼接）：
+      ① 现状趋势：复用同子目标 validate facts（goal_id == sg.id，既有逻辑）；
+      ② 影响持续性推演：渲染 prediction facts（跳过首行【…现状】输入上下文，
+         三档/置信度/演化/风险/低置信提示原样保留，免责声明去重）；
+      ③ 免责声明：由 _synth_multi_goal 合并各节后统一追加恰好一次（A1②），
+         本节不再各自追加（多 predict 子目标不再各节重复）。
+    - Evidence 缺失或 degraded → 维持 D35 降级提示（PREDICT_DEGRADED_HINT）+ 趋势要点。
+    - 定位规则：仅按 skill_name=="prediction"（prediction skill 恒设置该名；不按 goal_id
+      兜底——关键词兜底 compose 路径的 predict 子目标 g2 可能携带 goal_id="g2" 的
+      validate 证据但无 prediction call，按 goal_id 兜底会误标推演）。
+    """
+    pred_ev = next(
+        (ev for ev in evidences if ev.skill_name == "prediction" and not ev.degraded),
+        None,
+    )
+
+    trend_evs = [
+        ev
+        for ev in evidences
+        if ev.goal_id == sg.id and ev.skill_name != "prediction"
+    ]
+    trend_facts: list[str] = []
+    for ev in trend_evs:
+        trend_facts.extend(ev.facts)
+
+    if pred_ev is None:
+        # D35 降级路径（字节不变）：固定降级提示 + 当前趋势要点
+        lines = [f"## {sg.question}"]
+        if include_hint:
+            lines.append(PREDICT_DEGRADED_HINT)
+        if trend_facts:
+            lines.append("当前趋势要点：")
+            lines.extend(f"- {f}" for f in trend_facts[:10])
+        return "\n\n".join(lines)
+
+    # 三段式：① 现状趋势（同子目标 validate facts，既有逻辑）
+    lines = [f"## {sg.question}"]
+    if trend_facts:
+        lines.append("当前趋势要点：")
+        lines.extend(f"- {f}" for f in trend_facts[:10])
+    # ② 影响持续性推演：prediction facts 跳过首行【…现状】输入上下文；免责声明去重
+    pred_facts = pred_ev.facts
+    if pred_facts and "现状】" in pred_facts[0]:
+        pred_facts = pred_facts[1:]
+    pred_facts = [f for f in pred_facts if f != DISCLAIMER]
+    if pred_facts:
+        lines.append("影响持续性推演：")
+        # skill 的三档行自带 "- " 前缀，归一化避免双子弹
+        lines.extend(
+            f"- {f[2:]}" if f.startswith("- ") else f"- {f}" for f in pred_facts
+        )
+    return "\n\n".join(lines)
+
+
+async def _synth_multi_goal(
+    state: QuestionState,
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    goals: list[SubGoal],
+    summary_context: str = "",
+) -> dict[str, Any]:
+    """D34 多子目标分节回答（先 validate/trace 现状数据，后 predict 提示）。
+
+    - 非 predict 子目标各一次 deep_think（复用 _synth_section，LLM 契约零变化）；
+    - predict 子目标代码生成 D35 提示段（多个只输出一次），附同子目标 validate 趋势要点；
+    - 全文末尾单次 D28 风险段；非交易时段提示按全量 evidence 判断一次、置于文首。
+    - summary_context 为 Phase 5 长会话摘要段（由 synth_answer 核心入口统一重算传入，
+      短会话空串 → 各节 prompt 字节不变；不读 state.messages_summary 防跨轮残留）。
+    """
+    import time
+
+    start = time.monotonic()
+    metrics = get_metrics_collector()
+
+    # Phase 4-3（改进 15）：从 user_profile 提取个性化参数（None/缺字段 → 零行为变化）
+    _profile = state.get("user_profile") or {}
+    risk_tolerance = _profile.get("risk_tolerance")
+    investment_preferences = _profile.get("investment_preferences")
+
+    non_predict = _sort_goals_by_preferences(
+        [g for g in goals if g.dimension != "predict"], investment_preferences
+    )
+    predict = [g for g in goals if g.dimension == "predict"]
+    sections: list[str] = []
+    basis: list[Evidence] = []
+    uncertainty: list[str] = []
+    any_degraded = False
+    mode: str = "predict"
+    for sg in non_predict:
+        sg_evs = [ev for ev in evidences if ev.goal_id == sg.id]
+        res = await _synth_section(
+            _subgoal_to_goal(sg), sg_evs, summary_context=summary_context
+        )
+        if res.degraded:
+            any_degraded = True
+        sections.append(f"## {sg.question[:40]}\n\n{res.conclusion}")
+        basis.extend(res.basis)
+        uncertainty.extend(res.uncertainty)
+        if mode == "predict":
+            mode = res.mode
+    hint_emitted = False
+    for sg in predict:
+        sections.append(_build_predict_section(sg, evidences, include_hint=not hint_emitted))
+        hint_emitted = True
+    if not sections:
+        sections.append(
+            f"## {goals[0].question[:40]}\n\n当前没有可用的数据事实，暂时无法回答该问题。"
+        )
+        any_degraded = True
+    combined = "\n\n".join(sections)
+    # A1②：免责声明合并后统一追加恰好一次（多 predict 子目标不再各节重复；
+    # predict 按 dimension=="predict" 过滤（上方）；追加位置在预测段之后、D28 风险段之前）
+    if predict and DISCLAIMER not in combined:
+        combined = f"{combined}\n\n{DISCLAIMER}"
+    # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
+    combined = _append_risk_disclaimer(
+        combined,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
+    )
+    # 非交易时段提示：按全量 evidence 判断一次、置于文首
+    combined = _append_non_trading_time_hint(combined, evidences)
+
+    if any_degraded:
+        metrics.record_synth_degraded()
+    confidence: Literal["high", "medium", "low"] = (
+        "low" if (any_degraded or not basis) else "medium"
+    )
+    insight = Insight(
+        conclusion=combined,
+        basis=basis or evidences,
+        confidence=confidence,
+        uncertainty=uncertainty,
+        answer_mode=mode,  # type: ignore[arg-type]
+    )
+    trace = AnswerTrace(
+        goal=goal,
+        plan=state.get("plan", "compose"),
+        skill_calls=state.get("skill_calls", []),
+        evidences=evidences,
+        actual_mode=mode,  # type: ignore[arg-type]
+        goals=goals,
+    )
+    metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
+    return {
+        "insight": insight,
+        "final_response": combined,
+        "trace": trace,
+        "messages": [AIMessage(content=combined)],
+        "cards": _build_cards(evidences),
+    }
 
 
 def _infer_answer_mode(goal: InsightGoal, evidences: list[Evidence]) -> str:
@@ -147,8 +381,13 @@ def _resolve_basis_indices(
     return basis, None
 
 
-def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> str:
-    """构建综合回答 prompt。"""
+def _build_prompt(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    summary_context: str = "",
+) -> str:
+    """构建综合回答 prompt（summary_context 为 Phase 5 长会话摘要段，短会话为空串）。"""
     evidence_text = "\n".join(
         f"[{i+1}] skill={ev.skill_name} degraded={ev.degraded} reason={ev.degraded_reason}\n"
         f"    facts: {ev.facts}\n"
@@ -156,7 +395,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
         f"    as_of: {ev.as_of.isoformat()}"
         for i, ev in enumerate(evidences)
     )
-    return f"""{_MODE_PROMPTS[mode]}
+    return f"""{_MODE_PROMPTS[mode]}{summary_context}
 
 结构化输出要求（针对 conclusion 字段，必须遵守）：
 1. 使用 Markdown 分节组织回答，推荐结构：
@@ -201,41 +440,87 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
 """
 
 
-def _append_non_trading_day_hint(
+def _quote_data_not_today(ev: Evidence) -> bool:
+    """行情证据的数据是否非"今日"（决定是否触发非交易时段引导提示）。
+
+    按证据类型区分，避免误伤：
+    - market_snapshot：A 股数据是否"今日真实收盘"由 raw 判定——used_last_close=True
+      （最近交易日回退）或 a_share_success 非 True（A 股失败/未请求/未知）均视为非今日；
+      scope=global（仅全球行情）不受 A 股日历门控，维持 degraded 判定。
+    - 其他行情 skill（stock_snapshot/capital_flow 等）：非交易时段/空数据 → degraded=True。
+    """
+    if ev.skill_name == "market_snapshot":
+        raw = ev.raw or {}
+        if raw.get("scope") == "global":
+            return ev.degraded
+        return raw.get("used_last_close") is True or raw.get("a_share_success") is not True
+    return ev.degraded
+
+
+def _append_non_trading_time_hint(
     conclusion: str, evidences: list[Evidence]
 ) -> str:
-    """非交易日统一提示：今天非交易日且行情类证据降级 → 前导提示 + 引导最近交易日。
+    """非交易时段统一提示：5 种时段状态 + 行情类证据数据非今日 → 前导提示。
 
-    仅当（1）今天是非交易日（2）存在 kind=realtime_quote 的降级证据时触发；
-    报告类/护栏类回答不加，避免误提示。已含"非交易日"时不重复叠加。
+    触发条件 = 时段状态非 trading 且存在行情类证据且其数据非"今日"（_quote_data_not_today）；
+    报告类/护栏类回答不加。已含"当前为 A 股"前缀时不重复叠加。
     """
-    today = shanghai_today()
-    if is_trading_day(today):
+    status, _ = trading_session_status()
+    if status == "trading":
         return conclusion
-    quote_degraded = any(
-        ev.degraded
-        and (
-            ev.skill_name in _QUOTE_SKILLS
-            or any(src.kind == "realtime_quote" for src in ev.sources)
-        )
+
+    quote_evidence = [
+        ev
         for ev in evidences
-    )
-    if not quote_degraded:
+        if ev.skill_name in _QUOTE_SKILLS
+        or any(src.kind == "realtime_quote" for src in ev.sources)
+    ]
+    if not any(_quote_data_not_today(ev) for ev in quote_evidence):
         return conclusion
-    if "非交易日" in conclusion:
+
+    # 已含提示不重复
+    if conclusion.startswith("当前为 A 股") or conclusion.startswith("今天是 A 股非交易日"):
         return conclusion
+
+    today = shanghai_today()
     last = prev_trading_day(today)
-    hint = (
-        f"今天是 A 股非交易日（{today.isoformat()} "
-        f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。最近交易日为 "
-        f"{last.isoformat()}（{_CN_WEEKDAYS[last.weekday()]}），可以问我「"
-        f"{last.month}月{last.day}日大盘」或「上一交易日板块表现」查看该日行情。\n\n"
-    )
-    return hint + conclusion
+    if status == "non_trading_day":
+        prefix = (
+            f"今天是 A 股非交易日（{today.isoformat()} "
+            f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。以下为最近交易日（"
+            f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）数据。你说的是否是"
+            f"这个交易日（{last.isoformat()}）的行情？\n\n"
+        )
+    elif status == "pre_open":
+        prefix = (
+            f"今日尚未开盘（开盘时间 09:30），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    elif status == "lunch_break":
+        prefix = (
+            f"当前为 A 股午间休市（13:00 复盘），以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+    else:  # closed：已收盘但当日数据尚未发布（空窗期回退）
+        prefix = (
+            f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
+            f"数据。你说的是否是这个交易日的数据？\n\n"
+        )
+
+    return prefix + conclusion
+
+
+# 向后兼容：旧入口仍可调用，内部转调新函数
+def _append_non_trading_day_hint(conclusion: str, evidences: list[Evidence]) -> str:
+    return _append_non_trading_time_hint(conclusion, evidences)
 
 
 def _build_degraded_insight(
-    goal: InsightGoal, evidences: list[Evidence], mode: str, reason: str
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    reason: str,
+    risk_tolerance: str | None = None,
 ) -> Insight:
     """解析失败兜底：降级 validate + 结构化拼接 Evidence.facts + confidence=low。
     conclusion 按"核心结论/行情要点/数据说明"分节，即使降级也给出可用事实，
@@ -262,11 +547,14 @@ def _build_degraded_insight(
             "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
+    # Phase 4-3：conservative 档优先级高于 strong（risk_tolerance 由调用方传入）
     conclusion = _append_risk_disclaimer(
-        conclusion, strong=_contains_action_word(goal.question)
+        conclusion,
+        strong=_contains_action_word(goal.question),
+        risk_tolerance=risk_tolerance,
     )
-    # 非交易日统一提示（2026-08-02 规范）：行情类降级时提示 + 引导最近交易日
-    conclusion = _append_non_trading_day_hint(conclusion, evidences)
+    # 非交易时段统一提示（2026-08-03 规范扩展）：5 种时段状态 + 行情类降级时提示
+    conclusion = _append_non_trading_time_hint(conclusion, evidences)
     return Insight(
         conclusion=conclusion,
         basis=evidences,
@@ -281,19 +569,144 @@ def _contains_action_word(text: str) -> bool:
     return any(kw in text for kw in ACTION_KEYWORDS)
 
 
-def _append_risk_disclaimer(conclusion: str, *, strong: bool = False) -> str:
+def _append_risk_disclaimer(
+    conclusion: str, *, strong: bool = False, risk_tolerance: str | None = None
+) -> str:
     """在 conclusion 末尾强制追加风险段（去重：已含则跳过，纯字符串拼接）。
 
     D28：风险提示不依赖 LLM 自由裁量，由代码保证结论必含风险段。
     strong=True 时用强提示（用户问题含动作词，如"能买吗"）。
+    Phase 4-3（改进 15）：risk_tolerance=conservative 时用保守档强化提示
+    （优先级高于 strong 档；无 profile 时维持既有两档行为，字节不变）。
     """
-    disclaimer = RISK_DISCLAIMER_STRONG if strong else RISK_DISCLAIMER
-    if disclaimer in conclusion:
-        return conclusion
-    # 已含另一档风险段时不重复叠加
-    if RISK_DISCLAIMER_STRONG in conclusion or RISK_DISCLAIMER in conclusion:
+    if risk_tolerance == "conservative":
+        disclaimer = RISK_DISCLAIMER_CONSERVATIVE
+    elif strong:
+        disclaimer = RISK_DISCLAIMER_STRONG
+    else:
+        disclaimer = RISK_DISCLAIMER
+    # 已含任一档风险段时不重复叠加（三档互斥去重）
+    if any(
+        d in conclusion
+        for d in (RISK_DISCLAIMER, RISK_DISCLAIMER_STRONG, RISK_DISCLAIMER_CONSERVATIVE)
+    ):
         return conclusion
     return f"{conclusion}\n\n{disclaimer}"
+
+
+def _sort_goals_by_preferences(
+    goals: list[SubGoal], preferences: list[str] | None
+) -> list[SubGoal]:
+    """Phase 4-3（改进 15）：多子目标按用户投资偏好重排（偏好命中前置）。
+
+    - 偏好命中判定：偏好词是子目标 question 的子串；
+    - 稳定排序：未命中子目标保持原相对顺序，全部未命中 → 原序（字节不变）；
+    - 仅调整渲染顺序，不改变 evidence 的 goal_id 关联（证据约束不变）。
+    """
+    prefs = [p for p in (preferences or []) if isinstance(p, str) and p.strip()]
+    if not prefs:
+        return goals
+
+    def rank(g: SubGoal) -> int:
+        question = g.question or ""
+        hits = [i for i, p in enumerate(prefs) if p in question]
+        return -hits[0] if hits else len(prefs)
+
+    return sorted(goals, key=rank)
+
+
+# P11（线 3）：cards 汇总（spec §3.2）。按 skill_name 分派，逐卡片 try-except，
+# 失败跳过该卡片（warning 日志）；全部失败/无卡片化证据 → None（不破坏对话）。
+
+
+def _card_from_market_snapshot(ev: Evidence) -> ChatCard | None:
+    """market_snapshot → market_snapshot 卡片（仅 scope 含 a_share 才产出）。"""
+    raw = ev.raw or {}
+    if raw.get("scope") not in ("a_share", "both"):
+        return None
+    a_share_card = raw.get("a_share_card")
+    if not isinstance(a_share_card, dict) or not a_share_card:
+        return None
+    return ChatCard(card_type="market_snapshot", title="A股市场概览", data=a_share_card)
+
+
+def _card_from_stock_snapshot(ev: Evidence) -> ChatCard | None:
+    """stock_snapshot → stock_snapshot 卡片（data 透传 raw.quote）。"""
+    quote = (ev.raw or {}).get("quote")
+    if not isinstance(quote, dict) or not quote:
+        return None
+    name = quote.get("name") or (ev.symbols[0] if ev.symbols else "")
+    return ChatCard(card_type="stock_snapshot", title=f"{name} 实时行情", data=quote)
+
+
+def _card_from_capital_flow(ev: Evidence) -> ChatCard | None:
+    """capital_flow → capital_flow 卡片（data 透传 raw.flow）。"""
+    flow = (ev.raw or {}).get("flow")
+    if not isinstance(flow, dict) or not flow:
+        return None
+    symbol = ev.symbols[0] if ev.symbols else ""
+    return ChatCard(card_type="capital_flow", title=f"{symbol} 资金流向", data=flow)
+
+
+def _card_from_comparison(ev: Evidence) -> ChatCard | None:
+    """compare_stocks → comparison 卡片（stocks 透传 raw.parsed；conclusion 拼接'对比结论'facts）。
+
+    data 结构：{stocks: list[parsed], conclusion: '对比结论' 行文本}。
+    """
+    raw = ev.raw or {}
+    parsed = raw.get("parsed")
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    data: dict[str, Any] = {"stocks": parsed}
+    conclusions = [
+        f for f in raw.get("quotes", [])
+        if isinstance(f, str) and f.startswith("对比结论")
+    ]
+    if conclusions:
+        data["conclusion"] = conclusions[0]
+    return ChatCard(card_type="comparison", title="个股行情对比", data=data)
+
+
+_CARD_HANDLERS = {
+    "market_snapshot": _card_from_market_snapshot,
+    "stock_snapshot": _card_from_stock_snapshot,
+    "capital_flow": _card_from_capital_flow,
+    "compare_stocks": _card_from_comparison,
+}
+
+
+def _build_cards(evidences: list[Evidence]) -> list[ChatCard] | None:
+    """从 evidences 按 skill_name 汇总 cards（spec §3.2）。
+
+    卡片生成失败（缺 raw 字段/异常）→ 跳过该卡片（warning 日志），其余卡片照常；
+    全部失败/无卡片化证据 → None（前端纯 markdown 降级，不破坏对话）。
+    """
+    cards: list[ChatCard] = []
+    for ev in evidences:
+        handler = _CARD_HANDLERS.get(ev.skill_name)
+        if handler is None:
+            continue
+        try:
+            card = handler(ev)
+        except Exception as exc:  # noqa: BLE001  # 卡片失败不阻断对话（"永不 500"铁律）
+            logger.warning(
+                "synth_answer.card_failed", skill_name=ev.skill_name, err=str(exc)
+            )
+            card = None
+        if card is not None:
+            cards.append(card)
+    return cards or None
+
+
+def _build_deep_card(last_deep_report: DeepReportRef | None) -> ChatCard | None:
+    """deep 分支卡片：复用 last_deep_report（DeepReportRef 字段全透传，spec §2.2）。"""
+    if not last_deep_report:
+        return None
+    try:
+        return ChatCard(card_type="deep", title="深度分析报告", data=dict(last_deep_report))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synth_answer.deep_card_failed", err=str(exc))
+        return None
 
 
 def _build_deep_degraded(deep_source: str) -> str:
@@ -305,14 +718,96 @@ def _build_deep_degraded(deep_source: str) -> str:
     return "深度分析暂时不可用，请稍后重试"
 
 
-async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
-    """synth_answer 节点入口。"""
+def _build_deep_report_ref(
+    worker: str,
+    question: str,
+    final_response: str,
+    symbols: list[str],
+    tag_codes: list[str],
+    report_id: str | None,
+    created_at: str,
+) -> DeepReportRef:
+    """D12/D13：引用 + 短摘要，单引用结构（summary=前160字，与 D18 一致）。"""
+    return DeepReportRef(
+        worker=worker,  # type: ignore[typeddict-item]  # 由 deep_source 保证合法
+        report_id=report_id,
+        question=question,
+        summary=final_response[:160],
+        symbols=symbols,
+        tag_codes=tag_codes,
+        created_at=created_at,
+    )
+
+
+async def _persist_chat_analysis(
+    user_id: str | None,
+    final_response: str,
+    worker: str,
+) -> str | None:
+    """deep 分支落库 chat_analysis（D15-D18）。
+
+    - 仅登录（user_id 非空）落库（D38）；未登录返回 None。
+    - D18 适配层：display_report 双层（summary=前160字, details=全文, stocks/risks=[]），零 LLM。
+    - update_cache=False：不写 Python report_cache（公共列表排除 chat_analysis）。
+    - 落库失败不抛异常：日志 + 返回 None（降级，不阻断回答）。
+    Returns: Node 返回的 report_id；未登录/失败为 None。
+    """
+    from aistock_agent.services.data_client import node_api
+    from aistock_agent.utils.date import shanghai_today
+
+    if not user_id:
+        return None
+    content: dict[str, object] = {
+        "display_report": {
+            "summary": final_response[:160],
+            "details": final_response,
+            "stocks": [],
+            "risks": [],
+        },
+        "schema_version": "2.0",
+    }
+    try:
+        result = await node_api.save_analysis_report(
+            report_type="chat_analysis",
+            report_date=shanghai_today().isoformat(),
+            content=content,
+            user_id=user_id,
+            status="completed",
+            update_cache=False,
+        )
+        if result and result.get("id"):
+            return str(result["id"])
+        return None
+    except Exception:
+        logger.warning(
+            "chat_analysis.persist_failed",
+            user_id=user_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2：原实现改名，逻辑零改动）。
+
+    计划 C（线 3）的 cards 汇总逻辑块在本函数内新增（消费
+    state["evidences"] 按 skill_name 汇总），与本计划隔离。
+    """
     import time
 
     start = time.monotonic()
     metrics = get_metrics_collector()
     goal: InsightGoal | None = state.get("goal")
     evidences: list[Evidence] = state.get("evidences", [])
+    # Phase 4-3（改进 15）：user_profile 个性化参数（None/缺字段 → 零行为变化）
+    risk_tolerance = (state.get("user_profile") or {}).get("risk_tolerance")
+
+    # Phase 4-2（改进 13）：confirm 短路——qa_router 触发交互式确认时，不渲染、
+    # 不调 LLM，直接把 confirm 负载透出（ws.py 据此转 confirm_request 终态负载）。
+    # 位于澄清短路/缺 goal 检查之前：confirm 分支不需要 goal/evidences，恒有
+    # state["confirm"]（qa_router 触发分支保证）。
+    if state.get("confirm"):
+        return {"final_response": "", "confirm": state["confirm"]}
 
     if goal is None:
         logger.error("synth_answer.no_goal")
@@ -324,10 +819,12 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 evidences,
                 "validate",
                 "missing goal",
+                risk_tolerance,
             ),
             "final_response": "内部错误：缺少目标",
             "trace": None,
             "messages": [AIMessage(content="内部错误：缺少目标")],
+            "cards": None,
         }
 
     # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
@@ -351,6 +848,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="validate",
             ),
             "messages": [AIMessage(content=clarification)],
+            "cards": None,
         }
 
     # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
@@ -379,6 +877,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="validate",
             ),
             "messages": [AIMessage(content=shortcut)],
+            "cards": None,
         }
 
     # 3. D31 deep 分支（新增）：escalate 已产出 worker 全文，跳过 LLM 纯代码加工
@@ -387,9 +886,29 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
         final_response = state.get("final_response", "")
         if not final_response:
             final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
-        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示）
+        # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示；
+        # Phase 4-3：conservative 档优先）
         processed = _append_risk_disclaimer(
-            final_response, strong=_contains_action_word(goal.question)
+            final_response,
+            strong=_contains_action_word(goal.question),
+            risk_tolerance=risk_tolerance,
+        )
+        # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
+        report_id = await _persist_chat_analysis(
+            state.get("user_id"), processed, deep_source
+        )
+        logger.info("chat_analysis.persisted", report_id=report_id)
+        # D12/D13/D38/D39：last_deep_report 无条件写（双写解耦，与登录无关）；
+        # report_id 回填（落库失败/未登录为 None）。
+        now_iso = datetime.now(UTC).isoformat()
+        last_deep_report = _build_deep_report_ref(
+            worker=deep_source,
+            question=goal.question or "",
+            final_response=processed,
+            symbols=goal.symbols,
+            tag_codes=goal.tag_codes,
+            report_id=report_id,
+            created_at=now_iso,
         )
         insight = Insight(
             conclusion=processed,
@@ -399,6 +918,7 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             answer_mode="deep",
         )
         logger.info("synth_answer.deep_ok", deep_source=deep_source)
+        deep_card = _build_deep_card(last_deep_report)
         return {
             "insight": insight,
             "final_response": processed,
@@ -410,7 +930,22 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 actual_mode="deep",
             ),
             "messages": [AIMessage(content=processed)],
+            "last_deep_report": last_deep_report,
+            "cards": [deep_card] if deep_card is not None else None,
         }
+
+    # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
+    # 与 deep 分支互斥（多意图 compose 保持 light，不升级 escalate）。
+    goals = state.get("goals")
+    # Phase 5（Task 1 + review 修复）：从当前 messages 重算确定性摘要（纯函数幂等），
+    # 单意图与多子目标两条 LLM 路径统一注入同一 summary_context。不读
+    # state.messages_summary——跨轮残留场景（Phase 4-2 confirm 阶段 2 重跑把 messages
+    # 重置为 []，checkpointer 保留上一轮超窗摘要）会注入陈旧摘要；统一重算，
+    # 短会话 → summary None → 空串，prompt 字节不变。
+    _, summary = trim_messages(list(state.get("messages", [])))
+    summary_context = build_summary_context(summary)
+    if goals:
+        return await _synth_multi_goal(state, goal, evidences, goals, summary_context)
 
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
@@ -418,7 +953,9 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        # Phase 5（Task 1）：注入超窗确定性摘要（入口已统一从当前 messages 重算）。
+        # 短会话 → 空串，prompt 字节不变。
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
 
@@ -440,18 +977,21 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
                 expected=mode,
                 actual=raw.answer_mode,
             )
-        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量）
+        # D28：LLM 成功路径强制拼接风险段（代码保证，不依赖 LLM 自由裁量；
+        # Phase 4-3：conservative 档优先于 strong）
         insight = Insight(
             conclusion=_append_risk_disclaimer(
-                raw.conclusion, strong=_contains_action_word(goal.question)
+                raw.conclusion,
+                strong=_contains_action_word(goal.question),
+                risk_tolerance=risk_tolerance,
             ),
             basis=basis,
             confidence=raw.confidence,
             uncertainty=raw.uncertainty,
             answer_mode=mode,  # type: ignore[arg-type]
         )
-        # 非交易日统一提示（2026-08-02 规范）：行情类证据降级时前导提示 + 引导
-        final_response = _append_non_trading_day_hint(insight.conclusion, evidences)
+        # 非交易时段统一提示（2026-08-03 规范扩展）：行情类证据降级时前导提示 + 引导
+        final_response = _append_non_trading_time_hint(insight.conclusion, evidences)
         insight = insight.model_copy(update={"conclusion": final_response})
         trace = AnswerTrace(
             goal=goal,
@@ -473,11 +1013,12 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "final_response": final_response,
             "trace": trace,
             "messages": [AIMessage(content=final_response)],
+            "cards": _build_cards(evidences),
         }
 
     except Exception as exc:
         logger.warning("synth_answer.failed", err=str(exc), exc_info=True)
-        insight = _build_degraded_insight(goal, evidences, mode, str(exc))
+        insight = _build_degraded_insight(goal, evidences, mode, str(exc), risk_tolerance)
         trace = AnswerTrace(
             goal=goal,
             plan=state.get("plan", "direct"),
@@ -492,4 +1033,17 @@ async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
             "final_response": insight.conclusion,
             "trace": trace,
             "messages": [AIMessage(content=insight.conclusion)],
+            "cards": None,
         }
+
+
+async def synth_answer_node(state: QuestionState) -> dict[str, Any]:
+    """synth_answer 节点入口（P10 线 2 包装：token_usage 一行收口）。
+
+    委托 _synth_answer_node_core（原实现），在任意 return 路径统一附加
+    token_usage = get_token_usage()（全 0/未采集为 None）。只加一行——
+    与计划 C 的 cards 汇总逻辑块（在 core 内）隔离，git 合并友好。
+    """
+    result = await _synth_answer_node_core(state)
+    result["token_usage"] = get_token_usage()
+    return result

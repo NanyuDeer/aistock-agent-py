@@ -1,51 +1,76 @@
-"""市场工具 — yfinance 境外市场行情
+"""市场工具 — 境外市场行情（腾讯行情源，经 Node app-api 聚合）
 
-这些工具在 Python 侧直接调用，Node.js 无对应实现。
+原实现基于 yfinance 直连境外交易所，服务器上频繁触发 YFRateLimitError。
+现完全切换为 aistock-app-api 的 ``GET /api/gb/index/quotes``（腾讯 qt.gtimg.cn，
+Redis 缓存，与网页前端市场概览同源）。该接口支持：
 
-``collect_global_market_facts`` 为同步函数，供 ``market_trace_snapshot``
-和 ``get_global_markets`` Tool 复用。在异步上下文中通过
-``asyncio.to_thread`` 调用，避免阻塞 scheduler 的事件循环。
+- 全球指数：IXIC / DJI / HXC / SPX（hf_ES 标普期货）/ HSI / HSTECH
+- 大宗/汇率：GOLD（纽约黄金 hf_GC）、CRUDE（纽约原油 hf_CL）、USDCNY（美元人民币）
+- 腾讯无 N225 / FTSE / GDAXI / FCHI 对应代码，不请求
+
+``collect_global_market_facts`` 为异步函数，供 ``market_trace_snapshot``
+和 ``get_global_markets`` Tool 复用。
 """
 
-import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 
-import yfinance as yf  # type: ignore[import-untyped]
 from langchain_core.tools import tool
 
+from aistock_agent.services.data_client import node_api
 from aistock_agent.tools.base import safe_tool_call
 
-# yfinance Ticker 映射
-GLOBAL_MARKET_TICKERS = {
-    "sp500": "^GSPC",
-    "nasdaq": "^IXIC",
-    "dow": "^DJI",
-    "kweb": "KWEB",          # 中概ETF
-    "nikkei": "^N225",        # 日经
-    "hsi": "^HSI",            # 恒生
-    "kospi": "^KS11",         # 韩综
-    "gold": "GC=F",
-    "crude": "CL=F",
-    "usdcny": "USDCNY=X",
-}
+# 请求的全球行情符号（app-api 侧支持全集；腾讯无 N225/FTSE/GDAXI/FCHI，不请求）
+GLOBAL_MARKET_SYMBOLS = (
+    "IXIC,DJI,HXC,SPX,HSI,HSTECH,GOLD,CRUDE,USDCNY"
+)
+
+# 查询接口不可用或返回异常时抛出的异常类型，供上层区分"接口失败"
+class GlobalMarketFetchError(RuntimeError):
+    """Node 全球行情接口调用失败。"""
 
 
-def collect_global_market_facts(captured_at: datetime) -> list[dict[str, object]]:
-    tickers = yf.Tickers(" ".join(GLOBAL_MARKET_TICKERS.values()))
+def _to_number(value: object) -> float | None:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+async def collect_global_market_facts(captured_at: datetime) -> list[dict[str, object]]:
+    """获取境外行情事实（腾讯行情源，app-api 聚合）。
+
+    经 ``node_api.get`` 调用 ``/api/gb/index/quotes``，返回结构
+    ``{行情: [{指数代码, 指数简称, 最新价, 涨跌幅, 涨跌额}]}``。
+
+    Raises:
+        GlobalMarketFetchError: Node 接口失败或返回数据不可用，
+            由上层按 ``global_markets`` unavailable/empty 处理。
+    """
+    payload = await node_api.get(f"/api/gb/index/quotes?symbols={GLOBAL_MARKET_SYMBOLS}")
+    if not isinstance(payload, dict):
+        raise GlobalMarketFetchError(
+            f"node /api/gb/index/quotes returned non-dict: {type(payload).__name__}"
+        )
+    quotes = payload.get("行情")
+    if not isinstance(quotes, list):
+        raise GlobalMarketFetchError("node /api/gb/index/quotes returned no 行情 items")
+
     facts: list[dict[str, object]] = []
-    for key, symbol in GLOBAL_MARKET_TICKERS.items():
-        ticker = tickers.tickers.get(symbol)
-        if not ticker:
+    for quote in quotes:
+        if not isinstance(quote, dict):
             continue
-        info = ticker.fast_info
-        price = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+        price = _to_number(quote.get("最新价"))
         if price is None:
             continue
         facts.append({
-            "ticker": symbol,
-            "name": _market_display_name(key),
-            "price": float(price),
-            "change_pct": getattr(info, "regular_market_change_percent", None),
+            "ticker": quote.get("指数代码"),
+            "name": quote.get("指数简称", ""),
+            "price": price,
+            "change_pct": _to_number(quote.get("涨跌幅")),
             "observed_at": captured_at.isoformat(),
         })
     return facts
@@ -56,7 +81,7 @@ def collect_global_market_facts(captured_at: datetime) -> list[dict[str, object]
 async def get_global_markets() -> str:
     """获取全球市场行情（美股/亚太/大宗/汇率），用于晨报宏观分析"""
     try:
-        facts = await asyncio.to_thread(collect_global_market_facts, datetime.now())
+        facts = await collect_global_market_facts(datetime.now(UTC))
 
         results = []
         for fact in facts:
@@ -64,8 +89,8 @@ async def get_global_markets() -> str:
             price = fact.get("price")
             change_pct = fact.get("change_pct")
             if price is not None:
-                change_str = f" ({change_pct:+.2f}%)" if change_pct else ""
-                results.append(f"{display_name}: {price:.2f}{change_str}")
+                change_str = f" ({change_pct:+.2f}%)" if change_pct is not None else ""
+                results.append(f"{display_name}: {float(price):.2f}{change_str}")
             else:
                 results.append(f"{display_name}: 数据暂不可用")
 
@@ -74,23 +99,6 @@ async def get_global_markets() -> str:
         return "\n".join(results)
     except Exception as e:
         return f"全球市场数据获取失败: {e}"
-
-
-def _market_display_name(key: str) -> str:
-    """将 key 映射为中文显示名"""
-    names = {
-        "sp500": "标普500",
-        "nasdaq": "纳斯达克",
-        "dow": "道琼斯",
-        "kweb": "中概ETF(KWEB)",
-        "nikkei": "日经225",
-        "hsi": "恒生指数",
-        "kospi": "韩国综合",
-        "gold": "黄金",
-        "crude": "原油",
-        "usdcny": "美元/人民币",
-    }
-    return names.get(key, key)
 
 
 # ── 自注册到 Tool Registry ──────────────────────────────────────────

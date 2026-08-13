@@ -63,17 +63,98 @@ class TestTriggerMorningBriefing:
                 "analysis_reports": analysis_reports,
             }
 
-    def _mock_event_result(self, success=True, title="测试事件", persisted=True):
-        from aistock_agent.services.event_conduction import EventConductionResult
+    def test_multiple_events_reported_without_conduction_trigger(self, client):
+        """多事件：major_events 已上报，但手动入口不再触发事件传导（中台负责，Task 5）。
 
-        return EventConductionResult(
-            success=success,
-            event_id=f"evt_{title[:8]}",
-            title=title,
-            event_generated=success,
-            persisted=persisted if success else False,
-            error=None if success else "degraded",
+        传导统一由事件抓取中台（event_scrape 入库后）触发；手动入口保留
+        event_*_count 字段恒 0 维持响应契约，且不得再调用 run_event_conduction_batch
+        （防同批事件双跑回归，Task 4 评审 M2）。
+        """
+        events = [
+            {"title": "美联储加息", "summary": "加息25bp"},
+            {"title": "通胀数据公布", "summary": "CPI 3.2%"},
+        ]
+        morning_result = self._mock_morning_result(major_events=events)
+        with patch(
+            "aistock_agent.agents.workers.morning.run",
+            new_callable=AsyncMock,
+            return_value=morning_result,
+        ):
+            with patch(
+                "aistock_agent.services.event_conduction.run_event_conduction_batch",
+                new_callable=AsyncMock,
+            ) as mock_batch:
+                resp = client.post(
+                    "/api/agent/briefing/morning/trigger",
+                    headers=AUTH_HEADERS,
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["has_major_events"] is True
+        assert body["major_event_count"] == 2
+        assert body["event_triggered_count"] == 0
+        assert body["event_succeeded_count"] == 0
+        assert body["event_failed_count"] == 0
+        assert body["event_persisted_count"] == 0
+        assert body["event_persist_failed_count"] == 0
+        mock_batch.assert_not_called()
+
+    def test_cached_morning_reports_major_events_without_conduction(self, client):
+        """缓存命中的晨报：major_events 仍上报，但不再触发事件传导。"""
+        events = [{"title": "缓存事件", "summary": "测试"}]
+        morning_result = self._mock_morning_result(
+            major_events=events, cached=True
         )
+        with patch(
+            "aistock_agent.agents.workers.morning.run",
+            new_callable=AsyncMock,
+            return_value=morning_result,
+        ):
+            with patch(
+                "aistock_agent.services.event_conduction.run_event_conduction_batch",
+                new_callable=AsyncMock,
+            ) as mock_batch:
+                resp = client.post(
+                    "/api/agent/briefing/morning/trigger",
+                    headers=AUTH_HEADERS,
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cached"] is True
+        assert body["major_event_count"] == 1
+        assert body["event_triggered_count"] == 0
+        assert body["event_succeeded_count"] == 0
+        mock_batch.assert_not_called()
+
+    def test_event_conduction_failures_no_longer_reported_by_manual_entry(self, client):
+        """传导单事件成败不再由手动入口统计（传导归中台，本入口 event_* 恒 0）。"""
+        events = [
+            {"title": "成功事件1"},
+            {"title": "失败事件"},
+            {"title": "成功事件2"},
+        ]
+        morning_result = self._mock_morning_result(major_events=events)
+        with patch(
+            "aistock_agent.agents.workers.morning.run",
+            new_callable=AsyncMock,
+            return_value=morning_result,
+        ):
+            with patch(
+                "aistock_agent.services.event_conduction.run_event_conduction_batch",
+                new_callable=AsyncMock,
+            ) as mock_batch:
+                resp = client.post(
+                    "/api/agent/briefing/morning/trigger",
+                    headers=AUTH_HEADERS,
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["major_event_count"] == 3
+        assert body["event_triggered_count"] == 0
+        assert body["event_succeeded_count"] == 0
+        assert body["event_failed_count"] == 0
+        mock_batch.assert_not_called()
 
     def test_no_major_events(self, client):
         """晨报成功但无重大事件 → event_triggered_count=0"""
@@ -96,134 +177,6 @@ class TestTriggerMorningBriefing:
         assert body["event_triggered_count"] == 0
         assert body["event_succeeded_count"] == 0
         assert body["event_failed_count"] == 0
-
-    def test_multiple_events_all_succeed(self, client):
-        """多事件全部成功"""
-        events = [
-            {"title": "美联储加息", "summary": "加息25bp"},
-            {"title": "通胀数据公布", "summary": "CPI 3.2%"},
-        ]
-        morning_result = self._mock_morning_result(major_events=events)
-        event_results = [self._mock_event_result(True, e["title"]) for e in events]
-        with patch(
-            "aistock_agent.agents.workers.morning.run",
-            new_callable=AsyncMock,
-            return_value=morning_result,
-        ):
-            with patch(
-                "aistock_agent.services.event_conduction.run_event_conduction_batch",
-                new_callable=AsyncMock,
-                return_value=event_results,
-            ):
-                resp = client.post(
-                    "/api/agent/briefing/morning/trigger",
-                    headers=AUTH_HEADERS,
-                )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["success"] is True
-        assert body["has_major_events"] is True
-        assert body["major_event_count"] == 2
-        assert body["event_triggered_count"] == 2
-        assert body["event_succeeded_count"] == 2
-        assert body["event_failed_count"] == 0
-        assert body["event_persisted_count"] == 2
-        assert body["event_persist_failed_count"] == 0
-
-    def test_cached_morning_with_major_events(self, client):
-        """缓存命中的晨报含 major_events 也触发事件传导"""
-        events = [{"title": "缓存事件", "summary": "测试"}]
-        morning_result = self._mock_morning_result(
-            major_events=events, cached=True
-        )
-        event_results = [self._mock_event_result(True, "缓存事件")]
-        with patch(
-            "aistock_agent.agents.workers.morning.run",
-            new_callable=AsyncMock,
-            return_value=morning_result,
-        ):
-            with patch(
-                "aistock_agent.services.event_conduction.run_event_conduction_batch",
-                new_callable=AsyncMock,
-                return_value=event_results,
-            ):
-                resp = client.post(
-                    "/api/agent/briefing/morning/trigger",
-                    headers=AUTH_HEADERS,
-                )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["cached"] is True
-        assert body["major_event_count"] == 1
-        assert body["event_triggered_count"] == 1
-        assert body["event_succeeded_count"] == 1
-
-    def test_single_event_failure_does_not_block_others(self, client):
-        """单个事件失败不阻断其他事件"""
-        events = [
-            {"title": "成功事件1"},
-            {"title": "失败事件"},
-            {"title": "成功事件2"},
-        ]
-        morning_result = self._mock_morning_result(major_events=events)
-        event_results = [
-            self._mock_event_result(True, "成功事件1"),
-            self._mock_event_result(False, "失败事件"),
-            self._mock_event_result(True, "成功事件2"),
-        ]
-        with patch(
-            "aistock_agent.agents.workers.morning.run",
-            new_callable=AsyncMock,
-            return_value=morning_result,
-        ):
-            with patch(
-                "aistock_agent.services.event_conduction.run_event_conduction_batch",
-                new_callable=AsyncMock,
-                return_value=event_results,
-            ):
-                resp = client.post(
-                    "/api/agent/briefing/morning/trigger",
-                    headers=AUTH_HEADERS,
-                )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["major_event_count"] == 3
-        assert body["event_triggered_count"] == 3
-        assert body["event_succeeded_count"] == 2
-        assert body["event_failed_count"] == 1
-
-    def test_generated_but_persist_failed_reports_partial(self, client):
-        """生成成功但落库失败 → event_persisted_count < event_succeeded_count"""
-        events = [
-            {"title": "成功且落库成功"},
-            {"title": "成功但落库失败"},
-        ]
-        morning_result = self._mock_morning_result(major_events=events)
-        event_results = [
-            self._mock_event_result(True, "成功且落库成功", persisted=True),
-            self._mock_event_result(True, "成功但落库失败", persisted=False),
-        ]
-        with patch(
-            "aistock_agent.agents.workers.morning.run",
-            new_callable=AsyncMock,
-            return_value=morning_result,
-        ):
-            with patch(
-                "aistock_agent.services.event_conduction.run_event_conduction_batch",
-                new_callable=AsyncMock,
-                return_value=event_results,
-            ):
-                resp = client.post(
-                    "/api/agent/briefing/morning/trigger",
-                    headers=AUTH_HEADERS,
-                )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["event_triggered_count"] == 2
-        assert body["event_succeeded_count"] == 2
-        assert body["event_failed_count"] == 0
-        assert body["event_persisted_count"] == 1
-        assert body["event_persist_failed_count"] == 1
 
     def test_morning_degraded_reports_failure(self, client):
         """Morning 异常降级 → success=False，不触发事件传导"""
@@ -540,15 +493,20 @@ class TestTriggerEventBriefing:
             "aistock_agent.services.event_conduction.run_single_event_conduction",
             new_callable=AsyncMock,
         ) as mock_conduction:
-            from aistock_agent.services.event_conduction import EventConductionResult
+            from aistock_agent.services.event_conduction import (
+                EventConductionOutput,
+                EventConductionResult,
+            )
 
-            mock_conduction.return_value = EventConductionResult(
-                success=True,
-                event_id="evt_test123",
-                title="测试事件标题",
-                event_generated=True,
-                persisted=True,
-                cached=True,
+            mock_conduction.return_value = EventConductionOutput(
+                status=EventConductionResult(
+                    success=True,
+                    event_id="evt_test123",
+                    title="测试事件标题",
+                    event_generated=True,
+                    persisted=True,
+                    cached=True,
+                )
             )
             resp = client.post(
                 "/api/agent/briefing/event/trigger",
@@ -570,20 +528,25 @@ class TestTriggerEventBriefing:
     def test_empty_body_calls_conduction_with_nonempty_title(self, client):
         """空 body 时构造非空默认事件标题，实际调用 run_single_event_conduction，
         并按共享服务结果返回状态（不因空标题提前失败）。"""
-        from aistock_agent.services.event_conduction import EventConductionResult
+        from aistock_agent.services.event_conduction import (
+            EventConductionOutput,
+            EventConductionResult,
+        )
 
         with patch(
             "aistock_agent.services.event_conduction.run_single_event_conduction",
             new_callable=AsyncMock,
         ) as mock_conduction:
-            mock_conduction.return_value = EventConductionResult(
-                success=True,
-                event_id="evt_default",
-                title="最新重大市场事件",
-                event_generated=True,
-                persisted=True,
-                cached=True,
-                error=None,
+            mock_conduction.return_value = EventConductionOutput(
+                status=EventConductionResult(
+                    success=True,
+                    event_id="evt_default",
+                    title="最新重大市场事件",
+                    event_generated=True,
+                    persisted=True,
+                    cached=True,
+                    error=None,
+                )
             )
             resp = client.post(
                 "/api/agent/briefing/event/trigger",

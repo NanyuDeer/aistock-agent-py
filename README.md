@@ -18,7 +18,7 @@ cp .env.example .env
 # 编辑 .env 填入实际配置
 
 # 启动开发服务
-uvicorn aistock_agent.main:app --reload --port 8000
+uvicorn aistock_agent.main:app --reload --port 8080
 
 # 运行测试
 pytest tests/ -v
@@ -50,6 +50,7 @@ mypy src/
 - 缓存: Redis（会话持久化 + 晨报缓存）
 - 境外数据: yfinance（美股/亚太/大宗/汇率）
 - 全网搜索: Tavily
+- 抖音视频转写: requests + ffmpeg-python（硅基流动 SenseVoice；FFmpeg/FFprobe 为宿主二进制依赖）
 - 配置: pydantic-settings
 
 ## 架构
@@ -89,7 +90,6 @@ graph TB
         SUP -->|hot_burst| HB[hot_burst_agent<br/>deep_think]
         SUP -->|alert| AL[alert_agent<br/>deep_think]
         SUP -->|broadcast| BC[broadcast_agent<br/>deep_think]
-        SUP -->|ai_advisor| AI[ai_advisor_agent<br/>deep_think]
         SUP -->|trend_score| TS[trend_score_agent<br/>deep_think]
         SUP -->|general| GE[general_agent<br/>quick_think]
 
@@ -101,12 +101,11 @@ graph TB
         HB --> E1
         AL --> E1
         BC --> E1
-        AI --> E1
         GE --> E1
     end
 
     subgraph 用户对话路由["用户对话路由（trigger_source=user）"]
-        SUP2["intent ≠ general/broadcast"] --> AI2[ai_advisor_agent<br/>DB报告→整理回复]
+        SUP2["intent 未匹配 specialist"] --> GE2[general_agent<br/>quick_think 兜底]
     end
 
     subgraph 晨报链路["晨报链路（08:50 定时触发）"]
@@ -133,7 +132,7 @@ graph TB
     IA -.->|优化建议<br/>人工审核| M2
 
     style BC2 fill:#e8d5f5,stroke:#6f42c1
-    style AI2 fill:#fff3cd,stroke:#856404
+    style GE2 fill:#fff3cd,stroke:#856404
     style EV2 fill:#d1ecf1,stroke:#0c5460
     style SB fill:#d1ecf1,stroke:#0c5460
     style RV fill:#d4edda,stroke:#155724
@@ -142,7 +141,7 @@ graph TB
 
 > **架构说明**：
 > - **用户流程**：supervisor 意图路由后分发到各 Agent，各 Agent 独立返回 END
-> - **用户对话路由**：当 `trigger_source="user"` 且 intent 非 general/broadcast 时，统一路由到 ai_advisor_agent（从 DB 读取已有报告整理回复，省 token）
+> - **用户对话路由**：用户对话（`trigger_source="user"`）中未匹配 specialist 意图时由 general_agent（quick_think）兜底；深度推理由 ChatAgent 子图（qa_router → escalate/skill_executor → synth_answer）承担
 > - **晨报链路**：08:50 定时触发 morning_agent → 提取 major_events → 并行 fire-and-forget 触发 event_analyst
 > - **播报链路**：09:00 串行执行 morning→wind_leader→hot_burst→broadcast，各 Agent 写 DB，broadcast 从 DB 读取报告生成双人语音播报（9:10 前端可见）
 > - **复盘流水线**：15:30 review→15:35 snapshot→15:40 iterate，通过文件 I/O 传递数据，间隔 5 分钟顺序执行
@@ -169,17 +168,14 @@ graph TB
 - **双层输出消费**：通过 `utils/report_parser.py` 的 `extract_podcast_brief` / `extract_display_report` 函数读取双层结构内容，兼容 schema_version 1.0（单层 text）和 2.0（双层 display_report + podcast_brief）
 - **测试**：`scripts\run_broadcast_test.bat` 或 `$env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py`
 
-### 智能投顾Agent（ai_advisor_agent）
+### 用户对话（ChatAgent 子图承担）
 
-智能投顾Agent负责回应用户的自然语言提问，优先从数据库读取已有分析报告整理汇总，降级使用工具获取数据：
+用户自然语言对话（`trigger_source="user"`）由 **ChatAgent 子图**承担，不再走独立智能投顾 Agent：
 
-- **触发条件**：`trigger_source="user"` 且 intent 不是 general/broadcast 时路由到 ai_advisor_agent
-- **输入**：用户对话消息 + 数据库已有分析报告（morning/wind_leader/hot_burst 等）
-- **报告读取**：通过 `utils/report_parser.py` 的 `extract_display_report` 读取展示文本（兼容 1.0 单层 text 和 2.0 双层 display_report）
-- **降级策略**：DB 无报告时调用 advisor 工具集（get_quote、get_capital_flow、get_profit_forecast、search_cls_news、get_cls_news、get_global_markets、get_leader_stocks、get_hot_burst、get_hot_burst_history、tavily_finance_search）获取数据
-- **输出**：简洁要点式回复（200字以内），直接展示在对话气泡中
-- **模型**：deep_think
-- **路由**：`intent="ai_advisor"` → `ai_advisor_agent`
+- **入口**：ws.py / routes.py 构造 `QuestionState` → `qa_router` 意图拆解 → 闸门 0/0.5/1/2/3 短路（report_lookup / 行情问答 / 对比 / 多意图）→ 未命中时 escalate 升级到 specialist worker（stock/sector/hot_burst，图外切换）或 skill_executor 组合技能 → `synth_answer` 统一出口
+- **深度推理**：deep 分支直调 worker.run()，结果回流 state 经 synth_answer 加工，WS/SSE 透传 ReAct 事件
+- **detail 详见**：AGENTS.md「CHAT QA」系列段落（D1-D42 / P1-P5）
+- **模型**：quick_think（路由）+ deep_think（深度推理）
 
 ### 报告双层输出（schema_version 2.0）
 
@@ -188,7 +184,7 @@ graph TB
 **为什么要做双层输出？（两个核心原因）**
 
 1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
-2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
 
 双层结构定义如下：
 
@@ -206,14 +202,13 @@ content = {
 ```
 
 **消费方**：
-- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
-- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话；`podcast_brief` 缺失时降级读取 `display_report`（通过 `extract_display_report`，截取前 500 字）
 
 **兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
 
 **LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
 
-**已改造 Agent**：wind_leader、broadcast、ai_advisor
+**已改造 Agent**：wind_leader、broadcast
 **待改造 Agent**：morning、hot_burst、alert
 
 ### 机构调研热门股Agent
@@ -232,7 +227,7 @@ content = {
 - **工具**：`get_trend_score`（评分概览）、`get_trend_score_detail`（展开详情含K线/概念板块/龙头股加成/新闻）、`get_trend_top_stocks`（Top排行）
 - **模型**：deep_think（ReAct 模式）
 - **输出**：写入 `state.analysis_reports["trend_score"]`，scheduler 触发时写 DB（双层输出 display_report + podcast_brief）
-- **路由**：intent=`trend_score` → `trend_score_agent`（用户对话走 ai_advisor 省 token，scheduler 触发走 trend_score_agent）
+- **路由**：intent=`trend_score` → `trend_score_agent`（scheduler 触发；用户对话深度推理由 ChatAgent 子图承担）
 - **降级文本**：`"趋势股评分分析暂时不可用，请稍后重试"`
 
 ### 定时调度
@@ -241,15 +236,56 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）+ 并行触发 event agent 分析 major_events |
+| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）；事件来源读统一事件库（report_type=event_scrape，读库优先、缺库降级自主检索，2026-08-12 起） |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
-| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
+| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库（证据源读统一事件库优先、缺库降级直采，2026-08-12 起） |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> **事件传导分析（event conduction）**：不单独注册 cron job，而是嵌入 morning 任务中——晨报完成后提取 `major_events`，对 impact_score ≥ 4 的事件通过 `asyncio.create_task` 并行触发 `event_agent.run()`。每个事件独立运行，fire-and-forget 模式，失败不影响其他事件或后续复盘流水线。
+> **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；传导失败重试 1 次——`error` 非空或异常时重试，两次失败放弃并记 error 级日志不抛，H7，2026-08-13；中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
+
+### 统一事件抓取中台（2026-08-12）
+
+统一事件抓取中台收敛"多源事件采集 → 规则评分 → LLM 精评 → 归一化 → 筛选 → 入库 → 传导触发"全链路，为晨报、大盘溯源、stock_trace 提供统一事件库（`report_type=event_scrape`）证据源。Phase-2（2026-08-13）起规则评分后接 LLM 精评：quick 粗筛 + deep 精评，content_hash 缓存 24h，开关 `EVENT_SCORING_LLM_ENABLED` 默认关闭（灰度开启）。
+
+**架构分层**：
+
+| 层 | 模块 | 职责 |
+|----|------|------|
+| 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册** |
+| 规则评分层 | `services/event_scoring.py` | `apply_rule_score(raw, source=...)` 确定性规则评分（cls/ths/tavily 三源接入）：强词 5 分过阈 / 弱词 3 分不过阈 / 语境词降权防误判；已有有效 impact_score 不覆盖（eastmoney ai_impact 优先级更高） |
+| LLM 精评层 | `services/event_scoring_llm.py` | Phase-2：`score_events_llm` 入口（开关 `EVENT_SCORING_LLM_ENABLED` 默认关闭）→ 候选门槛 ≥3 送 quick_think 批量粗筛（`_quick_filter`，batch 20）→ deep_think 逐条精评（`_deep_score`，direction 校验 + 分数截断 [1,5]）→ `apply_llm_scores` 按 content_hash 合并覆盖规则分；`event_score:{content_hash}` Redis 缓存 TTL 24h；全链降级不阻断抓取 |
+| 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
+| 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
+| 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
+| 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集；传导失败重试 1 次（`error` 非空或异常时重试，仍失败记 error 日志不抛，H7，2026-08-13） |
+
+**调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
+
+| job_id | cron | 说明 |
+|--------|------|------|
+| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
+| `event_scrape_early` | `45 8 * * 1-5` | 08:45 早间刷新档，intraday 增量（晨报 08:50 读库前最后一刷，H5，2026-08-13） |
+| `event_scrape_intraday` | `0 10-11,13-14 * * 1-5` | 10:00-11:00、13:00-14:00 每小时，intraday 增量抓取（M8：避开 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑） |
+| `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
+
+**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
+
+**接口清单**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发抓取（需 X-Internal-Token；body `{"scrape_mode":"full_daily"}`；返回信封 `{"success": true, "data": {"scrape_mode","persisted","deduped","added","error"}}`，失败 `{"success": false, "message": ...}`；日志出现 `event_scrape_full_daily` / `event_scrape_done`） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（`date=YYYY-MM-DD` 必填） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源，`date` 必填） |
+
+**下游消费与降级**：
+
+- 晨报：`load_event_scrape(report_date)` 读库优先（日志 `morning_event_store_loaded`），缺库降级自主检索（不再直接触发 event_analyst）
+- 大盘溯源：`_normalize_event_store_facts` 读库优先（日志 `review_event_store_used`），缺库/空/读失败降级 telegraph/latest 直采
+- stock_trace（Node 侧）：`loadEventStoreEvidence` → Python `GET /api/agent/event/scrape-by-symbol/:symbol?date=当日`（`AGENT_PY_URL || PYTHON_AGENT_URL` + X-Internal-Token），空/失败降级原采集
 
 ### 目录结构
 
@@ -279,7 +315,7 @@ src/aistock_agent/
 │   ├── message.py       # 消息提取工具
 │   ├── report_parser.py # 双层报告解析（兼容 schema_version 1.0/2.0，extract_podcast_brief/extract_display_report/parse_dual_layer_response）
 │   ├── output_parser.py # _parse_json + transform_to_frontend（事件 Agent v3 前端对齐）+ extract_major_events
-│   └── date.py          # 日期/交易日工具
+│   └── date.py          # 日期/交易日工具 + 交易时段判断（is_trading_time / trading_session_status 5 状态）
 ├── errors/              # 异常体系（Phase 4）
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
@@ -299,7 +335,6 @@ src/aistock_agent/
 │       ├── hot_burst.py # 机构调研热门股（ReAct + 写入 analysis_reports）
 │       ├── wind_leader.py # 长线风口龙头（定时触发 + 文件归档 + 双层输出）
 │       ├── broadcast.py # 播报生成（deep_think + Node.js 双人播客 + 消费 podcast_brief）
-│       ├── ai_advisor.py # 智能投顾（消费 display_report，对话气泡展示）
 │       ├── trend_score.py # 趋势股评分（ReAct + 4维度评分解读 + 文件归档 + 双层输出）
 │       ├── alert.py     # 异动提醒（deep_think + 三步框架 + cycle 短中长线分类）
 │       ├── review.py    # 复盘归因（ReAct + Redis 缓存 + 文件归档，scheduler 触发）
@@ -322,7 +357,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
+│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
+│   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
@@ -370,7 +406,7 @@ src/aistock_agent/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，7 种事件：intermediate/llm_start/text/tool_start/tool_end/done/error） |
+| WS | `/ws/chat` | 对话 WebSocket 流式（astream_events v2，8 种事件：intermediate/llm_start/text/tool_start/tool_end/reasoning/done/error；reasoning = 节点推理过程流式，P3-fix） |
 | POST | `/api/agent/chat/message` | 对话消息（非流式，@deprecated） |
 | POST | `/api/agent/chat/stream/messages` | 对话文本流（SSE，LLM 文本 + DONE） |
 | POST | `/api/agent/chat/stream/updates` | 对话工具流（SSE，AGENT_SWITCH + TOOL 事件 + DONE） |
@@ -378,8 +414,13 @@ src/aistock_agent/
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | POST | `/api/agent/briefing/morning/trigger` | 手动触发晨报生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发统一事件抓取（事件抓取中台；body `{"scrape_mode":"full_daily"}`，需 X-Internal-Token） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（事件抓取中台；date=YYYY-MM-DD 必填，非法返回 400） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源；date=YYYY-MM-DD 必填，非法返回 400） |
 | POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/trigger` | 手动触发完整播报链路：morning→wind_leader→hot_burst→trend_score→broadcast（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/broadcast/only` | 仅重新生成双人播报（不重跑报告，需 X-Internal-Token） |
+| POST | `/api/agent/briefing/wind-leader/trigger` | 手动触发风口龙头 Agent 报告生成（需 X-Internal-Token，数据为空时自动 refresh 补数据） |
 | POST | `/api/agent/briefing/trend-score/trigger` | 手动触发趋势股评分 Agent 报告生成（需 X-Internal-Token） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
@@ -500,9 +541,13 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30） | `30 15 * * 1-5` |
 | `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35） | `35 15 * * 1-5` |
 | `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
+| `EVENT_SCORING_LLM_ENABLED` | 事件抓取中台 LLM 精评总开关（Phase-2，默认关闭灰度开启；开启后规则评分候选 ≥3 送 quick 粗筛 + deep 精评） | `false` |
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
 | `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
 | `MARKET_EVENT_MAX_PUSHES` | 每次晨报最多推送条数 | `2` |
+| `DOUYIN_API_KEY` | 抖音视频转写（硅基流动 SenseVoice）API 密钥 | - |
+| `FFMPEG_BINARY` | 显式指定 ffmpeg 路径（默认走 PATH 查找） | - |
+| `FFPROBE_BINARY` | 显式指定 ffprobe 路径（默认走 PATH 查找） | - |
 
 ## Vibecoding 工作流
 
@@ -517,10 +562,18 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 docker build -t aistock-agent .
 
 # 运行
-docker run -p 8000:8000 --env-file .env aistock-agent
+docker run -p 8080:8080 --env-file .env aistock-agent
 ```
 
 ## 相关项目
 
 - [aistock-app-api](../aistock-app-api) — Node.js 后端（数据层 + HTTP 接入）
 - [aistock-app-frontend](../aistock-app-frontend) — App 前端
+
+## 迭代 Agent 自动闭环
+
+- 模块：`src/aistock_agent/iterate/`（adapters/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
+- 机制：历史切片（T 窗口固化）→ 数据约束标准答案（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）→ 变体实验（目标区域补丁 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3，重归一化）+ iterated.json 去重
+- 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
+- 触发：交易日 16:30 产片 + 17:00 消费/报告（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
+- 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter` 即可

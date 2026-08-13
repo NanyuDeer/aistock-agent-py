@@ -1,5 +1,5 @@
 """synth_answer 节点单元测试。"""
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,15 +8,26 @@ from pydantic import ValidationError
 
 from aistock_agent.graph.nodes.synth_answer import (
     SynthOutput,
+    _build_predict_section,
     _build_prompt,
     _resolve_basis_indices,
+    _SectionResult,
+    _synth_multi_goal,
     synth_answer_node,
 )
 from aistock_agent.prompts.general.system import (
+    PREDICT_DEGRADED_HINT,
     RISK_DISCLAIMER,
     RISK_DISCLAIMER_STRONG,
 )
-from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
+from aistock_agent.schemas.chat_contract import (
+    ChatSource,
+    Evidence,
+    InsightGoal,
+    SubGoal,
+)
+from aistock_agent.services.data_client import node_api
+from aistock_agent.skills.prediction import DISCLAIMER, LOW_CONFIDENCE_HINT
 from aistock_agent.state.chat_schema import QuestionState
 
 CLARIFICATION = "请提供 6 位股票代码后重试。"
@@ -241,7 +252,15 @@ async def test_synth_answer_maps_basis_indices_to_evidences() -> None:
             "answer_mode": "trace",
         }
     )
-    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+    # 固定为交易日：P3-fix-3 后 market_snapshot 证据 raw 为空（a_share_success 未知）视为
+    # "数据非今日"，非交易时段会前导追加提示，破坏 startswith 断言（避免依赖真实日期）
+    with (
+        patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
+        ),
+    ):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
     assert result["insight"].conclusion.startswith("今日上涨由白酒带动")
@@ -274,7 +293,15 @@ async def test_synth_answer_invalid_basis_indices_degrades(indices: list[int]) -
             "answer_mode": "trace",
         }
     )
-    with patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm):
+    # 固定为交易日：P3-fix-3 后 market_snapshot 证据 raw 为空视为"数据非今日"，
+    # 非交易时段会前导追加提示，破坏 startswith 断言（避免依赖真实日期）
+    with (
+        patch("aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
+        ),
+    ):
         result = await synth_answer_node(_state_with_evidences([ev1, ev2]))
 
     assert result["final_response"].startswith("## 核心结论")
@@ -434,7 +461,10 @@ def test_build_degraded_insight_structured_conclusion() -> None:
         skill_name="market_snapshot",
     )
     # 固定为交易日，避免测试依赖真实日期（非交易日会前导追加提示，破坏分节断言）
-    with patch("aistock_agent.graph.nodes.synth_answer.is_trading_day", return_value=True):
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("trading", ""),
+    ):
         insight = _build_degraded_insight(goal, [evidence], "validate", "test failure")
 
     assert insight.conclusion.startswith("## 核心结论")
@@ -464,8 +494,8 @@ def test_degraded_insight_non_trading_day_quote_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=False,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -510,8 +540,8 @@ def test_degraded_insight_non_trading_day_report_no_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=False,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("closed", "今日已收盘"),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -548,8 +578,8 @@ def test_degraded_insight_trading_day_no_hint() -> None:
     )
     with (
         patch(
-            "aistock_agent.graph.nodes.synth_answer.is_trading_day",
-            return_value=True,
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
         ),
         patch(
             "aistock_agent.graph.nodes.synth_answer.shanghai_today",
@@ -660,6 +690,7 @@ def _state_with_deep(
         "白酒板块近期走势强劲，龙头股估值处于历史中位数，北向资金持续净流入。\n\n"
         "**结论**：行业景气度回升，龙头基本面稳健。"
     ),
+    user_id: str | None = None,
 ) -> QuestionState:
     """构造 deep 态：deep_source 由 escalate 写入，final_response 为 worker 全文。"""
 
@@ -673,6 +704,7 @@ def _state_with_deep(
         "final_response": worker_text,
         "trace": None,
         "deep_source": "stock",
+        "user_id": user_id,
     }
 
 
@@ -791,3 +823,597 @@ async def test_gate_shortcut_unchanged() -> None:
     assert result["insight"].answer_mode == "validate"
     assert result["trace"].actual_mode == "validate"
     assert RISK_DISCLAIMER not in result["insight"].conclusion
+
+
+# ─── P2（D15-D18）deep 分支落库 chat_analysis ───
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_persists_chat_analysis_for_logged_in(monkeypatch) -> None:
+    """登录用户 deep 升级 → save_analysis_report 被调（chat_analysis/today/user_id/D18 双层）。"""
+    saved: dict[str, object] = {}
+
+    async def fake_save(report_type, report_date, content, user_id=None, **kw):
+        saved.update(
+            report_type=report_type,
+            report_date=report_date,
+            user_id=user_id,
+            content=content,
+            update_cache=kw.get("update_cache"),
+        )
+        return {"id": "rep_1", "report_type": report_type, "report_date": report_date}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert saved["report_type"] == "chat_analysis"
+    assert saved["user_id"] == "u_42"
+    assert saved["update_cache"] is False
+    assert saved["content"]["schema_version"] == "2.0"
+    assert saved["content"]["display_report"]["details"] == out["final_response"]
+    assert len(saved["content"]["display_report"]["summary"]) <= 160
+    assert out["final_response"]  # 落库不影响回答
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_skips_persist_for_anonymous(monkeypatch) -> None:
+    """未登录（user_id 缺省/None）→ 不落库（D38），回答照常。"""
+    called = False
+
+    async def fake_save(*args, **kw):
+        nonlocal called
+        called = True
+        return {"id": "x"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id=None))
+
+    assert called is False
+    assert out["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_persist_failure_degrades_quietly(monkeypatch) -> None:
+    """落库抛异常 → 不抛、不阻断回答（降级 report_id=None）。"""
+
+    async def fake_save(*args, **kw):
+        raise RuntimeError("node down")
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert out["final_response"]
+
+
+# ─── Task 4（D12/D13/D38/D39）：last_deep_report 双写解耦 ───
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_writes_last_deep_report(monkeypatch) -> None:
+    """deep 升级（登录）→ last_deep_report 含 worker/question/summary/report_id/created_at。"""
+
+    async def fake_save(*args, **kw):
+        return {"id": "rep_1", "report_type": "chat_analysis", "report_date": "2026-08-02"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(
+        _state_with_deep(user_id="u_42", message="深度分析一下贵州茅台")
+    )
+    ref = out["last_deep_report"]
+    assert ref is not None
+    assert ref["worker"] == "stock"
+    assert ref["report_id"] == "rep_1"
+    assert ref["question"] == "深度分析一下贵州茅台"
+    assert len(ref["summary"]) <= 160
+    assert ref["symbols"] == []
+    assert ref["tag_codes"] == []
+    assert ref["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_writes_last_deep_report_anonymous(monkeypatch) -> None:
+    """未登录 → 不落库（save 不调）但 last_deep_report 仍写，report_id=None（D38/D39）。"""
+    called = False
+
+    async def fake_save(*args, **kw):
+        nonlocal called
+        called = True
+        return {"id": "x"}
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id=None))
+
+    assert called is False
+    assert out["last_deep_report"] is not None
+    assert out["last_deep_report"]["report_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_deep_branch_last_deep_report_on_persist_failure(monkeypatch) -> None:
+    """落库失败 → last_deep_report 仍写，report_id=None（降级不阻断）。"""
+
+    async def fake_save(*args, **kw):
+        raise RuntimeError("node down")
+
+    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    out = await synth_answer_node(_state_with_deep(user_id="u_42"))
+
+    assert out["last_deep_report"] is not None
+    assert out["last_deep_report"]["report_id"] is None
+
+
+# ─── P3-fix-3: 非交易时段引导确认提示（数据非今日即触发） ───
+
+
+def _quote_evidence(*, degraded: bool, raw: dict | None = None) -> Evidence:
+    """构造 market_snapshot 行情证据（sources 带 realtime_quote）。"""
+    return Evidence(
+        facts=["数据日期：07-31", "上证指数(07-31): 3832.26 (+0.72%)"],
+        sources=[
+            ChatSource(
+                source_id="market:a_share:quick:20260731",
+                kind="realtime_quote",
+                title="A 股最近交易日快照 (20260731)",
+                snippet="",
+                captured_at=datetime.now(UTC),
+            )
+        ],
+        as_of=datetime.now(UTC),
+        degraded=degraded,
+        skill_name="market_snapshot",
+        raw=raw or {},
+    )
+
+
+def test_non_trading_day_recent_close_triggers_guidance() -> None:
+    """非交易日 + 最近交易日回退成功（degraded=False, used_last_close=True）→ 触发引导确认。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={
+            "scope": "both",
+            "snapshot_kind": "quick",
+            "a_share_success": True,
+            "global_success": True,
+            "used_last_close": True,
+            "trade_date": "20260731",
+        },
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out.startswith("今天是 A 股非交易日")
+    assert "你说的是否是这个交易日（2026-07-31）的行情？" in out
+
+
+def test_pre_open_recent_close_triggers_guidance() -> None:
+    """开盘前 + 最近交易日回退 → 触发。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={
+            "scope": "both",
+            "a_share_success": True,
+            "used_last_close": True,
+            "trade_date": "20260731",
+        },
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("pre_open", "今日开盘前（开盘时间 09:30）"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 3),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert "今日尚未开盘" in out
+    assert "你说的是否是这个交易日的数据？" in out
+
+
+def test_closed_today_data_no_hint() -> None:
+    """交易日已收盘 + 今日真实数据（a_share_success=True, 无 used_last_close, 无 degraded）
+    不触发。
+    """
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=False,
+        raw={"scope": "both", "a_share_success": True, "global_success": True},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out == "## 核心结论\n正文"
+
+
+def test_closed_global_fail_a_share_today_no_hint() -> None:
+    """防误伤：global 失败使 degraded=True，但 A 股是今日数据（a_share_success=True）→ 不触发。"""
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=True,
+        raw={"scope": "both", "a_share_success": True, "global_success": False},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out == "## 核心结论\n正文"
+
+
+def test_non_trading_day_fallback_failed_triggers() -> None:
+    """非交易日回退也失败（a_share_success=False）→ 触发引导。"""
+    from datetime import date
+
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = _quote_evidence(
+        degraded=True,
+        raw={"scope": "both", "a_share_success": False, "global_success": False},
+    )
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", "今天非交易日，最近交易日 2026-07-31"),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 2),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 7, 31),
+        ),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert out.startswith("今天是 A 股非交易日")
+
+
+def test_closed_stock_snapshot_degraded_still_triggers() -> None:
+    """回归：closed + 其他行情 skill（stock_snapshot）degraded → 仍触发。"""
+    from aistock_agent.graph.nodes.synth_answer import _append_non_trading_time_hint
+
+    evidence = Evidence(
+        facts=["个股行情不可用"],
+        sources=[],
+        as_of=datetime.now(UTC),
+        degraded=True,
+        degraded_reason="非交易时段",
+        skill_name="stock_snapshot",
+        raw={"trading_status": "closed"},
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+        return_value=("closed", "今日已收盘"),
+    ):
+        out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
+
+    assert "你说的是否是这个交易日的数据？" in out
+
+
+# ─── P4（D34/D35）：多子目标分节回答 ───
+
+
+def _ev(goal_id: str, facts: list[str] | None = None) -> Evidence:
+    return Evidence(
+        facts=facts or [f"{goal_id}-fact"],
+        sources=[],
+        as_of=datetime.now(UTC),
+        skill_name="market_snapshot",
+        goal_id=goal_id,
+    )
+
+
+def _subgoal(goal_id: str, dimension: str, question: str) -> SubGoal:
+    return SubGoal(
+        id=goal_id,
+        question=question,
+        intent="market_snapshot",  # type: ignore[arg-type]
+        dimension=dimension,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_validate_then_predict() -> None:
+    """validate 子目标节在前、predict 子目标节在后，D35 提示与 LLM 结论共存。
+
+    Phase 4-1：goal_id="g2" 已被 prediction Evidence 占位（synth 定位兜底），
+    预测子目标无 prediction Evidence 即降级 → 仅保留 g1 validate 证据。
+    """
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现"), _subgoal("g2", "predict", "明日走势预测")]
+    state = {"plan": "compose", "skill_calls": []}
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer._synth_section",
+        new=AsyncMock(
+            return_value=_SectionResult(
+                "## 核心结论\n当前市场偏强", [evs[0]], "medium", [], "validate"
+            )
+        ),
+    ):
+        result = await _synth_multi_goal(
+            state, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    assert result["final_response"].index("大盘当前表现") < result["final_response"].index(
+        "明日走势预测"
+    )
+    assert PREDICT_DEGRADED_HINT in result["final_response"]
+    assert "当前市场偏强" in result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_predict_hint_once() -> None:
+    """多个 predict 子目标 → D35 提示全文仅输出一次。"""
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "predict", "明日走势预测"), _subgoal("g2", "predict", "下周走势预测")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+    )  # type: ignore[arg-type]
+    assert result["final_response"].count(PREDICT_DEGRADED_HINT) == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_risk_once() -> None:
+    """风险段全文单次（不重复叠加）。"""
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现")]
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer._synth_section",
+        new=AsyncMock(return_value=_SectionResult("正常结论", [evs[0]], "medium", [], "validate")),
+    ):
+        result = await _synth_multi_goal(
+            {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    # 风险段全文单次（不重复叠加）
+    assert result["final_response"].count("不构成投资建议") == 1
+
+
+@pytest.mark.asyncio
+async def test_pure_predict_no_evidence_only_hint() -> None:
+    """纯 predict 子目标 + 无证据 → 只输出 D35 提示，不编造预测。"""
+    goals = [_subgoal("g1", "predict", "明天会涨吗")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="明天会涨吗", intent="market_snapshot"), [], goals
+    )  # type: ignore[arg-type]
+    assert PREDICT_DEGRADED_HINT in result["final_response"]
+    assert "明天会涨吗" in result["final_response"]
+    assert result["insight"].answer_mode == "predict"
+    assert result["trace"].goals is not None
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_non_trading_hint_prepended() -> None:
+    """非交易日 + 行情类证据 → 非交易时段提示置于文首（一次）。"""
+    evs = [_ev("g1")]
+    goals = [_subgoal("g1", "validate", "大盘当前表现")]
+    with (
+        patch(
+            "aistock_agent.graph.nodes.synth_answer._synth_section",
+            new=AsyncMock(
+                return_value=_SectionResult(
+                    "## 核心结论\n正常结论", [evs[0]], "medium", [], "validate"
+                )
+            ),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("non_trading_day", {}),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.shanghai_today",
+            return_value=date(2026, 8, 3),
+        ),
+        patch(
+            "aistock_agent.graph.nodes.synth_answer.prev_trading_day",
+            return_value=date(2026, 8, 1),
+        ),
+    ):
+        result = await _synth_multi_goal(
+            {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+        )  # type: ignore[arg-type]
+    assert result["final_response"].startswith("今天是 A 股非交易日")
+
+
+def test_build_predict_section_hint_once_and_facts() -> None:
+    """D35 提示单次 + 趋势要点 facts 拼接（include_hint=False 时无提示）。"""
+    evs = [_ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])]
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    section = _build_predict_section(sg, evs, include_hint=True)
+    assert section.count(PREDICT_DEGRADED_HINT) == 1
+    assert "当前趋势：上证 3832.26" in section
+    section2 = _build_predict_section(sg, evs, include_hint=False)
+    assert PREDICT_DEGRADED_HINT not in section2
+
+
+# ─── Phase 4-1（Task 4）：predict 子目标三段式渲染 ───
+
+
+def _prediction_evidence(
+    *,
+    degraded: bool = False,
+    low_confidence: bool = False,
+    goal_id: str = "g2",
+) -> Evidence:
+    """构造 prediction skill 风格 Evidence（facts 对齐 skills/prediction._render_facts）。"""
+    facts = [
+        (
+            "【600519 现状】行情：【贵州茅台】最新价: 1500.0  涨跌幅: +1.20%；"
+            "资金：主力流入: 2.5亿；主力流出: 1.1亿"
+        ),
+        "【影响持续性推演（假设推演）】主力资金持续流入，短线延续强势",
+        (
+            "- 短线(1-5交易日)（2-4 周）：阶段影响高峰，方向看多，置信medium；"
+            "验证对象 贵州茅台，预期 股价维持 1500-1550 区间"
+        ),
+        "演化路径：短线情绪延续 → 中线资金回补",
+        "风险提示：市场整体回撤——影响提前衰减",
+    ]
+    if low_confidence:
+        facts.append(LOW_CONFIDENCE_HINT)
+    facts.append(DISCLAIMER)
+    return Evidence(
+        facts=facts,
+        sources=[],
+        as_of=datetime.now(UTC),
+        symbols=["600519"],
+        degraded=degraded,
+        degraded_reason="prediction 不可用" if degraded else None,
+        skill_name="prediction",
+        goal_id=goal_id,
+    )
+
+
+def test_build_predict_section_three_part_rendering() -> None:
+    """非 degraded prediction Evidence → 三段式：现状趋势 + 影响持续性推演 + 免责声明。
+
+    ① 现状趋势保留 validate facts；② 影响持续性推演渲染 prediction facts（首行
+    【…现状】输入上下文被跳过，不重复）；③ 免责声明 A1② 起由 _synth_multi_goal
+    合并后统一追加，本节不再逐节追加；无 D35 降级提示。
+    """
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    section = _build_predict_section(sg, [validate_ev, pred_ev], include_hint=True)
+    # ① 现状趋势（validate facts 原样保留）
+    assert "当前趋势要点：" in section
+    assert "当前趋势：上证 3832.26" in section
+    # ② 影响持续性推演（prediction facts；【…现状】首行被跳过）
+    assert "影响持续性推演：" in section
+    assert "主力资金持续流入，短线延续强势" in section
+    assert "短线(1-5交易日)" in section
+    assert "演化路径" in section
+    assert "风险提示" in section
+    assert "【600519 现状】" not in section
+    # ③ 免责声明 A1② 起由合并层统一追加，本节不含；无降级提示
+    assert DISCLAIMER not in section
+    assert PREDICT_DEGRADED_HINT not in section
+
+
+def test_build_predict_section_degraded_prediction_keeps_hint() -> None:
+    """degraded prediction Evidence → 维持 D35 降级提示，不渲染三段式/不追加免责声明。"""
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence(degraded=True)
+    section = _build_predict_section(sg, [validate_ev, pred_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：上证 3832.26" in section
+    assert "影响持续性推演：" not in section
+    assert DISCLAIMER not in section
+
+
+def test_build_predict_section_missing_prediction_keeps_hint() -> None:
+    """无 prediction Evidence（skill_name 与 goal_id 均不命中）→ D35 降级提示。"""
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    section = _build_predict_section(sg, [validate_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：上证 3832.26" in section
+    assert "影响持续性推演：" not in section
+
+
+def test_build_predict_section_g2_validate_not_mislabeled_as_prediction() -> None:
+    """goal_id="g2" 的 validate 证据（无 prediction Evidence）→ 仍走 D35 降级。
+
+    最终整分支审查 Important 修复：关键词兜底 compose 路径（_build_fallback_goals
+    ≥2 维度含 predict 时）predict 子目标 sg_id="g2" 且 validate call goal_id="g2"、
+    但从不发 prediction call——若按 goal_id=="g2" 兜底定位，会把 validate 事实误标为
+    "影响持续性推演"并追加免责声明，取代诚实的 D35 降级提示。prediction Evidence
+    恒带 skill_name="prediction"，仅按 skill_name 定位即可，goal_id 兜底必须删除。
+    """
+    sg = _subgoal("g2", "predict", "白酒板块未来走势预测")
+    validate_ev = _ev("g2", ["当前趋势：白酒板块资金持续流入"])
+    section = _build_predict_section(sg, [validate_ev], include_hint=True)
+    assert PREDICT_DEGRADED_HINT in section
+    assert "当前趋势：白酒板块资金持续流入" in section
+    assert "影响持续性推演：" not in section
+    assert DISCLAIMER not in section
+
+
+def test_build_predict_section_low_confidence_hint() -> None:
+    """prediction facts 含低置信提示（confidence=low）→ 三段式输出中保留不确定性提示。
+
+    免责声明 A1② 起由 _synth_multi_goal 合并后统一追加，本节不含。
+    """
+    sg = _subgoal("g1", "predict", "明日走势预测")
+    pred_ev = _prediction_evidence(low_confidence=True)
+    section = _build_predict_section(sg, [pred_ev], include_hint=True)
+    assert LOW_CONFIDENCE_HINT in section
+    assert PREDICT_DEGRADED_HINT not in section
+    assert DISCLAIMER not in section
+
+
+@pytest.mark.asyncio
+async def test_multi_goal_predict_three_part_no_degraded_hint() -> None:
+    """predict 子目标（g1）+ 非 degraded prediction Evidence → 全文三段式渲染。
+
+    对齐真实流程（闸门 1/2）：predict 子目标 id="g1"，validate 证据 goal_id="g1"，
+    prediction Evidence goal_id="g2"（定位哨兵，不属于任何子目标）。
+    """
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    evs = [validate_ev, pred_ev]
+    goals = [_subgoal("g1", "predict", "明日走势预测")]
+    result = await _synth_multi_goal(
+        {"plan": "compose"}, InsightGoal(question="x", intent="market_snapshot"), evs, goals
+    )  # type: ignore[arg-type]
+    assert PREDICT_DEGRADED_HINT not in result["final_response"]
+    assert "影响持续性推演：" in result["final_response"]
+    assert "主力资金持续流入，短线延续强势" in result["final_response"]
+    assert result["final_response"].count(DISCLAIMER) == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_predict_goals_disclaimer_once() -> None:
+    """A1②：两个 predict 子目标 → combined 中 DISCLAIMER 恰好出现一次（预测段末尾、风险段之前）。"""
+    validate_ev = _ev("g1", ["当前趋势：上证 3832.26 收涨 0.72%"])
+    pred_ev = _prediction_evidence()
+    goals = [
+        _subgoal("g1", "predict", "明日走势预测"),
+        _subgoal("g2", "predict", "下周走势预测"),
+    ]
+    result = await _synth_multi_goal(
+        {"plan": "compose"},
+        InsightGoal(question="x", intent="market_snapshot"),
+        [validate_ev, pred_ev],
+        goals,
+    )  # type: ignore[arg-type]
+    combined = result["final_response"]
+    # 免责声明全文恰好一次（不再每个 predict 子目标节各追加一次）
+    assert combined.count(DISCLAIMER) == 1
+    # 位于预测段（最后一个 predict 子目标节）之后
+    assert combined.index(DISCLAIMER) > combined.index("下周走势预测")
+    # 位于 D28 风险段之前
+    assert combined.index(DISCLAIMER) < combined.index(RISK_DISCLAIMER)
