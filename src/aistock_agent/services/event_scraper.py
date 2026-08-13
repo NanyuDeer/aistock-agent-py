@@ -51,6 +51,8 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
 
     从 aistock_agent.services.event_analysis_pipeline import run_event_analysis_pipeline
     （函数内 import 避免循环依赖：pipeline 依赖 event_conduction，本模块被 scheduler 引用）。
+    H7（2026-08-13）：消费 pipeline 返回值——error 非空或抛异常时重试 1 次；
+    两次失败记 error 级日志（不静默），避免"await 后丢弃返回值只留日志"的现状。
     import 与映射推导式均置于 try 内：fire-and-forget task 的任何异常都必须被吞掉记日志，
     避免以 "Task exception was never retrieved" 形式暴露（task 仅由 done_callback 移除引用）。
     """
@@ -73,7 +75,27 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
             }
             for ev in events
         ]
-        await run_event_analysis_pipeline(major_events)
+        for attempt in (1, 2):
+            try:
+                result = await run_event_analysis_pipeline(major_events)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "event_scrape_conduction_failed", attempt=attempt, error=str(exc)
+                )
+                continue
+            if not isinstance(result, dict) or result.get("error"):
+                logger.error(
+                    "event_scrape_conduction_errored",
+                    attempt=attempt,
+                    error=result.get("error") if isinstance(result, dict) else "unknown",
+                )
+                continue
+            logger.info(
+                "event_scrape_conduction_done",
+                event_count=len(events),
+                error=result.get("error"),
+            )
+            return
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_conduction_failed", error=str(exc))
 

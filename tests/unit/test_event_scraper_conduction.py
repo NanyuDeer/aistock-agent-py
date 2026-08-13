@@ -398,3 +398,69 @@ async def test_scrape_intraday_skips_conduction_when_nothing_persisted():
         await scrape_intraday("2026-08-12")
 
     mock_spawn.assert_not_called()
+
+
+# ── H7：传导结果消费与失败重试（Task 1 / Phase-3a）──
+
+
+def _major_event(event_id: str = "e1") -> dict[str, object]:
+    """构造最小 major_event dict（仅含 _trigger_conduction 映射所需字段）。"""
+    return {
+        "event_id": event_id,
+        "title": "央行降准",
+        "summary": "降准0.5个百分点",
+        "url": "https://example.com/1",
+        "impact_score": 5,
+        "direction": "positive",
+        "involved_keywords": ["银行"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_retries_once_on_error_result():
+    """H7：pipeline 返回 error 非空 → 重试 1 次；第二次成功不抛。"""
+    calls = 0
+
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"event_count": 1, "error": "boom", "conduction_results": [], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+        return {"event_count": 1, "error": None, "conduction_results": [{"ok": True}], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ):
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_success_no_retry():
+    calls = 0
+
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"event_count": 1, "error": None, "conduction_results": [], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ):
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_double_failure_logs_without_raise():
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ), patch("aistock_agent.services.event_scraper.logger") as mock_logger:
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert mock_logger.exception.call_count == 2
