@@ -1,7 +1,9 @@
 """replay_layer —— 回放开关、数据注入与副作用隔离"""
 
+import json
 import os
 from datetime import date
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -304,4 +306,67 @@ async def test_node_reader_filters_by_symbol(iterate_data_dir: object) -> None:
     # 切片 fixture 中无 symbol 字段 → fail-loud 返回 None（不静默退化全量）
     out = await node_api.get("/internal/news/search/600519")
     assert out is None
+    remove_replay_patches()
+
+
+@pytest.mark.asyncio
+async def test_node_reader_positive_symbol_and_id_matching(
+    iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正路径（I-3 补齐）：含 symbol/id 字段的切片记录按精确值匹配，无匹配 fail-loud。
+
+    iterate_data_dir 已把 fixtures/iterate 下 case 复制到临时目录，测试内直接向
+    临时目录中的 case JSON 注入 symbol/id 字段，再 apply 回放 patch（apply 时
+    load_replay_snapshot 会从临时目录重新读取，故必须先改文件再 apply）。
+    """
+    _enable_replay(monkeypatch, "review")
+    case_path = (
+        Path(iterate_data_dir)
+        / "cases"
+        / "review"
+        / "case_20260731_us_market_surge.json"
+    )
+    payload = json.loads(case_path.read_text(encoding="utf-8"))
+    matched_record = {
+        "time": "2026-07-31T09:00:00+08:00",
+        "title": "贵州茅台发布业绩预告",
+        "content": "茅台营收同比增长 15%",
+        "symbol": "600519",
+        "id": "abc123",
+    }
+    unmatched_record = {
+        "time": "2026-07-31T09:10:00+08:00",
+        "title": "宁德时代产能扩张",
+        "content": "宁德时代发布新产线计划",
+        "symbol": "300750",
+        "id": "xyz789",
+    }
+    payload["window_before"]["cls_telegraph"] = [matched_record, unmatched_record]
+    case_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.services.data_client import node_api
+
+    # 1) symbol 精确匹配正路径：只含匹配记录，不含不匹配记录
+    out = await node_api.get("/internal/news/search/600519")
+    assert out == {"items": [matched_record]}
+
+    # 2) symbol 精确不匹配 → fail-loud None
+    assert await node_api.get("/internal/news/search/999999") is None
+
+    # 3) 空 symbol（/internal/news/search/）→ fail-closed None（I-1 回归）
+    assert await node_api.get("/internal/news/search/") is None
+
+    # 4) fulltext id 精确匹配正路径
+    fulltext = await node_api.get("/internal/news/fulltext/abc123")
+    assert fulltext == {
+        "title": "贵州茅台发布业绩预告",
+        "content": "茅台营收同比增长 15%",
+    }
+
+    # 5) fulltext id 不匹配 → fail-loud None
+    assert await node_api.get("/internal/news/fulltext/nope") is None
+
     remove_replay_patches()

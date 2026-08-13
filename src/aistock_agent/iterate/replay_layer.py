@@ -393,8 +393,9 @@ def _make_service_node_reader(
     """构造 NodeApiClient.get/get_list 的服务层回放读（精确前缀 + 参数语义）。
 
     - 前缀命中 /internal/news/、/internal/telegraph、/internal/search/ 才返回切片语料；
-    - search/{symbol}：切片记录含 symbol 字段时按 symbol 过滤；无该字段时 fail-loud 返回 None
-      （绝不静默退化为全量，避免个股新闻=全市场电报的语义错配）；
+    - search/{symbol}：按 symbol 精确过滤，无任何模糊兜底——空 symbol、无匹配、
+      切片记录无 symbol 字段，一律 fail-loud 返回 None（绝不静默退化为全量，
+      避免个股新闻=全市场电报的语义错配）；
     - fulltext/{id}：切片记录含 id 字段时按 id 精确匹配；无匹配/无 id 字段 → fail-loud None；
     - 其余路径返回 None（隔离，不发真实请求）。
     """
@@ -417,16 +418,16 @@ def _make_service_node_reader(
         records = [r for r in records if isinstance(r, dict)]
 
         symbol = _extract_symbol_from_path(path)
+        if path.startswith(_SEARCH_SYMBOL_PREFIX) and symbol is None:
+            # I-1 修复：命中 search 前缀但 symbol 为空（如 /internal/news/search/ 或
+            # 带 query 的空段）时 fail-closed 返回 None——与 fulltext 侧空 id 兜底
+            # 对称，绝不落入下方 return {"items": records} 全量返回分支
+            logger.warning("iterate_replay_symbol_empty", path=path)
+            return None
         if symbol is not None:
-            # 按 symbol 过滤；切片记录无 symbol 字段 → fail-loud（不静默退化全量）
+            # I-2 修复：按 symbol 精确过滤，无任何模糊兜底（不再回退 title/content
+            # 子串匹配）；无匹配（含切片记录无 symbol 字段）一律 fail-loud 返回 None
             filtered = [r for r in records if str(r.get("symbol", "")) == symbol]
-            if not filtered and any("symbol" in r for r in records):
-                filtered = [
-                    r
-                    for r in records
-                    if symbol in str(r.get("title", ""))
-                    or symbol in str(r.get("content", ""))
-                ]
             if not filtered:
                 logger.warning("iterate_replay_symbol_no_match", path=path, symbol=symbol)
                 return None
