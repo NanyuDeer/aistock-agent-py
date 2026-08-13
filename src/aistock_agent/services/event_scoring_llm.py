@@ -136,3 +136,58 @@ async def _deep_score(event: event_store.EventRecord) -> DeepScoreOutput | None:
     except Exception:  # noqa: BLE001
         logger.warning("event_score_deep_failed", hash=event["content_hash"][:16])
         return None
+
+
+async def score_events_llm(
+    events: list[event_store.EventRecord],
+    *,
+    score_date: str,
+) -> list[event_store.EventRecord]:
+    """LLM 精评入口（spec 契约）。返回评分合并后的事件列表。
+
+    - 仅处理规则评分 >= 候选门槛的候选；
+    - 缓存命中直接复用（零 LLM 调用）；
+    - quick/deep 任一异常 -> 该事件保持规则评分；
+    - 开关关闭/无候选/全异常 -> 返回原列表（规则评分兜底，不阻断抓取）。
+    """
+    if not settings.event_scoring_llm_enabled or not events:
+        return events
+
+    candidates = [
+        ev for ev in events
+        if ev["impact_score"] >= settings.event_scoring_candidate_threshold
+    ]
+    if not candidates:
+        return events
+
+    scores: dict[str, DeepScoreOutput] = {}
+    to_score: list[event_store.EventRecord] = []
+    for ev in candidates:
+        try:
+            cached = await _cache_get(ev["content_hash"])
+        except Exception:  # noqa: BLE001
+            cached = None
+        if cached is not None:
+            scores[ev["content_hash"]] = cached
+            logger.info("event_score_cache_hit", hash=ev["content_hash"][:16])
+        else:
+            to_score.append(ev)
+
+    if to_score:
+        keep_hashes = await _quick_filter(to_score)
+        for ev in to_score:
+            if ev["content_hash"] not in keep_hashes:
+                continue
+            deep = await _deep_score(ev)
+            if deep is None:
+                continue
+            scores[ev["content_hash"]] = deep
+            await _cache_set(ev["content_hash"], deep)
+
+    logger.info(
+        "event_scoring_llm",
+        total=len(events),
+        candidates=len(candidates),
+        scored=len(scores),
+    )
+    return apply_llm_scores(events, scores)

@@ -13,6 +13,7 @@ from aistock_agent.services.event_scoring_llm import (
     _deep_score,
     _quick_filter,
     apply_llm_scores,
+    score_events_llm,
 )
 
 
@@ -191,3 +192,64 @@ async def test_deep_score_failure_returns_none():
     with patch("aistock_agent.services.event_scoring_llm.get_deep_think", side_effect=RuntimeError("boom")):
         result = await _deep_score(_ev("e1", "aaa", impact=5))
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_score_events_llm_disabled_returns_original():
+    events = [_ev("e1", "aaa")]
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", False):
+        result = await score_events_llm(events, score_date="2026-08-13")
+    assert result == events
+
+
+@pytest.mark.asyncio
+async def test_score_events_llm_skips_low_rule_score():
+    events = [_ev("e1", "aaa", impact=1)]  # 低于门槛 3
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scoring_llm._cache_get", new=AsyncMock(return_value=None)):
+        result = await score_events_llm(events, score_date="2026-08-13")
+    assert result == events  # 候选为空，零 LLM 调用
+
+
+@pytest.mark.asyncio
+async def test_score_events_llm_cache_hit_skips_llm():
+    events = [_ev("e1", "aaa", impact=5)]
+    cached = DeepScoreOutput(impact_score=5, direction="positive")
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scoring_llm._cache_get", new=AsyncMock(return_value=cached)), \
+         patch("aistock_agent.services.event_scoring_llm._quick_filter", new=AsyncMock()) as mock_q, \
+         patch("aistock_agent.services.event_scoring_llm._deep_score", new=AsyncMock()) as mock_d:
+        result = await score_events_llm(events, score_date="2026-08-13")
+    assert result[0]["impact_score"] == 5
+    mock_q.assert_not_awaited()
+    mock_d.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_score_events_llm_full_flow_merges_scores():
+    ev_keep = _ev("e1", "aaa", impact=5)
+    ev_drop = _ev("e2", "bbb", impact=5)
+    events = [ev_keep, ev_drop]
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scoring_llm._cache_get", new=AsyncMock(return_value=None)), \
+         patch("aistock_agent.services.event_scoring_llm._quick_filter", new=AsyncMock(return_value={"aaa"})), \
+         patch("aistock_agent.services.event_scoring_llm._deep_score", new=AsyncMock(
+             return_value=DeepScoreOutput(impact_score=5, direction="negative"))), \
+         patch("aistock_agent.services.event_scoring_llm._cache_set", new=AsyncMock()) as mock_set:
+        result = await score_events_llm(events, score_date="2026-08-13")
+    # e1 被精评 direction 改为 negative；e2 被 quick 滤掉保持规则评分
+    by_hash = {ev["content_hash"]: ev for ev in result}
+    assert by_hash["aaa"]["direction"] == "negative"
+    assert by_hash["bbb"]["direction"] == "neutral"
+    mock_set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_score_events_llm_failure_returns_original():
+    events = [_ev("e1", "aaa", impact=5)]
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scoring_llm._cache_get", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch("aistock_agent.services.event_scoring_llm._quick_filter", new=AsyncMock(return_value={"aaa"})), \
+         patch("aistock_agent.services.event_scoring_llm._deep_score", new=AsyncMock(return_value=None)):
+        result = await score_events_llm(events, score_date="2026-08-13")
+    assert result == events
