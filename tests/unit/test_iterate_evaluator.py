@@ -27,8 +27,10 @@ def _mock_llm_extract(direction: str, drivers: list[str], sectors: list[str]) ->
     return type("R", (), {"content": json.dumps(payload)})()
 
 
-def _mock_driver_judge(hit: int, total: int) -> object:
+def _mock_driver_judge(hit: int, total: int, quotes: list[str] | None = None) -> object:
     payload = {"hit_count": hit, "total_count": total}
+    if quotes is not None:
+        payload["quotes"] = quotes
     return type("R", (), {"content": json.dumps(payload)})()
 
 
@@ -203,3 +205,58 @@ async def test_gap_analysis_reports_direction_only_when_present() -> None:
     assert "方向不一致" in score.gap_analysis
     assert "板块覆盖不足" not in score.gap_analysis
     assert "驱动要素覆盖不足" not in score.gap_analysis
+
+
+"""judge 固定分母 + corpus 引用机械核验（A2/N5 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_driver_hit_score_uses_fixed_denominator() -> None:
+    """judge 自报 total 小于 len(truth) 时，分母仍固定为 len(truth)，防小 total 满分。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["a", "b", "c"],  # 3 条 truth
+            "affected_sectors": [],
+            "corpus": "a b c 语料",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                # extract：direction=bearish 与 GT(bullish) 不匹配 → direction_score=0，
+                # 隔离驱动维，保证下方 total<0.5 断言成立（若方向命中 total≈0.52 会误报）
+                _mock_llm_extract("bearish", ["a"], []),
+                # judge 恶意自报 hit=1 total=1（truth 实际 3 条）；
+                # quotes=["a"] 在 corpus="a b c 语料" 中可验证 → 核验通过 hit=1，
+                # 但分母固定 len(truth)=3 → 0.5*1/3≈0.1667，而非 0.5 满分
+                _mock_driver_judge(1, 1, quotes=["a"]),
+            ]
+        )
+        score = await evaluate_attribution("a", gt)
+    # 驱动分 = 0.5 * 1/3 ≈ 0.1667，而非 0.5 满分
+    assert score.drivers == pytest.approx(0.1667, abs=0.001)
+    assert score.total < 0.5
+
+
+@pytest.mark.asyncio
+async def test_driver_hit_rejects_unverifiable_quote() -> None:
+    """judge 声称命中但引用片段不在 corpus 中 → 该命中作废（机械核验）。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "affected_sectors": [],
+            "corpus": "财联社：A股高开，半导体领涨",  # 语料不含"隔夜美股"
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["隔夜美股暴涨"], []),
+                # judge 报 hit=1 且引用"隔夜美股暴涨"（不在 corpus）
+                _mock_driver_judge(1, 1, quotes=["隔夜美股暴涨"]),
+            ]
+        )
+        score = await evaluate_attribution("隔夜美股暴涨", gt)
+    assert score.drivers == 0.0  # 引用无法在 corpus 验证 → 命中作废

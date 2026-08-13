@@ -26,8 +26,10 @@ sectors 为提到的行业/板块（≤8 个）。
 _DRIVER_JUDGE_PROMPT = """判断 agent 的归因 drivers 是否覆盖标准答案 drivers 的语义。
 标准答案 drivers: {truth}
 agent drivers: {agent}
-对每条标准答案 drivers，若 agent 中能找到语义等价描述则命中。
-输出严格 JSON：{{"hit_count": 整数, "total_count": 整数}}。只输出 JSON。"""
+对每条标准答案 drivers，若 agent 中能找到语义等价描述则命中；
+命中时必须给出 agent 侧支撑引用的原文片段（quotes）。
+输出严格 JSON：{{"hit_count": 整数, "total_count": 整数, "quotes": ["agent 原文片段", ...]}}。
+只输出 JSON。"""
 
 
 @dataclass
@@ -84,8 +86,9 @@ async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object
     # 驱动维：truth 非空才参与
     truth_drivers = _as_str_list(attribution.get("drivers"))
     if truth_drivers:
+        corpus = str(attribution.get("corpus", ""))
         drivers_score = await _driver_hit_score(
-            truth_drivers, extracted.get("drivers", [])
+            truth_drivers, extracted.get("drivers", []), corpus=corpus
         )
         drivers_present = True
     else:
@@ -139,11 +142,15 @@ def _sector_overlap_score(truth_sectors: object, agent_sectors: object) -> float
     return round(0.3 * hit / len(truth), 4)
 
 
-async def _driver_hit_score(truth_drivers: object, agent_drivers: object) -> float:
+async def _driver_hit_score(
+    truth_drivers: object,
+    agent_drivers: object,
+    corpus: str = "",
+) -> float:
     truth = _as_str_list(truth_drivers)
     agent = _as_str_list(agent_drivers)
     if not truth:
-        return 0.5
+        return 0.0  # 重归一化后 truth 空不参与评分（A12 修复）
     if not agent:
         return 0.0
     llm = llm_service.get_deep_think()
@@ -156,9 +163,19 @@ async def _driver_hit_score(truth_drivers: object, agent_drivers: object) -> flo
     parsed = _parse_json(str(resp.content))
     try:
         hit = int(cast("str | float | int", parsed.get("hit_count", 0)))
-        total = int(cast("str | float | int", parsed.get("total_count", len(truth))))
     except (TypeError, ValueError):
-        hit, total = 0, len(truth)
+        hit = 0
+    # N5 修复：机械核验——judge 声称的命中引用片段必须在 corpus 中可验证，
+    # 否则作废（模型不可自证，证据由机器验证）。
+    quotes = parsed.get("quotes")
+    if corpus:
+        verified = 0
+        if isinstance(quotes, list):
+            for q in quotes:
+                if isinstance(q, str) and q and q in corpus:
+                    verified += 1
+        hit = min(hit, verified)
+    total = len(truth)  # A2 修复：分母固定 len(truth)，杜绝自报小 total
     if total <= 0:
         return 0.0
     return round(0.5 * min(hit, total) / total, 4)

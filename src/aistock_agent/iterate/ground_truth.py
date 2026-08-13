@@ -261,6 +261,7 @@ async def generate_data_constrained_gt(
             "transmission_path": [],
             "affected_sectors": sectors,
             "source_notes": [],
+            "corpus": corpus[:6000],  # 冻结切片语料，供 judge 引用机械核验（N5 修复）
         },
     }
     base = data_dir or get_data_dir()
