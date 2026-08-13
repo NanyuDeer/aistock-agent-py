@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     checkpointer_backend: str = "memory"
     # sqlite backend 的数据库路径（仅 checkpointer_backend="sqlite" 时使用）
     sqlite_path: str = ".langgraph.db"
+    # sqlite busy_timeout（秒；sqlite3 默认 5.0）。多 worker 并发写短暂争用时
+    # sqlite 抛 "database is locked"；30s 覆盖争用窗口（Phase 5 Task 3 低成本先行项）。
+    sqlite_busy_timeout: float = 30.0
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）

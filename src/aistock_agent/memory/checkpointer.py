@@ -124,7 +124,9 @@ async def _build_async_sqlite_saver() -> BaseCheckpointSaver[str]:
     import aiosqlite
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    conn = await aiosqlite.connect(settings.sqlite_path)
+    conn = await aiosqlite.connect(
+        settings.sqlite_path, timeout=settings.sqlite_busy_timeout
+    )
     return AsyncSqliteSaver(conn)
 
 
