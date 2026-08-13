@@ -7,6 +7,7 @@
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -31,6 +32,26 @@ agent drivers: {agent}
 输出严格 JSON：{{"hit_count": 整数, "total_count": 整数, "quotes": ["agent 原文片段", ...]}}。
 只输出 JSON。"""
 
+# review 渲染文末的板块清单标记（确定性事实，含快照 top_gainers/top_losers 板块名）
+_SECTOR_LIST_BLOCK_RE = re.compile(
+    r"<!--\s*SECTOR_LIST_START\s*-->.*?<!--\s*SECTOR_LIST_END\s*-->",
+    re.DOTALL,
+)
+
+
+def _prepare_extract_input(text: str) -> str:
+    """extract 输入预处理：SECTOR_LIST 板块清单置顶。
+
+    2026-08-13 板块维 0 命中根因：review 渲染的 SECTOR_LIST（含标准答案细分
+    板块，如 CRO概念/重组蛋白/细胞免疫治疗）位于文末，extract 输入 text[:4000]
+    截断后 extract 只能看到正文泛化板块（医药/CRO），细分板块名全丢 → 板块维
+    只命中子串匹配项。板块清单置顶让 extract 优先看到确定性事实清单。
+    """
+    m = _SECTOR_LIST_BLOCK_RE.search(text)
+    if m:
+        return m.group(0) + "\n\n" + text[:4000]
+    return text[:4000]
+
 
 @dataclass
 class ScoreDetail:
@@ -46,7 +67,10 @@ async def extract_agent_attribution(text: str) -> dict[str, object]:
     """用 LLM 从 agent 输出文本提取结构化归因要点。"""
     llm = llm_service.get_deep_think()
     resp = await llm.ainvoke(
-        [SystemMessage(content=_EXTRACT_PROMPT), HumanMessage(content=text[:4000])]
+        [
+            SystemMessage(content=_EXTRACT_PROMPT),
+            HumanMessage(content=_prepare_extract_input(text)),
+        ]
     )
     return _parse_json(str(resp.content))
 

@@ -34,9 +34,56 @@ def _mock_driver_judge(hit: int, total: int, quotes: list[str] | None = None) ->
     return type("R", (), {"content": json.dumps(payload)})()
 
 
+def _sample_sector_list_text() -> str:
+    """带文末 SECTOR_LIST 板块清单的 agent 输出样例（渲染层确定性产出）。"""
+    head = (
+        "## 归因结论\n"
+        "- 结论：CRO业绩超预期驱动医药板块逆势领涨。\n"
+        "## 候选解释与反证\n"
+        "- 候选：医药板块资金净流入，芯片概念资金流出。\n"
+    )
+    sector_list = (
+        "<!--SECTOR_LIST_START-->\n"
+        "- CRO概念\n- 重组蛋白\n- 细胞免疫治疗\n- 减肥药\n- 金属铅\n"
+        "<!--SECTOR_LIST_END-->"
+    )
+    # 正文足够长（>4000 字符），SECTOR_LIST 落在 4000 截断点之后（复现线上截断）
+    return head + "证据索引详情字段" * 600 + "\n" + sector_list
+
+
+@pytest.mark.asyncio
+async def test_extract_input_promotes_sector_list() -> None:
+    """extract 输入必须包含 SECTOR_LIST 板块清单（置顶）。
+
+    2026-08-13 板块维 0 命中根因：渲染文末的 SECTOR_LIST（含标准答案细分
+    板块：CRO概念/重组蛋白/细胞免疫治疗）被 extract 输入 text[:4000] 截断，
+    extract 只能看到正文泛化板块（医药/CRO）。板块清单置顶后 extract 能提取
+    细分板块名。
+    """
+    from aistock_agent.iterate.evaluator import extract_agent_attribution
+
+    text = _sample_sector_list_text()
+    assert "SECTOR_LIST_START" in text
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=type(
+                "R",
+                (),
+                {
+                    "content": (
+                        '{"direction": "bullish", "drivers": [], "sectors": []}'
+                    )
+                },
+            )()
+        )
+        await extract_agent_attribution(text)
+    prompt_arg = factory.return_value.ainvoke.call_args.args[0][1].content
+    assert "重组蛋白" in prompt_arg
+    assert "细胞免疫治疗" in prompt_arg
+
+
 @pytest.mark.asyncio
 async def test_perfect_match_scores_high() -> None:
-    """evaluate_attribution 内部调两次 LLM：extract（提取）→ judge（要素命中）。"""
     with patch("aistock_agent.services.llm.get_deep_think") as factory:
         factory.return_value.ainvoke = AsyncMock(
             side_effect=[
