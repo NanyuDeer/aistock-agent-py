@@ -94,6 +94,9 @@ async def test_generate_data_constrained_gt_deterministic_fields(
     prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
     assert "隔夜美股暴涨" in prompt_arg
     assert "禁止" in prompt_arg and "语料之外" in prompt_arg
+    # 2026-08-13 强化：驱动必须由语料原文关键词构成（产片校验拒绝事故防御）
+    assert "语料原文" in prompt_arg
+    assert "drivers" in prompt_arg and '"drivers": []' in prompt_arg
 
 
 @pytest.mark.asyncio
