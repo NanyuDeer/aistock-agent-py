@@ -5,6 +5,7 @@ import pytest
 from aistock_agent.services.event_scraper import (
     run_event_scrape,
     scrape_event_triggered,
+    scrape_full_daily,
     scrape_intraday,
 )
 from aistock_agent.services.event_store import is_major_event, normalize_event
@@ -177,3 +178,62 @@ async def test_scrape_event_triggered_requires_symbol():
     }
     mock_collect.assert_not_awaited()
     mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_applies_llm_scores_when_enabled():
+    """开关开启时：评分在重大筛选前应用，LLM 评分结果影响入库。"""
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_ths_original",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_tavily",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_global_markets",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scraper.event_scoring_llm.score_events_llm",
+               new=AsyncMock(side_effect=lambda events, **kwargs: events)) as mock_score, \
+         patch("aistock_agent.services.event_store.save_event_scrape",
+               new=AsyncMock(return_value={"persisted": 0, "deduped": 0, "added": 0, "added_events": [], "error": None})):
+        await scrape_full_daily("2026-08-13")
+    mock_score.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_skips_llm_scores_when_disabled():
+    """开关默认关闭：零 LLM 评分调用（行为与现状一致）。"""
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", False), \
+         patch("aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_ths_original",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_tavily",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_global_markets",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scraper.event_scoring_llm.score_events_llm",
+               new=AsyncMock()) as mock_score, \
+         patch("aistock_agent.services.event_store.save_event_scrape",
+               new=AsyncMock(return_value={"persisted": 0, "deduped": 0, "added": 0, "added_events": [], "error": None})):
+        await scrape_full_daily("2026-08-13")
+    mock_score.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_applies_llm_scores_when_enabled():
+    with patch("aistock_agent.config.settings.event_scoring_llm_enabled", True), \
+         patch("aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scraper.event_scoring_llm.score_events_llm",
+               new=AsyncMock(side_effect=lambda events, **kwargs: events)) as mock_score, \
+         patch("aistock_agent.services.event_store.save_event_scrape",
+               new=AsyncMock(return_value={"persisted": 0, "deduped": 0, "added": 0, "added_events": [], "error": None})):
+        await scrape_intraday("2026-08-13")
+    mock_score.assert_awaited_once()

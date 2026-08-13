@@ -20,7 +20,8 @@ from typing import Any
 
 import structlog
 
-from aistock_agent.services import event_scrape_sources, event_store
+from aistock_agent.config import settings
+from aistock_agent.services import event_scoring_llm, event_scrape_sources, event_store
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -96,6 +97,11 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
             continue
         events.extend(res)
 
+    # Phase-2 LLM 精评（2026-08-13）：重大筛选前对规则候选做 LLM 评分，
+    # 开关关闭时零调用（函数内部兜底，失败不阻断抓取）
+    if settings.event_scoring_llm_enabled:
+        events = await event_scoring_llm.score_events_llm(events, score_date=score_date)
+
     major = [ev for ev in events if event_store.is_major_event(ev)]
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
     result = await event_store.save_event_scrape(major, score_date)
@@ -117,6 +123,9 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
     events = [
         ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
     ]
+    # Phase-2 LLM 精评（2026-08-13）：同上，盘中增量同样接入
+    if settings.event_scoring_llm_enabled:
+        events = await event_scoring_llm.score_events_llm(events, score_date=score_date)
     logger.info("event_scrape_intraday", total=len(events))
     result = await event_store.save_event_scrape(events, score_date)
     # 同上（I3）：守卫用 added>0 且只传新增子集（全去重批次不重复触发传导）
