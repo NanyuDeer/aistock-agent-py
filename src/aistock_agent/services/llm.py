@@ -52,6 +52,13 @@ def _normalize_openai_base_url(base_url: str) -> str:
     return base_url
 
 
+# 单次 LLM 请求超时（秒）。显式化防止无限挂起：2026-08-13 服务器 run_case
+# round 3 变体应用后卡 15+ 分钟（deepseek 长输出 + 多进程并发抢代理），
+# ChatOpenAI 默认无显式超时，长尾请求可能挂死整个迭代闭环。
+# 600s 覆盖 16000 max_tokens 长输出，远超正常生成耗时。
+_LLM_REQUEST_TIMEOUT_SECONDS = 600
+
+
 def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
     """快速模型，用于意图分类和简单任务。
 
@@ -71,6 +78,8 @@ def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
         # 可观测性回调：token 用量统计 + agent 追踪（不侵入业务逻辑）
         # observe=False 时（reasoning 旁路）不挂，token 不计入用户账单（问题 17）
         callbacks=_get_observability_callbacks() if observe else None,
+        # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
+        request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
     )
 
 
@@ -97,6 +106,8 @@ def get_deep_think(
         max_tokens=max_tokens if max_tokens is not None else settings.deep_think_max_tokens,  # type: ignore[call-arg]
         callbacks=_get_observability_callbacks(),
         extra_body=extra_body,
+        # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
+        request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
     )
 
 
