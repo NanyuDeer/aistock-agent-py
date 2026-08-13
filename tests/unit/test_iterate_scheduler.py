@@ -31,18 +31,12 @@ async def test_run_iterate_daily_skips_non_trading_day() -> None:
 
 @pytest.mark.asyncio
 async def test_run_iterate_daily_consumes_only_pending_cases(iterate_data_dir: object) -> None:
-    """I4 回归：已有实验记录的案例不再被重复迭代（去重）。"""
-    import json
-    from pathlib import Path
-
+    """I4/D13 回归：已写 iterated.json 标记的案例不再被重复迭代（去重）。"""
+    from aistock_agent.iterate.case_builder import mark_iterated
     from aistock_agent.iterate.scheduler import _run_iterate_daily_task
 
     case_id = "case_20260731_us_market_surge"
-    exp_dir = Path(iterate_data_dir) / "experiments"  # type: ignore[arg-type]
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    (exp_dir / f"{case_id}_r1_baseline.json").write_text(
-        json.dumps({"case_id": case_id, "round": 1}), encoding="utf-8"
-    )
+    mark_iterated(case_id)
     with patch(
         "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
     ), patch(
@@ -51,7 +45,7 @@ async def test_run_iterate_daily_consumes_only_pending_cases(iterate_data_dir: o
         "aistock_agent.iterate.scheduler.run_daily_report", AsyncMock()
     ) as mock_report:
         await _run_iterate_daily_task()
-    mock_run.assert_not_awaited()  # 该案例已有基线实验记录 → 不再消费
+    mock_run.assert_not_awaited()  # 该案例已有 iterated 标记 → 不再消费
     mock_report.assert_awaited_once()
 
 

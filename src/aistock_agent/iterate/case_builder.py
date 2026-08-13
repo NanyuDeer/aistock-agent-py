@@ -5,6 +5,7 @@ T 窗口原则：window_before 只含 T 时刻及之前的数据；评估期不�
 """
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -165,26 +166,76 @@ def list_cases(agent_id: str | None = None) -> list[str]:
         base = base / agent_id
     if not base.exists():
         return []
-    ids = [p.stem for p in base.rglob("*.json") if p.stem.startswith("case_")]
+    # D13：排除 {case_id}.iterated.json 标记文件——其 stem 以 case_ 开头且同为
+    # cases/ 下 json，否则会被误当作切片 id 进入 pending（去重判定自身被污染）
+    ids = [
+        p.stem
+        for p in base.rglob("*.json")
+        if p.stem.startswith("case_") and not p.stem.endswith(".iterated")
+    ]
     return sorted(ids, reverse=True)
 
 
 def list_pending_cases(agent_id: str | None = None) -> list[str]:
-    """列出尚无实验记录的切片 id（I4：每日任务只消费未迭代过的案例）。
+    """列出尚无实验记录的切片 id（D13 修复：判定基于 iterated.json 标记）。
 
-    判定：data/experiments/ 下存在文件名前缀 ``{case_id}_r`` 的实验记录
-    （含 {case_id}_r1_baseline.json 基线记录）即视为已迭代，不再重复消费。
-    无实验记录 → 视为待迭代。
+    已迭代判定 = data/cases/{case_id}.iterated.json 存在；experiments 目录
+    可清理删除，不再触发重复迭代。无标记 → 视为待迭代。
     """
     cases = list_cases(agent_id)
     if not cases:
         return []
-    root = get_data_dir() / "experiments"
-    iterated: set[str] = set()
-    if root.exists():
-        for p in root.glob("*.json"):
-            for case_id in cases:
-                if p.stem.startswith(f"{case_id}_r"):
-                    iterated.add(case_id)
-                    break
-    return [case_id for case_id in cases if case_id not in iterated]
+    return [case_id for case_id in cases if not is_iterated(case_id)]
+
+
+def _iterated_mark_path(case_id: str, data_dir: Path | None = None) -> Path:
+    """已迭代标记文件路径：data/cases/{case_id}.iterated.json（与 case 同生命周期）。"""
+    base = data_dir or get_data_dir()
+    return base / "cases" / f"{case_id}.iterated.json"
+
+
+def is_iterated(case_id: str, data_dir: Path | None = None) -> bool:
+    """case 是否已迭代（D13 修复：单一权威标记文件，不依赖 experiments 前缀）。"""
+    return _iterated_mark_path(case_id, data_dir).exists()
+
+
+def mark_iterated(case_id: str, data_dir: Path | None = None) -> None:
+    """写入已迭代标记（原子写）。"""
+    path = _iterated_mark_path(case_id, data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = json.dumps(
+        {"case_id": case_id, "iterated_at": datetime.now(_TZ).isoformat()},
+        ensure_ascii=False,
+    )
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def migrate_iterated_marks(data_dir: Path | None = None) -> int:
+    """一次性单向迁移：experiments 前缀文件 → iterated.json 标记（幂等，永不回退）。
+
+    返回新生成的标记数量。迁移源是历史 experiments 记录；迁移完成后 experiments
+    目录可安全清理（不再作为去重事实源）。
+    """
+    base = data_dir or get_data_dir()
+    cases_root = base / "cases"
+    if not cases_root.exists():
+        return 0
+    migrated = 0
+    for case_file in cases_root.rglob("case_*.json"):
+        case_id = case_file.stem
+        # D13：跳过标记文件本身（{case_id}.iterated.json），避免其 stem 被当切片 id
+        if case_id.endswith(".iterated"):
+            continue
+        if is_iterated(case_id, data_dir):
+            continue
+        # 检查 experiments 下是否存在 {case_id}_r 前缀记录（旧事实源）
+        exps = base / "experiments"
+        has_record = False
+        if exps.exists():
+            has_record = any(p.stem.startswith(f"{case_id}_r") for p in exps.glob("*.json"))
+        if has_record:
+            mark_iterated(case_id, data_dir)
+            migrated += 1
+    return migrated

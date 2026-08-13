@@ -5,7 +5,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from aistock_agent.iterate.adapters import get_adapter
-from aistock_agent.iterate.case_builder import build_case, case_path, list_cases, load_case
+from aistock_agent.iterate.case_builder import (
+    build_case,
+    case_path,
+    is_iterated,
+    list_cases,
+    list_pending_cases,
+    load_case,
+    mark_iterated,
+    migrate_iterated_marks,
+)
 
 TZ = timezone(timedelta(hours=8))
 
@@ -171,3 +180,59 @@ async def test_build_case_marks_unknown_time_records(iterate_data_dir: object) -
     unknown = [r for r in records if r.get("time_unknown")]
     assert len(unknown) == 1
     assert unknown[0]["title"] == "无时间戳"
+
+
+# iterated.json 去重标记（D13/G4 修复）
+
+
+def test_mark_and_check_iterated(iterate_data_dir: object) -> None:
+    mark_iterated("case_a")
+    assert is_iterated("case_a")
+    assert not is_iterated("case_b")
+
+
+def test_list_pending_cases_uses_mark_not_experiments(iterate_data_dir: object) -> None:
+    """experiments 目录删除后，已标记案例不重跑；未标记案例仍待跑。"""
+    import json as _json
+    from pathlib import Path as _Path
+
+    data = _Path(iterate_data_dir)  # type: ignore[arg-type]
+    (data / "cases" / "review").mkdir(parents=True, exist_ok=True)
+    (data / "cases" / "review" / "case_marked.json").write_text(
+        _json.dumps({"case_id": "case_marked", "agent_id": "review"}), encoding="utf-8"
+    )
+    (data / "cases" / "review" / "case_pending.json").write_text(
+        _json.dumps({"case_id": "case_pending", "agent_id": "review"}), encoding="utf-8"
+    )
+    mark_iterated("case_marked")
+    # 模拟 experiments 目录被清理
+    import shutil
+
+    exps = data / "experiments"
+    if exps.exists():
+        shutil.rmtree(exps)
+
+    pending = list_pending_cases()
+    assert "case_pending" in pending
+    assert "case_marked" not in pending  # 标记文件仍在 → 不重跑
+
+
+def test_migrate_iterated_marks_is_idempotent(iterate_data_dir: object) -> None:
+    """从 experiments 前缀迁移为标记文件：幂等、单向。"""
+    import json as _json
+    from pathlib import Path as _Path
+
+    data = _Path(iterate_data_dir)  # type: ignore[arg-type]
+    (data / "cases" / "review").mkdir(parents=True, exist_ok=True)
+    (data / "cases" / "review" / "case_old.json").write_text(
+        _json.dumps({"case_id": "case_old", "agent_id": "review"}), encoding="utf-8"
+    )
+    (data / "experiments").mkdir(parents=True, exist_ok=True)
+    (data / "experiments" / "case_old_r1_baseline.json").write_text("{}", encoding="utf-8")
+
+    migrate_iterated_marks()
+    assert is_iterated("case_old")
+    # 再次迁移幂等（标记文件已存在不覆盖）
+    (data / "experiments" / "case_old_r2.json").write_text("{}", encoding="utf-8")
+    migrate_iterated_marks()
+    assert is_iterated("case_old")

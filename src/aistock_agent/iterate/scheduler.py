@@ -45,6 +45,13 @@ async def _run_iterate_daily_task() -> None:
         logger.info("iterate_skip_non_trading_day", date=today.isoformat())
         return
 
+    # D13 修复：每日任务开始前执行一次性迁移（幂等，存量 experiments 前缀 → 标记文件）
+    from aistock_agent.iterate.case_builder import migrate_iterated_marks
+
+    migrated = migrate_iterated_marks()
+    if migrated:
+        logger.info("iterate_iterated_marks_migrated", count=migrated)
+
     # 消费历史案例（先进先出，每日最多 iterate_max_daily_cases 个；只消费未迭代过的）
     pending = list_pending_cases()
     if not pending:

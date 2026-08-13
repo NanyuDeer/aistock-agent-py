@@ -171,6 +171,13 @@ async def run_case(
         tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, best_path)
 
+    # D13 修复：闭环跑完即标记已迭代（单一权威标记，experiments 目录可清理）。
+    # infra_failures 提前中止也走这里（该 case 已尝试且失败轮不落实验记录，
+    # 标记防重复尝试；若需重试可手动删除标记文件）。
+    from aistock_agent.iterate.case_builder import mark_iterated
+
+    mark_iterated(case_id)
+
     return {
         "agent_id": agent_id,
         "case_id": case_id,
