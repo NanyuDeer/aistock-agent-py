@@ -107,7 +107,9 @@ def mock_chat_llm():
     with_structured_output 按调用顺序返回 qa/synth 结构化 mock；
     qa 的 ainvoke 记录收到的 llm_messages（供窗口/摘要断言），synth 固定返回结论。
     """
-    qa_out = _qa_output("stock_snapshot", "stock_snapshot", {"symbol": "600519"}, symbols=["600519"])
+    qa_out = _qa_output(
+        "stock_snapshot", "stock_snapshot", {"symbol": "600519"}, symbols=["600519"]
+    )
     synth_out = _synth_output("茅台当前 1800 元")
 
     captured: list = []
@@ -119,7 +121,9 @@ def mock_chat_llm():
     qa_structured = MagicMock(ainvoke=qa_ainvoke)
     synth_structured = MagicMock(ainvoke=AsyncMock(return_value=synth_out))
     mock_llm = MagicMock()
-    mock_llm.with_structured_output = MagicMock(side_effect=[qa_structured, synth_structured] * TOTAL_TURNS)
+    mock_llm.with_structured_output = MagicMock(
+        side_effect=[qa_structured, synth_structured] * TOTAL_TURNS
+    )
     return mock_llm, captured
 
 
@@ -134,9 +138,25 @@ def chat_graph_patches(mock_chat_llm):
             "aistock_agent.graph.nodes.synth_answer.trading_session_status",
             return_value=("trading", ""),
         ),
+        # get_quote 是 @tool 结构化工具，真实调用形状为 await get_quote.ainvoke({...})
         patch(
             "aistock_agent.skills.stock_snapshot.get_quote",
-            new=AsyncMock(return_value="600519 当前价 1800"),
+            new=MagicMock(ainvoke=AsyncMock(return_value="600519 当前价 1800")),
+        ),
+        # stock_snapshot.py 模块级 import 的 node_api 单例（真实 I/O 路径）：
+        # patch 其模块引用消除 /internal/quote 网络请求（失败仅被吞异常侥幸通过）
+        patch(
+            "aistock_agent.skills.stock_snapshot.node_api",
+            new=MagicMock(
+                get=AsyncMock(
+                    return_value={
+                        "股票简称": "贵州茅台",
+                        "股票代码": "600519",
+                        "最新价": 1800.0,
+                        "涨跌幅": 1.2,
+                    }
+                )
+            ),
         ),
     ]
     for p in patchers:
