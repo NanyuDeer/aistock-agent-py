@@ -13,6 +13,9 @@ import pytest
 from aistock_agent.iterate.adapters import IterableAgentAdapter, get_adapter
 from aistock_agent.iterate.variant_engine import (
     VariantPlan,
+    _apply_snippet_patch,
+    _build_symbol_map,
+    _extract_symbol_source,
     apply_variant,
     generate_variant,
     restore_baseline,
@@ -153,10 +156,12 @@ async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object)
 
 @pytest.mark.asyncio
 async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> None:
-    """回归：变体生成必须把被迭代文件当前内容喂给 LLM（否则 LLM 凭空生成会丢 run 入口）。
+    """回归：变体生成必须把被迭代文件目标区域（符号地图+源码）喂给 LLM。
 
     直接复现线上事故：round 2 变体覆盖 review.py 后子进程报
     `module has no attribute 'run'`——根因是 prompt 只有路径没有内容。
+    修复后（F6/C1/C2）：喂符号地图 + 目标区域源码，LLM 输出 target_symbol/
+    old_snippet/new_snippet 补丁，而非完整文件。
     """
     adapter = IterableAgentAdapter(
         agent_id="review",
@@ -175,7 +180,9 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
         "type": "prompt_diff",
         "files": ["src/aistock_agent/prompts/workers/review.py"],
         "instructions": "强化外盘传导",
-        "new_content": {"src/aistock_agent/prompts/workers/review.py": "REVIEW_PROMPT = \"新\"\n"},
+        "target_symbol": "REVIEW_PROMPT",
+        "old_snippet": 'REVIEW_PROMPT = "外盘传导优先"',
+        "new_snippet": 'REVIEW_PROMPT = "新"',
     }
     with patch("aistock_agent.services.llm.get_deep_think") as factory:
         factory.return_value.ainvoke = AsyncMock(
@@ -191,10 +198,11 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
         )
 
     prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
-    # 文件内容（而非只有路径）必须出现在 prompt 中
+    # 目标区域模式：符号地图 + 目标区域源码（而非完整文件）必须出现在 prompt 中
     assert 'REVIEW_PROMPT = "外盘传导优先"' in prompt_arg
     assert "async def run(state):" in prompt_arg
-    assert "禁止删除/重命名已有函数、常量与入口" in prompt_arg
+    assert "符号地图" in prompt_arg
+    assert "target_symbol" in prompt_arg
     # 输出体量需要大 max_tokens + 关闭思考，防止 JSON 中途截断（线上事故复现）
     assert factory.call_args.kwargs["max_tokens"] >= 8000
     assert factory.call_args.kwargs["extra_body"] == {
@@ -202,8 +210,11 @@ async def test_generate_variant_feeds_current_file_content(tmp_path: Path) -> No
         "reasoning_effort": "none",
     }
     assert plan.type == "prompt_diff"
-    new_content = plan.new_content["src/aistock_agent/prompts/workers/review.py"]
-    assert new_content == 'REVIEW_PROMPT = "新"\n'
+    # 补丁模式：解析出 target_symbol/old_snippet/new_snippet，不产出完整文件
+    assert plan.target_symbol == "REVIEW_PROMPT"
+    assert plan.old_snippet == 'REVIEW_PROMPT = "外盘传导优先"'
+    assert plan.new_snippet == 'REVIEW_PROMPT = "新"'
+    assert plan.new_content == {}
 
 
 @pytest.mark.asyncio
@@ -249,3 +260,41 @@ async def test_run_experiment_round_timed_out_is_failed_round(
     mocked_evaluate.assert_not_awaited()
     assert record["score"] == 0.0
     assert "超时" in str(record["gap_analysis"])
+
+
+"""变体生成目标区域补丁（F6/C1/C2 修复）"""
+
+
+def test_symbol_map_extracts_top_level_symbols() -> None:
+    """ast 符号地图：提取顶层 def/async def/class 名与行号。"""
+    code = (
+        "REVIEW_PROMPT = \"x\"\n\n"
+        "def helper():\n    pass\n\n"
+        "async def run(state):\n    return {}\n"
+    )
+    symbols = _build_symbol_map(code)
+    names = [s["name"] for s in symbols]
+    assert "run" in names
+    assert "helper" in names
+    run_entry = next(s for s in symbols if s["name"] == "run")
+    assert run_entry["line"] > 0
+
+
+def test_extract_symbol_source_returns_block() -> None:
+    code = "async def run(state):\n    a = 1\n    return a\n\ndef other():\n    pass\n"
+    src = _extract_symbol_source(code, "run")
+    assert "async def run" in src
+    assert "return a" in src
+    assert "def other" not in src
+
+
+def test_apply_snippet_patch_exact_and_fuzzy() -> None:
+    original = "A\nB\nC\n"
+    # 精确匹配
+    patched = _apply_snippet_patch(original, "B", "B2")
+    assert patched == "A\nB2\nC\n"
+    # 空白差异的模糊匹配
+    patched2 = _apply_snippet_patch("A\nB\nC\n", " B ", "B2")
+    assert patched2 is not None and "B2" in patched2
+    # 找不到 → None（不崩）
+    assert _apply_snippet_patch(original, "ZZZ", "X") is None
