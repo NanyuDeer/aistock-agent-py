@@ -17,6 +17,7 @@ from typing import Literal
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
@@ -81,6 +82,11 @@ REQUIRED_CHAIN_STAGES: list[str] = [
 
 # 降级文本 — 校验失败、LLM 异常、快照构建失败时返回
 DEGRADED_RESPONSE = "收盘溯源生成暂时不可用，请稍后重试"
+
+# MarketTraceResult 生成 max_tokens（2026-08-13 事故：默认 4000 下 deepseek
+# thinking 模式 reasoning_content 占用 token，JSON 截断 → 整份降级）。
+# 与变体生成 _MAX_VARIANT_OUTPUT_TOKENS(12000) 同量级，含完整 sources 结构。
+_REVIEW_TRACE_MAX_TOKENS = 16000
 
 # 代码围栏剥离 — 防御性处理 LLM 可能包裹的 ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
@@ -1068,7 +1074,23 @@ async def run(state: AgentState) -> dict[str, object]:
     # 4. detected 时单次 LLM 调用 + 解析 + 跨对象校验
     try:
         if trace is None:
-            llm = get_deep_think()
+            # 2026-08-13 服务器事故：默认 max_tokens 4000 下 deepseek-v4-pro
+            # thinking 模式 reasoning_content 占用大量 token，MarketTraceResult
+            # JSON（含完整 sources）被截断 → model_validate_json EOF → 整份降级
+            # "收盘溯源生成暂时不可用" → 迭代闭环全 0 分。显式禁用 thinking +
+            # 加大 max_tokens（与变体生成 _MAX_VARIANT_OUTPUT_TOKENS 同量级）。
+            base_url = (
+                settings.deep_think_base_url or settings.openai_base_url
+            ).lower()
+            extra_body = (
+                {"thinking": {"type": "disabled"}}
+                if "deepseek" in base_url
+                else None
+            )
+            llm = get_deep_think(
+                max_tokens=_REVIEW_TRACE_MAX_TOKENS,
+                extra_body=extra_body,
+            )
             snapshot_json = snapshot.model_dump_json(indent=2)
             messages = [
                 SystemMessage(content=REVIEW_PROMPT),
