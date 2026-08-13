@@ -34,6 +34,7 @@ from aistock_agent.services.llm import get_deep_think, with_chat_structured_outp
 from aistock_agent.services.token_usage import get_token_usage
 from aistock_agent.skills.prediction import DISCLAIMER
 from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.date import (
     prev_trading_day,
     shanghai_today,
@@ -73,17 +74,22 @@ class _SectionResult:
     degraded: bool = False
 
 
-async def _synth_section(goal: InsightGoal, evidences: list[Evidence]) -> _SectionResult:
+async def _synth_section(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    summary_context: str = "",
+) -> _SectionResult:
     """单节综合回答（多子目标分节复用）：复用现状 LLM 流程与契约。
 
     与单意图路径的差异：不含风险段/非交易时段提示/AnswerTrace（多节外层统一处理）。
     LLM 失败 → facts 拼接降级（不抛异常，"永不 500"铁律）。
+    summary_context 为 Phase 5 长会话摘要段（短会话空串，由 _synth_multi_goal 统一传入）。
     """
     mode = _infer_answer_mode(goal, evidences)
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
         basis, basis_error = _resolve_basis_indices(raw.basis_indices, evidences)
@@ -183,12 +189,15 @@ async def _synth_multi_goal(
     goal: InsightGoal,
     evidences: list[Evidence],
     goals: list[SubGoal],
+    summary_context: str = "",
 ) -> dict[str, Any]:
     """D34 多子目标分节回答（先 validate/trace 现状数据，后 predict 提示）。
 
     - 非 predict 子目标各一次 deep_think（复用 _synth_section，LLM 契约零变化）；
     - predict 子目标代码生成 D35 提示段（多个只输出一次），附同子目标 validate 趋势要点；
     - 全文末尾单次 D28 风险段；非交易时段提示按全量 evidence 判断一次、置于文首。
+    - summary_context 为 Phase 5 长会话摘要段（由 synth_answer 核心入口统一重算传入，
+      短会话空串 → 各节 prompt 字节不变；不读 state.messages_summary 防跨轮残留）。
     """
     import time
 
@@ -211,7 +220,9 @@ async def _synth_multi_goal(
     mode: str = "predict"
     for sg in non_predict:
         sg_evs = [ev for ev in evidences if ev.goal_id == sg.id]
-        res = await _synth_section(_subgoal_to_goal(sg), sg_evs)
+        res = await _synth_section(
+            _subgoal_to_goal(sg), sg_evs, summary_context=summary_context
+        )
         if res.degraded:
             any_degraded = True
         sections.append(f"## {sg.question[:40]}\n\n{res.conclusion}")
@@ -370,8 +381,13 @@ def _resolve_basis_indices(
     return basis, None
 
 
-def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> str:
-    """构建综合回答 prompt。"""
+def _build_prompt(
+    goal: InsightGoal,
+    evidences: list[Evidence],
+    mode: str,
+    summary_context: str = "",
+) -> str:
+    """构建综合回答 prompt（summary_context 为 Phase 5 长会话摘要段，短会话为空串）。"""
     evidence_text = "\n".join(
         f"[{i+1}] skill={ev.skill_name} degraded={ev.degraded} reason={ev.degraded_reason}\n"
         f"    facts: {ev.facts}\n"
@@ -379,7 +395,7 @@ def _build_prompt(goal: InsightGoal, evidences: list[Evidence], mode: str) -> st
         f"    as_of: {ev.as_of.isoformat()}"
         for i, ev in enumerate(evidences)
     )
-    return f"""{_MODE_PROMPTS[mode]}
+    return f"""{_MODE_PROMPTS[mode]}{summary_context}
 
 结构化输出要求（针对 conclusion 字段，必须遵守）：
 1. 使用 Markdown 分节组织回答，推荐结构：
@@ -921,8 +937,15 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
     # 与 deep 分支互斥（多意图 compose 保持 light，不升级 escalate）。
     goals = state.get("goals")
+    # Phase 5（Task 1 + review 修复）：从当前 messages 重算确定性摘要（纯函数幂等），
+    # 单意图与多子目标两条 LLM 路径统一注入同一 summary_context。不读
+    # state.messages_summary——跨轮残留场景（Phase 4-2 confirm 阶段 2 重跑把 messages
+    # 重置为 []，checkpointer 保留上一轮超窗摘要）会注入陈旧摘要；统一重算，
+    # 短会话 → summary None → 空串，prompt 字节不变。
+    _, summary = trim_messages(list(state.get("messages", [])))
+    summary_context = build_summary_context(summary)
     if goals:
-        return await _synth_multi_goal(state, goal, evidences, goals)
+        return await _synth_multi_goal(state, goal, evidences, goals, summary_context)
 
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
@@ -930,7 +953,9 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
-        prompt = _build_prompt(goal, evidences, mode)
+        # Phase 5（Task 1）：注入超窗确定性摘要（入口已统一从当前 messages 重算）。
+        # 短会话 → 空串，prompt 字节不变。
+        prompt = _build_prompt(goal, evidences, mode, summary_context)
         output: SynthOutput = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         raw = output.insight
 

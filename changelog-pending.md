@@ -124,3 +124,10 @@
 - 修复：cancel 后 await asyncio.gather(recv_task, return_exceptions=True) 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动
 - 测试：test_ws_chat_replacement.py 新增 _RecvTrackingWebSocket（模拟 uvicorn 并发 recv 防护）+ test_forward_until_done_or_cmd_clears_pending_recv_on_done（返回时无挂起 recv / 主循环可安全发起下次 receive / 不抛 RuntimeError）
 - 改动文件：src/aistock_agent/api/ws.py + tests/unit/test_ws_chat_replacement.py
+
+## 2026-08-12 Phase 5 长会话上下文管理（agent-py 4 commits 686e7df + d11cdc6 + 34ec113 + 5699737，changer 未 push）
+- **Task 1 窗口+摘要（686e7df + d11cdc6）**：utils/context_window.py::trim_messages 纯函数——≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）；超窗 → LLM prompt 只喂最近 12 条，超窗部分收敛为零 LLM 确定性摘要（≤200 字，逐轮"用户：问句｜AI：回复片段"，幂等无累积）；state.messages 保持全量（checkpointer P2 语义不裁剪），messages_summary 每轮重算不读旧值；注入点 qa_router/synth_answer 节点内拼接 summary_context（SYSTEM_PROMPT 常量不变）；d11cdc6 修复 synth_answer 多子目标路径注入
+- **Task 2 删会话联动（34ec113，app-api 8e8e9e2）**：DELETE /api/agent/internal/chat/threads/:session_id → checkpointer.delete_thread()（sqlite/memory 幂等，redis best-effort）→ thread checkpoints/writes 全删；"永不 500"由调用侧保证
+- **Task 3 busy_timeout + 集成冒烟（5699737）**：config.sqlite_busy_timeout（默认 30s）→ _build_async_sqlite_saver 的 iosqlite.connect(timeout=...)（TDD RED→GREEN）；新增 	ests/integration/test_phase5_long_session_smoke.py（7 轮 13 条 → 12 条窗口 + 摘要注入 + messages_summary 持久化 + 删会话 thread 消失；短会话 prompt 无摘要、messages_summary 不持久化）
+- 验证：全量 A/B HEAD 失败集 ⊆ BASE（逐项一致，新增失败清零）；ruff 改动文件 0 新增；app-api tsc 0 + chat 定向 18/18（session 9/9 + usage 9/9）；**集成冒烟 2/2**；代码验收通过（待生产验证）
+- 文档：agent-py AGENTS.md CHAT QA 追加 Phase 5 小节；roadmap §2 P3 行 + 执行相位 Phase 5 行 + §7 已更新（只登记"代码验收通过（待生产验证）"，未写生产验证结论）

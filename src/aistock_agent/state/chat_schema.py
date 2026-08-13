@@ -94,3 +94,9 @@ class QuestionState(TypedDict, total=False):
     # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
     # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
     user_profile: dict | None = None
+    # Phase 5（Task 1）：长会话超窗确定性摘要（零 LLM、幂等、无累积）。
+    # qa_router 仅在超窗（summary 非 None）时写入，随 checkpointer 持久化（write-only，
+    # 供可观测/未来语义摘要锚点）；synth_answer 不读该字段，消费侧从当前 messages
+    # 确定性重算（防跨轮陈旧残留，G6）。值每轮重算，不累积；短会话（≤12 条）不写该
+    # 键 → 零变化硬约束。
+    messages_summary: str | None = None

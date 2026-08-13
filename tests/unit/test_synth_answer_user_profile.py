@@ -206,7 +206,9 @@ async def test_synth_multi_goal_preference_ordering(
         _evidence(["白酒事实"], "g_8"),
     ]
 
-    async def _fake_section(goal: InsightGoal, evidences: list[Evidence]) -> object:
+    async def _fake_section(
+        goal: InsightGoal, evidences: list[Evidence], summary_context: str = ""
+    ) -> object:
         from aistock_agent.graph.nodes.synth_answer import _SectionResult
 
         return _SectionResult(

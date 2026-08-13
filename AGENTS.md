@@ -275,6 +275,15 @@ START → supervisor(quick_think, 意图路由)
 - **教训（新增）**：① node-postgres 对 JSONB 参数必须传 JSON 字符串（JS 数组直传 500 "类型json的输入语法无效"）——app-api PUT profile 集成冒烟实证；② LangGraph checkpointer 跨轮状态：入口构造 state 时**未提供的键沿用上一轮 checkpoint 值**——注入类字段必须无条件赋值（匿名显式 None），不能条件设置
 - 提交：app-api a709928+159edb9；agent-py 2445417（注入）+ d9be256（消费）+ 4393ad9（防污染 fix），changer 未 push；详细记录 roadmap §2 Phase 4 行 + changelog-pending
 
+### CHAT QA Phase 5（2026-08-12）：长会话上下文管理（窗口 + 零 LLM 摘要 + 删会话联动 + busy_timeout）
+
+- **窗口语义（G6，spec §2.3/§4）**：`trim_messages` 纯函数（`utils/context_window.py`，DEFAULT_MAX_TURNS=6 → 窗口 12 条，DEFAULT_SUMMARY_CHARS=200）——**≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）**；超窗 → LLM prompt 只喂最近 12 条（window），超窗部分收敛为**零 LLM 确定性摘要**（逐轮"用户：问句｜AI：回复片段"，AI 片段 ≤60 字，整体按 200 字截断，幂等无累积）；**state.messages 保持全量**（checkpointer 按 P2 语义全量持久化不裁剪），`messages_summary` 每轮由超窗部分确定性重算（不读上一轮值，防跨轮残留）
+- **注入点（D14 对齐）**：qa_router LLM prompt 与 synth_answer 各节 prompt 均在节点内拼接 `summary_context`（`build_summary_context`，None/空 → 空串），SYSTEM_PROMPT 常量字节不变；短会话 prompt 与 Phase 4 前逐字节一致
+- **删会话联动（Task 2）**：`DELETE /api/agent/internal/chat/threads/:session_id`（app-api 转发）→ `checkpointer.delete_thread()`（sqlite/memory 幂等，redis best-effort 吞异常）→ 该 thread 的 checkpoints/writes 全删；"永不 500"由调用侧保证
+- **busy_timeout（Task 3）**：`config.sqlite_busy_timeout`（默认 30s，sqlite3 默认 5.0）→ `_build_async_sqlite_saver` 的 `aiosqlite.connect(timeout=...)`，缓解多 worker 并发写 "database is locked"（低成本先行项；单实例默认仍不生效）
+- **验证**：TDD（busy_timeout 参数断言 RED→GREEN）；全量 A/B HEAD 失败集 ⊆ BASE（逐项一致，新增清零）；ruff 改动文件 0 新增；app-api tsc 0 + chat 定向 18/18；**集成冒烟 2/2**（`tests/integration/test_phase5_long_session_smoke.py`：7 轮 13 条 → 12 条窗口 + "此前对话摘要"注入 + messages_summary 持久化 + 删会话 thread 消失；1 轮短会话 prompt 无摘要、messages_summary 不持久化）
+- 提交：686e7df（窗口+摘要）+ d11cdc6（synth_answer 多子目标路径注入修复）+ 34ec113（删会话联动）+ 5699737（busy_timeout + 集成冒烟），changer 未 push；详细记录 roadmap §2 Phase 5 行 + changelog-pending
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
