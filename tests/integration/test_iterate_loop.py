@@ -157,3 +157,66 @@ async def test_run_case_writes_best_patch_file(
     assert best_path.exists()
     best = _json.loads(best_path.read_text(encoding="utf-8"))
     assert best["score"] == result["best_score"]
+
+
+"""run_case 轮级兜底：坏变体不崩闭环、失败轮豁免 stalled、r1 失败不落盘（C11/G14/N3）"""
+
+
+@pytest.mark.asyncio
+async def test_run_case_survives_variant_patch_failure(iterate_data_dir: object) -> None:
+    """补丁不匹配（apply_variant 空写）不崩闭环，该轮计为失败轮。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    extract_payload = {"direction": "bullish", "drivers": ["隔夜美股暴涨"], "sectors": ["半导体"]}
+    judge_payload = {"hit_count": 1, "total_count": 1, "quotes": ["隔夜美股暴涨"]}
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+                type("R", (), {"content": json.dumps(extract_payload)})(),
+                type("R", (), {"content": json.dumps(judge_payload)})(),
+            ]
+        )
+        with patch(
+            "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+            AsyncMock(return_value={"final_response": "x"}),
+        ):
+            result = await run_case("review", str(case["case_id"]), max_rounds=2)
+
+    assert result["stopped_reason"] in {"score_reached", "max_rounds"}
+    assert result["rounds"]
+
+
+@pytest.mark.asyncio
+async def test_baseline_failure_does_not_write_r1_record(iterate_data_dir: object) -> None:
+    """基线轮子进程失败时不落盘 r1_baseline.json（G14 修复：防"已迭代"误判）。"""
+    case = json.loads((FIXTURES / "sample_case_review.json").read_text(encoding="utf-8"))
+    gt = json.loads((FIXTURES / "sample_gt_review.json").read_text(encoding="utf-8"))
+    (Path(iterate_data_dir) / "cases" / "review").mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    (Path(iterate_data_dir) / "cases" / "review" / f"{case['case_id']}.json").write_text(  # type: ignore[union-attr]
+        json.dumps(case, ensure_ascii=False), encoding="utf-8"
+    )
+    gt_path = Path(iterate_data_dir) / "ground_truths" / f"{gt['gt_id']}.json"  # type: ignore[union-attr]
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False), encoding="utf-8")
+
+    from aistock_agent.iterate.case_builder import get_data_dir
+
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(return_value={"final_response": "", "timed_out": True}),
+    ):
+        result = await run_case("review", str(case["case_id"]), max_rounds=1)
+
+    r1_path = get_data_dir() / "experiments" / f"{case['case_id']}_r1_baseline.json"
+    assert not r1_path.exists()  # 基线失败不落盘
+    assert result["stopped_reason"] == "max_rounds"

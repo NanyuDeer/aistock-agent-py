@@ -49,6 +49,8 @@ async def run_case(
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
     stalled = 0
+    # C11/N3：连续基础设施失败（轮级异常）计数，达 3 中止 case 防无限空转
+    infra_failures = 0
     stopped_reason = "max_rounds"
     # I2：上一轮 apply_variant 实际写过的文件（相对仓库根路径），下一轮开始时
     # 连同 adapter 声明的文件一起 restore_baseline，防止 data_source_diff 改动
@@ -64,23 +66,55 @@ async def run_case(
             record = await _run_baseline(adapter.agent_id, case_id, ground_truth)
             score = record["score_detail_obj"]
         else:
-            variant = await generate_variant(
-                adapter,
-                case,
-                ground_truth,
-                _last_score(best),
-                str(best.get("gap_analysis", "")),
-                root,
-            )
-            written = apply_variant(variant, root)
-            last_written = tuple(str(p.relative_to(root.resolve())) for p in written)
-            record = await run_experiment_round(
-                adapter.agent_id, case, round_no, variant, ground_truth
-            )
-            score = record["score_detail_obj"]
+            try:
+                variant = await generate_variant(
+                    adapter,
+                    case,
+                    ground_truth,
+                    _last_score(best),
+                    str(best.get("gap_analysis", "")),
+                    root,
+                )
+                written = apply_variant(variant, root)
+                last_written = tuple(str(p.relative_to(root.resolve())) for p in written)
+                record = await run_experiment_round(
+                    adapter.agent_id, case, round_no, variant, ground_truth
+                )
+                score = record["score_detail_obj"]
+            except Exception as exc:  # noqa: BLE001
+                # C11/N3 修复：轮级异常不崩整个闭环，计为失败轮（豁免 stalled）
+                logger.error(
+                    "iterate_round_failed",
+                    case_id=case_id,
+                    round=round_no,
+                    error=str(exc),
+                )
+                score = ScoreDetail(
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    gap_analysis=f"变体轮异常：{exc}",
+                )
+                record = {
+                    "score": 0.0,
+                    "score_detail_obj": score,
+                    "gap_analysis": score.gap_analysis,
+                }
+                infra_failures += 1
 
         detail = score if isinstance(score, ScoreDetail) else None
         total = detail.total if detail else float(cast("float", record.get("score", 0.0)))
+
+        # N3 修复：失败轮不计入 rounds、不更新 best、不计入 stalled
+        # （不触发"连续两轮无改善"误终止），但连续 3 次基础设施失败中止 case
+        # （防无限空转）。置于 rounds.append/best 更新之前，保证失败轮零痕迹。
+        if getattr(score, "gap_analysis", "").startswith(("回放子进程", "变体轮异常")):
+            if infra_failures >= 3:
+                stopped_reason = "infra_failures"
+                break
+            continue
+
         rounds.append(
             {
                 "round": round_no,
@@ -162,18 +196,23 @@ async def _run_baseline(
     )
 
     output = await _run_replay_subprocess(agent_id, case_id, "baseline")
-    if output.get("timed_out"):
+    if output.get("timed_out") or output.get("subprocess_failed"):
+        # G14 修复：基线失败不落盘 r1_baseline.json——若落盘，list_pending_cases
+        # 会按 {case_id}_r 前缀判"已迭代"，导致该 case 永久弃置。
         score = ScoreDetail(
             0.0,
             0.0,
             0.0,
             0.0,
             gap_analysis=(
-                f"回放子进程超时（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
+                f"回放子进程{'超时' if output.get('timed_out') else '失败'}，本轮视为失败"
             ),
         )
-    else:
-        score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
+        return {
+            **{"score": 0.0, "score_detail_obj": score, "gap_analysis": score.gap_analysis},
+            "variant": {"type": "baseline", "files": [], "instructions": ""},
+        }
+    score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
     record: dict[str, object] = {
         "case_id": case_id,
         "round": 1,

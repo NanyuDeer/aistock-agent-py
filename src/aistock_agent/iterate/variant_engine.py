@@ -374,15 +374,16 @@ async def run_experiment_round(
     case_id = str(case["case_id"])
     variant_hash = _content_hash(variant.new_content)
     output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
-    if output.get("timed_out"):
-        # 回放超时：不调用评估 LLM（无输出可评），记为超时失败轮。
+    if output.get("timed_out") or output.get("subprocess_failed"):
+        # 回放超时/子进程失败：不调用评估 LLM（无输出可评），记为失败轮。
         score = ScoreDetail(
             0.0,
             0.0,
             0.0,
             0.0,
             gap_analysis=(
-                f"回放子进程超时（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
+                f"回放子进程{'超时' if output.get('timed_out') else '失败'}"
+                f"（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
             ),
         )
     else:
@@ -467,7 +468,21 @@ async def _run_replay_subprocess(
             "timed_out": True,
         }
     if result.returncode != 0:
-        raise RuntimeError(f"replay subprocess failed: {result.stderr[-500:]}")
+        # C11 修复：子进程失败不再抛 RuntimeError 崩整个闭环，返回失败标记，
+        # 由 run_case 计为失败轮（评分 0 + gap 注明），连续失败达阈值再中止。
+        logger.warning(
+            "iterate_replay_subprocess_failed",
+            agent_id=agent_id,
+            case_id=case_id,
+            stderr=result.stderr[-300:],
+        )
+        return {
+            "agent_id": agent_id,
+            "case_id": case_id,
+            "variant_hash": variant_hash,
+            "final_response": "",
+            "subprocess_failed": True,
+        }
     lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
     try:
         # json.loads 返回 Any，mypy strict 的 no-any-return 要求显式 cast
