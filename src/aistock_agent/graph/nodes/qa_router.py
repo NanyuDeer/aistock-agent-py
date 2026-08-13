@@ -331,6 +331,12 @@ _COMPARE_KEYWORDS = (
 # 中文名多标的切分分隔符（"茅台和五粮液哪个更好" → 茅台 | 五粮液）
 _MULTI_NAME_SEPARATORS = ("和", "与", "、", "，", ",", "vs", "对比", "还是")
 
+# 批次 1（2026-08-13）：深度意图词——闸门 2 resolve 命中 + 命中此表 → 放行走 LLM/deep 路径
+# （不再短路固定 light）。刻意排除"分析/分析一下"（既有测试锁定闸门 2 light 快答）、"对比"
+# （闸门 2.5 已独立处理）与"为什么/原因"（溯源语义，避免改变既有 trace 行为）；force_deep
+# （「深度分析」按钮）是独立放行条件，与意图词互不依赖。
+_DEEP_INTENT_KEYWORDS = ("深度分析", "深入分析", "详细分析", "深度", "深入", "详析")
+
 
 def _extract_stock_symbol(message: str) -> str | None:
     match = _STOCK_SYMBOL_RE.search(message)
@@ -1471,51 +1477,66 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         if candidate is not None:
             resolved = await resolve_symbol(candidate)
             if resolved is not None:
-                skill_name = _infer_stock_skill(message)
-                args: dict[str, Any] = {"symbol": resolved}
-                if skill_name == "stock_news":
-                    args["limit"] = 10
-                goal = InsightGoal(
-                    question=message,
-                    intent=skill_name,  # type: ignore[arg-type]
-                    symbols=[resolved],
-                )
-                call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
-                # D35：单意图预测（"茅台明天会涨吗" → resolve 成功 → 附加 predict 子目标）
-                predict_goal = _build_single_predict_goal(
-                    message, skill_name, [resolved], label=candidate
-                )
-                if predict_goal is not None:
-                    call = call.model_copy(update={"goal_id": "g1"})
-                    # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据）
-                    resolve_calls = [
-                        call,
-                        SkillCall(
-                            skill_name="prediction",
-                            args={"symbols": [resolved]},
-                            goal_id="g2",
-                        ),
-                    ]
-                    resolve_plan: Literal["direct", "compose"] = "compose"
-                    resolve_goals: list[SubGoal] | None = [predict_goal]
-                else:
-                    resolve_plan = "direct"
-                    resolve_goals = None
-                    resolve_calls = [call]
+                # 批次 1（2026-08-13）：force_deep/深度意图词放行闸门 2 短路（roadmap §2
+                # force_deep 观察项行）。中文名问句 resolve 命中默认短路固定 light（「深度分析」
+                # 按钮 force_deep 对其无效）；命中 force_deep 或深度意图词（如"深度分析贵州茅台"）
+                # 时不再短路，放行走 LLM/兜底路径——force_deep 由下方 LLM 成功路径强制 deep，
+                # 深度意图词由 LLM 判定复杂度。红线不变：闸门 0（合规）/0.5（寒暄/科普）/1（指数）
+                # 短路永远优先，本放行不影响其优先级。
+                if not (force_deep or _match_keywords(message, _DEEP_INTENT_KEYWORDS)):
+                    skill_name = _infer_stock_skill(message)
+                    args: dict[str, Any] = {"symbol": resolved}
+                    if skill_name == "stock_news":
+                        args["limit"] = 10
+                    goal = InsightGoal(
+                        question=message,
+                        intent=skill_name,  # type: ignore[arg-type]
+                        symbols=[resolved],
+                    )
+                    call = SkillCall(skill_name=skill_name, args=args)  # type: ignore[arg-type]
+                    # D35：单意图预测（"茅台明天会涨吗" → resolve 成功 → 附加 predict 子目标）
+                    predict_goal = _build_single_predict_goal(
+                        message, skill_name, [resolved], label=candidate
+                    )
+                    if predict_goal is not None:
+                        call = call.model_copy(update={"goal_id": "g1"})
+                        # Phase 4-1：附加 prediction SkillCall（goal_id="g2" 供 synth 定位推演证据）
+                        resolve_calls = [
+                            call,
+                            SkillCall(
+                                skill_name="prediction",
+                                args={"symbols": [resolved]},
+                                goal_id="g2",
+                            ),
+                        ]
+                        resolve_plan: Literal["direct", "compose"] = "compose"
+                        resolve_goals: list[SubGoal] | None = [predict_goal]
+                    else:
+                        resolve_plan = "direct"
+                        resolve_goals = None
+                        resolve_calls = [call]
+                    logger.info(
+                        "qa_router.gate.stock_resolve",
+                        name=candidate,
+                        symbol=resolved,
+                        predict=bool(predict_goal),
+                    )
+                    metrics.record_chat_qa_latency(
+                        "qa_router", int((time.monotonic() - start) * 1000)
+                    )
+                    return {
+                        "goal": goal,
+                        "plan": resolve_plan,
+                        "skill_calls": resolve_calls,
+                        "complexity": "light",
+                        "goals": resolve_goals,
+                    }
                 logger.info(
-                    "qa_router.gate.stock_resolve",
+                    "qa_router.gate.stock_resolve_bypass_short_circuit",
                     name=candidate,
                     symbol=resolved,
-                    predict=bool(predict_goal),
+                    force_deep=force_deep,
                 )
-                metrics.record_chat_qa_latency("qa_router", int((time.monotonic() - start) * 1000))
-                return {
-                    "goal": goal,
-                    "plan": resolve_plan,
-                    "skill_calls": resolve_calls,
-                    "complexity": "light",
-                    "goals": resolve_goals,
-                }
             # D36 收口：resolve 未命中时，首轮纯个股问句强制澄清（不进 LLM，
             # 防 LLM 幻觉假代码——如"不存在的股票名称"被 LLM 输出 000000 查询空数据）；
             # 多轮（指代解析）或非个股意图（板块/行业/溯源/compose）放行
