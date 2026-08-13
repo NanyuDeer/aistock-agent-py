@@ -15,7 +15,7 @@ import asyncio
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import structlog
 
@@ -49,6 +49,30 @@ def _source_to_record(source: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _snapshot_data_sufficient(snapshot_dict: dict[str, object]) -> list[str]:
+    """检查收盘快照是否有足够的 A 股数据支撑归因分析；返回缺失原因列表（空 = 足够）。
+
+    回归（case_20260731_us_market_surge 服务器全 0 分事故）：build_market_trace_snapshot
+    的 normalize_a_share 只做字段复制不校验完整性——Node close-snapshot 返回
+    status=complete + coverage.complete=true 但 indexes 等字段缺失时，a_share
+    为空壳仍产片成功，空壳 case 进闭环跑满 max_rounds 全部 0 分（浪费 LLM 预算）。
+    以 a_share.indexes 为关键闸门：A 股指数是 review agent 归因（方向/板块/驱动）
+    的事实基础，缺失则无法产出有效分析，必须拒绝产片（force=True 可跳过）。
+    """
+    reasons: list[str] = []
+    a_share = snapshot_dict.get("a_share")
+    if not isinstance(a_share, dict):
+        reasons.append("a_share 缺失")
+        return reasons
+    indexes = a_share.get("indexes")
+    if not isinstance(indexes, dict) or not indexes:
+        reasons.append("a_share.indexes 为空")
+    missing = snapshot_dict.get("missing_fields")
+    if isinstance(missing, list) and "a_share.indexes" in missing:
+        reasons.append("missing_fields 含 a_share.indexes")
+    return reasons
+
+
 async def build_review_case(
     *,
     data_dir: Path,
@@ -68,7 +92,23 @@ async def build_review_case(
     primary = getattr(discovery, "primary", None)
     event_title = str(getattr(primary, "summary", "")) or f"A股收盘{trade_date}"
 
-    snapshot_dict = snapshot.model_dump(mode="json")  # type: ignore[attr-defined]
+    # snapshot 参数跨类型边界（生产 MarketTraceSnapshot / 测试 SimpleNamespace /
+    # CLI 注入 object），cast Any 调用 model_dump 避免 mypy attr-defined/union-attr
+    # 两种上下文错误码不一致（scripts 经 sys.path 注入，mypy 追踪结果不稳定）。
+    snapshot_dict = cast("Any", snapshot).model_dump(mode="json")
+    # 防御（2026-08-13）：快照 A 股数据不完整时拒绝产片——空壳 case 进闭环
+    # 跑满 max_rounds 全部 0 分浪费 LLM 预算（case_20260731_us_market_surge
+    # 服务器事故根因）。检查在 build_case 之前，省一次 case/GT 落盘与 LLM 调用；
+    # force=True 跳过（手动强制产片/测试场景）。
+    insufficient = _snapshot_data_sufficient(snapshot_dict)
+    if insufficient and not force:
+        logger.warning(
+            "review_case_rejected_insufficient_snapshot",
+            reasons=insufficient,
+            snapshot_id=snapshot_dict.get("snapshot_id"),
+        )
+        raise RuntimeError(f"review case 数据不足拒绝产片：{'; '.join(insufficient)}")
+
     sources = snapshot_dict.get("sources", {})
     telegraph_records = [
         _source_to_record(cast("dict[str, object]", src))
