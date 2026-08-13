@@ -266,9 +266,8 @@ content = {
 
 | job_id | cron | 说明 |
 |--------|------|------|
-| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
-| `event_scrape_early` | `45 8 * * 1-5` | 08:45 早间刷新档，intraday 增量（晨报 08:50 读库前最后一刷，H5，2026-08-13） |
-| `event_scrape_intraday` | `0 10-11,13-14 * * 1-5` | 10:00-11:00、13:00-14:00 每小时，intraday 增量抓取（M8：避开 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑） |
+| `event_scrape_daily` | `45 8 * * 1-5` | 08:45 盘前档，full_daily 全量抓取（2026-08-13 起由 07:30 调整，紧邻晨报 08:50） |
+| `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时（含 12:00 午间档），intraday 增量抓取（2026-08-13 恢复 12:00） |
 | `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
 
 **事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。

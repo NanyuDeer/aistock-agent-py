@@ -83,10 +83,11 @@ def start_scheduler() -> None:
         name="morning briefing",
         replace_existing=True,
     )
-    # ── 统一事件抓取中台（2026-08-12） ──
-    # 盘前档（07:30 全量）与盘中档（10-11、13-14 点每小时增量，M8：避开
-    # 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑）；早间/收盘若需
-    # 独立档位，可复用同一 cron 配置体系追加。
+    # ── 统一事件抓取中台（2026-08-12；2026-08-13 盘前全量 07:30→08:45，盘中 12:00 恢复） ──
+    # 盘前档（08:45 全量，紧邻晨报 08:50 前完成；原 07:30 太早，早间公告未出
+    # 全量价值低，故合并）与盘中档（10-14 点每小时增量，含 12:00 午间档——
+    # 午休期间仍有午间公告/新闻发布，2026-08-13 用户裁决恢复）；收盘汇总
+    # 15:05 复用 full_daily，供复盘/播报消费。
     scheduler.add_job(
         _run_event_scrape_job,
         CronTrigger.from_crontab(
@@ -108,19 +109,6 @@ def start_scheduler() -> None:
         kwargs={"scrape_mode": "intraday"},
         id="event_scrape_intraday",
         name="event scrape intraday",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    # 早间刷新（08:45）：晨报 08:50 读库前的最后一次事件刷新（H5，2026-08-13）
-    scheduler.add_job(
-        _run_event_scrape_job,
-        CronTrigger.from_crontab(
-            settings.scheduler_event_scrape_early_cron,
-            timezone=settings.scheduler_timezone,
-        ),
-        kwargs={"scrape_mode": "intraday"},
-        id="event_scrape_early",
-        name="event scrape early refresh",
         replace_existing=True,
         misfire_grace_time=3600,
     )
