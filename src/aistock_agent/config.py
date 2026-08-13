@@ -141,8 +141,10 @@ class Settings(BaseSettings):
     iterate_enabled: bool = False
     # 数据目录（切片/标准答案/实验/报告，均 gitignore）
     iterate_data_dir: str = "data"
-    # 每日汇总：交易日 16:00（现有 iterate 15:40 之后）
-    iterate_cron: str = "0 16 * * 1-5"
+    # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
+    iterate_cron: str = "0 17 * * 1-5"
+    # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
+    iterate_case_build_cron: str = "30 16 * * 1-5"
     iterate_max_rounds: int = 5            # 每案例变体轮数上限
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
@@ -159,6 +161,20 @@ class Settings(BaseSettings):
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
     scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    # ── 统一事件抓取中台调度（2026-08-12） ──
+    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    scheduler_event_scrape_intraday_cron: str = (
+        "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+    )
+    scheduler_event_scrape_early_cron: str = (
+        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷）
+    )
+    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
+    event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
+    event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
+    event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
+    event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

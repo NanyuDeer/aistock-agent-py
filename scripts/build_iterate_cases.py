@@ -13,6 +13,7 @@ event：扫描 window-days 天内电报重大事件 → 每事件 case + GT + �
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -78,7 +79,7 @@ async def build_review_case(
     case = await build_case(
         get_adapter("review"),
         event_title=event_title,
-        event_time=captured_at,
+        event_time=cast(datetime, captured_at),
         telegraph_records=telegraph_records,
         market_snapshot=snapshot_dict,
         meta={"snapshot_kind": "full", "t_window": "close"},
@@ -163,7 +164,7 @@ async def main(argv: list[str]) -> int:
             f"（校验{'拒绝' if result['rejected'] else '通过'}）"
         )
         if result["reasons"]:
-            print("原因：", *result["reasons"], sep="\n  - ")
+            print("原因：", *cast("list[str]", result["reasons"]), sep="\n  - ")
     else:
         events = await scan_major_events(args.window_days)
         if not events:
@@ -173,7 +174,7 @@ async def main(argv: list[str]) -> int:
             events=events, data_dir=data_dir, force=args.force
         )
         print(f"event case 生成：{result['generated']} 个，拒绝 {result['rejected']} 个")
-        for r in result["reasons"]:
+        for r in cast("list[str]", result["reasons"]):
             print(f"  - {r}")
     return 0
 

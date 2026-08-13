@@ -1165,7 +1165,17 @@ async def run_review(
 
     覆盖逻辑：snapshot_kind="quick" 时先检查是否已有 full 报告。
     如果已有 full，跳过持久化（quick 不覆盖 full），返回 status="skipped"。
+
+    B11/G11 修复：本函数体内有 `from ... import build_market_trace_snapshot` 等
+    运行时 from-import，会绕过 iterate replay 的模块属性 patch；迭代闭环
+    （iterate/run_case）回放必须显式拒绝本入口，防止未来接入时静默泄漏。
+    签名保持不变，仅加守卫（is_replay_mode 读 env REPLAY_CASE_ID）。
     """
+    from aistock_agent.iterate.replay_layer import is_replay_mode
+
+    if is_replay_mode():
+        raise RuntimeError("run_review 禁止在 iterate 回放模式调用：请使用 run() 入口")
+
     logger.info(
         "run_review_start",
         report_date=report_date,

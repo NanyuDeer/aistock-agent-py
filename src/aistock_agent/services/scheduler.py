@@ -2,8 +2,9 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
-  → 完成后自动提取 major_events，fire-and-forget 触发事件分析流水线
-  （event_analysis_pipeline：Event Conduction 全部完成 → Global Importance 双榜单写 DB）
+  （2026-08-12 起事件传导触发迁移到统一事件抓取中台 event_scrape 入库后，
+  见 Task 5；晨报仅在"（事件库为空 或 无当日传导报告）且未被中台标记"时降级
+  兜底触发 _run_event_analysis_pipeline_task，防中台抓取全失败时传导静默缺失，见 I4/H7。）
 - 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
   （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
@@ -13,6 +14,7 @@ import asyncio
 import json
 import time
 from datetime import date
+from typing import Any
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -29,9 +31,6 @@ from aistock_agent.utils.brief_contract import (
 from aistock_agent.utils.date import is_trading_day, shanghai_today
 
 logger = structlog.get_logger()
-
-# 保持 fire-and-forget task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
-_pending_event_tasks: set[asyncio.Task] = set()
 
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
@@ -83,6 +82,60 @@ def start_scheduler() -> None:
         id="morning_briefing",
         name="morning briefing",
         replace_existing=True,
+    )
+    # ── 统一事件抓取中台（2026-08-12） ──
+    # 盘前档（07:30 全量）与盘中档（10-11、13-14 点每小时增量，M8：避开
+    # 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑）；早间/收盘若需
+    # 独立档位，可复用同一 cron 配置体系追加。
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_daily",
+        name="event scrape daily",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_intraday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "intraday"},
+        id="event_scrape_intraday",
+        name="event scrape intraday",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 早间刷新（08:45）：晨报 08:50 读库前的最后一次事件刷新（H5，2026-08-13）
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_early_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "intraday"},
+        id="event_scrape_early",
+        name="event scrape early refresh",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 收盘汇总（15:05）：全天事件汇总补抓，供复盘/播报消费（H5，2026-08-13）
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_close",
+        name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _run_broadcast_task,
@@ -189,6 +242,11 @@ def shutdown_scheduler() -> None:
 
 # ─── 定时任务执行函数 ───
 
+# 保持 fire-and-forget 传导 task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
+# （Task 4 删除晨报直接触发后该集合一并移除；I4 兜底分支恢复使用，AGENTS.md
+# 明确警告 "fire-and-forget task 若不保存引用会被 GC 在执行前取消"）。
+_pending_event_tasks: set[asyncio.Task[Any]] = set()
+
 
 async def _run_morning_task() -> None:
     """晨报生成任务（交易日 08:50）。
@@ -225,14 +283,19 @@ async def _run_morning_task() -> None:
             "scheduler_morning_done",
             has_response=bool(result.get("final_response")),
         )
-
-        # 提取重大事件列表，触发事件分析流水线（fire-and-forget）
-        # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
-        # 流水线内部：Event Conduction 全部完成落库 → Global Importance，
-        # 不阻塞本任务返回，也不影响 09:00 broadcast 链路。
+        # 事件传导触发已迁移到统一事件抓取中台（2026-08-12）：
+        # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发。
+        # I4 兜底（中台抓取失败时的安全网）：当日（事件库为空 或 无当日传导报告）
+        # 且未被中台标记（conduction_triggered:{date} 不存在）时，若晨报 LLM 仍
+        # 识别出 major_events（自主检索兜底产出），降级 fire-and-forget 触发
+        # 事件传导——恢复 Task 4 删除晨报触发前的语义，避免"当日抓取全部失败
+        # → 传导静默缺失且无告警"。H7（2026-08-13）：中台触发传导即写当日标记，
+        # 晨报检查标记避免与中台双跑；传导报告已落库（has_conduction）同样抑制。
         analysis_reports = result.get("analysis_reports")
         raw_major_events = (
-            analysis_reports.get("major_events", []) if isinstance(analysis_reports, dict) else []
+            analysis_reports.get("major_events", [])
+            if isinstance(analysis_reports, dict)
+            else []
         )
         major_events: list[dict[str, object]] = (
             [event for event in raw_major_events if isinstance(event, dict)]
@@ -240,19 +303,36 @@ async def _run_morning_task() -> None:
             else []
         )
         if major_events:
-            task = asyncio.create_task(_run_event_analysis_pipeline_task(major_events))
-            _pending_event_tasks.add(task)
-            task.add_done_callback(_pending_event_tasks.discard)
-            logger.info(
-                "scheduler_event_pipeline_triggered",
-                total=len(major_events),
-                titles=[
-                    title[:30]
-                    for event in major_events
-                    if isinstance((title := event.get("title")), str)
-                ],
+            from aistock_agent.services.event_store import (  # noqa: PLC0415
+                load_event_scrape,
             )
-            # fire-and-forget: pipeline 在后台运行，错误由 pipeline 内部捕获
+            from aistock_agent.services.redis_pool import RedisPool  # noqa: PLC0415
+
+            event_store_events = await load_event_scrape(report_date)
+            # I4 兜底放宽（H7，2026-08-13）：库空 或 库有数据但当日无传导报告，
+            # 且当日未被中台标记触发过 → 晨报降级触发（防"抓取成功但传导失败"静默缺失）。
+            # 中台触发时会设置 conduction_triggered:{date} 标记，此处检查避免双跑。
+            triggered = False
+            try:
+                client = await RedisPool.get_client()
+                triggered = bool(await client.get(f"conduction_triggered:{report_date}"))
+            except Exception:  # noqa: BLE001
+                logger.debug("morning_conduction_mark_check_failed", date=report_date)
+            has_conduction = bool(
+                await node_api.list_analysis_reports("event_conduction", report_date)
+            )
+            if (not event_store_events or not has_conduction) and not triggered:
+                logger.warning(
+                    "morning_conduction_fallback_triggered",
+                    event_store_empty=not bool(event_store_events),
+                    has_conduction=has_conduction,
+                    event_count=len(major_events),
+                )
+                task = asyncio.create_task(
+                    _run_event_analysis_pipeline_task(major_events)
+                )
+                _pending_event_tasks.add(task)
+                task.add_done_callback(_pending_event_tasks.discard)
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
@@ -263,6 +343,10 @@ async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]
     委托给 services/event_analysis_pipeline.run_event_analysis_pipeline，
     pipeline 内部完成 Event Conduction → Global Importance 全链路，
     并自行处理超时/异常（不向上抛）。
+
+    调用方：I4 兜底（_run_morning_task 事件库为空时）与中台复用
+    （event_scraper 入库后触发；M1：Task 4 曾删除晨报触发使其无生产调用方，
+    I4 兜底恢复后重新被调用）。
     """
     from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
         run_event_analysis_pipeline,
@@ -271,6 +355,26 @@ async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]
     logger.info("scheduler_event_pipeline_start", event_count=len(major_events))
     await run_event_analysis_pipeline(major_events)
     logger.info("scheduler_event_pipeline_done", event_count=len(major_events))
+
+
+async def _run_event_scrape_job(scrape_mode: str) -> None:
+    """定时执行事件抓取（交易日守卫 + fire-and-forget）。"""
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        # 上海时区自然日（对齐 _run_morning_task；date.today() 用服务器本地时区，
+        # 跨时区部署时与交易日判定/score_date 语义不一致）
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if not is_trading_day(report_day):
+            logger.info("event_scrape_skipped_non_trading_day", date=today)
+            return
+        result = await run_event_scrape(scrape_mode, score_date=today)
+        # result 已含 scrape_mode 键（run_event_scrape 返回 {"scrape_mode", ...}），
+        # 重复传 scrape_mode= 会抛 TypeError，被下方 except 吞成误报的 job_failed
+        logger.info("event_scrape_job_done", **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
 
 
 def _make_scheduled_state(

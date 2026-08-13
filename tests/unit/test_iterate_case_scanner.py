@@ -39,6 +39,27 @@ async def test_find_recent_trading_day_none_when_all_fail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_recent_trading_day_skips_incomplete_snapshot() -> None:
+    """D16/N6：status 非 complete 的快照（如数据抓取中）不视为可产片交易日，
+    降级 last-close-snapshot；全部非 complete 时返回 None。"""
+
+    async def fake_get(path: str) -> dict[str, object] | None:
+        if path == "/internal/market/close-snapshot":
+            return {"trade_date": "2026-07-31", "status": "processing"}
+        return {"trade_date": "2026-07-30", "status": "complete"}
+
+    with patch("aistock_agent.iterate.case_scanner.node_api.get", side_effect=fake_get):
+        day = await find_recent_trading_day()
+    assert day == "2026-07-30"  # close-snapshot 未 complete → 降级 last-close
+
+    async def all_incomplete(path: str) -> dict[str, object] | None:
+        return {"trade_date": "2026-07-31", "status": "processing"}
+
+    with patch("aistock_agent.iterate.case_scanner.node_api.get", side_effect=all_incomplete):
+        assert await find_recent_trading_day() is None
+
+
+@pytest.mark.asyncio
 async def test_scan_major_events_clusters_by_keyword_and_window() -> None:
     """事件聚类：关键词命中 + 30 分钟窗口合并 + telegraph_records 取 [锚点, T] 窗口全部电报。"""
     records = [

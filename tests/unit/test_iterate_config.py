@@ -8,7 +8,8 @@ import pytest
     [
         ("iterate_enabled", False),
         ("iterate_data_dir", "data"),
-        ("iterate_cron", "0 16 * * 1-5"),
+        ("iterate_cron", "0 17 * * 1-5"),
+        ("iterate_case_build_cron", "30 16 * * 1-5"),
         ("iterate_max_rounds", 5),
         ("iterate_target_score", 0.8),
         ("iterate_max_daily_cases", 3),
