@@ -56,3 +56,11 @@ def test_validate_rejects_missing_stage():
 def test_validate_accepts_custom_stage_subset():
     chain = _chain("structural_root", "trigger")
     validate_chain_stages(chain.nodes, stages=["structural_root", "trigger"])
+
+
+def test_market_trace_reexports_shared_chain_types():
+    from aistock_agent.schemas.market_trace import CausalChain, CausalNode
+
+    node = CausalNode(stage="trigger", claim="触发", evidence_ids=["e1"])
+    chain = CausalChain(nodes=[node])
+    assert chain.nodes[0].stage == "trigger"
