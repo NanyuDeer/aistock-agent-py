@@ -149,7 +149,7 @@ START → supervisor(quick_think, 意图路由)
 - **追问复用（D14/D17）**：qa_router `_build_followup_context` 节点内拼接摘要（**`SYSTEM_PROMPT` 常量字节不变**）；`_postprocess_skill_calls(output, message, state)` 对 `report_lookup(chat_analysis)` 确定性注入 `user_id`（登录）/ `summary_fallback`（未登录）/ 无引用移除 call；`skills/report_lookup.py` chat_analysis 分支（登录读 DB 三元组 / 未登录会话内摘要，review/morning 分支不变）
 - **每轮 transient 归零（T6 跨任务修复）**：`deep_source`/`final_response` 是单轮路由信号，ws.py/routes.py 入口按轮置 None——否则 checkpointer 跨轮残留会让追问轮被 synth_answer deep 分支劫持（P1 起存在，T6 发现修复）
 - **checkpointer 持久化（P9 前置）**：`CHECKPOINTER_BACKEND=sqlite` → AsyncSqliteSaver + aiosqlite（chat 图 async 执行必须用 AsyncSqliteSaver，sync 版 NotImplementedError）；`get_checkpointer()` 同步入口经 `_run_coro_sync` 桥接；`_ensure_aiosqlite_compat` 补 is_alive；`threading._register_atexit` 退出关闭连接（防进程挂起）；redis 后端需 Redis 6.2+/RedisJSON；依赖钉版 `langgraph-checkpoint-sqlite==2.0.11` + `aiosqlite>=0.22,<0.23`（勿装 3.x/最新版）
-- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；~~user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）~~ **已由 P0 解决（2026-08-11）**：app-api 验签 JWT 后注入 user_id（HTTP/WS 双面覆写，未登录 None），agent-py 侧 `data.get("user_id")` 恒为可信值，客户端自报失效；多 worker 共写 .langgraph.db 有 SQLITE_BUSY 风险（pm2 单实例无碍）
+- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；~~user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）~~ **已由 P0 解决（2026-08-11）**：app-api 验签 JWT 后注入 user_id（HTTP/WS 双面覆写，未登录 None），agent-py 侧 `data.get("user_id")` 恒为可信值，客户端自报失效；多 worker 并发写 SQLite checkpointer 有 SQLITE_BUSY 风险（单实例部署无碍）
 
 ### CHAT QA P3-fix（2026-08-03）：reasoning 思维链 + 交易时段 5 状态降级
 
@@ -267,7 +267,7 @@ START → supervisor(quick_think, 意图路由)
 
 ### CHAT QA Phase 4-3 全局用户记忆（2026-08-12）：user_profile 注入 + 个性化消费（改进 15）
 
-- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（X-Internal-Token，agent-py 检索用；无记录 200 + 空对象）
+- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（内部访问令牌，agent-py 检索用；无记录 200 + 空对象）
 - **拉取（`services/data_client.py`）**：`get_user_profile(user_id)`——Redis 缓存 `user_profile:{user_id}` TTL 300s（失败/空画像同样缓存防每轮重复拉取）→ `GET /internal/user-profile/{user_id}`；非 dict → None（失败降级，warning 不阻断，"永不 500"）；空画像 `{}` 与失败 `None` 语义分离
 - **注入（`QuestionState.user_profile` 可选字段）**：ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）**无条件显式赋值**——`user_id` 非空拉取注入，匿名写 `None` 覆盖 checkpointer 旧值（**条件注入会跨轮污染画像：上一轮登录态画像残留到匿名轮，集成冒烟实证**；对齐 T6/messages 置空先例）
 - **消费**：qa_router `_build_user_profile_context(profile)` 在 LLM prompt 追加"称呼/投资偏好/风险偏好"参考段（profile 为 None 返回 ""，SYSTEM_PROMPT 常量字节不变，不改技能/闸门规则）；synth_answer 风险段三档——`RISK_DISCLAIMER_CONSERVATIVE`（conservative 强化"风险较高，谨慎对待"，优先级高于动作词 strong 档，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（stable，不改 evidence 的 goal_id 关联）
@@ -410,7 +410,7 @@ src/aistock_agent/
 
 ## Node.js 侧配合接口
 
-Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`）：
+Python 服务通过以下内部接口获取 A 股数据（需携带内部访问令牌）：
 
 | 接口 | 数据源 | 说明 |
 |------|--------|------|
@@ -460,13 +460,12 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 `deploy/ecosystem.config.json` 为 PM2 配置，主进程内集成 Stock Trace Consumer（无需独立进程）。
 
 ```bash
-# 首次部署
-cd /home/aistock/aistock-agent-py
+# 首次部署（在项目根目录执行）
 pm2 start deploy/ecosystem.config.json
 pm2 save
 
 # 更新代码后重启（一次重启同时刷新主服务 + consumer）
-cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
+git pull && pm2 restart aistock-agent
 
 # 查看日志
 pm2 logs aistock-agent --lines 50
@@ -574,5 +573,5 @@ content = {
 
 ### mail_sender（通用 SMTP 邮件发送）
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
-- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → 环境变量 `QQ_SMTP_USER/AUTH/TO`（同事交接约定）；授权码只放本地 .env，不进 git
+- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
 - 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式
