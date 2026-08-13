@@ -1,5 +1,10 @@
 # 待提交修改记录（changelog-pending）
 
+## 2026-08-13 B2 预测修复（PREDICTION_PROMPT 缺失 schema_version，changer 待 PR）
+- **根因（生产实测）**：`run_predict` 用 `PREDICTION_PROMPT` 未指示输出必填字段 `schema_version` → LLM 输出缺字段 → `PredictionResult.model_validate_json` pydantic 校验失败 → 预测静默丢弃。服务器证据：08-12 日志 `prediction_run_failed: schema_version Field required`；`prediction_records` 0 行；近 5 份 review 报告均无 `prediction` 字段（含 attribution_status=confirmed 的 08-10 报告）
+- 修复：`PREDICTION_PROMPT` 字段清单补 `- schema_version：固定为 "1.0"`（与 `PREDICTION_CHAT_PROMPT` 对齐）；回归测试 `test_prompt_instructs_schema_version`（RED→GREEN）
+- 验证：预测相关 4 测试文件 31 passed + ruff 0；修复后仅新生成报告生效（历史不回填），仅 confirmed/hypothesis 触发
+
 ## 2026-08-12 Phase 4 验收修复（正反辩论裁决，changer 未 push）
 
 > 两轮正反辩论（正方 A1-A10 / 反方 B1-B10 / 追打 C1-C4）后用户拍板"先修必修缺口再复审"。本批为验收修复 commits：agent-py d486dbe..637efb1（10 commits）、app-api 2ac18b9..86e2d13（2）、app-frontend 5f00eb4..50bce70（4）。
@@ -124,6 +129,15 @@
 - 修复：cancel 后 await asyncio.gather(recv_task, return_exceptions=True) 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动
 - 测试：test_ws_chat_replacement.py 新增 _RecvTrackingWebSocket（模拟 uvicorn 并发 recv 防护）+ test_forward_until_done_or_cmd_clears_pending_recv_on_done（返回时无挂起 recv / 主循环可安全发起下次 receive / 不抛 RuntimeError）
 - 改动文件：src/aistock_agent/api/ws.py + tests/unit/test_ws_chat_replacement.py
+
+## 2026-08-13 Phase 5 生产部署验证（PR #68 → main 0769099，git pull + pm2 restart）
+- **部署**：main 0769099（PR #68 merge 2026-08-13 02:46Z）；git pull（GitHub SNI 阻断重试 5 次通过）+ pm2 restart aistock-agent（pid 2641625）；uvicorn 127.0.0.1:8080 health 200；启动无异常日志
+- **长会话窗口+摘要实证（>12 条运行阈值）**：经 app-api 桥接 WS 冒烟（JWT o_p5_deploy）同 session 连发 13 条"600519 现在多少钱" → **13 轮全部 done、无 error、内容非空（183-271 字）**；turn 7+ 超窗走窗口+摘要路径无劣化无崩溃（skill_executor.done degraded=0 全 13 轮，日志实证）
+- **短会话零变化**：1 条"你好" → done 正常（AI 投资助手通用回复，无摘要）
+- **删会话联动**：app-api `DELETE /api/chat/sessions/:id` 200 → PG `chat_sessions` 行删除（count=0）→ agent-py `delete_thread` 生效（内部 `DELETE /api/agent/internal/chat/threads/:id` 幂等 200 "chat thread deleted"）→ **同 session_id 重建 WS 回答正常（不串历史）**
+- **sqlite busy_timeout N/A**：生产 checkpointer 为 memory 后端（.env 无 CHECKPOINTER 配置，无 .langgraph.db），busy_timeout 仅 sqlite 后端生效（当前单实例 memory 无碍）；**生产验证清单原「sqlite 部署下删会话查 checkpoints/writes」项不适用**
+- 验证期间 agent-py 无新错误（error log 22:50-22:58 为部署前旧记录）；app-api 报错均为既有已知项（HotSectorAnalyzer KG 映射 / MessagePush hot-sectors.json ENOENT 等，与 Phase 5 无关）
+- 记录：roadmap §2 P3 行已更新为"已部署并生产验证通过（2026-08-13）"
 
 ## 2026-08-12 Phase 5 长会话上下文管理（agent-py 4 commits 686e7df + d11cdc6 + 34ec113 + 5699737，changer 未 push）
 - **Task 1 窗口+摘要（686e7df + d11cdc6）**：utils/context_window.py::trim_messages 纯函数——≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）；超窗 → LLM prompt 只喂最近 12 条，超窗部分收敛为零 LLM 确定性摘要（≤200 字，逐轮"用户：问句｜AI：回复片段"，幂等无累积）；state.messages 保持全量（checkpointer P2 语义不裁剪），messages_summary 每轮重算不读旧值；注入点 qa_router/synth_answer 节点内拼接 summary_context（SYSTEM_PROMPT 常量不变）；d11cdc6 修复 synth_answer 多子目标路径注入

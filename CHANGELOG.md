@@ -1,5 +1,18 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [changer] 2026-08-13 — B2 预测修复：PREDICTION_PROMPT 缺失 schema_version 致大盘溯源预测恒丢失
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/prompts/workers/prediction.py`：`PREDICTION_PROMPT`（`run_predict` 用）字段清单补 `- schema_version：固定为 "1.0"`——与对话内 `PREDICTION_CHAT_PROMPT` 对齐。此前 LLM 输出缺必填字段 `schema_version` → `PredictionResult.model_validate_json` pydantic 校验失败 → `run_predict` 返回 None → 大盘溯源报告 `market_trace.trace.prediction` 恒为 null（生产实测 2026-08-12 日志 `prediction_run_failed`、`prediction_records` 0 行、近 5 份 review 报告均无 prediction 字段）
+
+### 测试
+- `tests/unit/test_prediction_prompt.py` 新增 `test_prompt_instructs_schema_version`（TDD RED→GREEN）
+
+> 验证：预测相关 4 测试文件 31 passed；ruff 改动文件 0。修复后仅新生成报告生效（历史不回填），且仅 `attribution_status ∈ {confirmed, hypothesis}` 时触发（08-11/12 为 not_applicable 属设计行为）。待组长 merge 后部署验证。
+
+---
+
 ## [changer] 2026-08-12 — Phase 5 长会话上下文管理
 **开发者**: 37588
 
