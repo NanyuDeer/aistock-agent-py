@@ -111,7 +111,9 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
 #   `archive_market_trace_snapshot(snapshot)` / `if not archive_review(...)`，
 #   用 async no-op 会产生未 await 的协程（RuntimeWarning 且恒真），必须同步替换。
 # - async 目标：`await set_cached_review(...)` / `await set_cached_event(...)` /
-#   `await persist_event_report(...)` / `await node_api.save_*`，异步替换。
+#   `await node_api.save_*`，异步替换；persist_event_report 不走本组（B19 修复）——
+#   通用 _make_noop 恒 True 与"回放未落库"事实矛盾，由 apply_replay_patches 内的
+#   专用 False-no-op 处理（见 _make_false_noop）。
 _SYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.archive_market_trace_snapshot",
     "aistock_agent.agents.workers.review.archive_review",
@@ -119,7 +121,6 @@ _SYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
 _ASYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.set_cached_review",
     "aistock_agent.agents.workers.event.set_cached_event",
-    "aistock_agent.agents.workers.event.persist_event_report",
     "aistock_agent.services.data_client.NodeApiClient.save_analysis_report",
     "aistock_agent.services.data_client.NodeApiClient.save_token_usage",
 )
@@ -206,6 +207,13 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
     for target in _ASYNC_SIDE_EFFECT_TARGETS:
         _patch_async(target, _make_noop)
 
+    # persist_event_report 专用 False-no-op（B19 修复）：不能走通用 _make_noop(True)，
+    # 否则 event.py:784 event_persisted 恒 True 与"回放未落库"事实矛盾。
+    _patch_async(
+        "aistock_agent.agents.workers.event.persist_event_report",
+        _make_false_noop,
+    )
+
     for target in _CACHE_READ_ISOLATION_TARGETS:
         _patch_async(target, _make_no_cache)
 
@@ -283,6 +291,16 @@ async def _make_none_noop(*args: object, **kwargs: object) -> None:
     不能返回 True——会被调用方误判为写成功。
     """
     return None
+
+
+async def _make_false_noop(*args: object, **kwargs: object) -> bool:
+    """persist_event_report 专用 no-op：恒返回 False（回放如实报告"未落库"）。
+
+    与 post 的 None 语义贯通：event_persister.py:69 `if result is None: return False`
+    是本代码库的既有降级判定；回放把落库判为 False 与生产"未写入"语义一致，
+    评估侧若按 event_persisted 判分不会失真（B19/G8 修复）。
+    """
+    return False
 
 
 async def _make_industry_chain_degraded(*args: object, **kwargs: object) -> object:

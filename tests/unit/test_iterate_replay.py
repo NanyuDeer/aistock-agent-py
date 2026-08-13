@@ -119,7 +119,10 @@ async def test_apply_patches_isolates_event_analyst_registry_tools(
 async def test_noop_contracts(
     iterate_data_dir: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """no-op 契约：async 副作用 await 后为 True、缓存读返回 None、sync 归档同步返回 True。"""
+    """no-op 契约：async 副作用 await 后为 True、缓存读返回 None、sync 归档同步返回 True。
+
+    persist_event_report 例外（B19/G8 修复）：回放如实报告"未落库"→ False。
+    """
     _enable_replay(monkeypatch, "review")
     adapter = get_adapter("review")
     apply_replay_patches(adapter)
@@ -139,8 +142,9 @@ async def test_noop_contracts(
     assert await event_module.get_cached_event("some event text") is None
     # event.py:783/790 `event_cached = await set_cached_event(...)` → True
     assert await event_module.set_cached_event("some event text", {}) is True
-    # event.py:629/784 `event_persisted = await persist_event_report(...)` → True
-    assert await event_module.persist_event_report("evt_1", {}, "text", {}) is True
+    # B19/G8 修复：event.py:784 `event_persisted = await persist_event_report(...)`
+    # 回放如实报告"未落库" → False（不再被通用 _make_noop 恒 True 误判为写成功）
+    assert await event_module.persist_event_report("evt_1", {}, "text", {}) is False
     remove_replay_patches()
 
 
@@ -369,4 +373,21 @@ async def test_node_reader_positive_symbol_and_id_matching(
     # 5) fulltext id 不匹配 → fail-loud None
     assert await node_api.get("/internal/news/fulltext/nope") is None
 
+    remove_replay_patches()
+
+
+"""persist_event_report 回放语义：event_persisted 必须为 False（B19/G8 修复）"""
+
+
+@pytest.mark.asyncio
+async def test_persist_event_report_returns_false_in_replay(iterate_data_dir: object) -> None:
+    """回放模式下 persist_event_report 恒 False（如实报告未落库），不再恒 True。"""
+    os.environ["REPLAY_CASE_ID"] = "case_20260731_us_market_surge"
+    adapter = get_adapter("review")
+    apply_replay_patches(adapter)
+
+    from aistock_agent.agents.workers import event as event_worker
+
+    result = await event_worker.persist_event_report({"event_id": "x"})
+    assert result is False
     remove_replay_patches()
