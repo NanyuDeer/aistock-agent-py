@@ -178,7 +178,10 @@ async def generate_variant(
     )
     llm = llm_service.get_deep_think(
         max_tokens=_MAX_VARIANT_OUTPUT_TOKENS,
-        extra_body={"thinking": {"type": "disabled"}, "reasoning_effort": "none"},
+        # reasoning_effort 用 "minimal"（非 "none"）：服务器 new-api 代理校验
+        # 合法值为 high/low/max/medium/minimal，"none" 会 400（2026-08-13 实测）；
+        # thinking disabled + minimal 双禁用推理，变体生成只需符号级补丁。
+        extra_body={"thinking": {"type": "disabled"}, "reasoning_effort": "minimal"},
     )
     resp = await llm.ainvoke(
         [SystemMessage(content=prompt), HumanMessage(content=str(case["event_title"]))]
