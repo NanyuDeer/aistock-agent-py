@@ -64,3 +64,17 @@ def test_market_trace_reexports_shared_chain_types():
     node = CausalNode(stage="trigger", claim="触发", evidence_ids=["e1"])
     chain = CausalChain(nodes=[node])
     assert chain.nodes[0].stage == "trigger"
+
+
+def test_stock_trace_reexports_shared_chain_stage():
+    from typing import get_args
+
+    from aistock_agent.schemas.stock_trace import ChainStage
+
+    assert set(get_args(ChainStage)) == set(TRACE_CHAIN_STAGES)
+
+
+def test_stock_trace_validator_uses_shared_stages():
+    from aistock_agent.services.stock_trace_validator import STAGES
+
+    assert tuple(STAGES) == TRACE_CHAIN_STAGES
