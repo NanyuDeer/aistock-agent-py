@@ -162,3 +162,53 @@ async def test_start_scheduler_registers_event_scrape_jobs():
     assert "event_scrape_daily" in job_ids
     assert "event_scrape_intraday" in job_ids
     shutdown_scheduler()
+
+
+# ── I4 兜底放宽（H7，Task 2 / Phase-3b）──
+
+
+@pytest.mark.asyncio
+async def test_morning_fallback_triggers_when_conduction_missing_and_not_marked():
+    """I4 放宽：库有数据但无当日传导报告且未被标记 → 晨报降级触发。
+
+    旧条件仅"库空"触发；放宽后"库空 或 无当日传导报告"且未被中台标记
+    （conduction_triggered:{date} 不存在）即触发，防"抓取成功但传导失败"静默缺失。
+    """
+    import asyncio
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    with (
+        patch("aistock_agent.services.scheduler.is_trading_day", return_value=True),
+        # morning_agent 在函数内 import，patch import 源模块（test_scheduler.py 既有约定）
+        patch("aistock_agent.agents.workers.morning", create=True) as mock_agent,
+        # load_event_scrape 在 I4 块内函数级 import，patch 源模块
+        patch(
+            "aistock_agent.services.event_store.load_event_scrape",
+            new=AsyncMock(return_value=[{"event_id": "e1"}]),
+        ),
+        # node_api 为 scheduler 模块级 import（scheduler.py:25），patch 模块属性生效
+        patch(
+            "aistock_agent.services.scheduler.node_api.list_analysis_reports",
+            new=AsyncMock(return_value=[]),
+        ),
+        # RedisPool 在 I4 块内函数级 import，patch 源模块
+        patch("aistock_agent.services.redis_pool.RedisPool") as mock_pool,
+        patch(
+            "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
+            new=AsyncMock(),
+        ) as mock_task,
+    ):
+        mock_agent.run = AsyncMock(
+            return_value={
+                "final_response": "x",
+                "analysis_reports": {"major_events": [{"event_id": "e1"}]},
+            }
+        )
+        fake_client = AsyncMock()
+        fake_client.get = AsyncMock(return_value=None)  # 未标记
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        await _run_morning_task()
+        # fire-and-forget：等待后台 task 完成再断言（对齐既有 I4 测试先例）
+        await asyncio.sleep(0.1)
+    mock_task.assert_awaited_once()

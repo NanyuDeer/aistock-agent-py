@@ -642,7 +642,12 @@ def test_traceable_report_validation_rejects_invalid_required_fields(
 
 @pytest.mark.asyncio
 async def test_morning_task_no_longer_triggers_event_conduction():
-    """事件库非空时晨报不直接触发事件传导（中台负责，防同批事件双跑）。"""
+    """事件库非空且当日已有传导报告时晨报不直接触发事件传导。
+
+    I4 放宽后（H7，2026-08-13）：仅库非空不再足以抑制兜底，还需当日传导报告
+    已落库（has_conduction=True）或中台已标记。本用例以"传导报告已存在"为
+    抑制条件，断言晨报不触发（中台负责，防同批事件双跑）。
+    """
     import asyncio
 
     from aistock_agent.services.scheduler import _run_morning_task
@@ -663,9 +668,18 @@ async def test_morning_task_no_longer_triggers_event_conduction():
                 "aistock_agent.services.event_store.load_event_scrape",
                 new=AsyncMock(return_value=[{"event_id": "e1", "title": "存量重大事件"}]),
             ), patch(
+                # 当日传导报告已存在（has_conduction=True → 抑制兜底）
+                "aistock_agent.services.scheduler.node_api.list_analysis_reports",
+                new=AsyncMock(return_value=[{"id": 1}]),
+            ), patch(
+                "aistock_agent.services.redis_pool.RedisPool"
+            ) as mock_pool, patch(
                 "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
             ) as mock_pipeline:
+                fake_client = AsyncMock()
+                fake_client.get = AsyncMock(return_value=None)  # 未标记
+                mock_pool.get_client = AsyncMock(return_value=fake_client)
                 await _run_morning_task()
                 await asyncio.sleep(0.1)
 
@@ -724,9 +738,18 @@ async def test_morning_task_falls_back_to_conduction_when_event_store_empty():
                 "aistock_agent.services.event_store.load_event_scrape",
                 new=AsyncMock(return_value=[]),
             ), patch(
+                # 无当日传导报告（I4 放宽后 has_conduction=False 同样触发兜底）
+                "aistock_agent.services.scheduler.node_api.list_analysis_reports",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                "aistock_agent.services.redis_pool.RedisPool"
+            ) as mock_pool, patch(
                 "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
             ) as mock_pipeline:
+                fake_client = AsyncMock()
+                fake_client.get = AsyncMock(return_value=None)  # 未标记
+                mock_pool.get_client = AsyncMock(return_value=fake_client)
                 await _run_morning_task()
                 # fire-and-forget：等待后台 task 完成再断言
                 await asyncio.sleep(0.1)

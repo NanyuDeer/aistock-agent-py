@@ -464,3 +464,40 @@ async def test_trigger_conduction_double_failure_logs_without_raise():
     ), patch("aistock_agent.services.event_scraper.logger") as mock_logger:
         await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
     assert mock_logger.exception.call_count == 2
+
+
+# ── H7：中台触发即标记当日，晨报 I4 兜底据此防双跑（Task 2 / Phase-3b）──
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_marks_triggered():
+    """H7：触发传导时设置当日防双跑标记（Redis SETEX）。
+
+    中台触发传导即写 conduction_triggered:{date}（TTL 6h），
+    晨报 I4 兜底据此避免重复触发（防双跑）。
+    """
+    fake_client = AsyncMock()
+    # patch 目标为 RedisPool 源模块（event_scraper 顶部将新增 import；
+    # 函数内 from-import 约束同 _PIPELINE_PATH，patch 源模块属性才生效）
+    with patch("aistock_agent.services.event_scraper.RedisPool") as mock_pool, patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(
+            return_value={
+                "event_count": 1,
+                "error": None,
+                "conduction_results": [],
+                "gi_result": None,
+                "timed_out": False,
+                "elapsed_seconds": 1.0,
+            }
+        ),
+    ):
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        # _major_event 无 score_date 字段，按简报备注补构造
+        await _trigger_conduction(
+            [{**_major_event(), "score_date": "2026-08-13"}]  # type: ignore[arg-type]
+        )
+    args = fake_client.setex.await_args
+    assert args is not None
+    assert args.args[0] == "conduction_triggered:2026-08-13"
+    assert args.args[1] == 21600

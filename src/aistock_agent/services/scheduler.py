@@ -3,8 +3,8 @@
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
   （2026-08-12 起事件传导触发迁移到统一事件抓取中台 event_scrape 入库后，
-  见 Task 5；晨报仅在"当日事件库为空且 LLM 识别出 major_events"时降级兜底
-  触发 _run_event_analysis_pipeline_task，防中台抓取全失败时传导静默缺失，见 I4。）
+  见 Task 5；晨报仅在"（事件库为空 或 无当日传导报告）且未被中台标记"时降级
+  兜底触发 _run_event_analysis_pipeline_task，防中台抓取全失败时传导静默缺失，见 I4/H7。）
 - 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
   （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
@@ -259,11 +259,12 @@ async def _run_morning_task() -> None:
         )
         # 事件传导触发已迁移到统一事件抓取中台（2026-08-12）：
         # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发。
-        # I4 兜底（中台抓取失败时的安全网）：当日事件库为空 且 晨报 LLM 仍
-        # 识别出 major_events（自主检索兜底产出）时，降级 fire-and-forget 触发
+        # I4 兜底（中台抓取失败时的安全网）：当日（事件库为空 或 无当日传导报告）
+        # 且未被中台标记（conduction_triggered:{date} 不存在）时，若晨报 LLM 仍
+        # 识别出 major_events（自主检索兜底产出），降级 fire-and-forget 触发
         # 事件传导——恢复 Task 4 删除晨报触发前的语义，避免"当日抓取全部失败
-        # → 传导静默缺失且无告警"。事件库非空时中台已负责触发，此处不触发
-        # （防同批事件双跑）。
+        # → 传导静默缺失且无告警"。H7（2026-08-13）：中台触发传导即写当日标记，
+        # 晨报检查标记避免与中台双跑；传导报告已落库（has_conduction）同样抑制。
         analysis_reports = result.get("analysis_reports")
         raw_major_events = (
             analysis_reports.get("major_events", [])
@@ -279,10 +280,26 @@ async def _run_morning_task() -> None:
             from aistock_agent.services.event_store import (  # noqa: PLC0415
                 load_event_scrape,
             )
+            from aistock_agent.services.redis_pool import RedisPool  # noqa: PLC0415
 
-            if not await load_event_scrape(report_date):
+            event_store_events = await load_event_scrape(report_date)
+            # I4 兜底放宽（H7，2026-08-13）：库空 或 库有数据但当日无传导报告，
+            # 且当日未被中台标记触发过 → 晨报降级触发（防"抓取成功但传导失败"静默缺失）。
+            # 中台触发时会设置 conduction_triggered:{date} 标记，此处检查避免双跑。
+            triggered = False
+            try:
+                client = await RedisPool.get_client()
+                triggered = bool(await client.get(f"conduction_triggered:{report_date}"))
+            except Exception:  # noqa: BLE001
+                logger.debug("morning_conduction_mark_check_failed", date=report_date)
+            has_conduction = bool(
+                await node_api.list_analysis_reports("event_conduction", report_date)
+            )
+            if (not event_store_events or not has_conduction) and not triggered:
                 logger.warning(
-                    "morning_conduction_fallback_event_store_empty",
+                    "morning_conduction_fallback_triggered",
+                    event_store_empty=not bool(event_store_events),
+                    has_conduction=has_conduction,
                     event_count=len(major_events),
                 )
                 task = asyncio.create_task(

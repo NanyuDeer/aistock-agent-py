@@ -22,6 +22,7 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services import event_scoring_llm, event_scrape_sources, event_store
+from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -46,6 +47,18 @@ def _today() -> str:
     return shanghai_today().isoformat()
 
 
+async def _mark_conduction_triggered(score_date: str) -> None:
+    """设置当日传导已触发标记（防 I4 晨报兜底与中台触发双跑）。
+
+    TTL 6h（覆盖盘中到收盘窗口）；Redis 不可用时静默降级（不阻断传导）。
+    """
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(f"conduction_triggered:{score_date}", 21600, "1")
+    except Exception:  # noqa: BLE001
+        logger.debug("event_scrape_conduction_mark_failed", date=score_date)
+
+
 async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
     """对新增重大事件触发事件传导分析（fire-and-forget，失败不阻断）。
 
@@ -58,6 +71,8 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
     """
     if not events:
         return
+    # H7 防双跑标记：中台触发即标记当日，晨报 I4 兜底据此避免重复触发
+    await _mark_conduction_triggered(str(events[0].get("score_date", "")))
     try:
         from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
             run_event_analysis_pipeline,
