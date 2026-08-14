@@ -1,6 +1,8 @@
 """case_sourcers 注册表清单封闭 + provider 候选构造（二期 case-sourcing）。"""
 
 import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aistock_agent.iterate.adapters import get_adapter
@@ -49,3 +51,70 @@ def test_source_cases_skips_failed_provider() -> None:
     with patch("aistock_agent.iterate.case_sourcers.SOURCE_PROVIDERS", {"boom": boom}):
         results = asyncio.run(source_cases(fake_adapter))  # type: ignore[arg-type]
     assert results == []
+
+
+def test_market_close_snapshot_uses_date_param_when_provided() -> None:
+    """三期：provider params 带 date → 历史回补分支（build_market_trace_snapshot 收到指定日期）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, market_close_snapshot
+
+    ctx = SourceContext(agent_id="review", params={"date": "2026-08-07"}, data_dir=None)
+    # provider 需要：trade_date/captured_at/phenomenon_discovery 属性 + model_dump(mode="json")
+    # model_dump 必须返回含 a_share.indexes 的完整快照（否则 _snapshot_data_sufficient 拒绝产片）
+    snapshot_dict = {
+        "trade_date": "2026-08-07",
+        "captured_at": "2026-08-07T08:00:00+00:00",
+        "a_share": {"indexes": {"000001": {"change_pct": 1.2}}},
+        "sources": {},
+        "missing_fields": [],
+    }
+    fake_snapshot = SimpleNamespace(
+        trade_date="2026-08-07",
+        captured_at=datetime(2026, 8, 7, 8, 0, tzinfo=timezone.utc),  # noqa: UP017
+        phenomenon_discovery=SimpleNamespace(primary=SimpleNamespace(summary="A股收盘2026-08-07")),
+    )
+    fake_snapshot.model_dump = lambda mode="python", **kw: snapshot_dict  # type: ignore[attr-defined]
+
+    with (
+        patch("aistock_agent.iterate.case_sourcers.find_recent_trading_day", AsyncMock(return_value="2026-08-06")),  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers.build_market_trace_snapshot", AsyncMock(return_value=fake_snapshot)) as mock_build,  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers._collect_industry_graph", AsyncMock(return_value=None)),  # noqa: E501
+    ):
+        candidates = asyncio.run(market_close_snapshot(ctx))
+    # 历史分支：不调用 find_recent_trading_day，直接以 date 构建
+    mock_build.assert_awaited_once_with("2026-08-07")
+    assert len(candidates) == 1
+    assert candidates[0].event_title == "A股收盘2026-08-07"
+
+
+def test_market_close_snapshot_no_date_uses_recent_trading_day() -> None:
+    """回归：无 date 走 find_recent_trading_day（二期行为不变）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, market_close_snapshot
+
+    ctx = SourceContext(agent_id="review", params={}, data_dir=None)
+    snapshot_dict = {
+        "trade_date": "2026-08-14",
+        "captured_at": "2026-08-14T08:00:00+00:00",
+        "a_share": {"indexes": {"000001": {"change_pct": 0.8}}},
+        "sources": {},
+        "missing_fields": [],
+    }
+    fake_snapshot = SimpleNamespace(
+        trade_date="2026-08-14",
+        captured_at=datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc),  # noqa: UP017
+        phenomenon_discovery=SimpleNamespace(primary=SimpleNamespace(summary="A股收盘2026-08-14")),
+    )
+    fake_snapshot.model_dump = lambda mode="python", **kw: snapshot_dict  # type: ignore[attr-defined]
+
+    with (
+        patch("aistock_agent.iterate.case_sourcers.find_recent_trading_day", AsyncMock(return_value="2026-08-14")) as mock_find,  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers.build_market_trace_snapshot", AsyncMock(return_value=fake_snapshot)) as mock_build,  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers._collect_industry_graph", AsyncMock(return_value=None)),  # noqa: E501
+    ):
+        candidates = asyncio.run(market_close_snapshot(ctx))
+    mock_find.assert_awaited_once()
+    mock_build.assert_awaited_once_with("2026-08-14")
+    assert len(candidates) == 1

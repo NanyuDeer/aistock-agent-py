@@ -958,7 +958,10 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 1. 获取 Node 收盘快照（带 last-close 降级） ──
     # 先尝试 close-snapshot（要求 >= 15:30）；若不可用（盘中/凌晨），
     # 降级到 last-close-snapshot（返回最近一个已完成交易日数据）。
-    close_data = await node_api.get("/internal/market/close-snapshot")
+    # 三期：按目标交易日回补（date=report_date 对任意目标日走 Node 伪时刻重建；
+    # 非交易日/数据缺失 → Node 409 → data_client.get 返回 None → 现有降级链
+    # last-close + trade_date 校验行为不变）。
+    close_data = await node_api.get(f"/internal/market/close-snapshot?date={report_date}")
     used_last_close = False
     if close_data is None:
         close_data = await node_api.get_last_close_snapshot()

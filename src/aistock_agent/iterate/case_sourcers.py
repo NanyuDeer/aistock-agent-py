@@ -14,6 +14,8 @@ from typing import Any, cast
 import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
+from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 
 logger = structlog.get_logger()
 
@@ -37,13 +39,18 @@ class SourceContext:
 
 
 async def market_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
-    """review 产片源：最近交易日收盘快照（迁移自 build_review_case 前半段）。"""
-    from aistock_agent.iterate.case_scanner import find_recent_trading_day
-    from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
-
-    day = await find_recent_trading_day()
-    if day is None:
-        raise RuntimeError("无法发现最近交易日（Node close-snapshot/last-close 均失败）")
+    """review 产片源：收盘快照（最近交易日，或 params["date"] 指定的历史交易日回补）。"""
+    target_day = ctx.params.get("date")
+    if isinstance(target_day, str) and target_day:
+        # 历史回补（三期）：直接用指定交易日（build_market_trace_snapshot 内部校验
+        # 交易日/complete，失败抛 MarketTraceSnapshotUnavailable → provider 抛错 →
+        # source_cases 降级）
+        day = target_day
+    else:
+        recent_day = await find_recent_trading_day()
+        if recent_day is None:
+            raise RuntimeError("无法发现最近交易日（Node close-snapshot/last-close 均失败）")
+        day = recent_day
     snapshot = await build_market_trace_snapshot(day)
 
     trade_date = str(getattr(snapshot, "trade_date", ""))

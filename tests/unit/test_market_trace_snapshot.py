@@ -741,7 +741,39 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
     global_market_mock.assert_not_called()
     tavily_search_mock.assert_not_called()
     # 只应调用过 close-snapshot，不应调用 news/latest
-    assert node_get_calls == ["/internal/market/close-snapshot"]
+    assert node_get_calls == ["/internal/market/close-snapshot?date=2026-07-19"]
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_passes_report_date_to_close_snapshot(mocker):
+    """三期：close-snapshot 请求必须携带 ?date=report_date（历史回补按目标交易日）。
+
+    Node /internal/market/close-snapshot?date=YYYY-MM-DD 返回目标交易日快照；
+    Python 侧必须把 report_date 透传进查询参数，否则历史回补拿到的仍是
+    "最近交易日"而非请求的目标交易日。
+    """
+    node_get_calls: list[str] = []
+
+    async def _node_get_side_effect(path: str, **_kwargs):
+        node_get_calls.append(path)
+        if path.startswith("/internal/market/close-snapshot"):
+            return COMPLETE_CLOSE
+        return {"items": []}
+
+    mocker.patch.object(node_api, "get", side_effect=_node_get_side_effect)
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert node_get_calls[0] == "/internal/market/close-snapshot?date=2026-07-19"
+    assert snapshot.trade_date == "2026-07-19"
 
 
 # ============================================================================
