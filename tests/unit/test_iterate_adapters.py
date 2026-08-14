@@ -56,7 +56,9 @@ def test_review_registers_market_close_snapshot_source() -> None:
 
 def test_event_analyst_registers_telegraph_scan_source() -> None:
     adapter = get_adapter("event_analyst")
+    # 四期：事件库主源在前（去重优先），电报后备
     assert adapter.case_sources == (
+        CaseSourceSpec("event_store_scan", {"window_days": 30}),
         CaseSourceSpec("telegraph_keyword_scan", {"window_days": 30}),
     )
 
