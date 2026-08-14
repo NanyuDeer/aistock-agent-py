@@ -66,3 +66,35 @@ async def test_pipeline_generates_and_rolls_back(tmp_path) -> None:
     assert result["rejected"] == 1
     assert result["case_ids"] == []
     assert not (tmp_path / "cases" / "case_x.json").exists()  # 已回滚
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rolls_back_when_gt_generation_fails(tmp_path) -> None:
+    """GT 生成失败（异常）→ 回滚已落盘 case + 记 rejected（防孤儿 case 进 pending）。
+
+    服务器实测（2026-08-15）：产片时 GT 生成抛异常（LLM 超时），case 已落盘但
+    无 GT 文件 → 迭代闭环 FileNotFoundError + pending 反复重试。
+    """
+    adapter = get_adapter("event_analyst")
+
+    async def fake_build_case(*args, **kwargs):
+        case = {"case_id": "case_y", "agent_id": "event_analyst"}
+        (tmp_path / "cases").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "cases" / "case_y.json").write_text("{}", encoding="utf-8")
+        return case
+
+    async def failing_gt(case, *, data_dir=None):
+        raise RuntimeError("LLM timeout")
+
+    with (
+        patch("aistock_agent.iterate.case_pipeline.source_cases", AsyncMock(return_value=[_candidate()])),  # noqa: E501
+        patch("aistock_agent.iterate.case_pipeline.build_case", side_effect=fake_build_case),
+        patch("aistock_agent.iterate.case_pipeline.generate_data_constrained_gt", side_effect=failing_gt),  # noqa: E501
+        patch("aistock_agent.iterate.case_pipeline.case_path", return_value=tmp_path / "cases" / "case_y.json"),  # noqa: E501
+    ):
+        result = await build_cases_for_adapter(adapter, data_dir=tmp_path, force=False)
+
+    assert result["generated"] == 0
+    assert result["rejected"] == 1
+    assert not (tmp_path / "cases" / "case_y.json").exists()  # 孤儿 case 已回滚
+    assert any("GT 生成失败" in r for r in result["reasons"])
