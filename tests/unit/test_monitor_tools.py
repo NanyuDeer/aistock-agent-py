@@ -1,12 +1,12 @@
 """monitor_tools 测试 — 个股监控与告警历史"""
 
+from datetime import date as _date
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aistock_agent.tools.base import DEGRADED_MESSAGE
 from aistock_agent.tools.monitor_tools import get_alert_history, get_stock_monitor
-
 
 # ── get_stock_monitor ────────────────────────────────────────────
 
@@ -62,12 +62,18 @@ async def test_get_alert_history_success():
             },
         ],
     }
-    with patch("aistock_agent.tools.monitor_tools.node_api") as mock_api:
+    with (
+        patch("aistock_agent.tools.monitor_tools.shanghai_today", return_value=_date(2026, 8, 14)),
+        patch("aistock_agent.tools.monitor_tools.node_api") as mock_api,
+    ):
         mock_api.get = AsyncMock(return_value=mock_data)
         result = await get_alert_history.ainvoke({"days": 7})
         assert "宁德时代" in result
         assert "固态电池" in result
-        mock_api.get.assert_called_once_with("/internal/monitor/alerts?days=7")
+        # days 内部换算 dateFrom 传给 Node（今天-7天）
+        mock_api.get.assert_called_once_with(
+            "/internal/monitor/alerts?dateFrom=2026-08-07&limit=20&offset=0"
+        )
 
 
 @pytest.mark.asyncio
@@ -108,7 +114,10 @@ async def test_get_alert_history_symbol_filtering():
             },
         ],
     }
-    with patch("aistock_agent.tools.monitor_tools.node_api") as mock_api:
+    with (
+        patch("aistock_agent.tools.monitor_tools.shanghai_today", return_value=_date(2026, 8, 14)),
+        patch("aistock_agent.tools.monitor_tools.node_api") as mock_api,
+    ):
         mock_api.get = AsyncMock(return_value=mock_data)
         result = await get_alert_history.ainvoke({"symbol": "300750", "days": 7})
         # 只包含 300750 的事件，不包含 600519
@@ -117,8 +126,10 @@ async def test_get_alert_history_symbol_filtering():
         assert "股价异动" in result
         assert "贵州茅台" not in result
         assert "半年报" not in result
-        # symbol 仅用于客户端过滤，不透传给 Node.js；days 透传
-        mock_api.get.assert_called_once_with("/internal/monitor/alerts?days=7")
+        # symbol 仅用于客户端过滤，不透传给 Node.js；days 内部换算 dateFrom 传给 Node
+        mock_api.get.assert_called_once_with(
+            "/internal/monitor/alerts?dateFrom=2026-08-07&limit=20&offset=0"
+        )
 
 
 @pytest.mark.asyncio
@@ -128,3 +139,33 @@ async def test_alert_history_degradation():
         mock_api.get = AsyncMock(side_effect=RuntimeError("node api down"))
         result = await get_alert_history.ainvoke({"days": 7})
         assert result == DEGRADED_MESSAGE
+
+
+# ── dateFrom 迁移（三期）：days → dateFrom，消除 Node 静默忽略 ──────
+
+
+@pytest.mark.asyncio
+async def test_get_alert_history_uses_datefrom_not_days() -> None:
+    """get_alert_history 内部换算 dateFrom（今天-days 天），不再透传 days 参数"""
+    with (
+        patch("aistock_agent.tools.monitor_tools.shanghai_today", return_value=_date(2026, 8, 14)),
+        patch("aistock_agent.tools.monitor_tools.node_api") as mock_api,
+    ):
+        mock_api.get = AsyncMock(return_value={"events": []})
+        await get_alert_history.ainvoke({"symbol": "600519", "days": 7})
+    url = mock_api.get.call_args.args[0]
+    assert "dateFrom=2026-08-07" in url      # 今天-7天
+    assert "days=" not in url                 # 静默失效参数消除
+
+
+@pytest.mark.asyncio
+async def test_get_alert_history_days_clamped_to_min_1() -> None:
+    """get_alert_history days 钳制 max(days, 1)：days=0 按 1 天换算"""
+    with (
+        patch("aistock_agent.tools.monitor_tools.shanghai_today", return_value=_date(2026, 8, 14)),
+        patch("aistock_agent.tools.monitor_tools.node_api") as mock_api,
+    ):
+        mock_api.get = AsyncMock(return_value={"events": []})
+        await get_alert_history.ainvoke({"days": 0})
+    url = mock_api.get.call_args.args[0]
+    assert "dateFrom=2026-08-13" in url      # max(days,1) 钳制
