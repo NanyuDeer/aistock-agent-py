@@ -5,10 +5,14 @@
 用法：.venv/bin/python scripts/calibration/export_calibration_set.py [--data-dir data] [--target 10]
 输出：calibration/human_scores.template.json（human 字段留空待人工回填）
 
-数据契约（run_case/case_builder 实际写入，2026-08-14 确认）：
+数据契约（run_case/variant_engine/case_builder 实际写入，2026-08-14 确认）：
 - ``experiments/{case_id}_best.json``：``{"score", "round", "patch"}``
-  （``_recompute_best`` 固化，无 ground_truth_ref/attribution 字段——attribution
-  保留 ``.get`` 兜底兼容未来扩展）
+  （``_recompute_best`` 固化，无 ground_truth_ref/attribution 字段——round 字段
+  回指 best 轮实验记录，供人工标注对照 agent 输出与 judge 维度分）
+- ``experiments/{case_id}_r{round}.json``：轮级实验记录（round==1 文件名为
+  ``{case_id}_r1_baseline.json``，round>1 为 ``{case_id}_r{round}.json``，见
+  variant_engine L450 落盘约定），含 ``agent_output``（final_response 全文）+
+  ``score_detail``（direction/drivers/sectors 三维分）+ ``score`` + ``round``
 - ``ground_truths/{gt_id}.json``：含 ``attribution``；gt_id 契约 = case 的
   ``ground_truth_ref`` = ``gt_{case_id}``（case_builder 前缀约定）
 - ``cases/{agent_id}/{case_id}.json``：切片按 agent 归档（agent_id 权威来源——
@@ -102,8 +106,18 @@ def _pick_score_tiered(
 
 
 def _collect_samples(base: Path) -> list[dict[str, Any]]:
-    """从 experiments/best + ground_truths 组装候选样本。
+    """从 experiments/best + 轮级实验记录 + ground_truths 组装候选样本。
 
+    标注模板字段：
+    - gt_attribution：GT 标准答案方向（ground_truths/{gt_id}.json 的 attribution），
+      人工评分对照基准
+    - agent_output：best 轮 agent 输出全文（按 best.round 匹配轮级实验记录），
+      人工判断输出质量/方向时参考
+    - judge_score_detail：best 轮 judge 三维分（direction/drivers/sectors），
+      与 human 空字段一一对应，供人工参考 judge 分档后打分
+    - human：四空字段待人工回填（direction/drivers/sectors/confidence）
+
+    组装规则：
     - 只收已迭代 case（``cases/{case_id}.iterated.json`` 存在）
     - judge_score = best.json 的 score（run_case ``_recompute_best`` 写入）
     - agent_id 按 case_id 实际形态 ``case_{YYYYMMDD}_{agent_id}_{slug}`` 提取
@@ -128,13 +142,18 @@ def _collect_samples(base: Path) -> list[dict[str, Any]]:
             gt = json.loads(gt_path.read_text(encoding="utf-8")) if gt_path.exists() else {}
         except (json.JSONDecodeError, OSError):
             gt = {}
+        agent_output, judge_score_detail = _load_round_record(base, case_id, best)
         samples.append(
             {
                 "case_id": case_id,
                 "gt_id": gt_id,
                 "agent_id": agent_id,
                 "gt_attribution": gt.get("attribution", {}) if isinstance(gt, dict) else {},
-                "agent_best_attribution": best.get("attribution", {}),
+                # best.json 契约 {score, round, patch} 无 attribution 字段——
+                # 保留键兼容，值恒 {}（数据源无该字段，见模块 docstring 数据契约）
+                "agent_best_attribution": {},
+                "agent_output": agent_output,
+                "judge_score_detail": judge_score_detail,
                 "judge_score": float(best.get("score", 0.0)),
                 "human": {
                     "direction_score": None,
@@ -145,6 +164,37 @@ def _collect_samples(base: Path) -> list[dict[str, Any]]:
             }
         )
     return samples
+
+
+def _load_round_record(
+    base: Path, case_id: str, best: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """按 best 轮号加载轮级实验记录，取 agent_output 全文 + judge_score_detail 三维分。
+
+    best.json 的 round 由 ``_recompute_best`` 固化（run_case.py L342）：
+    round==1 → ``experiments/{case_id}_r1_baseline.json``，round>1 →
+    ``experiments/{case_id}_r{round}.json``（variant_engine L450 落盘约定）。
+    记录缺失/损坏/字段类型异常 → 降级 ("", {})——人工标注仍可基于
+    gt_attribution 评分，不阻断整批组装。
+    """
+    round_no = best.get("round")
+    exp_path = (
+        base / "experiments" / f"{case_id}_r1_baseline.json"
+        if round_no == 1
+        else base / "experiments" / f"{case_id}_r{round_no}.json"
+    )
+    try:
+        record = json.loads(exp_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return "", {}
+    if not isinstance(record, dict):
+        return "", {}
+    raw_output = record.get("agent_output", "")
+    raw_detail = record.get("score_detail", {})
+    return (
+        raw_output if isinstance(raw_output, str) else "",
+        raw_detail if isinstance(raw_detail, dict) else {},
+    )
 
 
 def _resolve_case_meta(base: Path, case_id: str) -> tuple[str, str]:

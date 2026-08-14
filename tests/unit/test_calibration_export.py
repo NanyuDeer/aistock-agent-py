@@ -43,6 +43,19 @@ def test_collect_samples_assembles_candidates_from_data_dirs(tmp_path: Path) -> 
         json.dumps({"score": 0.7, "round": 1, "patch": {"target_symbol": "x"}}),
         encoding="utf-8",
     )
+    # best.round==1 → 匹配 _r1_baseline 实验记录，提取 agent_output 全文 + judge 三维分
+    (exps / "case_20260814_review_test1_r1_baseline.json").write_text(
+        json.dumps(
+            {
+                "case_id": "case_20260814_review_test1",
+                "round": 1,
+                "agent_output": "【方向判断】...（基线轮全文）",
+                "score": 0.7,
+                "score_detail": {"direction": 0.8, "drivers": 0.6, "sectors": 0.7},
+            }
+        ),
+        encoding="utf-8",
+    )
     # 未迭代 case 的 best 文件应被过滤（iterated 标记缺失）
     (exps / "case_20260814_event_analyst_test2_best.json").write_text(
         json.dumps({"score": 0.8}), encoding="utf-8",
@@ -71,6 +84,8 @@ def test_collect_samples_assembles_candidates_from_data_dirs(tmp_path: Path) -> 
     assert s["agent_id"] == "review"
     assert s["gt_attribution"] == {"direction": "bullish"}
     assert s["agent_best_attribution"] == {}
+    assert s["agent_output"] == "【方向判断】...（基线轮全文）"
+    assert s["judge_score_detail"] == {"direction": 0.8, "drivers": 0.6, "sectors": 0.7}
     assert s["judge_score"] == 0.7
     assert s["human"] == {
         "direction_score": None,
@@ -80,9 +95,51 @@ def test_collect_samples_assembles_candidates_from_data_dirs(tmp_path: Path) -> 
     }
 
 
+def test_collect_samples_matches_round_record_by_best_round(tmp_path: Path) -> None:
+    """best.round==2 → 匹配 {case_id}_r2.json 实验记录；best.round 缺失/记录不存在
+    → agent_output/judge_score_detail 降级空值（不阻断组装）。"""
+    case_id = "case_20260814_event_analyst_round2"
+    exps = tmp_path / "experiments"
+    exps.mkdir()
+    (exps / f"{case_id}_best.json").write_text(
+        json.dumps({"score": 0.9, "round": 2, "patch": {"target_symbol": "x"}}),
+        encoding="utf-8",
+    )
+    (exps / f"{case_id}_r2.json").write_text(
+        json.dumps(
+            {
+                "case_id": case_id,
+                "round": 2,
+                "agent_output": "【方向判断】...（round 2 全文）",
+                "score": 0.9,
+                "score_detail": {"direction": 0.9, "drivers": 0.8, "sectors": 0.75},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "cases").mkdir()
+    (tmp_path / "cases" / f"{case_id}.iterated.json").write_text(
+        json.dumps({"status": "iterated"}), encoding="utf-8",
+    )
+    gt_dir = tmp_path / "ground_truths"
+    gt_dir.mkdir()
+    (gt_dir / f"gt_{case_id}.json").write_text(
+        json.dumps({"gt_id": f"gt_{case_id}", "attribution": {"direction": "bearish"}}),
+        encoding="utf-8",
+    )
+
+    samples = _collect_samples(tmp_path)
+    assert len(samples) == 1
+    s = samples[0]
+    assert s["agent_output"] == "【方向判断】...（round 2 全文）"
+    assert s["judge_score_detail"] == {"direction": 0.9, "drivers": 0.8, "sectors": 0.75}
+    assert s["judge_score"] == 0.9
+
+
 def test_collect_samples_resolves_agent_id_from_case_dir(tmp_path: Path) -> None:
     """agent_id 从 case 文件归档目录反查（event_analyst 含下划线不被截断），
-    gt_id 优先取 case 文件 ground_truth_ref。"""
+    gt_id 优先取 case 文件 ground_truth_ref；best.round 指向的实验记录缺失时
+    agent_output/judge_score_detail 降级空值（不阻断组装）。"""
     case_id = "case_20260814_event_analyst_test3"
     exps = tmp_path / "experiments"
     exps.mkdir()
@@ -104,3 +161,5 @@ def test_collect_samples_resolves_agent_id_from_case_dir(tmp_path: Path) -> None
     assert len(samples) == 1
     assert samples[0]["agent_id"] == "event_analyst"
     assert samples[0]["gt_id"] == f"gt_{case_id}"
+    assert samples[0]["agent_output"] == ""
+    assert samples[0]["judge_score_detail"] == {}
