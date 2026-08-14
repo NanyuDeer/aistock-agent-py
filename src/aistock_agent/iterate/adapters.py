@@ -73,7 +73,10 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
             "search": "cls_telegraph",
         },
         ground_truth_kind="attribution",
-        case_sources=(CaseSourceSpec("telegraph_keyword_scan", {"window_days": 30}),),
+        case_sources=(
+            CaseSourceSpec("event_store_scan", {"window_days": 30}),
+            CaseSourceSpec("telegraph_keyword_scan", {"window_days": 30}),
+        ),
         description="事件传导分析：理解→传导→历史→投资结论",
     ),
 }

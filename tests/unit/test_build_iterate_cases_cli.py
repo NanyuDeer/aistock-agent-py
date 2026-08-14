@@ -125,7 +125,7 @@ def test_cli_both_window_days_and_date_inject_in_single_loop(monkeypatch, capsys
 
 
 def test_cli_window_days_still_injects_after_merge(monkeypatch) -> None:
-    """回归：合并重构后 --window-days 对 event_analyst 的注入行为不变。"""
+    """回归：--window-days 对 event_analyst 注入不变（四期：按 provider 名定位，不依赖位置）。"""
     from aistock_agent.iterate.adapters import IterableAgentAdapter
 
     exit_code, adapter = _run_cli_main(
@@ -133,7 +133,9 @@ def test_cli_window_days_still_injects_after_merge(monkeypatch) -> None:
     )
     assert exit_code == 0
     assert isinstance(adapter, IterableAgentAdapter)
-    spec = adapter.case_sources[0]
-    assert spec.provider == "telegraph_keyword_scan"
-    assert spec.params["window_days"] == 7
-    assert "date" not in spec.params
+    params_by_provider = {spec.provider: spec.params for spec in adapter.case_sources}
+    assert params_by_provider["telegraph_keyword_scan"]["window_days"] == 7
+    assert "date" not in params_by_provider["telegraph_keyword_scan"]
+    # 四期：CLI --window-days 注入仍仅对 telegraph_keyword_scan 生效（help 语义不变），
+    # event_store_scan 保持 adapter 登记默认值
+    assert params_by_provider["event_store_scan"]["window_days"] == 30

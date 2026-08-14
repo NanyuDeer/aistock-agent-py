@@ -5,9 +5,11 @@ provider 是"候选切片输入"的生产者：给定 SourceContext，返回 Cas
 注册表清单封闭：adapter 引用的 provider 名必须登记在本模块 SOURCE_PROVIDERS。
 """
 
+import hashlib
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,9 +17,19 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.services.data_client import NodeApiClient
+from aistock_agent.services.event_store import is_major_event, load_event_scrape
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
+
+#: 中台 direction 值域 → GT direction_hint 值域映射（四期最终评审 C2）。
+#: 中台（normalize_event/event_scoring_llm）direction ∈ {positive, negative, neutral}；
+#: GT 方向先验白名单 ∈ {bullish, bearish, neutral}（ground_truth.py:168）——
+#: 不映射则 positive/negative 原样写入 meta.direction_hint 不会被注入。
+_DIRECTION_MAP = {"positive": "bullish", "negative": "bearish", "neutral": "neutral"}
+
 
 #: 通用产片候选：与 build_case 入参一一对应，覆盖 adapter.data_deps 所需切片字段
 @dataclass
@@ -128,13 +140,94 @@ async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
+    """事件库产片源（四期）：近 window_days 天事件库重大事件 → CaseCandidate。
+
+    消费统一事件抓取中台（event_scraper）入库数据（只读，不改中台）；
+    is_major_event（impact_score >= 4）过滤；telegraph_records 用事件
+    summary/content（语料进 GT corpus）；meta 带 direction_hint（事件方向先验，
+    GT 生成消费）。
+
+    load_event_scrape/is_major_event/shanghai_today 为模块级 import：四期 brief
+    用例 patch 目标是 case_sourcers 模块属性（对齐 market_close_snapshot 的
+    find_recent_trading_day 先例——brief 用例 patch 模块属性时提升为模块级）。
+    """
+    days = int(cast("int", ctx.params.get("window_days", 30)))
+    today = shanghai_today()
+    candidates: list[CaseCandidate] = []
+    for offset in range(days):
+        day = (today - timedelta(days=offset)).isoformat()
+        try:
+            events = await load_event_scrape(day)
+        except Exception as exc:  # noqa: BLE001 — 单日读取失败降级跳过
+            logger.warning("event_store_scan_day_failed", date=day, error=str(exc))
+            continue
+        for event in events:
+            if not is_major_event(event):
+                continue
+            # 中台契约（四期最终评审 C1 修复）：
+            # - score_date 是纯日期 "2026-08-14"（评分日锚点，event_store.normalize_event 注释）；
+            # - scrape_at 是上海 naive 时间 "2026-08-14 10:00:00"（无时区）。
+            # 旧实现把 score_date（naive 被 _dt_from_iso 补 UTC → 当日 00:00 UTC）当
+            # event_time，而 telegraph_records.time 用 scrape_at（naive 被
+            # _parse_record_time 补 UTC → 10:00 UTC）→ _record_time_le(10:00, 00:00)
+            # False → 事件记录全被 T 窗口过滤 → cls_telegraph 空 → 空壳 case。
+            # 修复：scrape_at 补 +08:00 转 aware 作 event_time，record_time 存 aware
+            # ISO（_parse_record_time 对 aware 不再二次补 UTC），比较同轴。
+            # scrape_at 缺失时兜底用评分日零点（naive 补 UTC）作锚点，保持防空壳优先。
+            try:
+                scrape_at_raw = str(event.get("scrape_at", "")).strip()
+                if scrape_at_raw:
+                    event_time = _dt_from_iso(f"{scrape_at_raw}+08:00")
+                else:
+                    event_time = _dt_from_iso(str(event.get("score_date", "")))
+                record_time = event_time.isoformat()
+            except (TypeError, ValueError, KeyError):
+                # I1：单条事件时间畸形（不可解析）只跳过该条 + warning，不炸整源
+                logger.warning(
+                    "event_store_scan_skip_malformed_time",
+                    event_id=str(event.get("event_id", ""))[:32],
+                    score_date=str(event.get("score_date", "")),
+                    scrape_at=str(event.get("scrape_at", "")),
+                )
+                continue
+            candidates.append(
+                CaseCandidate(
+                    event_title=str(event["title"]),
+                    event_time=event_time,
+                    telegraph_records=[
+                        {
+                            "time": record_time,
+                            "title": str(event["title"]),
+                            "content": str(event.get("summary", "")),
+                            "url": str(event.get("url", "")),
+                        }
+                    ],
+                    meta={
+                        "t_window": "event",
+                        "source": "event_store",
+                        # C2：中台 positive/negative/neutral → GT 白名单
+                        # bullish/bearish/neutral；未映射值写空串（不注入先验）
+                        "direction_hint": _DIRECTION_MAP.get(
+                            str(event.get("direction", "")), ""
+                        ),
+                    },
+                )
+            )
+    return candidates
+
+
 async def source_cases(
     adapter: IterableAgentAdapter,
     *,
     data_dir: Path | None = None,
     force: bool = False,
 ) -> list[CaseCandidate]:
-    """按 adapter.case_sources 逐个 provider 采集候选；单源失败降级跳过并告警。"""
+    """按 adapter.case_sources 逐个 provider 采集候选；单源失败降级跳过并告警。
+
+    四期：合并后按事件标题指纹去重——同指纹候选只保留第一个（case_sources 顺序
+    保证事件库在前优先），去重范围限单次调用内。
+    """
     candidates: list[CaseCandidate] = []
     for spec in adapter.case_sources:
         provider = SOURCE_PROVIDERS.get(spec.provider)
@@ -161,12 +254,32 @@ async def source_cases(
                 agent=adapter.agent_id,
                 error=str(exc),
             )
-    return candidates
+    # 四期：跨源同事件指纹去重——同指纹候选只保留第一个（case_sources 顺序
+    # 保证事件库在前优先）；保持各源内部产出顺序。范围限单次调用内（跨日不重叠）。
+    seen: set[str] = set()
+    deduped: list[CaseCandidate] = []
+    for candidate in candidates:
+        fp = _candidate_fingerprint(candidate)
+        if fp in seen:
+            logger.info(
+                "case_source_candidate_deduped", fingerprint=fp, title=candidate.event_title
+            )
+            continue
+        seen.add(fp)
+        deduped.append(candidate)
+    return deduped
+
+
+def _candidate_fingerprint(candidate: CaseCandidate) -> str:
+    """事件标题指纹（去空白/标点归一化 → sha1）：跨源同事件识别（四期）。"""
+    normalized = re.sub(r"[\s\W_]+", "", candidate.event_title).lower()
+    return hashlib.sha1(normalized.encode()).hexdigest()
 
 
 #: provider 注册表（清单封闭：新 provider 必须登记于此）
 SOURCE_PROVIDERS: dict[str, Callable[[SourceContext], Awaitable[list[CaseCandidate]]]] = {
     "market_close_snapshot": market_close_snapshot,
+    "event_store_scan": event_store_scan,
     "telegraph_keyword_scan": telegraph_keyword_scan,
 }
 
@@ -229,19 +342,25 @@ async def _collect_industry_graph(*, event_time: datetime) -> dict[str, object] 
     {"chains": [...], "snapshot_generated_at": <采集时刻 ISO>,
      "graph_update_time": <Node payload 内的时间，缺失用采集时刻>,
      "event_time": <事件时间 ISO>, "posterior_exposure": False}
-    采集失败返回 None（降级，不阻断产片）。
+    采集失败重试 1 次（四期加固：三期实测 CLI 产片时单次调用超时/连接池异常，
+    Node 端点 200；重试后仍失败降级 None 不阻断产片）。
     """
-    from aistock_agent.services.data_client import NodeApiClient
-
     # 采集时刻用上海时区（与切片事件时间对齐；datetime.now 本地时区在服务器
     # 与容器间可能漂移，B-5 三时间戳要求可比较）
     from aistock_agent.utils.date import shanghai_now
 
-    try:
-        payload = await NodeApiClient().get_industry_graph_full()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("industry_graph_collect_failed", error=str(exc))
-        return None
+    # 四期：重试 1 次（共 2 次尝试）——首次异常或非 dict 均二次重试；NodeApiClient
+    # 为模块级 import（brief 用例 patch 目标是 case_sourcers 模块属性，对齐
+    # event_store_scan 的模块级 import 先例；data_client 已被 market_trace_snapshot
+    # 传递加载，无循环依赖）。
+    payload: object = None
+    for attempt in range(2):
+        try:
+            payload = await NodeApiClient().get_industry_graph_full()
+            if isinstance(payload, dict):
+                break
+        except Exception as exc:  # noqa: BLE001 — 单次失败重试，不阻断产片
+            logger.warning("industry_graph_collect_failed", attempt=attempt, error=str(exc))
     if not isinstance(payload, dict):
         return None
     collected_at = shanghai_now().isoformat()
