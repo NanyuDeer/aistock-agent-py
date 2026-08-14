@@ -91,13 +91,21 @@ async def market_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
         for src in sources.values()
         if isinstance(src, dict) and src.get("kind") in {"event_evidence", "market_fact"}
     ]
+    # 三期服务器实测修复（2026-08-14）：历史回补 case 的事件锚点必须是目标交易日
+    # （15:30 CST = UTC 07:30），而非构建时刻 captured_at——否则 event_time/case_id
+    # 前缀错标为构建日（如回补 08-07 却标 08-14），T 窗口锚定与去重语义全错。
+    event_time = (
+        _close_time_for_day(day)
+        if isinstance(target_day, str) and target_day
+        else cast(datetime, captured_at)
+    )
     return [
         CaseCandidate(
             event_title=event_title,
-            event_time=cast(datetime, captured_at),
+            event_time=event_time,
             telegraph_records=telegraph_records,
             market_snapshot=snapshot_dict,
-            industry_graph=await _collect_industry_graph(event_time=cast(datetime, captured_at)),
+            industry_graph=await _collect_industry_graph(event_time=event_time),
             meta={"snapshot_kind": "full", "t_window": "close"},
         )
     ]
@@ -203,6 +211,15 @@ def _dt_from_iso(value: str) -> datetime:
     dt = datetime.fromisoformat(value)
     # 按要求保留 timezone.utc（brief 指定 import timezone；UP017 建议 datetime.UTC 等价）
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)  # noqa: UP017
+
+
+def _close_time_for_day(day: str) -> datetime:
+    """目标交易日 15:30 CST（= UTC 07:30）：历史回补 case 的事件锚点（三期实测修复）。
+
+    与 Node getCloseSnapshotByDate 的伪时刻构造一致；day 格式 YYYY-MM-DD。
+    """
+    y, m, d = (int(x) for x in day.split("-"))
+    return datetime(y, m, d, 7, 30, tzinfo=timezone.utc)  # noqa: UP017
 
 
 async def _collect_industry_graph(*, event_time: datetime) -> dict[str, object] | None:
