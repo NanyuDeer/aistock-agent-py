@@ -28,6 +28,39 @@ def test_cache_read_isolation_targets_extended() -> None:
     assert "aistock_agent.services.report_cache.get_report" in targets
 
 
+def test_semantic_fallback_short_circuits_in_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B-2：回放模式 _try_semantic_fallback 显式短路（不发 embedding、不二次查询）。"""
+    import asyncio
+
+    from aistock_agent.services import event_graph_resolver as resolver
+
+    monkeypatch.setenv("REPLAY_CASE_ID", _REPLAY_CASE_ID)
+    # 若未短路，会真实调用 semantic_match_industries（embedding）——用会抛错的
+    # mock 验证短路发生在其之前。
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("回放模式不应调用 embedding")
+
+    monkeypatch.setattr(resolver, "semantic_match_industries", _boom)
+
+    result = asyncio.run(resolver._try_semantic_fallback("半导体"))
+    assert result is None
+
+
+def test_industry_vector_search_short_circuits_in_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-2：回放模式 industry_vector_search 入口短路（不发 embedding）。"""
+    import asyncio
+
+    from aistock_agent.tools import industry_vector_search as ivs
+
+    monkeypatch.setenv("REPLAY_CASE_ID", _REPLAY_CASE_ID)
+    monkeypatch.setattr(ivs.settings, "embedding_api_key", "sk-test")
+
+    result = asyncio.run(ivs.semantic_match_industries(["半导体"], 0.7, 3))
+    assert result == []
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个测试前清除回放开关环境变量，避免跨测试泄漏（不再用 os.environ.pop）。"""
