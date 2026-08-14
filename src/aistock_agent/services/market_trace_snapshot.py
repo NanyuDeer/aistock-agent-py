@@ -958,12 +958,26 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 1. 获取 Node 收盘快照（带 last-close 降级） ──
     # 先尝试 close-snapshot（要求 >= 15:30）；若不可用（盘中/凌晨），
     # 降级到 last-close-snapshot（返回最近一个已完成交易日数据）。
-    close_data = await node_api.get("/internal/market/close-snapshot")
+    # 三期：按目标交易日回补（date=report_date 对任意目标日走 Node 伪时刻重建；
+    # 非交易日/数据缺失 → Node 409 → data_client.get 返回 None → 现有降级链
+    # last-close + trade_date 校验行为不变）。
+    close_data = await node_api.get(f"/internal/market/close-snapshot?date={report_date}")
     used_last_close = False
     if close_data is None:
         close_data = await node_api.get_last_close_snapshot()
         if close_data is not None:
             used_last_close = True
+            actual = _normalize_date_yyyymmdd(close_data.get("trade_date"))
+            # 三期 C2 修复：历史回补时 last-close 兜底数据日 ≠ 请求日 → fail-loud
+            # （否则快照盖章为请求日但数据是最近交易日，产错日 case 进闭环）。
+            # 用 _normalize_date_yyyymmdd 规范化比较，兼容 Node 的 YYYYMMDD/YYYY-MM-DD
+            # 两种格式；no-date 路径 report_date 即最近交易日，兜底 actual == report_date
+            # 正常通过，每日产片零影响。
+            if actual is not None and actual != report_date:
+                raise MarketTraceSnapshotUnavailable(
+                    f"last-close 兜底数据日 {actual} 与请求日期 {report_date} "
+                    "不一致（非交易日或数据缺失，拒绝产片）"
+                )
             logger.info(
                 "build_snapshot_fell_back_to_last_close",
                 report_date=report_date,

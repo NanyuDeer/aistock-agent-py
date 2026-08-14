@@ -1,10 +1,12 @@
-"""build_iterate_cases.py — 迭代切片生成 CLI（二期 case-sourcing）。
+"""build_iterate_cases.py — 迭代切片生成 CLI（二期 case-sourcing，三期 --date 历史回补）。
 
 用法：
   python scripts/build_iterate_cases.py --agent <agent_id> \
-      [--window-days N] [--force] [--data-dir PATH]
+      [--window-days N] [--date YYYY-MM-DD] [--force] [--data-dir PATH]
 
 --agent choices 动态取自 iterate/adapters.py 的 iterable_agent_ids()（注册即生效）。
+--window-days 仅对 telegraph_keyword_scan 产片源生效；--date 仅对
+market_close_snapshot 产片源生效（review 历史回补，Task 2 已支持 params["date"]）。
 产片统一走 build_cases_for_adapter（sourcing → build_case → GT → 校验 → 回滚）。
 只在服务器沙盒/生产环境运行（依赖 Node 生产数据源与 LLM key）。
 """
@@ -40,6 +42,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=30,
         help="扫描窗口天数；仅对 telegraph_keyword_scan 产片源生效（review 等无该 provider 的 agent 忽略）",  # noqa: E501
     )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="历史交易日 YYYY-MM-DD（仅对 market_close_snapshot 产片源生效，review 历史回补用）",
+    )
     parser.add_argument("--force", action="store_true", help="跳过一致性校验强制落盘")
     parser.add_argument("--data-dir", type=Path, default=None)
     return parser
@@ -56,12 +63,14 @@ async def main(argv: list[str]) -> int:
 
     data_dir = args.data_dir or get_data_dir()
     adapter = get_adapter(args.agent)
-    if args.window_days != 30:
-        # CLI 显式覆盖产片源参数（默认 30 即用 adapter 登记值）。
-        # --window-days 仅对 telegraph_keyword_scan 产片源生效；adapter 无该
-        # provider（如 review 的 market_close_snapshot）时参数被静默忽略——
-        # 显式告警避免误解（final review I-1）。
-        if not any(
+    # CLI 显式覆盖产片源参数（--window-days 默认 30 即用 adapter 登记值；--date
+    # 缺省 None 即走最近交易日）。两参数分别只对对应 provider 生效，合并进一次
+    # new_sources 构造循环（对每个 spec 按 provider 名分别注入，避免两次 replace
+    # 互相覆盖）；adapter 无对应 provider 时显式告警避免误解（final review I-1）。
+    override_window_days = args.window_days != 30
+    override_date = args.date is not None
+    if override_window_days or override_date:
+        if override_window_days and not any(
             spec.provider == "telegraph_keyword_scan" for spec in adapter.case_sources
         ):
             print(
@@ -69,10 +78,31 @@ async def main(argv: list[str]) -> int:
                 f"产片源生效，adapter {adapter.agent_id} 无该 provider，参数被忽略",
                 file=sys.stderr,
             )
+        if override_date and not any(
+            spec.provider == "market_close_snapshot" for spec in adapter.case_sources
+        ):
+            print(
+                f"warning: --date {args.date} 仅对 market_close_snapshot 产片源生效，"
+                f"adapter {adapter.agent_id} 无该 provider，参数被忽略",
+                file=sys.stderr,
+            )
         new_sources = tuple(
-            CaseSourceSpec(spec.provider, {**spec.params, "window_days": args.window_days})
-            if spec.provider == "telegraph_keyword_scan"
-            else spec
+            CaseSourceSpec(
+                spec.provider,
+                {
+                    **spec.params,
+                    **(
+                        {"window_days": args.window_days}
+                        if override_window_days and spec.provider == "telegraph_keyword_scan"
+                        else {}
+                    ),
+                    **(
+                        {"date": args.date}
+                        if override_date and spec.provider == "market_close_snapshot"
+                        else {}
+                    ),
+                },
+            )
             for spec in adapter.case_sources
         )
         adapter = replace(adapter, case_sources=new_sources)
