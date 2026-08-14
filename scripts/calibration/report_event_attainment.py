@@ -73,7 +73,9 @@ def _collect_event_cases(base: Path) -> list[dict[str, Any]]:
         cases.append({
             "case_id": case_id,
             "best_score": float(best.get("score", 0.0)),
-            "best_round": int(best.get("round", 0)),
+            # 实际轮数 = experiments 轮文件数（非 best_round：全程未提升时
+            # best 停在首轮会低估真实轮数，服务器实测加拿大 case 5 轮被记为 1）
+            "rounds": len(list(base.glob(f"experiments/{case_id}_r*.json"))),
             "gt_confidence": _gt_confidence(base, f"gt_{case_id}"),
         })
     return cases
@@ -84,8 +86,9 @@ def compute_event_attainment(
 ) -> dict[str, float]:
     """达标率 + 轮数分布（达标 = best_score >= target 且 GT confidence != low）。
 
-    max_rounds_exhausted：best_round >= max_rounds 的 case 数（best_round 即
-    best.json 的 round，表示实验轮数已达上限耗尽）。空输入 → 全零统计。
+    max_rounds_exhausted：rounds >= max_rounds 的 case 数（rounds 为 experiments
+    轮文件数——实际实验轮数；服务器实测 best_round 会低估全程未提升 case 的轮数）。
+    空输入 → 全零统计。
     """
     if not cases:
         return {
@@ -98,7 +101,7 @@ def compute_event_attainment(
         c for c in cases
         if c["best_score"] >= target_score and c.get("gt_confidence") != "low"
     ]
-    rounds = [c["best_round"] for c in cases]
+    rounds = [c["rounds"] for c in cases]
     return {
         "attainment_rate": round(len(attained) / len(cases), 4),
         "avg_rounds": round(statistics.fmean(rounds), 4),
