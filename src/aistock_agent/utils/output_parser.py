@@ -727,6 +727,9 @@ def transform_to_frontend(
     if understanding and isinstance(understanding, dict):
         reports["event_understanding"] = {
             "summary": str(understanding.get("summary", "")),
+            # 短标题（2026-08-14）：透传 LLM 独立生成的 title，供缓存幂等补写
+            # 复用同一标题；前端仍消费顶层 content.title，本字段仅内部一致性用途。
+            "title": str(understanding.get("title", "")),
             "coreIndustry": str(understanding.get("coreIndustry", "")),
             "coreChanges": [
                 {

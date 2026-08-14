@@ -342,6 +342,26 @@ def test_transform_to_frontend_null_modules():
     assert result["event_investment"] is None
 
 
+def test_transform_understanding_passes_short_title():
+    """短标题方案（2026-08-14）：event_understanding.title 透传 LLM 独立短标题，
+    供缓存幂等补写复用；summary 保持完整概述，二者语义分离。"""
+    understanding = {
+        "title": "消费板块获资金集中流入",
+        "summary": "资金偏好消费龙头，市场短期风格快速切换至消费。",
+        "coreChanges": [{"variable": "资金偏好", "before": "科技", "after": "消费"}],
+    }
+    meta = {"eventId": "evt_003", "title": "", "source": ""}
+
+    result = transform_to_frontend(understanding, None, None, None, meta)
+
+    eu = result["event_understanding"]
+    assert eu["title"] == "消费板块获资金集中流入"
+    assert eu["summary"] == "资金偏好消费龙头，市场短期风格快速切换至消费。"
+    # title 缺失时透传空字符串（不抛出）
+    result2 = transform_to_frontend({"summary": "概述"}, None, None, None, meta)
+    assert result2["event_understanding"]["title"] == ""
+
+
 def test_transform_to_frontend_chinese_direction():
     """LLM 输出中文方向值 → 正确映射为英文"""
     transmission = {
