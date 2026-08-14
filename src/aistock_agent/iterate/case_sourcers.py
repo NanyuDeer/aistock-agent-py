@@ -7,7 +7,7 @@ provider 是"候选切片输入"的生产者：给定 SourceContext，返回 Cas
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,7 +15,9 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.services.event_store import is_major_event, load_event_scrape
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -128,6 +130,56 @@ async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
+    """事件库产片源（四期）：近 window_days 天事件库重大事件 → CaseCandidate。
+
+    消费统一事件抓取中台（event_scraper）入库数据（只读，不改中台）；
+    is_major_event（impact_score >= 4）过滤；telegraph_records 用事件
+    summary/content（语料进 GT corpus）；meta 带 direction_hint（事件方向先验，
+    GT 生成消费）。
+
+    load_event_scrape/is_major_event/shanghai_today 为模块级 import：四期 brief
+    用例 patch 目标是 case_sourcers 模块属性（对齐 market_close_snapshot 的
+    find_recent_trading_day 先例——brief 用例 patch 模块属性时提升为模块级）。
+    """
+    days = int(cast("int", ctx.params.get("window_days", 30)))
+    today = shanghai_today()
+    candidates: list[CaseCandidate] = []
+    for offset in range(days):
+        day = (today - timedelta(days=offset)).isoformat()
+        try:
+            events = await load_event_scrape(day)
+        except Exception as exc:  # noqa: BLE001 — 单日读取失败降级跳过
+            logger.warning("event_store_scan_day_failed", date=day, error=str(exc))
+            continue
+        for event in events:
+            if not is_major_event(event):
+                continue
+            # score_date 形如 "2026-08-14 10:30:00+08:00"：replace 空格为 T 后
+            # fromisoformat 才可解析（Python <3.11 不接受 " " 分隔的 ISO 时间）
+            event_time = _dt_from_iso(str(event["score_date"]).replace(" ", "T"))
+            candidates.append(
+                CaseCandidate(
+                    event_title=str(event["title"]),
+                    event_time=event_time,
+                    telegraph_records=[
+                        {
+                            "time": str(event.get("scrape_at", "")),
+                            "title": str(event["title"]),
+                            "content": str(event.get("summary", "")),
+                            "url": str(event.get("url", "")),
+                        }
+                    ],
+                    meta={
+                        "t_window": "event",
+                        "source": "event_store",
+                        "direction_hint": str(event.get("direction", "")),
+                    },
+                )
+            )
+    return candidates
+
+
 async def source_cases(
     adapter: IterableAgentAdapter,
     *,
@@ -167,6 +219,7 @@ async def source_cases(
 #: provider 注册表（清单封闭：新 provider 必须登记于此）
 SOURCE_PROVIDERS: dict[str, Callable[[SourceContext], Awaitable[list[CaseCandidate]]]] = {
     "market_close_snapshot": market_close_snapshot,
+    "event_store_scan": event_store_scan,
     "telegraph_keyword_scan": telegraph_keyword_scan,
 }
 

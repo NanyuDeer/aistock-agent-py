@@ -1,6 +1,7 @@
 """case_sourcers 注册表清单封闭 + provider 候选构造（二期 case-sourcing）。"""
 
 import asyncio
+from datetime import date as _date
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -144,3 +145,64 @@ def test_market_close_snapshot_date_param_rejects_trade_date_mismatch() -> None:
     ):
         with pytest.raises(RuntimeError, match="历史回补日期不一致"):
             asyncio.run(market_close_snapshot(ctx))
+
+
+def test_event_store_scan_filters_major_events() -> None:
+    """四期：事件库产片源——is_major_event 过滤 + 候选构造（meta 带 direction_hint）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, event_store_scan
+
+    ctx = SourceContext(agent_id="event_analyst", params={"window_days": 1}, data_dir=None)
+    major = {
+        "title": "央行降准 50 基点", "summary": "央行宣布降准支持实体经济",
+        "url": "https://x/1", "impact_score": 5, "direction": "bullish",
+        "source": "cls", "score_date": "2026-08-14 10:30:00+08:00", "scrape_at": "2026-08-14T10:00:00+08:00",  # noqa: E501
+    }
+    minor = {
+        "title": "某公司发布公告", "summary": "常规公告", "url": "https://x/2",
+        "impact_score": 2, "direction": "neutral", "source": "cls",
+        "score_date": "2026-08-14 10:30:00+08:00", "scrape_at": "2026-08-14T10:00:00+08:00",
+    }
+    with (
+        patch("aistock_agent.iterate.case_sourcers.load_event_scrape", AsyncMock(return_value=[major, minor])),  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers.shanghai_today", return_value=_date(2026, 8, 14)),  # noqa: E501
+    ):
+        candidates = asyncio.run(event_store_scan(ctx))
+    assert len(candidates) == 1  # 仅 major
+    assert candidates[0].event_title == "央行降准 50 基点"
+    assert candidates[0].telegraph_records[0]["content"] == "央行宣布降准支持实体经济"
+    assert candidates[0].meta == {
+        "t_window": "event", "source": "event_store", "direction_hint": "bullish",
+    }
+
+
+def test_event_store_scan_skips_failed_day() -> None:
+    """四期：单日事件库读取失败降级跳过（不阻断其他天）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, event_store_scan
+
+    ctx = SourceContext(agent_id="event_analyst", params={"window_days": 2}, data_dir=None)
+
+    async def flaky(score_date: str):
+        if score_date == "2026-08-14":
+            raise RuntimeError("db timeout")
+        return []
+
+    with (
+        patch("aistock_agent.iterate.case_sourcers.load_event_scrape", side_effect=flaky),
+        patch("aistock_agent.iterate.case_sourcers.shanghai_today", return_value=_date(2026, 8, 14)),  # noqa: E501
+    ):
+        candidates = asyncio.run(event_store_scan(ctx))
+    assert candidates == []  # 失败日跳过，不抛
+
+
+def test_event_analyst_registers_event_store_first() -> None:
+    """四期：event_analyst 产片源 = 事件库主源 + 电报后备（事件库在前保证去重优先）。"""
+    from aistock_agent.iterate.adapters import get_adapter
+
+    adapter = get_adapter("event_analyst")
+    assert [s.provider for s in adapter.case_sources] == [
+        "event_store_scan", "telegraph_keyword_scan",
+    ]
