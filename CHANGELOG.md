@@ -1,6 +1,15 @@
-﻿# CHANGELOG.md — aistock-agent-py 变更记录
+# CHANGELOG.md — aistock-agent-py 变更记录
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
+
+## [changer] 2026-08-14 — SPEC 设计文档忽略规则
+
+**开发者**: changelog
+
+### 改进
+- `.gitignore` 新增 `docs/*-SPEC.md` 忽略规则：SPEC 设计文档不提交不推送，仅本地维护
+
+---
 
 ## [changer-prediction-split] 2026-08-14 — 大盘溯源影响持续性预判独立成模块 + 跨年日期可靠性
 
