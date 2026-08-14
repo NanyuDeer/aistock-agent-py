@@ -330,6 +330,51 @@
 
 ## [main] 2026-08-02 — ChatAgent 最小落地 M1-M5 完成 + 非交易日统一提示
 
+---
+
+## [changer] 2026-08-14 — 大盘溯源影响持续性预判可靠性修复
+**开发者**: 37588
+
+### 修复
+- 影响持续性预判（B2 预测）可靠性修复：大盘溯源报告「影响持续性预判」区块此前持续为空（服务器实测 `prediction=null`）——根因①预测到期日跨年（long 档 +120 交易日进入 2027）触发 `chinese_calendar` 越界异常导致预测整体丢弃；②LLM 输出零容错（缺 schema_version / 多余字段 / 围栏文本即整体失败）；③证据 ID 一票否决（任一幻觉即整体抛错）
+- 交易日判断越年 fallback：`chinese_calendar` 仅覆盖 2004-2026，2027 年起 `is_workday` 抛异常；现捕获越界并按可交易日处理（只跳周末），库更新后自动恢复精确判断——同步修复 2027 年定时调度（晨报/晚报/复盘/预测验证）与预测到期日计算
+- 预测输出三层容错：到期日计算 best-effort（失败降级空字典不阻断预测）；证据 ID 过滤而非一票否决（对齐对话内预测路径）；LLM 输出解析容错（围栏/前缀剥离、JSON 提取、剔除 thinking 等多余键、缺 schema_version 自动注入 1.0）
+
+### 测试
+- 新增 9 个回归用例（2027 越年交易日、跨年 +120 交易日、到期日失败降级、证据 ID 过滤、缺 schema_version 注入、多余键剔除、围栏/前缀提取、纯文本降级 None）；全量单测 1553 passed，ruff 0，mypy 无新增错误
+
+> 代码验收通过（待生产验证：服务器 08-14 20:30 review_full 实测 prediction 非 null）。
+
+---
+
+
+## [changer] 2026-08-13 — 对话体验优化：回答内容流式显示
+**开发者**: 37588
+
+### 新增
+- 回答内容流式显示：AI 回答生成完成后按内容分节渐进呈现（配合打字机动画），替代此前的整段一次性弹出
+- 内容流式事件通道：回答文本增量与异常整段替换两类事件，经统一通道下发，支持断线续传回放
+
+### 改进
+- 生成中断时保留已生成内容并追加「已停止生成」提示，不再清空半截内容
+- 流式展示与既有「思考过程」「工具进度」展示协同，回答完成时按前缀校验只补尾部，避免内容跳变
+
+> 代码验收通过（待生产验证）。
+
+---
+
+
+## [changer] 2026-08-13 — 对话体验优化：深度分析触发修复
+**开发者**: 37588
+
+### 修复
+- 对话「深度分析」触发修复：此前使用股票中文名称提问（如"贵州茅台今天怎么样"）会被固定为轻量回答，「深度分析」入口无法生效；现支持在明确表达深度分析意图（如"深度分析贵州茅台"）或点击「深度分析」按钮时正确进入深度分析流程
+
+> 代码验收通过（待生产验证）。
+
+---
+
+
 
 ---
 
@@ -360,6 +405,7 @@
 
 ### 测试
 - `tests/unit/test_iterate_replay.py`: 17 passed（含清单封闭测试 RED→GREEN）；ruff All checks passed
+
 ## [fix/iterate-case-sufficiency] 2026-08-13 — 产片链路数据完整性防御（case_20260731 全 0 分事故）
 **开发者**: Aria
 
@@ -374,6 +420,7 @@
 - 验证：产片链路 + case/GT/校验/评估/调度 59 passed；ruff All checks passed；mypy iterate clean
 
 ---
+
 
 ## [feat/event-scrape-hub] 2026-08-13 — 迭代辩论裁决修复第二轮收尾（T9 M3/T10 Q1/T11 + 基线清理）
 **开发者**: Aria
@@ -394,50 +441,6 @@
 
 ---
 
-## [changer] 2026-08-13 — 对话体验优化：深度分析触发修复
-**开发者**: 37588
-
-### 修复
-- 对话「深度分析」触发修复：此前使用股票中文名称提问（如"贵州茅台今天怎么样"）会被固定为轻量回答，「深度分析」入口无法生效；现支持在明确表达深度分析意图（如"深度分析贵州茅台"）或点击「深度分析」按钮时正确进入深度分析流程
-
-> 代码验收通过（待生产验证）。
-
----
-
-## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final review 复审修复（Round 2）
-**开发者**: 37588
-
-### 修复
-- `services/event_scrape_sources.py` I1 过滤由 `published.startswith(score_date)`（北京日期前缀）改为 `_event_shanghai_date(published) == score_date`（上海时区日期归属）——Node `published_at TIMESTAMPTZ` 经 `toISOString()` 输出 UTC ISO（如 `2026-08-12T02:00:00.000Z`），北京 00:00-07:59 当日事件 UTC 日期落前一日（`2026-08-11T22:00:00.000Z` = 北京 8-12 06:00）被旧逻辑误过滤；新增 `_event_shanghai_date`（UTC 带 Z → 转上海；本地无时区 → 显式 `replace(tzinfo=Asia/Shanghai)` 保证确定性；解析失败宽容回退 `raw[:10]`）；保留"无时间字段保守保留"守卫
-- `agents/workers/morning.py::_event_records_to_major_events` 加 `impact_score >= MAJOR_IMPACT_THRESHOLD`（=4）过滤（对齐注入路径过滤语义，docstring 注明），缓存命中时 `analysis_reports["major_events"]` 不再混入 impact=1 普通证据（手动晨报端点 major_event_count 诊断计数失真）；函数为模块私有、仅缓存路径一处调用，无复用歧义
-
-### 测试
-- 新增 4 条：UTC 上海日期归属（当日保留/北京凌晨保留/真陈旧过滤，`shanghai_today()` 相对日期无炸弹）、非法时间回退、缓存命中 major/minor 过滤、全普通证据降级回 details 提取
-
-### 说明
-- 偏差：任务单测描述"`2026-08-11T22:00:00.000Z` 应过滤"与其 Issue-1 正文"北京凌晨当日事件应保留"矛盾（该时间戳上海日期=当日），按 Issue-1 正确语义实现并补充真陈旧行用例锁定
-- 验证：定向 pytest 28 passed；全量 1471 passed / 6 既有失败（test_industry_vector_search API 依赖，基线一致零回归）；mypy 2 文件 0 错误；ruff 4 文件 All checks passed
-
----
-
-## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final whole-branch review 修复（C1 + I1-I4 + Minor）
-**开发者**: 37588
-
-### 修复
-- **C1（Critical）**：`event_scrape_sources.py::collect_eastmoney_judgements` 响应键名 `"items"` → `"events"`（Node `StockMonitorService.getEvents` 返回 `{total, events}`）——修复东财三模式（full_daily/intraday/event_triggered）生产恒空
-- **I1**：东财行按 `published_at`/`event_time` 日期前缀过滤（alerts 接口不支持日期窗口），防昨日/前日陈旧行以当日 score_date 反复入库
-- **I2**：`raw.setdefault("url", raw.get("detail_url") or "")`——Node 输出 `detail_url` 非 `url`，修复东财事件 url 恒空
-- **I3**：`save_event_scrape` 返回值增加 `added`/`added_events`（本批真正新增数），传导守卫 `persisted>0` → `added>0` 且只传新增子集——全去重批次不再重复触发整批传导（LLM 成本）
-- **I4**：`scheduler._run_morning_task` 降级分支——当日事件库为空且 morning 产出 major_events 时兜底触发传导（恢复 `_pending_event_tasks` 强引用）；M1 随之解决
-- **M2**：`data_client.py` 新增 `get_analysis_report_quiet`（404 静默）；`load_event_scrape` 改走该方法并对空库降级 warning（不再刷 error 级 404）
-- **M4**：晨报注入前按 `impact_score >= MAJOR_IMPACT_THRESHOLD` 过滤；全普通时降级自主检索文案
-- **M5**：`scrape_event_triggered` 加 symbol 空守卫（不采集不落库）
-- **M8**：盘中 cron `0 10-14 * * 1-5` → `0 10-11,13-14 * * 1-5`（避开 A 股午休）
-
-### 验证
-- 全量 pytest 1467 passed / 6 既有失败（基线一致零回归）；mypy 0 新增；ruff All checks passed
-
----
 
 ## [changer] 2026-08-12 — Phase 5 长会话上下文管理
 **开发者**: 37588
@@ -458,6 +461,7 @@
 
 ---
 
+
 ## [changer] 2026-08-12 — 问题 18 WS recv 竞态修复（Phase 2 回归补丁）
 **开发者**: 37588
 
@@ -468,6 +472,44 @@
 > 验证：TDD RED→GREEN；单元 test_ws_chat_replacement.py 15/15 + 定向契约回归 22/22（chat_task_manager / ws 集成 / ws_resume / token_usage）；全量测试回归新增失败清零（+1 新增回归测试）；ruff 改动文件 0；真实 WS 冒烟同一连接连续 3 轮 done 全部送达、连接保持、主动关闭 code=1000（非 1005 崩溃）。不改 resume/stop/归属校验协议与事件协议，前端零改动。生产部署验证待 V1 部署窗口。
 
 ---
+
+
+## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final review 复审修复（Round 2）
+**开发者**: 37588
+
+### 修复
+- `services/event_scrape_sources.py` I1 过滤由 `published.startswith(score_date)`（北京日期前缀）改为 `_event_shanghai_date(published) == score_date`（上海时区日期归属）——Node `published_at TIMESTAMPTZ` 经 `toISOString()` 输出 UTC ISO（如 `2026-08-12T02:00:00.000Z`），北京 00:00-07:59 当日事件 UTC 日期落前一日（`2026-08-11T22:00:00.000Z` = 北京 8-12 06:00）被旧逻辑误过滤；新增 `_event_shanghai_date`（UTC 带 Z → 转上海；本地无时区 → 显式 `replace(tzinfo=Asia/Shanghai)` 保证确定性；解析失败宽容回退 `raw[:10]`）；保留"无时间字段保守保留"守卫
+- `agents/workers/morning.py::_event_records_to_major_events` 加 `impact_score >= MAJOR_IMPACT_THRESHOLD`（=4）过滤（对齐注入路径过滤语义，docstring 注明），缓存命中时 `analysis_reports["major_events"]` 不再混入 impact=1 普通证据（手动晨报端点 major_event_count 诊断计数失真）；函数为模块私有、仅缓存路径一处调用，无复用歧义
+
+### 测试
+- 新增 4 条：UTC 上海日期归属（当日保留/北京凌晨保留/真陈旧过滤，`shanghai_today()` 相对日期无炸弹）、非法时间回退、缓存命中 major/minor 过滤、全普通证据降级回 details 提取
+
+### 说明
+- 偏差：任务单测描述"`2026-08-11T22:00:00.000Z` 应过滤"与其 Issue-1 正文"北京凌晨当日事件应保留"矛盾（该时间戳上海日期=当日），按 Issue-1 正确语义实现并补充真陈旧行用例锁定
+- 验证：定向 pytest 28 passed；全量 1471 passed / 6 既有失败（test_industry_vector_search API 依赖，基线一致零回归）；mypy 2 文件 0 错误；ruff 4 文件 All checks passed
+
+---
+
+
+## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final whole-branch review 修复（C1 + I1-I4 + Minor）
+**开发者**: 37588
+
+### 修复
+- **C1（Critical）**：`event_scrape_sources.py::collect_eastmoney_judgements` 响应键名 `"items"` → `"events"`（Node `StockMonitorService.getEvents` 返回 `{total, events}`）——修复东财三模式（full_daily/intraday/event_triggered）生产恒空
+- **I1**：东财行按 `published_at`/`event_time` 日期前缀过滤（alerts 接口不支持日期窗口），防昨日/前日陈旧行以当日 score_date 反复入库
+- **I2**：`raw.setdefault("url", raw.get("detail_url") or "")`——Node 输出 `detail_url` 非 `url`，修复东财事件 url 恒空
+- **I3**：`save_event_scrape` 返回值增加 `added`/`added_events`（本批真正新增数），传导守卫 `persisted>0` → `added>0` 且只传新增子集——全去重批次不再重复触发整批传导（LLM 成本）
+- **I4**：`scheduler._run_morning_task` 降级分支——当日事件库为空且 morning 产出 major_events 时兜底触发传导（恢复 `_pending_event_tasks` 强引用）；M1 随之解决
+- **M2**：`data_client.py` 新增 `get_analysis_report_quiet`（404 静默）；`load_event_scrape` 改走该方法并对空库降级 warning（不再刷 error 级 404）
+- **M4**：晨报注入前按 `impact_score >= MAJOR_IMPACT_THRESHOLD` 过滤；全普通时降级自主检索文案
+- **M5**：`scrape_event_triggered` 加 symbol 空守卫（不采集不落库）
+- **M8**：盘中 cron `0 10-14 * * 1-5` → `0 10-11,13-14 * * 1-5`（避开 A 股午休）
+
+### 验证
+- 全量 pytest 1467 passed / 6 既有失败（基线一致零回归）；mypy 0 新增；ruff All checks passed
+
+---
+
 
 ## [changer] 2026-08-11 — Phase 2 断点续传 + 打断/停止/重试（问题 15）
 **开发者**: 37588
@@ -486,6 +528,7 @@
 > 验证：定向 40/40 + ruff 改动文件 0；全量测试回归新增失败清零（并修复 8 个基线失败）；三仓库整分支 review Ready to merge。
 
 ---
+
 
 ## [changer] 2026-08-11 — P0 端口层封堵（uvicorn 改绑）+ 文档
 **开发者**: 37588
