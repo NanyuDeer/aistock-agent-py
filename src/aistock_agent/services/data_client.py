@@ -482,6 +482,16 @@ class NodeApiClient:
         """读取全部 pending 预测记录（到期验证扫描用）。"""
         return await self.get_list("/internal/predictions?status=pending") or []
 
+    async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
+        """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
+
+        供 Python 端"已验证拒覆盖"防御查询（PR-A/T5）：app-api GET
+        /internal/predictions 支持 source_id 过滤后，返回该 source_id 下
+        的全部记录行；失败/无记录返回空列表（``get_list`` 已吞异常）。
+        source_id 形如 ``review:2026-08-14``，冒号为 URL query 安全字符，无需编码。
+        """
+        return await self.get_list(f"/internal/predictions?source_id={source_id}") or []
+
     async def update_prediction_verification(
         self,
         prediction_id: int,

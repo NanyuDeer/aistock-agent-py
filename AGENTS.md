@@ -61,7 +61,9 @@ START → supervisor(quick_think, 意图路由)
   08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
-  15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
+  15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
+  20:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 独立消费组 prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）
+  旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
 
 ### 多专家 Agent 协作体系（参考涨乐AI）
@@ -444,11 +446,12 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
 | `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
-| `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates） |
-| `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描） |
+| `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates；支持可选 status='pending'\|'skipped' 与 skip_reason——skip_reason 存 prediction 对象内） |
+| `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描）；支持可选 `source_id`（如 `review:2026-08-14`）过滤 |
 | `PUT /internal/predictions/:id/verification` | prediction_records | 回写单档位验证结果（horizon/result/actual/reason → 全档位覆盖自动置 verified） |
+| `POST /internal/predictions/regenerate` | prediction_records | **按需/补偿预测代理**：仅限当日（trade_date===上海今日）+ Redis 限流（每 date 每小时 ≤3）+ 已验证拒覆盖 409 + 90s 超时，转发 Python `POST /api/agent/internal/predictions/from-trace`（body {trade_date, trace_id}） |
 
-> **B2 预测能力（影响持续性推演）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。`evolution_steps`（label+text 结构化演化步骤，供前端时间轴渲染）为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
+> **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed|due_dates_failed, ...)`——gate/due_dates 失败落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年（chinese_calendar 覆盖 2004-2026 之外）due date 显式 due_dates_failed 告警，不静默产出近似日期**（`utils/date.py` 支持 `settings.holidays_extra` 补充休市日源，2027 数据发布/库升级后自动恢复精确）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
 
 ## 常用命令
 

@@ -1547,7 +1547,79 @@ async def trigger_evening_chain(
         raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
 
 
-# ── CHAT QA ────────────────────────────────────────────────────────
+# ── 大盘溯源后接预测（独立触发，PR-A/T5；T6 regenerate 代理的转发目标） ──
+
+
+@router.post("/internal/predictions/from-trace")
+async def trigger_predictions_from_trace(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """大盘溯源后接预测独立触发端点（供 app-api /regenerate 代理转发）。
+
+    流程：trade_date 校验 → 已验证拒覆盖（409，SPEC S6）→ predict_from_trace →
+    TraceUnavailableError 落 skipped 记录并返回 200（硬约束 7：不静默缺失）。
+    成功/llm_failed/parse_failed 均返回 ``{status, reason, record}``（后两者
+    record=None 不落库，调用方（T6 代理）可重试）；意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import (
+        TraceUnavailableError,
+        predict_from_trace,
+        save_skipped_prediction,
+    )
+
+    if not body or not body.get("trade_date"):
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+    trade_date = body["trade_date"]
+    try:
+        parsed_date = date.fromisoformat(trade_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != trade_date:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+
+    trace_id = body.get("trace_id") or "manual-regenerate"
+    logger = structlog.get_logger()
+    logger.info("predictions_from_trace_start", trade_date=trade_date, trace_id=trace_id)
+    try:
+        # 已验证拒覆盖防御（SPEC S6）：同交易日已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预测被静默重写
+        existing = await node_api.list_predictions(f"review:{trade_date}")
+        for record in existing:
+            verification = record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        result, record = await predict_from_trace(trace_id, trade_date)
+        logger.info(
+            "predictions_from_trace_done",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            status=result.status,
+        )
+        return {"status": result.status, "reason": result.reason, "record": record}
+    except TraceUnavailableError as exc:
+        # 溯源数据不可用：落 skipped 记录并原样暴露原因，不静默缺失（硬约束 7）
+        skipped = await save_skipped_prediction(f"review:{trade_date}", str(exc))
+        logger.warning(
+            "predictions_from_trace_trace_unavailable",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            reason=str(exc),
+        )
+        return {"status": "skipped", "reason": str(exc), "record": skipped}
+    except HTTPException:
+        # 409/400 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "predictions_from_trace_failed",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-trace failed: {exc}")
 
 
 @router.post("/qa")

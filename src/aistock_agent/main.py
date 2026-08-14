@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 启动事件消费者（quick_snapshot_enabled 时）
     if settings.quick_snapshot_enabled:
         try:
-            from aistock_agent.services.event_bus import EventBus
+            from aistock_agent.services.event_bus import EventBus, set_default_bus
             from aistock_agent.services.event_consumers import ConsumerContext, start_all_consumers
             from aistock_agent.services.redis_pool import RedisPool as _RP  # noqa: N814
 
@@ -68,6 +68,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 consumer_group=settings.event_bus_consumer_group,
                 stream_max_len=settings.event_stream_max_len,
             )
+            set_default_bus(event_bus)  # 供 review.run() 双保险补发 review_done 使用
             ctx = ConsumerContext(event_bus)
             start_all_consumers(ctx)
             logger.info("event_consumers_started")
@@ -154,9 +155,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     if settings.quick_snapshot_enabled:
         try:
+            from aistock_agent.services.event_bus import set_default_bus
             from aistock_agent.services.event_consumers import stop_all_consumers
 
             await stop_all_consumers()
+            set_default_bus(None)  # 清除默认总线引用，防止关闭后泄漏
         except Exception:
             logger.error("event_consumers_stop_failed", exc_info=True)
 

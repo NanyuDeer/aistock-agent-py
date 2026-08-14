@@ -1,16 +1,30 @@
-"""Consumer 单元测试 — 验证 5 个 consumer 的事件处理逻辑。"""
+"""Consumer 单元测试 — 验证 6 个 consumer 的事件处理逻辑。"""
 
-import pytest
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aistock_agent.services.event_bus import EventBus, Event
+import pytest
+
+from aistock_agent.agents.workers.review import ReviewRunResult
+from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.event_consumers import (
-    ConsumerContext,
-    ReviewQuickConsumer,
-    ReviewFullConsumer,
-    SnapshotConsumer,
-    IterateConsumer,
+    CHANNEL_REVIEW_DONE,
+    CHANNEL_REVIEW_FULL,
+    CHANNEL_REVIEW_QUICK,
+    CHANNEL_SNAPSHOT,
     BroadcastConsumer,
+    ConsumerContext,
+    IterateConsumer,
+    PredictionConsumer,
+    PredictionRetryExhaustedError,
+    ReviewFullConsumer,
+    ReviewQuickConsumer,
+    SnapshotConsumer,
+    start_all_consumers,
+)
+from aistock_agent.services.prediction_service import (
+    PredictionRunResult,
+    TraceUnavailableError,
 )
 
 
@@ -35,10 +49,24 @@ def mock_node_api():
 async def test_review_quick_consumer_calls_run_review_with_quick(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = ReviewQuickConsumer(ctx)
-    event = Event(event_id="evt-1", channel="review_quick", payload={"report_date": "2026-07-30", "trace_id": "t1"})
+    event = Event(
+        event_id="evt-1",
+        channel=CHANNEL_REVIEW_QUICK,
+        payload={"report_date": "2026-07-30", "trace_id": "t1"},
+        group="evening_chain",
+    )
 
-    with patch("aistock_agent.services.event_consumers.run_review", new_callable=AsyncMock) as mock_run:
-        mock_run.return_value = {"status": "ok", "markdown": "# Quick Review"}
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="ok",
+            report_date="2026-07-30",
+            snapshot_kind="quick",
+            trace_id="t1",
+            markdown="# Quick Review",
+        )
         await consumer.handle(event)
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args[1]
@@ -48,38 +76,65 @@ async def test_review_quick_consumer_calls_run_review_with_quick(mock_event_bus,
     # 完成后应该 publish snapshot 事件
     mock_event_bus.publish.assert_called_once()
     pub_args = mock_event_bus.publish.call_args
-    assert pub_args[0][0] == "snapshot"
+    assert pub_args[0][0] == CHANNEL_SNAPSHOT
     assert pub_args[1]["payload"]["snapshot_kind"] == "quick"
+    # quick 链路不发 review_done（S1）
+    assert CHANNEL_REVIEW_DONE not in [c.args[0] for c in mock_event_bus.publish.await_args_list]
 
 
 @pytest.mark.asyncio
 async def test_review_full_consumer_calls_run_review_with_full(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = ReviewFullConsumer(ctx)
-    event = Event(event_id="evt-2", channel="review_full", payload={"report_date": "2026-07-30", "trace_id": "t2"})
+    event = Event(
+        event_id="evt-2",
+        channel=CHANNEL_REVIEW_FULL,
+        payload={"report_date": "2026-07-30", "trace_id": "t2"},
+        group="evening_chain",
+    )
 
-    with patch("aistock_agent.services.event_consumers.run_review", new_callable=AsyncMock) as mock_run:
-        mock_run.return_value = {"status": "ok", "markdown": "# Full Review"}
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="ok",
+            report_date="2026-07-30",
+            snapshot_kind="full",
+            trace_id="t2",
+            markdown="# Full Review",
+        )
         await consumer.handle(event)
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["snapshot_kind"] == "full"
 
-    mock_event_bus.publish.assert_called_once()
-    assert mock_event_bus.publish.call_args[1]["payload"]["snapshot_kind"] == "full"
+    # status=ok → 同时发布 review_done 与 snapshot(full)
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+    snapshot_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["snapshot_kind"] == "full"
 
 
 @pytest.mark.asyncio
 async def test_snapshot_consumer_publishes_iterate_for_full_kind(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = SnapshotConsumer(ctx)
-    event = Event(event_id="evt-3", channel="snapshot", payload={"report_date": "2026-07-30", "snapshot_kind": "full"})
+    event = Event(
+        event_id="evt-3",
+        channel="snapshot",
+        payload={"report_date": "2026-07-30", "snapshot_kind": "full"},
+        group="evening_chain",
+    )
 
     snapshot = {
         "date": "2026-07-30",
         "dimension_1_coverage": {"hit_rate": 0.85, "new_coverage_rate": 0.32},
         "data": {},
     }
-    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot) as mock_snap:
+    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot):
         await consumer.handle(event)
 
     # full snapshot 完成后触发 iterate
@@ -98,14 +153,19 @@ async def test_snapshot_consumer_publishes_iterate_for_full_kind(mock_event_bus,
 async def test_snapshot_consumer_skips_iterate_for_quick_kind(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = SnapshotConsumer(ctx)
-    event = Event(event_id="evt-4", channel="snapshot", payload={"report_date": "2026-07-30", "snapshot_kind": "quick"})
+    event = Event(
+        event_id="evt-4",
+        channel="snapshot",
+        payload={"report_date": "2026-07-30", "snapshot_kind": "quick"},
+        group="evening_chain",
+    )
 
     snapshot = {
         "date": "2026-07-30",
         "dimension_1_coverage": {"hit_rate": 0.85, "new_coverage_rate": 0.32},
         "data": {},
     }
-    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot) as mock_snap:
+    with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot):
         await consumer.handle(event)
 
     # quick snapshot 不触发 iterate
@@ -120,13 +180,20 @@ async def test_snapshot_consumer_skips_iterate_for_quick_kind(mock_event_bus, mo
 async def test_iterate_consumer_publishes_broadcast(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = IterateConsumer(ctx)
-    event = Event(event_id="evt-5", channel="iterate", payload={"report_date": "2026-07-30"})
+    event = Event(
+        event_id="evt-5",
+        channel="iterate",
+        payload={"report_date": "2026-07-30"},
+        group="evening_chain",
+    )
 
     with patch("aistock_agent.agents.workers.iterate.run", new_callable=AsyncMock) as mock_iter:
         mock_iter.return_value = {"final_response": '{"status":"normal","triggered_dimensions":[]}'}
         await consumer.handle(event)
 
-    mock_event_bus.publish.assert_called_once_with("broadcast", payload={"report_date": "2026-07-30"})
+    mock_event_bus.publish.assert_called_once_with(
+        "broadcast", payload={"report_date": "2026-07-30"}
+    )
     # 持久化 content 必须携带受控 brief_summary，否则 brief_evening 会降级
     _, kwargs = mock_node_api.save_analysis_report.call_args
     assert kwargs["report_type"] == "iterate"
@@ -141,12 +208,301 @@ async def test_iterate_consumer_publishes_broadcast(mock_event_bus, mock_node_ap
 async def test_broadcast_consumer_calls_broadcast_run(mock_event_bus, mock_node_api):
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = BroadcastConsumer(ctx)
-    event = Event(event_id="evt-6", channel="broadcast", payload={"report_date": "2026-07-30"})
+    event = Event(
+        event_id="evt-6",
+        channel="broadcast",
+        payload={"report_date": "2026-07-30"},
+        group="evening_chain",
+    )
 
     with (
         patch("aistock_agent.agents.workers.broadcast.run", new_callable=AsyncMock) as mock_bc,
-        patch("aistock_agent.services.event_consumers.build_and_persist_brief", new_callable=AsyncMock) as mock_brief,
+        patch(
+            "aistock_agent.services.event_consumers.build_and_persist_brief",
+            new_callable=AsyncMock,
+        ) as mock_brief,
     ):
         mock_brief.return_value = True
         await consumer.handle(event)
         mock_bc.assert_called_once()
+
+
+# ============================================================================
+# review_done 发布规则（PR-A/T2）
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_review_full_consumer_publishes_review_done_on_ok(mock_event_bus, mock_node_api):
+    """run_review status=ok → 发布 review_done（幂等 event_id=review_done_{date}_{trace_id}）。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewFullConsumer(ctx)
+    event = Event(
+        event_id="evt-full-ok",
+        channel=CHANNEL_REVIEW_FULL,
+        payload={"report_date": "2026-07-30", "trace_id": "t2"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="ok",
+            report_date="2026-07-30",
+            snapshot_kind="full",
+            trace_id="t2",
+            markdown="# Full",
+        )
+        await consumer.handle(event)
+
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    review_done_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_REVIEW_DONE
+    )
+    assert review_done_call.kwargs["event_id"] == "review_done_2026-07-30_t2"
+    assert review_done_call.kwargs["payload"] == {"report_date": "2026-07-30", "trace_id": "t2"}
+    # 既有 snapshot 链路不受影响
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_full_consumer_skips_review_done_on_degraded(mock_event_bus, mock_node_api):
+    """run_review status=degraded → 不发布 review_done（硬约束 6），snapshot 链路照常。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewFullConsumer(ctx)
+    event = Event(
+        event_id="evt-full-degraded",
+        channel=CHANNEL_REVIEW_FULL,
+        payload={"report_date": "2026-07-30", "trace_id": "t2"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="degraded",
+            report_date="2026-07-30",
+            snapshot_kind="full",
+            trace_id="t2",
+            markdown="",
+        )
+        await consumer.handle(event)
+
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert CHANNEL_REVIEW_DONE not in channels
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_full_consumer_skips_review_done_on_skipped(mock_event_bus, mock_node_api):
+    """run_review status=skipped → 不发布 review_done（硬约束 6），snapshot 链路照常。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewFullConsumer(ctx)
+    event = Event(
+        event_id="evt-full-skipped",
+        channel=CHANNEL_REVIEW_FULL,
+        payload={"report_date": "2026-07-30", "trace_id": "t2"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="skipped",
+            report_date="2026-07-30",
+            snapshot_kind="full",
+            trace_id="t2",
+            markdown="",
+        )
+        await consumer.handle(event)
+
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert CHANNEL_REVIEW_DONE not in channels
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_quick_consumer_does_not_publish_review_done(mock_event_bus, mock_node_api):
+    """quick 链路（S1）不发 review_done，即使 run_review status=ok。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewQuickConsumer(ctx)
+    event = Event(
+        event_id="evt-quick-ok",
+        channel=CHANNEL_REVIEW_QUICK,
+        payload={"report_date": "2026-07-30", "trace_id": "t1"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="ok",
+            report_date="2026-07-30",
+            snapshot_kind="quick",
+            trace_id="t1",
+            markdown="# Quick",
+        )
+        await consumer.handle(event)
+
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert CHANNEL_REVIEW_DONE not in channels
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+
+
+# ============================================================================
+# PredictionConsumer（独立消费组 prediction_chain，PR-A/T2）
+# ============================================================================
+
+
+def _prediction_event(report_date: str = "2026-07-30", trace_id: str = "t1") -> Event:
+    return Event(
+        event_id=f"review_done_{report_date}_{trace_id}",
+        channel=CHANNEL_REVIEW_DONE,
+        payload={"report_date": report_date, "trace_id": trace_id},
+        group="prediction_chain",
+    )
+
+
+@pytest.mark.asyncio
+async def test_prediction_consumer_ok_no_retry(mock_event_bus, mock_node_api):
+    """status=ok → predict_from_trace 恰好一次、不抛（ok 已由 predict_from_trace 内落库）。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = PredictionConsumer(ctx)
+
+    with patch(
+        "aistock_agent.services.event_consumers.predict_from_trace",
+        new_callable=AsyncMock,
+    ) as mock_predict:
+        mock_predict.return_value = (
+            PredictionRunResult(
+                status="ok", prediction=MagicMock(), due_dates={"short": "2026-08-06"}
+            ),
+            {"id": "pred-1"},
+        )
+        await consumer.handle(_prediction_event())
+
+    mock_predict.assert_awaited_once_with("t1", "2026-07-30")
+
+
+@pytest.mark.asyncio
+async def test_prediction_consumer_llm_failed_then_ok_retries_once(mock_event_bus, mock_node_api):
+    """llm_failed → retry-once（退避后二次调用）→ ok → 不抛。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = PredictionConsumer(ctx)
+
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.predict_from_trace",
+            new_callable=AsyncMock,
+        ) as mock_predict,
+        patch("aistock_agent.services.event_consumers.PREDICTION_RETRY_BACKOFF_SEC", 0),
+    ):
+        mock_predict.side_effect = [
+            (PredictionRunResult(status="llm_failed", reason="boom"), None),
+            (
+                PredictionRunResult(status="ok", prediction=MagicMock(), due_dates={}),
+                {"id": "pred-1"},
+            ),
+        ]
+        await consumer.handle(_prediction_event())  # 不抛
+
+    assert mock_predict.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_prediction_consumer_llm_failed_exhausts_raises(mock_event_bus, mock_node_api):
+    """llm_failed → retry-once 后仍失败 → 抛 PredictionRetryExhaustedError。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = PredictionConsumer(ctx)
+
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.predict_from_trace",
+            new_callable=AsyncMock,
+        ) as mock_predict,
+        patch("aistock_agent.services.event_consumers.PREDICTION_RETRY_BACKOFF_SEC", 0),
+    ):
+        mock_predict.return_value = (PredictionRunResult(status="llm_failed", reason="boom"), None)
+        with pytest.raises(PredictionRetryExhaustedError):
+            await consumer.handle(_prediction_event())
+
+    assert mock_predict.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_prediction_consumer_gate_skipped_no_retry(mock_event_bus, mock_node_api):
+    """gate_skipped → 一次调用、不重试、不抛（skipped 已由 predict_from_trace 内落库）。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = PredictionConsumer(ctx)
+
+    with patch(
+        "aistock_agent.services.event_consumers.predict_from_trace",
+        new_callable=AsyncMock,
+    ) as mock_predict:
+        mock_predict.return_value = (
+            PredictionRunResult(status="gate_skipped", reason="attribution_status=not_applicable"),
+            None,
+        )
+        await consumer.handle(_prediction_event())
+
+    mock_predict.assert_awaited_once_with("t1", "2026-07-30")
+
+
+@pytest.mark.asyncio
+async def test_prediction_consumer_trace_unavailable_skips(mock_event_bus, mock_node_api):
+    """TraceUnavailableError → save_skipped_prediction 被调、不抛、不重试（硬约束 7）。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = PredictionConsumer(ctx)
+
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.predict_from_trace",
+            new_callable=AsyncMock,
+        ) as mock_predict,
+        patch(
+            "aistock_agent.services.event_consumers.save_skipped_prediction",
+            new_callable=AsyncMock,
+        ) as mock_skip,
+    ):
+        mock_predict.side_effect = TraceUnavailableError("no trace available for review:2026-07-30")
+        await consumer.handle(_prediction_event())
+
+    mock_skip.assert_awaited_once_with(
+        "review:2026-07-30", "no trace available for review:2026-07-30"
+    )
+    mock_predict.assert_awaited_once_with("t1", "2026-07-30")
+
+
+@pytest.mark.asyncio
+async def test_start_all_consumers_registers_six_with_prediction_group(
+    mock_event_bus, mock_node_api
+):
+    """start_all_consumers 注册 6 个消费者；PredictionConsumer 用独立组 prediction_chain。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+
+    with patch(
+        "aistock_agent.services.event_consumers._consumer_loop",
+        new_callable=AsyncMock,
+    ) as mock_loop:
+        tasks = start_all_consumers(ctx)
+        assert len(tasks) == 6
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert len(mock_loop.await_args_list) == 6
+    pred_calls = [c for c in mock_loop.await_args_list if c.args[0].channel == CHANNEL_REVIEW_DONE]
+    assert len(pred_calls) == 1
+    assert pred_calls[0].kwargs["group"] == "prediction_chain"
+    non_pred_calls = [
+        c for c in mock_loop.await_args_list if c.args[0].channel != CHANNEL_REVIEW_DONE
+    ]
+    assert len(non_pred_calls) == 5
+    assert all(c.kwargs.get("group") is None for c in non_pred_calls)
