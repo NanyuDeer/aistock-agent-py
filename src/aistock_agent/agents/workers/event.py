@@ -51,6 +51,109 @@ _INDUSTRY_GRAPH_DEGRADED_STATUSES = {
 }
 _INDUSTRY_GRAPH_BOUNDARY_VERSION = "one_hop_v1"
 
+# ── 事件短标题生成（2026-08-14：title 与 summary 语义分离） ──
+# content.title 语义从"summary[:50] 截断残片"改为"LLM 独立生成的简短事件标题"：
+#   - title   = AI 生成的短标题（新闻标题风格，20~30 字，≤30 字）
+#   - summary = AI 生成的事件概述（≤100 字，解释"事件改变了什么"）
+#   - source  = 原文 URL（不变）
+# 标题生成全部为确定性逻辑，不新增 LLM 调用。
+_EVENT_TITLE_LIMIT = 30
+_MAJOR_EVENT_PREFIX = "请分析以下重大事件："
+_EVENT_OVERVIEW_MARKER = "\n\n事件概述："
+_EVENT_LINK_MARKER = "\n\n原文链接："
+_TITLE_QUOTES = '"\'“”‘’《》'
+_TITLE_BOUNDARY_CHARS = "。！？；，、"
+
+
+def _clean_title_text(text: str) -> str:
+    """清理标题：去除首尾空白与多余引号/书名号包装。"""
+    text = (text or "").strip()
+    text = text.strip(_TITLE_QUOTES)
+    return text.strip()
+
+
+def _safe_shorten_title(text: str, limit: int = _EVENT_TITLE_LIMIT) -> str:
+    """异常长度保护：优先在完整标点边界缩短，避免机械截断产生半句话。
+
+    正常 LLM title 已由 Prompt 约束 ≤30 字；此函数仅防御异常输出，
+    保证标题有界（不超过 limit）且尽量保留完整短语。
+    """
+    text = _clean_title_text(text)
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    # 在 limit 内找最后一个标点边界（句子级优先），在其后断开并去掉悬空分句标点
+    for i in range(limit - 1, 0, -1):
+        if text[i] in _TITLE_BOUNDARY_CHARS:
+            candidate = text[: i + 1].rstrip("，、；")
+            if candidate:
+                return candidate
+    return text[:limit]
+
+
+def _extract_original_title(user_msg: str) -> str:
+    """从 event_conduction 构造的 user_msg 中提取原始事件标题。
+
+    event_conduction._build_event_message 拼接格式：
+      "请分析以下重大事件：{title}\n\n事件概述：{summary}\n\n原文链接：{url}"
+    仅当命中前缀时提取；chat/手动入口的原始消息不匹配时返回空串。
+    """
+    if not user_msg or not user_msg.startswith(_MAJOR_EVENT_PREFIX):
+        return ""
+    rest = user_msg[len(_MAJOR_EVENT_PREFIX):]
+    for marker in (_EVENT_OVERVIEW_MARKER, _EVENT_LINK_MARKER):
+        idx = rest.find(marker)
+        if idx >= 0:
+            rest = rest[:idx]
+            break
+    return rest.strip()
+
+
+def _extract_first_sentence(summary: str, limit: int = _EVENT_TITLE_LIMIT) -> str:
+    """从 summary 提取第一句作为短标题（完整句边界 + 长度保护）。"""
+    for sep in ("。", "！", "？"):
+        idx = summary.find(sep)
+        if idx > 0:
+            return _safe_shorten_title(summary[: idx + 1], limit)
+    return _safe_shorten_title(summary, limit)
+
+
+def _build_event_title(
+    understanding: dict[str, object] | None,
+    user_msg: str,
+    *,
+    limit: int = _EVENT_TITLE_LIMIT,
+) -> str:
+    """生成事件短标题（正常 20~30 字，异常有界，全部确定性逻辑）。
+
+    优先级：
+    1. LLM 生成的 title（EVENT_UNDERSTANDING_PROMPT 新字段）
+    2. 原始事件标题（从 event_conduction user_msg 前缀提取）
+    3. summary 首句（完整句边界，非机械截取）
+    4. summary 安全缩短（标点边界保护）
+    全部缺失返回空串（不阻断落库，event_generated 判定逻辑不变）。
+    """
+    if isinstance(understanding, dict):
+        raw_title = understanding.get("title")
+        if isinstance(raw_title, str) and raw_title.strip():
+            return _safe_shorten_title(raw_title, limit)
+
+    original = _extract_original_title(user_msg)
+    if original:
+        return _safe_shorten_title(original, limit)
+
+    if isinstance(understanding, dict):
+        raw_summary = understanding.get("summary")
+        if isinstance(raw_summary, str) and raw_summary.strip():
+            summary = raw_summary.strip()
+            first = _extract_first_sentence(summary, limit)
+            if first:
+                return first
+            return _safe_shorten_title(summary, limit)
+
+    return ""
+
 
 @dataclass(frozen=True)
 class _ToolCallResult:
@@ -621,9 +724,12 @@ async def run(state: AgentState) -> dict[str, object]:
                 cached_understanding = cached.get("event_understanding")
                 cached_meta: dict[str, object] = {
                     "eventId": cached_event_id,
-                    "title": str(cached_understanding.get("summary", ""))[:50]
-                    if isinstance(cached_understanding, dict)
-                    else "",
+                    "title": _build_event_title(
+                        cached_understanding
+                        if isinstance(cached_understanding, dict)
+                        else None,
+                        user_msg,
+                    ),
                     "source": event_source,
                 }
                 cached_persisted = await persist_event_report(
@@ -722,16 +828,17 @@ async def run(state: AgentState) -> dict[str, object]:
         )
 
         # ── 构建前端对齐的 analysis_reports ──
-        # 标题严格来自 understanding.summary（纯业务标题），
-        # 缺失时显式降级为空字符串，绝不回退到 user_msg 或指令前缀。
-        title = (
-            str(understanding.get("summary", ""))
-            if understanding and isinstance(understanding, dict)
-            else ""
+        # 短标题（content.title）优先使用 LLM 生成的 title（EVENT_UNDERSTANDING_PROMPT
+        # 新字段，新闻标题风格 20~30 字）；缺失时按 原始事件标题 → summary 首句 →
+        # summary 安全缩短 逐级兜底。不再无条件 summary[:50]——旧逻辑导致生产
+        # 78.9% 标题被硬切成半句话。
+        title = _build_event_title(
+            understanding if isinstance(understanding, dict) else None,
+            user_msg,
         )
         event_meta: dict[str, object] = {
             "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
-            "title": title[:50] if title else "",
+            "title": title,
             "source": event_source,
             # 事件元数据扩展：source_name（来源名称）/ event_type（事件类型枚举）
             # 由 Understanding LLM 生成（见 EVENT_UNDERSTANDING_PROMPT）；
