@@ -1,6 +1,7 @@
 """case_builder —— 历史切片生成与 T 窗口固化"""
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -138,6 +139,75 @@ async def test_build_case_industry_graph_none_when_missing(
         market_snapshot=_valid_snapshot(),
     )
     assert case["window_before"]["industry_graph"] is None
+
+
+def test_mark_failed_backoff_and_deadletter(iterate_data_dir: object) -> None:
+    """D-1：失败退避 1/2 天递增，第 3 次进 deadletter（不再进入 pending）。"""
+    from aistock_agent.iterate.case_builder import (
+        _iterated_mark_path,
+        _read_mark,
+        list_pending_cases,
+        mark_failed,
+    )
+
+    case_id = "case_d1_backoff"
+    # 准备 case 文件（list_cases 依赖）
+    cases_root = Path(iterate_data_dir) / "cases"  # type: ignore[arg-type]
+    cases_root.mkdir(parents=True, exist_ok=True)
+    (cases_root / f"{case_id}.json").write_text("{}", encoding="utf-8")
+
+    # 第 1 次失败 → failed + 1 天退避 → 不在 pending
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["status"] == "failed"
+    assert mark["retry_count"] == 1
+    assert case_id not in list_pending_cases()
+
+    # 第 2 次失败 → 2 天退避
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["retry_count"] == 2
+
+    # 第 3 次失败 → deadletter，不再返回
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["status"] == "deadletter"
+    assert mark["retry_count"] == 3
+    assert case_id not in list_pending_cases()
+
+
+def test_list_pending_cases_returns_due_failed_case(
+    iterate_data_dir: object,
+) -> None:
+    """D-1：退避到期的 failed 案例重新进入 pending。"""
+    import json as _json
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from aistock_agent.iterate.case_builder import (
+        _iterated_mark_path,
+        list_pending_cases,
+        mark_failed,
+    )
+
+    case_id = "case_d1_due"
+    cases_root = Path(iterate_data_dir) / "cases"  # type: ignore[arg-type]
+    cases_root.mkdir(parents=True, exist_ok=True)
+    (cases_root / f"{case_id}.json").write_text("{}", encoding="utf-8")
+
+    mark_failed(case_id)
+    assert case_id not in list_pending_cases()  # 退避期未到
+
+    # 手动把 next_retry_at 改到过去（模拟退避到期）
+    mark_path = _iterated_mark_path(case_id)
+    payload = _json.loads(mark_path.read_text(encoding="utf-8"))
+    payload["next_retry_at"] = (
+        _dt.now(_UTC) - _td(hours=1)
+    ).isoformat()
+    mark_path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    assert case_id in list_pending_cases()  # 到期重新进入
 
 
 @pytest.mark.asyncio

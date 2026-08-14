@@ -241,9 +241,14 @@ async def run_case(
     # D13 修复：闭环跑完即标记已迭代（单一权威标记，experiments 目录可清理）。
     # infra_failures 提前中止也走这里（该 case 已尝试且失败轮不落实验记录，
     # 标记防重复尝试；若需重试可手动删除标记文件）。
-    from aistock_agent.iterate.case_builder import mark_iterated
+    # D-1（2026-08-14）：基础设施失败 → mark_failed（退避 1/2 天后自动重试，
+    # 达 3 次进 deadletter）；正常结束（score_reached/max_rounds）→ mark_iterated。
+    from aistock_agent.iterate.case_builder import mark_failed, mark_iterated
 
-    mark_iterated(case_id)
+    if stopped_reason == "infra_failures":
+        mark_failed(case_id)
+    else:
+        mark_iterated(case_id)
 
     return {
         "agent_id": agent_id,
