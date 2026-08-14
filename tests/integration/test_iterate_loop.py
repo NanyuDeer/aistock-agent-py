@@ -50,7 +50,8 @@ async def test_loop_stops_when_score_above_threshold(
         factory.return_value.ainvoke = AsyncMock(
             side_effect=[
                 type("R", (), {"content": json.dumps(extract_payload)})(),
-                type("R", (), {"content": json.dumps({"hit_count": 2, "total_count": 2})})(),
+                # A-4：fixture GT drivers(3)+transmission(1)=4 条 truth，达标需全命中
+                type("R", (), {"content": json.dumps({"hit_count": 4, "total_count": 4})})(),
             ]
         )
         # 子进程回放被替换为固定 agent 输出（避免真实跑 agent）

@@ -169,7 +169,8 @@ async def test_perfect_match_scores_high() -> None:
                 _mock_llm_extract(
                     "bullish", ["隔夜美股暴涨", "外盘传导"], ["半导体", "算力", "新能源"]
                 ),
-                _mock_driver_judge(hit=2, total=2),
+                # A-4：transmission_path 并入 truth_drivers（2+1=3 条），完美匹配需 3 命中
+                _mock_driver_judge(hit=3, total=3),
             ]
         )
         score = await evaluate_attribution(AGENT_OUT, GT)

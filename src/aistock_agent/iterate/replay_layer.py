@@ -65,6 +65,7 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     "aistock_agent.services.data_client.NodeApiClient.post": "node_noop",
     # 直接 httpx 的读方法（B4 修复）：报告/行情类读返回 None（隔离），行业图谱返回 degraded
     "aistock_agent.services.data_client.NodeApiClient.get_industry_chain": "industry_chain",
+    "aistock_agent.services.data_client.NodeApiClient.get_industry_graph_full": "industry_graph",
     "aistock_agent.services.data_client.NodeApiClient.get_analysis_report_quiet": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_review_analysis_report": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_hot_burst_data": "report_read",
@@ -209,6 +210,10 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
             # 回放绝不触网：返回 degraded 状态
             # （event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含 upstream_failed）
             _patch_async(target, _make_industry_chain_degraded)
+        elif kind == "industry_graph":
+            # B-5：全图快照回放返回 None（build_iterate_cases 采集处已降级，
+            # 回放侧绝不触达 Node /internal/industry/graph）
+            _patch_async(target, _make_none_noop)
         elif kind == "report_read":
             # I-1 修复：按目标方法返回正确降级值，不能再统一返回 None——
             # get_analysis_report_quiet 契约是纯 dict/None（data_client.py:522，
