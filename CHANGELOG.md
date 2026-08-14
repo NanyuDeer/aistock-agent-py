@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-14 — 预测到期日越年逐档容错
+
+**开发者**: changelog
+
+### 修复
+- 大盘溯源影响持续性预判：到期日不再因 chinese_calendar 覆盖（2004-2026）越年而整条落 skipped（due_dates_failed）——改为逐档容错，越年档按「周末+已发布节假日(HOLIDAYS_EXTRA)」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb），其余档精确
+- 删除 `DueDatesComputationError` / `due_dates_failed` 状态（`PredictionRunResult.status` Literal 移除），`event_consumers` 同步
+- 到期验证器：近似档 reason 加 `(approximate_due_date)` 前缀，供统计分桶归因
+
+### 说明
+- 理由（P2 辩论裁决）：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益；显式标注优于预测停产；2027 官方节假日 2026-11 发布后经 HOLIDAYS_EXTRA 注入或 chinese_calendar 升级自动恢复精确
+
+---
+
 ## [changer] 2026-08-14 — SPEC 设计文档忽略规则
 
 **开发者**: changelog
