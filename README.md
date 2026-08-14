@@ -236,15 +236,56 @@ content = {
 
 | 时间 | 任务 | job_id | 说明 |
 |------|------|--------|------|
-| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）+ 并行触发 event agent 分析 major_events |
+| 08:50 | 晨报生成 | `morning_briefing` | 双层输出（display_report + podcast_brief + schema_version）；写 Redis 缓存（JSON）+ 落盘到 `docs/agent-outputs/morning/` + 持久化到 Node.js `/internal/analysis-reports`（公共报告 user_id=null）；完成后自动识别重磅市场事件并推送（±1.5% 对称阈值，最多 2 条，fire-and-forget 调用 `/internal/push/market-event`）；事件来源读统一事件库（report_type=event_scrape，读库优先、缺库降级自主检索，2026-08-12 起） |
 | 09:00 | 播报链路 | `broadcast_chain` | 串行执行 morning→wind_leader→hot_burst→broadcast，报告写DB + 双人语音播报（9:10前端可见） |
-| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库 |
+| 15:30 | 复盘生成 | `review_report` | 收盘后 5 步归因分析，写 Redis 缓存 + 归档到 `docs/agent-outputs/review/` + 写数据库（证据源读统一事件库优先、缺库降级直采，2026-08-12 起） |
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 
-> **事件传导分析（event conduction）**：不单独注册 cron job，而是嵌入 morning 任务中——晨报完成后提取 `major_events`，对 impact_score ≥ 4 的事件通过 `asyncio.create_task` 并行触发 `event_agent.run()`。每个事件独立运行，fire-and-forget 模式，失败不影响其他事件或后续复盘流水线。
+> **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；传导失败重试 1 次——`error` 非空或异常时重试，两次失败放弃并记 error 级日志不抛，H7，2026-08-13；中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
+
+### 统一事件抓取中台（2026-08-12）
+
+统一事件抓取中台收敛"多源事件采集 → 规则评分 → LLM 精评 → 归一化 → 筛选 → 入库 → 传导触发"全链路，为晨报、大盘溯源、stock_trace 提供统一事件库（`report_type=event_scrape`）证据源。Phase-2（2026-08-13）起规则评分后接 LLM 精评：quick 粗筛 + deep 精评，content_hash 缓存 24h，开关 `EVENT_SCORING_LLM_ENABLED` 默认关闭（灰度开启）。
+
+**架构分层**：
+
+| 层 | 模块 | 职责 |
+|----|------|------|
+| 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册** |
+| 规则评分层 | `services/event_scoring.py` | `apply_rule_score(raw, source=...)` 确定性规则评分（cls/ths/tavily 三源接入）：强词 5 分过阈 / 弱词 3 分不过阈 / 语境词降权防误判；已有有效 impact_score 不覆盖（eastmoney ai_impact 优先级更高） |
+| LLM 精评层 | `services/event_scoring_llm.py` | Phase-2：`score_events_llm` 入口（开关 `EVENT_SCORING_LLM_ENABLED` 默认关闭）→ 候选门槛 ≥3 送 quick_think 批量粗筛（`_quick_filter`，batch 20）→ deep_think 逐条精评（`_deep_score`，direction 校验 + 分数截断 [1,5]）→ `apply_llm_scores` 按 content_hash 合并覆盖规则分；`event_score:{content_hash}` Redis 缓存 TTL 24h；全链降级不阻断抓取 |
+| 归一化层 | `services/event_store.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级 |
+| 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
+| 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
+| 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集；传导失败重试 1 次（`error` 非空或异常时重试，仍失败记 error 日志不抛，H7，2026-08-13） |
+
+**调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
+
+| job_id | cron | 说明 |
+|--------|------|------|
+| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
+| `event_scrape_early` | `45 8 * * 1-5` | 08:45 早间刷新档，intraday 增量（晨报 08:50 读库前最后一刷，H5，2026-08-13） |
+| `event_scrape_intraday` | `0 10-11,13-14 * * 1-5` | 10:00-11:00、13:00-14:00 每小时，intraday 增量抓取（M8：避开 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑） |
+| `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
+
+**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
+
+**接口清单**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发抓取（需 X-Internal-Token；body `{"scrape_mode":"full_daily"}`；返回信封 `{"success": true, "data": {"scrape_mode","persisted","deduped","added","error"}}`，失败 `{"success": false, "message": ...}`；日志出现 `event_scrape_full_daily` / `event_scrape_done`） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（`date=YYYY-MM-DD` 必填） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源，`date` 必填） |
+
+**下游消费与降级**：
+
+- 晨报：`load_event_scrape(report_date)` 读库优先（日志 `morning_event_store_loaded`），缺库降级自主检索（不再直接触发 event_analyst）
+- 大盘溯源：`_normalize_event_store_facts` 读库优先（日志 `review_event_store_used`），缺库/空/读失败降级 telegraph/latest 直采
+- stock_trace（Node 侧）：`loadEventStoreEvidence` → Python `GET /api/agent/event/scrape-by-symbol/:symbol?date=当日`（`AGENT_PY_URL || PYTHON_AGENT_URL` + X-Internal-Token），空/失败降级原采集
 
 ### 目录结构
 
@@ -368,6 +409,9 @@ src/aistock_agent/
 | GET | `/api/agent/briefing/alert` | 异动提醒（SSE 流式，symbol + cycle 参数） |
 | POST | `/api/agent/briefing/morning/trigger` | 手动触发晨报生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/event/trigger` | 手动触发事件传导分析（需 X-Internal-Token） |
+| POST | `/api/agent/briefing/event-scrape/trigger` | 手动触发统一事件抓取（事件抓取中台；body `{"scrape_mode":"full_daily"}`，需 X-Internal-Token） |
+| GET | `/api/agent/event/scrape-list` | 按日期读取当日抓取事件列表（事件抓取中台；date=YYYY-MM-DD 必填，非法返回 400） |
+| GET | `/api/agent/event/scrape-by-symbol/:symbol` | 按标的读取当日抓取事件（stock_trace 证据源；date=YYYY-MM-DD 必填，非法返回 400） |
 | POST | `/api/agent/briefing/review/trigger` | 手动触发复盘溯源生成（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/trigger` | 手动触发完整播报链路：morning→wind_leader→hot_burst→trend_score→broadcast（需 X-Internal-Token） |
 | POST | `/api/agent/briefing/broadcast/only` | 仅重新生成双人播报（不重跑报告，需 X-Internal-Token） |
@@ -489,6 +533,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_REVIEW_CRON` | 复盘生成 cron（工作日 15:30） | `30 15 * * 1-5` |
 | `SCHEDULER_SNAPSHOT_CRON` | 快照生成 cron（工作日 15:35） | `35 15 * * 1-5` |
 | `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
+| `EVENT_SCORING_LLM_ENABLED` | 事件抓取中台 LLM 精评总开关（Phase-2，默认关闭灰度开启；开启后规则评分候选 ≥3 送 quick 粗筛 + deep 精评） | `false` |
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
 | `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
 | `MARKET_EVENT_MAX_PUSHES` | 每次晨报最多推送条数 | `2` |
@@ -520,7 +565,7 @@ docker run -p 8080:8080 --env-file .env aistock-agent
 ## 迭代 Agent 自动闭环
 
 - 模块：`src/aistock_agent/iterate/`（adapters/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
-- 机制：历史切片（T 窗口固化）→ 标准答案（tavily + 置信度）→ 变体实验（git 恢复基线 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3）
+- 机制：历史切片（T 窗口固化）→ 数据约束标准答案（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）→ 变体实验（目标区域补丁 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3，重归一化）+ iterated.json 去重
 - 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
-- 触发：交易日 16:00 自动（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
+- 触发：交易日 16:30 产片 + 17:00 消费/报告（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
 - 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter` 即可

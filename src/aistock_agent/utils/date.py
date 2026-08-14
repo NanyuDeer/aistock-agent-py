@@ -65,6 +65,11 @@ def shanghai_today() -> date:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
+def shanghai_now() -> datetime:
+    """返回上海时区的当前时刻（B-5 三时间戳采集用，防服务器/容器时区漂移）。"""
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
+
+
 def is_trading_time(now: datetime | None = None) -> bool:
     """判断当前是否在 A 股交易时段（9:30-11:30 / 13:00-15:00 北京时间）。"""
     now = now or datetime.now(ZoneInfo("Asia/Shanghai"))

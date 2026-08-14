@@ -7,7 +7,7 @@ httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 import json
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
@@ -516,6 +516,50 @@ class NodeApiClient:
 
         return await self.get(path)
 
+    async def get_analysis_report_quiet(
+        self,
+        report_type: str,
+        report_date: str,
+        user_id: str | None = None,
+    ) -> dict[str, object] | None:
+        """查询 Agent 分析报告（404 静默，供"空库是常态"的探测场景）。
+
+        与 get_analysis_report 的区别：报告不存在（HTTP 404）时返回 None 且
+        不打 error 级日志（调用方自行决定日志级别）。仅新增专用方法，不改
+        _request/get 的全局 404 行为，避免影响依赖 error 告警的其他调用方。
+        其他错误（业务码非 200 / HTTP 5xx / 网络异常）仍记 error 后返回 None。
+        """
+        if user_id:
+            path = f"/internal/analysis-reports/{report_type}/{report_date}/{user_id}"
+        else:
+            path = f"/internal/analysis-reports/{report_type}/{report_date}"
+        url = f"{self._base_url}{path}"
+        headers = {"X-Internal-Token": self._token}
+
+        try:
+            client = await HttpClientPool.get_client()
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                logger.error("node_api_unexpected_payload", url=url, payload=str(payload)[:200])
+                return None
+            if payload.get("code") != 200:
+                logger.error("node_api_business_error", url=url, code=payload.get("code"),
+                             message=payload.get("message"))
+                return None
+            return payload.get("data")
+        except httpx.HTTPStatusError as e:
+            logger.error("node_api_http_error", url=url, status=e.response.status_code)
+        except httpx.RequestError as e:
+            logger.error("node_api_request_error", url=url, error=str(e))
+        except Exception as e:
+            logger.error("node_api_unexpected_error", url=url, error=str(e))
+
+        return None
+
     async def list_analysis_reports(
         self,
         report_type: str,
@@ -598,6 +642,37 @@ class NodeApiClient:
             logger.error("review_report_read_invalid_data", url=url)
             return ReviewReportReadResult("unavailable")
         return ReviewReportReadResult("found", report)
+
+    async def get_industry_graph_full(self) -> dict[str, object] | None:
+        """读取 IndustryKG 全图快照（B-5，裁决书 B 论题：GET /internal/industry/graph）。
+
+        返回 Node payload（含 chains/graph_update_time 等）或 None（端点未就绪/
+        HTTP 失败/结构非法）。三时间戳与 posterior_exposure 标记由调用方补充
+        （build_iterate_cases 采集处注入 event_time 与采集时刻）。
+        """
+        url = f"{self._base_url}/internal/industry/graph"
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(
+                url, headers={"X-Internal-Token": self._token}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("industry_graph_full_request_error", error=str(exc))
+            return None
+        if response.status_code != 200:
+            logger.warning(
+                "industry_graph_full_http_error", status=response.status_code
+            )
+            return None
+        try:
+            payload = response.json()
+        except Exception:  # noqa: BLE001
+            logger.warning("industry_graph_full_invalid_json")
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            logger.warning("industry_graph_full_invalid_payload")
+            return None
+        return cast("dict[str, object]", payload["data"])
 
     async def get_industry_chain(self, industry_name: str) -> IndustryChainReadResult:
         """读取 IndustryKG 行业链，并保留 HTTP 与响应结构的失败分类。"""

@@ -5,8 +5,9 @@ T 窗口原则：window_before 只含 T 时刻及之前的数据；评估期不�
 """
 
 import json
+import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -59,6 +60,7 @@ async def build_case(
     event_time: datetime,
     telegraph_records: list[dict[str, object]],
     market_snapshot: dict[str, object] | None = None,
+    industry_graph: dict[str, object] | None = None,
     meta: dict[str, object] | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, object]:
@@ -66,13 +68,16 @@ async def build_case(
 
     只保留 time <= event_time 的电报记录（T 窗口约束，防后验泄漏）。
     meta 非空时并入 case 顶层（随切片落盘，供评估阶段识别切片来源与窗口类型）。
+    industry_graph：B-5（2026-08-14）——构建期采集的行业图谱快照（含
+    snapshot_generated_at/graph_update_time/event_time 三时间戳 + posterior_exposure
+    标记）；采集失败传 None（快照侧降级，不阻断产片）。
     data_dir 覆盖 iterate 数据根目录（测试隔离用）；None 走 get_data_dir()。
     """
     if event_time.tzinfo is None:
         event_time = event_time.replace(tzinfo=_TZ)
     before = [r for r in telegraph_records if _record_time_le(r, event_time)]
     if market_snapshot is not None:
-        _validate_market_snapshot(market_snapshot)
+        _validate_market_snapshot(market_snapshot, event_time)
 
     case_id = f"case_{event_time.strftime('%Y%m%d')}_{adapter.agent_id}_{_slugify(event_title)}"
     case: dict[str, object] = {
@@ -84,6 +89,7 @@ async def build_case(
             "cls_telegraph": before,
             "market_snapshot": market_snapshot or {},
             "global_markets": _extract_global_markets(market_snapshot),
+            "industry_graph": industry_graph,
         },
         "ground_truth_ref": f"gt_{case_id}",
         "created_at": datetime.now(_TZ).isoformat(),
@@ -101,15 +107,19 @@ async def build_case(
 
 def _record_time_le(record: dict[str, object], bound: datetime) -> bool:
     t = _parse_record_time(record)
-    return t is None or t <= bound  # 无时间戳的记录保守保留（无法判定时序）
+    if t is None:
+        # 无时间戳记录：保守保留（无法判定时序）但打标记，评估端可剔除/降权（G10）
+        record["time_unknown"] = True
+        return True
+    return t <= bound
 
 
-def _validate_market_snapshot(snapshot: dict[str, object]) -> None:
-    """校验调用方提供的 market_snapshot 必须满足 MarketTraceSnapshot 契约（I3）。
+def _validate_market_snapshot(snapshot: dict[str, object], event_time: datetime) -> None:
+    """校验调用方提供的 market_snapshot 必须满足 MarketTraceSnapshot 契约（I3）
+    且 trade_date 不晚于 event_time 所在日期（B1/G9 修复：防 T 后收盘快照固化）。
 
     回放时 review agent 会以 MarketTraceSnapshot 消费该字段并重算 discovery；
     不合法的切片会在评估期才崩溃（评分恒 0），因此必须在生成期快速失败。
-    不自动补全缺失字段——调用方必须提供 schema-valid 的快照（全量 dump 形状）。
     """
     from aistock_agent.schemas.market_trace import MarketTraceSnapshot
 
@@ -119,6 +129,18 @@ def _validate_market_snapshot(snapshot: dict[str, object]) -> None:
         raise ValueError(
             f"market_snapshot 不符合 MarketTraceSnapshot 契约: {e}"
         ) from e
+
+    trade_date = snapshot.get("trade_date")
+    if isinstance(trade_date, str):
+        try:
+            day = datetime.fromisoformat(trade_date).date()
+        except ValueError as e:
+            raise ValueError(f"market_snapshot.trade_date 非法: {trade_date}") from e
+        if event_time.date() < day:
+            raise ValueError(
+                f"market_snapshot.trade_date({trade_date}) 晚于 event_time"
+                f"({event_time.isoformat()}) 所在日期：切片会固化 T 后数据"
+            )
 
 
 def _slugify(title: str) -> str:
@@ -149,26 +171,167 @@ def list_cases(agent_id: str | None = None) -> list[str]:
         base = base / agent_id
     if not base.exists():
         return []
-    ids = [p.stem for p in base.rglob("*.json") if p.stem.startswith("case_")]
+    # D13：排除 {case_id}.iterated.json 标记文件——其 stem 以 case_ 开头且同为
+    # cases/ 下 json，否则会被误当作切片 id 进入 pending（去重判定自身被污染）
+    ids = [
+        p.stem
+        for p in base.rglob("*.json")
+        if p.stem.startswith("case_") and not p.stem.endswith(".iterated")
+    ]
     return sorted(ids, reverse=True)
 
 
 def list_pending_cases(agent_id: str | None = None) -> list[str]:
-    """列出尚无实验记录的切片 id（I4：每日任务只消费未迭代过的案例）。
+    """列出尚无实验记录的切片 id（D13 修复：判定基于 iterated.json 标记）。
 
-    判定：data/experiments/ 下存在文件名前缀 ``{case_id}_r`` 的实验记录
-    （含 {case_id}_r1_baseline.json 基线记录）即视为已迭代，不再重复消费。
-    无实验记录 → 视为待迭代。
+    已迭代判定 = data/cases/{case_id}.iterated.json 存在；experiments 目录
+    可清理删除，不再触发重复迭代。无标记 → 视为待迭代。
+    D-1（2026-08-14）：失败退避——status=failed 且 next_retry_at 未到的案例
+    不返回（仍在退避期）；到期后重新进入 pending。deadletter 不再返回。
     """
     cases = list_cases(agent_id)
     if not cases:
         return []
-    root = get_data_dir() / "experiments"
-    iterated: set[str] = set()
-    if root.exists():
-        for p in root.glob("*.json"):
-            for case_id in cases:
-                if p.stem.startswith(f"{case_id}_r"):
-                    iterated.add(case_id)
-                    break
-    return [case_id for case_id in cases if case_id not in iterated]
+    now = datetime.now(_TZ)
+    pending: list[str] = []
+    for case_id in cases:
+        mark_path = _iterated_mark_path(case_id)
+        if not mark_path.exists():
+            pending.append(case_id)
+            continue
+        mark = _read_mark(mark_path)
+        if mark.get("status") != "failed":
+            continue  # iterated/deadletter（或旧格式无 status）不重新进入
+        next_retry = mark.get("next_retry_at")
+        if isinstance(next_retry, str):
+            try:
+                if datetime.fromisoformat(next_retry) <= now:
+                    pending.append(case_id)
+            except ValueError:
+                pending.append(case_id)  # 非法时间戳按到期处理
+    return pending
+
+
+def _iterated_mark_path(case_id: str, data_dir: Path | None = None) -> Path:
+    """已迭代标记文件路径：data/cases/{case_id}.iterated.json（与 case 同生命周期）。"""
+    base = data_dir or get_data_dir()
+    return base / "cases" / f"{case_id}.iterated.json"
+
+
+def is_iterated(case_id: str, data_dir: Path | None = None) -> bool:
+    """case 是否已迭代（D13 修复：单一权威标记文件，不依赖 experiments 前缀）。
+
+    D-1（2026-08-14）：失败退避中的案例（status=failed 且未到 next_retry_at）
+    也视为"已处理"（不重复进入 pending）；到期后由 list_pending_cases 重新返回。
+    """
+    return _iterated_mark_path(case_id, data_dir).exists()
+
+
+def _read_mark(path: Path) -> dict[str, object]:
+    """读取迭代标记文件内容；不存在/非法返回空 dict。"""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def mark_iterated(
+    case_id: str,
+    data_dir: Path | None = None,
+    *,
+    status: str = "iterated",
+    round_type: str = "baseline",
+    retry_count: int = 0,
+) -> None:
+    """写入已迭代标记（原子写）。
+
+    D-1（2026-08-14）：扩展 status/round_type/retry_count——失败退避与
+    deadletter 复用同一标记文件（单一权威去重事实源不变）。
+    """
+    path = _iterated_mark_path(case_id, data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = json.dumps(
+        {
+            "case_id": case_id,
+            "status": status,
+            "round_type": round_type,
+            "retry_count": retry_count,
+            "iterated_at": datetime.now(_TZ).isoformat(),
+        },
+        ensure_ascii=False,
+    )
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+#: 失败退避间隔（天），按 retry_count 1/2 次 → 1/2 天；第 3 次失败进 deadletter
+_FAIL_RETRY_DELAY_DAYS: dict[int, int] = {1: 1, 2: 2}
+_FAIL_DEADLETTER_AT = 3
+
+
+def mark_failed(case_id: str, data_dir: Path | None = None) -> None:
+    """记录一次失败（D-1）：retry_count+1；退避 1/2 天后可重试；达 3 次进 deadletter。
+
+    返回语义：调用方无需关心状态机细节；标记文件保留 status/next_retry_at。
+    """
+    path = _iterated_mark_path(case_id, data_dir)
+    existing = _read_mark(path)
+    retry_count = int(existing.get("retry_count", 0)) + 1
+    now = datetime.now(_TZ)
+    if retry_count >= _FAIL_DEADLETTER_AT:
+        mark_iterated(
+            case_id,
+            data_dir,
+            status="deadletter",
+            round_type="failed",
+            retry_count=retry_count,
+        )
+        return
+    delay_days = _FAIL_RETRY_DELAY_DAYS.get(retry_count, 4)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = json.dumps(
+        {
+            "case_id": case_id,
+            "status": "failed",
+            "round_type": "failed",
+            "retry_count": retry_count,
+            "iterated_at": now.isoformat(),
+            "failed_at": now.isoformat(),
+            "next_retry_at": (now + timedelta(days=delay_days)).isoformat(),
+        },
+        ensure_ascii=False,
+    )
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def migrate_iterated_marks(data_dir: Path | None = None) -> int:
+    """一次性单向迁移：experiments 前缀文件 → iterated.json 标记（幂等，永不回退）。
+
+    返回新生成的标记数量。迁移源是历史 experiments 记录；迁移完成后 experiments
+    目录可安全清理（不再作为去重事实源）。
+    """
+    base = data_dir or get_data_dir()
+    cases_root = base / "cases"
+    if not cases_root.exists():
+        return 0
+    migrated = 0
+    for case_file in cases_root.rglob("case_*.json"):
+        case_id = case_file.stem
+        # D13：跳过标记文件本身（{case_id}.iterated.json），避免其 stem 被当切片 id
+        if case_id.endswith(".iterated"):
+            continue
+        if is_iterated(case_id, data_dir):
+            continue
+        # 检查 experiments 下是否存在 {case_id}_r 前缀记录（旧事实源）
+        exps = base / "experiments"
+        has_record = False
+        if exps.exists():
+            has_record = any(p.stem.startswith(f"{case_id}_r") for p in exps.glob("*.json"))
+        if has_record:
+            mark_iterated(case_id, data_dir)
+            migrated += 1
+    return migrated

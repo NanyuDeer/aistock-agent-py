@@ -15,6 +15,7 @@
 
 ---
 
+
 ## [changer] 2026-08-13 — 对话体验优化：回答内容流式显示
 **开发者**: 37588
 
@@ -30,6 +31,7 @@
 
 ---
 
+
 ## [changer] 2026-08-13 — 对话体验优化：深度分析触发修复
 **开发者**: 37588
 
@@ -39,6 +41,54 @@
 > 代码验收通过（待生产验证）。
 
 ---
+
+
+## [fix/iterate-replay-user-profile] 2026-08-13 — 回放隔离清单补登记：get_user_profile（PR #71 缺口）
+**开发者**: Aria
+
+### 修复
+- `iterate/replay_layer.py`: `NodeApiClient.get_user_profile` 加入 `_ISOLATION_EXEMPT_METHODS`（经 `get` 间接隔离分组）
+  - 背景：PR #71 新增 `get_user_profile`（用户画像，内部 `await self.get("/internal/user-profile/{user_id}")`），未登记回放隔离清单，I-3 清单封闭测试 `test_service_isolation_covers_all_public_network_methods` 失败（服务器沙盒全量测试暴露）
+  - 依据：`get_user_profile` 无独立网络入口，经 `get → node_read` 返回 None 后 `not isinstance(data, dict)` 走失败降级，符合豁免条件；回放模式下不触达真实 Node 后端
+
+### 测试
+- `tests/unit/test_iterate_replay.py`: 17 passed（含清单封闭测试 RED→GREEN）；ruff All checks passed
+
+## [fix/iterate-case-sufficiency] 2026-08-13 — 产片链路数据完整性防御（case_20260731 全 0 分事故）
+**开发者**: Aria
+
+### 修复
+- `scripts/build_iterate_cases.py`: 新增 `_snapshot_data_sufficient(snapshot_dict)` 产片数据完整性检查
+  - 背景：服务器沙盒 `case_20260731_us_market_surge` 跑 run_case 全 0 分，根因是该 case 为测试 fixture 样例（`a_share={}`、missing_fields 3 项），且真实产片链路 `build_market_trace_snapshot` 的 `normalize_a_share` 只做字段复制不校验完整性——Node 返回 status=complete + coverage.complete=true 但 indexes 等字段缺失时，空壳 case 照样产片进闭环，跑满 max_rounds 全部 0 分浪费 LLM 预算
+  - 修复：`build_review_case` 在 build_case 之前检查快照 A 股数据完整性（`a_share.indexes` 非空），数据不足且非 `force` 时抛 `RuntimeError` 拒绝产片（省一次 case/GT 落盘与 LLM 调用）；`force=True` 跳过
+- `scripts/build_iterate_cases.py`: `snapshot.model_dump` 改用 `cast("Any", ...)`（跨 SimpleNamespace/MarketTraceSnapshot 类型边界，消除 mypy attr-defined/union-attr 错误码不一致）
+
+### 测试
+- 新增 2 条：空壳快照拒绝产片（+ 不残留文件）、force 跳过检查
+- 验证：产片链路 + case/GT/校验/评估/调度 59 passed；ruff All checks passed；mypy iterate clean
+
+---
+
+
+## [feat/event-scrape-hub] 2026-08-13 — 迭代辩论裁决修复第二轮收尾（T9 M3/T10 Q1/T11 + 基线清理）
+**开发者**: Aria
+
+### 修复
+- `variant_engine.py`: `_content_hash` 参数类型从 `dict[str, str]` 放宽为 `dict[str, object]`，兼容 `_compute_variant_hash` 传入的嵌套 dict 补丁规格（T9 M3 补充修复）
+- `test_iterate_variant.py`: `test_experiment_record_has_real_variant_hash` 更新为用 `_compute_variant_hash` 计算预期值（适配 T9 M3）；移除未使用的 `hashlib` 导入
+- `test_iterate_loop.py`: `test_stale_experiment_records_cleaned_before_run` 添加 `result` 断言消除 ruff F841
+
+### 改进
+- `config.py`: 修复 2 个 E501 行过长（event_scrape 调度 cron 表达式换行）
+- `AGENTS.md`: iterate 模块描述补充 T9 M3/T10 Q1/T11 M1-M4 修复要点
+
+### 验证
+- pytest: 73 passed, 3 deselected（2 个依赖 git 可执行文件、1 个预存不相关失败）
+- ruff: All checks passed（iterate 模块 + 测试文件 + config.py）
+- mypy: 无错误（iterate 模块）
+
+---
+
 
 ## [changer] 2026-08-12 — Phase 5 长会话上下文管理
 **开发者**: 37588
@@ -59,6 +109,7 @@
 
 ---
 
+
 ## [changer] 2026-08-12 — 问题 18 WS recv 竞态修复（Phase 2 回归补丁）
 **开发者**: 37588
 
@@ -69,6 +120,44 @@
 > 验证：TDD RED→GREEN；单元 test_ws_chat_replacement.py 15/15 + 定向契约回归 22/22（chat_task_manager / ws 集成 / ws_resume / token_usage）；全量测试回归新增失败清零（+1 新增回归测试）；ruff 改动文件 0；真实 WS 冒烟同一连接连续 3 轮 done 全部送达、连接保持、主动关闭 code=1000（非 1005 崩溃）。不改 resume/stop/归属校验协议与事件协议，前端零改动。生产部署验证待 V1 部署窗口。
 
 ---
+
+
+## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final review 复审修复（Round 2）
+**开发者**: 37588
+
+### 修复
+- `services/event_scrape_sources.py` I1 过滤由 `published.startswith(score_date)`（北京日期前缀）改为 `_event_shanghai_date(published) == score_date`（上海时区日期归属）——Node `published_at TIMESTAMPTZ` 经 `toISOString()` 输出 UTC ISO（如 `2026-08-12T02:00:00.000Z`），北京 00:00-07:59 当日事件 UTC 日期落前一日（`2026-08-11T22:00:00.000Z` = 北京 8-12 06:00）被旧逻辑误过滤；新增 `_event_shanghai_date`（UTC 带 Z → 转上海；本地无时区 → 显式 `replace(tzinfo=Asia/Shanghai)` 保证确定性；解析失败宽容回退 `raw[:10]`）；保留"无时间字段保守保留"守卫
+- `agents/workers/morning.py::_event_records_to_major_events` 加 `impact_score >= MAJOR_IMPACT_THRESHOLD`（=4）过滤（对齐注入路径过滤语义，docstring 注明），缓存命中时 `analysis_reports["major_events"]` 不再混入 impact=1 普通证据（手动晨报端点 major_event_count 诊断计数失真）；函数为模块私有、仅缓存路径一处调用，无复用歧义
+
+### 测试
+- 新增 4 条：UTC 上海日期归属（当日保留/北京凌晨保留/真陈旧过滤，`shanghai_today()` 相对日期无炸弹）、非法时间回退、缓存命中 major/minor 过滤、全普通证据降级回 details 提取
+
+### 说明
+- 偏差：任务单测描述"`2026-08-11T22:00:00.000Z` 应过滤"与其 Issue-1 正文"北京凌晨当日事件应保留"矛盾（该时间戳上海日期=当日），按 Issue-1 正确语义实现并补充真陈旧行用例锁定
+- 验证：定向 pytest 28 passed；全量 1471 passed / 6 既有失败（test_industry_vector_search API 依赖，基线一致零回归）；mypy 2 文件 0 错误；ruff 4 文件 All checks passed
+
+---
+
+
+## [feat/event-scrape-hub] 2026-08-12 — 统一事件抓取中台 final whole-branch review 修复（C1 + I1-I4 + Minor）
+**开发者**: 37588
+
+### 修复
+- **C1（Critical）**：`event_scrape_sources.py::collect_eastmoney_judgements` 响应键名 `"items"` → `"events"`（Node `StockMonitorService.getEvents` 返回 `{total, events}`）——修复东财三模式（full_daily/intraday/event_triggered）生产恒空
+- **I1**：东财行按 `published_at`/`event_time` 日期前缀过滤（alerts 接口不支持日期窗口），防昨日/前日陈旧行以当日 score_date 反复入库
+- **I2**：`raw.setdefault("url", raw.get("detail_url") or "")`——Node 输出 `detail_url` 非 `url`，修复东财事件 url 恒空
+- **I3**：`save_event_scrape` 返回值增加 `added`/`added_events`（本批真正新增数），传导守卫 `persisted>0` → `added>0` 且只传新增子集——全去重批次不再重复触发整批传导（LLM 成本）
+- **I4**：`scheduler._run_morning_task` 降级分支——当日事件库为空且 morning 产出 major_events 时兜底触发传导（恢复 `_pending_event_tasks` 强引用）；M1 随之解决
+- **M2**：`data_client.py` 新增 `get_analysis_report_quiet`（404 静默）；`load_event_scrape` 改走该方法并对空库降级 warning（不再刷 error 级 404）
+- **M4**：晨报注入前按 `impact_score >= MAJOR_IMPACT_THRESHOLD` 过滤；全普通时降级自主检索文案
+- **M5**：`scrape_event_triggered` 加 symbol 空守卫（不采集不落库）
+- **M8**：盘中 cron `0 10-14 * * 1-5` → `0 10-11,13-14 * * 1-5`（避开 A 股午休）
+
+### 验证
+- 全量 pytest 1467 passed / 6 既有失败（基线一致零回归）；mypy 0 新增；ruff All checks passed
+
+---
+
 
 ## [changer] 2026-08-11 — Phase 2 断点续传 + 打断/停止/重试（问题 15）
 **开发者**: 37588
@@ -87,6 +176,7 @@
 > 验证：定向 40/40 + ruff 改动文件 0；全量测试回归新增失败清零（并修复 8 个基线失败）；三仓库整分支 review Ready to merge。
 
 ---
+
 
 ## [changer] 2026-08-11 — P0 端口层封堵（uvicorn 改绑）+ 文档
 **开发者**: 37588

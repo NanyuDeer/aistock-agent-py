@@ -36,8 +36,9 @@ def _normalize_date(value: object) -> str | None:
 async def find_recent_trading_day() -> str | None:
     """返回最近一个已收盘交易日 YYYY-MM-DD；全部失败返回 None。
 
-    优先当日 close-snapshot（15:30 后可用），降级 last-close-snapshot
-    （严格早于今天的最近交易日）。
+    优先当日 close-snapshot（15:30 后可用，要求 status=complete），降级
+    last-close-snapshot。status 检查（D16/N6 修复）：非 complete 快照
+    （如数据抓取中）不视为可产片的交易日，防止空壳切片进入闭环。
     """
     for path in ("/internal/market/close-snapshot", "/internal/market/last-close-snapshot"):
         try:
@@ -46,6 +47,11 @@ async def find_recent_trading_day() -> str | None:
             logger.warning("case_scanner_node_get_failed", path=path, exc_info=True)
             continue
         if data is not None:
+            if isinstance(data, dict) and data.get("status") not in (None, "complete"):
+                logger.warning(
+                    "case_scanner_snapshot_not_complete", path=path, status=data.get("status")
+                )
+                continue
             day = _normalize_date(data.get("trade_date"))
             if day is not None:
                 return day

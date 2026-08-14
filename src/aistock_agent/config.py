@@ -5,7 +5,7 @@ import os
 import random
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
@@ -141,24 +141,55 @@ class Settings(BaseSettings):
     iterate_enabled: bool = False
     # 数据目录（切片/标准答案/实验/报告，均 gitignore）
     iterate_data_dir: str = "data"
-    # 每日汇总：交易日 16:00（现有 iterate 15:40 之后）
-    iterate_cron: str = "0 16 * * 1-5"
+    # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
+    iterate_cron: str = "0 17 * * 1-5"
+    # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
+    iterate_case_build_cron: str = "30 16 * * 1-5"
     iterate_max_rounds: int = 5            # 每案例变体轮数上限
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
     iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
-    # SMTP 报告（QQ 邮箱授权码）
+    # C-3（2026-08-14）：禁止作为迭代仓库根的路径黑名单（fail-closed），
+    # 防止对非 git 目录恢复基线失败后静默污染
+    iterate_forbidden_repo_roots: list[str] = []
+    # A-1（2026-08-14）：judge 上线前校准闸门（默认关闭）——开启时
+    # calibration.calibration_passed() 必须达标（命中率 >= 0.8）
+    iterate_calibration_required: bool = False
+    # SMTP 报告（QQ 邮箱授权码；2026-08-14 加 QQ_SMTP_* 别名——.env.development
+    # 用 QQ_SMTP_USER/AUTH/TO 键名，与字段名不匹配导致 settings 读不到 →
+    # mail_not_configured，报告无法发送；LLM key 正常因 OPENAI_API_KEY 恰好匹配）
     iterate_smtp_host: str = ""
     iterate_smtp_port: int = 465
-    iterate_smtp_user: str = ""
-    iterate_smtp_password: str = ""
-    iterate_mail_to: str = ""
+    iterate_smtp_user: str = Field(
+        default="", validation_alias=AliasChoices("QQ_SMTP_USER", "ITERATE_SMTP_USER")
+    )
+    iterate_smtp_password: str = Field(
+        default="",
+        validation_alias=AliasChoices("QQ_SMTP_AUTH", "ITERATE_SMTP_PASSWORD"),
+    )
+    iterate_mail_to: str = Field(
+        default="", validation_alias=AliasChoices("QQ_SMTP_TO", "ITERATE_MAIL_TO")
+    )
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
     scheduler_review_quick_cron: str = "30 15 * * 1-5"
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
     scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    # ── 统一事件抓取中台调度（2026-08-12） ──
+    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    scheduler_event_scrape_intraday_cron: str = (
+        "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+    )
+    scheduler_event_scrape_early_cron: str = (
+        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷）
+    )
+    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
+    event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
+    event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
+    event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
+    event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

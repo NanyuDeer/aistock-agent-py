@@ -84,6 +84,24 @@ def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
     return report_date
 
 
+def _validate_scrape_date(date_str: str) -> str:
+    """校验事件抓取查询日期（YYYY-MM-DD），非法返回 400 结构化错误。
+
+    三层校验（对齐 Node 侧 /internal/analysis-reports 的日期校验惯例）：
+    正则格式 → fromisoformat 语义 → isoformat 回写一致性。非法格式与
+    语义非法日期（如 2026-13-45）均返回 400，避免把坏日期透传到事件库。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    try:
+        parsed_date = date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != date_str:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    return date_str
+
+
 def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
     """QA runner 必须显式指定固定上海日期，禁止回退到当天。"""
     if not body or "report_date" not in body:
@@ -413,12 +431,16 @@ async def trigger_morning_briefing(
     """手动触发晨报生成（非流式，供管理员 curl 触发）
 
     直接调用 morning_agent.run()，不走 graph SSE 流。
-    晨报完成后自动提取 major_events 并行执行事件传导分析，等待全部完成。
     返回 JSON 含 success / message / report_date / cached / 事件统计。
     管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
+
+    事件传导：2026-08-12（Task 5）起传导触发统一由事件抓取中台负责
+    （event_scrape 入库成功后触发 run_event_analysis_pipeline），本入口不再直接触发
+    event conduction——否则对同批事件（07:30 全量/每小时增量已触发）双跑
+    （Task 4 评审 M2）。响应中的 event_*_count 字段保留并恒为 0（接口契约，
+    Node 侧 morning_trigger_handler 消费）。
     """
     from aistock_agent.agents.workers import morning as morning_agent
-    from aistock_agent.services.event_conduction import run_event_conduction_batch
 
     report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
@@ -455,25 +477,16 @@ async def trigger_morning_briefing(
             major_events = []
         has_major_events = bool(major_events)
 
-        # 事件传导统计
+        # 事件传导统计：传导统一由中台负责（Task 5），本入口不再触发，
+        # 字段保留恒 0（响应契约：Node 侧 morning_trigger_handler.ts 消费
+        # event_triggered_count / event_succeeded_count / event_failed_count /
+        # event_persisted_count / event_persist_failed_count）。
         major_event_count = len(major_events)
         event_triggered_count = 0
         event_succeeded_count = 0
         event_failed_count = 0
         event_persisted_count = 0
         event_persist_failed_count = 0
-
-        # 晨报成功生成（非降级）且有重大事件 → 触发事件传导
-        if morning_generated and has_major_events:
-            event_results = await run_event_conduction_batch(major_events)
-            event_triggered_count = len(event_results)
-            event_succeeded_count = sum(1 for r in event_results if r.status.event_generated)
-            event_failed_count = event_triggered_count - event_succeeded_count
-            # 只统计生成成功的事件的持久化状态
-            event_persisted_count = sum(
-                1 for r in event_results if r.status.event_generated and r.status.persisted
-            )
-            event_persist_failed_count = event_succeeded_count - event_persisted_count
 
         elapsed = time.time() - start
 
@@ -610,6 +623,93 @@ async def trigger_event_briefing(
             "event_persisted": False,
             "event_cached": False,
         }
+
+
+@router.post("/briefing/event-scrape/trigger")
+async def trigger_event_scrape(
+    body: dict[str, object] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发统一事件抓取。
+
+    body: {"scrape_mode": "full_daily|intraday|event_triggered",
+           "score_date": "YYYY-MM-DD", "event": {...}}
+
+    返回契约（对齐既有 trigger 接口 success/message 风格）：
+    - 成功: {"success": True, "data": <run_event_scrape 结果>}
+    - 失败: {"success": False, "message": <错误说明>}
+      非法 scrape_mode 与 run_event_scrape 异常均走结构化错误体，不抛 500。
+    """
+    from aistock_agent.services.event_scraper import VALID_MODES, run_event_scrape
+
+    logger = structlog.get_logger()
+    payload = body or {}
+    scrape_mode = str(payload.get("scrape_mode", "full_daily"))
+    # allowlist 校验：非法值返回结构化错误，避免 run_event_scrape 抛 ValueError → 500
+    if scrape_mode not in VALID_MODES:
+        logger.warning(
+            "manual_trigger_event_scrape_invalid_mode",
+            scrape_mode=scrape_mode,
+            valid_modes=sorted(VALID_MODES),
+        )
+        return {
+            "success": False,
+            "message": f"未知 scrape_mode: {scrape_mode!r}，合法值: {sorted(VALID_MODES)}",
+        }
+    score_date = payload.get("score_date")
+    event = payload.get("event")
+    logger.info("manual_trigger_event_scrape_start", scrape_mode=scrape_mode)
+    try:
+        result = await run_event_scrape(
+            scrape_mode,
+            score_date=str(score_date) if score_date else None,
+            event=dict(event) if isinstance(event, dict) else None,
+        )
+        logger.info("manual_trigger_event_scrape_done", **result)
+        return {"success": True, "data": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "manual_trigger_event_scrape_failed",
+            scrape_mode=scrape_mode,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"success": False, "message": f"事件抓取失败: {str(exc)}"}
+
+
+@router.get("/event/scrape-list")
+async def event_scrape_list(date: str) -> dict[str, object]:
+    """按日期读取当日抓取事件列表（事件抓取中台查询接口）。
+
+    URL 参数：
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+    返回: {"events": [EventRecord, ...]}；当日无抓取事件返回空列表。
+    """
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    date = _validate_scrape_date(date)
+    events = await load_event_scrape(date)
+    return {"events": events}
+
+
+@router.get("/event/scrape-by-symbol/{symbol}")
+async def event_scrape_by_symbol(symbol: str, date: str) -> dict[str, object]:
+    """按标的读取当日抓取事件（stock_trace 证据源用）。
+
+    URL 参数：
+        symbol: 6 位股票代码（必填）。
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+    返回: {"events": [EventRecord, ...]}；按 payload.symbol / involved_keywords
+    子串过滤（"000" 类短符号可能误命中多股，对 stock_trace 证据源可接受，
+    Task 2 评审备注）。
+    """
+    from aistock_agent.services.event_store import (  # noqa: PLC0415
+        load_event_scrape_by_symbol,
+    )
+
+    date = _validate_scrape_date(date)
+    events = await load_event_scrape_by_symbol(symbol, date)
+    return {"events": events}
 
 
 @router.post("/briefing/review/trigger")

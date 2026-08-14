@@ -1,4 +1,4 @@
-"""标准答案采集 —— tavily 搜索权威分析 + LLM 提取归因结构 + 置信度。
+"""标准答案采集 —— 切片数据约束推导标准答案 + 置信度。
 
 标准答案库 data/ground_truths/{gt_id}.json（gitignore）。
 confidence=low 的案例进入待标注清单，随每日报告邮件发负责人人工回填。
@@ -13,24 +13,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.iterate.case_builder import get_data_dir
 from aistock_agent.services import llm as llm_service
-from aistock_agent.services.tavily import TavilyService
 
 logger = structlog.get_logger()
-
-_EXTRACT_PROMPT = """你是股票归因分析师。基于给定案例的异动事件与搜索到的权威资料，
-输出严格 JSON，字段如下：
-{
-  "confidence": "high|medium|low",
-  "attribution": {
-    "direction": "bullish|bearish|neutral",
-    "drivers": ["驱动因素1", "驱动因素2"],
-    "transmission_path": ["传导路径1"],
-    "affected_sectors": ["受影响板块1"],
-    "source_notes": [{"source": "来源名", "title": "标题", "url": "链接"}]
-  }
-}
-置信度规则：权威来源（券商研报/机构观点/主流财经媒体）>= 2 条为 high；1 条为 medium；0 条为 low。
-只输出 JSON，禁止 Markdown 或代码围栏。"""
 
 
 def load_ground_truth(gt_id: str, data_dir: Path | None = None) -> dict[str, object]:
@@ -38,42 +22,6 @@ def load_ground_truth(gt_id: str, data_dir: Path | None = None) -> dict[str, obj
     path = base / "ground_truths" / f"{gt_id}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     return cast("dict[str, object]", payload)
-
-
-async def generate_ground_truth(
-    case: dict[str, object], *, max_results: int = 5
-) -> dict[str, object]:
-    """对单个案例采集标准答案并落盘。"""
-    event_title = str(case["event_title"])
-    search_results = TavilyService.search(
-        f"{event_title} 原因 分析 机构观点",
-        topic="news",
-        max_results=max_results,
-    )
-    hits = _extract_hits(search_results)
-    payload = {
-        "case": {"event_title": event_title, "event_time": case["event_time"]},
-        "search_hits": hits,
-    }
-    llm = llm_service.get_deep_think()
-    resp = await llm.ainvoke(
-        [
-            SystemMessage(content=_EXTRACT_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
-        ]
-    )
-    parsed = _parse_llm_json(str(resp.content))
-    gt: dict[str, object] = {
-        "gt_id": str(case["ground_truth_ref"]),
-        "case_id": str(case["case_id"]),
-        "confidence": _normalize_confidence(parsed.get("confidence")),
-        "attribution": parsed.get("attribution", {}),
-    }
-    path = get_data_dir() / "ground_truths" / f"{gt['gt_id']}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(gt, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("iterate_ground_truth_generated", gt_id=gt["gt_id"], confidence=gt["confidence"])
-    return gt
 
 
 def list_pending_review() -> list[dict[str, object]]:
@@ -89,21 +37,6 @@ def list_pending_review() -> list[dict[str, object]]:
     return pending
 
 
-def _extract_hits(search_results: dict[str, object]) -> list[dict[str, object]]:
-    results = search_results.get("results")
-    if not isinstance(results, list):
-        return []
-    return [
-        {
-            "title": r.get("title", ""),
-            "url": r.get("url", ""),
-            "content": str(r.get("content", ""))[:500],
-        }
-        for r in results
-        if isinstance(r, dict)
-    ]
-
-
 def _parse_llm_json(text: str) -> dict[str, object]:
     import re
 
@@ -115,12 +48,6 @@ def _parse_llm_json(text: str) -> dict[str, object]:
     except json.JSONDecodeError:
         logger.warning("iterate_gt_llm_invalid_json", snippet=raw[:200])
         return {}
-
-
-def _normalize_confidence(value: object) -> str:
-    if value in {"high", "medium", "low"}:
-        return str(value)
-    return "low"  # 解析失败按低置信度进待标注清单
 
 
 # ============================================================================
@@ -136,6 +63,10 @@ _DRIVER_PROMPT = """你是股票归因分析师。基于给定切片语料提取
 要求：
 - 只输出严格 JSON：{{"drivers": ["驱动因素1", "驱动因素2"]}}，最多 4 条
 - 只能基于上述语料推断，禁止使用语料之外的信息（禁止联网、禁止事后知识）
+- 驱动因素必须由语料原文中的词/短语直接构成（可拼接语料中的关键词），
+  禁止概括、润色或使用语料中不存在的表述——逐字可溯源是后续评分校验前提
+  （gt_validator 驱动规则）；若语料无法支撑任何驱动，输出空列表
+  {{"drivers": []}}（空驱动会被评分剔除，不制造虚假驱动）
 - 驱动因素用简洁中文短语（4-12 字），如「隔夜美股暴涨」「外盘传导」
 只输出 JSON。"""
 
@@ -214,8 +145,8 @@ async def generate_data_constrained_gt(
 ) -> dict[str, object]:
     """受切片数据约束的标准答案：方向/板块确定性 + 驱动 LLM 受约束提取。
 
-    与 generate_ground_truth（Tavily 全网搜索/后验模式）的区别：本函数
-    只使用切片 window_before 内可见数据，杜绝后验知识泄漏。
+    只使用切片 window_before 内可见数据，杜绝后验知识泄漏（Tavily 后验模式
+    generate_ground_truth 已删除，F5 修复：本函数是唯一标准答案生成入口）。
     """
     window = case.get("window_before")
     snapshot = window.get("market_snapshot") if isinstance(window, dict) else None
@@ -239,11 +170,13 @@ async def generate_data_constrained_gt(
         raw_drivers = parsed.get("drivers")
         if isinstance(raw_drivers, list):
             drivers = [str(d) for d in raw_drivers if d][:4]
-    except Exception:  # noqa: BLE001 — LLM 失败降级为确定性摘要，不阻断切片生成
+    except Exception:  # noqa: BLE001 — LLM 失败降级为空驱动（方向/板块仍确定性），不阻断切片生成
         logger.warning("iterate_gt_drivers_llm_failed", exc_info=True)
 
     if not drivers:
-        drivers = [f"指数{direction}"]
+        # A14/G3 修复：驱动提取失败兜底为空列表（空驱动 → evaluator 重归一化
+        # 剔除该维度），绝不生成"指数neutral"类噪声驱动制造虚假不可达。
+        drivers = []
 
     telegraph = window.get("cls_telegraph") if isinstance(window, dict) else []
     record_count = len(telegraph) if isinstance(telegraph, list) else 0
@@ -254,6 +187,9 @@ async def generate_data_constrained_gt(
     gt: dict[str, object] = {
         "gt_id": str(case.get("ground_truth_ref", f"gt_{case.get('case_id')}")),
         "case_id": str(case.get("case_id", "")),
+        # A-3 修复：GT 版本字段（2026-08-14）——人工回填/口径升级可追踪，
+        # 回填必须过 validate_gt_against_case 校验。
+        "gt_version": 1,
         "confidence": confidence,
         "attribution": {
             "direction": direction,
@@ -261,6 +197,7 @@ async def generate_data_constrained_gt(
             "transmission_path": [],
             "affected_sectors": sectors,
             "source_notes": [],
+            "corpus": corpus[:6000],  # 冻结切片语料，供 judge 引用机械核验（N5 修复）
         },
     }
     base = data_dir or get_data_dir()

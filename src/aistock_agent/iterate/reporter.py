@@ -42,25 +42,49 @@ async def build_daily_report(report_date: date | None = None) -> str:
     return "\n".join(lines)
 
 
-def send_report_via_smtp(markdown: str, *, subject: str) -> bool:
-    """SMTP 发送（HTML 正文）；重试与配置解析由 mail_sender 负责；最终失败写兜底。"""
+def send_report_via_smtp(
+    markdown: str, *, subject: str, attachments: tuple[str, ...] = ()
+) -> bool:
+    """SMTP 发送（HTML 正文 + 可选附件）；重试与配置解析由 mail_sender 负责；最终失败写兜底。"""
     body_html = (
         "<pre style='font-family:Menlo,Consolas,monospace;font-size:12px;"
         f"white-space:pre-wrap'>{html.escape(markdown)}</pre>"
     )
-    ok = send_mail(subject, body_html)
+    ok = send_mail(subject, body_html, attachments=attachments)
     if not ok:
         _write_report_fallback(markdown)
     return ok
 
 
-async def run_daily_report() -> None:
-    """构建 + 发送每日报告（scheduler 调用）。"""
-    md = await build_daily_report()
-    subject = f"迭代Agent每日汇总 {date.today().isoformat()}"
-    ok = send_report_via_smtp(md, subject=subject)
+async def run_daily_report(report_date: date | None = None) -> None:
+    """构建 + 发送每日报告（scheduler 调用）。
+
+    report_date：手动补发历史日期的报告（2026-08-14 用户需求：主应用
+    scheduler 未运行时无自动发送，--once --date 补发）。
+    附件：当日实验记录 JSON（完整轮次/patch 规格，2026-08-14 用户反馈
+    邮件正文信息不足——只想看"改了什么"需要完整补丁）。
+    """
+    md = await build_daily_report(report_date)
+    day = report_date or date.today()
+    subject = f"迭代Agent每日汇总 {day.isoformat()}"
+    ok = send_report_via_smtp(
+        md, subject=subject, attachments=_collect_experiment_attachments(day)
+    )
     if not ok:
         logger.error("iterate_report_final_failure", subject=subject)
+
+
+def _collect_experiment_attachments(day: date) -> tuple[str, ...]:
+    """当日实验记录合并 JSON（含完整 patch 规格），作为报告附件。"""
+    records = _read_experiments(day)
+    if not records:
+        return ()
+    root = get_data_dir() / "reports"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{day.isoformat()}_experiments.json"
+    path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("iterate_report_attachment_written", path=str(path), count=len(records))
+    return (str(path),)
 
 
 def _read_experiments(report_date: date | None = None) -> list[dict[str, object]]:
@@ -68,6 +92,8 @@ def _read_experiments(report_date: date | None = None) -> list[dict[str, object]
 
     向后兼容：无 created_at 字段的旧记录（本修复前写入）视为"当日"恒包含，
     避免历史实验从报告中消失；有 created_at 的记录按 ISO 日期精确过滤。
+    排除 ``_best.json``（补丁固化汇总，无 case_id/created_at，2026-08-14 事故：
+    被"旧记录恒包含"误带进实验汇总，显示空案例行）。
     """
     root = get_data_dir() / "experiments"
     if not root.exists():
@@ -75,6 +101,8 @@ def _read_experiments(report_date: date | None = None) -> list[dict[str, object]
     records: list[dict[str, object]] = []
     day = report_date.isoformat() if report_date else None
     for p in sorted(root.glob("*.json")):
+        if p.name.endswith("_best.json"):
+            continue  # 补丁固化汇总文件，非轮次实验记录
         try:
             record = json.loads(p.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -110,13 +138,25 @@ def _format_improvements(experiments: list[dict[str, object]]) -> str:
         return "（无改进建议）"
     lines: list[str] = []
     for e in experiments:
-        variant = e.get("variant", {})
-        if isinstance(variant, dict) and variant.get("type") != "baseline":
-            lines.append(
-                f"- 案例 {e.get('case_id', '')} r{e.get('round', '')}："
-                f"改动 {variant.get('files', [])}，评分 {e.get('score', 0)}，"
-                f"建议：{variant.get('instructions', '')}"
-            )
+        variant = e.get("variant")
+        if not isinstance(variant, dict) or variant.get("type") == "baseline":
+            continue
+        case_id = e.get("case_id", "")
+        lines.append(
+            f"- 案例 {case_id} r{e.get('round', '')}："
+            f"改动 {variant.get('files', [])}，评分 {e.get('score', 0)}，"
+            f"建议：{variant.get('instructions', '')}"
+        )
+        # 2026-08-14 用户反馈：正文信息不足，不知道 agent 改了什么——
+        # 附上 patch 摘要（old_snippet → new_snippet 关键行）。
+        # 注意：patch 是实验记录顶层字段（run_experiment_round 写入结构），
+        # 不在 variant 内（variant 只含 type/files/instructions）。
+        patch = e.get("patch")
+        if isinstance(patch, dict):
+            old = str(patch.get("old_snippet", "")).replace("\n", "⏎")[:80]
+            new = str(patch.get("new_snippet", "")).replace("\n", "⏎")[:120]
+            if old and new:
+                lines.append(f"  - patch: `{old}` → `{new}`")
     return "\n".join(lines) if lines else "（无改进建议）"
 
 
