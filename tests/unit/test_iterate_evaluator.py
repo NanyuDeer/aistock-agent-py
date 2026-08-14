@@ -52,6 +52,29 @@ def _sample_sector_list_text() -> str:
 
 
 @pytest.mark.asyncio
+async def test_driver_judge_uses_temperature_zero() -> None:
+    """A-2：judge 主路径 T=0（评分确定性，裁决书 A 论题）。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "affected_sectors": ["半导体"],
+            "corpus": "财联社：A股高开，半导体领涨",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["隔夜美股暴涨"], ["半导体"]),
+                _mock_driver_judge(1, 1, quotes=["隔夜美股暴涨"]),
+            ]
+        )
+        await evaluate_attribution("大盘高开，半导体领涨", gt)
+    judge_call = factory.call_args_list[1]  # 第二次调用是 judge
+    assert judge_call.kwargs.get("temperature") == 0.0
+
+
+@pytest.mark.asyncio
 async def test_structured_sectors_preferred_over_extract() -> None:
     """A-5 N2：evaluate 收到 agent_structured 时，sectors 优先用结构化值。
 

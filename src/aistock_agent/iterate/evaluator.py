@@ -188,7 +188,8 @@ async def _driver_hit_score(
         return 0.0  # 重归一化后 truth 空不参与评分（A12 修复）
     if not agent:
         return 0.0
-    llm = llm_service.get_deep_think()
+    # A-2 修复：judge T=0 主路径（裁决书 A 论题）——评分确定性，消除温度采样噪声
+    llm = llm_service.get_deep_think(temperature=0.0)
     resp = await llm.ainvoke(
         [
             SystemMessage(content=_DRIVER_JUDGE_PROMPT.format(truth=truth, agent=agent)),
