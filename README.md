@@ -575,4 +575,6 @@ docker run -p 8080:8080 --env-file .env aistock-agent
 - 机制：历史切片（T 窗口固化）→ 数据约束标准答案（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）→ 变体实验（目标区域补丁 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3，重归一化）+ iterated.json 去重
 - 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
 - 触发：交易日 16:30 产片 + 17:00 消费/报告（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
+- 产片源（`iterate/case_sourcers.py` 注册表，清单封闭）：`market_close_snapshot`（review 收盘快照）；`event_store_scan`（event_analyst 主源，逐日读事件库 `load_event_scrape` + `is_major_event` 过滤，2026-08-14 四期 Task 1）+ `telegraph_keyword_scan`（后备，30 天电报关键词重大事件）
+- GT 消费（四期 Task 3，2026-08-14）：`generate_data_constrained_gt` 读 `case.meta.direction_hint`（事件库事件方向）注入 `source_notes` + 驱动语料增强（`gt_version` 2）；GT `direction` 仍为快照市场方向，不被事件方向覆盖（evaluator 计分语义不变）
 - 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter`（二期起须同时声明非空 `case_sources` 产片源，Task 1，2026-08-14）即可
