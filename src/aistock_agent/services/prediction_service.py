@@ -2,9 +2,14 @@
 
 独立可复用推理包：输入溯源结果 + 事实快照，输出 PredictionResult（含到期日）。
 大盘溯源（review）内联调用；个股溯源/事件传导后续接入同一入口。
-PR-A/T3：run_predict 返回状态化契约（ok/gate_skipped/llm_failed/parse_failed/due_dates_failed），
+PR-A/T3：run_predict 返回状态化契约（ok/gate_skipped/llm_failed/parse_failed），
 失败原因可区分，不再静默返回 None；另提供 predict_from_trace 独立执行入口
 （缓存直读 → DB 重建 → trade_date 校验 → run_predict → 落库）。
+
+P2 越年裁决（2026-08-14）：到期日不再因 chinese_calendar 覆盖（2004-2026）越年而整条
+失败——改为逐档容错，越年档按「周末+已发布节假日(HOLIDAYS_EXTRA)」近似计算并显式标记
+approximate（wire 键 due_dates_approximate），其余档精确。理由：验证器对照扫描日单日
+符号（低信噪比），精确日历无统计增益；越年显式标注优于整条 skipped（预判功能停产）。
 """
 
 import json
@@ -45,7 +50,7 @@ HORIZON_TRADING_DAY_OFFSETS: dict[str, int] = {
     "long": 120,
 }
 
-# skipped 落库默认文案（gate_skipped/due_dates_failed 的 reason 为空时兜底）
+# skipped 落库默认文案（gate_skipped 的 reason 为空时兜底）
 _DEFAULT_SKIP_REASON = "prediction skipped"
 
 # 代码围栏剥离 — 防御 LLM 可能包裹的 ```json ... ```
@@ -62,29 +67,25 @@ _EXTRA_KEYS_TO_DROP = (
 )
 
 
-class DueDatesComputationError(Exception):
-    """到期日计算失败（任一 horizon 计算异常或 due date 超出 chinese_calendar 覆盖范围）。"""
-
-
 class TraceUnavailableError(Exception):
     """溯源数据不可用（缓存与 DB 均无法重建 trace，或 snapshot trade_date 不匹配）。"""
 
 
 @dataclass(frozen=True)
 class PredictionRunResult:
-    """预测执行结果：状态 + 预测工件 + 各档位到期交易日 + 原因。
+    """预测执行结果：状态 + 预测工件 + 各档位到期交易日 + 原因 + 近似档标记。
 
     状态语义（S2 契约）：
-    - ok：prediction + due_dates 完整产出；
+    - ok：prediction + due_dates 完整产出（越年档降级为近似并记入 approximate_horizons）；
     - gate_skipped：attribution_status 门禁未过（prediction/due_dates 为空）；
     - llm_failed：LLM 调用异常（瞬时失败，可重试）；
-    - parse_failed：载荷解析/校验失败（不可重试，属 LLM 输出质量问题）；
-    - due_dates_failed：到期日计算失败（G7：不再静默降级 {}，显式标记）。
+    - parse_failed：载荷解析/校验失败（不可重试，属 LLM 输出质量问题）。
     """
 
-    status: Literal["ok", "gate_skipped", "llm_failed", "parse_failed", "due_dates_failed"]
+    status: Literal["ok", "gate_skipped", "llm_failed", "parse_failed"]
     prediction: PredictionResult | None = None
     due_dates: dict[str, str] = field(default_factory=dict)  # {horizon: YYYY-MM-DD}
+    approximate_horizons: list[str] = field(default_factory=list)  # 越年近似档位名列表
     reason: str = ""
 
 
@@ -201,36 +202,34 @@ def _build_prediction_input(
     }
 
 
-def _compute_due_dates(trade_date: str, horizons: list[PredictionHorizon]) -> dict[str, str]:
-    """确定性计算各档位到期交易日；任一 horizon 计算异常或超日历覆盖 → 显式失败。
+def _compute_due_dates(
+    trade_date: str, horizons: list[PredictionHorizon]
+) -> tuple[dict[str, str], list[str]]:
+    """确定性计算各档位到期交易日（逐档容错，P2 裁决）。
 
-    覆盖守卫（G7 修复）：chinese_calendar 覆盖 2004-2026。due date 落在覆盖范围外
-    （如 2027 年，节假日数据 2026 年底才发布）说明该日期依赖未确认的节假日——
-    静默给出近似日期会误导到期验证对照，故显式抛 DueDatesComputationError，
-    由 run_predict 落 due_dates_failed。库升级后 is_workday 不再抛异常，自动恢复精确。
-    注：PR-B（holidays_extra 补充源）合入后，此处可改为 consult 补充源
-    （post-merge 跟进项，本期不做）。
+    对每档：add_trading_days 推进 N 个交易日（内部 is_trading_day 对越年走
+    「周末+已发布节假日 HOLIDAYS_EXTRA」兜底，不抛）；随后用 chinese_calendar 覆盖探测
+    该 due date：超出覆盖范围（2004-2026，如 2027 年，节假日数据 2026 年底才发布）
+    → 该档到期日依赖未确认的节假日，显式标记为近似（approximate_horizons），不整条失败。
+
+    Returns:
+        (due_dates, approximate_horizons)：due_dates 每档 YYYY-MM-DD；
+        approximate_horizons 为越年降级为近似的档位名列表（其余档精确）。
     """
     base = date.fromisoformat(trade_date)
     due_dates: dict[str, str] = {}
+    approximate_horizons: list[str] = []
     for h in horizons:
-        try:
-            due_dates[h.horizon] = add_trading_days(
-                base, HORIZON_TRADING_DAY_OFFSETS[h.horizon]
-            ).isoformat()
-        except Exception as exc:
-            raise DueDatesComputationError(
-                f"due date computation failed for horizon {h.horizon}: {exc}"
-            ) from exc
-    # 覆盖守卫：任一 due date 超出 chinese_calendar 覆盖 → 显式失败
-    # （add_trading_days 内部对超范围日期保守 fallback 为可交易日，此处精确复核）
-    for due_str in due_dates.values():
-        due = date.fromisoformat(due_str)
+        due = add_trading_days(base, HORIZON_TRADING_DAY_OFFSETS[h.horizon])
+        due_str = due.isoformat()
+        due_dates[h.horizon] = due_str
+        # 覆盖探测：静默给出近似日期会误导到期验证对照，故显式标近似（G7 语义保留，
+        # 由「整条失败」改为「标注降级」——P2 裁决：越年标注优于预测停产）
         try:
             chinese_calendar.is_workday(due)
         except (NotImplementedError, ValueError):
-            raise DueDatesComputationError(f"due date beyond calendar coverage: {due}")
-    return due_dates
+            approximate_horizons.append(h.horizon)
+    return due_dates, approximate_horizons
 
 
 async def run_predict(
@@ -242,8 +241,8 @@ async def run_predict(
     其余返回 gate_skipped。失败不再静默返回 None，而是按原因分类返回状态：
     - LLM 调用异常 → llm_failed（瞬时失败，可重试）；
     - 载荷解析/校验失败 → parse_failed（LLM 输出质量问题）；
-    - 到期日计算失败 → due_dates_failed（G7：不再静默降级 {}）；
-    - 未预期异常（非上述四类）→ logger.error + 重新抛出（不吞 bug，
+    - 到期日越年 → ok + approximate_horizons（逐档容错：越年档降级近似并标注，P2 裁决）；
+    - 未预期异常（非上述已分类状态）→ logger.error + 重新抛出（不吞 bug，
       上层消费者/端点负责兜底）。
     """
     if trace.attribution_status not in {"confirmed", "hypothesis"}:
@@ -285,13 +284,16 @@ async def run_predict(
                 dropped=len(prediction.evidence_ids) - len(filtered),
             )
         prediction = prediction.model_copy(update={"evidence_ids": filtered})
-        # 到期日计算（G7 修复）：失败显式标记 due_dates_failed，不再静默降级 {}
-        try:
-            due_dates = _compute_due_dates(snapshot.trade_date, prediction.horizons)
-        except DueDatesComputationError as exc:
-            logger.warning("prediction.due_dates_failed", error=str(exc))
-            return PredictionRunResult(status="due_dates_failed", due_dates={}, reason=str(exc))
-        return PredictionRunResult(status="ok", prediction=prediction, due_dates=due_dates)
+        # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
+        due_dates, approximate_horizons = _compute_due_dates(
+            snapshot.trade_date, prediction.horizons
+        )
+        return PredictionRunResult(
+            status="ok",
+            prediction=prediction,
+            due_dates=due_dates,
+            approximate_horizons=approximate_horizons,
+        )
     except Exception as exc:
         # 未预期异常：不静默，重新抛出交由上层消费者/端点兜底
         logger.error("prediction.run_unexpected_failure", error=str(exc), exc_info=True)
@@ -351,8 +353,9 @@ async def predict_from_trace(
     后续个股溯源/事件传导复用本入口时，trace_id 可作为溯源标识扩展点。
 
     落库规则：
-    - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；
-    - gate_skipped / due_dates_failed → status=skipped + skip_reason（硬约束 3 闭环）；
+    - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；越年近似档
+      经 due_dates_approximate 显式标记（Node 侧合并进 prediction jsonb）；
+    - gate_skipped → status=skipped + skip_reason（硬约束 3 闭环）；
     - llm_failed / parse_failed → 瞬时失败不落库（由调用方决定重试），record=None。
 
     Returns:
@@ -374,7 +377,10 @@ async def predict_from_trace(
             "prediction": result.prediction.model_dump(mode="json"),
             "due_dates": result.due_dates,
         }
-    elif result.status in {"gate_skipped", "due_dates_failed"}:
+        if result.approximate_horizons:
+            # 越年近似档显式标记（仅非空携带，向后兼容；Node 侧合并进 prediction jsonb）
+            payload["due_dates_approximate"] = result.approximate_horizons
+    elif result.status == "gate_skipped":
         # 硬约束 3：skipped 落库闭环（skip_reason 存 prediction 对象内）
         payload = {
             "source_type": "market_trace",

@@ -261,7 +261,7 @@ class PredictionConsumer(BaseConsumer):
     """review_done 预测消费者（独立消费组 prediction_chain，S1/S2）。
 
     语义：
-    - ok / gate_skipped / due_dates_failed：predict_from_trace 内已完成落库，直接收尾；
+    - ok / gate_skipped：predict_from_trace 内已完成落库，直接收尾；
     - llm_failed / parse_failed：retry-once（退避 2s）后仍失败 → 抛异常，
       由 _consumer_loop 的 event_bus.retry(event) 接管（超过 max_retries 进 DLQ）；
     - TraceUnavailableError：不重试，落 skipped（硬约束 7）。
@@ -286,8 +286,8 @@ class PredictionConsumer(BaseConsumer):
             logger.warning("prediction_trace_unavailable", report_date=report_date, error=str(exc))
             return
 
-        if result.status in {"ok", "gate_skipped", "due_dates_failed"}:
-            # ok 已完整落库；gate_skipped/due_dates_failed 已落 skipped（predict_from_trace 内完成）
+        if result.status in {"ok", "gate_skipped"}:
+            # ok 已完整落库；gate_skipped 已落 skipped（predict_from_trace 内完成）
             logger.info("prediction_done", status=result.status, report_date=report_date)
             return
 

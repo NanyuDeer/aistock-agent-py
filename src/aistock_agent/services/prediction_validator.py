@@ -41,9 +41,15 @@ def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object
 
 
 async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, object]:
-    """对单档位做到期对照：resolve target → 取实际信号 → hit/miss/insufficient。"""
+    """对单档位做到期对照：resolve target → 取实际信号 → hit/miss/insufficient。
+
+    近似档（prediction.due_dates_approximate 含该档，P2 裁决：越年到期日为近似）
+    → reason 加 ``(approximate_due_date)`` 前缀，供统计分桶归因（区分于精确档）。
+    """
     prediction = record.get("prediction")
     entry = _extract_horizon_entry(prediction, horizon) or {}
+    approx = prediction.get("due_dates_approximate") if isinstance(prediction, dict) else None
+    is_approximate = isinstance(approx, list) and horizon in approx
     target = str(entry.get("target") or "")
     code = _INDEX_CODE_MAP.get(target)
     today = shanghai_today().isoformat()
@@ -84,11 +90,14 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
         result = "hit" if pct < 0 else "miss"
     else:
         result = "hit" if abs(pct) < _NEUTRAL_PCT_THRESHOLD else "miss"
+    reason = f"方向={direction}, 实际涨跌幅={actual_str}"
+    if is_approximate:
+        reason = f"(approximate_due_date) {reason}"
     return {
         "horizon": horizon,
         "result": result,
         "actual": actual_str,
-        "reason": f"方向={direction}, 实际涨跌幅={actual_str}",
+        "reason": reason,
         "verified_at": today,
     }
 

@@ -120,28 +120,10 @@ async def test_run_predict_filters_unknown_evidence(capsys):
 
 
 @pytest.mark.asyncio
-async def test_run_predict_due_dates_failure_raises_status(monkeypatch):
-    """G7 修复：add_trading_days 抛异常 → 显式 due_dates_failed（不再静默降级 {}）。"""
-    def _boom(*args: object, **kwargs: object) -> date:
-        raise NotImplementedError("no available data for year 2027")
-
-    monkeypatch.setattr(
-        "aistock_agent.services.prediction_service.add_trading_days", _boom
-    )
-    llm = AsyncMock()
-    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
-    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
-        result = await run_predict(_make_trace(), _make_snapshot())
-    assert result.status == "due_dates_failed"
-    assert result.due_dates == {}
-    assert result.prediction is None
-    assert "due date" in result.reason
-
-
-@pytest.mark.asyncio
-async def test_run_predict_calendar_coverage_guard_fails_due_dates():
-    """覆盖守卫：chinese_calendar.is_workday 抛 NotImplementedError（due date 超 2004-2026）
-    → 显式 due_dates_failed，不再用近似日期静默产出。"""
+async def test_run_predict_out_of_range_marks_approximate():
+    """越年覆盖（chinese_calendar.is_workday 抛 NotImplementedError）→ due date 照常按
+    「周末+已发布节假日(HOLIDAYS_EXTRA)」近似计算，档位标 approximate，不再整条 skipped
+    （逐档容错，P2 裁决：精确日历对低信噪比验证无统计增益，越年显式标注优于停产）。"""
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
     with patch(
@@ -150,14 +132,42 @@ async def test_run_predict_calendar_coverage_guard_fails_due_dates():
     ):
         with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
             result = await run_predict(_make_trace(), _make_snapshot())
-    assert result.status == "due_dates_failed"
-    assert result.due_dates == {}
-    assert result.prediction is None
+    assert result.status == "ok"
+    assert result.prediction is not None
+    # due date 照常产出（add_trading_days 内部 is_trading_day 对越年走周末+补充表兜底，不抛）
+    assert result.due_dates["short"] == date(2026, 8, 17).isoformat()
+    assert len(result.due_dates) == 2
+    # 越年档显式标记近似（不再静默、也不再整条失败）
+    assert result.approximate_horizons == ["short", "mid"]
+
+
+@pytest.mark.asyncio
+async def test_run_predict_partial_out_of_range_marks_only_that_horizon(monkeypatch):
+    """部分档越年：仅越年档标 approximate，其余档精确（逐档容错，不整条失败）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    real_add = ps.add_trading_days
+
+    def _fake(d: date, n: int) -> date:
+        if n == 20:  # mid 档偏移 → 2027 越年
+            return date(2027, 2, 5)
+        return real_add(d, n)
+
+    monkeypatch.setattr("aistock_agent.services.prediction_service.add_trading_days", _fake)
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
+    assert result.prediction is not None
+    assert result.due_dates["short"] == date(2026, 8, 17).isoformat()  # short 精确
+    assert result.due_dates["mid"] == "2027-02-05"  # mid 近似但照常产出
+    assert result.approximate_horizons == ["mid"]
 
 
 @pytest.mark.asyncio
 async def test_run_predict_reraises_unexpected_errors():
-    """未预期异常（非 LLM/parse/due_dates 四类）→ logger.error + 重新抛出，不静默吞 bug。"""
+    """未预期异常（非 LLM/parse 等已分类状态）→ logger.error + 重新抛出，不静默吞 bug。"""
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
     with patch(
@@ -299,6 +309,41 @@ async def test_predict_from_trace_cache_hit_persists_ok():
     assert payload["prediction"]["prediction_status"] == "confirmed"
     assert payload["due_dates"]["short"] == "2026-08-17"
     assert "status" not in payload  # ok 不传 status，Node 默认 pending
+    assert "due_dates_approximate" not in payload  # 全精确档不携带标记键（向后兼容）
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_ok_carries_approximate_horizons():
+    """ok 且存在近似档 → payload 携带 due_dates_approximate（Node 合并进 prediction jsonb）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    real_add = ps.add_trading_days
+
+    def _fake(d: date, n: int) -> date:
+        if n == 20:  # mid 档偏移 → 2027 越年
+            return date(2027, 2, 5)
+        return real_add(d, n)
+
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=_make_review_artifact_dict()),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.get_analysis_report = AsyncMock()
+            mock_api.save_prediction = AsyncMock(return_value={"id": 5})
+            with patch(
+                "aistock_agent.services.prediction_service.add_trading_days", _fake
+            ):
+                with patch(
+                    "aistock_agent.services.prediction_service.get_deep_think",
+                    return_value=_make_ok_llm(),
+                ):
+                    result, record = await predict_from_trace("trace-1", "2026-08-10")
+    assert result.status == "ok"
+    assert record == {"id": 5}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["due_dates_approximate"] == ["mid"]
+    assert payload["due_dates"]["mid"] == "2027-02-05"
 
 
 @pytest.mark.asyncio
