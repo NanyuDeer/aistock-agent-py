@@ -404,8 +404,11 @@ async def run_experiment_round(
             ),
         )
     else:
+        structured = output.get("structured")
         score = await evaluate_attribution(
-            str(output.get("final_response", "")), ground_truth
+            str(output.get("final_response", "")),
+            ground_truth,
+            agent_structured=structured if isinstance(structured, dict) else None,
         )
     record: dict[str, object] = {
         "case_id": case_id,

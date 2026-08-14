@@ -33,12 +33,21 @@ async def run_once(agent_id: str, case_id: str, variant_hash: str) -> dict[str, 
     module = __import__(adapter.module_path, fromlist=[adapter.run_entry])
     run_fn = getattr(module, adapter.run_entry)
     result = await run_fn(state)
-    return {
+    payload: dict[str, object] = {
         "agent_id": agent_id,
         "case_id": case_id,
         "variant_hash": variant_hash,
         "final_response": _safe_str(result.get("final_response", "")),
     }
+    # A-5 N2：结构化结果回传（review 返回 sectors），evaluator 提取优先级
+    # structured > 文本；无结构化键的 agent（如 event）保持原样。
+    structured: dict[str, object] = {}
+    sectors = result.get("sectors")
+    if isinstance(sectors, list):
+        structured["sectors"] = sectors
+    if structured:
+        payload["structured"] = structured
+    return payload
 
 
 def _load_case(case_id: str) -> dict[str, object]:

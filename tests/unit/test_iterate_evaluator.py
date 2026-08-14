@@ -52,6 +52,38 @@ def _sample_sector_list_text() -> str:
 
 
 @pytest.mark.asyncio
+async def test_structured_sectors_preferred_over_extract() -> None:
+    """A-5 N2：evaluate 收到 agent_structured 时，sectors 优先用结构化值。
+
+    裁决书 A 论题：提取优先级 structured > 文本。review run 内部已有
+    _extract_review_sectors 确定性提取，回传后 evaluator 不应再从文本
+    LLM 提取板块（后者受 SECTOR_LIST 截断影响）。
+    """
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "affected_sectors": ["CRO概念", "重组蛋白", "细胞免疫治疗"],
+            "corpus": "财联社：美国拟限制含光模块的中国数据中心组件对美出口",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                # extract 提取（文本）只给出泛化板块——不应被采纳
+                _mock_llm_extract("bullish", ["隔夜美股暴涨"], ["医药", "创新药"]),
+                _mock_driver_judge(1, 1, quotes=["隔夜美股暴涨"]),
+            ]
+        )
+        score = await evaluate_attribution(
+            "大盘高开，医药领涨",
+            gt,
+            agent_structured={"sectors": ["CRO概念", "重组蛋白", "细胞免疫治疗"]},
+        )
+    assert score.sectors == 0.3  # 结构化 sectors 全命中（而非文本提取的 0 命中）
+
+
+@pytest.mark.asyncio
 async def test_extract_input_promotes_sector_list() -> None:
     """extract 输入必须包含 SECTOR_LIST 板块清单（置顶）。
 

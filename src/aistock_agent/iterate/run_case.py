@@ -287,6 +287,11 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
     return best
 
 
+def _as_structured(value: object) -> dict[str, object] | None:
+    """回放输出中的 structured 键 → evaluator 入参（非 dict 时返回 None）。"""
+    return value if isinstance(value, dict) else None
+
+
 async def _run_baseline(
     agent_id: str, case_id: str, ground_truth: dict[str, object]
 ) -> dict[str, object]:
@@ -323,7 +328,11 @@ async def _run_baseline(
             "variant": {"type": "baseline", "files": [], "instructions": ""},
             "is_failure": True,
         }
-    score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
+    score = await evaluate_attribution(
+        str(output.get("final_response", "")),
+        ground_truth,
+        agent_structured=_as_structured(output.get("structured")),
+    )
     record: dict[str, object] = {
         "case_id": case_id,
         "round": 1,

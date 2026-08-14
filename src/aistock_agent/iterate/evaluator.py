@@ -75,11 +75,18 @@ async def extract_agent_attribution(text: str) -> dict[str, object]:
     return _parse_json(str(resp.content))
 
 
-async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object]) -> ScoreDetail:
+async def evaluate_attribution(
+    agent_output: str,
+    ground_truth: dict[str, object],
+    *,
+    agent_structured: dict[str, object] | None = None,
+) -> ScoreDetail:
     """对 agent 单次归因输出评分（0-1，重归一化）。
 
     重归一化（A12/A15 修复）：无对比对象维度排除出分母，空 GT 不得满分。
     direction_present（A3/N3 修复）：GT direction=neutral 时方向维不参与。
+    agent_structured（A-5 N2 修复）：回放子进程回传的结构化结果（如 review
+    的 sectors），提取优先级 structured > 文本——确定性事实不再经 LLM 提取。
     """
     attribution = ground_truth.get("attribution")
     if not isinstance(attribution, dict):
@@ -98,10 +105,14 @@ async def evaluate_attribution(agent_output: str, ground_truth: dict[str, object
         direction_score = 0.0
         direction_present = False
 
-    # 板块维：truth 非空才参与
+    # 板块维：truth 非空才参与；agent sectors 优先用结构化回传（A-5 N2），
+    # 否则退到 extract 文本提取
     truth_sectors = _as_str_list(attribution.get("affected_sectors"))
     if truth_sectors:
-        sectors_score = _sector_overlap_score(truth_sectors, extracted.get("sectors", []))
+        agent_sectors = _structured_sectors(agent_structured)
+        if not agent_sectors:
+            agent_sectors = extracted.get("sectors", [])
+        sectors_score = _sector_overlap_score(truth_sectors, agent_sectors)
         sectors_present = True
     else:
         sectors_score = 0.0
@@ -214,6 +225,13 @@ def _as_str_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+def _structured_sectors(agent_structured: dict[str, object] | None) -> list[str]:
+    """从结构化回传提取 sectors（A-5 N2：确定性事实优先于 LLM 文本提取）。"""
+    if not agent_structured:
+        return []
+    return _as_str_list(agent_structured.get("sectors"))
 
 
 def _quote_traceable(quote: str, corpus: str) -> bool:
