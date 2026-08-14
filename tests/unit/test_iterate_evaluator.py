@@ -52,6 +52,30 @@ def _sample_sector_list_text() -> str:
 
 
 @pytest.mark.asyncio
+async def test_transmission_path_merged_into_drivers() -> None:
+    """A-4：GT 的 transmission_path 并入驱动维参与命中判定。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "transmission_path": ["美股 → A股高开"],
+            "affected_sectors": [],
+            "corpus": "隔夜美股暴涨，A股高开",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["隔夜美股暴涨", "美股传导A股"], []),
+                # judge：agent 覆盖了传导语义（美股→A股），drivers+transmission 共 2 条 truth
+                _mock_driver_judge(2, 2, quotes=["隔夜美股暴涨", "美股传导A股"]),
+            ]
+        )
+        score = await evaluate_attribution("大盘高开", gt)
+    assert score.drivers == 0.5  # 2/2 命中（驱动 + 传导路径均覆盖）
+
+
+@pytest.mark.asyncio
 async def test_driver_judge_uses_temperature_zero() -> None:
     """A-2：judge 主路径 T=0（评分确定性，裁决书 A 论题）。"""
     gt = {

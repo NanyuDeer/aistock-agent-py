@@ -118,8 +118,13 @@ async def evaluate_attribution(
         sectors_score = 0.0
         sectors_present = False
 
-    # 驱动维：truth 非空才参与
+    # 驱动维：truth 非空才参与。
+    # A-4 修复：transmission_path 并入驱动维（裁决书 A 论题——不设独立第四维，
+    # 传导路径作为驱动语义的一部分参与命中判定；回填了 transmission_path 的
+    # GT 其传导覆盖同样被评估）。
     truth_drivers = _as_str_list(attribution.get("drivers"))
+    transmission = _as_str_list(attribution.get("transmission_path"))
+    truth_drivers = truth_drivers + [t for t in transmission if t not in truth_drivers]
     if truth_drivers:
         corpus = attribution.get("corpus") or ""
         drivers_score = await _driver_hit_score(
