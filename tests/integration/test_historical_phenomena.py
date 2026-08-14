@@ -76,7 +76,8 @@ async def test_historical_snapshot_matches_independent_label(
     close_snapshot = _load_close_snapshot(case)
 
     async def fake_get(path: str) -> dict[str, object] | None:
-        if path == "/internal/market/close-snapshot":
+        # 三期：close-snapshot 调用带 ?date={report_date}，必须用 startswith 匹配
+        if path.startswith("/internal/market/close-snapshot"):
             return close_snapshot
         if path == "/internal/news/latest":
             return {"items": []}

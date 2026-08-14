@@ -779,6 +779,35 @@ async def test_build_market_trace_snapshot_passes_report_date_to_close_snapshot(
     assert snapshot.trade_date == "2026-07-19"
 
 
+@pytest.mark.asyncio
+async def test_snapshot_last_close_fallback_date_mismatch_raises(mocker):
+    """三期 C2：close-snapshot 返回 None → last-close 兜底，但兜底数据日与请求日不一致 → fail-loud。
+
+    场景：历史回补（--date）命中非交易日/数据缺失 → Node 409 → last-close 返回
+    "最近交易日"数据。若不加校验，快照被盖章为请求日但数据是最近交易日，
+    产错日 case 进闭环（评审 C2，IMP-3 守卫死代码根因）。
+    修复后必须抛 MarketTraceSnapshotUnavailable，由 provider 抛错 → source_cases
+    降级 0 候选，绝不静默产错日 case。
+    """
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=None))
+    # last-close 兜底返回最近交易日（YYYYMMDD 格式，兼容 Node 两种格式之一）
+    last_close = {**COMPLETE_CLOSE, "trade_date": "20260813"}
+    mocker.patch.object(
+        node_api, "get_last_close_snapshot", AsyncMock(return_value=last_close)
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    with pytest.raises(MarketTraceSnapshotUnavailable, match="last-close 兜底数据日"):
+        await build_market_trace_snapshot("2026-07-19")
+
+
 # ============================================================================
 # Task 5 review 修复 — snapshot_id 必须支持同日失败后的安全重试
 # ============================================================================

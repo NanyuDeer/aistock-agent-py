@@ -38,8 +38,12 @@ async def get_alert_history(symbol: str | None = None, days: int = 7) -> str:
         days: 查询天数（最近 N 天，内部换算 dateFrom 传给 Node）
     """
     # Node /internal/monitor/alerts 已弃用 days 参数（静默忽略），只认 dateFrom；
-    # days 钳制 max(days,1)，按上海时区自然日换算 dateFrom=今天-days 天
-    date_from = (shanghai_today() - timedelta(days=max(days, 1))).isoformat()
+    # days 钳制 max(days,1)，按上海时区自然日换算 dateFrom=今天-days 天。
+    # 补东八区后缀（与 Node 端既有消费先例 YYYY-MM-DDT00:00:00+08:00 一致）：
+    # 纯日期 YYYY-MM-DD 的过滤语义依赖 DB session 时区，显式后缀消除时区漂移。
+    date_from = (
+        f"{(shanghai_today() - timedelta(days=max(days, 1))).isoformat()}T00:00:00+08:00"
+    )
     data = await node_api.get(f"/internal/monitor/alerts?dateFrom={date_from}&limit=20&offset=0")
     if not data:
         return "暂无告警历史数据"

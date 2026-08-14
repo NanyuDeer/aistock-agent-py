@@ -70,9 +70,9 @@ async def test_get_alert_history_success():
         result = await get_alert_history.ainvoke({"days": 7})
         assert "宁德时代" in result
         assert "固态电池" in result
-        # days 内部换算 dateFrom 传给 Node（今天-7天）
+        # days 内部换算 dateFrom 传给 Node（今天-7天，东八区时区后缀）
         mock_api.get.assert_called_once_with(
-            "/internal/monitor/alerts?dateFrom=2026-08-07&limit=20&offset=0"
+            "/internal/monitor/alerts?dateFrom=2026-08-07T00:00:00+08:00&limit=20&offset=0"
         )
 
 
@@ -128,7 +128,7 @@ async def test_get_alert_history_symbol_filtering():
         assert "半年报" not in result
         # symbol 仅用于客户端过滤，不透传给 Node.js；days 内部换算 dateFrom 传给 Node
         mock_api.get.assert_called_once_with(
-            "/internal/monitor/alerts?dateFrom=2026-08-07&limit=20&offset=0"
+            "/internal/monitor/alerts?dateFrom=2026-08-07T00:00:00+08:00&limit=20&offset=0"
         )
 
 
@@ -154,7 +154,7 @@ async def test_get_alert_history_uses_datefrom_not_days() -> None:
         mock_api.get = AsyncMock(return_value={"events": []})
         await get_alert_history.ainvoke({"symbol": "600519", "days": 7})
     url = mock_api.get.call_args.args[0]
-    assert "dateFrom=2026-08-07" in url      # 今天-7天
+    assert "dateFrom=2026-08-07T00:00:00+08:00" in url  # 今天-7天（东八区时区后缀）
     assert "days=" not in url                 # 静默失效参数消除
 
 
@@ -168,4 +168,4 @@ async def test_get_alert_history_days_clamped_to_min_1() -> None:
         mock_api.get = AsyncMock(return_value={"events": []})
         await get_alert_history.ainvoke({"days": 0})
     url = mock_api.get.call_args.args[0]
-    assert "dateFrom=2026-08-13" in url      # max(days,1) 钳制
+    assert "dateFrom=2026-08-13T00:00:00+08:00" in url  # max(days,1) 钳制
