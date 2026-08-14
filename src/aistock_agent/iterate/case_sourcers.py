@@ -17,6 +17,7 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.services.data_client import NodeApiClient
 from aistock_agent.services.event_store import is_major_event, load_event_scrape
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 from aistock_agent.utils.date import shanghai_today
@@ -307,19 +308,25 @@ async def _collect_industry_graph(*, event_time: datetime) -> dict[str, object] 
     {"chains": [...], "snapshot_generated_at": <采集时刻 ISO>,
      "graph_update_time": <Node payload 内的时间，缺失用采集时刻>,
      "event_time": <事件时间 ISO>, "posterior_exposure": False}
-    采集失败返回 None（降级，不阻断产片）。
+    采集失败重试 1 次（四期加固：三期实测 CLI 产片时单次调用超时/连接池异常，
+    Node 端点 200；重试后仍失败降级 None 不阻断产片）。
     """
-    from aistock_agent.services.data_client import NodeApiClient
-
     # 采集时刻用上海时区（与切片事件时间对齐；datetime.now 本地时区在服务器
     # 与容器间可能漂移，B-5 三时间戳要求可比较）
     from aistock_agent.utils.date import shanghai_now
 
-    try:
-        payload = await NodeApiClient().get_industry_graph_full()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("industry_graph_collect_failed", error=str(exc))
-        return None
+    # 四期：重试 1 次（共 2 次尝试）——首次异常或非 dict 均二次重试；NodeApiClient
+    # 为模块级 import（brief 用例 patch 目标是 case_sourcers 模块属性，对齐
+    # event_store_scan 的模块级 import 先例；data_client 已被 market_trace_snapshot
+    # 传递加载，无循环依赖）。
+    payload: object = None
+    for attempt in range(2):
+        try:
+            payload = await NodeApiClient().get_industry_graph_full()
+            if isinstance(payload, dict):
+                break
+        except Exception as exc:  # noqa: BLE001 — 单次失败重试，不阻断产片
+            logger.warning("industry_graph_collect_failed", attempt=attempt, error=str(exc))
     if not isinstance(payload, dict):
         return None
     collected_at = shanghai_now().isoformat()

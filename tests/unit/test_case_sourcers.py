@@ -262,3 +262,43 @@ def test_source_cases_dedupes_same_event_across_sources() -> None:
         results = asyncio.run(source_cases(adapter))
     assert len(results) == 2            # store_c + other_c（tele_c 被指纹去重）
     assert [c.meta["source"] for c in results] == ["event_store", "event_store"]
+
+
+def test_collect_industry_graph_retries_once() -> None:
+    """四期：industry_graph 采集失败重试 1 次；首次失败二次成功返回结构。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _collect_industry_graph  # noqa: PLC2701
+
+    calls = {"n": 0}
+
+    async def flaky_then_ok():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("timeout")
+        return {"chains": [{"id": 1}], "graph_update_time": "2026-08-14T03:00:00Z"}
+
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.get_industry_graph_full = flaky_then_ok
+        result = asyncio.run(_collect_industry_graph(
+            event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)))  # noqa: UP017
+    assert calls["n"] == 2  # 重试后成功（共 2 次调用）
+    assert result is not None
+    assert result["chains"] == [{"id": 1}]
+    assert result["event_time"] == "2026-08-14T07:30:00+00:00"
+
+
+def test_collect_industry_graph_two_failures_returns_none() -> None:
+    """四期：两次失败降级 None（不阻断产片）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _collect_industry_graph  # noqa: PLC2701
+
+    async def always_fail():
+        raise TimeoutError("timeout")
+
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.get_industry_graph_full = always_fail
+        result = asyncio.run(_collect_industry_graph(
+            event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)))  # noqa: UP017
+    assert result is None
