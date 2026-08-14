@@ -24,6 +24,13 @@ from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
+#: 中台 direction 值域 → GT direction_hint 值域映射（四期最终评审 C2）。
+#: 中台（normalize_event/event_scoring_llm）direction ∈ {positive, negative, neutral}；
+#: GT 方向先验白名单 ∈ {bullish, bearish, neutral}（ground_truth.py:168）——
+#: 不映射则 positive/negative 原样写入 meta.direction_hint 不会被注入。
+_DIRECTION_MAP = {"positive": "bullish", "negative": "bearish", "neutral": "neutral"}
+
+
 #: 通用产片候选：与 build_case 入参一一对应，覆盖 adapter.data_deps 所需切片字段
 @dataclass
 class CaseCandidate:
@@ -158,16 +165,39 @@ async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
         for event in events:
             if not is_major_event(event):
                 continue
-            # score_date 形如 "2026-08-14 10:30:00+08:00"：replace 空格为 T 后
-            # fromisoformat 才可解析（Python <3.11 不接受 " " 分隔的 ISO 时间）
-            event_time = _dt_from_iso(str(event["score_date"]).replace(" ", "T"))
+            # 中台契约（四期最终评审 C1 修复）：
+            # - score_date 是纯日期 "2026-08-14"（评分日锚点，event_store.normalize_event 注释）；
+            # - scrape_at 是上海 naive 时间 "2026-08-14 10:00:00"（无时区）。
+            # 旧实现把 score_date（naive 被 _dt_from_iso 补 UTC → 当日 00:00 UTC）当
+            # event_time，而 telegraph_records.time 用 scrape_at（naive 被
+            # _parse_record_time 补 UTC → 10:00 UTC）→ _record_time_le(10:00, 00:00)
+            # False → 事件记录全被 T 窗口过滤 → cls_telegraph 空 → 空壳 case。
+            # 修复：scrape_at 补 +08:00 转 aware 作 event_time，record_time 存 aware
+            # ISO（_parse_record_time 对 aware 不再二次补 UTC），比较同轴。
+            # scrape_at 缺失时兜底用评分日零点（naive 补 UTC）作锚点，保持防空壳优先。
+            try:
+                scrape_at_raw = str(event.get("scrape_at", "")).strip()
+                if scrape_at_raw:
+                    event_time = _dt_from_iso(f"{scrape_at_raw}+08:00")
+                else:
+                    event_time = _dt_from_iso(str(event.get("score_date", "")))
+                record_time = event_time.isoformat()
+            except (TypeError, ValueError, KeyError):
+                # I1：单条事件时间畸形（不可解析）只跳过该条 + warning，不炸整源
+                logger.warning(
+                    "event_store_scan_skip_malformed_time",
+                    event_id=str(event.get("event_id", ""))[:32],
+                    score_date=str(event.get("score_date", "")),
+                    scrape_at=str(event.get("scrape_at", "")),
+                )
+                continue
             candidates.append(
                 CaseCandidate(
                     event_title=str(event["title"]),
                     event_time=event_time,
                     telegraph_records=[
                         {
-                            "time": str(event.get("scrape_at", "")),
+                            "time": record_time,
                             "title": str(event["title"]),
                             "content": str(event.get("summary", "")),
                             "url": str(event.get("url", "")),
@@ -176,7 +206,11 @@ async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
                     meta={
                         "t_window": "event",
                         "source": "event_store",
-                        "direction_hint": str(event.get("direction", "")),
+                        # C2：中台 positive/negative/neutral → GT 白名单
+                        # bullish/bearish/neutral；未映射值写空串（不注入先验）
+                        "direction_hint": _DIRECTION_MAP.get(
+                            str(event.get("direction", "")), ""
+                        ),
                     },
                 )
             )

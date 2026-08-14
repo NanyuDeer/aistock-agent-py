@@ -140,7 +140,8 @@ async def test_driver_fallback_is_empty_not_index_neutral(iterate_data_dir: obje
             return_value=SimpleNamespace(content="not json")
         )
         gt = await generate_data_constrained_gt(case)
-    assert gt["attribution"]["drivers"] == []
+    attribution = cast("dict[str, object]", gt["attribution"])
+    assert attribution["drivers"] == []
 
 
 """T7 M1: corpus 字段写入测试（钉住 generate_data_constrained_gt 写入 corpus）"""
@@ -170,13 +171,12 @@ async def test_generate_data_constrained_gt_writes_corpus(tmp_path: Path) -> Non
 """四期 Task 3：GT 事件库方向先验（case.meta.direction_hint → source_notes + gt_version 2）"""
 
 
-def test_gt_injects_direction_hint_from_case_meta() -> None:
+@pytest.mark.asyncio
+async def test_gt_injects_direction_hint_from_case_meta(tmp_path: Path) -> None:
     """四期：direction_hint → source_notes 先验 + gt_version=2；direction 仍为快照市场方向。"""
-    import asyncio
-
     from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
 
-    case = {
+    case: dict[str, object] = {
         "case_id": "case_x", "ground_truth_ref": "gt_case_x",
         "meta": {"t_window": "event", "source": "event_store", "direction_hint": "bullish"},
         "window_before": {
@@ -188,24 +188,25 @@ def test_gt_injects_direction_hint_from_case_meta() -> None:
     }
     with patch("aistock_agent.iterate.ground_truth.llm_service") as mock_llm:
         mock_llm.get_deep_think.return_value = None  # LLM 失败 → drivers 兜底空
-        gt = asyncio.run(generate_data_constrained_gt(case, data_dir=None))
+        # I2：data_dir 必须指向 tmp_path，不得写真实 iterate 数据目录
+        gt = await generate_data_constrained_gt(case, data_dir=tmp_path)
+    attribution = cast("dict[str, object]", gt["attribution"])
     assert gt["gt_version"] == 2
-    attribution = gt["attribution"]
     assert attribution["direction"] == "bearish"          # 快照方向不变（change_pct -1.5）
-    assert "bullish" in " ".join(attribution.get("source_notes", []))  # 先验注入
+    notes = cast("list[str]", attribution.get("source_notes", []))
+    assert "bullish" in " ".join(notes)  # 先验注入
 
 
-def test_gt_ignores_invalid_direction_hint() -> None:
+@pytest.mark.asyncio
+async def test_gt_ignores_invalid_direction_hint(tmp_path: Path) -> None:
     """四期：direction_hint 非法/缺省 → source_notes 无先验，gt_version 仍 2。"""
-    import asyncio
-
     from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
 
     for meta in (
         {"t_window": "event", "source": "telegraph"},  # 缺省
         {"t_window": "event", "source": "event_store", "direction_hint": "sideways"},  # 非法
     ):
-        case = {
+        case: dict[str, object] = {
             "case_id": "case_y", "ground_truth_ref": "gt_case_y",
             "meta": meta,
             "window_before": {
@@ -217,6 +218,9 @@ def test_gt_ignores_invalid_direction_hint() -> None:
         }
         with patch("aistock_agent.iterate.ground_truth.llm_service") as mock_llm:
             mock_llm.get_deep_think.return_value = None
-            gt = asyncio.run(generate_data_constrained_gt(case, data_dir=None))
+            # I2：data_dir 指向 tmp_path（gt_case_y.json 落在临时目录，不污染真实库）
+            gt = await generate_data_constrained_gt(case, data_dir=tmp_path)
+        attribution = cast("dict[str, object]", gt["attribution"])
         assert gt["gt_version"] == 2
-        assert " ".join(gt["attribution"].get("source_notes", [])) == ""  # 无先验注入
+        notes = cast("list[str]", attribution.get("source_notes", []))
+        assert " ".join(notes) == ""  # 无先验注入
