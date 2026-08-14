@@ -3,19 +3,21 @@
 import asyncio
 import sys
 from datetime import date
+from html import escape as html_escape
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from aistock_agent.config import settings
+from aistock_agent.iterate.adapters import ITERABLE_AGENTS
 from aistock_agent.iterate.case_builder import (
     get_data_dir,
     list_cases,
     list_pending_cases,
     load_case,
 )
-from aistock_agent.iterate.case_scanner import find_recent_trading_day, scan_major_events
+from aistock_agent.iterate.case_pipeline import build_cases_for_adapter
 from aistock_agent.iterate.reporter import run_daily_report
 from aistock_agent.iterate.run_case import run_case
 from aistock_agent.utils.date import is_trading_day, shanghai_today
@@ -57,7 +59,7 @@ def register_iterate_jobs(scheduler: AsyncIOScheduler) -> None:
 
 
 async def _run_iterate_build_task() -> None:
-    """每日产片任务（16:30）：review 最近交易日 + event 近 30 天电报事件。
+    """每日产片任务（16:30）：按 iterable_agent_ids 循环通用产片流水线（二期）。
 
     失败语义（D16/N6）：产片失败只跳过当日产片并告警，不中止迭代报告；
     每日任务（17:00）照常消费既有切片并发送报告。
@@ -67,26 +69,62 @@ async def _run_iterate_build_task() -> None:
         logger.info("iterate_build_skip_non_trading_day", date=today.isoformat())
         return
     try:
-        await _build_review_and_event_cases()
+        await produce_cases_daily()
     except Exception as exc:  # noqa: BLE001
         logger.error("iterate_case_build_failed", error=str(exc), exc_info=True)
+        # D-3 修复：产片失败告警邮件（D16 语义：只跳过当日产片，不中止迭代报告）
+        _notify_build_failure(today, exc)
 
 
-async def _build_review_and_event_cases() -> dict[str, object]:
-    """复用 scripts/build_iterate_cases 的构建逻辑（review + event），返回摘要。"""
-    from scripts.build_iterate_cases import build_event_cases, build_review_case
+def _notify_build_failure(report_date: date, exc: Exception) -> None:
+    """产片失败告警邮件；配置缺失或发送失败仅记日志，不抛（不阻断闭环）。"""
+    from aistock_agent.services.mail_sender import send_mail
 
-    summary: dict[str, object] = {"review": None, "event": None}
-    day = await find_recent_trading_day()
-    if day is not None:
-        summary["review"] = await build_review_case(data_dir=get_data_dir(), force=False)
-    events = await scan_major_events(30)
-    if events:
-        summary["event"] = await build_event_cases(
-            events=events, data_dir=get_data_dir(), force=False
-        )
-    logger.info("iterate_cases_built", summary=str(summary))
-    return summary
+    subject = f"迭代产片失败告警 {report_date.isoformat()}"
+    body_html = (
+        "<pre style='font-family:Menlo,Consolas,monospace;font-size:12px;'>"
+        f"迭代产片任务失败（{report_date.isoformat()}）：\n\n"
+        f"{html_escape(str(exc))}\n\n"
+        "今日切片可能缺失；17:00 迭代报告照常消费既有切片。</pre>"
+    )
+    try:
+        ok = send_mail(subject, body_html)
+        if not ok:
+            logger.warning("iterate_build_failure_mail_not_sent", subject=subject)
+    except Exception as mail_exc:  # noqa: BLE001 — 告警失败不阻断
+        logger.warning("iterate_build_failure_mail_error", error=str(mail_exc))
+
+
+async def produce_cases_daily() -> dict[str, object]:
+    """每日产片：按 iterable_agent_ids 循环通用流水线（二期）。
+
+    单 agent 失败 → 告警邮件（D-3）+ 记录，不阻断其他 agent。
+    返回 {agent_id: BuildResult}；未声明 case_sources 的 adapter 跳过。
+
+    为什么模块级 import（而非函数内 lazy import）：测试/调用方需经
+    ``scheduler.build_cases_for_adapter`` 打桩隔离，函数内 import 会绑定
+    局部名导致 monkeypatch 失效（Task 5 评审发现，与旧的 lazy import
+    模式刻意不同——旧模式引入的 scripts 断链已修复）。
+    """
+    results: dict[str, object] = {}
+    for agent_id, adapter in ITERABLE_AGENTS.items():
+        if not adapter.case_sources:
+            continue  # 未声明产片源的 adapter 不参与产片
+        try:
+            results[agent_id] = await build_cases_for_adapter(
+                adapter, data_dir=get_data_dir()
+            )
+        except Exception as exc:  # noqa: BLE001 — 单 agent 失败不阻断
+            logger.error(
+                "iterate_produce_cases_failed",
+                agent_id=agent_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            _notify_build_failure(shanghai_today(), exc)
+            results[agent_id] = {"error": str(exc)}
+    logger.info("iterate_cases_built", summary=str(results))
+    return results
 
 
 async def _run_iterate_daily_task(report_date: date | None = None) -> None:

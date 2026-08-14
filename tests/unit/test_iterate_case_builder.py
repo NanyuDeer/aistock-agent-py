@@ -1,6 +1,7 @@
 """case_builder —— 历史切片生成与 T 窗口固化"""
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -91,6 +92,122 @@ async def test_build_case_filters_post_event_records(iterate_data_dir: object) -
     assert case["window_before"]["market_snapshot"]["trade_date"] == "2026-07-31"
     assert case["ground_truth_ref"] == f"gt_{case['case_id']}"
     assert (case_path(case["case_id"])).exists()
+
+
+@pytest.mark.asyncio
+async def test_build_case_writes_industry_graph_snapshot(
+    iterate_data_dir: object,
+) -> None:
+    """B-5：window_before.industry_graph 写入切片（三时间戳 + posterior_exposure 标记）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    industry_graph = {
+        "chains": [{"industry": "半导体", "nodes": ["上游", "下游"]}],
+        "snapshot_generated_at": "2026-07-31T09:00:00+08:00",
+        "graph_update_time": "2026-07-31T08:00:00+08:00",
+        "event_time": "2026-07-31T09:30:00+08:00",
+        "posterior_exposure": False,
+    }
+    case = await build_case(
+        adapter,
+        event_title="隔夜美股暴涨，A股高开",
+        event_time=t,
+        telegraph_records=_telegraph_around(t),
+        market_snapshot=_valid_snapshot(),
+        industry_graph=industry_graph,
+    )
+    stored = case["window_before"]["industry_graph"]
+    assert isinstance(stored, dict)
+    assert stored["chains"][0]["industry"] == "半导体"
+    assert stored["posterior_exposure"] is False
+    assert stored["snapshot_generated_at"]
+    assert stored["event_time"]
+
+
+@pytest.mark.asyncio
+async def test_build_case_industry_graph_none_when_missing(
+    iterate_data_dir: object,
+) -> None:
+    """B-5：未采集 industry_graph 时字段为 None（快照侧降级不阻断产片）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    case = await build_case(
+        adapter,
+        event_title="隔夜美股暴涨，A股高开",
+        event_time=t,
+        telegraph_records=_telegraph_around(t),
+        market_snapshot=_valid_snapshot(),
+    )
+    assert case["window_before"]["industry_graph"] is None
+
+
+def test_mark_failed_backoff_and_deadletter(iterate_data_dir: object) -> None:
+    """D-1：失败退避 1/2 天递增，第 3 次进 deadletter（不再进入 pending）。"""
+    from aistock_agent.iterate.case_builder import (
+        _iterated_mark_path,
+        _read_mark,
+        list_pending_cases,
+        mark_failed,
+    )
+
+    case_id = "case_d1_backoff"
+    # 准备 case 文件（list_cases 依赖）
+    cases_root = Path(iterate_data_dir) / "cases"  # type: ignore[arg-type]
+    cases_root.mkdir(parents=True, exist_ok=True)
+    (cases_root / f"{case_id}.json").write_text("{}", encoding="utf-8")
+
+    # 第 1 次失败 → failed + 1 天退避 → 不在 pending
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["status"] == "failed"
+    assert mark["retry_count"] == 1
+    assert case_id not in list_pending_cases()
+
+    # 第 2 次失败 → 2 天退避
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["retry_count"] == 2
+
+    # 第 3 次失败 → deadletter，不再返回
+    mark_failed(case_id)
+    mark = _read_mark(_iterated_mark_path(case_id))
+    assert mark["status"] == "deadletter"
+    assert mark["retry_count"] == 3
+    assert case_id not in list_pending_cases()
+
+
+def test_list_pending_cases_returns_due_failed_case(
+    iterate_data_dir: object,
+) -> None:
+    """D-1：退避到期的 failed 案例重新进入 pending。"""
+    import json as _json
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from aistock_agent.iterate.case_builder import (
+        _iterated_mark_path,
+        list_pending_cases,
+        mark_failed,
+    )
+
+    case_id = "case_d1_due"
+    cases_root = Path(iterate_data_dir) / "cases"  # type: ignore[arg-type]
+    cases_root.mkdir(parents=True, exist_ok=True)
+    (cases_root / f"{case_id}.json").write_text("{}", encoding="utf-8")
+
+    mark_failed(case_id)
+    assert case_id not in list_pending_cases()  # 退避期未到
+
+    # 手动把 next_retry_at 改到过去（模拟退避到期）
+    mark_path = _iterated_mark_path(case_id)
+    payload = _json.loads(mark_path.read_text(encoding="utf-8"))
+    payload["next_retry_at"] = (
+        _dt.now(_UTC) - _td(hours=1)
+    ).isoformat()
+    mark_path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    assert case_id in list_pending_cases()  # 到期重新进入
 
 
 @pytest.mark.asyncio

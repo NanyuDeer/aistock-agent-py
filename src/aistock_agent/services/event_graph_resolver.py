@@ -101,6 +101,14 @@ async def _try_semantic_fallback(canonical: str) -> dict[str, object] | None:
 
     返回 found evidence 或 None（无候选 / 全部重试失败 / embedding 服务不可用）。
     """
+    # B-2（2026-08-14）：回放模式显式短路——不发 embedding、不二次查询图谱
+    # （裁决书 B 论题"embedding/语义 fallback 短路"）。此前仅靠 get_industry_chain
+    # 回放降级间接短路，semantic_match_industries 的 embedding 调用未被拦截。
+    from aistock_agent.iterate.replay_layer import is_replay_mode
+
+    if is_replay_mode():
+        logger.info("event_graph_resolver_semantic_fallback_skipped_replay")
+        return None
     try:
         candidates = await semantic_match_industries(
             [canonical], threshold=0.7, limit=_FALLBACK_CANDIDATE_LIMIT

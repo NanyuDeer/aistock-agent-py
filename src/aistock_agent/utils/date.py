@@ -14,11 +14,21 @@ def is_trading_day(d: date | None = None) -> bool:
 
     Args:
         d: 指定日期，默认取今天。
+
+    Notes:
+        越年 fallback：chinese_calendar 1.11.0 仅覆盖 2004-2026，2027 年数据需
+        2026 年底公布。目标日期超出覆盖范围时 is_workday 抛 NotImplementedError，
+        此处捕获并按可交易日处理（保守可交易，只跳周末）；库更新后自动恢复精确判断。
     """
     target = d or date.today()
     if target.weekday() >= 5:
         return False
-    return bool(is_workday(target))
+    try:
+        return bool(is_workday(target))
+    except (NotImplementedError, ValueError):
+        # 越年 fallback：该年度节假日数据尚未发布/库未覆盖。无法确认法定节假日时
+        # 按可交易日处理（保守可交易），待库更新后 is_workday 不再抛异常，自动恢复。
+        return True
 
 
 def prev_trading_day(d: date | None = None) -> date:
@@ -53,6 +63,11 @@ def add_trading_days(d: date, n: int) -> date:
 def shanghai_today() -> date:
     """返回上海时区的自然日，作为报告交易日。"""
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+
+def shanghai_now() -> datetime:
+    """返回上海时区的当前时刻（B-5 三时间戳采集用，防服务器/容器时区漂移）。"""
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
 
 
 def is_trading_time(now: datetime | None = None) -> bool:

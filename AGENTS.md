@@ -58,7 +58,7 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  07:30 event_scrape_daily（盘前全量）+ 08:45 event_scrape_early（早间刷新，晨报 08:50 读库前最后一刷）+ 10:00-11:00、13:00-14:00 每小时 event_scrape_intraday + 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；避开 11:30-13:00 A 股午休；早间/收盘两档 H5，2026-08-13）
+  08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
@@ -295,6 +295,13 @@ START → supervisor(quick_think, 意图路由)
 - **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
 - **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
 
+### CHAT QA 批次 2（2026-08-13）：回答内容流式（D9 节级伪流式）+ 事件通道
+
+- **立项门禁结论**：Task 0 spike（tests/unit/test_stream_spike.py，STREAM_SPIKE_RUN=1 显式触发）5 断言 3 失败——`with_chat_structured_output(json_mode)` 对 Pydantic schema 实际走 PydanticOutputParser，整段 JSON 完整才产出唯一实例（partials=1），**无逐字增量可 diff**；自定义事件传播机制单独验证通过（`adispatch_custom_event` 从节点内嵌套 LLM run 传播到顶层 `astream_events(version="v2")` on_custom_event 正常，langchain-core 0.3.58 的 adispatch_custom_event 不接受 version kwarg）。**用户裁决 D9 节级伪流式**。
+- **事件通道（Task 1）**：`WSEventType.CONTENT_DELTA="content_delta"` / `CONTENT_RESET="content_reset"`（constants.py）；ws.py `_run_chat_graph_to_events` 新增 `on_custom_event` 分支捕获 `chat_content_delta`/`chat_content_reset` → 统一 sink 入 state.events（resume 回放兼容）；**红线不动**：L156-158 `ON_CHAT_MODEL_STREAM` 过滤分支逐字节未改，新增事件只走显式事件名通道。
+- **节级伪流式（Task 2，synth_answer.py）**：维持 `ainvoke` 生产链（计费口径零变化，无新增 LLM 调用）；回答最终文本按 markdown 分节经 `adispatch_custom_event("chat_content_delta", {"content": 节文本})` 渐进下发（多子目标节标题先发、正文后发，DISCLAIMER/风险段最后统一补发）；**字节前缀契约**：dispatch 序列拼接 == final_response 逐字全等、任意累积为字节前缀（前端 done 前缀补尾）；**content_reset 统一语义**：凡流式已开始且终态文本非已流式内容前缀（结构化校验失败降级 / 节降级 / 流式中途异常降级全文）→ `adispatch_custom_event("chat_content_reset", {"content": 终态文本})` 整段替换；hint 单次取值（`trading_session_status` 只取一次），payload 恒 `{"content": str}`、空串/None 不分发。
+- **验证**：全量 A/B HEAD 失败集 = BASE（22=22，唯一差异 test_full_flow_stock 经 5 项证据判定为本地 sqlite checkpointer 跨次运行状态残留的环境卫生问题，全新 db 复测通过）+ ruff 改动文件 0 + 跨仓契约（事件名 ↔ ws.py ↔ 前端 case 标签）字段级一致。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
@@ -310,6 +317,8 @@ src/aistock_agent/
 │   ├── chat.py          # ChatRequest / ChatResponse
 │   ├── sse.py           # SSEEvent
 │   └── agents.py        # 各 Agent 输入/输出 schema
+├── trace/               # 溯源共享推理核心（B1a）：6 阶段链枚举/节点schema/按序校验
+│   └── chain.py         # ChainStage / TRACE_CHAIN_STAGES / CausalNode / CausalChain / validate_chain_stages
 ├── memory/              # 持久化记忆模块
 │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
 │   ├── session_store.py # 会话历史读写
@@ -350,14 +359,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
-├── skills/              # CHAT QA Skill 注册中心 + 手写 skill
-│   ├── registry.py      # 统一注册中心（手写优先；douyin_video 等）
-│   ├── base.py          # @skill 装饰器（异常→degraded Evidence）
-│   ├── douyin_client.py # 抖音视频下载/转写客户端（requests + ffmpeg + SenseVoice）
-│   ├── douyin_video.py  # 抖音视频读取 skill（链接→转写文本）
-│   └── ...              # stock_snapshot/stock_news/market_snapshot 等既有 skill
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -434,6 +437,9 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
@@ -576,7 +582,11 @@ content = {
 - 评分体系：归因相似度重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；Tavily 死代码与"指数neutral"兜底删除
 - 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘；`_compute_variant_hash` 含完整补丁规格（T9 M3）；`_cleanup_stale_experiments` 跨运行残留清理（T10 Q1）；失败轮 `is_failure` 显式标记 + `infra_failures` 连续计数（T11 M1/M2）；基线轮纳入 try/except（T11 M3）；`_recompute_best` 跳过 `is_failure` 记录（T11 M4）
 - 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30 产片 / 17:00 消费报告）+ status=complete 检查
-- 已知限制（二期）：`scripts/build_iterate_cases.py` 按 `--agent` if/else 硬编码 review/event_analyst 两个 agent 的采集/构建流程，未消费 `adapter.data_deps` 声明；接入第三个 agent 时需抽「按 data_deps 采集 → build_case → 生成 GT → 校验」通用流水线（见 docs/superpowers/specs/2026-08-11-iterate-case-sourcing-design.md §1.1 目标 4）
+- 二期 case-sourcing（Task 1，2026-08-14）：`iterate/adapters.py` 新增 `CaseSourceSpec` 产片源声明模型与 `IterableAgentAdapter.case_sources` 字段——review 声明 `market_close_snapshot`、event_analyst 声明 `telegraph_keyword_scan(window_days=30)`；硬约束：全部已注册 agent 必须声明非空 case_sources（case_sourcers 注册表 provider 已完成 Task 2；通用流水线为二期后续 Task）
+- 二期 case-sourcing（Task 2，2026-08-14）：`iterate/case_sourcers.py` 新增 provider 注册表（`SOURCE_PROVIDERS` 清单封闭：`market_close_snapshot`/`telegraph_keyword_scan`）+ `source_cases(adapter, *, data_dir, force)` 采集入口（按 `adapter.case_sources` 逐个 provider 产片，单源失败降级跳过）+ `CaseCandidate`/`SourceContext` 模型；provider 逻辑迁移自 `scripts/build_iterate_cases.py`（telegraph_records 构造 / industry_graph 三时间戳结构 / `_snapshot_data_sufficient` 闸门与 force 语义 / meta 与原实现一致）
+- 二期 case-sourcing（Task 3，2026-08-14）：`iterate/case_pipeline.py` 通用产片流水线——`build_cases_for_adapter(adapter, *, data_dir, force)`（sourcing → 逐候选 build_case → 生成 GT → validate_gt_against_case → 违反且非 force 回滚，返回 `{"generated","rejected","case_ids","reasons"}`）+ `candidate_to_case_inputs`（data_deps 覆盖校验：candidate 缺 adapter.data_deps.values() 对应字段即 ValueError，空壳切片不得进闭环）；build_case 显式传 data_dir
+- 二期 case-sourcing（Task 4，2026-08-14）：`scripts/build_iterate_cases.py` CLI 改造——`_build_parser()` 提取（`--agent` choices 动态取自 `iterable_agent_ids()`，注册即生效）+ `main()` 删除 `if args.agent ==` 分支统一走 `build_cases_for_adapter`（`--window-days` 显式且 != 30 时经 `replace` 覆盖 provider 参数，默认 30 用 adapter 登记值）+ 删除旧函数（build_review_case / build_event_cases / _rollback / _source_to_record / _snapshot_data_sufficient / _collect_industry_graph，均已迁移到 iterate 包）；集成测试 4 用例迁移为 patch source_cases 注入候选（断言意图不变）
+- 二期 case-sourcing（Task 5，2026-08-14）：`iterate/scheduler.py` 产片 job 多 agent 循环——`_build_review_and_event_cases`（lazy import 已删的 scripts.build_iterate_cases.build_event_cases/build_review_case → 生产产片 ImportError 断链）删除，重构为 `produce_cases_daily()`（按 `ITERABLE_AGENTS` 循环调用 `build_cases_for_adapter`，未声明 `case_sources` 的 adapter 跳过，单 agent 失败 → D-3 告警邮件 + `{"error": ...}` 记录不阻断后续，整体性异常由 `_run_iterate_build_task` 外层兜底）；`build_cases_for_adapter`/`ITERABLE_AGENTS` 模块级 import（函数内 lazy import 会使 `monkeypatch.setattr(scheduler, ...)` 失效，Task 5 评审发现）；`case_scanner` import 随旧函数一并清理
 
 ### mail_sender（通用 SMTP 邮件发送）
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用

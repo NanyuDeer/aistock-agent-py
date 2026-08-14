@@ -547,6 +547,52 @@ async def test_generate_variant_parses_files_and_type(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_experiment_record_includes_agent_output(
+    iterate_data_dir: object,
+) -> None:
+    """C-5：实验记录含 agent 输出全文（评分可完全重算 REPRODUCIBLE）。"""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_agent_output"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_agent_output",
+        "attribution": {"direction": "bullish"},
+    }
+    agent_output_text = "大盘高开 1.2%，主因隔夜美股大涨。半导体板块领涨 3.2%。"
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            return_value={
+                "agent_id": "review",
+                "case_id": "case_test_agent_output",
+                "variant_hash": "h",
+                "final_response": agent_output_text,
+            }
+        ),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(return_value=ScoreDetail(0.2, 0.5, 0.1, 0.8)),
+    ):
+        await run_experiment_round("review", case, 2, variant, gt)
+
+    record_path = (
+        _Path(iterate_data_dir) / "experiments" / "case_test_agent_output_r2.json"
+    )
+    record = _json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["agent_output"] == agent_output_text
+
+
+@pytest.mark.asyncio
 async def test_experiment_record_includes_patch_spec(iterate_data_dir: object) -> None:
     """实验记录必须包含可复现的补丁规格（target/old/new），不再只有 instructions。"""
     from aistock_agent.iterate.case_builder import load_case
@@ -604,6 +650,111 @@ def _write_experiment_record(
     (exps / f"{case_id}_{name}.json").write_text(
         json.dumps(record, ensure_ascii=False), encoding="utf-8"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_case_rejects_invalid_max_rounds(
+    iterate_data_dir: object,
+) -> None:
+    """D-2：run_case 入口校验 max_rounds>=1（覆盖调度器直调路径）。"""
+    import pytest as _pytest
+
+    from aistock_agent.iterate.run_case import run_case
+
+    with patch(
+        "aistock_agent.iterate.run_case.get_adapter",
+        return_value=SimpleNamespace(agent_id="review"),
+    ), patch(
+        "aistock_agent.iterate.run_case.load_case",
+        return_value={"case_id": "case_x", "ground_truth_ref": "gt_x"},
+    ), patch("aistock_agent.iterate.run_case.load_ground_truth", return_value={}):
+        with _pytest.raises(ValueError, match="max_rounds 必须 >= 1"):
+            await run_case("review", "case_x", max_rounds=0)
+
+
+def test_check_repo_environment_matrix(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """C-3：APP_ENV × has_git 判定矩阵（4 组合行为确定）+ 黑名单 fail-closed。"""
+    from aistock_agent.iterate.variant_engine import _check_repo_environment
+
+    git_repo = tmp_path / "git_repo"
+    git_repo.mkdir()
+    (git_repo / ".git").mkdir()
+    no_git_repo = tmp_path / "no_git_repo"
+    no_git_repo.mkdir()
+
+    # production + 有 .git → ok
+    monkeypatch.setenv("APP_ENV", "production")  # type: ignore[attr-defined]
+    assert _check_repo_environment(git_repo) == "ok"
+
+    # production + 无 .git → raise（fail-closed）
+    with pytest.raises(RuntimeError, match="缺少 .git"):
+        _check_repo_environment(no_git_repo)
+
+    # development + 无 .git → skip
+    monkeypatch.setenv("APP_ENV", "development")  # type: ignore[attr-defined]
+    assert _check_repo_environment(no_git_repo) == "skip"
+
+    # development + 有 .git → ok
+    assert _check_repo_environment(git_repo) == "ok"
+
+    # 黑名单命中 → raise
+    from aistock_agent.iterate import variant_engine as _ve
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        _ve.settings,
+        "iterate_forbidden_repo_roots",
+        [str(no_git_repo)],
+    )
+    with pytest.raises(RuntimeError, match="黑名单"):
+        _check_repo_environment(no_git_repo)
+
+
+def test_mask_secrets_redacts_key_values() -> None:
+    """C-2：日志/错误文本中密钥值掩码。"""
+    from aistock_agent.iterate.variant_engine import _mask_secrets
+
+    masked = _mask_secrets(
+        "failed with API_KEY=sk-abc123 TOKEN=xyz password=secret123"
+    )
+    assert "sk-abc123" not in masked
+    assert "xyz" not in masked
+    assert "secret123" not in masked
+    assert "API_KEY=***" in masked
+
+
+@pytest.mark.asyncio
+async def test_replay_subprocess_env_allowlist(monkeypatch: object) -> None:
+    """C-2：子进程 env 白名单——未登记环境变量不传递（缩小密钥泄漏面）。"""
+    from aistock_agent.iterate import variant_engine
+
+    captured: dict[str, dict[str, str]] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b'{"final_response": "ok"}\n', b""
+
+    async def _fake_exec(*args: object, **kwargs: object) -> _FakeProc:
+        captured["env"] = kwargs.get("env", {})  # type: ignore[assignment]
+        return _FakeProc()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        variant_engine.asyncio, "create_subprocess_exec", _fake_exec
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # type: ignore[attr-defined]
+    monkeypatch.setenv("SECRET_LEAK_VAR", "should-not-pass")  # type: ignore[attr-defined]
+
+    result = await variant_engine._run_replay_subprocess("review", "case_c", "h")
+
+    env = captured["env"]
+    assert result["final_response"] == "ok"
+    assert "OPENAI_API_KEY" in env  # LLM 必需键保留
+    assert "SECRET_LEAK_VAR" not in env  # 未登记键不传递
+    assert env["REPLAY_CASE_ID"] == "case_c"
+    assert env["REPLAY_AGENT"] == "review"
 
 
 def test_recompute_best_excludes_failed_round_and_picks_r2(

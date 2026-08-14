@@ -94,13 +94,83 @@ async def test_run_predict_skips_insufficient_attribution():
 
 
 @pytest.mark.asyncio
-async def test_run_predict_rejects_unknown_evidence():
-    bad = _VALID_LLM_JSON.replace('"m1"', '"not-exist"')
+async def test_run_predict_filters_unknown_evidence(capsys):
+    """P1-1：证据 ID 幻觉被过滤而非一票否决——预测仍产出，只保留 allowed 子集并告警。"""
+    bad = _VALID_LLM_JSON.replace('"m1"', '"m1", "made-up-id"')
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=bad)
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
         result = await run_predict(_make_trace(), _make_snapshot())
-    assert result is None  # 校验失败降级，不抛异常
+    assert isinstance(result, PredictionRunResult)
+    assert result.prediction.evidence_ids == ["m1"]  # 只保留 allowed 子集
+    assert "prediction.evidence_filtered" in capsys.readouterr().out  # 告警频率可观察
+
+
+@pytest.mark.asyncio
+async def test_run_predict_due_dates_failure_degrades_to_empty(monkeypatch):
+    """Bug B 防御层：add_trading_days 抛异常 → due_dates={} 仍产出预测（best-effort）。"""
+    def _boom(*args: object, **kwargs: object) -> date:
+        raise NotImplementedError("no available data for year 2027")
+
+    monkeypatch.setattr(
+        "aistock_agent.services.prediction_service.add_trading_days", _boom
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert isinstance(result, PredictionRunResult)
+    assert result.due_dates == {}
+    assert result.prediction.prediction_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_injects_missing_schema_version():
+    """Bug A 双保险：LLM 缺 schema_version → 注入 1.0 后校验通过（834ddf9 之外再兜底）。"""
+    bad = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=bad)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert isinstance(result, PredictionRunResult)
+    assert result.prediction.schema_version == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_drops_extra_keys():
+    """P1-2：LLM 输出 thinking/analysis 等多余键 → 剔除后校验通过（extra=forbid 不再炸）。"""
+    extra = _VALID_LLM_JSON.replace(
+        '  "schema_version": "1.0",\n',
+        '  "schema_version": "1.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=extra)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert isinstance(result, PredictionRunResult)
+    assert result.prediction.prediction_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_extracts_json_from_fence_and_prefix():
+    """LLM 输出带 ```json 围栏或前缀文本 → 仍提取成功。"""
+    for raw in ("```json\n" + _VALID_LLM_JSON + "\n```", "好的，以下是预测结果：\n" + _VALID_LLM_JSON):
+        llm = AsyncMock()
+        llm.ainvoke.return_value = AsyncMock(content=raw)
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            result = await run_predict(_make_trace(), _make_snapshot())
+        assert isinstance(result, PredictionRunResult)
+        assert result.prediction.prediction_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_pure_text_returns_none():
+    """LLM 输出完全非法（纯文本）→ run_predict 返回 None（永不 500）。"""
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content="抱歉，我无法生成预测。")
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert result is None
 
 
 @pytest.mark.asyncio

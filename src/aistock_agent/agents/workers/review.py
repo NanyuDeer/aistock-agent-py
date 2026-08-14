@@ -43,6 +43,12 @@ from aistock_agent.services.prediction_service import (
     run_predict,
 )
 from aistock_agent.state.schema import AgentState
+from aistock_agent.trace.chain import (
+    TRACE_CHAIN_STAGES,
+)
+from aistock_agent.trace.chain import (
+    validate_chain_stages as _validate_chain_stages,
+)
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -70,15 +76,8 @@ REQUIRED_CANDIDATE_CATEGORIES: set[str] = {
     "market_positioning_liquidity",
 }
 
-# primary/alternative chain 必须按顺序包含的 6 个阶段
-REQUIRED_CHAIN_STAGES: list[str] = [
-    "structural_root",
-    "trigger",
-    "transmission",
-    "exposure",
-    "repricing",
-    "observable_result",
-]
+# primary/alternative chain 必须按顺序包含的 6 个阶段（共享事实源 trace.chain）
+REQUIRED_CHAIN_STAGES: list[str] = list(TRACE_CHAIN_STAGES)
 
 # 降级文本 — 校验失败、LLM 异常、快照构建失败时返回
 DEGRADED_RESPONSE = "收盘溯源生成暂时不可用，请稍后重试"
@@ -315,11 +314,7 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
         primary = candidate_by_id.get(trace.primary_chain_id)
         if primary is None or primary.chain is None:
             raise ValueError("primary candidate has no chain")
-        primary_stages = [n.stage for n in primary.chain.nodes]
-        if primary_stages != REQUIRED_CHAIN_STAGES:
-            raise ValueError(
-                f"primary chain stages mismatch: {primary_stages} != {REQUIRED_CHAIN_STAGES}"
-            )
+        _validate_chain_stages(primary.chain.nodes)
 
     # 无论 primary 是否为 null，非空 alternative 都必须通过 6 阶段校验。
     # 修复前：primary_chain_id=None 时直接 return，跳过 alternative 校验，
@@ -328,11 +323,7 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
         alt = candidate_by_id.get(trace.alternative_chain_id)
         if alt is None or alt.chain is None:
             raise ValueError("alternative candidate has no chain")
-        alt_stages = [n.stage for n in alt.chain.nodes]
-        if alt_stages != REQUIRED_CHAIN_STAGES:
-            raise ValueError(
-                f"alternative chain stages mismatch: {alt_stages} != {REQUIRED_CHAIN_STAGES}"
-            )
+        _validate_chain_stages(alt.chain.nodes)
 
 
 def _normalize_discovery_for_comparison(
@@ -540,7 +531,8 @@ def validate_trace_against_snapshot(
     if morning_forecast is not None:
         if pv is None:
             raise ValueError(
-                "prediction_validation 不得为 None：snapshot.morning_forecast 非空时必须输出预判对照"
+                "prediction_validation 不得为 None：snapshot.morning_forecast "
+                "非空时必须输出预判对照"
             )
         if pv.status == "no_forecast":
             raise ValueError(
@@ -692,14 +684,20 @@ def render_market_trace_markdown(
             lines.append("- 板块方向对照：")
             for hit in pv.sector_hits:
                 result_text = "命中" if hit.result == "hit" else "偏离"
-                line = f"  - {hit.sector}：晨报看{hit.morning_direction}，实际{hit.actual_direction}，{result_text}"
+                line = (
+                    f"  - {hit.sector}：晨报看{hit.morning_direction}，"
+                    f"实际{hit.actual_direction}，{result_text}"
+                )
                 if hit.result == "miss" and hit.deviation_note:
                     line += f"（原因：{hit.deviation_note}）"
                 lines.append(line)
         if pv.event_hits:
             lines.append("- 事件影响对照：")
             for hit in pv.event_hits:
-                lines.append(f"  - {hit.event_title}：预期{hit.morning_direction}，实际{hit.actual_impact}，{hit.result}")
+                lines.append(
+                    f"  - {hit.event_title}：预期{hit.morning_direction}，"
+                    f"实际{hit.actual_impact}，{hit.result}"
+                )
         if pv.overall_note:
             lines.append(f"- 整体结论：{pv.overall_note}")
     lines.append("")
@@ -1019,7 +1017,11 @@ async def run(state: AgentState) -> dict[str, object]:
                 prediction=prediction,
             )
             await _persist_review_report(state, rebuilt_artifact)
-            return {"final_response": rendered_markdown}
+            # A-5 N2：缓存命中路径同样附带结构化 sectors
+            return {
+                "final_response": rendered_markdown,
+                "sectors": _extract_review_sectors(rendered_markdown),
+            }
         # 缓存内容无效（如旧纯文本、日期不一致或语义非法），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
@@ -1161,7 +1163,11 @@ async def run(state: AgentState) -> dict[str, object]:
     await _persist_review_report(state, artifact)
     await _persist_prediction_record(state, run_result)
 
-    return {"final_response": markdown}
+    # A-5 N2：附带结构化结果（sectors 确定性提取，供迭代评估端优先使用）
+    return {
+        "final_response": markdown,
+        "sectors": _extract_review_sectors(markdown),
+    }
 
 
 # ============================================================================
