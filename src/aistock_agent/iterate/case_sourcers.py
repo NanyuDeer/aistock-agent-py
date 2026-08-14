@@ -52,6 +52,18 @@ async def market_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
             raise RuntimeError("无法发现最近交易日（Node close-snapshot/last-close 均失败）")
         day = recent_day
     snapshot = await build_market_trace_snapshot(day)
+    # 三期评审（IMP-3）：date 分支必须校验回补日期一致性。build_market_trace_snapshot
+    # 内部有 last-close 兜底链（Node 409 非交易日/数据缺失 → 返回"最近交易日"快照），
+    # 若不加校验，指定日期回补失败会静默产出"最近交易日"case（trade_date 与请求
+    # date 不一致），违背"回补失败 → provider 抛错 → source_cases 降级 0 候选"的硬约束。
+    # 校验放在 snapshot 获取后、后续字段取值前；不影响无 date 分支（target_day 非 str/空）。
+    if isinstance(target_day, str) and target_day:
+        actual = str(getattr(snapshot, "trade_date", ""))
+        if actual != target_day:
+            raise RuntimeError(
+                "历史回补日期不一致："
+                f"期望 {target_day}，Node 快照实际 {actual or '空'}（非交易日或数据缺失，拒绝产片）"
+            )
 
     trade_date = str(getattr(snapshot, "trade_date", ""))
     captured_at = getattr(snapshot, "captured_at", None)

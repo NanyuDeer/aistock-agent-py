@@ -716,7 +716,10 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
 
     async def _node_get_side_effect(path: str, **_kwargs):
         node_get_calls.append(path)
-        if path == "/internal/market/close-snapshot":
+        # 三期起 close-snapshot 调用携带 ?date=，必须用 startswith 匹配，
+        # 否则精确匹配永不命中、side_effect 落入 {"items": []} 分支走 status 校验，
+        # stale 变死数据、用例实际未覆盖 trade_date 不一致分支（评审 IMP-1）。
+        if path.startswith("/internal/market/close-snapshot"):
             return stale
         return {"items": []}
 

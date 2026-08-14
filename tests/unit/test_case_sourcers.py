@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from aistock_agent.iterate.adapters import get_adapter
 from aistock_agent.iterate.case_sourcers import SOURCE_PROVIDERS
 
@@ -118,3 +120,24 @@ def test_market_close_snapshot_no_date_uses_recent_trading_day() -> None:
     mock_find.assert_awaited_once()
     mock_build.assert_awaited_once_with("2026-08-14")
     assert len(candidates) == 1
+
+
+def test_market_close_snapshot_date_param_rejects_trade_date_mismatch() -> None:
+    """三期评审（IMP-3）：date 分支回补后 trade_date 与请求日期不一致（非交易日/数据缺失被
+    last-close 兜底产出"最近交易日"）→ provider 必须抛 RuntimeError，拒绝产片。
+
+    硬约束：回补失败 → provider 抛错 → source_cases 降级 0 候选；
+    不得静默产出 trade_date 与请求 date 不一致的 case。
+    """
+    from aistock_agent.iterate.case_sourcers import SourceContext, market_close_snapshot
+
+    ctx = SourceContext(agent_id="review", params={"date": "2026-08-07"}, data_dir=None)
+    # build_market_trace_snapshot 走 last-close 兜底：实际 trade_date 是最近交易日（非 2026-08-07）
+    fake_snapshot = SimpleNamespace(trade_date="2026-08-06")
+
+    with (
+        patch("aistock_agent.iterate.case_sourcers.find_recent_trading_day", AsyncMock(return_value="2026-08-06")),  # noqa: E501
+        patch("aistock_agent.iterate.case_sourcers.build_market_trace_snapshot", AsyncMock(return_value=fake_snapshot)),  # noqa: E501
+    ):
+        with pytest.raises(RuntimeError, match="历史回补日期不一致"):
+            asyncio.run(market_close_snapshot(ctx))
