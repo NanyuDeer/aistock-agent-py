@@ -88,6 +88,9 @@ def test_market_close_snapshot_uses_date_param_when_provided() -> None:
     mock_build.assert_awaited_once_with("2026-08-07")
     assert len(candidates) == 1
     assert candidates[0].event_title == "A股收盘2026-08-07"
+    # 三期实测修复：历史回补 case 的 event_time 锚定目标交易日 15:30 CST（UTC 07:30），
+    # 而非构建时刻 captured_at——否则 case_id 前缀/ T 窗口锚定错标为构建日
+    assert candidates[0].event_time == datetime(2026, 8, 7, 7, 30, tzinfo=timezone.utc)  # noqa: UP017
 
 
 def test_market_close_snapshot_no_date_uses_recent_trading_day() -> None:
