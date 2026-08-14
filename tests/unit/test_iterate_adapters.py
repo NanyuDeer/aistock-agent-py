@@ -2,7 +2,12 @@
 
 import pytest
 
-from aistock_agent.iterate.adapters import ITERABLE_AGENTS, get_adapter, iterable_agent_ids
+from aistock_agent.iterate.adapters import (
+    ITERABLE_AGENTS,
+    CaseSourceSpec,
+    get_adapter,
+    iterable_agent_ids,
+)
 
 
 def test_registry_contains_review_and_event_analyst() -> None:
@@ -40,3 +45,25 @@ def test_adapters_are_immutable() -> None:
     review = get_adapter("review")
     with pytest.raises(Exception):
         setattr(review, "description", "mutated")  # frozen dataclass 禁止修改
+
+
+# ---- 二期 case-sourcing：产片源声明 ----
+
+def test_review_registers_market_close_snapshot_source() -> None:
+    adapter = get_adapter("review")
+    assert adapter.case_sources == (CaseSourceSpec("market_close_snapshot"),)
+
+
+def test_event_analyst_registers_telegraph_scan_source() -> None:
+    adapter = get_adapter("event_analyst")
+    # 四期：事件库主源在前（去重优先），电报后备
+    assert adapter.case_sources == (
+        CaseSourceSpec("event_store_scan", {"window_days": 30}),
+        CaseSourceSpec("telegraph_keyword_scan", {"window_days": 30}),
+    )
+
+
+def test_all_registered_agents_have_case_sources() -> None:
+    # 二期硬约束：case_sources 非空才参与产片；全部已注册 agent 必须声明产片源
+    for agent_id, adapter in ITERABLE_AGENTS.items():
+        assert adapter.case_sources, f"{agent_id} 未声明产片源"
