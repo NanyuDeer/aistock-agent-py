@@ -20,6 +20,14 @@ from aistock_agent.iterate.replay_layer import (
 _REPLAY_CASE_ID = "case_20260731_us_market_surge"
 
 
+def test_cache_read_isolation_targets_extended() -> None:
+    """B-1：morning_forecast/briefing/report_cache 已列入缓存读隔离清单。"""
+    targets = replay_layer._CACHE_READ_ISOLATION_TARGETS
+    assert "aistock_agent.services.cache.get_cached_briefing" in targets
+    assert "aistock_agent.services.cache.get_cached_morning_forecast" in targets
+    assert "aistock_agent.services.report_cache.get_report" in targets
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个测试前清除回放开关环境变量，避免跨测试泄漏（不再用 os.environ.pop）。"""

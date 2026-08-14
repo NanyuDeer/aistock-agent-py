@@ -139,9 +139,14 @@ _ASYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
 # 缓存读隔离：回放必须强制走完整流水线。review.py:963 `await get_cached_review(report_date)`
 # 与 event.py:601 `await get_cached_event(user_msg)` 若真实 Redis 命中会返回生产全量数据，
 # 破坏 T 窗口隔离承诺，因此 patch 为"无缓存"（返回 None）。同样 patch 绑定模块名。
+# B-1（2026-08-14）：morning_forecast/briefing/report_cache 一并列入（裁决书 B 论题
+# "其余缓存读"——回放若命中晨报/简报/报告缓存同样会泄漏生产数据）。
 _CACHE_READ_ISOLATION_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.get_cached_review",
     "aistock_agent.agents.workers.event.get_cached_event",
+    "aistock_agent.services.cache.get_cached_briefing",
+    "aistock_agent.services.cache.get_cached_morning_forecast",
+    "aistock_agent.services.report_cache.get_report",
 )
 
 _PATCHED_PATHS: set[str] = set()
