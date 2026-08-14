@@ -38,6 +38,16 @@ HORIZON_TRADING_DAY_OFFSETS: dict[str, int] = {
 # 代码围栏剥离 — 防御 LLM 可能包裹的 ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
 
+# LLM 常见多余键（PredictionResult extra="forbid" 下会导致校验失败）
+_EXTRA_KEYS_TO_DROP = (
+    "thinking",
+    "analysis",
+    "reasoning",
+    "thoughts",
+    "thought",
+    "explanation",
+)
+
 
 @dataclass(frozen=True)
 class PredictionRunResult:
@@ -52,6 +62,59 @@ def _strip_code_fences(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+def _extract_first_json_object(text: str) -> dict[str, object] | None:
+    """扫描文本提取第一个平衡的 JSON 对象；失败返回 None（兜底，主路径不依赖）。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(text[start : i + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
+    """LLM 原始输出 → 可校验 dict：剥离围栏、提取 JSON、剔除多余键、兜底 schema_version。"""
+    text = _strip_code_fences(raw_text).strip()
+    data: object | None = None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+    if data is None:
+        data = _extract_first_json_object(text)
+    if not isinstance(data, dict):
+        raise ValueError("prediction output is not a JSON object")
+    for key in _EXTRA_KEYS_TO_DROP:
+        data.pop(key, None)
+    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
+    data.setdefault("schema_version", "1.0")
+    return data
 
 
 def _collect_allowed_evidence_ids(
@@ -139,12 +202,22 @@ async def run_predict(
             if isinstance(ai_message.content, str)
             else str(ai_message.content)
         )
-        prediction = PredictionResult.model_validate_json(_strip_code_fences(raw_text))
+        prediction = PredictionResult.model_validate(_coerce_prediction_payload(raw_text))
         allowed = _collect_allowed_evidence_ids(trace, snapshot)
-        for sid in prediction.evidence_ids:
-            if sid not in allowed:
-                raise ValueError(f"prediction evidence not in trace: {sid}")
-        due_dates = _compute_due_dates(snapshot.trade_date, prediction.horizons)
+        # P1-1：证据 ID 过滤而非一票否决（对齐 run_chat_prediction）——单一幻觉不丢整体
+        filtered = [sid for sid in prediction.evidence_ids if sid in allowed]
+        if len(filtered) != len(prediction.evidence_ids):
+            logger.warning(
+                "prediction.evidence_filtered",
+                dropped=len(prediction.evidence_ids) - len(filtered),
+            )
+        prediction = prediction.model_copy(update={"evidence_ids": filtered})
+        # Bug B 防御层：到期日计算 best-effort，失败降级为空 dict 不阻断预测
+        try:
+            due_dates = _compute_due_dates(snapshot.trade_date, prediction.horizons)
+        except Exception as exc:
+            logger.warning("prediction.due_dates_failed", error=str(exc))
+            due_dates = {}
         return PredictionRunResult(prediction=prediction, due_dates=due_dates)
     except Exception as exc:
         logger.warning("prediction_run_failed", error=str(exc), exc_info=True)

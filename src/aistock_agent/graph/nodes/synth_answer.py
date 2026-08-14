@@ -6,11 +6,13 @@ deep_think + structured output 产出 Insight。
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, StrictInt
 
@@ -218,40 +220,69 @@ async def _synth_multi_goal(
     uncertainty: list[str] = []
     any_degraded = False
     mode: str = "predict"
-    for sg in non_predict:
+
+    # 改进 17（D9 节级伪流式，2026-08-13）：分节渐进分发。
+    # - D5：trading_session_status 单次取值 + hint 前缀预计算（缓存，流式与 DONE 文本共用）；
+    # - 每节"节标题先发（渐进反馈）、正文后发"；DISCLAIMER/风险段按最终字节序列收尾；
+    # - 已分发内容任意时刻必须是最终文本的字节前缀（硬约束 2），收尾统一校验。
+    session_status, _ = trading_session_status()
+    hint_prefix = _non_trading_hint_prefix(evidences, status=session_status)
+    dispatched = hint_prefix
+    if hint_prefix:
+        await _dispatch_content_deltas([hint_prefix])
+    for i, sg in enumerate(non_predict):
+        section_header = f"## {sg.question[:40]}\n\n"
+        header_delta = section_header if i == 0 else f"\n\n{section_header}"
+        await _dispatch_content_deltas([header_delta])
+        dispatched += header_delta
         sg_evs = [ev for ev in evidences if ev.goal_id == sg.id]
         res = await _synth_section(
             _subgoal_to_goal(sg), sg_evs, summary_context=summary_context
         )
         if res.degraded:
             any_degraded = True
-        sections.append(f"## {sg.question[:40]}\n\n{res.conclusion}")
+        sections.append(f"{section_header}{res.conclusion}")
+        await _dispatch_content_deltas([res.conclusion])
+        dispatched += res.conclusion
         basis.extend(res.basis)
         uncertainty.extend(res.uncertainty)
         if mode == "predict":
             mode = res.mode
     hint_emitted = False
     for sg in predict:
-        sections.append(_build_predict_section(sg, evidences, include_hint=not hint_emitted))
+        predict_section = _build_predict_section(sg, evidences, include_hint=not hint_emitted)
         hint_emitted = True
+        sections.append(predict_section)
+        predict_delta = predict_section if len(sections) == 1 else f"\n\n{predict_section}"
+        await _dispatch_content_deltas([predict_delta])
+        dispatched += predict_delta
     if not sections:
-        sections.append(
-            f"## {goals[0].question[:40]}\n\n当前没有可用的数据事实，暂时无法回答该问题。"
-        )
+        fallback = f"## {goals[0].question[:40]}\n\n当前没有可用的数据事实，暂时无法回答该问题。"
+        sections.append(fallback)
         any_degraded = True
+        await _dispatch_content_deltas([fallback])
+        dispatched += fallback
     combined = "\n\n".join(sections)
     # A1②：免责声明合并后统一追加恰好一次（多 predict 子目标不再各节重复；
     # predict 按 dimension=="predict" 过滤（上方）；追加位置在预测段之后、D28 风险段之前）
     if predict and DISCLAIMER not in combined:
         combined = f"{combined}\n\n{DISCLAIMER}"
+        await _dispatch_content_deltas([f"\n\n{DISCLAIMER}"])
+        dispatched += f"\n\n{DISCLAIMER}"
     # D28：风险段全文单次（去重）；Phase 4-3：conservative 档优先于动作词 strong
-    combined = _append_risk_disclaimer(
-        combined,
-        strong=_contains_action_word(goal.question),
-        risk_tolerance=risk_tolerance,
-    )
-    # 非交易时段提示：按全量 evidence 判断一次、置于文首
-    combined = _append_non_trading_time_hint(combined, evidences)
+    strong_risk = _contains_action_word(goal.question)
+    disclaimer = _select_risk_disclaimer(strong=strong_risk, risk_tolerance=risk_tolerance)
+    if not any(
+        d in combined
+        for d in (RISK_DISCLAIMER, RISK_DISCLAIMER_STRONG, RISK_DISCLAIMER_CONSERVATIVE)
+    ):
+        await _dispatch_content_deltas([f"\n\n{disclaimer}"])
+        dispatched += f"\n\n{disclaimer}"
+    combined = _append_risk_disclaimer(combined, strong=strong_risk, risk_tolerance=risk_tolerance)
+    # 非交易时段提示：按全量 evidence 判断一次、置于文首（D5：复用缓存 status 单次取值）
+    combined = _append_non_trading_time_hint(combined, evidences, status=session_status)
+    # D4/M5 统一语义收尾：流式已开始且终态文本非已流式内容前缀 → 显式整段替换
+    await _finalize_content_stream(dispatched, combined)
 
     if any_degraded:
         metrics.record_synth_degraded()
@@ -457,17 +488,20 @@ def _quote_data_not_today(ev: Evidence) -> bool:
     return ev.degraded
 
 
-def _append_non_trading_time_hint(
-    conclusion: str, evidences: list[Evidence]
+def _non_trading_hint_prefix(
+    evidences: list[Evidence], *, status: str | None = None
 ) -> str:
-    """非交易时段统一提示：5 种时段状态 + 行情类证据数据非今日 → 前导提示。
+    """非交易时段提示前缀（含尾部 "\n\n"；不触发返回 ""）。
 
+    D5（改进 17）：trading_session_status 由调用方单次取值传入（流式分发与 DONE 文本
+    共用同一前缀，避免 LLM 跨时段边界两次取值不一致）；None 时自行取值（兼容旧调用）。
     触发条件 = 时段状态非 trading 且存在行情类证据且其数据非"今日"（_quote_data_not_today）；
-    报告类/护栏类回答不加。已含"当前为 A 股"前缀时不重复叠加。
+    报告类/护栏类回答不加。
     """
-    status, _ = trading_session_status()
+    if status is None:
+        status, _ = trading_session_status()
     if status == "trading":
-        return conclusion
+        return ""
 
     quote_evidence = [
         ev
@@ -476,36 +510,55 @@ def _append_non_trading_time_hint(
         or any(src.kind == "realtime_quote" for src in ev.sources)
     ]
     if not any(_quote_data_not_today(ev) for ev in quote_evidence):
-        return conclusion
-
-    # 已含提示不重复
-    if conclusion.startswith("当前为 A 股") or conclusion.startswith("今天是 A 股非交易日"):
-        return conclusion
+        return ""
 
     today = shanghai_today()
     last = prev_trading_day(today)
     if status == "non_trading_day":
-        prefix = (
+        return (
             f"今天是 A 股非交易日（{today.isoformat()} "
             f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。以下为最近交易日（"
             f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）数据。你说的是否是"
             f"这个交易日（{last.isoformat()}）的行情？\n\n"
         )
-    elif status == "pre_open":
-        prefix = (
+    if status == "pre_open":
+        return (
             f"今日尚未开盘（开盘时间 09:30），以下为最近交易日（{last.isoformat()}）"
             f"数据。你说的是否是这个交易日的数据？\n\n"
         )
-    elif status == "lunch_break":
-        prefix = (
+    if status == "lunch_break":
+        return (
             f"当前为 A 股午间休市（13:00 复盘），以下为最近交易日（{last.isoformat()}）"
             f"数据。你说的是否是这个交易日的数据？\n\n"
         )
-    else:  # closed：已收盘但当日数据尚未发布（空窗期回退）
-        prefix = (
-            f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
-            f"数据。你说的是否是这个交易日的数据？\n\n"
-        )
+    # closed：已收盘但当日数据尚未发布（空窗期回退）
+    return (
+        f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
+        f"数据。你说的是否是这个交易日的数据？\n\n"
+    )
+
+
+def _append_non_trading_time_hint(
+    conclusion: str,
+    evidences: list[Evidence],
+    *,
+    status: str | None = None,
+) -> str:
+    """非交易时段统一提示：5 种时段状态 + 行情类证据数据非今日 → 前导提示。
+
+    触发条件 = 时段状态非 trading 且存在行情类证据且其数据非"今日"（_quote_data_not_today）；
+    报告类/护栏类回答不加。已含"当前为 A 股"前缀时不重复叠加。
+    status 可选：D5 缓存 trading_session_status 单次取值复用（None 时自行取值，兼容旧调用）。
+    """
+    if status is None:
+        status, _ = trading_session_status()
+    prefix = _non_trading_hint_prefix(evidences, status=status)
+    if not prefix:
+        return conclusion
+
+    # 已含提示不重复
+    if conclusion.startswith("当前为 A 股") or conclusion.startswith("今天是 A 股非交易日"):
+        return conclusion
 
     return prefix + conclusion
 
@@ -569,6 +622,17 @@ def _contains_action_word(text: str) -> bool:
     return any(kw in text for kw in ACTION_KEYWORDS)
 
 
+def _select_risk_disclaimer(
+    *, strong: bool = False, risk_tolerance: str | None = None
+) -> str:
+    """选择 D28 风险段文本（Phase 4-3：conservative 档优先级高于 strong 档）。"""
+    if risk_tolerance == "conservative":
+        return RISK_DISCLAIMER_CONSERVATIVE
+    if strong:
+        return RISK_DISCLAIMER_STRONG
+    return RISK_DISCLAIMER
+
+
 def _append_risk_disclaimer(
     conclusion: str, *, strong: bool = False, risk_tolerance: str | None = None
 ) -> str:
@@ -579,12 +643,7 @@ def _append_risk_disclaimer(
     Phase 4-3（改进 15）：risk_tolerance=conservative 时用保守档强化提示
     （优先级高于 strong 档；无 profile 时维持既有两档行为，字节不变）。
     """
-    if risk_tolerance == "conservative":
-        disclaimer = RISK_DISCLAIMER_CONSERVATIVE
-    elif strong:
-        disclaimer = RISK_DISCLAIMER_STRONG
-    else:
-        disclaimer = RISK_DISCLAIMER
+    disclaimer = _select_risk_disclaimer(strong=strong, risk_tolerance=risk_tolerance)
     # 已含任一档风险段时不重复叠加（三档互斥去重）
     if any(
         d in conclusion
@@ -592,6 +651,76 @@ def _append_risk_disclaimer(
     ):
         return conclusion
     return f"{conclusion}\n\n{disclaimer}"
+
+
+# ─── 改进 17（D9 节级伪流式，2026-08-13）：回答内容分节渐进式展示 ───
+
+# 事件名冻结（spec §2.2 硬约束 5；Task 1 ws.py on_custom_event 分支消费）
+_STREAM_DELTA_EVENT = "chat_content_delta"
+_STREAM_RESET_EVENT = "chat_content_reset"
+
+
+def _split_content_deltas(final_text: str, hint_prefix: str = "") -> list[str]:
+    """把终态回答切分为有序节级增量（join(deltas) == final_text 字节全等，硬约束 2）。
+
+    D9 节级伪流式：hint 文首前缀（若 final_text 以其开头）→ 独立首增量；
+    其余按 `## ` markdown 节头切分（无节头 → 整段一节）；文末代码拼接的
+    D28 风险段（"\n\n"+三档之一）→ 独立末增量。任意累积前缀必是 final_text 的字节前缀。
+    """
+    deltas: list[str] = []
+    rest = final_text
+    if hint_prefix and rest.startswith(hint_prefix):
+        deltas.append(hint_prefix)
+        rest = rest[len(hint_prefix) :]
+    trailing = ""
+    for d in (RISK_DISCLAIMER, RISK_DISCLAIMER_STRONG, RISK_DISCLAIMER_CONSERVATIVE):
+        suffix = f"\n\n{d}"
+        if rest.endswith(suffix):
+            trailing = suffix
+            rest = rest[: -len(suffix)]
+            break
+    if rest:
+        parts: list[str] = []
+        start = 0
+        for m in re.finditer(r"(?m)^## ", rest):
+            if m.start() == 0:
+                continue
+            parts.append(rest[start : m.start()])
+            start = m.start()
+        parts.append(rest[start:])
+        deltas.extend(p for p in parts if p)
+    if trailing:
+        deltas.append(trailing)
+    return deltas
+
+
+async def _dispatch_content_deltas(deltas: list[str]) -> None:
+    """按序分发节级增量（payload 恒 dict {"content": str}；空串/None 跳过；失败静默）。
+
+    "永不 500"：分发失败（如脱离图 run 上下文无 parent_run_id）静默吞掉，不阻断回答。
+    """
+    for delta in deltas:
+        if not delta:
+            continue
+        try:
+            await adispatch_custom_event(_STREAM_DELTA_EVENT, {"content": delta})
+        except Exception as exc:  # noqa: BLE001  # 分发失败静默（"永不 500"铁律）
+            logger.warning("synth_answer.stream.dispatch_failed", err=str(exc))
+
+
+async def _dispatch_content_reset(final_text: str) -> None:
+    """显式整段替换（content_reset；前端整段覆盖半截流式内容）。失败静默（"永不 500"）。"""
+    try:
+        await adispatch_custom_event(_STREAM_RESET_EVENT, {"content": final_text})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synth_answer.stream.reset_failed", err=str(exc))
+
+
+async def _finalize_content_stream(dispatched: str, final_response: str) -> None:
+    """D4/M5 统一语义收尾：流式已开始（已分发非空）且终态文本非已分发内容前缀扩展 →
+    显式整段替换（content_reset）。若未分发任何内容（无半截可替换）→ 不重置。"""
+    if dispatched and not final_response.startswith(dispatched):
+        await _dispatch_content_reset(final_response)
 
 
 def _sort_goals_by_preferences(
@@ -950,6 +1079,15 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     mode = _infer_answer_mode(goal, evidences)
     logger.info("synth_answer.mode", mode=mode, intent=goal.intent)
 
+    # 改进 17（D9 节级伪流式，2026-08-13）：进入 LLM 前先取一次时段状态并缓存 hint 前缀
+    # （D5：跨时段边界两次取值可能不同，流式分发与 DONE 文本必须共用同一值）；
+    # hint 前缀最先分发（渐进反馈：用户先看到时段提示，LLM 并行生成正文）。
+    session_status, _ = trading_session_status()
+    hint_prefix = _non_trading_hint_prefix(evidences, status=session_status)
+    dispatched = hint_prefix
+    if hint_prefix:
+        await _dispatch_content_deltas([hint_prefix])
+
     try:
         llm = get_deep_think()
         structured_llm = with_chat_structured_output(llm, SynthOutput)
@@ -991,7 +1129,10 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             answer_mode=mode,  # type: ignore[arg-type]
         )
         # 非交易时段统一提示（2026-08-03 规范扩展）：行情类证据降级时前导提示 + 引导
-        final_response = _append_non_trading_time_hint(insight.conclusion, evidences)
+        # （D5：复用进入流式前缓存的 status 单次取值，保证与已分发 hint 前缀一致）
+        final_response = _append_non_trading_time_hint(
+            insight.conclusion, evidences, status=session_status
+        )
         insight = insight.model_copy(update={"conclusion": final_response})
         trace = AnswerTrace(
             goal=goal,
@@ -1000,6 +1141,15 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             evidences=evidences,
             actual_mode=mode,  # type: ignore[arg-type]
         )
+
+        # D9：最终文本按节分发（join(deltas) == final_response 字节全等，硬约束 2）；
+        # hint 前缀已在进入流式前分发（渐进反馈），此处从切分结果中去重避免重复；
+        # 收尾统一校验：终态文本非已分发内容前缀扩展 → 显式整段替换（D4/M5）。
+        final_deltas = _split_content_deltas(final_response, hint_prefix)
+        if hint_prefix and final_deltas and final_deltas[0] == hint_prefix:
+            final_deltas = final_deltas[1:]
+        await _dispatch_content_deltas(final_deltas)
+        await _finalize_content_stream(dispatched + "".join(final_deltas), final_response)
 
         logger.info(
             "synth_answer.ok",
@@ -1028,6 +1178,9 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
         )
         metrics.record_synth_degraded()
         metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
+        # 降级短路保持现状（spec §3.1：代码拼接整段不分发增量）；
+        # 若流式已开始（hint 已发）且降级终态文本非已分发内容前缀 → 显式整段替换（D4/M5）
+        await _finalize_content_stream(dispatched, insight.conclusion)
         return {
             "insight": insight,
             "final_response": insight.conclusion,
