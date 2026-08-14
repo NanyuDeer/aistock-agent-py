@@ -34,7 +34,12 @@ def _build_parser() -> argparse.ArgumentParser:
     """CLI 参数解析器（--agent choices 动态取自 adapter 注册表）。"""
     parser = argparse.ArgumentParser(description="迭代切片生成")
     parser.add_argument("--agent", required=True, choices=iterable_agent_ids())
-    parser.add_argument("--window-days", type=int, default=30)
+    parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="扫描窗口天数；仅对 telegraph_keyword_scan 产片源生效（review 等无该 provider 的 agent 忽略）",  # noqa: E501
+    )
     parser.add_argument("--force", action="store_true", help="跳过一致性校验强制落盘")
     parser.add_argument("--data-dir", type=Path, default=None)
     return parser
@@ -52,7 +57,18 @@ async def main(argv: list[str]) -> int:
     data_dir = args.data_dir or get_data_dir()
     adapter = get_adapter(args.agent)
     if args.window_days != 30:
-        # CLI 显式覆盖产片源参数（默认 30 即用 adapter 登记值）
+        # CLI 显式覆盖产片源参数（默认 30 即用 adapter 登记值）。
+        # --window-days 仅对 telegraph_keyword_scan 产片源生效；adapter 无该
+        # provider（如 review 的 market_close_snapshot）时参数被静默忽略——
+        # 显式告警避免误解（final review I-1）。
+        if not any(
+            spec.provider == "telegraph_keyword_scan" for spec in adapter.case_sources
+        ):
+            print(
+                f"warning: --window-days {args.window_days} 仅对 telegraph_keyword_scan "
+                f"产片源生效，adapter {adapter.agent_id} 无该 provider，参数被忽略",
+                file=sys.stderr,
+            )
         new_sources = tuple(
             CaseSourceSpec(spec.provider, {**spec.params, "window_days": args.window_days})
             if spec.provider == "telegraph_keyword_scan"

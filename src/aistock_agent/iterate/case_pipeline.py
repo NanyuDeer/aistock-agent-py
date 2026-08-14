@@ -39,7 +39,7 @@ def candidate_to_case_inputs(
             continue
         if field_name == "market_snapshot" and candidate.market_snapshot is None:
             raise ValueError(f"candidate 缺 data_deps 字段 market_snapshot（adapter={adapter.agent_id}）")  # noqa: E501
-        if field_name == "industry_graph" and candidate.industry_graph is None and dep == "industry_graph":  # noqa: E501
+        if field_name == "industry_graph" and candidate.industry_graph is None:
             raise ValueError(f"candidate 缺 data_deps 字段 industry_graph（adapter={adapter.agent_id}）")  # noqa: E501
     return {
         "event_title": candidate.event_title,
