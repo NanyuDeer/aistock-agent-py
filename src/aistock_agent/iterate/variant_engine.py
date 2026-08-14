@@ -9,8 +9,10 @@
 """
 
 import ast
+import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -354,12 +356,17 @@ def restore_baseline(
     files = list(adapter.prompt_files) + list(adapter.workflow_files) + list(extra_files)
     if not files:
         return
-    result = subprocess.run(
-        ["git", "checkout", "--", *files],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "checkout", "--", *files],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # git 命令不可用（如无 git 环境的测试沙盒）：仅告警不阻塞
+        logger.warning("iterate_restore_baseline_git_missing", root=str(repo_root))
+        return
     if result.returncode != 0:
         logger.warning("iterate_restore_baseline_failed", stderr=result.stderr.strip())
 
@@ -404,8 +411,11 @@ async def run_experiment_round(
             ),
         )
     else:
+        structured = output.get("structured")
         score = await evaluate_attribution(
-            str(output.get("final_response", "")), ground_truth
+            str(output.get("final_response", "")),
+            ground_truth,
+            agent_structured=structured if isinstance(structured, dict) else None,
         )
     record: dict[str, object] = {
         "case_id": case_id,
@@ -422,6 +432,9 @@ async def run_experiment_round(
             "old_snippet": variant.old_snippet,
             "new_snippet": variant.new_snippet,
         },
+        # C-5 修复：agent 输出全文落盘——评分可完全重算（REPRODUCIBLE），
+        # 报告/复盘无需重跑回放即可查看实际输出。
+        "agent_output": str(output.get("final_response", "")),
         "score": score.total,
         "score_detail": {
             "direction": score.direction,
@@ -455,6 +468,95 @@ def _needs_replay_retry(output: dict[str, object]) -> bool:
     return len(response) < _REPLAY_RETRY_MIN_OUTPUT_LEN
 
 
+#: 回放子进程 env 前缀白名单（C-2，2026-08-14）：只传递运行必需的配置，
+#: 其余环境变量（含未知密钥）不流入子进程，缩小泄漏面。
+_SUBPROCESS_ENV_PREFIX_ALLOW: tuple[str, ...] = (
+    "OPENAI_",
+    "DEEP_THINK_",
+    "QUICK_THINK_",
+    "REDIS_",
+    "TAVILY_",
+    "ITERATE_",
+    "REPLAY_",
+    "AISTOCK_",
+    "NODE_",
+    "STOCK_TRACE_",
+    "INSIGHT_",
+    "DOUYIN_",
+    "LANGSMITH_",
+    "QQ_SMTP_",
+    "HTTP_TIMEOUT_",
+    "LOG_LEVEL_",
+)
+_SUBPROCESS_ENV_EXACT_ALLOW: frozenset[str] = frozenset(
+    {
+        "PYTHONPATH",
+        "APP_ENV",
+        "HTTP_TIMEOUT_SECONDS",
+        "LOG_LEVEL",
+        "INTERNAL_API_TOKEN",
+        "HOST",
+        "PORT",
+        "CORS_ORIGINS",
+        "SCHEDULER_ENABLED",
+        "LLM_BASE_URL",
+    }
+)
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|auth|secret)\b[=:]\s*([^\s,;\"']+)"
+)
+
+
+def _mask_secrets(text: str) -> str:
+    """日志/错误文本中的密钥值掩码（C-2：密钥掩码防泄漏）。"""
+    return _SECRET_VALUE_RE.sub(lambda m: f"{m.group(1)}=***", text)
+
+
+def _build_replay_env(src_dir: str) -> dict[str, str]:
+    """回放子进程 env：白名单过滤 + 必需键注入（C-2，2026-08-14）。
+
+    REPLAY_CASE_ID/REPLAY_AGENT 由调用方（_run_replay_subprocess 的参数）注入，
+    不以 os.environ 为准（父进程可能残留上次回放的旧值）。
+    """
+    allowed = {
+        k: v
+        for k, v in os.environ.items()
+        if k in _SUBPROCESS_ENV_EXACT_ALLOW
+        or k.startswith(_SUBPROCESS_ENV_PREFIX_ALLOW)
+    }
+    allowed["PYTHONPATH"] = src_dir
+    return allowed
+
+
+def _check_repo_environment(root: Path) -> str:
+    """非 git 环境判定矩阵（C-3，裁决书 C 论题）。
+
+    APP_ENV × has_git 四组合行为确定：
+    - production + 无 .git → raise（拿不到基线参照，fail-closed 拒绝）
+    - production + 有 .git → ok
+    - development + 无 .git → warning + "skip"（变体轮跳过，只跑基线）
+    - development + 有 .git → ok
+    黑名单（settings.iterate_forbidden_repo_roots）命中 → raise。
+    """
+    root_resolved = str(root.resolve())
+    for forbidden in settings.iterate_forbidden_repo_roots:
+        if root_resolved.startswith(str(Path(forbidden).resolve())):
+            raise RuntimeError(
+                f"repo root 在黑名单内，拒绝迭代：{root_resolved}"
+            )
+    has_git = (root / ".git").exists()
+    app_env = os.environ.get("APP_ENV", "development")
+    if app_env == "production" and not has_git:
+        raise RuntimeError(f"production 环境缺少 .git，无法恢复基线：{root_resolved}")
+    if not has_git:
+        logger.warning(
+            "iterate_repo_no_git_skip", root=root_resolved, app_env=app_env
+        )
+        return "skip"
+    return "ok"
+
+
 async def _run_replay_subprocess(
     agent_id: str, case_id: str, variant_hash: str
 ) -> dict[str, object]:
@@ -462,30 +564,37 @@ async def _run_replay_subprocess(
     # 修正：brief 原写 parent.parent（解析为 src/aistock_agent，无法导入 aistock_agent 包），
     # 改为 parent.parent.parent 即 src 目录。
     src_dir = str(Path(__file__).resolve().parent.parent.parent)
-    env = {
-        **os.environ,
-        "REPLAY_CASE_ID": case_id,
-        "REPLAY_AGENT": agent_id,
-        "PYTHONPATH": src_dir,
-    }
+    env = _build_replay_env(src_dir)
+    # REPLAY_* 以函数参数为权威（C-2：不依赖父进程残留 env）
+    env["REPLAY_CASE_ID"] = case_id
+    env["REPLAY_AGENT"] = agent_id
+    proc: asyncio.subprocess.Process | None = None
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "aistock_agent.iterate.replay_runner",
-                agent_id,
-                case_id,
-                variant_hash,
-            ],
+        # C-4 修复：回放改异步子进程（asyncio.create_subprocess_exec）——
+        # 裁决书 C 论题：同步 subprocess.run(timeout=600s) 会阻塞主服务事件循环；
+        # 17:00 asyncio job 内同步等待使整个调度器停摆。超时用 wait_for 包裹。
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "aistock_agent.iterate.replay_runner",
+            agent_id,
+            case_id,
+            variant_hash,
             env=env,
-            capture_output=True,
-            text=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
             timeout=settings.iterate_round_timeout_seconds,
         )
-    except subprocess.TimeoutExpired:
-        # 超时不崩整个闭环：返回 timed_out 标记，调用侧记为超时失败轮（评分 0）。
-        # 之前裸抛 TimeoutExpired 导致 run_case 直接退出，多轮闭环无法继续。
+        stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+        stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
+    except TimeoutError:
+        # 超时不崩整个闭环：终止子进程，返回 timed_out 标记，调用侧记为超时失败轮。
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
         logger.warning(
             "iterate_replay_timed_out",
             agent_id=agent_id,
@@ -499,14 +608,14 @@ async def _run_replay_subprocess(
             "final_response": "",
             "timed_out": True,
         }
-    if result.returncode != 0:
+    if proc.returncode != 0:
         # C11 修复：子进程失败不再抛 RuntimeError 崩整个闭环，返回失败标记，
         # 由 run_case 计为失败轮（评分 0 + gap 注明），连续失败达阈值再中止。
         logger.warning(
             "iterate_replay_subprocess_failed",
             agent_id=agent_id,
             case_id=case_id,
-            stderr=result.stderr[-300:],
+            stderr=stderr[-300:],
         )
         return {
             "agent_id": agent_id,
@@ -515,12 +624,12 @@ async def _run_replay_subprocess(
             "final_response": "",
             "subprocess_failed": True,
         }
-    lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+    lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
     try:
         # json.loads 返回 Any，mypy strict 的 no-any-return 要求显式 cast
         return cast("dict[str, object]", json.loads(lines[-1]))
     except (IndexError, json.JSONDecodeError):
-        raise RuntimeError(f"replay subprocess bad output: {result.stdout[-500:]}") from None
+        raise RuntimeError(f"replay subprocess bad output: {stdout[-500:]}") from None
 
 
 def _parse_json(text: str) -> dict[str, object]:

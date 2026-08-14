@@ -52,6 +52,85 @@ def _sample_sector_list_text() -> str:
 
 
 @pytest.mark.asyncio
+async def test_transmission_path_merged_into_drivers() -> None:
+    """A-4：GT 的 transmission_path 并入驱动维参与命中判定。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "transmission_path": ["美股 → A股高开"],
+            "affected_sectors": [],
+            "corpus": "隔夜美股暴涨，A股高开",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["隔夜美股暴涨", "美股传导A股"], []),
+                # judge：agent 覆盖了传导语义（美股→A股），drivers+transmission 共 2 条 truth
+                _mock_driver_judge(2, 2, quotes=["隔夜美股暴涨", "美股传导A股"]),
+            ]
+        )
+        score = await evaluate_attribution("大盘高开", gt)
+    assert score.drivers == 0.5  # 2/2 命中（驱动 + 传导路径均覆盖）
+
+
+@pytest.mark.asyncio
+async def test_driver_judge_uses_temperature_zero() -> None:
+    """A-2：judge 主路径 T=0（评分确定性，裁决书 A 论题）。"""
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "affected_sectors": ["半导体"],
+            "corpus": "财联社：A股高开，半导体领涨",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _mock_llm_extract("bullish", ["隔夜美股暴涨"], ["半导体"]),
+                _mock_driver_judge(1, 1, quotes=["隔夜美股暴涨"]),
+            ]
+        )
+        await evaluate_attribution("大盘高开，半导体领涨", gt)
+    judge_call = factory.call_args_list[1]  # 第二次调用是 judge
+    assert judge_call.kwargs.get("temperature") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_structured_sectors_preferred_over_extract() -> None:
+    """A-5 N2：evaluate 收到 agent_structured 时，sectors 优先用结构化值。
+
+    裁决书 A 论题：提取优先级 structured > 文本。review run 内部已有
+    _extract_review_sectors 确定性提取，回传后 evaluator 不应再从文本
+    LLM 提取板块（后者受 SECTOR_LIST 截断影响）。
+    """
+    gt = {
+        "attribution": {
+            "direction": "bullish",
+            "drivers": ["隔夜美股暴涨"],
+            "affected_sectors": ["CRO概念", "重组蛋白", "细胞免疫治疗"],
+            "corpus": "财联社：美国拟限制含光模块的中国数据中心组件对美出口",
+        }
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                # extract 提取（文本）只给出泛化板块——不应被采纳
+                _mock_llm_extract("bullish", ["隔夜美股暴涨"], ["医药", "创新药"]),
+                _mock_driver_judge(1, 1, quotes=["隔夜美股暴涨"]),
+            ]
+        )
+        score = await evaluate_attribution(
+            "大盘高开，医药领涨",
+            gt,
+            agent_structured={"sectors": ["CRO概念", "重组蛋白", "细胞免疫治疗"]},
+        )
+    assert score.sectors == 0.3  # 结构化 sectors 全命中（而非文本提取的 0 命中）
+
+
+@pytest.mark.asyncio
 async def test_extract_input_promotes_sector_list() -> None:
     """extract 输入必须包含 SECTOR_LIST 板块清单（置顶）。
 
@@ -90,7 +169,8 @@ async def test_perfect_match_scores_high() -> None:
                 _mock_llm_extract(
                     "bullish", ["隔夜美股暴涨", "外盘传导"], ["半导体", "算力", "新能源"]
                 ),
-                _mock_driver_judge(hit=2, total=2),
+                # A-4：transmission_path 并入 truth_drivers（2+1=3 条），完美匹配需 3 命中
+                _mock_driver_judge(hit=3, total=3),
             ]
         )
         score = await evaluate_attribution(AGENT_OUT, GT)

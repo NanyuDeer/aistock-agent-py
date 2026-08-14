@@ -1019,7 +1019,11 @@ async def run(state: AgentState) -> dict[str, object]:
                 prediction=prediction,
             )
             await _persist_review_report(state, rebuilt_artifact)
-            return {"final_response": rendered_markdown}
+            # A-5 N2：缓存命中路径同样附带结构化 sectors
+            return {
+                "final_response": rendered_markdown,
+                "sectors": _extract_review_sectors(rendered_markdown),
+            }
         # 缓存内容无效（如旧纯文本、日期不一致或语义非法），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
@@ -1161,7 +1165,11 @@ async def run(state: AgentState) -> dict[str, object]:
     await _persist_review_report(state, artifact)
     await _persist_prediction_record(state, run_result)
 
-    return {"final_response": markdown}
+    # A-5 N2：附带结构化结果（sectors 确定性提取，供迭代评估端优先使用）
+    return {
+        "final_response": markdown,
+        "sectors": _extract_review_sectors(markdown),
+    }
 
 
 # ============================================================================
