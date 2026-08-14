@@ -652,6 +652,26 @@ def _write_experiment_record(
     )
 
 
+@pytest.mark.asyncio
+async def test_run_case_rejects_invalid_max_rounds(
+    iterate_data_dir: object,
+) -> None:
+    """D-2：run_case 入口校验 max_rounds>=1（覆盖调度器直调路径）。"""
+    import pytest as _pytest
+
+    from aistock_agent.iterate.run_case import run_case
+
+    with patch(
+        "aistock_agent.iterate.run_case.get_adapter",
+        return_value=SimpleNamespace(agent_id="review"),
+    ), patch(
+        "aistock_agent.iterate.run_case.load_case",
+        return_value={"case_id": "case_x", "ground_truth_ref": "gt_x"},
+    ), patch("aistock_agent.iterate.run_case.load_ground_truth", return_value={}):
+        with _pytest.raises(ValueError, match="max_rounds 必须 >= 1"):
+            await run_case("review", "case_x", max_rounds=0)
+
+
 def test_recompute_best_excludes_failed_round_and_picks_r2(
     iterate_data_dir: object,
 ) -> None:

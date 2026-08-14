@@ -45,7 +45,12 @@ async def run_case(
     adapter = get_adapter(agent_id)
     case = load_case(case_id)
     ground_truth = load_ground_truth(str(case["ground_truth_ref"]))
-    limit = max_rounds or settings.iterate_max_rounds
+    # D-2 修复：max_rounds>=1 校验移入入口（覆盖调度器直调路径——scheduler
+    # 直调 run_case 时 max_rounds 可能传 0/负数，原代码静默取默认值掩盖配置错误）。
+    # 注意：不能用 `max_rounds or default`——0 会被 or 吞掉绕开校验。
+    limit = max_rounds if max_rounds is not None else settings.iterate_max_rounds
+    if limit < 1:
+        raise ValueError(f"max_rounds 必须 >= 1，收到 {limit}")
     root = Path(repo_root) if repo_root else _default_repo_root()
 
     # T10 Q1 修复：清理上次运行残留的实验记录，防止跨运行 r*.json 污染 best.json。
