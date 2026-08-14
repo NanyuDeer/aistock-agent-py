@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     insight_label_max_chars: int = 12
     # 归因任务轻，默认 quick_think
     insight_llm_model: Literal["quick_think", "deep_think"] = "quick_think"
+    # 午盘触发后补抓窗口（分钟，PRD §8：15-20 分钟；Node 侧 cron 使用）
+    insight_refetch_minutes: int = 20
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
@@ -176,13 +178,13 @@ class Settings(BaseSettings):
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
     scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
-    # ── 统一事件抓取中台调度（2026-08-12） ──
-    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
+    scheduler_event_scrape_cron: str = "45 8 * * 1-5"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (
-        "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+        "0 10-14 * * 1-5"  # 盘中档：10:00-14:00 每小时（含 12:00，午间公告/新闻增量）
     )
     scheduler_event_scrape_early_cron: str = (
-        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷）
+        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
     scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
     # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
@@ -190,6 +192,12 @@ class Settings(BaseSettings):
     event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
     event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
     event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
+    # ── GI 盘中纯增量更新（2026-08-14） ──
+    gi_incremental_enabled: bool = False             # 总开关（默认关闭灰度开启）
+    gi_max_llm_calls_per_day: int = 10               # 每日 quick_think 比较次数上限（达上限后仅规则判断）
+    gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
+    gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
+    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

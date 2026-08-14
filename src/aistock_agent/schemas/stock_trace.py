@@ -10,12 +10,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aistock_agent.trace.chain import ChainStage
+
 SourceLevel = Literal["A", "B", "C", "D"]
 SourceKind = Literal[
     "trigger_fact", "quote_fact", "sector_fact", "market_fact", "announcement", "news"
-]
-ChainStage = Literal[
-    "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
 ]
 
 

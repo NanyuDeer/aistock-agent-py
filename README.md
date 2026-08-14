@@ -266,9 +266,8 @@ content = {
 
 | job_id | cron | 说明 |
 |--------|------|------|
-| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
-| `event_scrape_early` | `45 8 * * 1-5` | 08:45 早间刷新档，intraday 增量（晨报 08:50 读库前最后一刷，H5，2026-08-13） |
-| `event_scrape_intraday` | `0 10-11,13-14 * * 1-5` | 10:00-11:00、13:00-14:00 每小时，intraday 增量抓取（M8：避开 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑） |
+| `event_scrape_daily` | `45 8 * * 1-5` | 08:45 盘前档，full_daily 全量抓取（2026-08-13 起由 07:30 调整，紧邻晨报 08:50） |
+| `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时（含 12:00 午间档），intraday 增量抓取（2026-08-13 恢复 12:00） |
 | `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
 
 **事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
@@ -357,7 +356,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
@@ -370,7 +369,12 @@ src/aistock_agent/
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）
 │   ├── data_guard.py    # 空数据预检（ensure_data_available + DataCheck，规范13，scheduler触发时预检Node.js数据源）
+│   ├── insight_candidate.py  # 洞察候选抽取（证据包多来源 + 时效分层 _time_factor / extract_candidates_from_evidence）
+│   ├── insight_validator.py  # 洞察归因校验（一期正文锚定 + 二期证据包锚定 validate_attribution_from_evidence + 置信度封顶 confidence_cap_for_evidence）
 │   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/09:00/15:30/15:35/15:40）
+├── workers/             # 独立消费者（非 LangGraph 图内节点）
+│   ├── insight_worker.py    # 自选股洞察归因 worker（证据包路径 / 单篇正文路径双分支）
+│   └── insight_consumer.py  # Redis Stream 消费端（watchlist-insight.jobs → 归因 → 回写）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
@@ -448,6 +452,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package，insight_worker 消费） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定 pushCreated/pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/push/market-event` | 微信+飞书推送 | 市场事件重磅推送（Python morning_agent 触发，fire-and-forget） |
 | `GET /internal/health` | - | 轻量健康探针（供 Python `/health/ready` 探测，Phase 5） |

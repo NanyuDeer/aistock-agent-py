@@ -58,7 +58,7 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  07:30 event_scrape_daily（盘前全量）+ 08:45 event_scrape_early（早间刷新，晨报 08:50 读库前最后一刷）+ 10:00-11:00、13:00-14:00 每小时 event_scrape_intraday + 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；避开 11:30-13:00 A 股午休；早间/收盘两档 H5，2026-08-13）
+  08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
@@ -295,6 +295,13 @@ START → supervisor(quick_think, 意图路由)
 - **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
 - **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
 
+### CHAT QA 批次 2（2026-08-13）：回答内容流式（D9 节级伪流式）+ 事件通道
+
+- **立项门禁结论**：Task 0 spike（tests/unit/test_stream_spike.py，STREAM_SPIKE_RUN=1 显式触发）5 断言 3 失败——`with_chat_structured_output(json_mode)` 对 Pydantic schema 实际走 PydanticOutputParser，整段 JSON 完整才产出唯一实例（partials=1），**无逐字增量可 diff**；自定义事件传播机制单独验证通过（`adispatch_custom_event` 从节点内嵌套 LLM run 传播到顶层 `astream_events(version="v2")` on_custom_event 正常，langchain-core 0.3.58 的 adispatch_custom_event 不接受 version kwarg）。**用户裁决 D9 节级伪流式**。
+- **事件通道（Task 1）**：`WSEventType.CONTENT_DELTA="content_delta"` / `CONTENT_RESET="content_reset"`（constants.py）；ws.py `_run_chat_graph_to_events` 新增 `on_custom_event` 分支捕获 `chat_content_delta`/`chat_content_reset` → 统一 sink 入 state.events（resume 回放兼容）；**红线不动**：L156-158 `ON_CHAT_MODEL_STREAM` 过滤分支逐字节未改，新增事件只走显式事件名通道。
+- **节级伪流式（Task 2，synth_answer.py）**：维持 `ainvoke` 生产链（计费口径零变化，无新增 LLM 调用）；回答最终文本按 markdown 分节经 `adispatch_custom_event("chat_content_delta", {"content": 节文本})` 渐进下发（多子目标节标题先发、正文后发，DISCLAIMER/风险段最后统一补发）；**字节前缀契约**：dispatch 序列拼接 == final_response 逐字全等、任意累积为字节前缀（前端 done 前缀补尾）；**content_reset 统一语义**：凡流式已开始且终态文本非已流式内容前缀（结构化校验失败降级 / 节降级 / 流式中途异常降级全文）→ `adispatch_custom_event("chat_content_reset", {"content": 终态文本})` 整段替换；hint 单次取值（`trading_session_status` 只取一次），payload 恒 `{"content": str}`、空串/None 不分发。
+- **验证**：全量 A/B HEAD 失败集 = BASE（22=22，唯一差异 test_full_flow_stock 经 5 项证据判定为本地 sqlite checkpointer 跨次运行状态残留的环境卫生问题，全新 db 复测通过）+ ruff 改动文件 0 + 跨仓契约（事件名 ↔ ws.py ↔ 前端 case 标签）字段级一致。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
@@ -310,6 +317,8 @@ src/aistock_agent/
 │   ├── chat.py          # ChatRequest / ChatResponse
 │   ├── sse.py           # SSEEvent
 │   └── agents.py        # 各 Agent 输入/输出 schema
+├── trace/               # 溯源共享推理核心（B1a）：6 阶段链枚举/节点schema/按序校验
+│   └── chain.py         # ChainStage / TRACE_CHAIN_STAGES / CausalNode / CausalChain / validate_chain_stages
 ├── memory/              # 持久化记忆模块
 │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
 │   ├── session_store.py # 会话历史读写
@@ -350,14 +359,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
-├── skills/              # CHAT QA Skill 注册中心 + 手写 skill
-│   ├── registry.py      # 统一注册中心（手写优先；douyin_video 等）
-│   ├── base.py          # @skill 装饰器（异常→degraded Evidence）
-│   ├── douyin_client.py # 抖音视频下载/转写客户端（requests + ffmpeg + SenseVoice）
-│   ├── douyin_video.py  # 抖音视频读取 skill（链接→转写文本）
-│   └── ...              # stock_snapshot/stock_news/market_snapshot 等既有 skill
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -434,6 +437,9 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |

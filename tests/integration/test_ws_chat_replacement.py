@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from aistock_agent.services.chat_task_manager import chat_task_manager
+
 
 @pytest.fixture
 def client():
@@ -221,3 +223,130 @@ def test_ws_chat_done_omits_trace_field(client):
     assert len(done_events) == 1
     # 新子图无该字段
     assert "advisor_trace" not in done_events[0]
+
+
+def test_ws_chat_forwards_content_delta(client):
+    """改进 17（Task 1）：on_custom_event 捕获 chat_content_delta → content_delta 事件。
+
+    - 逐段增量经统一 sink 转发（顺序保持）
+    - 未知自定义事件名静默忽略（事件名冻结，硬约束 5）
+    - 事件入 state.events（resume 回放兼容，硬约束 4）
+    """
+    async def mock_astream_events(initial_state, config=None, version="v2"):
+        _assert_chat_initial_state(initial_state)
+        yield {
+            "event": "on_chain_start",
+            "name": "synth_answer",
+            "data": {},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_custom_event",
+            "name": "chat_content_delta",
+            "data": {"content": "第一段增量"},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_custom_event",
+            "name": "chat_content_delta",
+            "data": {"content": "第二段增量"},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        # 未知事件名：不转发、不报错（与分支只匹配两个冻结名对齐）
+        yield {
+            "event": "on_custom_event",
+            "name": "some_unrelated_event",
+            "data": {"content": "不应出现在 WS 流中"},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "synth_answer",
+            "data": {"output": {"final_response": "第一段增量第二段增量"}},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = mock_astream_events
+
+    with (
+        patch("aistock_agent.api.ws._select_graph", return_value=mock_graph),
+        patch("aistock_agent.api.ws.stream_reasoning", new=AsyncMock()),
+    ):
+        with client.websocket_connect("/api/agent/ws/chat") as websocket:
+            websocket.send_json({"message": "测试", "session_id": "test_ws_content_delta"})
+            messages = []
+            while True:
+                data = websocket.receive_json()
+                messages.append(data)
+                if data.get("type") == "done":
+                    break
+
+    delta_events = [m for m in messages if m.get("type") == "content_delta"]
+    assert [m.get("content") for m in delta_events] == ["第一段增量", "第二段增量"]
+    # 未知事件名不转发
+    assert all("不应出现在 WS 流中" not in str(m) for m in messages)
+    # 事件经统一 sink 入 state.events（resume 回放兼容，硬约束 4）
+    state = chat_task_manager.get("test_ws_content_delta")
+    assert state is not None
+    state_delta = [e for e in state.events if e.get("type") == "content_delta"]
+    assert [e.get("content") for e in state_delta] == ["第一段增量", "第二段增量"]
+
+
+def test_ws_chat_forwards_content_reset(client):
+    """改进 17（Task 1）：on_custom_event 捕获 chat_content_reset → content_reset 显式整段替换。
+
+    D4 语义：结构化校验失败时前端需整段覆盖半截流式内容；事件入 state.events。
+    """
+    async def mock_astream_events(initial_state, config=None, version="v2"):
+        _assert_chat_initial_state(initial_state)
+        yield {
+            "event": "on_chain_start",
+            "name": "synth_answer",
+            "data": {},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_custom_event",
+            "name": "chat_content_delta",
+            "data": {"content": "半截流式内容"},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_custom_event",
+            "name": "chat_content_reset",
+            "data": {"content": "降级后的完整回答"},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "synth_answer",
+            "data": {"output": {"final_response": "降级后的完整回答"}},
+            "metadata": {"langgraph_node": "synth_answer"},
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = mock_astream_events
+
+    with (
+        patch("aistock_agent.api.ws._select_graph", return_value=mock_graph),
+        patch("aistock_agent.api.ws.stream_reasoning", new=AsyncMock()),
+    ):
+        with client.websocket_connect("/api/agent/ws/chat") as websocket:
+            websocket.send_json({"message": "测试", "session_id": "test_ws_content_reset"})
+            messages = []
+            while True:
+                data = websocket.receive_json()
+                messages.append(data)
+                if data.get("type") == "done":
+                    break
+
+    reset_events = [m for m in messages if m.get("type") == "content_reset"]
+    assert len(reset_events) == 1
+    assert reset_events[0]["content"] == "降级后的完整回答"
+    # 事件经统一 sink 入 state.events（resume 回放兼容，硬约束 4）
+    state = chat_task_manager.get("test_ws_content_reset")
+    assert state is not None
+    state_reset = [e for e in state.events if e.get("type") == "content_reset"]
+    assert len(state_reset) == 1
+    assert state_reset[0]["content"] == "降级后的完整回答"

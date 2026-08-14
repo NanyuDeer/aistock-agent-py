@@ -314,6 +314,18 @@ EVENT_INVESTMENT_PROMPT = SYSTEM_PROMPT + """
 - risks 1-3 条
 - rating 必填：positive / neutral / negative
 - direction 必填：positive / negative
+- **focusIndustries 必须可追溯到传导分析（transmission.chain）**：
+  - 只能输出 chain 中出现的行业，或与 chain 行业存在同源细分关系的行业
+    （如 chain=半导体 → 可输出 半导体制造、半导体设备；chain=证券 → 可输出 证券）。
+  - industryGraphEvidence 仅代表产业关联事实，**不得**单独作为投资机会行业来源；
+    不得仅因某行业出现在 industryGraphEvidence 上游/下游就直接列为受益行业。
+  - 禁止根据事件关键词、原始新闻文本或历史案例自行推断 chain 之外的受益行业。
+- **当 transmission.chain 为空时**（传导分析未形成明确行业传导）：
+  - focusIndustries 必须返回 []
+  - opportunities 必须返回 []
+  - rating 必须返回 neutral
+  - conclusion 说明"事件未形成明确行业传导，暂不提供具体行业投资机会"
+  - 禁止根据 industryGraphEvidence、事件关键词或历史案例补造受益行业
 - 只输出 JSON 对象，不要 markdown 代码块包裹，不要多余文字
 """
 

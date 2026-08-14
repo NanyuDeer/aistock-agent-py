@@ -24,10 +24,14 @@ from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.global_importance import GLOBAL_IMPORTANCE_PROMPT
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.llm import get_deep_think
+from aistock_agent.services.llm import get_deep_think, get_quick_think, with_chat_structured_output
+from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.output_parser import _parse_json
 
 logger = structlog.get_logger()
@@ -518,6 +522,8 @@ async def eval_global_importance_from_events(
 async def save_global_importance_report(
     result: dict[str, object],
     report_date: str | None = None,
+    *,
+    extra_content: dict[str, object] | None = None,
 ) -> bool:
     """将 Global Importance 评估结果持久化到 agent_analysis_reports。
 
@@ -527,6 +533,8 @@ async def save_global_importance_report(
     Args:
         result: run_global_importance_evaluation() 的返回结果。
         report_date: 报告日期（YYYY-MM-DD），默认当天。
+        extra_content: 附加 content 字段（增量 GI 状态等，合并进 JSONB，不覆盖
+            顶层 top_bullish_event/top_bearish_event——前端读取契约保持不变）。
 
     Returns:
         True 表示持久化成功，False 表示失败。
@@ -542,6 +550,8 @@ async def save_global_importance_report(
         "top_bullish_event": result.get("top_bullish_event"),
         "top_bearish_event": result.get("top_bearish_event"),
     }
+    if extra_content:
+        content.update(extra_content)
 
     try:
         saved = await node_api.save_analysis_report(
@@ -655,3 +665,450 @@ async def _test_run() -> None:
 
 if __name__ == "__main__":
     asyncio.run(_test_run())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GI 盘中纯增量更新（2026-08-14）
+#
+# 目标：盘中随新增重大事件持续维护 current_max_bullish / current_max_bearish，
+#   以及每方向 Top-K 候选池，避免"每批新增都全量 deep_think 重算"。
+# 原则：
+#   - 每个新增事件都经过规则预筛（candidate_importance_score，零 Token）；
+#   - 只有可能进入 Top-K 的事件才调用 quick_think 决胜；
+#   - 不重新扫描当天全部事件；不新增收盘全量校准；
+#   - GI 异常（Redis/DB/LLM）一律不阻断抓取/入库/事件传导。
+# ══════════════════════════════════════════════════════════════════════
+
+_GI_STATE_PREFIX = "gi_state:"
+
+# importance_level → 竞争代理分（仅用于预筛，非 GI 真值）
+_LEVEL_PROXY = {"critical": 0.9, "important": 0.7, "notable": 0.5}
+
+
+class GiCompareOutput(BaseModel):
+    """quick_think 增量比较输出：新事件是否替代当前候选。"""
+
+    replace: bool
+    reason: str = ""
+
+
+def _level_to_proxy(level: object) -> float:
+    """importance_level（critical/important/notable）→ 代理分。未知值保守取 notable。"""
+    return _LEVEL_PROXY.get(str(level or "").lower(), _LEVEL_PROXY["notable"])
+
+
+def _proxy_to_level(proxy: float) -> str:
+    """代理分 → importance_level（落库展示用，兼容前端枚举）。"""
+    if proxy >= 0.8:
+        return "critical"
+    if proxy >= 0.6:
+        return "important"
+    return "notable"
+
+
+def candidate_importance_score(event: dict[str, object]) -> float:
+    """竞争代理分：max(impact_chain[].impact_strength)，0~1。
+
+    仅用于预筛排序，不作为 GI 最终真值；无 chain 或全空返回 0.0。
+    """
+    chain = event.get("impact_chain")
+    if not isinstance(chain, list):
+        return 0.0
+    strengths = [
+        float(item.get("impact_strength", 0) or 0)
+        for item in chain
+        if isinstance(item, dict)
+    ]
+    return max(strengths) if strengths else 0.0
+
+
+def _infer_direction(event: dict[str, object]) -> str:
+    """推断事件方向：优先 impact_chain 主导方向，fallback investment_rating。
+
+    无明确方向返回 "neutral"（不进入 bullish/bearish 槽位）。
+    """
+    chain = event.get("impact_chain")
+    bullish_s = bearish_s = 0.0
+    if isinstance(chain, list):
+        for item in chain:
+            if not isinstance(item, dict):
+                continue
+            direction = str(item.get("direction", ""))
+            strength = float(item.get("impact_strength", 0) or 0)
+            if direction == "bullish":
+                bullish_s += strength
+            elif direction == "bearish":
+                bearish_s += strength
+    if bullish_s > bearish_s:
+        return "bullish"
+    if bearish_s > bullish_s:
+        return "bearish"
+    rating = str(event.get("investment_rating", ""))
+    if rating == "positive":
+        return "bullish"
+    if rating == "negative":
+        return "bearish"
+    return "neutral"
+
+
+def _empty_gi_state(score_date: str) -> dict[str, object]:
+    """空 GI 增量状态。"""
+    return {
+        "date": score_date,
+        "max_bullish": None,
+        "max_bearish": None,
+        "top3_bullish": [],
+        "top3_bearish": [],
+        "compared_event_ids": [],
+        "llm_used_today": 0,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _state_key(score_date: str) -> str:
+    return f"{_GI_STATE_PREFIX}{score_date}"
+
+
+def _candidate_dict(
+    event: dict[str, object],
+    *,
+    direction: str,
+    proxy: float,
+) -> dict[str, object]:
+    """从 GI 输入事件构造候选条目（存入状态）。"""
+    title = str(event.get("original_event") or event.get("summary") or "")[:50]
+    return {
+        "event_id": str(event.get("event_id", "")),
+        "title": title,
+        "summary": str(event.get("summary", "")),
+        "direction": direction,
+        "proxy_score": round(proxy, 3),
+        "importance_level": _proxy_to_level(proxy),
+        "reason": str(event.get("investment_conclusion", ""))[:50],
+    }
+
+
+def _insert_top_k(
+    top3: list[dict[str, object]],
+    candidate: dict[str, object],
+    *,
+    top_k: int,
+) -> list[dict[str, object]]:
+    """按 proxy_score 降序插入候选，截断到 top_k。返回新列表。"""
+    merged = [c for c in top3 if c.get("event_id") != candidate.get("event_id")]
+    merged.append(candidate)
+    merged.sort(key=lambda c: float(c.get("proxy_score", 0) or 0), reverse=True)
+    return merged[: max(1, top_k)]
+
+
+def _to_gi_event(candidate: object, direction: str) -> dict[str, object] | None:
+    """候选 → 前端兼容的 top_bullish/bearish_event 结构。"""
+    if not isinstance(candidate, dict) or not candidate.get("event_id"):
+        return None
+    return {
+        "event_id": str(candidate["event_id"]),
+        "direction": direction,
+        "importance_level": str(candidate.get("importance_level", "notable")),
+        "reason": str(candidate.get("reason", "")),
+    }
+
+
+def _state_to_result(state: dict[str, object]) -> dict[str, object]:
+    """状态 → GI 结果结构（落库用，前端读取 top_bullish_event/top_bearish_event）。"""
+    summary_parts: list[str] = []
+    max_bullish = state.get("max_bullish")
+    max_bearish = state.get("max_bearish")
+    if isinstance(max_bullish, dict) and max_bullish.get("event_id"):
+        summary_parts.append(f"最大利好：{max_bullish.get('title', '')}")
+    if isinstance(max_bearish, dict) and max_bearish.get("event_id"):
+        summary_parts.append(f"最大利空：{max_bearish.get('title', '')}")
+    return {
+        "as_of": str(state.get("date", "")),
+        "summary": "；".join(summary_parts)[:50],
+        "top_bullish_event": _to_gi_event(max_bullish, "bullish"),
+        "top_bearish_event": _to_gi_event(max_bearish, "bearish"),
+    }
+
+
+async def _load_gi_state_from_db(score_date: str) -> dict[str, object]:
+    """从当天 global_importance DB 报告恢复状态（Redis 缺失时的真源回退）。
+
+    报告 content 的 gi_incremental_state 完整恢复；旧报告（无该字段）仅恢复
+    max_bullish/max_bearish（代理分用 importance_level 映射，Top-3 退化为单元素）。
+    """
+    state = _empty_gi_state(score_date)
+    try:
+        report = await node_api.get_analysis_report_quiet("global_importance", score_date)
+        if report is None:
+            return state
+        content = report.get("content")
+        if not isinstance(content, dict):
+            return state
+        saved = content.get("gi_incremental_state")
+        if isinstance(saved, dict):
+            for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
+                          "top3_bearish", "compared_event_ids", "llm_used_today"):
+                if field in saved:
+                    state[field] = saved[field]  # type: ignore[literal-required]
+            state["updated_at"] = str(saved.get("updated_at", ""))
+            return state
+        # 旧版报告：仅恢复 max（单槽位，Top-3 退化）
+        top_bullish = content.get("top_bullish_event")
+        if isinstance(top_bullish, dict) and top_bullish.get("event_id"):
+            cand = {
+                "event_id": str(top_bullish["event_id"]),
+                "title": "",
+                "summary": "",
+                "direction": "bullish",
+                "proxy_score": _level_to_proxy(top_bullish.get("importance_level")),
+                "importance_level": str(top_bullish.get("importance_level", "notable")),
+                "reason": str(top_bullish.get("reason", "")),
+            }
+            state["max_bullish"] = cand
+            state["top3_bullish"] = [cand]
+        top_bearish = content.get("top_bearish_event")
+        if isinstance(top_bearish, dict) and top_bearish.get("event_id"):
+            cand = {
+                "event_id": str(top_bearish["event_id"]),
+                "title": "",
+                "summary": "",
+                "direction": "bearish",
+                "proxy_score": _level_to_proxy(top_bearish.get("importance_level")),
+                "importance_level": str(top_bearish.get("importance_level", "notable")),
+                "reason": str(top_bearish.get("reason", "")),
+            }
+            state["max_bearish"] = cand
+            state["top3_bearish"] = [cand]
+        return state
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gi_state_db_restore_failed", date=score_date, error=str(exc))
+        return state
+
+
+async def load_gi_state(score_date: str) -> dict[str, object]:
+    """加载当日 GI 增量状态：Redis 优先，缺失/异常回退 DB，DB 也失败返回空状态。"""
+    try:
+        client = await RedisPool.get_client()
+        cached = await client.get(_state_key(score_date))
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                state = _empty_gi_state(score_date)
+                for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
+                              "top3_bearish", "compared_event_ids", "llm_used_today"):
+                    if field in parsed:
+                        state[field] = parsed[field]  # type: ignore[literal-required]
+                state["updated_at"] = str(parsed.get("updated_at", ""))
+                return state
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("gi_state_redis_load_failed", date=score_date, error=str(exc))
+    return await _load_gi_state_from_db(score_date)
+
+
+async def _save_gi_state(state: dict[str, object], score_date: str) -> dict[str, object]:
+    """保存 GI 状态：Redis 快速写（失败静默）+ DB upsert（真源）。"""
+    # Redis 快速状态（失败不阻断落库）
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(
+            _state_key(score_date),
+            settings.gi_state_ttl,
+            json.dumps(state, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("gi_state_redis_save_failed", date=score_date, error=str(exc))
+
+    result = _state_to_result(state)
+    persisted = await save_global_importance_report(
+        result,
+        report_date=score_date,
+        extra_content={"gi_incremental_state": state},
+    )
+    return {**result, "persisted": persisted}
+
+
+async def _llm_compare(
+    new_event: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object]:
+    """quick_think 单次比较：新事件是否替代当前候选。
+
+    失败返回 {"replace": False}（保守：保留旧 max，不引入未经确认的替换）。
+    """
+    try:
+        llm = with_chat_structured_output(get_quick_think(), GiCompareOutput)
+        payload = {
+            "new_event": {
+                "title": str(new_event.get("original_event", ""))[:50],
+                "summary": str(new_event.get("summary", "")),
+                "impact_industries": new_event.get("impact_industries", []),
+                "mechanism": str(new_event.get("mechanism", "")),
+            },
+            "current_candidate": {
+                "title": str(candidate.get("title", "")),
+                "summary": str(candidate.get("summary", "")),
+                "importance_level": str(candidate.get("importance_level", "notable")),
+                "reason": str(candidate.get("reason", "")),
+            },
+        }
+        output = await llm.ainvoke(payload)
+        return {
+            "replace": bool(getattr(output, "replace", False)),
+            "reason": str(getattr(output, "reason", "") or ""),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gi_incremental_llm_compare_failed", error=str(exc))
+        return {"replace": False, "reason": "", "error": str(exc)}
+
+
+def _classify_candidate(
+    proxy: float,
+    top3: list[dict[str, object]],
+    epsilon: float,
+    top_k: int,
+) -> str:
+    """增量竞争分类（确定性规则，零 LLM 成本）。
+
+    Returns:
+        "enter"          : 入池/替换（空池、池未满、明显高于 max、池满但不挑战 max）
+        "skip"           : 池满且明显低于池底，或无代理分 → 丢弃，不调 LLM
+        "llm"            : 池满且与 max 接近 → 需 quick_think 决胜
+    """
+    if not top3:
+        return "enter"
+    top3_min = float(top3[-1].get("proxy_score", 0) or 0)
+    max_proxy = float(top3[0].get("proxy_score", 0) or 0)
+    # 池未满：优先填充替补（入池不改变 max），避免 top3_min==max 时中间
+    # 代理分事件被误 skip；无代理分（proxy<=0）的事件不入池。
+    if len(top3) < max(1, top_k):
+        return "skip" if proxy <= 0 else "enter"
+    # 池已满：明显低于池底 → 丢弃；明显高于 max → 直接替换；接近 max → LLM 决胜
+    if proxy < top3_min - epsilon:
+        return "skip"
+    if proxy > max_proxy + epsilon:
+        return "enter"
+    if proxy >= max_proxy - epsilon:
+        return "llm"
+    return "enter"
+
+
+async def incremental_gi(
+    new_events: list[dict[str, object]],
+    *,
+    score_date: str | None = None,
+) -> dict[str, object]:
+    """GI 盘中纯增量更新入口（生产盘中路径，替代全量 persist_global_importance_evaluation）。
+
+    每个新增事件经规则预筛进入对应方向 Top-K 竞争；仅"接近"候选时调用
+    quick_think；达到每日 LLM 上限后仅走规则判断。全程异常不外抛，不影响
+    抓取/入库/事件传导。
+
+    Args:
+        new_events: 本次批次事件传导结果（_to_gi_events 格式）。
+        score_date: 交易日（YYYY-MM-DD），默认上海当天。
+
+    Returns:
+        与全量 GI 同构的 {as_of, summary, top_bullish_event, top_bearish_event,
+        persisted, state}。
+    """
+    if not new_events:
+        return {**_state_to_result(_empty_gi_state(score_date or shanghai_today().isoformat())), "persisted": False, "state": None}
+    day = score_date or shanghai_today().isoformat()
+    state = await load_gi_state(day)
+    compared = set(state.get("compared_event_ids") or [])
+    llm_used = int(state.get("llm_used_today", 0) or 0)
+    llm_cap = max(0, settings.gi_max_llm_calls_per_day)
+    epsilon = settings.gi_compare_epsilon
+    top_k = max(1, settings.gi_top_k)
+
+    # 批次内先按 candidate_score 排序（降序），只处理最有竞争力的候选
+    candidates: list[dict[str, object]] = []
+    for ev in new_events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = str(ev.get("event_id", ""))
+        if not event_id or event_id in compared:
+            continue
+        direction = _infer_direction(ev)
+        if direction == "neutral":
+            compared.add(event_id)
+            continue
+        proxy = candidate_importance_score(ev)
+        if proxy <= 0 and not state.get(f"top3_{direction}"):
+            # 空池兜底：无代理分也允许首个候选进入（避免无 chain 事件被永久丢弃）
+            proxy = 0.5
+        candidates.append({
+            "event_id": event_id,
+            "event": ev,
+            "direction": direction,
+            "proxy": proxy,
+        })
+    candidates.sort(key=lambda c: float(c["proxy"]), reverse=True)
+
+    for cand in candidates:
+        event_id = str(cand["event_id"])
+        direction = str(cand["direction"])
+        proxy = float(cand["proxy"])
+        top3_key = f"top3_{direction}"
+        top3: list[dict[str, object]] = list(state.get(top3_key) or [])
+        outcome = _classify_candidate(proxy, top3, epsilon, top_k)
+
+        if outcome == "skip":
+            compared.add(event_id)
+            continue
+
+        candidate = _candidate_dict(cand["event"], direction=direction, proxy=proxy)
+
+        if outcome == "llm" and llm_used < llm_cap:
+            # 与当前 max（Top-3 首位）比较；LLM 判定/异常一律以判定为准
+            current_max = top3[0] if top3 else None
+            if current_max is not None and current_max.get("event_id") != event_id:
+                try:
+                    verdict = await _llm_compare(cand["event"], current_max)
+                except Exception:  # noqa: BLE001 — LLM 异常不得影响 GI/传导
+                    verdict = {"replace": False, "reason": ""}
+                llm_used += 1
+            else:
+                verdict = {"replace": False, "reason": ""}
+            if verdict.get("replace"):
+                # replace=True：正常入池，可替换 max
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+            elif top3:
+                # replace=False：不得替换 max，但合格候选进入 Top-3 作替补——
+                # 代理分封顶在 max 之下（不越位），池满时由 _insert_top_k 按 proxy 截断
+                if float(candidate["proxy_score"]) >= float(top3[0]["proxy_score"]):
+                    capped = max(0.0, float(top3[0]["proxy_score"]) - 0.001)
+                    candidate = {**candidate, "proxy_score": round(capped, 3)}
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+            state[f"max_{direction}"] = top3[0] if top3 else None
+            state[top3_key] = top3
+            compared.add(event_id)
+            continue
+
+        # outcome == "enter" 或 LLM 预算耗尽（fallback 规则判断）
+        if outcome == "enter":
+            top3 = _insert_top_k(top3, candidate, top_k=top_k)
+        elif llm_used >= llm_cap:
+            # 预算耗尽：仅当代理分不低于 Top-3 最低时入池（不强换 max）
+            if not top3 or proxy >= float(top3[-1].get("proxy_score", 0) or 0) - epsilon:
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+        compared.add(event_id)
+        state[f"max_{direction}"] = top3[0] if top3 else None
+        state[top3_key] = top3
+
+    state["compared_event_ids"] = sorted(compared)
+    state["llm_used_today"] = llm_used
+    state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    saved = await _save_gi_state(state, day)
+    logger.info(
+        "gi_incremental_done",
+        date=day,
+        new_events=len(new_events),
+        candidates=len(candidates),
+        llm_calls=llm_used,
+        has_bullish=saved.get("top_bullish_event") is not None,
+        has_bearish=saved.get("top_bearish_event") is not None,
+    )
+    return {**saved, "state": state}

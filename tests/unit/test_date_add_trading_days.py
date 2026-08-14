@@ -22,3 +22,11 @@ def test_zero_returns_same():
 def test_negative_raises():
     with pytest.raises(ValueError):
         add_trading_days(date(2026, 8, 10), -1)
+
+
+def test_cross_year_120_days_lands_in_2027():
+    """Bug B 根因回归：long 档 +120 交易日跨入 2027 不再抛 NotImplementedError，
+    返回 2027 年内日期（越年 fallback 只跳周末）。"""
+    result = add_trading_days(date(2026, 8, 13), 120)
+    assert result.year == 2027
+    assert result == date(2027, 2, 5)
