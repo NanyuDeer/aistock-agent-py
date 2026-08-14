@@ -5,6 +5,8 @@ provider 是"候选切片输入"的生产者：给定 SourceContext，返回 Cas
 注册表清单封闭：adapter 引用的 provider 名必须登记在本模块 SOURCE_PROVIDERS。
 """
 
+import hashlib
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -186,7 +188,11 @@ async def source_cases(
     data_dir: Path | None = None,
     force: bool = False,
 ) -> list[CaseCandidate]:
-    """按 adapter.case_sources 逐个 provider 采集候选；单源失败降级跳过并告警。"""
+    """按 adapter.case_sources 逐个 provider 采集候选；单源失败降级跳过并告警。
+
+    四期：合并后按事件标题指纹去重——同指纹候选只保留第一个（case_sources 顺序
+    保证事件库在前优先），去重范围限单次调用内。
+    """
     candidates: list[CaseCandidate] = []
     for spec in adapter.case_sources:
         provider = SOURCE_PROVIDERS.get(spec.provider)
@@ -213,7 +219,26 @@ async def source_cases(
                 agent=adapter.agent_id,
                 error=str(exc),
             )
-    return candidates
+    # 四期：跨源同事件指纹去重——同指纹候选只保留第一个（case_sources 顺序
+    # 保证事件库在前优先）；保持各源内部产出顺序。范围限单次调用内（跨日不重叠）。
+    seen: set[str] = set()
+    deduped: list[CaseCandidate] = []
+    for candidate in candidates:
+        fp = _candidate_fingerprint(candidate)
+        if fp in seen:
+            logger.info(
+                "case_source_candidate_deduped", fingerprint=fp, title=candidate.event_title
+            )
+            continue
+        seen.add(fp)
+        deduped.append(candidate)
+    return deduped
+
+
+def _candidate_fingerprint(candidate: CaseCandidate) -> str:
+    """事件标题指纹（去空白/标点归一化 → sha1）：跨源同事件识别（四期）。"""
+    normalized = re.sub(r"[\s\W_]+", "", candidate.event_title).lower()
+    return hashlib.sha1(normalized.encode()).hexdigest()
 
 
 #: provider 注册表（清单封闭：新 provider 必须登记于此）

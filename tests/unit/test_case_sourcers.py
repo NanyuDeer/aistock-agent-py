@@ -206,3 +206,59 @@ def test_event_analyst_registers_event_store_first() -> None:
     assert [s.provider for s in adapter.case_sources] == [
         "event_store_scan", "telegraph_keyword_scan",
     ]
+
+
+def test_candidate_fingerprint_normalizes_title() -> None:
+    """四期：标题归一化指纹——空白/标点差异视为同事件。"""
+    from aistock_agent.iterate.case_sourcers import (  # noqa: PLC2701
+        CaseCandidate,
+        _candidate_fingerprint,
+    )
+
+    mk = lambda t: CaseCandidate(  # noqa: E731
+        event_title=t, event_time=datetime(2026, 8, 14, 2, 30, tzinfo=timezone.utc),  # noqa: UP017
+        telegraph_records=[], meta=None,
+    )
+    assert _candidate_fingerprint(mk("央行降准 50 基点")) == _candidate_fingerprint(
+        mk("央行降准50基点！")
+    )
+
+
+def test_source_cases_dedupes_same_event_across_sources() -> None:
+    """四期：两源同事件（同标题指纹）→ 仅 1 候选（首个保留 = 事件库优先）；不同事件 → 全部保留。
+
+    注（brief 测试适配）：source_cases 对全部 provider 传同一 adapter.agent_id，
+    brief 原文用 ctx.agent_id == "store" 判别两源恒不成立（两源都会返回 tele_c，
+    去重后仅 1 候选 → 断言必失败）。按最小改动改为按 spec.params 判别（source_cases
+    透传 spec.params 进 SourceContext），测试意图不变。
+    """
+    import asyncio
+
+    from aistock_agent.iterate.adapters import IterableAgentAdapter
+    from aistock_agent.iterate.case_sourcers import CaseCandidate, SourceContext, source_cases
+
+    mk = lambda title, src: CaseCandidate(  # noqa: E731
+        event_title=title, event_time=datetime(2026, 8, 14, 2, 30, tzinfo=timezone.utc),  # noqa: UP017
+        telegraph_records=[{"time": "t", "title": title, "content": "c", "url": "u"}],
+        meta={"source": src},
+    )
+    store_c = mk("央行降准 50 基点", "event_store")
+    tele_c = mk("央行降准50基点！", "telegraph")   # 同指纹
+    other_c = mk("美联储加息 25 基点", "event_store")
+
+    async def fake_provider(ctx: SourceContext) -> list[CaseCandidate]:  # type: ignore[type-arg]
+        return [store_c, other_c] if ctx.params.get("src") == "store" else [tele_c]
+
+    adapter = IterableAgentAdapter(
+        agent_id="x", module_path="x",
+        case_sources=(
+            SimpleNamespace(provider="store", params={"src": "store"}),
+            SimpleNamespace(provider="tele", params={"src": "tele"}),
+        ),
+    )
+    with patch("aistock_agent.iterate.case_sourcers.SOURCE_PROVIDERS", {
+        "store": fake_provider, "tele": fake_provider,
+    }):
+        results = asyncio.run(source_cases(adapter))
+    assert len(results) == 2            # store_c + other_c（tele_c 被指纹去重）
+    assert [c.meta["source"] for c in results] == ["event_store", "event_store"]
