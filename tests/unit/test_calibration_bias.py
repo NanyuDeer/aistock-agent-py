@@ -46,6 +46,24 @@ def test_compute_dimension_bias_skips_missing_human_dim() -> None:
     assert bias["drivers"]["signed"] == 0.1
 
 
+def test_compute_dimension_bias_skips_non_dict_rows() -> None:
+    """I-2：rows 含非 dict 元素（脏数据）→ 跳过不崩；正常行统计不受影响（含分组模式）。"""
+    rows = [
+        "not-a-dict",
+        42,
+        None,
+        {"judge_score_detail": {"direction": 0.6, "drivers": 0.5, "sectors": 0.3},
+         "human": {"direction_score": 0.4, "drivers_score": 0.5, "sectors_score": 0.3}},
+    ]
+    bias = compute_dimension_bias(rows)
+    assert bias["direction"]["signed"] == 0.2
+    assert bias["drivers"]["signed"] == 0.0
+    # 分组模式同样跳过非 dict 行（dict 行无 gt_direction → 归入 unknown 组）
+    grouped = compute_dimension_bias(rows, group_by="gt_direction")
+    assert "unknown" in grouped
+    assert grouped["unknown"]["direction"]["signed"] == 0.2
+
+
 def test_resolve_gt_direction_normalizes_from_attribution() -> None:
     """模板无顶层 gt_direction → 从 gt_attribution.direction 归一化；顶层优先；非法值归 unknown。"""
     assert _resolve_gt_direction({"gt_attribution": {"direction": "bullish"}}) == "bullish"

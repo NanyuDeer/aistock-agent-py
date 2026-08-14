@@ -31,12 +31,14 @@ def _is_event_case(case_id: str) -> bool:
 
 
 def _gt_confidence(base: Path, gt_ref: str) -> str:
-    """读取 GT confidence（缺失/损坏 → "unknown"）。"""
+    """读取 GT confidence（缺失/损坏/非 dict → "unknown"）。"""
     try:
         gt = json.loads((base / "ground_truths" / f"{gt_ref}.json").read_text(encoding="utf-8"))
-        return str(gt.get("confidence", "unknown"))
     except (json.JSONDecodeError, OSError):
         return "unknown"
+    if not isinstance(gt, dict):
+        return "unknown"  # 合法 JSON 但顶层非 dict（如数组）→ 视为损坏，跳过
+    return str(gt.get("confidence", "unknown"))
 
 
 def _collect_event_cases(base: Path) -> list[dict[str, Any]]:
@@ -58,12 +60,16 @@ def _collect_event_cases(base: Path) -> list[dict[str, Any]]:
             mark = json.loads(iterated.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(mark, dict):
+            continue  # 合法 JSON 但顶层非 dict（如数组）→ 视为损坏，跳过
         if mark.get("status") != "iterated":
             continue
         try:
             best = json.loads(best_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(best, dict):
+            continue  # 合法 JSON 但顶层非 dict（如数组）→ 视为损坏，跳过
         cases.append({
             "case_id": case_id,
             "best_score": float(best.get("score", 0.0)),

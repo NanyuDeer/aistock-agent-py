@@ -22,7 +22,8 @@ def _fake_data_dir(paths: list[object]) -> object:
 
 
 def test_iter_experiment_scores_parses_round_files() -> None:
-    """从 experiments 目录收集各 case 轮级 score（含 _r1_baseline/_best），非轮文件跳过。"""
+    """从 experiments 目录收集各 case 轮级 score（按轮号时序）；best 固化快照与
+    非轮文件排除（I-3：best 不参与 δ 统计）。"""
     files = {
         "case_a_r1_baseline.json": json.dumps({"score": 0.4}),
         "case_a_r2.json": json.dumps({"score": 0.6}),
@@ -36,7 +37,8 @@ def test_iter_experiment_scores_parses_round_files() -> None:
     with patch("scripts.calibration.compute_delta.Path.glob") as mock_glob:
         mock_glob.return_value = paths
         scores = iter_experiment_scores(_fake_data_dir(paths))
-    assert scores == {"case_a": [0.4, 0.6, 0.7], "case_b": [0.5]}
+    # best.json 不参与 δ 统计（轮文件已含 best 轮记录，重复计入产生伪零 Δ）
+    assert scores == {"case_a": [0.4, 0.6], "case_b": [0.5]}
 
 
 def test_iter_experiment_scores_skips_corrupted_files() -> None:
@@ -54,6 +56,44 @@ def test_iter_experiment_scores_skips_corrupted_files() -> None:
         mock_glob.return_value = paths
         scores = iter_experiment_scores(_fake_data_dir(paths))
     assert scores == {"case_a": [0.4], "case_b": [0.5]}
+
+
+def test_iter_experiment_scores_orders_by_round_not_value() -> None:
+    """轮次时序语义（I-3）：乱序分数按轮号排序取相邻差——δ 与按值排序法不同。"""
+    # 轮号时序 [0.6, 0.4, 0.9] → Δ=[0.2, 0.5]；值排序 [0.4, 0.6, 0.9] → Δ=[0.2, 0.3]
+    files = {
+        "case_a_r1_baseline.json": json.dumps({"score": 0.6}),
+        "case_a_r2.json": json.dumps({"score": 0.4}),
+        "case_a_r3.json": json.dumps({"score": 0.9}),
+    }
+    paths = [_fake_path(n, c) for n, c in files.items()]
+
+    with patch("scripts.calibration.compute_delta.Path.glob") as mock_glob:
+        mock_glob.return_value = paths
+        scores = iter_experiment_scores(_fake_data_dir(paths))
+    assert scores == {"case_a": [0.6, 0.4, 0.9]}  # 按轮号时序，非按值排序
+    # 10 case（case_a 2 个 Δ + 9 case × 2 个 Δ = 20 个 Δ 样本）→ 时序 δ ≠ 值排序 δ
+    base = {f"c{i}": [0.0, 0.1, 0.2] for i in range(9)}
+    delta_round = compute_delta_from_scores({"case_a": [0.6, 0.4, 0.9], **base})
+    delta_value = compute_delta_from_scores({"case_a": [0.4, 0.6, 0.9], **base})
+    assert delta_round is not None and delta_value is not None
+    assert delta_round != delta_value
+
+
+def test_iter_experiment_scores_excludes_best_files() -> None:
+    """best.json 不参与 δ 统计（I-3）：轮文件已含 best 轮记录，重复计入产生伪零 Δ。"""
+    files = {
+        "case_a_r1_baseline.json": json.dumps({"score": 0.4}),
+        "case_a_r2.json": json.dumps({"score": 0.6}),
+        "case_a_best.json": json.dumps({"score": 0.6}),  # == r2 的 best 轮快照（伪零 Δ 源）
+        "case_b_best.json": json.dumps({"score": 0.9}),  # 仅有 best 无轮文件 → 不收录
+    }
+    paths = [_fake_path(n, c) for n, c in files.items()]
+
+    with patch("scripts.calibration.compute_delta.Path.glob") as mock_glob:
+        mock_glob.return_value = paths
+        scores = iter_experiment_scores(_fake_data_dir(paths))
+    assert scores == {"case_a": [0.4, 0.6]}  # 无伪零 Δ 样本，纯 best case 不收录
 
 
 def test_compute_delta_is_two_sigma() -> None:

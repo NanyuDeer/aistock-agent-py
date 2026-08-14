@@ -163,3 +163,36 @@ def test_collect_samples_resolves_agent_id_from_case_dir(tmp_path: Path) -> None
     assert samples[0]["gt_id"] == f"gt_{case_id}"
     assert samples[0]["agent_output"] == ""
     assert samples[0]["judge_score_detail"] == {}
+
+
+def test_collect_samples_skips_non_numeric_score(tmp_path: Path) -> None:
+    """M-new：best.json 的 score 非数值（如字符串）→ float() 抛 ValueError →
+    跳过该文件不崩（与"损坏跳过"一致），同批其他正常 case 不受影响。"""
+    exps = tmp_path / "experiments"
+    exps.mkdir()
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    bad_id = "case_20260814_review_badscore"
+    (exps / f"{bad_id}_best.json").write_text(
+        json.dumps({"score": "high", "round": 1}), encoding="utf-8",
+    )
+    (cases / f"{bad_id}.iterated.json").write_text(
+        json.dumps({"status": "iterated"}), encoding="utf-8",
+    )
+    good_id = "case_20260814_review_goodscore"
+    (exps / f"{good_id}_best.json").write_text(
+        json.dumps({"score": 0.7, "round": 1}), encoding="utf-8",
+    )
+    (cases / f"{good_id}.iterated.json").write_text(
+        json.dumps({"status": "iterated"}), encoding="utf-8",
+    )
+    (tmp_path / "ground_truths").mkdir()
+    (tmp_path / "ground_truths" / f"gt_{good_id}.json").write_text(
+        json.dumps({"gt_id": f"gt_{good_id}", "attribution": {"direction": "bullish"}}),
+        encoding="utf-8",
+    )
+
+    samples = _collect_samples(tmp_path)
+    assert len(samples) == 1  # 坏 score 文件被跳过，好 case 仍收录
+    assert samples[0]["case_id"] == good_id
+    assert samples[0]["judge_score"] == 0.7

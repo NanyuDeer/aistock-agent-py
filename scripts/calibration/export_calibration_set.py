@@ -143,6 +143,10 @@ def _collect_samples(base: Path) -> list[dict[str, Any]]:
         except (json.JSONDecodeError, OSError):
             gt = {}
         agent_output, judge_score_detail = _load_round_record(base, case_id, best)
+        try:
+            judge_score = float(best.get("score", 0.0))
+        except (TypeError, ValueError):
+            continue  # score 非数值（如字符串）→ 视为损坏，跳过该文件（与"损坏跳过"一致）
         samples.append(
             {
                 "case_id": case_id,
@@ -154,7 +158,7 @@ def _collect_samples(base: Path) -> list[dict[str, Any]]:
                 "agent_best_attribution": {},
                 "agent_output": agent_output,
                 "judge_score_detail": judge_score_detail,
-                "judge_score": float(best.get("score", 0.0)),
+                "judge_score": judge_score,
                 "human": {
                     "direction_score": None,
                     "drivers_score": None,

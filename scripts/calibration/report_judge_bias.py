@@ -47,6 +47,8 @@ def compute_dimension_bias(
     if group_by:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
+            if not isinstance(row, dict):
+                continue  # 非 dict 行（脏数据）跳过不崩
             key = str(row.get(group_by, "unknown"))
             grouped.setdefault(key, []).append(row)
         return {key: compute_dimension_bias(items) for key, items in grouped.items()}
@@ -55,6 +57,8 @@ def compute_dimension_bias(
     for dim in dims:
         diffs: list[float] = []
         for row in rows:
+            if not isinstance(row, dict):
+                continue  # 非 dict 行（脏数据）跳过不崩
             detail = row.get("judge_score_detail")
             human = row.get("human")
             judge = detail.get(dim) if isinstance(detail, dict) else None
