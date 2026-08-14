@@ -9,6 +9,7 @@
 """
 
 import ast
+import asyncio
 import json
 import os
 import subprocess
@@ -471,24 +472,33 @@ async def _run_replay_subprocess(
         "REPLAY_AGENT": agent_id,
         "PYTHONPATH": src_dir,
     }
+    proc: asyncio.subprocess.Process | None = None
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "aistock_agent.iterate.replay_runner",
-                agent_id,
-                case_id,
-                variant_hash,
-            ],
+        # C-4 修复：回放改异步子进程（asyncio.create_subprocess_exec）——
+        # 裁决书 C 论题：同步 subprocess.run(timeout=600s) 会阻塞主服务事件循环；
+        # 17:00 asyncio job 内同步等待使整个调度器停摆。超时用 wait_for 包裹。
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "aistock_agent.iterate.replay_runner",
+            agent_id,
+            case_id,
+            variant_hash,
             env=env,
-            capture_output=True,
-            text=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
             timeout=settings.iterate_round_timeout_seconds,
         )
-    except subprocess.TimeoutExpired:
-        # 超时不崩整个闭环：返回 timed_out 标记，调用侧记为超时失败轮（评分 0）。
-        # 之前裸抛 TimeoutExpired 导致 run_case 直接退出，多轮闭环无法继续。
+        stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+        stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
+    except TimeoutError:
+        # 超时不崩整个闭环：终止子进程，返回 timed_out 标记，调用侧记为超时失败轮。
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
         logger.warning(
             "iterate_replay_timed_out",
             agent_id=agent_id,
@@ -502,14 +512,14 @@ async def _run_replay_subprocess(
             "final_response": "",
             "timed_out": True,
         }
-    if result.returncode != 0:
+    if proc.returncode != 0:
         # C11 修复：子进程失败不再抛 RuntimeError 崩整个闭环，返回失败标记，
         # 由 run_case 计为失败轮（评分 0 + gap 注明），连续失败达阈值再中止。
         logger.warning(
             "iterate_replay_subprocess_failed",
             agent_id=agent_id,
             case_id=case_id,
-            stderr=result.stderr[-300:],
+            stderr=stderr[-300:],
         )
         return {
             "agent_id": agent_id,
@@ -518,12 +528,12 @@ async def _run_replay_subprocess(
             "final_response": "",
             "subprocess_failed": True,
         }
-    lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+    lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
     try:
         # json.loads 返回 Any，mypy strict 的 no-any-return 要求显式 cast
         return cast("dict[str, object]", json.loads(lines[-1]))
     except (IndexError, json.JSONDecodeError):
-        raise RuntimeError(f"replay subprocess bad output: {result.stdout[-500:]}") from None
+        raise RuntimeError(f"replay subprocess bad output: {stdout[-500:]}") from None
 
 
 def _parse_json(text: str) -> dict[str, object]:
