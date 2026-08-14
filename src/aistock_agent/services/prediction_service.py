@@ -17,6 +17,7 @@ import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，�
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
@@ -207,9 +208,10 @@ def _compute_due_dates(trade_date: str, horizons: list[PredictionHorizon]) -> di
     覆盖守卫（G7 修复）：chinese_calendar 覆盖 2004-2026。due date 落在覆盖范围外
     （如 2027 年，节假日数据 2026 年底才发布）说明该日期依赖未确认的节假日——
     静默给出近似日期会误导到期验证对照，故显式抛 DueDatesComputationError，
-    由 run_predict 落 due_dates_failed。库升级后 is_workday 不再抛异常，自动恢复精确。
-    注：PR-B（holidays_extra 补充源）合入后，此处可改为 consult 补充源
-    （post-merge 跟进项，本期不做）。
+    由 run_predict 落 due_dates_failed。
+    越年放行（holidays_extra 补充源）：配置了 ``HOLIDAYS_EXTRA`` 补充节假日表时，
+    add_trading_days 内部走 is_trading_day 已消费补充表，到期日本身精确，此处放行；
+    未配置仍显式失败（保留 G7 语义）。
     """
     base = date.fromisoformat(trade_date)
     due_dates: dict[str, str] = {}
@@ -223,13 +225,15 @@ def _compute_due_dates(trade_date: str, horizons: list[PredictionHorizon]) -> di
                 f"due date computation failed for horizon {h.horizon}: {exc}"
             ) from exc
     # 覆盖守卫：任一 due date 超出 chinese_calendar 覆盖 → 显式失败
-    # （add_trading_days 内部对超范围日期保守 fallback 为可交易日，此处精确复核）
+    # （add_trading_days 内部对超范围日期保守 fallback 为可交易日，此处精确复核；
+    #  已配置 HOLIDAYS_EXTRA 补充表时放行——add_trading_days 已消费补充表，日期精确）
     for due_str in due_dates.values():
         due = date.fromisoformat(due_str)
         try:
             chinese_calendar.is_workday(due)
         except (NotImplementedError, ValueError):
-            raise DueDatesComputationError(f"due date beyond calendar coverage: {due}")
+            if not settings.holidays_extra:
+                raise DueDatesComputationError(f"due date beyond calendar coverage: {due}")
     return due_dates
 
 
