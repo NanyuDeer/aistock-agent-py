@@ -182,6 +182,11 @@ class Settings(BaseSettings):
     # A-1（2026-08-14）：judge 上线前校准闸门（默认关闭）——开启时
     # calibration.calibration_passed() 必须达标（命中率 >= 0.8）
     iterate_calibration_required: bool = False
+    # ── 五期校准：no_improvement 终止（裁决书 D4/N3 落地）──
+    # delta 未配置（None）→ 禁用（现状：stalled 仅观测）；compute_delta.py 校准后
+    # 配置 ITERATE_NO_IMPROVE_DELTA 启用。
+    iterate_no_improve_delta: float | None = None
+    no_improve_max_stalls: int = 4
     # SMTP 报告（QQ 邮箱授权码；2026-08-14 加 QQ_SMTP_* 别名——.env.development
     # 用 QQ_SMTP_USER/AUTH/TO 键名，与字段名不匹配导致 settings 读不到 →
     # mail_not_configured，报告无法发送；LLM key 正常因 OPENAI_API_KEY 恰好匹配）
@@ -219,10 +224,12 @@ class Settings(BaseSettings):
     event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # ── GI 盘中纯增量更新（2026-08-14） ──
     gi_incremental_enabled: bool = False             # 总开关（默认关闭灰度开启）
-    gi_max_llm_calls_per_day: int = 10               # 每日 quick_think 比较次数上限（达上限后仅规则判断）
+    # 每日 quick_think 比较次数上限（达上限后仅规则判断）
+    gi_max_llm_calls_per_day: int = 10
     gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
-    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
+    # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
+    gi_state_ttl: int = 86400
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from aistock_agent.config import settings
 from aistock_agent.schemas.market_trace import (
     MarketTraceResult,
     MarketTraceSnapshot,
@@ -163,6 +164,22 @@ async def test_run_predict_partial_out_of_range_marks_only_that_horizon(monkeypa
     assert result.due_dates["short"] == date(2026, 8, 17).isoformat()  # short 精确
     assert result.due_dates["mid"] == "2027-02-05"  # mid 近似但照常产出
     assert result.approximate_horizons == ["mid"]
+
+
+@pytest.mark.asyncio
+async def test_run_predict_calendar_coverage_guard_allows_when_holidays_extra(monkeypatch):
+    """越年放行：配置 HOLIDAYS_EXTRA 补充节假日表后，is_workday 抛 NotImplementedError
+    （due date 超 2004-2026）不再失败——add_trading_days 已消费补充表，到期日精确。"""
+    monkeypatch.setattr(settings, "holidays_extra", ["2027-01-01", "2027-10-01"])
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch(
+        "aistock_agent.services.prediction_service.chinese_calendar.is_workday",
+        side_effect=NotImplementedError("no holiday data for 2027"),
+    ):
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
 
 
 @pytest.mark.asyncio

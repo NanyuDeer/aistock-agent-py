@@ -38,8 +38,10 @@ async def run_case(
     - 评分 >= settings.iterate_target_score（0.8）→ stopped_reason=score_reached
     - best 评分曾达标但当前轮未持续 → stopped_reason=score_then_stall（报告语义修正）
     - 达到 max_rounds（默认 settings.iterate_max_rounds）
-    D4/N3：δ 校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，停滞判定
-    会误触发或永不触发；stalled 仅观测记录，终止性只依赖 score_reached 与 max_rounds。
+    - 五期（裁决书 D4/N3 落地）：settings.iterate_no_improve_delta 配置后，
+      stalled >= no_improve_max_stalls 且近轮与 best 分差 <= delta →
+      stopped_reason=no_improvement；未配置（None）保持 D4/N3 现状——评分含
+      LLM judge 噪声，停滞判定仅观测不终止，终止性只依赖 score_reached 与 max_rounds。
     round 1 为基线（无变体），round 2+ 应用 LLM 变体。
     """
     adapter = get_adapter(agent_id)
@@ -73,7 +75,7 @@ async def run_case(
 
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
-    stalled = 0  # D4/N3：δ 校准前禁用 no_improvement 终止，仅观测计数
+    stalled = 0  # 停滞计数（五期：δ 配置后触发 no_improvement 终止；未配置仅观测）
     # C11/N3/F1：连续基础设施失败（回放超时/子进程失败/轮级异常/补丁空写）计数，
     # 达 3 中止 case 防无限空转
     infra_failures = 0
@@ -206,21 +208,31 @@ async def run_case(
             }
             stalled = 0
         else:
-            stalled += 1  # 仅观测累计（D4/N3：不再触发任何终止）
+            stalled += 1  # 停滞累计（五期：δ 配置后作为终止判定输入；未配置仅观测）
 
         logger.info(
             "iterate_round_done",
             case_id=case_id,
             round=round_no,
             score=total,
-            stalled=stalled,  # D4/N3：观测字段，随轮日志输出供校准期分析
+            stalled=stalled,  # 观测字段，随轮日志输出供校准期分析
         )
 
-        # D4/N3 修复：δ 未校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，
-        # total > best 的停滞判定在噪声下会误触发或永不触发；终止性只依赖
-        # score_reached 与 max_rounds，stalled 仅观测记录。
+        # 五期（裁决书 D4/N3 落地）：δ 校准后启用 no_improvement 终止——
+        # iterate_no_improve_delta 配置后，stalled 达阈值且近轮与 best 分差
+        # <= delta（噪声带内）→ 终止；未配置（None）保持现状（仅观测）。
         # A-3 修复：confidence=low 的 GT 不构成达标（标准答案可信度不足，
         # 高分可能是对劣质 GT 的拟合，需人工回填后再验收）。
+        if _should_stop_no_improvement(
+            stalled=stalled,
+            best_score=cast("float", best.get("score", 0.0)),
+            current_score=total,
+            delta=settings.iterate_no_improve_delta,
+            max_stalls=settings.no_improve_max_stalls,
+        ):
+            stopped_reason = "no_improvement"
+            break
+
         gt_confidence = str(ground_truth.get("confidence", "high"))
         if total >= settings.iterate_target_score and gt_confidence != "low":
             stopped_reason = "score_reached"
@@ -259,6 +271,24 @@ async def run_case(
         "rounds": rounds,
         "stopped_reason": stopped_reason,
     }
+
+
+def _should_stop_no_improvement(
+    *,
+    stalled: int,
+    best_score: float,
+    current_score: float,
+    delta: float | None,
+    max_stalls: int,
+) -> bool:
+    """no_improvement 终止判定（五期）：delta 未配置（None）恒 False（默认禁用）。
+
+    裁决书 D4/N3：评分含 LLM judge 噪声，δ 校准前禁用；配置后 stalled 达阈值
+    且近轮与 best 分差在噪声带（<= delta）内才终止。
+    """
+    if delta is None:
+        return False
+    return stalled >= max_stalls and abs(current_score - best_score) <= delta
 
 
 def _cleanup_stale_experiments(case_id: str) -> None:

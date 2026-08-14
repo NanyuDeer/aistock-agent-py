@@ -74,3 +74,6 @@ data/cases/
 data/ground_truths/
 data/experiments/
 data/reports/
+
+# 人工校准数据（标注模板/回填/生成报告，仅存本地人工维护）
+data/calibration/

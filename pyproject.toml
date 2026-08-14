@@ -76,3 +76,6 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# scripts/*.py 单文件分析时本地包按第一方源码解析（否则 aistock_agent 被当
+# 已安装第三方包跳过 → import-untyped；五期 Task 5 report_event_attainment 引入）
+mypy_path = "src"
