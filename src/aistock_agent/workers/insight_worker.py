@@ -23,11 +23,18 @@ from aistock_agent.agents.workers.stock_trace import (
 from aistock_agent.config import settings
 from aistock_agent.prompts.workers.insight import INSIGHT_ATTRIBUTION_PROMPT
 from aistock_agent.schemas.insight import InsightAttributionOutput
-from aistock_agent.services.insight_candidate import CandidateFactor, extract_candidates
+from aistock_agent.services.insight_candidate import (
+    CandidateFactor,
+    extract_candidates,
+    extract_candidates_from_evidence,
+)
 from aistock_agent.services.insight_client import InsightNodeClient
 from aistock_agent.services.insight_validator import (
+    _apply_cap,
+    confidence_cap_for_evidence,
     rule_fallback_select,
     validate_attribution,
+    validate_attribution_from_evidence,
 )
 from aistock_agent.services.llm import get_deep_think, get_quick_think
 
@@ -96,22 +103,50 @@ class InsightWorker:
     async def analyze(
         self, event_id: str, analysis_version: str
     ) -> InsightOutcome:
-        """读取上下文 → 候选 → LLM → 校验 → 兜底 → 注入身份字段。"""
+        """读取上下文 → 候选 → LLM → 校验 → 兜底 → 注入身份字段。
+
+        二期：ctx 含 ``evidence_package`` 列表时走证据包归因路径（价格异动事件），
+        ``extract_candidates_from_evidence`` 抽取候选 + ``validate_attribution_from_evidence``
+        校验 + 置信度封顶（T1/T2 上限 medium，业绩远期上限 low）。
+        否则回退一期单篇正文路径（``limit_up_radar``）。
+        """
         ctx = await self._client.get_event_context(event_id)
         if not ctx:
             # 上下文未就绪（Node 侧快照冻结前）：返回可重试标记，由 consumer 不 ack 等 reclaim
             return InsightOutcome({}, retryable_snapshot_not_ready=True)
-        title = str(ctx.get("title") or "")
-        raw_keywords = ctx.get("keywords")
-        keywords = [str(k) for k in raw_keywords] if isinstance(raw_keywords, list) else []
-        content = str(ctx.get("content") or "")
-        if not content:
-            # 无正文：发布 unconfirmed（PRD §12：来源缺少正文，不生成主因结论）
-            result = rule_fallback_select([], content, title)
+        raw_evidence = ctx.get("evidence_package")
+        if isinstance(raw_evidence, list) and raw_evidence:
+            # 二期：价格异动证据包路径
+            direction = str(ctx.get("direction") or "up")
+            candidates = extract_candidates_from_evidence(raw_evidence, direction)
+            evidence_text = self._evidence_as_text(raw_evidence)
+            if not candidates:
+                result = rule_fallback_select([], "", "")
+            else:
+                payload = await self._llm_select(
+                    candidates, str(ctx.get("title") or ""), evidence_text
+                )
+                result = self._resolve(
+                    payload, candidates, "", evidence_text, evidence=raw_evidence
+                )
+            # 证据包路径置信度封顶
+            cap = confidence_cap_for_evidence(candidates)
+            result["confidence"] = _apply_cap(str(result["confidence"]), cap)
+            if result.get("primary_driver") and isinstance(result["primary_driver"], dict):
+                pd_conf = result["primary_driver"].get("confidence") or result["confidence"]
+                result["primary_driver"]["confidence"] = _apply_cap(str(pd_conf), cap)
         else:
-            candidates = extract_candidates(title, keywords, content)
-            payload = await self._llm_select(candidates, title, content)
-            result = self._resolve(payload, candidates, title, content)
+            title = str(ctx.get("title") or "")
+            raw_keywords = ctx.get("keywords")
+            keywords = [str(k) for k in raw_keywords] if isinstance(raw_keywords, list) else []
+            content = str(ctx.get("content") or "")
+            if not content:
+                # 无正文：发布 unconfirmed（PRD §12：来源缺少正文，不生成主因结论）
+                result = rule_fallback_select([], content, title)
+            else:
+                candidates = extract_candidates(title, keywords, content)
+                payload = await self._llm_select(candidates, title, content)
+                result = self._resolve(payload, candidates, title, content)
         # 身份字段统一注入（所有非 retryable 返回路径）：Node 侧 INSERT 的
         # event_id / analysis_version 为 NOT NULL，缺失会导致 post_result 落库失败
         # 且返回 None 不抛异常 → consumer 静默 ack → 结果被丢弃（前端永远 pending）
@@ -175,18 +210,33 @@ class InsightWorker:
                 return InsightAttributionOutput.model_validate(recovered)
         return None
 
+    @staticmethod
+    def _evidence_as_text(evidence: list[dict[str, object]]) -> str:
+        """证据包 → LLM 正文输入：每条证据带 source_type 前缀平铺（候选集是主输入，正文仅辅助）。"""
+        return "\n".join(
+            f"[{e.get('source_type')}] {e.get('title', '')}: {e.get('excerpt', '')}"
+            for e in evidence
+        )
+
     def _resolve(
         self,
         payload: InsightAttributionOutput | None,
         candidates: list[CandidateFactor],
         title: str,
         content: str,
+        evidence: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
-        """LLM 成功且校验通过 → llm 结果；否则 → 规则兜底。"""
-        if payload is not None and validate_attribution(
-            payload, candidates, title, content
-        ):
-            return self._from_llm(payload, candidates)
+        """LLM 成功且校验通过 → llm 结果；否则 → 规则兜底。
+
+        二期：``evidence`` 非空时走证据包路径校验（``validate_attribution_from_evidence``），
+        否则走一期单篇正文校验（``validate_attribution``）。
+        """
+        if payload is not None:
+            if evidence is not None:
+                if validate_attribution_from_evidence(payload, candidates, evidence):
+                    return self._from_llm(payload, candidates)
+            elif validate_attribution(payload, candidates, title, content):
+                return self._from_llm(payload, candidates)
         return rule_fallback_select(candidates, content, title)
 
     def _from_llm(

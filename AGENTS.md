@@ -359,14 +359,8 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
-├── skills/              # CHAT QA Skill 注册中心 + 手写 skill
-│   ├── registry.py      # 统一注册中心（手写优先；douyin_video 等）
-│   ├── base.py          # @skill 装饰器（异常→degraded Evidence）
-│   ├── douyin_client.py # 抖音视频下载/转写客户端（requests + ffmpeg + SenseVoice）
-│   ├── douyin_video.py  # 抖音视频读取 skill（链接→转写文本）
-│   └── ...              # stock_snapshot/stock_news/market_snapshot 等既有 skill
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
@@ -443,6 +437,9 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |

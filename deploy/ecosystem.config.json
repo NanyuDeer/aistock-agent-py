@@ -16,6 +16,7 @@
         "PYTHONPATH": "src",
         "APP_ENV": "production",
         "TZ": "Asia/Shanghai",
+        "INSIGHT_REDIS_URL": "",
         "INSIGHT_CONSUMER_ENABLED": "true",
         "STOCK_TRACE_CONSUMER_ENABLED": "false"
       },
