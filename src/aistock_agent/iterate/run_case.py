@@ -219,7 +219,10 @@ async def run_case(
         # D4/N3 修复：δ 未校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，
         # total > best 的停滞判定在噪声下会误触发或永不触发；终止性只依赖
         # score_reached 与 max_rounds，stalled 仅观测记录。
-        if total >= settings.iterate_target_score:
+        # A-3 修复：confidence=low 的 GT 不构成达标（标准答案可信度不足，
+        # 高分可能是对劣质 GT 的拟合，需人工回填后再验收）。
+        gt_confidence = str(ground_truth.get("confidence", "high"))
+        if total >= settings.iterate_target_score and gt_confidence != "low":
             stopped_reason = "score_reached"
             break
         if cast("float", best.get("score", 0.0)) >= settings.iterate_target_score:

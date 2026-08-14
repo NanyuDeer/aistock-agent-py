@@ -187,6 +187,9 @@ async def generate_data_constrained_gt(
     gt: dict[str, object] = {
         "gt_id": str(case.get("ground_truth_ref", f"gt_{case.get('case_id')}")),
         "case_id": str(case.get("case_id", "")),
+        # A-3 修复：GT 版本字段（2026-08-14）——人工回填/口径升级可追踪，
+        # 回填必须过 validate_gt_against_case 校验。
+        "gt_version": 1,
         "confidence": confidence,
         "attribution": {
             "direction": direction,
