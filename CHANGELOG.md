@@ -1,4 +1,4 @@
-# CHANGELOG.md — aistock-agent-py 变更记录
+﻿# CHANGELOG.md — aistock-agent-py 变更记录
 
 ## [changer] 2026-08-14 — 大盘溯源影响持续性预判可靠性修复
 **开发者**: 37588
@@ -42,6 +42,26 @@
 
 ---
 
+
+
+---
+
+## [feat/event-scrape-schedule-adjust] 2026-08-13 — 事件抓取中台调度调整（盘前 07:30→08:45 + 盘中恢复 12:00）
+**开发者**: Aria
+
+### 改进
+- `config.py`: `scheduler_event_scrape_cron` 由 `30 7 * * 1-5` 改为 `45 8 * * 1-5`（盘前全量档 07:30→08:45）
+  - 原因：07:30 时点早间公告（08:00-09:00 发布）尚未出，全量价值低；08:45 紧邻晨报 08:50，事件更全
+  - `scheduler_event_scrape_early_cron` 保留字段（兼容已部署配置），不再单独注册 job
+- `config.py`: `scheduler_event_scrape_intraday_cron` 由 `0 10-11,13-14 * * 1-5` 改回 `0 10-14 * * 1-5`（恢复 12:00 午间档，用户裁决：午休期间仍有午间公告/新闻发布，M8 移除属误删）
+- `scheduler.py`: 删除 `event_scrape_early` job（原 08:45 intraday 增量档），盘前档 `event_scrape_daily` 以 `full_daily` 在 08:45 运行，与早间刷新合并
+
+### 测试
+- `test_scheduler_event_scrape.py`: `event_scrape_early` 断言改为 `event_scrape_daily`（08:45）+ 确认 early 已删除
+- `test_scheduler.py`: `from_crontab.call_count` 9→8（删 1 档）；两个注册断言 `event_scrape_early`→`event_scrape_daily`；intraday cron mock 值同步为 `0 10-14 * * 1-5`
+- 验证：55 passed（scheduler 相关）；ruff All checks passed；mypy 3 个既有错误（_get_event_bus 无类型标注，与本次改动无关）
+
+---
 
 ## [fix/iterate-replay-user-profile] 2026-08-13 — 回放隔离清单补登记：get_user_profile（PR #71 缺口）
 **开发者**: Aria
