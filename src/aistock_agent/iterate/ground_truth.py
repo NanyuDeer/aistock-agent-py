@@ -63,6 +63,10 @@ _DRIVER_PROMPT = """你是股票归因分析师。基于给定切片语料提取
 要求：
 - 只输出严格 JSON：{{"drivers": ["驱动因素1", "驱动因素2"]}}，最多 4 条
 - 只能基于上述语料推断，禁止使用语料之外的信息（禁止联网、禁止事后知识）
+- 驱动因素必须由语料原文中的词/短语直接构成（可拼接语料中的关键词），
+  禁止概括、润色或使用语料中不存在的表述——逐字可溯源是后续评分校验前提
+  （gt_validator 驱动规则）；若语料无法支撑任何驱动，输出空列表
+  {{"drivers": []}}（空驱动会被评分剔除，不制造虚假驱动）
 - 驱动因素用简洁中文短语（4-12 字），如「隔夜美股暴涨」「外盘传导」
 只输出 JSON。"""
 
@@ -183,6 +187,9 @@ async def generate_data_constrained_gt(
     gt: dict[str, object] = {
         "gt_id": str(case.get("ground_truth_ref", f"gt_{case.get('case_id')}")),
         "case_id": str(case.get("case_id", "")),
+        # A-3 修复：GT 版本字段（2026-08-14）——人工回填/口径升级可追踪，
+        # 回填必须过 validate_gt_against_case 校验。
+        "gt_version": 1,
         "confidence": confidence,
         "attribution": {
             "direction": direction,

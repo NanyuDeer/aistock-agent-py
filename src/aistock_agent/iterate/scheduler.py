@@ -2,6 +2,8 @@
 
 import asyncio
 import sys
+from datetime import date
+from html import escape as html_escape
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -69,6 +71,27 @@ async def _run_iterate_build_task() -> None:
         await _build_review_and_event_cases()
     except Exception as exc:  # noqa: BLE001
         logger.error("iterate_case_build_failed", error=str(exc), exc_info=True)
+        # D-3 修复：产片失败告警邮件（D16 语义：只跳过当日产片，不中止迭代报告）
+        _notify_build_failure(today, exc)
+
+
+def _notify_build_failure(report_date: date, exc: Exception) -> None:
+    """产片失败告警邮件；配置缺失或发送失败仅记日志，不抛（不阻断闭环）。"""
+    from aistock_agent.services.mail_sender import send_mail
+
+    subject = f"迭代产片失败告警 {report_date.isoformat()}"
+    body_html = (
+        "<pre style='font-family:Menlo,Consolas,monospace;font-size:12px;'>"
+        f"迭代产片任务失败（{report_date.isoformat()}）：\n\n"
+        f"{html_escape(str(exc))}\n\n"
+        "今日切片可能缺失；17:00 迭代报告照常消费既有切片。</pre>"
+    )
+    try:
+        ok = send_mail(subject, body_html)
+        if not ok:
+            logger.warning("iterate_build_failure_mail_not_sent", subject=subject)
+    except Exception as mail_exc:  # noqa: BLE001 — 告警失败不阻断
+        logger.warning("iterate_build_failure_mail_error", error=str(mail_exc))
 
 
 async def _build_review_and_event_cases() -> dict[str, object]:
@@ -88,7 +111,7 @@ async def _build_review_and_event_cases() -> dict[str, object]:
     return summary
 
 
-async def _run_iterate_daily_task() -> None:
+async def _run_iterate_daily_task(report_date: date | None = None) -> None:
     """每日迭代任务：非交易日跳过；消费待迭代案例 + 发报告。
 
     切片生成由 16:30 产片 job（_run_iterate_build_task）负责（D16 修复），
@@ -96,6 +119,7 @@ async def _run_iterate_daily_task() -> None:
     案例去重（I4，D13 修复）：只消费尚未迭代的切片——已迭代判定基于
     ``data/cases/{case_id}.iterated.json`` 标记文件（不再看 experiments ``_r``
     前缀），每个案例只迭代一次，避免每个交易日反复重跑最新 N 个案例。
+    report_date：手动补发历史日期报告（--once --date），默认当日。
     """
     today = shanghai_today()
     if not is_trading_day(today):
@@ -121,19 +145,42 @@ async def _run_iterate_daily_task() -> None:
             logger.error("iterate_case_failed", case_id=case_id, error=str(exc))
 
     # 每日汇总报告（无重要结果也发；空案例库时报告会注明"无待迭代案例"）
-    await run_daily_report()
+    await run_daily_report(report_date)
 
 
-async def _manual_once() -> None:
+def _parse_date_arg(argv: list[str]) -> date | None:
+    """解析 --date YYYY-MM-DD（--once 补发模式用）；缺失/非法返回 None。"""
+    if "--date" not in argv:
+        return None
+    idx = argv.index("--date")
+    if idx + 1 >= len(argv):
+        return None
+    try:
+        return date.fromisoformat(argv[idx + 1])
+    except ValueError:
+        return None
+
+
+async def _manual_once(argv: list[str]) -> None:
+    report_date = _parse_date_arg(argv)
+    if report_date is not None:
+        # 补发模式：仅构建并发送指定日期报告（跳过案例消费与交易日检查）
+        logger.info("iterate_report_resend", report_date=report_date.isoformat())
+        await run_daily_report(report_date)
+        return
     await _run_iterate_daily_task()
 
 
 def main(argv: list[str]) -> int:
-    """手动触发：python -m aistock_agent.iterate.scheduler --once"""
+    """手动触发：python -m aistock_agent.iterate.scheduler --once [--date YYYY-MM-DD]"""
     if "--once" not in argv:
-        print("usage: python -m aistock_agent.iterate.scheduler --once", file=sys.stderr)
+        print(
+            "usage: python -m aistock_agent.iterate.scheduler "
+            "--once [--date YYYY-MM-DD]",
+            file=sys.stderr,
+        )
         return 2
-    asyncio.run(_manual_once())
+    asyncio.run(_manual_once(argv))
     return 0
 
 

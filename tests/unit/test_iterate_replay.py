@@ -20,6 +20,78 @@ from aistock_agent.iterate.replay_layer import (
 _REPLAY_CASE_ID = "case_20260731_us_market_surge"
 
 
+def test_cache_read_isolation_targets_extended() -> None:
+    """B-1：morning_forecast/briefing/report_cache 已列入缓存读隔离清单。"""
+    targets = replay_layer._CACHE_READ_ISOLATION_TARGETS
+    assert "aistock_agent.services.cache.get_cached_briefing" in targets
+    assert "aistock_agent.services.cache.get_cached_morning_forecast" in targets
+    assert "aistock_agent.services.report_cache.get_report" in targets
+
+
+def test_semantic_fallback_short_circuits_in_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B-2：回放模式 _try_semantic_fallback 显式短路（不发 embedding、不二次查询）。"""
+    import asyncio
+
+    from aistock_agent.services import event_graph_resolver as resolver
+
+    monkeypatch.setenv("REPLAY_CASE_ID", _REPLAY_CASE_ID)
+    # 若未短路，会真实调用 semantic_match_industries（embedding）——用会抛错的
+    # mock 验证短路发生在其之前。
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("回放模式不应调用 embedding")
+
+    monkeypatch.setattr(resolver, "semantic_match_industries", _boom)
+
+    result = asyncio.run(resolver._try_semantic_fallback("半导体"))
+    assert result is None
+
+
+def test_industry_vector_search_short_circuits_in_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-2：回放模式 industry_vector_search 入口短路（不发 embedding）。"""
+    import asyncio
+
+    from aistock_agent.tools import industry_vector_search as ivs
+
+    monkeypatch.setenv("REPLAY_CASE_ID", _REPLAY_CASE_ID)
+    monkeypatch.setattr(ivs.settings, "embedding_api_key", "sk-test")
+
+    result = asyncio.run(ivs.semantic_match_industries(["半导体"], 0.7, 3))
+    assert result == []
+
+
+def test_patch_is_idempotent_and_remove_cleans_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-3：重复 patch 保留首次原函数；remove 后清理 _REPLAY_ORIGINAL。"""
+    from aistock_agent.services import cache as cache_mod
+
+    target = "aistock_agent.services.cache.get_cached_briefing"
+    real_fn = cache_mod.get_cached_briefing
+
+    async def _fake_a(*args: object, **kwargs: object) -> object:
+        return "a"
+
+    async def _fake_b(*args: object, **kwargs: object) -> object:
+        return "b"
+
+    replay_layer._PATCHED_PATHS.clear()
+    # 首次 patch：记录真实原函数
+    replay_layer._patch(target, _fake_a)
+    # 重复 patch（不同 replacement）：不得覆盖首次记录的原函数
+    replay_layer._patch(target, _fake_b)
+    assert getattr(cache_mod, "get_cached_briefing") is _fake_b
+    originals = getattr(cache_mod, "_REPLAY_ORIGINAL", {})
+    assert originals.get("get_cached_briefing") is real_fn
+
+    # remove：恢复真实原函数 + 清理 _REPLAY_ORIGINAL 属性
+    replay_layer.remove_replay_patches()
+    assert getattr(cache_mod, "get_cached_briefing") is real_fn
+    assert not hasattr(cache_mod, "_REPLAY_ORIGINAL")
+    assert replay_layer._PATCHED_PATHS == set()
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个测试前清除回放开关环境变量，避免跨测试泄漏（不再用 os.environ.pop）。"""

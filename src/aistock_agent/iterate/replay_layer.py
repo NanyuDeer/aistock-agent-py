@@ -65,6 +65,7 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     "aistock_agent.services.data_client.NodeApiClient.post": "node_noop",
     # 直接 httpx 的读方法（B4 修复）：报告/行情类读返回 None（隔离），行业图谱返回 degraded
     "aistock_agent.services.data_client.NodeApiClient.get_industry_chain": "industry_chain",
+    "aistock_agent.services.data_client.NodeApiClient.get_industry_graph_full": "industry_graph",
     "aistock_agent.services.data_client.NodeApiClient.get_analysis_report_quiet": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_review_analysis_report": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_hot_burst_data": "report_read",
@@ -91,6 +92,12 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         "NodeApiClient.get_analysis_report",
         "NodeApiClient.get_quick_snapshot",
         "NodeApiClient.get_last_close_snapshot",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_user_profile 内部
+        # `await self.get(f"/internal/user-profile/{user_id}")`（data_client.py:745），
+        # 无独立网络入口；回放时 get 返回 None → `not isinstance(data, dict)` 走
+        # 失败降级返回 None，不触达真实 Node 后端（PR #71 新增，I-3 清单封闭测试
+        # 强制登记）
+        "NodeApiClient.get_user_profile",
         # 经 get_list 间接隔离（get_list → node_read 返回 None）
         "NodeApiClient.list_analysis_reports",
         "NodeApiClient.list_pending_predictions",
@@ -133,9 +140,14 @@ _ASYNC_SIDE_EFFECT_TARGETS: tuple[str, ...] = (
 # 缓存读隔离：回放必须强制走完整流水线。review.py:963 `await get_cached_review(report_date)`
 # 与 event.py:601 `await get_cached_event(user_msg)` 若真实 Redis 命中会返回生产全量数据，
 # 破坏 T 窗口隔离承诺，因此 patch 为"无缓存"（返回 None）。同样 patch 绑定模块名。
+# B-1（2026-08-14）：morning_forecast/briefing/report_cache 一并列入（裁决书 B 论题
+# "其余缓存读"——回放若命中晨报/简报/报告缓存同样会泄漏生产数据）。
 _CACHE_READ_ISOLATION_TARGETS: tuple[str, ...] = (
     "aistock_agent.agents.workers.review.get_cached_review",
     "aistock_agent.agents.workers.event.get_cached_event",
+    "aistock_agent.services.cache.get_cached_briefing",
+    "aistock_agent.services.cache.get_cached_morning_forecast",
+    "aistock_agent.services.report_cache.get_report",
 )
 
 _PATCHED_PATHS: set[str] = set()
@@ -198,6 +210,10 @@ def apply_replay_patches(adapter: IterableAgentAdapter) -> None:
             # 回放绝不触网：返回 degraded 状态
             # （event.py _INDUSTRY_GRAPH_DEGRADED_STATUSES 含 upstream_failed）
             _patch_async(target, _make_industry_chain_degraded)
+        elif kind == "industry_graph":
+            # B-5：全图快照回放返回 None（build_iterate_cases 采集处已降级，
+            # 回放侧绝不触达 Node /internal/industry/graph）
+            _patch_async(target, _make_none_noop)
         elif kind == "report_read":
             # I-1 修复：按目标方法返回正确降级值，不能再统一返回 None——
             # get_analysis_report_quiet 契约是纯 dict/None（data_client.py:522，
@@ -242,7 +258,26 @@ def remove_replay_patches() -> None:
                 setattr(owner, attr, original)
         except Exception:  # noqa: BLE001
             pass
+    # B-3（2026-08-14）：恢复后清理 _REPLAY_ORIGINAL 属性——避免跨 apply/remove
+    # 循环残留原函数引用（内存泄漏 + 语义污染）。须在 clear _PATCHED_PATHS 之前，
+    # 清理函数依赖路径集合定位 owner。
+    _clear_original_registries()
     _PATCHED_PATHS.clear()
+
+
+def _clear_original_registries() -> None:
+    """删除所有模块/类上的 _REPLAY_ORIGINAL 属性（B-3 幂等恢复链）。"""
+    seen: set[int] = set()
+    for path in _PATCHED_PATHS:
+        try:
+            owner, _attr = _import_owner(path)
+        except ModuleNotFoundError:
+            continue
+        if id(owner) in seen:
+            continue
+        seen.add(id(owner))
+        if hasattr(owner, "_REPLAY_ORIGINAL"):
+            delattr(owner, "_REPLAY_ORIGINAL")
 
 
 def _import_owner(target_path: str) -> tuple[object, str]:
@@ -274,14 +309,19 @@ def _patch_sync(target_path: str, replacement: Callable[..., object]) -> None:
 
 
 def _patch(target_path: str, replacement: Callable[..., object]) -> None:
-    """把 target_path 引用的函数替换为 replacement，并保留原函数供恢复。"""
+    """把 target_path 引用的函数替换为 replacement，并保留原函数供恢复。
+
+    B-3（2026-08-14）幂等化：setdefault 不覆盖已存原函数——重复 patch 同一
+    目标时保留首次记录的原函数（否则 originals[attr] 会被 replacement 覆盖，
+    remove 后无法恢复真实原函数）。
+    """
     owner, attr = _import_owner(target_path)
     original = getattr(owner, attr, None)
     originals = getattr(owner, "_REPLAY_ORIGINAL", None)
     if originals is None:
         originals = {}
         setattr(owner, "_REPLAY_ORIGINAL", originals)
-    originals[attr] = original
+    originals.setdefault(attr, original)
     setattr(owner, attr, replacement)
     _PATCHED_PATHS.add(target_path)
 

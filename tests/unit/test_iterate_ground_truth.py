@@ -89,11 +89,16 @@ async def test_generate_data_constrained_gt_deterministic_fields(
     assert attribution["affected_sectors"] == ["半导体", "算力", "新能源"]
     assert attribution["drivers"] == ["隔夜美股暴涨", "外盘传导"]
     assert gt["gt_id"] == "gt_case_t"
+    # A-3（2026-08-14）：GT 版本字段——人工回填/口径升级可追踪
+    assert gt.get("gt_version") == 1
 
     # 驱动提取 prompt 必须只含切片语料（断言含电报标题，且含禁止后验要求）
     prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
     assert "隔夜美股暴涨" in prompt_arg
     assert "禁止" in prompt_arg and "语料之外" in prompt_arg
+    # 2026-08-13 强化：驱动必须由语料原文关键词构成（产片校验拒绝事故防御）
+    assert "语料原文" in prompt_arg
+    assert "drivers" in prompt_arg and '"drivers": []' in prompt_arg
 
 
 @pytest.mark.asyncio

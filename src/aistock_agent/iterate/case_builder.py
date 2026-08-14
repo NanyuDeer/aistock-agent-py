@@ -7,7 +7,7 @@ T 窗口原则：window_before 只含 T 时刻及之前的数据；评估期不�
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -60,6 +60,7 @@ async def build_case(
     event_time: datetime,
     telegraph_records: list[dict[str, object]],
     market_snapshot: dict[str, object] | None = None,
+    industry_graph: dict[str, object] | None = None,
     meta: dict[str, object] | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, object]:
@@ -67,6 +68,9 @@ async def build_case(
 
     只保留 time <= event_time 的电报记录（T 窗口约束，防后验泄漏）。
     meta 非空时并入 case 顶层（随切片落盘，供评估阶段识别切片来源与窗口类型）。
+    industry_graph：B-5（2026-08-14）——构建期采集的行业图谱快照（含
+    snapshot_generated_at/graph_update_time/event_time 三时间戳 + posterior_exposure
+    标记）；采集失败传 None（快照侧降级，不阻断产片）。
     data_dir 覆盖 iterate 数据根目录（测试隔离用）；None 走 get_data_dir()。
     """
     if event_time.tzinfo is None:
@@ -85,6 +89,7 @@ async def build_case(
             "cls_telegraph": before,
             "market_snapshot": market_snapshot or {},
             "global_markets": _extract_global_markets(market_snapshot),
+            "industry_graph": industry_graph,
         },
         "ground_truth_ref": f"gt_{case_id}",
         "created_at": datetime.now(_TZ).isoformat(),
@@ -181,11 +186,30 @@ def list_pending_cases(agent_id: str | None = None) -> list[str]:
 
     已迭代判定 = data/cases/{case_id}.iterated.json 存在；experiments 目录
     可清理删除，不再触发重复迭代。无标记 → 视为待迭代。
+    D-1（2026-08-14）：失败退避——status=failed 且 next_retry_at 未到的案例
+    不返回（仍在退避期）；到期后重新进入 pending。deadletter 不再返回。
     """
     cases = list_cases(agent_id)
     if not cases:
         return []
-    return [case_id for case_id in cases if not is_iterated(case_id)]
+    now = datetime.now(_TZ)
+    pending: list[str] = []
+    for case_id in cases:
+        mark_path = _iterated_mark_path(case_id)
+        if not mark_path.exists():
+            pending.append(case_id)
+            continue
+        mark = _read_mark(mark_path)
+        if mark.get("status") != "failed":
+            continue  # iterated/deadletter（或旧格式无 status）不重新进入
+        next_retry = mark.get("next_retry_at")
+        if isinstance(next_retry, str):
+            try:
+                if datetime.fromisoformat(next_retry) <= now:
+                    pending.append(case_id)
+            except ValueError:
+                pending.append(case_id)  # 非法时间戳按到期处理
+    return pending
 
 
 def _iterated_mark_path(case_id: str, data_dir: Path | None = None) -> Path:
@@ -195,17 +219,89 @@ def _iterated_mark_path(case_id: str, data_dir: Path | None = None) -> Path:
 
 
 def is_iterated(case_id: str, data_dir: Path | None = None) -> bool:
-    """case 是否已迭代（D13 修复：单一权威标记文件，不依赖 experiments 前缀）。"""
+    """case 是否已迭代（D13 修复：单一权威标记文件，不依赖 experiments 前缀）。
+
+    D-1（2026-08-14）：失败退避中的案例（status=failed 且未到 next_retry_at）
+    也视为"已处理"（不重复进入 pending）；到期后由 list_pending_cases 重新返回。
+    """
     return _iterated_mark_path(case_id, data_dir).exists()
 
 
-def mark_iterated(case_id: str, data_dir: Path | None = None) -> None:
-    """写入已迭代标记（原子写）。"""
+def _read_mark(path: Path) -> dict[str, object]:
+    """读取迭代标记文件内容；不存在/非法返回空 dict。"""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def mark_iterated(
+    case_id: str,
+    data_dir: Path | None = None,
+    *,
+    status: str = "iterated",
+    round_type: str = "baseline",
+    retry_count: int = 0,
+) -> None:
+    """写入已迭代标记（原子写）。
+
+    D-1（2026-08-14）：扩展 status/round_type/retry_count——失败退避与
+    deadletter 复用同一标记文件（单一权威去重事实源不变）。
+    """
     path = _iterated_mark_path(case_id, data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     payload = json.dumps(
-        {"case_id": case_id, "iterated_at": datetime.now(_TZ).isoformat()},
+        {
+            "case_id": case_id,
+            "status": status,
+            "round_type": round_type,
+            "retry_count": retry_count,
+            "iterated_at": datetime.now(_TZ).isoformat(),
+        },
+        ensure_ascii=False,
+    )
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+#: 失败退避间隔（天），按 retry_count 1/2 次 → 1/2 天；第 3 次失败进 deadletter
+_FAIL_RETRY_DELAY_DAYS: dict[int, int] = {1: 1, 2: 2}
+_FAIL_DEADLETTER_AT = 3
+
+
+def mark_failed(case_id: str, data_dir: Path | None = None) -> None:
+    """记录一次失败（D-1）：retry_count+1；退避 1/2 天后可重试；达 3 次进 deadletter。
+
+    返回语义：调用方无需关心状态机细节；标记文件保留 status/next_retry_at。
+    """
+    path = _iterated_mark_path(case_id, data_dir)
+    existing = _read_mark(path)
+    retry_count = int(existing.get("retry_count", 0)) + 1
+    now = datetime.now(_TZ)
+    if retry_count >= _FAIL_DEADLETTER_AT:
+        mark_iterated(
+            case_id,
+            data_dir,
+            status="deadletter",
+            round_type="failed",
+            retry_count=retry_count,
+        )
+        return
+    delay_days = _FAIL_RETRY_DELAY_DAYS.get(retry_count, 4)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = json.dumps(
+        {
+            "case_id": case_id,
+            "status": "failed",
+            "round_type": "failed",
+            "retry_count": retry_count,
+            "iterated_at": now.isoformat(),
+            "failed_at": now.isoformat(),
+            "next_retry_at": (now + timedelta(days=delay_days)).isoformat(),
+        },
         ensure_ascii=False,
     )
     tmp.write_text(payload, encoding="utf-8")

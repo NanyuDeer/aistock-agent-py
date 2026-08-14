@@ -1,4 +1,4 @@
-# CHANGELOG.md — aistock-agent-py 变更记录
+﻿# CHANGELOG.md — aistock-agent-py 变更记录
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
@@ -329,6 +329,51 @@
 ---
 
 ## [main] 2026-08-02 — ChatAgent 最小落地 M1-M5 完成 + 非交易日统一提示
+
+
+---
+
+## [feat/event-scrape-schedule-adjust] 2026-08-13 — 事件抓取中台调度调整（盘前 07:30→08:45 + 盘中恢复 12:00）
+**开发者**: Aria
+
+### 改进
+- `config.py`: `scheduler_event_scrape_cron` 由 `30 7 * * 1-5` 改为 `45 8 * * 1-5`（盘前全量档 07:30→08:45）
+  - 原因：07:30 时点早间公告（08:00-09:00 发布）尚未出，全量价值低；08:45 紧邻晨报 08:50，事件更全
+  - `scheduler_event_scrape_early_cron` 保留字段（兼容已部署配置），不再单独注册 job
+- `config.py`: `scheduler_event_scrape_intraday_cron` 由 `0 10-11,13-14 * * 1-5` 改回 `0 10-14 * * 1-5`（恢复 12:00 午间档，用户裁决：午休期间仍有午间公告/新闻发布，M8 移除属误删）
+- `scheduler.py`: 删除 `event_scrape_early` job（原 08:45 intraday 增量档），盘前档 `event_scrape_daily` 以 `full_daily` 在 08:45 运行，与早间刷新合并
+
+### 测试
+- `test_scheduler_event_scrape.py`: `event_scrape_early` 断言改为 `event_scrape_daily`（08:45）+ 确认 early 已删除
+- `test_scheduler.py`: `from_crontab.call_count` 9→8（删 1 档）；两个注册断言 `event_scrape_early`→`event_scrape_daily`；intraday cron mock 值同步为 `0 10-14 * * 1-5`
+- 验证：55 passed（scheduler 相关）；ruff All checks passed；mypy 3 个既有错误（_get_event_bus 无类型标注，与本次改动无关）
+
+---
+
+## [fix/iterate-replay-user-profile] 2026-08-13 — 回放隔离清单补登记：get_user_profile（PR #71 缺口）
+**开发者**: Aria
+
+### 修复
+- `iterate/replay_layer.py`: `NodeApiClient.get_user_profile` 加入 `_ISOLATION_EXEMPT_METHODS`（经 `get` 间接隔离分组）
+  - 背景：PR #71 新增 `get_user_profile`（用户画像，内部 `await self.get("/internal/user-profile/{user_id}")`），未登记回放隔离清单，I-3 清单封闭测试 `test_service_isolation_covers_all_public_network_methods` 失败（服务器沙盒全量测试暴露）
+  - 依据：`get_user_profile` 无独立网络入口，经 `get → node_read` 返回 None 后 `not isinstance(data, dict)` 走失败降级，符合豁免条件；回放模式下不触达真实 Node 后端
+
+### 测试
+- `tests/unit/test_iterate_replay.py`: 17 passed（含清单封闭测试 RED→GREEN）；ruff All checks passed
+## [fix/iterate-case-sufficiency] 2026-08-13 — 产片链路数据完整性防御（case_20260731 全 0 分事故）
+**开发者**: Aria
+
+### 修复
+- `scripts/build_iterate_cases.py`: 新增 `_snapshot_data_sufficient(snapshot_dict)` 产片数据完整性检查
+  - 背景：服务器沙盒 `case_20260731_us_market_surge` 跑 run_case 全 0 分，根因是该 case 为测试 fixture 样例（`a_share={}`、missing_fields 3 项），且真实产片链路 `build_market_trace_snapshot` 的 `normalize_a_share` 只做字段复制不校验完整性——Node 返回 status=complete + coverage.complete=true 但 indexes 等字段缺失时，空壳 case 照样产片进闭环，跑满 max_rounds 全部 0 分浪费 LLM 预算
+  - 修复：`build_review_case` 在 build_case 之前检查快照 A 股数据完整性（`a_share.indexes` 非空），数据不足且非 `force` 时抛 `RuntimeError` 拒绝产片（省一次 case/GT 落盘与 LLM 调用）；`force=True` 跳过
+- `scripts/build_iterate_cases.py`: `snapshot.model_dump` 改用 `cast("Any", ...)`（跨 SimpleNamespace/MarketTraceSnapshot 类型边界，消除 mypy attr-defined/union-attr 错误码不一致）
+
+### 测试
+- 新增 2 条：空壳快照拒绝产片（+ 不残留文件）、force 跳过检查
+- 验证：产片链路 + case/GT/校验/评估/调度 59 passed；ruff All checks passed；mypy iterate clean
+
+---
 
 ## [feat/event-scrape-hub] 2026-08-13 — 迭代辩论裁决修复第二轮收尾（T9 M3/T10 Q1/T11 + 基线清理）
 **开发者**: Aria

@@ -58,7 +58,7 @@ START → supervisor(quick_think, 意图路由)
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  07:30 event_scrape_daily（盘前全量）+ 08:45 event_scrape_early（早间刷新，晨报 08:50 读库前最后一刷）+ 10:00-11:00、13:00-14:00 每小时 event_scrape_intraday + 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；避开 11:30-13:00 A 股午休；早间/收盘两档 H5，2026-08-13）
+  08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
@@ -568,7 +568,7 @@ content = {
 - `iterate/case_scanner.py`：迭代切片数据扫描器——`find_recent_trading_day()`（最近已收盘交易日，Node close-snapshot/last-close 降级）、`scan_major_events(days)`（电报关键词 + 30 分钟窗口聚类重大事件）
 - `iterate/gt_validator.py`：标准答案一致性校验——`validate_gt_against_case(gt, case)` 三条规则（方向/板块/驱动必须可由切片数据推导），返回违反列表
 - `iterate/ground_truth.py::generate_data_constrained_gt(case, *, data_dir=None)`：数据约束标准答案生成（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）
-- `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行
+- `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行；review 产片前校验快照数据完整性（`_snapshot_data_sufficient`：a_share.indexes 为空则拒绝产片，`--force` 可跳过，2026-08-13 case_20260731 全 0 分事故防御）
 - 回放隔离（fail-closed，2026-08-13 辩论裁决修复）：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放显式拒绝（走 run() 入口）+ 源模块双绑定
 - 评分体系：归因相似度重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；Tavily 死代码与"指数neutral"兜底删除
 - 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘；`_compute_variant_hash` 含完整补丁规格（T9 M3）；`_cleanup_stale_experiments` 跨运行残留清理（T10 Q1）；失败轮 `is_failure` 显式标记 + `infra_failures` 连续计数（T11 M1/M2）；基线轮纳入 try/except（T11 M3）；`_recompute_best` 跳过 `is_failure` 记录（T11 M4）
