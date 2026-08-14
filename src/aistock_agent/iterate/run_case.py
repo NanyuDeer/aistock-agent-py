@@ -53,6 +53,19 @@ async def run_case(
         raise ValueError(f"max_rounds 必须 >= 1，收到 {limit}")
     root = Path(repo_root) if repo_root else _default_repo_root()
 
+    # C-3（2026-08-14）：非 git 环境判定矩阵——development 无 .git 时变体轮
+    # 无法恢复基线，限制为只跑基线轮；production 无 .git 直接拒绝。
+    from aistock_agent.iterate.variant_engine import _check_repo_environment
+
+    repo_env = _check_repo_environment(root)
+    if repo_env == "skip":
+        logger.warning(
+            "iterate_repo_skip_variant_rounds",
+            case_id=case_id,
+            root=str(root),
+        )
+        limit = 1
+
     # T10 Q1 修复：清理上次运行残留的实验记录，防止跨运行 r*.json 污染 best.json。
     # 同一 case 多次运行时，旧 r*.json 会被 _recompute_best 纳入重算，
     # 可能选中上次运行的高分记录写入 best.json（与本次运行不一致）。

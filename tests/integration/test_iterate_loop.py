@@ -310,11 +310,14 @@ async def test_three_subprocess_failures_abort_with_infra_failures(
             ]
         )
         # 子进程回放：round 1 基线成功（rounds=[1]），rounds 2/3/4 连续 3 次失败。
+        # 失败项需双份（重试一次后仍失败）；success 文本 >30 字符避免触发重试判定。
         with patch(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(
                 side_effect=[
-                    {"final_response": "主因隔夜美股大涨，看多，半导体领涨"},
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
                     {"final_response": "", "subprocess_failed": True},
                     {"final_response": "", "subprocess_failed": True},
                     {"final_response": "", "subprocess_failed": True},
@@ -492,11 +495,15 @@ async def test_run_case_all_failed_does_not_write_best_file(
     # 失败轮无输出可评、不进入评估，无需 LLM mock；子进程回放 r1 超时 → r2/r3 失败，
     # 连续 3 次基础设施失败触发 infra_failures 中止（r2/r3 仍经 run_experiment_round
     # 落盘 0.0 + "回放子进程..." gap 记录，构成 best.json 污染源）。
+    # 失败项需双份（重试一次后仍失败）：r1(2)+r2(2)+r3(2)=6 项。
     with patch(
         "aistock_agent.iterate.variant_engine._run_replay_subprocess",
         AsyncMock(
             side_effect=[
                 {"final_response": "", "timed_out": True},
+                {"final_response": "", "timed_out": True},
+                {"final_response": "", "subprocess_failed": True},
+                {"final_response": "", "subprocess_failed": True},
                 {"final_response": "", "subprocess_failed": True},
                 {"final_response": "", "subprocess_failed": True},
             ]
@@ -595,10 +602,17 @@ async def test_failed_round_records_have_is_failure_marker(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(
                 side_effect=[
-                    {"final_response": "x"},  # r1 baseline success
-                    {"final_response": "", "subprocess_failed": True},  # r2 fail
-                    {"final_response": "", "subprocess_failed": True},  # r3 fail
-                    {"final_response": "", "subprocess_failed": True},  # r4 fail → infra
+                    # r1 baseline success（>30 字符避免触发重试判定）
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    # r2 fail（双份：重试一次后仍失败）
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    # r3 fail
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    # r4 fail → infra 中止
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
                 ]
             ),
         ):
@@ -650,13 +664,17 @@ async def test_non_consecutive_failures_do_not_abort(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(
                 side_effect=[
-                    {"final_response": "x"},  # r1 success
-                    {"final_response": "", "subprocess_failed": True},  # r2 fail
-                    {"final_response": "x"},  # r3 success
-                    {"final_response": "", "subprocess_failed": True},  # r4 fail
-                    {"final_response": "x"},  # r5 success
-                    {"final_response": "", "subprocess_failed": True},  # r6 fail
-                    {"final_response": "x"},  # r7 success
+                    # success 文本 >30 字符避免触发重试判定；失败项双份（重试一次后仍失败）
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
                 ]
             ),
         ):
@@ -704,10 +722,17 @@ async def test_failed_rounds_do_not_evaluate_llm(
             "aistock_agent.iterate.variant_engine._run_replay_subprocess",
             AsyncMock(
                 side_effect=[
-                    {"final_response": "x"},  # r1 baseline success
-                    {"final_response": "", "subprocess_failed": True},  # r2 fail
-                    {"final_response": "", "subprocess_failed": True},  # r3 fail
-                    {"final_response": "", "subprocess_failed": True},  # r4 fail → infra
+                    # r1 baseline success（>30 字符避免触发重试判定）
+                    {"final_response": "主因隔夜美股大涨，看多，半导体板块领涨 3.2%，市场情绪偏暖"},
+                    # r2 fail（双份）
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    # r3 fail
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
+                    # r4 fail → infra 中止
+                    {"final_response": "", "subprocess_failed": True},
+                    {"final_response": "", "subprocess_failed": True},
                 ]
             ),
         ):

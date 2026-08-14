@@ -356,12 +356,17 @@ def restore_baseline(
     files = list(adapter.prompt_files) + list(adapter.workflow_files) + list(extra_files)
     if not files:
         return
-    result = subprocess.run(
-        ["git", "checkout", "--", *files],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "checkout", "--", *files],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # git 命令不可用（如无 git 环境的测试沙盒）：仅告警不阻塞
+        logger.warning("iterate_restore_baseline_git_missing", root=str(repo_root))
+        return
     if result.returncode != 0:
         logger.warning("iterate_restore_baseline_failed", stderr=result.stderr.strip())
 
@@ -522,6 +527,34 @@ def _build_replay_env(src_dir: str) -> dict[str, str]:
     }
     allowed["PYTHONPATH"] = src_dir
     return allowed
+
+
+def _check_repo_environment(root: Path) -> str:
+    """非 git 环境判定矩阵（C-3，裁决书 C 论题）。
+
+    APP_ENV × has_git 四组合行为确定：
+    - production + 无 .git → raise（拿不到基线参照，fail-closed 拒绝）
+    - production + 有 .git → ok
+    - development + 无 .git → warning + "skip"（变体轮跳过，只跑基线）
+    - development + 有 .git → ok
+    黑名单（settings.iterate_forbidden_repo_roots）命中 → raise。
+    """
+    root_resolved = str(root.resolve())
+    for forbidden in settings.iterate_forbidden_repo_roots:
+        if root_resolved.startswith(str(Path(forbidden).resolve())):
+            raise RuntimeError(
+                f"repo root 在黑名单内，拒绝迭代：{root_resolved}"
+            )
+    has_git = (root / ".git").exists()
+    app_env = os.environ.get("APP_ENV", "development")
+    if app_env == "production" and not has_git:
+        raise RuntimeError(f"production 环境缺少 .git，无法恢复基线：{root_resolved}")
+    if not has_git:
+        logger.warning(
+            "iterate_repo_no_git_skip", root=root_resolved, app_env=app_env
+        )
+        return "skip"
+    return "ok"
 
 
 async def _run_replay_subprocess(

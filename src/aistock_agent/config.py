@@ -149,6 +149,9 @@ class Settings(BaseSettings):
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
     iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
+    # C-3（2026-08-14）：禁止作为迭代仓库根的路径黑名单（fail-closed），
+    # 防止对非 git 目录恢复基线失败后静默污染
+    iterate_forbidden_repo_roots: list[str] = []
     # SMTP 报告（QQ 邮箱授权码；2026-08-14 加 QQ_SMTP_* 别名——.env.development
     # 用 QQ_SMTP_USER/AUTH/TO 键名，与字段名不匹配导致 settings 读不到 →
     # mail_not_configured，报告无法发送；LLM key 正常因 OPENAI_API_KEY 恰好匹配）

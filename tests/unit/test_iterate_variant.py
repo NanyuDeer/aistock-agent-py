@@ -672,6 +672,45 @@ async def test_run_case_rejects_invalid_max_rounds(
             await run_case("review", "case_x", max_rounds=0)
 
 
+def test_check_repo_environment_matrix(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """C-3：APP_ENV × has_git 判定矩阵（4 组合行为确定）+ 黑名单 fail-closed。"""
+    from aistock_agent.iterate.variant_engine import _check_repo_environment
+
+    git_repo = tmp_path / "git_repo"
+    git_repo.mkdir()
+    (git_repo / ".git").mkdir()
+    no_git_repo = tmp_path / "no_git_repo"
+    no_git_repo.mkdir()
+
+    # production + 有 .git → ok
+    monkeypatch.setenv("APP_ENV", "production")  # type: ignore[attr-defined]
+    assert _check_repo_environment(git_repo) == "ok"
+
+    # production + 无 .git → raise（fail-closed）
+    with pytest.raises(RuntimeError, match="缺少 .git"):
+        _check_repo_environment(no_git_repo)
+
+    # development + 无 .git → skip
+    monkeypatch.setenv("APP_ENV", "development")  # type: ignore[attr-defined]
+    assert _check_repo_environment(no_git_repo) == "skip"
+
+    # development + 有 .git → ok
+    assert _check_repo_environment(git_repo) == "ok"
+
+    # 黑名单命中 → raise
+    from aistock_agent.iterate import variant_engine as _ve
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        _ve.settings,
+        "iterate_forbidden_repo_roots",
+        [str(no_git_repo)],
+    )
+    with pytest.raises(RuntimeError, match="黑名单"):
+        _check_repo_environment(no_git_repo)
+
+
 def test_mask_secrets_redacts_key_values() -> None:
     """C-2：日志/错误文本中密钥值掩码。"""
     from aistock_agent.iterate.variant_engine import _mask_secrets
