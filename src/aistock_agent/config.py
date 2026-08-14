@@ -9,6 +9,25 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
+def _parse_string_list(v: object) -> object:
+    """支持逗号分隔和 JSON 数组两种环境变量格式（cors_origins / holidays_extra 共用）。
+
+    NoDecode 阻止 pydantic-settings 预先 JSON 解析，原始字符串传入 before-validator。
+    此处先尝试 JSON 解析（处理 ["a","b"] 格式），失败则按逗号分割（处理 a,b 格式）。
+    """
+    if isinstance(v, str):
+        # 先尝试 JSON 数组格式（["a","b"]）
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # 退回逗号分隔格式（a,b）
+        return [item.strip() for item in v.split(",") if item.strip()]
+    return v
+
+
 class Settings(BaseSettings):
     """全局配置，从 .env.{APP_ENV} 或环境变量读取"""
 
@@ -103,6 +122,12 @@ class Settings(BaseSettings):
     # 支持逗号分隔（CORS_ORIGINS=http://a,http://b）或 JSON 数组格式（CORS_ORIGINS=["a","b"]）
     # NoDecode 阻止 pydantic-settings 预先 JSON 解析，交给 _parse_cors_origins 统一处理
     cors_origins: Annotated[list[str], NoDecode] = ["*"]
+
+    # 补充节假日表（HOLIDAYS_EXTRA，YYYY-MM-DD 逗号分隔或 JSON 数组，复用 cors_origins 解析模式）
+    # 用途：chinese_calendar 1.11.0 仅覆盖 2004-2026，2027 起 is_trading_day 走越年 fallback
+    # （只跳周末，精度损失）。此列表提供覆盖范围之外的补充休市日，让越年判定恢复精度。
+    # 空列表时 is_trading_day 行为与拆分前逐字节一致。
+    holidays_extra: Annotated[list[str], NoDecode] = []
 
     # 健康检查：是否在 /health/ready 中探测 LLM 连通性。
     # 默认关闭——避免 readiness 探针每次消耗 token；需探测时设 HEALTH_CHECK_LLM=true。
@@ -286,17 +311,17 @@ class Settings(BaseSettings):
         before-validator。此处先尝试 JSON 解析（处理 ["a","b"] 格式），
         失败则按逗号分割（处理 http://a,http://b 格式）。
         """
-        if isinstance(v, str):
-            # 先尝试 JSON 数组格式（CORS_ORIGINS=["http://a","http://b"]）
-            try:
-                parsed = json.loads(v)
-                if isinstance(parsed, list):
-                    return parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
-            # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+        return _parse_string_list(v)
+
+    @field_validator("holidays_extra", mode="before")
+    @classmethod
+    def _parse_holidays_extra(cls, v: object) -> object:
+        """HOLIDAYS_EXTRA 解析：复用 cors_origins 的逗号分隔/JSON 数组模式。
+
+        补充节假日表（YYYY-MM-DD 列表）：HOLIDAYS_EXTRA=2027-01-01,2027-10-01
+        或 HOLIDAYS_EXTRA=["2027-01-01","2027-10-01"]。
+        """
+        return _parse_string_list(v)
 
     @property
     def qa_mode_enabled(self) -> bool:

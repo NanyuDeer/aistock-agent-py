@@ -289,6 +289,30 @@ class TestConfigEnvOverride:
 
 
 # =============================================================================
+# HOLIDAYS_EXTRA 补充节假日表测试
+# =============================================================================
+
+
+class TestHolidaysExtra:
+    """验证 holidays_extra 默认空列表 + env 解析（复用 cors_origins 解析模式）"""
+
+    def test_holidays_extra_default_empty(self):
+        """默认空列表：未配置时 is_trading_day 行为与拆分前逐字节一致"""
+        s = Settings()
+        assert s.holidays_extra == []
+
+    def test_holidays_extra_comma_separated(self, monkeypatch):
+        """逗号分隔格式：HOLIDAYS_EXTRA=2027-01-01,2027-10-01 → list"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", "2027-01-01,2027-10-01")
+        assert Settings().holidays_extra == ["2027-01-01", "2027-10-01"]
+
+    def test_holidays_extra_json_array(self, monkeypatch):
+        """JSON 数组格式：HOLIDAYS_EXTRA=["2027-01-01"] → ["2027-01-01"]"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", '["2027-01-01"]')
+        assert Settings().holidays_extra == ["2027-01-01"]
+
+
+# =============================================================================
 # LLM 工厂读取配置测试
 # =============================================================================
 
