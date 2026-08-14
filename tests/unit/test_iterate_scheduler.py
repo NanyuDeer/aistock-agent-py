@@ -163,3 +163,25 @@ async def test_build_task_failure_does_not_break_report(iterate_data_dir: object
         await _run_iterate_build_task()
     mock_build.assert_awaited()
     # 产片失败不抛异常（被内部 try/except 吸收）
+
+
+@pytest.mark.asyncio
+async def test_build_failure_sends_alert_mail(iterate_data_dir: object) -> None:
+    """D-3：产片失败触发告警邮件（只告警不中止，D16 语义）。"""
+    from aistock_agent.iterate.scheduler import _run_iterate_build_task
+
+    with patch(
+        "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
+    ), patch(
+        "aistock_agent.iterate.scheduler.find_recent_trading_day",
+        AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.iterate.scheduler._build_review_and_event_cases",
+        AsyncMock(side_effect=RuntimeError("node unreachable")),
+    ), patch(
+        "aistock_agent.services.mail_sender.send_mail", return_value=True
+    ) as mock_mail:
+        await _run_iterate_build_task()
+    mock_mail.assert_called_once()
+    subject = mock_mail.call_args.args[0]
+    assert "迭代产片失败告警" in subject

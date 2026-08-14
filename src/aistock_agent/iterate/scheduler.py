@@ -3,6 +3,7 @@
 import asyncio
 import sys
 from datetime import date
+from html import escape as html_escape
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -70,6 +71,27 @@ async def _run_iterate_build_task() -> None:
         await _build_review_and_event_cases()
     except Exception as exc:  # noqa: BLE001
         logger.error("iterate_case_build_failed", error=str(exc), exc_info=True)
+        # D-3 修复：产片失败告警邮件（D16 语义：只跳过当日产片，不中止迭代报告）
+        _notify_build_failure(today, exc)
+
+
+def _notify_build_failure(report_date: date, exc: Exception) -> None:
+    """产片失败告警邮件；配置缺失或发送失败仅记日志，不抛（不阻断闭环）。"""
+    from aistock_agent.services.mail_sender import send_mail
+
+    subject = f"迭代产片失败告警 {report_date.isoformat()}"
+    body_html = (
+        "<pre style='font-family:Menlo,Consolas,monospace;font-size:12px;'>"
+        f"迭代产片任务失败（{report_date.isoformat()}）：\n\n"
+        f"{html_escape(str(exc))}\n\n"
+        "今日切片可能缺失；17:00 迭代报告照常消费既有切片。</pre>"
+    )
+    try:
+        ok = send_mail(subject, body_html)
+        if not ok:
+            logger.warning("iterate_build_failure_mail_not_sent", subject=subject)
+    except Exception as mail_exc:  # noqa: BLE001 — 告警失败不阻断
+        logger.warning("iterate_build_failure_mail_error", error=str(mail_exc))
 
 
 async def _build_review_and_event_cases() -> dict[str, object]:
