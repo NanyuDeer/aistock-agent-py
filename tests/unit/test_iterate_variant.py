@@ -547,6 +547,52 @@ async def test_generate_variant_parses_files_and_type(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_experiment_record_includes_agent_output(
+    iterate_data_dir: object,
+) -> None:
+    """C-5：实验记录含 agent 输出全文（评分可完全重算 REPRODUCIBLE）。"""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from aistock_agent.iterate.variant_engine import run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/review.py"],
+        instructions="无",
+        new_content={"src/aistock_agent/prompts/workers/review.py": "X = 1\n"},
+    )
+    case: dict[str, object] = {"case_id": "case_test_agent_output"}
+    gt: dict[str, object] = {
+        "gt_id": "gt_test",
+        "case_id": "case_test_agent_output",
+        "attribution": {"direction": "bullish"},
+    }
+    agent_output_text = "大盘高开 1.2%，主因隔夜美股大涨。半导体板块领涨 3.2%。"
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(
+            return_value={
+                "agent_id": "review",
+                "case_id": "case_test_agent_output",
+                "variant_hash": "h",
+                "final_response": agent_output_text,
+            }
+        ),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        AsyncMock(return_value=ScoreDetail(0.2, 0.5, 0.1, 0.8)),
+    ):
+        await run_experiment_round("review", case, 2, variant, gt)
+
+    record_path = (
+        _Path(iterate_data_dir) / "experiments" / "case_test_agent_output_r2.json"
+    )
+    record = _json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["agent_output"] == agent_output_text
+
+
+@pytest.mark.asyncio
 async def test_experiment_record_includes_patch_spec(iterate_data_dir: object) -> None:
     """实验记录必须包含可复现的补丁规格（target/old/new），不再只有 instructions。"""
     from aistock_agent.iterate.case_builder import load_case

@@ -338,6 +338,8 @@ async def _run_baseline(
         "round": 1,
         "agent_id": agent_id,
         "variant": {"type": "baseline", "files": [], "instructions": ""},
+        # C-5：基线轮 agent 输出全文同样落盘（评分可完全重算）
+        "agent_output": str(output.get("final_response", "")),
         "score": score.total,
         "score_detail": {
             "direction": score.direction,

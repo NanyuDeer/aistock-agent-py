@@ -426,6 +426,9 @@ async def run_experiment_round(
             "old_snippet": variant.old_snippet,
             "new_snippet": variant.new_snippet,
         },
+        # C-5 修复：agent 输出全文落盘——评分可完全重算（REPRODUCIBLE），
+        # 报告/复盘无需重跑回放即可查看实际输出。
+        "agent_output": str(output.get("final_response", "")),
         "score": score.total,
         "score_detail": {
             "direction": score.direction,
