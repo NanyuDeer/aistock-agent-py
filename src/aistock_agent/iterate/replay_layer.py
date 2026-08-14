@@ -253,7 +253,26 @@ def remove_replay_patches() -> None:
                 setattr(owner, attr, original)
         except Exception:  # noqa: BLE001
             pass
+    # B-3（2026-08-14）：恢复后清理 _REPLAY_ORIGINAL 属性——避免跨 apply/remove
+    # 循环残留原函数引用（内存泄漏 + 语义污染）。须在 clear _PATCHED_PATHS 之前，
+    # 清理函数依赖路径集合定位 owner。
+    _clear_original_registries()
     _PATCHED_PATHS.clear()
+
+
+def _clear_original_registries() -> None:
+    """删除所有模块/类上的 _REPLAY_ORIGINAL 属性（B-3 幂等恢复链）。"""
+    seen: set[int] = set()
+    for path in _PATCHED_PATHS:
+        try:
+            owner, _attr = _import_owner(path)
+        except ModuleNotFoundError:
+            continue
+        if id(owner) in seen:
+            continue
+        seen.add(id(owner))
+        if hasattr(owner, "_REPLAY_ORIGINAL"):
+            delattr(owner, "_REPLAY_ORIGINAL")
 
 
 def _import_owner(target_path: str) -> tuple[object, str]:
@@ -285,14 +304,19 @@ def _patch_sync(target_path: str, replacement: Callable[..., object]) -> None:
 
 
 def _patch(target_path: str, replacement: Callable[..., object]) -> None:
-    """把 target_path 引用的函数替换为 replacement，并保留原函数供恢复。"""
+    """把 target_path 引用的函数替换为 replacement，并保留原函数供恢复。
+
+    B-3（2026-08-14）幂等化：setdefault 不覆盖已存原函数——重复 patch 同一
+    目标时保留首次记录的原函数（否则 originals[attr] 会被 replacement 覆盖，
+    remove 后无法恢复真实原函数）。
+    """
     owner, attr = _import_owner(target_path)
     original = getattr(owner, attr, None)
     originals = getattr(owner, "_REPLAY_ORIGINAL", None)
     if originals is None:
         originals = {}
         setattr(owner, "_REPLAY_ORIGINAL", originals)
-    originals[attr] = original
+    originals.setdefault(attr, original)
     setattr(owner, attr, replacement)
     _PATCHED_PATHS.add(target_path)
 

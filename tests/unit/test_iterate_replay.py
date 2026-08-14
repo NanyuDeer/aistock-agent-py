@@ -61,6 +61,37 @@ def test_industry_vector_search_short_circuits_in_replay(
     assert result == []
 
 
+def test_patch_is_idempotent_and_remove_cleans_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-3：重复 patch 保留首次原函数；remove 后清理 _REPLAY_ORIGINAL。"""
+    from aistock_agent.services import cache as cache_mod
+
+    target = "aistock_agent.services.cache.get_cached_briefing"
+    real_fn = cache_mod.get_cached_briefing
+
+    async def _fake_a(*args: object, **kwargs: object) -> object:
+        return "a"
+
+    async def _fake_b(*args: object, **kwargs: object) -> object:
+        return "b"
+
+    replay_layer._PATCHED_PATHS.clear()
+    # 首次 patch：记录真实原函数
+    replay_layer._patch(target, _fake_a)
+    # 重复 patch（不同 replacement）：不得覆盖首次记录的原函数
+    replay_layer._patch(target, _fake_b)
+    assert getattr(cache_mod, "get_cached_briefing") is _fake_b
+    originals = getattr(cache_mod, "_REPLAY_ORIGINAL", {})
+    assert originals.get("get_cached_briefing") is real_fn
+
+    # remove：恢复真实原函数 + 清理 _REPLAY_ORIGINAL 属性
+    replay_layer.remove_replay_patches()
+    assert getattr(cache_mod, "get_cached_briefing") is real_fn
+    assert not hasattr(cache_mod, "_REPLAY_ORIGINAL")
+    assert replay_layer._PATCHED_PATHS == set()
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个测试前清除回放开关环境变量，避免跨测试泄漏（不再用 os.environ.pop）。"""
