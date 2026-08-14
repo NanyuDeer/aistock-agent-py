@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aistock_agent.config import settings
 from aistock_agent.services.event_analysis_pipeline import run_event_analysis_pipeline
 from aistock_agent.services.event_conduction import (
     AnalysisReportPayload,
@@ -12,6 +13,17 @@ from aistock_agent.services.event_conduction import (
 )
 
 _MODULE = "aistock_agent.services.event_analysis_pipeline"
+
+
+@pytest.fixture(autouse=True)
+def _force_legacy_gi():
+    """强制走旧全量 GI 路径，隔离本地 .env.development / .env.production 配置。
+
+    settings 是模块加载时的单例，patch.dict(os.environ) 无法在读取后生效，
+    必须直接 patch settings.gi_incremental_enabled 属性。
+    """
+    with patch.object(settings, "gi_incremental_enabled", False):
+        yield
 
 
 def _payload(event_id: str) -> AnalysisReportPayload:

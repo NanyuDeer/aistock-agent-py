@@ -1049,3 +1049,152 @@ def test_validate_chain_keeps_core_even_if_not_in_candidates() -> None:
     assert len(result) == 1
     assert result[0]["industry"] == "种植业"  # 核心行业保留
     assert result[0].get("kg_unverified") is True  # 但标记未验证
+
+
+# ── Investment 一致性修复（focusIndustries 必须可追溯到 transmission.chain） ──
+
+
+def _investment_with_focus(industries: list[str]) -> dict[str, object]:
+    return {
+        "conclusion": "证券行业受益，短期景气改善",
+        "keyPoints": ["支撑判断"],
+        "focusIndustries": [
+            {"name": name, "direction": "positive", "reason": f"{name}受益"} for name in industries
+        ],
+        "opportunities": ["关注券商龙头"],
+        "risks": ["风险"],
+        "rating": "positive",
+    }
+
+
+def _found_evidence_meta(core: str, ups: list[str], downs: list[str]) -> dict[str, object]:
+    return {
+        "status": "found",
+        "degraded": False,
+        "scope": "one_hop",
+        "source": "IndustryKGService",
+        "industry": {"id": "kg-core", "name": core},
+        "upstream": [{"id": f"u{i}", "name": n, "leadingStocks": []} for i, n in enumerate(ups)],
+        "downstream": [{"id": f"d{i}", "name": n, "leadingStocks": []} for i, n in enumerate(downs)],
+        "graphVersion": "kg-2026-07-22",
+        "updatedAt": "2026-07-22T09:00:00Z",
+        "missingBoundary": None,
+    }
+
+
+def test_investment_cleared_when_chain_empty_and_graph_found():
+    """chain=[] 但图谱 found（证券+上下游）→ focusIndustries/opportunities 必须清空、rating neutral。
+
+    复现「竞价看龙头」脱节：transmission 未形成行业传导，investment 却凭
+    industryGraphEvidence 直接输出 证券/软件开发/IT服务。
+    """
+    transmission = {
+        "mechanism": "",
+        "variables": [],
+        "coreIndustry": {"name": "", "impact": "", "reason": ""},
+        "chain": [],
+        "industryGraphEvidence": [
+            _found_evidence_meta("证券", ["IT服务", "软件开发", "计算机设备"], [])
+        ],
+    }
+    investment = _investment_with_focus(["证券", "软件开发", "IT服务"])
+
+    result = transform_to_frontend(
+        {"summary": "竞价看龙头", "coreIndustry": "", "coreChanges": []},
+        transmission,
+        [],
+        investment,
+        {"eventId": "evt_jjkl", "title": "竞价看龙头", "source": ""},
+    )
+
+    inv = result["event_investment"]
+    assert inv["focusIndustries"] == []
+    assert inv["opportunities"] == []
+    assert inv["rating"] == "neutral"
+    assert "未形成明确行业传导" in inv["conclusion"]
+
+
+def test_investment_filters_focus_not_traceable_to_chain():
+    """chain=[半导体] → focusIndustries 只保留可追溯行业，软件开发被过滤。"""
+    transmission = {
+        "mechanism": "半导体需求回暖",
+        "variables": [],
+        "coreIndustry": {"name": "半导体", "impact": "", "reason": ""},
+        "chain": [
+            {"industry": "半导体", "relation": "核心行业", "level": 1,
+             "direction": "bullish", "impactStrength": 0.85, "reason": "核心"}
+        ],
+        "industryGraphEvidence": [],
+    }
+    investment = _investment_with_focus(["半导体", "半导体制造", "半导体设备", "软件开发"])
+
+    result = transform_to_frontend(
+        {"summary": "半导体业绩", "coreIndustry": "半导体", "coreChanges": []},
+        transmission,
+        [],
+        investment,
+        {"eventId": "evt_semi", "title": "半导体业绩", "source": ""},
+    )
+
+    names = [fi["name"] for fi in result["event_investment"]["focusIndustries"]]
+    assert "半导体" in names
+    assert "半导体制造" in names  # 粒度扩展保留
+    assert "半导体设备" in names  # 粒度扩展保留
+    assert "软件开发" not in names  # 不可追溯 → 过滤
+
+
+def test_investment_graph_evidence_not_solo_source():
+    """industryGraphEvidence 不能单独成为投资机会行业来源（chain 为空时清空）。"""
+    transmission = {
+        "mechanism": "",
+        "variables": [],
+        "coreIndustry": {"name": "", "impact": "", "reason": ""},
+        "chain": [],
+        "industryGraphEvidence": [
+            _found_evidence_meta("证券", ["软件开发"], ["IT服务"])
+        ],
+    }
+    investment = _investment_with_focus(["软件开发"])
+
+    result = transform_to_frontend(
+        {"summary": "无传导事件", "coreIndustry": "", "coreChanges": []},
+        transmission, [], investment,
+        {"eventId": "evt_x", "title": "无传导", "source": ""},
+    )
+    assert result["event_investment"]["focusIndustries"] == []
+
+
+def test_understanding_core_industry_preserved():
+    """understanding.coreIndustry 必须保留到 event_understanding 落库（此前被映射丢弃）。"""
+    understanding = {"summary": "竞价看龙头", "coreIndustry": "证券", "coreChanges": []}
+    result = transform_to_frontend(
+        understanding, None, [], None,
+        {"eventId": "evt_core", "title": "", "source": ""},
+    )
+    assert result["event_understanding"]["coreIndustry"] == "证券"
+
+
+def test_investment_normal_event_unchanged():
+    """正常事件（chain 非空 + focus 完全匹配）→ investment 结果不受影响。"""
+    transmission = {
+        "mechanism": "补贴延续",
+        "variables": [],
+        "coreIndustry": {"name": "新能源汽车", "impact": "", "reason": ""},
+        "chain": [
+            {"industry": "新能源汽车", "relation": "核心行业", "level": 1,
+             "direction": "bullish", "impactStrength": 0.72, "reason": "核心"}
+        ],
+        "industryGraphEvidence": [],
+    }
+    investment = _investment_with_focus(["新能源汽车"])
+
+    result = transform_to_frontend(
+        {"summary": "补贴延续", "coreIndustry": "新能源汽车", "coreChanges": []},
+        transmission, [], investment,
+        {"eventId": "evt_normal", "title": "补贴延续", "source": ""},
+    )
+    inv = result["event_investment"]
+    assert [fi["name"] for fi in inv["focusIndustries"]] == ["新能源汽车"]
+    assert inv["rating"] == "positive"
+    assert inv["opportunities"] == ["关注券商龙头"]
+
