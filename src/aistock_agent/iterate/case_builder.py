@@ -60,6 +60,7 @@ async def build_case(
     event_time: datetime,
     telegraph_records: list[dict[str, object]],
     market_snapshot: dict[str, object] | None = None,
+    industry_graph: dict[str, object] | None = None,
     meta: dict[str, object] | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, object]:
@@ -67,6 +68,9 @@ async def build_case(
 
     只保留 time <= event_time 的电报记录（T 窗口约束，防后验泄漏）。
     meta 非空时并入 case 顶层（随切片落盘，供评估阶段识别切片来源与窗口类型）。
+    industry_graph：B-5（2026-08-14）——构建期采集的行业图谱快照（含
+    snapshot_generated_at/graph_update_time/event_time 三时间戳 + posterior_exposure
+    标记）；采集失败传 None（快照侧降级，不阻断产片）。
     data_dir 覆盖 iterate 数据根目录（测试隔离用）；None 走 get_data_dir()。
     """
     if event_time.tzinfo is None:
@@ -85,6 +89,7 @@ async def build_case(
             "cls_telegraph": before,
             "market_snapshot": market_snapshot or {},
             "global_markets": _extract_global_markets(market_snapshot),
+            "industry_graph": industry_graph,
         },
         "ground_truth_ref": f"gt_{case_id}",
         "created_at": datetime.now(_TZ).isoformat(),

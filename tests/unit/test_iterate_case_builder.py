@@ -94,6 +94,53 @@ async def test_build_case_filters_post_event_records(iterate_data_dir: object) -
 
 
 @pytest.mark.asyncio
+async def test_build_case_writes_industry_graph_snapshot(
+    iterate_data_dir: object,
+) -> None:
+    """B-5：window_before.industry_graph 写入切片（三时间戳 + posterior_exposure 标记）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    industry_graph = {
+        "chains": [{"industry": "半导体", "nodes": ["上游", "下游"]}],
+        "snapshot_generated_at": "2026-07-31T09:00:00+08:00",
+        "graph_update_time": "2026-07-31T08:00:00+08:00",
+        "event_time": "2026-07-31T09:30:00+08:00",
+        "posterior_exposure": False,
+    }
+    case = await build_case(
+        adapter,
+        event_title="隔夜美股暴涨，A股高开",
+        event_time=t,
+        telegraph_records=_telegraph_around(t),
+        market_snapshot=_valid_snapshot(),
+        industry_graph=industry_graph,
+    )
+    stored = case["window_before"]["industry_graph"]
+    assert isinstance(stored, dict)
+    assert stored["chains"][0]["industry"] == "半导体"
+    assert stored["posterior_exposure"] is False
+    assert stored["snapshot_generated_at"]
+    assert stored["event_time"]
+
+
+@pytest.mark.asyncio
+async def test_build_case_industry_graph_none_when_missing(
+    iterate_data_dir: object,
+) -> None:
+    """B-5：未采集 industry_graph 时字段为 None（快照侧降级不阻断产片）。"""
+    t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)
+    adapter = get_adapter("review")
+    case = await build_case(
+        adapter,
+        event_title="隔夜美股暴涨，A股高开",
+        event_time=t,
+        telegraph_records=_telegraph_around(t),
+        market_snapshot=_valid_snapshot(),
+    )
+    assert case["window_before"]["industry_graph"] is None
+
+
+@pytest.mark.asyncio
 async def test_build_case_rejects_invalid_market_snapshot(iterate_data_dir: object) -> None:
     """I3 回归：非 schema-valid 的 market_snapshot（旧 shorthand 形状）在生成期抛 ValueError。"""
     t = datetime(2026, 7, 31, 9, 30, tzinfo=TZ)

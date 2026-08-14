@@ -119,12 +119,17 @@ async def build_review_case(
         if isinstance(src, dict) and src.get("kind") in {"event_evidence", "market_fact"}
     ]
 
+    # B-5（2026-08-14）：构建期采集行业图谱快照（裁决书 B 论题）——三时间戳 +
+    # posterior_exposure 标记；Node 端点未就绪/失败降级 None（不阻断产片）。
+    industry_graph = await _collect_industry_graph(event_time=cast(datetime, captured_at))
+
     case = await build_case(
         get_adapter("review"),
         event_title=event_title,
         event_time=cast(datetime, captured_at),
         telegraph_records=telegraph_records,
         market_snapshot=snapshot_dict,
+        industry_graph=industry_graph,
         meta={"snapshot_kind": "full", "t_window": "close"},
         data_dir=data_dir,
     )
@@ -138,6 +143,42 @@ async def build_review_case(
         "case_id": str(case["case_id"]),
         "rejected": bool(violations),
         "reasons": violations,
+    }
+
+
+async def _collect_industry_graph(
+    *, event_time: datetime
+) -> dict[str, object] | None:
+    """采集行业图谱快照（B-5）：Node /internal/industry/graph + 三时间戳标记。
+
+    返回结构：
+    {"chains": [...], "snapshot_generated_at": <采集时刻 ISO>,
+     "graph_update_time": <Node payload 内的时间，缺失用采集时刻>,
+     "event_time": <事件时间 ISO>, "posterior_exposure": False}
+    采集失败返回 None（降级，不阻断产片）。
+    """
+    from aistock_agent.services.data_client import NodeApiClient
+
+    # 采集时刻用上海时区（与切片事件时间对齐；datetime.now 本地时区在服务器
+    # 与容器间可能漂移，B-5 三时间戳要求可比较）
+    from aistock_agent.utils.date import shanghai_now
+
+    try:
+        payload = await NodeApiClient().get_industry_graph_full()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("industry_graph_collect_failed", error=str(exc))
+        return None
+    if not isinstance(payload, dict):
+        return None
+    collected_at = shanghai_now().isoformat()
+    return {
+        "chains": payload.get("chains", []),
+        "snapshot_generated_at": collected_at,
+        "graph_update_time": str(
+            payload.get("graph_update_time", collected_at)
+        ),
+        "event_time": event_time.isoformat(),
+        "posterior_exposure": False,
     }
 
 

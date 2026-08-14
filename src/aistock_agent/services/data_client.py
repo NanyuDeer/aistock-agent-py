@@ -7,7 +7,7 @@ httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 import json
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
@@ -642,6 +642,37 @@ class NodeApiClient:
             logger.error("review_report_read_invalid_data", url=url)
             return ReviewReportReadResult("unavailable")
         return ReviewReportReadResult("found", report)
+
+    async def get_industry_graph_full(self) -> dict[str, object] | None:
+        """读取 IndustryKG 全图快照（B-5，裁决书 B 论题：GET /internal/industry/graph）。
+
+        返回 Node payload（含 chains/graph_update_time 等）或 None（端点未就绪/
+        HTTP 失败/结构非法）。三时间戳与 posterior_exposure 标记由调用方补充
+        （build_iterate_cases 采集处注入 event_time 与采集时刻）。
+        """
+        url = f"{self._base_url}/internal/industry/graph"
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(
+                url, headers={"X-Internal-Token": self._token}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("industry_graph_full_request_error", error=str(exc))
+            return None
+        if response.status_code != 200:
+            logger.warning(
+                "industry_graph_full_http_error", status=response.status_code
+            )
+            return None
+        try:
+            payload = response.json()
+        except Exception:  # noqa: BLE001
+            logger.warning("industry_graph_full_invalid_json")
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            logger.warning("industry_graph_full_invalid_payload")
+            return None
+        return cast("dict[str, object]", payload["data"])
 
     async def get_industry_chain(self, industry_name: str) -> IndustryChainReadResult:
         """读取 IndustryKG 行业链，并保留 HTTP 与响应结构的失败分类。"""
