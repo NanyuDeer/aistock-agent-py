@@ -672,6 +672,52 @@ async def test_run_case_rejects_invalid_max_rounds(
             await run_case("review", "case_x", max_rounds=0)
 
 
+def test_mask_secrets_redacts_key_values() -> None:
+    """C-2：日志/错误文本中密钥值掩码。"""
+    from aistock_agent.iterate.variant_engine import _mask_secrets
+
+    masked = _mask_secrets(
+        "failed with API_KEY=sk-abc123 TOKEN=xyz password=secret123"
+    )
+    assert "sk-abc123" not in masked
+    assert "xyz" not in masked
+    assert "secret123" not in masked
+    assert "API_KEY=***" in masked
+
+
+@pytest.mark.asyncio
+async def test_replay_subprocess_env_allowlist(monkeypatch: object) -> None:
+    """C-2：子进程 env 白名单——未登记环境变量不传递（缩小密钥泄漏面）。"""
+    from aistock_agent.iterate import variant_engine
+
+    captured: dict[str, dict[str, str]] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b'{"final_response": "ok"}\n', b""
+
+    async def _fake_exec(*args: object, **kwargs: object) -> _FakeProc:
+        captured["env"] = kwargs.get("env", {})  # type: ignore[assignment]
+        return _FakeProc()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        variant_engine.asyncio, "create_subprocess_exec", _fake_exec
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # type: ignore[attr-defined]
+    monkeypatch.setenv("SECRET_LEAK_VAR", "should-not-pass")  # type: ignore[attr-defined]
+
+    result = await variant_engine._run_replay_subprocess("review", "case_c", "h")
+
+    env = captured["env"]
+    assert result["final_response"] == "ok"
+    assert "OPENAI_API_KEY" in env  # LLM 必需键保留
+    assert "SECRET_LEAK_VAR" not in env  # 未登记键不传递
+    assert env["REPLAY_CASE_ID"] == "case_c"
+    assert env["REPLAY_AGENT"] == "review"
+
+
 def test_recompute_best_excludes_failed_round_and_picks_r2(
     iterate_data_dir: object,
 ) -> None:

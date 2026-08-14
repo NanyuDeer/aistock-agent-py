@@ -12,6 +12,7 @@ import ast
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -462,6 +463,67 @@ def _needs_replay_retry(output: dict[str, object]) -> bool:
     return len(response) < _REPLAY_RETRY_MIN_OUTPUT_LEN
 
 
+#: 回放子进程 env 前缀白名单（C-2，2026-08-14）：只传递运行必需的配置，
+#: 其余环境变量（含未知密钥）不流入子进程，缩小泄漏面。
+_SUBPROCESS_ENV_PREFIX_ALLOW: tuple[str, ...] = (
+    "OPENAI_",
+    "DEEP_THINK_",
+    "QUICK_THINK_",
+    "REDIS_",
+    "TAVILY_",
+    "ITERATE_",
+    "REPLAY_",
+    "AISTOCK_",
+    "NODE_",
+    "STOCK_TRACE_",
+    "INSIGHT_",
+    "DOUYIN_",
+    "LANGSMITH_",
+    "QQ_SMTP_",
+    "HTTP_TIMEOUT_",
+    "LOG_LEVEL_",
+)
+_SUBPROCESS_ENV_EXACT_ALLOW: frozenset[str] = frozenset(
+    {
+        "PYTHONPATH",
+        "APP_ENV",
+        "HTTP_TIMEOUT_SECONDS",
+        "LOG_LEVEL",
+        "INTERNAL_API_TOKEN",
+        "HOST",
+        "PORT",
+        "CORS_ORIGINS",
+        "SCHEDULER_ENABLED",
+        "LLM_BASE_URL",
+    }
+)
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|auth|secret)\b[=:]\s*([^\s,;\"']+)"
+)
+
+
+def _mask_secrets(text: str) -> str:
+    """日志/错误文本中的密钥值掩码（C-2：密钥掩码防泄漏）。"""
+    return _SECRET_VALUE_RE.sub(lambda m: f"{m.group(1)}=***", text)
+
+
+def _build_replay_env(src_dir: str) -> dict[str, str]:
+    """回放子进程 env：白名单过滤 + 必需键注入（C-2，2026-08-14）。
+
+    REPLAY_CASE_ID/REPLAY_AGENT 由调用方（_run_replay_subprocess 的参数）注入，
+    不以 os.environ 为准（父进程可能残留上次回放的旧值）。
+    """
+    allowed = {
+        k: v
+        for k, v in os.environ.items()
+        if k in _SUBPROCESS_ENV_EXACT_ALLOW
+        or k.startswith(_SUBPROCESS_ENV_PREFIX_ALLOW)
+    }
+    allowed["PYTHONPATH"] = src_dir
+    return allowed
+
+
 async def _run_replay_subprocess(
     agent_id: str, case_id: str, variant_hash: str
 ) -> dict[str, object]:
@@ -469,12 +531,10 @@ async def _run_replay_subprocess(
     # 修正：brief 原写 parent.parent（解析为 src/aistock_agent，无法导入 aistock_agent 包），
     # 改为 parent.parent.parent 即 src 目录。
     src_dir = str(Path(__file__).resolve().parent.parent.parent)
-    env = {
-        **os.environ,
-        "REPLAY_CASE_ID": case_id,
-        "REPLAY_AGENT": agent_id,
-        "PYTHONPATH": src_dir,
-    }
+    env = _build_replay_env(src_dir)
+    # REPLAY_* 以函数参数为权威（C-2：不依赖父进程残留 env）
+    env["REPLAY_CASE_ID"] = case_id
+    env["REPLAY_AGENT"] = agent_id
     proc: asyncio.subprocess.Process | None = None
     try:
         # C-4 修复：回放改异步子进程（asyncio.create_subprocess_exec）——
