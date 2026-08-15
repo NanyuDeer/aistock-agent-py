@@ -504,6 +504,76 @@ def _build_chat_prediction_input(
     return payload
 
 
+# P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
+_PRICE_PATTERN = re.compile(r"\d+(?:\.\d{1,2})?\s*元")
+_RANGE_PATTERN = re.compile(r"\d{3,6}\s*[-~至]\s*\d{3,6}\s*(?:点|区间)?")
+# D5 补丁：裸数字点位——上下文词（指数/点位/大盘）+ 3-6 位数字（可带"点"后缀），
+# 拦截"目标点位 12000"/"上证指数 12000"式绕过；刻意不匹配"成交额达 1000 亿"（量词非点位）
+_POINT_PATTERN = re.compile(
+    r"(?:上证|深证|创业板|科创|沪深|大盘|指数|点位|目标点位)\s*\d{3,6}(?:\s*点)?")
+_ABSOLUTE_VERBS = ("维持", "涨至", "跌至", "看至", "目标价")  # D5：不加入"达"（防误杀量词）
+_REDACTED_TEXT = "（点位表述已按合规要求移除）"
+
+
+def _contains_absolute_point(text: str) -> bool:
+    """绝对点位检测：价格（X 元）/ 点位区间（3500-3600 点）/ 绝对动词 / 裸数字点位（D5）。
+
+    刻意不匹配"涨幅/涨跌幅 20%"（相对描述）与"围绕当前价位窄幅整理"（相对区间）——
+    产品红线禁的是绝对价格/点位（PREDICTION_CHAT_PROMPT 语义）。"""
+    if not text:
+        return False
+    if _PRICE_PATTERN.search(text):
+        return True
+    if _RANGE_PATTERN.search(text):
+        return True
+    if _POINT_PATTERN.search(text):
+        return True
+    return any(v in text for v in _ABSOLUTE_VERBS)
+
+
+_HARD_VALIDATED_FIELDS = ("metric_projection", "evolution_narrative", "attribution_summary")
+
+
+def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) -> PredictionResult:
+    """chat 预测后处理红线硬校验：命中绝对点位 → 剥离该字段并记独立日志（G5：不静默）。
+
+    覆盖全文本字段（A6：narrative 是绕行通道）：顶层 evolution_narrative/attribution_summary
+    以及每个 horizon 的 metric_projection。命中 → 用占位文案替换，绝不静默丢弃。"""
+    changes: dict[str, object] = {}
+    for fld in ("evolution_narrative", "attribution_summary"):
+        val = getattr(prediction, fld, None)
+        if isinstance(val, str) and _contains_absolute_point(val):
+            logger.warning(
+                "chat_prediction.hard_validation_failed",
+                field=fld,
+                symbol=symbol,
+            )
+            changes[fld] = _REDACTED_TEXT
+    # horizon 级 metric_projection（prediction_jsonb 全文本覆盖，A6）
+    new_horizons: list[object] = []
+    for h in prediction.horizons:
+        mp = getattr(h, "metric_projection", None)
+        if isinstance(mp, str) and _contains_absolute_point(mp):
+            logger.warning(
+                "chat_prediction.hard_validation_failed",
+                field="metric_projection",
+                symbol=symbol,
+            )
+            new_horizons.append(h.model_copy(update={"metric_projection": _REDACTED_TEXT}))
+        else:
+            new_horizons.append(h)
+    horizons_changed = (
+        len(new_horizons) != len(prediction.horizons)
+        or any(n is not o for n, o in zip(new_horizons, prediction.horizons))
+    )
+    if changes or horizons_changed:
+        update = dict(changes)
+        if horizons_changed:
+            update["horizons"] = new_horizons
+        prediction = prediction.model_copy(update=update)
+    return prediction
+
+
 async def run_chat_prediction(
     snapshot: dict, news: list[dict], context: dict
 ) -> PredictionResult | None:
@@ -550,6 +620,9 @@ async def run_chat_prediction(
                 "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
             }
         )
+        # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
+        prediction = _hard_validate_chat_prediction(
+            prediction, str(snapshot.get("symbol", "")))
         # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
         # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
         # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)

@@ -579,6 +579,47 @@ def _chat_prediction(text: str) -> PredictionResult:
 
 
 @pytest.mark.asyncio
+async def test_chat_prediction_hard_validation_redacts_absolute_point():
+    """P0-3：chat 输出含绝对点位（如'上证指数维持 3500-3600 区间'）→ 剥离 + 独立日志，不静默。"""
+    from aistock_agent.services.prediction_service import _contains_absolute_point
+
+    assert _contains_absolute_point("上证指数维持 3500-3600 区间") is True
+    assert _contains_absolute_point("涨至 10.5 元") is True
+    assert _contains_absolute_point("围绕当前价位窄幅整理") is False
+    assert _contains_absolute_point("涨幅 20%，成交放大") is False  # 不误杀相对/涨幅描述
+    # D5：裸数字点位补丁——无动词/区间/元后缀的绝对点位也要拦截
+    assert _contains_absolute_point("目标点位 12000") is True
+    assert _contains_absolute_point("上证指数 12000") is True
+    assert _contains_absolute_point("成交额达 1000 亿") is False  # D5：量词描述不误杀
+
+    # 端到端：构造含点位的 LLM 输出 → run_chat_prediction 返回剥离后结果
+    snapshot = {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}}
+    prediction = PredictionResult(
+        schema_version="2.0",   # D6：与 schema_version 升 2.0 同步（H3 版本分桶）
+        prediction_status="hypothesis",
+        horizons=[{"horizon": "short", "remaining_estimate": "1-2周", "phase": "peaking",
+                   "direction": "bullish", "target": "上证指数",
+                   "metric_projection": "上证指数维持 3500-3600 区间",
+                   "confidence": "medium"}],
+        evolution_narrative="短线情绪延续，上证指数看至 3600 点。",
+        evolution_steps=[],
+        risks=[{"factor": "政策", "invalidation": "不及预期"}],
+        evidence_ids=["quote:600519"],
+    )
+    with (
+        patch("aistock_agent.services.prediction_service.get_quick_think"),
+        patch(
+            "aistock_agent.services.prediction_service.with_chat_structured_output"
+        ) as structured,
+    ):
+        structured.return_value.ainvoke = AsyncMock(return_value=prediction)
+        result = await run_chat_prediction(snapshot, [], {"question": "大盘会涨到哪"})
+    assert result is not None
+    assert "3500" not in result.horizons[0].metric_projection
+    assert "3600" not in result.evolution_narrative
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "snapshot_kwargs",
     [
