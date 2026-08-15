@@ -2,7 +2,7 @@
 
 target 是 LLM 自由文本（schemas/prediction.py），验证器必须区分（D4 扩四类）：
 - index：已知指数别名 → 可验证（走指数日 K）
-- sector：板块/概念词 → insufficient（板块源 P1-5 未接，reason 区分）
+- sector：板块/概念词 → 可验证（resolve_sector_target 经 Node 三级匹配 → 板块日 K，H3）
 - stock：6 位个股代码 → insufficient（个股源未接，reason 区分）
 - unknown：抽象词/错别字 → insufficient（target 漂移信号，P0-2 监控对象）
 """
@@ -37,3 +37,23 @@ def classify_target(target: str) -> str:
     if any(m in target for m in _SECTOR_MARKERS):
         return "sector"
     return "unknown"
+
+
+async def resolve_sector_target(target: str) -> dict[str, str] | None:
+    """板块 target → {ts_code, name}（经 Node resolve 三级匹配）。剥后缀后为空 → None。"""
+    from aistock_agent.services.data_client import node_api
+
+    if not target or not target.strip():
+        return None
+    stripped = target.strip()
+    for m in _SECTOR_MARKERS:
+        if stripped.endswith(m):
+            stripped = stripped[: -len(m)].strip()
+            break
+    if not stripped:
+        return None
+    matched = await node_api.resolve_ths_name(stripped)
+    if not isinstance(matched, dict):
+        return None
+    # node 返回 dict[str, object]，此处收窄并定型为 dict[str, str]（mypy strict 下 dict 值型逆变）
+    return {str(k): str(v) for k, v in matched.items()}

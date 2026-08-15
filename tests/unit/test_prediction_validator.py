@@ -318,3 +318,104 @@ async def test_v2_neutral_grade_is_null():
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
     assert "grade" not in entry
+
+
+def _pending_sector_record(due="2026-08-10", direction="bullish", target="半导体板块"):
+    return _pending_record(due=due, direction=direction, target=target)
+
+
+@pytest.mark.asyncio
+async def test_verify_sector_target_resolves_and_hit():
+    """H3/H8：板块 target resolve 命中 → 走 sector kline，entry 带 target_type/
+    matched_ts_code/matched_name/threshold_version/prediction_id。"""
+    record = _pending_sector_record(direction="bullish")
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.0},  # >0 hit
+             {"trade_date": "2026-08-11", "pct_chg": 0.3},
+             {"trade_date": "2026-08-12", "pct_chg": -0.2},
+             {"trade_date": "2026-08-13", "pct_chg": -0.1}]
+    with (
+        patch.object(
+            pv.node_api, "resolve_ths_name",
+            new=AsyncMock(return_value={"ts_code": "881121.TI", "name": "半导体"}),
+        ),
+        patch.object(pv.node_api, "get_ths_daily_range", new=AsyncMock(return_value=kline)),
+        patch.object(
+            pv.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            pv.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await pv.run_once()
+    assert updated == 1
+    entry = update.await_args.args[2]
+    assert entry["result"] == "hit"
+    assert entry["target_type"] == "sector"
+    assert entry["matched_ts_code"] == "881121.TI"
+    assert entry["matched_name"] == "半导体"
+    assert entry["threshold_version"] == "1.0"
+    assert "prediction_id" in entry
+
+
+@pytest.mark.asyncio
+async def test_verify_sector_target_unresolved_is_no_source():
+    """H2：板块 resolve 未命中 → insufficient/subtype=no_source，reason 含 '未匹配板块名'。"""
+    record = _pending_sector_record(target="不存在的板块")
+    with (
+        patch.object(pv.node_api, "resolve_ths_name", new=AsyncMock(return_value=None)),
+        patch.object(
+            pv.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            pv.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        await pv.run_once()
+    entry = update.await_args.args[2]
+    assert entry["result"] == "insufficient"
+    assert entry["subtype"] == "no_source"
+    assert "未匹配板块名" in entry["reason"]
+
+
+@pytest.mark.asyncio
+async def test_sector_neutral_uses_sector_threshold():
+    """H3：板块 neutral 阈值 0.25%（index 0.5% 复用会使命中率显著偏低——G0c 实证）。"""
+    record = _pending_sector_record(direction="neutral")
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 0.3},  # |0.3|>0.25 → 非 neutral hit
+             {"trade_date": "2026-08-11", "pct_chg": 0.4},
+             {"trade_date": "2026-08-12", "pct_chg": -0.4},
+             {"trade_date": "2026-08-13", "pct_chg": 0.35}]
+    with (
+        patch.object(
+            pv.node_api, "resolve_ths_name",
+            new=AsyncMock(return_value={"ts_code": "885525.TI", "name": "白酒概念"}),
+        ),
+        patch.object(pv.node_api, "get_ths_daily_range", new=AsyncMock(return_value=kline)),
+        patch.object(
+            pv.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            pv.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        await pv.run_once()
+    entry = update.await_args.args[2]
+    assert entry["result"] == "miss"  # 板块阈值下无 |pct|<0.25 日（index 0.5 阈值下为 hit）
