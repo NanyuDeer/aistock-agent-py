@@ -19,21 +19,13 @@ from typing import cast
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.prediction_targets import INDEX_TARGETS, classify_target
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
-# target（指数名）→ 6 位代码（G6 已外置到 prediction_targets.py，Task 5 迁移）
-_INDEX_CODE_MAP: dict[str, str] = {
-    "上证指数": "000001",
-    "上证": "000001",
-    "深证成指": "399001",
-    "深成指": "399001",
-    "创业板指": "399006",
-    "创业板": "399006",
-    "科创50": "000688",
-    "沪深300": "000300",
-}
+# target（指数名）→ 6 位代码（G6 外置到 prediction_targets.py；别名兼容既有引用名）
+_INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 
 # neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
 _NEUTRAL_PCT_THRESHOLD = 0.5
@@ -119,8 +111,11 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
         "methodology_version": _METHODOLOGY_VERSION,
     }
     if code is None:
+        kind = classify_target(target)
+        src = {"sector": "板块数据源（P1-5 未接）", "stock": "个股数据源（未接）"}.get(
+            kind, "抽象 target 漂移（LLM 输出质量问题）")
         return {**base, "result": "insufficient", "subtype": "no_source", "actual": "",
-                "reason": f"target '{target}' 暂无验证数据源"}
+                "reason": f"target '{target}' 无验证数据源：{src}"}
     rows = await _fetch_index_window(code, due_date)
     if rows is None:
         # D7：数据源故障 ≠ 等窗口，必须落 insufficient（可追溯）
@@ -165,6 +160,7 @@ async def run_once() -> int:
         logger.info("prediction_validate_no_pending")
         return 0
     updated = 0
+    target_counter: dict[str, int] = {}
     for record in records:
         record_id = record.get("id")
         if not isinstance(record_id, int):
@@ -178,6 +174,11 @@ async def run_once() -> int:
                 continue
             if due_date > today.isoformat() or horizon in verification:
                 continue
+            # P0-2：target 漂移监控——对待验证档位统计 target 分类分布
+            entry_h = _extract_horizon_entry(record.get("prediction"), horizon) or {}
+            tgt = str(entry_h.get("target") or "?")
+            kind = classify_target(tgt)
+            target_counter[kind] = target_counter.get(kind, 0) + 1
             entry = await _verify_horizon(record, horizon)
             if entry.get("wait"):
                 logger.info("prediction_validate_wait_window", id=record_id, horizon=horizon)
@@ -199,4 +200,7 @@ async def run_once() -> int:
                     error=str(exc),
                     exc_info=True,
                 )
+    # 日志输出（P0-2）
+    if target_counter:
+        logger.info("prediction_target_distribution", distribution=target_counter)
     return updated
