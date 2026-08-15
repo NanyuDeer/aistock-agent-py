@@ -31,6 +31,7 @@ class ChatRunState:
     events: list[dict] = field(default_factory=list)
     waiters: set[asyncio.Event] = field(default_factory=set)
     done: bool = False
+    finalizing: bool = False  # producer 已产出终态 result，进入收尾（cancel 拒绝窗口）
     cancelled: bool = False  # cancelled 终态标记（done 后为 True 表示被用户停止）
     result: dict | None = None
     created_at: float = field(default_factory=time.monotonic)
@@ -138,7 +139,7 @@ class ChatTaskManager:
     def cancel(self, session_id: str) -> bool:
         """停止 session 的活跃 run；无活跃 run 返回 False（stop_status not_found 依据）。"""
         s = self._states.get(session_id)
-        if s is None or s.done:
+        if s is None or s.done or s.finalizing:
             return False
         s.cancel()
         return True

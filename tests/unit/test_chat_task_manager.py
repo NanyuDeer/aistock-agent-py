@@ -180,3 +180,48 @@ async def test_pending_confirm_expires_after_ttl(monkeypatch):
         {"request_id": "r1", "question": "q", "options": [], "run_id": "r1", "user_id": None},
     )
     assert ctm.get_pending_confirm("s1") is None
+
+
+# ── 问题 20 B：finalizing 护栏（cancel 不误杀将成之轮） ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_when_finalizing():
+    """producer 已产出终态 result（finalizing=True）后 cancel 应拒绝（防误杀将成之轮）。"""
+    from aistock_agent.services.chat_task_manager import ChatTaskManager
+
+    manager = ChatTaskManager()
+
+    async def producer(state):
+        state.result = {"type": "done", "content": "ok"}
+        state.finalizing = True  # 复刻 _runner 在 result 赋后置位
+        await asyncio.sleep(0.05)  # 保持 finalizing 窗口：result 已产出但 done 未置位
+        return state.result
+
+    state = manager.start("s1", "r1", producer)
+    assert state is not None
+    # 让 producer 进入 finalizing 窗口（result 已产出、done 未置位）
+    await asyncio.sleep(0)
+    # 窗口内 cancel 必须被拒绝；RED 阶段（无护栏）返回 True → 断言失败
+    assert manager.cancel("s1") is False
+    await state.task
+    # 未误杀：终态保持 done，而非被取消成 cancelled
+    assert state.result == {"type": "done", "content": "ok"}
+    assert state.cancelled is False
+    await manager._cleanup_for_test()
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_when_done():
+    """done 后 cancel 返回 False（既有语义，回归锁定）。"""
+    from aistock_agent.services.chat_task_manager import ChatTaskManager
+
+    manager = ChatTaskManager()
+
+    async def producer(state):
+        return {"type": "done", "content": "ok"}
+
+    manager.start("s2", "r1", producer)
+    await asyncio.sleep(0)
+    assert manager.cancel("s2") is False
+    await manager._cleanup_for_test()
