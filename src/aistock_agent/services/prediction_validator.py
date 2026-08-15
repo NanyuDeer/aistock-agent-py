@@ -19,7 +19,11 @@ from typing import cast
 import structlog
 
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.prediction_stats import baseline_neutral_summary, hit_rate_summary
+from aistock_agent.services.prediction_stats import (
+    baseline_neutral_summary,
+    bucket_summary,
+    hit_rate_summary,
+)
 from aistock_agent.services.prediction_targets import (
     INDEX_TARGETS,
     classify_target,
@@ -316,6 +320,7 @@ async def _report_stats() -> None:
     if not entries:
         return
     summary = hit_rate_summary(entries)
+    buckets = bucket_summary(entries)
     baseline = baseline_neutral_summary(entries)
     logger.info(
         "prediction_stats_summary",
@@ -324,4 +329,5 @@ async def _report_stats() -> None:
         ci=summary["ci"],
         sufficient_sample=summary["sufficient_sample"],
         baseline_hit_rate=baseline["hit_rate"],
+        buckets=buckets,
     )
