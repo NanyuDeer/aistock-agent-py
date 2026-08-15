@@ -35,7 +35,7 @@ _NEUTRAL_PCT_THRESHOLD = 0.5
 _WINDOW_DAYS_AFTER_DUE = 3      # v2 验证窗口 [due, due+3] 交易日
 _METHODOLOGY_VERSION = "2.0"   # v2 口径版本（H1 版本分桶；与 schema_version 2.0 关联，D6）
 _STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
-_KLINE_FETCH_DAYS = 200        # 拉取最近交易日上限（long 档 120 + 窗口 3 富余）
+_KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_window index 分支）
 
 
 def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object] | None:
@@ -51,17 +51,35 @@ def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object
     return None
 
 
-async def _fetch_index_window(code: str, due_date: str) -> list[dict[str, object]] | None:
-    """取指数最近日 K（升序），仅保留 {trade_date, pct_chg}。失败/空返回 None（=数据源故障）。"""
-    rows = await node_api.get_index_kline(code, _KLINE_FETCH_DAYS)
-    if not rows:
+def _range_around_due(due_date: str) -> tuple[str, str]:
+    """due 前后缓冲窗口（起点=due-20 自然日，终点=due+10 自然日），YYYYMMDD。"""
+    from datetime import datetime, timedelta
+
+    d = datetime.strptime(due_date, "%Y-%m-%d")
+    return ((d - timedelta(days=20)).strftime("%Y%m%d"),
+            (d + timedelta(days=10)).strftime("%Y%m%d"))
+
+
+async def _fetch_kline_window(
+    kind: str, code: str, due_date: str
+) -> list[dict[str, object]] | None:
+    """按 due 区间拉取日 K（统一 index/sector）。返回升序 [{trade_date, pct_chg}]；
+    pct_chg=None 行保留占位（H7，由调用方计数）。失败/空返回 None（=数据源故障）。"""
+    start, end = _range_around_due(due_date)
+    if kind == "sector":
+        raw = await node_api.get_ths_daily_range(code, start, end)
+    else:
+        raw = await node_api.get_index_kline(
+            code, _KLINE_FETCH_DAYS, start_date=start, end_date=end)
+    if not raw:
         return None
     parsed: list[dict[str, object]] = []
-    for r in rows:
+    for r in raw:
         d = r.get("trade_date")
         pct = r.get("pct_chg")
-        if isinstance(d, str) and isinstance(pct, int | float):
-            parsed.append({"trade_date": d, "pct_chg": float(pct)})
+        if isinstance(d, str):
+            parsed.append(
+                {"trade_date": d, "pct_chg": pct if isinstance(pct, int | float) else None})
     parsed.sort(key=lambda x: str(x["trade_date"]))
     return parsed or None
 
@@ -117,11 +135,17 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
             kind, "抽象 target 漂移（LLM 输出质量问题）")
         return {**base, "result": "insufficient", "subtype": "no_source", "actual": "",
                 "reason": f"target '{target}' 无验证数据源：{src}"}
-    rows = await _fetch_index_window(code, due_date)
+    # kind="index"（Task 7 新增 sector 分支复用本函数；此处先保留 index 语义）
+    rows = await _fetch_kline_window("index", code, due_date)
     if rows is None:
         # D7：数据源故障 ≠ 等窗口，必须落 insufficient（可追溯）
         return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
                 "reason": "指数行情不可用"}
+    # H7：缺值占位行计数，>0 落 insufficient 不静默
+    missing = sum(1 for r in rows if r.get("pct_chg") is None)
+    if missing > 0:
+        return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
+                "reason": f"行情数据缺失 {missing} 行（pct_chg 空）"}
     idx = next((i for i, r in enumerate(rows) if r.get("trade_date") == due_date), None)
     if idx is None and is_approximate:
         # G2 补丁：越年近似档（due 非真实交易日）→ 取 >= due 最近真实交易日兜底，
@@ -133,7 +157,7 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
         return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
                 "reason": f"到期日 {due_date} 行情缺失"}
     window = [float(cast(float, r["pct_chg"])) for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
-    # 注：_fetch_index_window 已把 pct_chg 归一为 float；此处 cast 规避 mypy object 类型
+    # 注：_fetch_kline_window 已在上方过滤并计数 None 占位（H7）；此处 cast 规避 mypy object 类型
     if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
         # D1：窗口未满（due+3 尚未到）→ wait，run_once continue 不回写，下轮补齐再验
         return {**base, "wait": True,

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.services import prediction_validator
+from aistock_agent.services import prediction_validator as pv
 from aistock_agent.services.prediction_validator import _INDEX_CODE_MAP, run_once
 
 
@@ -177,6 +178,33 @@ async def test_v2_bullish_no_sign_hit_is_miss_without_fallback():
     assert updated == 1
     entry = update.await_args.args[2]
     assert entry["result"] == "miss"
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_window_index_preserves_none_rows():
+    """H7：pct_chg=None 行保留占位（不得静默丢行错位）。"""
+    rows = [
+        {"trade_date": "2026-08-10", "pct_chg": None},  # 缺值占位
+        {"trade_date": "2026-08-11", "pct_chg": 1.5},
+    ]
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)) as m:
+        out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": None},
+                   {"trade_date": "2026-08-11", "pct_chg": 1.5}]
+    # 必须携带区间参数（非 200 天滚动）
+    _, kwargs = m.call_args
+    assert kwargs.get("start_date") and kwargs.get("end_date")
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_window_sector_calls_ths_range():
+    with patch.object(
+        pv.node_api, "get_ths_daily_range",
+        new=AsyncMock(return_value=[{"trade_date": "2026-08-10", "pct_chg": 0.5}]),
+    ) as m:
+        out = await pv._fetch_kline_window("sector", "885525.TI", "2026-08-10")
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5}]
+    assert m.await_args.args[0] == "885525.TI"
 
 
 @pytest.mark.asyncio
