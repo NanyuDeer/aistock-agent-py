@@ -145,6 +145,17 @@ def start_scheduler() -> None:
         name="prediction due validation",
         replace_existing=True,
     )
+    # 预测验证统计出口（D3，独立调度与验证解耦）：16:05 验证落库后汇总命中率/baseline
+    scheduler.add_job(
+        _run_prediction_stats_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_prediction_stats_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="prediction_stats",
+        name="prediction hit-rate stats",
+        replace_existing=True,
+    )
 
     if settings.quick_snapshot_enabled:
         # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
@@ -854,4 +865,18 @@ async def _run_prediction_validate_task() -> None:
         logger.info("scheduler_prediction_validate_done", updated=updated)
     except Exception as e:
         logger.error("scheduler_prediction_validate_failed", error=str(e), exc_info=True)
+
+
+async def _run_prediction_stats_task() -> None:
+    """预测验证统计出口（D3，交易日 16:05 独立调度，与验证解耦）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="prediction_stats")
+        return
+    from aistock_agent.services.prediction_validator import _report_stats  # noqa: PLC0415
+
+    try:
+        await _report_stats()
+        logger.info("scheduler_prediction_stats_done")
+    except Exception as e:
+        logger.error("scheduler_prediction_stats_failed", error=str(e), exc_info=True)
 

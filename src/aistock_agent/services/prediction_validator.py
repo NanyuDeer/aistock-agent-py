@@ -1,30 +1,41 @@
 """预测到期验证服务 — 收盘后扫描到期预测，对照实际行情判 hit/miss 并回写。
 
-v1 对照口径：指数 target 用 /internal/index/quotes 当日涨跌幅符号 vs 预测方向；
-非指数 target 数据源未接入 → 记为 insufficient（v1 限制，后续迭代扩展）。
+v2 对照口径（P0 预测验证升级）：
+- 数据源：指数走 /internal/index/:code/kline（Tushare index_daily 历史日 K），
+  不再用当日 /internal/index/quotes 快照。
+- 判定：取 [due, due+3 交易日] 窗口日 K 涨跌幅符号命中主判（bullish 任一日>0→hit，
+  bearish 任一日<0→hit，neutral 任一日 |pct|<0.5%→hit）；无累计净值兜底（G13：bullish/bearish
+  下无符号命中日 ⇒ 累计必不命中，数学死代码）。
+- grade：仅 bullish/bearish 计算（G14）；strong_hit=due 当日命中或窗口内同向 |pct|>=5%，
+  strong_miss=全反向且窗口内反向 |pct|>=5%；neutral 恒不输出 grade。
+- approximate 档（越年近似到期日）显式标记 approximate=True 不进主统计（H2）。
+- 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
+- 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
+  数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
 """
+
+from typing import cast
 
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.prediction_stats import baseline_neutral_summary, hit_rate_summary
+from aistock_agent.services.prediction_targets import INDEX_TARGETS, classify_target
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
-# target（指数名）→ /internal/index/quotes 的 6 位代码
-_INDEX_CODE_MAP: dict[str, str] = {
-    "上证指数": "000001",
-    "上证": "000001",
-    "深证成指": "399001",
-    "深成指": "399001",
-    "创业板指": "399006",
-    "创业板": "399006",
-    "科创50": "000688",
-    "沪深300": "000300",
-}
+# target（指数名）→ 6 位代码（G6 外置到 prediction_targets.py；别名兼容既有引用名）
+_INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 
 # neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
 _NEUTRAL_PCT_THRESHOLD = 0.5
+
+# v2 口径常量（H1/D1/D6/G13/G14）
+_WINDOW_DAYS_AFTER_DUE = 3      # v2 验证窗口 [due, due+3] 交易日
+_METHODOLOGY_VERSION = "2.0"   # v2 口径版本（H1 版本分桶；与 schema_version 2.0 关联，D6）
+_STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
+_KLINE_FETCH_DAYS = 200        # 拉取最近交易日上限（long 档 120 + 窗口 3 富余）
 
 
 def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object] | None:
@@ -40,76 +51,127 @@ def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object
     return None
 
 
-async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, object]:
-    """对单档位做到期对照：resolve target → 取实际信号 → hit/miss/insufficient。
+async def _fetch_index_window(code: str, due_date: str) -> list[dict[str, object]] | None:
+    """取指数最近日 K（升序），仅保留 {trade_date, pct_chg}。失败/空返回 None（=数据源故障）。"""
+    rows = await node_api.get_index_kline(code, _KLINE_FETCH_DAYS)
+    if not rows:
+        return None
+    parsed: list[dict[str, object]] = []
+    for r in rows:
+        d = r.get("trade_date")
+        pct = r.get("pct_chg")
+        if isinstance(d, str) and isinstance(pct, int | float):
+            parsed.append({"trade_date": d, "pct_chg": float(pct)})
+    parsed.sort(key=lambda x: str(x["trade_date"]))
+    return parsed or None
 
-    近似档（prediction.due_dates_approximate 含该档，P2 裁决：越年到期日为近似）
-    → reason 加 ``(approximate_due_date)`` 前缀，供统计分桶归因（区分于精确档）。
+
+def _judge_window(direction: str, window: list[float]) -> tuple[str, str | None]:
+    """符号命中主判（G13：无累计净值兜底）。返回 (result, grade)。
+
+    - bullish: 任一日 >0 → hit；否则 miss
+    - bearish: 任一日 <0 → hit；否则 miss
+    - neutral: 任一日 |pct|<0.5% → hit；否则 miss（阈值 _NEUTRAL_PCT_THRESHOLD）
+    grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=5%；
+    strong_miss = 全反向 且 窗口内反向 |pct|>=5%；否则 hit/miss。neutral 恒 None。
+    """
+    if direction == "bullish":
+        if not any(p > 0 for p in window):
+            return "miss", ("strong_miss" if any(p <= -_STRONG_PCT for p in window) else "miss")
+        strong = window[0] > 0 or any(p >= _STRONG_PCT for p in window)
+        return "hit", ("strong_hit" if strong else "hit")
+    if direction == "bearish":
+        if not any(p < 0 for p in window):
+            return "miss", ("strong_miss" if any(p >= _STRONG_PCT for p in window) else "miss")
+        strong = window[0] < 0 or any(p <= -_STRONG_PCT for p in window)
+        return "hit", ("strong_hit" if strong else "hit")
+    return ("hit" if any(abs(p) < _NEUTRAL_PCT_THRESHOLD for p in window) else "miss"), None
+
+
+async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, object]:
+    """v2 到期验证：取 [due, due+3] 窗口 kline 符号命中主判。
+
+    entry 新增 methodology_version（H1）、grade（仅 bullish/bearish，G14）、
+    baseline_neutral（同窗口恒中性预测命中标记，供 baseline 对照，H6）、
+    approximate（越年近似档结构化标记，统计剔除，H2）。
+    返回语义（D1/D7）：正常 → hit/miss entry；窗口未满 → {"wait": True}（run_once 收到
+    wait 则 continue 不回写，下次再验）；数据源故障/无数据 → insufficient entry（落库可追溯）。
     """
     prediction = record.get("prediction")
     entry = _extract_horizon_entry(prediction, horizon) or {}
     approx = prediction.get("due_dates_approximate") if isinstance(prediction, dict) else None
     is_approximate = isinstance(approx, list) and horizon in approx
+    due_dates = record.get("due_dates")
+    due_date = str(due_dates.get(horizon) or "") if isinstance(due_dates, dict) else ""
     target = str(entry.get("target") or "")
     code = _INDEX_CODE_MAP.get(target)
     today = shanghai_today().isoformat()
+    base: dict[str, object] = {
+        "horizon": horizon,
+        "verified_at": today,
+        "methodology_version": _METHODOLOGY_VERSION,
+    }
     if code is None:
-        return {
-            "horizon": horizon,
-            "result": "insufficient",
-            "actual": "",
-            "reason": f"target '{target}' 暂无验证数据源",
-            "verified_at": today,
-        }
-
-    data = await node_api.get(f"/internal/index/quotes?symbols={code}")
-    pct: float | None = None
-    if isinstance(data, dict):
-        indices = data.get("indices")
-        if isinstance(indices, list):
-            for idx in indices:
-                if isinstance(idx, dict) and str(idx.get("index")) == code:
-                    raw = idx.get("changePercent")
-                    if isinstance(raw, int | float):
-                        pct = float(raw)
-                    break
-    if pct is None:
-        return {
-            "horizon": horizon,
-            "result": "insufficient",
-            "actual": "",
-            "reason": "指数行情不可用",
-            "verified_at": today,
-        }
-
+        kind = classify_target(target)
+        src = {"sector": "板块数据源（P1-5 未接）", "stock": "个股数据源（未接）"}.get(
+            kind, "抽象 target 漂移（LLM 输出质量问题）")
+        return {**base, "result": "insufficient", "subtype": "no_source", "actual": "",
+                "reason": f"target '{target}' 无验证数据源：{src}"}
+    rows = await _fetch_index_window(code, due_date)
+    if rows is None:
+        # D7：数据源故障 ≠ 等窗口，必须落 insufficient（可追溯）
+        return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
+                "reason": "指数行情不可用"}
+    idx = next((i for i, r in enumerate(rows) if r.get("trade_date") == due_date), None)
+    if idx is None and is_approximate:
+        # G2 补丁：越年近似档（due 非真实交易日）→ 取 >= due 最近真实交易日兜底，
+        # 消除 long 档系统性 no_data；approximate=True 标记由 H2 剔除主统计
+        idx = next((i for i, r in enumerate(rows) if str(r.get("trade_date")) >= due_date), None)
+        if idx is not None:
+            base["due_matched"] = str(rows[idx]["trade_date"])
+    if idx is None:
+        return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
+                "reason": f"到期日 {due_date} 行情缺失"}
+    window = [float(cast(float, r["pct_chg"])) for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
+    # 注：_fetch_index_window 已把 pct_chg 归一为 float；此处 cast 规避 mypy object 类型
+    if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
+        # D1：窗口未满（due+3 尚未到）→ wait，run_once continue 不回写，下轮补齐再验
+        return {**base, "wait": True,
+                "reason": f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"}
     direction = str(entry.get("direction") or "neutral")
-    actual_str = f"{pct:+.2f}%"
-    if direction == "bullish":
-        result = "hit" if pct > 0 else "miss"
-    elif direction == "bearish":
-        result = "hit" if pct < 0 else "miss"
-    else:
-        result = "hit" if abs(pct) < _NEUTRAL_PCT_THRESHOLD else "miss"
-    reason = f"方向={direction}, 实际涨跌幅={actual_str}"
+    result, grade = _judge_window(direction, window)
+    cumulative = sum(window)
+    actual_str = f"{cumulative:+.2f}%"
+    reason = f"方向={direction}, 窗口累计={actual_str}"
     if is_approximate:
         reason = f"(approximate_due_date) {reason}"
-    return {
-        "horizon": horizon,
-        "result": result,
-        "actual": actual_str,
-        "reason": reason,
-        "verified_at": today,
-    }
+    out = {**base, "result": result, "actual": actual_str, "reason": reason,
+           "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
+           "baseline_neutral": any(abs(p) < _NEUTRAL_PCT_THRESHOLD for p in window)}
+    if grade is not None:
+        out["grade"] = grade
+    return out
 
 
 async def run_once() -> int:
     """扫描到期预测并回写验证结果。返回成功回写的档位数。"""
     today = shanghai_today()
-    records = await node_api.list_pending_predictions()
+    records: list[dict[str, object]] = []
+    cursor: int | None = None
+    while True:
+        batch = await node_api.list_pending_predictions(limit=200, before_id=cursor)
+        if not batch:
+            break
+        records.extend(batch)
+        last_id = batch[-1].get("id")
+        cursor = cast(int | None, last_id)
+        if not isinstance(cursor, int) or len(batch) < 200:
+            break
     if not records:
         logger.info("prediction_validate_no_pending")
         return 0
     updated = 0
+    target_counter: dict[str, int] = {}
     for record in records:
         record_id = record.get("id")
         if not isinstance(record_id, int):
@@ -123,7 +185,15 @@ async def run_once() -> int:
                 continue
             if due_date > today.isoformat() or horizon in verification:
                 continue
+            # P0-2：target 漂移监控——对待验证档位统计 target 分类分布
+            entry_h = _extract_horizon_entry(record.get("prediction"), horizon) or {}
+            tgt = str(entry_h.get("target") or "?")
+            kind = classify_target(tgt)
+            target_counter[kind] = target_counter.get(kind, 0) + 1
             entry = await _verify_horizon(record, horizon)
+            if entry.get("wait"):
+                logger.info("prediction_validate_wait_window", id=record_id, horizon=horizon)
+                continue  # 窗口未满：不回写，下次 run_once 补齐再验
             try:
                 await node_api.update_prediction_verification(record_id, horizon, entry)
                 updated += 1
@@ -141,4 +211,37 @@ async def run_once() -> int:
                     error=str(exc),
                     exc_info=True,
                 )
+    # 日志输出（P0-2）
+    if target_counter:
+        logger.info("prediction_target_distribution", distribution=target_counter)
     return updated
+
+
+async def _report_stats() -> None:
+    """验证统计出口：拉取 status=verified 记录 → hit_rate_summary/baseline_compare → 结构化日志。
+
+    D3：verified 数据源用 Task 6 扩展的 listByStatus 游标（before_id 分页），
+    不依赖 pending 游标设施；输出结构化日志供 P2 开 chat 对照与 B3 反哺做决策依据。
+    """
+    verified = await node_api.list_verified_predictions(limit=500)
+    if not verified:
+        return
+    entries: list[dict[str, object]] = []
+    for rec in verified:
+        ver = rec.get("verification")
+        if isinstance(ver, dict):
+            for h, entry in ver.items():
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    if not entries:
+        return
+    summary = hit_rate_summary(entries)
+    baseline = baseline_neutral_summary(entries)
+    logger.info(
+        "prediction_stats_summary",
+        n=summary["n"],
+        hit_rate=summary["hit_rate"],
+        ci=summary["ci"],
+        sufficient_sample=summary["sufficient_sample"],
+        baseline_hit_rate=baseline["hit_rate"],
+    )

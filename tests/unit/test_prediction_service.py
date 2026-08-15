@@ -65,7 +65,7 @@ def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
 
 
 _VALID_LLM_JSON = """{
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "prediction_status": "confirmed",
   "horizons": [
     {"horizon": "short", "remaining_estimate": "1-3 日", "phase": "decaying",
@@ -198,8 +198,8 @@ async def test_run_predict_reraises_unexpected_errors():
 
 @pytest.mark.asyncio
 async def test_run_predict_injects_missing_schema_version():
-    """Bug A 双保险：LLM 缺 schema_version → 注入 1.0 后校验通过（834ddf9 之外再兜底）。"""
-    bad = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    """Bug A 双保险：LLM 缺 schema_version → 注入 2.0 后校验通过（834ddf9 之外再兜底）。"""
+    bad = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=bad)
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
@@ -207,15 +207,15 @@ async def test_run_predict_injects_missing_schema_version():
     assert isinstance(result, PredictionRunResult)
     assert result.status == "ok"
     assert result.prediction is not None
-    assert result.prediction.schema_version == "1.0"
+    assert result.prediction.schema_version == "2.0"
 
 
 @pytest.mark.asyncio
 async def test_run_predict_drops_extra_keys():
     """P1-2：LLM 输出 thinking/analysis 等多余键 → 剔除后校验通过（extra=forbid 不再炸）。"""
     extra = _VALID_LLM_JSON.replace(
-        '  "schema_version": "1.0",\n',
-        '  "schema_version": "1.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
+        '  "schema_version": "2.0",\n',
+        '  "schema_version": "2.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
     )
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=extra)
@@ -322,7 +322,7 @@ async def test_predict_from_trace_cache_hit_persists_ok():
     payload = mock_api.save_prediction.await_args.args[0]
     assert payload["source_type"] == "market_trace"
     assert payload["source_id"] == "review:2026-08-10"
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "2.0"
     assert payload["prediction"]["prediction_status"] == "confirmed"
     assert payload["due_dates"]["short"] == "2026-08-17"
     assert "status" not in payload  # ok 不传 status，Node 默认 pending
@@ -480,7 +480,7 @@ def test_render_prediction_markdown():
     )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="mid",
@@ -512,7 +512,7 @@ def test_render_prediction_markdown_uses_evolution_steps_when_present():
     )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="short",
@@ -576,6 +576,47 @@ def _make_chat_llm(
 def _chat_prediction(text: str) -> PredictionResult:
     """把合法 LLM 输出文本解析为 PredictionResult（结构化输出返回对象而非文本）。"""
     return PredictionResult.model_validate_json(text)
+
+
+@pytest.mark.asyncio
+async def test_chat_prediction_hard_validation_redacts_absolute_point():
+    """P0-3：chat 输出含绝对点位（如'上证指数维持 3500-3600 区间'）→ 剥离 + 独立日志，不静默。"""
+    from aistock_agent.services.prediction_service import _contains_absolute_point
+
+    assert _contains_absolute_point("上证指数维持 3500-3600 区间") is True
+    assert _contains_absolute_point("涨至 10.5 元") is True
+    assert _contains_absolute_point("围绕当前价位窄幅整理") is False
+    assert _contains_absolute_point("涨幅 20%，成交放大") is False  # 不误杀相对/涨幅描述
+    # D5：裸数字点位补丁——无动词/区间/元后缀的绝对点位也要拦截
+    assert _contains_absolute_point("目标点位 12000") is True
+    assert _contains_absolute_point("上证指数 12000") is True
+    assert _contains_absolute_point("成交额达 1000 亿") is False  # D5：量词描述不误杀
+
+    # 端到端：构造含点位的 LLM 输出 → run_chat_prediction 返回剥离后结果
+    snapshot = {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}}
+    prediction = PredictionResult(
+        schema_version="2.0",   # D6：与 schema_version 升 2.0 同步（H3 版本分桶）
+        prediction_status="hypothesis",
+        horizons=[{"horizon": "short", "remaining_estimate": "1-2周", "phase": "peaking",
+                   "direction": "bullish", "target": "上证指数",
+                   "metric_projection": "上证指数维持 3500-3600 区间",
+                   "confidence": "medium"}],
+        evolution_narrative="短线情绪延续，上证指数看至 3600 点。",
+        evolution_steps=[],
+        risks=[{"factor": "政策", "invalidation": "不及预期"}],
+        evidence_ids=["quote:600519"],
+    )
+    with (
+        patch("aistock_agent.services.prediction_service.get_quick_think"),
+        patch(
+            "aistock_agent.services.prediction_service.with_chat_structured_output"
+        ) as structured,
+    ):
+        structured.return_value.ainvoke = AsyncMock(return_value=prediction)
+        result = await run_chat_prediction(snapshot, [], {"question": "大盘会涨到哪"})
+    assert result is not None
+    assert "3500" not in result.horizons[0].metric_projection
+    assert "3600" not in result.evolution_narrative
 
 
 @pytest.mark.asyncio
@@ -659,11 +700,11 @@ async def test_run_chat_prediction_missing_schema_version_degrades():
     """LLM 输出缺 schema_version → 结构化解析抛 ValidationError → 返回 None（永不 500）。
 
     Phase 4-1 冒烟实测根因：PREDICTION_CHAT_PROMPT 未要求输出 schema_version，
-    而 PredictionResult.schema_version 是必填 Literal["1.0"] → 线上恒降级。
+    而 PredictionResult.schema_version 是必填 Literal["2.0"] → 线上恒降级。
     本测试锁定新调用链（json_mode 结构化输出）的降级语义：缺字段走异常 → None，
     skill 层落到 degraded 提示而非 500。
     """
-    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
     with pytest.raises(ValidationError):
         PredictionResult.model_validate_json(bad_json)  # 夹具自证：缺 schema_version 必校验失败
 

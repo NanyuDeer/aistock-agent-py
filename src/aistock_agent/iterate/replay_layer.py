@@ -101,6 +101,15 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 经 get_list 间接隔离（get_list → node_read 返回 None）
         "NodeApiClient.list_analysis_reports",
         "NodeApiClient.list_pending_predictions",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）：list_verified_predictions
+        # 内部 `await self.get_list(f"/internal/predictions?status=verified&limit={limit}")`
+        # （data_client.py:494），无独立网络入口；回放时 `or []` 兜底返回空列表（P0 统计出口）
+        "NodeApiClient.list_verified_predictions",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_index_kline 内部
+        # `await self.get(f"/internal/index/{code}/kline?days={days}")`（data_client.py:496），
+        # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)` 走
+        # 失败降级返回 None，不触达真实 Node 后端（P0 预测 v2 新增）
+        "NodeApiClient.get_index_kline",
         # PR-A/T5：list_predictions 与 list_pending_predictions 同型——内部
         # `await self.get_list(f"/internal/predictions?source_id={source_id}")`
         # （data_client.py:493），无独立网络入口；回放时 get_list 返回 None，

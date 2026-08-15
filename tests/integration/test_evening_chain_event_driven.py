@@ -258,7 +258,7 @@ async def test_full_chain_review_done_to_prediction_save(ctx):
     pred_result = PredictionRunResult(
         status="ok",
         prediction=PredictionResult(
-            schema_version="1.0",
+            schema_version="2.0",
             prediction_status="hypothesis",
             horizons=[
                 PredictionHorizon(

@@ -478,9 +478,32 @@ class NodeApiClient:
             )
         return result
 
-    async def list_pending_predictions(self) -> list[dict[str, object]]:
-        """读取全部 pending 预测记录（到期验证扫描用）。"""
-        return await self.get_list("/internal/predictions?status=pending") or []
+    async def list_pending_predictions(
+        self, limit: int = 200, before_id: int | None = None
+    ) -> list[dict[str, object]]:
+        """读取 pending 预测记录（游标分页，H8：防全量扫描）。
+
+        before_id：只取 id < before_id 的记录（按 id 倒序）；None 取最新一批。"""
+        path = f"/internal/predictions?status=pending&limit={limit}"
+        if before_id is not None:
+            path += f"&before_id={before_id}"
+        return await self.get_list(path) or []
+
+    async def list_verified_predictions(self, limit: int = 500) -> list[dict[str, object]]:
+        """读取已验证预测记录（统计出口 D3，GET /internal/predictions?status=verified）。"""
+        return await self.get_list(f"/internal/predictions?status=verified&limit={limit}") or []
+
+    async def get_index_kline(self, code: str, days: int = 130) -> list[dict[str, object]] | None:
+        """取指数日 K（P0 验证 v2 窗口数据源，GET /internal/index/:code/kline）。
+
+        返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
+        或 None（接口失败/无数据）。"""
+        result = await self.get(f"/internal/index/{code}/kline?days={days}")
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and isinstance(data.get("rows"), list):
+                return data["rows"]
+        return None
 
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
         """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
