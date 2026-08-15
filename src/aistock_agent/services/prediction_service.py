@@ -145,7 +145,7 @@ def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
     for key in _EXTRA_KEYS_TO_DROP:
         data.pop(key, None)
     # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
-    data.setdefault("schema_version", "1.0")
+    data.setdefault("schema_version", "2.0")
     return data
 
 

@@ -65,7 +65,7 @@ def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
 
 
 _VALID_LLM_JSON = """{
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "prediction_status": "confirmed",
   "horizons": [
     {"horizon": "short", "remaining_estimate": "1-3 日", "phase": "decaying",
@@ -198,8 +198,8 @@ async def test_run_predict_reraises_unexpected_errors():
 
 @pytest.mark.asyncio
 async def test_run_predict_injects_missing_schema_version():
-    """Bug A 双保险：LLM 缺 schema_version → 注入 1.0 后校验通过（834ddf9 之外再兜底）。"""
-    bad = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    """Bug A 双保险：LLM 缺 schema_version → 注入 2.0 后校验通过（834ddf9 之外再兜底）。"""
+    bad = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=bad)
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
@@ -207,15 +207,15 @@ async def test_run_predict_injects_missing_schema_version():
     assert isinstance(result, PredictionRunResult)
     assert result.status == "ok"
     assert result.prediction is not None
-    assert result.prediction.schema_version == "1.0"
+    assert result.prediction.schema_version == "2.0"
 
 
 @pytest.mark.asyncio
 async def test_run_predict_drops_extra_keys():
     """P1-2：LLM 输出 thinking/analysis 等多余键 → 剔除后校验通过（extra=forbid 不再炸）。"""
     extra = _VALID_LLM_JSON.replace(
-        '  "schema_version": "1.0",\n',
-        '  "schema_version": "1.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
+        '  "schema_version": "2.0",\n',
+        '  "schema_version": "2.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
     )
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=extra)
@@ -322,7 +322,7 @@ async def test_predict_from_trace_cache_hit_persists_ok():
     payload = mock_api.save_prediction.await_args.args[0]
     assert payload["source_type"] == "market_trace"
     assert payload["source_id"] == "review:2026-08-10"
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "2.0"
     assert payload["prediction"]["prediction_status"] == "confirmed"
     assert payload["due_dates"]["short"] == "2026-08-17"
     assert "status" not in payload  # ok 不传 status，Node 默认 pending
@@ -480,7 +480,7 @@ def test_render_prediction_markdown():
     )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="mid",
@@ -512,7 +512,7 @@ def test_render_prediction_markdown_uses_evolution_steps_when_present():
     )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="short",
@@ -659,11 +659,11 @@ async def test_run_chat_prediction_missing_schema_version_degrades():
     """LLM 输出缺 schema_version → 结构化解析抛 ValidationError → 返回 None（永不 500）。
 
     Phase 4-1 冒烟实测根因：PREDICTION_CHAT_PROMPT 未要求输出 schema_version，
-    而 PredictionResult.schema_version 是必填 Literal["1.0"] → 线上恒降级。
+    而 PredictionResult.schema_version 是必填 Literal["2.0"] → 线上恒降级。
     本测试锁定新调用链（json_mode 结构化输出）的降级语义：缺字段走异常 → None，
     skill 层落到 degraded 提示而非 500。
     """
-    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
     with pytest.raises(ValidationError):
         PredictionResult.model_validate_json(bad_json)  # 夹具自证：缺 schema_version 必校验失败
 

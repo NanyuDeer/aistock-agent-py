@@ -20,7 +20,7 @@ def _valid_horizon(**overrides):
 
 def test_valid_result():
     result = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(**_valid_horizon())],
         evolution_narrative="短线已兑现大半，中线延续，长线衰减",
@@ -34,7 +34,7 @@ def test_valid_result():
 def test_empty_horizons_raises():
     with pytest.raises(ValidationError):
         PredictionResult(
-            schema_version="1.0",
+            schema_version="2.0",
             prediction_status="confirmed",
             horizons=[],
             evolution_narrative="x",
@@ -46,7 +46,7 @@ def test_empty_horizons_raises():
 def test_extra_field_rejected():
     with pytest.raises(ValidationError):
         PredictionResult(
-            schema_version="1.0",
+            schema_version="2.0",
             prediction_status="confirmed",
             horizons=[PredictionHorizon(**_valid_horizon())],
             evolution_narrative="x",
