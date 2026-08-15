@@ -482,6 +482,18 @@ class NodeApiClient:
         """读取全部 pending 预测记录（到期验证扫描用）。"""
         return await self.get_list("/internal/predictions?status=pending") or []
 
+    async def get_index_kline(self, code: str, days: int = 130) -> list[dict[str, object]] | None:
+        """取指数日 K（P0 验证 v2 窗口数据源，GET /internal/index/:code/kline）。
+
+        返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
+        或 None（接口失败/无数据）。"""
+        result = await self.get(f"/internal/index/{code}/kline?days={days}")
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and isinstance(data.get("rows"), list):
+                return data["rows"]
+        return None
+
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
         """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
 
