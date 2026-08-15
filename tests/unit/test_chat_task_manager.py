@@ -229,3 +229,52 @@ async def test_cancel_rejected_when_done():
     assert state.finalizing is True
     assert manager.cancel("s2") is False
     await manager._cleanup_for_test()
+
+
+# ── 问题 20 C：producer 总时长兜底 T2 + run_finished 观测 ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_runner_total_timeout_sets_error():
+    """producer 挂起超过总时长兜底 → result=error 终态 + done 置位（session 释放）。"""
+    import asyncio
+    from unittest.mock import patch
+
+    from aistock_agent.services import chat_task_manager as ctm
+
+    manager = ctm.ChatTaskManager()
+
+    async def hung_producer(state):
+        await asyncio.sleep(3600)  # 永不返回
+
+    with patch.object(ctm, "_RUN_TOTAL_TIMEOUT_SEC", 0.05):
+        state = manager.start("s3", "r1", hung_producer)
+        assert state is not None
+        await asyncio.sleep(0.2)  # 越过 0.05s 超时 + finally
+        assert state.done is True
+        assert state.result is not None
+        assert state.result.get("type") == "error"
+        assert "超时" in state.result.get("content", "")
+    await manager._cleanup_for_test()
+
+
+@pytest.mark.asyncio
+async def test_runner_timeout_vs_cancel_mutual_exclusive():
+    """显式 TimeoutError 分支不落入通用 Exception 死区（result 非 None）。"""
+    import asyncio
+    from unittest.mock import patch
+
+    from aistock_agent.services import chat_task_manager as ctm
+
+    manager = ctm.ChatTaskManager()
+
+    async def hung_producer(state):
+        await asyncio.sleep(3600)
+
+    with patch.object(ctm, "_RUN_TOTAL_TIMEOUT_SEC", 0.03):
+        state = manager.start("s4", "r1", hung_producer)
+        assert state is not None
+        await asyncio.sleep(0.15)
+        assert state.result is not None  # TimeoutError 不落入 producer_failed 死区
+        assert state.done is True
+    await manager._cleanup_for_test()
