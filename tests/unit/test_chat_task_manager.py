@@ -213,7 +213,7 @@ async def test_cancel_rejected_when_finalizing():
 
 @pytest.mark.asyncio
 async def test_cancel_rejected_when_done():
-    """done 后 cancel 返回 False（既有语义，回归锁定）。"""
+    """done 后 cancel 返回 False（既有语义，回归锁定）+ finalizing 接线回归。"""
     from aistock_agent.services.chat_task_manager import ChatTaskManager
 
     manager = ChatTaskManager()
@@ -221,7 +221,11 @@ async def test_cancel_rejected_when_done():
     async def producer(state):
         return {"type": "done", "content": "ok"}
 
-    manager.start("s2", "r1", producer)
-    await asyncio.sleep(0)
+    state = manager.start("s2", "r1", producer)
+    assert state is not None
+    await state.task
+    # 回归锁定：producer 未手动置 finalizing，只能由 _runner 在 result 赋后置位；
+    # 若无此接线，本断言 FAIL（RED）
+    assert state.finalizing is True
     assert manager.cancel("s2") is False
     await manager._cleanup_for_test()

@@ -97,6 +97,8 @@ class ChatTaskManager:
         async def _runner() -> None:
             try:
                 state.result = await producer(state)
+                # 收尾窗口：result 已产出，置 finalizing 拒绝窗口内 cancel（防误杀将成之轮）
+                state.finalizing = True
             except asyncio.CancelledError:
                 # 用户停止（stop → task.cancel()）：CancelledError 继承 BaseException，
                 # 不被 except Exception 捕获，必须显式处理并置 cancelled 终态（spec §8.2）
