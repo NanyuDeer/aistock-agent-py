@@ -823,5 +823,8 @@ async def ws_chat(websocket: WebSocket) -> None:
             # 普通消息：消息校验/并发防护/图运行/确认编排统一走 _handle_user_message
             # （B2：confirm_response 已在上面被消费，不会走到这里的"消息不能为空"死端）
             await _handle_user_message(websocket, data, session_id)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        # 问题 20 R2：disconnect 消息已被 recv_task 消费后，主循环下一次
+        # receive_json() 会让 starlette 抛 RuntimeError("Cannot call receive...")。
+        # 与 WebSocketDisconnect 同义（连接已断），捕获后静默收尾，不再崩 handler。
         pass
