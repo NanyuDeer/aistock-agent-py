@@ -51,11 +51,19 @@ def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object
     return None
 
 
-def _range_around_due(due_date: str) -> tuple[str, str]:
-    """due 前后缓冲窗口（起点=due-20 自然日，终点=due+10 自然日），YYYYMMDD。"""
+def _range_around_due(due_date: str) -> tuple[str, str] | None:
+    """due 前后缓冲窗口（起点=due-20 自然日，终点=due+10 自然日），YYYYMMDD。
+
+    due_date 为 LLM 产出数据，脏值（空串/非 %Y-%m-%d）→ 返回 None，由调用方按
+    数据源故障语义处理，不得让整批验证崩溃（旧 _fetch_index_window 不解析日期、
+    天然安全失败，此守卫恢复该行为）。
+    """
     from datetime import datetime, timedelta
 
-    d = datetime.strptime(due_date, "%Y-%m-%d")
+    try:
+        d = datetime.strptime(due_date, "%Y-%m-%d")
+    except ValueError:
+        return None
     return ((d - timedelta(days=20)).strftime("%Y%m%d"),
             (d + timedelta(days=10)).strftime("%Y%m%d"))
 
@@ -65,7 +73,11 @@ async def _fetch_kline_window(
 ) -> list[dict[str, object]] | None:
     """按 due 区间拉取日 K（统一 index/sector）。返回升序 [{trade_date, pct_chg}]；
     pct_chg=None 行保留占位（H7，由调用方计数）。失败/空返回 None（=数据源故障）。"""
-    start, end = _range_around_due(due_date)
+    rng = _range_around_due(due_date)
+    if rng is None:
+        # 脏 due_date 无法确定窗口 → 数据源故障语义（_verify_horizon 落 insufficient）
+        return None
+    start, end = rng
     if kind == "sector":
         raw = await node_api.get_ths_daily_range(code, start, end)
     else:

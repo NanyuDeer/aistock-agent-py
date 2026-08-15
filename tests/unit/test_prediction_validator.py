@@ -191,9 +191,100 @@ async def test_fetch_kline_window_index_preserves_none_rows():
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
     assert out == [{"trade_date": "2026-08-10", "pct_chg": None},
                    {"trade_date": "2026-08-11", "pct_chg": 1.5}]
-    # 必须携带区间参数（非 200 天滚动）
+    # 必须携带区间参数（非 200 天滚动），且锁定 _range_around_due 区间数学：
+    # due=2026-08-10 → [2026-08-10 减 20 天, 加 10 天] = [20260721, 20260820]
     _, kwargs = m.call_args
-    assert kwargs.get("start_date") and kwargs.get("end_date")
+    assert kwargs["start_date"] == "20260721"
+    assert kwargs["end_date"] == "20260820"
+
+
+@pytest.mark.asyncio
+async def test_run_once_h7_missing_pct_chg_rows_insufficient():
+    """H7：kline 含 pct_chg=None 占位行 → 计数 >0 落 insufficient(subtype=no_data)，
+    reason 含 'pct_chg 空'，不静默。"""
+    record = _pending_record(due="2026-08-10")
+    kline_rows = [
+        {"trade_date": "2026-08-10", "pct_chg": None},  # 缺值占位
+        {"trade_date": "2026-08-11", "pct_chg": 1.5},
+        {"trade_date": "2026-08-12", "pct_chg": 0.2},
+        {"trade_date": "2026-08-13", "pct_chg": -0.1},
+    ]
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    entry = update.await_args.args[2]
+    assert entry["result"] == "insufficient"
+    assert entry["subtype"] == "no_data"
+    assert "pct_chg 空" in entry["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_window_malformed_due_returns_none():
+    """脏 due_date（非 %Y-%m-%d）→ 窗口无法确定 → 返回 None（数据源故障语义），不抛异常。"""
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])) as m:
+        out = await pv._fetch_kline_window("index", "000001", "not-a-date")
+    assert out is None
+    m.assert_not_awaited()  # 窗口无法确定，不应发请求
+
+
+@pytest.mark.asyncio
+async def test_run_once_dirty_due_date_does_not_crash_batch():
+    """脏 due_date 档位不得让整批验证崩溃：落 insufficient，其余记录正常回写。"""
+    bad = _pending_record(record_id=1, due="")
+    good = _pending_record(record_id=2, due="2026-08-10")
+    kline_rows = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.2},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_pending_predictions",
+            new=AsyncMock(return_value=[bad, good]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await run_once()
+    assert updated == 2  # 脏档 insufficient + 正常档 hit，均回写
+    by_id = {call.args[0]: call.args[2] for call in update.call_args_list}
+    assert by_id[1]["result"] == "insufficient"  # 脏 due 档不崩溃、可追溯
+    assert by_id[1]["reason"] == "指数行情不可用"
+    assert by_id[2]["result"] == "hit"           # 正常档不受影响
 
 
 @pytest.mark.asyncio
