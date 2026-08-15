@@ -110,6 +110,12 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)` 走
         # 失败降级返回 None，不触达真实 Node 后端（P0 预测 v2 新增）
         "NodeApiClient.get_index_kline",
+        # 经 get 间接隔离（get → node_read 返回 None）：M2 板块验证 ths 方法，
+        # 内部 `await self.get(...)` 无独立网络入口；回放时 get 返回 None →
+        # 各自 `not isinstance(result, dict)` 失败降级返回 None（T5 新增）
+        "NodeApiClient.get_ths_index_map",
+        "NodeApiClient.resolve_ths_name",
+        "NodeApiClient.get_ths_daily_range",
         # PR-A/T5：list_predictions 与 list_pending_predictions 同型——内部
         # `await self.get_list(f"/internal/predictions?source_id={source_id}")`
         # （data_client.py:493），无独立网络入口；回放时 get_list 返回 None，
