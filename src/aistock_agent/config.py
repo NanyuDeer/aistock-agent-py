@@ -208,6 +208,8 @@ class Settings(BaseSettings):
     # full review：20:30 Tushare 完整数据覆盖 quick
     scheduler_review_full_cron: str = "30 20 * * 1-5"
     scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
+    scheduler_prediction_stats_cron: str = "5 16 * * 1-5"
     # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
     scheduler_event_scrape_cron: str = "45 8 * * 1-5"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (

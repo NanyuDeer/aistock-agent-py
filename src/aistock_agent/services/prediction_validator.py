@@ -19,6 +19,7 @@ from typing import cast
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.prediction_stats import baseline_neutral_summary, hit_rate_summary
 from aistock_agent.services.prediction_targets import INDEX_TARGETS, classify_target
 from aistock_agent.utils.date import shanghai_today
 
@@ -155,7 +156,17 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
 async def run_once() -> int:
     """扫描到期预测并回写验证结果。返回成功回写的档位数。"""
     today = shanghai_today()
-    records = await node_api.list_pending_predictions()
+    records: list[dict[str, object]] = []
+    cursor: int | None = None
+    while True:
+        batch = await node_api.list_pending_predictions(limit=200, before_id=cursor)
+        if not batch:
+            break
+        records.extend(batch)
+        last_id = batch[-1].get("id")
+        cursor = cast(int | None, last_id)
+        if not isinstance(cursor, int) or len(batch) < 200:
+            break
     if not records:
         logger.info("prediction_validate_no_pending")
         return 0
@@ -204,3 +215,33 @@ async def run_once() -> int:
     if target_counter:
         logger.info("prediction_target_distribution", distribution=target_counter)
     return updated
+
+
+async def _report_stats() -> None:
+    """验证统计出口：拉取 status=verified 记录 → hit_rate_summary/baseline_compare → 结构化日志。
+
+    D3：verified 数据源用 Task 6 扩展的 listByStatus 游标（before_id 分页），
+    不依赖 pending 游标设施；输出结构化日志供 P2 开 chat 对照与 B3 反哺做决策依据。
+    """
+    verified = await node_api.list_verified_predictions(limit=500)
+    if not verified:
+        return
+    entries: list[dict[str, object]] = []
+    for rec in verified:
+        ver = rec.get("verification")
+        if isinstance(ver, dict):
+            for h, entry in ver.items():
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    if not entries:
+        return
+    summary = hit_rate_summary(entries)
+    baseline = baseline_neutral_summary(entries)
+    logger.info(
+        "prediction_stats_summary",
+        n=summary["n"],
+        hit_rate=summary["hit_rate"],
+        ci=summary["ci"],
+        sufficient_sample=summary["sufficient_sample"],
+        baseline_hit_rate=baseline["hit_rate"],
+    )
