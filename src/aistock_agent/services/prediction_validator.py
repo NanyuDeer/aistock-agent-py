@@ -237,9 +237,59 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
     return out
 
 
+async def backfill_no_data() -> int:
+    """存量 no_data 回补：扫描 verified 记录中 2.0/no_data 的 index 档位按区间重验（D4）。
+
+    幂等：仅重验 entry 为 insufficient/no_data 的档位，hit/miss 不回补；sector 回补
+    依赖 resolve，主链路已处理新记录，此处只回补 index。返回成功覆盖回写的档位数。
+    """
+    records = await node_api.list_verified_predictions(limit=500)
+    updated = 0
+    for record in records:
+        verification = record.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        for horizon, entry in verification.items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("methodology_version") != "2.0":
+                continue
+            if entry.get("subtype") != "no_data" or entry.get("target_type") == "sector":
+                continue  # sector 回补依赖 resolve，主链路已处理新记录；此处只回补 index
+            if entry.get("result") != "insufficient":
+                continue
+            # 构造最小记录形状复用 _verify_horizon
+            prediction = record.get("prediction")
+            due_dates = record.get("due_dates")
+            if not isinstance(prediction, dict) or not isinstance(due_dates, dict):
+                continue
+            re_entry = await _verify_horizon(
+                {"id": record.get("id"), "prediction": prediction, "due_dates": due_dates},
+                horizon,
+            )
+            if re_entry.get("wait") or re_entry.get("result") == "insufficient":
+                continue  # 仍不可验则不覆盖
+            try:
+                await node_api.update_prediction_verification(int(record["id"]), horizon, re_entry)
+                updated += 1
+            except Exception as exc:
+                logger.warning(
+                    "prediction_backfill_failed",
+                    id=record.get("id"),
+                    horizon=horizon,
+                    error=str(exc),
+                )
+    return updated
+
+
 async def run_once() -> int:
     """扫描到期预测并回写验证结果。返回成功回写的档位数。"""
     today = shanghai_today()
+    # D4 回补：存量 2.0/no_data 的 index 档按 due 区间重验。置于 pending 扫描之前，
+    # 保证无 pending（早退路径）时回补仍执行；两批记录不相交，顺序无影响（resolution 1）。
+    backfill_updated = await backfill_no_data()
+    if backfill_updated:
+        logger.info("prediction_backfill", count=backfill_updated)
     records: list[dict[str, object]] = []
     cursor: int | None = None
     while True:

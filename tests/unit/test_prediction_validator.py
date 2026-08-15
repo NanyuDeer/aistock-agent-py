@@ -8,6 +8,18 @@ from aistock_agent.services import prediction_validator as pv
 from aistock_agent.services.prediction_validator import _INDEX_CODE_MAP, run_once
 
 
+@pytest.fixture(autouse=True)
+def _no_backfill_verified_records():
+    """Task 10：run_once 内嵌 backfill_no_data 扫描 verified 记录；默认空扫描，
+    避免既有 run_once 用例触发真实 HTTP；回补用例内显式覆盖该 patch。"""
+    with patch.object(
+        prediction_validator.node_api,
+        "list_verified_predictions",
+        new=AsyncMock(return_value=[]),
+    ):
+        yield
+
+
 def _pending_record(record_id=1, due="2026-08-10", target="上证指数", direction="bullish"):
     return {
         "id": record_id,
@@ -324,6 +336,34 @@ def _pending_sector_record(due="2026-08-10", direction="bullish", target="半导
     return _pending_record(due=due, direction=direction, target=target)
 
 
+def _verified_no_data_record(
+    record_id=1, due="2026-08-10", target="上证指数", direction="bullish"
+):
+    """存量 verified 记录：verification 含 2.0/no_data 的 index 档（D4 回补目标）。"""
+    return {
+        "id": record_id,
+        "prediction": {
+            "horizons": [
+                {
+                    "horizon": "short",
+                    "target": target,
+                    "direction": direction,
+                    "metric_projection": "x",
+                }
+            ]
+        },
+        "due_dates": {"short": due},
+        "verification": {
+            "short": {
+                "result": "insufficient",
+                "subtype": "no_data",
+                "target_type": "index",
+                "methodology_version": "2.0",
+            }
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_verify_sector_target_resolves_and_hit():
     """H3/H8：板块 target resolve 命中 → 走 sector kline，entry 带 target_type/
@@ -419,3 +459,139 @@ async def test_sector_neutral_uses_sector_threshold():
         await pv.run_once()
     entry = update.await_args.args[2]
     assert entry["result"] == "miss"  # 板块阈值下无 |pct|<0.25 日（index 0.5 阈值下为 hit）
+
+
+@pytest.mark.asyncio
+async def test_backfill_no_data_retries_index_with_range():
+    """D4 回补：存量 2.0/no_data 的 index 档按 due 区间重验，覆盖回写 hit。"""
+    record = _verified_no_data_record()
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.2},  # due 当日 +1.2% → hit
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_verified_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=kline),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await pv.backfill_no_data()
+    assert updated == 1
+    assert update.await_args.args[0] == 1  # 覆盖原记录 id
+    entry = update.await_args.args[2]
+    assert entry["result"] == "hit"
+
+
+@pytest.mark.asyncio
+async def test_backfill_no_data_skips_still_insufficient():
+    """D4 幂等：重验仍 insufficient → 不覆盖回写。"""
+    record = _verified_no_data_record()
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_verified_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=None),  # 数据源仍不可用
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await pv.backfill_no_data()
+    assert updated == 0
+    update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_no_data_skips_non_no_data_entries():
+    """D4 幂等：hit/miss 档不回补（仅 2.0/no_data/insufficient 档重验）。"""
+    record = _verified_no_data_record()
+    record["verification"]["short"]["result"] = "hit"
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_verified_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline", new=AsyncMock()
+        ) as kline,
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+    ):
+        updated = await pv.backfill_no_data()
+    assert updated == 0
+    kline.assert_not_awaited()
+    update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_once_backfill_runs_when_no_pending():
+    """D4：无 pending 记录（早退路径）时 backfill 仍执行（resolution 1）。"""
+    record = _verified_no_data_record()
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.2},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_pending_predictions",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "list_verified_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=kline),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await run_once()
+    assert updated == 0  # 主链路无新增；回补数不入返回值（resolution 4）
+    assert update.await_count == 1
+    assert update.await_args.args[2]["result"] == "hit"
