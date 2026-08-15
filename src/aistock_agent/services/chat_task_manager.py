@@ -99,9 +99,11 @@ class ChatTaskManager:
         async def _runner() -> None:
             started = time.monotonic()
             try:
-                state.result = await asyncio.wait_for(
-                    producer(state), timeout=_RUN_TOTAL_TIMEOUT_SEC
-                )
+                # 总时长兜底：asyncio.timeout 在 _runner 内联执行 producer（无独立
+                # 内层 task → 调度与 BASE 一致、无任务泄漏）；超时抛内置
+                # TimeoutError（Py3.11 起与 asyncio.TimeoutError 同义），由下方分支处理。
+                async with asyncio.timeout(_RUN_TOTAL_TIMEOUT_SEC):
+                    state.result = await producer(state)
                 # 收尾窗口：result 已产出，置 finalizing 拒绝窗口内 cancel（防误杀将成之轮）
                 state.finalizing = True
             except asyncio.CancelledError:
