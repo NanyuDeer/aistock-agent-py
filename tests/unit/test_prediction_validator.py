@@ -300,6 +300,78 @@ async def test_run_once_dirty_due_date_does_not_crash_batch():
 
 
 @pytest.mark.asyncio
+async def test_fetch_kline_window_normalizes_yyyymmdd_trade_date():
+    """Task 11 smoke 修复：Node 端 kline 返回 YYYYMMDD trade_date（Tushare 原始格式），
+    必须归一化为 YYYY-MM-DD 才能与 due_date 精确匹配；已归一化的行幂等透传。"""
+    rows = [
+        {"trade_date": "20260810", "pct_chg": 1.2},  # YYYYMMDD → 归一化
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},  # 已是 YYYY-MM-DD → 透传
+        {"trade_date": "20260812", "pct_chg": -0.2},
+    ]
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
+        out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
+    assert out == [
+        {"trade_date": "2026-08-10", "pct_chg": 1.2},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_yyyymmdd_trade_date_matches_due():
+    """回归（存量 no_data 根因）：Node 端 YYYYMMDD trade_date 行 + YYYY-MM-DD due_date
+    → 到期日精确匹配成功，结果 hit（此前恒落 no_data）。"""
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline_rows = [
+        {"trade_date": "20260810", "pct_chg": 1.2},  # due 当日 +1.2% → hit, strong_hit
+        {"trade_date": "20260811", "pct_chg": 0.3},
+        {"trade_date": "20260812", "pct_chg": -0.2},
+        {"trade_date": "20260813", "pct_chg": 0.1},
+    ]
+    with (
+        patch.object(
+            pv.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows),
+        ),
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        entry = await pv._verify_horizon(record, "mid")
+    assert entry["result"] == "hit"  # 不再 no_data
+    assert entry["grade"] == "strong_hit"
+    assert entry["actual"] == "+1.40%"
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_sector_yyyymmdd_matches_due():
+    """回归（sector 分支）：ths daily 同样 YYYYMMDD → 归一化后到期日匹配成功。"""
+    record = _pending_sector_record(due="2026-08-10", direction="bullish")
+    kline_rows = [
+        {"trade_date": "20260810", "pct_chg": 1.0},
+        {"trade_date": "20260811", "pct_chg": 0.3},
+        {"trade_date": "20260812", "pct_chg": -0.2},
+        {"trade_date": "20260813", "pct_chg": -0.1},
+    ]
+    with (
+        patch.object(
+            pv.node_api, "resolve_ths_name",
+            new=AsyncMock(return_value={"ts_code": "881121.TI", "name": "半导体"}),
+        ),
+        patch.object(
+            pv.node_api, "get_ths_daily_range", new=AsyncMock(return_value=kline_rows),
+        ),
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        entry = await pv._verify_horizon(record, "mid")
+    assert entry["result"] == "hit"  # 不再 no_data
+    assert entry["target_type"] == "sector"
+
+
+@pytest.mark.asyncio
 async def test_fetch_kline_window_sector_calls_ths_range():
     with patch.object(
         pv.node_api, "get_ths_daily_range",

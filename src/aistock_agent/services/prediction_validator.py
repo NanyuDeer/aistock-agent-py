@@ -14,6 +14,7 @@ v2 对照口径（P0 预测验证升级）：
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
 """
 
+import re
 from typing import cast
 
 import structlog
@@ -107,6 +108,10 @@ async def _fetch_kline_window(
         d = r.get("trade_date")
         pct = r.get("pct_chg")
         if isinstance(d, str):
+            # Node 端 trade_date 为 Tushare 原始 YYYYMMDD，due_date 为 YYYY-MM-DD；
+            # 统一归一化为 YYYY-MM-DD 才能精确匹配（幂等：已是该格式的行原样透传）。
+            if re.fullmatch(r"\d{8}", d):
+                d = f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
             parsed.append(
                 {"trade_date": d, "pct_chg": pct if isinstance(pct, int | float) else None})
     parsed.sort(key=lambda x: str(x["trade_date"]))
