@@ -210,7 +210,7 @@ def _artifact(with_prediction: bool) -> ReviewArtifact:
     }
     prediction = (
         PredictionResult(
-            schema_version="1.0",
+            schema_version="2.0",
             prediction_status="hypothesis",
             horizons=[
                 PredictionHorizon(

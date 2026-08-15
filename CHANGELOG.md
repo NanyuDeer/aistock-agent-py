@@ -2,6 +2,25 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-15 — 预测验证口径升级 v2（B2.2 P0）
+
+**开发者**: changelog
+
+### 新增
+- 指数日 K 客户端 `get_index_kline`（GET /internal/index/:code/kline，Tushare index_daily 历史窗口，P0 验证 v2 数据源）
+- 预测验证统计模块 `prediction_stats.py`：Wilson 95% CI + 命中率汇总（methodology_version=2.0 分桶、insufficient/approximate 剔除）+ baseline 同口径对比；独立 scheduler 任务输出结构化日志（D3 真实消费方）
+- target 枚举外置 `prediction_targets.py`：`classify_target` 四类分类（index/sector/stock/unknown），sector/stock 归 insufficient 且 reason 区分，unknown 保留抽象词漂移信号（P0-2 target 分布监控）
+
+### 改进
+- 验证器重写 v2 窗口判定（[due, due+3 交易日] 符号命中主判，无累计净值兜底 G13）：grade 幅度分级（仅 bullish/bearish，G14）、baseline_neutral 同窗口标记（H6）、approximate 结构化标记（H2）；窗口未满返回 wait 不回写（D1）、数据源故障落 insufficient（D7）
+- chat 预测后处理红线硬校验（P0-3）：`_contains_absolute_point` 覆盖 metric_projection/evolution_narrative/attribution_summary 全文本字段（含 D5 裸数字点位正则），命中剥离 + 独立日志事件 `hard_validation_failed`，不静默
+- schema_version 升 2.0 四向同步（D6）：schemas/prompts/prediction_service 兜底/测试构造
+
+### 修复
+- 全量回归修复计划引入的 4 处失败：replay 隔离名单补 `get_index_kline`/`list_verified_predictions` 登记；test_prediction_prompt/test_review_prediction/test_evening_chain_event_driven 的 schema_version 断言与 fixture 同步 2.0
+
+---
+
 ## [changer] 2026-08-14 — 预测到期日越年逐档容错
 
 **开发者**: changelog
