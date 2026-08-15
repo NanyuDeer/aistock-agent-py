@@ -497,7 +497,8 @@ class NodeApiClient:
         self, code: str, days: int = 130,
         start_date: str | None = None, end_date: str | None = None,
     ) -> list[dict[str, object]] | None:
-        """指数日 K（GET /internal/index/:code/kline）。可选区间参数（Task 4，H9 向后兼容）。
+        """指数日 K（GET /internal/index/:code/kline）。
+        可选区间参数：start_date/end_date 存在时按区间拉取。
 
         返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
         或 None（接口失败/无数据）。"""
@@ -507,19 +508,15 @@ class NodeApiClient:
         if end_date is not None:
             path += f"&end_date={end_date}"
         result = await self.get(path)
-        if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict) and isinstance(data.get("rows"), list):
-                return data["rows"]
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
         return None
 
     async def get_ths_index_map(self) -> list[dict[str, object]] | None:
         """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
         result = await self.get("/internal/ths/index-map")
-        if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict) and isinstance(data.get("ts_codes"), list):
-                return data["ts_codes"]
+        if isinstance(result, dict) and isinstance(result.get("ts_codes"), list):
+            return result["ts_codes"]
         return None
 
     async def resolve_ths_name(self, name: str) -> dict[str, object] | None:
@@ -527,9 +524,7 @@ class NodeApiClient:
         from urllib.parse import quote
         result = await self.get(f"/internal/ths/resolve?name={quote(name)}")
         if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict):
-                return data.get("matched") or None
+            return result.get("matched") or None
         return None
 
     async def get_ths_daily_range(
@@ -538,10 +533,8 @@ class NodeApiClient:
         """板块区间日 K（GET /internal/ths/{code}/daily?start&end）。
         返回升序 [{trade_date, pct_chg}]。失败/异常返回 None。"""
         result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
-        if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict) and isinstance(data.get("rows"), list):
-                return data["rows"]
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
         return None
 
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
