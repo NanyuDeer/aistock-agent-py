@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 _RESULT_TTL_SEC = 600  # 完成后结果保留 10 分钟
 
-_RUN_TOTAL_TIMEOUT_SEC = 660  # producer 总时长兜底（LLM 单次 600s + 60s 余量，对齐 llm.py:61）
+# producer 总时长兜底（LLM 单次 600s + 60s 余量，对齐 llm.py:62 的 _LLM_REQUEST_TIMEOUT_SECONDS）
+_RUN_TOTAL_TIMEOUT_SEC = 660
 
 _CONFIRM_TTL_SEC = 600  # pending confirm 保留 10 分钟（对齐 result TTL；确认窗口 60s 远小于 TTL）
 
