@@ -77,7 +77,13 @@ async def build_cases_for_adapter(
             rejected += 1
             reasons.append(str(exc))
             continue
-        gt = await generate_data_constrained_gt(case, data_dir=data_dir)
+        try:
+            gt = await generate_data_constrained_gt(case, data_dir=data_dir)
+        except Exception as exc:  # noqa: BLE001 — GT 生成失败（LLM 超时等）→ 回滚已落盘 case
+            _rollback(case, None, data_dir)  # gt 未生成，仅回滚 case（防孤儿 case 进 pending）
+            rejected += 1
+            reasons.append(f"GT 生成失败: {exc}")
+            continue
         violations = validate_gt_against_case(gt, case)
         if violations and not force:
             _rollback(case, gt, data_dir)
@@ -93,10 +99,11 @@ async def build_cases_for_adapter(
     }
 
 
-def _rollback(case: dict[str, object], gt: dict[str, object], data_dir: Path) -> None:
+def _rollback(case: dict[str, object], gt: dict[str, object] | None, data_dir: Path) -> None:
     try:
         case_path(str(case["case_id"]), data_dir=data_dir).unlink(missing_ok=True)
-        gt_path = data_dir / "ground_truths" / f"{gt['gt_id']}.json"
-        gt_path.unlink(missing_ok=True)
+        if gt is not None:
+            gt_path = data_dir / "ground_truths" / f"{gt['gt_id']}.json"
+            gt_path.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
         logger.warning("iterate_case_rollback_failed", exc_info=True)
