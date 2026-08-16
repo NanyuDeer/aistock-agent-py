@@ -2,6 +2,23 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-16 — 对话卡死恢复止血（问题 20）
+
+**开发者**: 37588
+
+### 修复
+- `src/aistock_agent/api/ws.py`：主循环 `except WebSocketDisconnect` → `except (WebSocketDisconnect, RuntimeError)`（disconnect 被 recv_task 消费后再 receive 抛 starlette RuntimeError → 不再崩溃刷 error log）；非 "receive" 的 RuntimeError 打 `chat.ws_main_loop_runtime_error` warning 保留可观测性
+- `src/aistock_agent/services/chat_task_manager.py`：`ChatRunState.finalizing` 护栏（cancel 在 finalizing/done 时返回 False，防前端超时 stop 误杀将成之轮）+ `_RUN_TOTAL_TIMEOUT_SEC=660` 总时长兜底（`asyncio.timeout` 内联执行 producer，超时 → ERROR 终态「生成超时，请稍后重试」）
+- 测试：`tests/unit/test_ws_chat_replacement.py`（RuntimeError 捕获回归）+ `tests/unit/test_chat_task_manager.py`（finalizing 护栏 2 例 + 总时长兜底 2 例）
+
+### 验证
+- 全量 A/B HEAD 27 failed = BASE 27（新增清零）+ ruff 0
+
+### 配套（前端 aistock-app-frontend，同批）
+- useChatStream idle 超时兜底（见 frontend changelog）
+
+---
+
 ## [changer] 2026-08-15 — 预测验证口径升级 v2（B2.2 P0）
 
 **开发者**: changelog
