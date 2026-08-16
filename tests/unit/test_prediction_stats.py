@@ -1,5 +1,10 @@
 # tests/unit/test_prediction_stats.py
-from aistock_agent.services.prediction_stats import baseline_compare, hit_rate_summary, wilson_ci
+from aistock_agent.services.prediction_stats import (
+    baseline_compare,
+    bucket_summary,
+    hit_rate_summary,
+    wilson_ci,
+)
 
 
 def test_wilson_ci_basic():
@@ -37,3 +42,38 @@ def test_baseline_compare_excess():
     r = baseline_compare(llm, base)
     assert r["excess"] == 0.2
     assert r["better_than_baseline"] is True
+
+
+def _entry(target_type, result="hit", prediction_id=1):
+    return {"methodology_version": "2.0", "result": result, "target_type": target_type,
+            "approximate": False, "prediction_id": prediction_id}
+
+
+def test_hit_rate_summary_filters_by_target_type():
+    entries = [_entry("index", "hit", 1), _entry("index", "miss", 1),
+               _entry("sector", "hit", 2), _entry("sector", "miss", 2)]
+    s = hit_rate_summary(entries, target_type="sector")
+    assert s["n"] == 2 and s["hits"] == 1
+
+
+def test_bucket_summary_separates_index_sector():
+    entries = [_entry("index", "hit", 1), _entry("index", "miss", 1),
+               _entry("sector", "hit", 2), _entry("sector", "miss", 2)]
+    b = bucket_summary(entries)
+    assert b["index"]["n"] == 2 and b["sector"]["n"] == 2
+    assert b["combined"]["n"] == 4
+
+
+def test_bucket_summary_n_predictions_dedup():
+    # 同 prediction 三档（1 个 prediction_id）→ n_predictions=1
+    entries = [_entry("sector", "hit", 7), _entry("sector", "hit", 7), _entry("sector", "miss", 7)]
+    b = bucket_summary(entries)
+    assert b["sector"]["n_predictions"] == 1
+    assert b["sector"]["n"] == 3
+
+
+def test_sufficient_sample_requires_both_counts():
+    # 30 档但仅 1 个 prediction → 不 sufficient（样本独立性，H4）
+    entries = [_entry("sector", "hit", 1)] * 30
+    b = bucket_summary(entries)
+    assert b["sector"]["sufficient_sample"] is False

@@ -403,3 +403,47 @@ async def test_forward_until_done_or_cmd_clears_pending_recv_on_done() -> None:
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(ws.receive_json(), timeout=0.05)
     assert not ws.concurrent_recv_raised
+
+
+# ── 问题 20（R2）：disconnect 已被消费后再 receive 抛 RuntimeError 不崩溃 ──────
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_main_loop_catches_runtime_error_after_disconnect():
+    """主循环在 disconnect 已被消费后再次 receive 抛 RuntimeError 时不崩溃（问题 20 R2）。"""
+    from aistock_agent.api import ws as ws_module
+
+    class _RaisingSocket:
+        """复刻 starlette：disconnect 后再次 receive_json 抛 RuntimeError。"""
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self._calls = 0
+            self.accepted = False
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def receive_json(self) -> dict:
+            self._calls += 1
+            if self._calls > 1:
+                raise RuntimeError(
+                    'Cannot call "receive" once a disconnect message has been received.'
+                )
+            return {"message": "今日大盘", "session_id": "t1"}
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    sock = _RaisingSocket()
+
+    async def _noop(websocket, data, session_id) -> None:
+        pass
+
+    # 只验证主循环异常捕获路径：_handle_user_message 为 no-op，避免真实跑图（LLM 调用）
+    with patch.object(ws_module, "_handle_user_message", side_effect=_noop):
+        # 主循环首轮处理普通消息后，第二轮 receive 抛 RuntimeError → 不应向外抛
+        # （原实现只捕 WebSocketDisconnect，RuntimeError 会穿透）
+        try:
+            await ws_module.ws_chat(sock)  # type: ignore[arg-type]
+        except RuntimeError:
+            raise AssertionError("ws_chat 不应把主循环 receive RuntimeError 抛给 ASGI 层")

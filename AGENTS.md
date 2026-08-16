@@ -304,6 +304,12 @@ START → supervisor(quick_think, 意图路由)
 - **节级伪流式（Task 2，synth_answer.py）**：维持 `ainvoke` 生产链（计费口径零变化，无新增 LLM 调用）；回答最终文本按 markdown 分节经 `adispatch_custom_event("chat_content_delta", {"content": 节文本})` 渐进下发（多子目标节标题先发、正文后发，DISCLAIMER/风险段最后统一补发）；**字节前缀契约**：dispatch 序列拼接 == final_response 逐字全等、任意累积为字节前缀（前端 done 前缀补尾）；**content_reset 统一语义**：凡流式已开始且终态文本非已流式内容前缀（结构化校验失败降级 / 节降级 / 流式中途异常降级全文）→ `adispatch_custom_event("chat_content_reset", {"content": 终态文本})` 整段替换；hint 单次取值（`trading_session_status` 只取一次），payload 恒 `{"content": str}`、空串/None 不分发。
 - **验证**：全量 A/B HEAD 失败集 = BASE（22=22，唯一差异 test_full_flow_stock 经 5 项证据判定为本地 sqlite checkpointer 跨次运行状态残留的环境卫生问题，全新 db 复测通过）+ ruff 改动文件 0 + 跨仓契约（事件名 ↔ ws.py ↔ 前端 case 标签）字段级一致。
 
+### CHAT QA 问题 20 对话卡死恢复止血（2026-08-15）：发消息没反应/一直转圈
+
+- **R2（次生缺陷）**：ws.py 主循环 `except WebSocketDisconnect` 不捕获 `RuntimeError`（ws.py#L826）——disconnect 被 `_forward_until_done_or_cmd` 的 recv_task 消费后主循环再 `receive_json()` 抛 starlette `RuntimeError("Cannot call "receive"...")` → handler 崩溃刷 error log。修复：`except (WebSocketDisconnect, RuntimeError) as exc`，**非 "receive" 的 RuntimeError 打 `chat.ws_main_loop_runtime_error` warning 保留可观测性**（不静默吞真实 bug，对齐经验 45/54 recv 异常双形态）。
+- **ChatTaskManager finalizing 护栏**：`ChatRunState.finalizing: bool`（producer 已产出终态 result 后 `_runner` 置位）→ `cancel()` 检查 `if s is None or s.done or s.finalizing: return False`——前端 idle 超时联动 stop 不误杀将成之轮（stop_status 落 not_found，前端已本地复位可重试）。
+- **总时长兜底（T2）**：`_RUN_TOTAL_TIMEOUT_SEC = 660`（LLM 单次 600s + 60s 余量，对齐 llm.py `_LLM_REQUEST_TIMEOUT_SECONDS`）；`_runner` 用 **`asyncio.timeout`**（内联执行 producer，无 wait_for 的独立内层 task 调度副作用）包裹 → 超时置 ERROR 终态「生成超时，请稍后重试」→ done → session 释放可重试；**必须显式 `except TimeoutError`**（继承 Exception，否则落 producer_failed 死区）；`chat.run_timeout` / `chat.run_finished`（elapsed_ms + done）观测日志。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
@@ -450,8 +456,14 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描）；支持可选 `source_id`（如 `review:2026-08-14`）过滤 |
 | `PUT /internal/predictions/:id/verification` | prediction_records | 回写单档位验证结果（horizon/result/actual/reason → 全档位覆盖自动置 verified） |
 | `POST /internal/predictions/regenerate` | prediction_records | **按需/补偿预测代理**：仅限当日（trade_date===上海今日）+ Redis 限流（每 date 每小时 ≤3）+ 已验证拒覆盖 409 + 90s 超时，转发 Python `POST /api/agent/internal/predictions/from-trace`（body {trade_date, trace_id}） |
+| `GET /internal/ths/index-map` | Tushare 同花顺 | 板块名→885/886 全表（Node 进程缓存 6h TTL；**M2 板块验证**） |
+| `GET /internal/ths/resolve?name=` | Tushare 同花顺 | 板块名三级匹配（归一化精确 → 双向包含 → `{ts_code,name}` 或 null；**M2 板块验证**） |
+| `GET /internal/ths/:code/daily?start=&end=` | Tushare 同花顺 | 板块区间日 K（rows 升序，键 `trade_date`/`pct_chg`，None 保行为 null；**M2 板块验证**） |
+| `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容） |
 
 > **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed, ...)`——gate_skipped 落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年逐档容错（P2 裁决 2026-08-14）：chinese_calendar 覆盖 2004-2026 之外时不再整条 due_dates_failed，改为越年档按「周末+已发布节假日 HOLIDAYS_EXTRA」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb，`PredictionRunResult.approximate_horizons` 透传）**——理由：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益，显式标注优于预测停产；验证器 reason 加 `(approximate_due_date)` 前缀，Node 统计 `approximateHorizonCount` 分桶（近似档不计入命中率分母）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
+>
+> **M2 板块验证数据源（2026-08-15）**：sector target 走 `resolve_sector_target`（Node `/internal/ths/resolve` 三级匹配）→ `_fetch_kline_window("sector", ...)` 按 due 区间拉 `ths_daily`；**阈值参数化（H3）**：index 保持 neutral=0.5%/strong=5.0%，sector 用 G0c 分位标定 neutral=0.25%/strong=3.0%（entry 记 `threshold_version="1.0"`）；**entry 元数据（H8）**：`target_type`/`matched_ts_code`/`matched_name`/`prediction_id` 可审计；**按 due 区间拉取（Task 6）**：`_fetch_kline_window` 统一 index/sector，窗口 = due−20/+10 自然日（修复 index 200 天滚动窗口限制），**`trade_date` 归一化 YYYYMMDD→YYYY-MM-DD**（Node 返回 Tushare 原始格式而 due 为 YYYY-MM-DD，格式不匹配即存量 no_data 的根因，b4dc729）；H7 `pct_chg=None` 行保留占位计数，>0 落 insufficient；**存量回补（D4）**：`run_once` 每日尾随 `backfill_no_data()` 对 verified 中 2.0/no_data 的 index 档按区间重验（幂等，hit/miss 不回补，sector 走主链路）。**统计（Task 8，H3/H4）**：`hit_rate_summary`/`baseline_neutral_summary` 支持 `target_type` 过滤；`bucket_summary` 三桶（combined 仅描述性 + index/sector 各自判 `sufficient_sample`）；`n_predictions` 按 `prediction_id` 去重（旧记录无 id 退化为 n），`sufficient_sample = n≥30 且 n_predictions≥30`。
 
 ## 常用命令
 

@@ -493,16 +493,48 @@ class NodeApiClient:
         """读取已验证预测记录（统计出口 D3，GET /internal/predictions?status=verified）。"""
         return await self.get_list(f"/internal/predictions?status=verified&limit={limit}") or []
 
-    async def get_index_kline(self, code: str, days: int = 130) -> list[dict[str, object]] | None:
-        """取指数日 K（P0 验证 v2 窗口数据源，GET /internal/index/:code/kline）。
+    async def get_index_kline(
+        self, code: str, days: int = 130,
+        start_date: str | None = None, end_date: str | None = None,
+    ) -> list[dict[str, object]] | None:
+        """指数日 K（GET /internal/index/:code/kline）。
+        可选区间参数：start_date/end_date 存在时按区间拉取。
 
         返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
         或 None（接口失败/无数据）。"""
-        result = await self.get(f"/internal/index/{code}/kline?days={days}")
+        path = f"/internal/index/{code}/kline?days={days}"
+        if start_date is not None:
+            path += f"&start_date={start_date}"
+        if end_date is not None:
+            path += f"&end_date={end_date}"
+        result = await self.get(path)
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
+        return None
+
+    async def get_ths_index_map(self) -> list[dict[str, object]] | None:
+        """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
+        result = await self.get("/internal/ths/index-map")
+        if isinstance(result, dict) and isinstance(result.get("ts_codes"), list):
+            return result["ts_codes"]
+        return None
+
+    async def resolve_ths_name(self, name: str) -> dict[str, object] | None:
+        """板块名三级匹配（GET /internal/ths/resolve?name=）。未命中/失败返回 None。"""
+        from urllib.parse import quote
+        result = await self.get(f"/internal/ths/resolve?name={quote(name)}")
         if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict) and isinstance(data.get("rows"), list):
-                return data["rows"]
+            return result.get("matched") or None
+        return None
+
+    async def get_ths_daily_range(
+        self, code: str, start: str, end: str,
+    ) -> list[dict[str, object]] | None:
+        """板块区间日 K（GET /internal/ths/{code}/daily?start&end）。
+        返回升序 [{trade_date, pct_chg}]。失败/异常返回 None。"""
+        result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
         return None
 
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:

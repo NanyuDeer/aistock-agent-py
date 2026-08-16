@@ -21,40 +21,66 @@ def wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (round(lo, 4), round(hi, 4))
 
 
-def hit_rate_summary(entries: list[dict[str, object]]) -> dict[str, object]:
-    """汇总已验证档位（仅 2.0 的 hit/miss 参与；insufficient/v1/approximate 剔除）。
-
-    D2：过滤条件含 `not e.get("approximate")`（H2 结构化标记，与 baseline 分桶同一套口径）。
-    Returns: {n, hits, hit_rate, ci: [lo, hi], sufficient_sample: n>=30}
-    """
-    v2 = [
+def _filter_v2(
+    entries: list[dict[str, object]], target_type: str | None = None
+) -> list[dict[str, object]]:
+    return [
         e for e in entries
         if e.get("methodology_version") == "2.0" and e.get("result") in {"hit", "miss"}
         and not e.get("approximate")
+        and (target_type is None or e.get("target_type") == target_type)
     ]
-    n = len(v2)
-    hits = sum(1 for e in v2 if e.get("result") == "hit")
+
+
+def _summary(entries: list[dict[str, object]]) -> dict[str, object]:
+    n = len(entries)
+    hits = sum(1 for e in entries if e.get("result") == "hit")
     lo, hi = wilson_ci(hits, n)
+    n_predictions = len(
+        {e.get("prediction_id") for e in entries if e.get("prediction_id") is not None}
+    )
+    if n_predictions == 0:
+        n_predictions = n  # 旧记录无 prediction_id 时退化为档位数
     return {
-        "n": n,
-        "hits": hits,
-        "hit_rate": round(hits / n, 4) if n else 0.0,
-        "ci": [lo, hi],
-        "sufficient_sample": n >= 30,
+        "n": n, "hits": hits, "hit_rate": round(hits / n, 4) if n else 0.0,
+        "ci": [lo, hi], "n_predictions": n_predictions,
+        "sufficient_sample": n >= 30 and n_predictions >= 30,
     }
 
 
-def baseline_neutral_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+def hit_rate_summary(
+    entries: list[dict[str, object]], target_type: str | None = None
+) -> dict[str, object]:
+    """汇总已验证档位（仅 2.0 的 hit/miss 参与；insufficient/v1/approximate 剔除）。
+
+    target_type 过滤：None=聚合全部（兼容旧调用），"index"/"sector" 只统计该桶（H3 防桶污染）。
+    Returns: {n, hits, hit_rate, ci, n_predictions,
+              sufficient_sample: n>=30 且 n_predictions>=30}
+    """
+    return _summary(_filter_v2(entries, target_type))
+
+
+def bucket_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+    """三桶：combined 仅描述性；index/sector 各自判定 sufficient_sample（H3 防桶污染）。"""
+    v2 = _filter_v2(entries)
+    return {
+        "combined": _summary(v2),
+        "index": _summary(_filter_v2(entries, "index")),
+        "sector": _summary(_filter_v2(entries, "sector")),
+    }
+
+
+def baseline_neutral_summary(
+    entries: list[dict[str, object]], target_type: str | None = None
+) -> dict[str, object]:
     """同口径恒中性 baseline：统计 v2 hit/miss 档位中 baseline_neutral=True 的比例。
 
-    D2：与 hit_rate_summary 同一套过滤（2.0 + hit/miss + 非 approximate），
+    D2：与 hit_rate_summary 同一套过滤（2.0 + hit/miss + 非 approximate + target_type），
     近似档不得污染 baseline 分桶（H2 口径彻底）。
     """
     v2 = [
-        e for e in entries
-        if e.get("methodology_version") == "2.0" and e.get("result") in {"hit", "miss"}
-        and not e.get("approximate")
-        and isinstance(e.get("baseline_neutral"), bool)
+        e for e in _filter_v2(entries, target_type)
+        if isinstance(e.get("baseline_neutral"), bool)
     ]
     n = len(v2)
     hits = sum(1 for e in v2 if e.get("baseline_neutral") is True)

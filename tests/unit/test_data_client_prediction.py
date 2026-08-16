@@ -67,7 +67,7 @@ async def test_update_prediction_verification_puts(client: NodeApiClient):
 @pytest.mark.asyncio
 async def test_get_index_kline_returns_rows(client: NodeApiClient):
     rows = [{"trade_date": "2026-08-11", "pct_chg": 1.2}]
-    with patch.object(client, "get", new=AsyncMock(return_value={"code": 200, "data": {"rows": rows}})) as get:
+    with patch.object(client, "get", new=AsyncMock(return_value={"rows": rows})) as get:
         result = await client.get_index_kline("000001", days=130)
     assert result == rows
     get.assert_awaited_once_with("/internal/index/000001/kline?days=130")
@@ -77,3 +77,53 @@ async def test_get_index_kline_returns_rows(client: NodeApiClient):
 async def test_get_index_kline_returns_none_on_failure(client: NodeApiClient):
     with patch.object(client, "get", new=AsyncMock(return_value=None)):
         assert await client.get_index_kline("000001", days=130) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_ths_name_matched(client: NodeApiClient):
+    matched = {"matched": {"ts_code": "885525.TI", "name": "白酒概念"}}
+    with patch.object(client, "get", new=AsyncMock(return_value=matched)):
+        out = await client.resolve_ths_name("白酒板块")
+    assert out == {"ts_code": "885525.TI", "name": "白酒概念"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_ths_name_none(client: NodeApiClient):
+    with patch.object(client, "get", new=AsyncMock(return_value={"matched": None})):
+        assert await client.resolve_ths_name("不存在板块") is None
+
+
+@pytest.mark.asyncio
+async def test_get_ths_daily_range_parses_rows(client: NodeApiClient):
+    resp = {"rows": [{"trade_date": "20250102", "pct_chg": 1.23}]}
+    with patch.object(client, "get", new=AsyncMock(return_value=resp)):
+        rows = await client.get_ths_daily_range("885525.TI", "20250101", "20251231")
+    assert rows == [{"trade_date": "20250102", "pct_chg": 1.23}]
+
+
+@pytest.mark.asyncio
+async def test_get_index_kline_with_range_appends_params(client: NodeApiClient):
+    captured = {}
+
+    async def fake_get(path):
+        captured["path"] = path
+        return {"rows": []}
+
+    with patch.object(client, "get", new=fake_get):
+        await client.get_index_kline("000001", 200, start_date="20260101", end_date="20260131")
+    assert "start_date=20260101" in captured["path"] and "end_date=20260131" in captured["path"]
+
+
+@pytest.mark.asyncio
+async def test_get_ths_index_map_returns_ts_codes(client: NodeApiClient):
+    ts_codes = [{"name": "白酒概念", "ts_code": "885525.TI"}]
+    with patch.object(client, "get", new=AsyncMock(return_value={"ts_codes": ts_codes})) as get:
+        result = await client.get_ths_index_map()
+    assert result == ts_codes
+    get.assert_awaited_once_with("/internal/ths/index-map")
+
+
+@pytest.mark.asyncio
+async def test_get_ths_index_map_returns_none_on_failure(client: NodeApiClient):
+    with patch.object(client, "get", new=AsyncMock(return_value=None)):
+        assert await client.get_ths_index_map() is None
