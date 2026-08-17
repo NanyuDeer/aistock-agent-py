@@ -20,6 +20,7 @@ from pydantic import BaseModel, SecretStr
 
 from aistock_agent.config import settings
 from aistock_agent.observability.callback import get_default_callbacks
+from aistock_agent.services.http_client import LlmHttpClient
 
 logger = structlog.get_logger()
 
@@ -103,6 +104,8 @@ def get_quick_think(*, observe: bool = True, temperature: float | None = None) -
         callbacks=_get_observability_callbacks() if observe else None,
         # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
         request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
+        # 复用受限 httpx 连接池（消除向 DeepSeek 连接 CLOSE-WAIT 堆积，2026-08-17）
+        http_async_client=LlmHttpClient.client(),
     )
 
 
@@ -135,6 +138,8 @@ def get_deep_think(
         extra_body=extra_body,
         # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
         request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
+        # 复用受限 httpx 连接池（消除向 DeepSeek 连接 CLOSE-WAIT 堆积，2026-08-17）
+        http_async_client=LlmHttpClient.client(),
     )
 
 

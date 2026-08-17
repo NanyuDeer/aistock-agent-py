@@ -309,6 +309,10 @@ START → supervisor(quick_think, 意图路由)
 - **R2（次生缺陷）**：ws.py 主循环 `except WebSocketDisconnect` 不捕获 `RuntimeError`（ws.py#L826）——disconnect 被 `_forward_until_done_or_cmd` 的 recv_task 消费后主循环再 `receive_json()` 抛 starlette `RuntimeError("Cannot call "receive"...")` → handler 崩溃刷 error log。修复：`except (WebSocketDisconnect, RuntimeError) as exc`，**非 "receive" 的 RuntimeError 打 `chat.ws_main_loop_runtime_error` warning 保留可观测性**（不静默吞真实 bug，对齐经验 45/54 recv 异常双形态）。
 - **ChatTaskManager finalizing 护栏**：`ChatRunState.finalizing: bool`（producer 已产出终态 result 后 `_runner` 置位）→ `cancel()` 检查 `if s is None or s.done or s.finalizing: return False`——前端 idle 超时联动 stop 不误杀将成之轮（stop_status 落 not_found，前端已本地复位可重试）。
 - **总时长兜底（T2）**：`_RUN_TOTAL_TIMEOUT_SEC = 660`（LLM 单次 600s + 60s 余量，对齐 llm.py `_LLM_REQUEST_TIMEOUT_SECONDS`）；`_runner` 用 **`asyncio.timeout`**（内联执行 producer，无 wait_for 的独立内层 task 调度副作用）包裹 → 超时置 ERROR 终态「生成超时，请稍后重试」→ done → session 释放可重试；**必须显式 `except TimeoutError`**（继承 Exception，否则落 producer_failed 死区）；`chat.run_timeout` / `chat.run_finished`（elapsed_ms + done）观测日志。
+- **LLM 连接池复用 + WS 静默段看门狗（2026-08-17，问题 20 延续）**：线上偶发转圈追根为 **ChatOpenAI 底层 httpx 连接池泄漏**——现场 `ss` 观测 agent → DeepSeek(43.242.198.77:443) 累积 50+ CLOSE-WAIT，fd 增到 85。修复：
+  - `services/http_client.py` 新增 **`LlmHttpClient`**（LLM 专用 AsyncClient 单例，`httpx.Limits(max_connections=20, max_keepalive_connections=10)`）；`services/llm.py` 的 `get_quick_think/deep_think` 注入 `http_async_client=LlmHttpClient.client()`（**每实例新建 httpx client 是泄漏根因，必须复用共享池**）；`main.py` lifespan init/close。
+  - `api/ws.py` `_forward_until_done_or_cmd` 加 **静默段看门狗**（`_FORWARD_STALL_TIMEOUT_SEC=240`）：events 长度无新增且 recv 无新消息超阈值 → `chat_task_manager.cancel(session_id)` + 补发 error「生成超时，请重试」。**只依赖 660s 总超时不够**（<660s 悬挂 + timeout 可能被吞），看门狗保证前端绝不无限转圈。finally 补 `await gather` 收尾。
+  - **经验**：`asyncio.timeout(660)` 对 <660s 悬挂是 no-op；查连接类问题优先 `ss -tnp | grep pid` 看 CLOSE-WAIT 堆积（比 attach py-spy 更易得，perf_event_paranoid/无 sudo 时唯一手段）。
 
 ## 目录结构
 
