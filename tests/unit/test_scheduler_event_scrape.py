@@ -222,8 +222,8 @@ def test_event_scrape_jobs_registered_include_early_and_close():
     """2026-08-13 起盘前全量档 08:45（原 07:30），早间刷新档与盘前档合并。"""
     from aistock_agent.config import settings
 
-    assert settings.scheduler_event_scrape_cron == "45 8 * * 1-5"
-    assert settings.scheduler_event_scrape_close_cron == "5 15 * * 1-5"
+    assert settings.scheduler_event_scrape_cron == "45 8 * * 0-4"
+    assert settings.scheduler_event_scrape_close_cron == "5 15 * * 0-4"
 
 
 @pytest.mark.asyncio

@@ -154,13 +154,16 @@ class Settings(BaseSettings):
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）
+    # ⚠️ APScheduler day_of_week 编号与标准 crontab 不同：0=Monday（ISO），
+    #    标准 crontab 0=Sunday。from_crontab 直接按 APScheduler 语义解释数字，
+    #    "1-5" 实为周二~周六（周一=0 被跳过）。必须用 "0-4"（周一~周五）！
     scheduler_enabled: bool = True
-    scheduler_morning_cron: str = "50 8 * * 1-5"       # 晨报：工作日 08:50
-    scheduler_review_cron: str = "30 15 * * 1-5"       # 复盘：工作日 15:30
-    scheduler_snapshot_cron: str = "35 15 * * 1-5"     # 快照：工作日 15:35
-    scheduler_iterate_cron: str = "40 15 * * 1-5"      # 迭代：工作日 15:40
+    scheduler_morning_cron: str = "50 8 * * 0-4"       # 晨报：工作日 08:50
+    scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
+    scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
+    scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
-    scheduler_broadcast_cron: str = "0 9 * * 1-5"
+    scheduler_broadcast_cron: str = "0 9 * * 0-4"
     scheduler_timezone: str = "Asia/Shanghai"
 
     # ===== 迭代 Agent 自动闭环（iterate）=====
@@ -169,9 +172,9 @@ class Settings(BaseSettings):
     # 数据目录（切片/标准答案/实验/报告，均 gitignore）
     iterate_data_dir: str = "data"
     # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
-    iterate_cron: str = "0 17 * * 1-5"
+    iterate_cron: str = "0 17 * * 0-4"
     # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
-    iterate_case_build_cron: str = "30 16 * * 1-5"
+    iterate_case_build_cron: str = "30 16 * * 0-4"
     iterate_max_rounds: int = 5            # 每案例变体轮数上限
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
@@ -204,21 +207,21 @@ class Settings(BaseSettings):
     )
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
-    scheduler_review_quick_cron: str = "30 15 * * 1-5"
+    scheduler_review_quick_cron: str = "30 15 * * 0-4"
     # full review：20:30 Tushare 完整数据覆盖 quick
-    scheduler_review_full_cron: str = "30 20 * * 1-5"
-    scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
+    scheduler_review_full_cron: str = "30 20 * * 0-4"
+    scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
-    scheduler_prediction_stats_cron: str = "5 16 * * 1-5"
+    scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
     # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
-    scheduler_event_scrape_cron: str = "45 8 * * 1-5"  # 盘前档：08:45 全量（紧邻晨报 08:50）
+    scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (
-        "0 10-14 * * 1-5"  # 盘中档：10:00-14:00 每小时（含 12:00，午间公告/新闻增量）
+        "0 10-14 * * 0-4"  # 盘中档：10:00-14:00 每小时（含 12:00，午间公告/新闻增量）
     )
     scheduler_event_scrape_early_cron: str = (
-        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
+        "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
-    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
+    scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
     # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
     event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
     event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
