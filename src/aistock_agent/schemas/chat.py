@@ -20,3 +20,7 @@ class ChatResponse(BaseModel):
     session_id: str
     # P10 线 2 缺口修复：HTTP 非流式降级路径透出本轮 token 用量（graph 未采集时为 None，null 兼容）
     token_usage: dict[str, int] | None = None
+    # 深度分析引用 + 结构化卡片：WS 主路径已透传（ws.py DONE），HTTP 非流式降级路径
+    # 此前遗漏导致深度分析卡/卡片不渲染——此处补齐，与 WS 契约对齐（无则 None，null 兼容）。
+    last_deep_report: dict[str, object] | None = None
+    cards: list[dict[str, object]] | None = None
