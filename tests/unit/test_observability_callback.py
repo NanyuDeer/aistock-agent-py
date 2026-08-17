@@ -19,11 +19,13 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from httpx import ReadTimeout
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.outputs import LLMResult
 
 from aistock_agent.observability.callback import (
     AgentTraceCallback,
+    LatencyCallback,
     TokenUsageCallback,
     get_default_callbacks,
 )
@@ -177,13 +179,93 @@ def test_on_agent_finish_does_not_crash(metrics: MetricsCollector):
     cb.on_agent_finish(finish, run_id=uuid4())
 
 
+# ── LatencyCallback（请求级耗时诊断埋点）────────────────────────
+
+
+def _recorder():
+    """返回一个收集 (event, kwargs) 的列表记录器。"""
+    records: list[dict] = []
+
+    def sink(**kwargs):
+        records.append(kwargs)
+
+    return records, sink
+
+
+def test_latency_callback_records_total_ms_on_end():
+    """on_chat_model_start → on_llm_end 记录耗时，ms >= 0 且带 run_id。"""
+    records, sink = _recorder()
+    cb = LatencyCallback(log_sink=sink)
+    rid = uuid4()
+    cb.on_chat_model_start({"name": "ChatOpenAI"}, [], run_id=rid)
+    cb.on_llm_end(_make_llm_result(None), run_id=rid)
+    assert len(records) == 1
+    assert records[0]["event"] == "llm.call.duration"
+    assert records[0]["run_id"] == str(rid)
+    assert isinstance(records[0]["total_ms"], float)
+    assert records[0]["total_ms"] >= 0
+
+
+def test_latency_callback_records_first_token_ms_on_stream():
+    """前串流第一个 token 记录首 token 延迟；end 记录总时长。"""
+    records, sink = _recorder()
+    cb = LatencyCallback(log_sink=sink)
+    rid = uuid4()
+    cb.on_chat_model_start({"name": "ChatOpenAI"}, [], run_id=rid)
+    cb.on_llm_new_token("部分", run_id=rid)
+    cb.on_llm_end(_make_llm_result(None), run_id=rid)
+    types = [r["event"] for r in records]
+    assert "llm.call.duration" in types
+    first_token = next(
+        (r for r in records if r["event"] == "llm.call.first_token"), None
+    )
+    assert first_token is not None
+    assert "tokens_ms" in first_token
+
+
+def test_latency_callback_records_error_type():
+    """on_llm_error 记录错误时总耗时与错误类型。"""
+    records, sink = _recorder()
+    cb = LatencyCallback(log_sink=sink)
+    rid = uuid4()
+    cb.on_chat_model_start({"name": "ChatOpenAI"}, [], run_id=rid)
+    err = ReadTimeout("read timed out")
+    cb.on_llm_error(err, run_id=rid)
+    assert len(records) == 1
+    assert records[0]["event"] == "llm.call.error"
+    assert records[0]["error_type"] == "ReadTimeout"
+    assert records[0]["total_ms"] >= 0
+
+
+def test_latency_callback_missing_start_does_not_crash():
+    """异常路径下 end/error 无对应 start 时不崩溃、不产生记录。"""
+    records, sink = _recorder()
+    cb = LatencyCallback(log_sink=sink)
+    cb.on_llm_end(_make_llm_result(None), run_id=uuid4())
+    cb.on_llm_error(RuntimeError("x"), run_id=uuid4())
+    assert records == []
+
+
+def test_get_default_callbacks_includes_latency():
+    """get_default_callbacks 含 LatencyCallback（诊断埋点默认开启）。"""
+    callbacks = get_default_callbacks()
+    assert any(isinstance(c, LatencyCallback) for c in callbacks)
+
+
+def test_get_default_callbacks_returns_three_handlers():
+    """get_default_callbacks 现返回 TokenUsage + AgentTrace + Latency。"""
+    callbacks = get_default_callbacks()
+    assert len(callbacks) == 3
+    assert any(isinstance(c, TokenUsageCallback) for c in callbacks)
+    assert any(isinstance(c, AgentTraceCallback) for c in callbacks)
+
+
 # ── get_default_callbacks ────────────────────────────────────────
 
 
 def test_get_default_callbacks_returns_both_handlers():
-    """get_default_callbacks 返回 TokenUsageCallback + AgentTraceCallback"""
+    """get_default_callbacks 返回 TokenUsageCallback + AgentTraceCallback。"""
     callbacks = get_default_callbacks()
-    assert len(callbacks) == 2
     assert any(isinstance(c, TokenUsageCallback) for c in callbacks)
     assert any(isinstance(c, AgentTraceCallback) for c in callbacks)
 
