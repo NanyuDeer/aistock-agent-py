@@ -1,9 +1,9 @@
 """Event Consumers -- evening_chain 事件消费者（6 个消费者，2 个消费组）。
 事件流：
-  review_quick -> ReviewQuickConsumer   -> snapshot(quick)
+  review_quick -> ReviewQuickConsumer -> snapshot(quick) -> broadcast（quick 晚间播报）
   review_full  -> ReviewFullConsumer    -> snapshot(full) -> iterate -> broadcast
                                          └-> review_done（仅 status=ok）-> PredictionConsumer
-  snapshot     -> SnapshotConsumer      -> iterate（仅 full）
+  snapshot     -> SnapshotConsumer      -> quick：broadcast；full：iterate
   iterate      -> IterateConsumer       -> broadcast
   broadcast    -> BroadcastConsumer     （终点）
   review_done  -> PredictionConsumer    （独立消费组 prediction_chain）
@@ -195,6 +195,16 @@ class SnapshotConsumer(BaseConsumer):
         if snapshot_kind == "full":
             await self.ctx.event_bus.publish(
                 CHANNEL_ITERATE,
+                payload={"report_date": report_date},
+            )
+        elif snapshot_kind == "quick":
+            # quick snapshot 直接触发 broadcast（晚间双人播报）。
+            # 为什么跳过 iterate：brief_evening 只聚合 review 报告（quick review 已生成），
+            # 不依赖 iterate 分析；quick 链路补跑 iterate 是重复 LLM 消耗且无消费方。
+            # 此前 quick 链路止步 snapshot 不触发 broadcast，15:30 无晚间双人播报
+            # （2026-08-16 修复）。
+            await self.ctx.event_bus.publish(
+                CHANNEL_BROADCAST,
                 payload={"report_date": report_date},
             )
 

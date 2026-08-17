@@ -8,6 +8,8 @@ import pytest
 from aistock_agent.agents.workers.review import ReviewRunResult
 from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.event_consumers import (
+    CHANNEL_BROADCAST,
+    CHANNEL_ITERATE,
     CHANNEL_REVIEW_DONE,
     CHANNEL_REVIEW_FULL,
     CHANNEL_REVIEW_QUICK,
@@ -168,8 +170,12 @@ async def test_snapshot_consumer_skips_iterate_for_quick_kind(mock_event_bus, mo
     with patch("aistock_agent.services.event_consumers.build_snapshot", return_value=snapshot):
         await consumer.handle(event)
 
-    # quick snapshot 不触发 iterate
-    mock_event_bus.publish.assert_not_called()
+    # quick snapshot 不触发 iterate，但触发 broadcast（15:30 quick 晚间双人播报，2026-08-16 修复）
+    mock_event_bus.publish.assert_called_once()
+    publish_args = mock_event_bus.publish.call_args
+    assert publish_args[0][0] == CHANNEL_BROADCAST
+    # 绝不触发 iterate（iterate 是 full 复盘流水线）
+    assert CHANNEL_ITERATE not in [c.args[0] for c in mock_event_bus.publish.await_args_list]
     # quick snapshot 同样持久化 brief_summary（晚间 brief 依赖）
     _, kwargs = mock_node_api.save_analysis_report.call_args
     assert kwargs["report_type"] == "market_snapshot"

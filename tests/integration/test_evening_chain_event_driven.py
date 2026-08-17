@@ -8,6 +8,7 @@ from aistock_agent.agents.workers.review import ReviewRunResult
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.event_consumers import (
+    CHANNEL_BROADCAST,
     CHANNEL_ITERATE,
     CHANNEL_REVIEW_DONE,
     CHANNEL_REVIEW_FULL,
@@ -124,6 +125,34 @@ async def test_full_chain_review_to_snapshot_to_iterate_to_broadcast(ctx):
 
     ctx.event_bus.publish.assert_called_once_with(
         CHANNEL_ITERATE, payload={"report_date": "20260730"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_quick_snapshot_triggers_broadcast(ctx):
+    """quick 链路：snapshot(quick) 完成后直接触发 broadcast（晚间双人播报）。
+
+    brief_evening 只聚合 review 报告（quick review 已生成），不依赖 iterate；
+    因此 quick snapshot 后跳过 iterate，直接发 BROADCAST——保证 15:30 quick
+    链路也能产出晚间双人播报（此前止步 snapshot 不触发 broadcast）。
+    """
+    ctx.event_bus.publish.reset_mock()
+    snap_consumer = SnapshotConsumer(ctx)
+    snap_event = Event(
+        event_id="evt-q1",
+        channel=CHANNEL_SNAPSHOT,
+        payload={"report_date": "20260730", "snapshot_kind": "quick"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.build_snapshot",
+        return_value={"date": "20260730", "data": {}},
+    ):
+        await snap_consumer.handle(snap_event)
+
+    ctx.event_bus.publish.assert_called_once_with(
+        CHANNEL_BROADCAST, payload={"report_date": "20260730"}
     )
 
 
