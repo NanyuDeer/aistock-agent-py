@@ -2,6 +2,34 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-17 — LLM 请求级耗时埋点（诊断「等很久」根因）
+
+**开发者**: 37588
+
+### 背景
+「等很久没回答」根因未坐实。design-debate 两轮裁决：连接池修复有效但只解决泄漏，不解决推理慢/
+争用；真正的 149s「静默黑洞」在队列/上游/双 graph 三者间未定，缺 LLM 请求级耗时证据。
+
+### 修复
+- `src/aistock_agent/observability/callback.py`：新增 `LatencyCallback`——挂载到所有 ChatOpenAI
+  工厂（get_quick_think/get_deep_think）默认回调，记录请求级指标：
+  - `llm.call.duration`：每次 LLM 调用总耗时（覆盖非流式 ainvoke）
+  - `llm.call.first_token`：首 token 延迟（流式链路，可区分「上游慢」vs「池排队」）
+  - `llm.call.error`：失败时总耗时 + 异常类型（ReadTimeout/ConnectError/RemoteProtocolError，区分超时 vs 连接异常）
+- `get_default_callbacks()` 现返回 3 个 handler（TokenUsage + AgentTrace + Latency），全局生效，
+  不侵入业务代码（回调链注入）
+
+### 验证
+- 新增 6 个单测（`test_observability_callback`：duration/first_token/error/缺失 start 不崩/注入）
+- 改动相关单测 53 passed；ruff 0；mypy 0 新增
+- 注入链路实测：get_quick_think() 生成的 model 挂 3 回调 + http_async_client
+
+### 待生产验证
+- 部署后重复对话，观察日志 `llm.call.*`，据 total_ms/first_token_ms 定位 149s 黑洞：排队（start→首
+  token 大）vs 上游慢（first_token 大）vs 双 graph 叠加（同消息多条 duration）
+
+---
+
 ## [changer] 2026-08-17 — LLM 连接池泄漏修复 + WS 悬挂止血（问题 20 延续）
 
 **开发者**: 37588
