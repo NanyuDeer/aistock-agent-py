@@ -447,3 +447,67 @@ async def test_ws_chat_main_loop_catches_runtime_error_after_disconnect():
             await ws_module.ws_chat(sock)  # type: ignore[arg-type]
         except RuntimeError:
             raise AssertionError("ws_chat 不应把主循环 receive RuntimeError 抛给 ASGI 层")
+
+
+# ── 问题 20 止血：_forward_until_done_or_cmd 静默段看门狗 ───────────────────
+
+
+class _StalledSocket:
+    """producer 悬挂且前端无消息时，recv 永久挂起的最小替身。"""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self._gate = asyncio.Event()  # 永不释放 → recv 挂起（模拟无前端消息）
+
+    async def receive_json(self) -> dict:
+        await self._gate.wait()  # 永久挂起
+        return {"type": "pong"}  # 不可达
+
+    async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+def _make_stalled_state(session_id: str = "s1") -> ChatRunState:
+    """构造未完成、无事件产出的 ChatRunState（producer 悬挂场景）。"""
+    task = asyncio.create_task(asyncio.sleep(0))
+    return ChatRunState(session_id=session_id, run_id="r1", task=task)
+
+
+@pytest.mark.asyncio
+async def test_forward_until_done_or_cmd_watchdog_cancels_stalled_run() -> None:
+    """问题 20 止血：静默段超时后主动 cancel producer 并补发 error 终态。
+
+    修复前：producer 悬挂（无 done、无新事件、前端无消息）时 _forward 无限
+    `await state.waiters` → 前端转圈。修复后：看门狗在静默超过阈值时调用
+    chat_task_manager.cancel(session_id) 并发送 error，保证必有终态流出。
+    """
+    state = _make_stalled_state()
+    ws = _StalledSocket()
+
+    # cancel 的真实效果：_runner 捕获 CancelledError 后置终态并 notify → 转发
+    # 随后补发 cancelled 终态并结束。测试用 side_effect 复刻该收尾，观察窗口内
+    # 只触发一次看门狗即自然退出（不会因 state 恒未 done 而无限重复）。
+    def _cancel_and_finish(session_id: str) -> bool:
+        state.done = True
+        state.result = {"type": "cancelled", "content": "已停止生成"}
+        state.notify()
+        return True
+
+    with (
+        patch.object(
+            ws_module, "_FORWARD_STALL_TIMEOUT_SEC", 0.1,
+        ) as _,
+        patch.object(
+            ws_module.chat_task_manager, "cancel", side_effect=_cancel_and_finish,
+        ) as mock_cancel,
+    ):
+        await asyncio.wait_for(
+            ws_module._forward_until_done_or_cmd(state, ws, "s1"),
+            timeout=1.0,
+        )
+
+    mock_cancel.assert_called_once_with("s1")
+    # 至少发出一条 error 终态（cancel 已执行 → 应为"生成超时，请重试"语义）
+    errors = [m for m in ws.sent if m.get("type") == "error"]
+    assert errors, "看门狗超时应补发 error 终态"
+    assert errors[-1]["content"] == "生成超时，请重试"

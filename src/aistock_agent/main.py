@@ -13,7 +13,7 @@ from aistock_agent.api.routes import router as api_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
 from aistock_agent.observability.logging import get_logger, setup_logging
-from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.http_client import HttpClientPool, LlmHttpClient
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.scheduler import shutdown_scheduler, start_scheduler
 
@@ -22,14 +22,17 @@ setup_logging(settings.log_level)
 
 logger = get_logger(__name__)
 
+# LLM httpx 连接池默认超时（对齐 llm._LLM_REQUEST_TIMEOUT_SECONDS = 600）
+_LLM_HTTP_TIMEOUT = 600.0
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：启动初始化资源池，关闭优雅释放。
 
-    启动时初始化 Redis 连接池和 httpx AsyncClient，
+    启动时初始化 Redis 连接池、httpx AsyncClient 与 LLM 连接池，
     任一初始化失败不崩溃（降级运行，由调用方处理异常）。
-    关闭时无条件关闭两个池（close 幂等）。
+    关闭时无条件关闭所有池（close 幂等）。
     """
     logger.info("agent_service_started", host=settings.host, port=settings.port)
 
@@ -46,6 +49,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await HttpClientPool.init(timeout=settings.http_timeout_seconds)
     except Exception:
         logger.error("http_client_pool_init_failed", exc_info=True)
+
+    # LLM 连接池（ChatOpenAI 复用受限 AsyncClient，防 DeepSeek CLOSE-WAIT 堆积）
+    try:
+        await LlmHttpClient.init(timeout=_LLM_HTTP_TIMEOUT)
+    except Exception:
+        logger.error("llm_http_client_init_failed", exc_info=True)
 
     # 启动定时调度（在连接池初始化之后；异常不崩溃，降级为无调度运行）
     try:
@@ -166,6 +175,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     shutdown_scheduler()
     await RedisPool.close()
     await HttpClientPool.close()
+    await LlmHttpClient.close()
     logger.info("agent_service_stopped")
 
 

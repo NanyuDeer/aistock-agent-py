@@ -2,6 +2,44 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-17 — LLM 连接池泄漏修复 + WS 悬挂止血（问题 20 延续）
+
+**开发者**: 37588
+
+### 背景
+线上偶现聊天 WS"一直转圈"（前端收不到 done）+ 偶发 500。现场 `ss` 观测：agent 进程向
+DeepSeek（api.deepseek.com / 43.242.198.77:443）累积 **50+ 条 CLOSE-WAIT**、fd 增至 85
+（正常 <20），每次对话只增不减 → 连接池泄漏 → 偶发阻塞 LLM 调用 → `synth_answer.ok` 后
+producer 悬挂 → `_runner` finally 不执行 → `state.done` 永 False → `_forward` 无限 await →
+前端永久转圈。
+
+### 修复
+- `src/aistock_agent/services/http_client.py`：新增 `LlmHttpClient`——LLM（DeepSeek/ChatOpenAI）
+  专用 httpx.AsyncClient 单例，带 `httpx.Limits(max_connections=20, max_keepalive_connections=10)`
+  （显式限定连接/keep-alive 上限，杜绝 CLOSE-WAIT 无限堆积）；init/client/close 幂等
+- `src/aistock_agent/services/llm.py`：`get_quick_think()`/`get_deep_think()` 注入
+  `http_async_client=LlmHttpClient.client()`（原实现每实例新建 httpx client 且无回收）
+- `src/aistock_agent/main.py`：lifespan 启动 `LlmHttpClient.init(timeout=600)`、关闭 `close()`
+- `src/aistock_agent/api/ws.py`：`_forward_until_done_or_cmd` 新增**静默段看门狗**
+  （`_FORWARD_STALL_TIMEOUT_SEC=240`）——events 长度无新增且 recv 无新消息持续超阈值 →
+  主动 `chat_task_manager.cancel(session_id)` + 补发 error「生成超时，请重试」，再由 `_runner`
+  终态 notify 补发 cancelled，保证前端绝不无限转圈；finally 补 `await asyncio.gather` 收尾
+  （对齐"问题18"规范）
+- 测试：
+  - `tests/unit/test_llm.py`：新增连接池共享/受限断言（quick/deep 共用同一单例 + Limits 生效）
+  - `tests/unit/test_ws_chat_replacement.py`：新增看门狗测试（悬挂 → cancel + error 终态）
+
+### 验证
+- 全量 unit 1987 passed；ws/chat 集成 17 passed
+- ruff 改动文件 0；mypy 与 baseline 一致（20 pre-existing，无新增）
+- app import + `http_async_client` 共享单例确认
+
+### 待生产验证
+- 部署后重复对话，`ss -tnp | grep CLOSE-WAIT | grep 43.242.198.77` 计数应稳定不再增长
+- 聊天转圈 / 500 应消除（若另一用户 500 为同源连接池问题则一并解决；否则独立排查）
+
+---
+
 ## [changer] 2026-08-16 — 对话卡死恢复止血（问题 20）
 
 **开发者**: 37588
