@@ -1,6 +1,7 @@
 """Review Agent — 收盘溯源归因（受限 JSON 推理）
 
-模式：单次 get_deep_think().ainvoke，输入系统提示词 + JSON 快照
+模式：get_deep_think().ainvoke，输入系统提示词 + JSON 快照；
+LLM 输出解析失败时重试一次（_generate_trace_with_retry，2026-08-18）
 校验：MarketTraceResult.model_validate_json + validate_trace_against_snapshot
 缓存：Redis TTL=2小时（briefing:review:YYYY-MM-DD）
 归档：docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md
@@ -11,6 +12,7 @@ build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推�
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -94,6 +96,45 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+async def _generate_trace_with_retry(
+    llm: object,
+    messages: Sequence[object],
+) -> MarketTraceResult:
+    """单次 LLM 推理生成 MarketTraceResult，输出解析失败时重试一次。
+
+    线上复盘多次因单次 LLM 输出不合规整份降级（2026-08-18：15:30 空响应 → JSON EOF；
+    手动补跑 event_hits[].result 越界枚举 → literal_error），本函数在解析失败时
+    重试一次，二次仍失败抛最后一次异常（调用方降级为"生成暂时不可用"）。
+    仅重试 LLM 输出解析；确定性语义校验（validate_trace_against_snapshot）不重试，
+    避免为低概率结构问题反复烧 LLM 成本。
+    """
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            ai_message = await llm.ainvoke(messages)  # type: ignore[attr-defined]
+            raw_text = (
+                ai_message.content
+                if isinstance(ai_message.content, str)
+                else str(ai_message.content)
+            )
+            cleaned = _strip_code_fences(raw_text)
+            return MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if attempt == 0:
+                logger.warning(
+                    "review_trace_llm_retry",
+                    retry_index=attempt,
+                    error=str(e),
+                    exc_info=True,
+                )
+                continue
+    assert last_error is not None
+    raise last_error
+
+
 # ============================================================================
 # LLM 输出字段名归一化 — prompt 强化的兜底
 # ============================================================================
@@ -128,6 +169,10 @@ _OPPOSITE_DIRECTION: dict[str, str] = {
     "bearish": "bullish",
     "neutral": "neutral",
 }
+
+# EventHit.result 合法值（LLM 常把 PredictionValidation.status 的合法值如
+# partial 填进来，越界取值须归一化，防整份报告降级，2026-08-18 线上事故）
+_EVENT_RESULT_VALUES: set[str] = {"hit", "miss", "unverifiable"}
 
 
 def _normalize_sector_hit(hit: dict[str, object]) -> dict[str, object]:
@@ -180,6 +225,10 @@ def _normalize_event_hit(evt: dict[str, object]) -> dict[str, object]:
     ne.setdefault("actual_impact", "")
     # 确保 note 存在
     ne.setdefault("note", "")
+    # 值归一化：LLM 常把 status 的合法值（如 partial）填进 EventHit.result，
+    # 越界取值兜底为 unverifiable（防 literal 校验失败拖垮整份报告，2026-08-18）
+    if ne.get("result") not in _EVENT_RESULT_VALUES:
+        ne["result"] = "unverifiable"
     return ne
 
 
@@ -1081,16 +1130,7 @@ async def run(state: AgentState) -> dict[str, object]:
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            ai_message = await llm.ainvoke(messages)
-            raw_text = (
-                ai_message.content
-                if isinstance(ai_message.content, str)
-                else str(ai_message.content)
-            )
-            cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(
-                _normalize_llm_trace_json(cleaned)
-            )
+            trace = await _generate_trace_with_retry(llm, messages)
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
@@ -1303,16 +1343,7 @@ async def run_review(
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            ai_message = await llm.ainvoke(messages)
-            raw_text = (
-                ai_message.content
-                if isinstance(ai_message.content, str)
-                else str(ai_message.content)
-            )
-            cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(
-                _normalize_llm_trace_json(cleaned)
-            )
+            trace = await _generate_trace_with_retry(llm, messages)
         validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
