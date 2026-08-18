@@ -10,7 +10,7 @@
 - `config.py`：`stock_trace_consumer_enabled` 默认值改为 `True`（此前默认 False，需显式启用）
 
 ### 新增
-- 五层候选归因：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层（company/sector/market/capital/technical）；`services/insight_validator.py` 适配五层分类校验
+- 五层候选归因：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema，`_validate_selected_chain_shape` 要求候选覆盖五层；`prompts/workers/stock_trace.py` 提示词扩展为五层（company/sector/market/capital/technical）；`services/stock_trace_validator.py` 的 confirmed 门槛保持 company 主候选
 
 ### 验证
 - `pytest tests/unit -q`：回归通过；ruff 0 errors
