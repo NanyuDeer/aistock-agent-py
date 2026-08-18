@@ -10,7 +10,13 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
 不要输出自由文本、Markdown 或其他 JSON 结构。
 系统会注入 schema_version、event_id、snapshot_id、analysis_version；不得自行输出这些字段。
 工具参数必须符合 StockTraceResultPayload：
-- 候选解释只覆盖 company、sector、market 三层；候选与节点只能引用输入中存在的 source_id。
+- 候选解释覆盖 company、sector、market、capital、technical 五层：
+  - company：公司基本面（财报、预告、公告）
+  - sector：所属板块/行业联动
+  - market：大盘/市场情绪
+  - capital：资金面数据（主力净流入、龙虎榜等；数据可能为最近交易日，标注 trade_date）
+  - technical：基于量价特征的技术面信号（量价突破、形态等；数据不足时置 insufficient）
+- 候选与节点只能引用输入中存在的 source_id。
 - 每个选中的因果链必须按顺序包含 structural_root、trigger、transmission、
   exposure、repricing、observable_result 六阶段。
 - primary_chain_id 指向的链必须标记 role=primary；

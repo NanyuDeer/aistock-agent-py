@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SourceLevel = Literal["A", "B", "C", "D"]
 SourceKind = Literal[
-    "trigger_fact", "quote_fact", "sector_fact", "market_fact", "announcement", "news"
+    "trigger_fact", "quote_fact", "sector_fact", "market_fact",
+    "announcement", "news", "capital_fact", "technical_fact",
 ]
 ChainStage = Literal[
     "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
@@ -81,7 +82,7 @@ class TraceCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: str
-    layer: Literal["company", "sector", "market"]
+    layer: Literal["company", "sector", "market", "capital", "technical"]
     rank: int = Field(ge=1)
     status: Literal["supported", "weak", "rejected", "insufficient"]
     verdict: str = Field(min_length=1)
@@ -139,9 +140,11 @@ class StockTraceResult(StockTraceResultPayload):
     @model_validator(mode="after")
     def _validate_selected_chain_shape(self) -> "StockTraceResult":
         candidate_layers = {candidate.layer for candidate in self.candidates}
-        required_layers = {"company", "sector", "market"}
+        required_layers = {"company", "sector", "market", "capital", "technical"}
         if not required_layers.issubset(candidate_layers):
-            raise ValueError("candidates must cover company, sector and market layers")
+            raise ValueError(
+                "candidates must cover company, sector, market, capital and technical layers"
+            )
         selected = {item for item in (self.primary_chain_id, self.alternative_chain_id) if item}
         chain_ids = {chain.chain_id for chain in self.chains}
         if not selected.issubset(chain_ids):
