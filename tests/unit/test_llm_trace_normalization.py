@@ -190,6 +190,35 @@ def test_normalize_event_hit_default_actual_impact():
     assert ne["note"] == ""
 
 
+def test_normalize_event_hit_partial_result_to_unverifiable():
+    """LLM 把 status 的合法值 partial 填进 event_hits.result 时归一化为 unverifiable。
+
+    线上 2026-08-18 复盘失败根因：event_hits[].result='partial' 超出
+    EventHit.result 枚举（hit/miss/unverifiable），pydantic literal 校验失败，
+    整份复盘报告降级。partial 语义上接近"无法完整验证"，归一化为 unverifiable。
+    """
+    evt = {
+        "event": "事件C",
+        "expected_direction": "bullish",
+        "verification": "partial",
+    }
+    ne = _normalize_event_hit(evt)
+    assert ne["event_title"] == "事件C"
+    assert ne["morning_direction"] == "bullish"
+    assert ne["result"] == "unverifiable"
+
+
+def test_normalize_event_hit_invalid_result_value_defaults_to_unverifiable():
+    """result 为枚举外任意值时兜底为 unverifiable，防单点非法值拖垮整份报告。"""
+    evt = {
+        "event_title": "事件D",
+        "morning_direction": "bearish",
+        "result": "部分验证",
+    }
+    ne = _normalize_event_hit(evt)
+    assert ne["result"] == "unverifiable"
+
+
 # ============================================================================
 # _normalize_prediction_validation 测试
 # ============================================================================
@@ -303,6 +332,40 @@ def test_normalize_llm_trace_json_with_wrong_fields():
     assert pv["sector_hits"][0]["result"] == "miss"
     assert pv["sector_hits"][0]["actual_direction"] == "bearish"
     assert pv["event_hits"][0]["event_title"] == "事件A"
+    assert pv["event_hits"][0]["result"] == "unverifiable"
+
+
+def test_normalize_llm_trace_json_event_partial_result_normalized():
+    """完整 trace 含 event_hits[].result='partial' 时归一化为 unverifiable（可落库）。
+
+    复现 2026-08-18 线上失败：normalize 后仍留 'partial' 会导致
+    MarketTraceResult.model_validate_json 抛 literal_error，整份报告降级。
+    """
+    raw = json.dumps({
+        "schema_version": "1.1",
+        "attribution_status": "hypothesis",
+        "candidates": [],
+        "primary_chain_id": None,
+        "alternative_chain_id": None,
+        "confidence": "medium",
+        "unresolved_questions": [],
+        "prediction_validation": {
+            "status": "partial",
+            "sector_hits": [],
+            "event_hits": [
+                {
+                    "event": "事件A",
+                    "expected_direction": "bullish",
+                    "verification": "partial",
+                },
+            ],
+            "overall_note": "部分偏离",
+        },
+    })
+    normalized = _normalize_llm_trace_json(raw)
+    data = json.loads(normalized)
+    pv = data["prediction_validation"]
+    assert pv["status"] == "partial"
     assert pv["event_hits"][0]["result"] == "unverifiable"
 
 
