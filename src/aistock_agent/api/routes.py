@@ -132,22 +132,35 @@ async def chat_message(
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
-    result = await graph.ainvoke(
+    # G1 修订（2026-08-17 design-debate 定案）：值源 = 末节点 synth_answer 输出
+    result: dict[str, object] = {}
+    async for step in graph.astream(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
-    )
-    # Phase 4-2（改进 13）：confirm 是 WS 专属两阶段交互协议；HTTP 非流式路径
-    # 无交互能力，但 qa_router 触发 confirm 是传输无关的——此处降级为既有澄清
-    # 文本（等价 WS confirm_timeout 回退），避免"有用澄清"退化为"无法处理"。
+        stream_mode="updates",
+    ):
+        if isinstance(step, dict) and "synth_answer" in step:
+            result = step["synth_answer"]  # 终节点，最后一次命中即本轮输出
+    # 澄清分支显式置 None
     if not result.get("final_response") and result.get("confirm"):
-        content = _STOCK_SYMBOL_CLARIFICATION
-    else:
-        content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+        return ChatResponse(
+            content=_STOCK_SYMBOL_CLARIFICATION,
+            session_id=session_id,
+            token_usage=result.get("token_usage"),
+            last_deep_report=None,
+            cards=None,
+        )
+    content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     return ChatResponse(
         content=content,
         session_id=session_id,
-        # P10 线 2 缺口修复：透出本轮 token_usage（synth_answer_node 附加于 result；无则 None）
         token_usage=result.get("token_usage"),
+        last_deep_report=result.get("last_deep_report"),
+        cards=(
+            [c.model_dump() for c in result["cards"]]
+            if result.get("cards")
+            else None
+        ),
     )
 
 
@@ -225,6 +238,9 @@ async def _stream_messages(
         asyncio.create_task(_run_graph_to_queue(graph, initial_state, session_id))
 
     _llm_started = False
+    # G1 修订（2026-08-17）：last_deep_report/cards 改为事件流采集
+    round_last_deep_report: dict[str, object] | None = None
+    round_cards: list[dict[str, object]] | None = None
     try:
         while True:
             event = await queue.get()
@@ -233,7 +249,6 @@ async def _stream_messages(
                 final_state = await graph.aget_state(
                     config={"configurable": {"thread_id": session_id}}
                 )
-                final_cards = final_state.values.get("cards")
                 # Phase 4-2（改进 13）：SSE 与 HTTP 同样无两阶段交互能力；qa_router
                 # 触发 confirm 时降级为既有澄清文本（等价 WS confirm_timeout 回退）。
                 final_response = final_state.values.get("final_response", "")
@@ -246,8 +261,9 @@ async def _stream_messages(
                     # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
                     # 仅供前端本地累加展示，本路径不落库）
                     "token_usage": final_state.values.get("token_usage"),
-                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，需 model_dump 转 dict
-                    "cards": [c.model_dump() for c in final_cards] if final_cards else None,
+                    # G1 修订：DONE 补齐 last_deep_report（事件流采集值，非终态）
+                    "last_deep_report": round_last_deep_report,
+                    "cards": round_cards,
                 }
                 break
             if not isinstance(event, dict):
@@ -255,6 +271,14 @@ async def _stream_messages(
             if "__error__" in event:
                 yield {"type": SSEEventType.ERROR, "message": event["__error__"]}
                 break
+
+            # G1 修订：采集 synth_answer 节点输出
+            if event.get("event") == "on_chain_end" and event.get("name") == "synth_answer":
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict):
+                    round_last_deep_report = output.get("last_deep_report")
+                    cards = output.get("cards")
+                    round_cards = [c.model_dump() for c in cards] if cards else None
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
