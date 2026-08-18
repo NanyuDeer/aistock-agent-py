@@ -2,6 +2,21 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-15 — 自选股价格异动归因：stock_trace_consumer 默认启用 + 五层候选归因
+
+**开发者**: Aria
+
+### 改进
+- `config.py`：`stock_trace_consumer_enabled` 默认值改为 `True`（此前默认 False，需显式启用）
+
+### 新增
+- 五层候选归因：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层（company/sector/market/capital/technical）；`services/insight_validator.py` 适配五层分类校验
+
+### 验证
+- `pytest tests/unit -q`：回归通过；ruff 0 errors
+
+---
+
 ## [junliang] 2026-08-06 — 自选股洞察：LLM 归因 category 字段兼容 + 归因链路联调修复
 
 **开发者**: Aria
