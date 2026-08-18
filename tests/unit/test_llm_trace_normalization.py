@@ -14,7 +14,6 @@ from aistock_agent.agents.workers.review import (
     _normalize_sector_hit,
 )
 
-
 # ============================================================================
 # _normalize_sector_hit 测试
 # ============================================================================
@@ -122,10 +121,14 @@ def test_normalize_sector_hit_deviation_note_default():
 def test_normalize_sector_hit_miss_infers_opposite_direction():
     """result=miss 时从 morning_direction 推断 actual_direction 为相反方向。"""
     # bullish → bearish
-    nh = _normalize_sector_hit({"sector": "A", "predicted_direction": "bullish", "actual_direction": "miss"})
+    nh = _normalize_sector_hit(
+        {"sector": "A", "predicted_direction": "bullish", "actual_direction": "miss"}
+    )
     assert nh["actual_direction"] == "bearish"
     # bearish → bullish
-    nh = _normalize_sector_hit({"sector": "B", "predicted_direction": "bearish", "actual_direction": "miss"})
+    nh = _normalize_sector_hit(
+        {"sector": "B", "predicted_direction": "bearish", "actual_direction": "miss"}
+    )
     assert nh["actual_direction"] == "bullish"
 
 

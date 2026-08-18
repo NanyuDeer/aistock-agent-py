@@ -96,6 +96,28 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+def _build_trace_llm() -> object:
+    """构建复盘溯源 LLM：统一 run/run_review 两入口的配置。
+
+    2026-08-13 服务器事故：默认 max_tokens 4000 下 deepseek thinking 模式
+    reasoning_content 占用大量 token，MarketTraceResult JSON（含完整 sources）
+    被截断或输出为空 → model_validate_json EOF → 整份降级"收盘溯源生成暂时
+    不可用"。显式禁用 thinking + 加大 max_tokens（_REVIEW_TRACE_MAX_TOKENS，
+    与变体生成同量级）。run_review 曾遗漏本配置（get_deep_think() 默认参数）
+    导致偶发空输出降级（2026-08-18）——所有入口必须走本 helper。
+    """
+    base_url = (
+        settings.deep_think_base_url or settings.openai_base_url
+    ).lower()
+    extra_body = (
+        {"thinking": {"type": "disabled"}} if "deepseek" in base_url else None
+    )
+    return get_deep_think(
+        max_tokens=_REVIEW_TRACE_MAX_TOKENS,
+        extra_body=extra_body,
+    )
+
+
 async def _generate_trace_with_retry(
     llm: object,
     messages: Sequence[object],
@@ -1108,23 +1130,10 @@ async def run(state: AgentState) -> dict[str, object]:
     # 4. detected 时单次 LLM 调用 + 解析 + 跨对象校验
     try:
         if trace is None:
-            # 2026-08-13 服务器事故：默认 max_tokens 4000 下 deepseek-v4-pro
-            # thinking 模式 reasoning_content 占用大量 token，MarketTraceResult
-            # JSON（含完整 sources）被截断 → model_validate_json EOF → 整份降级
-            # "收盘溯源生成暂时不可用" → 迭代闭环全 0 分。显式禁用 thinking +
-            # 加大 max_tokens（与变体生成 _MAX_VARIANT_OUTPUT_TOKENS 同量级）。
-            base_url = (
-                settings.deep_think_base_url or settings.openai_base_url
-            ).lower()
-            extra_body = (
-                {"thinking": {"type": "disabled"}}
-                if "deepseek" in base_url
-                else None
-            )
-            llm = get_deep_think(
-                max_tokens=_REVIEW_TRACE_MAX_TOKENS,
-                extra_body=extra_body,
-            )
+            # _build_trace_llm 统一 run/run_review 的 LLM 配置（2026-08-13
+            # 事故：deepseek thinking 占满 max_tokens → 输出为空/截断 → EOF，
+            # 显式禁用 thinking + 加大 max_tokens，见 _build_trace_llm 注释）。
+            llm = _build_trace_llm()
             snapshot_json = snapshot.model_dump_json(indent=2)
             messages = [
                 SystemMessage(content=REVIEW_PROMPT),
@@ -1337,7 +1346,9 @@ async def run_review(
     # LLM 推理 + 校验
     try:
         if trace is None:
-            llm = get_deep_think()
+            # 统一配置见 _build_trace_llm（8-13 事故：deepseek thinking 占满
+            # max_tokens → 空输出 → EOF → 整份降级，run_review 曾遗漏此配置）。
+            llm = _build_trace_llm()
             snapshot_json = snapshot.model_dump_json(indent=2)
             messages = [
                 SystemMessage(content=REVIEW_PROMPT),
