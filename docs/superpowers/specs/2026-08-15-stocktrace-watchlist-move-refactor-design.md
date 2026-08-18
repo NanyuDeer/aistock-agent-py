@@ -46,7 +46,7 @@
 cron 11:30/15:05（现有）
   → 打点适配层（改造 PriceMoveService.run）
       ├─ 腾讯 activity 行情 → 计算 moveBps（相对今开，±7% 阈值）
-      └─ moveBps ≥700 → 构造 PriceFact{ changePct: moveBps/10000, previousClose: 今开 }
+      └─ moveBps ≥700 → 构造 PriceFact{ changePct: moveBps/100, previousClose: 今开 }
           → StockTraceService.processPriceFact(security, fact)   ← stocktrace 事件层接管
               ├─ 事件创建/修订（mv 前缀事件 ID，revision 机制，恢复窗口）
               ├─ 三阶段快照（initial → 30s enriched → corrected）
@@ -88,7 +88,7 @@ Python 侧
   - enriched 采集并行五域，readiness 扩展五域判定
 
 ### 6.2 触发适配层
-- `PriceMoveService.run`：保留行情拉取与 moveBps 计算；达到阈值时构造 `PriceFact`（`changePct = moveBps / 10000`、`previousClose = 今开价`、`observedAt = 打点时刻`）并调用 `StockTraceService.processPriceFact`。
+- `PriceMoveService.run`：保留行情拉取与 moveBps 计算；达到阈值时构造 `PriceFact`（`changePct = moveBps / 100`、`previousClose = 今开价`、`observedAt = 打点时刻`）并调用 `StockTraceService.processPriceFact`。
 - `persistSnapshot` 保留但仅作记录（watchlist_price_snapshots 追溯用）。
 - cron 11:30/15:05 与 11:50 补抓：11:50 补抓（refetchMiddayEvidence）停用——stocktrace 以 revision 机制处理盘中变化。
 
@@ -133,7 +133,7 @@ Python 侧
 | deep_think 成本/延迟上升 | 中 | 受限单次输出；规则兜底；consumer 可关停回退 |
 | 归因延迟 30s+（依赖 enriched 快照） | 中 | 前端 processing 状态 |
 | 五层候选幻觉 | 中 | validator 强校验：supported 必须证据锚定 |
-| 触发语义差异（今开 vs 昨收） | 低 | 适配层统一 changePct=moveBps/10000 |
+| 触发语义差异（今开 vs 昨收） | 低 | 适配层统一 changePct=moveBps/100 |
 | 旧页替换回退 | 低 | insight-detail-move 代码保留 |
 | 双 consumer 并发 | 低 | 已同构，不同 Redis db |
 | layer 历史数据 | 低 | stock_trace 表当前为空 |
