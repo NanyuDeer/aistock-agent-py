@@ -16,10 +16,11 @@ _ANYSEARCH_ENDPOINT = "https://api.anysearch.com/v1/search"
 class AnySearchProvider:
     """AnySearch（anysearch.com）— 每日 1000 次日更、中文友好、finance 垂直域。
 
-    走 `POST /v1/search`，鉴权 `Authorization: Bearer <key>`（无 key 匿名也可用、
-    限流更低）。body: `{query, max_results, domain:"finance", content_types:["web","news"],
-    zone:"cn"}`（finance 垂直域 + cn 区，适配 A 股）。返回每结果含 snippet/content。
-    429/401 → RateLimited；其余非 2xx → raise。
+    走 `POST /v1/search`，鉴权 `Authorization: Bearer <key>`（API 本身支持无 key
+    匿名调用、限流更低；但链路惰性注册要求配置 ANYSEARCH_API_KEY(S) 才会入链，
+    故匿名模式在链上不可达）。body: `{query, max_results, domain:"finance",
+    content_types:["web","news"], zone:"cn"}`（finance 垂直域 + cn 区，适配 A 股）。
+    返回每结果含 snippet/content。429/401 → RateLimited；其余非 2xx → raise。
     """
 
     name: ProviderName = "anysearch"
@@ -93,7 +94,8 @@ class DoubaoProvider:
         meta = data.get("ResponseMetadata") if isinstance(data, dict) else None
         if isinstance(meta, dict) and meta.get("Error"):
             raise RuntimeError(f"doubao error: {meta['Error']}")
-        docs = data.get("Result", {}).get("Documents") if isinstance(data, dict) else []
+        result_obj = data.get("Result") if isinstance(data, dict) else None
+        docs = result_obj.get("Documents") if isinstance(result_obj, dict) else []
         hits: list[_Hit] = []
         for d in (docs or []):
             if not isinstance(d, dict):

@@ -370,7 +370,8 @@ src/aistock_agent/
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
 │   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
 │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
-│   ├── market_tools.py  # get_global_markets, tavily_finance_search
+│   ├── market_tools.py  # get_global_markets（纯 yfinance 行情）
+│   ├── search_tools.py  # tavily_finance_search（全网搜索，从 market_tools 拆出）
 │   ├── monitor_tools.py # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── trend_tools.py   # get_trend_score, get_trend_score_detail, get_trend_top_stocks
