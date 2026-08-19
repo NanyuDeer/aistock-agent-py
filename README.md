@@ -49,9 +49,14 @@ mypy src/
 - LLM: langchain-openai（支持 DeepSeek/OpenAI）
 - 缓存: Redis（会话持久化 + 晨报缓存）
 - 境外数据: yfinance（美股/亚太/大宗/汇率）
-- 全网搜索: Tavily
+- 全网搜索: 多供应商 failover（Tavily 主源 → Doubao → AnySearch 兜底，链路顺序固定，`SEARCH_ENABLED_PROVIDERS` 只控制启停不控制顺序）
 - 抖音视频转写: requests + ffmpeg-python（硅基流动 SenseVoice；FFmpeg/FFprobe 为宿主二进制依赖）
 - 配置: pydantic-settings
+
+> **全网搜索削峰现状（2026-08-18，如实记录）**：需求侧 TTL 缓存尚未上线，当前容量仅由
+> **provider 惰性注册**（未配置 key 的 provider 不注册，避免空转）与**请求级 budget fail-fast**
+> （`SEARCH_BUDGET_SECONDS`，默认 10s 整链预算）承担。**不要误以为已削峰**——多供应商 failover
+> 只缓解单源限流，高峰期容量仍取决于各源 key 配额与预算上限；TTL 缓存为后续可选增强。
 
 ## 架构
 
@@ -70,7 +75,8 @@ mypy src/
 │  · LangGraph 图编排                      │
 │  · 通过 /internal/* 回调 Node.js 拿数据  │
 │  · yfinance：境外指数/大宗/汇率           │
-│  · Tavily：全网财经新闻搜索              │
+│  · 全网搜索：Tavily + Doubao/AnySearch    │
+│    多供应商 failover 兜底                 │
 └─────────────────────────────────────────┘
 ```
 
@@ -526,7 +532,14 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/1` |
 | `REDIS_MAX_CONNECTIONS` | Redis 连接池最大连接数 | `10` |
 | `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
-| `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
+| `TAVILY_API_KEY` | Tavily 搜索 API 密钥（单 key 兼容） | - |
+| `TAVILY_API_KEYS` | Tavily 搜索 API 密钥池（逗号分隔，优先于单 key） | - |
+| `DOUBAO_API_KEY` | Doubao 兜底搜索 API 密钥（单 key 兼容） | - |
+| `DOUBAO_API_KEYS` | Doubao 兜底搜索 API 密钥池（逗号分隔） | - |
+| `ANYSEARCH_API_KEY` | AnySearch 兜底搜索 API 密钥（单 key 兼容） | - |
+| `ANYSEARCH_API_KEYS` | AnySearch 兜底搜索 API 密钥池（逗号分隔） | - |
+| `SEARCH_ENABLED_PROVIDERS` | 启用的搜索 provider 集合（逗号分隔；只控制启停不控制顺序，链路固定 tavily→doubao→anysearch；空=默认 `tavily,doubao,anysearch`；未配 key 的 provider 惰性不注册） | 空（=默认全部） |
+| `SEARCH_BUDGET_SECONDS` | 整链 fail-fast 总预算（秒），全部 provider 共用 | `10.0` |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
 | `CORS_ORIGINS` | CORS 允许的源列表（逗号分隔或 JSON 数组） | `*` |
 | `HEALTH_CHECK_LLM` | `/health/ready` 是否探测 LLM 连通性（默认跳过避免消耗 token） | `false` |
