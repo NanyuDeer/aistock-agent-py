@@ -1361,3 +1361,23 @@ async def test_build_market_trace_snapshot_telegraph_fallback_to_latest(mocker):
         s for s in snapshot.sources.values() if s.source_id.startswith("NEWS_")
     ]
     assert len(news_sources) >= 1
+
+
+def test_normalize_search_provider_propagates_to_status() -> None:
+    """T4：_normalize_search_facts 消费 result 的 provider 键，透传进 status/source。"""
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "anysearch",
+        },
+        {"results": [], "provider": "anysearch"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].provider == "anysearch"
+    assert list(src.values())[0].provider == "anysearch"

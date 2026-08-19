@@ -57,7 +57,7 @@ class SourceCollectionStatus(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    state: Literal["available", "empty", "unavailable", "invalid_for_causality"]
+    state: Literal["available", "empty", "unavailable", "invalid_for_causality", "degraded"]
     provider: str
     item_count: int = 0
     reason: str | None = None

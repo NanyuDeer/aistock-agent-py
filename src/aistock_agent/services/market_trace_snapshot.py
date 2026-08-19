@@ -881,11 +881,18 @@ def _normalize_search_facts(
         ("tavily_search_2", "tavily_global_risk", tavily_result_2, fetch_errors[1]),
     ]:
         results = tavily_result.get("results") if isinstance(tavily_result, dict) else None
+        # T4：溯源透传 — 读 result 的 provider 键（failover 命中 doubao/anysearch 时
+        # 保留真实命中源）；fetch 失败路径 result 为 {}，兜底回 "tavily"。
+        provider = (
+            str(tavily_result.get("provider", "tavily"))
+            if isinstance(tavily_result, dict)
+            else "tavily"
+        )
         if fetch_error is not None:
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="unavailable",
-                provider="tavily",
+                provider=provider,
                 reason=type(fetch_error).__name__,
             )
             continue
@@ -893,7 +900,7 @@ def _normalize_search_facts(
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="empty",
-                provider="tavily",
+                provider=provider,
                 reason="provider_returned_no_items",
             )
             continue
@@ -918,7 +925,7 @@ def _normalize_search_facts(
             sources[source_id] = SourceRecord(
                 source_id=source_id,
                 kind="event_evidence",
-                provider="tavily",
+                provider=provider,
                 title=_safe_str(item.get("title"), "无标题"),
                 content=_safe_str(item.get("content", ""))[:500],
                 url=url,
@@ -932,13 +939,25 @@ def _normalize_search_facts(
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="invalid_for_causality",
-                provider="tavily",
+                provider=provider,
                 item_count=len(results),
                 reason="items_missing_url",
             )
         else:
+            outcome = (
+                tavily_result.get("outcome") if isinstance(tavily_result, dict) else "ok"
+            )
+            # T4：仅低质 fallback（outcome=degraded 且 provider != tavily）标记
+            # state=degraded；其余保持既有语义 available（内联三元保持 Literal 窄化，
+            # 中间变量会被 mypy 拓宽为 str）。
             statuses[status_key] = SourceCollectionStatus(
-                state="available", provider="tavily", item_count=source_count
+                state=(
+                    "degraded"
+                    if outcome == "degraded" and provider != "tavily"
+                    else "available"
+                ),
+                provider=provider,
+                item_count=source_count,
             )
     return statuses
 
