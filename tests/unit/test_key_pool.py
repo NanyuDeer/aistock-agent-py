@@ -26,6 +26,17 @@ def test_all_cooldown_fail_open_uses_oldest_and_opens_circuit():
     assert pool.circuit_open is True
 
 
+def test_fail_open_selects_key_failed_longest_ago():
+    pool = KeyPool(["a", "b"], cooldown_base_seconds=5.0)
+    pool.report_error("a", is_circuit=True)
+    time.sleep(0.01)  # 保证两次失败时间戳可区分
+    pool.report_error("b", is_circuit=True)
+    assert pool.circuit_open is False
+    picked = pool.select_key()  # fail-open：选距上次失败最久（最接近恢复）的 key
+    assert picked == "a"
+    assert pool.circuit_open is True
+
+
 def test_backoff_is_capped_and_key_returns_to_pool():
     pool = KeyPool(["a"], cooldown_base_seconds=5.0, max_backoff_seconds=60.0)
     # 第一次 hello：回退 base=5s

@@ -37,7 +37,7 @@ class KeyPool:
             return random.choice(healthy)
         # 全冷却 fail-open：选距上次失败最久（最接近恢复）的 key；打开熔断开关。
         self.circuit_open = True
-        return max(self._keys, key=lambda k: self._last_seen_error[k])
+        return min(self._keys, key=lambda k: self._last_seen_error[k])
 
     def report_success(self, key: str) -> None:
         self._fail_streak[key] = 0
