@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from datetime import UTC, datetime, timedelta, timezone
@@ -1121,13 +1122,17 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     tavily_error_1: Exception | None = None
     tavily_error_2: Exception | None = None
     try:
-        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
+        tavily_result_1 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_1, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
         tavily_error_1 = e
     try:
-        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
+        tavily_result_2 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_2, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}
@@ -1327,13 +1332,17 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     tavily_error_1: Exception | None = None
     tavily_error_2: Exception | None = None
     try:
-        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
+        tavily_result_1 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_1, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
         tavily_error_1 = e
     try:
-        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
+        tavily_result_2 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_2, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}
