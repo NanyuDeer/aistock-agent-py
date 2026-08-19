@@ -2,6 +2,29 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-19 — 搜索引擎多供应商故障转移链（Tavily + Doubao + AnySearch）
+
+**开发者**: 37588
+
+### 新增
+- 全网搜索升级为多供应商故障转移链：Tavily 主源 + Doubao（火山每月 500 次）+ AnySearch（每日 1000 次 finance 域）按 tavily→doubao→anysearch 顺序失败切换，整链预算 fail-fast；Tavily 多 key 健康感知池（熔断冷却 + 限流固定窗口 + 全冷却 fail-open），Doubao/AnySearch 惰性注册（未配 key 不占位）
+- 搜索溯源透传：`TavilyService.search` 返回加性 `provider`（真实命中源）/`outcome`（ok/degraded/empty/error）键，快照与事件采集的 `source` 从硬编码 tavily 改为读真实 provider，`SourceCollectionStatus.state` 新增 `degraded`（低质兜底可观测）
+- 配置：`DOUBAO_API_KEYS` / `ANYSEARCH_API_KEYS` / `SEARCH_ENABLED_PROVIDERS`（空=默认全部）/ `SEARCH_BUDGET_SECONDS`（默认 10s）
+
+### 改进
+- async 内同步阻塞的搜索调用全部下沉 `asyncio.to_thread`（快照 4 处 + `tavily_finance_search` 工具），并新增 AST 契约测试防止回归裸同步调用
+- 工具输出契约回归锁定（`tavily_finance_search` 输出格式逐字节稳定）
+
+### 修复
+- KeyPool 健康状态跨请求持久化（模块级缓存，冷却/熔断不随请求重置）；fail-open 选「距上次失败最久」的 key
+- 命中结果缺 url 时输出空串（避免「来源: None」）；Doubao `Result` 字段非 dict 解析守卫
+
+### 验证
+- 定向 87 passed + 全量 2454 passed（24 个基线环境失败，与本次零交集）；ruff 0；mypy strict 0
+- 待生产验证：Doubao/AnySearch 真实 key 联调已由人工完成
+
+---
+
 ## [changer] 2026-08-18 — 复盘报告生成偶发失败加固（市场洞见数据恢复）
 
 **开发者**: 37588
