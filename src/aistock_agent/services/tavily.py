@@ -25,6 +25,12 @@ from aistock_agent.services.search_service import (
 
 logger = logging.getLogger(__name__)
 
+# 模块级 KeyPool 单例缓存：按 (provider_name, key_tuple) 复用同一实例，
+# 使冷却/失败计数/circuit_open 健康状态跨请求保持（评审 Finding #1）。
+# 缓存规模受进程内不同 key 集合数量约束（有界），key 集合变化时自动换新池，
+# 也因此天然支持测试 monkeypatch 隔离（不同 key → 不同缓存键）。
+_KEY_POOL_CACHE: dict[tuple[str, tuple[str, ...]], KeyPool] = {}
+
 
 class TavilyClientProvider:
     """Tavily 主源 Provider —— 必须留在 tavily.py，复用模块级 TavilyClient，
@@ -111,7 +117,7 @@ class TavilyService:
                 break
         out: dict[str, object] = {
             "results": [
-                {"title": h.title, "content": h.content, "url": h.url}
+                {"title": h.title, "content": h.content, "url": h.url or ""}
                 for h in result.hits
             ],
             "provider": result.provider,
@@ -137,12 +143,23 @@ def _build_providers() -> list[SearchProvider]:
 
 
 def _build_key_pools() -> dict[str, KeyPool]:
+    """构建/复用模块级 KeyPool 缓存。
+
+    KeyPool.__init__ 已过滤空串，get_*_keys 已 strip/过滤空值，
+    因此缓存键 tuple 天然干净。
+    """
     pools: dict[str, KeyPool] = {}
     for name, keys in (
         ("tavily", settings.get_tavily_keys()),
         ("doubao", settings.get_doubao_keys()),
         ("anysearch", settings.get_anysearch_keys()),
     ):
-        if keys:
-            pools[name] = KeyPool(keys)
+        if not keys:
+            continue
+        cache_key = (name, tuple(keys))
+        pool = _KEY_POOL_CACHE.get(cache_key)
+        if pool is None:
+            pool = KeyPool(list(keys))
+            _KEY_POOL_CACHE[cache_key] = pool
+        pools[name] = pool
     return pools

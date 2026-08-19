@@ -17,6 +17,16 @@ def tavily_key(monkeypatch):
     return "test-key"
 
 
+@pytest.fixture(autouse=True)
+def _clear_key_pool_cache():
+    """模块级 _KEY_POOL_CACHE 是跨测试全局状态，逐测试清空保证 monkeypatch 隔离。"""
+    from aistock_agent.services import tavily as tv_mod
+
+    tv_mod._KEY_POOL_CACHE.clear()
+    yield
+    tv_mod._KEY_POOL_CACHE.clear()
+
+
 @pytest.mark.asyncio
 async def test_tavily_service_search_success(tavily_key):
     """TavilyService.search 正常调用 TavilyClient 并返回 dict（加性 provider 键）"""
@@ -84,3 +94,63 @@ def test_tavily_service_passes_provider_key(monkeypatch):
     assert result["provider"] == "anysearch"
     assert result["outcome"] == "ok"
     assert "results" in result
+
+
+def test_build_key_pools_reuses_same_instance_for_same_keys(monkeypatch):
+    """同一 key 集合跨调用复用同一 KeyPool 实例（健康状态跨请求保持）"""
+    from aistock_agent.services import tavily as tv_mod
+
+    monkeypatch.setattr(settings, "tavily_api_key", "cache-key-a")
+    monkeypatch.setattr(settings, "tavily_api_keys", "")
+
+    pool1 = tv_mod._build_key_pools()["tavily"]
+    pool2 = tv_mod._build_key_pools()["tavily"]
+    assert pool1 is pool2
+
+
+def test_build_key_pools_different_keys_yield_fresh_instance(monkeypatch):
+    """不同 key 集合得到不同 KeyPool 实例（变更配置即换新池，保持 monkeypatch 隔离）"""
+    from aistock_agent.services import tavily as tv_mod
+
+    monkeypatch.setattr(settings, "tavily_api_key", "cache-key-a")
+    monkeypatch.setattr(settings, "tavily_api_keys", "")
+    pool1 = tv_mod._build_key_pools()["tavily"]
+
+    monkeypatch.setattr(settings, "tavily_api_key", "cache-key-b")
+    pool2 = tv_mod._build_key_pools()["tavily"]
+
+    assert pool1 is not pool2
+
+
+def test_key_pool_cooldown_persists_across_build_boundary(monkeypatch):
+    """熔断冷却状态跨 _build_key_pools() 重建边界保持（单 key 全冷却 fail-open）"""
+    from aistock_agent.services import tavily as tv_mod
+
+    monkeypatch.setattr(settings, "tavily_api_key", "cooldown-key")
+    monkeypatch.setattr(settings, "tavily_api_keys", "")
+
+    pool = tv_mod._build_key_pools()["tavily"]
+    pool.report_error("cooldown-key", is_circuit=True)
+
+    pool_again = tv_mod._build_key_pools()["tavily"]
+    assert pool_again is pool
+    # 全冷却 fail-open：仍返回 key，且熔断开关打开（错误被记住）
+    selected = pool_again.select_key()
+    assert selected == "cooldown-key"
+    assert pool_again.circuit_open is True
+
+
+@pytest.mark.asyncio
+async def test_tavily_service_search_missing_url_yields_empty(tavily_key):
+    """结果无 url 时输出 url 为空字符串（不泄漏 '来源: None'）"""
+    from aistock_agent.services.tavily import TavilyService
+
+    mock_instance = MagicMock()
+    mock_instance.search.return_value = {
+        "results": [{"title": "t", "content": "c"}]
+    }
+
+    with patch("aistock_agent.services.tavily.TavilyClient", return_value=mock_instance):
+        result = TavilyService.search(query="q", topic="news", max_results=5)
+
+    assert result["results"][0]["url"] == ""
