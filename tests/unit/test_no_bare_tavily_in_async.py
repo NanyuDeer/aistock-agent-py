@@ -9,11 +9,12 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src" / "aistock_agent"
 
 # 显式纯同步模块白名单（工具/服务层本身，阻塞由调用方 to_thread）
+# tools/search_tools.py 已从白名单移除：tavily_finance_search 内部用
+# asyncio.to_thread 包裹同步 failover 链（跟进项，2026-08-19 落地）。
 SYNC_WHITELIST = {
     "services/tavily.py",
     "services/search_providers.py",
     "services/key_pool.py",
-    "tools/search_tools.py",
     "iterate/replay_layer.py",
 }
 
