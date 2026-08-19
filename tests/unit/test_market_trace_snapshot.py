@@ -1381,3 +1381,49 @@ def test_normalize_search_provider_propagates_to_status() -> None:
     )
     assert statuses["tavily_domestic_policy"].provider == "anysearch"
     assert list(src.values())[0].provider == "anysearch"
+
+
+def test_normalize_search_degraded_state_from_non_tavily_provider() -> None:
+    """T4：outcome=degraded 且 provider 非 tavily（doubao failover 命中）→ state=degraded。"""
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "doubao",
+            "outcome": "degraded",
+        },
+        {"results": [], "provider": "tavily"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].state == "degraded"
+    assert statuses["tavily_domestic_policy"].provider == "doubao"
+
+
+def test_normalize_search_degraded_guard_tavily_provider_stays_available() -> None:
+    """T4 守卫边界：outcome=degraded 但 provider=tavily → state 保持 available。
+
+    degraded 仅标记低质 fallback（非 tavily）；原生 tavily 命中即使声明
+    outcome=degraded 也不得降级，保持既有 available 语义。
+    """
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "tavily",
+            "outcome": "degraded",
+        },
+        {"results": [], "provider": "tavily"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].state == "available"
+    assert statuses["tavily_domestic_policy"].provider == "tavily"
