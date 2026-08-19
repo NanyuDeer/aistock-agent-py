@@ -19,6 +19,9 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
 - 候选与节点只能引用输入中存在的 source_id。
 - 每个选中的因果链必须按顺序包含 structural_root、trigger、transmission、
   exposure、repricing、observable_result 六阶段。
+- observable_result 节点必须引用 trigger_fact 类型的证据（source_id 以 trigger: 开头），
+  因为价格异动本身由触发事实直接观察得到。
+- supported 状态的候选必须引用至少一条支撑证据；无法支撑的候选应置 insufficient 或 weak。
 - primary_chain_id 指向的链必须标记 role=primary；
   alternative_chain_id 指向的链必须标记 role=alternative。
 - 节点必须标注 epistemic_type：可验证事实为 fact，基于事实的推导为 inference，
