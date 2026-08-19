@@ -96,8 +96,16 @@ START → supervisor(quick_think, 意图路由)
 ### 数据流
 
 - Python 通过 `services/data_client.py`（httpx）回调 Node.js `/internal/*` 获取 A 股数据
-- 境外市场数据（yfinance）和全网搜索（Tavily）在 Python 侧直接调用
+- 境外市场数据（yfinance）和全网搜索（Tavily 主源 + Doubao / AnySearch 兜底的多供应商 failover）在 Python 侧直接调用
 - **禁止在 Python 重复实现 A 股数据获取逻辑**
+
+### 搜索多供应商 failover 配置（2026-08-18）
+
+- **链路顺序固定**：`tavily → doubao → anysearch`（`services/tavily.py::_build_providers` 硬编码），`SEARCH_ENABLED_PROVIDERS` 只控制启停、不控制顺序；空值=默认 `tavily,doubao,anysearch`
+- **惰性注册**：未配置 key 的 provider 不注册进链路（如只配 Tavily key 则仅注册 tavily），全部未配时保底注册 Tavily 主源
+- **key 池**：`TAVILY_API_KEYS` / `DOUBAO_API_KEYS` / `ANYSEARCH_API_KEYS`（逗号分隔多成员共享额度），兼容单 key `*_API_KEY`；单 provider 多 key 用 `services/key_pool.py::KeyPool` 轮换 + 熔断（401/429 固定窗口冷却）
+- **fail-fast 预算**：`SEARCH_BUDGET_SECONDS`（默认 10.0s）为整链总预算，超时即返回当前错误集（`budget_exhausted`）
+- **工具输出契约**：`tavily_finance_search` 返回 `- {title}\n  {content[:200]}...\n  来源: {url}` 逐字节稳定（`tests/unit/test_search_contract.py` 回归锁定）；`TavilyService.search` 返回 `{"results", "provider", "outcome"}`（加性键，只读 title/content/url 的消费端零破坏）
 
 ### 双模型策略
 
@@ -362,7 +370,8 @@ src/aistock_agent/
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
 │   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
 │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
-│   ├── market_tools.py  # get_global_markets, tavily_finance_search
+│   ├── market_tools.py  # get_global_markets（纯 yfinance 行情）
+│   ├── search_tools.py  # tavily_finance_search（全网搜索，从 market_tools 拆出）
 │   ├── monitor_tools.py # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── trend_tools.py   # get_trend_score, get_trend_score_detail, get_trend_top_stocks

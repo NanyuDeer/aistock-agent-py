@@ -104,6 +104,19 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
+    # 搜索引擎多供应商 failover（辩论 2026-08-18）
+    # 逗号分隔多 key 池；缺配置则该 provider 惰性不注册
+    doubao_api_key: str = ""
+    doubao_api_keys: str = ""
+    anysearch_api_key: str = ""
+    anysearch_api_keys: str = ""
+    # 启用的 provider 集合，逗号分隔；空=默认 "tavily,doubao,anysearch"。
+    # 注意：链路顺序当前固定为 tavily→doubao→anysearch（_build_providers 硬编码），
+    # 本字段只控制启停、不控制顺序；如需"中文优先"排序再在 _build_providers 调整。
+    search_enabled_providers: str = ""
+    # 整链 fail-fast 总预算（秒）
+    search_budget_seconds: float = 10.0
+
     # 抖音视频转写（硅基流动 SenseVoice；E:/changer_learning 已验证）
     douyin_api_key: str = ""
     # 可选：显式指定 ffmpeg/ffprobe 路径（默认走 PATH 查找）
@@ -352,6 +365,24 @@ class Settings(BaseSettings):
             if keys:
                 return random.choice(keys)
         return self.tavily_api_key
+
+    def get_tavily_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.tavily_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.tavily_api_key.strip()] if k]
+
+    def get_doubao_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.doubao_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.doubao_api_key.strip()] if k]
+
+    def get_anysearch_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.anysearch_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.anysearch_api_key.strip()] if k]
 
 
 settings = Settings()

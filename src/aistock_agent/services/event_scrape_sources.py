@@ -243,6 +243,9 @@ async def collect_tavily(score_date: str) -> list[EventRecord]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("tavily_search_failed", query=query, error=str(exc))
             continue
+        # T4：溯源透传 — 读 result 的 provider 键（failover 命中 doubao/anysearch 时
+        # 评分 apply_rule_score 不读 source，事件 source 保留真实命中源不破坏评分）。
+        provider = str(result.get("provider", "tavily"))
         hits = _extract_items(result, key="results")
         for hit in hits:
             if not isinstance(hit, dict):
@@ -252,8 +255,8 @@ async def collect_tavily(score_date: str) -> list[EventRecord]:
                 "summary": str(hit.get("content", "")),
                 "url": str(hit.get("url", "")),
             }
-            apply_rule_score(raw, source="tavily")
-            event = normalize_event(raw, source="tavily", score_date=score_date)
+            apply_rule_score(raw, source=provider)
+            event = normalize_event(raw, source=provider, score_date=score_date)
             if event is not None:
                 events.append(event)
     return events
