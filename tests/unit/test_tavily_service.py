@@ -68,12 +68,13 @@ async def test_tavily_service_search_api_error(tavily_key):
 
 
 def test_tavily_service_passes_provider_key(monkeypatch):
-    """failover 编排返回的真实命中源落到加性 provider 键（逐 provider 切换已在 search_query 单测覆盖）"""
+    """failover 编排返回的真实命中源落到加性 provider 键
+    （逐 provider 切换已在 search_query 单测覆盖）
+    """
     from unittest.mock import patch as _patch
 
-    from aistock_agent.services.search_service import SearchResult
-
     import aistock_agent.services.tavily as tv_mod
+    from aistock_agent.services.search_service import SearchResult
 
     with _patch("aistock_agent.services.search_service.search_query") as mock_query:
         mock_query.return_value = SearchResult(
