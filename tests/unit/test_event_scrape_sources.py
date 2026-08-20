@@ -11,6 +11,7 @@ from aistock_agent.services.event_scrape_sources import (
     collect_ths_original,
 )
 from aistock_agent.services.event_store import event_content_hash
+from aistock_agent.services.tavily import TavilyService
 from aistock_agent.tools.market_tools import GlobalMarketFetchError
 from aistock_agent.utils.date import shanghai_today
 
@@ -429,3 +430,22 @@ async def test_collect_ths_original_keeps_url():
     # hash 精确等于 sha1(title|url)：与无 url 场景不同，跨源同题异文不再碰撞
     assert events[0]["content_hash"] == event_content_hash("某某公司公告", url)
     assert events[0]["content_hash"] != event_content_hash("某某公司公告", "")
+
+
+@pytest.mark.asyncio
+async def test_collect_tavily_uses_provider_key():
+    """T4：failover 命中 anysearch 时，normalize_event 的 source 应为 anysearch。"""
+    with patch.object(
+        TavilyService,
+        "search",
+        return_value={
+            "results": [
+                {"title": "政策出台", "content": "某宏观政策落地", "url": "http://x"}
+            ],
+            "provider": "anysearch",
+            "outcome": "ok",
+        },
+    ):
+        events = await collect_tavily("2026-08-18")
+    assert events
+    assert events[0]["source"] == "anysearch"

@@ -638,6 +638,59 @@ def _validate_chain_against_evidence(
     return validated
 
 
+def _build_chain_industry_set(chain: list[dict[str, object]]) -> set[str]:
+    """提取 transmission.chain 中所有非空行业名（strip 后）。
+
+    用于投资机会一致性校验：investment.focusIndustries 必须能追溯到 chain。
+    """
+    names: set[str] = set()
+    for item in chain:
+        industry = item.get("industry")
+        if isinstance(industry, str) and industry.strip():
+            names.add(industry.strip())
+    return names
+
+
+def _industry_traceable(name: str, chain_names: set[str]) -> bool:
+    """判断 investment 行业是否可追溯到 chain 行业。
+
+    兼容行业粒度差异：chain=半导体 → focus=半导体制造/半导体设备 应视为可追溯。
+    采用双向子串包含匹配（chain_name in name 或 name in chain_name），
+    不做字符串完全相等——避免误杀同源细分行业。
+    """
+    name = name.strip()
+    if not name:
+        return False
+    for chain_name in chain_names:
+        if chain_name in name or name in chain_name:
+            return True
+    return False
+
+
+def _filter_focus_industries_by_chain(
+    focus_industries: list[dict[str, object]],
+    chain_names: set[str],
+) -> list[dict[str, object]]:
+    """仅保留能追溯到 chain 行业的 focusIndustries 条目。
+
+    chain_names 为空时返回空列表（投资机会必须可追溯到传导链）。
+    """
+    if not chain_names:
+        return []
+    result: list[dict[str, object]] = []
+    for fi in focus_industries:
+        name = fi.get("name")
+        if isinstance(name, str) and _industry_traceable(name, chain_names):
+            result.append(fi)
+        else:
+            logger.info(
+                "investment_focus_industry_filtered",
+                industry=name,
+                chain=list(chain_names),
+            )
+    return result
+
+
 # ── 字段映射 ──
 
 
@@ -667,11 +720,17 @@ def transform_to_frontend(
         }
     """
     reports: dict[str, object] = {}
+    # 传导链行业集合：供 event_investment 后置校验（investment 行业必须可追溯到 chain）
+    chain_names: set[str] = set()
 
     # ── event_understanding ──
     if understanding and isinstance(understanding, dict):
         reports["event_understanding"] = {
             "summary": str(understanding.get("summary", "")),
+            # 短标题（2026-08-14）：透传 LLM 独立生成的 title，供缓存幂等补写
+            # 复用同一标题；前端仍消费顶层 content.title，本字段仅内部一致性用途。
+            "title": str(understanding.get("title", "")),
+            "coreIndustry": str(understanding.get("coreIndustry", "")),
             "coreChanges": [
                 {
                     "variable": str(c.get("variable", "")),
@@ -720,6 +779,7 @@ def transform_to_frontend(
             if isinstance(c, dict)
         ]
         chain_items.sort(key=lambda item: item["impactStrength"], reverse=True)
+        chain_names = _build_chain_industry_set(chain_items)
 
         reports["event_transmission"] = {
             "eventId": event_meta.get("eventId", ""),
@@ -768,9 +828,35 @@ def transform_to_frontend(
     # ── event_investment ──
     if investment and isinstance(investment, dict):
         focus_industries = _as_list(investment.get("focusIndustries", []))
+        # 后置一致性校验：投资机会行业必须可追溯到 transmission.chain。
+        # chain 为空时强制清空 focusIndustries/opportunities 并降级为 neutral，
+        # 防止 investment 仅凭 industryGraphEvidence 或关键词独立生成行业（脱节）。
+        filtered_focus = _filter_focus_industries_by_chain(
+            [
+                fi
+                for fi in focus_industries
+                if isinstance(fi, dict)
+            ],
+            chain_names,
+        )
+        if not chain_names:
+            opportunities: list[str] = []
+            rating = "neutral"
+            conclusion = str(investment.get("conclusion", ""))
+            # 仅当 LLM 给出了具体行业结论时才覆盖为"未形成明确传导"文案，
+            # 避免覆盖本就为空或已正确的 neutral 结论。
+            if "受益" in conclusion or "承压" in conclusion or "景气" in conclusion:
+                conclusion = "事件未形成明确行业传导，暂不提供具体行业投资机会"
+        else:
+            opportunities = [
+                str(o) for o in _as_list(investment.get("opportunities", []))
+            ]
+            rating = _normalize_direction(str(investment.get("rating", "neutral")), "rating")
+            conclusion = str(investment.get("conclusion", ""))
+
         reports["event_investment"] = {
             "id": event_meta.get("eventId", ""),
-            "conclusion": str(investment.get("conclusion", "")),
+            "conclusion": conclusion,
             "keyPoints": [
                 str(kp) for kp in _as_list(investment.get("keyPoints", []))
             ],
@@ -782,16 +868,13 @@ def transform_to_frontend(
                     ),
                     "reason": str(fi.get("reason", "")),
                 }
-                for fi in focus_industries
-                if isinstance(fi, dict)
+                for fi in filtered_focus
             ],
-            "opportunities": [
-                str(o) for o in _as_list(investment.get("opportunities", []))
-            ],
+            "opportunities": opportunities,
             "risks": [
                 str(r) for r in _as_list(investment.get("risks", []))
             ],
-            "rating": _normalize_direction(str(investment.get("rating", "neutral")), "rating"),
+            "rating": rating,
         }
     else:
         reports["event_investment"] = None

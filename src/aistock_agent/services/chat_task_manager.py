@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 _RESULT_TTL_SEC = 600  # 完成后结果保留 10 分钟
 
+# producer 总时长兜底（LLM 单次 600s + 60s 余量，对齐 llm.py:62 的 _LLM_REQUEST_TIMEOUT_SECONDS）
+_RUN_TOTAL_TIMEOUT_SEC = 660
+
 _CONFIRM_TTL_SEC = 600  # pending confirm 保留 10 分钟（对齐 result TTL；确认窗口 60s 远小于 TTL）
 
 # 事件 sink：接收一个 WS 就绪 payload dict
@@ -31,6 +34,7 @@ class ChatRunState:
     events: list[dict] = field(default_factory=list)
     waiters: set[asyncio.Event] = field(default_factory=set)
     done: bool = False
+    finalizing: bool = False  # producer 已产出终态 result，进入收尾（cancel 拒绝窗口）
     cancelled: bool = False  # cancelled 终态标记（done 后为 True 表示被用户停止）
     result: dict | None = None
     created_at: float = field(default_factory=time.monotonic)
@@ -94,12 +98,27 @@ class ChatTaskManager:
             return None
 
         async def _runner() -> None:
+            started = time.monotonic()
             try:
-                state.result = await producer(state)
+                # 总时长兜底：asyncio.timeout 在 _runner 内联执行 producer（无独立
+                # 内层 task → 调度与 BASE 一致、无任务泄漏）；超时抛内置
+                # TimeoutError（Py3.11 起与 asyncio.TimeoutError 同义），由下方分支处理。
+                async with asyncio.timeout(_RUN_TOTAL_TIMEOUT_SEC):
+                    state.result = await producer(state)
+                # 收尾窗口：result 已产出，置 finalizing 拒绝窗口内 cancel（防误杀将成之轮）
+                state.finalizing = True
             except asyncio.CancelledError:
                 # 用户停止（stop → task.cancel()）：CancelledError 继承 BaseException，
                 # 不被 except Exception 捕获，必须显式处理并置 cancelled 终态（spec §8.2）
                 state.result = {"type": "cancelled", "content": "已停止生成"}
+            except TimeoutError:
+                # 总时长兜底（T2）：producer 卡死时置 ERROR 终态，session 释放可重试。
+                # TimeoutError 继承 Exception，必须在此显式处理，避免落入 producer_failed 死区。
+                logger.warning(
+                    "chat.run_timeout session_id=%s elapsed_ms=%d",
+                    session_id, int((time.monotonic() - started) * 1000),
+                )
+                state.result = {"type": "error", "content": "生成超时，请稍后重试"}
             except Exception:
                 logger.exception(
                     "chat_task_manager.producer_failed session_id=%s", session_id
@@ -111,6 +130,12 @@ class ChatTaskManager:
                 # 则保留，避免覆盖导致 TTL 用例失效
                 if state.done_at is None:
                     state.done_at = time.monotonic()
+                # 观测种子（治理集 G3）：每轮 start→终态耗时 + 是否正常完成
+                logger.info(
+                    "chat.run_finished session_id=%s elapsed_ms=%d done=%s",
+                    session_id, int((time.monotonic() - started) * 1000),
+                    state.result is not None and state.result.get("type") in ("done", "cancelled"),
+                )
 
         state = ChatRunState(
             session_id=session_id,
@@ -138,7 +163,7 @@ class ChatTaskManager:
     def cancel(self, session_id: str) -> bool:
         """停止 session 的活跃 run；无活跃 run 返回 False（stop_status not_found 依据）。"""
         s = self._states.get(session_id)
-        if s is None or s.done:
+        if s is None or s.done or s.finalizing:
             return False
         s.cancel()
         return True

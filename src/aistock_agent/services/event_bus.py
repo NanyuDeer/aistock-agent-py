@@ -21,6 +21,7 @@ class Event:
     event_id: str
     channel: str
     payload: dict[str, object]
+    group: str  # 事件所属消费组（每个事件都来自某个消费组，必填）
     retry_count: int = 0
 
 
@@ -80,14 +81,18 @@ class EventBus:
         channel: str,
         consumer_name: str,
         *,
+        group: str | None = None,
         count: int = 1,
         block_ms: int = 5000,
     ) -> list[Event]:
-        """从消费者组读取事件。返回 Event 列表（可能为空）。"""
-        await self._ensure_group(channel)
+        """从消费者组读取事件。返回 Event 列表（可能为空）。
+        未传 group 时使用总线默认消费者组（self._group）。"""
+        if group is None:
+            group = self._group
+        await self._ensure_group(channel, group=group)
 
         raw = await self._redis.xreadgroup(
-            self._group,
+            group,
             consumer_name,
             {channel: ">"},
             count=count,
@@ -105,7 +110,7 @@ class EventBus:
                     payload = json.loads(payload_str)
                 except json.JSONDecodeError:
                     logger.error("event_bus_invalid_payload", msg_id=str(msg_id))
-                    await self.ack(channel, str(msg_id))
+                    await self.ack(channel, str(msg_id), group=group)
                     continue
 
                 event_id = str(fields.get(b"event_id") or fields.get("event_id") or msg_id, encoding="utf-8") \
@@ -117,12 +122,15 @@ class EventBus:
                     channel=channel,
                     payload=payload,
                     retry_count=int(payload.get("retry_count", 0)),
+                    group=group,
                 ))
         return events
 
-    async def ack(self, channel: str, event_id: str) -> None:
-        """确认事件已处理。"""
-        await self._redis.xack(channel, self._group, event_id)
+    async def ack(self, channel: str, event_id: str, *, group: str | None = None) -> None:
+        """确认事件已处理。未传 group 时使用总线默认消费者组（self._group）。"""
+        if group is None:
+            group = self._group
+        await self._redis.xack(channel, group, event_id)
 
     async def retry(self, event: Event) -> None:
         """重试事件。超过 max_retries 移入死信队列。"""
@@ -136,7 +144,7 @@ class EventBus:
         payload = {**event.payload, "retry_count": new_retry_count}
         await self._redis.xadd(event.channel, payload,
                                maxlen=self._max_len, approximate=True)
-        await self.ack(event.channel, event.event_id)
+        await self.ack(event.channel, event.event_id, group=event.group)
         logger.warning("event_bus_retry", channel=event.channel, event_id=event.event_id, retry_count=new_retry_count)
 
     async def mark_deadletter(self, event: Event, reason: str) -> None:
@@ -145,7 +153,8 @@ class EventBus:
         payload = {**event.payload, "reason": reason, "original_event_id": event.event_id}
         await self._redis.xadd(dlq_channel, {"payload": json.dumps(payload, ensure_ascii=False, default=str)},
                                maxlen=self._max_len, approximate=True)
-        await self.ack(event.channel, event.event_id)
+        # 用事件所属消费组 ack，否则默认组 xack 使该组消息永久 pending
+        await self.ack(event.channel, event.event_id, group=event.group)
         logger.error("event_bus_deadletter", channel=event.channel, event_id=event.event_id, reason=reason)
 
     async def is_processed(self, event_id: str) -> bool:
@@ -159,13 +168,34 @@ class EventBus:
         key = self._idempotency_key(event_id)
         await self._redis.setex(key, ttl_seconds, "1")
 
-    async def _ensure_group(self, channel: str) -> None:
-        """确保消费者组存在（幂等，已存在时忽略错误）。"""
+    async def _ensure_group(self, channel: str, *, group: str | None = None) -> None:
+        """确保消费者组存在（幂等，已存在时忽略错误）。
+        未传 group 时使用总线默认消费者组（self._group）。"""
+        if group is None:
+            group = self._group
         try:
-            await self._redis.xgroup_create(channel, self._group, id="0", mkstream=True)
+            await self._redis.xgroup_create(channel, group, id="0", mkstream=True)
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
 
     def _idempotency_key(self, event_id: str) -> str:
         return f"event_bus:processed:{event_id}"
+
+
+# ============================================================================
+# 默认总线访问器（供 review.run() 双保险补发 review_done 使用，后续任务消费）
+# ============================================================================
+
+_default_bus: EventBus | None = None
+
+
+def set_default_bus(bus: EventBus | None) -> None:
+    """设置全局默认 EventBus 实例（None 表示清除）。"""
+    global _default_bus
+    _default_bus = bus
+
+
+def get_default_bus() -> EventBus | None:
+    """获取全局默认 EventBus 实例（未设置时返回 None）。"""
+    return _default_bus

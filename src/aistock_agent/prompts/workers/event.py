@@ -15,6 +15,7 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 
 严格输出 JSON，不要其他文字：
 {
+  "title": "一句话新闻标题（20~30字，见下方约束）",
   "summary": "100字以内概括事件本质，聚焦'这个事件改变了什么'",
   "coreIndustry": "事件直接冲击的核心行业名（如：半导体、石油石化），必须是具体行业，禁止泛化概念",
   "source_name": "事件来源名称（如：搜狐、财联社、新华社、Reuters）",
@@ -25,6 +26,15 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
 }
 
 ## 约束
+- title：一句话新闻标题风格，聚焦事件主体 + 最关键变化，可直接作为事件卡片标题。要求：
+  - 建议 20~30 个中文字符，最多 30 个中文字符
+  - 简洁、直接，如"央行开展5000亿元逆回购"、"消费板块获资金集中流入"
+  - 不写完整因果链（禁止"因此、从而、导致……市场……"等长因果句式）
+  - 不写投资建议或"利好/利空某股票"等投资结论
+  - 不要压缩 summary 后机械截取作为 title，避免与 summary 重复表达
+  - 不使用引号、书名号等不必要包装
+  - 不以"该事件""这一事件""此次事件"作为标题开头，除非确实必要
+  - 不要为了凑 30 字而牺牲事件主体和关键事实
 - summary 聚焦"这个事件改变了什么"，不写行业影响
 - coreIndustry：事件最先直接冲击的 1 个具体行业（用于触发行业知识图谱查询），
   必须使用同花顺行业分类中的具体行业名（如 半导体、光伏设备、石油石化、航空运输），
@@ -314,6 +324,18 @@ EVENT_INVESTMENT_PROMPT = SYSTEM_PROMPT + """
 - risks 1-3 条
 - rating 必填：positive / neutral / negative
 - direction 必填：positive / negative
+- **focusIndustries 必须可追溯到传导分析（transmission.chain）**：
+  - 只能输出 chain 中出现的行业，或与 chain 行业存在同源细分关系的行业
+    （如 chain=半导体 → 可输出 半导体制造、半导体设备；chain=证券 → 可输出 证券）。
+  - industryGraphEvidence 仅代表产业关联事实，**不得**单独作为投资机会行业来源；
+    不得仅因某行业出现在 industryGraphEvidence 上游/下游就直接列为受益行业。
+  - 禁止根据事件关键词、原始新闻文本或历史案例自行推断 chain 之外的受益行业。
+- **当 transmission.chain 为空时**（传导分析未形成明确行业传导）：
+  - focusIndustries 必须返回 []
+  - opportunities 必须返回 []
+  - rating 必须返回 neutral
+  - conclusion 说明"事件未形成明确行业传导，暂不提供具体行业投资机会"
+  - 禁止根据 industryGraphEvidence、事件关键词或历史案例补造受益行业
 - 只输出 JSON 对象，不要 markdown 代码块包裹，不要多余文字
 """
 

@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import BaseMessage
 
 from aistock_agent.observability.logging import get_logger
 from aistock_agent.observability.metrics import (
@@ -24,7 +27,6 @@ from aistock_agent.services.token_usage import record_token_usage
 
 if TYPE_CHECKING:
     from langchain_core.agents import AgentAction, AgentFinish
-    from langchain_core.messages import BaseMessage
     from langchain_core.outputs import LLMResult
 
 logger = get_logger(__name__)
@@ -186,12 +188,139 @@ class AgentTraceCallback(BaseCallbackHandler):
         logger.info("agent_finish", run_id=str(run_id))
 
 
+class LatencyCallback(BaseCallbackHandler):
+    """记录每次 LLM 调用的请求级耗时（诊断「等很久」根因埋点）。
+
+    目标：区分「LLM 上游/连接慢」与「连接池排队/争用」。通过回调事件在原
+    点采集不收业务代码侵入：
+
+    - ``on_chat_model_start``：记录 run_id → 开始时刻（请求发起点）。
+    - ``on_llm_new_token``：记录首 token 到达时刻 → 首 token 延迟（流式）。
+    - ``on_llm_end``：总耗时 = 结束 − 开始（覆盖非流式 ainvoke）。
+    - ``on_llm_error``：错误时总耗时 + 异常类型（ReadTimeout/ConnectError/
+      RemoteProtocolError 等，可区分上游超时 vs 连接异常）。
+
+    ``log_sink`` 默认为 structlog.info；测试可注入自定义 sink 断言。
+    是诊断 2026-08-17「149s 静默黑洞」的必要证据来源（辩论裁决结论）。
+    """
+
+    def __init__(
+        self,
+        log_sink: Callable[..., None] | None = None,
+        metrics: MetricsCollector | None = None,
+    ) -> None:
+        self._log = log_sink or logger.info
+        self._starts: dict[UUID, float] = {}
+        self._first_tokens: dict[UUID, float] = {}
+        # 与 TokenUsage/AgentTrace 对齐：持有同一 MetricsCollector（本回调不消费
+        # metrics，仅让 get_default_callbacks 的所有 handler 共享全局单例）。
+        self._metrics = metrics or get_metrics_collector()
+
+    def _record(
+        self,
+        event: str,
+        run_id: UUID,
+        total_ms: float,
+        tokens_ms: float | None,
+        error_type: str | None,
+    ) -> None:
+        self._log(
+            event=event,
+            run_id=str(run_id),
+            total_ms=round(total_ms, 3),
+            tokens_ms=round(tokens_ms, 3) if tokens_ms is not None else None,
+            error_type=error_type,
+        )
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, object],
+        messages: list[list[BaseMessage]],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> None:
+        del serialized, messages, parent_run_id, tags, metadata, kwargs
+        self._starts[run_id] = time.monotonic()
+
+    def on_llm_new_token(
+        self,
+        token: str,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: object,
+    ) -> None:
+        del token, parent_run_id, kwargs
+        # 只记首个 token：首 token 延迟 = 对端开始输出所需时间（流式链路关键指标）。
+        if run_id not in self._first_tokens:
+            start = self._starts.get(run_id)
+            if start is None:
+                return
+            self._first_tokens[run_id] = time.monotonic()
+            self._log(
+                event="llm.call.first_token",
+                run_id=str(run_id),
+                tokens_ms=round((time.monotonic() - start) * 1000, 3),
+            )
+
+    def _elapsed(self, run_id: UUID) -> float | None:
+        start = self._starts.get(run_id)
+        if start is None:
+            return None
+        return time.monotonic() - start
+
+    def on_llm_end(
+        self,
+        response: object,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: object,
+    ) -> None:
+        del response, parent_run_id, kwargs
+        total_ms = self._elapsed(run_id)
+        if total_ms is None:
+            return  # 无对应 start（异常路径），不产生记录
+        ft = self._first_tokens.pop(run_id, None)
+        tokens_ms = (ft - self._starts[run_id]) * 1000 if ft is not None else None
+        self._record(
+            "llm.call.duration", run_id, total_ms * 1000, tokens_ms, None
+        )
+        self._starts.pop(run_id, None)
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: object,
+    ) -> None:
+        del parent_run_id, kwargs
+        total_ms = self._elapsed(run_id)
+        if total_ms is None:
+            return
+        self._record(
+            "llm.call.error",
+            run_id,
+            total_ms * 1000,
+            None,
+            error_type=type(error).__name__,
+        )
+        self._starts.pop(run_id, None)
+        self._first_tokens.pop(run_id, None)
+
+
 def get_default_callbacks() -> list[BaseCallbackHandler]:
     """返回默认可观测性回调列表（TokenUsageCallback + AgentTraceCallback）。
 
     每次 import 的 handler 共享全局 MetricsCollector 单例。
     """
-    return [TokenUsageCallback(), AgentTraceCallback()]
+    return [TokenUsageCallback(), AgentTraceCallback(), LatencyCallback()]
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────

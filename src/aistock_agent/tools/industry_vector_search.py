@@ -51,9 +51,19 @@ async def semantic_match_industries(
 
     Raises:
         Exception: embedding / 搜索失败时向上抛，由调用方处理
-            （工具侧 @safe_tool_call 捕获降级；resolver fallback 侧 _try_semantic_fallback 捕获返回 None）。
+            （工具侧 @safe_tool_call 捕获降级；resolver fallback 侧
+            _try_semantic_fallback 捕获返回 None）。
     """
     if not keywords:
+        return []
+
+    # B-2（2026-08-14）：回放模式显式短路——不发 embedding、不调 Node pgvector
+    # 搜索（裁决书 B 论题"embedding/语义 fallback 短路"；industry_vector_search
+    # 直连 embedding API，不在 replay_layer 服务清单内，须在入口拦截）。
+    from aistock_agent.iterate.replay_layer import is_replay_mode
+
+    if is_replay_mode():
+        logger.info("industry_vector_search_skipped_replay")
         return []
 
     # 无 embedding 凭据时快速短路（避免无效网络请求；生产未配置 EMBEDDING_* 时 fallback 安全降级）

@@ -6,20 +6,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSnapshot
+from aistock_agent.config import settings
+from aistock_agent.schemas.market_trace import (
+    MarketTraceResult,
+    MarketTraceSnapshot,
+    ReviewArtifact,
+)
 from aistock_agent.schemas.prediction import PredictionResult
 from aistock_agent.services.prediction_service import (
     PredictionRunResult,
+    TraceUnavailableError,
+    predict_from_trace,
     render_prediction_markdown,
     run_chat_prediction,
     run_predict,
+    save_skipped_prediction,
 )
 
 
-def _make_snapshot() -> MarketTraceSnapshot:
+def _make_snapshot(trade_date="2026-08-10") -> MarketTraceSnapshot:
     return MarketTraceSnapshot(
         snapshot_id="snap-1",
-        trade_date="2026-08-10",
+        trade_date=trade_date,
         captured_at=date(2026, 8, 10),
         a_share={"indices": [], "sectors": {}},
         sources={},
@@ -57,7 +65,7 @@ def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
 
 
 _VALID_LLM_JSON = """{
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "prediction_status": "confirmed",
   "horizons": [
     {"horizon": "short", "remaining_estimate": "1-3 日", "phase": "decaying",
@@ -81,6 +89,8 @@ async def test_run_predict_returns_run_result_with_due_dates():
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
         result = await run_predict(_make_trace(), _make_snapshot())
     assert isinstance(result, PredictionRunResult)
+    assert result.status == "ok"
+    assert result.prediction is not None
     assert result.prediction.prediction_status == "confirmed"
     # 2026-08-10(周一) + 5 交易日 = 2026-08-17；+20 交易日跨周末
     assert result.due_dates["short"] == date(2026, 8, 17).isoformat()
@@ -88,35 +98,389 @@ async def test_run_predict_returns_run_result_with_due_dates():
 
 
 @pytest.mark.asyncio
-async def test_run_predict_skips_insufficient_attribution():
+async def test_run_predict_gate_skipped_on_insufficient_attribution():
     result = await run_predict(_make_trace("insufficient"), _make_snapshot())
-    assert result is None
+    assert result.status == "gate_skipped"
+    assert result.prediction is None
+    assert result.reason == "attribution_status=insufficient"
 
 
 @pytest.mark.asyncio
-async def test_run_predict_rejects_unknown_evidence():
-    bad = _VALID_LLM_JSON.replace('"m1"', '"not-exist"')
+async def test_run_predict_filters_unknown_evidence(capsys):
+    """P1-1：证据 ID 幻觉被过滤而非一票否决——预测仍产出，只保留 allowed 子集并告警。"""
+    bad = _VALID_LLM_JSON.replace('"m1"', '"m1", "made-up-id"')
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=bad)
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
         result = await run_predict(_make_trace(), _make_snapshot())
-    assert result is None  # 校验失败降级，不抛异常
+    assert isinstance(result, PredictionRunResult)
+    assert result.status == "ok"
+    assert result.prediction is not None
+    assert result.prediction.evidence_ids == ["m1"]  # 只保留 allowed 子集
+    assert "prediction.evidence_filtered" in capsys.readouterr().out  # 告警频率可观察
 
 
 @pytest.mark.asyncio
-async def test_run_predict_falls_back_on_llm_error():
+async def test_run_predict_out_of_range_marks_approximate():
+    """越年覆盖（chinese_calendar.is_workday 抛 NotImplementedError）→ due date 照常按
+    「周末+已发布节假日(HOLIDAYS_EXTRA)」近似计算，档位标 approximate，不再整条 skipped
+    （逐档容错，P2 裁决：精确日历对低信噪比验证无统计增益，越年显式标注优于停产）。"""
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch(
+        "aistock_agent.services.prediction_service.chinese_calendar.is_workday",
+        side_effect=NotImplementedError("no holiday data for 2027"),
+    ):
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
+    assert result.prediction is not None
+    # due date 照常产出（add_trading_days 内部 is_trading_day 对越年走周末+补充表兜底，不抛）
+    assert result.due_dates["short"] == date(2026, 8, 17).isoformat()
+    assert len(result.due_dates) == 2
+    # 越年档显式标记近似（不再静默、也不再整条失败）
+    assert result.approximate_horizons == ["short", "mid"]
+
+
+@pytest.mark.asyncio
+async def test_run_predict_partial_out_of_range_marks_only_that_horizon(monkeypatch):
+    """部分档越年：仅越年档标 approximate，其余档精确（逐档容错，不整条失败）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    real_add = ps.add_trading_days
+
+    def _fake(d: date, n: int) -> date:
+        if n == 20:  # mid 档偏移 → 2027 越年
+            return date(2027, 2, 5)
+        return real_add(d, n)
+
+    monkeypatch.setattr("aistock_agent.services.prediction_service.add_trading_days", _fake)
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
+    assert result.prediction is not None
+    assert result.due_dates["short"] == date(2026, 8, 17).isoformat()  # short 精确
+    assert result.due_dates["mid"] == "2027-02-05"  # mid 近似但照常产出
+    assert result.approximate_horizons == ["mid"]
+
+
+@pytest.mark.asyncio
+async def test_run_predict_calendar_coverage_guard_allows_when_holidays_extra(monkeypatch):
+    """越年放行：配置 HOLIDAYS_EXTRA 补充节假日表后，is_workday 抛 NotImplementedError
+    （due date 超 2004-2026）不再失败——add_trading_days 已消费补充表，到期日精确。"""
+    monkeypatch.setattr(settings, "holidays_extra", ["2027-01-01", "2027-10-01"])
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch(
+        "aistock_agent.services.prediction_service.chinese_calendar.is_workday",
+        side_effect=NotImplementedError("no holiday data for 2027"),
+    ):
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_reraises_unexpected_errors():
+    """未预期异常（非 LLM/parse 等已分类状态）→ logger.error + 重新抛出，不静默吞 bug。"""
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    with patch(
+        "aistock_agent.services.prediction_service._compute_due_dates",
+        side_effect=RuntimeError("unexpected boom"),
+    ):
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            with pytest.raises(RuntimeError, match="unexpected boom"):
+                await run_predict(_make_trace(), _make_snapshot())
+
+
+@pytest.mark.asyncio
+async def test_run_predict_injects_missing_schema_version():
+    """Bug A 双保险：LLM 缺 schema_version → 注入 2.0 后校验通过（834ddf9 之外再兜底）。"""
+    bad = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=bad)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert isinstance(result, PredictionRunResult)
+    assert result.status == "ok"
+    assert result.prediction is not None
+    assert result.prediction.schema_version == "2.0"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_drops_extra_keys():
+    """P1-2：LLM 输出 thinking/analysis 等多余键 → 剔除后校验通过（extra=forbid 不再炸）。"""
+    extra = _VALID_LLM_JSON.replace(
+        '  "schema_version": "2.0",\n',
+        '  "schema_version": "2.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
+    )
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=extra)
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert isinstance(result, PredictionRunResult)
+    assert result.status == "ok"
+    assert result.prediction is not None
+    assert result.prediction.prediction_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_extracts_json_from_fence_and_prefix():
+    """LLM 输出带 ```json 围栏或前缀文本 → 仍提取成功。"""
+    for raw in (
+        "```json\n" + _VALID_LLM_JSON + "\n```",
+        "好的，以下是预测结果：\n" + _VALID_LLM_JSON,
+    ):
+        llm = AsyncMock()
+        llm.ainvoke.return_value = AsyncMock(content=raw)
+        with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+            result = await run_predict(_make_trace(), _make_snapshot())
+        assert isinstance(result, PredictionRunResult)
+        assert result.status == "ok"
+        assert result.prediction is not None
+        assert result.prediction.prediction_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_run_predict_pure_text_returns_parse_failed():
+    """LLM 输出完全非法（纯文本）→ status=parse_failed（失败原因可区分，非 None）。"""
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content="抱歉，我无法生成预测。")
+    with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
+        result = await run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "parse_failed"
+    assert result.prediction is None
+
+
+@pytest.mark.asyncio
+async def test_run_predict_llm_failed_on_llm_error():
     llm = AsyncMock()
     llm.ainvoke.side_effect = RuntimeError("llm down")
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
         result = await run_predict(_make_trace(), _make_snapshot())
-    assert result is None
+    assert result.status == "llm_failed"
+    assert result.prediction is None
+    assert "llm down" in result.reason
+
+
+# ---------- predict_from_trace（独立入口：缓存直读 → DB 重建 → run_predict → 落库） ----------
+
+
+def _make_review_artifact_dict(trade_date="2026-08-10") -> dict[str, object]:
+    """构造合法 ReviewArtifact 的 dict 表示（对齐 set_cached_review 缓存内容）。"""
+    artifact = ReviewArtifact(
+        schema_version="1.1",
+        snapshot=_make_snapshot(trade_date),
+        trace=_make_trace(),
+        markdown="# md",
+        trace_summary="sum",
+        sectors=[],
+    )
+    return artifact.model_dump(mode="json")
+
+
+def _make_db_report_dict(trade_date="2026-08-10") -> dict[str, object]:
+    """构造 DB 落库 report dict（对齐 _build_review_report 的 content.market_trace 结构）。"""
+    return {
+        "content": {
+            "market_trace": {
+                "snapshot": _make_snapshot(trade_date).model_dump(mode="json"),
+                "trace": _make_trace().model_dump(mode="json"),
+            }
+        }
+    }
+
+
+def _make_ok_llm() -> AsyncMock:
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AsyncMock(content=_VALID_LLM_JSON)
+    return llm
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_cache_hit_persists_ok():
+    """缓存直读路径：合法 artifact → run_predict ok → save_prediction 被调且 payload 正确。"""
+    llm = _make_ok_llm()
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=_make_review_artifact_dict()),
+    ) as mock_cache:
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.get_analysis_report = AsyncMock()
+            mock_api.save_prediction = AsyncMock(return_value={"id": 1})
+            with patch(
+                "aistock_agent.services.prediction_service.get_deep_think", return_value=llm
+            ):
+                result, record = await predict_from_trace("trace-1", "2026-08-10")
+    mock_cache.assert_awaited_once_with("2026-08-10")
+    mock_api.get_analysis_report.assert_not_awaited()  # 缓存命中不查 DB
+    assert result.status == "ok"
+    assert record == {"id": 1}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["source_type"] == "market_trace"
+    assert payload["source_id"] == "review:2026-08-10"
+    assert payload["schema_version"] == "2.0"
+    assert payload["prediction"]["prediction_status"] == "confirmed"
+    assert payload["due_dates"]["short"] == "2026-08-17"
+    assert "status" not in payload  # ok 不传 status，Node 默认 pending
+    assert "due_dates_approximate" not in payload  # 全精确档不携带标记键（向后兼容）
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_ok_carries_approximate_horizons():
+    """ok 且存在近似档 → payload 携带 due_dates_approximate（Node 合并进 prediction jsonb）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    real_add = ps.add_trading_days
+
+    def _fake(d: date, n: int) -> date:
+        if n == 20:  # mid 档偏移 → 2027 越年
+            return date(2027, 2, 5)
+        return real_add(d, n)
+
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=_make_review_artifact_dict()),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.get_analysis_report = AsyncMock()
+            mock_api.save_prediction = AsyncMock(return_value={"id": 5})
+            with patch(
+                "aistock_agent.services.prediction_service.add_trading_days", _fake
+            ):
+                with patch(
+                    "aistock_agent.services.prediction_service.get_deep_think",
+                    return_value=_make_ok_llm(),
+                ):
+                    result, record = await predict_from_trace("trace-1", "2026-08-10")
+    assert result.status == "ok"
+    assert record == {"id": 5}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["due_dates_approximate"] == ["mid"]
+    assert payload["due_dates"]["mid"] == "2027-02-05"
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_db_rebuild_path():
+    """DB 重建路径：缓存未命中 → get_analysis_report 重建 trace/snapshot → run_predict 落库。"""
+    llm = _make_ok_llm()
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=None),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.get_analysis_report = AsyncMock(return_value=_make_db_report_dict())
+            mock_api.save_prediction = AsyncMock(return_value={"id": 2})
+            with patch(
+                "aistock_agent.services.prediction_service.get_deep_think", return_value=llm
+            ):
+                result, record = await predict_from_trace("trace-1", "2026-08-10")
+    mock_api.get_analysis_report.assert_awaited_once_with("review", "2026-08-10")
+    assert result.status == "ok"
+    assert record == {"id": 2}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["source_id"] == "review:2026-08-10"
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_trade_date_mismatch_raises():
+    """trade_date 校验：snapshot.trade_date != 参数 trade_date → TraceUnavailableError。"""
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=_make_review_artifact_dict(trade_date="2026-08-09")),
+    ):
+        with pytest.raises(TraceUnavailableError, match="trade_date"):
+            await predict_from_trace("trace-1", "2026-08-10")
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_both_sources_unavailable_raises():
+    """两条读取链都失败（缓存 None + DB None）→ TraceUnavailableError。"""
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=None),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.get_analysis_report = AsyncMock(return_value=None)
+            with pytest.raises(TraceUnavailableError, match="2026-08-10"):
+                await predict_from_trace("trace-1", "2026-08-10")
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_gate_skipped_persists_skipped():
+    """gate_skipped → 落 skipped 记录：status=skipped、prediction.skip_reason、due_dates={}。"""
+    artifact = ReviewArtifact(
+        schema_version="1.1",
+        snapshot=_make_snapshot(),
+        trace=_make_trace("insufficient"),
+        markdown="# md",
+        trace_summary="sum",
+        sectors=[],
+    )
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=artifact.model_dump(mode="json")),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.save_prediction = AsyncMock(return_value={"id": 3})
+            result, record = await predict_from_trace("trace-1", "2026-08-10")
+    assert result.status == "gate_skipped"
+    assert record == {"id": 3}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["status"] == "skipped"
+    assert payload["prediction"] == {"skip_reason": "attribution_status=insufficient"}
+    assert payload["due_dates"] == {}
+    assert payload["source_type"] == "market_trace"
+    assert payload["source_id"] == "review:2026-08-10"
+    assert payload["schema_version"] == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_llm_failed_does_not_persist():
+    """llm_failed → 瞬时失败不落库（由调用方决定重试），record=None。"""
+    llm = AsyncMock()
+    llm.ainvoke.side_effect = RuntimeError("llm down")
+    with patch(
+        "aistock_agent.services.prediction_service.get_cached_review",
+        AsyncMock(return_value=_make_review_artifact_dict()),
+    ):
+        with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+            mock_api.save_prediction = AsyncMock(return_value={"id": 4})
+            with patch(
+                "aistock_agent.services.prediction_service.get_deep_think", return_value=llm
+            ):
+                result, record = await predict_from_trace("trace-1", "2026-08-10")
+    assert result.status == "llm_failed"
+    assert record is None
+    mock_api.save_prediction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_skipped_prediction_payload():
+    """save_skipped_prediction：独立导出的 skipped 落库辅助（供 TraceUnavailableError 场景）。"""
+    with patch("aistock_agent.services.prediction_service.node_api") as mock_api:
+        mock_api.save_prediction = AsyncMock(return_value={"id": 9})
+        record = await save_skipped_prediction("review:2026-08-10", "no trace available")
+    assert record == {"id": 9}
+    payload = mock_api.save_prediction.await_args.args[0]
+    assert payload["status"] == "skipped"
+    assert payload["prediction"] == {"skip_reason": "no trace available"}
+    assert payload["due_dates"] == {}
+    assert payload["schema_version"] == "1.0"
 
 
 def test_render_prediction_markdown():
-    from aistock_agent.schemas.prediction import EvolutionStep, PredictionHorizon, PredictionResult, PredictionRisk
+    from aistock_agent.schemas.prediction import (
+        PredictionHorizon,
+        PredictionResult,
+        PredictionRisk,
+    )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="mid",
@@ -141,10 +505,14 @@ def test_render_prediction_markdown():
 
 def test_render_prediction_markdown_uses_evolution_steps_when_present():
     # B2 结构化演化路径：有 evolution_steps 时逐条渲染，不再整段输出 narrative
-    from aistock_agent.schemas.prediction import EvolutionStep, PredictionHorizon, PredictionResult, PredictionRisk
+    from aistock_agent.schemas.prediction import (
+        EvolutionStep,
+        PredictionHorizon,
+        PredictionResult,
+    )
 
     prediction = PredictionResult(
-        schema_version="1.0",
+        schema_version="2.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="short",
@@ -208,6 +576,47 @@ def _make_chat_llm(
 def _chat_prediction(text: str) -> PredictionResult:
     """把合法 LLM 输出文本解析为 PredictionResult（结构化输出返回对象而非文本）。"""
     return PredictionResult.model_validate_json(text)
+
+
+@pytest.mark.asyncio
+async def test_chat_prediction_hard_validation_redacts_absolute_point():
+    """P0-3：chat 输出含绝对点位（如'上证指数维持 3500-3600 区间'）→ 剥离 + 独立日志，不静默。"""
+    from aistock_agent.services.prediction_service import _contains_absolute_point
+
+    assert _contains_absolute_point("上证指数维持 3500-3600 区间") is True
+    assert _contains_absolute_point("涨至 10.5 元") is True
+    assert _contains_absolute_point("围绕当前价位窄幅整理") is False
+    assert _contains_absolute_point("涨幅 20%，成交放大") is False  # 不误杀相对/涨幅描述
+    # D5：裸数字点位补丁——无动词/区间/元后缀的绝对点位也要拦截
+    assert _contains_absolute_point("目标点位 12000") is True
+    assert _contains_absolute_point("上证指数 12000") is True
+    assert _contains_absolute_point("成交额达 1000 亿") is False  # D5：量词描述不误杀
+
+    # 端到端：构造含点位的 LLM 输出 → run_chat_prediction 返回剥离后结果
+    snapshot = {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}}
+    prediction = PredictionResult(
+        schema_version="2.0",   # D6：与 schema_version 升 2.0 同步（H3 版本分桶）
+        prediction_status="hypothesis",
+        horizons=[{"horizon": "short", "remaining_estimate": "1-2周", "phase": "peaking",
+                   "direction": "bullish", "target": "上证指数",
+                   "metric_projection": "上证指数维持 3500-3600 区间",
+                   "confidence": "medium"}],
+        evolution_narrative="短线情绪延续，上证指数看至 3600 点。",
+        evolution_steps=[],
+        risks=[{"factor": "政策", "invalidation": "不及预期"}],
+        evidence_ids=["quote:600519"],
+    )
+    with (
+        patch("aistock_agent.services.prediction_service.get_quick_think"),
+        patch(
+            "aistock_agent.services.prediction_service.with_chat_structured_output"
+        ) as structured,
+    ):
+        structured.return_value.ainvoke = AsyncMock(return_value=prediction)
+        result = await run_chat_prediction(snapshot, [], {"question": "大盘会涨到哪"})
+    assert result is not None
+    assert "3500" not in result.horizons[0].metric_projection
+    assert "3600" not in result.evolution_narrative
 
 
 @pytest.mark.asyncio
@@ -291,11 +700,11 @@ async def test_run_chat_prediction_missing_schema_version_degrades():
     """LLM 输出缺 schema_version → 结构化解析抛 ValidationError → 返回 None（永不 500）。
 
     Phase 4-1 冒烟实测根因：PREDICTION_CHAT_PROMPT 未要求输出 schema_version，
-    而 PredictionResult.schema_version 是必填 Literal["1.0"] → 线上恒降级。
+    而 PredictionResult.schema_version 是必填 Literal["2.0"] → 线上恒降级。
     本测试锁定新调用链（json_mode 结构化输出）的降级语义：缺字段走异常 → None，
     skill 层落到 degraded 提示而非 500。
     """
-    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "1.0",\n', "")
+    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
     with pytest.raises(ValidationError):
         PredictionResult.model_validate_json(bad_json)  # 夹具自证：缺 schema_version 必校验失败
 

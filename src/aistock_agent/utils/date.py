@@ -8,17 +8,38 @@ from zoneinfo import ZoneInfo
 
 from chinese_calendar import is_workday  # type: ignore[import-untyped]
 
+from aistock_agent.config import settings
+
 
 def is_trading_day(d: date | None = None) -> bool:
     """判断是否为 A 股交易日（排除周末和法定节假日）。
 
     Args:
         d: 指定日期，默认取今天。
+
+    Notes:
+        G6 缺陷背景：chinese_calendar 1.11.0 仅覆盖 2004-2026，2027 年起
+        is_workday 抛 NotImplementedError，旧实现直接 fallback "只跳周末"，
+        把 2027 法定节假日误判为交易日（精度损失）。
+        本实现支持通过 ``HOLIDAYS_EXTRA``（config.holidays_extra，YYYY-MM-DD
+        列表）注入覆盖范围之外的补充休市日，判定顺序：周末 → 补充表 →
+        chinese_calendar → 越年 fallback。补充表语义为"休市日"，周末调休补班日
+        不在支持范围（不承诺 2027 精确节假日）；chinese_calendar 库升级
+        （覆盖 2027+）后 try 分支自动恢复精确判断，无需改代码。
     """
     target = d or date.today()
     if target.weekday() >= 5:
         return False
-    return bool(is_workday(target))
+    # 补充节假日表优先（HOLIDAYS_EXTRA，YYYY-MM-DD；
+    # chinese_calendar 覆盖 2004-2026 之外年份的精度来源）
+    if settings.holidays_extra and target.isoformat() in settings.holidays_extra:
+        return False
+    try:
+        return bool(is_workday(target))
+    except (NotImplementedError, ValueError):
+        # 越年（>2026）：有补充表则已排除休市日，剩余按交易日；
+        # 无补充表回退"只跳周末"（语义与拆分前一致）
+        return True
 
 
 def prev_trading_day(d: date | None = None) -> date:
@@ -53,6 +74,11 @@ def add_trading_days(d: date, n: int) -> date:
 def shanghai_today() -> date:
     """返回上海时区的自然日，作为报告交易日。"""
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+
+def shanghai_now() -> datetime:
+    """返回上海时区的当前时刻（B-5 三时间戳采集用，防服务器/容器时区漂移）。"""
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
 
 
 def is_trading_time(now: datetime | None = None) -> bool:

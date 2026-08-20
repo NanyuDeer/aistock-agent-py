@@ -206,6 +206,22 @@ class TestConfigEnvOverride:
         assert s.phenomenon_broad_index_change_pct == 1.25
         assert s.phenomenon_sentiment_broken_ratio == 0.50
 
+    def test_smtp_qq_env_alias(self, monkeypatch):
+        """QQ_SMTP_* 环境变量映射到 iterate_smtp_* 字段。
+
+        2026-08-14 事故：.env.development 用 QQ_SMTP_USER/AUTH/TO 键名，
+        与字段 iterate_smtp_user/password/mail_to（env 名 ITERATE_SMTP_*）
+        不匹配 → settings 读不到 → mail_not_configured → 报告无法发送
+        （LLM key 正常因为 OPENAI_API_KEY 与字段名恰好匹配）。
+        """
+        monkeypatch.setenv("QQ_SMTP_USER", "sender@qq.com")
+        monkeypatch.setenv("QQ_SMTP_AUTH", "authcode123")
+        monkeypatch.setenv("QQ_SMTP_TO", "receiver@qq.com")
+        s = Settings()
+        assert s.iterate_smtp_user == "sender@qq.com"
+        assert s.iterate_smtp_password == "authcode123"
+        assert s.iterate_mail_to == "receiver@qq.com"
+
     def test_quick_think_temperature_override(self, monkeypatch):
         monkeypatch.setenv("QUICK_THINK_TEMPERATURE", "0.5")
         assert Settings().quick_think_temperature == 0.5
@@ -270,6 +286,30 @@ class TestConfigEnvOverride:
 
         monkeypatch.setenv("QA_MODE", "1")
         assert Settings().qa_mode_enabled is False
+
+
+# =============================================================================
+# HOLIDAYS_EXTRA 补充节假日表测试
+# =============================================================================
+
+
+class TestHolidaysExtra:
+    """验证 holidays_extra 默认空列表 + env 解析（复用 cors_origins 解析模式）"""
+
+    def test_holidays_extra_default_empty(self):
+        """默认空列表：未配置时 is_trading_day 行为与拆分前逐字节一致"""
+        s = Settings()
+        assert s.holidays_extra == []
+
+    def test_holidays_extra_comma_separated(self, monkeypatch):
+        """逗号分隔格式：HOLIDAYS_EXTRA=2027-01-01,2027-10-01 → list"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", "2027-01-01,2027-10-01")
+        assert Settings().holidays_extra == ["2027-01-01", "2027-10-01"]
+
+    def test_holidays_extra_json_array(self, monkeypatch):
+        """JSON 数组格式：HOLIDAYS_EXTRA=["2027-01-01"] → ["2027-01-01"]"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", '["2027-01-01"]')
+        assert Settings().holidays_extra == ["2027-01-01"]
 
 
 # =============================================================================

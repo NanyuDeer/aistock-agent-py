@@ -1,9 +1,46 @@
 """iterate 调度 —— 注册 job 与手动触发"""
 
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+
+
+@pytest.mark.asyncio
+async def test_manual_once_with_date_sends_report_only() -> None:
+    """--once --date 补发模式：仅构建并发送指定日期报告，跳过消费与交易日检查。
+
+    2026-08-14 用户需求：迭代报告已生成但主应用 scheduler 未运行（无自动发送），
+    需手动触发补发。--date 允许补发历史日期的报告（含当日实验记录）。
+    """
+    from aistock_agent.iterate.scheduler import _manual_once
+
+    with patch(
+        "aistock_agent.iterate.scheduler.run_daily_report", AsyncMock()
+    ) as mock_report, patch(
+        "aistock_agent.iterate.scheduler._run_iterate_daily_task", AsyncMock()
+    ) as mock_daily:
+        await _manual_once(["--once", "--date", "2026-08-13"])
+
+    mock_report.assert_awaited_once_with(date(2026, 8, 13))
+    mock_daily.assert_not_awaited()  # 补发模式不消费案例、不受交易日限制
+
+
+@pytest.mark.asyncio
+async def test_manual_once_without_date_runs_daily_task() -> None:
+    """--once 无 --date：走完整每日任务（消费 + 当日报告）。"""
+    from aistock_agent.iterate.scheduler import _manual_once
+
+    with patch(
+        "aistock_agent.iterate.scheduler.run_daily_report", AsyncMock()
+    ) as mock_report, patch(
+        "aistock_agent.iterate.scheduler._run_iterate_daily_task", AsyncMock()
+    ) as mock_daily:
+        await _manual_once(["--once"])
+
+    mock_daily.assert_awaited_once()
+    mock_report.assert_not_awaited()
 
 
 def test_register_iterate_jobs_adds_daily_job() -> None:
@@ -114,15 +151,62 @@ async def test_build_task_failure_does_not_break_report(iterate_data_dir: object
     # （shanghai_today + chinese_calendar.is_workday），不 patch 时周末/节假日
     # 提前 return，mock_build.assert_awaited() 必挂。参照同文件既有用例模式
     # 显式 patch is_trading_day=True；shanghai_today 无需 patch（True 时继续到 try 块）。
+    # Task 5 适配：产片内部逻辑已重构为 produce_cases_daily（单 agent 失败在函数内
+    # 隔离），本用例 patch 外层整体性异常（如 import/初始化失败）的兜底路径。
     with patch(
         "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
     ), patch(
-        "aistock_agent.iterate.scheduler.find_recent_trading_day",
-        AsyncMock(return_value=None),
-    ), patch(
-        "aistock_agent.iterate.scheduler._build_review_and_event_cases",
+        "aistock_agent.iterate.scheduler.produce_cases_daily",
         AsyncMock(side_effect=RuntimeError("node unreachable")),
     ) as mock_build:
         await _run_iterate_build_task()
     mock_build.assert_awaited()
     # 产片失败不抛异常（被内部 try/except 吸收）
+
+
+@pytest.mark.asyncio
+async def test_build_failure_sends_alert_mail(iterate_data_dir: object) -> None:
+    """D-3：产片失败触发告警邮件（只告警不中止，D16 语义）。"""
+    from aistock_agent.iterate.scheduler import _run_iterate_build_task
+
+    with patch(
+        "aistock_agent.iterate.scheduler.is_trading_day", return_value=True
+    ), patch(
+        "aistock_agent.iterate.scheduler.produce_cases_daily",
+        AsyncMock(side_effect=RuntimeError("node unreachable")),
+    ), patch(
+        "aistock_agent.services.mail_sender.send_mail", return_value=True
+    ) as mock_mail:
+        await _run_iterate_build_task()
+    mock_mail.assert_called_once()
+    subject = mock_mail.call_args.args[0]
+    assert "迭代产片失败告警" in subject
+
+
+@pytest.mark.asyncio
+async def test_produce_cases_loops_all_agents_and_isolates_failure(monkeypatch) -> None:
+    """二期：产片 job 循环 iterable_agent_ids；单 agent 异常不阻断后续。"""
+    from aistock_agent.iterate import scheduler
+    from aistock_agent.iterate.adapters import iterable_agent_ids
+
+    calls: list[str] = []
+    notified: list[object] = []
+
+    async def fake_build(adapter, *, data_dir, force=False):
+        calls.append(adapter.agent_id)
+        if adapter.agent_id == "review":
+            raise RuntimeError("review 产片失败")
+        return {"generated": 1, "rejected": 0, "case_ids": ["case_y"], "reasons": []}
+
+    # 告警邮件本体由 test_build_failure_sends_alert_mail 单独覆盖；此处 stub
+    # _notify_build_failure 防真实 SMTP，并断言失败 agent 确实走了告警通道。
+    monkeypatch.setattr(
+        scheduler, "_notify_build_failure", lambda _date, exc: notified.append(exc)
+    )
+    monkeypatch.setattr(scheduler, "build_cases_for_adapter", fake_build)
+    results = await scheduler.produce_cases_daily()
+    assert calls == iterable_agent_ids()  # 全部 agent 都被尝试
+    assert "review" in results  # 失败 agent 仍记录（失败经告警通道，不抛出）
+    assert results["review"] == {"error": "review 产片失败"}
+    assert len(notified) == 1  # 仅失败 agent 触发告警
+    assert "review 产片失败" in str(notified[0])

@@ -63,6 +63,10 @@ _DRIVER_PROMPT = """你是股票归因分析师。基于给定切片语料提取
 要求：
 - 只输出严格 JSON：{{"drivers": ["驱动因素1", "驱动因素2"]}}，最多 4 条
 - 只能基于上述语料推断，禁止使用语料之外的信息（禁止联网、禁止事后知识）
+- 驱动因素必须由语料原文中的词/短语直接构成（可拼接语料中的关键词），
+  禁止概括、润色或使用语料中不存在的表述——逐字可溯源是后续评分校验前提
+  （gt_validator 驱动规则）；若语料无法支撑任何驱动，输出空列表
+  {{"drivers": []}}（空驱动会被评分剔除，不制造虚假驱动）
 - 驱动因素用简洁中文短语（4-12 字），如「隔夜美股暴涨」「外盘传导」
 只输出 JSON。"""
 
@@ -153,6 +157,18 @@ async def generate_data_constrained_gt(
     sectors = _top_gainers(a_share, n=3)
     corpus = _corpus_text(case)
 
+    # 四期 Task 3：事件库方向先验（case.meta.direction_hint，event_store_scan 写入）——
+    # 增强归因证据（source_notes + 驱动语料），不覆盖快照 direction
+    # （GT direction 语义 = 市场方向，evaluator 计分不变）。
+    direction_hint = ""
+    case_meta = case.get("meta")
+    if isinstance(case_meta, dict):
+        direction_hint = str(case_meta.get("direction_hint", ""))
+    source_notes: list[str] = []
+    if direction_hint in {"bullish", "bearish", "neutral"}:
+        source_notes.append(f"事件库方向先验: {direction_hint}")
+        corpus = f"{corpus}\n事件方向先验: {direction_hint}"  # 驱动语料增强
+
     drivers: list[str] = []
     try:
         llm = llm_service.get_deep_think()
@@ -183,13 +199,17 @@ async def generate_data_constrained_gt(
     gt: dict[str, object] = {
         "gt_id": str(case.get("ground_truth_ref", f"gt_{case.get('case_id')}")),
         "case_id": str(case.get("case_id", "")),
+        # A-3 修复：GT 版本字段（2026-08-14）——人工回填/口径升级可追踪，
+        # 回填必须过 validate_gt_against_case 校验。
+        # 四期 Task 3（2026-08-14）：gt_version 1→2（事件库方向先验口径）。
+        "gt_version": 2,
         "confidence": confidence,
         "attribution": {
             "direction": direction,
             "drivers": drivers,
             "transmission_path": [],
             "affected_sectors": sectors,
-            "source_notes": [],
+            "source_notes": source_notes,  # 四期 Task 3：事件库方向先验（无条件时为空列表）
             "corpus": corpus[:6000],  # 冻结切片语料，供 judge 引用机械核验（N5 修复）
         },
     }

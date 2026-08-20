@@ -132,22 +132,35 @@ async def chat_message(
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
-    result = await graph.ainvoke(
+    # G1 修订（2026-08-17 design-debate 定案）：值源 = 末节点 synth_answer 输出
+    result: dict[str, object] = {}
+    async for step in graph.astream(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
-    )
-    # Phase 4-2（改进 13）：confirm 是 WS 专属两阶段交互协议；HTTP 非流式路径
-    # 无交互能力，但 qa_router 触发 confirm 是传输无关的——此处降级为既有澄清
-    # 文本（等价 WS confirm_timeout 回退），避免"有用澄清"退化为"无法处理"。
+        stream_mode="updates",
+    ):
+        if isinstance(step, dict) and "synth_answer" in step:
+            result = step["synth_answer"]  # 终节点，最后一次命中即本轮输出
+    # 澄清分支显式置 None
     if not result.get("final_response") and result.get("confirm"):
-        content = _STOCK_SYMBOL_CLARIFICATION
-    else:
-        content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+        return ChatResponse(
+            content=_STOCK_SYMBOL_CLARIFICATION,
+            session_id=session_id,
+            token_usage=result.get("token_usage"),
+            last_deep_report=None,
+            cards=None,
+        )
+    content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     return ChatResponse(
         content=content,
         session_id=session_id,
-        # P10 线 2 缺口修复：透出本轮 token_usage（synth_answer_node 附加于 result；无则 None）
         token_usage=result.get("token_usage"),
+        last_deep_report=result.get("last_deep_report"),
+        cards=(
+            [c.model_dump() for c in result["cards"]]
+            if result.get("cards")
+            else None
+        ),
     )
 
 
@@ -225,6 +238,9 @@ async def _stream_messages(
         asyncio.create_task(_run_graph_to_queue(graph, initial_state, session_id))
 
     _llm_started = False
+    # G1 修订（2026-08-17）：last_deep_report/cards 改为事件流采集
+    round_last_deep_report: dict[str, object] | None = None
+    round_cards: list[dict[str, object]] | None = None
     try:
         while True:
             event = await queue.get()
@@ -233,7 +249,6 @@ async def _stream_messages(
                 final_state = await graph.aget_state(
                     config={"configurable": {"thread_id": session_id}}
                 )
-                final_cards = final_state.values.get("cards")
                 # Phase 4-2（改进 13）：SSE 与 HTTP 同样无两阶段交互能力；qa_router
                 # 触发 confirm 时降级为既有澄清文本（等价 WS confirm_timeout 回退）。
                 final_response = final_state.values.get("final_response", "")
@@ -246,8 +261,9 @@ async def _stream_messages(
                     # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
                     # 仅供前端本地累加展示，本路径不落库）
                     "token_usage": final_state.values.get("token_usage"),
-                    # 2026-08-05 冒烟定位：cards 为 pydantic ChatCard 列表，需 model_dump 转 dict
-                    "cards": [c.model_dump() for c in final_cards] if final_cards else None,
+                    # G1 修订：DONE 补齐 last_deep_report（事件流采集值，非终态）
+                    "last_deep_report": round_last_deep_report,
+                    "cards": round_cards,
                 }
                 break
             if not isinstance(event, dict):
@@ -255,6 +271,14 @@ async def _stream_messages(
             if "__error__" in event:
                 yield {"type": SSEEventType.ERROR, "message": event["__error__"]}
                 break
+
+            # G1 修订：采集 synth_answer 节点输出
+            if event.get("event") == "on_chain_end" and event.get("name") == "synth_answer":
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict):
+                    round_last_deep_report = output.get("last_deep_report")
+                    cards = output.get("cards")
+                    round_cards = [c.model_dump() for c in cards] if cards else None
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
@@ -1547,7 +1571,79 @@ async def trigger_evening_chain(
         raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
 
 
-# ── CHAT QA ────────────────────────────────────────────────────────
+# ── 大盘溯源后接预测（独立触发，PR-A/T5；T6 regenerate 代理的转发目标） ──
+
+
+@router.post("/internal/predictions/from-trace")
+async def trigger_predictions_from_trace(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """大盘溯源后接预测独立触发端点（供 app-api /regenerate 代理转发）。
+
+    流程：trade_date 校验 → 已验证拒覆盖（409，SPEC S6）→ predict_from_trace →
+    TraceUnavailableError 落 skipped 记录并返回 200（硬约束 7：不静默缺失）。
+    成功/llm_failed/parse_failed 均返回 ``{status, reason, record}``（后两者
+    record=None 不落库，调用方（T6 代理）可重试）；意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import (
+        TraceUnavailableError,
+        predict_from_trace,
+        save_skipped_prediction,
+    )
+
+    if not body or not body.get("trade_date"):
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+    trade_date = body["trade_date"]
+    try:
+        parsed_date = date.fromisoformat(trade_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != trade_date:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+
+    trace_id = body.get("trace_id") or "manual-regenerate"
+    logger = structlog.get_logger()
+    logger.info("predictions_from_trace_start", trade_date=trade_date, trace_id=trace_id)
+    try:
+        # 已验证拒覆盖防御（SPEC S6）：同交易日已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预测被静默重写
+        existing = await node_api.list_predictions(f"review:{trade_date}")
+        for record in existing:
+            verification = record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        result, record = await predict_from_trace(trace_id, trade_date)
+        logger.info(
+            "predictions_from_trace_done",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            status=result.status,
+        )
+        return {"status": result.status, "reason": result.reason, "record": record}
+    except TraceUnavailableError as exc:
+        # 溯源数据不可用：落 skipped 记录并原样暴露原因，不静默缺失（硬约束 7）
+        skipped = await save_skipped_prediction(f"review:{trade_date}", str(exc))
+        logger.warning(
+            "predictions_from_trace_trace_unavailable",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            reason=str(exc),
+        )
+        return {"status": "skipped", "reason": str(exc), "record": skipped}
+    except HTTPException:
+        # 409/400 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "predictions_from_trace_failed",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-trace failed: {exc}")
 
 
 @router.post("/qa")

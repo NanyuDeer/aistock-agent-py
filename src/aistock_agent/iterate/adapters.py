@@ -8,6 +8,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class CaseSourceSpec:
+    """产片源声明：provider 为 case_sourcers 注册表已登记的 provider 名。
+
+    params 为 provider 参数（如 telegraph_keyword_scan 的 window_days）。
+    一个 adapter 可有多个产片源（如 event_analyst 后续叠加新源）。
+    """
+
+    provider: str
+    params: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class IterableAgentAdapter:
     """可迭代 Agent 的统一描述。
 
@@ -30,6 +42,7 @@ class IterableAgentAdapter:
     tool_categories: tuple[str, ...] = field(default_factory=tuple)
     data_deps: dict[str, str] = field(default_factory=dict)
     ground_truth_kind: str = "attribution"
+    case_sources: tuple[CaseSourceSpec, ...] = field(default_factory=tuple)
     description: str = ""
 
 
@@ -46,6 +59,7 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
             "global": "global_markets",
         },
         ground_truth_kind="attribution",
+        case_sources=(CaseSourceSpec("market_close_snapshot"),),
         description="大盘溯源归因：5 步归因分析，输出 MarketTraceResult（候选×阶段链）",
     ),
     "event_analyst": IterableAgentAdapter(
@@ -59,6 +73,10 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
             "search": "cls_telegraph",
         },
         ground_truth_kind="attribution",
+        case_sources=(
+            CaseSourceSpec("event_store_scan", {"window_days": 30}),
+            CaseSourceSpec("telegraph_keyword_scan", {"window_days": 30}),
+        ),
         description="事件传导分析：理解→传导→历史→投资结论",
     ),
 }

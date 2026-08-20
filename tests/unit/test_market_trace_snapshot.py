@@ -716,7 +716,10 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
 
     async def _node_get_side_effect(path: str, **_kwargs):
         node_get_calls.append(path)
-        if path == "/internal/market/close-snapshot":
+        # 三期起 close-snapshot 调用携带 ?date=，必须用 startswith 匹配，
+        # 否则精确匹配永不命中、side_effect 落入 {"items": []} 分支走 status 校验，
+        # stale 变死数据、用例实际未覆盖 trade_date 不一致分支（评审 IMP-1）。
+        if path.startswith("/internal/market/close-snapshot"):
             return stale
         return {"items": []}
 
@@ -741,7 +744,68 @@ async def test_snapshot_date_mismatch_blocks_external_calls(mocker):
     global_market_mock.assert_not_called()
     tavily_search_mock.assert_not_called()
     # 只应调用过 close-snapshot，不应调用 news/latest
-    assert node_get_calls == ["/internal/market/close-snapshot"]
+    assert node_get_calls == ["/internal/market/close-snapshot?date=2026-07-19"]
+
+
+@pytest.mark.asyncio
+async def test_build_market_trace_snapshot_passes_report_date_to_close_snapshot(mocker):
+    """三期：close-snapshot 请求必须携带 ?date=report_date（历史回补按目标交易日）。
+
+    Node /internal/market/close-snapshot?date=YYYY-MM-DD 返回目标交易日快照；
+    Python 侧必须把 report_date 透传进查询参数，否则历史回补拿到的仍是
+    "最近交易日"而非请求的目标交易日。
+    """
+    node_get_calls: list[str] = []
+
+    async def _node_get_side_effect(path: str, **_kwargs):
+        node_get_calls.append(path)
+        if path.startswith("/internal/market/close-snapshot"):
+            return COMPLETE_CLOSE
+        return {"items": []}
+
+    mocker.patch.object(node_api, "get", side_effect=_node_get_side_effect)
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    assert node_get_calls[0] == "/internal/market/close-snapshot?date=2026-07-19"
+    assert snapshot.trade_date == "2026-07-19"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_last_close_fallback_date_mismatch_raises(mocker):
+    """三期 C2：close-snapshot 返回 None → last-close 兜底，但兜底数据日与请求日不一致 → fail-loud。
+
+    场景：历史回补（--date）命中非交易日/数据缺失 → Node 409 → last-close 返回
+    "最近交易日"数据。若不加校验，快照被盖章为请求日但数据是最近交易日，
+    产错日 case 进闭环（评审 C2，IMP-3 守卫死代码根因）。
+    修复后必须抛 MarketTraceSnapshotUnavailable，由 provider 抛错 → source_cases
+    降级 0 候选，绝不静默产错日 case。
+    """
+    mocker.patch.object(node_api, "get", AsyncMock(return_value=None))
+    # last-close 兜底返回最近交易日（YYYYMMDD 格式，兼容 Node 两种格式之一）
+    last_close = {**COMPLETE_CLOSE, "trade_date": "20260813"}
+    mocker.patch.object(
+        node_api, "get_last_close_snapshot", AsyncMock(return_value=last_close)
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        return_value={"results": []},
+    )
+
+    with pytest.raises(MarketTraceSnapshotUnavailable, match="last-close 兜底数据日"):
+        await build_market_trace_snapshot("2026-07-19")
 
 
 # ============================================================================
@@ -1297,3 +1361,69 @@ async def test_build_market_trace_snapshot_telegraph_fallback_to_latest(mocker):
         s for s in snapshot.sources.values() if s.source_id.startswith("NEWS_")
     ]
     assert len(news_sources) >= 1
+
+
+def test_normalize_search_provider_propagates_to_status() -> None:
+    """T4：_normalize_search_facts 消费 result 的 provider 键，透传进 status/source。"""
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "anysearch",
+        },
+        {"results": [], "provider": "anysearch"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].provider == "anysearch"
+    assert list(src.values())[0].provider == "anysearch"
+
+
+def test_normalize_search_degraded_state_from_non_tavily_provider() -> None:
+    """T4：outcome=degraded 且 provider 非 tavily（doubao failover 命中）→ state=degraded。"""
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "doubao",
+            "outcome": "degraded",
+        },
+        {"results": [], "provider": "tavily"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].state == "degraded"
+    assert statuses["tavily_domestic_policy"].provider == "doubao"
+
+
+def test_normalize_search_degraded_guard_tavily_provider_stays_available() -> None:
+    """T4 守卫边界：outcome=degraded 但 provider=tavily → state 保持 available。
+
+    degraded 仅标记低质 fallback（非 tavily）；原生 tavily 命中即使声明
+    outcome=degraded 也不得降级，保持既有 available 语义。
+    """
+    from aistock_agent.services.market_trace_snapshot import _normalize_search_facts
+
+    src: dict[str, object] = {}
+    missing: list[str] = []
+    statuses = _normalize_search_facts(
+        {
+            "results": [{"title": "t", "content": "c", "url": "u"}],
+            "provider": "tavily",
+            "outcome": "degraded",
+        },
+        {"results": [], "provider": "tavily"},
+        src,
+        missing,
+        datetime.now(UTC),
+    )
+    assert statuses["tavily_domestic_policy"].state == "available"
+    assert statuses["tavily_domestic_policy"].provider == "tavily"

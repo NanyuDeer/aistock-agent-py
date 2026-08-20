@@ -38,15 +38,35 @@ async def run_case(
     - 评分 >= settings.iterate_target_score（0.8）→ stopped_reason=score_reached
     - best 评分曾达标但当前轮未持续 → stopped_reason=score_then_stall（报告语义修正）
     - 达到 max_rounds（默认 settings.iterate_max_rounds）
-    D4/N3：δ 校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，停滞判定
-    会误触发或永不触发；stalled 仅观测记录，终止性只依赖 score_reached 与 max_rounds。
+    - 五期（裁决书 D4/N3 落地）：settings.iterate_no_improve_delta 配置后，
+      stalled >= no_improve_max_stalls 且近轮与 best 分差 <= delta →
+      stopped_reason=no_improvement；未配置（None）保持 D4/N3 现状——评分含
+      LLM judge 噪声，停滞判定仅观测不终止，终止性只依赖 score_reached 与 max_rounds。
     round 1 为基线（无变体），round 2+ 应用 LLM 变体。
     """
     adapter = get_adapter(agent_id)
     case = load_case(case_id)
     ground_truth = load_ground_truth(str(case["ground_truth_ref"]))
-    limit = max_rounds or settings.iterate_max_rounds
+    # D-2 修复：max_rounds>=1 校验移入入口（覆盖调度器直调路径——scheduler
+    # 直调 run_case 时 max_rounds 可能传 0/负数，原代码静默取默认值掩盖配置错误）。
+    # 注意：不能用 `max_rounds or default`——0 会被 or 吞掉绕开校验。
+    limit = max_rounds if max_rounds is not None else settings.iterate_max_rounds
+    if limit < 1:
+        raise ValueError(f"max_rounds 必须 >= 1，收到 {limit}")
     root = Path(repo_root) if repo_root else _default_repo_root()
+
+    # C-3（2026-08-14）：非 git 环境判定矩阵——development 无 .git 时变体轮
+    # 无法恢复基线，限制为只跑基线轮；production 无 .git 直接拒绝。
+    from aistock_agent.iterate.variant_engine import _check_repo_environment
+
+    repo_env = _check_repo_environment(root)
+    if repo_env == "skip":
+        logger.warning(
+            "iterate_repo_skip_variant_rounds",
+            case_id=case_id,
+            root=str(root),
+        )
+        limit = 1
 
     # T10 Q1 修复：清理上次运行残留的实验记录，防止跨运行 r*.json 污染 best.json。
     # 同一 case 多次运行时，旧 r*.json 会被 _recompute_best 纳入重算，
@@ -55,7 +75,7 @@ async def run_case(
 
     rounds: list[dict[str, object]] = []
     best: dict[str, object] = {"round": 0, "score": 0.0, "detail": None}
-    stalled = 0  # D4/N3：δ 校准前禁用 no_improvement 终止，仅观测计数
+    stalled = 0  # 停滞计数（五期：δ 配置后触发 no_improvement 终止；未配置仅观测）
     # C11/N3/F1：连续基础设施失败（回放超时/子进程失败/轮级异常/补丁空写）计数，
     # 达 3 中止 case 防无限空转
     infra_failures = 0
@@ -188,20 +208,33 @@ async def run_case(
             }
             stalled = 0
         else:
-            stalled += 1  # 仅观测累计（D4/N3：不再触发任何终止）
+            stalled += 1  # 停滞累计（五期：δ 配置后作为终止判定输入；未配置仅观测）
 
         logger.info(
             "iterate_round_done",
             case_id=case_id,
             round=round_no,
             score=total,
-            stalled=stalled,  # D4/N3：观测字段，随轮日志输出供校准期分析
+            stalled=stalled,  # 观测字段，随轮日志输出供校准期分析
         )
 
-        # D4/N3 修复：δ 未校准前禁用 no_improvement 终止——评分含 LLM judge 噪声，
-        # total > best 的停滞判定在噪声下会误触发或永不触发；终止性只依赖
-        # score_reached 与 max_rounds，stalled 仅观测记录。
-        if total >= settings.iterate_target_score:
+        # 五期（裁决书 D4/N3 落地）：δ 校准后启用 no_improvement 终止——
+        # iterate_no_improve_delta 配置后，stalled 达阈值且近轮与 best 分差
+        # <= delta（噪声带内）→ 终止；未配置（None）保持现状（仅观测）。
+        # A-3 修复：confidence=low 的 GT 不构成达标（标准答案可信度不足，
+        # 高分可能是对劣质 GT 的拟合，需人工回填后再验收）。
+        if _should_stop_no_improvement(
+            stalled=stalled,
+            best_score=cast("float", best.get("score", 0.0)),
+            current_score=total,
+            delta=settings.iterate_no_improve_delta,
+            max_stalls=settings.no_improve_max_stalls,
+        ):
+            stopped_reason = "no_improvement"
+            break
+
+        gt_confidence = str(ground_truth.get("confidence", "high"))
+        if total >= settings.iterate_target_score and gt_confidence != "low":
             stopped_reason = "score_reached"
             break
         if cast("float", best.get("score", 0.0)) >= settings.iterate_target_score:
@@ -220,9 +253,14 @@ async def run_case(
     # D13 修复：闭环跑完即标记已迭代（单一权威标记，experiments 目录可清理）。
     # infra_failures 提前中止也走这里（该 case 已尝试且失败轮不落实验记录，
     # 标记防重复尝试；若需重试可手动删除标记文件）。
-    from aistock_agent.iterate.case_builder import mark_iterated
+    # D-1（2026-08-14）：基础设施失败 → mark_failed（退避 1/2 天后自动重试，
+    # 达 3 次进 deadletter）；正常结束（score_reached/max_rounds）→ mark_iterated。
+    from aistock_agent.iterate.case_builder import mark_failed, mark_iterated
 
-    mark_iterated(case_id)
+    if stopped_reason == "infra_failures":
+        mark_failed(case_id)
+    else:
+        mark_iterated(case_id)
 
     return {
         "agent_id": agent_id,
@@ -233,6 +271,24 @@ async def run_case(
         "rounds": rounds,
         "stopped_reason": stopped_reason,
     }
+
+
+def _should_stop_no_improvement(
+    *,
+    stalled: int,
+    best_score: float,
+    current_score: float,
+    delta: float | None,
+    max_stalls: int,
+) -> bool:
+    """no_improvement 终止判定（五期）：delta 未配置（None）恒 False（默认禁用）。
+
+    裁决书 D4/N3：评分含 LLM judge 噪声，δ 校准前禁用；配置后 stalled 达阈值
+    且近轮与 best 分差在噪声带（<= delta）内才终止。
+    """
+    if delta is None:
+        return False
+    return stalled >= max_stalls and abs(current_score - best_score) <= delta
 
 
 def _cleanup_stale_experiments(case_id: str) -> None:
@@ -287,6 +343,11 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
     return best
 
 
+def _as_structured(value: object) -> dict[str, object] | None:
+    """回放输出中的 structured 键 → evaluator 入参（非 dict 时返回 None）。"""
+    return value if isinstance(value, dict) else None
+
+
 async def _run_baseline(
     agent_id: str, case_id: str, ground_truth: dict[str, object]
 ) -> dict[str, object]:
@@ -296,11 +357,16 @@ async def _run_baseline(
     # 使测试 patch("aistock_agent.iterate.variant_engine._run_replay_subprocess") 生效。
     from aistock_agent.iterate.variant_engine import (
         _content_hash,
+        _needs_replay_retry,
         _now_iso_date,
         _run_replay_subprocess,
     )
 
     output = await _run_replay_subprocess(agent_id, case_id, "baseline")
+    # 2026-08-13：基线回放偶发失败（LLM 波动）同样重试一次，与变体轮一致。
+    if _needs_replay_retry(output):
+        logger.warning("iterate_baseline_replay_retry_once", agent_id=agent_id, case_id=case_id)
+        output = await _run_replay_subprocess(agent_id, case_id, "baseline")
     if output.get("timed_out") or output.get("subprocess_failed"):
         # G14 修复：基线失败不落盘 r1_baseline.json——若落盘，list_pending_cases
         # 会按 {case_id}_r 前缀判"已迭代"，导致该 case 永久弃置。
@@ -318,12 +384,18 @@ async def _run_baseline(
             "variant": {"type": "baseline", "files": [], "instructions": ""},
             "is_failure": True,
         }
-    score = await evaluate_attribution(str(output.get("final_response", "")), ground_truth)
+    score = await evaluate_attribution(
+        str(output.get("final_response", "")),
+        ground_truth,
+        agent_structured=_as_structured(output.get("structured")),
+    )
     record: dict[str, object] = {
         "case_id": case_id,
         "round": 1,
         "agent_id": agent_id,
         "variant": {"type": "baseline", "files": [], "instructions": ""},
+        # C-5：基线轮 agent 输出全文同样落盘（评分可完全重算）
+        "agent_output": str(output.get("final_response", "")),
         "score": score.total,
         "score_detail": {
             "direction": score.direction,

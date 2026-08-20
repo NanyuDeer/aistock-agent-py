@@ -136,29 +136,58 @@ async def run_event_analysis_pipeline(
             "global_importance_started",
             event_count=len(conduction_outputs),
         )
-        from aistock_agent.services.global_importance_evaluation import (  # noqa: PLC0415
-            persist_global_importance_evaluation,
-        )
-
         # 将当天传导结果转换为 GI 输入格式（当天事件池 + 完整分析内容）
         # _to_gi_events 仅收集 success=True 的事件，即已确认落库事件
         # （P1-2：GI 输入 = 已确认落库事件）。
         today_events = _to_gi_events(conduction_outputs)
-        # persist_global_importance_evaluation 内部完成：评估（quick_think）→ 非空判断
-        # → save_global_importance_report 落库（report_type='global_importance'）。
-        # 使用带落库的入口而非 eval_global_importance_from_events（仅评估不持久化），
-        # 否则 GI 结果只返回不写库，前端无当日 GI 数据。
-        gi_result = await persist_global_importance_evaluation(today_events)
-        logger.info(
-            "global_importance_completed",
-            has_top_bullish=bool(
-                gi_result.get("top_bullish_event") if isinstance(gi_result, dict) else False
-            ),
-            has_top_bearish=bool(
-                gi_result.get("top_bearish_event") if isinstance(gi_result, dict) else False
-            ),
-            persisted=bool(gi_result.get("persisted")) if isinstance(gi_result, dict) else False,
-        )
+        # 盘中纯增量更新（2026-08-14）：开关开启时走 incremental_gi——
+        # 新增事件与当前 max_bullish/max_bearish 竞争，仅必要时 quick_think，
+        # 不重新分析当天全部事件，也不新增收盘全量校准。开关关闭时保持
+        # 原全量 persist_global_importance_evaluation（旧路径，仅测试/手动恢复）。
+        if settings.gi_incremental_enabled:
+            from aistock_agent.services.global_importance_evaluation import (  # noqa: PLC0415
+                incremental_gi,
+            )
+
+            gi_result = await incremental_gi(today_events)
+            logger.info(
+                "global_importance_incremental_completed",
+                has_top_bullish=bool(
+                    gi_result.get("top_bullish_event")
+                    if isinstance(gi_result, dict)
+                    else False
+                ),
+                has_top_bearish=bool(
+                    gi_result.get("top_bearish_event")
+                    if isinstance(gi_result, dict)
+                    else False
+                ),
+                persisted=bool(
+                    gi_result.get("persisted") if isinstance(gi_result, dict) else False
+                ),
+            )
+        else:
+            from aistock_agent.services.global_importance_evaluation import (  # noqa: PLC0415
+                persist_global_importance_evaluation,
+            )
+
+            gi_result = await persist_global_importance_evaluation(today_events)
+            logger.info(
+                "global_importance_completed",
+                has_top_bullish=bool(
+                    gi_result.get("top_bullish_event")
+                    if isinstance(gi_result, dict)
+                    else False
+                ),
+                has_top_bearish=bool(
+                    gi_result.get("top_bearish_event")
+                    if isinstance(gi_result, dict)
+                    else False
+                ),
+                persisted=bool(
+                    gi_result.get("persisted") if isinstance(gi_result, dict) else False
+                ),
+            )
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
         logger.exception(

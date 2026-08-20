@@ -101,6 +101,107 @@ async def test_build_daily_report_filters_experiments_by_date(
 
 
 @pytest.mark.asyncio
+async def test_build_daily_report_excludes_best_summary(
+    iterate_data_dir: object,
+) -> None:
+    """_best.json（补丁固化汇总，无 case_id/created_at）不得混入实验汇总。
+
+    2026-08-14 事故：8-14 报告显示"空案例 r1 baseline 0.75"——best.json
+    无 created_at 被"旧记录恒包含"逻辑带进汇总，而真正的 r1/r2/r3
+    （created_at=8-13）被日期过滤掉。
+    """
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    root = Path(iterate_data_dir) / "experiments"  # type: ignore[arg-type]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "case_20260814_review_今日_best.json").write_text(
+        json.dumps({"score": 0.75, "round": 1, "patch": {}}), encoding="utf-8"
+    )
+    (root / "case_20260814_r1.json").write_text(
+        json.dumps(
+            {
+                "case_id": "case_20260814",
+                "created_at": date.today().isoformat(),
+                "score": 0.5,
+                "round": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    md = await build_daily_report()
+    assert "0.75" not in md  # best 汇总不显示
+    assert "case_20260814" in md
+
+
+def test_format_improvements_shows_patch_summary() -> None:
+    """改进建议展示变体 patch 摘要（old→new），让负责人知道"改了什么"。
+
+    patch 是实验记录顶层字段（run_experiment_round 写入结构：variant 只含
+    type/files/instructions；patch 含 target_symbol/old_snippet/new_snippet）。
+    """
+    from aistock_agent.iterate.reporter import _format_improvements
+
+    experiments = [
+        {
+            "case_id": "case_a",
+            "round": 2,
+            "variant": {
+                "type": "prompt_diff",
+                "files": ["src/aistock_agent/prompts/workers/review.py"],
+                "instructions": "增加外盘传导优先指令",
+            },
+            "patch": {
+                "target_symbol": "REVIEW_PROMPT",
+                "old_snippet": "【调查规则】\n1. primary 是唯一归因对象",
+                "new_snippet": "【调查规则】\n1. primary 是唯一归因对象\n2. 强制列出板块清单",
+            },
+            "score": 0.7,
+        },
+    ]
+    out = _format_improvements(experiments)
+    assert "增加外盘传导优先指令" in out
+    assert "patch:" in out
+    assert "→" in out  # old → new 摘要标记
+    assert "【调查规则】" in out  # patch 内容可见
+
+
+@pytest.mark.asyncio
+async def test_run_daily_report_attaches_experiments(
+    iterate_data_dir: object,
+) -> None:
+    """报告附带当日实验记录 JSON 附件（用户可查看完整轮次/patch 规格）。"""
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    root = Path(iterate_data_dir) / "experiments"  # type: ignore[arg-type]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "case_20260814_r1.json").write_text(
+        json.dumps(
+            {
+                "case_id": "case_20260814",
+                "created_at": date.today().isoformat(),
+                "round": 1,
+                "score": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    from aistock_agent.iterate.reporter import run_daily_report
+
+    with patch(
+        "aistock_agent.iterate.reporter.send_report_via_smtp", return_value=True
+    ) as mock_send:
+        await run_daily_report(date.today())
+    attachments = mock_send.call_args.kwargs.get("attachments") or ()
+    assert len(attachments) == 1  # 当日实验记录附件
+    assert Path(attachments[0]).exists()
+
+
+@pytest.mark.asyncio
 async def test_build_daily_report_empty_store_notes_no_pending_cases(tmp_path: Path) -> None:
     """I4 回归：空切片库时报告注明"无待迭代案例"，不报错。"""
     from aistock_agent.config import settings

@@ -51,7 +51,7 @@ class PredictionResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
