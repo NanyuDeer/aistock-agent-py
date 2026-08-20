@@ -512,11 +512,13 @@ pm2 logs aistock-agent --lines 50
 
 外网 `wss://gupiao-api.yaozhineng.com/api/agent/ws/chat` 需 Caddy WS 转发修复（`flush_interval -1`，§roadmap 5.3）。未通期间：前端 WS→HTTP 非流式降级自动生效（`useChatStream` 3s 超时兜底，无需临时代码）；P10 计费仅 WS 路径落库（WS 修复后启用）；P11 cards 由线 5 前端消费（当前前端不渲染 cards，无损失）。
 
-### Stock Trace Consumer 集成模式（2026-08-01）
+### Stock Trace Consumer 集成模式（2026-08-01，2026-08-15 更新）
 
-- `STOCK_TRACE_CONSUMER_ENABLED=true`（默认）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
+- `STOCK_TRACE_CONSUMER_ENABLED=true`（默认，**2026-08-15 起 config.py 默认值改为 True**）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
 - `STOCK_TRACE_CONSUMER_ENABLED=false`：consumer 不启动，需独立进程运行 `python -m aistock_agent.workers.stock_trace_consumer`
 - 关闭顺序：lifespan 退出时先 `cancel()` consumer task → 等待 CancelledError → 关闭独立 redis 连接 → 再关 RedisPool / HttpClientPool
+- **五层候选归因（2026-08-15）**：归因链路从三层（company/sector/market）扩展为五层（company/sector/market/capital/technical）：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层；`services/insight_validator.py` 适配五层分类校验
+- **primary_phrase 主因短语（2026-08-19）**：`StockTraceResultPayload` 新增必填字段 `primary_phrase`（≤20 字，LLM 生成的简短主因短语，供列表/卡片展示；`attribution_status` 为 insufficient 时给出简短结论如"证据不足"）。`prompts/workers/stock_trace.py` 提示词增加对应输出要求。Node 端持久化为 `stock_trace_results.primary_phrase`，列表接口透传为 `primary_cause`。
 
 ## 关键约束
 

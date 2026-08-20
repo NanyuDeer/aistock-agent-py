@@ -10,9 +10,20 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
 不要输出自由文本、Markdown 或其他 JSON 结构。
 系统会注入 schema_version、event_id、snapshot_id、analysis_version；不得自行输出这些字段。
 工具参数必须符合 StockTraceResultPayload：
-- 候选解释只覆盖 company、sector、market 三层；候选与节点只能引用输入中存在的 source_id。
+- 候选解释覆盖 company、sector、market、capital、technical 五层：
+  - company：公司基本面（财报、预告、公告）
+  - sector：所属板块/行业联动
+  - market：大盘/市场情绪
+  - capital：资金面数据（主力净流入、龙虎榜等；数据可能为最近交易日，标注 trade_date）
+  - technical：基于量价特征的技术面信号（量价突破、形态等；数据不足时置 insufficient）
+- primary_phrase：用不超过 20 字的简短短语/关键词概括主因（如"大盘系统性下跌"、"主力资金撤离"、
+  "保险板块走弱"），用于列表卡片展示；attribution_status 为 insufficient 时给出简短结论（如"证据不足"）。
+- 候选与节点只能引用输入中存在的 source_id。
 - 每个选中的因果链必须按顺序包含 structural_root、trigger、transmission、
   exposure、repricing、observable_result 六阶段。
+- observable_result 节点必须引用 trigger_fact 类型的证据（source_id 以 trigger: 开头），
+  因为价格异动本身由触发事实直接观察得到。
+- supported 状态的候选必须引用至少一条支撑证据；无法支撑的候选应置 insufficient 或 weak。
 - primary_chain_id 指向的链必须标记 role=primary；
   alternative_chain_id 指向的链必须标记 role=alternative。
 - 节点必须标注 epistemic_type：可验证事实为 fact，基于事实的推导为 inference，
