@@ -353,8 +353,8 @@ async def test_multi_goal_hint_dispatched_first(monkeypatch) -> None:
     ev = _quote_evidence_non_today()
     goals = [_subgoal("g1", "validate", "大盘当前表现")]
     expected_hint = (
-        "今天是 A 股非交易日（2026-08-02 周日），暂无当日行情数据。以下为最近交易日（"
-        "2026-07-31 周五）数据。你说的是否是这个交易日（2026-07-31）的行情？\n\n"
+        "今天是 A 股非交易日（2026-08-02 周日），当日无行情数据。以下为最近交易日（"
+        "2026-07-31 周五）收盘数据（非今日实时）。\n\n"
     )
     monkeypatch.setattr(
         synth_answer,
@@ -524,8 +524,8 @@ async def test_hint_single_read_and_once_in_final(monkeypatch) -> None:
 
     assert len(status_calls) == 1  # D5：时段状态只取一次（流式前缀与 DONE 文本共用）
     expected_hint = (
-        "今天是 A 股非交易日（2026-08-02 周日），暂无当日行情数据。以下为最近交易日（"
-        "2026-07-31 周五）数据。你说的是否是这个交易日（2026-07-31）的行情？\n\n"
+        "今天是 A 股非交易日（2026-08-02 周日），当日无行情数据。以下为最近交易日（"
+        "2026-07-31 周五）收盘数据（非今日实时）。\n\n"
     )
     deltas = _delta_contents(events)
     assert deltas[0] == expected_hint

@@ -121,7 +121,7 @@ START → supervisor(quick_think, 意图路由)
 - degraded 为整体标志：任一数据源缺失即 True（global 无 last-close 回退源，失败仍 degraded）
 - A 股 last-close 成功但 global 失败 → degraded=True，但 facts 仍含 A 股真实数据（source 标注 trade_date）；A 股部分可独立成功，不被 global 拖累
 - **facts 日期标注（P3-fix-3，2026-08-03）**：facts 始终带交易日——首行锚点 `数据日期：MM-DD`，指数行 `名称(MM-DD): 收盘 (涨跌幅)`，LLM 无法把最近交易日误标"今日"。
-- **非交易时段引导提示（P3-fix-3）**：`synth_answer._append_non_trading_time_hint` 触发条件由"仅 degraded 行情"放宽为"行情类证据存在且数据非今日"（market_snapshot 看 `raw.used_last_close` / `raw.a_share_success`，其他行情 skill 看 `degraded`）；文案含"你说的是否是这个交易日的数据？"引导确认。数据确为今日（a_share_success=True 且无 used_last_close）时不触发。
+- **非交易时段引导提示（P3-fix-3 + 路线 D 文案诚实化 2026-08-20）**：`synth_answer._append_non_trading_time_hint` 触发条件由"仅 degraded 行情"放宽为"行情类证据存在且数据非今日"（market_snapshot 看 `raw.used_last_close` / `raw.a_share_success`，其他行情 skill 看 `degraded`）；文案统一为自洽陈述并显式标注"非今日实时"（如"当前为 A 股午间休市（13:00 复盘），暂无今日盘中行情，以下为最近交易日（{date}）收盘数据（非今日实时）。"），**去掉反问句**「你说的是否是这个交易日的数据？」与误导措辞「综合回答生成受限」，不再对用户制造"数据当下/昨日"矛盾观感。数据确为今日（a_share_success=True 且无 used_last_close）时不触发。
 
 ### qa_router 增强：2026-08-01
 - 指数名（沪指/深成指/创业板指/科创50/沪深300/恒生等）→ market_snapshot（a_share + index_name）

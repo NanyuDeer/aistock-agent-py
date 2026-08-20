@@ -999,7 +999,9 @@ def test_non_trading_day_recent_close_triggers_guidance() -> None:
         out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
 
     assert out.startswith("今天是 A 股非交易日")
-    assert "你说的是否是这个交易日（2026-07-31）的行情？" in out
+    # 路线 D：数据身份诚实化——不再用反问句，显式标注"非今日实时"
+    assert "你说的是否" not in out
+    assert "收盘数据（非今日实时）" in out
 
 
 def test_pre_open_recent_close_triggers_guidance() -> None:
@@ -1034,7 +1036,9 @@ def test_pre_open_recent_close_triggers_guidance() -> None:
         out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
 
     assert "今日尚未开盘" in out
-    assert "你说的是否是这个交易日的数据？" in out
+    # 路线 D：去反问句，显式标注"非今日实时"
+    assert "你说的是否" not in out
+    assert "收盘数据（非今日实时）" in out
 
 
 def test_closed_today_data_no_hint() -> None:
@@ -1121,7 +1125,9 @@ def test_closed_stock_snapshot_degraded_still_triggers() -> None:
     ):
         out = _append_non_trading_time_hint("## 核心结论\n正文", [evidence])
 
-    assert "你说的是否是这个交易日的数据？" in out
+    # 路线 D：closed 去反问句（当日收盘数据发布中，不标"非今日实时"）
+    assert "你说的是否" not in out
+    assert "收盘数据发布中" in out
 
 
 # ─── P4（D34/D35）：多子目标分节回答 ───
