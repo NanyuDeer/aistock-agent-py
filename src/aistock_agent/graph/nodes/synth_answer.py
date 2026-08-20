@@ -517,24 +517,24 @@ def _non_trading_hint_prefix(
     if status == "non_trading_day":
         return (
             f"今天是 A 股非交易日（{today.isoformat()} "
-            f"{_CN_WEEKDAYS[today.weekday()]}），暂无当日行情数据。以下为最近交易日（"
-            f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）数据。你说的是否是"
-            f"这个交易日（{last.isoformat()}）的行情？\n\n"
+            f"{_CN_WEEKDAYS[today.weekday()]}），当日无行情数据。以下为最近交易日（"
+            f"{last.isoformat()} {_CN_WEEKDAYS[last.weekday()]}）收盘数据（非今日实时）。"
+            f"\n\n"
         )
     if status == "pre_open":
         return (
-            f"今日尚未开盘（开盘时间 09:30），以下为最近交易日（{last.isoformat()}）"
-            f"数据。你说的是否是这个交易日的数据？\n\n"
+            f"今日尚未开盘（09:30 开盘），暂无今日盘中行情，以下为最近交易日"
+            f"（{last.isoformat()}）收盘数据（非今日实时）。\n\n"
         )
     if status == "lunch_break":
         return (
-            f"当前为 A 股午间休市（13:00 复盘），以下为最近交易日（{last.isoformat()}）"
-            f"数据。你说的是否是这个交易日的数据？\n\n"
+            f"当前为 A 股午间休市（13:00 复盘），暂无今日盘中行情，以下为最近交易日"
+            f"（{last.isoformat()}）收盘数据（非今日实时）。\n\n"
         )
     # closed：已收盘但当日数据尚未发布（空窗期回退）
     return (
-        f"当前为 A 股今日已收盘，收盘数据发布中，以下为最近交易日（{last.isoformat()}）"
-        f"数据。你说的是否是这个交易日的数据？\n\n"
+        f"当前为 A 股今日已收盘，当日收盘数据发布中，以下为最近交易日"
+        f"（{last.isoformat()}）收盘数据。\n\n"
     )
 
 
