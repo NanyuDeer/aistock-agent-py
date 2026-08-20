@@ -59,6 +59,7 @@ def test_validate_selected_chain_shape_all_five_layers_passes():
         contradictions=[],
         unresolved_questions=[],
         suggested_actions=["observe"],
+        primary_phrase="大盘向好",
     )
 
     # 不抛异常即通过验证
@@ -93,6 +94,7 @@ def test_validate_selected_chain_shape_missing_layer_raises():
             contradictions=[],
             unresolved_questions=[],
             suggested_actions=["observe"],
+            primary_phrase="证据不足",
         )
         assert False, "Expected ValueError for missing required layer"
     except ValueError as e:

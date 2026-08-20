@@ -127,6 +127,9 @@ class StockTraceResultPayload(BaseModel):
     contradictions: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
     suggested_actions: list[Literal["verify_announcement", "observe", "read_evidence"]]
+    # 简短主因短语（关键词/概括性短语，≤20 字），供列表/卡片展示；
+    # 无确立主因（insufficient）时给出简短结论（如"证据不足"）。
+    primary_phrase: str = Field(min_length=1, max_length=20)
 
 
 class StockTraceResult(StockTraceResultPayload):

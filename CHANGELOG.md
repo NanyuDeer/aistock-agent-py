@@ -2,6 +2,25 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-20 — stock_trace 归因新增 primary_phrase 短语输出
+
+**开发者**: Aria
+
+### 改进
+- `src/aistock_agent/schemas/stock_trace.py`：`StockTraceResultPayload` 新增必填 `primary_phrase`（≤20 字归因短语，供列表/卡片展示；insufficient 时给简短结论如"证据不足"）
+- `src/aistock_agent/prompts/workers/stock_trace.py`：提示词新增 primary_phrase 输出要求（关键词概括主因短语）
+
+### 测试
+- `tests/test_stock_trace_validator.py`：用例补 `primary_phrase` 参数
+
+### 文档
+- `AGENTS.md`：更新归因输出字段说明
+
+### 验证
+- `pytest tests/test_stock_trace_validator.py` 通过
+
+---
+
 ## [junliang] 2026-08-15 — 自选股价格异动归因：stock_trace_consumer 默认启用 + 五层候选归因
 
 **开发者**: Aria

@@ -481,6 +481,7 @@ pm2 logs aistock-agent --lines 50
 - `STOCK_TRACE_CONSUMER_ENABLED=false`：consumer 不启动，需独立进程运行 `python -m aistock_agent.workers.stock_trace_consumer`
 - 关闭顺序：lifespan 退出时先 `cancel()` consumer task → 等待 CancelledError → 关闭独立 redis 连接 → 再关 RedisPool / HttpClientPool
 - **五层候选归因（2026-08-15）**：归因链路从三层（company/sector/market）扩展为五层（company/sector/market/capital/technical）：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层；`services/insight_validator.py` 适配五层分类校验
+- **primary_phrase 主因短语（2026-08-19）**：`StockTraceResultPayload` 新增必填字段 `primary_phrase`（≤20 字，LLM 生成的简短主因短语，供列表/卡片展示；`attribution_status` 为 insufficient 时给出简短结论如"证据不足"）。`prompts/workers/stock_trace.py` 提示词增加对应输出要求。Node 端持久化为 `stock_trace_results.primary_phrase`，列表接口透传为 `primary_cause`。
 
 ## 关键约束
 
