@@ -1350,6 +1350,53 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     return {"code": 404, "message": "报告未生成", "data": None}
 
 
+# ── 观测指标 ──────────────────────────────────────────────────────
+
+
+async def get_stock_trace_observability() -> dict[str, object]:
+    """组装 stock_trace 观测快照：进程内计数器 + Redis 实时 gauge。
+
+    计数器来自 MetricsCollector（stock_trace 链路，Task 2 扩展）；gauge 实时读
+    Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，不阻塞 /metrics。
+    """
+    from aistock_agent.observability.metrics import get_metrics
+    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
+
+    snapshot = get_metrics()
+    stock_trace = dict(snapshot.get("stock_trace", {}))
+    gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
+    try:
+        import redis.asyncio as aioredis
+
+        redis_client = aioredis.from_url(settings.stock_trace_redis_url)
+        try:
+            gauges["dlq_length"] = await redis_client.xlen(DLQ_STREAM)
+            groups = await redis_client.xinfo_groups(STREAM)
+            if groups:
+                gauges["stream_lag"] = groups[0].get("lag", 0)
+            pending = await redis_client.xpending(
+                STREAM, settings.stock_trace_consumer_group
+            )
+            if pending:
+                # 未指定 count 时 xpending 返回摘要，首元素即 pending 计数
+                gauges["pending_unacked"] = pending[0]
+        finally:
+            await redis_client.aclose()
+    except Exception:
+        logger = structlog.get_logger()
+        logger.warning("metrics_redis_read_failed")
+    return {"stock_trace": {**stock_trace, **gauges}}
+
+
+@health_router.get("/metrics")
+async def metrics() -> dict[str, object]:
+    """观测指标（Prometheus 语义的 JSON 快照）。含 stock_trace 计数与实时 gauge。
+
+    注意：挂在 health_router 下，/metrics 在根路径（main.py 挂载），不带 /api/agent 前缀。
+    """
+    return await get_stock_trace_observability()
+
+
 # ── 健康检查 ──────────────────────────────────────────────────────
 
 
@@ -1584,6 +1631,7 @@ async def replay_stock_trace_dlq(
     将直接跳过。error_code / job_id 可选，用于精确筛选。
     """
     import redis.asyncio as _aioredis
+
     from aistock_agent.workers.stock_trace_consumer import replay_dlq
 
     client = _aioredis.from_url(  # type: ignore[no-untyped-call]

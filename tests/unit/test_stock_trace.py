@@ -533,3 +533,24 @@ async def test_replay_dlq_rejects_non_replayable_error_code() -> None:
     assert replayed == 0
     assert len(client.dlq) == 1
     assert client.main == []
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_returns_stock_trace_gauges() -> None:
+    """/metrics 观测：stock_trace 计数器 + Redis 实时 gauge（连接失败降级为 0 不阻塞）。"""
+    from aistock_agent.api.routes import get_stock_trace_observability
+    from aistock_agent.observability.metrics import get_metrics_collector
+
+    collector = get_metrics_collector()
+    collector.reset()
+    collector.record_stock_trace_snapshot_not_ready()
+    collector.record_stock_trace_validation_failed("StockTraceValidationError")
+    collector.record_stock_trace_dlq_total("SNAPSHOT_TIMEOUT")
+
+    snap = await get_stock_trace_observability()
+    stock_trace = snap["stock_trace"]
+    assert stock_trace["snapshot_not_ready_total"] == 1
+    assert stock_trace["validation_failed_total"]["StockTraceValidationError"] == 1
+    assert stock_trace["dlq_total"]["SNAPSHOT_TIMEOUT"] == 1
+    # Redis gauge 字段存在（测试环境连接失败时降级为 0）
+    assert set(stock_trace) >= {"stream_lag", "dlq_length", "pending_unacked"}
