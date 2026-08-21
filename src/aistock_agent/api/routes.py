@@ -1580,7 +1580,7 @@ async def replay_stock_trace_dlq(
 ) -> dict[str, object]:
     """把 DLQ 中可重投的死信重新入队回 stock-trace.jobs 主流。
 
-    结构t性错误码（INVALID_JOB_MESSAGE 等）不在 REPLAYABLE_ERROR_CODES 白名单，
+    结构性错误码（INVALID_JOB_MESSAGE 等）不在 REPLAYABLE_ERROR_CODES 白名单，
     将直接跳过。error_code / job_id 可选，用于精确筛选。
     """
     import redis.asyncio as _aioredis

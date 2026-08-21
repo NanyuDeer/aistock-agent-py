@@ -497,7 +497,6 @@ class FakeRedisForDlq:
 
 @pytest.mark.asyncio
 async def test_replay_dlq_moves_messages_back_to_main_stream() -> None:
-    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM  # noqa: F401
     from aistock_agent.workers.stock_trace_consumer import replay_dlq
 
     client = FakeRedisForDlq()
@@ -521,7 +520,6 @@ async def test_replay_dlq_moves_messages_back_to_main_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_replay_dlq_rejects_non_replayable_error_code() -> None:
-    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM  # noqa: F401
     from aistock_agent.workers.stock_trace_consumer import replay_dlq
 
     client = FakeRedisForDlq()
