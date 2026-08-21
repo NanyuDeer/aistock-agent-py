@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     ] = "function_calling"
     # SNAPSHOT_NOT_READY 空转兜底：首次命中起超过该秒数仍未就绪 → SNAPSHOT_TIMEOUT 死信
     stock_trace_snapshot_not_ready_timeout_seconds: int = 600
+    # DLQ 巡检：每隔 N 秒检查一次；DLQ 长度>0 持续超过该秒数触发告警
+    stock_trace_dlq_inspect_interval_seconds: int = 60
+    stock_trace_dlq_alert_after_seconds: int = 900
 
     # ===== 自选股洞察（watchlist insight）=====
     # 独立 Redis db，与 stock_trace db=2 隔离

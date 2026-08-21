@@ -20,7 +20,11 @@ from aistock_agent.services.stock_trace_validator import (
     StockTraceValidationError,
     validate_stock_trace_result,
 )
-from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
+from aistock_agent.workers.stock_trace_consumer import (
+    DLQ_STREAM,
+    STREAM,
+    StockTraceConsumer,
+)
 
 NOW = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
 
@@ -453,3 +457,81 @@ def test_trigger_response_supports_completed_and_degraded() -> None:
     )
     assert completed.report_id == 42
     assert degraded.degraded_reason == "LLM temporarily unavailable"
+
+
+class FakeRedisForDlq:
+    """隔离的 DLQ 重投测试替身：dlq/main 两个独立流，字段编码为 bytes 以配合 _fields。"""
+
+    def __init__(self) -> None:
+        self.dlq: list[tuple[str, dict[bytes, bytes]]] = []
+        self.main: list[tuple[str, dict[bytes, bytes]]] = []
+
+    async def xrange(
+        self, name: str, min: str, max: str, count: int = 50
+    ) -> list[tuple[str, dict[bytes, bytes]]]:
+        del name, min, max
+        cnt = count if count >= 1 else 1
+        return list(self.dlq[:cnt])
+
+    async def xadd(self, stream: str, payload: dict[object, object]) -> str:
+        encoded = {
+            (k if isinstance(k, bytes) else str(k).encode()): (
+                v if isinstance(v, bytes) else str(v).encode()
+            )
+            for k, v in payload.items()
+        }
+        msg_id = f"main-{len(self.main)}"
+        if stream == STREAM:
+            self.main.append((msg_id, encoded))
+        else:
+            self.dlq.append((msg_id, encoded))
+        return msg_id
+
+    async def xdel(self, stream: str, message_id: str) -> int:
+        if stream != DLQ_STREAM:
+            return 0
+        before = len(self.dlq)
+        self.dlq = [m for m in self.dlq if m[0] != message_id]
+        return before - len(self.dlq)
+
+
+@pytest.mark.asyncio
+async def test_replay_dlq_moves_messages_back_to_main_stream() -> None:
+    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM  # noqa: F401
+    from aistock_agent.workers.stock_trace_consumer import replay_dlq
+
+    client = FakeRedisForDlq()
+    client.dlq = [
+        (
+            "dlq-1",
+            {b"job_id": b"job-1", b"event_id": b"evt-1", b"error_code": b"SNAPSHOT_TIMEOUT"},
+        ),
+        (
+            "dlq-2",
+            {b"job_id": b"job-2", b"event_id": b"evt-2", b"error_code": b"INVALID_JOB_MESSAGE"},
+        ),
+    ]
+    replayed = await replay_dlq(client, {"error_code": "SNAPSHOT_TIMEOUT"}, limit=10)  # type: ignore[arg-type]
+    assert replayed == 1
+    assert client.main[0][1][b"job_id"] == b"job-1"
+    assert len(client.dlq) == 1
+    assert client.dlq[0][0] == "dlq-2"
+    assert b"error_code" not in client.main[0][1]
+
+
+@pytest.mark.asyncio
+async def test_replay_dlq_rejects_non_replayable_error_code() -> None:
+    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM  # noqa: F401
+    from aistock_agent.workers.stock_trace_consumer import replay_dlq
+
+    client = FakeRedisForDlq()
+    client.dlq = [
+        (
+            "dlq-1",
+            {b"job_id": b"job-1", b"event_id": b"evt-1", b"error_code": b"INVALID_JOB_MESSAGE"},
+        ),
+    ]
+    replayed = await replay_dlq(client, None, limit=10)  # type: ignore[arg-type]
+    assert replayed == 0
+    assert len(client.dlq) == 1
+    assert client.main == []

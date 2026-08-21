@@ -1571,6 +1571,37 @@ async def trigger_evening_chain(
         raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
 
 
+@router.post("/admin/stock-trace/dlq/replay")
+async def replay_stock_trace_dlq(
+    _: None = Depends(verify_internal_token),
+    error_code: str = "",
+    job_id: str = "",
+    limit: int = 50,
+) -> dict[str, object]:
+    """把 DLQ 中可重投的死信重新入队回 stock-trace.jobs 主流。
+
+    结构t性错误码（INVALID_JOB_MESSAGE 等）不在 REPLAYABLE_ERROR_CODES 白名单，
+    将直接跳过。error_code / job_id 可选，用于精确筛选。
+    """
+    import redis.asyncio as _aioredis
+    from aistock_agent.workers.stock_trace_consumer import replay_dlq
+
+    client = _aioredis.from_url(  # type: ignore[no-untyped-call]
+        settings.stock_trace_redis_url, max_connections=2
+    )
+    filter_criteria: dict[str, str] = {}
+    if error_code:
+        filter_criteria["error_code"] = error_code
+    if job_id:
+        filter_criteria["job_id"] = job_id
+    try:
+        limit = max(1, min(limit, 200))
+        replayed = await replay_dlq(client, filter_criteria, limit)
+    finally:
+        await client.aclose()
+    return {"replayed": replayed}
+
+
 # ── 大盘溯源后接预测（独立触发，PR-A/T5；T6 regenerate 代理的转发目标） ──
 
 
