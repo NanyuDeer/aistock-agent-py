@@ -2,6 +2,7 @@
   "apps": [
     {
       "name": "aistock-agent",
+      "_comment": "QUICK_SNAPSHOT_ENABLED=true：生产必须事件驱动（SPEC 硬约束 1），否则默认配置（false）下自动预测断链、只剩手动兜底",
       "script": "./.venv/bin/python",
       "args": "-m uvicorn aistock_agent.main:app --host 127.0.0.1 --port 8080",
       "cwd": "/home/aistock/aistock-agent-py",
@@ -16,8 +17,10 @@
         "PYTHONPATH": "src",
         "APP_ENV": "production",
         "TZ": "Asia/Shanghai",
+        "INSIGHT_REDIS_URL": "",
         "INSIGHT_CONSUMER_ENABLED": "true",
-        "STOCK_TRACE_CONSUMER_ENABLED": "false"
+        "STOCK_TRACE_CONSUMER_ENABLED": "false",
+        "QUICK_SNAPSHOT_ENABLED": "true"
       },
       "error_file": "/home/aistock/logs/aistock-agent-error.log",
       "out_file": "/home/aistock/logs/aistock-agent-out.log",

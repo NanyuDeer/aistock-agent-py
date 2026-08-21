@@ -59,6 +59,8 @@ data/audio/
 # Superpowers 计划/规格/审查文档（2026-08-02 决策：代码仓库只留代码，计划文档不跟踪）
 docs/superpowers/
 docs/outputs/
+# SPEC 设计文档（2026-08-14 决策：SPEC 不提交不推送，仅本地维护）
+docs/*-SPEC.md
 docs/2026-08-01-chat-agent-architecture-discussion.md
 docs/2026-08-01-chat-agent-subagents-design.md
 
@@ -72,3 +74,6 @@ data/cases/
 data/ground_truths/
 data/experiments/
 data/reports/
+
+# 人工校准数据（标注模板/回填/生成报告，仅存本地人工维护）
+data/calibration/

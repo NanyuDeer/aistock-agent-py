@@ -7,7 +7,7 @@ httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 import json
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
@@ -478,9 +478,74 @@ class NodeApiClient:
             )
         return result
 
-    async def list_pending_predictions(self) -> list[dict[str, object]]:
-        """读取全部 pending 预测记录（到期验证扫描用）。"""
-        return await self.get_list("/internal/predictions?status=pending") or []
+    async def list_pending_predictions(
+        self, limit: int = 200, before_id: int | None = None
+    ) -> list[dict[str, object]]:
+        """读取 pending 预测记录（游标分页，H8：防全量扫描）。
+
+        before_id：只取 id < before_id 的记录（按 id 倒序）；None 取最新一批。"""
+        path = f"/internal/predictions?status=pending&limit={limit}"
+        if before_id is not None:
+            path += f"&before_id={before_id}"
+        return await self.get_list(path) or []
+
+    async def list_verified_predictions(self, limit: int = 500) -> list[dict[str, object]]:
+        """读取已验证预测记录（统计出口 D3，GET /internal/predictions?status=verified）。"""
+        return await self.get_list(f"/internal/predictions?status=verified&limit={limit}") or []
+
+    async def get_index_kline(
+        self, code: str, days: int = 130,
+        start_date: str | None = None, end_date: str | None = None,
+    ) -> list[dict[str, object]] | None:
+        """指数日 K（GET /internal/index/:code/kline）。
+        可选区间参数：start_date/end_date 存在时按区间拉取。
+
+        返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
+        或 None（接口失败/无数据）。"""
+        path = f"/internal/index/{code}/kline?days={days}"
+        if start_date is not None:
+            path += f"&start_date={start_date}"
+        if end_date is not None:
+            path += f"&end_date={end_date}"
+        result = await self.get(path)
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
+        return None
+
+    async def get_ths_index_map(self) -> list[dict[str, object]] | None:
+        """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
+        result = await self.get("/internal/ths/index-map")
+        if isinstance(result, dict) and isinstance(result.get("ts_codes"), list):
+            return result["ts_codes"]
+        return None
+
+    async def resolve_ths_name(self, name: str) -> dict[str, object] | None:
+        """板块名三级匹配（GET /internal/ths/resolve?name=）。未命中/失败返回 None。"""
+        from urllib.parse import quote
+        result = await self.get(f"/internal/ths/resolve?name={quote(name)}")
+        if isinstance(result, dict):
+            return result.get("matched") or None
+        return None
+
+    async def get_ths_daily_range(
+        self, code: str, start: str, end: str,
+    ) -> list[dict[str, object]] | None:
+        """板块区间日 K（GET /internal/ths/{code}/daily?start&end）。
+        返回升序 [{trade_date, pct_chg}]。失败/异常返回 None。"""
+        result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
+        return None
+
+    async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
+        """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
+
+        供 Python 端"已验证拒覆盖"防御查询（PR-A/T5）：app-api GET
+        /internal/predictions 支持 source_id 过滤后，返回该 source_id 下
+        的全部记录行；失败/无记录返回空列表（``get_list`` 已吞异常）。
+        source_id 形如 ``review:2026-08-14``，冒号为 URL query 安全字符，无需编码。
+        """
+        return await self.get_list(f"/internal/predictions?source_id={source_id}") or []
 
     async def update_prediction_verification(
         self,
@@ -642,6 +707,37 @@ class NodeApiClient:
             logger.error("review_report_read_invalid_data", url=url)
             return ReviewReportReadResult("unavailable")
         return ReviewReportReadResult("found", report)
+
+    async def get_industry_graph_full(self) -> dict[str, object] | None:
+        """读取 IndustryKG 全图快照（B-5，裁决书 B 论题：GET /internal/industry/graph）。
+
+        返回 Node payload（含 chains/graph_update_time 等）或 None（端点未就绪/
+        HTTP 失败/结构非法）。三时间戳与 posterior_exposure 标记由调用方补充
+        （build_iterate_cases 采集处注入 event_time 与采集时刻）。
+        """
+        url = f"{self._base_url}/internal/industry/graph"
+        try:
+            client = await HttpClientPool.get_client()
+            response = await client.get(
+                url, headers={"X-Internal-Token": self._token}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("industry_graph_full_request_error", error=str(exc))
+            return None
+        if response.status_code != 200:
+            logger.warning(
+                "industry_graph_full_http_error", status=response.status_code
+            )
+            return None
+        try:
+            payload = response.json()
+        except Exception:  # noqa: BLE001
+            logger.warning("industry_graph_full_invalid_json")
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            logger.warning("industry_graph_full_invalid_payload")
+            return None
+        return cast("dict[str, object]", payload["data"])
 
     async def get_industry_chain(self, industry_name: str) -> IndustryChainReadResult:
         """读取 IndustryKG 行业链，并保留 HTTP 与响应结构的失败分类。"""

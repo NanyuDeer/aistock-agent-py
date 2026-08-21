@@ -54,16 +54,18 @@ async def _mock_aget_state(config=None):
 
 def test_chat_message_omits_trace_field(client, monkeypatch):
     """/chat/message 恒走新子图，响应不含该字段。"""
-    async def mock_ainvoke(state, config=None):
-        return {
-            "final_response": "测试回复",
-            "insight": None,
-            "trace": None,
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "测试回复",
+                "insight": None,
+                "trace": None,
+            }
         }
 
     with patch("aistock_agent.api.routes.compile_chat_graph") as mock_compile:
         mock_graph = mock_compile.return_value
-        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.astream = mock_astream
         mock_graph.aget_state = _mock_aget_state
 
         response = client.post(
@@ -80,16 +82,18 @@ def test_chat_message_omits_trace_field(client, monkeypatch):
 
 def test_chat_message_clarification(client):
     """/chat/message 澄清路径返回澄清文本，响应不含该字段。"""
-    async def mock_ainvoke(state, config=None):
-        return {
-            "final_response": "请提供 6 位股票代码后重试。",
-            "insight": None,
-            "trace": None,
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "请提供 6 位股票代码后重试。",
+                "insight": None,
+                "trace": None,
+            }
         }
 
     with patch("aistock_agent.api.routes.compile_chat_graph") as mock_compile:
         mock_graph = mock_compile.return_value
-        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.astream = mock_astream
         mock_graph.aget_state = _mock_aget_state
 
         response = client.post(
@@ -258,12 +262,12 @@ def test_chat_message_force_deep_propagates_to_state(client, monkeypatch):
         lambda message: captured,
     )
 
-    async def fake_ainvoke(state, config=None):
-        return {"final_response": "ok", "insight": None, "trace": None}
+    async def fake_astream(state, config=None, stream_mode="updates"):
+        yield {"synth_answer": {"final_response": "ok", "insight": None, "trace": None}}
 
     monkeypatch.setattr(
         "aistock_agent.api.routes._select_graph",
-        lambda: types.SimpleNamespace(ainvoke=fake_ainvoke),
+        lambda: types.SimpleNamespace(astream=fake_astream),
     )
     resp = client.post(
         "/api/agent/chat/message",
@@ -282,12 +286,12 @@ def test_chat_message_force_deep_default_false(client, monkeypatch):
         lambda message: captured,
     )
 
-    async def fake_ainvoke(state, config=None):
-        return {"final_response": "ok", "insight": None, "trace": None}
+    async def fake_astream(state, config=None, stream_mode="updates"):
+        yield {"synth_answer": {"final_response": "ok", "insight": None, "trace": None}}
 
     monkeypatch.setattr(
         "aistock_agent.api.routes._select_graph",
-        lambda: types.SimpleNamespace(ainvoke=fake_ainvoke),
+        lambda: types.SimpleNamespace(astream=fake_astream),
     )
     resp = client.post(
         "/api/agent/chat/message",

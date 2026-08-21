@@ -73,3 +73,82 @@ class HttpClientPool:
             await cls._client.aclose()
             cls._client = None
         logger.info("HttpClientPool closed")
+
+
+class LlmHttpClient:
+    """LLM（DeepSeek/ChatOpenAI）专用 httpx.AsyncClient 单例。
+
+    与 HttpClientPool（Node /internal 调用池）职责分离：ChatOpenAI 底层为每个
+    实例新建 ``httpx.AsyncClient`` 且无连接回收，导致向 DeepSeek
+    （api.deepseek.com）的 keep-alive 连接在 peer 关闭后滞留成 CLOSE-WAIT，
+    socket/FD 无限堆积，最终阻塞 LLM 调用（现场观测 53+ 条 CLOSE-WAIT）。
+
+    ``limits`` 显式限制连接数 + keep-alive 数，配合 app 进程单例复用，
+    消除连接泄漏。由 main.lifespan 管理生命周期。
+    """
+
+    _client: httpx.AsyncClient | None = None
+    _timeout: float = 600.0
+    _max_connections: int = 20
+    _max_keepalive: int = 10
+
+    @classmethod
+    async def init(
+        cls,
+        *,
+        timeout: float | None = None,
+        max_connections: int | None = None,
+        max_keepalive_connections: int | None = None,
+    ) -> None:
+        """初始化 LLM AsyncClient 单例（幂等）。
+
+        Args:
+            timeout: 请求超时秒数，默认 600（对齐 llm._LLM_REQUEST_TIMEOUT_SECONDS）。
+            max_connections: 连接池最大连接数，默认 20。
+            max_keepalive_connections: 长期 keep-alive 连接上限，默认 10。
+                显式设小防 CLOSE-WAIT 无限堆积。
+        """
+        if cls._client is not None:
+            logger.warning("llm_http_client_already_initialized")
+            return
+        if timeout is not None:
+            cls._timeout = timeout
+        if max_connections is not None:
+            cls._max_connections = max_connections
+        if max_keepalive_connections is not None:
+            cls._max_keepalive = max_keepalive_connections
+        cls._client = httpx.AsyncClient(
+            timeout=cls._timeout,
+            limits=httpx.Limits(
+                max_connections=cls._max_connections,
+                max_keepalive_connections=cls._max_keepalive,
+            ),
+        )
+        logger.info(
+            "llm_http_client_initialized",
+            timeout=cls._timeout,
+            max_connections=cls._max_connections,
+            max_keepalive_connections=cls._max_keepalive,
+        )
+
+    @classmethod
+    def client(cls) -> httpx.AsyncClient:
+        """返回 LLM AsyncClient 单例；未 init 时惰性创建（幂等测试友好）。"""
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(
+                timeout=cls._timeout,
+                limits=httpx.Limits(
+                    max_connections=cls._max_connections,
+                    max_keepalive_connections=cls._max_keepalive,
+                ),
+            )
+            logger.info("llm_http_client_lazy_created")
+        return cls._client
+
+    @classmethod
+    async def close(cls) -> None:
+        """关闭 LLM AsyncClient，释放资源（幂等）。"""
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+            logger.info("llm_http_client_closed")

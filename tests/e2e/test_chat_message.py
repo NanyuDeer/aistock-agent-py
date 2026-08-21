@@ -21,8 +21,8 @@ _VALID_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
 
 def _mock_chat_graph(final_response: str, token_usage: dict | None = None) -> MagicMock:
-    """mock compile_chat_graph 返回的 graph（固定 final_response，可选 token_usage）。"""
-    async def mock_ainvoke(state, config=None):
+    """mock compile_chat_graph 返回的 graph（astream updates 产出 synth_answer 末节点输出）。"""
+    async def mock_astream(state, config=None, stream_mode="updates"):
         result: dict = {
             "final_response": final_response,
             "insight": None,
@@ -30,10 +30,10 @@ def _mock_chat_graph(final_response: str, token_usage: dict | None = None) -> Ma
         }
         if token_usage is not None:
             result["token_usage"] = token_usage
-        return result
+        yield {"synth_answer": result}
 
     mock_graph = MagicMock()
-    mock_graph.ainvoke = mock_ainvoke
+    mock_graph.astream = mock_astream
     return mock_graph
 
 
@@ -113,20 +113,22 @@ async def test_chat_message_confirm_falls_back_to_clarification():
     qa_router 仍可能触发 confirm（传输无关），此处必须降级为澄清而非道歉话术，
     否则同消息在 HTTP 路径从"有用澄清"退化为"无法处理"（严格劣化回归）。
     """
-    async def mock_ainvoke(state, config=None):
-        return {
-            "final_response": "",
-            "confirm": {
-                "request_id": "r1",
-                "question": "您想了解哪只股票？",
-                "options": [{"key": "600519", "label": "贵州茅台"}],
-            },
-            "insight": None,
-            "trace": None,
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "",
+                "confirm": {
+                    "request_id": "r1",
+                    "question": "您想了解哪只股票？",
+                    "options": [{"key": "600519", "label": "贵州茅台"}],
+                },
+                "insight": None,
+                "trace": None,
+            }
         }
 
     mock_graph = MagicMock()
-    mock_graph.ainvoke = mock_ainvoke
+    mock_graph.astream = mock_astream
     with patch(
         "aistock_agent.api.routes.compile_chat_graph",
         return_value=mock_graph,
@@ -162,3 +164,127 @@ async def test_chat_message_empty_message_returns_422():
                 headers=_VALID_HEADERS,
             )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_chat_message_deep_round_passes_through_last_deep_report_and_cards():
+    """G1：deep 轮末节点 synth_answer 输出含 last_deep_report/cards → HTTP 响应透传（跨轮不陈旧）。"""
+
+    class _MockCard:
+        """模拟 pydantic ChatCard 的 model_dump 行为。"""
+        def __init__(self, data: dict) -> None:
+            self._data = data
+        def model_dump(self) -> dict:
+            return self._data
+
+    deep_report = {"report_id": "rep-1", "symbol": "600519", "report_date": "2026-08-17"}
+    cards = [_MockCard({"type": "stock_card", "symbol": "600519", "title": "贵州茅台"})]
+    expected_cards = [{"type": "stock_card", "symbol": "600519", "title": "贵州茅台"}]
+
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "深度分析完成",
+                "insight": None,
+                "trace": None,
+                "last_deep_report": deep_report,
+                "cards": cards,
+            }
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream = mock_astream
+    with patch(
+        "aistock_agent.api.routes.compile_chat_graph",
+        return_value=mock_graph,
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                _CHAT_URL,
+                json={"message": "深度分析一下贵州茅台"},
+                headers=_VALID_HEADERS,
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"] == "深度分析完成"
+    assert body["last_deep_report"] == deep_report
+    assert body["cards"] == expected_cards
+
+
+@pytest.mark.asyncio
+async def test_chat_message_non_deep_round_last_deep_report_is_none():
+    """G1：非 deep 轮末节点 synth_answer 无 last_deep_report/cards → 响应置 None（防跨轮陈旧值）。"""
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "普通回答",
+                "insight": None,
+                "trace": None,
+            }
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream = mock_astream
+    with patch(
+        "aistock_agent.api.routes.compile_chat_graph",
+        return_value=mock_graph,
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                _CHAT_URL,
+                json={"message": "普通问题"},
+                headers=_VALID_HEADERS,
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"] == "普通回答"
+    assert body["last_deep_report"] is None
+    assert body["cards"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_message_confirm_clarification_cards_and_last_deep_report_none():
+    """G1：澄清分支显式置 None——即使 synth_answer 带陈旧 cards/last_deep_report 也不透出（防图文打架）。"""
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {
+            "synth_answer": {
+                "final_response": "",
+                "confirm": {
+                    "request_id": "r1",
+                    "question": "您想了解哪只股票？",
+                    "options": [{"key": "600519", "label": "贵州茅台"}],
+                },
+                "insight": None,
+                "trace": None,
+                # 陈旧值：本轮未产出，但 state 可能残留上轮 deep 输出
+                "last_deep_report": {"report_id": "rep-1", "symbol": "600519"},
+                "cards": [{"type": "stock_card", "symbol": "600519"}],
+            }
+        }
+
+    mock_graph = MagicMock()
+    mock_graph.astream = mock_astream
+    with patch(
+        "aistock_agent.api.routes.compile_chat_graph",
+        return_value=mock_graph,
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                _CHAT_URL,
+                json={"message": "我想了解一下贵州茅台和五粮液"},
+                headers=_VALID_HEADERS,
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"] == "请提供 6 位股票代码后重试。"
+    assert body["last_deep_report"] is None
+    assert body["cards"] is None

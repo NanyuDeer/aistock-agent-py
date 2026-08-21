@@ -10,6 +10,8 @@ from typing import Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aistock_agent.schemas.prediction import PredictionResult
+from aistock_agent.trace.chain import CausalChain
+from aistock_agent.trace.chain import CausalNode as CausalNode
 
 # 市场现象 kind 的 Literal 别名。
 MarketPhenomenonKind: TypeAlias = Literal[
@@ -55,7 +57,7 @@ class SourceCollectionStatus(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    state: Literal["available", "empty", "unavailable", "invalid_for_causality"]
+    state: Literal["available", "empty", "unavailable", "invalid_for_causality", "degraded"]
     provider: str
     item_count: int = 0
     reason: str | None = None
@@ -96,23 +98,6 @@ class PhenomenonDiscoveryResult(BaseModel):
         elif self.primary is not None or self.concurrent_phenomena:
             raise ValueError("non-detected discovery must not contain phenomena")
         return self
-
-
-class CausalNode(BaseModel):
-    stage: Literal[
-        "structural_root",
-        "trigger",
-        "transmission",
-        "exposure",
-        "repricing",
-        "observable_result",
-    ]
-    claim: str
-    evidence_ids: list[str]
-
-
-class CausalChain(BaseModel):
-    nodes: list[CausalNode]
 
 
 class CandidateExplanation(BaseModel):

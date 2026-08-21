@@ -157,6 +157,18 @@ async def generate_data_constrained_gt(
     sectors = _top_gainers(a_share, n=3)
     corpus = _corpus_text(case)
 
+    # 四期 Task 3：事件库方向先验（case.meta.direction_hint，event_store_scan 写入）——
+    # 增强归因证据（source_notes + 驱动语料），不覆盖快照 direction
+    # （GT direction 语义 = 市场方向，evaluator 计分不变）。
+    direction_hint = ""
+    case_meta = case.get("meta")
+    if isinstance(case_meta, dict):
+        direction_hint = str(case_meta.get("direction_hint", ""))
+    source_notes: list[str] = []
+    if direction_hint in {"bullish", "bearish", "neutral"}:
+        source_notes.append(f"事件库方向先验: {direction_hint}")
+        corpus = f"{corpus}\n事件方向先验: {direction_hint}"  # 驱动语料增强
+
     drivers: list[str] = []
     try:
         llm = llm_service.get_deep_think()
@@ -187,13 +199,17 @@ async def generate_data_constrained_gt(
     gt: dict[str, object] = {
         "gt_id": str(case.get("ground_truth_ref", f"gt_{case.get('case_id')}")),
         "case_id": str(case.get("case_id", "")),
+        # A-3 修复：GT 版本字段（2026-08-14）——人工回填/口径升级可追踪，
+        # 回填必须过 validate_gt_against_case 校验。
+        # 四期 Task 3（2026-08-14）：gt_version 1→2（事件库方向先验口径）。
+        "gt_version": 2,
         "confidence": confidence,
         "attribution": {
             "direction": direction,
             "drivers": drivers,
             "transmission_path": [],
             "affected_sectors": sectors,
-            "source_notes": [],
+            "source_notes": source_notes,  # 四期 Task 3：事件库方向先验（无条件时为空列表）
             "corpus": corpus[:6000],  # 冻结切片语料，供 judge 引用机械核验（N5 修复）
         },
     }

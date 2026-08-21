@@ -58,3 +58,43 @@ def test_already_has_prefix_no_duplicate():
                return_value=("pre_open", "今日开盘前（开盘时间 09:30）")):
         result = _append_non_trading_time_hint(conclusion, [_evidence(True)])
     assert result.count("当前为 A 股今日开盘前") == 1
+
+
+def test_non_trading_day_no_misleading_question():
+    """非交易日文案：去反问句、显式标注数据日期与"非今日实时"。"""
+    with patch("aistock_agent.graph.nodes.synth_answer.trading_session_status",
+               return_value=("non_trading_day", "今天非交易日")):
+        result = _append_non_trading_time_hint("## 核心结论\nok", [_evidence(True)])
+    assert result.startswith("今天是 A 股非交易日")
+    assert "你说的是否" not in result
+    assert "非今日实时" in result
+
+
+def test_pre_open_no_misleading_question():
+    """pre_open 文案：去反问句、标注"非今日实时"。"""
+    with patch("aistock_agent.graph.nodes.synth_answer.trading_session_status",
+               return_value=("pre_open", "今日开盘前（开盘时间 09:30）")):
+        result = _append_non_trading_time_hint("## 核心结论\nok", [_evidence(True)])
+    assert result.startswith("今日尚未开盘")
+    assert "你说的是否" not in result
+    assert "非今日实时" in result
+
+
+def test_lunch_break_no_misleading_question():
+    """午间休市文案：去反问句、标注"非今日实时"。"""
+    with patch("aistock_agent.graph.nodes.synth_answer.trading_session_status",
+               return_value=("lunch_break", "午间休市（13:00 复盘）")):
+        result = _append_non_trading_time_hint("## 核心结论\nok", [_evidence(True)])
+    assert result.startswith("当前为 A 股午间休市")
+    assert "你说的是否" not in result
+    assert "非今日实时" in result
+
+
+def test_closed_no_misleading_question_and_no_realtime_mark():
+    """closed 文案：去反问句；因属当日收盘数据发布中，不标注"非今日实时"。"""
+    with patch("aistock_agent.graph.nodes.synth_answer.trading_session_status",
+               return_value=("closed", "今日已收盘")):
+        result = _append_non_trading_time_hint("## 核心结论\nok", [_evidence(True)])
+    assert result.startswith("当前为 A 股今日已收盘")
+    assert "你说的是否" not in result
+    assert "非今日实时" not in result

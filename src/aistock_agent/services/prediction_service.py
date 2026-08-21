@@ -2,14 +2,23 @@
 
 独立可复用推理包：输入溯源结果 + 事实快照，输出 PredictionResult（含到期日）。
 大盘溯源（review）内联调用；个股溯源/事件传导后续接入同一入口。
-失败一律返回 None 不抛异常，保证调用方主流程不受阻断（"永不 500"）。
+PR-A/T3：run_predict 返回状态化契约（ok/gate_skipped/llm_failed/parse_failed），
+失败原因可区分，不再静默返回 None；另提供 predict_from_trace 独立执行入口
+（缓存直读 → DB 重建 → trade_date 校验 → run_predict → 落库）。
+
+P2 越年裁决（2026-08-14）：到期日不再因 chinese_calendar 覆盖（2004-2026）越年而整条
+失败——改为逐档容错，越年档按「周末+已发布节假日(HOLIDAYS_EXTRA)」近似计算并显式标记
+approximate（wire 键 due_dates_approximate），其余档精确。理由：验证器对照扫描日单日
+符号（低信噪比），精确日历无统计增益；越年显式标注优于整条 skipped（预判功能停产）。
 """
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from typing import Literal
 
+import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -17,8 +26,14 @@ from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
 )
-from aistock_agent.schemas.market_trace import MarketTraceResult, MarketTraceSnapshot
+from aistock_agent.schemas.market_trace import (
+    MarketTraceResult,
+    MarketTraceSnapshot,
+    ReviewArtifact,
+)
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+from aistock_agent.services.cache import get_cached_review
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import (
     get_deep_think,
     get_quick_think,
@@ -35,16 +50,43 @@ HORIZON_TRADING_DAY_OFFSETS: dict[str, int] = {
     "long": 120,
 }
 
+# skipped 落库默认文案（gate_skipped 的 reason 为空时兜底）
+_DEFAULT_SKIP_REASON = "prediction skipped"
+
 # 代码围栏剥离 — 防御 LLM 可能包裹的 ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+# LLM 常见多余键（PredictionResult extra="forbid" 下会导致校验失败）
+_EXTRA_KEYS_TO_DROP = (
+    "thinking",
+    "analysis",
+    "reasoning",
+    "thoughts",
+    "thought",
+    "explanation",
+)
+
+
+class TraceUnavailableError(Exception):
+    """溯源数据不可用（缓存与 DB 均无法重建 trace，或 snapshot trade_date 不匹配）。"""
 
 
 @dataclass(frozen=True)
 class PredictionRunResult:
-    """预测执行结果：预测工件 + 各档位到期交易日。"""
+    """预测执行结果：状态 + 预测工件 + 各档位到期交易日 + 原因 + 近似档标记。
 
-    prediction: PredictionResult
-    due_dates: dict[str, str]  # {horizon: YYYY-MM-DD}
+    状态语义（S2 契约）：
+    - ok：prediction + due_dates 完整产出（越年档降级为近似并记入 approximate_horizons）；
+    - gate_skipped：attribution_status 门禁未过（prediction/due_dates 为空）；
+    - llm_failed：LLM 调用异常（瞬时失败，可重试）；
+    - parse_failed：载荷解析/校验失败（不可重试，属 LLM 输出质量问题）。
+    """
+
+    status: Literal["ok", "gate_skipped", "llm_failed", "parse_failed"]
+    prediction: PredictionResult | None = None
+    due_dates: dict[str, str] = field(default_factory=dict)  # {horizon: YYYY-MM-DD}
+    approximate_horizons: list[str] = field(default_factory=list)  # 越年近似档位名列表
+    reason: str = ""
 
 
 def _strip_code_fences(text: str) -> str:
@@ -52,6 +94,59 @@ def _strip_code_fences(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+def _extract_first_json_object(text: str) -> dict[str, object] | None:
+    """扫描文本提取第一个平衡的 JSON 对象；失败返回 None（兜底，主路径不依赖）。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(text[start : i + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
+    """LLM 原始输出 → 可校验 dict：剥离围栏、提取 JSON、剔除多余键、兜底 schema_version。"""
+    text = _strip_code_fences(raw_text).strip()
+    data: object | None = None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+    if data is None:
+        data = _extract_first_json_object(text)
+    if not isinstance(data, dict):
+        raise ValueError("prediction output is not a JSON object")
+    for key in _EXTRA_KEYS_TO_DROP:
+        data.pop(key, None)
+    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
+    data.setdefault("schema_version", "2.0")
+    return data
 
 
 def _collect_allowed_evidence_ids(
@@ -107,48 +202,225 @@ def _build_prediction_input(
     }
 
 
-def _compute_due_dates(trade_date: str, horizons: list[PredictionHorizon]) -> dict[str, str]:
+def _compute_due_dates(
+    trade_date: str, horizons: list[PredictionHorizon]
+) -> tuple[dict[str, str], list[str]]:
+    """确定性计算各档位到期交易日（逐档容错，P2 裁决）。
+
+    对每档：add_trading_days 推进 N 个交易日（内部 is_trading_day 对越年走
+    「周末+已发布节假日 HOLIDAYS_EXTRA」兜底，不抛）；随后用 chinese_calendar 覆盖探测
+    该 due date：超出覆盖范围（2004-2026，如 2027 年，节假日数据 2026 年底才发布）
+    → 该档到期日依赖未确认的节假日，显式标记为近似（approximate_horizons），不整条失败。
+
+    Returns:
+        (due_dates, approximate_horizons)：due_dates 每档 YYYY-MM-DD；
+        approximate_horizons 为越年降级为近似的档位名列表（其余档精确）。
+    """
     base = date.fromisoformat(trade_date)
-    return {
-        h.horizon: add_trading_days(base, HORIZON_TRADING_DAY_OFFSETS[h.horizon]).isoformat()
-        for h in horizons
-    }
+    due_dates: dict[str, str] = {}
+    approximate_horizons: list[str] = []
+    for h in horizons:
+        due = add_trading_days(base, HORIZON_TRADING_DAY_OFFSETS[h.horizon])
+        due_str = due.isoformat()
+        due_dates[h.horizon] = due_str
+        # 覆盖探测：静默给出近似日期会误导到期验证对照，故显式标近似（G7 语义保留，
+        # 由「整条失败」改为「标注降级」——P2 裁决：越年标注优于预测停产）
+        try:
+            chinese_calendar.is_workday(due)
+        except (NotImplementedError, ValueError):
+            approximate_horizons.append(h.horizon)
+    return due_dates, approximate_horizons
 
 
 async def run_predict(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
-) -> PredictionRunResult | None:
-    """对已溯源的因果链推演影响持续性。
+) -> PredictionRunResult:
+    """对已溯源的因果链推演影响持续性（状态化契约，S2）。
 
     门禁：attribution_status ∈ {confirmed, hypothesis} 才预测；
-    insufficient/not_applicable 返回 None。任一失败返回 None（调用方降级为无预测章节）。
+    其余返回 gate_skipped。失败不再静默返回 None，而是按原因分类返回状态：
+    - LLM 调用异常 → llm_failed（瞬时失败，可重试）；
+    - 载荷解析/校验失败 → parse_failed（LLM 输出质量问题）；
+    - 到期日越年 → ok + approximate_horizons（逐档容错：越年档降级近似并标注，P2 裁决）；
+    - 未预期异常（非上述已分类状态）→ logger.error + 重新抛出（不吞 bug，
+      上层消费者/端点负责兜底）。
     """
     if trace.attribution_status not in {"confirmed", "hypothesis"}:
         logger.info("prediction_skip_by_attribution_status", status=trace.attribution_status)
-        return None
-    try:
-        prompt_input = _build_prediction_input(trace, snapshot)
-        llm = get_deep_think()
-        messages = [
-            SystemMessage(content=PREDICTION_PROMPT),
-            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
-        ]
-        ai_message = await llm.ainvoke(messages)
-        raw_text = (
-            ai_message.content
-            if isinstance(ai_message.content, str)
-            else str(ai_message.content)
+        return PredictionRunResult(
+            status="gate_skipped",
+            reason=f"attribution_status={trace.attribution_status}",
         )
-        prediction = PredictionResult.model_validate_json(_strip_code_fences(raw_text))
+    try:
+        # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
+        try:
+            prompt_input = _build_prediction_input(trace, snapshot)
+            llm = get_deep_think()
+            messages = [
+                SystemMessage(content=PREDICTION_PROMPT),
+                HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+            ]
+            ai_message = await llm.ainvoke(messages)
+            raw_text = (
+                ai_message.content
+                if isinstance(ai_message.content, str)
+                else str(ai_message.content)
+            )
+        except Exception as exc:
+            logger.warning("prediction.llm_failed", error=str(exc), exc_info=True)
+            return PredictionRunResult(status="llm_failed", reason=str(exc))
+        # 载荷解析/校验 — LLM 输出质量问题分类
+        try:
+            prediction = PredictionResult.model_validate(_coerce_prediction_payload(raw_text))
+        except Exception as exc:
+            logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
+            return PredictionRunResult(status="parse_failed", reason=str(exc))
         allowed = _collect_allowed_evidence_ids(trace, snapshot)
-        for sid in prediction.evidence_ids:
-            if sid not in allowed:
-                raise ValueError(f"prediction evidence not in trace: {sid}")
-        due_dates = _compute_due_dates(snapshot.trade_date, prediction.horizons)
-        return PredictionRunResult(prediction=prediction, due_dates=due_dates)
+        # P1-1：证据 ID 过滤而非一票否决（对齐 run_chat_prediction）——单一幻觉不丢整体
+        filtered = [sid for sid in prediction.evidence_ids if sid in allowed]
+        if len(filtered) != len(prediction.evidence_ids):
+            logger.warning(
+                "prediction.evidence_filtered",
+                dropped=len(prediction.evidence_ids) - len(filtered),
+            )
+        prediction = prediction.model_copy(update={"evidence_ids": filtered})
+        # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
+        due_dates, approximate_horizons = _compute_due_dates(
+            snapshot.trade_date, prediction.horizons
+        )
+        return PredictionRunResult(
+            status="ok",
+            prediction=prediction,
+            due_dates=due_dates,
+            approximate_horizons=approximate_horizons,
+        )
     except Exception as exc:
-        logger.warning("prediction_run_failed", error=str(exc), exc_info=True)
-        return None
+        # 未预期异常：不静默，重新抛出交由上层消费者/端点兜底
+        logger.error("prediction.run_unexpected_failure", error=str(exc), exc_info=True)
+        raise
+
+
+async def _load_trace_and_snapshot(
+    trace_id: str, trade_date: str
+) -> tuple[MarketTraceResult, MarketTraceSnapshot]:
+    """按读取链重建 (trace, snapshot)：a. 缓存直读 → b. DB 重建；都失败抛 TraceUnavailableError。"""
+    # a. 缓存直读：ReviewArtifact dict → model_validate（旧缓存缺字段/多余字段按不可重建处理）
+    cached = await get_cached_review(trade_date)
+    if cached is not None:
+        try:
+            artifact = ReviewArtifact.model_validate(cached)
+            logger.debug(
+                "predict_from_trace.cache_hit",
+                trace_id=trace_id,
+                trade_date=trade_date,
+                snapshot_id=artifact.snapshot.snapshot_id,
+            )
+            return artifact.trace, artifact.snapshot
+        except Exception as exc:
+            logger.warning("predict_from_trace.cache_invalid", error=str(exc))
+    # b. DB 重建：analysis_reports.content.market_trace = {"snapshot": ..., "trace": ...}
+    report = await node_api.get_analysis_report("review", trade_date)
+    if report is not None:
+        content = report.get("content")
+        market_trace = content.get("market_trace") if isinstance(content, dict) else None
+        if isinstance(market_trace, dict):
+            snapshot_data = market_trace.get("snapshot")
+            trace_data = market_trace.get("trace")
+            if isinstance(snapshot_data, dict) and isinstance(trace_data, dict):
+                try:
+                    snapshot = MarketTraceSnapshot.model_validate(snapshot_data)
+                    trace = MarketTraceResult.model_validate(trace_data)
+                    logger.debug(
+                        "predict_from_trace.db_rebuild",
+                        trace_id=trace_id,
+                        trade_date=trade_date,
+                        snapshot_id=snapshot.snapshot_id,
+                    )
+                    return trace, snapshot
+                except Exception as exc:
+                    # extra="forbid" 下旧数据字段缺失/多余 → 按不可重建处理
+                    logger.warning("predict_from_trace.db_rebuild_failed", error=str(exc))
+    raise TraceUnavailableError(f"no trace available for review:{trade_date}")
+
+
+async def predict_from_trace(
+    trace_id: str, trade_date: str
+) -> tuple[PredictionRunResult, dict[str, object] | None]:
+    """大盘溯源后接预测的独立执行入口（PR-A/T3）。
+
+    流程：缓存直读 → DB 重建 → snapshot.trade_date 校验 → run_predict → 按状态落库。
+    trace_id 当前用于日志标识（source_id 统一为 review:{trade_date}，与 review 内联落库一致）；
+    后续个股溯源/事件传导复用本入口时，trace_id 可作为溯源标识扩展点。
+
+    落库规则：
+    - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；越年近似档
+      经 due_dates_approximate 显式标记（Node 侧合并进 prediction jsonb）；
+    - gate_skipped → status=skipped + skip_reason（硬约束 3 闭环）；
+    - llm_failed / parse_failed → 瞬时失败不落库（由调用方决定重试），record=None。
+
+    Returns:
+        (run_result, save_prediction 返回的 record 或 None)。
+    """
+    trace, snapshot = await _load_trace_and_snapshot(trace_id, trade_date)
+    # 校验：快照日期必须与目标交易日一致（对照 review.py L983 先例，防旧快照误用）
+    if snapshot.trade_date != trade_date:
+        raise TraceUnavailableError(
+            f"snapshot trade_date {snapshot.trade_date} != trade_date {trade_date}"
+        )
+    result = await run_predict(trace, snapshot)
+    if result.status == "ok":
+        assert result.prediction is not None
+        payload: dict[str, object] = {
+            "source_type": "market_trace",
+            "source_id": f"review:{trade_date}",
+            "schema_version": result.prediction.schema_version,
+            "prediction": result.prediction.model_dump(mode="json"),
+            "due_dates": result.due_dates,
+        }
+        if result.approximate_horizons:
+            # 越年近似档显式标记（仅非空携带，向后兼容；Node 侧合并进 prediction jsonb）
+            payload["due_dates_approximate"] = result.approximate_horizons
+    elif result.status == "gate_skipped":
+        # 硬约束 3：skipped 落库闭环（skip_reason 存 prediction 对象内）
+        payload = {
+            "source_type": "market_trace",
+            "source_id": f"review:{trade_date}",
+            "schema_version": "1.0",
+            "status": "skipped",
+            "prediction": {"skip_reason": result.reason or _DEFAULT_SKIP_REASON},
+            "due_dates": {},
+        }
+    else:
+        # llm_failed / parse_failed：瞬时失败，不落库
+        return result, None
+    try:
+        record = await node_api.save_prediction(payload)
+    except Exception as exc:
+        logger.error(
+            "prediction.persist_failed",
+            source_id=f"review:{trade_date}",
+            error=str(exc),
+            exc_info=True,
+        )
+        raise
+    return result, record
+
+
+async def save_skipped_prediction(source_id: str, reason: str) -> dict[str, object] | None:
+    """落一条 skipped 预测记录（供消费者/端点在 TraceUnavailableError 等场景调用）。
+
+    内部调 save_prediction：status=skipped、prediction={"skip_reason": reason}、
+    due_dates={}、schema_version=1.0。
+    """
+    payload: dict[str, object] = {
+        "source_type": "market_trace",
+        "source_id": source_id,
+        "schema_version": "1.0",
+        "status": "skipped",
+        "prediction": {"skip_reason": reason},
+        "due_dates": {},
+    }
+    return await node_api.save_prediction(payload)
 
 
 def _gate_chat_snapshot(snapshot: dict) -> str | None:
@@ -232,6 +504,76 @@ def _build_chat_prediction_input(
     return payload
 
 
+# P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
+_PRICE_PATTERN = re.compile(r"\d+(?:\.\d{1,2})?\s*元")
+_RANGE_PATTERN = re.compile(r"\d{3,6}\s*[-~至]\s*\d{3,6}\s*(?:点|区间)?")
+# D5 补丁：裸数字点位——上下文词（指数/点位/大盘）+ 3-6 位数字（可带"点"后缀），
+# 拦截"目标点位 12000"/"上证指数 12000"式绕过；刻意不匹配"成交额达 1000 亿"（量词非点位）
+_POINT_PATTERN = re.compile(
+    r"(?:上证|深证|创业板|科创|沪深|大盘|指数|点位|目标点位)\s*\d{3,6}(?:\s*点)?")
+_ABSOLUTE_VERBS = ("维持", "涨至", "跌至", "看至", "目标价")  # D5：不加入"达"（防误杀量词）
+_REDACTED_TEXT = "（点位表述已按合规要求移除）"
+
+
+def _contains_absolute_point(text: str) -> bool:
+    """绝对点位检测：价格（X 元）/ 点位区间（3500-3600 点）/ 绝对动词 / 裸数字点位（D5）。
+
+    刻意不匹配"涨幅/涨跌幅 20%"（相对描述）与"围绕当前价位窄幅整理"（相对区间）——
+    产品红线禁的是绝对价格/点位（PREDICTION_CHAT_PROMPT 语义）。"""
+    if not text:
+        return False
+    if _PRICE_PATTERN.search(text):
+        return True
+    if _RANGE_PATTERN.search(text):
+        return True
+    if _POINT_PATTERN.search(text):
+        return True
+    return any(v in text for v in _ABSOLUTE_VERBS)
+
+
+_HARD_VALIDATED_FIELDS = ("metric_projection", "evolution_narrative", "attribution_summary")
+
+
+def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) -> PredictionResult:
+    """chat 预测后处理红线硬校验：命中绝对点位 → 剥离该字段并记独立日志（G5：不静默）。
+
+    覆盖全文本字段（A6：narrative 是绕行通道）：顶层 evolution_narrative/attribution_summary
+    以及每个 horizon 的 metric_projection。命中 → 用占位文案替换，绝不静默丢弃。"""
+    changes: dict[str, object] = {}
+    for fld in ("evolution_narrative", "attribution_summary"):
+        val = getattr(prediction, fld, None)
+        if isinstance(val, str) and _contains_absolute_point(val):
+            logger.warning(
+                "chat_prediction.hard_validation_failed",
+                field=fld,
+                symbol=symbol,
+            )
+            changes[fld] = _REDACTED_TEXT
+    # horizon 级 metric_projection（prediction_jsonb 全文本覆盖，A6）
+    new_horizons: list[object] = []
+    for h in prediction.horizons:
+        mp = getattr(h, "metric_projection", None)
+        if isinstance(mp, str) and _contains_absolute_point(mp):
+            logger.warning(
+                "chat_prediction.hard_validation_failed",
+                field="metric_projection",
+                symbol=symbol,
+            )
+            new_horizons.append(h.model_copy(update={"metric_projection": _REDACTED_TEXT}))
+        else:
+            new_horizons.append(h)
+    horizons_changed = (
+        len(new_horizons) != len(prediction.horizons)
+        or any(n is not o for n, o in zip(new_horizons, prediction.horizons))
+    )
+    if changes or horizons_changed:
+        update = dict(changes)
+        if horizons_changed:
+            update["horizons"] = new_horizons
+        prediction = prediction.model_copy(update=update)
+    return prediction
+
+
 async def run_chat_prediction(
     snapshot: dict, news: list[dict], context: dict
 ) -> PredictionResult | None:
@@ -278,6 +620,9 @@ async def run_chat_prediction(
                 "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
             }
         )
+        # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
+        prediction = _hard_validate_chat_prediction(
+            prediction, str(snapshot.get("symbol", "")))
         # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
         # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
         # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)

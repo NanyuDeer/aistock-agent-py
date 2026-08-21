@@ -42,6 +42,11 @@ class MetricsCollector:
         self._synth_degraded = 0
         # T6：deep 升级率基础计数（按 worker 名分桶，D3）
         self._chat_qa_escalations: dict[str, int] = {}
+        # Stock Trace 链路指标
+        self._stock_trace_snapshot_not_ready = 0
+        self._stock_trace_validation_failed: dict[str, int] = {}
+        self._stock_trace_validation_retry_success = 0
+        self._stock_trace_dlq_total: dict[str, int] = {}
 
     def record_llm_start(self, model: str = "") -> None:
         """记录一次 LLM 调用开始（调用次数 +1）。
@@ -144,6 +149,32 @@ class MetricsCollector:
                 self._chat_qa_escalations.get(worker, 0) + 1
             )
 
+    # ---- Stock Trace 链路指标 ----
+
+    def record_stock_trace_snapshot_not_ready(self) -> None:
+        """记录一次 SNAPSHOT_NOT_READY（快照未就绪空转）命中。"""
+        with self._lock:
+            self._stock_trace_snapshot_not_ready += 1
+
+    def record_stock_trace_validation_failed(self, error_type: str = "") -> None:
+        """记录一次 Stock Trace 结果校验失败（按异常类型分桶）。"""
+        with self._lock:
+            self._stock_trace_validation_failed[error_type] = (
+                self._stock_trace_validation_failed.get(error_type, 0) + 1
+            )
+
+    def record_stock_trace_validation_retry_success(self) -> None:
+        """记录一次 Stock Trace 校验失败后重试成功。"""
+        with self._lock:
+            self._stock_trace_validation_retry_success += 1
+
+    def record_stock_trace_dlq_total(self, error_code: str) -> None:
+        """记录一次 Stock Trace 死信（按 error_code 分桶）。"""
+        with self._lock:
+            self._stock_trace_dlq_total[error_code] = (
+                self._stock_trace_dlq_total.get(error_code, 0) + 1
+            )
+
     def get_metrics(self) -> dict[str, object]:
         """返回当前累计指标快照。
 
@@ -171,6 +202,10 @@ class MetricsCollector:
             skill_degraded = dict(self._skill_degraded)
             synth_degraded = self._synth_degraded
             chat_qa_escalations = dict(self._chat_qa_escalations)
+            stock_trace_snapshot_not_ready = self._stock_trace_snapshot_not_ready
+            stock_trace_validation_failed = dict(self._stock_trace_validation_failed)
+            stock_trace_validation_retry_success = self._stock_trace_validation_retry_success
+            stock_trace_dlq_total = dict(self._stock_trace_dlq_total)
         error_rate = (llm_errors / llm_calls) if llm_calls > 0 else 0.0
 
         def _avg(bucket: dict[str, int]) -> float:
@@ -196,6 +231,12 @@ class MetricsCollector:
                 "synth_degraded_total": synth_degraded,
                 "escalation_total": chat_qa_escalations,
             },
+            "stock_trace": {
+                "snapshot_not_ready_total": stock_trace_snapshot_not_ready,
+                "validation_failed_total": stock_trace_validation_failed,
+                "validation_retry_success_total": stock_trace_validation_retry_success,
+                "dlq_total": stock_trace_dlq_total,
+            },
         }
 
     def reset(self) -> None:
@@ -217,6 +258,10 @@ class MetricsCollector:
             self._skill_degraded = {}
             self._synth_degraded = 0
             self._chat_qa_escalations = {}
+            self._stock_trace_snapshot_not_ready = 0
+            self._stock_trace_validation_failed = {}
+            self._stock_trace_validation_retry_success = 0
+            self._stock_trace_dlq_total = {}
 
 
 # 模块级单例：全局共享，回调 handler 与端点读取同一实例。

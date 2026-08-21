@@ -9,6 +9,25 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
+def _parse_string_list(v: object) -> object:
+    """支持逗号分隔和 JSON 数组两种环境变量格式（cors_origins / holidays_extra 共用）。
+
+    NoDecode 阻止 pydantic-settings 预先 JSON 解析，原始字符串传入 before-validator。
+    此处先尝试 JSON 解析（处理 ["a","b"] 格式），失败则按逗号分割（处理 a,b 格式）。
+    """
+    if isinstance(v, str):
+        # 先尝试 JSON 数组格式（["a","b"]）
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # 退回逗号分隔格式（a,b）
+        return [item.strip() for item in v.split(",") if item.strip()]
+    return v
+
+
 class Settings(BaseSettings):
     """全局配置，从 .env.{APP_ENV} 或环境变量读取"""
 
@@ -48,13 +67,17 @@ class Settings(BaseSettings):
     stock_trace_max_attempts: int = 3
     # Consumer 集成模式开关：true=在 agent-py 主进程 lifespan 内启动（一次重启即可），
     # false=需独立进程运行（python -m aistock_agent.workers.stock_trace_consumer）。
-    # 自选股洞察上线后默认停用旧 stock_trace consumer；
-    # STOCK_TRACE_CONSUMER_ENABLED=true 可临时恢复。
-    stock_trace_consumer_enabled: bool = False
+    # 默认启用；STOCK_TRACE_CONSUMER_ENABLED=false 可关闭回滚。
+    stock_trace_consumer_enabled: bool = True
     # Tool calling provides a schema-bound response across OpenAI-compatible models.
     stock_trace_structured_output_method: Literal[
         "function_calling", "json_mode", "json_schema"
     ] = "function_calling"
+    # SNAPSHOT_NOT_READY 空转兜底：首次命中起超过该秒数仍未就绪 → SNAPSHOT_TIMEOUT 死信
+    stock_trace_snapshot_not_ready_timeout_seconds: int = 600
+    # DLQ 巡检：每隔 N 秒检查一次；DLQ 长度>0 持续超过该秒数触发告警
+    stock_trace_dlq_inspect_interval_seconds: int = 60
+    stock_trace_dlq_alert_after_seconds: int = 900
 
     # ===== 自选股洞察（watchlist insight）=====
     # 独立 Redis db，与 stock_trace db=2 隔离
@@ -74,6 +97,8 @@ class Settings(BaseSettings):
     insight_label_max_chars: int = 12
     # 归因任务轻，默认 quick_think
     insight_llm_model: Literal["quick_think", "deep_think"] = "quick_think"
+    # 午盘触发后补抓窗口（分钟，PRD §8：15-20 分钟；Node 侧 cron 使用）
+    insight_refetch_minutes: int = 20
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
@@ -82,6 +107,19 @@ class Settings(BaseSettings):
     # 优先使用 TAVILY_API_KEYS；若只有单人，用 TAVILY_API_KEY 兼容
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
+
+    # 搜索引擎多供应商 failover（辩论 2026-08-18）
+    # 逗号分隔多 key 池；缺配置则该 provider 惰性不注册
+    doubao_api_key: str = ""
+    doubao_api_keys: str = ""
+    anysearch_api_key: str = ""
+    anysearch_api_keys: str = ""
+    # 启用的 provider 集合，逗号分隔；空=默认 "tavily,doubao,anysearch"。
+    # 注意：链路顺序当前固定为 tavily→doubao→anysearch（_build_providers 硬编码），
+    # 本字段只控制启停、不控制顺序；如需"中文优先"排序再在 _build_providers 调整。
+    search_enabled_providers: str = ""
+    # 整链 fail-fast 总预算（秒）
+    search_budget_seconds: float = 10.0
 
     # 抖音视频转写（硅基流动 SenseVoice；E:/changer_learning 已验证）
     douyin_api_key: str = ""
@@ -101,6 +139,12 @@ class Settings(BaseSettings):
     # 支持逗号分隔（CORS_ORIGINS=http://a,http://b）或 JSON 数组格式（CORS_ORIGINS=["a","b"]）
     # NoDecode 阻止 pydantic-settings 预先 JSON 解析，交给 _parse_cors_origins 统一处理
     cors_origins: Annotated[list[str], NoDecode] = ["*"]
+
+    # 补充节假日表（HOLIDAYS_EXTRA，YYYY-MM-DD 逗号分隔或 JSON 数组，复用 cors_origins 解析模式）
+    # 用途：chinese_calendar 1.11.0 仅覆盖 2004-2026，2027 起 is_trading_day 走越年 fallback
+    # （只跳周末，精度损失）。此列表提供覆盖范围之外的补充休市日，让越年判定恢复精度。
+    # 空列表时 is_trading_day 行为与拆分前逐字节一致。
+    holidays_extra: Annotated[list[str], NoDecode] = []
 
     # 健康检查：是否在 /health/ready 中探测 LLM 连通性。
     # 默认关闭——避免 readiness 探针每次消耗 token；需探测时设 HEALTH_CHECK_LLM=true。
@@ -127,13 +171,16 @@ class Settings(BaseSettings):
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）
+    # ⚠️ APScheduler day_of_week 编号与标准 crontab 不同：0=Monday（ISO），
+    #    标准 crontab 0=Sunday。from_crontab 直接按 APScheduler 语义解释数字，
+    #    "1-5" 实为周二~周六（周一=0 被跳过）。必须用 "0-4"（周一~周五）！
     scheduler_enabled: bool = True
-    scheduler_morning_cron: str = "50 8 * * 1-5"       # 晨报：工作日 08:50
-    scheduler_review_cron: str = "30 15 * * 1-5"       # 复盘：工作日 15:30
-    scheduler_snapshot_cron: str = "35 15 * * 1-5"     # 快照：工作日 15:35
-    scheduler_iterate_cron: str = "40 15 * * 1-5"      # 迭代：工作日 15:40
+    scheduler_morning_cron: str = "50 8 * * 0-4"       # 晨报：工作日 08:50
+    scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
+    scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
+    scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
-    scheduler_broadcast_cron: str = "0 9 * * 1-5"
+    scheduler_broadcast_cron: str = "0 9 * * 0-4"
     scheduler_timezone: str = "Asia/Shanghai"
 
     # ===== 迭代 Agent 自动闭环（iterate）=====
@@ -142,13 +189,24 @@ class Settings(BaseSettings):
     # 数据目录（切片/标准答案/实验/报告，均 gitignore）
     iterate_data_dir: str = "data"
     # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
-    iterate_cron: str = "0 17 * * 1-5"
+    iterate_cron: str = "0 17 * * 0-4"
     # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
-    iterate_case_build_cron: str = "30 16 * * 1-5"
+    iterate_case_build_cron: str = "30 16 * * 0-4"
     iterate_max_rounds: int = 5            # 每案例变体轮数上限
     iterate_target_score: float = 0.8      # 归因相似度达标值
     iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
     iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
+    # C-3（2026-08-14）：禁止作为迭代仓库根的路径黑名单（fail-closed），
+    # 防止对非 git 目录恢复基线失败后静默污染
+    iterate_forbidden_repo_roots: list[str] = []
+    # A-1（2026-08-14）：judge 上线前校准闸门（默认关闭）——开启时
+    # calibration.calibration_passed() 必须达标（命中率 >= 0.8）
+    iterate_calibration_required: bool = False
+    # ── 五期校准：no_improvement 终止（裁决书 D4/N3 落地）──
+    # delta 未配置（None）→ 禁用（现状：stalled 仅观测）；compute_delta.py 校准后
+    # 配置 ITERATE_NO_IMPROVE_DELTA 启用。
+    iterate_no_improve_delta: float | None = None
+    no_improve_max_stalls: int = 4
     # SMTP 报告（QQ 邮箱授权码；2026-08-14 加 QQ_SMTP_* 别名——.env.development
     # 用 QQ_SMTP_USER/AUTH/TO 键名，与字段名不匹配导致 settings 读不到 →
     # mail_not_configured，报告无法发送；LLM key 正常因 OPENAI_API_KEY 恰好匹配）
@@ -166,19 +224,21 @@ class Settings(BaseSettings):
     )
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
-    scheduler_review_quick_cron: str = "30 15 * * 1-5"
+    scheduler_review_quick_cron: str = "30 15 * * 0-4"
     # full review：20:30 Tushare 完整数据覆盖 quick
-    scheduler_review_full_cron: str = "30 20 * * 1-5"
-    scheduler_prediction_validate_cron: str = "0 16 * * 1-5"  # 预测到期验证：工作日 16:00
-    # ── 统一事件抓取中台调度（2026-08-12） ──
-    scheduler_event_scrape_cron: str = "30 7 * * 1-5"      # 盘前档：07:30
+    scheduler_review_full_cron: str = "30 20 * * 0-4"
+    scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
+    # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
+    scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
+    scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (
-        "0 10-11,13-14 * * 1-5"  # 盘中档：每小时（避开 11:30-13:00 午休）
+        "0 10-14 * * 0-4"  # 盘中档：10:00-14:00 每小时（含 12:00，午间公告/新闻增量）
     )
     scheduler_event_scrape_early_cron: str = (
-        "45 8 * * 1-5"  # 早间刷新：08:45（晨报 08:50 前最后一刷）
+        "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
-    scheduler_event_scrape_close_cron: str = "5 15 * * 1-5"   # 收盘汇总：15:05（复盘/播报消费）
+    scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
     # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
     event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
     event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
@@ -278,17 +338,17 @@ class Settings(BaseSettings):
         before-validator。此处先尝试 JSON 解析（处理 ["a","b"] 格式），
         失败则按逗号分割（处理 http://a,http://b 格式）。
         """
-        if isinstance(v, str):
-            # 先尝试 JSON 数组格式（CORS_ORIGINS=["http://a","http://b"]）
-            try:
-                parsed = json.loads(v)
-                if isinstance(parsed, list):
-                    return parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
-            # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+        return _parse_string_list(v)
+
+    @field_validator("holidays_extra", mode="before")
+    @classmethod
+    def _parse_holidays_extra(cls, v: object) -> object:
+        """HOLIDAYS_EXTRA 解析：复用 cors_origins 的逗号分隔/JSON 数组模式。
+
+        补充节假日表（YYYY-MM-DD 列表）：HOLIDAYS_EXTRA=2027-01-01,2027-10-01
+        或 HOLIDAYS_EXTRA=["2027-01-01","2027-10-01"]。
+        """
+        return _parse_string_list(v)
 
     @property
     def qa_mode_enabled(self) -> bool:
@@ -307,6 +367,24 @@ class Settings(BaseSettings):
             if keys:
                 return random.choice(keys)
         return self.tavily_api_key
+
+    def get_tavily_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.tavily_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.tavily_api_key.strip()] if k]
+
+    def get_doubao_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.doubao_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.doubao_api_key.strip()] if k]
+
+    def get_anysearch_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.anysearch_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.anysearch_api_key.strip()] if k]
 
 
 settings = Settings()

@@ -4,6 +4,7 @@
 实际 API 调用委托给 services/tavily.py 的 TavilyService。
 """
 
+import asyncio
 from typing import cast
 
 from langchain_core.tools import tool
@@ -21,7 +22,10 @@ async def tavily_finance_search(query: str) -> str:
         query: 搜索关键词，如"美联储利率决议"、"中国PMI数据"
     """
     try:
-        result = TavilyService.search(query=query, topic="news", max_results=5)
+        # failover 链是同步阻塞（最多 SEARCH_BUDGET_SECONDS），必须 to_thread 防阻塞事件循环
+        result = await asyncio.to_thread(
+            TavilyService.search, query=query, topic="news", max_results=5
+        )
 
         if not result.get("results"):
             return f"未找到关于「{query}」的相关新闻"

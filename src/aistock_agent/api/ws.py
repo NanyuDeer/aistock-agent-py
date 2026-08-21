@@ -69,6 +69,14 @@ def _sanitize_label(label: str | None) -> str:
 # 略大于 _reasoning.py 的 _REASONING_TIMEOUT_SEC=2.0，保证兜底 label 有机会发出。
 _REASONING_DRAIN_TIMEOUT_SEC = 2.5
 
+# 问题 20 止血（2026-08-17）：_forward_until_done_or_cmd 静默段看门狗。
+# producer（LLM/图）偶发悬挂且既不发 done 也不 produce 新事件时，若只依赖
+# _RUN_TOTAL_TIMEOUT_SEC=660 兜底，前端会长时间转圈无终态。本看门狗以
+# "events 长度无新增 + recv 无新消息" 判静默段，超过本阈值主动 cancel 该轮
+# 并补发 error 终态，保证用户侧绝不无限转圈。阈值取远小于 660s（deep 长报告
+# 正常耗时 <60s，240s 足够宽裕，实测 probe 28s 完成）。
+_FORWARD_STALL_TIMEOUT_SEC = 240.0
+
 
 async def _drain_reasoning_tasks(tasks: list[asyncio.Task]) -> None:
     """等待所有 reasoning task 完成；超时则取消未完成 task，不阻塞 DONE。
@@ -172,6 +180,21 @@ async def _run_chat_graph_to_events(
                     )
                     if text.strip():
                         await sink({"type": WSEventType.TEXT, "content": text})
+            elif event_type == "on_custom_event":
+                # 改进 17（Task 1）：捕获 synth_answer 分发的回答内容自定义事件
+                # （D9 节级伪流式，2026-08-13）。走独立事件名通道，不触碰上方
+                # ON_CHAT_MODEL_STREAM 过滤红线（spec §2.2 硬约束 1）；经统一
+                # sink 入 state.events，resume 回放兼容（硬约束 4）。
+                if name == "chat_content_delta":
+                    content = event.get("data", {}).get("content")
+                    if content is None:
+                        continue
+                    await sink({"type": WSEventType.CONTENT_DELTA, "content": content})
+                elif name == "chat_content_reset":
+                    content = event.get("data", {}).get("content")
+                    if content is None:
+                        continue
+                    await sink({"type": WSEventType.CONTENT_RESET, "content": content})
             elif event_type == LangGraphEventType.ON_TOOL_START:
                 label = _sanitize_label(TOOL_LABELS.get(name, name))
                 await sink({"type": WSEventType.TOOL_START, "tool": name, "label": label})
@@ -451,11 +474,41 @@ async def _forward_until_done_or_cmd(
         _forward(state, websocket.send_json, replay=True)
     )
     recv_task = asyncio.create_task(websocket.receive_json())
+    # 问题 20 止血：静默段看门狗。活动性判据 = events 长度有新增（producer 在跑）
+    # 或 recv 有新消息（客户端交互）。二者都无变化持续超过 _FORWARD_STALL_TIMEOUT_SEC
+    # → 判定 producer 悬挂，主动 cancel 该轮并补发 error，避免前端无限转圈。
+    last_events_len = len(state.events)
+    last_activity = time.monotonic()
     try:
         while not send_task.done():
             done, _ = await asyncio.wait(
-                {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+                {send_task, recv_task},
+                timeout=max(0.0, _FORWARD_STALL_TIMEOUT_SEC - (time.monotonic() - last_activity)),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                # 静默段超时：无新事件、无新消息 → 判定悬挂，强制止血。
+                logger.warning(
+                    "chat.forward.stalled session_id=%s events_len=%d",
+                    session_id, len(state.events),
+                )
+                cancelled = chat_task_manager.cancel(session_id)
+                stall_msg = (
+                    "生成超时，请重试"
+                    if cancelled else "上一条消息仍在生成中，请稍候"
+                )
+                try:
+                    await websocket.send_json({
+                        "type": WSEventType.ERROR,
+                        "content": stall_msg,
+                    })
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
+                # cancel 后 producer 的 _runner 会置终态并 notify → 转发自动补发
+                # cancelled/error 终态后 send_task 结束。这里继续循环等它收尾，
+                # 避免提前 return cancel 掉正在补发终态的转发。
+                last_activity = time.monotonic()
+                continue
             if send_task in done:
                 # 检索 recv_task 异常（若以 WebSocketDisconnect 结束时避免
                 # "Task exception was never retrieved" 日志噪声）
@@ -479,8 +532,11 @@ async def _forward_until_done_or_cmd(
             except ValueError:
                 # 坏 JSON（JSONDecodeError 为 ValueError 子类）：视为无效消息继续监听
                 # （不崩溃、不 500，语义对齐 _wait_confirm_response）。
+                last_activity = time.monotonic()
                 recv_task = asyncio.create_task(websocket.receive_json())
                 continue
+            # 有前端消息 → 交互活跃，刷新活动时间戳
+            last_activity = time.monotonic()
             if msg.get("type") == "stop":
                 s = chat_task_manager.get(session_id)
                 if s is None:
@@ -502,8 +558,11 @@ async def _forward_until_done_or_cmd(
                 await websocket.send_json({
                     "type": WSEventType.ERROR, "content": "上一条消息仍在生成中，请稍候",
                 })
-            # 继续监听下一条
+            # 继续监听下一条；同时追踪 events 长度以维持活动性判据
             recv_task = asyncio.create_task(websocket.receive_json())
+            if len(state.events) != last_events_len:
+                last_events_len = len(state.events)
+                last_activity = time.monotonic()
     except (WebSocketDisconnect, RuntimeError):
         # 连接断开：停止监听；转发协程（send_task）会因 send 失败自行退出，后台任务继续
         pass
@@ -512,6 +571,8 @@ async def _forward_until_done_or_cmd(
             send_task.cancel()
         if recv_task is not None and not recv_task.done():
             recv_task.cancel()
+        # 问题 18 规范：cancel 后必须 await 收尾，避免未 retrieved 任务/并发 recv
+        await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
 
 async def _run_confirm_stage2(
@@ -808,5 +869,10 @@ async def ws_chat(websocket: WebSocket) -> None:
             # 普通消息：消息校验/并发防护/图运行/确认编排统一走 _handle_user_message
             # （B2：confirm_response 已在上面被消费，不会走到这里的"消息不能为空"死端）
             await _handle_user_message(websocket, data, session_id)
-    except WebSocketDisconnect:
-        pass
+    except (WebSocketDisconnect, RuntimeError) as exc:
+        # 问题 20 R2：disconnect 已被 _forward_until_done_or_cmd 的 recv_task 消费后，
+        # 主循环再次 receive_json() 抛 RuntimeError("Cannot call \"receive\"...") —— 静默收尾。
+        # 其余 RuntimeError（主循环内真实 bug）不得零观测：打 warning 保留可观测性
+        # （最终评审 Important）。
+        if isinstance(exc, RuntimeError) and "receive" not in str(exc):
+            logger.warning("chat.ws_main_loop_runtime_error exc=%s", exc)

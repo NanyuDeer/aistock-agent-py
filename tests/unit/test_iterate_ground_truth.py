@@ -89,6 +89,9 @@ async def test_generate_data_constrained_gt_deterministic_fields(
     assert attribution["affected_sectors"] == ["半导体", "算力", "新能源"]
     assert attribution["drivers"] == ["隔夜美股暴涨", "外盘传导"]
     assert gt["gt_id"] == "gt_case_t"
+    # A-3（2026-08-14）：GT 版本字段——人工回填/口径升级可追踪；
+    # 四期 Task 3（2026-08-14）：gt_version 1→2（事件库方向先验口径）
+    assert gt.get("gt_version") == 2
 
     # 驱动提取 prompt 必须只含切片语料（断言含电报标题，且含禁止后验要求）
     prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
@@ -137,7 +140,8 @@ async def test_driver_fallback_is_empty_not_index_neutral(iterate_data_dir: obje
             return_value=SimpleNamespace(content="not json")
         )
         gt = await generate_data_constrained_gt(case)
-    assert gt["attribution"]["drivers"] == []
+    attribution = cast("dict[str, object]", gt["attribution"])
+    assert attribution["drivers"] == []
 
 
 """T7 M1: corpus 字段写入测试（钉住 generate_data_constrained_gt 写入 corpus）"""
@@ -162,3 +166,61 @@ async def test_generate_data_constrained_gt_writes_corpus(tmp_path: Path) -> Non
     assert corpus  # 非空
     assert "隔夜美股暴涨" in corpus  # 含电报标题
     assert "纳斯达克涨2.5%" in corpus  # 含电报内容
+
+
+"""四期 Task 3：GT 事件库方向先验（case.meta.direction_hint → source_notes + gt_version 2）"""
+
+
+@pytest.mark.asyncio
+async def test_gt_injects_direction_hint_from_case_meta(tmp_path: Path) -> None:
+    """四期：direction_hint → source_notes 先验 + gt_version=2；direction 仍为快照市场方向。"""
+    from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
+
+    case: dict[str, object] = {
+        "case_id": "case_x", "ground_truth_ref": "gt_case_x",
+        "meta": {"t_window": "event", "source": "event_store", "direction_hint": "bullish"},
+        "window_before": {
+            "market_snapshot": {
+                "a_share": {"indexes": {"000001": {"change_pct": -1.5}}},  # 快照方向 = bearish
+            },
+            "cls_telegraph": [{"title": "央行降准", "content": "央行宣布降准"}],
+        },
+    }
+    with patch("aistock_agent.iterate.ground_truth.llm_service") as mock_llm:
+        mock_llm.get_deep_think.return_value = None  # LLM 失败 → drivers 兜底空
+        # I2：data_dir 必须指向 tmp_path，不得写真实 iterate 数据目录
+        gt = await generate_data_constrained_gt(case, data_dir=tmp_path)
+    attribution = cast("dict[str, object]", gt["attribution"])
+    assert gt["gt_version"] == 2
+    assert attribution["direction"] == "bearish"          # 快照方向不变（change_pct -1.5）
+    notes = cast("list[str]", attribution.get("source_notes", []))
+    assert "bullish" in " ".join(notes)  # 先验注入
+
+
+@pytest.mark.asyncio
+async def test_gt_ignores_invalid_direction_hint(tmp_path: Path) -> None:
+    """四期：direction_hint 非法/缺省 → source_notes 无先验，gt_version 仍 2。"""
+    from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
+
+    for meta in (
+        {"t_window": "event", "source": "telegraph"},  # 缺省
+        {"t_window": "event", "source": "event_store", "direction_hint": "sideways"},  # 非法
+    ):
+        case: dict[str, object] = {
+            "case_id": "case_y", "ground_truth_ref": "gt_case_y",
+            "meta": meta,
+            "window_before": {
+                "market_snapshot": {
+                    "a_share": {"indexes": {"000001": {"change_pct": 1.2}}},
+                },
+                "cls_telegraph": [{"title": "标题", "content": "内容"}],
+            },
+        }
+        with patch("aistock_agent.iterate.ground_truth.llm_service") as mock_llm:
+            mock_llm.get_deep_think.return_value = None
+            # I2：data_dir 指向 tmp_path（gt_case_y.json 落在临时目录，不污染真实库）
+            gt = await generate_data_constrained_gt(case, data_dir=tmp_path)
+        attribution = cast("dict[str, object]", gt["attribution"])
+        assert gt["gt_version"] == 2
+        notes = cast("list[str]", attribution.get("source_notes", []))
+        assert " ".join(notes) == ""  # 无先验注入

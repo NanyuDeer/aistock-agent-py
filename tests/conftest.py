@@ -7,6 +7,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _ensure_tmp_repo_git(tmp_path: Path) -> None:
+    """C-3（2026-08-14）：迭代集成测试以 tmp_path 作为 repo_root 时须视为
+    git 仓库（_check_repo_environment 判定 has_git），否则变体轮被跳过。"""
+    (tmp_path / ".git").mkdir(exist_ok=True)
+
+
+@pytest.fixture(autouse=True)
 def _reset_sse_appstatus():
     """每个测试前重置 sse-starlette 的类级 AppStatus。
 

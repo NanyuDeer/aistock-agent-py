@@ -1,10 +1,15 @@
-"""Event Consumers -- evening_chain 5 个事件消费者。
+"""Event Consumers -- evening_chain 事件消费者（6 个消费者，2 个消费组）。
 事件流：
-  review_quick -> ReviewQuickConsumer -> snapshot(quick)
-  review_full  -> ReviewFullConsumer  -> snapshot(full) -> iterate -> broadcast
-  snapshot     -> SnapshotConsumer     -> iterate（仅 full）
-  iterate      -> IterateConsumer      -> broadcast
-  broadcast    -> BroadcastConsumer    （终点）
+  review_quick -> ReviewQuickConsumer -> snapshot(quick) -> broadcast（quick 晚间播报）
+  review_full  -> ReviewFullConsumer    -> snapshot(full) -> iterate -> broadcast
+                                         └-> review_done（仅 status=ok）-> PredictionConsumer
+  snapshot     -> SnapshotConsumer      -> quick：broadcast；full：iterate
+  iterate      -> IterateConsumer       -> broadcast
+  broadcast    -> BroadcastConsumer     （终点）
+  review_done  -> PredictionConsumer    （独立消费组 prediction_chain）
+
+消费组：5 个既有消费者走默认组 evening_chain；PredictionConsumer 独立
+group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）。
 """
 
 import asyncio
@@ -19,6 +24,11 @@ from aistock_agent.agents.workers.review import run_review
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
+from aistock_agent.services.prediction_service import (
+    TraceUnavailableError,
+    predict_from_trace,
+    save_skipped_prediction,
+)
 from aistock_agent.services.snapshot_builder import build_snapshot
 from aistock_agent.utils.brief_contract import (
     build_iterate_brief_summary,
@@ -30,9 +40,20 @@ logger = get_logger()
 # 通道名称常量
 CHANNEL_REVIEW_QUICK = "review_quick"
 CHANNEL_REVIEW_FULL = "review_full"
+CHANNEL_REVIEW_DONE = "review_done"
 CHANNEL_SNAPSHOT = "snapshot"
 CHANNEL_ITERATE = "iterate"
 CHANNEL_BROADCAST = "broadcast"
+
+# PredictionConsumer 消费组（独立于 evening_chain，S1/S2）
+PREDICTION_CONSUMER_GROUP = "prediction_chain"
+
+# llm_failed/parse_failed 的 retry-once 退避秒数（S2）
+PREDICTION_RETRY_BACKOFF_SEC = 2
+
+
+class PredictionRetryExhaustedError(Exception):
+    """预测 retry-once 后仍 llm/parse 失败：事件级失败，交由 EventBus retry → DLQ。"""
 
 
 class ConsumerContext:
@@ -49,6 +70,9 @@ class BaseConsumer(ABC):
     def __init__(self, ctx: ConsumerContext) -> None:
         self.ctx = ctx
 
+    # 消费组：None 使用 EventBus 默认组（evening_chain）；独立链路覆盖为专属组
+    consumer_group: str | None = None
+
     @property
     @abstractmethod
     def channel(self) -> str:
@@ -57,6 +81,19 @@ class BaseConsumer(ABC):
     @abstractmethod
     async def handle(self, event: Event) -> None:
         """处理事件。失败时由 run_loop 统一 retry。"""
+
+
+async def publish_review_done(event_bus: EventBus, *, report_date: str, trace_id: str) -> None:
+    """发布 review_done（幂等 event_id=review_done_{date}_{trace_id}；失败仅告警不阻断 review）。"""
+    try:
+        await event_bus.publish(
+            CHANNEL_REVIEW_DONE,
+            payload={"report_date": report_date, "trace_id": trace_id},
+            event_id=f"review_done_{report_date}_{trace_id}",
+        )
+        logger.info("review_done_published", report_date=report_date, trace_id=trace_id)
+    except Exception as exc:
+        logger.warning("review_done_publish_failed", error=str(exc), exc_info=True)
 
 
 class ReviewQuickConsumer(BaseConsumer):
@@ -70,11 +107,21 @@ class ReviewQuickConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        await run_review(
+        result = await run_review(
             report_date=report_date,
             snapshot_kind="quick",
             trace_id=trace_id,
         )
+
+        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）：
+        # 降级/跳过不发；publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
+        # 为什么补齐：quick 改进版欲替代 full，需同样支撑次日预测（编排缺口 #1）。
+        if result.status == "ok":
+            await publish_review_done(
+                self.ctx.event_bus,
+                report_date=result.report_date,
+                trace_id=result.trace_id,
+            )
 
         # quick review 完成后触发 quick snapshot
         await self.ctx.event_bus.publish(
@@ -99,11 +146,20 @@ class ReviewFullConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        await run_review(
+        result = await run_review(
             report_date=report_date,
             snapshot_kind="full",
             trace_id=trace_id,
         )
+
+        # 仅 status=ok 发布 review_done（硬约束 6）：降级/跳过不发；
+        # publish_review_done 内部吞掉发布异常，不阻断后续快照链路
+        if result.status == "ok":
+            await publish_review_done(
+                self.ctx.event_bus,
+                report_date=result.report_date,
+                trace_id=result.trace_id,
+            )
 
         # full review 完成后触发 full snapshot -> iterate -> broadcast 完整链路
         await self.ctx.event_bus.publish(
@@ -149,6 +205,16 @@ class SnapshotConsumer(BaseConsumer):
         if snapshot_kind == "full":
             await self.ctx.event_bus.publish(
                 CHANNEL_ITERATE,
+                payload={"report_date": report_date},
+            )
+        elif snapshot_kind == "quick":
+            # quick snapshot 直接触发 broadcast（晚间双人播报）。
+            # 为什么跳过 iterate：brief_evening 只聚合 review 报告（quick review 已生成），
+            # 不依赖 iterate 分析；quick 链路补跑 iterate 是重复 LLM 消耗且无消费方。
+            # 此前 quick 链路止步 snapshot 不触发 broadcast，15:30 无晚间双人播报
+            # （2026-08-16 修复）。
+            await self.ctx.event_bus.publish(
+                CHANNEL_BROADCAST,
                 payload={"report_date": report_date},
             )
 
@@ -211,7 +277,61 @@ class BroadcastConsumer(BaseConsumer):
         logger.info("broadcast_done", report_date=report_date)
 
 
-def _make_consumer_state(report_date: str, *, intent: str | None = None, brief_type: str | None = None) -> dict[str, object]:
+class PredictionConsumer(BaseConsumer):
+    """review_done 预测消费者（独立消费组 prediction_chain，S1/S2）。
+
+    语义：
+    - ok / gate_skipped：predict_from_trace 内已完成落库，直接收尾；
+    - llm_failed / parse_failed：retry-once（退避 2s）后仍失败 → 抛异常，
+      由 _consumer_loop 的 event_bus.retry(event) 接管（超过 max_retries 进 DLQ）；
+    - TraceUnavailableError：不重试，落 skipped（硬约束 7）。
+    """
+
+    consumer_group = PREDICTION_CONSUMER_GROUP
+
+    @property
+    def channel(self) -> str:
+        return CHANNEL_REVIEW_DONE
+
+    async def handle(self, event: Event) -> None:
+        payload = event.payload
+        report_date = str(payload.get("report_date") or "")
+        trace_id = str(payload.get("trace_id") or "")
+
+        try:
+            result, _ = await predict_from_trace(trace_id, report_date)
+        except TraceUnavailableError as exc:
+            # 溯源不可用：不重试，直接落 skipped（缓存/DB 均无法重建 trace）
+            await save_skipped_prediction(f"review:{report_date}", str(exc))
+            logger.warning("prediction_trace_unavailable", report_date=report_date, error=str(exc))
+            return
+
+        if result.status in {"ok", "gate_skipped"}:
+            # ok 已完整落库；gate_skipped 已落 skipped（predict_from_trace 内完成）
+            logger.info("prediction_done", status=result.status, report_date=report_date)
+            return
+
+        if result.status in {"llm_failed", "parse_failed"}:
+            # retry-once（指数退避），仅可重试状态（S2）
+            await asyncio.sleep(PREDICTION_RETRY_BACKOFF_SEC)
+            result, _ = await predict_from_trace(trace_id, report_date)
+            if result.status in {"llm_failed", "parse_failed"}:
+                # 事件级失败 → _consumer_loop 捕获后 event_bus.retry(event) → DLQ
+                raise PredictionRetryExhaustedError(
+                    f"prediction retry exhausted: status={result.status}, report_date={report_date}"
+                )
+            logger.info("prediction_retry_succeeded", status=result.status, report_date=report_date)
+            return
+
+        raise RuntimeError(f"unexpected prediction status: {result.status}")
+
+
+def _make_consumer_state(
+    report_date: str,
+    *,
+    intent: str | None = None,
+    brief_type: str | None = None,
+) -> dict[str, object]:
     """构造 consumer 触发的 AgentState（trigger_source=scheduler 使报告写 DB）。"""
     state: dict[str, object] = {
         "messages": [],
@@ -241,21 +361,30 @@ _all_tasks: list[asyncio.Task] = []
 async def _consumer_loop(
     consumer: BaseConsumer,
     consumer_name: str,
+    *,
     block_ms: int = 5000,
+    group: str | None = None,
 ) -> None:
-    """单个 consumer 的消费循环。"""
-    logger.info("consumer_started", channel=consumer.channel, consumer=consumer_name)
+    """单个 consumer 的消费循环。
+
+    group：消费组名；None 使用 EventBus 默认组（evening_chain）。
+    独立链路（如 prediction_chain）由 start_all_consumers 显式传入。
+    """
+    logger.info("consumer_started", channel=consumer.channel, consumer=consumer_name, group=group)
     while True:
         try:
             events = await consumer.ctx.event_bus.consume(
                 consumer.channel,
                 consumer_name,
                 block_ms=block_ms,
+                group=group,
             )
             for event in events:
                 try:
                     await consumer.handle(event)
-                    await consumer.ctx.event_bus.ack(consumer.channel, event.event_id)
+                    await consumer.ctx.event_bus.ack(
+                        consumer.channel, event.event_id, group=event.group
+                    )
                 except Exception as e:
                     logger.error(
                         "consumer_handle_failed",
@@ -269,23 +398,33 @@ async def _consumer_loop(
             logger.info("consumer_cancelled", channel=consumer.channel)
             raise
         except Exception as e:
-            logger.error("consumer_loop_error", channel=consumer.channel, error=str(e), exc_info=True)
+            logger.error(
+                "consumer_loop_error",
+                channel=consumer.channel,
+                error=str(e),
+                exc_info=True,
+            )
             await asyncio.sleep(1)
 
 
 def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
-    """启动全部 5 个消费者。返回 Task 列表用于管理。"""
+    """启动全部 6 个消费者。返回 Task 列表用于管理。
+
+    消费组：PredictionConsumer 走独立组 prediction_chain；
+    其余 5 个不传 group（默认组 evening_chain），保持既有行为零改动。
+    """
     consumers = [
         ReviewQuickConsumer(ctx),
         ReviewFullConsumer(ctx),
         SnapshotConsumer(ctx),
         IterateConsumer(ctx),
         BroadcastConsumer(ctx),
+        PredictionConsumer(ctx),
     ]
     tasks = []
     for c in consumers:
         name = f"{c.channel}_consumer"
-        task = asyncio.create_task(_consumer_loop(c, name), name=name)
+        task = asyncio.create_task(_consumer_loop(c, name, group=c.consumer_group), name=name)
         tasks.append(task)
     _all_tasks.extend(tasks)
     return tasks

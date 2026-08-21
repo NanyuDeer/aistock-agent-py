@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from datetime import UTC, datetime, timedelta, timezone
@@ -881,11 +882,18 @@ def _normalize_search_facts(
         ("tavily_search_2", "tavily_global_risk", tavily_result_2, fetch_errors[1]),
     ]:
         results = tavily_result.get("results") if isinstance(tavily_result, dict) else None
+        # T4：溯源透传 — 读 result 的 provider 键（failover 命中 doubao/anysearch 时
+        # 保留真实命中源）；fetch 失败路径 result 为 {}，兜底回 "tavily"。
+        provider = (
+            str(tavily_result.get("provider", "tavily"))
+            if isinstance(tavily_result, dict)
+            else "tavily"
+        )
         if fetch_error is not None:
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="unavailable",
-                provider="tavily",
+                provider=provider,
                 reason=type(fetch_error).__name__,
             )
             continue
@@ -893,7 +901,7 @@ def _normalize_search_facts(
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="empty",
-                provider="tavily",
+                provider=provider,
                 reason="provider_returned_no_items",
             )
             continue
@@ -918,7 +926,7 @@ def _normalize_search_facts(
             sources[source_id] = SourceRecord(
                 source_id=source_id,
                 kind="event_evidence",
-                provider="tavily",
+                provider=provider,
                 title=_safe_str(item.get("title"), "无标题"),
                 content=_safe_str(item.get("content", ""))[:500],
                 url=url,
@@ -932,13 +940,25 @@ def _normalize_search_facts(
             _append_missing(missing_fields, label)
             statuses[status_key] = SourceCollectionStatus(
                 state="invalid_for_causality",
-                provider="tavily",
+                provider=provider,
                 item_count=len(results),
                 reason="items_missing_url",
             )
         else:
+            outcome = (
+                tavily_result.get("outcome") if isinstance(tavily_result, dict) else "ok"
+            )
+            # T4：仅低质 fallback（outcome=degraded 且 provider != tavily）标记
+            # state=degraded；其余保持既有语义 available（内联三元保持 Literal 窄化，
+            # 中间变量会被 mypy 拓宽为 str）。
             statuses[status_key] = SourceCollectionStatus(
-                state="available", provider="tavily", item_count=source_count
+                state=(
+                    "degraded"
+                    if outcome == "degraded" and provider != "tavily"
+                    else "available"
+                ),
+                provider=provider,
+                item_count=source_count,
             )
     return statuses
 
@@ -958,12 +978,26 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     # ── 1. 获取 Node 收盘快照（带 last-close 降级） ──
     # 先尝试 close-snapshot（要求 >= 15:30）；若不可用（盘中/凌晨），
     # 降级到 last-close-snapshot（返回最近一个已完成交易日数据）。
-    close_data = await node_api.get("/internal/market/close-snapshot")
+    # 三期：按目标交易日回补（date=report_date 对任意目标日走 Node 伪时刻重建；
+    # 非交易日/数据缺失 → Node 409 → data_client.get 返回 None → 现有降级链
+    # last-close + trade_date 校验行为不变）。
+    close_data = await node_api.get(f"/internal/market/close-snapshot?date={report_date}")
     used_last_close = False
     if close_data is None:
         close_data = await node_api.get_last_close_snapshot()
         if close_data is not None:
             used_last_close = True
+            actual = _normalize_date_yyyymmdd(close_data.get("trade_date"))
+            # 三期 C2 修复：历史回补时 last-close 兜底数据日 ≠ 请求日 → fail-loud
+            # （否则快照盖章为请求日但数据是最近交易日，产错日 case 进闭环）。
+            # 用 _normalize_date_yyyymmdd 规范化比较，兼容 Node 的 YYYYMMDD/YYYY-MM-DD
+            # 两种格式；no-date 路径 report_date 即最近交易日，兜底 actual == report_date
+            # 正常通过，每日产片零影响。
+            if actual is not None and actual != report_date:
+                raise MarketTraceSnapshotUnavailable(
+                    f"last-close 兜底数据日 {actual} 与请求日期 {report_date} "
+                    "不一致（非交易日或数据缺失，拒绝产片）"
+                )
             logger.info(
                 "build_snapshot_fell_back_to_last_close",
                 report_date=report_date,
@@ -1088,13 +1122,17 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
     tavily_error_1: Exception | None = None
     tavily_error_2: Exception | None = None
     try:
-        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
+        tavily_result_1 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_1, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
         tavily_error_1 = e
     try:
-        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
+        tavily_result_2 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_2, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}
@@ -1199,7 +1237,8 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     - 调用 /internal/market/quick-snapshot（腾讯行情）而非
       /internal/market/close-snapshot（Tushare）
     - 不校验 coverage.current_daily.complete（quick 版 coverage 不完整是正常的）
-    - 不校验 previous_daily（quick 版无前日数据）
+    - 需校验 coverage.previous_daily.complete（编排缺口 #3：quick 改进版替代 full，
+      Node 已用 Tushare 前日填充；前日缺失即 fail-loud，不伪造"已收盘"）
     - 其余归一化、discovery 逻辑与 full 版一致
 
     Raises:
@@ -1216,6 +1255,19 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     if close_data.get("status") != "complete":
         raise MarketTraceSnapshotUnavailable(
             f"Node quick-snapshot status is not complete: {close_data.get('status')}"
+        )
+
+    # 校验 coverage.previous_daily.complete（编排缺口 #3）。
+    # 为什么与 current_daily 分开：quick 版当日 coverage 不完整是正常的（腾讯近似），
+    # 但前日必须已由 Node 用 Tushare 填充并 complete，否则拒绝产片——与 full 硬门槛对齐，
+    # 让 quick 改进版能替代 full 而不会在 previous_daily 滞后的场景产错日报告。
+    coverage = close_data.get("coverage")
+    coverage_dict = coverage if isinstance(coverage, dict) else {}
+    previous_daily = coverage_dict.get("previous_daily")
+    previous_daily_dict = previous_daily if isinstance(previous_daily, dict) else {}
+    if previous_daily_dict.get("complete") is not True:
+        raise MarketTraceSnapshotUnavailable(
+            "Node quick-snapshot coverage.previous_daily.complete is not True"
         )
 
     # ── 2. 校验 trade_date ──
@@ -1294,13 +1346,17 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     tavily_error_1: Exception | None = None
     tavily_error_2: Exception | None = None
     try:
-        tavily_result_1 = TavilyService.search(query=tavily_query_1, topic="news", max_results=5)
+        tavily_result_1 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_1, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_1_failed", error_class=type(e).__name__)
         tavily_result_1 = {}
         tavily_error_1 = e
     try:
-        tavily_result_2 = TavilyService.search(query=tavily_query_2, topic="news", max_results=5)
+        tavily_result_2 = await asyncio.to_thread(
+            TavilyService.search, query=tavily_query_2, topic="news", max_results=5
+        )
     except Exception as e:
         logger.warning("tavily_search_2_failed", error_class=type(e).__name__)
         tavily_result_2 = {}

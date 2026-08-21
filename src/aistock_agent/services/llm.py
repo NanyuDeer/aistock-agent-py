@@ -12,6 +12,7 @@
 import os
 from typing import Any
 
+import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
@@ -19,6 +20,9 @@ from pydantic import BaseModel, SecretStr
 
 from aistock_agent.config import settings
 from aistock_agent.observability.callback import get_default_callbacks
+from aistock_agent.services.http_client import LlmHttpClient
+
+logger = structlog.get_logger()
 
 
 def _setup_langsmith_tracing() -> None:
@@ -59,7 +63,25 @@ def _normalize_openai_base_url(base_url: str) -> str:
 _LLM_REQUEST_TIMEOUT_SECONDS = 600
 
 
-def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
+def _effective_temperature(base: float, override: float | None) -> float:
+    """温度解析：显式参数 > env 覆盖 > settings 默认。
+
+    C-1（2026-08-14）：回放子进程通过 AISTOCK_LLM_TEMPERATURE_OVERRIDE 注入
+    统一温度（如 T=0），使回放内所有 LLM 调用（extract/judge/agent 输出）
+    确定性一致，评分可复现。
+    """
+    if override is not None:
+        return override
+    env_val = os.environ.get("AISTOCK_LLM_TEMPERATURE_OVERRIDE", "")
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            logger.warning("llm_temperature_override_invalid", value=env_val)
+    return base
+
+
+def get_quick_think(*, observe: bool = True, temperature: float | None = None) -> ChatOpenAI:
     """快速模型，用于意图分类和简单任务。
 
     Args:
@@ -67,12 +89,14 @@ def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
             （token 用量统计 + agent 追踪），主链路计费依赖此行为，存量调用
             无需改动；False —— 不挂 callbacks，用于 reasoning 旁路（问题 17，
             2026-08-11 拍板），该旁路 token 不计入用户账单。
+        temperature: 按调用覆盖温度（C-1，2026-08-14）；None 时回退
+            AISTOCK_LLM_TEMPERATURE_OVERRIDE env，再回退 settings 默认。
     """
     return ChatOpenAI(
         model=settings.quick_think_model,
         api_key=SecretStr(settings.openai_api_key),
         base_url=_normalize_openai_base_url(settings.openai_base_url),
-        temperature=settings.quick_think_temperature,
+        temperature=_effective_temperature(settings.quick_think_temperature, temperature),
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
         # 可观测性回调：token 用量统计 + agent 追踪（不侵入业务逻辑）
@@ -80,6 +104,8 @@ def get_quick_think(*, observe: bool = True) -> ChatOpenAI:
         callbacks=_get_observability_callbacks() if observe else None,
         # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
         request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
+        # 复用受限 httpx 连接池（消除向 DeepSeek 连接 CLOSE-WAIT 堆积，2026-08-17）
+        http_async_client=LlmHttpClient.client(),
     )
 
 
@@ -87,6 +113,7 @@ def get_deep_think(
     *,
     extra_body: dict[str, Any] | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> ChatOpenAI:
     """深度模型，用于复杂分析和推理
 
@@ -94,6 +121,9 @@ def get_deep_think(
     若未配置则 fallback 到默认 OPENAI_API_KEY / OPENAI_BASE_URL。
     max_tokens：按调用覆盖全局 deep_think_max_tokens（如变体生成需要
     输出完整文件内容，4000 默认值会被截断）。
+    temperature：按调用覆盖（C-1，2026-08-14，如 judge T=0 主路径）；
+    None 时回退 AISTOCK_LLM_TEMPERATURE_OVERRIDE env（回放子进程注入，
+    使回放内所有调用统一温度），再回退 settings 默认。
     """
     api_key = settings.deep_think_api_key or settings.openai_api_key
     base_url = settings.deep_think_base_url or settings.openai_base_url
@@ -101,13 +131,15 @@ def get_deep_think(
         model=settings.deep_think_model,
         api_key=SecretStr(api_key),
         base_url=_normalize_openai_base_url(base_url),
-        temperature=settings.deep_think_temperature,
+        temperature=_effective_temperature(settings.deep_think_temperature, temperature),
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
         max_tokens=max_tokens if max_tokens is not None else settings.deep_think_max_tokens,  # type: ignore[call-arg]
         callbacks=_get_observability_callbacks(),
         extra_body=extra_body,
         # 显式请求超时，防止长尾请求无限挂起（2026-08-13 迭代闭环事故防御）
         request_timeout=_LLM_REQUEST_TIMEOUT_SECONDS,
+        # 复用受限 httpx 连接池（消除向 DeepSeek 连接 CLOSE-WAIT 堆积，2026-08-17）
+        http_async_client=LlmHttpClient.client(),
     )
 
 

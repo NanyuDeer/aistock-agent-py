@@ -1091,15 +1091,16 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.qa_mode_enabled = False
             mock_settings.scheduler_enabled = True
             mock_settings.quick_snapshot_enabled = True
-            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
-            mock_settings.scheduler_review_quick_cron = "30 15 * * 1-5"
-            mock_settings.scheduler_review_full_cron = "30 20 * * 1-5"
-            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
-            mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-11,13-14 * * 1-5"
-            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 1-5"
-            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 1-5"
+            mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
+            mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
+            mock_settings.scheduler_review_quick_cron = "30 15 * * 0-4"
+            mock_settings.scheduler_review_full_cron = "30 20 * * 0-4"
+            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 0-4"
+            mock_settings.scheduler_prediction_stats_cron = "5 16 * * 0-4"
+            mock_settings.scheduler_event_scrape_cron = "45 8 * * 0-4"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
+            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
+            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1107,7 +1108,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
     assert "review_quick" in job_ids
     assert "review_full" in job_ids
     assert "prediction_validate" in job_ids
-    assert "event_scrape_early" in job_ids
+    assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
     assert "evening_chain" not in job_ids
 
@@ -1124,21 +1125,22 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.qa_mode_enabled = False
             mock_settings.scheduler_enabled = True
             mock_settings.quick_snapshot_enabled = False
-            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
-            mock_settings.scheduler_review_cron = "30 15 * * 1-5"
-            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 1-5"
-            mock_settings.scheduler_event_scrape_cron = "30 7 * * 1-5"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-11,13-14 * * 1-5"
-            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 1-5"
-            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 1-5"
+            mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
+            mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
+            mock_settings.scheduler_review_cron = "30 15 * * 0-4"
+            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 0-4"
+            mock_settings.scheduler_prediction_stats_cron = "5 16 * * 0-4"
+            mock_settings.scheduler_event_scrape_cron = "45 8 * * 0-4"
+            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
+            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
+            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
     assert "evening_chain" in job_ids
     assert "prediction_validate" in job_ids
-    assert "event_scrape_early" in job_ids
+    assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
     assert "review_quick" not in job_ids
 

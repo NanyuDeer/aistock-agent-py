@@ -1,10 +1,9 @@
 """Stock Trace 的确定性跨对象校验。"""
 
 from aistock_agent.schemas.stock_trace import StockTraceResult, StockTraceSnapshot
+from aistock_agent.trace.chain import TRACE_CHAIN_STAGES
 
-STAGES = (
-    "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
-)
+STAGES = TRACE_CHAIN_STAGES
 
 
 class StockTraceValidationError(ValueError):

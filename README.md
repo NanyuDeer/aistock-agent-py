@@ -49,9 +49,14 @@ mypy src/
 - LLM: langchain-openai（支持 DeepSeek/OpenAI）
 - 缓存: Redis（会话持久化 + 晨报缓存）
 - 境外数据: yfinance（美股/亚太/大宗/汇率）
-- 全网搜索: Tavily
+- 全网搜索: 多供应商 failover（Tavily 主源 → Doubao → AnySearch 兜底，链路顺序固定，`SEARCH_ENABLED_PROVIDERS` 只控制启停不控制顺序）
 - 抖音视频转写: requests + ffmpeg-python（硅基流动 SenseVoice；FFmpeg/FFprobe 为宿主二进制依赖）
 - 配置: pydantic-settings
+
+> **全网搜索削峰现状（2026-08-18，如实记录）**：需求侧 TTL 缓存尚未上线，当前容量仅由
+> **provider 惰性注册**（未配置 key 的 provider 不注册，避免空转）与**请求级 budget fail-fast**
+> （`SEARCH_BUDGET_SECONDS`，默认 10s 整链预算）承担。**不要误以为已削峰**——多供应商 failover
+> 只缓解单源限流，高峰期容量仍取决于各源 key 配额与预算上限；TTL 缓存为后续可选增强。
 
 ## 架构
 
@@ -70,7 +75,8 @@ mypy src/
 │  · LangGraph 图编排                      │
 │  · 通过 /internal/* 回调 Node.js 拿数据  │
 │  · yfinance：境外指数/大宗/汇率           │
-│  · Tavily：全网财经新闻搜索              │
+│  · 全网搜索：Tavily + Doubao/AnySearch    │
+│    多供应商 failover 兜底                 │
 └─────────────────────────────────────────┘
 ```
 
@@ -266,9 +272,8 @@ content = {
 
 | job_id | cron | 说明 |
 |--------|------|------|
-| `event_scrape_daily` | `30 7 * * 1-5` | 07:30 盘前档，full_daily 全量抓取 |
-| `event_scrape_early` | `45 8 * * 1-5` | 08:45 早间刷新档，intraday 增量（晨报 08:50 读库前最后一刷，H5，2026-08-13） |
-| `event_scrape_intraday` | `0 10-11,13-14 * * 1-5` | 10:00-11:00、13:00-14:00 每小时，intraday 增量抓取（M8：避开 11:30-13:00 A 股午休，原 10-14 含 12:00 午休档属空跑） |
+| `event_scrape_daily` | `45 8 * * 1-5` | 08:45 盘前档，full_daily 全量抓取（2026-08-13 起由 07:30 调整，紧邻晨报 08:50） |
+| `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时（含 12:00 午间档），intraday 增量抓取（2026-08-13 恢复 12:00） |
 | `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
 
 **事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`。
@@ -357,7 +362,7 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录（Phase 4）
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,hot_burst,wind_leader,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
@@ -370,7 +375,12 @@ src/aistock_agent/
 │   ├── tavily.py        # Tavily 客户端封装层（Key 轮换，供 search_tools 调用）
 │   ├── snapshot_builder.py  # 快照生成器 service（复盘流水线，文件I/O+MA+manifest+板块匹配+LLM 4维评估+语义匹配）
 │   ├── data_guard.py    # 空数据预检（ensure_data_available + DataCheck，规范13，scheduler触发时预检Node.js数据源）
+│   ├── insight_candidate.py  # 洞察候选抽取（证据包多来源 + 时效分层 _time_factor / extract_candidates_from_evidence）
+│   ├── insight_validator.py  # 洞察归因校验（一期正文锚定 + 二期证据包锚定 validate_attribution_from_evidence + 置信度封顶 confidence_cap_for_evidence）
 │   └── scheduler.py     # APScheduler 定时调度（lifespan 管理，交易日 08:50/09:00/15:30/15:35/15:40）
+├── workers/             # 独立消费者（非 LangGraph 图内节点）
+│   ├── insight_worker.py    # 自选股洞察归因 worker（证据包路径 / 单篇正文路径双分支）
+│   └── insight_consumer.py  # Redis Stream 消费端（watchlist-insight.jobs → 归因 → 回写）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
@@ -448,6 +458,9 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package，insight_worker 消费） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定 pushCreated/pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/push/market-event` | 微信+飞书推送 | 市场事件重磅推送（Python morning_agent 触发，fire-and-forget） |
 | `GET /internal/health` | - | 轻量健康探针（供 Python `/health/ready` 探测，Phase 5） |
@@ -519,7 +532,14 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/1` |
 | `REDIS_MAX_CONNECTIONS` | Redis 连接池最大连接数 | `10` |
 | `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
-| `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | - |
+| `TAVILY_API_KEY` | Tavily 搜索 API 密钥（单 key 兼容） | - |
+| `TAVILY_API_KEYS` | Tavily 搜索 API 密钥池（逗号分隔，优先于单 key） | - |
+| `DOUBAO_API_KEY` | Doubao 兜底搜索 API 密钥（单 key 兼容） | - |
+| `DOUBAO_API_KEYS` | Doubao 兜底搜索 API 密钥池（逗号分隔） | - |
+| `ANYSEARCH_API_KEY` | AnySearch 兜底搜索 API 密钥（单 key 兼容） | - |
+| `ANYSEARCH_API_KEYS` | AnySearch 兜底搜索 API 密钥池（逗号分隔） | - |
+| `SEARCH_ENABLED_PROVIDERS` | 启用的搜索 provider 集合（逗号分隔；只控制启停不控制顺序，链路固定 tavily→doubao→anysearch；空=默认 `tavily,doubao,anysearch`；未配 key 的 provider 惰性不注册） | 空（=默认全部） |
+| `SEARCH_BUDGET_SECONDS` | 整链 fail-fast 总预算（秒），全部 provider 共用 | `10.0` |
 | `INTERNAL_API_TOKEN` | 内网鉴权 Token | `change-me-in-production` |
 | `CORS_ORIGINS` | CORS 允许的源列表（逗号分隔或 JSON 数组） | `*` |
 | `HEALTH_CHECK_LLM` | `/health/ready` 是否探测 LLM 连通性（默认跳过避免消耗 token） | `false` |
@@ -564,8 +584,10 @@ docker run -p 8080:8080 --env-file .env aistock-agent
 
 ## 迭代 Agent 自动闭环
 
-- 模块：`src/aistock_agent/iterate/`（adapters/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
+- 模块：`src/aistock_agent/iterate/`（adapters/case_sourcers/case_pipeline/case_builder/ground_truth/replay_layer/variant_engine/evaluator/reporter/scheduler）
 - 机制：历史切片（T 窗口固化）→ 数据约束标准答案（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）→ 变体实验（目标区域补丁 + 沙盒分支）→ 归因相似度评分（方向 0.2/要素 0.5/板块 0.3，重归一化）+ iterated.json 去重
 - 部署：服务器 worktree 沙盒 `/home/aistock/iterate-sandbox`（experiment-iterate 分支），主目录 master 只 pull 不 push
 - 触发：交易日 16:30 产片 + 17:00 消费/报告（`ITERATE_ENABLED=true`）或 `python -m aistock_agent.iterate.run_case <agent_id> <case_id>`
-- 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter` 即可
+- 产片源（`iterate/case_sourcers.py` 注册表，清单封闭）：`market_close_snapshot`（review 收盘快照）；`event_store_scan`（event_analyst 主源，逐日读事件库 `load_event_scrape` + `is_major_event` 过滤，2026-08-14 四期 Task 1）+ `telegraph_keyword_scan`（后备，30 天电报关键词重大事件）
+- GT 消费（四期 Task 3，2026-08-14）：`generate_data_constrained_gt` 读 `case.meta.direction_hint`（事件库事件方向）注入 `source_notes` + 驱动语料增强（`gt_version` 2）；GT `direction` 仍为快照市场方向，不被事件方向覆盖（evaluator 计分语义不变）
+- 接入新 agent：在 `iterate/adapters.py` 注册一条 `IterableAgentAdapter`（二期起须同时声明非空 `case_sources` 产片源，Task 1，2026-08-14）即可
