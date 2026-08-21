@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     stock_trace_structured_output_method: Literal[
         "function_calling", "json_mode", "json_schema"
     ] = "function_calling"
+    # SNAPSHOT_NOT_READY 空转兜底：首次命中起超过该秒数仍未就绪 → SNAPSHOT_TIMEOUT 死信
+    stock_trace_snapshot_not_ready_timeout_seconds: int = 600
 
     # ===== 自选股洞察（watchlist insight）=====
     # 独立 Redis db，与 stock_trace db=2 隔离

@@ -12,6 +12,7 @@ from redis.typing import EncodableT
 
 from aistock_agent.agents.workers.stock_trace import StockTraceWorker
 from aistock_agent.config import settings
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.stock_trace_client import StockTraceNodeClient
@@ -19,6 +20,7 @@ from aistock_agent.services.stock_trace_client import StockTraceNodeClient
 STREAM = "stock-trace.jobs"
 DLQ_STREAM = "stock-trace.jobs.dlq"
 logger = structlog.get_logger()
+_metrics = get_metrics_collector()
 
 
 # 心跳可观测性：供 /health/ready 检查 consumer 是否卡死。
@@ -112,17 +114,37 @@ class StockTraceConsumer:
             if writeback is not None:
                 await self._node_client.report_job(job_id, "completed")
                 await self._redis.xack(STREAM, self._group, message_id)
+                await self._redis.delete(f"stock_trace:snapshot_pending:{job_id}")
                 logger.info("stock_trace_job_completed", job_id=job_id, event_id=event_id)
                 return
             await self._handle_failure(message_id, fields, job_id, "NODE_WRITEBACK_FAILED")
             return
         if outcome.error_code == "SNAPSHOT_NOT_READY":
             await self._node_client.report_job(job_id, "queued", error_code=outcome.error_code)
+            _metrics.record_stock_trace_snapshot_not_ready()
+            # 超时兜底：首次命中起超过阈值仍未就绪 → SNAPSHOT_TIMEOUT 死信，杜绝无限空转
+            if await self._snapshot_pending_expired(job_id):
+                await self._dead_letter(message_id, fields, "SNAPSHOT_TIMEOUT")
+                return
             # 不确认消息：快照就绪后由 pending reclaim 重新执行。
             return
         await self._handle_failure(
             message_id, fields, job_id, outcome.error_code or "WORKER_FAILED"
         )
+
+    async def _snapshot_pending_expired(self, job_id: str) -> bool:
+        """记录首次 SNAPSHOT_NOT_READY 时间；超过阈值返回 True（由调用方死信）。"""
+        key = f"stock_trace:snapshot_pending:{job_id}"
+        raw = await self._redis.get(key)
+        now = int(time.time())
+        if raw is None:
+            await self._redis.setex(key, 3600, str(now))
+            return False
+        elapsed = now - int(raw)
+        if elapsed > settings.stock_trace_snapshot_not_ready_timeout_seconds:
+            logger.warning("stock_trace_snapshot_timeout", job_id=job_id, elapsed_seconds=elapsed)
+            return True
+        return False
 
     async def _handle_failure(
         self, message_id: str, fields: dict[str, str], job_id: str, error_code: str

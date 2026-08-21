@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import UTC, date, datetime
 
 import pytest
@@ -225,10 +226,36 @@ def test_recovers_single_trailing_brace_in_provider_tool_arguments() -> None:
 class FakeRedis:
     def __init__(self) -> None:
         self.acked: list[tuple[str, str, str]] = []
+        self.store: dict[str, str] = {}
+        self.added: list[tuple[str, dict[bytes, bytes]]] = []
 
     async def xack(self, stream: str, group: str, message_id: str) -> int:
         self.acked.append((stream, group, message_id))
         return 1
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        del ttl
+        self.store[key] = value
+
+    async def delete(self, *keys: str) -> int:
+        removed = sum(1 for k in keys if k in self.store)
+        for k in keys:
+            self.store.pop(k, None)
+        return removed
+
+    async def xadd(self, stream: str, payload: dict[bytes, bytes]) -> str:
+        # 模拟真实 redis.asyncio.xadd：str key/value 按协议编码为 bytes。
+        encoded = {
+            (k if isinstance(k, bytes) else str(k).encode()): (
+                str(v).encode()
+            )
+            for k, v in payload.items()
+        }
+        self.added.append((stream, encoded))
+        return "dlq-0"
 
 
 class CompletedWorker:
@@ -255,6 +282,51 @@ async def test_consumer_writes_validated_result_then_acknowledges_job() -> None:
     assert redis_client.acked == [
         ("stock-trace.jobs", "stock-trace-workers", "1710000000000-0")
     ]
+
+
+class SnapshotNotReadyWorker:
+    async def analyze(self, _e: str, _r: int, _v: str) -> StockTraceWorkerOutcome:
+        return StockTraceWorkerOutcome(status="failed", error_code="SNAPSHOT_NOT_READY")
+
+
+@pytest.mark.asyncio
+async def test_consumer_snapshot_not_ready_first_seen_does_not_dead_letter() -> None:
+    redis_client = FakeRedis()
+    consumer = StockTraceConsumer(
+        redis_client,  # type: ignore[arg-type]
+        StockTraceNodeClient(FakeNodeClient()),
+        SnapshotNotReadyWorker(),  # type: ignore[arg-type]
+    )
+    # 首次命中：标记 first_seen，不 dead-letter，不 ack
+    await consumer._consume_message("m-1", {
+        "job_id": "job-1",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "trigger_revision": "1",
+        "analysis_version": "llm-stock-trace-v1",
+    })
+    assert redis_client.acked == []
+    assert redis_client.store["stock_trace:snapshot_pending:job-1"]
+
+
+@pytest.mark.asyncio
+async def test_consumer_snapshot_not_ready_timeout_dead_letters() -> None:
+    redis_client = FakeRedis()
+    # 模拟 first_seen 已超过阈值（10 分钟前）
+    redis_client.store["stock_trace:snapshot_pending:job-1"] = str(int(time.time()) - 601)
+    consumer = StockTraceConsumer(
+        redis_client,  # type: ignore[arg-type]
+        StockTraceNodeClient(FakeNodeClient()),
+        SnapshotNotReadyWorker(),  # type: ignore[arg-type]
+    )
+    await consumer._consume_message("m-1", {
+        "job_id": "job-1",
+        "event_id": "mv:000004:2026-07-30:1:up",
+        "trigger_revision": "1",
+        "analysis_version": "llm-stock-trace-v1",
+    })
+    assert redis_client.added, "超时应进 DLQ"
+    assert redis_client.added[0][0] == "stock-trace.jobs.dlq"
+    assert redis_client.added[0][1][b"error_code"] == b"SNAPSHOT_TIMEOUT"
 
 
 def test_trigger_request_validates_symbol_and_optional_fields() -> None:
