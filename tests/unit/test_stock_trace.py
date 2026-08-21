@@ -128,6 +128,7 @@ def valid_result() -> StockTraceResult:
         "snapshot_id": "snapshot-001",
         "analysis_version": "llm-stock-trace-v1",
         "attribution_status": "confirmed",
+        "primary_phrase": "大额订单利好",
         "primary_chain_id": "chain-1",
         "confidence_score": 0.8,
         "confidence_level": "high",
@@ -142,6 +143,14 @@ def valid_result() -> StockTraceResult:
         }, {
             "candidate_id": "candidate-3", "layer": "market", "rank": 1,
             "status": "insufficient", "verdict": "No market explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-4", "layer": "capital", "rank": 1,
+            "status": "insufficient", "verdict": "No capital explanation is established.",
+            "supporting_evidence_ids": [], "counter_evidence_ids": [],
+        }, {
+            "candidate_id": "candidate-5", "layer": "technical", "rank": 1,
+            "status": "insufficient", "verdict": "No technical explanation is established.",
             "supporting_evidence_ids": [], "counter_evidence_ids": [],
         }],
         "chains": [{
