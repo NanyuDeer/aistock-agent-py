@@ -220,6 +220,91 @@ async def test_worker_returns_validated_structured_result() -> None:
     assert FakeLlm.structured_method == "function_calling"
 
 
+class FakeLlmFailsFirst:
+    calls = 0
+    structured_schema: type[object] | None = None
+
+    def with_structured_output(
+        self, schema: type[object], *, method: str, include_raw: bool = False
+    ) -> "FakeLlmFailsFirst":
+        self.__class__.structured_schema = schema
+        return self
+
+    async def ainvoke(self, _messages: list[object]) -> StockTraceResultPayload:
+        self.__class__.calls += 1
+        if self.__class__.calls == 1:
+            raise StockTraceValidationError("fact node requires evidence")
+        valid = valid_result().model_dump(
+            exclude={
+                "schema_version",
+                "event_id",
+                "snapshot_id",
+                "analysis_version",
+            }
+        )
+        return StockTraceResultPayload.model_validate(valid)
+
+
+class FakeLlmAlwaysFails:
+    calls = 0
+
+    def with_structured_output(
+        self, schema: type[object], *, method: str, include_raw: bool = False
+    ) -> "FakeLlmAlwaysFails":
+        return self
+
+    async def ainvoke(self, _messages: list[object]) -> StockTraceResultPayload:
+        self.__class__.calls += 1
+        raise StockTraceValidationError("confirmed requires high confidence")
+
+
+class FakeLlmGenericError:
+    calls = 0
+
+    def with_structured_output(
+        self, schema: type[object], *, method: str, include_raw: bool = False
+    ) -> "FakeLlmGenericError":
+        return self
+
+    async def ainvoke(self, _messages: list[object]) -> StockTraceResultPayload:
+        self.__class__.calls += 1
+        raise RuntimeError("provider down")
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_once_on_validation_error_then_succeeds() -> None:
+    FakeLlmFailsFirst.calls = 0
+    worker = StockTraceWorker(StockTraceNodeClient(FakeNodeClient()), llm_factory=FakeLlmFailsFirst)
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "completed"
+    assert outcome.result is not None
+    assert FakeLlmFailsFirst.calls == 2, "校验失败应带纠错提示重试一次"
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_once_then_fails_with_validation_rejected() -> None:
+    FakeLlmAlwaysFails.calls = 0
+    worker = StockTraceWorker(
+        StockTraceNodeClient(FakeNodeClient()), llm_factory=FakeLlmAlwaysFails
+    )
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "failed"
+    assert outcome.error_code == "VALIDATION_REJECTED"
+    assert FakeLlmAlwaysFails.calls == 2, "最多重试一次"
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_retry_generic_llm_error() -> None:
+    FakeLlmGenericError.calls = 0
+    worker = StockTraceWorker(
+        StockTraceNodeClient(FakeNodeClient()), llm_factory=FakeLlmGenericError
+    )
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "failed"
+    assert outcome.error_code == "LLM_OR_DEPENDENCY_UNAVAILABLE"
+    assert FakeLlmGenericError.calls == 1, "非校验异常不重试"
+
+
 def test_recovers_single_trailing_brace_in_provider_tool_arguments() -> None:
     arguments = valid_result().model_dump_json(
         exclude={"schema_version", "event_id", "snapshot_id", "analysis_version"}
