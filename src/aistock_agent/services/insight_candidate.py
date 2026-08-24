@@ -185,15 +185,18 @@ def extract_candidates(title: str, keywords: list[str], content: str) -> list[Ca
         )
 
     # L1：正文结构信号（"行业原因：..." / "公司原因：..." 直接引用）
+    # 证据引用不做截断（用户要求保留完整证据），随信号起句截取正文至句末；
+    # 上游正文本身长度受限，起句窗口取 500 字符即可覆盖完整证据句。
+    EVIDENCE_WINDOW = 500
     for signal, category in BODY_SIGNALS.items():
         idx = content.find(signal)
         if idx >= 0:
-            snippet = content[idx : idx + 120]
+            snippet = content[idx : idx + EVIDENCE_WINDOW]
             add(
                 f"{signal}:{snippet[:20]}",
                 category,
                 "body",
-                snippet[:120],
+                snippet,
                 0.9 if signal in ("行业原因", "公司原因") else 0.7,
                 start_idx=idx,
             )
@@ -204,7 +207,7 @@ def extract_candidates(title: str, keywords: list[str], content: str) -> list[Ca
             m.group(1)[:24],
             "company_event",
             "body",
-            m.group(1)[:120],
+            m.group(1),
             0.6,
             start_idx=m.start(),
         )
@@ -297,7 +300,9 @@ def extract_candidates_from_evidence(
             # source 必须落在 _SOURCE_BASE_SCORE 已有键（body/quant/title）：文本证据按正文级 body，
             # 量化证据按 quant，保证 rule_fallback_select 打分不出现 KeyError/NaN
             source="body" if source_type != "quant" else "quant",
-            evidence_quote=(excerpt or title)[:120],
+            # 证据引用保留完整（excerpt 优先，缺失回退 title），不截断：
+            # label 已做 24 字精炼展示名，evidence_quote 承载完整证据供 LLM/前端呈现
+            evidence_quote=(excerpt or title),
             strength=round(base_strength * _time_factor(item), 3),
             suppressed=False,
             time_bucket=str(item.get("time_bucket") or "T0"),

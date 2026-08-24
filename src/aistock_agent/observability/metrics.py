@@ -42,6 +42,16 @@ class MetricsCollector:
         self._synth_degraded = 0
         # T6：deep 升级率基础计数（按 worker 名分桶，D3）
         self._chat_qa_escalations: dict[str, int] = {}
+        # Stock Trace 链路指标
+        self._stock_trace_snapshot_not_ready = 0
+        self._stock_trace_validation_failed: dict[str, int] = {}
+        self._stock_trace_validation_retry_success = 0
+        self._stock_trace_dlq_total: dict[str, int] = {}
+        # 搜索 provider 链路指标（2026-08-24）
+        self._search_attempts: dict[str, int] = {}
+        self._search_failed: dict[str, int] = {}
+        self._search_budget_exhausted = 0
+        self._search_empty = 0
 
     def record_llm_start(self, model: str = "") -> None:
         """记录一次 LLM 调用开始（调用次数 +1）。
@@ -144,6 +154,54 @@ class MetricsCollector:
                 self._chat_qa_escalations.get(worker, 0) + 1
             )
 
+    # ---- Stock Trace 链路指标 ----
+
+    def record_stock_trace_snapshot_not_ready(self) -> None:
+        """记录一次 SNAPSHOT_NOT_READY（快照未就绪空转）命中。"""
+        with self._lock:
+            self._stock_trace_snapshot_not_ready += 1
+
+    def record_stock_trace_validation_failed(self, error_type: str = "") -> None:
+        """记录一次 Stock Trace 结果校验失败（按异常类型分桶）。"""
+        with self._lock:
+            self._stock_trace_validation_failed[error_type] = (
+                self._stock_trace_validation_failed.get(error_type, 0) + 1
+            )
+
+    def record_stock_trace_validation_retry_success(self) -> None:
+        """记录一次 Stock Trace 校验失败后重试成功。"""
+        with self._lock:
+            self._stock_trace_validation_retry_success += 1
+
+    def record_stock_trace_dlq_total(self, error_code: str) -> None:
+        """记录一次 Stock Trace 死信（按 error_code 分桶）。"""
+        with self._lock:
+            self._stock_trace_dlq_total[error_code] = (
+                self._stock_trace_dlq_total.get(error_code, 0) + 1
+            )
+
+    # ---- 搜索 provider 链路指标 ----
+
+    def record_search_attempt(self, provider: str) -> None:
+        """记录一次对某 provider 的搜索尝试。"""
+        with self._lock:
+            self._search_attempts[provider] = self._search_attempts.get(provider, 0) + 1
+
+    def record_search_failed(self, provider: str) -> None:
+        """记录一次某 provider 搜索失败（含 429/网络/解析/provider 返回 error）。"""
+        with self._lock:
+            self._search_failed[provider] = self._search_failed.get(provider, 0) + 1
+
+    def record_search_budget_exhausted(self) -> None:
+        """记录一次搜索总预算耗尽（budget_expired）。"""
+        with self._lock:
+            self._search_budget_exhausted += 1
+
+    def record_search_empty(self) -> None:
+        """记录一次搜索返回空 results（outcome == empty）。"""
+        with self._lock:
+            self._search_empty += 1
+
     def get_metrics(self) -> dict[str, object]:
         """返回当前累计指标快照。
 
@@ -171,6 +229,14 @@ class MetricsCollector:
             skill_degraded = dict(self._skill_degraded)
             synth_degraded = self._synth_degraded
             chat_qa_escalations = dict(self._chat_qa_escalations)
+            stock_trace_snapshot_not_ready = self._stock_trace_snapshot_not_ready
+            stock_trace_validation_failed = dict(self._stock_trace_validation_failed)
+            stock_trace_validation_retry_success = self._stock_trace_validation_retry_success
+            stock_trace_dlq_total = dict(self._stock_trace_dlq_total)
+            search_attempts = dict(self._search_attempts)
+            search_failed = dict(self._search_failed)
+            search_budget_exhausted = self._search_budget_exhausted
+            search_empty = self._search_empty
         error_rate = (llm_errors / llm_calls) if llm_calls > 0 else 0.0
 
         def _avg(bucket: dict[str, int]) -> float:
@@ -196,6 +262,18 @@ class MetricsCollector:
                 "synth_degraded_total": synth_degraded,
                 "escalation_total": chat_qa_escalations,
             },
+            "stock_trace": {
+                "snapshot_not_ready_total": stock_trace_snapshot_not_ready,
+                "validation_failed_total": stock_trace_validation_failed,
+                "validation_retry_success_total": stock_trace_validation_retry_success,
+                "dlq_total": stock_trace_dlq_total,
+            },
+            "search": {
+                "attempts": search_attempts,
+                "failed": search_failed,
+                "budget_exhausted": search_budget_exhausted,
+                "empty": search_empty,
+            },
         }
 
     def reset(self) -> None:
@@ -217,6 +295,14 @@ class MetricsCollector:
             self._skill_degraded = {}
             self._synth_degraded = 0
             self._chat_qa_escalations = {}
+            self._stock_trace_snapshot_not_ready = 0
+            self._stock_trace_validation_failed = {}
+            self._stock_trace_validation_retry_success = 0
+            self._stock_trace_dlq_total = {}
+            self._search_attempts = {}
+            self._search_failed = {}
+            self._search_budget_exhausted = 0
+            self._search_empty = 0
 
 
 # 模块级单例：全局共享，回调 handler 与端点读取同一实例。

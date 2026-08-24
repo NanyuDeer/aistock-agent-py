@@ -32,6 +32,10 @@ from aistock_agent.utils.date import is_trading_day, shanghai_today
 
 logger = structlog.get_logger()
 
+# H3（2026-08-24）：盘中报 12:05 AI 段与 event_scrape 串行化的最小实现。
+# 单进程单 loop（uvicorn），Semaphore(1) 足够；未来多 worker 需换 Redis 分布式锁。
+_midday_llm_semaphore = asyncio.Semaphore(1)
+
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
 _scheduler: AsyncIOScheduler | None = None
@@ -81,6 +85,27 @@ def start_scheduler() -> None:
         ),
         id="morning_briefing",
         name="morning briefing",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_midday_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_midday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="midday_briefing",
+        name="midday briefing",
+        replace_existing=True,
+    )
+    # 午报播报（音频/双人）：12:15 错峰于 12:05 midday 落库之后（H3 信号量），回填 audio_path
+    scheduler.add_job(
+        _run_midday_broadcast_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_midday_broadcast_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="midday_broadcast",
+        name="midday broadcast",
         replace_existing=True,
     )
     # ── 统一事件抓取中台（2026-08-12；2026-08-13 盘前全量 07:30→08:45，盘中 12:00 恢复） ──
@@ -334,6 +359,101 @@ async def _run_morning_task() -> None:
                 task.add_done_callback(_pending_event_tasks.discard)
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
+
+
+async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
+    """盘中报生成任务（工作日 12:05）。
+
+    交易日守卫 + H3 信号量串行化（与 event_scrape AI 段错峰） + 调用 midday.run。
+    report_date 缺省时使用上海当天做交易日检查；显式传入（YYYY-MM-DD）时同样
+    进行交易日校验，避免手动补跑时绕过守卫（controller 裁决，替代计划原始
+    "显式传入跳过检查"语义）。
+
+    返回状态 dict 供手动触发端点透传：
+    - skipped(non_trading_day) / ok / partial / failed
+    """
+    day = shanghai_today()
+    if report_date is not None:
+        day = date.fromisoformat(report_date)
+    if not is_trading_day(day):
+        logger.info("scheduler_skip_non_trading_day", task="midday")
+        return {"status": "skipped", "reason": "non_trading_day"}
+    report_date = day.isoformat()
+
+    logger.info("scheduler_midday_start", report_date=report_date)
+    from aistock_agent.agents.workers import midday as midday_agent
+
+    state = _make_scheduled_state(report_date, intent="midday")
+
+    async with _midday_llm_semaphore:
+        try:
+            result = await midday_agent.run(state)
+            generated = bool(
+                result.get("analysis_reports", {}).get("midday_generated")
+            ) if isinstance(result.get("analysis_reports"), dict) else False
+            persisted = bool(
+                result.get("analysis_reports", {}).get("midday_persisted")
+            ) if isinstance(result.get("analysis_reports"), dict) else False
+            logger.info(
+                "scheduler_midday_done",
+                report_date=report_date,
+                generated=generated,
+                persisted=persisted,
+            )
+            return {"status": "ok" if generated else "partial", "report_date": report_date}
+        except Exception as e:
+            # run() 已内层 try-catch；此处兜底
+            logger.error("scheduler_midday_failed", error=str(e), exc_info=True)
+            return {"status": "failed", "reason": str(e), "report_date": report_date}
+
+
+async def _run_midday_broadcast_task(report_date: str | None = None) -> dict[str, object]:
+    """午报播报生成任务（工作日 12:15）。
+
+    错峰于 12:05 ``_run_midday_task`` 落库之后；持 ``_midday_llm_semaphore``（H3）
+    使其对话 LLM 段不与 event_scrape 抢算力。调用 ``midday_broadcast.run``，
+    成功后 midday 报告 ``content.audio_path`` 已被回填。
+    """
+    day = shanghai_today()
+    if report_date is not None:
+        try:
+            day = date.fromisoformat(report_date)
+        except ValueError:
+            day = shanghai_today()
+    if not is_trading_day(day):
+        logger.info("scheduler_skip_non_trading_day", task="midday_broadcast")
+        return {"status": "skipped", "reason": "non_trading_day"}
+    report_date = day.isoformat()
+
+    logger.info("scheduler_midday_broadcast_start", report_date=report_date)
+    from aistock_agent.agents.workers import midday_broadcast as midday_broadcast_agent
+
+    state = _make_scheduled_state(report_date, intent="midday_broadcast")
+
+    async with _midday_llm_semaphore:
+        try:
+            result = await midday_broadcast_agent.run(state)
+            mb_info = result.get("midday_broadcast")
+            generated = (
+                bool(mb_info.get("generated")) if isinstance(mb_info, dict) else False
+            )
+            audio_path = (
+                mb_info.get("audio_path") if isinstance(mb_info, dict) else None
+            )
+            logger.info(
+                "scheduler_midday_broadcast_done",
+                report_date=report_date,
+                generated=generated,
+                has_audio=bool(audio_path),
+            )
+            return {
+                "status": "ok" if generated else "partial",
+                "report_date": report_date,
+            }
+        except Exception as e:
+            # run() 已内层 try-catch；此处兜底
+            logger.error("scheduler_midday_broadcast_failed", error=str(e), exc_info=True)
+            return {"status": "failed", "reason": str(e), "report_date": report_date}
 
 
 async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]]) -> None:

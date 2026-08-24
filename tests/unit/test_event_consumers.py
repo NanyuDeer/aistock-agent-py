@@ -75,13 +75,14 @@ async def test_review_quick_consumer_calls_run_review_with_quick(mock_event_bus,
         assert call_kwargs["snapshot_kind"] == "quick"
         assert call_kwargs["report_date"] == "2026-07-30"
 
-    # 完成后应该 publish snapshot 事件
-    mock_event_bus.publish.assert_called_once()
-    pub_args = mock_event_bus.publish.call_args
-    assert pub_args[0][0] == CHANNEL_SNAPSHOT
-    assert pub_args[1]["payload"]["snapshot_kind"] == "quick"
-    # quick 链路不发 review_done（S1）
-    assert CHANNEL_REVIEW_DONE not in [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    # status=ok → quick 改进版同样发布 review_done（次日预测，编排缺口 #1）与 snapshot
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+    snapshot_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["snapshot_kind"] == "quick"
 
 
 @pytest.mark.asyncio
@@ -335,12 +336,15 @@ async def test_review_full_consumer_skips_review_done_on_skipped(mock_event_bus,
 
 
 @pytest.mark.asyncio
-async def test_review_quick_consumer_does_not_publish_review_done(mock_event_bus, mock_node_api):
-    """quick 链路（S1）不发 review_done，即使 run_review status=ok。"""
+async def test_review_quick_consumer_skips_review_done_on_degraded(
+    mock_event_bus, mock_node_api
+):
+    """quick 链路 status=degraded → 不发布 review_done（硬约束 6，编排缺口 #1
+    仅 ok 触发），snapshot 照常。"""
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = ReviewQuickConsumer(ctx)
     event = Event(
-        event_id="evt-quick-ok",
+        event_id="evt-quick-degraded",
         channel=CHANNEL_REVIEW_QUICK,
         payload={"report_date": "2026-07-30", "trace_id": "t1"},
         group="evening_chain",
@@ -351,11 +355,11 @@ async def test_review_quick_consumer_does_not_publish_review_done(mock_event_bus
         new_callable=AsyncMock,
     ) as mock_run:
         mock_run.return_value = ReviewRunResult(
-            status="ok",
+            status="degraded",
             report_date="2026-07-30",
             snapshot_kind="quick",
             trace_id="t1",
-            markdown="# Quick",
+            markdown="",
         )
         await consumer.handle(event)
 

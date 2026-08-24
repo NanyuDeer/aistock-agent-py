@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from aistock_agent.config import settings
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.prompts.workers.stock_trace import STOCK_TRACE_PROMPT
 from aistock_agent.schemas.stock_trace import (
     StockTraceResult,
@@ -28,6 +29,8 @@ from aistock_agent.services.stock_trace_validator import (
 )
 
 logger = structlog.get_logger()
+
+_metrics = get_metrics_collector()
 
 
 class StockTraceLlm(Protocol):
@@ -177,70 +180,93 @@ class StockTraceWorker:
                 method=settings.stock_trace_structured_output_method,
                 include_raw=True,
             )
-            response = await structured_llm.ainvoke([
-                SystemMessage(content=STOCK_TRACE_PROMPT),
-                HumanMessage(content=snapshot.model_dump_json()),
-            ])
-            if isinstance(response, dict) and "parsed" in response:
-                parsed = response.get("parsed")
-                raw_payload = (
-                    parsed.model_dump(mode="python")
-                    if isinstance(parsed, BaseModel)
-                    else parsed
-                )
-                if raw_payload is None:
-                    raw_payload = _recover_tool_payload(response.get("raw"))
-            else:
-                raw_payload = (
-                    response.model_dump(mode="python")
-                    if isinstance(response, BaseModel)
-                    else response
-                )
-            payload = StockTraceResultPayload.model_validate(raw_payload)
-            payload_data = payload.model_dump(mode="python")
-            _strip_post_window_market_references(payload_data, snapshot)
-            chain_ids = {chain["chain_id"] for chain in payload_data["chains"]}
-            primary_chain_id = payload.primary_chain_id
-            alternative_chain_id = payload.alternative_chain_id
-            if primary_chain_id not in chain_ids:
-                primary_chain_id = next(
-                    (
-                        chain["chain_id"]
-                        for chain in payload_data["chains"]
-                        if chain["role"] == "primary"
-                    ),
-                    next(iter(chain_ids), None),
-                )
-            if alternative_chain_id not in chain_ids:
-                alternative_chain_id = next(
-                    (
-                        chain["chain_id"]
-                        for chain in payload_data["chains"]
-                        if chain["role"] == "alternative"
-                    ),
-                    None,
-                )
-            payload_data["primary_chain_id"] = primary_chain_id
-            payload_data["alternative_chain_id"] = alternative_chain_id
-            # Chain role is redundant metadata: its only valid value is defined
-            # by the selected chain ids. Derive it here instead of letting an LLM
-            # create a conflicting second identity for the same chain.
-            for chain in payload_data["chains"]:
-                if chain["chain_id"] == primary_chain_id:
-                    chain["role"] = "primary"
-                elif chain["chain_id"] == alternative_chain_id:
-                    chain["role"] = "alternative"
-            result = StockTraceResult.model_validate({
-                "schema_version": "stock-trace-result-v1",
-                "event_id": event_id,
-                "snapshot_id": snapshot.snapshot_id,
-                "analysis_version": analysis_version,
-                **payload_data,
-            })
-            validate_stock_trace_result(result, snapshot)
-            return StockTraceWorkerOutcome(status="completed", result=result)
-        except (ValueError, StockTraceValidationError) as exc:
-            logger.warning("stock_trace_validation_failed", event_id=event_id, error=str(exc))
+            last_error: str | None = None
+            for attempt in range(2):  # 首次 + 校验失败纠错一次（token 保护，不无限重试）
+                try:
+                    messages: list[object] = [
+                        SystemMessage(content=STOCK_TRACE_PROMPT),
+                        HumanMessage(content=snapshot.model_dump_json()),
+                    ]
+                    if last_error is not None:
+                        messages.append(HumanMessage(
+                            content=(
+                                "你上一轮输出未通过确定性校验，请修正后重试。"
+                                f"校验错误详情：{last_error}\n"
+                                "请对照上面错误逐项修正（缺失字段补齐、未引用的 source_id 删除、"
+                                "选中链补全六阶段、confirmed 条件不满足时降级为"
+                                " probable/insufficient）。"
+                            )
+                        ))
+                    response = await structured_llm.ainvoke(messages)
+                    if isinstance(response, dict) and "parsed" in response:
+                        parsed = response.get("parsed")
+                        raw_payload = (
+                            parsed.model_dump(mode="python")
+                            if isinstance(parsed, BaseModel)
+                            else parsed
+                        )
+                        if raw_payload is None:
+                            raw_payload = _recover_tool_payload(response.get("raw"))
+                    else:
+                        raw_payload = (
+                            response.model_dump(mode="python")
+                            if isinstance(response, BaseModel)
+                            else response
+                        )
+                    payload = StockTraceResultPayload.model_validate(raw_payload)
+                    payload_data = payload.model_dump(mode="python")
+                    _strip_post_window_market_references(payload_data, snapshot)
+                    chain_ids = {chain["chain_id"] for chain in payload_data["chains"]}
+                    primary_chain_id = payload.primary_chain_id
+                    alternative_chain_id = payload.alternative_chain_id
+                    if primary_chain_id not in chain_ids:
+                        primary_chain_id = next(
+                            (
+                                chain["chain_id"]
+                                for chain in payload_data["chains"]
+                                if chain["role"] == "primary"
+                            ),
+                            next(iter(chain_ids), None),
+                        )
+                    if alternative_chain_id not in chain_ids:
+                        alternative_chain_id = next(
+                            (
+                                chain["chain_id"]
+                                for chain in payload_data["chains"]
+                                if chain["role"] == "alternative"
+                            ),
+                            None,
+                        )
+                    payload_data["primary_chain_id"] = primary_chain_id
+                    payload_data["alternative_chain_id"] = alternative_chain_id
+                    # Chain role is redundant metadata: its only valid value is defined
+                    # by the selected chain ids. Derive it here instead of letting an LLM
+                    # create a conflicting second identity for the same chain.
+                    for chain in payload_data["chains"]:
+                        if chain["chain_id"] == primary_chain_id:
+                            chain["role"] = "primary"
+                        elif chain["chain_id"] == alternative_chain_id:
+                            chain["role"] = "alternative"
+                    result = StockTraceResult.model_validate({
+                        "schema_version": "stock-trace-result-v1",
+                        "event_id": event_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "analysis_version": analysis_version,
+                        **payload_data,
+                    })
+                    validate_stock_trace_result(result, snapshot)
+                    if attempt == 1:
+                        _metrics.record_stock_trace_validation_retry_success()
+                    return StockTraceWorkerOutcome(status="completed", result=result)
+                except (ValueError, StockTraceValidationError) as exc:
+                    # 解析/校验类失败：记录 + 纠错重试一次（第二次循环直接落到返回值）
+                    _metrics.record_stock_trace_validation_failed(type(exc).__name__)
+                    logger.warning(
+                        "stock_trace_validation_failed",
+                        event_id=event_id, attempt=attempt + 1, error=str(exc),
+                    )
+                    last_error = str(exc)
+                    continue
             return StockTraceWorkerOutcome(status="failed", error_code="VALIDATION_REJECTED")
         except Exception as exc:
             logger.exception("stock_trace_worker_failed", event_id=event_id, error=str(exc))

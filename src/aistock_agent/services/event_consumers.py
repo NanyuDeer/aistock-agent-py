@@ -107,11 +107,21 @@ class ReviewQuickConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        await run_review(
+        result = await run_review(
             report_date=report_date,
             snapshot_kind="quick",
             trace_id=trace_id,
         )
+
+        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）：
+        # 降级/跳过不发；publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
+        # 为什么补齐：quick 改进版欲替代 full，需同样支撑次日预测（编排缺口 #1）。
+        if result.status == "ok":
+            await publish_review_done(
+                self.ctx.event_bus,
+                report_date=result.report_date,
+                trace_id=result.trace_id,
+            )
 
         # quick review 完成后触发 quick snapshot
         await self.ctx.event_bus.publish(

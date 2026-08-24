@@ -61,6 +61,8 @@ START → supervisor(quick_think, 意图路由)
   08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
+  12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）
+  12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
   20:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 独立消费组 prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）
   旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
@@ -101,7 +103,7 @@ START → supervisor(quick_think, 意图路由)
 
 ### 搜索多供应商 failover 配置（2026-08-18）
 
-- **链路顺序固定**：`tavily → doubao → anysearch`（`services/tavily.py::_build_providers` 硬编码），`SEARCH_ENABLED_PROVIDERS` 只控制启停、不控制顺序；空值=默认 `tavily,doubao,anysearch`
+- **链路顺序由配置决定（2026-08-24）**：`SEARCH_ENABLED_PROVIDERS` 同时控制启停与顺序（`_build_providers` 按配置顺序建链）；空值=默认 `tavily,doubao,anysearch`。生产配 `anysearch,tavily,doubao` 使 anysearch 优先（日 1000 次额度充足），tavily/doubao 兜底
 - **惰性注册**：未配置 key 的 provider 不注册进链路（如只配 Tavily key 则仅注册 tavily），全部未配时保底注册 Tavily 主源
 - **key 池**：`TAVILY_API_KEYS` / `DOUBAO_API_KEYS` / `ANYSEARCH_API_KEYS`（逗号分隔多成员共享额度），兼容单 key `*_API_KEY`；单 provider 多 key 用 `services/key_pool.py::KeyPool` 轮换 + 熔断（401/429 固定窗口冷却）
 - **fail-fast 预算**：`SEARCH_BUDGET_SECONDS`（默认 10.0s）为整链总预算，超时即返回当前错误集（`budget_exhausted`）
@@ -462,6 +464,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
 | `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
+| `POST /internal/midday/generate-audio` | 火山引擎/Azure TTS | 午报音频（方案 A）：根据请求体 `{date, dialogue}` 合成 MP3 并回填同一份 midday 报告 `content.audio_path` |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
 | `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
