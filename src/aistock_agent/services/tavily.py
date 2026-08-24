@@ -129,11 +129,12 @@ class TavilyService:
 def _build_providers() -> list[SearchProvider]:
     # SEARCH_ENABLED_PROVIDERS 同时控制启停与顺序（2026-08-24）；
     # 空值默认按 tavily→doubao→anysearch 保底（与历史链序一致）。
-    configured = [
-        p.strip()
-        for p in (settings.search_enabled_providers or "").split(",")
-        if p.strip()
-    ] or ["tavily", "doubao", "anysearch"]
+    # dict.fromkeys 保持顺序并去重重复配置项（2026-08-24 复审加固）。
+    configured = list(
+        dict.fromkeys(
+            p.strip() for p in (settings.search_enabled_providers or "").split(",") if p.strip()
+        )
+    ) or ["tavily", "doubao", "anysearch"]
     chain: list[SearchProvider] = []
     for name in configured:
         if name == "tavily" and (settings.tavily_api_key or settings.tavily_api_keys):

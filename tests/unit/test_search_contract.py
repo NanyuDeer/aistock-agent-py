@@ -51,3 +51,29 @@ def test_build_providers_respects_config_order(monkeypatch):
         (settings.tavily_api_key, settings.tavily_api_keys,
          settings.doubao_api_key, settings.doubao_api_keys,
          settings.anysearch_api_key, settings.anysearch_api_keys) = orig_keys
+
+
+def test_build_providers_dedups_duplicate_config_entries(monkeypatch):
+    """重复配置项去重且保持首现顺序（anysearch,tavily,anysearch → anysearch,tavily）。"""
+    from aistock_agent.config import settings
+    from aistock_agent.services.tavily import _build_providers
+
+    orig_enabled = settings.search_enabled_providers
+    orig_keys = (settings.tavily_api_key, settings.tavily_api_keys,
+                 settings.doubao_api_key, settings.doubao_api_keys,
+                 settings.anysearch_api_key, settings.anysearch_api_keys)
+    try:
+        settings.search_enabled_providers = "anysearch,tavily,anysearch"
+        settings.tavily_api_key = "k-t"
+        settings.tavily_api_keys = ""
+        settings.doubao_api_key = ""
+        settings.doubao_api_keys = ""
+        settings.anysearch_api_key = "k-a"
+        settings.anysearch_api_keys = ""
+        providers = _build_providers()
+        assert [p.name for p in providers] == ["anysearch", "tavily"]
+    finally:
+        settings.search_enabled_providers = orig_enabled
+        (settings.tavily_api_key, settings.tavily_api_keys,
+         settings.doubao_api_key, settings.doubao_api_keys,
+         settings.anysearch_api_key, settings.anysearch_api_keys) = orig_keys
