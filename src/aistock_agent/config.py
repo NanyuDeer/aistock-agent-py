@@ -115,8 +115,8 @@ class Settings(BaseSettings):
     anysearch_api_key: str = ""
     anysearch_api_keys: str = ""
     # 启用的 provider 集合，逗号分隔；空=默认 "tavily,doubao,anysearch"。
-    # 注意：链路顺序当前固定为 tavily→doubao→anysearch（_build_providers 硬编码），
-    # 本字段只控制启停、不控制顺序；如需"中文优先"排序再在 _build_providers 调整。
+    # 顺序即链路调用顺序：TavilyService.search 按此顺序逐个 provider failover。
+    # 注意：链路顺序由此配置决定，不再由 _build_providers 硬编码（2026-08-24）。
     search_enabled_providers: str = ""
     # 整链 fail-fast 总预算（秒）
     search_budget_seconds: float = 10.0

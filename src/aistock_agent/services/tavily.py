@@ -127,16 +127,21 @@ class TavilyService:
 
 
 def _build_providers() -> list[SearchProvider]:
-    enabled = {
-        p.strip() for p in (settings.search_enabled_providers or "").split(",") if p.strip()
-    } or {"tavily", "doubao", "anysearch"}
+    # SEARCH_ENABLED_PROVIDERS 同时控制启停与顺序（2026-08-24）；
+    # 空值默认按 tavily→doubao→anysearch 保底（与历史链序一致）。
+    configured = [
+        p.strip()
+        for p in (settings.search_enabled_providers or "").split(",")
+        if p.strip()
+    ] or ["tavily", "doubao", "anysearch"]
     chain: list[SearchProvider] = []
-    if "tavily" in enabled and (settings.tavily_api_key or settings.tavily_api_keys):
-        chain.append(TavilyClientProvider())
-    if "doubao" in enabled and (settings.doubao_api_key or settings.doubao_api_keys):
-        chain.append(DoubaoProvider())
-    if "anysearch" in enabled and (settings.anysearch_api_key or settings.anysearch_api_keys):
-        chain.append(AnySearchProvider())
+    for name in configured:
+        if name == "tavily" and (settings.tavily_api_key or settings.tavily_api_keys):
+            chain.append(TavilyClientProvider())
+        elif name == "doubao" and (settings.doubao_api_key or settings.doubao_api_keys):
+            chain.append(DoubaoProvider())
+        elif name == "anysearch" and (settings.anysearch_api_key or settings.anysearch_api_keys):
+            chain.append(AnySearchProvider())
     if not chain:
         chain.append(TavilyClientProvider())  # 配置缺失时保底主源
     return chain
