@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.services.key_pool import KeyPool
 
 ProviderName = Literal["tavily", "doubao", "anysearch"]
@@ -83,9 +84,11 @@ def search_query(
     budget = Budget(time.monotonic() + budget_seconds)
     errors: list[tuple[str, str]] = []
     first_provider = providers[0].name if providers else "tavily"
+    metrics = get_metrics_collector()
     for provider in providers:
         if budget.expired():
             errors.append((provider.name, "budget_exhausted"))
+            metrics.record_search_budget_exhausted()
             break
         key_pool = keys.get(provider.name)
         if key_pool is None or not key_pool._keys:
@@ -93,6 +96,7 @@ def search_query(
             continue
         api_key = key_pool.select_key()
         try:
+            metrics.record_search_attempt(provider.name)
             result = provider.search(
                 query, topic=topic, max_results=max_results, api_key=api_key
             )
@@ -101,6 +105,8 @@ def search_query(
                 key_pool.report_error(api_key, is_circuit=True)
                 continue
             key_pool.report_success(api_key)
+            if result.outcome == "empty":
+                metrics.record_search_empty()
             if provider.name != first_provider:
                 degraded = is_low_quality(result)
                 return SearchResult(
@@ -110,9 +116,10 @@ def search_query(
                     provider_errors=errors,
                 )
             return result
-        except Exception as exc:  # noqa: BLE001 — 网络/API 异常都算熔断
+        except Exception as exc:  # noqa: BLE001
             is_quota = isinstance(exc, RateLimited)
             errors.append((provider.name, type(exc).__name__))
+            metrics.record_search_failed(provider.name)
             key_pool.report_error(api_key, is_circuit=not is_quota)
     return SearchResult(
         provider=first_provider,
