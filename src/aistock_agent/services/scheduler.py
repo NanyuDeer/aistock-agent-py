@@ -97,6 +97,17 @@ def start_scheduler() -> None:
         name="midday briefing",
         replace_existing=True,
     )
+    # 午报播报（音频/双人）：12:15 错峰于 12:05 midday 落库之后（H3 信号量），回填 audio_path
+    scheduler.add_job(
+        _run_midday_broadcast_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_midday_broadcast_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="midday_broadcast",
+        name="midday broadcast",
+        replace_existing=True,
+    )
     # ── 统一事件抓取中台（2026-08-12；2026-08-13 盘前全量 07:30→08:45，盘中 12:00 恢复） ──
     # 盘前档（08:45 全量，紧邻晨报 08:50 前完成；原 07:30 太早，早间公告未出
     # 全量价值低，故合并）与盘中档（10-14 点每小时增量，含 12:00 午间档——
@@ -393,6 +404,55 @@ async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
         except Exception as e:
             # run() 已内层 try-catch；此处兜底
             logger.error("scheduler_midday_failed", error=str(e), exc_info=True)
+            return {"status": "failed", "reason": str(e), "report_date": report_date}
+
+
+async def _run_midday_broadcast_task(report_date: str | None = None) -> dict[str, object]:
+    """午报播报生成任务（工作日 12:15）。
+
+    错峰于 12:05 ``_run_midday_task`` 落库之后；持 ``_midday_llm_semaphore``（H3）
+    使其对话 LLM 段不与 event_scrape 抢算力。调用 ``midday_broadcast.run``，
+    成功后 midday 报告 ``content.audio_path`` 已被回填。
+    """
+    day = shanghai_today()
+    if report_date is not None:
+        try:
+            day = date.fromisoformat(report_date)
+        except ValueError:
+            day = shanghai_today()
+    if not is_trading_day(day):
+        logger.info("scheduler_skip_non_trading_day", task="midday_broadcast")
+        return {"status": "skipped", "reason": "non_trading_day"}
+    report_date = day.isoformat()
+
+    logger.info("scheduler_midday_broadcast_start", report_date=report_date)
+    from aistock_agent.agents.workers import midday_broadcast as midday_broadcast_agent
+
+    state = _make_scheduled_state(report_date, intent="midday_broadcast")
+
+    async with _midday_llm_semaphore:
+        try:
+            result = await midday_broadcast_agent.run(state)
+            mb_info = result.get("midday_broadcast")
+            generated = (
+                bool(mb_info.get("generated")) if isinstance(mb_info, dict) else False
+            )
+            audio_path = (
+                mb_info.get("audio_path") if isinstance(mb_info, dict) else None
+            )
+            logger.info(
+                "scheduler_midday_broadcast_done",
+                report_date=report_date,
+                generated=generated,
+                has_audio=bool(audio_path),
+            )
+            return {
+                "status": "ok" if generated else "partial",
+                "report_date": report_date,
+            }
+        except Exception as e:
+            # run() 已内层 try-catch；此处兜底
+            logger.error("scheduler_midday_broadcast_failed", error=str(e), exc_info=True)
             return {"status": "failed", "reason": str(e), "report_date": report_date}
 
 

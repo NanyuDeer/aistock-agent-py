@@ -1354,16 +1354,18 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
 
 
 async def get_stock_trace_observability() -> dict[str, object]:
-    """组装 stock_trace 观测快照：进程内计数器 + Redis 实时 gauge。
+    """组装观测快照：stock_trace / search 进程内计数器 + Redis 实时 gauge。
 
-    计数器来自 MetricsCollector（stock_trace 链路，Task 2 扩展）；gauge 实时读
-    Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，不阻塞 /metrics。
+    计数器来自 MetricsCollector（stock_trace 链路与搜索 provider 链路，Task 2 扩展）；
+    gauge 实时读 Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，
+    不阻塞 /metrics。
     """
     from aistock_agent.observability.metrics import get_metrics
     from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
 
     snapshot = get_metrics()
     stock_trace = dict(snapshot.get("stock_trace", {}))
+    search = dict(snapshot.get("search", {}))  # type: ignore[call-overload]
     gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
     try:
         import redis.asyncio as aioredis
@@ -1385,7 +1387,7 @@ async def get_stock_trace_observability() -> dict[str, object]:
     except Exception:
         logger = structlog.get_logger()
         logger.warning("metrics_redis_read_failed")
-    return {"stock_trace": {**stock_trace, **gauges}}
+    return {"stock_trace": {**stock_trace, **gauges}, "search": search}
 
 
 @health_router.get("/metrics")
