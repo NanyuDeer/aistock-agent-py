@@ -68,9 +68,10 @@ async def test_run_degraded_does_not_persist(base_state):
         "podcast_brief": "",
         "schema_version": "1.0",
     }
+    persist_mock = AsyncMock(return_value=False)
     with (
         patch.object(midday_agent, "_invoke_agent", AsyncMock(return_value=degraded)),
-        patch.object(midday_agent, "persist_midday_report", AsyncMock(return_value=False)),
+        patch.object(midday_agent, "persist_midday_report", persist_mock),
         patch.object(
             midday_agent,
             "_resolve_morning_context",
@@ -79,3 +80,4 @@ async def test_run_degraded_does_not_persist(base_state):
     ):
         result = await midday_agent.run(base_state)
     assert result["analysis_reports"]["midday_persisted"] is False
+    persist_mock.assert_not_awaited()
