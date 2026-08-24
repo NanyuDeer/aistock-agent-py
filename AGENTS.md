@@ -101,7 +101,7 @@ START → supervisor(quick_think, 意图路由)
 
 ### 搜索多供应商 failover 配置（2026-08-18）
 
-- **链路顺序固定**：`tavily → doubao → anysearch`（`services/tavily.py::_build_providers` 硬编码），`SEARCH_ENABLED_PROVIDERS` 只控制启停、不控制顺序；空值=默认 `tavily,doubao,anysearch`
+- **链路顺序由配置决定（2026-08-24）**：`SEARCH_ENABLED_PROVIDERS` 同时控制启停与顺序（`_build_providers` 按配置顺序建链）；空值=默认 `tavily,doubao,anysearch`。生产配 `anysearch,tavily,doubao` 使 anysearch 优先（日 1000 次额度充足），tavily/doubao 兜底
 - **惰性注册**：未配置 key 的 provider 不注册进链路（如只配 Tavily key 则仅注册 tavily），全部未配时保底注册 Tavily 主源
 - **key 池**：`TAVILY_API_KEYS` / `DOUBAO_API_KEYS` / `ANYSEARCH_API_KEYS`（逗号分隔多成员共享额度），兼容单 key `*_API_KEY`；单 provider 多 key 用 `services/key_pool.py::KeyPool` 轮换 + 熔断（401/429 固定窗口冷却）
 - **fail-fast 预算**：`SEARCH_BUDGET_SECONDS`（默认 10.0s）为整链总预算，超时即返回当前错误集（`budget_exhausted`）
