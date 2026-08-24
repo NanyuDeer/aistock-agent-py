@@ -2,6 +2,13 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-24 — stock_trace 提示词补板块证据要求
+
+**开发者**: Aria
+
+### 改进
+- `src/aistock_agent/prompts/workers/stock_trace.py`：sector 候选证据要求——只要上下文中存在板块/行业联动相关 source，sector 候选必须引用至少一条并置 supported 或 weak，不得置 insufficient 且留空支撑证据；仅当上下文完全不存在板块相关 source 时才允许 insufficient
+
 ## [changer] 2026-08-24 — 搜索链路顺序可配 + 搜索观测 + 午报语音播报 + 盘中报
 
 **开发者**: Aria
