@@ -176,6 +176,7 @@ class Settings(BaseSettings):
     #    "1-5" 实为周二~周六（周一=0 被跳过）。必须用 "0-4"（周一~周五）！
     scheduler_enabled: bool = True
     scheduler_morning_cron: str = "50 8 * * 0-4"       # 晨报：工作日 08:50
+    scheduler_midday_cron: str = "5 12 * * 0-4"        # 盘中报：工作日 12:05（错开 12:00 抓取,H3）
     scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
     scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
