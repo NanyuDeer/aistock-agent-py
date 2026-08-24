@@ -1,18 +1,20 @@
 """盘中报 MVP 端到端冒烟：调度触发 → worker 组装 → midday 落库 closed loop。
 
-真实验证 ``_run_midday_task`` → ``midday.run`` → ``persist_midday_report``
-→ ``node_api.post`` 完整调用链（mock LLM 层，不跑真实 deep_think / quick_think）。
+真实验证 ``_run_midday_task`` → ``midday.run`` → ``_is_degraded_report`` →
+``persist_midday_report`` → ``node_api.post`` 完整调用链（mock LLM 层，
+不跑真实 deep_think / quick_think / Redis / Node）。
 
-与计划 L1065-1105 的差异（controller 裁决修正）：
-计划用 ``side_effect=_fake_worker`` 完全替换 ``midday.run``，但 ``_fake_worker``
-不调用 persist，导致 ``mock_post``（node_api.post）不会被 await，计划里的
-``assert_awaited_once()`` 必然 FAIL。本实现（方案 A）让 ``_fake_worker`` 内部走
-一次**真实** ``persist_midday_report``，从而构成 closed loop，``mock_post`` 被
-真实 persister await 一次。
+方案 B（superpowers-task-reviewer 对 Task 8 的 Important 发现修正）：
+原方案 A 用 ``side_effect=_fake_worker`` 整体替换 ``midday.run``，而
+``_fake_worker`` 自己调 persist，导致真实 worker 内"降级判定后
+``if not degraded: midday_persisted = await persist_midday_report(...)``"
+这条触发落库的核心分支从未被执行——若真实 run 回归成不落库，冒烟仍通过，
+形成验收盲区。方案 B 改走**真实** ``midday.run``，仅 patch 内部 LLM 层
+（``_invoke_agent``）与外部依赖（``_resolve_morning_context``/交易日守卫），
+使持久化真正经由 worker 判定后触发，``mock_post`` 被真实 await 一次。
 """
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,16 +22,15 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_midday_closed_loop_real_scheduler() -> None:
-    """真实验证 _run_midday_task 调用链路（mock LLM 层，不跑真实 deep_think/quick_think）。
+    """调度器 → 真实 midday.run → 落库 closed loop（mock LLM 层）。
 
-    调度器 → 真实 midday_persister（方案 A：_fake_worker 内走一次 persist）→
-    node_api.post 被 await 一次，payload 的 report_type="midday"、user_id=None。
+    走真实 worker 的"降级判定后 persist"分支，node_api.post 被 await 一次，
+    payload 的 report_type="midday"、user_id=None，报告内容真实透传完整。
     """
+    from aistock_agent.agents.workers import midday as midday_mod
     from aistock_agent.services import scheduler as sched_mod
-    from aistock_agent.services.midday_persister import persist_midday_report
-    from aistock_agent.state.schema import AgentState
 
-    mock_report = {
+    mock_report: dict[str, object] = {
         "display_report": {
             "summary": "上午指数分化，午后关注量能",
             "details": "沪深主要指数上午涨跌互现，" + ("数据" * 60),
@@ -40,21 +41,18 @@ async def test_midday_closed_loop_real_scheduler() -> None:
         "schema_version": "2.0",
     }
 
-    async def _fake_worker(state: AgentState) -> dict[str, object]:
-        # 方案 A：内部走一次真实 persist，使 closed loop 成立，node_api.post 被 await。
-        persisted = await persist_midday_report(mock_report, "2026-08-24")
-        return {
-            "final_response": json.dumps(mock_report, ensure_ascii=False),
-            "analysis_reports": {
-                "midday_generated": True,
-                "midday_persisted": persisted,  # persist 由真实 persister → mock_post 完成
-                "morning_context": "mock",
-            },
-        }
-
     with (
+        # 调度器守卫：patch 为交易日，避免日历一键 flaky
         patch.object(sched_mod, "is_trading_day", return_value=True),
-        patch("aistock_agent.agents.workers.midday.run", side_effect=_fake_worker),
+        # 真实 run 内部的交易日守卫同样 patch（按需，不改核心断言）
+        patch.object(midday_mod, "is_trading_day", return_value=True),
+        # 仅 patch LLM 层：真实 worker 其余逻辑（降级判定 + persist）原样执行
+        patch.object(midday_mod, "_invoke_agent", AsyncMock(return_value=mock_report)),
+        patch.object(
+            midday_mod,
+            "_resolve_morning_context",
+            AsyncMock(return_value="今日晨报结论示例"),
+        ),
         patch(
             "aistock_agent.services.midday_persister.node_api.post",
             new_callable=AsyncMock,
@@ -65,11 +63,18 @@ async def test_midday_closed_loop_real_scheduler() -> None:
 
     assert result["status"] == "ok"
     assert result["report_date"] == "2026-08-24"
-    # 真实 persister 走了一次 persist → node_api.post 恰好被 await 一次
+    # 核心验收点：真实 worker 判定非降级后 persist 恰好触发一次落库，
+    # mock_post 被真实 await 一次（方案 A 的 fake_worker 无法等价证明）
     mock_post.assert_awaited_once()
     payload = mock_post.call_args[0][1]
     assert isinstance(payload, dict)
     assert payload["report_type"] == "midday"
     assert payload["report_date"] == "2026-08-24"
     assert payload["user_id"] is None
-    assert payload["content"]["schema_version"] == "2.0"
+    content = payload["content"]
+    assert isinstance(content, dict)
+    assert content["schema_version"] == "2.0"
+    # 报告内容由 mock LLM 报告真实透传至持久化层，证明完整调用链闭合
+    display = content["display_report"]
+    assert isinstance(display, dict)
+    assert display["details"] == mock_report["display_report"]["details"]
