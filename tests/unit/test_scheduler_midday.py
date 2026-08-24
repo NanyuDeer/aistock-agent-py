@@ -43,3 +43,62 @@ async def test_midday_ai_semaphore_limits_concurrency_to_1():
     from aistock_agent.services.scheduler import _midday_llm_semaphore
     # 默认 Semaphore(1) 证明存在且值为1
     assert _midday_llm_semaphore._value == 1
+
+
+# ── 午报播报（12:15，方案 A）──
+
+def test_scheduler_midday_broadcast_cron_config():
+    assert settings.scheduler_midday_broadcast_cron == "15 12 * * 0-4"
+    # 错峰于 12:05 midday 落库之后
+    assert settings.scheduler_midday_broadcast_cron != settings.scheduler_midday_cron
+    assert settings.scheduler_midday_broadcast_cron.split()[0] == "15"
+
+
+@pytest.mark.asyncio
+async def test_run_midday_broadcast_task_skips_non_trading_day():
+    from aistock_agent.services import scheduler as sched_mod
+
+    with patch.object(sched_mod, "is_trading_day", return_value=False):
+        result = await sched_mod._run_midday_broadcast_task(report_date="2026-08-23")
+    assert result["status"] == "skipped"
+    assert result["reason"] == "non_trading_day"
+
+
+@pytest.mark.asyncio
+async def test_run_midday_broadcast_task_invokes_worker():
+    from aistock_agent.services import scheduler as sched_mod
+
+    worker_run_mock = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "midday_broadcast": {
+                "generated": True,
+                "audio_path": "/api/agent/audio/midday-2026-08-24.mp3",
+            },
+        }
+    )
+    with (
+        patch.object(sched_mod, "is_trading_day", return_value=True),
+        patch("aistock_agent.agents.workers.midday_broadcast.run", worker_run_mock),
+    ):
+        result = await sched_mod._run_midday_broadcast_task(report_date="2026-08-24")
+    worker_run_mock.assert_awaited_once()
+    assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_midday_broadcast_task_partial_on_no_audio():
+    from aistock_agent.services import scheduler as sched_mod
+
+    worker_run_mock = AsyncMock(
+        return_value={
+            "final_response": "no",
+            "midday_broadcast": {"generated": False, "audio_path": None},
+        }
+    )
+    with (
+        patch.object(sched_mod, "is_trading_day", return_value=True),
+        patch("aistock_agent.agents.workers.midday_broadcast.run", worker_run_mock),
+    ):
+        result = await sched_mod._run_midday_broadcast_task(report_date="2026-08-24")
+    assert result["status"] == "partial"

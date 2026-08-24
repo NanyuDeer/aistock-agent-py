@@ -177,6 +177,8 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_morning_cron: str = "50 8 * * 0-4"       # 晨报：工作日 08:50
     scheduler_midday_cron: str = "5 12 * * 0-4"        # 盘中报：工作日 12:05（错开 12:00 抓取,H3）
+    # 午报播报（音频/双人）：工作日 12:15，错峰于 12:05 midday 落库之后
+    scheduler_midday_broadcast_cron: str = "15 12 * * 0-4"
     scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
     scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
