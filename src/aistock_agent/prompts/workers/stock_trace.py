@@ -24,6 +24,10 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
 - observable_result 节点必须引用 trigger_fact 类型的证据（source_id 以 trigger: 开头），
   因为价格异动本身由触发事实直接观察得到。
 - supported 状态的候选必须引用至少一条支撑证据；无法支撑的候选应置 insufficient 或 weak。
+- sector 候选证据要求：只要上下文中存在板块/行业联动相关 source（如新闻提及该股所属概念/板块联动、
+  sector_fact 板块涨跌幅事实等），sector 候选就必须引用至少一条此类 source 作为支撑证据，
+  并根据联动强度置 supported 或 weak，不得置 insufficient 且留空支撑证据（如"光缆概念活跃但仅为跟涨"→ weak）；
+  仅当上下文完全不存在任何板块相关 source 时，才允许 sector 候选为 insufficient。
 - primary_chain_id 指向的链必须标记 role=primary；
   alternative_chain_id 指向的链必须标记 role=alternative。
 - 节点必须标注 epistemic_type：可验证事实为 fact，基于事实的推导为 inference，
