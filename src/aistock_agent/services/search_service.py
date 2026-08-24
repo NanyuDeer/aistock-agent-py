@@ -102,6 +102,7 @@ def search_query(
             )
             if result.outcome == "error":
                 errors.append((provider.name, "provider_error"))
+                metrics.record_search_failed(provider.name)  # provider 返回 error 也计失败
                 key_pool.report_error(api_key, is_circuit=True)
                 continue
             key_pool.report_success(api_key)

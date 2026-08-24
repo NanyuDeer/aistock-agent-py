@@ -188,7 +188,7 @@ class MetricsCollector:
             self._search_attempts[provider] = self._search_attempts.get(provider, 0) + 1
 
     def record_search_failed(self, provider: str) -> None:
-        """记录一次某 provider 搜索失败（含 429/网络/解析）。"""
+        """记录一次某 provider 搜索失败（含 429/网络/解析/provider 返回 error）。"""
         with self._lock:
             self._search_failed[provider] = self._search_failed.get(provider, 0) + 1
 

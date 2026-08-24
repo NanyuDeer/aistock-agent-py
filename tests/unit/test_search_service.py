@@ -114,3 +114,28 @@ def test_search_query_records_budget_exhausted(monkeypatch):
     assert res.outcome == "error"
     m = collector.get_metrics()["search"]
     assert m["budget_exhausted"] == 1
+
+
+def test_search_query_records_failed_on_provider_error(monkeypatch):
+    collector = MetricsCollector()
+    monkeypatch.setattr(_ss, "get_metrics_collector", lambda: collector)
+
+    long_a = (
+        "本日重要宏观政策正式落地开始实施，涉及产业格局与市场"
+        "预期的显著调整，并对实体经济多个层面产生深远影响"
+    )
+    p1 = _FakeProvider("tavily", results=[
+        SearchResult(provider="tavily", hits=[], outcome="error", provider_errors=[]),
+    ])
+    p2 = _FakeProvider("doubao", results=[
+        SearchResult(provider="doubao", hits=[_Hit("政策", long_a, "http://a")],
+                     outcome="ok", provider_errors=[]),
+    ])
+    keys = {"tavily": KeyPool(["a"]), "doubao": KeyPool(["b"])}
+    res = search_query("政策", providers=[p1, p2], keys=keys)
+
+    m = collector.get_metrics()["search"]
+    assert res.outcome == "ok"
+    assert m["failed"]["tavily"] == 1      # provider 返回 outcome=="error" 也计失败
+    assert m["attempts"]["tavily"] == 1
+    assert m["attempts"]["doubao"] == 1
