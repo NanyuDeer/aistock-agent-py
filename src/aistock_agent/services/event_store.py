@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.stock_event_detector import detect_stock_event
 
 logger = structlog.get_logger()
 
@@ -45,11 +46,37 @@ class EventRecord(TypedDict):
     scrape_at: str
     score_date: str
     payload: dict[str, Any]
+    # 股票关联字段：仅记录/后续个股情报联动，不参与个股事件判定
+    symbol: str
+    stock_name: str
+    industry: str
+    # 个股事件识别标记（第一阶段：STOCK/UNKNOWN 二值 + 规则来源 + 置信度）
+    event_scope: str
+    event_scope_source: str
+    event_scope_confidence: float
 
 
 def event_content_hash(title: str, url: str) -> str:
     """生成事件去重键（sha1 of title+url）。"""
     return hashlib.sha1(f"{title}|{url}".encode()).hexdigest()
+
+
+def _normalize_symbol(value: str) -> str:
+    """归一化股票代码：剥 SH/SZ/BJ 前缀，保留 6 位数字；非法返回空串。"""
+    code = value.strip().upper()
+    for prefix in ("SH", "SZ", "BJ"):
+        if code.startswith(prefix):
+            code = code[len(prefix) :]
+            break
+    return code if code.isdigit() else ""
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    """安全转 float，失败返回默认值（历史数据字段畸形不炸整批）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _now_shanghai() -> str:
@@ -108,6 +135,15 @@ def normalize_event(
     content_hash = event_content_hash(title, url)
     event_id = f"{score_date}-{content_hash[:16]}"
 
+    # 统一抽取股票关联字段（仅记录，不参与个股判定：symbol 只表示事件关联股票，
+    # 不代表事件主体是单家公司，行业/产业链新闻可能携带关联 symbol）
+    symbol = _normalize_symbol(str(raw.get("symbol") or raw.get("stock_code") or ""))
+    stock_name = str(raw.get("stock_name", "")).strip()
+    industry = str(raw.get("industry", "")).strip()
+
+    # 个股事件识别标记（STOCK/UNKNOWN 二值；结果始终存在，不依赖 LLM）
+    detection = detect_stock_event(title, summary, raw, source)
+
     return EventRecord(
         event_id=event_id,
         title=title,
@@ -122,6 +158,12 @@ def normalize_event(
         scrape_at=_now_shanghai(),
         score_date=score_date,
         payload=dict(raw),
+        symbol=symbol,
+        stock_name=stock_name,
+        industry=industry,
+        event_scope=detection["event_scope"],
+        event_scope_source=detection["event_scope_source"],
+        event_scope_confidence=detection["event_scope_confidence"],
     )
 
 
@@ -274,6 +316,16 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                         ev.get("payload", {})
                         if isinstance(ev.get("payload", {}), dict)
                         else {}
+                    ),
+                    # 历史数据无新字段：默认值兜底（symbol/stock_name/industry 空串，
+                    # event_scope 默认 UNKNOWN——未知不拦截，保持旧行为）
+                    symbol=str(ev.get("symbol", "")),
+                    stock_name=str(ev.get("stock_name", "")),
+                    industry=str(ev.get("industry", "")),
+                    event_scope=str(ev.get("event_scope", "UNKNOWN")),
+                    event_scope_source=str(ev.get("event_scope_source", "unknown")),
+                    event_scope_confidence=_safe_float(
+                        ev.get("event_scope_confidence"), 0.0
                     ),
                 )
             )

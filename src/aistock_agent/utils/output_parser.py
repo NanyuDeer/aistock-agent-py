@@ -740,6 +740,10 @@ def transform_to_frontend(
                 for c in _as_list(understanding.get("coreChanges", []))
                 if isinstance(c, dict)
             ],
+            # 第四阶段：事件传导价值判断（Call1 语义判断结果，随理解落库供后续读取）
+            "is_stock_only": bool(understanding.get("is_stock_only", False)),
+            "transmission_needed": bool(understanding.get("transmission_needed", True)),
+            "transmission_reason": str(understanding.get("transmission_reason", "")),
         }
     else:
         reports["event_understanding"] = None

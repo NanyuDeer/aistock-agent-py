@@ -620,6 +620,9 @@ def _event_records_to_major_events(
                     if isinstance(keywords, list)
                     else []
                 ),
+                # 第三阶段：透传 event_scope（缺失默认 UNKNOWN），使 scheduler I4 兜底
+                # 路径经 run_single_event_conduction 统一防护点过滤 STOCK 事件
+                "event_scope": str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN"),
             }
         )
     return result
