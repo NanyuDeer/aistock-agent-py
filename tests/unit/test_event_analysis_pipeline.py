@@ -10,6 +10,7 @@ from aistock_agent.services.event_conduction import (
     AnalysisReportPayload,
     EventConductionOutput,
     EventConductionResult,
+    run_single_event_conduction,
 )
 
 _MODULE = "aistock_agent.services.event_analysis_pipeline"
@@ -99,3 +100,59 @@ async def test_pipeline_passes_per_event_timeout_and_runs_gi() -> None:
     gi_events = mock_gi.call_args.args[0]
     assert [e["event_id"] for e in gi_events] == ["evt_a"]
     assert result["gi_result"]["persisted"] is True
+
+
+# ── 第三阶段：event_scope 传导入口保护（STOCK 跳过 / UNKNOWN 放行）──
+# 防护位于 run_single_event_conduction（scraper/pipeline/scheduler/routes 的
+# 统一汇聚点），进入 event_agent.run() 之前检查 event_scope。
+
+
+@pytest.mark.asyncio
+async def test_single_conduction_skips_stock_event() -> None:
+    """STOCK 事件 → 不执行 event_agent.run()，返回 event_conduction_skipped=True。"""
+    with patch(
+        "aistock_agent.agents.workers.event.run",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        result = await run_single_event_conduction(
+            {
+                "event_id": "evt_stock",
+                "title": "贵州茅台回购股份",
+                "event_scope": "STOCK",
+            }
+        )
+
+    mock_run.assert_not_called()
+    assert result.status.event_conduction_skipped is True
+    assert result.status.success is False
+    assert result.status.error_type == "stock_event_skipped"
+    assert result.analysis_report is None
+
+
+@pytest.mark.asyncio
+async def test_single_conduction_allows_unknown_event() -> None:
+    """UNKNOWN 事件 → 正常执行 event_agent.run()，不跳过。"""
+    mock_result = {
+        "final_response": "ok",
+        "analysis_reports": {
+            "event_generated": True,
+            "event_persisted": True,
+            "event_id": "evt_unknown",
+        },
+    }
+    with patch(
+        "aistock_agent.agents.workers.event.run",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ) as mock_run:
+        result = await run_single_event_conduction(
+            {
+                "event_id": "evt_unknown",
+                "title": "新能源汽车产业链发展",
+                "event_scope": "UNKNOWN",
+            }
+        )
+
+    mock_run.assert_awaited_once()
+    assert result.status.event_conduction_skipped is False
+    assert result.status.success is True

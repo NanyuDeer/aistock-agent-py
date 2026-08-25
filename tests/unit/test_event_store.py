@@ -276,6 +276,82 @@ async def test_load_event_scrape_not_found_logs_warning(
     assert "node_api_http_error" not in out
 
 
+def test_normalize_event_extracts_stock_fields_and_scope() -> None:
+    # eastmoney 个股情报管线事件：统一抽取 symbol/stock_name/industry，并打 STOCK 标记
+    raw = {
+        "title": "贵州茅台回购股份",
+        "url": "https://example.com/mt",
+        "symbol": "SH600519",
+        "stock_name": "贵州茅台",
+        "industry": "白酒",
+        "impact_score": 5,
+    }
+    event = normalize_event(raw, source="eastmoney", score_date="2026-08-12")
+    assert event is not None
+    assert event["symbol"] == "600519"
+    assert event["stock_name"] == "贵州茅台"
+    assert event["industry"] == "白酒"
+    assert event["event_scope"] == "STOCK"
+    assert event["event_scope_source"] == "eastmoney_rule"
+    assert event["event_scope_confidence"] == 0.95
+
+
+def test_normalize_event_defaults_scope_unknown_without_stock_signal() -> None:
+    # 无个股信号：event_scope=UNKNOWN，symbol 等关联字段为空串（不参与判定）
+    raw = {"title": "国家支持新能源汽车产业发展", "url": "https://example.com/x"}
+    event = normalize_event(raw, source="cls", score_date="2026-08-12")
+    assert event is not None
+    assert event["event_scope"] == "UNKNOWN"
+    assert event["event_scope_source"] == "unknown"
+    assert event["event_scope_confidence"] == 0.0
+    assert event["symbol"] == ""
+    assert event["stock_name"] == ""
+    assert event["industry"] == ""
+
+
+@pytest.mark.asyncio
+async def test_load_event_scrape_defaults_missing_scope_to_unknown() -> None:
+    # 历史数据无 event_scope 字段：加载后默认 UNKNOWN，不报错、不影响读取
+    legacy = _make_event()
+    with patch("aistock_agent.services.event_store.node_api") as mock_api:
+        mock_api.get_analysis_report_quiet = AsyncMock(
+            return_value={"content": {"events": [legacy]}}
+        )
+        events = await load_event_scrape("2026-08-12")
+    assert len(events) == 1
+    assert events[0]["event_scope"] == "UNKNOWN"
+    assert events[0]["event_scope_source"] == "unknown"
+    assert events[0]["event_scope_confidence"] == 0.0
+    assert events[0]["symbol"] == ""
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_persists_scope_fields() -> None:
+    # event_scope 相关字段随事件落库（后续传导过滤/前端展示的数据基础）
+    events = [
+        _make_event(
+            event_scope="STOCK",
+            event_scope_source="eastmoney_rule",
+            event_scope_confidence=0.95,
+            symbol="600519",
+            stock_name="贵州茅台",
+            industry="白酒",
+        )
+    ]
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        await save_event_scrape(events, "2026-08-12")
+        call_kwargs = mock_api.save_analysis_report.call_args.kwargs
+        saved = call_kwargs["content"]["events"][0]
+        assert saved["event_scope"] == "STOCK"
+        assert saved["event_scope_source"] == "eastmoney_rule"
+        assert saved["event_scope_confidence"] == 0.95
+        assert saved["symbol"] == "600519"
+
+
 @pytest.mark.asyncio
 async def test_save_event_scrape_concurrent_batches_no_loss() -> None:
     """P0-4：并发两批不同事件，读-改-写串行化后无丢批。

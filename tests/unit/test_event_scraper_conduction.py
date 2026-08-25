@@ -92,6 +92,7 @@ async def test_trigger_conduction_maps_major_event_fields():
         "impact_score": 5,
         "direction": "negative",
         "involved_keywords": ["美股", "美元"],
+        "event_scope": "UNKNOWN",
     }
 
 
@@ -501,3 +502,66 @@ async def test_trigger_conduction_marks_triggered():
     assert args is not None
     assert args.args[0] == "conduction_triggered:2026-08-13"
     assert args.args[1] == 21600
+
+
+# ── 第三阶段：event_scope 传导过滤（STOCK 不触发传导 / UNKNOWN 放行）──
+
+
+def _scope_event(
+    *, event_id: str, title: str, event_scope: str | None = None
+) -> dict[str, object]:
+    """构造含/不含 event_scope 的 EventRecord（模拟落库后新增事件）。"""
+    ev: dict[str, object] = {
+        "event_id": event_id,
+        "title": title,
+        "summary": "",
+        "url": "",
+        "impact_score": 5,
+        "direction": "positive",
+        "involved_keywords": [],
+        "score_date": "2026-08-12",
+    }
+    if event_scope is not None:
+        ev["event_scope"] = event_scope
+    return ev
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_skips_stock_event():
+    """STOCK 事件（贵州茅台回购股份）→ 不调用 run_event_analysis_pipeline，
+    事件保留 event_scrape 记录，仅跳过传导（action=skip_conduction）。"""
+    events = [_scope_event(event_id="e_stock", title="贵州茅台回购股份", event_scope="STOCK")]
+    with patch(_PIPELINE_PATH, new=AsyncMock()) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_allows_unknown_event():
+    """UNKNOWN 事件（新能源汽车产业链发展）→ 正常调用流水线，event_scope 透传。"""
+    events = [_scope_event(event_id="e_unknown", title="新能源汽车产业链发展", event_scope="UNKNOWN")]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_awaited_once()
+    called = mock_pipeline.await_args.args[0]
+    assert len(called) == 1
+    assert called[0]["event_id"] == "e_unknown"
+    assert called[0]["event_scope"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_defaults_missing_scope_to_unknown():
+    """历史事件无 event_scope（美联储降息）→ 默认 UNKNOWN → 正常进入传导（向后兼容）。"""
+    events = [_scope_event(event_id="e_old", title="美联储降息")]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_awaited_once()
+    called = mock_pipeline.await_args.args[0]
+    assert len(called) == 1
+    assert called[0]["event_scope"] == "UNKNOWN"
