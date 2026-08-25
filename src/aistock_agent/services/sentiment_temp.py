@@ -10,7 +10,10 @@ import structlog
 from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_quick_think
-from aistock_agent.services.market_trace_snapshot import normalize_a_share
+from aistock_agent.services.market_trace_snapshot import (
+    _normalize_date_yyyymmdd,
+    normalize_a_share,
+)
 from aistock_agent.utils.date import is_trading_day
 
 logger = structlog.get_logger()
@@ -313,6 +316,19 @@ async def compute_and_persist_sentiment_temp(
         close_data = await node_api.get("/internal/market/close-snapshot")
         if not isinstance(close_data, dict) or close_data.get("status") != "complete":
             logger.warning("sentiment_temp_snapshot_missing", date=report_date)
+            return None
+
+        # trade_date 一致性校验（镜像 market_trace_snapshot 的 C2 保护，但按本任务
+        # "跳过而非抛错"语义处理）：Node 在今日数据未就绪时可能返回上一交易日的
+        # complete 数据，若把它按今日日期落盘会污染连冰计数与次日晨报引用
+        # （错误地把昨日冰点当作今日新冰点）。规范化后不一致 → 告警并跳过，不落盘。
+        trade_date = _normalize_date_yyyymmdd(close_data.get("trade_date"))
+        if trade_date is None or trade_date != report_date:
+            logger.warning(
+                "sentiment_temp_trade_date_mismatch",
+                date=report_date,
+                trade_date=trade_date,
+            )
             return None
 
         a_share = normalize_a_share(close_data)
