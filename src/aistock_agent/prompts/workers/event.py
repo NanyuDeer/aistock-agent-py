@@ -22,8 +22,31 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
   "event_type": "事件类型（必须从枚举中选择，见下方约束）",
   "coreChanges": [
     { "variable": "被改变的变量名", "before": "变化前状态", "after": "变化后状态" }
-  ]
+  ],
+  "is_stock_only": false,
+  "transmission_needed": true,
+  "transmission_reason": ""
 }
+
+## 事件传导价值判断（is_stock_only / transmission_needed）
+
+核心判断标准不是"是否包含股票名称"，而是"**事件是否存在行业/产业链外溢影响**"。
+
+1. **纯个股事件**：仅影响单家公司自身，不产生产业链外溢影响。例如：
+   - 回购、增持、减持、分红、股权激励
+   - 董监高变化、单家公司财务变化
+   输出：`is_stock_only=true`、`transmission_needed=false`
+
+2. **个股但存在产业链影响**：即使主体是单家公司，但具备外溢影响。例如：
+   - 重大订单、技术突破、新产品商业化
+   - 大规模扩产、供应链变化、市场份额变化
+   输出：`is_stock_only=false`、`transmission_needed=true`
+
+3. **行业/市场事件**：默认 `is_stock_only=false`、`transmission_needed=true`
+
+- 禁止因为事件包含股票名称就判断为纯个股。
+- transmission_reason：必须给出 ≤40 字判断依据（为何纯个股 / 为何存在产业链外溢）。
+- 无法确定时默认 `is_stock_only=false`、`transmission_needed=true`，宁可多分析，不要误杀产业链事件。
 
 ## 约束
 - title：一句话新闻标题风格，聚焦事件主体 + 最关键变化，可直接作为事件卡片标题。要求：

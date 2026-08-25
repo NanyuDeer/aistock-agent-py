@@ -781,6 +781,44 @@ async def run(state: AgentState) -> dict[str, object]:
                 },
             }
 
+        # ── 第四阶段：事件传导价值判断（Call1 后立即终止）──
+        # 纯个股事件（is_stock_only=true 且 transmission_needed=false）从事件传导
+        # 链路整体剔除：不执行 Call1.5 图谱查询 / Call2-5，不落库、不缓存、
+        # 不生成 event_conduction 记录（事件仍保留在 event_scrape）。
+        # 字段缺失或格式异常 → 默认放行（is_stock_only=false / transmission_needed=true），
+        # 宁可多分析，不要误杀有产业链外溢影响的行业事件。
+        if bool(understanding.get("is_stock_only", False)) and not bool(
+            understanding.get("transmission_needed", True)
+        ):
+            stock_skip_reason = str(understanding.get("transmission_reason", "")).strip()
+            logger.info(
+                "EVENT_CONDUCTION_FILTER",
+                event_id=event_id,
+                title=str(understanding.get("title", ""))[:50],
+                event_scope="UNKNOWN",
+                action="skip_conduction",
+                reason="stock_only_event",
+                is_stock_only=True,
+                transmission_reason=stock_skip_reason[:40],
+            )
+            return {
+                "final_response": "纯个股事件，不进行产业链传导分析",
+                "analysis_reports": {
+                    **state.get("analysis_reports", {}),
+                    "event_id": event_id,
+                    "event_generated": False,
+                    "event_complete": False,
+                    "can_persist": False,
+                    "event_persisted": False,
+                    "event_cached": False,
+                    "event_conduction_skipped": True,
+                    "skip_reason": "stock_only_event",
+                    "is_stock_only": True,
+                    "transmission_needed": False,
+                    "transmission_reason": stock_skip_reason,
+                },
+            }
+
         # Call 2: 传导路径（deep, ReAct + tools）
         # ── Phase 1 稳定性升级：代码确定性图谱查询 ──
         # 从 understanding 提取核心行业名，强制调用后端 IndustryKG，

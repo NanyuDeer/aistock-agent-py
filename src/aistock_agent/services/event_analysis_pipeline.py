@@ -51,6 +51,10 @@ def _to_gi_events(
     events: list[dict[str, object]] = []
 
     for output in conduction_outputs:
+        # 第四阶段：纯个股 skip 事件（success=true + event_conduction_skipped=true）
+        # 显式过滤——即使成功也不得进入 GI（与第三阶段 STOCK 过滤同源）。
+        if output.status.event_conduction_skipped:
+            continue
         if not output.status.success:
             continue
         report = output.analysis_report
