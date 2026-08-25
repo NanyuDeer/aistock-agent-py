@@ -19,18 +19,24 @@ from aistock_agent.services.redis_pool import RedisPool
 logger = structlog.get_logger()
 
 
-async def get_cached_briefing() -> str | None:
-    """从 Redis 获取缓存晨报。
+async def get_cached_briefing(report_type: str = "morning") -> str | None:
+    """从 Redis 获取缓存晨报/盘中报。
 
-    缓存 key 格式：``briefing:morning:{YYYY-MM-DD}``
+    缓存 key 格式：``briefing:{report_type}:{YYYY-MM-DD}``
+
+    参数化 report_type（H2，2026-08-24）：盘中报复用同一函数但传
+    report_type="midday"，key 按类型隔离，避免与晨报撞键。
+
+    Args:
+        report_type: 报告类型，决定缓存 key 前缀（默认 morning 兼容既有调用）。
 
     Returns:
-        缓存的晨报文本，未命中或异常时返回 None。
+        缓存的报告文本，未命中或异常时返回 None。
     """
     try:
         client = await RedisPool.get_client()
         today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:morning:{today}"
+        cache_key = f"briefing:{report_type}:{today}"
         cached = await client.get(cache_key)
         if cached:
             if isinstance(cached, bytes):
@@ -41,17 +47,20 @@ async def get_cached_briefing() -> str | None:
     return None
 
 
-async def set_cached_briefing(content: str, ttl: int = 86400) -> None:
-    """缓存晨报到 Redis。
+async def set_cached_briefing(content: str, ttl: int = 86400, report_type: str = "morning") -> None:
+    """缓存报告到 Redis。
+
+    缓存 key 格式：``briefing:{report_type}:{YYYY-MM-DD}``
 
     Args:
-        content: 晨报文本。
+        content: 报告文本。
         ttl: 缓存过期秒数，默认 86400（每日更新语义）。
+        report_type: 报告类型，决定缓存 key 前缀（默认 morning 兼容既有调用；H2）。
     """
     try:
         client = await RedisPool.get_client()
         today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:morning:{today}"
+        cache_key = f"briefing:{report_type}:{today}"
         await client.setex(cache_key, ttl, content)
     except Exception:
         logger.debug("set_cached_briefing_failed", exc_info=True)

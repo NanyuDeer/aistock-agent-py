@@ -1354,16 +1354,18 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
 
 
 async def get_stock_trace_observability() -> dict[str, object]:
-    """组装 stock_trace 观测快照：进程内计数器 + Redis 实时 gauge。
+    """组装观测快照：stock_trace / search 进程内计数器 + Redis 实时 gauge。
 
-    计数器来自 MetricsCollector（stock_trace 链路，Task 2 扩展）；gauge 实时读
-    Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，不阻塞 /metrics。
+    计数器来自 MetricsCollector（stock_trace 链路与搜索 provider 链路，Task 2 扩展）；
+    gauge 实时读 Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，
+    不阻塞 /metrics。
     """
     from aistock_agent.observability.metrics import get_metrics
     from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
 
     snapshot = get_metrics()
     stock_trace = dict(snapshot.get("stock_trace", {}))
+    search = dict(snapshot.get("search", {}))  # type: ignore[call-overload]
     gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
     try:
         import redis.asyncio as aioredis
@@ -1385,7 +1387,7 @@ async def get_stock_trace_observability() -> dict[str, object]:
     except Exception:
         logger = structlog.get_logger()
         logger.warning("metrics_redis_read_failed")
-    return {"stock_trace": {**stock_trace, **gauges}}
+    return {"stock_trace": {**stock_trace, **gauges}, "search": search}
 
 
 @health_router.get("/metrics")
@@ -1616,6 +1618,50 @@ async def trigger_evening_chain(
             error=str(e), exc_info=True, trace_id=trace_id,
         )
         raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
+
+
+@router.post("/admin/trigger/midday")
+async def trigger_midday(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动补跑盘中报任务（12:05 调度）。
+
+    供管理员在错过 12:05 调度或验收时使用。仍会经过交易日守卫
+    （_run_midday_task 内部校验，非交易日返回 skipped）。
+    返回任务状态（skipped/ok/partial/failed），供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_midday_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-midday-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_midday_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_midday_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_midday_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "reason": result.get("reason"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_midday_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"midday trigger failed: {e}")
 
 
 @router.post("/admin/stock-trace/dlq/replay")
