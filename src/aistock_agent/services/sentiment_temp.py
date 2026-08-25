@@ -1,6 +1,15 @@
-"""短线情绪温度：六指标 → 0-100 温度 + 冰点判定（纯函数，无 IO）。"""
+"""短线情绪温度：六指标 → 0-100 温度 + 冰点判定 + 预判生成 + 落盘/加载 + 晨报上下文。"""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import structlog
+
+from aistock_agent.services.llm import get_quick_think
+
+logger = structlog.get_logger()
 
 
 def _num(value: object) -> float:
@@ -112,3 +121,166 @@ def judge_ice(
         "consecutive_ice_days": consecutive,
         "is_extreme_ice": is_ice and consecutive >= extreme_days,
     }
+
+
+# ── 预判生成（仅冰点调用）───────────────────────────────────────────
+
+_PREDICTION_FALLBACK = (
+    "昨日情绪冰点，短期修复概率较高，关注超跌方向反弹机会，注意弱势板块补跌风险。"
+)
+
+_PREDICTION_PROMPT = (
+    "你是一名 A 股短线情绪分析师。昨日市场情绪到达冰点"
+    "（温度 {score}/100，{level}，连续 {consecutive} 日）。\n"
+    "指标：涨停 {up_count} 家，跌停 {down_count} 家，"
+    "炸板率 {broken_ratio}，最高连板 {highest_board} 板，"
+    "涨跌家数比 {advance_ratio}，主力净流入 {main_force_net_yi} 亿。\n"
+    "请输出 1-2 句「冰点次日预判」：短期修复概率（参考历史规律表述，如\"修复概率较高\"）+ "
+    "关注方向（超跌反弹方向）+ 风险提示。\n"
+    "只输出正文，不要标题、不要列表、不要引号，不超过 60 字。"
+)
+
+
+async def generate_ice_prediction(
+    metrics: dict[str, float],
+    score: float,
+    level: str,
+    consecutive: int,
+) -> tuple[bool, str]:
+    """冰点预判：quick_think 生成；失败/空输出降级为模板话术。"""
+    try:
+        from langchain_core.messages import HumanMessage
+
+        prompt = _PREDICTION_PROMPT.format(
+            score=score,
+            level=level,
+            consecutive=consecutive,
+            up_count=int(metrics.get("up_count", 0)),
+            down_count=int(metrics.get("down_count", 0)),
+            broken_ratio=metrics.get("broken_ratio", 0.0),
+            highest_board=int(metrics.get("highest_board", 0)),
+            advance_ratio=metrics.get("advance_ratio", 0.0),
+            main_force_net_yi=metrics.get("main_force_net_yi", 0.0),
+        )
+        resp = await get_quick_think().ainvoke([HumanMessage(content=prompt)])
+        text = str(getattr(resp, "content", "") or "").strip()
+        if text:
+            return True, text
+    except Exception:  # noqa: BLE001 —— LLM 失败降级，不阻断任务
+        pass
+    return False, _PREDICTION_FALLBACK
+
+
+# ── 落盘 / 加载 ────────────────────────────────────────────────────
+
+
+def build_sentiment_payload(
+    date: str,
+    score: float,
+    level: str,
+    metrics: dict[str, object],
+    ice: dict[str, object],
+    prediction: dict[str, object],
+) -> dict[str, object]:
+    """组装落盘 schema（见 spec 5.5）。"""
+    return {
+        "date": date,
+        "is_trading_day": True,
+        "score": score,
+        "level": level,
+        "ice": ice,
+        "metrics": metrics,
+        "prediction": prediction,
+    }
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def persist_sentiment(payload: dict[str, object], output_dir: str) -> None:
+    """写当日归档 + latest.json（样式对齐 docs/agent-outputs 惯例）。"""
+    root = Path(output_dir)
+    date_str = str(payload["date"])
+    _write_json(root / f"{date_str}.json", payload)
+    _write_json(root / "latest.json", payload)
+    logger.info("sentiment_temp_persisted", date=date_str, score=payload.get("score"))
+
+
+async def load_latest_sentiment(output_dir: str) -> dict[str, object] | None:
+    """读 latest.json；缺失或非法 JSON 返回 None。"""
+    try:
+        raw = Path(output_dir, "latest.json").read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_previous_archive(output_dir: str, report_date: str) -> dict[str, object] | None:
+    """严格早于 report_date 的最近归档（连冰计数用）；无 → None。"""
+    root = Path(output_dir)
+    if not root.is_dir():
+        return None
+    candidates: list[tuple[str, Path]] = []
+    for f in root.glob("????-??-??.json"):
+        if f.name == "latest.json":
+            continue
+        d = f.stem
+        if d < report_date:
+            candidates.append((d, f))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0])
+    try:
+        parsed = json.loads(candidates[-1][1].read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _format_score(score: object) -> str:
+    """温度展示：整数值省略小数位（52 而非 52.0）。"""
+    try:
+        numeric = float(score)
+    except (TypeError, ValueError):
+        return str(score)
+    return str(int(numeric)) if numeric.is_integer() else str(numeric)
+
+
+def build_morning_sentiment_context(
+    latest: dict[str, object] | None,
+    extreme_days: int,
+) -> str:
+    """晨报三档注入文本：冰点→预判+指标；非冰点→一行概览；None→空串。"""
+    if not isinstance(latest, dict):
+        return ""
+    ice = latest.get("ice")
+    ice = ice if isinstance(ice, dict) else {}
+    score = latest.get("score")
+    level = latest.get("level", "")
+    date_str = str(latest.get("date", ""))
+    if ice.get("is_ice"):
+        consecutive = int(ice.get("consecutive_ice_days", 0) or 0)
+        consecutive_txt = (
+            f"，连续{consecutive}日冰点" if consecutive >= extreme_days else ""
+        )
+        prediction = latest.get("prediction")
+        pred_txt = (
+            str(prediction.get("text", ""))
+            if isinstance(prediction, dict) and prediction.get("text")
+            else ""
+        )
+        metrics = latest.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        metrics_txt = (
+            f" 指标：涨停{metrics.get('up_count', '-')} 跌停{metrics.get('down_count', '-')} "
+            f"炸板{metrics.get('broken_count', '-')} 最高连板{metrics.get('highest_board', '-')}。"
+        )
+        return (
+            f"昨日（{date_str}）短线情绪冰点：温度 {_format_score(score)}"
+            f"（{level}{consecutive_txt}）。{pred_txt}{metrics_txt}"
+        )
+    return f"昨日（{date_str}）短线情绪温度 {_format_score(score)}（{level}）。"
