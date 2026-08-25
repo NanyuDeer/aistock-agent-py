@@ -320,6 +320,12 @@ class Settings(BaseSettings):
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
 
+    # 短线情绪温度：冰点阈值与连冰升级天数。
+    sentiment_ice_threshold: int = 20
+    sentiment_ice_consecutive_days: int = 2
+    # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
+    sentiment_output_dir: str = "docs/agent-outputs/sentiment"
+
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
         "env_file_encoding": "utf-8",
