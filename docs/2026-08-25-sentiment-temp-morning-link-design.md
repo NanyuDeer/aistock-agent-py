@@ -118,7 +118,7 @@ services/sentiment_temp.py
   "is_trading_day": true,
   "score": 18,
   "level": "冰点",
-  "ice": { "is_ice": true, "consecutive_ice_days": 2 },
+  "ice": { "is_ice": true, "consecutive_ice_days": 2, "is_extreme_ice": true },
   "metrics": {
     "up_count": 22, "down_count": 96, "broken_count": 31,
     "highest_board": 3, "advance_ratio": 0.21, "main_force_net_yi": -128.5
