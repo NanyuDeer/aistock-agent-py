@@ -893,7 +893,11 @@ async def test_build_quick_snapshot_success(mocker):
             "decline_count": 1500,
             "flat_count": 500,
         },
-        "coverage": {"current_daily": {"complete": False}},
+        "coverage": {
+            "current_daily": {"complete": False},
+            # 编排缺口 #3：quick 改进版硬门槛，previous_daily 需 complete
+            "previous_daily": {"complete": True},
+        },
     }
 
     mocker.patch.object(node_api, "get_quick_snapshot", AsyncMock(return_value=quick_data))
@@ -928,7 +932,7 @@ async def test_build_quick_snapshot_raises_when_node_returns_none(mocker):
 
 @pytest.mark.asyncio
 async def test_build_quick_snapshot_raises_on_trade_date_mismatch(mocker):
-    """trade_date 不匹配时抛出异常。"""
+    """trade_date 不匹配时抛出异常（需先满足 previous_daily 硬门槛，见编排缺口 #3）。"""
     from aistock_agent.services.market_trace_snapshot import (
         MarketTraceSnapshotUnavailable,
         build_quick_snapshot,
@@ -943,12 +947,46 @@ async def test_build_quick_snapshot_raises_on_trade_date_mismatch(mocker):
                 "trade_date": "20260729",
                 "indexes": [],
                 "breadth": {},
-                "coverage": {},
+                "coverage": {
+                    "current_daily": {"complete": False},
+                    "previous_daily": {"complete": True},
+                },
             }
         ),
     )
 
     with pytest.raises(MarketTraceSnapshotUnavailable, match="trade_date"):
+        await build_quick_snapshot("2026-07-30")
+
+
+@pytest.mark.asyncio
+async def test_build_quick_snapshot_raises_on_previous_daily_incomplete(mocker):
+    """编排缺口 #3（硬门槛 fail-loud）：previous_daily.complete 非 True 即拒绝产片。"""
+    from aistock_agent.services.market_trace_snapshot import (
+        MarketTraceSnapshotUnavailable,
+        build_quick_snapshot,
+    )
+
+    mocker.patch.object(
+        node_api,
+        "get_quick_snapshot",
+        AsyncMock(
+            return_value={
+                "status": "complete",
+                "trade_date": "20260730",
+                "indexes": [],
+                "breadth": {},
+                "coverage": {
+                    "current_daily": {"complete": False},
+                    "previous_daily": {"complete": False, "reason": "stale"},
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(
+        MarketTraceSnapshotUnavailable, match="previous_daily.complete is not True"
+    ):
         await build_quick_snapshot("2026-07-30")
 
 
@@ -988,7 +1026,12 @@ def _quick_payload(**overrides: object) -> dict[str, object]:
             "sectors": {"state": "unavailable", "reason": "provider_empty"},
             "main_force": {"state": "unavailable", "reason": "moneyflow_ths_unavailable"},
         },
-        "coverage": {"current_daily": {"complete": False}},
+        "coverage": {
+            "current_daily": {"complete": False},
+            # 编排缺口 #3：quick 改进版需校验 coverage.previous_daily.complete==True
+            # （Node 用 Tushare 前日填充），故默认桩置 True，否则 build_quick_snapshot fail-loud。
+            "previous_daily": {"complete": True},
+        },
     }
     payload.update(overrides)
     return payload

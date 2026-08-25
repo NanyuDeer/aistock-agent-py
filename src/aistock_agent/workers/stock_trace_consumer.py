@@ -12,6 +12,7 @@ from redis.typing import EncodableT
 
 from aistock_agent.agents.workers.stock_trace import StockTraceWorker
 from aistock_agent.config import settings
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.stock_trace_client import StockTraceNodeClient
@@ -19,6 +20,7 @@ from aistock_agent.services.stock_trace_client import StockTraceNodeClient
 STREAM = "stock-trace.jobs"
 DLQ_STREAM = "stock-trace.jobs.dlq"
 logger = structlog.get_logger()
+_metrics = get_metrics_collector()
 
 
 # 心跳可观测性：供 /health/ready 检查 consumer 是否卡死。
@@ -34,6 +36,48 @@ def _text(value: object) -> str:
 
 def _fields(value: Mapping[object, object]) -> dict[str, str]:
     return {_text(key): _text(item) for key, item in value.items()}
+
+
+# 可重投错误码白名单：结构性错误（INVALID_JOB_MESSAGE 等）不允许重投
+REPLAYABLE_ERROR_CODES = {
+    "SNAPSHOT_TIMEOUT",
+    "NODE_WRITEBACK_FAILED",
+    "WORKER_FAILED",
+    "LLM_OR_DEPENDENCY_UNAVAILABLE",
+}
+
+
+async def replay_dlq(
+    redis_client: aioredis.Redis,
+    filter_criteria: dict[str, str] | None = None,
+    limit: int = 50,
+) -> int:
+    """把 DLQ 中可重投消息 re-xadd 回主流并删除。结构性错误码直接跳过。"""
+    filter_criteria = filter_criteria or {}
+    messages = await redis_client.xrange(DLQ_STREAM, min="-", max="+", count=max(1, limit))
+    replayed = 0
+    for message_id, raw_fields in messages:
+        fields = _fields(raw_fields)
+        error_code = fields.get("error_code", "")
+        if error_code not in REPLAYABLE_ERROR_CODES:
+            continue
+        if filter_criteria.get("error_code") and error_code != filter_criteria["error_code"]:
+            continue
+        if filter_criteria.get("job_id") and fields.get("job_id") != filter_criteria["job_id"]:
+            continue
+        payload: dict[EncodableT, EncodableT] = {}
+        for key, value in fields.items():
+            if key == "error_code":
+                continue  # 重投时剔除死信元信息
+            payload[key] = value
+        await redis_client.xadd(STREAM, payload)
+        await redis_client.xdel(DLQ_STREAM, message_id)
+        replayed += 1
+        if replayed >= limit:
+            break
+    if replayed:
+        logger.info("stock_trace_dlq_replayed", count=replayed)
+    return replayed
 
 
 class StockTraceConsumer:
@@ -112,17 +156,37 @@ class StockTraceConsumer:
             if writeback is not None:
                 await self._node_client.report_job(job_id, "completed")
                 await self._redis.xack(STREAM, self._group, message_id)
+                await self._redis.delete(f"stock_trace:snapshot_pending:{job_id}")
                 logger.info("stock_trace_job_completed", job_id=job_id, event_id=event_id)
                 return
             await self._handle_failure(message_id, fields, job_id, "NODE_WRITEBACK_FAILED")
             return
         if outcome.error_code == "SNAPSHOT_NOT_READY":
             await self._node_client.report_job(job_id, "queued", error_code=outcome.error_code)
+            _metrics.record_stock_trace_snapshot_not_ready()
+            # 超时兜底：首次命中起超过阈值仍未就绪 → SNAPSHOT_TIMEOUT 死信，杜绝无限空转
+            if await self._snapshot_pending_expired(job_id):
+                await self._dead_letter(message_id, fields, "SNAPSHOT_TIMEOUT")
+                return
             # 不确认消息：快照就绪后由 pending reclaim 重新执行。
             return
         await self._handle_failure(
             message_id, fields, job_id, outcome.error_code or "WORKER_FAILED"
         )
+
+    async def _snapshot_pending_expired(self, job_id: str) -> bool:
+        """记录首次 SNAPSHOT_NOT_READY 时间；超过阈值返回 True（由调用方死信）。"""
+        key = f"stock_trace:snapshot_pending:{job_id}"
+        raw = await self._redis.get(key)
+        now = int(time.time())
+        if raw is None:
+            await self._redis.setex(key, 3600, str(now))
+            return False
+        elapsed = now - int(raw)
+        if elapsed > settings.stock_trace_snapshot_not_ready_timeout_seconds:
+            logger.warning("stock_trace_snapshot_timeout", job_id=job_id, elapsed_seconds=elapsed)
+            return True
+        return False
 
     async def _handle_failure(
         self, message_id: str, fields: dict[str, str], job_id: str, error_code: str
@@ -149,14 +213,38 @@ class StockTraceConsumer:
         if job_id:
             await self._node_client.report_job(job_id, "dead_letter", error_code=error_code)
         await self._redis.xack(STREAM, self._group, message_id)
+        _metrics.record_stock_trace_dlq_total(error_code)
         logger.warning("stock_trace_job_dead_letter", job_id=job_id, error_code=error_code)
 
     async def run_forever(self) -> None:
         global _stock_trace_consumer_last_heartbeat
         _stock_trace_consumer_last_heartbeat = time.time()
+        last_inspect = 0.0
+        last_alert = 0.0
+        dlq_first_seen: float | None = None
         while True:
             _stock_trace_consumer_last_heartbeat = time.time()
             try:
+                now = time.time()
+                if now - last_inspect >= settings.stock_trace_dlq_inspect_interval_seconds:
+                    last_inspect = now
+                    length = await self._redis.xlen(DLQ_STREAM)
+                    if length > 0:
+                        if dlq_first_seen is None:
+                            dlq_first_seen = now
+                        if (
+                            now - dlq_first_seen >= settings.stock_trace_dlq_alert_after_seconds
+                            and now - last_alert >= settings.stock_trace_dlq_alert_after_seconds
+                        ):
+                            last_alert = now
+                            logger.warning(
+                                "stock_trace_dlq_alert",
+                                dlq_length=length,
+                                dlq_persist_seconds=int(now - dlq_first_seen),
+                                hint="run POST /admin/stock-trace/dlq/replay to requeue",
+                            )
+                    else:
+                        dlq_first_seen = None
                 await self.consume_once()
             except asyncio.CancelledError:
                 raise

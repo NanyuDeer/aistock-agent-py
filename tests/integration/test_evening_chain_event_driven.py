@@ -42,7 +42,7 @@ def ctx(event_bus):
 
 @pytest.mark.asyncio
 async def test_quick_chain_review_to_snapshot(ctx):
-    """quick 链路：review_quick -> snapshot(quick)，不触发 iterate，不发 review_done。"""
+    """quick 链路：review_quick -> review_done(ok) + snapshot(quick)，不触发 iterate。"""
     consumer = ReviewQuickConsumer(ctx)
     event = Event(
         event_id="evt-1",
@@ -64,13 +64,14 @@ async def test_quick_chain_review_to_snapshot(ctx):
         )
         await consumer.handle(event)
 
-    # 应该 publish snapshot 事件（kind=quick）
-    ctx.event_bus.publish.assert_called_once()
-    pub_call = ctx.event_bus.publish.call_args
-    assert pub_call[0][0] == CHANNEL_SNAPSHOT
-    assert pub_call[1]["payload"]["snapshot_kind"] == "quick"
-    # quick 链路不发 review_done（S1）
-    assert CHANNEL_REVIEW_DONE not in [c.args[0] for c in ctx.event_bus.publish.await_args_list]
+    # status=ok → quick 改进版同样发布 review_done（次日预测，编排缺口 #1）与 snapshot
+    channels = [c.args[0] for c in ctx.event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+    snapshot_call = next(
+        c for c in ctx.event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["snapshot_kind"] == "quick"
 
 
 @pytest.mark.asyncio

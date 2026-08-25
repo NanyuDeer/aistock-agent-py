@@ -1350,6 +1350,55 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     return {"code": 404, "message": "报告未生成", "data": None}
 
 
+# ── 观测指标 ──────────────────────────────────────────────────────
+
+
+async def get_stock_trace_observability() -> dict[str, object]:
+    """组装观测快照：stock_trace / search 进程内计数器 + Redis 实时 gauge。
+
+    计数器来自 MetricsCollector（stock_trace 链路与搜索 provider 链路，Task 2 扩展）；
+    gauge 实时读 Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，
+    不阻塞 /metrics。
+    """
+    from aistock_agent.observability.metrics import get_metrics
+    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
+
+    snapshot = get_metrics()
+    stock_trace = dict(snapshot.get("stock_trace", {}))
+    search = dict(snapshot.get("search", {}))  # type: ignore[call-overload]
+    gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
+    try:
+        import redis.asyncio as aioredis
+
+        redis_client = aioredis.from_url(settings.stock_trace_redis_url)
+        try:
+            gauges["dlq_length"] = await redis_client.xlen(DLQ_STREAM)
+            groups = await redis_client.xinfo_groups(STREAM)
+            if groups:
+                gauges["stream_lag"] = groups[0].get("lag", 0)
+            pending = await redis_client.xpending(
+                STREAM, settings.stock_trace_consumer_group
+            )
+            if pending:
+                # 未指定 count 时 xpending 返回摘要，首元素即 pending 计数
+                gauges["pending_unacked"] = pending[0]
+        finally:
+            await redis_client.aclose()
+    except Exception:
+        logger = structlog.get_logger()
+        logger.warning("metrics_redis_read_failed")
+    return {"stock_trace": {**stock_trace, **gauges}, "search": search}
+
+
+@health_router.get("/metrics")
+async def metrics() -> dict[str, object]:
+    """观测指标（Prometheus 语义的 JSON 快照）。含 stock_trace 计数与实时 gauge。
+
+    注意：挂在 health_router 下，/metrics 在根路径（main.py 挂载），不带 /api/agent 前缀。
+    """
+    return await get_stock_trace_observability()
+
+
 # ── 健康检查 ──────────────────────────────────────────────────────
 
 
@@ -1569,6 +1618,82 @@ async def trigger_evening_chain(
             error=str(e), exc_info=True, trace_id=trace_id,
         )
         raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
+
+
+@router.post("/admin/trigger/midday")
+async def trigger_midday(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动补跑盘中报任务（12:05 调度）。
+
+    供管理员在错过 12:05 调度或验收时使用。仍会经过交易日守卫
+    （_run_midday_task 内部校验，非交易日返回 skipped）。
+    返回任务状态（skipped/ok/partial/failed），供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_midday_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-midday-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_midday_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_midday_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_midday_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "reason": result.get("reason"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_midday_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"midday trigger failed: {e}")
+
+
+@router.post("/admin/stock-trace/dlq/replay")
+async def replay_stock_trace_dlq(
+    _: None = Depends(verify_internal_token),
+    error_code: str = "",
+    job_id: str = "",
+    limit: int = 50,
+) -> dict[str, object]:
+    """把 DLQ 中可重投的死信重新入队回 stock-trace.jobs 主流。
+
+    结构性错误码（INVALID_JOB_MESSAGE 等）不在 REPLAYABLE_ERROR_CODES 白名单，
+    将直接跳过。error_code / job_id 可选，用于精确筛选。
+    """
+    import redis.asyncio as _aioredis
+
+    from aistock_agent.workers.stock_trace_consumer import replay_dlq
+
+    client = _aioredis.from_url(  # type: ignore[no-untyped-call]
+        settings.stock_trace_redis_url, max_connections=2
+    )
+    filter_criteria: dict[str, str] = {}
+    if error_code:
+        filter_criteria["error_code"] = error_code
+    if job_id:
+        filter_criteria["job_id"] = job_id
+    try:
+        limit = max(1, min(limit, 200))
+        replayed = await replay_dlq(client, filter_criteria, limit)
+    finally:
+        await client.aclose()
+    return {"replayed": replayed}
 
 
 # ── 大盘溯源后接预测（独立触发，PR-A/T5；T6 regenerate 代理的转发目标） ──

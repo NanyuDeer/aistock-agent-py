@@ -1237,7 +1237,8 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     - 调用 /internal/market/quick-snapshot（腾讯行情）而非
       /internal/market/close-snapshot（Tushare）
     - 不校验 coverage.current_daily.complete（quick 版 coverage 不完整是正常的）
-    - 不校验 previous_daily（quick 版无前日数据）
+    - 需校验 coverage.previous_daily.complete（编排缺口 #3：quick 改进版替代 full，
+      Node 已用 Tushare 前日填充；前日缺失即 fail-loud，不伪造"已收盘"）
     - 其余归一化、discovery 逻辑与 full 版一致
 
     Raises:
@@ -1254,6 +1255,19 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     if close_data.get("status") != "complete":
         raise MarketTraceSnapshotUnavailable(
             f"Node quick-snapshot status is not complete: {close_data.get('status')}"
+        )
+
+    # 校验 coverage.previous_daily.complete（编排缺口 #3）。
+    # 为什么与 current_daily 分开：quick 版当日 coverage 不完整是正常的（腾讯近似），
+    # 但前日必须已由 Node 用 Tushare 填充并 complete，否则拒绝产片——与 full 硬门槛对齐，
+    # 让 quick 改进版能替代 full 而不会在 previous_daily 滞后的场景产错日报告。
+    coverage = close_data.get("coverage")
+    coverage_dict = coverage if isinstance(coverage, dict) else {}
+    previous_daily = coverage_dict.get("previous_daily")
+    previous_daily_dict = previous_daily if isinstance(previous_daily, dict) else {}
+    if previous_daily_dict.get("complete") is not True:
+        raise MarketTraceSnapshotUnavailable(
+            "Node quick-snapshot coverage.previous_daily.complete is not True"
         )
 
     # ── 2. 校验 trade_date ──
