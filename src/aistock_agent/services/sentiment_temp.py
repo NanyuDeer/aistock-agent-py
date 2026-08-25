@@ -7,7 +7,11 @@ from pathlib import Path
 
 import structlog
 
+from aistock_agent.config import settings
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.market_trace_snapshot import normalize_a_share
+from aistock_agent.utils.date import is_trading_day
 
 logger = structlog.get_logger()
 
@@ -284,3 +288,90 @@ def build_morning_sentiment_context(
             f"（{level}{consecutive_txt}）。{pred_txt}{metrics_txt}"
         )
     return f"昨日（{date_str}）短线情绪温度 {_format_score(score)}（{level}）。"
+
+
+# ── 收盘编排（定时任务入口）─────────────────────────────────────────
+
+
+async def compute_and_persist_sentiment_temp(
+    report_date: str,
+    output_dir: str | None = None,
+) -> dict[str, object] | None:
+    """收盘编排：交易日守卫 → close-snapshot → 温度 → 冰点预判 → 落盘。
+
+    Returns:
+        落盘的 payload；非交易日、snapshot 缺失或计算异常 → None（不落盘）。
+    """
+    from datetime import date as date_cls_dt
+
+    try:
+        if not is_trading_day(date_cls_dt.fromisoformat(report_date)):
+            logger.info("sentiment_temp_skip_non_trading_day", date=report_date)
+            return None
+
+        root = output_dir or settings.sentiment_output_dir
+        close_data = await node_api.get("/internal/market/close-snapshot")
+        if not isinstance(close_data, dict) or close_data.get("status") != "complete":
+            logger.warning("sentiment_temp_snapshot_missing", date=report_date)
+            return None
+
+        a_share = normalize_a_share(close_data)
+        score = compute_sentiment_score(a_share)
+        level = sentiment_level(score)
+
+        prev = load_previous_archive(root, report_date)
+        prev_ice = prev.get("ice") if isinstance(prev, dict) else {}
+        prev_consecutive = (
+            int(prev_ice.get("consecutive_ice_days", 0) or 0)
+            if isinstance(prev_ice, dict)
+            else 0
+        )
+        ice = judge_ice(
+            score,
+            prev_consecutive,
+            threshold=settings.sentiment_ice_threshold,
+            extreme_days=settings.sentiment_ice_consecutive_days,
+        )
+
+        metrics = _metrics_payload(a_share, score)
+        prediction: dict[str, object] = {"generated": False}
+        if ice["is_ice"]:
+            generated, text = await generate_ice_prediction(
+                metrics, score, level, int(ice["consecutive_ice_days"])
+            )
+            prediction = {"generated": generated, "text": text}
+
+        payload = build_sentiment_payload(report_date, score, level, metrics, ice, prediction)
+        persist_sentiment(payload, root)
+        return payload
+    except Exception as exc:  # noqa: BLE001 —— 独立任务，失败不阻断调度
+        logger.warning("sentiment_temp_task_failed", date=report_date, error=str(exc))
+        return None
+
+
+def _metrics_payload(a_share: dict[str, object], score: float) -> dict[str, object]:
+    """落盘 metrics（六指标原值；缺失置 0）。"""
+    limits = a_share.get("limits")
+    limits = limits if isinstance(limits, dict) else {}
+    breadth = a_share.get("breadth")
+    breadth = breadth if isinstance(breadth, dict) else {}
+    main_force = a_share.get("main_force")
+    main_force = main_force if isinstance(main_force, dict) else {}
+
+    def _n(v: object) -> float:
+        return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else 0.0
+
+    up = _n(limits.get("up_count"))
+    broken = _n(limits.get("broken_count"))
+    up_broken = up + broken
+    broken_ratio = round(broken / up_broken, 2) if up_broken > 0 else 0.0
+    main_force_yi = round(_n(main_force.get("large_and_extra_large_net_yuan")) / 1e8, 1)
+    return {
+        "up_count": int(_n(limits.get("up_count"))),
+        "down_count": int(_n(limits.get("down_count"))),
+        "broken_count": int(broken),
+        "broken_ratio": broken_ratio,
+        "highest_board": int(_n(limits.get("highest_board"))),
+        "advance_ratio": round(_n(breadth.get("advance_ratio")), 2),
+        "main_force_net_yi": main_force_yi,
+    }

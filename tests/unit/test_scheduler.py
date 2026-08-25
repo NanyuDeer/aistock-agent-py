@@ -89,8 +89,8 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
         ) as from_crontab:
             scheduler.start_scheduler()
 
-        # 9 个业务 job（含 midday_briefing）+ scheduler_heartbeat
-        assert from_crontab.call_count == 10
+        # 11 个业务 job（含 sentiment_temp）+ scheduler_heartbeat
+        assert from_crontab.call_count == 12
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
