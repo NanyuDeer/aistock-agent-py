@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-25 — LLM 前缀缓存命中观测（可观测先行）
+
+**开发者**: changer-collab
+
+### 新增
+- LLM 前缀缓存命中观测（design-debate 裁决「可观测先行」，不做 prompt 重排/前缀冻结）：callback 层归一化提取 OpenAI `prompt_tokens_details.cached_tokens` / astream 路径 `input_token_details.cached_tokens` 与 DeepSeek `prompt_cache_hit_tokens`，按 provider 分桶进 `metrics["llm_cache"]`（`{prompt_tokens, cached_tokens, hit_rate}`）；只做观测不落库、不进计费链（`token_usage.py` / `ws.py` / `node_api.save_token_usage` 字节零改动）
+
+### 改进
+- `observability/callback.py`：抽取 `_get_raw_token_usage`（llm_output.token_usage → usage_metadata fallback）供计费与缓存观测复用；新增 `_extract_cache_usage` 字段归一化，无缓存字段不记录不抛异常
+- `observability/metrics.py`：新增 `record_llm_cache_hit`（max(x,0) 防负）、快照 `hit_rate`（prompt=0 取 0.0）、reset 同步清零
+
+### 验证
+- 定向 38 passed（含 7 个新增缓存命中用例）；全量 unit 2100 passed / 3 failed（checkpointer 基线失败，A/B 验证新增清零）；ruff 0；mypy 0
+
+---
+
 ## [changer] 2026-08-25 — 短线情绪温度 + 冰点次日晨报引用预判
 
 **开发者**: Aria

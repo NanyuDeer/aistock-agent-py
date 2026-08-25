@@ -52,6 +52,10 @@ class MetricsCollector:
         self._search_failed: dict[str, int] = {}
         self._search_budget_exhausted = 0
         self._search_empty = 0
+        # LLM 前缀缓存命中观测（2026-08-25 design-debate 产出）：
+        # 按 provider 分桶累计 {prompt_tokens, cached_tokens}，命中率 = cached / prompt。
+        # 只做观测统计，不进计费链（token_usage 累加器/ws.py 透传零改动）。
+        self._llm_cache_hit: dict[str, dict[str, int]] = {}
 
     def record_llm_start(self, model: str = "") -> None:
         """记录一次 LLM 调用开始（调用次数 +1）。
@@ -85,6 +89,31 @@ class MetricsCollector:
         """记录一次 LLM 调用错误（错误次数 +1）。"""
         with self._lock:
             self._llm_errors += 1
+
+    def record_llm_cache_hit(
+        self,
+        *,
+        prompt_tokens: int,
+        cached_input_tokens: int,
+        provider: str,
+    ) -> None:
+        """累计一次 LLM 调用的前缀缓存命中（按 provider 分桶，仅观测）。
+
+        Args:
+            prompt_tokens: 本次调用 prompt token 总数（含缓存与非缓存部分）。
+            cached_input_tokens: 其中命中缓存的 token 数（OpenAI cached_tokens /
+                DeepSeek prompt_cache_hit_tokens，缺失按 0）。
+            provider: provider 标签（"openai" / "deepseek"，归一化后）。
+
+        命中率由 get_metrics 快照计算（cached / prompt）。此计数独立于
+        record_llm_tokens 计费累加，不写入 token_usage 计费链。
+        """
+        with self._lock:
+            bucket = self._llm_cache_hit.setdefault(
+                provider, {"prompt_tokens": 0, "cached_tokens": 0}
+            )
+            bucket["prompt_tokens"] += max(prompt_tokens, 0)
+            bucket["cached_tokens"] += max(cached_input_tokens, 0)
 
     def record_tool_start(self, tool_name: str = "") -> None:
         """记录一次工具调用开始（工具调用次数 +1）。
@@ -237,6 +266,18 @@ class MetricsCollector:
             search_failed = dict(self._search_failed)
             search_budget_exhausted = self._search_budget_exhausted
             search_empty = self._search_empty
+            llm_cache_hit = {
+                provider: {
+                    "prompt_tokens": v["prompt_tokens"],
+                    "cached_tokens": v["cached_tokens"],
+                    "hit_rate": (
+                        v["cached_tokens"] / v["prompt_tokens"]
+                        if v["prompt_tokens"] > 0
+                        else 0.0
+                    ),
+                }
+                for provider, v in self._llm_cache_hit.items()
+            }
         error_rate = (llm_errors / llm_calls) if llm_calls > 0 else 0.0
 
         def _avg(bucket: dict[str, int]) -> float:
@@ -274,6 +315,7 @@ class MetricsCollector:
                 "budget_exhausted": search_budget_exhausted,
                 "empty": search_empty,
             },
+            "llm_cache": llm_cache_hit,
         }
 
     def reset(self) -> None:
@@ -303,6 +345,7 @@ class MetricsCollector:
             self._search_failed = {}
             self._search_budget_exhausted = 0
             self._search_empty = 0
+            self._llm_cache_hit = {}
 
 
 # 模块级单例：全局共享，回调 handler 与端点读取同一实例。
