@@ -181,6 +181,8 @@ class Settings(BaseSettings):
     scheduler_midday_broadcast_cron: str = "15 12 * * 0-4"
     scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
+    # 短线情绪温度：收盘后 15:45（紧随快照 15:35）。
+    scheduler_sentiment_cron: str = "45 15 * * 0-4"
     scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 0-4"
@@ -319,6 +321,12 @@ class Settings(BaseSettings):
     phenomenon_min_match_score: int = 2
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
+
+    # 短线情绪温度：冰点阈值与连冰升级天数。
+    sentiment_ice_threshold: int = 20
+    sentiment_ice_consecutive_days: int = 2
+    # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
+    sentiment_output_dir: str = "docs/agent-outputs/sentiment"
 
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",

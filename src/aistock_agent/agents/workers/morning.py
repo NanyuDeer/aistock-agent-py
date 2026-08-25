@@ -23,7 +23,11 @@ from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.config import settings
-from aistock_agent.prompts.workers.morning import MORNING_PROMPT
+from aistock_agent.prompts.workers.morning import (
+    MAJOR_EVENTS_CONTEXT_PLACEHOLDER,
+    MORNING_PROMPT,
+    SENTIMENT_ICE_CONTEXT_PLACEHOLDER,
+)
 from aistock_agent.services.archiver import archive_morning
 from aistock_agent.services.cache import (
     get_cached_briefing,
@@ -34,6 +38,10 @@ from aistock_agent.services.cache import (
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.morning_persister import persist_morning_report
+from aistock_agent.services.sentiment_temp import (
+    build_morning_sentiment_context,
+    load_latest_sentiment,
+)
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.date import is_trading_day, shanghai_today
@@ -722,7 +730,7 @@ async def run(state: AgentState) -> dict[str, object]:
                     major_context.append(ev)
             if major_context:
                 system_prompt = system_prompt.replace(
-                    "{{MAJOR_EVENTS_CONTEXT}}",
+                    MAJOR_EVENTS_CONTEXT_PLACEHOLDER,
                     "\n".join(
                         f"- {ev.get('title', '')}（{ev.get('summary', '')}）"
                         for ev in major_context
@@ -731,15 +739,25 @@ async def run(state: AgentState) -> dict[str, object]:
             else:
                 # 有数据但全为普通证据 → 仍按缺库降级（避免注入空列表）
                 system_prompt = system_prompt.replace(
-                    "{{MAJOR_EVENTS_CONTEXT}}",
+                    MAJOR_EVENTS_CONTEXT_PLACEHOLDER,
                     "（事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块）",
                 )
         else:
             # 缺库降级：保留原自主检索指令
             system_prompt = system_prompt.replace(
-                "{{MAJOR_EVENTS_CONTEXT}}",
+                MAJOR_EVENTS_CONTEXT_PLACEHOLDER,
                 "（事件库为空，请自行通过工具检索当日重大事件并输出 MAJOR_EVENTS 标记块）",
             )
+
+        # 短线情绪温度注入（冰点次日引用预判）：文件缺失/异常 → 空串，行为零变化。
+        sentiment_ctx = build_morning_sentiment_context(
+            await load_latest_sentiment(settings.sentiment_output_dir),
+            extreme_days=settings.sentiment_ice_consecutive_days,
+        )
+        system_prompt = system_prompt.replace(
+            SENTIMENT_ICE_CONTEXT_PLACEHOLDER,
+            sentiment_ctx,
+        )
 
         # 调用 morning agent（含降级重试逻辑）
         report = await _invoke_morning_agent(system_prompt)
