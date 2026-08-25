@@ -7,6 +7,9 @@
 # 仅在事件库为空时自主检索。输出格式保持 <!--MAJOR_EVENTS_START/END--> 不变。
 MAJOR_EVENTS_CONTEXT_PLACEHOLDER = "{{MAJOR_EVENTS_CONTEXT}}"
 
+# 短线情绪温度/冰点预判（冰点次日晨报引用；无数据时替换为空串，忽略该段）。
+SENTIMENT_ICE_CONTEXT_PLACEHOLDER = "{{SENTIMENT_ICE_CONTEXT}}"
+
 MORNING_PROMPT = """你是 AiStock 晨报分析师，日期：{{DATE}}。
 
 请按照以下4步框架，为 A 股投资者生成今日晨报：
@@ -27,6 +30,9 @@ MORNING_PROMPT = """你是 AiStock 晨报分析师，日期：{{DATE}}。
 - 昨日领涨/领跌板块
 - 资金面概况（北向资金、融资融券）
 - 市场情绪指标
+- 短线情绪衔接：{{SENTIMENT_ICE_CONTEXT}}
+  若上方内容非空，必须基于它输出参考历史规律表述（如"昨日情绪冰点，短期修复概率较高"），
+  并结合外盘与消息定性演绎，标注"参考历史规律，非确定性指令"；若内容为空，忽略本段。
 - **在步骤末尾，必须用明确的小标题"## 今日焦点板块预测"，逐板块列出你预测今日会受关注的方向**，
   每个板块写一段判断理由，格式如：**板块名** - 关注方向 - 核心逻辑
 
