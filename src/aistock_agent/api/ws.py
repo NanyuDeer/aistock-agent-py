@@ -126,6 +126,7 @@ async def _run_chat_graph_to_events(
     last_deep_report: dict[str, object] | None = None
     token_usage: dict[str, int] | None = None
     cards: list[ChatCard] | None = None
+    questions: list[str] | None = None
     seen_nodes: set[str] = set()
     reasoning_tasks: list[asyncio.Task] = []
     current_node: str = ""
@@ -213,6 +214,7 @@ async def _run_chat_graph_to_events(
                     last_deep_report = output.get("last_deep_report")
                     token_usage = output.get("token_usage")
                     cards = output.get("cards")
+                    questions = output.get("questions")  # 追问面板（2026-08-26）
 
         await _drain_reasoning_tasks(reasoning_tasks)
         await asyncio.sleep(0)
@@ -254,6 +256,7 @@ async def _run_chat_graph_to_events(
             "last_deep_report": last_deep_report,
             "token_usage": token_usage,
             "cards": [c.model_dump() for c in cards] if cards else None,
+            "questions": questions,  # 追问面板（2026-08-26）
         }
     except Exception as exc:
         logger.error("chat_resume.graph_failed: %s", exc, exc_info=True)

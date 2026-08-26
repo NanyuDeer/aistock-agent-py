@@ -336,6 +336,7 @@ async def _synth_multi_goal(
         "trace": trace,
         "messages": [AIMessage(content=combined)],
         "cards": _build_cards(evidences),
+        "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
     }
 
 
@@ -463,10 +464,8 @@ def _build_prompt(
    （基于证据的要点列表，引用具体数据，如指数点位、涨跌幅、板块、个股）
    ## 数据说明
    （若证据 degraded 或为最近交易日数据，列出缺失项与数据日期；正常时简述数据时间范围）
-2. conclusion 结尾必须追加 1 句引导追问，基于用户意图自然生成，
-   例如"想深入了解某个板块或个股的表现，可以继续问我。"
-2b. 在 insight.questions 中生成 2-4 条可点击追问建议（问句形态、每条 6-20 字、
-    与回答同主题），供前端"追问面板"展示；不要与结尾引导句重复表述
+2. 在 insight.questions 中生成 2-4 条可点击追问建议（问句形态、每条 6-20 字、
+   与回答同主题），供前端"追问面板"展示；不要与结尾引导句重复表述
 3. 即使证据 degraded 或仅有最近交易日数据，也要基于可用 facts 按正常结构回答，
    缺失项写入"数据说明"，禁止输出一句"无法提供"后结束。
 用户问题: {goal.question}
@@ -482,7 +481,7 @@ def _build_prompt(
 
 {{
   "insight": {{
-    "conclusion": "直接回答用户问题的结论（Markdown 分节 + 结尾引导句）",
+    "conclusion": "直接回答用户问题的结论（Markdown 分节）",
     "basis_indices": [],
     "confidence": "low",
     "uncertainty": [],
@@ -622,13 +621,11 @@ def _build_degraded_insight(
             + "\n".join(f"- {fact}" for fact in all_facts)
             + "\n\n## 数据说明\n"
             f"综合回答生成失败（{reason}），已返回原始证据事实。"
-            + "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     else:
         conclusion = (
             "## 核心结论\n"
             "当前没有可用的数据事实，暂时无法回答该问题。"
-            "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
     # Phase 4-3：conservative 档优先级高于 strong（risk_tolerance 由调用方传入）
@@ -991,18 +988,20 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
         logger.error("synth_answer.no_goal")
         metrics.record_synth_degraded()
         metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
+        insight = _build_degraded_insight(
+            InsightGoal(question="", intent="report_lookup"),
+            evidences,
+            "validate",
+            "missing goal",
+            risk_tolerance,
+        )
         return {
-            "insight": _build_degraded_insight(
-                InsightGoal(question="", intent="report_lookup"),
-                evidences,
-                "validate",
-                "missing goal",
-                risk_tolerance,
-            ),
+            "insight": insight,
             "final_response": "内部错误：缺少目标",
             "trace": None,
             "messages": [AIMessage(content="内部错误：缺少目标")],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：降级恒空
         }
 
     # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
@@ -1028,6 +1027,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             ),
             "messages": [AIMessage(content=clarification)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：澄清恒空
         }
 
     # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
@@ -1058,6 +1058,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             ),
             "messages": [AIMessage(content=shortcut)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：闸门恒空
         }
 
     # 3. D31 deep 分支（新增）：escalate 已产出 worker 全文，跳过 LLM 纯代码加工
@@ -1122,6 +1123,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content=processed)],
             "last_deep_report": last_deep_report,
             "cards": [deep_card] if deep_card is not None else None,
+            "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
         }
 
     # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
@@ -1226,6 +1228,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "trace": trace,
             "messages": [AIMessage(content=final_response)],
             "cards": _build_cards(evidences),
+            "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
         }
 
     except Exception as exc:
@@ -1249,6 +1252,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "trace": trace,
             "messages": [AIMessage(content=insight.conclusion)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：降级恒空
         }
 
 

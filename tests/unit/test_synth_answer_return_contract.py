@@ -217,3 +217,11 @@ async def test_deep_degraded_empty_questions():
     ):
         result = await synth_answer_node(state)
     assert result["insight"].questions == []
+
+
+def test_chat_response_has_questions_field():
+    """ChatResponse 契约含可选 questions 字段（HTTP 非流式透出）。"""
+    from aistock_agent.schemas.chat import ChatResponse
+
+    resp = ChatResponse(content="ok", session_id="s", token_usage=None, last_deep_report=None, cards=None)
+    assert resp.questions is None or resp.questions == []

@@ -24,3 +24,5 @@ class ChatResponse(BaseModel):
     # 此前遗漏导致深度分析卡/卡片不渲染——此处补齐，与 WS 契约对齐（无则 None，null 兼容）。
     last_deep_report: dict[str, object] | None = None
     cards: list[dict[str, object]] | None = None
+    # 追问面板（Task 5，2026-08-26）：透出本轮 questions 建议（graph 未采集时为 None，null 兼容）
+    questions: list[str] | None = None
