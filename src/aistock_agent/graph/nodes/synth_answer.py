@@ -879,6 +879,23 @@ def _build_deep_degraded(deep_source: str) -> str:
     return "深度分析暂时不可用，请稍后重试"
 
 
+# deep 分支追问模板（零 LLM，worker 名 + 用户问题骨架；2026-08-26）
+_DEEP_QUESTION_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "stock": ("「{q}」的结论有哪些风险点？", "「{q}」最新消息面有什么变化？"),
+    "sector": ("「{q}」板块的龙头股有哪些？", "该板块今日资金流向如何？"),
+    "hot_burst": ("「{q}」的爆发逻辑还能持续多久？",),
+}
+
+
+def _build_deep_questions(worker: str, question: str) -> list[str]:
+    """deep 分支零 LLM 模板生成 1-2 条追问；未知 worker 回退通用追问。"""
+    q = (question or "").strip()
+    templates = _DEEP_QUESTION_TEMPLATES.get(worker)
+    if not templates:
+        templates = ("「{q}」结论的核心依据有哪些？",)
+    return [t.format(q=q) for t in templates if q]
+
+
 def _build_deep_report_ref(
     worker: str,
     question: str,
@@ -1047,6 +1064,9 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
     deep_source = state.get("deep_source")
     if deep_source is not None:
         final_response = state.get("final_response", "")
+        # 追问面板（Task 4）：degraded 判定必须在降级填充前（空 final_response → 恒 []，
+        # 不能拿 processed 与 _build_deep_degraded 产物比较——文本可变，判定不稳）
+        degraded = not final_response
         if not final_response:
             final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
         # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示；
@@ -1056,6 +1076,12 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             strong=_contains_action_word(goal.question),
             risk_tolerance=risk_tolerance,
         )
+        # 追问面板（Task 4）：degraded deep 恒空（面板不升级）；正常 deep 按 worker 名
+        # 模板零 LLM 生成 1-2 条追问（问题骨架）
+        if degraded:
+            deep_questions: list[str] = []
+        else:
+            deep_questions = _build_deep_questions(deep_source, goal.question or "")
         # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
         report_id = await _persist_chat_analysis(
             state.get("user_id"), processed, deep_source
@@ -1079,6 +1105,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="medium",          # worker 已深度分析；失败降级时 low
             uncertainty=[],               # P2 落库时再补数据说明
             answer_mode="deep",
+            questions=deep_questions,     # 追问面板：模板 1-2 条（degraded 恒 []）
         )
         logger.info("synth_answer.deep_ok", deep_source=deep_source)
         deep_card = _build_deep_card(last_deep_report)

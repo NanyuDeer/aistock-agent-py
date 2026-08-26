@@ -186,3 +186,34 @@ def test_multi_goal_questions_cap_respected():
 
     merged = _merge_section_questions([["a1", "a2", "a3"], ["b1", "b2", "b3"], ["c1", "c2"]])
     assert len(merged) <= 4
+
+
+def test_deep_template_questions_by_worker():
+    """deep 分支按 worker 名模板生成 1-2 条追问（零 LLM）。"""
+    from aistock_agent.graph.nodes.synth_answer import _build_deep_questions
+
+    stock_qs = _build_deep_questions("stock", "贵州茅台值得长期持有吗")
+    assert len(stock_qs) == 2
+    assert "贵州茅台值得长期持有吗" in stock_qs[0]
+
+    sector_qs = _build_deep_questions("sector", "白酒板块怎么看")
+    assert len(sector_qs) >= 1
+
+    # 未知 worker 名回退：至少 1 条通用追问
+    assert len(_build_deep_questions("unknown_worker", "问题")) >= 1
+
+
+@pytest.mark.asyncio
+async def test_deep_degraded_empty_questions():
+    """degraded deep（空 final_response）questions 恒空（面板不升级）。"""
+    state = _minimal_state(
+        goal=InsightGoal(question="x", symbols=[], intent="stock_snapshot"),
+        deep_source="stock",
+        final_response="",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("degraded deep 分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
