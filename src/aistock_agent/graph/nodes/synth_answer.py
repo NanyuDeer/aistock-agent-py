@@ -373,6 +373,8 @@ class SynthInsightOutput(BaseModel):
     confidence: Literal["high", "medium", "low"]
     uncertainty: list[str] = []
     answer_mode: Literal["predict", "trace", "validate"]
+    # 追问面板（2026-08-26）：可选 questions 数组，缺失/空=无建议=前端不升级面板
+    questions: list[str] = []
 
     model_config = ConfigDict(extra="forbid")
 
@@ -438,6 +440,8 @@ def _build_prompt(
    （若证据 degraded 或为最近交易日数据，列出缺失项与数据日期；正常时简述数据时间范围）
 2. conclusion 结尾必须追加 1 句引导追问，基于用户意图自然生成，
    例如"想深入了解某个板块或个股的表现，可以继续问我。"
+2b. 在 insight.questions 中生成 2-4 条可点击追问建议（问句形态、每条 6-20 字、
+    与回答同主题），供前端"追问面板"展示；不要与结尾引导句重复表述
 3. 即使证据 degraded 或仅有最近交易日数据，也要基于可用 facts 按正常结构回答，
    缺失项写入"数据说明"，禁止输出一句"无法提供"后结束。
 用户问题: {goal.question}
@@ -457,7 +461,8 @@ def _build_prompt(
     "basis_indices": [],
     "confidence": "low",
     "uncertainty": [],
-    "answer_mode": "{mode}"
+    "answer_mode": "{mode}",
+    "questions": ["追问1", "追问2"]
   }}
 }}
 
@@ -467,6 +472,7 @@ def _build_prompt(
 - 禁止输出完整证据对象数组，禁止输出 skill/reason 等旧字段
 - 完整证据由服务端按序号引用生成，你只需要决定引用哪些证据条目
 - answer_mode 必须为 {mode}
+- questions 必须为问句字符串数组，2-4 条，缺失/空数组均合法（前端视为无建议）
 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
@@ -614,6 +620,7 @@ def _build_degraded_insight(
         confidence="low",
         uncertainty=[f"综合失败: {reason}"],
         answer_mode="validate",  # 兜底始终 validate
+        questions=[],
     )
 
 
@@ -1127,6 +1134,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence=raw.confidence,
             uncertainty=raw.uncertainty,
             answer_mode=mode,  # type: ignore[arg-type]
+            questions=raw.questions,
         )
         # 非交易时段统一提示（2026-08-03 规范扩展）：行情类证据降级时前导提示 + 引导
         # （D5：复用进入流式前缓存的 status 单次取值，保证与已分发 hint 前缀一致）

@@ -17,7 +17,10 @@ last_deep_report 键且值非 None，7 个非 deep 返回点不得返回该键�
 """
 import pytest
 
-from aistock_agent.graph.nodes.synth_answer import _build_deep_report_ref
+from aistock_agent.graph.nodes.synth_answer import (
+    SynthInsightOutput,
+    _build_deep_report_ref,
+)
 from aistock_agent.state.chat_schema import DeepReportRef
 
 
@@ -83,3 +86,28 @@ def test_deep_branch_build_deep_report_ref_is_dict_with_expected_keys():
     assert isinstance(ref, dict)
     for key in ("worker", "report_id", "question", "summary", "symbols", "tag_codes", "created_at"):
         assert key in ref
+
+
+def test_synth_insight_output_questions_field():
+    """SynthInsightOutput 必须含可选 questions 字段（默认空列表）。"""
+    out = SynthInsightOutput(
+        conclusion="## 核心结论\n短期震荡。\n## 行情要点\n- 指数收涨 0.5%",
+        basis_indices=[1],
+        confidence="low",
+        uncertainty=[],
+        answer_mode="validate",
+    )
+    assert out.questions == []
+
+
+def test_synth_insight_output_questions_roundtrip():
+    """LLM 提供 questions 时完整透传（2-4 条问句）。"""
+    out = SynthInsightOutput(
+        conclusion="## 核心结论\n短期震荡。",
+        basis_indices=[],
+        confidence="low",
+        uncertainty=[],
+        answer_mode="validate",
+        questions=["今天大盘成交量如何？", "哪些板块领涨？"],
+    )
+    assert len(out.questions) == 2
