@@ -15,13 +15,17 @@
 禁止未来"state 层显式 None 化"破坏该契约（硬约束 #1）：deep 分支必须返回
 last_deep_report 键且值非 None，7 个非 deep 返回点不得返回该键。
 """
+from unittest.mock import patch
+
 import pytest
 
 from aistock_agent.graph.nodes.synth_answer import (
     SynthInsightOutput,
     _build_deep_report_ref,
+    synth_answer_node,
 )
-from aistock_agent.state.chat_schema import DeepReportRef
+from aistock_agent.schemas.chat_contract import InsightGoal
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 
 
 def test_deep_branch_build_deep_report_ref_non_none():
@@ -111,3 +115,55 @@ def test_synth_insight_output_questions_roundtrip():
         questions=["今天大盘成交量如何？", "哪些板块领涨？"],
     )
     assert len(out.questions) == 2
+
+
+def _minimal_state(**extra) -> QuestionState:
+    """构造最小 QuestionState：goal 缺省为 None（命中无 goal 分支）。"""
+    state: QuestionState = {"messages": [], "user_id": None}
+    state.update(extra)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_clarification_branch_insight_has_empty_questions():
+    """澄清分支（qa_router 兜底缺失个股代码）Insight.questions 恒空（面板不升级）。
+
+    注意：澄清分支在 goal 缺失检查之后，state 必须带合法 goal 才会走到该分支；
+    仅带 clarification 会命中无 goal 分支（由 test_no_goal_branch 覆盖）。
+    """
+    state = _minimal_state(
+        goal=InsightGoal(question="分析贵州茅台", intent="stock_snapshot"),
+        clarification="请提供 6 位股票代码",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("澄清分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_shortcut_branch_insight_has_empty_questions():
+    """闸门短路分支（final_response 话术直出）Insight.questions 恒空（面板不升级）。"""
+    state = _minimal_state(
+        goal=InsightGoal(question="你是谁", intent="stock_snapshot"),
+        final_response="我是 AI 投资助手，可以为您分析个股、板块与大盘。",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("闸门短路分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
+
+
+@pytest.mark.asyncio
+async def test_no_goal_branch_insight_has_empty_questions():
+    """无 goal 降级分支（_build_degraded_insight）Insight.questions 恒空（面板不升级）。"""
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("无 goal 分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(_minimal_state())
+    assert result["insight"].questions == []

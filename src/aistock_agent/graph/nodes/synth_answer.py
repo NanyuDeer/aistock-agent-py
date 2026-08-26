@@ -972,6 +972,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="low",
             uncertainty=["需要股票代码才能执行个股查询"],
             answer_mode="validate",
+            questions=[],  # 追问面板：澄清出口恒空（面板不升级）
         )
         return {
             "insight": insight,
@@ -1001,6 +1002,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="low",
             uncertainty=["guardrail short-circuit"],
             answer_mode="validate",
+            questions=[],  # 追问面板：闸门短路出口恒空（面板不升级）
         )
         return {
             "insight": insight,
