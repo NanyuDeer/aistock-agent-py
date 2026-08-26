@@ -42,6 +42,10 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    - market_positioning_liquidity（市场定位与资金面）
 3. 结构性根源（structural_root）与触发事件（trigger）必须分开；
    政策、公告、数据和新闻 URL 作为证据放在对应节点下。
+   当涨跌停与炸板情绪指标出现极端值（如炸板率异常高、涨跌停家数极端分化）时，
+   必须优先从 market_positioning_liquidity 候选解释短线情绪波动，
+   并在 trigger/exposure/repricing 节点显式引用涨跌停、炸板、连板等市场事实 source_id，
+   不得因情绪指标极端而默认方向为 neutral。
 4. observable_result 必须引用市场事实 source_id（来自 a_share）；
    其余每个节点也必须引用至少一项 SourceRecord 的 source_id。
 5. 全球市场（GLOBAL_*）只能作为候选，不得因"同期下跌/上涨"自动获得 supported 状态。
