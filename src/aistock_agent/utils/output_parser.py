@@ -25,7 +25,8 @@ def parse_event_output(
     解析策略（逐级回退）：
     1. 提取最后一条 AI 消息，尝试整段 JSON 解析
     2. 如果失败，正则匹配 JSON 块（花括号平衡）
-    3. 再失败则返回 (None, None)
+    3. 再失败则对字符串值内未转义的 ASCII 引号做字符级修复后重试
+    4. 仍失败则返回 (None, None)
 
     Returns:
         (display_report, podcast_brief) 元组，解析失败均返回 None。
@@ -35,26 +36,92 @@ def parse_event_output(
         logger.warning("event_output_parse_empty_text")
         return (None, None)
 
-    # 策略 1: 整段 JSON 解析
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return _extract_fields(parsed)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 策略 2: 正则匹配 JSON 块（花括号平衡）
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        try:
-            parsed = json.loads(match.group(0))
-            if isinstance(parsed, dict):
-                return _extract_fields(parsed)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    parsed = _parse_event_json(text)
+    if parsed is not None:
+        return _extract_fields(parsed)
 
     logger.warning("event_output_parse_failed", text_preview=text[:200])
     return (None, None)
+
+
+def _parse_event_json(text: str) -> dict[str, object] | None:
+    """解析事件 Agent 双层 JSON 输出，含字符串值内未转义引号的容错。
+
+    场景（2026-08-26 午报）：LLM 在 details/risks 的 Markdown 正文里把中文
+    引语误写成成对 ASCII 双引号（如 与晨报"头部券商业绩+并购重组活跃"提示方向吻合），
+    导致整段 json.loads 失败、整报被降级为 schema 1.0 落库、前端无法展示 summary。
+    此处复用 _parse_json 的标准策略，失败后对原文做一次字符级引号修复再重试，
+    命中即恢复 display_report / podcast_brief。仅当标准解析失败时才走修复路径，
+    避免破坏本已合法的输出。
+    """
+    parsed = _parse_json(text)
+    if parsed is not None:
+        return parsed if isinstance(parsed, dict) else None
+
+    # 剥掉 markdown 代码块，缩小修复范围
+    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text)
+    cleaned = re.sub(r'\n?\s*```', '', cleaned).strip()
+
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if not match:
+        return None
+    repaired = _escape_unescaped_string_quotes(match.group(0))
+    if repaired == match.group(0):
+        return None
+    try:
+        obj = json.loads(repaired)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    logger.info("event_output_repaired_unescaped_quotes")
+    return obj
+
+
+def _escape_unescaped_string_quotes(raw: str) -> str:
+    """字符级状态机：把字符串字面量内部未转义的 ASCII 双引号转义为 ``\\"``。
+
+    规则：处于字符串内部时，若某双引号之后（忽略空白后）紧跟的不是结构符
+    ``{ : , ] }``（键/值定界符特征，或 JSON 序列分隔符），则判定它为正文里
+    误用的引号并转义；真正的字符串结束定界符（其后是结构符）保持不变。
+    已转义的 ``\\"`` 原样保留。修复后仍可能因其他原因失败，由调用方判定。
+    这是对 json.loads 失败的尽力兜底，不做偷懒的全局替换，避免破坏合法 JSON。
+    """
+    out: list[str] = []
+    in_string = False
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                # 已转义序列（如 \”，\\）原样保留
+                out.append(ch)
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and raw[j] in " \t\r\n":
+                    j += 1
+                nxt = raw[j] if j < n else ""
+                if nxt in ':,}]':
+                    out.append(ch)  # 真正的字符串结束定界符
+                    in_string = False
+                    i += 1
+                    continue
+                out.append('\\"')  # 正文内误用引号 → 转义
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        # 字符串外
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_fields(parsed: dict[str, object]) -> tuple[dict[str, object] | None, str | None]:
