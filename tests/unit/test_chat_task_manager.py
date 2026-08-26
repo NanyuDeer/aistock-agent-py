@@ -16,13 +16,13 @@ async def test_start_and_done_result_cached():
         state.events.append({"type": "text", "content": "hi"})
         state.notify()
         await asyncio.sleep(0)  # 给 waiters 一次轮询机会
-        return {"type": "done", "content": "最终回答"}
+        return {"type": "done", "content": "最终回答", "questions": None}
 
     state = manager.start("s1", "r1", producer)
     assert state is not None
     await state.task
     assert state.done is True
-    assert state.result == {"type": "done", "content": "最终回答"}
+    assert state.result == {"type": "done", "content": "最终回答", "questions": None}
     got = manager.get("s1")
     assert got is state
 
@@ -193,7 +193,7 @@ async def test_cancel_rejected_when_finalizing():
     manager = ChatTaskManager()
 
     async def producer(state):
-        state.result = {"type": "done", "content": "ok"}
+        state.result = {"type": "done", "content": "ok", "questions": None}
         state.finalizing = True  # 复刻 _runner 在 result 赋后置位
         await asyncio.sleep(0.05)  # 保持 finalizing 窗口：result 已产出但 done 未置位
         return state.result
@@ -206,7 +206,7 @@ async def test_cancel_rejected_when_finalizing():
     assert manager.cancel("s1") is False
     await state.task
     # 未误杀：终态保持 done，而非被取消成 cancelled
-    assert state.result == {"type": "done", "content": "ok"}
+    assert state.result == {"type": "done", "content": "ok", "questions": None}
     assert state.cancelled is False
     await manager._cleanup_for_test()
 

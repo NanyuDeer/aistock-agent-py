@@ -37,7 +37,7 @@ async def test_forward_replays_events_and_sends_terminal():
     state = FakeRunState(
         events=[{"type": "text", "content": "a"}, {"type": "text", "content": "b"}],
         done=True,
-        result={"type": "done", "content": "终态"},
+        result={"type": "done", "content": "终态", "questions": None},
     )
     sent: list[dict] = []
 
@@ -48,7 +48,7 @@ async def test_forward_replays_events_and_sends_terminal():
     assert sent == [
         {"type": "text", "content": "a"},
         {"type": "text", "content": "b"},
-        {"type": "done", "content": "终态"},
+        {"type": "done", "content": "终态", "questions": None},
     ]
 
 
@@ -69,7 +69,7 @@ async def test_forward_live_follows_new_events():
         await asyncio.sleep(0.01)
         state.events.append({"type": "text", "content": "b"})
         state.done = True
-        state.result = {"type": "done", "content": "终态"}
+        state.result = {"type": "done", "content": "终态", "questions": None}
         for w in list(state.waiters):
             w.set()
 
@@ -106,7 +106,7 @@ async def test_manager_done_resume_path():
     await manager._cleanup_for_test()
 
     async def producer(state):
-        return {"type": "done", "content": "完整回答"}
+        return {"type": "done", "content": "完整回答", "questions": None}
 
     state = manager.start("rs1", "r1", producer)
     assert state is not None
@@ -114,7 +114,7 @@ async def test_manager_done_resume_path():
     got = manager.get("rs1")
     assert got is not None
     assert got.done is True
-    assert got.result == {"type": "done", "content": "完整回答"}
+    assert got.result == {"type": "done", "content": "完整回答", "questions": None}
     await manager._cleanup_for_test()
 
 
