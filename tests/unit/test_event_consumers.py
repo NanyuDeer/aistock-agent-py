@@ -642,3 +642,32 @@ async def test_review_quick_consumer_ok_no_retry_publishes_review_done(
         c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
     )
     assert snapshot_call.kwargs["payload"]["review_degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_consumer_degraded_fallback_on_missing_reports(
+    mock_event_bus, mock_node_api
+):
+    """build_snapshot 返回 error → 不 raise、持久化降级快照、quick 仍发布 broadcast。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = SnapshotConsumer(ctx)
+    event = Event(
+        event_id="evt-snap-degraded",
+        channel="snapshot",
+        payload={"report_date": "2026-07-30", "snapshot_kind": "quick"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.build_snapshot",
+        return_value={"error": "missing_reports"},
+    ):
+        await consumer.handle(event)  # 不得抛异常
+
+    mock_event_bus.publish.assert_called_once()
+    assert mock_event_bus.publish.call_args[0][0] == CHANNEL_BROADCAST
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "market_snapshot"
+    # 降级快照仍能生成可播报的 brief_summary，且带降级标记
+    assert kwargs["content"]["brief_summary"] is not None
+    assert kwargs["content"]["snapshot"]["degraded"] is True

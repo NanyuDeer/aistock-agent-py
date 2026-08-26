@@ -191,6 +191,41 @@ class ReviewFullConsumer(BaseConsumer):
         logger.info("review_full_done", report_date=report_date, trace_id=trace_id)
 
 
+def _degraded_snapshot(report_date: str, reason: str) -> dict[str, object]:
+    """快照构建失败时返回的降级快照（零值四维度 + error 标记）。
+
+    保证 build_market_snapshot_brief_summary 能产出摘要（hit_rate=0.00），
+    从而 brief_evening / 广播照常生成降级晚报。
+    """
+    return {
+        "date": report_date,
+        "error": reason,
+        "degraded": True,
+        "dimension_1_coverage": {
+            "overlap_hits": [],
+            "missing_in_morning": [],
+            "over_focused": [],
+            "hit_rate": 0.0,
+            "new_coverage_rate": 0.0,
+        },
+        "dimension_2_direction": {
+            "sectors": {},
+            "direction_accuracy": 0.0,
+            "mean_deviation": 0.0,
+            "abs_mean_deviation": 0.0,
+        },
+        "dimension_3_attribution": {
+            "sectors": {},
+            "attribution_match_rate": 0.0,
+        },
+        "dimension_4_sentiment": {
+            "morning_sentiment": 0.0,
+            "review_sentiment": 0.0,
+            "bias": 0.0,
+        },
+    }
+
+
 class SnapshotConsumer(BaseConsumer):
     """快照消费者。quick 只存快照，full 继续触发 iterate。"""
 
@@ -204,7 +239,20 @@ class SnapshotConsumer(BaseConsumer):
 
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         if not isinstance(snapshot, dict) or snapshot.get("error"):
-            raise ValueError(f"snapshot build failed: {snapshot.get('error', 'invalid')}")
+            reason = (
+                str(snapshot.get("error", "invalid_snapshot"))
+                if isinstance(snapshot, dict)
+                else "invalid_snapshot"
+            )
+            logger.warning(
+                "snapshot_degraded_fallback",
+                report_date=report_date,
+                reason=reason,
+            )
+            # 降级快照：零值维度同样能产出 brief_summary，广播照常、不再断链。
+            # 为什么不再 raise：quick 链路 review 失败时快照天然缺 review 报告，
+            # 若抛错会打断广播导致晚报静默丢失（2026-08-26 双钩子设计）。
+            snapshot = _degraded_snapshot(report_date, reason)
 
         # 持久化快照。brief_summary 由受控构造函数生成（复用 scheduler 旧链路逻辑），
         # briefing.py 对 market_snapshot 强制要求该字段，缺失则 brief_evening 降级。
