@@ -40,6 +40,11 @@ def _build_midday_report(
         return {
             "display_report": {
                 "summary": str(display_report.get("summary", "")),
+                "sections": (
+                    display_report.get("sections", [])
+                    if isinstance(display_report.get("sections"), list)
+                    else []
+                ),
                 "details": str(display_report.get("details", "")),
                 "stocks": (
                     display_report.get("stocks", [])
@@ -58,6 +63,7 @@ def _build_midday_report(
     return {
         "display_report": {
             "summary": "",
+            "sections": [],
             "details": raw_text,
             "stocks": [],
             "risks": [],
