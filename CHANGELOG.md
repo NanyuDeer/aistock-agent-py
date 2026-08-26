@@ -14,7 +14,8 @@
 - synth_answer 7 个带 cards 返回点统一写 `questions`；移除结论结尾固定引导句要求与降级引导句文本（G21——问答不重复引导，追问统一走 questions 字段）
 
 ### 验证
-- 全量回归 2590 passed / 22 failed：20 例为合并前基线既有（event/hot_burst/sector/iterate/lifespan、full_flow 实栈、AsyncMock 交互等，baseline c1098ec 交叉验证）；2 例新增为 `tests/e2e/test_ws_chat.py` DONE 负载断言未同步 `questions` 键（Task 10 报告已列，需补期望值）
+- `tests/e2e/test_ws_chat.py` DONE 负载断言已同步 `questions` 键（85370a2），原 2 例新增失败清零
+- 全量回归 2592 passed / 20 failed：20 例均为合并前基线既有环境类失败（event/hot_burst/sector/iterate/lifespan、full_flow 实栈、AsyncMock 交互等，baseline c1098ec 交叉验证）——新增清零
 
 ---
 
