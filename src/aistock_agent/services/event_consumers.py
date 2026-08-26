@@ -236,14 +236,24 @@ class SnapshotConsumer(BaseConsumer):
     async def handle(self, event: Event) -> None:
         report_date = event.payload["report_date"]
         snapshot_kind = event.payload.get("snapshot_kind", "full")
+        # 显式消费 quick 链路透传的降级契约（Task 1 发布、本处消费）；直接触发的
+        # snapshot（如 full 链路）无该字段 → 缺省视为未降级，消除隐性耦合。
+        review_degraded: bool = bool(event.payload.get("review_degraded", False))
+        review_status: str = str(event.payload.get("review_status") or ("degraded" if review_degraded else "ok"))
 
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
-        if not isinstance(snapshot, dict) or snapshot.get("error"):
+        invalid = not isinstance(snapshot, dict) or snapshot.get("error")
+        # 降级判定：review 已降级（即使 build_snapshot 意外成功）或快照构建缺报告。
+        # 保证 review_degraded 字段被消费——降级状态写入持久化与广播链路，而非透传不透用。
+        if review_degraded or invalid:
             reason = (
                 str(snapshot.get("error", "invalid_snapshot"))
                 if isinstance(snapshot, dict)
                 else "invalid_snapshot"
             )
+            if not invalid:
+                # build_snapshot 成功但 review 已降级：强制标记降级（缺 review 报告语义）。
+                reason = "review_degraded"
             logger.warning(
                 "snapshot_degraded_fallback",
                 report_date=report_date,
@@ -264,6 +274,8 @@ class SnapshotConsumer(BaseConsumer):
                 "brief_summary": build_market_snapshot_brief_summary(snapshot),
                 "snapshot": snapshot,
                 "snapshot_kind": snapshot_kind,
+                "review_degraded": review_degraded,
+                "review_status": review_status,
             },
         )
 

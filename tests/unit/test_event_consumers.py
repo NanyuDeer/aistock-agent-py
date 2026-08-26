@@ -671,3 +671,72 @@ async def test_snapshot_consumer_degraded_fallback_on_missing_reports(
     # 降级快照仍能生成可播报的 brief_summary，且带降级标记
     assert kwargs["content"]["brief_summary"] is not None
     assert kwargs["content"]["snapshot"]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_consumer_degraded_full_publishes_iterate(mock_event_bus, mock_node_api):
+    """build_snapshot 返回 error 且 snapshot_kind=full → 不 raise、发 iterate（不 broadcast）。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = SnapshotConsumer(ctx)
+    event = Event(
+        event_id="evt-snap-degraded-full",
+        channel="snapshot",
+        payload={"report_date": "2026-07-30", "snapshot_kind": "full"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.build_snapshot",
+        return_value={"error": "missing_reports"},
+    ):
+        await consumer.handle(event)  # 不得抛异常
+
+    # full 降级快照仍走原 snapshot_kind 分派 → iterate 链路（而非 broadcast）
+    mock_event_bus.publish.assert_called_once_with(
+        CHANNEL_ITERATE, payload={"report_date": "2026-07-30"}
+    )
+    assert CHANNEL_BROADCAST not in [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "market_snapshot"
+    assert kwargs["content"]["snapshot"]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_consumer_review_degraded_forces_degraded(mock_event_bus, mock_node_api):
+    """review_degraded=true 且 build_snapshot 正常（无 error）→ 仍强制降级并透传降级字段。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = SnapshotConsumer(ctx)
+    event = Event(
+        event_id="evt-snap-review-degraded",
+        channel="snapshot",
+        payload={
+            "report_date": "2026-07-30",
+            "snapshot_kind": "quick",
+            "review_degraded": True,
+            "review_status": "degraded",
+        },
+        group="evening_chain",
+    )
+
+    snapshot = {
+        "date": "2026-07-30",
+        "dimension_1_coverage": {"hit_rate": 0.85, "new_coverage_rate": 0.32},
+        "data": {},
+    }
+    with patch(
+        "aistock_agent.services.event_consumers.build_snapshot",
+        return_value=snapshot,
+    ):
+        await consumer.handle(event)
+
+    # quick → broadcast，分派不受 review_degraded 影响
+    mock_event_bus.publish.assert_called_once_with(
+        CHANNEL_BROADCAST, payload={"report_date": "2026-07-30"}
+    )
+    _, kwargs = mock_node_api.save_analysis_report.call_args
+    assert kwargs["report_type"] == "market_snapshot"
+    # 降级契约显式写入持久化内容（而非透传不透用）
+    assert kwargs["content"]["review_degraded"] is True
+    assert kwargs["content"]["review_status"] == "degraded"
+    # build_snapshot 虽成功，但 review 已降级 → 快照仍被标记为降级
+    assert kwargs["content"]["snapshot"]["degraded"] is True
