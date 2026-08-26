@@ -394,7 +394,7 @@ src/aistock_agent/
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
-│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
+│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace / Latency；2026-08-25 加 LLM 前缀缓存命中观测：归一化 OpenAI cached_tokens / DeepSeek prompt_cache_hit_tokens，按 provider 分桶进 metrics["llm_cache"]，不进计费链，见 docs/2026-08-25-token-cache-observability.md）
 └── api/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
