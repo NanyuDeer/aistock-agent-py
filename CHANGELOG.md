@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-08-26 — AI 投顾追问面板：questions 结构化下发（后端链路）
+
+**开发者**: changer-collab
+
+### 新增
+- 回答后建议追问（追问面板数据源）：`SynthInsightOutput.questions: list[str] = []`（LLM 结构化输出，prompt 2b 指令生成 2-4 条同主题问句）+ `QuestionState.questions: list[str] | None`（LangGraph 通道声明）+ `ChatResponse.questions`；WS DONE / HTTP 非流式 / SSE DONE（`round_questions`，G1 事件流采集模式）三通道透出
+- deep 分支 `_build_deep_questions` 零 LLM 模板化（worker 名骨架；多子目标每节前 2 + 全局截 4）；澄清/闸门/无 goal/degraded 出口恒 `[]`
+
+### 改进
+- synth_answer 7 个带 cards 返回点统一写 `questions`；移除结论结尾固定引导句要求与降级引导句文本（G21——问答不重复引导，追问统一走 questions 字段）
+
+### 验证
+- 全量回归 2590 passed / 22 failed：20 例为合并前基线既有（event/hot_burst/sector/iterate/lifespan、full_flow 实栈、AsyncMock 交互等，baseline c1098ec 交叉验证）；2 例新增为 `tests/e2e/test_ws_chat.py` DONE 负载断言未同步 `questions` 键（Task 10 报告已列，需补期望值）
+
+---
+
 ## [changer] 2026-08-25 — LLM 前缀缓存命中观测（可观测先行）
 
 **开发者**: changer-collab

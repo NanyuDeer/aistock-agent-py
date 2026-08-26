@@ -117,6 +117,13 @@ START → supervisor(quick_think, 意图路由)
 
 ### CHAT QA 行为说明（2026-08-01）
 
+### CHAT QA 追问面板 questions 契约（2026-08-26）
+- **数据源契约**：`SynthInsightOutput.questions: list[str] = []`（LLM 结构化输出）+ `QuestionState.questions: list[str] | None`（LangGraph 通道声明，节点返回未声明键会 InvalidUpdateError）+ `ChatResponse.questions`（对外）
+- **生成规则**：light 正常路径 prompt 2b 指令生成 2-4 条问句（6-20 字、问句形态、与回答同主题）；deep 分支 `_build_deep_questions` 零 LLM 模板化（worker 名骨架，多子目标每节前 2 + 全局截 4）；澄清/闸门/无 goal/degraded 出口恒 `[]`；confirm 短路无 questions 键
+- **透出三通道**：WS DONE `questions` / HTTP 非流式 `ChatResponse.questions` / SSE DONE `round_questions`（G1 事件流采集模式，非 final_state.values）；synth_answer 7 个带 cards 返回点统一写 `questions`
+- **G21**：移除结论结尾引导句要求与固定引导句文本——问答不重复引导，追问统一交给 questions 字段
+- **前端契约**：`questions?: string[]`；`[]` 与 `undefined` 均视为"无建议"，前端面板须用 `msg.questions?.length` 判定（勿用真值判断）
+
 ### market_snapshot Skill 降级语义：2026-08-01
 - quick/full 快照失败（如非交易日 quick 409）时自动回退 `/internal/market/last-close-snapshot`
 - 回退成功：degraded=False，source title 标注"最近交易日快照 (trade_date)"，raw 含 used_last_close/trade_date
