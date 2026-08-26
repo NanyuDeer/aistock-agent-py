@@ -167,3 +167,22 @@ async def test_no_goal_branch_insight_has_empty_questions():
     ):
         result = await synth_answer_node(_minimal_state())
     assert result["insight"].questions == []
+
+
+def test_multi_goal_questions_merge_caps_at_four():
+    """多子目标 questions：每节取前 2、全局按节序截 4。"""
+    from aistock_agent.graph.nodes.synth_answer import _merge_section_questions
+
+    per_section = [
+        ["q1a", "q1b", "q1c"],   # 节 1 取前 2
+        ["q2a", "q2b"],          # 节 2 取前 2
+        [],                      # 节 3 降级空
+    ]
+    assert _merge_section_questions(per_section) == ["q1a", "q1b", "q2a", "q2b"]
+
+
+def test_multi_goal_questions_cap_respected():
+    from aistock_agent.graph.nodes.synth_answer import _merge_section_questions
+
+    merged = _merge_section_questions([["a1", "a2", "a3"], ["b1", "b2", "b3"], ["c1", "c2"]])
+    assert len(merged) <= 4

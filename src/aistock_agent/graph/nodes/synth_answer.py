@@ -7,7 +7,7 @@ deep_think + structured output 产出 Insight。
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -74,6 +74,17 @@ class _SectionResult:
     uncertainty: list[str]
     mode: str
     degraded: bool = False
+    questions: list[str] = field(default_factory=list)
+
+
+def _merge_section_questions(per_section: list[list[str]]) -> list[str]:
+    """多子目标 questions 合并：每节取前 2，按节序全局截断至 4 条（确定性）。"""
+    merged: list[str] = []
+    for qs in per_section:
+        merged.extend(qs[:2])
+        if len(merged) >= 4:
+            return merged[:4]
+    return merged
 
 
 async def _synth_section(
@@ -102,7 +113,9 @@ async def _synth_section(
             logger.warning(
                 "synth_answer.section.mode_mismatch", expected=mode, actual=raw.answer_mode
             )
-        return _SectionResult(raw.conclusion, basis, raw.confidence, raw.uncertainty, mode)
+        return _SectionResult(
+            raw.conclusion, basis, raw.confidence, raw.uncertainty, mode, questions=raw.questions
+        )
     except Exception as exc:
         logger.warning("synth_answer.section_failed", err=str(exc), exc_info=True)
         all_facts = [f for ev in evidences for f in ev.facts]
@@ -111,7 +124,13 @@ async def _synth_section(
         else:
             conclusion = "当前没有可用的数据事实，暂时无法回答该问题。"
         return _SectionResult(
-            conclusion, evidences, "low", [f"综合失败: {exc}"], "validate", degraded=True
+            conclusion,
+            evidences,
+            "low",
+            [f"综合失败: {exc}"],
+            "validate",
+            degraded=True,
+            questions=[],
         )
 
 
@@ -220,6 +239,8 @@ async def _synth_multi_goal(
     uncertainty: list[str] = []
     any_degraded = False
     mode: str = "predict"
+    # 追问面板：逐节收集 questions（predict 节为代码生成、无 questions，不参与合并）
+    per_section_questions: list[list[str]] = []
 
     # 改进 17（D9 节级伪流式，2026-08-13）：分节渐进分发。
     # - D5：trading_session_status 单次取值 + hint 前缀预计算（缓存，流式与 DONE 文本共用）；
@@ -242,6 +263,7 @@ async def _synth_multi_goal(
         if res.degraded:
             any_degraded = True
         sections.append(f"{section_header}{res.conclusion}")
+        per_section_questions.append(res.questions)
         await _dispatch_content_deltas([res.conclusion])
         dispatched += res.conclusion
         basis.extend(res.basis)
@@ -289,12 +311,15 @@ async def _synth_multi_goal(
     confidence: Literal["high", "medium", "low"] = (
         "low" if (any_degraded or not basis) else "medium"
     )
+    # 追问面板：多子目标 questions 合并（每节取前 2、按节序全局截 4；节降级该节 []）
+    combined_questions = _merge_section_questions(per_section_questions)
     insight = Insight(
         conclusion=combined,
         basis=basis or evidences,
         confidence=confidence,
         uncertainty=uncertainty,
         answer_mode=mode,  # type: ignore[arg-type]
+        questions=combined_questions,
     )
     trace = AnswerTrace(
         goal=goal,
