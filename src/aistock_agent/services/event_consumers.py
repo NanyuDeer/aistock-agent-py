@@ -51,6 +51,11 @@ PREDICTION_CONSUMER_GROUP = "prediction_chain"
 # llm_failed/parse_failed 的 retry-once 退避秒数（S2）
 PREDICTION_RETRY_BACKOFF_SEC = 2
 
+# quick review 失败重试（2026-08-26 双钩子：先重试后降级）。
+# 总尝试次数含首次；退避序列长度 = MAX-1，总阻塞约 3 分钟（该通道每日一次）。
+REVIEW_QUICK_MAX_RETRIES = 3
+REVIEW_QUICK_RETRY_BACKOFF = (60, 120)  # 秒
+
 
 class PredictionRetryExhaustedError(Exception):
     """预测 retry-once 后仍 llm/parse 失败：事件级失败，交由 EventBus retry → DLQ。"""
@@ -107,29 +112,42 @@ class ReviewQuickConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        result = await run_review(
-            report_date=report_date,
-            snapshot_kind="quick",
-            trace_id=trace_id,
-        )
+        # 有限退避重试：review 瞬时故障（LLM/数据源抖动）自愈，持续故障降级。
+        # 为什么内联 sleep 而非 EventBus.retry：该通道一天仅一次，内联最直观、不进
+        # DLQ 纠缠；后退避仅在前几次尝试间生效（2026-08-26 降级钩子设计）。
+        result = None
+        for attempt in range(REVIEW_QUICK_MAX_RETRIES):
+            result = await run_review(
+                report_date=report_date,
+                snapshot_kind="quick",
+                trace_id=trace_id,
+            )
+            if result.status in ("ok", "skipped"):
+                break
+            # status == "degraded"：退避后重试下一轮
+            if attempt < len(REVIEW_QUICK_RETRY_BACKOFF):
+                await asyncio.sleep(REVIEW_QUICK_RETRY_BACKOFF[attempt])
+        review_status: str = result.status if result is not None else "degraded"
+        review_degraded: bool = review_status != "ok"
 
-        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）：
-        # 降级/跳过不发；publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
-        # 为什么补齐：quick 改进版欲替代 full，需同样支撑次日预测（编排缺口 #1）。
-        if result.status == "ok":
+        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）；
+        # publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
+        if review_status == "ok" and result is not None:
             await publish_review_done(
                 self.ctx.event_bus,
                 report_date=result.report_date,
                 trace_id=result.trace_id,
             )
 
-        # quick review 完成后触发 quick snapshot
+        # quick review 完成后触发 quick snapshot。degraded 即使重试耗尽也照常发布，
+        # 由 SnapshotConsumer 构造降级快照 → 广播，晚报不静默丢失（Task 2 兜底）。
         await self.ctx.event_bus.publish(
             CHANNEL_SNAPSHOT,
             payload={
                 "report_date": report_date,
                 "snapshot_kind": "quick",
-                "trace_id": trace_id,
+                "review_degraded": review_degraded,
+                "review_status": review_status,
             },
         )
         logger.info("review_quick_done", report_date=report_date, trace_id=trace_id)

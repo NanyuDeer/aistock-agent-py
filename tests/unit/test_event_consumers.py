@@ -336,11 +336,10 @@ async def test_review_full_consumer_skips_review_done_on_skipped(mock_event_bus,
 
 
 @pytest.mark.asyncio
-async def test_review_quick_consumer_skips_review_done_on_degraded(
+async def test_review_quick_consumer_degraded_exhausts_publishes_degraded_snapshot(
     mock_event_bus, mock_node_api
 ):
-    """quick 链路 status=degraded → 不发布 review_done（硬约束 6，编排缺口 #1
-    仅 ok 触发），snapshot 照常。"""
+    """恒 degraded → 退避重试 3 次耗尽 → 仍发 snapshot(review_degraded=true)、不发 review_done。"""
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
     consumer = ReviewQuickConsumer(ctx)
     event = Event(
@@ -350,10 +349,15 @@ async def test_review_quick_consumer_skips_review_done_on_degraded(
         group="evening_chain",
     )
 
-    with patch(
-        "aistock_agent.services.event_consumers.run_review",
-        new_callable=AsyncMock,
-    ) as mock_run:
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.run_review",
+            new_callable=AsyncMock,
+        ) as mock_run,
+        patch(
+            "aistock_agent.services.event_consumers.REVIEW_QUICK_RETRY_BACKOFF", (0, 0)
+        ),
+    ):
         mock_run.return_value = ReviewRunResult(
             status="degraded",
             report_date="2026-07-30",
@@ -363,9 +367,15 @@ async def test_review_quick_consumer_skips_review_done_on_degraded(
         )
         await consumer.handle(event)
 
+    assert mock_run.await_count == 3
     channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
     assert CHANNEL_REVIEW_DONE not in channels
     assert channels.count(CHANNEL_SNAPSHOT) == 1
+    snapshot_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["review_degraded"] is True
+    assert snapshot_call.kwargs["payload"]["review_status"] == "degraded"
 
 
 # ============================================================================
@@ -516,3 +526,119 @@ async def test_start_all_consumers_registers_six_with_prediction_group(
     ]
     assert len(non_pred_calls) == 5
     assert all(c.kwargs.get("group") is None for c in non_pred_calls)
+
+
+@pytest.mark.asyncio
+async def test_review_quick_consumer_retries_then_ok(mock_event_bus, mock_node_api):
+    """degraded → 按退避重试 → ok → 发 snapshot(review_degraded=false) + review_done。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewQuickConsumer(ctx)
+    event = Event(
+        event_id="evt-quick-retry-ok",
+        channel=CHANNEL_REVIEW_QUICK,
+        payload={"report_date": "2026-07-30", "trace_id": "t1"},
+        group="evening_chain",
+    )
+
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.run_review",
+            new_callable=AsyncMock,
+        ) as mock_run,
+        patch(
+            "aistock_agent.services.event_consumers.REVIEW_QUICK_RETRY_BACKOFF", (0, 0)
+        ),
+    ):
+        mock_run.side_effect = [
+            ReviewRunResult(
+                status="degraded",
+                report_date="2026-07-30",
+                snapshot_kind="quick",
+                trace_id="t1",
+                markdown="",
+            ),
+            ReviewRunResult(
+                status="ok",
+                report_date="2026-07-30",
+                snapshot_kind="quick",
+                trace_id="t1",
+                markdown="# Quick",
+            ),
+        ]
+        await consumer.handle(event)
+
+    assert mock_run.await_count == 2
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+    snapshot_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["review_degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_review_quick_consumer_skipped_no_retry(mock_event_bus, mock_node_api):
+    """skipped(已有 full) → 不重试、发 snapshot、不发 review_done。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewQuickConsumer(ctx)
+    event = Event(
+        event_id="evt-quick-skipped",
+        channel=CHANNEL_REVIEW_QUICK,
+        payload={"report_date": "2026-07-30", "trace_id": "t1"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="skipped",
+            report_date="2026-07-30",
+            snapshot_kind="quick",
+            trace_id="t1",
+            markdown="",
+        )
+        await consumer.handle(event)
+
+    assert mock_run.await_count == 1
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert CHANNEL_REVIEW_DONE not in channels
+    assert channels.count(CHANNEL_SNAPSHOT) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_quick_consumer_ok_no_retry_publishes_review_done(
+    mock_event_bus, mock_node_api
+):
+    """首次即 ok → 只调 1 次、发 review_done + snapshot(review_degraded=false)。"""
+    ctx = ConsumerContext(mock_event_bus, mock_node_api)
+    consumer = ReviewQuickConsumer(ctx)
+    event = Event(
+        event_id="evt-quick-ok",
+        channel=CHANNEL_REVIEW_QUICK,
+        payload={"report_date": "2026-07-30", "trace_id": "t1"},
+        group="evening_chain",
+    )
+
+    with patch(
+        "aistock_agent.services.event_consumers.run_review",
+        new_callable=AsyncMock,
+    ) as mock_run:
+        mock_run.return_value = ReviewRunResult(
+            status="ok",
+            report_date="2026-07-30",
+            snapshot_kind="quick",
+            trace_id="t1",
+            markdown="# Quick",
+        )
+        await consumer.handle(event)
+
+    assert mock_run.await_count == 1
+    channels = [c.args[0] for c in mock_event_bus.publish.await_args_list]
+    assert channels.count(CHANNEL_REVIEW_DONE) == 1
+    snapshot_call = next(
+        c for c in mock_event_bus.publish.await_args_list if c.args[0] == CHANNEL_SNAPSHOT
+    )
+    assert snapshot_call.kwargs["payload"]["review_degraded"] is False
