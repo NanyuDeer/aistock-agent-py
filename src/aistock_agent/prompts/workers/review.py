@@ -42,6 +42,10 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    - market_positioning_liquidity（市场定位与资金面）
 3. 结构性根源（structural_root）与触发事件（trigger）必须分开；
    政策、公告、数据和新闻 URL 作为证据放在对应节点下。
+   当涨跌停与炸板情绪指标出现极端值（如炸板率异常高、涨跌停家数极端分化）时，
+   必须优先从 market_positioning_liquidity 候选解释短线情绪波动，
+   并在 trigger/exposure/repricing 节点显式引用涨跌停、炸板、连板等市场事实 source_id，
+   不得因情绪指标极端而默认方向为 neutral。
 4. observable_result 必须引用市场事实 source_id（来自 a_share）；
    其余每个节点也必须引用至少一项 SourceRecord 的 source_id。
 5. 全球市场（GLOBAL_*）只能作为候选，不得因"同期下跌/上涨"自动获得 supported 状态。
@@ -55,6 +59,17 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
    的 event_evidence；observable_result 必须引用 phenomenon_discovery.primary.fact_ids。
 9. 无 occurred_at 的新闻、null 主力资金或缺失全球行情只能写入限制与未解问题，
    不得据此确认因果。
+9.1 【强约束】主链（primary）与备选链（alternative）的 observable_result 节点
+    MUST 引用 phenomenon_discovery.primary.fact_ids 中的 source_id（且该 source 为
+    market_fact，即 a_share 市场事实，如指数点位/涨跌幅/广度/成交额/涨跌停数）。
+    两条链的 observable_result 都必须这样引用，缺一不可。
+    - 备选链即使解释的是另一条逻辑（如宏观 vs 产业），其可观测结果仍必须是
+      "主现象在盘面上的落点"，不能引用候选自身的新闻/事件证据当作可观测结果。
+    - 反例（会被拒绝）：alternative chain 的 observable_result.claim 用了板块文章、
+      政策新闻等非 a_share 市场事实；或引用了不在 primary.fact_ids 中的 source_id。
+    - 正例：alternative observable_result.evidence_ids 至少含一个属于
+      primary.fact_ids 的 market_fact source_id（能直接观察到主现象在股价/指数上表现）。
+    校验失败（alternative observable_result 未引用主现象 fact_ids）将整份报为 degraded。
    ⚠️ attribution_status 与选链必须严格一致：
    - hypothesis = 证据不足以确认主因，只能选 weak 备选（alternative_chain_id）；
      禁止设置 primary_chain_id，禁止任何候选为 supported（只能 weak/rejected/insufficient）
@@ -194,12 +209,17 @@ primary_chain_id 和非空 alternative_chain_id 指向的 chain 必须按顺序�
       {"stage": "transmission", "claim": "...", "evidence_ids": ["EVID_003"]},
       {"stage": "exposure", "claim": "...", "evidence_ids": ["EVID_004"]},
       {"stage": "repricing", "claim": "...", "evidence_ids": ["EVID_005"]},
-      {"stage": "observable_result", "claim": "...", "evidence_ids": ["EVID_006"]}
+      {"stage": "observable_result", "claim": "...",
+       "evidence_ids": ["<一个来自 phenomenon_discovery.primary.fact_ids 的 market_fact source_id>"]}
     ]
   }
 }
-**重要：nodes 必须是数组（list），每个元素是一个 CausalNode 对象，
-不能是字典/对象形式（如 {structural_root: {...}, trigger: {...}}）。**
+**重要：**
+1. nodes 必须是数组（list），每个元素是一个 CausalNode 对象，
+   不能是字典/对象形式（如 {structural_root: {...}, trigger: {...}}）。
+2. 最后一个节点 observable_result 的 evidence_ids 必须引用 primary.fact_ids 中
+   kind=market_fact 的 source（即 a_share 市场事实）。此约束对 primary 链和
+   alternative 链都强制；若违反，整份报告将被判为 degraded（不产出）。
 
 【CausalNode 字段约束】
 - stage: 上述 6 个之一
