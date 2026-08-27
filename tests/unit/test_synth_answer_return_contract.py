@@ -15,10 +15,17 @@
 禁止未来"state 层显式 None 化"破坏该契约（硬约束 #1）：deep 分支必须返回
 last_deep_report 键且值非 None，7 个非 deep 返回点不得返回该键。
 """
+from unittest.mock import patch
+
 import pytest
 
-from aistock_agent.graph.nodes.synth_answer import _build_deep_report_ref
-from aistock_agent.state.chat_schema import DeepReportRef
+from aistock_agent.graph.nodes.synth_answer import (
+    SynthInsightOutput,
+    _build_deep_report_ref,
+    synth_answer_node,
+)
+from aistock_agent.schemas.chat_contract import InsightGoal
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
 
 
 def test_deep_branch_build_deep_report_ref_non_none():
@@ -83,3 +90,138 @@ def test_deep_branch_build_deep_report_ref_is_dict_with_expected_keys():
     assert isinstance(ref, dict)
     for key in ("worker", "report_id", "question", "summary", "symbols", "tag_codes", "created_at"):
         assert key in ref
+
+
+def test_synth_insight_output_questions_field():
+    """SynthInsightOutput 必须含可选 questions 字段（默认空列表）。"""
+    out = SynthInsightOutput(
+        conclusion="## 核心结论\n短期震荡。\n## 行情要点\n- 指数收涨 0.5%",
+        basis_indices=[1],
+        confidence="low",
+        uncertainty=[],
+        answer_mode="validate",
+    )
+    assert out.questions == []
+
+
+def test_synth_insight_output_questions_roundtrip():
+    """LLM 提供 questions 时完整透传（2-4 条问句）。"""
+    out = SynthInsightOutput(
+        conclusion="## 核心结论\n短期震荡。",
+        basis_indices=[],
+        confidence="low",
+        uncertainty=[],
+        answer_mode="validate",
+        questions=["今天大盘成交量如何？", "哪些板块领涨？"],
+    )
+    assert len(out.questions) == 2
+
+
+def _minimal_state(**extra) -> QuestionState:
+    """构造最小 QuestionState：goal 缺省为 None（命中无 goal 分支）。"""
+    state: QuestionState = {"messages": [], "user_id": None}
+    state.update(extra)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_clarification_branch_insight_has_empty_questions():
+    """澄清分支（qa_router 兜底缺失个股代码）Insight.questions 恒空（面板不升级）。
+
+    注意：澄清分支在 goal 缺失检查之后，state 必须带合法 goal 才会走到该分支；
+    仅带 clarification 会命中无 goal 分支（由 test_no_goal_branch 覆盖）。
+    """
+    state = _minimal_state(
+        goal=InsightGoal(question="分析贵州茅台", intent="stock_snapshot"),
+        clarification="请提供 6 位股票代码",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("澄清分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_shortcut_branch_insight_has_empty_questions():
+    """闸门短路分支（final_response 话术直出）Insight.questions 恒空（面板不升级）。"""
+    state = _minimal_state(
+        goal=InsightGoal(question="你是谁", intent="stock_snapshot"),
+        final_response="我是 AI 投资助手，可以为您分析个股、板块与大盘。",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("闸门短路分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
+
+
+@pytest.mark.asyncio
+async def test_no_goal_branch_insight_has_empty_questions():
+    """无 goal 降级分支（_build_degraded_insight）Insight.questions 恒空（面板不升级）。"""
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("无 goal 分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(_minimal_state())
+    assert result["insight"].questions == []
+
+
+def test_multi_goal_questions_merge_caps_at_four():
+    """多子目标 questions：每节取前 2、全局按节序截 4。"""
+    from aistock_agent.graph.nodes.synth_answer import _merge_section_questions
+
+    per_section = [
+        ["q1a", "q1b", "q1c"],   # 节 1 取前 2
+        ["q2a", "q2b"],          # 节 2 取前 2
+        [],                      # 节 3 降级空
+    ]
+    assert _merge_section_questions(per_section) == ["q1a", "q1b", "q2a", "q2b"]
+
+
+def test_multi_goal_questions_cap_respected():
+    from aistock_agent.graph.nodes.synth_answer import _merge_section_questions
+
+    merged = _merge_section_questions([["a1", "a2", "a3"], ["b1", "b2", "b3"], ["c1", "c2"]])
+    assert len(merged) <= 4
+
+
+def test_deep_template_questions_by_worker():
+    """deep 分支按 worker 名模板生成 1-2 条追问（零 LLM）。"""
+    from aistock_agent.graph.nodes.synth_answer import _build_deep_questions
+
+    stock_qs = _build_deep_questions("stock", "贵州茅台值得长期持有吗")
+    assert len(stock_qs) == 2
+    assert "贵州茅台值得长期持有吗" in stock_qs[0]
+
+    sector_qs = _build_deep_questions("sector", "白酒板块怎么看")
+    assert len(sector_qs) >= 1
+
+    # 未知 worker 名回退：至少 1 条通用追问
+    assert len(_build_deep_questions("unknown_worker", "问题")) >= 1
+
+
+@pytest.mark.asyncio
+async def test_deep_degraded_empty_questions():
+    """degraded deep（空 final_response）questions 恒空（面板不升级）。"""
+    state = _minimal_state(
+        goal=InsightGoal(question="x", symbols=[], intent="stock_snapshot"),
+        deep_source="stock",
+        final_response="",
+    )
+    with patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think",
+        side_effect=AssertionError("degraded deep 分支不应调用 LLM"),
+    ):
+        result = await synth_answer_node(state)
+    assert result["insight"].questions == []
+
+
+def test_chat_response_has_questions_field():
+    """ChatResponse 契约含可选 questions 字段（HTTP 非流式透出）。"""
+    from aistock_agent.schemas.chat import ChatResponse
+
+    resp = ChatResponse(content="ok", session_id="s", token_usage=None, last_deep_report=None, cards=None)
+    assert resp.questions is None or resp.questions == []

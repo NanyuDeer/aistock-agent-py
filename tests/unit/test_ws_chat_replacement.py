@@ -300,12 +300,18 @@ async def test_ws_chat_done_payload_includes_token_usage_and_cards() -> None:
     """
     ws = _FakeWebSocket([{"message": "分析 600519", "user_id": "u_42"}])
     usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    questions = ["今日大盘走势如何？", "哪些板块领涨？"]
     with (
         patch.object(
             ws_module,
             "_select_graph",
             return_value=_DoneEventGraph(
-                {"final_response": "回复", "token_usage": usage, "cards": None}
+                {
+                    "final_response": "回复",
+                    "token_usage": usage,
+                    "cards": None,
+                    "questions": questions,
+                }
             ),
         ),
         patch.object(ws_module.node_api, "save_token_usage", new_callable=AsyncMock),
@@ -316,6 +322,7 @@ async def test_ws_chat_done_payload_includes_token_usage_and_cards() -> None:
     assert len(done) == 1
     assert done[0]["token_usage"] == usage
     assert done[0]["cards"] is None
+    assert done[0]["questions"] == questions
 
 
 @pytest.mark.asyncio
@@ -333,6 +340,7 @@ async def test_ws_chat_done_payload_defaults_token_usage_cards_none() -> None:
     assert len(done) == 1
     assert done[0]["token_usage"] is None
     assert done[0]["cards"] is None
+    assert done[0]["questions"] is None
 
 
 # ── 问题 18（Phase 2 recv 竞态）：recv_task.cancel() 必须 await 收尾 ──────────

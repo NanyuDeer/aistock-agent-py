@@ -82,6 +82,10 @@ class QuestionState(TypedDict, total=False):
     # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
     cards: list[ChatCard] | None
     token_usage: dict[str, int] | None
+    # 追问面板（Task 5，2026-08-26）：synth_answer 汇总写（与 cards 同源，透出到
+    # WS DONE / HTTP ChatResponse / SSE DONE）。LangGraph 通道机制必需声明（节点
+    # 返回未声明键会触发 InvalidUpdateError —— 对齐 L62-63 fallback_to_skill 先例）。
+    questions: list[str] | None = None
     # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发写，synth_answer 短路透出，
     # ws.py 转 confirm_request 终态）。单轮 transient，不落 trace/insight。
     confirm: dict | None = None

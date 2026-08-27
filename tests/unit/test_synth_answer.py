@@ -435,7 +435,7 @@ async def test_synth_answer_parse_error_still_degrades_safely() -> None:
 
 
 def test_build_prompt_requires_structured_sections() -> None:
-    """prompt 要求 Markdown 分节 + 结尾引导追问。"""
+    """prompt 要求 Markdown 分节 + 追问面板 questions 指令（G21 已移除结尾引导句要求）。"""
     from aistock_agent.graph.nodes.synth_answer import _build_prompt
 
     goal = InsightGoal(question="大盘今天怎么了?", intent="market_snapshot")
@@ -444,7 +444,8 @@ def test_build_prompt_requires_structured_sections() -> None:
     assert "## 核心结论" in prompt
     assert "## 行情要点" in prompt
     assert "## 数据说明" in prompt
-    assert "引导" in prompt or "继续问我" in prompt
+    assert "insight.questions" in prompt  # 追问面板指令保留
+    assert "结尾必须追加" not in prompt  # G21：不再要求结尾引导句
 
 
 def test_build_degraded_insight_structured_conclusion() -> None:
@@ -470,7 +471,8 @@ def test_build_degraded_insight_structured_conclusion() -> None:
     assert insight.conclusion.startswith("## 核心结论")
     assert "## 行情要点" in insight.conclusion
     assert "上证指数" in insight.conclusion
-    assert "继续问我" in insight.conclusion
+    # G21（2026-08-26）：降级回答不再追加固定引导句（删胶囊同步移除，防新老语义分裂）
+    assert "继续问我" not in insight.conclusion
 
 
 # ─── 非交易日统一提示（2026-08-02 规范） ───
