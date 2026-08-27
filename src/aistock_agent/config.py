@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # DLQ 巡检：每隔 N 秒检查一次；DLQ 长度>0 持续超过该秒数触发告警
     stock_trace_dlq_inspect_interval_seconds: int = 60
     stock_trace_dlq_alert_after_seconds: int = 900
+    # DLQ 自治回收：死信滞留超过该秒数即自动丢弃（记日志留审计）。
+    # 结构性问题码（不可重投）与关联历史快照已结算的死信（如 snapshot 已清理）重试永远无法成功，
+    # 不应无限滞留 DLQ 积累告警；超过保留期由巡检统一回收，封顶堆积并消除反复告警。
+    stock_trace_dlq_retention_seconds: int = 86400
 
     # ===== 自选股洞察（watchlist insight）=====
     # 独立 Redis db，与 stock_trace db=2 隔离

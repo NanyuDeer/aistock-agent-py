@@ -532,6 +532,24 @@ async def test_replay_dlq_rejects_non_replayable_error_code() -> None:
     replayed = await replay_dlq(client, None, limit=10)  # type: ignore[arg-type]
     assert replayed == 0
     assert len(client.dlq) == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaim_dlq_discards_only_expired_dead_letters() -> None:
+    from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
+
+    client = FakeRedisForDlq()
+    old_ms = int((time.time() - 25 * 3600) * 1000)  # 25h 前入库，超过默认保留期 24h
+    fresh_ms = int((time.time() - 60) * 1000)        # 1 分钟前入库，未超保留期
+    client.dlq = [
+        (f"{old_ms}-0", {b"error_code": b"INVALID_JOB_MESSAGE"}),
+        (f"{fresh_ms}-1", {b"job_id": b"job-1", b"error_code": b"NODE_WRITEBACK_FAILED"}),
+    ]
+    consumer = StockTraceConsumer(  # type: ignore[arg-type]
+        client, StockTraceNodeClient(FakeNodeClient()), CompletedWorker()
+    )
+    await consumer._reclaim_dlq(time.time())
+    assert [mid for mid, _ in client.dlq] == [f"{fresh_ms}-1"]
     assert client.main == []
 
 
