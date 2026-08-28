@@ -73,6 +73,34 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
         return
     # H7 防双跑标记：中台触发即标记当日，晨报 I4 兜底据此避免重复触发
     await _mark_conduction_triggered(str(events[0].get("score_date", "")))
+
+    # 第三阶段：event_scope 过滤 —— STOCK 事件不进入事件传导。
+    # 事件仍保留在事件库（event_scrape），event_scope 继续作为个股情报标记；
+    # UNKNOWN（含缺失默认）一律放行——可能含行业/市场/产业链事件，不能过滤。
+    allowed_events: list[event_store.EventRecord] = []
+    for ev in events:
+        event_scope = str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN")
+        if event_scope == "STOCK":
+            logger.info(
+                "EVENT_CONDUCTION_FILTER",
+                event_id=ev.get("event_id", ""),
+                title=str(ev.get("title", ""))[:50],
+                event_scope=event_scope,
+                action="skip_conduction",
+                reason="stock_event",
+            )
+            continue
+        allowed_events.append(ev)
+    if not allowed_events:
+        logger.info(
+            "EVENT_CONDUCTION_FILTER",
+            event_scope="STOCK",
+            action="skip_conduction",
+            reason="stock_event_all_skipped",
+            skipped_count=len(events),
+        )
+        return
+
     try:
         from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
             run_event_analysis_pipeline,
@@ -87,8 +115,10 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
                 "impact_score": ev["impact_score"],
                 "direction": ev["direction"],
                 "involved_keywords": ev["involved_keywords"],
+                # 第三阶段：透传 event_scope，供下游统一防护点（run_single_event_conduction）校验
+                "event_scope": str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN"),
             }
-            for ev in events
+            for ev in allowed_events
         ]
         for attempt in (1, 2):
             try:

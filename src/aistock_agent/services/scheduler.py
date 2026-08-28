@@ -219,6 +219,18 @@ def start_scheduler() -> None:
         )
         logger.info("scheduler_legacy_evening_chain")
 
+    # 短线情绪温度：工作日 15:45（紧随快照 15:35，独立任务，失败不阻塞其他链路）
+    scheduler.add_job(
+        _run_sentiment_temp_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_sentiment_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="sentiment_temp",
+        name="sentiment temperature daily",
+        replace_existing=True,
+    )
+
     if settings.iterate_enabled:
         from aistock_agent.iterate.scheduler import register_iterate_jobs
 
@@ -359,6 +371,24 @@ async def _run_morning_task() -> None:
                 task.add_done_callback(_pending_event_tasks.discard)
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
+
+
+async def _run_sentiment_temp_task() -> None:
+    """15:45 短线情绪温度计算（标注为独立任务，失败不阻塞其他链路）。"""
+    from aistock_agent.services.sentiment_temp import compute_and_persist_sentiment_temp
+    from aistock_agent.utils.date import shanghai_today
+
+    try:
+        payload = await compute_and_persist_sentiment_temp(shanghai_today().isoformat())
+        if payload is not None:
+            logger.info(
+                "sentiment_temp_done",
+                date=payload.get("date"),
+                score=payload.get("score"),
+                is_ice=payload.get("ice", {}).get("is_ice"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("sentiment_temp_task_failed", exc_info=True)
 
 
 async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:

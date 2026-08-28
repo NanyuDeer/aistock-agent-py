@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # DLQ 巡检：每隔 N 秒检查一次；DLQ 长度>0 持续超过该秒数触发告警
     stock_trace_dlq_inspect_interval_seconds: int = 60
     stock_trace_dlq_alert_after_seconds: int = 900
+    # DLQ 自治回收：死信滞留超过该秒数即自动丢弃（记日志留审计）。
+    # 结构性问题码（不可重投）与关联历史快照已结算的死信（如 snapshot 已清理）重试永远无法成功，
+    # 不应无限滞留 DLQ 积累告警；超过保留期由巡检统一回收，封顶堆积并消除反复告警。
+    stock_trace_dlq_retention_seconds: int = 86400
 
     # ===== 自选股洞察（watchlist insight）=====
     # 独立 Redis db，与 stock_trace db=2 隔离
@@ -181,6 +185,8 @@ class Settings(BaseSettings):
     scheduler_midday_broadcast_cron: str = "15 12 * * 0-4"
     scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
+    # 短线情绪温度：收盘后 15:45（紧随快照 15:35）。
+    scheduler_sentiment_cron: str = "45 15 * * 0-4"
     scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 0-4"
@@ -249,12 +255,10 @@ class Settings(BaseSettings):
     event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # ── GI 盘中纯增量更新（2026-08-14） ──
     gi_incremental_enabled: bool = False             # 总开关（默认关闭灰度开启）
-    # 每日 quick_think 比较次数上限（达上限后仅规则判断）
-    gi_max_llm_calls_per_day: int = 10
+    gi_max_llm_calls_per_day: int = 10               # 每日 quick_think 比较次数上限（达上限后仅规则判断）
     gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
-    # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
-    gi_state_ttl: int = 86400
+    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
@@ -319,6 +323,12 @@ class Settings(BaseSettings):
     phenomenon_min_match_score: int = 2
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
+
+    # 短线情绪温度：冰点阈值与连冰升级天数。
+    sentiment_ice_threshold: int = 20
+    sentiment_ice_consecutive_days: int = 2
+    # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
+    sentiment_output_dir: str = "docs/agent-outputs/sentiment"
 
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",

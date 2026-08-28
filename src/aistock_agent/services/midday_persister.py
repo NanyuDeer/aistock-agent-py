@@ -34,6 +34,11 @@ def _is_degraded_report(report: dict[str, object]) -> bool:
         return True
     if schema_version == "1.0" and len(stripped) < 100:
         return True
+    # schema 1.0 且 summary 为空 → 双保险拦截降级内容：
+    # 解析失败的降级报 details 会塞入原始 LLM 输出（可能很长），叠加 details 长度
+    # 规则仍可能漏判，故显式校验 summary 非空才允许落库（2026-08-26 午报空 summary 落库）。
+    if schema_version == "1.0" and not str(display.get("summary", "")).strip():
+        return True
     return False
 
 

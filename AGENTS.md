@@ -26,7 +26,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
-| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启） | 无（代码管线） | P0（中台底座） |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
@@ -64,6 +64,7 @@ START → supervisor(quick_think, 意图路由)
   12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）
   12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
+  15:45 sentiment_temp（短线情绪温度计算，冰点≤20 触发 quick_think 预判，落盘 docs/agent-outputs/sentiment，次日晨报引用）
   20:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 独立消费组 prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）
   旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
@@ -115,6 +116,13 @@ START → supervisor(quick_think, 意图路由)
 - `deep_think`（gpt-4o）：晨报分析、个股/风口/事件/十倍股/播报深度分析
 
 ### CHAT QA 行为说明（2026-08-01）
+
+### CHAT QA 追问面板 questions 契约（2026-08-26）
+- **数据源契约**：`SynthInsightOutput.questions: list[str] = []`（LLM 结构化输出）+ `QuestionState.questions: list[str] | None`（LangGraph 通道声明，节点返回未声明键会 InvalidUpdateError）+ `ChatResponse.questions`（对外）
+- **生成规则**：light 正常路径 prompt 2b 指令生成 2-4 条问句（6-20 字、问句形态、与回答同主题）；deep 分支 `_build_deep_questions` 零 LLM 模板化（worker 名骨架，多子目标每节前 2 + 全局截 4）；澄清/闸门/无 goal/degraded 出口恒 `[]`；confirm 短路无 questions 键
+- **透出三通道**：WS DONE `questions` / HTTP 非流式 `ChatResponse.questions` / SSE DONE `round_questions`（G1 事件流采集模式，非 final_state.values）；synth_answer 7 个带 cards 返回点统一写 `questions`
+- **G21**：移除结论结尾引导句要求与固定引导句文本——问答不重复引导，追问统一交给 questions 字段
+- **前端契约**：`questions?: string[]`；`[]` 与 `undefined` 均视为"无建议"，前端面板须用 `msg.questions?.length` 判定（勿用真值判断）
 
 ### market_snapshot Skill 降级语义：2026-08-01
 - quick/full 快照失败（如非交易日 quick 409）时自动回退 `/internal/market/last-close-snapshot`
@@ -395,7 +403,7 @@ src/aistock_agent/
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
-│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
+│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace / Latency；2026-08-25 加 LLM 前缀缓存命中观测：归一化 OpenAI cached_tokens / DeepSeek prompt_cache_hit_tokens，按 provider 分桶进 metrics["llm_cache"]，不进计费链，见 docs/2026-08-25-token-cache-observability.md）
 └── api/
     ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
@@ -481,6 +489,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/ths/resolve?name=` | Tushare 同花顺 | 板块名三级匹配（归一化精确 → 双向包含 → `{ts_code,name}` 或 null；**M2 板块验证**） |
 | `GET /internal/ths/:code/daily?start=&end=` | Tushare 同花顺 | 板块区间日 K（rows 升序，键 `trade_date`/`pct_chg`，None 保行为 null；**M2 板块验证**） |
 | `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容） |
+| `GET /internal/stocks/basic` | stocks 表 | 全量 A 股基础信息（symbol/name/industry），内存 6h 缓存；供 stock_basic_index 构建股票名称索引（最长匹配优先），支持 company_event_rule 实体匹配；接口失败降级空索引 |
 
 > **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed, ...)`——gate_skipped 落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年逐档容错（P2 裁决 2026-08-14）：chinese_calendar 覆盖 2004-2026 之外时不再整条 due_dates_failed，改为越年档按「周末+已发布节假日 HOLIDAYS_EXTRA」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb，`PredictionRunResult.approximate_horizons` 透传）**——理由：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益，显式标注优于预测停产；验证器 reason 加 `(approximate_due_date)` 前缀，Node 统计 `approximateHorizonCount` 分桶（近似档不计入命中率分母）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
 >

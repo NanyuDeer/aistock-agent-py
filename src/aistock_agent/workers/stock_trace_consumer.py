@@ -201,6 +201,42 @@ class StockTraceConsumer:
         if attempt_count >= settings.stock_trace_max_attempts:
             await self._dead_letter(message_id, fields, error_code)
 
+    async def _reclaim_dlq(self, now: float) -> None:
+        """自治回收：将滞留超过保留期的死信直接丢弃（记日志留审计）。
+
+        结构性问题码（不可重投）与关联历史快照已结算的死信（如 snapshot
+        已清理）重推永远不会成功，若只告警不处理会无限滞留 DLQ、反复告警、
+        手动重放也只是反复空转。超过 stock_trace_dlq_retention_seconds 由
+        巡检统一回收，封顶堆积并消除告警风暴；真正可处理的近况死信仍可走
+        POST /admin/stock-trace/dlq/replay 手动重投/现场处置，不在此列。
+        """
+        retention = settings.stock_trace_dlq_retention_seconds
+        if retention <= 0:
+            return
+        entries = await self._redis.xrange(DLQ_STREAM, min="-", max="+", count=500)
+        dropped_ids: list[str] = []
+        dropped_codes: dict[str, int] = {}
+        for message_id, raw_fields in entries:
+            # Redis Stream 消息 id 是 <毫秒时间戳>-<序号>，取毫秒段换算条目入库时刻
+            try:
+                entry_ms = int(message_id.split("-")[0]) / 1000.0
+            except (ValueError, IndexError):
+                entry_ms = now
+            if now - entry_ms < retention:
+                continue
+            code = _fields(raw_fields).get("error_code", "UNKNOWN")
+            dropped_ids.append(message_id)
+            dropped_codes[code] = dropped_codes.get(code, 0) + 1
+        if not dropped_ids:
+            return
+        await self._redis.xdel(DLQ_STREAM, *dropped_ids)
+        logger.warning(
+            "stock_trace_dlq_reclaimed",
+            count=len(dropped_ids),
+            by_error_code=dropped_codes,
+            retention_seconds=retention,
+        )
+
     async def _dead_letter(self, message_id: str, fields: dict[str, str], error_code: str) -> None:
         payload: dict[EncodableT, EncodableT] = {
             "error_code": error_code,
@@ -228,6 +264,7 @@ class StockTraceConsumer:
                 now = time.time()
                 if now - last_inspect >= settings.stock_trace_dlq_inspect_interval_seconds:
                     last_inspect = now
+                    await self._reclaim_dlq(now)
                     length = await self._redis.xlen(DLQ_STREAM)
                     if length > 0:
                         if dlq_first_seen is None:

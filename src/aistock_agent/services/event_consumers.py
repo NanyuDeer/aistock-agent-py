@@ -51,6 +51,11 @@ PREDICTION_CONSUMER_GROUP = "prediction_chain"
 # llm_failed/parse_failed 的 retry-once 退避秒数（S2）
 PREDICTION_RETRY_BACKOFF_SEC = 2
 
+# quick review 失败重试（2026-08-26 双钩子：先重试后降级）。
+# 总尝试次数含首次；退避序列长度 = MAX-1，总阻塞约 3 分钟（该通道每日一次）。
+REVIEW_QUICK_MAX_RETRIES = 3
+REVIEW_QUICK_RETRY_BACKOFF = (60, 120)  # 秒
+
 
 class PredictionRetryExhaustedError(Exception):
     """预测 retry-once 后仍 llm/parse 失败：事件级失败，交由 EventBus retry → DLQ。"""
@@ -107,29 +112,42 @@ class ReviewQuickConsumer(BaseConsumer):
         report_date = event.payload["report_date"]
         trace_id = event.payload.get("trace_id", event.event_id)
 
-        result = await run_review(
-            report_date=report_date,
-            snapshot_kind="quick",
-            trace_id=trace_id,
-        )
+        # 有限退避重试：review 瞬时故障（LLM/数据源抖动）自愈，持续故障降级。
+        # 为什么内联 sleep 而非 EventBus.retry：该通道一天仅一次，内联最直观、不进
+        # DLQ 纠缠；后退避仅在前几次尝试间生效（2026-08-26 降级钩子设计）。
+        result = None
+        for attempt in range(REVIEW_QUICK_MAX_RETRIES):
+            result = await run_review(
+                report_date=report_date,
+                snapshot_kind="quick",
+                trace_id=trace_id,
+            )
+            if result.status in ("ok", "skipped"):
+                break
+            # status == "degraded"：退避后重试下一轮
+            if attempt < len(REVIEW_QUICK_RETRY_BACKOFF):
+                await asyncio.sleep(REVIEW_QUICK_RETRY_BACKOFF[attempt])
+        review_status: str = result.status if result is not None else "degraded"
+        review_degraded: bool = review_status != "ok"
 
-        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）：
-        # 降级/跳过不发；publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
-        # 为什么补齐：quick 改进版欲替代 full，需同样支撑次日预测（编排缺口 #1）。
-        if result.status == "ok":
+        # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）；
+        # publish_review_done 内部吞掉发布异常，不阻断后续快照链路。
+        if review_status == "ok" and result is not None:
             await publish_review_done(
                 self.ctx.event_bus,
                 report_date=result.report_date,
                 trace_id=result.trace_id,
             )
 
-        # quick review 完成后触发 quick snapshot
+        # quick review 完成后触发 quick snapshot。degraded 即使重试耗尽也照常发布，
+        # 由 SnapshotConsumer 构造降级快照 → 广播，晚报不静默丢失（Task 2 兜底）。
         await self.ctx.event_bus.publish(
             CHANNEL_SNAPSHOT,
             payload={
                 "report_date": report_date,
                 "snapshot_kind": "quick",
-                "trace_id": trace_id,
+                "review_degraded": review_degraded,
+                "review_status": review_status,
             },
         )
         logger.info("review_quick_done", report_date=report_date, trace_id=trace_id)
@@ -173,6 +191,41 @@ class ReviewFullConsumer(BaseConsumer):
         logger.info("review_full_done", report_date=report_date, trace_id=trace_id)
 
 
+def _degraded_snapshot(report_date: str, reason: str) -> dict[str, object]:
+    """快照构建失败时返回的降级快照（零值四维度 + error 标记）。
+
+    保证 build_market_snapshot_brief_summary 能产出摘要（hit_rate=0.00），
+    从而 brief_evening / 广播照常生成降级晚报。
+    """
+    return {
+        "date": report_date,
+        "error": reason,
+        "degraded": True,
+        "dimension_1_coverage": {
+            "overlap_hits": [],
+            "missing_in_morning": [],
+            "over_focused": [],
+            "hit_rate": 0.0,
+            "new_coverage_rate": 0.0,
+        },
+        "dimension_2_direction": {
+            "sectors": {},
+            "direction_accuracy": 0.0,
+            "mean_deviation": 0.0,
+            "abs_mean_deviation": 0.0,
+        },
+        "dimension_3_attribution": {
+            "sectors": {},
+            "attribution_match_rate": 0.0,
+        },
+        "dimension_4_sentiment": {
+            "morning_sentiment": 0.0,
+            "review_sentiment": 0.0,
+            "bias": 0.0,
+        },
+    }
+
+
 class SnapshotConsumer(BaseConsumer):
     """快照消费者。quick 只存快照，full 继续触发 iterate。"""
 
@@ -183,10 +236,33 @@ class SnapshotConsumer(BaseConsumer):
     async def handle(self, event: Event) -> None:
         report_date = event.payload["report_date"]
         snapshot_kind = event.payload.get("snapshot_kind", "full")
+        # 显式消费 quick 链路透传的降级契约（Task 1 发布、本处消费）；直接触发的
+        # snapshot（如 full 链路）无该字段 → 缺省视为未降级，消除隐性耦合。
+        review_degraded: bool = bool(event.payload.get("review_degraded", False))
+        review_status: str = str(event.payload.get("review_status") or ("degraded" if review_degraded else "ok"))
 
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
-        if not isinstance(snapshot, dict) or snapshot.get("error"):
-            raise ValueError(f"snapshot build failed: {snapshot.get('error', 'invalid')}")
+        invalid = not isinstance(snapshot, dict) or snapshot.get("error")
+        # 降级判定：review 已降级（即使 build_snapshot 意外成功）或快照构建缺报告。
+        # 保证 review_degraded 字段被消费——降级状态写入持久化与广播链路，而非透传不透用。
+        if review_degraded or invalid:
+            reason = (
+                str(snapshot.get("error", "invalid_snapshot"))
+                if isinstance(snapshot, dict)
+                else "invalid_snapshot"
+            )
+            if not invalid:
+                # build_snapshot 成功但 review 已降级：强制标记降级（缺 review 报告语义）。
+                reason = "review_degraded"
+            logger.warning(
+                "snapshot_degraded_fallback",
+                report_date=report_date,
+                reason=reason,
+            )
+            # 降级快照：零值维度同样能产出 brief_summary，广播照常、不再断链。
+            # 为什么不再 raise：quick 链路 review 失败时快照天然缺 review 报告，
+            # 若抛错会打断广播导致晚报静默丢失（2026-08-26 双钩子设计）。
+            snapshot = _degraded_snapshot(report_date, reason)
 
         # 持久化快照。brief_summary 由受控构造函数生成（复用 scheduler 旧链路逻辑），
         # briefing.py 对 market_snapshot 强制要求该字段，缺失则 brief_evening 降级。
@@ -198,6 +274,8 @@ class SnapshotConsumer(BaseConsumer):
                 "brief_summary": build_market_snapshot_brief_summary(snapshot),
                 "snapshot": snapshot,
                 "snapshot_kind": snapshot_kind,
+                "review_degraded": review_degraded,
+                "review_status": review_status,
             },
         )
 

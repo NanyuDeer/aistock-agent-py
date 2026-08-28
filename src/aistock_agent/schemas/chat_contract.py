@@ -132,6 +132,9 @@ class Insight(BaseModel):
     confidence: Literal["high", "medium", "low"]
     uncertainty: list[str] = []
     answer_mode: Literal["predict", "trace", "validate", "deep"]  # D31：deep 统一出口
+    # 追问面板（2026-08-26）：可选 questions 数组，缺失/空=无建议=前端不升级面板。
+    # 澄清/闸门/无 goal 等简单出口恒为 []；仅 LLM 成功路径可携带 2-4 条追问。
+    questions: list[str] = []
 
     model_config = ConfigDict(extra="forbid")
 

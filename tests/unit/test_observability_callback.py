@@ -295,3 +295,88 @@ def test_metrics_reset_clears_all_counters(metrics: MetricsCollector):
     m = metrics.get_metrics()
     assert m["llm_calls"] == 0
     assert m["prompt_tokens"] == 0
+
+
+# ── LLM 前缀缓存命中观测（2026-08-25 design-debate 产出）────────
+
+
+def _make_result_with_cache(llm_output: dict[str, object]) -> LLMResult:
+    """构造含缓存字段的 token_usage LLMResult（ainvoke 路径）。"""
+    return LLMResult(generations=[], llm_output=llm_output)
+
+
+def test_on_llm_end_records_openai_cached_tokens(metrics: MetricsCollector):
+    """OpenAI prompt_tokens_details.cached_tokens → llm_cache.openai"""
+    cb = TokenUsageCallback(metrics=metrics)
+    result = _make_result_with_cache(
+        {
+            "token_usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "prompt_tokens_details": {"cached_tokens": 80},
+            }
+        }
+    )
+    cb.on_llm_end(result, run_id=uuid4())
+    cache = metrics.get_metrics()["llm_cache"]["openai"]
+    assert cache["prompt_tokens"] == 100
+    assert cache["cached_tokens"] == 80
+
+
+def test_on_llm_end_records_deepseek_cached_tokens(metrics: MetricsCollector):
+    """DeepSeek prompt_cache_hit_tokens → llm_cache.deepseek"""
+    cb = TokenUsageCallback(metrics=metrics)
+    result = _make_result_with_cache(
+        {
+            "token_usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 20,
+                "total_tokens": 220,
+                "prompt_cache_hit_tokens": 150,
+                "prompt_cache_miss_tokens": 50,
+            }
+        }
+    )
+    cb.on_llm_end(result, run_id=uuid4())
+    cache = metrics.get_metrics()["llm_cache"]["deepseek"]
+    assert cache["prompt_tokens"] == 200
+    assert cache["cached_tokens"] == 150
+
+
+def test_on_llm_end_no_cache_fields_ignored(metrics: MetricsCollector):
+    """无缓存字段时 llm_cache 不产生条目、不崩溃；原计费路径不受影响"""
+    cb = TokenUsageCallback(metrics=metrics)
+    cb.on_llm_end(
+        _make_llm_result(
+            {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        ),
+        run_id=uuid4(),
+    )
+    m = metrics.get_metrics()
+    assert m["llm_cache"] == {}
+    assert m["prompt_tokens"] == 5
+    assert m["total_tokens"] == 6
+
+
+def test_llm_cache_accumulates_across_calls(metrics: MetricsCollector):
+    """多次命中调用按 provider 分桶累加，hit_rate = cached / prompt"""
+    cb = TokenUsageCallback(metrics=metrics)
+    for cached in (10, 20):
+        cb.on_llm_end(
+            _make_result_with_cache(
+                {
+                    "token_usage": {
+                        "prompt_tokens": 50,
+                        "completion_tokens": 5,
+                        "total_tokens": 55,
+                        "prompt_tokens_details": {"cached_tokens": cached},
+                    }
+                }
+            ),
+            run_id=uuid4(),
+        )
+    cache = metrics.get_metrics()["llm_cache"]["openai"]
+    assert cache["prompt_tokens"] == 100
+    assert cache["cached_tokens"] == 30
+    assert cache["hit_rate"] == 0.3

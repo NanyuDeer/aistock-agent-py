@@ -149,6 +149,7 @@ async def chat_message(
             token_usage=result.get("token_usage"),
             last_deep_report=None,
             cards=None,
+            questions=None,  # 追问面板：澄清出口恒空
         )
     content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     return ChatResponse(
@@ -161,6 +162,7 @@ async def chat_message(
             if result.get("cards")
             else None
         ),
+        questions=result.get("questions"),  # 追问面板（2026-08-26）
     )
 
 
@@ -241,6 +243,8 @@ async def _stream_messages(
     # G1 修订（2026-08-17）：last_deep_report/cards 改为事件流采集
     round_last_deep_report: dict[str, object] | None = None
     round_cards: list[dict[str, object]] | None = None
+    # 追问面板（2026-08-26）：questions 同事件流采集（与 cards 同模式）
+    round_questions: list[str] | None = None
     try:
         while True:
             event = await queue.get()
@@ -264,6 +268,8 @@ async def _stream_messages(
                     # G1 修订：DONE 补齐 last_deep_report（事件流采集值，非终态）
                     "last_deep_report": round_last_deep_report,
                     "cards": round_cards,
+                    # 追问面板（2026-08-26）：事件流采集值（同 cards 模式）
+                    "questions": round_questions,
                 }
                 break
             if not isinstance(event, dict):
@@ -279,6 +285,7 @@ async def _stream_messages(
                     round_last_deep_report = output.get("last_deep_report")
                     cards = output.get("cards")
                     round_cards = [c.model_dump() for c in cards] if cards else None
+                    round_questions = output.get("questions")  # 追问面板（2026-08-26）
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None

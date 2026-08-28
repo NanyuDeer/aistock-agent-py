@@ -7,7 +7,7 @@ deep_think + structured output 产出 Insight。
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -74,6 +74,17 @@ class _SectionResult:
     uncertainty: list[str]
     mode: str
     degraded: bool = False
+    questions: list[str] = field(default_factory=list)
+
+
+def _merge_section_questions(per_section: list[list[str]]) -> list[str]:
+    """多子目标 questions 合并：每节取前 2，按节序全局截断至 4 条（确定性）。"""
+    merged: list[str] = []
+    for qs in per_section:
+        merged.extend(qs[:2])
+        if len(merged) >= 4:
+            return merged[:4]
+    return merged
 
 
 async def _synth_section(
@@ -102,7 +113,9 @@ async def _synth_section(
             logger.warning(
                 "synth_answer.section.mode_mismatch", expected=mode, actual=raw.answer_mode
             )
-        return _SectionResult(raw.conclusion, basis, raw.confidence, raw.uncertainty, mode)
+        return _SectionResult(
+            raw.conclusion, basis, raw.confidence, raw.uncertainty, mode, questions=raw.questions
+        )
     except Exception as exc:
         logger.warning("synth_answer.section_failed", err=str(exc), exc_info=True)
         all_facts = [f for ev in evidences for f in ev.facts]
@@ -111,7 +124,13 @@ async def _synth_section(
         else:
             conclusion = "当前没有可用的数据事实，暂时无法回答该问题。"
         return _SectionResult(
-            conclusion, evidences, "low", [f"综合失败: {exc}"], "validate", degraded=True
+            conclusion,
+            evidences,
+            "low",
+            [f"综合失败: {exc}"],
+            "validate",
+            degraded=True,
+            questions=[],
         )
 
 
@@ -220,6 +239,8 @@ async def _synth_multi_goal(
     uncertainty: list[str] = []
     any_degraded = False
     mode: str = "predict"
+    # 追问面板：逐节收集 questions（predict 节为代码生成、无 questions，不参与合并）
+    per_section_questions: list[list[str]] = []
 
     # 改进 17（D9 节级伪流式，2026-08-13）：分节渐进分发。
     # - D5：trading_session_status 单次取值 + hint 前缀预计算（缓存，流式与 DONE 文本共用）；
@@ -242,6 +263,7 @@ async def _synth_multi_goal(
         if res.degraded:
             any_degraded = True
         sections.append(f"{section_header}{res.conclusion}")
+        per_section_questions.append(res.questions)
         await _dispatch_content_deltas([res.conclusion])
         dispatched += res.conclusion
         basis.extend(res.basis)
@@ -289,12 +311,15 @@ async def _synth_multi_goal(
     confidence: Literal["high", "medium", "low"] = (
         "low" if (any_degraded or not basis) else "medium"
     )
+    # 追问面板：多子目标 questions 合并（每节取前 2、按节序全局截 4；节降级该节 []）
+    combined_questions = _merge_section_questions(per_section_questions)
     insight = Insight(
         conclusion=combined,
         basis=basis or evidences,
         confidence=confidence,
         uncertainty=uncertainty,
         answer_mode=mode,  # type: ignore[arg-type]
+        questions=combined_questions,
     )
     trace = AnswerTrace(
         goal=goal,
@@ -311,6 +336,7 @@ async def _synth_multi_goal(
         "trace": trace,
         "messages": [AIMessage(content=combined)],
         "cards": _build_cards(evidences),
+        "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
     }
 
 
@@ -373,6 +399,8 @@ class SynthInsightOutput(BaseModel):
     confidence: Literal["high", "medium", "low"]
     uncertainty: list[str] = []
     answer_mode: Literal["predict", "trace", "validate"]
+    # 追问面板（2026-08-26）：可选 questions 数组，缺失/空=无建议=前端不升级面板
+    questions: list[str] = []
 
     model_config = ConfigDict(extra="forbid")
 
@@ -436,8 +464,8 @@ def _build_prompt(
    （基于证据的要点列表，引用具体数据，如指数点位、涨跌幅、板块、个股）
    ## 数据说明
    （若证据 degraded 或为最近交易日数据，列出缺失项与数据日期；正常时简述数据时间范围）
-2. conclusion 结尾必须追加 1 句引导追问，基于用户意图自然生成，
-   例如"想深入了解某个板块或个股的表现，可以继续问我。"
+2. 在 insight.questions 中生成 2-4 条可点击追问建议（问句形态、每条 6-20 字、
+   与回答同主题），供前端"追问面板"展示
 3. 即使证据 degraded 或仅有最近交易日数据，也要基于可用 facts 按正常结构回答，
    缺失项写入"数据说明"，禁止输出一句"无法提供"后结束。
 用户问题: {goal.question}
@@ -453,11 +481,12 @@ def _build_prompt(
 
 {{
   "insight": {{
-    "conclusion": "直接回答用户问题的结论（Markdown 分节 + 结尾引导句）",
+    "conclusion": "直接回答用户问题的结论（Markdown 分节）",
     "basis_indices": [],
     "confidence": "low",
     "uncertainty": [],
-    "answer_mode": "{mode}"
+    "answer_mode": "{mode}",
+    "questions": ["追问1", "追问2"]
   }}
 }}
 
@@ -467,6 +496,7 @@ def _build_prompt(
 - 禁止输出完整证据对象数组，禁止输出 skill/reason 等旧字段
 - 完整证据由服务端按序号引用生成，你只需要决定引用哪些证据条目
 - answer_mode 必须为 {mode}
+- questions 必须为问句字符串数组，2-4 条，缺失/空数组均合法（前端视为无建议）
 只返回合法 JSON 对象，不使用 Markdown 或 schema 外字段
 """
 
@@ -591,13 +621,11 @@ def _build_degraded_insight(
             + "\n".join(f"- {fact}" for fact in all_facts)
             + "\n\n## 数据说明\n"
             f"综合回答生成失败（{reason}），已返回原始证据事实。"
-            + "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     else:
         conclusion = (
             "## 核心结论\n"
             "当前没有可用的数据事实，暂时无法回答该问题。"
-            "\n\n想深入了解某个板块或个股的表现，可以继续问我。"
         )
     # D28：降级路径同样强制拼接风险段（strong 取决于用户问题是否含动作词）
     # Phase 4-3：conservative 档优先级高于 strong（risk_tolerance 由调用方传入）
@@ -614,6 +642,7 @@ def _build_degraded_insight(
         confidence="low",
         uncertainty=[f"综合失败: {reason}"],
         answer_mode="validate",  # 兜底始终 validate
+        questions=[],
     )
 
 
@@ -847,6 +876,23 @@ def _build_deep_degraded(deep_source: str) -> str:
     return "深度分析暂时不可用，请稍后重试"
 
 
+# deep 分支追问模板（零 LLM，worker 名 + 用户问题骨架；2026-08-26）
+_DEEP_QUESTION_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "stock": ("「{q}」的结论有哪些风险点？", "「{q}」最新消息面有什么变化？"),
+    "sector": ("「{q}」板块的龙头股有哪些？", "该板块今日资金流向如何？"),
+    "hot_burst": ("「{q}」的爆发逻辑还能持续多久？",),
+}
+
+
+def _build_deep_questions(worker: str, question: str) -> list[str]:
+    """deep 分支零 LLM 模板生成 1-2 条追问；未知 worker 回退通用追问。"""
+    q = (question or "").strip()
+    templates = _DEEP_QUESTION_TEMPLATES.get(worker)
+    if not templates:
+        templates = ("「{q}」结论的核心依据有哪些？",)
+    return [t.format(q=q) for t in templates if q]
+
+
 def _build_deep_report_ref(
     worker: str,
     question: str,
@@ -942,18 +988,20 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
         logger.error("synth_answer.no_goal")
         metrics.record_synth_degraded()
         metrics.record_chat_qa_latency("synth_answer", int((time.monotonic() - start) * 1000))
+        insight = _build_degraded_insight(
+            InsightGoal(question="", intent="report_lookup"),
+            evidences,
+            "validate",
+            "missing goal",
+            risk_tolerance,
+        )
         return {
-            "insight": _build_degraded_insight(
-                InsightGoal(question="", intent="report_lookup"),
-                evidences,
-                "validate",
-                "missing goal",
-                risk_tolerance,
-            ),
+            "insight": insight,
             "final_response": "内部错误：缺少目标",
             "trace": None,
             "messages": [AIMessage(content="内部错误：缺少目标")],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：降级恒空
         }
 
     # 澄清短路：qa_router 兜底缺失个股代码时不再调 deep LLM，直接返回澄清文本
@@ -965,6 +1013,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="low",
             uncertainty=["需要股票代码才能执行个股查询"],
             answer_mode="validate",
+            questions=[],  # 追问面板：澄清出口恒空（面板不升级）
         )
         return {
             "insight": insight,
@@ -978,6 +1027,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             ),
             "messages": [AIMessage(content=clarification)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：澄清恒空
         }
 
     # 闸门短路（M1 §3.2 契约）：qa_router 命中敏感/寒暄/科普闸门时写 final_response 话术，
@@ -994,6 +1044,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="low",
             uncertainty=["guardrail short-circuit"],
             answer_mode="validate",
+            questions=[],  # 追问面板：闸门短路出口恒空（面板不升级）
         )
         return {
             "insight": insight,
@@ -1007,12 +1058,16 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             ),
             "messages": [AIMessage(content=shortcut)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：闸门恒空
         }
 
     # 3. D31 deep 分支（新增）：escalate 已产出 worker 全文，跳过 LLM 纯代码加工
     deep_source = state.get("deep_source")
     if deep_source is not None:
         final_response = state.get("final_response", "")
+        # 追问面板（Task 4）：degraded 判定必须在降级填充前（空 final_response → 恒 []，
+        # 不能拿 processed 与 _build_deep_degraded 产物比较——文本可变，判定不稳）
+        degraded = not final_response
         if not final_response:
             final_response = _build_deep_degraded(deep_source)  # escalate 空响应兜底
         # 纯代码加工：D28 风险段（worker 已含风险段则去重不叠加；动作词升级强提示；
@@ -1022,6 +1077,12 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             strong=_contains_action_word(goal.question),
             risk_tolerance=risk_tolerance,
         )
+        # 追问面板（Task 4）：degraded deep 恒空（面板不升级）；正常 deep 按 worker 名
+        # 模板零 LLM 生成 1-2 条追问（问题骨架）
+        if degraded:
+            deep_questions: list[str] = []
+        else:
+            deep_questions = _build_deep_questions(deep_source, goal.question or "")
         # P2（D15-D18）：落库 chat_analysis（仅登录，D38）；report_id 供 last_deep_report 回填
         report_id = await _persist_chat_analysis(
             state.get("user_id"), processed, deep_source
@@ -1045,6 +1106,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence="medium",          # worker 已深度分析；失败降级时 low
             uncertainty=[],               # P2 落库时再补数据说明
             answer_mode="deep",
+            questions=deep_questions,     # 追问面板：模板 1-2 条（degraded 恒 []）
         )
         logger.info("synth_answer.deep_ok", deep_source=deep_source)
         deep_card = _build_deep_card(last_deep_report)
@@ -1061,6 +1123,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "messages": [AIMessage(content=processed)],
             "last_deep_report": last_deep_report,
             "cards": [deep_card] if deep_card is not None else None,
+            "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
         }
 
     # P4（D34/D35）：多子目标分节回答（多意图 ≥2 或单预测子目标）。
@@ -1127,6 +1190,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             confidence=raw.confidence,
             uncertainty=raw.uncertainty,
             answer_mode=mode,  # type: ignore[arg-type]
+            questions=raw.questions,
         )
         # 非交易时段统一提示（2026-08-03 规范扩展）：行情类证据降级时前导提示 + 引导
         # （D5：复用进入流式前缓存的 status 单次取值，保证与已分发 hint 前缀一致）
@@ -1164,6 +1228,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "trace": trace,
             "messages": [AIMessage(content=final_response)],
             "cards": _build_cards(evidences),
+            "questions": insight.questions if insight else None,  # 追问面板（2026-08-26）
         }
 
     except Exception as exc:
@@ -1187,6 +1252,7 @@ async def _synth_answer_node_core(state: QuestionState) -> dict[str, Any]:
             "trace": trace,
             "messages": [AIMessage(content=insight.conclusion)],
             "cards": None,
+            "questions": insight.questions if insight else None,  # 追问面板：降级恒空
         }
 
 

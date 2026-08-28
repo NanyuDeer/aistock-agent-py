@@ -99,6 +99,15 @@ class TokenUsageCallback(BaseCallbackHandler):
                 usage["completion_tokens"],
                 usage["total_tokens"],
             )
+        # LLM 前缀缓存命中观测（2026-08-25 design-debate 产出）：
+        # 独立于计费链，只进 metrics（按 provider 分桶），token_usage 累加器零改动。
+        cache = _extract_cache_usage(response)
+        if cache is not None:
+            self._metrics.record_llm_cache_hit(
+                prompt_tokens=_to_int(cache["prompt_tokens"]),
+                cached_input_tokens=_to_int(cache["cached_input_tokens"]),
+                provider=str(cache["provider"]),
+            )
 
     def on_llm_error(
         self,
@@ -338,31 +347,18 @@ def _extract_tool_name(serialized: dict[str, object]) -> str:
     return str(name) if isinstance(name, str) else ""
 
 
-def _extract_token_usage(response: LLMResult) -> dict[str, int] | None:
-    """从 LLMResult 提取 token 用量。
+def _get_raw_token_usage(response: LLMResult) -> dict[str, object] | None:
+    """从 LLMResult 提取原始 token usage dict。
 
     主路径：llm_output.token_usage（graph.ainvoke 路径，llm_output 为 dict）
     Fallback：generations[].message.usage_metadata（graph.astream_events 路径，
     llm_output 为 None 但 ChatGeneration 的 AIMessage 带 usage_metadata）
-
-    Returns:
-        含 prompt_tokens/completion_tokens/total_tokens 的字典；
-        若无 token_usage 则返回 None。
     """
-    # 主路径：llm_output.token_usage（ainvoke 路径）
     llm_output = response.llm_output
     if isinstance(llm_output, dict):
         usage = llm_output.get("token_usage")
         if isinstance(usage, dict):
-            return {
-                "prompt_tokens": _to_int(usage.get("prompt_tokens", 0)),
-                "completion_tokens": _to_int(usage.get("completion_tokens", 0)),
-                "total_tokens": _to_int(usage.get("total_tokens", 0)),
-            }
-
-    # Fallback：从 generations 提取 AIMessage.usage_metadata（astream_events 路径）
-    # astream_events 的 on_llm_end 回调 llm_output 为 None，但 generations 中的
-    # ChatGeneration 带 AIMessage，其 usage_metadata 含 input_tokens/output_tokens/total_tokens
+            return usage
     for generation_list in response.generations or []:
         for generation in generation_list:
             message = getattr(generation, "message", None)
@@ -370,17 +366,70 @@ def _extract_token_usage(response: LLMResult) -> dict[str, int] | None:
                 continue
             usage_metadata = getattr(message, "usage_metadata", None)
             if isinstance(usage_metadata, dict) and usage_metadata:
-                return {
-                    "prompt_tokens": _to_int(usage_metadata.get("input_tokens", 0)),
-                    "completion_tokens": _to_int(usage_metadata.get("output_tokens", 0)),
-                    "total_tokens": _to_int(usage_metadata.get("total_tokens", 0)),
-                }
+                return usage_metadata
+    return None
 
-    logger.debug(
-        "token_usage_extraction_failed",
-        llm_output=response.llm_output,
-        gen_count=sum(len(g) for g in (response.generations or [])),
-    )
+
+def _extract_token_usage(response: LLMResult) -> dict[str, int] | None:
+    """从 LLMResult 提取 token 用量（prompt/completion/total）。
+
+    主路径：llm_output.token_usage（键 prompt_tokens/completion_tokens/total_tokens）
+    Fallback：usage_metadata（键 input_tokens/output_tokens/total_tokens）
+
+    Returns:
+        含 prompt_tokens/completion_tokens/total_tokens 的字典；
+        若无 token_usage 则返回 None。
+    """
+    raw = _get_raw_token_usage(response)
+    if raw is None:
+        logger.debug(
+            "token_usage_extraction_failed",
+            llm_output=response.llm_output,
+            gen_count=sum(len(g) for g in (response.generations or [])),
+        )
+        return None
+    # usage_metadata 路径用 input/output_tokens 键；llm_output 路径用 prompt/completion_tokens
+    if "input_tokens" in raw or "output_tokens" in raw:
+        prompt = raw.get("input_tokens", 0)
+        completion = raw.get("output_tokens", 0)
+    else:
+        prompt = raw.get("prompt_tokens", 0)
+        completion = raw.get("completion_tokens", 0)
+    return {
+        "prompt_tokens": _to_int(prompt),
+        "completion_tokens": _to_int(completion),
+        "total_tokens": _to_int(raw.get("total_tokens", 0)),
+    }
+
+
+def _extract_cache_usage(response: LLMResult) -> dict[str, object] | None:
+    """从 LLMResult 提取前缀缓存命中信息（2026-08-25 design-debate 产出）。
+
+    双 provider 字段归一化（只映射字段名、不归并语义，按 provider 分桶统计）：
+    - OpenAI：usage.prompt_tokens_details.cached_tokens（astream 路径为
+      usage_metadata.input_token_details.cached_tokens）
+    - DeepSeek：usage.prompt_cache_hit_tokens（缓存命中的输入 token 数）
+
+    Returns:
+        {"prompt_tokens", "cached_input_tokens", "provider"}（provider 为
+        "openai"/"deepseek"）；无缓存字段时返回 None（不记录，不抛异常）。
+    """
+    raw = _get_raw_token_usage(response)
+    if raw is None:
+        return None
+    details = raw.get("prompt_tokens_details") or raw.get("input_token_details")
+    if isinstance(details, dict) and "cached_tokens" in details:
+        return {
+            "prompt_tokens": _to_int(raw.get("prompt_tokens", raw.get("input_tokens", 0))),
+            "cached_input_tokens": _to_int(details.get("cached_tokens", 0)),
+            "provider": "openai",
+        }
+    if "prompt_cache_hit_tokens" in raw:
+        return {
+            "prompt_tokens": _to_int(raw.get("prompt_tokens", raw.get("input_tokens", 0))),
+            "cached_input_tokens": _to_int(raw.get("prompt_cache_hit_tokens", 0)),
+            "provider": "deepseek",
+        }
     return None
 
 

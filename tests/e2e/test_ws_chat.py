@@ -52,6 +52,7 @@ def test_ws_chat_passes_thread_id_config() -> None:
         "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
         "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
         "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
+        "questions": None,         # 追问面板（2026-08-26）：未产出时 null
     }
 
 
@@ -86,5 +87,6 @@ def test_ws_done_omits_trace_field() -> None:
         "last_deep_report": None,  # T4：非 deep 流程 DONE 携带 null
         "token_usage": None,       # P10 线 2：无 LLM 用量时 null 兼容
         "cards": None,             # P10 线 2：cards 本阶段恒 None（线 3 才产出）
+        "questions": None,         # 追问面板（2026-08-26）：未产出时 null
     }
     assert "advisor_trace" not in done

@@ -49,6 +49,58 @@
 - `tests/unit/test_prediction_validator.py`：3.0 窗口累计主判用例（bullish/bearish/neutral 反例）+ baseline_neutral 双版本差异 + backfill 版本隔离
 - `tests/unit/test_prediction_stats.py`：版本过滤参数化用例（默认 2.0 / 显式 3.0）
 
+---
+
+## [changer] 2026-08-26 — AI 投顾追问面板：questions 结构化下发（后端链路）
+
+**开发者**: changer-collab
+
+### 新增
+- 回答后建议追问（追问面板数据源）：`SynthInsightOutput.questions: list[str] = []`（LLM 结构化输出，prompt 2b 指令生成 2-4 条同主题问句）+ `QuestionState.questions: list[str] | None`（LangGraph 通道声明）+ `ChatResponse.questions`；WS DONE / HTTP 非流式 / SSE DONE（`round_questions`，G1 事件流采集模式）三通道透出
+- deep 分支 `_build_deep_questions` 零 LLM 模板化（worker 名骨架；多子目标每节前 2 + 全局截 4）；澄清/闸门/无 goal/degraded 出口恒 `[]`
+
+### 改进
+- synth_answer 7 个带 cards 返回点统一写 `questions`；移除结论结尾固定引导句要求与降级引导句文本（G21——问答不重复引导，追问统一走 questions 字段）
+
+### 验证
+- `tests/e2e/test_ws_chat.py` DONE 负载断言已同步 `questions` 键（85370a2），原 2 例新增失败清零
+- 全量回归 2592 passed / 20 failed：20 例均为合并前基线既有环境类失败（event/hot_burst/sector/iterate/lifespan、full_flow 实栈、AsyncMock 交互等，baseline c1098ec 交叉验证）——新增清零
+
+---
+
+## [changer] 2026-08-25 — LLM 前缀缓存命中观测（可观测先行）
+
+**开发者**: changer-collab
+
+### 新增
+- LLM 前缀缓存命中观测（design-debate 裁决「可观测先行」，不做 prompt 重排/前缀冻结）：callback 层归一化提取 OpenAI `prompt_tokens_details.cached_tokens` / astream 路径 `input_token_details.cached_tokens` 与 DeepSeek `prompt_cache_hit_tokens`，按 provider 分桶进 `metrics["llm_cache"]`（`{prompt_tokens, cached_tokens, hit_rate}`）；只做观测不落库、不进计费链（`token_usage.py` / `ws.py` / `node_api.save_token_usage` 字节零改动）
+
+### 改进
+- `observability/callback.py`：抽取 `_get_raw_token_usage`（llm_output.token_usage → usage_metadata fallback）供计费与缓存观测复用；新增 `_extract_cache_usage` 字段归一化，无缓存字段不记录不抛异常
+- `observability/metrics.py`：新增 `record_llm_cache_hit`（max(x,0) 防负）、快照 `hit_rate`（prompt=0 取 0.0）、reset 同步清零
+
+### 验证
+- 定向 38 passed（含 7 个新增缓存命中用例）；全量 unit 2100 passed / 3 failed（checkpointer 基线失败，A/B 验证新增清零）；ruff 0；mypy 0
+
+---
+
+## [changer] 2026-08-25 — 短线情绪温度 + 冰点次日晨报引用预判
+
+**开发者**: Aria
+
+### 新增
+- 短线情绪温度（每日收盘 15:45 计算并落盘 `docs/agent-outputs/sentiment/`）：涨停 / 跌停 / 炸板率 / 连板高度 / 涨跌家数比 / 主力净额六指标加权，0-100 分档（冰点 ≤20 / 低迷 / 常温 / 活跃 / 亢奋）
+- 冰点判定与连冰升级：温度 ≤20 判冰点，连续 2 日升级连冰标记；冰点触发快速模型生成「修复概率 + 关注方向 + 风险」预判，模型不可用时自动降级为模板话术（不阻断链路）
+- 次日晨报联动：冰点 → 注入预判全文与指标概览供晨报结合外盘/消息演绎引用；非冰点 → 注入一行温度概览；无数据 → 不注入（晨报行为与现状一致）
+
+### 改进
+- 收盘快照日期与报告日不一致时跳过当日温度落盘，防止旧交易日数据污染连冰计数与次日晨报引用
+
+### 验证
+- 全量自动化测试无新增失败（与基线 A/B 对比零回归，含 22 个新增用例）；代码规范检查改动文件 0 新增错误
+
+---
+
 ## [junliang] 2026-08-24 — stock_trace 提示词补板块证据要求
 
 **开发者**: Aria

@@ -22,8 +22,31 @@ EVENT_UNDERSTANDING_PROMPT = SYSTEM_PROMPT + """
   "event_type": "事件类型（必须从枚举中选择，见下方约束）",
   "coreChanges": [
     { "variable": "被改变的变量名", "before": "变化前状态", "after": "变化后状态" }
-  ]
+  ],
+  "is_stock_only": false,
+  "transmission_needed": true,
+  "transmission_reason": ""
 }
+
+## 事件传导价值判断（is_stock_only / transmission_needed）
+
+核心判断标准不是"是否包含股票名称"，而是"**事件是否存在行业/产业链外溢影响**"。
+
+1. **纯个股事件**：仅影响单家公司自身，不产生产业链外溢影响。例如：
+   - 回购、增持、减持、分红、股权激励
+   - 董监高变化、单家公司财务变化
+   输出：`is_stock_only=true`、`transmission_needed=false`
+
+2. **个股但存在产业链影响**：即使主体是单家公司，但具备外溢影响。例如：
+   - 重大订单、技术突破、新产品商业化
+   - 大规模扩产、供应链变化、市场份额变化
+   输出：`is_stock_only=false`、`transmission_needed=true`
+
+3. **行业/市场事件**：默认 `is_stock_only=false`、`transmission_needed=true`
+
+- 禁止因为事件包含股票名称就判断为纯个股。
+- transmission_reason：必须给出 ≤40 字判断依据（为何纯个股 / 为何存在产业链外溢）。
+- 无法确定时默认 `is_stock_only=false`、`transmission_needed=true`，宁可多分析，不要误杀产业链事件。
 
 ## 约束
 - title：一句话新闻标题风格，聚焦事件主体 + 最关键变化，可直接作为事件卡片标题。要求：
@@ -119,6 +142,12 @@ LLM 必须优先消费这些候选行业。
   - 风险偏好提升 → 半导体、软件开发
   - 流动性改善 → 证券、房地产开发
   将推导行业作为首层行业候选。
+- **若事件仅涉及宏观指标或汇率波动，且无法通过变量推导出任何具体行业**（如央行议息会议时间表、汇率中间价调整、通胀数据发布等）：
+  - 不得强行映射行业，不得输出任何 chain 行业
+  - coreIndustry.name 输出空字符串
+  - chain 输出空数组 []
+  - variables 可保留对宏观变量的描述，但 direction 仍须为 bullish 或 bearish
+  - mechanism 说明"事件未形成可落地的行业传导路径"
 
 **Step 2-B — 新闻行业信息使用规则与选择优先级**：
 - 新闻明确行业可以直接参考，但必须满足：

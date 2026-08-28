@@ -57,6 +57,9 @@ class EventConductionResult:
     cached: bool = False
     error: str | None = None
     error_type: str | None = None
+    # 第三阶段：event_scope=STOCK 被入口过滤（未执行 event_agent.run），
+    # 与"真实失败"区分——不进入 GI、不计入传导失败统计的语义由调用方按需处理。
+    event_conduction_skipped: bool = False
 
 
 @dataclass
@@ -131,6 +134,35 @@ async def run_single_event_conduction(
             ),
         )
 
+    # ── 第三阶段：event_scope 入口保护（多入口统一防护点）──
+    # scraper/pipeline/scheduler 兜底/routes 手动触发都汇聚到本函数；
+    # 进入 event_agent.run() 之前检查 event_scope：STOCK 事件不执行传导，
+    # 事件仍保留在事件库（event_scrape），event_scope 继续作为个股情报标记。
+    # event_scope 缺失（历史数据/手动触发无此字段）→ 默认 UNKNOWN 放行，不阻断未知事件。
+    event_scope = str(event.get("event_scope", "UNKNOWN") or "UNKNOWN")
+    if event_scope == "STOCK":
+        event_id = str(event.get("event_id", ""))
+        logger.info(
+            "EVENT_CONDUCTION_FILTER",
+            event_id=event_id,
+            title=title[:50],
+            event_scope=event_scope,
+            action="skip_conduction",
+            reason="stock_event",
+        )
+        return EventConductionOutput(
+            status=EventConductionResult(
+                success=False,
+                event_id=event_id,
+                title=title,
+                event_generated=False,
+                persisted=False,
+                error="stock event conduction skipped",
+                error_type="stock_event_skipped",
+                event_conduction_skipped=True,
+            ),
+        )
+
     logger.info("event_conduction_start", title=title[:50])
 
     user_message = _build_event_message(event)
@@ -160,6 +192,32 @@ async def run_single_event_conduction(
         analysis_reports = result.get("analysis_reports", {})
         if not isinstance(analysis_reports, dict):
             analysis_reports = {}
+
+        # ── 第四阶段：Agent 内部判定纯个股事件并跳过传导 → 显式 skip 输出 ──
+        # 不当作异常/失败：success=true（run 完成，非错误），但 event_conduction_skipped=true，
+        # analysis_report=None（不提取 payload）→ 下游 _to_gi_events 过滤，不进 GI。
+        if bool(analysis_reports.get("event_conduction_skipped", False)):
+            skip_event_id = str(analysis_reports.get("event_id", event_id))
+            logger.info(
+                "EVENT_CONDUCTION_FILTER",
+                event_id=skip_event_id,
+                title=title[:50],
+                action="skip_conduction",
+                reason="stock_only_event",
+            )
+            return EventConductionOutput(
+                status=EventConductionResult(
+                    success=True,
+                    event_id=skip_event_id,
+                    title=title,
+                    event_generated=False,
+                    persisted=False,
+                    cached=False,
+                    error="stock only event conduction skipped",
+                    error_type="stock_only_event_skipped",
+                    event_conduction_skipped=True,
+                ),
+            )
 
         # 只读显式状态字段，不推断
         event_generated = bool(analysis_reports.get("event_generated", False))

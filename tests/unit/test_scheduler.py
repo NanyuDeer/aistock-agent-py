@@ -87,10 +87,15 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
             "from_crontab",
             wraps=scheduler.CronTrigger.from_crontab,
         ) as from_crontab:
-            scheduler.start_scheduler()
+            # 同步测试里没有 running loop，AsyncIOScheduler.start() 会抛
+            # RuntimeError: no running event loop（Python 3.13 get_running_loop）。
+            # 本用例只断言 from_crontab 的 timezone 传参，start 打桩为 no-op 即可，
+            # 不影响断言语义（job 注册全部在 start() 之前完成）。
+            with patch.object(scheduler.AsyncIOScheduler, "start"):
+                scheduler.start_scheduler()
 
-        # 9 个业务 job（含 midday_briefing）+ scheduler_heartbeat
-        assert from_crontab.call_count == 10
+        # 11 个业务 job（含 sentiment_temp）+ scheduler_heartbeat
+        assert from_crontab.call_count == 12
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1094,6 +1099,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.quick_snapshot_enabled = True
             mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
             mock_settings.scheduler_midday_cron = "5 12 * * 0-4"
+            mock_settings.scheduler_midday_broadcast_cron = "15 12 * * 0-4"
             mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
             mock_settings.scheduler_review_quick_cron = "30 15 * * 0-4"
             mock_settings.scheduler_review_full_cron = "30 20 * * 0-4"
@@ -1103,6 +1109,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
             mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
             mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
+            mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1112,6 +1119,7 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
     assert "prediction_validate" in job_ids
     assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
+    assert "sentiment_temp" in job_ids
     assert "evening_chain" not in job_ids
 
 
@@ -1129,6 +1137,7 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.quick_snapshot_enabled = False
             mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
             mock_settings.scheduler_midday_cron = "5 12 * * 0-4"
+            mock_settings.scheduler_midday_broadcast_cron = "15 12 * * 0-4"
             mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
             mock_settings.scheduler_review_cron = "30 15 * * 0-4"
             mock_settings.scheduler_prediction_validate_cron = "0 16 * * 0-4"
@@ -1137,6 +1146,7 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
             mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
             mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
+            mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1145,6 +1155,7 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     assert "prediction_validate" in job_ids
     assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
+    assert "sentiment_temp" in job_ids
     assert "review_quick" not in job_ids
 
 

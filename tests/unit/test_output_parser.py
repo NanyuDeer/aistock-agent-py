@@ -105,6 +105,40 @@ def test_parse_nested_json_block():
     assert brief == "嵌套摘要"
 
 
+def test_parse_codeblock_with_unescaped_chinese_quotes():
+    """代码块内 details 含未转义 ASCII 引号（中文标点误用）→ 应容错解析
+
+    复现 2026-08-26 午报：LLM 在 details/risks 的 Markdown 正文里用成对 ASCII
+    双引号标注引语（如 与晨报"头部券商业绩+并购重组活跃"提示方向吻合），
+    JSON 未转义导致整段 json.loads 失败，整报被降级为 schema 1.0 落库、
+    前端无法展示 summary/stocks/risks。
+    """
+    text = (
+        '```json\n'
+        '{\n'
+        '  "display_report": {\n'
+        '    "summary": "大金融搭台、黄金有色共振",\n'
+        '    "details": "# AiStock 盘中报\\n'
+        '      - 楚天龙4连板——与晨报"头部券商业绩+并购重组活跃"提示方向吻合",\n'
+        '    "stocks": [],\n'
+        '    "risks": ["油价大跌对石油石化形成压力"]\n'
+        '  },\n'
+        '  "podcast_brief": "A股午间三大指数齐涨",\n'
+        '  "schema_version": "2.0"\n'
+        '}\n'
+        '```'
+    )
+    messages = [AIMessage(content=text)]
+    display, brief = parse_event_output(messages)
+
+    assert isinstance(display, dict)
+    assert display["summary"] == "大金融搭台、黄金有色共振"
+    assert "头部券商业绩+并购重组活跃" in str(display["details"])
+    assert display["stocks"] == []
+    assert "石油石化" in display["risks"][0]
+    assert brief == "A股午间三大指数齐涨"
+
+
 # ── 降级/异常路径 ──
 
 
