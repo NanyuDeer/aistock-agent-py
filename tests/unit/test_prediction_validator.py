@@ -146,15 +146,15 @@ async def test_run_once_skips_not_due_and_unknown_target():
 
 
 @pytest.mark.asyncio
-async def test_v2_verify_bullish_window_hit_with_grade():
-    """v2：bullish 档窗口内任一日 >0 → hit；due 当日命中 → grade=strong_hit。"""
+async def test_v3_verify_bullish_window_hit_with_grade():
+    """3.0：bullish 档窗口累计 sum>0 → hit；due 当日未命中、窗口无 >=5% → 普通 hit。"""
     record = _pending_record(due="2026-08-10", direction="bullish")
     kline_rows = [
         {"trade_date": "2026-08-10", "pct_chg": -0.5},  # due 当日（未命中）
-        {"trade_date": "2026-08-11", "pct_chg": 1.8},   # 窗口内命中
+        {"trade_date": "2026-08-11", "pct_chg": 1.8},   # 窗口累计正贡献
         {"trade_date": "2026-08-12", "pct_chg": 0.2},
         {"trade_date": "2026-08-13", "pct_chg": -0.1},
-    ]
+    ]  # sum=1.4 > 0
     with (
         patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
         patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
@@ -166,7 +166,7 @@ async def test_v2_verify_bullish_window_hit_with_grade():
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
     assert entry["grade"] == "hit"        # 非 due 当日命中、窗口无 >=5% → 普通 hit
-    assert entry["methodology_version"] == "2.0"
+    assert entry["methodology_version"] == "3.0"
     assert "baseline_neutral" in entry
 
 
@@ -383,14 +383,14 @@ async def test_fetch_kline_window_sector_calls_ths_range():
 
 
 @pytest.mark.asyncio
-async def test_v2_neutral_grade_is_null():
+async def test_v3_neutral_grade_is_null():
     """G14：neutral 档不输出 grade（strong_hit 语义与 neutral 方向反转）。"""
     record = _pending_record(due="2026-08-10", direction="neutral")
     kline_rows = [
-        {"trade_date": "2026-08-10", "pct_chg": 0.2},   # |pct|<0.5 → hit
-        {"trade_date": "2026-08-11", "pct_chg": 1.5},
-        {"trade_date": "2026-08-12", "pct_chg": 2.0},
-        {"trade_date": "2026-08-13", "pct_chg": -1.0},
+        {"trade_date": "2026-08-10", "pct_chg": 0.2},   # mean(|p|)=0.3 < 0.5 → hit
+        {"trade_date": "2026-08-11", "pct_chg": 0.4},
+        {"trade_date": "2026-08-12", "pct_chg": -0.3},
+        {"trade_date": "2026-08-13", "pct_chg": 0.3},
     ]
     with (
         patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
@@ -401,6 +401,7 @@ async def test_v2_neutral_grade_is_null():
         updated = await run_once()
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
+    assert entry["methodology_version"] == "3.0"
     assert "grade" not in entry
 
 
@@ -667,3 +668,161 @@ async def test_run_once_backfill_runs_when_no_pending():
     assert updated == 0  # 主链路无新增；回补数不入返回值（resolution 4）
     assert update.await_count == 1
     assert update.await_args.args[2]["result"] == "hit"
+
+
+# ============ 阶段 0：3.0 窗口累计主判 ============
+
+def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=None):
+    """直接调 _verify_horizon（不经 run_once），mock kline + 今日。"""
+    import aistock_agent.services.prediction_validator as pv
+
+    async def _run():
+        with (
+            patch.object(
+                pv.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows),
+            ),
+            patch(
+                "aistock_agent.services.prediction_validator.shanghai_today",
+                return_value=date(2026, 8, 13),
+            ),
+        ):
+            return await pv._verify_horizon(record, horizon, methodology_version=methodology_version)
+
+    return _run()
+
+
+@pytest.mark.asyncio
+async def test_v3_bullish_cumulative_sum_positive_hit():
+    """3.0：bullish 窗口累计 sum>0 → hit；entry 写 methodology_version='3.0'。"""
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.0},   # due 当日 +1.0% → strong_hit
+        {"trade_date": "2026-08-11", "pct_chg": 0.5},
+        {"trade_date": "2026-08-12", "pct_chg": -0.5},
+        {"trade_date": "2026-08-13", "pct_chg": -0.2},
+    ]  # sum=0.8 > 0
+    entry = await _verify_direct(record, kline_rows=kline)
+    assert entry["result"] == "hit"
+    assert entry["grade"] == "strong_hit"  # due 当日命中
+    assert entry["methodology_version"] == "3.0"
+    assert entry["actual"] == "+0.80%"
+
+
+@pytest.mark.asyncio
+async def test_v3_bullish_any_positive_but_cumulative_negative_is_miss():
+    """3.0 反例：bullish 单日 >0 但窗口累计 <=0 → miss（2.0 的 any>0 为 hit，口径真变化）。"""
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.0},   # 单日 +1.0% 但被大跌淹没
+        {"trade_date": "2026-08-11", "pct_chg": -2.0},
+        {"trade_date": "2026-08-12", "pct_chg": -1.0},
+        {"trade_date": "2026-08-13", "pct_chg": -0.5},
+    ]  # sum=-2.5 <= 0
+    entry = await _verify_direct(record, kline_rows=kline)
+    assert entry["result"] == "miss"
+    # 3.0 miss 且窗口无 >=5% 反向幅度（-2.0 < 5.0）→ 普通 miss（非 strong_miss）
+    assert entry["grade"] == "miss"
+
+
+@pytest.mark.asyncio
+async def test_v3_bearish_any_negative_but_cumulative_positive_is_miss():
+    """3.0 反例：bearish 单日 <0 但窗口累计 >=0 → miss（2.0 any<0 为 hit）。"""
+    record = _pending_record(due="2026-08-10", direction="bearish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": -1.0},
+        {"trade_date": "2026-08-11", "pct_chg": 2.0},
+        {"trade_date": "2026-08-12", "pct_chg": 1.0},
+        {"trade_date": "2026-08-13", "pct_chg": 0.5},
+    ]  # sum=2.5 >= 0
+    entry = await _verify_direct(record, kline_rows=kline)
+    assert entry["result"] == "miss"
+    assert "grade" in entry  # bearish 输出 grade（strong_miss/hit）
+
+
+@pytest.mark.asyncio
+async def test_v3_neutral_mean_abs_below_threshold_hit():
+    """3.0：neutral 主判 = mean(|p_i|) < 0.5 → hit（不再要求单日 |p|<0.5）。"""
+    record = _pending_record(due="2026-08-10", direction="neutral")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.4},
+        {"trade_date": "2026-08-11", "pct_chg": -0.4},
+        {"trade_date": "2026-08-12", "pct_chg": 0.4},
+        {"trade_date": "2026-08-13", "pct_chg": 0.3},
+    ]  # mean(|p|)=0.375 < 0.5
+    entry = await _verify_direct(record, kline_rows=kline)
+    assert entry["result"] == "hit"
+    assert "grade" not in entry  # G14：neutral 恒不输出 grade
+
+
+@pytest.mark.asyncio
+async def test_v3_neutral_mean_abs_above_threshold_is_miss():
+    """3.0 反例：neutral 有单日 |p|<0.5 但 mean(|p_i|)>=0.5 → miss（2.0 any 口径为 hit）。"""
+    record = _pending_record(due="2026-08-10", direction="neutral")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.1},   # |0.1|<0.5 单日横盘
+        {"trade_date": "2026-08-11", "pct_chg": 2.0},
+        {"trade_date": "2026-08-12", "pct_chg": -1.0},
+        {"trade_date": "2026-08-13", "pct_chg": 1.0},
+    ]  # mean(|p|)=1.025 >= 0.5
+    entry = await _verify_direct(record, kline_rows=kline)
+    assert entry["result"] == "miss"
+
+
+@pytest.mark.asyncio
+async def test_v3_vs_v2_baseline_neutral_differs():
+    """baseline_neutral 随版本：同一窗口 {0.3,2.0,-1.0,1.0}（thr=0.5）——
+    v2 any(|p|<0.5)=True；v3 mean(|p|)=1.075 → False。"""
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.3},
+        {"trade_date": "2026-08-11", "pct_chg": 2.0},
+        {"trade_date": "2026-08-12", "pct_chg": -1.0},
+        {"trade_date": "2026-08-13", "pct_chg": 1.0},
+    ]
+    record = _pending_record(due="2026-08-10", direction="neutral")
+    e_v3 = await _verify_direct(record, methodology_version="3.0", kline_rows=kline)
+    e_v2 = await _verify_direct(record, methodology_version="2.0", kline_rows=kline)
+    assert e_v3["methodology_version"] == "3.0"
+    assert e_v2["methodology_version"] == "2.0"
+    assert e_v3["baseline_neutral"] is False   # mean(|p|)=1.075 >= 0.5
+    assert e_v2["baseline_neutral"] is True    # any(0.3 < 0.5)
+    assert e_v3["result"] == "miss"            # mean>=0.5 → 3.0 miss
+    assert e_v2["result"] == "hit"             # any|p|<0.5 → 2.0 hit
+
+
+@pytest.mark.asyncio
+async def test_backfill_no_data_rewrites_keep_v2_version():
+    """阶段 0：backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'（不混版本）。"""
+    record = _verified_no_data_record()
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.0},   # 单日 +1.0%（2.0 any>0 → hit）
+        {"trade_date": "2026-08-11", "pct_chg": -2.0},  # 但 3.0 累计 sum=-2.5 → miss
+        {"trade_date": "2026-08-12", "pct_chg": -1.0},
+        {"trade_date": "2026-08-13", "pct_chg": -0.5},
+    ]
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_verified_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_index_kline",
+            new=AsyncMock(return_value=kline),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        updated = await pv.backfill_no_data()
+    assert updated == 1
+    entry = update.await_args.args[2]
+    # backfill 保持 2.0 口径：bullish any>0（单日 +1.0%）→ hit；若误用 3.0 累计 sum=-2.5 → miss
+    assert entry["result"] == "hit"
+    assert entry["methodology_version"] == "2.0"

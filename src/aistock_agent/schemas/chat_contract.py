@@ -35,6 +35,8 @@ class InsightGoal(BaseModel):
         "index_snapshot",
         "douyin_video",
         "prediction",
+        "insight_lookup",
+        "stock_trace_lookup",
     ]
     # QA Router 不填，由 synth_answer 通过 _infer_answer_mode 推断
     answer_mode: Literal["predict", "trace", "validate"] | None = None
@@ -71,6 +73,8 @@ class SubGoal(BaseModel):
         "index_snapshot",
         "douyin_video",
         "prediction",
+        "insight_lookup",
+        "stock_trace_lookup",
     ]
     dimension: Literal["predict", "trace", "validate"]
     symbols: list[str] = []
@@ -84,7 +88,16 @@ class ChatSource(BaseModel):
     """CHAT 专用 Source 类型，不与 PROD 的 SourceRecord 双源。"""
 
     source_id: str
-    kind: Literal["db_report", "realtime_quote", "news", "trace", "industry", "capital_flow"]
+    kind: Literal[
+        "db_report",
+        "realtime_quote",
+        "news",
+        "trace",
+        "industry",
+        "capital_flow",
+        "insight",
+        "stock_trace",
+    ]
     title: str
     url: str | None = None
     snippet: str
@@ -143,6 +156,8 @@ class SkillCall(BaseModel):
         "index_snapshot",
         "douyin_video",
         "prediction",
+        "insight_lookup",
+        "stock_trace_lookup",
     ]
     args: dict[str, Any]
     depends_on: list[str] = []

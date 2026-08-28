@@ -20,6 +20,7 @@ from aistock_agent.skills.douyin_video import douyin_video
 from aistock_agent.skills.evidence_resolver import evidence_resolver
 from aistock_agent.skills.index_snapshot import index_snapshot
 from aistock_agent.skills.industry_relation import industry_relation
+from aistock_agent.skills.insight_lookup import insight_lookup
 from aistock_agent.skills.market_snapshot import market_snapshot
 from aistock_agent.skills.prediction import prediction
 from aistock_agent.skills.report_lookup import report_lookup
@@ -27,6 +28,7 @@ from aistock_agent.skills.sector_snapshot import sector_snapshot
 from aistock_agent.skills.stock_history import stock_history
 from aistock_agent.skills.stock_news import stock_news
 from aistock_agent.skills.stock_snapshot import stock_snapshot
+from aistock_agent.skills.stock_trace_lookup import stock_trace_lookup
 from aistock_agent.skills.trace_lookup import trace_lookup
 from aistock_agent.skills.trend_ranking import trend_ranking
 
@@ -175,4 +177,16 @@ register_skill(
     "prediction",
     prediction,
     description='影响持续性推演（非点位预测）。入参 {symbols: ["6位代码"]}',
+)
+# 阶段 2.1：自选股洞察读层（涨停雷达/价格异动归因，只读；user_id 由后处理注入）
+register_skill(
+    "insight_lookup",
+    insight_lookup,
+    description='自选股洞察（只读涨停雷达/价格异动归因结果）。入参 {symbol: "6位代码"}',
+)
+# 阶段 2.2：个股异动溯源读层（stock_trace 价格异动/涨停雷达归因，只读；user_id 后处理注入）
+register_skill(
+    "stock_trace_lookup",
+    stock_trace_lookup,
+    description='个股异动溯源（只读价格异动/涨停雷达归因结果）。入参 {symbol: "6位代码"}',
 )

@@ -1,6 +1,7 @@
 # tests/unit/test_prediction_stats.py
 from aistock_agent.services.prediction_stats import (
     baseline_compare,
+    baseline_neutral_summary,
     bucket_summary,
     hit_rate_summary,
     wilson_ci,
@@ -44,9 +45,58 @@ def test_baseline_compare_excess():
     assert r["better_than_baseline"] is True
 
 
-def _entry(target_type, result="hit", prediction_id=1):
-    return {"methodology_version": "2.0", "result": result, "target_type": target_type,
+def _entry(target_type, result="hit", prediction_id=1, methodology_version="2.0"):
+    return {"methodology_version": methodology_version, "result": result, "target_type": target_type,
             "approximate": False, "prediction_id": prediction_id}
+
+
+def test_hit_rate_summary_default_filters_v2_only():
+    """阶段 0：默认（不传版本）只统计 2.0——混合 1.0/2.0/3.0 记录时 n 只含 2.0（防跳变/混桶）。"""
+    entries = [
+        _entry("index", "hit", 1, "1.0"),
+        _entry("index", "hit", 2, "2.0"),
+        _entry("index", "miss", 2, "2.0"),
+        _entry("index", "hit", 3, "3.0"),
+    ]
+    s = hit_rate_summary(entries)
+    assert s["n"] == 2 and s["hits"] == 1
+
+
+def test_hit_rate_summary_filters_by_methodology_version():
+    """阶段 0：显式传 methodology_version='3.0' 只统计 3.0 记录（2.0 被隔离，观测通道）。"""
+    entries = [
+        _entry("index", "hit", 1, "2.0"),
+        _entry("index", "miss", 1, "2.0"),
+        _entry("index", "hit", 2, "3.0"),
+        _entry("index", "hit", 3, "3.0"),
+    ]
+    s = hit_rate_summary(entries, methodology_version="3.0")
+    assert s["n"] == 2 and s["hits"] == 2
+    assert s["hit_rate"] == 1.0
+
+
+def test_bucket_summary_filters_by_methodology_version():
+    """阶段 0：bucket_summary 传版本只统计该版本（3.0 桶观测）。"""
+    entries = [
+        _entry("index", "hit", 1, "2.0"),
+        _entry("index", "hit", 2, "3.0"),
+        _entry("sector", "miss", 2, "3.0"),
+    ]
+    b = bucket_summary(entries, methodology_version="3.0")
+    assert b["combined"]["n"] == 2 and b["combined"]["hits"] == 1
+    assert b["index"]["n"] == 1 and b["sector"]["n"] == 1
+    assert b["index"]["hits"] == 1 and b["sector"]["hits"] == 0
+
+
+def test_baseline_neutral_summary_filters_by_methodology_version():
+    """阶段 0：baseline 同套版本过滤（3.0 记录单独分桶）。"""
+    entries = [
+        _entry("index", "hit", 1, "2.0"),
+        _entry("index", "hit", 2, "3.0"),
+    ]
+    # 仅 3.0 记录无 baseline_neutral 字段 → n=0（被 _filter_v2 后的 bool 过滤剔除）
+    b = baseline_neutral_summary(entries, methodology_version="3.0")
+    assert b["n"] == 0
 
 
 def test_hit_rate_summary_filters_by_target_type():
