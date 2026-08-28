@@ -873,6 +873,7 @@ def _normalize_search_facts(
     missing_fields: list[str],
     captured_at: datetime,
     fetch_errors: tuple[Exception | None, Exception | None] = (None, None),
+    trade_date: datetime | None = None,
 ) -> dict[str, SourceCollectionStatus]:
     """Tavily 检索结果 → SourceRecord（event_evidence）"""
     search_counter = 0
@@ -914,6 +915,12 @@ def _normalize_search_facts(
             occurred_at = _parse_datetime(pub_date)
             # 未来数据防呆：published_date 有效且晚于捕获时刻才跳过
             if occurred_at is not None and occurred_at > captured_at:
+                continue
+            # 历史回补（目标交易日早于捕获日）下，无 published_date 的结果无法
+            # 确认是目标日新闻（2026-08-28 存储狙击测试：query 带 '2026-07-16'
+            # 但 anysearch 返回 8-28 近期新闻，缺时间戳 → 兜底捕获时刻混入切片），
+            # 直接过滤；当日链路（trade_date 同日/未传）不受影响，仍按捕获时刻兜底。
+            if occurred_at is None and trade_date is not None and trade_date.date() < captured_at.date():
                 continue
             # Tavily 结果常缺 published_date（2026-08 实测无该字段）；
             # 不丢弃，用捕获时刻兜底（仅要求 URL 可溯源）。
@@ -1277,6 +1284,7 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             missing_fields,
             captured_at,
             (tavily_error_1, tavily_error_2),
+            trade_date_dt,
         )
     )
     targeted_count = _normalize_targeted_search_facts(
@@ -1505,6 +1513,7 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
             missing_fields,
             captured_at,
             (tavily_error_1, tavily_error_2),
+            trade_date_dt,
         )
     )
 

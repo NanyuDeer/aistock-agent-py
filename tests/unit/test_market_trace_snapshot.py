@@ -1564,3 +1564,66 @@ async def test_snapshot_targeted_search_queries_loser_sectors(mocker) -> None:
     assert "反垄断" in (event_sources[0].title or "")
     # 快照仍完整（原有市场事实不缺失）
     assert "INDEX_000001_SH" in snapshot.sources
+
+
+@pytest.mark.asyncio
+async def test_snapshot_search_filters_undated_items_in_historical_backfill(mocker) -> None:
+    """历史回补（report_date 早于捕获日）：无 published_date 的搜索结果必须过滤。
+
+    2026-08-28 存储狙击测试暴露：通用搜索 query 带 '2026-07-16' 日期，但
+    anysearch 返回的近期新闻缺 published_date → occurred_at 兜底为捕获时刻
+    （8-28），未来数据防呆（occurred_at > captured_at）判定不了 → 8-28 新闻
+    混入 7-16 切片。本测试锁定：目标日早于捕获日时，无时间戳结果直接过滤。
+    """
+    import copy
+
+    from aistock_agent.services.market_trace_snapshot import (
+        TavilyService,
+        build_market_trace_snapshot,
+        node_api,
+    )
+
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    # sectors 全空 → 不触发定向搜索，隔离出通用搜索的过滤行为
+    close_data["sectors"] = {
+        "top_gainers": [],
+        "top_losers": [],
+        "top_inflows": [],
+        "top_outflows": [],
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    # 通用搜索（tavily_search_1/2）返回"无 published_date 的近期新闻"（8-28 混入场景）
+    def fake_search(query, *, topic="news", max_results=5):
+        return {
+            "results": [
+                {
+                    "title": "创业板深化改革落地3个月，发生了什么变化？",
+                    "content": "发布于捕获日附近的宏观新闻，非目标交易日",
+                    "url": "https://example.com/recent-news",
+                }
+            ],
+            "provider": "anysearch",
+            "outcome": "ok",
+        }
+
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        side_effect=fake_search,
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    # 无 published_date 的结果不得进入 sources（无法确认是目标日新闻）
+    leaked = [s for s in snapshot.sources.values() if "创业板深化改革" in (s.title or "")]
+    assert not leaked, "历史回补下无 published_date 的搜索结果应被过滤，而非兜底为捕获日"
+    # 市场事实不受影响
+    assert "INDEX_000001_SH" in snapshot.sources
