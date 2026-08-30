@@ -147,8 +147,15 @@ class LlmHttpClient:
 
     @classmethod
     async def close(cls) -> None:
-        """关闭 LLM AsyncClient，释放资源（幂等）。"""
+        """关闭 LLM AsyncClient，释放资源（幂等）。
+
+        防御：client 可能在另一个（已关闭的）event loop 上惰性创建（测试/多 loop 场景），
+        跨 loop 关闭时 aclose() 抛 "Event loop is closed"——吞掉并置 None，绝不因收尾崩溃。
+        """
         if cls._client is not None:
-            await cls._client.aclose()
+            try:
+                await cls._client.aclose()
+            except Exception:
+                logger.warning("llm_http_client_close_failed", exc_info=True)
             cls._client = None
             logger.info("llm_http_client_closed")
