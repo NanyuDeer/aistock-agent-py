@@ -17,17 +17,30 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 @pytest.mark.asyncio
 async def test_load_event_window_returns_events(mock_api: AsyncMock) -> None:
     mock_api.get_calendar_events.return_value = [
-        {"date": "2026-09-01", "type": "delivery", "title": "交割日", "importance": "medium", "source": "L1"},
-        {"date": "2026-09-02", "type": "earnings", "title": "英伟达财报", "importance": "high", "source": "L3"},
+        {
+            "date": "2026-09-01",
+            "type": "delivery",
+            "title": "交割日",
+            "importance": "medium",
+            "source": "L1",
+        },
+        {
+            "date": "2026-09-02",
+            "type": "earnings",
+            "title": "英伟达财报",
+            "importance": "high",
+            "source": "L3",
+        },
     ]
     win = await load_event_window("2026-09-01")
     assert len(win.events) == 2
     assert len(win.high_events) == 1
     assert win.high_events[0]["importance"] == "high"
     assert win.source_missing is False
-    # 窗口上界 = target_date 起 5 个交易日（dateTo 传参验证）
-    _date_from, date_to = mock_api.get_calendar_events.call_args.args
-    assert date_to == "2026-09-08"
+    # 窗口 = 含 target_date 当日共 5 个交易日（§4.6）：2026-09-01 起第 4 个后续交易日
+    date_from, date_to = mock_api.get_calendar_events.call_args.args
+    assert date_from == "2026-09-01"
+    assert date_to == "2026-09-07"
 
 
 @pytest.mark.asyncio
@@ -53,14 +66,39 @@ async def test_earnings_density(mock_api: AsyncMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_event_window_calendar_uncovered(mock_api: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
-    """交易日历越年 → fail-close 标记（§16 开放问题 6），不抛错、不各自兜底。"""
+async def test_earnings_density_non_dict_returns_empty(mock_api: AsyncMock) -> None:
+    """非 dict 响应（接口异常/错配）→ []，不抛错（§4.2）。"""
+    mock_api.get.return_value = ["unexpected"]
+    density = await event_calendar.load_earnings_density("2026-09-01", "2026-09-05")
+    assert density == []
+
+
+@pytest.mark.asyncio
+async def test_load_event_window_real_year_crossing_fail_close(mock_api: AsyncMock) -> None:
+    """真实越年（2027-01-04 超出 chinese_calendar 2004-2026 覆盖）→ fail-close（§16 开放问题 6）。
+
+    显式判覆盖年份：不调 add_trading_days、不查接口、不各自兜底。
+    """
+    win = await load_event_window("2027-01-04")
+    assert win.calendar_uncovered is True
+    assert win.events == []
+    mock_api.get_calendar_events.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_load_event_window_calendar_uncovered_defensive(
+    mock_api: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """防御路径：年份在覆盖内但 add_trading_days 抛 ValueError（如 horizon<0）→ 同一 fail-close。
+
+    真实越年路径由 test_load_event_window_real_year_crossing_fail_close 覆盖。
+    """
     import datetime as _dt
 
     def _raise(d: _dt.date, n: int) -> _dt.date:
         raise ValueError("calendar out of range")
 
     monkeypatch.setattr(event_calendar, "add_trading_days", _raise)
-    win = await load_event_window("2027-01-04")
+    win = await load_event_window("2026-09-01")
     assert win.calendar_uncovered is True
     assert win.events == []
