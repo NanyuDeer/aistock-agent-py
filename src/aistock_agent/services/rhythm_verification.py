@@ -25,7 +25,7 @@ Result = Literal["hit", "miss", "insufficient"]
 # 验证统计归档
 verification_dir = Path("docs/agent-outputs/rhythm")
 
-WINDAW_DAYS = 5
+WINDOW_DAYS = 5
 
 
 def _parse_range(range_text: str) -> tuple[float, float] | None:
@@ -37,12 +37,17 @@ def _parse_range(range_text: str) -> tuple[float, float] | None:
 
 
 def _triggered(
-    cond: dict[str, Any], rows: list[dict[str, Any]], event_results: dict[str, str]
+    cond: dict[str, Any],
+    rows: list[dict[str, Any]],
+    event_results: dict[str, str],
+    event_title: str | None = None,
 ) -> bool:
     kind = cond.get("kind")
     indicator = str(cond.get("indicator", ""))
     if kind == "enum":
-        title = indicator.replace("预期差", "")
+        # D11：优先用 event_ref.title 精确匹配事件 result（title 可能含"预期差"字样，
+        # indicator 去前缀会误匹配），indicator 去"预期差"仅作无 event_ref 时的 fallback。
+        title = event_title or indicator.replace("预期差", "")
         result = event_results.get(title)
         return result == cond.get("value")
     lo = cond.get("lo")
@@ -68,7 +73,9 @@ def evaluate_branch(
     """单分支判定。rows 为窗口（升序）指数日 K。"""
     cond = branch.get("condition") or {}
     conclusion = branch.get("conclusion") or {}
-    if not _triggered(cond, rows, event_results):
+    ref = branch.get("event_ref")
+    event_title = str(ref["title"]) if isinstance(ref, dict) and ref.get("title") else None
+    if not _triggered(cond, rows, event_results, event_title):
         return "insufficient"
     parsed = _parse_range(str(conclusion.get("range", "")))
     if parsed is None:
@@ -106,48 +113,68 @@ async def run_once(report_date: str | None = None) -> dict[str, Any]:
     """扫描已满窗口的 rhythm_master 报告，按 §19.4 判各分支，统计独立指标
     （不并入 prediction hitRate）。
 
-    数据源：`/internal/analysis-reports/rhythm_master/{target}/after_close`
+    数据源：`/internal/analysis-reports/rhythm_master/{target}/{slot}`
     + 窗口指数 K 线 + 事件 result。
+    事件在 morning/midday 增量版本落档（after_close 版为占位，D11），故依次读
+    最新 refresh_slot 版本（midday → morning → after_close），取第一个非空。
     v1 以手动/测试驱动为主（scheduler job 由 rhythm_verification_enabled 控制，默认关）。
     """
     target = report_date or shanghai_today().isoformat()
     try:
-        end = add_trading_days(date.fromisoformat(target), WINDAW_DAYS)
+        end = add_trading_days(date.fromisoformat(target), WINDOW_DAYS)
     except ValueError:
         logger.warning("rhythm_verification.calendar_out_of_range target=%s", target)
         return {"report_date": target, "error": "交易日历未覆盖"}
-    rows_raw = await node_api.get_index_kline(
-        "000001",
-        days=200,
-        start_date=target.replace("-", ""),
-        end_date=end.isoformat().replace("-", ""),
-    )
-    rows = list(rows_raw) if isinstance(rows_raw, list) else []
-    if not rows:
-        return {"report_date": target, "evaluated": 0, "error": "窗口 K 线不可用"}
-    base = await node_api.get_rhythm_report(target, "after_close")
-    if not isinstance(base, dict):
-        return {"report_date": target, "evaluated": 0, "error": "基准报告缺失"}
-    content = base.get("content")
-    if not isinstance(content, dict):
-        return {"report_date": target, "evaluated": 0, "error": "基准报告内容缺失"}
-    card_raw = content.get("rhythm_card")
-    card = card_raw if isinstance(card_raw, dict) else {}
-    branches_raw = card.get("branches")
-    branches = branches_raw if isinstance(branches_raw, list) else []
-    events_raw = await node_api.get_calendar_events(target, end.isoformat())
-    event_results: dict[str, str] = {}
-    if isinstance(events_raw, list):
-        for e in events_raw:
-            title = str(e.get("title", ""))
-            result = e.get("result")
-            if title and isinstance(result, str):
-                event_results[title] = result
-    results = [evaluate_branch(b, rows, event_results) for b in branches]
-    summary = hit_rate_summary(results)
-    verification_dir.mkdir(parents=True, exist_ok=True)
-    out = {"report_date": target, "evaluated": len(results), "results": results, "summary": summary}
-    (verification_dir / "verification.json").write_text(
-        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return out
+    # 顶层 try：IO/网络异常不抛（对齐 rhythm_master.run 先例，G6/§10）
+    try:
+        rows_raw = await node_api.get_index_kline(
+            "000001",
+            days=200,
+            start_date=target.replace("-", ""),
+            end_date=end.isoformat().replace("-", ""),
+        )
+        rows = list(rows_raw) if isinstance(rows_raw, list) else []
+        if not rows:
+            return {"report_date": target, "evaluated": 0, "error": "窗口 K 线不可用"}
+        # 事件落档只发生在 morning/midday 版本，after_close 为占位（D11）
+        base = None
+        for slot in ("midday", "morning", "after_close"):
+            resp = await node_api.get_rhythm_report(target, slot)
+            content = resp.get("content") if isinstance(resp, dict) else None
+            if isinstance(content, dict) and "rhythm_card" in content:
+                base = resp
+                break
+        if not isinstance(base, dict):
+            return {"report_date": target, "evaluated": 0, "error": "基准报告缺失"}
+        content = base.get("content")
+        if not isinstance(content, dict):
+            return {"report_date": target, "evaluated": 0, "error": "基准报告内容缺失"}
+        card_raw = content.get("rhythm_card")
+        card = card_raw if isinstance(card_raw, dict) else {}
+        branches_raw = card.get("branches")
+        branches = branches_raw if isinstance(branches_raw, list) else []
+        events_raw = await node_api.get_calendar_events(target, end.isoformat())
+        event_results: dict[str, str] = {}
+        if isinstance(events_raw, list):
+            for e in events_raw:
+                if not e.get("title"):
+                    continue
+                result = e.get("result")
+                if isinstance(result, str):
+                    event_results[str(e["title"])] = result
+        results = [evaluate_branch(b, rows, event_results) for b in branches]
+        summary = hit_rate_summary(results)
+        verification_dir.mkdir(parents=True, exist_ok=True)
+        out = {
+            "report_date": target,
+            "evaluated": len(results),
+            "results": results,
+            "summary": summary,
+        }
+        (verification_dir / "verification.json").write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return out
+    except Exception:
+        logger.exception("rhythm_verification.run_once_failed target=%s", target)
+        return {"report_date": target, "evaluated": 0, "error": "验证执行异常"}

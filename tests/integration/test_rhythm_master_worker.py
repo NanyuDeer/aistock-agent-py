@@ -116,6 +116,8 @@ async def test_midday_event_delta_lands_branch_by_result(temp_sentiment: Path, m
     assert content["rhythm_card"]["score"] == 58.0  # 主档位沿用 16:05 基准值
     event_branch = [b for b in content["rhythm_card"]["branches"] if b.get("event_ref")]
     assert event_branch and "已公布" in event_branch[0]["conclusion"]["note"]
+    # D11：落档后事件分支 range 由技术分支（bullish）区间填充，验证不再恒 miss
+    assert event_branch[0]["conclusion"]["range"] == "3020.00-3040.00"
 
 
 @pytest.mark.asyncio

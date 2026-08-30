@@ -188,7 +188,21 @@ async def _apply_event_delta(
             result = matched[0].get("result") if matched else None
             if result in {"超预期", "符合", "不及预期"}:
                 br["condition"]["value"] = result
-                br["conclusion"]["note"] = f"事件结果已公布：{result}，按预期差落档"
+                # D11：目标区间由 engine 确定性给（技术分支 range 来自 engine，G19），
+                # 按预期差方向取对应技术分支区间填入，LLM 不参与点位；找不到保持 ""（保守 miss）。
+                direction = {"超预期": "bullish", "符合": "neutral", "不及预期": "bearish"}[result]
+                event_range = ""
+                for tb in card.get("branches", []):
+                    tcond = tb.get("condition") or {}
+                    tconcl = tb.get("conclusion") or {}
+                    if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
+                        event_range = str(tconcl.get("range", "") or "")
+                        break
+                br["conclusion"]["range"] = event_range
+                br["conclusion"]["note"] = (
+                    f"事件结果已公布：{result}，按预期差落档，"
+                    "目标区间由 engine 按当日行情计算"
+                )
             else:
                 br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
         new_branches.append(br)
