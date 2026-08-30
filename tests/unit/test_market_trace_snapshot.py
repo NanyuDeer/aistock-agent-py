@@ -1470,3 +1470,160 @@ def test_normalize_search_degraded_guard_tavily_provider_stays_available() -> No
     )
     assert statuses["tavily_domestic_policy"].state == "available"
     assert statuses["tavily_domestic_policy"].provider == "tavily"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_targeted_search_queries_loser_sectors(mocker) -> None:
+    """定向搜索增强：领跌板块触发定向事件检索，事件证据并入快照 sources。
+
+    背景（2026-08-28 存储狙击测试）：固定通用 query（'2026-07-16 中国 资本市场
+    政策 产业 公告'）搜不到具体产业事件（韩国检方突击搜查存储三巨头），溯源
+    agent 止步于板块层。本测试锁定：top_losers 含异动板块时，追加
+    '{date} {板块} 板块 下跌 原因' 定向 query，结果以 event_evidence 并入。
+    """
+    import copy
+
+    from aistock_agent.services.market_trace_snapshot import (
+        TavilyService,
+        build_market_trace_snapshot,
+        extract_morning_forecast,
+        node_api,
+    )
+
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    close_data["sectors"] = {
+        "top_gainers": [],
+        "top_losers": [
+            {
+                "ts_code": "881xxx",
+                "name": "存储芯片",
+                "pct_change": -6.5,
+                "net_amount": -8_000_000_000,
+                "lead_stock": "澜起科技",
+                "company_num": 60,
+                "trade_date": "20260719",
+            },
+            {
+                "ts_code": "881yyy",
+                "name": "先进封装",
+                "pct_change": -5.2,
+                "net_amount": -5_000_000_000,
+                "lead_stock": "长电科技",
+                "company_num": 40,
+                "trade_date": "20260719",
+            },
+        ],
+        "top_inflows": [],
+        "top_outflows": [],
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    def fake_search(query, *, topic="news", max_results=5):
+        # 定向 query 命中存储事件；固定通用 query 返回空
+        if "存储芯片" in query:
+            return {
+                "results": [
+                    {
+                        "title": "突发反垄断风暴！全球内存接口芯片三巨头遭韩突击搜查",
+                        "content": "韩国检方突击搜查澜起科技、瑞萨电子、Rambus",
+                        "url": "https://example.com/raid",
+                    }
+                ],
+                "provider": "anysearch",
+                "outcome": "ok",
+            }
+        return {"results": [], "provider": "anysearch", "outcome": "empty"}
+
+    search_spy = mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        side_effect=fake_search,
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    # 定向 query 必须被调用（含板块名）
+    targeted_calls = [
+        c for c in search_spy.call_args_list if "存储芯片" in str(c) or "先进封装" in str(c)
+    ]
+    assert targeted_calls, "应针对领跌板块发起定向搜索"
+
+    # 定向搜索结果以 event_evidence 并入 sources（标题含"内存"= 存储事件）
+    event_sources = [
+        s for s in snapshot.sources.values()
+        if s.kind == "event_evidence" and "内存" in (s.title or "")
+    ]
+    assert event_sources, "定向搜索到的存储事件证据应并入快照 sources"
+    assert "反垄断" in (event_sources[0].title or "")
+    # 快照仍完整（原有市场事实不缺失）
+    assert "INDEX_000001_SH" in snapshot.sources
+
+
+@pytest.mark.asyncio
+async def test_snapshot_search_filters_undated_items_in_historical_backfill(mocker) -> None:
+    """历史回补（report_date 早于捕获日）：无 published_date 的搜索结果必须过滤。
+
+    2026-08-28 存储狙击测试暴露：通用搜索 query 带 '2026-07-16' 日期，但
+    anysearch 返回的近期新闻缺 published_date → occurred_at 兜底为捕获时刻
+    （8-28），未来数据防呆（occurred_at > captured_at）判定不了 → 8-28 新闻
+    混入 7-16 切片。本测试锁定：目标日早于捕获日时，无时间戳结果直接过滤。
+    """
+    import copy
+
+    from aistock_agent.services.market_trace_snapshot import (
+        TavilyService,
+        build_market_trace_snapshot,
+        node_api,
+    )
+
+    close_data = copy.deepcopy(COMPLETE_CLOSE)
+    # sectors 全空 → 不触发定向搜索，隔离出通用搜索的过滤行为
+    close_data["sectors"] = {
+        "top_gainers": [],
+        "top_losers": [],
+        "top_inflows": [],
+        "top_outflows": [],
+    }
+    mocker.patch.object(node_api, "get", AsyncMock(side_effect=[close_data, {"items": []}]))
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.collect_global_market_facts",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.extract_morning_forecast",
+        AsyncMock(return_value=None),
+    )
+
+    # 通用搜索（tavily_search_1/2）返回"无 published_date 的近期新闻"（8-28 混入场景）
+    def fake_search(query, *, topic="news", max_results=5):
+        return {
+            "results": [
+                {
+                    "title": "创业板深化改革落地3个月，发生了什么变化？",
+                    "content": "发布于捕获日附近的宏观新闻，非目标交易日",
+                    "url": "https://example.com/recent-news",
+                }
+            ],
+            "provider": "anysearch",
+            "outcome": "ok",
+        }
+
+    mocker.patch(
+        "aistock_agent.services.market_trace_snapshot.TavilyService.search",
+        side_effect=fake_search,
+    )
+
+    snapshot = await build_market_trace_snapshot("2026-07-19")
+
+    # 无 published_date 的结果不得进入 sources（无法确认是目标日新闻）
+    leaked = [s for s in snapshot.sources.values() if "创业板深化改革" in (s.title or "")]
+    assert not leaked, "历史回补下无 published_date 的搜索结果应被过滤，而非兜底为捕获日"
+    # 市场事实不受影响
+    assert "INDEX_000001_SH" in snapshot.sources

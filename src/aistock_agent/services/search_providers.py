@@ -45,9 +45,14 @@ class AnySearchProvider:
             raise RateLimited(f"{resp.status_code}: {resp.text[:80]}")
         resp.raise_for_status()
         data = resp.json()
+        # 真实 API 返回 {code,message,data:{results:[...]}} 双层结构；旧实现只取
+        # 顶层 results 后把 data 字典当 list 遍历键名，导致 hits 恒空（2026-08-28
+        # 服务器实测：anysearch 搜索全空、触发熔断、快照新闻证据缺失）。
+        # 兼容两层：顶层 results 优先，否则取 data.results。
         items = data.get("results") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            items = data.get("data") if isinstance(data, dict) else []
+        if not isinstance(items, list) and isinstance(data, dict):
+            inner = data.get("data")
+            items = inner.get("results") if isinstance(inner, dict) else None
         hits: list[_Hit] = []
         for it in (items or []):
             if not isinstance(it, dict):
