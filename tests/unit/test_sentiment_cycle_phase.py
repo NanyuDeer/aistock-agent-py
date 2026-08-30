@@ -69,3 +69,20 @@ async def test_cycle_phase_omitted_when_unknown(tmp_path: Path, mock_deps: None)
     # 单点序列无法判斜率且无前阶段 → 省略键（向后兼容，契约 #5）
     assert "cycle_phase" not in payload
     (tmp_path / "2026-08-28.json").unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_cycle_phase_dirty_prev_narrowed(tmp_path: Path, mock_deps: None) -> None:
+    """历史归档 cycle_phase 为非四态脏值 → 收窄为 None，不透传落盘（P7 加固）。"""
+    _write_archive(tmp_path, "2026-08-27", 40)
+    prev = {"date": "2026-08-27", "score": 40.0, "cycle_phase": "weird"}
+    with patch.object(sentiment_temp, "load_previous_archive", return_value=prev), patch.object(
+        sentiment_temp, "is_trading_day", return_value=True
+    ):
+        payload = await sentiment_temp.compute_and_persist_sentiment_temp(
+            "2026-08-28", output_dir=tmp_path
+        )
+    # 单点序列 + 脏 prev 被收窄 → detect_phase 返回 None → 省略键（脏值不落盘）
+    assert "cycle_phase" not in payload
+    assert "weird" not in payload
+    (tmp_path / "2026-08-28.json").unlink(missing_ok=True)

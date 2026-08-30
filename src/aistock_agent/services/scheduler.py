@@ -446,6 +446,8 @@ async def _dispatch_rhythm_master(slot: str) -> None:
     from aistock_agent.agents.workers.rhythm_master import run as run_rhythm_master
 
     state = _make_scheduled_state(shanghai_today().isoformat(), intent="rhythm_master")
+    # session_id 带 slot 后缀：三时点会话 trace 隔离（_make_scheduled_state 固定生成）
+    state["session_id"] = f"{state['session_id']}_{slot}"
     state["refresh_slot"] = slot
     try:
         await run_rhythm_master(state)

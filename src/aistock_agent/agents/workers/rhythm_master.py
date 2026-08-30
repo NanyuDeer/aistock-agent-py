@@ -60,13 +60,15 @@ def _load_sentiment_series(
         ice = payload.get("ice") or {}
         if f == files[-1]:
             consecutive_ice = int(ice.get("consecutive_ice_days", 0) or 0)
-            latest_phase = payload.get("cycle_phase")
+            # cycle_phase 四态收窄（对齐 sentiment_temp 同款收窄，P7 加固）：脏值不入参 detect_phase
+            raw_phase = payload.get("cycle_phase")
+            latest_phase = (
+                raw_phase
+                if isinstance(raw_phase, str)
+                and raw_phase in {"ice", "warm_up", "overheat", "ebb"}
+                else None
+            )
     return series, scores, consecutive_ice, latest_phase
-
-
-def _temperature_series_for_card() -> list[dict[str, Any]]:
-    series, _, _, _ = _load_sentiment_series(days=7)
-    return series
 
 
 async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
@@ -129,7 +131,7 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         "position_band": rhythm_engine.position_band(level),
         "phase": phase,
         "phase_evidence": {**phase_evidence, "experimental": True},
-        "temperature_series": _temperature_series_for_card(),
+        "temperature_series": series,  # 复用本函数已加载的 series，避免二次读盘
         "event_window": win.events,
         "event_source_missing": win.source_missing,
         "conflict": conflict,
@@ -148,11 +150,30 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
 async def _apply_event_delta(
     base: dict[str, Any], slot: str, basis_date: str
 ) -> dict[str, Any]:
-    """morning/midday 事件驱动增量：主档位沿用基准，只更新事件窗口/分支触发/提示（G18）。"""
+    """morning/midday 事件驱动增量：主档位沿用基准，只更新事件窗口/分支触发/提示（G18）。
+
+    basis_date 语义随刷新推进（spec §8：16:05=当日收盘基准 / 9:00=当日盘前隔夜 /
+    12:30=当日午间）；增量版本 basis_date=运行日 为规格语义，主档位数据基准日由
+    基准报告（after_close 版）自含，故此处不改 basis 语义、不重合成主档位。
+    """
     card = dict(base.get("rhythm_card", {}))
+    # data_missing 从基准卡拷贝后独立维护（不改写基准报告；保持缺失标注如实）
+    missing = list(card.get("data_missing") or [])
     win = await load_event_window(basis_date)
     card["event_window"] = win.events
     card["event_source_missing"] = win.source_missing
+    # 事件窗口缺失标注：calendar_uncovered / source_missing 按当前窗口状态追加/移除（对齐全量分支）
+    if win.calendar_uncovered:
+        if "交易日历未覆盖（事件窗口不可用）" not in missing:
+            missing.append("交易日历未覆盖（事件窗口不可用）")
+    else:
+        missing = [m for m in missing if m != "交易日历未覆盖（事件窗口不可用）"]
+    if win.source_missing:
+        if "事件源未接（日历接口不可用）" not in missing:
+            missing.append("事件源未接（日历接口不可用）")
+    else:
+        missing = [m for m in missing if m != "事件源未接（日历接口不可用）"]
+    card["data_missing"] = missing
     # 事件分支落档：公布后按预期差触发（§19.3/D11）；v1 以 result 字段人工回填为主
     new_branches: list[dict[str, Any]] = []
     for br in card.get("branches", []):

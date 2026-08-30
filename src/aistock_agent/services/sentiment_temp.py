@@ -385,7 +385,14 @@ async def compute_and_persist_sentiment_temp(
             scores = _load_recent_scores(root, report_date, days=5)
             prev_phase = None
             if prev is not None and isinstance(prev, dict):
-                prev_phase = prev.get("cycle_phase")
+                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘
+                raw_phase = prev.get("cycle_phase")
+                prev_phase = (
+                    raw_phase
+                    if isinstance(raw_phase, str)
+                    and raw_phase in {"ice", "warm_up", "overheat", "ebb"}
+                    else None
+                )
             phase, _evidence = detect_phase(
                 history=scores,
                 consecutive_ice=int(payload.get("ice", {}).get("consecutive_ice_days", 0)),

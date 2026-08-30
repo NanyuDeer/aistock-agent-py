@@ -139,3 +139,36 @@ async def test_worker_top_level_degrade(temp_sentiment: Path, mock_llm: None, mo
     assert "趋势数据缺失" in missing and "恐贪数据缺失" in missing
     # 事件源缺失条目为 "事件源未接（日历接口不可用）"，按子串断言
     assert any("事件源未接" in m for m in missing)
+
+
+@pytest.mark.asyncio
+async def test_event_delta_maintains_data_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """增量分支：calendar_uncovered / source_missing 如实标注 data_missing，恢复后移除（G18 不编造）。"""
+    from aistock_agent.services.event_calendar import EventWindow
+
+    base = {
+        "target_date": "2026-08-31", "basis_date": "2026-08-28", "refresh_slot": "after_close",
+        "rhythm_card": {
+            "score": 58.0, "level": "active", "position_band": {"text": "6~8 成，顺势持有"},
+            "branches": [],
+            "data_missing": ["事件源未接（日历接口不可用）"],
+        },
+    }
+    # 窗口不可用（日历未覆盖）+ 事件源缺失 → 两条标注均在
+    monkeypatch.setattr(
+        worker_mod,
+        "load_event_window",
+        AsyncMock(return_value=EventWindow(calendar_uncovered=True, source_missing=True)),
+    )
+    out = await worker_mod._apply_event_delta(base, "morning", "2026-08-31")
+    missing = out["rhythm_card"]["data_missing"]
+    assert "交易日历未覆盖（事件窗口不可用）" in missing
+    assert "事件源未接（日历接口不可用）" in missing
+    # 基准卡未被污染（data_missing 独立拷贝）
+    assert base["rhythm_card"]["data_missing"] == ["事件源未接（日历接口不可用）"]
+    # 窗口恢复 → 两条标注均移除，data_missing 回到基准状态
+    monkeypatch.setattr(
+        worker_mod, "load_event_window", AsyncMock(return_value=EventWindow(events=[]))
+    )
+    out2 = await worker_mod._apply_event_delta(base, "midday", "2026-08-31")
+    assert out2["rhythm_card"]["data_missing"] == []
