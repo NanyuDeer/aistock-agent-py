@@ -23,11 +23,16 @@ import structlog
 from aistock_agent.config import settings
 from aistock_agent.services import event_scoring_llm, event_scrape_sources, event_store
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.search_cache import SearchCache
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
 VALID_MODES = frozenset({"full_daily", "intraday", "event_triggered"})
+
+# L3 前瞻捕捉（§4.3）：full_daily 采集完成后的 best-effort 附加通道；
+# 模块级复用 SearchCache（当日去重 + 空结果负缓存），进程内跨调度共享
+_L3_CACHE = SearchCache()
 
 # 保持 fire-and-forget 传导 task 的强引用，避免被 GC 回收导致传导分析静默丢失
 # （对齐 morning 时代 scheduler._pending_event_tasks 先例；AGENTS.md 明确警告
@@ -180,6 +185,11 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     # fire-and-forget：传导失败不阻断抓取结果返回。
     if major and result.get("added", 0) > 0:
         _spawn_conduction(result.get("added_events") or [])
+    # L3 前瞻捕捉（§4.3）：best-effort 辅助，主通道 L1/L2/L4 不受影响；失败不 fail 链
+    try:
+        await event_scrape_sources.collect_l3_forward(score_date, _L3_CACHE)
+    except Exception:  # noqa: BLE001
+        logger.warning("event_scrape_l3.skipped", exc_info=True)
     return result
 
 
