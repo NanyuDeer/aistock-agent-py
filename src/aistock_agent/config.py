@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 0-4"  # 16:05 收盘基准（错峰晚于 15:45）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
