@@ -151,6 +151,35 @@ def test_technical_branches_price_fallback() -> None:
     assert all("" in b["conclusion"]["range"] and "-" in b["conclusion"]["range"] for b in branches)
 
 
+def test_technical_branches_range_anchored_on_trigger() -> None:
+    """分支目标区间锚定触发值（design-debate A1 裁决）：
+    bullish 区间下界=压力位、bearish 区间上界=支撑位、neutral=真实通道 [S, P]；
+    三档区间互斥、触发值=区间边界，消除"站上 P 却给 P±0.5% 对称带"的语义错位。"""
+    closes = [float(3000 + (i % 7)) for i in range(30)]
+    highs = [c + 5.0 for c in closes]
+    lows = [c - 5.0 for c in closes]
+    branches = build_technical_branches(closes=closes, highs=highs, lows=lows, amounts=[])
+    by_dir = {b["conclusion"]["direction"]: b for b in branches}
+    assert {"bullish", "bearish", "neutral"} <= set(by_dir)
+    ma20 = sum(closes[-20:]) / 20
+    support = max(min(lows[-20:]), ma20 * 0.97)
+    pressure = min(max(highs[-20:]), ma20 * 1.03)
+
+    bull_lo, bull_hi = (float(x) for x in by_dir["bullish"]["conclusion"]["range"].split("-"))
+    bear_lo, bear_hi = (float(x) for x in by_dir["bearish"]["conclusion"]["range"].split("-"))
+    neut_lo, neut_hi = (float(x) for x in by_dir["neutral"]["conclusion"]["range"].split("-"))
+    # 触发值 = 区间边界
+    assert abs(bull_lo - pressure) < 0.01
+    assert abs(bear_hi - support) < 0.01
+    assert abs(neut_lo - support) < 0.01
+    assert abs(neut_hi - pressure) < 0.01
+    # 三档互斥：bull 从压力向上、bear 到支撑向下、neutral 为真实通道
+    assert bull_lo >= neut_hi - 0.01
+    assert bear_hi <= neut_lo + 0.01
+    # 突破后空间（Δ）与通道宽度成比例，非固定 5%（避免过度承诺）
+    assert bull_hi > bull_lo and bear_lo < bear_hi
+
+
 def test_event_branch_enum_three_partitions() -> None:
     event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "source": "L3"}
     branch = build_event_branch(event)
