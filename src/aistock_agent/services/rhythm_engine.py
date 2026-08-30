@@ -41,8 +41,6 @@ POSITION_BANDS: dict[str, dict[str, Any]] = {
     "ice": {"text": "空仓~观察（冰点修复窗口属博弈，非确定性加仓信号）"},
 }
 
-CONFLICT_BRANCH_ONLY_TEXT = "信号背离，仅提供区间与提示，不输出单一档位"
-
 
 def map_bipolar(anchor: float) -> float:
     """双极性锚固定映射（§3.1）。"""

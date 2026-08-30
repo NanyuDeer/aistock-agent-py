@@ -68,6 +68,34 @@ async def test_after_close_full_compose_and_persist(temp_sentiment: Path, mock_a
     assert content["basis_date"] == "2026-08-28"
     assert "rhythm_card" in content
     assert content["rhythm_card"]["data_missing"] == []
+    # I1：无 high 事件时 event_high_hint 为空串（前端 v-if 不渲染）
+    assert content["rhythm_card"]["event_high_hint"] == ""
+
+
+@pytest.mark.asyncio
+async def test_after_close_event_high_hint_present(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """I1（验收 3）：16:05 基准卡存在 high 事件时写入 event_high_hint（与增量同文案）。"""
+    mock_api.get_calendar_events.return_value = [
+        {
+            "date": "2026-08-31",
+            "type": "earnings",
+            "title": "英伟达财报",
+            "importance": "high",
+            "source": "L3",
+            "result": None,
+        },
+    ]
+    out = await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    assert "final_response" in out
+    call = mock_api.save_analysis_report.call_args
+    assert call is not None
+    content = call.kwargs["content"]
+    hint = content["rhythm_card"]["event_high_hint"]
+    assert isinstance(hint, str) and "英伟达财报" in hint
 
 
 @pytest.mark.asyncio

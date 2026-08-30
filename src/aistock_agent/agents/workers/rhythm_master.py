@@ -35,6 +35,21 @@ INDEX_CODE = "000001"  # 上证指数
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
 
+def _event_high_hint(high_events: list[dict[str, Any]]) -> str:
+    """high 事件前置提示文案（§7.1 事件前置纪律，I1）。
+
+    after_close 基准卡与 morning/midday 增量共用同一文案逻辑；
+    无 high 事件时返回空串（前端 v-if 不渲染）。
+    """
+    titles = [str(e.get("title", "")) for e in high_events]
+    if not titles:
+        return ""
+    return (
+        f"未来 {len(titles)} 日有 {'、'.join(titles[:2])} 等高影响事件，"
+        "注意确定性风险，倾向相应收敛"
+    )
+
+
 def _load_sentiment_series(
     days: int = 7,
 ) -> tuple[list[dict[str, Any]], list[float], int, str | None]:
@@ -134,6 +149,7 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         "temperature_series": series,  # 复用本函数已加载的 series，避免二次读盘
         "event_window": win.events,
         "event_source_missing": win.source_missing,
+        "event_high_hint": _event_high_hint(win.high_events),
         "conflict": conflict,
         "conflict_detail": conflict_detail,
         "branches": branches,
@@ -207,14 +223,8 @@ async def _apply_event_delta(
                 br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
         new_branches.append(br)
     card["branches"] = new_branches
-    # 提示层：high 事件前置提示（不改主档位，§7.1 事件前置纪律）
-    high_titles = [str(e.get("title", "")) for e in win.high_events]
-    card["event_high_hint"] = (
-        f"未来 {len(high_titles)} 日有 {'、'.join(high_titles[:2])} "
-        "等高影响事件，注意确定性风险，倾向相应收敛"
-        if high_titles
-        else ""
-    )
+    # 提示层：high 事件前置提示（不改主档位，§7.1 事件前置纪律；与 after_close 基准卡共用文案，I1）
+    card["event_high_hint"] = _event_high_hint(win.high_events)
     return {**base, "basis_date": basis_date, "refresh_slot": slot, "rhythm_card": card}
 
 
