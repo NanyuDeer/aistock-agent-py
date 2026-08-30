@@ -873,6 +873,7 @@ def _normalize_search_facts(
     missing_fields: list[str],
     captured_at: datetime,
     fetch_errors: tuple[Exception | None, Exception | None] = (None, None),
+    trade_date: datetime | None = None,
 ) -> dict[str, SourceCollectionStatus]:
     """Tavily 检索结果 → SourceRecord（event_evidence）"""
     search_counter = 0
@@ -914,6 +915,12 @@ def _normalize_search_facts(
             occurred_at = _parse_datetime(pub_date)
             # 未来数据防呆：published_date 有效且晚于捕获时刻才跳过
             if occurred_at is not None and occurred_at > captured_at:
+                continue
+            # 历史回补（目标交易日早于捕获日）下，无 published_date 的结果无法
+            # 确认是目标日新闻（2026-08-28 存储狙击测试：query 带 '2026-07-16'
+            # 但 anysearch 返回 8-28 近期新闻，缺时间戳 → 兜底捕获时刻混入切片），
+            # 直接过滤；当日链路（trade_date 同日/未传）不受影响，仍按捕获时刻兜底。
+            if occurred_at is None and trade_date is not None and trade_date.date() < captured_at.date():
                 continue
             # Tavily 结果常缺 published_date（2026-08 实测无该字段）；
             # 不丢弃，用捕获时刻兜底（仅要求 URL 可溯源）。
@@ -961,6 +968,71 @@ def _normalize_search_facts(
                 item_count=source_count,
             )
     return statuses
+
+
+def _build_sector_queries(
+    normalized_a_share: dict[str, object], report_date: str
+) -> list[str]:
+    """从领跌板块（top_losers 前 3）构造定向事件检索 query。
+
+    2026-08-28 存储狙击测试暴露：固定通用 query（'2026-07-16 中国 资本市场
+    政策 产业 公告'）搜不到具体产业事件（韩国检方突击搜查存储三巨头），
+    溯源止步板块层。定向 query 补上 '{date} {板块} 板块 下跌 原因'，
+    为溯源提供事件级证据。无领跌板块时返回空（增强功能，不改变既有行为）。
+    """
+    sectors = normalized_a_share.get("sectors")
+    if not isinstance(sectors, dict):
+        return []
+    losers = sectors.get("top_losers")
+    if not isinstance(losers, list):
+        return []
+    queries: list[str] = []
+    for sector in losers[:3]:
+        if not isinstance(sector, dict):
+            continue
+        name = str(sector.get("name") or "").strip()
+        if name:
+            queries.append(f"{report_date} {name} 板块 下跌 原因")
+    return queries
+
+
+def _normalize_targeted_search_facts(
+    targeted_results: list[tuple[str, dict[str, object]]],
+    sources: dict[str, SourceRecord],
+    captured_at: datetime,
+    trade_date_dt: datetime,
+) -> int:
+    """定向搜索结果 → SourceRecord（event_evidence），source_id 前缀 SEARCH_S。
+
+    与 _normalize_search_facts 的 SEARCH_ 前缀隔离（避免 source_id 冲突）；
+    失败/空结果已在上游过滤，此处只做结构转换。返回并入条数（供观测日志）。
+    """
+    counter = 0
+    for _query, result in targeted_results:
+        results = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(results, list):
+            continue
+        provider = str(result.get("provider", "anysearch"))
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            title = _safe_str(item.get("title"), "无标题")
+            content = _safe_str(item.get("content", ""))[:500]
+            url = _safe_optional_str(item.get("url"))
+            counter += 1
+            source_id = f"SEARCH_S{counter:02d}"
+            sources[source_id] = SourceRecord(
+                source_id=source_id,
+                kind="event_evidence",
+                provider=provider,
+                title=title,
+                content=content,
+                url=url,
+                occurred_at=trade_date_dt,
+                captured_at=captured_at,
+                source_level="reporting",
+            )
+    return counter
 
 
 async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
@@ -1138,6 +1210,26 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         tavily_result_2 = {}
         tavily_error_2 = e
 
+    # ── 3.5 定向搜索增强（2026-08-28）──
+    # 针对领跌板块（top_losers 前 3）追加事件检索，补足固定通用 query 搜不到
+    # 具体产业事件的盲区（存储狙击测试暴露）。失败/空结果静默降级，不阻断快照。
+    targeted_search_results: list[tuple[str, dict[str, object]]] = []
+    for targeted_query in _build_sector_queries(normalized_a_share, report_date):
+        try:
+            targeted_result = await asyncio.to_thread(
+                TavilyService.search, query=targeted_query, topic="news", max_results=5
+            )
+            if isinstance(targeted_result, dict) and targeted_result.get("results"):
+                targeted_search_results.append((targeted_query, targeted_result))
+        except Exception as e:  # noqa: BLE001 — 定向搜索失败不影响快照主链
+            logger.warning(
+                "targeted_search_failed",
+                query=targeted_query,
+                error_class=type(e).__name__,
+            )
+    if targeted_search_results:
+        logger.info("targeted_search_done", count=len(targeted_search_results))
+
     # ── 4. 归一化为 SourceRecord ──
     sources: dict[str, SourceRecord] = {}
     missing_fields: list[str] = []
@@ -1192,8 +1284,14 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
             missing_fields,
             captured_at,
             (tavily_error_1, tavily_error_2),
+            trade_date_dt,
         )
     )
+    targeted_count = _normalize_targeted_search_facts(
+        targeted_search_results, sources, captured_at, trade_date_dt
+    )
+    if targeted_count:
+        logger.info("targeted_search_facts_added", count=targeted_count)
 
     # ── 5. 在冻结事实和真实来源上确定性发现市场现象 ──
     discovery = discover_market_phenomenon(
@@ -1415,6 +1513,7 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
             missing_fields,
             captured_at,
             (tavily_error_1, tavily_error_2),
+            trade_date_dt,
         )
     )
 

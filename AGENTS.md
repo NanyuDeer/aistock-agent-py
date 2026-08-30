@@ -22,17 +22,20 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
 | 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0（报告区分短线/长线风口） |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
+| 节奏大师 | agents/workers/rhythm_master.py | deep_think | P1 |
 | 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
-| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行） | 无（代码管线） | P0（中台底座） |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
 
 > **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
+>
+> **节奏大师三时点（2026-08-30）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 为**当日节奏事件驱动增量**（主档位沿用收盘基准结论，事件触发即增量刷新）；收盘基准错峰晚于 sentiment_temp（15:45）。
 >
 > **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、证据源读统一事件库优先（`load_event_scrape(report_date)`，有库用事件库做 event_evidence、缺库降级到财联社电报当日全量爬取 `/internal/news/telegraph`，再降级 `/internal/news/latest`，2026-08-12 起）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
 
@@ -65,6 +68,9 @@ START → supervisor(quick_think, 意图路由)
   12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
   15:45 sentiment_temp（短线情绪温度计算，冰点≤20 触发 quick_think 预判，落盘 docs/agent-outputs/sentiment，次日晨报引用）
+  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；错峰晚于 sentiment_temp 15:45）
+  次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
+  12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
   20:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 独立消费组 prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）
   旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
@@ -330,7 +336,7 @@ START → supervisor(quick_think, 意图路由)
 - **ChatTaskManager finalizing 护栏**：`ChatRunState.finalizing: bool`（producer 已产出终态 result 后 `_runner` 置位）→ `cancel()` 检查 `if s is None or s.done or s.finalizing: return False`——前端 idle 超时联动 stop 不误杀将成之轮（stop_status 落 not_found，前端已本地复位可重试）。
 - **总时长兜底（T2）**：`_RUN_TOTAL_TIMEOUT_SEC = 660`（LLM 单次 600s + 60s 余量，对齐 llm.py `_LLM_REQUEST_TIMEOUT_SECONDS`）；`_runner` 用 **`asyncio.timeout`**（内联执行 producer，无 wait_for 的独立内层 task 调度副作用）包裹 → 超时置 ERROR 终态「生成超时，请稍后重试」→ done → session 释放可重试；**必须显式 `except TimeoutError`**（继承 Exception，否则落 producer_failed 死区）；`chat.run_timeout` / `chat.run_finished`（elapsed_ms + done）观测日志。
 - **LLM 连接池复用 + WS 静默段看门狗（2026-08-17，问题 20 延续）**：线上偶发转圈追根为 **ChatOpenAI 底层 httpx 连接池泄漏**——现场 `ss` 观测 agent → DeepSeek(43.242.198.77:443) 累积 50+ CLOSE-WAIT，fd 增到 85。修复：
-  - `services/http_client.py` 新增 **`LlmHttpClient`**（LLM 专用 AsyncClient 单例，`httpx.Limits(max_connections=20, max_keepalive_connections=10)`）；`services/llm.py` 的 `get_quick_think/deep_think` 注入 `http_async_client=LlmHttpClient.client()`（**每实例新建 httpx client 是泄漏根因，必须复用共享池**）；`main.py` lifespan init/close。
+  - `services/http_client.py` 新增 **`LlmHttpClient`**（LLM 专用 AsyncClient 单例，`httpx.Limits(max_connections=20, max_keepalive_connections=10)`）；`services/llm.py` 的 `get_quick_think/deep_think` 注入 `http_async_client=LlmHttpClient.client()`（**每实例新建 httpx client 是泄漏根因，必须复用共享池**）；`main.py` lifespan init/close；**`LlmHttpClient.close()` 跨 event loop 关闭防御（2026-08-30）**：close 必须在创建该 client 的 event loop 内调用，跨 loop 关闭（如 scheduler/线程池路径触发）需捕获 `RuntimeError` 兜底，避免关闭时抛异常打断 lifespan 收尾。
   - `api/ws.py` `_forward_until_done_or_cmd` 加 **静默段看门狗**（`_FORWARD_STALL_TIMEOUT_SEC=240`）：events 长度无新增且 recv 无新消息超阈值 → `chat_task_manager.cancel(session_id)` + 补发 error「生成超时，请重试」。**只依赖 660s 总超时不够**（<660s 悬挂 + timeout 可能被吞），看门狗保证前端绝不无限转圈。finally 补 `await gather` 收尾。
   - **经验**：`asyncio.timeout(660)` 对 <660s 悬挂是 no-op；查连接类问题优先 `ss -tnp | grep pid` 看 CLOSE-WAIT 堆积（比 attach py-spy 更易得，perf_event_paranoid/无 sudo 时唯一手段）。
 
@@ -376,6 +382,7 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + Redis 缓存）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
+│       ├── rhythm_master.py # 节奏大师（三时点事件驱动，节奏状态报告，scheduler 触发）
 │       └── event.py     # 事件传导链（v2：Redis 缓存 + 双层输出解析 + 持久化）
 ├── tools/
 │   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
@@ -392,11 +399,15 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight,rhythm_master}.py
 │   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
+│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close）
+│   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events）
+│   ├── search_cache.py  # 搜索缓存（TTL 削峰，供节奏大师等重复检索复用）
+│   ├── rhythm_verification.py # 节奏验证（回放隔离 + 校验，`RHYTHM_VERIFICATION_ENABLED` 开关）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
 │   └── cache.py         # 晨报缓存服务（基于 RedisPool）
@@ -490,6 +501,11 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/ths/:code/daily?start=&end=` | Tushare 同花顺 | 板块区间日 K（rows 升序，键 `trade_date`/`pct_chg`，None 保行为 null；**M2 板块验证**） |
 | `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容） |
 | `GET /internal/stocks/basic` | stocks 表 | 全量 A 股基础信息（symbol/name/industry），内存 6h 缓存；供 stock_basic_index 构建股票名称索引（最长匹配优先），支持 company_event_rule 实体匹配；接口失败降级空索引 |
+| `GET /internal/calendar/events` | market_calendar_events | 事件日历查询（L1 交割日规则 + 前瞻，rhythm_master 用；data_client `get_calendar_events`） |
+| `POST /internal/calendar/events` | market_calendar_events | 事件日历写入（幂等 upsert；data_client `post_calendar_event`） |
+| `GET /internal/calendar/earnings-density` | market_calendar_events | 业绩披露密度（rhythm_master 择时用） |
+| `GET /internal/fear-greed` | 聚合指标 | 恐惧贪婪指数（rhythm_master 情绪维度；data_client `get_fear_greed`） |
+| `GET /internal/analysis-reports/:type/:date/:slot` | agent_analysis_reports | 节奏大师报告读取（`rhythm_master` 按 target_date + refresh_slot 三元组；data_client `get_rhythm_report`） |
 
 > **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed, ...)`——gate_skipped 落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年逐档容错（P2 裁决 2026-08-14）：chinese_calendar 覆盖 2004-2026 之外时不再整条 due_dates_failed，改为越年档按「周末+已发布节假日 HOLIDAYS_EXTRA」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb，`PredictionRunResult.approximate_horizons` 透传）**——理由：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益，显式标注优于预测停产；验证器 reason 加 `(approximate_due_date)` 前缀，Node 统计 `approximateHorizonCount` 分桶（近似档不计入命中率分母）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
 >
@@ -627,7 +643,7 @@ content = {
 - `iterate/gt_validator.py`：标准答案一致性校验——`validate_gt_against_case(gt, case)` 三条规则（方向/板块/驱动必须可由切片数据推导），返回违反列表
 - `iterate/ground_truth.py::generate_data_constrained_gt(case, *, data_dir=None)`：数据约束标准答案生成（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）
 - `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行；review 产片前校验快照数据完整性（`_snapshot_data_sufficient`：a_share.indexes 为空则拒绝产片，`--force` 可跳过，2026-08-13 case_20260731 全 0 分事故防御）
-- 回放隔离（fail-closed，2026-08-13 辩论裁决修复）：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放显式拒绝（走 run() 入口）+ 源模块双绑定
+- 回放隔离（fail-closed，2026-08-13 辩论裁决修复）：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放显式拒绝（走 run() 入口）+ 源模块双绑定；节奏大师（2026-08-30）：回放隔离清单（`_SERVICE_ISOLATION_TARGETS`）新增 rhythm_master 4 方法登记（get_calendar_events / post_calendar_event / get_rhythm_report / get_fear_greed）
 - 评分体系：归因相似度重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；Tavily 死代码与"指数neutral"兜底删除
 - 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘；`_compute_variant_hash` 含完整补丁规格（T9 M3）；`_cleanup_stale_experiments` 跨运行残留清理（T10 Q1）；失败轮 `is_failure` 显式标记 + `infra_failures` 连续计数（T11 M1/M2）；基线轮纳入 try/except（T11 M3）；`_recompute_best` 跳过 `is_failure` 记录（T11 M4）
 - 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30 产片 / 17:00 消费报告）+ status=complete 检查

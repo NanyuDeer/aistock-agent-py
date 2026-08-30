@@ -94,8 +94,8 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
             with patch.object(scheduler.AsyncIOScheduler, "start"):
                 scheduler.start_scheduler()
 
-        # 11 个业务 job（含 sentiment_temp）+ scheduler_heartbeat
-        assert from_crontab.call_count == 12
+        # 14 个业务 job（含 sentiment_temp/rhythm_master×3）+ scheduler_heartbeat
+        assert from_crontab.call_count == 15
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1110,6 +1110,9 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
             mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
             mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
+            mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
+            mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
+            mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1120,6 +1123,9 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
     assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
     assert "sentiment_temp" in job_ids
+    assert "rhythm_master_after_close" in job_ids
+    assert "rhythm_master_morning" in job_ids
+    assert "rhythm_master_midday" in job_ids
     assert "evening_chain" not in job_ids
 
 
@@ -1147,6 +1153,9 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
             mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
             mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
+            mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
+            mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
+            mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1156,6 +1165,9 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     assert "event_scrape_daily" in job_ids
     assert "event_scrape_close" in job_ids
     assert "sentiment_temp" in job_ids
+    assert "rhythm_master_after_close" in job_ids
+    assert "rhythm_master_morning" in job_ids
+    assert "rhythm_master_midday" in job_ids
     assert "review_quick" not in job_ids
 
 

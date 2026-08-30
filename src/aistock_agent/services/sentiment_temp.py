@@ -226,6 +226,26 @@ async def load_latest_sentiment(output_dir: str) -> dict[str, object] | None:
         return None
 
 
+def _load_recent_scores(root: Path | str, upto_date: str, days: int = 5) -> list[float]:
+    """读近 N 个归档温度 score（时间升序，仅日期文件，排除 latest.json）。"""
+    base = Path(root)
+    if not base.exists():
+        return []
+    files = sorted(
+        f for f in base.glob("*.json") if f.name != "latest.json" and f.stem <= upto_date
+    )
+    scores: list[float] = []
+    for f in files[-days:]:
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        score = payload.get("score")
+        if isinstance(score, int | float):
+            scores.append(float(score))
+    return scores
+
+
 def load_previous_archive(output_dir: str, report_date: str) -> dict[str, object] | None:
     """严格早于 report_date 的最近归档（连冰计数用）；无 → None。"""
     root = Path(output_dir)
@@ -358,6 +378,31 @@ async def compute_and_persist_sentiment_temp(
             prediction = {"generated": generated, "text": text}
 
         payload = build_sentiment_payload(report_date, score, level, metrics, ice, prediction)
+        # 契约 #5：可选键 cycle_phase（§5 四态，实验性判定；量能佐证缺省，engine 侧重算）
+        try:
+            from aistock_agent.services.rhythm_engine import detect_phase
+
+            scores = _load_recent_scores(root, report_date, days=5)
+            prev_phase = None
+            if prev is not None and isinstance(prev, dict):
+                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘
+                raw_phase = prev.get("cycle_phase")
+                prev_phase = (
+                    raw_phase
+                    if isinstance(raw_phase, str)
+                    and raw_phase in {"ice", "warm_up", "overheat", "ebb"}
+                    else None
+                )
+            phase, _evidence = detect_phase(
+                history=scores,
+                consecutive_ice=int(payload.get("ice", {}).get("consecutive_ice_days", 0)),
+                volume_weak=None,
+                prev_phase=prev_phase,
+            )
+            if phase is not None:
+                payload["cycle_phase"] = phase
+        except Exception:
+            logger.warning("sentiment_temp.cycle_phase_skipped")
         persist_sentiment(payload, root)
         return payload
     except Exception as exc:  # noqa: BLE001 —— 独立任务，失败不阻断调度

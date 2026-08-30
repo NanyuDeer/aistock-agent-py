@@ -5,6 +5,7 @@ httpx.AsyncClient 由 ``HttpClientPool`` 全局复用（lifespan 管理）。
 """
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, cast
@@ -85,6 +86,7 @@ class NodeApiClient:
     def __init__(self) -> None:
         self._base_url = settings.node_api_base_url.rstrip("/")
         self._token = settings.internal_api_token
+        self._fear_greed_cache: dict[str, object] | None = None
 
     async def get(self, path: str) -> dict[str, object] | None:
         """GET 请求 Node.js 内部 API
@@ -401,6 +403,51 @@ class NodeApiClient:
                 user_id=user_id,
             )
         return result
+
+    # ---------- 节奏大师（rhythm_master）----------
+
+    async def get_calendar_events(
+        self, date_from: str, date_to: str
+    ) -> list[dict[str, object]] | None:
+        """GET /internal/calendar/events（L1 交割日 + market_calendar_events 合并窗口）。"""
+        resp = await self._request(
+            f"/internal/calendar/events?dateFrom={date_from}&dateTo={date_to}"
+        )
+        if not isinstance(resp, dict):
+            return None
+        events = resp.get("events")
+        return events if isinstance(events, list) else None
+
+    async def post_calendar_event(self, body: dict[str, object]) -> dict[str, object] | None:
+        """POST /internal/calendar/events（L3 前瞻解析产物 upsert，§4.4/§4.8 C1）。"""
+        result = await self._post_request("/internal/calendar/events", body)
+        return result if isinstance(result, dict) else None
+
+    async def get_rhythm_report(
+        self, target_date: str, refresh_slot: str
+    ) -> dict[str, object] | None:
+        """GET /internal/analysis-reports/rhythm_master/{date}/{slot}
+
+        morning/midday 读 16:05 基准（D13）。
+        """
+        result = await self._request(
+            f"/internal/analysis-reports/rhythm_master/{target_date}/{refresh_slot}"
+        )
+        return result if isinstance(result, dict) else None
+
+    async def get_fear_greed(self) -> dict[str, object] | None:
+        """GET /internal/fear-greed 只读镜像（契约 #1）；TTL 1h 快照缓存（C 类决策）。"""
+        now = time.time()
+        cached = getattr(self, "_fear_greed_cache", None)
+        if isinstance(cached, dict):
+            ts = cached.get("ts")
+            if isinstance(ts, int | float) and now - ts < 3600:
+                value = cached.get("value")
+                return value if isinstance(value, dict) else None
+        result = await self._request("/internal/fear-greed")
+        value = result if isinstance(result, dict) else None
+        self._fear_greed_cache = {"ts": now, "value": value}
+        return value
 
     async def save_token_usage(
         self,
