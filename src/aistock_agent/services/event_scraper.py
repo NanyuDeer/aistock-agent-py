@@ -185,11 +185,14 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     # fire-and-forget：传导失败不阻断抓取结果返回。
     if major and result.get("added", 0) > 0:
         _spawn_conduction(result.get("added_events") or [])
-    # L3 前瞻捕捉（§4.3）：best-effort 辅助，主通道 L1/L2/L4 不受影响；失败不 fail 链
-    try:
-        await event_scrape_sources.collect_l3_forward(score_date, _L3_CACHE)
-    except Exception:  # noqa: BLE001
-        logger.warning("event_scrape_l3.skipped", exc_info=True)
+    # L3 前瞻捕捉（§4.3）：best-effort 辅助，主通道 L1/L2/L4 不受影响；失败不 fail 链。
+    # 当日门控：对齐上方 collect_global_markets 先例（score_date == _today() 才挂载），
+    # 历史回补日不写"下周前瞻"，避免把前瞻事件写进过去日期。
+    if score_date == _today():
+        try:
+            await event_scrape_sources.collect_l3_forward(score_date, _L3_CACHE)
+        except Exception:  # noqa: BLE001
+            logger.warning("event_scrape_l3.skipped", exc_info=True)
     return result
 
 

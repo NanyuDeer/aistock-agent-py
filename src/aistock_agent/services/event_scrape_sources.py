@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re as _re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -350,7 +350,9 @@ def _parse_event_date(text: str, ref_year: int) -> str | None:
         month = int(g[0]) if len(g) == 2 else int(g[1])
         day = int(g[1]) if len(g) == 2 else int(g[2])
         try:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+            # date 构造做日历合法性校验：13 月/2 月 30 日等非法日期
+            # 自然抛 ValueError 落入下方 except（f-string 对已 int 值永不抛，是死代码）
+            return date(year, month, day).isoformat()
         except ValueError:
             continue
     return None
