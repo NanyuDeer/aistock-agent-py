@@ -231,6 +231,38 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
+    # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
+    scheduler.add_job(
+        _run_rhythm_master_after_close,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_after_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_after_close",
+        name="rhythm master after-close",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_morning,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_morning_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_morning",
+        name="rhythm master morning",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_midday,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_midday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_midday",
+        name="rhythm master midday",
+        replace_existing=True,
+    )
+
     if settings.iterate_enabled:
         from aistock_agent.iterate.scheduler import register_iterate_jobs
 
@@ -389,6 +421,36 @@ async def _run_sentiment_temp_task() -> None:
             )
     except Exception:  # noqa: BLE001
         logger.warning("sentiment_temp_task_failed", exc_info=True)
+
+
+async def _run_rhythm_master_after_close() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    # 16:05 读前校验 basis_date 温度已落盘：缺失由 worker 内降级标注，不污染 basis 语义（G18）
+    await _dispatch_rhythm_master("after_close")
+
+
+async def _run_rhythm_master_morning() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("morning")
+
+
+async def _run_rhythm_master_midday() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("midday")
+
+
+async def _dispatch_rhythm_master(slot: str) -> None:
+    from aistock_agent.agents.workers.rhythm_master import run as run_rhythm_master
+
+    state = _make_scheduled_state(shanghai_today().isoformat(), intent="rhythm_master")
+    state["refresh_slot"] = slot
+    try:
+        await run_rhythm_master(state)
+    except Exception:
+        logger.warning("rhythm_master.task_failed", slot=slot, exc_info=True)
 
 
 async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:

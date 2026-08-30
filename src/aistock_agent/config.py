@@ -239,6 +239,11 @@ class Settings(BaseSettings):
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
+    scheduler_rhythm_after_close_cron: str = "5 16 * * 0-4"  # 16:05 收盘基准（错峰晚于 15:45）
+    scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
+    scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
     # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
     scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (
@@ -255,10 +260,10 @@ class Settings(BaseSettings):
     event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
     # ── GI 盘中纯增量更新（2026-08-14） ──
     gi_incremental_enabled: bool = False             # 总开关（默认关闭灰度开启）
-    gi_max_llm_calls_per_day: int = 10               # 每日 quick_think 比较次数上限（达上限后仅规则判断）
+    gi_max_llm_calls_per_day: int = 10  # 每日 quick_think 比较次数上限（达上限仅规则判断）
     gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
-    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（秒，当日 24:00 过期）
+    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（当日过期）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
