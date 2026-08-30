@@ -175,6 +175,9 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
         "aistock_agent.services.event_scrape_sources.collect_global_markets",
         new=AsyncMock(return_value=[major]),
     ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
         new=AsyncMock(
             return_value={
@@ -222,6 +225,9 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
         "aistock_agent.services.event_scrape_sources.collect_global_markets",
         new=AsyncMock(return_value=[major]),
     ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
         new=AsyncMock(
             return_value={
@@ -268,6 +274,9 @@ async def test_scrape_full_daily_skips_conduction_when_all_deduped():
         "aistock_agent.services.event_scrape_sources.collect_global_markets",
         new=AsyncMock(return_value=[major]),
     ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
         new=AsyncMock(
             return_value={
@@ -309,6 +318,9 @@ async def test_scrape_full_daily_skips_conduction_when_no_major_events():
         new=AsyncMock(return_value=[normal]),
     ), patch(
         "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_l3_forward",
         new=AsyncMock(return_value=[]),
     ), patch(
         "aistock_agent.services.event_store.save_event_scrape",

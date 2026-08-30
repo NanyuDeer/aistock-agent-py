@@ -69,6 +69,14 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     "aistock_agent.services.data_client.NodeApiClient.get_analysis_report_quiet": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_review_analysis_report": "report_read",
     "aistock_agent.services.data_client.NodeApiClient.get_hot_burst_data": "report_read",
+    # 节奏大师（rhythm_master）方法：直接调私有 _request/_post_request（不在
+    # 任何替换清单），必须登记隔离，否则回放会触达真实 Node 后端。读方法
+    # node_read 返回 None、写方法 node_noop 返回 None，调用方 isinstance 判否
+    # 各自走失败降级（P1 新增）
+    "aistock_agent.services.data_client.NodeApiClient.get_calendar_events": "node_read",
+    "aistock_agent.services.data_client.NodeApiClient.post_calendar_event": "node_noop",
+    "aistock_agent.services.data_client.NodeApiClient.get_rhythm_report": "node_read",
+    "aistock_agent.services.data_client.NodeApiClient.get_fear_greed": "node_read",
     # 写方法（B4 修复）：全部 no-op，返回 None 走调用方既有降级
     "aistock_agent.services.data_client.NodeApiClient.put": "node_noop",
     "aistock_agent.services.data_client.NodeApiClient.delete": "node_noop",

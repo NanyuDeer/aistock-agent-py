@@ -29,6 +29,9 @@ async def test_run_event_scrape_full_daily():
         "aistock_agent.services.event_scrape_sources.collect_global_markets",
         new=AsyncMock(return_value=[]),
     ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "aistock_agent.services.event_store.save_event_scrape",
         new=AsyncMock(
             return_value={
@@ -194,6 +197,8 @@ async def test_scrape_full_daily_applies_llm_scores_when_enabled():
                new=AsyncMock(return_value=[])), \
          patch("aistock_agent.services.event_scrape_sources.collect_global_markets",
                new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_l3_forward",
+               new=AsyncMock(return_value=[])), \
          patch("aistock_agent.services.event_scraper.event_scoring_llm.score_events_llm",
                new=AsyncMock(side_effect=lambda events, **kwargs: events)) as mock_score, \
          patch("aistock_agent.services.event_store.save_event_scrape",
@@ -215,6 +220,8 @@ async def test_scrape_full_daily_skips_llm_scores_when_disabled():
          patch("aistock_agent.services.event_scrape_sources.collect_tavily",
                new=AsyncMock(return_value=[])), \
          patch("aistock_agent.services.event_scrape_sources.collect_global_markets",
+               new=AsyncMock(return_value=[])), \
+         patch("aistock_agent.services.event_scrape_sources.collect_l3_forward",
                new=AsyncMock(return_value=[])), \
          patch("aistock_agent.services.event_scraper.event_scoring_llm.score_events_llm",
                new=AsyncMock()) as mock_score, \
