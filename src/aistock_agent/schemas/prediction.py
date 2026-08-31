@@ -67,6 +67,7 @@ class PredictionResult(BaseModel):
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
+    evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
 
     @model_validator(mode="after")
     def _require_horizons(self) -> "PredictionResult":

@@ -18,6 +18,7 @@ from aistock_agent.services.prediction_service import (
     TraceUnavailableError,
     _apply_confidence_cap,
     _load_horizon_stats,
+    corroborate_evidence,
     predict_from_trace,
     render_prediction_markdown,
     run_chat_prediction,
@@ -826,3 +827,44 @@ def test_load_horizon_stats_groups_by_horizon_and_excludes_early_exit():
 
 def test_load_horizon_stats_empty_records():
     assert _load_horizon_stats([]) == {}
+
+
+# ---------- A2 独立源冲突检测：corroborate_evidence（Task 6） ----------
+
+
+def test_corroborated_two_channels_with_non_price():
+    out = corroborate_evidence(
+        quote_dir=1, flow_dir=1, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "corroborated"
+    assert out["independent_sources"] == 2
+    assert out["non_price_sources"] == 1
+
+
+def test_insufficient_single_price_source_only():
+    out = corroborate_evidence(quote_dir=1, flow_dir=None, news_dirs=[], direction="bullish")
+    assert out["verdict"] == "insufficient"
+    assert out["non_price_sources"] == 0
+
+
+def test_zero_sources_insufficient_no_conflict():
+    out = corroborate_evidence(
+        quote_dir=None, flow_dir=None, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "insufficient"
+    assert out["conflict"] is False
+
+
+def test_conflict_when_price_opposes_direction():
+    out = corroborate_evidence(
+        quote_dir=-1, flow_dir=1, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "conflicted"
+    assert out["conflict"] is True
+
+
+def test_news_majority_direction():
+    out = corroborate_evidence(
+        quote_dir=1, flow_dir=None, news_dirs=[1, 1, -1], direction="bullish",
+    )
+    assert out["verdict"] == "corroborated"

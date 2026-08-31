@@ -298,6 +298,63 @@ def _load_horizon_stats(
     return stats
 
 
+# A2 独立源冲突检测：独立源=数据获取通道不同；claim/LLM 文本不计入
+def _news_majority(news_dirs: list[int]) -> int | None:
+    if not news_dirs:
+        return None
+    pos = sum(1 for d in news_dirs if d > 0)
+    neg = sum(1 for d in news_dirs if d < 0)
+    if pos == neg:
+        return None
+    return 1 if pos > neg else -1
+
+
+def corroborate_evidence(
+    *,
+    quote_dir: int | None,
+    flow_dir: int | None,
+    news_dirs: list[int],
+    calendar_dir: int | None = None,
+    global_dir: int | None = None,
+    direction: str,
+) -> dict[str, object]:
+    """独立源冲突检测（A2）。独立源=数据获取通道不同；claim/LLM 文本不计入。
+
+    v1 仅 quote/flow/news 三通道有确定性取数；calendar/global 恒 None（保留签名供扩展）。
+    """
+    sources: list[tuple[str, int]] = []
+    if quote_dir is not None:
+        sources.append(("quote", quote_dir))
+    if flow_dir is not None:
+        sources.append(("flow", flow_dir))
+    news_dir = _news_majority(news_dirs)
+    if news_dir is not None:
+        sources.append(("news", news_dir))
+    if calendar_dir is not None:
+        sources.append(("calendar", calendar_dir))
+    if global_dir is not None:
+        sources.append(("global", global_dir))
+
+    n_price = sum(1 for k, _ in sources if k != "quote")
+    if not sources:
+        return {"independent_sources": 0, "non_price_sources": 0,
+                "conflict": False, "verdict": "insufficient"}
+
+    target = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
+    conflict = target != 0 and any(
+        (v > 0) != (target > 0) for _, v in sources if v != 0
+    )
+
+    if conflict:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": True, "verdict": "conflicted"}
+    if len(sources) >= 2 and n_price >= 1:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": False, "verdict": "corroborated"}
+    return {"independent_sources": len(sources), "non_price_sources": n_price,
+            "conflict": False, "verdict": "insufficient"}
+
+
 async def run_predict(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> PredictionRunResult:
