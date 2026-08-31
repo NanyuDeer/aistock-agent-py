@@ -94,8 +94,13 @@ def compose_score(
     fg: float | None,
     trend_available: bool,
     fg_available: bool,
+    penalty: float = 0.0,
 ) -> tuple[float, list[str]]:
-    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。"""
+    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
+
+    penalty≤0（顶背离降档）在最后应用；ice 为下界封顶由 level_from_score
+    阈值天然提供，不引入独立降档函数（C2）。
+    """
     parts: list[tuple[str, float, float]] = [
         ("sentiment", sentiment_coefficient(phase), WEIGHTS["sentiment"])
     ]
@@ -112,7 +117,8 @@ def compose_score(
     if total_w <= 0:
         return 50.0, missing
     score = sum(v * w for _, v, w in parts) / total_w * 100.0
-    return max(0.0, min(100.0, score)), missing
+    score = max(0.0, min(100.0, score + penalty))  # penalty≤0，ice 由 level_from_score 天然封顶
+    return score, missing
 
 
 def level_from_score(score: float) -> Level:
@@ -211,6 +217,22 @@ def detect_phase(
         if tech.get("recovery") and prev_phase in {"ebb", "ice"}:
             return "warm_up", {"reason": "指数站上 MA20（技术佐证）", "technical": True}
     return phase, evidence
+
+
+def conflict_kind(phase: Phase | None, trend: float | None) -> Literal["top", "bottom"] | None:
+    """背离方向（C2）：顶背离=趋势空+情绪热；底背离=趋势多+情绪冷。"""
+    if trend is None:
+        return None
+    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
+        return "top"
+    if trend >= 1.5 and phase in {"ice", "ebb"}:
+        return "bottom"
+    return None
+
+
+def conflict_penalty(kind: Literal["top", "bottom"] | None) -> float:
+    """背离惩罚（确定性，LLM 不产数值）：顶背离 -8.0（降档）；底背离 0.0（禁止降档）。"""
+    return -8.0 if kind == "top" else 0.0
 
 
 def detect_conflict(phase: Phase | None, trend: float | None) -> tuple[bool, str]:

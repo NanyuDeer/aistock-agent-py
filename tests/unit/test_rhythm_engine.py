@@ -4,6 +4,8 @@ from aistock_agent.services.rhythm_engine import (
     build_event_branch,
     build_technical_branches,
     compose_score,
+    conflict_kind,
+    conflict_penalty,
     detect_conflict,
     detect_phase,
     fear_greed_anchor,
@@ -228,3 +230,35 @@ def test_detect_phase_tech_unchanged_when_none() -> None:
         history=history, consecutive_ice=0, volume_weak=None, prev_phase=None, tech=None
     )
     assert p1 == p2  # tech=None 零破坏
+
+
+def test_conflict_kind_top_bottom_none():
+    assert conflict_kind("warm_up", -2.0) == "top"
+    assert conflict_kind("overheat", -1.6) == "top"
+    assert conflict_kind("ice", 2.0) == "bottom"
+    assert conflict_kind("ebb", 1.5) == "bottom"
+    assert conflict_kind("normal", 1.0) is None
+    assert conflict_kind(None, None) is None
+
+
+def test_conflict_penalty_top_only():
+    assert conflict_penalty("top") == -8.0
+    assert conflict_penalty("bottom") == 0.0
+    assert conflict_penalty(None) == 0.0
+
+
+def test_compose_score_penalty_lowers_level():
+    base_score, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                                  trend_available=True, fg_available=True)
+    penalized, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                                 trend_available=True, fg_available=True, penalty=-8.0)
+    assert penalized <= base_score
+    assert penalized >= 0.0
+
+
+def test_compose_score_penalty_default_zero_change():
+    a, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                         trend_available=True, fg_available=True)
+    b, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                         trend_available=True, fg_available=True, penalty=0.0)
+    assert a == b

@@ -115,6 +115,18 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     volume_weak = None
     if amounts and len(amounts) >= 20:
         volume_weak = sum(amounts[-5:]) / 5 < sum(amounts[-20:]) / 20 * 0.8
+    # C1 前原始 phase 判背离（同一价格信号只经一条路径生效：tech 佐证不进 detect_conflict 输入）
+    base_phase, _ = rhythm_engine.detect_phase(
+        history=scores,
+        consecutive_ice=consecutive_ice,
+        volume_weak=volume_weak,
+        prev_phase=prev_phase,
+        tech=None,
+    )
+    conflict, conflict_detail = rhythm_engine.detect_conflict(base_phase, trend)
+    penalty = rhythm_engine.conflict_penalty(rhythm_engine.conflict_kind(base_phase, trend))
+
+    # 展示相位（tech 佐证只影响展示与 evidence，不进入背离判定）
     phase, phase_evidence = rhythm_engine.detect_phase(
         history=scores,
         consecutive_ice=consecutive_ice,
@@ -129,10 +141,10 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         fg=fg_index,
         trend_available=trend is not None,
         fg_available=fg_index is not None,
+        penalty=penalty,  # C2：顶背离降 1 档；底背离 0.0 禁止降档
     )
     missing.extend(compose_missing)
     level = rhythm_engine.level_from_score(score)
-    conflict, conflict_detail = rhythm_engine.detect_conflict(phase, trend)
     win = await load_event_window(target_date)
     branches: list[dict[str, Any]] = []
     if win.high_events:
