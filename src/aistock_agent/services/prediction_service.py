@@ -266,12 +266,36 @@ def _apply_confidence_cap(
 
 def _load_horizon_stats(
     records: list[dict[str, object]],
-) -> dict[str, tuple[dict[str, object], dict[str, object]]] | None:
-    """Task 3 补全：从 verified predictions 汇总各档位 (hit_summary, baseline_summary)。
+) -> dict[str, tuple[dict[str, object], dict[str, object]]]:
+    """从 verified 记录按 horizon 聚合命中/基线统计。
 
-    本任务 stub：固定返回 None（_apply_confidence_cap 对 stats=None 不钳制，不会误伤）。
+    只取 entry.result ∈ {hit, miss}（剔除 insufficient 与 early_exit-only entry），
+    逐档喂给 hit_rate_summary / baseline_neutral_summary（内部再按 methodology_version
+    2.0 / 非 approximate 过滤，LLM 不产数值，统计为确定性计算）。
     """
-    return None
+    from aistock_agent.services.prediction_stats import (
+        baseline_neutral_summary,
+        hit_rate_summary,
+    )
+
+    by_horizon: dict[str, list[dict[str, object]]] = {}
+    for rec in records:
+        verification = rec.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        for horizon, entry in verification.items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("result") not in {"hit", "miss"}:
+                continue
+            by_horizon.setdefault(horizon, []).append(entry)
+
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] = {}
+    for horizon, entries in by_horizon.items():
+        hit = hit_rate_summary(entries)
+        baseline = baseline_neutral_summary(entries)
+        stats[horizon] = (hit, baseline)
+    return stats
 
 
 async def run_predict(
@@ -326,10 +350,12 @@ async def run_predict(
                 dropped=len(prediction.evidence_ids) - len(filtered),
             )
         prediction = prediction.model_copy(update={"evidence_ids": filtered})
-        # A3 确定性钳制：confidence 后处理覆盖（LLM 不产数值；stub 返回 None 不钳制）
-        records: list[dict[str, object]] = []
-        # Task 3: 从 node_api.list_verified_predictions() 加载
-        stats = _load_horizon_stats(records)
+        # A3 确定性钳制：confidence 后处理覆盖（LLM 不产数值；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
         for h in prediction.horizons:
             conf, source = _apply_confidence_cap(
                 h.horizon,
@@ -678,10 +704,12 @@ async def run_chat_prediction(
         # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
         prediction = _hard_validate_chat_prediction(
             prediction, str(snapshot.get("symbol", "")))
-        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict 同一后处理，stub 返回 None 不钳制）
-        records: list[dict[str, object]] = []
-        # Task 3: 从 node_api.list_verified_predictions() 加载
-        stats = _load_horizon_stats(records)
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict 同一后处理；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
         for h in prediction.horizons:
             conf, source = _apply_confidence_cap(
                 h.horizon,

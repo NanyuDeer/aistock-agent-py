@@ -17,6 +17,7 @@ from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     TraceUnavailableError,
     _apply_confidence_cap,
+    _load_horizon_stats,
     predict_from_trace,
     render_prediction_markdown,
     run_chat_prediction,
@@ -789,3 +790,39 @@ def test_apply_cap_long_never_capped():
     conf, source = _apply_confidence_cap("long", "high", None, mid_enabled=False)
     assert conf == "high"
     assert source == "llm"
+
+
+# ---------- A3 per-horizon 聚合：_load_horizon_stats（Task 3） ----------
+
+
+def _entry(result, baseline=None):
+    # 对齐验证器真实回写结构：methodology_version=2.0 是 hit_rate_summary /
+    # baseline_neutral_summary 的过滤前提（缺失会被整体过滤为 n=0，fixture 偏差已修正）
+    e = {"methodology_version": "2.0", "result": result}
+    if baseline is not None:
+        e["baseline_neutral"] = baseline
+    return e
+
+
+def test_load_horizon_stats_groups_by_horizon_and_excludes_early_exit():
+    records = [
+        {
+            "id": "p1",
+            "horizons": {"short": {}, "mid": {}, "long": {}},
+            "verification": {
+                "short": _entry("hit", True),
+                "mid": _entry("miss", False),
+                "long": {"early_exit": {"state": "armed"}},  # 无 result，应剔除
+            },
+        },
+    ]
+    stats = _load_horizon_stats(records)
+    assert "short" in stats and "mid" in stats
+    assert "long" not in stats  # early_exit-only 不参与统计
+    assert stats["short"][0]["n"] == 1
+    assert stats["short"][0]["hits"] == 1
+    assert stats["short"][1]["hit_rate"] == 1.0  # baseline_neutral=True → baseline 命中
+
+
+def test_load_horizon_stats_empty_records():
+    assert _load_horizon_stats([]) == {}
