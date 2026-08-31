@@ -8,6 +8,7 @@ from aistock_agent.services.rhythm_engine import (
     detect_phase,
     fear_greed_anchor,
     level_from_score,
+    ma_breadth,
     map_bipolar,
     position_band,
     sentiment_coefficient,
@@ -192,3 +193,38 @@ def test_event_branch_enum_three_partitions() -> None:
 
 def test_disclaimer_present() -> None:
     assert "不构成任何投资建议" in DISCLAIMER
+
+
+def test_ma_breadth_insufficient_under_65_bars() -> None:
+    out = ma_breadth([100.0] * 64)
+    assert out["insufficient"] is True
+    assert out["ma20"] is None and out["ma60"] is None
+
+
+def test_ma_breadth_warning_below_ma20() -> None:
+    closes = [100.0] * 120
+    closes[-1] = 90.0  # 收盘跌破 MA20
+    out = ma_breadth(closes)
+    assert out["warning"] is True
+    assert out["insufficient"] is False
+
+
+def test_ma_breadth_recovery_above_ma20_three_days() -> None:
+    closes = [100.0] * 117 + [105.0, 106.0, 107.0]  # 连续 3 日站上 MA20
+    out = ma_breadth(closes)
+    assert out["recovery"] is True
+
+
+def test_ma_breadth_breakdown_ma60() -> None:
+    closes = [100.0] * 117 + [60.0, 59.0, 58.0]  # 连续 3 日跌破 MA60
+    out = ma_breadth(closes)
+    assert out["breakdown_ma60"] is True
+
+
+def test_detect_phase_tech_unchanged_when_none() -> None:
+    history = [10.0, 20.0, 30.0, 40.0, 50.0]
+    p1, _ = detect_phase(history=history, consecutive_ice=0, volume_weak=None, prev_phase=None)
+    p2, _ = detect_phase(
+        history=history, consecutive_ice=0, volume_weak=None, prev_phase=None, tech=None
+    )
+    assert p1 == p2  # tech=None 零破坏

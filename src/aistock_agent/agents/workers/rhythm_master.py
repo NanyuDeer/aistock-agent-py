@@ -95,11 +95,19 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     if not today_archive.exists():
         missing.append("情绪数据缺失（沿用前值）")
     prev_phase = latest_phase
-    kline = await node_api.get_index_kline(INDEX_CODE, days=60) or []
+    kline = await node_api.get_index_kline(INDEX_CODE, days=120) or []  # 60→120：MA60 佐证需 ≥65 根
     closes = [float(r["close"]) for r in kline if r.get("close") is not None]
     highs = [float(r["high"]) for r in kline if r.get("high") is not None]
     lows = [float(r["low"]) for r in kline if r.get("low") is not None]
     amounts = [float(r["amount"]) for r in kline if r.get("amount") is not None]
+    # C1：指数技术位多级确认佐证（确定性计算，LLM 不产数值）；不足 65 根时如实标注
+    breadth = (
+        rhythm_engine.ma_breadth(closes)
+        if len(closes) >= 65
+        else rhythm_engine.ma_breadth([])
+    )
+    if breadth.get("insufficient"):
+        missing.append("MA 技术位数据不足")
     trend = rhythm_engine.trend_anchor(closes, amounts)
     fg_resp = await node_api.get_fear_greed()
     fg_index = fg_resp.get("index") if isinstance(fg_resp, dict) else None
@@ -112,7 +120,9 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         consecutive_ice=consecutive_ice,
         volume_weak=volume_weak,
         prev_phase=prev_phase,
+        tech=breadth,  # C1：技术佐证只进 phase_evidence，不进仓位话术
     )
+    phase_evidence["technical"] = breadth
     score, compose_missing = rhythm_engine.compose_score(
         phase=phase,
         trend=trend,

@@ -21,9 +21,20 @@ def temp_sentiment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _kline_rows() -> list[dict]:
     base = 3000.0
     rows = []
-    for i in range(60):
+    for i in range(130):  # ≥65：ma_breadth 需 MA60（前 101 行日期钳位到 08-01，仅用于 bar 数）
         c = base + i * 1.0 + (i % 3)
-        rows.append({"trade_date": f"2026-08-{max(1, 28 - (59 - i)):02d}", "open": c - 1, "high": c + 2, "low": c - 2, "close": c, "pct_chg": 0.1, "vol": 100, "amount": 120.0})
+        rows.append(
+            {
+                "trade_date": f"2026-08-{max(1, 28 - (129 - i)):02d}",
+                "open": c - 1,
+                "high": c + 2,
+                "low": c - 2,
+                "close": c,
+                "pct_chg": 0.1,
+                "vol": 100,
+                "amount": 120.0,
+            }
+        )
     return rows
 
 
@@ -202,3 +213,21 @@ async def test_event_delta_maintains_data_missing(monkeypatch: pytest.MonkeyPatc
     )
     out2 = await worker_mod._apply_event_delta(base, "midday", "2026-08-31")
     assert out2["rhythm_card"]["data_missing"] == []
+
+
+@pytest.mark.asyncio
+async def test_after_close_ma_breadth_insufficient_marks_missing(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """C1：kline <65 根 → ma_breadth insufficient → data_missing 标注 + technical 佐证。"""
+    mock_api.get_index_kline = AsyncMock(return_value=_kline_rows()[:60])
+    out = await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    assert "final_response" in out
+    call = mock_api.save_analysis_report.call_args
+    assert call is not None
+    card = call.kwargs["content"]["rhythm_card"]
+    assert "MA 技术位数据不足" in card["data_missing"]
+    tech = card["phase_evidence"]["technical"]
+    assert tech["insufficient"] is True
