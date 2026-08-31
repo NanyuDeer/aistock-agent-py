@@ -21,12 +21,19 @@ def wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (round(lo, 4), round(hi, 4))
 
 
+# 当前生产版本（统计默认过滤，防跳变/混桶；3.0 切换时与 validator._METHODOLOGY_VERSION、
+# Node publicRouter.CURRENT_METHODOLOGY_VERSION、backfill 目标版本四处同步更新）
+_CURRENT_METHODOLOGY_VERSION = "2.0"
+
+
 def _filter_v2(
-    entries: list[dict[str, object]], target_type: str | None = None
+    entries: list[dict[str, object]],
+    target_type: str | None = None,
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> list[dict[str, object]]:
     return [
         e for e in entries
-        if e.get("methodology_version") == "2.0" and e.get("result") in {"hit", "miss"}
+        if e.get("methodology_version") == methodology_version and e.get("result") in {"hit", "miss"}
         and not e.get("approximate")
         and (target_type is None or e.get("target_type") == target_type)
     ]
@@ -49,37 +56,45 @@ def _summary(entries: list[dict[str, object]]) -> dict[str, object]:
 
 
 def hit_rate_summary(
-    entries: list[dict[str, object]], target_type: str | None = None
+    entries: list[dict[str, object]],
+    target_type: str | None = None,
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """汇总已验证档位（仅 2.0 的 hit/miss 参与；insufficient/v1/approximate 剔除）。
+    """汇总已验证档位（仅默认版本的 hit/miss 参与；insufficient/其他版本/approximate 剔除）。
 
     target_type 过滤：None=聚合全部（兼容旧调用），"index"/"sector" 只统计该桶（H3 防桶污染）。
+    methodology_version：默认当前生产版本（防跳变）；传 "3.0" 可观测 3.0 分桶（阶段 0）。
     Returns: {n, hits, hit_rate, ci, n_predictions,
               sufficient_sample: n>=30 且 n_predictions>=30}
     """
-    return _summary(_filter_v2(entries, target_type))
+    return _summary(_filter_v2(entries, target_type, methodology_version))
 
 
-def bucket_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+def bucket_summary(
+    entries: list[dict[str, object]],
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
+) -> dict[str, object]:
     """三桶：combined 仅描述性；index/sector 各自判定 sufficient_sample（H3 防桶污染）。"""
-    v2 = _filter_v2(entries)
+    v2 = _filter_v2(entries, None, methodology_version)
     return {
         "combined": _summary(v2),
-        "index": _summary(_filter_v2(entries, "index")),
-        "sector": _summary(_filter_v2(entries, "sector")),
+        "index": _summary(_filter_v2(entries, "index", methodology_version)),
+        "sector": _summary(_filter_v2(entries, "sector", methodology_version)),
     }
 
 
 def baseline_neutral_summary(
-    entries: list[dict[str, object]], target_type: str | None = None
+    entries: list[dict[str, object]],
+    target_type: str | None = None,
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """同口径恒中性 baseline：统计 v2 hit/miss 档位中 baseline_neutral=True 的比例。
+    """同口径恒中性 baseline：统计对应版本 hit/miss 档位中 baseline_neutral=True 的比例。
 
-    D2：与 hit_rate_summary 同一套过滤（2.0 + hit/miss + 非 approximate + target_type），
+    D2：与 hit_rate_summary 同一套过滤（当前版本 + hit/miss + 非 approximate + target_type），
     近似档不得污染 baseline 分桶（H2 口径彻底）。
     """
     v2 = [
-        e for e in _filter_v2(entries, target_type)
+        e for e in _filter_v2(entries, target_type, methodology_version)
         if isinstance(e.get("baseline_neutral"), bool)
     ]
     n = len(v2)

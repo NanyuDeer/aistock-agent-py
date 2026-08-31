@@ -628,6 +628,64 @@ class NodeApiClient:
 
         return await self.get(path)
 
+    async def list_insights(
+        self,
+        openid: str,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]] | None:
+        """自选股洞察列表（阶段 2.1 读层：涨停雷达/价格异动归因结果，只读）。
+
+        Args:
+            openid: 登录用户 openid（user_stocks 归属过滤）
+            symbol: 可选 6 位代码（只查单只股票的洞察）
+            limit: 条数上限（默认 50，Node 侧上限 100）
+
+        Returns:
+            洞察事件列表（含 attribution_status/primary_driver 等）或 None（失败/非列表）
+        """
+        path = f"/internal/insight/events?openid={openid}"
+        if symbol:
+            path += f"&symbol={symbol}"
+        if limit and limit != 50:
+            path += f"&limit={limit}"
+        return await self.get_list(path)
+
+    async def get_insight(self, openid: str, event_id: str) -> dict[str, object] | None:
+        """自选股洞察详情（阶段 2.1 读层：事件 + 归因结果 + 证据包，只读）。
+
+        Args:
+            openid: 登录用户 openid（归属校验，无归属返回 None）
+            event_id: 洞察事件 ID
+
+        Returns:
+            详情 dict（含 primary_driver/evidence_package 等）或 None（无归属/失败）
+        """
+        return await self.get(f"/internal/insight/events/{event_id}?openid={openid}")
+
+    async def list_stock_traces(
+        self,
+        openid: str,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]] | None:
+        """自选股异动溯源列表（阶段 2.2 读层：价格异动/涨停雷达归因结果，只读）。
+
+        Args:
+            openid: 登录用户 openid（user_stocks 归属过滤）
+            symbol: 可选 6 位代码（只查单只股票的溯源事件）
+            limit: 条数上限（默认 50，Node 侧上限 100）
+
+        Returns:
+            溯源事件列表（含 analysis_status/primary_cause 等）或 None（失败/非列表）
+        """
+        path = f"/internal/stock-trace/events?openid={openid}"
+        if symbol:
+            path += f"&symbol={symbol}"
+        if limit and limit != 50:
+            path += f"&limit={limit}"
+        return await self.get_list(path)
+
     async def get_analysis_report_quiet(
         self,
         report_type: str,

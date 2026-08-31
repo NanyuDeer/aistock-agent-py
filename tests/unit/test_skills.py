@@ -240,3 +240,172 @@ async def test_industry_relation_exception_degraded():
             InsightGoal(question="x", intent="industry_relation"),
         )
     assert ev.degraded is True
+
+
+# ── insight_lookup（阶段 2.1：自选股洞察读层） ─────────────────────────────
+from aistock_agent.skills.insight_lookup import insight_lookup  # noqa: E402
+
+
+def _insight_goal() -> InsightGoal:
+    return InsightGoal(question="我自选股的异动归因", intent="insight_lookup")
+
+
+@pytest.mark.asyncio
+@patch("aistock_agent.services.data_client.node_api.list_insights")
+@patch("aistock_agent.services.data_client.node_api.get_insight")
+async def test_insight_lookup_normal(get_insight_mock, list_mock):
+    """登录用户自选股洞察 → facts 含主因/摘要，sources kind=insight。
+
+    只读断言：仅调用 list_insights（列表维度），不触发 get_insight/写端点。
+    """
+    list_mock.return_value = [
+        {
+            "event_id": "wi_1",
+            "symbol": "000001",
+            "stock_name": "测试股",
+            "event_type": "limit_up_radar",
+            "direction": "up",
+            "primary_driver": {"label": "涨停主因"},
+        },
+        {
+            "event_id": "wi_2",
+            "symbol": "600519",
+            "stock_name": "贵州茅台",
+            "event_type": "midday_price_move",
+            "direction": "up",
+            "primary_driver": None,
+            "display_report": {"summary": "资金流入推动"},
+        },
+    ]
+    ev = await insight_lookup({"user_id": "o_test", "symbol": "000001"}, _insight_goal())
+
+    assert ev.degraded is False
+    assert ev.skill_name == "insight_lookup"
+    assert len(ev.facts) == 2
+    assert "涨停主因" in ev.facts[0]
+    assert "资金流入推动" in ev.facts[1]
+    assert ev.sources[0].kind == "insight"
+    assert ev.sources[0].source_id == "insight:wi_1"
+    assert ev.symbols == ["000001", "600519"]
+    # 只读断言：只走列表读取，未触发详情/写方法
+    list_mock.assert_awaited_once()
+    get_insight_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_insight_lookup_no_login_degraded():
+    """未登录（无 user_id）→ degraded，不触网络。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_insights",
+        new=AsyncMock(),
+    ) as m:
+        ev = await insight_lookup({}, _insight_goal())
+    assert ev.degraded is True
+    m.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_insight_lookup_no_data_degraded():
+    """用户自选股无洞察 → degraded。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_insights",
+        new=AsyncMock(return_value=[]),
+    ):
+        ev = await insight_lookup({"user_id": "o_test"}, _insight_goal())
+    assert ev.degraded is True
+    assert "no insight" in (ev.degraded_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_insight_lookup_exception_degraded():
+    """Node 调用异常 → degraded 不抛。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_insights",
+        new=AsyncMock(side_effect=RuntimeError("node down")),
+    ):
+        ev = await insight_lookup({"user_id": "o_test"}, _insight_goal())
+    assert ev.degraded is True
+    assert "failed" in (ev.degraded_reason or "")
+
+
+# ── stock_trace_lookup（阶段 2.2：个股异动溯源读层） ─────────────────────────
+from aistock_agent.skills.stock_trace_lookup import stock_trace_lookup  # noqa: E402
+
+
+def _stock_trace_goal() -> InsightGoal:
+    return InsightGoal(question="600519 为什么异动", intent="stock_trace_lookup")
+
+
+@pytest.mark.asyncio
+@patch("aistock_agent.services.data_client.node_api.list_stock_traces")
+async def test_stock_trace_lookup_normal(list_mock):
+    """登录用户异动溯源 → facts 含主因/状态，sources kind=stock_trace。
+
+    只读断言：仅调用 list_stock_traces（不触发写端点）。
+    """
+    list_mock.return_value = [
+        {
+            "event_id": "mv:600519:2026-08-25:1787641509681:up",
+            "symbol": "600519",
+            "stock_name": "贵州茅台",
+            "direction": "up",
+            "analysis_status": "completed",
+            "primary_cause": "业绩超预期",
+        },
+        {
+            "event_id": "mv:600519:2026-08-25:1787641501078:up",
+            "symbol": "600519",
+            "stock_name": "贵州茅台",
+            "direction": "up",
+            "analysis_status": "processing",
+            "primary_cause": None,
+        },
+    ]
+    ev = await stock_trace_lookup({"user_id": "o_test", "symbol": "600519"}, _stock_trace_goal())
+
+    assert ev.degraded is False
+    assert ev.skill_name == "stock_trace_lookup"
+    assert len(ev.facts) == 2
+    assert "业绩超预期" in ev.facts[0]
+    assert "归因分析中" in ev.facts[1]
+    assert ev.sources[0].kind == "stock_trace"
+    assert ev.sources[0].source_id.startswith("stock_trace:mv:600519")
+    # 只读断言：仅触发列表读取
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args.args[0] == "o_test"
+
+
+@pytest.mark.asyncio
+async def test_stock_trace_lookup_no_login_degraded():
+    """未登录 → degraded，不触网络。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_stock_traces",
+        new=AsyncMock(),
+    ) as m:
+        ev = await stock_trace_lookup({}, _stock_trace_goal())
+    assert ev.degraded is True
+    m.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stock_trace_lookup_no_data_degraded():
+    """用户无异动溯源事件 → degraded。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_stock_traces",
+        new=AsyncMock(return_value=[]),
+    ):
+        ev = await stock_trace_lookup({"user_id": "o_test"}, _stock_trace_goal())
+    assert ev.degraded is True
+    assert "no stock trace" in (ev.degraded_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_stock_trace_lookup_exception_degraded():
+    """Node 调用异常 → degraded 不抛。"""
+    with patch(
+        "aistock_agent.services.data_client.node_api.list_stock_traces",
+        new=AsyncMock(side_effect=RuntimeError("node down")),
+    ):
+        ev = await stock_trace_lookup({"user_id": "o_test"}, _stock_trace_goal())
+    assert ev.degraded is True
+    assert "failed" in (ev.degraded_reason or "")

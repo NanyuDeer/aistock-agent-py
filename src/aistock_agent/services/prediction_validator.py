@@ -40,9 +40,12 @@ _INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 # neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
 _NEUTRAL_PCT_THRESHOLD = 0.5
 
-# v2 口径常量（H1/D1/D6/G13/G14）
-_WINDOW_DAYS_AFTER_DUE = 3      # v2 验证窗口 [due, due+3] 交易日
-_METHODOLOGY_VERSION = "2.0"   # v2 口径版本（H1 版本分桶；与 schema_version 2.0 关联，D6）
+# v2/v3 口径常量（H1/D1/D6/G13/G14；阶段 0 起 _METHODOLOGY_VERSION 为 3.0 窗口累计主判）
+_WINDOW_DAYS_AFTER_DUE = 3      # 验证窗口 [due, due+3] 交易日
+_METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计主判；H1 版本分桶）
+# 存量回补目标版本：backfill 只回补 2.0 时代遗留 no_data，用 2.0 口径重验、写 2.0（不混版本）。
+# 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
+_BACKFILL_METHODOLOGY_VERSION = "2.0"
 _STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_window index 分支）
 
@@ -132,37 +135,59 @@ def _judge_window(
     window: list[float],
     neutral_pct: float = _NEUTRAL_PCT_THRESHOLD,
     strong_pct: float = _STRONG_PCT,
+    methodology_version: str = _METHODOLOGY_VERSION,
 ) -> tuple[str, str | None]:
-    """符号命中主判（G13：无累计净值兜底）。返回 (result, grade)。
+    """窗口主判（阶段 0 起默认 3.0 窗口累计口径）。返回 (result, grade)。
 
-    - bullish: 任一日 >0 → hit；否则 miss
-    - bearish: 任一日 <0 → hit；否则 miss
-    - neutral: 任一日 |pct|<neutral_pct → hit；否则 miss
+    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+
     grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=strong_pct；
     strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。neutral 恒 None。
 
     H3：默认参数即 index 阈值（0.5/5.0），行为不变；sector 调用注入 0.25/3.0。
     """
+    if methodology_version == "2.0":
+        # v2：任一日符号命中（G13，无累计净值兜底）
+        if direction == "bullish":
+            if not any(p > 0 for p in window):
+                return "miss", ("strong_miss" if any(p <= -strong_pct for p in window) else "miss")
+            strong = window[0] > 0 or any(p >= strong_pct for p in window)
+            return "hit", ("strong_hit" if strong else "hit")
+        if direction == "bearish":
+            if not any(p < 0 for p in window):
+                return "miss", ("strong_miss" if any(p >= strong_pct for p in window) else "miss")
+            strong = window[0] < 0 or any(p <= -strong_pct for p in window)
+            return "hit", ("strong_hit" if strong else "hit")
+        return ("hit" if any(abs(p) < neutral_pct for p in window) else "miss"), None
+    # v3：窗口累计主判（bullish sum>0 / bearish sum<0 / neutral mean(|p_i|)<thr）
     if direction == "bullish":
-        if not any(p > 0 for p in window):
+        if sum(window) <= 0:
             return "miss", ("strong_miss" if any(p <= -strong_pct for p in window) else "miss")
         strong = window[0] > 0 or any(p >= strong_pct for p in window)
         return "hit", ("strong_hit" if strong else "hit")
     if direction == "bearish":
-        if not any(p < 0 for p in window):
+        if sum(window) >= 0:
             return "miss", ("strong_miss" if any(p >= strong_pct for p in window) else "miss")
         strong = window[0] < 0 or any(p <= -strong_pct for p in window)
         return "hit", ("strong_hit" if strong else "hit")
-    return ("hit" if any(abs(p) < neutral_pct for p in window) else "miss"), None
+    mean_abs = sum(abs(p) for p in window) / len(window)
+    return ("hit" if mean_abs < neutral_pct else "miss"), None
 
 
-async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, object]:
-    """v2 到期验证：取 [due, due+3] 窗口 kline 符号命中主判。
+async def _verify_horizon(
+    record: dict[str, object],
+    horizon: str,
+    methodology_version: str = _METHODOLOGY_VERSION,
+) -> dict[str, object]:
+    """到期验证：取 [due, due+3] 窗口 kline，按版本口径主判（默认 3.0 窗口累计）。
 
     entry 新增 methodology_version（H1）、grade（仅 bullish/bearish，G14）、
     baseline_neutral（同窗口恒中性预测命中标记，供 baseline 对照，H6）、
     approximate（越年近似档结构化标记，统计剔除，H2）、
     target_type/matched_*（H8）、threshold_version（sector，H3）、prediction_id（H4）。
+    methodology_version 参数：主链默认 _METHODOLOGY_VERSION（3.0）；backfill 传
+    _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量口径不混版本（阶段 0）。
     返回语义（D1/D7）：正常 → hit/miss entry；窗口未满 → {"wait": True}（run_once 收到
     wait 则 continue 不回写，下次再验）；数据源故障/无数据 → insufficient entry（落库可追溯）。
     """
@@ -187,7 +212,7 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
     base: dict[str, object] = {
         "horizon": horizon,
         "verified_at": today,
-        "methodology_version": _METHODOLOGY_VERSION,
+        "methodology_version": methodology_version,
         "prediction_id": record.get("id"),  # H4 双计数关联
         "target_type": target_type,          # H8 目标类型（index/sector）
     }
@@ -235,15 +260,23 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
     result, grade = _judge_window(
         direction, window,
         neutral_pct=float(thresholds["neutral_pct"]),
-        strong_pct=float(thresholds["strong_pct"]))
+        strong_pct=float(thresholds["strong_pct"]),
+        methodology_version=methodology_version)
     cumulative = sum(window)
     actual_str = f"{cumulative:+.2f}%"
     reason = f"方向={direction}, 窗口累计={actual_str}"
     if is_approximate:
         reason = f"(approximate_due_date) {reason}"
+    # baseline_neutral（H6）随版本口径：v2 任一日 |p|<thr；v3 mean(|p_i|)<thr
+    if methodology_version == "2.0":
+        baseline_neutral = any(abs(p) < float(thresholds["neutral_pct"]) for p in window)
+    else:
+        baseline_neutral = (
+            sum(abs(p) for p in window) / len(window) < float(thresholds["neutral_pct"])
+        )
     out = {**base, "result": result, "actual": actual_str, "reason": reason,
            "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
-           "baseline_neutral": any(abs(p) < float(thresholds["neutral_pct"]) for p in window)}
+           "baseline_neutral": baseline_neutral}
     if target_type == "sector":
         out["threshold_version"] = _THRESHOLD_VERSION  # H3：sector 阈值版本（1.0）
     if grade is not None:
@@ -252,10 +285,12 @@ async def _verify_horizon(record: dict[str, object], horizon: str) -> dict[str, 
 
 
 async def backfill_no_data() -> int:
-    """存量 no_data 回补：扫描 verified 记录中 2.0/no_data 的 index 档位按区间重验（D4）。
+    """存量 no_data 回补：扫描 verified 记录中 _BACKFILL_METHODOLOGY_VERSION/no_data 的
+    index 档位按区间重验（D4）。
 
     幂等：仅重验 entry 为 insufficient/no_data 的档位，hit/miss 不回补；sector 回补
-    依赖 resolve，主链路已处理新记录，此处只回补 index。返回成功覆盖回写的档位数。
+    依赖 resolve，主链路已处理新记录，此处只回补 index。重验沿用存量版本口径
+    （阶段 0：2.0 记录用 2.0 主判、写 2.0，不混入 3.0）。返回成功覆盖回写的档位数。
     """
     records = await node_api.list_verified_predictions(limit=500)
     updated = 0
@@ -266,7 +301,7 @@ async def backfill_no_data() -> int:
         for horizon, entry in verification.items():
             if not isinstance(entry, dict):
                 continue
-            if entry.get("methodology_version") != "2.0":
+            if entry.get("methodology_version") != _BACKFILL_METHODOLOGY_VERSION:
                 continue
             if entry.get("subtype") != "no_data" or entry.get("target_type") == "sector":
                 continue  # sector 回补依赖 resolve，主链路已处理新记录；此处只回补 index
@@ -280,6 +315,7 @@ async def backfill_no_data() -> int:
             re_entry = await _verify_horizon(
                 {"id": record.get("id"), "prediction": prediction, "due_dates": due_dates},
                 horizon,
+                methodology_version=_BACKFILL_METHODOLOGY_VERSION,
             )
             if re_entry.get("wait") or re_entry.get("result") == "insufficient":
                 continue  # 仍不可验则不覆盖
