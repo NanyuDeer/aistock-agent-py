@@ -2,6 +2,7 @@
 from aistock_agent.services.prediction_stats import (
     baseline_compare,
     bucket_summary,
+    clamp_confidence_by_bucket,
     hit_rate_summary,
     wilson_ci,
 )
@@ -77,3 +78,33 @@ def test_sufficient_sample_requires_both_counts():
     entries = [_entry("sector", "hit", 1)] * 30
     b = bucket_summary(entries)
     assert b["sector"]["sufficient_sample"] is False
+
+
+def test_clamp_triggers_when_ci_upper_below_baseline():
+    hit = {"n": 40, "hits": 10, "hit_rate": 0.25, "ci": (0.13, 0.41)}
+    base = {"n": 40, "hits": 24, "hit_rate": 0.60}
+    cap, reason = clamp_confidence_by_bucket("short", hit, base)
+    assert cap == "medium"
+    assert "钳制" in reason
+
+
+def test_clamp_no_action_when_sample_insufficient():
+    hit = {"n": 10, "hits": 3, "hit_rate": 0.3, "ci": (0.10, 0.60)}
+    base = {"n": 10, "hits": 6, "hit_rate": 0.6}
+    cap, reason = clamp_confidence_by_bucket("short", hit, base)
+    assert cap is None
+    assert "样本不足" in reason
+
+
+def test_clamp_high_when_not_worse_than_baseline():
+    hit = {"n": 40, "hits": 28, "hit_rate": 0.7, "ci": (0.54, 0.82)}
+    base = {"n": 40, "hits": 20, "hit_rate": 0.5}
+    cap, reason = clamp_confidence_by_bucket("short", hit, base)
+    assert cap == "high"
+
+
+def test_clamp_respects_cap_floor():
+    hit = {"n": 40, "hits": 6, "hit_rate": 0.15, "ci": (0.06, 0.30)}
+    base = {"n": 40, "hits": 24, "hit_rate": 0.60}
+    cap, _ = clamp_confidence_by_bucket("short", hit, base, cap_floor="low")
+    assert cap == "low"
