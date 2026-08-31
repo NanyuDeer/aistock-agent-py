@@ -36,6 +36,13 @@ class PredictionRisk(BaseModel):
 
     factor: str
     invalidation: str
+    # 失效条件"读数触发式"复核触发器（A1）— 可选，仅读数触发类风险填充
+    indicator: Literal["ma20", "ma60"] | None = None
+    direction: Literal["above", "below"] | None = None
+    window: int | None = None
+    measure: Literal["close"] | None = "close"
+    snapshot_value: float | None = None  # 预测日 MA 快照（审计用）
+    triggered: bool = False
 
 
 class EvolutionStep(BaseModel):
