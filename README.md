@@ -549,6 +549,8 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/1` |
 | `REDIS_MAX_CONNECTIONS` | Redis 连接池最大连接数 | `10` |
 | `HTTP_TIMEOUT_SECONDS` | httpx 请求超时（秒） | `10.0` |
+| `PREDICTION_CONF_CAP_SHORT` | A3 置信钳制：short 桶上限档（high=不钳制；short 恒启用） | `high` |
+| `PREDICTION_CONF_CAP_MID` | A3 置信钳制：mid 桶上限档（仅当 `!= high` 时启用 mid 桶；long 桶不启用） | `high` |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥（单 key 兼容） | - |
 | `TAVILY_API_KEYS` | Tavily 搜索 API 密钥池（逗号分隔，优先于单 key） | - |
 | `DOUBAO_API_KEY` | Doubao 兜底搜索 API 密钥（单 key 兼容） | - |

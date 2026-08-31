@@ -95,11 +95,19 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     if not today_archive.exists():
         missing.append("情绪数据缺失（沿用前值）")
     prev_phase = latest_phase
-    kline = await node_api.get_index_kline(INDEX_CODE, days=60) or []
+    kline = await node_api.get_index_kline(INDEX_CODE, days=120) or []  # 60→120：MA60 佐证需 ≥65 根
     closes = [float(r["close"]) for r in kline if r.get("close") is not None]
     highs = [float(r["high"]) for r in kline if r.get("high") is not None]
     lows = [float(r["low"]) for r in kline if r.get("low") is not None]
     amounts = [float(r["amount"]) for r in kline if r.get("amount") is not None]
+    # C1：指数技术位多级确认佐证（确定性计算，LLM 不产数值）；不足 65 根时如实标注
+    breadth = (
+        rhythm_engine.ma_breadth(closes)
+        if len(closes) >= 65
+        else rhythm_engine.ma_breadth([])
+    )
+    if breadth.get("insufficient"):
+        missing.append("MA 技术位数据不足")
     trend = rhythm_engine.trend_anchor(closes, amounts)
     fg_resp = await node_api.get_fear_greed()
     fg_index = fg_resp.get("index") if isinstance(fg_resp, dict) else None
@@ -107,22 +115,36 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     volume_weak = None
     if amounts and len(amounts) >= 20:
         volume_weak = sum(amounts[-5:]) / 5 < sum(amounts[-20:]) / 20 * 0.8
+    # C1 前原始 phase 判背离（同一价格信号只经一条路径生效：tech 佐证不进 detect_conflict 输入）
+    base_phase, _ = rhythm_engine.detect_phase(
+        history=scores,
+        consecutive_ice=consecutive_ice,
+        volume_weak=volume_weak,
+        prev_phase=prev_phase,
+        tech=None,
+    )
+    conflict, conflict_detail = rhythm_engine.detect_conflict(base_phase, trend)
+    penalty = rhythm_engine.conflict_penalty(rhythm_engine.conflict_kind(base_phase, trend))
+
+    # 展示相位（tech 佐证只影响展示与 evidence，不进入背离判定）
     phase, phase_evidence = rhythm_engine.detect_phase(
         history=scores,
         consecutive_ice=consecutive_ice,
         volume_weak=volume_weak,
         prev_phase=prev_phase,
+        tech=breadth,  # C1：技术佐证只进 phase_evidence，不进仓位话术
     )
+    phase_evidence["technical"] = breadth
     score, compose_missing = rhythm_engine.compose_score(
         phase=phase,
         trend=trend,
         fg=fg_index,
         trend_available=trend is not None,
         fg_available=fg_index is not None,
+        penalty=penalty,  # C2：顶背离降 1 档；底背离 0.0 禁止降档
     )
     missing.extend(compose_missing)
     level = rhythm_engine.level_from_score(score)
-    conflict, conflict_detail = rhythm_engine.detect_conflict(phase, trend)
     win = await load_event_window(target_date)
     branches: list[dict[str, Any]] = []
     if win.high_events:

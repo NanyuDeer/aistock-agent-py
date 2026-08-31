@@ -2,6 +2,23 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+<<<<<<< HEAD
+## [changer] 2026-08-31 — 预判/节奏/迭代增强（TradingVane 研报借鉴 v2）
+
+**开发者**: changer-collab
+
+### 新增
+- 预判 A3 确定性置信钳制：`clamp_confidence_by_bucket`（Wilson 95%CI 上界 vs baseline，n<30 不动作）+ run_predict/run_chat_prediction 接线（short 恒启用/mid 配置开关/long 不启用）+ `PredictionHorizon.confidence_source` 标记（`prediction_stats.py`/`prediction_service.py`/`config.py`）
+- 预判 A1 失效复核触发器：`prediction_invalidation.py` 三态迟滞状态机 `update_trigger_state` + `scan_active_pending` 早退扫描（MA20 读数触发，early_exit 标记与 result 分离存储，验证器 skip 改按 `"result" in entry` 判定）
+- 预判 A2 独立源冲突检测：`corroborate_evidence`（quote/flow/news 三通道，claim 不计入）+ `PredictionResult.evidence_corroboration`（run_chat_prediction 接线，不覆盖 confidence）
+- 节奏大师 C1 指数技术位佐证：`ma_breadth` + `detect_phase(tech=)`（kline 扩至 120 日，佐证只进 phase_evidence，不进背离判定）
+- 节奏大师 C2 背离传导：`conflict_kind` 顶/底区分 + `conflict_penalty` 进 `compose_score`（顶背离 -8.0 降档/底背离禁止，背离用 tech=None 原始相位防双降）
+- 迭代 B1 维度证据标注：`build_scorecard` 每维度加 `evidence_kind`（deterministic/llm_derived）
+
+### 文档
+- AGENTS.md：PUT verification 早退契约行 + A1/A2/A3 增强小节 + services 目录登记 prediction_invalidation.py；README 环境变量表补充 PREDICTION_CONF_CAP_SHORT/MID
+
+=======
 ## [junliang] 2026-08-27 — 个股异动溯源读层 skill（阶段 2.2）
 
 **开发者**: Aria
@@ -48,6 +65,7 @@
 ### 测试
 - `tests/unit/test_prediction_validator.py`：3.0 窗口累计主判用例（bullish/bearish/neutral 反例）+ baseline_neutral 双版本差异 + backfill 版本隔离
 - `tests/unit/test_prediction_stats.py`：版本过滤参数化用例（默认 2.0 / 显式 3.0）
+
 ## [changer] 2026-08-30 — 节奏大师语义修正 + 调度修复（design-debate）
 
 **开发者**: changer-collab

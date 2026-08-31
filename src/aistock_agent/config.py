@@ -335,6 +335,12 @@ class Settings(BaseSettings):
     # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
     sentiment_output_dir: str = "docs/agent-outputs/sentiment"
 
+    # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
+    # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）
+    prediction_conf_cap_short: str = "high"
+    # env: PREDICTION_CONF_CAP_MID；仅当值 != "high" 时才启用 mid 桶
+    prediction_conf_cap_mid: str = "high"
+
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
         "env_file_encoding": "utf-8",
