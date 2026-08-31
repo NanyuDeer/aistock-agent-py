@@ -22,6 +22,7 @@ import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，�
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
@@ -232,6 +233,47 @@ def _compute_due_dates(
     return due_dates, approximate_horizons
 
 
+# A3 确定性钳制：LLM 不产数值，confidence 由历史命中率后处理覆盖
+_CONF_ORDER = {"high": 2, "medium": 1, "low": 0}
+
+
+def _apply_confidence_cap(
+    horizon: str,
+    llm_conf: str,
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] | None,
+    *,
+    mid_enabled: bool,
+) -> tuple[str, str]:
+    """确定性钳制 confidence（LLM 不产数值，此处为后处理覆盖）。
+
+    - long 桶不启用；mid 桶仅 mid_enabled=True 时启用；short 桶恒启用。
+    - stats 为 None 或 horizon 不在其中 → 不钳制（保 LLM 原值）。
+    """
+    if horizon == "long":
+        return llm_conf, "llm"
+    if horizon == "mid" and not mid_enabled:
+        return llm_conf, "llm"
+    if not stats or horizon not in stats:
+        return llm_conf, "llm"
+    from aistock_agent.services.prediction_stats import clamp_confidence_by_bucket
+
+    hit_summary, baseline_summary = stats[horizon]
+    cap, _ = clamp_confidence_by_bucket(horizon, hit_summary, baseline_summary)
+    if cap and _CONF_ORDER.get(llm_conf, 0) > _CONF_ORDER.get(cap, 0):
+        return cap, "deterministic"
+    return llm_conf, "llm"
+
+
+def _load_horizon_stats(
+    records: list[dict[str, object]],
+) -> dict[str, tuple[dict[str, object], dict[str, object]]] | None:
+    """Task 3 补全：从 verified predictions 汇总各档位 (hit_summary, baseline_summary)。
+
+    本任务 stub：固定返回 None（_apply_confidence_cap 对 stats=None 不钳制，不会误伤）。
+    """
+    return None
+
+
 async def run_predict(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> PredictionRunResult:
@@ -284,6 +326,19 @@ async def run_predict(
                 dropped=len(prediction.evidence_ids) - len(filtered),
             )
         prediction = prediction.model_copy(update={"evidence_ids": filtered})
+        # A3 确定性钳制：confidence 后处理覆盖（LLM 不产数值；stub 返回 None 不钳制）
+        records: list[dict[str, object]] = []
+        # Task 3: 从 node_api.list_verified_predictions() 加载
+        stats = _load_horizon_stats(records)
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = conf
+            h.confidence_source = source
         # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
         due_dates, approximate_horizons = _compute_due_dates(
             snapshot.trade_date, prediction.horizons
@@ -623,6 +678,19 @@ async def run_chat_prediction(
         # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
         prediction = _hard_validate_chat_prediction(
             prediction, str(snapshot.get("symbol", "")))
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict 同一后处理，stub 返回 None 不钳制）
+        records: list[dict[str, object]] = []
+        # Task 3: 从 node_api.list_verified_predictions() 加载
+        stats = _load_horizon_stats(records)
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = conf
+            h.confidence_source = source
         # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
         # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
         # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)

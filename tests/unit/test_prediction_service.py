@@ -16,6 +16,7 @@ from aistock_agent.schemas.prediction import PredictionResult
 from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     TraceUnavailableError,
+    _apply_confidence_cap,
     predict_from_trace,
     render_prediction_markdown,
     run_chat_prediction,
@@ -749,3 +750,42 @@ async def test_run_chat_prediction_no_due_dates_call(monkeypatch):
     assert result.prediction_status == "hypothesis"
     structured_ainvoke.assert_awaited()
     assert called == []
+
+
+# ---------- A3 确定性钳制：_apply_confidence_cap（confidence_source 接线） ----------
+
+
+def test_apply_cap_short_capped_when_bucket_loses():
+    stats = {
+        "short": (
+            {"n": 40, "hits": 10, "hit_rate": 0.25, "ci": (0.13, 0.41)},
+            {"n": 40, "hits": 24, "hit_rate": 0.60},
+        )
+    }
+    conf, source = _apply_confidence_cap("short", "high", stats, mid_enabled=False)
+    assert conf == "medium"
+    assert source == "deterministic"
+
+
+def test_apply_cap_keeps_llm_when_bucket_wins():
+    stats = {
+        "short": (
+            {"n": 40, "hits": 28, "hit_rate": 0.7, "ci": (0.54, 0.82)},
+            {"n": 40, "hits": 20, "hit_rate": 0.5},
+        )
+    }
+    conf, source = _apply_confidence_cap("short", "high", stats, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"
+
+
+def test_apply_cap_mid_disabled_keeps_llm():
+    conf, source = _apply_confidence_cap("mid", "high", None, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"
+
+
+def test_apply_cap_long_never_capped():
+    conf, source = _apply_confidence_cap("long", "high", None, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"

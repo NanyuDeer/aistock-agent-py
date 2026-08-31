@@ -26,6 +26,7 @@ class PredictionHorizon(BaseModel):
     target: str  # 验证对象（"上证指数"/"半导体板块"）
     metric_projection: str  # 可量化预期（到期 hit/miss 对照依据）
     confidence: Literal["high", "medium", "low"]
+    confidence_source: Literal["llm", "deterministic"] | None = None  # LLM 原值 or 确定性钳制
 
 
 class PredictionRisk(BaseModel):
