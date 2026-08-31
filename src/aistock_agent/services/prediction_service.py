@@ -355,6 +355,38 @@ def corroborate_evidence(
             "conflict": False, "verdict": "insufficient"}
 
 
+def _direction_sign(value: float | None) -> int | None:
+    """确定性方向提取（LLM 不产数值）：正→1，负→-1，零→0，缺失→None。"""
+    if value is None:
+        return None
+    return 1 if value > 0 else -1 if value < 0 else 0
+
+
+def _corroboration_inputs(
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+) -> dict[str, object]:
+    """从 run_chat_prediction 输入提取确定性方向（对齐 raw 结构键）。缺失 → None（通道不参与计数）。
+
+    独立源=数据获取通道不同：quote/flow/news 各取确定性符号，LLM 文本/claim 不计入。
+    """
+    quote = snapshot.get("quote") if isinstance(snapshot, dict) else None
+    flow = snapshot.get("flow") if isinstance(snapshot, dict) else None
+    quote_dir = _direction_sign(
+        (quote or {}).get("change_pct") if isinstance(quote, dict) else None
+    )
+    flow_dir = _direction_sign(
+        (flow or {}).get("net_amount") if isinstance(flow, dict) else None
+    )
+    news_dirs: list[int] = []
+    for n in news:
+        d = n.get("direction") if isinstance(n, dict) else None
+        s = _direction_sign(d)
+        if s is not None:
+            news_dirs.append(s)
+    return {"quote_dir": quote_dir, "flow_dir": flow_dir, "news_dirs": news_dirs}
+
+
 async def run_predict(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> PredictionRunResult:
@@ -779,6 +811,13 @@ async def run_chat_prediction(
         # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
         # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
         # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # A2 独立源冲突检测接线：确定性方向提取自输入（LLM 不产数值）；结果仅作为
+        # 独立证据字段，绝不覆盖 confidence（佐证信号 ≠ 置信度）。run_predict 路径
+        # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。
+        inputs = _corroboration_inputs(snapshot, news)
+        prediction.evidence_corroboration = corroborate_evidence(
+            direction=prediction.horizons[0].direction, **inputs,
+        )
         return prediction
     except Exception as exc:
         logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)
