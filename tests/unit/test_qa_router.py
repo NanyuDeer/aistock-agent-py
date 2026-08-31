@@ -1685,6 +1685,133 @@ def test_extract_multi_symbols_two_codes():
     assert _extract_multi_symbols("600519 vs 000858 哪个强") == ["600519", "000858"]
 
 
+# ── 阶段 2.1：insight_lookup 读层 skill 路由 ──
+
+def test_route_by_keyword_fallback_insight():
+    """"涨停雷达/自选股/洞察/归因" 词条 → insight_lookup。"""
+    call = route_by_keyword_fallback("600519 涨停雷达归因")
+    assert call is not None
+    assert call.skill_name == "insight_lookup"
+    assert call.args == {"symbol": "600519"}
+
+
+def test_route_by_keyword_fallback_insight_without_symbol():
+    """无代码的洞察问句 → insight_lookup（symbol 可空，user_id 后处理注入）。"""
+    call = route_by_keyword_fallback("我自选股最近的洞察")
+    assert call is not None
+    assert call.skill_name == "insight_lookup"
+    assert call.args == {}
+
+
+def test_route_by_keyword_fallback_stock_trace():
+    """"异动/异动原因" 词条（价格异动溯源，阶段 2.2）→ stock_trace_lookup。"""
+    call = route_by_keyword_fallback("600519 为什么异动")
+    assert call is not None
+    assert call.skill_name == "stock_trace_lookup"
+    assert call.args == {"symbol": "600519"}
+
+
+def test_route_by_keyword_fallback_stock_trace_without_symbol():
+    """无代码的异动问句 → stock_trace_lookup（symbol 可空）。"""
+    call = route_by_keyword_fallback("最近有什么异动")
+    assert call is not None
+    assert call.skill_name == "stock_trace_lookup"
+    assert call.args == {}
+
+
+def test_infer_stock_skill_insight_lookup():
+    """个股 skill 推断：涨停雷达/自选股洞察 → insight_lookup。"""
+    from aistock_agent.graph.nodes.qa_router import _infer_stock_skill
+
+    assert _infer_stock_skill("600519 涨停雷达归因") == "insight_lookup"
+    assert _infer_stock_skill("自选股洞察分析") == "insight_lookup"
+
+
+def test_infer_stock_skill_stock_trace_lookup():
+    """个股 skill 推断：价格异动/异动原因 → stock_trace_lookup（先于 insight_lookup）。"""
+    from aistock_agent.graph.nodes.qa_router import _infer_stock_skill
+
+    assert _infer_stock_skill("600519 为什么异动") == "stock_trace_lookup"
+    assert _infer_stock_skill("异动归因分析") == "stock_trace_lookup"
+
+
+def test_system_prompt_dynamic_intent_includes_insight_lookup():
+    """footer 白名单动态化：注册的 insight_lookup 出现在 goal.intent 枚举，占位符已替换。"""
+    from aistock_agent.graph.nodes.qa_router import _build_system_prompt
+
+    prompt = _build_system_prompt()
+    assert "insight_lookup" in prompt
+    assert "__INTENT_ENUM__" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_postprocess_injects_user_id_for_insight_lookup():
+    """登录 → insight_lookup 确定性注入 user_id（对齐 chat_analysis 注入模式）。"""
+    out = QARouterOutput(
+        goal=InsightGoal(question="我自选股异动", intent="insight_lookup"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="insight_lookup", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(
+        out,
+        "600519 异动归因",
+        QuestionState(messages=[], user_id="u_42"),
+    )
+    assert result.skill_calls[0].args["user_id"] == "u_42"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_drops_insight_lookup_without_login():
+    """未登录（无 user_id）→ 移除 insight_lookup call（无自选股上下文）。"""
+    out = QARouterOutput(
+        goal=InsightGoal(question="我自选股异动", intent="insight_lookup"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="insight_lookup", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(
+        out,
+        "600519 异动归因",
+        QuestionState(messages=[]),
+    )
+    assert result.skill_calls == []
+
+
+@pytest.mark.asyncio
+async def test_postprocess_injects_user_id_for_stock_trace_lookup():
+    """阶段 2.2：登录 → stock_trace_lookup 注入 user_id。"""
+    out = QARouterOutput(
+        goal=InsightGoal(question="600519 为什么异动", intent="stock_trace_lookup"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_trace_lookup", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(
+        out,
+        "600519 为什么异动",
+        QuestionState(messages=[], user_id="u_42"),
+    )
+    assert result.skill_calls[0].args["user_id"] == "u_42"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_drops_stock_trace_lookup_without_login():
+    """阶段 2.2：未登录 → 移除 stock_trace_lookup call。"""
+    out = QARouterOutput(
+        goal=InsightGoal(question="600519 为什么异动", intent="stock_trace_lookup"),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name="stock_trace_lookup", args={"symbol": "600519"})],
+        complexity="light",
+    )
+    result = await _postprocess_skill_calls(
+        out,
+        "600519 为什么异动",
+        QuestionState(messages=[]),
+    )
+    assert result.skill_calls == []
+
+
 def test_extract_multi_symbols_dedup_and_insufficient():
     """去重；少于 2 个候选 → 空列表（不短路空 symbols）。"""
     assert _extract_multi_symbols("600519 和 600519") == []

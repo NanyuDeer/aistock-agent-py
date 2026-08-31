@@ -2,6 +2,52 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-27 — 个股异动溯源读层 skill（阶段 2.2）
+
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/skills/stock_trace_lookup.py`：对话内查登录用户个股异动溯源（价格异动/涨停雷达归因结果，只读列表）；入参 `{symbol?}`（可空——无代码返回该用户全部异动溯源），user_id 由 qa_router postprocess 登录态注入（未登录移除 call），无数据/异常 → degraded；`ChatSource.kind="stock_trace"`，source_id=`stock_trace:{event_id}`
+- `src/aistock_agent/services/data_client.py`：`list_stock_traces(openid, symbol?, limit?)` 走 `/internal/stock-trace/events` 只读端点
+
+### 改进
+- `src/aistock_agent/schemas/chat_contract.py`：3 处 Literal（InsightGoal.intent / SubGoal.intent / SkillCall.skill_name）加 `stock_trace_lookup` + `ChatSource.kind` 加 `stock_trace`
+- `src/aistock_agent/graph/nodes/qa_router.py`：KEYWORD_FALLBACK 词条优先级——`异动/异动归因/异动原因` → `stock_trace_lookup`（置于 `涨停雷达/自选股/洞察/归因` → `insight_lookup` 之前）；`_STOCK_SKILLS` 扩为 5 项；`_infer_stock_skill`/`_build_default_skill_call` 增加分支（symbol 可空）；postprocess 5.6 合并 `insight_lookup`/`stock_trace_lookup` 注入 user_id
+- `src/aistock_agent/skills/registry.py`：注册 `stock_trace_lookup`
+
+### 测试
+- `tests/unit/test_skills.py`：stock_trace_lookup 正常/未登录/无数据/异常 + **只读断言**（仅触发 list_stock_traces）
+- `tests/unit/test_qa_router.py`：异动词条路由优先于洞察、_infer_stock_skill 分支、postprocess 注入/移除
+
+## [junliang] 2026-08-27 — 自选股洞察读层 skill（阶段 2.1）
+
+**开发者**: Aria
+
+### 新增
+- `src/aistock_agent/skills/insight_lookup.py`：对话内查登录用户自选股洞察（涨停雷达/价格异动归因结果，只读）；入参 `{symbol?}`，user_id 由 qa_router postprocess 登录态注入（未登录移除 call），无数据/异常 → degraded
+- `src/aistock_agent/services/data_client.py`：`list_insights(openid, symbol?, limit?)` / `get_insight(openid, event_id)` 走 `/internal/insight/events` 只读端点
+
+### 改进
+- `src/aistock_agent/schemas/chat_contract.py`：3 处 Literal（InsightGoal.intent / SubGoal.intent / SkillCall.skill_name）加 `insight_lookup` + `ChatSource.kind` 加 `insight`
+- `src/aistock_agent/graph/nodes/qa_router.py`：KEYWORD_FALLBACK 加词条（异动/归因/涨停雷达/自选股/洞察）、`_STOCK_SKILLS` 扩展、`_infer_stock_skill` 分支、`_build_default_skill_call` 分支、postprocess 注入 user_id；**footer 白名单动态化**——`_build_system_prompt` 从 registry 实时渲染 `goal.intent` 枚举（占位符 `__INTENT_ENUM__` 替换，新增 skill 无需改硬编码）
+- `src/aistock_agent/skills/registry.py`：注册 `insight_lookup`
+
+### 测试
+- `tests/unit/test_skills.py`：insight_lookup 正常/未登录/无数据/异常 + **只读断言**（仅触发 list_insights）
+- `tests/unit/test_qa_router.py`：关键词路由、_infer_stock_skill、postprocess user_id 注入/未登录移除、footer 动态化断言
+
+## [junliang] 2026-08-27 — 预测验证口径升级 3.0（阶段 0）
+
+**开发者**: Aria
+
+### 改进
+- `src/aistock_agent/services/prediction_validator.py`：`_METHODOLOGY_VERSION` 2.0→3.0，`_judge_window` 主判改**窗口累计口径**（bullish sum>0 / bearish sum<0 / neutral mean(|p_i|)<thr；v2"任一日符号命中"保留给存量回补）；`_verify_horizon` 增 `methodology_version` 参数，`baseline_neutral` 随版本（v2: any(|p|)<thr / v3: mean(|p_i|)<thr）
+- `src/aistock_agent/services/prediction_stats.py`：`_filter_v2` 参数化（`_CURRENT_METHODOLOGY_VERSION` 默认 2.0 防跳变/混桶），`hit_rate_summary`/`bucket_summary`/`baseline_neutral_summary` 支持传版本观测 3.0 分桶
+- `backfill_no_data`：版本判断引用 `_BACKFILL_METHODOLOGY_VERSION`（2.0），存量 2.0/no_data 用 2.0 口径重验、写 2.0 不混版本
+
+### 测试
+- `tests/unit/test_prediction_validator.py`：3.0 窗口累计主判用例（bullish/bearish/neutral 反例）+ baseline_neutral 双版本差异 + backfill 版本隔离
+- `tests/unit/test_prediction_stats.py`：版本过滤参数化用例（默认 2.0 / 显式 3.0）
 ## [changer] 2026-08-30 — 节奏大师语义修正 + 调度修复（design-debate）
 
 **开发者**: changer-collab

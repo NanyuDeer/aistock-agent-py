@@ -468,9 +468,12 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据（Phase 5） |
 | `GET /internal/institution-research` | 机构调研 | 共振检测结果（Phase 5） |
 | `GET /internal/institution-research/history` | 机构调研 | 历史记录（Phase 5） |
+| `GET /internal/insight/events?openid=&symbol=&limit=` | 洞察模块 | 自选股洞察列表（阶段 2.1 读层：涨停雷达/价格异动归因，openid 归属过滤、symbol 可选、limit 默认 50 上限 100） |
+| `GET /internal/insight/events/:eventId?openid=` | 洞察模块 | 自选股洞察详情（阶段 2.1 读层：事件 + 归因结果 + 证据包；openid 归属校验无归属 404） |
 | `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package，insight_worker 消费） |
 | `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败 increment_attempt） |
 | `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定 pushCreated/pushUpdated） |
+| `GET /internal/stock-trace/events?openid=&symbol=&limit=` | 异动溯源模块 | 个股异动溯源列表（阶段 2.2 读层：价格异动/涨停雷达归因，复用 listUserEvents；openid 必填、symbol 可选——为空返回该用户全部异动溯源、limit 默认 50 上限 100） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/push/market-event` | 微信+飞书推送 | 市场事件重磅推送（Python morning_agent 触发，fire-and-forget） |
 | `GET /internal/calendar/events` | market_calendar_events | 事件日历查询（L1 交割日规则 + 前瞻，rhythm_master 用） |

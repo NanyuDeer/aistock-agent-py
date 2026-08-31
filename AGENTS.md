@@ -166,6 +166,8 @@ START → supervisor(quick_think, 意图路由)
 - `skills/registry.py` 统一注册中心（手写 skill 优先，同名冲突拒绝适配覆盖）+ `skills/adapters.py`（tool→skill 适配：get_quote/get_capital_flow/search_cls_news/get_leader_stocks/get_global_markets/tavily_finance_search，Evidence.facts/sources/degraded/raw）
 - `skill_executor.SKILL_REGISTRY` 改从 registry 读取；qa_router SYSTEM_PROMPT Skill 清单由注册表动态渲染（方案 1：适配 skill 渲染入 prompt）
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
+- **阶段 2.1（2026-08-27）`insight_lookup` 读层 skill**：对话内查登录用户自选股洞察（涨停雷达/价格异动归因，只读）；入参 `{symbol?}`，user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/insight/events` 只读端点；`ChatSource.kind="insight"`；`qa_router` footer 白名单动态化——`_build_system_prompt` 从 registry 实时渲染 `goal.intent` 枚举（`__INTENT_ENUM__` 占位符替换，新增 skill 无需改硬编码）
+- **阶段 2.2（2026-08-27）`stock_trace_lookup` 读层 skill**：对话内查登录用户个股异动溯源（价格异动/涨停雷达归因结果，只读列表）；入参 `{symbol?}`（symbol 可空——无代码时返回该用户全部异动溯源），user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/stock-trace/events` 只读端点；`ChatSource.kind="stock_trace"`，source_id=`stock_trace:{event_id}`；**词条优先级**：`异动/异动归因/异动原因` → 本 skill（置于前），`涨停雷达/自选股/洞察/归因` → `insight_lookup`
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
 
@@ -479,9 +481,12 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `GET /internal/insight/events?openid=&symbol=&limit=` | 洞察模块 | 自选股洞察列表（阶段 2.1 读层：涨停雷达/价格异动归因结果，仅登录用户自选股命中事件；openid 必填、symbol 可选、limit 默认 50 上限 100） |
+| `GET /internal/insight/events/:eventId?openid=` | 洞察模块 | 自选股洞察详情（阶段 2.1 读层：事件 + 归因结果 + 最新证据包；openid 归属校验，无归属 404） |
 | `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package） |
 | `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
 | `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
+| `GET /internal/stock-trace/events?openid=&symbol=&limit=` | 异动溯源模块 | 个股异动溯源列表（阶段 2.2 读层：价格异动/涨停雷达归因结果，复用 `listUserEvents`；openid 必填、symbol 可选——为空返回该用户全部异动溯源、limit 默认 50 上限 100） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/midday/generate-audio` | 火山引擎/Azure TTS | 午报音频（方案 A）：根据请求体 `{date, dialogue}` 合成 MP3 并回填同一份 midday 报告 `content.audio_path` |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
@@ -503,6 +508,8 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/analysis-reports/:type/:date/:slot` | agent_analysis_reports | 节奏大师报告读取（`rhythm_master` 按 target_date + refresh_slot 三元组；data_client `get_rhythm_report`） |
 
 > **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed, ...)`——gate_skipped 落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年逐档容错（P2 裁决 2026-08-14）：chinese_calendar 覆盖 2004-2026 之外时不再整条 due_dates_failed，改为越年档按「周末+已发布节假日 HOLIDAYS_EXTRA」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb，`PredictionRunResult.approximate_horizons` 透传）**——理由：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益，显式标注优于预测停产；验证器 reason 加 `(approximate_due_date)` 前缀，Node 统计 `approximateHorizonCount` 分桶（近似档不计入命中率分母）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
+>
+> **验证口径 3.0（阶段 0，2026-08-27）**：`prediction_validator._METHODOLOGY_VERSION` 升 `"3.0"`，`_judge_window` 主判改**窗口累计**（bullish: sum>0 / bearish: sum<0 / neutral: mean(|p_i|)<thr，v2 的"任一日符号命中"保留给存量回补）；`baseline_neutral` 随版本（v2: any(|p|)<thr / v3: mean(|p_i|)<thr）。**版本分桶隔离（四处同步）**：① `prediction_stats._CURRENT_METHODOLOGY_VERSION`（统计默认过滤，保持 `"2.0"` 防跳变/混桶）② `prediction_validator._METHODOLOGY_VERSION`（`"3.0"`，主链写入）③ `prediction_validator._BACKFILL_METHODOLOGY_VERSION`（`"2.0"`，`backfill_no_data` 只回补 2.0/no_data 存量、用 2.0 口径重验、写 2.0 不混版本）④ Node `publicRouter.CURRENT_METHODOLOGY_VERSION`（`bucketStats`/`computeStats` 命中率按版本过滤、档位进度全量；旧记录无 `methodology_version` 兼容视为 2.0）。3.0 切换为默认过滤版本前，以 2.0/3.0 桶命中率漂移 ≤±1pct 为观测信号（存量重验仅观测不落库）。
 >
 > **M2 板块验证数据源（2026-08-15）**：sector target 走 `resolve_sector_target`（Node `/internal/ths/resolve` 三级匹配）→ `_fetch_kline_window("sector", ...)` 按 due 区间拉 `ths_daily`；**阈值参数化（H3）**：index 保持 neutral=0.5%/strong=5.0%，sector 用 G0c 分位标定 neutral=0.25%/strong=3.0%（entry 记 `threshold_version="1.0"`）；**entry 元数据（H8）**：`target_type`/`matched_ts_code`/`matched_name`/`prediction_id` 可审计；**按 due 区间拉取（Task 6）**：`_fetch_kline_window` 统一 index/sector，窗口 = due−20/+10 自然日（修复 index 200 天滚动窗口限制），**`trade_date` 归一化 YYYYMMDD→YYYY-MM-DD**（Node 返回 Tushare 原始格式而 due 为 YYYY-MM-DD，格式不匹配即存量 no_data 的根因，b4dc729）；H7 `pct_chg=None` 行保留占位计数，>0 落 insufficient；**存量回补（D4）**：`run_once` 每日尾随 `backfill_no_data()` 对 verified 中 2.0/no_data 的 index 档按区间重验（幂等，hit/miss 不回补，sector 走主链路）。**统计（Task 8，H3/H4）**：`hit_rate_summary`/`baseline_neutral_summary` 支持 `target_type` 过滤；`bucket_summary` 三桶（combined 仅描述性 + index/sector 各自判 `sufficient_sample`）；`n_predictions` 按 `prediction_id` 去重（旧记录无 id 退化为 n），`sufficient_sample = n≥30 且 n_predictions≥30`。
 
