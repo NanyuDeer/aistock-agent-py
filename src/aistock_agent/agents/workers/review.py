@@ -30,10 +30,12 @@ from aistock_agent.schemas.market_trace import (
     ReviewArtifact,
     SourceRecord,
 )
+from aistock_agent.schemas.target import Target
 from aistock_agent.services.archiver import (
     archive_market_trace_snapshot,
     archive_review,
 )
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.services.cache import get_cached_review, set_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
@@ -41,6 +43,7 @@ from aistock_agent.services.market_trace_snapshot import build_market_trace_snap
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
 from aistock_agent.state.schema import AgentState
 from aistock_agent.trace.chain import (
+    PredictionConfirmation,
     TRACE_CHAIN_STAGES,
 )
 from aistock_agent.trace.chain import (
@@ -86,6 +89,62 @@ _REVIEW_TRACE_MAX_TOKENS = 16000
 
 # 代码围栏剥离 — 防御性处理 LLM 可能包裹的 ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+# 大盘溯源渠道B探针 target（对齐 Spec B _enrich_market_predict_input 绑定的上证指数）
+_INDEX_TARGET: Target = make_target("上证指数") or Target(
+    kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数"
+)
+
+
+def attach_confirmations_to_trace(
+    trace: MarketTraceResult,
+    confirmations: list[PredictionConfirmation],
+) -> bool:
+    """把采集到的渠道B确认写回 primary 链（若无 primary 链或确认非空链时不动）.
+
+    返回是否发生了回填（供调用方判断是否值得打日志）。
+    """
+    if not confirmations or trace.primary_chain_id is None:
+        return False
+    for candidate in trace.candidates:
+        if candidate.id == trace.primary_chain_id and candidate.chain is not None:
+            candidate.chain.confirmed_prediction = [c for c in confirmations]
+            return True
+    return False
+
+
+def _trace_conclusion_summary(trace: MarketTraceResult) -> str:
+    """取归因结论文本：优先 attribution_summary，None 时退化到 primary 链 observable_result。"""
+    if trace.attribution_summary:
+        return trace.attribution_summary
+    if trace.primary_chain_id is None:
+        return ""
+    for candidate in trace.candidates:
+        if candidate.id == trace.primary_chain_id and candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                if node.stage == "observable_result":
+                    return node.claim
+    return ""
+
+
+async def _attach_scene_confirmations(trace: MarketTraceResult, report_date: str) -> None:
+    """Spec Cbis：溯源归因结论产出后，顺手核对大盘历史预判场景，回填渠道B确认.
+    不改变归因职责；探针失败降级为无确认，不阻断后续步骤/不向调用方抛异常。
+    """
+    # 函数内 import 避免与 aistock_agent.skills（→ evidence_resolver → review）
+    # 形成循环依赖，与 _publish_review_done_if_available 的延迟 import 同模式。
+    from aistock_agent.skills.scene_probe import probe_scene_confirmation
+
+    try:
+        confirmations = await probe_scene_confirmation(
+            target=_INDEX_TARGET,
+            trace_id=f"review:{report_date}",
+            conclusion=_trace_conclusion_summary(trace),
+        )
+        attach_confirmations_to_trace(trace, confirmations)
+    except Exception:
+        logger.debug("review_cbis_probe_failed", report_date=report_date, exc_info=True)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -759,10 +818,10 @@ def render_market_trace_markdown(
                 lines.append(line)
         if pv.event_hits:
             lines.append("- 事件影响对照：")
-            for hit in pv.event_hits:
+            for evt in pv.event_hits:
                 lines.append(
-                    f"  - {hit.event_title}：预期{hit.morning_direction}，"
-                    f"实际{hit.actual_impact}，{hit.result}"
+                    f"  - {evt.event_title}：预期{evt.morning_direction}，"
+                    f"实际{evt.actual_impact}，{evt.result}"
                 )
         if pv.overall_note:
             lines.append(f"- 整体结论：{pv.overall_note}")
@@ -1153,6 +1212,8 @@ async def run(state: AgentState) -> dict[str, object]:
     # 5. 渲染 Markdown + 构造 ReviewArtifact
     #    预测已退役（PR-A/T4）：内联 run_predict 删除，prediction 一律置 None，
     #    预测改由 review_done 事件驱动 PredictionConsumer 完成。
+    #    Spec Cbis：校验通过后附着渠道B场景确认（探针失败降级，不阻断渲染）。
+    await _attach_scene_confirmations(trace, report_date)
     markdown = render_market_trace_markdown(trace, snapshot)
     artifact = ReviewArtifact(
         schema_version="1.1",
@@ -1373,6 +1434,8 @@ async def run_review(
 
     # 渲染 + 构造 artifact（预测已退役：run_review 不再内联 run_predict，
     # 由 ReviewFullConsumer 在 status=ok 时发布 review_done 驱动预测，T2 已实现）
+    # Spec Cbis：校验通过后附着渠道B场景确认（探针失败降级，不阻断渲染）。
+    await _attach_scene_confirmations(trace, report_date)
     markdown = render_market_trace_markdown(trace, snapshot)
     artifact = ReviewArtifact(
         schema_version="1.1",
