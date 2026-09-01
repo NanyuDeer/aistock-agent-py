@@ -522,3 +522,47 @@ def evaluate_verification(
         gap_analysis=gap_analysis,
         available_weight=round(available_weight, 4),
     )
+
+
+def verification_gt_from_case(
+    case: dict[str, object],
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """从 case.meta 提取验证驱动迭代的"标准答案"（Spec C §4.2，P4）。
+
+    prediction 产片源（prediction_verified_scan）在 meta 落
+    {record_id, target, trade_date, prediction, due_dates, verification}：
+    - prediction：recorded prediction（dict，足够 evaluate_verification 解析
+      direction/conditions）
+    - verification：{horizon/condition 键 → 到期验证 entry dict}，entries =
+      dict 值列表（每个含 result/horizon/actual/grade/condition_met 等）。
+
+    返回 (prediction_dict, verification_entries)；无 meta/字段缺失 → 空 dict + 空列表
+    （evaluate_verification 对空样本返回降级 0 分，不触发迭代）。
+    """
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    entries = [v for v in verification.values() if isinstance(v, dict)]
+    return prediction, entries
+
+
+def score_detail_payload(score: object) -> dict[str, object]:
+    """把评分对象序列化为实验记录 score_detail 字段（P4 双链路分流）。
+
+    归因分支（ScoreDetail）→ {direction, drivers, sectors}（既有形状不变）；
+    验证分支（VerificationScore）→ {hit_rate, direction_score, condition_met_rate,
+    miss_insights}。调用方不感知具体评分器类型，实验记录可被 reporter 按
+    ground_truth_kind 消费。
+    """
+    if isinstance(score, VerificationScore):
+        return {
+            "hit_rate": score.hit_rate,
+            "direction_score": score.direction_score,
+            "condition_met_rate": score.condition_met_rate,
+            "miss_insights": score.miss_insights,
+        }
+    sd = cast("ScoreDetail", score)
+    return {"direction": sd.direction, "drivers": sd.drivers, "sectors": sd.sectors}

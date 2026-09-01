@@ -463,6 +463,91 @@ async def test_predict_from_trace_llm_failed_does_not_persist():
 
 
 @pytest.mark.asyncio
+async def test_predict_from_trace_replay_branch(monkeypatch):
+    """P4：REPLAY_CASE_ID 存在 → 顶部转调 _replay_predict_from_case，从 case meta
+    重建输入、并入验证反馈，且不落库（record=None）。
+
+    验证：
+    - run_predict 被调且 replay_context 含 replay/recorded_prediction/
+      verification_feedback/target（验证反哺注入）；
+    - node_api.save_prediction 不被调（回放只读）；
+    - 返回 (result, None)。
+    """
+    case = {
+        "case_id": "case_p4_replay",
+        "meta": {
+            "target": "600519.SH",
+            "trade_date": "2026-08-12",
+            "prediction": {"schema_version": "3.0", "prediction_status": "confirmed"},
+            "verification": {
+                "short": {
+                    "result": "hit", "horizon": "short", "actual": "+1.5%",
+                    "grade": "hit", "condition_met": True,
+                }
+            },
+        },
+    }
+    fake_run = AsyncMock(return_value=PredictionRunResult(
+        status="ok",
+        prediction=PredictionResult(
+            schema_version="3.0",
+            prediction_status="confirmed",
+            horizons=[PredictionHorizon(
+                horizon="short", remaining_estimate="1-3日", phase="decaying",
+                direction="bullish", target="600519.SH", metric_projection="+2%",
+                confidence="high",
+            )],
+            evolution_narrative="延续", risks=[], evidence_ids=[],
+        ),
+        due_dates={"short": "2026-08-17"},
+    ))
+    monkeypatch.setenv("REPLAY_CASE_ID", "case_p4_replay")
+    with patch(
+        "aistock_agent.iterate.case_builder.load_case", return_value=case
+    ), patch(
+        "aistock_agent.services.prediction_service.run_predict", new=fake_run
+    ) as mocked_run, patch(
+        "aistock_agent.services.prediction_service.node_api"
+    ) as mock_api:
+        mock_api.save_prediction = AsyncMock()
+        result, record = await predict_from_trace("trace-1", "2026-08-12")
+
+    mocked_run.assert_awaited_once()
+    rc = mocked_run.await_args.kwargs["replay_context"]
+    assert rc["replay"] is True
+    assert rc["recorded_prediction"]["prediction_status"] == "confirmed"
+    assert rc["verification_feedback"][0]["result"] == "hit"
+    assert rc["target"] == "600519.SH"
+    assert result.status == "ok"
+    assert record is None
+    mock_api.save_prediction.assert_not_awaited()  # 回放只读不落库
+
+
+@pytest.mark.asyncio
+async def test_predict_from_trace_replay_trade_date_mismatch(monkeypatch):
+    """P4：回放 case.meta.trade_date 与参数 trade_date 不一致 → TraceUnavailableError
+    （防旧切片误用，对齐非回放路径的 snapshot.trade_date 校验先例）。"""
+    monkeypatch.setenv("REPLAY_CASE_ID", "case_p4_replay")
+    case = {
+        "case_id": "case_p4_replay",
+        "meta": {
+            "target": "600519.SH",
+            "trade_date": "2026-08-12",
+            "prediction": {},
+            "verification": {},
+        },
+    }
+    with patch(
+        "aistock_agent.iterate.case_builder.load_case", return_value=case
+    ), patch(
+        "aistock_agent.services.prediction_service.run_predict", new=AsyncMock()
+    ) as mocked_run:
+        with pytest.raises(TraceUnavailableError, match="replay case meta trade_date"):
+            await predict_from_trace("trace-1", "2026-08-13")
+    mocked_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_save_skipped_prediction_payload():
     """save_skipped_prediction：独立导出的 skipped 落库辅助（供 TraceUnavailableError 场景）。"""
     with patch("aistock_agent.services.prediction_service.node_api") as mock_api:

@@ -13,9 +13,10 @@ approximate（wire 键 due_dates_approximate），其余档精确。理由：验
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Literal
 
 import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
@@ -28,8 +29,10 @@ from aistock_agent.prompts.workers.prediction import (
     PREDICTION_PROMPT,
 )
 from aistock_agent.schemas.market_trace import (
+    DataReadiness,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
 )
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
@@ -440,7 +443,10 @@ def _corroboration_inputs(
 
 
 async def run_predict(
-    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+    trace: MarketTraceResult,
+    snapshot: MarketTraceSnapshot,
+    *,
+    replay_context: dict[str, object] | None = None,
 ) -> PredictionRunResult:
     """对已溯源的因果链推演影响持续性（状态化契约，S2）。
 
@@ -451,6 +457,10 @@ async def run_predict(
     - 到期日越年 → ok + approximate_horizons（逐档容错：越年档降级近似并标注，P2 裁决）；
     - 未预期异常（非上述已分类状态）→ logger.error + 重新抛出（不吞 bug，
       上层消费者/端点负责兜底）。
+
+    replay_context（P4 迭代回放，仅回放态传）：{recorded_prediction, verification_feedback,
+    target, replay}——并入 LLM 输入作「历史验证结果反馈」，供变体逻辑重出预判后
+    与同一 verification entries 对比；target 用于按标的读取验证画像（替代默认上证指数）。
     """
     if trace.attribution_status not in {"confirmed", "hypothesis"}:
         logger.info("prediction_skip_by_attribution_status", status=trace.attribution_status)
@@ -462,10 +472,20 @@ async def run_predict(
         # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
         try:
             prompt_input = _build_prediction_input(trace, snapshot)
+            # P4 回放：历史验证结果作为反馈注入输入（recorded prediction +
+            # verification entries），LLM 据此按变体逻辑重出预判。
+            if replay_context:
+                prompt_input = {**prompt_input, **replay_context}
             # Spec B §4.3：run_predict 绑定——大盘溯源（review）target 恒为市场指数
             # （prediction.horizons[].target 归一化到"上证指数"），画像并入输入做参考；
             # 解析/读取失败 → 原样返回不阻断产出（对齐 chat 绑定红线）。
-            prompt_input = await _enrich_market_predict_input(prompt_input)
+            # 回放态（P4）：target 由 case.meta 锚定（可能为板块/个股），按标的读画像。
+            replay_symbol: str | None = None
+            if replay_context and isinstance(replay_context.get("target"), str):
+                replay_symbol = str(replay_context["target"])
+            prompt_input = await _enrich_predict_input_for_symbol(
+                prompt_input, replay_symbol or _MARKET_PROFILE_SYMBOL
+            )
             llm = get_deep_think()
             messages = [
                 SystemMessage(content=PREDICTION_PROMPT),
@@ -572,6 +592,89 @@ async def _load_trace_and_snapshot(
     raise TraceUnavailableError(f"no trace available for review:{trade_date}")
 
 
+def _replay_minimal_trace_snapshot(
+    trade_date: str,
+) -> tuple[MarketTraceResult, MarketTraceSnapshot]:
+    """回放态最小合法 trace/snapshot（P4，无 DB 访问）。
+
+    prediction 产片源（prediction_verified_scan）不落市场快照/溯源链，case.meta
+    只带 {target, trade_date, prediction, verification}；真实上下文经 replay_context
+    注入 run_predict 的 prompt_input（历史快照源 Spec D 未落地前，回放输入 =
+    验证画像增强 + 原 prediction 输入，对齐计划 P4 裁决）。此处仅构造能通过
+    run_predict 门禁/输入构造的最小结构对象（chains 空、a_share 空）。
+    """
+    discovery = PhenomenonDiscoveryResult(
+        status="insufficient_data",
+        primary=None,
+        concurrent_phenomena=[],
+        data_readiness=DataReadiness(
+            market_data="incomplete",
+            attribution_inputs="missing",
+            causal_evidence="not_ready",
+        ),
+        diagnostics=[],
+    )
+    snapshot = MarketTraceSnapshot(
+        snapshot_id=f"replay_{trade_date}",
+        trade_date=trade_date,
+        captured_at=datetime.now(UTC),
+        a_share={},
+        sources={},
+        missing_fields=[],
+        phenomenon_discovery=discovery,
+    )
+    trace = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="confirmed",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="medium",
+        unresolved_questions=[],
+    )
+    return trace, snapshot
+
+
+async def _replay_predict_from_case(
+    case_id: str, trade_date: str
+) -> PredictionRunResult:
+    """回放态预测：从 case slice meta 重建输入（无 DB 访问），并入验证反馈。
+
+    REPLAY_CASE_ID 存在时由 predict_from_trace 顶部转调（P4）。从 case.meta 提取
+    {target, trade_date, prediction, verification}：
+    - recorded prediction + verification entries 作为回放上下文注入 run_predict
+      ——LLM 看到「前次预判 + 到期验证结果」，据此按变体逻辑重出预判；
+    - 验证画像按 case.meta target 读取（Target 维度一致，替代默认上证指数）。
+    返回 PredictionRunResult；落库由调用方跳过（回放只读，post 已被 no-op）。
+    """
+    from aistock_agent.iterate.case_builder import load_case
+
+    case = load_case(case_id)
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    meta_trade_date = str(meta.get("trade_date") or "")
+    if meta_trade_date and meta_trade_date != trade_date:
+        raise TraceUnavailableError(
+            f"replay case meta trade_date {meta_trade_date} != trade_date {trade_date}"
+        )
+    trace, snapshot = _replay_minimal_trace_snapshot(meta_trade_date or trade_date)
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    target = str(meta.get("target") or "")
+    replay_context: dict[str, object] = {
+        "replay": True,
+        "recorded_prediction": prediction,
+        "verification_feedback": [
+            v for v in verification.values() if isinstance(v, dict)
+        ],
+    }
+    if target:
+        replay_context["target"] = target
+    return await run_predict(trace, snapshot, replay_context=replay_context)
+
+
 async def predict_from_trace(
     trace_id: str, trade_date: str
 ) -> tuple[PredictionRunResult, dict[str, object] | None]:
@@ -580,6 +683,10 @@ async def predict_from_trace(
     流程：缓存直读 → DB 重建 → snapshot.trade_date 校验 → run_predict → 按状态落库。
     trace_id 当前用于日志标识（source_id 统一为 review:{trade_date}，与 review 内联落库一致）；
     后续个股溯源/事件传导复用本入口时，trace_id 可作为溯源标识扩展点。
+
+    REPLAY 回放态（P4）：REPLAY_CASE_ID 环境变量存在时，顶部转调
+    `_replay_predict_from_case`——从 case slice meta 重建输入（无 DB 访问）、
+    并入验证反馈，且不落库（record=None）。
 
     落库规则：
     - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；越年近似档
@@ -590,6 +697,12 @@ async def predict_from_trace(
     Returns:
         (run_result, save_prediction 返回的 record 或 None)。
     """
+    if os.environ.get("REPLAY_CASE_ID"):
+        # P4 回放态：从 case slice meta 重建输入，回放只读不落库
+        return (
+            await _replay_predict_from_case(os.environ["REPLAY_CASE_ID"], trade_date),
+            None,
+        )
     trace, snapshot = await _load_trace_and_snapshot(trace_id, trade_date)
     # 校验：快照日期必须与目标交易日一致（对照 review.py L983 先例，防旧快照误用）
     if snapshot.trade_date != trade_date:
@@ -766,23 +879,34 @@ async def _enrich_chat_input_with_profile(
 _MARKET_PROFILE_SYMBOL = "上证指数"
 
 
-async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
-    """Spec B §4.3：run_predict（大盘溯源）预判产出方绑定——读市场指数验证画像并入输入。"""
+async def _enrich_predict_input_for_symbol(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：按 symbol 读验证画像并入预判输入（回放态按 case.meta target 分层）。
+
+    大盘溯源（review）固定上证指数；P4 迭代回放用产片源锚定的 target（可能为
+    板块/个股），Target 维度一致。红线：画像只作输入参考；解析 target 失败/读取
+    异常 → 原样返回（不阻断产出）。
+    """
     from aistock_agent.skills.prediction_validation import (
         enrich_prediction_input,
         read_validation_profile,
     )
 
-    target = make_target(_MARKET_PROFILE_SYMBOL)
+    target = make_target(symbol)
     if target is None:
         return prompt_input
     try:
         profile = await read_validation_profile(target)
     except Exception:  # noqa: BLE001
-        logger.debug("run_predict.enrich_profile_failed", symbol=_MARKET_PROFILE_SYMBOL,
-                     exc_info=True)
+        logger.debug("predict_input.enrich_profile_failed", symbol=symbol, exc_info=True)
         return prompt_input
     return enrich_prediction_input(prompt_input, profile)
+
+
+async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
+    """Spec B §4.3：run_predict（大盘溯源）预判产出方绑定——读市场指数验证画像并入输入。"""
+    return await _enrich_predict_input_for_symbol(prompt_input, _MARKET_PROFILE_SYMBOL)
 
 
 # P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
