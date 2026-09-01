@@ -11,6 +11,7 @@ import pytest
 from aistock_agent.schemas.target import Target
 from aistock_agent.skills.prediction_validation import (
     _collect_target_confirmations,
+    enrich_prediction_input,
     read_validation_profile,
 )
 
@@ -76,3 +77,23 @@ async def test_read_profile_includes_channel_b() -> None:
     assert profile["source"] == "rebuilt"
     assert profile.get("scenario_harvest", {}).get("confirmed", {}).get("降息预期兑现", 0) == 1
     assert "evidence_confirmed" in profile
+
+
+def test_enrich_surfaces_confirmed_scenarios() -> None:
+    profile: dict[str, object] = {
+        "target": "000001.SH", "n": 10, "hit_rate": 0.5,
+        "sufficient_sample": True,
+        "scenario_harvest": {"confirmed": {"降息预期兑现": 3, "流动性宽松": 1}, "unconfirmed": {}},
+    }
+    out = enrich_prediction_input({"text": "x"}, profile)
+    assert "scenario_signal" in out
+    found = [s["scenario"] for s in out["scenario_signal"]["confirmed"]]
+    assert "降息预期兑现" in found
+    assert out["scenario_signal"]["confirmed"][0]["count"] >= out["scenario_signal"]["confirmed"][1]["count"]
+
+
+def test_enrich_no_harvest_no_signal() -> None:
+    profile: dict[str, object] = {"target": "000001.SH", "n": 0, "hit_rate": 0.0,
+                                  "sufficient_sample": False}
+    out = enrich_prediction_input({"text": "x"}, profile)
+    assert "scenario_signal" not in out

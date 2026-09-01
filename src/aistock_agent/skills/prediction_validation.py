@@ -250,6 +250,10 @@ def enrich_prediction_input(
 
     红线：只作**输入参考**——不改写 hit/miss 判定、不产交易指令、不在代码层钳制
     confidence（A3 置信钳制仍由产出方后处理覆盖，此处仅是 LLM 输入提示词上下文）。
+
+    当 profile 含被现实多轮印证的 ``scenario_harvest.confirmed`` 场景时，额外并入可选的
+    ``scenario_signal`` 块（按印证次数降序排列，供 LLM 预判时适当提高对应条件权重）；
+    无 confirmed 场景时不含该块。``validation_profile`` 行为保持不变。
     """
     n = int(cast(float, profile.get("n", 0)))
     rate = float(cast(float, profile.get("hit_rate", 0.0)))
@@ -268,6 +272,25 @@ def enrich_prediction_input(
         )
     out = dict(base_input)
     out["validation_profile"] = ctx
+    # Spec Cbis（渠道B）：被现实多次印证的场景 → 给 LLM 提权提示（纯输入参考）
+    harvest = profile.get("scenario_harvest")
+    confirmed = harvest.get("confirmed") if isinstance(harvest, dict) else None
+    if isinstance(confirmed, dict):
+        ranked = sorted(
+            ((sc, c) for sc, c in confirmed.items() if c > 0),
+            key=lambda kv: kv[1], reverse=True,
+        )
+        if ranked:
+            out["scenario_signal"] = {
+                "confirmed": [
+                    {"scenario": sc, "count": c}
+                    for sc, c in ranked
+                ],
+                "note": (
+                    "以下场景在历史溯源中被现实多次印证，预判时可适当提高其 conditions[] 权重；"
+                    "仅供输入参考，不产交易指令。"
+                ),
+            }
     return out
 
 
