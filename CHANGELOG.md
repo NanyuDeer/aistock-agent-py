@@ -2,6 +2,22 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-09-01 — 四环三粒度 Target 维度地基（TargetProfile 引擎独立提交）
+
+**开发者**: Aria
+
+### 新增
+- `services/target_profile.py`：`TARGET_PROFILES` 注册表（index/sector/stock 三粒度，每项含溯源 prompt/证据源/快照构造/默认周期/K线拉取/迭代阈值）+ `get_profile` 一次查表 + `get_iterate_threshold`（horizon×场景分层阈值，`resolve_raw_threshold` fail-closed）+ `make_target`（LLM 自由文本 → 首类 `Target`）+ `canonical_ts_code`（裸 6 位码带交易所后缀，防指数/个股空间冲突）
+- `tests/unit/test_target_profile.py`：20 例（模型约束 `extra=forbid`/注册表三粒度覆盖/阈值分层命中与 fallback/首类构造/ts_code 数据卫生）
+
+### 说明
+- 仅依赖已提交的 `schemas/target.py` 与 `prediction_targets.py`；`prediction_targets.classify_target`（legacy 字符串四分类）保持不动。本模块是后续 Spec B/C/D 落地的统一入口，`get_iterate_threshold` 消费方待阶段 5 / Spec1 接入。
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 清空 TargetProfile 待办
+
+---
+
 ## [main] 2026-09-01 — 条件化预判改造（Spec A，三端全量收尾）
 
 **开发者**: Aria
