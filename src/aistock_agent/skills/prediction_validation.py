@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from aistock_agent.prompts.workers.prediction_validation import (
     PREDICTION_VALIDATION_PROMPT,
 )
+from aistock_agent.schemas.market_trace import MarketTraceResult
 from aistock_agent.schemas.target import Target
 from aistock_agent.services.cache import (
     get_cached_validation_profile,
@@ -42,6 +43,9 @@ _PROFILE_METHODOLOGY_VERSION = "3.0"
 
 # 画像缓存 TTL（秒）：run_once 每日 16:00 更新，86400 即每日失效重算。
 _PROFILE_CACHE_TTL = 86400
+
+# 渠道B回扫窗口（天）：回扫近 N 日 review 报告，抽"被现实印证的场景"确认信号。
+_CNF_WINDOW_DAYS = 10
 
 
 def _record_target(prediction: object) -> str | None:
@@ -105,6 +109,64 @@ async def _collect_target_entries(target: Target) -> list[dict[str, object]]:
     return entries
 
 
+def _extract_primary_confirmed(trace: dict[str, object]) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    candidates = trace.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            chain = candidate.get("chain")
+            if not isinstance(chain, dict):
+                continue
+            cnf = chain.get("confirmed_prediction")
+            if isinstance(cnf, list):
+                for item in cnf:
+                    if isinstance(item, dict):
+                        out.append(item)
+    return out
+
+
+async def _collect_target_confirmations(
+    target: Target, window_days: int = _CNF_WINDOW_DAYS
+) -> list[dict[str, object]]:
+    """渠道B：回扫近 window_days 日 review 报告，抽 primary/alternative 链的确认证据.
+    同一(idx prediction+scenario)的确认信号跨日去重，避免窗口重扫把同一次印证重复计数。
+    失败/无报告统一降级返回 []。板块/个股画像渠道B回扫见计划跟随项。
+    """
+    from datetime import date as date_type, timedelta
+
+    confirmations: list[dict[str, object]] = []
+    seen: set[tuple[object, object]] = set()
+    today = date_type.today()
+    try:
+        for offset in range(window_days):
+            d = (today - timedelta(days=offset)).isoformat()
+            reports = await node_api.list_analysis_reports("review", d)
+            for rep in reports or []:
+                if not isinstance(rep, dict) or rep.get("status") != "completed":
+                    continue
+                content = rep.get("content")
+                market_trace = content.get("market_trace") if isinstance(content, dict) else None
+                trace_data = market_trace.get("trace") if isinstance(market_trace, dict) else None
+                if not isinstance(trace_data, dict):
+                    continue
+                try:
+                    trace = MarketTraceResult.model_validate(trace_data).model_dump(mode="json")
+                except Exception:
+                    continue
+                for item in _extract_primary_confirmed(trace):
+                    key = (item.get("prediction_id"), item.get("scenario"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    confirmations.append(item)
+    except Exception:
+        logger.debug("collect_confirmations_failed", target=target.internal_id, exc_info=True)
+        return []
+    return confirmations
+
+
 async def read_validation_profile(
     target: Target,
     horizon: str | None = None,
@@ -117,6 +179,7 @@ async def read_validation_profile(
 
     Returns: {target, n, hits, hit_rate, ci, sufficient_sample, condition_met_rate,
               condition_summary, miss_patterns, horizon_breakdown, degradation_rate,
+              evidence_confirmed, scenario_harvest,
               source: "cache"|"rebuilt", cached: bool}（horizon 给定则叠加单档切片）。
     """
     cached = await get_cached_validation_profile(target.internal_id)
@@ -124,8 +187,10 @@ async def read_validation_profile(
         out = _slice_horizon(cached, horizon) if horizon else cached
         return {**out, "source": "cache", "cached": True}
     entries = await _collect_target_entries(target)
+    confirmations = await _collect_target_confirmations(target)
     profile = build_validation_profile(
-        entries, target.internal_id, methodology_version=_PROFILE_METHODOLOGY_VERSION
+        entries, target.internal_id, methodology_version=_PROFILE_METHODOLOGY_VERSION,
+        confirmations=confirmations,
     )
     await set_cached_validation_profile(target.internal_id, profile, ttl=ttl)
     out = _slice_horizon(profile, horizon) if horizon else profile
