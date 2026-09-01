@@ -36,6 +36,7 @@ from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.prediction_targets import classify_target
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.services.llm import (
     get_deep_think,
     get_quick_think,
@@ -461,6 +462,10 @@ async def run_predict(
         # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
         try:
             prompt_input = _build_prediction_input(trace, snapshot)
+            # Spec B §4.3：run_predict 绑定——大盘溯源（review）target 恒为市场指数
+            # （prediction.horizons[].target 归一化到"上证指数"），画像并入输入做参考；
+            # 解析/读取失败 → 原样返回不阻断产出（对齐 chat 绑定红线）。
+            prompt_input = await _enrich_market_predict_input(prompt_input)
             llm = get_deep_think()
             messages = [
                 SystemMessage(content=PREDICTION_PROMPT),
@@ -728,6 +733,58 @@ def _build_chat_prediction_input(
     return payload
 
 
+async def _enrich_chat_input_with_profile(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：预判产出方绑定——产出前读 target 验证画像并入 LLM 输入。
+
+    依赖 skill 的 read_validation_profile + enrich_prediction_input（缓存优先，miss 拉取重算）。
+    红线：画像只作输入参考；解析 target 失败/读取异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    if not symbol:
+        return prompt_input
+    target = make_target(symbol)
+    if target is None:
+        logger.debug("chat_prediction.enrich_skipped_no_target", symbol=symbol)
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("chat_prediction.enrich_profile_failed", symbol=symbol, exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
+# run_predict（大盘溯源）反哺画像的代表 target：run_predict 预测的是市场整体影响
+# 持续性，prediction.horizons[].target 归一化到上证指数（INDEX_TARGETS 首个）。绑定
+# 到该指数画像即可复用验证闭环；target 解析/读取失败 → 原样返回（同 chat 红线）。
+_MARKET_PROFILE_SYMBOL = "上证指数"
+
+
+async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
+    """Spec B §4.3：run_predict（大盘溯源）预判产出方绑定——读市场指数验证画像并入输入。"""
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    target = make_target(_MARKET_PROFILE_SYMBOL)
+    if target is None:
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("run_predict.enrich_profile_failed", symbol=_MARKET_PROFILE_SYMBOL,
+                     exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
 # P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
 _PRICE_PATTERN = re.compile(r"\d+(?:\.\d{1,2})?\s*元")
 _RANGE_PATTERN = re.compile(r"\d{3,6}\s*[-~至]\s*\d{3,6}\s*(?:点|区间)?")
@@ -861,6 +918,10 @@ async def run_chat_prediction(
         return None
     try:
         prompt_input = _build_chat_prediction_input(snapshot, news, context)
+        # Spec B §4.3：验证画像并入 LLM 输入（预判反哺；only 输入参考，异常/无 target 不阻断）
+        prompt_input = await _enrich_chat_input_with_profile(
+            prompt_input, str(snapshot.get("symbol", "") or ""),
+        )
         # P10 计费口径：对齐 skill_executor 其它 skill，用 quick_think 单次调用
         # （deep_think 26-47s/次，chat UX 不可接受）；json_mode 结构化输出
         # （DeepSeek thinking 兼容，项目记忆 lesson 8）直接产出已解析的

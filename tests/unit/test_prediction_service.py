@@ -4,6 +4,7 @@ from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import HumanMessage
 from pydantic import ValidationError
 
 from aistock_agent.config import settings
@@ -948,3 +949,124 @@ async def test_run_chat_prediction_fills_corroboration_without_touching_confiden
     assert out is not None
     assert out.evidence_corroboration is not None
     assert out.horizons[0].confidence == "high"  # 佐证信号不覆盖 confidence
+
+
+# ---------- Spec B P5：预判产出方绑定（验证画像并入 chat LLM 输入） ----------
+
+
+@pytest.mark.asyncio
+async def test_enrich_chat_input_with_profile_adds_profile_block():
+    """Spec B §4.3：symbol 可解析 → read_validation_profile 结果经 enrich 并入输入。"""
+    from aistock_agent.services import prediction_service as ps
+
+    base = {"input_mode": "snapshot_driven", "symbol": "600519"}
+    with (
+        patch("aistock_agent.skills.prediction_validation.read_validation_profile",
+              new=AsyncMock(return_value={
+                  "target": "600519.SH", "n": 40, "hit_rate": 0.25,
+                  "sufficient_sample": True, "condition_met_rate": None},
+              )) as rp,
+    ):
+        out = await ps._enrich_chat_input_with_profile(base, "600519")
+    assert "validation_profile" in out
+    vp = out["validation_profile"]
+    assert vp["target"] == "600519.SH" and vp["hit_rate"] == 0.25
+    assert "note" in vp and "命中率低" in vp["note"]
+    rp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_enrich_chat_input_with_profile_unresolvable_returns_unchanged():
+    """Spec B §4.3：symbol 无法解析为 Target → 原样返回（不阻断产出）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    base = {"input_mode": "snapshot_driven", "symbol": "没有标点词的抽象表述"}
+    with patch(
+        "aistock_agent.skills.prediction_validation.read_validation_profile",
+        new=AsyncMock(),
+    ) as rp:
+        out = await ps._enrich_chat_input_with_profile(base, "没有标点词的抽象表述")
+    assert out == base
+    rp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enrich_chat_input_with_profile_read_failure_degrades():
+    """Spec B §4.3：画像读取异常 → 原样返回（红线：反哺失败不阻断预判产出）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    base = {"input_mode": "snapshot_driven", "symbol": "600519"}
+    with patch(
+        "aistock_agent.skills.prediction_validation.read_validation_profile",
+        new=AsyncMock(side_effect=RuntimeError("redis down")),
+    ):
+        out = await ps._enrich_chat_input_with_profile(base, "600519")
+    assert out == base
+
+
+@pytest.mark.asyncio
+async def test_enrich_market_predict_input_adds_profile_block():
+    """Spec B §4.3 run_predict：市场指数可解析 → 上证指数画像经 enrich 并入输入。"""
+    from aistock_agent.services import prediction_service as ps
+
+    base = {"input_mode": "trace_driven"}
+    with patch(
+        "aistock_agent.skills.prediction_validation.read_validation_profile",
+        new=AsyncMock(return_value={
+            "target": "000001.SH", "n": 40, "hit_rate": 0.25,
+            "sufficient_sample": True, "condition_met_rate": None},
+        ),
+    ) as rp:
+        out = await ps._enrich_market_predict_input(base)
+    assert "validation_profile" in out
+    vp = out["validation_profile"]
+    assert vp["target"] == "000001.SH" and vp["hit_rate"] == 0.25
+    assert "note" in vp and "命中率低" in vp["note"]
+    rp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_enrich_market_predict_input_read_failure_degrades():
+    """Spec B §4.3 run_predict：画像读取异常 → 原样返回（不阻断大盘溯源产出）。"""
+    from aistock_agent.services import prediction_service as ps
+
+    base = {"input_mode": "trace_driven"}
+    with patch(
+        "aistock_agent.skills.prediction_validation.read_validation_profile",
+        new=AsyncMock(side_effect=RuntimeError("redis down")),
+    ):
+        out = await ps._enrich_market_predict_input(base)
+    assert out == base
+
+
+@pytest.mark.asyncio
+async def test_run_predict_prompt_includes_validation_profile():
+    """Spec B §4.3 run_predict 集成：产出前并入市场指数画像 → LLM 输入含 validation_profile。"""
+    from aistock_agent.services import prediction_service as ps
+
+    captured: dict = {}
+    llm = AsyncMock()
+    llm.ainvoke = AsyncMock(side_effect=lambda msgs: _capture_and_return(msgs, captured))
+    with (
+        patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm),
+        patch(
+            "aistock_agent.skills.prediction_validation.read_validation_profile",
+            new=AsyncMock(return_value={
+                "target": "000001.SH", "n": 40, "hit_rate": 0.25,
+                "sufficient_sample": True, "condition_met_rate": None},
+            ),
+        ),
+    ):
+        result = await ps.run_predict(_make_trace(), _make_snapshot())
+    assert result.status == "ok"
+    prompt_input = json.loads(captured["human"])
+    assert "validation_profile" in prompt_input
+    assert prompt_input["validation_profile"]["n"] == 40
+
+
+def _capture_and_return(messages, captured: dict):
+    """test helper：捕获 HumanMessage 输入并返回合法 LLM JSON（避免内联 lambda 阻塞断言）。"""
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            captured["human"] = m.content
+    return AsyncMock(content=_VALID_LLM_JSON)

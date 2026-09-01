@@ -2,6 +2,27 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-09-01 — Spec B 预判验证闭环（验证 skill + 画像 + 个股数据源 + 三处反哺）
+
+**开发者**: Aria
+
+### 新增
+- `skills/prediction_validation.py`：验证 skill——`read_validation_profile`（缓存优先，miss 拉 verified 重算，key 用 `internal_id`）+ `explain_verification`（LLM 解释层，失败降级规则兜底）+ `enrich_prediction_input`（纯函数并入 `validation_profile` 块，红线：不改判定/不产指令/不覆盖 A3）
+- `prompts/workers/prediction_validation.py`：解释层 prompt
+- `services/cache.py`：`get/set_cached_validation_profile`（key `prediction:profile:{internal_id}`，TTL 86400）
+- `services/prediction_stats.py`：`build_validation_profile` 纯函数（condition 级命中率/miss_patterns/condition_met 分布/失效模式/degradation）
+- `services/data_client.py`：`get_stock_kline(code, days, start_date, end_date)`（复用 `get` 解包 `data.rows`）
+
+### 改进
+- `services/prediction_validator.py`：`_fetch_kline_window` 补 stock 分支（个股日 K 走 `get_stock_kline`，带区间参数 [due-20, due+10]）+ `_write_validation_profiles` 到期验证落画像（接管）
+- `services/prediction_service.py`：`run_chat_prediction` 绑定 `_enrich_chat_input_with_profile`；`run_predict` 绑定 `_enrich_market_predict_input`（大盘溯源代表 target=上证指数）
+- `services/morning_forecast_extractor.py`：新增 `_enrich_morning_summary_with_profile` 展示侧反哺（sufficient_sample 时 summary 追加历史命中率；缓存存原始 LLM 结果防陈旧；异常降级保持原文）
+
+### 测试
+- 新增 `tests/unit/test_prediction_validation.py`；扩充 prediction_stats/prediction_validator/prediction_service/morning_forecast_extractor 测试。晨报 9 例、预测相关 113 例全绿；mypy 通过
+
+---
+
 ## [main] 2026-09-01 — 四环三粒度 Target 维度地基（TargetProfile 引擎独立提交）
 
 **开发者**: Aria

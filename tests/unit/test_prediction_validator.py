@@ -260,7 +260,75 @@ async def test_fetch_kline_window_malformed_due_returns_none():
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])) as m:
         out = await pv._fetch_kline_window("index", "000001", "not-a-date")
     assert out is None
-    m.assert_not_awaited()  # 窗口无法确定，不应发请求
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_window_stock_calls_quote_kline():
+    """Spec B §4.5：个股走 get_stock_kline（/internal/quote/{code}/kline），
+    且携带与指数一致的区间参数（[due-20, due+10]），返回归一化行。"""
+    rows = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.5},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3},
+    ]
+    with patch.object(pv.node_api, "get_stock_kline", new=AsyncMock(return_value=rows)) as m:
+        out = await pv._fetch_kline_window("stock", "600519", "2026-08-10")
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5},
+                   {"trade_date": "2026-08-11", "pct_chg": 0.3}]
+    _, kwargs = m.call_args
+    assert kwargs["start_date"] == "20260721"
+    assert kwargs["end_date"] == "20260820"
+
+
+@pytest.mark.asyncio
+async def test_resolve_verify_target_stock_code():
+    """Spec B §4.5：6 位个股裸码 → (code, "stock", None)，绕过板块 resolve（不发网络请求）。"""
+    with patch.object(
+        prediction_validator,
+        "resolve_sector_target",
+        new=AsyncMock(return_value=None),
+    ):
+        code, target_type, matched = await pv._resolve_verify_target("600519")
+    assert code == "600519"
+    assert target_type == "stock"
+    assert matched is None
+
+
+@pytest.mark.asyncio
+async def test_run_once_verifies_stock_horizon():
+    """Spec B §4.5：个股 target 到期验证落地（target_type=stock，不再落 no_source）。"""
+    record = _pending_record(due="2026-08-10", target="600519")
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_stock_kline",
+            new=AsyncMock(return_value=[
+                {"trade_date": "2026-08-10", "pct_chg": 1.2},  # due 当日 +1.2% → hit, strong_hit
+                {"trade_date": "2026-08-11", "pct_chg": 0.3},
+                {"trade_date": "2026-08-12", "pct_chg": -0.2},
+                {"trade_date": "2026-08-13", "pct_chg": 0.1},
+            ]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 10),
+        ),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    entry = update.await_args.args[2]
+    assert entry["result"] == "hit"
+    assert entry["target_type"] == "stock"
+    assert entry["actual"] == "+1.40%"
 
 
 @pytest.mark.asyncio
@@ -842,3 +910,105 @@ async def test_backfill_no_data_rewrites_keep_v2_version():
     # backfill 保持 2.0 口径：bullish any>0（单日 +1.0%）→ hit；若误用 3.0 累计 sum=-2.5 → miss
     assert entry["result"] == "hit"
     assert entry["methodology_version"] == "2.0"
+
+
+def _verified_rec(target, entries):
+    """构造一条 verified 记录（指定 target + verification entries）。"""
+    return {
+        "id": target,
+        "prediction": {"horizons": [{"horizon": "mid", "target": target,
+                                     "direction": "bullish"}]},
+        "verification": {str(i): e for i, e in enumerate(entries)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_write_validation_profiles_groups_by_target():
+    """Spec B §7 P4：run_once 接管——按 target 落画像缓存（key 用稳定 internal_id）。"""
+    # stock target（600519）与 index target（000001 -> 000001.SH code）
+    records = [
+        _verified_rec("600519", [
+            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
+            {"result": "miss", "methodology_version": "3.0", "target_type": "stock"},
+        ]),
+        _verified_rec("上证指数", [
+            {"result": "hit", "methodology_version": "3.0", "target_type": "index"},
+        ]),
+    ]
+    written: dict[str, object] = {}
+    async def _set(key, profile, ttl=None):
+        written[key] = profile
+        return True
+    with (
+        patch.object(prediction_validator.node_api, "list_verified_predictions",
+                     new=AsyncMock(return_value=records)),
+        patch.object(prediction_validator, "set_cached_validation_profile",
+                     new=_set),
+    ):
+        n = await pv._write_validation_profiles()
+    assert n == 2
+    # key = _resolve_verify_target 收敛的稳定 code（stock 裸码 / index 裸码，不加交易所后缀）
+    assert set(written) == {"600519", "000001"}
+    assert written["600519"]["n"] == 2 and written["600519"]["hit_rate"] == 0.5
+    assert written["000001"]["n"] == 1 and written["000001"]["hit_rate"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_write_validation_profiles_skips_early_exit_no_result():
+    """Spec B §7 P4：early_exit-only（无 result）不入画像；无 target 的记录被跳过。"""
+    records = [
+        _verified_rec("600519", [
+            {"meaning": "early_exit", "horizon": "mid"},  # 无 result → 不计入
+            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
+        ]),
+        {"id": 9, "prediction": {"horizons": []}, "verification": {"h": {"result": "miss"}}},
+    ]
+    written: dict[str, object] = {}
+    async def _set(key, profile, ttl=None):
+        written[key] = profile
+        return True
+    with (
+        patch.object(prediction_validator.node_api, "list_verified_predictions",
+                     new=AsyncMock(return_value=records)),
+        patch.object(prediction_validator, "set_cached_validation_profile",
+                     new=_set),
+    ):
+        n = await pv._write_validation_profiles()
+    assert n == 1
+    assert written["600519"]["n"] == 1  # 只算带 result 的 hit
+    assert "9" not in written  # horizons 空 → 无 target → 跳过
+
+
+@pytest.mark.asyncio
+async def test_run_once_writes_profile_after_verification():
+    """Spec B §7 P4：run_once 收尾调用 _write_validation_profiles（结果成功回写后落画像）。"""
+    record = _pending_record(due="2026-08-10", target="600519")
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.node_api, "list_verified_predictions",
+                     new=AsyncMock(side_effect=[[], [{  # backfill 空 + 画像窗口含 600519 hit
+                         "id": 1,
+                         "prediction": {"horizons": [{"target": "600519"}]},
+                         "verification": {"h": {"result": "hit", "methodology_version": "3.0",
+                                                "target_type": "stock"}},
+                     }]])),
+        patch.object(prediction_validator.node_api, "get_stock_kline",
+                     new=AsyncMock(return_value=[
+                         {"trade_date": "2026-08-10", "pct_chg": 1.2},
+                         {"trade_date": "2026-08-11", "pct_chg": 0.3},
+                         {"trade_date": "2026-08-12", "pct_chg": -0.2},
+                         {"trade_date": "2026-08-13", "pct_chg": 0.1},
+                     ])),
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=AsyncMock(return_value={"id": 1})),
+        patch.object(prediction_validator, "set_cached_validation_profile",
+                     new=AsyncMock(return_value=True)) as setp,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 8, 10)),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    assert setp.await_count == 1
+    key = setp.await_args.args[0]
+    assert key == "600519"
