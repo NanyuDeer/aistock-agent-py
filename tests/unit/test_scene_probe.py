@@ -1,4 +1,5 @@
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -23,6 +24,7 @@ def test_match_scenarios_empty_and_blank() -> None:
 async def test_probe_uses_injected_predictions() -> None:
     target = Target(kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数")
     rec = {
+        "id": "p1",
         "prediction": {
             "horizons": [{"target": "上证指数"}],
             "conditions": [{"scenario": "降息预期兑现", "direction": "up"}],
@@ -62,4 +64,15 @@ async def test_probe_skips_other_target() -> None:
     got = await probe_scene_confirmation(
         target=target, trace_id="tr3", conclusion="降息预期兑现", fetched_predictions=[rec]
     )
+    assert got == []
+
+
+@pytest.mark.asyncio
+async def test_probe_degrades_on_fetch_failure() -> None:
+    target = Target(kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数")
+    with patch("aistock_agent.skills.scene_probe.node_api") as m_node:
+        m_node.list_verified_predictions = AsyncMock(side_effect=RuntimeError("fetch fail"))
+        got = await probe_scene_confirmation(
+            target=target, trace_id="trX", conclusion="降息预期兑现"
+        )
     assert got == []

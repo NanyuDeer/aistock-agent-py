@@ -127,15 +127,11 @@ async def probe_scene_confirmation(
         record_target = _record_target(prediction)
         if record_target is None or record_target not in accepted_targets:
             continue
-        if "id" in rec:
-            # 规范约束：id 存在但非非空 str（如空串/非 str）→ 跳过，避免脏记录回流
-            prediction_id = rec.get("id")
-            if not isinstance(prediction_id, str) or not prediction_id:
-                continue
-        else:
-            # 注入型记录（测试）常省略 id，真实记录由 Node 端保证有 id；
-            # 缺失时兜底非空占位，仍让命中的场景回流为确认证据。
-            prediction_id = "<unknown>"
+        prediction_id = rec.get("id")
+        if not isinstance(prediction_id, str) or not prediction_id:
+            # 数据卫生：prediction_id 必须为非空 str，缺失/非法则整条记录跳过，
+            # 避免含不可溯源 id 的脏记录回流为 channel B 证据。
+            continue
         scenarios = _scenarios_from_prediction(prediction)
         matched = match_scenarios(conclusion, scenarios)
         for scenario in matched:
