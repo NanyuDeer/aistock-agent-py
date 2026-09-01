@@ -5,7 +5,11 @@ import pytest
 
 from aistock_agent.services import prediction_validator
 from aistock_agent.services import prediction_validator as pv
-from aistock_agent.services.prediction_validator import _INDEX_CODE_MAP, run_once
+from aistock_agent.services.prediction_validator import (
+    _INDEX_CODE_MAP,
+    _should_skip_horizon,
+    run_once,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -668,6 +672,18 @@ async def test_run_once_backfill_runs_when_no_pending():
     assert updated == 0  # 主链路无新增；回补数不入返回值（resolution 4）
     assert update.await_count == 1
     assert update.await_args.args[2]["result"] == "hit"
+
+
+def test_early_exit_only_entry_does_not_skip():
+    """A1：early_exit-only 状态 dict（无 result）不阻塞到期验证。"""
+    entry = {"early_exit": {"state": "armed"}}
+    assert _should_skip_horizon(entry) is False
+
+
+def test_result_entry_skips():
+    """A1：已含 result（hit/miss/insufficient）的档位跳过到期验证。"""
+    entry = {"result": "hit"}
+    assert _should_skip_horizon(entry) is True
 
 
 # ============ 阶段 0：3.0 窗口累计主判 ============

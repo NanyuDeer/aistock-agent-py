@@ -324,3 +324,25 @@ def test_sanitize_no_observations_when_all_triggered():
     assert "observations" not in cleaned or len(cleaned.get("observations", [])) == 0
     assert len(cleaned["analysis"]) == 2
     assert len(cleaned["optimization_suggestions"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# build_scorecard — evidence_kind 证据来源维度标注（B1）
+# ---------------------------------------------------------------------------
+
+
+def test_scorecard_has_evidence_kind():
+    """每个维度的评分卡必须标注证据来源类型"""
+    from aistock_agent.services.iterate_analyzer import build_scorecard
+
+    snapshot = {
+        "dimension_1_coverage": {"hit_rate": 0.9, "new_coverage_rate": 0.1},
+        "dimension_2_direction": {"mean_deviation": 1.0},
+        "dimension_3_attribution": {"attribution_match_rate": 0.8},
+    }
+    rolling = {"ma10": {"mean_deviation": 0.5}, "ma20": {"sentiment_bias": 0.05}}
+
+    card = build_scorecard(snapshot, rolling)
+    assert card["dimension_1"]["evidence_kind"] == "deterministic"
+    assert card["dimension_3"]["evidence_kind"] == "llm_derived"
+    assert card["dimension_4"]["evidence_kind"] == "llm_derived"

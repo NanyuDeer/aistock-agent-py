@@ -12,10 +12,13 @@ from aistock_agent.schemas.market_trace import (
     MarketTraceSnapshot,
     ReviewArtifact,
 )
-from aistock_agent.schemas.prediction import PredictionResult
+from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     TraceUnavailableError,
+    _apply_confidence_cap,
+    _load_horizon_stats,
+    corroborate_evidence,
     predict_from_trace,
     render_prediction_markdown,
     run_chat_prediction,
@@ -749,3 +752,150 @@ async def test_run_chat_prediction_no_due_dates_call(monkeypatch):
     assert result.prediction_status == "hypothesis"
     structured_ainvoke.assert_awaited()
     assert called == []
+
+
+# ---------- A3 确定性钳制：_apply_confidence_cap（confidence_source 接线） ----------
+
+
+def test_apply_cap_short_capped_when_bucket_loses():
+    stats = {
+        "short": (
+            {"n": 40, "hits": 10, "hit_rate": 0.25, "ci": (0.13, 0.41)},
+            {"n": 40, "hits": 24, "hit_rate": 0.60},
+        )
+    }
+    conf, source = _apply_confidence_cap("short", "high", stats, mid_enabled=False)
+    assert conf == "medium"
+    assert source == "deterministic"
+
+
+def test_apply_cap_keeps_llm_when_bucket_wins():
+    stats = {
+        "short": (
+            {"n": 40, "hits": 28, "hit_rate": 0.7, "ci": (0.54, 0.82)},
+            {"n": 40, "hits": 20, "hit_rate": 0.5},
+        )
+    }
+    conf, source = _apply_confidence_cap("short", "high", stats, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"
+
+
+def test_apply_cap_mid_disabled_keeps_llm():
+    conf, source = _apply_confidence_cap("mid", "high", None, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"
+
+
+def test_apply_cap_long_never_capped():
+    conf, source = _apply_confidence_cap("long", "high", None, mid_enabled=False)
+    assert conf == "high"
+    assert source == "llm"
+
+
+# ---------- A3 per-horizon 聚合：_load_horizon_stats（Task 3） ----------
+
+
+def _entry(result, baseline=None):
+    # 对齐验证器真实回写结构：methodology_version=2.0 是 hit_rate_summary /
+    # baseline_neutral_summary 的过滤前提（缺失会被整体过滤为 n=0，fixture 偏差已修正）
+    e = {"methodology_version": "2.0", "result": result}
+    if baseline is not None:
+        e["baseline_neutral"] = baseline
+    return e
+
+
+def test_load_horizon_stats_groups_by_horizon_and_excludes_early_exit():
+    records = [
+        {
+            "id": "p1",
+            "horizons": {"short": {}, "mid": {}, "long": {}},
+            "verification": {
+                "short": _entry("hit", True),
+                "mid": _entry("miss", False),
+                "long": {"early_exit": {"state": "armed"}},  # 无 result，应剔除
+            },
+        },
+    ]
+    stats = _load_horizon_stats(records)
+    assert "short" in stats and "mid" in stats
+    assert "long" not in stats  # early_exit-only 不参与统计
+    assert stats["short"][0]["n"] == 1
+    assert stats["short"][0]["hits"] == 1
+    assert stats["short"][1]["hit_rate"] == 1.0  # baseline_neutral=True → baseline 命中
+
+
+def test_load_horizon_stats_empty_records():
+    assert _load_horizon_stats([]) == {}
+
+
+# ---------- A2 独立源冲突检测：corroborate_evidence（Task 6） ----------
+
+
+def test_corroborated_two_channels_with_non_price():
+    out = corroborate_evidence(
+        quote_dir=1, flow_dir=1, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "corroborated"
+    assert out["independent_sources"] == 2
+    assert out["non_price_sources"] == 1
+
+
+def test_insufficient_single_price_source_only():
+    out = corroborate_evidence(quote_dir=1, flow_dir=None, news_dirs=[], direction="bullish")
+    assert out["verdict"] == "insufficient"
+    assert out["non_price_sources"] == 0
+
+
+def test_zero_sources_insufficient_no_conflict():
+    out = corroborate_evidence(
+        quote_dir=None, flow_dir=None, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "insufficient"
+    assert out["conflict"] is False
+
+
+def test_conflict_when_price_opposes_direction():
+    out = corroborate_evidence(
+        quote_dir=-1, flow_dir=1, news_dirs=[], direction="bullish",
+    )
+    assert out["verdict"] == "conflicted"
+    assert out["conflict"] is True
+
+
+def test_news_majority_direction():
+    out = corroborate_evidence(
+        quote_dir=1, flow_dir=None, news_dirs=[1, 1, -1], direction="bullish",
+    )
+    assert out["verdict"] == "corroborated"
+
+
+# ---------- A2 接线：run_chat_prediction 填充 evidence_corroboration（Task 7） ----------
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_fills_corroboration_without_touching_confidence():
+    """A2 接线：LLM 返回后填充 evidence_corroboration，且 confidence 不被佐证信号覆盖。"""
+    horizon = PredictionHorizon(
+        horizon="short", remaining_estimate="2-4 周", phase="building",
+        direction="bullish", target="上证指数", metric_projection="站上 4000",
+        confidence="high",
+    )
+    result = PredictionResult(
+        schema_version="2.0",
+        prediction_status="hypothesis", horizons=[horizon],
+        evolution_narrative="n", risks=[], evidence_ids=["e1"],
+    )
+    llm, _ = _make_chat_llm(prediction=result)
+    with (
+        patch("aistock_agent.services.prediction_service.get_quick_think", return_value=llm),
+        patch("aistock_agent.services.prediction_service._corroboration_inputs",
+              return_value={"quote_dir": 1, "flow_dir": 1, "news_dirs": []}),
+    ):
+        out = await run_chat_prediction(
+            {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}},
+            [], {},
+        )
+    assert out is not None
+    assert out.evidence_corroboration is not None
+    assert out.horizons[0].confidence == "high"  # 佐证信号不覆盖 confidence

@@ -22,6 +22,7 @@ import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，�
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
@@ -232,6 +233,160 @@ def _compute_due_dates(
     return due_dates, approximate_horizons
 
 
+# A3 确定性钳制：LLM 不产数值，confidence 由历史命中率后处理覆盖
+_CONF_ORDER = {"high": 2, "medium": 1, "low": 0}
+
+
+def _apply_confidence_cap(
+    horizon: str,
+    llm_conf: str,
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] | None,
+    *,
+    mid_enabled: bool,
+) -> tuple[str, str]:
+    """确定性钳制 confidence（LLM 不产数值，此处为后处理覆盖）。
+
+    - long 桶不启用；mid 桶仅 mid_enabled=True 时启用；short 桶恒启用。
+    - stats 为 None 或 horizon 不在其中 → 不钳制（保 LLM 原值）。
+    """
+    if horizon == "long":
+        return llm_conf, "llm"
+    if horizon == "mid" and not mid_enabled:
+        return llm_conf, "llm"
+    if not stats or horizon not in stats:
+        return llm_conf, "llm"
+    from aistock_agent.services.prediction_stats import clamp_confidence_by_bucket
+
+    hit_summary, baseline_summary = stats[horizon]
+    cap, _ = clamp_confidence_by_bucket(horizon, hit_summary, baseline_summary)
+    if cap and _CONF_ORDER.get(llm_conf, 0) > _CONF_ORDER.get(cap, 0):
+        return cap, "deterministic"
+    return llm_conf, "llm"
+
+
+def _load_horizon_stats(
+    records: list[dict[str, object]],
+) -> dict[str, tuple[dict[str, object], dict[str, object]]]:
+    """从 verified 记录按 horizon 聚合命中/基线统计。
+
+    只取 entry.result ∈ {hit, miss}（剔除 insufficient 与 early_exit-only entry），
+    逐档喂给 hit_rate_summary / baseline_neutral_summary（内部再按 methodology_version
+    2.0 / 非 approximate 过滤，LLM 不产数值，统计为确定性计算）。
+    """
+    from aistock_agent.services.prediction_stats import (
+        baseline_neutral_summary,
+        hit_rate_summary,
+    )
+
+    by_horizon: dict[str, list[dict[str, object]]] = {}
+    for rec in records:
+        verification = rec.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        for horizon, entry in verification.items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("result") not in {"hit", "miss"}:
+                continue
+            by_horizon.setdefault(horizon, []).append(entry)
+
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] = {}
+    for horizon, entries in by_horizon.items():
+        hit = hit_rate_summary(entries)
+        baseline = baseline_neutral_summary(entries)
+        stats[horizon] = (hit, baseline)
+    return stats
+
+
+# A2 独立源冲突检测：独立源=数据获取通道不同；claim/LLM 文本不计入
+def _news_majority(news_dirs: list[int]) -> int | None:
+    if not news_dirs:
+        return None
+    pos = sum(1 for d in news_dirs if d > 0)
+    neg = sum(1 for d in news_dirs if d < 0)
+    if pos == neg:
+        return None
+    return 1 if pos > neg else -1
+
+
+def corroborate_evidence(
+    *,
+    quote_dir: int | None,
+    flow_dir: int | None,
+    news_dirs: list[int],
+    calendar_dir: int | None = None,
+    global_dir: int | None = None,
+    direction: str,
+) -> dict[str, object]:
+    """独立源冲突检测（A2）。独立源=数据获取通道不同；claim/LLM 文本不计入。
+
+    v1 仅 quote/flow/news 三通道有确定性取数；calendar/global 恒 None（保留签名供扩展）。
+    """
+    sources: list[tuple[str, int]] = []
+    if quote_dir is not None:
+        sources.append(("quote", quote_dir))
+    if flow_dir is not None:
+        sources.append(("flow", flow_dir))
+    news_dir = _news_majority(news_dirs)
+    if news_dir is not None:
+        sources.append(("news", news_dir))
+    if calendar_dir is not None:
+        sources.append(("calendar", calendar_dir))
+    if global_dir is not None:
+        sources.append(("global", global_dir))
+
+    n_price = sum(1 for k, _ in sources if k != "quote")
+    if not sources:
+        return {"independent_sources": 0, "non_price_sources": 0,
+                "conflict": False, "verdict": "insufficient"}
+
+    target = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
+    conflict = target != 0 and any(
+        (v > 0) != (target > 0) for _, v in sources if v != 0
+    )
+
+    if conflict:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": True, "verdict": "conflicted"}
+    if len(sources) >= 2 and n_price >= 1:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": False, "verdict": "corroborated"}
+    return {"independent_sources": len(sources), "non_price_sources": n_price,
+            "conflict": False, "verdict": "insufficient"}
+
+
+def _direction_sign(value: float | None) -> int | None:
+    """确定性方向提取（LLM 不产数值）：正→1，负→-1，零→0，缺失→None。"""
+    if value is None:
+        return None
+    return 1 if value > 0 else -1 if value < 0 else 0
+
+
+def _corroboration_inputs(
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+) -> dict[str, object]:
+    """从 run_chat_prediction 输入提取确定性方向（对齐 raw 结构键）。缺失 → None（通道不参与计数）。
+
+    独立源=数据获取通道不同：quote/flow/news 各取确定性符号，LLM 文本/claim 不计入。
+    """
+    quote = snapshot.get("quote") if isinstance(snapshot, dict) else None
+    flow = snapshot.get("flow") if isinstance(snapshot, dict) else None
+    quote_dir = _direction_sign(
+        (quote or {}).get("change_pct") if isinstance(quote, dict) else None
+    )
+    flow_dir = _direction_sign(
+        (flow or {}).get("net_amount") if isinstance(flow, dict) else None
+    )
+    news_dirs: list[int] = []
+    for n in news:
+        d = n.get("direction") if isinstance(n, dict) else None
+        s = _direction_sign(d)
+        if s is not None:
+            news_dirs.append(s)
+    return {"quote_dir": quote_dir, "flow_dir": flow_dir, "news_dirs": news_dirs}
+
+
 async def run_predict(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> PredictionRunResult:
@@ -284,6 +439,21 @@ async def run_predict(
                 dropped=len(prediction.evidence_ids) - len(filtered),
             )
         prediction = prediction.model_copy(update={"evidence_ids": filtered})
+        # A3 确定性钳制：confidence 后处理覆盖（LLM 不产数值；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = conf
+            h.confidence_source = source
         # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
         due_dates, approximate_horizons = _compute_due_dates(
             snapshot.trade_date, prediction.horizons
@@ -623,9 +793,31 @@ async def run_chat_prediction(
         # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
         prediction = _hard_validate_chat_prediction(
             prediction, str(snapshot.get("symbol", "")))
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict 同一后处理；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = conf
+            h.confidence_source = source
         # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
         # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
         # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # A2 独立源冲突检测接线：确定性方向提取自输入（LLM 不产数值）；结果仅作为
+        # 独立证据字段，绝不覆盖 confidence（佐证信号 ≠ 置信度）。run_predict 路径
+        # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。
+        inputs = _corroboration_inputs(snapshot, news)
+        prediction.evidence_corroboration = corroborate_evidence(
+            direction=prediction.horizons[0].direction, **inputs,
+        )
         return prediction
     except Exception as exc:
         logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)

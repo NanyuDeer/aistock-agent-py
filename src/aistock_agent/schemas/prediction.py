@@ -26,6 +26,7 @@ class PredictionHorizon(BaseModel):
     target: str  # 验证对象（"上证指数"/"半导体板块"）
     metric_projection: str  # 可量化预期（到期 hit/miss 对照依据）
     confidence: Literal["high", "medium", "low"]
+    confidence_source: Literal["llm", "deterministic"] | None = None  # LLM 原值 or 确定性钳制
 
 
 class PredictionRisk(BaseModel):
@@ -35,6 +36,13 @@ class PredictionRisk(BaseModel):
 
     factor: str
     invalidation: str
+    # 失效条件"读数触发式"复核触发器（A1）— 可选，仅读数触发类风险填充
+    indicator: Literal["ma20", "ma60"] | None = None
+    direction: Literal["above", "below"] | None = None
+    window: int | None = None
+    measure: Literal["close"] | None = "close"
+    snapshot_value: float | None = None  # 预测日 MA 快照（审计用）
+    triggered: bool = False
 
 
 class EvolutionStep(BaseModel):
@@ -59,6 +67,7 @@ class PredictionResult(BaseModel):
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
+    evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
 
     @model_validator(mode="after")
     def _require_horizons(self) -> "PredictionResult":

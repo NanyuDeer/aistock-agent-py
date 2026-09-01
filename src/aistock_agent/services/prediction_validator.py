@@ -59,6 +59,15 @@ _INDEX_THRESHOLDS: dict[str, float] = {
 }
 
 
+def _should_skip_horizon(entry: object) -> bool:
+    """该档位是否已产出 result（hit/miss/insufficient）→ 到期验证应跳过。
+
+    A1：early_exit-only 状态 dict（无 result，早退标记）不阻塞到期验证——
+    early_exit 与最终结果分离存储，验证照常进行。
+    """
+    return isinstance(entry, dict) and "result" in entry
+
+
 def _extract_horizon_entry(prediction: object, horizon: str) -> dict[str, object] | None:
     """从 prediction jsonb 中取指定档位的 PredictionHorizon。"""
     if not isinstance(prediction, dict):
@@ -358,7 +367,7 @@ async def run_once() -> int:
         for horizon, due_date in due_dates.items():
             if not (isinstance(horizon, str) and isinstance(due_date, str)):
                 continue
-            if due_date > today.isoformat() or horizon in verification:
+            if due_date > today.isoformat() or _should_skip_horizon(verification.get(horizon)):
                 continue
             # P0-2：target 漂移监控——对待验证档位统计 target 分类分布
             entry_h = _extract_horizon_entry(record.get("prediction"), horizon) or {}

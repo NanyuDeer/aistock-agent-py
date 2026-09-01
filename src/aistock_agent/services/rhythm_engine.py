@@ -94,8 +94,13 @@ def compose_score(
     fg: float | None,
     trend_available: bool,
     fg_available: bool,
+    penalty: float = 0.0,
 ) -> tuple[float, list[str]]:
-    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。"""
+    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
+
+    penalty≤0（顶背离降档）在最后应用；ice 为下界封顶由 level_from_score
+    阈值天然提供，不引入独立降档函数（C2）。
+    """
     parts: list[tuple[str, float, float]] = [
         ("sentiment", sentiment_coefficient(phase), WEIGHTS["sentiment"])
     ]
@@ -112,7 +117,8 @@ def compose_score(
     if total_w <= 0:
         return 50.0, missing
     score = sum(v * w for _, v, w in parts) / total_w * 100.0
-    return max(0.0, min(100.0, score)), missing
+    score = max(0.0, min(100.0, score + penalty))  # penalty≤0，ice 由 level_from_score 天然封顶
+    return score, missing
 
 
 def level_from_score(score: float) -> Level:
@@ -126,6 +132,35 @@ def position_band(level: Level) -> dict[str, Any]:
     return dict(POSITION_BANDS[level])
 
 
+def ma_breadth(
+    closes: list[float],
+    *,
+    arm_days: int = 3,
+) -> dict[str, object]:
+    """指数技术位多级确认佐证（C1）。MA60 不可算（<65 根）时 insufficient=True。"""
+    if len(closes) < 65:
+        return {
+            "ma20": None, "ma60": None,
+            "close": closes[-1] if closes else None,
+            "warning": False, "recovery": False,
+            "breakdown_ma60": False, "below_prior_low": False,
+            "insufficient": True,
+        }
+    ma20 = sum(closes[-20:]) / 20
+    ma60 = sum(closes[-60:]) / 60
+    close = closes[-1]
+    prior_low = min(closes[-40:-20]) if len(closes) >= 40 else min(closes)
+    last3 = closes[-arm_days:]
+    return {
+        "ma20": ma20, "ma60": ma60, "close": close,
+        "warning": close < ma20,
+        "recovery": close > ma20 and all(c > ma20 for c in last3),
+        "breakdown_ma60": close < ma60 and all(c < ma60 for c in last3),
+        "below_prior_low": close < prior_low and all(c < prior_low for c in last3),
+        "insufficient": False,
+    }
+
+
 def detect_phase(
     *,
     history: list[float],
@@ -134,34 +169,70 @@ def detect_phase(
     prev_phase: Phase | None,
     slope_window: int = 5,
     slope_threshold: float = 5.0,
+    tech: dict[str, object] | None = None,  # ma_breadth 输出；None=不启用（原行为）
 ) -> tuple[Phase | None, dict[str, Any]]:
     """spec §5 判定仲裁表（主信号=温度斜率，佐证=连冰+量能；实验性判定，G3）。
 
     返回 (phase, evidence)；phase=None 表示判定依据不足且无前阶段。
+    tech（C1 ma_breadth 输出）非空且数据充分时，主判落空/模糊阶段可被
+    技术佐证覆盖；佐证只进 evidence，不产用户可见仓位话术。
     """
     if len(history) < 2:
         return prev_phase, {"reason": "温度序列不足", "evidence_insufficient": True}
     recent = history[-slope_window:]
     slope = recent[-1] - recent[0]
     current = history[-1]
+    # 主判收敛为单一 (phase, evidence)，佐证覆盖统一在返回前应用（C1）
     if slope > slope_threshold:
         phase: Phase | None = "warm_up" if prev_phase != "overheat" else "overheat"
-        return phase, {"slope": round(slope, 1), "reason": "温度上行"}
-    if slope < -slope_threshold:
+        evidence: dict[str, Any] = {"slope": round(slope, 1), "reason": "温度上行"}
+    elif slope < -slope_threshold:
         if current <= 20 and consecutive_ice >= 2:
-            return "ice", {"slope": round(slope, 1), "reason": "温度下行且连冰"}
-        return "ebb", {"slope": round(slope, 1), "reason": "温度下行"}
-    if consecutive_ice >= 2:
-        return "ice", {"slope": round(slope, 1), "reason": "温度低位平 + 连冰"}
-    if volume_weak:
-        return "ebb", {"slope": round(slope, 1), "reason": "温度平 + 量能偏弱"}
-    if prev_phase is not None:
-        return prev_phase, {"slope": round(slope, 1), "reason": "沿用前阶段（判定依据不足）"}
-    return None, {
-        "slope": round(slope, 1),
-        "reason": "判定依据不足（无前阶段）",
-        "evidence_insufficient": True,
-    }
+            phase = "ice"
+            evidence = {"slope": round(slope, 1), "reason": "温度下行且连冰"}
+        else:
+            phase = "ebb"
+            evidence = {"slope": round(slope, 1), "reason": "温度下行"}
+    elif consecutive_ice >= 2:
+        phase = "ice"
+        evidence = {"slope": round(slope, 1), "reason": "温度低位平 + 连冰"}
+    elif volume_weak:
+        phase = "ebb"
+        evidence = {"slope": round(slope, 1), "reason": "温度平 + 量能偏弱"}
+    elif prev_phase is not None:
+        phase = prev_phase
+        evidence = {"slope": round(slope, 1), "reason": "沿用前阶段（判定依据不足）"}
+    else:
+        phase = None
+        evidence = {
+            "slope": round(slope, 1),
+            "reason": "判定依据不足（无前阶段）",
+            "evidence_insufficient": True,
+        }
+    # C1 技术佐证：主判未给明确方向（None）或处于模糊阶段时按技术位覆盖
+    if tech and not tech.get("insufficient"):
+        if tech.get("below_prior_low") or tech.get("breakdown_ma60"):
+            if phase in {None, "warm_up", "overheat"}:
+                return "ebb", {"reason": "指数跌破前低/MA60（技术佐证）", "technical": True}
+        if tech.get("recovery") and prev_phase in {"ebb", "ice"}:
+            return "warm_up", {"reason": "指数站上 MA20（技术佐证）", "technical": True}
+    return phase, evidence
+
+
+def conflict_kind(phase: Phase | None, trend: float | None) -> Literal["top", "bottom"] | None:
+    """背离方向（C2）：顶背离=趋势空+情绪热；底背离=趋势多+情绪冷。"""
+    if trend is None:
+        return None
+    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
+        return "top"
+    if trend >= 1.5 and phase in {"ice", "ebb"}:
+        return "bottom"
+    return None
+
+
+def conflict_penalty(kind: Literal["top", "bottom"] | None) -> float:
+    """背离惩罚（确定性，LLM 不产数值）：顶背离 -8.0（降档）；底背离 0.0（禁止降档）。"""
+    return -8.0 if kind == "top" else 0.0
 
 
 def detect_conflict(phase: Phase | None, trend: float | None) -> tuple[bool, str]:
