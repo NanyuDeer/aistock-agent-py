@@ -35,11 +35,10 @@ class CausalNode(BaseModel):
 
 
 class PredictionConfirmation(BaseModel):
-    """Spec Cbis: 溯源归因时确认的历史预判场景印证证据（渠道B信号）.
+    """Spec Cbis：溯源归因时确认的历史预判场景印证证据（渠道B信号）.
 
-    Only records scenario/evidence-layer confirmation (scene_match/evidence_match),
-    without judging directional correctness — direction stays with the main
-    expiry-price channel (channel A).
+    只记录"场景/证据层印证"（scene_match/evidence_match），不判定涨跌方向对错——
+    方向对错仍由到期价格主渠道（渠道A）负责。
     """
     prediction_id: str
     scenario: str

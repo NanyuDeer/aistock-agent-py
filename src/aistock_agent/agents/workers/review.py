@@ -132,6 +132,10 @@ async def _attach_scene_confirmations(trace: MarketTraceResult, report_date: str
     """Spec Cbis：溯源归因结论产出后，顺手核对大盘历史预判场景，回填渠道B确认.
     不改变归因职责；探针失败降级为无确认，不阻断后续步骤/不向调用方抛异常。
     """
+    # 无 primary 链（no_phenomenon/insufficient 或降级）时无结论可核对，
+    # 直接跳过，避免白白发起 list_verified_predictions 网络调用。
+    if trace.primary_chain_id is None:
+        return
     # 函数内 import 避免与 aistock_agent.skills（→ evidence_resolver → review）
     # 形成循环依赖，与 _publish_review_done_if_available 的延迟 import 同模式。
     from aistock_agent.skills.scene_probe import probe_scene_confirmation

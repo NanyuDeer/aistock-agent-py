@@ -68,6 +68,31 @@ async def test_probe_skips_other_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_skips_missing_id_even_on_match() -> None:
+    """记录命中目标且场景匹配，但缺有效 id → 严格跳过，不产生确认证据。"""
+    target = Target(kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数")
+    # 命中场景但 prediction.id 缺失/非法 → 应被跳过（不回流脏记录）
+    recs: list[dict[str, object]] = [
+        {
+            "no_id_field": True,
+            "prediction": {"horizons": [{"target": "上证指数"}], "conditions": [{"scenario": "降息预期兑现"}]},
+            "due_dates": {},
+            "verification": {},
+        },
+        {
+            "id": "",
+            "prediction": {"horizons": [{"target": "上证指数"}], "conditions": [{"scenario": "降息预期兑现"}]},
+            "due_dates": {},
+            "verification": {},
+        },
+    ]
+    got = await probe_scene_confirmation(
+        target=target, trace_id="tr5", conclusion="上行主因是降息预期兑现", fetched_predictions=recs
+    )
+    assert got == []
+
+
+@pytest.mark.asyncio
 async def test_probe_degrades_on_fetch_failure() -> None:
     target = Target(kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数")
     with patch("aistock_agent.skills.scene_probe.node_api") as m_node:
