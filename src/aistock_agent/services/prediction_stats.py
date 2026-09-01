@@ -140,10 +140,26 @@ def _classify_miss_patterns(entries: list[dict[str, object]]) -> list[dict[str, 
     ]
 
 
+def build_scenario_harvest(confirmations: list[dict[str, object]]) -> dict[str, object]:
+    """渠道B信号：被现实印证的场景 / （预留）从未被印证的场景计数。
+
+    分渠道记录、合并呈现，不把渠道A/B合成单一数字。unconfirmed 依赖"预判侧
+    主动探针"，本计划统一置空（跟随项补齐）。
+    """
+    confirmed: dict[str, int] = {}
+    for c in confirmations:
+        sc = c.get("scenario")
+        if not isinstance(sc, str) or not sc:
+            continue
+        confirmed[sc] = confirmed.get(sc, 0) + 1
+    return {"confirmed": confirmed, "unconfirmed": {}}
+
+
 def build_validation_profile(
     entries: list[dict[str, object]],
     target: str,
     methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
+    confirmations: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """计算 target 的历史验证画像（纯函数，供验证 skill / 预判反哺 / 迭代闭环读取）。
 
@@ -155,8 +171,13 @@ def build_validation_profile(
     methodology_version 参与——防跳变/混桶，H1）。命中率只取 hit/miss + 非 approximate；
     insufficient 单列 ``degradation_rate``（数据源/到期缺失占比，供解释层参考，不计命中率）。
 
+    渠道B（``confirmations``，双向印证信号）分渠道记录，与渠道A（档位命中）分开呈现在
+    ``evidence_confirmed`` / ``scenario_harvest``，**不合并成单一命中数字**；单独记录便于
+    后续以"被现实印证的场景"作独立证据引用。
+
     Returns: {target, n, hit_rate, ci, sufficient_sample, condition_met_rate,
-              condition_summary, miss_patterns, horizon_breakdown, degradation_rate}
+              condition_summary, miss_patterns, horizon_breakdown, degradation_rate,
+              evidence_confirmed, scenario_harvest}
     """
     scoped = [e for e in entries if isinstance(e, dict)]
     v2 = [
@@ -217,6 +238,8 @@ def build_validation_profile(
         "miss_patterns": miss_patterns,
         "horizon_breakdown": horizon_breakdown,
         "degradation_rate": degradation_rate,
+        "evidence_confirmed": confirmations or [],
+        "scenario_harvest": build_scenario_harvest(confirmations or []),
     }
 
 
