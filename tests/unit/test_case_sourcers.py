@@ -350,3 +350,92 @@ def test_collect_industry_graph_two_failures_returns_none() -> None:
         result = asyncio.run(_collect_industry_graph(
             event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)))  # noqa: UP017
     assert result is None
+
+
+# ---- 预判验证驱动产片源（Spec C §4.3：prediction 验证驱动迭代） ----
+
+def _verified_record(
+    *,
+    rid: int,
+    schema_version: str,
+    trade_date: str,
+    target: str,
+    verification_keys: tuple[str, ...] = ("c0",),
+) -> dict[str, object]:
+    """构造一条验证过/未验证的 prediction 记录（对齐元数据契约源 shape）。"""
+    return {
+        "id": rid,
+        "source_id": f"review:{trade_date}",
+        "schema_version": schema_version,
+        "prediction": {
+            "schema_version": schema_version,
+            "horizons": [{"horizon": "short", "target": target, "direction": "bullish"}],
+            "conditions": [
+                {"condition": "放量突破", "scenario": "上行", "anchor": {
+                    "horizon": "short", "threshold": "+5%", "direction": "bullish"}}
+            ],
+        },
+        "due_dates": {"short": f"{trade_date[:8]}28"},
+        "verification": {k: {"result": "hit", "condition_met": True}
+                         for k in verification_keys},
+    }
+
+
+def test_prediction_verified_scan_maps_records() -> None:
+    """Spec C §4.3：只切 schema_version=3.0 且 verification 非空的记录 → 每记录一候选。
+
+    event_time 锚定 source_id 的交易日 15:30 CST（UTC 07:30，对齐 _close_time_for_day）；
+    meta 携带 {record_id, prediction, due_dates, verification, target, trade_date} 供回放。
+    """
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    records = [
+        _verified_record(rid=101, schema_version="3.0", trade_date="2026-08-14",
+                         target="上证指数"),
+        _verified_record(rid=102, schema_version="3.0", trade_date="2026-08-12",
+                         target="半导体板块"),
+    ]
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=records)
+        candidates = asyncio.run(prediction_verified_scan(ctx))
+    assert len(candidates) == 2
+    assert candidates[0].event_time == datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)  # noqa: UP017
+    assert candidates[0].meta is not None
+    assert candidates[0].meta["record_id"] == 101
+    assert candidates[0].meta["target"] == "上证指数"
+    assert candidates[0].meta["trade_date"] == "2026-08-14"
+    assert "上证指数" in candidates[0].event_title
+
+
+def test_prediction_verified_scan_filters_bad_records() -> None:
+    """Spec C §7：只切 schema_version=3.0 且 verification 非空；不满足的记录不产片，无记录不产片。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    records = [
+        _verified_record(rid=1, schema_version="2.0", trade_date="2026-08-14", target="上证指数"),  # 旧版本
+        _verified_record(rid=3, schema_version="3.0", trade_date="2026-08-14",
+                         target="上证指数", verification_keys=()),  # 无 verification
+    ]
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=records)
+        assert asyncio.run(prediction_verified_scan(ctx)) == []
+
+
+def test_prediction_verified_scan_skips_unparsable_source_id() -> None:
+    """source_id 无交易日锚点（不可解析日期）→ 跳过该条，不炸产片源。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    bad = _verified_record(rid=9, schema_version="3.0", trade_date="2026-08-14", target="上证指数")
+    bad["source_id"] = "review:not-a-date"
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=[bad])
+        assert asyncio.run(prediction_verified_scan(ctx)) == []
