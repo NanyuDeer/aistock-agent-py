@@ -284,6 +284,150 @@ async def _verify_horizon(
     return out
 
 
+async def _resolve_verify_target(
+    target: str,
+) -> tuple[str | None, str, dict | None]:
+    """index/sector 目标资产解析（horizon 与 condition 共用）。
+
+    返回 (code, target_type, matched)：index 直接命中代码映射；否则尝试板块
+    resolve；均失败返回 (None, classify_target(target), None)——个股/抽象词
+    无验证数据源（Spec A §9-5：首批仅覆盖大盘/板块）。
+    """
+    code = _INDEX_CODE_MAP.get(target)
+    if code is not None:
+        return code, "index", None
+    resolved = await resolve_sector_target(target)
+    if resolved:
+        return str(resolved["ts_code"]), "sector", resolved
+    return None, classify_target(target), None
+
+
+def _parse_threshold(value: str) -> float | None:
+    """解析涨跌幅阈值（"+5%"→5.0、"-3%"→-3.0）；无效返回 None。"""
+    if not isinstance(value, str):
+        return None
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", value)
+    return float(m.group(0)) if m else None
+
+
+def _judge_condition_hit(
+    direction: str, threshold_val: float | None, cumulative: float
+) -> bool:
+    """condition scenario 是否命中：按 anchor.direction + threshold 比对窗口累计。
+
+    显式阈值（如 "+5%"/"-3%"）存在 → 与窗口累计累计直接比对（scenario 命中主判）；
+    阈值缺省 → 退化为方向符号主判（bullish>0 / bearish<0 / neutral 横盘），
+    对齐 _judge_window 语义。spec §9-5：条件成立两段判定推迟，此处仅起见
+    scenario 命中与否。
+    """
+    if threshold_val is not None:
+        if direction == "bullish":
+            return cumulative >= max(threshold_val, 0.0)
+        if direction == "bearish":
+            return cumulative <= min(threshold_val, 0.0)
+    if direction == "bullish":
+        return cumulative > 0
+    if direction == "bearish":
+        return cumulative < 0
+    return abs(cumulative) < _NEUTRAL_PCT_THRESHOLD
+
+
+async def _verify_conditions(
+    record: dict[str, object],
+    methodology_version: str = _METHODOLOGY_VERSION,
+) -> dict[str, object]:
+    """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
+
+    - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
+    - condition_met 本批恒 null（两段判定推迟，§9-5 决策）；scenario 命中用
+      anchor.direction + threshold 比对窗口累计；
+    - entry 显式补 target_type（index/sector，§4.2/§11）避免统计漏桶；
+    - 窗口未满 → {"wait": True}，run_once continue 不回写，下次补齐再验（D1 语义）；
+    - 返回 {c{i}: entry}，run_once 对已存在 result 的 c{i} 幂等跳过。
+    """
+    prediction = record.get("prediction")
+    if not isinstance(prediction, dict):
+        return {}
+    conditions = prediction.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return {}  # 2.0 旧记录/无条件预判无 c{i} 验证
+    horizons = prediction.get("horizons")
+    tgt = ""
+    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+        tgt = str(horizons[0].get("target") or "")
+    code, target_type, matched = await _resolve_verify_target(tgt)
+    base: dict[str, object] = {
+        "verified_at": shanghai_today().isoformat(),
+        "methodology_version": methodology_version,
+        "prediction_id": record.get("id"),
+        "condition_met": None,  # 两段判定推迟（§9-5）
+        "target_type": target_type,
+    }
+    if matched:
+        base["matched_ts_code"] = str(matched["ts_code"])
+        base["matched_name"] = str(matched["name"])
+    due_dates = record.get("due_dates")
+    due_dates_map = due_dates if isinstance(due_dates, dict) else {}
+    out: dict[str, object] = {}
+    for i, cond in enumerate(conditions):
+        key = f"c{i}"
+        if not isinstance(cond, dict):
+            continue
+        anchor = cond.get("anchor") if isinstance(cond.get("anchor"), dict) else {}
+        horizon = anchor.get("horizon")
+        due_date = str(due_dates_map.get(horizon) or "") if horizon else ""
+        direction = str(anchor.get("direction") or "neutral")
+        threshold = str(anchor.get("threshold") or "")
+        entry: dict[str, object] = {
+            **base,
+            "condition_index": i,
+            "horizon": horizon,
+            "condition": cond.get("condition"),
+            "scenario": cond.get("scenario"),
+            "threshold": threshold,
+        }
+        if code is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_source",
+                        "actual": "", "reason": f"target '{tgt}' 无验证数据源"}
+            continue
+        if not due_date:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_due_date",
+                        "actual": "", "reason": "condition anchor 无对应 due_date"}
+            continue
+        rows = await _fetch_kline_window(target_type, code, due_date)
+        if rows is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": "到期行情不可用"}
+            continue
+        missing = sum(1 for r in rows if r.get("pct_chg") is None)
+        if missing > 0:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": f"行情数据缺失 {missing} 行"}
+            continue
+        idx = next((j for j, r in enumerate(rows) if r.get("trade_date") == due_date), None)
+        if idx is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": f"到期日 {due_date} 行情缺失"}
+            continue
+        window = [float(cast(float, r["pct_chg"]))
+                  for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
+        if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
+            # D1：窗口未满不回写，下次 run_once 补齐再验
+            out[key] = {**entry, "wait": True,
+                        "reason": f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"}
+            continue
+        cumulative = sum(window)
+        hit = _judge_condition_hit(direction, _parse_threshold(threshold), cumulative)
+        out[key] = {
+            **entry,
+            "result": "hit" if hit else "miss",
+            "actual": f"{cumulative:+.2f}%",
+            "reason": f"direction={direction}, threshold={threshold or 'N/A'}, "
+                      f"窗口累计={f'{cumulative:+.2f}%'}",
+        }
+    return out
+
+
 async def backfill_no_data() -> int:
     """存量 no_data 回补：扫描 verified 记录中 _BACKFILL_METHODOLOGY_VERSION/no_data 的
     index 档位按区间重验（D4）。
@@ -392,6 +536,32 @@ async def run_once() -> int:
                     "prediction_verify_write_failed",
                     id=record_id,
                     horizon=horizon,
+                    error=str(exc),
+                    exc_info=True,
+                )
+        # Spec A §4.2/§11：条件化预判双验证调度——3.0 记录对每条 condition 另产 c{i}
+        # entry（c{i} key 与 horizon key 并存，A1 early_exit 不冲突）；已存在 result
+        # 的 c{i} 幂等跳过。
+        cond_entries = await _verify_conditions(record)
+        for ckey, centry in cond_entries.items():
+            if centry.get("wait"):
+                continue  # D1：窗口未满不回写，下次补齐再验
+            if _should_skip_horizon(verification.get(ckey)):
+                continue  # 幂等：上一轮已产出 result 的 condition 跳过
+            try:
+                await node_api.update_prediction_verification(record_id, ckey, centry)
+                updated += 1
+                logger.info(
+                    "prediction_condition_verified",
+                    id=record_id,
+                    key=ckey,
+                    result=centry["result"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "prediction_condition_verify_write_failed",
+                    id=record_id,
+                    key=ckey,
                     error=str(exc),
                     exc_info=True,
                 )

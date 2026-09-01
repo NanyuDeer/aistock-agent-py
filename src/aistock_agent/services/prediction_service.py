@@ -35,6 +35,7 @@ from aistock_agent.schemas.market_trace import (
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.prediction_targets import classify_target
 from aistock_agent.services.llm import (
     get_deep_think,
     get_quick_think,
@@ -145,8 +146,8 @@ def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
         raise ValueError("prediction output is not a JSON object")
     for key in _EXTRA_KEYS_TO_DROP:
         data.pop(key, None)
-    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
-    data.setdefault("schema_version", "2.0")
+    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）；升 3.0 同步（Spec A §3.3）
+    data.setdefault("schema_version", "3.0")
     return data
 
 
@@ -362,6 +363,56 @@ def _direction_sign(value: float | None) -> int | None:
     return 1 if value > 0 else -1 if value < 0 else 0
 
 
+# Spec A §3.1/§4.1：anchor.direction 归一化兜底的关键词映射
+_BULLISH_RE = re.compile(r"涨|升|站上|突破|看多|反弹|创新高|放量上攻")
+_BEARISH_RE = re.compile(r"跌|破|回踩|回落|看空|走弱|破位|下探|缩量退守")
+
+
+def infer_prediction_direction(condition: str, scenario: str) -> str:
+    """anchor.direction 兜底：从 condition/scenario 文本确定性提取方向。
+
+    复现 Spec A §4.1 与 A2 _direction_sign 同构思路：LLM 产结构，判定确定性算。
+    命中看多词 → bullish；命中看空词 → bearish；两词皆命中或皆无 → neutral
+    （text extraction 兜底，避免 model_validate 直接 parse_failed）。
+    """
+    text = f"{condition} {scenario}"
+    bull = _BULLISH_RE.search(text) is not None
+    bear = _BEARISH_RE.search(text) is not None
+    if bull == bear:
+        return "neutral"
+    return "bullish" if bull else "bearish"
+
+
+def _normalize_conditions_anchor_direction(
+    result: PredictionResult,
+) -> PredictionResult:
+    """条件化 schema 后处理：LLM 缺失 anchor.direction 时按文本确定性兜底。
+
+    PredidctorAnchor.direction 为 schema 必填；Pydantic 对缺失字段直接 raise → LLM
+    单条 condition 未自挂 direction 会导致整份 parse_failed。此处先按缺失值（direction
+    缺省成 neutral 重放）后逐条补强——前提是 schema 层 direction 允许先由缺省值进入，
+    这里对已是默认 neutral 且文本明显看多/看空的条目重判。返回新对象，不改原对象。
+    """
+    if not result.conditions:
+        return result
+    new_conds: list[object] = []
+    for c in result.conditions:
+        cur = c.anchor.direction
+        # 仅对"未明确表态"（仍带默认/neutral）的锚点做文本兜底，显式 bullish/bearish 不覆盖
+        if cur == "neutral":
+            inferred = infer_prediction_direction(c.condition, c.scenario)
+            if inferred != "neutral":
+                new_conds.append(c.model_copy(
+                    deep=True,
+                    update={"anchor": c.anchor.model_copy(update={"direction": inferred})},
+                ))
+                continue
+        new_conds.append(c)
+    if all(n is o for n, o in zip(new_conds, result.conditions)):
+        return result
+    return result.model_copy(update={"conditions": new_conds})
+
+
 def _corroboration_inputs(
     snapshot: dict[str, object],
     news: list[dict[str, object]],
@@ -430,6 +481,9 @@ async def run_predict(
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
+        # Spec A §4.1：anchor.direction 归一化兜底（load 后、使用前）——
+        # LLM 未产 direction 时按 condition/scenario 文本确定性提取，避免 parse_failed。
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_allowed_evidence_ids(trace, snapshot)
         # P1-1：证据 ID 过滤而非一票否决（对齐 run_chat_prediction）——单一幻觉不丢整体
         filtered = [sid for sid in prediction.evidence_ids if sid in allowed]
@@ -744,6 +798,40 @@ def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) ->
     return prediction
 
 
+async def _persist_chat_prediction(
+    prediction: PredictionResult,
+    snapshot: dict,
+    due_dates: dict[str, str],
+    approximate_horizons: list[str],
+) -> dict[str, object] | None:
+    """方案A：对话预判落库（Spec A §4.2/§11），target 分流防 pending 堆积。
+
+    classify_target(horizons[0].target)：index/sector → status=pending 纳入 16:00
+    到期验证；stock → status=skipped + skip_reason（v1 验证器个股源未接，§9-5），
+    避免无法验证的个股记录污染验证队列。落库失败不阻断返回值（"永不 500"）。
+    """
+    source_id = f"chat:{snapshot.get('symbol', '')}:{snapshot.get('trade_date', '')}"
+    payload: dict[str, object] = {
+        "source_type": "chat_prediction",
+        "source_id": source_id,
+        "schema_version": prediction.schema_version,
+        "prediction": prediction.model_dump(mode="json"),
+        "due_dates": due_dates,
+    }
+    if approximate_horizons:
+        payload["due_dates_approximate"] = approximate_horizons
+    try:
+        tgt = str(prediction.horizons[0].target or "")
+        if classify_target(tgt) == "stock":
+            # 个股 target 超出 v1 验证范围 → skipped（完整预判仍保留便于追溯）
+            payload["status"] = "skipped"
+            payload["prediction"]["skip_reason"] = "chat 个股 target 超出 v1 验证范围"
+        return await node_api.save_prediction(payload)
+    except Exception as exc:
+        logger.warning("chat_prediction.persist_failed", source_id=source_id, error=str(exc))
+        return None
+
+
 async def run_chat_prediction(
     snapshot: dict, news: list[dict], context: dict
 ) -> PredictionResult | None:
@@ -762,8 +850,9 @@ async def run_chat_prediction(
     通过门禁（指数场景，LLM 输入不携带 capital_flow 块，不编造指数资金流）。后处理：
     - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
     - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
-    - 到期日计算已移除（A3，2026-08-12）：chat 预测 v1 不落库、返回值无验证对照，
-      调用结果被丢弃属死代码；V2 落库验证时恢复（见下方注释）。
+    - 落库（Spec A §4.2/§9-2 方案 A）：恢复 _compute_due_dates 到期日计算，经
+      _persist_chat_prediction 写入 prediction_records——index/sector 纳入 16:00
+      到期验证，stock 分流 skipped（v1 验证器个股源未接，防 pending 堆积）。
     任一失败返回 None（"永不 500"铁律）。不产生交易指令。
     """
     gate_reason = _gate_chat_snapshot(snapshot)
@@ -783,6 +872,9 @@ async def run_chat_prediction(
         ]
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = await structured.ainvoke(messages)
+        # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
+        # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_chat_evidence_ids(snapshot, news)
         prediction = prediction.model_copy(
             update={
@@ -808,9 +900,15 @@ async def run_chat_prediction(
             )
             h.confidence = conf
             h.confidence_source = source
-        # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
-        # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
-        # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # Spec A §4.2/§9-2（方案 A）：恢复到期日计算并落库。chat 预判 index/sector
+        # 纳入 16:00 到期验证；stock 由 _persist_chat_prediction 分流 skipped。越年
+        # 近似档经 due_dates_approximate 显式标记。
+        due_dates, approximate_horizons = _compute_due_dates(
+            str(snapshot["trade_date"]), prediction.horizons,
+        )
+        await _persist_chat_prediction(
+            prediction, snapshot, due_dates, approximate_horizons,
+        )
         # A2 独立源冲突检测接线：确定性方向提取自输入（LLM 不产数值）；结果仅作为
         # 独立证据字段，绝不覆盖 confidence（佐证信号 ≠ 置信度）。run_predict 路径
         # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。

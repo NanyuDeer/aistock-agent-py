@@ -68,7 +68,7 @@ def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
 
 
 _VALID_LLM_JSON = """{
-  "schema_version": "2.0",
+  "schema_version": "3.0",
   "prediction_status": "confirmed",
   "horizons": [
     {"horizon": "short", "remaining_estimate": "1-3 日", "phase": "decaying",
@@ -201,8 +201,8 @@ async def test_run_predict_reraises_unexpected_errors():
 
 @pytest.mark.asyncio
 async def test_run_predict_injects_missing_schema_version():
-    """Bug A 双保险：LLM 缺 schema_version → 注入 2.0 后校验通过（834ddf9 之外再兜底）。"""
-    bad = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
+    """Bug A 双保险：LLM 缺 schema_version → 注入 3.0 后校验通过（834ddf9 之外再兜底）。"""
+    bad = _VALID_LLM_JSON.replace('  "schema_version": "3.0",\n', "")
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=bad)
     with patch("aistock_agent.services.prediction_service.get_deep_think", return_value=llm):
@@ -210,15 +210,15 @@ async def test_run_predict_injects_missing_schema_version():
     assert isinstance(result, PredictionRunResult)
     assert result.status == "ok"
     assert result.prediction is not None
-    assert result.prediction.schema_version == "2.0"
+    assert result.prediction.schema_version == "3.0"
 
 
 @pytest.mark.asyncio
 async def test_run_predict_drops_extra_keys():
     """P1-2：LLM 输出 thinking/analysis 等多余键 → 剔除后校验通过（extra=forbid 不再炸）。"""
     extra = _VALID_LLM_JSON.replace(
-        '  "schema_version": "2.0",\n',
-        '  "schema_version": "2.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
+        '  "schema_version": "3.0",\n',
+        '  "schema_version": "3.0",\n  "thinking": "先分析再输出",\n  "analysis": {"a": 1},\n',
     )
     llm = AsyncMock()
     llm.ainvoke.return_value = AsyncMock(content=extra)
@@ -325,7 +325,7 @@ async def test_predict_from_trace_cache_hit_persists_ok():
     payload = mock_api.save_prediction.await_args.args[0]
     assert payload["source_type"] == "market_trace"
     assert payload["source_id"] == "review:2026-08-10"
-    assert payload["schema_version"] == "2.0"
+    assert payload["schema_version"] == "3.0"
     assert payload["prediction"]["prediction_status"] == "confirmed"
     assert payload["due_dates"]["short"] == "2026-08-17"
     assert "status" not in payload  # ok 不传 status，Node 默认 pending
@@ -483,7 +483,7 @@ def test_render_prediction_markdown():
     )
 
     prediction = PredictionResult(
-        schema_version="2.0",
+        schema_version="3.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="mid",
@@ -515,7 +515,7 @@ def test_render_prediction_markdown_uses_evolution_steps_when_present():
     )
 
     prediction = PredictionResult(
-        schema_version="2.0",
+        schema_version="3.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(
             horizon="short",
@@ -598,7 +598,7 @@ async def test_chat_prediction_hard_validation_redacts_absolute_point():
     # 端到端：构造含点位的 LLM 输出 → run_chat_prediction 返回剥离后结果
     snapshot = {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}}
     prediction = PredictionResult(
-        schema_version="2.0",   # D6：与 schema_version 升 2.0 同步（H3 版本分桶）
+        schema_version="3.0",   # D6：与 schema_version 升 3.0 同步（H3 版本分桶）
         prediction_status="hypothesis",
         horizons=[{"horizon": "short", "remaining_estimate": "1-2周", "phase": "peaking",
                    "direction": "bullish", "target": "上证指数",
@@ -703,11 +703,11 @@ async def test_run_chat_prediction_missing_schema_version_degrades():
     """LLM 输出缺 schema_version → 结构化解析抛 ValidationError → 返回 None（永不 500）。
 
     Phase 4-1 冒烟实测根因：PREDICTION_CHAT_PROMPT 未要求输出 schema_version，
-    而 PredictionResult.schema_version 是必填 Literal["2.0"] → 线上恒降级。
+    而 PredictionResult.schema_version 是必填 Literal["3.0"] → 线上恒降级。
     本测试锁定新调用链（json_mode 结构化输出）的降级语义：缺字段走异常 → None，
     skill 层落到 degraded 提示而非 500。
     """
-    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "2.0",\n', "")
+    bad_json = _VALID_LLM_JSON.replace('  "schema_version": "3.0",\n', "")
     with pytest.raises(ValidationError):
         PredictionResult.model_validate_json(bad_json)  # 夹具自证：缺 schema_version 必校验失败
 
@@ -731,17 +731,25 @@ async def test_run_chat_prediction_falls_back_on_llm_error():
 
 
 @pytest.mark.asyncio
-async def test_run_chat_prediction_no_due_dates_call(monkeypatch):
-    """A3：run_chat_prediction 不再调用 _compute_due_dates（v1 无消费方）。
+async def test_run_chat_prediction_restores_due_dates_and_persists(monkeypatch):
+    """方案A（Spec A §4.2/§9-2）：恢复 _compute_due_dates 到期日计算，并落库 prediction_records。
 
-    原 test_run_chat_prediction_survives_due_dates_out_of_range（B4 冒烟根因：long 档
-    +120 交易日落 2027 超出 holiday 日历）随 A3 死代码移除而失效——到期日计算已删除，
-    改为断言不再调用（best-effort try/except 整段移除）。
+    _VALID_LLM_JSON 的 horizons[0].target=上证指数（index）→ 分流 status=pending 纳入
+    16:00 到期验证（非 stock skipped）。
     """
-    called = []
+    called: list[object] = []
     monkeypatch.setattr(
         "aistock_agent.services.prediction_service._compute_due_dates",
-        lambda *a, **k: called.append(1),
+        lambda *a, **k: (called.append(1), ({"short": "2026-09-08"}, []))[1],
+    )
+    saved: dict[str, object] = {}
+
+    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+        saved.update(payload)
+        return {"id": 1, **payload}
+
+    monkeypatch.setattr(
+        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
     )
     llm, structured_ainvoke = _make_chat_llm(prediction=_chat_prediction(_VALID_LLM_JSON))
     with patch(
@@ -751,7 +759,48 @@ async def test_run_chat_prediction_no_due_dates_call(monkeypatch):
     assert result is not None
     assert result.prediction_status == "hypothesis"
     structured_ainvoke.assert_awaited()
-    assert called == []
+    assert len(called) == 1  # 到期日计算已恢复
+    assert saved["source_type"] == "chat_prediction"
+    assert saved["due_dates"] == {"short": "2026-09-08"}
+    assert "status" not in saved  # index target → pending（不显式打 skipped）
+
+
+@pytest.mark.asyncio
+async def test_run_chat_prediction_stock_target_routed_to_skipped(monkeypatch):
+    """方案A target 分流（Spec A §4.2/§11）：个股 target → status=skipped 防 pending 堆积。"""
+    monkeypatch.setattr(
+        "aistock_agent.services.prediction_service._compute_due_dates",
+        lambda *a, **k: ({"short": "2026-09-08"}, []),
+    )
+    saved: dict[str, object] = {}
+
+    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+        saved.update(payload)
+        return {"id": 1, **payload}
+
+    monkeypatch.setattr(
+        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
+    )
+    llm, structured_ainvoke = _make_chat_llm(
+        prediction=PredictionResult(
+            schema_version="3.0",
+            prediction_status="hypothesis",
+            horizons=[{"horizon": "short", "remaining_estimate": "1-2周", "phase": "peaking",
+                       "direction": "bullish", "target": "600519",
+                       "metric_projection": "相对现价区间波动", "confidence": "medium"}],
+            evolution_narrative="短线情绪延续",
+            evolution_steps=[{"label": "短线", "text": "情绪延续"}],
+            risks=[],
+            evidence_ids=["quote:600519"],
+        )
+    )
+    with patch(
+        "aistock_agent.services.prediction_service.get_quick_think", return_value=llm
+    ):
+        result = await run_chat_prediction(_make_chat_snapshot(), [], {})
+    assert result is not None
+    assert saved["status"] == "skipped"
+    assert saved["prediction"]["skip_reason"] == "chat 个股 target 超出 v1 验证范围"
 
 
 # ---------- A3 确定性钳制：_apply_confidence_cap（confidence_source 接线） ----------
@@ -882,7 +931,7 @@ async def test_run_chat_prediction_fills_corroboration_without_touching_confiden
         confidence="high",
     )
     result = PredictionResult(
-        schema_version="2.0",
+        schema_version="3.0",
         prediction_status="hypothesis", horizons=[horizon],
         evolution_narrative="n", risks=[], evidence_ids=["e1"],
     )

@@ -2,6 +2,24 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-09-01 — 条件化预判改造（Spec A，三端全量收尾）
+
+**开发者**: Aria
+
+### 新增
+- 预判 schema 升 3.0（`schemas/prediction.py`）：新增 `PredictionDirection`/`PredictionMetric`/`PredictionAnchor`（horizon+threshold+metric+direction 自带方向）/`PredictionCondition`（condition/scenario/anchor 三段式）；`PredictionResult` 增加可选 `conditions` 与 `target: Target | None`，并新增 `schemas/target.py`（`Target`/`TargetProfile` 纯数据模型，关联统一 Target 维度，兼容 `classify_target` 归类）
+- `PredictionAnchor.direction` 缺省 neutral，归一化层从文本兜底（regex），确保验证不因缺失方向失败
+- `services/prediction_service.py`：`_coerce_prediction_payload` 兜底 schema_version=3.0；`run_chat_prediction` 恢复到期日计算并落库 chat 预判（`_persist_chat_prediction`），按 `classify_target` 分流——index/sector→pending 入 16:00 验证，stock→skipped 防验证队列堆积
+- `services/prediction_validator.py`：新增 `_verify_conditions`，对每条 condition 产出 `c{i}` 验证 entry（hit/miss），`run_once` 双验证调度（horizon 与 condition 并行互不干扰，窗口未满 wait 不回写）
+
+### 改进
+- `prompts/workers/prediction.py`：PREDICTION_PROMPT / PREDICTION_CHAT_PROMPT 强制 `conditions[]`（2-3 条，至少 1 条含成交量维度），禁止"无条件短中长期"式空洞预判
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 重置
+
+---
+
 <<<<<<< HEAD
 ## [changer] 2026-08-31 — 预判/节奏/迭代增强（TradingVane 研报借鉴 v2）
 
