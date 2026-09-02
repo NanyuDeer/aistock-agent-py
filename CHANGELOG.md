@@ -2,7 +2,18 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
-<<<<<<< HEAD
+## [changer] 2026-09-02 — 节奏大师「下一重大事件锚点」（design-debate P1）
+
+**开发者**: changer-collab
+
+### 新增
+- 节奏大师下一重大事件锚点：`rhythm_engine.build_next_event_anchor` 纯函数（取事件窗口内首条 high 事件，N=事件日与 basis_date 自然日差，note 三态 今日/明日/N 天后；无 high 返回 None，日期异常跳过不抛异常 G6）（`services/rhythm_engine.py`）
+- rhythm_master 三时点接线：after_close 全量卡与 morning/midday 事件驱动增量统一以 basis_date 为锚写入 `rhythm_card.next_event_anchor`（`agents/workers/rhythm_master.py`）
+
+### 测试
+- `tests/unit/test_rhythm_engine.py`：锚点无 high/取首条 high/今日明日/坏日期跳过 4 用例（26 passed）
+- `tests/integration/test_rhythm_master_worker.py`：after_close 全量 + morning 增量锚点 2 集成用例
+
 ## [changer] 2026-08-31 — 预判/节奏/迭代增强（TradingVane 研报借鉴 v2）
 
 **开发者**: changer-collab
@@ -18,7 +29,6 @@
 ### 文档
 - AGENTS.md：PUT verification 早退契约行 + A1/A2/A3 增强小节 + services 目录登记 prediction_invalidation.py；README 环境变量表补充 PREDICTION_CONF_CAP_SHORT/MID
 
-=======
 ## [junliang] 2026-08-27 — 个股异动溯源读层 skill（阶段 2.2）
 
 **开发者**: Aria
