@@ -31,7 +31,6 @@ async def test_sector_snapshot_builds_evidence_and_facts() -> None:
             report_date="2026-07-16",
             sector_name="存储板块",
             sector_row=_sector_row(),
-            trace_ctx=object(),
         )
     assert snap["sector"]["name"] == "存储板块"
     assert snap["sector"]["pct_change"] == -4.2
@@ -52,7 +51,6 @@ async def test_sector_snapshot_search_failure_degrades() -> None:
             report_date="2026-07-16",
             sector_name="存储板块",
             sector_row=_sector_row(),
-            trace_ctx=object(),
         )
     assert snap["sector"]["pct_change"] == -4.2
     assert snap["attribution_status"] == "insufficient"
@@ -64,7 +62,32 @@ async def test_sector_queries_include_regulatory() -> None:
     """定向 query 覆盖监管/事件词（与大盘溯源 query 的关键区别）。"""
     from aistock_agent.services.sector_trace_snapshot import _sector_evidence_queries
 
-    queries = _sector_evidence_queries("存储板块")
-    joined = " | ".join(queries)
+    queries = _sector_evidence_queries("存储板块", "2026-07-16")
+    joined = " ".join(queries)
     assert "存储板块" in joined
+    assert "2026-07-16" in joined, "query 需注入 report_date 聚焦当日"
+    assert "|" not in joined, "query 不应含 |（搜索服务按字面量处理）"
     assert any(k in joined for k in ("反垄断", "调查", "监管")), "需含监管词"
+
+
+@pytest.mark.asyncio
+async def test_sector_snapshot_real_search_path_returns_sources() -> None:
+    """真实检索路径可用（D4.5 防断链）：不 mock _run_directed_searches，仅 mock
+    TavilyService.search → sources 非空且 attribution_status == "sufficient"。"""
+    from aistock_agent.services.sector_trace_snapshot import build_sector_snapshot
+
+    with patch(
+        "aistock_agent.services.sector_trace_snapshot.TavilyService.search",
+        return_value={
+            "results": [{"title": "x", "content": "y", "url": "https://e.com/a"}],
+            "provider": "tavily",
+            "outcome": "ok",
+        },
+    ):
+        snap = await build_sector_snapshot(
+            report_date="2026-07-16",
+            sector_name="存储板块",
+            sector_row=_sector_row(),
+        )
+    assert snap["sources"], "真实 Tavily 检索路径应产出来源"
+    assert snap["attribution_status"] == "sufficient"

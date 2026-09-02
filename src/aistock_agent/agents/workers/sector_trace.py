@@ -5,7 +5,6 @@ review_done 事件触发的板块级事件归因：对主因板块回答「今�
 report_type="sector_trace"。
 """
 from dataclasses import dataclass, field
-from typing import cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -13,10 +12,7 @@ from aistock_agent.prompts.workers.sector_trace import _GENERATE_SECTOR_PROMPT
 from aistock_agent.schemas.sector_trace import SectorChainResult, validate_sector_chain
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
-from aistock_agent.services.sector_trace_snapshot import (
-    _SearchContext,
-    build_sector_snapshot,
-)
+from aistock_agent.services.sector_trace_snapshot import build_sector_snapshot
 
 
 @dataclass
@@ -118,15 +114,12 @@ async def _generate_sector_trace_with_retry(
 async def run_sector_trace(
     *, report_date: str, sector_name: str, sector_row: dict[str, object] | None
 ) -> SectorTraceRunResult:
+    # 定向事件检索路径在 snapshot 内部走 TavilyService.search（D4.5 接线，
+    # 无外部上下文注入；快照内失败静默降级语义不变）
     snapshot = await build_sector_snapshot(
         report_date=report_date,
         sector_name=sector_name,
         sector_row=sector_row,
-        # 检索上下文待 D4 接线真实 async 检索适配器：此处 cast(_SearchContext,
-        # node_api) 仅通过类型检查，运行期 node_api 无 search 方法，ctx.search
-        # 会抛 AttributeError → 被 snapshot 内部 try/except 捕获后恒静默降级
-        # （sources 为空）。D4 实现者需替换为真实检索适配器，勿遗漏。
-        trace_ctx=cast(_SearchContext, node_api),
     )
     trace_result = await _generate_sector_trace_with_retry(snapshot, captured_at=report_date)
     content = {
