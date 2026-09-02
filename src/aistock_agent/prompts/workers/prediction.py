@@ -27,6 +27,9 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
     - metric：验证标的，"close"（默认）"/ "index_close"（大盘用）/"volume" 等
     - direction：该条件的**情景方向**（bullish / bearish / neutral），自挂、不依赖 horizons[].direction
   约束：至少 1 条 condition 含**成交量维度**（放量/缩量）；禁止产出"无条件短中长期"式空洞预判。
+  结构性要求（2026-09-02）：每个独立触发情形**必须单独成一条 condition**；禁止在 condition 或 scenario
+  文本里用"；若…则/将/会…"拼接第二个情形；对冲/反向情形（如"若跌破某位则转跌"）必须独立成条输出，
+  direction 与主情景相反，并自带 anchor（horizon/threshold/direction）。
 - horizons：每档包含（为三档持续性判断，与 conditions 并存）
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）
@@ -72,6 +75,9 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
     - metric：验证标的，"close"（默认）"/ "index_close"（大盘用）/"volume" 等
     - direction：该条件的**情景方向**（bullish / bearish / neutral），自挂、不依赖 horizons[].direction
   约束：至少 1 条 condition 含**成交量维度**（放量/缩量）；禁止产出"无条件短中长期"式空洞预判。
+  结构性要求（2026-09-02）：每个独立触发情形**必须单独成一条 condition**；禁止在 condition 或 scenario
+  文本里用"；若…则/将/会…"拼接第二个情形；对冲/反向情形（如"若跌破某位则转跌"）必须独立成条输出，
+  direction 与主情景相反，并自带 anchor（horizon/threshold/direction）。
 - horizons：每档包含
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）
