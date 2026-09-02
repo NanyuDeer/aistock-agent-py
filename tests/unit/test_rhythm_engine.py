@@ -2,6 +2,7 @@
 from aistock_agent.services.rhythm_engine import (
     DISCLAIMER,
     build_event_branch,
+    build_next_event_anchor,
     build_technical_branches,
     compose_score,
     conflict_kind,
@@ -262,3 +263,45 @@ def test_compose_score_penalty_default_zero_change():
     b, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
                          trend_available=True, fg_available=True, penalty=0.0)
     assert a == b
+
+
+def test_build_next_event_anchor_none_without_high():
+    events = [{"date": "2026-09-01", "title": "低影响", "importance": "low"}]
+    assert build_next_event_anchor(events, "2026-08-28") is None
+    assert build_next_event_anchor([], "2026-08-28") is None
+
+
+def test_build_next_event_anchor_takes_first_high_inherited_order():
+    # 顺序继承 app-api 三键排序，Python 不重排：取首条 high
+    events = [
+        {"date": "2026-09-01", "title": "低影响", "importance": "low"},
+        {"date": "2026-09-02", "title": "FOMC 议息", "importance": "high"},
+        {"date": "2026-09-03", "title": "CPI", "importance": "high"},
+    ]
+    anchor = build_next_event_anchor(events, "2026-08-28")
+    assert anchor is not None
+    assert anchor["title"] == "FOMC 议息"
+    assert anchor["event_date"] == "2026-09-02"
+    assert anchor["days_until"] == 5
+    assert anchor["note"] == "5 天后"
+
+
+def test_build_next_event_anchor_today_tomorrow_notes():
+    today = build_next_event_anchor(
+        [{"date": "2026-09-01", "title": "X", "importance": "high"}], "2026-09-01"
+    )
+    assert today["note"] == "今日"
+    tomorrow = build_next_event_anchor(
+        [{"date": "2026-09-02", "title": "X", "importance": "high"}], "2026-09-01"
+    )
+    assert tomorrow["note"] == "明日"
+
+
+def test_build_next_event_anchor_skips_bad_date_event():
+    # G6：日期格式异常跳过错该事件，不抛异常；首个合法 high 仍取到
+    events = [
+        {"date": "bad-date", "title": "异常日期", "importance": "high"},
+        {"date": "2026-09-03", "title": "FOMC", "importance": "high"},
+    ]
+    anchor = build_next_event_anchor(events, "2026-09-01")
+    assert anchor is not None and anchor["title"] == "FOMC"

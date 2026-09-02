@@ -290,3 +290,44 @@ async def test_conflict_uses_pre_tech_phase(
     assert recorded == [("warm_up", -2.0)]
     assert card["conflict"] is True
     assert card["conflict_detail"] == "趋势偏空但情绪周期偏热，信号背离"
+
+
+@pytest.mark.asyncio
+async def test_after_close_card_includes_next_event_anchor_when_high_event(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None,
+) -> None:
+    mock_api.get_calendar_events = AsyncMock(return_value=[
+        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
+         "importance": "high", "source": "L3", "event_time": "22:00"},
+    ])
+    out = await run({"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"})
+    content = json.loads(out["final_response"])
+    anchor = content["rhythm_card"]["next_event_anchor"]
+    assert anchor is not None
+    assert anchor["title"] == "FOMC 议息"
+    assert anchor["days_until"] >= 3  # 08-28 至 08-31 至少 3 自然日
+
+
+@pytest.mark.asyncio
+async def test_morning_delta_refreshes_anchor(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None,
+) -> None:
+    mock_api.get_rhythm_report = AsyncMock(return_value={
+        "content": {
+            "target_date": "2026-08-31", "basis_date": "2026-08-28",
+            "refresh_slot": "after_close",
+            "rhythm_card": {
+                "score": 60.0, "level": "active",
+                "position_band": {"text": "6~8 成"},
+                "branches": [], "event_window": [],
+            },
+        }
+    })
+    mock_api.get_calendar_events = AsyncMock(return_value=[
+        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
+         "importance": "high", "source": "L3", "event_time": "22:00"},
+    ])
+    out = await run({"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-31"})
+    content = json.loads(out["final_response"])
+    anchor = content["rhythm_card"]["next_event_anchor"]
+    assert anchor is not None and anchor["title"] == "FOMC 议息"

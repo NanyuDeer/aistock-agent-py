@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal
 
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
@@ -409,3 +410,30 @@ def build_event_branch(event: dict[str, Any]) -> dict[str, Any] | None:
         },
         "event_ref": {"event_date": str(event.get("date", "")), "title": title},
     }
+
+
+def build_next_event_anchor(
+    events: list[dict[str, object]], basis_date: str
+) -> dict[str, object] | None:
+    """下一重大事件锚点（design-debate P1，2026-09-02）。
+
+    取窗口内首条 high 事件（顺序继承 app-api 事件日历下发顺序，
+    Python 侧不重排）；N = event_date 与 basis_date 自然日差。
+    无 high 事件返回 None（前端整块不渲染，对齐空串先例 §7.1）。
+    日期解析失败跳过错该事件（G6 不抛异常纪律）。
+    """
+    for e in events:
+        if e.get("importance") != "high":
+            continue
+        event_date = str(e.get("date") or "")
+        title = str(e.get("title") or "")
+        if not event_date or not title:
+            continue
+        try:
+            days_until = (date.fromisoformat(event_date) - date.fromisoformat(basis_date)).days
+        except ValueError:
+            continue  # 日期格式异常：跳过错该事件，不抛异常穿透
+        days_until = max(0, days_until)
+        note = "今日" if days_until == 0 else ("明日" if days_until == 1 else f"{days_until} 天后")
+        return {"title": title, "event_date": event_date, "days_until": days_until, "note": note}
+    return None
