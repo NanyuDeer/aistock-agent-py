@@ -239,6 +239,12 @@ class Settings(BaseSettings):
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 21:30 收盘后对 leaders
+    # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
+    # 时刻选 21:30 的原因：review_full 20:30 会再触发主因板块级联预判落库，其后拉榜做
+    # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
+    # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
+    scheduler_sector_wind_prediction_cron: str = "30 21 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
     scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）

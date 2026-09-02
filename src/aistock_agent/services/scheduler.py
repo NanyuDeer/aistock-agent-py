@@ -181,6 +181,18 @@ def start_scheduler() -> None:
         name="prediction hit-rate stats",
         replace_existing=True,
     )
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：21:30 收盘后逐板块
+    # predict_sector（幂等跳过 + 主因板块排除；review_full 20:30 级联预判落库后执行）
+    scheduler.add_job(
+        _run_sector_wind_prediction_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_sector_wind_prediction_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="sector_wind_prediction",
+        name="daily wind sector prediction batch",
+        replace_existing=True,
+    )
 
     if settings.quick_snapshot_enabled:
         # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
@@ -1093,4 +1105,22 @@ async def _run_prediction_stats_task() -> None:
         logger.info("scheduler_prediction_stats_done")
     except Exception as e:
         logger.error("scheduler_prediction_stats_failed", error=str(e), exc_info=True)
+
+
+async def _run_sector_wind_prediction_task() -> None:
+    """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 21:30 收盘后）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="sector_wind_prediction")
+        return
+    # 函数内 import：延迟加载业务模块（照抄 _run_prediction_validate_task 先例），
+    # 避免 scheduler 模块加载时拖慢启动
+    from aistock_agent.services.sector_wind_prediction import (  # noqa: PLC0415
+        run_sector_wind_prediction,
+    )
+
+    try:
+        stats = await run_sector_wind_prediction()
+        logger.info("scheduler_sector_wind_prediction_done", **stats)
+    except Exception as e:
+        logger.error("scheduler_sector_wind_prediction_failed", error=str(e), exc_info=True)
 
