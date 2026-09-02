@@ -278,7 +278,7 @@ def mark_failed(case_id: str, data_dir: Path | None = None) -> None:
     """
     path = _iterated_mark_path(case_id, data_dir)
     existing = _read_mark(path)
-    retry_count = int(existing.get("retry_count", 0)) + 1
+    retry_count = int(cast("int", existing.get("retry_count", 0))) + 1
     now = datetime.now(_TZ)
     if retry_count >= _FAIL_DEADLETTER_AT:
         mark_iterated(

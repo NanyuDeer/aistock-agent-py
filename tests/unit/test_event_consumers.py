@@ -1,4 +1,4 @@
-"""Consumer 单元测试 — 验证 6 个 consumer 的事件处理逻辑。"""
+"""Consumer 单元测试 — 验证 7 个 consumer 的事件处理逻辑。"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -503,10 +503,10 @@ async def test_prediction_consumer_trace_unavailable_skips(mock_event_bus, mock_
 
 
 @pytest.mark.asyncio
-async def test_start_all_consumers_registers_six_with_prediction_group(
+async def test_start_all_consumers_registers_seven_with_groups(
     mock_event_bus, mock_node_api
 ):
-    """start_all_consumers 注册 6 个消费者；PredictionConsumer 用独立组 prediction_chain。"""
+    """start_all_consumers 注册 7 个消费者；Prediction/SectorTrace 用独立组。"""
     ctx = ConsumerContext(mock_event_bus, mock_node_api)
 
     with patch(
@@ -514,13 +514,15 @@ async def test_start_all_consumers_registers_six_with_prediction_group(
         new_callable=AsyncMock,
     ) as mock_loop:
         tasks = start_all_consumers(ctx)
-        assert len(tasks) == 6
+        assert len(tasks) == 7
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert len(mock_loop.await_args_list) == 6
-    pred_calls = [c for c in mock_loop.await_args_list if c.args[0].channel == CHANNEL_REVIEW_DONE]
-    assert len(pred_calls) == 1
-    assert pred_calls[0].kwargs["group"] == "prediction_chain"
+    assert len(mock_loop.await_args_list) == 7
+    review_calls = [
+        c for c in mock_loop.await_args_list if c.args[0].channel == CHANNEL_REVIEW_DONE
+    ]
+    assert len(review_calls) == 2
+    assert {c.kwargs["group"] for c in review_calls} == {"prediction_chain", "sector_chain"}
     non_pred_calls = [
         c for c in mock_loop.await_args_list if c.args[0].channel != CHANNEL_REVIEW_DONE
     ]

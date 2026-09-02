@@ -2,12 +2,16 @@
 from aistock_agent.services.rhythm_engine import (
     DISCLAIMER,
     build_event_branch,
+    build_next_event_anchor,
     build_technical_branches,
     compose_score,
+    conflict_kind,
+    conflict_penalty,
     detect_conflict,
     detect_phase,
     fear_greed_anchor,
     level_from_score,
+    ma_breadth,
     map_bipolar,
     position_band,
     sentiment_coefficient,
@@ -192,3 +196,112 @@ def test_event_branch_enum_three_partitions() -> None:
 
 def test_disclaimer_present() -> None:
     assert "不构成任何投资建议" in DISCLAIMER
+
+
+def test_ma_breadth_insufficient_under_65_bars() -> None:
+    out = ma_breadth([100.0] * 64)
+    assert out["insufficient"] is True
+    assert out["ma20"] is None and out["ma60"] is None
+
+
+def test_ma_breadth_warning_below_ma20() -> None:
+    closes = [100.0] * 120
+    closes[-1] = 90.0  # 收盘跌破 MA20
+    out = ma_breadth(closes)
+    assert out["warning"] is True
+    assert out["insufficient"] is False
+
+
+def test_ma_breadth_recovery_above_ma20_three_days() -> None:
+    closes = [100.0] * 117 + [105.0, 106.0, 107.0]  # 连续 3 日站上 MA20
+    out = ma_breadth(closes)
+    assert out["recovery"] is True
+
+
+def test_ma_breadth_breakdown_ma60() -> None:
+    closes = [100.0] * 117 + [60.0, 59.0, 58.0]  # 连续 3 日跌破 MA60
+    out = ma_breadth(closes)
+    assert out["breakdown_ma60"] is True
+
+
+def test_detect_phase_tech_unchanged_when_none() -> None:
+    history = [10.0, 20.0, 30.0, 40.0, 50.0]
+    p1, _ = detect_phase(history=history, consecutive_ice=0, volume_weak=None, prev_phase=None)
+    p2, _ = detect_phase(
+        history=history, consecutive_ice=0, volume_weak=None, prev_phase=None, tech=None
+    )
+    assert p1 == p2  # tech=None 零破坏
+
+
+def test_conflict_kind_top_bottom_none():
+    assert conflict_kind("warm_up", -2.0) == "top"
+    assert conflict_kind("overheat", -1.6) == "top"
+    assert conflict_kind("ice", 2.0) == "bottom"
+    assert conflict_kind("ebb", 1.5) == "bottom"
+    assert conflict_kind("normal", 1.0) is None
+    assert conflict_kind(None, None) is None
+
+
+def test_conflict_penalty_top_only():
+    assert conflict_penalty("top") == -8.0
+    assert conflict_penalty("bottom") == 0.0
+    assert conflict_penalty(None) == 0.0
+
+
+def test_compose_score_penalty_lowers_level():
+    base_score, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                                  trend_available=True, fg_available=True)
+    penalized, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                                 trend_available=True, fg_available=True, penalty=-8.0)
+    assert penalized <= base_score
+    assert penalized >= 0.0
+
+
+def test_compose_score_penalty_default_zero_change():
+    a, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                         trend_available=True, fg_available=True)
+    b, _ = compose_score(phase="overheat", trend=1.0, fg=60.0,
+                         trend_available=True, fg_available=True, penalty=0.0)
+    assert a == b
+
+
+def test_build_next_event_anchor_none_without_high():
+    events = [{"date": "2026-09-01", "title": "低影响", "importance": "low"}]
+    assert build_next_event_anchor(events, "2026-08-28") is None
+    assert build_next_event_anchor([], "2026-08-28") is None
+
+
+def test_build_next_event_anchor_takes_first_high_inherited_order():
+    # 顺序继承 app-api 三键排序，Python 不重排：取首条 high
+    events = [
+        {"date": "2026-09-01", "title": "低影响", "importance": "low"},
+        {"date": "2026-09-02", "title": "FOMC 议息", "importance": "high"},
+        {"date": "2026-09-03", "title": "CPI", "importance": "high"},
+    ]
+    anchor = build_next_event_anchor(events, "2026-08-28")
+    assert anchor is not None
+    assert anchor["title"] == "FOMC 议息"
+    assert anchor["event_date"] == "2026-09-02"
+    assert anchor["days_until"] == 5
+    assert anchor["note"] == "5 天后"
+
+
+def test_build_next_event_anchor_today_tomorrow_notes():
+    today = build_next_event_anchor(
+        [{"date": "2026-09-01", "title": "X", "importance": "high"}], "2026-09-01"
+    )
+    assert today["note"] == "今日"
+    tomorrow = build_next_event_anchor(
+        [{"date": "2026-09-02", "title": "X", "importance": "high"}], "2026-09-01"
+    )
+    assert tomorrow["note"] == "明日"
+
+
+def test_build_next_event_anchor_skips_bad_date_event():
+    # G6：日期格式异常跳过错该事件，不抛异常；首个合法 high 仍取到
+    events = [
+        {"date": "bad-date", "title": "异常日期", "importance": "high"},
+        {"date": "2026-09-03", "title": "FOMC", "importance": "high"},
+    ]
+    anchor = build_next_event_anchor(events, "2026-09-01")
+    assert anchor is not None and anchor["title"] == "FOMC"

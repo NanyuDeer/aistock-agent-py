@@ -1,6 +1,6 @@
 """iterate 调度 —— 注册 job 与手动触发"""
 
-from datetime import date
+from datetime import date, datetime, timezone  # noqa: UP017
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -210,3 +210,90 @@ async def test_produce_cases_loops_all_agents_and_isolates_failure(monkeypatch) 
     assert results["review"] == {"error": "review 产片失败"}
     assert len(notified) == 1  # 仅失败 agent 触发告警
     assert "review 产片失败" in str(notified[0])
+
+
+# ---- P5: scheduler 预测阈值触发链（Spec C §5.3 阈值分层 + sufficient_sample 闸门）----
+
+
+@pytest.mark.asyncio
+async def test_eligible_threshold_miss_invokes_sourcer() -> None:
+    """画像命中率低于分层阈值且样本充足 → 触发产片（return True）。"""
+    from aistock_agent.iterate.case_sourcers import _prediction_case_source_eligible
+    from aistock_agent.services.target_profile import make_target
+
+    target = make_target("上证指数")
+    assert target is not None
+    with patch(
+        "aistock_agent.iterate.case_sourcers.read_validation_profile",
+        AsyncMock(return_value={"sufficient_sample": True, "hit_rate": 0.3}),
+    ):
+        assert await _prediction_case_source_eligible(target, "short", "up") is True
+
+
+@pytest.mark.asyncio
+async def test_eligible_insufficient_sample_barred() -> None:
+    """样本不足（sufficient_sample=False）不触发，防小样本抖动误触发。"""
+    from aistock_agent.iterate.case_sourcers import _prediction_case_source_eligible
+    from aistock_agent.services.target_profile import make_target
+
+    target = make_target("上证指数")
+    assert target is not None
+    with patch(
+        "aistock_agent.iterate.case_sourcers.read_validation_profile",
+        AsyncMock(return_value={"sufficient_sample": False, "hit_rate": 0.0}),
+    ):
+        assert await _prediction_case_source_eligible(target, "short", "up") is False
+
+
+@pytest.mark.asyncio
+async def test_eligible_uses_layered_threshold() -> None:
+    """sector 用 get_iterate_threshold（horizon×scenario 分层），不读裸 score_threshold float。"""
+    from aistock_agent.iterate.case_sourcers import _prediction_case_source_eligible
+    from aistock_agent.services.target_profile import make_target
+
+    target = make_target("半导体板块")
+    assert target is not None and target.kind == "sector"
+    with patch(
+        "aistock_agent.iterate.case_sourcers.read_validation_profile",
+        AsyncMock(return_value={"sufficient_sample": True, "hit_rate": 0.4}),
+    ):
+        # sector 分层阈值 long×down=0.5（target_profile 注册表）；0.4<0.5 → True，
+        # 证明走 get_iterate_threshold 而非裸 float（sector raw 是 dict）。
+        assert await _prediction_case_source_eligible(target, "long", "down") is True
+
+
+@pytest.mark.asyncio
+async def test_produce_skips_non_triggered_prediction() -> None:
+    """prediction 画像未命中阈值 → produce_cases_daily 对该 agent 产片标记 skipped（不产片）。"""
+    from aistock_agent.iterate.adapters import get_adapter
+    from aistock_agent.iterate.case_sourcers import CaseCandidate
+    from aistock_agent.iterate.scheduler import produce_cases_daily
+
+    candidate = CaseCandidate(
+        event_title="预判验证 上证指数（2026-08-14）",
+        event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc),  # noqa: UP017
+        telegraph_records=[],
+        meta={"target": "上证指数"},
+    )
+    with (
+        patch(
+            "aistock_agent.iterate.scheduler.ITERABLE_AGENTS",
+            {"prediction": get_adapter("prediction")},
+        ),
+        patch(
+            "aistock_agent.iterate.case_pipeline.source_cases",
+            AsyncMock(return_value=[candidate]),
+        ),
+        patch(
+            "aistock_agent.iterate.case_sourcers._prediction_case_source_eligible",
+            AsyncMock(return_value=False),
+        ),
+    ):
+        results = await produce_cases_daily()
+    assert results["prediction"] == {
+        "skipped": "threshold_not_triggered",
+        "generated": 0,
+        "rejected": 0,
+        "case_ids": [],
+        "reasons": [],
+    }

@@ -350,3 +350,153 @@ def test_collect_industry_graph_two_failures_returns_none() -> None:
         result = asyncio.run(_collect_industry_graph(
             event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)))  # noqa: UP017
     assert result is None
+
+
+# ---- 预判验证驱动产片源（Spec C §4.3：prediction 验证驱动迭代） ----
+
+def _verified_record(
+    *,
+    rid: int,
+    schema_version: str,
+    trade_date: str,
+    target: str,
+    verification_keys: tuple[str, ...] = ("c0",),
+) -> dict[str, object]:
+    """构造一条验证过/未验证的 prediction 记录（对齐元数据契约源 shape）。"""
+    return {
+        "id": rid,
+        "source_id": f"review:{trade_date}",
+        "schema_version": schema_version,
+        "prediction": {
+            "schema_version": schema_version,
+            "horizons": [{"horizon": "short", "target": target, "direction": "bullish"}],
+            "conditions": [
+                {"condition": "放量突破", "scenario": "上行", "anchor": {
+                    "horizon": "short", "threshold": "+5%", "direction": "bullish"}}
+            ],
+        },
+        "due_dates": {"short": f"{trade_date[:8]}28"},
+        "verification": {k: {"result": "hit", "condition_met": True}
+                         for k in verification_keys},
+    }
+
+
+def test_prediction_verified_scan_maps_records() -> None:
+    """Spec C §4.3：只切 schema_version=3.0 且 verification 非空的记录 → 每记录一候选。
+
+    event_time 锚定 source_id 的交易日 15:30 CST（UTC 07:30，对齐 _close_time_for_day）；
+    meta 携带 {record_id, prediction, due_dates, verification, target, trade_date} 供回放。
+    """
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    records = [
+        _verified_record(rid=101, schema_version="3.0", trade_date="2026-08-14",
+                         target="上证指数"),
+        _verified_record(rid=102, schema_version="3.0", trade_date="2026-08-12",
+                         target="半导体板块"),
+    ]
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=records)
+        candidates = asyncio.run(prediction_verified_scan(ctx))
+    assert len(candidates) == 2
+    assert candidates[0].event_time == datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc)  # noqa: UP017
+    assert candidates[0].meta is not None
+    assert candidates[0].meta["record_id"] == 101
+    assert candidates[0].meta["target"] == "上证指数"
+    assert candidates[0].meta["trade_date"] == "2026-08-14"
+    assert "上证指数" in candidates[0].event_title
+
+
+def test_prediction_verified_scan_filters_bad_records() -> None:
+    """Spec C §7：只切 schema_version=3.0 且 verification 非空；不满足的记录不产片，无记录不产片。"""  # noqa: E501
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    records = [
+        _verified_record(rid=1, schema_version="2.0", trade_date="2026-08-14",
+                         target="上证指数"),  # 旧版本
+        _verified_record(rid=3, schema_version="3.0", trade_date="2026-08-14",
+                         target="上证指数", verification_keys=()),  # 无 verification
+    ]
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=records)
+        assert asyncio.run(prediction_verified_scan(ctx)) == []
+
+
+def test_prediction_verified_scan_skips_unparsable_source_id() -> None:
+    """source_id 无交易日锚点（不可解析日期）→ 跳过该条，不炸产片源。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
+
+    ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
+    bad = _verified_record(rid=9, schema_version="3.0", trade_date="2026-08-14", target="上证指数")
+    bad["source_id"] = "review:not-a-date"
+    with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
+        mock_client.return_value.list_verified_predictions = AsyncMock(return_value=[bad])
+        assert asyncio.run(prediction_verified_scan(ctx)) == []
+
+
+# ---- P5: prediction 候选阈值触发过滤（Spec C §5.3 阈值分层 + sufficient_sample 闸门）----
+
+
+def _mk_pred_candidate(target: str) -> object:
+    """构造带 meta.target 的 prediction CaseCandidate（供候选过滤用例）。"""
+    from aistock_agent.iterate.case_sourcers import CaseCandidate
+
+    return CaseCandidate(
+        event_title=f"预判验证 {target}（2026-08-14）",
+        event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc),  # noqa: UP017
+        telegraph_records=[],
+        meta={"target": target},
+    )
+
+
+def test_prediction_candidate_kept_when_any_horizon_triggers() -> None:
+    """候选任一 default horizon×scenario 触发（命中率超标）→ 候选保留 – 可产片。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("半导体板块")
+    with patch(
+        "aistock_agent.iterate.case_sourcers._prediction_case_source_eligible",
+        side_effect=[True, False],  # 首个 horizon/scenario 即触发 → 短路 True
+    ):
+        assert asyncio.run(_prediction_candidate_kept(candidate)) is True  # type: ignore[arg-type]
+
+
+def test_prediction_candidate_dropped_when_unresolvable_target() -> None:
+    """meta.target 无法解析为首类 Target（unknown 抽象词）→ 保守丢弃（不产片防误触发）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("资本市场波动")  # 非指数/代码/板块标记 → make_target None
+    assert asyncio.run(_prediction_candidate_kept(candidate)) is False  # type: ignore[arg-type]
+
+
+def test_prediction_candidate_stock_code_resolves_and_loops_stock_horizons() -> None:
+    """个股（6 位 code）候选：make_target 解析为 stock Target，按 stock profile
+    default_horizons(short/mid/long)×(up/down) 逐档判定——全不触发才丢弃。
+
+    证明个股 verified 记录不会被产片过滤误丢（若 make_target("600519") 不可解析，
+    函数会直接 return False 且不调用 eligible，call_count 将不是 6）。
+    """
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("600519")
+    with patch(
+        "aistock_agent.iterate.case_sourcers._prediction_case_source_eligible",
+        return_value=False,
+    ) as eligible:
+        kept = asyncio.run(_prediction_candidate_kept(candidate))  # type: ignore[arg-type]
+    assert kept is False
+    assert eligible.call_count == 6  # stock 3 档 × 2 方向场景（target 可解析且走 stock profile）

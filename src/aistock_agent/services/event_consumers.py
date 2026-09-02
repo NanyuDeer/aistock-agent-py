@@ -1,4 +1,4 @@
-"""Event Consumers -- evening_chain 事件消费者（6 个消费者，2 个消费组）。
+"""Event Consumers -- evening_chain 事件消费者（7 个消费者，3 个消费组）。
 事件流：
   review_quick -> ReviewQuickConsumer -> snapshot(quick) -> broadcast（quick 晚间播报）
   review_full  -> ReviewFullConsumer    -> snapshot(full) -> iterate -> broadcast
@@ -7,9 +7,11 @@
   iterate      -> IterateConsumer       -> broadcast
   broadcast    -> BroadcastConsumer     （终点）
   review_done  -> PredictionConsumer    （独立消费组 prediction_chain）
+  review_done  -> SectorTraceConsumer   （独立消费组 sector_chain，板块溯源环）
 
 消费组：5 个既有消费者走默认组 evening_chain；PredictionConsumer 独立
-group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）。
+group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）；SectorTraceConsumer
+独立 group="sector_chain"（板块溯源事件层归因，Spec D/T4）。
 """
 
 import asyncio
@@ -21,12 +23,14 @@ from structlog import get_logger
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
+from aistock_agent.agents.workers.sector_trace import extract_primary_sector, run_sector_trace
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.prediction_service import (
     TraceUnavailableError,
     predict_from_trace,
+    predict_sector,
     save_skipped_prediction,
 )
 from aistock_agent.services.snapshot_builder import build_snapshot
@@ -239,7 +243,10 @@ class SnapshotConsumer(BaseConsumer):
         # 显式消费 quick 链路透传的降级契约（Task 1 发布、本处消费）；直接触发的
         # snapshot（如 full 链路）无该字段 → 缺省视为未降级，消除隐性耦合。
         review_degraded: bool = bool(event.payload.get("review_degraded", False))
-        review_status: str = str(event.payload.get("review_status") or ("degraded" if review_degraded else "ok"))
+        review_status: str = str(
+            event.payload.get("review_status")
+            or ("degraded" if review_degraded else "ok")
+        )
 
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         invalid = not isinstance(snapshot, dict) or snapshot.get("error")
@@ -319,14 +326,24 @@ class IterateConsumer(BaseConsumer):
         # 原始 LLM payload 仅用于链路诊断；brief 事实由受控构造函数生成
         # （复用 scheduler 旧链路逻辑）。briefing.py 对 iterate 强制要求
         # content.brief_summary，缺失会导致 brief_evening 降级。
+        content = {
+            "brief_summary": build_iterate_brief_summary(iterate_payload),
+            "iterate_payload": iterate_payload,
+        }
         await self.ctx.node_api.save_analysis_report(
             report_type="iterate",
             report_date=report_date,
             data_source="iterate_analyzer",
-            content={
-                "brief_summary": build_iterate_brief_summary(iterate_payload),
-                "iterate_payload": iterate_payload,
-            },
+            content=content,
+        )
+
+        # 每次 iterate 完成后推送通知邮件（2026-09-02；静默失败不阻断链路）
+        from aistock_agent.services.iterate_mail import maybe_notify_iterate_mail
+
+        await maybe_notify_iterate_mail(
+            report_date=report_date,
+            summary=content["brief_summary"],
+            payload=iterate_payload,
         )
 
         await self.ctx.event_bus.publish(
@@ -402,6 +419,88 @@ class PredictionConsumer(BaseConsumer):
             return
 
         raise RuntimeError(f"unexpected prediction status: {result.status}")
+
+
+class SectorTraceConsumer(BaseConsumer):
+    """板块溯源消费：review_done(ok) → 主因板块事件层归因（Spec D · 溯源环）。
+
+    独立消费组 sector_chain（与 prediction_chain 并列），失败走 event_bus.retry→DLQ。
+    review 无主因板块 → 跳过不产出（日志）。
+
+    级联预判（Spec D · 预判环生产触发）：溯源成功后串行调 predict_sector（同一
+    handler 内，非新增事件/触发通道）——sector_snapshot 用溯源快照（板块行情 +
+    事件证据），当日大盘结论由 predict_sector 内部 _market_trace_brief 主动拉取
+    （输入组装级联）。落库 source_type="sector_prediction"（Node 按
+    (source_type, source_id) 幂等 upsert，review_done quick/full 重复触发不堆积），
+    status 默认 pending → 16:00 到期验证 → prediction_verified_scan → 板块预判迭代。
+    预判失败仅日志不阻断（绝不因预判问题把溯源事件重试进 DLQ）。
+    """
+
+    consumer_group = "sector_chain"
+
+    @property
+    def channel(self) -> str:
+        return CHANNEL_REVIEW_DONE
+
+    async def handle(self, event: Event) -> None:
+        payload = event.payload or {}
+        report_date = str(payload.get("report_date") or "")
+        # 回放态隔离：review 报告读取受既有回放层保护（node_read 白名单），此处不额外处理
+        report = await node_api.get_analysis_report(report_type="review", report_date=report_date)
+        sector_name, sector_row = extract_primary_sector({"report": report})
+        if not sector_name:
+            logger.info("sector_trace_skip_no_primary_sector", report_date=report_date)
+            return
+        result = await run_sector_trace(
+            report_date=report_date, sector_name=sector_name, sector_row=sector_row
+        )
+        logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
+        await _cascade_sector_prediction(
+            report_date=report_date,
+            sector_name=sector_name,
+            sector_snapshot=result.snapshot,
+        )
+
+
+async def _cascade_sector_prediction(
+    *,
+    report_date: str,
+    sector_name: str,
+    sector_snapshot: dict[str, object],
+) -> None:
+    """板块溯源后的级联预判（Spec D · 预判环生产触发，输入组装非事件驱动）。
+
+    失败绝不 raise：板块溯源事件已成功，预判失败（resolve 失败 / LLM 失败 / 落库
+    失败）只记日志——否则会把整个 review_done 事件拖进 retry/DLQ（错误归属）。
+    """
+    try:
+        prediction = await predict_sector(
+            report_date=report_date,
+            sector_name=sector_name,
+            sector_snapshot=sector_snapshot,
+        )
+    except Exception as exc:  # noqa: BLE001 — 级联预判失败不阻断溯源链路
+        logger.warning(
+            "sector_prediction_cascade_failed",
+            report_date=report_date,
+            sector=sector_name,
+            error=str(exc),
+            exc_info=True,
+        )
+        return
+    if prediction is None:
+        logger.info(
+            "sector_prediction_cascade_skipped",
+            report_date=report_date,
+            sector=sector_name,
+        )
+        return
+    logger.info(
+        "sector_prediction_done",
+        report_date=report_date,
+        sector=sector_name,
+        prediction_status=prediction.prediction_status,
+    )
 
 
 def _make_consumer_state(
@@ -486,10 +585,11 @@ async def _consumer_loop(
 
 
 def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
-    """启动全部 6 个消费者。返回 Task 列表用于管理。
+    """启动全部 7 个消费者。返回 Task 列表用于管理。
 
-    消费组：PredictionConsumer 走独立组 prediction_chain；
-    其余 5 个不传 group（默认组 evening_chain），保持既有行为零改动。
+    消费组：PredictionConsumer 走独立组 prediction_chain；SectorTraceConsumer
+    走独立组 sector_chain；其余 5 个不传 group（默认组 evening_chain），
+    保持既有行为零改动。
     """
     consumers = [
         ReviewQuickConsumer(ctx),
@@ -498,6 +598,7 @@ def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
         IterateConsumer(ctx),
         BroadcastConsumer(ctx),
         PredictionConsumer(ctx),
+        SectorTraceConsumer(ctx),
     ]
     tasks = []
     for c in consumers:

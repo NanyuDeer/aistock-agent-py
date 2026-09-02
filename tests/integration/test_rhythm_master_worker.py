@@ -21,9 +21,20 @@ def temp_sentiment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _kline_rows() -> list[dict]:
     base = 3000.0
     rows = []
-    for i in range(60):
+    for i in range(130):  # ≥65：ma_breadth 需 MA60（前 101 行日期钳位到 08-01，仅用于 bar 数）
         c = base + i * 1.0 + (i % 3)
-        rows.append({"trade_date": f"2026-08-{max(1, 28 - (59 - i)):02d}", "open": c - 1, "high": c + 2, "low": c - 2, "close": c, "pct_chg": 0.1, "vol": 100, "amount": 120.0})
+        rows.append(
+            {
+                "trade_date": f"2026-08-{max(1, 28 - (129 - i)):02d}",
+                "open": c - 1,
+                "high": c + 2,
+                "low": c - 2,
+                "close": c,
+                "pct_chg": 0.1,
+                "vol": 100,
+                "amount": 120.0,
+            }
+        )
     return rows
 
 
@@ -202,3 +213,121 @@ async def test_event_delta_maintains_data_missing(monkeypatch: pytest.MonkeyPatc
     )
     out2 = await worker_mod._apply_event_delta(base, "midday", "2026-08-31")
     assert out2["rhythm_card"]["data_missing"] == []
+
+
+@pytest.mark.asyncio
+async def test_after_close_ma_breadth_insufficient_marks_missing(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """C1：kline <65 根 → ma_breadth insufficient → data_missing 标注 + technical 佐证。"""
+    mock_api.get_index_kline = AsyncMock(return_value=_kline_rows()[:60])
+    out = await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    assert "final_response" in out
+    call = mock_api.save_analysis_report.call_args
+    assert call is not None
+    card = call.kwargs["content"]["rhythm_card"]
+    assert "MA 技术位数据不足" in card["data_missing"]
+    tech = card["phase_evidence"]["technical"]
+    assert tech["insufficient"] is True
+
+
+@pytest.mark.asyncio
+async def test_conflict_uses_pre_tech_phase(
+    temp_sentiment: Path, mock_api: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2：顶背离判定用 tech=None 的原始 phase，不被 C1 技术佐证（拉向 ebb）掩盖。
+
+    kline 近 3 日跌破 MA60/前低（breakdown_ma60=True）会把展示相位拉到 ebb；
+    温度序列升幅 10 > 5 → 原始 phase=warm_up；量能萎缩 → trend=-2.0 → 顶背离。
+    断言 detect_conflict 的输入是 base_phase（warm_up）而非展示相位（ebb），
+    即同一价格信号只经一条路径生效。
+    """
+    from aistock_agent.services import rhythm_engine as rhythm_engine_mod
+
+    # 温度序列 2 根且上行（slope=10 > 5 → warm_up），保证走到 C1 技术佐证覆盖分支
+    (temp_sentiment / "2026-08-27.json").write_text(
+        json.dumps({"date": "2026-08-27", "score": 35.0, "level": "低迷", "ice": {"is_ice": False, "consecutive_ice_days": 0}, "cycle_phase": "warm_up"}),
+        encoding="utf-8",
+    )
+    (temp_sentiment / "2026-08-28.json").write_text(
+        json.dumps({"date": "2026-08-28", "score": 45.0, "level": "低迷", "ice": {"is_ice": False, "consecutive_ice_days": 0}, "cycle_phase": "warm_up"}),
+        encoding="utf-8",
+    )
+    # 115 根平盘后近 3 日跌破 MA60/前低（C1 佐证触发）；量能同步萎缩 → trend_anchor=-2.0
+    rows: list[dict] = []
+    for i in range(115):
+        rows.append(
+            {
+                "trade_date": f"2026-08-{max(1, 28 - (117 - i)):02d}",
+                "open": 99.0, "high": 101.0, "low": 98.0,
+                "close": 100.0, "pct_chg": 0.0, "vol": 100, "amount": 120.0,
+            }
+        )
+    for c, amt in ((60.0, 20.0), (59.0, 15.0), (58.0, 10.0)):
+        rows.append(
+            {
+                "trade_date": "2026-08-31", "open": c - 1, "high": c + 2, "low": c - 2,
+                "close": c, "pct_chg": 0.1, "vol": 100, "amount": amt,
+            }
+        )
+    mock_api.get_index_kline = AsyncMock(return_value=rows)
+
+    recorded: list[tuple[object, object]] = []
+
+    def spy_conflict(phase, trend):
+        recorded.append((phase, trend))
+        return True, "趋势偏空但情绪周期偏热，信号背离"
+
+    monkeypatch.setattr(rhythm_engine_mod, "detect_conflict", spy_conflict)
+
+    payload = await worker_mod._compose_after_close("2026-08-28")
+    card = payload["rhythm_card"]
+    # 场景真实性：C1 展示相位已被技术佐证拉到 ebb（否则隔离断言无意义）
+    assert card["phase"] == "ebb"
+    # 隔离接线：detect_conflict 输入是 tech=None 的原始 phase（warm_up），非展示 ebb
+    assert recorded == [("warm_up", -2.0)]
+    assert card["conflict"] is True
+    assert card["conflict_detail"] == "趋势偏空但情绪周期偏热，信号背离"
+
+
+@pytest.mark.asyncio
+async def test_after_close_card_includes_next_event_anchor_when_high_event(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None,
+) -> None:
+    mock_api.get_calendar_events = AsyncMock(return_value=[
+        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
+         "importance": "high", "source": "L3", "event_time": "22:00"},
+    ])
+    out = await run({"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"})
+    content = json.loads(out["final_response"])
+    anchor = content["rhythm_card"]["next_event_anchor"]
+    assert anchor is not None
+    assert anchor["title"] == "FOMC 议息"
+    assert anchor["days_until"] >= 3  # 08-28 至 08-31 至少 3 自然日
+
+
+@pytest.mark.asyncio
+async def test_morning_delta_refreshes_anchor(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None,
+) -> None:
+    mock_api.get_rhythm_report = AsyncMock(return_value={
+        "content": {
+            "target_date": "2026-08-31", "basis_date": "2026-08-28",
+            "refresh_slot": "after_close",
+            "rhythm_card": {
+                "score": 60.0, "level": "active",
+                "position_band": {"text": "6~8 成"},
+                "branches": [], "event_window": [],
+            },
+        }
+    })
+    mock_api.get_calendar_events = AsyncMock(return_value=[
+        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
+         "importance": "high", "source": "L3", "event_time": "22:00"},
+    ])
+    out = await run({"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-31"})
+    content = json.loads(out["final_response"])
+    anchor = content["rhythm_card"]["next_event_anchor"]
+    assert anchor is not None and anchor["title"] == "FOMC 议息"

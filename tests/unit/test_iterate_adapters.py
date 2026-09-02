@@ -10,9 +10,17 @@ from aistock_agent.iterate.adapters import (
 )
 
 
-def test_registry_contains_review_and_event_analyst() -> None:
-    assert set(iterable_agent_ids()) == {"review", "event_analyst"}
-    assert len(ITERABLE_AGENTS) == 2
+def test_registry_contains_review_and_event_analyst_and_prediction() -> None:
+    # Spec C §4.1：预判接入迭代注册表（验证驱动，非归因监督式）
+    # Spec D（D6）：板块溯源/预判两条链路浅挂载（attribution/verification 评分器分离）
+    assert set(iterable_agent_ids()) == {
+        "review",
+        "event_analyst",
+        "prediction",
+        "sector_trace",
+        "sector_prediction",
+    }
+    assert len(ITERABLE_AGENTS) == 5
 
 
 def test_review_adapter_fields() -> None:
@@ -67,3 +75,13 @@ def test_all_registered_agents_have_case_sources() -> None:
     # 二期硬约束：case_sources 非空才参与产片；全部已注册 agent 必须声明产片源
     for agent_id, adapter in ITERABLE_AGENTS.items():
         assert adapter.case_sources, f"{agent_id} 未声明产片源"
+
+
+def test_prediction_adapter_fields() -> None:
+    """Spec C §4.1：prediction 走验证驱动迭代（ground_truth_kind=verification）。"""
+    adapter = get_adapter("prediction")
+    assert adapter.module_path == "aistock_agent.services.prediction_service"
+    assert adapter.run_entry == "predict_from_trace"
+    assert adapter.ground_truth_kind == "verification"
+    assert set(adapter.data_deps) == {"market"}
+    assert adapter.case_sources == (CaseSourceSpec("prediction_verified_scan"),)

@@ -13,8 +13,15 @@ import structlog
 from aistock_agent.config import settings
 from aistock_agent.iterate.adapters import get_adapter
 from aistock_agent.iterate.case_builder import get_data_dir, load_case
-from aistock_agent.iterate.evaluator import ScoreDetail, evaluate_attribution
+from aistock_agent.iterate.evaluator import (
+    ScoreDetail,
+    evaluate_attribution,
+    evaluate_verification,
+    score_detail_payload,
+    verification_gt_from_case,
+)
 from aistock_agent.iterate.ground_truth import load_ground_truth
+from aistock_agent.iterate.regression_golden import gate_case_variant
 from aistock_agent.iterate.variant_engine import (
     apply_variant,
     generate_variant,
@@ -94,7 +101,13 @@ async def run_case(
             # T11 M3 修复：基线轮纳入 try/except——returncode=0 但输出非 JSON 时
             # _run_replay_subprocess 抛 RuntimeError，原代码不在 try/except 内会崩整个闭环。
             try:
-                record = await _run_baseline(adapter.agent_id, case_id, ground_truth)
+                record = await _run_baseline(
+                    adapter.agent_id,
+                    case_id,
+                    ground_truth,
+                    case=case,
+                    ground_truth_kind=adapter.ground_truth_kind,
+                )
                 score = record["score_detail_obj"]
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -242,13 +255,11 @@ async def run_case(
             stopped_reason = "score_then_stall"
             break
 
-    # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入
-    best_patch = _recompute_best(adapter.agent_id, case_id)
-    if best_patch is not None:
-        best_path = get_data_dir() / "experiments" / f"{case_id}_best.json"
-        tmp = best_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, best_path)
+    # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入。
+    # P6.5 双闸门第一道（Spec C §4.7/§8）：prediction（verification）变体写 best
+    # 建议前先过回归闸门（冻结金标准上新旧 prompt 分层得分不降才准入人工审核），
+    # 未过闸改落 regression_blocked 标记而非直接落盘建议；归因分支不 gate，行为不变。
+    await _promote_best(adapter.agent_id, case, root)
 
     # D13 修复：闭环跑完即标记已迭代（单一权威标记，experiments 目录可清理）。
     # infra_failures 提前中止也走这里（该 case 已尝试且失败轮不落实验记录，
@@ -343,16 +354,71 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
     return best
 
 
+async def _promote_best(
+    agent_id: str,
+    case: dict[str, object],
+    repo_root: Path,
+) -> dict[str, object]:
+    """best 轮补丁晋升：prediction 变体先过回归闸门，归因分支照常。
+
+    P6.5 双闸门第一道（Spec C §4.7/§8）：任何 prediction（verification）变体落盘
+    best 建议前，必须在冻结金标准案例上「新旧 prompt 各跑一遍、分层得分不降」才
+    准入人工审核。未过闸 → 落 regression_blocked 标记（不写 best.json）；过闸 →
+    原子写 best.json 建议。归因分支（review/event_analyst）不触发 gate，行为不变。
+    """
+    case_id = str(case["case_id"])
+    best_patch = _recompute_best(agent_id, case_id)
+    if best_patch is None:
+        return {"pass": False, "reason": "no_best_patch"}
+
+    adapter = get_adapter(agent_id)
+    if adapter.ground_truth_kind != "verification":
+        _write_best(case_id, best_patch)
+        return {"pass": True, "best": best_patch}
+
+    gate = await gate_case_variant(agent_id, case, repo_root, best_patch)
+    if not gate.get("pass", False):
+        blocked = get_data_dir() / "experiments" / f"{case_id}_regression_blocked.json"
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_text(json.dumps(gate, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"pass": False, "reason": str(gate.get("reason", "regression_detected"))}
+
+    _write_best(case_id, best_patch)
+    return {"pass": True, "best": best_patch}
+
+
+def _write_best(case_id: str, best_patch: dict[str, object]) -> None:
+    """原子写 best.json 建议（C8/N2：tmp + os.replace 防半写）。"""
+    best_path = get_data_dir() / "experiments" / f"{case_id}_best.json"
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = best_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, best_path)
+
+
 def _as_structured(value: object) -> dict[str, object] | None:
     """回放输出中的 structured 键 → evaluator 入参（非 dict 时返回 None）。"""
     return value if isinstance(value, dict) else None
 
 
 async def _run_baseline(
-    agent_id: str, case_id: str, ground_truth: dict[str, object]
+    agent_id: str,
+    case_id: str,
+    ground_truth: dict[str, object],
+    *,
+    case: dict[str, object] | None = None,
+    ground_truth_kind: str = "attribution",
 ) -> dict[str, object]:
-    """round 1 基线：子进程回放 + 评分，并落盘实验记录（I5：基线轮也写入实验记录，
-    使每日报告能看到 round 1）。"""
+    """round 1 基线：按 ground_truth_kind 分流评分，并落盘实验记录（I5：基线轮也写入
+    实验记录，使每日报告能看到 round 1）。
+
+    - attribution（review/event_analyst）：子进程回放 + evaluate_attribution（现状）。
+    - verification（prediction）：确定性评分，不启动 LLM 子进程——标准答案 =
+      case.meta 的 recorded prediction + verification entries（P4 双链路分流；
+      evaluate_verification 是纯函数，无需回放、无需历史快照）。
+    """
+    if ground_truth_kind == "verification":
+        return await _run_verification_baseline(agent_id, case_id, case)
     # 函数内 import：从 variant_engine 模块命名空间按名字取（而非 from-import 固定绑定），
     # 使测试 patch("aistock_agent.iterate.variant_engine._run_replay_subprocess") 生效。
     from aistock_agent.iterate.variant_engine import (
@@ -397,11 +463,46 @@ async def _run_baseline(
         # C-5：基线轮 agent 输出全文同样落盘（评分可完全重算）
         "agent_output": str(output.get("final_response", "")),
         "score": score.total,
-        "score_detail": {
-            "direction": score.direction,
-            "drivers": score.drivers,
-            "sectors": score.sectors,
-        },
+        "score_detail": score_detail_payload(score),
+        "gap_analysis": score.gap_analysis,
+        "duration_ms": 0,
+        "variant_hash": _content_hash({}),
+        "created_at": _now_iso_date(),
+        "is_failure": False,
+    }
+    path = get_data_dir() / "experiments" / f"{case_id}_r1_baseline.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**record, "score_detail_obj": score}
+
+
+async def _run_verification_baseline(
+    agent_id: str, case_id: str, case: dict[str, object] | None
+) -> dict[str, object]:
+    """verification 基线轮：确定性评分，不启动 LLM 子进程（P4）。
+
+    标准答案从 case.meta 提取（recorded prediction + verification entries），
+    evaluate_verification 是纯函数；空/无判档样本 → 降级 0 分（gap 标注"无已验证
+    样本"），本轮记为非失败（is_failure=False）——0 分基线不更新 best，变体轮仍可
+    尝试改善，符合"验证驱动迭代"语义。
+    """
+    if case is None:
+        raise ValueError("verification baseline 需要 case（从 meta 提取标准答案）")
+    from aistock_agent.iterate.variant_engine import (
+        _content_hash,
+        _now_iso_date,
+    )
+
+    prediction_obj, verification_entries = verification_gt_from_case(case)
+    score = evaluate_verification(prediction_obj, verification_entries)
+    record: dict[str, object] = {
+        "case_id": case_id,
+        "round": 1,
+        "agent_id": agent_id,
+        "variant": {"type": "baseline", "files": [], "instructions": ""},
+        "agent_output": json.dumps(prediction_obj, ensure_ascii=False, default=str),
+        "score": score.total,
+        "score_detail": score_detail_payload(score),
         "gap_analysis": score.gap_analysis,
         "duration_ms": 0,
         "variant_hash": _content_hash({}),

@@ -26,5 +26,6 @@ def test_prompt_requires_structured_evolution_steps():
 def test_prompt_instructs_schema_version():
     # B2 回归：PREDICTION_PROMPT 必须指示输出 schema_version（PredictionResult 必填字段），
     # 否则 LLM 输出缺字段 → pydantic 校验失败 → 大盘溯源预测恒丢失（生产实测 2026-08-12）
+    # Spec A §3.3：schema_version 升 "3.0"（条件化预判）
     assert "schema_version" in PREDICTION_PROMPT
-    assert "2.0" in PREDICTION_PROMPT
+    assert "3.0" in PREDICTION_PROMPT

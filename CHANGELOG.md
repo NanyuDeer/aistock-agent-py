@@ -2,6 +2,116 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-09-02 — Spec D 收口：板块迭代回放接线 + 板块预判生产触发 + 个股验证/迭代环同构
+
+**开发者**: Aria
+
+### 新增
+- `services/prediction_service.py`：统一**个股预判入口 `predict_stock`**（keyword-only `(*, report_date, stock_code, stock_snapshot)`，stock_code 收 6 位裸码/带后缀 ts_code）+ `_stock_prediction_core`（LLM 结构化链，生产/回放共用）+ `_replay_predict_stock_from_case`（REPLAY 转调，case.meta 重建）；落库 `source_type="stock_prediction"`（source_id=`stock:{code}:{date}`）默认 pending
+- `services/prediction_targets.py`：`resolve_index_or_stock_code`——指数/个股 target code 归一（6 位裸码/带后缀 ts_code/指数后缀消歧防 `000001.SH` vs `000001.SZ`），验证器与预判入口共用
+- `iterate/adapters.py`：注册 `stock_prediction` 迭代 adapter（verification 验证驱动 + `prediction_verified_scan` 产片源，`data_deps={}`——回放输入全来自 case.meta）
+- `tools/sector_tools.py`：新增 `predict_sector_trend` 对话工具（板块预判对话补充入口）+ `prompts/workers/sector.py` 预判意图说明
+- `agents/workers/sector_trace.py`：`SectorTraceRunResult.snapshot`——溯源快照随结果返回（级联预判的 `sector_snapshot` 输入）
+
+### 修复/改进
+- **板块迭代回放接线（收口已知缺口 #1）**：`replay_runner._build_state` 建 sector_trace/sector_prediction 分支 + `_report_date_from_case`（meta.trade_date 优先，回退切片快照）；`sector_trace.run()` 返回 final_response（trace JSON）+ 顶层 `sectors`（对齐 review.run 契约，run_once 转 structured 供 `evaluate_attribution`）；`run_once` 验证分支适配 predict_sector keyword-only 签名；`predict_sector` 顶部 REPLAY_CASE_ID 转调 `_replay_predict_sector_from_case`；LLM 链抽为 `_sector_prediction_core`（生产/回放共用，后处理语义一致）；adapters 移除两 adapter「回放未接线」缺口注记
+- **板块预判生产触发接线（收口已知缺口 #2）**：`SectorTraceConsumer` 溯源成功后串行级联 `predict_sector`（`_cascade_sector_prediction`，失败仅日志不阻断，不把溯源事件拖进 retry/DLQ）；Node `(source_type, source_id)` UNIQUE 幂等防 quick/full 重复触发堆积
+- **个股验证环就绪**：`prediction_validator` horizon/condition 两解析入口改用共享 `resolve_index_or_stock_code`（支持 6 位裸码/带后缀 ts_code，stock 不再 no_source）；无法解析 reason 文案更正
+- **个股迭代支撑**：`_persist_chat_prediction` 移除 stock→skipped 过时分流（验证器已支持个股，对话预判即时进 16:00 验证队列）；`replay_runner` 补 stock_prediction `_build_state` 分支 + run_once keyword-only 调用
+
+### 测试
+- 新增 `tests/unit/test_prediction_stock_service.py`（predict_stock 落 pending/后缀归一/非 stock 拒绝/REPLAY 重建/日期错位）；新增/更新约 30 例（sector/stock 回放状态、级联触发传快照、对话工具、验证 code 归一、个股产片走 stock profile 判定、chat stock pending）；回归：prediction/validator/targets/stats/iterate/replay/skills/consumers/sector/case_sourcers 282 例全绿 + src mypy/ruff 0 告警
+
+### 文档
+- changelog-pending.md 收口已知缺口 #1/#2；总架构 `2026-08-31-四环三粒度复用架构-design.md` §5.4.1/§5.4.2 与自选股洞察升级 spec §10 登记下游契约（含对同事 light_predict 的落库约定）
+
+---
+
+## [changer] 2026-09-02 — 节奏大师「下一重大事件锚点」（design-debate P1）
+
+**开发者**: changer-collab
+
+### 新增
+- 节奏大师下一重大事件锚点：`rhythm_engine.build_next_event_anchor` 纯函数（取事件窗口内首条 high 事件，N=事件日与 basis_date 自然日差，note 三态 今日/明日/N 天后；无 high 返回 None，日期异常跳过不抛异常 G6）（`services/rhythm_engine.py`）
+- rhythm_master 三时点接线：after_close 全量卡与 morning/midday 事件驱动增量统一以 basis_date 为锚写入 `rhythm_card.next_event_anchor`（`agents/workers/rhythm_master.py`）
+
+### 测试
+- `tests/unit/test_rhythm_engine.py`：锚点无 high/取首条 high/今日明日/坏日期跳过 4 用例（26 passed）
+- `tests/integration/test_rhythm_master_worker.py`：after_close 全量 + morning 增量锚点 2 集成用例
+
+---
+
+## [main] 2026-09-01 — Spec B 预判验证闭环（验证 skill + 画像 + 个股数据源 + 三处反哺）
+
+**开发者**: Aria
+
+### 新增
+- `skills/prediction_validation.py`：验证 skill——`read_validation_profile`（缓存优先，miss 拉 verified 重算，key 用 `internal_id`）+ `explain_verification`（LLM 解释层，失败降级规则兜底）+ `enrich_prediction_input`（纯函数并入 `validation_profile` 块，红线：不改判定/不产指令/不覆盖 A3）
+- `prompts/workers/prediction_validation.py`：解释层 prompt
+- `services/cache.py`：`get/set_cached_validation_profile`（key `prediction:profile:{internal_id}`，TTL 86400）
+- `services/prediction_stats.py`：`build_validation_profile` 纯函数（condition 级命中率/miss_patterns/condition_met 分布/失效模式/degradation）
+- `services/data_client.py`：`get_stock_kline(code, days, start_date, end_date)`（复用 `get` 解包 `data.rows`）
+
+### 改进
+- `services/prediction_validator.py`：`_fetch_kline_window` 补 stock 分支（个股日 K 走 `get_stock_kline`，带区间参数 [due-20, due+10]）+ `_write_validation_profiles` 到期验证落画像（接管）
+- `services/prediction_service.py`：`run_chat_prediction` 绑定 `_enrich_chat_input_with_profile`；`run_predict` 绑定 `_enrich_market_predict_input`（大盘溯源代表 target=上证指数）
+- `services/morning_forecast_extractor.py`：新增 `_enrich_morning_summary_with_profile` 展示侧反哺（sufficient_sample 时 summary 追加历史命中率；缓存存原始 LLM 结果防陈旧；异常降级保持原文）
+
+### 测试
+- 新增 `tests/unit/test_prediction_validation.py`；扩充 prediction_stats/prediction_validator/prediction_service/morning_forecast_extractor 测试。晨报 9 例、预测相关 113 例全绿；mypy 通过
+
+---
+
+## [main] 2026-09-01 — 四环三粒度 Target 维度地基（TargetProfile 引擎独立提交）
+
+**开发者**: Aria
+
+### 新增
+- `services/target_profile.py`：`TARGET_PROFILES` 注册表（index/sector/stock 三粒度，每项含溯源 prompt/证据源/快照构造/默认周期/K线拉取/迭代阈值）+ `get_profile` 一次查表 + `get_iterate_threshold`（horizon×场景分层阈值，`resolve_raw_threshold` fail-closed）+ `make_target`（LLM 自由文本 → 首类 `Target`）+ `canonical_ts_code`（裸 6 位码带交易所后缀，防指数/个股空间冲突）
+- `tests/unit/test_target_profile.py`：20 例（模型约束 `extra=forbid`/注册表三粒度覆盖/阈值分层命中与 fallback/首类构造/ts_code 数据卫生）
+
+### 说明
+- 仅依赖已提交的 `schemas/target.py` 与 `prediction_targets.py`；`prediction_targets.classify_target`（legacy 字符串四分类）保持不动。本模块是后续 Spec B/C/D 落地的统一入口，`get_iterate_threshold` 消费方待阶段 5 / Spec1 接入。
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 清空 TargetProfile 待办
+
+---
+
+## [main] 2026-09-01 — 条件化预判改造（Spec A，三端全量收尾）
+
+**开发者**: Aria
+
+### 新增
+- 预判 schema 升 3.0（`schemas/prediction.py`）：新增 `PredictionDirection`/`PredictionMetric`/`PredictionAnchor`（horizon+threshold+metric+direction 自带方向）/`PredictionCondition`（condition/scenario/anchor 三段式）；`PredictionResult` 增加可选 `conditions` 与 `target: Target | None`，并新增 `schemas/target.py`（`Target`/`TargetProfile` 纯数据模型，关联统一 Target 维度，兼容 `classify_target` 归类）
+- `PredictionAnchor.direction` 缺省 neutral，归一化层从文本兜底（regex），确保验证不因缺失方向失败
+- `services/prediction_service.py`：`_coerce_prediction_payload` 兜底 schema_version=3.0；`run_chat_prediction` 恢复到期日计算并落库 chat 预判（`_persist_chat_prediction`），按 `classify_target` 分流——index/sector→pending 入 16:00 验证，stock→skipped 防验证队列堆积
+- `services/prediction_validator.py`：新增 `_verify_conditions`，对每条 condition 产出 `c{i}` 验证 entry（hit/miss），`run_once` 双验证调度（horizon 与 condition 并行互不干扰，窗口未满 wait 不回写）
+
+### 改进
+- `prompts/workers/prediction.py`：PREDICTION_PROMPT / PREDICTION_CHAT_PROMPT 强制 `conditions[]`（2-3 条，至少 1 条含成交量维度），禁止"无条件短中长期"式空洞预判
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 重置
+
+---
+## [changer] 2026-08-31 — 预判/节奏/迭代增强（TradingVane 研报借鉴 v2）
+
+**开发者**: changer-collab
+
+### 新增
+- 预判 A3 确定性置信钳制：`clamp_confidence_by_bucket`（Wilson 95%CI 上界 vs baseline，n<30 不动作）+ run_predict/run_chat_prediction 接线（short 恒启用/mid 配置开关/long 不启用）+ `PredictionHorizon.confidence_source` 标记（`prediction_stats.py`/`prediction_service.py`/`config.py`）
+- 预判 A1 失效复核触发器：`prediction_invalidation.py` 三态迟滞状态机 `update_trigger_state` + `scan_active_pending` 早退扫描（MA20 读数触发，early_exit 标记与 result 分离存储，验证器 skip 改按 `"result" in entry` 判定）
+- 预判 A2 独立源冲突检测：`corroborate_evidence`（quote/flow/news 三通道，claim 不计入）+ `PredictionResult.evidence_corroboration`（run_chat_prediction 接线，不覆盖 confidence）
+- 节奏大师 C1 指数技术位佐证：`ma_breadth` + `detect_phase(tech=)`（kline 扩至 120 日，佐证只进 phase_evidence，不进背离判定）
+- 节奏大师 C2 背离传导：`conflict_kind` 顶/底区分 + `conflict_penalty` 进 `compose_score`（顶背离 -8.0 降档/底背离禁止，背离用 tech=None 原始相位防双降）
+- 迭代 B1 维度证据标注：`build_scorecard` 每维度加 `evidence_kind`（deterministic/llm_derived）
+
+### 文档
+- AGENTS.md：PUT verification 早退契约行 + A1/A2/A3 增强小节 + services 目录登记 prediction_invalidation.py；README 环境变量表补充 PREDICTION_CONF_CAP_SHORT/MID
+
+---
+
 ## [junliang] 2026-08-30 — 涨停雷达并入 stock-trace：词条统一 + SourceKind 扩展
 
 **开发者**: Aria
@@ -61,6 +171,7 @@
 ### 测试
 - `tests/unit/test_prediction_validator.py`：3.0 窗口累计主判用例（bullish/bearish/neutral 反例）+ baseline_neutral 双版本差异 + backfill 版本隔离
 - `tests/unit/test_prediction_stats.py`：版本过滤参数化用例（默认 2.0 / 显式 3.0）
+
 ## [changer] 2026-08-30 — 节奏大师语义修正 + 调度修复（design-debate）
 
 **开发者**: changer-collab

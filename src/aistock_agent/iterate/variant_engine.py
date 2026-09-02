@@ -24,9 +24,16 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.config import settings
-from aistock_agent.iterate.adapters import IterableAgentAdapter
+from aistock_agent.iterate.adapters import IterableAgentAdapter, get_adapter
 from aistock_agent.iterate.case_builder import get_data_dir
-from aistock_agent.iterate.evaluator import ScoreDetail, evaluate_attribution
+from aistock_agent.iterate.evaluator import (
+    ScoreDetail,
+    VerificationScore,
+    evaluate_attribution,
+    evaluate_verification,
+    score_detail_payload,
+    verification_gt_from_case,
+)
 from aistock_agent.services import llm as llm_service
 
 logger = structlog.get_logger()
@@ -81,6 +88,96 @@ _GENERATE_PROMPT = """你是迭代优化工程师。目标是改进待迭代 Age
 - 若需新增独立函数，target_symbol 用 "__new__" 且 new_snippet 为完整新函数；
   old_snippet 必须省略（空字符串）
 只输出 JSON。"""
+
+
+_GENERATE_VERIFICATION_PROMPT = """你是预判条件优化工程师。目标是改进待迭代 Agent 的预判条件与方向生成质量。
+待迭代文件符号地图（含目标区域源代码，超长已截断并标注）：
+{files_with_content}
+验证画像差距（来自到期验证结果，含历史命中率/条件成立命中率/失效模式）：
+{verification_context}
+已记录的预判条件（recorded prediction，供对照现有条件与方向）：
+{prediction}
+请基于上述目标区域生成最小变体，输出严格 JSON：
+{{
+  "type": "prompt_diff|workflow_diff|data_source_diff",
+  "files": ["相对仓库根路径的被改文件（必须来自符号地图所在文件）"],
+  "target_symbol": "被修改的函数/常量名",
+  "old_snippet": "目标区域中被替换的原文片段（必须与给定源码逐字符一致）",
+  "new_snippet": "替换后的新片段",
+  "instructions": "改动思路一句话"
+}}
+要求：
+- target_symbol 必须存在于符号地图；old_snippet 必须从给定源码原样复制
+- files 必须且只能包含 target_symbol 所在文件
+- 只改与验证画像差距相关的预判条件/方向生成逻辑；禁止引入无关重构
+- 若需新增独立函数，target_symbol 用 "__new__" 且 new_snippet 为完整新函数；
+  old_snippet 必须省略（空字符串）
+只输出 JSON。"""
+
+
+def _verification_context(
+    case: dict[str, object], gap_analysis: str
+) -> dict[str, object]:
+    """归并 case.meta.verification + prediction → 预判变体生成的画像差距上下文。
+
+    Spec C P3：verification 分支的"标准答案"是到期验证画像（差异分析），
+    与归因分支的 ground_truth.attribution 正交。
+    meta.verification 为混合键字典：horizon 级（key="short" 等）与 condition 级
+    （key="c0" 等）entry 并存。按 entry 是否含 condition_met 区分两级：
+    - horizon 级：统计到期命中率（hit/(hit+miss)）
+    - condition 级：统计条件成立命中率（condition_met 为 True 比例）
+    - 失效模式：horizon miss 按 grade 归类；condition miss 且未触发记为"条件未触发"
+    返回 {"text": 差分手画像文本（含差距分析）, "prediction": 原样透传}。
+    """
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+
+    horizon_hits = 0
+    horizon_judged = 0
+    cond_met = 0
+    cond_total = 0
+    miss_modes: dict[str, int] = {}
+    for value in verification.values():
+        if not isinstance(value, dict):
+            continue
+        result = str(value.get("result", ""))
+        if "condition_met" in value:
+            cond_total += 1
+            if value.get("condition_met") is True:
+                cond_met += 1
+            if result == "miss":
+                miss_modes["条件未触发"] = miss_modes.get("条件未触发", 0) + 1
+        else:
+            if result in {"hit", "miss"}:
+                horizon_judged += 1
+                if result == "hit":
+                    horizon_hits += 1
+                else:
+                    grade = str(value.get("grade", "miss"))
+                    miss_modes[grade] = miss_modes.get(grade, 0) + 1
+
+    hit_rate = (
+        f"{horizon_hits}/{horizon_judged}" if horizon_judged else "N/A（无到期样本）"
+    )
+    cond_rate = f"{cond_met}/{cond_total}" if cond_total else "N/A（无条件样本）"
+    mode_text = "；".join(
+        f"{k} x{v}" for k, v in sorted(miss_modes.items())
+    ) or "无"
+
+    text = (
+        "预判条件优化任务\n"
+        f"Target: {meta.get('target', '')}  交易日: {meta.get('trade_date', '')}\n"
+        "验证画像（来自 case.meta.verification）：\n"
+        f"- 到期命中率：{hit_rate}\n"
+        f"- 条件成立命中率：{cond_rate}\n"
+        f"- 失效模式：{mode_text}\n"
+        f"- 差距分析：{gap_analysis}"
+    )
+    return {"text": text, "prediction": prediction}
 
 
 def _build_symbol_map(file_content: str) -> list[dict[str, int | str]]:
@@ -171,13 +268,28 @@ async def generate_variant(
     避免 from-import 的绑定陷阱（模块内部状态变更时旧引用失效）。
     补丁输出体量小但 old_snippet 需逐字符复制原文，仍显式加大 max_tokens
     并关闭思考（生产走本地代理参数可能被剥离，大 token 兜底）。
+
+    Spec C P3 分支：adapter.ground_truth_kind 决定"标准答案"来源——
+    - attribution（默认，归因链路）：_GENERATE_PROMPT + ground_truth.attribution
+    - verification（预判链路）：_GENERATE_VERIFICATION_PROMPT + case.meta 验证画像
+    （双链路分离，对齐全局 §3.4/Spec C §4.2；变体类型仍复用 prompt_diff 不新增）。
     """
-    prompt = _GENERATE_PROMPT.format(
-        files_with_content=_target_regions(adapter, repo_root),
-        ground_truth=json.dumps(ground_truth.get("attribution", {}), ensure_ascii=False),
-        score=current_score.total if current_score else "N/A",
-        gap_analysis=gap_analysis,
-    )
+    if adapter.ground_truth_kind == "verification":
+        ctx = _verification_context(case, gap_analysis)
+        prompt = _GENERATE_VERIFICATION_PROMPT.format(
+            files_with_content=_target_regions(adapter, repo_root),
+            verification_context=str(ctx["text"]),
+            prediction=json.dumps(ctx["prediction"], ensure_ascii=False),
+        )
+    else:
+        prompt = _GENERATE_PROMPT.format(
+            files_with_content=_target_regions(adapter, repo_root),
+            ground_truth=json.dumps(
+                ground_truth.get("attribution", {}), ensure_ascii=False
+            ),
+            score=current_score.total if current_score else "N/A",
+            gap_analysis=gap_analysis,
+        )
     llm = llm_service.get_deep_think(
         max_tokens=_MAX_VARIANT_OUTPUT_TOKENS,
         # 只保留 thinking disabled（2026-08-13 实测：单独传 thinking disabled
@@ -400,7 +512,8 @@ async def run_experiment_round(
         output = await _run_replay_subprocess(agent_id, case_id, variant_hash)
     if output.get("timed_out") or output.get("subprocess_failed"):
         # 回放超时/子进程失败：不调用评估 LLM（无输出可评），记为失败轮。
-        score = ScoreDetail(
+        # score 联合类型：归因分支 ScoreDetail / 验证分支 VerificationScore（P4 双链路）。
+        score: ScoreDetail | VerificationScore = ScoreDetail(
             0.0,
             0.0,
             0.0,
@@ -410,6 +523,22 @@ async def run_experiment_round(
                 f"（>{settings.iterate_round_timeout_seconds}s），本轮视为失败"
             ),
         )
+    elif get_adapter(agent_id).ground_truth_kind == "verification":
+        # 验证驱动（prediction，P4 双链路分流）：子进程返回新预测对象 JSON →
+        # evaluate_verification 与基线同一 verification entries 对比（确定性，
+        # 不触碰归因评分桶）。回放输出非预测对象 → 失败轮。
+        prediction_obj = _parse_prediction_payload(str(output.get("final_response", "")))
+        if prediction_obj is None:
+            score = ScoreDetail(
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                gap_analysis="回放输出非预测对象（parse_failed），本轮视为失败",
+            )
+        else:
+            _, verification_entries = verification_gt_from_case(case)
+            score = evaluate_verification(prediction_obj, verification_entries)
     else:
         structured = output.get("structured")
         score = await evaluate_attribution(
@@ -417,6 +546,10 @@ async def run_experiment_round(
             ground_truth,
             agent_structured=structured if isinstance(structured, dict) else None,
         )
+    is_failure = bool(output.get("timed_out") or output.get("subprocess_failed"))
+    if not is_failure and get_adapter(agent_id).ground_truth_kind == "verification":
+        # verification 分支：回放输出非预测对象（parse_failed）同样记失败轮
+        is_failure = _parse_prediction_payload(str(output.get("final_response", ""))) is None
     record: dict[str, object] = {
         "case_id": case_id,
         "round": round_no,
@@ -436,22 +569,34 @@ async def run_experiment_round(
         # 报告/复盘无需重跑回放即可查看实际输出。
         "agent_output": str(output.get("final_response", "")),
         "score": score.total,
-        "score_detail": {
-            "direction": score.direction,
-            "drivers": score.drivers,
-            "sectors": score.sectors,
-        },
+        "score_detail": score_detail_payload(score),
         "gap_analysis": score.gap_analysis,
         "duration_ms": 0,
         "variant_hash": variant_hash,
         "created_at": _now_iso_date(),
-        "is_failure": bool(output.get("timed_out") or output.get("subprocess_failed")),
+        "is_failure": is_failure,
     }
     path = get_data_dir() / "experiments" / f"{case_id}_r{round_no}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("iterate_experiment_recorded", case_id=case_id, round=round_no, score=score.total)
     return {**record, "score_detail_obj": score}
+
+
+def _parse_prediction_payload(final_response: str) -> dict[str, object] | None:
+    """解析回放子进程返回的预测对象 JSON（prediction 变体轮消费）。
+
+    回放输出的 final_response 为 PredictionResult.model_dump(mode="json") 的
+    JSON 串（replay_runner.prediction 分支序列化）。解析失败 → None（调用方记为
+    失败轮），与归因分支的 agent_output 文本解析隔离。
+    """
+    if not final_response:
+        return None
+    try:
+        parsed = json.loads(final_response)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 #: 回放结果视为"可重试的偶发失败"的最小输出长度阈值（字符）。

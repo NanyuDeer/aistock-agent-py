@@ -559,6 +559,24 @@ class NodeApiClient:
             return result["rows"]
         return None
 
+    async def get_stock_kline(
+        self, code: str, days: int = 120,
+        start_date: str | None = None, end_date: str | None = None,
+    ) -> list[dict[str, object]] | None:
+        """个股日 K（GET /internal/quote/:code/kline）。
+        可选区间参数：start_date/end_date 存在时按区间过滤（Node 端复用 TushareKlineService）。
+        返回 [{trade_date, open, high, low, close, pct_chg, vol, amount}, ...]（日期升序）
+        或 None（接口失败/无数据）。"""
+        path = f"/internal/quote/{code}/kline?days={days}"
+        if start_date is not None:
+            path += f"&start_date={start_date}"
+        if end_date is not None:
+            path += f"&end_date={end_date}"
+        result = await self.get(path)
+        if isinstance(result, dict) and isinstance(result.get("rows"), list):
+            return result["rows"]
+        return None
+
     async def get_ths_index_map(self) -> list[dict[str, object]] | None:
         """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
         result = await self.get("/internal/ths/index-map")

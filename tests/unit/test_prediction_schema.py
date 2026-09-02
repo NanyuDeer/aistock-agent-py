@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult, PredictionRisk
+from aistock_agent.schemas.prediction import (
+    PredictionAnchor,
+    PredictionCondition,
+    PredictionHorizon,
+    PredictionResult,
+    PredictionRisk,
+)
+from aistock_agent.schemas.target import Target
 
 
 def _valid_horizon(**overrides):
@@ -20,7 +27,7 @@ def _valid_horizon(**overrides):
 
 def test_valid_result():
     result = PredictionResult(
-        schema_version="2.0",
+        schema_version="3.0",
         prediction_status="confirmed",
         horizons=[PredictionHorizon(**_valid_horizon())],
         evolution_narrative="短线已兑现大半，中线延续，长线衰减",
@@ -34,7 +41,7 @@ def test_valid_result():
 def test_empty_horizons_raises():
     with pytest.raises(ValidationError):
         PredictionResult(
-            schema_version="2.0",
+            schema_version="3.0",
             prediction_status="confirmed",
             horizons=[],
             evolution_narrative="x",
@@ -46,7 +53,7 @@ def test_empty_horizons_raises():
 def test_extra_field_rejected():
     with pytest.raises(ValidationError):
         PredictionResult(
-            schema_version="2.0",
+            schema_version="3.0",
             prediction_status="confirmed",
             horizons=[PredictionHorizon(**_valid_horizon())],
             evolution_narrative="x",
@@ -59,3 +66,116 @@ def test_extra_field_rejected():
 def test_invalid_horizon_literal():
     with pytest.raises(ValidationError):
         PredictionHorizon(**_valid_horizon(horizon="week"))
+
+
+# ===== 条件化预判 schema 层（P1 / Spec A §3.1）=====
+
+
+def test_prediction_anchor_defaults_metric_close():
+    """anchor.metric 缺省 close。"""
+    a = PredictionAnchor(horizon="short", threshold="+5%", direction="bullish")
+    assert a.metric == "close"
+    assert a.direction == "bullish"
+
+
+def test_prediction_anchor_direction_defaults_neutral():
+    """direction 缺省 neutral（Spec A §4.1 决策：schema 放行，归一化层从文本兜底）。"""
+    a = PredictionAnchor(horizon="short", threshold="+5%", metric="close")
+    assert a.direction == "neutral"
+
+
+def test_prediction_anchor_direction_literal():
+    """direction 必须是 bullish/bearish/neutral 之一。"""
+    with pytest.raises(ValidationError):
+        PredictionAnchor(horizon="short", threshold="+5%", direction="sideways")  # type: ignore[arg-type]
+
+
+def test_prediction_anchor_metric_literal():
+    """metric 限定 close/high/low/volume/index_close。"""
+    with pytest.raises(ValidationError):
+        PredictionAnchor(horizon="short", threshold="+5%", metric="open")  # type: ignore[arg-type]
+
+
+def test_prediction_condition_full():
+    """condition/scenario/anchor 三段齐全。"""
+    c = PredictionCondition(
+        condition="若明日放量站稳前高 82.50 元",
+        scenario="则趋势延续，上看 +5%",
+        anchor=PredictionAnchor(horizon="short", threshold="+5%", metric="close", direction="bullish"),
+    )
+    assert c.anchor.horizon == "short"
+    assert c.anchor.direction == "bullish"
+
+
+def test_prediction_condition_rejects_extra_field():
+    with pytest.raises(ValidationError):
+        PredictionCondition(
+            condition="x",
+            scenario="y",
+            anchor={"horizon": "short", "threshold": "+1%", "direction": "neutral"},
+            unknown_field="x",  # type: ignore[call-arg]
+        )
+
+
+def test_prediction_result_conditions_able():
+    """PredictionResult.conditions 为可选字段（旧 2.0 记录为空），schema_version 升 3.0。"""
+    result = PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[PredictionHorizon(**_valid_horizon())],
+        conditions=[
+            PredictionCondition(
+                condition="若放量站上前高",
+                scenario="则看多 +5%",
+                anchor={"horizon": "short", "threshold": "+5%", "direction": "bullish"},
+            )
+        ],
+        evolution_narrative="x",
+        risks=[],
+        evidence_ids=[],
+    )
+    assert len(result.conditions) == 1
+    assert result.conditions[0].anchor.direction == "bullish"
+
+
+def test_prediction_result_conditions_default_empty():
+    """conditions 缺省为空（兼容存量无 conditions 产出）。"""
+    result = PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[PredictionHorizon(**_valid_horizon())],
+        evolution_narrative="x",
+        risks=[],
+        evidence_ids=[],
+    )
+    assert result.conditions == []
+    assert result.target is None
+
+
+def test_prediction_result_target_association():
+    """PredictionResult.target 关联首类 Target 对象（全局 §2.1 数据卫生：internal_id 带后缀）。"""
+    stock = Target(kind="stock", internal_id="600519.SH", code="600519.SH", name="贵州茅台")
+    result = PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[PredictionHorizon(**_valid_horizon())],
+        target=stock,
+        evolution_narrative="x",
+        risks=[],
+        evidence_ids=[],
+    )
+    assert result.target is not None
+    assert result.target.internal_id == "600519.SH"
+
+
+def test_prediction_schema_version_literal_3():
+    """schema_version 字面量升为 3.0，拒绝旧 2.0。"""
+    with pytest.raises(ValidationError):
+        PredictionResult(
+            schema_version="2.0",
+            prediction_status="confirmed",
+            horizons=[PredictionHorizon(**_valid_horizon())],
+            evolution_narrative="x",
+            risks=[],
+            evidence_ids=[],
+        )

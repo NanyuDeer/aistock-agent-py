@@ -17,9 +17,16 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.schemas.target import Target
 from aistock_agent.services.data_client import NodeApiClient
 from aistock_agent.services.event_store import is_major_event, load_event_scrape
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
+from aistock_agent.services.target_profile import (
+    get_iterate_threshold,
+    get_profile,
+    make_target,
+)
+from aistock_agent.skills.prediction_validation import read_validation_profile
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -123,6 +130,69 @@ async def market_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def sector_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
+    """sector 板块归因产片源（Spec D）：大盘快照 top_losers → 每板块一个历史案例。
+
+    板块异动切片语义与 market_close_snapshot 同款：date 参数走历史回补
+    （build_market_trace_snapshot 内部校验交易日/complete），否则最近交易日。
+    从快照 a_share.sectors.top_losers 取领跌板块列表（快照缺 sectors/top_losers
+    返回 []，不炸产片源）；每板块产一个 CaseCandidate，meta 携带 {sector_row}
+    （板块行情条目，含 pct_change/net_amount/lead_stock/company_num，Node 原样），
+    供 TargetProfile.snapshot_builder=build_sector_snapshot 重建归因输入。
+    market_snapshot 传完整快照 dict（对齐 market_close_snapshot——build_case 的
+    _validate_market_snapshot 强制完整 MarketTraceSnapshot 契约，只传 a_share
+    切片会在产片链校验失败，候选全被拒）。单板块条目畸形（非 dict/无名）仅跳过。
+    """
+    target_day = ctx.params.get("date")
+    if isinstance(target_day, str) and target_day:
+        day = target_day
+    else:
+        recent_day = await find_recent_trading_day()
+        if recent_day is None:
+            raise RuntimeError("无法发现最近交易日（Node close-snapshot/last-close 均失败）")
+        day = recent_day
+    snapshot = await build_market_trace_snapshot(day)
+    # 对齐 market_close_snapshot（IMP-3）：date 回补必须校验一致性——build_market_trace_snapshot
+    # 有 last-close 兜底链，不校验会静默产出"最近交易日"快照但 event_time 锚定请求日，
+    # 切片内容与 case_id 前缀错位（防复现已修事故）。
+    if isinstance(target_day, str) and target_day:
+        actual = str(getattr(snapshot, "trade_date", ""))
+        if actual != target_day:
+            raise RuntimeError(
+                "历史回补日期不一致："
+                f"期望 {target_day}，Node 快照实际 {actual or '空'}（非交易日或数据缺失，拒绝产片）"
+            )
+    # snapshot 跨类型边界（生产 MarketTraceSnapshot / 测试注入 object），cast Any
+    # 调用 model_dump 避免 mypy attr-defined（与 market_close_snapshot 一致）。
+    snapshot_dict = cast("dict[str, object]", cast("Any", snapshot).model_dump(mode="json"))
+    a_share = snapshot_dict.get("a_share")
+    if not isinstance(a_share, dict):
+        return []
+    sectors = a_share.get("sectors")
+    if not isinstance(sectors, dict):
+        return []
+    losers = sectors.get("top_losers")
+    if not isinstance(losers, list):
+        return []
+    candidates: list[CaseCandidate] = []
+    for los in losers:
+        if not isinstance(los, dict):
+            continue
+        name = str(los.get("name") or "")
+        if not name:
+            continue
+        candidates.append(
+            CaseCandidate(
+                event_title=f"{name} 板块异动",
+                event_time=_close_time_for_day(day),
+                telegraph_records=[],
+                market_snapshot=snapshot_dict,
+                meta={"sector_row": los, "t_window": "close"},
+            )
+        )
+    return candidates
+
+
 async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     """event_analyst 产片源：window_days 天内电报重大事件（迁移自 scan_major_events 调用点）。"""
     from aistock_agent.iterate.case_scanner import scan_major_events
@@ -140,9 +210,118 @@ async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def prediction_verified_scan(ctx: SourceContext) -> list[CaseCandidate]:
+    """prediction 产片源（Spec C §4.3）：从已验证的 prediction 记录切历史案例。
+
+    只切 schema_version=3.0（现役条件化预判）且 verification 非空的记录——有
+    due_dates + hit/miss，是「验证驱动迭代」的标准答案锚点。每记录一条候选，
+    event_time 锚定 source_id 内嵌的交易日（对齐 _close_time_for_day 15:30 CST），
+    meta 携带 {record_id, target, trade_date, prediction, due_dates, verification}
+    供回放/评估消费。回放输入的历史市场快照按 data_deps "market" 在切片落地时
+    由 TargetProfile.snapshot_builder 补齐（全局 §2.3/§4.1 衔接 Spec D）。
+    无满足条件的记录返回 []（不炸产片源）；单条 source_id 不可解析日期仅跳过。
+    """
+    records = await NodeApiClient().list_verified_predictions(limit=500)
+    candidates: list[CaseCandidate] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("schema_version", "")) != "3.0":
+            continue
+        verification = rec.get("verification")
+        if not isinstance(verification, dict) or not verification:
+            continue
+        prediction = rec.get("prediction")
+        if not isinstance(prediction, dict):
+            continue
+        target = _first_target_str(prediction)
+        trade_date = _source_trade_date(str(rec.get("source_id", "")))
+        if target is None or trade_date is None:
+            logger.warning(
+                "prediction_verified_scan_skip_missing_anchor",
+                record_id=rec.get("id"),
+                source_id=rec.get("source_id"),
+            )
+            continue
+        candidates.append(
+            CaseCandidate(
+                event_title=f"预判验证 {target}（{trade_date}）",
+                event_time=_close_time_for_day(trade_date),
+                telegraph_records=[],
+                meta={
+                    "record_id": rec.get("id"),
+                    "target": target,
+                    "trade_date": trade_date,
+                    "prediction": prediction,
+                    "due_dates": rec.get("due_dates", {}),
+                    "verification": verification,
+                    "t_window": "prediction",
+                },
+            )
+        )
+    return candidates
+
+
+def _first_target_str(prediction: dict[str, object]) -> str | None:
+    """取 prediction 首个非空 target 字符串（预判产片分组锚点）。"""
+    horizons = prediction.get("horizons")
+    if isinstance(horizons, list):
+        for h in horizons:
+            if isinstance(h, dict) and h.get("target"):
+                return str(h["target"])
+    return None
+
+
+#: 迭代触发判定的方向场景（Spec C §5.3 分层阈值的 scenario 轴；方向中性归 up 侧保守）。
+_SCENARIOS = ("up", "down")
+
+
+async def _prediction_case_source_eligible(
+    target: Target, horizon: str, scenario: str
+) -> bool:
+    """prediction 案例是否达迭代触发条件（Spec C §5.3 阈值分层 + §5.3 sufficient_sample 闸门）。
+
+    读 target 历史验证画像（缓存优先，read_validation_profile），样本充足
+    （sufficient_sample=True）且命中率低于 ``get_iterate_threshold(target, horizon, scenario)``
+    分层阈值 → True（应产片）。小样本 / 未命中阈值 → False（不触发不耗 token）。
+    """
+    profile = await read_validation_profile(target, horizon)
+    if not bool(profile.get("sufficient_sample", False)):
+        return False
+    hit_rate = float(cast(float, profile.get("hit_rate", 0.0)))
+    threshold = get_iterate_threshold(target, horizon, scenario)
+    return hit_rate < threshold
+
+
+async def _prediction_candidate_kept(candidate: CaseCandidate) -> bool:
+    """prediction 候选是否保留：任一 default horizon×scenario 触发即保留。
+
+    候选 meta.target 无法解析为首类 Target（unknown 抽象词，make_target None）→
+    保守丢弃（不产片，防误触发）；解析成功则按 profile.default_horizons × 方向
+    场景逐个判 ``_prediction_case_source_eligible``，任一命中 True 即短路保留。
+    """
+    meta = candidate.meta
+    target_raw = meta.get("target") if isinstance(meta, dict) else None
+    if not isinstance(target_raw, str) or not target_raw:
+        return False
+    target = make_target(target_raw)
+    if target is None:
+        return False
+    for horizon in get_profile(target).default_horizons:
+        for scenario in _SCENARIOS:
+            if await _prediction_case_source_eligible(target, horizon, scenario):
+                return True
+    return False
+
+
+def _source_trade_date(source_id: str) -> str | None:
+    """从 source_id（如 "review:2026-08-14"）提取交易日 YYYY-MM-DD；无则 None。"""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", source_id)
+    return m.group(1) if m else None
+
+
 async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
     """事件库产片源（四期）：近 window_days 天事件库重大事件 → CaseCandidate。
-
     消费统一事件抓取中台（event_scraper）入库数据（只读，不改中台）；
     is_major_event（impact_score >= 4）过滤；telegraph_records 用事件
     summary/content（语料进 GT corpus）；meta 带 direction_hint（事件方向先验，
@@ -279,8 +458,10 @@ def _candidate_fingerprint(candidate: CaseCandidate) -> str:
 #: provider 注册表（清单封闭：新 provider 必须登记于此）
 SOURCE_PROVIDERS: dict[str, Callable[[SourceContext], Awaitable[list[CaseCandidate]]]] = {
     "market_close_snapshot": market_close_snapshot,
+    "sector_close_snapshot": sector_close_snapshot,
     "event_store_scan": event_store_scan,
     "telegraph_keyword_scan": telegraph_keyword_scan,
+    "prediction_verified_scan": prediction_verified_scan,
 }
 
 

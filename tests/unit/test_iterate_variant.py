@@ -873,3 +873,266 @@ def test_variant_hash_differs_for_different_patches() -> None:
 
     assert hash_a != hash_b  # 不同补丁 → 不同 hash
     assert hash_a == hash_same  # 相同补丁 → 相同 hash
+
+
+# ============================================================================
+# Spec C P3：预判变体——verification 差距分析分支（与归因分支并列不混用）
+# ============================================================================
+
+
+def _prediction_adapter(ground_truth_kind: str = "verification") -> IterableAgentAdapter:
+    return IterableAgentAdapter(
+        agent_id="prediction",
+        module_path="aistock_agent.services.prediction_service",
+        run_entry="predict_from_trace",
+        prompt_files=("src/aistock_agent/prompts/workers/prediction.py",),
+        workflow_files=("src/aistock_agent/services/prediction_service.py",),
+        ground_truth_kind=ground_truth_kind,
+        case_sources=(),
+    )
+
+
+def _verification_case() -> dict[str, object]:
+    return {
+        "case_id": "case_p3_verify",
+        "event_title": "预判验证 上证指数（2026-08-12）",
+        "meta": {
+            "record_id": 1,
+            "target": "上证指数",
+            "trade_date": "2026-08-12",
+            "prediction": {
+                "schema_version": "3.0",
+                "horizons": [
+                    {
+                        "horizon": "short",
+                        "direction": "bullish",
+                        "target": "上证指数",
+                    }
+                ],
+                "conditions": [
+                    {
+                        "condition": "若放量站稳前高",
+                        "scenario": "上看 +2%",
+                        "anchor": {
+                            "horizon": "short",
+                            "threshold": "+2%",
+                            "metric": "index_close",
+                            "direction": "bullish",
+                        },
+                    }
+                ],
+            },
+            "verification": {
+                "short": {
+                    "result": "hit",
+                    "actual": "+1.5%",
+                    "horizon": "short",
+                    "grade": "hit",
+                },
+                "c0": {
+                    "result": "miss",
+                    "actual": "-1.0%",
+                    "condition_met": False,
+                    "horizon": "short",
+                    "grade": "plain_miss",
+                },
+            },
+        },
+    }
+
+
+def test_verification_context_builds_profile_text() -> None:
+    """P3：_verification_context 归并 case.meta.verification → 画像差距文本（含命中率/条件/失效）。"""
+    from aistock_agent.iterate.variant_engine import _verification_context
+
+    ctx = _verification_context(_verification_case(), "到期命中率偏低 50%（n=2）")
+    assert isinstance(ctx, dict)
+    text = str(ctx["text"])
+    assert "命中率" in text
+    assert "条件成立命中率" in text
+    assert "失效模式" in text
+    assert "差距分析" in text
+    # prediction（recorded conditions）须一并返回供 LLM 上下文
+    assert isinstance(ctx["prediction"], dict)
+    assert ctx["prediction"]["schema_version"] == "3.0"
+
+
+@pytest.mark.asyncio
+async def test_generate_variant_verification_kind_uses_verification_context(
+    tmp_path: Path,
+) -> None:
+    """P3：ground_truth_kind=verification 的 adapter 走 `_GENERATE_VERIFICATION_PROMPT`，
+    变体仍复用 prompt_diff（不新增 VariantType），差距输入含验证画像而非归因 GT。"""
+    adapter = _prediction_adapter("verification")
+    payload = {
+        "type": "prompt_diff",
+        "files": ["src/aistock_agent/prompts/workers/prediction.py"],
+        "target_symbol": "PREDICTION_PROMPT",
+        "old_snippet": 'PREDICTION_PROMPT = "x"',
+        "new_snippet": 'PREDICTION_PROMPT = "新"',
+        "instructions": "short 档条件 threshold 过高导致 miss，改为更窄 threshold",
+    }
+    with patch(
+        "aistock_agent.iterate.variant_engine._verification_context",
+        return_value={"text": "验证画像：hit_rate 50%", "prediction": {}},
+    ), patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+        )
+        plan = await generate_variant(
+            adapter,
+            _verification_case(),
+            {"gt_id": "gt", "attribution": {}},  # verification 不读 attribution
+            None,
+            "到期命中率偏低 50%（n=2）",
+            tmp_path,
+        )
+    prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
+    # 验证分支：喂验证画像上下文，不喂归因 GT
+    assert "验证画像：hit_rate 50%" in prompt_arg
+    assert "预判条件优化工程师" in prompt_arg
+    # 不落入归因分支
+    assert "归因质量" not in prompt_arg
+    # 复用 prompt_diff 类型（不新增 VariantType）
+    assert plan.type == "prompt_diff"
+    assert plan.target_symbol == "PREDICTION_PROMPT"
+
+
+@pytest.mark.asyncio
+async def test_generate_variant_attribution_kind_unchanged(tmp_path: Path) -> None:
+    """P3：归因分支保持 `_GENERATE_PROMPT`（归因质量），不被验证分支污染。"""
+    adapter = _prediction_adapter("attribution")
+    payload = {
+        "type": "prompt_diff",
+        "files": ["src/aistock_agent/prompts/workers/prediction.py"],
+        "target_symbol": "PREDICTION_PROMPT",
+        "old_snippet": 'x',
+        "new_snippet": 'y',
+        "instructions": "归因改进",
+    }
+    with patch("aistock_agent.services.llm.get_deep_think") as factory:
+        factory.return_value.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+        )
+        await generate_variant(
+            adapter,
+            {"event_title": "事件", "event_time": "2026-07-31"},
+            {"gt_id": "gt", "attribution": {"direction": "bullish"}},
+            None,
+            "gap",
+            tmp_path,
+        )
+    prompt_arg = factory.return_value.ainvoke.call_args.args[0][0].content
+    assert "归因质量" in prompt_arg
+    assert "预判条件优化工程师" not in prompt_arg
+
+
+# ============================================================================
+# P4：run_experiment_round 验证分支——变体轮评分走 evaluate_verification，
+#     parse_failed 记失败轮（与归因评分桶隔离）
+# ============================================================================
+
+
+def _p4_prediction_payload_json() -> str:
+    return json.dumps(
+        {
+            "schema_version": "3.0",
+            "prediction_status": "confirmed",
+            "horizons": [
+                {
+                    "horizon": "short",
+                    "remaining_estimate": "1-3日",
+                    "phase": "decaying",
+                    "direction": "bullish",
+                    "target": "上证指数",
+                    "metric_projection": "+2%",
+                    "confidence": "high",
+                }
+            ],
+            "evolution_narrative": "延续",
+            "risks": [],
+            "evidence_ids": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_verification_kind_uses_evaluate_verification(
+    iterate_data_dir: object,
+) -> None:
+    """P4：prediction 变体轮回放输出预测对象 → evaluate_verification 与基线同
+    verification entries 对比（确定性），不触碰归因评分桶。"""
+    from aistock_agent.iterate.evaluator import VerificationScore
+    from aistock_agent.iterate.variant_engine import VariantPlan, run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/prediction.py"],
+        instructions="short 档 threshold 收紧",
+        new_content={"src/aistock_agent/prompts/workers/prediction.py": "X = 1\n"},
+    )
+    case = _verification_case()
+    vs = VerificationScore(
+        hit_rate=0.5,
+        direction_score=0.5,
+        condition_met_rate=0.0,
+        miss_insights=[],
+        total=0.4,
+        n=2,
+        gap_analysis="gap",
+    )
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(return_value={"final_response": _p4_prediction_payload_json()}),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_verification", return_value=vs
+    ) as mocked_ev, patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        new=AsyncMock(side_effect=AssertionError("verification 变体不得调用归因评分")),
+    ) as mocked_ea:
+        record = await run_experiment_round(
+            "prediction", case, 2, variant, {"gt_id": "gt", "attribution": {}}
+        )
+
+    mocked_ev.assert_called_once()
+    mocked_ea.assert_not_awaited()
+    assert record["is_failure"] is False
+    assert record["score"] == 0.4
+    assert record["score_detail"]["hit_rate"] == 0.5
+    assert record["score_detail"]["condition_met_rate"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_round_verification_parse_failed_is_failure(
+    iterate_data_dir: object,
+) -> None:
+    """P4：verification 变体轮回放输出非预测对象（parse_failed）→ 失败轮
+    （0 分 + gap 标注），且不调用验证评分器。"""
+    from aistock_agent.iterate.variant_engine import VariantPlan, run_experiment_round
+
+    variant = VariantPlan(
+        type="prompt_diff",
+        files=["src/aistock_agent/prompts/workers/prediction.py"],
+        instructions="threshold 收紧",
+        new_content={"src/aistock_agent/prompts/workers/prediction.py": "X = 1\n"},
+    )
+    case = _verification_case()
+    with patch(
+        "aistock_agent.iterate.variant_engine._run_replay_subprocess",
+        AsyncMock(return_value={"final_response": "非预测对象文本"}),
+    ), patch(
+        "aistock_agent.iterate.variant_engine.evaluate_verification",
+        side_effect=AssertionError("parse_failed 不应调用验证评分"),
+    ) as mocked_ev, patch(
+        "aistock_agent.iterate.variant_engine.evaluate_attribution",
+        new=AsyncMock(side_effect=AssertionError("verification 不得调用归因评分")),
+    ):
+        record = await run_experiment_round(
+            "prediction", case, 2, variant, {"gt_id": "gt"}
+        )
+
+    mocked_ev.assert_not_called()
+    assert record["is_failure"] is True
+    assert record["score"] == 0.0
+    assert "parse_failed" in str(record["gap_analysis"])

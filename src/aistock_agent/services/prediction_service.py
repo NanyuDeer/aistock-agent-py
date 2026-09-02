@@ -13,22 +13,26 @@ approximate（wire 键 due_dates_approximate），其余档精确。理由：验
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Literal
+from datetime import UTC, date, datetime
+from typing import Literal, cast
 
 import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
 )
 from aistock_agent.schemas.market_trace import (
+    DataReadiness,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
 )
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
@@ -39,6 +43,12 @@ from aistock_agent.services.llm import (
     get_quick_think,
     with_chat_structured_output,
 )
+from aistock_agent.services.prediction_targets import (
+    resolve_index_or_stock_code,
+    resolve_sector_target,
+)
+from aistock_agent.services.sector_target import sector_target_from_resolved
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.utils.date import add_trading_days
 
 logger = structlog.get_logger()
@@ -144,9 +154,34 @@ def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
         raise ValueError("prediction output is not a JSON object")
     for key in _EXTRA_KEYS_TO_DROP:
         data.pop(key, None)
-    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
-    data.setdefault("schema_version", "2.0")
+    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）；升 3.0 同步（Spec A §3.3）
+    data.setdefault("schema_version", "3.0")
     return data
+
+
+def _repair_llm_target_internal_id(payload: dict[str, object]) -> dict[str, object]:
+    """LLM 结构化 target 兜底：补 internal_id/code（Target 顶层必填，2026-09-02 实盘验证）。
+
+    大盘/统一预判入口 LLM 常输出 {kind, code, name} 而缺 internal_id（Target 画像 key），
+    schema 收紧后 model_validate 直接 parse_failed（服务器 8.27 复现：index target
+    缺 internal_id）。用 make_target(name) 归一补 internal_id/code（index/sector/stock）；
+    归一失败不改动 → 交给 model_validate 的 parse_failed 兜底（不编造）。
+    """
+    raw = payload.get("target")
+    if not isinstance(raw, dict):
+        return payload
+    if raw.get("internal_id"):
+        return payload
+    name = str(raw.get("name") or "")
+    resolved = make_target(name) if name else None
+    if resolved is not None:
+        target = {**raw, "internal_id": resolved.internal_id}
+        raw_code = raw.get("code")
+        # code 缺失或为 6 位裸码时统一为带后缀 ts_code（数据卫生：内部 code 不带裸码）
+        if (not raw_code or (isinstance(raw_code, str) and "." not in raw_code)) and resolved.code:
+            target["code"] = resolved.code
+        return {**payload, "target": target}
+    return payload
 
 
 def _collect_allowed_evidence_ids(
@@ -232,8 +267,215 @@ def _compute_due_dates(
     return due_dates, approximate_horizons
 
 
+# A3 确定性钳制：LLM 不产数值，confidence 由历史命中率后处理覆盖
+_CONF_ORDER = {"high": 2, "medium": 1, "low": 0}
+
+
+def _apply_confidence_cap(
+    horizon: str,
+    llm_conf: str,
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] | None,
+    *,
+    mid_enabled: bool,
+) -> tuple[str, str]:
+    """确定性钳制 confidence（LLM 不产数值，此处为后处理覆盖）。
+
+    - long 桶不启用；mid 桶仅 mid_enabled=True 时启用；short 桶恒启用。
+    - stats 为 None 或 horizon 不在其中 → 不钳制（保 LLM 原值）。
+    """
+    if horizon == "long":
+        return llm_conf, "llm"
+    if horizon == "mid" and not mid_enabled:
+        return llm_conf, "llm"
+    if not stats or horizon not in stats:
+        return llm_conf, "llm"
+    from aistock_agent.services.prediction_stats import clamp_confidence_by_bucket
+
+    hit_summary, baseline_summary = stats[horizon]
+    cap, _ = clamp_confidence_by_bucket(horizon, hit_summary, baseline_summary)
+    if cap and _CONF_ORDER.get(llm_conf, 0) > _CONF_ORDER.get(cap, 0):
+        return cap, "deterministic"
+    return llm_conf, "llm"
+
+
+def _load_horizon_stats(
+    records: list[dict[str, object]],
+) -> dict[str, tuple[dict[str, object], dict[str, object]]]:
+    """从 verified 记录按 horizon 聚合命中/基线统计。
+
+    只取 entry.result ∈ {hit, miss}（剔除 insufficient 与 early_exit-only entry），
+    逐档喂给 hit_rate_summary / baseline_neutral_summary（内部再按 methodology_version
+    2.0 / 非 approximate 过滤，LLM 不产数值，统计为确定性计算）。
+    """
+    from aistock_agent.services.prediction_stats import (
+        baseline_neutral_summary,
+        hit_rate_summary,
+    )
+
+    by_horizon: dict[str, list[dict[str, object]]] = {}
+    for rec in records:
+        verification = rec.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        for horizon, entry in verification.items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("result") not in {"hit", "miss"}:
+                continue
+            by_horizon.setdefault(horizon, []).append(entry)
+
+    stats: dict[str, tuple[dict[str, object], dict[str, object]]] = {}
+    for horizon, entries in by_horizon.items():
+        hit = hit_rate_summary(entries)
+        baseline = baseline_neutral_summary(entries)
+        stats[horizon] = (hit, baseline)
+    return stats
+
+
+# A2 独立源冲突检测：独立源=数据获取通道不同；claim/LLM 文本不计入
+def _news_majority(news_dirs: list[int]) -> int | None:
+    if not news_dirs:
+        return None
+    pos = sum(1 for d in news_dirs if d > 0)
+    neg = sum(1 for d in news_dirs if d < 0)
+    if pos == neg:
+        return None
+    return 1 if pos > neg else -1
+
+
+def corroborate_evidence(
+    *,
+    quote_dir: int | None,
+    flow_dir: int | None,
+    news_dirs: list[int],
+    calendar_dir: int | None = None,
+    global_dir: int | None = None,
+    direction: str,
+) -> dict[str, object]:
+    """独立源冲突检测（A2）。独立源=数据获取通道不同；claim/LLM 文本不计入。
+
+    v1 仅 quote/flow/news 三通道有确定性取数；calendar/global 恒 None（保留签名供扩展）。
+    """
+    sources: list[tuple[str, int]] = []
+    if quote_dir is not None:
+        sources.append(("quote", quote_dir))
+    if flow_dir is not None:
+        sources.append(("flow", flow_dir))
+    news_dir = _news_majority(news_dirs)
+    if news_dir is not None:
+        sources.append(("news", news_dir))
+    if calendar_dir is not None:
+        sources.append(("calendar", calendar_dir))
+    if global_dir is not None:
+        sources.append(("global", global_dir))
+
+    n_price = sum(1 for k, _ in sources if k != "quote")
+    if not sources:
+        return {"independent_sources": 0, "non_price_sources": 0,
+                "conflict": False, "verdict": "insufficient"}
+
+    target = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
+    conflict = target != 0 and any(
+        (v > 0) != (target > 0) for _, v in sources if v != 0
+    )
+
+    if conflict:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": True, "verdict": "conflicted"}
+    if len(sources) >= 2 and n_price >= 1:
+        return {"independent_sources": len(sources), "non_price_sources": n_price,
+                "conflict": False, "verdict": "corroborated"}
+    return {"independent_sources": len(sources), "non_price_sources": n_price,
+            "conflict": False, "verdict": "insufficient"}
+
+
+def _direction_sign(value: float | None) -> int | None:
+    """确定性方向提取（LLM 不产数值）：正→1，负→-1，零→0，缺失→None。"""
+    if value is None:
+        return None
+    return 1 if value > 0 else -1 if value < 0 else 0
+
+
+# Spec A §3.1/§4.1：anchor.direction 归一化兜底的关键词映射
+_BULLISH_RE = re.compile(r"涨|升|站上|突破|看多|反弹|创新高|放量上攻")
+_BEARISH_RE = re.compile(r"跌|破|回踩|回落|看空|走弱|破位|下探|缩量退守")
+
+
+def infer_prediction_direction(condition: str, scenario: str) -> str:
+    """anchor.direction 兜底：从 condition/scenario 文本确定性提取方向。
+
+    复现 Spec A §4.1 与 A2 _direction_sign 同构思路：LLM 产结构，判定确定性算。
+    命中看多词 → bullish；命中看空词 → bearish；两词皆命中或皆无 → neutral
+    （text extraction 兜底，避免 model_validate 直接 parse_failed）。
+    """
+    text = f"{condition} {scenario}"
+    bull = _BULLISH_RE.search(text) is not None
+    bear = _BEARISH_RE.search(text) is not None
+    if bull == bear:
+        return "neutral"
+    return "bullish" if bull else "bearish"
+
+
+def _normalize_conditions_anchor_direction(
+    result: PredictionResult,
+) -> PredictionResult:
+    """条件化 schema 后处理：LLM 缺失 anchor.direction 时按文本确定性兜底。
+
+    PredidctorAnchor.direction 为 schema 必填；Pydantic 对缺失字段直接 raise → LLM
+    单条 condition 未自挂 direction 会导致整份 parse_failed。此处先按缺失值（direction
+    缺省成 neutral 重放）后逐条补强——前提是 schema 层 direction 允许先由缺省值进入，
+    这里对已是默认 neutral 且文本明显看多/看空的条目重判。返回新对象，不改原对象。
+    """
+    if not result.conditions:
+        return result
+    new_conds: list[object] = []
+    for c in result.conditions:
+        cur = c.anchor.direction
+        # 仅对"未明确表态"（仍带默认/neutral）的锚点做文本兜底，显式 bullish/bearish 不覆盖
+        if cur == "neutral":
+            inferred = infer_prediction_direction(c.condition, c.scenario)
+            if inferred != "neutral":
+                new_conds.append(c.model_copy(
+                    deep=True,
+                    update={"anchor": c.anchor.model_copy(update={"direction": inferred})},
+                ))
+                continue
+        new_conds.append(c)
+    if all(n is o for n, o in zip(new_conds, result.conditions)):
+        return result
+    return result.model_copy(update={"conditions": new_conds})
+
+
+def _corroboration_inputs(
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+) -> tuple[int | None, int | None, list[int]]:
+    """从 run_chat_prediction 输入提取确定性方向（对齐 raw 结构键）。缺失 → None（通道不参与计数）。
+
+    独立源=数据获取通道不同：quote/flow/news 各取确定性符号，LLM 文本/claim 不计入。
+    """
+    quote = snapshot.get("quote") if isinstance(snapshot, dict) else None
+    flow = snapshot.get("flow") if isinstance(snapshot, dict) else None
+    quote_dir = _direction_sign(
+        (quote or {}).get("change_pct") if isinstance(quote, dict) else None
+    )
+    flow_dir = _direction_sign(
+        (flow or {}).get("net_amount") if isinstance(flow, dict) else None
+    )
+    news_dirs: list[int] = []
+    for n in news:
+        d = n.get("direction") if isinstance(n, dict) else None
+        s = _direction_sign(d if isinstance(d, int | float) else None)
+        if s is not None:
+            news_dirs.append(s)
+    return quote_dir, flow_dir, news_dirs
+
+
 async def run_predict(
-    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+    trace: MarketTraceResult,
+    snapshot: MarketTraceSnapshot,
+    *,
+    replay_context: dict[str, object] | None = None,
 ) -> PredictionRunResult:
     """对已溯源的因果链推演影响持续性（状态化契约，S2）。
 
@@ -244,6 +486,10 @@ async def run_predict(
     - 到期日越年 → ok + approximate_horizons（逐档容错：越年档降级近似并标注，P2 裁决）；
     - 未预期异常（非上述已分类状态）→ logger.error + 重新抛出（不吞 bug，
       上层消费者/端点负责兜底）。
+
+    replay_context（P4 迭代回放，仅回放态传）：{recorded_prediction, verification_feedback,
+    target, replay}——并入 LLM 输入作「历史验证结果反馈」，供变体逻辑重出预判后
+    与同一 verification entries 对比；target 用于按标的读取验证画像（替代默认上证指数）。
     """
     if trace.attribution_status not in {"confirmed", "hypothesis"}:
         logger.info("prediction_skip_by_attribution_status", status=trace.attribution_status)
@@ -255,6 +501,20 @@ async def run_predict(
         # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
         try:
             prompt_input = _build_prediction_input(trace, snapshot)
+            # P4 回放：历史验证结果作为反馈注入输入（recorded prediction +
+            # verification entries），LLM 据此按变体逻辑重出预判。
+            if replay_context:
+                prompt_input = {**prompt_input, **replay_context}
+            # Spec B §4.3：run_predict 绑定——大盘溯源（review）target 恒为市场指数
+            # （prediction.horizons[].target 归一化到"上证指数"），画像并入输入做参考；
+            # 解析/读取失败 → 原样返回不阻断产出（对齐 chat 绑定红线）。
+            # 回放态（P4）：target 由 case.meta 锚定（可能为板块/个股），按标的读画像。
+            replay_symbol: str | None = None
+            if replay_context and isinstance(replay_context.get("target"), str):
+                replay_symbol = str(replay_context["target"])
+            prompt_input = await _enrich_predict_input_for_symbol(
+                prompt_input, replay_symbol or _MARKET_PROFILE_SYMBOL
+            )
             llm = get_deep_think()
             messages = [
                 SystemMessage(content=PREDICTION_PROMPT),
@@ -271,10 +531,16 @@ async def run_predict(
             return PredictionRunResult(status="llm_failed", reason=str(exc))
         # 载荷解析/校验 — LLM 输出质量问题分类
         try:
-            prediction = PredictionResult.model_validate(_coerce_prediction_payload(raw_text))
+            payload = _coerce_prediction_payload(raw_text)
+            # 大盘/统一入口 LLM target 缺 internal_id 兜底（Target 必填，实盘验证）
+            payload = _repair_llm_target_internal_id(payload)
+            prediction = PredictionResult.model_validate(payload)
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
+        # Spec A §4.1：anchor.direction 归一化兜底（load 后、使用前）——
+        # LLM 未产 direction 时按 condition/scenario 文本确定性提取，避免 parse_failed。
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_allowed_evidence_ids(trace, snapshot)
         # P1-1：证据 ID 过滤而非一票否决（对齐 run_chat_prediction）——单一幻觉不丢整体
         filtered = [sid for sid in prediction.evidence_ids if sid in allowed]
@@ -284,6 +550,21 @@ async def run_predict(
                 dropped=len(prediction.evidence_ids) - len(filtered),
             )
         prediction = prediction.model_copy(update={"evidence_ids": filtered})
+        # A3 确定性钳制：confidence 后处理覆盖（LLM 不产数值；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
         # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
         due_dates, approximate_horizons = _compute_due_dates(
             snapshot.trade_date, prediction.horizons
@@ -343,6 +624,89 @@ async def _load_trace_and_snapshot(
     raise TraceUnavailableError(f"no trace available for review:{trade_date}")
 
 
+def _replay_minimal_trace_snapshot(
+    trade_date: str,
+) -> tuple[MarketTraceResult, MarketTraceSnapshot]:
+    """回放态最小合法 trace/snapshot（P4，无 DB 访问）。
+
+    prediction 产片源（prediction_verified_scan）不落市场快照/溯源链，case.meta
+    只带 {target, trade_date, prediction, verification}；真实上下文经 replay_context
+    注入 run_predict 的 prompt_input（历史快照源 Spec D 未落地前，回放输入 =
+    验证画像增强 + 原 prediction 输入，对齐计划 P4 裁决）。此处仅构造能通过
+    run_predict 门禁/输入构造的最小结构对象（chains 空、a_share 空）。
+    """
+    discovery = PhenomenonDiscoveryResult(
+        status="insufficient_data",
+        primary=None,
+        concurrent_phenomena=[],
+        data_readiness=DataReadiness(
+            market_data="incomplete",
+            attribution_inputs="missing",
+            causal_evidence="not_ready",
+        ),
+        diagnostics=[],
+    )
+    snapshot = MarketTraceSnapshot(
+        snapshot_id=f"replay_{trade_date}",
+        trade_date=trade_date,
+        captured_at=datetime.now(UTC),
+        a_share={},
+        sources={},
+        missing_fields=[],
+        phenomenon_discovery=discovery,
+    )
+    trace = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="confirmed",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="medium",
+        unresolved_questions=[],
+    )
+    return trace, snapshot
+
+
+async def _replay_predict_from_case(
+    case_id: str, trade_date: str
+) -> PredictionRunResult:
+    """回放态预测：从 case slice meta 重建输入（无 DB 访问），并入验证反馈。
+
+    REPLAY_CASE_ID 存在时由 predict_from_trace 顶部转调（P4）。从 case.meta 提取
+    {target, trade_date, prediction, verification}：
+    - recorded prediction + verification entries 作为回放上下文注入 run_predict
+      ——LLM 看到「前次预判 + 到期验证结果」，据此按变体逻辑重出预判；
+    - 验证画像按 case.meta target 读取（Target 维度一致，替代默认上证指数）。
+    返回 PredictionRunResult；落库由调用方跳过（回放只读，post 已被 no-op）。
+    """
+    from aistock_agent.iterate.case_builder import load_case
+
+    case = load_case(case_id)
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    meta_trade_date = str(meta.get("trade_date") or "")
+    if meta_trade_date and meta_trade_date != trade_date:
+        raise TraceUnavailableError(
+            f"replay case meta trade_date {meta_trade_date} != trade_date {trade_date}"
+        )
+    trace, snapshot = _replay_minimal_trace_snapshot(meta_trade_date or trade_date)
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    target = str(meta.get("target") or "")
+    replay_context: dict[str, object] = {
+        "replay": True,
+        "recorded_prediction": prediction,
+        "verification_feedback": [
+            v for v in verification.values() if isinstance(v, dict)
+        ],
+    }
+    if target:
+        replay_context["target"] = target
+    return await run_predict(trace, snapshot, replay_context=replay_context)
+
+
 async def predict_from_trace(
     trace_id: str, trade_date: str
 ) -> tuple[PredictionRunResult, dict[str, object] | None]:
@@ -351,6 +715,10 @@ async def predict_from_trace(
     流程：缓存直读 → DB 重建 → snapshot.trade_date 校验 → run_predict → 按状态落库。
     trace_id 当前用于日志标识（source_id 统一为 review:{trade_date}，与 review 内联落库一致）；
     后续个股溯源/事件传导复用本入口时，trace_id 可作为溯源标识扩展点。
+
+    REPLAY 回放态（P4）：REPLAY_CASE_ID 环境变量存在时，顶部转调
+    `_replay_predict_from_case`——从 case slice meta 重建输入（无 DB 访问）、
+    并入验证反馈，且不落库（record=None）。
 
     落库规则：
     - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；越年近似档
@@ -361,6 +729,12 @@ async def predict_from_trace(
     Returns:
         (run_result, save_prediction 返回的 record 或 None)。
     """
+    if os.environ.get("REPLAY_CASE_ID"):
+        # P4 回放态：从 case slice meta 重建输入，回放只读不落库
+        return (
+            await _replay_predict_from_case(os.environ["REPLAY_CASE_ID"], trade_date),
+            None,
+        )
     trace, snapshot = await _load_trace_and_snapshot(trace_id, trade_date)
     # 校验：快照日期必须与目标交易日一致（对照 review.py L983 先例，防旧快照误用）
     if snapshot.trade_date != trade_date:
@@ -423,7 +797,7 @@ async def save_skipped_prediction(source_id: str, reason: str) -> dict[str, obje
     return await node_api.save_prediction(payload)
 
 
-def _gate_chat_snapshot(snapshot: dict) -> str | None:
+def _gate_chat_snapshot(snapshot: dict[str, object]) -> str | None:
     """对话内预测门禁：缺行情关键字段返回原因（None = 通过）。
 
     - quote 必须为非空 dict（行情关键字段缺失 → synth 走既有 D35 降级提示）；
@@ -444,7 +818,10 @@ def _gate_chat_snapshot(snapshot: dict) -> str | None:
     return None
 
 
-def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, list[str | None]]:
+def _chat_item_ids(
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+) -> tuple[str, str | None, list[str | None]]:
     """现状快照各输入项的 evidence_id（LLM 输入与后处理过滤共用同一套 id）。
 
     - quote：优先取快照自带 quote_evidence_id，缺省 "quote:{symbol}"（确定性）；
@@ -454,10 +831,10 @@ def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, l
       （不可被预测引用，LLM 输入中也不携带 evidence_id）。
     """
     symbol = str(snapshot.get("symbol", ""))
-    quote_id = snapshot.get("quote_evidence_id") or f"quote:{symbol}"
+    quote_id = str(snapshot.get("quote_evidence_id") or f"quote:{symbol}")
     flow = snapshot.get("flow")
     if isinstance(flow, dict) and flow:
-        flow_id: str | None = snapshot.get("flow_evidence_id") or f"flow:{symbol}"
+        flow_id: str | None = str(snapshot.get("flow_evidence_id") or f"flow:{symbol}")
     else:
         flow_id = None
     news_ids: list[str | None] = []
@@ -467,7 +844,9 @@ def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, l
     return quote_id, flow_id, news_ids
 
 
-def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
+def _collect_chat_evidence_ids(
+    snapshot: dict[str, object], news: list[dict[str, object]]
+) -> set[str]:
     """输入快照/新闻中实际存在项的 evidence_id 集合（预测只能引用这些）。"""
     quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
     ids = {quote_id}
@@ -478,7 +857,9 @@ def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
 
 
 def _build_chat_prediction_input(
-    snapshot: dict, news: list[dict], context: dict
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+    context: dict[str, object],
 ) -> dict[str, object]:
     """现状快照驱动的 LLM 输入包（行情/资金/新闻 + 上下文，无溯源因果链）。
 
@@ -502,6 +883,69 @@ def _build_chat_prediction_input(
     if flow_id is not None:
         payload["capital_flow"] = {"evidence_id": flow_id, "data": snapshot.get("flow")}
     return payload
+
+
+async def _enrich_chat_input_with_profile(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：预判产出方绑定——产出前读 target 验证画像并入 LLM 输入。
+
+    依赖 skill 的 read_validation_profile + enrich_prediction_input（缓存优先，miss 拉取重算）。
+    红线：画像只作输入参考；解析 target 失败/读取异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    if not symbol:
+        return prompt_input
+    target = make_target(symbol)
+    if target is None:
+        logger.debug("chat_prediction.enrich_skipped_no_target", symbol=symbol)
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("chat_prediction.enrich_profile_failed", symbol=symbol, exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
+# run_predict（大盘溯源）反哺画像的代表 target：run_predict 预测的是市场整体影响
+# 持续性，prediction.horizons[].target 归一化到上证指数（INDEX_TARGETS 首个）。绑定
+# 到该指数画像即可复用验证闭环；target 解析/读取失败 → 原样返回（同 chat 红线）。
+_MARKET_PROFILE_SYMBOL = "上证指数"
+
+
+async def _enrich_predict_input_for_symbol(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：按 symbol 读验证画像并入预判输入（回放态按 case.meta target 分层）。
+
+    大盘溯源（review）固定上证指数；P4 迭代回放用产片源锚定的 target（可能为
+    板块/个股），Target 维度一致。红线：画像只作输入参考；解析 target 失败/读取
+    异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    target = make_target(symbol)
+    if target is None:
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("predict_input.enrich_profile_failed", symbol=symbol, exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
+async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
+    """Spec B §4.3：run_predict（大盘溯源）预判产出方绑定——读市场指数验证画像并入输入。"""
+    return await _enrich_predict_input_for_symbol(prompt_input, _MARKET_PROFILE_SYMBOL)
 
 
 # P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
@@ -574,8 +1018,39 @@ def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) ->
     return prediction
 
 
+async def _persist_chat_prediction(
+    prediction: PredictionResult,
+    snapshot: dict[str, object],
+    due_dates: dict[str, str],
+    approximate_horizons: list[str],
+) -> dict[str, object] | None:
+    """方案A：对话预判落库（Spec A §4.2/§11）。
+
+    index/sector/stock 三类 target 均 → status=pending 纳入 16:00 到期验证（Spec B
+    个股数据源已接入，prediction_validator 支持 6 位裸码/带后缀 ts_code——个股
+    不再分流 skipped，个股对话预判成为个股验证/迭代的即时样本源）。落库失败不阻断
+    返回值（"永不 500"）。
+    """
+    source_id = f"chat:{snapshot.get('symbol', '')}:{snapshot.get('trade_date', '')}"
+    prediction_payload: dict[str, object] = prediction.model_dump(mode="json")
+    payload: dict[str, object] = {
+        "source_type": "chat_prediction",
+        "source_id": source_id,
+        "schema_version": prediction.schema_version,
+        "prediction": prediction_payload,
+        "due_dates": due_dates,
+    }
+    if approximate_horizons:
+        payload["due_dates_approximate"] = approximate_horizons
+    try:
+        return await node_api.save_prediction(payload)
+    except Exception as exc:
+        logger.warning("chat_prediction.persist_failed", source_id=source_id, error=str(exc))
+        return None
+
+
 async def run_chat_prediction(
-    snapshot: dict, news: list[dict], context: dict
+    snapshot: dict[str, object], news: list[dict[str, object]], context: dict[str, object]
 ) -> PredictionResult | None:
     """无溯源链的现状快照驱动预测入口（CHAT QA 对话内预测专用，Phase 4-1）。
 
@@ -592,8 +1067,9 @@ async def run_chat_prediction(
     通过门禁（指数场景，LLM 输入不携带 capital_flow 块，不编造指数资金流）。后处理：
     - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
     - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
-    - 到期日计算已移除（A3，2026-08-12）：chat 预测 v1 不落库、返回值无验证对照，
-      调用结果被丢弃属死代码；V2 落库验证时恢复（见下方注释）。
+    - 落库（Spec A §4.2/§9-2 方案 A）：恢复 _compute_due_dates 到期日计算，经
+      _persist_chat_prediction 写入 prediction_records——index/sector 纳入 16:00
+      到期验证，stock 分流 skipped（v1 验证器个股源未接，防 pending 堆积）。
     任一失败返回 None（"永不 500"铁律）。不产生交易指令。
     """
     gate_reason = _gate_chat_snapshot(snapshot)
@@ -602,6 +1078,10 @@ async def run_chat_prediction(
         return None
     try:
         prompt_input = _build_chat_prediction_input(snapshot, news, context)
+        # Spec B §4.3：验证画像并入 LLM 输入（预判反哺；only 输入参考，异常/无 target 不阻断）
+        prompt_input = await _enrich_chat_input_with_profile(
+            prompt_input, str(snapshot.get("symbol", "") or ""),
+        )
         # P10 计费口径：对齐 skill_executor 其它 skill，用 quick_think 单次调用
         # （deep_think 26-47s/次，chat UX 不可接受）；json_mode 结构化输出
         # （DeepSeek thinking 兼容，项目记忆 lesson 8）直接产出已解析的
@@ -612,7 +1092,12 @@ async def run_chat_prediction(
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
         structured = with_chat_structured_output(llm, PredictionResult)
-        prediction = await structured.ainvoke(messages)
+        # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult，
+        # 避免下游（_normalize/_hard_validate/model_copy）被 Any 污染（mypy no-any-return）。
+        prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
+        # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_chat_evidence_ids(snapshot, news)
         prediction = prediction.model_copy(
             update={
@@ -623,12 +1108,482 @@ async def run_chat_prediction(
         # P0-3：红线硬校验（chat 专属；run_predict 允许点位区间，不做此校验）
         prediction = _hard_validate_chat_prediction(
             prediction, str(snapshot.get("symbol", "")))
-        # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
-        # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
-        # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict 同一后处理；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
+        # Spec A §4.2/§9-2（方案 A）：恢复到期日计算并落库。chat 预判 index/sector
+        # 纳入 16:00 到期验证；stock 由 _persist_chat_prediction 分流 skipped。越年
+        # 近似档经 due_dates_approximate 显式标记。
+        due_dates, approximate_horizons = _compute_due_dates(
+            str(snapshot["trade_date"]), prediction.horizons,
+        )
+        await _persist_chat_prediction(
+            prediction, snapshot, due_dates, approximate_horizons,
+        )
+        # A2 独立源冲突检测接线：确定性方向提取自输入（LLM 不产数值）；结果仅作为
+        # 独立证据字段，绝不覆盖 confidence（佐证信号 ≠ 置信度）。run_predict 路径
+        # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。
+        inputs = _corroboration_inputs(snapshot, news)
+        prediction.evidence_corroboration = corroborate_evidence(
+            direction=prediction.horizons[0].direction,
+            quote_dir=inputs[0],
+            flow_dir=inputs[1],
+            news_dirs=inputs[2],
+        )
         return prediction
     except Exception as exc:
         logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)
+        return None
+
+
+async def _market_trace_brief(report_date: str) -> str:
+    """当日大盘 review 结论摘要（Spec D · 板块预判级联输入组装）。
+
+    取 review 持久化 content.display_report.summary（大盘结论一句话摘要，
+    即 review.py _build_review_report 的 artifact.trace_summary）；
+    报告缺失/结构不符/读取异常 → 返回 ""（级联降级，不阻断板块预判）。
+    """
+    try:
+        report = await node_api.get_analysis_report(
+            report_type="review", report_date=report_date
+        )
+    except Exception as exc:
+        logger.debug("sector_prediction.market_brief_read_failed", error=str(exc))
+        return ""
+    content = report.get("content") if isinstance(report, dict) else None
+    display = content.get("display_report") if isinstance(content, dict) else None
+    summary = display.get("summary") if isinstance(display, dict) else None
+    if isinstance(summary, str) and summary:
+        return summary
+    return ""
+
+
+def _collect_sector_evidence_ids(
+    sector_snapshot: dict[str, object], sector_id: str
+) -> set[str]:
+    """板块预判输入可引用证据 id：确定性 ``sector:{ts_code}`` + 快照内显式 evidence_id 条目。
+
+    对齐 run_chat_prediction 语义：quote/flow 用确定性 id、news 仅带 evidence_id 的
+    条目可被引用——板块场景下板块主体恒带确定性 id（sector:{internal_id}），
+    快照内 dict/list 条目显式携带 evidence_id 时同样可引用，无 id 项不可引用。
+    """
+    ids = {sector_id}
+    candidates: list[dict[str, object]] = []
+    for value in sector_snapshot.values():
+        if isinstance(value, dict):
+            candidates.append(value)
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, dict))
+    for item in candidates:
+        eid = item.get("evidence_id")
+        if isinstance(eid, str) and eid:
+            ids.add(eid)
+    return ids
+
+
+async def _sector_prediction_core(
+    *,
+    report_date: str,
+    sector: dict[str, object],
+    sector_evidence_id: str,
+    sector_snapshot: dict[str, object],
+    market_brief: str,
+    extra_input: dict[str, object] | None = None,
+) -> PredictionResult | None:
+    """板块预判 LLM 结构化链（生产/回放共用，Spec D · 预判环）。
+
+    构造 prompt_input（sector_snapshot_driven 形态）→ quick_think json_mode
+    结构化输出（P10 计费口径，DeepSeek thinking 兼容）→ 后处理管线：
+    - anchor.direction 归一化兜底（_normalize_conditions_anchor_direction）；
+    - evidence_ids 只留输入存在项（_collect_sector_evidence_ids，过滤而非抛错）；
+    - prediction_status 强制 "hypothesis"（级联 brief 仅输入上下文，非因果链证据）；
+    - P0-3 点位红线 _hard_validate_chat_prediction（板块不产绝对点位）；
+    - A3 确定性钳制（confidence 后处理覆盖，拉取失败不钳制）。
+    生产路径（predict_sector resolve 后）与回放路径（_replay_predict_sector_from_case）
+    调同一管线——后处理语义严格一致，杜绝复制漂移。LLM/解析任一失败返回 None
+    （对齐 run_chat_prediction 契约，永不 500）。
+    """
+    try:
+        prompt_input: dict[str, object] = {
+            "input_mode": "sector_snapshot_driven",
+            "report_date": report_date,
+            "sector": sector,
+            "sector_evidence_id": sector_evidence_id,
+            "sector_snapshot": sector_snapshot,
+            "market_trace_brief": market_brief,
+        }
+        # P4 回放：历史验证结果反馈并入输入（recorded prediction + verification
+        # entries），LLM 据此按变体逻辑重出预判（对齐 run_predict 的 replay_context）。
+        if extra_input:
+            prompt_input = {**prompt_input, **extra_input}
+        llm = get_quick_think()
+        messages = [
+            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+        ]
+        # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
+        # （同 run_chat_prediction，避免下游被 Any 污染，mypy no-any-return）。
+        structured = with_chat_structured_output(llm, PredictionResult)
+        prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        prediction = _normalize_conditions_anchor_direction(prediction)
+        allowed = _collect_sector_evidence_ids(sector_snapshot, sector_evidence_id)
+        # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错，对齐 chat）
+        prediction = prediction.model_copy(
+            update={
+                "prediction_status": "hypothesis",
+                "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
+            }
+        )
+        # P0-3 红线硬校验：板块不产绝对点位（命中 → 占位文案替换 + 独立日志，不静默）
+        prediction = _hard_validate_chat_prediction(
+            prediction, str(sector.get("name") or ""))
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict/chat 同一后处理；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
+        return prediction
+    except Exception as exc:
+        logger.warning("sector_prediction.failed", error=str(exc), exc_info=True)
+        return None
+
+
+async def _replay_predict_sector_from_case(*, report_date: str) -> PredictionResult | None:
+    """回放态板块预判（Spec D 迭代回放，对齐 P4 _replay_predict_from_case）。
+
+    REPLAY_CASE_ID 存在时由 predict_sector 顶部转调。prediction 产片源
+    （prediction_verified_scan）case.meta 落 {target, trade_date, prediction,
+    verification}——据此从 case meta 重建输入（无 DB/无 resolve/不落库）：
+    - meta.trade_date 与入参 report_date 不一致 → TraceUnavailableError（对齐
+      _replay_predict_from_case 校验语义，防切片错位）；
+    - target 作板块名锚（回放态无 ts_code，evidence 过滤收敛到空快照允许集）；
+    - recorded prediction + verification entries 作 replay 反馈并入 prompt_input，
+      LLM 按变体逻辑重出预判，评估端与同一 verification entries 对比评分。
+    返回新 PredictionResult|None（run_once 序列化为 final_response，
+    evaluate_verification 消费）。
+    """
+    from aistock_agent.iterate.case_builder import load_case
+
+    case_id = os.environ.get("REPLAY_CASE_ID", "")
+    if not case_id:
+        return None
+    case = load_case(case_id)
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    meta_trade_date = str(meta.get("trade_date") or "")
+    if meta_trade_date and meta_trade_date != report_date:
+        raise TraceUnavailableError(
+            "replay sector case meta trade_date "
+            f"{meta_trade_date} != report_date {report_date}"
+        )
+    target = str(meta.get("target") or "")
+    if not target:
+        logger.info("sector_prediction.replay_missing_target", case_id=case_id)
+        return None
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    replay_input: dict[str, object] = {
+        "replay": True,
+        "recorded_prediction": prediction,
+        "verification_feedback": [
+            v for v in verification.values() if isinstance(v, dict)
+        ],
+        # 回放态无当日大盘结论：级联降级为空串（对齐 _market_trace_brief 失败语义）
+        "market_trace_brief": "",
+    }
+    if target:
+        replay_input["target"] = target
+    return await _sector_prediction_core(
+        report_date=meta_trade_date or report_date,
+        sector={"kind": "sector", "name": target},
+        sector_evidence_id="",  # 回放无 resolve → 无真实 ts_code，不设伪证据前缀
+        sector_snapshot={},
+        market_brief="",
+        extra_input=replay_input,
+    )
+
+
+async def predict_sector(
+    *,
+    report_date: str,
+    sector_name: str,
+    sector_snapshot: dict[str, object],
+) -> PredictionResult | None:
+    """板块预判入口（Spec D · 预判环 · 级联输入组装）。
+
+    级联 = 输入组装非事件驱动：内部拉当日大盘 review 结论摘要作上下文
+    （_market_trace_brief，失败降级 ""），不订阅事件、不新增触发方式。
+    板块 Target 解析失败（resolve_sector_target → None）→ 返回 None 不产出
+    （无法解析即无法验证，无产出优于编造）。
+
+    REPLAY 回放态（Spec D 迭代回放）：REPLAY_CASE_ID 环境变量存在时顶部转调
+    `_replay_predict_sector_from_case`——从 case slice meta 重建输入（无 DB 访问）、
+    并入验证反馈，且不落库（回放只读；save_prediction → post no-op 兜底双保险）。
+
+    LLM 结构化链与后处理统一走 `_sector_prediction_core`（生产/回放共用）：
+    - prediction_status 强制 "hypothesis"（级联 brief 仅输入上下文，非因果链证据）；
+    - 点位红线 _hard_validate_chat_prediction（板块预判不产绝对点位，P0-3 不回退）；
+    - evidence_ids 过滤按输入存在项（_collect_sector_evidence_ids，对齐 chat）；
+    - A3 置信钳制 + _compute_due_dates 复用既有后处理。
+    落库 source_type="sector_prediction"（验证环回扫 conditions[]）；落库失败仅
+    warning 不阻断（永不 500）。任一失败返回 None（对齐 run_chat_prediction 契约）。
+    """
+    if os.environ.get("REPLAY_CASE_ID"):
+        # P4/Spec D 回放态：从 case slice meta 重建输入，回放只读不落库
+        return await _replay_predict_sector_from_case(report_date=report_date)
+    resolved = await resolve_sector_target(sector_name)
+    if resolved is None:
+        logger.info("sector_prediction.unresolved_target", sector_name=sector_name)
+        return None
+    target = sector_target_from_resolved(sector_name, resolved)
+    try:
+        market_brief = await _market_trace_brief(report_date)
+        sector_id = f"sector:{target.internal_id}"
+        prediction = await _sector_prediction_core(
+            report_date=report_date,
+            sector=target.model_dump(mode="json"),
+            sector_evidence_id=sector_id,
+            sector_snapshot=sector_snapshot,
+            market_brief=market_brief,
+        )
+        if prediction is None:
+            return None
+        # 到期日确定性计算（越年近似档显式标记，P2 裁决语义）
+        due_dates, approximate_horizons = _compute_due_dates(
+            report_date, prediction.horizons,
+        )
+        source_id = f"sector:{sector_name}:{report_date}"
+        payload: dict[str, object] = {
+            "source_type": "sector_prediction",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        try:
+            await node_api.save_prediction(payload)
+        except Exception as exc:
+            # 落库失败仅 warning 不阻断返回（永不 500，对齐 save_prediction 契约）
+            logger.warning(
+                "sector_prediction.persist_failed", source_id=source_id, error=str(exc),
+            )
+        return prediction
+    except Exception as exc:
+        logger.warning("sector_prediction.failed", error=str(exc), exc_info=True)
+        return None
+
+
+async def _stock_prediction_core(
+    *,
+    report_date: str,
+    stock: dict[str, object],
+    stock_evidence_id: str,
+    stock_snapshot: dict[str, object],
+    extra_input: dict[str, object] | None = None,
+) -> PredictionResult | None:
+    """个股预判 LLM 结构化链（生产/回放共用，Spec D 同构 · 个股预判入口）。
+
+    构造 prompt_input（stock_snapshot_driven 形态）→ quick_think json_mode 结构化
+    输出 → 后处理管线（direction 归一化 / evidence 只留输入存在项 / 强制 hypothesis /
+    P0-3 点位红线 / A3 置信钳制）。生产路径（predict_stock）与回放路径
+    （_replay_predict_stock_from_case）调同一管线——后处理语义严格一致不漂移。
+    任一失败返回 None（对齐 run_chat_prediction 契约，永不 500）。
+    """
+    try:
+        prompt_input: dict[str, object] = {
+            "input_mode": "stock_snapshot_driven",
+            "report_date": report_date,
+            "stock": stock,
+            "stock_evidence_id": stock_evidence_id,
+            "stock_snapshot": stock_snapshot,
+        }
+        if extra_input:
+            prompt_input = {**prompt_input, **extra_input}
+        llm = get_quick_think()
+        messages = [
+            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+        ]
+        # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
+        structured = with_chat_structured_output(llm, PredictionResult)
+        prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        prediction = _normalize_conditions_anchor_direction(prediction)
+        allowed = _collect_sector_evidence_ids(stock_snapshot, stock_evidence_id)
+        # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错）
+        prediction = prediction.model_copy(
+            update={
+                "prediction_status": "hypothesis",
+                "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
+            }
+        )
+        # P0-3 红线硬校验：个股预判不产绝对点位（命中 → 占位文案替换 + 独立日志）
+        prediction = _hard_validate_chat_prediction(
+            prediction, str(stock.get("name") or ""))
+        # A3 确定性钳制：confidence 后处理覆盖（拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
+        return prediction
+    except Exception as exc:
+        logger.warning("stock_prediction.failed", error=str(exc), exc_info=True)
+        return None
+
+
+async def _replay_predict_stock_from_case(*, report_date: str) -> PredictionResult | None:
+    """回放态个股预判（对齐 P4 _replay_predict_sector_from_case）。
+
+    REPLAY_CASE_ID 存在时由 predict_stock 顶部转调。prediction 产片源
+    （prediction_verified_scan）case.meta 落 {target, trade_date, prediction,
+    verification}——target 即个股 code（6 位裸码或带后缀 ts_code，对话 chat 通道
+    落 6 位裸码；验证器/迭代样本源不限 source_type）。从 case meta 重建输入
+    （无 DB/无网络/不落库）：recorded prediction + verification entries 作回放
+    反馈，LLM 按变体逻辑重出预判，评估端与同一 verification entries 对比评分。
+    """
+    from aistock_agent.iterate.case_builder import load_case
+
+    case_id = os.environ.get("REPLAY_CASE_ID", "")
+    if not case_id:
+        return None
+    case = load_case(case_id)
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    meta_trade_date = str(meta.get("trade_date") or "")
+    if meta_trade_date and meta_trade_date != report_date:
+        raise TraceUnavailableError(
+            "replay stock case meta trade_date "
+            f"{meta_trade_date} != report_date {report_date}"
+        )
+    target = str(meta.get("target") or "")
+    if not target:
+        logger.info("stock_prediction.replay_missing_target", case_id=case_id)
+        return None
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    code, kind = resolve_index_or_stock_code(target)
+    if kind != "stock":
+        # target 非个股 code（中文名等）→ 无法作为回放标的，如实不产出
+        logger.info("stock_prediction.replay_non_stock_target", target=target)
+        return None
+    replay_input: dict[str, object] = {
+        "replay": True,
+        "recorded_prediction": prediction,
+        "verification_feedback": [
+            v for v in verification.values() if isinstance(v, dict)
+        ],
+    }
+    if target:
+        replay_input["target"] = target
+    return await _stock_prediction_core(
+        report_date=meta_trade_date or report_date,
+        stock={"kind": "stock", "name": target, "code": code or ""},
+        stock_evidence_id=f"stock:{code}",
+        stock_snapshot={},
+        extra_input=replay_input,
+    )
+
+
+async def predict_stock(
+    *,
+    report_date: str,
+    stock_code: str,
+    stock_snapshot: dict[str, object],
+) -> PredictionResult | None:
+    """个股预判统一入口（Spec D 同构 · 个股预判环，对话/light_predict 共用落点）。
+
+    stock_code 接受 6 位裸码或带交易所后缀 ts_code（Target.internal_id 形态，
+    与验证器归一一致）；非个股 code（指数别名/板块名/中文名）→ None 不产出
+    （验证器无 name→code 通道，宁缺毋滥）。
+
+    REPLAY 回放态（个股验证驱动迭代）：REPLAY_CASE_ID 存在时顶部转调
+    `_replay_predict_stock_from_case`——从 case slice meta 重建输入、不落库。
+
+    LLM 链与后处理统一走 `_stock_prediction_core`（生产/回放共用）。落库
+    source_type="stock_prediction"（source_id=stock:{code}:{date}，Node 幂等
+    upsert），status 默认 pending → 16:00 到期验证 → 画像 → 迭代样本。
+    """
+    if os.environ.get("REPLAY_CASE_ID"):
+        # P4/Spec D 回放态：从 case slice meta 重建输入，回放只读不落库
+        return await _replay_predict_stock_from_case(report_date=report_date)
+    name = (stock_code or "").strip()
+    if not name:
+        logger.info("stock_prediction.unresolved_stock", stock_code=stock_code)
+        return None
+    code, kind = resolve_index_or_stock_code(name)
+    if kind != "stock" or not code:
+        # 非个股 code：不误产（个股预判入口只服务股票；指数/板块走各自入口）
+        logger.info("stock_prediction.non_stock_target", target=name, kind=kind)
+        return None
+    try:
+        prediction = await _stock_prediction_core(
+            report_date=report_date,
+            stock={"kind": "stock", "name": name, "code": code},
+            stock_evidence_id=f"stock:{code}",
+            stock_snapshot=stock_snapshot,
+        )
+        if prediction is None:
+            return None
+        # 到期日确定性计算（越年近似档显式标记，P2 裁决语义）
+        due_dates, approximate_horizons = _compute_due_dates(
+            report_date, prediction.horizons,
+        )
+        source_id = f"stock:{code}:{report_date}"
+        payload: dict[str, object] = {
+            "source_type": "stock_prediction",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        try:
+            await node_api.save_prediction(payload)
+        except Exception as exc:
+            logger.warning(
+                "stock_prediction.persist_failed", source_id=source_id, error=str(exc),
+            )
+        return prediction
+    except Exception as exc:
+        logger.warning("stock_prediction.failed", error=str(exc), exc_info=True)
         return None
 
 

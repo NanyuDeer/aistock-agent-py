@@ -1,0 +1,225 @@
+"""迭代完成邮件通知（2026-09-02）。
+
+iterate 报告持久化后调用：经 app-api /internal/mail/notify 复用 EMAIL_SMTP_*（QQ 邮箱）
+配置把"摘要+日期+类型"推送到收件邮箱（EMAIL_FROM）。自动（20:35 事件链路 / evening_chain）
+与手动补跑统一在此收敛。任何失败仅告警，绝不阻断迭代链路。
+"""
+
+import json
+from typing import Any
+
+from structlog import get_logger
+
+logger = get_logger()
+
+# 迭代四维内部 key → 人读名称（对齐 iterate_analyzer 维度语义）
+_DIM_LABELS = {
+    "dimension_1": "关注点重叠度（命中率 / 新覆盖率）",
+    "dimension_2": "方向-强度偏差",
+    "dimension_3": "归因一致性",
+    "dimension_4": "情绪基调偏差",
+}
+
+# 指标 key → 中文名（0~1 比例按百分比展示）
+_METRIC_LABELS = {
+    "hit_rate": "命中率",
+    "new_coverage_rate": "新覆盖率",
+    "attribution_match_rate": "归因一致率",
+    "mean_deviation": "方向偏差",
+    "ma10_mean_deviation": "MA10 方向偏差",
+    "ma20_sentiment_bias": "MA20 情绪偏差",
+}
+_RATIO_KEYS = {"hit_rate", "new_coverage_rate", "attribution_match_rate"}
+
+
+def _fmt_metric(key: str, value: float) -> str:
+    name = _METRIC_LABELS.get(key, key)
+    if key in _RATIO_KEYS:
+        return f"{name}={value * 100:.1f}%"
+    return f"{name}={value:.2f}"
+
+
+def _to_text(value: object, max_len: int) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    else:
+        text = str(value)
+    text = text.replace("\r", " ").replace("\n", " ")
+    if len(text) <= max_len:
+        return text
+    # 尽量在句末截断，避免硬切
+    cut = text[:max_len]
+    boundary = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("。"), cut.rfind("，"), cut.rfind("."))
+    if boundary > max_len * 0.6:
+        return cut[: boundary + 1] + "…（后略）"
+    return cut + "…（后略）"
+
+
+# LLM 分析正文里常见内部 key → 中文术语（长 key 先替换避免子串冲突）
+_METRIC_TERMS = [
+    ("attribution_match_rate", "归因一致率"),
+    ("new_coverage_rate", "新覆盖率"),
+    ("ma10_mean_deviation", "MA10 方向偏差"),
+    ("ma20_sentiment_bias", "MA20 情绪偏差"),
+    ("mean_deviation", "方向偏差"),
+    ("sentiment_bias", "情绪偏差"),
+    ("morning_sentiment", "晨报情绪"),
+    ("review_sentiment", "收盘情绪"),
+    ("morning_forecast", "晨报预判"),
+    ("hit_rate", "命中率"),
+    ("bias", "偏差"),
+]
+
+
+def _localize_terms(text: str) -> str:
+    """把分析/建议正文里的英文指标 key 汉化为中文术语（仅邮件展示层）。"""
+    for eng, zh in _METRIC_TERMS:
+        text = text.replace(eng, zh)
+    return text
+
+
+def _pick_human_text(value: object) -> str | None:
+    """从 LLM 产物里挑人类可读的主文本（去掉 JSON 花括号壳）。"""
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "summary",
+        "conclusion",
+        "suggestion",
+        "recommendation",
+        "main",
+        "analysis",
+        "impact",
+        "evidence",
+        "note",
+        "text",
+        "reason",
+    ):
+        inner = value.get(key)
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return None
+
+
+def format_iterate_text(payload: object) -> str | None:
+    """从完整 iterate_payload 拼可读邮件正文（易读摘要；字段版走 .md 附件）。"""
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    triggered = payload.get("triggered_dimensions")
+    trig: list[str] = triggered if isinstance(triggered, list) else []
+
+    if status == "normal" or not trig:
+        return "今日迭代分析：无显著异常，四维指标均在阈值内。\n详情见附件字段版或前往 App 查看。"
+
+    lines = _format_alert_digest(payload, trig)
+    lines.append("\n完整字段版见邮件附件（.md）。")
+    return "\n".join(lines)
+
+
+def build_iterate_attachment_md(payload: object, report_date: str) -> dict[str, str]:
+    """字段版 .md 附件内容：结构化 markdown + 原始 iterate_payload JSON 块（供 Agent 迭代）。"""
+    date = report_date or ""
+    header = [
+        f"# iterate 迭代报告（完整字段版）{(' ' + date) if date else ''}",
+        "",
+        "> 本文件为 AI 迭代输入用原始字段版，含确定性评分卡与 LLM 分析/建议。",
+        "",
+    ]
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    body = header + ["```json", raw, "```", ""]
+    return {
+        "filename": f"iterate-{date}.md" if date else "iterate.md",
+        "content": "\n".join(body),
+    }
+
+
+def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[str]:
+    """可读摘要（每维度：中文名 + 指标 + 汉化分析 + 优化建议）。"""
+    scorecard = payload.get("scorecard") if isinstance(payload.get("scorecard"), dict) else {}
+    analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+
+    lines: list[str] = [f"状态：需关注（共 {len(trig)} 个维度触发阈值）"]
+    for idx, dim in enumerate(trig, start=1):
+        label = _DIM_LABELS.get(dim, dim)
+        lines.append(f"\n{idx}. {label}")
+        card = scorecard.get(dim)
+        if isinstance(card, dict):
+            metrics = card.get("metrics")
+            if isinstance(metrics, dict) and metrics:
+                parts = [
+                    _fmt_metric(k, v)
+                    for k, v in metrics.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                ]
+                if parts:
+                    lines.append("　指标：" + "，".join(parts))
+        human = _pick_human_text(analysis.get(dim))
+        if human:
+            lines.append("　分析：" + _to_text(_localize_terms(human), 500))
+
+    suggestions = payload.get("optimization_suggestions")
+    if isinstance(suggestions, list) and suggestions:
+        lines.append("\n优化建议：")
+        for sug in suggestions[:6]:
+            if isinstance(sug, dict):
+                dim = sug.get("dimension")
+                label = _DIM_LABELS.get(str(dim)) if isinstance(dim, str) else ""
+                human = _pick_human_text(sug)
+                if not human:
+                    human = str(sug)
+                prefix = f"  - [{label}] " if label else "  - "
+                lines.append(prefix + _to_text(_localize_terms(human), 400))
+            else:
+                lines.append("  - " + _to_text(sug, 300))
+    return lines
+
+
+def _summary_text(summary: object) -> str:
+    if summary is None:
+        return ""
+    if isinstance(summary, str):
+        return summary
+    return json.dumps(summary, ensure_ascii=False, default=str)
+
+
+async def maybe_notify_iterate_mail(
+    *,
+    report_date: str,
+    summary: object,
+    report_type: str = "iterate",
+    payload: Any | None = None,
+) -> None:
+    """静默推送通知邮件；node_api.post 内部吞 HTTP/业务错误返回 None，此处兜底异常。"""
+    try:
+        from aistock_agent.services.data_client import node_api
+
+        body = format_iterate_text(payload) if isinstance(payload, dict) else None
+        attachment = build_iterate_attachment_md(payload, report_date) if isinstance(payload, dict) else None
+        data = await node_api.post(
+            "/internal/mail/notify",
+            {
+                "report_type": report_type,
+                "report_date": report_date,
+                "summary": body or _summary_text(summary),
+                **({"attachment": attachment} if attachment else {}),
+            },
+        )
+        sent = bool(data and data.get("sent"))
+        logger.info(
+            "iterate_mail_notified",
+            report_date=report_date,
+            sent=sent,
+            formatted=body is not None,
+        )
+    except Exception as exc:  # noqa: BLE001 — 邮件失败不阻断迭代
+        logger.warning(
+            "iterate_mail_notify_failed",
+            report_date=report_date,
+            error=str(exc),
+            exc_info=True,
+        )
