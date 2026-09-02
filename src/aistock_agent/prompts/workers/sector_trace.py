@@ -8,7 +8,8 @@ _GENERATE_SECTOR_PROMPT = (
     "你是一位板块事件归因分析师。给定板块快照（板块行情 market_fact + 定向检索来源），"
     "对主因板块回答「今天为什么暴/大涨」，把影响推演为事件层归因链（不套大盘 category 框架）。\n"
     "输出严格 JSON（不要用代码围栏，直接输出对象），字段：\n"
-    '{chain_id, sector, stages, attribution_status("sufficient"/"insufficient"), missing_evidence[]}\n'
+    '{chain_id, sector, stages, attribution_status("sufficient"/"insufficient"), '
+     'missing_evidence[]}\n'
     "stages 为 4 项数组，kind 依次为 phenomenon → trigger → transmission → impact，每项结构：\n"
     '{kind, headline, claims, evidence}\n'
     "其中 headline=一句话标题（string）；claims=短断言数组（string[]）；"
