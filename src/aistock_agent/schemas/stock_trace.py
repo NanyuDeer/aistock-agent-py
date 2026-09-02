@@ -16,6 +16,7 @@ SourceLevel = Literal["A", "B", "C", "D"]
 SourceKind = Literal[
     "trigger_fact", "quote_fact", "sector_fact", "market_fact",
     "announcement", "news", "capital_fact", "technical_fact",
+    "insight_article",
 ]
 
 

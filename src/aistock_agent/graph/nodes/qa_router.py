@@ -260,10 +260,8 @@ KEYWORD_FALLBACK: list[tuple[list[str], str]] = [
     (["排名", "排行", "榜单", "最强"], "trend_ranking"),
     # douyin_video：抖音视频读取（下载→语音识别→文本）
     (["抖音", "douyin", "博主视频", "视频里的"], "douyin_video"),
-    # 阶段 2.2：个股异动溯源读层（价格异动/异动原因 → stock_trace_lookup，置于 insight 之前）
-    (["异动", "异动归因", "异动原因"], "stock_trace_lookup"),
-    # 阶段 2.1：自选股洞察读层（涨停雷达/自选股/洞察/归因 → insight_lookup）
-    (["涨停雷达", "自选股", "洞察", "归因"], "insight_lookup"),
+    # 涨停雷达与午尾盘链路合并：异动/涨停/涨停雷达/自选股/洞察/归因 → stock_trace_lookup
+    (["异动", "涨停", "涨停雷达", "自选股", "洞察", "归因", "异动归因", "异动原因"], "stock_trace_lookup"),
     (["现在", "实时", "行情", "多少钱"], "stock_snapshot"),
 ]
 
@@ -272,10 +270,10 @@ _STOCK_SYMBOL_RE = re.compile(r"(?<!\d)(?:sh|sz)?(\d{6})(?!\d)", re.IGNORECASE)
 _DAYS_RE = re.compile(r"近(\d{1,3})天")
 _STOCK_SYMBOL_CLARIFICATION = "请提供 6 位股票代码后重试。"
 
-# 个股类 Skill（symbol 必填 6 位代码；insight_lookup 阶段 2.1、stock_trace_lookup 阶段 2.2 加入）
+# 个股类 Skill（symbol 必填 6 位代码；insight_lookup 已移除，统一由 stock_trace_lookup 路由）
 _STOCK_SKILLS = (
     "stock_snapshot", "stock_news", "capital_flow",
-    "insight_lookup", "stock_trace_lookup",
+    "stock_trace_lookup",
 )
 
 # ── M1 闸门关键词表（D29/D32/6.15 缺口） ──
@@ -581,12 +579,9 @@ def _extract_stock_name_candidate(message: str) -> str | None:
 
 def _infer_stock_skill(message: str) -> str:
     """按关键词推断个股类 Skill：新闻类 → stock_news，资金类 → capital_flow，
-    价格异动/异动原因 → stock_trace_lookup，涨停雷达/自选股洞察 → insight_lookup
-    （阶段 2.1/2.2）。"""
-    if any(kw in message for kw in ("异动", "异动归因", "异动原因")):
+    异动/涨停/涨停雷达/自选股/洞察/归因 → stock_trace_lookup（insight_lookup 不再路由）。"""
+    if any(kw in message for kw in ("异动", "异动归因", "异动原因", "涨停", "涨停雷达", "自选股", "洞察", "归因")):
         return "stock_trace_lookup"
-    if any(kw in message for kw in ("涨停雷达", "自选股", "洞察", "归因")):
-        return "insight_lookup"
     if any(kw in message for kw in ("新闻", "资讯", "消息", "公告")):
         return "stock_news"
     if any(kw in message for kw in ("资金", "主力", "流入", "流出", "净流入")):
@@ -780,13 +775,6 @@ def _build_default_skill_call(skill_name: str, message: str) -> SkillCall | None
         if symbol is None:
             return None
         return SkillCall(skill_name="prediction", args={"symbols": [symbol]})
-    # 阶段 2.1：insight_lookup——symbol 可空（无代码返回用户全部自选股洞察，user_id 后处理注入）
-    if skill_name == "insight_lookup":
-        symbol = _extract_stock_symbol(message)
-        return SkillCall(
-            skill_name="insight_lookup",
-            args={"symbol": symbol} if symbol else {},
-        )
     # 阶段 2.2：stock_trace_lookup——symbol 可空（无代码返回用户全部异动溯源，user_id 后处理注入）
     if skill_name == "stock_trace_lookup":
         symbol = _extract_stock_symbol(message)
@@ -1212,9 +1200,9 @@ async def _postprocess_skill_calls(
                     logger.warning("qa_router.postprocess.chat_analysis_no_ref")
                     continue   # 无登录无摘要 → 移除该 call，走既有短路/兜底
 
-        # 5.6 阶段 2.1/2.2：insight_lookup / stock_trace_lookup 读层 skill——确定性注入
-        #     user_id（登录）；未登录无自选股上下文 → 移除 call
-        if call.skill_name in ("insight_lookup", "stock_trace_lookup"):
+        # 5.6 阶段 2.2：stock_trace_lookup 读层 skill——确定性注入
+        #     user_id（登录）；未登录无上下文 → 移除 call
+        if call.skill_name == "stock_trace_lookup":
             user_id = state.get("user_id")
             if user_id:
                 args["user_id"] = user_id
