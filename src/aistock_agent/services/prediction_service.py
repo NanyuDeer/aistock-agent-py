@@ -17,7 +17,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
 import structlog
@@ -38,13 +38,13 @@ from aistock_agent.schemas.market_trace import (
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.prediction_targets import classify_target
-from aistock_agent.services.target_profile import make_target
 from aistock_agent.services.llm import (
     get_deep_think,
     get_quick_think,
     with_chat_structured_output,
 )
+from aistock_agent.services.prediction_targets import classify_target
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.utils.date import add_trading_days
 
 logger = structlog.get_logger()
@@ -420,7 +420,7 @@ def _normalize_conditions_anchor_direction(
 def _corroboration_inputs(
     snapshot: dict[str, object],
     news: list[dict[str, object]],
-) -> dict[str, object]:
+) -> tuple[int | None, int | None, list[int]]:
     """从 run_chat_prediction 输入提取确定性方向（对齐 raw 结构键）。缺失 → None（通道不参与计数）。
 
     独立源=数据获取通道不同：quote/flow/news 各取确定性符号，LLM 文本/claim 不计入。
@@ -436,10 +436,10 @@ def _corroboration_inputs(
     news_dirs: list[int] = []
     for n in news:
         d = n.get("direction") if isinstance(n, dict) else None
-        s = _direction_sign(d)
+        s = _direction_sign(d if isinstance(d, int | float) else None)
         if s is not None:
             news_dirs.append(s)
-    return {"quote_dir": quote_dir, "flow_dir": flow_dir, "news_dirs": news_dirs}
+    return quote_dir, flow_dir, news_dirs
 
 
 async def run_predict(
@@ -531,8 +531,8 @@ async def run_predict(
                 stats,
                 mid_enabled=settings.prediction_conf_cap_mid != "high",
             )
-            h.confidence = conf
-            h.confidence_source = source
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
         # 到期日计算（逐档容错，P2）：越年档标近似（approximate_horizons），不整条失败
         due_dates, approximate_horizons = _compute_due_dates(
             snapshot.trade_date, prediction.horizons
@@ -765,7 +765,7 @@ async def save_skipped_prediction(source_id: str, reason: str) -> dict[str, obje
     return await node_api.save_prediction(payload)
 
 
-def _gate_chat_snapshot(snapshot: dict) -> str | None:
+def _gate_chat_snapshot(snapshot: dict[str, object]) -> str | None:
     """对话内预测门禁：缺行情关键字段返回原因（None = 通过）。
 
     - quote 必须为非空 dict（行情关键字段缺失 → synth 走既有 D35 降级提示）；
@@ -786,7 +786,10 @@ def _gate_chat_snapshot(snapshot: dict) -> str | None:
     return None
 
 
-def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, list[str | None]]:
+def _chat_item_ids(
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+) -> tuple[str, str | None, list[str | None]]:
     """现状快照各输入项的 evidence_id（LLM 输入与后处理过滤共用同一套 id）。
 
     - quote：优先取快照自带 quote_evidence_id，缺省 "quote:{symbol}"（确定性）；
@@ -796,10 +799,10 @@ def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, l
       （不可被预测引用，LLM 输入中也不携带 evidence_id）。
     """
     symbol = str(snapshot.get("symbol", ""))
-    quote_id = snapshot.get("quote_evidence_id") or f"quote:{symbol}"
+    quote_id = str(snapshot.get("quote_evidence_id") or f"quote:{symbol}")
     flow = snapshot.get("flow")
     if isinstance(flow, dict) and flow:
-        flow_id: str | None = snapshot.get("flow_evidence_id") or f"flow:{symbol}"
+        flow_id: str | None = str(snapshot.get("flow_evidence_id") or f"flow:{symbol}")
     else:
         flow_id = None
     news_ids: list[str | None] = []
@@ -809,7 +812,9 @@ def _chat_item_ids(snapshot: dict, news: list[dict]) -> tuple[str, str | None, l
     return quote_id, flow_id, news_ids
 
 
-def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
+def _collect_chat_evidence_ids(
+    snapshot: dict[str, object], news: list[dict[str, object]]
+) -> set[str]:
     """输入快照/新闻中实际存在项的 evidence_id 集合（预测只能引用这些）。"""
     quote_id, flow_id, news_ids = _chat_item_ids(snapshot, news)
     ids = {quote_id}
@@ -820,7 +825,9 @@ def _collect_chat_evidence_ids(snapshot: dict, news: list[dict]) -> set[str]:
 
 
 def _build_chat_prediction_input(
-    snapshot: dict, news: list[dict], context: dict
+    snapshot: dict[str, object],
+    news: list[dict[str, object]],
+    context: dict[str, object],
 ) -> dict[str, object]:
     """现状快照驱动的 LLM 输入包（行情/资金/新闻 + 上下文，无溯源因果链）。
 
@@ -981,7 +988,7 @@ def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) ->
 
 async def _persist_chat_prediction(
     prediction: PredictionResult,
-    snapshot: dict,
+    snapshot: dict[str, object],
     due_dates: dict[str, str],
     approximate_horizons: list[str],
 ) -> dict[str, object] | None:
@@ -992,11 +999,12 @@ async def _persist_chat_prediction(
     避免无法验证的个股记录污染验证队列。落库失败不阻断返回值（"永不 500"）。
     """
     source_id = f"chat:{snapshot.get('symbol', '')}:{snapshot.get('trade_date', '')}"
+    prediction_payload: dict[str, object] = prediction.model_dump(mode="json")
     payload: dict[str, object] = {
         "source_type": "chat_prediction",
         "source_id": source_id,
         "schema_version": prediction.schema_version,
-        "prediction": prediction.model_dump(mode="json"),
+        "prediction": prediction_payload,
         "due_dates": due_dates,
     }
     if approximate_horizons:
@@ -1006,7 +1014,7 @@ async def _persist_chat_prediction(
         if classify_target(tgt) == "stock":
             # 个股 target 超出 v1 验证范围 → skipped（完整预判仍保留便于追溯）
             payload["status"] = "skipped"
-            payload["prediction"]["skip_reason"] = "chat 个股 target 超出 v1 验证范围"
+            prediction_payload["skip_reason"] = "chat 个股 target 超出 v1 验证范围"
         return await node_api.save_prediction(payload)
     except Exception as exc:
         logger.warning("chat_prediction.persist_failed", source_id=source_id, error=str(exc))
@@ -1014,7 +1022,7 @@ async def _persist_chat_prediction(
 
 
 async def run_chat_prediction(
-    snapshot: dict, news: list[dict], context: dict
+    snapshot: dict[str, object], news: list[dict[str, object]], context: dict[str, object]
 ) -> PredictionResult | None:
     """无溯源链的现状快照驱动预测入口（CHAT QA 对话内预测专用，Phase 4-1）。
 
@@ -1056,7 +1064,9 @@ async def run_chat_prediction(
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
         structured = with_chat_structured_output(llm, PredictionResult)
-        prediction = await structured.ainvoke(messages)
+        # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult，
+        # 避免下游（_normalize/_hard_validate/model_copy）被 Any 污染（mypy no-any-return）。
+        prediction = cast("PredictionResult", await structured.ainvoke(messages))
         # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
         # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
         prediction = _normalize_conditions_anchor_direction(prediction)
@@ -1083,8 +1093,8 @@ async def run_chat_prediction(
                 stats,
                 mid_enabled=settings.prediction_conf_cap_mid != "high",
             )
-            h.confidence = conf
-            h.confidence_source = source
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
         # Spec A §4.2/§9-2（方案 A）：恢复到期日计算并落库。chat 预判 index/sector
         # 纳入 16:00 到期验证；stock 由 _persist_chat_prediction 分流 skipped。越年
         # 近似档经 due_dates_approximate 显式标记。
@@ -1099,7 +1109,10 @@ async def run_chat_prediction(
         # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。
         inputs = _corroboration_inputs(snapshot, news)
         prediction.evidence_corroboration = corroborate_evidence(
-            direction=prediction.horizons[0].direction, **inputs,
+            direction=prediction.horizons[0].direction,
+            quote_dir=inputs[0],
+            flow_dir=inputs[1],
+            news_dirs=inputs[2],
         )
         return prediction
     except Exception as exc:

@@ -1025,7 +1025,7 @@ async def test_run_chat_prediction_fills_corroboration_without_touching_confiden
     with (
         patch("aistock_agent.services.prediction_service.get_quick_think", return_value=llm),
         patch("aistock_agent.services.prediction_service._corroboration_inputs",
-              return_value={"quote_dir": 1, "flow_dir": 1, "news_dirs": []}),
+              return_value=(1, 1, [])),
     ):
         out = await run_chat_prediction(
             {"symbol": "600519", "trade_date": "2026-08-14", "quote": {"price": 1400}},

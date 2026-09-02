@@ -15,7 +15,6 @@ from aistock_agent.iterate.adapters import get_adapter
 from aistock_agent.iterate.case_builder import get_data_dir, load_case
 from aistock_agent.iterate.evaluator import (
     ScoreDetail,
-    VerificationScore,
     evaluate_attribution,
     evaluate_verification,
     score_detail_payload,

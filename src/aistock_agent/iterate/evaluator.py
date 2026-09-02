@@ -139,7 +139,7 @@ async def evaluate_attribution(
     if truth_sectors:
         agent_sectors = _structured_sectors(agent_structured)
         if not agent_sectors:
-            agent_sectors = extracted.get("sectors", [])
+            agent_sectors = _as_str_list(extracted.get("sectors"))
         sectors_score = _sector_overlap_score(truth_sectors, agent_sectors)
         sectors_present = True
     else:

@@ -17,8 +17,9 @@
 
 import json
 import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -232,7 +233,7 @@ async def gate_case_variant(
     golden = list_all_golden()
     if not golden:
         return {"pass": True, "reason": "no_golden", "per_layer_delta": []}
-    from aistock_agent.iterate.variant_engine import VariantPlan, apply_variant, restore_baseline
+    from aistock_agent.iterate.variant_engine import VariantPlan, restore_baseline
 
     adapter = get_adapter(agent_id)
     patch_spec = cast("dict[str, object]", (best_patch or {}).get("patch", {}))
