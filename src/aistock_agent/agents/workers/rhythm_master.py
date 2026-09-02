@@ -172,6 +172,7 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         "event_window": win.events,
         "event_source_missing": win.source_missing,
         "event_high_hint": _event_high_hint(win.high_events),
+        "next_event_anchor": rhythm_engine.build_next_event_anchor(win.events, basis_date),
         "conflict": conflict,
         "conflict_detail": conflict_detail,
         "branches": branches,
@@ -200,6 +201,7 @@ async def _apply_event_delta(
     win = await load_event_window(basis_date)
     card["event_window"] = win.events
     card["event_source_missing"] = win.source_missing
+    card["next_event_anchor"] = rhythm_engine.build_next_event_anchor(win.events, basis_date)
     # 事件窗口缺失标注：calendar_uncovered / source_missing 按当前窗口状态追加/移除（对齐全量分支）
     if win.calendar_uncovered:
         if "交易日历未覆盖（事件窗口不可用）" not in missing:
