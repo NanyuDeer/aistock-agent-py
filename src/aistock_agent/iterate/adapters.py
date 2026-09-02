@@ -100,17 +100,23 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
     #   evaluate_verification）——绝不混用评分器。
     # 产片源 sector_close_snapshot 名与 TARGET_PROFILES["sector"].case_sourcer 一致
     # （services/target_profile.py:48 已预留），避免 profile 引用悬空。
+    # ⚠️ Spec D 已知缺口（如实标注，不静默扩大）：sector_trace 与 sector_prediction
+    # 均为"浅挂载注册"——迭代回放态（replay_runner._build_state）只覆盖 review/prediction，
+    # 未建 sector 两 adapter 的 state 分支；sector_trace.run() 返回 {report_type, trace_result}
+    # 也缺归因分支消费的 final_response 键。若保持产片注册，scheduler 16:30 会对
+    # sector_trace 产片并在 17:00 消费时跑空回放 → 全 0 分无用结果（每日无效 LLM 消耗）。
+    # 部署迭代 scheduler 前必须先完成回放适配或临时撤这两条产片源（后续任务）。
     "sector_trace": IterableAgentAdapter(
         agent_id="sector_trace",
         module_path="aistock_agent.agents.workers.sector_trace",
-        run_entry="run",  # D3 run(state) 归因形态，replay attribution 分支可驱动
+        run_entry="run",  # D3 run(state) 归因形态；回放态 _build_state 分支未建（见上方缺口注记）
         prompt_files=("src/aistock_agent/prompts/workers/sector_trace.py",),
         workflow_files=("src/aistock_agent/agents/workers/sector_trace.py",),
         tool_categories=("sector",),
         data_deps={"market": "market_snapshot"},  # 归因回放读切片快照（对齐 review）
         ground_truth_kind="attribution",
         case_sources=(CaseSourceSpec("sector_close_snapshot"),),
-        description="板块溯源事件层归因（仅主因板块，review_done 触发 + 迭代产片）",
+        description="板块溯源事件层归因（仅主因板块，review_done 触发 + 迭代产片；回放态未接线）",
     ),
     # ⚠️ Spec D 已知缺口（如实标注，不静默扩大）：sector_prediction run_entry="predict_sector"
     # 签名是 (*, report_date, sector_name, sector_snapshot)，非 replay_runner 验证分支
