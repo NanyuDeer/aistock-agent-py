@@ -43,7 +43,8 @@ from aistock_agent.services.llm import (
     get_quick_think,
     with_chat_structured_output,
 )
-from aistock_agent.services.prediction_targets import classify_target
+from aistock_agent.services.prediction_targets import classify_target, resolve_sector_target
+from aistock_agent.services.sector_target import sector_target_from_resolved
 from aistock_agent.services.target_profile import make_target
 from aistock_agent.utils.date import add_trading_days
 
@@ -1117,6 +1118,153 @@ async def run_chat_prediction(
         return prediction
     except Exception as exc:
         logger.warning("chat_prediction.failed", error=str(exc), exc_info=True)
+        return None
+
+
+async def _market_trace_brief(report_date: str) -> str:
+    """当日大盘 review 结论摘要（Spec D · 板块预判级联输入组装）。
+
+    取 review 持久化 content.display_report.summary（大盘结论一句话摘要，
+    即 review.py _build_review_report 的 artifact.trace_summary）；
+    报告缺失/结构不符/读取异常 → 返回 ""（级联降级，不阻断板块预判）。
+    """
+    try:
+        report = await node_api.get_analysis_report(
+            report_type="review", report_date=report_date
+        )
+    except Exception as exc:
+        logger.debug("sector_prediction.market_brief_read_failed", error=str(exc))
+        return ""
+    content = report.get("content") if isinstance(report, dict) else None
+    display = content.get("display_report") if isinstance(content, dict) else None
+    summary = display.get("summary") if isinstance(display, dict) else None
+    if isinstance(summary, str) and summary:
+        return summary
+    return ""
+
+
+def _collect_sector_evidence_ids(
+    sector_snapshot: dict[str, object], sector_id: str
+) -> set[str]:
+    """板块预判输入可引用证据 id：确定性 ``sector:{ts_code}`` + 快照内显式 evidence_id 条目。
+
+    对齐 run_chat_prediction 语义：quote/flow 用确定性 id、news 仅带 evidence_id 的
+    条目可被引用——板块场景下板块主体恒带确定性 id（sector:{internal_id}），
+    快照内 dict/list 条目显式携带 evidence_id 时同样可引用，无 id 项不可引用。
+    """
+    ids = {sector_id}
+    candidates: list[dict[str, object]] = []
+    for value in sector_snapshot.values():
+        if isinstance(value, dict):
+            candidates.append(value)
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, dict))
+    for item in candidates:
+        eid = item.get("evidence_id")
+        if isinstance(eid, str) and eid:
+            ids.add(eid)
+    return ids
+
+
+async def predict_sector(
+    *,
+    report_date: str,
+    sector_name: str,
+    sector_snapshot: dict[str, object],
+) -> PredictionResult | None:
+    """板块预判入口（Spec D · 预判环 · 级联输入组装）。
+
+    级联 = 输入组装非事件驱动：内部拉当日大盘 review 结论摘要作上下文
+    （_market_trace_brief，失败降级 ""），不订阅事件、不新增触发方式。
+    板块 Target 解析失败（resolve_sector_target → None）→ 返回 None 不产出
+    （无法解析即无法验证，无产出优于编造）。
+
+    链路复用 run_chat_prediction 骨架（quick_think + with_chat_structured_output
+    json_mode 结构化输出）——板块预判无溯源因果链，语义对齐 chat 快照驱动：
+    - prediction_status 强制 "hypothesis"（级联 brief 仅输入上下文，非因果链证据）；
+    - 点位红线 _hard_validate_chat_prediction（板块预判不产绝对点位，P0-3 不回退）；
+    - evidence_ids 过滤按输入存在项（_collect_sector_evidence_ids，对齐 chat）；
+    - A3 置信钳制 + _compute_due_dates 复用既有后处理。
+    落库 source_type="sector_prediction"（验证环回扫 conditions[]）；落库失败仅
+    warning 不阻断（永不 500）。任一失败返回 None（对齐 run_chat_prediction 契约）。
+    """
+    resolved = await resolve_sector_target(sector_name)
+    if resolved is None:
+        logger.info("sector_prediction.unresolved_target", sector_name=sector_name)
+        return None
+    target = sector_target_from_resolved(sector_name, resolved)
+    try:
+        market_brief = await _market_trace_brief(report_date)
+        sector_id = f"sector:{target.internal_id}"
+        prompt_input: dict[str, object] = {
+            "input_mode": "sector_snapshot_driven",
+            "report_date": report_date,
+            "sector": target.model_dump(mode="json"),
+            "sector_evidence_id": sector_id,
+            "sector_snapshot": sector_snapshot,
+            "market_trace_brief": market_brief,
+        }
+        # quick_think + json_mode 结构化输出（P10 计费口径）：板块预判被迭代循环
+        # 多板块调用，deep_think 26-47s/次不可接受；DeepSeek thinking 兼容（lesson 8）。
+        llm = get_quick_think()
+        messages = [
+            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
+        ]
+        # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
+        # （同 run_chat_prediction，避免下游被 Any 污染，mypy no-any-return）。
+        structured = with_chat_structured_output(llm, PredictionResult)
+        prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        prediction = _normalize_conditions_anchor_direction(prediction)
+        allowed = _collect_sector_evidence_ids(sector_snapshot, sector_id)
+        # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错，对齐 chat）
+        prediction = prediction.model_copy(
+            update={
+                "prediction_status": "hypothesis",
+                "evidence_ids": [sid for sid in prediction.evidence_ids if sid in allowed],
+            }
+        )
+        # P0-3 红线硬校验：板块不产绝对点位（命中 → 占位文案替换 + 独立日志，不静默）
+        prediction = _hard_validate_chat_prediction(prediction, sector_name)
+        # A3 确定性钳制：confidence 后处理覆盖（与 run_predict/chat 同一后处理；拉取失败不钳制）
+        try:
+            records = await node_api.list_verified_predictions(limit=500)
+        except Exception:
+            records = None
+        stats = _load_horizon_stats(records or [])
+        for h in prediction.horizons:
+            conf, source = _apply_confidence_cap(
+                h.horizon,
+                h.confidence,
+                stats,
+                mid_enabled=settings.prediction_conf_cap_mid != "high",
+            )
+            h.confidence = cast("Literal['high', 'medium', 'low']", conf)
+            h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
+        # 到期日确定性计算（越年近似档显式标记，P2 裁决语义）
+        due_dates, approximate_horizons = _compute_due_dates(
+            report_date, prediction.horizons,
+        )
+        source_id = f"sector:{sector_name}:{report_date}"
+        payload: dict[str, object] = {
+            "source_type": "sector_prediction",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        try:
+            await node_api.save_prediction(payload)
+        except Exception as exc:
+            # 落库失败仅 warning 不阻断返回（永不 500，对齐 save_prediction 契约）
+            logger.warning(
+                "sector_prediction.persist_failed", source_id=source_id, error=str(exc),
+            )
+        return prediction
+    except Exception as exc:
+        logger.warning("sector_prediction.failed", error=str(exc), exc_info=True)
         return None
 
 
