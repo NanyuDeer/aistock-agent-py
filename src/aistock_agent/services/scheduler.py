@@ -798,6 +798,7 @@ async def _run_evening_chain_task(report_date: str | None = None) -> dict[str, o
         await maybe_notify_iterate_mail(
             report_date=report_date,
             summary=iterate_summary,
+            payload=iterate_payload,
         )
     except Exception as exc:
         logger.error("scheduler_evening_iterate_failed", error=str(exc), exc_info=True)

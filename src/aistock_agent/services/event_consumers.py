@@ -343,6 +343,7 @@ class IterateConsumer(BaseConsumer):
         await maybe_notify_iterate_mail(
             report_date=report_date,
             summary=content["brief_summary"],
+            payload=iterate_payload,
         )
 
         await self.ctx.event_bus.publish(
