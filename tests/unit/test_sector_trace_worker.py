@@ -110,7 +110,10 @@ async def test_extract_primary_sector_none_when_no_sector() -> None:
 
 @pytest.mark.asyncio
 async def test_extract_primary_sector_none_when_claim_misses_top_losers() -> None:
-    """primary claim 未命中 top_losers（如涨日）→ (None, None)，不取 top_losers[0] 兜底。"""
+    """claim 未命中 top_losers 且无 top_gainers（两桶均无该板块行）→ (None, None)。
+
+    不取桶首行兜底。
+    """
     from aistock_agent.agents.workers.sector_trace import extract_primary_sector
 
     report = {
@@ -164,6 +167,70 @@ async def test_extract_primary_sector_none_when_claim_misses_top_losers() -> Non
     }
     name, row = extract_primary_sector({"report": report})
     assert name is None and row is None
+
+
+@pytest.mark.asyncio
+async def test_extract_primary_sector_hits_top_gainers_bull_market() -> None:
+    """涨市主因（2026-09-02 实盘 8.27 回归）：claim 命中 top_gainers → 返回板块名 + 行情条目。
+
+    top_losers 全是指数、主因板块在 top_gainers 时，只查 top_losers 会漏掉涨市主因
+    （英伟达财报催化 AI 算力链领涨场景）。
+    """
+    from aistock_agent.agents.workers.sector_trace import extract_primary_sector
+
+    report = {
+        "id": "r1",
+        "report_type": "review",
+        "report_date": "2026-08-27",
+        "content": {
+            "schema_version": "2.0",
+            "snapshot_id": "s1",
+            "market_trace": {
+                "snapshot": {
+                    "snapshot_id": "s1",
+                    "trade_date": "2026-08-27",
+                    "a_share": {
+                        "sectors": {
+                            "top_losers": [{"name": "标准普尔", "pct_change": 0.64}],
+                            "top_gainers": [{"name": "CPO概念", "pct_change": 4.95}],
+                        }
+                    },
+                },
+                "trace": {
+                    "schema_version": "1.1",
+                    "attribution_status": "confirmed",
+                    "candidates": [
+                        {
+                            "id": "c1",
+                            "category": "industry_technology_supply",
+                            "status": "supported",
+                            "verdict": "英伟达财报超预期催化 AI 算力链",
+                            "chain": {
+                                "nodes": [
+                                    {
+                                        "stage": "observable_result",
+                                        "claim": "CPO概念涨4.95%、存储芯片涨4.84%，市场放量上行",
+                                        "evidence_ids": [],
+                                    }
+                                ],
+                                "confirmed_prediction": [],
+                            },
+                            "supporting_evidence_ids": [],
+                            "counter_evidence_ids": [],
+                        }
+                    ],
+                    "primary_chain_id": "c1",
+                    "alternative_chain_id": None,
+                    "confidence": "high",
+                    "unresolved_questions": [],
+                    "prediction_validation": None,
+                },
+            },
+        },
+    }
+    name, row = extract_primary_sector({"report": report})
+    assert name == "CPO概念"
+    assert row is not None and row["pct_change"] == 4.95
 
 
 @pytest.mark.asyncio

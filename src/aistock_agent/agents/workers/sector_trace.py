@@ -55,7 +55,10 @@ def extract_primary_sector(
     输入形态：payload 包一层 {"report": Node行}（D4 约定，consumer 传
     node_api.get_analysis_report 返回的 Node DB 行）。快照与 trace 均从
     content.market_trace 下读取（review._build_review_report 持久化结构）。
-    primary 链 claim 命中 top_losers 板块名 → 返回 (板块名, 行情条目)；
+    primary 链 claim 命中板块行情名 → 返回 (板块名, 行情条目)：
+    - 跌市主因：先命中 top_losers（原语义保持优先）；
+    - 涨市主因：未命中 losers 时回退 top_gainers（2026-09-02 实盘验证：
+      8.27 英伟达财报催化 AI 算力链领涨，主因板块在 top_gainers，只查 losers 会漏）；
     无命中 → 返回 (None, None)（宁缺毋滥，调用方跳过不产出）。
     """
     report = payload.get("report")
@@ -70,9 +73,13 @@ def extract_primary_sector(
     snapshot = snapshot if isinstance(snapshot, dict) else None
     a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
     sectors = a_share.get("sectors") if isinstance(a_share, dict) else None
-    raw_losers = sectors.get("top_losers") if isinstance(sectors, dict) else []
-    losers = raw_losers if isinstance(raw_losers, list) else []
-    top_losers = [t for t in losers if isinstance(t, dict)]
+
+    def _rows(raw: object) -> list[dict[str, object]]:
+        """收窄行情桶为 dict 行列表（非 list / 非 dict 项安全过滤）。"""
+        return [t for t in raw if isinstance(t, dict)] if isinstance(raw, list) else []
+
+    top_losers = _rows(sectors.get("top_losers") if isinstance(sectors, dict) else [])
+    top_gainers = _rows(sectors.get("top_gainers") if isinstance(sectors, dict) else [])
 
     trace = market_trace.get("trace") if isinstance(market_trace, dict) else None
     for claim in _primary_chain_claims(trace):
@@ -80,6 +87,10 @@ def extract_primary_sector(
             name = str(los.get("name") or "")
             if name and name in claim:
                 return name, los
+        for g in top_gainers:
+            name = str(g.get("name") or "")
+            if name and name in claim:
+                return name, g
     return None, None
 
 
