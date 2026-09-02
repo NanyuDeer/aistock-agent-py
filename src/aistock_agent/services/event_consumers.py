@@ -326,14 +326,23 @@ class IterateConsumer(BaseConsumer):
         # 原始 LLM payload 仅用于链路诊断；brief 事实由受控构造函数生成
         # （复用 scheduler 旧链路逻辑）。briefing.py 对 iterate 强制要求
         # content.brief_summary，缺失会导致 brief_evening 降级。
+        content = {
+            "brief_summary": build_iterate_brief_summary(iterate_payload),
+            "iterate_payload": iterate_payload,
+        }
         await self.ctx.node_api.save_analysis_report(
             report_type="iterate",
             report_date=report_date,
             data_source="iterate_analyzer",
-            content={
-                "brief_summary": build_iterate_brief_summary(iterate_payload),
-                "iterate_payload": iterate_payload,
-            },
+            content=content,
+        )
+
+        # 每次 iterate 完成后推送通知邮件（2026-09-02；静默失败不阻断链路）
+        from aistock_agent.services.iterate_mail import maybe_notify_iterate_mail
+
+        await maybe_notify_iterate_mail(
+            report_date=report_date,
+            summary=content["brief_summary"],
         )
 
         await self.ctx.event_bus.publish(

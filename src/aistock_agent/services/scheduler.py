@@ -791,6 +791,14 @@ async def _run_evening_chain_task(report_date: str | None = None) -> dict[str, o
                 report_date=report_date,
             )
             return {"status": "failed", "stage": "iterate", "error": "iterate not traceable"}
+
+        # 每次 iterate 完成后推送通知邮件（2026-09-02；静默失败不阻断链路）
+        from aistock_agent.services.iterate_mail import maybe_notify_iterate_mail
+
+        await maybe_notify_iterate_mail(
+            report_date=report_date,
+            summary=iterate_summary,
+        )
     except Exception as exc:
         logger.error("scheduler_evening_iterate_failed", error=str(exc), exc_info=True)
         return {"status": "failed", "stage": "iterate", "error": str(exc)}
