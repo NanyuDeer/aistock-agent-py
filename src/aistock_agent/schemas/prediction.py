@@ -86,9 +86,14 @@ class PredictionCondition(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    condition: str  # 触发条件（可验证的事实描述）
+    condition: str  # 触发条件（完整可量化事实描述，长句保留，供详细报告原文展示）
     scenario: str  # 条件满足后的走势预判（尽量含幅度/目标位）
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="简洁展示用关键词（1~2 个，单条 ≤10 字、硬上限 15 字，如 两市放量≥2.2万亿）；"
+        "condition 本体不受影响仍为完整句。旧记录为空数组。",
+    )
 
 
 class PredictionResult(BaseModel):
