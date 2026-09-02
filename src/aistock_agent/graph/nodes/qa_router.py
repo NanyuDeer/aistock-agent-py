@@ -1909,6 +1909,7 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
             "stock_history": "stock_history",
             "trace_lookup": "trace_lookup",
             "trend_ranking": "trend_ranking",
+            "stock_trace_lookup": "stock_trace_lookup",
         }
         goal = InsightGoal(
             question=message,

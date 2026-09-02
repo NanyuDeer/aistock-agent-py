@@ -247,7 +247,7 @@ from aistock_agent.skills.insight_lookup import insight_lookup  # noqa: E402
 
 
 def _insight_goal() -> InsightGoal:
-    return InsightGoal(question="我自选股的异动归因", intent="insight_lookup")
+    return InsightGoal(question="我自选股的异动归因", intent="stock_trace_lookup")
 
 
 @pytest.mark.asyncio
