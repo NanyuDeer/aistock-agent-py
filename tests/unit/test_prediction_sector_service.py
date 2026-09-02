@@ -8,6 +8,7 @@ test_prediction_service.py 对 run_chat_prediction 的 mock 方式（patch get_q
 """
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -270,3 +271,86 @@ async def test_predict_sector_llm_failure_returns_none() -> None:
         )
     assert out is None
     mock_save.assert_not_awaited()
+
+
+# ---------- predict_sector REPLAY 转调（Spec D 迭代回放） ----------
+
+
+def _write_replay_case(data_dir: Path, *, trade_date: str) -> str:
+    """写 sector_prediction 回放切片到临时数据目录（prediction_verified_scan meta 形状）。"""
+    case_id = "case_sp_replay_meta"
+    case = {
+        "case_id": case_id,
+        "agent_id": "sector_prediction",
+        "event_title": f"预判验证 存储板块（{trade_date}）",
+        "meta": {
+            "record_id": "pred-1",
+            "target": "存储板块",
+            "trade_date": trade_date,
+            "prediction": {
+                "schema_version": "3.0",
+                "prediction_status": "hypothesis",
+                "horizons": [
+                    {"horizon": "short", "direction": "bearish", "target": "存储板块"}
+                ],
+                "risks": [],
+                "evidence_ids": [],
+            },
+            "verification": {
+                "short": {"result": "miss", "horizon": "short", "actual": "-2.00%"}
+            },
+            "t_window": "prediction",
+        },
+    }
+    path = Path(data_dir) / "cases" / "sector_prediction" / f"{case_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+    return case_id
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_replay_reconstructs_from_case_meta(
+    monkeypatch: pytest.MonkeyPatch, iterate_data_dir: Path,
+) -> None:
+    """REPLAY_CASE_ID → predict_sector 顶部转调：不 resolve/不拉大盘/不落库，注入验证反馈。"""
+    case_id = _write_replay_case(iterate_data_dir, trade_date=_REPORT_DATE)
+    monkeypatch.setenv("REPLAY_CASE_ID", case_id)
+    llm, structured_ainvoke = _make_llm(_sector_prediction())
+    with (
+        patch.object(ps, "resolve_sector_target", AsyncMock()) as mock_resolve,
+        patch.object(ps, "_market_trace_brief", AsyncMock()) as mock_brief,
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps.node_api, "save_prediction", AsyncMock()) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE, sector_name="存储板块", sector_snapshot={}
+        )
+    assert out is not None
+    assert out.prediction_status == "hypothesis"
+    # 回放只读：无 DB/网络输入组装
+    mock_resolve.assert_not_awaited()
+    mock_brief.assert_not_awaited()
+    mock_save.assert_not_awaited()
+    prompt_input = json.loads(structured_ainvoke.await_args.args[0][1].content)
+    assert prompt_input["replay"] is True
+    assert prompt_input["target"] == "存储板块"
+    assert prompt_input["sector"] == {"kind": "sector", "name": "存储板块"}
+    assert prompt_input["sector_snapshot"] == {}
+    assert prompt_input["market_trace_brief"] == ""  # 级联降级（回放无当日大盘结论）
+    assert prompt_input["recorded_prediction"]["prediction_status"] == "hypothesis"
+    assert prompt_input["verification_feedback"] == [
+        {"result": "miss", "horizon": "short", "actual": "-2.00%"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_replay_trade_date_mismatch_raises(
+    monkeypatch: pytest.MonkeyPatch, iterate_data_dir: Path,
+) -> None:
+    """回放态 meta.trade_date 与入参 report_date 不一致 → TraceUnavailableError（防切片错位）。"""
+    case_id = _write_replay_case(iterate_data_dir, trade_date="2026-08-01")
+    monkeypatch.setenv("REPLAY_CASE_ID", case_id)
+    with pytest.raises(ps.TraceUnavailableError):
+        await ps.predict_sector(
+            report_date=_REPORT_DATE, sector_name="存储板块", sector_snapshot={}
+        )

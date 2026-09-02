@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -185,11 +187,12 @@ async def test_run_sector_trace_publishes_report() -> None:
         ],
         attribution_status="insufficient",
     )
+    snapshot = {"sector": {"name": "存储板块"}, "sources": []}
     with (
         patch.object(
             st,
             "build_sector_snapshot",
-            AsyncMock(return_value={"sector": {"name": "存储板块"}, "sources": []}),
+            AsyncMock(return_value=snapshot),
         ),
         patch.object(st, "_generate_sector_trace_with_retry", AsyncMock(return_value=fake)),
         patch.object(st.node_api, "save_analysis_report", AsyncMock(return_value={})) as mock_save,
@@ -201,6 +204,7 @@ async def test_run_sector_trace_publishes_report() -> None:
         )
     mock_save.assert_called_once()
     assert result.report_type == "sector_trace"
+    assert result.snapshot == snapshot  # 溯源快照随结果返回（级联预判的 sector_snapshot 输入）
 
 
 # --- validate_sector_chain（T3 review 补测：#1 日期比较 + 降级契约） ---
@@ -271,3 +275,28 @@ def test_validate_sector_chain_occurred_at_after_captured_at_downgraded() -> Non
     validate_sector_chain(result, captured_at="2026-07-16")
     assert result.attribution_status == "insufficient"
     assert "trigger:韩检突袭存储三巨头:occurred_at晚于captured_at" in result.missing_evidence
+
+
+@pytest.mark.asyncio
+async def test_run_returns_final_response_and_sectors() -> None:
+    """run(state) 返回 final_response（trace JSON）+ 顶层 sectors（run_once 归因评分回传）。
+
+    对齐 review.run 契约：replay_runner.run_once 归因分支读 result.get("sectors") 转
+    structured 回传 evaluate_attribution（确定性板块事实优先于 LLM 文本提取）。
+    """
+    from aistock_agent.agents.workers import sector_trace as st
+
+    fake = SimpleNamespace(
+        report_type="sector_trace",
+        report_date="2026-07-16",
+        sector="存储板块",
+        trace_result={"chain_id": "x1", "sector": "存储板块", "stages": []},
+    )
+    with patch.object(st, "run_sector_trace", AsyncMock(return_value=fake)):
+        out = await st.run(
+            {"report_date": "2026-07-16", "sector": {"name": "存储板块"}}
+        )
+    assert out["report_type"] == "sector_trace"
+    parsed = json.loads(out["final_response"])
+    assert parsed["chain_id"] == "x1"
+    assert out["sectors"] == ["存储板块"]

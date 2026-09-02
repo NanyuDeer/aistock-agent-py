@@ -19,18 +19,21 @@ from typing import cast
 
 import structlog
 
-from aistock_agent.services.data_client import node_api
 from aistock_agent.services.cache import set_cached_validation_profile
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
-    build_validation_profile,
     bucket_summary,
+    build_validation_profile,
     hit_rate_summary,
 )
 from aistock_agent.services.prediction_targets import (
     INDEX_TARGETS,
     classify_target,
     resolve_sector_target,
+)
+from aistock_agent.services.prediction_targets import (
+    resolve_index_or_stock_code as _resolve_index_or_stock,
 )
 from aistock_agent.utils.date import shanghai_today
 
@@ -50,7 +53,8 @@ _METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
 _STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_window index 分支）
-_STOCK_KLINE_FETCH_DAYS = 120  # 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_window stock 分支）
+# 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_window stock 分支）
+_STOCK_KLINE_FETCH_DAYS = 120
 
 # Spec B §4.2：验证画像缓存 TTL（秒）——每日 16:00 run_once 更新，86400 次日失效重算
 _PROFILE_CACHE_TTL = 86400
@@ -150,8 +154,10 @@ def _judge_window(
 ) -> tuple[str, str | None]:
     """窗口主判（阶段 0 起默认 3.0 窗口累计口径）。返回 (result, grade)。
 
-    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；
+      neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；
+      neutral mean(|p_i|)<neutral_pct
 
     grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=strong_pct；
     strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。neutral 恒 None。
@@ -209,13 +215,10 @@ async def _verify_horizon(
     due_dates = record.get("due_dates")
     due_date = str(due_dates.get(horizon) or "") if isinstance(due_dates, dict) else ""
     target = str(entry.get("target") or "")
-    code = _INDEX_CODE_MAP.get(target)
-    target_type = "index"
+    # Spec B/light_predict：index 别名/裸码/带后缀 ts_code/6 位个股裸码统一在此解析
+    # （纯同步免网络），未命中才走板块 resolve（H3）。
+    code, target_type = _resolve_index_or_stock(target)
     matched: dict[str, str] | None = None
-    if code is None and classify_target(target) == "stock":
-        # Spec B：6 位个股裸码 → 稳定标识，绕过板块 resolve、不发网络请求（对齐 _resolve_verify_target）
-        code = target
-        target_type = "stock"
     if code is None:
         # H3：指数未命中 → 尝试板块 resolve（三级匹配，Task 5 node_api.resolve_ths_name）
         resolved = await resolve_sector_target(target)
@@ -234,7 +237,8 @@ async def _verify_horizon(
     if code is None:
         kind = classify_target(target)
         src = {"sector": "未匹配板块名（resolve 未命中）",
-               "stock": "个股数据源（未接）"}.get(kind, "抽象 target 漂移（LLM 输出质量问题）")
+               "stock": "个股代码无法解析（需 6 位代码或带后缀 ts_code）"}.get(
+            kind, "抽象 target 漂移（LLM 输出质量问题）")
         return {**base, "result": "insufficient", "subtype": "no_source", "actual": "",
                 "reason": f"target '{target}' 无验证数据源：{src}"}
     if matched:
@@ -299,25 +303,26 @@ async def _verify_horizon(
     return out
 
 
+# 带交易所后缀的指数 ts_code 消歧与 index/stock code 归一在 prediction_targets.py
+# （resolve_index_or_stock_code，验证器/预判入口共用，本文件以 _resolve_index_or_stock 引用）。
+
+
 async def _resolve_verify_target(
     target: str,
-) -> tuple[str | None, str, dict | None]:
+) -> tuple[str | None, str, dict[str, str] | None]:
     """index/sector/stock 目标资产解析（horizon 与 condition 共用）。
 
-    返回 (code, target_type, matched)：index 直接命中代码映射；否则尝试板块
-    resolve；6 位裸码 → 个股直接以裸码为代码（Spec B：个股数据源已接入）；
-    均失败返回 (None, classify_target(target), None)——抽象词无验证数据源。
+    返回 (code, target_type, matched)：index 直接命中代码映射/后缀 ts_code；6 位
+    个股裸码或带后缀 ts_code → stock（Spec B：个股数据源已接入，不发网络请求）；
+    否则尝试板块 resolve；均失败返回 (None, classify_target(target), None)。
     """
-    code = _INDEX_CODE_MAP.get(target)
+    code, target_type = _resolve_index_or_stock(target)
     if code is not None:
-        return code, "index", None
+        return code, target_type, None
     resolved = await resolve_sector_target(target)
     if resolved:
         return str(resolved["ts_code"]), "sector", resolved
-    # Spec B：6 位个股裸码（如 600519）作为稳定标识，绕过板块 resolve、不发网络请求
-    if classify_target(target) == "stock":
-        return target, "stock", None
-    return None, classify_target(target), None
+    return None, target_type, None
 
 
 def _parse_threshold(value: str) -> float | None:
@@ -431,8 +436,10 @@ async def _verify_conditions(
                   for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
         if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
             # D1：窗口未满不回写，下次 run_once 补齐再验
-            out[key] = {**entry, "wait": True,
-                        "reason": f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"}
+            wait_reason = (
+                f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"
+            )
+            out[key] = {**entry, "wait": True, "reason": wait_reason}
             continue
         cumulative = sum(window)
         hit = _judge_condition_hit(direction, _parse_threshold(threshold), cumulative)

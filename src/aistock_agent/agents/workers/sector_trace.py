@@ -21,6 +21,9 @@ class SectorTraceRunResult:
     report_date: str = ""
     sector: str = ""
     trace_result: dict[str, object] = field(default_factory=dict)
+    # Spec D 级联预判：溯源快照随结果返回（SectorTraceConsumer 作为 predict_sector
+    # 的 sector_snapshot 输入——板块行情 market_fact + 事件证据来源）。
+    snapshot: dict[str, object] = field(default_factory=dict)
 
 
 def _primary_chain_claims(trace: dict[str, object] | None) -> list[str]:
@@ -139,11 +142,23 @@ async def run_sector_trace(
         report_date=report_date,
         sector=sector_name,
         trace_result=trace_result.model_dump(mode="json"),
+        snapshot=snapshot,
     )
 
 
 async def run(state: dict[str, object]) -> dict[str, object]:
-    """iterate/事件链 run_entry="run" 约定：从 state 读 report_date/sector。"""
+    """iterate/事件链 run_entry="run" 约定：从 state 读 report_date/sector。
+
+    返回对齐 review.run 的迭代评分消费契约（replay_runner.run_once 归因分支读取）：
+    - ``final_response``：trace_result 的 JSON 串（evaluate_attribution 的
+      extract_agent_attribution 消费，从 LLM 归因链文本提取方向/驱动/板块）；
+    - ``sectors``：顶层确定性板块清单（run_once 转 structured 回传，sector 维度
+      优先于 LLM 文本提取，对齐 evaluate_attribution 的 agent_structured 契约）。
+    回放态（REPLAY）下 node 写与定向搜索已被 replay_layer 隔离（save_analysis_report
+    → no-op、TavilyService.search → 空语料），本函数无需特判。
+    """
+    import json
+
     report_date = str(state.get("report_date") or "")
     sector = state.get("sector")
     if isinstance(sector, dict):
@@ -155,4 +170,10 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         sector_name=sector_name,
         sector_row=sector if isinstance(sector, dict) else None,
     )
-    return {"report_type": res.report_type, "trace_result": res.trace_result}
+    trace_result = res.trace_result
+    return {
+        "report_type": res.report_type,
+        "trace_result": trace_result,
+        "final_response": json.dumps(trace_result, ensure_ascii=False),
+        "sectors": [str(trace_result.get("sector") or sector_name)],
+    }

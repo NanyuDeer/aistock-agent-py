@@ -852,8 +852,12 @@ async def test_run_chat_prediction_restores_due_dates_and_persists(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_chat_prediction_stock_target_routed_to_skipped(monkeypatch):
-    """方案A target 分流（Spec A §4.2/§11）：个股 target → status=skipped 防 pending 堆积。"""
+async def test_run_chat_prediction_stock_target_routed_to_pending(monkeypatch):
+    """方案A（Spec A §4.2/§11，2026-09-02）：个股 target → status=pending 纳入 16:00 到期验证。
+
+    Spec B 个股数据源已接入（验证器支持 6 位裸码/带后缀 ts_code），不再分流 skipped；
+    个股对话预判成为个股验证/迭代的即时样本源。
+    """
     monkeypatch.setattr(
         "aistock_agent.services.prediction_service._compute_due_dates",
         lambda *a, **k: ({"short": "2026-09-08"}, []),
@@ -885,8 +889,9 @@ async def test_run_chat_prediction_stock_target_routed_to_skipped(monkeypatch):
     ):
         result = await run_chat_prediction(_make_chat_snapshot(), [], {})
     assert result is not None
-    assert saved["status"] == "skipped"
-    assert saved["prediction"]["skip_reason"] == "chat 个股 target 超出 v1 验证范围"
+    # stock target → pending（不显式打 skipped，验证器已支持个股）
+    assert "status" not in saved
+    assert "skip_reason" not in saved["prediction"]
 
 
 # ---------- A3 确定性钳制：_apply_confidence_cap（confidence_source 接线） ----------

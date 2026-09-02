@@ -57,3 +57,37 @@ async def resolve_sector_target(target: str) -> dict[str, str] | None:
         return None
     # node 返回 dict[str, object]，此处收窄并定型为 dict[str, str]（mypy strict 下 dict 值型逆变）
     return {str(k): str(v) for k, v in matched.items()}
+
+
+# 带交易所后缀的指数 ts_code（裸码 → 期望后缀）：个股/指数码空间消歧——
+# 000001.SH = 上证指数（指数），000001.SZ = 平安银行（个股）；399001/399006 为深市指数。
+_SUFFIXED_INDEX_EXPECTED: dict[str, str] = {
+    "000001": "SH", "000300": "SH", "000688": "SH", "399001": "SZ", "399006": "SZ",
+}
+_STOCK_SUFFIX_RE = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$")
+
+
+def resolve_index_or_stock_code(target: str) -> tuple[str | None, str]:
+    """指数/个股 target → (code, kind)，纯同步、不发网络请求（验证器/预判入口共用）。
+
+    支持三种形态（个股 light_predict 通道按 Target.internal_id=带后缀 ts_code）：
+    1. 指数别名/裸码（“上证指数”/“000001”）→ INDEX_TARGETS 命中 → (code, "index")；
+    2. 带交易所后缀 ts_code（600519.SH / 000001.SZ / 000001.SH）：后缀与指数期望
+       一致（000001.SH=上证指数）→ ("000001", "index")；否则按个股裸码 → stock；
+    3. 6 位裸码（600519）→ stock。
+    板块名/抽象词返回 (None, classify_target(target))，由调用方继续板块 resolve 或
+    按 insufficient/no_source 处理（对齐 H3：index 直命中、板块 resolve、个股免网络）。
+    """
+    code = INDEX_TARGETS.get(target)
+    if code is not None:
+        return code, "index"
+    m = _STOCK_SUFFIX_RE.match(target)
+    if m:
+        bare, suffix = m.group(1), m.group(2)
+        if _SUFFIXED_INDEX_EXPECTED.get(bare) == suffix:
+            # 000001.SH 上证指数 / 000300.SH 沪深300 / 399006.SZ 创业板指……
+            return bare, "index"
+        return bare, "stock"  # 其余带后缀 → 个股裸码（000001.SZ 平安银行）
+    if classify_target(target) == "stock":
+        return target, "stock"
+    return None, classify_target(target)

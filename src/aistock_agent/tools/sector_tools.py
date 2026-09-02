@@ -33,6 +33,41 @@ async def get_wind_leaders() -> str:
     return _format_wind_leaders(data)
 
 
+@tool
+@safe_tool_call
+async def predict_sector_trend(sector_name: str) -> str:
+    """板块影响持续性预判（Spec D · 预判环 · 对话补充入口）
+
+    用户询问板块**未来走势 / 能否持续 / 还会不会涨跌**时调用：对指定板块产出
+    短线(1-5交易日)/中线(1-4周)/长线(1-6月)三档影响持续性推演（hypothesis）。
+    内部统一走 services.prediction_service.predict_sector（与主链级联同一入口，
+    落库 source_type="sector_prediction" → 16:00 到期验证 → 板块预判迭代样本）。
+
+    Args:
+        sector_name: 板块中文名，如 存储、半导体、白酒（带"板块/概念/行业"后缀亦可）；非 BK 码
+    """
+    from aistock_agent.services.prediction_service import (
+        predict_sector,
+        render_prediction_markdown,
+    )
+    from aistock_agent.utils.date import shanghai_today
+
+    name = (sector_name or "").strip()
+    if not name:
+        return "缺少板块名称，无法预判。请用 get_wind_leaders 或用户问题确认板块中文名"
+    prediction = await predict_sector(
+        report_date=shanghai_today().isoformat(),
+        sector_name=name,
+        sector_snapshot={},
+    )
+    if prediction is None:
+        return (
+            f"板块【{name}】暂无法预判（板块解析失败或推演未产出）。"
+            "可先用 get_wind_leaders 了解板块热度与主线再评估"
+        )
+    return render_prediction_markdown(prediction)
+
+
 def _format_leaders(data: dict[str, object]) -> str:
     """格式化龙头股数据（Tushare 返回 tag_code + leaders 数组）"""
     tag_name = data.get("tag_code", data.get("tag_name", "未知板块"))
@@ -59,8 +94,14 @@ def _format_wind_leaders(data: dict[str, object]) -> str:
     if not isinstance(sectors_raw, list) or not sectors_raw:
         return "暂无风口龙头数据"
     lines = [f"风口龙头（更新: {update_time}）"] if update_time else ["风口龙头"]
-    long_board = [s for s in sectors_raw if isinstance(s, dict) and s.get("cycle") in ("long", "both")]
-    short_board = [s for s in sectors_raw if isinstance(s, dict) and (s.get("cycle") or "short") in ("short", "both")]
+    long_board = [
+        s for s in sectors_raw
+        if isinstance(s, dict) and s.get("cycle") in ("long", "both")
+    ]
+    short_board = [
+        s for s in sectors_raw
+        if isinstance(s, dict) and (s.get("cycle") or "short") in ("short", "both")
+    ]
 
     def fmt_sector(s: dict[str, object]) -> str:
         ai = s.get("ai_analysis") or {}
@@ -69,9 +110,13 @@ def _format_wind_leaders(data: dict[str, object]) -> str:
         name = s.get("name", "未知板块")
         today = s.get("today_change", "-")
         leader = s.get("leading_stock", "-")
-        return (f"{name} 今日涨幅{today}% 龙头{leader} "
-                f"长线{ai.get('long_term_days', 0)}天/置信{ai.get('long_confidence', 0)}：{ai.get('long_reason', '-')} "
-                f"短线{ai.get('short_term_days', 0)}天/热度{ai.get('short_heat', 0)}：{ai.get('short_reason', '-')}")
+        return (
+            f"{name} 今日涨幅{today}% 龙头{leader} "
+            f"长线{ai.get('long_term_days', 0)}天/置信{ai.get('long_confidence', 0)}："
+            f"{ai.get('long_reason', '-')} "
+            f"短线{ai.get('short_term_days', 0)}天/热度{ai.get('short_heat', 0)}："
+            f"{ai.get('short_reason', '-')}"
+        )
 
     if long_board:
         lines.append("【长线链研判】")
@@ -89,6 +134,7 @@ from aistock_agent.tools.registry import register  # noqa: E402
 
 register("sector", get_leader_stocks)
 register("sector", get_wind_leaders)
+register("sector", predict_sector_trend)
 register("wind_leader", get_wind_leaders)
 # advisor agent 复用
 register("advisor", get_leader_stocks)

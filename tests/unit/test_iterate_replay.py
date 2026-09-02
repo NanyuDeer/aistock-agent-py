@@ -3,8 +3,8 @@
 import json
 from datetime import date
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 from unittest import mock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -572,3 +572,214 @@ async def test_run_once_prediction_branch_serializes_prediction(
     assert result["agent_id"] == "prediction"
     parsed = json.loads(result["final_response"])
     assert parsed["prediction_status"] == "confirmed"
+
+
+# ============================================================================
+# Spec D：sector 两 adapter 回放态——_build_state 分支 + run_once 签名适配
+# ============================================================================
+
+
+def test_build_state_sector_trace_replay() -> None:
+    """Spec D：sector_trace 回放态——report_date 取切片快照 trade_date + sector=sector_row。
+
+    sector_close_snapshot 产片源 meta 只带 sector_row（top_losers 条目，含 name），
+    不带 trade_date；report_date 从 window_before.market_snapshot.trade_date 取
+    （对齐 review 分支），sector 透传 sector_row 供 run() 从 .name 提取板块名。
+    """
+    from aistock_agent.iterate.replay_runner import _build_state
+
+    case = {
+        "case_id": "case_sector_trace_x",
+        "meta": {"sector_row": {"name": "存储板块", "pct_change": -4.2}, "t_window": "close"},
+        "window_before": {"market_snapshot": {"trade_date": "2026-07-16"}},
+    }
+    state = _build_state("sector_trace", case)
+    assert state["report_date"] == "2026-07-16"
+    assert state["sector"] == {"name": "存储板块", "pct_change": -4.2}
+
+
+def test_build_state_sector_trace_prefers_meta_trade_date() -> None:
+    """sector_trace 回放态：meta.trade_date 存在时优先于切片快照 trade_date。"""
+    from aistock_agent.iterate.replay_runner import _build_state
+
+    case = {
+        "case_id": "case_sector_trace_y",
+        "meta": {"sector_row": {"name": "存储板块"}, "trade_date": "2026-07-16"},
+        "window_before": {"market_snapshot": {"trade_date": "2026-07-17"}},
+    }
+    state = _build_state("sector_trace", case)
+    assert state["report_date"] == "2026-07-16"
+
+
+def test_build_state_sector_prediction_replay() -> None:
+    """Spec D：sector_prediction 回放态——REPLAY 标记 + meta.trade_date + target。
+
+    与 prediction 回放态同构：REPLAY_CASE_ID 由 predict_sector 顶部转调
+    _replay_predict_sector_from_case 读 case meta，state 仅携带锚定信息。
+    """
+    from aistock_agent.iterate.replay_runner import _build_state
+
+    case = {
+        "case_id": "case_sp_replay",
+        "meta": {"target": "存储板块", "trade_date": "2026-08-12"},
+    }
+    state = _build_state("sector_prediction", case)
+    assert state["REPLAY"] is True
+    assert state["trade_date"] == "2026-08-12"
+    assert state["target"] == "存储板块"
+
+
+@pytest.mark.asyncio
+async def test_run_once_sector_prediction_branch_calls_keyword_only_signature() -> None:
+    """Spec D：run_once 对 sector_prediction 按 keyword-only 签名调 predict_sector。
+
+    predict_sector(*, report_date, sector_name, sector_snapshot) —— 回放态由顶部
+    REPLAY_CASE_ID 转调（predict_sector 单测覆盖），此处验证 run_once 传占位参
+    且 final_response 为预测对象 JSON（evaluate_verification 消费）。
+    """
+    from aistock_agent.iterate.replay_runner import run_once
+    from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+
+    case = {
+        "case_id": "case_sp_replay",
+        "meta": {"target": "存储板块", "trade_date": "2026-08-12"},
+    }
+    prediction = PredictionResult(
+        schema_version="3.0",
+        prediction_status="hypothesis",
+        horizons=[
+            PredictionHorizon(
+                horizon="short",
+                remaining_estimate="1-3日",
+                phase="peaking",
+                direction="bearish",
+                target="存储板块",
+                metric_projection="相对现价区间波动",
+                confidence="medium",
+            )
+        ],
+        evolution_narrative="短线弱势震荡",
+        risks=[],
+        evidence_ids=[],
+    )
+    fake_run = AsyncMock(return_value=prediction)
+    with patch("aistock_agent.iterate.replay_runner._load_case", return_value=case), patch(
+        "aistock_agent.iterate.replay_runner.apply_replay_patches"
+    ), patch(
+        "aistock_agent.services.prediction_service.predict_sector", new=fake_run
+    ):
+        result = await run_once("sector_prediction", "case_sp_replay", "h")
+
+    fake_run.assert_awaited_once_with(
+        report_date="2026-08-12", sector_name="", sector_snapshot={}
+    )
+    assert result["agent_id"] == "sector_prediction"
+    parsed = json.loads(result["final_response"])
+    assert parsed["prediction_status"] == "hypothesis"
+    assert parsed["horizons"][0]["target"] == "存储板块"
+
+
+@pytest.mark.asyncio
+async def test_run_once_sector_trace_forwards_structured_sectors() -> None:
+    """Spec D：run_once 归因分支对 sector_trace —— final_response 直通 + sectors 转 structured。
+
+    sector_trace.run() 对齐 review.run 契约返回顶层 sectors；run_once 读
+    result.get("sectors") 组装 structured 回传，evaluate_attribution 的
+    agent_structured 才能命中（确定性板块事实优先于 LLM 文本提取）。
+    """
+    from aistock_agent.iterate.replay_runner import run_once
+
+    trace_json = json.dumps(
+        {"chain_id": "x1", "sector": "存储板块", "stages": []}, ensure_ascii=False
+    )
+    fake_run = AsyncMock(
+        return_value={
+            "report_type": "sector_trace",
+            "final_response": trace_json,
+            "sectors": ["存储板块"],
+        }
+    )
+    case = {
+        "case_id": "case_st_replay",
+        "meta": {"sector_row": {"name": "存储板块", "pct_change": -4.2}},
+        "window_before": {"market_snapshot": {"trade_date": "2026-07-16"}},
+    }
+    with patch("aistock_agent.iterate.replay_runner._load_case", return_value=case), patch(
+        "aistock_agent.iterate.replay_runner.apply_replay_patches"
+    ), patch(
+        "aistock_agent.agents.workers.sector_trace.run", new=fake_run
+    ):
+        result = await run_once("sector_trace", "case_st_replay", "h")
+
+    fake_run.assert_awaited_once()
+    assert result["agent_id"] == "sector_trace"
+    assert result["final_response"] == trace_json
+    assert result["structured"] == {"sectors": ["存储板块"]}
+
+
+# ============================================================================
+# Spec D 同构：stock_prediction 回放态——_build_state 分支 + run_once 签名适配
+# ============================================================================
+
+
+def test_build_state_stock_prediction_replay() -> None:
+    """stock_prediction 回放态：REPLAY 标记 + meta.trade_date + target（个股 code）。"""
+    from aistock_agent.iterate.replay_runner import _build_state
+
+    case = {
+        "case_id": "case_stock_replay",
+        "meta": {"target": "600519", "trade_date": "2026-08-12"},
+    }
+    state = _build_state("stock_prediction", case)
+    assert state["REPLAY"] is True
+    assert state["trade_date"] == "2026-08-12"
+    assert state["target"] == "600519"
+
+
+@pytest.mark.asyncio
+async def test_run_once_stock_prediction_branch_calls_keyword_only_signature() -> None:
+    """Spec D 同构：run_once 对 stock_prediction 按 keyword-only 签名调 predict_stock。
+
+    predict_stock(*, report_date, stock_code, stock_snapshot) —— 回放态由顶部
+    REPLAY_CASE_ID 转调（predict_stock 单测覆盖），此处验证占位参与序列化。
+    """
+    from aistock_agent.iterate.replay_runner import run_once
+    from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+
+    case = {
+        "case_id": "case_stock_replay",
+        "meta": {"target": "600519", "trade_date": "2026-08-12"},
+    }
+    prediction = PredictionResult(
+        schema_version="3.0",
+        prediction_status="hypothesis",
+        horizons=[
+            PredictionHorizon(
+                horizon="short",
+                remaining_estimate="1-3日",
+                phase="peaking",
+                direction="bullish",
+                target="600519",
+                metric_projection="相对现价区间波动",
+                confidence="medium",
+            )
+        ],
+        evolution_narrative="事件驱动短线偏强",
+        risks=[],
+        evidence_ids=[],
+    )
+    fake_run = AsyncMock(return_value=prediction)
+    with patch("aistock_agent.iterate.replay_runner._load_case", return_value=case), patch(
+        "aistock_agent.iterate.replay_runner.apply_replay_patches"
+    ), patch(
+        "aistock_agent.services.prediction_service.predict_stock", new=fake_run
+    ):
+        result = await run_once("stock_prediction", "case_stock_replay", "h")
+
+    fake_run.assert_awaited_once_with(
+        report_date="2026-08-12", stock_code="", stock_snapshot={}
+    )
+    assert result["agent_id"] == "stock_prediction"
+    parsed = json.loads(result["final_response"])
+    assert parsed["prediction_status"] == "hypothesis"
+    assert parsed["horizons"][0]["target"] == "600519"

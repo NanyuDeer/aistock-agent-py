@@ -30,6 +30,7 @@ from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.prediction_service import (
     TraceUnavailableError,
     predict_from_trace,
+    predict_sector,
     save_skipped_prediction,
 )
 from aistock_agent.services.snapshot_builder import build_snapshot
@@ -242,7 +243,10 @@ class SnapshotConsumer(BaseConsumer):
         # 显式消费 quick 链路透传的降级契约（Task 1 发布、本处消费）；直接触发的
         # snapshot（如 full 链路）无该字段 → 缺省视为未降级，消除隐性耦合。
         review_degraded: bool = bool(event.payload.get("review_degraded", False))
-        review_status: str = str(event.payload.get("review_status") or ("degraded" if review_degraded else "ok"))
+        review_status: str = str(
+            event.payload.get("review_status")
+            or ("degraded" if review_degraded else "ok")
+        )
 
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         invalid = not isinstance(snapshot, dict) or snapshot.get("error")
@@ -412,6 +416,14 @@ class SectorTraceConsumer(BaseConsumer):
 
     独立消费组 sector_chain（与 prediction_chain 并列），失败走 event_bus.retry→DLQ。
     review 无主因板块 → 跳过不产出（日志）。
+
+    级联预判（Spec D · 预判环生产触发）：溯源成功后串行调 predict_sector（同一
+    handler 内，非新增事件/触发通道）——sector_snapshot 用溯源快照（板块行情 +
+    事件证据），当日大盘结论由 predict_sector 内部 _market_trace_brief 主动拉取
+    （输入组装级联）。落库 source_type="sector_prediction"（Node 按
+    (source_type, source_id) 幂等 upsert，review_done quick/full 重复触发不堆积），
+    status 默认 pending → 16:00 到期验证 → prediction_verified_scan → 板块预判迭代。
+    预判失败仅日志不阻断（绝不因预判问题把溯源事件重试进 DLQ）。
     """
 
     consumer_group = "sector_chain"
@@ -429,10 +441,56 @@ class SectorTraceConsumer(BaseConsumer):
         if not sector_name:
             logger.info("sector_trace_skip_no_primary_sector", report_date=report_date)
             return
-        await run_sector_trace(
+        result = await run_sector_trace(
             report_date=report_date, sector_name=sector_name, sector_row=sector_row
         )
         logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
+        await _cascade_sector_prediction(
+            report_date=report_date,
+            sector_name=sector_name,
+            sector_snapshot=result.snapshot,
+        )
+
+
+async def _cascade_sector_prediction(
+    *,
+    report_date: str,
+    sector_name: str,
+    sector_snapshot: dict[str, object],
+) -> None:
+    """板块溯源后的级联预判（Spec D · 预判环生产触发，输入组装非事件驱动）。
+
+    失败绝不 raise：板块溯源事件已成功，预判失败（resolve 失败 / LLM 失败 / 落库
+    失败）只记日志——否则会把整个 review_done 事件拖进 retry/DLQ（错误归属）。
+    """
+    try:
+        prediction = await predict_sector(
+            report_date=report_date,
+            sector_name=sector_name,
+            sector_snapshot=sector_snapshot,
+        )
+    except Exception as exc:  # noqa: BLE001 — 级联预判失败不阻断溯源链路
+        logger.warning(
+            "sector_prediction_cascade_failed",
+            report_date=report_date,
+            sector=sector_name,
+            error=str(exc),
+            exc_info=True,
+        )
+        return
+    if prediction is None:
+        logger.info(
+            "sector_prediction_cascade_skipped",
+            report_date=report_date,
+            sector=sector_name,
+        )
+        return
+    logger.info(
+        "sector_prediction_done",
+        report_date=report_date,
+        sector=sector_name,
+        prediction_status=prediction.prediction_status,
+    )
 
 
 def _make_consumer_state(

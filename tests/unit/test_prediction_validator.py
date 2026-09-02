@@ -1012,3 +1012,91 @@ async def test_run_once_writes_profile_after_verification():
     assert setp.await_count == 1
     key = setp.await_args.args[0]
     assert key == "600519"
+
+
+# --- light_predict 下游就绪：带交易所后缀 ts_code 归一化（个股验证环） ---
+
+
+def test_resolve_index_or_stock_suffixed_stock_code():
+    """带后缀 ts_code（600519.SH / 000001.SZ）→ 个股裸码（个股 light_predict 通道）。"""
+    code, target_type = pv._resolve_index_or_stock("600519.SH")
+    assert code == "600519"
+    assert target_type == "stock"
+    code, target_type = pv._resolve_index_or_stock("000001.SZ")  # 平安银行，非上证指数
+    assert code == "000001"
+    assert target_type == "stock"
+
+
+def test_resolve_index_or_stock_suffixed_index_code():
+    """带后缀指数 ts_code（000001.SH 上证 / 000300.SH 沪深300 / 399006.SZ 创业板指）→ index。"""
+    code, target_type = pv._resolve_index_or_stock("000001.SH")
+    assert code == "000001"
+    assert target_type == "index"
+    code, target_type = pv._resolve_index_or_stock("399006.SZ")
+    assert code == "399006"
+    assert target_type == "index"
+
+
+def test_resolve_index_or_stock_bare_forms():
+    """裸码/别名仍走 index 优先、6 位裸码 stock、板块/抽象词留待 resolve。"""
+    code, target_type = pv._resolve_index_or_stock("上证指数")
+    assert code == "000001" and target_type == "index"
+    code, target_type = pv._resolve_index_or_stock("600519")
+    assert code == "600519" and target_type == "stock"
+    code, target_type = pv._resolve_index_or_stock("存储板块")
+    assert code is None and target_type == "sector"
+    code, target_type = pv._resolve_index_or_stock("随便写")
+    assert code is None and target_type == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_resolve_verify_target_suffixed_stock_skips_sector_resolve():
+    """带后缀个股 ts_code → 直接 stock，不发板块 resolve 网络请求。"""
+    with patch.object(
+        prediction_validator,
+        "resolve_sector_target",
+        new=AsyncMock(return_value={"ts_code": "BK0000", "name": "x"}),
+    ) as mock_resolve:
+        code, target_type, matched = await pv._resolve_verify_target("600519.SH")
+    assert code == "600519"
+    assert target_type == "stock"
+    assert matched is None
+    mock_resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_once_verifies_suffixed_stock_horizon():
+    """light_predict 通道（target=带后缀 ts_code）到期验证落地 hit，不再 no_source。"""
+    record = _pending_record(due="2026-08-10", target="600519.SH")
+    with (
+        patch.object(
+            prediction_validator.node_api,
+            "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "get_stock_kline",
+            new=AsyncMock(return_value=[
+                {"trade_date": "2026-08-10", "pct_chg": 1.2},
+                {"trade_date": "2026-08-11", "pct_chg": 0.3},
+                {"trade_date": "2026-08-12", "pct_chg": -0.2},
+                {"trade_date": "2026-08-13", "pct_chg": 0.1},
+            ]),
+        ),
+        patch.object(
+            prediction_validator.node_api,
+            "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 10),
+        ),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    entry = update.await_args.args[2]
+    assert entry["result"] == "hit"
+    assert entry["target_type"] == "stock"
+    assert entry["actual"] == "+1.40%"

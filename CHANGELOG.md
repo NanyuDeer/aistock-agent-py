@@ -2,6 +2,31 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-09-02 — Spec D 收口：板块迭代回放接线 + 板块预判生产触发 + 个股验证/迭代环同构
+
+**开发者**: Aria
+
+### 新增
+- `services/prediction_service.py`：统一**个股预判入口 `predict_stock`**（keyword-only `(*, report_date, stock_code, stock_snapshot)`，stock_code 收 6 位裸码/带后缀 ts_code）+ `_stock_prediction_core`（LLM 结构化链，生产/回放共用）+ `_replay_predict_stock_from_case`（REPLAY 转调，case.meta 重建）；落库 `source_type="stock_prediction"`（source_id=`stock:{code}:{date}`）默认 pending
+- `services/prediction_targets.py`：`resolve_index_or_stock_code`——指数/个股 target code 归一（6 位裸码/带后缀 ts_code/指数后缀消歧防 `000001.SH` vs `000001.SZ`），验证器与预判入口共用
+- `iterate/adapters.py`：注册 `stock_prediction` 迭代 adapter（verification 验证驱动 + `prediction_verified_scan` 产片源，`data_deps={}`——回放输入全来自 case.meta）
+- `tools/sector_tools.py`：新增 `predict_sector_trend` 对话工具（板块预判对话补充入口）+ `prompts/workers/sector.py` 预判意图说明
+- `agents/workers/sector_trace.py`：`SectorTraceRunResult.snapshot`——溯源快照随结果返回（级联预判的 `sector_snapshot` 输入）
+
+### 修复/改进
+- **板块迭代回放接线（收口已知缺口 #1）**：`replay_runner._build_state` 建 sector_trace/sector_prediction 分支 + `_report_date_from_case`（meta.trade_date 优先，回退切片快照）；`sector_trace.run()` 返回 final_response（trace JSON）+ 顶层 `sectors`（对齐 review.run 契约，run_once 转 structured 供 `evaluate_attribution`）；`run_once` 验证分支适配 predict_sector keyword-only 签名；`predict_sector` 顶部 REPLAY_CASE_ID 转调 `_replay_predict_sector_from_case`；LLM 链抽为 `_sector_prediction_core`（生产/回放共用，后处理语义一致）；adapters 移除两 adapter「回放未接线」缺口注记
+- **板块预判生产触发接线（收口已知缺口 #2）**：`SectorTraceConsumer` 溯源成功后串行级联 `predict_sector`（`_cascade_sector_prediction`，失败仅日志不阻断，不把溯源事件拖进 retry/DLQ）；Node `(source_type, source_id)` UNIQUE 幂等防 quick/full 重复触发堆积
+- **个股验证环就绪**：`prediction_validator` horizon/condition 两解析入口改用共享 `resolve_index_or_stock_code`（支持 6 位裸码/带后缀 ts_code，stock 不再 no_source）；无法解析 reason 文案更正
+- **个股迭代支撑**：`_persist_chat_prediction` 移除 stock→skipped 过时分流（验证器已支持个股，对话预判即时进 16:00 验证队列）；`replay_runner` 补 stock_prediction `_build_state` 分支 + run_once keyword-only 调用
+
+### 测试
+- 新增 `tests/unit/test_prediction_stock_service.py`（predict_stock 落 pending/后缀归一/非 stock 拒绝/REPLAY 重建/日期错位）；新增/更新约 30 例（sector/stock 回放状态、级联触发传快照、对话工具、验证 code 归一、个股产片走 stock profile 判定、chat stock pending）；回归：prediction/validator/targets/stats/iterate/replay/skills/consumers/sector/case_sourcers 282 例全绿 + src mypy/ruff 0 告警
+
+### 文档
+- changelog-pending.md 收口已知缺口 #1/#2；总架构 `2026-08-31-四环三粒度复用架构-design.md` §5.4.1/§5.4.2 与自选股洞察升级 spec §10 登记下游契约（含对同事 light_predict 的落库约定）
+
+---
+
 ## [main] 2026-09-01 — Spec B 预判验证闭环（验证 skill + 画像 + 个股数据源 + 三处反哺）
 
 **开发者**: Aria

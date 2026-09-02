@@ -411,14 +411,15 @@ def test_prediction_verified_scan_maps_records() -> None:
 
 
 def test_prediction_verified_scan_filters_bad_records() -> None:
-    """Spec C §7：只切 schema_version=3.0 且 verification 非空；不满足的记录不产片，无记录不产片。"""
+    """Spec C §7：只切 schema_version=3.0 且 verification 非空；不满足的记录不产片，无记录不产片。"""  # noqa: E501
     import asyncio
 
     from aistock_agent.iterate.case_sourcers import SourceContext, prediction_verified_scan
 
     ctx = SourceContext(agent_id="prediction", params={}, data_dir=None)
     records = [
-        _verified_record(rid=1, schema_version="2.0", trade_date="2026-08-14", target="上证指数"),  # 旧版本
+        _verified_record(rid=1, schema_version="2.0", trade_date="2026-08-14",
+                         target="上证指数"),  # 旧版本
         _verified_record(rid=3, schema_version="3.0", trade_date="2026-08-14",
                          target="上证指数", verification_keys=()),  # 无 verification
     ]
@@ -478,3 +479,24 @@ def test_prediction_candidate_dropped_when_unresolvable_target() -> None:
 
     candidate = _mk_pred_candidate("资本市场波动")  # 非指数/代码/板块标记 → make_target None
     assert asyncio.run(_prediction_candidate_kept(candidate)) is False  # type: ignore[arg-type]
+
+
+def test_prediction_candidate_stock_code_resolves_and_loops_stock_horizons() -> None:
+    """个股（6 位 code）候选：make_target 解析为 stock Target，按 stock profile
+    default_horizons(short/mid/long)×(up/down) 逐档判定——全不触发才丢弃。
+
+    证明个股 verified 记录不会被产片过滤误丢（若 make_target("600519") 不可解析，
+    函数会直接 return False 且不调用 eligible，call_count 将不是 6）。
+    """
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("600519")
+    with patch(
+        "aistock_agent.iterate.case_sourcers._prediction_case_source_eligible",
+        return_value=False,
+    ) as eligible:
+        kept = asyncio.run(_prediction_candidate_kept(candidate))  # type: ignore[arg-type]
+    assert kept is False
+    assert eligible.call_count == 6  # stock 3 档 × 2 方向场景（target 可解析且走 stock profile）
