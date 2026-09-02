@@ -57,6 +57,29 @@ def _to_text(value: object, max_len: int) -> str:
     return cut + "…（后略）"
 
 
+# LLM 分析正文里常见内部 key → 中文术语（长 key 先替换避免子串冲突）
+_METRIC_TERMS = [
+    ("attribution_match_rate", "归因一致率"),
+    ("new_coverage_rate", "新覆盖率"),
+    ("ma10_mean_deviation", "MA10 方向偏差"),
+    ("ma20_sentiment_bias", "MA20 情绪偏差"),
+    ("mean_deviation", "方向偏差"),
+    ("sentiment_bias", "情绪偏差"),
+    ("morning_sentiment", "晨报情绪"),
+    ("review_sentiment", "收盘情绪"),
+    ("morning_forecast", "晨报预判"),
+    ("hit_rate", "命中率"),
+    ("bias", "偏差"),
+]
+
+
+def _localize_terms(text: str) -> str:
+    """把分析/建议正文里的英文指标 key 汉化为中文术语（仅邮件展示层）。"""
+    for eng, zh in _METRIC_TERMS:
+        text = text.replace(eng, zh)
+    return text
+
+
 def _pick_human_text(value: object) -> str | None:
     """从 LLM 产物里挑人类可读的主文本（去掉 JSON 花括号壳）。"""
     if isinstance(value, str):
@@ -112,7 +135,7 @@ def format_iterate_text(payload: object) -> str | None:
                     lines.append("　指标：" + "，".join(parts))
         human = _pick_human_text(analysis.get(dim))
         if human:
-            lines.append("　分析：" + _to_text(human, 500))
+            lines.append("　分析：" + _to_text(_localize_terms(human), 500))
 
     suggestions = payload.get("optimization_suggestions")
     if isinstance(suggestions, list) and suggestions:
@@ -125,7 +148,7 @@ def format_iterate_text(payload: object) -> str | None:
                 if not human:
                     human = str(sug)
                 prefix = f"  - [{label}] " if label else "  - "
-                lines.append(prefix + _to_text(human, 400))
+                lines.append(prefix + _to_text(_localize_terms(human), 400))
             else:
                 lines.append("  - " + _to_text(sug, 300))
     lines.append("\n详情请前往 App 查看。")
