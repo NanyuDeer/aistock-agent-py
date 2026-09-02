@@ -2,6 +2,19 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-08-30 — 涨停雷达并入 stock-trace：词条统一 + SourceKind 扩展
+
+**开发者**: Aria
+
+### 变更
+- 涨停雷达事件并入 stock-trace 链路后，对话词条统一：`异动/涨停/涨停雷达/自选股/洞察/归因` 全部路由到 `stock_trace_lookup`；`insight_lookup` 从 registry/`_STOCK_SKILLS`/`_infer_stock_skill` 摘除（skill 文件保留不注册，存量数据不再新产生）。
+- `schemas/stock_trace.py` `SourceKind` 增加 `insight_article`（Node 快照新增同花顺涨停雷达文章证据域；候选层仍强制 company/sector/market/capital/technical 五层）。
+
+### 测试
+- `test_qa_router.py`（词条→stock_trace_lookup、prompt 排除 insight_lookup、postprocess 注入）、`test_skills.py` 更新。
+
+---
+
 ## [junliang] 2026-08-27 — 个股异动溯源读层 skill（阶段 2.2）
 
 **开发者**: Aria
