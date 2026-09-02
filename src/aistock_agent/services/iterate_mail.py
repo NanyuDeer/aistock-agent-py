@@ -106,17 +106,33 @@ def _pick_human_text(value: object) -> str | None:
 
 
 def format_iterate_text(payload: object) -> str | None:
-    """从完整 iterate_payload 拼可读邮件正文（不用受控 brief_summary 的内部 key）。"""
+    """从完整 iterate_payload 拼可读邮件正文（不用受控 brief_summary 的内部 key）。
+
+    正文前半段为易读摘要；末尾附上完整字段版（原始 iterate_payload JSON），
+    供用户转发给 Agent 做迭代输入。
+    """
     if not isinstance(payload, dict):
         return None
     status = payload.get("status")
     triggered = payload.get("triggered_dimensions")
     trig: list[str] = triggered if isinstance(triggered, list) else []
-    scorecard = payload.get("scorecard") if isinstance(payload.get("scorecard"), dict) else {}
-    analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
 
     if status == "normal" or not trig:
-        return "今日迭代分析：无显著异常，四维指标均在阈值内。\n详情请前往 App 查看。"
+        lines = ["今日迭代分析：无显著异常，四维指标均在阈值内。\n详情请前往 App 查看。"]
+    else:
+        lines = list(_format_alert_digest(payload, trig))
+
+    lines.append("\n" + "=" * 24)
+    lines.append("【完整字段版 · 供 Agent 迭代】")
+    lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    lines.append("\n详情请前往 App 查看。")
+    return "\n".join(lines)
+
+
+def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[str]:
+    """可读摘要（每维度：中文名 + 指标 + 汉化分析 + 优化建议）。"""
+    scorecard = payload.get("scorecard") if isinstance(payload.get("scorecard"), dict) else {}
+    analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
 
     lines: list[str] = [f"状态：需关注（共 {len(trig)} 个维度触发阈值）"]
     for idx, dim in enumerate(trig, start=1):
@@ -151,8 +167,7 @@ def format_iterate_text(payload: object) -> str | None:
                 lines.append(prefix + _to_text(_localize_terms(human), 400))
             else:
                 lines.append("  - " + _to_text(sug, 300))
-    lines.append("\n详情请前往 App 查看。")
-    return "\n".join(lines)
+    return lines
 
 
 def _summary_text(summary: object) -> str:
