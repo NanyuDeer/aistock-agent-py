@@ -169,6 +169,7 @@ START → supervisor(quick_think, 意图路由)
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
 - **阶段 2.1（2026-08-27）`insight_lookup` 读层 skill**：对话内查登录用户自选股洞察（涨停雷达/价格异动归因，只读）；入参 `{symbol?}`，user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/insight/events` 只读端点；`ChatSource.kind="insight"`；`qa_router` footer 白名单动态化——`_build_system_prompt` 从 registry 实时渲染 `goal.intent` 枚举（`__INTENT_ENUM__` 占位符替换，新增 skill 无需改硬编码）
 - **阶段 2.2（2026-08-27）`stock_trace_lookup` 读层 skill**：对话内查登录用户个股异动溯源（价格异动/涨停雷达归因结果，只读列表）；入参 `{symbol?}`（symbol 可空——无代码时返回该用户全部异动溯源），user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/stock-trace/events` 只读端点；`ChatSource.kind="stock_trace"`，source_id=`stock_trace:{event_id}`；**词条优先级**：`异动/异动归因/异动原因` → 本 skill（置于前），`涨停雷达/自选股/洞察/归因` → `insight_lookup`
+- **2026-08-30 链路合并后**：涨停雷达事件并入 stock-trace（Node 侧不再建 watchlist_insight_events），词条统一——`异动/涨停/涨停雷达/自选股/洞察/归因/异动归因/异动原因` 全部 → `stock_trace_lookup`；`insight_lookup` 从 registry/`_STOCK_SKILLS`/`_infer_stock_skill` 摘除路由（skill 文件保留不注册）；`schemas/stock_trace.py` `SourceKind` 增加 `insight_article`（Node 快照新增文章证据域，候选层仍强制五层）。
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
 
