@@ -159,6 +159,31 @@ def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
     return data
 
 
+def _repair_llm_target_internal_id(payload: dict[str, object]) -> dict[str, object]:
+    """LLM 结构化 target 兜底：补 internal_id/code（Target 顶层必填，2026-09-02 实盘验证）。
+
+    大盘/统一预判入口 LLM 常输出 {kind, code, name} 而缺 internal_id（Target 画像 key），
+    schema 收紧后 model_validate 直接 parse_failed（服务器 8.27 复现：index target
+    缺 internal_id）。用 make_target(name) 归一补 internal_id/code（index/sector/stock）；
+    归一失败不改动 → 交给 model_validate 的 parse_failed 兜底（不编造）。
+    """
+    raw = payload.get("target")
+    if not isinstance(raw, dict):
+        return payload
+    if raw.get("internal_id"):
+        return payload
+    name = str(raw.get("name") or "")
+    resolved = make_target(name) if name else None
+    if resolved is not None:
+        target = {**raw, "internal_id": resolved.internal_id}
+        raw_code = raw.get("code")
+        # code 缺失或为 6 位裸码时统一为带后缀 ts_code（数据卫生：内部 code 不带裸码）
+        if (not raw_code or (isinstance(raw_code, str) and "." not in raw_code)) and resolved.code:
+            target["code"] = resolved.code
+        return {**payload, "target": target}
+    return payload
+
+
 def _collect_allowed_evidence_ids(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> set[str]:
@@ -506,7 +531,10 @@ async def run_predict(
             return PredictionRunResult(status="llm_failed", reason=str(exc))
         # 载荷解析/校验 — LLM 输出质量问题分类
         try:
-            prediction = PredictionResult.model_validate(_coerce_prediction_payload(raw_text))
+            payload = _coerce_prediction_payload(raw_text)
+            # 大盘/统一入口 LLM target 缺 internal_id 兜底（Target 必填，实盘验证）
+            payload = _repair_llm_target_internal_id(payload)
+            prediction = PredictionResult.model_validate(payload)
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
