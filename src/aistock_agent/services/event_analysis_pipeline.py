@@ -144,6 +144,15 @@ async def run_event_analysis_pipeline(
         # _to_gi_events 仅收集 success=True 的事件，即已确认落库事件
         # （P1-2：GI 输入 = 已确认落库事件）。
         today_events = _to_gi_events(conduction_outputs)
+        # GI 准入过滤（2026-09-02）：_to_gi_events 输出之后、full/incremental GI 之前。
+        # 只影响 GI 候选池，**完全不修改事件传导**（事件传导结果已落库）。
+        # 纯收评/快评/行情回顾 → DROP；板块异动+明确外部催化 → KEEP。
+        from aistock_agent.services.gi_admittance import (  # noqa: PLC0415
+            filter_gi_eligible_events,
+        )
+
+        today_events, admittance_stats = await filter_gi_eligible_events(today_events)
+        logger.info("gi_admittance_stats", **admittance_stats)
         # 盘中纯增量更新（2026-08-14）：开关开启时走 incremental_gi——
         # 新增事件与当前 max_bullish/max_bearish 竞争，仅必要时 quick_think，
         # 不重新分析当天全部事件，也不新增收盘全量校准。开关关闭时保持
