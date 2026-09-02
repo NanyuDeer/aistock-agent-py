@@ -17,9 +17,16 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_scanner import find_recent_trading_day
+from aistock_agent.schemas.target import Target
 from aistock_agent.services.data_client import NodeApiClient
 from aistock_agent.services.event_store import is_major_event, load_event_scrape
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
+from aistock_agent.services.target_profile import (
+    get_iterate_threshold,
+    get_profile,
+    make_target,
+)
+from aistock_agent.skills.prediction_validation import read_validation_profile
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -200,6 +207,48 @@ def _first_target_str(prediction: dict[str, object]) -> str | None:
             if isinstance(h, dict) and h.get("target"):
                 return str(h["target"])
     return None
+
+
+#: 迭代触发判定的方向场景（Spec C §5.3 分层阈值的 scenario 轴；方向中性归 up 侧保守）。
+_SCENARIOS = ("up", "down")
+
+
+async def _prediction_case_source_eligible(
+    target: Target, horizon: str, scenario: str
+) -> bool:
+    """prediction 案例是否达迭代触发条件（Spec C §5.3 阈值分层 + §5.3 sufficient_sample 闸门）。
+
+    读 target 历史验证画像（缓存优先，read_validation_profile），样本充足
+    （sufficient_sample=True）且命中率低于 ``get_iterate_threshold(target, horizon, scenario)``
+    分层阈值 → True（应产片）。小样本 / 未命中阈值 → False（不触发不耗 token）。
+    """
+    profile = await read_validation_profile(target, horizon)
+    if not bool(profile.get("sufficient_sample", False)):
+        return False
+    hit_rate = float(cast(float, profile.get("hit_rate", 0.0)))
+    threshold = get_iterate_threshold(target, horizon, scenario)
+    return hit_rate < threshold
+
+
+async def _prediction_candidate_kept(candidate: CaseCandidate) -> bool:
+    """prediction 候选是否保留：任一 default horizon×scenario 触发即保留。
+
+    候选 meta.target 无法解析为首类 Target（unknown 抽象词，make_target None）→
+    保守丢弃（不产片，防误触发）；解析成功则按 profile.default_horizons × 方向
+    场景逐个判 ``_prediction_case_source_eligible``，任一命中 True 即短路保留。
+    """
+    meta = candidate.meta
+    target_raw = meta.get("target") if isinstance(meta, dict) else None
+    if not isinstance(target_raw, str) or not target_raw:
+        return False
+    target = make_target(target_raw)
+    if target is None:
+        return False
+    for horizon in get_profile(target).default_horizons:
+        for scenario in _SCENARIOS:
+            if await _prediction_case_source_eligible(target, horizon, scenario):
+                return True
+    return False
 
 
 def _source_trade_date(source_id: str) -> str | None:

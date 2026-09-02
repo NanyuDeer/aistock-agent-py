@@ -11,7 +11,11 @@ import structlog
 
 from aistock_agent.iterate.adapters import IterableAgentAdapter
 from aistock_agent.iterate.case_builder import build_case, case_path
-from aistock_agent.iterate.case_sourcers import CaseCandidate, source_cases
+from aistock_agent.iterate.case_sourcers import (
+    CaseCandidate,
+    _prediction_candidate_kept,
+    source_cases,
+)
 from aistock_agent.iterate.ground_truth import generate_data_constrained_gt
 from aistock_agent.iterate.gt_validator import validate_gt_against_case
 
@@ -61,8 +65,29 @@ async def build_cases_for_adapter(
 
     返回 {"generated", "rejected", "case_ids", "reasons"}（与旧 build_event_cases 形状一致）。
     单候选失败仅回滚该候选，不阻断后续。
+
+    验证驱动 agent（ground_truth_kind == "verification"，即 prediction，Spec C §5.3）：
+    先从产片源候选里按 target 逐个判「画像阈值触发」（_prediction_candidate_kept：
+    sufficient_sample 且 hit_rate < 分层阈值），未命中的 target 候选被过滤——未命中
+    全部则返回 {"skipped": "threshold_not_triggered"}，不产片不耗 token。
     """
     candidates = await source_cases(adapter, data_dir=data_dir, force=force)
+    if adapter.ground_truth_kind == "verification" and candidates:
+        kept = [c for c in candidates if await _prediction_candidate_kept(c)]
+        if not kept:
+            logger.info(
+                "iterate_prediction_skipped_threshold",
+                agent_id=adapter.agent_id,
+                total=len(candidates),
+            )
+            return {
+                "skipped": "threshold_not_triggered",
+                "generated": 0,
+                "rejected": 0,
+                "case_ids": [],
+                "reasons": [],
+            }
+        candidates = kept
     case_ids: list[str] = []
     rejected = 0
     reasons: list[str] = []

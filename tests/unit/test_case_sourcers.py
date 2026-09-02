@@ -439,3 +439,42 @@ def test_prediction_verified_scan_skips_unparsable_source_id() -> None:
     with patch("aistock_agent.iterate.case_sourcers.NodeApiClient") as mock_client:
         mock_client.return_value.list_verified_predictions = AsyncMock(return_value=[bad])
         assert asyncio.run(prediction_verified_scan(ctx)) == []
+
+
+# ---- P5: prediction 候选阈值触发过滤（Spec C §5.3 阈值分层 + sufficient_sample 闸门）----
+
+
+def _mk_pred_candidate(target: str) -> object:
+    """构造带 meta.target 的 prediction CaseCandidate（供候选过滤用例）。"""
+    from aistock_agent.iterate.case_sourcers import CaseCandidate
+
+    return CaseCandidate(
+        event_title=f"预判验证 {target}（2026-08-14）",
+        event_time=datetime(2026, 8, 14, 7, 30, tzinfo=timezone.utc),  # noqa: UP017
+        telegraph_records=[],
+        meta={"target": target},
+    )
+
+
+def test_prediction_candidate_kept_when_any_horizon_triggers() -> None:
+    """候选任一 default horizon×scenario 触发（命中率超标）→ 候选保留 – 可产片。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("半导体板块")
+    with patch(
+        "aistock_agent.iterate.case_sourcers._prediction_case_source_eligible",
+        side_effect=[True, False],  # 首个 horizon/scenario 即触发 → 短路 True
+    ):
+        assert asyncio.run(_prediction_candidate_kept(candidate)) is True  # type: ignore[arg-type]
+
+
+def test_prediction_candidate_dropped_when_unresolvable_target() -> None:
+    """meta.target 无法解析为首类 Target（unknown 抽象词）→ 保守丢弃（不产片防误触发）。"""
+    import asyncio
+
+    from aistock_agent.iterate.case_sourcers import _prediction_candidate_kept  # noqa: PLC2701
+
+    candidate = _mk_pred_candidate("资本市场波动")  # 非指数/代码/板块标记 → make_target None
+    assert asyncio.run(_prediction_candidate_kept(candidate)) is False  # type: ignore[arg-type]
