@@ -106,11 +106,7 @@ def _pick_human_text(value: object) -> str | None:
 
 
 def format_iterate_text(payload: object) -> str | None:
-    """从完整 iterate_payload 拼可读邮件正文（不用受控 brief_summary 的内部 key）。
-
-    正文前半段为易读摘要；末尾附上完整字段版（原始 iterate_payload JSON），
-    供用户转发给 Agent 做迭代输入。
-    """
+    """从完整 iterate_payload 拼可读邮件正文（易读摘要；字段版走 .md 附件）。"""
     if not isinstance(payload, dict):
         return None
     status = payload.get("status")
@@ -118,15 +114,28 @@ def format_iterate_text(payload: object) -> str | None:
     trig: list[str] = triggered if isinstance(triggered, list) else []
 
     if status == "normal" or not trig:
-        lines = ["今日迭代分析：无显著异常，四维指标均在阈值内。\n详情请前往 App 查看。"]
-    else:
-        lines = list(_format_alert_digest(payload, trig))
+        return "今日迭代分析：无显著异常，四维指标均在阈值内。\n详情见附件字段版或前往 App 查看。"
 
-    lines.append("\n" + "=" * 24)
-    lines.append("【完整字段版 · 供 Agent 迭代】")
-    lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    lines.append("\n详情请前往 App 查看。")
+    lines = _format_alert_digest(payload, trig)
+    lines.append("\n完整字段版见邮件附件（.md）。")
     return "\n".join(lines)
+
+
+def build_iterate_attachment_md(payload: object, report_date: str) -> dict[str, str]:
+    """字段版 .md 附件内容：结构化 markdown + 原始 iterate_payload JSON 块（供 Agent 迭代）。"""
+    date = report_date or ""
+    header = [
+        f"# iterate 迭代报告（完整字段版）{(' ' + date) if date else ''}",
+        "",
+        "> 本文件为 AI 迭代输入用原始字段版，含确定性评分卡与 LLM 分析/建议。",
+        "",
+    ]
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    body = header + ["```json", raw, "```", ""]
+    return {
+        "filename": f"iterate-{date}.md" if date else "iterate.md",
+        "content": "\n".join(body),
+    }
 
 
 def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[str]:
@@ -190,12 +199,14 @@ async def maybe_notify_iterate_mail(
         from aistock_agent.services.data_client import node_api
 
         body = format_iterate_text(payload) if isinstance(payload, dict) else None
+        attachment = build_iterate_attachment_md(payload, report_date) if isinstance(payload, dict) else None
         data = await node_api.post(
             "/internal/mail/notify",
             {
                 "report_type": report_type,
                 "report_date": report_date,
                 "summary": body or _summary_text(summary),
+                **({"attachment": attachment} if attachment else {}),
             },
         )
         sent = bool(data and data.get("sent"))
