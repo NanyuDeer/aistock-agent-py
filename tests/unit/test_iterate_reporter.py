@@ -213,3 +213,108 @@ async def test_build_daily_report_empty_store_notes_no_pending_cases(tmp_path: P
         assert "无待迭代案例" in md
     finally:
         settings.iterate_data_dir = original
+
+
+# ---- P6: reporter 预判迭代区块（Spec C §4.6：画像 / 触发维度 / 变体对比 / 建议）----
+
+
+def _write_prediction_experiment(
+    iterate_data_dir: object,
+    *,
+    case_id: str,
+    round_no: int,
+    variant_type: str,
+    instructions: str = "",
+    patch: dict[str, object] | None = None,
+    score: float = 0.6,
+    hit_rate: float = 0.6,
+) -> None:
+    """写一条 prediction 实验记录（agent_id=prediction + verification score_detail）。"""
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    root = Path(iterate_data_dir) / "experiments"  # type: ignore[arg-type]
+    root.mkdir(parents=True, exist_ok=True)
+    name = f"{case_id}_r{round_no}" + ("_baseline" if round_no == 1 else "")
+    (root / f"{name}.json").write_text(
+        json.dumps(
+            {
+                "case_id": case_id,
+                "agent_id": "prediction",
+                "created_at": date.today().isoformat(),
+                "round": round_no,
+                "variant": {
+                    "type": variant_type,
+                    "files": ["src/aistock_agent/prompts/workers/prediction.py"],
+                    "instructions": instructions,
+                },
+                "patch": patch or {},
+                "score": score,
+                "score_detail": {
+                    "hit_rate": hit_rate,
+                    "direction_score": 0.8,
+                    "condition_met_rate": None,
+                    "miss_insights": [{"pattern": "plain_miss", "count": 2}],
+                },
+                "gap_analysis": "到期命中率偏低 60%",
+                "is_failure": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_daily_report_includes_prediction_iteration_block(
+    iterate_data_dir: object,
+) -> None:
+    """验证驱动实验（agent_id=prediction）→ 报告新增"预判迭代"区块，展示命中率与建议。"""
+    _write_prediction_experiment(
+        iterate_data_dir,
+        case_id="case_pred",
+        round_no=1,
+        variant_type="baseline",
+        score=0.6,
+        hit_rate=0.6,
+    )
+    md = await build_daily_report()
+    assert "预判迭代" in md
+    assert "命中率 0.6" in md
+    assert "到期命中率偏低 60%" in md
+
+
+@pytest.mark.asyncio
+async def test_build_daily_report_prediction_variant_contrast(
+    iterate_data_dir: object,
+) -> None:
+    """预判迭代区块对比 基线 vs 最优变体 评分，并给出 patch 建议（负责人可复现合入）。"""
+    _write_prediction_experiment(
+        iterate_data_dir,
+        case_id="case_ver",
+        round_no=1,
+        variant_type="baseline",
+        score=0.5,
+        hit_rate=0.5,
+    )
+    _write_prediction_experiment(
+        iterate_data_dir,
+        case_id="case_ver",
+        round_no=2,
+        variant_type="prompt_diff",
+        instructions="short 档 threshold 过高常 miss，改窄",
+        patch={
+            "target_symbol": "PREDICTION_PROMPT",
+            "old_snippet": "short 档 threshold=0.5",
+            "new_snippet": "short 档 threshold=0.3",
+        },
+        score=0.72,
+        hit_rate=0.72,
+    )
+    md = await build_daily_report()
+    assert "案例 case_ver" in md
+    assert "最优变体" in md
+    assert "0.72" in md  # 变体评分高于基线 0.5 → 作为最优对比展示
+    assert "short 档 threshold 过高" in md or "改窄" in md  # 变体 instructions 建议
+    assert "patch 建议" in md
+    assert "→" in md  # old → new patch 摘要

@@ -7,6 +7,7 @@ SMTP 发送复用 services/mail_sender（QQ 邮箱已验证模式：SSL + 授权
 import html
 import json
 from datetime import date
+from typing import cast
 
 import structlog
 
@@ -29,13 +30,16 @@ async def build_daily_report(report_date: date | None = None) -> str:
         "## 一、当日迭代实验汇总",
         _format_experiments(experiments),
         "",
-        "## 二、改进建议",
+        "## 二、预判迭代",
+        await _format_prediction_iteration(experiments),
+        "",
+        "## 三、改进建议",
         _format_improvements(experiments),
         "",
-        "## 三、待标注案例清单",
+        "## 四、待标注案例清单",
         _format_pending(pending),
         "",
-        "## 四、系统状态",
+        "## 五、系统状态",
         _format_system_status(),
         "",
     ]
@@ -200,3 +204,162 @@ def _write_report_fallback(markdown: str) -> None:
     path = root / f"{date.today().isoformat()}.md"
     path.write_text(markdown, encoding="utf-8")
     logger.info("iterate_report_written_fallback", path=str(path))
+
+
+# ---------------------------------------------------------------------------
+# 预判迭代区块（Spec C §4.6：画像 / 触发维度 / 变体对比 / 建议）
+# ---------------------------------------------------------------------------
+
+
+def _prediction_records(
+    experiments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """过滤验证驱动（prediction）实验记录：agent_id=prediction 或 score_detail 含 hit_rate。
+
+    双链路分流（P4）后 prediction 记录以 ``agent_id="prediction"`` 标识；为兼容
+    早期未写 agent_id 的存量记录，退化用 ``score_detail["hit_rate"]`` 存在性判定。
+    """
+    out: list[dict[str, object]] = []
+    for e in experiments:
+        kind = str(e.get("agent_id", ""))
+        if kind == "prediction":
+            out.append(e)
+            continue
+        sd = e.get("score_detail")
+        if isinstance(sd, dict) and "hit_rate" in sd:
+            out.append(e)
+    return out
+
+
+def _case_target_name(case_id: str) -> str:
+    """从切片 meta 取 prediction target 字符串（best-effort；load 失败返回空）。"""
+    try:
+        from aistock_agent.iterate.case_builder import load_case
+
+        case = load_case(case_id)
+        meta = case.get("meta") if isinstance(case, dict) else {}
+        meta = meta if isinstance(meta, dict) else {}
+        t = meta.get("target")
+        return str(t) if isinstance(t, str) and t else ""
+    except Exception:  # noqa: BLE001 —— 未知 case / 解析失败不阻断报告
+        return ""
+
+
+async def _profile_brief(case_id: str) -> str:
+    """读取该 target 的当前验证画像（Spec C §4.6 画像趋势；缓存优先，fail-open）。
+
+    报告不因画像不可用而失败——DB/解析任一环节出错都静默降级为空串，
+    回退到单条实验记录的 score_detail.hit_rate 展示。
+    """
+    try:
+        from aistock_agent.services.target_profile import make_target
+        from aistock_agent.skills.prediction_validation import read_validation_profile
+
+        target_raw = _case_target_name(case_id)
+        if not target_raw:
+            return ""
+        target = make_target(target_raw)
+        if target is None:
+            return ""
+        profile = await read_validation_profile(target, None)
+        parts: list[str] = []
+        hit = profile.get("hit_rate")
+        if hit is not None:
+            n = profile.get("n")
+            suff = bool(profile.get("sufficient_sample", False))
+            parts.append(f"命中率 {hit}" + (f"（n={n}，样本充足={suff}）" if n is not None else ""))
+        cond = profile.get("condition_met_rate")
+        if cond is not None:
+            parts.append(f"条件命中 {cond}")
+        return ("画像：" + "；".join(parts)) if parts else "画像：暂无画像"
+    except Exception:  # noqa: BLE001 —— 画像读取失败降级，不阻断报告
+        return ""
+
+
+def _miss_brief(miss_insights: object) -> str:
+    """miss_insights 列表 → 失效模式摘要（"强反向失效 2 次 / 普通 miss 3 次"）。"""
+    if not isinstance(miss_insights, list):
+        return ""
+    labels = {"strong_reversal": "强反向失效", "plain_miss": "普通 miss"}
+    parts = [
+        f"{labels.get(str(p.get('pattern')), str(p.get('pattern')))}{p.get('count')} 次"
+        for p in miss_insights
+        if isinstance(p, dict) and p.get("pattern")
+    ]
+    return "；".join(parts)
+
+
+def _variant_map(record: dict[str, object]) -> dict[str, object]:
+    """取实验记录 variant（非 dict 时回退空 dict，避免 mypy object.get 告警）。"""
+    v = record.get("variant")
+    return v if isinstance(v, dict) else {}
+
+
+async def _format_prediction_iteration(
+    experiments: list[dict[str, object]],
+) -> str:
+    """预判迭代区块：按 case 分组，展示 画像 / 触发维度(gap) / 基线vs最优变体 / 建议。
+
+    无 prediction 记录时提示（触发链 P5 未命中阈值 → 产片端已跳过，无实验属正常）。
+    回写红线（Spec C §4.6）：仅展示落盘建议（patch/instructions），不自动改生产 prompt。
+    """
+    recs = _prediction_records(experiments)
+    if not recs:
+        return "（今日无非满意的预判验证实验；未触发阈值时产片端已跳过 prediction）"
+
+    from collections import defaultdict
+
+    by_case: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for e in recs:
+        by_case[str(e.get("case_id", ""))].append(e)
+
+    lines: list[str] = []
+    for case_id, rec_list in sorted(by_case.items()):
+        baseline = next(
+            (e for e in rec_list if _variant_map(e).get("type") == "baseline"),
+            None,
+        )
+        variants = [e for e in rec_list if _variant_map(e).get("type") != "baseline"]
+        best = (
+            max(
+                variants,
+                key=lambda x: float(cast(float, x.get("score", 0.0)) or 0.0),
+            )
+            if variants
+            else None
+        )
+        lines.append(f"### 案例 {case_id}")
+        brief = await _profile_brief(case_id)
+        if brief:
+            lines.append(f"- {brief}")
+        if baseline:
+            bsd = baseline.get("score_detail")
+            bsd = bsd if isinstance(bsd, dict) else {}
+            lines.append(
+                f"- 基线 r{baseline.get('round')}：评分 {baseline.get('score')}，"
+                f"命中率 {bsd.get('hit_rate', '-')}，{baseline.get('gap_analysis', '')}"
+            )
+        if best:
+            sd = best.get("score_detail")
+            sd = sd if isinstance(sd, dict) else {}
+            vtype = _variant_map(best).get("type", "")
+            miss = _miss_brief(sd.get("miss_insights"))
+            detail = (
+                f"，方向 {sd.get('direction_score', '-')}"
+                f"，条件 {sd.get('condition_met_rate', '-')}"
+                + (f"，失效 {miss}" if miss else "")
+            )
+            lines.append(
+                f"- 最优变体 r{best.get('round')}（{vtype}）：评分 {best.get('score')}，"
+                f"命中率 {sd.get('hit_rate', '-')}{detail}，{best.get('gap_analysis', '')}"
+            )
+            patch = best.get("patch")
+            if isinstance(patch, dict):
+                old = str(patch.get("old_snippet", "")).replace("\n", "⏎")[:80]
+                new = str(patch.get("new_snippet", "")).replace("\n", "⏎")[:120]
+                if old and new:
+                    lines.append(f"  - patch 建议：`{old}` → `{new}`")
+            inst = _variant_map(best).get("instructions", "")
+            if inst:
+                lines.append(f"  - 建议：{inst}")
+    return "\n".join(lines) if lines else "（无预判验证实验）"
