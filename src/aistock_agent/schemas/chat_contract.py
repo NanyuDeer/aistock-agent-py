@@ -73,7 +73,6 @@ class SubGoal(BaseModel):
         "index_snapshot",
         "douyin_video",
         "prediction",
-        "insight_lookup",
         "stock_trace_lookup",
     ]
     dimension: Literal["predict", "trace", "validate"]
