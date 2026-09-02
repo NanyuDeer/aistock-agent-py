@@ -1,4 +1,4 @@
-"""Event Consumers -- evening_chain 事件消费者（6 个消费者，2 个消费组）。
+"""Event Consumers -- evening_chain 事件消费者（7 个消费者，3 个消费组）。
 事件流：
   review_quick -> ReviewQuickConsumer -> snapshot(quick) -> broadcast（quick 晚间播报）
   review_full  -> ReviewFullConsumer    -> snapshot(full) -> iterate -> broadcast
@@ -7,9 +7,11 @@
   iterate      -> IterateConsumer       -> broadcast
   broadcast    -> BroadcastConsumer     （终点）
   review_done  -> PredictionConsumer    （独立消费组 prediction_chain）
+  review_done  -> SectorTraceConsumer   （独立消费组 sector_chain，板块溯源环）
 
 消费组：5 个既有消费者走默认组 evening_chain；PredictionConsumer 独立
-group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）。
+group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）；SectorTraceConsumer
+独立 group="sector_chain"（板块溯源事件层归因，Spec D/T4）。
 """
 
 import asyncio
@@ -21,6 +23,7 @@ from structlog import get_logger
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
+from aistock_agent.agents.workers.sector_trace import extract_primary_sector, run_sector_trace
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
@@ -404,6 +407,34 @@ class PredictionConsumer(BaseConsumer):
         raise RuntimeError(f"unexpected prediction status: {result.status}")
 
 
+class SectorTraceConsumer(BaseConsumer):
+    """板块溯源消费：review_done(ok) → 主因板块事件层归因（Spec D · 溯源环）。
+
+    独立消费组 sector_chain（与 prediction_chain 并列），失败走 event_bus.retry→DLQ。
+    review 无主因板块 → 跳过不产出（日志）。
+    """
+
+    consumer_group = "sector_chain"
+
+    @property
+    def channel(self) -> str:
+        return CHANNEL_REVIEW_DONE
+
+    async def handle(self, event: Event) -> None:
+        payload = event.payload or {}
+        report_date = str(payload.get("report_date") or "")
+        # 回放态隔离：review 报告读取受既有回放层保护（node_read 白名单），此处不额外处理
+        report = await node_api.get_analysis_report(report_type="review", report_date=report_date)
+        sector_name, sector_row = extract_primary_sector({"report": report})
+        if not sector_name:
+            logger.info("sector_trace_skip_no_primary_sector", report_date=report_date)
+            return
+        await run_sector_trace(
+            report_date=report_date, sector_name=sector_name, sector_row=sector_row
+        )
+        logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
+
+
 def _make_consumer_state(
     report_date: str,
     *,
@@ -486,10 +517,11 @@ async def _consumer_loop(
 
 
 def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
-    """启动全部 6 个消费者。返回 Task 列表用于管理。
+    """启动全部 7 个消费者。返回 Task 列表用于管理。
 
-    消费组：PredictionConsumer 走独立组 prediction_chain；
-    其余 5 个不传 group（默认组 evening_chain），保持既有行为零改动。
+    消费组：PredictionConsumer 走独立组 prediction_chain；SectorTraceConsumer
+    走独立组 sector_chain；其余 5 个不传 group（默认组 evening_chain），
+    保持既有行为零改动。
     """
     consumers = [
         ReviewQuickConsumer(ctx),
@@ -498,6 +530,7 @@ def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
         IterateConsumer(ctx),
         BroadcastConsumer(ctx),
         PredictionConsumer(ctx),
+        SectorTraceConsumer(ctx),
     ]
     tasks = []
     for c in consumers:
