@@ -3,6 +3,7 @@
 > 日期：2026-08-28
 > 范围：aistock-agent-py（+ aistock-app-api 白名单一处）
 > 状态：设计确认（用户已定：仅主因板块 / review_done 事件链触发 / 独立报告 / 先写设计不动工）
+> **落地状态（2026-09-02）**：Spec D 已实施——本设计稿按 Spec D 落地（sector_trace_snapshot / SectorTraceConsumer / sector_trace worker / 独立报告 report_type="sector_trace" / Node 白名单），"仅设计不动工"条款作废；实现对照见 Spec D 提交 D1-D4
 
 ## 1. 背景与问题本质
 
