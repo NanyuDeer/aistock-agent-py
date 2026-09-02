@@ -61,6 +61,21 @@
 ### 测试
 - `tests/unit/test_prediction_validator.py`：3.0 窗口累计主判用例（bullish/bearish/neutral 反例）+ baseline_neutral 双版本差异 + backfill 版本隔离
 - `tests/unit/test_prediction_stats.py`：版本过滤参数化用例（默认 2.0 / 显式 3.0）
+## [changer] 2026-08-30 — 节奏大师语义修正 + 调度修复（design-debate）
+
+**开发者**: changer-collab
+
+### 修复
+- 分支目标区间（range）锚定突破后空间：bullish `[P, P+Δ]` / bearish `[S-Δ, S]` / neutral `[S, P]`（Δ=半通道宽），触发值=区间边界，替换 `±0.5%` 对称带（消除"站上 P 却给 P±0.5% 带"语义错位）；成交额分支同步（`rhythm_engine.py`）
+
+### 改进
+- after_close 调度 cron 由 `5 16 * * 0-4` 改为 `5 16 * * 1-5`：周一至周五 16:05 收盘基准，周五收盘生成下周一预告（修复"周一 after_close 永久缺失"）（`config.py`）
+
+### 测试
+- `test_rhythm_engine.py` 新增锚定语义用例（触发值=区间边界、三档互斥）
+
+### 文档
+- `README.md` 环境变量表、`AGENTS.md` 定时链路 cron 描述同步
 
 ---
 

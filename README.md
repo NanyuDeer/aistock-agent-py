@@ -572,7 +572,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_ITERATE_CRON` | 迭代分析 cron（工作日 15:40） | `40 15 * * 1-5` |
 | `SCHEDULER_RHYTHM_MORNING_CRON` | 节奏大师盘前档 cron（工作日 09:00） | `0 9 * * 0-4` |
 | `SCHEDULER_RHYTHM_MIDDAY_CRON` | 节奏大师午间档 cron（工作日 12:30） | `30 12 * * 0-4` |
-| `SCHEDULER_RHYTHM_AFTER_CLOSE_CRON` | 节奏大师收盘基准 cron（工作日 16:05） | `5 16 * * 0-4` |
+| `SCHEDULER_RHYTHM_AFTER_CLOSE_CRON` | 节奏大师收盘基准 cron（周一至周五 16:05；周五收盘生成下周一预告，design-debate F2） | `5 16 * * 1-5` |
 | `RHYTHM_VERIFICATION_ENABLED` | 节奏验证开关（回放隔离 + 校验） | `false` |
 | `EVENT_SCORING_LLM_ENABLED` | 事件抓取中台 LLM 精评总开关（Phase-2，默认关闭灰度开启；开启后规则评分候选 ≥3 送 quick 粗筛 + deep 精评） | `false` |
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |

@@ -175,9 +175,18 @@ def detect_conflict(phase: Phase | None, trend: float | None) -> tuple[bool, str
     return False, ""
 
 
-def _range_str(value: float, width: float = 0.005) -> str:
-    lo, hi = value * (1 - width), value * (1 + width)
-    return f"{lo:.2f}-{hi:.2f}"
+def _range_above(value: float, delta: float) -> str:
+    """突破锚定（design-debate A1 裁决）：目标区间 = [触发位, 触发位+Δ]，触发值=区间下界。
+
+    突破后空间 Δ 与通道宽度成比例（0.5×通道宽），而非固定百分比外推——
+    避免"站上 P 却给 P±0.5% 对称带"（触发值∉区间）的语义错位与过度承诺。
+    """
+    return f"{value:.2f}-{value + delta:.2f}"
+
+
+def _range_below(value: float, delta: float) -> str:
+    """跌破锚定（design-debate A1 裁决）：目标区间 = [触发位-Δ, 触发位]，触发值=区间上界。"""
+    return f"{value - delta:.2f}-{value:.2f}"
 
 
 def build_technical_branches(
@@ -200,6 +209,8 @@ def build_technical_branches(
     recent_low = min(lows[-20:])
     support = max(recent_low, ma20 * 0.97)
     pressure = min(recent_high, ma20 * 1.03)
+    # 突破后空间 Δ = 半通道宽（design-debate A1：range 锚定突破后空间，非固定百分比）
+    channel_half = 0.5 * (pressure - support)
     if amounts and len(amounts) >= 20:
         avg20 = sum(amounts[-20:]) / 20
         return [
@@ -214,7 +225,7 @@ def build_technical_branches(
                 },
                 "conclusion": {
                     "direction": "bullish",
-                    "range": _range_str(pressure),
+                    "range": _range_above(pressure, channel_half),
                     "validity": 5,
                     "note": "放量突破压力位",
                 },
@@ -230,7 +241,7 @@ def build_technical_branches(
                 },
                 "conclusion": {
                     "direction": "bearish",
-                    "range": _range_str(support),
+                    "range": _range_below(support, channel_half),
                     "validity": 5,
                     "note": "缩量回踩支撑位",
                 },
@@ -246,7 +257,7 @@ def build_technical_branches(
                 },
                 "conclusion": {
                     "direction": "neutral",
-                    "range": _range_str((support + pressure) / 2, 0.01),
+                    "range": f"{support:.2f}-{pressure:.2f}",
                     "validity": 5,
                     "note": "区间震荡",
                 },
@@ -263,7 +274,7 @@ def build_technical_branches(
             },
             "conclusion": {
                 "direction": "bullish",
-                "range": _range_str(pressure),
+                "range": _range_above(pressure, channel_half),
                 "validity": 5,
                 "note": "突破压力位",
             },
@@ -278,7 +289,7 @@ def build_technical_branches(
             },
             "conclusion": {
                 "direction": "bearish",
-                "range": _range_str(support),
+                "range": _range_below(support, channel_half),
                 "validity": 5,
                 "note": "跌破支撑位",
             },
@@ -293,7 +304,7 @@ def build_technical_branches(
             },
             "conclusion": {
                 "direction": "neutral",
-                "range": _range_str((support + pressure) / 2, 0.01),
+                "range": f"{support:.2f}-{pressure:.2f}",
                 "validity": 5,
                 "note": "区间震荡",
             },
