@@ -94,6 +94,46 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
         case_sources=(CaseSourceSpec("prediction_verified_scan"),),
         description="影响持续性预判：conditions[] 条件化输出，验证驱动迭代",
     ),
+    # Spec D 板块四环——板块溯源迭代环（D6 浅挂载）。两条链路评分器严格分离：
+    # - sector_trace：板块溯源（事件层归因）→ 归因监督式（attribution，evaluate_attribution）
+    # - sector_prediction：板块预判（conditions[] 条件化输出）→ 验证驱动（verification，
+    #   evaluate_verification）——绝不混用评分器。
+    # 产片源 sector_close_snapshot 名与 TARGET_PROFILES["sector"].case_sourcer 一致
+    # （services/target_profile.py:48 已预留），避免 profile 引用悬空。
+    "sector_trace": IterableAgentAdapter(
+        agent_id="sector_trace",
+        module_path="aistock_agent.agents.workers.sector_trace",
+        run_entry="run",  # D3 run(state) 归因形态，replay attribution 分支可驱动
+        prompt_files=("src/aistock_agent/prompts/workers/sector_trace.py",),
+        workflow_files=("src/aistock_agent/agents/workers/sector_trace.py",),
+        tool_categories=("sector",),
+        data_deps={"market": "market_snapshot"},  # 归因回放读切片快照（对齐 review）
+        ground_truth_kind="attribution",
+        case_sources=(CaseSourceSpec("sector_close_snapshot"),),
+        description="板块溯源事件层归因（仅主因板块，review_done 触发 + 迭代产片）",
+    ),
+    # ⚠️ Spec D 已知缺口（如实标注，不静默扩大）：sector_prediction run_entry="predict_sector"
+    # 签名是 (*, report_date, sector_name, sector_snapshot)，非 replay_runner 验证分支
+    # 硬编码的 predict_from_trace 形态 (case_id, trade_date)；且 _build_state 只认
+    # review/prediction、predict_sector 无 REPLAY env 转调分支（prediction_service.py:700
+    # 只有 predict_from_trace 有）→ 板块预判变体回放会 TypeError。本 Task 仅浅挂载注册，
+    # 回放适配（replay_runner/_build_state/predict_sector REPLAY 扩展）为后续任务缺口。
+    "sector_prediction": IterableAgentAdapter(
+        agent_id="sector_prediction",
+        module_path="aistock_agent.services.prediction_service",
+        run_entry="predict_sector",
+        prompt_files=("src/aistock_agent/prompts/workers/prediction.py",),
+        workflow_files=("src/aistock_agent/services/prediction_service.py",),
+        tool_categories=("prediction",),
+        data_deps={"market": "market_snapshot"},
+        ground_truth_kind="verification",
+        case_sources=(CaseSourceSpec("prediction_verified_scan"),),
+        description=(
+            "板块预判：conditions[] 条件化输出，验证驱动迭代（级联输入组装）。"
+            "注意：变体回放需 replay_runner/_build_state 支持 predict_sector 形态（REPLAY "
+            "转调分支），当前仅注册挂载，回放适配为后续任务缺口。"
+        ),
+    ),
 }
 
 

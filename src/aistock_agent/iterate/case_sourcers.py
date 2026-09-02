@@ -130,6 +130,69 @@ async def market_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def sector_close_snapshot(ctx: SourceContext) -> list[CaseCandidate]:
+    """sector 板块归因产片源（Spec D）：大盘快照 top_losers → 每板块一个历史案例。
+
+    板块异动切片语义与 market_close_snapshot 同款：date 参数走历史回补
+    （build_market_trace_snapshot 内部校验交易日/complete），否则最近交易日。
+    从快照 a_share.sectors.top_losers 取领跌板块列表（快照缺 sectors/top_losers
+    返回 []，不炸产片源）；每板块产一个 CaseCandidate，meta 携带 {sector_row}
+    （板块行情条目，含 pct_change/net_amount/lead_stock/company_num，Node 原样），
+    供 TargetProfile.snapshot_builder=build_sector_snapshot 重建归因输入。
+    market_snapshot 传完整快照 dict（对齐 market_close_snapshot——build_case 的
+    _validate_market_snapshot 强制完整 MarketTraceSnapshot 契约，只传 a_share
+    切片会在产片链校验失败，候选全被拒）。单板块条目畸形（非 dict/无名）仅跳过。
+    """
+    target_day = ctx.params.get("date")
+    if isinstance(target_day, str) and target_day:
+        day = target_day
+    else:
+        recent_day = await find_recent_trading_day()
+        if recent_day is None:
+            raise RuntimeError("无法发现最近交易日（Node close-snapshot/last-close 均失败）")
+        day = recent_day
+    snapshot = await build_market_trace_snapshot(day)
+    # 对齐 market_close_snapshot（IMP-3）：date 回补必须校验一致性——build_market_trace_snapshot
+    # 有 last-close 兜底链，不校验会静默产出"最近交易日"快照但 event_time 锚定请求日，
+    # 切片内容与 case_id 前缀错位（防复现已修事故）。
+    if isinstance(target_day, str) and target_day:
+        actual = str(getattr(snapshot, "trade_date", ""))
+        if actual != target_day:
+            raise RuntimeError(
+                "历史回补日期不一致："
+                f"期望 {target_day}，Node 快照实际 {actual or '空'}（非交易日或数据缺失，拒绝产片）"
+            )
+    # snapshot 跨类型边界（生产 MarketTraceSnapshot / 测试注入 object），cast Any
+    # 调用 model_dump 避免 mypy attr-defined（与 market_close_snapshot 一致）。
+    snapshot_dict = cast("dict[str, object]", cast("Any", snapshot).model_dump(mode="json"))
+    a_share = snapshot_dict.get("a_share")
+    if not isinstance(a_share, dict):
+        return []
+    sectors = a_share.get("sectors")
+    if not isinstance(sectors, dict):
+        return []
+    losers = sectors.get("top_losers")
+    if not isinstance(losers, list):
+        return []
+    candidates: list[CaseCandidate] = []
+    for los in losers:
+        if not isinstance(los, dict):
+            continue
+        name = str(los.get("name") or "")
+        if not name:
+            continue
+        candidates.append(
+            CaseCandidate(
+                event_title=f"{name} 板块异动",
+                event_time=_close_time_for_day(day),
+                telegraph_records=[],
+                market_snapshot=snapshot_dict,
+                meta={"sector_row": los, "t_window": "close"},
+            )
+        )
+    return candidates
+
+
 async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     """event_analyst 产片源：window_days 天内电报重大事件（迁移自 scan_major_events 调用点）。"""
     from aistock_agent.iterate.case_scanner import scan_major_events
@@ -395,6 +458,7 @@ def _candidate_fingerprint(candidate: CaseCandidate) -> str:
 #: provider 注册表（清单封闭：新 provider 必须登记于此）
 SOURCE_PROVIDERS: dict[str, Callable[[SourceContext], Awaitable[list[CaseCandidate]]]] = {
     "market_close_snapshot": market_close_snapshot,
+    "sector_close_snapshot": sector_close_snapshot,
     "event_store_scan": event_store_scan,
     "telegraph_keyword_scan": telegraph_keyword_scan,
     "prediction_verified_scan": prediction_verified_scan,
