@@ -22,6 +22,7 @@ from aistock_agent.iterate.evaluator import (
     verification_gt_from_case,
 )
 from aistock_agent.iterate.ground_truth import load_ground_truth
+from aistock_agent.iterate.regression_golden import gate_case_variant
 from aistock_agent.iterate.variant_engine import (
     apply_variant,
     generate_variant,
@@ -255,13 +256,11 @@ async def run_case(
             stopped_reason = "score_then_stall"
             break
 
-    # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入
-    best_patch = _recompute_best(adapter.agent_id, case_id)
-    if best_patch is not None:
-        best_path = get_data_dir() / "experiments" / f"{case_id}_best.json"
-        tmp = best_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, best_path)
+    # C8/N2 修复：best 轮补丁固化到 best.json（原子写），负责人可复现合入。
+    # P6.5 双闸门第一道（Spec C §4.7/§8）：prediction（verification）变体写 best
+    # 建议前先过回归闸门（冻结金标准上新旧 prompt 分层得分不降才准入人工审核），
+    # 未过闸改落 regression_blocked 标记而非直接落盘建议；归因分支不 gate，行为不变。
+    await _promote_best(adapter.agent_id, case, root)
 
     # D13 修复：闭环跑完即标记已迭代（单一权威标记，experiments 目录可清理）。
     # infra_failures 提前中止也走这里（该 case 已尝试且失败轮不落实验记录，
@@ -354,6 +353,48 @@ def _recompute_best(agent_id: str, case_id: str) -> dict[str, object] | None:
         if best is None or score > float(cast("float", best.get("score", 0.0))):
             best = {"score": score, "round": record.get("round"), "patch": record.get("patch", {})}
     return best
+
+
+async def _promote_best(
+    agent_id: str,
+    case: dict[str, object],
+    repo_root: Path,
+) -> dict[str, object]:
+    """best 轮补丁晋升：prediction 变体先过回归闸门，归因分支照常。
+
+    P6.5 双闸门第一道（Spec C §4.7/§8）：任何 prediction（verification）变体落盘
+    best 建议前，必须在冻结金标准案例上「新旧 prompt 各跑一遍、分层得分不降」才
+    准入人工审核。未过闸 → 落 regression_blocked 标记（不写 best.json）；过闸 →
+    原子写 best.json 建议。归因分支（review/event_analyst）不触发 gate，行为不变。
+    """
+    case_id = str(case["case_id"])
+    best_patch = _recompute_best(agent_id, case_id)
+    if best_patch is None:
+        return {"pass": False, "reason": "no_best_patch"}
+
+    adapter = get_adapter(agent_id)
+    if adapter.ground_truth_kind != "verification":
+        _write_best(case_id, best_patch)
+        return {"pass": True, "best": best_patch}
+
+    gate = await gate_case_variant(agent_id, case, repo_root, best_patch)
+    if not gate.get("pass", False):
+        blocked = get_data_dir() / "experiments" / f"{case_id}_regression_blocked.json"
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_text(json.dumps(gate, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"pass": False, "reason": str(gate.get("reason", "regression_detected"))}
+
+    _write_best(case_id, best_patch)
+    return {"pass": True, "best": best_patch}
+
+
+def _write_best(case_id: str, best_patch: dict[str, object]) -> None:
+    """原子写 best.json 建议（C8/N2：tmp + os.replace 防半写）。"""
+    best_path = get_data_dir() / "experiments" / f"{case_id}_best.json"
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = best_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(best_patch, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, best_path)
 
 
 def _as_structured(value: object) -> dict[str, object] | None:
