@@ -8,10 +8,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aistock_agent.schemas.target import Target
+
 # 时间尺度分档（对齐 alert cycle）：短 1-5 交易日 / 中 1-4 周 / 长 1-6 月
 PredictionHorizonType = Literal["short", "mid", "long"]
 # 当前演化阶段
 PredictionPhase = Literal["building", "peaking", "decaying", "returning"]
+# 条件化预判方向（§3.1，anchor 自带 direction，不依赖 horizons[].direction）
+PredictionDirection = Literal["bullish", "bearish", "neutral"]
+# 验证标的（§3.1 anchor.metric）
+PredictionMetric = Literal["close", "high", "low", "volume", "index_close"]
 
 
 class PredictionHorizon(BaseModel):
@@ -54,14 +60,47 @@ class EvolutionStep(BaseModel):
     text: str  # 该档位演化描述
 
 
+class PredictionAnchor(BaseModel):
+    """条件化预判的验证锚点（§3.1）— 到期比对的确定性标准。
+
+    - ``horizon`` 对齐 PredictionHorizonType + HORIZON_TRADING_DAY_OFFSETS（5/20/120 交易日）
+    - ``direction`` 该条件的**情景方向**（验证 scenario 命中主判依据），**自挂**不依赖
+      ``horizons[].direction``：同档不同情景方向可能相反，且个股轻量预判不自建完整三档。
+      必填；LLM 缺失时由归一化层确定性提取兜底（见 §4.1），不做 parse_failed。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: PredictionHorizonType  # 验证周期 short / mid / long
+    threshold: str  # 验证阈值（涨跌幅 %，如 "+5%"/"-3%"），到期比对用
+    metric: PredictionMetric = "close"  # 验证标的，缺省 close；大盘用 index_close
+    direction: PredictionDirection = "neutral"  # 情景方向；缺省 neutral，LLM 不产时归一化层兜底
+
+
+class PredictionCondition(BaseModel):
+    """条件化预判的"条件 → 情景"对（§3.1）。
+
+    硬约束：condition 必须含可量化条件（放量/缩量、价位、均线、情绪温度等）；
+    至少 1 条 condition 含成交量维度（呼应"分放量/缩量场景"）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    condition: str  # 触发条件（可验证的事实描述）
+    scenario: str  # 条件满足后的走势预判（尽量含幅度/目标位）
+    anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
+
+
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["2.0"]
+    schema_version: Literal["3.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
+    conditions: list[PredictionCondition] = Field(default_factory=list)  # 条件化预判（§3.1）；旧 2.0 记录为空
+    target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
     evolution_steps: list[EvolutionStep] = Field(default_factory=list)  # 结构化演化步骤（前端时间轴）；旧记录可能为空
     risks: list[PredictionRisk]

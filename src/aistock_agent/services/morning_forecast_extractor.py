@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import cast
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -59,6 +60,39 @@ _MORNING_FORECAST_EXTRACTION_PROMPT = """你是金融晨报分析助手。从晨
 3. 若晨报未提及任何板块方向，sectors 输出空数组
 4. 只输出 JSON，禁止 markdown 代码围栏
 """
+
+
+# 晨报展示侧反哺代表 target：晨报 focus 是当日市场方向，绑定市场指数画像即可复用验证闭环。
+# 仅展示侧（Spec A §4.2）：不改判定、不落库、不进验证画像/迭代闭环，异常降级保持原文。
+_MARKET_PROFILE_SYMBOL = "上证指数"
+
+
+async def _enrich_morning_summary_with_profile(forecast: MorningForecast) -> MorningForecast:
+    """Spec B §4.3 morning_forecast 展示侧反哺——市场指数画像 sufficient_sample 时在 summary 追加历史命中率。
+
+    - 不改判定/不产指令：只把历史命中率作为展示文本追加到 summary。
+    - 不进闭环：结果不写缓存、不改 MorningForecast 其它字段（缓存仍存原始 LLM 提取结果，防命中率随缓存陈旧）。
+    - 红线：target 解析/读取失败 → 返回原 forecast（不阻断晨报产出）。
+    """
+    from aistock_agent.services.target_profile import make_target
+    from aistock_agent.skills.prediction_validation import read_validation_profile
+
+    target = make_target(_MARKET_PROFILE_SYMBOL)
+    if target is None:
+        return forecast
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("morning_forecast.enrich_profile_failed", symbol=_MARKET_PROFILE_SYMBOL,
+                     exc_info=True)
+        return forecast
+    n = int(cast(float, profile.get("n", 0) or 0))
+    if not profile.get("sufficient_sample") or n <= 0:
+        return forecast
+    rate = float(cast(float, profile.get("hit_rate", 0.0) or 0.0))
+    extra = f"；历史大盘预判命中率 {rate:.0%}（n={n}）"
+    base_summary = forecast.summary
+    return forecast.model_copy(update={"summary": base_summary + extra})
 
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
@@ -147,10 +181,11 @@ async def extract_morning_forecast(report_date: str) -> MorningForecast | None:
         logger.warning("morning_forecast_llm_failed", error_class=type(e).__name__)
         return None
 
-    # 5. 写缓存
+    # 5. 写缓存（存原始 LLM 提取结果，防止命中率随缓存陈旧）
     try:
         await set_cached_morning_forecast(report_date, forecast.model_dump(mode="json"))
     except Exception as e:
         logger.debug("set_cached_morning_forecast_failed", error_class=type(e).__name__)
 
-    return forecast
+    # 5b. 展示侧反哺：仅对返回结果追加历史命中率到 summary，不进闭环、不吃缓存；异常降级保持原文。
+    return await _enrich_morning_summary_with_profile(forecast)

@@ -3,6 +3,7 @@
 import json
 from datetime import date
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from unittest import mock
 
 import pytest
@@ -503,3 +504,71 @@ async def test_run_review_rejects_replay_mode(monkeypatch: pytest.MonkeyPatch) -
             snapshot_kind="quick",
             trace_id="trace-test-replay-reject",
         )
+
+
+# ============================================================================
+# P4：replay_runner prediction 回放态——REPLAY 标记 + trade_date + case_id
+# ============================================================================
+
+
+def test_build_state_prediction_replay() -> None:
+    """P4：prediction agent 的 state 含 REPLAY 标记、meta.trade_date、case_id。"""
+    from aistock_agent.iterate.replay_runner import _build_state
+
+    case = {"case_id": "case_p4", "meta": {"trade_date": "2026-08-12"}}
+    state = _build_state("prediction", case)
+    assert state["REPLAY"] is True
+    assert state["trade_date"] == "2026-08-12"
+    assert state["case_id"] == "case_p4"
+
+
+@pytest.mark.asyncio
+async def test_run_once_prediction_branch_serializes_prediction(
+    iterate_data_dir: object,
+) -> None:
+    """P4：run_once 对 prediction 调 predict_from_trace(case_id, trade_date)，
+    final_response 为预测对象 JSON（variant_engine._parse_prediction_payload 消费）。"""
+    from types import SimpleNamespace
+
+    from aistock_agent.iterate.replay_runner import run_once
+    from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+
+    case = {
+        "case_id": "case_p4_replay",
+        "meta": {
+            "target": "上证指数",
+            "trade_date": "2026-08-12",
+            "prediction": {"schema_version": "3.0"},
+            "verification": {},
+        },
+    }
+    prediction = PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[
+            PredictionHorizon(
+                horizon="short",
+                remaining_estimate="1-3日",
+                phase="decaying",
+                direction="bullish",
+                target="上证指数",
+                metric_projection="+2%",
+                confidence="high",
+            )
+        ],
+        evolution_narrative="延续",
+        risks=[],
+        evidence_ids=[],
+    )
+    fake_run = AsyncMock(return_value=SimpleNamespace(status="ok", prediction=prediction))
+    with patch("aistock_agent.iterate.replay_runner._load_case", return_value=case), patch(
+        "aistock_agent.iterate.replay_runner.apply_replay_patches"
+    ), patch(
+        "aistock_agent.services.prediction_service.predict_from_trace", new=fake_run
+    ):
+        result = await run_once("prediction", "case_p4_replay", "h")
+
+    fake_run.assert_awaited_once_with("case_p4_replay", "2026-08-12")
+    assert result["agent_id"] == "prediction"
+    parsed = json.loads(result["final_response"])
+    assert parsed["prediction_status"] == "confirmed"

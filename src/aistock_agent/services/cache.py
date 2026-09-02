@@ -278,3 +278,59 @@ async def set_cached_event(
     except Exception:
         logger.debug("event_cache_set_failed", exc_info=True)
         return False
+
+
+def _profile_cache_key(internal_id: str) -> str:
+    """验证画像缓存键（Spec B §4.4）：prediction:profile:{internal_id}。
+
+    Target 维度（全局 §2.1）：key 用 internal_id（稳定标识），不用 name/裸码，
+    防板块改名断画像 + index/stock 码空间冲突。
+    """
+    return f"prediction:profile:{internal_id}"
+
+
+async def get_cached_validation_profile(internal_id: str) -> dict[str, object] | None:
+    """读取 target 的验证画像缓存（Spec B §4.4）。
+
+    Returns:
+        命中 → 画像 dict；未命中/异常 → None（调用方走拉取重算降级）。
+    """
+    try:
+        client = await RedisPool.get_client()
+        cached = await client.get(_profile_cache_key(internal_id))
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        logger.debug("get_cached_validation_profile_failed", exc_info=True)
+    return None
+
+
+async def set_cached_validation_profile(
+    internal_id: str,
+    profile: dict[str, object],
+    ttl: int = 86400,
+) -> bool:
+    """写入 target 的验证画像缓存（Spec B §4.4）。
+
+    Args:
+        internal_id: target 稳定标识（画像 key）。
+        profile: build_validation_profile 的输出 dict。
+        ttl: 缓存过期秒数，默认 86400（每日 16:00 run_once 更新语义）。
+
+    Returns:
+        True 表示写入成功；False 表示写入失败。
+    """
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(
+            _profile_cache_key(internal_id),
+            ttl,
+            json.dumps(profile, ensure_ascii=False),
+        )
+        return True
+    except Exception:
+        logger.debug("set_cached_validation_profile_failed", exc_info=True)
+        return False

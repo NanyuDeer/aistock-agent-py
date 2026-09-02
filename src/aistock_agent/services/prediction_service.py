@@ -13,9 +13,10 @@ approximate（wire 键 due_dates_approximate），其余档精确。理由：验
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Literal
 
 import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
@@ -28,13 +29,17 @@ from aistock_agent.prompts.workers.prediction import (
     PREDICTION_PROMPT,
 )
 from aistock_agent.schemas.market_trace import (
+    DataReadiness,
     MarketTraceResult,
     MarketTraceSnapshot,
+    PhenomenonDiscoveryResult,
     ReviewArtifact,
 )
 from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.prediction_targets import classify_target
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.services.llm import (
     get_deep_think,
     get_quick_think,
@@ -145,8 +150,8 @@ def _coerce_prediction_payload(raw_text: str) -> dict[str, object]:
         raise ValueError("prediction output is not a JSON object")
     for key in _EXTRA_KEYS_TO_DROP:
         data.pop(key, None)
-    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）
-    data.setdefault("schema_version", "2.0")
+    # 双保险：防御 LLM 漏 schema_version（834ddf9 之外再兜底）；升 3.0 同步（Spec A §3.3）
+    data.setdefault("schema_version", "3.0")
     return data
 
 
@@ -362,6 +367,56 @@ def _direction_sign(value: float | None) -> int | None:
     return 1 if value > 0 else -1 if value < 0 else 0
 
 
+# Spec A §3.1/§4.1：anchor.direction 归一化兜底的关键词映射
+_BULLISH_RE = re.compile(r"涨|升|站上|突破|看多|反弹|创新高|放量上攻")
+_BEARISH_RE = re.compile(r"跌|破|回踩|回落|看空|走弱|破位|下探|缩量退守")
+
+
+def infer_prediction_direction(condition: str, scenario: str) -> str:
+    """anchor.direction 兜底：从 condition/scenario 文本确定性提取方向。
+
+    复现 Spec A §4.1 与 A2 _direction_sign 同构思路：LLM 产结构，判定确定性算。
+    命中看多词 → bullish；命中看空词 → bearish；两词皆命中或皆无 → neutral
+    （text extraction 兜底，避免 model_validate 直接 parse_failed）。
+    """
+    text = f"{condition} {scenario}"
+    bull = _BULLISH_RE.search(text) is not None
+    bear = _BEARISH_RE.search(text) is not None
+    if bull == bear:
+        return "neutral"
+    return "bullish" if bull else "bearish"
+
+
+def _normalize_conditions_anchor_direction(
+    result: PredictionResult,
+) -> PredictionResult:
+    """条件化 schema 后处理：LLM 缺失 anchor.direction 时按文本确定性兜底。
+
+    PredidctorAnchor.direction 为 schema 必填；Pydantic 对缺失字段直接 raise → LLM
+    单条 condition 未自挂 direction 会导致整份 parse_failed。此处先按缺失值（direction
+    缺省成 neutral 重放）后逐条补强——前提是 schema 层 direction 允许先由缺省值进入，
+    这里对已是默认 neutral 且文本明显看多/看空的条目重判。返回新对象，不改原对象。
+    """
+    if not result.conditions:
+        return result
+    new_conds: list[object] = []
+    for c in result.conditions:
+        cur = c.anchor.direction
+        # 仅对"未明确表态"（仍带默认/neutral）的锚点做文本兜底，显式 bullish/bearish 不覆盖
+        if cur == "neutral":
+            inferred = infer_prediction_direction(c.condition, c.scenario)
+            if inferred != "neutral":
+                new_conds.append(c.model_copy(
+                    deep=True,
+                    update={"anchor": c.anchor.model_copy(update={"direction": inferred})},
+                ))
+                continue
+        new_conds.append(c)
+    if all(n is o for n, o in zip(new_conds, result.conditions)):
+        return result
+    return result.model_copy(update={"conditions": new_conds})
+
+
 def _corroboration_inputs(
     snapshot: dict[str, object],
     news: list[dict[str, object]],
@@ -388,7 +443,10 @@ def _corroboration_inputs(
 
 
 async def run_predict(
-    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+    trace: MarketTraceResult,
+    snapshot: MarketTraceSnapshot,
+    *,
+    replay_context: dict[str, object] | None = None,
 ) -> PredictionRunResult:
     """对已溯源的因果链推演影响持续性（状态化契约，S2）。
 
@@ -399,6 +457,10 @@ async def run_predict(
     - 到期日越年 → ok + approximate_horizons（逐档容错：越年档降级近似并标注，P2 裁决）；
     - 未预期异常（非上述已分类状态）→ logger.error + 重新抛出（不吞 bug，
       上层消费者/端点负责兜底）。
+
+    replay_context（P4 迭代回放，仅回放态传）：{recorded_prediction, verification_feedback,
+    target, replay}——并入 LLM 输入作「历史验证结果反馈」，供变体逻辑重出预判后
+    与同一 verification entries 对比；target 用于按标的读取验证画像（替代默认上证指数）。
     """
     if trace.attribution_status not in {"confirmed", "hypothesis"}:
         logger.info("prediction_skip_by_attribution_status", status=trace.attribution_status)
@@ -410,6 +472,20 @@ async def run_predict(
         # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
         try:
             prompt_input = _build_prediction_input(trace, snapshot)
+            # P4 回放：历史验证结果作为反馈注入输入（recorded prediction +
+            # verification entries），LLM 据此按变体逻辑重出预判。
+            if replay_context:
+                prompt_input = {**prompt_input, **replay_context}
+            # Spec B §4.3：run_predict 绑定——大盘溯源（review）target 恒为市场指数
+            # （prediction.horizons[].target 归一化到"上证指数"），画像并入输入做参考；
+            # 解析/读取失败 → 原样返回不阻断产出（对齐 chat 绑定红线）。
+            # 回放态（P4）：target 由 case.meta 锚定（可能为板块/个股），按标的读画像。
+            replay_symbol: str | None = None
+            if replay_context and isinstance(replay_context.get("target"), str):
+                replay_symbol = str(replay_context["target"])
+            prompt_input = await _enrich_predict_input_for_symbol(
+                prompt_input, replay_symbol or _MARKET_PROFILE_SYMBOL
+            )
             llm = get_deep_think()
             messages = [
                 SystemMessage(content=PREDICTION_PROMPT),
@@ -430,6 +506,9 @@ async def run_predict(
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
+        # Spec A §4.1：anchor.direction 归一化兜底（load 后、使用前）——
+        # LLM 未产 direction 时按 condition/scenario 文本确定性提取，避免 parse_failed。
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_allowed_evidence_ids(trace, snapshot)
         # P1-1：证据 ID 过滤而非一票否决（对齐 run_chat_prediction）——单一幻觉不丢整体
         filtered = [sid for sid in prediction.evidence_ids if sid in allowed]
@@ -513,6 +592,89 @@ async def _load_trace_and_snapshot(
     raise TraceUnavailableError(f"no trace available for review:{trade_date}")
 
 
+def _replay_minimal_trace_snapshot(
+    trade_date: str,
+) -> tuple[MarketTraceResult, MarketTraceSnapshot]:
+    """回放态最小合法 trace/snapshot（P4，无 DB 访问）。
+
+    prediction 产片源（prediction_verified_scan）不落市场快照/溯源链，case.meta
+    只带 {target, trade_date, prediction, verification}；真实上下文经 replay_context
+    注入 run_predict 的 prompt_input（历史快照源 Spec D 未落地前，回放输入 =
+    验证画像增强 + 原 prediction 输入，对齐计划 P4 裁决）。此处仅构造能通过
+    run_predict 门禁/输入构造的最小结构对象（chains 空、a_share 空）。
+    """
+    discovery = PhenomenonDiscoveryResult(
+        status="insufficient_data",
+        primary=None,
+        concurrent_phenomena=[],
+        data_readiness=DataReadiness(
+            market_data="incomplete",
+            attribution_inputs="missing",
+            causal_evidence="not_ready",
+        ),
+        diagnostics=[],
+    )
+    snapshot = MarketTraceSnapshot(
+        snapshot_id=f"replay_{trade_date}",
+        trade_date=trade_date,
+        captured_at=datetime.now(UTC),
+        a_share={},
+        sources={},
+        missing_fields=[],
+        phenomenon_discovery=discovery,
+    )
+    trace = MarketTraceResult(
+        schema_version="1.1",
+        attribution_status="confirmed",
+        candidates=[],
+        primary_chain_id=None,
+        alternative_chain_id=None,
+        confidence="medium",
+        unresolved_questions=[],
+    )
+    return trace, snapshot
+
+
+async def _replay_predict_from_case(
+    case_id: str, trade_date: str
+) -> PredictionRunResult:
+    """回放态预测：从 case slice meta 重建输入（无 DB 访问），并入验证反馈。
+
+    REPLAY_CASE_ID 存在时由 predict_from_trace 顶部转调（P4）。从 case.meta 提取
+    {target, trade_date, prediction, verification}：
+    - recorded prediction + verification entries 作为回放上下文注入 run_predict
+      ——LLM 看到「前次预判 + 到期验证结果」，据此按变体逻辑重出预判；
+    - 验证画像按 case.meta target 读取（Target 维度一致，替代默认上证指数）。
+    返回 PredictionRunResult；落库由调用方跳过（回放只读，post 已被 no-op）。
+    """
+    from aistock_agent.iterate.case_builder import load_case
+
+    case = load_case(case_id)
+    meta = case.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    meta_trade_date = str(meta.get("trade_date") or "")
+    if meta_trade_date and meta_trade_date != trade_date:
+        raise TraceUnavailableError(
+            f"replay case meta trade_date {meta_trade_date} != trade_date {trade_date}"
+        )
+    trace, snapshot = _replay_minimal_trace_snapshot(meta_trade_date or trade_date)
+    prediction = meta.get("prediction")
+    prediction = prediction if isinstance(prediction, dict) else {}
+    verification = meta.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    target = str(meta.get("target") or "")
+    replay_context: dict[str, object] = {
+        "replay": True,
+        "recorded_prediction": prediction,
+        "verification_feedback": [
+            v for v in verification.values() if isinstance(v, dict)
+        ],
+    }
+    if target:
+        replay_context["target"] = target
+    return await run_predict(trace, snapshot, replay_context=replay_context)
+
+
 async def predict_from_trace(
     trace_id: str, trade_date: str
 ) -> tuple[PredictionRunResult, dict[str, object] | None]:
@@ -521,6 +683,10 @@ async def predict_from_trace(
     流程：缓存直读 → DB 重建 → snapshot.trade_date 校验 → run_predict → 按状态落库。
     trace_id 当前用于日志标识（source_id 统一为 review:{trade_date}，与 review 内联落库一致）；
     后续个股溯源/事件传导复用本入口时，trace_id 可作为溯源标识扩展点。
+
+    REPLAY 回放态（P4）：REPLAY_CASE_ID 环境变量存在时，顶部转调
+    `_replay_predict_from_case`——从 case slice meta 重建输入（无 DB 访问）、
+    并入验证反馈，且不落库（record=None）。
 
     落库规则：
     - ok → 完整 prediction 记录（status 不传，Node 默认 pending）；越年近似档
@@ -531,6 +697,12 @@ async def predict_from_trace(
     Returns:
         (run_result, save_prediction 返回的 record 或 None)。
     """
+    if os.environ.get("REPLAY_CASE_ID"):
+        # P4 回放态：从 case slice meta 重建输入，回放只读不落库
+        return (
+            await _replay_predict_from_case(os.environ["REPLAY_CASE_ID"], trade_date),
+            None,
+        )
     trace, snapshot = await _load_trace_and_snapshot(trace_id, trade_date)
     # 校验：快照日期必须与目标交易日一致（对照 review.py L983 先例，防旧快照误用）
     if snapshot.trade_date != trade_date:
@@ -674,6 +846,69 @@ def _build_chat_prediction_input(
     return payload
 
 
+async def _enrich_chat_input_with_profile(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：预判产出方绑定——产出前读 target 验证画像并入 LLM 输入。
+
+    依赖 skill 的 read_validation_profile + enrich_prediction_input（缓存优先，miss 拉取重算）。
+    红线：画像只作输入参考；解析 target 失败/读取异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    if not symbol:
+        return prompt_input
+    target = make_target(symbol)
+    if target is None:
+        logger.debug("chat_prediction.enrich_skipped_no_target", symbol=symbol)
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("chat_prediction.enrich_profile_failed", symbol=symbol, exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
+# run_predict（大盘溯源）反哺画像的代表 target：run_predict 预测的是市场整体影响
+# 持续性，prediction.horizons[].target 归一化到上证指数（INDEX_TARGETS 首个）。绑定
+# 到该指数画像即可复用验证闭环；target 解析/读取失败 → 原样返回（同 chat 红线）。
+_MARKET_PROFILE_SYMBOL = "上证指数"
+
+
+async def _enrich_predict_input_for_symbol(
+    prompt_input: dict[str, object], symbol: str
+) -> dict[str, object]:
+    """Spec B §4.3：按 symbol 读验证画像并入预判输入（回放态按 case.meta target 分层）。
+
+    大盘溯源（review）固定上证指数；P4 迭代回放用产片源锚定的 target（可能为
+    板块/个股），Target 维度一致。红线：画像只作输入参考；解析 target 失败/读取
+    异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    target = make_target(symbol)
+    if target is None:
+        return prompt_input
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug("predict_input.enrich_profile_failed", symbol=symbol, exc_info=True)
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
+async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
+    """Spec B §4.3：run_predict（大盘溯源）预判产出方绑定——读市场指数验证画像并入输入。"""
+    return await _enrich_predict_input_for_symbol(prompt_input, _MARKET_PROFILE_SYMBOL)
+
+
 # P0-3：chat 禁点位红线后处理硬校验（防 prompt 改动静默失效；仅 chat 入口）
 _PRICE_PATTERN = re.compile(r"\d+(?:\.\d{1,2})?\s*元")
 _RANGE_PATTERN = re.compile(r"\d{3,6}\s*[-~至]\s*\d{3,6}\s*(?:点|区间)?")
@@ -744,6 +979,40 @@ def _hard_validate_chat_prediction(prediction: PredictionResult, symbol: str) ->
     return prediction
 
 
+async def _persist_chat_prediction(
+    prediction: PredictionResult,
+    snapshot: dict,
+    due_dates: dict[str, str],
+    approximate_horizons: list[str],
+) -> dict[str, object] | None:
+    """方案A：对话预判落库（Spec A §4.2/§11），target 分流防 pending 堆积。
+
+    classify_target(horizons[0].target)：index/sector → status=pending 纳入 16:00
+    到期验证；stock → status=skipped + skip_reason（v1 验证器个股源未接，§9-5），
+    避免无法验证的个股记录污染验证队列。落库失败不阻断返回值（"永不 500"）。
+    """
+    source_id = f"chat:{snapshot.get('symbol', '')}:{snapshot.get('trade_date', '')}"
+    payload: dict[str, object] = {
+        "source_type": "chat_prediction",
+        "source_id": source_id,
+        "schema_version": prediction.schema_version,
+        "prediction": prediction.model_dump(mode="json"),
+        "due_dates": due_dates,
+    }
+    if approximate_horizons:
+        payload["due_dates_approximate"] = approximate_horizons
+    try:
+        tgt = str(prediction.horizons[0].target or "")
+        if classify_target(tgt) == "stock":
+            # 个股 target 超出 v1 验证范围 → skipped（完整预判仍保留便于追溯）
+            payload["status"] = "skipped"
+            payload["prediction"]["skip_reason"] = "chat 个股 target 超出 v1 验证范围"
+        return await node_api.save_prediction(payload)
+    except Exception as exc:
+        logger.warning("chat_prediction.persist_failed", source_id=source_id, error=str(exc))
+        return None
+
+
 async def run_chat_prediction(
     snapshot: dict, news: list[dict], context: dict
 ) -> PredictionResult | None:
@@ -762,8 +1031,9 @@ async def run_chat_prediction(
     通过门禁（指数场景，LLM 输入不携带 capital_flow 块，不编造指数资金流）。后处理：
     - prediction_status 强制 "hypothesis"（无溯源链不得 confirmed）；
     - evidence_ids 只保留输入快照/新闻存在项（过滤而非抛错，区别于 run_predict）；
-    - 到期日计算已移除（A3，2026-08-12）：chat 预测 v1 不落库、返回值无验证对照，
-      调用结果被丢弃属死代码；V2 落库验证时恢复（见下方注释）。
+    - 落库（Spec A §4.2/§9-2 方案 A）：恢复 _compute_due_dates 到期日计算，经
+      _persist_chat_prediction 写入 prediction_records——index/sector 纳入 16:00
+      到期验证，stock 分流 skipped（v1 验证器个股源未接，防 pending 堆积）。
     任一失败返回 None（"永不 500"铁律）。不产生交易指令。
     """
     gate_reason = _gate_chat_snapshot(snapshot)
@@ -772,6 +1042,10 @@ async def run_chat_prediction(
         return None
     try:
         prompt_input = _build_chat_prediction_input(snapshot, news, context)
+        # Spec B §4.3：验证画像并入 LLM 输入（预判反哺；only 输入参考，异常/无 target 不阻断）
+        prompt_input = await _enrich_chat_input_with_profile(
+            prompt_input, str(snapshot.get("symbol", "") or ""),
+        )
         # P10 计费口径：对齐 skill_executor 其它 skill，用 quick_think 单次调用
         # （deep_think 26-47s/次，chat UX 不可接受）；json_mode 结构化输出
         # （DeepSeek thinking 兼容，项目记忆 lesson 8）直接产出已解析的
@@ -783,6 +1057,9 @@ async def run_chat_prediction(
         ]
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = await structured.ainvoke(messages)
+        # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
+        # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
+        prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_chat_evidence_ids(snapshot, news)
         prediction = prediction.model_copy(
             update={
@@ -808,9 +1085,15 @@ async def run_chat_prediction(
             )
             h.confidence = conf
             h.confidence_source = source
-        # A3（2026-08-12 验收裁决）：到期日计算 v1 无消费方（chat 预测不落库、返回值
-        # 无验证对照）——调用结果被丢弃属死代码，移除；V2 落库验证时恢复
-        # _compute_due_dates(str(snapshot["trade_date"]), prediction.horizons)
+        # Spec A §4.2/§9-2（方案 A）：恢复到期日计算并落库。chat 预判 index/sector
+        # 纳入 16:00 到期验证；stock 由 _persist_chat_prediction 分流 skipped。越年
+        # 近似档经 due_dates_approximate 显式标记。
+        due_dates, approximate_horizons = _compute_due_dates(
+            str(snapshot["trade_date"]), prediction.horizons,
+        )
+        await _persist_chat_prediction(
+            prediction, snapshot, due_dates, approximate_horizons,
+        )
         # A2 独立源冲突检测接线：确定性方向提取自输入（LLM 不产数值）；结果仅作为
         # 独立证据字段，绝不覆盖 confidence（佐证信号 ≠ 置信度）。run_predict 路径
         # 无此接线——输入仅指数行情方向，恒 insufficient，不误报。

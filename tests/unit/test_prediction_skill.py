@@ -41,7 +41,7 @@ def _goal(symbols: list[str] | None = None) -> InsightGoal:
 
 def _result(*, low: bool = False) -> PredictionResult:
     return PredictionResult(
-        schema_version="2.0",
+        schema_version="3.0",
         prediction_status="hypothesis",
         horizons=[
             PredictionHorizon(

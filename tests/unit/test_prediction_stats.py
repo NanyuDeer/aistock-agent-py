@@ -2,6 +2,7 @@
 from aistock_agent.services.prediction_stats import (
     baseline_compare,
     baseline_neutral_summary,
+    build_validation_profile,
     bucket_summary,
     clamp_confidence_by_bucket,
     hit_rate_summary,
@@ -151,6 +152,96 @@ def test_clamp_high_when_not_worse_than_baseline():
     base = {"n": 40, "hits": 20, "hit_rate": 0.5}
     cap, reason = clamp_confidence_by_bucket("short", hit, base)
     assert cap == "high"
+
+
+def _v3_entry(result="hit", horizon="short", grade=None, method="3.0",
+              condition_index=None, condition_met=None, **kw):
+    e = {"methodology_version": method, "result": result, "horizon": horizon,
+         "target_type": "stock", "approximate": False, **kw}
+    if grade is not None:
+        e["grade"] = grade
+    if condition_index is not None:
+        e["condition_index"] = condition_index
+        e["condition_met"] = condition_met
+    return e
+
+
+# 画像针对 run_once 当前写入的 3.0 现役档（_METHODOLOGY_VERSION）；stats 默认 2.0 是
+# 存量统计口径，画像读取/接管需显式传 3.0 才能框住现役已验证档（防混桶）。
+_PROFILE_V3 = {"methodology_version": "3.0"}
+
+
+def test_build_validation_profile_empty():
+    """Spec B §7 P1：空 entries → 画像零值且不抛异常。"""
+    p = build_validation_profile([], "600519", **_PROFILE_V3)
+    assert p["target"] == "600519"
+    assert p["n"] == 0 and p["hit_rate"] == 0.0
+    assert p["sufficient_sample"] is False
+    assert p["condition_met_rate"] is None
+    assert p["miss_patterns"] == []
+    assert p["horizon_breakdown"] == {}
+    assert p["degradation_rate"] == 0.0
+
+
+def test_build_validation_profile_hit_rate():
+    """Spec B §7 P1：单 target 命中率/n/样本判定正确；非当前版本 & insufficient & approximate 剔除。"""
+    entries = [
+        _v3_entry("hit"),
+        _v3_entry("miss"),
+        _v3_entry("hit", method="2.0"),                     # 非当前版本剔除
+        _v3_entry("insufficient", subtype="no_data"),       # 不计命中率
+        _v3_entry("miss", approximate=True),                # 近似档剔除
+    ]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    assert p["n"] == 2 and p["hits"] == 1 and p["hit_rate"] == 0.5
+    assert p["sufficient_sample"] is False
+    # insufficient 单列降解占比（2 可判 + 1 insufficient）
+    assert p["degradation_rate"] == round(1 / 3, 4)
+
+
+def test_build_validation_profile_horizon_breakdown():
+    """Spec B §7 P1：horizon_breakdown 按档位分桶命中率。"""
+    entries = [_v3_entry("hit", horizon="short"),
+               _v3_entry("miss", horizon="mid"),
+               _v3_entry("hit", horizon="short")]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    assert p["horizon_breakdown"]["short"]["n"] == 2
+    assert p["horizon_breakdown"]["short"]["hit_rate"] == 1.0
+    assert p["horizon_breakdown"]["mid"]["n"] == 1
+    assert p["horizon_breakdown"]["mid"]["hit_rate"] == 0.0
+
+
+def test_build_validation_profile_miss_patterns():
+    """Spec B §7 P1：miss_patterns 归类——strong_miss→strong_reversal，其余 plain_miss，按 count 降序。"""
+    entries = [
+        _v3_entry("miss", grade="strong_miss"),
+        _v3_entry("miss"),
+        _v3_entry("miss"),
+    ]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    by = {x["pattern"]: x["count"] for x in p["miss_patterns"]}
+    assert by == {"plain_miss": 2, "strong_reversal": 1}
+
+
+def test_build_validation_profile_condition_met_distribution():
+    """Spec B §7 P1：condition_met 分布（c{i} 汇总 + 整体命中率），None 计 confirmed=0。"""
+    entries = [
+        _v3_entry(condition_index=0, condition_met=True),
+        _v3_entry(condition_index=0, condition_met=False),
+        _v3_entry(condition_index=0, condition_met=None),  # 两段判定推迟
+        _v3_entry(condition_index=1, condition_met=True),
+    ]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    # condition_met_rate 只在已确认（非 None）样本上算：2 个 True / 3 个 confirmed
+    assert p["condition_met_rate"] == round(2 / 3, 4)
+    c0 = p["condition_summary"]["c0"]
+    assert c0 == {"count": 3, "met": 1, "confirmed": 2}
+
+
+def test_build_validation_profile_sample_threshold():
+    """Spec B §7 P1：样本充足（30 档 + 30 prediction）→ sufficient_sample。"""
+    entries = [_v3_entry("hit", prediction_id=i) for i in range(30)]
+    assert build_validation_profile(entries, "600519", **_PROFILE_V3)["sufficient_sample"] is True
 
 
 def test_clamp_respects_cap_floor():

@@ -14,6 +14,60 @@
 - `tests/unit/test_rhythm_engine.py`：锚点无 high/取首条 high/今日明日/坏日期跳过 4 用例（26 passed）
 - `tests/integration/test_rhythm_master_worker.py`：after_close 全量 + morning 增量锚点 2 集成用例
 
+## [main] 2026-09-01 — Spec B 预判验证闭环（验证 skill + 画像 + 个股数据源 + 三处反哺）
+
+**开发者**: Aria
+
+### 新增
+- `skills/prediction_validation.py`：验证 skill——`read_validation_profile`（缓存优先，miss 拉 verified 重算，key 用 `internal_id`）+ `explain_verification`（LLM 解释层，失败降级规则兜底）+ `enrich_prediction_input`（纯函数并入 `validation_profile` 块，红线：不改判定/不产指令/不覆盖 A3）
+- `prompts/workers/prediction_validation.py`：解释层 prompt
+- `services/cache.py`：`get/set_cached_validation_profile`（key `prediction:profile:{internal_id}`，TTL 86400）
+- `services/prediction_stats.py`：`build_validation_profile` 纯函数（condition 级命中率/miss_patterns/condition_met 分布/失效模式/degradation）
+- `services/data_client.py`：`get_stock_kline(code, days, start_date, end_date)`（复用 `get` 解包 `data.rows`）
+
+### 改进
+- `services/prediction_validator.py`：`_fetch_kline_window` 补 stock 分支（个股日 K 走 `get_stock_kline`，带区间参数 [due-20, due+10]）+ `_write_validation_profiles` 到期验证落画像（接管）
+- `services/prediction_service.py`：`run_chat_prediction` 绑定 `_enrich_chat_input_with_profile`；`run_predict` 绑定 `_enrich_market_predict_input`（大盘溯源代表 target=上证指数）
+- `services/morning_forecast_extractor.py`：新增 `_enrich_morning_summary_with_profile` 展示侧反哺（sufficient_sample 时 summary 追加历史命中率；缓存存原始 LLM 结果防陈旧；异常降级保持原文）
+
+### 测试
+- 新增 `tests/unit/test_prediction_validation.py`；扩充 prediction_stats/prediction_validator/prediction_service/morning_forecast_extractor 测试。晨报 9 例、预测相关 113 例全绿；mypy 通过
+
+---
+
+## [main] 2026-09-01 — 四环三粒度 Target 维度地基（TargetProfile 引擎独立提交）
+
+**开发者**: Aria
+
+### 新增
+- `services/target_profile.py`：`TARGET_PROFILES` 注册表（index/sector/stock 三粒度，每项含溯源 prompt/证据源/快照构造/默认周期/K线拉取/迭代阈值）+ `get_profile` 一次查表 + `get_iterate_threshold`（horizon×场景分层阈值，`resolve_raw_threshold` fail-closed）+ `make_target`（LLM 自由文本 → 首类 `Target`）+ `canonical_ts_code`（裸 6 位码带交易所后缀，防指数/个股空间冲突）
+- `tests/unit/test_target_profile.py`：20 例（模型约束 `extra=forbid`/注册表三粒度覆盖/阈值分层命中与 fallback/首类构造/ts_code 数据卫生）
+
+### 说明
+- 仅依赖已提交的 `schemas/target.py` 与 `prediction_targets.py`；`prediction_targets.classify_target`（legacy 字符串四分类）保持不动。本模块是后续 Spec B/C/D 落地的统一入口，`get_iterate_threshold` 消费方待阶段 5 / Spec1 接入。
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 清空 TargetProfile 待办
+
+---
+
+## [main] 2026-09-01 — 条件化预判改造（Spec A，三端全量收尾）
+
+**开发者**: Aria
+
+### 新增
+- 预判 schema 升 3.0（`schemas/prediction.py`）：新增 `PredictionDirection`/`PredictionMetric`/`PredictionAnchor`（horizon+threshold+metric+direction 自带方向）/`PredictionCondition`（condition/scenario/anchor 三段式）；`PredictionResult` 增加可选 `conditions` 与 `target: Target | None`，并新增 `schemas/target.py`（`Target`/`TargetProfile` 纯数据模型，关联统一 Target 维度，兼容 `classify_target` 归类）
+- `PredictionAnchor.direction` 缺省 neutral，归一化层从文本兜底（regex），确保验证不因缺失方向失败
+- `services/prediction_service.py`：`_coerce_prediction_payload` 兜底 schema_version=3.0；`run_chat_prediction` 恢复到期日计算并落库 chat 预判（`_persist_chat_prediction`），按 `classify_target` 分流——index/sector→pending 入 16:00 验证，stock→skipped 防验证队列堆积
+- `services/prediction_validator.py`：新增 `_verify_conditions`，对每条 condition 产出 `c{i}` 验证 entry（hit/miss），`run_once` 双验证调度（horizon 与 condition 并行互不干扰，窗口未满 wait 不回写）
+
+### 改进
+- `prompts/workers/prediction.py`：PREDICTION_PROMPT / PREDICTION_CHAT_PROMPT 强制 `conditions[]`（2-3 条，至少 1 条含成交量维度），禁止"无条件短中长期"式空洞预判
+
+### 文档
+- 同步 CHANGELOG.md；changelog-pending.md 重置
+
+---
 ## [changer] 2026-08-31 — 预判/节奏/迭代增强（TradingVane 研报借鉴 v2）
 
 **开发者**: changer-collab

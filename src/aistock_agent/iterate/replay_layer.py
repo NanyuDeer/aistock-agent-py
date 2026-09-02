@@ -106,9 +106,25 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 失败降级返回 None，不触达真实 Node 后端（PR #71 新增，I-3 清单封闭测试
         # 强制登记）
         "NodeApiClient.get_user_profile",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_insight 内部
+        # `await self.get(f"/internal/insight/events/{event_id}?openid={openid}")`
+        # （data_client.py:682），无独立网络入口；回放时 get 返回 None → 方法原样
+        # 返回 None，不触达真实 Node 后端（自选股洞察阶段 2.1 新增，I-3 清单封闭
+        # 测试强制登记）
+        "NodeApiClient.get_insight",
         # 经 get_list 间接隔离（get_list → node_read 返回 None）
         "NodeApiClient.list_analysis_reports",
         "NodeApiClient.list_pending_predictions",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）：list_insights 内部
+        # `await self.get_list(f"/internal/insight/events?openid=...")`（data_client.py:670），
+        # 无独立网络入口；回放时 get_list 返回 None → `or []` 兜底返回空列表
+        # （自选股洞察阶段 2.1 新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.list_insights",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）：list_stock_traces 内部
+        # `await self.get_list(f"/internal/stock-trace/events?openid=...")`
+        # （data_client.py:705），无独立网络入口；回放时 get_list 返回 None →
+        # `or []` 兜底返回空列表（阶段 2.2 自选股异动溯源新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.list_stock_traces",
         # 经 get_list 间接隔离（get_list → node_read 返回 None）：list_verified_predictions
         # 内部 `await self.get_list(f"/internal/predictions?status=verified&limit={limit}")`
         # （data_client.py:494），无独立网络入口；回放时 `or []` 兜底返回空列表（P0 统计出口）
@@ -118,6 +134,11 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)` 走
         # 失败降级返回 None，不触达真实 Node 后端（P0 预测 v2 新增）
         "NodeApiClient.get_index_kline",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_stock_kline 内部
+        # `await self.get(f"/internal/quote/{code}/kline?...")`（data_client.py:575），
+        # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)`
+        # 返回 None（Spec B 个股验证新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.get_stock_kline",
         # 经 get 间接隔离（get → node_read 返回 None）：M2 板块验证 ths 方法，
         # 内部 `await self.get(...)` 无独立网络入口；回放时 get 返回 None →
         # 各自 `not isinstance(result, dict)` 失败降级返回 None（T5 新增）

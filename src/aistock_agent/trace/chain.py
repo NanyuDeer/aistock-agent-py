@@ -8,6 +8,7 @@ B1a 只抽象「阶段枚举 + 节点 schema + 按序校验」三件套；
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -33,8 +34,22 @@ class CausalNode(BaseModel):
     evidence_ids: list[str]
 
 
+class PredictionConfirmation(BaseModel):
+    """Spec Cbis：溯源归因时确认的历史预判场景印证证据（渠道B信号）.
+
+    只记录"场景/证据层印证"（scene_match/evidence_match），不判定涨跌方向对错——
+    方向对错仍由到期价格主渠道（渠道A）负责。
+    """
+    prediction_id: str
+    scenario: str
+    source_trace_id: str
+    confirmed_kind: Literal["scene_match", "evidence_match"]
+    confirmed_at: datetime
+
+
 class CausalChain(BaseModel):
     nodes: list[CausalNode]
+    confirmed_prediction: list[PredictionConfirmation] = []
 
 
 class TraceChainError(ValueError):

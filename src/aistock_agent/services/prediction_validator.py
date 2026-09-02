@@ -20,8 +20,10 @@ from typing import cast
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.cache import set_cached_validation_profile
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
+    build_validation_profile,
     bucket_summary,
     hit_rate_summary,
 )
@@ -48,6 +50,10 @@ _METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
 _STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_window index 分支）
+_STOCK_KLINE_FETCH_DAYS = 120  # 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_window stock 分支）
+
+# Spec B §4.2：验证画像缓存 TTL（秒）——每日 16:00 run_once 更新，86400 次日失效重算
+_PROFILE_CACHE_TTL = 86400
 
 # H3：板块验证阈值（G0c 标定 neutral 0.25%/strong 3.0%，版本 1.0）；
 # index 保持 0.5/5.0（_INDEX_THRESHOLDS 复用既有常量，_judge_window 默认参数行为不变）
@@ -101,7 +107,7 @@ def _range_around_due(due_date: str) -> tuple[str, str] | None:
 async def _fetch_kline_window(
     kind: str, code: str, due_date: str
 ) -> list[dict[str, object]] | None:
-    """按 due 区间拉取日 K（统一 index/sector）。返回升序 [{trade_date, pct_chg}]；
+    """按 due 区间拉取日 K（统一 index/sector/stock）。返回升序 [{trade_date, pct_chg}]；
     pct_chg=None 行保留占位（H7，由调用方计数）。失败/空返回 None（=数据源故障）。"""
     rng = _range_around_due(due_date)
     if rng is None:
@@ -110,6 +116,11 @@ async def _fetch_kline_window(
     start, end = rng
     if kind == "sector":
         raw = await node_api.get_ths_daily_range(code, start, end)
+    elif kind == "stock":
+        # Spec B：个股数据源接入（/internal/quote/{code}/kline，TushareKlineService），
+        # 携带与指数一致的区间参数 [due-20, due+10]。
+        raw = await node_api.get_stock_kline(
+            code, _STOCK_KLINE_FETCH_DAYS, start_date=start, end_date=end)
     else:
         raw = await node_api.get_index_kline(
             code, _KLINE_FETCH_DAYS, start_date=start, end_date=end)
@@ -201,6 +212,10 @@ async def _verify_horizon(
     code = _INDEX_CODE_MAP.get(target)
     target_type = "index"
     matched: dict[str, str] | None = None
+    if code is None and classify_target(target) == "stock":
+        # Spec B：6 位个股裸码 → 稳定标识，绕过板块 resolve、不发网络请求（对齐 _resolve_verify_target）
+        code = target
+        target_type = "stock"
     if code is None:
         # H3：指数未命中 → 尝试板块 resolve（三级匹配，Task 5 node_api.resolve_ths_name）
         resolved = await resolve_sector_target(target)
@@ -281,6 +296,153 @@ async def _verify_horizon(
         out["threshold_version"] = _THRESHOLD_VERSION  # H3：sector 阈值版本（1.0）
     if grade is not None:
         out["grade"] = grade
+    return out
+
+
+async def _resolve_verify_target(
+    target: str,
+) -> tuple[str | None, str, dict | None]:
+    """index/sector/stock 目标资产解析（horizon 与 condition 共用）。
+
+    返回 (code, target_type, matched)：index 直接命中代码映射；否则尝试板块
+    resolve；6 位裸码 → 个股直接以裸码为代码（Spec B：个股数据源已接入）；
+    均失败返回 (None, classify_target(target), None)——抽象词无验证数据源。
+    """
+    code = _INDEX_CODE_MAP.get(target)
+    if code is not None:
+        return code, "index", None
+    resolved = await resolve_sector_target(target)
+    if resolved:
+        return str(resolved["ts_code"]), "sector", resolved
+    # Spec B：6 位个股裸码（如 600519）作为稳定标识，绕过板块 resolve、不发网络请求
+    if classify_target(target) == "stock":
+        return target, "stock", None
+    return None, classify_target(target), None
+
+
+def _parse_threshold(value: str) -> float | None:
+    """解析涨跌幅阈值（"+5%"→5.0、"-3%"→-3.0）；无效返回 None。"""
+    if not isinstance(value, str):
+        return None
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", value)
+    return float(m.group(0)) if m else None
+
+
+def _judge_condition_hit(
+    direction: str, threshold_val: float | None, cumulative: float
+) -> bool:
+    """condition scenario 是否命中：按 anchor.direction + threshold 比对窗口累计。
+
+    显式阈值（如 "+5%"/"-3%"）存在 → 与窗口累计累计直接比对（scenario 命中主判）；
+    阈值缺省 → 退化为方向符号主判（bullish>0 / bearish<0 / neutral 横盘），
+    对齐 _judge_window 语义。spec §9-5：条件成立两段判定推迟，此处仅起见
+    scenario 命中与否。
+    """
+    if threshold_val is not None:
+        if direction == "bullish":
+            return cumulative >= max(threshold_val, 0.0)
+        if direction == "bearish":
+            return cumulative <= min(threshold_val, 0.0)
+    if direction == "bullish":
+        return cumulative > 0
+    if direction == "bearish":
+        return cumulative < 0
+    return abs(cumulative) < _NEUTRAL_PCT_THRESHOLD
+
+
+async def _verify_conditions(
+    record: dict[str, object],
+    methodology_version: str = _METHODOLOGY_VERSION,
+) -> dict[str, object]:
+    """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
+
+    - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
+    - condition_met 本批恒 null（两段判定推迟，§9-5 决策）；scenario 命中用
+      anchor.direction + threshold 比对窗口累计；
+    - entry 显式补 target_type（index/sector，§4.2/§11）避免统计漏桶；
+    - 窗口未满 → {"wait": True}，run_once continue 不回写，下次补齐再验（D1 语义）；
+    - 返回 {c{i}: entry}，run_once 对已存在 result 的 c{i} 幂等跳过。
+    """
+    prediction = record.get("prediction")
+    if not isinstance(prediction, dict):
+        return {}
+    conditions = prediction.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return {}  # 2.0 旧记录/无条件预判无 c{i} 验证
+    horizons = prediction.get("horizons")
+    tgt = ""
+    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+        tgt = str(horizons[0].get("target") or "")
+    code, target_type, matched = await _resolve_verify_target(tgt)
+    base: dict[str, object] = {
+        "verified_at": shanghai_today().isoformat(),
+        "methodology_version": methodology_version,
+        "prediction_id": record.get("id"),
+        "condition_met": None,  # 两段判定推迟（§9-5）
+        "target_type": target_type,
+    }
+    if matched:
+        base["matched_ts_code"] = str(matched["ts_code"])
+        base["matched_name"] = str(matched["name"])
+    due_dates = record.get("due_dates")
+    due_dates_map = due_dates if isinstance(due_dates, dict) else {}
+    out: dict[str, object] = {}
+    for i, cond in enumerate(conditions):
+        key = f"c{i}"
+        if not isinstance(cond, dict):
+            continue
+        anchor = cond.get("anchor") if isinstance(cond.get("anchor"), dict) else {}
+        horizon = anchor.get("horizon")
+        due_date = str(due_dates_map.get(horizon) or "") if horizon else ""
+        direction = str(anchor.get("direction") or "neutral")
+        threshold = str(anchor.get("threshold") or "")
+        entry: dict[str, object] = {
+            **base,
+            "condition_index": i,
+            "horizon": horizon,
+            "condition": cond.get("condition"),
+            "scenario": cond.get("scenario"),
+            "threshold": threshold,
+        }
+        if code is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_source",
+                        "actual": "", "reason": f"target '{tgt}' 无验证数据源"}
+            continue
+        if not due_date:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_due_date",
+                        "actual": "", "reason": "condition anchor 无对应 due_date"}
+            continue
+        rows = await _fetch_kline_window(target_type, code, due_date)
+        if rows is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": "到期行情不可用"}
+            continue
+        missing = sum(1 for r in rows if r.get("pct_chg") is None)
+        if missing > 0:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": f"行情数据缺失 {missing} 行"}
+            continue
+        idx = next((j for j, r in enumerate(rows) if r.get("trade_date") == due_date), None)
+        if idx is None:
+            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
+                        "actual": "", "reason": f"到期日 {due_date} 行情缺失"}
+            continue
+        window = [float(cast(float, r["pct_chg"]))
+                  for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
+        if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
+            # D1：窗口未满不回写，下次 run_once 补齐再验
+            out[key] = {**entry, "wait": True,
+                        "reason": f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"}
+            continue
+        cumulative = sum(window)
+        hit = _judge_condition_hit(direction, _parse_threshold(threshold), cumulative)
+        out[key] = {
+            **entry,
+            "result": "hit" if hit else "miss",
+            "actual": f"{cumulative:+.2f}%",
+            "reason": f"direction={direction}, threshold={threshold or 'N/A'}, "
+                      f"窗口累计={f'{cumulative:+.2f}%'}",
+        }
     return out
 
 
@@ -395,9 +557,40 @@ async def run_once() -> int:
                     error=str(exc),
                     exc_info=True,
                 )
+        # Spec A §4.2/§11：条件化预判双验证调度——3.0 记录对每条 condition 另产 c{i}
+        # entry（c{i} key 与 horizon key 并存，A1 early_exit 不冲突）；已存在 result
+        # 的 c{i} 幂等跳过。
+        cond_entries = await _verify_conditions(record)
+        for ckey, centry in cond_entries.items():
+            if centry.get("wait"):
+                continue  # D1：窗口未满不回写，下次补齐再验
+            if _should_skip_horizon(verification.get(ckey)):
+                continue  # 幂等：上一轮已产出 result 的 condition 跳过
+            try:
+                await node_api.update_prediction_verification(record_id, ckey, centry)
+                updated += 1
+                logger.info(
+                    "prediction_condition_verified",
+                    id=record_id,
+                    key=ckey,
+                    result=centry["result"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "prediction_condition_verify_write_failed",
+                    id=record_id,
+                    key=ckey,
+                    error=str(exc),
+                    exc_info=True,
+                )
     # 日志输出（P0-2）
     if target_counter:
         logger.info("prediction_target_distribution", distribution=target_counter)
+    # Spec B §4.2：到期验证接管——验证后按 target 落画像缓存（供预判 skill 读取 + 迭代闭环）
+    try:
+        await _write_validation_profiles()
+    except Exception:  # noqa: BLE001
+        logger.warning("prediction_profile_write_failed", exc_info=True)
     return updated
 
 
@@ -431,3 +624,59 @@ async def _report_stats() -> None:
         baseline_hit_rate=baseline["hit_rate"],
         buckets=buckets,
     )
+
+
+async def _write_validation_profiles() -> int:
+    """到期验证接管（Spec B §4.2）：验证后按 target 落画像缓存。
+
+    读取 verified 窗口，把每条带 result 的 verification entry 归到 record 级 target
+    字符串下，经 ``_resolve_verify_target`` 收敛为稳定 internal_id（stock/index=裸码，
+    sector=ts_code；不直接用 name，防板块改名断画像），再 build_validation_profile +
+    落 ``prediction:profile:{internal_id}`` 缓存——供预判 skill 读取 + 迭代闭环消费，
+    避免每次预判拉全量 verified 重算（§8 拉取开销）。
+    early_exit-only（无 result）不计入画像（§9-3）。返回写入的靶位数。
+    """
+    verified = await node_api.list_verified_predictions(limit=500)
+    if not verified:
+        return 0
+    groups: dict[str, list[dict[str, object]]] = {}
+    for rec in verified:
+        tgt = _record_target_str(rec.get("prediction"))
+        if tgt is None:
+            continue
+        ver = rec.get("verification")
+        if not isinstance(ver, dict):
+            continue
+        for entry in ver.values():
+            if isinstance(entry, dict) and "result" in entry:
+                groups.setdefault(tgt, []).append(entry)
+    if not groups:
+        return 0
+    written = 0
+    for tgt, entries in groups.items():
+        code, _, _ = await _resolve_verify_target(tgt)
+        key = code or tgt
+        profile = build_validation_profile(
+            entries, key, methodology_version=_METHODOLOGY_VERSION)
+        if await set_cached_validation_profile(key, profile, ttl=_PROFILE_CACHE_TTL):
+            written += 1
+        logger.info(
+            "prediction_profile_written",
+            target=key,
+            n=profile["n"],
+            hit_rate=profile["hit_rate"],
+            degradation_rate=profile["degradation_rate"],
+        )
+    return written
+
+
+def _record_target_str(prediction: object) -> str | None:
+    """取 prediction 首个非空 target 字符串（画像分组用）。"""
+    if not isinstance(prediction, dict):
+        return None
+    horizons = prediction.get("horizons")
+    if isinstance(horizons, list):
+        for h in horizons:
+            if isinstance(h, dict) and h.get("target"):
+                return str(h["target"])
+    return None

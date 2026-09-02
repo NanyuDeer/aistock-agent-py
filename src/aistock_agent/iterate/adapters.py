@@ -79,6 +79,21 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
         ),
         description="事件传导分析：理解→传导→历史→投资结论",
     ),
+    # Spec C §4.1：预判接入迭代注册表。与 review/event_analyst（归因监督式）不同，
+    # prediction 走「验证驱动」迭代：标准答案 = 到期验证结果（read_validation_profile），
+    # 产片源从已验证的 prediction 记录切历史案例（prediction_verified_scan）。
+    "prediction": IterableAgentAdapter(
+        agent_id="prediction",
+        module_path="aistock_agent.services.prediction_service",
+        run_entry="predict_from_trace",
+        prompt_files=("src/aistock_agent/prompts/workers/prediction.py",),
+        workflow_files=("src/aistock_agent/services/prediction_service.py",),
+        tool_categories=("prediction",),
+        data_deps={"market": "market_snapshot"},
+        ground_truth_kind="verification",
+        case_sources=(CaseSourceSpec("prediction_verified_scan"),),
+        description="影响持续性预判：conditions[] 条件化输出，验证驱动迭代",
+    ),
 }
 
 

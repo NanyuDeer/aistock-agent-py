@@ -140,9 +140,76 @@ async def telegraph_keyword_scan(ctx: SourceContext) -> list[CaseCandidate]:
     ]
 
 
+async def prediction_verified_scan(ctx: SourceContext) -> list[CaseCandidate]:
+    """prediction 产片源（Spec C §4.3）：从已验证的 prediction 记录切历史案例。
+
+    只切 schema_version=3.0（现役条件化预判）且 verification 非空的记录——有
+    due_dates + hit/miss，是「验证驱动迭代」的标准答案锚点。每记录一条候选，
+    event_time 锚定 source_id 内嵌的交易日（对齐 _close_time_for_day 15:30 CST），
+    meta 携带 {record_id, target, trade_date, prediction, due_dates, verification}
+    供回放/评估消费。回放输入的历史市场快照按 data_deps "market" 在切片落地时
+    由 TargetProfile.snapshot_builder 补齐（全局 §2.3/§4.1 衔接 Spec D）。
+    无满足条件的记录返回 []（不炸产片源）；单条 source_id 不可解析日期仅跳过。
+    """
+    records = await NodeApiClient().list_verified_predictions(limit=500)
+    candidates: list[CaseCandidate] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("schema_version", "")) != "3.0":
+            continue
+        verification = rec.get("verification")
+        if not isinstance(verification, dict) or not verification:
+            continue
+        prediction = rec.get("prediction")
+        if not isinstance(prediction, dict):
+            continue
+        target = _first_target_str(prediction)
+        trade_date = _source_trade_date(str(rec.get("source_id", "")))
+        if target is None or trade_date is None:
+            logger.warning(
+                "prediction_verified_scan_skip_missing_anchor",
+                record_id=rec.get("id"),
+                source_id=rec.get("source_id"),
+            )
+            continue
+        candidates.append(
+            CaseCandidate(
+                event_title=f"预判验证 {target}（{trade_date}）",
+                event_time=_close_time_for_day(trade_date),
+                telegraph_records=[],
+                meta={
+                    "record_id": rec.get("id"),
+                    "target": target,
+                    "trade_date": trade_date,
+                    "prediction": prediction,
+                    "due_dates": rec.get("due_dates", {}),
+                    "verification": verification,
+                    "t_window": "prediction",
+                },
+            )
+        )
+    return candidates
+
+
+def _first_target_str(prediction: dict[str, object]) -> str | None:
+    """取 prediction 首个非空 target 字符串（预判产片分组锚点）。"""
+    horizons = prediction.get("horizons")
+    if isinstance(horizons, list):
+        for h in horizons:
+            if isinstance(h, dict) and h.get("target"):
+                return str(h["target"])
+    return None
+
+
+def _source_trade_date(source_id: str) -> str | None:
+    """从 source_id（如 "review:2026-08-14"）提取交易日 YYYY-MM-DD；无则 None。"""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", source_id)
+    return m.group(1) if m else None
+
+
 async def event_store_scan(ctx: SourceContext) -> list[CaseCandidate]:
     """事件库产片源（四期）：近 window_days 天事件库重大事件 → CaseCandidate。
-
     消费统一事件抓取中台（event_scraper）入库数据（只读，不改中台）；
     is_major_event（impact_score >= 4）过滤；telegraph_records 用事件
     summary/content（语料进 GT corpus）；meta 带 direction_hint（事件方向先验，
@@ -281,6 +348,7 @@ SOURCE_PROVIDERS: dict[str, Callable[[SourceContext], Awaitable[list[CaseCandida
     "market_close_snapshot": market_close_snapshot,
     "event_store_scan": event_store_scan,
     "telegraph_keyword_scan": telegraph_keyword_scan,
+    "prediction_verified_scan": prediction_verified_scan,
 }
 
 
