@@ -110,3 +110,73 @@ async def test_run_sector_trace_publishes_report() -> None:
         )
     mock_save.assert_called_once()
     assert result.report_type == "sector_trace"
+
+
+# --- validate_sector_chain（T3 review 补测：#1 日期比较 + 降级契约） ---
+
+
+def _chain(stages: list[dict]) -> object:
+    from aistock_agent.schemas.sector_trace import SectorChainResult
+
+    return SectorChainResult(
+        chain_id="x1",
+        sector="存储板块",
+        stages=stages,
+        attribution_status="sufficient",
+    )
+
+
+def test_validate_sector_chain_trigger_missing_evidence() -> None:
+    """trigger 阶段缺 evidence → 降级 insufficient 且 missing_evidence 记「缺事件证据」。"""
+    from aistock_agent.schemas.sector_trace import validate_sector_chain
+
+    result = _chain([{"kind": "trigger", "headline": "韩检突袭存储三巨头"}])
+    validate_sector_chain(result, captured_at="2026-07-16")
+    assert result.attribution_status == "insufficient"
+    assert "trigger:韩检突袭存储三巨头:缺事件证据" in result.missing_evidence
+
+
+def test_validate_sector_chain_empty_url_records_stage_label() -> None:
+    """evidence.url 为空 → 记「缺URL」，标签用真实 stage.kind（非 trigger 不误标）。"""
+    from aistock_agent.schemas.sector_trace import validate_sector_chain
+
+    result = _chain([
+        {"kind": "trigger", "headline": "h1", "evidence": [{"url": ""}]},
+        {"kind": "impact", "headline": "h2", "evidence": [{"url": ""}]},
+    ])
+    validate_sector_chain(result, captured_at="2026-07-16")
+    assert result.attribution_status == "insufficient"
+    assert "trigger:h1:缺URL" in result.missing_evidence
+    assert "impact:h2:缺URL" in result.missing_evidence
+
+
+def test_validate_sector_chain_same_day_occurred_at_not_downgraded() -> None:
+    """同日盘中事件（occurred_at 带时间戳 vs captured_at 纯日期）不误判、不降级。"""
+    from aistock_agent.schemas.sector_trace import validate_sector_chain
+
+    result = _chain([
+        {
+            "kind": "trigger",
+            "headline": "韩检突袭存储三巨头",
+            "evidence": [{"url": "https://e.com/a", "occurred_at": "2026-07-16T09:00:00Z"}],
+        }
+    ])
+    validate_sector_chain(result, captured_at="2026-07-16")
+    assert result.attribution_status == "sufficient"
+    assert result.missing_evidence == []
+
+
+def test_validate_sector_chain_occurred_at_after_captured_at_downgraded() -> None:
+    """occurred_at 日期晚于 captured_at → 正确标记并降级。"""
+    from aistock_agent.schemas.sector_trace import validate_sector_chain
+
+    result = _chain([
+        {
+            "kind": "trigger",
+            "headline": "韩检突袭存储三巨头",
+            "evidence": [{"url": "https://e.com/a", "occurred_at": "2026-07-17T09:00:00Z"}],
+        }
+    ])
+    validate_sector_chain(result, captured_at="2026-07-16")
+    assert result.attribution_status == "insufficient"
+    assert "trigger:韩检突袭存储三巨头:occurred_at晚于captured_at" in result.missing_evidence

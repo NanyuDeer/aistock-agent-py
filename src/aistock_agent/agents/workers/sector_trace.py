@@ -1,7 +1,8 @@
 """板块溯源 worker（Spec D · 溯源环 · 事件层归因）。
 
-review_done 事件触发的板块级事件归因：对主因板块回答「今天为什么暴/大涨」。
-复用 CausalChain/ChainStage 的链结构语义；独立报告 report_type="sector_trace"。
+review_done 事件触发的板块级事件归因：对主因板块回答「今天为什么暴/大跌或
+异动归因」。复用 CausalChain/ChainStage 的链结构语义；独立报告
+report_type="sector_trace"。
 """
 from dataclasses import dataclass, field
 from typing import cast
@@ -121,6 +122,10 @@ async def run_sector_trace(
         report_date=report_date,
         sector_name=sector_name,
         sector_row=sector_row,
+        # 检索上下文待 D4 接线真实 async 检索适配器：此处 cast(_SearchContext,
+        # node_api) 仅通过类型检查，运行期 node_api 无 search 方法，ctx.search
+        # 会抛 AttributeError → 被 snapshot 内部 try/except 捕获后恒静默降级
+        # （sources 为空）。D4 实现者需替换为真实检索适配器，勿遗漏。
         trace_ctx=cast(_SearchContext, node_api),
     )
     trace_result = await _generate_sector_trace_with_retry(snapshot, captured_at=report_date)
