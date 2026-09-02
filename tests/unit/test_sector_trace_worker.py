@@ -8,10 +8,26 @@ async def test_extract_primary_sector_hits_claim() -> None:
     """primary 链 claim 命中 top_losers 板块 → 返回板块名 + 行情条目。"""
     from aistock_agent.agents.workers.sector_trace import extract_primary_sector
 
-    # 真实 MarketTraceResult 结构：candidates[].chain.nodes[].claim + primary_chain_id
+    # 真实 Node DB 行结构：快照与 trace 同级嵌在 content.market_trace 下
+    # （review._build_review_report 持久化结构；行顶层无 snapshot 键）
     report = {
+        "id": "r1",
+        "report_type": "review",
+        "report_date": "2026-07-16",
         "content": {
+            "display_report": {"summary": "半导体产业链暴跌", "sectors": ["存储板块"], "risks": []},
+            "schema_version": "2.0",
+            "snapshot_id": "s1",
             "market_trace": {
+                "snapshot": {
+                    "snapshot_id": "s1",
+                    "trade_date": "2026-07-16",
+                    "a_share": {
+                        "sectors": {
+                            "top_losers": [{"name": "存储板块", "pct_change": -4.2}]
+                        }
+                    },
+                },
                 "trace": {
                     "schema_version": "1.1",
                     "attribution_status": "confirmed",
@@ -45,16 +61,11 @@ async def test_extract_primary_sector_hits_claim() -> None:
                     "confidence": "high",
                     "unresolved_questions": [],
                     "prediction_validation": None,
-                }
-            }
-        },
-        "snapshot": {
-            "a_share": {
-                "sectors": {"top_losers": [{"name": "存储板块", "pct_change": -4.2}]}
-            }
+                },
+            },
         },
     }
-    name, row = extract_primary_sector(report)
+    name, row = extract_primary_sector({"report": report})
     assert name == "存储板块"
     assert row is not None and row["pct_change"] == -4.2
 
@@ -64,12 +75,92 @@ async def test_extract_primary_sector_none_when_no_sector() -> None:
     """primary 无板块且 top_losers 空 → (None, None)（不产出报告）。"""
     from aistock_agent.agents.workers.sector_trace import extract_primary_sector
 
-    report = {"content": {"market_trace": {"trace": {
-        "schema_version": "1.1", "attribution_status": "confirmed",
-        "candidates": [], "primary_chain_id": None, "alternative_chain_id": None,
-        "confidence": "high", "unresolved_questions": [], "prediction_validation": None,
-    }}}}
-    name, row = extract_primary_sector(report)
+    # 真实 Node 行结构：无 candidates、top_losers 空
+    report = {
+        "id": "r1",
+        "report_type": "review",
+        "report_date": "2026-07-16",
+        "content": {
+            "schema_version": "2.0",
+            "snapshot_id": "s1",
+            "market_trace": {
+                "snapshot": {
+                    "snapshot_id": "s1",
+                    "trade_date": "2026-07-16",
+                    "a_share": {"sectors": {"top_losers": []}},
+                },
+                "trace": {
+                    "schema_version": "1.1",
+                    "attribution_status": "confirmed",
+                    "candidates": [],
+                    "primary_chain_id": None,
+                    "alternative_chain_id": None,
+                    "confidence": "high",
+                    "unresolved_questions": [],
+                    "prediction_validation": None,
+                },
+            },
+        },
+    }
+    name, row = extract_primary_sector({"report": report})
+    assert name is None and row is None
+
+
+@pytest.mark.asyncio
+async def test_extract_primary_sector_none_when_claim_misses_top_losers() -> None:
+    """primary claim 未命中 top_losers（如涨日）→ (None, None)，不取 top_losers[0] 兜底。"""
+    from aistock_agent.agents.workers.sector_trace import extract_primary_sector
+
+    report = {
+        "id": "r1",
+        "report_type": "review",
+        "report_date": "2026-07-16",
+        "content": {
+            "schema_version": "2.0",
+            "snapshot_id": "s1",
+            "market_trace": {
+                "snapshot": {
+                    "snapshot_id": "s1",
+                    "trade_date": "2026-07-16",
+                    "a_share": {
+                        "sectors": {
+                            "top_losers": [{"name": "白酒板块", "pct_change": -0.3}]
+                        }
+                    },
+                },
+                "trace": {
+                    "schema_version": "1.1",
+                    "attribution_status": "confirmed",
+                    "candidates": [
+                        {
+                            "id": "c1",
+                            "category": "industry_technology_supply",
+                            "status": "supported",
+                            "verdict": "半导体产业链集体暴涨",
+                            "chain": {
+                                "nodes": [
+                                    {
+                                        "stage": "observable_result",
+                                        "claim": "半导体产业链集体暴涨",
+                                        "evidence_ids": [],
+                                    }
+                                ],
+                                "confirmed_prediction": [],
+                            },
+                            "supporting_evidence_ids": [],
+                            "counter_evidence_ids": [],
+                        }
+                    ],
+                    "primary_chain_id": "c1",
+                    "alternative_chain_id": None,
+                    "confidence": "high",
+                    "unresolved_questions": [],
+                    "prediction_validation": None,
+                },
+            },
+        },
+    }
+    name, row = extract_primary_sector({"report": report})
     assert name is None and row is None
 
 

@@ -49,32 +49,34 @@ def extract_primary_sector(
 ) -> tuple[str | None, dict[str, object] | None]:
     """从 review 报告确定性提取主因板块（不依赖 LLM）。
 
-    输入形态：payload 直接为 {"content": ..., "snapshot": ...}，或包一层
-    {"report": {...}}（D4 约定）。primary 链 claim 命中 top_losers 板块名 →
-    返回 (板块名, 行情条目)；回退 top_losers[0]；两者皆空返回 (None, None)
-    （调用方跳过不产出）。
+    输入形态：payload 包一层 {"report": Node行}（D4 约定，consumer 传
+    node_api.get_analysis_report 返回的 Node DB 行）。快照与 trace 均从
+    content.market_trace 下读取（review._build_review_report 持久化结构）。
+    primary 链 claim 命中 top_losers 板块名 → 返回 (板块名, 行情条目)；
+    无命中 → 返回 (None, None)（宁缺毋滥，调用方跳过不产出）。
     """
     report = payload.get("report")
     if not isinstance(report, dict):
-        report = payload
-    snapshot = report.get("snapshot")
+        return None, None
+    # Node 行：content.market_trace.snapshot + trace 同级（review 持久化结构）
+    content = report.get("content")
+    content = content if isinstance(content, dict) else None
+    market_trace = content.get("market_trace") if isinstance(content, dict) else None
+    market_trace = market_trace if isinstance(market_trace, dict) else None
+    snapshot = market_trace.get("snapshot") if isinstance(market_trace, dict) else None
+    snapshot = snapshot if isinstance(snapshot, dict) else None
     a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
     sectors = a_share.get("sectors") if isinstance(a_share, dict) else None
     raw_losers = sectors.get("top_losers") if isinstance(sectors, dict) else []
     losers = raw_losers if isinstance(raw_losers, list) else []
     top_losers = [t for t in losers if isinstance(t, dict)]
 
-    content = report.get("content")
-    market_trace = content.get("market_trace") if isinstance(content, dict) else None
     trace = market_trace.get("trace") if isinstance(market_trace, dict) else None
     for claim in _primary_chain_claims(trace):
         for los in top_losers:
             name = str(los.get("name") or "")
             if name and name in claim:
                 return name, los
-    if top_losers:
-        first = top_losers[0]
-        return str(first.get("name") or ""), first
     return None, None
 
 
