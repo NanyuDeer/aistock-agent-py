@@ -14,11 +14,29 @@ logger = get_logger()
 
 # 迭代四维内部 key → 人读名称（对齐 iterate_analyzer 维度语义）
 _DIM_LABELS = {
-    "dimension_1": "关注点重叠度（命中率/新覆盖率）",
+    "dimension_1": "关注点重叠度（命中率 / 新覆盖率）",
     "dimension_2": "方向-强度偏差",
-    "dimension_3": "归因一致性（attribution_match_rate）",
-    "dimension_4": "情绪基调偏差（sentiment_bias）",
+    "dimension_3": "归因一致性",
+    "dimension_4": "情绪基调偏差",
 }
+
+# 指标 key → 中文名（0~1 比例按百分比展示）
+_METRIC_LABELS = {
+    "hit_rate": "命中率",
+    "new_coverage_rate": "新覆盖率",
+    "attribution_match_rate": "归因一致率",
+    "mean_deviation": "方向偏差",
+    "ma10_mean_deviation": "MA10 方向偏差",
+    "ma20_sentiment_bias": "MA20 情绪偏差",
+}
+_RATIO_KEYS = {"hit_rate", "new_coverage_rate", "attribution_match_rate"}
+
+
+def _fmt_metric(key: str, value: float) -> str:
+    name = _METRIC_LABELS.get(key, key)
+    if key in _RATIO_KEYS:
+        return f"{name}={value * 100:.1f}%"
+    return f"{name}={value:.2f}"
 
 
 def _to_text(value: object, max_len: int) -> str:
@@ -29,7 +47,39 @@ def _to_text(value: object, max_len: int) -> str:
     else:
         text = str(value)
     text = text.replace("\r", " ").replace("\n", " ")
-    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+    if len(text) <= max_len:
+        return text
+    # 尽量在句末截断，避免硬切
+    cut = text[:max_len]
+    boundary = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("。"), cut.rfind("，"), cut.rfind("."))
+    if boundary > max_len * 0.6:
+        return cut[: boundary + 1] + "…（后略）"
+    return cut + "…（后略）"
+
+
+def _pick_human_text(value: object) -> str | None:
+    """从 LLM 产物里挑人类可读的主文本（去掉 JSON 花括号壳）。"""
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "summary",
+        "conclusion",
+        "suggestion",
+        "recommendation",
+        "main",
+        "analysis",
+        "impact",
+        "evidence",
+        "note",
+        "text",
+        "reason",
+    ):
+        inner = value.get(key)
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return None
 
 
 def format_iterate_text(payload: object) -> str | None:
@@ -53,24 +103,31 @@ def format_iterate_text(payload: object) -> str | None:
         if isinstance(card, dict):
             metrics = card.get("metrics")
             if isinstance(metrics, dict) and metrics:
-                lines.append(
-                    "   指标：" + "，".join(f"{k}={v}" for k, v in metrics.items() if isinstance(v, (int, float)))
-                )
-        dim_analysis = analysis.get(dim)
-        if dim_analysis is not None:
-            lines.append("   分析：" + _to_text(dim_analysis, 240))
+                parts = [
+                    _fmt_metric(k, v)
+                    for k, v in metrics.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                ]
+                if parts:
+                    lines.append("　指标：" + "，".join(parts))
+        human = _pick_human_text(analysis.get(dim))
+        if human:
+            lines.append("　分析：" + _to_text(human, 500))
 
     suggestions = payload.get("optimization_suggestions")
     if isinstance(suggestions, list) and suggestions:
         lines.append("\n优化建议：")
-        for sug in suggestions[:8]:
+        for sug in suggestions[:6]:
             if isinstance(sug, dict):
                 dim = sug.get("dimension")
                 label = _DIM_LABELS.get(str(dim)) if isinstance(dim, str) else ""
-                text = sug.get("suggestion") or sug.get("text") or sug.get("evidence") or str(sug)
-                lines.append(f"  - {('[' + label + '] ' if label else '')}{_to_text(text, 200)}")
+                human = _pick_human_text(sug)
+                if not human:
+                    human = str(sug)
+                prefix = f"  - [{label}] " if label else "  - "
+                lines.append(prefix + _to_text(human, 400))
             else:
-                lines.append("  - " + _to_text(sug, 200))
+                lines.append("  - " + _to_text(sug, 300))
     lines.append("\n详情请前往 App 查看。")
     return "\n".join(lines)
 
