@@ -217,9 +217,11 @@ class StockTraceConsumer:
         dropped_ids: list[str] = []
         dropped_codes: dict[str, int] = {}
         for message_id, raw_fields in entries:
-            # Redis Stream 消息 id 是 <毫秒时间戳>-<序号>，取毫秒段换算条目入库时刻
+            # Redis Stream 消息 id 是 <毫秒时间戳>-<序号>，取毫秒段换算条目入库时刻。
+            # redis-py 默认不 decode（decode_responses=False），xrange 返回 bytes 消息 id，
+            # 必须 _text 归一后再 split（否则 str.split 作用在 bytes 上抛 TypeError）。
             try:
-                entry_ms = int(message_id.split("-")[0]) / 1000.0
+                entry_ms = int(_text(message_id).split("-")[0]) / 1000.0
             except (ValueError, IndexError):
                 entry_ms = now
             if now - entry_ms < retention:
