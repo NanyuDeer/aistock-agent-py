@@ -34,7 +34,7 @@ def _build_midday_report(
 ) -> dict[str, object]:
     """组装双层报告。
 
-    解析成功：schema_version="2.0"；解析失败：schema_version="1.0"，raw_text 作 details。
+    解析成功：schema_version="2.1"；解析失败：schema_version="1.0"，raw_text 作 details。
     """
     if display_report is not None:
         return {
@@ -58,7 +58,7 @@ def _build_midday_report(
                 ),
             },
             "podcast_brief": podcast_brief or str(display_report.get("podcast_brief", "")),
-            "schema_version": "2.0",
+            "schema_version": "2.1",
         }
     return {
         "display_report": {
