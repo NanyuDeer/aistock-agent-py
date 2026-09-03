@@ -980,6 +980,42 @@ async def test_write_validation_profiles_skips_early_exit_no_result():
 
 
 @pytest.mark.asyncio
+async def test_write_validation_profiles_scans_pending_records_d3():
+    """D3（2026-09-03）回归：画像数据源改为档位级扫描（list_all = pending+verified）。
+
+    status=pending 但已有 result 档位的记录必须计入画像——不再等全档 verified
+    （long 2027 才到期），short/mid 到期写入即计入。
+    """
+    pending_rec = {
+        "id": 1001, "status": "pending",
+        "prediction": {"horizons": [
+            {"horizon": "short", "target": "600519", "direction": "bullish"},
+            {"horizon": "mid", "target": "600519", "direction": "bullish"},
+        ]},
+        # short 已写 hit；mid 未到期无 result → 不计入
+        "verification": {"short": {"result": "hit", "methodology_version": "3.0",
+                                   "target_type": "stock"}},
+    }
+    verified_rec = _verified_rec("上证指数", [
+        {"result": "miss", "methodology_version": "3.0", "target_type": "index"},
+    ])
+    written: dict[str, object] = {}
+    async def _set(key, profile, ttl=None):
+        written[key] = profile
+        return True
+    with (
+        patch.object(prediction_validator.node_api, "list_all_predictions",
+                     new=AsyncMock(return_value=[pending_rec, verified_rec])),
+        patch.object(prediction_validator, "set_cached_validation_profile",
+                     new=_set),
+    ):
+        n = await pv._write_validation_profiles()
+    assert n == 2
+    assert written["600519"]["n"] == 1 and written["600519"]["hit_rate"] == 1.0
+    assert written["000001"]["n"] == 1 and written["000001"]["hit_rate"] == 0.0
+
+
+@pytest.mark.asyncio
 async def test_run_once_writes_profile_after_verification():
     """Spec B §7 P4：run_once 收尾调用 _write_validation_profiles（结果成功回写后落画像）。"""
     record = _pending_record(due="2026-08-10", target="600519")
@@ -1012,6 +1048,47 @@ async def test_run_once_writes_profile_after_verification():
     assert setp.await_count == 1
     key = setp.await_args.args[0]
     assert key == "600519"
+
+
+@pytest.mark.asyncio
+async def test_run_once_normalizes_string_record_id_d2():
+    """D2（2026-09-03）回归：Node internal 曾返回 string id（pg BIGSERIAL）致
+    isinstance(record_id, int) 门禁全量跳过（updated=0 堆积）；现在兼容 string，
+    归一 int 后正常回写验证。"""
+    record = _pending_record(record_id="35", due="2026-08-10", target="600519")
+    captured: list[tuple[int, str, dict[str, object]]] = []
+
+    async def _update(
+        prediction_id: int, horizon: str, entry: dict[str, object]
+    ) -> dict[str, object]:
+        captured.append((prediction_id, horizon, entry))
+        return {"id": prediction_id}
+
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.node_api, "list_verified_predictions",
+                     new=AsyncMock(side_effect=[[], []])),  # backfill 空 + 画像窗口空
+        patch.object(prediction_validator.node_api, "get_stock_kline",
+                     new=AsyncMock(return_value=[
+                         {"trade_date": "2026-08-10", "pct_chg": 1.2},
+                         {"trade_date": "2026-08-11", "pct_chg": 0.3},
+                         {"trade_date": "2026-08-12", "pct_chg": -0.2},
+                         {"trade_date": "2026-08-13", "pct_chg": 0.1},
+                     ])),
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=_update),
+        patch.object(prediction_validator, "set_cached_validation_profile",
+                     new=AsyncMock(return_value=True)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 8, 10)),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    pid, horizon, entry = captured[0]
+    assert pid == 35 and isinstance(pid, int)  # string id 已归一为 int
+    assert horizon == "mid"
+    assert entry["result"] == "hit"
 
 
 # --- light_predict 下游就绪：带交易所后缀 ts_code 归一化（个股验证环） ---

@@ -487,7 +487,12 @@ class NodeApiClient:
         return result
 
     async def put(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
-        """PUT Node 内部 API，并返回已解包的对象 data。"""
+        """PUT Node 内部 API，并返回已解包的对象 data。
+
+        D4（2026-09-03）：与 post/patch/delete 不同，put 仅用于预测验证回写，调用方
+        （run_once/backfill）依赖异常感知真实写失败以正确计数与告警——HTTP/请求/业务
+        失败一律**抛出**，不再吞错返回 None（吞 5xx 曾致 updated 虚增、D1 生产被静默）。
+        """
         url = f"{self._base_url}{path}"
         headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
         try:
@@ -495,18 +500,15 @@ class NodeApiClient:
             response = await client.put(url, json=body, headers=headers)
             response.raise_for_status()
             payload = response.json()
-            if not isinstance(payload, dict) or payload.get("code") != 200:
-                logger.error("node_api_put_business_error", url=url)
-                return None
-            data = payload.get("data")
-            return data if isinstance(data, dict) else None
-        except httpx.HTTPStatusError as exc:
-            logger.error("node_api_put_http_error", url=url, status=exc.response.status_code)
-        except httpx.RequestError as exc:
-            logger.error("node_api_put_request_error", url=url, error=str(exc))
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            raise  # 让调用方 try/except 感知回写失败
         except Exception as exc:
-            logger.error("node_api_put_unexpected_error", url=url, error=str(exc))
-        return None
+            raise RuntimeError(f"node_api_put_unexpected_error url={url}: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            code = payload.get("code") if isinstance(payload, dict) else "?"
+            raise RuntimeError(f"node_api_put_business_error url={url} code={code}")
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
 
     # ─── 预测能力落库与验证（大盘溯源预测 → prediction_records）───
 
@@ -539,6 +541,32 @@ class NodeApiClient:
     async def list_verified_predictions(self, limit: int = 500) -> list[dict[str, object]]:
         """读取已验证预测记录（统计出口 D3，GET /internal/predictions?status=verified）。"""
         return await self.get_list(f"/internal/predictions?status=verified&limit={limit}") or []
+
+    async def list_all_predictions(self, limit: int = 200) -> list[dict[str, object]]:
+        """D3（2026-09-03）：全部预测记录（pending 游标分页 + verified 存量）供档位级扫描。
+
+        Node 判定 status=verified 需 short/mid/long 全档完结（long 到期 2027），画像/统计
+        若只读 verified 将数月恒空；画像数据源改为扫全部记录中含 result 的档位
+        （short/mid 到期写入即计入），status 保留全档完结语义，仅消费侧解耦。
+        """
+        records: list[dict[str, object]] = []
+        cursor: int | None = None
+        while True:
+            batch = await self.list_pending_predictions(limit=limit, before_id=cursor)
+            if not batch:
+                break
+            records.extend(batch)
+            last_id = batch[-1].get("id")
+            if isinstance(last_id, str) and last_id.isdigit():
+                cursor = int(last_id)
+            elif isinstance(last_id, int):
+                cursor = last_id
+            else:
+                break
+            if len(batch) < limit:
+                break
+        records.extend(await self.list_verified_predictions(limit=500))
+        return records
 
     async def get_index_kline(
         self, code: str, days: int = 130,
