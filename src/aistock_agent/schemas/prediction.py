@@ -96,6 +96,15 @@ class PredictionCondition(BaseModel):
     )
 
 
+class OmittedHorizon(BaseModel):
+    """被省略（未产出）档位的显式留痕（spec §5.3）：供产品解释与画像诊断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: PredictionHorizonType
+    reason: str  # LLM 产出；归一化层校验非空、非空泛
+
+
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""
 
@@ -104,6 +113,7 @@ class PredictionResult(BaseModel):
     schema_version: Literal["3.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
+    omitted_horizons: list[OmittedHorizon] = Field(default_factory=list)  # 缺档留痕（spec §5.3）
     conditions: list[PredictionCondition] = Field(default_factory=list)  # 条件化预判（§3.1）；旧 2.0 记录为空
     target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
@@ -112,6 +122,14 @@ class PredictionResult(BaseModel):
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
     evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
+
+    @model_validator(mode="after")
+    def _check_omitted_not_overlap(self) -> "PredictionResult":
+        produced = {h.horizon for h in self.horizons}
+        for o in self.omitted_horizons:
+            if o.horizon in produced:
+                raise ValueError(f"horizon {o.horizon} 同时出现在 horizons 与 omitted_horizons")
+        return self
 
     @model_validator(mode="after")
     def _require_horizons(self) -> "PredictionResult":

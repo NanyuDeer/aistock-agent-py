@@ -179,3 +179,41 @@ def test_prediction_schema_version_literal_3():
             risks=[],
             evidence_ids=[],
         )
+
+
+# ===== omitted_horizons 缺档留痕（Task 2 / spec §5.3）=====
+
+
+def _base_result(horizons: list[str]) -> PredictionResult:
+    """最小合法 PredictionResult（字段见 schemas/prediction.py，horizons 按输入档位列表构造）。"""
+    return PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[
+            {
+                "horizon": h, "remaining_estimate": "2-4 周", "phase": "building",
+                "direction": "bullish", "target": "上证指数", "metric_projection": "+2%",
+                "confidence": "medium",
+            }
+            for h in horizons
+        ],
+        evolution_narrative="短期冲高后回落",
+        risks=[{"factor": "政策转向", "invalidation": "若出现收紧"}],
+        evidence_ids=["evt-1"],
+    )
+
+
+def test_omitted_horizons_roundtrip():
+    r = PredictionResult(**{**_base_result(["short"]).model_dump(),
+                            "omitted_horizons": [
+                                {"horizon": "mid", "reason": "情绪性脉冲，缺乏中期产业逻辑"},
+                                {"horizon": "long", "reason": "无中长期催化"},
+                            ]})
+    assert [o.horizon for o in r.omitted_horizons] == ["mid", "long"]
+    assert r.schema_version == "3.0"
+
+
+def test_omitted_horizons_reject_overlap_with_horizons():
+    with pytest.raises(ValueError):
+        PredictionResult(**{**_base_result(["short", "mid"]).model_dump(),
+                            "omitted_horizons": [{"horizon": "mid", "reason": "x"}]})
