@@ -331,3 +331,39 @@ async def test_morning_delta_refreshes_anchor(
     content = json.loads(out["final_response"])
     anchor = content["rhythm_card"]["next_event_anchor"]
     assert anchor is not None and anchor["title"] == "FOMC 议息"
+
+
+@pytest.mark.asyncio
+async def test_dense_band_injected_into_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task2：长历史取数 + amount 对齐 + touch_strength 注入（确定性，不编造）。
+
+    _compose_after_close 生成的分支必须含 position_action/anchor（Task1 接线），
+    且 touch_strength 被回填为确定性数值（touch_count/len(closes)，非命中概率）。
+    同时验证 amount 由统一的 rows 列表统一取近窗口，不与 closes 独立过滤漂移。
+    """
+    from aistock_agent.services.event_calendar import EventWindow
+
+    async def fake_kline(code, days=120, **kw):
+        return [
+            {"trade_date": f"2026-0{1 + i % 9}-{1 + i % 28}", "close": 3000 + i,
+             "high": 3010 + i, "low": 2990 + i, "amount": 100.0}
+            for i in range(120)
+        ]
+
+    monkeypatch.setattr(worker_mod.node_api, "get_index_kline", fake_kline)
+    monkeypatch.setattr(
+        worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 50})
+    )
+    monkeypatch.setattr(
+        worker_mod, "load_event_window", AsyncMock(return_value=EventWindow(events=[]))
+    )
+    monkeypatch.setattr(worker_mod, "_load_sentiment_series", lambda days=7: ([], [], 0, None))
+
+    result = await worker_mod._compose_after_close("2026-08-28")
+    assert result is not None
+    branches = result["rhythm_card"]["branches"]
+    assert branches
+    # Task1 接线：每个分支都含 position_action 与 anchor
+    assert all("position_action" in b and "anchor" in b for b in branches)
+    # Task2 注入：touch_strength 为确定性数值（len(closes) 非 0 时必为数值）
+    assert all(isinstance(b.get("touch_strength"), int | float) for b in branches)

@@ -17,7 +17,7 @@ from aistock_agent.prompts.workers.rhythm_master import (
     RHYTHM_NARRATIVE_FALLBACK,
     build_narrative_prompt,
 )
-from aistock_agent.services import rhythm_engine
+from aistock_agent.services import rhythm_dense_band, rhythm_engine
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_calendar import load_event_window
 from aistock_agent.services.llm import get_quick_think
@@ -95,11 +95,25 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     if not today_archive.exists():
         missing.append("情绪数据缺失（沿用前值）")
     prev_phase = latest_phase
-    kline = await node_api.get_index_kline(INDEX_CODE, days=120) or []  # 60→120：MA60 佐证需 ≥65 根
-    closes = [float(r["close"]) for r in kline if r.get("close") is not None]
-    highs = [float(r["high"]) for r in kline if r.get("high") is not None]
-    lows = [float(r["low"]) for r in kline if r.get("low") is not None]
-    amounts = [float(r["amount"]) for r in kline if r.get("amount") is not None]
+    # 长历史解锁：传 start_date（internal.ts 仅在传 start_date 时拉 5000 行），
+    # 供 dense_band 与 MA60 佐证（≥65 根 close）取足近 65 根。
+    kline = (
+        await node_api.get_index_kline(
+            INDEX_CODE,
+            days=200,
+            start_date=date_cls.fromisoformat(basis_date).strftime("%Y%m%d"),
+        )
+        or []
+    )
+    # 统一按"交易日序"取 close 非空行，再取近窗口；避免 closes/highs/lows/amounts
+    # 各自独立过滤导致近 20 交易日量能（amounts[-20:]）与价格序列错位（硬约束 #6）。
+    rows = [r for r in kline if r.get("close") is not None]
+    closes = [float(r["close"]) for r in rows[-65:]]
+    highs = [float(r["high"]) for r in rows[-65:] if r.get("high") is not None]
+    lows = [float(r["low"]) for r in rows[-65:] if r.get("low") is not None]
+    amounts = [
+        float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]
+    ]
     # C1：指数技术位多级确认佐证（确定性计算，LLM 不产数值）；不足 65 根时如实标注
     breadth = (
         rhythm_engine.ma_breadth(closes)
@@ -162,6 +176,14 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
         missing.append("事件源未接（日历接口不可用）")
     if win.calendar_uncovered:
         missing.append("交易日历未覆盖（事件窗口不可用）")
+    # dense_band 密集触碰带（确定性纯函数，硬约束 #1）：回填各分支 touch_strength。
+    # touch_strength = 触碰次数/有效 close 数（非命中概率）；len(closes)=0 时取 None。
+    # dense_support/dense_pressure 本任务仅计算不接入支撑压力值（接入属后续）。
+    dense_support, dense_pressure, touch_count, _ = rhythm_dense_band.dense_band(
+        closes=closes, highs=highs, lows=lows, amount=amounts, window=40
+    )
+    for b in branches:
+        b["touch_strength"] = touch_count / len(closes) if len(closes) else None
     card = {
         "score": round(score, 1),
         "level": level,
