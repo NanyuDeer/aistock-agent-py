@@ -61,6 +61,26 @@ def test_labels_default_empty_and_parse():
     assert cond_old.label == ""
 
 
+def test_scenario_keywords_default_empty_and_parse():
+    """2026-09-03 scenario_keywords 预判关键词：与 condition keywords 同构（1~2 个/≤10 字），
+    新数据携带正常解析、旧记录缺省为空数组。"""
+    cond_with = PredictionCondition(
+        condition="若放量站稳前高",
+        label="放量突破 · 短线续攻",
+        keywords=["量能≥2800亿"],
+        scenario_keywords=["上探+3%~+5%", "分歧加大"],
+        scenario="短线做多动能延续，累计涨幅上看 +3%~+5%，之后分歧加大。",
+        anchor=PredictionAnchor(horizon="short", threshold="+3%", direction="bullish"),
+    )
+    assert cond_with.scenario_keywords == ["上探+3%~+5%", "分歧加大"]
+    cond_old = PredictionCondition(
+        condition="缩量企稳、不破前低",
+        scenario="空头衰竭、修复至平台",
+        anchor=PredictionAnchor(horizon="short", threshold="+5%", direction="bullish"),
+    )
+    assert cond_old.scenario_keywords == []
+
+
 def test_empty_horizons_raises():
     with pytest.raises(ValidationError):
         PredictionResult(

@@ -105,6 +105,13 @@ class PredictionCondition(BaseModel):
         description="简洁展示用关键词（1~2 个，单条 ≤10 字、硬上限 15 字，如 两市放量≥2.2万亿）；"
         "condition 本体不受影响仍为完整句。旧记录为空数组。",
     )
+    scenario_keywords: list[str] = Field(
+        default_factory=list,
+        description="预判关键词（2026-09-03）：scenario 的简洁展示摘要（1~2 个，单条 ≤10 字、"
+        "硬上限 15 字），侧重**触发后的方向与幅度**（如 上探+3%~+5% / 回踩-3%内 / 窄幅±1%）；"
+        "与 keywords（触发前提）语义互补、禁止与 label 后段/condition 大段重复；"
+        "scenario 本体不受影响仍为完整句。旧记录为空数组。",
+    )
 
 
 class OmittedHorizon(BaseModel):
