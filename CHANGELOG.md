@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-09-03 — 盘中报「午后前瞻」schema 2.1（机会/风险短词契约）
+
+**开发者**: 37588
+
+### 改进
+- `prompts/workers/midday.py`：「午后前瞻」分段输出改为结构化 `opportunities` 关键词（4-5 个、每个 ≤8 字纯词、无 conclusion 段落，完整叙述保留于 details 第2部分）；`risks` 输出收紧为 4-5 条 ≤8 字短词；schema_version 示例升 `"2.1"`
+- `agents/workers/midday.py`：`_build_midday_report` 成功分支 schema_version `"2.0"`→`"2.1"`（降级分支 `"1.0"` 不动；sections/risks 原样透传，12:15 广播链路不受影响）
+
+### 测试
+- 新增 `tests/unit/test_midday_prompt_contract.py`：锁定 prompt 契约（opportunities ≤8 字 4-5 个、risks 短词、schema 2.1、午后前瞻 JSON 示例无 conclusion）+ `_build_midday_report` 版本与透传断言（断言贴 prompt 原文并负向锁定）
+
+### 文档
+- 根 `AGENTS.md`：12:05 盘中报定时链路行补充 schema 2.1 契约说明（12:15 广播行无需改）
+
 ## [main] 2026-09-02 — Spec D 收口：板块迭代回放接线 + 板块预判生产触发 + 个股验证/迭代环同构
 
 **开发者**: Aria
