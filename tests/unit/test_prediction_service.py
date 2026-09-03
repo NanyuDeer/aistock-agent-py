@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from aistock_agent.config import settings
 from aistock_agent.schemas.market_trace import (
+    CandidateExplanation,
     MarketTraceResult,
     MarketTraceSnapshot,
     ReviewArtifact,
@@ -57,11 +58,28 @@ def _make_snapshot(trade_date="2026-08-10") -> MarketTraceSnapshot:
 
 
 def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
+    # 动态档位（Task4）：大盘溯源候选恒含 4 类（review 固定），confirmed/hypothesis 态
+    # 主因 = supported 候选。取 market_positioning_liquidity（资金面）→ sector_rotation
+    # 白名单 {short, mid}，与 _VALID_LLM_JSON 两档形态自洽（mid 不被裁剪、不 degraded）。
+    # insufficient 态无主因（不进预测门禁，gate_skipped）。
+    has_primary = attribution_status in {"confirmed", "hypothesis"}
     return MarketTraceResult(
         schema_version="1.1",
         attribution_status=attribution_status,
-        candidates=[],
-        primary_chain_id=None,
+        candidates=[
+            CandidateExplanation(
+                id="market_positioning_liquidity",
+                category="market_positioning_liquidity",
+                status="supported",
+                verdict="资金与情绪主导短线走势，无中期基本面依据",
+                chain=None,
+                supporting_evidence_ids=["m1"],
+                counter_evidence_ids=[],
+            ),
+        ]
+        if has_primary
+        else [],
+        primary_chain_id="market_positioning_liquidity" if has_primary else None,
         alternative_chain_id=None,
         confidence="high" if attribution_status == "confirmed" else "low",
         unresolved_questions=[],

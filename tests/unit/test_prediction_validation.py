@@ -48,7 +48,8 @@ async def test_read_validation_profile_cache_hit():
     with patch.object(pv, "get_cached_validation_profile",
                       new=AsyncMock(return_value=cached)) as getc, \
          patch.object(pv, "_collect_target_entries", new=AsyncMock(return_value=[])) as collect, \
-         patch.object(pv, "set_cached_validation_profile", new=AsyncMock(return_value=True)) as setc:
+         patch.object(pv, "set_cached_validation_profile",
+                      new=AsyncMock(return_value=True)) as setc:
         out = await pv.read_validation_profile(_STOCK, horizon="short")
     assert out["source"] == "cache" and out["cached"] is True
     assert out["horizon"] == "short" and out["hit_rate"] == 1.0
@@ -169,3 +170,39 @@ def test_enrich_prediction_input_low_rate_sufficient_notes():
     # 命中率正常 → 不附 note
     ok = pv.enrich_prediction_input({}, _profile(n=40, hit_rate=0.6, sufficient_sample=True))
     assert "note" not in ok["validation_profile"]
+
+
+def test_enrich_horizon_low_hit_attaches_warning():
+    """Task5（B 期）：mid/long 档样本≥3 且命中率<0.4 → note 附抑制提示；样本不足档不提示。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {
+                   "short": {"n": 6, "hit_rate": 0.67},
+                   "mid": {"n": 4, "hit_rate": 0.25},   # n>=3 且 <0.4 → 抑制提示
+                   "long": {"n": 1, "hit_rate": 0.0},   # n<3 → 不提示
+               }}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    txt = str(out.get("validation_profile", {}).get("note", ""))
+    assert "mid" in txt and "印证少" in txt
+    assert "long" not in txt  # 无样本档不提示
+
+
+def test_enrich_horizon_ok_no_warning():
+    """Task5（B 期）：mid 档命中率正常（≥0.4）→ 不附任何 note。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {"mid": {"n": 4, "hit_rate": 0.6}}}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    assert "note" not in out.get("validation_profile", {})
+
+
+def test_enrich_global_and_horizon_notes_concat_no_punct_clash():
+    """FixRound：全局 sufficient 低命中 note 与 mid 低命中 horizon note 并存 → 同键拼接含两者，
+    且拼接处无"句号+分号"连用病句（分号前句尾句号去除其一）。"""
+    profile = {"target": "000001", "n": 40, "hit_rate": 0.25, "sufficient_sample": True,
+               "horizon_breakdown": {"mid": {"n": 4, "hit_rate": 0.25}}}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    note = out["validation_profile"].get("note")
+    assert note
+    assert "该 target 同类条件历史命中率低" in note  # 全局低命中 note 在
+    assert "mid" in note and "历史印证少" in note     # horizon note 在
+    assert "。；" not in note                        # 无句号+分号病句
+

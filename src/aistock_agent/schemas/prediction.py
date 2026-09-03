@@ -26,6 +26,11 @@ class PredictionHorizon(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     horizon: PredictionHorizonType
+    label: str = Field(
+        default="",
+        description="该档基准走势短语（4~6 字，如 恐慌出清为主/震荡磨底/震荡走强；"
+        "洞见卡基准行“基准 · {label}”展示；旧记录为空则前端回退不渲染）。",
+    )
     remaining_estimate: str  # 还能持续多久（定性估算，如 "2-4 周"）
     phase: PredictionPhase  # 当前演化阶段
     direction: Literal["bullish", "bearish", "neutral"]  # 该档位影响方向
@@ -87,6 +92,12 @@ class PredictionCondition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     condition: str  # 触发条件（完整可量化事实描述，长句保留，供详细报告原文展示）
+    label: str = Field(
+        default="",
+        description="路径短语名，固定两段式“{市场状态/触发条件，≈4 字，≤6} · {触发后走势，≈4 字，≤6}”，"
+        "如 恐慌出清 · 下跌中继 / 缩量企稳 · 平台修复（洞见卡路径首行加粗展示；"
+        "旧记录为空则前端回退用 condition 主干）。",
+    )
     scenario: str  # 条件满足后的走势预判（尽量含幅度/目标位）
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
     keywords: list[str] = Field(
@@ -94,6 +105,30 @@ class PredictionCondition(BaseModel):
         description="简洁展示用关键词（1~2 个，单条 ≤10 字、硬上限 15 字，如 两市放量≥2.2万亿）；"
         "condition 本体不受影响仍为完整句。旧记录为空数组。",
     )
+    scenario_keywords: list[str] = Field(
+        default_factory=list,
+        description="预判关键词（2026-09-03）：scenario 的简洁展示摘要（1~2 个，单条 ≤10 字、"
+        "硬上限 15 字），侧重**触发后的方向与幅度**（如 上探+3%~+5% / 回踩-3%内 / 窄幅±1%）；"
+        "与 keywords（触发前提）语义互补、禁止与 label 后段/condition 大段重复；"
+        "scenario 本体不受影响仍为完整句。旧记录为空数组。",
+    )
+
+
+class OmittedHorizon(BaseModel):
+    """被省略（未产出）档位的显式留痕（spec §5.3）：供产品解释与画像诊断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: PredictionHorizonType
+    reason: str  # LLM 产出；归一化层校验非空、非空泛
+
+    @model_validator(mode="after")
+    def _reason_not_blank(self) -> "OmittedHorizon":
+        # spec §5.4：归一化层校验非空——空白/纯空格 reason 无解释价值，拒绝（空泛词
+        # 由提示词约束 + LLM 侧控制，此处只挡结构空值）。
+        if not self.reason.strip():
+            raise ValueError("omitted reason must not be blank")
+        return self
 
 
 class PredictionResult(BaseModel):
@@ -104,14 +139,25 @@ class PredictionResult(BaseModel):
     schema_version: Literal["3.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
-    conditions: list[PredictionCondition] = Field(default_factory=list)  # 条件化预判（§3.1）；旧 2.0 记录为空
+    omitted_horizons: list[OmittedHorizon] = Field(default_factory=list)  # 缺档留痕（spec §5.3）
+    # 条件化预判（§3.1）；旧 2.0 记录为空
+    conditions: list[PredictionCondition] = Field(default_factory=list)
     target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
-    evolution_steps: list[EvolutionStep] = Field(default_factory=list)  # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    evolution_steps: list[EvolutionStep] = Field(default_factory=list)
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
     evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
+
+    @model_validator(mode="after")
+    def _check_omitted_not_overlap(self) -> "PredictionResult":
+        produced = {h.horizon for h in self.horizons}
+        for o in self.omitted_horizons:
+            if o.horizon in produced:
+                raise ValueError(f"horizon {o.horizon} 同时出现在 horizons 与 omitted_horizons")
+        return self
 
     @model_validator(mode="after")
     def _require_horizons(self) -> "PredictionResult":

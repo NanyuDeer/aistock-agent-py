@@ -38,6 +38,49 @@ def test_valid_result():
     assert result.horizons[0].horizon == "mid"
 
 
+def test_labels_default_empty_and_parse():
+    """2026-09-03 label 展示字段：horizon.label（基准走势）与 condition.label（两段式路径名）。
+    新数据携带 label 正常解析；旧记录缺省为空字符串，不破坏既有校验。"""
+    horizon_with = PredictionHorizon(**_valid_horizon(label="恐慌出清为主"))
+    assert horizon_with.label == "恐慌出清为主"
+    horizon_old = PredictionHorizon(**_valid_horizon())
+    assert horizon_old.label == ""
+
+    cond_with = PredictionCondition(
+        condition="成交额放大至 900 亿以上、收盘较当前再跌超 2%",
+        label="恐慌出清 · 下跌中继",
+        scenario="恐慌出清、惯性下探 -3%~-5%",
+        anchor=PredictionAnchor(horizon="short", threshold="-3%", direction="bearish"),
+    )
+    assert cond_with.label == "恐慌出清 · 下跌中继"
+    cond_old = PredictionCondition(
+        condition="缩量企稳、不破前低",
+        scenario="空头衰竭、修复至平台",
+        anchor=PredictionAnchor(horizon="short", threshold="+5%", direction="bullish"),
+    )
+    assert cond_old.label == ""
+
+
+def test_scenario_keywords_default_empty_and_parse():
+    """2026-09-03 scenario_keywords 预判关键词：与 condition keywords 同构（1~2 个/≤10 字），
+    新数据携带正常解析、旧记录缺省为空数组。"""
+    cond_with = PredictionCondition(
+        condition="若放量站稳前高",
+        label="放量突破 · 短线续攻",
+        keywords=["量能≥2800亿"],
+        scenario_keywords=["上探+3%~+5%", "分歧加大"],
+        scenario="短线做多动能延续，累计涨幅上看 +3%~+5%，之后分歧加大。",
+        anchor=PredictionAnchor(horizon="short", threshold="+3%", direction="bullish"),
+    )
+    assert cond_with.scenario_keywords == ["上探+3%~+5%", "分歧加大"]
+    cond_old = PredictionCondition(
+        condition="缩量企稳、不破前低",
+        scenario="空头衰竭、修复至平台",
+        anchor=PredictionAnchor(horizon="short", threshold="+5%", direction="bullish"),
+    )
+    assert cond_old.scenario_keywords == []
+
+
 def test_empty_horizons_raises():
     with pytest.raises(ValidationError):
         PredictionResult(
@@ -101,7 +144,9 @@ def test_prediction_condition_full():
     c = PredictionCondition(
         condition="若明日放量站稳前高 82.50 元",
         scenario="则趋势延续，上看 +5%",
-        anchor=PredictionAnchor(horizon="short", threshold="+5%", metric="close", direction="bullish"),
+        anchor=PredictionAnchor(
+            horizon="short", threshold="+5%", metric="close", direction="bullish"
+        ),
     )
     assert c.anchor.horizon == "short"
     assert c.anchor.direction == "bullish"
@@ -179,3 +224,49 @@ def test_prediction_schema_version_literal_3():
             risks=[],
             evidence_ids=[],
         )
+
+
+# ===== omitted_horizons 缺档留痕（Task 2 / spec §5.3）=====
+
+
+def _base_result(horizons: list[str]) -> PredictionResult:
+    """最小合法 PredictionResult（字段见 schemas/prediction.py，horizons 按输入档位列表构造）。"""
+    return PredictionResult(
+        schema_version="3.0",
+        prediction_status="confirmed",
+        horizons=[
+            {
+                "horizon": h, "remaining_estimate": "2-4 周", "phase": "building",
+                "direction": "bullish", "target": "上证指数", "metric_projection": "+2%",
+                "confidence": "medium",
+            }
+            for h in horizons
+        ],
+        evolution_narrative="短期冲高后回落",
+        risks=[{"factor": "政策转向", "invalidation": "若出现收紧"}],
+        evidence_ids=["evt-1"],
+    )
+
+
+def test_omitted_horizons_roundtrip():
+    r = PredictionResult(**{**_base_result(["short"]).model_dump(),
+                            "omitted_horizons": [
+                                {"horizon": "mid", "reason": "情绪性脉冲，缺乏中期产业逻辑"},
+                                {"horizon": "long", "reason": "无中长期催化"},
+                            ]})
+    assert [o.horizon for o in r.omitted_horizons] == ["mid", "long"]
+    assert r.schema_version == "3.0"
+
+
+def test_omitted_horizons_reject_overlap_with_horizons():
+    with pytest.raises(ValueError):
+        PredictionResult(**{**_base_result(["short", "mid"]).model_dump(),
+                            "omitted_horizons": [{"horizon": "mid", "reason": "x"}]})
+
+
+def test_omitted_horizons_reject_blank_reason():
+    # spec §5.4 归一化层校验非空：空白/纯空格 reason 无解释价值，校验层拒绝（final fix）
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValidationError):
+            PredictionResult(**{**_base_result(["short"]).model_dump(),
+                                "omitted_horizons": [{"horizon": "mid", "reason": blank}]})

@@ -165,7 +165,7 @@ def _make_stats() -> dict[str, int]:
 
 
 async def run_sector_wind_prediction(report_date: str | None = None) -> dict[str, int]:
-    """执行一次风口板块批量预判（板块四环 spec §6.3，scheduler 交易日 21:30 调用）。
+    """执行一次风口板块批量预判（板块四环 spec §6.3，scheduler 交易日 19:30 调用）。
 
     Args:
         report_date: 报告交易日 YYYY-MM-DD；缺省取上海时区自然日
