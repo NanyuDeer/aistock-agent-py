@@ -1,4 +1,7 @@
-from aistock_agent.prompts.workers.prediction import PREDICTION_PROMPT
+from aistock_agent.prompts.workers.prediction import (
+    PREDICTION_CHAT_PROMPT,
+    PREDICTION_PROMPT,
+)
 
 
 def test_prompt_covers_three_horizons():
@@ -29,3 +32,26 @@ def test_prompt_instructs_schema_version():
     # Spec A §3.3：schema_version 升 "3.0"（条件化预判）
     assert "schema_version" in PREDICTION_PROMPT
     assert "3.0" in PREDICTION_PROMPT
+
+
+def test_prediction_prompt_horizon_policy_semantics():
+    # spec 2026-09-03-动态档位：影响时长分流——short 必产 / 白名单 required+optional /
+    # optional 有据才产并写 omitted_horizons / 禁越白名单产档（两处 prompts 同语义）
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "omitted_horizons" in prompt
+        assert "必须产出" in prompt            # short 必产
+        assert "required" in prompt and "optional" in prompt
+        assert "禁止输出白名单之外的档位" in prompt
+        assert "{driver_type}" in prompt        # 白名单由系统注入的运行时占位（Task4 注入）
+
+
+def test_prediction_prompt_removes_force_three_horizons():
+    # 旧"强制三档并列"引导句必须移除（不再默认产出 short/mid/long 三档）；
+    # 段落中"不再默认三档"是否定式说明（允许存在），故断言只禁旧引导句片段
+    assert "三档补充持续性判断" not in PREDICTION_PROMPT        # 旧任务引导句
+    assert "三档分别输出" not in PREDICTION_CHAT_PROMPT         # 旧任务引导句
+    assert "为三档持续性判断" not in PREDICTION_PROMPT          # 旧 horizons 引导
+    assert "把三档串成" not in PREDICTION_PROMPT                # 旧 evolution_narrative
+    assert "把三档串成" not in PREDICTION_CHAT_PROMPT
+    assert "若三档方向" not in PREDICTION_PROMPT
+    assert "若三档方向" not in PREDICTION_CHAT_PROMPT
