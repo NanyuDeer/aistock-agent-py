@@ -35,7 +35,7 @@ from aistock_agent.schemas.market_trace import (
     PhenomenonDiscoveryResult,
     ReviewArtifact,
 )
-from aistock_agent.schemas.prediction import PredictionHorizon, PredictionResult
+from aistock_agent.schemas.prediction import OmittedHorizon, PredictionHorizon, PredictionResult
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import (
@@ -471,6 +471,150 @@ def _corroboration_inputs(
     return quote_dir, flow_dir, news_dirs
 
 
+# ============================================================================
+# Task 4（2026-09-03 动态档位 spec §5.4）：归一化强制层
+# model_validate 后、due_dates 计算前确定性调用（越界裁剪/short 恒产/required degraded）
+# ============================================================================
+
+
+def apply_horizon_policy(
+    prediction: PredictionResult,
+    driver_type: str,
+    target_kind: str,
+) -> PredictionResult:
+    """spec §5.4：确定性强制层（model_validate 后、due_dates 计算前调用）。
+
+    1) 越白名单档位裁剪（防 LLM 漂移）；
+    2) short 恒产：白名单恒含 short，裁剪后 short 缺失说明 LLM 结构性漏产 → 抛 ValueError，
+       由调用方既有异常兜底（run_predict → parse_failed 不落库；chat/sector → None 降级，
+       均不留脏 pending）；
+    3) required 档缺失 → 不硬补凑数：写 omitted_horizons + prediction_status="hypothesis"
+       （spec §9 决策③ degraded，宁缺毋滥、可审计）；
+    4) omitted_horizons 归一：只保留「本轮确实未产出」的档——含白名单内未产（依据不足）
+       与被越界裁剪档（LLM 产出了但不在白名单），与 horizons 不重叠（Task2 validator 兜底）。
+    """
+    from aistock_agent.services.prediction_horizon_policy import infer_horizon_policy
+
+    policy = infer_horizon_policy(driver_type, target_kind)
+    allowed = set(policy.required) | set(policy.optional)
+    kept = [h for h in prediction.horizons if h.horizon in allowed]
+    if not kept or "short" not in {h.horizon for h in kept}:
+        # short 是白名单恒有档；缺失 = LLM 结构性漏产（或全被越界裁剪），拒绝半残落库
+        raise ValueError("no horizon left after policy (short missing)")
+
+    produced = {h.horizon for h in kept}
+    llm_produced = {h.horizon for h in prediction.horizons}
+    omitted_horizons = list(prediction.omitted_horizons)  # LLM 原留痕，下面归一
+
+    degraded = False
+    for hor in ("mid", "long"):
+        if hor in produced:
+            continue
+        if hor in policy.required:
+            degraded = True  # required 缺档：宁缺毋滥，标 degraded 可审计
+        if hor in policy.required or hor in policy.optional or hor in llm_produced:
+            # 未产出档统一补留痕（供产品解释与画像诊断）；已有 LLM 留痕则保留其 reason：
+            # - 白名单允许/要求但未产出 → 依据不足（系统归一）；
+            # - LLM 越界产出被系统裁剪 → 标注越界原因（区别于 LLM 主动省略）。
+            if any(o.horizon == hor for o in omitted_horizons):
+                continue
+            reason = (
+                "越出档位白名单，系统裁剪（影响时长无依据）"
+                if hor in llm_produced
+                else "依据不足未产出（系统归一）"
+            )
+            omitted_horizons.append(OmittedHorizon(horizon=hor, reason=reason))
+
+    update: dict[str, object] = {"horizons": kept, "omitted_horizons": omitted_horizons}
+    if degraded:
+        update["prediction_status"] = "hypothesis"
+    return prediction.model_copy(update=update)
+
+
+# 大盘溯源候选类别（review 固定 4 类，CandidateExplanation.category，英文枚举）→ driver_type。
+# 与 classify_driver 的中文关键词表解耦：这里做枚举级精确映射（英文枚举无法被中文关键词命中），
+# 未知名回落走 classify_driver 保守档。
+_TRACE_CATEGORY_TO_DRIVER: dict[str, str] = {
+    # 国内宏观与政策 → 政策/宏观驱动（required short/mid/long）
+    "domestic_macro_policy": "policy_macro",
+    # 产业与技术供给侧 → 产业趋势/基本面驱动（required short/mid + optional long）
+    "industry_technology_supply": "trend_fundamental",
+    # 市场定位与资金面 → 资金主线/风格轮动（required short + optional mid）
+    "market_positioning_liquidity": "sector_rotation",
+    # "global_risk_liquidity"（全球风险与流动性）：review 规则不得 supported（至多 weak，
+    # 见 agents/workers/review.py L174），不可能是主因；若数据异常出现 → 回落保守档。
+}
+
+
+def _extract_driver_for_trace(trace: object) -> str:
+    """从溯源主因候选类别提取 driver_type（大盘入口）。
+
+    真实结构（schemas/market_trace.py）：candidates 为 CandidateExplanation 对象列表
+    （无 is_primary 字段）；主因判定 = candidate.id == trace.primary_chain_id
+    （review worker 保证其指向 supported 候选）。primary_chain_id 为空
+    （attribution_status=hypothesis 被 review 服务层清空）→ 回落首个 supported 候选；
+    仍未知名/提取失败 → classify_driver 保守回落 transient_market（只 short，宁缺毋滥）。
+    """
+    from aistock_agent.services.prediction_horizon_policy import classify_driver
+
+    def _candidate_fields(c: object) -> tuple[object, object, object]:
+        """兼容 Pydantic 对象与 dict 两种候选表示（dict 兼容缓存直读历史形态）。"""
+        if isinstance(c, dict):
+            return c.get("id"), c.get("category"), c.get("status")
+        return (
+            getattr(c, "id", None),
+            getattr(c, "category", None),
+            getattr(c, "status", None),
+        )
+
+    cat: object = None
+    try:
+        candidates = getattr(trace, "candidates", None) or []
+        primary_id = getattr(trace, "primary_chain_id", None)
+        if isinstance(candidates, list):
+            for c in candidates:
+                cid, ccat, _ = _candidate_fields(c)
+                if primary_id and cid == primary_id and isinstance(ccat, str):
+                    cat = ccat
+                    break
+            if cat is None:
+                # primary_chain_id 为空 → 首个 supported 候选作主因类别
+                for c in candidates:
+                    _, ccat, cstatus = _candidate_fields(c)
+                    if cstatus == "supported" and isinstance(ccat, str):
+                        cat = ccat
+                        break
+    except Exception:  # noqa: BLE001 —— 提取失败不影响主链，回落保守档
+        cat = None
+    if isinstance(cat, str) and cat in _TRACE_CATEGORY_TO_DRIVER:
+        return _TRACE_CATEGORY_TO_DRIVER[cat]
+    return classify_driver(cat if isinstance(cat, str) else None, "index")
+
+
+def _extract_driver_for_sector(ctx: dict[str, object]) -> str:
+    """板块入口 driver 提取：大盘溯源结论类别 → 轮动/趋势；无结论回落 sector_rotation。
+
+    真实映射（2026-09-03 接入时点）：predict_sector/_sector_prediction_core 的输入上下文
+    （sector_snapshot + market_trace_brief）尚无结构化 driver_category 字段——
+    market_trace_brief 为 review display_report.summary 一句话结论（如"今日市场主因是
+    政策利好…"）。故：① 预留 ctx["driver_category"]（未来大盘结论结构化类别直通）；
+    ② 无则按 market_trace_brief 文本关键词归类（classify_driver 命中 policy/趋势/资金/
+    业绩任一组即采用；未知名不采用，避免自由文本误判）；③ 仍无 → sector_rotation
+    （板块轮动/主题扩散默认，白名单 short+mid，无长期逻辑）。
+    """
+    from aistock_agent.services.prediction_horizon_policy import classify_driver
+
+    cat = ctx.get("driver_category")
+    if isinstance(cat, str):
+        return classify_driver(cat, "sector")
+    brief = ctx.get("market_trace_brief") or ctx.get("market_brief")
+    if isinstance(brief, str) and brief.strip():
+        drv = classify_driver(brief.strip(), "sector")
+        if drv != "transient_market":
+            return drv
+    return "sector_rotation"
+
+
 async def run_predict(
     trace: MarketTraceResult,
     snapshot: MarketTraceSnapshot,
@@ -535,6 +679,13 @@ async def run_predict(
             # 大盘/统一入口 LLM target 缺 internal_id 兜底（Target 必填，实盘验证）
             payload = _repair_llm_target_internal_id(payload)
             prediction = PredictionResult.model_validate(payload)
+            # Task4 动态档位：确定性强制层（spec §5.4）——越界裁剪/short 恒产/
+            # required degraded+留痕。driver 依溯源主因候选类别（大盘入口 target_kind=index）。
+            # 抛 ValueError（LLM 结构性漏 short / 全越界）→ 落入本 try 的 parse_failed
+            # 兜底（不落库，不留脏 pending）。
+            prediction = apply_horizon_policy(
+                prediction, _extract_driver_for_trace(trace), "index"
+            )
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
@@ -1095,6 +1246,15 @@ async def run_chat_prediction(
         # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult，
         # 避免下游（_normalize/_hard_validate/model_copy）被 Any 污染（mypy no-any-return）。
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        # Task4 动态档位：确定性强制层（spec §5.4）。chat 无溯源因果链 → driver 保守回落
+        # transient_market（classify_driver(None, kind) 恒保守单 short；板块对话走
+        # predict_sector 不经过此入口，kind 传对话标的默认 stock）。抛 ValueError（结构性
+        # 漏 short）→ 落入本函数外层 except → 返回 None（skill 层既有降级，不落脏 pending）。
+        from aistock_agent.services.prediction_horizon_policy import classify_driver
+
+        prediction = apply_horizon_policy(
+            prediction, classify_driver(None, "stock"), "stock"
+        )
         # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
         # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
         prediction = _normalize_conditions_anchor_direction(prediction)
@@ -1237,6 +1397,16 @@ async def _sector_prediction_core(
         # （同 run_chat_prediction，避免下游被 Any 污染，mypy no-any-return）。
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        # Task4 动态档位：确定性强制层（spec §5.4）。板块 driver 依级联上下文归类
+        # （大盘结论摘要 market_trace_brief / 预留 driver_category），无 → sector_rotation
+        # （白名单 short+mid）。抛 ValueError（结构性漏 short）→ 外层 except → None 降级。
+        prediction = apply_horizon_policy(
+            prediction,
+            _extract_driver_for_sector(
+                {"market_trace_brief": market_brief, **sector_snapshot}
+            ),
+            "sector",
+        )
         prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_sector_evidence_ids(sector_snapshot, sector_evidence_id)
         # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错，对齐 chat）
