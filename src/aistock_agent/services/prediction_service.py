@@ -1483,6 +1483,17 @@ async def _sector_prediction_core(
         # （同 run_chat_prediction，避免下游被 Any 污染，mypy no-any-return）。
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        # scenario_keywords 遵循防御（2026-09-03）：仅靠文字约束模型可能整批漏输出
+        # （无 JSON 示例时 12/12 全空）——全 conditions 都空时重试一次；JSON 示例已
+        # 让一次通过率接近 100%，此兜底只在低概率遗漏时多一次调用。
+        if prediction.conditions and all(
+            not c.scenario_keywords for c in prediction.conditions
+        ):
+            logger.info(
+                "sector_prediction.scenario_keywords_empty_retry",
+                sector=sector.get("name"),
+            )
+            prediction = cast("PredictionResult", await structured.ainvoke(messages))
         # Task4 动态档位：确定性强制层（spec §5.4）。抛 ValueError（结构性漏 short）
         # → 外层 except → None 降级。
         prediction = apply_horizon_policy(prediction, driver_type, "sector")
