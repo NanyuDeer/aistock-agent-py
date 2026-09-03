@@ -270,6 +270,10 @@ class Settings(BaseSettings):
     gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
     gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（当日过期）
+    # ── GI 准入过滤（2026-09-02，盘面/行情类事件不进 GI 候选） ──
+    gi_admittance_enabled: bool = True               # GI 准入过滤总开关（只影响 GI，不影响事件传导）
+    gi_admittance_llm_enabled: bool = True           # 盘面/异动类事件外部催化判断 LLM 开关（关闭时保守 KEEP）
+    gi_consistency_ratio: float = 1.5                # chain 主导方向判定阈值（bullish ≥ bearish × ratio → bullish）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

@@ -412,6 +412,7 @@ src/aistock_agent/
 │   ├── rhythm_verification.py # 节奏验证（回放隔离 + 校验，`RHYTHM_VERIFICATION_ENABLED` 开关）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
+│   ├── gi_admittance.py # GI 准入过滤（盘面/异动信号检测 + 外部催化判断，KEEP/DROP 二档，2026-09-02）
 │   └── cache.py         # 晨报缓存服务（基于 RedisPool）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
