@@ -5,8 +5,15 @@
 """
 import pytest
 
+from aistock_agent.prompts.workers.prediction import (
+    PREDICTION_CHAT_PROMPT,
+    PREDICTION_PROMPT,
+)
 from aistock_agent.schemas.prediction import PredictionResult
-from aistock_agent.services.prediction_service import apply_horizon_policy
+from aistock_agent.services.prediction_service import (
+    _inject_horizon_policy,
+    apply_horizon_policy,
+)
 
 
 def _mini_result(horizons: list[str]) -> PredictionResult:
@@ -51,3 +58,26 @@ def test_policy_crop_empty_raises_for_insufficient_fallback():
     r = _mini_result(["mid", "long"])
     with pytest.raises(ValueError, match="no horizon left after policy"):
         apply_horizon_policy(r, "transient_market", "sector")
+
+
+# Task 4b：prompt 白名单运行时注入（spec 2026-09-03-动态档位 §5.2 系统注入）。
+# _inject_horizon_policy 把 PREDICTION_PROMPT/PREDICTION_CHAT_PROMPT 的占位段
+# "{driver_type} 型 → required=[...] / optional=[...]" 替换为实例化白名单。
+
+
+def test_inject_horizon_policy_index_policy_macro():
+    out = _inject_horizon_policy(PREDICTION_PROMPT, "policy_macro", "index")
+    assert "policy_macro 型" in out
+    assert "required=[short, mid, long]" in out
+    assert "optional=[]" in out
+    assert "{driver_type}" not in out
+    assert "required=[...]" not in out
+
+
+def test_inject_horizon_policy_sector_transient_market():
+    out = _inject_horizon_policy(PREDICTION_CHAT_PROMPT, "transient_market", "sector")
+    assert "transient_market 型" in out
+    assert "required=[short]" in out
+    assert "optional=[]" in out
+    assert "{driver_type}" not in out
+    assert "required=[...]" not in out

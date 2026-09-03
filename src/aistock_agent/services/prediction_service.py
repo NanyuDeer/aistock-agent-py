@@ -477,6 +477,25 @@ def _corroboration_inputs(
 # ============================================================================
 
 
+def _inject_horizon_policy(prompt: str, driver_type: str, target_kind: str) -> str:
+    """把 prompt 中白名单占位段替换为实例化说明（spec §5.2 系统注入）。
+
+    不用 .format（prompt 内存在其它花括号如 {horizon: ...} 语义占位），
+    用精确子串替换 "{driver_type}" 与 "required=[...] / optional=[...]"。
+    """
+    from aistock_agent.services.prediction_horizon_policy import infer_horizon_policy
+
+    policy = infer_horizon_policy(driver_type, target_kind)
+    req = ", ".join(policy.required)
+    opt = ", ".join(policy.optional)
+    prompt = prompt.replace("{driver_type}", driver_type)
+    prompt = prompt.replace(
+        "required=[...] / optional=[...]",
+        f"required=[{req}] / optional=[{opt}]",
+    )
+    return prompt
+
+
 def apply_horizon_policy(
     prediction: PredictionResult,
     driver_type: str,
@@ -659,9 +678,16 @@ async def run_predict(
             prompt_input = await _enrich_predict_input_for_symbol(
                 prompt_input, replay_symbol or _MARKET_PROFILE_SYMBOL
             )
+            # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用
+            # 同一值（大盘入口 target_kind=index，driver 依溯源主因候选类别）。
+            driver_type = _extract_driver_for_trace(trace)
             llm = get_deep_think()
             messages = [
-                SystemMessage(content=PREDICTION_PROMPT),
+                SystemMessage(
+                    content=_inject_horizon_policy(
+                        PREDICTION_PROMPT, driver_type, "index"
+                    )
+                ),
                 HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
             ]
             ai_message = await llm.ainvoke(messages)
@@ -680,12 +706,10 @@ async def run_predict(
             payload = _repair_llm_target_internal_id(payload)
             prediction = PredictionResult.model_validate(payload)
             # Task4 动态档位：确定性强制层（spec §5.4）——越界裁剪/short 恒产/
-            # required degraded+留痕。driver 依溯源主因候选类别（大盘入口 target_kind=index）。
+            # required degraded+留痕。driver 与 prompt 注入同一值（上面提取）。
             # 抛 ValueError（LLM 结构性漏 short / 全越界）→ 落入本 try 的 parse_failed
             # 兜底（不落库，不留脏 pending）。
-            prediction = apply_horizon_policy(
-                prediction, _extract_driver_for_trace(trace), "index"
-            )
+            prediction = apply_horizon_policy(prediction, driver_type, "index")
         except Exception as exc:
             logger.warning("prediction.parse_failed", error=str(exc), exc_info=True)
             return PredictionRunResult(status="parse_failed", reason=str(exc))
@@ -1237,24 +1261,28 @@ async def run_chat_prediction(
         # （deep_think 26-47s/次，chat UX 不可接受）；json_mode 结构化输出
         # （DeepSeek thinking 兼容，项目记忆 lesson 8）直接产出已解析的
         # PredictionResult，省去手动 raw 文本 + _strip_code_fences + validate。
+        # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用同一值。
+        # chat 无溯源因果链 → driver 保守回落 transient_market（classify_driver(None, kind)
+        # 恒保守单 short；板块对话走 predict_sector 不经过此入口，kind 传对话标的默认 stock）。
+        from aistock_agent.services.prediction_horizon_policy import classify_driver
+
+        driver_type = classify_driver(None, "stock")
         llm = get_quick_think()
         messages = [
-            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            SystemMessage(
+                content=_inject_horizon_policy(
+                    PREDICTION_CHAT_PROMPT, driver_type, "stock"
+                )
+            ),
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
         structured = with_chat_structured_output(llm, PredictionResult)
         # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult，
         # 避免下游（_normalize/_hard_validate/model_copy）被 Any 污染（mypy no-any-return）。
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
-        # Task4 动态档位：确定性强制层（spec §5.4）。chat 无溯源因果链 → driver 保守回落
-        # transient_market（classify_driver(None, kind) 恒保守单 short；板块对话走
-        # predict_sector 不经过此入口，kind 传对话标的默认 stock）。抛 ValueError（结构性
+        # Task4 动态档位：确定性强制层（spec §5.4）。抛 ValueError（结构性
         # 漏 short）→ 落入本函数外层 except → 返回 None（skill 层既有降级，不落脏 pending）。
-        from aistock_agent.services.prediction_horizon_policy import classify_driver
-
-        prediction = apply_horizon_policy(
-            prediction, classify_driver(None, "stock"), "stock"
-        )
+        prediction = apply_horizon_policy(prediction, driver_type, "stock")
         # Spec A §4.1：anchor.direction 归一化兜底（json_mode 结构化输出同样适用，
         # direction 缺省 neutral，LLM 不产时按文本确定性提取，不 parse_failed）
         prediction = _normalize_conditions_anchor_direction(prediction)
@@ -1388,25 +1416,28 @@ async def _sector_prediction_core(
         # entries），LLM 据此按变体逻辑重出预判（对齐 run_predict 的 replay_context）。
         if extra_input:
             prompt_input = {**prompt_input, **extra_input}
+        # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用同一值。
+        # 板块 driver 依级联上下文归类（大盘结论摘要 market_trace_brief / 预留
+        # driver_category），无 → sector_rotation（白名单 short+mid）。
+        driver_type = _extract_driver_for_sector(
+            {"market_trace_brief": market_brief, **sector_snapshot}
+        )
         llm = get_quick_think()
         messages = [
-            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            SystemMessage(
+                content=_inject_horizon_policy(
+                    PREDICTION_CHAT_PROMPT, driver_type, "sector"
+                )
+            ),
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
         # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
         # （同 run_chat_prediction，避免下游被 Any 污染，mypy no-any-return）。
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
-        # Task4 动态档位：确定性强制层（spec §5.4）。板块 driver 依级联上下文归类
-        # （大盘结论摘要 market_trace_brief / 预留 driver_category），无 → sector_rotation
-        # （白名单 short+mid）。抛 ValueError（结构性漏 short）→ 外层 except → None 降级。
-        prediction = apply_horizon_policy(
-            prediction,
-            _extract_driver_for_sector(
-                {"market_trace_brief": market_brief, **sector_snapshot}
-            ),
-            "sector",
-        )
+        # Task4 动态档位：确定性强制层（spec §5.4）。抛 ValueError（结构性漏 short）
+        # → 外层 except → None 降级。
+        prediction = apply_horizon_policy(prediction, driver_type, "sector")
         prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_sector_evidence_ids(sector_snapshot, sector_evidence_id)
         # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错，对齐 chat）
@@ -1595,9 +1626,19 @@ async def _stock_prediction_core(
         }
         if extra_input:
             prompt_input = {**prompt_input, **extra_input}
+        # Task4b 动态档位：prompt 注入白名单实例。个股入口 apply_horizon_policy
+        # 尚未接入（见 Task4 接入范围，spec §5.4）——本点仅让 LLM 可见白名单，
+        # driver 按其 target kind=stock 用 classify_driver 保守回落 transient_market。
+        from aistock_agent.services.prediction_horizon_policy import classify_driver
+
+        driver_type = classify_driver(None, "stock")
         llm = get_quick_think()
         messages = [
-            SystemMessage(content=PREDICTION_CHAT_PROMPT),
+            SystemMessage(
+                content=_inject_horizon_policy(
+                    PREDICTION_CHAT_PROMPT, driver_type, "stock"
+                )
+            ),
             HumanMessage(content=json.dumps(prompt_input, ensure_ascii=False, indent=2)),
         ]
         # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
