@@ -405,7 +405,8 @@ src/aistock_agent/
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
-│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close）
+│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close；2026-09-03 分支新增 position_action/anchor/touch_strength，结论 range 降级为辅助）
+│   ├── rhythm_dense_band.py # 历史密集触碰带（2026-09-03 design-debate A1 裁决）：确定性纯函数 dense_band，touch_gap 容差带 + 量能加权选带，替代 max/min(20日极值)×MA20 系数
 │   ├── prediction_invalidation.py # 预测失效"读数触发式"复核触发器（A1，2026-08-31）：update_trigger_state 三态迟滞状态机 + scan_active_pending 早退扫描
 │   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events）
 │   ├── search_cache.py  # 搜索缓存（TTL 削峰，供节奏大师等重复检索复用）
