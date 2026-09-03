@@ -1,4 +1,5 @@
 """节奏合成引擎（spec §3.1/§5/§7.1/§19）——量纲/映射/档位/阶段/分支全部确定性。"""
+from aistock_agent.services import rhythm_engine
 from aistock_agent.services.rhythm_engine import (
     DISCLAIMER,
     build_event_branch,
@@ -305,3 +306,25 @@ def test_build_next_event_anchor_skips_bad_date_event():
     ]
     anchor = build_next_event_anchor(events, "2026-09-01")
     assert anchor is not None and anchor["title"] == "FOMC"
+
+
+def test_position_band_to_action_bullish():
+    band = {"min": 5, "max": 7, "text": "6~8 成，顺势持有"}
+    action = rhythm_engine.position_band_to_action(band, "bullish")
+    assert action["direction"] == "add"
+    assert action["change"] == "+2 成"
+    assert action["band"] == band
+
+
+def test_position_band_to_action_bearish():
+    band = {"min": 0, "max": 3, "text": "轻仓~观望"}
+    action = rhythm_engine.position_band_to_action(band, "bearish")
+    assert action["direction"] == "reduce"
+    assert action["change"] == "-1 成"
+
+
+def test_position_band_to_action_neutral():
+    band = {"min": 5, "max": 6, "text": "半仓~6 成，中性偏多"}
+    action = rhythm_engine.position_band_to_action(band, "neutral")
+    assert action["direction"] == "hold"
+    assert action["change"] == "持仓不变"
