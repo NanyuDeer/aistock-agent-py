@@ -646,9 +646,17 @@ class NodeApiClient:
         horizon: str,
         entry: dict[str, object],
     ) -> dict[str, object] | None:
-        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。"""
-        body: dict[str, object] = {"horizon": horizon}
-        body.update(entry)
+        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。
+
+        D5（2026-09-03）：jsonb key 恒用 horizon 参数，entry 自带 horizon 字段不得覆盖——
+        condition 路径 key=c{i} 而 entry.horizon=anchor 档位（short/mid），两者语义不同；
+        此前 body.update(entry) 使 condition 全部错位写到 anchor 档位键下并互相覆盖。
+        anchor 档位经 anchor_horizon 透传，Node 端写回 entry.horizon 供统计按档位分桶。
+        """
+        body: dict[str, object] = dict(entry)
+        body["horizon"] = horizon
+        if isinstance(entry.get("horizon"), str) and entry["horizon"] != horizon:
+            body["anchor_horizon"] = entry["horizon"]
         return await self.put(f"/internal/predictions/{prediction_id}/verification", body)
 
     async def get_analysis_report(

@@ -262,6 +262,13 @@ async def _verify_horizon(
         if idx is not None:
             base["due_matched"] = str(rows[idx]["trade_date"])
     if idx is None:
+        # D6（2026-09-03）：到期日当天（含盘中/收盘前）日 K 通常尚未入库 → 判 wait 而非
+        # insufficient——盘中跑若落 insufficient 会被 _should_skip_horizon 拦下，16:00 收盘后
+        # 无法重判，档位被永久写死 no_data。仅当 due 已过且行情缺失（停牌/数据故障）才落
+        # insufficient 可追溯。
+        if due_date >= today:
+            return {**base, "wait": True,
+                    "reason": f"到期日 {due_date} 当日行情未出，等待收盘后判定"}
         return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
                 "reason": f"到期日 {due_date} 行情缺失"}
     window = [float(cast(float, r["pct_chg"])) for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
@@ -392,6 +399,7 @@ async def _verify_conditions(
     due_dates = record.get("due_dates")
     due_dates_map = due_dates if isinstance(due_dates, dict) else {}
     out: dict[str, object] = {}
+    today = shanghai_today().isoformat()
     for i, cond in enumerate(conditions):
         key = f"c{i}"
         if not isinstance(cond, dict):
@@ -401,6 +409,10 @@ async def _verify_conditions(
         due_date = str(due_dates_map.get(horizon) or "") if horizon else ""
         direction = str(anchor.get("direction") or "neutral")
         threshold = str(anchor.get("threshold") or "")
+        # D6（2026-09-03）：条件到期日仍在未来 → 未到验证窗口，跳过不产 entry（run_once 会在
+        # 到期后自然处理）；此前对未来 due 落 insufficient no_data 违反窗口语义。
+        if due_date and due_date > today:
+            continue
         entry: dict[str, object] = {
             **base,
             "condition_index": i,
@@ -429,6 +441,11 @@ async def _verify_conditions(
             continue
         idx = next((j for j, r in enumerate(rows) if r.get("trade_date") == due_date), None)
         if idx is None:
+            # D6：到期日当天日 K 未出（盘中/收盘前）→ wait 待收盘后判定，不落 insufficient
+            if due_date >= today:
+                out[key] = {**entry, "wait": True,
+                            "reason": f"到期日 {due_date} 当日行情未出，等待收盘后判定"}
+                continue
             out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
                         "actual": "", "reason": f"到期日 {due_date} 行情缺失"}
             continue

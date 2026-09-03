@@ -332,6 +332,48 @@ async def test_run_once_verifies_stock_horizon():
 
 
 @pytest.mark.asyncio
+async def test_verify_conditions_skips_future_due_d6():
+    """D6（2026-09-03）回归：condition 到期日仍在未来 → 不产 entry（未到验证窗口）。
+    此前对未来 due（如 09-09）落 insufficient no_data，违反窗口语义。"""
+    record = {
+        "id": 1,
+        "prediction": {
+            "horizons": [{"horizon": "short", "target": "上证指数", "direction": "bullish"}],
+            "conditions": [{
+                "condition": "若未来 1 周累计上涨超 1%",
+                "scenario": "后续 1-4 周上行",
+                "anchor": {"horizon": "short", "direction": "bullish", "threshold": "+1%"},
+            }],
+        },
+        "due_dates": {"short": "2026-09-09"},
+        "verification": {},
+    }
+    with patch("aistock_agent.services.prediction_validator.shanghai_today",
+               return_value=date(2026, 9, 3)):
+        out = await pv._verify_conditions(record)
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_today_no_kline_waits_d6():
+    """D6（2026-09-03）回归：due=今天但当日日 K 未出（盘中/收盘前）→ wait 而非
+    insufficient——盘中跑写死 no_data 会被 _should_skip_horizon 拦下无法收盘后重判。"""
+    record = _pending_record(due="2026-09-03", target="上证指数")
+    with (
+        patch.object(prediction_validator.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=[
+                         {"trade_date": "2026-09-01", "pct_chg": 0.5},
+                         {"trade_date": "2026-09-02", "pct_chg": -0.3},
+                     ])),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 3)),
+    ):
+        entry = await pv._verify_horizon(record, "mid")
+    assert entry.get("wait") is True
+    assert entry.get("result") is None
+
+
+@pytest.mark.asyncio
 async def test_run_once_dirty_due_date_does_not_crash_batch():
     """脏 due_date 档位不得让整批验证崩溃：落 insufficient，其余记录正常回写。"""
     bad = _pending_record(record_id=1, due="")
