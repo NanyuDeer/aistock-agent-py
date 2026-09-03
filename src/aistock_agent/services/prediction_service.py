@@ -60,6 +60,10 @@ HORIZON_TRADING_DAY_OFFSETS: dict[str, int] = {
     "long": 120,
 }
 
+# 预测结构化输出 max_tokens（2026-09-03：quick 默认 2000 下 deepseek thinking
+# 占满 reasoning 后输出被截断 → 对齐 review 事故处理：加大 + 禁用 thinking）
+_PREDICTION_MAX_TOKENS = 4000
+
 # skipped 落库默认文案（gate_skipped 的 reason 为空时兜底）
 _DEFAULT_SKIP_REASON = "prediction skipped"
 
@@ -477,6 +481,38 @@ def _corroboration_inputs(
 # ============================================================================
 
 
+def _build_prediction_llm(*, deep: bool = False) -> object:
+    """构建预测结构化输出 LLM（大盘溯源内联/个股/板块 chat 全链路统一）。
+
+    2026-09-03：deepseek thinking 的 reasoning 会占满默认 max_tokens 使
+    PredictionResult JSON 被截断（9-3 板块批量 7/13 因此失败）→ 显式禁用
+    thinking + 加大 max_tokens（_PREDICTION_MAX_TOKENS，对齐 review 事故先例）。
+    """
+    deep = deep or False
+    if deep:
+        model = settings.deep_think_model
+        base_url = settings.deep_think_base_url or settings.openai_base_url
+    else:
+        model = settings.quick_think_model
+        base_url = settings.openai_base_url
+    # deepseek 系（含本地代理转发 deepseek-v4-flash 等 reasoning 模型）在部分
+    # base_url 无 deepseek 字样（如 127.0.0.1 代理）——按模型名兜底判定，
+    # 命中即禁用 thinking，防止 reasoning 占满 max_tokens 截断 JSON。
+    haystack = f"{model} {base_url}".lower()
+    extra_body = (
+        {"thinking": {"type": "disabled"}} if "deepseek" in haystack else None
+    )
+    if deep:
+        return get_deep_think(
+            max_tokens=_PREDICTION_MAX_TOKENS,
+            extra_body=extra_body,
+        )
+    return get_quick_think(
+        max_tokens=_PREDICTION_MAX_TOKENS,
+        extra_body=extra_body,
+    )
+
+
 def _inject_horizon_policy(prompt: str, driver_type: str, target_kind: str) -> str:
     """把 prompt 中白名单占位段替换为实例化说明（spec §5.2 系统注入）。
 
@@ -693,7 +729,7 @@ async def run_predict(
             # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用
             # 同一值（大盘入口 target_kind=index，driver 依溯源主因候选类别）。
             driver_type = _extract_driver_for_trace(trace)
-            llm = get_deep_think()
+            llm = _build_prediction_llm(deep=True)
             messages = [
                 SystemMessage(
                     content=_inject_horizon_policy(
@@ -1279,7 +1315,7 @@ async def run_chat_prediction(
         from aistock_agent.services.prediction_horizon_policy import classify_driver
 
         driver_type = classify_driver(None, "stock")
-        llm = get_quick_think()
+        llm = _build_prediction_llm()
         messages = [
             SystemMessage(
                 content=_inject_horizon_policy(
@@ -1434,7 +1470,7 @@ async def _sector_prediction_core(
         driver_type = _extract_driver_for_sector(
             {"market_trace_brief": market_brief, **sector_snapshot}
         )
-        llm = get_quick_think()
+        llm = _build_prediction_llm()
         messages = [
             SystemMessage(
                 content=_inject_horizon_policy(
@@ -1644,7 +1680,7 @@ async def _stock_prediction_core(
         from aistock_agent.services.prediction_horizon_policy import classify_driver
 
         driver_type = classify_driver(None, "stock")
-        llm = get_quick_think()
+        llm = _build_prediction_llm()
         messages = [
             SystemMessage(
                 content=_inject_horizon_policy(

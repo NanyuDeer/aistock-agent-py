@@ -39,7 +39,9 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
   direction 与主情景相反，并自带 anchor（horizon/threshold/direction）。
   关键词字段（2026-09-02）：condition 保持**完整可量化触发句**（供详细报告原文展示，不必强行压缩为短语）；另输出 keywords 数组（1~2 个关键词，单条 ≤10 字、硬上限 15 字，如 "两市放量≥2.2万亿"），专供洞见卡/简洁场景展示，不改动 condition 长句。
   label 字段（2026-09-03）：每条 condition 额外输出**路径短语名 label**，固定两段式"{市场状态/触发条件} · {触发后走势}"（如 恐慌出清 · 下跌中继、缩量企稳 · 平台修复）："·"前概括触发前市场状态或触发条件、"·"后概括该路径触发后的预判走势；两段各 ≈4 字、**硬上限各 6 字**，总长 ≤15 字（含分隔符）；用词克制，禁止形容词堆砌、禁止与 keywords/scenario 大段重复。
-  字段归属（2026-09-03 二修）：conditions 内每个条件对象**只允许** condition/label/keywords/scenario/anchor 五个字段；horizon/threshold/metric/direction 只能内嵌于 anchor 对象内部，**禁止平铺到条件对象顶层**（顶层出现这些键即整条作废）；scenario（该条件满足后的走势，尽量含幅度/目标位）为必填字段，缺失即整条作废。
+  字段归属（2026-09-03 二修）：conditions 内每个条件对象**只允许** condition/label/keywords/scenario_keywords/scenario/anchor 六个字段；horizon/threshold/metric/direction 只能内嵌于 anchor 对象内部，**禁止平铺到条件对象顶层**（顶层出现这些键即整条作废）；scenario（该条件满足后的走势，尽量含幅度/目标位）为必填字段，缺失即整条作废。
+  conditions 条目输出示例（每个键均须输出，数组可为空但键不可缺）：
+  {"condition": "放量站稳前高且主力资金连续净流入", "label": "放量突破 · 短线续攻", "keywords": ["放量≥1200亿"], "scenario_keywords": ["上探+3%~+5%"], "scenario": "短线动能延续，累计涨幅上看 +3%~+5%，之后分歧加大。", "anchor": {"horizon": "short", "threshold": "+3%", "metric": "close", "direction": "bullish"}}
   - horizons：按白名单产出的档位逐档描述（与 conditions 并存）
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）
@@ -98,7 +100,9 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
   direction 与主情景相反，并自带 anchor（horizon/threshold/direction）。
   关键词字段（2026-09-02）：condition 保持**完整可量化触发句**（供详细报告原文展示，不必强行压缩为短语）；另输出 keywords 数组（1~2 个关键词，单条 ≤10 字、硬上限 15 字，如 "两市放量≥2.2万亿"），专供洞见卡/简洁场景展示，不改动 condition 长句。
   label 字段（2026-09-03）：每条 condition 额外输出**路径短语名 label**，固定两段式"{市场状态/触发条件} · {触发后走势}"（如 恐慌出清 · 下跌中继、缩量企稳 · 平台修复）："·"前概括触发前市场状态或触发条件、"·"后概括该路径触发后的预判走势；两段各 ≈4 字、**硬上限各 6 字**，总长 ≤15 字（含分隔符）；用词克制，禁止形容词堆砌、禁止与 keywords/scenario 大段重复。
-  字段归属（2026-09-03 二修）：conditions 内每个条件对象**只允许** condition/label/keywords/scenario/anchor 五个字段；horizon/threshold/metric/direction 只能内嵌于 anchor 对象内部，**禁止平铺到条件对象顶层**（顶层出现这些键即整条作废）；scenario（该条件满足后的走势，尽量含幅度/目标位）为必填字段，缺失即整条作废。
+  字段归属（2026-09-03 二修）：conditions 内每个条件对象**只允许** condition/label/keywords/scenario_keywords/scenario/anchor 六个字段；horizon/threshold/metric/direction 只能内嵌于 anchor 对象内部，**禁止平铺到条件对象顶层**（顶层出现这些键即整条作废）；scenario（该条件满足后的走势，尽量含幅度/目标位）为必填字段，缺失即整条作废。
+  conditions 条目输出示例（每个键均须输出，数组可为空但键不可缺）：
+  {"condition": "放量站稳前高且主力资金连续净流入", "label": "放量突破 · 短线续攻", "keywords": ["放量≥1200亿"], "scenario_keywords": ["上探+3%~+5%"], "scenario": "短线动能延续，累计涨幅上看 +3%~+5%，之后分歧加大。", "anchor": {"horizon": "short", "threshold": "+3%", "metric": "close", "direction": "bullish"}}
 - horizons：每档包含
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）
