@@ -114,10 +114,12 @@ class PredictionResult(BaseModel):
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
     omitted_horizons: list[OmittedHorizon] = Field(default_factory=list)  # 缺档留痕（spec §5.3）
-    conditions: list[PredictionCondition] = Field(default_factory=list)  # 条件化预判（§3.1）；旧 2.0 记录为空
+    # 条件化预判（§3.1）；旧 2.0 记录为空
+    conditions: list[PredictionCondition] = Field(default_factory=list)
     target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
-    evolution_steps: list[EvolutionStep] = Field(default_factory=list)  # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    evolution_steps: list[EvolutionStep] = Field(default_factory=list)
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
