@@ -185,6 +185,47 @@ def test_technical_branches_range_anchored_on_trigger() -> None:
     assert bull_hi > bull_lo and bear_lo < bear_hi
 
 
+def test_technical_branches_use_dense_support_pressure() -> None:
+    """Task2：dense_support/dense_pressure 接入后，分支支撑/压力=密集触碰带，而非旧极值法。
+
+    传 dense_support=3900.0, dense_pressure=4010.0：neutral 区间 = 真实密集带，
+    且 bullish 突破区间下界=压力位、bearish 下破区间上界=支撑位（触发值=区间边界），
+    点位 fallback 分支的 condition.lo/hi 亦使用密集带值。
+    """
+    closes = [float(3000 + (i % 7)) for i in range(30)]
+    highs = [c + 5.0 for c in closes]
+    lows = [c - 5.0 for c in closes]
+    branches = build_technical_branches(
+        closes=closes, highs=highs, lows=lows, amounts=[],
+        dense_support=3900.0, dense_pressure=4010.0,
+    )
+    by_dir = {b["conclusion"]["direction"]: b for b in branches}
+    assert {"bullish", "bearish", "neutral"} <= set(by_dir)
+    # neutral = 密集触碰带区间 [S, P]
+    assert by_dir["neutral"]["conclusion"]["range"] == "3900.00-4010.00"
+    # bullish/bearish 触发值=区间边界（锚定密集带）
+    assert by_dir["bullish"]["conclusion"]["range"].split("-")[0] == "4010.00"
+    assert by_dir["bearish"]["conclusion"]["range"].split("-")[-1] == "3900.00"
+    # 点位 fallback 分支的 condition.lo/hi 也使用密集带（支撑/压力用户可见）
+    assert by_dir["bullish"]["condition"]["lo"] == 4010.0
+    assert by_dir["bearish"]["condition"]["hi"] == 3900.0
+    assert by_dir["neutral"]["condition"]["lo"] == 3900.0
+    assert by_dir["neutral"]["condition"]["hi"] == 4010.0
+
+
+def test_technical_branches_fallback_without_dense() -> None:
+    """Task2：未提供 dense 参数时回退旧极值法（兜底），行为与历史一致。"""
+    closes = [float(3000 + (i % 7)) for i in range(30)]
+    highs = [c + 5.0 for c in closes]
+    lows = [c - 5.0 for c in closes]
+    branches = build_technical_branches(closes=closes, highs=highs, lows=lows, amounts=[])
+    ma20 = sum(closes[-20:]) / 20
+    support = max(min(lows[-20:]), ma20 * 0.97)
+    pressure = min(max(highs[-20:]), ma20 * 1.03)
+    by_dir = {b["conclusion"]["direction"]: b for b in branches}
+    assert by_dir["neutral"]["conclusion"]["range"] == f"{support:.2f}-{pressure:.2f}"
+
+
 def test_event_branch_enum_three_partitions() -> None:
     event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "source": "L3"}
     branch = build_event_branch(event)

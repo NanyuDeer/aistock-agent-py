@@ -283,6 +283,8 @@ def build_technical_branches(
     highs: list[float],
     lows: list[float],
     amounts: list[float],
+    dense_support: float | None = None,
+    dense_pressure: float | None = None,
 ) -> list[dict[str, Any]]:
     """确定性技术点位节点（§19.2，G19：点位由 engine 按当日行情计算）。
 
@@ -293,10 +295,16 @@ def build_technical_branches(
     if len(closes) < 20:
         return []
     ma20 = sum(closes[-20:]) / 20
-    recent_high = max(highs[-20:])
-    recent_low = min(lows[-20:])
-    support = max(recent_low, ma20 * 0.97)
-    pressure = min(recent_high, ma20 * 1.03)
+    # 密集触碰带优先：需求方核心要求"支撑/压力 = 历史密集触碰带"；未接入时回退旧极值法（兜底）。
+    # dense_band 已自行 clamp 到 MA20±clamp_ratio，此处不再重复 clamp，避免二次收窄。
+    if dense_support is not None and dense_pressure is not None:
+        support = dense_support
+        pressure = dense_pressure
+    else:
+        recent_high = max(highs[-20:])
+        recent_low = min(lows[-20:])
+        support = max(recent_low, ma20 * 0.97)
+        pressure = min(recent_high, ma20 * 1.03)
     # 突破后空间 Δ = 半通道宽（design-debate A1：range 锚定突破后空间，非固定百分比）
     channel_half = 0.5 * (pressure - support)
     if amounts and len(amounts) >= 20:

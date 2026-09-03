@@ -160,28 +160,32 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
     missing.extend(compose_missing)
     level = rhythm_engine.level_from_score(score)
     win = await load_event_window(target_date)
+    # dense_band 密集触碰带（确定性纯函数，硬约束 #1）：先计算，供 build_technical_branches
+    # 注入支撑/压力，并回填各分支 touch_strength。
+    # touch_strength = 触碰次数/有效 close 数（非命中概率）；len(closes)=0 时取 None。
+    # dense_support/dense_pressure 优先作为分支支撑/压力；insufficient=True（None）时
+    # build_technical_branches 内部回退旧极值法（兜底，不编造密集带）。
+    dense_support, dense_pressure, touch_count, _ = rhythm_dense_band.dense_band(
+        closes=closes, highs=highs, lows=lows, amount=amounts, window=40
+    )
     branches: list[dict[str, Any]] = []
     if win.high_events:
         branches = rhythm_engine.build_technical_branches(
-            closes=closes, highs=highs, lows=lows, amounts=amounts
+            closes=closes, highs=highs, lows=lows, amounts=amounts,
+            dense_support=dense_support, dense_pressure=dense_pressure,
         )[:2]
         ev = rhythm_engine.build_event_branch(win.high_events[0])
         if ev is not None:
             branches.append(ev)
     else:
         branches = rhythm_engine.build_technical_branches(
-            closes=closes, highs=highs, lows=lows, amounts=amounts
+            closes=closes, highs=highs, lows=lows, amounts=amounts,
+            dense_support=dense_support, dense_pressure=dense_pressure,
         )[:3]
     if win.source_missing:
         missing.append("事件源未接（日历接口不可用）")
     if win.calendar_uncovered:
         missing.append("交易日历未覆盖（事件窗口不可用）")
-    # dense_band 密集触碰带（确定性纯函数，硬约束 #1）：回填各分支 touch_strength。
-    # touch_strength = 触碰次数/有效 close 数（非命中概率）；len(closes)=0 时取 None。
-    # dense_support/dense_pressure 本任务仅计算不接入支撑压力值（接入属后续）。
-    dense_support, dense_pressure, touch_count, _ = rhythm_dense_band.dense_band(
-        closes=closes, highs=highs, lows=lows, amount=amounts, window=40
-    )
     for b in branches:
         b["touch_strength"] = touch_count / len(closes) if len(closes) else None
     card = {
