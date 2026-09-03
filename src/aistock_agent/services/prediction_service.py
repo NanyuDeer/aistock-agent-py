@@ -508,7 +508,8 @@ def apply_horizon_policy(
        由调用方既有异常兜底（run_predict → parse_failed 不落库；chat/sector → None 降级，
        均不留脏 pending）；
     3) required 档缺失 → 不硬补凑数：写 omitted_horizons + prediction_status="hypothesis"
-       （spec §9 决策③ degraded，宁缺毋滥、可审计）；
+       （spec §9 决策③ degraded，宁缺毋滥、可审计）；LLM 已自判 "insufficient"
+       （证据不足、仅 short、confidence low）属更保守的宁缺毋滥态，保持不升；
     4) omitted_horizons 归一：只保留「本轮确实未产出」的档——含白名单内未产（依据不足）
        与被越界裁剪档（LLM 产出了但不在白名单），与 horizons 不重叠（Task2 validator 兜底）。
     """
@@ -546,7 +547,11 @@ def apply_horizon_policy(
 
     update: dict[str, object] = {"horizons": kept, "omitted_horizons": omitted_horizons}
     if degraded:
-        update["prediction_status"] = "hypothesis"
+        # degraded 只对 confirmed/hypothesis 语境生效：原 insufficient（LLM 自判证据不足、
+        # 仅 short）是更保守的宁缺毋滥态，提级 hypothesis 会违背 LLM 明确判断（大盘入口
+        # LLM 自判 insufficient + 仅 short 时保持 insufficient，不升 hypothesis）。
+        if prediction.prediction_status != "insufficient":
+            update["prediction_status"] = "hypothesis"
     return prediction.model_copy(update=update)
 
 
@@ -616,10 +621,13 @@ def _extract_driver_for_sector(ctx: dict[str, object]) -> str:
     真实映射（2026-09-03 接入时点）：predict_sector/_sector_prediction_core 的输入上下文
     （sector_snapshot + market_trace_brief）尚无结构化 driver_category 字段——
     market_trace_brief 为 review display_report.summary 一句话结论（如"今日市场主因是
-    政策利好…"）。故：① 预留 ctx["driver_category"]（未来大盘结论结构化类别直通）；
-    ② 无则按 market_trace_brief 文本关键词归类（classify_driver 命中 policy/趋势/资金/
-    业绩任一组即采用；未知名不采用，避免自由文本误判）；③ 仍无 → sector_rotation
-    （板块轮动/主题扩散默认，白名单 short+mid，无长期逻辑）。
+    政策利好…"）。故：① 预留 ctx["driver_category"]（未来板块自身类别结构化直通，
+    classify_driver 结果不作上限截断——板块自因可精确）；② 无则按 market_trace_brief
+    文本关键词归类（classify_driver 命中 policy/趋势/资金/业绩任一组即采用；未知名不采用，
+    避免自由文本误判）——文本归类是近似口径（brief 只说明大盘主因，非板块自身因果），
+    controller 裁决：命中 policy_macro（宏观/政策强词）时**上限只到 trend_fundamental**
+    （long 由 required 降 optional），不得因"大盘政策主因"强制板块硬产 long；
+    ③ 仍无 → sector_rotation（板块轮动/主题扩散默认，白名单 short+mid，无长期逻辑）。
     """
     from aistock_agent.services.prediction_horizon_policy import classify_driver
 
@@ -630,6 +638,10 @@ def _extract_driver_for_sector(ctx: dict[str, object]) -> str:
     if isinstance(brief, str) and brief.strip():
         drv = classify_driver(brief.strip(), "sector")
         if drv != "transient_market":
+            # 文本 fallback 近似口径上限（controller 裁决，见 docstring）：大盘政策/宏观
+            # 主因不构成板块长期逻辑依据 → 收敛到 trend_fundamental（long 降 optional）。
+            if drv == "policy_macro":
+                return "trend_fundamental"
             return drv
     return "sector_rotation"
 
@@ -1626,9 +1638,9 @@ async def _stock_prediction_core(
         }
         if extra_input:
             prompt_input = {**prompt_input, **extra_input}
-        # Task4b 动态档位：prompt 注入白名单实例。个股入口 apply_horizon_policy
-        # 尚未接入（见 Task4 接入范围，spec §5.4）——本点仅让 LLM 可见白名单，
-        # driver 按其 target kind=stock 用 classify_driver 保守回落 transient_market。
+        # Task4b 动态档位：prompt 注入白名单实例，model_validate 后下方 apply_horizon_policy
+        # 强制层复用同一 driver_type（spec §5.4）——个股 chat 无溯源因果链，driver 按其
+        # target kind=stock 用 classify_driver 保守回落 transient_market。
         from aistock_agent.services.prediction_horizon_policy import classify_driver
 
         driver_type = classify_driver(None, "stock")
@@ -1644,6 +1656,10 @@ async def _stock_prediction_core(
         # 结构化输出 Runnable.ainvoke 返回 Any，显式 cast 收敛为 PredictionResult
         structured = with_chat_structured_output(llm, PredictionResult)
         prediction = cast("PredictionResult", await structured.ainvoke(messages))
+        # Task4 动态档位：确定性强制层（spec §5.4，对齐 run_chat_prediction chat 语义）——
+        # 越界裁剪/short 恒产/required degraded+omitted 留痕。driver 与 prompt 注入同一值
+        # （transient_market）。抛 ValueError（结构性漏 short）→ 外层 except → 返回 None 降级。
+        prediction = apply_horizon_policy(prediction, driver_type, "stock")
         prediction = _normalize_conditions_anchor_direction(prediction)
         allowed = _collect_sector_evidence_ids(stock_snapshot, stock_evidence_id)
         # 无溯源链不得 confirmed；证据只保留输入存在项（过滤而非抛错）

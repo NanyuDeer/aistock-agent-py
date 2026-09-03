@@ -101,7 +101,9 @@ def test_prediction_condition_full():
     c = PredictionCondition(
         condition="若明日放量站稳前高 82.50 元",
         scenario="则趋势延续，上看 +5%",
-        anchor=PredictionAnchor(horizon="short", threshold="+5%", metric="close", direction="bullish"),
+        anchor=PredictionAnchor(
+            horizon="short", threshold="+5%", metric="close", direction="bullish"
+        ),
     )
     assert c.anchor.horizon == "short"
     assert c.anchor.direction == "bullish"
@@ -217,3 +219,11 @@ def test_omitted_horizons_reject_overlap_with_horizons():
     with pytest.raises(ValueError):
         PredictionResult(**{**_base_result(["short", "mid"]).model_dump(),
                             "omitted_horizons": [{"horizon": "mid", "reason": "x"}]})
+
+
+def test_omitted_horizons_reject_blank_reason():
+    # spec §5.4 归一化层校验非空：空白/纯空格 reason 无解释价值，校验层拒绝（final fix）
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValidationError):
+            PredictionResult(**{**_base_result(["short"]).model_dump(),
+                                "omitted_horizons": [{"horizon": "mid", "reason": blank}]})

@@ -104,6 +104,14 @@ class OmittedHorizon(BaseModel):
     horizon: PredictionHorizonType
     reason: str  # LLM 产出；归一化层校验非空、非空泛
 
+    @model_validator(mode="after")
+    def _reason_not_blank(self) -> "OmittedHorizon":
+        # spec §5.4：归一化层校验非空——空白/纯空格 reason 无解释价值，拒绝（空泛词
+        # 由提示词约束 + LLM 侧控制，此处只挡结构空值）。
+        if not self.reason.strip():
+            raise ValueError("omitted reason must not be blank")
+        return self
+
 
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""

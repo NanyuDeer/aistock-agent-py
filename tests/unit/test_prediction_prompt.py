@@ -55,3 +55,14 @@ def test_prediction_prompt_removes_force_three_horizons():
     assert "把三档串成" not in PREDICTION_CHAT_PROMPT
     assert "若三档方向" not in PREDICTION_PROMPT
     assert "若三档方向" not in PREDICTION_CHAT_PROMPT
+
+
+def test_prediction_prompt_closing_sentence_required_optional():
+    # spec §5.4 final fix（2026-09-03）：收束句去歧义——"某档位无法可靠判断时 confidence
+    # 用 low" 未区分档位属性（会诱导 LLM 省略 required 档）；现区分：
+    # required 档无法可靠判断 → confidence low（档位仍须产出）；optional 档无证据 → 省略
+    # 并写 omitted_horizons（两处 prompts 同语义，防旧句回潮）。
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "required 档无法可靠判断时 confidence 用" in prompt
+        assert "optional 档无证据则省略并写入 omitted_horizons" in prompt
+        assert "某档位无法可靠判断时" not in prompt

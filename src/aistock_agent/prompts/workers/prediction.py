@@ -54,7 +54,7 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
 
 先评估影响消化度：主因链影响在当前行情中已体现到什么程度（已定价 vs 未定价），
 再据此设计互相排斥的条件集（上行/下行/震荡主情景）并逐条给出验证锚点，
-最后按白名单输出各档持续性。宁缺毋滥：某档位无法可靠判断时，confidence 用 "low"。
+最后按白名单输出各档持续性。required 档无法可靠判断时 confidence 用 "low"；optional 档无证据则省略并写入 omitted_horizons。
 不要输出 Markdown、代码围栏、解释文字或模型思考过程。"""
 
 
@@ -109,5 +109,5 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
 - attribution_summary：一句话预测结论（30-40 字，供展示）
 
 先评估影响消化度：现状行情/资金/新闻已体现到什么程度（已定价 vs 未定价），
-再据此推演白名单内各档的持续性。宁缺毋滥：某档位无法可靠判断时，confidence 用 "low"。
+再据此推演白名单内各档的持续性。required 档无法可靠判断时 confidence 用 "low"；optional 档无证据则省略并写入 omitted_horizons。
 不要输出 Markdown、代码围栏、解释文字或模型思考过程。"""
