@@ -10,7 +10,10 @@ def test_prompt_requires_opportunities_keywords_for_afternoon_outlook():
     # 午后前瞻分段：要求 opportunities 关键词（≤8 字 4-5 个），示例不再含 conclusion
     assert '"title": "午后前瞻"' in MIDDAY_PROMPT
     assert '"opportunities"' in MIDDAY_PROMPT
-    assert "8" in MIDDAY_PROMPT and "4-5" in MIDDAY_PROMPT
+    assert "每个 ≤8 字" in MIDDAY_PROMPT
+    assert "共 4-5 个" in MIDDAY_PROMPT
+    # 负向锁定：午后前瞻 JSON 示例不含 conclusion（机会关键词契约，段落留 details 详述）
+    assert '"title": "午后前瞻", "conclusion"' not in MIDDAY_PROMPT
     assert '"schema_version": "2.1"' in MIDDAY_PROMPT
 
 
