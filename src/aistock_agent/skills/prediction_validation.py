@@ -22,9 +22,6 @@ from typing import cast
 import structlog
 from pydantic import BaseModel, Field
 
-from aistock_agent.prompts.workers.prediction_validation import (
-    PREDICTION_VALIDATION_PROMPT,
-)
 from aistock_agent.schemas.market_trace import MarketTraceResult
 from aistock_agent.schemas.target import Target
 from aistock_agent.services.cache import (
@@ -82,15 +79,18 @@ def _slice_horizon(profile: dict[str, object], horizon: str) -> dict[str, object
 
 
 async def _collect_target_entries(target: Target) -> list[dict[str, object]]:
-    """从 verified 记录中收集该 target 的验证 entry（缓存 miss 时的重算数据源）。
+    """从全部记录中收集该 target 的验证 entry（缓存 miss 时的重算数据源）。
 
+    D3（2026-09-03）：数据源从 list_verified_predictions 改为 list_all_predictions
+    （pending+verified 档位级扫描）——status=verified 需全档完结（long 2027），只读
+    verified 画像恒空；short/mid 到期写入即有 result 即计入。
     按 record 级 target 字符串匹配（== internal_id 或 == name），把该记录的
     verification 下所有带 result 的 entry 归入 target。数据源故障返回空列表（降级，
     build_validation_profile 得零画像，不 crash）。
     """
     entries: list[dict[str, object]] = []
     try:
-        records = await node_api.list_verified_predictions(limit=500)
+        records = await node_api.list_all_predictions()
     except Exception:
         logger.debug("read_validation_profile_fetch_failed", target=target.internal_id,
                      exc_info=True)
@@ -134,7 +134,8 @@ async def _collect_target_confirmations(
     同一(idx prediction+scenario)的确认信号跨日去重，避免窗口重扫把同一次印证重复计数。
     失败/无报告统一降级返回 []。板块/个股画像渠道B回扫见计划跟随项。
     """
-    from datetime import date as date_type, timedelta
+    from datetime import date as date_type
+    from datetime import timedelta
 
     confirmations: list[dict[str, object]] = []
     seen: set[tuple[object, object]] = set()

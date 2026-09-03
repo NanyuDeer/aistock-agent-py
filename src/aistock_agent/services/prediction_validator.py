@@ -262,6 +262,13 @@ async def _verify_horizon(
         if idx is not None:
             base["due_matched"] = str(rows[idx]["trade_date"])
     if idx is None:
+        # D6（2026-09-03）：到期日当天（含盘中/收盘前）日 K 通常尚未入库 → 判 wait 而非
+        # insufficient——盘中跑若落 insufficient 会被 _should_skip_horizon 拦下，16:00 收盘后
+        # 无法重判，档位被永久写死 no_data。仅当 due 已过且行情缺失（停牌/数据故障）才落
+        # insufficient 可追溯。
+        if due_date >= today:
+            return {**base, "wait": True,
+                    "reason": f"到期日 {due_date} 当日行情未出，等待收盘后判定"}
         return {**base, "result": "insufficient", "subtype": "no_data", "actual": "",
                 "reason": f"到期日 {due_date} 行情缺失"}
     window = [float(cast(float, r["pct_chg"])) for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
@@ -392,6 +399,7 @@ async def _verify_conditions(
     due_dates = record.get("due_dates")
     due_dates_map = due_dates if isinstance(due_dates, dict) else {}
     out: dict[str, object] = {}
+    today = shanghai_today().isoformat()
     for i, cond in enumerate(conditions):
         key = f"c{i}"
         if not isinstance(cond, dict):
@@ -401,6 +409,10 @@ async def _verify_conditions(
         due_date = str(due_dates_map.get(horizon) or "") if horizon else ""
         direction = str(anchor.get("direction") or "neutral")
         threshold = str(anchor.get("threshold") or "")
+        # D6（2026-09-03）：条件到期日仍在未来 → 未到验证窗口，跳过不产 entry（run_once 会在
+        # 到期后自然处理）；此前对未来 due 落 insufficient no_data 违反窗口语义。
+        if due_date and due_date > today:
+            continue
         entry: dict[str, object] = {
             **base,
             "condition_index": i,
@@ -429,6 +441,11 @@ async def _verify_conditions(
             continue
         idx = next((j for j, r in enumerate(rows) if r.get("trade_date") == due_date), None)
         if idx is None:
+            # D6：到期日当天日 K 未出（盘中/收盘前）→ wait 待收盘后判定，不落 insufficient
+            if due_date >= today:
+                out[key] = {**entry, "wait": True,
+                            "reason": f"到期日 {due_date} 当日行情未出，等待收盘后判定"}
+                continue
             out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
                         "actual": "", "reason": f"到期日 {due_date} 行情缺失"}
             continue
@@ -517,8 +534,13 @@ async def run_once() -> int:
             break
         records.extend(batch)
         last_id = batch[-1].get("id")
-        cursor = cast(int | None, last_id)
-        if not isinstance(cursor, int) or len(batch) < 200:
+        # D2：Node internal 列表已归一 id 为 number（治本）；兼容历史 string 双保险
+        cursor = (
+            int(last_id)
+            if isinstance(last_id, str) and last_id.isdigit()
+            else cast(int | None, last_id)
+        )
+        if cursor is None or len(batch) < 200:
             break
     if not records:
         logger.info("prediction_validate_no_pending")
@@ -527,6 +549,9 @@ async def run_once() -> int:
     target_counter: dict[str, int] = {}
     for record in records:
         record_id = record.get("id")
+        # D2：Node internal 归一后为 number；兼容历史 string（曾致 isinstance(int) 门禁全量跳过）
+        if isinstance(record_id, str) and record_id.isdigit():
+            record_id = int(record_id)
         if not isinstance(record_id, int):
             continue
         due_dates = record.get("due_dates")
@@ -602,16 +627,17 @@ async def run_once() -> int:
 
 
 async def _report_stats() -> None:
-    """验证统计出口：拉取 status=verified 记录 → hit_rate_summary/baseline_compare → 结构化日志。
+    """验证统计出口：拉取全部含验证档位的记录（D3 档位级扫描）→ hit_rate_summary/
+    baseline_compare → 结构化日志（输出结构化日志供 P2 开 chat 对照与 B3 反哺做决策依据）。
 
-    D3：verified 数据源用 Task 6 扩展的 listByStatus 游标（before_id 分页），
-    不依赖 pending 游标设施；输出结构化日志供 P2 开 chat 对照与 B3 反哺做决策依据。
+    D3：数据源从 status=verified 改为 pending+verified 全记录（node_api.list_all_predictions），
+    否则画像/统计在 long 档（2027）到期前恒空。
     """
-    verified = await node_api.list_verified_predictions(limit=500)
-    if not verified:
+    records = await node_api.list_all_predictions()
+    if not records:
         return
     entries: list[dict[str, object]] = []
-    for rec in verified:
+    for rec in records:
         ver = rec.get("verification")
         if isinstance(ver, dict):
             for h, entry in ver.items():
@@ -636,18 +662,18 @@ async def _report_stats() -> None:
 async def _write_validation_profiles() -> int:
     """到期验证接管（Spec B §4.2）：验证后按 target 落画像缓存。
 
-    读取 verified 窗口，把每条带 result 的 verification entry 归到 record 级 target
-    字符串下，经 ``_resolve_verify_target`` 收敛为稳定 internal_id（stock/index=裸码，
-    sector=ts_code；不直接用 name，防板块改名断画像），再 build_validation_profile +
-    落 ``prediction:profile:{internal_id}`` 缓存——供预判 skill 读取 + 迭代闭环消费，
-    避免每次预判拉全量 verified 重算（§8 拉取开销）。
+    读取全部含验证档位的记录（D3 档位级扫描，node_api.list_all_predictions），把每条带
+    result 的 verification entry 归到 record 级 target 字符串下，经 ``_resolve_verify_target``
+    收敛为稳定 internal_id（stock/index=裸码，sector=ts_code；不直接用 name，防板块改名断
+    画像），再 build_validation_profile + 落 ``prediction:profile:{internal_id}`` 缓存——供
+    预判 skill 读取 + 迭代闭环消费，避免每次预判拉全量 verified 重算（§8 拉取开销）。
     early_exit-only（无 result）不计入画像（§9-3）。返回写入的靶位数。
     """
-    verified = await node_api.list_verified_predictions(limit=500)
-    if not verified:
+    records = await node_api.list_all_predictions()
+    if not records:
         return 0
     groups: dict[str, list[dict[str, object]]] = {}
-    for rec in verified:
+    for rec in records:
         tgt = _record_target_str(rec.get("prediction"))
         if tgt is None:
             continue
