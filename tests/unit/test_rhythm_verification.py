@@ -219,6 +219,61 @@ def test_evaluate_branch_anchor_bearish_uses_hi_trigger() -> None:
     assert evaluate_branch(branch, rows, {}) == "hit"
 
 
+def test_amount_branch_with_anchor_falls_to_range_miss() -> None:
+    """成交额分支 + anchor 不能拿"指数点位 close"去比"亿元 cond.lo"：应回退 range 判点。
+
+    anchor bullish + 成交额 lo=1.5（亿元），若误走点位机械判定：close(点位 3000)>1.5 → 恒 hit；
+    修复后回退 conclusion.range（点位区间 3050-3070），close 未进区间 → miss。
+    """
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "成交额",
+            "lo": 1.5, "hi": None, "unit": "亿元", "label": "放量",
+        },
+        "anchor": {"metric": "amount", "threshold": "放量", "direction": "bullish"},
+        "conclusion": {
+            "direction": "bullish", "range": "3050.00-3070.00",
+            "validity": 5, "note": "",
+        },
+    }
+    rows = _rows([3000.0, 3010.0, 3005.0, 3008.0, 3003.0])
+    assert evaluate_branch(branch, rows, {}) == "miss"
+
+
+def test_amount_branch_with_anchor_hit_via_range() -> None:
+    """成交额分支 + anchor：仍可经 range 判 hit（回退路径），而非点位机械判定。"""
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "成交额",
+            "lo": 1.5, "hi": None, "unit": "亿元", "label": "放量",
+        },
+        "anchor": {"metric": "amount", "threshold": "放量", "direction": "bullish"},
+        "conclusion": {
+            "direction": "bullish", "range": "3020.00-3040.00",
+            "validity": 5, "note": "",
+        },
+    }
+    rows = _rows([3000.0, 3030.0, 3035.0, 3010.0, 3005.0])
+    assert evaluate_branch(branch, rows, {}) == "hit"
+
+
+def test_neutral_anchor_falls_to_range() -> None:
+    """neutral anchor 无点位机械触发位，应回退 range 判点（hit），而非点位机械判定。"""
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "上证指数点位",
+            "lo": None, "hi": None, "label": "区间震荡",
+        },
+        "anchor": {"metric": "index_close", "threshold": "区间", "direction": "neutral"},
+        "conclusion": {
+            "direction": "neutral", "range": "3020.00-3040.00",
+            "validity": 5, "note": "",
+        },
+    }
+    rows = _rows([3000.0, 3030.0, 3035.0, 3010.0, 3005.0])
+    assert evaluate_branch(branch, rows, {}) == "hit"
+
+
 def test_event_branch_trigger_prefers_event_ref_title() -> None:
     """_triggered 优先用 event_ref.title 匹配事件 result（title 含"预期差"字样仍能匹配，D11）。"""
     branch = {
