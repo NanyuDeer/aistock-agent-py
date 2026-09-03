@@ -26,6 +26,11 @@ class PredictionHorizon(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     horizon: PredictionHorizonType
+    label: str = Field(
+        default="",
+        description="该档基准走势短语（4~6 字，如 恐慌出清为主/震荡磨底/震荡走强；"
+        "洞见卡基准行“基准 · {label}”展示；旧记录为空则前端回退不渲染）。",
+    )
     remaining_estimate: str  # 还能持续多久（定性估算，如 "2-4 周"）
     phase: PredictionPhase  # 当前演化阶段
     direction: Literal["bullish", "bearish", "neutral"]  # 该档位影响方向
@@ -87,6 +92,12 @@ class PredictionCondition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     condition: str  # 触发条件（完整可量化事实描述，长句保留，供详细报告原文展示）
+    label: str = Field(
+        default="",
+        description="路径短语名，固定两段式“{市场状态/触发条件，≈4 字，≤6} · {触发后走势，≈4 字，≤6}”，"
+        "如 恐慌出清 · 下跌中继 / 缩量企稳 · 平台修复（洞见卡路径首行加粗展示；"
+        "旧记录为空则前端回退用 condition 主干）。",
+    )
     scenario: str  # 条件满足后的走势预判（尽量含幅度/目标位）
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
     keywords: list[str] = Field(

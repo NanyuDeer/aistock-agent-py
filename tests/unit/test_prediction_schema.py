@@ -38,6 +38,29 @@ def test_valid_result():
     assert result.horizons[0].horizon == "mid"
 
 
+def test_labels_default_empty_and_parse():
+    """2026-09-03 label 展示字段：horizon.label（基准走势）与 condition.label（两段式路径名）。
+    新数据携带 label 正常解析；旧记录缺省为空字符串，不破坏既有校验。"""
+    horizon_with = PredictionHorizon(**_valid_horizon(label="恐慌出清为主"))
+    assert horizon_with.label == "恐慌出清为主"
+    horizon_old = PredictionHorizon(**_valid_horizon())
+    assert horizon_old.label == ""
+
+    cond_with = PredictionCondition(
+        condition="成交额放大至 900 亿以上、收盘较当前再跌超 2%",
+        label="恐慌出清 · 下跌中继",
+        scenario="恐慌出清、惯性下探 -3%~-5%",
+        anchor=PredictionAnchor(horizon="short", threshold="-3%", direction="bearish"),
+    )
+    assert cond_with.label == "恐慌出清 · 下跌中继"
+    cond_old = PredictionCondition(
+        condition="缩量企稳、不破前低",
+        scenario="空头衰竭、修复至平台",
+        anchor=PredictionAnchor(horizon="short", threshold="+5%", direction="bullish"),
+    )
+    assert cond_old.label == ""
+
+
 def test_empty_horizons_raises():
     with pytest.raises(ValidationError):
         PredictionResult(
