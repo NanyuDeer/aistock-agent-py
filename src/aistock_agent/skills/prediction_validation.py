@@ -227,10 +227,13 @@ def _default_explanation(profile: dict[str, object]) -> dict[str, object]:
     else:
         implications = ["命中率处于正常区间，历史验证对当前预判不做额外约束"]
     return {
-        "summary": f"该 target 已验证 {n} 档，命中率 {rate:.0%}，样本{'充足' if sufficient else '不足'}",
+        "summary": (
+            f"该 target 已验证 {n} 档，命中率 {rate:.0%}，"
+            f"样本{'充足' if sufficient else '不足'}"
+        ),
         "miss_reasons": [miss_text] if miss_text else ["无失手样本可归类"],
         "condition_met_insights": (
-            [f"条件化判定已确认 {cond_rate:.0%} 成立"] if isinstance(cond_rate, (int, float))
+            [f"条件化判定已确认 {cond_rate:.0%} 成立"] if isinstance(cond_rate, int | float)
             else ["条件化判定样本尚不足"]
         ),
         "prediction_implications": implications,
@@ -240,18 +243,25 @@ def _default_explanation(profile: dict[str, object]) -> dict[str, object]:
 # 低命中率判定阈值：sufficient_sample（样本充足）且 hit_rate 低于该值 → 提示降置信/补条件
 _LOW_HIT_RATE_THRESHOLD = 0.5
 
-# 档位级抑制门槛（B 期 Task5）：optional 档（mid/long）该档样本≥3 且命中率<0.4 → 附抑制提示。
-# 只覆盖 optional mid/long：short 为 required 主判定（预判必需），不做档位级抑制。
+# 档位级弱化置信门槛（B 期 Task5）：mid/long 档该档样本≥3 且命中率<0.4 → 附提示。
+# 覆盖所有 mid/long 档（含 policy_macro/trend_fundamental 下 required 的 mid/long）：画像
+# horizon_breakdown 不带 driver 上下文，无法区分 required/optional；optional 集合 ⊆ {mid,long}，
+# 固定查 mid/long 即覆盖全部 optional 形态，required 形态一并覆盖（近似，控制器裁定接受）。
+# 提示只用于弱化置信/谨慎表述，不裁剪产出——required 档不可裁语义由归一化强制层保证；
+# 不查 short：short 恒为 required 主判定（预判必需），不做档位级提示。
 _HORIZON_MIN_SAMPLES = 3
 _HORIZON_LOW_HIT_RATE = 0.4
 _HORIZON_CHECKED = ("mid", "long")
 
 
 def _horizon_suppress_note(profile: dict[str, object]) -> str | None:
-    """horizon_breakdown 中 optional 档（mid/long）「样本≥3 且命中率<0.4」→ 抑制提示文本。
+    """horizon_breakdown 中 mid/long 档「样本≥3 且命中率<0.4」→ 弱化置信提示文本。
 
+    覆盖所有 mid/long 档（含 policy_macro/trend_fundamental 下 required 的 mid/long——画像
+    horizon_breakdown 不带 driver 上下文，无法区分 required/optional，统一按档检查）。
     命中档位可能多个，合并进同一句（None 表示无档位命中，调用方不附 note）。
-    只读画像附加输入提示，不改写判定/不产交易指令（红线与 _LOW_HIT_RATE_THRESHOLD 分支一致）。
+    提示仅供弱化置信/谨慎表述，不裁剪产出：required 档不可裁语义由归一化强制层保证。
+    本层只读画像附加输入提示，不改写判定/不产交易指令（红线与 _LOW_HIT_RATE_THRESHOLD 分支一致）。
     """
     hd = profile.get("horizon_breakdown")
     if not isinstance(hd, dict):
@@ -280,8 +290,10 @@ def enrich_prediction_input(
 
     新增 ``validation_profile`` 块（target/n/hit_rate/sufficient_sample/condition_met_rate），
     样本充足且命中率低时附 ``note``（"该 target 同类条件历史命中率低，请降低置信/补充条件"）。
-    另有 B 期 horizon 级反哺：horizon_breakdown 中 optional mid/long 档「样本≥3 且命中率<0.4」
-    时，同键 ``note`` 附对应档位的抑制提示（与全局低命中提示并存时拼接）。
+    另有 B 期 horizon 级反哺：horizon_breakdown 中 mid/long 档「样本≥3 且命中率<0.4」
+    时，同键 ``note`` 附对应档位的弱化置信提示——覆盖所有 mid/long 档（含
+    policy_macro/trend_fundamental 下 required 的 mid/long；提示仅供 LLM 弱化置信/谨慎表述，
+    不裁剪产出，required 档不可裁语义由归一化强制层保证；与全局低命中提示并存时拼接）。
 
     红线：只作**输入参考**——不改写 hit/miss 判定、不产交易指令、不在代码层钳制
     confidence（A3 置信钳制仍由产出方后处理覆盖，此处仅是 LLM 输入提示词上下文）。
@@ -305,10 +317,15 @@ def enrich_prediction_input(
             f"该 target 同类条件历史命中率低（{rate:.0%}，n={n}），"
             "预判时刻意降低置信/补充更严条件；仅供输入参考，不产交易指令。"
         )
-    # B 期 Task5：optional mid/long 档低命中反哺——命中档位附抑制提示（与全局 note 并存时拼接）
+    # B 期 Task5：mid/long 档低命中反哺（覆盖全部 mid/long 档，含 required 形态）——命中档位
+    # 附弱化置信提示（不裁剪产出，required 不可裁由归一化强制层保证）；与全局 note 并存时拼接
     horizon_note = _horizon_suppress_note(profile)
     if horizon_note:
-        ctx["note"] = f"{ctx['note']}；{horizon_note}" if ctx.get("note") else horizon_note
+        if ctx.get("note"):
+            # 分号拼接前句尾句号去除其一，避免"句号；"连用病句
+            ctx["note"] = f"{ctx['note'].rstrip('。')}；{horizon_note}"
+        else:
+            ctx["note"] = horizon_note
     out = dict(base_input)
     out["validation_profile"] = ctx
     # Spec Cbis（渠道B）：被现实多次印证的场景 → 给 LLM 提权提示（纯输入参考）
