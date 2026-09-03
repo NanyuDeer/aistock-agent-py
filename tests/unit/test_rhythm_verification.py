@@ -140,6 +140,85 @@ def test_event_branch_result_landed_miss_via_range() -> None:
     assert evaluate_branch(branch, rows, {"英伟达财报": "超预期"}) == "miss"
 
 
+def test_evaluate_branch_uses_anchor_threshold() -> None:
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "上证指数点位",
+            "lo": 4000.0, "hi": None, "label": "站上 4000",
+        },
+        "position_action": {"direction": "add", "change": "+2 成", "band": None},
+        "anchor": {"metric": "index_close", "threshold": "站稳 +0.5%", "direction": "bullish"},
+        "conclusion": {
+            "direction": "bullish", "range": "4000-4030",
+            "validity": 5, "note": "突破压力位",
+        },
+        "touch_strength": 0.12,
+    }
+    rows = [
+        {"close": 4020.0},
+        {"close": 4030.0},
+    ]
+    result = evaluate_branch(branch, rows, {})
+    # 站上 4000 且窗口内 2 日 > 触发位 → 命中（anchor direction bullish，阈值站稳）
+    assert result in ("hit", "miss", "insufficient")
+    # anchor 机械判定：窗口内连续 2 日 close > 触发位 lo=4000 → hit
+    assert result == "hit"
+
+
+def test_evaluate_branch_anchor_bullish_miss_when_not_stable() -> None:
+    """anchor bull：以 condition.lo 为触发位，需连续 2 日 close > 触发位才算 hit。
+
+    窗口内仅首日站上（4010>4000），后续回落 → anchor 判 miss；
+    旧 range 判定（3990-4010 包含 3990）会误判 hit → 本用例 RED。
+    """
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "上证指数点位",
+            "lo": 4000.0, "hi": None, "label": "站上 4000",
+        },
+        "position_action": {"direction": "add", "change": "+2 成", "band": None},
+        "anchor": {"metric": "index_close", "threshold": "站稳 +0.5%", "direction": "bullish"},
+        "conclusion": {
+            "direction": "bullish", "range": "3990-4010",
+            "validity": 5, "note": "突破压力位",
+        },
+        "touch_strength": 0.12,
+    }
+    rows = [
+        {"close": 4010.0},
+        {"close": 3990.0},
+        {"close": 3990.0},
+        {"close": 3990.0},
+        {"close": 3990.0},
+    ]
+    assert evaluate_branch(branch, rows, {}) == "miss"
+
+
+def test_evaluate_branch_anchor_bearish_uses_hi_trigger() -> None:
+    """anchor bear：跌破支撑以 condition.hi 为触发位（非 lo），连续 2 日 close < hi → hit。
+
+    旧 range 判定只覆盖窄区间（3998-4000）→ miss；anchor bear 正确判 hit → 本用例 RED。
+    """
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "上证指数点位",
+            "lo": None, "hi": 4000.0, "label": "跌破 4000",
+        },
+        "position_action": {"direction": "reduce", "change": "-1 成", "band": None},
+        "anchor": {"metric": "index_close", "threshold": "跌破 -0.5%", "direction": "bearish"},
+        "conclusion": {
+            "direction": "bearish", "range": "3998-4000",
+            "validity": 5, "note": "跌破支撑位",
+        },
+        "touch_strength": 0.2,
+    }
+    rows = [
+        {"close": 3990.0},
+        {"close": 3985.0},
+    ]
+    assert evaluate_branch(branch, rows, {}) == "hit"
+
+
 def test_event_branch_trigger_prefers_event_ref_title() -> None:
     """_triggered 优先用 event_ref.title 匹配事件 result（title 含"预期差"字样仍能匹配，D11）。"""
     branch = {
