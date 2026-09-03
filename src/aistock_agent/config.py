@@ -247,7 +247,7 @@ class Settings(BaseSettings):
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
     scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周五生成下周一预告，F2）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周五生成下周一预告）
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
