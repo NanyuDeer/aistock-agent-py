@@ -1,5 +1,5 @@
-import pytest
 from aistock_agent.services.rhythm_dense_band import dense_band
+
 
 def test_insufficient_data():
     assert dense_band([1.0], [1.0], [1.0], [1.0], window=40) == (None, None, 0, True)
@@ -18,7 +18,9 @@ def test_returns_band_within_price_range():
     highs = [c + 10 for c in closes]
     lows = [c - 10 for c in closes]
     amount = [100.0] * 60
-    support, pressure, touch_count, insufficient = dense_band(closes, highs, lows, amount, window=40)
+    support, pressure, touch_count, insufficient = dense_band(
+        closes, highs, lows, amount, window=40
+    )
     assert insufficient is False
     assert support is not None and pressure is not None
     assert support <= pressure
@@ -40,6 +42,8 @@ def test_repeated_touch_zone_yields_high_touch_count():
             highs.append(3060 + i)
             lows.append(3040 + i)
     amount = [100.0] * 60
-    support, pressure, touch_count, insufficient = dense_band(closes, highs, lows, amount, window=40)
+    support, pressure, touch_count, insufficient = dense_band(
+        closes, highs, lows, amount, window=40
+    )
     assert insufficient is False
     assert touch_count >= 2

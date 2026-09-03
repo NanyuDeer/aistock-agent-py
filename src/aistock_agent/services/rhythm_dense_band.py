@@ -4,7 +4,7 @@
 确定性纯函数：同输入必同输出。数据不足时 insufficient=True，不产伪带。
 """
 from __future__ import annotations
-from typing import Any
+
 
 def dense_band(
     closes: list[float],
@@ -37,8 +37,8 @@ def dense_band(
     # 触碰频次统计：对每根 K 线，看它的 high/low 落在哪些候选价位带内
     # 候选带中心 = 每个 high/low 采样值；统计各中心被触碰次数
     touch_events: dict[float, int] = {}
-    for h, l in zip(highs_w, lows_w):
-        for price in (h, l):
+    for h, lo in zip(highs_w, lows_w):
+        for price in (h, lo):
             if price is None:
                 continue
             # 记录该价位被触碰
