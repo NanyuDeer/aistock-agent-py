@@ -234,19 +234,20 @@ class Settings(BaseSettings):
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
     scheduler_review_quick_cron: str = "30 15 * * 0-4"
-    # full review：20:30 Tushare 完整数据覆盖 quick
-    scheduler_review_full_cron: str = "30 20 * * 0-4"
+    # full review：18:30 收盘后完整数据覆盖 quick（2026-09-03 组长裁决 20:30→18:30）
+    scheduler_review_full_cron: str = "30 18 * * 0-4"
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
-    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 21:30 收盘后对 leaders
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
     # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
-    # 时刻选 21:30 的原因：review_full 20:30 会再触发主因板块级联预判落库，其后拉榜做
+    # 时刻选 19:30 的原因：review_full 18:30 会再触发主因板块级联预判落库，其后拉榜做
     # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
+    # （2026-09-03 组长裁决：review_full 20:30→18:30、板块批量 21:30→19:30，整体前移。）
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
-    scheduler_sector_wind_prediction_cron: str = "30 21 * * 0-4"
+    scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周五生成下周一预告，F2）
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
@@ -271,9 +272,9 @@ class Settings(BaseSettings):
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
     gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（当日过期）
     # ── GI 准入过滤（2026-09-02，盘面/行情类事件不进 GI 候选） ──
-    gi_admittance_enabled: bool = True               # GI 准入过滤总开关（只影响 GI，不影响事件传导）
-    gi_admittance_llm_enabled: bool = True           # 盘面/异动类事件外部催化判断 LLM 开关（关闭时保守 KEEP）
-    gi_consistency_ratio: float = 1.5                # chain 主导方向判定阈值（bullish ≥ bearish × ratio → bullish）
+    gi_admittance_enabled: bool = True               # GI 准入过滤总开关（只影响 GI，不涉事件传导）
+    gi_admittance_llm_enabled: bool = True           # GI 外部催化 LLM 开关（关=保守 KEEP）
+    gi_consistency_ratio: float = 1.5                # 主导方向阈值（bullish ≥ bearish × ratio）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"

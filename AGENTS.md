@@ -71,8 +71,8 @@ START → supervisor(quick_think, 意图路由)
   16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；错峰晚于 sentiment_temp 15:45；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
   次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
   12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
-  20:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → run_sector_trace 落 report_type="sector_trace"（Spec D 板块溯源，2026-09-02）
-  21:30 sector_wind_prediction（每日长线风口板块批量预判，板块四环 spec §6.3）：对 leaders 页 hot-sectors 双榜并集（≤16 且 cycle != 'none'）逐板块 predict_sector 落 source_type="sector_prediction"（list_predictions 幂等跳过 + 当日 sector_trace 主因板块 ts_code 排除；排 20:30 review_full 之后执行保证主因排除准确，2026-09-02）
+  18:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → run_sector_trace 落 report_type="sector_trace"（Spec D 板块溯源，2026-09-02；2026-09-03 组长裁决 20:30→18:30）
+  19:30 sector_wind_prediction（每日长线风口板块批量预判，板块四环 spec §6.3）：对 leaders 页 hot-sectors 双榜并集（≤16 且 cycle != 'none'）逐板块 predict_sector 落 source_type="sector_prediction"（list_predictions 幂等跳过 + 当日 sector_trace 主因板块 ts_code 排除；排 18:30 review_full 之后执行保证主因排除准确；2026-09-03 组长裁决 21:30→19:30）
   旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
 

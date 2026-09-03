@@ -35,16 +35,16 @@ from aistock_agent.services.archiver import (
     archive_market_trace_snapshot,
     archive_review,
 )
-from aistock_agent.services.target_profile import make_target
 from aistock_agent.services.cache import get_cached_review, set_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.state.schema import AgentState
 from aistock_agent.trace.chain import (
-    PredictionConfirmation,
     TRACE_CHAIN_STAGES,
+    PredictionConfirmation,
 )
 from aistock_agent.trace.chain import (
     validate_chain_stages as _validate_chain_stages,
@@ -1282,7 +1282,8 @@ async def run_review(
 
     snapshot_kind 决定使用 quick 还是 full 快照：
     - quick: 调用 build_quick_snapshot（腾讯实时行情，15:30 可用）
-    - full:  调用 build_market_trace_snapshot（Tushare 完整数据，20:30 可用）
+    - full:  调用 build_market_trace_snapshot（Tushare 完整数据；cron 18:30 触发，
+      2026-09-03 组长裁决 20:30→18:30——若当日数据未全由既有降级/兜底处理）
 
     覆盖逻辑：snapshot_kind="quick" 时先检查是否已有 full 报告。
     如果已有 full，跳过持久化（quick 不覆盖 full），返回 status="skipped"。

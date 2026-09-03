@@ -158,7 +158,7 @@ class ReviewQuickConsumer(BaseConsumer):
 
 
 class ReviewFullConsumer(BaseConsumer):
-    """20:30 full review 消费者。"""
+    """18:30 full review 消费者。"""
 
     @property
     def channel(self) -> str:

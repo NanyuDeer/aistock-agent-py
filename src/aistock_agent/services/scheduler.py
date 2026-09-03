@@ -181,8 +181,8 @@ def start_scheduler() -> None:
         name="prediction hit-rate stats",
         replace_existing=True,
     )
-    # 每日长线风口板块批量预判（板块四环 spec §6.3）：21:30 收盘后逐板块
-    # predict_sector（幂等跳过 + 主因板块排除；review_full 20:30 级联预判落库后执行）
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：19:30 收盘后逐板块
+    # predict_sector（幂等跳过 + 主因板块排除；review_full 18:30 级联预判落库后执行）
     scheduler.add_job(
         _run_sector_wind_prediction_task,
         CronTrigger.from_crontab(
@@ -195,7 +195,7 @@ def start_scheduler() -> None:
     )
 
     if settings.quick_snapshot_enabled:
-        # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
+        # 新事件驱动链路：review_quick(15:30) + review_full(18:30)
         scheduler.add_job(
             _publish_review_quick_event,
             CronTrigger.from_crontab(
@@ -862,7 +862,7 @@ async def _publish_review_quick_event() -> None:
 
 
 async def _publish_review_full_event() -> None:
-    """20:30 cron 触发：发布 review_full 事件到 EventBus。"""
+    """18:30 cron 触发：发布 review_full 事件到 EventBus。"""
     report_day = shanghai_today()
     if not is_trading_day(report_day):
         logger.info("scheduler_skip_non_trading_day", task="review_full")
@@ -1117,7 +1117,7 @@ async def _run_prediction_stats_task() -> None:
 
 
 async def _run_sector_wind_prediction_task() -> None:
-    """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 21:30 收盘后）。"""
+    """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 19:30 收盘后）。"""
     if not is_trading_day(shanghai_today()):
         logger.info("scheduler_skip_non_trading_day", task="sector_wind_prediction")
         return
