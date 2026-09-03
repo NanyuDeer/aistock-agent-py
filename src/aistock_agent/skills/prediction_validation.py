@@ -240,6 +240,38 @@ def _default_explanation(profile: dict[str, object]) -> dict[str, object]:
 # 低命中率判定阈值：sufficient_sample（样本充足）且 hit_rate 低于该值 → 提示降置信/补条件
 _LOW_HIT_RATE_THRESHOLD = 0.5
 
+# 档位级抑制门槛（B 期 Task5）：optional 档（mid/long）该档样本≥3 且命中率<0.4 → 附抑制提示。
+# 只覆盖 optional mid/long：short 为 required 主判定（预判必需），不做档位级抑制。
+_HORIZON_MIN_SAMPLES = 3
+_HORIZON_LOW_HIT_RATE = 0.4
+_HORIZON_CHECKED = ("mid", "long")
+
+
+def _horizon_suppress_note(profile: dict[str, object]) -> str | None:
+    """horizon_breakdown 中 optional 档（mid/long）「样本≥3 且命中率<0.4」→ 抑制提示文本。
+
+    命中档位可能多个，合并进同一句（None 表示无档位命中，调用方不附 note）。
+    只读画像附加输入提示，不改写判定/不产交易指令（红线与 _LOW_HIT_RATE_THRESHOLD 分支一致）。
+    """
+    hd = profile.get("horizon_breakdown")
+    if not isinstance(hd, dict):
+        return None
+    flagged: list[str] = []
+    for h in _HORIZON_CHECKED:
+        sub = hd.get(h)
+        if not isinstance(sub, dict):
+            continue
+        n = int(cast(float, sub.get("n", 0) or 0))
+        rate = float(cast(float, sub.get("hit_rate", 0.0) or 0.0))
+        if n >= _HORIZON_MIN_SAMPLES and rate < _HORIZON_LOW_HIT_RATE:
+            flagged.append(f"{h} 档（n={n}，命中率 {rate:.0%}）")
+    if not flagged:
+        return None
+    return (
+        "；".join(flagged)
+        + "历史印证少，该档预判建议降低置信/补充更严条件或暂缓；仅供输入参考，不产交易指令。"
+    )
+
 
 def enrich_prediction_input(
     base_input: dict[str, object], profile: dict[str, object]
@@ -248,6 +280,8 @@ def enrich_prediction_input(
 
     新增 ``validation_profile`` 块（target/n/hit_rate/sufficient_sample/condition_met_rate），
     样本充足且命中率低时附 ``note``（"该 target 同类条件历史命中率低，请降低置信/补充条件"）。
+    另有 B 期 horizon 级反哺：horizon_breakdown 中 optional mid/long 档「样本≥3 且命中率<0.4」
+    时，同键 ``note`` 附对应档位的抑制提示（与全局低命中提示并存时拼接）。
 
     红线：只作**输入参考**——不改写 hit/miss 判定、不产交易指令、不在代码层钳制
     confidence（A3 置信钳制仍由产出方后处理覆盖，此处仅是 LLM 输入提示词上下文）。
@@ -271,6 +305,10 @@ def enrich_prediction_input(
             f"该 target 同类条件历史命中率低（{rate:.0%}，n={n}），"
             "预判时刻意降低置信/补充更严条件；仅供输入参考，不产交易指令。"
         )
+    # B 期 Task5：optional mid/long 档低命中反哺——命中档位附抑制提示（与全局 note 并存时拼接）
+    horizon_note = _horizon_suppress_note(profile)
+    if horizon_note:
+        ctx["note"] = f"{ctx['note']}；{horizon_note}" if ctx.get("note") else horizon_note
     out = dict(base_input)
     out["validation_profile"] = ctx
     # Spec Cbis（渠道B）：被现实多次印证的场景 → 给 LLM 提权提示（纯输入参考）

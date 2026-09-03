@@ -169,3 +169,25 @@ def test_enrich_prediction_input_low_rate_sufficient_notes():
     # 命中率正常 → 不附 note
     ok = pv.enrich_prediction_input({}, _profile(n=40, hit_rate=0.6, sufficient_sample=True))
     assert "note" not in ok["validation_profile"]
+
+
+def test_enrich_horizon_low_hit_attaches_warning():
+    """Task5（B 期）：mid/long 档样本≥3 且命中率<0.4 → note 附抑制提示；样本不足档不提示。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {
+                   "short": {"n": 6, "hit_rate": 0.67},
+                   "mid": {"n": 4, "hit_rate": 0.25},   # n>=3 且 <0.4 → 抑制提示
+                   "long": {"n": 1, "hit_rate": 0.0},   # n<3 → 不提示
+               }}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    txt = str(out.get("validation_profile", {}).get("note", ""))
+    assert "mid" in txt and "印证少" in txt
+    assert "long" not in txt  # 无样本档不提示
+
+
+def test_enrich_horizon_ok_no_warning():
+    """Task5（B 期）：mid 档命中率正常（≥0.4）→ 不附任何 note。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {"mid": {"n": 4, "hit_rate": 0.6}}}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    assert "note" not in out.get("validation_profile", {})
