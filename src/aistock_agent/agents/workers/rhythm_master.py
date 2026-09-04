@@ -1,9 +1,9 @@
 """节奏大师 Worker（spec §8/D13）。
 
-三时点：
-- after_close（16:05，target_date=下一交易日）：全量合成主档位 + 分支 + 提示 → 落盘；
-- morning（9:00）/ midday（12:30）（target_date=当天）：只做事件驱动增量
-  （预期差落档/分支触发/提示更新），主档位沿用 16:05 基准值，禁止重合成、禁止伪造当日温度（G18）。
+三时点统一走 `_compose_card` 三层证据流水线：
+- after_close（target_date=下一交易日）：全量证据重算 + 合成 → 落盘；
+- morning / midday（target_date=运行日）：读最新事件 result / kline 后重算证据，
+  天然满足事件驱动增量语义；为控制成本，过度重生成的缓存优化列入开放点。
 """
 from __future__ import annotations
 
@@ -13,14 +13,12 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
 
-from aistock_agent.prompts.workers.rhythm_master import (
-    RHYTHM_NARRATIVE_FALLBACK,
-    build_narrative_prompt,
-)
-from aistock_agent.services import rhythm_dense_band, rhythm_engine
+from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
+from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_calendar import load_event_window
-from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
+from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.utils.date import add_trading_days, shanghai_today
 
 logger = logging.getLogger(__name__)
@@ -34,20 +32,7 @@ INDEX_CODE = "000001"  # 上证指数
 
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
-
-def _event_high_hint(high_events: list[dict[str, Any]]) -> str:
-    """high 事件前置提示文案（§7.1 事件前置纪律，I1）。
-
-    after_close 基准卡与 morning/midday 增量共用同一文案逻辑；
-    无 high 事件时返回空串（前端 v-if 不渲染）。
-    """
-    titles = [str(e.get("title", "")) for e in high_events]
-    if not titles:
-        return ""
-    return (
-        f"未来 {len(titles)} 日有 {'、'.join(titles[:2])} 等高影响事件，"
-        "注意确定性风险，倾向相应收敛"
-    )
+DEGRADED_MODEL = "研研判暂不可用"
 
 
 def _load_sentiment_series(
@@ -86,245 +71,99 @@ def _load_sentiment_series(
     return series, scores, consecutive_ice, latest_phase
 
 
-async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
-    """16:05 全量合成（读前校验 basis_date 温度已落盘，G18）。"""
-    target_date = add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
-    series, scores, consecutive_ice, latest_phase = _load_sentiment_series(days=7)
-    missing: list[str] = []
-    today_archive = sentiment_archive_dir / f"{basis_date}.json"
-    if not today_archive.exists():
-        missing.append("情绪数据缺失（沿用前值）")
-    prev_phase = latest_phase
-    # 长历史解锁：传 start_date（internal.ts 仅在传 start_date 时拉 5000 行），
-    # 供 dense_band 与 MA60 佐证（≥65 根 close）取足近 65 根。
-    kline = (
-        await node_api.get_index_kline(
-            INDEX_CODE,
-            days=200,
-            start_date=date_cls.fromisoformat(basis_date).strftime("%Y%m%d"),
-        )
-        or []
+def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
+    """按量能三档 + 阶段给量价确认方向（确定性，不靠 LLM）。"""
+    if len(amounts) < 20 or stage is None:
+        return None
+    avg20 = sum(amounts[-20:]) / 20
+    avg5 = sum(amounts[-5:]) / 5
+    if avg20 <= 0:
+        return None
+    ratio = avg5 / avg20
+    if ratio >= 1.1 and stage in {"launch", "rally"}:
+        return "bullish"
+    if ratio <= 0.8 and stage in {"overheat", "ebb"}:
+        return "bearish"
+    return None
+
+
+async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
+    target_date = (
+        add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
+        if slot == "after_close"
+        else basis_date
     )
-    # 统一按"交易日序"取 close 非空行，再取近窗口；避免 closes/highs/lows/amounts
-    # 各自独立过滤导致近 20 交易日量能（amounts[-20:]）与价格序列错位（硬约束 #6）。
+    start = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
+    kline = (
+        await node_api.get_index_kline(INDEX_CODE, days=260, start_date=start) or []
+    )
     rows = [r for r in kline if r.get("close") is not None]
     closes = [float(r["close"]) for r in rows[-65:]]
-    highs = [float(r["high"]) for r in rows[-65:] if r.get("high") is not None]
-    lows = [float(r["low"]) for r in rows[-65:] if r.get("low") is not None]
-    amounts = [
-        float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]
-    ]
-    # C1：指数技术位多级确认佐证（确定性计算，LLM 不产数值）；不足 65 根时如实标注
-    breadth = (
-        rhythm_engine.ma_breadth(closes)
-        if len(closes) >= 65
-        else rhythm_engine.ma_breadth([])
-    )
-    if breadth.get("insufficient"):
-        missing.append("MA 技术位数据不足")
-    trend = rhythm_engine.trend_anchor(closes, amounts)
-    fg_resp = await node_api.get_fear_greed()
-    fg_index = fg_resp.get("index") if isinstance(fg_resp, dict) else None
-    # 阶段：以 payload.cycle_phase 为 prev 输入、量能真实证据重算（单源真相 = engine）
-    volume_weak = None
-    if amounts and len(amounts) >= 20:
-        volume_weak = sum(amounts[-5:]) / 5 < sum(amounts[-20:]) / 20 * 0.8
-    # C1 前原始 phase 判背离（同一价格信号只经一条路径生效：tech 佐证不进 detect_conflict 输入）
-    base_phase, _ = rhythm_engine.detect_phase(
-        history=scores,
-        consecutive_ice=consecutive_ice,
-        volume_weak=volume_weak,
-        prev_phase=prev_phase,
-        tech=None,
-    )
-    conflict, conflict_detail = rhythm_engine.detect_conflict(base_phase, trend)
-    penalty = rhythm_engine.conflict_penalty(rhythm_engine.conflict_kind(base_phase, trend))
-
-    # 展示相位（tech 佐证只影响展示与 evidence，不进入背离判定）
-    phase, phase_evidence = rhythm_engine.detect_phase(
-        history=scores,
-        consecutive_ice=consecutive_ice,
-        volume_weak=volume_weak,
-        prev_phase=prev_phase,
-        tech=breadth,  # C1：技术佐证只进 phase_evidence，不进仓位话术
-    )
-    phase_evidence["technical"] = breadth
-    score, compose_missing = rhythm_engine.compose_score(
-        phase=phase,
-        trend=trend,
-        fg=fg_index,
-        trend_available=trend is not None,
-        fg_available=fg_index is not None,
-        penalty=penalty,  # C2：顶背离降 1 档；底背离 0.0 禁止降档
-    )
-    missing.extend(compose_missing)
-    level = rhythm_engine.level_from_score(score)
+    amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
+    fg = (await node_api.get_fear_greed() or {}).get("index")
     win = await load_event_window(target_date)
-    # dense_band 密集触碰带（确定性纯函数，硬约束 #1）：先计算，供 build_technical_branches
-    # 注入支撑/压力，并回填各分支 touch_strength。
-    # touch_strength = 触碰次数/有效 close 数（非命中概率）；len(closes)=0 时取 None。
-    # dense_support/dense_pressure 优先作为分支支撑/压力；insufficient=True（None）时
-    # build_technical_branches 内部回退旧极值法（兜底，不编造密集带）。
-    dense_support, dense_pressure, touch_count, _ = rhythm_dense_band.dense_band(
-        closes=closes, highs=highs, lows=lows, amount=amounts, window=40
+    _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
+
+    breadth = None
+    snap = await node_api.get_last_close_snapshot()
+    if isinstance(snap, dict):
+        breadth = snap.get("breadth")
+
+    stage, stage_reason = ev.detect_stage(
+        breadth=breadth, closes=closes, amounts=amounts,
+        sentiment_scores=sentiment_scores,
+        fg=fg if isinstance(fg, int | float) else None,
+        prev_phase=None,
     )
-    branches: list[dict[str, Any]] = []
-    if win.high_events:
-        branches = rhythm_engine.build_technical_branches(
-            closes=closes, highs=highs, lows=lows, amounts=amounts,
-            dense_support=dense_support, dense_pressure=dense_pressure,
-        )[:2]
-        branches.extend(rhythm_engine.build_event_branch(win.high_events[0]))
-    else:
-        branches = rhythm_engine.build_technical_branches(
-            closes=closes, highs=highs, lows=lows, amounts=amounts,
-            dense_support=dense_support, dense_pressure=dense_pressure,
-        )[:3]
-    if win.source_missing:
-        missing.append("事件源未接（日历接口不可用）")
-    if win.calendar_uncovered:
-        missing.append("交易日历未覆盖（事件窗口不可用）")
-    for b in branches:
-        b["touch_strength"] = touch_count / len(closes) if len(closes) else None
-    card = {
-        "score": round(score, 1),
-        "level": level,
-        "position_band": rhythm_engine.position_band(level),
-        "phase": phase,
-        "phase_evidence": {**phase_evidence, "experimental": True},
-        "temperature_series": series,  # 复用本函数已加载的 series，避免二次读盘
-        "event_window": win.events,
-        "event_source_missing": win.source_missing,
-        "event_high_hint": _event_high_hint(win.high_events),
-        "next_event_anchor": rhythm_engine.build_next_event_anchor(win.events, basis_date),
-        "conflict": conflict,
-        "conflict_detail": conflict_detail,
-        "branches": branches,
-        "data_missing": missing,
-    }
-    return {
-        "target_date": target_date,
-        "basis_date": basis_date,
-        "refresh_slot": "after_close",
-        "rhythm_card": card,
-    }
+    event_confirm = any(e.get("result") in {"超预期", "不及预期"} for e in win.events)
+    volume_direction = _volume_confirm(amounts, stage)
+    cert, cert_reason = ev.detect_certainty(
+        event_confirm=event_confirm, volume_direction=volume_direction,
+        stage=stage, breadth=breadth,
+    )
+    position = ev.compute_position(stage=stage, certainty=cert)
+    anchors = ev.build_event_anchors(win.events)
 
-
-async def _apply_event_delta(
-    base: dict[str, Any], slot: str, basis_date: str
-) -> dict[str, Any]:
-    """morning/midday 事件驱动增量：主档位沿用基准，只更新事件窗口/分支触发/提示（G18）。
-
-    basis_date 语义随刷新推进（spec §8：16:05=当日收盘基准 / 9:00=当日盘前隔夜 /
-    12:30=当日午间）；增量版本 basis_date=运行日 为规格语义，主档位数据基准日由
-    基准报告（after_close 版）自含，故此处不改 basis 语义、不重合成主档位。
-    """
-    card = dict(base.get("rhythm_card", {}))
-    # data_missing 从基准卡拷贝后独立维护（不改写基准报告；保持缺失标注如实）
-    missing = list(card.get("data_missing") or [])
-    win = await load_event_window(basis_date)
-    card["event_window"] = win.events
-    card["event_source_missing"] = win.source_missing
-    card["next_event_anchor"] = rhythm_engine.build_next_event_anchor(win.events, basis_date)
-    # 事件窗口缺失标注：calendar_uncovered / source_missing 按当前窗口状态追加/移除（对齐全量分支）
-    if win.calendar_uncovered:
-        if "交易日历未覆盖（事件窗口不可用）" not in missing:
-            missing.append("交易日历未覆盖（事件窗口不可用）")
-    else:
-        missing = [m for m in missing if m != "交易日历未覆盖（事件窗口不可用）"]
-    if win.source_missing:
-        if "事件源未接（日历接口不可用）" not in missing:
-            missing.append("事件源未接（日历接口不可用）")
-    else:
-        missing = [m for m in missing if m != "事件源未接（日历接口不可用）"]
-    card["data_missing"] = missing
-    # 事件分支落档：公布后按预期差触发（§19.3/D11）；v1 以 result 字段人工回填为主
-    card["branches"] = rhythm_engine.apply_event_result_met(card.get("branches", []), win.events)
-    # 提示层：high 事件前置提示（不改主档位，§7.1 事件前置纪律；与 after_close 基准卡共用文案，I1）
-    card["event_high_hint"] = _event_high_hint(win.high_events)
-    return {**base, "basis_date": basis_date, "refresh_slot": slot, "rhythm_card": card}
-
-
-async def _narrate(card: dict[str, Any]) -> dict[str, Any]:
-    """LLM 叙事（quick_think，禁点位）；失败降级模板（§7.2）。"""
-    try:
-        resp = await get_quick_think().ainvoke(
-            [{"role": "user", "content": build_narrative_prompt(card)}]
-        )
-        text = getattr(resp, "content", None) or ""
-        parsed = json.loads(text) if isinstance(text, str) else {}
-        if not isinstance(parsed, dict) or not parsed.get("summary"):
-            return dict(RHYTHM_NARRATIVE_FALLBACK)
-        risks = parsed.get("risks")
-        if not isinstance(risks, list) or not risks:
-            risks = [rhythm_engine.DISCLAIMER]
-        return {
-            "summary": str(parsed["summary"])[:50],
-            "details": str(parsed.get("details", "")),
-            "risks": [str(r) for r in risks],
-        }
-    except Exception:
-        logger.warning("rhythm_master.narrative_fallback")
-        return dict(RHYTHM_NARRATIVE_FALLBACK)
+    evidence = RhythmEvidence(
+        stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
+        position=position, event_anchors=anchors, data_missing=[],
+    )
+    synthesis = await run_synthesis(evidence)
+    synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
+    return MasterRhythmCard(
+        basis_date=basis_date, target_date=target_date, refresh_slot=slot,
+        evidence=evidence, synthesis=synthesis if synthesis_ok else None,
+        synthesis_available=synthesis_ok,
+    )
 
 
 async def run(state: dict[str, object]) -> dict[str, object]:
-    """Worker 入口（顶层 try-catch 降级，不抛异常，G6/§10）。"""
     try:
         slot = str(state.get("refresh_slot") or "after_close")
         if slot not in REFRESH_SLOTS:
             slot = "after_close"
-        basis_date = str(state.get("report_date") or shanghai_today().isoformat())
-        if slot == "after_close":
-            payload = await _compose_after_close(basis_date)
-            if payload is None:
-                return {"final_response": DEGRADED_TEXT}
-        else:
-            # 基准 = 上一交易日 16:05 生成的 target_date=当天的 after_close 版本（D13）
-            target_date = basis_date
-            base_resp = await node_api.get_rhythm_report(target_date, "after_close")
-            base = None
-            if isinstance(base_resp, dict):
-                base = base_resp.get("content")
-            if not isinstance(base, dict) or "rhythm_card" not in base:
-                card_fallback = {
-                    "score": None,
-                    "level": None,
-                    "position_band": {"text": "沿用前值"},
-                    "branches": [],
-                    "data_missing": ["基准报告缺失（沿用前值）"],
-                }
-                payload = {
-                    "target_date": target_date,
-                    "basis_date": basis_date,
-                    "refresh_slot": slot,
-                    "rhythm_card": card_fallback,
-                }
-            else:
-                payload = await _apply_event_delta(base, slot, basis_date)
-        card = payload["rhythm_card"]
-        narrative = await _narrate(card)
+        basis = str(state.get("report_date") or shanghai_today().isoformat())
+        card = await _compose_card(basis, slot)
+        if card is None:
+            return {"final_response": DEGRADED_TEXT}
+        if not card.synthesis_available:
+            card.evidence.data_missing.append(DEGRADED_MODEL)
         content = {
-            "display_report": narrative,
-            "schema_version": "2.0",
-            "target_date": payload["target_date"],
-            "basis_date": payload["basis_date"],
-            "refresh_slot": payload["refresh_slot"],
-            "rhythm_card": card,
+            "schema_version": "1.0",
+            "target_date": card.target_date,
+            "basis_date": card.basis_date,
+            "refresh_slot": card.refresh_slot,
+            "evidence": card.evidence.model_dump(),
+            "synthesis": card.synthesis.model_dump() if card.synthesis else None,
+            "synthesis_available": card.synthesis_available,
         }
-        # 三版本独立落盘：user_id 列承载 refresh_slot（event_conduction 隔离先例，契约 #6）
         await node_api.save_analysis_report(
-            report_type="rhythm_master",
-            report_date=payload["target_date"],
-            user_id=slot,
-            content=content,
-            data_source="rhythm_master_agent",
+            report_type="rhythm_master", report_date=card.target_date,
+            user_id=slot, content=content, data_source="rhythm_master_agent",
             update_cache=False,
         )
-        return {
-            "final_response": json.dumps(content, ensure_ascii=False),
-            "analysis_reports": {"rhythm_master": content},
-        }
+        return {"final_response": json.dumps(content, ensure_ascii=False),
+                "analysis_reports": {"rhythm_master": content}}
     except Exception:
         logger.exception("rhythm_master.run_failed")
         return {"final_response": DEGRADED_TEXT}

@@ -2,6 +2,26 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-09-04 — 节奏大师「大师级判断」重建
+
+**开发者**: 37588
+
+### 新增
+- `schemas/rhythm_master.py`：Pydantic 契约（Stage/Certainty/Direction/PositionAction Literal + PositionBand/EventAnchor/RhythmEvidence/MainlineRef/LaunchOutlook/RhythmSynthesis/MasterRhythmCard）
+- `services/rhythm_rebuilt_evidence.py`：确定性证据层纯函数——`detect_stage`/`detect_certainty`/`compute_position`/`build_event_anchors`（阶段/确定性/仓位/事件锚点不依赖 LLM）
+- `services/rhythm_rebuilt_validate.py`：校验层纯函数——`validate_synthesis`/`_contains_price_point`（G19 禁点位拦截 + confidence/grounding 校验）
+- `services/rhythm_rebuilt_synthesis.py`：研研判层——`run_synthesis` 结构化输出（`with_chat_structured_output` json_mode，DeepSeek thinking 兼容，失败返回 None 不 500）
+- 测试：6 个单元测试 + `tests/integration/test_rhythm_master_rebuilt.py`
+
+### 改进
+- `agents/workers/rhythm_master.py`：重构接入「确定性证据层 → LLM 研研判层 → 校验层」三层流水线，产出 `MasterRhythmCard`（四段 + 仓位）；三时点统一走 `_compose_card`，保留 `_load_sentiment_series`，顶层 try-catch 永不 500（合成失败降级 `DEGRADED_TEXT`）
+- `prompts/workers/rhythm_master.py`：追加 `build_synthesis_prompt`（主线段只引用 P0 + 标注来源时效；启动节点概率式展望 + confidence + 假设推演；禁点位；narrative ≤60 字 + 不构成投资建议）；保留旧叙事导出
+
+### 文档
+- 本次改动记录写入本 CHANGELOG
+
+---
+
 ## [changer] 2026-09-04 — 午间报「午后前瞻机会提示」接入真实盘面数据
 
 **开发者**: 37588
