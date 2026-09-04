@@ -174,9 +174,7 @@ async def _compose_after_close(basis_date: str) -> dict[str, Any] | None:
             closes=closes, highs=highs, lows=lows, amounts=amounts,
             dense_support=dense_support, dense_pressure=dense_pressure,
         )[:2]
-        ev = rhythm_engine.build_event_branch(win.high_events[0])
-        if ev is not None:
-            branches.append(ev)
+        branches.extend(rhythm_engine.build_event_branch(win.high_events[0]))
     else:
         branches = rhythm_engine.build_technical_branches(
             closes=closes, highs=highs, lows=lows, amounts=amounts,
@@ -241,38 +239,7 @@ async def _apply_event_delta(
         missing = [m for m in missing if m != "事件源未接（日历接口不可用）"]
     card["data_missing"] = missing
     # 事件分支落档：公布后按预期差触发（§19.3/D11）；v1 以 result 字段人工回填为主
-    new_branches: list[dict[str, Any]] = []
-    for br in card.get("branches", []):
-        ref = br.get("event_ref")
-        if ref:
-            matched = [
-                e
-                for e in win.events
-                if str(e.get("date", "")) == str(ref.get("event_date", ""))
-                and str(e.get("title", "")) == str(ref.get("title", ""))
-            ]
-            result = matched[0].get("result") if matched else None
-            if result in {"超预期", "符合", "不及预期"}:
-                br["condition"]["value"] = result
-                # D11：目标区间由 engine 确定性给（技术分支 range 来自 engine，G19），
-                # 按预期差方向取对应技术分支区间填入，LLM 不参与点位；找不到保持 ""（保守 miss）。
-                direction = {"超预期": "bullish", "符合": "neutral", "不及预期": "bearish"}[result]
-                event_range = ""
-                for tb in card.get("branches", []):
-                    tcond = tb.get("condition") or {}
-                    tconcl = tb.get("conclusion") or {}
-                    if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
-                        event_range = str(tconcl.get("range", "") or "")
-                        break
-                br["conclusion"]["range"] = event_range
-                br["conclusion"]["note"] = (
-                    f"事件结果已公布：{result}，按预期差落档，"
-                    "目标区间由 engine 按当日行情计算"
-                )
-            else:
-                br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
-        new_branches.append(br)
-    card["branches"] = new_branches
+    card["branches"] = rhythm_engine.apply_event_result_met(card.get("branches", []), win.events)
     # 提示层：high 事件前置提示（不改主档位，§7.1 事件前置纪律；与 after_close 基准卡共用文案，I1）
     card["event_high_hint"] = _event_high_hint(win.high_events)
     return {**base, "basis_date": basis_date, "refresh_slot": slot, "rhythm_card": card}
