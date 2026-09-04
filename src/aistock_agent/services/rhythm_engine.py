@@ -451,38 +451,54 @@ def build_technical_branches(
 
 
 EVENT_RESULT_ENUM = ("超预期", "符合", "不及预期")
+EVENT_RESULT_DIRECTION = {"超预期": "bullish", "符合": "neutral", "不及预期": "bearish"}
+EVENT_BAND_KEY = {"超预期": "active", "符合": "normal", "不及预期": "ice"}
+EVENT_ANCHOR_THRESHOLD = {
+    "超预期": "超预期 -> 站上",
+    "符合": "符合 -> 震荡",
+    "不及预期": "不及预期 -> 跌破",
+}
 
 
-def build_event_branch(event: dict[str, Any]) -> dict[str, Any] | None:
+def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
     """事件节点（§19.2/D10/D15）：枚举分档（预期差），公布前不预判方向（占位"结果待公布"）。
 
-    只对 high 级事件生成；各档预绑结论（区间点位由 engine 确定性给，公布后按预期差落档触发）。
+    只对 high 级事件生成 3 条互斥情景；公布后由 apply_event_result_met 按预期差落档触发。
+    返回 [] 表示非 high 事件（无事件分支）。
     """
     if event.get("importance") != "high":
-        return None
+        return []
     title = str(event.get("title", "关键事件"))
-    return {
-        "condition": {
-            "kind": "enum",
-            "indicator": f"{title}预期差",
-            "value": EVENT_RESULT_ENUM[0],
-            "label": "超预期",
-        },
-        "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
-        "anchor": {
-            "metric": "index_close",
-            "threshold": "超预期 -> 站上",
-            "direction": "bullish",
-        },
-        "touch_strength": None,
-        "conclusion": {
-            "direction": "bullish",
-            "range": "",
-            "validity": 5,
-            "note": "结果待公布，公布后按预期差落档",
-        },
-        "event_ref": {"event_date": str(event.get("date", "")), "title": title},
-    }
+    branches: list[dict[str, Any]] = []
+    for value in EVENT_RESULT_ENUM:
+        direction = EVENT_RESULT_DIRECTION[value]
+        band_key = EVENT_BAND_KEY[value]
+        branches.append(
+            {
+                "condition": {
+                    "kind": "enum",
+                    "indicator": f"{title}预期差",
+                    "value": value,
+                    "label": value,
+                },
+                "position_action": position_band_to_action(POSITION_BANDS[band_key], direction),
+                "anchor": {
+                    "metric": "index_close",
+                    "threshold": EVENT_ANCHOR_THRESHOLD[value],
+                    "direction": direction,
+                },
+                "touch_strength": None,
+                "conclusion": {
+                    "direction": direction,
+                    "range": "",
+                    "validity": 5,
+                    "note": "结果待公布，公布后按预期差落档",
+                },
+                "event_ref": {"event_date": str(event.get("date", "")), "title": title},
+                "met": None,
+            }
+        )
+    return branches
 
 
 def build_next_event_anchor(

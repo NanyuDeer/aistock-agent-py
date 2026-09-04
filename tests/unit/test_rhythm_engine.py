@@ -228,12 +228,29 @@ def test_technical_branches_fallback_without_dense() -> None:
 
 def test_event_branch_enum_three_partitions() -> None:
     event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "source": "L3"}
-    branch = build_event_branch(event)
-    assert branch is not None
-    assert branch["condition"]["kind"] == "enum"
-    assert branch["condition"]["value"] in {"超预期", "符合", "不及预期"}
-    assert branch["conclusion"]["direction"] in {"bullish", "bearish", "neutral"}
-    assert branch["conclusion"]["validity"] == 5
+    branches = build_event_branch(event)
+    assert len(branches) == 3
+    assert all(b["condition"]["kind"] == "enum" for b in branches)
+    assert all(b["conclusion"]["validity"] == 5 for b in branches)
+    values = {b["condition"]["value"] for b in branches}
+    assert values == {"超预期", "符合", "不及预期"}
+    by_value = {b["condition"]["value"]: b for b in branches}
+    assert by_value["超预期"]["conclusion"]["direction"] == "bullish"
+    assert by_value["超预期"]["position_action"]["direction"] == "add"
+    assert by_value["超预期"]["anchor"]["threshold"] == "超预期 -> 站上"
+    assert by_value["符合"]["conclusion"]["direction"] == "neutral"
+    assert by_value["符合"]["position_action"]["direction"] == "hold"
+    assert by_value["不及预期"]["conclusion"]["direction"] == "bearish"
+    assert by_value["不及预期"]["position_action"]["direction"] == "reduce"
+    assert by_value["不及预期"]["anchor"]["threshold"] == "不及预期 -> 跌破"
+    assert all(b["conclusion"]["range"] == "" for b in branches)
+    assert all(b.get("met") is None for b in branches)
+    assert all(b["condition"]["indicator"] == "英伟达财报预期差" for b in branches)
+
+
+def test_event_branch_non_high_returns_empty() -> None:
+    event = {"date": "2026-09-02", "title": "普通事件", "importance": "low"}
+    assert build_event_branch(event) == []
 
 
 def test_disclaimer_present() -> None:
