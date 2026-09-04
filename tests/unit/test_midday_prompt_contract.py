@@ -7,20 +7,20 @@ from aistock_agent.prompts.workers.midday import MIDDAY_PROMPT
 
 
 def test_prompt_requires_opportunities_keywords_for_afternoon_outlook():
-    # 午后前瞻分段：要求 opportunities 关键词（≤8 字 4-5 个），示例不再含 conclusion
+    # 机会关键词改由系统代码侧基于当日真实板块行情生成，LLM 不输出具体关键词
     assert '"title": "午后前瞻"' in MIDDAY_PROMPT
-    assert '"opportunities"' in MIDDAY_PROMPT
-    assert "每个 ≤8 字" in MIDDAY_PROMPT
-    assert "共 4-5 个" in MIDDAY_PROMPT
+    assert '"opportunities": []' in MIDDAY_PROMPT
+    assert "机会/风险关键词由系统基于当日真实板块行情生成" in MIDDAY_PROMPT
+    assert "你不要输出" in MIDDAY_PROMPT
     # 负向锁定：午后前瞻 JSON 示例不含 conclusion（机会关键词契约，段落留 details 详述）
     assert '"title": "午后前瞻", "conclusion"' not in MIDDAY_PROMPT
     assert '"schema_version": "2.1"' in MIDDAY_PROMPT
 
 
 def test_prompt_requires_short_risk_words():
-    # risks 输出收紧为 ≤8 字短词 4-5 条（对称）
-    assert '"risks": [' in MIDDAY_PROMPT
-    assert "≤8" in MIDDAY_PROMPT or "8 字" in MIDDAY_PROMPT
+    # risks 改由系统代码侧生成，LLM 不输出风险短词（避免与真实盘面及机会语义冲突）
+    assert '"risks": []' in MIDDAY_PROMPT
+    assert "你不要输出" in MIDDAY_PROMPT
 
 
 def test_build_midday_report_bumps_schema_and_passes_opportunities_through():

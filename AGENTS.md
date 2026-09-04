@@ -494,6 +494,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/midday/generate-audio` | 火山引擎/Azure TTS | 午报音频（方案 A）：根据请求体 `{date, dialogue}` 合成 MP3 并回填同一份 midday 报告 `content.audio_path` |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
+| `GET /internal/market/sectors` | 腾讯 | 盘内板块快照（indexes/breadth/gainers/losers/availability，绕开 15:30 门禁），午间报机会/风险候选源（data_client `get_intraday_sectors`；2026-09-04 解绑 H6） |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
 | `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
 | `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates；支持可选 status='pending'\|'skipped' 与 skip_reason——skip_reason 存 prediction 对象内） |
