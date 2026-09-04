@@ -1,10 +1,13 @@
 """多主驱动板块提取测试（spec P1a-1）。"""
-import pytest
 
 from aistock_agent.agents.workers.sector_trace import extract_primary_sectors
 
 
-def _report(claims: list[str], losers: list[str] | None = None, gainers: list[str] | None = None) -> dict:
+def _report(
+    claims: list[str],
+    losers: list[str] | None = None,
+    gainers: list[str] | None = None,
+) -> dict:
     losers = losers or []
     gainers = gainers or []
     return {

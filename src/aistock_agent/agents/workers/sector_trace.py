@@ -89,7 +89,9 @@ def extract_primary_sectors(
     return out
 
 
-def extract_primary_sector(payload: dict[str, object]) -> tuple[str | None, dict[str, object] | None]:
+def extract_primary_sector(
+    payload: dict[str, object],
+) -> tuple[str | None, dict[str, object] | None]:
     """兼容旧语义：返回多板块提取结果的首个（或无）。"""
     hits = extract_primary_sectors(payload, max_sectors=1)
     if not hits:
