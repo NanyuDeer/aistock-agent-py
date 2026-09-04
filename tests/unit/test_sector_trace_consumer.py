@@ -1,10 +1,13 @@
 """SectorTraceConsumer 单元测试 — review_done(ok) → 板块溯源 + 级联预判（Spec D · T4/预判触发）。
 
 patch 目标说明：event_consumers.py 顶部为
-`from aistock_agent.agents.workers.sector_trace import extract_primary_sector, run_sector_trace`
+`from aistock_agent.agents.workers.sector_trace import extract_primary_sectors, run_sector_trace`
 与 `from aistock_agent.services.prediction_service import predict_sector`，
 因此 handle() 内引用的名字位于 event_consumers 模块命名空间，patch 目标一律
 指向 `aistock_agent.services.event_consumers.<name>`（命中实际引用点）。
+
+Task2 多板块语义：extract_primary_sectors 返回板块列表 list[tuple[str, dict]]
+（无主因命中返回 []），handle 逐板块并行溯源（单板块 tuple 旧语义已废弃）。
 """
 
 from types import SimpleNamespace
@@ -46,8 +49,8 @@ async def test_sector_trace_consumer_consumes_review_done() -> None:
             AsyncMock(return_value={}),
         ),
         patch(
-            "aistock_agent.services.event_consumers.extract_primary_sector",
-            return_value=("存储板块", {"pct_change": -4.2}),
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=[("存储板块", {"pct_change": -4.2})],
         ),
         patch(
             "aistock_agent.services.event_consumers.run_sector_trace",
@@ -76,8 +79,8 @@ async def test_sector_trace_consumer_skips_when_no_primary_sector() -> None:
             AsyncMock(return_value={}),
         ),
         patch(
-            "aistock_agent.services.event_consumers.extract_primary_sector",
-            return_value=(None, None),
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=[],
         ),
         patch(
             "aistock_agent.services.event_consumers.run_sector_trace",
@@ -109,8 +112,8 @@ async def test_sector_trace_consumer_cascades_prediction_with_snapshot() -> None
             AsyncMock(return_value={}),
         ),
         patch(
-            "aistock_agent.services.event_consumers.extract_primary_sector",
-            return_value=("存储板块", {"pct_change": -4.2}),
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=[("存储板块", {"pct_change": -4.2})],
         ),
         patch(
             "aistock_agent.services.event_consumers.run_sector_trace",
@@ -139,8 +142,8 @@ async def test_sector_trace_consumer_prediction_failure_does_not_raise() -> None
             AsyncMock(return_value={}),
         ),
         patch(
-            "aistock_agent.services.event_consumers.extract_primary_sector",
-            return_value=("存储板块", {"pct_change": -4.2}),
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=[("存储板块", {"pct_change": -4.2})],
         ),
         patch(
             "aistock_agent.services.event_consumers.run_sector_trace",

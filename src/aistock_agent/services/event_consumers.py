@@ -23,7 +23,7 @@ from structlog import get_logger
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
-from aistock_agent.agents.workers.sector_trace import extract_primary_sector, run_sector_trace
+from aistock_agent.agents.workers.sector_trace import extract_primary_sectors, run_sector_trace
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
@@ -445,21 +445,79 @@ class SectorTraceConsumer(BaseConsumer):
     async def handle(self, event: Event) -> None:
         payload = event.payload or {}
         report_date = str(payload.get("report_date") or "")
-        # 回放态隔离：review 报告读取受既有回放层保护（node_read 白名单），此处不额外处理
         report = await node_api.get_analysis_report(report_type="review", report_date=report_date)
-        sector_name, sector_row = extract_primary_sector({"report": report})
-        if not sector_name:
+        sectors = extract_primary_sectors({"report": report})
+        if not sectors:
             logger.info("sector_trace_skip_no_primary_sector", report_date=report_date)
             return
-        result = await run_sector_trace(
-            report_date=report_date, sector_name=sector_name, sector_row=sector_row
-        )
-        logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
-        await _cascade_sector_prediction(
-            report_date=report_date,
-            sector_name=sector_name,
-            sector_snapshot=result.snapshot,
-        )
+        index_pct = _review_index_pct(report)
+        parent_ref = {
+            "source_report_type": "review",
+            "report_date": report_date,
+            "index_pct": index_pct,
+        }
+
+        results: list[object] = []
+
+        async def _one(sector_name: str, sector_row: dict[str, object]) -> None:
+            try:
+                result = await run_sector_trace(
+                    report_date=report_date,
+                    sector_name=sector_name,
+                    sector_row=sector_row,
+                    parent_trace_ref=parent_ref,
+                )
+                results.append(result)
+                logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
+                await _cascade_sector_prediction(
+                    report_date=report_date,
+                    sector_name=sector_name,
+                    sector_snapshot=result.snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "sector_trace_one_failed",
+                    report_date=report_date,
+                    sector=sector_name,
+                    error=str(exc),
+                )
+
+        await asyncio.gather(*(_one(name, row) for name, row in sectors))
+
+        # P1a-3：溯源完成（results 非空）→ 组装大盘-板块归因链并 internal 保存。
+        # 链保存失败只 warning 不阻断（溯源已逐板块落库，兼容降级约束）。
+        if results:
+            try:
+                from aistock_agent.services.attribution_chain import (
+                    AttributionChainStore,
+                    assemble_attribution_chain,
+                )
+
+                chain = assemble_attribution_chain(report_date, {"report": report}, results)
+                await AttributionChainStore().save(report_date, chain)
+            except Exception as exc:  # noqa: BLE001 — 链保存失败不阻断（溯源已落库）
+                logger.warning(
+                    "attribution_chain.save_failed",
+                    report_date=report_date,
+                    error=str(exc),
+                )
+
+
+def _review_index_pct(report: dict[str, object]) -> float | None:
+    """从 review 报告快照解析大盘指数涨跌幅（候选键兼容，缺失返回 None）。"""
+    content = report.get("content") if isinstance(report, dict) else None
+    content = content if isinstance(content, dict) else None
+    mt = content.get("market_trace") if isinstance(content, dict) else None
+    mt = mt if isinstance(mt, dict) else None
+    snapshot = mt.get("snapshot") if isinstance(mt, dict) else None
+    a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
+    if not isinstance(a_share, dict):
+        return None
+    for key in ("index_change_pct", "index_pct", "benchmark_change_pct", "sh_change_pct"):
+        v = a_share.get(key)
+        if isinstance(v, int | float):
+            return float(v)
+    return None
 
 
 async def _cascade_sector_prediction(
