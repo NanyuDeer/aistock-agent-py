@@ -484,6 +484,24 @@ class SectorTraceConsumer(BaseConsumer):
 
         await asyncio.gather(*(_one(name, row) for name, row in sectors))
 
+        # P1a-3：溯源完成（results 非空）→ 组装大盘-板块归因链并 internal 保存。
+        # 链保存失败只 warning 不阻断（溯源已逐板块落库，兼容降级约束）。
+        if results:
+            try:
+                from aistock_agent.services.attribution_chain import (
+                    AttributionChainStore,
+                    assemble_attribution_chain,
+                )
+
+                chain = assemble_attribution_chain(report_date, {"report": report}, results)
+                await AttributionChainStore().save(report_date, chain)
+            except Exception as exc:  # noqa: BLE001 — 链保存失败不阻断（溯源已落库）
+                logger.warning(
+                    "attribution_chain.save_failed",
+                    report_date=report_date,
+                    error=str(exc),
+                )
+
 
 def _review_index_pct(report: dict[str, object]) -> float | None:
     """从 review 报告快照解析大盘指数涨跌幅（候选键兼容，缺失返回 None）。"""
