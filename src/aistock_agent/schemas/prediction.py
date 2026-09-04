@@ -91,6 +91,20 @@ class PredictionCondition(BaseModel):
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
 
 
+class LightForecast(BaseModel):
+    """自选股洞察轻量预判输出（阶段 2，2026-09-03）— 卡片预判区 1-2 句条件化摘要。
+
+    设计文档对齐：本 Spec 只负责"何时生成/生成谁/存哪"，内容结构消费 conditions[]
+    （与 PredictionCondition 同 schema），不重定义预判结构；summary 供卡片秒读。
+    轻量预判不自建完整三档（PredictionAnchor 注释：个股轻量预判不自建完整三档）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str  # 1-2 句条件化摘要（卡片预判区直接展示）
+    conditions: list[PredictionCondition] = Field(..., min_length=1, max_length=3)
+
+
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""
 
@@ -99,10 +113,12 @@ class PredictionResult(BaseModel):
     schema_version: Literal["3.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
-    conditions: list[PredictionCondition] = Field(default_factory=list)  # 条件化预判（§3.1）；旧 2.0 记录为空
+    # 条件化预判（§3.1）；旧 2.0 记录为空
+    conditions: list[PredictionCondition] = Field(default_factory=list)
     target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
     evolution_narrative: str  # 后续演化路径叙事（强化→衰减→回归），兼容旧展示
-    evolution_steps: list[EvolutionStep] = Field(default_factory=list)  # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    # 结构化演化步骤（前端时间轴）；旧记录可能为空
+    evolution_steps: list[EvolutionStep] = Field(default_factory=list)
     risks: list[PredictionRisk]
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）

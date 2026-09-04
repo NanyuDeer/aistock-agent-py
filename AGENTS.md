@@ -679,3 +679,10 @@ content = {
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
 - 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
 - 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式
+
+### 2026-09-03 更新：自选股洞察阶段 2（定时轻量预判 + forecast 落库）
+
+- 定时调度：新增 `light_predict_midday`（11:40，工作日）/ `light_predict_close`（15:20）两 cron；slot 级分存互不覆盖。env：`SCHEDULER_LIGHT_PREDICT_MIDDAY_CRON`（默认 `40 11 * * 0-4`）、`SCHEDULER_LIGHT_PREDICT_CLOSE_CRON`（默认 `20 15 * * 0-4`）。
+- 新文件：`services/light_predictor.py`（`run_light_prediction(slot)`）；`prompts/workers/light_predict.py`（`PREDICTION_LIGHT_PROMPT`）；`schemas/prediction.py` 新增 `LightForecast`（summary + conditions[min1,max3]，复用 anchor 契约）。
+- Node 侧配合接口（internal，见 app-api）：`GET /internal/stock-trace/light-predict-targets?trade_date=`、`PATCH /internal/stock-trace/events/:eventId/forecast`、`PATCH /internal/stock-info/judgements/:id/forecast`（data_client：`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）。
+- iterate 回放隔离：data_client 新增网络方法（get_quote/get_stock_flow/list_light_predict_targets/set_event_forecast/set_judgement_forecast）已在 `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 登记（经 get/patch 间接隔离）。
