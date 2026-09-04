@@ -443,8 +443,6 @@ class SectorTraceConsumer(BaseConsumer):
         return CHANNEL_REVIEW_DONE
 
     async def handle(self, event: Event) -> None:
-        import asyncio
-
         payload = event.payload or {}
         report_date = str(payload.get("report_date") or "")
         report = await node_api.get_analysis_report(report_type="review", report_date=report_date)
