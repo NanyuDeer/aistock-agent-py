@@ -2,6 +2,7 @@
 from aistock_agent.services import rhythm_engine
 from aistock_agent.services.rhythm_engine import (
     DISCLAIMER,
+    apply_event_result_met,
     build_event_branch,
     build_next_event_anchor,
     build_technical_branches,
@@ -228,12 +229,29 @@ def test_technical_branches_fallback_without_dense() -> None:
 
 def test_event_branch_enum_three_partitions() -> None:
     event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "source": "L3"}
-    branch = build_event_branch(event)
-    assert branch is not None
-    assert branch["condition"]["kind"] == "enum"
-    assert branch["condition"]["value"] in {"超预期", "符合", "不及预期"}
-    assert branch["conclusion"]["direction"] in {"bullish", "bearish", "neutral"}
-    assert branch["conclusion"]["validity"] == 5
+    branches = build_event_branch(event)
+    assert len(branches) == 3
+    assert all(b["condition"]["kind"] == "enum" for b in branches)
+    assert all(b["conclusion"]["validity"] == 5 for b in branches)
+    values = {b["condition"]["value"] for b in branches}
+    assert values == {"超预期", "符合", "不及预期"}
+    by_value = {b["condition"]["value"]: b for b in branches}
+    assert by_value["超预期"]["conclusion"]["direction"] == "bullish"
+    assert by_value["超预期"]["position_action"]["direction"] == "add"
+    assert by_value["超预期"]["anchor"]["threshold"] == "超预期 -> 站上"
+    assert by_value["符合"]["conclusion"]["direction"] == "neutral"
+    assert by_value["符合"]["position_action"]["direction"] == "hold"
+    assert by_value["不及预期"]["conclusion"]["direction"] == "bearish"
+    assert by_value["不及预期"]["position_action"]["direction"] == "reduce"
+    assert by_value["不及预期"]["anchor"]["threshold"] == "不及预期 -> 跌破"
+    assert all(b["conclusion"]["range"] == "" for b in branches)
+    assert all(b.get("met") is None for b in branches)
+    assert all(b["condition"]["indicator"] == "英伟达财报预期差" for b in branches)
+
+
+def test_event_branch_non_high_returns_empty() -> None:
+    event = {"date": "2026-09-02", "title": "普通事件", "importance": "low"}
+    assert build_event_branch(event) == []
 
 
 def test_disclaimer_present() -> None:
@@ -369,3 +387,33 @@ def test_position_band_to_action_neutral():
     action = rhythm_engine.position_band_to_action(band, "neutral")
     assert action["direction"] == "hold"
     assert action["change"] == "持仓不变"
+
+
+def test_apply_event_result_met_marks_realized_and_dims_others() -> None:
+    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
+    branches = build_event_branch(event)
+    events = [{"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "result": "不及预期"}]
+    out = apply_event_result_met(branches, events)
+    by_value = {b["condition"]["value"]: b for b in out}
+    assert by_value["不及预期"]["met"] is True
+    assert by_value["不及预期"]["condition"]["value"] == "不及预期"
+    assert by_value["不及预期"]["conclusion"]["note"].startswith("事件结果已公布：不及预期")
+    assert by_value["超预期"]["met"] is False
+    assert by_value["符合"]["met"] is False
+    # 未公布：met 保持 None
+    out_und = apply_event_result_met(branches, [])
+    assert all(b.get("met") is None for b in out_und)
+
+
+def test_apply_event_result_met_range_from_technical_branch() -> None:
+    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
+    branches = build_event_branch(event)
+    tech = {
+        "condition": {"kind": "interval", "indicator": "成交额", "lo": None, "hi": 1200, "label": "缩量"},
+        "conclusion": {"direction": "bearish", "range": "3880-3930", "validity": 5, "note": "缩量回踩支撑位"},
+    }
+    branches.append(tech)
+    events = [{"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "result": "不及预期"}]
+    out = apply_event_result_met(branches, events)
+    by_value = {b["condition"]["value"]: b for b in out if b["condition"].get("value")}
+    assert by_value["不及预期"]["conclusion"]["range"] == "3880-3930"

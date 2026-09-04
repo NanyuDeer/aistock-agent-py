@@ -405,7 +405,7 @@ src/aistock_agent/
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
-│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close；2026-09-03 分支新增 position_action/anchor/touch_strength，结论 range 降级为辅助）
+│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close；2026-09-03 分支新增 position_action/anchor/touch_strength，结论 range 降级为辅助；2026-09-04 build_event_branch 三情景展开 + apply_event_result_met 公布后 met 回填纯函数）
 │   ├── rhythm_dense_band.py # 历史密集触碰带（2026-09-03 design-debate A1 裁决）：确定性纯函数 dense_band，touch_gap 容差带 + 量能加权选带，替代 max/min(20日极值)×MA20 系数
 │   ├── prediction_invalidation.py # 预测失效"读数触发式"复核触发器（A1，2026-08-31）：update_trigger_state 三态迟滞状态机 + scan_active_pending 早退扫描
 │   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events）
@@ -494,6 +494,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
 | `POST /internal/midday/generate-audio` | 火山引擎/Azure TTS | 午报音频（方案 A）：根据请求体 `{date, dialogue}` 合成 MP3 并回填同一份 midday 报告 `content.audio_path` |
 | `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
+| `GET /internal/market/sectors` | 腾讯 | 盘内板块快照（indexes/breadth/gainers/losers/availability，绕开 15:30 门禁），午间报机会/风险候选源（data_client `get_intraday_sectors`；2026-09-04 解绑 H6） |
 | `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
 | `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
 | `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates；支持可选 status='pending'\|'skipped' 与 skip_reason——skip_reason 存 prediction 对象内） |

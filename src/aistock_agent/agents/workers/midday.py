@@ -2,7 +2,8 @@
 
 模式：create_react_agent + get_quick_think（H4：不跑独立 deep_think）
 工具集：get_tools("morning")（外盘 get_global_markets + 新闻 get_cls_news + 搜索
-        tavily_finance_search；H6：不新增 A 股大盘结构化数据源）
+        tavily_finance_search；H6 已于 2026-09-04 解绑：新增盘内板块端点
+        GET /internal/market/sectors，供机会/风险数据锚定）
 数据源：注入当日晨报结论（缓存优先→库读→空串）+ 工具获取
 持久化：Node.js /internal/analysis-reports（report_type="midday"，H1）
 
@@ -15,9 +16,14 @@ import json
 import structlog
 
 from aistock_agent.prompts.workers.midday import MIDDAY_PROMPT
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.midday_persister import (
     _is_degraded_report,
     persist_midday_report,
+)
+from aistock_agent.services.midday_sectors import (
+    select_opportunities,
+    select_risks,
 )
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import is_trading_day, shanghai_today
@@ -31,27 +37,45 @@ def _build_midday_report(
     display_report: dict[str, object] | None,
     raw_text: str,
     podcast_brief: str = "",
+    *,
+    opportunities: list[str] | None = None,
+    risks: list[str] | None = None,
 ) -> dict[str, object]:
     """组装双层报告。
 
     解析成功：schema_version="2.1"；解析失败：schema_version="1.0"，raw_text 作 details。
+
+    机会/风险由调用方（代码侧候选集）注入——``opportunities``/``risks`` 非 None 时
+    覆写「午后前瞻」分段的 opportunities 与 display_report.risks，避免 LLM 自由
+    生成与真实行情相悖的机会词。
     """
     if display_report is not None:
+        raw_sections = display_report.get("sections", [])
+        sections: list[dict[str, object]] = raw_sections if isinstance(raw_sections, list) else []
+        if opportunities is not None:
+            # 覆写「午后前瞻」分段的 opportunities；无该段则补建，保证对位卡可渲染
+            matched = False
+            overridden: list[dict[str, object]] = []
+            for sec in sections:
+                if str(sec.get("title", "")).find("午后") != -1:
+                    overridden.append({**sec, "opportunities": opportunities})
+                    matched = True
+                else:
+                    overridden.append(sec)
+            if not matched:
+                overridden.append({"title": "午后前瞻", "opportunities": opportunities})
+            sections = overridden
         return {
             "display_report": {
                 "summary": str(display_report.get("summary", "")),
-                "sections": (
-                    display_report.get("sections", [])
-                    if isinstance(display_report.get("sections"), list)
-                    else []
-                ),
+                "sections": sections,
                 "details": str(display_report.get("details", "")),
                 "stocks": (
                     display_report.get("stocks", [])
                     if isinstance(display_report.get("stocks"), list)
                     else []
                 ),
-                "risks": (
+                "risks": risks if risks is not None else (
                     display_report.get("risks", [])
                     if isinstance(display_report.get("risks"), list)
                     else []
@@ -97,8 +121,6 @@ async def _resolve_morning_context(report_date: str) -> str:
         logger.debug("midday_morning_cache_read_failed", exc_info=True)
 
     try:
-        from aistock_agent.services.data_client import node_api
-
         report = await node_api.get_analysis_report("morning", report_date)
         if isinstance(report, dict):
             content = report.get("content")
@@ -137,7 +159,21 @@ async def _invoke_agent(system_prompt: str) -> dict[str, object]:
     # 构建兼容双层结构；解析失败时以原始文本作 details。
     display_report, podcast_brief = parse_event_output(result.get("messages", []))
     raw_text = extract_final_ai_response(result.get("messages", []))
-    return _build_midday_report(display_report, raw_text, podcast_brief)
+    # 机会/风险数据锚定：从真实板块行情候选集生成；数据源失败（None）→ 机会/风险一并为空
+    # （对位区隐藏），不阻断叙述生成。
+    sectors = await node_api.get_intraday_sectors()
+    opportunities = select_opportunities(sectors) if sectors else []
+    risks = select_risks(sectors) if sectors else []
+    # 对称降级：无真实机会时风险也一并置空，避免"机会空但风险仍 LLM 生成"的不对称
+    if not opportunities:
+        risks = []
+    return _build_midday_report(
+        display_report,
+        raw_text,
+        podcast_brief or "",
+        opportunities=opportunities,
+        risks=risks,
+    )
 
 
 async def run(state: AgentState) -> dict[str, object]:

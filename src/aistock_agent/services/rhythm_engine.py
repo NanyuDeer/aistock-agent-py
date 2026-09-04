@@ -451,38 +451,108 @@ def build_technical_branches(
 
 
 EVENT_RESULT_ENUM = ("超预期", "符合", "不及预期")
+EVENT_RESULT_DIRECTION = {"超预期": "bullish", "符合": "neutral", "不及预期": "bearish"}
+EVENT_BAND_KEY = {"超预期": "active", "符合": "normal", "不及预期": "ice"}
+EVENT_ANCHOR_THRESHOLD = {
+    "超预期": "超预期 -> 站上",
+    "符合": "符合 -> 震荡",
+    "不及预期": "不及预期 -> 跌破",
+}
 
 
-def build_event_branch(event: dict[str, Any]) -> dict[str, Any] | None:
+def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
     """事件节点（§19.2/D10/D15）：枚举分档（预期差），公布前不预判方向（占位"结果待公布"）。
 
-    只对 high 级事件生成；各档预绑结论（区间点位由 engine 确定性给，公布后按预期差落档触发）。
+    只对 high 级事件生成 3 条互斥情景；公布后由 apply_event_result_met 按预期差落档触发。
+    返回 [] 表示非 high 事件（无事件分支）。
     """
     if event.get("importance") != "high":
-        return None
+        return []
     title = str(event.get("title", "关键事件"))
-    return {
-        "condition": {
-            "kind": "enum",
-            "indicator": f"{title}预期差",
-            "value": EVENT_RESULT_ENUM[0],
-            "label": "超预期",
-        },
-        "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
-        "anchor": {
-            "metric": "index_close",
-            "threshold": "超预期 -> 站上",
-            "direction": "bullish",
-        },
-        "touch_strength": None,
-        "conclusion": {
-            "direction": "bullish",
-            "range": "",
-            "validity": 5,
-            "note": "结果待公布，公布后按预期差落档",
-        },
-        "event_ref": {"event_date": str(event.get("date", "")), "title": title},
-    }
+    branches: list[dict[str, Any]] = []
+    for value in EVENT_RESULT_ENUM:
+        direction = EVENT_RESULT_DIRECTION[value]
+        band_key = EVENT_BAND_KEY[value]
+        branches.append(
+            {
+                "condition": {
+                    "kind": "enum",
+                    "indicator": f"{title}预期差",
+                    "value": value,
+                    "label": value,
+                },
+                "position_action": position_band_to_action(POSITION_BANDS[band_key], direction),
+                "anchor": {
+                    "metric": "index_close",
+                    "threshold": EVENT_ANCHOR_THRESHOLD[value],
+                    "direction": direction,
+                },
+                "touch_strength": None,
+                "conclusion": {
+                    "direction": direction,
+                    "range": "",
+                    "validity": 5,
+                    "note": "结果待公布，公布后按预期差落档",
+                },
+                "event_ref": {"event_date": str(event.get("date", "")), "title": title},
+                "met": None,
+            }
+        )
+    return branches
+
+
+def _event_range_for_direction(branches: list[dict[str, Any]], result: str) -> str:
+    """按预期差方向从技术分支取对应区间（G19：点位由 engine 确定性给）。找不到保持 ""。"""
+    direction = EVENT_RESULT_DIRECTION[result]
+    for tb in branches:
+        tcond = tb.get("condition") or {}
+        tconcl = tb.get("conclusion") or {}
+        if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
+            return str(tconcl.get("range", "") or "")
+    return ""
+
+
+def apply_event_result_met(
+    branches: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """事件分支公布后落档（§19.3/D11）：按预期差触发，回填 met/value/range/note。
+
+    copy-on-write：不改写传入 branches（避免污染基准报告的 event 分支，G18）。
+    未公布：全部保持 met=None、note="结果待公布..."。
+    公布后：命中 result 的分支 met=True（点亮），其余同事件分支 met=False（置灰）。
+    """
+    out: list[dict[str, Any]] = []
+    for br in branches:
+        new_br = dict(br)
+        ref = br.get("event_ref")
+        if not ref:
+            out.append(new_br)
+            continue
+        matched = [
+            e
+            for e in events
+            if str(e.get("date", "")) == str(ref.get("event_date", ""))
+            and str(e.get("title", "")) == str(ref.get("title", ""))
+        ]
+        result = matched[0].get("result") if matched else None
+        if result in EVENT_RESULT_ENUM:
+            new_br["condition"] = dict(br["condition"])
+            new_br["conclusion"] = dict(br["conclusion"])
+            if br.get("condition", {}).get("value") == result:
+                new_br["condition"]["value"] = result
+                new_br["conclusion"]["range"] = _event_range_for_direction(branches, result)
+                new_br["conclusion"]["note"] = (
+                    f"事件结果已公布：{result}，按预期差落档，目标区间由 engine 按当日行情计算"
+                )
+                new_br["met"] = True
+            else:
+                new_br["met"] = False
+        else:
+            new_br["conclusion"] = dict(br["conclusion"])
+            new_br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
+            new_br["met"] = None
+        out.append(new_br)
+    return out
 
 
 def build_next_event_anchor(
