@@ -501,6 +501,60 @@ def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
     return branches
 
 
+def _event_range_for_direction(branches: list[dict[str, Any]], result: str) -> str:
+    """按预期差方向从技术分支取对应区间（G19：点位由 engine 确定性给）。找不到保持 ""。"""
+    direction = EVENT_RESULT_DIRECTION[result]
+    for tb in branches:
+        tcond = tb.get("condition") or {}
+        tconcl = tb.get("conclusion") or {}
+        if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
+            return str(tconcl.get("range", "") or "")
+    return ""
+
+
+def apply_event_result_met(
+    branches: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """事件分支公布后落档（§19.3/D11）：按预期差触发，回填 met/value/range/note。
+
+    copy-on-write：不改写传入 branches（避免污染基准报告的 event 分支，G18）。
+    未公布：全部保持 met=None、note="结果待公布..."。
+    公布后：命中 result 的分支 met=True（点亮），其余同事件分支 met=False（置灰）。
+    """
+    out: list[dict[str, Any]] = []
+    for br in branches:
+        new_br = dict(br)
+        ref = br.get("event_ref")
+        if not ref:
+            out.append(new_br)
+            continue
+        matched = [
+            e
+            for e in events
+            if str(e.get("date", "")) == str(ref.get("event_date", ""))
+            and str(e.get("title", "")) == str(ref.get("title", ""))
+        ]
+        result = matched[0].get("result") if matched else None
+        if result in EVENT_RESULT_ENUM:
+            new_br["condition"] = dict(br["condition"])
+            new_br["conclusion"] = dict(br["conclusion"])
+            if br.get("condition", {}).get("value") == result:
+                new_br["condition"]["value"] = result
+                new_br["conclusion"]["range"] = _event_range_for_direction(branches, result)
+                new_br["conclusion"]["note"] = (
+                    f"事件结果已公布：{result}，按预期差落档，目标区间由 engine 按当日行情计算"
+                )
+                new_br["met"] = True
+            else:
+                new_br["met"] = False
+        else:
+            new_br["conclusion"] = dict(br["conclusion"])
+            new_br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
+            new_br["met"] = None
+        out.append(new_br)
+    return out
+
+
 def build_next_event_anchor(
     events: list[dict[str, object]], basis_date: str
 ) -> dict[str, object] | None:
