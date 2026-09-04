@@ -89,6 +89,23 @@ def extract_primary_sectors(
     return out
 
 
+def judge_sector_driver_relation(
+    sector_pct: float | None, index_pct: float | None
+) -> str:
+    """板块驱动关系确定性判定（spec P1a-2，演示级；LLM/画像强化留 P2）。
+
+    self_driven：板块与大盘反向，或同向但显著超（|sector| > 2*|index| + 0.5）。
+    market_follow：同向且未显著超。数据缺失 → unknown。
+    """
+    if sector_pct is None or index_pct is None:
+        return "unknown"
+    if sector_pct > 0 >= index_pct or sector_pct < 0 <= index_pct:
+        return "self_driven"
+    if abs(sector_pct) > 2 * abs(index_pct) + 0.5:
+        return "self_driven"
+    return "market_follow"
+
+
 def extract_primary_sector(
     payload: dict[str, object],
 ) -> tuple[str | None, dict[str, object] | None]:
@@ -134,7 +151,11 @@ async def _generate_sector_trace_with_retry(
 
 
 async def run_sector_trace(
-    *, report_date: str, sector_name: str, sector_row: dict[str, object] | None
+    *,
+    report_date: str,
+    sector_name: str,
+    sector_row: dict[str, object] | None,
+    parent_trace_ref: dict[str, object] | None = None,  # P1：大盘归因父链引用
 ) -> SectorTraceRunResult:
     # 定向事件检索路径在 snapshot 内部走 TavilyService.search（D4.5 接线，
     # 无外部上下文注入；快照内失败静默降级语义不变）
@@ -146,9 +167,11 @@ async def run_sector_trace(
     trace_result = await _generate_sector_trace_with_retry(snapshot, captured_at=report_date)
     content = {
         "display_report": {"summary": "", "sectors": [sector_name], "risks": []},
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "market_trace": {"snapshot": snapshot, "trace": trace_result.model_dump(mode="json")},
     }
+    if parent_trace_ref:
+        content["attribution_parent"] = parent_trace_ref
     await node_api.save_analysis_report(
         report_type="sector_trace",
         report_date=report_date,
