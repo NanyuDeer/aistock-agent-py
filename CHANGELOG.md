@@ -2,6 +2,20 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [changer] 2026-09-04 — 节奏大师预判语义重构（密集触碰带 + 结构化仓位动作 + 可验证锚点）
+
+**开发者**: 37588
+
+### 新增
+- `services/rhythm_dense_band.py`：历史密集触碰带确定性纯函数 `dense_band`（touch_gap 容差带聚类 + 量能加权选带 + 近端 clamp），替代"max/min(20日极值)×MA20 系数"的机械支撑/压力计算——符合"压力位应来自前期反复触碰不破/跌不破密集区"语义
+- `services/rhythm_engine.py`：`build_technical_branches`/`build_event_branch` 分支新增 `position_action`（direction=add/reduce/hold + change 成数 + band）、`anchor`（metric/threshold/direction 可验证锚点）、`touch_strength`（历史触碰强度，非命中概率）；`conclusion.range` 降级为辅助参考；新增 `position_band_to_action` 确定性映射（bullish→add/+2成、bearish→reduce/-1成、neutral→hold/持仓不变）
+
+### 改进
+- `agents/workers/rhythm_master.py`：`get_index_kline` 传 `start_date` 解锁长历史取数（命中 internal.ts startDate 5000 行分支）；amount 量能分档对齐近 20 交易日（修复 closes/highs/lows/amounts 各自独立过滤的取样错位既有 bug）；`dense_band` 的 `dense_support/dense_pressure` 接入 `build_technical_branches`（支撑/压力改为密集触碰带）；每分支回填真实 `touch_strength`
+- `services/rhythm_verification.py`：`evaluate_branch` 改用 `anchor.direction`/`anchor.threshold` 机械判 hit/miss（仅对"上证指数点位"触发做点位机械判定，成交额/enum 分支回退到 `conclusion.range`，避免"指数点位 vs 亿元"单位错配）；保留 `_triggered` 前置判断（条件未发生 → insufficient）；事件分支落档后按 range 判 hit/miss（D11 保持）
+
+---
+
 ## [changer] 2026-09-03 — 盘中报「午后前瞻」schema 2.1（机会/风险短词契约）
 
 **开发者**: 37588

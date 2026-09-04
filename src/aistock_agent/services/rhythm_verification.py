@@ -77,6 +77,48 @@ def evaluate_branch(
     event_title = str(ref["title"]) if isinstance(ref, dict) and ref.get("title") else None
     if not _triggered(cond, rows, event_results, event_title):
         return "insufficient"
+    # 有 anchor：以 direction + 触发位机械判 hit/miss（Task3）。
+    # bullish → 站上触发位（cond.lo），bearish → 跌破触发位（cond.hi），
+    # neutral → 沿 conclusion.range；均要求窗口内连续 2 日成立才算 hit（站稳）。
+    # 仅对"上证指数点位"触发做机械锚定判定；成交额（单位亿元）与 enum 事件分支
+    # 无同量纲点位触发，回退到 conclusion.range（恒为点位区间）判定，避免"指数点位 vs 亿元"错配。
+    anchor = branch.get("anchor")
+    if isinstance(anchor, dict):
+        direction = anchor.get("direction")
+        point_trigger = cond.get("indicator") == "上证指数点位"
+        trigger_val: float | None = None
+        if point_trigger and cond.get("kind") == "interval":
+            if direction == "bullish":
+                lo = cond.get("lo")
+                trigger_val = float(lo) if lo is not None else None
+            elif direction == "bearish":
+                hi = cond.get("hi")
+                trigger_val = float(hi) if hi is not None else None
+        # 机械判定前提：仅点位触发 + bullish/bearish 且能定位触发位；enum 事件/成交额分支
+        # 触发位单位≠点位，不在此判定，落回下方 range 回退（D11：事件落档后按 range 判 hit/miss）。
+        can_judge = (
+            point_trigger and direction in ("bullish", "bearish") and trigger_val is not None
+        )
+        if can_judge:
+            consecutive = 0
+            for row in rows:
+                close = row.get("close")
+                if close is None:
+                    continue
+                ok = False
+                if direction == "bullish":
+                    ok = float(close) > float(trigger_val)
+                elif direction == "bearish":
+                    ok = float(close) < float(trigger_val)
+                if ok:
+                    consecutive += 1
+                    if consecutive >= 2:
+                        return "hit"
+                else:
+                    consecutive = 0
+            return "miss"
+        # 其余（成交额分支 / enum 事件分支 / neutral / 无机械触发位）：落到下方原 range 回退逻辑
+    # 无 anchor（或 anchor 无法机械判定）：回退旧 range 判定（兼容）
     parsed = _parse_range(str(conclusion.get("range", "")))
     if parsed is None:
         return "miss"

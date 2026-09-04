@@ -133,6 +133,22 @@ def position_band(level: Level) -> dict[str, Any]:
     return dict(POSITION_BANDS[level])
 
 
+def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, Any]:
+    """按 direction 生成结构化仓位动作。
+
+    direction: bullish→add / bearish→reduce / neutral→hold。
+    change 成数按保守区间确定性取值（不靠 LLM 拍脑袋，硬约束 #7）。
+    """
+    d = "add" if direction == "bullish" else ("reduce" if direction == "bearish" else "hold")
+    if d == "add":
+        change = "+2 成"
+    elif d == "reduce":
+        change = "-1 成"
+    else:
+        change = "持仓不变"
+    return {"direction": d, "change": change, "band": band}
+
+
 def ma_breadth(
     closes: list[float],
     *,
@@ -267,6 +283,8 @@ def build_technical_branches(
     highs: list[float],
     lows: list[float],
     amounts: list[float],
+    dense_support: float | None = None,
+    dense_pressure: float | None = None,
 ) -> list[dict[str, Any]]:
     """确定性技术点位节点（§19.2，G19：点位由 engine 按当日行情计算）。
 
@@ -277,10 +295,16 @@ def build_technical_branches(
     if len(closes) < 20:
         return []
     ma20 = sum(closes[-20:]) / 20
-    recent_high = max(highs[-20:])
-    recent_low = min(lows[-20:])
-    support = max(recent_low, ma20 * 0.97)
-    pressure = min(recent_high, ma20 * 1.03)
+    # 密集触碰带优先：需求方核心要求"支撑/压力 = 历史密集触碰带"；未接入时回退旧极值法（兜底）。
+    # dense_band 已自行 clamp 到 MA20±clamp_ratio，此处不再重复 clamp，避免二次收窄。
+    if dense_support is not None and dense_pressure is not None:
+        support = dense_support
+        pressure = dense_pressure
+    else:
+        recent_high = max(highs[-20:])
+        recent_low = min(lows[-20:])
+        support = max(recent_low, ma20 * 0.97)
+        pressure = min(recent_high, ma20 * 1.03)
     # 突破后空间 Δ = 半通道宽（design-debate A1：range 锚定突破后空间，非固定百分比）
     channel_half = 0.5 * (pressure - support)
     if amounts and len(amounts) >= 20:
@@ -295,6 +319,13 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": f"放量（>{avg20 * 1.2:.0f}亿）",
                 },
+                "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
+                "anchor": {
+                    "metric": "index_close",
+                    "threshold": "站稳 +0.5%",
+                    "direction": "bullish",
+                },
+                "touch_strength": None,
                 "conclusion": {
                     "direction": "bullish",
                     "range": _range_above(pressure, channel_half),
@@ -311,6 +342,13 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": f"缩量（<{avg20 * 0.8:.0f}亿）",
                 },
+                "position_action": position_band_to_action(POSITION_BANDS["ice"], "bearish"),
+                "anchor": {
+                    "metric": "index_close",
+                    "threshold": "跌破 -0.5%",
+                    "direction": "bearish",
+                },
+                "touch_strength": None,
                 "conclusion": {
                     "direction": "bearish",
                     "range": _range_below(support, channel_half),
@@ -327,6 +365,13 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": "平量",
                 },
+                "position_action": position_band_to_action(POSITION_BANDS["normal"], "neutral"),
+                "anchor": {
+                    "metric": "index_close",
+                    "threshold": "区间震荡",
+                    "direction": "neutral",
+                },
+                "touch_strength": None,
                 "conclusion": {
                     "direction": "neutral",
                     "range": f"{support:.2f}-{pressure:.2f}",
@@ -344,6 +389,13 @@ def build_technical_branches(
                 "hi": None,
                 "label": f"收盘站上 {pressure:.0f} 压力位",
             },
+            "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
+            "anchor": {
+                "metric": "index_close",
+                "threshold": "站稳 +0.5%",
+                "direction": "bullish",
+            },
+            "touch_strength": None,
             "conclusion": {
                 "direction": "bullish",
                 "range": _range_above(pressure, channel_half),
@@ -359,6 +411,13 @@ def build_technical_branches(
                 "hi": round(support, 2),
                 "label": f"收盘跌破 {support:.0f} 支撑位",
             },
+            "position_action": position_band_to_action(POSITION_BANDS["ice"], "bearish"),
+            "anchor": {
+                "metric": "index_close",
+                "threshold": "跌破 -0.5%",
+                "direction": "bearish",
+            },
+            "touch_strength": None,
             "conclusion": {
                 "direction": "bearish",
                 "range": _range_below(support, channel_half),
@@ -374,6 +433,13 @@ def build_technical_branches(
                 "hi": round(pressure, 2),
                 "label": "支撑-压力区间内",
             },
+            "position_action": position_band_to_action(POSITION_BANDS["normal"], "neutral"),
+            "anchor": {
+                "metric": "index_close",
+                "threshold": "区间震荡",
+                "direction": "neutral",
+            },
+            "touch_strength": None,
             "conclusion": {
                 "direction": "neutral",
                 "range": f"{support:.2f}-{pressure:.2f}",
@@ -402,6 +468,13 @@ def build_event_branch(event: dict[str, Any]) -> dict[str, Any] | None:
             "value": EVENT_RESULT_ENUM[0],
             "label": "超预期",
         },
+        "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
+        "anchor": {
+            "metric": "index_close",
+            "threshold": "超预期 -> 站上",
+            "direction": "bullish",
+        },
+        "touch_strength": None,
         "conclusion": {
             "direction": "bullish",
             "range": "",
