@@ -80,3 +80,19 @@ async def test_compose_card_passes_historical_kline_params():
     assert kwargs["days"] == 200
     assert "start_date" not in kwargs
     assert kwargs["end_date"] == basis.replace("-", "")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (8.0e8, 8000.0),  # Tushare 千元 → 亿元：8e8 千元 = 8000 亿
+        (2.0e8, 2000.0),
+        (0.0, 0.0),
+        (None, 0.0),  # 缺失如实转 0（量能仅 ratio/均量阈值，0 不伪造）
+    ],
+)
+def test_amount_yi_converts_qian_yuan_to_yi(raw, expected):
+    from aistock_agent.agents.workers.rhythm_master import _amount_yi
+
+    assert _amount_yi(raw) == pytest.approx(expected)
+
