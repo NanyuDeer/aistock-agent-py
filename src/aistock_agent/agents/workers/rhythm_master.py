@@ -41,6 +41,12 @@ DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 DEGRADED_MODEL = "研研判暂不可用"
 
 
+def _amount_yi(raw: float | None) -> float:
+    """Tushare index_daily 的 amount 单位是千元，engine/前端成交额分支按"亿元"计
+    （1 亿 = 1e5 千元）。缺失/非法如实转 0.0（量能仅参与 ratio 与均量阈值，0 不伪造）。"""
+    return (raw * 1e-5) if raw is not None else 0.0
+
+
 def _load_sentiment_series(
     days: int = 7,
 ) -> tuple[list[dict[str, Any]], list[float], int, str | None]:
@@ -115,7 +121,12 @@ async def _compose_card(
     if kline_short:
         logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
     closes = [float(r["close"]) for r in rows[-65:]]
-    amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
+    # Tushare index_daily amount 千元 → 亿元（engine 单位契约；2026-09-05 核实修复：
+    # Node /internal/index/:code/kline 此前丢弃 vol/amount，恒 null → 量能伪分支）
+    amounts = [
+        _amount_yi(float(r["amount"]) if r.get("amount") is not None else None)
+        for r in rows[-120:]
+    ]
     fg = (await node_api.get_fear_greed() or {}).get("index")
     win = await load_event_window(target_date)
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
@@ -179,7 +190,10 @@ def _build_rhythm_card(
     level = level_entry["level"] if level_entry else None
     score = level_entry["score"] if level_entry else None
     closes = [float(r["close"]) for r in rows[-65:] if r.get("close") is not None]
-    amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
+    amounts = [
+        _amount_yi(float(r["amount"]) if r.get("amount") is not None else None)
+        for r in rows[-120:]
+    ]
     highs = [float(r["high"]) if r.get("high") is not None else None for r in rows[-120:]]
     lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
     missing = list(card.evidence.data_missing)

@@ -575,8 +575,9 @@ class NodeApiClient:
         """指数日 K（GET /internal/index/:code/kline）。
         可选区间参数：start_date/end_date 存在时按区间拉取。
 
-        返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
-        或 None（接口失败/无数据）。"""
+        返回 [{trade_date, open, high, low, close, pct_chg, vol, amount}, ...]
+        （日期升序，Tushare index_daily；vol=手、amount=千元，缺失为 null，
+        2026-09-05 核实修复后接口透传 vol/amount）或 None（接口失败/无数据）。"""
         path = f"/internal/index/{code}/kline?days={days}"
         if start_date is not None:
             path += f"&start_date={start_date}"

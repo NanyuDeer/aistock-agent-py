@@ -507,7 +507,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/ths/index-map` | Tushare 同花顺 | 板块名→885/886 全表（Node 进程缓存 6h TTL；**M2 板块验证**） |
 | `GET /internal/ths/resolve?name=` | Tushare 同花顺 | 板块名三级匹配（归一化精确 → 双向包含 → `{ts_code,name}` 或 null；**M2 板块验证**） |
 | `GET /internal/ths/:code/daily?start=&end=` | Tushare 同花顺 | 板块区间日 K（rows 升序，键 `trade_date`/`pct_chg`，None 保行为 null；**M2 板块验证**） |
-| `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容） |
+| `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容；**2026-09-05 起返回行加性含 `vol`（手）/`amount`（千元）**，rhythm_master 消费时按 1e-5 折算亿元） |
 | `GET /internal/stocks/basic` | stocks 表 | 全量 A 股基础信息（symbol/name/industry），内存 6h 缓存；供 stock_basic_index 构建股票名称索引（最长匹配优先），支持 company_event_rule 实体匹配；接口失败降级空索引 |
 | `GET /internal/calendar/events` | market_calendar_events | 事件日历查询（L1 交割日规则 + 前瞻，rhythm_master 用；data_client `get_calendar_events`） |
 | `POST /internal/calendar/events` | market_calendar_events | 事件日历写入（幂等 upsert；data_client `post_calendar_event`） |
