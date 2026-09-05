@@ -13,7 +13,7 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
 
-from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
+from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_calendar import load_event_window
@@ -29,6 +29,11 @@ REFRESH_SLOTS = ("after_close", "morning", "midday")
 sentiment_archive_dir = Path("docs/agent-outputs/sentiment")
 
 INDEX_CODE = "000001"  # 上证指数
+
+KLINE_LOOKBACK = 200  # 对齐 Node /internal/index/:code/kline 的 days 上限（1-200）；
+# 传 end_date 时该参数仍须在限内（G2/G9 裁决）
+MIN_KLINE_ROWS = 20   # 对齐 rhythm_rebuilt_evidence._trend_score/_volume_score 的
+# len<20 短路下限（G2 裁决）
 
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
@@ -93,11 +98,14 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
         if slot == "after_close"
         else basis_date
     )
-    start = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
+    basis_ymd = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
     kline = (
-        await node_api.get_index_kline(INDEX_CODE, days=260, start_date=start) or []
+        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
+    kline_short = len(rows) < MIN_KLINE_ROWS
+    if kline_short:
+        logger.warning("rhythm_master.kline_insufficient", n=len(rows), basis=basis_date)
     closes = [float(r["close"]) for r in rows[-65:]]
     amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
     fg = (await node_api.get_fear_greed() or {}).get("index")
@@ -109,12 +117,16 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     if isinstance(snap, dict):
         breadth = snap.get("breadth")
 
-    stage, stage_reason = ev.detect_stage(
-        breadth=breadth, closes=closes, amounts=amounts,
-        sentiment_scores=sentiment_scores,
-        fg=fg if isinstance(fg, int | float) else None,
-        prev_phase=None,
-    )
+    if kline_short:
+        stage: Stage | None = None
+        stage_reason = "指数K线不足20根，趋势/量能判定不可用"
+    else:
+        stage, stage_reason = ev.detect_stage(
+            breadth=breadth, closes=closes, amounts=amounts,
+            sentiment_scores=sentiment_scores,
+            fg=fg if isinstance(fg, int | float) else None,
+            prev_phase=None,
+        )
     event_confirm = any(e.get("result") in {"超预期", "不及预期"} for e in win.events)
     volume_direction = _volume_confirm(amounts, stage)
     cert, cert_reason = ev.detect_certainty(
@@ -124,9 +136,12 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     position = ev.compute_position(stage=stage, certainty=cert)
     anchors = ev.build_event_anchors(win.events)
 
+    missing: list[str] = []
+    if kline_short:
+        missing.append("指数K线不足")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
-        position=position, event_anchors=anchors, data_missing=[],
+        position=position, event_anchors=anchors, data_missing=missing,
     )
     synthesis = await run_synthesis(evidence)
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
