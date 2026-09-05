@@ -85,3 +85,33 @@ async def test_run_output_contains_rhythm_card_contract():
     card = content["rhythm_card"]
     for key in ("level", "score", "position_band", "branches", "data_missing"):
         assert key in card
+
+
+@pytest.mark.asyncio
+async def test_run_persisted_content_has_rhythm_card_branches():
+    from aistock_agent.agents.workers.rhythm_master import run
+    from aistock_agent.utils.date import shanghai_today
+    from unittest.mock import patch
+
+    basis = shanghai_today().isoformat()
+    state = {"refresh_slot": "after_close", "report_date": basis}
+    with patch("aistock_agent.agents.workers.rhythm_master._compose_card") as cc, \
+         patch("aistock_agent.agents.workers.rhythm_master.node_api") as api:
+        from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
+        cc.return_value = (
+            MasterRhythmCard(
+                basis_date=basis, target_date=basis, refresh_slot="after_close",
+                evidence=RhythmEvidence(stage="rally", certainty="high"),
+                synthesis_available=True,
+            ),
+            [{"close": 3000.0, "amount": 100.0, "high": 3010.0, "low": 2990.0}] * 60,
+            type("W", (), {"events": [], "high_events": [], "source_missing": False})(),
+        )
+        api.save_analysis_report.return_value = {"id": 2}
+        await run(state)
+    _, kwargs = api.save_analysis_report.call_args
+    content = kwargs["content"]
+    assert content["rhythm_card"]["level"] == "active"
+    assert content["rhythm_card"]["score"] == 60
+    assert isinstance(content["rhythm_card"]["branches"], list)
+    assert content["rhythm_card"]["branches"]  # technical branches 非空
