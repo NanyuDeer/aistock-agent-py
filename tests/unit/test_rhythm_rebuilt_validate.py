@@ -29,3 +29,13 @@ def test_reject_synthesis_not_grounded_on_evidence():
         narrative="",
     )
     assert not validate_synthesis(synth, RhythmEvidence())
+
+
+def test_reject_all_empty_synthesis():
+    synth = RhythmSynthesis(mainline=[], launch_outlook=[], narrative="")
+    assert not validate_synthesis(synth, RhythmEvidence())
+
+
+def test_allow_empty_mainline_with_nonempty_narrative():
+    synth = RhythmSynthesis(mainline=[], launch_outlook=[], narrative="主线缺省，观望为主，不构成投资建议。")
+    assert validate_synthesis(synth, RhythmEvidence())

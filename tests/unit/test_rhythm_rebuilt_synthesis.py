@@ -8,3 +8,12 @@ def test_prompt_contains_evidence_and_constraints():
     assert "启动" in prompt or "launch" in prompt
     assert "假设推演" in prompt
     assert "不输出点位" in prompt
+
+
+def test_synthesis_prompt_contains_json_and_schema_fields():
+    ev = RhythmEvidence(stage="rally", certainty="high")
+    prompt = build_synthesis_prompt(ev)
+    assert "json" in prompt.lower()
+    assert "mainline" in prompt
+    assert "launch_outlook" in prompt
+    assert "narrative" in prompt

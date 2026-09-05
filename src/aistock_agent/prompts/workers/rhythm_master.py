@@ -52,7 +52,11 @@ def build_synthesis_prompt(evidence: RhythmEvidence) -> str:
         "2. 启动节点段只对事件锚点给概率式展望，标注 if_confirmed_direction 与 confidence；"
         "这是假设推演。\n"
         "3. 不输出点位/目标价/百分比目标。\n"
-        "4. narrative 为不超过 60 字的一句话大师判断，结尾注明“不构成投资建议”。"
+        "4. narrative 为不超过 60 字的一句话大师判断，结尾注明“不构成投资建议”。\n"
+        "5. 请以 JSON 对象格式输出（键名精确为）：mainline — 数组，元素含 "
+        "{name, stage, source, data_date, direction, confidence}；launch_outlook — 数组，"
+        "元素含 {anchor_date, title, if_confirmed_direction, confidence}；narrative — 字符串。"
+        "直接输出 JSON，不要包裹 Markdown。"
     )
 
 

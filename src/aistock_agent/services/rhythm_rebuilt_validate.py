@@ -20,6 +20,9 @@ def _grounded(mainline_source: str, mainline_date: str) -> bool:
 def validate_synthesis(synthesis: RhythmSynthesis, evidence: RhythmEvidence) -> bool:
     if _contains_price_point(synthesis.narrative):
         return False
+    if not synthesis.mainline and not synthesis.launch_outlook and not synthesis.narrative.strip():
+        # 三者皆空 = 空壳，拒绝（主线段空但 narrative/outlook 非空是合法态）
+        return False
     for mainline in synthesis.mainline:
         if mainline.confidence not in _VALID_CONFIDENCE:
             return False
