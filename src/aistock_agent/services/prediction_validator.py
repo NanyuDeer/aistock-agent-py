@@ -154,10 +154,8 @@ def _judge_window(
 ) -> tuple[str, str | None]:
     """窗口主判（阶段 0 起默认 3.0 窗口累计口径）。返回 (result, grade)。
 
-    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；
-      neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；
-      neutral mean(|p_i|)<neutral_pct
+    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
 
     grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=strong_pct；
     strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。neutral 恒 None。

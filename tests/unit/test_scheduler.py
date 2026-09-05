@@ -94,8 +94,8 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
             with patch.object(scheduler.AsyncIOScheduler, "start"):
                 scheduler.start_scheduler()
 
-        # 15 个业务 job（sentiment_temp/rhythm×3/sector_wind_prediction 等）+ heartbeat
-        assert from_crontab.call_count == 16
+        # 17 个业务 job（light_predict×2 等）+ heartbeat
+        assert from_crontab.call_count == 18
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1114,6 +1114,8 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
             mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
             mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
+            mock_settings.scheduler_light_predict_midday_cron = "40 11 * * 0-4"
+            mock_settings.scheduler_light_predict_close_cron = "20 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1159,6 +1161,8 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
             mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
             mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
+            mock_settings.scheduler_light_predict_midday_cron = "40 11 * * 0-4"
+            mock_settings.scheduler_light_predict_close_cron = "20 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 

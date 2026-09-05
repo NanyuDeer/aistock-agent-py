@@ -240,6 +240,10 @@ class Settings(BaseSettings):
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）+ 15:20
+    # 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖；对齐 Node 打点 cron 0-4 工作日口径
+    scheduler_light_predict_midday_cron: str = "40 11 * * 0-4"
+    scheduler_light_predict_close_cron: str = "20 15 * * 0-4"
     # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
     # 时刻选 19:30 的原因：review_full 18:30 会再触发主因板块级联预判落库，其后拉榜做
     # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
@@ -247,7 +251,8 @@ class Settings(BaseSettings):
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
     scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"  # 16:05 收盘基准（周五生成下周一预告）
+    # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
