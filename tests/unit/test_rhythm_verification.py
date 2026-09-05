@@ -345,5 +345,5 @@ async def test_run_once_uses_latest_after_close_when_target_misses() -> None:
         )
         api.get_calendar_events = AsyncMock(return_value=[])
         result = await run_once(target)
-    # 方案丙：即使当天 target 精确读命中，也应读到最新 after_close 卡继续，不作"基准报告缺失"
+    # 方案丙（min 边界）：未命中时 after_close 兜底读到即继续，不作"基准报告缺失"
     assert result.get("error") != "基准报告缺失"
