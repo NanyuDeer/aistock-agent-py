@@ -125,6 +125,20 @@ def test_detect_conflict() -> None:
     assert detect_conflict(phase="warm_up", trend=1.0)[0] is False
 
 
+def test_technical_branches_empty_when_highs_lows_missing():
+    closes = [float(i) for i in range(3000, 3400, 10)]
+    missing: list[str] = []
+    branches = build_technical_branches(
+        closes=closes,
+        highs=[None] * len(closes),
+        lows=[None] * len(closes),
+        amounts=[100.0] * len(closes),
+        data_missing=missing,
+    )
+    assert branches == []
+    assert any("high/low" in m or "缺失" in m for m in missing)
+
+
 def test_technical_branches_turnover_condition() -> None:
     closes = [float(3000 + (i % 7)) for i in range(30)]
     highs = [c + 5.0 for c in closes]

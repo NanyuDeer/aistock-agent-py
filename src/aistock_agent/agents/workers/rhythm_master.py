@@ -13,10 +13,11 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
 
-from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
+from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
+from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_calendar import load_event_window
+from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.utils.date import add_trading_days, shanghai_today
@@ -29,6 +30,11 @@ REFRESH_SLOTS = ("after_close", "morning", "midday")
 sentiment_archive_dir = Path("docs/agent-outputs/sentiment")
 
 INDEX_CODE = "000001"  # 上证指数
+
+KLINE_LOOKBACK = 200  # 对齐 Node /internal/index/:code/kline 的 days 上限（1-200）；
+# 传 end_date 时该参数仍须在限内（G2/G9 裁决）
+MIN_KLINE_ROWS = 20   # 对齐 rhythm_rebuilt_evidence._trend_score/_volume_score 的
+# len<20 短路下限（G2 裁决）
 
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
@@ -87,17 +93,27 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
     return None
 
 
-async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
+async def _compose_card(
+    basis_date: str, slot: str
+) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
+    """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
+
+    rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
+    win 为当前窗口 EventWindow（事件分支/锚点来源）。
+    """
     target_date = (
         add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
         if slot == "after_close"
         else basis_date
     )
-    start = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
+    basis_ymd = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
     kline = (
-        await node_api.get_index_kline(INDEX_CODE, days=260, start_date=start) or []
+        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
+    kline_short = len(rows) < MIN_KLINE_ROWS
+    if kline_short:
+        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
     closes = [float(r["close"]) for r in rows[-65:]]
     amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
     fg = (await node_api.get_fear_greed() or {}).get("index")
@@ -109,12 +125,16 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     if isinstance(snap, dict):
         breadth = snap.get("breadth")
 
-    stage, stage_reason = ev.detect_stage(
-        breadth=breadth, closes=closes, amounts=amounts,
-        sentiment_scores=sentiment_scores,
-        fg=fg if isinstance(fg, int | float) else None,
-        prev_phase=None,
-    )
+    if kline_short:
+        stage: Stage | None = None
+        stage_reason = "指数K线不足20根，趋势/量能判定不可用"
+    else:
+        stage, stage_reason = ev.detect_stage(
+            breadth=breadth, closes=closes, amounts=amounts,
+            sentiment_scores=sentiment_scores,
+            fg=fg if isinstance(fg, int | float) else None,
+            prev_phase=None,
+        )
     event_confirm = any(e.get("result") in {"超预期", "不及预期"} for e in win.events)
     volume_direction = _volume_confirm(amounts, stage)
     cert, cert_reason = ev.detect_certainty(
@@ -124,17 +144,74 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     position = ev.compute_position(stage=stage, certainty=cert)
     anchors = ev.build_event_anchors(win.events)
 
+    missing: list[str] = []
+    if kline_short:
+        missing.append("指数K线不足")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
-        position=position, event_anchors=anchors, data_missing=[],
+        position=position, event_anchors=anchors, data_missing=missing,
     )
     synthesis = await run_synthesis(evidence)
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
-    return MasterRhythmCard(
-        basis_date=basis_date, target_date=target_date, refresh_slot=slot,
-        evidence=evidence, synthesis=synthesis if synthesis_ok else None,
-        synthesis_available=synthesis_ok,
+    return (
+        MasterRhythmCard(
+            basis_date=basis_date, target_date=target_date, refresh_slot=slot,
+            evidence=evidence, synthesis=synthesis if synthesis_ok else None,
+            synthesis_available=synthesis_ok,
+        ),
+        rows,
+        win,
     )
+
+
+def _build_rhythm_card(
+    card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]]
+) -> dict[str, object]:
+    """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决）。
+
+    - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
+    - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
+    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）。
+    """
+    from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
+
+    level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
+    level = level_entry["level"] if level_entry else None
+    score = level_entry["score"] if level_entry else None
+    closes = [float(r["close"]) for r in rows[-65:] if r.get("close") is not None]
+    amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
+    highs = [float(r["high"]) if r.get("high") is not None else None for r in rows[-120:]]
+    lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
+    missing = list(card.evidence.data_missing)
+    data_missing_container: list[str] = list(card.evidence.data_missing)
+    try:
+        branches = engine.build_technical_branches(
+            closes=closes, highs=highs, lows=lows, amounts=amounts,
+            data_missing=data_missing_container,
+        )
+        for e in win.events:
+            branches.extend(engine.build_event_branch(e))
+    except Exception:
+        logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
+        branches = []
+    missing.extend(m for m in data_missing_container if m not in missing)
+    return {
+        "score": score,
+        "level": level,
+        "position_band": {
+            "min": None,
+            "max": None,
+            "text": card.evidence.position.text if card.evidence.position else "",
+        },
+        "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
+        "temperature_series": [],
+        "event_window": [],
+        "event_source_missing": win.source_missing,
+        "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        "conflict": False,
+        "branches": branches,
+        "data_missing": missing,
+    }
 
 
 async def run(state: dict[str, object]) -> dict[str, object]:
@@ -143,9 +220,7 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         if slot not in REFRESH_SLOTS:
             slot = "after_close"
         basis = str(state.get("report_date") or shanghai_today().isoformat())
-        card = await _compose_card(basis, slot)
-        if card is None:
-            return {"final_response": DEGRADED_TEXT}
+        card, rows, win = await _compose_card(basis, slot)
         if not card.synthesis_available:
             card.evidence.data_missing.append(DEGRADED_MODEL)
         content = {
@@ -156,6 +231,7 @@ async def run(state: dict[str, object]) -> dict[str, object]:
             "evidence": card.evidence.model_dump(),
             "synthesis": card.synthesis.model_dump() if card.synthesis else None,
             "synthesis_available": card.synthesis_available,
+            "rhythm_card": _build_rhythm_card(card, win, rows),
         }
         await node_api.save_analysis_report(
             report_type="rhythm_master", report_date=card.target_date,

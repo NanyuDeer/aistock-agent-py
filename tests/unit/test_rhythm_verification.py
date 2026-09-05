@@ -1,7 +1,19 @@
 """分支验证（§19.4/G14）：窗口 5 交易日/触及/站稳 hit-miss/未触发 insufficient；
 事件落档后判 hit/miss（D11）。
+
+Task 7（方案丙 min 边界）新增：run_once 读取语义改为 morning/midday 优先、
+after_close 兜底；after_close 存储 report_date=target_date 不改，本任务只对齐
+当天精确命中语义（Node 无"最新卡"端点，见 Task 8 开放项）。
 """
-from aistock_agent.services.rhythm_verification import evaluate_branch, hit_rate_summary
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from aistock_agent.services.rhythm_verification import (
+    evaluate_branch,
+    hit_rate_summary,
+    run_once,
+)
 
 
 def _rows(closes: list[float]) -> list[dict]:
@@ -301,3 +313,37 @@ def test_hit_rate_summary() -> None:
     summary = hit_rate_summary(["hit", "miss", "insufficient", "hit"])
     assert summary["hit"] == 2 and summary["miss"] == 1 and summary["insufficient"] == 1
     assert summary["hit_rate"] == 2 / 3
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_latest_after_close_when_target_misses() -> None:
+    """Task 7/min 边界：morning/midday 当天无 rhythm_card 命中时，after_close 兜底命中。
+
+    方案丙语义：after_close 存储 report_date=target_date 不改，run_once 不要求"当天
+    精确匹配 after_close"；测试 mock 须 async-correct（get_rhythm_report 等被 await，
+    须用 AsyncMock，plain MagicMock+同步 lambda 会 TypeError）。
+    """
+    from aistock_agent.utils.date import shanghai_today
+
+    target = shanghai_today().isoformat()
+    basis_card = {
+        "content": {"basis_date": "2026-09-04", "rhythm_card": {"branches": []}},
+        "report_date": target,
+    }
+    with (
+        patch(
+            "aistock_agent.services.rhythm_verification.add_trading_days",
+            side_effect=lambda d, n: d,
+        ),
+        patch("aistock_agent.services.rhythm_verification.node_api") as api,
+    ):
+        api.get_index_kline = AsyncMock(
+            return_value=[{"trade_date": target, "close": 3000.0, "pct_chg": 0.0}]
+        )
+        api.get_rhythm_report = AsyncMock(
+            side_effect=lambda d, slot: basis_card if slot == "after_close" else None
+        )
+        api.get_calendar_events = AsyncMock(return_value=[])
+        result = await run_once(target)
+    # 方案丙（min 边界）：未命中时 after_close 兜底读到即继续，不作"基准报告缺失"
+    assert result.get("error") != "基准报告缺失"

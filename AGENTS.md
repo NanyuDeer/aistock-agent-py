@@ -37,6 +37,8 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 >
 > **节奏大师三时点（2026-08-30）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 为**当日节奏事件驱动增量**（主档位沿用收盘基准结论，事件触发即增量刷新）；收盘基准错峰晚于 sentiment_temp（15:45）。
 >
+> **节奏大师降级链修复（2026-09-05，design-debate 裁决落地）**：K 线取数改 `days=200 & end_date=basis`（去 start_date，对齐 Node 1-200 上限；行数<20 → `stage=None` + `data_missing="指数K线不足"` 留痕）；synthesis prompt 补 "json" 字段锚定 + validate 三者皆空门槛；producer 补发 `content.rhythm_card`（`_build_rhythm_card`，level/score 由 `STAGE_TO_LEVEL` 常量同源派生，score=LEVEL_IDX×20，branches 由 engine 确定性生成）；`run_once` 方案丙 min 边界（morning/midday 优先 + after_close 兜底，存储 `report_date=target_date` 不改，Node 无"最新卡"端点待开放项）。
+>
 > **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、证据源读统一事件库优先（`load_event_scrape(report_date)`，有库用事件库做 event_evidence、缺库降级到财联社电报当日全量爬取 `/internal/news/telegraph`，再降级 `/internal/news/latest`，2026-08-12 起）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
 
 ## 核心架构

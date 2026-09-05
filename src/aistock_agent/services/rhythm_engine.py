@@ -285,12 +285,15 @@ def build_technical_branches(
     amounts: list[float],
     dense_support: float | None = None,
     dense_pressure: float | None = None,
+    data_missing: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """确定性技术点位节点（§19.2，G19：点位由 engine 按当日行情计算）。
 
     条件分档（§19.5 interval 形态，互斥）：
     - 主用成交额 vs 20 日均量三档（放量/缩量/平量）；
     - amount 缺失 → 退化为指数点位三档（站上压力/跌破支撑/区间内）。
+    - high/low 空值兜底（2026-09-05 裁决）：剔除空值行，整体仍不可得则
+      返回空 branches 并在 data_missing 留痕，绝不伪造支撑/压力点位。
     """
     if len(closes) < 20:
         return []
@@ -301,10 +304,14 @@ def build_technical_branches(
         support = dense_support
         pressure = dense_pressure
     else:
-        recent_high = max(highs[-20:])
-        recent_low = min(lows[-20:])
-        support = max(recent_low, ma20 * 0.97)
-        pressure = min(recent_high, ma20 * 1.03)
+        recent_highs = [h for h in highs[-20:] if h is not None]
+        recent_lows = [v for v in lows[-20:] if v is not None]
+        if not recent_highs or not recent_lows:
+            if data_missing is not None:
+                data_missing.append("技术支撑/压力因 high/low 缺失无法计算，本卡不产出生效分支")
+            return []
+        support = max(min(recent_lows), ma20 * 0.97)
+        pressure = min(max(recent_highs), ma20 * 1.03)
     # 突破后空间 Δ = 半通道宽（design-debate A1：range 锚定突破后空间，非固定百分比）
     channel_half = 0.5 * (pressure - support)
     if amounts and len(amounts) >= 20:
