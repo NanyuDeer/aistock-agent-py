@@ -96,6 +96,11 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 async def _compose_card(
     basis_date: str, slot: str
 ) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
+    """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
+
+    rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
+    win 为当前窗口 EventWindow（事件分支/锚点来源）。
+    """
     target_date = (
         add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
         if slot == "after_close"
