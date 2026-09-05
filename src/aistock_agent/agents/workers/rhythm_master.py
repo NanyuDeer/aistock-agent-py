@@ -168,7 +168,7 @@ def _build_rhythm_card(
     - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
     - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）。
     """
-    from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # Task 5 定义
+    from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
     level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
     level = level_entry["level"] if level_entry else None
