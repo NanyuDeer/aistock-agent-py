@@ -105,7 +105,7 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     rows = [r for r in kline if r.get("close") is not None]
     kline_short = len(rows) < MIN_KLINE_ROWS
     if kline_short:
-        logger.warning("rhythm_master.kline_insufficient", n=len(rows), basis=basis_date)
+        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
     closes = [float(r["close"]) for r in rows[-65:]]
     amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
     fg = (await node_api.get_fear_greed() or {}).get("index")
