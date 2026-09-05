@@ -180,8 +180,8 @@ def _build_rhythm_card(
     score = level_entry["score"] if level_entry else None
     closes = [float(r["close"]) for r in rows[-65:] if r.get("close") is not None]
     amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
-    highs = [float(r["high"]) if r.get("high") is not None else 0.0 for r in rows[-120:]]
-    lows = [float(r["low"]) if r.get("low") is not None else 0.0 for r in rows[-120:]]
+    highs = [float(r["high"]) if r.get("high") is not None else None for r in rows[-120:]]
+    lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
     missing = list(card.evidence.data_missing)
     data_missing_container: list[str] = list(card.evidence.data_missing)
     try:
