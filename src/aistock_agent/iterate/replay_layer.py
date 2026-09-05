@@ -139,6 +139,18 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)`
         # 返回 None（Spec B 个股验证新增，I-3 清单封闭测试强制登记）
         "NodeApiClient.get_stock_kline",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_quote/
+        # get_stock_flow/list_light_predict_targets
+        # 内部 `await self.get(...)`，无独立网络入口；回放时 get 返回 None → 各自失败
+        # 降级返回 None（阶段 2 轻量预判新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.get_quote",
+        "NodeApiClient.get_stock_flow",
+        "NodeApiClient.list_light_predict_targets",
+        # 经 patch 间接隔离（patch → node_noop 返回 None）：forecast slot 级回写
+        # 无独立网络入口；回放时 patch 返回 None → 方法原样返回 None
+        # （阶段 2 轻量预判新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.set_event_forecast",
+        "NodeApiClient.set_judgement_forecast",
         # 经 get 间接隔离（get → node_read 返回 None）：M2 板块验证 ths 方法，
         # 内部 `await self.get(...)` 无独立网络入口；回放时 get 返回 None →
         # 各自 `not isinstance(result, dict)` 失败降级返回 None（T5 新增）

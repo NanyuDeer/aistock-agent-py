@@ -171,6 +171,7 @@ START → supervisor(quick_think, 意图路由)
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
 - **阶段 2.1（2026-08-27）`insight_lookup` 读层 skill**：对话内查登录用户自选股洞察（涨停雷达/价格异动归因，只读）；入参 `{symbol?}`，user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/insight/events` 只读端点；`ChatSource.kind="insight"`；`qa_router` footer 白名单动态化——`_build_system_prompt` 从 registry 实时渲染 `goal.intent` 枚举（`__INTENT_ENUM__` 占位符替换，新增 skill 无需改硬编码）
 - **阶段 2.2（2026-08-27）`stock_trace_lookup` 读层 skill**：对话内查登录用户个股异动溯源（价格异动/涨停雷达归因结果，只读列表）；入参 `{symbol?}`（symbol 可空——无代码时返回该用户全部异动溯源），user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/stock-trace/events` 只读端点；`ChatSource.kind="stock_trace"`，source_id=`stock_trace:{event_id}`；**词条优先级**：`异动/异动归因/异动原因` → 本 skill（置于前），`涨停雷达/自选股/洞察/归因` → `insight_lookup`
+- **2026-08-30 链路合并后**：涨停雷达事件并入 stock-trace（Node 侧不再建 watchlist_insight_events），词条统一——`异动/涨停/涨停雷达/自选股/洞察/归因/异动归因/异动原因` 全部 → `stock_trace_lookup`；`insight_lookup` 从 registry/`_STOCK_SKILLS`/`_infer_stock_skill` 摘除路由（skill 文件保留不注册）；`schemas/stock_trace.py` `SourceKind` 增加 `insight_article`（Node 快照新增文章证据域，候选层仍强制五层）。
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
 
@@ -683,3 +684,10 @@ content = {
 - 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
 - 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
 - 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式
+
+### 2026-09-03 更新：自选股洞察阶段 2（定时轻量预判 + forecast 落库）
+
+- 定时调度：新增 `light_predict_midday`（11:40，工作日）/ `light_predict_close`（15:20）两 cron；slot 级分存互不覆盖。env：`SCHEDULER_LIGHT_PREDICT_MIDDAY_CRON`（默认 `40 11 * * 0-4`）、`SCHEDULER_LIGHT_PREDICT_CLOSE_CRON`（默认 `20 15 * * 0-4`）。
+- 新文件：`services/light_predictor.py`（`run_light_prediction(slot)`）；`prompts/workers/light_predict.py`（`PREDICTION_LIGHT_PROMPT`）；`schemas/prediction.py` 新增 `LightForecast`（summary + conditions[min1,max3]，复用 anchor 契约）。
+- Node 侧配合接口（internal，见 app-api）：`GET /internal/stock-trace/light-predict-targets?trade_date=`、`PATCH /internal/stock-trace/events/:eventId/forecast`、`PATCH /internal/stock-info/judgements/:id/forecast`（data_client：`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）。
+- iterate 回放隔离：data_client 新增网络方法（get_quote/get_stock_flow/list_light_predict_targets/set_event_forecast/set_judgement_forecast）已在 `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 登记（经 get/patch 间接隔离）。

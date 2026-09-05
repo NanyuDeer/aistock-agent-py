@@ -605,6 +605,54 @@ class NodeApiClient:
             return result["rows"]
         return None
 
+    # ── 阶段 2：自选股洞察轻量预判（2026-09-03）──
+
+    async def get_quote(self, symbol: str) -> dict[str, object] | None:
+        """个股实时行情（GET /internal/quote/:symbol，腾讯中文键字段集；预判盘口输入）。"""
+        return await self.get(f"/internal/quote/{symbol}")
+
+    async def get_stock_flow(self, symbol: str) -> dict[str, object] | None:
+        """个股主力资金流（GET /internal/flow/:symbol；预判盘口输入，失败降级跳过）。"""
+        return await self.get(f"/internal/flow/{symbol}")
+
+    async def list_light_predict_targets(self, trade_date: str) -> list[dict[str, object]]:
+        """当日轻量预判候选（GET /internal/stock-trace/light-predict-targets）。
+
+        返回 targets 列表（按 symbol 去重；event=异动/涨停主事件、intel=当日重大利好/利空资讯）。
+        请求失败/无候选返回 []（任务空转不报错）。
+        """
+        path = (
+            "/internal/stock-trace/light-predict-targets"
+            f"?trade_date={trade_date}"
+        )
+        result = await self.get(path)
+        if isinstance(result, dict):
+            targets = result.get("targets")
+            if isinstance(targets, list):
+                return [t for t in targets if isinstance(t, dict)]
+        return []
+
+    async def set_event_forecast(
+        self, event_id: str, slot: str, forecast: dict[str, object],
+    ) -> dict[str, object] | None:
+        """事件 forecast slot 级回写（PATCH /internal/stock-trace/events/:eventId/forecast）。"""
+        return await self.patch(
+            f"/internal/stock-trace/events/{event_id}/forecast",
+            {"slot": slot, "forecast": forecast},
+        )
+
+    async def set_judgement_forecast(
+        self, judgement_id: int, slot: str, forecast: dict[str, object],
+    ) -> dict[str, object] | None:
+        """情报事件 forecast slot 级回写（PATCH /internal/stock-info/judgements/:id/forecast）。
+
+        仅重大资讯（无 stock_trace 事件）股票使用；slot 级 upsert 由 Node 保证互不覆盖。
+        """
+        return await self.patch(
+            f"/internal/stock-info/judgements/{judgement_id}/forecast",
+            {"slot": slot, "forecast": forecast},
+        )
+
     async def get_ths_index_map(self) -> list[dict[str, object]] | None:
         """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
         result = await self.get("/internal/ths/index-map")

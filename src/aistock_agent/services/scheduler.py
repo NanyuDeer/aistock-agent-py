@@ -181,6 +181,32 @@ def start_scheduler() -> None:
         name="prediction hit-rate stats",
         replace_existing=True,
     )
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）
+    # + 15:20 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖
+    scheduler.add_job(
+        _run_light_predict_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_light_predict_midday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "midday"},
+        id="light_predict_midday",
+        name="watchlist light predict (midday)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_light_predict_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_light_predict_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "close"},
+        id="light_predict_close",
+        name="watchlist light predict (close)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：19:30 收盘后逐板块
     # predict_sector（幂等跳过 + 主因板块排除；review_full 18:30 级联预判落库后执行）
     scheduler.add_job(
