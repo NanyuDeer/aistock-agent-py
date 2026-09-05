@@ -45,7 +45,7 @@ async def test_compose_card_short_kline_forces_stage_none_and_missing():
         "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
     ) as vs:
         vs.return_value = True
-        card = await _compose_card(basis, "after_close")
+        card, _, _ = await _compose_card(basis, "after_close")
     assert card.evidence.stage is None
     assert "指数K线不足" in card.evidence.data_missing
 

@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
+from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_calendar import load_event_window
+from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.utils.date import add_trading_days, shanghai_today
@@ -92,7 +93,9 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
     return None
 
 
-async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
+async def _compose_card(
+    basis_date: str, slot: str
+) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
     target_date = (
         add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
         if slot == "after_close"
@@ -145,11 +148,65 @@ async def _compose_card(basis_date: str, slot: str) -> MasterRhythmCard | None:
     )
     synthesis = await run_synthesis(evidence)
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
-    return MasterRhythmCard(
-        basis_date=basis_date, target_date=target_date, refresh_slot=slot,
-        evidence=evidence, synthesis=synthesis if synthesis_ok else None,
-        synthesis_available=synthesis_ok,
+    return (
+        MasterRhythmCard(
+            basis_date=basis_date, target_date=target_date, refresh_slot=slot,
+            evidence=evidence, synthesis=synthesis if synthesis_ok else None,
+            synthesis_available=synthesis_ok,
+        ),
+        rows,
+        win,
     )
+
+
+def _build_rhythm_card(
+    card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]]
+) -> dict[str, object]:
+    """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决）。
+
+    - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
+    - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
+    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）。
+    """
+    from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # Task 5 定义
+
+    level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
+    level = level_entry["level"] if level_entry else None
+    score = level_entry["score"] if level_entry else None
+    closes = [float(r["close"]) for r in rows[-65:] if r.get("close") is not None]
+    amounts = [float(r["amount"]) if r.get("amount") is not None else 0.0 for r in rows[-120:]]
+    highs = [float(r["high"]) if r.get("high") is not None else 0.0 for r in rows[-120:]]
+    lows = [float(r["low"]) if r.get("low") is not None else 0.0 for r in rows[-120:]]
+    missing = list(card.evidence.data_missing)
+    data_missing_container: list[str] = list(card.evidence.data_missing)
+    try:
+        branches = engine.build_technical_branches(
+            closes=closes, highs=highs, lows=lows, amounts=amounts,
+            data_missing=data_missing_container,
+        )
+        for e in win.events:
+            branches.extend(engine.build_event_branch(e))
+    except Exception:
+        logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
+        branches = []
+    missing.extend(m for m in data_missing_container if m not in missing)
+    return {
+        "score": score,
+        "level": level,
+        "position_band": {
+            "min": None,
+            "max": None,
+            "text": card.evidence.position.text if card.evidence.position else "",
+        },
+        "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
+        "temperature_series": [],
+        "event_window": [],
+        "event_source_missing": win.source_missing,
+        "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        "conflict": False,
+        "branches": branches,
+        "data_missing": missing,
+    }
 
 
 async def run(state: dict[str, object]) -> dict[str, object]:
@@ -158,9 +215,7 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         if slot not in REFRESH_SLOTS:
             slot = "after_close"
         basis = str(state.get("report_date") or shanghai_today().isoformat())
-        card = await _compose_card(basis, slot)
-        if card is None:
-            return {"final_response": DEGRADED_TEXT}
+        card, rows, win = await _compose_card(basis, slot)
         if not card.synthesis_available:
             card.evidence.data_missing.append(DEGRADED_MODEL)
         content = {
@@ -171,6 +226,7 @@ async def run(state: dict[str, object]) -> dict[str, object]:
             "evidence": card.evidence.model_dump(),
             "synthesis": card.synthesis.model_dump() if card.synthesis else None,
             "synthesis_available": card.synthesis_available,
+            "rhythm_card": _build_rhythm_card(card, win, rows),
         }
         await node_api.save_analysis_report(
             report_type="rhythm_master", report_date=card.target_date,
