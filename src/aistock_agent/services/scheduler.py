@@ -1142,6 +1142,26 @@ async def _run_prediction_stats_task() -> None:
         logger.error("scheduler_prediction_stats_failed", error=str(e), exc_info=True)
 
 
+async def _run_light_predict_task(*, slot: str) -> None:
+    """自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行 / 15:20 收盘终版。
+
+    slot ∈ {midday, close}，对应 light_predict_midday/light_predict_close 两个
+    cron job；slot 级分存互不覆盖。委托 services/light_predictor.run_light_prediction。
+    """
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="light_predict", slot=slot)
+        return
+    from aistock_agent.services.light_predictor import (  # noqa: PLC0415
+        run_light_prediction,
+    )
+
+    try:
+        updated = await run_light_prediction(slot)
+        logger.info("scheduler_light_predict_done", slot=slot, updated=updated)
+    except Exception as e:
+        logger.error("scheduler_light_predict_failed", slot=slot, error=str(e), exc_info=True)
+
+
 async def _run_sector_wind_prediction_task() -> None:
     """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 19:30 收盘后）。"""
     if not is_trading_day(shanghai_today()):
