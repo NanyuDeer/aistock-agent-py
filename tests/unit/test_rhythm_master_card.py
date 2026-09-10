@@ -51,5 +51,11 @@ def test_build_rhythm_card_includes_basis_data_date():
     assert card["basis_data_date"] == "20260909"
 
 
+def test_build_rhythm_card_position_band_has_no_min_max():
+    card = _build_rhythm_card(_card(), _win(), _rows(60, high=3010.0, low=2990.0))
+    assert set(card["position_band"].keys()) == {"text"}
+    assert card["conflict"] is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -233,8 +233,6 @@ def _build_rhythm_card(
         "score": score,
         "level": level,
         "position_band": {
-            "min": None,
-            "max": None,
             "text": card.evidence.position.text if card.evidence.position else "",
         },
         "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
@@ -243,6 +241,8 @@ def _build_rhythm_card(
         "event_window": [],
         "event_source_missing": win.source_missing,
         "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        # 暂无冲突检测器（Phase 4 态 ↔ Stage 5 态不同源，见 spec §2.2）：恒 False。
+        # 前端 conflict 为必填 bool，不可置 null；接入检测器前保持此常量。
         "conflict": False,
         "branches": branches,
         "data_missing": missing,
