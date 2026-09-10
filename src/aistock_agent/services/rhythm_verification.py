@@ -12,19 +12,20 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Any, Literal
 
+from aistock_agent.config import settings
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services.data_client import node_api
 from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
 Result = Literal["hit", "miss", "insufficient"]
 
-# 验证统计归档
-verification_dir = Path("docs/agent-outputs/rhythm")
+# 验证统计归档（settings 值 + 仓库根解析，不依赖 CWD）
+verification_dir = project_root() / settings.rhythm_output_dir
 
 WINDOW_DAYS = 5
 

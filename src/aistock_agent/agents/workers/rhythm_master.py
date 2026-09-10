@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date as date_cls
-from pathlib import Path
 from typing import Any
 
+from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
@@ -21,13 +21,14 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
 REFRESH_SLOTS = ("after_close", "morning", "midday")
 
-# sentiment 归档目录（对齐 config.sentiment_output_dir 默认值；测试可覆写）
-sentiment_archive_dir = Path("docs/agent-outputs/sentiment")
+# sentiment 归档目录（settings 值 + 仓库根解析，不依赖 CWD；测试可覆写）
+sentiment_archive_dir = project_root() / settings.sentiment_output_dir
 
 INDEX_CODE = "000001"  # 上证指数
 

@@ -352,6 +352,9 @@ class Settings(BaseSettings):
     # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
     sentiment_output_dir: str = "docs/agent-outputs/sentiment"
 
+    # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
+    rhythm_output_dir: str = "docs/agent-outputs/rhythm"
+
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）
     prediction_conf_cap_short: str = "high"
