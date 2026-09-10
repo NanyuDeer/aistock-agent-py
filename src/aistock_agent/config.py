@@ -252,7 +252,8 @@ class Settings(BaseSettings):
     scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
     # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"
+    # 收盘基准（周一至周五；APScheduler 0=周一，禁用 1-5）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
@@ -350,6 +351,9 @@ class Settings(BaseSettings):
     sentiment_ice_consecutive_days: int = 2
     # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
     sentiment_output_dir: str = "docs/agent-outputs/sentiment"
+
+    # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
+    rhythm_output_dir: str = "docs/agent-outputs/rhythm"
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）

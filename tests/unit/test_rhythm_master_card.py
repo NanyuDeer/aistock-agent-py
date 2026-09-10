@@ -43,5 +43,36 @@ def test_build_rhythm_card_normal_high_low_returns_branches():
     assert card["branches"]
 
 
+def test_build_rhythm_card_includes_basis_data_date():
+    rows = _rows(60, high=3010.0, low=2990.0)
+    for r in rows:
+        r["trade_date"] = "20260909"
+    card = _build_rhythm_card(_card(), _win(), rows)
+    assert card["basis_data_date"] == "20260909"
+
+
+def test_build_rhythm_card_position_band_has_no_min_max():
+    card = _build_rhythm_card(_card(), _win(), _rows(60, high=3010.0, low=2990.0))
+    assert set(card["position_band"].keys()) == {"text"}
+    assert card["conflict"] is False
+
+
+def test_build_technical_branches_zero_amounts_falls_back_to_index_point():
+    """amounts 全 0 → 成交额三档不可用，退化为指数点位三档并留痕（不产"放量（>0亿）"伪分支）。"""
+    from aistock_agent.services.rhythm_engine import build_technical_branches
+
+    missing: list[str] = []
+    branches = build_technical_branches(
+        closes=[3000.0 + i for i in range(30)],
+        highs=[3100.0] * 30,
+        lows=[2900.0] * 30,
+        amounts=[0.0] * 30,
+        data_missing=missing,
+    )
+    assert branches
+    assert all(b["condition"]["indicator"] == "上证指数点位" for b in branches)
+    assert any("成交额数据不可用" in m for m in missing)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

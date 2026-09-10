@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date as date_cls
-from pathlib import Path
 from typing import Any
 
+from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
@@ -21,13 +21,14 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
 REFRESH_SLOTS = ("after_close", "morning", "midday")
 
-# sentiment 归档目录（对齐 config.sentiment_output_dir 默认值；测试可覆写）
-sentiment_archive_dir = Path("docs/agent-outputs/sentiment")
+# sentiment 归档目录（settings 值 + 仓库根解析，不依赖 CWD；测试可覆写）
+sentiment_archive_dir = project_root() / settings.sentiment_output_dir
 
 INDEX_CODE = "000001"  # 上证指数
 
@@ -41,10 +42,19 @@ DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 DEGRADED_MODEL = "研研判暂不可用"
 
 
+def _normalize_ymd(value: object) -> str | None:
+    """把 trade_date 归一为 YYYYMMDD（容忍 YYYY-MM-DD / 空）。G3：比对前必须归一。"""
+    if value is None:
+        return None
+    text = str(value).replace("-", "").strip()
+    return text or None
+
+
 def _amount_yi(raw: float | None) -> float:
     """Tushare index_daily 的 amount 单位是千元，engine/前端成交额分支按"亿元"计
-    （1 亿 = 1e5 千元）。缺失/非法如实转 0.0（量能仅参与 ratio 与均量阈值，0 不伪造）。"""
-    return (raw * 1e-5) if raw is not None else 0.0
+    （1 亿 = 1e5 千元，常量见 rhythm_engine.QIAN_YUAN_TO_YI）。缺失/非法如实转 0.0
+    （量能仅参与 ratio 与均量阈值，0 不伪造）。"""
+    return (raw * engine.QIAN_YUAN_TO_YI) if raw is not None else 0.0
 
 
 def _load_sentiment_series(
@@ -117,6 +127,12 @@ async def _compose_card(
         await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
+    last_trade_date = _normalize_ymd(rows[-1].get("trade_date")) if rows else None
+    # P0-2/G4 分槽门禁：after_close 的 basis 必须是"当日 K 线到位"的交易日；
+    # morning/midday 的 basis 是运行日（盘中当日 bar 天然未出），不设该门禁。
+    basis_gate = slot == "after_close" and (
+        last_trade_date is None or last_trade_date != basis_ymd
+    )
     kline_short = len(rows) < MIN_KLINE_ROWS
     if kline_short:
         logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
@@ -139,6 +155,9 @@ async def _compose_card(
     if kline_short:
         stage: Stage | None = None
         stage_reason = "指数K线不足20根，趋势/量能判定不可用"
+    elif basis_gate:
+        stage = None
+        stage_reason = "基准日无当日K线，趋势/量能判定不适用"
     else:
         stage, stage_reason = ev.detect_stage(
             breadth=breadth, closes=closes, amounts=amounts,
@@ -158,6 +177,8 @@ async def _compose_card(
     missing: list[str] = []
     if kline_short:
         missing.append("指数K线不足")
+    if basis_gate:
+        missing.append("基准日无当日K线（非交易日或数据未就绪）")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
@@ -213,15 +234,16 @@ def _build_rhythm_card(
         "score": score,
         "level": level,
         "position_band": {
-            "min": None,
-            "max": None,
             "text": card.evidence.position.text if card.evidence.position else "",
         },
         "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
+        "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
         "temperature_series": [],
         "event_window": [],
         "event_source_missing": win.source_missing,
         "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        # 暂无冲突检测器（Phase 4 态 ↔ Stage 5 态不同源，见 spec §2.2）：恒 False。
+        # 前端 conflict 为必填 bool，不可置 null；接入检测器前保持此常量。
         "conflict": False,
         "branches": branches,
         "data_missing": missing,

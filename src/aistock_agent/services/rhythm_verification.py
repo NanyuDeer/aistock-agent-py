@@ -12,18 +12,20 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Any, Literal
 
+from aistock_agent.config import settings
+from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services.data_client import node_api
 from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
 Result = Literal["hit", "miss", "insufficient"]
 
-# 验证统计归档
-verification_dir = Path("docs/agent-outputs/rhythm")
+# 验证统计归档（settings 值 + 仓库根解析，不依赖 CWD）
+verification_dir = project_root() / settings.rhythm_output_dir
 
 WINDOW_DAYS = 5
 
@@ -175,7 +177,12 @@ async def run_once(report_date: str | None = None) -> dict[str, Any]:
             start_date=target.replace("-", ""),
             end_date=end.isoformat().replace("-", ""),
         )
-        rows = list(rows_raw) if isinstance(rows_raw, list) else []
+        rows: list[Any] = list(rows_raw) if isinstance(rows_raw, list) else []
+        # 量纲对齐（G6/P0-3）：Node 返回 amount=千元，branches 阈值=亿元；
+        # 在数据边界一次性换算，使 evaluate_branch/_triggered 的 amount 口径恒为"亿元"。
+        for r in rows:
+            if isinstance(r, dict) and r.get("amount") is not None:
+                r["amount"] = float(r["amount"]) * engine.QIAN_YUAN_TO_YI
         if not rows:
             return {"report_date": target, "evaluated": 0, "error": "窗口 K 线不可用"}
         # 事件落档只发生在 morning/midday 版本，after_close 为占位（D11）。

@@ -1,4 +1,7 @@
 """节奏合成引擎（spec §3.1/§5/§7.1/§19）——量纲/映射/档位/阶段/分支全部确定性。"""
+
+import pytest
+
 from aistock_agent.services import rhythm_engine
 from aistock_agent.services.rhythm_engine import (
     DISCLAIMER,
@@ -431,3 +434,17 @@ def test_apply_event_result_met_range_from_technical_branch() -> None:
     out = apply_event_result_met(branches, events)
     by_value = {b["condition"]["value"]: b for b in out if b["condition"].get("value")}
     assert by_value["不及预期"]["conclusion"]["range"] == "3880-3930"
+
+
+def test_qian_yuan_to_yi_constant_exposed():
+    from aistock_agent.services.rhythm_engine import QIAN_YUAN_TO_YI
+
+    assert QIAN_YUAN_TO_YI == 1e-5
+
+
+def test_trend_anchor_zero_amounts_has_no_volume_bias():
+    """avg20=0（量能不可用）时不得伪装"缩量 -0.5"：均线满锚 +1.5，量能不加不减。"""
+    from aistock_agent.services.rhythm_engine import trend_anchor
+
+    closes = [float(i) for i in range(1, 22)]  # 单边上升 → 满锚 1.5（1.0 均线 + 0.5 位置）
+    assert trend_anchor(closes, [0.0] * 21) == pytest.approx(1.5)

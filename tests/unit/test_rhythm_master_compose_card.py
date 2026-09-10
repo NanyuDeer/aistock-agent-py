@@ -96,3 +96,71 @@ def test_amount_yi_converts_qian_yuan_to_yi(raw, expected):
 
     assert _amount_yi(raw) == pytest.approx(expected)
 
+
+def _mock_kline_dated(n_rows: int, last_trade_date: str | None):
+    rows = _mock_kline(n_rows)
+    for r in rows:
+        r["trade_date"] = "20260801"
+    if rows and last_trade_date is not None:
+        rows[-1]["trade_date"] = last_trade_date
+    return rows
+
+
+async def _compose(slot: str, basis: str, kline_value):
+    from aistock_agent.agents.workers.rhythm_master import _compose_card
+
+    with patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_index_kline",
+        AsyncMock(return_value=kline_value),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_fear_greed",
+        AsyncMock(return_value={"index": 40}),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_last_close_snapshot",
+        AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.run_synthesis",
+        AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
+    ) as vs:
+        vs.return_value = True
+        card, rows, _ = await _compose_card(basis, slot)
+    return card
+
+
+_GATE_MSG = "基准日无当日K线"
+
+
+@pytest.mark.asyncio
+async def test_after_close_gate_when_last_row_not_basis():
+    basis = "2026-09-10"
+    card = await _compose("after_close", basis, _mock_kline_dated(200, "20260909"))
+    assert card.evidence.stage is None
+    assert any(_GATE_MSG in m for m in card.evidence.data_missing)
+
+
+@pytest.mark.asyncio
+async def test_after_close_no_gate_when_last_row_equals_basis():
+    basis = "2026-09-10"
+    card = await _compose("after_close", basis, _mock_kline_dated(200, "20260910"))
+    assert not any(_GATE_MSG in m for m in card.evidence.data_missing)
+
+
+@pytest.mark.asyncio
+async def test_morning_not_gated_when_last_row_older_than_basis():
+    basis = "2026-09-10"
+    card = await _compose("morning", basis, _mock_kline_dated(200, "20260909"))
+    assert not any(_GATE_MSG in m for m in card.evidence.data_missing)
+
+
+@pytest.mark.asyncio
+async def test_empty_kline_short_circuits_without_exception():
+    basis = "2026-09-10"
+    card = await _compose("after_close", basis, [])
+    assert card.evidence.stage is None
+    assert any("指数K线不足" in m for m in card.evidence.data_missing)
+
