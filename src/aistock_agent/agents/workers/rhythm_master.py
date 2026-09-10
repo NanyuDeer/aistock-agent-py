@@ -43,8 +43,9 @@ DEGRADED_MODEL = "研研判暂不可用"
 
 def _amount_yi(raw: float | None) -> float:
     """Tushare index_daily 的 amount 单位是千元，engine/前端成交额分支按"亿元"计
-    （1 亿 = 1e5 千元）。缺失/非法如实转 0.0（量能仅参与 ratio 与均量阈值，0 不伪造）。"""
-    return (raw * 1e-5) if raw is not None else 0.0
+    （1 亿 = 1e5 千元，常量见 rhythm_engine.QIAN_YUAN_TO_YI）。缺失/非法如实转 0.0
+    （量能仅参与 ratio 与均量阈值，0 不伪造）。"""
+    return (raw * engine.QIAN_YUAN_TO_YI) if raw is not None else 0.0
 
 
 def _load_sentiment_series(

@@ -347,3 +347,44 @@ async def test_run_once_uses_latest_after_close_when_target_misses() -> None:
         result = await run_once(target)
     # 方案丙（min 边界）：未命中时 after_close 兜底读到即继续，不作"基准报告缺失"
     assert result.get("error") != "基准报告缺失"
+
+
+@pytest.mark.asyncio
+async def test_run_once_converts_row_amount_qian_yuan_to_yi() -> None:
+    """P0-3：Node 行 amount=千元（1.2e7 千元 = 120 亿），branches 阈值=亿元。
+
+    未换算时 1.2e7 >= 200（亿元）恒成立 → 放量分支假命中（RED）；
+    换算后 120 < 200 → 条件未触发 → insufficient（GREEN）。
+    """
+    target = "2026-09-10"
+    branch = {
+        "condition": {
+            "kind": "interval", "indicator": "成交额",
+            "lo": 200.0, "hi": None, "unit": "亿元", "label": "放量",
+        },
+        "conclusion": {
+            "direction": "bullish", "range": "3000.00-3010.00",
+            "validity": 5, "note": "",
+        },
+    }
+    basis_card = {
+        "content": {"basis_date": "2026-09-09", "rhythm_card": {"branches": [branch]}},
+        "report_date": target,
+    }
+    with (
+        patch(
+            "aistock_agent.services.rhythm_verification.add_trading_days",
+            side_effect=lambda d, n: d,
+        ),
+        patch("aistock_agent.services.rhythm_verification.node_api") as api,
+    ):
+        api.get_index_kline = AsyncMock(return_value=[
+            {"trade_date": "20260909", "close": 3000.0, "amount": 12_000_000.0},
+            {"trade_date": "20260910", "close": 3000.0, "amount": 12_000_000.0},
+        ])
+        api.get_rhythm_report = AsyncMock(
+            side_effect=lambda d, slot: basis_card if slot == "after_close" else None
+        )
+        api.get_calendar_events = AsyncMock(return_value=[])
+        out = await run_once(target)
+    assert out["results"] == ["insufficient"]

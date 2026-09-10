@@ -16,6 +16,10 @@ Level = Literal["ice", "low", "normal", "active", "euphoria"]
 
 DISCLAIMER = "本页内容为研究参考，不构成任何投资建议，据此操作风险自担。"
 
+# Tushare index_daily amount 单位=千元；engine/前端成交额分支按"亿元"计（1 亿 = 1e5 千元）。
+# 单点常量（G6）：任何千元→亿元换算一律引用本常量，禁止散落字面量 1e-5。
+QIAN_YUAN_TO_YI: float = 1e-5
+
 WEIGHTS: dict[str, float] = {"sentiment": 0.60, "trend": 0.27, "fear_greed": 0.13}
 
 SENTIMENT_COEFF: dict[str, float] = {
