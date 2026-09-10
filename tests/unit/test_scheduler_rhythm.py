@@ -1,6 +1,10 @@
 """scheduler 三时点注册（§8/D13）：16:05 收盘基准 + 9:00 盘前 + 12:30 午间。"""
-import pytest
+from datetime import datetime, timedelta
 
+import pytest
+from apscheduler.triggers.cron import CronTrigger
+
+from aistock_agent.config import settings
 from aistock_agent.services import scheduler
 
 
@@ -43,3 +47,31 @@ def test_rhythm_jobs_registered() -> None:
         scheduler.shutdown_scheduler()
         loop.close()
         asyncio.set_event_loop(None)
+
+
+def _fire_weekdays(cron: str) -> set[int]:
+    """返回该 cron 在 2026-09-01（周二）起连续 8 次触发的 weekday 集合（0=周一）。"""
+    trig = CronTrigger.from_crontab(cron)
+    t = datetime(2026, 9, 1, tzinfo=trig.timezone)
+    out: set[int] = set()
+    for _ in range(8):
+        nxt = trig.get_next_fire_time(None, t)
+        if nxt is None:
+            break
+        out.add(nxt.weekday())
+        t = nxt + timedelta(minutes=1)
+    return out
+
+
+def test_rhythm_three_slots_share_mon_to_fri_weekday_window():
+    for cron in (
+        settings.scheduler_rhythm_after_close_cron,
+        settings.scheduler_rhythm_morning_cron,
+        settings.scheduler_rhythm_midday_cron,
+    ):
+        assert cron.split()[4] in {"mon-fri", "0-4"}, f"cron weekday 口径非法: {cron}"
+
+
+def test_after_close_fires_on_monday_not_saturday():
+    days = _fire_weekdays(settings.scheduler_rhythm_after_close_cron)
+    assert days == {0, 1, 2, 3, 4}, f"after_close 应周一~周五，实际 {sorted(days)}"
