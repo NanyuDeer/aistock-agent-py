@@ -43,5 +43,13 @@ def test_build_rhythm_card_normal_high_low_returns_branches():
     assert card["branches"]
 
 
+def test_build_rhythm_card_includes_basis_data_date():
+    rows = _rows(60, high=3010.0, low=2990.0)
+    for r in rows:
+        r["trade_date"] = "20260909"
+    card = _build_rhythm_card(_card(), _win(), rows)
+    assert card["basis_data_date"] == "20260909"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
