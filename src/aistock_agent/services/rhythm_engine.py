@@ -85,10 +85,12 @@ def trend_anchor(closes: list[float], amounts: list[float]) -> float | None:
         avg5 = sum(amounts[-5:]) / 5
         # 量能健康（放量或平量）视为趋势确认 +0.5；仅缩量（<20日均量80%）-0.5。
         # 测试口径：单边上升+平量 → 满锚 2.0（test_trend_anchor_ma_alignment）。
-        if avg5 >= avg20 * 0.8:
-            score += 0.5
-        else:
-            score -= 0.5
+        # avg20<=0 = 量能不可用（全缺失/全零），不作量能加减（不得伪装"缩量 -0.5"）。
+        if avg20 > 0:
+            if avg5 >= avg20 * 0.8:
+                score += 0.5
+            else:
+                score -= 0.5
     return max(-2.0, min(2.0, score))
 
 
@@ -318,8 +320,14 @@ def build_technical_branches(
         pressure = min(max(recent_highs), ma20 * 1.03)
     # 突破后空间 Δ = 半通道宽（design-debate A1：range 锚定突破后空间，非固定百分比）
     channel_half = 0.5 * (pressure - support)
+    avg20 = 0.0
+    amounts_usable = False
     if amounts and len(amounts) >= 20:
         avg20 = sum(amounts[-20:]) / 20
+        amounts_usable = avg20 > 0
+        if not amounts_usable and data_missing is not None:
+            data_missing.append("成交额数据不可用，成交额条件退化为指数点位三档")
+    if amounts_usable:
         return [
             {
                 "condition": {
