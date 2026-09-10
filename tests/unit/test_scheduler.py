@@ -1179,6 +1179,48 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     assert "review_quick" not in job_ids
 
 
+# ── 自选股洞察轻量预判调度任务（阶段 2，2026-09-03） ──
+
+
+@pytest.mark.asyncio
+async def test_light_predict_task_delegates_to_light_predictor():
+    """_run_light_predict_task 交易日调用 run_light_prediction(slot)。"""
+    import aistock_agent.services.light_predictor as light_predictor_module
+    from aistock_agent.services import scheduler
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(
+            light_predictor_module,
+            "run_light_prediction",
+            new_callable=AsyncMock,
+            return_value=3,
+        ) as mock_run,
+    ):
+        await scheduler._run_light_predict_task(slot="midday")
+
+    mock_run.assert_awaited_once_with("midday")
+
+
+@pytest.mark.asyncio
+async def test_light_predict_task_skips_non_trading_day():
+    """非交易日跳过轻量预判（不调用业务模块）。"""
+    import aistock_agent.services.light_predictor as light_predictor_module
+    from aistock_agent.services import scheduler
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=False),
+        patch.object(
+            light_predictor_module,
+            "run_light_prediction",
+            new_callable=AsyncMock,
+        ) as mock_run,
+    ):
+        await scheduler._run_light_predict_task(slot="close")
+
+    mock_run.assert_not_awaited()
+
+
 # ── 手动补跑晚间链路（/admin/trigger/evening_chain 支持） ──
 
 

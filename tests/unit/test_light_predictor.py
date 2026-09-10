@@ -168,9 +168,12 @@ async def test_run_returns_zero_when_no_targets(_mock_today: object):
 
 
 @pytest.mark.asyncio
+@patch("aistock_agent.services.light_predictor.get_quick_think")
 @patch("aistock_agent.services.light_predictor.shanghai_today", return_value=D)
 @patch("aistock_agent.services.light_predictor.with_chat_structured_output")
-async def test_event_target_writes_event_forecast(mock_structured: object, _mock_today: object):
+async def test_event_target_writes_event_forecast(
+    mock_structured: object, _mock_today: object, _mock_llm: object,
+):
     fake = _FakeStructured(_forecast())
     mock_structured.return_value = fake
     event_mock = AsyncMock(return_value={"event_id": "mv:...", "slot": "close"})
@@ -198,10 +201,11 @@ async def test_event_target_writes_event_forecast(mock_structured: object, _mock
 
 
 @pytest.mark.asyncio
+@patch("aistock_agent.services.light_predictor.get_quick_think")
 @patch("aistock_agent.services.light_predictor.shanghai_today", return_value=D)
 @patch("aistock_agent.services.light_predictor.with_chat_structured_output")
 async def test_intel_only_target_writes_judgement_forecast(
-    mock_structured: object, _mock_today: object,
+    mock_structured: object, _mock_today: object, _mock_llm: object,
 ):
     fake = _FakeStructured(_forecast())
     mock_structured.return_value = fake
@@ -226,9 +230,12 @@ async def test_intel_only_target_writes_judgement_forecast(
 
 
 @pytest.mark.asyncio
+@patch("aistock_agent.services.light_predictor.get_quick_think")
 @patch("aistock_agent.services.light_predictor.shanghai_today", return_value=D)
 @patch("aistock_agent.services.light_predictor.with_chat_structured_output")
-async def test_llm_failure_skips_target(mock_structured: object, _mock_today: object):
+async def test_llm_failure_skips_target(
+    mock_structured: object, _mock_today: object, _mock_llm: object,
+):
     fake = _FakeStructured(RuntimeError("llm boom"))
     mock_structured.return_value = fake
     event_mock = AsyncMock()

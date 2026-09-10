@@ -114,6 +114,24 @@ class PredictionCondition(BaseModel):
     )
 
 
+class LightForecast(BaseModel):
+    """自选股洞察轻量预判输出（阶段 2，2026-09-03）。
+
+    卡片预判区 1-2 句条件化摘要 + 1-3 条"条件→情景"对；conditions 与
+    PredictionCondition 同 schema（复用 anchor 契约；轻量预判不自建完整三档，
+    horizon 实际取 short/mid）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(description="1-2 句条件化摘要（直接展示于卡片预判区；含方向与幅度暗示）")
+    conditions: list[PredictionCondition] = Field(
+        min_length=1,
+        max_length=3,
+        description="1-3 条条件→情景对，复用 PredictionCondition schema",
+    )
+
+
 class OmittedHorizon(BaseModel):
     """被省略（未产出）档位的显式留痕（spec §5.3）：供产品解释与画像诊断。"""
 
