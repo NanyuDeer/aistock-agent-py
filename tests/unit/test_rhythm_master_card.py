@@ -74,7 +74,13 @@ def test_build_technical_branches_zero_amounts_falls_back_to_index_point():
     assert any("成交额数据不可用" in m for m in missing)
 
 
-def test_dead_fields_are_documented_not_silently_empty():
+def test_dead_fields_are_empty_and_documented_without_polluting_gaps():
+    """已知空置字段：显式空 + 代码文档标注，但**不写入**对用户可见的缺失清单。
+
+    两个字段的数据源均已接入（温度序列←sentiment 归档、事件窗口←事件日历），
+    缺口在「字段未接线」（S4/S5）；该属架构说明，混进 data_missing 会让健康卡
+    常驻一条无关提示，也与「降级信息不污染证据清单」的口径冲突。
+    """
     from aistock_agent.agents.workers import rhythm_master as wm
     from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
 
@@ -85,10 +91,13 @@ def test_dead_fields_are_documented_not_silently_empty():
     )
     win = type("W", (), {"events": [], "source_missing": False})()
     out = wm._build_rhythm_card(card, win, [])
-    # 未接入数据源 → 显式空 + 留痕（不得静默假象）
+    # 未接线的两个字段：显式空（不得静默渲染假数据）
     assert out["temperature_series"] == []
     assert out["event_window"] == []
-    assert any("事件窗口" in m or "温度序列" in m for m in out["data_missing"])
+    # 但不写进缺失清单：健康日不得因这两个字段出现常驻提示（G4 精神）
+    assert not any("温度序列" in m or "事件窗口" in m for m in out["data_missing"])
+    # 「已知空置」仍保留在代码文档中（G7）
+    assert "temperature_series" in (wm._build_rhythm_card.__doc__ or "")
 
 
 def test_next_event_anchor_counts_from_target_date_not_basis_date():
