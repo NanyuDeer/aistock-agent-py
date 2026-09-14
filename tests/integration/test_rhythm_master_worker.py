@@ -2,7 +2,7 @@
 import json
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -328,7 +328,11 @@ async def test_conflict_uses_pre_tech_phase(
     """C2：conflict 检测器尚未接线，断言未接线的真实行为（恒定 False、无 detail）。"""
     # conflict 检测器尚未接线（spec §1.2 #11 / §7 S6）：卡片 conflict 恒 False，
     # 且不产出 conflict_detail。此处断言「未接线的真实行为」，不得断言未实现字段。
-    card, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
+    with (
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        card, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
     out = wm_build(card, type("W", (), {"events": [], "source_missing": False})(), [])
     assert out["conflict"] is False
     assert "conflict_detail" not in out
@@ -461,9 +465,13 @@ async def test_morning_inherits_after_close_main_level(
         "content": {"evidence": {"stage": "ice", "stage_reason": "宽度收缩"},
                     "basis_date": "2026-08-28"}
     })
-    out = await run(
-        {"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-28"}
-    )
+    with (
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        out = await run(
+            {"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-28"}
+        )
     content = json.loads(out["final_response"])
     assert content["evidence"]["stage"] == "ice"
     assert content["rhythm_card"]["level"] == "ice"
