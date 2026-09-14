@@ -10,6 +10,7 @@ import logging
 from aistock_agent.prompts.workers.rhythm_master import build_synthesis_prompt
 from aistock_agent.schemas.rhythm_master import RhythmEvidence, RhythmSynthesis
 from aistock_agent.services.llm import get_deep_think, with_chat_structured_output
+from aistock_agent.services.rhythm_rebuilt_validate import prune_invalid
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ async def run_synthesis(evidence: RhythmEvidence) -> RhythmSynthesis | None:
     except Exception:
         logger.warning("rhythm_rebuilt.synthesis_failed", exc_info=True)
         return None
-    if isinstance(resp, RhythmSynthesis):
-        return resp
-    return None
+    if not isinstance(resp, RhythmSynthesis):
+        return None
+    # P1-2：按元素保全（剔除非法项），避免全丢
+    return prune_invalid(resp)
