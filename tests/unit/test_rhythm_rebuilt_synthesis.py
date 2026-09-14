@@ -34,7 +34,7 @@ def test_synthesis_prompt_pins_enums_and_anchor_guard():
 
 
 def test_prune_invalid_drops_only_bad_elements():
-    from aistock_agent.schemas.rhythm_master import MainlineRef, LaunchOutlook, RhythmSynthesis
+    from aistock_agent.schemas.rhythm_master import LaunchOutlook, MainlineRef, RhythmSynthesis
     from aistock_agent.services.rhythm_rebuilt_validate import prune_invalid
 
     good = MainlineRef(name="AI", stage="launch", source="P0/板块", data_date="2026-09-11",
