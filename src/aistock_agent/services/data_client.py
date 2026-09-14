@@ -873,6 +873,26 @@ class NodeApiClient:
         """
         return await self.get("/internal/market/last-close-snapshot")
 
+    async def get_close_snapshot(
+        self, snapshot_date: str
+    ) -> dict[str, object] | None:
+        """拉取**指定交易日**的收盘快照（G1：证据日同源）。
+
+        snapshot_date 为 YYYYMMDD（Tushare K 线 trade_date 格式），内部转
+        YYYY-MM-DD 拼 query。Node 端点 GET /internal/market/close-snapshot?date=
+        对已收盘交易日返回 status='complete'；未收盘/非交易日返回 409 语义
+        （self.get 归一为 None）。
+
+        Returns:
+            dict（含 breadth），或 None（未就绪/非交易日/服务异常）。
+        """
+        ymd = str(snapshot_date).replace("-", "")
+        if len(ymd) != 8 or not ymd.isdigit():
+            logger.warning("close_snapshot_invalid_date", snapshot_date=snapshot_date)
+            return None
+        iso = f"{ymd[0:4]}-{ymd[4:6]}-{ymd[6:8]}"
+        return await self.get(f"/internal/market/close-snapshot?date={iso}")
+
     async def get_review_analysis_report(
         self,
         report_date: date,

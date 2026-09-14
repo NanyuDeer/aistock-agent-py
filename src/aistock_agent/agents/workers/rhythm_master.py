@@ -160,9 +160,17 @@ async def _compose_card(
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
 
     breadth = None
-    snap = await node_api.get_last_close_snapshot()
-    if isinstance(snap, dict):
-        breadth = snap.get("breadth")
+    snapshot_missing = False
+    # G1：宽度证据必须与 K 线证据日同源（此前 get_last_close_snapshot() 取
+    # 「严格早于今天」的最近交易日 → after_close(周五) 实际取周四宽度）。
+    if last_trade_date is None:
+        snapshot_missing = True
+    else:
+        snap = await node_api.get_close_snapshot(last_trade_date)
+        if isinstance(snap, dict):
+            breadth = snap.get("breadth")
+        else:
+            snapshot_missing = True
 
     if kline_short:
         stage: Stage | None = None
@@ -191,6 +199,8 @@ async def _compose_card(
         missing.append("指数K线不足")
     if basis_gate:
         missing.append("基准日无当日K线（非交易日或数据未就绪）")
+    if snapshot_missing:
+        missing.append("宽度快照缺失（证据日无收盘快照）")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
