@@ -510,3 +510,24 @@ async def test_after_close_dense_band_feeds_branch_range(monkeypatch: pytest.Mon
     assert branches
     neutral = next(b for b in branches if b["conclusion"]["direction"] == "neutral")
     assert neutral["conclusion"]["range"] == "3900.00-4010.00"
+
+
+@pytest.mark.asyncio
+async def test_morning_inherits_after_close_main_level(
+    temp_sentiment: Path, mock_api: AsyncMock,
+) -> None:
+    # 基准卡存在且 stage=ice
+    mock_api.get_rhythm_report = AsyncMock(return_value={
+        "content": {"evidence": {"stage": "ice", "stage_reason": "宽度收缩"},
+                    "basis_date": "2026-08-28"}
+    })
+    out = await run(
+        {"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-28"}
+    )
+    content = json.loads(out["final_response"])
+    assert content["evidence"]["stage"] == "ice"
+    assert content["rhythm_card"]["level"] == "ice"
+    assert content["rhythm_card"]["score"] == 0
+    assert "沿用收盘基准" in content["evidence"]["stage_reason"]
+    # G9：基准卡必须按 (运行日, after_close) 精确读取一次
+    mock_api.get_rhythm_report.assert_awaited_once_with("2026-08-28", "after_close")

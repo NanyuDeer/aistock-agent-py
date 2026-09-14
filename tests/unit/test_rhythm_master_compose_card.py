@@ -122,6 +122,9 @@ async def _compose(slot: str, basis: str, kline_value):
         "aistock_agent.agents.workers.rhythm_master.load_event_window",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_rhythm_report",
+        AsyncMock(return_value=None),
+    ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
         AsyncMock(return_value=None),
     ), patch(
@@ -240,6 +243,7 @@ async def test_breadth_snapshot_uses_kline_last_date():
         patch.object(worker_mod.node_api, "get_close_snapshot", snap),
         patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
         patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
@@ -248,3 +252,19 @@ async def test_breadth_snapshot_uses_kline_last_date():
     snap.assert_awaited_once()
     # 关键：以 K 线末日（证据日）而非「严格早于今天」取快照
     assert snap.await_args.args[0] == "20260911"
+
+
+def test_inherit_basis_stage_only_for_intraday_slots():
+    from aistock_agent.agents.workers.rhythm_master import _inherit_basis_stage
+
+    # 真实契约：get_rhythm_report 已解包 code==200 信封，content 在顶层
+    resp = {"content": {"evidence": {"stage": "ice", "stage_reason": "冰点筑底"},
+                        "basis_date": "2026-09-11"}}
+    # after_close 不继承
+    assert _inherit_basis_stage("after_close", resp) is None
+    # morning/midday 继承
+    assert _inherit_basis_stage("morning", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
+    assert _inherit_basis_stage("midday", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
+    # 基准缺失 / stage 为空 → None
+    assert _inherit_basis_stage("morning", None) is None
+    assert _inherit_basis_stage("morning", {"content": {"evidence": {"stage": None}}}) is None

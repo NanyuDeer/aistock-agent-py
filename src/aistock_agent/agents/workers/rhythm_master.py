@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date as date_cls
-from typing import Any
+from typing import Any, cast, get_args
 
 from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
@@ -60,6 +60,40 @@ def _event_confirm(events: list[dict[str, Any]]) -> bool:
         e.get("importance") == "high" and e.get("result") in {"超预期", "不及预期"}
         for e in events
     )
+
+
+def _inherit_basis_stage(
+    slot: str, basis_response: object
+) -> tuple[str | None, str] | None:
+    """morning/midday 主档位沿用最近 after_close 基准（AGENTS.md：「主档位沿用收盘基准结论」）。
+
+    仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
+    stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
+    G2：消灭「同日日历格 ice / 详情页 low」的自相矛盾。
+
+    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，`get_rhythm_report`
+    返回的业务对象把 `content` 放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+    """
+    if slot not in {"morning", "midday"}:
+        return None
+    if not isinstance(basis_response, dict):
+        return None
+    content = basis_response.get("content")
+    if not isinstance(content, dict):
+        return None
+    evidence = content.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    stage = evidence.get("stage")
+    if not isinstance(stage, str) or not stage:
+        return None
+    # 越界 stage 必须在此拦截：该值会流入 RhythmEvidence.stage（Stage|None 的
+    # Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新
+    if stage not in get_args(Stage):
+        return None
+    basis_date = content.get("basis_date")
+    reason = str(evidence.get("stage_reason") or "")
+    return stage, f"沿用收盘基准（{basis_date or '—'}）：{reason}"
 
 
 def _amount_yi(raw: float | None) -> float:
@@ -134,6 +168,7 @@ async def _compose_card(
         if slot == "after_close"
         else basis_date
     )
+    basis_inherit_note: str | None = None
     basis_ymd = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
     kline = (
         await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
@@ -185,6 +220,14 @@ async def _compose_card(
             fg=fg if isinstance(fg, int | float) else None,
             prev_phase=None,
         )
+    # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
+    if slot in {"morning", "midday"} and stage is not None:
+        basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
+        inherited = _inherit_basis_stage(slot, basis_resp)
+        if inherited is not None:
+            stage, stage_reason = cast("tuple[Stage | None, str]", inherited)
+        elif basis_resp is None:
+            basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
     event_confirm = _event_confirm(win.events)
     volume_direction = _volume_confirm(amounts, stage)
     cert, cert_reason = ev.detect_certainty(
@@ -201,6 +244,8 @@ async def _compose_card(
         missing.append("基准日无当日K线（非交易日或数据未就绪）")
     if snapshot_missing:
         missing.append("宽度快照缺失（证据日无收盘快照）")
+    if basis_inherit_note:
+        missing.append(basis_inherit_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
