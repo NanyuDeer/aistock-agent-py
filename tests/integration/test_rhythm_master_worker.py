@@ -1,5 +1,6 @@
 """rhythm_master worker 集成测试（三时点语义 + 落盘 + 降级）。"""
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -531,3 +532,27 @@ async def test_morning_inherits_after_close_main_level(
     assert "沿用收盘基准" in content["evidence"]["stage_reason"]
     # G9：基准卡必须按 (运行日, after_close) 精确读取一次
     mock_api.get_rhythm_report.assert_awaited_once_with("2026-08-28", "after_close")
+
+
+@pytest.mark.asyncio
+async def test_degraded_model_not_polluting_evidence(
+    temp_sentiment: Path, mock_api: AsyncMock, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # synthesis 恒失败 → 断言降级标记不写入 evidence/rhythm_card 的 data_missing
+    caplog.set_level(logging.WARNING, logger="aistock_agent.agents.workers.rhythm_master")
+    monkey_event = type("W", (), {"events": [], "high_events": [], "source_missing": False})()
+    from unittest.mock import patch
+
+    import aistock_agent.agents.workers.rhythm_master as wm
+
+    with patch.object(wm, "load_event_window", AsyncMock(return_value=monkey_event)), \
+         patch.object(wm, "run_synthesis", AsyncMock(return_value=None)), \
+         patch.object(wm, "validate_synthesis", return_value=False):
+        out = await run({"trigger_source": "scheduler", "refresh_slot": "after_close",
+                         "report_date": "2026-08-28"})
+    content = json.loads(out["final_response"])
+    assert content["synthesis_available"] is False
+    assert "研研判暂不可用" not in content["evidence"]["data_missing"]
+    assert "研研判暂不可用" not in content["rhythm_card"]["data_missing"]
+    assert "degraded_reasons" not in content
+    assert any("rhythm_master.degraded" in r.getMessage() for r in caplog.records)

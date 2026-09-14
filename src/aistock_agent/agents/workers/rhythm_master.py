@@ -325,7 +325,10 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         basis = str(state.get("report_date") or shanghai_today().isoformat())
         card, rows, win = await _compose_card(basis, slot)
         if not card.synthesis_available:
-            card.evidence.data_missing.append(DEGRADED_MODEL)
+            logger.warning(
+                "rhythm_master.degraded reason=%s slot=%s target_date=%s",
+                DEGRADED_MODEL, card.refresh_slot, card.target_date,
+            )
         content = {
             "schema_version": "1.0",
             "target_date": card.target_date,
