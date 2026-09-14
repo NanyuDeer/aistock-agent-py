@@ -35,7 +35,9 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 > **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
 >
-> **节奏大师三时点（2026-08-30）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 为**当日节奏事件驱动增量**（主档位沿用收盘基准结论，事件触发即增量刷新）；收盘基准错峰晚于 sentiment_temp（15:45）。
+> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；收盘基准错峰晚于 sentiment_temp（15:45）。
+>
+> **边界（2026-09-14 spec §10 / S1 未闭环）**：是否引入「仅有新事件才刷新」的事件门控属产品口径，尚未裁决；当前 morning/midday 仍按时点无条件执行，但**不再无条件改写主档位**。
 >
 > **节奏大师降级链修复（2026-09-05，design-debate 裁决落地）**：K 线取数改 `days=200 & end_date=basis`（去 start_date，对齐 Node 1-200 上限；行数<20 → `stage=None` + `data_missing="指数K线不足"` 留痕）；synthesis prompt 补 "json" 字段锚定 + validate 三者皆空门槛；producer 补发 `content.rhythm_card`（`_build_rhythm_card`，level/score 由 `STAGE_TO_LEVEL` 常量同源派生，score=LEVEL_IDX×20，branches 由 engine 确定性生成）；`run_once` 方案丙 min 边界（morning/midday 优先 + after_close 兜底，存储 `report_date=target_date` 不改，Node 无"最新卡"端点待开放项）。
 >

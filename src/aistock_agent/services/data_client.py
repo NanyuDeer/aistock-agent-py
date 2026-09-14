@@ -428,7 +428,9 @@ class NodeApiClient:
     ) -> dict[str, object] | None:
         """GET /internal/analysis-reports/rhythm_master/{date}/{slot}
 
-        morning/midday 读 16:05 基准（D13）。
+        调用方：① `rhythm_verification.run_once`（命中率验证）；②
+        `rhythm_master._compose_card`（morning/midday 读 `slot="after_close"`
+        的基准卡以沿用主档位，2026-09-14 P0-2）。
         """
         result = await self._request(
             f"/internal/analysis-reports/rhythm_master/{target_date}/{refresh_slot}"

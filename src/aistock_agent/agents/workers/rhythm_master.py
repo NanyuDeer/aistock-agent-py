@@ -65,7 +65,7 @@ def _event_confirm(events: list[dict[str, Any]]) -> bool:
 def _inherit_basis_stage(
     slot: str, basis_response: object
 ) -> tuple[str | None, str] | None:
-    """morning/midday 主档位沿用最近 after_close 基准（AGENTS.md：「主档位沿用收盘基准结论」）。
+    """morning/midday 主档位沿用最近 after_close 基准（对齐 AGENTS.md 节奏大师三时点契约）。
 
     仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
     stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
