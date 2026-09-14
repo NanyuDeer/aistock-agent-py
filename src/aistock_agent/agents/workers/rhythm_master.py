@@ -50,6 +50,18 @@ def _normalize_ymd(value: object) -> str | None:
     return text or None
 
 
+def _event_confirm(events: list[dict[str, Any]]) -> bool:
+    """事件确认（G3）：与 event_anchors/event_branches 同源，仅认 high 级事件。
+
+    result ∈ {超预期, 不及预期} 才算「已确认方向」；medium/low 事件不得抬 certainty
+    （否则出现「有确认、无锚点」的矛盾卡）。
+    """
+    return any(
+        e.get("importance") == "high" and e.get("result") in {"超预期", "不及预期"}
+        for e in events
+    )
+
+
 def _amount_yi(raw: float | None) -> float:
     """Tushare index_daily 的 amount 单位是千元，engine/前端成交额分支按"亿元"计
     （1 亿 = 1e5 千元，常量见 rhythm_engine.QIAN_YUAN_TO_YI）。缺失/非法如实转 0.0
@@ -165,7 +177,7 @@ async def _compose_card(
             fg=fg if isinstance(fg, int | float) else None,
             prev_phase=None,
         )
-    event_confirm = any(e.get("result") in {"超预期", "不及预期"} for e in win.events)
+    event_confirm = _event_confirm(win.events)
     volume_direction = _volume_confirm(amounts, stage)
     cert, cert_reason = ev.detect_certainty(
         event_confirm=event_confirm, volume_direction=volume_direction,
