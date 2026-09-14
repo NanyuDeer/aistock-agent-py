@@ -74,5 +74,22 @@ def test_build_technical_branches_zero_amounts_falls_back_to_index_point():
     assert any("成交额数据不可用" in m for m in missing)
 
 
+def test_dead_fields_are_documented_not_silently_empty():
+    from aistock_agent.agents.workers import rhythm_master as wm
+    from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
+
+    card = MasterRhythmCard(
+        basis_date="2026-09-11", target_date="2026-09-14", refresh_slot="after_close",
+        evidence=RhythmEvidence(stage="ice", certainty="low"), synthesis=None,
+        synthesis_available=False,
+    )
+    win = type("W", (), {"events": [], "source_missing": False})()
+    out = wm._build_rhythm_card(card, win, [])
+    # 未接入数据源 → 显式空 + 留痕（不得静默假象）
+    assert out["temperature_series"] == []
+    assert out["event_window"] == []
+    assert any("事件窗口" in m or "温度序列" in m for m in out["data_missing"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

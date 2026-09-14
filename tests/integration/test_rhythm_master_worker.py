@@ -1,11 +1,13 @@
 """rhythm_master worker 集成测试（三时点语义 + 落盘 + 降级）。"""
 import json
+import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aistock_agent.agents.workers import rhythm_master as worker_mod
+from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card as wm_build
 from aistock_agent.agents.workers.rhythm_master import run
 
 _ARCHIVE = "aistock_agent.agents.workers.rhythm_master.sentiment_archive_dir"
@@ -323,75 +325,17 @@ async def test_after_close_ma_breadth_insufficient_marks_missing(
 async def test_conflict_uses_pre_tech_phase(
     temp_sentiment: Path, mock_api: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C2：顶背离判定用 tech=None 的原始 phase，不被 C1 技术佐证（拉向 ebb）掩盖。
-
-    kline 近 3 日跌破 MA60/前低（breakdown_ma60=True）会把展示相位拉到 ebb；
-    温度序列升幅 10 > 5 → 原始 phase=warm_up；量能萎缩 → trend=-2.0 → 顶背离。
-    断言 detect_conflict 的输入是 base_phase（warm_up）而非展示相位（ebb），
-    即同一价格信号只经一条路径生效。
-    """
-    from aistock_agent.services import rhythm_engine as rhythm_engine_mod
-
-    # 温度序列 2 根且上行（slope=10 > 5 → warm_up），保证走到 C1 技术佐证覆盖分支
-    (temp_sentiment / "2026-08-27.json").write_text(
-        json.dumps(
-            {
-                "date": "2026-08-27",
-                "score": 35.0,
-                "level": "低迷",
-                "ice": {"is_ice": False, "consecutive_ice_days": 0},
-                "cycle_phase": "warm_up",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (temp_sentiment / "2026-08-28.json").write_text(
-        json.dumps(
-            {
-                "date": "2026-08-28",
-                "score": 45.0,
-                "level": "低迷",
-                "ice": {"is_ice": False, "consecutive_ice_days": 0},
-                "cycle_phase": "warm_up",
-            }
-        ),
-        encoding="utf-8",
-    )
-    # 115 根平盘后近 3 日跌破 MA60/前低（C1 佐证触发）；量能同步萎缩 → trend_anchor=-2.0
-    rows: list[dict] = []
-    for i in range(115):
-        rows.append(
-            {
-                "trade_date": f"2026-08-{max(1, 28 - (117 - i)):02d}",
-                "open": 99.0, "high": 101.0, "low": 98.0,
-                "close": 100.0, "pct_chg": 0.0, "vol": 100, "amount": 120.0,
-            }
-        )
-    for c, amt in ((60.0, 20.0), (59.0, 15.0), (58.0, 10.0)):
-        rows.append(
-            {
-                "trade_date": "2026-08-31", "open": c - 1, "high": c + 2, "low": c - 2,
-                "close": c, "pct_chg": 0.1, "vol": 100, "amount": amt,
-            }
-        )
-    mock_api.get_index_kline = AsyncMock(return_value=rows)
-
-    recorded: list[tuple[object, object]] = []
-
-    def spy_conflict(phase, trend):
-        recorded.append((phase, trend))
-        return True, "趋势偏空但情绪周期偏热，信号背离"
-
-    monkeypatch.setattr(rhythm_engine_mod, "detect_conflict", spy_conflict)
-
-    payload = await worker_mod._compose_after_close("2026-08-28")
-    card = payload["rhythm_card"]
-    # 场景真实性：C1 展示相位已被技术佐证拉到 ebb（否则隔离断言无意义）
-    assert card["phase"] == "ebb"
-    # 隔离接线：detect_conflict 输入是 tech=None 的原始 phase（warm_up），非展示 ebb
-    assert recorded == [("warm_up", -2.0)]
-    assert card["conflict"] is True
-    assert card["conflict_detail"] == "趋势偏空但情绪周期偏热，信号背离"
+    """C2：conflict 检测器尚未接线，断言未接线的真实行为（恒定 False、无 detail）。"""
+    # conflict 检测器尚未接线（spec §1.2 #11 / §7 S6）：卡片 conflict 恒 False，
+    # 且不产出 conflict_detail。此处断言「未接线的真实行为」，不得断言未实现字段。
+    with (
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        card, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
+    out = wm_build(card, type("W", (), {"events": [], "source_missing": False})(), [])
+    assert out["conflict"] is False
+    assert "conflict_detail" not in out
 
 
 @pytest.mark.asyncio
@@ -510,3 +454,52 @@ async def test_after_close_dense_band_feeds_branch_range(monkeypatch: pytest.Mon
     assert branches
     neutral = next(b for b in branches if b["conclusion"]["direction"] == "neutral")
     assert neutral["conclusion"]["range"] == "3900.00-4010.00"
+
+
+@pytest.mark.asyncio
+async def test_morning_inherits_after_close_main_level(
+    temp_sentiment: Path, mock_api: AsyncMock,
+) -> None:
+    # 基准卡存在且 stage=ice
+    mock_api.get_rhythm_report = AsyncMock(return_value={
+        "content": {"evidence": {"stage": "ice", "stage_reason": "宽度收缩"},
+                    "basis_date": "2026-08-28"}
+    })
+    with (
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        out = await run(
+            {"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-28"}
+        )
+    content = json.loads(out["final_response"])
+    assert content["evidence"]["stage"] == "ice"
+    assert content["rhythm_card"]["level"] == "ice"
+    assert content["rhythm_card"]["score"] == 0
+    assert "沿用收盘基准" in content["evidence"]["stage_reason"]
+    # G9：基准卡必须按 (运行日, after_close) 精确读取一次
+    mock_api.get_rhythm_report.assert_awaited_once_with("2026-08-28", "after_close")
+
+
+@pytest.mark.asyncio
+async def test_degraded_model_not_polluting_evidence(
+    temp_sentiment: Path, mock_api: AsyncMock, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # synthesis 恒失败 → 断言降级标记不写入 evidence/rhythm_card 的 data_missing
+    caplog.set_level(logging.WARNING, logger="aistock_agent.agents.workers.rhythm_master")
+    monkey_event = type("W", (), {"events": [], "high_events": [], "source_missing": False})()
+    from unittest.mock import patch
+
+    import aistock_agent.agents.workers.rhythm_master as wm
+
+    with patch.object(wm, "load_event_window", AsyncMock(return_value=monkey_event)), \
+         patch.object(wm, "run_synthesis", AsyncMock(return_value=None)), \
+         patch.object(wm, "validate_synthesis", return_value=False):
+        out = await run({"trigger_source": "scheduler", "refresh_slot": "after_close",
+                         "report_date": "2026-08-28"})
+    content = json.loads(out["final_response"])
+    assert content["synthesis_available"] is False
+    assert "研研判暂不可用" not in content["evidence"]["data_missing"]
+    assert "研研判暂不可用" not in content["rhythm_card"]["data_missing"]
+    assert "degraded_reasons" not in content
+    assert any("rhythm_master.degraded" in r.getMessage() for r in caplog.records)

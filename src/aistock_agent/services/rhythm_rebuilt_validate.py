@@ -36,3 +36,24 @@ def validate_synthesis(synthesis: RhythmSynthesis, evidence: RhythmEvidence) -> 
         if outlook.if_confirmed_direction not in _VALID_DIRECTION:
             return False
     return True
+
+
+def prune_invalid(synthesis: RhythmSynthesis) -> RhythmSynthesis:
+    """按元素剔除非法项（P1-2：避免「一条非法→整段作废」）。
+
+    复用 validate_synthesis 的子规则：mainline 需 confidence/direction 合法且
+    source+data_date 非空；launch_outlook 需 confidence/if_confirmed_direction 合法。
+    """
+    mainline = [
+        m for m in synthesis.mainline
+        if m.confidence in _VALID_CONFIDENCE
+        and m.direction in _VALID_DIRECTION
+        and _grounded(m.source, m.data_date)
+    ]
+    outlook = [
+        o for o in synthesis.launch_outlook
+        if o.confidence in _VALID_CONFIDENCE
+        and o.if_confirmed_direction in _VALID_DIRECTION
+    ]
+    return RhythmSynthesis(mainline=mainline, launch_outlook=outlook,
+                           narrative=synthesis.narrative)

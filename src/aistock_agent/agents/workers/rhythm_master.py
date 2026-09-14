@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date as date_cls
-from typing import Any
+from typing import Any, cast, get_args
 
 from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
@@ -48,6 +48,52 @@ def _normalize_ymd(value: object) -> str | None:
         return None
     text = str(value).replace("-", "").strip()
     return text or None
+
+
+def _event_confirm(events: list[dict[str, Any]]) -> bool:
+    """事件确认（G3）：与 event_anchors/event_branches 同源，仅认 high 级事件。
+
+    result ∈ {超预期, 不及预期} 才算「已确认方向」；medium/low 事件不得抬 certainty
+    （否则出现「有确认、无锚点」的矛盾卡）。
+    """
+    return any(
+        e.get("importance") == "high" and e.get("result") in {"超预期", "不及预期"}
+        for e in events
+    )
+
+
+def _inherit_basis_stage(
+    slot: str, basis_response: object
+) -> tuple[str | None, str] | None:
+    """morning/midday 主档位沿用最近 after_close 基准（对齐 AGENTS.md 节奏大师三时点契约）。
+
+    仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
+    stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
+    G2：消灭「同日日历格 ice / 详情页 low」的自相矛盾。
+
+    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，`get_rhythm_report`
+    返回的业务对象把 `content` 放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+    """
+    if slot not in {"morning", "midday"}:
+        return None
+    if not isinstance(basis_response, dict):
+        return None
+    content = basis_response.get("content")
+    if not isinstance(content, dict):
+        return None
+    evidence = content.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    stage = evidence.get("stage")
+    if not isinstance(stage, str) or not stage:
+        return None
+    # 越界 stage 必须在此拦截：该值会流入 RhythmEvidence.stage（Stage|None 的
+    # Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新
+    if stage not in get_args(Stage):
+        return None
+    basis_date = content.get("basis_date")
+    reason = str(evidence.get("stage_reason") or "")
+    return stage, f"沿用收盘基准（{basis_date or '—'}）：{reason}"
 
 
 def _amount_yi(raw: float | None) -> float:
@@ -110,32 +156,42 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 
 
 async def _compose_card(
-    basis_date: str, slot: str
+    run_date: str, slot: str
 ) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
     """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
+
+    `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
+    对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
     win 为当前窗口 EventWindow（事件分支/锚点来源）。
     """
     target_date = (
-        add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
+        add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
         if slot == "after_close"
-        else basis_date
+        else run_date
     )
-    basis_ymd = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
+    basis_inherit_note: str | None = None
+    run_ymd = date_cls.fromisoformat(run_date).strftime("%Y%m%d")
     kline = (
-        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
+        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=run_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
     last_trade_date = _normalize_ymd(rows[-1].get("trade_date")) if rows else None
+    # 证据日 = K 线末日（对外 basis_date 语义，P1-6/G9）；无 K 线时退回运行日。
+    evidence_date = (
+        f"{last_trade_date[0:4]}-{last_trade_date[4:6]}-{last_trade_date[6:8]}"
+        if last_trade_date
+        else run_date
+    )
     # P0-2/G4 分槽门禁：after_close 的 basis 必须是"当日 K 线到位"的交易日；
     # morning/midday 的 basis 是运行日（盘中当日 bar 天然未出），不设该门禁。
     basis_gate = slot == "after_close" and (
-        last_trade_date is None or last_trade_date != basis_ymd
+        last_trade_date is None or last_trade_date != run_ymd
     )
     kline_short = len(rows) < MIN_KLINE_ROWS
     if kline_short:
-        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
+        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), run_date)
     closes = [float(r["close"]) for r in rows[-65:]]
     # Tushare index_daily amount 千元 → 亿元（engine 单位契约；2026-09-05 核实修复：
     # Node /internal/index/:code/kline 此前丢弃 vol/amount，恒 null → 量能伪分支）
@@ -148,9 +204,17 @@ async def _compose_card(
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
 
     breadth = None
-    snap = await node_api.get_last_close_snapshot()
-    if isinstance(snap, dict):
-        breadth = snap.get("breadth")
+    snapshot_missing = False
+    # G1：宽度证据必须与 K 线证据日同源（此前 get_last_close_snapshot() 取
+    # 「严格早于今天」的最近交易日 → after_close(周五) 实际取周四宽度）。
+    if last_trade_date is None:
+        snapshot_missing = True
+    else:
+        snap = await node_api.get_close_snapshot(last_trade_date)
+        if isinstance(snap, dict):
+            breadth = snap.get("breadth")
+        else:
+            snapshot_missing = True
 
     if kline_short:
         stage: Stage | None = None
@@ -165,7 +229,15 @@ async def _compose_card(
             fg=fg if isinstance(fg, int | float) else None,
             prev_phase=None,
         )
-    event_confirm = any(e.get("result") in {"超预期", "不及预期"} for e in win.events)
+    # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
+    if slot in {"morning", "midday"} and stage is not None:
+        basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
+        inherited = _inherit_basis_stage(slot, basis_resp)
+        if inherited is not None:
+            stage, stage_reason = cast("tuple[Stage | None, str]", inherited)
+        elif basis_resp is None:
+            basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
+    event_confirm = _event_confirm(win.events)
     volume_direction = _volume_confirm(amounts, stage)
     cert, cert_reason = ev.detect_certainty(
         event_confirm=event_confirm, volume_direction=volume_direction,
@@ -179,6 +251,10 @@ async def _compose_card(
         missing.append("指数K线不足")
     if basis_gate:
         missing.append("基准日无当日K线（非交易日或数据未就绪）")
+    if snapshot_missing:
+        missing.append("宽度快照缺失（证据日无收盘快照）")
+    if basis_inherit_note:
+        missing.append(basis_inherit_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
@@ -187,7 +263,7 @@ async def _compose_card(
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
     return (
         MasterRhythmCard(
-            basis_date=basis_date, target_date=target_date, refresh_slot=slot,
+            basis_date=evidence_date, target_date=target_date, refresh_slot=slot,
             evidence=evidence, synthesis=synthesis if synthesis_ok else None,
             synthesis_available=synthesis_ok,
         ),
@@ -203,7 +279,9 @@ def _build_rhythm_card(
 
     - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
     - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
-    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）。
+    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）；
+    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底），
+      数据源未接入，对齐 spec §2.2。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
@@ -230,6 +308,7 @@ def _build_rhythm_card(
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
         branches = []
     missing.extend(m for m in data_missing_container if m not in missing)
+    missing.append("温度序列/事件窗口数据源未接入（S4/S5）")
     return {
         "score": score,
         "level": level,
@@ -238,6 +317,7 @@ def _build_rhythm_card(
         },
         "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
+        # 数据源未接入（S4/S5）：显式空 + 留痕，不做「恒空但仍渲染」的静默假象
         "temperature_series": [],
         "event_window": [],
         "event_source_missing": win.source_missing,
@@ -258,7 +338,10 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         basis = str(state.get("report_date") or shanghai_today().isoformat())
         card, rows, win = await _compose_card(basis, slot)
         if not card.synthesis_available:
-            card.evidence.data_missing.append(DEGRADED_MODEL)
+            logger.warning(
+                "rhythm_master.degraded reason=%s slot=%s target_date=%s",
+                DEGRADED_MODEL, card.refresh_slot, card.target_date,
+            )
         content = {
             "schema_version": "1.0",
             "target_date": card.target_date,

@@ -100,6 +100,8 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         "NodeApiClient.get_analysis_report",
         "NodeApiClient.get_quick_snapshot",
         "NodeApiClient.get_last_close_snapshot",
+        # 经 get 间接隔离（get → node_read 返回 None）
+        "NodeApiClient.get_close_snapshot",
         # 经 get 间接隔离（get → node_read 返回 None）：get_user_profile 内部
         # `await self.get(f"/internal/user-profile/{user_id}")`（data_client.py:745），
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(data, dict)` 走

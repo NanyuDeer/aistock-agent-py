@@ -21,7 +21,14 @@ async def test_after_close_produces_master_card():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_index_kline",
         AsyncMock(
             return_value=[
-                {"close": 120, "high": 121, "low": 119, "amount": 5000} for _ in range(65)
+                {
+                    "close": 120,
+                    "high": 121,
+                    "low": 119,
+                    "amount": 5000,
+                    "trade_date": "20260903",
+                }
+                for _ in range(65)
             ]
         ),
     ), patch(
@@ -37,7 +44,7 @@ async def test_after_close_produces_master_card():
         "aistock_agent.agents.workers.rhythm_master._load_sentiment_series",
         return_value=([], [35, 40, 45, 50, 55], 0, None),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.node_api.get_last_close_snapshot",
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(
             return_value={
                 "breadth": {"advance_count": 3800, "decline_count": 900, "total_count": 5000}

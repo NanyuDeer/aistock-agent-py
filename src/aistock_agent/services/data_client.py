@@ -428,7 +428,9 @@ class NodeApiClient:
     ) -> dict[str, object] | None:
         """GET /internal/analysis-reports/rhythm_master/{date}/{slot}
 
-        morning/midday 读 16:05 基准（D13）。
+        调用方：① `rhythm_verification.run_once`（命中率验证）；②
+        `rhythm_master._compose_card`（morning/midday 读 `slot="after_close"`
+        的基准卡以沿用主档位，2026-09-14 P0-2）。
         """
         result = await self._request(
             f"/internal/analysis-reports/rhythm_master/{target_date}/{refresh_slot}"
@@ -872,6 +874,26 @@ class NodeApiClient:
             dict（status='complete'），或 None（数据不可用/服务异常）。
         """
         return await self.get("/internal/market/last-close-snapshot")
+
+    async def get_close_snapshot(
+        self, snapshot_date: str
+    ) -> dict[str, object] | None:
+        """拉取**指定交易日**的收盘快照（G1：证据日同源）。
+
+        snapshot_date 为 YYYYMMDD（Tushare K 线 trade_date 格式），内部转
+        YYYY-MM-DD 拼 query。Node 端点 GET /internal/market/close-snapshot?date=
+        对已收盘交易日返回 status='complete'；未收盘/非交易日返回 409 语义
+        （self.get 归一为 None）。
+
+        Returns:
+            dict（含 breadth），或 None（未就绪/非交易日/服务异常）。
+        """
+        ymd = str(snapshot_date).replace("-", "")
+        if len(ymd) != 8 or not ymd.isdigit():
+            logger.warning("close_snapshot_invalid_date", snapshot_date=snapshot_date)
+            return None
+        iso = f"{ymd[0:4]}-{ymd[4:6]}-{ymd[6:8]}"
+        return await self.get(f"/internal/market/close-snapshot?date={iso}")
 
     async def get_review_analysis_report(
         self,
