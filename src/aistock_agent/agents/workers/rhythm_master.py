@@ -156,33 +156,42 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 
 
 async def _compose_card(
-    basis_date: str, slot: str
+    run_date: str, slot: str
 ) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
     """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
+
+    `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
+    对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
     win 为当前窗口 EventWindow（事件分支/锚点来源）。
     """
     target_date = (
-        add_trading_days(date_cls.fromisoformat(basis_date), 1).isoformat()
+        add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
         if slot == "after_close"
-        else basis_date
+        else run_date
     )
     basis_inherit_note: str | None = None
-    basis_ymd = date_cls.fromisoformat(basis_date).strftime("%Y%m%d")
+    run_ymd = date_cls.fromisoformat(run_date).strftime("%Y%m%d")
     kline = (
-        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=basis_ymd) or []
+        await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=run_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
     last_trade_date = _normalize_ymd(rows[-1].get("trade_date")) if rows else None
+    # 证据日 = K 线末日（对外 basis_date 语义，P1-6/G9）；无 K 线时退回运行日。
+    evidence_date = (
+        f"{last_trade_date[0:4]}-{last_trade_date[4:6]}-{last_trade_date[6:8]}"
+        if last_trade_date
+        else run_date
+    )
     # P0-2/G4 分槽门禁：after_close 的 basis 必须是"当日 K 线到位"的交易日；
     # morning/midday 的 basis 是运行日（盘中当日 bar 天然未出），不设该门禁。
     basis_gate = slot == "after_close" and (
-        last_trade_date is None or last_trade_date != basis_ymd
+        last_trade_date is None or last_trade_date != run_ymd
     )
     kline_short = len(rows) < MIN_KLINE_ROWS
     if kline_short:
-        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), basis_date)
+        logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), run_date)
     closes = [float(r["close"]) for r in rows[-65:]]
     # Tushare index_daily amount 千元 → 亿元（engine 单位契约；2026-09-05 核实修复：
     # Node /internal/index/:code/kline 此前丢弃 vol/amount，恒 null → 量能伪分支）
@@ -254,7 +263,7 @@ async def _compose_card(
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
     return (
         MasterRhythmCard(
-            basis_date=basis_date, target_date=target_date, refresh_slot=slot,
+            basis_date=evidence_date, target_date=target_date, refresh_slot=slot,
             evidence=evidence, synthesis=synthesis if synthesis_ok else None,
             synthesis_available=synthesis_ok,
         ),

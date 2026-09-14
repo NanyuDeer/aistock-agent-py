@@ -268,3 +268,32 @@ def test_inherit_basis_stage_only_for_intraday_slots():
     # 基准缺失 / stage 为空 → None
     assert _inherit_basis_stage("morning", None) is None
     assert _inherit_basis_stage("morning", {"content": {"evidence": {"stage": None}}}) is None
+
+
+@pytest.mark.asyncio
+async def test_card_basis_date_is_evidence_date():
+    from aistock_agent.agents.workers import rhythm_master as worker_mod
+    from aistock_agent.agents.workers.rhythm_master import _compose_card
+
+    kline = _mock_kline_dated(200, "20260911")
+    with (
+        patch.object(worker_mod.node_api, "get_index_kline", AsyncMock(return_value=kline)),
+        patch.object(
+            worker_mod.node_api, "get_close_snapshot",
+            AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 60}}),
+        ),
+        patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
+        patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
+        patch.object(
+            worker_mod, "load_event_window",
+            AsyncMock(return_value=type("W", (), {
+                "events": [], "high_events": [], "source_missing": False,
+            })()),
+        ),
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        card, _, _ = await _compose_card("2026-09-14", "morning")
+
+    assert card.basis_date == "2026-09-11"   # 证据日（K 线末日）
+    assert card.target_date == "2026-09-14"  # 运行日
