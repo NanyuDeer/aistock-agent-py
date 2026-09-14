@@ -270,7 +270,9 @@ def _build_rhythm_card(
 
     - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
     - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
-    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）。
+    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）；
+    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底），
+      数据源未接入，对齐 spec §2.2。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
@@ -297,6 +299,7 @@ def _build_rhythm_card(
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
         branches = []
     missing.extend(m for m in data_missing_container if m not in missing)
+    missing.append("温度序列/事件窗口数据源未接入（S4/S5）")
     return {
         "score": score,
         "level": level,
@@ -305,6 +308,7 @@ def _build_rhythm_card(
         },
         "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
+        # 数据源未接入（S4/S5）：显式空 + 留痕，不做「恒空但仍渲染」的静默假象
         "temperature_series": [],
         "event_window": [],
         "event_source_missing": win.source_missing,

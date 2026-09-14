@@ -539,6 +539,9 @@ def apply_event_result_met(
     copy-on-write：不改写传入 branches（避免污染基准报告的 event 分支，G18）。
     未公布：全部保持 met=None、note="结果待公布..."。
     公布后：命中 result 的分支 met=True（点亮），其余同事件分支 met=False（置灰）。
+
+    ⚠️ 未接线（2026-09-14 核查）：当前 `src/` 无调用点，卡片 `branches[].met`
+    恒为 `None`（前端点亮/置灰分支未生效）。若需生效，见 spec §7 单独立项 S1/§5 D6。
     """
     out: list[dict[str, Any]] = []
     for br in branches:
