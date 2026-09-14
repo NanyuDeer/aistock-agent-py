@@ -91,5 +91,30 @@ def test_dead_fields_are_documented_not_silently_empty():
     assert any("事件窗口" in m or "温度序列" in m for m in out["data_missing"])
 
 
+def test_next_event_anchor_counts_from_target_date_not_basis_date():
+    """锚点「距今天数」以**目标交易日**为原点（该卡描述的那一天）。
+
+    `basis_date` 自 2026-09-14 起表示证据日（K 线末日）；若仍用它作原点，
+    盘前 / 午间档（证据日 = 上一交易日）的展示值会相对当天偏大。本用例锁定原点。
+    """
+    rows = _rows(60, high=3010.0, low=2990.0)
+    for r in rows:
+        r["trade_date"] = "20260911"  # 证据日（K 线末日）
+    win = _win()
+    win.events = [
+        {"date": "2026-09-16", "title": "FOMC 议息", "importance": "high", "source": "L3"}
+    ]
+    card = MasterRhythmCard(
+        basis_date="2026-09-11", target_date="2026-09-14",
+        refresh_slot="morning", evidence=RhythmEvidence(stage="ebb"),
+    )
+    out = _build_rhythm_card(card, win, rows)
+    anchor = out["next_event_anchor"]
+    assert anchor is not None
+    # 09-16 − 目标日 09-14 = 2 天；若误用证据日 09-11 则为 5 天
+    assert anchor["days_until"] == 2
+    assert anchor["note"] == "2 天后"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

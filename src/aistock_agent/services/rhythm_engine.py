@@ -578,12 +578,17 @@ def apply_event_result_met(
 
 
 def build_next_event_anchor(
-    events: list[dict[str, object]], basis_date: str
+    events: list[dict[str, object]], origin_date: str
 ) -> dict[str, object] | None:
     """下一重大事件锚点（design-debate P1，2026-09-02）。
 
     取窗口内首条 high 事件（顺序继承 app-api 事件日历下发顺序，
-    Python 侧不重排）；N = event_date 与 basis_date 自然日差。
+    Python 侧不重排）；N = event_date 与 origin_date 自然日差。
+
+    原点由调用方给出：节奏大师传**目标交易日**（该卡所描述的那一天，盘前/午间档
+    即当天、收盘基准档为次一交易日），使「距今天数」相对卡片描述的那一天。
+    注意卡片 `basis_date` 自 2026-09-14 起表示**证据日**（K 线末日），不可用作本处原点。
+
     无 high 事件返回 None（前端整块不渲染，对齐空串先例 §7.1）。
     日期解析失败跳过错该事件（G6 不抛异常纪律）。
     """
@@ -595,7 +600,7 @@ def build_next_event_anchor(
         if not event_date or not title:
             continue
         try:
-            days_until = (date.fromisoformat(event_date) - date.fromisoformat(basis_date)).days
+            days_until = (date.fromisoformat(event_date) - date.fromisoformat(origin_date)).days
         except ValueError:
             continue  # 日期格式异常：跳过错该事件，不抛异常穿透
         days_until = max(0, days_until)

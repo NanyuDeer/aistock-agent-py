@@ -321,7 +321,8 @@ def _build_rhythm_card(
         "temperature_series": [],
         "event_window": [],
         "event_source_missing": win.source_missing,
-        "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
+        "next_event_anchor": engine.build_next_event_anchor(win.events, card.target_date),
         # 暂无冲突检测器（Phase 4 态 ↔ Stage 5 态不同源，见 spec §2.2）：恒 False。
         # 前端 conflict 为必填 bool，不可置 null；接入检测器前保持此常量。
         "conflict": False,
