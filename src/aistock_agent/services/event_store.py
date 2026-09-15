@@ -31,7 +31,12 @@ _save_lock = asyncio.Lock()
 
 
 class EventRecord(TypedDict):
-    """统一事件模型（收敛 stock_trace StockSourceRecord 与 review SourceRecord）。"""
+    """统一事件模型（收敛 stock_trace StockSourceRecord 与 review SourceRecord）。
+
+    `event_id`（score_date-content_hash[:16]）语义为 **source_event_id**（来源身份，
+    spec §4.2）——不冒充 Event Entity 权威 id；权威 `app_event_id` 由 app-api 生成、
+    上层挂接后写入（缺省 None，本模型仅声明不生成）。
+    """
 
     event_id: str
     title: str
@@ -54,6 +59,10 @@ class EventRecord(TypedDict):
     event_scope: str
     event_scope_source: str
     event_scope_confidence: float
+    # 重大事件时间线（spec §4.2）：app-api 权威 event_id，由上层挂接写入（缺省 None）；
+    # 本模型既有 `event_id` 语义为 **source_event_id**（来源身份），不冒充 Event Entity 权威 id。
+    # TypedDict 可选键用 `str | None` 声明（未引入 typing_extensions），调用方一律 .get 消费。
+    app_event_id: str | None
 
 
 def event_content_hash(title: str, url: str) -> str:
@@ -164,6 +173,8 @@ def normalize_event(
         event_scope=detection["event_scope"],
         event_scope_source=detection["event_scope_source"],
         event_scope_confidence=detection["event_scope_confidence"],
+        # 来源侧无 app-api 权威 id：缺省 None（由上层物化/透传链路挂接）
+        app_event_id=None,
     )
 
 
@@ -326,6 +337,10 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                     event_scope_source=str(ev.get("event_scope_source", "unknown")),
                     event_scope_confidence=_safe_float(
                         ev.get("event_scope_confidence"), 0.0
+                    ),
+                    # 重大事件时间线（spec §4.2）：存储有值保留；历史数据无该键 → None
+                    app_event_id=(
+                        str(ev["app_event_id"]) if ev.get("app_event_id") else None
                     ),
                 )
             )
