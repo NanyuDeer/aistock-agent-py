@@ -105,3 +105,62 @@ async def test_event_entity_e2e_degradation_contract():
         {"title": "", "source_type": "news", "event_start_time": "2026-09-23"}
     )
     assert resp is None
+
+
+@pytest.mark.skipif(not _E2E, reason=_SKIP_REASON)
+@pytest.mark.asyncio
+async def test_event_entity_e2e_agent_materialize_path(monkeypatch):
+    """agent-py `_materialize_event_entity` 对真实 app-api 全链路（P0.5 收口）：
+
+    有明确绝对日期即物化（未来 scheduled / 已发生 occurred，spec §5B.3 第 4 条）；
+    无日期 → None（publish_time_fallback 语义，不 SUP 注入）。
+    """
+    from aistock_agent.config import settings
+    from aistock_agent.services.event_scrape_sources import _materialize_event_entity
+    from aistock_agent.services.event_store import EventRecord
+
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    today = shanghai_today().isoformat()
+
+    def _rec(title: str, score_date: str = today) -> EventRecord:
+        return EventRecord(
+            event_id=f"{score_date}-e2eabcdef12345678",
+            title=title,
+            summary="",
+            url="",
+            impact_score=5,
+            direction="unknown",
+            involved_keywords=[],
+            source="calendar",
+            source_level="A",
+            content_hash="e2eabcdef12345678",
+            scrape_at=f"{score_date} 08:00:00",
+            score_date=score_date,
+            payload={},
+            symbol="",
+            stock_name="",
+            industry="",
+            event_scope="UNKNOWN",
+            event_scope_source="rule",
+            event_scope_confidence=0.0,
+            app_event_id=None,
+            app_event_status=None,
+        )
+
+    future = _future_date()
+    info_future = await _materialize_event_entity(
+        _rec(f"E2E 未来发布会 {future}"), f"{today}T09:00:00+08:00"
+    )
+    assert info_future is not None and info_future["event_id"]
+    assert info_future["event_status"] == "scheduled"
+
+    past = _past_date()
+    info_past = await _materialize_event_entity(
+        _rec(f"E2E 已发生 {past}"), f"{today}T09:00:00+08:00"
+    )
+    assert info_past is not None and info_past["event_status"] == "occurred"
+
+    info_none = await _materialize_event_entity(
+        _rec("E2E 某公司回应关税影响"), f"{today}T09:00:00+08:00"
+    )
+    assert info_none is None
