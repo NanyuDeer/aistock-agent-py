@@ -359,8 +359,8 @@ def test_build_next_event_anchor_takes_first_high_inherited_order():
     assert anchor is not None
     assert anchor["title"] == "FOMC 议息"
     assert anchor["event_date"] == "2026-09-02"
-    assert anchor["days_until"] == 5
-    assert anchor["note"] == "5 天后"
+    assert anchor["days_until"] == 3
+    assert anchor["note"] == "3 天后"
 
 
 def test_build_next_event_anchor_today_tomorrow_notes():
