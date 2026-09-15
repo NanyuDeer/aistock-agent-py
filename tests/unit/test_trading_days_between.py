@@ -1,7 +1,5 @@
 from datetime import date
 
-import pytest
-
 from aistock_agent.utils.date import trading_days_between
 
 

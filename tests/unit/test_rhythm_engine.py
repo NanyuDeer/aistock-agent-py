@@ -10,7 +10,6 @@ from aistock_agent.services.rhythm_engine import (
     compose_score,
     detect_phase,
     fear_greed_anchor,
-    level_from_score,
     map_bipolar,
     sentiment_coefficient,
     trend_anchor,

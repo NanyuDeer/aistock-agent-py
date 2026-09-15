@@ -24,7 +24,9 @@ HORIZON_TRADING_DAYS = 4
 # H3：必须逐字等于 app-api typeFromSource macro 正则词元，禁止各自维护
 MACRO_EVENT_TERMS: tuple[str, ...] = ("发布日程", "CPI", "PPI", "PMI", "社融", "FOMC", "议息")
 EVENT_TITLE_MAX_CHARS = 40
-_COMPANY_TOKENS: tuple[str, ...] = ("股份", "科技", "集团", "有限公司", "银行", "证券", "医药", "公司")
+_COMPANY_TOKENS: tuple[str, ...] = (
+    "股份", "科技", "集团", "有限公司", "银行", "证券", "医药", "公司",
+)
 
 
 def is_high_importance_event(title: str, source: str | None) -> bool:

@@ -51,8 +51,8 @@ def detect_trend_reversal(
     各自依次抬高 → confirmed=True。open 缺失的行剔除不参与（H5 fail-safe）。
     """
     rows = [
-        (c, o, h, l, a)
-        for c, o, h, l, a in zip(closes, opens, highs, lows, amounts)
+        (c, o, h, low_v, a)
+        for c, o, h, low_v, a in zip(closes, opens, highs, lows, amounts)
         if o is not None and c is not None
     ]
     if len(rows) < MIN_BARS_FOR_REVERSAL:
