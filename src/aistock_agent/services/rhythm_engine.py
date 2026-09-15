@@ -18,6 +18,16 @@ Level = Literal["ice", "low", "normal", "active", "euphoria"]
 
 DISCLAIMER = "本页内容为研究参考，不构成任何投资建议，据此操作风险自担。"
 
+# spec §5.2.1 T3 / §5.4.1 T4
+POSITION_LADDER: list[str] = [
+    "空仓观望", "轻仓~三成", "五成~六成", "七成~八成", "八成~满仓",
+]
+LADDER_MIN, LADDER_MAX = 0, 4
+EVENT_ADJ_PRE, EVENT_WATCH_D, EVENT_NEAR_D, EVENT_BRANCH_MAX_D = 1, 3, 2, 3
+VOL_UP_RATIO, VOL_DOWN_RATIO = 1.2, 0.8
+SWING_WINDOW, SWING_LEFT_RIGHT, SWING_MIN_DELTA, SWING_CONFIRM_BARS = 20, 2, 0.001, 2
+MIN_BARS_FOR_REVERSAL = SWING_WINDOW + SWING_CONFIRM_BARS  # 22
+
 # Tushare index_daily amount 单位=千元；engine/前端成交额分支按"亿元"计（1 亿 = 1e5 千元）。
 # 单点常量（G6）：任何千元→亿元换算一律引用本常量，禁止散落字面量 1e-5。
 QIAN_YUAN_TO_YI: float = 1e-5
@@ -481,15 +491,27 @@ EVENT_ANCHOR_THRESHOLD = {
 }
 
 
-def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """事件节点（§19.2/D10/D15）：枚举分档（预期差），公布前不预判方向（占位"结果待公布"）。
+def build_event_branch(event: dict[str, Any], origin_date: str | None = None) -> list[dict[str, Any]]:
+    """事件节点（spec §19.2/D10/D15 + 本 spec §5.4/G12）：枚举分档（预期差）。
 
-    只对 high 级事件生成 3 条互斥情景；公布后由 apply_event_result_met 按预期差落档触发。
-    返回 [] 表示非 high 事件（无事件分支）。
+    只对 high 级事件生成 3 条互斥情景；公布后由确定性 d 逻辑按预期差落档。
+
+    origin_date 提供时启用 d 约束：交易日差 d > EVENT_BRANCH_MAX_D 的事件不产分支
+    （避免「闸门说无影响 vs 分支说超预期加仓」的同卡矛盾，spec §5.5.2）。
+    返回 [] 表示非 high 事件（无事件分支）或 d 超限（同语义不产分支）。
     """
     if event.get("importance") != "high":
         return []
+    if origin_date is not None:
+        try:
+            d = trading_days_between(date.fromisoformat(origin_date),
+                                     date.fromisoformat(str(event.get("date") or "")))
+        except ValueError:
+            d = 0
+        if d is None or d > EVENT_BRANCH_MAX_D:
+            return []
     title = str(event.get("title", "关键事件"))
+    note_suffix = "（该情景为条件态，不改变主档位）"
     branches: list[dict[str, Any]] = []
     for value in EVENT_RESULT_ENUM:
         direction = EVENT_RESULT_DIRECTION[value]
@@ -513,7 +535,7 @@ def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
                     "direction": direction,
                     "range": "",
                     "validity": 5,
-                    "note": "结果待公布，公布后按预期差落档",
+                    "note": "结果待公布，公布后按预期差落档" + note_suffix,
                 },
                 "event_ref": {"event_date": str(event.get("date", "")), "title": title},
                 "met": None,
