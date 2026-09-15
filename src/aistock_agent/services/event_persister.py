@@ -54,6 +54,8 @@ async def persist_event_report(
             "event_id": event_id,
             "content": {
                 "eventId": event_id,
+                # 重大事件时间线（spec §4.3）：回写 app-api 权威 event_id，供前端/时间线关联
+                "appEventId": event_id,
                 "title": event_meta.get("title", ""),
                 "source": event_meta.get("source", ""),
                 "source_name": event_meta.get("source_name", ""),
