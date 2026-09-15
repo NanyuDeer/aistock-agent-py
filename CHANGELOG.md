@@ -2,6 +2,49 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-15 — 重大事件时间线 Event Entity 接入 + 收口
+
+**开发者**: 37588
+
+### 新增
+
+- **P0 event_id 透传**：`EventRecord` 增可选 `app_event_id`/`app_event_status`（既有 `event_id` 降级为 source_event_id 语义）；`event_scraper._trigger_conduction` 条件透传（缺省不落键，major_events 形状逐字节不变）；`event_conduction.run_single_event_conduction` 优先消费 app-api 权威 `event_id` 作传导隔离键（缺省回退 `evt_md5` 逐字节不变）并向 state 注入 `event_id/event_status`；`event_persister` content 加性回写 `appEventId/appEventStatus`。
+- **P0.5 事件时间抽取 + 物化**：`_extract_event_start_time` 确定性抽取（只认明确绝对日期/区间，禁 LLM 猜日期）；`_materialize_event_entity` **有明确绝对日期即物化**（未来 scheduled / 已发生 occurred 都 POST，time_confidence=0.9=抽取方法确定性），挂接 `scrape_full_daily`/`scrape_intraday` 的 added_events 并原地回填 app id/status（时序在传导前）。
+- **未来事件守卫（spec §6.2 红线）**：`app_event_status∈{scheduled,upcoming}` → 跳过已发生传导（`event_conduction_phase="pre"` + `event_conduction_skipped=True`；Pre 双套 P2 未落地）。
+- 开关 `event_entity_enabled`（env `EVENT_ENTITY_ENABLED`，默认 False——翻转前行为逐字节不变）。
+
+### 文档
+
+- 本地真实 HTTP 联调通过（app-api 端点已落地：信封 code:200 / 幂等重放 / 读时重算 status / 降级契约，探针 `tests/integration/test_event_entity_local_e2e.py` 默认 skip 生产零影响）；跳过日期 → None 不 SUP 注入；物化失败 warning 不阻断主链路。
+- `EVENT_ENTITY_ENABLED` 生产翻 True 前需组长 merge app-api + 部署。
+
+### 状态
+
+- 本地验收通过：收口定向测试 93 passed + ruff 0；app-api 端点相关验证见 app-api CHANGELOG 2026-09-15。
+
+---
+
+## \[changer\] 2026-09-15 — 节奏大师「大盘主线 / 主升浪仓位节奏」（spec 2026-09-14-rhythm-mainline-position-rhythm）
+
+**开发者**: 37588
+
+### 新增
+
+- `services/mainline_engine.py`（主线判定纯函数 + `load_mainline_candidates()` + 破位判据，阈值全绝对锚定 H1）；`services/trend_reversal.py`（放量阴线后摆动点抬高的趋势反转确定性判定）；`data/mainline_candidates.json`（AI 科技组优先）。
+- `services/rhythm_engine.py`：`POSITION_LADDER` 五档仓位阶梯 + `derive_position_text`（指数趋势定 base → 硬闸门 → 主线 strong/none 调整 → 事件档位 → clamp）+ `build_event_branch` 的 d 约束（>3 交易日不产分支）。
+- `services/event_calendar.py` 读取端升格 L3 宏观事件为 high（关键词 ⊆ app-api macro 正则词元 H3）；worker 接线 position_band.text（主线驱动）/ event_high_hint / phase_evidence.technical 确定性生产者 + 盘中档剔除未完成 bar；synthesis 主线段受确定性事实约束（不得自创主线）。
+- 开关 `rhythm_mainline_enabled`（env `RHYTHM_MAINLINE_ENABLED`，默认 True）。
+
+### 修复
+
+- `next_event_anchor` 计数口径改**交易日差**（D7/G4）；`_canonicalize_mainline_with_evidence` 约束 LLM（data_date 必须等于证据日）；`trading_days_between` 新原语（T5.5）；残枝死代码清理（spec 8/D3/D6）。
+
+### 文档
+
+- 前端（app-frontend）0 生产代码改动（仅 rhythm 模块 AGENTS.md 文档口径更新）。
+
+---
+
 ## \[changer\] 2026-09-14 — 节奏大师「逻辑准确性」修复
 
 **开发者**: 37588
