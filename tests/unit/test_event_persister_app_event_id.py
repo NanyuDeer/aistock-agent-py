@@ -48,3 +48,20 @@ async def test_persist_content_keeps_event_id_unchanged():
     content = _posted_body(api)["content"]
     assert content["eventId"] == "EVT-0001"
     assert content["appEventId"] == "EVT-0001"
+
+
+@pytest.mark.asyncio
+async def test_persist_content_includes_app_event_status():
+    """event_meta.event_status → content.appEventStatus 加性回写（spec §6.2 关联）。"""
+    with patch("aistock_agent.services.event_persister.node_api") as api:
+        api.post = AsyncMock(return_value={"id": 1})
+        await persist_event_report(
+            event_id="EVT-0001",
+            event_meta={"title": "美联储议息", "event_status": "scheduled"},
+            event_text="text",
+            analysis_reports={},
+        )
+    content = _posted_body(api)["content"]
+    assert content["eventId"] == "EVT-0001"
+    assert content["appEventId"] == "EVT-0001"
+    assert content["appEventStatus"] == "scheduled"

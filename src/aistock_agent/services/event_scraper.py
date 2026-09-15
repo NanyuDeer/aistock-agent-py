@@ -131,6 +131,10 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
             app_event_id = str(ev.get("app_event_id") or "").strip()
             if app_event_id:
                 item["app_event_id"] = app_event_id
+            # spec §6.2：条件透传 event_status（物化回填），驱动传导 pre/post 守卫
+            app_event_status = str(ev.get("app_event_status") or "").strip()
+            if app_event_status:
+                item["app_event_status"] = app_event_status
         for attempt in (1, 2):
             try:
                 result = await run_event_analysis_pipeline(major_events)
@@ -183,12 +187,18 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     major = [ev for ev in events if event_store.is_major_event(ev)]
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
     result = await event_store.save_event_scrape(major, score_date)
-    # 重大事件时间线（spec §5A.3 P0.5）：新增事件未来物化到 /internal/event-entities
-    # （开关内短路，失败不阻断抓取/传导主链路）
+    # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：新增事件物化到 /internal/event-entities
+    # （开关内短路，失败不阻断抓取/传导主链路）→ 回填 app_event_id/app_event_status，
+    # 时序在 _spawn_conduction 之前：物化产出的权威 id 进入传导 payload（A1a 裁决）。
     if settings.event_entity_enabled:
         _now_iso = shanghai_now().isoformat()
         for _ev in result.get("added_events") or []:
-            await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
+            _info = await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
+            if _info:
+                _ev["app_event_id"] = _info["event_id"]
+                _ev["app_event_status"] = _info["event_status"]
+            else:
+                _ev["event_entity_unfilled"] = True  # 未物化/失败 → 守卫兜底走旧路径
     # 落库成功且有新增重大事件 → 触发事件传导（Task 5：传导统一由中台负责，
     # 晨报/scheduler 不再直接触发）。I3：守卫用 added（本批真正新增数）而非
     # persisted（合并后库中总数）——07:30 全量后每小时全去重批次 persisted>0
@@ -220,11 +230,16 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
         events = await event_scoring_llm.score_events_llm(events, score_date=score_date)
     logger.info("event_scrape_intraday", total=len(events))
     result = await event_store.save_event_scrape(events, score_date)
-    # 重大事件时间线（spec §5A.3 P0.5）：盘中新增事件未来物化（开关内，失败不阻断）
+    # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：盘中新增事件物化 → 回填 app id/status
     if settings.event_entity_enabled:
         _now_iso = shanghai_now().isoformat()
         for _ev in result.get("added_events") or []:
-            await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
+            _info = await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
+            if _info:
+                _ev["app_event_id"] = _info["event_id"]
+                _ev["app_event_status"] = _info["event_status"]
+            else:
+                _ev["event_entity_unfilled"] = True
     # 同上（I3）：守卫用 added>0 且只传新增子集（全去重批次不重复触发传导）
     if events and result.get("added", 0) > 0:
         _spawn_conduction(result.get("added_events") or [])

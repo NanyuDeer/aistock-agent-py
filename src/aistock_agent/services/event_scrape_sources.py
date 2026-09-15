@@ -479,27 +479,33 @@ def _extract_event_start_time(title: str, content: str, ref_date: str) -> str | 
 
 async def _materialize_event_entity(
     event: EventRecord, now_iso: str
-) -> None:
-    """事件物化到 /internal/event-entities（spec §5A.3 P0.5）。
+) -> dict[str, str] | None:
+    """事件物化到 /internal/event-entities（spec §5A.3/§5B.3 P0.5 收口）。
 
-    仅当 `settings.event_entity_enabled` 且抽出 `event_start_time > now`（未来事件）
-    才 POST；端点未落地/失败 → warning 跳过，绝不阻断抓取/传导主链路。
-    已发生事件物化 + time_confidence 判定属 P0.5 增量，留收口清单对账。
+    「有明确绝对日期即物化」——未来/已发生都落（spec §5B.3 第 4 条，时间三分离：
+    `event_start_time` 只认抽取的绝对日期）；抽不出日期（publish_time_fallback
+    语义，spec §5B.3 第 3 条）→ 返回 None，不 SUP 注入。
+    `time_confidence=0.9` = 抽取方法确定性（正则命中绝对日期；措辞分档归 P1，
+    design-debate A5 裁决，绝不 LLM 猜日期）。
+    端点未落地/失败 → warning、返回 None，绝不阻断抓取/传导主链路。
+    返回 `{"event_id", "event_status"}` 供外层物化循环回填 EventRecord（A1a 裁决：
+    本函数只物化不写回；None → 外层置未回填标记，守卫兜底走旧路径）。
     """
     if not settings.event_entity_enabled:
-        return
+        return None
     event_start = _extract_event_start_time(
         str(event.get("title", "")),
         str(event.get("summary", "")),
         str(event.get("score_date", now_iso[:10])),
     )
-    if not event_start or event_start <= now_iso[:10]:
-        return  # 无明确日期或非未来 → 本阶段不物化（已发生物化对账留收口清单）
+    if not event_start:
+        return None
     body: dict[str, object] = {
         "title": str(event.get("title", "")),
         "source_type": "news",
         "event_start_time": f"{event_start}T00:00:00+08:00",
         "time_source": "news_extraction",
+        "time_confidence": 0.9,
     }
     try:
         resp = await node_api.post_event_entity(body)
@@ -509,7 +515,12 @@ async def _materialize_event_entity(
                 event_id=resp["event_id"],
                 title=body["title"],
             )
-        else:
-            logger.warning("event_entity_materialize_skipped", title=body["title"])
+            return {
+                "event_id": str(resp["event_id"]),
+                "event_status": str(resp.get("event_status") or ""),
+            }
+        logger.warning("event_entity_materialize_skipped", title=body["title"])
+        return None
     except Exception:  # noqa: BLE001
         logger.warning("event_entity_materialize_failed", exc_info=True)
+        return None

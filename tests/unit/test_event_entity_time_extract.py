@@ -124,6 +124,41 @@ async def test_materialize_skips_non_future_or_undated_event(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_materialize_occurred_event_posts(monkeypatch):
+    """已发生事件（有明确绝对日期）同样物化（spec §5B.3 第 4 条），信度 0.9。"""
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.node_api.post_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001", "event_status": "occurred"}),
+    ) as m:
+        result = await _materialize_event_entity(
+            _rec("9/1 已发生的发布会", score_date="2026-09-01"),
+            "2026-09-15T09:00:00+08:00",
+        )
+    body = m.call_args.args[0]
+    assert body["event_start_time"] == "2026-09-01T00:00:00+08:00"
+    assert body["time_confidence"] == 0.9
+    # 返回值含 event_id/event_status（供外层回填）
+    assert result == {"event_id": "EVT-0001", "event_status": "occurred"}
+
+
+@pytest.mark.asyncio
+async def test_materialize_returns_none_without_date(monkeypatch):
+    """抽不出日期（publish_time_fallback 语义）→ 不物化、返回 None（不 SUP 注入）。"""
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.node_api.post_event_entity",
+        new=AsyncMock(),
+    ) as m:
+        result = await _materialize_event_entity(
+            _rec("某公司回应关税影响", "公司股价大跌"),
+            "2026-09-15T09:00:00+08:00",
+        )
+    m.assert_not_called()
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_materialize_failure_does_not_raise(monkeypatch):
     """端点未落地/失败 → warning 跳过，不抛异常（降级纪律）。"""
     monkeypatch.setattr(settings, "event_entity_enabled", True)

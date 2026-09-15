@@ -63,6 +63,9 @@ class EventRecord(TypedDict):
     # 本模型既有 `event_id` 语义为 **source_event_id**（来源身份），不冒充 Event Entity 权威 id。
     # TypedDict 可选键用 `str | None` 声明（未引入 typing_extensions），调用方一律 .get 消费。
     app_event_id: str | None
+    # 重大事件时间线（spec §6.1/§6.2）：物化响应回填的 event_status（写库快照/读时重算，
+    # app-api 权威）；缺省 None（未物化/开关关闭）时传导走旧路径（逐字节不变）。
+    app_event_status: str | None
 
 
 def event_content_hash(title: str, url: str) -> str:
@@ -173,8 +176,9 @@ def normalize_event(
         event_scope=detection["event_scope"],
         event_scope_source=detection["event_scope_source"],
         event_scope_confidence=detection["event_scope_confidence"],
-        # 来源侧无 app-api 权威 id：缺省 None（由上层物化/透传链路挂接）
+        # 来源侧无 app-api 权威 id/status：缺省 None（由上层物化/透传链路挂接）
         app_event_id=None,
+        app_event_status=None,
     )
 
 
@@ -341,6 +345,9 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                     # 重大事件时间线（spec §4.2）：存储有值保留；历史数据无该键 → None
                     app_event_id=(
                         str(ev["app_event_id"]) if ev.get("app_event_id") else None
+                    ),
+                    app_event_status=(
+                        str(ev["app_event_status"]) if ev.get("app_event_status") else None
                     ),
                 )
             )

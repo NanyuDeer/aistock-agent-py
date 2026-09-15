@@ -57,3 +57,43 @@ async def test_conduction_falls_back_to_md5_without_app_event_id():
     # 期望值按真实 _build_event_message 计算（标题 + 摘要 + url）
     expected = f"evt_{hashlib.md5(_build_event_message(event).encode()).hexdigest()[:8]}"
     assert out.status.event_id == expected
+
+
+@pytest.mark.asyncio
+async def test_conduction_skips_future_event_as_pre_phase():
+    """scheduled/upcoming → 不执行已发生传导（红线 spec §6.2），标记 pre 阶段。"""
+    event = {
+        "title": "美联储 9/23 议息",
+        "summary": "",
+        "url": "http://x",
+        "event_scope": "UNKNOWN",
+        "app_event_id": "EVT-0001",
+        "app_event_status": "scheduled",
+    }
+    with patch(_EVENT_RUN, new_callable=AsyncMock) as mock_run:
+        out = await run_single_event_conduction(event)
+    mock_run.assert_not_called()
+    assert out.status.event_conduction_skipped is True
+    assert out.status.event_conduction_phase == "pre"
+    assert out.status.event_id == "EVT-0001"
+
+
+@pytest.mark.asyncio
+async def test_conduction_occurred_status_still_runs_agent():
+    """occurred → 正常已发生传导（不拦截）。"""
+    event = {
+        "title": "已发生事件",
+        "summary": "",
+        "url": "http://x",
+        "event_scope": "UNKNOWN",
+        "app_event_id": "EVT-0001",
+        "app_event_status": "occurred",
+    }
+    with patch(
+        _EVENT_RUN,
+        new_callable=AsyncMock,
+        return_value={"analysis_reports": {"event_generated": False}},
+    ) as mock_run:
+        out = await run_single_event_conduction(event)
+    mock_run.assert_awaited_once()
+    assert out.status.event_conduction_skipped is False
