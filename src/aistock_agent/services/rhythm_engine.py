@@ -161,6 +161,68 @@ def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, A
     return {"direction": d, "change": change, "band": band}
 
 
+def derive_position_text(
+    *,
+    index_closes: list[float],
+    mainline: dict[str, object] | None,
+    event_d: int | None,
+    event_result: str | None,
+) -> str:
+    """仓位阶梯文案（spec §5.2.2 合成序，H1 绝对锚定；H11：只作用于 stage→level 之后的文案层）。
+
+    step0 指数趋势定 base（多头 3 / 其余 2 / 破位 0）→ step1 硬闸门（指数
+    close<ma20 且 ma5<ma10<ma20，或主线板块破位）可否决一切 +1 → step2 主线
+    调整（strong +1 / weak 0 / none 强制 0）→ step3 事件档位（d∈{1,2} 且强主线
+    +1；d==0 未落档 → min(base,1)；d==0 已落档 → 按预期差方向相对 base 调档）→
+    step4 clamp 后取阶梯文案。
+    """
+    if len(index_closes) >= 20:
+        c = index_closes[-1]
+        ma5 = sum(index_closes[-5:]) / 5
+        ma10 = sum(index_closes[-10:]) / 10
+        ma20 = sum(index_closes[-20:]) / 20
+        bull = c > ma5 > ma10 > ma20
+        gate_hit = c < ma20 and ma5 < ma10 < ma20
+    else:
+        bull = False
+        gate_hit = False
+    ml_breakdown = bool((mainline or {}).get("breakdown"))
+    if gate_hit or ml_breakdown:
+        base = 0
+    elif bull:
+        base = 3
+    else:
+        base = 2
+    # step1 硬闸门：命中 → base=0 且禁止 +1；数据不足（<20 根）→ 闸门状态未知 → 禁止 +1（H5）
+    gate_blocked = gate_hit or ml_breakdown or len(index_closes) < 20
+    state = (mainline or {}).get("state")
+    strength = (mainline or {}).get("strength")
+    adj = 0
+    if not gate_blocked:
+        # step2 主线调整
+        if state == "established" and strength == "strong":
+            adj += 1
+        elif state == "none":
+            base = 0  # 需求①：无清晰主线 → 空仓观望
+        # step3 事件档位（仅闸门未禁止时生效）
+        if event_d is not None and event_d in (1, 2) \
+                and state == "established" and strength == "strong":
+            adj += 1
+        elif event_d == 0:
+            if event_result in EVENT_RESULT_ENUM:
+                # 已落档：按事件结果直接定档（EVENT_BAND_KEY 语义，覆盖主线/事件增量）
+                direction = EVENT_RESULT_DIRECTION[event_result]
+                adj = 1 if direction == "bullish" else (-1 if direction == "bearish" else 0)
+            else:
+                base = min(base, 1)  # 观望/低仓
+    final = base + adj
+    # d==0 且未落档 → 最终档位封顶 1（观望/低仓，spec step3）
+    if event_d == 0 and event_result not in EVENT_RESULT_ENUM:
+        final = min(final, 1)
+    final = max(LADDER_MIN, min(LADDER_MAX, final))
+    return "建议仓位：" + POSITION_LADDER[final]
+
+
 def detect_phase(
     *,
     history: list[float],
@@ -429,7 +491,9 @@ EVENT_ANCHOR_THRESHOLD = {
 }
 
 
-def build_event_branch(event: dict[str, Any], origin_date: str | None = None) -> list[dict[str, Any]]:
+def build_event_branch(
+    event: dict[str, Any], origin_date: str | None = None
+) -> list[dict[str, Any]]:
     """事件节点（spec §19.2/D10/D15 + 本 spec §5.4/G12）：枚举分档（预期差）。
 
     只对 high 级事件生成 3 条互斥情景；公布后由确定性 d 逻辑按预期差落档。

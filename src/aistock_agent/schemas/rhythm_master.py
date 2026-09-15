@@ -76,3 +76,6 @@ class MasterRhythmCard(BaseModel):
     evidence: RhythmEvidence
     synthesis: RhythmSynthesis | None = None
     synthesis_available: bool = False
+    # 确定性主线事实（judge_mainline 输出 + 胜出候选 nav，worker 内部接线用；
+    # 不直接序列化进 content，供 _build_rhythm_card 派生仓位文案/技术佐证）
+    mainline_facts: dict[str, Any] | None = None

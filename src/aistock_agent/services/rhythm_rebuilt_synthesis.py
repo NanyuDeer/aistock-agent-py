@@ -15,7 +15,9 @@ from aistock_agent.services.rhythm_rebuilt_validate import prune_invalid
 logger = logging.getLogger(__name__)
 
 
-async def run_synthesis(evidence: RhythmEvidence) -> RhythmSynthesis | None:
+async def run_synthesis(
+    evidence: RhythmEvidence, mainline_facts: dict | None = None
+) -> RhythmSynthesis | None:
     try:
         structured_llm = with_chat_structured_output(get_deep_think(), RhythmSynthesis)
         resp = await structured_llm.ainvoke(

@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from functools import lru_cache
 from math import isfinite
-from pathlib import Path
 from typing import Any
 
 from aistock_agent.utils.paths import project_root
@@ -77,6 +75,36 @@ def detect_sector_breakdown(pct_chgs: list[float]) -> dict[str, object]:
     }
 
 
+def detect_breakdown(
+    closes: list[float], nav: list[float] | None = None
+) -> dict[str, object]:
+    """指数/主线破位单一判据（spec §5.4.2 / D3，唯一真相源）。
+
+    - 指数：closes < 65 根 → insufficient=True（MA60 状态未知，H5 禁止加仓）；
+      否则 index_breakdown = close<ma20 且 ma5<ma10<ma20。
+    - 板块：nav is None 或 len<65 → mainline_breakdown=None（状态未知，H5 禁止加仓）；
+      否则 mainline_breakdown = nav[-1]<nav_ma20 且 近 3 日 nav<nav_ma20。
+    """
+    index_breakdown = False
+    index_insufficient = len(closes) < 65
+    if not index_insufficient:
+        c = closes[-1]
+        ma5 = sum(closes[-5:]) / 5
+        ma10 = sum(closes[-10:]) / 10
+        ma20 = sum(closes[-20:]) / 20
+        index_breakdown = c < ma20 and ma5 < ma10 < ma20
+    mainline_breakdown: bool | None = None
+    if nav is not None and len(nav) >= 65:
+        nav_ma20 = sum(nav[-SECTOR_BREAKDOWN_MA_WINDOW:]) / SECTOR_BREAKDOWN_MA_WINDOW
+        last3 = nav[-SECTOR_BREAKDOWN_ARM_DAYS:]
+        mainline_breakdown = nav[-1] < nav_ma20 and all(v < nav_ma20 for v in last3)
+    return {
+        "index_breakdown": index_breakdown,
+        "mainline_breakdown": mainline_breakdown,
+        "insufficient": index_insufficient,
+    }
+
+
 def _excess_pct(nav: list[float], index_nav: list[float], window: int) -> float | None:
     """候选相对基准的 window 日累计超额（百分点）。数据不足 → None。"""
     if len(nav) < window + 1 or len(index_nav) < window + 1:
@@ -86,7 +114,8 @@ def _excess_pct(nav: list[float], index_nav: list[float], window: int) -> float 
     return (nav[-1] / nav[-1 - window] - index_nav[-1] / index_nav[-1 - window]) * 100.0
 
 
-def _pool_best(pool: list[dict], index_nav: list[float], ret_window: int) -> list[tuple[dict, float]]:
+def _pool_best(pool: list[dict], index_nav: list[float],
+               ret_window: int) -> list[tuple[dict, float]]:
     scored: list[tuple[dict, float]] = []
     for c in pool:
         excess = _excess_pct(nav_from_pct(c["pct_chgs"]), index_nav, ret_window)
@@ -96,7 +125,8 @@ def _pool_best(pool: list[dict], index_nav: list[float], ret_window: int) -> lis
     return scored
 
 
-def _established_top1(scored, *, weak: float, strong: float, gap: float) -> tuple[dict, float] | None:
+def _established_top1(scored, *, weak: float, strong: float,
+                      gap: float) -> tuple[dict, float] | None:
     """判池内是否成立；单候选时收窄为 strong（spec 自审 4c，防间距不可算放松）。"""
     if not scored:
         return None

@@ -257,6 +257,8 @@ class Settings(BaseSettings):
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
+    rhythm_mainline_enabled: bool = True
     # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
     scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (

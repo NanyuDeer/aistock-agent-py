@@ -64,6 +64,7 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         }
     )
     api.get_calendar_events = AsyncMock(return_value=[])
+    api.get_ths_index_map = AsyncMock(return_value=[])  # 未接线 → 主线 unavailable
     api.get_close_snapshot = AsyncMock(
         return_value={"breadth": {"total_count": 100, "advance_count": 60}}
     )
@@ -111,7 +112,6 @@ async def test_after_close_full_compose_and_persist(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="event_high_hint 生产者待 Task 10 接线", strict=False)
 async def test_after_close_event_high_hint_present(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
@@ -171,58 +171,27 @@ async def test_morning_inherits_base_no_recompose(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="事件落档确定性语义待 Task 10 接线", strict=False)
 async def test_midday_event_delta_lands_branch_by_result(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """12:30 事件驱动增量：事件 result=超预期 → 事件分支落档（§19.3/D11），主档位不变。"""
-    base_content = {
-        "target_date": "2026-08-31",
-        "basis_date": "2026-08-28",
-        "refresh_slot": "after_close",
-        "rhythm_card": {
-            "score": 58.0,
-            "level": "active",
-            "position_band": {"text": "6~8 成，顺势持有"},
-            "branches": [
-                {
-                    "condition": {
-                        "kind": "interval",
-                        "indicator": "成交额",
-                        "lo": 144.0,
-                        "hi": None,
-                        "label": "放量",
-                    },
-                    "conclusion": {
-                        "direction": "bullish",
-                        "range": "3020.00-3040.00",
-                        "validity": 5,
-                    },
-                },
-                {
-                    "condition": {
-                        "kind": "enum",
-                        "indicator": "英伟达财报预期差",
-                        "value": "超预期",
-                        "label": "超预期",
-                    },
-                    "conclusion": {
-                        "direction": "bullish",
-                        "range": "",
-                        "validity": 5,
-                        "note": "结果待公布",
-                    },
-                    "event_ref": {"event_date": "2026-08-31", "title": "英伟达财报"},
-                },
-            ],
-            "data_missing": [],
-        },
+    """12:30 事件落档：d=0 且 result=超预期 → 仓位文案按事件结果定档（八成~满仓），主档位不变。"""
+    mock_api.get_rhythm_report.return_value = {
+        "content": {
+            "target_date": "2026-08-31",
+            "basis_date": "2026-08-28",
+            "refresh_slot": "after_close",
+            "evidence": {"stage": "rally", "stage_reason": "收盘基准：主升"},
+            "rhythm_card": {
+                "score": 60.0, "level": "active",
+                "position_band": {"text": "建议仓位：七成~八成"},
+                "branches": [], "event_window": [],
+            },
+        }
     }
-    mock_api.get_rhythm_report.return_value = {"content": base_content}
     mock_api.get_calendar_events.return_value = [
         {
             "date": "2026-08-31",
-            "type": "earnings",
+            "type": "macro",
             "title": "英伟达财报",
             "importance": "high",
             "source": "L3",
@@ -236,11 +205,13 @@ async def test_midday_event_delta_lands_branch_by_result(
     assert call is not None
     content = call.kwargs["content"]
     assert content["refresh_slot"] == "midday"
-    assert content["rhythm_card"]["score"] == 58.0  # 主档位沿用 16:05 基准值
+    # 主档位沿用收盘基准 stage（rally），score 由 STAGE_TO_LEVEL 确定性派生
+    assert content["rhythm_card"]["score"] == 60.0
+    # d=0 且已落档（超预期）→ 事件结果定档：base 3 + 1 = 4（八成~满仓）
+    assert content["rhythm_card"]["position_band"]["text"] == "建议仓位：八成~满仓"
+    # 事件分支仍产出（d=0 在 EVENT_BRANCH_MAX_D 内），且注明不改变主档位
     event_branch = [b for b in content["rhythm_card"]["branches"] if b.get("event_ref")]
-    assert event_branch and "已公布" in event_branch[0]["conclusion"]["note"]
-    # D11：落档后事件分支 range 由技术分支（bullish）区间填充，验证不再恒 miss
-    assert event_branch[0]["conclusion"]["range"] == "3020.00-3040.00"
+    assert event_branch and "不改变主档位" in event_branch[0]["conclusion"]["note"]
 
 
 @pytest.mark.asyncio
@@ -271,11 +242,10 @@ async def test_worker_top_level_degrade(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="phase_evidence.technical 待 Task 10 接线", strict=False)
 async def test_after_close_ma_breadth_insufficient_marks_missing(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """C1：kline <65 根 → ma_breadth insufficient → data_missing 标注 + technical 佐证。"""
+    """detect_breakdown：kline=60 根 < 65 → insufficient → data_missing 标注 + technical 佐证。"""
     mock_api.get_index_kline = AsyncMock(return_value=_kline_rows()[:60])
     out = await run(
         {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}

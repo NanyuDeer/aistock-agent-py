@@ -5,6 +5,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aistock_agent.services.event_calendar import is_high_importance_event
+from aistock_agent.services.rhythm_engine import (
+    POSITION_LADDER,
+    build_event_branch,
+    derive_position_text,
+)
+from aistock_agent.services.trend_reversal import detect_trend_reversal
 
 
 @pytest.mark.parametrize("title", [
@@ -47,11 +53,6 @@ def test_load_event_window_normalizes_importance():
     assert len(win.high_events) == 1
 
 
-from aistock_agent.services.rhythm_engine import (
-    EVENT_BRANCH_MAX_D, POSITION_LADDER, build_event_branch,
-)
-
-
 def test_position_ladder_is_absolute():
     # H1：绝对成数锚定
     assert POSITION_LADDER[0] == "空仓观望"
@@ -81,11 +82,6 @@ def test_event_branch_non_high_empty():
     assert build_event_branch({"date": "2026-09-15", "title": "X", "importance": "medium"}) == []
 
 
-import pytest
-
-from aistock_agent.services.trend_reversal import detect_trend_reversal
-
-
 def _bars(n, *, last_close, last_open, last_high, last_low, amount=150.0):
     closes, opens, highs, lows, amounts = [], [], [], [], []
     base = 3000.0
@@ -106,13 +102,17 @@ def _bars(n, *, last_close, last_open, last_high, last_low, amount=150.0):
 
 
 def test_insufficient_below_22_bars():
-    out = detect_trend_reversal(*_bars(21, last_close=100, last_open=101, last_high=102, last_low=99))
+    out = detect_trend_reversal(
+        *_bars(21, last_close=100, last_open=101, last_high=102, last_low=99)
+    )
     assert out["insufficient"] is True and out["confirmed"] is False
 
 
 def test_no_bearish_volume_bar_not_confirmed():
     # 末根不是放量阴线（放量但阳线）→ 无前置事件
-    out = detect_trend_reversal(*_bars(30, last_close=101, last_open=100, last_high=103, last_low=99, amount=150.0))
+    out = detect_trend_reversal(
+        *_bars(30, last_close=101, last_open=100, last_high=103, last_low=99, amount=150.0)
+    )
     assert out["confirmed"] is False
 
 
@@ -155,3 +155,91 @@ def test_trend_reversal_confirmed_after_bearish_volume_with_rising_swings():
     closes[20], opens[20], highs[20], lows[20], amounts[20] = 3080.0, 3200.0, 3220.0, 3060.0, 200.0
     out = detect_trend_reversal(closes, opens, highs, lows, amounts)
     assert out["insufficient"] is False and out["confirmed"] is True
+
+
+def _closes_multibull(n=40):
+    return [3000.0 + i for i in range(n)]
+
+
+def _closes_multibear(n=40):
+    return [3200.0 - i for i in range(n)]
+
+
+def _mainline(state, strength="weak"):
+    return {"state": state, "name": "AI 算力", "strength": strength,
+            "excess": 1.0, "data_date": "2026-09-12", "breakdown": None}
+
+
+def test_flat_when_no_clear_mainline():
+    # 需求①：none → 空仓观望
+    text = derive_position_text(
+        index_closes=_closes_multibull(),
+        mainline=_mainline("none"), event_d=None, event_result=None,
+    )
+    assert text == "建议仓位：空仓观望"
+
+
+def test_strong_mainline_adds_one_rung():
+    # base=3（均线多头）+ strong +1 → 4 满仓档
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=None, event_result=None) == "建议仓位：八成~满仓"
+
+
+def test_weak_mainline_no_add():
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "weak"),
+                                event_d=None, event_result=None) == "建议仓位：七成~八成"
+
+
+def test_hard_gate_blocks_mainline_and_event_add():
+    # 指数 close<ma20 且 ma5<ma10<ma20 → 硬闸门：即使主线强 + d=1 也空仓（V3）
+    assert derive_position_text(index_closes=_closes_multibear(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=1, event_result=None) == "建议仓位：空仓观望"
+
+
+def test_mainline_breakdown_gate_blocks_add():
+    # 主线板块破位 → 闸门命中 → base=0，禁止加仓
+    ml = _mainline("established", "strong")
+    ml["breakdown"] = True
+    assert derive_position_text(index_closes=_closes_multibull(), mainline=ml,
+                                event_d=1, event_result=None) == "建议仓位：空仓观望"
+
+
+def test_event_near_day_adds_one_when_strong():
+    # d=2 且主线强且无闸门 → base 3 + strong +1 + event +1 = 5 → clamp 4（V7）
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=2, event_result=None) == "建议仓位：八成~满仓"
+
+
+def test_event_watch_day_no_adjust():
+    # d=3 仅提示不调档 → base 3 + strong +1 = 4
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=3, event_result=None) == "建议仓位：八成~满仓"
+
+
+def test_event_day_without_result_caps_low():
+    # d=0 且未落档 → min(tmp,1)：base 3 + strong +1 = 4 → 1 → 轻仓~三成
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=0, event_result=None) == "建议仓位：轻仓~三成"
+
+
+def test_event_day_with_result_uses_band():
+    # d=0 且已落档（超预期）→ 按预期差方向相对 base 调档：3 + 1 = 4（V7/事件落档）
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=0, event_result="超预期") == "建议仓位：八成~满仓"
+    assert derive_position_text(index_closes=_closes_multibull(),
+                                mainline=_mainline("established", "strong"),
+                                event_d=0, event_result="不及预期") == "建议仓位：五成~六成"
+
+
+def test_insufficient_index_blocks_add():
+    # 指数 K 线 < 20 根 → 闸门状态未知 → 禁止 +1（fail-safe，H5）；base 保持 step0（2）
+    assert derive_position_text(index_closes=[3000.0] * 10,
+                                mainline=_mainline("established", "strong"),
+                                event_d=1, event_result=None) == "建议仓位：五成~六成"
