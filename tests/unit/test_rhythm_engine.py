@@ -4,21 +4,14 @@ import pytest
 
 from aistock_agent.services import rhythm_engine
 from aistock_agent.services.rhythm_engine import (
-    DISCLAIMER,
-    apply_event_result_met,
     build_event_branch,
     build_next_event_anchor,
     build_technical_branches,
     compose_score,
-    conflict_kind,
-    conflict_penalty,
-    detect_conflict,
     detect_phase,
     fear_greed_anchor,
     level_from_score,
-    ma_breadth,
     map_bipolar,
-    position_band,
     sentiment_coefficient,
     trend_anchor,
 )
@@ -61,15 +54,9 @@ def test_compose_score_weighted_and_missing_renorm() -> None:
     assert 0.0 <= score2 <= 100.0
 
 
-def test_level_and_position_band() -> None:
-    assert level_from_score(10.0) == "ice"
-    assert level_from_score(30.0) == "low"
-    assert level_from_score(50.0) == "normal"
-    assert level_from_score(70.0) == "active"
-    assert level_from_score(90.0) == "euphoria"
-    band = position_band("active")
-    assert band["text"] == "6~8 成，顺势持有"
-    assert "减仓" in position_band("euphoria")["text"]
+def test_position_bands_constants():
+    assert "6~8 成" in rhythm_engine.POSITION_BANDS["active"]["text"]
+    assert "减仓" in rhythm_engine.POSITION_BANDS["euphoria"]["text"]
 
 
 def test_trend_anchor_ma_alignment() -> None:
@@ -117,15 +104,6 @@ def test_detect_phase_arbitration_table() -> None:
         prev_phase="ebb",
     )
     assert phase == "ebb"
-
-
-def test_detect_conflict() -> None:
-    # 趋势强多 + 情绪冰点 → 背离
-    assert detect_conflict(phase="ice", trend=2.0)[0] is True
-    # 趋势强空 + 情绪过热 → 背离
-    assert detect_conflict(phase="overheat", trend=-2.0)[0] is True
-    # 一致 → 无背离
-    assert detect_conflict(phase="warm_up", trend=1.0)[0] is False
 
 
 def test_technical_branches_empty_when_highs_lows_missing():
@@ -271,58 +249,14 @@ def test_event_branch_non_high_returns_empty() -> None:
     assert build_event_branch(event) == []
 
 
-def test_disclaimer_present() -> None:
-    assert "不构成任何投资建议" in DISCLAIMER
-
-
-def test_ma_breadth_insufficient_under_65_bars() -> None:
-    out = ma_breadth([100.0] * 64)
-    assert out["insufficient"] is True
-    assert out["ma20"] is None and out["ma60"] is None
-
-
-def test_ma_breadth_warning_below_ma20() -> None:
-    closes = [100.0] * 120
-    closes[-1] = 90.0  # 收盘跌破 MA20
-    out = ma_breadth(closes)
-    assert out["warning"] is True
-    assert out["insufficient"] is False
-
-
-def test_ma_breadth_recovery_above_ma20_three_days() -> None:
-    closes = [100.0] * 117 + [105.0, 106.0, 107.0]  # 连续 3 日站上 MA20
-    out = ma_breadth(closes)
-    assert out["recovery"] is True
-
-
-def test_ma_breadth_breakdown_ma60() -> None:
-    closes = [100.0] * 117 + [60.0, 59.0, 58.0]  # 连续 3 日跌破 MA60
-    out = ma_breadth(closes)
-    assert out["breakdown_ma60"] is True
-
-
-def test_detect_phase_tech_unchanged_when_none() -> None:
+def test_detect_phase_arbitration_table_unchanged() -> None:
+    # 死码清理后 detect_phase 仍可用（tech 参数保留向后兼容，None=不启用）
     history = [10.0, 20.0, 30.0, 40.0, 50.0]
     p1, _ = detect_phase(history=history, consecutive_ice=0, volume_weak=None, prev_phase=None)
     p2, _ = detect_phase(
         history=history, consecutive_ice=0, volume_weak=None, prev_phase=None, tech=None
     )
     assert p1 == p2  # tech=None 零破坏
-
-
-def test_conflict_kind_top_bottom_none():
-    assert conflict_kind("warm_up", -2.0) == "top"
-    assert conflict_kind("overheat", -1.6) == "top"
-    assert conflict_kind("ice", 2.0) == "bottom"
-    assert conflict_kind("ebb", 1.5) == "bottom"
-    assert conflict_kind("normal", 1.0) is None
-    assert conflict_kind(None, None) is None
-
-
-def test_conflict_penalty_top_only():
-    assert conflict_penalty("top") == -8.0
-    assert conflict_penalty("bottom") == 0.0
-    assert conflict_penalty(None) == 0.0
 
 
 def test_compose_score_penalty_lowers_level():
@@ -404,36 +338,6 @@ def test_position_band_to_action_neutral():
     action = rhythm_engine.position_band_to_action(band, "neutral")
     assert action["direction"] == "hold"
     assert action["change"] == "持仓不变"
-
-
-def test_apply_event_result_met_marks_realized_and_dims_others() -> None:
-    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
-    branches = build_event_branch(event)
-    events = [{"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "result": "不及预期"}]
-    out = apply_event_result_met(branches, events)
-    by_value = {b["condition"]["value"]: b for b in out}
-    assert by_value["不及预期"]["met"] is True
-    assert by_value["不及预期"]["condition"]["value"] == "不及预期"
-    assert by_value["不及预期"]["conclusion"]["note"].startswith("事件结果已公布：不及预期")
-    assert by_value["超预期"]["met"] is False
-    assert by_value["符合"]["met"] is False
-    # 未公布：met 保持 None
-    out_und = apply_event_result_met(branches, [])
-    assert all(b.get("met") is None for b in out_und)
-
-
-def test_apply_event_result_met_range_from_technical_branch() -> None:
-    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
-    branches = build_event_branch(event)
-    tech = {
-        "condition": {"kind": "interval", "indicator": "成交额", "lo": None, "hi": 1200, "label": "缩量"},
-        "conclusion": {"direction": "bearish", "range": "3880-3930", "validity": 5, "note": "缩量回踩支撑位"},
-    }
-    branches.append(tech)
-    events = [{"date": "2026-09-02", "title": "英伟达财报", "importance": "high", "result": "不及预期"}]
-    out = apply_event_result_met(branches, events)
-    by_value = {b["condition"]["value"]: b for b in out if b["condition"].get("value")}
-    assert by_value["不及预期"]["conclusion"]["range"] == "3880-3930"
 
 
 def test_qian_yuan_to_yi_constant_exposed():

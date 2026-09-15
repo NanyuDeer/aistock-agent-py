@@ -16,8 +16,6 @@ from aistock_agent.utils.date import trading_days_between
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
 Level = Literal["ice", "low", "normal", "active", "euphoria"]
 
-DISCLAIMER = "本页内容为研究参考，不构成任何投资建议，据此操作风险自担。"
-
 # spec §5.2.1 T3 / §5.4.1 T4
 POSITION_LADDER: list[str] = [
     "空仓观望", "轻仓~三成", "五成~六成", "七成~八成", "八成~满仓",
@@ -147,10 +145,6 @@ def level_from_score(score: float) -> Level:
     return "euphoria"
 
 
-def position_band(level: Level) -> dict[str, Any]:
-    return dict(POSITION_BANDS[level])
-
-
 def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, Any]:
     """按 direction 生成结构化仓位动作。
 
@@ -167,35 +161,6 @@ def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, A
     return {"direction": d, "change": change, "band": band}
 
 
-def ma_breadth(
-    closes: list[float],
-    *,
-    arm_days: int = 3,
-) -> dict[str, object]:
-    """指数技术位多级确认佐证（C1）。MA60 不可算（<65 根）时 insufficient=True。"""
-    if len(closes) < 65:
-        return {
-            "ma20": None, "ma60": None,
-            "close": closes[-1] if closes else None,
-            "warning": False, "recovery": False,
-            "breakdown_ma60": False, "below_prior_low": False,
-            "insufficient": True,
-        }
-    ma20 = sum(closes[-20:]) / 20
-    ma60 = sum(closes[-60:]) / 60
-    close = closes[-1]
-    prior_low = min(closes[-40:-20]) if len(closes) >= 40 else min(closes)
-    last3 = closes[-arm_days:]
-    return {
-        "ma20": ma20, "ma60": ma60, "close": close,
-        "warning": close < ma20,
-        "recovery": close > ma20 and all(c > ma20 for c in last3),
-        "breakdown_ma60": close < ma60 and all(c < ma60 for c in last3),
-        "below_prior_low": close < prior_low and all(c < prior_low for c in last3),
-        "insufficient": False,
-    }
-
-
 def detect_phase(
     *,
     history: list[float],
@@ -204,13 +169,13 @@ def detect_phase(
     prev_phase: Phase | None,
     slope_window: int = 5,
     slope_threshold: float = 5.0,
-    tech: dict[str, object] | None = None,  # ma_breadth 输出；None=不启用（原行为）
+    tech: dict[str, object] | None = None,  # 技术佐证输入；None=不启用（原行为）
 ) -> tuple[Phase | None, dict[str, Any]]:
     """spec §5 判定仲裁表（主信号=温度斜率，佐证=连冰+量能；实验性判定，G3）。
 
     返回 (phase, evidence)；phase=None 表示判定依据不足且无前阶段。
-    tech（C1 ma_breadth 输出）非空且数据充分时，主判落空/模糊阶段可被
-    技术佐证覆盖；佐证只进 evidence，不产用户可见仓位话术。
+    tech 非空且数据充分时，主判落空/模糊阶段可被技术佐证覆盖；
+    佐证只进 evidence，不产用户可见仓位话术。
     """
     if len(history) < 2:
         return prev_phase, {"reason": "温度序列不足", "evidence_insufficient": True}
@@ -244,7 +209,7 @@ def detect_phase(
             "reason": "判定依据不足（无前阶段）",
             "evidence_insufficient": True,
         }
-    # C1 技术佐证：主判未给明确方向（None）或处于模糊阶段时按技术位覆盖
+    # 技术佐证：主判未给明确方向（None）或处于模糊阶段时按技术位覆盖
     if tech and not tech.get("insufficient"):
         if tech.get("below_prior_low") or tech.get("breakdown_ma60"):
             if phase in {None, "warm_up", "overheat"}:
@@ -252,33 +217,6 @@ def detect_phase(
         if tech.get("recovery") and prev_phase in {"ebb", "ice"}:
             return "warm_up", {"reason": "指数站上 MA20（技术佐证）", "technical": True}
     return phase, evidence
-
-
-def conflict_kind(phase: Phase | None, trend: float | None) -> Literal["top", "bottom"] | None:
-    """背离方向（C2）：顶背离=趋势空+情绪热；底背离=趋势多+情绪冷。"""
-    if trend is None:
-        return None
-    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
-        return "top"
-    if trend >= 1.5 and phase in {"ice", "ebb"}:
-        return "bottom"
-    return None
-
-
-def conflict_penalty(kind: Literal["top", "bottom"] | None) -> float:
-    """背离惩罚（确定性，LLM 不产数值）：顶背离 -8.0（降档）；底背离 0.0（禁止降档）。"""
-    return -8.0 if kind == "top" else 0.0
-
-
-def detect_conflict(phase: Phase | None, trend: float | None) -> tuple[bool, str]:
-    """强信号方向相反并存 → 背离（§7.2/G2）。仲裁优先级：趋势 > 情绪 > 恐贪（D1）。"""
-    if trend is None:
-        return False, ""
-    if trend >= 1.5 and phase in {"ice", "ebb"}:
-        return True, "趋势偏多但情绪周期偏冷，信号背离"
-    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
-        return True, "趋势偏空但情绪周期偏热，信号背离"
-    return False, ""
 
 
 def _range_above(value: float, delta: float) -> str:
@@ -542,63 +480,6 @@ def build_event_branch(event: dict[str, Any], origin_date: str | None = None) ->
             }
         )
     return branches
-
-
-def _event_range_for_direction(branches: list[dict[str, Any]], result: str) -> str:
-    """按预期差方向从技术分支取对应区间（G19：点位由 engine 确定性给）。找不到保持 ""。"""
-    direction = EVENT_RESULT_DIRECTION[result]
-    for tb in branches:
-        tcond = tb.get("condition") or {}
-        tconcl = tb.get("conclusion") or {}
-        if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
-            return str(tconcl.get("range", "") or "")
-    return ""
-
-
-def apply_event_result_met(
-    branches: list[dict[str, Any]], events: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """事件分支公布后落档（§19.3/D11）：按预期差触发，回填 met/value/range/note。
-
-    copy-on-write：不改写传入 branches（避免污染基准报告的 event 分支，G18）。
-    未公布：全部保持 met=None、note="结果待公布..."。
-    公布后：命中 result 的分支 met=True（点亮），其余同事件分支 met=False（置灰）。
-
-    ⚠️ 未接线（2026-09-14 核查）：当前 `src/` 无调用点，卡片 `branches[].met`
-    恒为 `None`（前端点亮/置灰分支未生效）。若需生效，见 spec §7 单独立项 S1/§5 D6。
-    """
-    out: list[dict[str, Any]] = []
-    for br in branches:
-        new_br = dict(br)
-        ref = br.get("event_ref")
-        if not ref:
-            out.append(new_br)
-            continue
-        matched = [
-            e
-            for e in events
-            if str(e.get("date", "")) == str(ref.get("event_date", ""))
-            and str(e.get("title", "")) == str(ref.get("title", ""))
-        ]
-        result = matched[0].get("result") if matched else None
-        if result in EVENT_RESULT_ENUM:
-            new_br["condition"] = dict(br["condition"])
-            new_br["conclusion"] = dict(br["conclusion"])
-            if br.get("condition", {}).get("value") == result:
-                new_br["condition"]["value"] = result
-                new_br["conclusion"]["range"] = _event_range_for_direction(branches, result)
-                new_br["conclusion"]["note"] = (
-                    f"事件结果已公布：{result}，按预期差落档，目标区间由 engine 按当日行情计算"
-                )
-                new_br["met"] = True
-            else:
-                new_br["met"] = False
-        else:
-            new_br["conclusion"] = dict(br["conclusion"])
-            new_br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
-            new_br["met"] = None
-        out.append(new_br)
-    return out
 
 
 def build_next_event_anchor(

@@ -4,11 +4,12 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src" / "aistock_agent"
 
 
-def test_event_result_met_is_documented_as_unwired():
+def test_deleted_symbols_not_regressed():
     from aistock_agent.services import rhythm_engine as eng
 
-    doc = eng.apply_event_result_met.__doc__ or ""
-    assert "未接线" in doc  # Task 8 标注；接线后本断言应改为「有调用点」
+    for name in ("ma_breadth", "detect_conflict", "conflict_kind",
+                 "conflict_penalty", "position_band", "apply_event_result_met"):
+        assert not hasattr(eng, name), f"{name} 已被删除，不得回归（spec §8）"
 
 
 def test_compose_card_is_referenced_by_run():
