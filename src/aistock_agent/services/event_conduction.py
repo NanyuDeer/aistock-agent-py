@@ -10,7 +10,7 @@
 
 import asyncio
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 import structlog
@@ -166,7 +166,10 @@ async def run_single_event_conduction(
     logger.info("event_conduction_start", title=title[:50])
 
     user_message = _build_event_message(event)
-    event_id = f"evt_{hashlib.md5(user_message.encode()).hexdigest()[:8]}"
+    # 重大事件时间线（spec §4.2/§5A.3）：app-api 权威 event_id 优先作传导隔离键；
+    # 缺省回退既有 evt_md5（execution_id 语义），历史行为逐字节不变。
+    app_event_id = str(event.get("app_event_id") or "").strip()
+    event_id = app_event_id or f"evt_{hashlib.md5(user_message.encode()).hexdigest()[:8]}"
 
     # 来源元数据：从 major_events 的 url 字段提取，通过 state.analysis_reports.event_source
     # 传递给 event agent，使后者能在 event_meta.source 中落库真实来源 URL。
