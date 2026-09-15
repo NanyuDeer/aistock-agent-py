@@ -12,14 +12,9 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from aistock_agent.services.data_client import node_api
-from aistock_agent.utils.date import add_trading_days
+from aistock_agent.utils.date import CALENDAR_MAX_YEAR, CALENDAR_MIN_YEAR, add_trading_days
 
 logger = logging.getLogger(__name__)
-
-# chinese_calendar 覆盖范围（1.11.0：2004-2026）；超出范围的 target_date 无法计算
-# 交易日窗口，同一 fail-close（calendar_uncovered=True，§16 开放问题 6）。
-CALENDAR_MIN_YEAR = 2004
-CALENDAR_MAX_YEAR = 2026
 
 # 事件扫描窗口 = 含 target_date 当日共 ≤5 个交易日（§4.6）。
 # add_trading_days 语义为"不含 d 向后推 n 个交易日"，故取 4 得 5 个交易日。
