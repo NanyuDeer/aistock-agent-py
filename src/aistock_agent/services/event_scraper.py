@@ -125,6 +125,12 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
             }
             for ev in allowed_events
         ]
+        # 重大事件时间线（spec §5A.3 P0）：条件透传 app-api event_id 供传导链消费；
+        # 缺省不落键——major_events 形状与既有行为逐字节不变（既有单测精确断言）。
+        for ev, item in zip(allowed_events, major_events, strict=True):
+            app_event_id = str(ev.get("app_event_id") or "").strip()
+            if app_event_id:
+                item["app_event_id"] = app_event_id
         for attempt in (1, 2):
             try:
                 result = await run_event_analysis_pipeline(major_events)
