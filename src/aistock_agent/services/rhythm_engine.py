@@ -11,10 +11,20 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
+from aistock_agent.utils.date import trading_days_between
+
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
 Level = Literal["ice", "low", "normal", "active", "euphoria"]
 
-DISCLAIMER = "本页内容为研究参考，不构成任何投资建议，据此操作风险自担。"
+# spec §5.2.1 T3 / §5.4.1 T4
+POSITION_LADDER: list[str] = [
+    "空仓观望", "轻仓~三成", "五成~六成", "七成~八成", "八成~满仓",
+]
+LADDER_MIN, LADDER_MAX = 0, 4
+EVENT_ADJ_PRE, EVENT_WATCH_D, EVENT_NEAR_D, EVENT_BRANCH_MAX_D = 1, 3, 2, 3
+VOL_UP_RATIO, VOL_DOWN_RATIO = 1.2, 0.8
+SWING_WINDOW, SWING_LEFT_RIGHT, SWING_MIN_DELTA, SWING_CONFIRM_BARS = 20, 2, 0.001, 2
+MIN_BARS_FOR_REVERSAL = SWING_WINDOW + SWING_CONFIRM_BARS  # 22
 
 # Tushare index_daily amount 单位=千元；engine/前端成交额分支按"亿元"计（1 亿 = 1e5 千元）。
 # 单点常量（G6）：任何千元→亿元换算一律引用本常量，禁止散落字面量 1e-5。
@@ -135,10 +145,6 @@ def level_from_score(score: float) -> Level:
     return "euphoria"
 
 
-def position_band(level: Level) -> dict[str, Any]:
-    return dict(POSITION_BANDS[level])
-
-
 def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, Any]:
     """按 direction 生成结构化仓位动作。
 
@@ -155,33 +161,66 @@ def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, A
     return {"direction": d, "change": change, "band": band}
 
 
-def ma_breadth(
-    closes: list[float],
+def derive_position_text(
     *,
-    arm_days: int = 3,
-) -> dict[str, object]:
-    """指数技术位多级确认佐证（C1）。MA60 不可算（<65 根）时 insufficient=True。"""
-    if len(closes) < 65:
-        return {
-            "ma20": None, "ma60": None,
-            "close": closes[-1] if closes else None,
-            "warning": False, "recovery": False,
-            "breakdown_ma60": False, "below_prior_low": False,
-            "insufficient": True,
-        }
-    ma20 = sum(closes[-20:]) / 20
-    ma60 = sum(closes[-60:]) / 60
-    close = closes[-1]
-    prior_low = min(closes[-40:-20]) if len(closes) >= 40 else min(closes)
-    last3 = closes[-arm_days:]
-    return {
-        "ma20": ma20, "ma60": ma60, "close": close,
-        "warning": close < ma20,
-        "recovery": close > ma20 and all(c > ma20 for c in last3),
-        "breakdown_ma60": close < ma60 and all(c < ma60 for c in last3),
-        "below_prior_low": close < prior_low and all(c < prior_low for c in last3),
-        "insufficient": False,
-    }
+    index_closes: list[float],
+    mainline: dict[str, object] | None,
+    event_d: int | None,
+    event_result: str | None,
+) -> str:
+    """仓位阶梯文案（spec §5.2.2 合成序，H1 绝对锚定；H11：只作用于 stage→level 之后的文案层）。
+
+    step0 指数趋势定 base（多头 3 / 其余 2 / 破位 0）→ step1 硬闸门（指数
+    close<ma20 且 ma5<ma10<ma20，或主线板块破位）可否决一切 +1 → step2 主线
+    调整（strong +1 / weak 0 / none 强制 0）→ step3 事件档位（d∈{1,2} 且强主线
+    +1；d==0 未落档 → min(base,1)；d==0 已落档 → 按预期差方向相对 base 调档）→
+    step4 clamp 后取阶梯文案。
+    """
+    if len(index_closes) >= 20:
+        c = index_closes[-1]
+        ma5 = sum(index_closes[-5:]) / 5
+        ma10 = sum(index_closes[-10:]) / 10
+        ma20 = sum(index_closes[-20:]) / 20
+        bull = c > ma5 > ma10 > ma20
+        gate_hit = c < ma20 and ma5 < ma10 < ma20
+    else:
+        bull = False
+        gate_hit = False
+    ml_breakdown = bool((mainline or {}).get("breakdown"))
+    if gate_hit or ml_breakdown:
+        base = 0
+    elif bull:
+        base = 3
+    else:
+        base = 2
+    # step1 硬闸门：命中 → base=0 且禁止 +1；数据不足（<20 根）→ 闸门状态未知 → 禁止 +1（H5）
+    gate_blocked = gate_hit or ml_breakdown or len(index_closes) < 20
+    state = (mainline or {}).get("state")
+    strength = (mainline or {}).get("strength")
+    adj = 0
+    if not gate_blocked:
+        # step2 主线调整
+        if state == "established" and strength == "strong":
+            adj += 1
+        elif state == "none":
+            base = 0  # 需求①：无清晰主线 → 空仓观望
+        # step3 事件档位（仅闸门未禁止时生效）
+        if event_d is not None and event_d in (1, 2) \
+                and state == "established" and strength == "strong":
+            adj += 1
+        elif event_d == 0:
+            if event_result in EVENT_RESULT_ENUM:
+                # 已落档：按事件结果直接定档（EVENT_BAND_KEY 语义，覆盖主线/事件增量）
+                direction = EVENT_RESULT_DIRECTION[event_result]
+                adj = 1 if direction == "bullish" else (-1 if direction == "bearish" else 0)
+            else:
+                base = min(base, 1)  # 观望/低仓
+    final = base + adj
+    # d==0 且未落档 → 最终档位封顶 1（观望/低仓，spec step3）
+    if event_d == 0 and event_result not in EVENT_RESULT_ENUM:
+        final = min(final, 1)
+    final = max(LADDER_MIN, min(LADDER_MAX, final))
+    return "建议仓位：" + POSITION_LADDER[final]
 
 
 def detect_phase(
@@ -192,13 +231,13 @@ def detect_phase(
     prev_phase: Phase | None,
     slope_window: int = 5,
     slope_threshold: float = 5.0,
-    tech: dict[str, object] | None = None,  # ma_breadth 输出；None=不启用（原行为）
+    tech: dict[str, object] | None = None,  # 技术佐证输入；None=不启用（原行为）
 ) -> tuple[Phase | None, dict[str, Any]]:
     """spec §5 判定仲裁表（主信号=温度斜率，佐证=连冰+量能；实验性判定，G3）。
 
     返回 (phase, evidence)；phase=None 表示判定依据不足且无前阶段。
-    tech（C1 ma_breadth 输出）非空且数据充分时，主判落空/模糊阶段可被
-    技术佐证覆盖；佐证只进 evidence，不产用户可见仓位话术。
+    tech 非空且数据充分时，主判落空/模糊阶段可被技术佐证覆盖；
+    佐证只进 evidence，不产用户可见仓位话术。
     """
     if len(history) < 2:
         return prev_phase, {"reason": "温度序列不足", "evidence_insufficient": True}
@@ -232,7 +271,7 @@ def detect_phase(
             "reason": "判定依据不足（无前阶段）",
             "evidence_insufficient": True,
         }
-    # C1 技术佐证：主判未给明确方向（None）或处于模糊阶段时按技术位覆盖
+    # 技术佐证：主判未给明确方向（None）或处于模糊阶段时按技术位覆盖
     if tech and not tech.get("insufficient"):
         if tech.get("below_prior_low") or tech.get("breakdown_ma60"):
             if phase in {None, "warm_up", "overheat"}:
@@ -240,33 +279,6 @@ def detect_phase(
         if tech.get("recovery") and prev_phase in {"ebb", "ice"}:
             return "warm_up", {"reason": "指数站上 MA20（技术佐证）", "technical": True}
     return phase, evidence
-
-
-def conflict_kind(phase: Phase | None, trend: float | None) -> Literal["top", "bottom"] | None:
-    """背离方向（C2）：顶背离=趋势空+情绪热；底背离=趋势多+情绪冷。"""
-    if trend is None:
-        return None
-    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
-        return "top"
-    if trend >= 1.5 and phase in {"ice", "ebb"}:
-        return "bottom"
-    return None
-
-
-def conflict_penalty(kind: Literal["top", "bottom"] | None) -> float:
-    """背离惩罚（确定性，LLM 不产数值）：顶背离 -8.0（降档）；底背离 0.0（禁止降档）。"""
-    return -8.0 if kind == "top" else 0.0
-
-
-def detect_conflict(phase: Phase | None, trend: float | None) -> tuple[bool, str]:
-    """强信号方向相反并存 → 背离（§7.2/G2）。仲裁优先级：趋势 > 情绪 > 恐贪（D1）。"""
-    if trend is None:
-        return False, ""
-    if trend >= 1.5 and phase in {"ice", "ebb"}:
-        return True, "趋势偏多但情绪周期偏冷，信号背离"
-    if trend <= -1.5 and phase in {"warm_up", "overheat"}:
-        return True, "趋势偏空但情绪周期偏热，信号背离"
-    return False, ""
 
 
 def _range_above(value: float, delta: float) -> str:
@@ -479,15 +491,29 @@ EVENT_ANCHOR_THRESHOLD = {
 }
 
 
-def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """事件节点（§19.2/D10/D15）：枚举分档（预期差），公布前不预判方向（占位"结果待公布"）。
+def build_event_branch(
+    event: dict[str, Any], origin_date: str | None = None
+) -> list[dict[str, Any]]:
+    """事件节点（spec §19.2/D10/D15 + 本 spec §5.4/G12）：枚举分档（预期差）。
 
-    只对 high 级事件生成 3 条互斥情景；公布后由 apply_event_result_met 按预期差落档触发。
-    返回 [] 表示非 high 事件（无事件分支）。
+    只对 high 级事件生成 3 条互斥情景；公布后由确定性 d 逻辑按预期差落档。
+
+    origin_date 提供时启用 d 约束：交易日差 d > EVENT_BRANCH_MAX_D 的事件不产分支
+    （避免「闸门说无影响 vs 分支说超预期加仓」的同卡矛盾，spec §5.5.2）。
+    返回 [] 表示非 high 事件（无事件分支）或 d 超限（同语义不产分支）。
     """
     if event.get("importance") != "high":
         return []
+    if origin_date is not None:
+        try:
+            d = trading_days_between(date.fromisoformat(origin_date),
+                                     date.fromisoformat(str(event.get("date") or "")))
+        except ValueError:
+            d = 0
+        if d is None or d > EVENT_BRANCH_MAX_D:
+            return []
     title = str(event.get("title", "关键事件"))
+    note_suffix = "（该情景为条件态，不改变主档位）"
     branches: list[dict[str, Any]] = []
     for value in EVENT_RESULT_ENUM:
         direction = EVENT_RESULT_DIRECTION[value]
@@ -511,7 +537,7 @@ def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
                     "direction": direction,
                     "range": "",
                     "validity": 5,
-                    "note": "结果待公布，公布后按预期差落档",
+                    "note": "结果待公布，公布后按预期差落档" + note_suffix,
                 },
                 "event_ref": {"event_date": str(event.get("date", "")), "title": title},
                 "met": None,
@@ -520,72 +546,21 @@ def build_event_branch(event: dict[str, Any]) -> list[dict[str, Any]]:
     return branches
 
 
-def _event_range_for_direction(branches: list[dict[str, Any]], result: str) -> str:
-    """按预期差方向从技术分支取对应区间（G19：点位由 engine 确定性给）。找不到保持 ""。"""
-    direction = EVENT_RESULT_DIRECTION[result]
-    for tb in branches:
-        tcond = tb.get("condition") or {}
-        tconcl = tb.get("conclusion") or {}
-        if tcond.get("kind") == "interval" and tconcl.get("direction") == direction:
-            return str(tconcl.get("range", "") or "")
-    return ""
-
-
-def apply_event_result_met(
-    branches: list[dict[str, Any]], events: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """事件分支公布后落档（§19.3/D11）：按预期差触发，回填 met/value/range/note。
-
-    copy-on-write：不改写传入 branches（避免污染基准报告的 event 分支，G18）。
-    未公布：全部保持 met=None、note="结果待公布..."。
-    公布后：命中 result 的分支 met=True（点亮），其余同事件分支 met=False（置灰）。
-
-    ⚠️ 未接线（2026-09-14 核查）：当前 `src/` 无调用点，卡片 `branches[].met`
-    恒为 `None`（前端点亮/置灰分支未生效）。若需生效，见 spec §7 单独立项 S1/§5 D6。
-    """
-    out: list[dict[str, Any]] = []
-    for br in branches:
-        new_br = dict(br)
-        ref = br.get("event_ref")
-        if not ref:
-            out.append(new_br)
-            continue
-        matched = [
-            e
-            for e in events
-            if str(e.get("date", "")) == str(ref.get("event_date", ""))
-            and str(e.get("title", "")) == str(ref.get("title", ""))
-        ]
-        result = matched[0].get("result") if matched else None
-        if result in EVENT_RESULT_ENUM:
-            new_br["condition"] = dict(br["condition"])
-            new_br["conclusion"] = dict(br["conclusion"])
-            if br.get("condition", {}).get("value") == result:
-                new_br["condition"]["value"] = result
-                new_br["conclusion"]["range"] = _event_range_for_direction(branches, result)
-                new_br["conclusion"]["note"] = (
-                    f"事件结果已公布：{result}，按预期差落档，目标区间由 engine 按当日行情计算"
-                )
-                new_br["met"] = True
-            else:
-                new_br["met"] = False
-        else:
-            new_br["conclusion"] = dict(br["conclusion"])
-            new_br["conclusion"]["note"] = "结果待公布，公布后按预期差落档"
-            new_br["met"] = None
-        out.append(new_br)
-    return out
-
-
 def build_next_event_anchor(
-    events: list[dict[str, object]], basis_date: str
+    events: list[dict[str, object]], origin_date: str
 ) -> dict[str, object] | None:
     """下一重大事件锚点（design-debate P1，2026-09-02）。
 
     取窗口内首条 high 事件（顺序继承 app-api 事件日历下发顺序，
-    Python 侧不重排）；N = event_date 与 basis_date 自然日差。
+    Python 侧不重排）；N = event_date 与 origin_date **交易日差**（D7，spec §5.5.2）。
+
+    原点由调用方给出：节奏大师传**目标交易日**（该卡所描述的那一天，盘前/午间档
+    即当天、收盘基准档为次一交易日），使「距今天数」相对卡片描述的那一天。
+    注意卡片 `basis_date` 自 2026-09-14 起表示**证据日**（K 线末日），不可用作本处原点。
+
     无 high 事件返回 None（前端整块不渲染，对齐空串先例 §7.1）。
-    日期解析失败跳过错该事件（G6 不抛异常纪律）。
+    日期解析失败跳过错该事件（G6 不抛异常纪律）；越年交易日差不可算（None）
+    同语义跳过，不抛异常。
     """
     for e in events:
         if e.get("importance") != "high":
@@ -595,10 +570,13 @@ def build_next_event_anchor(
         if not event_date or not title:
             continue
         try:
-            days_until = (date.fromisoformat(event_date) - date.fromisoformat(basis_date)).days
+            # 交易日差（(origin, event_date] 内交易日数）；origin==event_date→0（"今日"）
+            days_until = trading_days_between(date.fromisoformat(origin_date),
+                                              date.fromisoformat(event_date))
         except ValueError:
             continue  # 日期格式异常：跳过错该事件，不抛异常穿透
-        days_until = max(0, days_until)
+        if days_until is None:
+            continue  # 越年/非法 → 与坏日期同语义：跳过错该事件（不抛异常）
         note = "今日" if days_until == 0 else ("明日" if days_until == 1 else f"{days_until} 天后")
         return {"title": title, "event_date": event_date, "days_until": days_until, "note": note}
     return None

@@ -4,11 +4,12 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src" / "aistock_agent"
 
 
-def test_event_result_met_is_documented_as_unwired():
+def test_deleted_symbols_not_regressed():
     from aistock_agent.services import rhythm_engine as eng
 
-    doc = eng.apply_event_result_met.__doc__ or ""
-    assert "未接线" in doc  # Task 8 标注；接线后本断言应改为「有调用点」
+    for name in ("ma_breadth", "detect_conflict", "conflict_kind",
+                 "conflict_penalty", "position_band", "apply_event_result_met"):
+        assert not hasattr(eng, name), f"{name} 已被删除，不得回归（spec §8）"
 
 
 def test_compose_card_is_referenced_by_run():
@@ -28,3 +29,20 @@ def test_snapshot_uses_evidence_date_helper():
 def test_run_synthesis_wires_prune_invalid():
     text = (SRC / "services" / "rhythm_rebuilt_synthesis.py").read_text(encoding="utf-8")
     assert "prune_invalid(" in text
+
+
+def test_mainline_wiring_present_in_worker():
+    """V15：主线/仓位节奏能力已接线到 worker（H10：测试绿 ≠ 已接线，须有接线断言）。"""
+    worker_text = (SRC / "agents" / "workers" / "rhythm_master.py").read_text(encoding="utf-8")
+    assert "judge_mainline(" in worker_text
+    assert "detect_breakdown(" in worker_text
+    assert "event_high_hint" in worker_text
+    assert "derive_position_text(" in worker_text
+    assert "load_mainline_candidates()" in worker_text
+
+
+def test_deleted_symbols_absent_from_engine_source():
+    """V15：死码符号已从源码移除，不得回归。"""
+    engine_text = (SRC / "services" / "rhythm_engine.py").read_text(encoding="utf-8")
+    assert "def ma_breadth" not in engine_text
+    assert "LADDER_MAX_LEVEL" not in engine_text

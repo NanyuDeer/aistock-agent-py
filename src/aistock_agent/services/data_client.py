@@ -423,6 +423,26 @@ class NodeApiClient:
         result = await self._post_request("/internal/calendar/events", body)
         return result if isinstance(result, dict) else None
 
+    async def post_event_entity(self, body: dict[str, object]) -> dict[str, object] | None:
+        """POST /internal/event-entities（Event Entity 物化，spec §10.2）。
+
+        权威 event_id 由 app-api 生成；本方法失败返回 None（调用方降级跳过，
+        不阻断抓取/传导主链路）。body 契约见方案实施计划 Global Constraints 接口先决依赖。
+        """
+        result = await self._post_request("/internal/event-entities", body)
+        return result if isinstance(result, dict) else None
+
+    async def get_event_entities(
+        self, params: dict[str, str] | None = None
+    ) -> list[dict[str, object]] | None:
+        """GET /internal/event-entities（status/日期过滤查询，spec §10.2）。"""
+        query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+        path = "/internal/event-entities" + (f"?{query}" if query else "")
+        result = await self.get(path)
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            return result["items"]
+        return None
+
     async def get_rhythm_report(
         self, target_date: str, refresh_slot: str
     ) -> dict[str, object] | None:
