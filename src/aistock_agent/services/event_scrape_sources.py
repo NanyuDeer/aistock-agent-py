@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_scoring import apply_rule_score
 from aistock_agent.services.event_store import EventRecord, normalize_event
@@ -425,3 +426,90 @@ async def collect_l3_forward(score_date: str, cache: SearchCache) -> list[dict[s
                 logger.warning("event_scrape_l3.post_failed", event_date=ev.get("event_date"))
         parsed_events.extend(events)
     return parsed_events
+
+
+# ---------- 重大事件时间线（P0.5，spec §5B.3 / §5A.3）：事件时间抽取 + 物化 ----------
+
+
+_BARE_MD = _re.compile(r"(?<!\d)(\d{1,2})[-/月](\d{1,2})")
+
+
+def _parse_event_date_flexible(frag: str, ref_year: int) -> str | None:
+    """解析日期片段：年份形式（2026-09-17 / 2026年9月23日）优先；
+    无年份 M/D（9/23）补 ref_year 复用 `_parse_event_date` 归一化。
+    纯正则确定性实现，绝不引入相对日期/LLM 猜测（spec §5B.3）。
+    """
+    parsed = _parse_event_date(frag, ref_year)
+    if parsed:
+        return parsed
+    return _parse_event_date(f"{ref_year}/{frag}", ref_year)
+
+
+def _extract_event_start_time(title: str, content: str, ref_date: str) -> str | None:
+    """抽取事件开始日期（spec §5B.3）：只认明确绝对日期，区间取开始日；无 → None。
+
+    支持：年份形式绝对日期（2026-09-17 / 2026年9月23日）、无年份 M/D（9/23）、
+    「X 至 Y」/「X-Y」/「X~Y」区间（只取开始日，spec §1.5 多日事件只在开始日落点）。
+    相对日期（本周五/明日/下周）本阶段明确不支持（spec §5B.3 P2 才做）。
+    """
+    text = f"{title} {content}"
+    ref_year = int(ref_date[:4])
+
+    # 区间优先：`9-23 至 9-25` / `9/23-9/25` / `9/23~9/25`，取开始日
+    range_match = _re.search(
+        r"(?:20\d{2}[-/年])?\d{1,2}[-/月]\d{1,2}\s*(?:至|到|-|~)\s*"
+        r"(?:20\d{2}[-/年])?\d{1,2}[-/月]\d{1,2}",
+        text,
+    )
+    if range_match:
+        start_m = _re.match(
+            r"(?:20\d{2}[-/年])?\d{1,2}[-/月]\d{1,2}", range_match.group(0)
+        )
+        return _parse_event_date_flexible(start_m.group(0) if start_m else "", ref_year)
+
+    # 无区间：整个文本抽绝对日期（年份形式优先）；无年份 M/D 兜底
+    parsed = _parse_event_date(text, ref_year)
+    if parsed:
+        return parsed
+    bare = _BARE_MD.search(text)
+    if bare:
+        return _parse_event_date_flexible(bare.group(0), ref_year)
+    return None
+
+
+async def _materialize_event_entity(
+    event: EventRecord, now_iso: str
+) -> None:
+    """事件物化到 /internal/event-entities（spec §5A.3 P0.5）。
+
+    仅当 `settings.event_entity_enabled` 且抽出 `event_start_time > now`（未来事件）
+    才 POST；端点未落地/失败 → warning 跳过，绝不阻断抓取/传导主链路。
+    已发生事件物化 + time_confidence 判定属 P0.5 增量，留收口清单对账。
+    """
+    if not settings.event_entity_enabled:
+        return
+    event_start = _extract_event_start_time(
+        str(event.get("title", "")),
+        str(event.get("summary", "")),
+        str(event.get("score_date", now_iso[:10])),
+    )
+    if not event_start or event_start <= now_iso[:10]:
+        return  # 无明确日期或非未来 → 本阶段不物化（已发生物化对账留收口清单）
+    body: dict[str, object] = {
+        "title": str(event.get("title", "")),
+        "source_type": "news",
+        "event_start_time": f"{event_start}T00:00:00+08:00",
+        "time_source": "news_extraction",
+    }
+    try:
+        resp = await node_api.post_event_entity(body)
+        if isinstance(resp, dict) and resp.get("event_id"):
+            logger.info(
+                "event_entity_materialized",
+                event_id=resp["event_id"],
+                title=body["title"],
+            )
+        else:
+            logger.warning("event_entity_materialize_skipped", title=body["title"])
+    except Exception:  # noqa: BLE001
+        logger.warning("event_entity_materialize_failed", exc_info=True)
