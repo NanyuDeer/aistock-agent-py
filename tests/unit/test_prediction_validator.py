@@ -205,13 +205,27 @@ async def test_fetch_kline_window_index_preserves_none_rows():
     ]
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": None},
-                   {"trade_date": "2026-08-11", "pct_chg": 1.5}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": None, "close": None, "vol": None},
+                   {"trade_date": "2026-08-11", "pct_chg": 1.5, "close": None, "vol": None}]
     # 必须携带区间参数（非 200 天滚动），且锁定 _range_around_due 区间数学：
     # due=2026-08-10 → [2026-08-10 减 20 天, 加 10 天] = [20260721, 20260820]
     _, kwargs = m.call_args
     assert kwargs["start_date"] == "20260721"
     assert kwargs["end_date"] == "20260820"
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_window_keeps_close_and_vol():
+    """两段判定需要 close（技术位）与 vol（后续 volume 类）；缺失保 None 占位。"""
+    rows = [
+        {"trade_date": "20260916", "pct_chg": 1.2, "close": 3100.5, "vol": 2.1e8},
+        {"trade_date": "20260917", "pct_chg": None, "close": None, "vol": None},
+    ]
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
+        out = await pv._fetch_kline_window("index", "000001.SH", "2026-09-17")
+    assert out is not None
+    assert out[0]["close"] == 3100.5 and out[0]["vol"] == 2.1e8
+    assert out[1]["close"] is None and out[1]["vol"] is None
 
 
 @pytest.mark.asyncio
@@ -272,8 +286,8 @@ async def test_fetch_kline_window_stock_calls_quote_kline():
     ]
     with patch.object(pv.node_api, "get_stock_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("stock", "600519", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5},
-                   {"trade_date": "2026-08-11", "pct_chg": 0.3}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5, "close": None, "vol": None},
+                   {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None}]
     _, kwargs = m.call_args
     assert kwargs["start_date"] == "20260721"
     assert kwargs["end_date"] == "20260820"
@@ -425,9 +439,9 @@ async def test_fetch_kline_window_normalizes_yyyymmdd_trade_date():
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
     assert out == [
-        {"trade_date": "2026-08-10", "pct_chg": 1.2},
-        {"trade_date": "2026-08-11", "pct_chg": 0.3},
-        {"trade_date": "2026-08-12", "pct_chg": -0.2},
+        {"trade_date": "2026-08-10", "pct_chg": 1.2, "close": None, "vol": None},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2, "close": None, "vol": None},
     ]
 
 
@@ -492,7 +506,7 @@ async def test_fetch_kline_window_sector_calls_ths_range():
         new=AsyncMock(return_value=[{"trade_date": "2026-08-10", "pct_chg": 0.5}]),
     ) as m:
         out = await pv._fetch_kline_window("sector", "885525.TI", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5, "close": None, "vol": None}]
     assert m.await_args.args[0] == "885525.TI"
 
 

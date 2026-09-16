@@ -108,11 +108,17 @@ def _range_around_due(due_date: str) -> tuple[str, str] | None:
             (d + timedelta(days=10)).strftime("%Y%m%d"))
 
 
+def _num(v: object) -> float | None:
+    """非数值（含 None/str/缺失）一律 None，保持缺值占位语义（H7）。"""
+    return float(v) if isinstance(v, int | float) else None
+
+
 async def _fetch_kline_window(
     kind: str, code: str, due_date: str
 ) -> list[dict[str, object]] | None:
-    """按 due 区间拉取日 K（统一 index/sector/stock）。返回升序 [{trade_date, pct_chg}]；
-    pct_chg=None 行保留占位（H7，由调用方计数）。失败/空返回 None（=数据源故障）。"""
+    """按 due 区间拉取日 K（统一 index/sector/stock）。返回升序
+    [{trade_date, pct_chg, close, vol}]；缺值行保留 None 占位（H7，由调用方计数）。
+    失败/空返回 None（=数据源故障）。"""
     rng = _range_around_due(due_date)
     if rng is None:
         # 脏 due_date 无法确定窗口 → 数据源故障语义（_verify_horizon 落 insufficient）
@@ -133,14 +139,19 @@ async def _fetch_kline_window(
     parsed: list[dict[str, object]] = []
     for r in raw:
         d = r.get("trade_date")
-        pct = r.get("pct_chg")
         if isinstance(d, str):
             # Node 端 trade_date 为 Tushare 原始 YYYYMMDD，due_date 为 YYYY-MM-DD；
             # 统一归一化为 YYYY-MM-DD 才能精确匹配（幂等：已是该格式的行原样透传）。
             if re.fullmatch(r"\d{8}", d):
                 d = f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
-            parsed.append(
-                {"trade_date": d, "pct_chg": pct if isinstance(pct, int | float) else None})
+            # close/vol 供 condition_met 确定性判定（技术位/后续 volume 类）使用；
+            # 本函数只做取数保留，不做判定。
+            parsed.append({
+                "trade_date": d,
+                "pct_chg": _num(r.get("pct_chg")),
+                "close": _num(r.get("close")),
+                "vol": _num(r.get("vol")),
+            })
     parsed.sort(key=lambda x: str(x["trade_date"]))
     return parsed or None
 
