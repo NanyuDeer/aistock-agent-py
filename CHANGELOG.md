@@ -2,6 +2,37 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[main] 2026-09-16 — 条件化预判 condition\_met 两段判定落地（Spec A §4.2 收尾）
+
+**开发者**: Aria
+
+### 新增
+
+- `services/condition_met_judge.py`：`judge_condition_met` 确定性纯函数（无 IO/无日志/仅标准库，禁 LLM）。判定优先级：① volume 类关键词（放量/缩量/成交额/成交量）→ **首批 omit**（恒不判定，`volumes` 入参保留供后续扩展）；② 技术位类（跌破/下破/失守/站上/突破/收回/前低/新高/均线/MA\d+）→ 严格前低 / 严格新高 / 均线近似（`MA60|60日` → 60 日线，否则 MA20；可用样本均值近似，样本 < 2 个 → 无法判定），方向取关键词优先、否则回落 `anchor.direction`；③ 其余涨跌幅/点位类 → 窗口累计 pct（`closes` 首末优先，不足 2 个 → `pct_chgs` 复利累计）按 direction 比对 threshold。
+- `prediction_validator._scan_condition_met`：第①段「到期前点亮」——对 `due_date > today` 的 condition 扫最近 60 个交易日窗口，条件成立才回写 `verification[c{i}].condition_met=true`（entry **不含 `result`**）。
+- `prediction_validator._fetch_kline_window`：日 K 解析保留 `close`/`vol`（index/sector/stock 统一），补齐条件判定数据基础。
+
+### 改进
+
+- `prediction_validator._verify_conditions`：第②段「到期 hit/miss 且保留点亮」——照常写 `c{i}` 的 `result`，并显式带出①已点亮的 `condition_met=true`（修掉 `base` 硬写 `condition_met: None` 抹掉点亮值的问题）。
+- `run_once` 三段接线：horizon 验证（含 A1 跳过 / wait 不回写）→ ① 扫描点亮 → ② 到期判定；新增日志 `prediction_condition_lit` / `prediction_condition_verified`。复用既有 `prediction_validate` job，**未新增 cron**。
+
+### 修复
+
+- 决策 D1：**只写 `condition_met=true`，不写 false**——不成立 / 无法判定 / 数据源故障 / 无数据源一律不产键（不写 `false`，也不写 `null` 覆盖）；幂等：已点亮 / 已有 `result` / `due_date <= today` 均跳过。
+- ⚠️ 口径修正：spec 原文"条件成立判定复用 `rhythm_engine.ma_breadth`"**已失效**（`ma_breadth` 已删除且有测试守卫禁止回归），技术位改为上述新写确定性实现；文档已同步标注。
+
+### 文档
+
+- `docs/specs/2026-08-31-条件化预判改造-design.md` §3.1/§4.2/§9-5/§9-10/§11 与 `docs/specs/2026-08-31-预判验证-design.md` §4.2/§9-1：标注判定已落地、写清实际口径（含 volume omit、只写 true、两段结构、`c{i}` 不参与 `status=verified`），并明确"绝对点位阈值 / MA5 / volume 真值判定 / `target_type` 按 `anchor.metric` 分流"仍为后续项。
+- 跨仓配套（app-api）：`fa5c6b3` PUT `/internal/predictions/:id/verification` 放行"`c{i}` + `condition_met` 布尔且无 `result`"的中间态；`edb9941` 板块日 K 透传 `close`/`vol`/`amount`（`amount` 上游无源 → 契约位恒 null）。**部署顺序强制：先 app-api 再 agent-py**。
+
+### 状态
+
+- 本地验收通过：`test_condition_met_judge.py + test_prediction_validator.py` 66 passed；`-k "prediction or validator or condition_met"` 372 passed / 1 failed（唯一红为存量 `test_iterate_adapters` 期望集缺 `stock_prediction`，非本次引入）。
+
+---
+
 ## \[changer\] 2026-09-15 — 重大事件时间线 Event Entity 接入 + 收口
 
 **开发者**: 37588
