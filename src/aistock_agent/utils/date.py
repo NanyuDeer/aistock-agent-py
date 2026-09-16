@@ -71,6 +71,32 @@ def add_trading_days(d: date, n: int) -> date:
     return cursor
 
 
+# chinese_calendar 覆盖范围（1.11.0：2004-2026）；作为交易日差的显式 fail-close 边界
+# （event_calendar 从本模块 import，消除重复定义/循环依赖，spec §5.5.1）。
+CALENDAR_MIN_YEAR = 2004
+CALENDAR_MAX_YEAR = 2026
+
+
+def trading_days_between(start: date, end: date) -> int | None:
+    """(start, end] 内交易日数。end<=start→0；年份超出 chinese_calendar 覆盖→None（fail-close）。
+
+    禁止把 is_trading_day 的越年 except→True 回退用于本函数——
+    否则法定节假日会被算成交易日（spec §5.5.1）。
+    """
+    if end <= start:
+        return 0
+    if not (CALENDAR_MIN_YEAR <= start.year <= CALENDAR_MAX_YEAR
+            and CALENDAR_MIN_YEAR <= end.year <= CALENDAR_MAX_YEAR):
+        return None
+    n = 0
+    cur = start
+    while cur < end:
+        cur += timedelta(days=1)
+        if is_trading_day(cur):
+            n += 1
+    return n
+
+
 def shanghai_today() -> date:
     """返回上海时区的自然日，作为报告交易日。"""
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()

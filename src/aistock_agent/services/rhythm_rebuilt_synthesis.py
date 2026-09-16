@@ -15,16 +15,24 @@ from aistock_agent.services.rhythm_rebuilt_validate import prune_invalid
 logger = logging.getLogger(__name__)
 
 
-async def run_synthesis(evidence: RhythmEvidence) -> RhythmSynthesis | None:
+async def run_synthesis(
+    evidence: RhythmEvidence, mainline_facts: dict | None = None
+) -> RhythmSynthesis | None:
     try:
         structured_llm = with_chat_structured_output(get_deep_think(), RhythmSynthesis)
         resp = await structured_llm.ainvoke(
-            [{"role": "user", "content": build_synthesis_prompt(evidence)}]
+            [{"role": "user", "content": build_synthesis_prompt(evidence, mainline_facts)}]
         )
     except Exception:
         logger.warning("rhythm_rebuilt.synthesis_failed", exc_info=True)
         return None
     if not isinstance(resp, RhythmSynthesis):
         return None
-    # P1-2：按元素保全（剔除非法项），避免全丢
-    return prune_invalid(resp)
+    # P1-2：按元素保全（剔除非法项），避免全丢；主线受确定性事实约束（spec §7/H2）
+    names = set()
+    if mainline_facts and mainline_facts.get("name"):
+        names.add(str(mainline_facts["name"]))
+    evidence_date = None
+    if mainline_facts and mainline_facts.get("data_date"):
+        evidence_date = str(mainline_facts["data_date"])
+    return prune_invalid(resp, candidate_names=names or None, evidence_date=evidence_date)

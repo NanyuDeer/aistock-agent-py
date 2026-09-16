@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "candidates": [
+    {"name": "AI 算力", "group": "ai_tech", "priority": 1, "tag_code": "885896.TI", "aliases": ["算力租赁", "CPO"]},
+    {"name": "AI 应用", "group": "ai_tech", "priority": 1, "tag_code": "885913.TI", "aliases": ["AIGC", "人工智能"]},
+    {"name": "半导体", "group": "ai_tech", "priority": 2, "tag_code": "885851.TI", "aliases": ["芯片"]},
+    {"name": "低空经济", "group": "default", "priority": 3, "tag_code": "885938.TI", "aliases": ["飞行汽车"]},
+    {"name": "创新药", "group": "default", "priority": 4, "tag_code": "884110.TI", "aliases": []}
+  ]
+}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date as date_cls
+from datetime import timedelta
 from typing import Any, cast, get_args
 
 from aistock_agent.config import settings
@@ -18,9 +19,18 @@ from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_calendar import EventWindow, load_event_window
+from aistock_agent.services.mainline_engine import (
+    MA20_MIN_BARS,
+    MIN_CANDIDATES,
+    detect_breakdown,
+    judge_mainline,
+    load_mainline_candidates,
+    nav_from_pct,
+)
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
-from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.services.trend_reversal import detect_trend_reversal
+from aistock_agent.utils.date import add_trading_days, shanghai_today, trading_days_between
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
@@ -36,6 +46,7 @@ KLINE_LOOKBACK = 200  # 对齐 Node /internal/index/:code/kline 的 days 上限�
 # 传 end_date 时该参数仍须在限内（G2/G9 裁决）
 MIN_KLINE_ROWS = 20   # 对齐 rhythm_rebuilt_evidence._trend_score/_volume_score 的
 # len<20 短路下限（G2 裁决）
+SECTOR_LOOKBACK_NATURAL_DAYS = 130  # spec §5.4.1 T4：板块取数窗口（≥65 个交易日行）
 
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
@@ -177,6 +188,10 @@ async def _compose_card(
         await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=run_ymd) or []
     )
     rows = [r for r in kline if r.get("close") is not None]
+    # 未完成 bar 剔除（spec §5.4.2）：盘中档剔除 trade_date==run_ymd 的行，
+    # 防 15:00 后补跑把当日未完成 bar 污染趋势/反转判定。
+    if slot in {"morning", "midday"}:
+        rows = [r for r in rows if _normalize_ymd(r.get("trade_date")) != run_ymd]
     last_trade_date = _normalize_ymd(rows[-1].get("trade_date")) if rows else None
     # 证据日 = K 线末日（对外 basis_date 语义，P1-6/G9）；无 K 线时退回运行日。
     evidence_date = (
@@ -202,6 +217,72 @@ async def _compose_card(
     fg = (await node_api.get_fear_greed() or {}).get("index")
     win = await load_event_window(target_date)
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
+
+    # 主线判定（spec §5.1，确定性；失败/数据不足 → unavailable + 留痕，H5）
+    mainline: dict[str, object] = {
+        "state": "unavailable", "name": None, "strength": None,
+        "excess": None, "data_date": None, "attention": "",
+        "breakdown": None, "nav": None,
+    }
+    candidate_load_failed = False
+    if settings.rhythm_mainline_enabled:
+        ok, cands = load_mainline_candidates()
+        if not ok:
+            candidate_load_failed = True  # 降级 1：候选清单缺失（data_missing 留痕）
+        else:
+            index_resp = await node_api.get_ths_index_map()
+            index_map = index_resp if isinstance(index_resp, list) else []
+            idx_by_code = {
+                str(i.get("ts_code")): str(i.get("name") or "") for i in index_map
+            }
+            start = (
+                date_cls.fromisoformat(evidence_date)
+                - timedelta(days=SECTOR_LOOKBACK_NATURAL_DAYS)
+            ).isoformat()
+            valid: list[dict[str, object]] = []
+            for c in cands:
+                code = str(c.get("tag_code") or "")
+                if code not in idx_by_code:
+                    continue  # 降级 3：code 不在 index-map → 剔除候选
+                rows_b = await node_api.get_ths_daily_range(code, start, evidence_date) or []
+                pk = [p for p in rows_b if p.get("pct_chg") is not None]
+                if len(pk) < MA20_MIN_BARS:
+                    continue  # 降级 4：pct_chg 序列不足 → 剔除候选
+                valid.append({
+                    **c,
+                    "pct_chgs": [float(p["pct_chg"]) for p in pk],
+                    "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
+                    if rows_b else None,
+                })
+            if len(valid) >= MIN_CANDIDATES:
+                index_pct_chgs = [
+                    float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
+                ]
+                mainline = judge_mainline(valid, index_pct_chgs, evidence_date)
+                if mainline.get("state") == "established":
+                    winner = next(
+                        (c for c in valid if c.get("name") == mainline.get("name")), None
+                    )
+                    if winner:
+                        w_last = winner.get("last_trade_date")
+                        # H2：主线 data_date 必须 == 证据日（K 线末日），不等 → unavailable
+                        if w_last and w_last != _normalize_ymd(evidence_date):
+                            mainline = {
+                                "state": "unavailable", "name": None, "strength": None,
+                                "excess": None, "data_date": None,
+                                "attention": (
+                                    f"主线数据滞后（data_date={w_last}，证据日={evidence_date}）"
+                                ),
+                                "breakdown": None, "nav": None,
+                            }
+                        else:
+                            wnav = nav_from_pct(winner["pct_chgs"])  # type: ignore[arg-type]
+                            brk = detect_breakdown(closes, wnav)
+                            mainline = {
+                                **mainline,
+                                "nav": wnav,
+                                "breakdown": brk["mainline_breakdown"],
+                            }
 
     breadth = None
     snapshot_missing = False
@@ -255,17 +336,23 @@ async def _compose_card(
         missing.append("宽度快照缺失（证据日无收盘快照）")
     if basis_inherit_note:
         missing.append(basis_inherit_note)
+    if candidate_load_failed:
+        missing.append("主线候选清单缺失")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
     )
-    synthesis = await run_synthesis(evidence)
+    # 需求①：无清晰主线 → 仓位动作强制 hold（与「空仓观望」自洽，spec §5.2.2）
+    if mainline.get("state") == "none" and position is not None:
+        position = position.model_copy(update={"action": "hold"})
+        evidence = evidence.model_copy(update={"position": position})
+    synthesis = await run_synthesis(evidence, mainline_facts=mainline)
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
     return (
         MasterRhythmCard(
             basis_date=evidence_date, target_date=target_date, refresh_slot=slot,
             evidence=evidence, synthesis=synthesis if synthesis_ok else None,
-            synthesis_available=synthesis_ok,
+            synthesis_available=synthesis_ok, mainline_facts=mainline,
         ),
         rows,
         win,
@@ -273,15 +360,19 @@ async def _compose_card(
 
 
 def _build_rhythm_card(
-    card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]]
+    card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]],
+    mainline: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决）。
+    """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决 + 本批主线/仓位接线）。
 
     - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
     - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
-    - 可选字段缺失由前端 v-if 兜底（next_event_anchor/event_high_hint 等）；
-    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底），
-      数据源未接入，对齐 spec §2.2。
+    - `position_band.text` 改由 `derive_position_text` 主线驱动（H11：只覆盖文案层，
+      `evidence.position` 原样保留）；
+    - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
+    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底）：两者的
+      数据源均已接入并被判定层消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；
+      该属架构说明，**不写入缺失清单**（对齐 spec §2.2 / G4）。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
@@ -303,25 +394,103 @@ def _build_rhythm_card(
             data_missing=data_missing_container,
         )
         for e in win.events:
-            branches.extend(engine.build_event_branch(e))
+            branches.extend(engine.build_event_branch(e, card.target_date))
     except Exception:
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
         branches = []
     missing.extend(m for m in data_missing_container if m not in missing)
-    missing.append("温度序列/事件窗口数据源未接入（S4/S5）")
+
+    # 主线/技术佐证（spec §5.4.2 detect_breakdown 单一判据）
+    mainline_facts = mainline or {}
+    tech = detect_breakdown(closes, mainline_facts.get("nav"))
+    if tech["insufficient"]:
+        missing.append("MA 技术位数据不足")
+    # ② 趋势反转（spec §5.4.2；已完成 bar 不足 → 视为未确认 + 留痕，H5）
+    rev_closes, rev_opens, rev_highs, rev_lows, rev_amounts = [], [], [], [], []
+    for r in rows[-120:]:
+        c = r.get("close")
+        if c is None:
+            continue
+        rev_closes.append(float(c))
+        rev_opens.append(float(r["open"]) if r.get("open") is not None else None)
+        rev_highs.append(float(r["high"]) if r.get("high") is not None else None)
+        rev_lows.append(float(r["low"]) if r.get("low") is not None else None)
+        rev_amounts.append(_amount_yi(float(r["amount"]) if r.get("amount") is not None else None))
+    reversal = detect_trend_reversal(rev_closes, rev_opens, rev_highs, rev_lows, rev_amounts)
+    if reversal["insufficient"]:
+        missing.append("反转确认数据不足（完成 bar < 22）")
+
+    # 事件档位（需求⑤）：d 与 next_event_anchor 同函数同源
+    win_highs = getattr(win, "high_events", None) or []
+    event_d: int | None = None
+    event_result: object | None = None
+    if win_highs:
+        first_high = win_highs[0]
+        try:
+            event_d = trading_days_between(
+                date_cls.fromisoformat(card.target_date),
+                date_cls.fromisoformat(str(first_high.get("date") or "")),
+            )
+        except ValueError:
+            event_d = None
+        event_result = first_high.get("result")
+    pos_text = engine.derive_position_text(
+        index_closes=closes, mainline=mainline_facts,
+        event_d=event_d, event_result=str(event_result) if event_result is not None else None,
+    )
+
+    # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤60 字）
+    if tech["insufficient"]:
+        tech_part = "技术位数据不足"
+    elif tech["index_breakdown"]:
+        tech_part = "指数破位"
+    elif tech["mainline_breakdown"]:
+        tech_part = "主线板块破位"
+    else:
+        tech_part = "趋势未破位"
+    mstate = mainline_facts.get("state")
+    if mstate == "established":
+        head = (
+            f"主线：{mainline_facts.get('name') or '未知'}（主线成立，"
+            f"超额 +{mainline_facts.get('excess')}pct，"
+            f"数据日 {mainline_facts.get('data_date') or ''}）"
+        )
+    elif mstate == "none":
+        head = "主线：无清晰主线"
+    else:
+        head = "主线：数据不可用"
+    reason = f"{head}｜{tech_part}"
+    if len(reason) > 60:
+        reason = reason[:60]
+
+    next_anchor = engine.build_next_event_anchor(win.events, card.target_date)
+    event_high_hint = (
+        f"{next_anchor['title']}（{next_anchor['event_date']}，{next_anchor['note']}）："
+        "事件临近，注意确定性风险"
+        if next_anchor else ""
+    )
     return {
         "score": score,
         "level": level,
         "position_band": {
-            "text": card.evidence.position.text if card.evidence.position else "",
+            "text": pos_text,
         },
-        "phase_evidence": {"reason": card.evidence.stage_reason, "slope": None},
+        "phase_evidence": {
+            "reason": reason,
+            "slope": None,
+            "technical": tech,
+            "reversal": reversal,
+        },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
-        # 数据源未接入（S4/S5）：显式空 + 留痕，不做「恒空但仍渲染」的静默假象
+        # 已知空置（spec §7 S4/S5）：字段未接线（数据源已接入，见函数 docstring）——
+        # 显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
         "temperature_series": [],
         "event_window": [],
         "event_source_missing": win.source_missing,
-        "next_event_anchor": engine.build_next_event_anchor(win.events, card.basis_date),
+        # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
+        "next_event_anchor": next_anchor,
+        # 事件临近提示（与 next_event_anchor 同源，共用 skip 逻辑）
+        "event_high_hint": event_high_hint,
         # 暂无冲突检测器（Phase 4 态 ↔ Stage 5 态不同源，见 spec §2.2）：恒 False。
         # 前端 conflict 为必填 bool，不可置 null；接入检测器前保持此常量。
         "conflict": False,
@@ -350,7 +519,7 @@ async def run(state: dict[str, object]) -> dict[str, object]:
             "evidence": card.evidence.model_dump(),
             "synthesis": card.synthesis.model_dump() if card.synthesis else None,
             "synthesis_available": card.synthesis_available,
-            "rhythm_card": _build_rhythm_card(card, win, rows),
+            "rhythm_card": _build_rhythm_card(card, win, rows, card.mainline_facts),
         }
         await node_api.save_analysis_report(
             report_type="rhythm_master", report_date=card.target_date,

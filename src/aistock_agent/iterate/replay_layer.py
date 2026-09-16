@@ -75,6 +75,10 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     # 各自走失败降级（P1 新增）
     "aistock_agent.services.data_client.NodeApiClient.get_calendar_events": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.post_calendar_event": "node_noop",
+    # Event Entity 物化（P0.5，2026-09-15）：post_event_entity 直接调私有
+    # _post_request（不在任何替换清单），写方法 node_noop 返回 None 走调用方降级；
+    # get_event_entities 经 self.get 间接隔离（已在豁免名单登记）
+    "aistock_agent.services.data_client.NodeApiClient.post_event_entity": "node_noop",
     "aistock_agent.services.data_client.NodeApiClient.get_rhythm_report": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.get_fear_greed": "node_read",
     # 写方法（B4 修复）：全部 no-op，返回 None 走调用方既有降级
@@ -108,12 +112,25 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 失败降级返回 None，不触达真实 Node 后端（PR #71 新增，I-3 清单封闭测试
         # 强制登记）
         "NodeApiClient.get_user_profile",
-        # 经 get 间接隔离（get → node_read 返回 None）：get_insight 内部
+        # 经 get 间接隔离（get → node_read 返回 None）：get_event_entities 内部
+        # `await self.get(f"/internal/event-entities?...")`（data_client.py），无
+        # 独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)` 走
+        # 失败降级返回 None，不触达真实 Node 后端（Event Entity P0.5 新增登记）
+        "NodeApiClient.get_event_entities",
+        # 经 get 间接隔离（get → node_read 返回 None）：list_insights 内部
         # `await self.get(f"/internal/insight/events/{event_id}?openid={openid}")`
         # （data_client.py:682），无独立网络入口；回放时 get 返回 None → 方法原样
         # 返回 None，不触达真实 Node 后端（自选股洞察阶段 2.1 新增，I-3 清单封闭
         # 测试强制登记）
         "NodeApiClient.get_insight",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）：list_all_predictions
+        # 内部循环调 list_pending_predictions + list_verified_predictions（均已在
+        # 本豁免名单），无独立网络入口（D3 档位级扫描 2026-09-03；P0.5 批次补齐登记）
+        "NodeApiClient.list_all_predictions",
+        # 经 get 间接隔离（get → node_read 返回 None）：get_intraday_sectors 内部
+        # `await self.get(f"/internal/market/sectors")`（data_client.py:885），无
+        # 独立网络入口（午间报板块快照 2026-09-04；P0.5 批次补齐登记）
+        "NodeApiClient.get_intraday_sectors",
         # 经 get_list 间接隔离（get_list → node_read 返回 None）
         "NodeApiClient.list_analysis_reports",
         "NodeApiClient.list_pending_predictions",

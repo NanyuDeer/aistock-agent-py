@@ -874,10 +874,21 @@ async def run(state: AgentState) -> dict[str, object]:
             understanding if isinstance(understanding, dict) else None,
             user_msg,
         )
+        _injected_event_id = str(
+            (state.get("analysis_reports") or {}).get("event_id") or ""
+        ).strip()
+        _injected_event_status = str(
+            (state.get("analysis_reports") or {}).get("event_status") or ""
+        ).strip()
         event_meta: dict[str, object] = {
-            "eventId": f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
+            # 重大事件时间线（spec §4.3）：优先消费传导注入的 app-api 权威 event_id，
+            # 使持久化隔离键 = 权威 id（缺省回退既有 evt_md5，历史行为逐字节不变）
+            "eventId": _injected_event_id
+            or f"evt_{hashlib.md5(user_msg.encode()).hexdigest()[:8]}",
             "title": title,
             "source": event_source,
+            # 物化回填的 event_status（快照），persister 加性回写 appEventStatus
+            "event_status": _injected_event_status,
             # 事件元数据扩展：source_name（来源名称）/ event_type（事件类型枚举）
             # 由 Understanding LLM 生成（见 EVENT_UNDERSTANDING_PROMPT）；
             # source_name 缺失时兜底"未知来源"，不阻断分析结果保存。
