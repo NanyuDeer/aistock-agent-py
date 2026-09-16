@@ -93,3 +93,48 @@ def test_neutral_flat_met_and_not_met() -> None:
         "维持横盘", direction="neutral", threshold_pct=None,
         closes=[100.0, 101.0], pct_chgs=[], volumes=[],
     ) is None
+
+
+# ============ 终审 #2：绝对点位条件不得误走技术位分支 ============
+
+
+@pytest.mark.parametrize("text,direction,closes", [
+    ("若突破 3300 点", "bullish", UPTREND),   # 收盘 > MA20，旧路由误判 True
+    ("站上 3000 点", "bullish", UPTREND),
+    ("站上 82.50 元", "bullish", UPTREND),
+    ("若跌破 3300", "bearish", DOWNTREND),    # 收盘 < MA20，旧路由误判 True
+])
+def test_absolute_level_conditions_omitted_first_batch(
+    text: str, direction: str, closes: list[float]
+) -> None:
+    """#2（阻塞）：条件含绝对点位（"数字+点/元"或"站上/突破/跌破+紧邻数字"）→ 首批 omit
+    （恒 None）。旧路由会把它们丢进技术位分支，在顺势 close 序列上误判 True（不可撤回
+    的错写：只写 true 不写 false），故必须优先短路。"""
+    assert judge_condition_met(
+        text, direction=direction, threshold_pct=None,
+        closes=closes, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_explicit_tech_level_still_uses_tech_branch() -> None:
+    """明示技术位（均线 / MA\\d+ / 前低 / 新高）仍走技术位判定，不被点位短路误伤。"""
+    assert judge_condition_met(
+        "站上均线", direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "突破 MA20", direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "若跌破 20 日线", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_pct_threshold_with_digits_still_uses_pct_branch() -> None:
+    """涨跌幅类（"上涨 2%"）含数字但非点位 → 不得被点位短路吞掉，仍走涨跌幅判定。"""
+    assert judge_condition_met(
+        "若上涨 2%", direction="bullish", threshold_pct=2.0,
+        closes=[100.0, 103.0], pct_chgs=[], volumes=[],
+    ) is True
