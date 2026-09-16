@@ -2,6 +2,33 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[main] 2026-09-17 — condition\_met 终审修复（阻塞 #2 + 重要 #3/#4/#5）
+
+**开发者**: Aria
+
+### 修复
+
+- **#2（阻塞）绝对点位条件不再误走技术位分支**（`services/condition_met_judge.py`）：`judge_condition_met` 路由优先级改为 ① volume 关键词 → ② **绝对点位（恒 `None`）** → ③ 明示技术位（`跌破|下破|失守|站上|突破|收回|前低|新高|均线|日线|周线|月线|MA\d+`）→ ④ 涨跌幅/阈值。绝对点位判据：`\d{3,}(\.\d+)?\s*(点|元)`，或"站上/突破/跌破/上穿/下破/击穿/失守/收回"+紧邻数字（排除"数字+`%`/日/周/月/个交易日"）。旧路由把"站上 3000 点""突破 3300 点"丢进技术位分支、用 MA 近似在顺势行情下误判 `true`；`true` 一旦写入不可撤回（D1 只写 true 不写 false）→ 宁可 omit。
+- **#4（重要）`condition_met_rate` 口径修正**（`services/prediction_stats.py` + `iterate/evaluator.py`）：第①段只写 true（无 false 参照），全 true 样本不得读成 100% 命中率抬高下游评分——**仅当存在 `condition_met is False` 的 entry 时才计算 `condition_met_rate`，否则 `None`**；evaluator 的 condition 维度（0.2 权重）在无 false entry 时整体剔除并按 present 维度重归一化。
+
+### 改进
+
+- **#3（重要）第①段扫描窗口改 `[created_at, today]`**（`services/prediction_validator.py`）：新增 `_condition_scan_range(record, today)`——起点取 `prediction_records.created_at` 的日期部分、上限 **120 自然日**（早于 `today-120d` 裁剪）、`created_at` 缺失/脏值回退 `today-120d`、裁剪后空窗（未来脏值）**直接跳过不发请求**；取数走新增 `_fetch_kline_range(kind, code, start, end)`，`_fetch_kline_window` 保留为 **stage② 到期判定 due 区间专用**（语义不变，`_verify_horizon`/`_verify_conditions` 未动）。旧口径误用 due 区间 `[due-20, due+10]`：远端 due（long/越年档）时该区间整体落在未来、过滤后为空 → 静默跳过，长档条件几乎永不点亮。
+- **成本与健壮性**：`run_once` 内 stage① 取数按 `(target_type, code, start, end)` 记忆化（同记录多 condition 只取一次数；窗口不同不串用缓存）；`_scan_condition_met` 调用处加 try/except，单记录异常只 warning（`prediction_condition_scan_failed`），不中断整批。
+- **#5**：窗口约束（远端 due 仍点亮 / 空窗不发请求 / `created_at` 缺失回退 120d / 越界裁剪）由 `tests/unit/test_prediction_validator.py` 用例覆盖。
+
+### 文档
+
+- `docs/specs/2026-08-31-条件化预判改造-design.md` §4.2：窗口口径由"最近 60 个交易日"改写为 `[created_at, today]`（上限 120 自然日，含空窗/回退/记忆化与 stage② 不变说明），并新增"绝对点位类首批 omit"条目与路由优先级；§9-5 的"绝对点位阈值"标注为首批显式 omit。
+- `data_client.get_ths_daily_range` docstring 补 `close`/`vol` 键（`amount` 上游无源恒 null）。
+
+### 状态
+
+- 本地验收：`test_condition_met_judge.py + test_prediction_validator.py + test_prediction_stats.py` → **102 passed**；`-k "prediction or validator or condition_met"` → **385 passed, 1 failed**（唯一红为存量 `test_iterate_adapters` 期望集缺 `stock_prediction`，非本次引入）；iterate 消费侧 7 个测试文件 → 130 passed。ruff/mypy 仅报存量问题，改动行内无新增。
+- **部署顺序仍强制：先 app-api 再 agent-py**（第①段点亮依赖 Node PUT 放行"无 `result` 的 `c{i}` 中间态"）。
+
+---
+
 ## \[main] 2026-09-16 — 条件化预判 condition\_met 两段判定落地（Spec A §4.2 收尾）
 
 **开发者**: Aria
