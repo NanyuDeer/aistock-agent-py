@@ -56,8 +56,8 @@ _METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计
 # 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
 _STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
-_KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_window index 分支）
-# 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_window stock 分支）
+_KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_range index 分支）
+# 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_range stock 分支）
 _STOCK_KLINE_FETCH_DAYS = 120
 
 # Spec B §4.2：验证画像缓存 TTL（秒）——每日 16:00 run_once 更新，86400 次日失效重算

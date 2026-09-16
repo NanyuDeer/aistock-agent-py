@@ -7,7 +7,9 @@
   ② **绝对点位类**（"3300 点"/"82.50 元"，或"站上/突破/跌破/上穿/下破…"+紧邻数字）→ `None`
      （终审 #2 裁决：首批无点位阈值口径，走技术位分支会用 MA 近似误判 true，而 true 一旦
      写入不可撤回 → 宁可 omit，比误判安全）
-  ③ 仅当文本**明示技术位**（均线/MA\\d+/前低/新高/日线/周线/月线）→ MA/前低/新高 近似判定
+  ③ 仅当文本**明示技术位**（均线/MA\\d+/前低/新高/日线/周线/月线）**或含裸方向动词**
+     （跌破/下破/失守/站上/突破/收回）→ MA/前低/新高 近似判定（与 `_TECH_RE` 同口径；
+     注意裸动词也会进本分支——带数字点位的条件在更早的②分支已 omit）
      （D3：`rhythm_engine.ma_breadth` 已删除且被测试守卫禁止回归，此处为新写确定性实现）
   ④ 其余（涨跌幅/点位阈值类）→ 窗口累计涨跌幅与 `anchor.threshold` 按 direction 比对
      （优先 closes 首末，closes 不足 2 个时用 pct_chgs 复利累计 —— sector 链路端点不返回
@@ -134,6 +136,12 @@ def judge_condition_met(
       否则"站上 3000 点"这类条件会被 MA 近似误判为 true 且不可撤回）。
     """
     text = condition_text or ""
+    if max(len(closes), len(pct_chgs)) < 2:
+        # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
+        # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
+        # neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上会立即点亮 true，而 true
+        # 一旦写入不可撤回 → 宁可 None（不产键），也不让单日样本误点亮。
+        return None
     if _VOLUME_RE.search(text):
         return None  # ① volume 类首批 omit
     if _ABS_LEVEL_RE.search(text) or _ABS_LEVEL_VERB_RE.search(text):

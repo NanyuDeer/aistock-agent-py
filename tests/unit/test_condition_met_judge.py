@@ -95,6 +95,23 @@ def test_neutral_flat_met_and_not_met() -> None:
     ) is None
 
 
+def test_single_data_point_returns_none_before_judging() -> None:
+    """最小样本守卫：窗口仅 1 行（created_at == today）时不判定，恒 None。
+
+    单行时 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单行 pct_chg 累计恰为自身，
+    neutral 分支（|累计| ≤ 0.5%）会在"累计=0"这类单日样本上**立即点亮 true**，
+    且 true 一旦写入不可撤回 → 必须在入口挡住 < 2 个可用数据点。
+    """
+    assert judge_condition_met(
+        "维持横盘", direction="neutral", threshold_pct=None,
+        closes=[100.0], pct_chgs=[0.0], volumes=[],
+    ) is None
+    assert judge_condition_met(
+        "若上涨", direction="bullish", threshold_pct=0.0,
+        closes=[100.0], pct_chgs=[0.5], volumes=[],
+    ) is None
+
+
 # ============ 终审 #2：绝对点位条件不得误走技术位分支 ============
 
 
