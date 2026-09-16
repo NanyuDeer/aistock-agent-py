@@ -12,6 +12,9 @@ v2 对照口径（P0 预测验证升级）：
 - 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
 - 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
+- 条件化预判两段判定（Spec A §4.2）：① 到期前 `_scan_condition_met` 条件一成立即点亮
+  `verification[c{i}].condition_met=true`（确定性判定，无 result；只写 true 不写 false）；
+  ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true（不写 null 覆盖）。
 """
 
 import re
@@ -20,6 +23,7 @@ from typing import cast
 import structlog
 
 from aistock_agent.services.cache import set_cached_validation_profile
+from aistock_agent.services.condition_met_judge import judge_condition_met
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
@@ -58,6 +62,9 @@ _STOCK_KLINE_FETCH_DAYS = 120
 
 # Spec B §4.2：验证画像缓存 TTL（秒）——每日 16:00 run_once 更新，86400 次日失效重算
 _PROFILE_CACHE_TTL = 86400
+
+# condition_met 第①段扫描窗口：最近 60 个交易日（D3：技术位类 MA5/MA20/MA60 + 前低/新高）
+_CONDITION_SCAN_WINDOW = 60
 
 # H3：板块验证阈值（G0c 标定 neutral 0.25%/strong 3.0%，版本 1.0）；
 # index 保持 0.5/5.0（_INDEX_THRESHOLDS 复用既有常量，_judge_window 默认参数行为不变）
@@ -378,8 +385,9 @@ async def _verify_conditions(
     """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
 
     - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
-    - condition_met 本批恒 null（两段判定推迟，§9-5 决策）；scenario 命中用
-      anchor.direction + threshold 比对窗口累计；
+    - condition_met 不在此段判定（第①段 _scan_condition_met 负责点亮）：已点亮 true 的
+      entry 原样带出，未点亮则不写该键（jsonb 键级浅合并保留旧值，绝不写 null/false，D1）；
+      scenario 命中用 anchor.direction + threshold 比对窗口累计；
     - entry 显式补 target_type（index/sector，§4.2/§11）避免统计漏桶；
     - 窗口未满 → {"wait": True}，run_once continue 不回写，下次补齐再验（D1 语义）；
     - 返回 {c{i}: entry}，run_once 对已存在 result 的 c{i} 幂等跳过。
@@ -399,7 +407,6 @@ async def _verify_conditions(
         "verified_at": shanghai_today().isoformat(),
         "methodology_version": methodology_version,
         "prediction_id": record.get("id"),
-        "condition_met": None,  # 两段判定推迟（§9-5）
         "target_type": target_type,
     }
     if matched:
@@ -407,6 +414,8 @@ async def _verify_conditions(
         base["matched_name"] = str(matched["name"])
     due_dates = record.get("due_dates")
     due_dates_map = due_dates if isinstance(due_dates, dict) else {}
+    verification = record.get("verification")
+    ver_map = verification if isinstance(verification, dict) else {}
     out: dict[str, object] = {}
     today = shanghai_today().isoformat()
     for i, cond in enumerate(conditions):
@@ -430,6 +439,11 @@ async def _verify_conditions(
             "scenario": cond.get("scenario"),
             "threshold": threshold,
         }
+        # 第①段（_scan_condition_met）已点亮的 condition_met=true 必须原样带出——Node 端
+        # verification[c{i}] 为键级浅合并，不写该键即保留旧值，但显式写 null 会抹掉点亮。
+        existing = ver_map.get(key)
+        if isinstance(existing, dict) and existing.get("condition_met") is True:
+            entry["condition_met"] = True
         if code is None:
             out[key] = {**entry, "result": "insufficient", "subtype": "no_source",
                         "actual": "", "reason": f"target '{tgt}' 无验证数据源"}
@@ -475,6 +489,101 @@ async def _verify_conditions(
             "actual": f"{cumulative:+.2f}%",
             "reason": f"direction={direction}, threshold={threshold or 'N/A'}, "
                       f"窗口累计={f'{cumulative:+.2f}%'}",
+        }
+    return out
+
+
+async def _scan_condition_met(
+    record: dict[str, object],
+    methodology_version: str = _METHODOLOGY_VERSION,
+) -> dict[str, dict[str, object]]:
+    """条件化预判第①段：到期前条件扫描（只点亮 `condition_met=true`，§4.2）。
+
+    与 _verify_conditions（第②段·到期 hit/miss）同一 16:00 任务内执行（D4）；逐条 condition：
+
+    - 已有 `condition_met is True` → 跳过（幂等：不重复点亮）；
+    - 已有 `result` → 跳过（已到期末判定，不得覆盖）；
+    - `due_date <= today` → 跳过，交由 _verify_conditions 处理；
+    - 否则拉窗口行情（`_fetch_kline_window`；未来 due 时端点自然只返回到今日）→ 组装
+      closes/pct_chgs/volumes（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
+
+    判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
+    threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含 volume 类
+   首批 omit，D2）不产 entry —— 只写 true 不写 false（D1）。
+    """
+    prediction = record.get("prediction")
+    if not isinstance(prediction, dict):
+        return {}
+    conditions = prediction.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return {}
+    horizons = prediction.get("horizons")
+    tgt = ""
+    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+        tgt = str(horizons[0].get("target") or "")
+    code, target_type, matched = await _resolve_verify_target(tgt)
+    if code is None:
+        return {}  # 无数据源：交第②段落 insufficient，本段不产点亮 entry
+    base: dict[str, object] = {
+        "verified_at": shanghai_today().isoformat(),
+        "methodology_version": methodology_version,
+        "prediction_id": record.get("id"),
+        "target_type": target_type,
+    }
+    if matched:
+        base["matched_ts_code"] = str(matched["ts_code"])
+        base["matched_name"] = str(matched["name"])
+    due_dates = record.get("due_dates")
+    due_dates_map = due_dates if isinstance(due_dates, dict) else {}
+    verification = record.get("verification")
+    ver_map = verification if isinstance(verification, dict) else {}
+    today = shanghai_today().isoformat()
+    out: dict[str, dict[str, object]] = {}
+    for i, cond in enumerate(conditions):
+        key = f"c{i}"
+        if not isinstance(cond, dict):
+            continue
+        existing = ver_map.get(key)
+        if isinstance(existing, dict):
+            if existing.get("condition_met") is True:
+                continue  # 幂等：已点亮不重复写
+            if "result" in existing:
+                continue  # 已到期末判定，不覆盖
+        anchor_raw = cond.get("anchor")
+        anchor: dict[str, object] = (
+            cast(dict[str, object], anchor_raw) if isinstance(anchor_raw, dict) else {}
+        )
+        horizon = anchor.get("horizon")
+        due_date = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
+        if not due_date or due_date <= today:
+            continue  # 已到期/无 due → 交 _verify_conditions 第②段
+        rows = await _fetch_kline_window(target_type, code, due_date)
+        if not rows:
+            continue  # 数据源故障/无数据：本段静默跳过（不产 false 键）
+        window = rows[-_CONDITION_SCAN_WINDOW:]
+        closes = [float(cast(float, r["close"])) for r in window if r.get("close") is not None]
+        pct_chgs = [
+            float(cast(float, r["pct_chg"])) for r in window if r.get("pct_chg") is not None
+        ]
+        volumes = [float(cast(float, r["vol"])) for r in window if r.get("vol") is not None]
+        met = judge_condition_met(
+            str(cond.get("condition") or ""),
+            direction=str(anchor.get("direction") or "neutral"),
+            threshold_pct=_parse_threshold(str(anchor.get("threshold") or "")),
+            closes=closes,
+            pct_chgs=pct_chgs,
+            volumes=volumes,
+        )
+        if met is not True:
+            continue  # 不成立/无法判定 → 不产键（只写 true，D1）
+        out[key] = {
+            **base,
+            "condition_index": i,
+            "horizon": horizon,  # D5：anchor 档位（data_client 以 anchor_horizon 透传）
+            "condition": cond.get("condition"),
+            "scenario": cond.get("scenario"),
+            "threshold": str(anchor.get("threshold") or ""),
+            "condition_met": True,
         }
     return out
 
@@ -595,6 +704,30 @@ async def run_once() -> int:
                     "prediction_verify_write_failed",
                     id=record_id,
                     horizon=horizon,
+                    error=str(exc),
+                    exc_info=True,
+                )
+        # Spec A §4.2/§11：条件化预判两点判定——第①段（到期前扫描）先执行：条件一成立即
+        # 点亮 condition_met=true（无 result，Node 端放行中间态），前端洞见卡"待验证"分支
+        # 立即亮起；第②段（到期判定）照常写 result。幂等：已点亮/已有 result/已到期者跳过。
+        lit_entries = await _scan_condition_met(record)
+        for lit_key, lit_entry in lit_entries.items():
+            if _should_skip_horizon(verification.get(lit_key)):
+                continue  # 兜底：已有 result 的 key 不再写
+            try:
+                await node_api.update_prediction_verification(record_id, lit_key, lit_entry)
+                updated += 1
+                logger.info(
+                    "prediction_condition_lit",
+                    id=record_id,
+                    key=lit_key,
+                    condition_met=lit_entry.get("condition_met"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "prediction_condition_lit_write_failed",
+                    id=record_id,
+                    key=lit_key,
                     error=str(exc),
                     exc_info=True,
                 )

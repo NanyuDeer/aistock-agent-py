@@ -1233,3 +1233,190 @@ async def test_run_once_verifies_suffixed_stock_horizon():
     assert entry["result"] == "hit"
     assert entry["target_type"] == "stock"
     assert entry["actual"] == "+1.40%"
+
+
+# ============ condition_met 两段判定（T4 点亮 / T5 保留 / T6 接线） ============
+
+
+def _pending_condition_record(
+    record_id=1,
+    due="2026-09-30",
+    direction="bearish",
+    condition="若跌破 MA20",
+    threshold="",
+    verification=None,
+):
+    """条件化 pending 记录：conditions[0].anchor.horizon='short' → due_dates['short']。"""
+    return {
+        "id": record_id,
+        "source_type": "market_trace",
+        "source_id": "review:2026-09-16",
+        "prediction": {
+            "horizons": [{"horizon": "short", "target": "上证指数",
+                          "direction": direction, "metric_projection": "x"}],
+            "conditions": [{
+                "condition": condition,
+                "scenario": "后续 1-4 周下行",
+                "anchor": {"horizon": "short", "direction": direction,
+                           "threshold": threshold},
+            }],
+        },
+        "due_dates": {"short": due},
+        "verification": verification if verification is not None else {},
+    }
+
+
+def _scan_rows(closes, pct_chg=-1.0, vol=1e8):
+    """升序日 K 行（trade_date 与条件扫描判定无关：scan 不按 due 截断窗口）。"""
+    return [
+        {"trade_date": f"2026-09-{i + 1:02d}", "pct_chg": pct_chg,
+         "close": float(c), "vol": vol}
+        for i, c in enumerate(closes)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_lights_up_when_met() -> None:
+    """T4 第①段：未到期但条件已成立（末日跌破 MA20）→ 产 condition_met=True entry。"""
+    record = _pending_condition_record(due="2026-09-30", direction="bearish")
+    rows = _scan_rows([130.0 - i for i in range(25)])  # 末日 106 < MA20 115.5
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    assert "result" not in out["c0"]  # 第①段只点亮，不写 result
+    assert out["c0"]["condition_index"] == 0
+    assert out["c0"]["horizon"] == "short"  # D5：anchor 档位（data_client → anchor_horizon）
+    assert out["c0"]["target_type"] == "index"
+    assert out["c0"]["prediction_id"] == 1
+    assert out["c0"]["verified_at"] == "2026-09-16"
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_no_entry_when_not_met() -> None:
+    """T4 第①段：条件不成立 → 不产 entry（只写 true，不写 false，D1）。"""
+    record = _pending_condition_record(
+        due="2026-09-30", direction="bullish", condition="若站上 MA20")
+    rows = _scan_rows([130.0 - i for i in range(25)])  # 下行 → 未站上 MA20
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_skips_when_already_true() -> None:
+    """T4 幂等：已有 condition_met=true → 跳过（不重复点亮，且不拉行情）。"""
+    record = _pending_condition_record(
+        record_id=7, verification={"c0": {"condition_met": True}})
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out == {}
+    kline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_skips_due_and_result_entries() -> None:
+    """T4：已到期（due<=today，交 stage②）与已到期末判定（有 result）的 c{i} 都不产 entry。"""
+    due_record = _pending_condition_record(due="2026-09-16")  # due == today
+    result_record = _pending_condition_record(verification={"c0": {"result": "hit"}})
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(due_record) == {}
+        assert await pv._scan_condition_met(result_record) == {}
+    kline.assert_not_awaited()  # 两条都在取数前短路
+
+
+@pytest.mark.asyncio
+async def test_verify_conditions_preserves_lit_condition_met() -> None:
+    """T5：stage① 已点亮 true → stage② 到期判定不得覆盖为 null。"""
+    record = _pending_condition_record(
+        due="2026-09-09", direction="bearish",
+        verification={"c0": {"condition_met": True, "condition_index": 0}},
+    )
+    rows = _scan_rows([100.0 + i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._verify_conditions(record)
+    assert out["c0"]["result"] == "hit"          # 到期判定照常写 result
+    assert out["c0"]["condition_met"] is True    # 但点亮状态被保留
+
+
+@pytest.mark.asyncio
+async def test_verify_conditions_omits_condition_met_when_not_lit() -> None:
+    """T5：未点亮 → entry 不写 condition_met 键（jsonb 键级浅合并保留旧值，绝不写 null）。"""
+    record = _pending_condition_record(due="2026-09-09", direction="bearish")
+    rows = _scan_rows([100.0 + i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._verify_conditions(record)
+    assert out["c0"]["result"] == "hit"
+    assert "condition_met" not in out["c0"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_scans_condition_met_before_due() -> None:
+    """T6 端到端：due 在未来但条件已成立的 pending 记录 → 回写 (id, 'c0', 点亮 entry)。"""
+    record = _pending_condition_record(due="2026-09-30", direction="bearish")
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)),
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=AsyncMock(return_value={"id": 1})) as update,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        updated = await run_once()
+    assert updated == 1
+    update.assert_awaited_once()
+    pid, ckey, entry = update.await_args.args
+    assert (pid, ckey) == (1, "c0")
+    assert entry["condition_met"] is True
+    assert "result" not in entry
+
+
+@pytest.mark.asyncio
+async def test_run_once_does_not_rewrite_already_lit_condition() -> None:
+    """T6 幂等：已点亮 true 的 c0 → run_once 不重复回写、不拉行情。"""
+    record = _pending_condition_record(
+        due="2026-09-30", direction="bearish",
+        verification={"c0": {"condition_met": True}},
+    )
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.node_api, "get_index_kline",
+                     new=AsyncMock()) as kline,
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=AsyncMock(return_value={"id": 1})) as update,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        updated = await run_once()
+    assert updated == 0
+    update.assert_not_awaited()
+    kline.assert_not_awaited()
