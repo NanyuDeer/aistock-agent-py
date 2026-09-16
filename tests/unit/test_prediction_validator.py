@@ -1420,3 +1420,116 @@ async def test_run_once_does_not_rewrite_already_lit_condition() -> None:
     assert updated == 0
     update.assert_not_awaited()
     kline.assert_not_awaited()
+
+
+# ============ 终审 #3/#5：第①段扫描窗口 = [created_at, today]（上限 120 自然日） ============
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_far_due_uses_created_at_window() -> None:
+    """#3：due 在 60 天后（旧 [due-20, due+10] 窗口过滤后对今天为空 → 静默跳过、长档
+    几乎永不点亮）→ 第①段改用 [created_at, today] 窗口，远端 due 也能点亮；
+    且请求区间只由 created_at/today 决定，不依赖 due。"""
+    record = _pending_condition_record(due="2026-11-15", direction="bearish")
+    record["created_at"] = "2026-09-01T10:20:30.000Z"
+    rows = _scan_rows([130.0 - i for i in range(25)])  # 末日 106 < MA20 115.5
+    with (
+        patch.object(pv.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    _, kwargs = kline.call_args
+    assert kwargs["start_date"] == "20260901"   # created_at（不是 due-20 = 20261026）
+    assert kwargs["end_date"] == "20260916"     # today（不是 due+10 = 20261125）
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_empty_window_skips_without_request() -> None:
+    """#3/#5：窗口为空（created_at 为未来脏值 → 裁剪后 start > end）→ 不产 entry，
+    且**不发起请求**（避免必然空请求）。"""
+    record = _pending_condition_record(due="2026-11-15", direction="bearish")
+    record["created_at"] = "2026-10-01"  # 晚于 today → 空窗
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out == {}
+    kline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_missing_created_at_falls_back_120d() -> None:
+    """#3：created_at 缺失 → 回退 today-120 自然日，不报错且仍能点亮。"""
+    record = _pending_condition_record(due="2026-11-15", direction="bearish")  # 无 created_at
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    _, kwargs = kline.call_args
+    assert kwargs["start_date"] == "20260519"   # 2026-09-16 - 120 自然日
+    assert kwargs["end_date"] == "20260916"
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_clamps_window_to_120_days() -> None:
+    """#3/#5：created_at 早于 today-120 自然日 → 越界裁剪到 120 日上限（不超额拉取）。"""
+    record = _pending_condition_record(due="2026-11-15", direction="bearish")
+    record["created_at"] = "2026-01-01T00:00:00+08:00"  # 远超 120 天
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        await pv._scan_condition_met(record)
+    _, kwargs = kline.call_args
+    assert kwargs["start_date"] == "20260519"   # today - 120d（裁剪后）
+    assert kwargs["end_date"] == "20260916"
+
+
+def _two_condition_record(record_id: int, created_at: str, due: str = "2026-09-30") -> dict:
+    """同一记录两条 condition（共用 anchor 档位 → 同一扫描窗口）。"""
+    record = _pending_condition_record(record_id=record_id, due=due, direction="bearish")
+    record["created_at"] = created_at
+    record["prediction"]["conditions"].append({
+        "condition": "若跌破前低",
+        "scenario": "后续 1-4 周下行",
+        "anchor": {"horizon": "short", "direction": "bearish", "threshold": ""},
+    })
+    return record
+
+
+@pytest.mark.asyncio
+async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
+    """成本（终审附带）：同一 run_once 内 stage① 取数记忆化——同记录多条 condition 只取
+    一次数；不同 created_at（窗口不同）不串用缓存（不得用他记录的窗口结果判定）。"""
+    rec1 = _two_condition_record(1, "2026-09-01")
+    rec2 = _pending_condition_record(record_id=2, due="2026-09-30", direction="bearish")
+    rec2["created_at"] = "2026-09-10"
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[rec1, rec2])),
+        patch.object(prediction_validator.node_api, "get_index_kline",
+                     new=AsyncMock(return_value=rows)) as kline,
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=AsyncMock(return_value={"id": 1})) as update,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        updated = await run_once()
+    assert updated == 3            # rec1 两条 + rec2 一条，全部点亮
+    assert kline.await_count == 2  # rec1 共享一次；rec2 窗口不同 → 各一次
+    keys = {(c.args[0], c.args[1]) for c in update.call_args_list}
+    assert keys == {(1, "c0"), (1, "c1"), (2, "c0")}

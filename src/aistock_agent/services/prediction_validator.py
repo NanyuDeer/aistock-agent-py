@@ -63,7 +63,14 @@ _STOCK_KLINE_FETCH_DAYS = 120
 # Spec B §4.2：验证画像缓存 TTL（秒）——每日 16:00 run_once 更新，86400 次日失效重算
 _PROFILE_CACHE_TTL = 86400
 
-# condition_met 第①段扫描窗口：最近 60 个交易日（D3：技术位类 MA5/MA20/MA60 + 前低/新高）
+# condition_met 第①段扫描窗口（终审 #3 修正）：
+#   窗口 = [created_at(开预判日), today]，**上限 120 自然日**（越界裁剪）；created_at 缺失 →
+#   回退 today-120d；空窗（created_at 为未来脏值）→ 直接跳过不发请求。
+#   旧实现误用 due 区间（_fetch_kline_window 的 [due-20, due+10]）：远端 due（long/越年档）
+#   时该区间落在未来、对"今天"过滤后为空 → 静默跳过，长档条件几乎永不点亮。
+_CONDITION_SCAN_MAX_DAYS = 120
+# 判定只取窗口内最近 60 个交易日的尾部切片（D3：MA20/MA60 + 前低/新高所需形态）；
+# 窗口本身是自然日区间，故取数长度由 _CONDITION_SCAN_MAX_DAYS 约束、此处只做尾部截取。
 _CONDITION_SCAN_WINDOW = 60
 
 # H3：板块验证阈值（G0c 标定 neutral 0.25%/strong 3.0%，版本 1.0）；
@@ -120,22 +127,19 @@ def _num(v: object) -> float | None:
     return float(v) if isinstance(v, int | float) else None
 
 
-async def _fetch_kline_window(
-    kind: str, code: str, due_date: str
+async def _fetch_kline_range(
+    kind: str, code: str, start: str, end: str
 ) -> list[dict[str, object]] | None:
-    """按 due 区间拉取日 K（统一 index/sector/stock）。返回升序
-    [{trade_date, pct_chg, close, vol}]；缺值行保留 None 占位（H7，由调用方计数）。
-    失败/空返回 None（=数据源故障）。"""
-    rng = _range_around_due(due_date)
-    if rng is None:
-        # 脏 due_date 无法确定窗口 → 数据源故障语义（_verify_horizon 落 insufficient）
-        return None
-    start, end = rng
+    """按**显式区间** [start, end]（YYYYMMDD）拉取日 K（统一 index/sector/stock）。
+
+    返回升序 [{trade_date, pct_chg, close, vol}]；缺值行保留 None 占位（H7，由调用方计数）。
+    失败/空返回 None（=数据源故障）。调用方决定区间口径（stage② due 区间 / stage① 扫描窗口）。
+    """
     if kind == "sector":
         raw = await node_api.get_ths_daily_range(code, start, end)
     elif kind == "stock":
         # Spec B：个股数据源接入（/internal/quote/{code}/kline，TushareKlineService），
-        # 携带与指数一致的区间参数 [due-20, due+10]。
+        # 携带与指数一致的区间参数。
         raw = await node_api.get_stock_kline(
             code, _STOCK_KLINE_FETCH_DAYS, start_date=start, end_date=end)
     else:
@@ -161,6 +165,46 @@ async def _fetch_kline_window(
             })
     parsed.sort(key=lambda x: str(x["trade_date"]))
     return parsed or None
+
+
+async def _fetch_kline_window(
+    kind: str, code: str, due_date: str
+) -> list[dict[str, object]] | None:
+    """按 due 区间（[due-20, due+10] 自然日）拉取日 K —— **stage②（horizon/到期 condition）
+    专用窗口，语义不变**；stage① 扫描另走 `_condition_scan_range` + `_fetch_kline_range`。"""
+    rng = _range_around_due(due_date)
+    if rng is None:
+        # 脏 due_date 无法确定窗口 → 数据源故障语义（_verify_horizon 落 insufficient）
+        return None
+    return await _fetch_kline_range(kind, code, rng[0], rng[1])
+
+
+def _condition_scan_range(record: dict[str, object], today: str) -> tuple[str, str] | None:
+    """第①段（到期前扫描）取数窗口 [created_at, today]（YYYYMMDD）；空窗返回 None。
+
+    终审 #3 裁决口径：
+    - 起点 = record.created_at（Node 端 `prediction_records.created_at`）的日期部分；
+      缺失/脏值 → 回退 `today - _CONDITION_SCAN_MAX_DAYS` 自然日；
+    - 上限 `_CONDITION_SCAN_MAX_DAYS` 自然日：早于 `today - 120d` 的起点裁剪到该下限；
+    - 裁剪后 start > end（created_at 为未来脏值）→ 返回 None，调用方**直接跳过、不发请求**。
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        end_d = datetime.strptime(today, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    floor_d = end_d - timedelta(days=_CONDITION_SCAN_MAX_DAYS)
+    created = record.get("created_at")
+    start_d = floor_d
+    if isinstance(created, str) and len(created) >= 10:
+        try:
+            start_d = max(datetime.strptime(created[:10], "%Y-%m-%d").date(), floor_d)
+        except ValueError:
+            start_d = floor_d  # 脏 created_at → 回退 120 日
+    if start_d > end_d:
+        return None
+    return start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d")
 
 
 def _judge_window(
@@ -496,6 +540,8 @@ async def _verify_conditions(
 async def _scan_condition_met(
     record: dict[str, object],
     methodology_version: str = _METHODOLOGY_VERSION,
+    *,
+    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] | None = None,
 ) -> dict[str, dict[str, object]]:
     """条件化预判第①段：到期前条件扫描（只点亮 `condition_met=true`，§4.2）。
 
@@ -504,12 +550,16 @@ async def _scan_condition_met(
     - 已有 `condition_met is True` → 跳过（幂等：不重复点亮）；
     - 已有 `result` → 跳过（已到期末判定，不得覆盖）；
     - `due_date <= today` → 跳过，交由 _verify_conditions 处理；
-    - 否则拉窗口行情（`_fetch_kline_window`；未来 due 时端点自然只返回到今日）→ 组装
+    - 否则拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
+      见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
       closes/pct_chgs/volumes（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
 
     判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
     threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含 volume 类
-   首批 omit，D2）不产 entry —— 只写 true 不写 false（D1）。
+    首批 omit，D2）不产 entry —— 只写 true 不写 false（D1）。
+
+    `scan_cache`：同一次 run_once 内 stage① 取数记忆化（key=(target_type, code, start, end)，
+    含窗口以防跨记录串用——不同 created_at 的窗口不同）。传 None 时仅在本记录内生效。
     """
     prediction = record.get("prediction")
     if not isinstance(prediction, dict):
@@ -517,6 +567,10 @@ async def _scan_condition_met(
     conditions = prediction.get("conditions")
     if not isinstance(conditions, list) or not conditions:
         return {}
+    today = shanghai_today().isoformat()
+    scan_range = _condition_scan_range(record, today)
+    if scan_range is None:
+        return {}  # 空窗：不产 entry 且不发请求（避免必然空请求）
     horizons = prediction.get("horizons")
     tgt = ""
     if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
@@ -524,8 +578,9 @@ async def _scan_condition_met(
     code, target_type, matched = await _resolve_verify_target(tgt)
     if code is None:
         return {}  # 无数据源：交第②段落 insufficient，本段不产点亮 entry
+    cache = scan_cache if scan_cache is not None else {}
     base: dict[str, object] = {
-        "verified_at": shanghai_today().isoformat(),
+        "verified_at": today,
         "methodology_version": methodology_version,
         "prediction_id": record.get("id"),
         "target_type": target_type,
@@ -537,7 +592,6 @@ async def _scan_condition_met(
     due_dates_map = due_dates if isinstance(due_dates, dict) else {}
     verification = record.get("verification")
     ver_map = verification if isinstance(verification, dict) else {}
-    today = shanghai_today().isoformat()
     out: dict[str, dict[str, object]] = {}
     for i, cond in enumerate(conditions):
         key = f"c{i}"
@@ -557,7 +611,12 @@ async def _scan_condition_met(
         due_date = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
         if not due_date or due_date <= today:
             continue  # 已到期/无 due → 交 _verify_conditions 第②段
-        rows = await _fetch_kline_window(target_type, code, due_date)
+        cache_key = (target_type, code, scan_range[0], scan_range[1])
+        if cache_key in cache:
+            rows = cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数
+        else:
+            rows = await _fetch_kline_range(target_type, code, *scan_range)
+            cache[cache_key] = rows
         if not rows:
             continue  # 数据源故障/无数据：本段静默跳过（不产 false 键）
         window = rows[-_CONDITION_SCAN_WINDOW:]
@@ -665,6 +724,8 @@ async def run_once() -> int:
         return 0
     updated = 0
     target_counter: dict[str, int] = {}
+    # stage① 取数记忆化（终审附带成本项）：同一批次内相同 (target_type, code, 窗口) 只取一次
+    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] = {}
     for record in records:
         record_id = record.get("id")
         # D2：Node internal 归一后为 number；兼容历史 string（曾致 isinstance(int) 门禁全量跳过）
@@ -710,7 +771,17 @@ async def run_once() -> int:
         # Spec A §4.2/§11：条件化预判两点判定——第①段（到期前扫描）先执行：条件一成立即
         # 点亮 condition_met=true（无 result，Node 端放行中间态），前端洞见卡"待验证"分支
         # 立即亮起；第②段（到期判定）照常写 result。幂等：已点亮/已有 result/已到期者跳过。
-        lit_entries = await _scan_condition_met(record)
+        # 单记录异常只 warning 不中断整批（与相邻写回循环同风格）。
+        try:
+            lit_entries = await _scan_condition_met(record, scan_cache=scan_cache)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "prediction_condition_scan_failed",
+                id=record_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            lit_entries = {}
         for lit_key, lit_entry in lit_entries.items():
             if _should_skip_horizon(verification.get(lit_key)):
                 continue  # 兜底：已有 result 的 key 不再写

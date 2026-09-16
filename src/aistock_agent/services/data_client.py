@@ -695,7 +695,9 @@ class NodeApiClient:
         self, code: str, start: str, end: str,
     ) -> list[dict[str, object]] | None:
         """板块区间日 K（GET /internal/ths/{code}/daily?start&end）。
-        返回升序 [{trade_date, pct_chg}]。失败/异常返回 None。"""
+        返回升序 [{trade_date, pct_chg, close, vol, amount}]（T9 `edb9941` 起透传
+        close/vol 供 condition_met 技术位判定；amount 上游 ths_daily 无此字段 → 恒 null，
+        缺失为 null 不丢行）。失败/异常返回 None。"""
         result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
             return result["rows"]
