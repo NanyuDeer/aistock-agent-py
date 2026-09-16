@@ -61,6 +61,40 @@ def test_labels_default_empty_and_parse():
     assert cond_old.label == ""
 
 
+def test_horizon_and_condition_label_default_empty_on_legacy_record():
+    """旧记录（已落库 JSON 无 label 键）反序列化 → label 空串，不 break 校验（spec §3）。"""
+    horizon = PredictionHorizon.model_validate(_valid_horizon())
+    assert horizon.label == ""
+
+    cond = PredictionCondition.model_validate(
+        {
+            "condition": "缩量企稳、不破前低",
+            "scenario": "空头衰竭、修复至平台",
+            "anchor": {"horizon": "short", "threshold": "+5%", "direction": "bullish"},
+        }
+    )
+    assert cond.label == ""
+
+    # 默认值声明在字段层（而非仅构造期产物）——防回归：label 不得变为必填或被改成 None
+    assert PredictionHorizon.model_fields["label"].default == ""
+    assert PredictionCondition.model_fields["label"].default == ""
+
+
+def test_horizon_and_condition_label_parse_and_roundtrip():
+    """label 显式传入 → 原样解析（不裁剪/不改写），并随 model_dump 序列化往返保持。"""
+    horizon = PredictionHorizon(**_valid_horizon(label="恐慌出清为主"))
+    cond = PredictionCondition(
+        condition="成交额放大至 900 亿以上、收盘较当前再跌超 2%",
+        label="恐慌出清 · 下跌中继",
+        scenario="恐慌出清、惯性下探 -3%~-5%",
+        anchor=PredictionAnchor(horizon="short", threshold="-3%", direction="bearish"),
+    )
+    assert horizon.label == "恐慌出清为主"
+    assert cond.label == "恐慌出清 · 下跌中继"
+    assert PredictionHorizon.model_validate(horizon.model_dump()).label == "恐慌出清为主"
+    assert PredictionCondition.model_validate(cond.model_dump()).label == "恐慌出清 · 下跌中继"
+
+
 def test_scenario_keywords_default_empty_and_parse():
     """2026-09-03 scenario_keywords 预判关键词：与 condition keywords 同构（1~2 个/≤10 字），
     新数据携带正常解析、旧记录缺省为空数组。"""
