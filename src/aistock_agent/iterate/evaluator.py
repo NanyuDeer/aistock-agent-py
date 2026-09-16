@@ -69,7 +69,7 @@ class VerificationScore:
 
     - 基础分 hit_rate：到期命中率（确定性，来自验证 entry）
     - direction_score：方向维度（预测 direction 与到期实际方向一致性）
-    - condition_met_rate：条件成立命中率（有 condition entry 时）
+    - condition_met_rate：条件成立命中率（存在 False entry 时；仅 true 无参照 → None）
     - miss_insights：失效模式归类（strong_reversal/plain_miss）
     - total/score：按 present 维度权重重归一化后的综合分
     - available_weight：剔除无对比对象维度后的可用权重和（对齐 ScoreDetail）
@@ -429,7 +429,9 @@ def evaluate_verification(
     维度：
     - 基础分 hit_rate（权重 0.5）：非 approximate 且 result∈{hit, miss} 的命中率。
     - 方向维度 direction_score（0.3）：预测 direction 与到期实际方向符号一致性。
-    - condition 维度 condition_met_rate（0.2）：condition_met 成立命中率（有 bool entry 时）。
+    - condition 维度 condition_met_rate（0.2）：condition_met 成立命中率。**仅当存在
+      `condition_met is False` 的 entry 时**才参与（第①段只写 true，无 false 参照的全 true
+      样本不算命中率，见终审 #4），否则该维度剔除并按 present 维度重归一化。
     按 present 维度权重重归一化（对齐 evaluate_attribution 的 available_weight）。
 
     空/无判档样本：返回降级 VerificationScore（total=0，gap 标注"无已验证样本"），不触发迭代。
@@ -474,11 +476,14 @@ def evaluate_verification(
         else 0.0
     )
 
-    # condition 维度：condition_met 为 bool 的 entry 成立命中率
+    # condition 维度：condition_met 为 bool 的 entry 成立命中率。
+    # **终审 #4**：两段判定的第①段只写 true、不写 false，故"只有 true"没有任何反例参照；
+    # 按全 True 算会读成 100% 命中率并把本维度（0.2 权重）当天花板抬高综合分。
+    # 口径修正：仅当存在 `condition_met is False` 的 entry 时才计算并纳入评分，否则视为无该维度。
     met_vals = [
         e.get("condition_met") for e in scoped if isinstance(e.get("condition_met"), bool)
     ]
-    condition_present = len(met_vals) > 0
+    condition_present = any(v is False for v in met_vals)
     condition_met_rate = (
         round(len([v for v in met_vals if v is True]) / len(met_vals), 4)
         if condition_present

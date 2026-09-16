@@ -171,23 +171,27 @@ def test_neutral_prediction_direction_uses_threshold() -> None:
 # condition 维度
 # ---------------------------------------------------------------------------
 
-def test_condition_met_rate_affects_score() -> None:
-    """condition_met 成立率参与评分；越高综合分越高。"""
+def test_condition_met_rate_requires_false_entry() -> None:
+    """终审 #4：第①段只写 true（无 false 参照）→ condition_met_rate 不得读成 100%，
+    否则 0.2 权重会把"只写 true"当成满分抬高迭代评分——此时该维度整体剔除（None）。
+    存在 false entry 时按原口径计算（成立数 / 已确认数）。"""
     conds = [_cond(0), _cond(1), _cond(2)]
     base = _prediction(conditions=conds)
-    high = _score(base, [
+    only_true = _score(base, [
         _entry(condition_index=0, condition_met=True, result="hit"),
         _entry(condition_index=1, condition_met=True, result="hit"),
         _entry(condition_index=2, condition_met=True, result="hit"),
     ])
-    low = _score(base, [
+    mixed = _score(base, [
         _entry(condition_index=0, condition_met=True, result="hit"),
         _entry(condition_index=1, condition_met=False, result="hit"),
         _entry(condition_index=2, condition_met=False, result="hit"),
     ])
-    assert high.condition_met_rate == 1.0
-    assert high.condition_met_rate > low.condition_met_rate
-    assert high.score > low.score
+    assert only_true.condition_met_rate is None
+    assert only_true.available_weight == 0.8        # condition(0.2) 维度不参与分母
+    assert mixed.condition_met_rate == round(1 / 3, 4)
+    assert mixed.available_weight == 1.0
+    assert "条件成立命中率偏低" in mixed.gap_analysis
 
 
 def test_no_condition_dimension_renormalizes() -> None:

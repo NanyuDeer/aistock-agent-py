@@ -238,6 +238,26 @@ def test_build_validation_profile_condition_met_distribution():
     assert c0 == {"count": 3, "met": 1, "confirmed": 2}
 
 
+def test_build_validation_profile_condition_met_rate_none_when_only_true():
+    """终审 #4：第①段只写 true（无任何 false 参照）→ 不得读成 100% 命中率抬高下游评分，
+    condition_met_rate 返回 None（分布 condition_summary 仍按 entry 计数，仅命中率不产值）。"""
+    entries = [
+        _v3_entry(condition_index=0, condition_met=True),
+        _v3_entry(condition_index=1, condition_met=True),
+    ]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    assert p["condition_met_rate"] is None
+    assert p["condition_summary"]["c0"]["met"] == 1
+    assert p["condition_summary"]["c1"]["count"] == 1
+
+
+def test_build_validation_profile_condition_met_rate_zero_with_false_entry():
+    """终审 #4 反例：存在 false entry → 按原口径计算（0 成立 / 1 已确认 = 0.0，而非 None）。"""
+    entries = [_v3_entry(condition_index=0, condition_met=False)]
+    p = build_validation_profile(entries, "600519", **_PROFILE_V3)
+    assert p["condition_met_rate"] == 0.0
+
+
 def test_build_validation_profile_sample_threshold():
     """Spec B §7 P1：样本充足（30 档 + 30 prediction）→ sufficient_sample。"""
     entries = [_v3_entry("hit", prediction_id=i) for i in range(30)]
