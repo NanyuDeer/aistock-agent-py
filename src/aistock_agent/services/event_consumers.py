@@ -428,13 +428,15 @@ class SectorTraceConsumer(BaseConsumer):
     独立消费组 sector_chain（与 prediction_chain 并列），失败走 event_bus.retry→DLQ。
     review 无主因板块 → 跳过不产出（日志）。
 
-    级联预判（Spec D · 预判环生产触发）：溯源成功后串行调 predict_sector（同一
-    handler 内，非新增事件/触发通道）——sector_snapshot 用溯源快照（板块行情 +
+    级联预判（Spec D · 预判环生产触发，spec §13.1 方案 A）：**链组装/保存之后**并行
+    调 predict_sector（同一 handler 内，非新增事件/触发通道）——先有当日链，预判的
+    输入组装（P2' 依据增强）才可能读到链；sector_snapshot 用溯源快照（板块行情 +
     事件证据），当日大盘结论由 predict_sector 内部 _market_trace_brief 主动拉取
     （输入组装级联）。落库 source_type="sector_prediction"（Node 按
     (source_type, source_id) 幂等 upsert，review_done quick/full 重复触发不堆积），
     status 默认 pending → 16:00 到期验证 → prediction_verified_scan → 板块预判迭代。
-    预判失败仅日志不阻断（绝不因预判问题把溯源事件重试进 DLQ）。
+    预判失败仅日志不阻断（绝不因预判问题把溯源事件重试进 DLQ）；链保存与级联预判
+    两个 try 相互独立（链保存失败不跳过级联，级联失败不影响已保存的链）。
     """
 
     consumer_group = "sector_chain"
@@ -459,6 +461,8 @@ class SectorTraceConsumer(BaseConsumer):
         }
 
         results: list[object] = []
+        # 级联预判入参（板块名 + 溯源快照），链保存后再消费（P0' 时序）
+        cascades: list[tuple[str, dict[str, object]]] = []
 
         async def _one(sector_name: str, sector_row: dict[str, object]) -> None:
             try:
@@ -469,12 +473,8 @@ class SectorTraceConsumer(BaseConsumer):
                     parent_trace_ref=parent_ref,
                 )
                 results.append(result)
+                cascades.append((sector_name, result.snapshot))
                 logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
-                await _cascade_sector_prediction(
-                    report_date=report_date,
-                    sector_name=sector_name,
-                    sector_snapshot=result.snapshot,
-                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "sector_trace_one_failed",
@@ -502,6 +502,27 @@ class SectorTraceConsumer(BaseConsumer):
                     report_date=report_date,
                     error=str(exc),
                 )
+
+        # P0'（spec §13.1 方案 A）：级联预判**移到链组装/保存之后**——预判输入组装
+        # （P2' 依据增强）需读当日链；gather 并行触发（串行 for 会让每板块一次 LLM
+        # 调用线性累加）。级联失败只 warning（溯源与链已落库），与链保存 try 独立。
+        async def _cascade_one(sector_name: str, sector_snapshot: dict[str, object]) -> None:
+            try:
+                await _cascade_sector_prediction(
+                    report_date=report_date,
+                    sector_name=sector_name,
+                    sector_snapshot=sector_snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001 — 级联失败不得阻断/回滚溯源与链
+                logger.warning(
+                    "sector_cascade_predict_failed",
+                    report_date=report_date,
+                    sector=sector_name,
+                    error=str(exc),
+                )
+
+        if cascades:
+            await asyncio.gather(*(_cascade_one(name, snap) for name, snap in cascades))
 
 
 def _review_index_pct(report: dict[str, object]) -> float | None:

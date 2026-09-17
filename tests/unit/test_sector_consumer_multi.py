@@ -6,8 +6,11 @@
 - 单板块溯源失败仅 warning 不阻断其它板块，handle 不 raise（review_done 不进 retry/DLQ）；
 - _review_index_pct 大盘指数涨跌候选键解析与降级（index_pct=None → relation unknown）。
 """
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -193,3 +196,138 @@ async def test_handle_parent_ref_index_pct_from_real_snapshot_indexes() -> None:
     ):
         await consumer.handle(event)
     assert mock_run.await_args.kwargs["parent_trace_ref"]["index_pct"] == -1.2
+
+
+# --- Task 1.1（spec §13.1 方案 A，P0' 时序）：链组装先于级联预判 + 两个 try 独立 ---
+
+
+def _chain_store_patch(save_side_effect: object = None):
+    """AttributionChainStore 替身（save=AsyncMock），供顺序/隔离断言。
+
+    链保存在 handle 内是函数级 import，patch 模块属性即可对被调方生效。
+    """
+    store = SimpleNamespace(save=AsyncMock(side_effect=save_side_effect))
+    return (
+        patch(
+            "aistock_agent.services.attribution_chain.AttributionChainStore",
+            MagicMock(return_value=store),
+        ),
+        store,
+    )
+
+
+@contextmanager
+def _sector_handle_patches(*, cascade: AsyncMock, store_patch: object) -> Iterator[None]:
+    """handle 的常规依赖替身（review 报告 / 主因板块 / 溯源）+ 链 Store 替身。"""
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.node_api.get_analysis_report",
+            AsyncMock(return_value=_review_report(index_pct=-1.2)),
+        ),
+        patch(
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=_TWO_SECTORS,
+        ),
+        patch(
+            "aistock_agent.services.event_consumers.run_sector_trace",
+            AsyncMock(return_value=SimpleNamespace(snapshot={})),
+        ),
+        patch(
+            "aistock_agent.services.event_consumers._cascade_sector_prediction",
+            cascade,
+        ),
+        store_patch,
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_handle_saves_chain_before_cascade_prediction() -> None:
+    """P0' 时序：链组装/保存完成后才触发级联预判（级联可读到当日链）。"""
+    call_order: list[str] = []
+    consumer = SectorTraceConsumer(ctx=object())
+    event = _make_event("2026-07-16")
+
+    async def _cascade(**kwargs: object) -> None:
+        call_order.append("cascade")
+
+    store_patch, _store = _chain_store_patch(lambda *a, **k: call_order.append("chain_save"))
+    with _sector_handle_patches(
+        cascade=AsyncMock(side_effect=_cascade), store_patch=store_patch
+    ):
+        await consumer.handle(event)
+
+    assert call_order[0] == "chain_save"  # 链先于级联（旧时序此处为 cascade）
+    assert call_order.count("chain_save") == 1
+    assert call_order.count("cascade") == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_cascade_runs_when_chain_save_fails() -> None:
+    """链保存抛错 → 只 warning，不向外抛，且不得跳过级联预判。"""
+    call_order: list[str] = []
+    consumer = SectorTraceConsumer(ctx=object())
+    event = _make_event("2026-07-16")
+
+    async def _cascade(**kwargs: object) -> None:
+        call_order.append("cascade")
+
+    def _save_fail(*args: object, **kwargs: object) -> None:
+        call_order.append("chain_save")
+        raise RuntimeError("chain store down")
+
+    store_patch, _store = _chain_store_patch(_save_fail)
+    with _sector_handle_patches(
+        cascade=AsyncMock(side_effect=_cascade), store_patch=store_patch
+    ):
+        await consumer.handle(event)  # 不得抛出（review_done 不进 retry/DLQ）
+
+    assert call_order[0] == "chain_save"
+    assert call_order.count("chain_save") == 1
+    assert call_order.count("cascade") == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_chain_result_kept_when_cascade_fails() -> None:
+    """级联预判抛错 → 链已保存的结果不受影响，且 handle 不向外抛。"""
+    call_order: list[str] = []
+    consumer = SectorTraceConsumer(ctx=object())
+    event = _make_event("2026-07-16")
+
+    async def _cascade_fail(**kwargs: object) -> None:
+        call_order.append("cascade")
+        raise RuntimeError("cascade down")
+
+    store_patch, store = _chain_store_patch(lambda *a, **k: call_order.append("chain_save"))
+    with _sector_handle_patches(
+        cascade=AsyncMock(side_effect=_cascade_fail), store_patch=store_patch
+    ):
+        await consumer.handle(event)  # 不得抛出
+
+    assert store.save.await_count == 1  # 链已保存
+    assert call_order[0] == "chain_save"
+    assert call_order.count("cascade") == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_cascade_predictions_run_concurrently() -> None:
+    """级联预判必须并行触发（gather），不得串行线性累加 LLM 调用。"""
+    in_flight = 0
+    peak = 0
+    consumer = SectorTraceConsumer(ctx=object())
+    event = _make_event("2026-07-16")
+
+    async def _cascade(**kwargs: object) -> None:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+
+    store_patch, _store = _chain_store_patch()
+    with _sector_handle_patches(
+        cascade=AsyncMock(side_effect=_cascade), store_patch=store_patch
+    ):
+        await consumer.handle(event)
+
+    assert peak == 2  # 两板块预判同时在飞（串行 for 会得到 1）
