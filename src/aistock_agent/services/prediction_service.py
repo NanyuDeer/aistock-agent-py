@@ -234,7 +234,11 @@ def _build_prediction_input(
         "chains": chains,
         "phenomenon_discovery": snapshot.phenomenon_discovery.model_dump(mode="json"),
         "a_share": {
-            "indices": snapshot.a_share.get("indices"),
+            # 生产快照指数键为 indexes（normalize_a_share 产出）；indices 为历史兼容键。
+            # 输出侧 key 保持 indices（prompt 未约定该块键名，见 prompts/workers/prediction.py）。
+            "indices": snapshot.a_share.get("indexes")
+            or snapshot.a_share.get("indices")
+            or [],
             "sectors": snapshot.a_share.get("sectors"),
         },
         "trade_date": snapshot.trade_date,
