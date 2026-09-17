@@ -7,10 +7,14 @@ condition_index）、SQL 生成（只 `#-` 删 condition_met 键、不碰 result
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from scripts.rollback_condition_met import (
     RollbackTarget,
+    _parse_args,
+    _run,
     build_sql,
     render_plan,
     select_targets,
@@ -115,3 +119,47 @@ def test_render_plan_lists_locator_and_truncates_condition() -> None:
     assert "待回滚 1 条" in plan
     assert "market_trace/review:2026-09-17" in plan
     assert "…" in plan  # 长条件截断展示（人工复核仍以原文为准）
+
+
+# ============ CLI 装配（只读 + 落盘 SQL；不连库写入） ============
+
+
+@pytest.mark.asyncio
+async def test_run_writes_sql_file_without_touching_db(tmp_path, capsys) -> None:
+    """`--sql-out` 路径：落盘 SQL，且全程不调用任何写接口（只读 + 生成文件）。"""
+    record = _record(verification={"c0": {"condition_met": True, "condition_index": 0}})
+    out_file = tmp_path / "rollback.sql"
+    args = _parse_args(["--source-id", "sector:半导体材料:2026-09-17", "--sql-out", str(out_file)])
+    with patch(
+        "scripts.rollback_condition_met._load_records",
+        new=AsyncMock(return_value=[record]),
+    ):
+        code = await _run(args)
+    assert code == 0
+    assert out_file.exists()
+    assert "verification #- '{c0,condition_met}'" in out_file.read_text(encoding="utf-8")
+    assert "SQL 已写出" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_run_dry_run_prints_caution_when_no_targets(capsys) -> None:
+    """无候选（含读接口失败静默空列表）→ 退 0 并提示先核对可达性（不产 SQL）。"""
+    args = _parse_args(["--date", "2026-09-17"])
+    with patch(
+        "scripts.rollback_condition_met._load_records", new=AsyncMock(return_value=[])
+    ):
+        code = await _run(args)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "无待回滚项" in out
+    assert "NODE_API_BASE_URL" in out  # 读失败静默返回空的坑：清单为 0 时先核对可达性
+
+
+@pytest.mark.asyncio
+async def test_run_returns_error_when_read_fails() -> None:
+    """读失败（异常）→ 退 1，不产任何 SQL/清单（宁可不回滚，也不在数据不全时误改）。"""
+    args = _parse_args([])
+    with patch(
+        "scripts.rollback_condition_met._load_records", new=AsyncMock(return_value=None)
+    ):
+        assert await _run(args) == 1

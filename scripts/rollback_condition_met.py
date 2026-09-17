@@ -234,7 +234,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
     print(render_plan(targets, args.date))
     if not targets:
-        print("[rollback-condition-met] 无待回滚项（未点亮或筛选未命中）")
+        print(
+            "[rollback-condition-met] 无待回滚项（未点亮或筛选未命中）"
+            "；注意：读接口失败会静默返回空列表，清单为 0 时请先确认 "
+            "NODE_API_BASE_URL / INTERNAL_API_TOKEN 可达（本脚本不写库，可安全重复执行）"
+        )
         return 0
     sql = build_sql(targets)
     if args.dry_run and not args.sql_out:
