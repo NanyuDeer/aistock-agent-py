@@ -265,3 +265,269 @@ def test_index_pct_non_numeric_change_pct_falls_back_then_none():
         ]["index_pct"]
         is None
     )
+
+
+# --- Task 2.1：链事件节点契约（children[].events: warehouse/search，spec §3.2-4） ---
+
+# 与 sector_trace_snapshot._sector_evidence_queries 第 1 组同形（检索补漏来源的 kind 后缀）
+_SEARCH_QUERY = "2026-09-03 半导体材料 板块 暴跌 大涨 原因"
+
+
+def _warehouse_event(
+    event_id: str | None,
+    title: str,
+    *,
+    url: str = "",
+    impact_score: int = 5,
+    keywords: list[str] | None = None,
+    industry: str = "",
+    summary: str = "",
+) -> dict[str, object]:
+    """中台存量事件（event_store.EventRecord 消费侧最小形状）。"""
+    return {
+        "event_id": event_id,
+        "title": title,
+        "summary": summary,
+        "url": url,
+        "impact_score": impact_score,
+        "involved_keywords": keywords or [],
+        "industry": industry,
+    }
+
+
+def _search_source(
+    title: str,
+    *,
+    url: str = "",
+    content: str = "板块当日大幅波动，市场关注政策动向。",
+    query: str = _SEARCH_QUERY,
+) -> dict[str, object]:
+    """板块定向检索来源（sector_trace_snapshot._normalize_source 产物形状）。"""
+    return {
+        "title": title,
+        "url": url,
+        "content": content,
+        "published_at": "2026-09-03T10:00:00Z",
+        "kind": f"sector_event:{query}",
+        "source": "tavily_finance_search",
+    }
+
+
+def _sector_with_evidence(
+    name: str,
+    pct: float,
+    summary: str = "美对华设备出口限制落地",
+    *,
+    sources: list[dict[str, object]] | None = None,
+    trigger_evidence: list[dict[str, object]] | None = None,
+    attribution_parent: dict[str, object] | None = None,
+):
+    """板块溯源结果（真实 dump 形状 + 快照 sources + 可选报告 attribution_parent）。"""
+    stages = [
+        SectorStage(kind="phenomenon", headline=f"{name}今日大幅波动"),
+        SectorStage(
+            kind="trigger",
+            headline=summary,
+            claims=[summary],
+            evidence=trigger_evidence or [],
+        ),
+        SectorStage(kind="transmission", headline=f"{name}带动产业链联动"),
+        SectorStage(kind="impact", headline="拖累大盘"),
+    ]
+    chain = SectorChainResult(
+        chain_id=f"chain-{name}",
+        sector=name,
+        stages=stages,
+        attribution_status="sufficient",
+    )
+
+    class R:
+        sector = name
+        trace_result = chain.model_dump(mode="json")
+        snapshot = {"sector": {"name": name, "pct_change": pct}, "sources": sources or []}
+
+    if attribution_parent is not None:
+        R.attribution_parent = attribution_parent  # type: ignore[attr-defined]
+    return R()
+
+
+def test_child_events_warehouse_hit_keeps_event_id():
+    """中台命中 → source='warehouse' 且 event_id 非空（ref 为可追溯 URL）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+        warehouse_events=[
+            _warehouse_event(
+                "2026-09-03-abc1234567890",
+                "美对华半导体设备出口限制落地",
+                url="https://news.example.com/a",
+                impact_score=9,
+                keywords=["半导体", "出口限制"],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": "2026-09-03-abc1234567890",
+            "ref": "https://news.example.com/a",
+            "headline": "美对华半导体设备出口限制落地",
+            "source": "warehouse",
+        }
+    ]
+
+
+def test_child_events_search_fallback_when_warehouse_miss():
+    """中台无命中但检索有 → source='search'，event_id 为 null（不冒充中台 id）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[_search_source("半导体材料板块大跌 出口管制升级", url="https://news.example.com/b")],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": None,
+            "ref": "https://news.example.com/b",
+            "headline": "半导体材料板块大跌 出口管制升级",
+            "source": "search",
+        }
+    ]
+
+
+def test_child_events_empty_when_no_hit():
+    """中台与检索都无命中 → events 为空数组，不编造 event_id/URL。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[_search_source("白酒龙头半年报点评", url="https://news.example.com/c")],
+            )
+        ],
+        warehouse_events=[_warehouse_event("2026-09-03-zzz", "白酒库存周期见底")],
+    )
+    assert chain["children"][0]["events"] == []
+
+
+def test_child_events_dedup_same_event_keeps_warehouse_only():
+    """同一现实事件（同 URL）不产生两个节点：中台优先，检索补漏被吸收。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[_search_source("半导体材料设备出口限制落地", url="https://news.example.com/a")],
+            )
+        ],
+        warehouse_events=[
+            _warehouse_event(
+                "2026-09-03-abc1234567890",
+                "美对华半导体设备出口限制落地",
+                url="https://news.example.com/a",
+                keywords=["半导体材料"],
+            )
+        ],
+    )
+    events = chain["children"][0]["events"]
+    assert len(events) == 1
+    assert events[0]["source"] == "warehouse"
+
+
+def test_child_events_dedup_similar_title_across_search_sources():
+    """检索来源标题仅标点/空格差异（归一化相同）→ 只留一条。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块大跌：出口管制升级", url="https://news.example.com/d1"),
+                    _search_source("半导体材料板块大跌 出口管制升级", url="https://news.example.com/d2"),
+                ],
+            )
+        ],
+    )
+    events = chain["children"][0]["events"]
+    assert len(events) == 1
+    assert events[0]["headline"] == "半导体材料板块大跌：出口管制升级"
+
+
+def test_child_events_cap_and_ranking_by_impact():
+    """每板块上限 3 条，取最相关（权重同分按 impact_score 降序）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+        warehouse_events=[
+            _warehouse_event(f"2026-09-03-e{i}", f"半导体材料相关事件{i}", impact_score=score)
+            for i, score in enumerate([4, 9, 6, 8, 5])
+        ],
+    )
+    headlines = [e["headline"] for e in chain["children"][0]["events"]]
+    assert headlines == ["半导体材料相关事件1", "半导体材料相关事件3", "半导体材料相关事件2"]
+
+
+def test_child_events_warehouse_without_event_id_skipped():
+    """契约要求 warehouse 节点 event_id 非空 → 无 id 的中台事件不产节点（宁缺不造）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+        warehouse_events=[
+            _warehouse_event(None, "半导体材料出口限制落地", url="https://news.example.com/e"),
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+
+
+def test_child_events_search_ref_falls_back_to_query_and_title():
+    """检索来源无 URL → ref 用「检索 query + title」保留可追溯引用。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料", -3.0, sources=[_search_source("半导体材料出口管制升级")]
+            )
+        ],
+    )
+    assert chain["children"][0]["events"][0]["ref"] == (
+        f"search:{_SEARCH_QUERY}|半导体材料出口管制升级"
+    )
+
+
+def test_child_events_prefers_trigger_evidence_source():
+    """检索补漏排序：溯源 trigger 阶段引用的来源（最贴近根因）优先于检索原始序。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块今日收评：资金净流出", url="https://news.example.com/f1"),
+                    _search_source("半导体材料出口管制升级落地", url="https://news.example.com/f2"),
+                ],
+                trigger_evidence=[
+                    {"url": "https://news.example.com/f2", "title": "半导体材料出口管制升级落地"}
+                ],
+            )
+        ],
+    )
+    assert [e["ref"] for e in chain["children"][0]["events"]] == [
+        "https://news.example.com/f2",
+        "https://news.example.com/f1",
+    ]

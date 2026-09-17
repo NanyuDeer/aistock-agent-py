@@ -128,12 +128,282 @@ def _pct_from(snapshot: dict[str, object]) -> float | None:
     return float(v) if isinstance(v, int | float) else None
 
 
+# --- 链事件层（spec §3.2-4：中台优先 → 检索补漏，去重 + 上限，禁编造） ---
+
+# 每板块事件节点上限（取最相关；超出丢弃并留痕）
+MAX_CHAIN_EVENTS_PER_SECTOR = 3
+
+_EVENT_SOURCE_WAREHOUSE = "warehouse"
+_EVENT_SOURCE_SEARCH = "search"
+
+# 板块定向检索来源的 kind 前缀（sector_trace_snapshot._normalize_source 产出
+# kind=f"sector_event:{query}"）：链事件层的检索补漏**只消费定向检索产物**，
+# 不另起检索（溯源快照已强制跑过，见 sector_trace_snapshot.build_sector_snapshot）。
+_SECTOR_SOURCE_PREFIX = "sector_event:"
+
+# 板块名常见后缀（"券商板块" 同时按 "券商" 匹配）；不建别名表——无权威别名源，
+# 猜测性别名会引入误召回。
+_SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
+
+# 盘面复述/表层转载特征词：命中降权（spec §3.2-4"追溯到最本质事件"——避免停在
+# 复述当日行情/资金流的新闻上）。仅降权不排除；排除只按板块相关性门槛。
+_RECAP_TITLE_MARKERS = ("收评", "午评", "早评", "复盘", "盘点", "资金流向", "涨停潮", "异动")
+
+
+def _normalize_match_text(value: object) -> str:
+    """匹配/去重归一化：仅保留字母数字与汉字（去空格、标点、大小写差异）。"""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _sector_tokens(sector: str) -> list[str]:
+    """板块匹配词：板块名 + 剥常见后缀后的核心名（长度 ≥2 才用）。"""
+    name = (sector or "").strip()
+    if not name:
+        return []
+    tokens = [name]
+    for suffix in _SECTOR_NAME_SUFFIXES:
+        if name.endswith(suffix) and len(name) - len(suffix) >= 2:
+            tokens.append(name[: -len(suffix)])
+    return tokens
+
+
+def _mentions(text: str, tokens: list[str]) -> bool:
+    return any(token in text for token in tokens if token)
+
+
+def _warehouse_match_weight(tokens: list[str], event: dict[str, object]) -> int:
+    """中台事件与板块的相关度权重（确定性：实体 > 关键词 > 标题 > 摘要；0 = 不相关）。"""
+    industry = str(event.get("industry") or "")
+    if industry and _mentions(industry, tokens):
+        return 3
+    raw_keywords = event.get("involved_keywords")
+    keywords = (
+        [str(k) for k in raw_keywords if isinstance(k, str)]
+        if isinstance(raw_keywords, list)
+        else []
+    )
+    for token in tokens:
+        if any(len(k) >= 2 and (token in k or k in token) for k in keywords):
+            return 3
+    if _mentions(str(event.get("title") or ""), tokens):
+        return 2
+    if _mentions(str(event.get("summary") or ""), tokens):
+        return 1
+    return 0
+
+
+def _node(
+    *,
+    event_id: str | None,
+    ref: str,
+    headline: str,
+    source: str,
+    content_hash: str = "",
+) -> dict[str, object]:
+    """事件节点（内部形状：公开四字段 + 去重键；_dedup 后投影为公开契约）。"""
+    return {
+        "event_id": event_id,
+        "ref": ref,
+        "headline": headline,
+        "source": source,
+        "_title_key": _normalize_match_text(headline),
+        "_content_hash": content_hash,
+        "_url_key": ref if ref.startswith(("http://", "https://")) else "",
+    }
+
+
+def _warehouse_candidates(
+    sector: str, warehouse_events: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """中台存量命中（spec §3.2-4 ①）：按板块别名/关键词/实体匹配，权重→影响力→原序。"""
+    tokens = _sector_tokens(sector)
+    if not tokens:
+        return []
+    scored: list[tuple[int, int, int, dict[str, object]]] = []
+    for index, event in enumerate(warehouse_events):
+        if not isinstance(event, dict):
+            continue
+        weight = _warehouse_match_weight(tokens, event)
+        if weight <= 0:
+            continue
+        title = str(event.get("title") or "").strip()
+        # 契约：source=warehouse 的 event_id 必须非空；无标题无法作为事件摘要 →
+        # 二者任一缺失即不产节点（宁缺不造，不用 url 冒充 id）
+        event_id = str(event.get("event_id") or event.get("app_event_id") or "").strip()
+        if not title or not event_id:
+            continue
+        url = str(event.get("url") or "").strip()
+        impact = event.get("impact_score")
+        impact_score = impact if isinstance(impact, int) else 0
+        scored.append(
+            (
+                -weight,
+                -impact_score,
+                index,
+                _node(
+                    event_id=event_id,
+                    ref=url or f"event:{event_id}",
+                    headline=title,
+                    source=_EVENT_SOURCE_WAREHOUSE,
+                    content_hash=str(event.get("content_hash") or ""),
+                ),
+            )
+        )
+    scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in scored]
+
+
+def _trigger_evidence_urls(trace_result: dict[str, object]) -> set[str]:
+    """溯源 trigger 阶段引用的来源 URL（最贴近根因的判断来自既有溯源产物，非新增 LLM 判定）。"""
+    stages = trace_result.get("stages") if isinstance(trace_result, dict) else None
+    if not isinstance(stages, list):
+        return set()
+    urls: set[str] = set()
+    for stage in stages:
+        if not isinstance(stage, dict) or stage.get("kind") != "trigger":
+            continue
+        evidence = stage.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        for ref in evidence:
+            url = str(ref.get("url") or "").strip() if isinstance(ref, dict) else ""
+            if url:
+                urls.add(url)
+    return urls
+
+
+def _search_candidates(
+    sector: str,
+    trace_result: dict[str, object],
+    snapshot: dict[str, object],
+) -> list[dict[str, object]]:
+    """检索补漏（spec §3.2-4 ②，溯源板块一律强制执行）。
+
+    消费溯源快照的定向检索来源（sources[].kind="sector_event:<query>"，由
+    sector_trace_snapshot._run_directed_searches 真实产出）。相关性门槛：标题/正文
+    命中板块词，或 URL 被 trigger 阶段引用；门槛不过 → 不产节点（不编造事件）。
+    """
+    sources = snapshot.get("sources") if isinstance(snapshot, dict) else None
+    if not isinstance(sources, list):
+        return []
+    tokens = _sector_tokens(sector)
+    evidence_urls = _trigger_evidence_urls(trace_result)
+    scored: list[tuple[int, int, int, int, int, dict[str, object]]] = []
+    for index, item in enumerate(sources):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        if not kind.startswith(_SECTOR_SOURCE_PREFIX):
+            continue
+        query = kind[len(_SECTOR_SOURCE_PREFIX) :]
+        title = str(item.get("title") or "").strip()
+        content = str(item.get("content") or "")
+        headline = title or content[:60].strip()
+        if not headline:
+            continue
+        url = str(item.get("url") or "").strip()
+        in_title = _mentions(title, tokens)
+        in_content = _mentions(content, tokens)
+        by_evidence = bool(url) and url in evidence_urls
+        if not (by_evidence or in_title or in_content):
+            continue
+        recap = 1 if any(marker in title for marker in _RECAP_TITLE_MARKERS) else 0
+        scored.append(
+            (
+                0 if by_evidence else 1,
+                0 if in_title else 1,
+                0 if in_content else 1,
+                recap,
+                index,
+                _node(
+                    event_id=None,  # 检索来源无中台权威 id（不冒充）
+                    ref=url or f"search:{query}|{headline}",
+                    headline=headline,
+                    source=_EVENT_SOURCE_SEARCH,
+                ),
+            )
+        )
+    scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+    return [item[5] for item in scored]
+
+
+def _is_same_event(left: dict[str, object], right: dict[str, object]) -> bool:
+    """同一现实事件判定（确定性：content_hash → URL → 标题归一化/互相包含）。"""
+    left_hash, right_hash = str(left["_content_hash"]), str(right["_content_hash"])
+    if left_hash and right_hash and left_hash == right_hash:
+        return True
+    if left["_url_key"] and left["_url_key"] == right["_url_key"]:
+        return True
+    left_title, right_title = str(left["_title_key"]), str(right["_title_key"])
+    if not left_title or not right_title:
+        return False
+    if left_title == right_title:
+        return True
+    shorter, longer = sorted((left_title, right_title), key=len)
+    return len(shorter) >= 8 and shorter in longer
+
+
+def _child_events(
+    sector: str,
+    trace_result: dict[str, object],
+    snapshot: dict[str, object],
+    warehouse_events: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    """板块事件节点集合：中台优先 → 检索补漏 → 去重 → 上限（返回节点 + 留痕计数）。"""
+    candidates = _warehouse_candidates(sector, warehouse_events)
+    candidates.extend(_search_candidates(sector, trace_result, snapshot))
+    kept: list[dict[str, object]] = []
+    dropped = 0
+    for candidate in candidates:
+        if any(_is_same_event(candidate, existing) for existing in kept):
+            dropped += 1
+            continue
+        kept.append(candidate)
+    capped = len(kept) - MAX_CHAIN_EVENTS_PER_SECTOR
+    kept = kept[:MAX_CHAIN_EVENTS_PER_SECTOR]
+    events = [
+        {
+            "event_id": item["event_id"],
+            "ref": item["ref"],
+            "headline": item["headline"],
+            "source": item["source"],
+        }
+        for item in kept
+    ]
+    stats = {
+        "warehouse": sum(1 for e in events if e["source"] == _EVENT_SOURCE_WAREHOUSE),
+        "search": sum(1 for e in events if e["source"] == _EVENT_SOURCE_SEARCH),
+        "deduped": dropped,
+        "capped": max(capped, 0),
+    }
+    return events, stats
+
+
+async def load_chain_warehouse_events(report_date: str) -> list[dict[str, object]]:
+    """读当日中台存量事件（事件抓取中台 report_type=event_scrape）供链事件层匹配。
+
+    复用 event_store.load_event_scrape（内部已吞异常返回 []，空事件库是常态）：
+    链事件层不因中台不可用而失败——events 退化为检索补漏或空数组。
+    """
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    events = await load_event_scrape(report_date)
+    return [dict(event) for event in events if isinstance(event, dict)]
+
+
 def assemble_attribution_chain(
     report_date: str,
     review_payload: dict[str, object],
     sector_results: list[object],
+    warehouse_events: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """组装 大盘(market) → 主驱动板块(self_driven/follow) 归因链。"""
+    """组装 大盘(market) → 主驱动板块(self_driven/follow) 归因链。
+
+    `warehouse_events` 为当日中台存量事件（`load_chain_warehouse_events` 产物，供
+    children[].events 的"中台优先"匹配）；缺省 None = 不做中台匹配，只走检索补漏。
+    """
     report = review_payload.get("report")
     content = report.get("content") if isinstance(report, dict) else None
     content = content if isinstance(content, dict) else None
@@ -154,12 +424,28 @@ def assemble_attribution_chain(
         trace_result = getattr(res, "trace_result", {}) or {}
         snapshot_dict = getattr(res, "snapshot", {}) or {}
         pct = _pct_from(snapshot_dict) if isinstance(snapshot_dict, dict) else None
+        # 链事件层（spec §3.2-4）：中台优先 → 检索补漏 → 去重 → 上限；无命中为空数组
+        events, event_stats = _child_events(
+            sector,
+            trace_result if isinstance(trace_result, dict) else {},
+            snapshot_dict if isinstance(snapshot_dict, dict) else {},
+            warehouse_events or [],
+        )
+        if events or event_stats["deduped"] or event_stats["capped"]:
+            # 判定留痕（spec §3.2-4 去重/上限口径调参用）
+            logger.info(
+                "chain_sector_events",
+                report_date=report_date,
+                sector=sector,
+                **event_stats,
+            )
         children.append(
             {
                 "sector": sector,
                 "relation": judge_sector_driver_relation(pct, index_pct),
                 "pct": pct,
                 "trace_summary": _trace_summary(trace_result),
+                "events": events,
             }
         )
 

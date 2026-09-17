@@ -236,6 +236,11 @@ def _sector_handle_patches(*, cascade: AsyncMock, store_patch: object) -> Iterat
             "aistock_agent.services.event_consumers._cascade_sector_prediction",
             cascade,
         ),
+        # Task 2.1：链事件层的中台事件池（避免测试真实打 Node 接口）
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
+            AsyncMock(return_value=[]),
+        ),
         store_patch,
     ):
         yield
@@ -307,6 +312,43 @@ async def test_handle_chain_result_kept_when_cascade_fails() -> None:
     assert store.save.await_count == 1  # 链已保存
     assert call_order[0] == "chain_save"
     assert call_order.count("cascade") == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_passes_warehouse_events_to_chain_assembly() -> None:
+    """Task 2.1 接线：链组装前读当日中台存量事件（一次读），并透传给组装做事件匹配。"""
+    consumer = SectorTraceConsumer(ctx=object())
+    event = _make_event("2026-07-16")
+    warehouse = [
+        {
+            "event_id": "2026-07-16-abc123",
+            "title": "半导体材料出口限制落地",
+            "url": "https://news.example.com/a",
+            "impact_score": 8,
+        }
+    ]
+    store_patch, _store = _chain_store_patch()
+    with (
+        _sector_handle_patches(cascade=AsyncMock(return_value=None), store_patch=store_patch),
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
+            AsyncMock(return_value=warehouse),
+        ) as mock_load,
+        patch(
+            "aistock_agent.services.attribution_chain.assemble_attribution_chain",
+            MagicMock(
+                return_value={
+                    "date": "2026-07-16",
+                    "root": {"type": "market"},
+                    "children": [],
+                }
+            ),
+        ) as mock_assemble,
+    ):
+        await consumer.handle(event)
+
+    mock_load.assert_awaited_once_with("2026-07-16")  # 每轮一次读（多板块共用同一事件池）
+    assert mock_assemble.call_args.kwargs["warehouse_events"] == warehouse
 
 
 @pytest.mark.asyncio
