@@ -27,6 +27,7 @@ dependencies = [
 
     # 数据调用 & 配置
     "httpx==0.28.1",            # 异步HTTP → Node.js /internal/* API
+    "reportlab>=4.2,<5.0",     # 完整洞察报告 PDF 渲染（纯模板，无 LLM）
     "redis==5.2.1",             # 会话持久化 / 晨报缓存
     "pydantic>=2.11",
     "pydantic-settings==2.8.1",
