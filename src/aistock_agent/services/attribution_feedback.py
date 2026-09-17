@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date as date_type
 
@@ -269,6 +270,30 @@ def build_signal(
         suggestion=suggestion,
         detail={**detail, "reason": reason},
     )
+
+
+# ── 背离条目（spec §13.3 验收："能给出'某板块溯源反复与验证结果背离'的报告条目"） ──
+# 背离 = 样本充分且命中率越阈值（suggestion ∈ {downgrade, upgrade}）；
+# hold（落在观望区间）与 insufficient（样本不足/无结果档位）**不算背离**。
+_DIVERGENCE_SUGGESTIONS = frozenset({SUGGESTION_DOWNGRADE, SUGGESTION_UPGRADE})
+
+
+def divergence_entries(signals: Sequence[FeedbackSignal]) -> list[FeedbackSignal]:
+    """筛出并排序背离条目（纯函数，只读；供报告渲染与人工复核）。
+
+    排序口径（可复现、无随机）：
+    ① **降权侧在前**——spec §13.3 的原始场景是"同一板块多次'溯源到但预判未中'"，即命中率
+       过低侧，人工复核应优先看到；② 同侧按**背离强度** `|hit_rate - 0.5|` 降序（越偏离越值得看）；
+    ③ 再按样本量降序（同强度下样本越多越可信）；④ 末按 `unit_key` 升序，保证输出确定。
+    """
+    entries = [signal for signal in signals if signal.suggestion in _DIVERGENCE_SUGGESTIONS]
+
+    def _key(signal: FeedbackSignal) -> tuple[int, float, int, str]:
+        rate = signal.hit_rate if signal.hit_rate is not None else 0.0
+        side = 0 if signal.suggestion == SUGGESTION_DOWNGRADE else 1
+        return (side, -abs(rate - 0.5), -signal.sample_size, signal.unit_key)
+
+    return sorted(entries, key=_key)
 
 
 # ────────────────────────────── 读侧：记录索引与验证计数 ──────────────────────────────

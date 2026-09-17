@@ -4,6 +4,10 @@
 把「链上溯源信号」与「预判验证结果」关联聚合（窗口默认 60 个交易日）→ 产出建议
 （建议降权 / 建议提级 / 观望）→ 上报审计表（app-api `attribution_feedback_signals`，幂等）。
 
+输出分两段：① **统计**（扫描/匹配/信号计数）；② **溯源背离报告**——只列样本充分且命中率
+越阈值的单元（降权侧优先），即 spec §13.3 验收要的"某板块溯源反复与验证结果背离"条目。
+报告为**只读审计产物**，不改变任何溯源权重（应用层未启用）。
+
 ## 用法
     $env:PYTHONPATH = "src"
     # ① dry-run（默认，零写入）：只出统计与建议，供人工审阅
@@ -12,6 +16,7 @@
     # ② 上报审计表（默认 observe 模式：只落建议，不产生任何副作用）
     python scripts/attribution_feedback.py --execute
     # ③ 换口径（不传则用配置 attribution_feedback_unit，默认 relation）
+    #    看"某板块"维度条目用 --unit sector / relation_sector
     python scripts/attribution_feedback.py --unit driver_type --execute
 
 ## 使用条件与风险
@@ -34,11 +39,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from aistock_agent.config import settings  # noqa: E402
 from aistock_agent.services.attribution_feedback import (  # noqa: E402
+    SUGGESTION_DOWNGRADE,
+    SUGGESTION_HOLD,
+    SUGGESTION_INSUFFICIENT,
     SUPPORTED_UNITS,
     FeedbackRunStats,
+    FeedbackSignal,
+    divergence_entries,
     run_attribution_feedback,
 )
 from aistock_agent.services.http_client import HttpClientPool  # noqa: E402
+
+
+def render_divergence_report(signals: Sequence[FeedbackSignal], *, unit: str = "") -> str:
+    """渲染**溯源背离报告**（spec §13.3 验收条目；纯函数，便于测试与人工复核）。
+
+    只列**样本充分且命中率越阈值**的单元（降权侧优先，排序见 `divergence_entries`）；观望与
+    样本不足只计数——避免"样本还在积累"的单元淹没真信号。每条含触发依据（样本数）、触发规则
+    （越阈方向与阈值）与影响对象（板块抽样）。**本报告只读**：应用层未启用，不改变任何溯源权重。
+    """
+    entries = divergence_entries(signals)
+    hold = sum(1 for s in signals if s.suggestion == SUGGESTION_HOLD)
+    insufficient = sum(1 for s in signals if s.suggestion == SUGGESTION_INSUFFICIENT)
+    min_samples = settings.attribution_feedback_min_samples
+    low = settings.attribution_feedback_low_threshold
+    high = settings.attribution_feedback_high_threshold
+    lines = [
+        f"[溯源背离报告] 背离条目 {len(entries)} 条｜观望 {hold}｜样本不足 {insufficient}"
+        f"（unit={unit or '-'}；触发规则 样本≥{min_samples} 且 "
+        f"命中率<{low} 降权 / >{high} 提级）",
+    ]
+    if not entries:
+        lines.append("  无背离：所有单元均落在观望区间或样本不足（样本积累中，暂不建议动作）")
+    for i, signal in enumerate(entries, start=1):
+        rate = signal.hit_rate if signal.hit_rate is not None else 0.0
+        if signal.suggestion == SUGGESTION_DOWNGRADE:
+            verdict = f"低于阈值 {low} → 建议降权"
+        else:
+            verdict = f"高于阈值 {high} → 建议提级"
+        lines.append(
+            f"  {i}) {signal.unit_key}  样本={signal.sample_size}  "
+            f"命中={signal.hit_count} 未中={signal.miss_count}  "
+            f"命中率={rate:.4f}  {verdict}"
+        )
+        sectors = signal.detail.get("sectors")
+        if isinstance(sectors, list) and sectors:
+            shown = "、".join(str(name) for name in sectors[:5])
+            more = f"（共 {len(sectors)}）" if len(sectors) > 5 else ""
+            lines.append(f"      板块抽样：{shown}{more}")
+    lines.append(
+        "  说明：本报告为只读审计产物，不改变溯源权重（应用层未启用）；"
+        "要看板块维度条目请用 --unit sector 重跑"
+    )
+    return "\n".join(lines)
 
 
 def render_report(stats: FeedbackRunStats) -> str:
@@ -71,6 +124,7 @@ def render_report(stats: FeedbackRunStats) -> str:
             "  提示：未匹配多为链上板块名与预判 source_id 的 resolved 名口径漂移"
             "（见 detail.unmatched_sectors 抽样），需人工核查后再调整口径"
         )
+    lines.append(render_divergence_report(stats.signals, unit=stats.unit))
     if stats.dry_run:
         lines.append(
             "  下一步：确认统计与建议无异常后加 --execute 上报审计表"

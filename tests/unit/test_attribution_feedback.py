@@ -15,7 +15,7 @@ import pytest
 
 from aistock_agent.config import settings
 from aistock_agent.services import attribution_feedback as af
-from scripts.attribution_feedback import _parse_args, render_report
+from scripts.attribution_feedback import _parse_args, render_divergence_report, render_report
 
 D = "2026-09-17"
 D2 = "2026-09-16"
@@ -654,3 +654,104 @@ def test_cli_defaults_to_dry_run() -> None:
     assert executed.date == D
     assert executed.window == 5
     assert executed.unit == "sector"
+
+
+# ────────────────────── 背离报告（spec §13.3 验收条目） ──────────────────────
+# §13.3 验收："能给出'某板块溯源反复与验证结果背离'的报告条目"。
+# 背离 = 样本充分（≥min_samples）且命中率越阈值（建议降权 / 建议提级）；
+# 观望（hold）与样本不足（insufficient）**只计数、不成条目**（避免噪声淹没真信号）。
+
+
+def _sig(unit_key: str, hit: int, miss: int, *, sectors: list[str] | None = None):
+    """构造一条信号（样本 = hit + miss；阈值用配置默认 10 / 0.35 / 0.65）。"""
+    return af.build_signal(
+        date=D,
+        unit_key=unit_key,
+        mode="observe",
+        sample_size=hit + miss,
+        hit_count=hit,
+        miss_count=miss,
+        detail={"sectors": sectors or []},
+    )
+
+
+def test_divergence_entries_keeps_only_threshold_breaching_units() -> None:
+    """只收 downgrade/upgrade；hold 与 insufficient 不入列。"""
+    signals = [
+        _sig("relation:self_driven", 3, 9),      # 0.25 → downgrade
+        _sig("relation:market_follow", 4, 8),    # 0.3333 → downgrade
+        _sig("relation:unknown", 6, 6),          # 0.5 → hold（观望）
+        _sig("relation:thin", 0, 3),             # 样本 3 < 10 → insufficient
+    ]
+    entries = af.divergence_entries(signals)
+    assert [s.unit_key for s in entries] == ["relation:self_driven", "relation:market_follow"]
+
+
+def test_divergence_entries_downgrade_first_then_strength_then_sample() -> None:
+    """排序：降权侧在前（"溯源到但预判未中"是主要风险），同侧按背离强度、样本量、key 稳定序。"""
+    signals = [
+        _sig("relation:up_strong", 9, 1),      # 0.9 → upgrade（侧别靠后）
+        _sig("relation:down_weak", 3, 7),      # 0.3 → 强度 0.20
+        _sig("relation:down_strong", 1, 19),   # 0.05 → 强度 0.45
+        _sig("relation:down_tie_b", 2, 18),    # 0.1 → 强度 0.40，与下条同强度同样本 → key 序
+        _sig("relation:down_tie_a", 2, 18),
+    ]
+    entries = af.divergence_entries(signals)
+    assert [s.unit_key for s in entries] == [
+        "relation:down_strong",
+        "relation:down_tie_a",
+        "relation:down_tie_b",
+        "relation:down_weak",
+        "relation:up_strong",
+    ]
+
+
+def test_divergence_entries_empty_when_all_hold_or_insufficient() -> None:
+    """无背离时不产条目（回归：不得把观望单元当背离列出）。"""
+    signals = [_sig("relation:unknown", 6, 6), _sig("relation:thin", 0, 2)]
+    assert af.divergence_entries(signals) == []
+
+
+def test_render_divergence_report_lists_entries_with_evidence() -> None:
+    """条目含：样本数（触发依据）、命中率与越阈方向、板块抽样（影响对象）。"""
+    text = render_divergence_report(
+        [
+            _sig("relation:self_driven", 3, 9, sectors=["半导体材料", "存储芯片"]),
+            _sig("relation:unknown", 6, 6),
+            _sig("relation:thin", 0, 3),
+        ],
+        unit="relation",
+    )
+    assert "背离条目 1 条" in text
+    assert "观望 1" in text
+    assert "样本不足 1" in text
+    assert "relation:self_driven" in text
+    assert "样本=12" in text
+    assert "命中率=0.2500" in text
+    assert "低于阈值 0.35" in text
+    assert "建议降权" in text
+    assert "半导体材料" in text
+
+
+def test_render_divergence_report_empty_state_and_readonly_note() -> None:
+    """全观望 → 明确"无背离"，并标注本报告只读（应用层未启用，不改权重）。"""
+    text = render_divergence_report([_sig("relation:unknown", 6, 6)], unit="relation")
+    assert "背离条目 0 条" in text
+    assert "无背离" in text
+    assert "不改" in text or "只读" in text
+
+
+def test_render_report_appends_divergence_section() -> None:
+    """`render_report` 追加背离段（回归：原有统计行仍在）。"""
+    stats = af.FeedbackRunStats(
+        date=D,
+        window=60,
+        unit="relation",
+        mode="observe",
+        dry_run=True,
+        signals=[_sig("relation:self_driven", 3, 9)],
+    )
+    text = render_report(stats)
+    assert "dry-run" in text
+    assert "relation:self_driven" in text
+    assert "背离条目 1 条" in text
