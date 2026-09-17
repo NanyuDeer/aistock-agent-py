@@ -24,6 +24,7 @@ from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
 from aistock_agent.agents.workers.sector_trace import extract_primary_sectors, run_sector_trace
+from aistock_agent.services.attribution_chain import index_pct_from_snapshot
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_bus import Event, EventBus
@@ -504,20 +505,20 @@ class SectorTraceConsumer(BaseConsumer):
 
 
 def _review_index_pct(report: dict[str, object]) -> float | None:
-    """从 review 报告快照解析大盘指数涨跌幅（候选键兼容，缺失返回 None）。"""
+    """从 review 报告快照解析大盘指数涨跌幅（缺失返回 None）。
+
+    解析规则与归因链共用 attribution_chain.index_pct_from_snapshot：真实快照键为
+    a_share.indexes（旧四候选键仅作兼容回退），避免两处漂移导致
+    parent_trace_ref.index_pct 恒 None。
+    """
     content = report.get("content") if isinstance(report, dict) else None
     content = content if isinstance(content, dict) else None
     mt = content.get("market_trace") if isinstance(content, dict) else None
     mt = mt if isinstance(mt, dict) else None
     snapshot = mt.get("snapshot") if isinstance(mt, dict) else None
-    a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
-    if not isinstance(a_share, dict):
+    if not isinstance(snapshot, dict):
         return None
-    for key in ("index_change_pct", "index_pct", "benchmark_change_pct", "sh_change_pct"):
-        v = a_share.get(key)
-        if isinstance(v, int | float):
-            return float(v)
-    return None
+    return index_pct_from_snapshot(snapshot)
 
 
 async def _cascade_sector_prediction(

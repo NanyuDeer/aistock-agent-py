@@ -8,16 +8,22 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
 from aistock_agent.schemas.sector_trace import SectorChainResult, SectorStage
 from aistock_agent.services.attribution_chain import assemble_attribution_chain
 
 
 def _review_payload():
+    return _review_payload_with_a_share({"index_change_pct": -1.2})
+
+
+def _review_payload_with_a_share(a_share: dict[str, object]) -> dict[str, object]:
+    """构造 review 报告：a_share 快照可替换（真实快照结构见下方用例）。"""
     return {
         "report": {
             "content": {
                 "market_trace": {
-                    "snapshot": {"a_share": {"index_change_pct": -1.2}},
+                    "snapshot": {"a_share": a_share},
                     "trace": {"attribution_summary": "半导体材料与券商领跌拖累大盘"},
                 }
             }
@@ -181,3 +187,81 @@ def test_no_index_relation_unknown():
     assert chain["root"]["index_pct"] is None
     assert chain["children"][0]["relation"] == "unknown"
     assert chain["root"]["summary"] == ""
+
+
+# --- 大盘涨跌幅真实键（a_share.indexes）解析：修复 relation 恒 unknown ---
+
+
+def _chain_with_a_share(a_share: dict[str, object], *, sector_pct: float = -3.0):
+    return assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload_with_a_share(a_share),
+        sector_results=[_sector_result("半导体材料", sector_pct, "美对华设备出口限制落地")],
+    )
+
+
+def test_index_pct_from_real_snapshot_indexes_list():
+    """真实快照结构（a_share.indexes 列表）→ root.index_pct = 上证涨跌幅。
+
+    旧实现读 index_change_pct 等四个不存在的键 → 恒 None → relation 恒 unknown。
+    """
+    chain = _chain_with_a_share(
+        {"indexes": [{"name": "上证指数", "code": "000001", "change_pct": -0.9}]}
+    )
+    assert chain["root"]["index_pct"] == -0.9
+    # 板块跌幅显著大于指数 → self_driven（不再是 unknown）
+    assert chain["children"][0]["relation"] == "self_driven"
+    assert (
+        judge_sector_driver_relation(
+            chain["children"][0]["pct"], chain["root"]["index_pct"]
+        )
+        == "self_driven"
+    )
+
+
+def test_index_pct_prefers_shanghai_over_first_item_in_normalized_dict():
+    """归一化产出形状（indexes 为 dict，key=SH000001）→ 取上证而非首个深证。"""
+    chain = _chain_with_a_share(
+        {
+            "indexes": {
+                "SZ399001": {"ts_code": "399001.SZ", "name": "深证成指", "change_pct": -1.8},
+                "SH000001": {"ts_code": "000001.SH", "name": "上证指数", "change_pct": -0.9},
+            }
+        }
+    )
+    assert chain["root"]["index_pct"] == -0.9
+
+
+def test_index_pct_falls_back_to_first_index_without_shanghai():
+    """无上证指数 → 取列表第一项（另有深证成指时取深证）。"""
+    chain = _chain_with_a_share(
+        {
+            "indexes": [
+                {"name": "深证成指", "code": "399001.SZ", "change_pct": -1.8},
+                {"name": "创业板指", "code": "399006.SZ", "change_pct": -2.4},
+            ]
+        }
+    )
+    assert chain["root"]["index_pct"] == -1.8
+
+
+def test_index_pct_legacy_keys_still_supported():
+    """向后兼容：indexes 缺失时仍按旧四键读取。"""
+    assert _chain_with_a_share({"index_change_pct": -1.2})["root"]["index_pct"] == -1.2
+    assert _chain_with_a_share({"sh_change_pct": -0.7})["root"]["index_pct"] == -0.7
+
+
+def test_index_pct_non_numeric_change_pct_falls_back_then_none():
+    """indexes 值非数值 → 视为缺失并回退旧键；全部缺失 → None（不伪造 0）。"""
+    assert (
+        _chain_with_a_share(
+            {"indexes": [{"name": "上证指数", "change_pct": "x"}], "index_pct": 0.8}
+        )["root"]["index_pct"]
+        == 0.8
+    )
+    assert (
+        _chain_with_a_share({"indexes": [{"name": "上证指数", "change_pct": None}]})[
+            "root"
+        ]["index_pct"]
+        is None
+    )

@@ -10,6 +10,79 @@ logger = structlog.get_logger()
 # insufficient 或无法从 stages 提取 trigger 结论时，如实说明原因未确认）。
 _FALLBACK_TRACE_SUMMARY = "溯源未确认驱动原因"
 
+# 大盘涨跌幅旧候选键：生产快照已不产出（真实形状是 a_share.indexes），
+# 仅保留读取以兼容历史报告/旧 fixture。
+_LEGACY_INDEX_PCT_KEYS = (
+    "index_change_pct",
+    "index_pct",
+    "benchmark_change_pct",
+    "sh_change_pct",
+)
+
+# 上证指数识别：code 取 000001（裸码）/ 000001.SH / SH000001 三种写法
+_SHANGHAI_INDEX_CODES = frozenset({"000001", "000001.SH", "SH000001"})
+
+
+def _numeric_pct(value: object) -> float | None:
+    """仅接受真实数值（bool/字符串等视为缺失，不伪造 0）。"""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _index_items(indexes: object) -> list[dict[str, object]]:
+    """兼容 a_share.indexes 两种形状，返回指数项列表。
+
+    真实快照形状：normalize_a_share（market_trace_snapshot.py）把 Node 的 list
+    归一化为 dict（key=SH000001 → 指数项）；list 形状为归一化前的原始载荷，
+    两种都支持，避免下游按形状踩空。
+    """
+    if isinstance(indexes, dict):
+        return [item for item in indexes.values() if isinstance(item, dict)]
+    if isinstance(indexes, list):
+        return [item for item in indexes if isinstance(item, dict)]
+    return []
+
+
+def _is_shanghai_index(item: dict[str, object]) -> bool:
+    name = item.get("name")
+    if isinstance(name, str) and "上证" in name:
+        return True
+    for key in ("ts_code", "code"):
+        code = item.get(key)
+        if isinstance(code, str) and code.upper() in _SHANGHAI_INDEX_CODES:
+            return True
+    return False
+
+
+def index_pct_from_snapshot(snapshot: dict[str, object]) -> float | None:
+    """从市场溯源快照解析大盘（上证）涨跌幅，缺失返回 None。
+
+    真实快照形状为 ``a_share["indexes"]``：优先取上证指数项，找不到则取首项；
+    值非数值视为缺失，再回退旧候选键（见 _LEGACY_INDEX_PCT_KEYS）。全部缺失
+    返回 None——保持"未知"，不伪造 0（0 会让 relation 误判为 market_follow）。
+    归因链（本模块）与板块溯源父链引用（event_consumers）共用，避免两处漂移。
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    a_share = snapshot.get("a_share")
+    if not isinstance(a_share, dict):
+        return None
+    items = _index_items(a_share.get("indexes"))
+    chosen = next((item for item in items if _is_shanghai_index(item)), None)
+    if chosen is None and items:
+        chosen = items[0]
+    if chosen is not None:
+        for key in ("change_pct", "pct_chg"):  # pct_chg：Node 原始字段（归一化前）
+            pct = _numeric_pct(chosen.get(key))
+            if pct is not None:
+                return pct
+    for legacy_key in _LEGACY_INDEX_PCT_KEYS:
+        pct = _numeric_pct(a_share.get(legacy_key))
+        if pct is not None:
+            return pct
+    return None
+
 
 def _trace_summary(trace_result: dict[str, object]) -> str:
     """从真实板块溯源 dump（SectorChainResult.model_dump(mode="json")）摘一句话。
@@ -67,16 +140,11 @@ def assemble_attribution_chain(
     mt = content.get("market_trace") if isinstance(content, dict) else None
     mt = mt if isinstance(mt, dict) else None
     snapshot = mt.get("snapshot") if isinstance(mt, dict) else None
-    a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
     trace = mt.get("trace") if isinstance(mt, dict) else None
 
-    index_pct: float | None = None
-    if isinstance(a_share, dict):
-        for key in ("index_change_pct", "index_pct", "benchmark_change_pct", "sh_change_pct"):
-            v = a_share.get(key)
-            if isinstance(v, int | float):
-                index_pct = float(v)
-                break
+    # 大盘涨跌幅来自快照 a_share.indexes（旧四个候选键在生产快照并不存在，
+    # 曾导致 root.index_pct 恒 None → children relation 恒 unknown）
+    index_pct = index_pct_from_snapshot(snapshot) if isinstance(snapshot, dict) else None
 
     summary = str(trace.get("attribution_summary") or "") if isinstance(trace, dict) else ""
 

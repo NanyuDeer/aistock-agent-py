@@ -130,11 +130,66 @@ async def test_handle_one_sector_failure_does_not_block_others() -> None:
         ({}, None),
         (None, None),
         ({"index_change_pct": "0.5"}, None),  # 非数值类型 → None（降级 unknown）
+        # 真实快照形状：a_share.indexes（list，每项含 name/code/change_pct）
+        ({"indexes": [{"name": "上证指数", "code": "000001", "change_pct": -0.9}]}, -0.9),
+        # 归一化形状：indexes 为 dict（key=SH000001），取上证而非首项
+        (
+            {
+                "indexes": {
+                    "SZ399001": {"ts_code": "399001.SZ", "change_pct": -1.8},
+                    "SH000001": {"ts_code": "000001.SH", "change_pct": -0.9},
+                }
+            },
+            -0.9,
+        ),
+        # indexes 存在但值非数值 → 回退旧键
+        ({"indexes": [{"name": "上证指数", "change_pct": "x"}], "index_pct": 0.8}, 0.8),
     ],
 )
 def test_review_index_pct_candidate_keys(
     a_share: dict[str, object] | None, expected: float | None
 ) -> None:
-    """_review_index_pct 四候选键解析与缺失/畸形降级。"""
+    """_review_index_pct 候选键解析与缺失/畸形降级（含真实快照 indexes 键）。"""
     report = {"content": {"market_trace": {"snapshot": {"a_share": a_share}}}}
     assert _review_index_pct(report) == expected
+
+
+@pytest.mark.asyncio
+async def test_handle_parent_ref_index_pct_from_real_snapshot_indexes() -> None:
+    """真实快照结构（a_share.indexes）→ parent_trace_ref.index_pct 非 None。"""
+    ctx = object()
+    consumer = SectorTraceConsumer(ctx=ctx)
+    event = _make_event("2026-07-16")
+    report = {
+        "content": {
+            "market_trace": {
+                "snapshot": {
+                    "a_share": {
+                        "indexes": [
+                            {"name": "上证指数", "code": "000001", "change_pct": -1.2}
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    with (
+        patch(
+            "aistock_agent.services.event_consumers.node_api.get_analysis_report",
+            AsyncMock(return_value=report),
+        ),
+        patch(
+            "aistock_agent.services.event_consumers.extract_primary_sectors",
+            return_value=_TWO_SECTORS[:1],
+        ),
+        patch(
+            "aistock_agent.services.event_consumers.run_sector_trace",
+            AsyncMock(return_value=SimpleNamespace(snapshot={})),
+        ) as mock_run,
+        patch(
+            "aistock_agent.services.event_consumers._cascade_sector_prediction",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        await consumer.handle(event)
+    assert mock_run.await_args.kwargs["parent_trace_ref"]["index_pct"] == -1.2
