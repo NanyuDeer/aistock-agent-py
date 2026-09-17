@@ -77,6 +77,7 @@ START → supervisor(quick_think, 意图路由)
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
   15:45 sentiment_temp（短线情绪温度计算，冰点≤20 触发 quick_think 预判，落盘 docs/agent-outputs/sentiment，次日晨报引用）
   16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；错峰晚于 sentiment_temp 15:45；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
+  16:10 attribution_feedback（溯源弱反馈观测层，Task 7.1 / spec §13.3：聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表；**默认 `attribution_feedback_mode=observe`，只落建议、不改写溯源判定与预判、不应用权重**；`off` 可运维关闭；置于 16:00 prediction_validate 与 16:05 prediction_stats 之后）
   次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
   12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
   18:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → run_sector_trace 落 report_type="sector_trace"（Spec D 板块溯源，2026-09-02；2026-09-03 组长裁决 20:30→18:30）
@@ -520,6 +521,7 @@ Python 服务通过以下内部接口获取 A 股数据（需携带内部访问�
 | `GET /internal/calendar/earnings-density` | market_calendar_events | 业绩披露密度（rhythm_master 择时用） |
 | `GET /internal/fear-greed` | 聚合指标 | 恐惧贪婪指数（rhythm_master 情绪维度；data_client `get_fear_greed`） |
 | `GET /internal/analysis-reports/:type/:date/:slot` | agent_analysis_reports | 节奏大师报告读取（`rhythm_master` 按 target_date + refresh_slot 三元组；data_client `get_rhythm_report`） |
+| `POST /api/internal/attribution-feedback` | attribution_feedback_signals | **溯源弱反馈审计上报**（Task 7.1，2026-09-17；路径带 `/api` 前缀，同 attribution-chain）：body `{date, unit_key, mode, sample_size, hit_count, miss_count, hit_rate, suggestion, detail}`，`(date, unit_key)` upsert 幂等；失败只 warning 不抛（app-api 未部署 → 404/401 不影响其他链路）。**本期只落建议、不应用权重**（观测层，默认 `attribution_feedback_mode=observe`） |
 | `POST /internal/event-entities` | event_entities | Event Entity 物化 upsert（canonical_event_key 幂等；响应含权威 `event_id`/`event_status`；data_client `post_event_entity`；信封恒 code:200——禁止 code:0，记忆 #59） |
 | `GET /internal/event-entities` | event_entities | Event Entity 列表查询（status/dateFrom/dateTo AND 组合；status 读时重算；data_client `get_event_entities`；响应 `data.items`） |
 
