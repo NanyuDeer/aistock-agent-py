@@ -37,6 +37,9 @@ class SectorTraceRunResult:
     # 板块提取来源/弱标记（Task 9.1）：SectorTraceConsumer 消费 extract_primary_sectors
     # 的 SectorHit 后写入（{"source": ..., "weak": ...}），归因链据此标注弱依据。
     extraction: dict[str, object] = field(default_factory=dict)
+    # 命中的快照板块行（SectorHit.row：name/ts_code/pct_change/...）：R14 链组装据此
+    # 写 children[].ts_code/sector_std（前端按权威名/代码桥接角色徽）。
+    sector_row: dict[str, object] = field(default_factory=dict)
 
 
 def _chain_claims(chain: object) -> list[str]:

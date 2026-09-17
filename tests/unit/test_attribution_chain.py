@@ -4,6 +4,7 @@
 SectorChainResult.model_dump(mode="json")（含 chain_id/sector/stages/
 attribution_status/missing_evidence），而非简化的 summary 键。
 """
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -330,8 +331,9 @@ def _sector_with_evidence(
     sources: list[dict[str, object]] | None = None,
     trigger_evidence: list[dict[str, object]] | None = None,
     attribution_parent: dict[str, object] | None = None,
+    sector_row: dict[str, object] | None = None,
 ):
-    """板块溯源结果（真实 dump 形状 + 快照 sources + 可选报告 attribution_parent）。"""
+    """板块溯源结果（真实 dump 形状 + 快照 sources + 可选报告 attribution_parent/sector_row）。"""
     stages = [
         SectorStage(kind="phenomenon", headline=f"{name}今日大幅波动"),
         SectorStage(
@@ -357,6 +359,8 @@ def _sector_with_evidence(
 
     if attribution_parent is not None:
         R.attribution_parent = attribution_parent  # type: ignore[attr-defined]
+    if sector_row is not None:
+        R.sector_row = sector_row  # type: ignore[attr-defined]
     return R()
 
 
@@ -656,9 +660,10 @@ def _sector_with_extraction(
     *,
     summary: str = "金属铅领跌带动有色走弱",
     weak: bool = True,
+    sector_row: dict[str, object] | None = None,
 ):
     """板块溯源结果 + 提取来源/弱标记（SectorTraceRunResult.extraction 的真实形状）。"""
-    result = _sector_with_evidence(name, pct, summary)
+    result = _sector_with_evidence(name, pct, summary, sector_row=sector_row)
     result.extraction = {"source": source, "weak": weak}
     return result
 
@@ -732,3 +737,86 @@ def test_missing_extraction_attr_is_treated_as_primary() -> None:
     )
     assert "extraction" not in chain["children"][0]
     assert "evidence_weak" not in chain["root"]
+
+
+# --- R14：链板块落「权威名 + ts_code」（消除前端按名匹配不上角色徽） ---
+
+_SNAPSHOT_ROW = {"name": "黄金概念", "ts_code": "885525.TI", "pct_change": -1.87}
+
+
+@pytest.mark.parametrize("source", ["primary_claim", "candidate_claim", "snapshot"])
+def test_child_carries_authoritative_ts_code_and_std_name(source: str) -> None:
+    """T1/T2/T3 三条提取路径都带 ts_code + sector_std（取自快照权威行，不是复盘原始名）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("贵金属领跌"),
+        sector_results=[
+            _sector_with_extraction("贵金属", -1.87, source, sector_row=_SNAPSHOT_ROW)
+        ],
+    )
+    child = chain["children"][0]
+    assert child["sector"] == "贵金属"  # 复盘原始名保持现状（向后兼容）
+    assert child["ts_code"] == "885525.TI"
+    # sector_std 取快照行的权威名（"黄金概念" 剥「概念」后缀 → 小写），不是原始名 "贵金属"
+    assert child["sector_std"] == "黄金"
+
+
+def test_child_std_name_falls_back_to_raw_sector_name() -> None:
+    """快照行缺 name → sector_std 回退复盘原始名归一（同前端归一化口径，不编造权威名）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("存储板块 领跌"),
+        sector_results=[
+            _sector_with_evidence("存储板块 ", -1.87, sector_row={"ts_code": "885525.TI"})
+        ],
+    )
+    child = chain["children"][0]
+    assert child["ts_code"] == "885525.TI"
+    assert child["sector_std"] == "存储"  # 去空白 + 剥「板块」后缀
+
+
+def test_child_omits_meta_keys_when_snapshot_row_missing() -> None:
+    """无 sector_row / 行内缺 ts_code → 省略 ts_code（不写 null、不崩），sector 仍非空字符串。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("半导体材料领跌"),
+        sector_results=[
+            _sector_with_evidence("半导体材料", -3.0),
+            _sector_with_evidence("存储芯片", -2.0, sector_row={"name": 123}),
+        ],
+    )
+    for child in chain["children"]:
+        assert "ts_code" not in child
+        assert isinstance(child["sector"], str) and child["sector"]
+    assert chain["children"][0]["sector_std"] == "半导体材料"
+    assert chain["children"][1]["sector_std"] == "存储芯片"  # 行 name 非字符串 → 回退原始名
+
+
+def test_child_omits_std_name_for_empty_sector() -> None:
+    """板块名与行名都不可用 → 不产 sector_std（空归一化无匹配意义），其余字段照常。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("无板块"),
+        sector_results=[_sector_with_evidence("", -3.0, sector_row={})],
+    )
+    child = chain["children"][0]
+    assert child["sector"] == ""
+    assert "sector_std" not in child
+    assert "ts_code" not in child
+
+
+def test_child_meta_is_json_friendly() -> None:
+    """序列化友好：新增字段只能是 str（不得混入 Pydantic/快照对象）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("黄金概念领跌"),
+        sector_results=[
+            _sector_with_evidence("黄金概念", -1.87, sector_row=_SNAPSHOT_ROW)
+        ],
+    )
+    child = chain["children"][0]
+    assert isinstance(child["ts_code"], str)
+    assert isinstance(child["sector_std"], str)
+    dumped = json.dumps(chain, ensure_ascii=False)
+    assert "885525.TI" in dumped
+

@@ -479,6 +479,9 @@ class SectorTraceConsumer(BaseConsumer):
                 # Task 9.1：提取来源/弱标记随溯源结果携带（链组装 children[].extraction
                 # 与 root.evidence_weak 消费）——主链命中为正常依据，T2/T3 兜底为弱依据
                 result.extraction = {"source": hit.source, "weak": hit.weak}
+                # R14：命中的快照行随结果携带（链组装 children[].ts_code/sector_std 消费，
+                # 供前端按权威名/代码桥接角色徽）
+                result.sector_row = dict(hit.row)
                 results.append(result)
                 cascades.append((hit.name, result.snapshot, hit.source, hit.weak))
                 logger.info(

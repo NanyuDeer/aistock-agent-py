@@ -1,4 +1,6 @@
 """归因链组装与保存（spec P1a-3：大盘-板块-事件 链树的 agent 侧产物）。"""
+import re
+
 import structlog
 
 from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
@@ -130,6 +132,50 @@ def _pct_from(snapshot: dict[str, object]) -> float | None:
         # 兼容 wind-leaders 快照行（无 pct_change，只有 today_change 字段）
         v = sector.get("today_change")
     return float(v) if isinstance(v, int | float) else None
+
+
+# --- R14：链板块标识增强（ts_code + 归一化权威名），消除前端按名匹配不上角色徽 ---
+
+# 归一化口径**逐字对齐** app-api `ThsBoardService.normName` 与 app-frontend
+# `utils/sectorInsight.normalizeSectorName`（去空白/括号 → 剥「（A股）/概念/板块/行业/产业链」
+# 后缀 → 小写）。为什么必须同口径：前端用归一化名把链 child 桥到 THS 权威候选名，两侧
+# 任一处口径漂移即回到"有链但角色徽不显示"（R14）。先删空白/括号再剥后缀的顺序也与前端一致
+# （故「（A股）」两条分支在前端同样不可达，保留是为逐字对齐、便于比对）。
+_SECTOR_STD_SPACE_RE = re.compile(r"[\s（）()]")
+_SECTOR_STD_SUFFIX_RE = re.compile(r"（A股）|\(A股\)|概念$|板块$|行业$|产业链$")
+
+
+def normalize_sector_std(name: object) -> str:
+    """板块名归一化（R14）：非字符串/空归一化结果返回空串（调用方据此省略键）。"""
+    if not isinstance(name, str):
+        return ""
+    return _SECTOR_STD_SUFFIX_RE.sub(
+        "", _SECTOR_STD_SPACE_RE.sub("", name)
+    ).lower()
+
+
+def _sector_meta(sector: str, sector_row: object) -> dict[str, str]:
+    """child 的板块标识增强字段（R14）：`ts_code` + `sector_std`（归一化权威名）。
+
+    取不到即**省略键**（与仓库"无匹配省略键"惯例一致，不写 null）：
+    - `ts_code`：仅取快照行（`extract_primary_sectors` 命中行，含 app-api SectorFact 的
+      `ts_code`）的非空字符串，缺失/非字符串一律省略（不编造）；
+    - `sector_std`：优先快照行 `name`（THS 权威榜名），行缺失/name 不可用时回退复盘原始
+      `sector`（归一化仍是有效的桥接键，只是权威性较弱）；归一化结果为空则省略。
+    """
+    row = sector_row if isinstance(sector_row, dict) else {}
+    meta: dict[str, str] = {}
+    ts_code = row.get("ts_code")
+    if isinstance(ts_code, str) and ts_code.strip():
+        meta["ts_code"] = ts_code.strip()
+    row_name = row.get("name")
+    source_name = (
+        row_name if isinstance(row_name, str) and row_name.strip() else sector
+    )
+    std = normalize_sector_std(source_name)
+    if std:
+        meta["sector_std"] = std
+    return meta
 
 
 # --- 链事件层（spec §3.2-4：中台优先 → 检索补漏，去重 + 上限，禁编造） ---
@@ -482,6 +528,10 @@ def assemble_attribution_chain(
     SectorTraceRunResult.extraction）为弱依据时 → children[] 写 extraction 标弱、
     root 写 evidence_weak（+报告 attribution_status，摘要空缺用中性表述，不编造主因）；
     主链命中路径不写这些键（正常链不被弱标记污染）。
+
+    R14：children[] 加性写 `ts_code`/`sector_std`（快照权威行，取不到省略键，见
+    `_sector_meta`）——供前端把链板块桥到 THS 权威候选（消除命名漂移导致的角色徽丢失）；
+    `sector` 保持复盘原始名不变（app-api 校验要求非空字符串，向后兼容）。
     """
     report = review_payload.get("report")
     content = report.get("content") if isinstance(report, dict) else None
@@ -526,6 +576,9 @@ def assemble_attribution_chain(
         extraction = _sector_extraction(res)
         child: dict[str, object] = {
             "sector": sector,
+            # R14：板块标识增强（ts_code/sector_std，取自溯源命中的快照权威行）——
+            # sector 保持复盘原始名（app-api 校验要求非空字符串，向后兼容）
+            **_sector_meta(sector, getattr(res, "sector_row", None)),
             "relation": judge_sector_driver_relation(pct, index_pct),
             "pct": pct,
             "trace_summary": _trace_summary(trace_result),

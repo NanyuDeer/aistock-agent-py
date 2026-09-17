@@ -229,6 +229,8 @@ async def test_sector_trace_consumer_keeps_weak_fallback_with_marks(
     # 来源/弱信息随溯源结果传给链组装（children[].extraction 的输入）
     results = mock_assemble.call_args.args[2]
     assert results[0].extraction == {"source": source, "weak": True}
+    # R14：命中的快照行随结果携带（链组装 children[].ts_code/sector_std 的输入）
+    assert results[0].sector_row == {"name": "金属铅", "pct_change": -4.2}
     # 级联预判留痕带弱依据标记
     assert mock_predict.await_args.kwargs["attribution_weak"] is True
     assert mock_predict.await_args.kwargs["extraction_source"] == source
