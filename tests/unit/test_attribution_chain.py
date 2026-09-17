@@ -531,3 +531,87 @@ def test_child_events_prefers_trigger_evidence_source():
         "https://news.example.com/f2",
         "https://news.example.com/f1",
     ]
+
+
+# --- Task 2.2：消费 sector_trace 报告的 attribution_parent（修"只写不读"） ---
+
+
+def test_root_index_pct_consistent_with_parent_ref():
+    """报告 attribution_parent.index_pct 与快照一致 → 组装结果与报告一致。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                attribution_parent={
+                    "source_report_type": "review",
+                    "report_date": "2026-09-03",
+                    "index_pct": -1.2,
+                },
+            )
+        ],
+    )
+    assert chain["root"]["index_pct"] == -1.2
+    assert chain["children"][0]["relation"] == "self_driven"
+
+
+def test_root_index_pct_report_wins_on_mismatch_with_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """报告 index_pct 与快照不一致 → 以报告为准 + warning chain_parent_mismatch（不静默）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),  # 快照 -1.2
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -2.0,
+                attribution_parent={
+                    "source_report_type": "review",
+                    "report_date": "2026-09-03",
+                    "index_pct": -0.4,
+                },
+            )
+        ],
+    )
+    out = capsys.readouterr().out
+    assert "chain_parent_mismatch" in out
+    assert chain["root"]["index_pct"] == -0.4  # 以报告为准
+    # relation 随报告口径重算：|−2.0| > 2*|−0.4| + 0.5 → self_driven
+    assert chain["children"][0]["relation"] == "self_driven"
+
+
+def test_root_index_pct_filled_from_parent_ref_when_snapshot_missing() -> None:
+    """快照无大盘涨跌幅但报告有 → 用报告补全（不是 mismatch，不打 warning）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload={
+            "report": {
+                "content": {
+                    "market_trace": {"snapshot": {"a_share": {}}, "trace": {}}
+                }
+            }
+        },
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                2.0,
+                attribution_parent={"index_pct": 0.4},
+            )
+        ],
+    )
+    assert chain["root"]["index_pct"] == 0.4
+    assert chain["children"][0]["relation"] == "self_driven"
+
+
+def test_root_index_pct_unchanged_without_parent_ref() -> None:
+    """报告缺 attribution_parent → 行为与现状一致（快照口径，不告警）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -0.8)],
+    )
+    assert chain["root"]["index_pct"] == -1.2
+    assert chain["children"][0]["relation"] == "market_follow"

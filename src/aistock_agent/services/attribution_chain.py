@@ -393,6 +393,65 @@ async def load_chain_warehouse_events(report_date: str) -> list[dict[str, object
     return [dict(event) for event in events if isinstance(event, dict)]
 
 
+def _attribution_parent(result: object) -> dict[str, object]:
+    """板块溯源结果携带的报告 attribution_parent（sector_trace.py 写入的报告字段）。
+
+    run_sector_trace 把要落库的 content["attribution_parent"] 原样带入结果：板块
+    溯源报告与链路同键 report_date（多板块同日互相覆盖），回读无法区分板块，故由
+    写入侧携带、链组装消费（Task 2.2 修"只写不读"）。
+    """
+    parent = getattr(result, "attribution_parent", None)
+    return parent if isinstance(parent, dict) else {}
+
+
+def _reconcile_index_pct(
+    report_date: str, snapshot_index_pct: float | None, sector_results: list[object]
+) -> float | None:
+    """用报告 attribution_parent.index_pct 校验/补全大盘涨跌幅（以报告为准并告警）。
+
+    - 报告缺该字段 → 沿用现有组装逻辑（快照口径，向后兼容）；
+    - 快照缺失、报告有 → 补全（info）；
+    - 两者不一致 → warning chain_parent_mismatch 并采用报告值（不静默）；
+    - 多板块报告之间不一致 → warning（以首个为准，便于排查父链引用漂移）。
+    """
+    authoritative: float | None = None
+    for result in sector_results:
+        parent = _attribution_parent(result)
+        value = _numeric_pct(parent.get("index_pct")) if parent else None
+        if value is None:
+            continue
+        if authoritative is None:
+            authoritative = value
+            continue
+        if value != authoritative:
+            logger.warning(
+                "chain_parent_mismatch",
+                report_date=report_date,
+                field="index_pct",
+                sector=str(getattr(result, "sector", "") or ""),
+                report_index_pct=value,
+                first_report_index_pct=authoritative,
+            )
+    if authoritative is None:
+        return snapshot_index_pct
+    if snapshot_index_pct is None:
+        logger.info(
+            "chain_parent_index_filled",
+            report_date=report_date,
+            report_index_pct=authoritative,
+        )
+    elif snapshot_index_pct != authoritative:
+        logger.warning(
+            "chain_parent_mismatch",
+            report_date=report_date,
+            field="index_pct",
+            source="snapshot_vs_report",
+            snapshot_index_pct=snapshot_index_pct,
+            report_index_pct=authoritative,
+        )
+    return authoritative
+
+
 def assemble_attribution_chain(
     report_date: str,
     review_payload: dict[str, object],
@@ -414,7 +473,12 @@ def assemble_attribution_chain(
 
     # 大盘涨跌幅来自快照 a_share.indexes（旧四个候选键在生产快照并不存在，
     # 曾导致 root.index_pct 恒 None → children relation 恒 unknown）
-    index_pct = index_pct_from_snapshot(snapshot) if isinstance(snapshot, dict) else None
+    snapshot_index_pct = (
+        index_pct_from_snapshot(snapshot) if isinstance(snapshot, dict) else None
+    )
+    # Task 2.2：消费板块溯源报告写入的 attribution_parent（原先只写不读）——
+    # 校验/补全大盘涨跌幅，不一致以报告为准并 warning
+    index_pct = _reconcile_index_pct(report_date, snapshot_index_pct, sector_results)
 
     summary = str(trace.get("attribution_summary") or "") if isinstance(trace, dict) else ""
 

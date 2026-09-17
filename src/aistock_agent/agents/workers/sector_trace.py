@@ -24,6 +24,10 @@ class SectorTraceRunResult:
     # Spec D 级联预判：溯源快照随结果返回（SectorTraceConsumer 作为 predict_sector
     # 的 sector_snapshot 输入——板块行情 market_fact + 事件证据来源）。
     snapshot: dict[str, object] = field(default_factory=dict)
+    # 父链引用（写进溯源报告 content["attribution_parent"] 的同一份）；由链组装消费
+    # （Task 2.2 修"只写不读"：报告与链路同键 (report_type, report_date) 会被多板块
+    # 互相覆盖，回读无法区分板块，故写入侧携带）。
+    attribution_parent: dict[str, object] = field(default_factory=dict)
 
 
 def _primary_chain_claims(trace: dict[str, object] | None) -> list[str]:
@@ -183,6 +187,7 @@ async def run_sector_trace(
         sector=sector_name,
         trace_result=trace_result.model_dump(mode="json"),
         snapshot=snapshot,
+        attribution_parent=dict(parent_trace_ref or {}),
     )
 
 
