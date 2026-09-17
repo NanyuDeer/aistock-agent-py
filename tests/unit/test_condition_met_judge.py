@@ -10,9 +10,11 @@ True=成立 / **False=确定性不成立** / None=无法判定，供到期未成
 import pytest
 
 from aistock_agent.services.condition_met_judge import (
+    classify_condition_domain,
     infer_condition_class,
     judge_condition_met,
     judge_condition_met_state,
+    split_condition_clauses,
 )
 
 UPTREND = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
@@ -513,5 +515,140 @@ def test_ref_level_two_value_judge_keeps_only_true() -> None:
         closes=[100.0], pct_chgs=[], volumes=[],
         metric="today_high", op="above",
         today_ref={"close": 101.0, "high": 102.0},
+    ) is None
+
+
+# ============ G1/G2 保守化护栏（R9 误点亮防复发，spec §12.3/§12.7） ============
+# 三条生产实证文本（当日真实误点亮，已人工回滚）——防复发回归锚点：
+#   ① id=214 c2：情绪口径（炸板/涨停家数）被**价格/量口径**判成成立；
+#   ② id=18  c2：海外利率口径（10 年期美债）同上被点亮；
+#   ③ id=158 c1：复合条件前半句（技术位）可判、后半句（资金流）判不了，旧实现只判一半即命中。
+_CASE_214_C2 = (
+    "炸板家数回落至10家以内、涨停家数回升至50家以上，"
+    "且半导体相关板块（存储芯片/先进封装）同步走强"
+)
+_CASE_18_C2 = "10年期美债收益率站上5%"
+_CASE_158_C1 = "猪肉板块指数跌破近期支撑位且主力资金持续净流出"
+
+
+def test_case_214_sentiment_caliber_is_unjudgeable() -> None:
+    """id=214 c2：情绪口径不得用价格/量判径（旧实现 closes 上涨 6% → 误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_214_C2, direction="bullish", threshold_pct=2.0,
+            closes=UPTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_case_18_overseas_rate_caliber_is_unjudgeable() -> None:
+    """id=18 c2：海外利率口径不得用 A 股价格/技术位判径（旧实现 close>MA20 → 误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_18_C2, direction="bullish", threshold_pct=None,
+            closes=UPTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_case_158_compound_capital_flow_clause_blocks_whole() -> None:
+    """id=158 c1：任一子句判不了（资金流）→ 整体 unjudgeable，不得半判命中。
+
+    旧实现把整段当技术位判（closes 下行 → 末值 < MA20）→ 只判前半句即点亮 True。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_158_C1, direction="bearish", threshold_pct=None,
+            closes=DOWNTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_classify_condition_domain_three_calibers() -> None:
+    """领域分类（常量表 + 单点函数）：三类非价格/量口径命中，量类/技术位不误伤。"""
+    assert classify_condition_domain(_CASE_18_C2) == "overseas_macro"
+    assert classify_condition_domain(_CASE_214_C2) == "sentiment"
+    assert classify_condition_domain(_CASE_158_C1) == "capital_flow"
+    # 不误伤清单：成交额/成交量/换手率（量类可判）、支撑位/前低/MA20（技术位可判）
+    assert classify_condition_domain("两市成交额放大至 1.2 万亿") is None
+    assert classify_condition_domain("成交量放大、换手率提升") is None
+    assert classify_condition_domain("跌破近期支撑位并回踩前低 MA20") is None
+
+
+def test_split_condition_clauses_connectors_and_comma_boundary() -> None:
+    """子句切分规则：连接词（且/并且/同时/而且/以及）切分；中文逗号**不切**（并列列举同一子句）。"""
+    assert split_condition_clauses("跌破 MA20 且 跌破前低") == ["跌破 MA20", "跌破前低"]
+    assert split_condition_clauses("A 并且 B") == ["A", "B"]   # 多字连接词优先于单字「且」
+    assert split_condition_clauses("A 同时 B") == ["A", "B"]
+    assert split_condition_clauses("A 而且 B") == ["A", "B"]
+    assert split_condition_clauses("A 以及 B") == ["A", "B"]
+    # 逗号/顿号不切（214 原文本即"顿号并列同一子句"）
+    assert split_condition_clauses(
+        "炸板家数回落至10家以内、涨停家数回升至50家以上"
+    ) == ["炸板家数回落至10家以内、涨停家数回升至50家以上"]
+    # 无连接词 → 原文本单元素（后续按逐字不变的单子句路径判定）
+    assert split_condition_clauses("跌破 MA20") == ["跌破 MA20"]
+
+
+def test_single_clause_tech_and_volume_still_light_up() -> None:
+    """回归（重点）：单子句技术位/量类条件行为逐字不变，数据满足时正常点亮。"""
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "成交量放大至 1.5 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op="gte", level=1.5e8,
+    ) is True
+
+
+def test_compound_all_clauses_met_lights_up() -> None:
+    """回归：复合条件全部子句可判且都成立 → 点亮 True。"""
+    assert judge_condition_met_state(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_compound_all_judgeable_one_false_is_deterministic_false() -> None:
+    """回归：全部子句可判但有一句不成立 → 整体不点亮且**非 unjudgeable**（三值=False）。"""
+    text = "站上 MA20 且 跌破前低"
+    assert judge_condition_met_state(
+        text, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is False
+    # 两值口径（第①段）：确定性不成立折叠回 None（只写 true，不产键）
+    assert judge_condition_met(
+        text, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_single_clause_insufficient_data_stays_none() -> None:
+    """回归：单子句 + 数据不足 → 仍为 None（不写键），不得被 G2 改成 False。"""
+    assert judge_condition_met_state(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_event_ref_bypasses_domain_guard_in_pure_judge() -> None:
+    """事件类优先级高于 G1：带 event_ref 的条件即使文本命中口径词也不走价格/量判径。
+
+    纯函数对事件类恒 None（交调用方三层判定）——G1 不得把事件类条件"改写"为
+    unjudgeable 语义之外的分流（调用方扫描层行为见 test_prediction_validator）。
+    """
+    assert infer_condition_class(
+        metric="close", event_ref="evt_1", text=_CASE_18_C2
+    ) == "event"
+    assert judge_condition_met_state(
+        _CASE_18_C2, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[], event_ref="evt_1",
     ) is None
 

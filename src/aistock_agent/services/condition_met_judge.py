@@ -44,6 +44,18 @@
 最小样本守卫：各分支要求该维度至少 2 个数据点（单行样本会因"单日累计=自身"而误点亮）；
 参考位类例外——它比较的是**同一行**的开/高/低与 close（无窗口累计语义），单行即可判定。
 
+**两道保守化护栏**（R9 防误点亮；spec §12.3/§12.7，2026-09-17 生产误点亮后追加）：
+- **G1 口径不对应就不判**（常量表 + 单点函数 `_is_unjudgeable_domain`）：
+  条件文本命中"非 A 股价格/量可判"口径（海外/宏观利率、情绪指标、资金流）且 anchor 无**对应**
+  `metric` → 整体 `unjudgeable`（None，不产键）——常量表 `_NON_PRICE_DOMAIN_KEYWORDS` /
+  `classify_condition_domain` 为唯一事实源，单点扩展。**只作用于价格/量/技术位判径**：带
+  `event_ref` 的条件优先短路走调用方事件三层（状态锚/受限 LLM），不被 G1 拦截。刻意不误伤：
+  成交量/成交额/换手率（量类）与支撑位/前低/MA20（技术位）。
+- **G2 复合条件不得半判**（`split_condition_clauses`）：按连接词（且/并且/同时/而且/以及；
+  **不按中文逗号**——逗号多用于并列列举同一子句内的对象）切出 ≥2 子句时——全部子句可判且都成立
+  → `True`；任一子句判不了（含被 G1 拦截/缺 metric/数据不足）→ `None`；全部可判但有子句不成立
+  → `False`。**单子句条件走 `_judge_clause_state`（原判定体），行为逐字不变**。
+
 纯函数：无 IO、无日志、无第三方依赖（只用标准库）。
 """
 
@@ -107,6 +119,81 @@ _DEFAULT_MA_WINDOW = 20   # 文本未点名周期时的默认均线
 _MA60_WINDOW = 60         # 文本含 MA60 / 60 日 → 60 日线
 # 优先级 ③：neutral（横盘）阈值，与 prediction_validator._NEUTRAL_PCT_THRESHOLD 同口径
 _NEUTRAL_PCT = 0.5
+
+# ── G1 口径护栏常量表 + 单点函数（R9 误点亮防复发；spec §12.3/§12.7） ──
+# 为什么需要：判定层只有 A 股价格/量/技术位口径的行情数据，对**情绪/海外宏观/资金流**口径
+# 条件，任何"用价格近似判定"都会产出**不可撤回**的假 true。2026-09-17 生产实证（已人工回滚）：
+#   ① id=214 c2「炸板家数…涨停家数…」被价格/量口径判成 condition_met=true（误）；
+#   ② id=18  c2「10 年期美债收益率站上 5%」同上被点亮（海外利率指标，非 A 股价格/量）。
+# 刻意**不入表**（可判，不得误伤）：成交额/成交量/换手率（量类）；支撑位/前低/MA20（技术位）。
+DOMAIN_OVERSEAS_MACRO = "overseas_macro"
+DOMAIN_SENTIMENT = "sentiment"
+DOMAIN_CAPITAL_FLOW = "capital_flow"
+
+_NON_PRICE_DOMAIN_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (DOMAIN_OVERSEAS_MACRO, (
+        "美债", "美元指数", "美股", "道指", "纳指", "标普", "恒生",
+        "人民币汇率", "美联储", "加息", "降息", "原油",
+    )),
+    (DOMAIN_SENTIMENT, (
+        "涨停", "跌停", "炸板", "封板", "连板", "家数", "涨跌家数", "赚钱效应",
+    )),
+    (DOMAIN_CAPITAL_FLOW, (
+        "净流入", "净流出", "主力资金", "北向", "融资余额", "融券",
+    )),
+)
+# 各口径 → 能使其"变为可判定"的 anchor.metric 白名单。当前 `PredictionMetric`
+# （schemas/prediction.py）内不存在海外利率/情绪/资金流维度 → 对应集为空 = 命中即不可判；
+# 保留该映射结构是为了后续若生成侧新增对应 metric（如 northbound_flow / limit_up_count）时
+# **单点扩展**，无需改动任何判定分支。
+_DOMAIN_EXEMPT_METRICS: dict[str, frozenset[str]] = {
+    DOMAIN_OVERSEAS_MACRO: frozenset(),
+    DOMAIN_SENTIMENT: frozenset(),
+    DOMAIN_CAPITAL_FLOW: frozenset(),
+}
+
+# ── G2 复合条件连接词（子句切分；**不按中文逗号切**） ──
+# 逗号/顿号多用于并列列举**同一子句内**的对象（如 id=214「炸板家数…、涨停家数…」属同一子句），
+# 按逗号切会把可判子句拆碎、放大误判面。正则按**长词优先**排列（并且/而且/以及/同时 先于 且），
+# 保证多字连接词不被单字「且」拆断。
+_CLAUSE_CONNECTOR_RE = re.compile(r"并且|而且|以及|同时|且")
+# 子句首尾剥除的分隔/标点（切分残留的"、，。"等；只剥端点，不动子句内部并列顿号）
+_CLAUSE_STRIP = " \t\r\n，,、。.；;：:（）()【】[]{}\"'“”‘’"
+
+
+def classify_condition_domain(text: str) -> str | None:
+    """条件文本领域分类：命中"非 A 股价格/量可判口径"返回口径常量，否则 None。
+
+    单点函数（常量表 `_NON_PRICE_DOMAIN_KEYWORDS` 为唯一事实源，便于后续扩展）；
+    无配置开关——行为确定、可测，避免开关分歧导致"谁开谁关"误点亮。
+    """
+    for domain, keywords in _NON_PRICE_DOMAIN_KEYWORDS:
+        if any(keyword in text for keyword in keywords):
+            return domain
+    return None
+
+
+def _is_unjudgeable_domain(text: str, metric: str | None) -> bool:
+    """G1：命中非价格/量口径且 anchor 未给出**对应** metric → 不可判（整体 None，不产键）。
+
+    与 G2 共用：G2 逐子句调用，故任一子句命中即令整体 unjudgeable（id=158 的资金流子句）。
+    """
+    domain = classify_condition_domain(text)
+    if domain is None:
+        return False
+    return metric not in _DOMAIN_EXEMPT_METRICS[domain]
+
+
+def split_condition_clauses(text: str) -> list[str]:
+    """按连接词切分子句（G2）；无连接词时返回单元素列表（**原文本**，保证单子句逐字不变）。
+
+    切分后剥除端点标点并丢弃空子句（如尾部"… 且 "）；返回长度 ≥2 才启用复合判定。
+    """
+    parts = _CLAUSE_CONNECTOR_RE.split(text or "")
+    if len(parts) < 2:
+        return [text or ""]
+    clauses = [part.strip(_CLAUSE_STRIP) for part in parts]
+    return [clause for clause in clauses if clause]
 
 
 def infer_condition_class(*, metric: str | None, event_ref: str | None, text: str) -> str:
@@ -368,6 +455,57 @@ def _judge_ref_level_state(
     return _compare([close], resolved, ref)
 
 
+def _judge_clause_state(
+    text: str,
+    *,
+    direction: str,
+    threshold_pct: float | None,
+    closes: list[float],
+    pct_chgs: list[float],
+    volumes: list[float],
+    amounts: list[float] | None,
+    metric: str | None,
+    op: str | None,
+    level: float | None,
+    event_ref: str | None,
+    today_ref: dict[str, float] | None,
+) -> bool | None:
+    """**单子句**三值判定（改造前的原判定体；G2 逐子句复用 —— 保证单子句口径逐字不变）。
+
+    分流与守卫见模块 docstring（类型推断 → 事件/量/参考位/技术位/涨跌幅；绝对点位与最小样本守卫）。
+    """
+    condition_class = infer_condition_class(
+        metric=metric, event_ref=event_ref, text=text
+    )
+    if condition_class == CONDITION_CLASS_EVENT:
+        return None  # 事件类：调用方按 状态锚 → 受限 LLM → None 三层处理
+    if _is_unjudgeable_domain(text, metric):
+        # G1：非 A 股价格/量口径（情绪/海外宏观/资金流）且无对应 metric → 不可判（不产键）。
+        # 置于类型分流之前：这些口径没有对应行情维度，任何近似判定都是不可撤回的假 true。
+        return None
+    if condition_class == CONDITION_CLASS_VOLUME:
+        series = list(amounts or []) if metric == "amount" else list(volumes)
+        return _judge_volume_state(series, op, level, direction, text)
+    if condition_class == CONDITION_CLASS_REF_LEVEL:
+        # 参考位类（spec §12.3 ④）：取数层已透传 open/high/low → 当日行参考位 vs 同当日 close
+        return _judge_ref_level_state(metric, op, direction, text, today_ref)
+    if max(len(closes), len(pct_chgs)) < 2:
+        # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
+        # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
+        # neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上会立即点亮 true，而 true
+        # 一旦写入不可撤回 → 宁可 None（不产键），也不让单日样本误点亮。
+        return None
+    if not _has_explicit_anchor(metric, level) and (
+        _ABS_LEVEL_RE.search(text) or _ABS_LEVEL_VERB_RE.search(text)
+    ):
+        # 绝对点位守卫（终审 #2）：无点位阈值口径 → 不得走技术位近似（会对"站上 3000 点"
+        # 在顺势序列上误判 true，且 true 不可撤回）。
+        return None
+    if condition_class == CONDITION_CLASS_TECH:
+        return _judge_tech_state(text, direction, closes, metric, op)
+    return _judge_pct_state(direction, threshold_pct, closes, pct_chgs)
+
+
 def judge_condition_met_state(
     condition_text: str,
     *,
@@ -393,37 +531,62 @@ def judge_condition_met_state(
     `today_ref`：当日（窗口最后一行）参考位 `{"close":…, "open":…, "high":…, "low":…}`，
     仅参考位类（`metric=today_open/high/low`）消费；缺省/缺字段 → 该类降级 `None`。
 
+    G1/G2 两道保守化护栏（R9 误点亮防复发，spec §12.3/§12.7）：
+    - **G1 口径不对应就不判**（`_is_unjudgeable_domain`）：命中情绪/海外宏观/资金流口径且
+      anchor 无对应 metric → 整体不可判（不产键）；
+    - **G2 复合条件不得半判**（`split_condition_clauses`）：切出 ≥2 子句时——
+      全部子句可判且都成立 → `True`；任一子句判不了 → `None`（整体 unjudgeable）；
+      全部可判但有子句不成立 → `False`（确定性不成立，到期可写未成立态）；
+      **单子句 → 走原判定体，行为逐字不变**。
+    两道护栏只在"价格/量/技术位"判径生效：带 `event_ref` 的条件（事件类，spec §12.4 状态锚/
+    受限 LLM）**优先短路**，不得被 G1 误判为 unjudgeable。
+
     给 False 的四类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
     不成立（非 cross_*）、参考位未触发（当日 close 未达/未破当日开/高/低）。其余（参考位缺
     数据、无 level 量类、量级护栏、单样本、绝对点位守卫、cross_* 未穿越、事件类）恒 None。
     """
     text = condition_text or ""
-    condition_class = infer_condition_class(
-        metric=metric, event_ref=event_ref, text=text
+    if isinstance(event_ref, str) and event_ref.strip():
+        # 事件类优先级最高（spec §12.4）：判定在调用方（状态锚 → 受限 LLM → None），
+        # 本纯函数恒 None。G1/G2 不介入，避免把事件类条件误判为"口径不可判"。
+        return None
+    clauses = split_condition_clauses(text)
+    if len(clauses) >= 2:
+        states = [
+            _judge_clause_state(
+                clause,
+                direction=direction,
+                threshold_pct=threshold_pct,
+                closes=closes,
+                pct_chgs=pct_chgs,
+                volumes=volumes,
+                amounts=amounts,
+                metric=metric,
+                op=op,
+                level=level,
+                event_ref=event_ref,
+                today_ref=today_ref,
+            )
+            for clause in clauses
+        ]
+        if any(state is None for state in states):
+            # 半判收口（id=158 实证）：任一子句判不了 → 整体不可判，不得"前半句命中即点亮"。
+            return None
+        return all(states)
+    return _judge_clause_state(
+        text,
+        direction=direction,
+        threshold_pct=threshold_pct,
+        closes=closes,
+        pct_chgs=pct_chgs,
+        volumes=volumes,
+        amounts=amounts,
+        metric=metric,
+        op=op,
+        level=level,
+        event_ref=event_ref,
+        today_ref=today_ref,
     )
-    if condition_class == CONDITION_CLASS_EVENT:
-        return None  # 事件类：调用方按 状态锚 → 受限 LLM → None 三层处理
-    if condition_class == CONDITION_CLASS_VOLUME:
-        series = list(amounts or []) if metric == "amount" else list(volumes)
-        return _judge_volume_state(series, op, level, direction, text)
-    if condition_class == CONDITION_CLASS_REF_LEVEL:
-        # 参考位类（spec §12.3 ④）：取数层已透传 open/high/low → 当日行参考位 vs 同当日 close
-        return _judge_ref_level_state(metric, op, direction, text, today_ref)
-    if max(len(closes), len(pct_chgs)) < 2:
-        # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
-        # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
-        # neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上会立即点亮 true，而 true
-        # 一旦写入不可撤回 → 宁可 None（不产键），也不让单日样本误点亮。
-        return None
-    if not _has_explicit_anchor(metric, level) and (
-        _ABS_LEVEL_RE.search(text) or _ABS_LEVEL_VERB_RE.search(text)
-    ):
-        # 绝对点位守卫（终审 #2）：无点位阈值口径 → 不得走技术位近似（会对"站上 3000 点"
-        # 在顺势序列上误判 true，且 true 不可撤回）。
-        return None
-    if condition_class == CONDITION_CLASS_TECH:
-        return _judge_tech_state(text, direction, closes, metric, op)
-    return _judge_pct_state(direction, threshold_pct, closes, pct_chgs)
 
 
 def judge_condition_met(

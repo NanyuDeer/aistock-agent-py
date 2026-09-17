@@ -1722,6 +1722,23 @@ async def test_scan_condition_met_event_lit_without_market_source() -> None:
     assert out["c0"]["target_type"] == "sector"
 
 
+@pytest.mark.asyncio
+async def test_scan_condition_met_event_class_bypasses_domain_guard() -> None:
+    """G1 只作用于价格/量/技术位判径：事件类条件文本含"美债"仍按状态锚点亮，不被口径护栏拦截。"""
+    record = _event_condition_record()
+    record["prediction"]["conditions"][0]["condition"] = "10年期美债收益率站上5%"
+    entities = [{"event_id": "EVT-1", "event_status": "occurred", "title": "美债收益率上行"}]
+    with (
+        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=entities)),
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    kline.assert_not_awaited()  # 事件类不拉行情（G1 未介入）
+
+
 # ============ 终审 #3/#5：第①段扫描窗口 = [created_at, today]（上限 120 自然日） ============
 
 
