@@ -182,6 +182,78 @@ async def test_save_warns_when_post_returns_none(
     assert "attribution_chain.saved" not in out
 
 
+@pytest.mark.asyncio
+async def test_save_failed_warning_carries_real_cause(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R17 遗留：`save_failed` 文案须带**真实原因**（业务码/HTTP 状态），不再只报"返回 None"。
+
+    R17 生产事故的排障代价正来自这里：真实原因只在 `node_api_post_business_error` 那条
+    **独立**日志里，得交叉 grep 才能定位。现在由 `_post_request` 经 `error_out` 出参回传，
+    `save()` 把它并入同一条 warning。
+    """
+    from aistock_agent.services.attribution_chain import AttributionChainStore
+
+    store = AttributionChainStore()
+
+    async def _fake_post(path, body, *, timeout=None, error_out=None):
+        if error_out is not None:
+            error_out["stage"] = "business_error"
+            error_out["detail"] = "code=500 message=boom"
+        return None
+
+    with patch.object(store.node_api, "post", new=_fake_post):
+        await store.save(
+            "2026-09-03",
+            {"date": "2026-09-03", "root": {"type": "market"}, "children": []},
+        )
+    out = capsys.readouterr().out
+    assert "attribution_chain.save_failed" in out
+    assert "business_error" in out      # stage
+    assert "code=500" in out            # detail
+
+
+@pytest.mark.asyncio
+async def test_post_request_fills_error_out_on_business_error() -> None:
+    """`_post_request` 失败时必须把原因写进 `error_out` 出参（成功时**不写**）。"""
+    from aistock_agent.services.data_client import HttpClientPool, node_api
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"code": 500, "message": "boom"}
+
+    class _Client:
+        async def post(self, *args: object, **kwargs: object) -> object:
+            return _Resp()
+
+    with patch.object(HttpClientPool, "get_client", AsyncMock(return_value=_Client())):
+        cause: dict[str, object] = {}
+        data = await node_api._post_request("/api/internal/attribution-chain", {}, error_out=cause)
+    assert data is None
+    assert cause["stage"] == "business_error"
+    assert "500" in str(cause["detail"])
+
+    # 成功路径不得写出参（调用方据此区分"有原因"与"无原因"）
+    class _OkResp(_Resp):
+        def json(self) -> dict[str, object]:
+            return {"code": 200, "data": {"ok": True}}
+
+    class _OkClient:
+        async def post(self, *args: object, **kwargs: object) -> object:
+            return _OkResp()
+
+    with patch.object(HttpClientPool, "get_client", AsyncMock(return_value=_OkClient())):
+        ok_cause: dict[str, object] = {}
+        ok_data = await node_api._post_request(
+            "/api/internal/attribution-chain", {}, error_out=ok_cause
+        )
+    assert ok_data == {"ok": True}
+    assert ok_cause == {}
+
+
 def test_no_index_relation_unknown():
     chain = assemble_attribution_chain(
         report_date="2026-09-03",

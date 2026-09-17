@@ -30,7 +30,7 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
   - scenario_keywords（2026-09-03）：scenario 的简洁展示摘要（1~2 个，单条 ≤10 字、硬上限 15 字），侧重**触发后的方向与幅度**（如 上探+3%~+5% / 回踩-3%内 / 窄幅±1%）；与 keywords（触发前提）语义互补、禁止与 label 后段/condition/scenario 大段重复；scenario 本体保持完整句不裁剪
   - anchor：验证锚点，包含
     - horizon: "short" | "mid" | "long"（对齐 HORIZON_TRADING_DAY_OFFSETS：5/20/120 交易日）
-    - threshold：验证阈值（涨跌幅 %，如 "+5%"/"-3%"），明确数值，用于到期比对
+    - threshold：涨跌幅阈值（百分比字符串，如 "+5%"/"-3%"）。**取值口径（2026-09-18 明确）**：① 条件本身为涨跌幅口径时（如"上涨超过 5%""相对当前收盘价跌破 -3%"），threshold 必须**等于该条件的触发阈值**，且与 condition 文本中的百分数**同值同号**（判定层据此判定条件是否成立；不一致会导致该条件无法判定）；② 其余口径（量能/技术位/参考位由 metric+op+level 判定触发）时，threshold 填该条件满足后**情景的验证幅度**，用于到期比对
     - metric：验证标的，取值枚举（2026-09-17 扩展）："close"（默认）/ "index_close"（大盘用）/"volume"（成交量）/"amount"（成交额）/"ma20" | "ma60"（20/60 日均线）/"prior_low" | "prior_high"（窗口前低/前高）/"today_open" | "today_high" | "today_low"（当日开盘/最高/最低）
     - direction：该条件的**情景方向**（bullish / bearish / neutral），自挂、不依赖 horizons[].direction
     - op（2026-09-17，可选）：比较操作，"gte" | "lte" | "above" | "below" | "cross_above" | "cross_below"（放量/站上量能用 gte/above，缩量用 lte/below，穿越用 cross_*）
@@ -109,7 +109,7 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
   - scenario_keywords（2026-09-03）：scenario 的简洁展示摘要（1~2 个，单条 ≤10 字、硬上限 15 字），侧重**触发后的方向与幅度**（如 上探+3%~+5% / 回踩-3%内 / 窄幅±1%）；与 keywords（触发前提）语义互补、禁止与 label 后段/condition/scenario 大段重复；scenario 本体保持完整句不裁剪
   - anchor：验证锚点，包含
     - horizon: "short" | "mid" | "long"（对齐 HORIZON_TRADING_DAY_OFFSETS：5/20/120 交易日）
-    - threshold：验证阈值（涨跌幅 %，如 "+5%"/"-3%"），明确数值，用于到期比对
+    - threshold：涨跌幅阈值（百分比字符串，如 "+5%"/"-3%"）。**取值口径（2026-09-18 明确）**：① 条件本身为涨跌幅口径时（如"上涨超过 5%""相对当前收盘价跌破 -3%"），threshold 必须**等于该条件的触发阈值**，且与 condition 文本中的百分数**同值同号**（判定层据此判定条件是否成立；不一致会导致该条件无法判定）；② 其余口径（量能/技术位/参考位由 metric+op+level 判定触发）时，threshold 填该条件满足后**情景的验证幅度**，用于到期比对
     - metric：验证标的，取值枚举（2026-09-17 扩展）："close"（默认）/ "index_close"（大盘用）/"volume"（成交量）/"amount"（成交额）/"ma20" | "ma60"（20/60 日均线）/"prior_low" | "prior_high"（窗口前低/前高）/"today_open" | "today_high" | "today_low"（当日开盘/最高/最低）
     - direction：该条件的**情景方向**（bullish / bearish / neutral），自挂、不依赖 horizons[].direction
     - op（2026-09-17，可选）：比较操作，"gte" | "lte" | "above" | "below" | "cross_above" | "cross_below"（放量/站上量能用 gte/above，缩量用 lte/below，穿越用 cross_*）

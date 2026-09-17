@@ -160,19 +160,30 @@ class NodeApiClient:
         body: dict[str, object],
         *,
         timeout: float | None = None,
+        error_out: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         """POST 请求 Node.js 内部 API
 
         Args:
             path: 路径，如 /internal/analysis-reports
             body: JSON 请求体
+            error_out: 可选出参——失败时写入 ``{"stage": ..., "detail": ...}``，供调用方把
+                **真实原因**并入自己的告警。为什么需要（2026-09-18，R17 遗留）：本方法吞错
+                返回 None，真实原因只在 `node_api_post_business_error` / `node_api_post_http_error`
+                那几条**独立**日志里 → `attribution_chain.save_failed` 文案笼统，生产排障必须
+                交叉 grep。**仅在失败时写入**（成功路径保持空 dict）。
 
         Returns:
             业务数据（已解包 data 字段）；请求失败或业务码非 0/200/201 返回 None。
             仅返回 dict 类型——Node.js ``data`` 为列表时返回 None。
         """
-        data = await self._post_request(path, body, timeout=timeout)
-        return data if isinstance(data, dict) else None
+        data = await self._post_request(path, body, timeout=timeout, error_out=error_out)
+        if isinstance(data, dict):
+            return data
+        if error_out is not None and data is not None:
+            error_out["stage"] = "data_not_dict"
+            error_out["detail"] = f"data 为 {type(data).__name__}（按契约应为 dict）"
+        return None
 
     async def semantic_search_industries(
         self, embedding: list[float], threshold: float = 0.7, limit: int = 5
@@ -201,17 +212,29 @@ class NodeApiClient:
         return []
 
     async def _post_request(
-        self, path: str, body: dict[str, object], *, timeout: float | None = None
+        self,
+        path: str,
+        body: dict[str, object],
+        *,
+        timeout: float | None = None,
+        error_out: dict[str, object] | None = None,
     ) -> object | None:
         """POST 请求 Node.js 内部 API，返回解包后的 data 字段。
 
         ``post`` 的共享实现：统一处理 HTTP 错误、业务码校验、payload 解包。
+        `error_out`：失败分支写入 `{"stage", "detail"}`（成功不写），供调用方合并告警原因。
         """
         url = f"{self._base_url}{path}"
         headers = {
             "X-Internal-Token": self._token,
             "Content-Type": "application/json",
         }
+
+        def _mark(stage: str, detail: str) -> None:
+            """把失败原因写进出参（未传 error_out 时是 no-op）。"""
+            if error_out is not None:
+                error_out["stage"] = stage
+                error_out["detail"] = detail
 
         try:
             client = await HttpClientPool.get_client()
@@ -228,10 +251,15 @@ class NodeApiClient:
                     url=url,
                     payload=str(payload)[:200],
                 )
+                _mark("unexpected_payload", f"payload 非 dict：{str(payload)[:200]}")
                 return None
             if payload.get("code") not in (0, 200, 201):
                 logger.error("node_api_post_business_error", url=url, code=payload.get("code"),
                              message=payload.get("message"))
+                _mark(
+                    "business_error",
+                    f"code={payload.get('code')} message={payload.get('message')}",
+                )
                 return None
             return payload.get("data")
         except httpx.HTTPStatusError as e:
@@ -241,10 +269,16 @@ class NodeApiClient:
                 status=e.response.status_code,
                 response_body=e.response.text[:500],
             )
+            _mark(
+                "http_error",
+                f"status={e.response.status_code} body={e.response.text[:200]}",
+            )
         except httpx.RequestError as e:
             logger.error("node_api_post_request_error", url=url, error=str(e))
+            _mark("request_error", str(e))
         except Exception as e:
             logger.error("node_api_post_unexpected_error", url=url, error=str(e))
+            _mark("unexpected_error", str(e))
 
         return None
 

@@ -11,6 +11,7 @@ import pytest
 
 from aistock_agent.services.condition_met_judge import (
     classify_condition_domain,
+    has_or_connector,
     infer_condition_class,
     judge_condition_met,
     judge_condition_met_state,
@@ -572,6 +573,74 @@ def test_classify_condition_domain_three_calibers() -> None:
     assert classify_condition_domain("跌破近期支撑位并回踩前低 MA20") is None
 
 
+# ============ G1 口径清单扩展（2026-09-18：三组新词补齐） ============
+# 目标：把生产/生成侧高频的"非 A 股价格/量可判"口径补齐进 `_NON_PRICE_DOMAIN_KEYWORDS`，
+# 防其被价格/量/技术位口径近似点亮（true 不可撤回）。**只加词，不加新机制**。
+
+
+@pytest.mark.parametrize("text,expected", [
+    # 情绪口径：封单/开板/连板晋级等情绪家数类指标
+    ("封单量显著放大", "sentiment"),
+    ("涨停开板家数增加", "sentiment"),
+    ("连板晋级率提升", "sentiment"),
+    ("封成率回升", "sentiment"),
+    ("炸板率下降至 10% 以内", "sentiment"),
+    ("首板数量明显增加", "sentiment"),
+    ("二板成功率提升", "sentiment"),
+    ("空间板高度打开", "sentiment"),
+    ("情绪温度回升至 60", "sentiment"),
+    # 资金流口径：大单/龙虎榜/ETF 份额/两融/互联互通席位
+    ("大单净额由负转正", "capital_flow"),
+    ("龙虎榜出现机构专用席位", "capital_flow"),
+    ("ETF 份额持续增加", "capital_flow"),
+    ("融资买入额占比提升", "capital_flow"),
+    ("南向资金加速流入", "capital_flow"),
+    ("沪股通净买入额扩大", "capital_flow"),
+    ("深股通持股比例提升", "capital_flow"),
+    ("机构席位集中买入", "capital_flow"),
+    # 海外/宏观口径：经济数据/议息/汇率/大宗/外盘指数
+    ("美国非农数据超预期", "overseas_macro"),
+    ("CPI 同比回落", "overseas_macro"),
+    ("9 月议息会议结果落地", "overseas_macro"),
+    ("人民币汇率中间价上调", "overseas_macro"),
+    ("黄金价格创新高", "overseas_macro"),
+    ("伦铜库存持续下降", "overseas_macro"),
+    ("A50 期货夜盘走强", "overseas_macro"),
+    ("日经指数大幅低开", "overseas_macro"),
+])
+def test_classify_condition_domain_extended_keywords(text: str, expected: str) -> None:
+    """扩展后的三组口径词必须被分类命中（否则这些条件会被行情口径近似点亮）。"""
+    assert classify_condition_domain(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "两市成交额放大至 1.2 万亿",
+    "成交量放大、换手率提升",
+    "跌破近期支撑位并回踩前低 MA20",
+    "板块指数上涨 3%",
+    "缩量回踩 5 日均线",
+    # 「金价」而非「黄金」：A 股有"黄金/贵金属"板块，用「黄金」会误伤这些可判条件
+    "黄金板块指数站上 MA20",
+    "黄金/贵金属板块放量上涨",
+])
+def test_classify_condition_domain_extended_no_false_positive(text: str) -> None:
+    """扩展不得误伤：量类/技术位/纯涨跌幅口径 + A 股「黄金」板块名**仍可判**（classify → None）。"""
+    assert classify_condition_domain(text) is None
+
+
+def test_extended_capital_flow_keyword_unjudgeable_end_to_end() -> None:
+    """端到端：新词条件（龙虎榜机构席位）在顺势序列下不得被涨跌幅口径点亮。
+
+    旧实现：纯涨跌幅类（metric 缺省）→ 窗口累计 +6% > 0 → 误点亮 True（不可撤回）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            "龙虎榜出现机构专用席位", direction="bullish", threshold_pct=None,
+            closes=[100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0],
+            pct_chgs=[], volumes=[],
+        ) is None
+
+
 def test_split_condition_clauses_connectors_and_comma_boundary() -> None:
     """子句切分规则：连接词（且/并且/同时/而且/以及）切分；中文逗号**不切**（并列列举同一子句）。"""
     assert split_condition_clauses("跌破 MA20 且 跌破前低") == ["跌破 MA20", "跌破前低"]
@@ -700,5 +769,48 @@ def test_pct_words_without_direction_verb_unaffected() -> None:
     assert judge_condition_met(
         "指数上涨超过 5%", direction="bullish", threshold_pct=2.0,
         closes=UPTREND, pct_chgs=[], volumes=[], metric="close",
+    ) is True
+
+
+# ============ G4 「或」复合条件守卫（2026-09-18） ============
+# 「或」是"任一子句成立"语义，与 G2 的"全部成立"**相反**：正确实现需三值或运算
+# （任一 True → True；全部可判且全 False → False；含不可判子句且无 True → None）。
+# 现状：**生产 0 条**含「或」的条件（2026-09-18 全库 372 条条件实测 with_or=0）→
+# 不做 or 运算（零收益却新增误判面），改为**一律不可判**，堵掉"整段当单子句近似判"的
+# 潜在误点亮（true 不可撤回）。若生成侧后续真产出「或」条件，再按三值或语义实现。
+
+
+def test_has_or_connector_detects_and_excludes_idiom() -> None:
+    """识别「或」，但排除"不可或缺"等固定搭配里的「或」。"""
+    assert has_or_connector("放量突破 或 缩量回踩") is True
+    assert has_or_connector("跌破 MA20 或者 跌破前低") is True
+    assert has_or_connector("不可或缺的支撑位") is False
+    assert has_or_connector("跌破 MA20") is False
+    assert has_or_connector("") is False
+
+
+def test_or_compound_condition_is_unjudgeable() -> None:
+    """含「或」的复合条件 → 整体 unjudgeable（不产键），不得整段当单子句判。
+
+    旧实现：「跌破 MA20 或 放量下跌」里 `_TECH_RE` 命中"跌破" → 归技术位类 →
+    下行序列末值 < MA20 → 误点亮 True（而"或"语义要求逐子句判定）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            "跌破 MA20 或 放量下跌", direction="bearish", threshold_pct=None,
+            closes=DOWNTREND, pct_chgs=[], volumes=[1.0e8, 9.0e7],
+            metric="close",
+        ) is None
+
+
+def test_or_guard_does_not_touch_and_compounds_or_single_clause() -> None:
+    """不误伤：G2 的「且」系复合（无「或」）与单子句行为**逐字不变**。"""
+    assert judge_condition_met(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
     ) is True
 

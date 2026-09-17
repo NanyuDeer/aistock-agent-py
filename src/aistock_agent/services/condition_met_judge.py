@@ -44,7 +44,7 @@
 最小样本守卫：各分支要求该维度至少 2 个数据点（单行样本会因"单日累计=自身"而误点亮）；
 参考位类例外——它比较的是**同一行**的开/高/低与 close（无窗口累计语义），单行即可判定。
 
-**三道保守化护栏**（R9 防误点亮；spec §12.3/§12.7，2026-09-17 生产误点亮后追加）：
+**四道保守化护栏**（R9/R21 防误点亮；spec §12.3/§12.7，2026-09-17 生产误点亮后追加）：
 - **G1 口径不对应就不判**（常量表 + 单点函数 `_is_unjudgeable_domain`）：
   条件文本命中"非 A 股价格/量可判"口径（海外/宏观利率、情绪指标、资金流）且 anchor 无**对应**
   `metric` → 整体 `unjudgeable`（None，不产键）——常量表 `_NON_PRICE_DOMAIN_KEYWORDS` /
@@ -63,6 +63,12 @@
   （已人工回滚）：id=24 c1「重组蛋白板块指数相对当前收盘价跌破 -3%」的文本百分数（-3%）与
   `anchor.threshold`（-4%）**不一致** → 该形态判定标准无可靠对齐，故与 G1 同源，宁可 None。
   **不含 上穿/击穿**（二者本就不进技术位判径，走涨跌幅口径属正常判定，不得误伤）。
+- **G4 「或」复合条件不判**（单点函数 `has_or_connector`）：文本含「或」（排除"不可或缺"等
+  固定搭配）→ 整体 `unjudgeable`（None，不产键）。为什么：**「或」是"任一子句成立"语义，
+  与 G2 的"全部成立"相反**，正确实现需三值或运算（任一 `True` → `True`；全部可判且全 `False`
+  → `False`；含不可判子句且无 `True` → `None`）。现状**生产 0 条**（2026-09-18 全库 372 条
+  条件实测 `with_or=0`）→ 不做 or 运算（零收益却新增误判面），改为一律不判，堵掉"整段当
+  单子句近似判"的潜在误点亮。若生成侧后续真产出「或」条件，再按上述三值或语义实现。
 
 纯函数：无 IO、无日志、无第三方依赖（只用标准库）。
 """
@@ -142,12 +148,21 @@ _NON_PRICE_DOMAIN_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (DOMAIN_OVERSEAS_MACRO, (
         "美债", "美元指数", "美股", "道指", "纳指", "标普", "恒生",
         "人民币汇率", "美联储", "加息", "降息", "原油",
+        # 2026-09-18 扩展：经济数据/议息/汇率中间价/海外大宗与外盘指数口径
+        # 注：写「金价」而非「黄金」——A 股有"黄金/贵金属"板块（sector_aliases.json 标准名），
+        # 用「黄金」会把「黄金板块指数站上 MA20」这类可判条件整体拦成不可判（误伤）；
+        # 「金价」既覆盖「国际金价/黄金价格创新高」（黄金价格 含子串"金价"），又不撞板块名。
+        "非农", "CPI", "议息", "汇率中间价", "金价", "伦铜", "A50", "日经",
     )),
     (DOMAIN_SENTIMENT, (
         "涨停", "跌停", "炸板", "封板", "连板", "家数", "涨跌家数", "赚钱效应",
+        # 2026-09-18 扩展：封单/开板/连板晋级等情绪指标口径（无对应行情 metric）
+        "封单", "开板", "晋级率", "封成率", "炸板率", "首板", "二板", "空间板", "情绪温度",
     )),
     (DOMAIN_CAPITAL_FLOW, (
         "净流入", "净流出", "主力资金", "北向", "融资余额", "融券",
+        # 2026-09-18 扩展：大单/龙虎榜/ETF 份额/两融买入/互联互通与席位口径
+        "大单净额", "龙虎榜", "ETF", "份额", "融资买入额", "南向", "沪股通", "深股通", "席位",
     )),
 )
 # 各口径 → 能使其"变为可判定"的 anchor.metric 白名单。当前 `PredictionMetric`
@@ -227,6 +242,23 @@ def is_dir_verb_pct_ambiguous(text: str) -> bool:
     if _TECH_LEVEL_HINT_RE.search(text):
         return False  # 明示技术位 → 技术位判径有明确标准，不拦
     return bool(_DIR_VERB_PCT_RE.search(text))
+
+
+# ── G4 「或」复合条件守卫（2026-09-18；spec §12.3/§13.6） ──
+# 「或」= "任一子句成立"，与 G2 的"全部成立"语义相反；正确实现需三值或运算。
+# 生产 0 条（2026-09-18 实测全库 372 条条件 with_or=0）→ 零收益，不做 or 运算，一律不判。
+# 排除"不可或缺/未曾或"这类固定搭配里的「或」（仅命中该成语时不算连接词）。
+_OR_IDIOM = "不可或缺"
+
+
+def has_or_connector(text: str) -> bool:
+    """G4：文本是否含「或」连接词（排除"不可或缺"这类固定搭配里的「或」）。
+
+    单点函数（`_OR_IDIOM` 为唯一事实源）；供判定层早退与后续统计复用。
+    """
+    if not text:
+        return False
+    return "或" in text.replace(_OR_IDIOM, "")
 
 
 def infer_condition_class(*, metric: str | None, event_ref: str | None, text: str) -> str:
@@ -520,6 +552,10 @@ def _judge_clause_state(
         # G3（R21）：方向动词 + 百分数且无明示技术位 → 判定标准不确定（文本百分数 vs
         # anchor.threshold 无可靠对齐，id=24 c1 实证 -3% vs -4%）→ 不可判，不得走技术位近似。
         return None
+    if has_or_connector(text):
+        # G4：「或」是"任一子句成立"语义，与 G2 相反；生产 0 条 → 不做 or 运算（零收益
+        # 却新增误判面），一律不可判，堵掉"整段当单子句近似判"的潜在误点亮。
+        return None
     if condition_class == CONDITION_CLASS_VOLUME:
         series = list(amounts or []) if metric == "amount" else list(volumes)
         return _judge_volume_state(series, op, level, direction, text)
@@ -568,7 +604,7 @@ def judge_condition_met_state(
     `today_ref`：当日（窗口最后一行）参考位 `{"close":…, "open":…, "high":…, "low":…}`，
     仅参考位类（`metric=today_open/high/low`）消费；缺省/缺字段 → 该类降级 `None`。
 
-    G1/G2/G3 三道保守化护栏（R9/R21 误点亮防复发，spec §12.3/§12.7/§13.6）：
+    G1/G2/G3/G4 四道保守化护栏（R9/R21 误点亮防复发，spec §12.3/§12.7/§13.6）：
     - **G1 口径不对应就不判**（`_is_unjudgeable_domain`）：命中情绪/海外宏观/资金流口径且
       anchor 无对应 metric → 整体不可判（不产键）；
     - **G2 复合条件不得半判**（`split_condition_clauses`）：切出 ≥2 子句时——
@@ -577,8 +613,10 @@ def judge_condition_met_state(
       **单子句 → 走原判定体，行为逐字不变**。
     - **G3 方向动词 + 百分数判定标准不确定就不判**（`is_dir_verb_pct_ambiguous`）：文本同时含
       方向动词与百分数、且未明示技术位 → 整体不可判（不产键），不得走技术位近似（id=24 c1）。
-    三道护栏只在"价格/量/技术位"判径生效：带 `event_ref` 的条件（事件类，spec §12.4 状态锚/
-    受限 LLM）**优先短路**，不得被 G1/G3 误判为 unjudgeable。
+    - **G4 「或」复合条件不判**（`has_or_connector`）：含「或」→ 整体不可判（不产键）——「或」是
+      "任一子句成立"语义，与 G2 相反；生产 0 条，不做 or 运算，堵潜在误点亮。
+    四道护栏只在"价格/量/技术位"判径生效：带 `event_ref` 的条件（事件类，spec §12.4 状态锚/
+    受限 LLM）**优先短路**，不得被 G1/G3/G4 误判为 unjudgeable。
 
     给 False 的四类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
     不成立（非 cross_*）、参考位未触发（当日 close 未达/未破当日开/高/低）。其余（参考位缺

@@ -624,15 +624,21 @@ class AttributionChainStore:
         # 路径必须带 /api 前缀：app-api 把 attributionChainRouter 挂在 /api 下
         # （index.ts:165），绝对路径为 POST /api/internal/attribution-chain；不带 /api 会命中
         # /internal 那个 router（index.ts:631）而恒 404，且 post 吞错返回 None → 静默不落库。
+        # error_out（2026-09-18）：把 data_client 捕获的**真实失败原因**（业务码/HTTP 状态）
+        # 并入本条 warning —— R17 排障代价正来自"真实原因只在那几条独立日志里，需交叉 grep"。
+        cause: dict[str, object] = {}
         result = await self.node_api.post(
-            "/api/internal/attribution-chain", {"date": report_date, "chain": chain}
+            "/api/internal/attribution-chain",
+            {"date": report_date, "chain": chain},
+            error_out=cause,
         )
         if result is None:
             # data_client.post 失败/业务码异常吞错返回 None → 告警而非误报 saved
             logger.warning(
                 "attribution_chain.save_failed",
                 report_date=report_date,
-                error="node_api.post 返回 None（请求失败或业务码异常）",
+                stage=str(cause.get("stage") or "unknown"),
+                error=str(cause.get("detail") or "node_api.post 返回 None（原因未捕获）"),
             )
             return
         logger.info(
