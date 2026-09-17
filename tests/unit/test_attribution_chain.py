@@ -135,7 +135,14 @@ def test_trace_summary_fallback_when_trace_result_empty():
 
 
 @pytest.mark.asyncio
-async def test_save_posts_to_internal():
+async def test_save_posts_to_api_internal():
+    """写入路径必须带 /api 前缀（Critical 2026-09-17 防回归）。
+
+    app-api 中 attributionChainRouter 挂在 ``/api`` 下（index.ts:165），其写接口绝对路径为
+    ``/api/internal/attribution-chain``；而 ``/internal`` 是另一个 router 的挂载点
+    （index.ts:631）。缺 /api 前缀 → 路由不匹配 → 恒 404 → post 吞错返回 None →
+    链静默不落库（生产 attribution_chains 表曾长期不存在）。
+    """
     from aistock_agent.services.attribution_chain import AttributionChainStore
 
     store = AttributionChainStore()
@@ -148,7 +155,9 @@ async def test_save_posts_to_internal():
         )
         mock_post.assert_awaited_once()
         call = mock_post.await_args
-        assert call.args[0] == "/internal/attribution-chain"
+        assert call.args[0].startswith("/api/internal/attribution-chain")
+        # 负向断言：path 以 /internal/ 开头即表示漏了 /api 前缀（该前缀下无此路由，恒 404）
+        assert not call.args[0].startswith("/internal/")
         assert call.args[1]["date"] == "2026-09-03"
         assert call.args[1]["chain"]["root"]["type"] == "market"
 

@@ -710,8 +710,8 @@ class NodeApiClient:
         `aistock-app-api/src/core/routes/attributionChainRouter.ts:180` + `src/index.ts:164`）：
         ① 该路由挂在 ``/api`` 下（``GET /api/agent/attribution-chain/:date``），base_url
            不含 /api，故路径必须带 /api 前缀（对齐 tools/market_tools.py 的 /api/gb/... 先例）——
-           chain 写入路径 ``/internal/attribution-chain`` 同样缺 /api 前缀，属 Node 侧既有口径，
-           本任务不改（见 task-3.1-report 遗留）；
+           chain 写入路径同理（Task 3.1b 已补为 ``/api/internal/attribution-chain``，此前缺
+           /api 前缀导致生产恒 404、链从未落库）；
         ② 响应为**裸体** ``{date, chain|null}``（非 ``{code,data}`` 信封），不能走 self.get
            的信封解包（会恒返回 None）。此处直接发请求并容忍裸体/信封两种形状。
 

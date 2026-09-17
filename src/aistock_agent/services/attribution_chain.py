@@ -525,8 +525,11 @@ class AttributionChainStore:
         self.node_api = node_api
 
     async def save(self, report_date: str, chain: dict[str, object]) -> None:
+        # 路径必须带 /api 前缀：app-api 把 attributionChainRouter 挂在 /api 下
+        # （index.ts:165），绝对路径为 POST /api/internal/attribution-chain；不带 /api 会命中
+        # /internal 那个 router（index.ts:631）而恒 404，且 post 吞错返回 None → 静默不落库。
         result = await self.node_api.post(
-            "/internal/attribution-chain", {"date": report_date, "chain": chain}
+            "/api/internal/attribution-chain", {"date": report_date, "chain": chain}
         )
         if result is None:
             # data_client.post 失败/业务码异常吞错返回 None → 告警而非误报 saved
