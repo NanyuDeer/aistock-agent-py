@@ -27,10 +27,11 @@ PREDICTION_LIGHT_PROMPT = """你是 A 股自选股洞察轻量预判器（quick_
 - conditions：1-3 条"条件→情景"对，每条包含
   - condition：触发条件，可量化的市场事实（放量/缩量、突破/跌破某价位、站上/跌破均线等），关键词式短语，禁止长句与背景铺垫
   - scenario：条件满足后的走势预判（含幅度或目标位，如 "上看 +5%"、"回踩不破 20 日线"）
-  - anchor：{horizon: "short"|"mid"，threshold: 涨跌幅数值如 "+5%"/"-3%"，metric: "close"|"volume"（默认 close），direction: "bullish"|"bearish"|"neutral"，event_ref（2026-09-17）: 事件 id（**仅事件类条件填写**；输入中无对应事件 id 时不得填写该键、禁止编造）}
+  - anchor：{horizon: "short"|"mid"，threshold: 涨跌幅数值如 "+5%"/"-3%"，metric（2026-09-17 扩展）: "close"|"volume"|"amount"|"ma20"|"ma60"|"prior_low"|"prior_high"|"today_open"|"today_high"|"today_low"（默认 close），direction: "bullish"|"bearish"|"neutral"，op（2026-09-17）: "gte"|"lte"|"above"|"below"|"cross_above"|"cross_below"（与 level 配对），level（2026-09-17）: 数值阈值（如成交量 150000000、成交额 120000000000；与 threshold 并存），event_ref（2026-09-17）: 事件 id（**仅事件类条件填写**；输入中无对应事件 id 时不得填写该键、禁止编造）}
 约束：
-- 只使用输入中出现的价格/量能/均线/归因主因/资讯事实，禁止编造（如输入无量能数据则不得断言"放量"）
-- 有量能对比数据（vol_recent5_avg vs vol_prev5_avg）时，至少 1 条 condition 用 volume 维度（放量/缩量情景）
+- 只使用输入中出现的价格/量能/均线/归因主因/资讯事实，禁止编造（如输入无量能数据则不得断言"放量"，level 必须取输入中真实存在的量级）
+- 可判定性硬约束（2026-09-17，spec §12.3）：每条 condition 的 anchor **至少映射一个可判定维度**——① 涨跌幅（threshold）② 量能（metric=volume/amount + op + level）③ 技术位（metric=ma20/ma60/prior_low/prior_high）④ 参考位（metric=today_open/high/low，判定层暂不取当日开高低，优先用前低/均线替代）⑤ 事件（event_ref）；量化条件必须给 level 或 threshold，两者皆缺的条件不会被点亮
+- 有量能对比数据（vol_recent5_avg vs vol_prev5_avg）时，至少 1 条 condition 用 volume 维度（放量/缩量）并量化到具体量级或倍数
 - 每个独立触发情形单独成条；禁止用"；若…则…"在一条内拼接第二个反向情形
 - 禁止生成买入/卖出等交易指令，禁止使用收益承诺性措辞
 - direction 与主情景矛盾的对冲情形（如"若跌破 X 则转跌"）独立成条并自带 anchor"""

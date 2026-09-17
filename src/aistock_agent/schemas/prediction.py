@@ -16,8 +16,16 @@ PredictionHorizonType = Literal["short", "mid", "long"]
 PredictionPhase = Literal["building", "peaking", "decaying", "returning"]
 # 条件化预判方向（§3.1，anchor 自带 direction，不依赖 horizons[].direction）
 PredictionDirection = Literal["bullish", "bearish", "neutral"]
-# 验证标的（§3.1 anchor.metric）
-PredictionMetric = Literal["close", "high", "low", "volume", "index_close"]
+# 验证标的（§3.1 anchor.metric）。2026-09-17 扩展（spec §12.3）：新增量类 amount、
+# 技术位 ma20/ma60/prior_low/prior_high、参考位 today_open/today_high/today_low。
+# 该枚举是生成侧 prompt 与判定层共用的唯一白名单（禁止两侧各写一套，防再次口径脱节）。
+PredictionMetric = Literal[
+    "close", "high", "low", "volume", "index_close",
+    "amount", "ma20", "ma60", "prior_low", "prior_high",
+    "today_open", "today_high", "today_low",
+]
+# 判定原子操作（§12.3）：gte/above/lte/below 用于窗口极值比较；cross_* 用于相邻日穿越。
+PredictionAnchorOp = Literal["gte", "lte", "above", "below", "cross_above", "cross_below"]
 
 
 class PredictionHorizon(BaseModel):
@@ -86,6 +94,13 @@ class PredictionAnchor(BaseModel):
     # 同批同步，否则 LLM 多吐该键会整条预判校验失败。缺失的事件类条件由判定层按
     # unjudgeable（met=null）处理，不误点亮。
     event_ref: str | None = None
+    # 判定操作（spec §12.3，2026-09-17 P4'）：与 level 配对使用，声明"如何比较"。
+    # 可空（旧记录缺省 None）→ 判定层按 direction 兜底选择 gte/lte；不升 schema_version。
+    op: PredictionAnchorOp | None = None
+    # 数值阈值（spec §12.3）：与用于涨跌幅的 threshold（百分比字符串）并存——
+    # threshold 管"涨跌幅 %"，level 管"绝对量/价格"（如成交量 2.2e8 手、均线点位 82.5）。
+    # 可空：无量化阈值 → 判定层视为不可判定（met 不写），不得凭文本关键词点亮。
+    level: float | None = None
 
 
 class PredictionCondition(BaseModel):

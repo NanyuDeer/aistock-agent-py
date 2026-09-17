@@ -96,3 +96,20 @@ def test_prediction_prompts_require_event_driven_statement():
         assert "warehouse_events" in prompt
         assert "是否受事件驱动" in prompt
         assert "禁止编造事件" in prompt
+
+
+def test_prediction_prompts_declare_anchor_op_level_and_metric_enum():
+    # spec §12.3 / Task 5.1：anchor 键清单须登记 op/level，metric 可选值清单与
+    # schemas/prediction.py::PredictionMetric 同批（extra="forbid" 下：prompt 多吐 schema 未收的键
+    # → 整条预判丢失；schema 收了 prompt 不吐 → 条件永远不可判定，覆盖率回归 5.5%）。
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT, PREDICTION_LIGHT_PROMPT):
+        assert "op" in prompt and "level" in prompt
+        for metric in ("volume", "amount", "ma20", "ma60", "prior_low", "prior_high",
+                       "today_open", "today_high", "today_low"):
+            assert metric in prompt, metric
+        # 生成侧硬约束：每条条件至少映射一个可判定维度（否则降级 unjudgeable）
+        assert "可判定" in prompt
+    # 量类 / 参考位类示例 JSON（Task 5.1 要求各补一条）
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert '"op": "gte"' in prompt          # 量类示例
+        assert '"metric": "today_low"' in prompt  # 参考位类示例
