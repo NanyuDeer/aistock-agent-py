@@ -142,9 +142,27 @@ async def test_run_writes_sql_file_without_touching_db(tmp_path, capsys) -> None
 
 
 @pytest.mark.asyncio
-async def test_run_dry_run_prints_caution_when_no_targets(capsys) -> None:
-    """无候选（含读接口失败静默空列表）→ 退 0 并提示先核对可达性（不产 SQL）。"""
+async def test_run_fails_loud_when_full_scan_empty(capsys) -> None:
+    """全量读取 0 条（无 source_id 过滤）→ 视为读接口失败：退 1 + stderr 报错。
+
+    2026-09-17 生产踩过：data_client 吞错返回空列表，脚本误报"无待回滚项"（假阴性）。
+    """
     args = _parse_args(["--date", "2026-09-17"])
+    with patch(
+        "scripts.rollback_condition_met._load_records", new=AsyncMock(return_value=[])
+    ):
+        code = await _run(args)
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "极可能是读接口失败" in captured.err
+    assert "NODE_API_BASE_URL" in captured.err
+    assert "无待回滚项" not in captured.out  # 不得再把"读不到"报成"没有待回滚项"
+
+
+@pytest.mark.asyncio
+async def test_run_dry_run_prints_caution_when_no_targets(capsys) -> None:
+    """带 source_id 过滤且 0 条 → 退 0 并提示（该范围确实没有记录，非读取失败）。"""
+    args = _parse_args(["--source-id", "sector:半导体材料:2026-09-17"])
     with patch(
         "scripts.rollback_condition_met._load_records", new=AsyncMock(return_value=[])
     ):

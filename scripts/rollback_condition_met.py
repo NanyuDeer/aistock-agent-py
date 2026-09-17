@@ -46,7 +46,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from aistock_agent.config import settings  # noqa: E402
 from aistock_agent.services.data_client import node_api  # noqa: E402
+from aistock_agent.services.http_client import HttpClientPool  # noqa: E402
 
 # condition entry 的 key 形态（与 prediction_validator 的第①/②段一致）
 _CONDITION_KEY_RE = re.compile(r"^c(\d+)$")
@@ -222,8 +224,25 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    records = await _load_records(args.source_id)
+    # CLI 独立运行时必须自建连接池（服务进程由 lifespan 初始化；脚本没有 lifespan）。
+    # 2026-09-17 生产踩过：缺此初始化时读接口恒失败，而 data_client 吞错返回空列表
+    # → 脚本会把"读不到"误报成"无待回滚项"（假阴性，差点漏掉真正误点亮的项）。
+    await HttpClientPool.init(timeout=settings.http_timeout_seconds)
+    try:
+        records = await _load_records(args.source_id)
+    finally:
+        await HttpClientPool.close()
     if records is None:
+        return 1
+    # 无 source_id 过滤时为全量读取：生产库不可能 0 条 → 视为读取失败，fail-loud 退出，
+    # 不再打印"无待回滚项"（区分"确无待回滚项"与"根本没读到"）。
+    if not records and args.source_id is None:
+        print(
+            "[rollback-condition-met] 全量读取到 0 条记录：极可能是读接口失败，"
+            "请先确认 NODE_API_BASE_URL / INTERNAL_API_TOKEN 可达后重试"
+            "（本脚本不写库，可安全重复执行）",
+            file=sys.stderr,
+        )
         return 1
     targets = select_targets(
         records,
