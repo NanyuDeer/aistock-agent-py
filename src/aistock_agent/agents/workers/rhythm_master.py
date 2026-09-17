@@ -22,6 +22,7 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
+    candidate_name_matches,
     detect_breakdown,
     judge_mainline,
     load_mainline_candidates,
@@ -224,11 +225,13 @@ async def _compose_card(
         "excess": None, "data_date": None, "attention": "",
         "breakdown": None, "nav": None,
     }
-    candidate_load_failed = False
-    if settings.rhythm_mainline_enabled:
+    mainline_notes: list[str] = []
+    if not settings.rhythm_mainline_enabled:
+        mainline_notes.append("主线判定未启用")
+    else:
         ok, cands = load_mainline_candidates()
         if not ok:
-            candidate_load_failed = True  # 降级 1：候选清单缺失（data_missing 留痕）
+            mainline_notes.append("主线候选清单缺失")  # 降级 1：候选清单缺失
         else:
             index_resp = await node_api.get_ths_index_map()
             index_map = index_resp if isinstance(index_resp, list) else []
@@ -240,21 +243,36 @@ async def _compose_card(
                 - timedelta(days=SECTOR_LOOKBACK_NATURAL_DAYS)
             ).isoformat()
             valid: list[dict[str, object]] = []
+            code_skipped = 0
+            name_skipped = 0
+            thin_skipped = 0
             for c in cands:
                 code = str(c.get("tag_code") or "")
                 if code not in idx_by_code:
-                    continue  # 降级 3：code 不在 index-map → 剔除候选
+                    code_skipped += 1
+                    continue  # 降级 3：code 不在板块表 → 剔除
+                if not candidate_name_matches(c, idx_by_code[code]):
+                    name_skipped += 1
+                    continue  # §5.10.3 名称不一致 → 剔除（防"代码存在但语义错"）
                 rows_b = await node_api.get_ths_daily_range(code, start, evidence_date) or []
                 pk = [p for p in rows_b if p.get("pct_chg") is not None]
                 if len(pk) < MA20_MIN_BARS:
-                    continue  # 降级 4：pct_chg 序列不足 → 剔除候选
+                    thin_skipped += 1
+                    continue  # 降级 4：pct_chg 序列不足 → 剔除
                 valid.append({
                     **c,
                     "pct_chgs": [float(p["pct_chg"]) for p in pk],
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
-            if len(valid) >= MIN_CANDIDATES:
+            if name_skipped:
+                mainline_notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
+            if len(valid) < MIN_CANDIDATES:
+                mainline_notes.append(
+                    f"主线候选不可用（有效候选 {len(valid)}/{MIN_CANDIDATES}；"
+                    f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}）"
+                )
+            else:
                 index_pct_chgs = [
                     float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
                 ]
@@ -267,6 +285,9 @@ async def _compose_card(
                         w_last = winner.get("last_trade_date")
                         # H2：主线 data_date 必须 == 证据日（K 线末日），不等 → unavailable
                         if w_last and w_last != _normalize_ymd(evidence_date):
+                            mainline_notes.append(
+                                f"主线数据滞后（data_date={w_last}，证据日={evidence_date}）"
+                            )
                             mainline = {
                                 "state": "unavailable", "name": None, "strength": None,
                                 "excess": None, "data_date": None,
@@ -283,6 +304,8 @@ async def _compose_card(
                                 "nav": wnav,
                                 "breakdown": brk["mainline_breakdown"],
                             }
+                elif mainline.get("state") == "none":
+                    mainline_notes.append("主线候选齐备但无清晰主线")
 
     breadth = None
     snapshot_missing = False
@@ -327,7 +350,7 @@ async def _compose_card(
     position = ev.compute_position(stage=stage, certainty=cert)
     anchors = ev.build_event_anchors(win.events)
 
-    missing: list[str] = []
+    missing: list[str] = list(mainline_notes)
     if kline_short:
         missing.append("指数K线不足")
     if basis_gate:
@@ -336,8 +359,6 @@ async def _compose_card(
         missing.append("宽度快照缺失（证据日无收盘快照）")
     if basis_inherit_note:
         missing.append(basis_inherit_note)
-    if candidate_load_failed:
-        missing.append("主线候选清单缺失")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
