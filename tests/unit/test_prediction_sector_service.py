@@ -15,10 +15,20 @@ import pytest
 
 from aistock_agent.schemas.prediction import PredictionResult
 from aistock_agent.services import prediction_service as ps
+from aistock_agent.services import sector_wind_prediction as swp
 
 _RESOLVED: dict[str, str] = {"ts_code": "BK1001", "name": "存储板块"}
 _SECTOR_SNAPSHOT: dict[str, object] = {"sector": {"name": "存储板块"}}
 _REPORT_DATE = "2026-07-16"
+
+
+def _no_existing_predictions() -> AsyncMock:
+    """幂等查询 mock：同 source_id 无既有记录（predict_sector 前置幂等检查用）。
+
+    Task 0.1 起 predict_sector 落库前先查 list_predictions，测试必须显式注入该 mock，
+    否则会走真实 node_api（HTTP）。
+    """
+    return AsyncMock(return_value=[])
 
 
 def _make_llm(
@@ -136,6 +146,7 @@ async def test_predict_sector_invokes_llm_and_persists() -> None:
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="半导体产业链暴跌")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(
             ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
@@ -178,6 +189,7 @@ async def test_predict_sector_forces_hypothesis_and_filters_evidence() -> None:
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
     ):
@@ -204,6 +216,7 @@ async def test_predict_sector_allows_explicit_snapshot_evidence_ids() -> None:
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
     ):
@@ -221,6 +234,7 @@ async def test_predict_sector_redacts_absolute_point() -> None:
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
     ):
@@ -240,6 +254,7 @@ async def test_predict_sector_persist_failure_still_returns_prediction() -> None
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(
             ps.node_api, "save_prediction", AsyncMock(side_effect=RuntimeError("db down"))
@@ -261,6 +276,7 @@ async def test_predict_sector_llm_failure_returns_none() -> None:
     with (
         patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
         patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
         patch.object(ps, "get_quick_think", return_value=llm),
         patch.object(ps.node_api, "save_prediction", AsyncMock()) as mock_save,
     ):
@@ -271,6 +287,132 @@ async def test_predict_sector_llm_failure_returns_none() -> None:
         )
     assert out is None
     mock_save.assert_not_awaited()
+
+
+# ---------- Task 0.1/0.2：幂等 + source_id 口径（与批量路径同源） ----------
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_skips_existing_source_id() -> None:
+    """幂等（Critical 1）：同 source_id 已有记录（含已验证）→ 不生成、不落库。
+
+    与批量路径 sector_wind_prediction 同构：落库前先查 list_predictions，避免
+    Node upsert 覆盖并把已验证记录打回 pending（污染命中率统计 + 重复扣费）。
+    """
+    with (
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(
+            ps.node_api,
+            "list_predictions",
+            AsyncMock(return_value=[
+                {"source_id": "sector:存储板块:2026-07-16", "status": "verified"},
+            ]),
+        ) as mock_list,
+        patch.object(ps, "get_quick_think") as mock_llm,
+        patch.object(ps, "_market_trace_brief", AsyncMock()) as mock_brief,
+        patch.object(ps.node_api, "save_prediction", AsyncMock()) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is None
+    mock_list.assert_awaited_once_with("sector:存储板块:2026-07-16")
+    mock_llm.assert_not_called()  # 幂等命中在 LLM 之前短路（不重复扣费）
+    mock_brief.assert_not_awaited()
+    mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_idempotent_check_failure_is_failsafe() -> None:
+    """幂等查询异常 → fail-safe 不落库（宁可不产，不裸覆盖可能已验证的记录）。"""
+    with (
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(
+            ps.node_api, "list_predictions", AsyncMock(side_effect=RuntimeError("node down"))
+        ),
+        patch.object(ps, "get_quick_think") as mock_llm,
+        patch.object(ps.node_api, "save_prediction", AsyncMock()) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is None
+    mock_llm.assert_not_called()
+    mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_source_id_uses_resolved_name() -> None:
+    """source_id 口径（Critical 2）：raw 名 ≠ resolved 名 → 用 resolved 权威名。"""
+    llm, _ = _make_llm(_sector_prediction())
+    with (
+        patch.object(
+            ps,
+            "resolve_sector_target",
+            AsyncMock(return_value={"ts_code": "BK1001", "name": "存储概念"}),
+        ),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()) as mock_list,
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",  # raw 名（review 快照名）
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None
+    expected = f"sector:存储概念:{_REPORT_DATE}"
+    mock_list.assert_awaited_once_with(expected)
+    assert mock_save.await_args.args[0]["source_id"] == expected
+
+
+@pytest.mark.asyncio
+async def test_cascade_and_batch_share_same_source_id() -> None:
+    """两路口径一致：同板块同交易日，级联（raw 名入参）与批量（resolved 名）同一 source_id。"""
+    resolver = AsyncMock(return_value={"ts_code": "BK1001", "name": "存储概念"})
+    listed: AsyncMock = AsyncMock(return_value=[])
+    llm, _ = _make_llm(_sector_prediction())
+    with (
+        patch.object(ps, "resolve_sector_target", resolver),
+        patch.object(swp, "resolve_sector_target", resolver),
+        patch.object(ps.node_api, "list_predictions", listed),  # ps/swp 共用同一 node_api 实例
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
+        patch.object(
+            swp.node_api,
+            "get",
+            AsyncMock(return_value={
+                "hot_sectors": [
+                    {"code": "BK1001", "name": "存储", "cycle": "long", "today_change": 1.0},
+                ]
+            }),
+        ),
+        patch.object(swp.node_api, "list_analysis_reports", AsyncMock(return_value=[])),
+        patch.object(
+            swp,
+            "predict_sector",
+            AsyncMock(return_value=MagicMock(prediction_status="hypothesis")),
+        ),
+    ):
+        stats = await swp.run_sector_wind_prediction(report_date=_REPORT_DATE)
+        cascade = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储",  # 级联入参 raw 名（与批量候选同名，均非权威名）
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert stats["predicted"] == 1
+    assert cascade is not None
+    expected = f"sector:存储概念:{_REPORT_DATE}"
+    # 批量先查、级联后查 → 两次查询命中同一 source_id（修复前级联用 raw 名 → 不一致）
+    assert [call.args[0] for call in listed.await_args_list] == [expected, expected]
 
 
 # ---------- predict_sector REPLAY 转调（Spec D 迭代回放） ----------

@@ -1604,6 +1604,10 @@ async def predict_sector(
     板块 Target 解析失败（resolve_sector_target → None）→ 返回 None 不产出
     （无法解析即无法验证，无产出优于编造）。
 
+    落库前 fail-safe 幂等（Task 0.1）：同 source_id 已有记录 → 跳过不产。
+    source_id 口径（Task 0.2）与批量路径 sector_wind_prediction 统一为
+    `sector:{resolved 权威名}:{YYYY-MM-DD}`（raw 名随别名漂移会导致同板块两条记录）。
+
     REPLAY 回放态（Spec D 迭代回放）：REPLAY_CASE_ID 环境变量存在时顶部转调
     `_replay_predict_sector_from_case`——从 case slice meta 重建输入（无 DB 访问）、
     并入验证反馈，且不落库（回放只读；save_prediction → post no-op 兜底双保险）。
@@ -1624,6 +1628,26 @@ async def predict_sector(
         logger.info("sector_prediction.unresolved_target", sector_name=sector_name)
         return None
     target = sector_target_from_resolved(sector_name, resolved)
+    # source_id 口径与批量路径（sector_wind_prediction）统一为 resolved 权威名：
+    # raw 名（review 快照名/候选名）会随别名漂移，导致同板块同日两条记录、批量侧
+    # 幂等查询看不到级联写入的记录。日志同时带 raw 名便于排查。
+    source_id = f"sector:{target.name}:{report_date}"
+    try:
+        existing = await node_api.list_predictions(source_id)
+    except Exception:  # noqa: BLE001 —— fail-safe：查询失败宁可不生成，也不覆盖
+        logger.warning(
+            "sector_predict_idempotent_check_failed",
+            source_id=source_id,
+            sector_name=sector_name,
+        )
+        return None
+    if existing:
+        logger.info(
+            "sector_predict_idempotent_skipped",
+            source_id=source_id,
+            sector_name=sector_name,
+        )
+        return None
     try:
         market_brief = await _market_trace_brief(report_date)
         sector_id = f"sector:{target.internal_id}"
@@ -1640,7 +1664,6 @@ async def predict_sector(
         due_dates, approximate_horizons = _compute_due_dates(
             report_date, prediction.horizons,
         )
-        source_id = f"sector:{sector_name}:{report_date}"
         payload: dict[str, object] = {
             "source_type": "sector_prediction",
             "source_id": source_id,
