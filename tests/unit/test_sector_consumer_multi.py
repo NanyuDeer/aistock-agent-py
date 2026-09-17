@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
+from aistock_agent.agents.workers.sector_trace import (
+    SOURCE_PRIMARY_CLAIM,
+    SectorHit,
+    judge_sector_driver_relation,
+)
 from aistock_agent.services.event_consumers import SectorTraceConsumer, _review_index_pct
 
 
@@ -55,7 +59,10 @@ def _review_report(*, index_pct: float | None) -> dict:
     return {"content": {"market_trace": {"snapshot": {"a_share": a_share}}}}
 
 
-_TWO_SECTORS = [("存储板块", {"pct_change": -4.2}), ("券商板块", {"pct_change": -2.1})]
+_TWO_SECTORS = [
+    SectorHit("存储板块", {"name": "存储板块", "pct_change": -4.2}, SOURCE_PRIMARY_CLAIM),
+    SectorHit("券商板块", {"name": "券商板块", "pct_change": -2.1}, SOURCE_PRIMARY_CLAIM),
+]
 _PARENT_REF = {"source_report_type": "review", "report_date": "2026-07-16", "index_pct": -1.2}
 
 

@@ -23,7 +23,11 @@ from structlog import get_logger
 from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
-from aistock_agent.agents.workers.sector_trace import extract_primary_sectors, run_sector_trace
+from aistock_agent.agents.workers.sector_trace import (
+    SectorHit,
+    extract_primary_sectors,
+    run_sector_trace,
+)
 from aistock_agent.services.attribution_chain import index_pct_from_snapshot
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
@@ -461,29 +465,38 @@ class SectorTraceConsumer(BaseConsumer):
         }
 
         results: list[object] = []
-        # 级联预判入参（板块名 + 溯源快照），链保存后再消费（P0' 时序）
-        cascades: list[tuple[str, dict[str, object]]] = []
+        # 级联预判入参（板块名 + 溯源快照 + 提取来源/弱标记），链保存后再消费（P0' 时序）
+        cascades: list[tuple[str, dict[str, object], str, bool]] = []
 
-        async def _one(sector_name: str, sector_row: dict[str, object]) -> None:
+        async def _one(hit: SectorHit) -> None:
             try:
                 result = await run_sector_trace(
                     report_date=report_date,
-                    sector_name=sector_name,
-                    sector_row=sector_row,
+                    sector_name=hit.name,
+                    sector_row=hit.row,
                     parent_trace_ref=parent_ref,
                 )
+                # Task 9.1：提取来源/弱标记随溯源结果携带（链组装 children[].extraction
+                # 与 root.evidence_weak 消费）——主链命中为正常依据，T2/T3 兜底为弱依据
+                result.extraction = {"source": hit.source, "weak": hit.weak}
                 results.append(result)
-                cascades.append((sector_name, result.snapshot))
-                logger.info("sector_trace_done", report_date=report_date, sector=sector_name)
+                cascades.append((hit.name, result.snapshot, hit.source, hit.weak))
+                logger.info(
+                    "sector_trace_done",
+                    report_date=report_date,
+                    sector=hit.name,
+                    extraction_source=hit.source,
+                    extraction_weak=hit.weak,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "sector_trace_one_failed",
                     report_date=report_date,
-                    sector=sector_name,
+                    sector=hit.name,
                     error=str(exc),
                 )
 
-        await asyncio.gather(*(_one(name, row) for name, row in sectors))
+        await asyncio.gather(*(_one(hit) for hit in sectors))
 
         # P1a-3：溯源完成（results 非空）→ 组装大盘-板块归因链并 internal 保存。
         # 链保存失败只 warning 不阻断（溯源已逐板块落库，兼容降级约束）。
@@ -515,12 +528,20 @@ class SectorTraceConsumer(BaseConsumer):
         # P0'（spec §13.1 方案 A）：级联预判**移到链组装/保存之后**——预判输入组装
         # （P2' 依据增强）需读当日链；gather 并行触发（串行 for 会让每板块一次 LLM
         # 调用线性累加）。级联失败只 warning（溯源与链已落库），与链保存 try 独立。
-        async def _cascade_one(sector_name: str, sector_snapshot: dict[str, object]) -> None:
+        # Task 9.1：兜底命中（弱依据）照常触发预判，只把来源/弱标记带进产物留痕。
+        async def _cascade_one(
+            sector_name: str,
+            sector_snapshot: dict[str, object],
+            extraction_source: str,
+            attribution_weak: bool,
+        ) -> None:
             try:
                 await _cascade_sector_prediction(
                     report_date=report_date,
                     sector_name=sector_name,
                     sector_snapshot=sector_snapshot,
+                    extraction_source=extraction_source,
+                    attribution_weak=attribution_weak,
                 )
             except Exception as exc:  # noqa: BLE001 — 级联失败不得阻断/回滚溯源与链
                 logger.warning(
@@ -531,7 +552,7 @@ class SectorTraceConsumer(BaseConsumer):
                 )
 
         if cascades:
-            await asyncio.gather(*(_cascade_one(name, snap) for name, snap in cascades))
+            await asyncio.gather(*(_cascade_one(*item) for item in cascades))
 
 
 def _review_index_pct(report: dict[str, object]) -> float | None:
@@ -556,17 +577,24 @@ async def _cascade_sector_prediction(
     report_date: str,
     sector_name: str,
     sector_snapshot: dict[str, object],
+    extraction_source: str = "",
+    attribution_weak: bool = False,
 ) -> None:
     """板块溯源后的级联预判（Spec D · 预判环生产触发，输入组装非事件驱动）。
 
     失败绝不 raise：板块溯源事件已成功，预判失败（resolve 失败 / LLM 失败 / 落库
     失败）只记日志——否则会把整个 review_done 事件拖进 retry/DLQ（错误归属）。
+
+    Task 9.1：`extraction_source`/`attribution_weak` 为板块提取的（弱）依据标记，
+    透传 predict_sector 写入预判留痕（弱归因日兜底命中时点亮），不影响预判触发本身。
     """
     try:
         prediction = await predict_sector(
             report_date=report_date,
             sector_name=sector_name,
             sector_snapshot=sector_snapshot,
+            extraction_source=extraction_source,
+            attribution_weak=attribution_weak,
         )
     except Exception as exc:  # noqa: BLE001 — 级联预判失败不阻断溯源链路
         logger.warning(

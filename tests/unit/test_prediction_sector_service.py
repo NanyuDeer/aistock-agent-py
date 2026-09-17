@@ -184,6 +184,59 @@ async def test_predict_sector_invokes_llm_and_persists() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["candidate_claim", "snapshot"])
+async def test_predict_sector_persists_weak_extraction_marks(source: str) -> None:
+    """Task 9.1：兜底命中（弱依据）→ 落库产物带 attribution_weak/extraction_source 留痕。"""
+    llm, _ = _make_llm(_sector_prediction(evidence_ids=["sector:BK1001"]))
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+            extraction_source=source,
+            attribution_weak=True,
+        )
+    assert out is not None
+    assert out.attribution_weak is True
+    assert out.extraction_source == source
+    # 留痕随产物落库（Node 侧整体落 prediction jsonb，无需改端点）
+    assert mock_save.await_args.args[0]["prediction"]["attribution_weak"] is True
+    assert mock_save.await_args.args[0]["prediction"]["extraction_source"] == source
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_defaults_to_no_weak_mark() -> None:
+    """主链命中（缺省入参）→ attribution_weak=False、extraction_source=""（不误标弱）。"""
+    llm, _ = _make_llm(_sector_prediction(evidence_ids=["sector:BK1001"]))
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None
+    assert out.attribution_weak is False
+    assert out.extraction_source == ""
+    assert mock_save.await_args.args[0]["prediction"]["attribution_weak"] is False
+
+
+@pytest.mark.asyncio
 async def test_predict_sector_forces_hypothesis_and_filters_evidence() -> None:
     """LLM 输出 confirmed + 编造证据 id → 强制 hypothesis、evidence 只留输入存在项。"""
     llm, _ = _make_llm(

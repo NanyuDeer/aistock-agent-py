@@ -10,6 +10,10 @@ logger = structlog.get_logger()
 # insufficient 或无法从 stages 提取 trigger 结论时，如实说明原因未确认）。
 _FALLBACK_TRACE_SUMMARY = "溯源未确认驱动原因"
 
+# 弱依据日（无主链：板块提取走候选链/快照兜底）链根摘要回退文案：报告中
+# attribution_summary 空缺时用中性表述，不编造主因（Task 9.1）。
+_WEAK_ATTRIBUTION_SUMMARY = "证据不足，未确认主因"
+
 # 大盘涨跌幅旧候选键：生产快照已不产出（真实形状是 a_share.indexes），
 # 仅保留读取以兼容历史报告/旧 fixture。
 _LEGACY_INDEX_PCT_KEYS = (
@@ -404,6 +408,17 @@ def _attribution_parent(result: object) -> dict[str, object]:
     return parent if isinstance(parent, dict) else {}
 
 
+def _sector_extraction(result: object) -> dict[str, object]:
+    """板块溯源结果携带的提取来源/弱标记（SectorTraceRunResult.extraction）。
+
+    SectorTraceConsumer 消费 extract_primary_sectors 的 SectorHit 后写入
+    ``{"source": "primary_claim"|"candidate_claim"|"snapshot", "weak": bool}``；
+    缺该属性（旧调用方/回放）→ 空 dict，视同主链命中（不误标弱）。
+    """
+    value = getattr(result, "extraction", None)
+    return value if isinstance(value, dict) else {}
+
+
 def _reconcile_index_pct(
     report_date: str, snapshot_index_pct: float | None, sector_results: list[object]
 ) -> float | None:
@@ -462,6 +477,11 @@ def assemble_attribution_chain(
 
     `warehouse_events` 为当日中台存量事件（`load_chain_warehouse_events` 产物，供
     children[].events 的"中台优先"匹配）；缺省 None = 不做中台匹配，只走检索补漏。
+
+    Task 9.1：sector_results 携带的 extraction（板块提取来源/弱标记，见
+    SectorTraceRunResult.extraction）为弱依据时 → children[] 写 extraction 标弱、
+    root 写 evidence_weak（+报告 attribution_status，摘要空缺用中性表述，不编造主因）；
+    主链命中路径不写这些键（正常链不被弱标记污染）。
     """
     report = review_payload.get("report")
     content = report.get("content") if isinstance(report, dict) else None
@@ -503,19 +523,42 @@ def assemble_attribution_chain(
                 sector=sector,
                 **event_stats,
             )
-        children.append(
-            {
-                "sector": sector,
-                "relation": judge_sector_driver_relation(pct, index_pct),
-                "pct": pct,
-                "trace_summary": _trace_summary(trace_result),
-                "events": events,
+        extraction = _sector_extraction(res)
+        child: dict[str, object] = {
+            "sector": sector,
+            "relation": judge_sector_driver_relation(pct, index_pct),
+            "pct": pct,
+            "trace_summary": _trace_summary(trace_result),
+            "events": events,
+        }
+        # Task 9.1：兜底命中（无主链 → 候选链/快照）标弱依据，供展示层提示证据不足；
+        # 主链命中不写该键（正常路径不被弱标记污染）
+        if extraction.get("weak"):
+            child["extraction"] = {
+                "source": str(extraction.get("source") or ""),
+                "weak": True,
             }
-        )
+        children.append(child)
+
+    # 整体走 T2/T3（无主链）→ 链根如实标注证据弱；摘要空缺用中性表述，不编造主因
+    evidence_weak = any(_sector_extraction(res).get("weak") for res in sector_results)
+    root: dict[str, object] = {
+        "type": "market",
+        "date": report_date,
+        "summary": summary,
+        "index_pct": index_pct,
+    }
+    if evidence_weak:
+        status = str(trace.get("attribution_status") or "") if isinstance(trace, dict) else ""
+        if status:
+            root["attribution_status"] = status
+        root["evidence_weak"] = True
+        if not summary:
+            root["summary"] = _WEAK_ATTRIBUTION_SUMMARY
 
     return {
         "date": report_date,
-        "root": {"type": "market", "date": report_date, "summary": summary, "index_pct": index_pct},
+        "root": root,
         "children": children,
     }
 

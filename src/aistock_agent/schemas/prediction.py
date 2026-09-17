@@ -194,6 +194,12 @@ class PredictionResult(BaseModel):
     # **由系统在产出后填充，非 LLM 产出**（两个 prompt 已登记"不得产出"）；纯留痕、
     # 不改输出语义，故不升 schema_version（3.0）；无注入为空数组（不是 None）。
     input_event_refs: list[str] = Field(default_factory=list)
+    # 弱依据留痕（2026-09-17 Task 9.1）：级联板块预判的板块提取走候选链
+    # （candidate_claim）/快照（snapshot）兜底时由**系统**点亮；主链（primary_claim）
+    # 路径恒 False + 空串。纯留痕、不改输出语义，故不升 schema_version（3.0）；
+    # LLM 不得产出（两个 prompt 已登记）——extra="forbid" 下多吐键会整条预判丢失。
+    attribution_weak: bool = False
+    extraction_source: str = ""
 
     @model_validator(mode="after")
     def _check_omitted_not_overlap(self) -> "PredictionResult":

@@ -14,6 +14,12 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.sector_trace_snapshot import build_sector_snapshot
 
+# 板块提取来源标记（Task 9.1 三级兜底）：仅 primary_claim 为主链命中（正常依据），
+# 其余为弱依据——归因链与级联预判据此标注，不把兜底当主因。
+SOURCE_PRIMARY_CLAIM = "primary_claim"
+SOURCE_CANDIDATE_CLAIM = "candidate_claim"
+SOURCE_SNAPSHOT = "snapshot"
+
 
 @dataclass
 class SectorTraceRunResult:
@@ -28,69 +34,168 @@ class SectorTraceRunResult:
     # （Task 2.2 修"只写不读"：报告与链路同键 (report_type, report_date) 会被多板块
     # 互相覆盖，回读无法区分板块，故写入侧携带）。
     attribution_parent: dict[str, object] = field(default_factory=dict)
+    # 板块提取来源/弱标记（Task 9.1）：SectorTraceConsumer 消费 extract_primary_sectors
+    # 的 SectorHit 后写入（{"source": ..., "weak": ...}），归因链据此标注弱依据。
+    extraction: dict[str, object] = field(default_factory=dict)
+
+
+def _chain_claims(chain: object) -> list[str]:
+    """链对象各节点 claim 文本（保持节点原序）。"""
+    if not isinstance(chain, dict):
+        return []
+    raw_nodes = chain.get("nodes")
+    nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    return [str(n.get("claim") or "") for n in nodes if isinstance(n, dict)]
+
+
+def _candidates(trace: dict[str, object] | None) -> list[dict[str, object]]:
+    if not isinstance(trace, dict):
+        return []
+    raw_candidates = trace.get("candidates")
+    return [c for c in raw_candidates if isinstance(c, dict)] if isinstance(
+        raw_candidates, list
+    ) else []
 
 
 def _primary_chain_claims(trace: dict[str, object] | None) -> list[str]:
     """从 MarketTraceResult 序列化提取 primary 链各节点 claim 文本。"""
-    if not isinstance(trace, dict):
-        return []
-    primary_id = trace.get("primary_chain_id")
-    raw_candidates = trace.get("candidates")
-    candidates = raw_candidates if isinstance(raw_candidates, list) else []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
+    primary_id = trace.get("primary_chain_id") if isinstance(trace, dict) else None
+    for candidate in _candidates(trace):
         if candidate.get("id") != primary_id:
             continue
-        chain = candidate.get("chain")
-        if not isinstance(chain, dict):
-            continue
-        raw_nodes = chain.get("nodes")
-        nodes = raw_nodes if isinstance(raw_nodes, list) else []
-        return [str(n.get("claim") or "") for n in nodes if isinstance(n, dict)]
+        return _chain_claims(candidate.get("chain"))
     return []
 
 
-def extract_primary_sectors(
-    payload: dict[str, object], max_sectors: int = 3
-) -> list[tuple[str, dict[str, object]]]:
-    """从 review 报告确定性提取主驱动板块集合（spec P1a-1：单→多）。
+def _candidate_chain_claims(trace: dict[str, object] | None) -> list[str]:
+    """全部候选链（含 status=weak）节点 claim 文本，保持候选与节点原序（T2 输入）。"""
+    claims: list[str] = []
+    for candidate in _candidates(trace):
+        claims.extend(_chain_claims(candidate.get("chain")))
+    return claims
 
-    输入形态同原 extract_primary_sector（payload={"report": Node行}）。
-    主因链 claim 命中板块行情名 → 依 claim 顺序收集（跌市 losers 优先于涨市
-    gainers，语义保持），去重 + max_sectors 上限。无命中返回 []。
+
+@dataclass(frozen=True)
+class SectorHit:
+    """板块提取命中项：板块名 + 快照行 + 来源标记。
+
+    来源取值 ``primary_claim``（主链 claim 命中，正常依据）/ ``candidate_claim``
+    （候选链 claim 命中）/ ``snapshot``（快照头部队列兜底）——后两者为弱依据
+    （无主链时降级所得，下游须标注，见 weak）。
     """
-    report = payload.get("report")
-    if not isinstance(report, dict):
-        return []
-    content = report.get("content")
-    content = content if isinstance(content, dict) else None
-    market_trace = content.get("market_trace") if isinstance(content, dict) else None
-    market_trace = market_trace if isinstance(market_trace, dict) else None
-    snapshot = market_trace.get("snapshot") if isinstance(market_trace, dict) else None
-    snapshot = snapshot if isinstance(snapshot, dict) else None
+
+    name: str
+    row: dict[str, object]
+    source: str = SOURCE_PRIMARY_CLAIM
+
+    @property
+    def weak(self) -> bool:
+        """弱依据标记：非主链命中即弱（T2/T3 兜底）。"""
+        return self.source != SOURCE_PRIMARY_CLAIM
+
+
+def _sector_rows(
+    market_trace: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """快照板块行情两桶（top_losers / top_gainers），非 list/非 dict 项一并丢弃。"""
+    snapshot = market_trace.get("snapshot")
     a_share = snapshot.get("a_share") if isinstance(snapshot, dict) else None
     sectors = a_share.get("sectors") if isinstance(a_share, dict) else None
 
     def _rows(raw: object) -> list[dict[str, object]]:
         return [t for t in raw if isinstance(t, dict)] if isinstance(raw, list) else []
 
-    top_losers = _rows(sectors.get("top_losers") if isinstance(sectors, dict) else [])
-    top_gainers = _rows(sectors.get("top_gainers") if isinstance(sectors, dict) else [])
+    return (
+        _rows(sectors.get("top_losers") if isinstance(sectors, dict) else []),
+        _rows(sectors.get("top_gainers") if isinstance(sectors, dict) else []),
+    )
 
-    trace = market_trace.get("trace") if isinstance(market_trace, dict) else None
-    seen: set[str] = set()
-    out: list[tuple[str, dict[str, object]]] = []
-    for claim in _primary_chain_claims(trace):
-        for bucket in (top_losers, top_gainers):
-            for row in bucket:
-                name = str(row.get("name") or "")
-                if name and name in claim and name not in seen:
-                    seen.add(name)
-                    out.append((name, row))
-                    if len(out) >= max_sectors:
-                        return out
+
+def _claim_hits(
+    claims: list[str],
+    top_losers: list[dict[str, object]],
+    top_gainers: list[dict[str, object]],
+    *,
+    source: str,
+    seen: set[str],
+    max_sectors: int,
+) -> list[SectorHit]:
+    """claim 命中板块名收集（claims 顺序优先，同一 claim 内跌市 losers 优先于涨市）。"""
+    out: list[SectorHit] = []
+    for claim in claims:
+        for row in [*top_losers, *top_gainers]:
+            name = str(row.get("name") or "")
+            if name and name in claim and name not in seen:
+                seen.add(name)
+                out.append(SectorHit(name=name, row=row, source=source))
+                if len(out) >= max_sectors:
+                    return out
     return out
+
+
+def _snapshot_hits(
+    top_losers: list[dict[str, object]],
+    top_gainers: list[dict[str, object]],
+    *,
+    seen: set[str],
+    max_sectors: int,
+) -> list[SectorHit]:
+    """快照头部队列兜底（T3）：跌市 top_losers 优先，不足补涨市 top_gainers 头部。"""
+    out: list[SectorHit] = []
+    for row in [*top_losers, *top_gainers]:
+        name = str(row.get("name") or "")
+        if name and name not in seen:
+            seen.add(name)
+            out.append(SectorHit(name=name, row=row, source=SOURCE_SNAPSHOT))
+            if len(out) >= max_sectors:
+                return out
+    return out
+
+
+def extract_primary_sectors(payload: dict[str, object], max_sectors: int = 3) -> list[SectorHit]:
+    """从 review 报告确定性提取主驱动板块集合（spec P1a-1：单→多 + Task 9.1 三级兜底）。
+
+    输入形态同原 extract_primary_sector（payload={"report": Node行}）。仅在上一级
+    无产出时降级（弱归因日 2026-09-17：primary_chain_id 为空且候选全 weak → 主链
+    零命中导致溯源整链空转）：
+
+    - T1 主链 claim 命中 → source=primary_claim（正常依据，行为逐字不变）；
+    - T2 候选链（含 status=weak）claim 命中 → source=candidate_claim（弱）；
+    - T3 快照头部队列兜底（losers → gainers）→ source=snapshot（弱）。
+
+    逐级收集时跨层/跨来源按板块名去重（同名只收最先命中的来源），上限
+    max_sectors；三层皆空返回 []。弱依据由调用方（SectorTraceConsumer →
+    assemble_attribution_chain）标注，本函数只如实给出来源。
+    """
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        return []
+    content = report.get("content")
+    market_trace = content.get("market_trace") if isinstance(content, dict) else None
+    if not isinstance(market_trace, dict) or max_sectors <= 0:
+        return []
+
+    top_losers, top_gainers = _sector_rows(market_trace)
+    trace = market_trace.get("trace")
+    seen: set[str] = set()
+
+    for claims, source in (
+        (_primary_chain_claims(trace), SOURCE_PRIMARY_CLAIM),
+        (_candidate_chain_claims(trace), SOURCE_CANDIDATE_CLAIM),
+    ):
+        hits = _claim_hits(
+            claims,
+            top_losers,
+            top_gainers,
+            source=source,
+            seen=seen,
+            max_sectors=max_sectors,
+        )
+        if hits:
+            return hits
+    return _snapshot_hits(
+        top_losers, top_gainers, seen=seen, max_sectors=max_sectors
+    )
 
 
 def judge_sector_driver_relation(
@@ -113,12 +218,31 @@ def judge_sector_driver_relation(
 def extract_primary_sector(
     payload: dict[str, object],
 ) -> tuple[str | None, dict[str, object] | None]:
-    """兼容旧语义：返回多板块提取结果的首个（或无）。"""
-    hits = extract_primary_sectors(payload, max_sectors=1)
+    """兼容旧语义：主链（T1）命中的首个（或无）。**行为不变**——不做 T2/T3 兜底。
+
+    Task 9.1 三级兜底只作用于多板块入口 extract_primary_sectors（溯源链路）；
+    单数版是"主因板块"旧语义，claim 未命中即无（不取快照桶首行兜底，见
+    test_sector_trace_worker.py 既有断言）。
+    """
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        return None, None
+    content = report.get("content")
+    market_trace = content.get("market_trace") if isinstance(content, dict) else None
+    if not isinstance(market_trace, dict):
+        return None, None
+    top_losers, top_gainers = _sector_rows(market_trace)
+    hits = _claim_hits(
+        _primary_chain_claims(market_trace.get("trace")),
+        top_losers,
+        top_gainers,
+        source=SOURCE_PRIMARY_CLAIM,
+        seen=set(),
+        max_sectors=1,
+    )
     if not hits:
         return None, None
-    name, row = hits[0]
-    return name, row
+    return hits[0].name, hits[0].row
 
 
 async def _generate_sector_trace_with_retry(

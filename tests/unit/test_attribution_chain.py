@@ -624,3 +624,111 @@ def test_root_index_pct_unchanged_without_parent_ref() -> None:
     )
     assert chain["root"]["index_pct"] == -1.2
     assert chain["children"][0]["relation"] == "market_follow"
+
+
+# --- Task 9.1：弱依据标注（children[].extraction + root.evidence_weak） ---
+
+# 弱依据兜底文案（原文空缺时的中性表述：不编造主因）
+_WEAK_SUMMARY = "证据不足，未确认主因"
+
+
+def _review_payload_with_trace(summary: str = "", status: str = "hypothesis") -> dict:
+    """review 报告：attribution_summary/attribution_status 可替换（弱归因日形态）。"""
+    return {
+        "report": {
+            "content": {
+                "market_trace": {
+                    "snapshot": {"a_share": {"index_change_pct": -1.2}},
+                    "trace": {
+                        "attribution_summary": summary,
+                        "attribution_status": status,
+                    },
+                }
+            }
+        }
+    }
+
+
+def _sector_with_extraction(
+    name: str,
+    pct: float,
+    source: str,
+    *,
+    summary: str = "金属铅领跌带动有色走弱",
+    weak: bool = True,
+):
+    """板块溯源结果 + 提取来源/弱标记（SectorTraceRunResult.extraction 的真实形状）。"""
+    result = _sector_with_evidence(name, pct, summary)
+    result.extraction = {"source": source, "weak": weak}
+    return result
+
+
+def test_weak_fallback_marks_child_and_root() -> None:
+    """T3 快照兜底：children[].extraction 标弱 + root.evidence_weak/attribution_status。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace(),
+        sector_results=[
+            _sector_with_extraction("金属铅", -5.1, "snapshot"),
+            _sector_with_extraction("金属锌", -4.8, "snapshot"),
+        ],
+    )
+    assert chain["children"][0]["extraction"] == {"source": "snapshot", "weak": True}
+    assert chain["children"][1]["extraction"] == {"source": "snapshot", "weak": True}
+    assert chain["root"]["evidence_weak"] is True
+    assert chain["root"]["attribution_status"] == "hypothesis"
+    # 原文空缺 → 中性表述，不编造主因
+    assert chain["root"]["summary"] == _WEAK_SUMMARY
+
+
+def test_weak_fallback_keeps_report_summary_when_present() -> None:
+    """原文有结论 → 保留原文（兜底只补空缺，不覆盖已确认文案）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("板块普跌，情绪主导"),
+        sector_results=[_sector_with_extraction("金属铅", -5.1, "candidate_claim")],
+    )
+    assert chain["root"]["summary"] == "板块普跌，情绪主导"
+    assert chain["children"][0]["extraction"] == {
+        "source": "candidate_claim",
+        "weak": True,
+    }
+
+
+def test_weak_fallback_omits_status_when_report_lacks_it() -> None:
+    """报告无 attribution_status → 不编造（仅 evidence_weak 标弱）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace(status=""),
+        sector_results=[_sector_with_extraction("金属铅", -5.1, "snapshot")],
+    )
+    assert chain["root"]["evidence_weak"] is True
+    assert "attribution_status" not in chain["root"]
+
+
+def test_primary_hit_carries_no_weak_marks() -> None:
+    """T1 主链命中 → 不写 extraction / evidence_weak（正常链不被弱标记污染）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("半导体材料领跌"),
+        sector_results=[
+            _sector_with_extraction(
+                "半导体材料", -3.0, "primary_claim", weak=False
+            )
+        ],
+    )
+    assert "extraction" not in chain["children"][0]
+    assert "evidence_weak" not in chain["root"]
+    assert "attribution_status" not in chain["root"]
+    assert chain["root"]["summary"] == "半导体材料领跌"
+
+
+def test_missing_extraction_attr_is_treated_as_primary() -> None:
+    """无 extraction 属性（旧调用方/回放）→ 与 T1 同形，不误标弱。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload_with_trace("半导体材料领跌"),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+    )
+    assert "extraction" not in chain["children"][0]
+    assert "evidence_weak" not in chain["root"]

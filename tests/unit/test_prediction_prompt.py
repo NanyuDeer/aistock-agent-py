@@ -89,6 +89,16 @@ def test_prediction_prompts_declare_input_event_refs_as_system_filled():
         assert "不得产出" in prompt
 
 
+def test_prediction_prompts_declare_weak_extraction_marks_as_system_filled():
+    # Task 9.1：attribution_weak / extraction_source 同样是系统填充的留痕字段（弱依据
+    # 标记）——Prompt 键清单须同步登记（extra="forbid" 下 LLM 自发产出即整条预判丢失）。
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "attribution_weak" in prompt
+        assert "extraction_source" in prompt
+        assert "由系统填充" in prompt
+        assert "不得产出" in prompt
+
+
 def test_prediction_prompts_require_event_driven_statement():
     # spec §4.2：预判结论须说明"是否受事件驱动"（输入含事件块时点明依据；无事件禁止编造）
     for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):

@@ -1848,6 +1848,8 @@ async def predict_sector(
     report_date: str,
     sector_name: str,
     sector_snapshot: dict[str, object],
+    extraction_source: str = "",
+    attribution_weak: bool = False,
 ) -> PredictionResult | None:
     """板块预判入口（Spec D · 预判环 · 级联输入组装）。
 
@@ -1869,6 +1871,8 @@ async def predict_sector(
     - 点位红线 _hard_validate_chat_prediction（板块预判不产绝对点位，P0-3 不回退）；
     - evidence_ids 过滤按输入存在项（_collect_sector_evidence_ids，对齐 chat）；
     - A3 置信钳制 + _compute_due_dates 复用既有后处理。
+    - Task 9.1：`extraction_source`/`attribution_weak`（板块提取弱依据标记）系统填充
+      写入产物留痕，不影响触发与输出语义。
     落库 source_type="sector_prediction"（验证环回扫 conditions[]）；落库失败仅
     warning 不阻断（永不 500）。任一失败返回 None（对齐 run_chat_prediction 契约）。
     """
@@ -1929,7 +1933,15 @@ async def predict_sector(
         if prediction is None:
             return None
         # 依据增强留痕（spec §4.2）：注入事件 id/ref 写入产物（系统填充，非 LLM 产出）
-        prediction = prediction.model_copy(update={"input_event_refs": input_event_refs})
+        # Task 9.1：弱依据留痕（板块提取来源 + 弱标记）同批系统填充——板块提取走候选链/
+        # 快照兜底时点亮，主链命中保持 False/""（展示层据此提示证据不足，不改预判语义）
+        prediction = prediction.model_copy(
+            update={
+                "input_event_refs": input_event_refs,
+                "attribution_weak": attribution_weak,
+                "extraction_source": extraction_source,
+            }
+        )
         # 到期日确定性计算（越年近似档显式标记，P2 裁决语义）
         due_dates, approximate_horizons = _compute_due_dates(
             report_date, prediction.horizons,
