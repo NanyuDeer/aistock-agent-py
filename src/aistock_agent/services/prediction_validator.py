@@ -22,7 +22,8 @@ v2 对照口径（P0 预测验证升级）：
   `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
   事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
   → ② 受限 LLM（`settings.condition_met_event_llm_enabled` 默认关，开启才调，带留痕）
-  → ③ None 兜底；参考位类（today_open/high/low）取数层不可得 → None 降级。
+  → ③ None 兜底；参考位类（today_open/high/low）取数层已透传 open/high/low（Task 10.1），
+  以当日行（窗口最后一行）参考位与同行 close 判定，字段缺失时才降级 None。
 """
 
 import asyncio
@@ -143,6 +144,29 @@ def _num(v: object) -> float | None:
     return float(v) if isinstance(v, int | float) else None
 
 
+def _today_ref_from_window(window: list[dict[str, object]]) -> dict[str, float] | None:
+    """当日参考位（窗口最后一行的 close + open/high/low）——参考位类（today_open/high/low）判定输入。
+
+    只取**同一行**：参考位（今日开/高/低）与比较基准 close 必须同源同行，否则逐维度剔 None 后
+    跨行错位会误判（判定层 `_judge_ref_level_state` 以本次传入值同源为前提）。该行无 close、或三个
+    参考位全缺（旧端点未透传 open/high/low）→ 返回 None（调用方降级不判）。
+    """
+    if not window:
+        return None
+    last = window[-1]
+    if not isinstance(last, dict):
+        return None
+    close = last.get("close")
+    if not isinstance(close, int | float):
+        return None
+    ref: dict[str, float] = {"close": float(close)}
+    for key in ("open", "high", "low"):
+        value = last.get(key)
+        if isinstance(value, int | float):
+            ref[key] = float(value)
+    return ref if len(ref) > 1 else None
+
+
 async def _fetch_kline_range(
     kind: str, code: str, start: str, end: str
 ) -> list[dict[str, object]] | None:
@@ -174,12 +198,17 @@ async def _fetch_kline_range(
             # close/vol 供 condition_met 确定性判定（技术位/量类）使用；
             # amount 为 2026-09-17 Task 5.1 加性透传（index/stock 上游有值、sector 恒 null），
             # 供 metric=amount 的量类判定；本函数只做取数保留，不做判定。
+            # open/high/low 为 2026-09-17 Task 10.1 加性透传（参考位类 today_open/high/low
+            # 判定数据源；index/stock 上游已透传，sector 依赖 app-api ThsBoardDailyRow 同步扩展）。
             parsed.append({
                 "trade_date": d,
                 "pct_chg": _num(r.get("pct_chg")),
                 "close": _num(r.get("close")),
                 "vol": _num(r.get("vol")),
                 "amount": _num(r.get("amount")),
+                "open": _num(r.get("open")),
+                "high": _num(r.get("high")),
+                "low": _num(r.get("low")),
             })
     parsed.sort(key=lambda x: str(x["trade_date"]))
     return parsed or None
@@ -811,6 +840,8 @@ async def _judge_condition_met_once(
     amounts = [
         float(cast(float, r["amount"])) for r in window if r.get("amount") is not None
     ]
+    # 参考位类（today_open/high/low）判定输入：当日行（窗口最后一行）的开/高/低 + 同行 close
+    today_ref = _today_ref_from_window(window)
     return judge_condition_met_state(
         condition_text,
         direction=str(anchor.get("direction") or "neutral"),
@@ -823,6 +854,7 @@ async def _judge_condition_met_once(
         op=op,
         level=level,
         event_ref=event_ref,
+        today_ref=today_ref,
     )
 
 

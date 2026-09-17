@@ -411,3 +411,107 @@ def test_state_event_class_stays_none_in_pure_judge() -> None:
         "若出口限制细则落地", direction="bearish", threshold_pct=None,
         closes=[100.0, 99.0], pct_chgs=[], volumes=[], event_ref="evt_1",
     ) is None
+
+
+# ============ 参考位类（today_open/high/low）接通：取数层补当日行后可得 ============
+# 口径（写入实现 docstring）：today_open/high/low 一律取**窗口最后一行（当日）**的
+# 开/高/低，与同一行的 close 比较；cross_* 对单日参考位无跨日稳定阈值 → 恒 None。
+
+
+def test_ref_level_met_when_close_breaks_today_high() -> None:
+    """站上今日高点：末日 close > 当日 high → True（此前取数层无 high → 恒 None 降级）。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is True
+
+
+def test_ref_level_not_met_returns_false_when_close_below_today_high() -> None:
+    """确定性不成立：末日 close 未站上当日 high → False（到期可写未成立态）。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 101.5, "high": 102.0},
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "metric,direction,text,ref,expected,",
+    [
+        ("today_low", "bearish", "跌破今日盘中低点",
+         {"close": 98.0, "low": 99.0}, True),
+        ("today_low", "bearish", "跌破今日盘中低点",
+         {"close": 99.5, "low": 99.0}, False),
+        ("today_open", "bearish", "跌破今日开盘价",
+         {"close": 97.9, "open": 98.0}, True),
+        ("today_open", "bullish", "站上今日开盘价",
+         {"close": 98.1, "open": 98.0}, True),
+    ],
+)
+def test_ref_level_text_and_direction_resolve_op(
+    metric: str, direction: str, text: str, ref: dict[str, float], expected: bool,
+) -> None:
+    """op 缺省时方向由文本（跌破/站上）→ direction 兜底解析；显式 op 优先。"""
+    assert judge_condition_met_state(
+        text, direction=direction, threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric=metric, today_ref=ref,
+    ) is expected
+
+
+def test_ref_level_cross_op_stays_none() -> None:
+    """cross_* 不适用单日参考位（参考位是当日值，无跨日稳定阈值）→ 恒 None。"""
+    for op in ("cross_above", "cross_below"):
+        assert judge_condition_met_state(
+            "站上今日高点", direction="bullish", threshold_pct=None,
+            closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+            metric="today_high", op=op,
+            today_ref={"close": 103.0, "high": 102.0},
+        ) is None
+
+
+def test_ref_level_missing_data_or_direction_stays_none() -> None:
+    """缺字段（无 today_ref / 缺对应参考位 / 缺 close）与方向不明（neutral 且无动词）→ None。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+    ) is None
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0},  # 缺 high（数据源未透传该字段）
+    ) is None
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"high": 102.0},  # 缺 close → 无比较基准
+    ) is None
+    assert judge_condition_met_state(
+        "今日高点", direction="neutral", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is None
+
+
+def test_ref_level_two_value_judge_keeps_only_true() -> None:
+    """两值口径（第①段只写 true）：参考位成立 → True，未成立 → None。"""
+    assert judge_condition_met(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is True
+    assert judge_condition_met(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 101.0, "high": 102.0},
+    ) is None
+

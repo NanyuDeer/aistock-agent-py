@@ -206,9 +206,9 @@ async def test_fetch_kline_window_index_preserves_none_rows():
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
     assert out == [{"trade_date": "2026-08-10", "pct_chg": None, "close": None, "vol": None,
-                    "amount": None},
+                    "amount": None, "open": None, "high": None, "low": None},
                    {"trade_date": "2026-08-11", "pct_chg": 1.5, "close": None, "vol": None,
-                    "amount": None}]
+                    "amount": None, "open": None, "high": None, "low": None}]
     # 必须携带区间参数（非 200 天滚动），且锁定 _range_around_due 区间数学：
     # due=2026-08-10 → [2026-08-10 减 20 天, 加 10 天] = [20260721, 20260820]
     _, kwargs = m.call_args
@@ -289,9 +289,9 @@ async def test_fetch_kline_window_stock_calls_quote_kline():
     with patch.object(pv.node_api, "get_stock_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("stock", "600519", "2026-08-10")
     assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5, "close": None, "vol": None,
-                    "amount": None},
+                    "amount": None, "open": None, "high": None, "low": None},
                    {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None,
-                    "amount": None}]
+                    "amount": None, "open": None, "high": None, "low": None}]
     _, kwargs = m.call_args
     assert kwargs["start_date"] == "20260721"
     assert kwargs["end_date"] == "20260820"
@@ -443,9 +443,12 @@ async def test_fetch_kline_window_normalizes_yyyymmdd_trade_date():
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
     assert out == [
-        {"trade_date": "2026-08-10", "pct_chg": 1.2, "close": None, "vol": None, "amount": None},
-        {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None, "amount": None},
-        {"trade_date": "2026-08-12", "pct_chg": -0.2, "close": None, "vol": None, "amount": None},
+        {"trade_date": "2026-08-10", "pct_chg": 1.2, "close": None, "vol": None, "amount": None,
+         "open": None, "high": None, "low": None},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None, "amount": None,
+         "open": None, "high": None, "low": None},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2, "close": None, "vol": None, "amount": None,
+         "open": None, "high": None, "low": None},
     ]
 
 
@@ -511,7 +514,7 @@ async def test_fetch_kline_window_sector_calls_ths_range():
     ) as m:
         out = await pv._fetch_kline_window("sector", "885525.TI", "2026-08-10")
     assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5, "close": None, "vol": None,
-                    "amount": None}]
+                    "amount": None, "open": None, "high": None, "low": None}]
     assert m.await_args.args[0] == "885525.TI"
 
 
@@ -1563,7 +1566,7 @@ async def test_scan_condition_met_volume_class_not_met_on_small_volume() -> None
 
 @pytest.mark.asyncio
 async def test_scan_condition_met_ref_level_degrades_to_none() -> None:
-    """参考位：metric=today_high 当前取数层不可得（日 K 无 open/high/low）→ 不点亮。"""
+    """参考位：日 K 未透传 open/high/low（旧端点/字段缺失）→ 仍降级 None（不点亮）。"""
     record = _anchor_condition_record(
         {"metric": "today_high", "op": "above"}, "站上今日高点")
     rows = _scan_rows([100.0, 101.0, 102.0])
@@ -1573,6 +1576,63 @@ async def test_scan_condition_met_ref_level_degrades_to_none() -> None:
               return_value=date(2026, 9, 16)),
     ):
         assert await pv._scan_condition_met(record) == {}
+
+
+def _ref_level_rows(last_close: float, *, open_=None, high=None, low=None) -> list[dict]:
+    """带 open/high/low 的日 K 行（末日 = 当日参考位；前几日用于满足窗口语义）。"""
+    return [
+        {"trade_date": "2026-09-14", "pct_chg": -1.0, "close": 100.0,
+         "vol": 1e8, "open": 101.0, "high": 101.5, "low": 99.5},
+        {"trade_date": "2026-09-15", "pct_chg": -1.0, "close": 101.0,
+         "vol": 1e8, "open": 100.0, "high": 102.0, "low": 99.8},
+        {"trade_date": "2026-09-16", "pct_chg": 1.0, "close": last_close,
+         "vol": 1e8, "open": open_, "high": high, "low": low},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_ref_level_lights_up_with_open_high_low() -> None:
+    """参考位接通：末日 close 站上当日 high → 点亮（此前恒降级 None）。"""
+    record = _anchor_condition_record(
+        {"metric": "today_high", "op": "above"}, "站上今日高点")
+    rows = _ref_level_rows(last_close=103.0, open_=100.5, high=102.0, low=99.9)
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    assert "result" not in out["c0"]
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_ref_level_not_met_no_entry() -> None:
+    """参考位未成立（末日 close 在当日 high 之下）→ 不产 entry（第①段只写 true）。"""
+    record = _anchor_condition_record(
+        {"metric": "today_low", "op": "below"}, "跌破今日盘中低点")
+    rows = _ref_level_rows(last_close=100.2, open_=100.5, high=102.0, low=99.9)
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(record) == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_kline_range_keeps_open_high_low() -> None:
+    """取数层加性透传 open/high/low（参考位判定数据源）；缺值保 None 占位不丢行。"""
+    rows = [
+        {"trade_date": "20260916", "pct_chg": 1.2, "close": 3100.5, "vol": 2.1e8,
+         "open": 3090.0, "high": 3110.0, "low": 3080.0},
+        {"trade_date": "20260917", "pct_chg": None, "close": None, "vol": None},
+    ]
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
+        out = await pv._fetch_kline_range("index", "000001.SH", "20260916", "20260917")
+    assert out is not None
+    assert (out[0]["open"], out[0]["high"], out[0]["low"]) == (3090.0, 3110.0, 3080.0)
+    assert (out[1]["open"], out[1]["high"], out[1]["low"]) == (None, None, None)
 
 
 def _event_condition_record(event_ref: str = "EVT-1", record_id: int = 1) -> dict:

@@ -18,7 +18,8 @@
      → **量类**；
   ③ `metric ∈ {ma20, ma60, prior_low, prior_high}`，或（无显式 metric 时）文本明示技术位
      （均线/MA\\d+/前低/新高/日线/周线/月线/方向动词）→ **技术位类**；
-  ④ `metric ∈ {today_open, today_high, today_low}` → **参考位类**（当前取数层不可得 → 恒 None）；
+  ④ `metric ∈ {today_open, today_high, today_low}` → **参考位类**（取当日行开/高/低，与当日
+     close 比较；取数层未透传该字段 → 缺数据降级 `None`）；
   ⑤ 其余 → **涨跌幅/点位类**（`threshold` + `direction`，窗口累计）。
 
 判定分流（优先级同上）：
@@ -31,14 +32,17 @@
      如"元" vs "手"；`lte` 在 level 远大于实际量能时会恒真）→ `None`（宁可 None 不可误点亮，R9）。
   ③ 技术位类 → 明示 metric 优先（`ma20`/`ma60` 用对应均线、`prior_low`/`prior_high` 用窗口内
      前 N-1 极值），否则按文本关键词（前低/新高/MA60/均线）回退，再回退 `direction`。
-  ④ 参考位类 → `None`（**降级**：日 K 取数层只透传 trade_date/pct_chg/close/vol/amount，
-     `today_open/high/low` 不可得；待取数层补当日行后再实现，见 Task 5.1 报告与 spec §12.3）。
+  ④ 参考位类 → **当日行**（窗口最后一行）的 open/high/low 与**同一行 close** 比较（口径见
+     `_judge_ref_level_state`）：调用方以 `today_ref={"close":…, "open":…, "high":…, "low":…}`
+     传入（取数层已透传 open/high/low，见 `prediction_validator._fetch_kline_range`）；
+     `today_ref` 缺省/缺对应参考位/缺 close → `None`（降级，绝不猜）。
   ⑤ 涨跌幅/点位类 → 窗口累计涨跌幅与 `anchor.threshold` 按 direction 比对（优先 closes 首末，
      closes 不足 2 个时用 pct_chgs 复利累计 —— sector 链路端点不返回 close，close 可能恒 None）。
      **绝对点位守卫**（终审 #2 保留）：条件含"数字+点/元"或"方向动词+紧邻数字"，且 anchor 未显式
      声明扩展 metric / `level` 时 → `None`（无点位阈值口径，误判 true 不可撤回）。
 
-最小样本守卫：各分支要求该维度至少 2 个数据点（单行样本会因"单日累计=自身"而误点亮）。
+最小样本守卫：各分支要求该维度至少 2 个数据点（单行样本会因"单日累计=自身"而误点亮）；
+参考位类例外——它比较的是**同一行**的开/高/低与 close（无窗口累计语义），单行即可判定。
 
 纯函数：无 IO、无日志、无第三方依赖（只用标准库）。
 """
@@ -59,6 +63,15 @@ CONDITION_CLASS_PCT = "pct"
 _VOLUME_METRICS = frozenset({"volume", "amount"})
 _TECH_METRICS = frozenset({"ma20", "ma60", "prior_low", "prior_high"})
 _REF_LEVEL_METRICS = frozenset({"today_open", "today_high", "today_low"})
+
+# 参考位 metric → 当日行字段（`today_ref` 键；口径见 _judge_ref_level_state）
+_REF_LEVEL_KEYS: dict[str, str] = {
+    "today_open": "open",
+    "today_high": "high",
+    "today_low": "low",
+}
+# 显式 op 直接用于参考位比较（cross_* 不适用：单日参考位无跨日稳定阈值）
+_REF_LEVEL_OPS = frozenset({"gte", "above", "lte", "below"})
 
 # op 原子操作分组（up/down 用于技术位方向兜底；cross_* 走相邻日比较）
 _UP_OPS = frozenset({"gte", "above", "cross_above"})
@@ -304,6 +317,57 @@ def _judge_pct_state(
     return abs(cumulative) <= _NEUTRAL_PCT
 
 
+def _resolve_ref_op(op: str | None, direction: str, text: str) -> str | None:
+    """参考位比较方向：显式 `op` > 文本（跌破/下破/失守 → below；站上/突破/收回 → above）
+    > direction。
+
+    `cross_*` 恒 `None`：参考位是**当日**开/高/低（单日值），没有可跨日比较的稳定阈值。
+    """
+    if op in _REF_LEVEL_OPS:
+        return op
+    if op in _UP_OPS | _DOWN_OPS:  # cross_* 落此（非 _REF_LEVEL_OPS）→ 不判
+        return None
+    if _DOWN_RE.search(text):
+        return "below"
+    if _UP_RE.search(text):
+        return "above"
+    if direction == "bearish":
+        return "below"
+    if direction == "bullish":
+        return "above"
+    return None
+
+
+def _judge_ref_level_state(
+    metric: str | None, op: str | None, direction: str, text: str,
+    today_ref: dict[str, float] | None,
+) -> bool | None:
+    """参考位类三值判定：**同一行**（窗口最后一行 = 当日）的参考位与 close 比较。
+
+    口径（本任务裁决，写入模块 docstring；spec §12.3 只写"参考位需取数层补当日行"）：
+    - `today_open`/`today_high`/`today_low` 一律取**窗口最后一行**的开/高/低（"今日参考位"），
+      与**同一行**的 `close` 比较——不用窗口极值：条件文本写的是"今日高点/今日开盘价"，
+      用窗口极值会把 N 日前的极值当"今日"参考位而误判（true 不可撤回）；同源同行的
+      close/参考位也避免了逐维度剔 None 后列表错位。
+    - 比较方向按 `_resolve_ref_op`（显式 op > 文本动词 > direction）；无方向线索 → `None`。
+    - 缺数据（无 `today_ref` / 缺对应参考位 / 缺 close）→ `None`（降级，绝不猜）。
+    - 判定是**同一行**上的决定性比较 → 可给 `False`（到期未成立态），且无需 2 样本守卫。
+    """
+    if not today_ref:
+        return None
+    ref_key = _REF_LEVEL_KEYS.get(metric or "")
+    if ref_key is None:
+        return None  # 非参考位 metric（调用方路由保证不会走到）
+    ref = today_ref.get(ref_key)
+    close = today_ref.get("close")
+    if ref is None or close is None:
+        return None
+    resolved = _resolve_ref_op(op, direction, text)
+    if resolved is None:
+        return None
+    return _compare([close], resolved, ref)
+
+
 def judge_condition_met_state(
     condition_text: str,
     *,
@@ -317,6 +381,7 @@ def judge_condition_met_state(
     op: str | None = None,
     level: float | None = None,
     event_ref: str | None = None,
+    today_ref: dict[str, float] | None = None,
 ) -> bool | None:
     """条件成立**三值**判定：`True`=成立 / `False`=确定性不成立 / `None`=无法判定。
 
@@ -325,9 +390,12 @@ def judge_condition_met_state(
     会抹掉旧值）。两值口径 `judge_condition_met` 保留给第①段扫描（到期前只写 true），
     二者路由与守卫**完全同源**（同一批 `*_state` 函数），仅是否把"确定性不成立"折叠成 None 不同。
 
-    给 False 的三类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
-    不成立（非 cross_*）。其余（参考位降级、无 level 量类、量级护栏、单样本、绝对点位守卫、
-    cross_* 未穿越、事件类）恒 None。
+    `today_ref`：当日（窗口最后一行）参考位 `{"close":…, "open":…, "high":…, "low":…}`，
+    仅参考位类（`metric=today_open/high/low`）消费；缺省/缺字段 → 该类降级 `None`。
+
+    给 False 的四类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
+    不成立（非 cross_*）、参考位未触发（当日 close 未达/未破当日开/高/低）。其余（参考位缺
+    数据、无 level 量类、量级护栏、单样本、绝对点位守卫、cross_* 未穿越、事件类）恒 None。
     """
     text = condition_text or ""
     condition_class = infer_condition_class(
@@ -339,7 +407,8 @@ def judge_condition_met_state(
         series = list(amounts or []) if metric == "amount" else list(volumes)
         return _judge_volume_state(series, op, level, direction, text)
     if condition_class == CONDITION_CLASS_REF_LEVEL:
-        return None  # 参考位降级（日 K 取数层无 open/high/low，见 docstring ④）
+        # 参考位类（spec §12.3 ④）：取数层已透传 open/high/low → 当日行参考位 vs 同当日 close
+        return _judge_ref_level_state(metric, op, direction, text, today_ref)
     if max(len(closes), len(pct_chgs)) < 2:
         # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
         # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
@@ -370,6 +439,7 @@ def judge_condition_met(
     op: str | None = None,
     level: float | None = None,
     event_ref: str | None = None,
+    today_ref: dict[str, float] | None = None,
 ) -> bool | None:
     """条件文本 + anchor + 行情 → True（成立）/ None（不成立或无法判定）。
 
@@ -380,7 +450,7 @@ def judge_condition_met(
     - `metric`/`op`/`level`/`event_ref` 为 anchor 的判定维度（spec §12.3，2026-09-17 扩展）；
       缺省（旧记录）时行为与扩展前一致（由文本推断类型）。
     - 事件类：本纯函数恒 `None`（无 IO）；由调用方 `_scan_condition_met` 走三层判定。
-    - 参考位类：当前取数层不可得 → `None`（降级，待取数层补当日 open/high/low）。
+    - 参考位类：`today_ref`（当日行 open/high/low + close）有值即可判；缺数据 → `None`。
     - 路由与守卫见模块 docstring（绝对点位 → None 的守卫对未显式声明判定维度的 anchor 保留）。
     """
     state = judge_condition_met_state(
@@ -395,5 +465,6 @@ def judge_condition_met(
         op=op,
         level=level,
         event_ref=event_ref,
+        today_ref=today_ref,
     )
     return True if state is True else None
