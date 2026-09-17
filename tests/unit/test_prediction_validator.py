@@ -205,8 +205,10 @@ async def test_fetch_kline_window_index_preserves_none_rows():
     ]
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": None, "close": None, "vol": None},
-                   {"trade_date": "2026-08-11", "pct_chg": 1.5, "close": None, "vol": None}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": None, "close": None, "vol": None,
+                    "amount": None},
+                   {"trade_date": "2026-08-11", "pct_chg": 1.5, "close": None, "vol": None,
+                    "amount": None}]
     # 必须携带区间参数（非 200 天滚动），且锁定 _range_around_due 区间数学：
     # due=2026-08-10 → [2026-08-10 减 20 天, 加 10 天] = [20260721, 20260820]
     _, kwargs = m.call_args
@@ -286,8 +288,10 @@ async def test_fetch_kline_window_stock_calls_quote_kline():
     ]
     with patch.object(pv.node_api, "get_stock_kline", new=AsyncMock(return_value=rows)) as m:
         out = await pv._fetch_kline_window("stock", "600519", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5, "close": None, "vol": None},
-                   {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 1.5, "close": None, "vol": None,
+                    "amount": None},
+                   {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None,
+                    "amount": None}]
     _, kwargs = m.call_args
     assert kwargs["start_date"] == "20260721"
     assert kwargs["end_date"] == "20260820"
@@ -439,9 +443,9 @@ async def test_fetch_kline_window_normalizes_yyyymmdd_trade_date():
     with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)):
         out = await pv._fetch_kline_window("index", "000001", "2026-08-10")
     assert out == [
-        {"trade_date": "2026-08-10", "pct_chg": 1.2, "close": None, "vol": None},
-        {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None},
-        {"trade_date": "2026-08-12", "pct_chg": -0.2, "close": None, "vol": None},
+        {"trade_date": "2026-08-10", "pct_chg": 1.2, "close": None, "vol": None, "amount": None},
+        {"trade_date": "2026-08-11", "pct_chg": 0.3, "close": None, "vol": None, "amount": None},
+        {"trade_date": "2026-08-12", "pct_chg": -0.2, "close": None, "vol": None, "amount": None},
     ]
 
 
@@ -506,7 +510,8 @@ async def test_fetch_kline_window_sector_calls_ths_range():
         new=AsyncMock(return_value=[{"trade_date": "2026-08-10", "pct_chg": 0.5}]),
     ) as m:
         out = await pv._fetch_kline_window("sector", "885525.TI", "2026-08-10")
-    assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5, "close": None, "vol": None}]
+    assert out == [{"trade_date": "2026-08-10", "pct_chg": 0.5, "close": None, "vol": None,
+                    "amount": None}]
     assert m.await_args.args[0] == "885525.TI"
 
 
@@ -1420,6 +1425,135 @@ async def test_run_once_does_not_rewrite_already_lit_condition() -> None:
     assert updated == 0
     update.assert_not_awaited()
     kline.assert_not_awaited()
+
+
+# ============ Task 5.1：anchor.metric/op/level 分流（量类 / 参考位 / 事件状态锚） ============
+
+
+def _anchor_condition_record(anchor_extra: dict, condition: str, record_id: int = 1) -> dict:
+    """带扩展 anchor 字段的 pending 记录（量类 / 参考位 / 事件类共用）。"""
+    record = _pending_condition_record(
+        record_id=record_id, due="2026-09-30", condition=condition)
+    record["prediction"]["conditions"][0]["anchor"].update(anchor_extra)
+    return record
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_volume_class_lights_up() -> None:
+    """量类：anchor.metric=volume + op/level → 窗口 max 达标 → 点亮（无需 close/pct_chg）。"""
+    record = _anchor_condition_record(
+        {"metric": "volume", "op": "gte", "level": 1.5e8, "threshold": "+3%"},
+        "板块放量至 1.5 亿手以上",
+    )
+    rows = [
+        {"trade_date": "2026-09-14", "pct_chg": None, "close": None, "vol": 1.0e8},
+        {"trade_date": "2026-09-15", "pct_chg": None, "close": None, "vol": 2.0e8},
+    ]
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    assert out["c0"]["condition_index"] == 0
+    assert "result" not in out["c0"]
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_volume_class_not_met_on_small_volume() -> None:
+    """量类：窗口 max 未达 level → 不产 entry（只写 true）。"""
+    record = _anchor_condition_record(
+        {"metric": "volume", "op": "gte", "level": 5.0e8}, "板块放量至 5 亿手以上")
+    rows = [
+        {"trade_date": "2026-09-14", "pct_chg": None, "close": None, "vol": 1.0e8},
+        {"trade_date": "2026-09-15", "pct_chg": None, "close": None, "vol": 2.0e8},
+    ]
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(record) == {}
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_ref_level_degrades_to_none() -> None:
+    """参考位：metric=today_high 当前取数层不可得（日 K 无 open/high/low）→ 不点亮。"""
+    record = _anchor_condition_record(
+        {"metric": "today_high", "op": "above"}, "站上今日高点")
+    rows = _scan_rows([100.0, 101.0, 102.0])
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(record) == {}
+
+
+def _event_condition_record(event_ref: str = "EVT-1", record_id: int = 1) -> dict:
+    """事件类条件记录：anchor 带 event_ref（类型推断 → 事件类，走状态锚）。"""
+    record = _pending_condition_record(
+        record_id=record_id, due="2026-09-30", direction="bearish",
+        condition="若出口限制细则落地")
+    record["created_at"] = "2026-09-10T09:00:00+08:00"
+    record["prediction"]["conditions"][0]["anchor"]["event_ref"] = event_ref
+    return record
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_event_status_anchor_lights_up() -> None:
+    """事件三层①（状态锚）：event_status=ongoing/occurred → 确定性点亮，且不拉行情。"""
+    for status in ("ongoing", "occurred"):
+        record = _event_condition_record()
+        entities = [{"event_id": "EVT-1", "event_status": status, "title": "出口限制细则"}]
+        with (
+            patch.object(pv.node_api, "get_event_entities",
+                         new=AsyncMock(return_value=entities)) as events,
+            patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
+            patch("aistock_agent.services.prediction_validator.shanghai_today",
+                  return_value=date(2026, 9, 16)),
+        ):
+            out = await pv._scan_condition_met(record)
+        assert out["c0"]["condition_met"] is True
+        kline.assert_not_awaited()  # 事件类不需要行情
+        events.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_event_status_not_yet_returns_empty() -> None:
+    """事件未落地（scheduled/upcoming）→ 不点亮（不得按"尚未发生"误判为成立）。"""
+    for status in ("scheduled", "upcoming"):
+        record = _event_condition_record()
+        entities = [{"event_id": "EVT-1", "event_status": status}]
+        with (
+            patch.object(pv.node_api, "get_event_entities",
+                         new=AsyncMock(return_value=entities)),
+            patch("aistock_agent.services.prediction_validator.shanghai_today",
+                  return_value=date(2026, 9, 16)),
+        ):
+            assert await pv._scan_condition_met(record) == {}
+
+
+@pytest.mark.asyncio
+async def test_scan_condition_met_event_missing_or_read_failure_returns_empty() -> None:
+    """事件三层③（兜底）：event_ref 无对应事件 / 读接口失败 → None（不点亮）。
+    ②层（受限 LLM）默认开关关闭（config.condition_met_event_llm_enabled=False）。"""
+    record = _event_condition_record(event_ref="EVT-NOT-FOUND")
+    with (
+        patch.object(pv.node_api, "get_event_entities",
+                     new=AsyncMock(return_value=[{"event_id": "EVT-OTHER",
+                                                   "event_status": "occurred"}])),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(record) == {}
+    with (
+        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=None)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        assert await pv._scan_condition_met(record) == {}
 
 
 # ============ 终审 #3/#5：第①段扫描窗口 = [created_at, today]（上限 120 自然日） ============

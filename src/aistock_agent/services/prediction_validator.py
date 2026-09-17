@@ -15,15 +15,26 @@ v2 对照口径（P0 预测验证升级）：
 - 条件化预判两段判定（Spec A §4.2）：① 到期前 `_scan_condition_met` 条件一成立即点亮
   `verification[c{i}].condition_met=true`（确定性判定，无 result；只写 true 不写 false）；
   ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true（不写 null 覆盖）。
+- 条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
+  `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
+  事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
+  → ② 受限 LLM（`settings.condition_met_event_llm_enabled` 默认关，开启才调，带留痕）
+  → ③ None 兜底；参考位类（today_open/high/low）取数层不可得 → None 降级。
 """
 
 import re
-from typing import cast
+from typing import Literal, cast
 
 import structlog
+from pydantic import BaseModel, ConfigDict
 
+from aistock_agent.config import settings
 from aistock_agent.services.cache import set_cached_validation_profile
-from aistock_agent.services.condition_met_judge import judge_condition_met
+from aistock_agent.services.condition_met_judge import (
+    CONDITION_CLASS_EVENT,
+    infer_condition_class,
+    judge_condition_met,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
@@ -155,13 +166,15 @@ async def _fetch_kline_range(
             # 统一归一化为 YYYY-MM-DD 才能精确匹配（幂等：已是该格式的行原样透传）。
             if re.fullmatch(r"\d{8}", d):
                 d = f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
-            # close/vol 供 condition_met 确定性判定（技术位/后续 volume 类）使用；
-            # 本函数只做取数保留，不做判定。
+            # close/vol 供 condition_met 确定性判定（技术位/量类）使用；
+            # amount 为 2026-09-17 Task 5.1 加性透传（index/stock 上游有值、sector 恒 null），
+            # 供 metric=amount 的量类判定；本函数只做取数保留，不做判定。
             parsed.append({
                 "trade_date": d,
                 "pct_chg": _num(r.get("pct_chg")),
                 "close": _num(r.get("close")),
                 "vol": _num(r.get("vol")),
+                "amount": _num(r.get("amount")),
             })
     parsed.sort(key=lambda x: str(x["trade_date"]))
     return parsed or None
@@ -537,11 +550,157 @@ async def _verify_conditions(
     return out
 
 
+# ── 事件类条件三层判定（spec §12.4，Task 5.1）──
+# ① 状态锚（确定性）：Event Entity `event_status ∈ {ongoing, occurred}` → 条件成立；
+# ② 受限 LLM（`settings.condition_met_event_llm_enabled`，**默认关闭**）：仅事件类条件、
+#    输入限定"事件标题 + 进展摘要 + 条件文本"、输出 true/false/unknown + 置信，低置信归
+#    unjudgeable；每次判定留痕（prompt 版本 / 事件 id / 结论 / 置信）。
+# ③ 兜底 None（无法判定，前端显示"无法判定"，不等同"未触发"）。
+_EVENT_MET_STATUSES = frozenset({"ongoing", "occurred"})
+# 已物化但未落地（尚未发生）→ 条件不成立，无需进 ② 层（确定性短路）
+_EVENT_OPEN_STATUSES = frozenset({"scheduled", "upcoming"})
+_EVENT_LLM_PROMPT_VERSION = "event-condition-v1"
+# 最低可采信置信度：low 置信一律归 None（spec §12.4 ②）
+_EVENT_LLM_MIN_CONFIDENCE = frozenset({"high", "medium"})
+
+
+class _EventConditionVerdict(BaseModel):
+    """受限 LLM 输出契约（spec §12.4 ②）：三值结论 + 置信度（禁止多余键）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["true", "false", "unknown"]
+    confidence: Literal["high", "medium", "low"]
+
+
+_EVENT_CONDITION_SYSTEM_PROMPT = """你是 A 股事件类预判条件的成立判定器。
+输入只有三样：事件标题、事件进展摘要、条件文本。判定该条件**当前是否已成立**。
+只依据输入内容判断；信息不足、事件未落地或无法从摘要确认时，结论必须用 unknown。
+只输出 JSON：{"verdict": "true"|"false"|"unknown", "confidence": "high"|"medium"|"low"}
+（verdict=true 表示条件已成立；false 表示条件已确定不成立；unknown 表示信息不足）。
+不要输出解释、Markdown 或其他键。"""
+
+
+def _yyyymmdd_to_iso(value: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（Event Entity 读接口的日期参数格式）；脏值原样返回。"""
+    if len(value) == 8 and value.isdigit():
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
+    return value
+
+
+async def _load_event_index(
+    date_from: str, date_to: str, *, cache: dict[tuple[str, str], dict[str, dict[str, object]]]
+) -> dict[str, dict[str, object]]:
+    """读 Event Entity 列表 → {event_id: 事件条目}（条目含 event_status/title/summary）。
+
+    `date_from`/`date_to` 为扫描窗口（YYYYMMDD），转 ISO 后按 Event Entity 的
+    `dateFrom`/`dateTo` 过滤（作用于 `event_start_time` 的上海日期）。读取失败/异常 → 空索引
+    （**fail-safe：不点亮**，交 ②/③ 层）。同一次 run_once 内按 (dateFrom, dateTo) 记忆化。
+    """
+    iso_from = _yyyymmdd_to_iso(date_from)
+    iso_to = _yyyymmdd_to_iso(date_to)
+    key = (iso_from, iso_to)
+    if key in cache:
+        return cache[key]
+    index: dict[str, dict[str, object]] = {}
+    try:
+        items = await node_api.get_event_entities({"dateFrom": iso_from, "dateTo": iso_to})
+    except Exception as exc:  # noqa: BLE001 —— 读失败等价"未物化"，不得点亮
+        logger.warning("condition_met_event_read_failed", error=str(exc))
+        items = None
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            event_id = item.get("event_id")
+            if isinstance(event_id, str) and event_id.strip():
+                index[event_id] = item
+    cache[key] = index
+    return index
+
+
+async def _judge_event_condition(
+    event_ref: str, condition_text: str, event: dict[str, object] | None
+) -> bool | None:
+    """事件类条件三层判定（spec §12.4）：① 状态锚 → ② 受限 LLM → ③ None。
+
+    - 事件未读到（缺失/未物化/读失败）→ ③ None（无标题/摘要输入，不空跑 LLM）；
+    - 状态 ∈ {ongoing, occurred} → ① `True`（确定性，不调 LLM）；
+    - 状态 ∈ {scheduled, upcoming} → 条件尚未成立 → None（确定性短路）；
+    - 其余（状态缺失/未知）→ ② 受限 LLM（开关默认关，关闭时直落 ③）。
+    """
+    if event is None:
+        return None  # ③ 无事件可锚（不编造、不空跑 LLM）
+    status = str(event.get("event_status") or "").strip()
+    if status in _EVENT_MET_STATUSES:
+        return True  # ① 状态锚：确定性点亮
+    if status in _EVENT_OPEN_STATUSES:
+        return None  # 未落地 → 条件未成立（交到期第②段写 result）
+    return await _judge_event_condition_llm(event_ref, condition_text, event)  # ② → ③
+
+
+async def _judge_event_condition_llm(
+    event_ref: str, condition_text: str, event: dict[str, object]
+) -> bool | None:
+    """事件类 ② 层：受限 LLM 判定（仅事件类；输入限定标题+摘要+条件文本）。
+
+    治理与成本（Task 5.1 裁决）：`settings.condition_met_event_llm_enabled` **默认 False**——
+    条件点亮是"只写 true 不可撤回"的写入，LLM 半确定性结论在大范围灰度前不放开；开关打开后
+    每次判定写 `condition_met_event_llm_judged` 留痕（prompt 版本 / 事件 id / 结论 / 置信），
+    低置信（low）与解析失败一律归 None（unjudgeable）。
+    """
+    if not settings.condition_met_event_llm_enabled:
+        return None  # ② 层默认关闭 → ③ 兜底
+    from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
+
+    payload = {
+        "event_id": event_ref,
+        "event_title": str(event.get("title") or ""),
+        "event_summary": str(event.get("summary") or ""),
+        "condition": condition_text,
+    }
+    try:
+        llm = with_chat_structured_output(get_quick_think(), _EventConditionVerdict)
+        verdict = await llm.ainvoke([
+            {"role": "system", "content": _EVENT_CONDITION_SYSTEM_PROMPT},
+            {"role": "user", "content": str(payload)},
+        ])
+    except Exception as exc:  # noqa: BLE001 —— LLM 失败不得点亮
+        logger.warning(
+            "condition_met_event_llm_failed",
+            event_ref=event_ref,
+            prompt_version=_EVENT_LLM_PROMPT_VERSION,
+            error=str(exc),
+        )
+        return None
+    if verdict is None:
+        logger.warning(
+            "condition_met_event_llm_empty",
+            event_ref=event_ref,
+            prompt_version=_EVENT_LLM_PROMPT_VERSION,
+        )
+        return None
+    conclusion = str(getattr(verdict, "verdict", "unknown"))
+    confidence = str(getattr(verdict, "confidence", "low"))
+    # 留痕（spec §12.4 ②）：prompt 版本 / 事件 id / 结论 / 置信
+    logger.info(
+        "condition_met_event_llm_judged",
+        event_ref=event_ref,
+        prompt_version=_EVENT_LLM_PROMPT_VERSION,
+        verdict=conclusion,
+        confidence=confidence,
+    )
+    if conclusion == "true" and confidence in _EVENT_LLM_MIN_CONFIDENCE:
+        return True
+    return None
+
+
 async def _scan_condition_met(
     record: dict[str, object],
     methodology_version: str = _METHODOLOGY_VERSION,
     *,
     scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] | None = None,
+    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
 ) -> dict[str, dict[str, object]]:
     """条件化预判第①段：到期前条件扫描（只点亮 `condition_met=true`，§4.2）。
 
@@ -550,16 +709,20 @@ async def _scan_condition_met(
     - 已有 `condition_met is True` → 跳过（幂等：不重复点亮）；
     - 已有 `result` → 跳过（已到期末判定，不得覆盖）；
     - `due_date <= today` → 跳过，交由 _verify_conditions 处理；
-    - 否则拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
-      见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
-      closes/pct_chgs/volumes（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
+    - 否则按 `infer_condition_class` 分流（spec §12.3，Task 5.1）：
+      · 事件类 → 三层判定（状态锚 → 受限 LLM（默认关）→ None），**不拉行情**；
+      · 其余 → 拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
+        见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
+        closes/pct_chgs/volumes/amounts（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
 
     判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
-    threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含 volume 类
-    首批 omit，D2）不产 entry —— 只写 true 不写 false（D1）。
+    threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含参考位降级、
+    无 level 的量类）不产 entry —— 只写 true 不写 false（D1）。
 
     `scan_cache`：同一次 run_once 内 stage① 取数记忆化（key=(target_type, code, start, end)，
     含窗口以防跨记录串用——不同 created_at 的窗口不同）。传 None 时仅在本记录内生效。
+    `event_cache`：同一次 run_once 内 Event Entity 列表记忆化（key=(dateFrom, dateTo)，
+    避免每条事件类条件重复拉全表）；传 None 时仅在本记录内生效。
     """
     prediction = record.get("prediction")
     if not isinstance(prediction, dict):
@@ -579,6 +742,7 @@ async def _scan_condition_met(
     if code is None:
         return {}  # 无数据源：交第②段落 insufficient，本段不产点亮 entry
     cache = scan_cache if scan_cache is not None else {}
+    events = event_cache if event_cache is not None else {}
     base: dict[str, object] = {
         "verified_at": today,
         "methodology_version": methodology_version,
@@ -611,28 +775,51 @@ async def _scan_condition_met(
         due_date = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
         if not due_date or due_date <= today:
             continue  # 已到期/无 due → 交 _verify_conditions 第②段
-        cache_key = (target_type, code, scan_range[0], scan_range[1])
-        if cache_key in cache:
-            rows = cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数
-        else:
-            rows = await _fetch_kline_range(target_type, code, *scan_range)
-            cache[cache_key] = rows
-        if not rows:
-            continue  # 数据源故障/无数据：本段静默跳过（不产 false 键）
-        window = rows[-_CONDITION_SCAN_WINDOW:]
-        closes = [float(cast(float, r["close"])) for r in window if r.get("close") is not None]
-        pct_chgs = [
-            float(cast(float, r["pct_chg"])) for r in window if r.get("pct_chg") is not None
-        ]
-        volumes = [float(cast(float, r["vol"])) for r in window if r.get("vol") is not None]
-        met = judge_condition_met(
-            str(cond.get("condition") or ""),
-            direction=str(anchor.get("direction") or "neutral"),
-            threshold_pct=_parse_threshold(str(anchor.get("threshold") or "")),
-            closes=closes,
-            pct_chgs=pct_chgs,
-            volumes=volumes,
+        condition_text = str(cond.get("condition") or "")
+        metric = str(anchor.get("metric") or "") or None
+        op = str(anchor.get("op") or "") or None
+        level = _num(anchor.get("level"))
+        event_ref = str(anchor.get("event_ref") or "").strip() or None
+        condition_class = infer_condition_class(
+            metric=metric, event_ref=event_ref, text=condition_text
         )
+        if condition_class == CONDITION_CLASS_EVENT:
+            # 事件类（§12.4）：不需要行情；三层判定 + 事件列表记忆化
+            index = await _load_event_index(*scan_range, cache=events)
+            met = await _judge_event_condition(
+                event_ref or "", condition_text, index.get(event_ref or "")
+            )
+        else:
+            cache_key = (target_type, code, scan_range[0], scan_range[1])
+            if cache_key in cache:
+                rows = cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数
+            else:
+                rows = await _fetch_kline_range(target_type, code, *scan_range)
+                cache[cache_key] = rows
+            if not rows:
+                continue  # 数据源故障/无数据：本段静默跳过（不产 false 键）
+            window = rows[-_CONDITION_SCAN_WINDOW:]
+            closes = [float(cast(float, r["close"])) for r in window if r.get("close") is not None]
+            pct_chgs = [
+                float(cast(float, r["pct_chg"])) for r in window if r.get("pct_chg") is not None
+            ]
+            volumes = [float(cast(float, r["vol"])) for r in window if r.get("vol") is not None]
+            amounts = [
+                float(cast(float, r["amount"])) for r in window if r.get("amount") is not None
+            ]
+            met = judge_condition_met(
+                condition_text,
+                direction=str(anchor.get("direction") or "neutral"),
+                threshold_pct=_parse_threshold(str(anchor.get("threshold") or "")),
+                closes=closes,
+                pct_chgs=pct_chgs,
+                volumes=volumes,
+                amounts=amounts,
+                metric=metric,
+                op=op,
+                level=level,
+                event_ref=event_ref,
+            )
         if met is not True:
             continue  # 不成立/无法判定 → 不产键（只写 true，D1）
         out[key] = {
@@ -726,6 +913,8 @@ async def run_once() -> int:
     target_counter: dict[str, int] = {}
     # stage① 取数记忆化（终审附带成本项）：同一批次内相同 (target_type, code, 窗口) 只取一次
     scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] = {}
+    # 事件类条件用的事件列表记忆化（Task 5.1）：同批次内相同 (dateFrom, dateTo) 只取一次
+    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
     for record in records:
         record_id = record.get("id")
         # D2：Node internal 归一后为 number；兼容历史 string（曾致 isinstance(int) 门禁全量跳过）
@@ -773,7 +962,9 @@ async def run_once() -> int:
         # 立即亮起；第②段（到期判定）照常写 result。幂等：已点亮/已有 result/已到期者跳过。
         # 单记录异常只 warning 不中断整批（与相邻写回循环同风格）。
         try:
-            lit_entries = await _scan_condition_met(record, scan_cache=scan_cache)
+            lit_entries = await _scan_condition_met(
+                record, scan_cache=scan_cache, event_cache=event_cache
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "prediction_condition_scan_failed",

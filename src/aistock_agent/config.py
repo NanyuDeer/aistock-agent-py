@@ -239,6 +239,10 @@ class Settings(BaseSettings):
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # 条件成立判定·事件类 ② 层受限 LLM 开关（spec §12.4，Task 5.1，2026-09-17）：
+    # 默认 False——condition_met 是"只写 true 不可撤回"的写入，LLM 半确定性结论先不放开；
+    # 开启后仅事件类条件、输入限定"事件标题+进展摘要+条件文本"，每次判定留痕。
+    condition_met_event_llm_enabled: bool = False
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
     # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）+ 15:20
     # 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖；对齐 Node 打点 cron 0-4 工作日口径
