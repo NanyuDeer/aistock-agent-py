@@ -1366,9 +1366,60 @@ async def test_verify_conditions_preserves_lit_condition_met() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_conditions_omits_condition_met_when_not_lit() -> None:
-    """T5：未点亮 → entry 不写 condition_met 键（jsonb 键级浅合并保留旧值，绝不写 null）。"""
+async def test_verify_conditions_writes_false_when_not_lit() -> None:
+    """Task 6.1（spec §12.5）：到期对**确定性未成立**的条件写 condition_met=false + checked_at。
+
+    与第①段的 true 形成完整布尔；checked_at 记录到期判定时间（便于审计与回溯区分）。
+    """
     record = _pending_condition_record(due="2026-09-09", direction="bearish")
+    rows = _scan_rows([100.0 + i for i in range(25)])  # 上行 → 未跌破 MA20 → 确定性不成立
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._verify_conditions(record)
+    assert out["c0"]["result"] == "hit"           # scenario 命中（pct_chg 恒 -1）与条件成立无关
+    assert out["c0"]["condition_met"] is False    # 到期未成立态
+    assert out["c0"]["checked_at"] == "2026-09-16"
+    assert out["c0"]["condition_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_verify_conditions_lit_true_not_downgraded_to_false() -> None:
+    """Task 6.1 不可回退：已点亮 true 的条件到期**不得**被改写成 false（显式防御）。"""
+    record = _pending_condition_record(
+        due="2026-09-09", direction="bearish",
+        verification={"c0": {"condition_met": True, "condition_index": 0}},
+    )
+    rows = _scan_rows([100.0 + i for i in range(25)])  # 判定口径会得 False，但已点亮必须保留
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._verify_conditions(record)
+    assert out["c0"]["condition_met"] is True
+    assert "checked_at" not in out["c0"]  # 不回退即不产生新的到期判定留痕
+
+
+@pytest.mark.asyncio
+async def test_verify_conditions_omits_condition_met_when_unjudgeable() -> None:
+    """Task 6.1：无法判定（参考位降级）→ **不写该键**（保持缺失，绝不写 null）。"""
+    record = {
+        "id": 1,
+        "prediction": {
+            "horizons": [{"horizon": "short", "target": "上证指数", "direction": "bearish"}],
+            "conditions": [{
+                "condition": "若跌破今日盘中低点",
+                "scenario": "后续继续下行",
+                "anchor": {"horizon": "short", "direction": "bearish",
+                           "threshold": "", "metric": "today_low", "op": "below"},
+            }],
+        },
+        "due_dates": {"short": "2026-09-09"},
+        "verification": {},
+    }
     rows = _scan_rows([100.0 + i for i in range(25)])
     with (
         patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
@@ -1378,6 +1429,39 @@ async def test_verify_conditions_omits_condition_met_when_not_lit() -> None:
         out = await pv._verify_conditions(record)
     assert out["c0"]["result"] == "hit"
     assert "condition_met" not in out["c0"]
+    assert "checked_at" not in out["c0"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_condition_verify_idempotent_no_repeat_side_effects() -> None:
+    """Task 6.1 幂等：重复到期扫描（c{i} 已有 result）不产生任何重复副作用（不重复回写）。"""
+    record = _pending_condition_record(
+        due="2026-09-09", direction="bearish",
+        verification={
+            "short": {"result": "hit"},
+            "c0": {"result": "hit", "condition_met": False,
+                   "condition_index": 0, "checked_at": "2026-09-16"},
+        },
+    )
+    with (
+        patch.object(prediction_validator.node_api, "list_pending_predictions",
+                     new=AsyncMock(return_value=[record])),
+        # D4 存量回补置空：本用例只验到期重扫的幂等（回补是独立路径）
+        patch.object(prediction_validator.node_api, "list_verified_predictions",
+                     new=AsyncMock(return_value=[])),
+        patch.object(prediction_validator.node_api, "get_index_kline",
+                     new=AsyncMock()) as kline,
+        patch.object(prediction_validator.node_api, "update_prediction_verification",
+                     new=AsyncMock(return_value={"id": 1})) as update,
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        updated = await run_once()
+    assert updated == 0
+    update.assert_not_awaited()  # 副作用（回写）为零：重复扫描不重复写
+    # 注：stage② 对已产 result 的 c{i} 仍会走一次 scenario 取数（既有行为，不写库），
+    # Task 6.1 新加的到期未成立态判定在"已有 result"时提前跳过，不额外取数。
+    assert kline.await_count <= 1
 
 
 @pytest.mark.asyncio

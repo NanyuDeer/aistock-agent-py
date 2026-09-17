@@ -12,9 +12,12 @@ v2 对照口径（P0 预测验证升级）：
 - 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
 - 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
-- 条件化预判两段判定（Spec A §4.2）：① 到期前 `_scan_condition_met` 条件一成立即点亮
-  `verification[c{i}].condition_met=true`（确定性判定，无 result；只写 true 不写 false）；
-  ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true（不写 null 覆盖）。
+- 条件化预判两段判定（Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）：
+  ① 到期前 `_scan_condition_met` 条件一成立即点亮 `verification[c{i}].condition_met=true`
+  （确定性判定，无 result，**只写 true**）；
+  ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true；**对确定性未成立的条件写
+  `condition_met=false` + `checked_at`**（到期未成立态，与 true 对称的布尔；无法判定保持键缺失、
+  绝不写 null；已点亮 true 显式防御不回退）。
 - 条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
   `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
   事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
@@ -22,7 +25,9 @@ v2 对照口径（P0 预测验证升级）：
   → ③ None 兜底；参考位类（today_open/high/low）取数层不可得 → None 降级。
 """
 
+import asyncio
 import re
+from dataclasses import dataclass
 from typing import Literal, cast
 
 import structlog
@@ -33,7 +38,7 @@ from aistock_agent.services.cache import set_cached_validation_profile
 from aistock_agent.services.condition_met_judge import (
     CONDITION_CLASS_EVENT,
     infer_condition_class,
-    judge_condition_met,
+    judge_condition_met_state,
 )
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.prediction_stats import (
@@ -438,16 +443,21 @@ def _judge_condition_hit(
 async def _verify_conditions(
     record: dict[str, object],
     methodology_version: str = _METHODOLOGY_VERSION,
+    *,
+    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] | None = None,
+    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
 
     - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
-    - condition_met 不在此段判定（第①段 _scan_condition_met 负责点亮）：已点亮 true 的
-      entry 原样带出，未点亮则不写该键（jsonb 键级浅合并保留旧值，绝不写 null/false，D1）；
-      scenario 命中用 anchor.direction + threshold 比对窗口累计；
+    - 到期未成立态（spec §12.5，Task 6.1）：`result` 落库那一刻按第①段**同一判定能力**对
+      确定性未成立的条件写 `condition_met=false` + `checked_at`（窗口 = [created_at, due]）；
+      已点亮 `true` 的 entry 显式防御、不得回退为 false；无法判定 → 不写该键（绝不写 null）；
+    - scenario 命中用 anchor.direction + threshold 比对窗口累计；
     - entry 显式补 target_type（index/sector，§4.2/§11）避免统计漏桶；
     - 窗口未满 → {"wait": True}，run_once continue 不回写，下次补齐再验（D1 语义）；
     - 返回 {c{i}: entry}，run_once 对已存在 result 的 c{i} 幂等跳过。
+    - `scan_cache`/`event_cache`：与第①段共用的取数/事件记忆化（key 含窗口，不串用）。
     """
     prediction = record.get("prediction")
     if not isinstance(prediction, dict):
@@ -547,6 +557,46 @@ async def _verify_conditions(
             "reason": f"direction={direction}, threshold={threshold or 'N/A'}, "
                       f"窗口累计={f'{cumulative:+.2f}%'}",
         }
+    # 到期末成立态（spec §12.5，Task 6.1）：result 落库那一刻对**未触发**条件写
+    # `condition_met=false` + `checked_at`——与第①段的 true 形成完整布尔，前端"到期未触发"
+    # 与"在途未触发"从此可区分（此前只能以卡级 verification 近似）。三条硬约束：
+    #   ① **不得回退**：已点亮 true 的条件不得改写成 false（jsonb 键级浅合并天然保留，
+    #      此处显式防御）；
+    #   ② **不写 null**：无法判定（参考位降级/无 level 量类/无数据/无行情源）→ 不写该键，
+    #      保持缺失（前端按"未触发/在途"处理）；
+    #   ③ **只在此刻写**：wait（窗口未满）分支不产 result 故不写；已含 result 的 c{i} 由
+    #      run_once 的幂等守卫跳过，重复扫描不产生重复副作用。
+    cache_scan = scan_cache if scan_cache is not None else {}
+    cache_events = event_cache if event_cache is not None else {}
+    for key, entry in out.items():
+        if "result" not in entry or entry.get("condition_met") is True:
+            continue  # 未到期末判定 / 已点亮 true（第①段点亮或上方带出）
+        existing = ver_map.get(key)
+        if isinstance(existing, dict) and "result" in existing:
+            # 该 c{i} 已到期末判定（run_once 会幂等跳过回写）→ 不再重复判定/取数
+            continue
+        idx = entry.get("condition_index")
+        if not isinstance(idx, int) or not 0 <= idx < len(conditions):
+            continue
+        cond = conditions[idx]
+        if not isinstance(cond, dict):
+            continue
+        horizon = entry.get("horizon")
+        cond_due = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
+        met = await _judge_condition_met_once(
+            cond,
+            target_type=target_type,
+            code=code,
+            # 到期判定窗口 = [created_at, due]（第①段是 [created_at, today]）
+            window_range=_condition_scan_range(record, cond_due) if cond_due else None,
+            scan_cache=cache_scan,
+            event_cache=cache_events,
+            at_due=True,
+        )
+        if met is None:
+            continue  # 无法判定 → 保持键缺失
+        entry["condition_met"] = met
+        entry["checked_at"] = today
     return out
 
 
@@ -620,13 +670,16 @@ async def _load_event_index(
 
 
 async def _judge_event_condition(
-    event_ref: str, condition_text: str, event: dict[str, object] | None
+    event_ref: str, condition_text: str, event: dict[str, object] | None,
+    *, at_due: bool = False,
 ) -> bool | None:
     """事件类条件三层判定（spec §12.4）：① 状态锚 → ② 受限 LLM → ③ None。
 
     - 事件未读到（缺失/未物化/读失败）→ ③ None（无标题/摘要输入，不空跑 LLM）；
     - 状态 ∈ {ongoing, occurred} → ① `True`（确定性，不调 LLM）；
-    - 状态 ∈ {scheduled, upcoming} → 条件尚未成立 → None（确定性短路）；
+    - 状态 ∈ {scheduled, upcoming} → **到期时**（`at_due=True`）为确定性未成立 `False`
+      （Task 6.1：到期未触发条件要写 `condition_met=false`）；扫描期（未到期）返回 None
+      ——第①段"只写 true"，不写 false；
     - 其余（状态缺失/未知）→ ② 受限 LLM（开关默认关，关闭时直落 ③）。
     """
     if event is None:
@@ -635,7 +688,7 @@ async def _judge_event_condition(
     if status in _EVENT_MET_STATUSES:
         return True  # ① 状态锚：确定性点亮
     if status in _EVENT_OPEN_STATUSES:
-        return None  # 未落地 → 条件未成立（交到期第②段写 result）
+        return False if at_due else None  # 未落地 → 未到期不写 false，到期为确定性未成立
     return await _judge_event_condition_llm(event_ref, condition_text, event)  # ② → ③
 
 
@@ -695,6 +748,84 @@ async def _judge_event_condition_llm(
     return None
 
 
+async def _judge_condition_met_once(
+    cond: dict[str, object],
+    *,
+    target_type: str,
+    code: str | None,
+    window_range: tuple[str, str] | None,
+    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None],
+    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]],
+    at_due: bool = False,
+) -> bool | None:
+    """单条条件的成立判定（第①段扫描与到期未成立态**共用**；spec §12.3/§12.4，Task 6.1）。
+
+    返回三值：`True`=成立 / `False`=**确定性不成立** / `None`=无法判定（不得写键）。
+
+    为什么抽成一处：到期写 `condition_met=false` 必须与第①段点亮 true **同一判定能力**
+    （同分流、同守卫、同取数口径），否则会出现"点亮与置否两套口径"（spec §12.3-3 同源维护）。
+
+    - 窗口由调用方给定：第①段 = `[created_at, today]`（只判 true）；到期 = `[created_at, due]`；
+    - 事件类 → 三层判定（`at_due=True` 时 `scheduled/upcoming` 为确定性未成立 False）；
+    - 行情/量/技术位类 → `judge_condition_met_state`（确定性，禁 LLM）；
+    - `code is None`（无行情数据源）/ 空窗口 / 无数据 → `None`（不判定）。
+    """
+    anchor_raw = cond.get("anchor")
+    anchor: dict[str, object] = (
+        cast(dict[str, object], anchor_raw) if isinstance(anchor_raw, dict) else {}
+    )
+    condition_text = str(cond.get("condition") or "")
+    metric = str(anchor.get("metric") or "") or None
+    op = str(anchor.get("op") or "") or None
+    level = _num(anchor.get("level"))
+    event_ref = str(anchor.get("event_ref") or "").strip() or None
+    condition_class = infer_condition_class(
+        metric=metric, event_ref=event_ref, text=condition_text
+    )
+    if condition_class == CONDITION_CLASS_EVENT:
+        # 事件类（§12.4）：不需要行情；三层判定 + 事件列表记忆化
+        index = (
+            await _load_event_index(*window_range, cache=event_cache)
+            if window_range is not None
+            else {}
+        )
+        return await _judge_event_condition(
+            event_ref or "", condition_text, index.get(event_ref or ""), at_due=at_due
+        )
+    if code is None or window_range is None:
+        return None  # 无行情数据源/空窗口：行情/量类条件无法判（交第②段落 insufficient）
+    cache_key = (target_type, code, window_range[0], window_range[1])
+    if cache_key in scan_cache:
+        rows = scan_cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数
+    else:
+        rows = await _fetch_kline_range(target_type, code, *window_range)
+        scan_cache[cache_key] = rows
+    if not rows:
+        return None  # 数据源故障/无数据：静默跳过（不产 false 键）
+    window = rows[-_CONDITION_SCAN_WINDOW:]
+    closes = [float(cast(float, r["close"])) for r in window if r.get("close") is not None]
+    pct_chgs = [
+        float(cast(float, r["pct_chg"])) for r in window if r.get("pct_chg") is not None
+    ]
+    volumes = [float(cast(float, r["vol"])) for r in window if r.get("vol") is not None]
+    amounts = [
+        float(cast(float, r["amount"])) for r in window if r.get("amount") is not None
+    ]
+    return judge_condition_met_state(
+        condition_text,
+        direction=str(anchor.get("direction") or "neutral"),
+        threshold_pct=_parse_threshold(str(anchor.get("threshold") or "")),
+        closes=closes,
+        pct_chgs=pct_chgs,
+        volumes=volumes,
+        amounts=amounts,
+        metric=metric,
+        op=op,
+        level=level,
+        event_ref=event_ref,
+    )
+
+
 async def _scan_condition_met(
     record: dict[str, object],
     methodology_version: str = _METHODOLOGY_VERSION,
@@ -713,7 +844,8 @@ async def _scan_condition_met(
       · 事件类 → 三层判定（状态锚 → 受限 LLM（默认关）→ None），**不拉行情**；
       · 其余 → 拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
         见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
-        closes/pct_chgs/volumes/amounts（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
+        closes/pct_chgs/volumes/amounts（各自剔除 None）→ `judge_condition_met_state`
+        （确定性，禁 LLM）。
     目标资产无法解析（无行情数据源）时只跳过行情类条件，事件类条件仍按状态锚判定。
 
     判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
@@ -777,53 +909,15 @@ async def _scan_condition_met(
         due_date = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
         if not due_date or due_date <= today:
             continue  # 已到期/无 due → 交 _verify_conditions 第②段
-        condition_text = str(cond.get("condition") or "")
-        metric = str(anchor.get("metric") or "") or None
-        op = str(anchor.get("op") or "") or None
-        level = _num(anchor.get("level"))
-        event_ref = str(anchor.get("event_ref") or "").strip() or None
-        condition_class = infer_condition_class(
-            metric=metric, event_ref=event_ref, text=condition_text
+        # 判定与到期未成立态**共用**（Task 6.1）：本段只取 True 点亮，False/None 一律不产键。
+        met = await _judge_condition_met_once(
+            cond,
+            target_type=target_type,
+            code=code,
+            window_range=scan_range,
+            scan_cache=cache,
+            event_cache=events,
         )
-        if condition_class == CONDITION_CLASS_EVENT:
-            # 事件类（§12.4）：不需要行情；三层判定 + 事件列表记忆化
-            index = await _load_event_index(*scan_range, cache=events)
-            met = await _judge_event_condition(
-                event_ref or "", condition_text, index.get(event_ref or "")
-            )
-        else:
-            if code is None:
-                continue  # 无行情数据源：行情/量类条件无法判（交第②段落 insufficient）
-            cache_key = (target_type, code, scan_range[0], scan_range[1])
-            if cache_key in cache:
-                rows = cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数
-            else:
-                rows = await _fetch_kline_range(target_type, code, *scan_range)
-                cache[cache_key] = rows
-            if not rows:
-                continue  # 数据源故障/无数据：本段静默跳过（不产 false 键）
-            window = rows[-_CONDITION_SCAN_WINDOW:]
-            closes = [float(cast(float, r["close"])) for r in window if r.get("close") is not None]
-            pct_chgs = [
-                float(cast(float, r["pct_chg"])) for r in window if r.get("pct_chg") is not None
-            ]
-            volumes = [float(cast(float, r["vol"])) for r in window if r.get("vol") is not None]
-            amounts = [
-                float(cast(float, r["amount"])) for r in window if r.get("amount") is not None
-            ]
-            met = judge_condition_met(
-                condition_text,
-                direction=str(anchor.get("direction") or "neutral"),
-                threshold_pct=_parse_threshold(str(anchor.get("threshold") or "")),
-                closes=closes,
-                pct_chgs=pct_chgs,
-                volumes=volumes,
-                amounts=amounts,
-                metric=metric,
-                op=op,
-                level=level,
-                event_ref=event_ref,
-            )
         if met is not True:
             continue  # 不成立/无法判定 → 不产键（只写 true，D1）
         out[key] = {
@@ -884,6 +978,217 @@ async def backfill_no_data() -> int:
                     error=str(exc),
                 )
     return updated
+
+
+# ── 存量条件回溯补算（spec §12.6；计划 Task 6.2）──
+# 为什么需要：`run_once` 只扫 `status='pending'`（+ 2.0/no_data 回补），已 `verified` 记录不再被扫
+# → 存量记录的条件永远无布尔 `condition_met`（实测 88 个 entry 全无）。本入口一次性补齐。
+_BACKFILL_CONDITION_SCHEMA_VERSION = "3.0"  # 只扫 3.0（conditions 契约）
+
+
+@dataclass(frozen=True)
+class BackfillConditionMetStats:
+    """`backfill_condition_met` 统计出口（dry-run 报告 + 人工确认依据）。"""
+
+    scanned: int = 0             # 扫描记录数（list_all_predictions 全量）
+    candidates: int = 0          # 命中目标集合的记录数（3.0 + 含 conditions + 有无布尔 c{i}）
+    judgeable: int = 0           # 可判定条件数（= lit + unmet）
+    lit: int = 0                 # 判定成立（补写 true）
+    unmet: int = 0               # 判定确定性不成立（补写 false，仅已到期）
+    unjudgeable: int = 0         # 无法判定（不写键）
+    skipped_in_flight: int = 0   # 未到期且判定不成立 → 不写（到期前只写 true，§12.5）
+    written: int = 0             # 实际写入键数（dry_run 恒 0）
+    write_failed: int = 0        # 写失败数（不炸整批）
+    samples: tuple[str, ...] = ()  # 抽样明细（人工复核；上限 sample_size）
+
+
+def _condition_met_payload(
+    existing: dict[str, object] | None,
+    index: int,
+    horizon: object,
+    met: bool,
+    checked_at: str,
+) -> dict[str, object]:
+    """构造"只补 condition_met/checked_at"的回写 payload（Task 6.2）。
+
+    为什么把既有 entry 整条回传：Node 侧 `verification[c{i}]` 是**键级浅合并**，且会为每条
+    非 early_exit entry 补 `actual:''/reason:''/verified_at:now` 默认值——只发 condition_met
+    会把已判档位的 actual/reason/verified_at 覆盖成默认值（审计信息损失）。整条回传后这些键
+    逐字节不变，真正变化的只有 `condition_met`/`checked_at`（+ 定位键 condition_index/horizon）。
+    """
+    payload: dict[str, object] = dict(existing) if isinstance(existing, dict) else {}
+    payload.pop("type", None)        # 早退标记 entry 不属条件档位（防御，正常不存在）
+    payload.pop("early_exit", None)
+    payload["condition_index"] = index
+    if isinstance(horizon, str) and horizon:
+        # D5 口径：data_client 见 entry.horizon != body.horizon → 以 anchor_horizon 透传
+        payload["horizon"] = horizon
+    payload["condition_met"] = met
+    payload["checked_at"] = checked_at
+    return payload
+
+
+async def backfill_condition_met(
+    *,
+    dry_run: bool = True,
+    limit: int = 200,
+    batch_size: int = 20,
+    sleep_seconds: float = 0.5,
+    max_records: int | None = None,
+    sample_size: int = 10,
+) -> BackfillConditionMetStats:
+    """存量条件回溯补算（spec §12.6，Task 6.2）——独立入口、可重入、限速，**默认 dry-run**。
+
+    目标集合：`schema_version='3.0'` + `prediction.conditions[]` 非空 + 对应
+    `verification[c{i}]` **尚无布尔 `condition_met`** 的记录。
+    动作：按 Phase 5 判定能力（`_judge_condition_met_once`，与第①/②段同源）**只补写
+    `condition_met`（+ `checked_at`）**，**不覆盖** `result`/`window` 等其他键；不写 `null`。
+
+    口径（与主链路一致，见 spec §12.5）：
+    - 未到期（`due > today`）：窗口 `[created_at, today]`，**只写 true**（到期前不写 false）；
+    - 已到期（`due <= today`）：窗口 `[created_at, due]`，写布尔（未成立态 false）；
+    - 无法判定（参考位降级 / 无 level 量类 / 无数据 / 无行情源）→ 不写该键（绝不写 null）；
+    - 幂等：已有布尔 `condition_met` 的 c{i} 直接跳过 → 重复执行结果一致；
+    - 限速：每处理 `batch_size` 条记录 `await asyncio.sleep(sleep_seconds)`（避免打满 DB/上游）；
+    - **不自动执行**：`dry_run=True`（默认）只统计与抽样、零写入；生产须先跑 dry-run 报告 →
+      人工确认 → 再以 `dry_run=False` 执行（`scripts/backfill_condition_met.py --execute`）。
+    - `limit`：Node 侧 pending 游标分页页大小 / verified 上限；`max_records`：本地截断（演练用）。
+    """
+    today = shanghai_today().isoformat()
+    records = await node_api.list_all_predictions(limit=limit)
+    if max_records is not None:
+        records = records[: max(0, max_records)]
+    # 取数/事件记忆化（同一次运行内跨记录复用；key 含窗口，不串用）
+    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] = {}
+    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
+    scanned = candidates = judgeable = lit = unmet = 0
+    unjudgeable = skipped_in_flight = written = write_failed = 0
+    samples: list[str] = []
+    for pos, record in enumerate(records):
+        scanned += 1
+        if str(record.get("schema_version") or "") != _BACKFILL_CONDITION_SCHEMA_VERSION:
+            continue  # 2.0 旧记录无 conditions 契约
+        prediction = record.get("prediction")
+        conditions = prediction.get("conditions") if isinstance(prediction, dict) else None
+        if not isinstance(conditions, list) or not conditions:
+            continue
+        record_id = _coerce_record_id(record.get("id"))
+        if record_id is None:
+            continue
+        verification = record.get("verification")
+        ver_map = verification if isinstance(verification, dict) else {}
+        due_dates = record.get("due_dates")
+        due_map = due_dates if isinstance(due_dates, dict) else {}
+        horizons = prediction.get("horizons") if isinstance(prediction, dict) else None
+        tgt = ""
+        if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+            tgt = str(horizons[0].get("target") or "")
+        code, target_type, _ = await _resolve_verify_target(tgt)
+        record_pending = False
+        for i, cond in enumerate(conditions):
+            if not isinstance(cond, dict):
+                continue
+            key = f"c{i}"
+            existing = ver_map.get(key)
+            if isinstance(existing, dict):
+                if isinstance(existing.get("condition_met"), bool):
+                    continue  # 幂等：已有布尔判定（true/false）→ 不重复写
+                if existing.get("type") == "early_exit":
+                    continue  # 早退标记 entry 不属条件档位（防御）
+            record_pending = True
+            anchor_raw = cond.get("anchor")
+            anchor: dict[str, object] = (
+                cast(dict[str, object], anchor_raw) if isinstance(anchor_raw, dict) else {}
+            )
+            horizon = anchor.get("horizon")
+            due = str(due_map.get(str(horizon)) or "") if horizon else ""
+            at_due = bool(due) and due <= today
+            # 窗口：已到期 → [created_at, due]；未到期 → [created_at, today]
+            window_range = _condition_scan_range(record, due if at_due else today)
+            met = await _judge_condition_met_once(
+                cond,
+                target_type=target_type,
+                code=code,
+                window_range=window_range,
+                scan_cache=scan_cache,
+                event_cache=event_cache,
+                at_due=at_due,
+            )
+            if met is None:
+                unjudgeable += 1
+                continue
+            if met is False and not at_due:
+                # 未到期只写 true（spec §12.5）：此处的 false 不具备"到期"语义 → 不写
+                skipped_in_flight += 1
+                continue
+            judgeable += 1
+            if met:
+                lit += 1
+            else:
+                unmet += 1
+            if len(samples) < sample_size:
+                samples.append(
+                    f"id={record_id} key={key} due={due or '-'} met={str(met).lower()} "
+                    f"condition={str(cond.get('condition') or '')[:30]}"
+                )
+            if dry_run:
+                continue
+            try:
+                await node_api.update_prediction_verification(
+                    record_id,
+                    key,
+                    _condition_met_payload(existing, i, horizon, met, today),
+                )
+                written += 1
+            except Exception as exc:  # noqa: BLE001 —— 单条失败不炸整批（限速批处理语义）
+                write_failed += 1
+                logger.warning(
+                    "backfill_condition_met_write_failed",
+                    id=record_id,
+                    key=key,
+                    error=str(exc),
+                )
+        if record_pending:
+            candidates += 1
+        # 限速：每 batch_size 条记录一次间隔（避免打满 DB/上游）
+        if sleep_seconds > 0 and (pos + 1) % max(1, batch_size) == 0:
+            await asyncio.sleep(sleep_seconds)
+    logger.info(
+        "backfill_condition_met_done",
+        dry_run=dry_run,
+        scanned=scanned,
+        candidates=candidates,
+        judgeable=judgeable,
+        lit=lit,
+        unmet=unmet,
+        unjudgeable=unjudgeable,
+        skipped_in_flight=skipped_in_flight,
+        written=written,
+        write_failed=write_failed,
+    )
+    return BackfillConditionMetStats(
+        scanned=scanned,
+        candidates=candidates,
+        judgeable=judgeable,
+        lit=lit,
+        unmet=unmet,
+        unjudgeable=unjudgeable,
+        skipped_in_flight=skipped_in_flight,
+        written=written,
+        write_failed=write_failed,
+        samples=tuple(samples),
+    )
+
+
+def _coerce_record_id(value: object) -> int | None:
+    """记录 id 归一（Node internal 已归 number；兼容历史 string）。脏值 → None（跳过）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 async def run_once() -> int:
@@ -999,8 +1304,10 @@ async def run_once() -> int:
                 )
         # Spec A §4.2/§11：条件化预判双验证调度——3.0 记录对每条 condition 另产 c{i}
         # entry（c{i} key 与 horizon key 并存，A1 early_exit 不冲突）；已存在 result
-        # 的 c{i} 幂等跳过。
-        cond_entries = await _verify_conditions(record)
+        # 的 c{i} 幂等跳过。取数/事件记忆化与第①段共用（key 含窗口，不串用）。
+        cond_entries = await _verify_conditions(
+            record, scan_cache=scan_cache, event_cache=event_cache
+        )
         for ckey, centry in cond_entries.items():
             if centry.get("wait"):
                 continue  # D1：窗口未满不回写，下次补齐再验

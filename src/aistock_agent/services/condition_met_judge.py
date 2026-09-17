@@ -1,6 +1,12 @@
 """条件成立（`condition_met`）确定性判定纯函数（条件化 spec §4.2；spec §12.3；禁 LLM）。
 
-返回语义：`True`=条件成立；`None`=不成立/无法判定（**不返回 False**，只写 true，见计划 D1）。
+返回语义（两值口径，`judge_condition_met`，第①段"到期前只写 true"用）：
+`True`=条件成立；`None`=不成立/无法判定（**不返回 False**，见计划 D1）。
+返回语义（三值口径，`judge_condition_met_state`，Task 6.1 到期未成立态用）：
+`True`=成立 / `False`=**确定性不成立** / `None`=无法判定（**不得写 false**）——
+到期写 `condition_met=false`（spec §12.5）必须区分"确定不成立"与"无法判定（保持缺失，
+绝不写 null）"，故按同一批 `*_state` 判定函数给出三值；两值口径是它的折叠（False → None），
+行为逐字不变。
 
 **条件类型确定性推断**（spec §12.3；不新增 `condition_type` 字段——由字段推断，生成侧与判定侧
 共用同一份白名单 `schemas/prediction.py::PredictionMetric`，防两侧口径再次脱节）。
@@ -191,13 +197,17 @@ def _cumulative_pct(closes: list[float], pct_chgs: list[float]) -> float | None:
     return None
 
 
-def _judge_tech(
+def _judge_tech_state(
     text: str, direction: str, closes: list[float], metric: str | None, op: str | None
 ) -> bool | None:
-    """技术位类判定（前低/新高 → 均线）。
+    """技术位类三值判定（前低/新高 → 均线）：True=成立 / False=确定性不成立 / None=无法判定。
 
     取值优先级：显式 `metric`（ma20/ma60/prior_low/prior_high）> 文本关键词（前低/新高/MA60/均线）
     > `anchor.direction`；`op` 显式给出时优先决定比较方向（up/down），cross_* 用相邻两日穿越。
+
+    为何只有"末值 vs 均线/前极值"给 False：这是窗口末端的**决定性**比较（末值未在触发侧
+    → 确定性不成立）；`cross_*` 是相邻两日穿越语义，当日未穿越**不能断言窗口内从未穿越**
+    → 恒 None（宁可 None 不可误写 false，R9 同源原则）。
     """
     if len(closes) < 2:
         return None  # 数据不足（MA/前低/新高任一形态都需至少 2 个点）
@@ -205,9 +215,9 @@ def _judge_tech(
     prior = closes[:-1]
     if metric == "prior_low" or "前低" in text:
         # 前低/前高语义固定为"末值 vs 窗口内前 N-1 极值"（不适用窗口极值比较）
-        return True if last < min(prior) else None
+        return last < min(prior)
     if metric == "prior_high" or "新高" in text:
-        return True if last > max(prior) else None
+        return last > max(prior)
     if op in _DOWN_OPS:
         want: str | None = "down"
     elif op in _UP_OPS:
@@ -238,21 +248,22 @@ def _judge_tech(
     if op == "cross_below":
         return True if closes[-2] > ma >= last else None
     if want == "down":
-        return True if last < ma else None
-    return True if last > ma else None
+        return last < ma
+    return last > ma
 
 
-def _judge_volume(
+def _judge_volume_state(
     series: list[float], op: str | None, level: float | None, direction: str, text: str = ""
 ) -> bool | None:
-    """量类判定：窗口量能（vol 或 amount）与 `level` 按 `op` 比较。
+    """量类三值判定：True=成立 / False=确定性不成立 / None=无法判定。
 
     口径（spec §12.3 + 本任务裁决，写入模块 docstring）：
     - `gte`/`above` → 窗口 **max**（"曾放量到该量级"）；`lte`/`below` → 窗口 **min**；
     - `cross_above`/`cross_below` → **相邻两日**（前一日在 level 一侧、最新日穿越到另一侧）；
+      **未穿越 → None**（不能断言窗口内从未穿越）；
     - `op` 缺省 → 文本（放量→gte / 缩量→lte）→ 再按 direction（bullish→gte / bearish→lte）。
 
-    三道守卫（缺一即 None，宁可 None 不可误点亮）：
+    三道守卫（缺一即 None，宁可 None 不可误点亮/误置否）：
     ① 无 `level`（非正数/非有限值）→ 生成侧未给量化阈值，不得凭"放量"字样点亮；
     ② 样本 < 2 → 最小样本守卫；
     ③ 量级护栏：`level / max(series)` 落在 [1e-3, 1e3] 之外 → 视为口径/单位错配（如 level 用"元"
@@ -271,23 +282,79 @@ def _judge_volume(
     ratio = level / reference
     if not _VOLUME_LEVEL_RATIO_MIN <= ratio <= _VOLUME_LEVEL_RATIO_MAX:
         return None
-    return True if _compare(series, resolved, level) else None
+    met = _compare(series, resolved, level)
+    if resolved in {"cross_above", "cross_below"}:
+        return True if met else None  # 穿越语义：当日未穿越 ≠ 窗口内从未穿越
+    return met
 
 
-def _judge_pct(
+def _judge_pct_state(
     direction: str, threshold_pct: float | None, closes: list[float], pct_chgs: list[float]
 ) -> bool | None:
-    """涨跌幅/点位类判定：窗口累计 pct 与 anchor.threshold 按 direction 比对。"""
+    """涨跌幅/点位类三值判定：窗口累计 pct 与 anchor.threshold 按 direction 比对（决定性）。"""
     cumulative = _cumulative_pct(closes, pct_chgs)
     if cumulative is None:
         return None  # 数据不足（closes 与 pct_chgs 均不可用）
     if direction == "bullish":
         need = max(threshold_pct or 0.0, 0.0)
-        return True if cumulative >= need and cumulative > 0 else None
+        return cumulative >= need and cumulative > 0
     if direction == "bearish":
         need = min(threshold_pct or 0.0, 0.0)
-        return True if cumulative <= need and cumulative < 0 else None
-    return True if abs(cumulative) <= _NEUTRAL_PCT else None
+        return cumulative <= need and cumulative < 0
+    return abs(cumulative) <= _NEUTRAL_PCT
+
+
+def judge_condition_met_state(
+    condition_text: str,
+    *,
+    direction: str,
+    threshold_pct: float | None,
+    closes: list[float],
+    pct_chgs: list[float],
+    volumes: list[float],
+    amounts: list[float] | None = None,
+    metric: str | None = None,
+    op: str | None = None,
+    level: float | None = None,
+    event_ref: str | None = None,
+) -> bool | None:
+    """条件成立**三值**判定：`True`=成立 / `False`=确定性不成立 / `None`=无法判定。
+
+    为什么需要 False（Task 6.1，spec §12.5）：到期未成立态要写与 true 对称的布尔
+    `condition_met=false`；**无法判定必须保持键缺失**（绝不写 null，jsonb 键级浅合并下 null
+    会抹掉旧值）。两值口径 `judge_condition_met` 保留给第①段扫描（到期前只写 true），
+    二者路由与守卫**完全同源**（同一批 `*_state` 函数），仅是否把"确定性不成立"折叠成 None 不同。
+
+    给 False 的三类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
+    不成立（非 cross_*）。其余（参考位降级、无 level 量类、量级护栏、单样本、绝对点位守卫、
+    cross_* 未穿越、事件类）恒 None。
+    """
+    text = condition_text or ""
+    condition_class = infer_condition_class(
+        metric=metric, event_ref=event_ref, text=text
+    )
+    if condition_class == CONDITION_CLASS_EVENT:
+        return None  # 事件类：调用方按 状态锚 → 受限 LLM → None 三层处理
+    if condition_class == CONDITION_CLASS_VOLUME:
+        series = list(amounts or []) if metric == "amount" else list(volumes)
+        return _judge_volume_state(series, op, level, direction, text)
+    if condition_class == CONDITION_CLASS_REF_LEVEL:
+        return None  # 参考位降级（日 K 取数层无 open/high/low，见 docstring ④）
+    if max(len(closes), len(pct_chgs)) < 2:
+        # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
+        # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
+        # neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上会立即点亮 true，而 true
+        # 一旦写入不可撤回 → 宁可 None（不产键），也不让单日样本误点亮。
+        return None
+    if not _has_explicit_anchor(metric, level) and (
+        _ABS_LEVEL_RE.search(text) or _ABS_LEVEL_VERB_RE.search(text)
+    ):
+        # 绝对点位守卫（终审 #2）：无点位阈值口径 → 不得走技术位近似（会对"站上 3000 点"
+        # 在顺势序列上误判 true，且 true 不可撤回）。
+        return None
+    if condition_class == CONDITION_CLASS_TECH:
+        return _judge_tech_state(text, direction, closes, metric, op)
+    return _judge_pct_state(direction, threshold_pct, closes, pct_chgs)
 
 
 def judge_condition_met(
@@ -306,6 +373,9 @@ def judge_condition_met(
 ) -> bool | None:
     """条件文本 + anchor + 行情 → True（成立）/ None（不成立或无法判定）。
 
+    **两值口径**（第①段扫描用，行为与三值化前逐字一致）：三值判定的"确定性不成立"（False）
+    在此折叠为 None——到期前只写 true，不写 false（计划 D1）。
+
     - `closes`/`pct_chgs`/`volumes`/`amounts` 均为升序且已剔除 None（空列表表示该维度无数据）。
     - `metric`/`op`/`level`/`event_ref` 为 anchor 的判定维度（spec §12.3，2026-09-17 扩展）；
       缺省（旧记录）时行为与扩展前一致（由文本推断类型）。
@@ -313,29 +383,17 @@ def judge_condition_met(
     - 参考位类：当前取数层不可得 → `None`（降级，待取数层补当日 open/high/low）。
     - 路由与守卫见模块 docstring（绝对点位 → None 的守卫对未显式声明判定维度的 anchor 保留）。
     """
-    text = condition_text or ""
-    condition_class = infer_condition_class(
-        metric=metric, event_ref=event_ref, text=text
+    state = judge_condition_met_state(
+        condition_text,
+        direction=direction,
+        threshold_pct=threshold_pct,
+        closes=closes,
+        pct_chgs=pct_chgs,
+        volumes=volumes,
+        amounts=amounts,
+        metric=metric,
+        op=op,
+        level=level,
+        event_ref=event_ref,
     )
-    if condition_class == CONDITION_CLASS_EVENT:
-        return None  # 事件类：调用方按 状态锚 → 受限 LLM → None 三层处理
-    if condition_class == CONDITION_CLASS_VOLUME:
-        series = list(amounts or []) if metric == "amount" else list(volumes)
-        return _judge_volume(series, op, level, direction, text)
-    if condition_class == CONDITION_CLASS_REF_LEVEL:
-        return None  # 参考位降级（日 K 取数层无 open/high/low，见 docstring ④）
-    if max(len(closes), len(pct_chgs)) < 2:
-        # 最小样本守卫（终审补项）：窗口仅 1 行（created_at == today）时不做判定。
-        # 单行且 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单日 pct_chg 累计恰为自身，
-        # neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上会立即点亮 true，而 true
-        # 一旦写入不可撤回 → 宁可 None（不产键），也不让单日样本误点亮。
-        return None
-    if not _has_explicit_anchor(metric, level) and (
-        _ABS_LEVEL_RE.search(text) or _ABS_LEVEL_VERB_RE.search(text)
-    ):
-        # 绝对点位守卫（终审 #2）：无点位阈值口径 → 不得走技术位近似（会对"站上 3000 点"
-        # 在顺势序列上误判 true，且 true 不可撤回）。
-        return None
-    if condition_class == CONDITION_CLASS_TECH:
-        return _judge_tech(text, direction, closes, metric, op)
-    return _judge_pct(direction, threshold_pct, closes, pct_chgs)
+    return True if state is True else None

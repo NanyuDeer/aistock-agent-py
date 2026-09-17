@@ -1,6 +1,8 @@
 """`condition_met` 确定性判定纯函数单测（条件化 spec §4.2；计划 Task 3 Step 1）。
 
-口径：只返回 True（条件成立）或 None（不成立/无法判定），**不返回 False**（计划 D1 D2）。
+口径：`judge_condition_met` 只返回 True（条件成立）或 None（不成立/无法判定），**不返回 False**
+（计划 D1 D2，第①段"只写 true"）；`judge_condition_met_state`（Task 6.1 新增）返回三值——
+True=成立 / **False=确定性不成立** / None=无法判定，供到期未成立态写入 `condition_met=false`。
 覆盖三类：volume 类（首批 omit）、技术位类（MA/前低/新高）、涨跌幅/点位类（含 sector 链路
 仅 pct_chgs 的回退路径）。
 """
@@ -10,6 +12,7 @@ import pytest
 from aistock_agent.services.condition_met_judge import (
     infer_condition_class,
     judge_condition_met,
+    judge_condition_met_state,
 )
 
 UPTREND = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
@@ -339,4 +342,72 @@ def test_event_class_returns_none_in_pure_judge() -> None:
         "若出口限制细则落地", direction="bearish", threshold_pct=None,
         closes=[100.0, 99.0], pct_chgs=[], volumes=[],
         metric="close", event_ref="evt_20260917_001",
+    ) is None
+
+
+# ============ Task 6.1：三值判定（到期未成立态 condition_met=false 的判定依据） ============
+# 语义：True=成立 / False=**确定性不成立** / None=无法判定（不得写 false）。
+# `judge_condition_met`（第①段"只写 true"）行为不变：False 折叠回 None。
+
+
+def test_state_pct_not_met_is_false() -> None:
+    """涨跌幅类：窗口累计未达阈值 → 确定性不成立（false），可用于到期写未成立态。"""
+    assert judge_condition_met_state(
+        "若未来 1 周累计上涨超 1%", direction="bullish", threshold_pct=1.0,
+        closes=[100.0, 100.5, 100.8], pct_chgs=[], volumes=[],
+    ) is False
+    # 两值口径（第①段）仍折叠为 None，行为与改造前一致
+    assert judge_condition_met(
+        "若未来 1 周累计上涨超 1%", direction="bullish", threshold_pct=1.0,
+        closes=[100.0, 100.5, 100.8], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_state_tech_not_met_is_false() -> None:
+    """技术位类：末值未跌破 MA20 → 确定性不成立（false）。"""
+    assert judge_condition_met_state(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0 + i for i in range(25)], pct_chgs=[], volumes=[],
+    ) is False
+
+
+def test_state_volume_not_met_is_false() -> None:
+    """量类：窗口 max 低于 level（op=gte）→ 确定性不成立（false）。"""
+    assert judge_condition_met_state(
+        "放量至 3 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op="gte", level=3.0e8,
+    ) is False
+
+
+def test_state_unjudgeable_stays_none() -> None:
+    """无法判定的三类（参考位降级 / 无 level 的量类 / 单样本）恒 None——绝不写 false。"""
+    assert judge_condition_met_state(
+        "跌破今日盘中低点", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0], pct_chgs=[], volumes=[], metric="today_low", op="below",
+    ) is None
+    assert judge_condition_met_state(
+        "放量至 3 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8], metric="volume", op="gte",
+    ) is None
+    assert judge_condition_met_state(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_state_cross_op_not_crossed_is_none() -> None:
+    """cross_* 语义为"相邻两日穿越"：当日未穿越不能断言"窗口内从未穿越" → None（不写 false）。"""
+    assert judge_condition_met_state(
+        "放量上穿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.5e8, 1.6e8],
+        metric="volume", op="cross_above", level=1.4e8,
+    ) is None
+
+
+def test_state_event_class_stays_none_in_pure_judge() -> None:
+    """事件类在纯函数中仍为 None（三值化只覆盖市场类；事件类三层在调用方）。"""
+    assert judge_condition_met_state(
+        "若出口限制细则落地", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0], pct_chgs=[], volumes=[], event_ref="evt_1",
     ) is None
