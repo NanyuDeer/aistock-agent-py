@@ -36,6 +36,7 @@ from aistock_agent.schemas.market_trace import (
     ReviewArtifact,
 )
 from aistock_agent.schemas.prediction import OmittedHorizon, PredictionHorizon, PredictionResult
+from aistock_agent.schemas.target import Target
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import (
@@ -1145,6 +1146,31 @@ async def _enrich_chat_input_with_profile(
 _MARKET_PROFILE_SYMBOL = "上证指数"
 
 
+async def _enrich_predict_input_for_target(
+    prompt_input: dict[str, object], target: Target
+) -> dict[str, object]:
+    """Spec B §4.3 / Task 0.5：按 Target 对象读验证画像并入预判输入。
+
+    板块链路已持有 resolved Target（``sector_target_from_resolved``，
+    internal_id = resolved.ts_code），直接用对象读取——画像缓存 key 与记录匹配口径
+    都是 internal_id，不经 make_target(板块名) 退化（那会剥后缀 + code=None，key 对不上）。
+    红线：画像只作输入参考；读取异常 → 原样返回（不阻断产出）。
+    """
+    from aistock_agent.skills.prediction_validation import (
+        enrich_prediction_input,
+        read_validation_profile,
+    )
+
+    try:
+        profile = await read_validation_profile(target)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "predict_input.enrich_profile_failed", target=target.internal_id, exc_info=True
+        )
+        return prompt_input
+    return enrich_prediction_input(prompt_input, profile)
+
+
 async def _enrich_predict_input_for_symbol(
     prompt_input: dict[str, object], symbol: str
 ) -> dict[str, object]:
@@ -1154,20 +1180,10 @@ async def _enrich_predict_input_for_symbol(
     板块/个股），Target 维度一致。红线：画像只作输入参考；解析 target 失败/读取
     异常 → 原样返回（不阻断产出）。
     """
-    from aistock_agent.skills.prediction_validation import (
-        enrich_prediction_input,
-        read_validation_profile,
-    )
-
     target = make_target(symbol)
     if target is None:
         return prompt_input
-    try:
-        profile = await read_validation_profile(target)
-    except Exception:  # noqa: BLE001
-        logger.debug("predict_input.enrich_profile_failed", symbol=symbol, exc_info=True)
-        return prompt_input
-    return enrich_prediction_input(prompt_input, profile)
+    return await _enrich_predict_input_for_target(prompt_input, target)
 
 
 async def _enrich_market_predict_input(prompt_input: dict[str, object]) -> dict[str, object]:
@@ -1466,6 +1482,7 @@ async def _sector_prediction_core(
         }
         # P4 回放：历史验证结果反馈并入输入（recorded prediction + verification
         # entries），LLM 据此按变体逻辑重出预判（对齐 run_predict 的 replay_context）。
+        # Task 0.5：生产路径同键并入板块验证画像（predict_sector 注入 validation_profile）。
         if extra_input:
             prompt_input = {**prompt_input, **extra_input}
         # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用同一值。
@@ -1651,12 +1668,17 @@ async def predict_sector(
     try:
         market_brief = await _market_trace_brief(report_date)
         sector_id = f"sector:{target.internal_id}"
+        # Task 0.5：板块画像注入（对齐大盘 run_predict/_enrich_market_predict_input）——
+        # target 用 resolved ts_code（sector_target_from_resolved，internal_id=ts_code）；
+        # 无画像/读取失败 → 空 dict 不并入（省略该块，不报错、不阻断产出）。
+        profile_input = await _enrich_predict_input_for_target({}, target)
         prediction = await _sector_prediction_core(
             report_date=report_date,
             sector=target.model_dump(mode="json"),
             sector_evidence_id=sector_id,
             sector_snapshot=sector_snapshot,
             market_brief=market_brief,
+            extra_input=profile_input,
         )
         if prediction is None:
             return None

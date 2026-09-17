@@ -289,6 +289,71 @@ async def test_predict_sector_llm_failure_returns_none() -> None:
     mock_save.assert_not_awaited()
 
 
+# ---------- Task 0.5：板块画像注入（target 用 resolved ts_code，对齐大盘） ----------
+
+_PROFILE: dict[str, object] = {
+    "target": "BK1001", "n": 12, "hits": 6, "hit_rate": 0.5, "ci": [0.0, 1.0],
+    "sufficient_sample": False, "condition_met_rate": None,
+}
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_injects_profile_for_resolved_target() -> None:
+    """Task 0.5：板块预判按 resolved ts_code 读画像并入 prompt_input（与大盘同构）。
+
+    target 必须走 sector_target_from_resolved（internal_id = resolved.ts_code）——
+    不用 make_target(板块名)（internal_id 退化为剥后缀名 → 缓存 key 与记录匹配口径均对不上）。
+    """
+    llm, structured_ainvoke = _make_llm(_sector_prediction())
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch(
+            "aistock_agent.skills.prediction_validation.read_validation_profile",
+            new=AsyncMock(return_value=dict(_PROFILE)),
+        ) as mock_read,
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None
+    mock_read.assert_awaited_once()
+    assert mock_read.await_args.args[0].internal_id == "BK1001"  # resolved ts_code
+    prompt_input = json.loads(structured_ainvoke.await_args.args[0][1].content)
+    assert prompt_input["validation_profile"]["target"] == "BK1001"
+    assert prompt_input["validation_profile"]["n"] == 12
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_omits_profile_when_read_fails() -> None:
+    """Task 0.5：画像读取失败 → 省略 validation_profile，不报错、不阻断预判产出。"""
+    llm, structured_ainvoke = _make_llm(_sector_prediction())
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch(
+            "aistock_agent.skills.prediction_validation.read_validation_profile",
+            new=AsyncMock(side_effect=RuntimeError("redis down")),
+        ),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})),
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None
+    prompt_input = json.loads(structured_ainvoke.await_args.args[0][1].content)
+    assert "validation_profile" not in prompt_input
+
+
 # ---------- Task 0.1/0.2：幂等 + source_id 口径（与批量路径同源） ----------
 
 
