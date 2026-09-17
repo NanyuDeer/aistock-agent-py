@@ -27,7 +27,7 @@ PREDICTION_LIGHT_PROMPT = """你是 A 股自选股洞察轻量预判器（quick_
 - conditions：1-3 条"条件→情景"对，每条包含
   - condition：触发条件，可量化的市场事实（放量/缩量、突破/跌破某价位、站上/跌破均线等），关键词式短语，禁止长句与背景铺垫
   - scenario：条件满足后的走势预判（含幅度或目标位，如 "上看 +5%"、"回踩不破 20 日线"）
-  - anchor：{horizon: "short"|"mid"，threshold: 涨跌幅数值如 "+5%"/"-3%"，metric: "close"|"volume"（默认 close），direction: "bullish"|"bearish"|"neutral"}
+  - anchor：{horizon: "short"|"mid"，threshold: 涨跌幅数值如 "+5%"/"-3%"，metric: "close"|"volume"（默认 close），direction: "bullish"|"bearish"|"neutral"，event_ref（2026-09-17）: 事件 id（**仅事件类条件填写**；输入中无对应事件 id 时不得填写该键、禁止编造）}
 约束：
 - 只使用输入中出现的价格/量能/均线/归因主因/资讯事实，禁止编造（如输入无量能数据则不得断言"放量"）
 - 有量能对比数据（vol_recent5_avg vs vol_prev5_avg）时，至少 1 条 condition 用 volume 维度（放量/缩量情景）

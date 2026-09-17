@@ -1,3 +1,4 @@
+from aistock_agent.prompts.workers.light_predict import PREDICTION_LIGHT_PROMPT
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
@@ -32,6 +33,17 @@ def test_prompt_instructs_schema_version():
     # Spec A §3.3：schema_version 升 "3.0"（条件化预判）
     assert "schema_version" in PREDICTION_PROMPT
     assert "3.0" in PREDICTION_PROMPT
+
+
+def test_prediction_prompts_declare_anchor_event_ref():
+    # spec §13.2 / Task 0.3：anchor 键清单须登记 event_ref，LLM 不产则状态锚无法落地。
+    # 反之 prompt 多吐该键而 schema 未收时，extra="forbid" 会整条拒绝（parse_failed / None）。
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "event_ref" in prompt
+        assert "仅事件类条件填写" in prompt
+    # 轻量预判（LightForecast 复用 PredictionCondition）的 anchor 键清单同批同步
+    assert "event_ref" in PREDICTION_LIGHT_PROMPT
+    assert "仅事件类条件填写" in PREDICTION_LIGHT_PROMPT
 
 
 def test_prediction_prompt_horizon_policy_semantics():

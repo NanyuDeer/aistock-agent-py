@@ -80,6 +80,12 @@ class PredictionAnchor(BaseModel):
     threshold: str  # 验证阈值（涨跌幅 %，如 "+5%"/"-3%"），到期比对用
     metric: PredictionMetric = "close"  # 验证标的，缺省 close；大盘用 index_close
     direction: PredictionDirection = "neutral"  # 情景方向；缺省 neutral，LLM 不产时归一化层兜底
+    # 事件类条件的锚（spec §13.2，状态锚前置）：指向 Event Entity 的 event_id，判定层据此
+    # 走 event_status 迁移自动点亮。可空：仅事件类条件填写，非事件类留空；旧记录缺省即
+    # None，向后兼容、不升 schema_version（3.0）。extra="forbid" 下该键必须与 prompt 键清单
+    # 同批同步，否则 LLM 多吐该键会整条预判校验失败。缺失的事件类条件由判定层按
+    # unjudgeable（met=null）处理，不误点亮。
+    event_ref: str | None = None
 
 
 class PredictionCondition(BaseModel):

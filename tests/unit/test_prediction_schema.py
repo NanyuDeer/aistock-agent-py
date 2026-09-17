@@ -173,6 +173,59 @@ def test_prediction_anchor_metric_literal():
         PredictionAnchor(horizon="short", threshold="+5%", metric="open")  # type: ignore[arg-type]
 
 
+# ===== anchor.event_ref：事件类条件的锚（Task 0.3 / spec §13.2）=====
+
+
+def test_prediction_anchor_accepts_event_ref():
+    """事件类条件的锚：显式传 event_ref → 原样解析（指向 Event Entity 的 event_id）。"""
+    a = PredictionAnchor(
+        horizon="mid", threshold="+5%", direction="bullish", event_ref="evt_20260917_001"
+    )
+    assert a.event_ref == "evt_20260917_001"
+
+
+def test_prediction_anchor_event_ref_default_none_on_legacy_record():
+    """旧记录（anchor 无 event_ref 键）反序列化 → None，不 break 校验（不升 schema_version）。"""
+    a = PredictionAnchor.model_validate(
+        {"horizon": "short", "threshold": "+5%", "direction": "bullish"}
+    )
+    assert a.event_ref is None
+    # 默认值声明在字段层——防回归：event_ref 不得变为必填
+    assert PredictionAnchor.model_fields["event_ref"].default is None
+
+
+def test_prediction_condition_anchor_event_ref_roundtrip():
+    """条件→情景→anchor 全链带 event_ref：dict 输入（json_mode 路径）与序列化往返均保留。"""
+    cond = PredictionCondition.model_validate(
+        {
+            "condition": "若出口限制细则落地且相关个股放量下探",
+            "scenario": "情绪转弱，短线回踩 -3% 内",
+            "anchor": {
+                "horizon": "short",
+                "threshold": "-3%",
+                "metric": "close",
+                "direction": "bearish",
+                "event_ref": "evt_20260917_001",
+            },
+        }
+    )
+    assert cond.anchor.event_ref == "evt_20260917_001"
+    assert (
+        PredictionCondition.model_validate(cond.model_dump()).anchor.event_ref
+        == "evt_20260917_001"
+    )
+
+
+def test_prediction_anchor_rejects_unknown_key_around_event_ref():
+    """extra=forbid 未放开：拼错的键（eventrefs/eventRef）仍整条拒绝——该 guard 证明 prompt
+    键清单必须与 schema 同批同步，否则 LLM 多吐一个键即整条预判丢失（parse_failed / None）。"""
+    for bad in ("eventrefs", "eventRef"):
+        with pytest.raises(ValidationError):
+            PredictionAnchor.model_validate(
+                {"horizon": "short", "threshold": "+5%", "direction": "bullish", bad: "x"}
+            )
+
+
 def test_prediction_condition_full():
     """condition/scenario/anchor 三段齐全。"""
     c = PredictionCondition(
