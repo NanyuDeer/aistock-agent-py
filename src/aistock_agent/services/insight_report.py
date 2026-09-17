@@ -54,7 +54,8 @@ def build_report_sections(data: dict[str, Any]) -> list[tuple[str, list[str]]]:
             f"方向：{_text(event.get('direction'))}",
             f"涨跌幅：{_text(event.get('changePct'))}%（阈值 {_text(event.get('thresholdPct'))}%）",
             f"严重度：{_text(event.get('severity'))}",
-            f"最新价 / 昨收：{_text(event.get('latestPrice'))} / {_text(event.get('previousClose'))}",
+            f"最新价 / 昨收：{_text(event.get('latestPrice'))} / "
+            f"{_text(event.get('previousClose'))}",
         ]),
         ("主因结论", [
             f"一句话主因：{_text(attr.get('primaryPhrase'))}",
@@ -101,12 +102,16 @@ def render_insight_report(
     """章节列表 → A4 PDF bytes（页眉标题 + 章节 + 页脚免责声明/页码）。"""
     _register_font()
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("cnTitle", parent=styles["Title"], fontName=_FONT, fontSize=18, leading=26)
+    title_style = ParagraphStyle(
+        "cnTitle", parent=styles["Title"], fontName=_FONT, fontSize=18, leading=26
+    )
     heading_style = ParagraphStyle(
         "cnHeading", parent=styles["Heading2"], fontName=_FONT, fontSize=13, leading=19,
         spaceBefore=12, spaceAfter=4, textColor=colors.HexColor("#1B4E8C"),
     )
-    body_style = ParagraphStyle("cnBody", parent=styles["BodyText"], fontName=_FONT, fontSize=10.5, leading=17)
+    body_style = ParagraphStyle(
+        "cnBody", parent=styles["BodyText"], fontName=_FONT, fontSize=10.5, leading=17
+    )
 
     def _decorate(canvas: Any, doc: Any) -> None:  # noqa: ANN401 - reportlab 回调签名
         canvas.saveState()

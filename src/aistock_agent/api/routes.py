@@ -1867,8 +1867,12 @@ async def render_insight_report_pdf(
     payload: dict[str, object],
     _: None = Depends(verify_internal_token),
 ) -> Response:
-    """完整洞察报告 PDF 渲染：app-api 组装数据 → 本端点纯模板渲染（无 LLM）→ 返回 application/pdf。"""
-    from aistock_agent.services.insight_report import build_report_sections, render_insight_report  # noqa: PLC0415
+    """完整洞察报告 PDF 渲染：
+    app-api 组装数据 → 本端点纯模板渲染（无 LLM）→ 返回 application/pdf。"""
+    from aistock_agent.services.insight_report import (  # noqa: PLC0415
+        build_report_sections,
+        render_insight_report,
+    )
 
     pdf = render_insight_report(build_report_sections(payload))
     return Response(

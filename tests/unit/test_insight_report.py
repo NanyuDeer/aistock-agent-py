@@ -18,10 +18,20 @@ _FULL_DATA = {
     "attribution": {
         "primaryPhrase": "液冷服务器概念板块联动",
         "confidenceLevel": "medium",
-        "candidates": [{"layer": "sector", "status": "supported", "verdict": "板块联动", "supportingEvidenceIds": ["e1"]}],
-        "chains": [{"role": "primary", "nodes": [{"stage": "trigger", "claim": "板块异动", "epistemicType": "fact", "status": "established", "evidenceIds": ["e1"]}]}],
+        "candidates": [
+            {"layer": "sector", "status": "supported", "verdict": "板块联动",
+             "supportingEvidenceIds": ["e1"]},
+        ],
+        "chains": [
+            {"role": "primary",
+             "nodes": [{"stage": "trigger", "claim": "板块异动", "epistemicType": "fact",
+                        "status": "established", "evidenceIds": ["e1"]}]},
+        ],
         "unresolvedQuestions": ["资金持续性待观察"],
-        "evidenceIndex": [{"source_id": "e1", "kind": "news", "title": "液冷概念走强", "content_excerpt": "板块涨 3%"}],
+        "evidenceIndex": [
+            {"source_id": "e1", "kind": "news", "title": "液冷概念走强",
+             "content_excerpt": "板块涨 3%"},
+        ],
     },
 }
 
@@ -29,7 +39,8 @@ _FULL_DATA = {
 def test_build_sections_contains_all_chapters() -> None:
     sections = build_report_sections(_FULL_DATA)
     headings = [h for h, _ in sections]
-    assert headings == ["事件事实", "主因结论", "五层候选归因", "六阶段因果链", "证据清单", "未解问题"]
+    expected = ["事件事实", "主因结论", "五层候选归因", "六阶段因果链", "证据清单", "未解问题"]
+    assert headings == expected
 
 
 def test_missing_fields_render_as_placeholder() -> None:
