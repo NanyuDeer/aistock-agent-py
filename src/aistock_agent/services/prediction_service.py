@@ -1457,6 +1457,7 @@ async def _sector_prediction_core(
     sector_snapshot: dict[str, object],
     market_brief: str,
     extra_input: dict[str, object] | None = None,
+    resolved_target: Target | None = None,
 ) -> PredictionResult | None:
     """板块预判 LLM 结构化链（生产/回放共用，Spec D · 预判环）。
 
@@ -1466,7 +1467,8 @@ async def _sector_prediction_core(
     - evidence_ids 只留输入存在项（_collect_sector_evidence_ids，过滤而非抛错）；
     - prediction_status 强制 "hypothesis"（级联 brief 仅输入上下文，非因果链证据）；
     - P0-3 点位红线 _hard_validate_chat_prediction（板块不产绝对点位）；
-    - A3 确定性钳制（confidence 后处理覆盖，拉取失败不钳制）。
+    - A3 确定性钳制（confidence 后处理覆盖，拉取失败不钳制）；
+    - target 归一（Task 0.5b）：resolved_target 存在时一律覆盖为 resolved ts_code。
     生产路径（predict_sector resolve 后）与回放路径（_replay_predict_sector_from_case）
     调同一管线——后处理语义严格一致，杜绝复制漂移。LLM/解析任一失败返回 None
     （对齐 run_chat_prediction 契约，永不 500）。
@@ -1545,6 +1547,22 @@ async def _sector_prediction_core(
             )
             h.confidence = cast("Literal['high', 'medium', 'low']", conf)
             h.confidence_source = cast("Literal['llm', 'deterministic'] | None", source)
+        # Task 0.5b 写入侧归一（画像匹配闭环）：板块 target 一律以 resolved ts_code 为准
+        # —— 板块所用 PREDICTION_CHAT_PROMPT 未要求顶层 target（只有 horizons[].target
+        # 自由文本，按 prompt 常写"上证指数"），落库 target 为 None 会让画像匹配
+        # （_record_target 结构化优先）恒 miss（n=0）。此处直接采用 sector_target_from_resolved
+        # 产出的 resolved Target（internal_id=code=ts_code），不复用
+        # _repair_llm_target_internal_id（那条是 make_target(name) 的补全兜底，板块名会
+        # 退化成剥后缀名 → 与画像 key 口径冲突）。resolved 缺失（回放态无 ts_code）→
+        # 不伪造 target（保持原样，可能是 None），warning 留痕。
+        if resolved_target is not None:
+            prediction = prediction.model_copy(update={"target": resolved_target})
+        else:
+            logger.warning(
+                "sector_prediction.target_unresolved",
+                sector=sector.get("name"),
+                llm_target=prediction.target.internal_id if prediction.target else None,
+            )
         return prediction
     except Exception as exc:
         logger.warning("sector_prediction.failed", error=str(exc), exc_info=True)
@@ -1679,6 +1697,9 @@ async def predict_sector(
             sector_snapshot=sector_snapshot,
             market_brief=market_brief,
             extra_input=profile_input,
+            # Task 0.5b：写入侧归一 prediction.target 为 resolved ts_code（画像匹配闭环；
+            # LLM 侧 prompt 不产顶层 target，缺则落库 target=None → 画像恒 miss）
+            resolved_target=target,
         )
         if prediction is None:
             return None

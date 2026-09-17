@@ -14,8 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aistock_agent.schemas.prediction import PredictionResult
+from aistock_agent.schemas.target import Target
 from aistock_agent.services import prediction_service as ps
 from aistock_agent.services import sector_wind_prediction as swp
+from aistock_agent.services.sector_target import sector_target_from_resolved
+from aistock_agent.skills import prediction_validation as pv
 
 _RESOLVED: dict[str, str] = {"ts_code": "BK1001", "name": "存储板块"}
 _SECTOR_SNAPSHOT: dict[str, object] = {"sector": {"name": "存储板块"}}
@@ -53,6 +56,8 @@ def _sector_prediction(
     prediction_status: str = "hypothesis",
     evidence_ids: list[str] | None = None,
     metric_projection: str = "相对现价区间波动",
+    target: Target | None = None,
+    horizon_target: str = "存储板块",
 ) -> PredictionResult:
     return PredictionResult(
         schema_version="3.0",
@@ -62,13 +67,14 @@ def _sector_prediction(
             "remaining_estimate": "1-3 日",
             "phase": "peaking",
             "direction": "bearish",
-            "target": "存储板块",
+            "target": horizon_target,
             "metric_projection": metric_projection,
             "confidence": "medium",
         }],
         evolution_narrative="大盘情绪传导，板块短线弱势震荡后回稳",
         risks=[],
         evidence_ids=evidence_ids if evidence_ids is not None else [],
+        target=target,
     )
 
 
@@ -352,6 +358,140 @@ async def test_predict_sector_omits_profile_when_read_fails() -> None:
     assert out is not None
     prompt_input = json.loads(structured_ainvoke.await_args.args[0][1].content)
     assert "validation_profile" not in prompt_input
+
+
+# ---------- Task 0.5b：写入侧归一 prediction.target 为 resolved ts_code ----------
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_persists_resolved_target() -> None:
+    """Task 0.5b：落库 payload 的 prediction.target 归一为 resolved ts_code 结构。
+
+    LLM 侧 prompt（PREDICTION_CHAT_PROMPT）未要求顶层 target → 典型输出 target=None；
+    写入侧必须以 sector_target_from_resolved（internal_id=resolved.ts_code）补齐，
+    否则 read_validation_profile 的结构化匹配恒 miss（画像 n=0）。
+    """
+    llm, _ = _make_llm(_sector_prediction(evidence_ids=["sector:BK1001"]))
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None and out.target is not None
+    assert out.target.internal_id == "BK1001"
+    payload = mock_save.await_args.args[0]
+    assert payload["prediction"]["target"] == {
+        "kind": "sector", "internal_id": "BK1001", "code": "BK1001", "name": "存储板块",
+    }
+
+
+@pytest.mark.asyncio
+async def test_predict_sector_overrides_llm_target_with_resolved() -> None:
+    """Task 0.5b：LLM 顶层 target 已产出但非本板块（如指数）→ 一律以 resolved ts_code 为准。"""
+    llm, _ = _make_llm(
+        _sector_prediction(
+            target=Target(kind="index", internal_id="000001.SH", code="000001.SH",
+                          name="上证指数"),
+        )
+    )
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None and out.target is not None
+    assert out.target.internal_id == "BK1001"
+    assert mock_save.await_args.args[0]["prediction"]["target"]["internal_id"] == "BK1001"
+
+
+@pytest.mark.asyncio
+async def test_sector_prediction_core_without_resolved_keeps_target_and_warns(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Task 0.5b：resolved 缺失（回放态无 ts_code）→ 不伪造 target、不抛错，warning 留痕。
+
+    structlog 走 stdout ConsoleRenderer（未接 stdlib logging），故用 capsys 断言输出
+    （同 test_event_store.py 的记法）。
+    """
+    llm, _ = _make_llm(_sector_prediction())
+    with (
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(ps.node_api, "list_verified_predictions", AsyncMock(return_value=[])),
+    ):
+        out = await ps._sector_prediction_core(
+            report_date=_REPORT_DATE,
+            sector={"kind": "sector", "name": "存储板块"},
+            sector_evidence_id="",
+            sector_snapshot={},
+            market_brief="",
+        )
+    assert out is not None
+    assert out.target is None  # 不伪造
+    assert "sector_prediction.target_unresolved" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_persisted_target_hits_task05_profile_matching() -> None:
+    """Task 0.5b 端到端：落库 payload 直接喂 0.5 画像链路（写→读闭环）→ n>0 命中。
+
+    改造前 payload["prediction"] 无顶层 target（None）→ _record_target 回退
+    horizons[].target 自由文本（prompt 要求"优先用指数名"→ 常写"上证指数"），
+    与 internal_id=ts_code 及板块名均不匹配 → n=0。
+    """
+    llm, _ = _make_llm(
+        _sector_prediction(evidence_ids=["sector:BK1001"], horizon_target="上证指数")
+    )
+    with (
+        patch.object(ps, "_market_trace_brief", AsyncMock(return_value="")),
+        patch.object(ps, "resolve_sector_target", AsyncMock(return_value=dict(_RESOLVED))),
+        patch.object(ps.node_api, "list_predictions", _no_existing_predictions()),
+        patch.object(ps, "get_quick_think", return_value=llm),
+        patch.object(
+            ps.node_api, "save_prediction", AsyncMock(return_value={"id": "p1"})
+        ) as mock_save,
+    ):
+        out = await ps.predict_sector(
+            report_date=_REPORT_DATE,
+            sector_name="存储板块",
+            sector_snapshot=_SECTOR_SNAPSHOT,
+        )
+    assert out is not None
+    record = {
+        "id": "p1",
+        "prediction": mock_save.await_args.args[0]["prediction"],
+        "verification": {
+            "short": {"result": "hit", "horizon": "short", "methodology_version": "3.0",
+                      "target_type": "sector", "approximate": False},
+        },
+    }
+    target = sector_target_from_resolved("存储板块", dict(_RESOLVED))
+    with (
+        patch.object(pv, "get_cached_validation_profile", AsyncMock(return_value=None)),
+        patch.object(pv.node_api, "list_all_predictions", AsyncMock(return_value=[record])),
+        patch.object(pv, "_collect_target_confirmations", AsyncMock(return_value=[])),
+        patch.object(pv, "set_cached_validation_profile", AsyncMock(return_value=True)),
+    ):
+        profile = await pv.read_validation_profile(target)
+    assert profile["target"] == "BK1001"
+    assert profile["n"] == 1 and profile["hit_rate"] == 1.0
 
 
 # ---------- Task 0.1/0.2：幂等 + source_id 口径（与批量路径同源） ----------
