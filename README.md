@@ -37,6 +37,12 @@ $env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py --date 2026-07-09
 
+# condition_met 误点亮回滚预案（运维入口；默认 dry-run，只列清单/SQL，不写库、不自动执行）
+# 仅用于"判定口径 bug 导致 condition_met 误点亮"的清理：DB 级只删 verification[c{i}].condition_met，
+# 不删 result；须由运维在服务器 psql 执行（先修根因，否则下一轮扫描会再次点亮）
+$env:PYTHONPATH = "src"; python scripts/rollback_condition_met.py --date 2026-09-17
+$env:PYTHONPATH = "src"; python scripts/rollback_condition_met.py --prediction-id 123 --condition-index 0 --sql-out rollback.sql
+
 # 代码检查
 ruff check src/
 mypy src/
