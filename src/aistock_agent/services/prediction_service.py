@@ -1527,7 +1527,7 @@ async def predict_stock(
     stock_code: str,
     stock_snapshot: dict[str, object],
 ) -> PredictionResult | None:
-    """个股预判统一入口（Spec D 同构 · 个股预判环，对话/light_predict 共用落点）。
+    """个股预判统一入口（Spec D 同构 · 个股预判环，对话/个股预判共用落点）。
 
     stock_code 接受 6 位裸码或带交易所后缀 ts_code（Target.internal_id 形态，
     与验证器归一一致）；非个股 code（指数别名/板块名/中文名）→ None 不产出

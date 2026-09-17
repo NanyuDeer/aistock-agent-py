@@ -91,20 +91,6 @@ class PredictionCondition(BaseModel):
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
 
 
-class LightForecast(BaseModel):
-    """自选股洞察轻量预判输出（阶段 2，2026-09-03）— 卡片预判区 1-2 句条件化摘要。
-
-    设计文档对齐：本 Spec 只负责"何时生成/生成谁/存哪"，内容结构消费 conditions[]
-    （与 PredictionCondition 同 schema），不重定义预判结构；summary 供卡片秒读。
-    轻量预判不自建完整三档（PredictionAnchor 注释：个股轻量预判不自建完整三档）。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str  # 1-2 句条件化摘要（卡片预判区直接展示）
-    conditions: list[PredictionCondition] = Field(..., min_length=1, max_length=3)
-
-
 class PredictionResult(BaseModel):
     """影响持续性推演完整输出。"""
 

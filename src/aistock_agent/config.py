@@ -239,10 +239,6 @@ class Settings(BaseSettings):
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
-    # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）+ 15:20
-    # 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖；对齐 Node 打点 cron 0-4 工作日口径
-    scheduler_light_predict_midday_cron: str = "40 11 * * 0-4"
-    scheduler_light_predict_close_cron: str = "20 15 * * 0-4"
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 21:30 收盘后对 leaders
     # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
     # 时刻选 21:30 的原因：review_full 20:30 会再触发主因板块级联预判落库，其后拉榜做
