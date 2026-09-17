@@ -652,3 +652,53 @@ def test_event_ref_bypasses_domain_guard_in_pure_judge() -> None:
         closes=UPTREND, pct_chgs=[], volumes=[], event_ref="evt_1",
     ) is None
 
+
+# ============ G3 方向动词 + 百分数口径守卫（R21 误点亮防复发，spec §13.6 R21） ============
+# 生产实证：id=24 c1「重组蛋白板块指数相对当前收盘价跌破 -3%」（anchor: metric=close、
+# threshold="-4%"、direction=bearish）被**技术位判径**（裸"跌破" → 末值 vs MA20）判成
+# condition_met=true（误，已人工回滚）。根因：metric=close 是 schema 缺省值、不携带口径信息
+# → 文本兜底把"相对百分比"错归技术位类；且文本百分数（-3%）与 anchor.threshold（-4%）
+# 不一致 → 该形态**没有可靠判定标准** → 一律不判（与 G1 同源：口径不确定就不判）。
+_CASE_24_C1 = "重组蛋白板块指数相对当前收盘价跌破 -3%"
+
+
+def test_case_24_direction_verb_with_pct_is_unjudgeable() -> None:
+    """id=24 c1：方向动词 + 百分数且无明示技术位 → 不得走技术位近似。
+
+    旧实现：closes 下行 → 末值 < MA20 → 误点亮 True（true 不可撤回）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_24_C1, direction="bearish", threshold_pct=-4.0,
+            closes=DOWNTREND, pct_chgs=[], volumes=[], metric="close",
+        ) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["板块指数突破 +3%", "板块指数站上3%", "指数失守 -1.5%", "指数收回 +2%"],
+)
+def test_direction_verb_with_pct_variants_are_unjudgeable(text: str) -> None:
+    """变体：带符号/不带符号/不同方向动词 均不判（顺势序列下旧实现会误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            text, direction="bullish", threshold_pct=3.0,
+            closes=UPTREND, pct_chgs=[], volumes=[], metric="close",
+        ) is None
+
+
+def test_explicit_tech_level_with_pct_still_uses_tech_branch() -> None:
+    """不误伤：文本明示技术位（均线/MA\\d+/日线/前低/新高）时仍走技术位判径，照常点亮。"""
+    assert judge_condition_met(
+        "板块指数相对 5 日均线跌破 3%", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[], metric="close",
+    ) is True
+
+
+def test_pct_words_without_direction_verb_unaffected() -> None:
+    """不误伤：无方向动词的纯涨跌幅条件仍走涨跌幅判径（G3 只作用于方向动词 + 百分数）。"""
+    assert judge_condition_met(
+        "指数上涨超过 5%", direction="bullish", threshold_pct=2.0,
+        closes=UPTREND, pct_chgs=[], volumes=[], metric="close",
+    ) is True
+

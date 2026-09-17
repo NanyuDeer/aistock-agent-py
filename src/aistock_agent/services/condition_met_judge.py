@@ -44,7 +44,7 @@
 最小样本守卫：各分支要求该维度至少 2 个数据点（单行样本会因"单日累计=自身"而误点亮）；
 参考位类例外——它比较的是**同一行**的开/高/低与 close（无窗口累计语义），单行即可判定。
 
-**两道保守化护栏**（R9 防误点亮；spec §12.3/§12.7，2026-09-17 生产误点亮后追加）：
+**三道保守化护栏**（R9 防误点亮；spec §12.3/§12.7，2026-09-17 生产误点亮后追加）：
 - **G1 口径不对应就不判**（常量表 + 单点函数 `_is_unjudgeable_domain`）：
   条件文本命中"非 A 股价格/量可判"口径（海外/宏观利率、情绪指标、资金流）且 anchor 无**对应**
   `metric` → 整体 `unjudgeable`（None，不产键）——常量表 `_NON_PRICE_DOMAIN_KEYWORDS` /
@@ -55,6 +55,14 @@
   **不按中文逗号**——逗号多用于并列列举同一子句内的对象）切出 ≥2 子句时——全部子句可判且都成立
   → `True`；任一子句判不了（含被 G1 拦截/缺 metric/数据不足）→ `None`；全部可判但有子句不成立
   → `False`。**单子句条件走 `_judge_clause_state`（原判定体），行为逐字不变**。
+- **G3 方向动词 + 百分数判定标准不确定就不判**（单点函数 `is_dir_verb_pct_ambiguous`）：
+  文本同时出现方向动词（跌破/下破/失守/站上/突破/收回，与 `_TECH_RE` 同集）与百分数，
+  且**未明示技术位**（均线/日线/周线/月线/MA\\d+/前低/新高）→ 整体 `unjudgeable`（None，不产键）。
+  为什么：`metric` 在 schema 缺省即 `close`（不携带口径信息）→ 类型推断落到文本兜底，裸方向
+  动词会把"**相对百分比**"口径错归技术位类，用 MA20 近似判出**不可撤回**的假 true。生产实证
+  （已人工回滚）：id=24 c1「重组蛋白板块指数相对当前收盘价跌破 -3%」的文本百分数（-3%）与
+  `anchor.threshold`（-4%）**不一致** → 该形态判定标准无可靠对齐，故与 G1 同源，宁可 None。
+  **不含 上穿/击穿**（二者本就不进技术位判径，走涨跌幅口径属正常判定，不得误伤）。
 
 纯函数：无 IO、无日志、无第三方依赖（只用标准库）。
 """
@@ -194,6 +202,31 @@ def split_condition_clauses(text: str) -> list[str]:
         return [text or ""]
     clauses = [part.strip(_CLAUSE_STRIP) for part in parts]
     return [clause for clause in clauses if clause]
+
+
+# ── G3 方向动词 + 百分数口径守卫常量 + 单点函数（R21；spec §13.6 R21） ──
+# 为什么需要：`metric` 在 schema 缺省即 "close"，**不携带口径信息** → 类型推断落文本兜底；
+# 裸方向动词（跌破/站上…）会把"相对百分比"条件错归技术位类，用 MA20 近似判出不可撤回的假 true。
+# 2026-09-17/18 生产实证（已人工回滚）：id=24 c1「重组蛋白板块指数相对当前收盘价跌破 -3%」
+# 的 anchor 为 metric=close / threshold="-4%" / direction=bearish，文本百分数（-3%）与
+# anchor.threshold（-4%）**不一致** → 该形态判定标准无可靠对齐 → 一律不判（与 G1 同源原则）。
+# 动词集合与 `_TECH_RE` 的方向动词**逐字同集**：只拦"会进技术位判径"的动词，不含 上穿/击穿
+# （二者不进技术位判径，走涨跌幅口径属正常判定，不得误伤）。明示技术位（均线/日线/前低/新高）
+# 时不受该守卫影响，仍走技术位判径。
+_DIR_VERB_PCT_RE = re.compile(r"(?:跌破|下破|失守|站上|突破|收回)\s*[+-]?\d+(?:\.\d+)?\s*[%％]")
+_TECH_LEVEL_HINT_RE = re.compile(r"均线|日线|周线|月线|MA\s*\d+|前低|新高", re.IGNORECASE)
+
+
+def is_dir_verb_pct_ambiguous(text: str) -> bool:
+    """G3：方向动词 + 百分数且**未明示技术位** → 判定标准不确定（不可判）。
+
+    单点函数（`_DIR_VERB_PCT_RE` / `_TECH_LEVEL_HINT_RE` 为唯一事实源，便于后续扩展或撤销）。
+    """
+    if not text:
+        return False
+    if _TECH_LEVEL_HINT_RE.search(text):
+        return False  # 明示技术位 → 技术位判径有明确标准，不拦
+    return bool(_DIR_VERB_PCT_RE.search(text))
 
 
 def infer_condition_class(*, metric: str | None, event_ref: str | None, text: str) -> str:
@@ -483,6 +516,10 @@ def _judge_clause_state(
         # G1：非 A 股价格/量口径（情绪/海外宏观/资金流）且无对应 metric → 不可判（不产键）。
         # 置于类型分流之前：这些口径没有对应行情维度，任何近似判定都是不可撤回的假 true。
         return None
+    if is_dir_verb_pct_ambiguous(text):
+        # G3（R21）：方向动词 + 百分数且无明示技术位 → 判定标准不确定（文本百分数 vs
+        # anchor.threshold 无可靠对齐，id=24 c1 实证 -3% vs -4%）→ 不可判，不得走技术位近似。
+        return None
     if condition_class == CONDITION_CLASS_VOLUME:
         series = list(amounts or []) if metric == "amount" else list(volumes)
         return _judge_volume_state(series, op, level, direction, text)
@@ -531,15 +568,17 @@ def judge_condition_met_state(
     `today_ref`：当日（窗口最后一行）参考位 `{"close":…, "open":…, "high":…, "low":…}`，
     仅参考位类（`metric=today_open/high/low`）消费；缺省/缺字段 → 该类降级 `None`。
 
-    G1/G2 两道保守化护栏（R9 误点亮防复发，spec §12.3/§12.7）：
+    G1/G2/G3 三道保守化护栏（R9/R21 误点亮防复发，spec §12.3/§12.7/§13.6）：
     - **G1 口径不对应就不判**（`_is_unjudgeable_domain`）：命中情绪/海外宏观/资金流口径且
       anchor 无对应 metric → 整体不可判（不产键）；
     - **G2 复合条件不得半判**（`split_condition_clauses`）：切出 ≥2 子句时——
       全部子句可判且都成立 → `True`；任一子句判不了 → `None`（整体 unjudgeable）；
       全部可判但有子句不成立 → `False`（确定性不成立，到期可写未成立态）；
       **单子句 → 走原判定体，行为逐字不变**。
-    两道护栏只在"价格/量/技术位"判径生效：带 `event_ref` 的条件（事件类，spec §12.4 状态锚/
-    受限 LLM）**优先短路**，不得被 G1 误判为 unjudgeable。
+    - **G3 方向动词 + 百分数判定标准不确定就不判**（`is_dir_verb_pct_ambiguous`）：文本同时含
+      方向动词与百分数、且未明示技术位 → 整体不可判（不产键），不得走技术位近似（id=24 c1）。
+    三道护栏只在"价格/量/技术位"判径生效：带 `event_ref` 的条件（事件类，spec §12.4 状态锚/
+    受限 LLM）**优先短路**，不得被 G1/G3 误判为 unjudgeable。
 
     给 False 的四类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare`
     不成立（非 cross_*）、参考位未触发（当日 close 未达/未破当日开/高/低）。其余（参考位缺
