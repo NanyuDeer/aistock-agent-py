@@ -714,6 +714,7 @@ async def _scan_condition_met(
       · 其余 → 拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
         见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
         closes/pct_chgs/volumes/amounts（各自剔除 None）→ `judge_condition_met`（确定性，禁 LLM）。
+    目标资产无法解析（无行情数据源）时只跳过行情类条件，事件类条件仍按状态锚判定。
 
     判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
     threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含参考位降级、
@@ -739,8 +740,9 @@ async def _scan_condition_met(
     if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
         tgt = str(horizons[0].get("target") or "")
     code, target_type, matched = await _resolve_verify_target(tgt)
-    if code is None:
-        return {}  # 无数据源：交第②段落 insufficient，本段不产点亮 entry
+    # 目标资产无法解析（无行情数据源）时**不提前 return**：事件类条件不依赖 kline（只读事件
+    # status），提前 return 会让可判定的事件条件被无关的行情解析失败连带跳过；行情类条件在
+    # 下方逐条 `continue`（本段不产点亮 entry，交 _verify_conditions 第②段落 insufficient）。
     cache = scan_cache if scan_cache is not None else {}
     events = event_cache if event_cache is not None else {}
     base: dict[str, object] = {
@@ -790,6 +792,8 @@ async def _scan_condition_met(
                 event_ref or "", condition_text, index.get(event_ref or "")
             )
         else:
+            if code is None:
+                continue  # 无行情数据源：行情/量类条件无法判（交第②段落 insufficient）
             cache_key = (target_type, code, scan_range[0], scan_range[1])
             if cache_key in cache:
                 rows = cache[cache_key]  # 记忆化：同窗口（同记录多 condition）只取一次数

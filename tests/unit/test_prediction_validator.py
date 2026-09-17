@@ -1556,6 +1556,28 @@ async def test_scan_condition_met_event_missing_or_read_failure_returns_empty() 
         assert await pv._scan_condition_met(record) == {}
 
 
+@pytest.mark.asyncio
+async def test_scan_condition_met_event_lit_without_market_source() -> None:
+    """事件类条件不依赖行情：目标资产解析失败（无行情数据源）仍按状态锚点亮。
+
+    回归守卫：早期实现把"无数据源"提前 return，会让可判定的事件条件被无关的行情解析失败连带跳过。
+    """
+    record = _event_condition_record()
+    record["prediction"]["horizons"][0]["target"] = "某不存在的板块名"
+    entities = [{"event_id": "EVT-1", "event_status": "occurred"}]
+    with (
+        patch.object(prediction_validator, "resolve_sector_target",
+                     new=AsyncMock(return_value=None)),
+        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=entities)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+    assert out["c0"]["condition_met"] is True
+    # classify_target 按"板块"标记归类（与是否有数据源无关）
+    assert out["c0"]["target_type"] == "sector"
+
+
 # ============ 终审 #3/#5：第①段扫描窗口 = [created_at, today]（上限 120 自然日） ============
 
 
