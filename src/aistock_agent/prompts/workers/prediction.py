@@ -60,6 +60,12 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
 - risks：每条包含 factor（风险因素）与 invalidation（该风险出现时预测如何失效）
 - evidence_ids：只引用输入溯源结果中实际存在的证据 ID，禁止编造
 - attribution_summary：一句话预测结论（30-40 字，供展示）
+- input_event_refs：**由系统填充，LLM 不得产出该键**（系统留痕：本次输入注入的事件 id/检索 ref 列表，供审计）
+
+事件驱动说明（2026-09-17，spec §4.2）：若输入含 chain_events（当日链上事件）、warehouse_events
+（中台匹配事件）、attribution_summary（当日大盘归因结论）等事件依据，结论必须**说明是否受事件驱动**
+（事件驱动 / 非事件驱动 / 跟随大盘），并点明所依据的事件（可用 headline 指代）；输入无这些键时按现有
+依据推演，**禁止编造事件**。
 
 先评估影响消化度：主因链影响在当前行情中已体现到什么程度（已定价 vs 未定价），
 再据此设计互相排斥的条件集（上行/下行/震荡主情景）并逐条给出验证锚点，
@@ -125,6 +131,11 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
 - risks：每条包含 factor（风险因素）与 invalidation（该风险出现时预测如何失效）
 - evidence_ids：只引用输入快照/新闻中实际存在的 evidence_id（news 中无 evidence_id 的条目不可引用），禁止编造
 - attribution_summary：一句话预测结论（30-40 字，供展示）
+- input_event_refs：**由系统填充，LLM 不得产出该键**（系统留痕：本次输入注入的事件 id/检索 ref 列表，供审计）
+
+事件驱动说明（2026-09-17，spec §4.2）：若输入含 chain_events（当日链上事件）、warehouse_events
+（中台匹配事件）等事件依据，结论必须**说明是否受事件驱动**（事件驱动 / 非事件驱动 / 跟随大盘），
+并点明所依据的事件（可用 headline 指代）；输入无这些键时按现有依据推演，**禁止编造事件**。
 
 先评估影响消化度：现状行情/资金/新闻已体现到什么程度（已定价 vs 未定价），
 再据此推演白名单内各档的持续性。required 档无法可靠判断时 confidence 用 "low"；optional 档无证据则省略并写入 omitted_horizons。

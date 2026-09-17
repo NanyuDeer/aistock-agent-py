@@ -703,6 +703,47 @@ class NodeApiClient:
             return result["rows"]
         return None
 
+    async def get_attribution_chain(self, date: str) -> dict[str, object] | None:
+        """读取当日大盘归因链树（GET /api/agent/attribution-chain/{date}，Task 3.1）。
+
+        路径与信封两点与 /internal/* 惯例不同，均为 Node 侧既定事实（已核对
+        `aistock-app-api/src/core/routes/attributionChainRouter.ts:180` + `src/index.ts:164`）：
+        ① 该路由挂在 ``/api`` 下（``GET /api/agent/attribution-chain/:date``），base_url
+           不含 /api，故路径必须带 /api 前缀（对齐 tools/market_tools.py 的 /api/gb/... 先例）——
+           chain 写入路径 ``/internal/attribution-chain`` 同样缺 /api 前缀，属 Node 侧既有口径，
+           本任务不改（见 task-3.1-report 遗留）；
+        ② 响应为**裸体** ``{date, chain|null}``（非 ``{code,data}`` 信封），不能走 self.get
+           的信封解包（会恒返回 None）。此处直接发请求并容忍裸体/信封两种形状。
+
+        无链（chain=null / 空对象）与请求失败均返回 None——调用方据 None 省略注入键。
+        """
+        url = f"{self._base_url}/api/agent/attribution-chain/{date}"
+        headers = {"X-Internal-Token": self._token}
+        try:
+            client = await HttpClientPool.get_client()
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "attribution_chain_read_http_error", url=url, status=exc.response.status_code
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.error("attribution_chain_read_request_error", url=url, error=str(exc))
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.error("attribution_chain_read_unexpected_error", url=url, error=str(exc))
+            return None
+        if not isinstance(payload, dict):
+            logger.error(
+                "attribution_chain_read_invalid_payload", url=url, payload=str(payload)[:200]
+            )
+            return None
+        data = payload.get("data") if payload.get("code") == 200 else payload
+        chain = data.get("chain") if isinstance(data, dict) else None
+        return chain if isinstance(chain, dict) and chain else None
+
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
         """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
 

@@ -174,6 +174,11 @@ class PredictionResult(BaseModel):
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
     evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
+    # 依据增强留痕（spec §4.2，2026-09-17 P2'）：本次预判输入**实际注入**的事件 id /
+    # 检索 ref 列表（链上事件 + 中台匹配事件），供审计与后续效果归因。
+    # **由系统在产出后填充，非 LLM 产出**（两个 prompt 已登记"不得产出"）；纯留痕、
+    # 不改输出语义，故不升 schema_version（3.0）；无注入为空数组（不是 None）。
+    input_event_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_omitted_not_overlap(self) -> "PredictionResult":

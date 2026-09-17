@@ -714,6 +714,8 @@ async def run_predict(
             reason=f"attribution_status={trace.attribution_status}",
         )
     try:
+        # 依据增强留痕（spec §4.2）：本次输入实际注入的事件 id/ref（无注入保持空数组）
+        input_event_refs: list[str] = []
         # LLM 调用（含输入构造、ainvoke、raw 文本提取）— 瞬时失败分类
         try:
             prompt_input = _build_prediction_input(trace, snapshot)
@@ -731,6 +733,19 @@ async def run_predict(
             prompt_input = await _enrich_predict_input_for_symbol(
                 prompt_input, replay_symbol or _MARKET_PROFILE_SYMBOL
             )
+            # P2' 依据增强（spec §4.2）：注入当日链上事件（大盘侧=全部 children）+
+            # 中台匹配事件 + 大盘归因结论（链根摘要，无链回退溯源结论），供 LLM 判断
+            # "是否受事件驱动"；同批留痕注入的事件 id/ref。
+            # 回放态（P4）不注入：回放隔离要求零 DB/网络访问（链/事件库读均为外部读）。
+            if replay_context is None:
+                event_block, input_event_refs = await _build_event_input(
+                    snapshot.trade_date,
+                    [],
+                    # 大盘路径注入 attribution_summary：链根摘要优先，无链回退溯源结论
+                    # （传 "" 而非 None——None 语义为"该路径不注入"，见 _build_event_input）
+                    market_summary=trace.attribution_summary or "",
+                )
+                prompt_input = {**prompt_input, **event_block}
             # Task4b 动态档位：driver 先于 prompt 组装提取，注入与后续 apply 复用
             # 同一值（大盘入口 target_kind=index，driver 依溯源主因候选类别）。
             driver_type = _extract_driver_for_trace(trace)
@@ -797,6 +812,8 @@ async def run_predict(
         due_dates, approximate_horizons = _compute_due_dates(
             snapshot.trade_date, prediction.horizons
         )
+        # 依据增强留痕（spec §4.2）：注入事件 id/ref 写入产物（系统填充，非 LLM 产出）
+        prediction = prediction.model_copy(update={"input_event_refs": input_event_refs})
         return PredictionRunResult(
             status="ok",
             prediction=prediction,
@@ -807,6 +824,206 @@ async def run_predict(
         # 未预期异常：不静默，重新抛出交由上层消费者/端点兜底
         logger.error("prediction.run_unexpected_failure", error=str(exc), exc_info=True)
         raise
+
+
+# ============================================================================
+# 依据增强（spec §4.2/§4.4，P2'）：链上事件 + 中台匹配事件 + 大盘归因注入预判输入
+# ============================================================================
+
+# 注入上限（spec §4.4）：链上事件优先（有链必用），中台匹配补充（无链亦有事件视角）
+_MAX_INPUT_CHAIN_EVENTS = 5
+_MAX_INPUT_WAREHOUSE_EVENTS = 3
+
+
+def _chain_children(chain: object) -> list[dict[str, object]]:
+    """链树 children（形状防御：非 dict / children 非 list → 空列表）。"""
+    children = chain.get("children") if isinstance(chain, dict) else None
+    if not isinstance(children, list):
+        return []
+    return [child for child in children if isinstance(child, dict)]
+
+
+def _normalize_sector_name(value: object) -> str:
+    """板块名归一化（仅字母数字汉字），对齐链事件层的匹配/去重口径。"""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _sector_matches(child_sector: object, sector_names: list[str]) -> bool:
+    """链板块名与目标板块名匹配（归一化相等，或长度 ≥2 时互相包含）。"""
+    child = _normalize_sector_name(child_sector)
+    if not child:
+        return False
+    for name in sector_names:
+        target = _normalize_sector_name(name)
+        if not target:
+            continue
+        if child == target:
+            return True
+        shorter, longer = sorted((child, target), key=len)
+        if len(shorter) >= 2 and shorter in longer:
+            return True
+    return False
+
+
+def _chain_event_items(
+    chain: object, sector_names: list[str]
+) -> tuple[list[dict[str, object]], list[str]]:
+    """当日链上事件（≤5 条）+ 留痕 refs。
+
+    `sector_names` 非空 → 只取匹配板块（板块路径）；空 → 取全部 children（大盘路径）。
+    注入形状与链事件契约一致（event_id/ref/headline/source）；留痕优先中台权威 id，
+    检索来源无 id 用 ref。无链/无命中 → ([], [])，调用方据此省略该键（不注入空数组）。
+    """
+    items: list[dict[str, object]] = []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for child in _chain_children(chain):
+        if sector_names and not _sector_matches(child.get("sector"), sector_names):
+            continue
+        events = child.get("events")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_id = str(event.get("event_id") or "").strip()
+            ref = str(event.get("ref") or "").strip()
+            headline = str(event.get("headline") or "").strip()
+            key = event_id or ref
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(
+                {
+                    "event_id": event_id or None,
+                    "ref": ref,
+                    "headline": headline,
+                    "source": str(event.get("source") or ""),
+                }
+            )
+            refs.append(key)
+            if len(items) >= _MAX_INPUT_CHAIN_EVENTS:
+                return items, refs
+    return items, refs
+
+
+async def _warehouse_event_items(
+    report_date: str, sector_names: list[str]
+) -> tuple[list[dict[str, object]], list[str]]:
+    """当日中台存量事件按板块关键词匹配（≤3 条）+ 留痕 refs。
+
+    复用链事件层同源的中台读取（`load_chain_warehouse_events` → `event_store.
+    load_event_scrape`，**仅一次报告读，无新增检索/LLM 成本**）与同一匹配权重函数
+    （实体 > 关键词 > 标题 > 摘要），保证与 children[].events 的中台口径一致。
+    无板块词/读库失败/无命中 → ([], [])。
+    """
+    from aistock_agent.services.attribution_chain import (  # noqa: PLC0415
+        _sector_tokens,
+        _warehouse_match_weight,
+        load_chain_warehouse_events,
+    )
+
+    tokens: list[str] = []
+    for name in sector_names:
+        tokens.extend(_sector_tokens(name))
+    tokens = [token for token in dict.fromkeys(tokens) if token]
+    if not tokens:
+        return [], []
+    try:
+        warehouse_events = await load_chain_warehouse_events(report_date)
+    except Exception as exc:  # noqa: BLE001 — 注入失败不阻断预判产出
+        logger.warning(
+            "predict_input.warehouse_read_failed", date=report_date, error=str(exc)
+        )
+        return [], []
+    scored: list[tuple[int, int, int, dict[str, object]]] = []
+    for index, event in enumerate(warehouse_events):
+        if not isinstance(event, dict):
+            continue
+        weight = _warehouse_match_weight(tokens, event)
+        if weight <= 0:
+            continue
+        title = str(event.get("title") or "").strip()
+        # 契约同链事件层：中台事件 id 必须非空、标题必须非空（宁缺不造）
+        event_id = str(event.get("event_id") or event.get("app_event_id") or "").strip()
+        if not title or not event_id:
+            continue
+        impact = event.get("impact_score")
+        scored.append(
+            (
+                -weight,
+                -(impact if isinstance(impact, int) else 0),
+                index,
+                {
+                    "event_id": event_id,
+                    "ref": str(event.get("url") or "").strip() or f"event:{event_id}",
+                    "headline": title,
+                },
+            )
+        )
+    scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    items = [item[3] for item in scored[:_MAX_INPUT_WAREHOUSE_EVENTS]]
+    return items, [str(item["event_id"]) for item in items]
+
+
+async def _build_event_input(
+    report_date: str,
+    sector_names: list[str],
+    *,
+    market_summary: str | None = None,
+) -> tuple[dict[str, object], list[str]]:
+    """依据增强注入块 + 留痕 refs（spec §4.2/§4.4）。
+
+    - ``chain_events``：当日链上事件（板块路径=该板块 children[].events；大盘路径=全部
+      children），≤5 条；无链/无该板块入链 → 省略该键；
+    - ``warehouse_events``：当日中台存量事件按板块关键词匹配，≤3 条；关键词取
+      `sector_names`，大盘路径（未指定板块）取链上主驱动板块名；无匹配 → 省略该键；
+    - ``market_summary`` 非 None 时注入 ``attribution_summary``：当日链根摘要，无链
+      回退该入口的溯源结论（同源），皆空则省略；传 None 表示该路径不注入（板块路径已由
+      market_trace_brief 承载大盘结论）。
+
+    链读取失败/无链只降级不报错；任一来源为空 → **省略对应键**（不注入空数组/占位）。
+    整体 fail-safe：任何未预期异常（含读取封装被违反契约）→ warning + 返回空块，
+    **绝不因"依据增强"失败而丢掉整条预判**（对齐 spec §4.4 无匹配即维持现状预判）。
+    """
+    try:
+        chain = await node_api.get_attribution_chain(report_date)
+        children = _chain_children(chain)
+        chain_events, chain_refs = _chain_event_items(chain, sector_names)
+        warehouse_names = sector_names or [
+            str(child.get("sector") or "") for child in children
+        ]
+        warehouse_events, warehouse_refs = await _warehouse_event_items(
+            report_date, warehouse_names
+        )
+    except Exception as exc:  # noqa: BLE001 — 依据增强失败不阻断预判产出
+        logger.warning(
+            "predict_input.event_context_failed", report_date=report_date, error=str(exc)
+        )
+        return {}, []
+    block: dict[str, object] = {}
+    if chain_events:
+        block["chain_events"] = chain_events
+    if warehouse_events:
+        block["warehouse_events"] = warehouse_events
+    if market_summary is not None:
+        root = chain.get("root") if isinstance(chain, dict) else None
+        chain_summary = str(root.get("summary") or "").strip() if isinstance(root, dict) else ""
+        summary = chain_summary or market_summary.strip()
+        if summary:
+            block["attribution_summary"] = summary
+    refs = list(dict.fromkeys([*chain_refs, *warehouse_refs]))
+    if block:
+        logger.info(
+            "predict_input.event_context_injected",
+            report_date=report_date,
+            chain_events=len(chain_events),
+            warehouse_events=len(warehouse_events),
+            refs=len(refs),
+        )
+    return block, refs
 
 
 async def _load_trace_and_snapshot(
@@ -1690,19 +1907,29 @@ async def predict_sector(
         # target 用 resolved ts_code（sector_target_from_resolved，internal_id=ts_code）；
         # 无画像/读取失败 → 空 dict 不并入（省略该块，不报错、不阻断产出）。
         profile_input = await _enrich_predict_input_for_target({}, target)
+        # P2' 依据增强（spec §4.2）：注入该板块在当日链上的 events（≤5，未入链则省略）
+        # + 中台匹配事件（≤3）；板块名同时用 raw 名与 resolved 名匹配（链 children
+        # 用溯源侧名、批量路径用 resolved 名，两口径都要能命中）。
+        # market_summary=None：板块入口不注入 attribution_summary（大盘结论已由
+        # market_trace_brief 承载，避免同义键重复）。
+        event_block, input_event_refs = await _build_event_input(
+            report_date, [sector_name, target.name]
+        )
         prediction = await _sector_prediction_core(
             report_date=report_date,
             sector=target.model_dump(mode="json"),
             sector_evidence_id=sector_id,
             sector_snapshot=sector_snapshot,
             market_brief=market_brief,
-            extra_input=profile_input,
+            extra_input={**profile_input, **event_block},
             # Task 0.5b：写入侧归一 prediction.target 为 resolved ts_code（画像匹配闭环；
             # LLM 侧 prompt 不产顶层 target，缺则落库 target=None → 画像恒 miss）
             resolved_target=target,
         )
         if prediction is None:
             return None
+        # 依据增强留痕（spec §4.2）：注入事件 id/ref 写入产物（系统填充，非 LLM 产出）
+        prediction = prediction.model_copy(update={"input_event_refs": input_event_refs})
         # 到期日确定性计算（越年近似档显式标记，P2 裁决语义）
         due_dates, approximate_horizons = _compute_due_dates(
             report_date, prediction.horizons,

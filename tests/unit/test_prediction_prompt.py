@@ -78,3 +78,21 @@ def test_prediction_prompt_closing_sentence_required_optional():
         assert "required 档无法可靠判断时 confidence 用" in prompt
         assert "optional 档无证据则省略并写入 omitted_horizons" in prompt
         assert "某档位无法可靠判断时" not in prompt
+
+
+def test_prediction_prompts_declare_input_event_refs_as_system_filled():
+    # spec §4.2 / Task 3.1：input_event_refs 为系统填充的留痕字段（非 LLM 产出）——
+    # 顶层键清单须登记，否则模型自发产出非法值会让整条预判 extra="forbid" 校验失败。
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "input_event_refs" in prompt
+        assert "由系统填充" in prompt
+        assert "不得产出" in prompt
+
+
+def test_prediction_prompts_require_event_driven_statement():
+    # spec §4.2：预判结论须说明"是否受事件驱动"（输入含事件块时点明依据；无事件禁止编造）
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
+        assert "chain_events" in prompt
+        assert "warehouse_events" in prompt
+        assert "是否受事件驱动" in prompt
+        assert "禁止编造事件" in prompt

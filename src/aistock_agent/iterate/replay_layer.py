@@ -79,6 +79,11 @@ _SERVICE_ISOLATION_TARGETS: dict[str, str] = {
     # _post_request（不在任何替换清单），写方法 node_noop 返回 None 走调用方降级；
     # get_event_entities 经 self.get 间接隔离（已在豁免名单登记）
     "aistock_agent.services.data_client.NodeApiClient.post_event_entity": "node_noop",
+    # 依据增强（Task 3.1，2026-09-17）：get_attribution_chain 直接 httpx（路径带 /api
+    # 前缀 + 裸体响应，不经 self.get），必须登记隔离；回放返回 None → 调用方
+    # （prediction_service._build_event_input）视为无链，省略注入键（回放态另有
+    # replay_context 守卫不调用该方法，此为双保险）
+    "aistock_agent.services.data_client.NodeApiClient.get_attribution_chain": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.get_rhythm_report": "node_read",
     "aistock_agent.services.data_client.NodeApiClient.get_fear_greed": "node_read",
     # 写方法（B4 修复）：全部 no-op，返回 None 走调用方既有降级
