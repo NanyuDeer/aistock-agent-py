@@ -105,7 +105,8 @@ async def test_after_close_full_compose_and_persist(
     assert content["target_date"] == report_date
     assert content["basis_date"] == "2026-08-28"
     assert "rhythm_card" in content
-    assert content["rhythm_card"]["data_missing"] == []
+    # A1：mock 的 index-map 为空 → 候选全部「代码未命中」，主线不可用须如实留痕
+    assert any("主线候选不可用" in m for m in content["rhythm_card"]["data_missing"])
     # I1：无 high 事件时 event_high_hint 为空串（前端 v-if 不渲染）。
     # 冻结：当前无键恒真（Task 2）；Task 10 后恒产键且空仍真，无需再改。
     assert content["rhythm_card"].get("event_high_hint", "") == ""
