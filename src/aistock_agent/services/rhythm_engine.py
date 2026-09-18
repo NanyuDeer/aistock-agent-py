@@ -113,7 +113,10 @@ def compose_score(
     fg_available: bool,
     penalty: float = 0.0,
 ) -> tuple[float, list[str]]:
-    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
+    """未接线说明（2026-09-18）：本函数与 `level_from_score` 在 rhythm 链路**无调用点**——
+    生产的档位真相源是 `schemas/rhythm_master.STAGE_TO_LEVEL`（由 `stage` 派生）。
+    保留原因：08-29 spec §3/§3.1 依据 + 阈值校准（G7/D9）可能复用。
+    节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
 
     penalty≤0（顶背离降档）在最后应用；ice 为下界封顶由 level_from_score
     阈值天然提供，不引入独立降档函数（C2）。
