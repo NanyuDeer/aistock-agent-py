@@ -304,8 +304,6 @@ async def _compose_card(
                                 "nav": wnav,
                                 "breakdown": brk["mainline_breakdown"],
                             }
-                elif mainline.get("state") == "none":
-                    mainline_notes.append("主线候选齐备但无清晰主线")
 
     breadth = None
     snapshot_missing = False
