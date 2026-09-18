@@ -51,6 +51,38 @@ def candidate_name_matches(candidate: dict[str, Any], board_name: str) -> bool:
     return any(normalize_board_name(p) == board for p in pool)
 
 
+def build_mainline_notes(
+    *,
+    valid_count: int,
+    min_candidates: int,
+    code_skipped: int,
+    name_skipped: int,
+    thin_skipped: int,
+    fetch_failed: int,
+) -> list[str]:
+    """主线留痕文案（硬约束 12：取数失败不得被归因为"序列不足"）。
+
+    取数失败（路由非 200 / 网络异常 → None）与数据不足（行数 < MA20_MIN_BARS）
+    是两类不同根因，混写会把排查方向带偏——2026-09-19 生产实测：Python 传 ISO 日期
+    致路由恒 400，却被写成"序列不足 5"，使团队误判为数据问题。`fetch_failed == 0`
+    时文案与既有实现逐字一致（零回归）。
+    """
+    notes: list[str] = []
+    if name_skipped:
+        notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
+    if fetch_failed:
+        notes.append(f"主线候选取数失败（{fetch_failed} 个）")
+    if valid_count < min_candidates:
+        detail = (
+            f"有效候选 {valid_count}/{min_candidates}；"
+            f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}"
+        )
+        if fetch_failed:
+            detail += f"、取数失败 {fetch_failed}"
+        notes.append(f"主线候选不可用（{detail}）")
+    return notes
+
+
 def load_mainline_candidates() -> tuple[bool, list[dict[str, Any]]]:
     """加载候选清单。失败返回 (False, [])，且【失败不缓存】（H5/H7 不静默降级）。
 
