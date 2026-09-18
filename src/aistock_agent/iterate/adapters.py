@@ -134,8 +134,8 @@ ITERABLE_AGENTS: dict[str, IterableAgentAdapter] = {
         ),
     ),
     # Spec D 同构 · 个股预判验证驱动迭代。与 sector_prediction 同为 verification 评分器；
-    # run_entry=predict_stock（对话/个股预判统一落点，服务层入口，不占用同事
-    # 生产文件）；回放态由 predict_stock 顶部 REPLAY_CASE_ID 转调
+    # run_entry=predict_stock（对话/服务层通道共用落点，服务层入口，不占用 worker/
+    # 提示词生产文件）；回放态由 predict_stock 顶部 REPLAY_CASE_ID 转调
     # _replay_predict_stock_from_case（从 case.meta 重建，验证器/迭代样本源不限
     # source_type——chat_prediction / stock_prediction 的 verified
     # stock 记录均会被 prediction_verified_scan 采到）。

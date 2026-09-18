@@ -139,7 +139,7 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)`
         # 返回 None（Spec B 个股验证新增，I-3 清单封闭测试强制登记）
         "NodeApiClient.get_stock_kline",
-        # 经 get 间接隔离（get → node_read 返回 None）：get_quote/ 内部
+        # 经 get 间接隔离（get → node_read 返回 None）：get_quote 内部
         # `await self.get(...)`，无独立网络入口；回放时 get 返回 None → 各自失败
         # 降级返回 None（阶段 2 新增，I-3 清单封闭测试强制登记）
         "NodeApiClient.get_quote",
