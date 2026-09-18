@@ -1,6 +1,7 @@
 """rhythm_master worker 集成测试（三时点语义 + 落盘 + 降级）。"""
 import json
 import logging
+from datetime import date as date_cls
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +10,7 @@ import pytest
 from aistock_agent.agents.workers import rhythm_master as worker_mod
 from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card as wm_build
 from aistock_agent.agents.workers.rhythm_master import run
+from aistock_agent.utils.date import prev_trading_day
 
 _ARCHIVE = "aistock_agent.agents.workers.rhythm_master.sentiment_archive_dir"
 
@@ -376,3 +378,111 @@ async def test_degraded_model_not_polluting_evidence(
     assert "研研判暂不可用" not in content["rhythm_card"]["data_missing"]
     assert "degraded_reasons" not in content
     assert any("rhythm_master.degraded" in r.getMessage() for r in caplog.records)
+
+
+def _flat_kline_rows() -> list[dict]:
+    """横盘 K 线（复现 X2 的「证据中性」条件）。
+
+    横盘时 `_trend_score` 走 `c > ma20` 为假的 `-0.5` 分支；量能比 1.0 → 0；
+    情绪序列为空 → 0；fg=55 → 0；宽度 0.6 → +1.0 → score = +0.5：
+    rally(≥3) / launch(≥1 且 trend≥0.5) / ice(≤-2) / overheat(需 hot_sentiment)
+    / ebb(≤-0.5) **全部不命中** → 落 detect_stage 兜底 2（stage=None）。
+    """
+    rows = []
+    for i in range(130):
+        c = 3000.0
+        rows.append(
+            {
+                "trade_date": f"2026-08-{max(1, 28 - (129 - i)):02d}",
+                "open": c,
+                "high": c + 1,
+                "low": c - 1,
+                "close": c,
+                "pct_chg": 0.0,
+                "vol": 100,
+                "amount": 120.0,
+            }
+        )
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_after_close_inherits_prev_trading_day_stage_when_neutral(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """X2：证据中性时沿用前一交易日主阶段，热度轴恢复（不再 stage=None）。"""
+    mock_api.get_index_kline.return_value = _flat_kline_rows()
+    mock_api.get_rhythm_report = AsyncMock(
+        return_value={
+            "content": {
+                "basis_date": "2026-08-27",
+                "evidence": {"stage": "ebb", "stage_reason": "温度回落/量能转弱，退潮"},
+            }
+        }
+    )
+    await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    content = mock_api.save_analysis_report.call_args.kwargs["content"]
+    # 阶段沿用（detect_stage 兜底 1 生效）
+    assert content["evidence"]["stage"] == "ebb"
+    assert content["evidence"]["stage_reason"] == "沿用前阶段（证据中性）"
+    # 热度轴恢复：score/level 只由 stage 派生（09-18 硬约束 6）
+    assert content["rhythm_card"]["phase"] == "ebb"
+    assert content["rhythm_card"]["level"] is not None
+    assert content["rhythm_card"]["score"] is not None
+    # 取的是「前一交易日 + after_close」卡
+    assert mock_api.get_rhythm_report.call_count == 1
+    assert mock_api.get_rhythm_report.call_args.args[0] == prev_trading_day(
+        date_cls.fromisoformat("2026-08-28")
+    ).isoformat()
+    assert mock_api.get_rhythm_report.call_args.args[1] == "after_close"
+    # 成功沿用 → 不写降级留痕
+    assert not any("前一交易日基准卡" in m for m in content["evidence"]["data_missing"])
+
+
+@pytest.mark.asyncio
+async def test_after_close_notes_fetch_failure_when_prev_card_missing(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """前卡取不到 + 本地无阶段可归 → 留痕且保持现行为（stage 仍 None）。"""
+    mock_api.get_index_kline.return_value = _flat_kline_rows()
+    mock_api.get_rhythm_report = AsyncMock(return_value=None)
+    await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    content = mock_api.save_analysis_report.call_args.kwargs["content"]
+    assert content["evidence"]["stage"] is None
+    assert "前一交易日基准卡读取失败（主阶段未沿用）" in content["evidence"]["data_missing"]
+    assert content["rhythm_card"]["level"] is None  # 观行为不变
+
+
+@pytest.mark.asyncio
+async def test_after_close_notes_invalid_prev_stage(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """前卡存在但主阶段越界 → 越界拒绝（不沿用）+ 与「读取失败」区分留痕（硬约束 12）。"""
+    mock_api.get_index_kline.return_value = _flat_kline_rows()
+    mock_api.get_rhythm_report = AsyncMock(
+        return_value={"content": {"basis_date": "2026-08-27", "evidence": {"stage": "boom"}}}
+    )
+    await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    content = mock_api.save_analysis_report.call_args.kwargs["content"]
+    assert content["evidence"]["stage"] is None
+    assert "前一交易日基准卡无有效主阶段（主阶段未沿用）" in content["evidence"]["data_missing"]
+
+
+@pytest.mark.asyncio
+async def test_after_close_no_note_when_stage_locally_decided(
+    temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
+) -> None:
+    """本地能定阶段（非中性）→ 不产生「前一交易日基准卡」常驻噪音（09-14 裁决）。"""
+    mock_api.get_rhythm_report = AsyncMock(return_value=None)  # 默认 _kline_rows 为上行趋势
+    await run(
+        {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
+    )
+    content = mock_api.save_analysis_report.call_args.kwargs["content"]
+    assert content["evidence"]["stage"] is not None
+    assert not any("前一交易日基准卡" in m for m in content["evidence"]["data_missing"])
