@@ -2,6 +2,15 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-18 — 节奏大师新增手动触发端点（补跑 / 补发）
+
+**开发者**: 37588
+
+### 新增
+
+- 新增 `POST /api/agent/briefing/rhythm-master/trigger`：管理员可手动触发节奏大师卡生成，无需等待三时点定时任务。入参 `refresh_slot`（缺省 after_close，仅接受三时点枚举）与 `report_date`（缺省上海当天，语义为**基准日**）；返回统一 `{"success", "data"}` 契约并回带 `target_date` / `basis_date` / `refresh_slot` / `synthesis_available` / `rhythm_card`，便于补跑后当场核验卡片内容。非法 slot 与 worker 无产出均返回结构化错误体，不抛 500。
+- 三时点分发函数支持显式传入基准日：定时任务路径仍用上海当天，手动补跑可指向最近一个有 K 线的交易日（否则 after_close 的"基准日无当日K线"门禁会使档位降级为空）。
+
 ## \[changer\] 2026-09-18 — 节奏大师事件可见性与报告逻辑修复（事件维度可见 + 市场主线可信）
 
 **开发者**: 37588

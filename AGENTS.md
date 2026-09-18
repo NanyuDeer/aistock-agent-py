@@ -441,7 +441,7 @@ src/aistock_agent/
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
 │   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace / Latency；2026-08-25 加 LLM 前缀缓存命中观测：归一化 OpenAI cached_tokens / DeepSeek prompt_cache_hit_tokens，按 provider 分桶进 metrics["llm_cache"]，不进计费链，见 docs/2026-08-25-token-cache-observability.md）
 └── api/
-    ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
+    ├── routes.py        # REST 接口（/chat/* + /briefing/{morning,event,event-scrape,rhythm-master}/trigger + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
     └── ws.py            # WebSocket 流式接口（astream_events v2，8 种事件类型含 reasoning + _sanitize_label JSON 标签净化 + 节点标签映射）
