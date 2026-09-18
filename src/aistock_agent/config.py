@@ -239,6 +239,27 @@ class Settings(BaseSettings):
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # ── 溯源弱反馈观测层（spec §13.3 / 计划 Phase 7 Task 7.1，P6'） ──
+    # **本期只有观测层**：聚合链上溯源信号 × 预判验证结果 → 建议（降权/提级/观望）→ 落审计表；
+    # 不修改溯源 prompt / 驱动类型判定 / 预判输入，也不真正应用权重（应用层待真实样本后立项）。
+    # mode: observe=只记录建议（默认）；off=运维开关（不读不写）；apply 未实现（配置为其他值
+    # 会告警回落 observe）。
+    attribution_feedback_mode: str = "observe"
+    # 观察窗口（交易日数）与最小样本守卫（样本不足 → 建议"样本不足-观望"）
+    attribution_feedback_window: int = 60
+    attribution_feedback_min_samples: int = 10
+    # 建议阈值：hit_rate < low → 建议降权；> high → 建议提级；其余观望（需 0<=low<high<=1）
+    attribution_feedback_low_threshold: float = 0.35
+    attribution_feedback_high_threshold: float = 0.65
+    # 聚合单元 key：relation(默认，链上驱动关系) / relation_sector / sector /
+    # driver_type / driver_type_sector（后两者需回读复盘报告取大盘 driver_type）
+    attribution_feedback_unit: str = "relation"
+    # 16:10（prediction_validate 16:00 + stats 16:05 之后）工作日执行，观测期持续采样
+    scheduler_attribution_feedback_cron: str = "10 16 * * 0-4"
+    # 条件成立判定·事件类 ② 层受限 LLM 开关（spec §12.4，Task 5.1，2026-09-17）：
+    # 默认 False——condition_met 是"只写 true 不可撤回"的写入，LLM 半确定性结论先不放开；
+    # 开启后仅事件类条件、输入限定"事件标题+进展摘要+条件文本"，每次判定留痕。
+    condition_met_event_llm_enabled: bool = False
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
     # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）+ 15:20
     # 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖；对齐 Node 打点 cron 0-4 工作日口径

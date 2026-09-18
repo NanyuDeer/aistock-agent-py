@@ -61,6 +61,40 @@ def test_labels_default_empty_and_parse():
     assert cond_old.label == ""
 
 
+def test_horizon_and_condition_label_default_empty_on_legacy_record():
+    """旧记录（已落库 JSON 无 label 键）反序列化 → label 空串，不 break 校验（spec §3）。"""
+    horizon = PredictionHorizon.model_validate(_valid_horizon())
+    assert horizon.label == ""
+
+    cond = PredictionCondition.model_validate(
+        {
+            "condition": "缩量企稳、不破前低",
+            "scenario": "空头衰竭、修复至平台",
+            "anchor": {"horizon": "short", "threshold": "+5%", "direction": "bullish"},
+        }
+    )
+    assert cond.label == ""
+
+    # 默认值声明在字段层（而非仅构造期产物）——防回归：label 不得变为必填或被改成 None
+    assert PredictionHorizon.model_fields["label"].default == ""
+    assert PredictionCondition.model_fields["label"].default == ""
+
+
+def test_horizon_and_condition_label_parse_and_roundtrip():
+    """label 显式传入 → 原样解析（不裁剪/不改写），并随 model_dump 序列化往返保持。"""
+    horizon = PredictionHorizon(**_valid_horizon(label="恐慌出清为主"))
+    cond = PredictionCondition(
+        condition="成交额放大至 900 亿以上、收盘较当前再跌超 2%",
+        label="恐慌出清 · 下跌中继",
+        scenario="恐慌出清、惯性下探 -3%~-5%",
+        anchor=PredictionAnchor(horizon="short", threshold="-3%", direction="bearish"),
+    )
+    assert horizon.label == "恐慌出清为主"
+    assert cond.label == "恐慌出清 · 下跌中继"
+    assert PredictionHorizon.model_validate(horizon.model_dump()).label == "恐慌出清为主"
+    assert PredictionCondition.model_validate(cond.model_dump()).label == "恐慌出清 · 下跌中继"
+
+
 def test_scenario_keywords_default_empty_and_parse():
     """2026-09-03 scenario_keywords 预判关键词：与 condition keywords 同构（1~2 个/≤10 字），
     新数据携带正常解析、旧记录缺省为空数组。"""
@@ -137,6 +171,142 @@ def test_prediction_anchor_metric_literal():
     """metric 限定 close/high/low/volume/index_close。"""
     with pytest.raises(ValidationError):
         PredictionAnchor(horizon="short", threshold="+5%", metric="open")  # type: ignore[arg-type]
+
+
+# ===== anchor 判定维度扩展：metric 枚举 + op/level（Task 5.1 / spec §12.3）=====
+
+
+@pytest.mark.parametrize("metric", [
+    "close", "high", "low", "volume", "index_close",          # 存量
+    "amount", "ma20", "ma60", "prior_low", "prior_high",       # 量类 / 技术位
+    "today_open", "today_high", "today_low",                   # 参考位
+])
+def test_prediction_anchor_metric_extended_enum(metric: str) -> None:
+    """metric 枚举扩展：新增 amount/均线/前低新高/参考位 全部可解析（含存量值不回归）。"""
+    a = PredictionAnchor(horizon="short", threshold="+5%", metric=metric)  # type: ignore[arg-type]
+    assert a.metric == metric
+
+
+def test_prediction_anchor_metric_still_rejects_unknown() -> None:
+    """未登记值（open/turnover）仍被 Literal 拒绝——枚举是白名单，不是自由字符串。"""
+    for bad in ("open", "turnover", "ma5"):
+        with pytest.raises(ValidationError):
+            PredictionAnchor(horizon="short", threshold="+5%", metric=bad)  # type: ignore[arg-type]
+
+
+def test_prediction_anchor_op_level_default_none() -> None:
+    """op/level 为可选字段（带默认值）→ 旧记录反序列化缺省 None，不升 schema_version。"""
+    a = PredictionAnchor.model_validate(
+        {"horizon": "short", "threshold": "+5%", "direction": "bullish"}
+    )
+    assert a.op is None
+    assert a.level is None
+    # 默认值声明在字段层——防回归：不得变为必填
+    assert PredictionAnchor.model_fields["op"].default is None
+    assert PredictionAnchor.model_fields["level"].default is None
+
+
+@pytest.mark.parametrize("op", ["gte", "lte", "above", "below", "cross_above", "cross_below"])
+def test_prediction_anchor_op_enum(op: str) -> None:
+    a = PredictionAnchor(
+        horizon="short", threshold="+5%", metric="volume", op=op, level=2.2e8  # type: ignore[arg-type]
+    )
+    assert a.op == op
+    assert a.level == 2.2e8
+
+
+def test_prediction_anchor_rejects_unknown_op() -> None:
+    """op 白名单外（gt/ge/cross）整条拒绝（判定层只认这 6 个原子操作）。"""
+    for bad in ("gt", "ge", "cross", "breakout"):
+        with pytest.raises(ValidationError):
+            PredictionAnchor(
+                horizon="short", threshold="+5%", metric="volume", op=bad  # type: ignore[arg-type]
+            )
+
+
+def test_prediction_condition_anchor_op_level_roundtrip() -> None:
+    """量类条件全链（dict 输入 json_mode 路径 + 序列化往返）保留 op/level。"""
+    cond = PredictionCondition.model_validate(
+        {
+            "condition": "板块放量至 1.2 亿手以上",
+            "scenario": "量能确认后短线续攻 +3%",
+            "anchor": {
+                "horizon": "short",
+                "threshold": "+3%",
+                "metric": "volume",
+                "direction": "bullish",
+                "op": "gte",
+                "level": 120000000.0,
+            },
+        }
+    )
+    assert cond.anchor.op == "gte"
+    assert cond.anchor.level == 120000000.0
+    again = PredictionCondition.model_validate(cond.model_dump())
+    assert (again.anchor.op, again.anchor.level) == ("gte", 120000000.0)
+
+
+def test_prediction_anchor_rejects_unknown_key_around_op_level() -> None:
+    """extra=forbid 未放开：op/level 的近义拼写仍整条拒绝——证明 prompt 键清单须与 schema
+    同批同步，否则 LLM 多吐一个键即整条预判丢失（parse_failed / None）。"""
+    for bad in ("operator", "levels", "level_pct", "condition_type"):
+        with pytest.raises(ValidationError):
+            PredictionAnchor.model_validate(
+                {"horizon": "short", "threshold": "+5%", "direction": "bullish", bad: 1.0}
+            )
+
+
+# ===== anchor.event_ref：事件类条件的锚（Task 0.3 / spec §13.2）=====
+
+
+def test_prediction_anchor_accepts_event_ref():
+    """事件类条件的锚：显式传 event_ref → 原样解析（指向 Event Entity 的 event_id）。"""
+    a = PredictionAnchor(
+        horizon="mid", threshold="+5%", direction="bullish", event_ref="evt_20260917_001"
+    )
+    assert a.event_ref == "evt_20260917_001"
+
+
+def test_prediction_anchor_event_ref_default_none_on_legacy_record():
+    """旧记录（anchor 无 event_ref 键）反序列化 → None，不 break 校验（不升 schema_version）。"""
+    a = PredictionAnchor.model_validate(
+        {"horizon": "short", "threshold": "+5%", "direction": "bullish"}
+    )
+    assert a.event_ref is None
+    # 默认值声明在字段层——防回归：event_ref 不得变为必填
+    assert PredictionAnchor.model_fields["event_ref"].default is None
+
+
+def test_prediction_condition_anchor_event_ref_roundtrip():
+    """条件→情景→anchor 全链带 event_ref：dict 输入（json_mode 路径）与序列化往返均保留。"""
+    cond = PredictionCondition.model_validate(
+        {
+            "condition": "若出口限制细则落地且相关个股放量下探",
+            "scenario": "情绪转弱，短线回踩 -3% 内",
+            "anchor": {
+                "horizon": "short",
+                "threshold": "-3%",
+                "metric": "close",
+                "direction": "bearish",
+                "event_ref": "evt_20260917_001",
+            },
+        }
+    )
+    assert cond.anchor.event_ref == "evt_20260917_001"
+    assert (
+        PredictionCondition.model_validate(cond.model_dump()).anchor.event_ref
+        == "evt_20260917_001"
+    )
+
+
+def test_prediction_anchor_rejects_unknown_key_around_event_ref():
+    """extra=forbid 未放开：拼错的键（eventrefs/eventRef）仍整条拒绝——该 guard 证明 prompt
+    键清单必须与 schema 同批同步，否则 LLM 多吐一个键即整条预判丢失（parse_failed / None）。"""
+    for bad in ("eventrefs", "eventRef"):
+        with pytest.raises(ValidationError):
+            PredictionAnchor.model_validate(
+                {"horizon": "short", "threshold": "+5%", "direction": "bullish", bad: "x"}
+            )
 
 
 def test_prediction_condition_full():

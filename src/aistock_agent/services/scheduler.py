@@ -181,6 +181,19 @@ def start_scheduler() -> None:
         name="prediction hit-rate stats",
         replace_existing=True,
     )
+    # 溯源弱反馈观测层（spec §13.3 / Task 7.1）：16:10 在 prediction_validate(16:00) +
+    # prediction_stats(16:05) 之后采样，默认 observe（只写审计表建议，无其他副作用）；
+    # attribution_feedback_mode=off 时不读不写（运维开关）
+    scheduler.add_job(
+        _run_attribution_feedback_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_attribution_feedback_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="attribution_feedback",
+        name="attribution weak feedback (observe)",
+        replace_existing=True,
+    )
     # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）
     # + 15:20 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖
     scheduler.add_job(
@@ -1140,6 +1153,33 @@ async def _run_prediction_stats_task() -> None:
         logger.info("scheduler_prediction_stats_done")
     except Exception as e:
         logger.error("scheduler_prediction_stats_failed", error=str(e), exc_info=True)
+
+
+async def _run_attribution_feedback_task() -> None:
+    """溯源弱反馈观测层（spec §13.3 / Task 7.1，工作日 16:10）。
+
+    默认 observe：只落审计表建议（不修改溯源 prompt / 驱动类型判定 / 预判输入，不应用权重）。
+    `attribution_feedback_mode=off` → 不读不写；异常只 error 日志，不影响其他链路。
+    """
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="attribution_feedback")
+        return
+    from aistock_agent.services.attribution_feedback import (  # noqa: PLC0415
+        run_attribution_feedback,
+    )
+
+    try:
+        stats = await run_attribution_feedback(dry_run=False)
+        logger.info(
+            "scheduler_attribution_feedback_done",
+            date=stats.date,
+            mode=stats.mode,
+            signals=len(stats.signals),
+            written=stats.written,
+            write_failed=stats.write_failed,
+        )
+    except Exception as e:  # noqa: BLE001 —— 观测层失败不得影响主链路
+        logger.error("scheduler_attribution_feedback_failed", error=str(e), exc_info=True)
 
 
 async def _run_light_predict_task(*, slot: str) -> None:

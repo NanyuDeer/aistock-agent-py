@@ -19,6 +19,7 @@ from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     TraceUnavailableError,
     _apply_confidence_cap,
+    _build_prediction_input,
     _load_horizon_stats,
     corroborate_evidence,
     predict_from_trace,
@@ -289,6 +290,41 @@ async def test_run_predict_llm_failed_on_llm_error():
 
 
 # ---------- predict_from_trace（独立入口：缓存直读 → DB 重建 → run_predict → 落库） ----------
+
+
+def test_build_prediction_input_a_share_indexes_block_not_empty():
+    """快照真实键为 a_share.indexes → prompt 输入 a_share.indices 块非空。
+
+    旧实现只读 a_share["indices"]（生产快照不存在该键）→ 指数事实整块为 None，
+    LLM 拿不到大盘指数背景。key 名保持输出侧契约不变（indices）。
+    """
+    snapshot = _make_snapshot()
+    snapshot.a_share = {
+        "indexes": {
+            "SH000001": {
+                "ts_code": "000001.SH",
+                "name": "上证指数",
+                "close": 3200.0,
+                "change_pct": -0.9,
+            }
+        },
+        "sectors": {"top_losers": [{"name": "半导体"}]},
+    }
+    prompt_input = _build_prediction_input(_make_trace(), snapshot)
+    a_share_input = prompt_input["a_share"]
+    assert isinstance(a_share_input, dict)
+    assert a_share_input["indices"]  # 非空（此前恒 None）
+    assert a_share_input["sectors"] == {"top_losers": [{"name": "半导体"}]}
+
+
+def test_build_prediction_input_a_share_indices_legacy_key_compatible():
+    """向后兼容：快照用旧键 indices 时仍原样透传。"""
+    snapshot = _make_snapshot()
+    snapshot.a_share = {"indices": [{"name": "上证指数", "change_pct": -0.9}], "sectors": {}}
+    prompt_input = _build_prediction_input(_make_trace(), snapshot)
+    a_share_input = prompt_input["a_share"]
+    assert isinstance(a_share_input, dict)
+    assert a_share_input["indices"] == [{"name": "上证指数", "change_pct": -0.9}]
 
 
 def _make_review_artifact_dict(trade_date="2026-08-10") -> dict[str, object]:

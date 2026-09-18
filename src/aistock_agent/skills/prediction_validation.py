@@ -46,9 +46,22 @@ _CNF_WINDOW_DAYS = 10
 
 
 def _record_target(prediction: object) -> str | None:
-    """取 prediction 的首个非空 target 字符串（画像分 target 重算用）。"""
+    """取 prediction 的目标串（画像分 target 重算用）。
+
+    Task 0.5：**优先**取结构化 ``prediction["target"]`` 的 ``internal_id``（稳定标识，
+    数据卫生 §2.1；板块 = resolved ts_code，防改名断画像）→ ``name``（内层回退）；
+    无结构化 target（旧记录）→ 回退首个非空 ``horizons[].target`` 字符串（向后兼容）。
+    理由：板块预判的 ``horizons[].target`` 是 LLM 自由文本（prompt 要求"验证对象优先用
+    指数名"），常写成"上证指数"，按字符串与板块 ts_code/板块名比对必然 miss（画像恒空）。
+    """
     if not isinstance(prediction, dict):
         return None
+    target = prediction.get("target")
+    if isinstance(target, dict):
+        for key in ("internal_id", "name"):
+            value = target.get(key)
+            if isinstance(value, str) and value:
+                return value
     horizons = prediction.get("horizons")
     if isinstance(horizons, list):
         for h in horizons:

@@ -318,3 +318,21 @@ async def test_build_daily_report_prediction_variant_contrast(
     assert "short 档 threshold 过高" in md or "改窄" in md  # 变体 instructions 建议
     assert "patch 建议" in md
     assert "→" in md  # old → new patch 摘要
+
+
+@pytest.mark.asyncio
+async def test_build_daily_report_condition_rate_none_renders_dash(
+    iterate_data_dir: object,
+) -> None:
+    """condition_met_rate 键存在但值为 None（样本无 false entry）→ 渲染 '-' 而非 "条件 None"。"""
+    _write_prediction_experiment(
+        iterate_data_dir, case_id="case_cond_none", round_no=1,
+        variant_type="baseline", score=0.5, hit_rate=0.5,
+    )
+    _write_prediction_experiment(
+        iterate_data_dir, case_id="case_cond_none", round_no=2,
+        variant_type="prompt_diff", instructions="补条件维度样本", score=0.7, hit_rate=0.7,
+    )
+    md = await build_daily_report()
+    assert "条件 -" in md
+    assert "条件 None" not in md

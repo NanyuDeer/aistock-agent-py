@@ -175,6 +175,9 @@ def build_validation_profile(
     ``evidence_confirmed`` / ``scenario_harvest``，**不合并成单一命中数字**；单独记录便于
     后续以"被现实印证的场景"作独立证据引用。
 
+    ``condition_met_rate``（终审 #4）：仅当存在 ``condition_met is False`` 的 entry 时才计算，
+    否则为 None——两段判定的第①段只写 true，无 false 参照的"全 true"读成 100% 会抬高下游评分。
+
     Returns: {target, n, hit_rate, ci, sufficient_sample, condition_met_rate,
               condition_summary, miss_patterns, horizon_breakdown, degradation_rate,
               evidence_confirmed, scenario_harvest}
@@ -195,7 +198,10 @@ def build_validation_profile(
         horizon_breakdown[hor] = _summary([e for e in v2 if e.get("horizon") == hor])
     summary = _summary(v2)
     # condition_met 分布（c{i} entry）：condition_met 仅 True/False 参与命中率，
-    # None（两段判定推迟，§9-5）计 confirmed=0
+    # None（未点亮/未确认）计 confirmed=0。
+    # **终审 #4**：两段判定下第①段**只写 true、不写 false**，故"只有 true"的样本没有
+    # 任何反例参照——按全 True 算会读成 100% 命中率并抬高下游迭代评分（0.2 权重）。
+    # 口径修正：仅当存在 `condition_met is False` 的 entry 时才计算，否则 None。
     cond_met: list[bool] = []
     condition_summary: dict[str, dict[str, int]] = {}
     for e in scoped:
@@ -214,7 +220,9 @@ def build_validation_profile(
                 if cm is True:
                     cur["met"] += 1
     condition_met_rate = (
-        round(sum(1 for x in cond_met if x) / len(cond_met), 4) if cond_met else None
+        round(sum(1 for x in cond_met if x) / len(cond_met), 4)
+        if cond_met and any(x is False for x in cond_met)
+        else None
     )
     # 失效模式（当前版本 miss 归类）
     miss_patterns = _classify_miss_patterns(v2)

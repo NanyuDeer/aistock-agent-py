@@ -26,6 +26,63 @@
 ### 文档
 
 - 修正节奏引擎能力描述的文档漂移，并标注未接线的合成函数。
+## \[main] 2026-09-17 — condition\_met 终审修复（阻塞 #2 + 重要 #3/#4/#5）
+
+**开发者**: Aria
+
+### 修复
+
+- **#2（阻塞）绝对点位条件不再误走技术位分支**（`services/condition_met_judge.py`）：`judge_condition_met` 路由优先级改为 ① volume 关键词 → ② **绝对点位（恒 `None`）** → ③ 明示技术位（`跌破|下破|失守|站上|突破|收回|前低|新高|均线|日线|周线|月线|MA\d+`）→ ④ 涨跌幅/阈值。绝对点位判据：`\d{3,}(\.\d+)?\s*(点|元)`，或"站上/突破/跌破/上穿/下破/击穿/失守/收回"+紧邻数字（排除"数字+`%`/日/周/月/个交易日"）。旧路由把"站上 3000 点""突破 3300 点"丢进技术位分支、用 MA 近似在顺势行情下误判 `true`；`true` 一旦写入不可撤回（D1 只写 true 不写 false）→ 宁可 omit。
+- **#4（重要）`condition_met_rate` 口径修正**（`services/prediction_stats.py` + `iterate/evaluator.py`）：第①段只写 true（无 false 参照），全 true 样本不得读成 100% 命中率抬高下游评分——**仅当存在 `condition_met is False` 的 entry 时才计算 `condition_met_rate`，否则 `None`**；evaluator 的 condition 维度（0.2 权重）在无 false entry 时整体剔除并按 present 维度重归一化。
+
+### 改进
+
+- **#3（重要）第①段扫描窗口改 `[created_at, today]`**（`services/prediction_validator.py`）：新增 `_condition_scan_range(record, today)`——起点取 `prediction_records.created_at` 的日期部分、上限 **120 自然日**（早于 `today-120d` 裁剪）、`created_at` 缺失/脏值回退 `today-120d`、裁剪后空窗（未来脏值）**直接跳过不发请求**；取数走新增 `_fetch_kline_range(kind, code, start, end)`，`_fetch_kline_window` 保留为 **stage② 到期判定 due 区间专用**（语义不变，`_verify_horizon`/`_verify_conditions` 未动）。旧口径误用 due 区间 `[due-20, due+10]`：远端 due（long/越年档）时该区间整体落在未来、过滤后为空 → 静默跳过，长档条件几乎永不点亮。
+- **成本与健壮性**：`run_once` 内 stage① 取数按 `(target_type, code, start, end)` 记忆化（同记录多 condition 只取一次数；窗口不同不串用缓存）；`_scan_condition_met` 调用处加 try/except，单记录异常只 warning（`prediction_condition_scan_failed`），不中断整批。
+- **#5**：窗口约束（远端 due 仍点亮 / 空窗不发请求 / `created_at` 缺失回退 120d / 越界裁剪）由 `tests/unit/test_prediction_validator.py` 用例覆盖。
+
+### 文档
+
+- `docs/specs/2026-08-31-条件化预判改造-design.md` §4.2：窗口口径由"最近 60 个交易日"改写为 `[created_at, today]`（上限 120 自然日，含空窗/回退/记忆化与 stage② 不变说明），并新增"绝对点位类首批 omit"条目与路由优先级；§9-5 的"绝对点位阈值"标注为首批显式 omit。
+- `data_client.get_ths_daily_range` docstring 补 `close`/`vol` 键（`amount` 上游无源恒 null）。
+
+### 状态
+
+- 本地验收：`test_condition_met_judge.py + test_prediction_validator.py + test_prediction_stats.py` → **102 passed**；`-k "prediction or validator or condition_met"` → **385 passed, 1 failed**（唯一红为存量 `test_iterate_adapters` 期望集缺 `stock_prediction`，非本次引入）；iterate 消费侧 7 个测试文件 → 130 passed。ruff/mypy 仅报存量问题，改动行内无新增。
+- **部署顺序仍强制：先 app-api 再 agent-py**（第①段点亮依赖 Node PUT 放行"无 `result` 的 `c{i}` 中间态"）。
+
+---
+
+## \[main] 2026-09-16 — 条件化预判 condition\_met 两段判定落地（Spec A §4.2 收尾）
+
+**开发者**: Aria
+
+### 新增
+
+- `services/condition_met_judge.py`：`judge_condition_met` 确定性纯函数（无 IO/无日志/仅标准库，禁 LLM）。判定优先级：① volume 类关键词（放量/缩量/成交额/成交量）→ **首批 omit**（恒不判定，`volumes` 入参保留供后续扩展）；② 技术位类（跌破/下破/失守/站上/突破/收回/前低/新高/均线/MA\d+）→ 严格前低 / 严格新高 / 均线近似（`MA60|60日` → 60 日线，否则 MA20；可用样本均值近似，样本 < 2 个 → 无法判定），方向取关键词优先、否则回落 `anchor.direction`；③ 其余涨跌幅/点位类 → 窗口累计 pct（`closes` 首末优先，不足 2 个 → `pct_chgs` 复利累计）按 direction 比对 threshold。
+- `prediction_validator._scan_condition_met`：第①段「到期前点亮」——对 `due_date > today` 的 condition 扫最近 60 个交易日窗口，条件成立才回写 `verification[c{i}].condition_met=true`（entry **不含 `result`**）。
+- `prediction_validator._fetch_kline_window`：日 K 解析保留 `close`/`vol`（index/sector/stock 统一），补齐条件判定数据基础。
+
+### 改进
+
+- `prediction_validator._verify_conditions`：第②段「到期 hit/miss 且保留点亮」——照常写 `c{i}` 的 `result`，并显式带出①已点亮的 `condition_met=true`（修掉 `base` 硬写 `condition_met: None` 抹掉点亮值的问题）。
+- `run_once` 三段接线：horizon 验证（含 A1 跳过 / wait 不回写）→ ① 扫描点亮 → ② 到期判定；新增日志 `prediction_condition_lit` / `prediction_condition_verified`。复用既有 `prediction_validate` job，**未新增 cron**。
+
+### 修复
+
+- 决策 D1：**只写 `condition_met=true`，不写 false**——不成立 / 无法判定 / 数据源故障 / 无数据源一律不产键（不写 `false`，也不写 `null` 覆盖）；幂等：已点亮 / 已有 `result` / `due_date <= today` 均跳过。
+- ⚠️ 口径修正：spec 原文"条件成立判定复用 `rhythm_engine.ma_breadth`"**已失效**（`ma_breadth` 已删除且有测试守卫禁止回归），技术位改为上述新写确定性实现；文档已同步标注。
+
+### 文档
+
+- `docs/specs/2026-08-31-条件化预判改造-design.md` §3.1/§4.2/§9-5/§9-10/§11 与 `docs/specs/2026-08-31-预判验证-design.md` §4.2/§9-1：标注判定已落地、写清实际口径（含 volume omit、只写 true、两段结构、`c{i}` 不参与 `status=verified`），并明确"绝对点位阈值 / MA5 / volume 真值判定 / `target_type` 按 `anchor.metric` 分流"仍为后续项。
+- 跨仓配套（app-api）：`fa5c6b3` PUT `/internal/predictions/:id/verification` 放行"`c{i}` + `condition_met` 布尔且无 `result`"的中间态；`edb9941` 板块日 K 透传 `close`/`vol`/`amount`（`amount` 上游无源 → 契约位恒 null）。**部署顺序强制：先 app-api 再 agent-py**。
+
+### 状态
+
+- 本地验收通过：`test_condition_met_judge.py + test_prediction_validator.py` 66 passed；`-k "prediction or validator or condition_met"` 372 passed / 1 failed（唯一红为存量 `test_iterate_adapters` 期望集缺 `stock_prediction`，非本次引入）。
+
+---
 
 ## \[changer\] 2026-09-15 — 重大事件时间线 Event Entity 接入 + 收口
 

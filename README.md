@@ -37,6 +37,12 @@ $env:PYTHONPATH = "src"; python scripts/run_broadcast_test.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py
 $env:PYTHONPATH = "src"; python scripts/extract_morning_cache.py --date 2026-07-09
 
+# condition_met 误点亮回滚预案（运维入口；默认 dry-run，只列清单/SQL，不写库、不自动执行）
+# 仅用于"判定口径 bug 导致 condition_met 误点亮"的清理：DB 级只删 verification[c{i}].condition_met，
+# 不删 result；须由运维在服务器 psql 执行（先修根因，否则下一轮扫描会再次点亮）
+$env:PYTHONPATH = "src"; python scripts/rollback_condition_met.py --date 2026-09-17
+$env:PYTHONPATH = "src"; python scripts/rollback_condition_met.py --prediction-id 123 --condition-index 0 --sql-out rollback.sql
+
 # 代码检查
 ruff check src/
 mypy src/
@@ -250,6 +256,7 @@ content = {
 | 15:35 | 快照生成 | `snapshot_build` | 晨报 × 复盘 4 维度偏差评估，归档到 `docs/agent-outputs/snapshots/` |
 | 15:40 | 迭代分析 | `iterate_analysis` | 阈值判断 + 偏差分析报告 + 优化建议，归档到 `docs/agent-outputs/iterate/` |
 | 16:05 | 节奏大师收盘基准 | `rhythm_master_after_close` | 收盘基准档：生成次日节奏基准（事件驱动；错峰晚于 sentiment_temp 15:45） |
+| 16:10 | 溯源弱反馈观测 | `attribution_feedback` | 聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表（`attribution_feedback_signals`）。**默认 `observe`：只落建议、不改写溯源判定与预判、不应用权重**；`ATTRIBUTION_FEEDBACK_MODE=off` 可关闭（不读不写） |
 
 > **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；传导失败重试 1 次——`error` 非空或异常时重试，两次失败放弃并记 error 级日志不抛，H7，2026-08-13；中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。**双层个股过滤（2026-08-25）**：采集层 `event_scope=STOCK` 粗筛（规则识别，不依赖 LLM）→ 传导层 Call1 事件传导价值判断精判（`is_stock_only=true` 且 `transmission_needed=false` 的纯个股事件在 Call1 后立即终止，不执行图谱查询/Call2-5，不落库、不进 GI、不进传导前端；字段缺失默认放行）。
 
@@ -576,6 +583,11 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `SCHEDULER_RHYTHM_MIDDAY_CRON` | 节奏大师午间档 cron（工作日 12:30） | `30 12 * * 0-4` |
 | `SCHEDULER_RHYTHM_AFTER_CLOSE_CRON` | 节奏大师收盘基准 cron（周一至周五 16:05；周五收盘生成下周一预告，design-debate F2） | `5 16 * * 1-5` |
 | `RHYTHM_VERIFICATION_ENABLED` | 节奏验证开关（回放隔离 + 校验） | `false` |
+| `ATTRIBUTION_FEEDBACK_MODE` | 溯源弱反馈运行模式（`observe`=只落审计建议 / `off`=关闭；`apply` 未实现） | `observe` |
+| `ATTRIBUTION_FEEDBACK_WINDOW` | 溯源弱反馈观察窗口（交易日） | `60` |
+| `ATTRIBUTION_FEEDBACK_MIN_SAMPLES` / `_LOW_THRESHOLD` / `_HIGH_THRESHOLD` | 最小样本守卫 / 建议降权阈值 / 建议提级阈值 | `10` / `0.35` / `0.65` |
+| `ATTRIBUTION_FEEDBACK_UNIT` | 聚合单元 key（`relation` / `relation_sector` / `sector` / `driver_type` / `driver_type_sector`） | `relation` |
+| `SCHEDULER_ATTRIBUTION_FEEDBACK_CRON` | 溯源弱反馈观测 cron（工作日 16:10，晚于 16:00 到期验证与 16:05 统计） | `10 16 * * 0-4` |
 | `EVENT_SCORING_LLM_ENABLED` | 事件抓取中台 LLM 精评总开关（Phase-2，默认关闭灰度开启；开启后规则评分候选 ≥3 送 quick 粗筛 + deep 精评） | `false` |
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
 | `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
