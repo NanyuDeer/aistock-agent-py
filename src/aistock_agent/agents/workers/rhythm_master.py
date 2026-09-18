@@ -409,16 +409,32 @@ def _build_rhythm_card(
     lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
     missing = list(card.evidence.data_missing)
     data_missing_container: list[str] = list(card.evidence.data_missing)
+    # §5.7 预算裁决：总数 ≤3（条目数）；两个来源互斥使用，被让位方留痕。
+    # 理由：技术分档是"互斥全覆盖"整体（截断会破坏覆盖性与验证器依赖）→ 优先整体保留；
+    # 技术不可用且有关键事件时才让位给事件三情景。
+    # 注意：用 getattr 兼容只声明 events/source_missing 的旧测试替身（无 high_events 属性）。
+    win_highs_for_budget = getattr(win, "high_events", None) or []
+    branches: list[dict[str, object]] = []
     try:
-        branches = engine.build_technical_branches(
+        tech_branches = engine.build_technical_branches(
             closes=closes, highs=highs, lows=lows, amounts=amounts,
             data_missing=data_missing_container,
         )
-        for e in win.events:
-            branches.extend(engine.build_event_branch(e, card.target_date))
+        if tech_branches:
+            branches = list(tech_branches[:3])
+            if win_highs_for_budget:
+                data_missing_container.append("事件节点因分支预算（≤3）未展示")
+        else:
+            for e in win_highs_for_budget[:1]:
+                branches.extend(engine.build_event_branch(e, card.target_date))
+            branches = branches[:3]
     except Exception:
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
         branches = []
+        data_missing_container.append("分支生成降级（无分支）")
+    # §5.7 两者皆不可得 → branches = [] 并留痕：正常路径（非异常）空分支同样留痕，与 except 路径去重
+    if not branches and "分支生成降级（无分支）" not in data_missing_container:
+        data_missing_container.append("分支生成降级（无分支）")
     missing.extend(m for m in data_missing_container if m not in missing)
 
     # 主线/技术佐证（spec §5.4.2 detect_breakdown 单一判据）

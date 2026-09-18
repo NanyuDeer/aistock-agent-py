@@ -174,5 +174,60 @@ def test_card_phase_none_when_stage_missing() -> None:
     assert out["phase"] is None
 
 
+def _win_with_highs(*dates: str):
+    win = _win()
+    highs = [{"date": d, "title": f"事件{d}", "importance": "high", "source": "L3"}
+             for d in dates]
+    win.events = list(highs)
+    win.high_events = list(highs)
+    return win
+
+
+def test_branches_never_exceed_three_with_two_high_events() -> None:
+    """§5.7：两个 high 事件不得产出 3(技术)+3+3=9 条分支。"""
+    win = _win_with_highs("2026-09-18", "2026-09-21")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) <= 3
+
+
+def test_branches_defer_event_node_and_record_reason() -> None:
+    """§5.7：技术分档优先占满预算时，事件节点被让位必须留痕。"""
+    win = _win_with_highs("2026-09-18")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) == 3
+    assert all(b["condition"]["kind"] == "interval" for b in out["branches"])
+    assert any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
+def test_branches_empty_normal_path_records_degradation_once() -> None:
+    """§5.7：两个来源皆不可得（正常路径）→ branches=[] 且留痕，且只写一次。"""
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(), _rows(60, high=None, low=None))
+    assert out["branches"] == []
+    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+
+
+def test_branches_event_only_source_used_when_technical_unavailable() -> None:
+    """§5.7：技术分档不可用时才让位给事件三情景——两来源互斥，不并存。"""
+    win = _win_with_highs("2026-09-18")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=None, low=None))
+    assert 0 < len(out["branches"]) <= 3
+    assert all(b["condition"]["kind"] == "enum" for b in out["branches"])
+    assert not any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
+def test_branches_exception_path_records_degradation_once(monkeypatch) -> None:
+    """§5.7：分支生成异常 → branches=[] + 留痕，且不与正常路径重复写同一条。"""
+    from aistock_agent.services import rhythm_engine
+
+    def _boom(**_kwargs: object) -> list[dict[str, object]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rhythm_engine, "build_technical_branches", _boom)
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win_with_highs("2026-09-18"),
+                             _rows(60, high=3010.0, low=2990.0))
+    assert out["branches"] == []
+    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
