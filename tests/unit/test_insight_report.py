@@ -43,7 +43,8 @@ _FULL_DATA = {
 def test_build_sections_contains_all_chapters() -> None:
     sections = build_report_sections(_FULL_DATA)
     headings = [h for h, _ in sections]
-    expected = ["事件事实", "主因结论", "五层候选归因", "六阶段因果链", "证据清单", "未解问题"]
+    # 2026-09-18：capital 降级为条件准入层后候选不再恒为五层，标题改为"分层候选归因"
+    expected = ["事件事实", "主因结论", "分层候选归因", "六阶段因果链", "证据清单", "未解问题"]
     assert headings == expected
 
 

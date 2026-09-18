@@ -68,7 +68,7 @@ def build_report_sections(data: dict[str, Any]) -> list[tuple[str, list[str]]]:
     ]
 
     candidates = [c for c in (attr.get("candidates") or []) if isinstance(c, dict)]
-    sections.append(("五层候选归因", [
+    sections.append(("分层候选归因", [
         f"[{_text(c.get('layer'))} · {_text(c.get('status'))}] {_text(c.get('verdict'))}"
         for c in candidates
     ] or [_MISSING]))
