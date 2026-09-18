@@ -32,7 +32,12 @@ from aistock_agent.services.mainline_engine import (
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.services.trend_reversal import detect_trend_reversal
-from aistock_agent.utils.date import add_trading_days, shanghai_today, trading_days_between
+from aistock_agent.utils.date import (
+    add_trading_days,
+    prev_trading_day,
+    shanghai_today,
+    trading_days_between,
+)
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
@@ -218,6 +223,7 @@ async def _compose_card(
         else run_date
     )
     basis_inherit_note: str | None = None
+    stage_inherit_note: str | None = None
     run_ymd = date_cls.fromisoformat(run_date).strftime("%Y%m%d")
     kline = (
         await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=run_ymd) or []
@@ -366,12 +372,33 @@ async def _compose_card(
         stage = None
         stage_reason = "基准日无当日K线，趋势/量能判定不适用"
     else:
+        # X2（spec §5.12.2 / R11）：证据中性时 detect_stage 会走兜底「沿用前阶段」，但生产调用点
+        # 固定传 prev_phase=None 使该兜底失效 → stage=None → level/score/phase 整条热度轴消失
+        # （2026-09-19 生产实测：index_breakdown=true 而三键全 null）。改为读「前一交易日
+        # after_close 卡」的主阶段传入；不改任何判据。
+        # 作用域收口（controller 裁决）：仅 after_close 查询——morning/midday 已有同日 after_close
+        # 沿用（下方 P0-2/G2 块），此处再查前一交易日会多一次取数并破坏既有 await 次数断言。
+        prev_resp: object = None
+        prev_stage: Stage | None = None
+        if slot == "after_close":
+            prev_date = prev_trading_day(date_cls.fromisoformat(run_date)).isoformat()
+            prev_resp = await node_api.get_rhythm_report(prev_date, "after_close")
+            prev_stage = _stage_from_report(prev_resp)
         stage, stage_reason = ev.detect_stage(
             breadth=breadth, closes=closes, amounts=amounts,
             sentiment_scores=sentiment_scores,
             fg=fg if isinstance(fg, int | float) else None,
-            prev_phase=None,
+            prev_phase=prev_stage,
         )
+        # 降级留痕：仅当 after_close 且「本地无阶段可归」且「前卡也拿不到阶段」时才提示——避免每卡
+        # 常驻噪音（对齐 2026-09-14 裁决：已知空置字段不写入 data_missing）。两类根因分开措辞
+        # （硬约束 12）：取数失败 ≠ 卡存在但阶段非法。
+        if slot == "after_close" and stage is None and prev_stage is None:
+            stage_inherit_note = (
+                "前一交易日基准卡读取失败（主阶段未沿用）"
+                if prev_resp is None
+                else "前一交易日基准卡无有效主阶段（主阶段未沿用）"
+            )
     # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
     if slot in {"morning", "midday"} and stage is not None:
         basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
@@ -398,6 +425,8 @@ async def _compose_card(
         missing.append("宽度快照缺失（证据日无收盘快照）")
     if basis_inherit_note:
         missing.append(basis_inherit_note)
+    if stage_inherit_note:
+        missing.append(stage_inherit_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
