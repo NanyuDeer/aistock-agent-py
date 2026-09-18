@@ -140,6 +140,82 @@ def test_trace_summary_prefers_report_summary_field():
     assert chain["children"][0]["trace_summary"] == "报告主句：设备出口限制落地"
 
 
+def test_trace_summary_prefers_report_conclusion_over_summary_and_trigger():
+    """R25：报告带 conclusion（LLM 一句话归因结论）→ 优先级高于 summary 与 trigger headline。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "conclusion": "美方设备出口限制落地，国产替代预期升温",
+            "summary": "报告主句：设备出口限制落地",
+            "stages": [
+                {"kind": "phenomenon", "headline": "今日大幅波动", "claims": []},
+                {"kind": "trigger", "headline": "触发句", "claims": []},
+            ],
+            "attribution_status": "sufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "美方设备出口限制落地，国产替代预期升温"
+
+
+def test_trace_summary_falls_back_to_summary_when_conclusion_blank():
+    """R25 旧兼容：conclusion 为空白 → 仍按原口径走报告 summary。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "conclusion": "   ",
+            "summary": "报告主句：设备出口限制落地",
+            "stages": [{"kind": "trigger", "headline": "触发句", "claims": []}],
+            "attribution_status": "sufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "报告主句：设备出口限制落地"
+
+
+def test_trace_summary_falls_back_to_trigger_when_conclusion_absent():
+    """R25 边界：老数据无 conclusion 也无 summary → 回退 trigger headline（同修复前行为）。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "stages": [{"kind": "trigger", "headline": "触发句", "claims": []}],
+            "attribution_status": "sufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "触发句"
+
+
+def test_trace_summary_conclusion_still_yields_to_events_when_negative():
+    """R25：让位裁决对新取源同样生效——conclusion 是否定句且事件层有内容 → 让位给事件首条。"""
+    trace_result = {
+        "conclusion": "未检索到可解释该板块异动的独立触发事件",
+        "stages": [{"kind": "trigger", "headline": "触发句", "claims": []}],
+        "attribution_status": "insufficient",
+    }
+
+    out = _trace_summary(trace_result, events=[_event_node("某部委发布出口管制清单")])
+    assert out == "某部委发布出口管制清单"
+
+
 def test_trace_summary_falls_back_to_trigger_claim_when_headline_empty():
     """B：报告 summary 为空（trigger 无标题）→ 退回 trigger claim（仍非现象/非兜底）。"""
 
