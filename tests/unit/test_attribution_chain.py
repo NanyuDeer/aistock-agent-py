@@ -1443,6 +1443,39 @@ def test_non_market_site_urls_are_not_noise(url: str) -> None:
     assert is_page_noise_url(url) is False
 
 
+# 2026-09-18 收窄的**覆盖回归**（生产实证）：把站点名移出 `_PAGE_NOISE_TOKENS` 后，
+# `股票频道- 东方财富网`（ref `https://stock.eastmoney.com/`）不再被任何判据拦住——它是
+# **站点栏目首页**（既非现象也非原因，按"判不出即放行"漏进事件层），迭代 4 的一致性裁决
+# 还会把它提升成板块摘要，暴露面反而变大。补两道**形态类**判据（不恢复站点名，避免回到
+# "同花顺：国家大基金三期成立"被误拒）：
+#   1. 标题级：栏目/首页形态词（频道/首页/栏目/导航）——栏目名不是事件标题；
+#   2. URL 级：已知行情/数据站点域（含子域）的**站点/栏目首页**（path 为空/`/`/`index.*`）。
+_PAGE_FORM_HEADLINES = [
+    "股票频道- 东方财富网",
+    "财经首页 - 某站",
+    "基金栏目 - 某站",
+    "行情导航页",
+]
+
+_SITE_ROOT_URLS = [
+    "https://stock.eastmoney.com/",
+    "https://stock.eastmoney.com",
+    "https://www.eastmoney.com/index.html",
+    "https://data.10jqka.com.cn/",
+]
+
+
+@pytest.mark.parametrize("headline", _PAGE_FORM_HEADLINES)
+def test_page_form_headlines_rejected(headline: str) -> None:
+    assert event_summary_reason(headline) == "page_noise"
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("url", _SITE_ROOT_URLS)
+def test_site_root_urls_are_noise(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
 # --- 迭代 4（2026-09-18）：摘要与事件层一致性（"结论不得与证据相反"）---
 #
 # 生产实证（2026-09-18 重跑）：同一板块 `children[].trace_summary` =

@@ -297,6 +297,10 @@ _PAGE_NOISE_TOKENS = (
     "研报中心", "研報中心", "公告列表",
     # 股吧/F10/盘口（页面而非报道）
     "f10", "股吧", "盘口", "盤口",
+    # 栏目/首页形态（2026-09-18 收窄后的覆盖回归补偿）："股票频道- 东方财富网"这类**站点栏目名**
+    # 不是事件标题——站点名已移出词表，改由"栏目形态词"识别，既拦住栏目名又不误拒
+    # "同花顺：国家大基金三期成立"（含站点名但无栏目形态）。
+    "频道", "頻道", "首页", "首頁", "栏目", "欄目", "导航", "導航",
     # 英文页面标题
     "quote page", "market center", "stock quote",
 )
@@ -314,6 +318,10 @@ _PAGE_NOISE_TOKENS = (
 _PAGE_NOISE_URL_SITE_DOMAINS = ("10jqka.com.cn", "eastmoney.com")
 _PAGE_NOISE_URL_PAGE_LABELS = ("q", "data", "stockpage", "quote", "f10", "guba")
 _PAGE_NOISE_URL_PATH_TOKENS = ("/detail/code/", "/quote/", "/f10/", "/guba/")
+# 站点/栏目首页路径（2026-09-18 收窄后的覆盖回归补偿）：已知行情/数据站点域（含子域）下
+# path 为空/`/`/`index.*` → 是"某频道的首页"，不是任何报道。生产实证：
+# `https://stock.eastmoney.com/` → 标题 `股票频道- 东方财富网` 漏进事件层。
+_PAGE_NOISE_URL_ROOT_PATHS = ("", "/", "/index.html", "/index.htm", "/index.shtml", "/index.php")
 # 市场级词元（大盘/指数/两市/A 股整体）——与涨跌动作/涨跌幅式描述同现即行情复述
 _MARKET_WIDE_TOKENS = (
     "沪指", "滬指", "上证指数", "上證指數", "深证成指", "深證成指", "创业板指",
@@ -443,12 +451,26 @@ def _is_page_noise_host(host: str) -> bool:
     return False
 
 
+def _is_site_root(host: str, path: str) -> bool:
+    """已知行情/数据站点域（含子域）的**站点/栏目首页**判定（`_PAGE_NOISE_URL_ROOT_PATHS`）。
+
+    首页路径本身不含任何报道内容，无论标题多干净都不承载原因（页面模块子域之外的第二道形态判据）。
+    """
+    if path not in _PAGE_NOISE_URL_ROOT_PATHS:
+        return False
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in _PAGE_NOISE_URL_SITE_DOMAINS
+    )
+
+
 def is_page_noise_url(url: object) -> bool:
     """URL 级页面噪声判定：True = 该 URL 指向行情页/股吧/F10 等**页面**而非事件报道。
 
     只看 URL 形态（确定性纯函数，无网络/无 LLM）：主机是已知行情/数据站点域下的页面模块
     子域（`q.10jqka.com.cn`/`quote.eastmoney.com`/`f10.eastmoney.com`/`guba.eastmoney.com`/
-    `data.10jqka.com.cn`/`stockpage.10jqka.com.cn`…），或路径含 ``/detail/code/``/``/quote/``/
+    `data.10jqka.com.cn`/`stockpage.10jqka.com.cn`…），或是该站点域（含任意子域）的
+    **站点/栏目首页**（path 空/`/`/`index.*`），或路径含 ``/detail/code/``/``/quote/``/
     ``/f10/``/``/guba/``。非字符串/空 → False（判不出即放行）。
 
     **刻意只收 url 一个参数**：原因词豁免由调用方判定——把 URL 逻辑塞进
@@ -464,7 +486,7 @@ def is_page_noise_url(url: object) -> bool:
     # 故主机回退取首段，保证裸域同样能判出；顺手剥掉 userinfo 与端口。
     netloc = parsed.netloc or parsed.path.split("/", 1)[0]
     host = netloc.rsplit("@", 1)[-1].split(":", 1)[0]
-    if _is_page_noise_host(host):
+    if _is_page_noise_host(host) or _is_site_root(host, parsed.path):
         return True
     return any(token in parsed.path for token in _PAGE_NOISE_URL_PATH_TOKENS)
 
@@ -481,9 +503,10 @@ def event_summary_reason(headline: object) -> str:
        （`_CAUSE_TOKENS`：政策/监管/公告/中标/订单/涨跌价/产能/供需/关税/补贴/并购/
        业绩/落地…）一个不命中；
     3. ``page_noise``：命中页面噪声词（`_PAGE_NOISE_TOKENS`：行情中心/行情页/行情查询/
-       行情报价/行情走势/数据中心/资讯中心/研报中心/F10/股吧/盘口，简繁同列）**且**原因词
-       一个不命中。**站点名（同花顺/东方财富）刻意不在词表内**——来源品牌不是页面形态
-       （2026-09-18 收窄，防误拒「同花顺：国家大基金三期成立」）。
+       行情报价/行情走势/数据中心/资讯中心/研报中心/F10/股吧/盘口/**频道/首页/栏目/导航**，
+       简繁同列）**且**原因词一个不命中。**站点名（同花顺/东方财富）刻意不在词表内**——
+       来源品牌不是页面形态（2026-09-18 收窄，防误拒「同花顺：国家大基金三期成立」）；
+       站点**栏目名**改由栏目形态词拦（「股票频道- 东方财富网」，2026-09-18 覆盖回归补偿）。
 
     判据 2 是 2026-09-18 修订的核心：由「命中现象即拒」改为「现象 且 无原因才拒」——
     "某政策落地带动光伏板块大涨""多晶硅价格上涨 供需缺口扩大"是原因不是现象，必须放行；
