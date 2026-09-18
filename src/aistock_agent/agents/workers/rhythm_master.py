@@ -476,7 +476,7 @@ def _build_rhythm_card(
         event_d=event_d, event_result=str(event_result) if event_result is not None else None,
     )
 
-    # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤60 字）
+    # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:
         tech_part = "技术位数据不足"
     elif tech["index_breakdown"]:
@@ -487,8 +487,9 @@ def _build_rhythm_card(
         tech_part = "趋势未破位"
     mstate = mainline_facts.get("state")
     if mstate == "established":
+        ml_strength = "强" if mainline_facts.get("strength") == "strong" else "弱"
         head = (
-            f"主线：{mainline_facts.get('name') or '未知'}（主线成立，"
+            f"主线：{mainline_facts.get('name') or '未知'}（主线成立·{ml_strength}，"
             f"超额 +{mainline_facts.get('excess')}pct，"
             f"数据日 {mainline_facts.get('data_date') or ''}）"
         )
@@ -497,8 +498,9 @@ def _build_rhythm_card(
     else:
         head = "主线：数据不可用"
     reason = f"{head}｜{tech_part}"
-    if len(reason) > 60:
-        reason = reason[:60]
+    # §5.10.4：强主线 + 技术位结论需同时在句内，60 字会吃掉结论 → 放宽到 72
+    if len(reason) > 72:
+        reason = reason[:72]
 
     next_anchor = engine.build_next_event_anchor(win.events, card.target_date)
     event_high_hint = engine.build_event_hint(next_anchor)

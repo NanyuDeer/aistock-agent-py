@@ -229,5 +229,27 @@ def test_branches_exception_path_records_degradation_once(monkeypatch) -> None:
     assert out["data_missing"].count("分支生成降级（无分支）") == 1
 
 
+def test_reason_carries_mainline_strength_within_limit() -> None:
+    """§5.10.4：溯源行须含板块名 + 强弱 + 超额 + 数据日，且不被截断吃掉结论。"""
+    facts = {"state": "established", "name": "半导体", "strength": "strong",
+             "excess": 6.12, "data_date": "2026-09-16", "attention": "ai_tech",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert "半导体" in reason and "强" in reason and "+6.12pct" in reason
+    assert "2026-09-16" in reason
+    assert len(reason) <= 72
+
+
+def test_reason_marks_weak_mainline() -> None:
+    facts = {"state": "established", "name": "创新药", "strength": "weak",
+             "excess": 1.2, "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    assert "·弱" in out["phase_evidence"]["reason"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
