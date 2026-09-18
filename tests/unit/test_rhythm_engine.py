@@ -5,12 +5,14 @@ import pytest
 from aistock_agent.services import rhythm_engine
 from aistock_agent.services.rhythm_engine import (
     build_event_branch,
+    build_event_hint,
     build_next_event_anchor,
     build_technical_branches,
     compose_score,
     detect_phase,
     fear_greed_anchor,
     map_bipolar,
+    project_event_window,
     sentiment_coefficient,
     trend_anchor,
 )
@@ -351,3 +353,41 @@ def test_trend_anchor_zero_amounts_has_no_volume_bias():
 
     closes = [float(i) for i in range(1, 22)]  # 单边上升 → 满锚 1.5（1.0 均线 + 0.5 位置）
     assert trend_anchor(closes, [0.0] * 21) == pytest.approx(1.5)
+
+
+def test_next_event_anchor_prefers_high_then_medium() -> None:
+    medium = {"date": "2026-09-18", "title": "2026-09 股指期货交割日",
+              "importance": "medium", "source": "L1", "type": "delivery"}
+    high = {"date": "2026-09-21", "title": "美联储议息", "importance": "high",
+            "source": "L3", "type": "macro"}
+    only_medium = build_next_event_anchor([medium], "2026-09-17")
+    assert only_medium is not None
+    assert only_medium["importance"] == "medium"
+    assert only_medium["note"] == "明日"
+    with_high = build_next_event_anchor([medium, high], "2026-09-17")
+    assert with_high is not None and with_high["importance"] == "high"
+    assert with_high["title"] == "美联储议息"
+    assert build_next_event_anchor([], "2026-09-17") is None
+
+
+def test_build_event_hint_graded_by_importance() -> None:
+    assert build_event_hint(None) == ""
+    high = {"title": "美联储议息", "event_date": "2026-09-21", "note": "2 天后",
+            "days_until": 2, "importance": "high"}
+    medium = {"title": "2026-09 股指期货交割日", "event_date": "2026-09-18",
+              "note": "明日", "days_until": 1, "importance": "medium"}
+    assert "注意确定性风险" in build_event_hint(high)
+    assert "不改仓位倾向" in build_event_hint(medium)
+
+
+def test_project_event_window_contract_keys() -> None:
+    events = [
+        {"date": "2026-09-18", "type": "delivery", "title": "2026-09 股指期货交割日",
+         "importance": "medium", "source": "L1", "event_time": None, "result": None},
+        {"date": "2026-09-17", "title": "无类型事件", "importance": "high"},
+    ]
+    out = project_event_window(events)
+    assert out[0] == {"date": "2026-09-18", "type": "delivery",
+                      "title": "2026-09 股指期货交割日", "importance": "medium"}
+    assert out[1]["type"] == "seed"
+    assert set(out[1].keys()) == {"date", "type", "title", "importance"}

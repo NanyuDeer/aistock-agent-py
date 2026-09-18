@@ -125,5 +125,40 @@ def test_next_event_anchor_counts_from_target_date_not_basis_date():
     assert anchor["note"] == "2 天后"
 
 
+def _card_at(target_date: str, stage: str | None = "ebb") -> MasterRhythmCard:
+    return MasterRhythmCard(
+        basis_date="2026-09-16", target_date=target_date, refresh_slot="after_close",
+        evidence=RhythmEvidence(stage=stage),  # type: ignore[arg-type]
+    )
+
+
+def test_card_event_window_and_hint_open_to_medium() -> None:
+    """§5.1/§5.2：交割日（medium）必须进入 event_window 并可产出提示。"""
+    win = _win()
+    win.events = [{"date": "2026-09-18", "type": "delivery",
+                   "title": "2026-09 股指期货交割日", "importance": "medium",
+                   "source": "L1"}]
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert out["next_event_anchor"] is not None
+    assert out["next_event_anchor"]["importance"] == "medium"
+    assert out["next_event_anchor"]["note"] == "明日"
+    assert out["event_window"] == [{"date": "2026-09-18", "type": "delivery",
+                                    "title": "2026-09 股指期货交割日",
+                                    "importance": "medium"}]
+    assert "不改仓位倾向" in out["event_high_hint"]
+
+
+def test_medium_event_does_not_change_position_text() -> None:
+    """验收 3：只被看见不改数值——仅中级事件时仓位文案与"无事件"基线逐字相同。"""
+    rows = _rows(60, high=3010.0, low=2990.0)
+    baseline = _build_rhythm_card(_card_at("2026-09-17"), _win(), rows)
+    win = _win()
+    win.events = [{"date": "2026-09-18", "type": "delivery",
+                   "title": "2026-09 股指期货交割日", "importance": "medium",
+                   "source": "L1"}]
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, rows)
+    assert out["position_band"]["text"] == baseline["position_band"]["text"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

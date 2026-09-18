@@ -389,9 +389,11 @@ def _build_rhythm_card(
     - `position_band.text` 改由 `derive_position_text` 主线驱动（H11：只覆盖文案层，
       `evidence.position` 原样保留）；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
-    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底）：两者的
-      数据源均已接入并被判定层消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；
-      该属架构说明，**不写入缺失清单**（对齐 spec §2.2 / G4）。
+    - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
+      事件（含 medium），供前端事件日历渲染；
+    - `temperature_series` 仍为已知空置字段（前端 v-if 兜底）：数据源已接入并被判定层
+      消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；该属架构说明，
+      **不写入缺失清单**（对齐 spec §2.2 / G4）。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
@@ -483,11 +485,7 @@ def _build_rhythm_card(
         reason = reason[:60]
 
     next_anchor = engine.build_next_event_anchor(win.events, card.target_date)
-    event_high_hint = (
-        f"{next_anchor['title']}（{next_anchor['event_date']}，{next_anchor['note']}）："
-        "事件临近，注意确定性风险"
-        if next_anchor else ""
-    )
+    event_high_hint = engine.build_event_hint(next_anchor)
     return {
         "score": score,
         "level": level,
@@ -501,10 +499,11 @@ def _build_rhythm_card(
             "reversal": reversal,
         },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
-        # 已知空置（spec §7 S4/S5）：字段未接线（数据源已接入，见函数 docstring）——
-        # 显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
+        # 已知空置（spec §7 S4/S5，仅 temperature_series）：字段未接线（数据源已接入，
+        # 见函数 docstring）——显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
         "temperature_series": [],
-        "event_window": [],
+        # 展示通道：全部已接入事件（含 medium）；档位通道见上方 win_highs（仅 high）
+        "event_window": engine.project_event_window(win.events),
         "event_source_missing": win.source_missing,
         # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
         "next_event_anchor": next_anchor,
