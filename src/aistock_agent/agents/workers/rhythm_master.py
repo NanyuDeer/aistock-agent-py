@@ -524,7 +524,9 @@ def _build_rhythm_card(
         "temperature_series": [],
         # 展示通道：全部已接入事件（含 medium）；档位通道见上方 win_highs（仅 high）
         "event_window": engine.project_event_window(win.events),
-        "event_source_missing": win.source_missing,
+        "event_source_missing": (
+            win.source_missing or getattr(win, "calendar_uncovered", False)
+        ),
         # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
         "next_event_anchor": next_anchor,
         # 事件临近提示（与 next_event_anchor 同源，共用 skip 逻辑）

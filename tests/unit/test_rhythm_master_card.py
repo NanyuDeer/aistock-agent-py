@@ -11,7 +11,10 @@ from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
 
 
 def _win():
-    return type("W", (), {"events": [], "high_events": [], "source_missing": False})()
+    return type("W", (), {
+        "events": [], "high_events": [], "source_missing": False,
+        "calendar_uncovered": False,
+    })()
 
 
 def _card():
@@ -89,7 +92,8 @@ def test_dead_fields_are_empty_and_documented_without_polluting_gaps():
         evidence=RhythmEvidence(stage="ice", certainty="low"), synthesis=None,
         synthesis_available=False,
     )
-    win = type("W", (), {"events": [], "source_missing": False})()
+    win = type("W", (), {"events": [], "source_missing": False,
+                         "calendar_uncovered": False})()
     out = wm._build_rhythm_card(card, win, [])
     # 未接线的两个字段：显式空（不得静默渲染假数据）
     assert out["temperature_series"] == []
@@ -158,6 +162,23 @@ def test_medium_event_does_not_change_position_text() -> None:
                    "source": "L1"}]
     out = _build_rhythm_card(_card_at("2026-09-17"), win, rows)
     assert out["position_band"]["text"] == baseline["position_band"]["text"]
+
+
+def test_card_uncovered_calendar_reports_event_source_missing() -> None:
+    """日历未覆盖目标日期时不得显示为"窗口内无事件"。
+
+    该路径 EventWindow 恒为 events=[] 且 source_missing=False（见 event_calendar
+    的年份越界 fail-close）。若只透出 source_missing，前端三态会落到第三态
+    「未来 5 个交易日暂无已登记事件」——对同一天作出与日历网格相反的**事实断言**，
+    而实际情况是"该维度数据不可得"。故须复用既有的 event_source_missing 布尔，
+    使其如实为 True（不新增第四态）。
+    """
+    win = _win()
+    win.calendar_uncovered = True
+    assert win.source_missing is False and win.events == []
+    out = _build_rhythm_card(_card_at("2027-01-04"), win, _rows(60, high=3010.0, low=2990.0))
+    assert out["event_window"] == []
+    assert out["event_source_missing"] is True
 
 
 def test_card_exposes_phase_from_stage() -> None:
