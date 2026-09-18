@@ -33,6 +33,37 @@ async def test_get_calendar_events_non_dict_returns_none(client: NodeApiClient) 
     assert await client.get_calendar_events("2026-09-01", "2026-09-05") is None
 
 
+# ============ X1（2026-09-19）：日期契约 ============
+# `/internal/ths/:code/daily` 硬校验 ^\d{8}$；Python 曾传 ISO 连字符 → 恒 400 →
+# 取数失败被静默吞掉。约定：取数边界统一规范化为 YYYYMMDD。
+
+
+@pytest.mark.asyncio
+async def test_get_ths_daily_range_normalizes_iso_dates(client: NodeApiClient) -> None:
+    _mock_request(client, {"rows": []})
+    await client.get_ths_daily_range("886050.TI", "2026-05-11", "2026-09-18")
+    client._request.assert_called_once_with(  # type: ignore[attr-defined]
+        "/internal/ths/886050.TI/daily?start=20260511&end=20260918"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_ths_daily_range_keeps_compact_dates(client: NodeApiClient) -> None:
+    """回归护栏：紧凑格式（仓库既有正确写法）不得被改坏。"""
+    _mock_request(client, {"rows": []})
+    await client.get_ths_daily_range("886050.TI", "20260511", "20260918")
+    client._request.assert_called_once_with(  # type: ignore[attr-defined]
+        "/internal/ths/886050.TI/daily?start=20260511&end=20260918"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_ths_daily_range_failure_returns_none(client: NodeApiClient) -> None:
+    """取数失败必须可被上层识别为 None（与"空列表 = 数据不足"区分开）。"""
+    _mock_request(client, None)
+    assert await client.get_ths_daily_range("886050.TI", "20260511", "20260918") is None
+
+
 @pytest.mark.asyncio
 async def test_post_calendar_event_passes_body(client: NodeApiClient) -> None:
     client._post_request = AsyncMock(return_value={"id": 1, "upserted": True})  # type: ignore[method-assign]

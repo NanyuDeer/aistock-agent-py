@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from aistock_agent.services.mainline_engine import (
+    build_mainline_notes,
     candidate_name_matches,
     normalize_board_name,
 )
@@ -42,3 +43,38 @@ def test_candidates_tag_codes_are_replaced_with_verified_values() -> None:
     }
     for bad in ("885896.TI", "885913.TI", "885851.TI", "885938.TI", "884110.TI"):
         assert bad not in got.values()
+
+
+# ============ X1（2026-09-19）：失败归因拆分 ============
+# 背景：`/internal/ths/:code/daily` 硬校验 YYYYMMDD，Python 传 ISO 连字符 → 恒 400 →
+# self.get 返回 None → 被 `or []` 吞掉 → 5 个候选全被误记为"序列不足"。
+# 硬约束 12：取数失败与数据不足必须分开留痕，禁止把请求失败归因为"数据不足"。
+
+
+def test_build_mainline_notes_legacy_wording_unchanged() -> None:
+    """无取数失败时，文案必须与既有实现逐字一致（零回归）。"""
+    notes = build_mainline_notes(
+        valid_count=0, min_candidates=3,
+        code_skipped=0, name_skipped=0, thin_skipped=5, fetch_failed=0,
+    )
+    assert notes == ["主线候选不可用（有效候选 0/3；代码未命中 0、名称不符 0、序列不足 5）"]
+
+
+def test_build_mainline_notes_distinguishes_fetch_failure_from_thin() -> None:
+    """取数失败（None）不得被归因为"序列不足"。"""
+    notes = build_mainline_notes(
+        valid_count=0, min_candidates=3,
+        code_skipped=0, name_skipped=0, thin_skipped=0, fetch_failed=5,
+    )
+    assert "主线候选取数失败（5 个）" in notes
+    unavailable = next(n for n in notes if n.startswith("主线候选不可用"))
+    assert "取数失败 5" in unavailable
+    assert "序列不足 0" in unavailable
+
+
+def test_build_mainline_notes_silent_when_enough_candidates() -> None:
+    """候选充足且无异常 → 不留痕（防"健康卡常驻无关提示"）。"""
+    assert build_mainline_notes(
+        valid_count=4, min_candidates=3,
+        code_skipped=1, name_skipped=0, thin_skipped=0, fetch_failed=0,
+    ) == []
