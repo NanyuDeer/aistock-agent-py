@@ -22,6 +22,7 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
+    build_mainline_notes,
     candidate_name_matches,
     detect_breakdown,
     judge_mainline,
@@ -260,6 +261,7 @@ async def _compose_card(
             code_skipped = 0
             name_skipped = 0
             thin_skipped = 0
+            fetch_failed = 0
             for c in cands:
                 code = str(c.get("tag_code") or "")
                 if code not in idx_by_code:
@@ -268,7 +270,10 @@ async def _compose_card(
                 if not candidate_name_matches(c, idx_by_code[code]):
                     name_skipped += 1
                     continue  # §5.10.3 名称不一致 → 剔除（防"代码存在但语义错"）
-                rows_b = await node_api.get_ths_daily_range(code, start, evidence_date) or []
+                rows_b = await node_api.get_ths_daily_range(code, start, evidence_date)
+                if rows_b is None:
+                    fetch_failed += 1
+                    continue  # 降级 5：取数失败（≠ 数据不足，硬约束 12 禁混写归因）
                 pk = [p for p in rows_b if p.get("pct_chg") is not None]
                 if len(pk) < MA20_MIN_BARS:
                     thin_skipped += 1
@@ -279,14 +284,17 @@ async def _compose_card(
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
-            if name_skipped:
-                mainline_notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
-            if len(valid) < MIN_CANDIDATES:
-                mainline_notes.append(
-                    f"主线候选不可用（有效候选 {len(valid)}/{MIN_CANDIDATES}；"
-                    f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}）"
+            mainline_notes.extend(
+                build_mainline_notes(
+                    valid_count=len(valid),
+                    min_candidates=MIN_CANDIDATES,
+                    code_skipped=code_skipped,
+                    name_skipped=name_skipped,
+                    thin_skipped=thin_skipped,
+                    fetch_failed=fetch_failed,
                 )
-            else:
+            )
+            if len(valid) >= MIN_CANDIDATES:
                 index_pct_chgs = [
                     float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
                 ]
