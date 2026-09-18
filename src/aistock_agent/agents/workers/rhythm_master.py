@@ -22,6 +22,7 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
+    candidate_name_matches,
     detect_breakdown,
     judge_mainline,
     load_mainline_candidates,
@@ -112,6 +113,20 @@ def _amount_yi(raw: float | None) -> float:
     （1 亿 = 1e5 千元，常量见 rhythm_engine.QIAN_YUAN_TO_YI）。缺失/非法如实转 0.0
     （量能仅参与 ratio 与均量阈值，0 不伪造）。"""
     return (raw * engine.QIAN_YUAN_TO_YI) if raw is not None else 0.0
+
+
+def _event_branchable(event: dict[str, Any], origin_date: str) -> bool:
+    """首个高级事件是否落在事件分支窗口内（即"本可成支"）。
+
+    终审 I2：预算让位留痕只能描述真实发生的让位。交易日差超出事件分支窗口上限的事件，
+    即使预算无上限也不会产出分支 —— 把它归因为"因分支预算未展示"是对外可见的错误归因。
+    判据不在此重复维护 d 阈值，统一问引擎（对非 high / 非法日期 / d 超限一律返回 []，
+    且自身不抛异常；此处再兜一层，任何意外都不影响 branches 结果）。
+    """
+    try:
+        return bool(engine.build_event_branch(event, origin_date))
+    except Exception:
+        return False
 
 
 def _load_sentiment_series(
@@ -224,11 +239,13 @@ async def _compose_card(
         "excess": None, "data_date": None, "attention": "",
         "breakdown": None, "nav": None,
     }
-    candidate_load_failed = False
-    if settings.rhythm_mainline_enabled:
+    mainline_notes: list[str] = []
+    if not settings.rhythm_mainline_enabled:
+        mainline_notes.append("主线判定未启用")
+    else:
         ok, cands = load_mainline_candidates()
         if not ok:
-            candidate_load_failed = True  # 降级 1：候选清单缺失（data_missing 留痕）
+            mainline_notes.append("主线候选清单缺失")  # 降级 1：候选清单缺失
         else:
             index_resp = await node_api.get_ths_index_map()
             index_map = index_resp if isinstance(index_resp, list) else []
@@ -240,21 +257,36 @@ async def _compose_card(
                 - timedelta(days=SECTOR_LOOKBACK_NATURAL_DAYS)
             ).isoformat()
             valid: list[dict[str, object]] = []
+            code_skipped = 0
+            name_skipped = 0
+            thin_skipped = 0
             for c in cands:
                 code = str(c.get("tag_code") or "")
                 if code not in idx_by_code:
-                    continue  # 降级 3：code 不在 index-map → 剔除候选
+                    code_skipped += 1
+                    continue  # 降级 3：code 不在板块表 → 剔除
+                if not candidate_name_matches(c, idx_by_code[code]):
+                    name_skipped += 1
+                    continue  # §5.10.3 名称不一致 → 剔除（防"代码存在但语义错"）
                 rows_b = await node_api.get_ths_daily_range(code, start, evidence_date) or []
                 pk = [p for p in rows_b if p.get("pct_chg") is not None]
                 if len(pk) < MA20_MIN_BARS:
-                    continue  # 降级 4：pct_chg 序列不足 → 剔除候选
+                    thin_skipped += 1
+                    continue  # 降级 4：pct_chg 序列不足 → 剔除
                 valid.append({
                     **c,
                     "pct_chgs": [float(p["pct_chg"]) for p in pk],
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
-            if len(valid) >= MIN_CANDIDATES:
+            if name_skipped:
+                mainline_notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
+            if len(valid) < MIN_CANDIDATES:
+                mainline_notes.append(
+                    f"主线候选不可用（有效候选 {len(valid)}/{MIN_CANDIDATES}；"
+                    f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}）"
+                )
+            else:
                 index_pct_chgs = [
                     float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
                 ]
@@ -267,6 +299,9 @@ async def _compose_card(
                         w_last = winner.get("last_trade_date")
                         # H2：主线 data_date 必须 == 证据日（K 线末日），不等 → unavailable
                         if w_last and w_last != _normalize_ymd(evidence_date):
+                            mainline_notes.append(
+                                f"主线数据滞后（data_date={w_last}，证据日={evidence_date}）"
+                            )
                             mainline = {
                                 "state": "unavailable", "name": None, "strength": None,
                                 "excess": None, "data_date": None,
@@ -327,7 +362,7 @@ async def _compose_card(
     position = ev.compute_position(stage=stage, certainty=cert)
     anchors = ev.build_event_anchors(win.events)
 
-    missing: list[str] = []
+    missing: list[str] = list(mainline_notes)
     if kline_short:
         missing.append("指数K线不足")
     if basis_gate:
@@ -336,8 +371,6 @@ async def _compose_card(
         missing.append("宽度快照缺失（证据日无收盘快照）")
     if basis_inherit_note:
         missing.append(basis_inherit_note)
-    if candidate_load_failed:
-        missing.append("主线候选清单缺失")
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
@@ -370,9 +403,11 @@ def _build_rhythm_card(
     - `position_band.text` 改由 `derive_position_text` 主线驱动（H11：只覆盖文案层，
       `evidence.position` 原样保留）；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
-    - `temperature_series`/`event_window` 为已知空置字段（前端 v-if 兜底）：两者的
-      数据源均已接入并被判定层消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；
-      该属架构说明，**不写入缺失清单**（对齐 spec §2.2 / G4）。
+    - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
+      事件（含 medium），供前端事件日历渲染；
+    - `temperature_series` 仍为已知空置字段（前端 v-if 兜底）：数据源已接入并被判定层
+      消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；该属架构说明，
+      **不写入缺失清单**（对齐 spec §2.2 / G4）。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
@@ -388,16 +423,35 @@ def _build_rhythm_card(
     lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
     missing = list(card.evidence.data_missing)
     data_missing_container: list[str] = list(card.evidence.data_missing)
+    # §5.7 预算裁决：总数 ≤3（条目数）；两个来源互斥使用，被让位方留痕。
+    # 理由：技术分档是"互斥全覆盖"整体（截断会破坏覆盖性与验证器依赖）→ 优先整体保留；
+    # 技术不可用且有关键事件时才让位给事件三情景。
+    # 注意：用 getattr 兼容只声明 events/source_missing 的旧测试替身（无 high_events 属性）。
+    win_highs_for_budget = getattr(win, "high_events", None) or []
+    branches: list[dict[str, object]] = []
     try:
-        branches = engine.build_technical_branches(
+        tech_branches = engine.build_technical_branches(
             closes=closes, highs=highs, lows=lows, amounts=amounts,
             data_missing=data_missing_container,
         )
-        for e in win.events:
-            branches.extend(engine.build_event_branch(e, card.target_date))
+        if tech_branches:
+            branches = list(tech_branches[:3])
+            # 终审 I2：只有"本可成支"的事件才谈得上被预算让位（否则归因错误）。
+            if win_highs_for_budget and _event_branchable(
+                win_highs_for_budget[0], card.target_date
+            ):
+                data_missing_container.append("事件节点因分支预算（≤3）未展示")
+        else:
+            for e in win_highs_for_budget[:1]:
+                branches.extend(engine.build_event_branch(e, card.target_date))
+            branches = branches[:3]
     except Exception:
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)
         branches = []
+        data_missing_container.append("分支生成降级（无分支）")
+    # §5.7 两者皆不可得 → branches = [] 并留痕：正常路径（非异常）空分支同样留痕，与 except 路径去重
+    if not branches and "分支生成降级（无分支）" not in data_missing_container:
+        data_missing_container.append("分支生成降级（无分支）")
     missing.extend(m for m in data_missing_container if m not in missing)
 
     # 主线/技术佐证（spec §5.4.2 detect_breakdown 单一判据）
@@ -439,7 +493,7 @@ def _build_rhythm_card(
         event_d=event_d, event_result=str(event_result) if event_result is not None else None,
     )
 
-    # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤60 字）
+    # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:
         tech_part = "技术位数据不足"
     elif tech["index_breakdown"]:
@@ -450,8 +504,9 @@ def _build_rhythm_card(
         tech_part = "趋势未破位"
     mstate = mainline_facts.get("state")
     if mstate == "established":
+        ml_strength = "强" if mainline_facts.get("strength") == "strong" else "弱"
         head = (
-            f"主线：{mainline_facts.get('name') or '未知'}（主线成立，"
+            f"主线：{mainline_facts.get('name') or '未知'}（主线成立·{ml_strength}，"
             f"超额 +{mainline_facts.get('excess')}pct，"
             f"数据日 {mainline_facts.get('data_date') or ''}）"
         )
@@ -460,17 +515,16 @@ def _build_rhythm_card(
     else:
         head = "主线：数据不可用"
     reason = f"{head}｜{tech_part}"
-    if len(reason) > 60:
-        reason = reason[:60]
+    # §5.10.4：强主线 + 技术位结论需同时在句内，60 字会吃掉结论 → 放宽到 72
+    if len(reason) > 72:
+        reason = reason[:72]
 
     next_anchor = engine.build_next_event_anchor(win.events, card.target_date)
-    event_high_hint = (
-        f"{next_anchor['title']}（{next_anchor['event_date']}，{next_anchor['note']}）："
-        "事件临近，注意确定性风险"
-        if next_anchor else ""
-    )
+    event_high_hint = engine.build_event_hint(next_anchor)
     return {
         "score": score,
+        # §5.6：phase 供前端情绪周期块（stage 原样透出，含 launch/rally）
+        "phase": card.evidence.stage,
         "level": level,
         "position_band": {
             "text": pos_text,
@@ -482,11 +536,14 @@ def _build_rhythm_card(
             "reversal": reversal,
         },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
-        # 已知空置（spec §7 S4/S5）：字段未接线（数据源已接入，见函数 docstring）——
-        # 显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
+        # 已知空置（spec §7 S4/S5，仅 temperature_series）：字段未接线（数据源已接入，
+        # 见函数 docstring）——显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
         "temperature_series": [],
-        "event_window": [],
-        "event_source_missing": win.source_missing,
+        # 展示通道：全部已接入事件（含 medium）；档位通道见上方 win_highs（仅 high）
+        "event_window": engine.project_event_window(win.events),
+        "event_source_missing": (
+            win.source_missing or getattr(win, "calendar_uncovered", False)
+        ),
         # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
         "next_event_anchor": next_anchor,
         # 事件临近提示（与 next_event_anchor 同源，共用 skip 逻辑）

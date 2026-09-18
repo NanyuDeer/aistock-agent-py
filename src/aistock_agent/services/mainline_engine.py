@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from math import isfinite
 from typing import Any
 
@@ -26,6 +27,28 @@ GAP_EXCESS = 2.0          # Top1-Top2 超额间距下限（pct）
 SECTOR_BREAKDOWN_MIN_BARS = 65
 SECTOR_BREAKDOWN_MA_WINDOW = 20
 SECTOR_BREAKDOWN_ARM_DAYS = 3
+
+# §5.10.3 名称一致性：板名归一化仅用于"相等比较"，不用于展示
+_BOARD_NAME_NOISE_RE = re.compile(r"[\s【】（）()·\-—_/]+")
+
+
+def normalize_board_name(name: str) -> str:
+    """板名归一：去空白/括号/连接符 + 小写。"""
+    return _BOARD_NAME_NOISE_RE.sub("", (name or "")).lower()
+
+
+def candidate_name_matches(candidate: dict[str, Any], board_name: str) -> bool:
+    """候选名一致性（spec §5.10.3）：`name` 或 `aliases` 之一归一化后与板名相等。
+
+    单靠"代码 ∈ 板块表"会放行"代码存在但语义错"的板块（§5.10.1 实测：占位代码
+    分别指向医美概念 / 烟草 / 换电概念且日 K 完整）→ 会用无关板块行情产出错误主线。
+    """
+    board = normalize_board_name(board_name)
+    if not board:
+        return False
+    pool = [str(candidate.get("name") or "")]
+    pool += [str(a) for a in (candidate.get("aliases") or [])]
+    return any(normalize_board_name(p) == board for p in pool)
 
 
 def load_mainline_candidates() -> tuple[bool, list[dict[str, Any]]]:
