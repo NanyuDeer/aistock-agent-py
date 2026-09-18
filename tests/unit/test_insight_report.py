@@ -1,6 +1,10 @@
 """完整洞察报告 PDF 渲染测试（2026-09-13）。"""
 
-from aistock_agent.services.insight_report import build_report_sections, render_insight_report
+from aistock_agent.services.insight_report import (
+    _escape,
+    build_report_sections,
+    render_insight_report,
+)
 
 _FULL_DATA = {
     "event": {
@@ -41,6 +45,54 @@ def test_build_sections_contains_all_chapters() -> None:
     headings = [h for h, _ in sections]
     expected = ["事件事实", "主因结论", "五层候选归因", "六阶段因果链", "证据清单", "未解问题"]
     assert headings == expected
+
+
+def test_escape_removes_xml_illegal_control_chars() -> None:
+    """_escape 应去除 XML 非法控制字符（保留 \\t\\n\\r），否则 PDF 渲染可能失败。"""
+    raw = "板块涨 3%\x00\x01\x0b\x0c\x1f"
+    result = _escape(raw)
+    for ch in ("\x00", "\x01", "\x0b", "\x0c", "\x1f"):
+        assert ch not in result, f"_escape 未去除 {hex(ord(ch))}"
+
+
+def test_escape_preserves_legit_whitespace() -> None:
+    """_escape 应保留 XML 合法的 \\t \\n \\r。"""
+    raw = "a\tb\nc\rd"
+    result = _escape(raw)
+    for ch in ("\t", "\n", "\r"):
+        assert ch in result, f"_escape 意外移除了合法字符 {hex(ord(ch))}"
+
+
+def test_render_with_xml_control_chars_in_excerpt() -> None:
+    """XML 非法控制字符不应导致 PDF 渲染崩溃。"""
+    data = {
+        "event": {
+            "eventId": "mv:test:control",
+            "symbol": "000001",
+            "stockName": "测试",
+            "triggeredAt": "2026-09-18T00:00:00Z",
+            "direction": "up",
+            "changePct": 5.0,
+            "thresholdPct": 7,
+            "severity": "medium",
+            "latestPrice": 10.0,
+            "previousClose": 9.52,
+        },
+        "attribution": {
+            "primaryPhrase": "测试",
+            "confidenceLevel": "low",
+            "candidates": [],
+            "chains": [],
+            "unresolvedQuestions": [],
+            "evidenceIndex": [
+                {"source_id": "e1", "kind": "news", "title": "测试",
+                 "content_excerpt": "板块涨 3%\x00\x01\x0b\x0c\x1f"},
+            ],
+        },
+    }
+    pdf = render_insight_report(build_report_sections(data))
+    assert pdf[:4] == b"%PDF"
+    assert len(pdf) > 1000
 
 
 def test_missing_fields_render_as_placeholder() -> None:

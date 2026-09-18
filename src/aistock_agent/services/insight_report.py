@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from io import BytesIO
 from typing import Any
 
@@ -38,8 +39,11 @@ def _text(value: Any) -> str:
 
 
 def _escape(text: str) -> str:
-    """Paragraph 需要转义 XML 保留字符。"""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Paragraph 需要转义 XML 保留字符，并去除 XML 1.0 非法控制字符（保留 \\t\\n\\r）。"""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 去除 XML 1.0 非法控制字符 #x0-#x8 | #xB | #xC | #xE-#x1F（保留 #x9 #xA #xD）
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', text)
+    return text
 
 
 def build_report_sections(data: dict[str, Any]) -> list[tuple[str, list[str]]]:
