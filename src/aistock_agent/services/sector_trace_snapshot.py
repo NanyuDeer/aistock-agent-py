@@ -11,14 +11,27 @@ from aistock_agent.services.tavily import TavilyService
 
 
 def _sector_evidence_queries(sector_name: str, report_date: str) -> list[str]:
-    """3 组定向 query：暴跌/大涨原因、事件公告政策、监管类（命中存储狙击类）。
+    """5 组**事件族**定向 query（2026-09-18 换词，组长口径「要溯源到基本事件——是原因，不是现象」）。
 
-    注入 report_date 聚焦当日结果；中文空格连接（不用 |，搜索服务按字面量处理）。
+    换词前是 3 组，其中第 1 组 `{date} {板块} 板块 暴跌 大涨 原因` 是**现象式问句**：检索器返回
+    的正是「XX 大涨八个点」「全线上涨！涨幅第一」这类行情综述，而准入层（`is_driving_event`）
+    刚写好规则专门拒它们 —— 等于**捞回来再扔掉**，白花检索配额；第 3 组 `反垄断 调查 监管`
+    是早前某次「存储狙击」案例的特化词，绝大多数日子空转。
+
+    换词口径：
+    - **一条 query 一个事件族**（政策监管 / 公司硬事件 / 供需价格 / 技术产业 / 海外贸易），
+      族间词不重叠 → 提高召回多样性；族内是并列同义词（搜索服务按字面量处理，语义召回兜底）；
+    - **不再出现任何现象词**（原因/暴跌/大涨/涨幅）——现象类召回一律交给准入层去拒是浪费；
+    - 每族仍注入 `report_date` 聚焦当日（中文财经新闻日期写法不统一，日期 token 只是**弱锚**，
+      真正提召回的是族词本身）；
+    - 中文空格连接（不用 |，搜索服务按字面量处理）。
     """
     return [
-        f"{report_date} {sector_name} 板块 暴跌 大涨 原因",
-        f"{report_date} {sector_name} 板块 事件 公告 政策",
-        f"{report_date} {sector_name} 板块 反垄断 调查 监管",
+        f"{report_date} {sector_name} 政策 监管 调查 部委 试点",
+        f"{report_date} {sector_name} 公告 中标 订单 获批 并购",
+        f"{report_date} {sector_name} 涨价 减产 扩产 供需 库存",
+        f"{report_date} {sector_name} 量产 投产 认证 技术突破 招标",
+        f"{report_date} {sector_name} 出口 关税 制裁 海外订单 豁免",
     ]
 
 

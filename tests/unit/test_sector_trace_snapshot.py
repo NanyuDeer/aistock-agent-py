@@ -68,6 +68,32 @@ async def test_sector_queries_include_regulatory() -> None:
     assert "2026-07-16" in joined, "query 需注入 report_date 聚焦当日"
     assert "|" not in joined, "query 不应含 |（搜索服务按字面量处理）"
     assert any(k in joined for k in ("反垄断", "调查", "监管")), "需含监管词"
+    # 换词后仍要求：**每条** query 都带板块名与日期（不因分组而漏）
+    for q in queries:
+        assert "存储板块" in q and "2026-07-16" in q
+
+
+@pytest.mark.asyncio
+async def test_sector_queries_are_event_oriented_not_phenomenon() -> None:
+    """换词（2026-09-18）：定向 query 由「问涨跌原因」改为**事件族**（组长口径「是原因不是现象」）。
+
+    旧第 1 组是现象式问句 `{date} {板块} 板块 暴跌 大涨 原因` —— 检索器返回的正是
+    「XX 大涨八个点」「全线上涨！涨幅第一」这类行情综述，而准入层（`is_driving_event`）
+    刚写好规则专门拒它们：等于**捞回来再扔掉**，白花检索配额。现改为 5 个事件族，族间词不重叠。
+    """
+    from aistock_agent.services.sector_trace_snapshot import _sector_evidence_queries
+
+    queries = _sector_evidence_queries("汽车芯片", "2026-09-18")
+    joined = " ".join(queries)
+
+    # 旧现象式问句词一律不得再出现
+    for bad in ("原因", "暴跌", "大涨", "涨幅"):
+        assert bad not in joined, f"现象式问句词「{bad}」不得出现在定向 query 里"
+
+    # 5 个事件族各自至少命中一个代表词
+    for kw in ("政策", "监管", "公告", "中标", "涨价", "扩产", "量产", "认证", "出口", "关税"):
+        assert kw in joined, f"缺事件族词：{kw}"
+    assert len(queries) == 5, "一条 query 一个事件族"
 
 
 @pytest.mark.asyncio

@@ -421,7 +421,7 @@ def test_index_pct_non_numeric_change_pct_falls_back_then_none():
 # --- Task 2.1：链事件节点契约（children[].events: warehouse/search，spec §3.2-4） ---
 
 # 与 sector_trace_snapshot._sector_evidence_queries 第 1 组同形（检索补漏来源的 kind 后缀）
-_SEARCH_QUERY = "2026-09-03 半导体材料 板块 暴跌 大涨 原因"
+_SEARCH_QUERY = "2026-09-03 半导体材料 政策 监管 调查 部委 试点"
 
 
 def _warehouse_event(
