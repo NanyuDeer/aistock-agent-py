@@ -214,20 +214,51 @@ _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 # 层——它们只复述"发生了什么"（现象），回答不了"为什么动"（原因）。口径：宁可漏判
 # （少放），也不拿综述当原因；全部被拒即 events=[]（如实交空，不得回退成综述兜底）。
 #
+# 2026-09-18 修订（今日生产实证漏网两条，均 source=search 进链）：
+# 「注册制次新股大涨八个点，A股市场全线拉升，沪指站上五日均线 - 网易」「全线上涨！
+# A股这一板块，涨幅第一！ - 21财经」——旧规则只看 marker/百分号/两市/时段，"八个点"
+# "全线上涨""涨幅第一""站上五日均线"这类**无百分号**写法全漏。故判据由「命中现象即拒」
+# 改为「命中现象 **且** 原因词未命中 → 拒」：现象外壳但讲清原因（政策落地/价格上涨/
+# 订单放量…）必须放行——它们是原因不是现象，误拒成本高于误留。
+#
 # 为什么做在**准入**而不是只写进 prompt：生成侧（LLM prompt）与判定侧（本护栏）双保险，
 # 不依赖单次 LLM 输出的稳定性。
 _SUMMARY_TITLE_MARKERS = (
-    # 复盘/综述体裁词（简繁同列，英文综述标题同列）
+    # 复盘/综述体裁词（简繁同列，英文综述标题同列）——体裁即综述，不看原因词
     "收评", "收盤", "收盘", "午评", "早评", "复盘", "盘点", "盘面",
     "三大指数", "三大指數", "涨跌家数", "漲跌家數", "时间线", "時間線",
     "资金流向", "資金流向", "涨停潮", "漲停潮", "异动", "異動",
     "closing bell", "market wrap", "market recap", "daily recap",
 )
-# 市场级词元（大盘/指数/两市/A 股整体）——与涨跌幅式描述同现即行情复述
+# 市场级词元（大盘/指数/两市/A 股整体）——与涨跌动作/涨跌幅式描述同现即行情复述
 _MARKET_WIDE_TOKENS = (
     "沪指", "滬指", "上证指数", "上證指數", "深证成指", "深證成指", "创业板指",
-    "創業板指", "科创50", "科創50", "沪深300", "滬深300", "两市", "兩市", "a股",
-    "s&p 500", "nasdaq", "dow jones", "shanghai composite",
+    "創業板指", "科创50", "科創50", "沪深300", "滬深300", "大盘", "大盤", "两市",
+    "兩市", "a股", "s&p 500", "nasdaq", "dow jones", "shanghai composite",
+)
+# 市场级涨跌动作词（无百分号写法："沪指站上五日均线""大盘走弱""创业板指跌破2000点"）
+_MARKET_ACTION_TOKENS = (
+    "站上", "失守", "跌破", "拉升", "上涨", "上漲", "下跌", "走强", "走強",
+    "走弱", "回落", "低开", "低開", "高开", "高開",
+)
+# 板块级涨幅语（无数字、无百分号的行情复述："全线上涨""涨幅第一""领涨两市"）
+_RALLY_PHRASES = (
+    "全线上涨", "全線上漲", "全线拉升", "全線拉升", "集体上涨", "集體上漲",
+    "集体拉升", "集體拉升", "普涨", "普漲", "涨幅第一", "漲幅第一",
+    "涨幅居前", "漲幅居前", "涨幅榜", "漲幅榜", "领涨两市", "領漲兩市",
+)
+# "大涨八个点"/"涨了3个点"/"跌超2个点"：中文/阿拉伯数字＋"个点"（无百分号也能读出涨幅）
+_POINT_MOVE_RE = re.compile(
+    r"[涨漲跌](?:了|超|近|逾)?\s*[0-9零一二三四五六七八九十百两半]+\s*个点"
+)
+# 新高语：**限与板块/指数同现**才算行情复述（"板块创阶段新高"）；个股新高不在本链口径
+_NEW_HIGH_PHRASES = (
+    "创阶段新高", "創階段新高", "创年内新高", "創年內新高", "创新高", "創新高",
+    "创出新高", "刷新新高",
+)
+_NEW_HIGH_QUALIFIERS = (
+    "板块", "板塊", "指数", "指數", "大盘", "大盤", "概念", "行业", "行業",
+    "两市", "兩市", "etf",
 )
 # 涨跌幅式描述："跌0.41%"/"涨超2%"/"下跌1.2%"
 _PCT_RECAP_RE = re.compile(r"[涨漲跌][幅超逾]?\s*\d+(?:\.\d+)?\s*%")
@@ -236,6 +267,29 @@ _TURNOVER_RECAP_TOKENS = ("成交", "亿元", "億元", "家数", "家數")
 # 时段词＋涨跌动词 = 盘中盘面复述（"午后跌幅扩大"/"早盘跳水"）
 _SESSION_TOKENS = ("午后", "午後", "早盘", "早盤", "盘中", "盤中", "尾盘", "尾盤", "开盘", "開盤")
 _DIRECTION_TOKENS = ("涨", "漲", "跌", "跳水", "拉升")
+
+# 原因词表（准入第二判据）：命中现象形态 **且** 这些词一个不命中才拒。"价格"/"供给"
+# 为 2026-09-18 按需增补——"多晶硅价格上涨"是价格驱动原因，不加会被当纯现象误拒。
+# 刻意与 `_DRIVING_KEYWORDS`（只用于检索候选排序）分开：准入与排序口径不同，合并会
+# 牵动排序行为（准入只求"能读出原因"，排序还要看权重）。
+_CAUSE_TOKENS = (
+    # 政策/监管/部委
+    "政策", "监管", "監管", "部委", "国常会", "國常會", "发改委", "發改委",
+    "工信部", "证监会", "證監會", "央行", "国务院", "國務院", "牌照",
+    # 公司/交易披露
+    "公告", "披露", "预案", "預案", "中标", "中標", "订单", "訂單", "签约",
+    "簽約", "招标", "招標", "获批", "獲批", "并购", "並購", "重组", "重組",
+    "收购", "收購", "增持", "回购", "回購",
+    # 供需/价格/产能
+    "涨价", "漲價", "提价", "提價", "降价", "降價", "价格", "價格", "减产",
+    "減產", "扩产", "擴產", "投产", "投產", "产能", "產能", "供需", "需求",
+    "供给", "供給", "库存", "庫存",
+    # 外贸/政策工具
+    "出口", "进口", "進口", "关税", "關稅", "补贴", "補貼", "试点", "試點",
+    "细则", "細則", "方案", "规划", "規劃", "标准", "標準",
+    # 业绩/落地（弱原因词：宁可放行）
+    "业绩", "業績", "财报", "財報", "落地",
+)
 
 # 驱动类正面特征（政策/监管/供需/价格/公司公告/行业事件/资金制度）：只用于检索候选
 # **排序加权**，不做准入（真原因千变万化，白名单式准入门槛会漏掉真驱动——误拒成本高于
@@ -250,19 +304,57 @@ _DRIVING_KEYWORDS = (
 )
 
 
+def _has_phenomenon(low: str) -> bool:
+    """现象形态识别（纯词表/正则，判不出即 False）——覆盖形态：
+
+    - 市场级主语（沪指/上证指数/创业板指/沪深300/大盘/两市/A股…）＋涨跌动作词或涨跌幅；
+    - 两市＋成交额/家数/涨跌综述（"两市成交额跌破万亿"）；
+    - 时段词（午后/早盘/盘中/尾盘/开盘）＋涨跌幅或涨跌动词；
+    - 板块级涨幅语（全线上涨/集体拉升/普涨/涨幅第一/领涨两市…）；
+    - "大涨八个点"/"涨了3个点"（`_POINT_MOVE_RE`）；
+    - 板块/指数创新高（`_NEW_HIGH_PHRASES` × `_NEW_HIGH_QUALIFIERS`）。
+    """
+    has_pct = bool(_PCT_RECAP_RE.search(low))
+    market = any(token in low for token in _MARKET_WIDE_TOKENS)
+    action = any(token in low for token in _MARKET_ACTION_TOKENS)
+    if market and (has_pct or action):
+        return True
+    if ("两市" in low or "兩市" in low) and (
+        has_pct or action or any(token in low for token in _TURNOVER_RECAP_TOKENS)
+    ):
+        return True
+    if any(token in low for token in _SESSION_TOKENS) and (
+        has_pct or action or any(token in low for token in _DIRECTION_TOKENS)
+    ):
+        return True
+    if any(phrase in low for phrase in _RALLY_PHRASES):
+        return True
+    if _POINT_MOVE_RE.search(low):
+        return True
+    return any(phrase in low for phrase in _NEW_HIGH_PHRASES) and any(
+        qualifier in low for qualifier in _NEW_HIGH_QUALIFIERS
+    )
+
+
 def event_summary_reason(headline: object) -> str:
-    """行情综述/现象判定：返回非驱动原因（``""`` = 通过，即驱动原因或判不出综述）。
+    """行情综述/现象判定：返回拒收原因码（``""`` = 放行，即原因事件或判不出形态）。
 
-    确定性单点判定（纯函数，无 LLM/无网络），覆盖形态：
+    两条独立判据（确定性纯函数，无 LLM/无网络）：
 
-    - ``summary_marker``：收评/收盤/复盘/盘面/三大指数/涨跌家数/时间线/资金流向/
-      涨停潮/异动（简繁与英文综述标题同列）；
-    - ``index_pct_recap``：市场级词元（沪指/上证/两市/A股/创业板指…）＋涨跌幅式描述；
-    - ``turnover_recap``：两市＋成交额/家数/涨跌综述；
-    - ``session_recap``：时段词（午后/早盘/盘中/尾盘/开盘）＋涨跌幅式描述或涨跌动词。
+    1. ``summary_marker``：**综述体裁词**（收评/收盤/复盘/盘面/三大指数/涨跌家数/时间线/
+       资金流向/涨停潮/异动，简繁与英文综述标题同列）——体裁本身就是综述，**不因**含
+       原因词而放行（"今日收评：某政策落地"仍是收评，不可能是一条原因事件）；
+    2. ``phenomenon_without_cause``：命中现象形态（`_has_phenomenon`）**且**原因词表
+       （`_CAUSE_TOKENS`：政策/监管/公告/中标/订单/涨跌价/产能/供需/关税/补贴/并购/
+       业绩/落地…）一个不命中。
 
-    匹配统一对 ``lower()`` 后文本做（中文不受影响，英文词元按小写）。判不出来一律放行
-    （宁可漏判：本函数只负责挡"确定是综述"的形态）。
+    判据 2 是 2026-09-18 修订的核心：由「命中现象即拒」改为「现象 且 无原因才拒」——
+    "某政策落地带动光伏板块大涨""多晶硅价格上涨 供需缺口扩大"是原因不是现象，必须放行；
+    "注册制次新股大涨八个点…沪指站上五日均线""全线上涨！…涨幅第一"是纯现象，拒收
+    （今日生产实证）。
+
+    匹配统一对 ``lower()`` 后文本做。判不出来一律放行（宁可漏判：宁可少放，也不拿综述
+    当原因；真原因写法的多样性远高于现象）。
     """
     if not isinstance(headline, str):
         return "not_text"
@@ -272,20 +364,11 @@ def event_summary_reason(headline: object) -> str:
     low = text.lower()
     if any(marker in low for marker in _SUMMARY_TITLE_MARKERS):
         return "summary_marker"
-    has_pct = bool(_PCT_RECAP_RE.search(low))
-    if has_pct and any(token in low for token in _MARKET_WIDE_TOKENS):
-        return "index_pct_recap"
-    if ("两市" in low or "兩市" in low) and (
-        has_pct
-        or any(token in low for token in _TURNOVER_RECAP_TOKENS)
-        or any(token in low for token in _DIRECTION_TOKENS)
-    ):
-        return "turnover_recap"
-    if any(token in low for token in _SESSION_TOKENS) and (
-        has_pct or any(token in low for token in _DIRECTION_TOKENS)
-    ):
-        return "session_recap"
-    return ""
+    if not _has_phenomenon(low):
+        return ""
+    if any(token in low for token in _CAUSE_TOKENS):
+        return ""
+    return "phenomenon_without_cause"
 
 
 def is_driving_event(headline: object) -> bool:
@@ -431,9 +514,11 @@ def _search_candidates(
     消费溯源快照的定向检索来源（sources[].kind="sector_event:<query>"，由
     sector_trace_snapshot._run_directed_searches 真实产出）。两道门槛：
 
-    1. **事件准入**（`event_summary_reason`）：行情综述/现象（收评/复盘/指数涨跌幅
-       复述/成交额综述…）一律拒收——综述回答不了"为什么动"，拿它填充会让用户误以为
-       已归因（2026-09-17 生产实证）。被拒逐条留痕 `chain_event_rejected_not_driving`
+    1. **事件准入**（`event_summary_reason`）：行情综述/现象一律拒收——综述回答不了
+       "为什么动"，拿它填充会让用户误以为已归因（2026-09-17/18 生产实证）。2026-09-18
+       起判据为"命中现象形态**且**原因词未命中"（`_has_phenomenon` × `_CAUSE_TOKENS`）：
+       现象外衣但讲清原因（政策落地/价格上涨/订单放量…）放行，纯现象（全线上涨/涨幅第一/
+       沪指站上五日均线…）拒收。被拒逐条留痕 `chain_event_rejected_not_driving`
        并返回被拒条数（汇总进 `chain_sector_events`）；
     2. **相关性门槛**：标题/正文命中板块词，或 URL 被 trigger 阶段引用；
        门槛不过 → 不产节点（不编造事件）。

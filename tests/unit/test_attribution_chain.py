@@ -1115,3 +1115,94 @@ def test_warehouse_event_path_ignores_admission_filter() -> None:
         }
     ]
 
+
+# --- 2026-09-18 迭代：判据由「命中现象即拒」改为「命中现象 且 无原因词 → 拒」 ---
+#
+# 生产实证（2026-09-18 归因链 children[].events，均 source=search）：两条**无百分号**的
+# 现象标题漏网——旧规则只看 marker / 百分号 / 两市 / 时段，把「八个点」「全线上涨」
+# 「涨幅第一」「沪指站上五日均线」这类写法全放过。新判据：现象形态 **且** 原因词未命中
+# 才拒；现象外壳但讲清原因（政策/公告/供需/价格…）必须放行，不误杀真驱动。
+
+# 今日两条实证（原样字符串，含站点后缀）+ 同族现象写法（动作词/涨幅语/个点/新高/普涨）
+_RECAP_HEADLINES_V2 = [
+    "注册制次新股大涨八个点，A股市场全线拉升，沪指站上五日均线 - 网易",
+    "全线上涨！A股这一板块，涨幅第一！ - 21财经",
+    "沪指站上3400点，两市普涨",
+    "大盘走弱，创业板指跌破2000点",
+    "A股集体上涨，涨幅居前的是半导体板块",
+    "两市成交额创年内新高",
+    "半导体板块大涨五个点",
+]
+
+# 现象外壳但含原因词 → 必须放行（新判据的核心：不误杀真驱动）
+_CAUSE_BEARING_HEADLINES = [
+    "某政策落地带动光伏板块大涨",
+    "国家大基金三期落地，半导体设备订单放量",
+    "多晶硅价格上涨 供需缺口扩大",
+    "工信部发布光伏行业规范条件",
+    "A股全线上涨背后：国常会部署新一轮稳增长政策",
+]
+
+# 综述体裁词（收评/复盘…）本身就是综述，**不因**含原因词而放行
+_MARKER_WITH_CAUSE_HEADLINES = [
+    "今日收评：某政策落地带动光伏板块大涨",
+    "市场复盘：国常会部署稳增长政策",
+]
+
+
+@pytest.mark.parametrize("headline", _RECAP_HEADLINES_V2)
+def test_is_driving_event_rejects_phenomenon_without_cause(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _CAUSE_BEARING_HEADLINES)
+def test_is_driving_event_keeps_phenomenon_with_cause(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+@pytest.mark.parametrize("headline", _MARKER_WITH_CAUSE_HEADLINES)
+def test_summary_marker_rejected_even_with_cause_tokens(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+def test_missed_phenomenon_headlines_rejected_with_new_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """今日两条实证（source=search）→ events=[]，留痕 reason=phenomenon_without_cause。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                3.0,
+                sources=[
+                    _search_source(_RECAP_HEADLINES_V2[0]),
+                    _search_source(_RECAP_HEADLINES_V2[1]),
+                ],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "phenomenon_without_cause" in out
+    assert "rejected_not_driving" in out
+
+
+def test_cause_bearing_phenomenon_headline_survives_search_admission() -> None:
+    """现象外壳 + 原因词（价格上涨/供需缺口）→ 检索补漏里正常放行。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "多晶硅",
+                3.0,
+                sources=[_search_source("多晶硅价格上涨 供需缺口扩大")],
+            )
+        ],
+    )
+    assert [e["headline"] for e in chain["children"][0]["events"]] == [
+        "多晶硅价格上涨 供需缺口扩大"
+    ]
+
