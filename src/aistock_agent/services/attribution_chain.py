@@ -1,5 +1,6 @@
 """归因链组装与保存（spec P1a-3：大盘-板块-事件 链树的 agent 侧产物）。"""
 import re
+from urllib.parse import urlparse
 
 import structlog
 
@@ -208,7 +209,6 @@ _SECTOR_SOURCE_PREFIX = "sector_event:"
 _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 
 # --- 事件准入：只收「驱动原因」，拒收「行情综述/现象」（2026-09-18 组长口径） ---
-#
 # 生产实证（2026-09-17 CRO 概念）：检索补漏把「A股收評|滬指跌0.41% 三大指數收跌農業
 # 板塊逆勢大漲」「今天A股，三大指数集体下跌 - 时间线- 搜狐」这类**行情综述**塞进事件
 # 层——它们只复述"发生了什么"（现象），回答不了"为什么动"（原因）。口径：宁可漏判
@@ -223,6 +223,13 @@ _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 #
 # 为什么做在**准入**而不是只写进 prompt：生成侧（LLM prompt）与判定侧（本护栏）双保险，
 # 不依赖单次 LLM 输出的稳定性。
+#
+# 2026-09-18 修订 3（页面噪声，同一原因词豁免口径）：生产链 children[].events 漏网
+# 「国家大基金持股 - 行情中心- 同花顺」（URL http://q.10jqka.com.cn/gn/detail/code/…）。
+# 它是**行情页/UI 页面标题**——既无现象词也无原因词，按"判不出即放行"进了事件层，但页面
+# 标题回答不了"为什么动"。两道网：标题级 `_PAGE_NOISE_TOKENS`（reason=page_noise）、
+# URL 级 `is_page_noise_url`（reason=page_noise_url）。两网豁免口径与现象判据一致：headline
+# 命中任一原因词即放行（站点名不是拒收理由，「同花顺：某公司公告中标5亿元订单」必须留下）。
 _SUMMARY_TITLE_MARKERS = (
     # 复盘/综述体裁词（简繁同列，英文综述标题同列）——体裁即综述，不看原因词
     "收评", "收盤", "收盘", "午评", "早评", "复盘", "盘点", "盘面",
@@ -230,6 +237,30 @@ _SUMMARY_TITLE_MARKERS = (
     "资金流向", "資金流向", "涨停潮", "漲停潮", "异动", "異動",
     "closing bell", "market wrap", "market recap", "daily recap",
 )
+# 页面噪声词（准入第三判据）：行情页/数据中心/股吧/盘口等 **UI 页面标题**用语——页面标题
+# 只说明"这是一页行情/资料"，不承载"为什么动"（2026-09-18 生产实证）。与现象判据**相互
+# 独立**（现象看涨跌描述，页面噪声看页面形态），但共用"原因词未命中才拒"的豁免口径。
+#
+# 注意「公告列表」在现有 `_CAUSE_TOKENS` 含「公告」时**不可达**（必然被豁免），保留为对齐
+# 建议口径；调参时可删。「资金流向表」同时命中 marker（reason=summary_marker）。
+_PAGE_NOISE_TOKENS = (
+    # 行情页/行情模块用语
+    "行情中心", "行情页", "行情頁", "行情查询", "行情查詢", "行情报价", "行情報價",
+    "行情走势", "行情走勢", "个股行情", "個股行情", "概念行情", "板块行情", "板塊行情",
+    # 站内栏目/数据中心
+    "资金流向表", "資金流向表", "数据中心", "資料中心", "资讯中心", "資訊中心",
+    "研报中心", "研報中心", "公告列表",
+    # 股吧/F10/盘口（页面而非报道）
+    "f10", "股吧", "盘口", "盤口",
+    # 站点名（标题即页面标题的强信号）
+    "同花顺", "同花順", "东方财富", "東方財富",
+    # 英文页面标题
+    "quote page", "market center", "stock quote",
+)
+# 页面级 URL 特征（网 2）：主机含行情站/股吧/F10/报价站，或路径含页面段——这类页面的
+# 正文是表格/讨论区，不承载原因。
+_PAGE_NOISE_URL_HOST_TOKENS = ("q.10jqka.com.cn", "guba", "f10", "quote")
+_PAGE_NOISE_URL_PATH_TOKENS = ("/detail/code/", "/quote/", "/f10/", "/guba/")
 # 市场级词元（大盘/指数/两市/A 股整体）——与涨跌动作/涨跌幅式描述同现即行情复述
 _MARKET_WIDE_TOKENS = (
     "沪指", "滬指", "上证指数", "上證指數", "深证成指", "深證成指", "创业板指",
@@ -336,25 +367,61 @@ def _has_phenomenon(low: str) -> bool:
     )
 
 
-def event_summary_reason(headline: object) -> str:
-    """行情综述/现象判定：返回拒收原因码（``""`` = 放行，即原因事件或判不出形态）。
+def _has_cause_token(low: str) -> bool:
+    """原因词命中判定（准入共用）：现象判据与页面噪声判据的豁免口径必须**一致**——
+    含任一原因词即放行（"同花顺：某公司公告中标5亿元订单"必须留下）。
+    """
+    return any(token in low for token in _CAUSE_TOKENS)
 
-    两条独立判据（确定性纯函数，无 LLM/无网络）：
+
+def is_page_noise_url(url: object) -> bool:
+    """URL 级页面噪声判定：True = 该 URL 指向行情页/股吧/F10 等**页面**而非事件报道。
+
+    只看 URL 形态（确定性纯函数，无网络/无 LLM）：主机含 ``q.10jqka.com.cn``/``guba``/
+    ``f10``/``quote``，或路径含 ``/detail/code/``/``/quote/``/``/f10/``/``/guba/``。
+    非字符串/空 → False（判不出即放行）。
+
+    **刻意只收 url 一个参数**：原因词豁免由调用方判定——把 URL 逻辑塞进
+    `event_summary_reason` 的 ``headline`` 签名会破坏既有调用方。
+    """
+    if not isinstance(url, str):
+        return False
+    raw = url.strip().lower()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    # 无 scheme 的裸域（"q.10jqka.com.cn/gn/detail/code/30"）会被 urlparse 当路径，
+    # 故主机回退取首段，保证裸域同样能判出。
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    if any(token in host for token in _PAGE_NOISE_URL_HOST_TOKENS):
+        return True
+    return any(token in parsed.path for token in _PAGE_NOISE_URL_PATH_TOKENS)
+
+
+def event_summary_reason(headline: object) -> str:
+    """行情综述/页面噪声判定：返回拒收原因码（``""`` = 放行，即原因事件或判不出形态）。
+
+    三条独立判据（确定性纯函数，无 LLM/无网络）：
 
     1. ``summary_marker``：**综述体裁词**（收评/收盤/复盘/盘面/三大指数/涨跌家数/时间线/
        资金流向/涨停潮/异动，简繁与英文综述标题同列）——体裁本身就是综述，**不因**含
        原因词而放行（"今日收评：某政策落地"仍是收评，不可能是一条原因事件）；
     2. ``phenomenon_without_cause``：命中现象形态（`_has_phenomenon`）**且**原因词表
        （`_CAUSE_TOKENS`：政策/监管/公告/中标/订单/涨跌价/产能/供需/关税/补贴/并购/
-       业绩/落地…）一个不命中。
+       业绩/落地…）一个不命中；
+    3. ``page_noise``：命中页面噪声词（`_PAGE_NOISE_TOKENS`：行情中心/数据中心/股吧/
+       F10/盘口/同花顺/东方财富…，2026-09-18 生产实证）**且**原因词一个不命中。
 
     判据 2 是 2026-09-18 修订的核心：由「命中现象即拒」改为「现象 且 无原因才拒」——
     "某政策落地带动光伏板块大涨""多晶硅价格上涨 供需缺口扩大"是原因不是现象，必须放行；
-    "注册制次新股大涨八个点…沪指站上五日均线""全线上涨！…涨幅第一"是纯现象，拒收
-    （今日生产实证）。
+    "注册制次新股大涨八个点…沪指站上五日均线""全线上涨！…涨幅第一"是纯现象，拒收。
+
+    判据 3 与判据 2 **相互独立**（现象看涨跌描述，页面噪声看页面形态）：判定顺序为
+    marker → 现象 → 页面噪声，同时命中时原因码取现象（既有口径不变）；两者共用
+    "原因词未命中才拒"的豁免——站点名不构成拒收理由。
 
     匹配统一对 ``lower()`` 后文本做。判不出来一律放行（宁可漏判：宁可少放，也不拿综述
-    当原因；真原因写法的多样性远高于现象）。
+    当原因；真原因写法的多样性远高于现象/页面标题）。
     """
     if not isinstance(headline, str):
         return "not_text"
@@ -364,11 +431,13 @@ def event_summary_reason(headline: object) -> str:
     low = text.lower()
     if any(marker in low for marker in _SUMMARY_TITLE_MARKERS):
         return "summary_marker"
-    if not _has_phenomenon(low):
+    has_phenomenon = _has_phenomenon(low)
+    has_page_noise = any(token in low for token in _PAGE_NOISE_TOKENS)
+    if not (has_phenomenon or has_page_noise):
         return ""
-    if any(token in low for token in _CAUSE_TOKENS):
+    if _has_cause_token(low):
         return ""
-    return "phenomenon_without_cause"
+    return "phenomenon_without_cause" if has_phenomenon else "page_noise"
 
 
 def is_driving_event(headline: object) -> bool:
@@ -512,15 +581,19 @@ def _search_candidates(
     """检索补漏（spec §3.2-4 ②，溯源板块一律强制执行）。
 
     消费溯源快照的定向检索来源（sources[].kind="sector_event:<query>"，由
-    sector_trace_snapshot._run_directed_searches 真实产出）。两道门槛：
+    sector_trace_snapshot._run_directed_searches 真实产出）。三道门槛：
 
-    1. **事件准入**（`event_summary_reason`）：行情综述/现象一律拒收——综述回答不了
+    1. **事件准入**（`event_summary_reason`）：行情综述/现象/页面标题一律拒收——综述回答不了
        "为什么动"，拿它填充会让用户误以为已归因（2026-09-17/18 生产实证）。2026-09-18
        起判据为"命中现象形态**且**原因词未命中"（`_has_phenomenon` × `_CAUSE_TOKENS`）：
        现象外衣但讲清原因（政策落地/价格上涨/订单放量…）放行，纯现象（全线上涨/涨幅第一/
-       沪指站上五日均线…）拒收。被拒逐条留痕 `chain_event_rejected_not_driving`
-       并返回被拒条数（汇总进 `chain_sector_events`）；
-    2. **相关性门槛**：标题/正文命中板块词，或 URL 被 trigger 阶段引用；
+       沪指站上五日均线…）拒收；页面噪声词（行情中心/数据中心/股吧…）同理，reason=page_noise。
+       被拒逐条留痕 `chain_event_rejected_not_driving` 并返回被拒条数（汇总进
+       `chain_sector_events`）；
+    2. **URL 准入门槛**（`is_page_noise_url`，2026-09-18）：headline 干净但 URL 是行情页/
+       股吧/F10 页（reason=page_noise_url）→ 拒收；headline 含原因词则**不因 URL 被拒**，
+       留痕与计数口径同 1；
+    3. **相关性门槛**：标题/正文命中板块词，或 URL 被 trigger 阶段引用；
        门槛不过 → 不产节点（不编造事件）。
 
     排序（全等分时保原序）：trigger 证据引用 → 标题命中 → 正文命中 → 含驱动类关键词
@@ -556,6 +629,17 @@ def _search_candidates(
             )
             continue
         url = str(item.get("url") or "").strip()
+        # 网 2（URL 级，2026-09-18）：headline 干净但 URL 指向行情页/股吧/F10 页 → 页面噪声。
+        # 豁免口径与标题级一致：headline 命中任一原因词即放行（行情站也可能转载真原因）。
+        if is_page_noise_url(url) and not _has_cause_token(headline.lower()):
+            rejected += 1
+            logger.info(
+                "chain_event_rejected_not_driving",
+                sector=sector,
+                reason="page_noise_url",
+                headline=headline[:60],  # 截断口径与标题级一致
+            )
+            continue
         in_title = _mentions(title, tokens)
         in_content = _mentions(content, tokens)
         by_evidence = bool(url) and url in evidence_urls

@@ -13,7 +13,9 @@ from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relati
 from aistock_agent.schemas.sector_trace import SectorChainResult, SectorStage
 from aistock_agent.services.attribution_chain import (
     assemble_attribution_chain,
+    event_summary_reason,
     is_driving_event,
+    is_page_noise_url,
 )
 
 
@@ -1204,5 +1206,172 @@ def test_cause_bearing_phenomenon_headline_survives_search_admission() -> None:
     )
     assert [e["headline"] for e in chain["children"][0]["events"]] == [
         "多晶硅价格上涨 供需缺口扩大"
+    ]
+
+
+# --- 2026-09-18 迭代 3：页面噪声拒收（标题级 + URL 级，同一原因词豁免口径） ---
+#
+# 生产实证（2026-09-18 归因链 children[].events，source=search）：漏网
+# 「国家大基金持股 - 行情中心- 同花顺」（URL http://q.10jqka.com.cn/gn/detail/code/…）。
+# 它是**行情页/UI 页面标题**——既无现象词也无原因词，按旧规则"判不出即放行"进了事件层，
+# 但页面标题回答不了"为什么动"，属纯噪声。两道网（豁免口径一致：headline 命中任一原因词
+# 即放行——站点名/页面形态不是拒收理由）：
+#
+#   1. **标题级** `_PAGE_NOISE_TOKENS`：命中页面噪声词 **且** 原因词未命中 → 拒
+#      （reason=``page_noise``）；
+#   2. **URL 级** `is_page_noise_url`：URL 是行情页/股吧/F10 页 **且** headline 无原因词
+#      → 拒（reason=``page_noise_url``）。
+#
+# 「同花顺：某公司公告中标5亿元订单」这类**站点名 + 真驱动**必须留下——误拒成本高于误留。
+
+# 页面噪声词各 1 例（首条为今日生产实证原样字符串）
+#
+# 注意：「资金流向表」同时命中 marker「资金流向」（reason=summary_marker，仍被拒）；
+# 「公告列表」必然含原因词「公告」→ 被豁免放行（词表保留是为与建议口径对齐，
+# 该词在现有原因词表下不可达，调参时可直接删除）。
+_PAGE_NOISE_HEADLINES = [
+    "国家大基金持股 - 行情中心- 同花顺",
+    "半导体板块行情中心 - 东方财富",
+    "XX概念 F10 资料",
+    "某股 股吧 讨论",
+    "个股行情查询 - 行情报价",
+    "概念行情走势中心",
+    "资金流向表 - 数据中心",
+    "资讯中心：今日要闻",
+    "研报中心 - 机构观点汇总",
+    "盘口数据一览",
+    "Stock Quote Page - Market Center",
+]
+
+# 站点名/页面词 + 原因词 → 必须放行（不误杀真驱动）
+_PAGE_NOISE_WITH_CAUSE_HEADLINES = [
+    "同花顺：某公司公告中标5亿元订单",
+    "东方财富数据显示，多晶硅价格上涨",
+    "同花顺财经：某公司披露并购重组预案",
+    "数据中心：某公司公告扩产计划获批",
+]
+
+
+@pytest.mark.parametrize("headline", _PAGE_NOISE_HEADLINES)
+def test_is_driving_event_rejects_page_noise_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _PAGE_NOISE_WITH_CAUSE_HEADLINES)
+def test_is_driving_event_keeps_page_noise_headline_with_cause(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+def test_event_summary_reason_separates_page_noise_from_phenomenon() -> None:
+    """页面噪声与现象共用"无原因词才拒"口径，但原因码必须可区分（统计/调参用）。"""
+    assert event_summary_reason("某股 股吧 讨论") == "page_noise"
+    assert event_summary_reason("国家大基金持股 - 行情中心- 同花顺") == "page_noise"
+    # 现象形态优先（先现象后页面噪声的顺序），原因码仍是既有 phenomenon_without_cause
+    assert event_summary_reason("行情中心：沪指跌0.41%") == "phenomenon_without_cause"
+    # 含原因词 → 放行（站点名不构成拒收理由）
+    assert event_summary_reason("同花顺：某公司公告中标5亿元订单") == ""
+
+
+def test_page_noise_headline_rejected_in_search(capsys: pytest.CaptureFixture[str]) -> None:
+    """生产实证原样字符串（source=search）→ 不产节点，留痕 reason=page_noise 且计数 +1。"""
+    source = _search_source("国家大基金持股 - 行情中心- 同花顺")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("国家大基金持股", 3.0, sources=[source])],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "chain_event_rejected_not_driving" in out
+    assert "page_noise" in out
+    assert "rejected_not_driving" in out
+    # 计数 +1 直测出参（日志渲染格式随全局 structlog 配置变化，不按字符串断言数值）
+    from aistock_agent.services.attribution_chain import _child_events
+
+    events, stats = _child_events("国家大基金持股", {}, {"sources": [source]}, [])
+    assert events == []
+    assert stats["rejected_not_driving"] == 1
+
+
+# --- 迭代 3 网 2：URL 级页面噪声（行情页/股吧/F10 页 URL 不承载原因） ---
+#
+# headline 可能是干净的（如「国家大基金持股最新动态」），但 URL 指向行情页/股吧/F10 页——
+# 这类页面的正文是表格/讨论，不是原因。故对补漏候选项加 URL 判据；豁免口径与标题级一致
+# （headline 命中任一原因词即放行：真驱动可能恰好被行情站转载）。
+
+# URL 命中页面级特征（主机含站点/页面词，或路径含页面段）
+_PAGE_NOISE_URLS = [
+    "http://q.10jqka.com.cn/gn/detail/code/30",  # 今日生产实证原样 URL
+    "https://guba.eastmoney.com/news,600519,123.html",
+    "https://www.example.com/quote/600519",
+    "https://xueqiu.com/f10/600519",
+    "https://www.example.com/stock/f10/profile",
+    "https://www.example.com/detail/code/30",
+]
+
+# 正常新闻页 URL（不因 URL 被判页面噪声）
+_PLAIN_URLS = [
+    "https://news.example.com/2026/09/18/semiconductor-policy",
+    "https://finance.sina.com.cn/stock/2026-09-18/doc-abc.shtml",
+    "",
+]
+
+
+@pytest.mark.parametrize("url", _PAGE_NOISE_URLS)
+def test_is_page_noise_url_true(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
+@pytest.mark.parametrize("url", [*_PLAIN_URLS, None])
+def test_is_page_noise_url_false(url: object) -> None:
+    assert is_page_noise_url(url) is False
+
+
+def test_page_noise_url_rejected_when_headline_has_no_cause(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """URL 是行情页且 headline 无原因词 → 不产节点，留痕 reason=page_noise_url 且计数 +1。"""
+    source = _search_source(
+        "国家大基金持股最新动态", url="http://q.10jqka.com.cn/gn/detail/code/30"
+    )
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("国家大基金持股", 3.0, sources=[source])],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "chain_event_rejected_not_driving" in out
+    assert "page_noise_url" in out
+    assert "rejected_not_driving" in out
+    # 计数 +1 直测出参（日志渲染格式随全局 structlog 配置变化，不按字符串断言数值）
+    from aistock_agent.services.attribution_chain import _child_events
+
+    events, stats = _child_events("国家大基金持股", {}, {"sources": [source]}, [])
+    assert events == []
+    assert stats["rejected_not_driving"] == 1
+
+
+def test_page_noise_url_kept_when_headline_carries_cause() -> None:
+    """同一行情页 URL，但 headline 含原因词 → **不得**因 URL 被拒，节点照常产出。"""
+    url = "http://q.10jqka.com.cn/gn/detail/code/30"
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "国家大基金持股",
+                3.0,
+                sources=[_search_source("国家大基金持股：某公司公告中标5亿元订单", url=url)],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": None,
+            "ref": url,
+            "headline": "国家大基金持股：某公司公告中标5亿元订单",
+            "source": "search",
+        }
     ]
 
