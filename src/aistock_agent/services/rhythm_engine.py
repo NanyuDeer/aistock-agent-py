@@ -501,6 +501,9 @@ def build_event_branch(
     origin_date 提供时启用 d 约束：交易日差 d > EVENT_BRANCH_MAX_D 的事件不产分支
     （避免「闸门说无影响 vs 分支说超预期加仓」的同卡矛盾，spec §5.5.2）。
     返回 [] 表示非 high 事件（无事件分支）或 d 超限（同语义不产分支）。
+
+    公布后"点亮/置灰"能力当前未接线（spec D3 拆契约），故分支不含 met 键；
+    event_ref 保留供验证器使用。
     """
     if event.get("importance") != "high":
         return []
@@ -540,7 +543,6 @@ def build_event_branch(
                     "note": "结果待公布，公布后按预期差落档" + note_suffix,
                 },
                 "event_ref": {"event_date": str(event.get("date", "")), "title": title},
-                "met": None,
             }
         )
     return branches

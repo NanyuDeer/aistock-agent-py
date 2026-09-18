@@ -241,7 +241,8 @@ def test_event_branch_enum_three_partitions() -> None:
     assert by_value["不及预期"]["position_action"]["direction"] == "reduce"
     assert by_value["不及预期"]["anchor"]["threshold"] == "不及预期 -> 跌破"
     assert all(b["conclusion"]["range"] == "" for b in branches)
-    assert all(b.get("met") is None for b in branches)
+    assert all("met" not in b for b in branches)
+    assert all(b["event_ref"]["title"] == "英伟达财报" for b in branches)
     assert all(b["condition"]["indicator"] == "英伟达财报预期差" for b in branches)
 
 
