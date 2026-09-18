@@ -5,9 +5,11 @@
 "中文板块名 → BK 代码" 映射，未命中返回 None（由调用方回落无 tag_code 模式）。
 
 设计约束（D22/D23 偏差）：
-- sector_aliases.json 结构为 `{标准板块名: [别名...]}`，被 snapshot_builder 读取写回，
-  禁止修改其结构；因此映射表独立为新增的 sector_tag_codes.json（`{标准名: "BK0477"}`）。
-- 查找顺序：sector_tag_codes.json 标准名精确命中 → sector_aliases.json 别名反向匹配
+- sector_aliases.json 结构为 `{标准板块名: [别名...]}`，人工维护；运行时学到的别名
+  写在独立的 sector_aliases_learned.json（gitignore），读取时由
+  sector_aliases_store.load_merged_aliases 合并（仓库优先）。
+  因此映射表独立为新增的 sector_tag_codes.json（`{标准名: "BK0477"}`）。
+- 查找顺序：sector_tag_codes.json 标准名精确命中 → 别名字典反向匹配
   （别名 → 标准名 → tag_code）→ 未命中 None。
 """
 
@@ -18,11 +20,12 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
+from aistock_agent.services.sector_aliases_store import load_merged_aliases
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TAG_CODES_FILE = _DATA_DIR / "sector_tag_codes.json"
-_ALIASES_FILE = _DATA_DIR / "sector_aliases.json"
 
 
 @lru_cache(maxsize=1)
@@ -53,21 +56,16 @@ def _load_tag_codes() -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def _load_alias_index() -> dict[str, str]:
-    """sector_aliases.json 别名 → 标准板块名 反向索引（只读，不修改原文件）。"""
-    try:
-        with _ALIASES_FILE.open("r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
+    """别名 → 标准板块名 反向索引（只读）。
+
+    数据源为 sector_aliases_store.load_merged_aliases（仓库字典 + 运行时 learned，
+    仓库优先；learned 缺失/损坏时退化为仓库内容，不抛错）。
+    """
     index: dict[str, str] = {}
-    for standard_name, aliases in raw.items():
-        if not isinstance(standard_name, str) or not isinstance(aliases, list):
-            continue
+    for standard_name, aliases in load_merged_aliases().items():
         index[standard_name] = standard_name
         for alias in aliases:
-            if isinstance(alias, str) and alias:
+            if alias:
                 index[alias] = standard_name
     return index
 

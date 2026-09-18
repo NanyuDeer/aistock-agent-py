@@ -312,7 +312,8 @@ src/aistock_agent/
 ├── config.py            # pydantic-settings 配置（多模型/连接池/LangSmith/CORS/调度）
 ├── constants.py         # SSE 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
 ├── data/                # 静态数据文件
-│   └── sector_aliases.json  # 板块别名字典（35 标准板块 → 别名列表，快照生成器第一级匹配用）
+│   ├── sector_aliases.json  # 板块别名字典（人工维护，快照生成器第一级匹配用）
+│   └── sector_aliases_learned.json  # 运行时学到的别名（gitignore，读取时合并、仓库优先）
 ├── state/
 │   └── schema.py        # AgentState TypedDict
 ├── schemas/             # 数据模型（Pydantic 对外交互 + TypedDict 内部结构）

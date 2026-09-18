@@ -56,6 +56,9 @@ changelog-pending.md
 docs/agent-outputs/
 data/audio/
 
+# 运行时学到的板块别名（防止生产回写人工维护的 sector_aliases.json 造成 git 冲突）
+src/aistock_agent/data/sector_aliases_learned.json
+
 # Superpowers 计划/规格/审查文档（2026-08-02 决策：代码仓库只留代码，计划文档不跟踪）
 docs/superpowers/
 docs/outputs/

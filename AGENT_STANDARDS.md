@@ -524,8 +524,8 @@ LLM 输出非 JSON 时包装为 `raw_text` 降级。
 
 **两级板块匹配机制**：
 
-1. **第一级（代码层，`match_sectors_code_level`）**：使用 `data/sector_aliases.json`（35 标准板块 → 别名列表）做别名映射，将晨报和复盘的板块列表匹配。采用标准名集合求交（一个别名可能对应多个标准名，如"贵金属"同时归属黄金与白银），避免 last-write-wins 字典在别名碰撞时丢失映射。
-2. **第二级（LLM 层，`llm_evaluate_dimensions`）**：代码层未匹配的板块交由 LLM 做语义等价判断，发现的新别名自动追加到 `sector_aliases.json`（`_append_new_aliases`），实现字典自学习。
+1. **第一级（代码层，`match_sectors_code_level`）**：使用 `data/sector_aliases.json`（标准板块 → 别名列表，人工维护）做别名映射，将晨报和复盘的板块列表匹配。采用标准名集合求交（一个别名可能对应多个标准名，如"贵金属"同时归属黄金与白银），避免 last-write-wins 字典在别名碰撞时丢失映射。
+2. **第二级（LLM 层，`llm_evaluate_dimensions`）**：代码层未匹配的板块交由 LLM 做语义等价判断，发现的新别名经"结构 + 观察范围"校验后追加到 `data/sector_aliases_learned.json`（`_append_new_aliases`，已 gitignore，运行时学习**绝不回写**人工维护的 `sector_aliases.json`），实现字典自学习。读取侧由 `services/sector_aliases_store.load_merged_aliases` 合并两个文件（仓库文件优先，learned 只补充仓库不存在的标准名与别名；learned 缺失/损坏时退化为仓库内容）。
 
 **MA 计算**（`calculate_ma`）：基于 manifest 历史记录计算 MA5/MA10/MA20 滑动平均，指标包括 `hit_rate` / `direction_accuracy` / `mean_deviation` / `attribution_match_rate` / `sentiment_bias`。
 
@@ -1543,7 +1543,8 @@ aistock-agent-py/
         ├── constants.py              # SSE/WS 事件类型 / intent 集合 / 错误码 / TOOL_LABELS
         │
         ├── data/                     # 静态数据文件
-        │   └── sector_aliases.json   # 板块别名字典（35 标准板块 → 别名列表，快照生成器第一级匹配）
+        │   ├── sector_aliases.json   # 板块别名字典（人工维护，快照生成器第一级匹配）
+        │   └── sector_aliases_learned.json  # 运行时学到的别名（gitignore，读取时合并、仓库优先）
         │
         ├── state/
         │   └── schema.py             # AgentState TypedDict（预加载字段为 NotRequired）
