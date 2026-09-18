@@ -28,6 +28,7 @@ from aistock_agent.agents.workers.sector_trace import (
     extract_primary_sectors,
     run_sector_trace,
 )
+from aistock_agent.config import settings
 from aistock_agent.services.attribution_chain import index_pct_from_snapshot
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
@@ -655,6 +656,28 @@ def _make_consumer_state(
 _all_tasks: list[asyncio.Task] = []
 
 
+async def _dispatch_events(consumer: BaseConsumer, events: list[Event]) -> None:
+    """把事件交给既有处理分支（新消息与 PEL 认领消息共用，避免复制分发逻辑）。
+
+    处理成功才 XACK；失败走 event_bus.retry（失败的事件不 XACK，留在 PEL 等下次认领）。
+    """
+    for event in events:
+        try:
+            await consumer.handle(event)
+            await consumer.ctx.event_bus.ack(
+                consumer.channel, event.event_id, group=event.group
+            )
+        except Exception as e:
+            logger.error(
+                "consumer_handle_failed",
+                channel=consumer.channel,
+                event_id=event.event_id,
+                error=str(e),
+                exc_info=True,
+            )
+            await consumer.ctx.event_bus.retry(event)
+
+
 async def _consumer_loop(
     consumer: BaseConsumer,
     consumer_name: str,
@@ -666,31 +689,29 @@ async def _consumer_loop(
 
     group：消费组名；None 使用 EventBus 默认组（evening_chain）。
     独立链路（如 prediction_chain）由 start_all_consumers 显式传入。
+
+    每轮先认领本消费者组 PEL 中空闲超阈值的消息（进程崩溃在 XACK 前的兜底恢复），
+    再读新消息；两者都走同一处理分支。
     """
     logger.info("consumer_started", channel=consumer.channel, consumer=consumer_name, group=group)
     while True:
         try:
+            if settings.event_bus_pel_reclaim_enabled:
+                reclaimed = await consumer.ctx.event_bus.reclaim_pending(
+                    consumer.channel,
+                    consumer_name,
+                    group=group,
+                    min_idle_ms=settings.event_bus_pel_min_idle_ms,
+                    count=settings.event_bus_pel_reclaim_batch,
+                )
+                await _dispatch_events(consumer, reclaimed)
             events = await consumer.ctx.event_bus.consume(
                 consumer.channel,
                 consumer_name,
                 block_ms=block_ms,
                 group=group,
             )
-            for event in events:
-                try:
-                    await consumer.handle(event)
-                    await consumer.ctx.event_bus.ack(
-                        consumer.channel, event.event_id, group=event.group
-                    )
-                except Exception as e:
-                    logger.error(
-                        "consumer_handle_failed",
-                        channel=consumer.channel,
-                        event_id=event.event_id,
-                        error=str(e),
-                        exc_info=True,
-                    )
-                    await consumer.ctx.event_bus.retry(event)
+            await _dispatch_events(consumer, events)
         except asyncio.CancelledError:
             logger.info("consumer_cancelled", channel=consumer.channel)
             raise

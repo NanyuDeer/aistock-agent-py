@@ -1583,17 +1583,35 @@ async def _publish_review_done_for_chain(report_date: str, trace_id: str) -> boo
                 logger.debug("manual_review_done_temp_redis_close_failed")
 
 
+class ReviewQuickTriggerBody(BaseModel):
+    """POST /admin/trigger/review_quick 请求体。
+
+    `with_chain`（缺省 False，保持既有行为）：复盘成功后补发 `review_done`，驱动链组装/
+    级联预判消费者——手动触发不走 `ReviewQuickConsumer`，不补发就无法手动验证全链路。
+    """
+
+    report_date: str | None = None
+    with_chain: bool = False
+
+
 @router.post("/admin/trigger/review_quick")
 async def trigger_review_quick(
-    body: dict[str, str] | None = None,
+    body: ReviewQuickTriggerBody | None = None,
     _: None = Depends(verify_internal_token),
 ) -> dict[str, object]:
     """手动触发 quick review（15:30 腾迅实时行情版）。
     供管理员灰度验证用。绕过 is_trading_day() 检查。
+
+    `with_chain=true`（可选，缺省 false 保持既有行为）：复盘成功后补发 `review_done`
+    （见 `_publish_review_done_for_chain`），使链组装/级联预判消费者被触发——手动验证
+    全链路必需；返回体带 `chain_published` 便于观测（发布失败只 warning，不影响复盘结果）。
     """
     from aistock_agent.agents.workers.review import run_review
 
-    report_date = _resolve_manual_report_date(body)
+    report_date = _resolve_manual_report_date(
+        {"report_date": body.report_date} if body and body.report_date else None
+    )
+    with_chain = bool(body.with_chain) if body is not None else False
     trace_id = f"manual-quick-{report_date}-{int(time.time())}"
     logger = structlog.get_logger()
     logger.info("manual_trigger_review_quick", report_date=report_date, trace_id=trace_id)
@@ -1610,6 +1628,12 @@ async def trigger_review_quick(
             "manual_trigger_review_quick_done",
             status=result.status, elapsed=elapsed, trace_id=trace_id,
         )
+        # 仅 status=ok 且显式请求联动时才发布（对齐调度路径"仅 ok 发 review_done"硬约束）
+        chain_published = (
+            await _publish_review_done_for_chain(result.report_date, result.trace_id)
+            if with_chain and result.status == "ok"
+            else False
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1617,6 +1641,7 @@ async def trigger_review_quick(
             "trace_id": result.trace_id,
             "elapsed_seconds": elapsed,
             "markdown_preview": result.markdown[:200] if result.markdown else "",
+            "chain_published": chain_published,
         }
     except Exception as e:
         logger.error(

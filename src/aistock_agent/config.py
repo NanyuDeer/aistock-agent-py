@@ -312,6 +312,19 @@ class Settings(BaseSettings):
     event_bus_deadletter_prefix: str = "dlq:"
     event_bus_consumer_group: str = "evening_chain"
     event_stream_max_len: int = 10000
+    # ── EventBus PEL 恢复（spec §13.6）──
+    # 消费进程在「读到消息」与 XACK 之间崩溃/重启时，消息会滞留在消费者组 PEL，
+    # XREADGROUP(">") 不再投递它 → 静默丢事件。以下开关让消费循环定期认领超时
+    # 空闲的 pending 消息重新处理。关闭即回到认领前的行为（零行为变化，可回滚）。
+    event_bus_pel_reclaim_enabled: bool = True
+    # 认领下限空闲时间（毫秒）：**15 分钟** > 最慢 handler 耗时，避免把仍在处理中的
+    # 在途消息抢回来重复投递（重复执行会重跑 LLM、重发迭代邮件/播报，落库侧靠 upsert 兜底）。
+    # 取值依据（2026-09-18 复核）：review_quick 的 handler 最多 3 次 run_review + 60/120s
+    # 退避，最坏可逼近 5 分钟 → 取 5 分钟会重复执行，故上调到 15 分钟
+    # （宁可晚恢复，不可重复执行；日批管道晚 15 分钟恢复无影响）。
+    event_bus_pel_min_idle_ms: int = 900000
+    # 单轮最多认领条数：与消费批量同量级，避免一次认领过多挤占主链路处理时隙
+    event_bus_pel_reclaim_batch: int = 10
     # Feature Flag：quick snapshot 开关（false 时走旧 _run_evening_chain_task）
     quick_snapshot_enabled: bool = False
 
