@@ -11,6 +11,7 @@ import pytest
 
 from aistock_agent.services.condition_met_judge import (
     classify_condition_domain,
+    explain_unjudgeable_reason,
     has_or_connector,
     infer_condition_class,
     judge_condition_met,
@@ -20,6 +21,26 @@ from aistock_agent.services.condition_met_judge import (
 
 UPTREND = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
 DOWNTREND = list(reversed(UPTREND))
+
+
+# ── explain_unjudgeable_reason（2026-09-19 方案 A 观测项：条件"为什么不亮"归因，纯诊断）──
+
+@pytest.mark.parametrize(
+    ("text", "metric", "event_ref", "want"),
+    [
+        # 复合条件里含资金流子句 → 命中 G1（逐子句同序）
+        ("板块成交额维持在 230 亿元以上且主力资金延续净流入", None, None, "guard_domain"),
+        ("主力资金延续净流入", None, None, "guard_domain"),
+        ("若跌破支撑位或站上压力位", None, None, "guard_or"),
+        ("板块指数跌破 -3%", None, None, "guard_dir_pct"),
+        ("政策落地支持该产业", None, "evt-1", "event_channel"),
+        ("板块指数站稳 20 日均线且成交额维持在 100 亿以上", None, None,
+         "compound_other_unjudgeable"),
+        ("板块指数站稳 20 日均线", None, None, "single_other_unjudgeable"),
+    ],
+)
+def test_explain_unjudgeable_reason_codes(text, metric, event_ref, want) -> None:
+    assert explain_unjudgeable_reason(text, metric=metric, event_ref=event_ref) == want
 
 
 def test_breakdown_ma20_met_when_close_below() -> None:
