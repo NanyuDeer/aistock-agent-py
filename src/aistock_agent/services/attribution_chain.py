@@ -229,7 +229,8 @@ _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 # 它是**行情页/UI 页面标题**——既无现象词也无原因词，按"判不出即放行"进了事件层，但页面
 # 标题回答不了"为什么动"。两道网：标题级 `_PAGE_NOISE_TOKENS`（reason=page_noise）、
 # URL 级 `is_page_noise_url`（reason=page_noise_url）。两网豁免口径与现象判据一致：headline
-# 命中任一原因词即放行（站点名不是拒收理由，「同花顺：某公司公告中标5亿元订单」必须留下）。
+# 命中任一原因词即放行（「同花顺：某公司公告中标5亿元订单」必须留下——站点名本身不是噪声词，
+# 2026-09-18 收窄）。
 _SUMMARY_TITLE_MARKERS = (
     # 复盘/综述体裁词（简繁同列，英文综述标题同列）——体裁即综述，不看原因词
     "收评", "收盤", "收盘", "午评", "早评", "复盘", "盘点", "盘面",
@@ -252,14 +253,22 @@ _PAGE_NOISE_TOKENS = (
     "研报中心", "研報中心", "公告列表",
     # 股吧/F10/盘口（页面而非报道）
     "f10", "股吧", "盘口", "盤口",
-    # 站点名（标题即页面标题的强信号）
-    "同花顺", "同花順", "东方财富", "東方財富",
     # 英文页面标题
     "quote page", "market center", "stock quote",
 )
-# 页面级 URL 特征（网 2）：主机含行情站/股吧/F10/报价站，或路径含页面段——这类页面的
-# 正文是表格/讨论区，不承载原因。
-_PAGE_NOISE_URL_HOST_TOKENS = ("q.10jqka.com.cn", "guba", "f10", "quote")
+# 站点名（同花顺/东方财富）**刻意不入表**：它们只是**来源品牌**，不是页面形态——真原因标题
+# 若只带站点名而不含原因词（「同花顺：国家大基金三期成立」）会被误判成页面噪声。生产实证那条
+# 「国家大基金持股 - 行情中心- 同花顺」靠「行情中心」即可命中，删站点名不丢覆盖（2026-09-18 收窄）。
+#
+# 页面级 URL 特征（网 2）：**行情/数据站点域** 下的 **页面模块子域**（首段标签），或路径含页面
+# 段——这类页面的正文是表格/讨论区，不承载原因。
+#
+# 2026-09-18 收窄：旧实现是「主机**任意子串**匹配」（`guba`/`f10`/`quote`），
+# `f10.example.com`、`quotes.example.com`、`guba.example.com` 这类**非行情站**域名会被误判成
+# 页面噪声 → 误拒其转载的真驱动。现改为**站点域后缀 + 页面模块首段标签**双条件；站点首页
+# （`www.eastmoney.com`）与站内**报道页**（`finance.eastmoney.com/news/…`）不再命中。
+_PAGE_NOISE_URL_SITE_DOMAINS = ("10jqka.com.cn", "eastmoney.com")
+_PAGE_NOISE_URL_PAGE_LABELS = ("q", "data", "stockpage", "quote", "f10", "guba")
 _PAGE_NOISE_URL_PATH_TOKENS = ("/detail/code/", "/quote/", "/f10/", "/guba/")
 # 市场级词元（大盘/指数/两市/A 股整体）——与涨跌动作/涨跌幅式描述同现即行情复述
 _MARKET_WIDE_TOKENS = (
@@ -374,12 +383,29 @@ def _has_cause_token(low: str) -> bool:
     return any(token in low for token in _CAUSE_TOKENS)
 
 
+def _is_page_noise_host(host: str) -> bool:
+    """站点域下的**页面模块子域**判定：主机以 ``q.``/``data.``/``stockpage.``/``quote.``/
+    ``f10.``/``guba.`` 开头且落在已知行情/数据站点域（`_PAGE_NOISE_URL_SITE_DOMAINS`）。
+
+    刻意**不做任意子串匹配**（2026-09-18 收窄）：`f10.example.com`、`quotes.example.com`
+    这类非行情站域名不得被判页面噪声；站点首页（`www.eastmoney.com`）与站内报道页
+    （`finance.eastmoney.com/news/…`）同样不判。
+    """
+    for domain in _PAGE_NOISE_URL_SITE_DOMAINS:
+        if not host.endswith("." + domain):
+            continue
+        subdomain = host[: -(len(domain) + 1)]
+        return subdomain.split(".")[0] in _PAGE_NOISE_URL_PAGE_LABELS
+    return False
+
+
 def is_page_noise_url(url: object) -> bool:
     """URL 级页面噪声判定：True = 该 URL 指向行情页/股吧/F10 等**页面**而非事件报道。
 
-    只看 URL 形态（确定性纯函数，无网络/无 LLM）：主机含 ``q.10jqka.com.cn``/``guba``/
-    ``f10``/``quote``，或路径含 ``/detail/code/``/``/quote/``/``/f10/``/``/guba/``。
-    非字符串/空 → False（判不出即放行）。
+    只看 URL 形态（确定性纯函数，无网络/无 LLM）：主机是已知行情/数据站点域下的页面模块
+    子域（`q.10jqka.com.cn`/`quote.eastmoney.com`/`f10.eastmoney.com`/`guba.eastmoney.com`/
+    `data.10jqka.com.cn`/`stockpage.10jqka.com.cn`…），或路径含 ``/detail/code/``/``/quote/``/
+    ``/f10/``/``/guba/``。非字符串/空 → False（判不出即放行）。
 
     **刻意只收 url 一个参数**：原因词豁免由调用方判定——把 URL 逻辑塞进
     `event_summary_reason` 的 ``headline`` 签名会破坏既有调用方。
@@ -391,9 +417,10 @@ def is_page_noise_url(url: object) -> bool:
         return False
     parsed = urlparse(raw)
     # 无 scheme 的裸域（"q.10jqka.com.cn/gn/detail/code/30"）会被 urlparse 当路径，
-    # 故主机回退取首段，保证裸域同样能判出。
-    host = parsed.netloc or parsed.path.split("/", 1)[0]
-    if any(token in host for token in _PAGE_NOISE_URL_HOST_TOKENS):
+    # 故主机回退取首段，保证裸域同样能判出；顺手剥掉 userinfo 与端口。
+    netloc = parsed.netloc or parsed.path.split("/", 1)[0]
+    host = netloc.rsplit("@", 1)[-1].split(":", 1)[0]
+    if _is_page_noise_host(host):
         return True
     return any(token in parsed.path for token in _PAGE_NOISE_URL_PATH_TOKENS)
 
@@ -409,8 +436,10 @@ def event_summary_reason(headline: object) -> str:
     2. ``phenomenon_without_cause``：命中现象形态（`_has_phenomenon`）**且**原因词表
        （`_CAUSE_TOKENS`：政策/监管/公告/中标/订单/涨跌价/产能/供需/关税/补贴/并购/
        业绩/落地…）一个不命中；
-    3. ``page_noise``：命中页面噪声词（`_PAGE_NOISE_TOKENS`：行情中心/数据中心/股吧/
-       F10/盘口/同花顺/东方财富…，2026-09-18 生产实证）**且**原因词一个不命中。
+    3. ``page_noise``：命中页面噪声词（`_PAGE_NOISE_TOKENS`：行情中心/行情页/行情查询/
+       行情报价/行情走势/数据中心/资讯中心/研报中心/F10/股吧/盘口，简繁同列）**且**原因词
+       一个不命中。**站点名（同花顺/东方财富）刻意不在词表内**——来源品牌不是页面形态
+       （2026-09-18 收窄，防误拒「同花顺：国家大基金三期成立」）。
 
     判据 2 是 2026-09-18 修订的核心：由「命中现象即拒」改为「现象 且 无原因才拒」——
     "某政策落地带动光伏板块大涨""多晶硅价格上涨 供需缺口扩大"是原因不是现象，必须放行；
@@ -418,7 +447,7 @@ def event_summary_reason(headline: object) -> str:
 
     判据 3 与判据 2 **相互独立**（现象看涨跌描述，页面噪声看页面形态）：判定顺序为
     marker → 现象 → 页面噪声，同时命中时原因码取现象（既有口径不变）；两者共用
-    "原因词未命中才拒"的豁免——站点名不构成拒收理由。
+    "原因词未命中才拒"的豁免。
 
     匹配统一对 ``lower()`` 后文本做。判不出来一律放行（宁可漏判：宁可少放，也不拿综述
     当原因；真原因写法的多样性远高于现象/页面标题）。

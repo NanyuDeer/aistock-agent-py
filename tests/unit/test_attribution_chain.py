@@ -1299,7 +1299,7 @@ def test_page_noise_headline_rejected_in_search(capsys: pytest.CaptureFixture[st
 # 这类页面的正文是表格/讨论，不是原因。故对补漏候选项加 URL 判据；豁免口径与标题级一致
 # （headline 命中任一原因词即放行：真驱动可能恰好被行情站转载）。
 
-# URL 命中页面级特征（主机含站点/页面词，或路径含页面段）
+# URL 命中页面级特征（主机是行情/数据站点域下的页面模块子域，或路径含页面段）
 _PAGE_NOISE_URLS = [
     "http://q.10jqka.com.cn/gn/detail/code/30",  # 今日生产实证原样 URL
     "https://guba.eastmoney.com/news,600519,123.html",
@@ -1374,4 +1374,70 @@ def test_page_noise_url_kept_when_headline_carries_cause() -> None:
             "source": "search",
         }
     ]
+
+
+# --- 迭代 3 收窄（2026-09-18）：站点名不再单独构成拒收理由 + URL 主机按「站点域 + 页面模块」判 ---
+#
+# 上一轮如实登记的两处误伤风险：
+#   ① 标题级词表曾含**站点名**（同花顺/东方财富）——它们是**来源品牌**不是页面形态，真原因标题
+#      若只带站点名而不含任何原因词（「同花顺：国家大基金三期成立」）会被 `page_noise` 误拒；
+#   ② URL 主机曾做**任意子串**匹配（`guba`/`f10`/`quote`）：`f10.example.com`、
+#      `quotes.example.com` 这类非行情站域名被误判成"页面噪声页面"。
+# 收窄口径：① 站点名移出标题级词表（生产实证那条靠「行情中心」即可命中，覆盖不丢）；
+# ② 主机改为**站点域后缀 + 站内页面模块首段标签**双条件（路径段判据 `/detail/code/` 等不变）。
+
+# 站点名单独出现（无页面形态词、无原因词）→ 必须放行
+_STATION_NAME_ONLY_HEADLINES = [
+    "同花顺：国家大基金三期成立",
+    "同花顺财经：某行业龙头企业挂牌上市",
+    "东方财富：某公司实控人变更",
+]
+
+# 站点名 + 页面形态词（行情中心）→ 仍拒（生产实证路径不受影响）
+_STATION_NAME_WITH_PAGE_FORM_HEADLINES = [
+    "国家大基金持股 - 行情中心- 同花顺",
+    "半导体板块行情中心 - 东方财富",
+]
+
+# 行情/数据站点下的**页面模块子域**（或路径含页面段）→ 判页面噪声
+_PAGE_MODULE_URLS = [
+    "https://quote.eastmoney.com/600519.html",
+    "https://f10.eastmoney.com/f10_v2/CompanyInfo.aspx",
+    "https://guba.eastmoney.com/news,600519,123.html",
+    "https://data.10jqka.com.cn/gn/detail/code/30",
+    "https://stockpage.10jqka.com.cn/600519/",
+]
+
+# 主机含 guba/f10/quote 子串但**不属于**已知行情/数据站点 → 不得判页面噪声
+_NOT_PAGE_NOISE_URLS = [
+    "https://f10.example.com/profile",
+    "https://quotes.example.com/600519",
+    "https://guba.example.com/thread/1",
+    "https://www.eastmoney.com/news/2026/x.html",
+    "https://finance.eastmoney.com/news/2026/x.html",
+]
+
+
+@pytest.mark.parametrize("headline", _STATION_NAME_ONLY_HEADLINES)
+def test_station_name_alone_is_not_page_noise(headline: str) -> None:
+    """站点名是来源品牌，不是页面形态——不得单独构成拒收理由（2026-09-18 收窄）。"""
+    assert event_summary_reason(headline) == ""
+    assert is_driving_event(headline) is True
+
+
+@pytest.mark.parametrize("headline", _STATION_NAME_WITH_PAGE_FORM_HEADLINES)
+def test_station_name_with_page_form_still_rejected(headline: str) -> None:
+    """站点名 + 页面形态词 → 仍判页面噪声（生产实证路径不受影响）。"""
+    assert event_summary_reason(headline) == "page_noise"
+
+
+@pytest.mark.parametrize("url", _PAGE_MODULE_URLS)
+def test_page_module_urls_still_noise(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
+@pytest.mark.parametrize("url", _NOT_PAGE_NOISE_URLS)
+def test_non_market_site_urls_are_not_noise(url: str) -> None:
+    """主机出现 guba/f10/quote 子串但非行情站 → 不得误判（收窄 ② 的红线）。"""
+    assert is_page_noise_url(url) is False
 
