@@ -11,7 +11,10 @@ import pytest
 
 from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
 from aistock_agent.schemas.sector_trace import SectorChainResult, SectorStage
-from aistock_agent.services.attribution_chain import assemble_attribution_chain
+from aistock_agent.services.attribution_chain import (
+    assemble_attribution_chain,
+    is_driving_event,
+)
 
 
 def _review_payload():
@@ -93,12 +96,75 @@ def test_trace_summary_extracted_from_real_chain_dump():
     assert chain["children"][0]["trace_summary"] == "美对华设备出口限制落地"
 
 
-def test_trace_summary_fallback_when_insufficient():
-    """I-1：attribution_status=insufficient → 不再显示'板块溯源完成'占位。"""
+def test_trace_summary_taken_from_report_when_insufficient():
+    """B（2026-09-18）：报告有归因句时链摘要取它——`insufficient` **不得**触发兜底覆盖。
+
+    生产实证（2026-09-17 玉米）：同一板块在 `GET /api/agent/sector-insight/:date` 的
+    `trace.summary` 有内容（"未出现单一独立公告；催化来自…"），链却是
+    "溯源未确认驱动原因"；根因是旧实现拿 `attribution_status == "insufficient"`
+    直接返回兜底文案（app-api `extractTraceSummary` 从不看该字段）。
+    两个前端页面按摘要判"有无归因"，口径必须一致 → 有内容就不许覆盖。
+    """
+    summary = "未出现单一独立公告；催化来自超强厄尔尼诺供给扰动预期"
     chain = assemble_attribution_chain(
         report_date="2026-09-03",
         review_payload=_review_payload(),
-        sector_results=[_sector_result("半导体材料", -3.0, "疑似外部限制", status="insufficient")],
+        sector_results=[_sector_result("玉米", -3.0, summary, status="insufficient")],
+    )
+    assert chain["children"][0]["trace_summary"] == summary
+
+
+def test_trace_summary_prefers_report_summary_field():
+    """B：报告自身带非空 summary（字段形态）→ 优先取它（trigger 只是次选）。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "summary": "报告主句：设备出口限制落地",
+            "stages": [
+                {"kind": "phenomenon", "headline": "今日大幅波动", "claims": []},
+                {"kind": "trigger", "headline": "触发句", "claims": []},
+            ],
+            "attribution_status": "sufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "报告主句：设备出口限制落地"
+
+
+def test_trace_summary_falls_back_to_trigger_claim_when_headline_empty():
+    """B：报告 summary 为空（trigger 无标题）→ 退回 trigger claim（仍非现象/非兜底）。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "stages": [
+                {"kind": "phenomenon", "headline": "今日大幅波动", "claims": []},
+                {"kind": "trigger", "headline": "", "claims": ["某部委发布出口管制清单"]},
+            ],
+            "attribution_status": "insufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "某部委发布出口管制清单"
+
+
+def test_trace_summary_fallback_when_report_summary_empty():
+    """B：报告确实无内容（trigger headline/claims 皆空）→ 才用中性兜底文案。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_result("半导体材料", -3.0, "")],
     )
     assert chain["children"][0]["trace_summary"] == "溯源未确认驱动原因"
 
@@ -603,7 +669,7 @@ def test_child_events_prefers_trigger_evidence_source():
                 "半导体材料",
                 -3.0,
                 sources=[
-                    _search_source("半导体材料板块今日收评：资金净流出", url="https://news.example.com/f1"),
+                    _search_source("半导体材料板块库存去化快于预期", url="https://news.example.com/f1"),
                     _search_source("半导体材料出口管制升级落地", url="https://news.example.com/f2"),
                 ],
                 trigger_evidence=[
@@ -891,4 +957,161 @@ def test_child_meta_is_json_friendly() -> None:
     assert isinstance(child["sector_std"], str)
     dumped = json.dumps(chain, ensure_ascii=False)
     assert "885525.TI" in dumped
+
+
+# --- 2026-09-18：事件准入只收「驱动原因」，拒收「行情综述/现象」（组长口径） ---
+#
+# 生产实证（2026-09-17 CRO 概念）：事件层被"A股收評|滬指跌0.41%…""今天A股，三大指数
+# 集体下跌 - 时间线- 搜狐"这类**行情综述**填充——它们回答不了"为什么动"。口径：宁可
+# 漏判（少放）也不把综述当原因；筛完为空即 events=[]（如实交空，不得回退成综述）。
+
+# 综述/现象形态（含生产实证两例 + 简繁 + 英文）
+_RECAP_HEADLINES = [
+    "A股收評| 滬指跌0.41% 三大指數收跌農業板塊逆勢大漲",
+    "今天A股，三大指数集体下跌 - 时间线- 搜狐",
+    "半导体材料板块今日收评：主力资金净流出居前",
+    "半导体材料板块复盘：午后跌幅扩大",
+    "两市成交额跌破万亿，沪指跌0.41%",
+    "涨跌家数显示市场情绪转弱，盘面承压",
+    "券商板块午评：早盘冲高回落",
+    "Closing Bell: S&P 500 falls 0.4% as tech slides",
+]
+
+# 驱动原因形态（政策/监管/供需/价格/公司公告/行业事件）
+_DRIVING_HEADLINES = [
+    "工信部发布光伏制造行业规范条件 推动落后产能退出",
+    "商务部对原产于X的进口多晶硅加征关税",
+    "某公司公告：拟收购XX股权并复牌",
+    "多晶硅价格上涨 供需缺口扩大",
+]
+
+
+@pytest.mark.parametrize("headline", _RECAP_HEADLINES)
+def test_is_driving_event_rejects_recap_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _DRIVING_HEADLINES)
+def test_is_driving_event_keeps_driving_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+def test_recap_search_sources_produce_empty_events(capsys: pytest.CaptureFixture[str]) -> None:
+    """综述类 headline 不产事件节点（含源标题与板块词命中，仍被准入拦下）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块今日收评：主力资金净流出居前"),
+                    _search_source("今天A股，三大指数集体下跌 - 时间线- 搜狐"),
+                ],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    # 被拒留痕：结构化日志键 + 原因 + 汇总计数（条数可观测）
+    assert "chain_event_rejected_not_driving" in out
+    assert "summary_marker" in out
+    assert "rejected_not_driving" in out
+
+
+def test_recap_headline_truncated_in_rejection_log(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """留痕的 headline 必须截断（长标题不整条进日志）。"""
+    long_title = "半导体材料板块今日收评：" + "资金净流出居前" * 10
+    assert len(long_title) > 60
+    assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("半导体材料", -3.0, sources=[_search_source(long_title)])
+        ],
+    )
+    out = capsys.readouterr().out
+    assert long_title not in out
+
+
+def test_recap_rejected_does_not_fall_back_to_recap() -> None:
+    """全部被拒 → events=[]（如实交空），**不得**回退成综述兜底。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[_search_source("A股收評| 滬指跌0.41% 三大指數收跌農業板塊逆勢大漲")],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+
+
+def test_driving_search_source_kept_recap_rejected() -> None:
+    """同一板块下：驱动原因保留、综述被拒（互不影响）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块今日收评：主力资金净流出居前"),
+                    _search_source("半导体材料出口管制升级落地", url="https://news.example.com/b"),
+                ],
+            )
+        ],
+    )
+    events = chain["children"][0]["events"]
+    assert [e["headline"] for e in events] == ["半导体材料出口管制升级落地"]
+
+
+def test_driving_keyword_outranks_plain_headline_in_search_candidates() -> None:
+    """正向要求：能回答"为什么动"的事件（公告/政策/价格类）排序靠前。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块近期持续承压", url="https://news.example.com/g1"),
+                    _search_source("半导体材料公司公告：扩产计划获批", url="https://news.example.com/g2"),
+                ],
+            )
+        ],
+    )
+    assert [e["ref"] for e in chain["children"][0]["events"]] == [
+        "https://news.example.com/g2",
+        "https://news.example.com/g1",
+    ]
+
+
+def test_warehouse_event_path_ignores_admission_filter() -> None:
+    """回归：中台存量事件（event_id 非空）**不受**准入筛选影响（warehouse 路径逐字不变）。"""
+    title = "半导体材料板块今日收评：资金净流出"
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+        warehouse_events=[
+            _warehouse_event("2026-09-17-abc1234567890", title, keywords=["半导体材料"])
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": "2026-09-17-abc1234567890",
+            "ref": "event:2026-09-17-abc1234567890",
+            "headline": title,
+            "source": "warehouse",
+        }
+    ]
 

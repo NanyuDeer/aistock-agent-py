@@ -16,6 +16,7 @@ group="prediction_chain"（大盘溯源后接预测独立拆分，PR-A/T2）；S
 
 import asyncio
 import json
+import time
 from abc import ABC, abstractmethod
 
 from structlog import get_logger
@@ -24,6 +25,8 @@ from aistock_agent.agents.workers import broadcast as broadcast_agent
 from aistock_agent.agents.workers import iterate as iterate_agent
 from aistock_agent.agents.workers.review import run_review
 from aistock_agent.agents.workers.sector_trace import (
+    SOURCE_CANDIDATE_CLAIM,
+    SOURCE_SNAPSHOT,
     SectorHit,
     extract_primary_sectors,
     run_sector_trace,
@@ -65,6 +68,20 @@ PREDICTION_RETRY_BACKOFF_SEC = 2
 # 总尝试次数含首次；退避序列长度 = MAX-1，总阻塞约 3 分钟（该通道每日一次）。
 REVIEW_QUICK_MAX_RETRIES = 3
 REVIEW_QUICK_RETRY_BACKOFF = (60, 120)  # 秒
+
+# 兜底（T2/T3）补跑板块溯源的数量上限：与 extract_primary_sectors 的 max_sectors
+# 默认值同值（3，该链路既有上限）。提取层已按此截断，这里再兜一道——防上游日后放宽
+# 上限时弱归因日（兜底命中多）的 LLM/检索成本失控。
+SECTOR_TRACE_FALLBACK_MAX_SECTORS = 3
+
+
+def _fallback_level(source: str) -> str:
+    """兜底来源级别标签（补跑日志用）：候选链 claim → T2，快照桶 → T3（其余原样回显）。"""
+    if source == SOURCE_CANDIDATE_CLAIM:
+        return "T2"
+    if source == SOURCE_SNAPSHOT:
+        return "T3"
+    return source
 
 
 class PredictionRetryExhaustedError(Exception):
@@ -469,7 +486,19 @@ class SectorTraceConsumer(BaseConsumer):
         # 级联预判入参（板块名 + 溯源快照 + 提取来源/弱标记），链保存后再消费（P0' 时序）
         cascades: list[tuple[str, dict[str, object], str, bool]] = []
 
-        async def _one(hit: SectorHit) -> None:
+        async def _one(hit: SectorHit, *, fallback_level: str = "") -> None:
+            # 兜底命中（T2/T3）必须真跑一遍板块溯源（不是只点名入链）：fallback_level
+            # 非空即代表该板块来自兜底（补跑），补跑前后各记一条留痕日志
+            # （sector / 来源级别 T2|T3 / 耗时），与 T1 日志分离便于对账。
+            if fallback_level:
+                logger.info(
+                    "sector_trace_fallback_started",
+                    report_date=report_date,
+                    sector=hit.name,
+                    fallback_level=fallback_level,
+                    extraction_source=hit.source,
+                )
+            started = time.monotonic()
             try:
                 result = await run_sector_trace(
                     report_date=report_date,
@@ -492,6 +521,15 @@ class SectorTraceConsumer(BaseConsumer):
                     extraction_source=hit.source,
                     extraction_weak=hit.weak,
                 )
+                if fallback_level:
+                    logger.info(
+                        "sector_trace_fallback_done",
+                        report_date=report_date,
+                        sector=hit.name,
+                        fallback_level=fallback_level,
+                        extraction_source=hit.source,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "sector_trace_one_failed",
@@ -499,8 +537,47 @@ class SectorTraceConsumer(BaseConsumer):
                     sector=hit.name,
                     error=str(exc),
                 )
+                if fallback_level:
+                    # 逐项隔离：单板块补跑失败只留痕 + 该板块如实未确认（不入链），
+                    # 其它板块与链保存不受影响。
+                    logger.warning(
+                        "sector_trace_fallback_failed",
+                        report_date=report_date,
+                        sector=hit.name,
+                        fallback_level=fallback_level,
+                        extraction_source=hit.source,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        error=str(exc),
+                    )
 
-        await asyncio.gather(*(_one(hit) for hit in sectors))
+        # 兜底命中（T2/T3，弱依据）与主链命中（T1）**分流**后一并并行溯源：
+        # - T1 命中：fallback_level 恒为空 → 调用次数/入参/日志与既有行为逐字一致；
+        # - 兜底命中：逐个真跑 run_sector_trace（复用既有实现与并发/降级策略），
+        #   产物带 timeline/extraction/sector_row 入链 → 弱归因日 children 也有真实
+        #   trace_summary（前端「未确认不显示」过滤后仍有内容）；
+        # - 分流而非"对同一板块再跑一遍"：避免把弱归因日的 LLM/检索成本翻倍。
+        primary_hits = [hit for hit in sectors if not hit.weak]
+        fallback_hits = [hit for hit in sectors if hit.weak]
+        if len(fallback_hits) > SECTOR_TRACE_FALLBACK_MAX_SECTORS:
+            logger.info(
+                "sector_trace_fallback_truncated",
+                report_date=report_date,
+                total=len(fallback_hits),
+                kept=SECTOR_TRACE_FALLBACK_MAX_SECTORS,
+                dropped=[
+                    hit.name
+                    for hit in fallback_hits[SECTOR_TRACE_FALLBACK_MAX_SECTORS:]
+                ],
+            )
+            fallback_hits = fallback_hits[:SECTOR_TRACE_FALLBACK_MAX_SECTORS]
+
+        await asyncio.gather(
+            *(_one(hit) for hit in primary_hits),
+            *(
+                _one(hit, fallback_level=_fallback_level(hit.source))
+                for hit in fallback_hits
+            ),
+        )
 
         # P1a-3：溯源完成（results 非空）→ 组装大盘-板块归因链并 internal 保存。
         # 链保存失败只 warning 不阻断（溯源已逐板块落库，兼容降级约束）。

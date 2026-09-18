@@ -91,18 +91,30 @@ def index_pct_from_snapshot(snapshot: dict[str, object]) -> float | None:
 
 
 def _trace_summary(trace_result: dict[str, object]) -> str:
-    """从真实板块溯源 dump（SectorChainResult.model_dump(mode="json")）摘一句话。
+    """链 children[].trace_summary：优先取该板块 sector_trace 报告的非空摘要。
 
-    真实形状：{chain_id, sector, stages:[{kind, headline, claims, evidence}],
-    attribution_status, missing_evidence}——没有 summary/observable_result 等
-    顶层文案键。归因结论在 trigger stage（事件主因）的 headline/claims 里；
-    attribution_status=insufficient 或无法提取（无 stages/无 trigger/无文本）
-    时回退 _FALLBACK_TRACE_SUMMARY，避免显示"板块溯源完成"误导。
+    取源优先级（**报告有内容就不得被兜底覆盖**）：
+
+    1. 报告顶层 `summary`（写入侧若提供非空字符串，直接采用）；
+    2. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
+    3. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
+    4. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
+
+    为什么去掉"attribution_status == insufficient → 直接兜底"：生产实证
+    （2026-09-17 玉米）同一板块在 `GET /api/agent/sector-insight/:date` 的
+    `trace.summary`（app-api `extractTraceSummary` 取 trigger headline，从不看该字段）
+    是有内容的归因句，链却是"溯源未确认驱动原因"——前端两页（市场洞见按链摘要判
+    "有无归因"、板块四环按 sector-insight 主因）口径必须一致，故摘要只按"有没有内容"
+    决定是否兜底。
+
+    刻意**不**回退 phenomenon/首 stage 的 headline：那是现象描述（"今日大幅波动"），
+    拿它当驱动原因正是本次要修的问题；无 trigger 即无归因，如实走中性兜底。
     """
     if not isinstance(trace_result, dict):
         return _FALLBACK_TRACE_SUMMARY
-    if trace_result.get("attribution_status") == "insufficient":
-        return _FALLBACK_TRACE_SUMMARY
+    summary = trace_result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
     stages = trace_result.get("stages")
     if not isinstance(stages, list):
         return _FALLBACK_TRACE_SUMMARY
@@ -195,9 +207,94 @@ _SECTOR_SOURCE_PREFIX = "sector_event:"
 # 猜测性别名会引入误召回。
 _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 
-# 盘面复述/表层转载特征词：命中降权（spec §3.2-4"追溯到最本质事件"——避免停在
-# 复述当日行情/资金流的新闻上）。仅降权不排除；排除只按板块相关性门槛。
-_RECAP_TITLE_MARKERS = ("收评", "午评", "早评", "复盘", "盘点", "资金流向", "涨停潮", "异动")
+# --- 事件准入：只收「驱动原因」，拒收「行情综述/现象」（2026-09-18 组长口径） ---
+#
+# 生产实证（2026-09-17 CRO 概念）：检索补漏把「A股收評|滬指跌0.41% 三大指數收跌農業
+# 板塊逆勢大漲」「今天A股，三大指数集体下跌 - 时间线- 搜狐」这类**行情综述**塞进事件
+# 层——它们只复述"发生了什么"（现象），回答不了"为什么动"（原因）。口径：宁可漏判
+# （少放），也不拿综述当原因；全部被拒即 events=[]（如实交空，不得回退成综述兜底）。
+#
+# 为什么做在**准入**而不是只写进 prompt：生成侧（LLM prompt）与判定侧（本护栏）双保险，
+# 不依赖单次 LLM 输出的稳定性。
+_SUMMARY_TITLE_MARKERS = (
+    # 复盘/综述体裁词（简繁同列，英文综述标题同列）
+    "收评", "收盤", "收盘", "午评", "早评", "复盘", "盘点", "盘面",
+    "三大指数", "三大指數", "涨跌家数", "漲跌家數", "时间线", "時間線",
+    "资金流向", "資金流向", "涨停潮", "漲停潮", "异动", "異動",
+    "closing bell", "market wrap", "market recap", "daily recap",
+)
+# 市场级词元（大盘/指数/两市/A 股整体）——与涨跌幅式描述同现即行情复述
+_MARKET_WIDE_TOKENS = (
+    "沪指", "滬指", "上证指数", "上證指數", "深证成指", "深證成指", "创业板指",
+    "創業板指", "科创50", "科創50", "沪深300", "滬深300", "两市", "兩市", "a股",
+    "s&p 500", "nasdaq", "dow jones", "shanghai composite",
+)
+# 涨跌幅式描述："跌0.41%"/"涨超2%"/"下跌1.2%"
+_PCT_RECAP_RE = re.compile(r"[涨漲跌][幅超逾]?\s*\d+(?:\.\d+)?\s*%")
+# 成交额/家数综述词（"两市"＋其一即成交额/涨跌家数综述）
+_TURNOVER_RECAP_TOKENS = ("成交", "亿元", "億元", "家数", "家數")
+# 时段词＋涨跌动词 = 盘中盘面复述（"午后跌幅扩大"/"早盘跳水"）
+_SESSION_TOKENS = ("午后", "午後", "早盘", "早盤", "盘中", "盤中", "尾盘", "尾盤", "开盘", "開盤")
+_DIRECTION_TOKENS = ("涨", "漲", "跌", "跳水", "拉升")
+
+# 驱动类正面特征（政策/监管/供需/价格/公司公告/行业事件/资金制度）：只用于检索候选
+# **排序加权**，不做准入（真原因千变万化，白名单式准入门槛会漏掉真驱动——误拒成本高于
+# 误留：留下来的仍要过"是不是综述"的准入判定）。
+_DRIVING_KEYWORDS = (
+    "政策", "监管", "部委", "国务院", "发改委", "工信部", "财政部",
+    "证监会", "央行", "公告", "披露", "预案", "中标", "订单", "合同", "业绩",
+    "盈利", "涨价", "提价", "降价", "供需", "供给", "需求", "库存", "减产",
+    "扩产", "投产", "并购", "重组", "增持", "回购", "分红", "立案", "调查",
+    "处罚", "禁令", "限制", "出口管制", "关税", "补贴", "试点", "标准", "新规",
+    "条例", "法案", "会议", "预期",
+)
+
+
+def event_summary_reason(headline: object) -> str:
+    """行情综述/现象判定：返回非驱动原因（``""`` = 通过，即驱动原因或判不出综述）。
+
+    确定性单点判定（纯函数，无 LLM/无网络），覆盖形态：
+
+    - ``summary_marker``：收评/收盤/复盘/盘面/三大指数/涨跌家数/时间线/资金流向/
+      涨停潮/异动（简繁与英文综述标题同列）；
+    - ``index_pct_recap``：市场级词元（沪指/上证/两市/A股/创业板指…）＋涨跌幅式描述；
+    - ``turnover_recap``：两市＋成交额/家数/涨跌综述；
+    - ``session_recap``：时段词（午后/早盘/盘中/尾盘/开盘）＋涨跌幅式描述或涨跌动词。
+
+    匹配统一对 ``lower()`` 后文本做（中文不受影响，英文词元按小写）。判不出来一律放行
+    （宁可漏判：本函数只负责挡"确定是综述"的形态）。
+    """
+    if not isinstance(headline, str):
+        return "not_text"
+    text = headline.strip()
+    if not text:
+        return "empty"
+    low = text.lower()
+    if any(marker in low for marker in _SUMMARY_TITLE_MARKERS):
+        return "summary_marker"
+    has_pct = bool(_PCT_RECAP_RE.search(low))
+    if has_pct and any(token in low for token in _MARKET_WIDE_TOKENS):
+        return "index_pct_recap"
+    if ("两市" in low or "兩市" in low) and (
+        has_pct
+        or any(token in low for token in _TURNOVER_RECAP_TOKENS)
+        or any(token in low for token in _DIRECTION_TOKENS)
+    ):
+        return "turnover_recap"
+    if any(token in low for token in _SESSION_TOKENS) and (
+        has_pct or any(token in low for token in _DIRECTION_TOKENS)
+    ):
+        return "session_recap"
+    return ""
+
+
+def is_driving_event(headline: object) -> bool:
+    """事件准入（单点判定）：True = 该 headline 可作为"驱动原因"进链事件节点。
+
+    只挡"确定是行情综述/现象"的形态（见 `event_summary_reason`）；判不出即放行。
+    仅作用于**检索补漏**（source=search）；中台存量事件（source=warehouse）路径不变。
+    """
+    return event_summary_reason(headline) == ""
 
 
 def _normalize_match_text(value: object) -> str:
@@ -328,19 +425,29 @@ def _search_candidates(
     sector: str,
     trace_result: dict[str, object],
     snapshot: dict[str, object],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], int]:
     """检索补漏（spec §3.2-4 ②，溯源板块一律强制执行）。
 
     消费溯源快照的定向检索来源（sources[].kind="sector_event:<query>"，由
-    sector_trace_snapshot._run_directed_searches 真实产出）。相关性门槛：标题/正文
-    命中板块词，或 URL 被 trigger 阶段引用；门槛不过 → 不产节点（不编造事件）。
+    sector_trace_snapshot._run_directed_searches 真实产出）。两道门槛：
+
+    1. **事件准入**（`event_summary_reason`）：行情综述/现象（收评/复盘/指数涨跌幅
+       复述/成交额综述…）一律拒收——综述回答不了"为什么动"，拿它填充会让用户误以为
+       已归因（2026-09-17 生产实证）。被拒逐条留痕 `chain_event_rejected_not_driving`
+       并返回被拒条数（汇总进 `chain_sector_events`）；
+    2. **相关性门槛**：标题/正文命中板块词，或 URL 被 trigger 阶段引用；
+       门槛不过 → 不产节点（不编造事件）。
+
+    排序（全等分时保原序）：trigger 证据引用 → 标题命中 → 正文命中 → 含驱动类关键词
+    （政策/公告/供需/价格…，`_DRIVING_KEYWORDS`）→ 原序。返回 (节点列表, 被拒条数)。
     """
     sources = snapshot.get("sources") if isinstance(snapshot, dict) else None
     if not isinstance(sources, list):
-        return []
+        return [], 0
     tokens = _sector_tokens(sector)
     evidence_urls = _trigger_evidence_urls(trace_result)
     scored: list[tuple[int, int, int, int, int, dict[str, object]]] = []
+    rejected = 0
     for index, item in enumerate(sources):
         if not isinstance(item, dict):
             continue
@@ -353,19 +460,30 @@ def _search_candidates(
         headline = title or content[:60].strip()
         if not headline:
             continue
+        reason = event_summary_reason(headline)
+        if reason:
+            rejected += 1
+            logger.info(
+                "chain_event_rejected_not_driving",
+                sector=sector,
+                reason=reason,
+                headline=headline[:60],  # 截断：综述标题可能很长，日志只留可辨识前缀
+            )
+            continue
         url = str(item.get("url") or "").strip()
         in_title = _mentions(title, tokens)
         in_content = _mentions(content, tokens)
         by_evidence = bool(url) and url in evidence_urls
         if not (by_evidence or in_title or in_content):
             continue
-        recap = 1 if any(marker in title for marker in _RECAP_TITLE_MARKERS) else 0
+        low_headline = headline.lower()
+        driving = 0 if any(k in low_headline for k in _DRIVING_KEYWORDS) else 1
         scored.append(
             (
                 0 if by_evidence else 1,
                 0 if in_title else 1,
                 0 if in_content else 1,
-                recap,
+                driving,
                 index,
                 _node(
                     event_id=None,  # 检索来源无中台权威 id（不冒充）
@@ -376,7 +494,7 @@ def _search_candidates(
             )
         )
     scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
-    return [item[5] for item in scored]
+    return [item[5] for item in scored], rejected
 
 
 def _is_same_event(left: dict[str, object], right: dict[str, object]) -> bool:
@@ -401,9 +519,16 @@ def _child_events(
     snapshot: dict[str, object],
     warehouse_events: list[dict[str, object]],
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """板块事件节点集合：中台优先 → 检索补漏 → 去重 → 上限（返回节点 + 留痕计数）。"""
+    """板块事件节点集合：中台优先 → 检索补漏 → 去重 → 上限（返回节点 + 留痕计数）。
+
+    `rejected_not_driving` = 检索补漏里被"非驱动原因（行情综述/现象）"准入挡下的条数
+    （留痕/调参用；中台事件不参与该筛选）。
+    """
     candidates = _warehouse_candidates(sector, warehouse_events)
-    candidates.extend(_search_candidates(sector, trace_result, snapshot))
+    search_candidates, rejected_not_driving = _search_candidates(
+        sector, trace_result, snapshot
+    )
+    candidates.extend(search_candidates)
     kept: list[dict[str, object]] = []
     dropped = 0
     for candidate in candidates:
@@ -427,6 +552,7 @@ def _child_events(
         "search": sum(1 for e in events if e["source"] == _EVENT_SOURCE_SEARCH),
         "deduped": dropped,
         "capped": max(capped, 0),
+        "rejected_not_driving": rejected_not_driving,
     }
     return events, stats
 
@@ -565,8 +691,13 @@ def assemble_attribution_chain(
             snapshot_dict if isinstance(snapshot_dict, dict) else {},
             warehouse_events or [],
         )
-        if events or event_stats["deduped"] or event_stats["capped"]:
-            # 判定留痕（spec §3.2-4 去重/上限口径调参用）
+        if (
+            events
+            or event_stats["deduped"]
+            or event_stats["capped"]
+            or event_stats["rejected_not_driving"]
+        ):
+            # 判定留痕（spec §3.2-4 去重/上限口径调参用；含"综述被拒"计数）
             logger.info(
                 "chain_sector_events",
                 report_date=report_date,
