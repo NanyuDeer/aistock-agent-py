@@ -461,6 +461,50 @@ def _chain(stages: list[dict]) -> object:
     )
 
 
+def test_sector_trace_prompt_declares_conclusion_contract() -> None:
+    """R25 生成侧契约：prompt 必须声明 `conclusion` 字段与约束（否则 LLM 不会产出结论）。
+
+    与大盘【attribution_summary 约束】同款：仅 sufficient 时给一句话、只讲原因本身。
+    """
+    from aistock_agent.prompts.workers.sector_trace import _GENERATE_SECTOR_PROMPT
+
+    assert "conclusion" in _GENERATE_SECTOR_PROMPT
+    assert "【conclusion 约束】" in _GENERATE_SECTOR_PROMPT
+    assert "sufficient" in _GENERATE_SECTOR_PROMPT
+    assert "空字符串" in _GENERATE_SECTOR_PROMPT
+
+
+def test_sector_chain_result_carries_conclusion_field() -> None:
+    """R25：`conclusion` 为加性字段——LLM 产出随 `model_dump` 流出（中间层据此透出到前端）。
+
+    缺省（老数据/未产出）必须是空串，不得编造结论。
+    """
+    from aistock_agent.schemas.sector_trace import SectorChainResult
+
+    parsed = SectorChainResult.model_validate(
+        {
+            "chain_id": "x1",
+            "sector": "存储板块",
+            "stages": [{"kind": "trigger", "headline": "触发句", "claims": [], "evidence": []}],
+            "attribution_status": "sufficient",
+            "conclusion": "美方设备出口限制落地，国产替代预期升温",
+        }
+    )
+    dumped = parsed.model_dump(mode="json")
+    assert dumped["conclusion"] == "美方设备出口限制落地，国产替代预期升温"
+
+    legacy = SectorChainResult.model_validate(
+        {
+            "chain_id": "x1",
+            "sector": "存储板块",
+            "stages": [],
+            "attribution_status": "insufficient",
+        }
+    )
+    assert legacy.conclusion == ""
+    assert legacy.model_dump(mode="json")["conclusion"] == ""
+
+
 def test_validate_sector_chain_trigger_missing_evidence() -> None:
     """trigger 阶段缺 evidence → 降级 insufficient 且 missing_evidence 记「缺事件证据」。"""
     from aistock_agent.schemas.sector_trace import validate_sector_chain

@@ -33,6 +33,26 @@
 - 主线留痕新增「主线候选取数失败（N 个）」标注；worker 区分 `None`（取数失败）与行数不足（数据不足）两条降级路径。
 - 单元用例：`build_mainline_notes` 的「legacy 文案零回归」「两类失败不混写」「候选充足不留痕」三条断言；`get_ths_daily_range` 的 ISO 归一 / 紧凑格式不变 / 失败返回 None 三条断言。
 
+## \[main\] 2026-09-18 — 板块溯源新增「归因结论」`conclusion`（折叠卡不再显示「触发」）
+
+**开发者**: Aria
+
+### 新增
+
+- `schemas/sector_trace.py::SectorChainResult` 加性新增 `conclusion: str = ""`（不升 `schema_version`，缺省空串不编造）；因 `trace_result = model_dump(mode="json")`，新键自动流进 `display_report.sector_traces[板块名]` 与 `market_trace.trace`，中间层零改动。
+- `prompts/workers/sector_trace.py` 输出字段加 `conclusion`，并新增【conclusion 约束】镜像大盘【attribution_summary 约束】：仅 `attribution_status === "sufficient"` 时给一句 30-40 字综合该板块当日驱动原因的结论，其余输出空串；只讲原因本身，不混现象描述/涨跌幅数据/事件罗列，不用冒号或列表，语义须与 stages 一致。
+
+### 修复
+
+- 链 `children[].trace_summary` 取源改为 `conclusion` → 顶层 `summary`（旧数据兼容层）→ trigger headline → trigger claims → 中性兜底。根因：板块溯源 schema 此前无结论字段，`_trace_summary_from_report` 读 `trace_result.get("summary")` 永远读不到，摘要只能落 trigger 段 headline（原因第 1 段），导致市场洞见链分支 / 板块预判页 / 板块详情页三处折叠卡显示的都是「触发」。
+- 事件让位裁决（`_is_negative_summary` / `_NEGATIVE_SUMMARY_MARKERS`）逐字不变；老数据无 `conclusion` 自动回退旧口径（零变化）。
+
+### 测试
+
+- `tests/unit/test_attribution_chain.py` +4 例、`tests/unit/test_sector_trace_worker.py` +2 例（先红后绿）；定向 5 个 sector/chain spec 201 passed；全量 `tests/unit` 3263 passed / 8 failed（8 条均为文档化存量红，零新增）；`ruff` 改动文件通过；`mypy` 仅 1 条 HEAD 存量。
+
+---
+
 ## \[changer\] 2026-09-18 — 节奏大师新增手动触发端点（补跑 / 补发）
 
 **开发者**: 37588

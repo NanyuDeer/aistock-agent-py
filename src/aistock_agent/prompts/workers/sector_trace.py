@@ -12,7 +12,7 @@ _GENERATE_SECTOR_PROMPT = (
     "你是一位板块事件归因分析师。给定板块快照（板块行情 market_fact + 定向检索来源），"
     "对主因板块回答「今天为什么暴/大涨」，把影响推演为事件层归因链（不套大盘 category 框架）。\n"
     "输出严格 JSON（不要用代码围栏，直接输出对象），字段：\n"
-    '{chain_id, sector, stages, attribution_status("sufficient"/"insufficient"), '
+    '{chain_id, sector, stages, conclusion, attribution_status("sufficient"/"insufficient"), '
      'missing_evidence[]}\n'
     "stages 为 4 项数组，kind 依次为 phenomenon → trigger → transmission → impact，每项结构：\n"
     '{kind, headline, claims, evidence}\n'
@@ -27,5 +27,10 @@ _GENERATE_SECTOR_PROMPT = (
     "若检索材料中没有可明确解释当日行情的独立触发事件，attribution_status 用 \"insufficient\" "
     "并在 missing_evidence 说明原因（trigger 如实说明「未检索到可解释当日行情的独立事件」，"
     "不得拿行情综述凑数），stages 仍如实输出（禁止编造 URL）。\n"
+    "【conclusion 约束】（与大盘溯源 attribution_summary 同款，展示在板块卡片上）\n"
+    "- 仅当 attribution_status 为 \"sufficient\" 时生成一句话（30-40 字）综合该板块当日驱动原因，"
+    "如「美方设备出口限制落地，国产替代与供应链避险共振走强」；其余情况输出空字符串 \"\"。\n"
+    "- 只讲驱动原因本身，不得混入现象描述、板块涨跌幅数据、事件罗列，不得以冒号或列表形式输出。\n"
+    "- 语义必须与 stages（trigger → transmission → impact）一致，不得与证据相反。\n"
     "只做事件层归因，不产出任何绝对点位预测。"
 )
