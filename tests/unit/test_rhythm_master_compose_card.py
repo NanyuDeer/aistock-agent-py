@@ -297,3 +297,64 @@ async def test_card_basis_date_is_evidence_date():
 
     assert card.basis_date == "2026-09-11"   # 证据日（K 线末日）
     assert card.target_date == "2026-09-14"  # 运行日
+
+
+@pytest.mark.asyncio
+async def test_mainline_none_state_is_not_marked_data_missing():
+    """A1 fix wave 2：候选齐备但无清晰主线属正常市场态，不得写入 data_missing。
+
+    守 spec §5.5「只有确实降级才写，正常态不写（守 H7）」：`state == "none"`
+    表示候选选择完全成功、只是没有清晰主线，非数据降级；该信息已由
+    `phase_evidence.reason` 的 `主线：无清晰主线` 承载，删除留痕不丢信息。
+    """
+    from aistock_agent.agents.workers import rhythm_master as worker_mod
+    from aistock_agent.services.mainline_engine import MA20_MIN_BARS
+
+    cands = [
+        {"name": "AI 算力", "tag_code": "886050.TI", "aliases": ["算力租赁"]},
+        {"name": "AI 应用", "tag_code": "886108.TI", "aliases": []},
+        {"name": "半导体", "tag_code": "881121.TI", "aliases": ["芯片"]},
+    ]
+    index_map = [{"ts_code": c["tag_code"], "name": c["name"]} for c in cands]
+    sector_rows = [
+        {"trade_date": "20260910", "pct_chg": 1.0} for _ in range(MA20_MIN_BARS)
+    ]
+    win_stub = type("W", (), {"events": [], "high_events": [], "source_missing": False})()
+    with (
+        patch.object(
+            worker_mod.node_api, "get_index_kline",
+            AsyncMock(return_value=_mock_kline_dated(200, "20260910")),
+        ),
+        patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
+        patch.object(
+            worker_mod.node_api, "get_close_snapshot",
+            AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 60}}),
+        ),
+        patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
+        patch.object(worker_mod.node_api, "get_ths_index_map", AsyncMock(return_value=index_map)),
+        patch.object(
+            worker_mod.node_api, "get_ths_daily_range", AsyncMock(return_value=sector_rows)
+        ),
+        patch.object(worker_mod, "load_mainline_candidates", return_value=(True, cands)),
+        patch.object(
+            worker_mod, "judge_mainline",
+            return_value={
+                "state": "none", "name": None, "strength": None, "excess": None,
+                "data_date": None, "attention": "候选齐备但无清晰主线",
+                "breakdown": None, "nav": None,
+            },
+        ),
+        patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
+        patch.object(worker_mod, "validate_synthesis", return_value=False),
+    ):
+        card, rows, win = await worker_mod._compose_card("2026-09-10", "after_close")
+        rhythm_card = worker_mod._build_rhythm_card(card, win, rows, card.mainline_facts)
+
+    # 前提：候选齐备（未触发不可用降级）且主线判定为 none
+    assert card.mainline_facts.get("state") == "none"
+    missing = rhythm_card["data_missing"]
+    assert not any("无清晰主线" in m for m in missing)
+    assert not any("主线" in m for m in missing)
+    # 信息仍在：正常态由 phase_evidence.reason 承载，删除留痕不丢信息
+    assert rhythm_card["phase_evidence"]["reason"].startswith("主线：无清晰主线")

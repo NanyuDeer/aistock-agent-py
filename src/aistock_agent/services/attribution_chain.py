@@ -1,5 +1,6 @@
 """归因链组装与保存（spec P1a-3：大盘-板块-事件 链树的 agent 侧产物）。"""
 import re
+from urllib.parse import urlparse
 
 import structlog
 
@@ -11,6 +12,18 @@ logger = structlog.get_logger()
 # 溯源未确认驱动原因时的 trace_summary 回退文案（区别于"溯源完成"占位——溯源
 # insufficient 或无法从 stages 提取 trigger 结论时，如实说明原因未确认）。
 _FALLBACK_TRACE_SUMMARY = "溯源未确认驱动原因"
+
+# 「否定句摘要」标记词（2026-09-18 迭代 4）：溯源阶段如实说明"没找到原因"的句式。
+# 这类句子的存在前提是**事件层也为空**——`children[].events` 非空却写着"未检索到触发事件"
+# 就是结论与证据相反（生产实证：同一板块卡片上两句话并存）。
+#
+# 刻意只用**无歧义的否定词**：肯定归因句里的"不足/没有/缺少/缺乏"（如"供给不足推动多晶硅
+# 价格上涨"）一旦入表就会被误判成否定句、把真有归因的摘要错误让位给事件标题，故不收。
+_NEGATIVE_SUMMARY_MARKERS = (
+    "未检索到", "未找到", "未发现", "未确认", "未明确", "未识别", "未匹配",
+    "没有检索到", "没有找到", "没有发现",
+    "无法确认", "无法判断", "不能确认", "暂无", "尚未",
+)
 
 # 弱依据日（无主链：板块提取走候选链/快照兜底）链根摘要回退文案：报告中
 # attribution_summary 空缺时用中性表述，不编造主因（Task 9.1）。
@@ -90,19 +103,29 @@ def index_pct_from_snapshot(snapshot: dict[str, object]) -> float | None:
     return None
 
 
-def _trace_summary(trace_result: dict[str, object]) -> str:
-    """从真实板块溯源 dump（SectorChainResult.model_dump(mode="json")）摘一句话。
+def _is_negative_summary(text: str) -> bool:
+    """摘要是否为「未找到原因」的否定句（`_NEGATIVE_SUMMARY_MARKERS`，纯子串判定）。"""
+    return any(marker in text for marker in _NEGATIVE_SUMMARY_MARKERS)
 
-    真实形状：{chain_id, sector, stages:[{kind, headline, claims, evidence}],
-    attribution_status, missing_evidence}——没有 summary/observable_result 等
-    顶层文案键。归因结论在 trigger stage（事件主因）的 headline/claims 里；
-    attribution_status=insufficient 或无法提取（无 stages/无 trigger/无文本）
-    时回退 _FALLBACK_TRACE_SUMMARY，避免显示"板块溯源完成"误导。
-    """
+
+def _first_event_headline(events: object) -> str:
+    """事件层首条可用 headline（空/空白/非 dict/非字符串一律跳过），取不到返回 ``""``。"""
+    if not isinstance(events, list):
+        return ""
+    for node in events:
+        headline = node.get("headline") if isinstance(node, dict) else None
+        if isinstance(headline, str) and headline.strip():
+            return headline.strip()
+    return ""
+
+
+def _trace_summary_from_report(trace_result: dict[str, object]) -> str:
+    """`_trace_summary` 的报告侧取源（1→4 优先级），不含事件层裁决。"""
     if not isinstance(trace_result, dict):
         return _FALLBACK_TRACE_SUMMARY
-    if trace_result.get("attribution_status") == "insufficient":
-        return _FALLBACK_TRACE_SUMMARY
+    summary = trace_result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
     stages = trace_result.get("stages")
     if not isinstance(stages, list):
         return _FALLBACK_TRACE_SUMMARY
@@ -121,6 +144,40 @@ def _trace_summary(trace_result: dict[str, object]) -> str:
             if isinstance(claim, str) and claim.strip():
                 return claim.strip()
     return _FALLBACK_TRACE_SUMMARY
+
+
+def _trace_summary(trace_result: dict[str, object], *, events: object = ()) -> str:
+    """链 children[].trace_summary：优先取该板块 sector_trace 报告的非空摘要。
+
+    取源优先级（**报告有内容就不得被兜底覆盖**）：
+
+    1. 报告顶层 `summary`（写入侧若提供非空字符串，直接采用）；
+    2. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
+    3. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
+    4. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
+
+    为什么去掉"attribution_status == insufficient → 直接兜底"：生产实证
+    （2026-09-17 玉米）同一板块在 `GET /api/agent/sector-insight/:date` 的
+    `trace.summary`（app-api `extractTraceSummary` 取 trigger headline，从不看该字段）
+    是有内容的归因句，链却是"溯源未确认驱动原因"——前端两页（市场洞见按链摘要判
+    "有无归因"、板块四环按 sector-insight 主因）口径必须一致，故摘要只按"有没有内容"
+    决定是否兜底。
+
+    刻意**不**回退 phenomenon/首 stage 的 headline：那是现象描述（"今日大幅波动"），
+    拿它当驱动原因正是本次要修的问题；无 trigger 即无归因，如实走中性兜底。
+
+    **迭代 4（2026-09-18）：结论不得与证据相反**——`events` 非空（事件层确有驱动事件）
+    且上面取到的摘要是否定句（`_is_negative_summary`）时，摘要让位给事件首条 headline。
+    依据：`trace_summary` 语义是"该板块的驱动原因"，而 `events` 是它的支撑证据；链上已经
+    有事件节点却写着"未检索到触发事件"，同一个板块卡片上两句话自相矛盾（生产实证）。
+    事件首条 headline 也取不到时（节点无标题）让不了位，如实保留否定句。
+    """
+    summary = _trace_summary_from_report(trace_result)
+    if _is_negative_summary(summary):
+        headline = _first_event_headline(events)
+        if headline:
+            return headline
+    return summary
 
 
 def _pct_from(snapshot: dict[str, object]) -> float | None:
@@ -195,9 +252,297 @@ _SECTOR_SOURCE_PREFIX = "sector_event:"
 # 猜测性别名会引入误召回。
 _SECTOR_NAME_SUFFIXES = ("板块", "概念", "行业", "指数")
 
-# 盘面复述/表层转载特征词：命中降权（spec §3.2-4"追溯到最本质事件"——避免停在
-# 复述当日行情/资金流的新闻上）。仅降权不排除；排除只按板块相关性门槛。
-_RECAP_TITLE_MARKERS = ("收评", "午评", "早评", "复盘", "盘点", "资金流向", "涨停潮", "异动")
+# --- 事件准入：只收「驱动原因」，拒收「行情综述/现象」（2026-09-18 组长口径） ---
+# 生产实证（2026-09-17 CRO 概念）：检索补漏把「A股收評|滬指跌0.41% 三大指數收跌農業
+# 板塊逆勢大漲」「今天A股，三大指数集体下跌 - 时间线- 搜狐」这类**行情综述**塞进事件
+# 层——它们只复述"发生了什么"（现象），回答不了"为什么动"（原因）。口径：宁可漏判
+# （少放），也不拿综述当原因；全部被拒即 events=[]（如实交空，不得回退成综述兜底）。
+#
+# 2026-09-18 修订（今日生产实证漏网两条，均 source=search 进链）：
+# 「注册制次新股大涨八个点，A股市场全线拉升，沪指站上五日均线 - 网易」「全线上涨！
+# A股这一板块，涨幅第一！ - 21财经」——旧规则只看 marker/百分号/两市/时段，"八个点"
+# "全线上涨""涨幅第一""站上五日均线"这类**无百分号**写法全漏。故判据由「命中现象即拒」
+# 改为「命中现象 **且** 原因词未命中 → 拒」：现象外壳但讲清原因（政策落地/价格上涨/
+# 订单放量…）必须放行——它们是原因不是现象，误拒成本高于误留。
+#
+# 为什么做在**准入**而不是只写进 prompt：生成侧（LLM prompt）与判定侧（本护栏）双保险，
+# 不依赖单次 LLM 输出的稳定性。
+#
+# 2026-09-18 修订 3（页面噪声，同一原因词豁免口径）：生产链 children[].events 漏网
+# 「国家大基金持股 - 行情中心- 同花顺」（URL http://q.10jqka.com.cn/gn/detail/code/…）。
+# 它是**行情页/UI 页面标题**——既无现象词也无原因词，按"判不出即放行"进了事件层，但页面
+# 标题回答不了"为什么动"。两道网：标题级 `_PAGE_NOISE_TOKENS`（reason=page_noise）、
+# URL 级 `is_page_noise_url`（reason=page_noise_url）。两网豁免口径与现象判据一致：headline
+# 命中任一原因词即放行（「同花顺：某公司公告中标5亿元订单」必须留下——站点名本身不是噪声词，
+# 2026-09-18 收窄）。
+_SUMMARY_TITLE_MARKERS = (
+    # 复盘/综述体裁词（简繁同列，英文综述标题同列）——体裁即综述，不看原因词
+    "收评", "收盤", "收盘", "午评", "早评", "复盘", "盘点", "盘面",
+    "三大指数", "三大指數", "涨跌家数", "漲跌家數", "时间线", "時間線",
+    "资金流向", "資金流向", "涨停潮", "漲停潮", "异动", "異動",
+    "closing bell", "market wrap", "market recap", "daily recap",
+)
+# 页面噪声词（准入第三判据）：行情页/数据中心/股吧/盘口等 **UI 页面标题**用语——页面标题
+# 只说明"这是一页行情/资料"，不承载"为什么动"（2026-09-18 生产实证）。与现象判据**相互
+# 独立**（现象看涨跌描述，页面噪声看页面形态），但共用"原因词未命中才拒"的豁免口径。
+#
+# 注意「公告列表」在现有 `_CAUSE_TOKENS` 含「公告」时**不可达**（必然被豁免），保留为对齐
+# 建议口径；调参时可删。「资金流向表」同时命中 marker（reason=summary_marker）。
+_PAGE_NOISE_TOKENS = (
+    # 行情页/行情模块用语
+    "行情中心", "行情页", "行情頁", "行情查询", "行情查詢", "行情报价", "行情報價",
+    "行情走势", "行情走勢", "个股行情", "個股行情", "概念行情", "板块行情", "板塊行情",
+    # 站内栏目/数据中心
+    "资金流向表", "資金流向表", "数据中心", "資料中心", "资讯中心", "資訊中心",
+    "研报中心", "研報中心", "公告列表",
+    # 股吧/F10/盘口（页面而非报道）
+    "f10", "股吧", "盘口", "盤口",
+    # 栏目/首页形态（2026-09-18 收窄后的覆盖回归补偿）："股票频道- 东方财富网"这类**站点栏目名**
+    # 不是事件标题——站点名已移出词表，改由"栏目形态词"识别，既拦住栏目名又不误拒
+    # "同花顺：国家大基金三期成立"（含站点名但无栏目形态）。
+    "频道", "頻道", "首页", "首頁", "栏目", "欄目", "导航", "導航",
+    # 英文页面标题
+    "quote page", "market center", "stock quote",
+)
+# 站点名（同花顺/东方财富）**刻意不入表**：它们只是**来源品牌**，不是页面形态——真原因标题
+# 若只带站点名而不含原因词（「同花顺：国家大基金三期成立」）会被误判成页面噪声。生产实证那条
+# 「国家大基金持股 - 行情中心- 同花顺」靠「行情中心」即可命中，删站点名不丢覆盖（2026-09-18 收窄）。
+#
+# 页面级 URL 特征（网 2）：**行情/数据站点域** 下的 **页面模块子域**（首段标签），或路径含页面
+# 段——这类页面的正文是表格/讨论区，不承载原因。
+#
+# 2026-09-18 收窄：旧实现是「主机**任意子串**匹配」（`guba`/`f10`/`quote`），
+# `f10.example.com`、`quotes.example.com`、`guba.example.com` 这类**非行情站**域名会被误判成
+# 页面噪声 → 误拒其转载的真驱动。现改为**站点域后缀 + 页面模块首段标签**双条件；站点首页
+# （`www.eastmoney.com`）与站内**报道页**（`finance.eastmoney.com/news/…`）不再命中。
+_PAGE_NOISE_URL_SITE_DOMAINS = ("10jqka.com.cn", "eastmoney.com")
+_PAGE_NOISE_URL_PAGE_LABELS = ("q", "data", "stockpage", "quote", "f10", "guba")
+_PAGE_NOISE_URL_PATH_TOKENS = ("/detail/code/", "/quote/", "/f10/", "/guba/")
+# 站点/栏目首页路径（2026-09-18 收窄后的覆盖回归补偿）：已知行情/数据站点域（含子域）下
+# path 为空/`/`/`index.*` → 是"某频道的首页"，不是任何报道。生产实证：
+# `https://stock.eastmoney.com/` → 标题 `股票频道- 东方财富网` 漏进事件层。
+_PAGE_NOISE_URL_ROOT_PATHS = ("", "/", "/index.html", "/index.htm", "/index.shtml", "/index.php")
+# 市场级词元（大盘/指数/两市/A 股整体）——与涨跌动作/涨跌幅式描述同现即行情复述
+_MARKET_WIDE_TOKENS = (
+    "沪指", "滬指", "上证指数", "上證指數", "深证成指", "深證成指", "创业板指",
+    "創業板指", "科创50", "科創50", "沪深300", "滬深300", "大盘", "大盤", "两市",
+    "兩市", "a股", "s&p 500", "nasdaq", "dow jones", "shanghai composite",
+)
+# 市场级涨跌动作词（无百分号写法："沪指站上五日均线""大盘走弱""创业板指跌破2000点"）
+_MARKET_ACTION_TOKENS = (
+    "站上", "失守", "跌破", "拉升", "上涨", "上漲", "下跌", "走强", "走強",
+    "走弱", "回落", "低开", "低開", "高开", "高開",
+)
+# 板块级涨幅语（无数字、无百分号的行情复述："全线上涨""涨幅第一""领涨两市"）
+_RALLY_PHRASES = (
+    "全线上涨", "全線上漲", "全线拉升", "全線拉升", "集体上涨", "集體上漲",
+    "集体拉升", "集體拉升", "普涨", "普漲", "涨幅第一", "漲幅第一",
+    "涨幅居前", "漲幅居前", "涨幅榜", "漲幅榜", "领涨两市", "領漲兩市",
+)
+# "大涨八个点"/"涨了3个点"/"跌超2个点"：中文/阿拉伯数字＋"个点"（无百分号也能读出涨幅）
+_POINT_MOVE_RE = re.compile(
+    r"[涨漲跌](?:了|超|近|逾)?\s*[0-9零一二三四五六七八九十百两半]+\s*个点"
+)
+# 新高语：**限与板块/指数同现**才算行情复述（"板块创阶段新高"）；个股新高不在本链口径
+_NEW_HIGH_PHRASES = (
+    "创阶段新高", "創階段新高", "创年内新高", "創年內新高", "创新高", "創新高",
+    "创出新高", "刷新新高",
+)
+_NEW_HIGH_QUALIFIERS = (
+    "板块", "板塊", "指数", "指數", "大盘", "大盤", "概念", "行业", "行業",
+    "两市", "兩市", "etf",
+)
+# 涨跌幅式描述："跌0.41%"/"涨超2%"/"下跌1.2%"
+_PCT_RECAP_RE = re.compile(r"[涨漲跌][幅超逾]?\s*\d+(?:\.\d+)?\s*%")
+# 成交额/家数综述词（"两市"＋其一即成交额/涨跌家数综述）
+_TURNOVER_RECAP_TOKENS = ("成交", "亿元", "億元", "家数", "家數")
+# 时段词＋涨跌动词 = 盘中盘面复述（"午后跌幅扩大"/"早盘跳水"）
+_SESSION_TOKENS = ("午后", "午後", "早盘", "早盤", "盘中", "盤中", "尾盘", "尾盤", "开盘", "開盤")
+_DIRECTION_TOKENS = ("涨", "漲", "跌", "跳水", "拉升")
+
+# 原因词表（准入第二判据）：命中现象形态 **且** 这些词一个不命中才拒。"价格"/"供给"
+# 为 2026-09-18 按需增补——"多晶硅价格上涨"是价格驱动原因，不加会被当纯现象误拒。
+# 刻意与 `_DRIVING_KEYWORDS`（只用于检索候选排序）分开：准入与排序口径不同，合并会
+# 牵动排序行为（准入只求"能读出原因"，排序还要看权重）。
+_CAUSE_TOKENS = (
+    # 政策/监管/部委
+    "政策", "监管", "監管", "部委", "国常会", "國常會", "发改委", "發改委",
+    "工信部", "证监会", "證監會", "央行", "国务院", "國務院", "牌照",
+    # 公司/交易披露
+    "公告", "披露", "预案", "預案", "中标", "中標", "订单", "訂單", "签约",
+    "簽約", "招标", "招標", "获批", "獲批", "并购", "並購", "重组", "重組",
+    "收购", "收購", "增持", "回购", "回購",
+    # 供需/价格/产能
+    "涨价", "漲價", "提价", "提價", "降价", "降價", "价格", "價格", "减产",
+    "減產", "扩产", "擴產", "投产", "投產", "产能", "產能", "供需", "需求",
+    "供给", "供給", "库存", "庫存",
+    # 外贸/政策工具
+    "出口", "进口", "進口", "关税", "關稅", "补贴", "補貼", "试点", "試點",
+    "细则", "細則", "方案", "规划", "規劃", "标准", "標準",
+    # 业绩/落地（弱原因词：宁可放行）
+    "业绩", "業績", "财报", "財報", "落地",
+)
+
+# 驱动类正面特征（政策/监管/供需/价格/公司公告/行业事件/资金制度）：只用于检索候选
+# **排序加权**，不做准入（真原因千变万化，白名单式准入门槛会漏掉真驱动——误拒成本高于
+# 误留：留下来的仍要过"是不是综述"的准入判定）。
+_DRIVING_KEYWORDS = (
+    "政策", "监管", "部委", "国务院", "发改委", "工信部", "财政部",
+    "证监会", "央行", "公告", "披露", "预案", "中标", "订单", "合同", "业绩",
+    "盈利", "涨价", "提价", "降价", "供需", "供给", "需求", "库存", "减产",
+    "扩产", "投产", "并购", "重组", "增持", "回购", "分红", "立案", "调查",
+    "处罚", "禁令", "限制", "出口管制", "关税", "补贴", "试点", "标准", "新规",
+    "条例", "法案", "会议", "预期",
+)
+
+
+def _has_phenomenon(low: str) -> bool:
+    """现象形态识别（纯词表/正则，判不出即 False）——覆盖形态：
+
+    - 市场级主语（沪指/上证指数/创业板指/沪深300/大盘/两市/A股…）＋涨跌动作词或涨跌幅；
+    - 两市＋成交额/家数/涨跌综述（"两市成交额跌破万亿"）；
+    - 时段词（午后/早盘/盘中/尾盘/开盘）＋涨跌幅或涨跌动词；
+    - 板块级涨幅语（全线上涨/集体拉升/普涨/涨幅第一/领涨两市…）；
+    - "大涨八个点"/"涨了3个点"（`_POINT_MOVE_RE`）；
+    - 板块/指数创新高（`_NEW_HIGH_PHRASES` × `_NEW_HIGH_QUALIFIERS`）。
+    """
+    has_pct = bool(_PCT_RECAP_RE.search(low))
+    market = any(token in low for token in _MARKET_WIDE_TOKENS)
+    action = any(token in low for token in _MARKET_ACTION_TOKENS)
+    if market and (has_pct or action):
+        return True
+    if ("两市" in low or "兩市" in low) and (
+        has_pct or action or any(token in low for token in _TURNOVER_RECAP_TOKENS)
+    ):
+        return True
+    if any(token in low for token in _SESSION_TOKENS) and (
+        has_pct or action or any(token in low for token in _DIRECTION_TOKENS)
+    ):
+        return True
+    if any(phrase in low for phrase in _RALLY_PHRASES):
+        return True
+    if _POINT_MOVE_RE.search(low):
+        return True
+    return any(phrase in low for phrase in _NEW_HIGH_PHRASES) and any(
+        qualifier in low for qualifier in _NEW_HIGH_QUALIFIERS
+    )
+
+
+def _has_cause_token(low: str) -> bool:
+    """原因词命中判定（准入共用）：现象判据与页面噪声判据的豁免口径必须**一致**——
+    含任一原因词即放行（"同花顺：某公司公告中标5亿元订单"必须留下）。
+    """
+    return any(token in low for token in _CAUSE_TOKENS)
+
+
+def _is_page_noise_host(host: str) -> bool:
+    """站点域下的**页面模块子域**判定：主机以 ``q.``/``data.``/``stockpage.``/``quote.``/
+    ``f10.``/``guba.`` 开头且落在已知行情/数据站点域（`_PAGE_NOISE_URL_SITE_DOMAINS`）。
+
+    刻意**不做任意子串匹配**（2026-09-18 收窄）：`f10.example.com`、`quotes.example.com`
+    这类非行情站域名不得被判页面噪声；站点首页（`www.eastmoney.com`）与站内报道页
+    （`finance.eastmoney.com/news/…`）同样不判。
+    """
+    for domain in _PAGE_NOISE_URL_SITE_DOMAINS:
+        if not host.endswith("." + domain):
+            continue
+        subdomain = host[: -(len(domain) + 1)]
+        return subdomain.split(".")[0] in _PAGE_NOISE_URL_PAGE_LABELS
+    return False
+
+
+def _is_site_root(host: str, path: str) -> bool:
+    """已知行情/数据站点域（含子域）的**站点/栏目首页**判定（`_PAGE_NOISE_URL_ROOT_PATHS`）。
+
+    首页路径本身不含任何报道内容，无论标题多干净都不承载原因（页面模块子域之外的第二道形态判据）。
+    """
+    if path not in _PAGE_NOISE_URL_ROOT_PATHS:
+        return False
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in _PAGE_NOISE_URL_SITE_DOMAINS
+    )
+
+
+def is_page_noise_url(url: object) -> bool:
+    """URL 级页面噪声判定：True = 该 URL 指向行情页/股吧/F10 等**页面**而非事件报道。
+
+    只看 URL 形态（确定性纯函数，无网络/无 LLM）：主机是已知行情/数据站点域下的页面模块
+    子域（`q.10jqka.com.cn`/`quote.eastmoney.com`/`f10.eastmoney.com`/`guba.eastmoney.com`/
+    `data.10jqka.com.cn`/`stockpage.10jqka.com.cn`…），或是该站点域（含任意子域）的
+    **站点/栏目首页**（path 空/`/`/`index.*`），或路径含 ``/detail/code/``/``/quote/``/
+    ``/f10/``/``/guba/``。非字符串/空 → False（判不出即放行）。
+
+    **刻意只收 url 一个参数**：原因词豁免由调用方判定——把 URL 逻辑塞进
+    `event_summary_reason` 的 ``headline`` 签名会破坏既有调用方。
+    """
+    if not isinstance(url, str):
+        return False
+    raw = url.strip().lower()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    # 无 scheme 的裸域（"q.10jqka.com.cn/gn/detail/code/30"）会被 urlparse 当路径，
+    # 故主机回退取首段，保证裸域同样能判出；顺手剥掉 userinfo 与端口。
+    netloc = parsed.netloc or parsed.path.split("/", 1)[0]
+    host = netloc.rsplit("@", 1)[-1].split(":", 1)[0]
+    if _is_page_noise_host(host) or _is_site_root(host, parsed.path):
+        return True
+    return any(token in parsed.path for token in _PAGE_NOISE_URL_PATH_TOKENS)
+
+
+def event_summary_reason(headline: object) -> str:
+    """行情综述/页面噪声判定：返回拒收原因码（``""`` = 放行，即原因事件或判不出形态）。
+
+    三条独立判据（确定性纯函数，无 LLM/无网络）：
+
+    1. ``summary_marker``：**综述体裁词**（收评/收盤/复盘/盘面/三大指数/涨跌家数/时间线/
+       资金流向/涨停潮/异动，简繁与英文综述标题同列）——体裁本身就是综述，**不因**含
+       原因词而放行（"今日收评：某政策落地"仍是收评，不可能是一条原因事件）；
+    2. ``phenomenon_without_cause``：命中现象形态（`_has_phenomenon`）**且**原因词表
+       （`_CAUSE_TOKENS`：政策/监管/公告/中标/订单/涨跌价/产能/供需/关税/补贴/并购/
+       业绩/落地…）一个不命中；
+    3. ``page_noise``：命中页面噪声词（`_PAGE_NOISE_TOKENS`：行情中心/行情页/行情查询/
+       行情报价/行情走势/数据中心/资讯中心/研报中心/F10/股吧/盘口/**频道/首页/栏目/导航**，
+       简繁同列）**且**原因词一个不命中。**站点名（同花顺/东方财富）刻意不在词表内**——
+       来源品牌不是页面形态（2026-09-18 收窄，防误拒「同花顺：国家大基金三期成立」）；
+       站点**栏目名**改由栏目形态词拦（「股票频道- 东方财富网」，2026-09-18 覆盖回归补偿）。
+
+    判据 2 是 2026-09-18 修订的核心：由「命中现象即拒」改为「现象 且 无原因才拒」——
+    "某政策落地带动光伏板块大涨""多晶硅价格上涨 供需缺口扩大"是原因不是现象，必须放行；
+    "注册制次新股大涨八个点…沪指站上五日均线""全线上涨！…涨幅第一"是纯现象，拒收。
+
+    判据 3 与判据 2 **相互独立**（现象看涨跌描述，页面噪声看页面形态）：判定顺序为
+    marker → 现象 → 页面噪声，同时命中时原因码取现象（既有口径不变）；两者共用
+    "原因词未命中才拒"的豁免。
+
+    匹配统一对 ``lower()`` 后文本做。判不出来一律放行（宁可漏判：宁可少放，也不拿综述
+    当原因；真原因写法的多样性远高于现象/页面标题）。
+    """
+    if not isinstance(headline, str):
+        return "not_text"
+    text = headline.strip()
+    if not text:
+        return "empty"
+    low = text.lower()
+    if any(marker in low for marker in _SUMMARY_TITLE_MARKERS):
+        return "summary_marker"
+    has_phenomenon = _has_phenomenon(low)
+    has_page_noise = any(token in low for token in _PAGE_NOISE_TOKENS)
+    if not (has_phenomenon or has_page_noise):
+        return ""
+    if _has_cause_token(low):
+        return ""
+    return "phenomenon_without_cause" if has_phenomenon else "page_noise"
+
+
+def is_driving_event(headline: object) -> bool:
+    """事件准入（单点判定）：True = 该 headline 可作为"驱动原因"进链事件节点。
+
+    只挡"确定是行情综述/现象"的形态（见 `event_summary_reason`）；判不出即放行。
+    仅作用于**检索补漏**（source=search）；中台存量事件（source=warehouse）路径不变。
+    """
+    return event_summary_reason(headline) == ""
 
 
 def _normalize_match_text(value: object) -> str:
@@ -328,19 +673,35 @@ def _search_candidates(
     sector: str,
     trace_result: dict[str, object],
     snapshot: dict[str, object],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], int]:
     """检索补漏（spec §3.2-4 ②，溯源板块一律强制执行）。
 
     消费溯源快照的定向检索来源（sources[].kind="sector_event:<query>"，由
-    sector_trace_snapshot._run_directed_searches 真实产出）。相关性门槛：标题/正文
-    命中板块词，或 URL 被 trigger 阶段引用；门槛不过 → 不产节点（不编造事件）。
+    sector_trace_snapshot._run_directed_searches 真实产出）。三道门槛：
+
+    1. **事件准入**（`event_summary_reason`）：行情综述/现象/页面标题一律拒收——综述回答不了
+       "为什么动"，拿它填充会让用户误以为已归因（2026-09-17/18 生产实证）。2026-09-18
+       起判据为"命中现象形态**且**原因词未命中"（`_has_phenomenon` × `_CAUSE_TOKENS`）：
+       现象外衣但讲清原因（政策落地/价格上涨/订单放量…）放行，纯现象（全线上涨/涨幅第一/
+       沪指站上五日均线…）拒收；页面噪声词（行情中心/数据中心/股吧…）同理，reason=page_noise。
+       被拒逐条留痕 `chain_event_rejected_not_driving` 并返回被拒条数（汇总进
+       `chain_sector_events`）；
+    2. **URL 准入门槛**（`is_page_noise_url`，2026-09-18）：headline 干净但 URL 是行情页/
+       股吧/F10 页（reason=page_noise_url）→ 拒收；headline 含原因词则**不因 URL 被拒**，
+       留痕与计数口径同 1；
+    3. **相关性门槛**：标题/正文命中板块词，或 URL 被 trigger 阶段引用；
+       门槛不过 → 不产节点（不编造事件）。
+
+    排序（全等分时保原序）：trigger 证据引用 → 标题命中 → 正文命中 → 含驱动类关键词
+    （政策/公告/供需/价格…，`_DRIVING_KEYWORDS`）→ 原序。返回 (节点列表, 被拒条数)。
     """
     sources = snapshot.get("sources") if isinstance(snapshot, dict) else None
     if not isinstance(sources, list):
-        return []
+        return [], 0
     tokens = _sector_tokens(sector)
     evidence_urls = _trigger_evidence_urls(trace_result)
     scored: list[tuple[int, int, int, int, int, dict[str, object]]] = []
+    rejected = 0
     for index, item in enumerate(sources):
         if not isinstance(item, dict):
             continue
@@ -353,19 +714,41 @@ def _search_candidates(
         headline = title or content[:60].strip()
         if not headline:
             continue
+        reason = event_summary_reason(headline)
+        if reason:
+            rejected += 1
+            logger.info(
+                "chain_event_rejected_not_driving",
+                sector=sector,
+                reason=reason,
+                headline=headline[:60],  # 截断：综述标题可能很长，日志只留可辨识前缀
+            )
+            continue
         url = str(item.get("url") or "").strip()
+        # 网 2（URL 级，2026-09-18）：headline 干净但 URL 指向行情页/股吧/F10 页 → 页面噪声。
+        # 豁免口径与标题级一致：headline 命中任一原因词即放行（行情站也可能转载真原因）。
+        if is_page_noise_url(url) and not _has_cause_token(headline.lower()):
+            rejected += 1
+            logger.info(
+                "chain_event_rejected_not_driving",
+                sector=sector,
+                reason="page_noise_url",
+                headline=headline[:60],  # 截断口径与标题级一致
+            )
+            continue
         in_title = _mentions(title, tokens)
         in_content = _mentions(content, tokens)
         by_evidence = bool(url) and url in evidence_urls
         if not (by_evidence or in_title or in_content):
             continue
-        recap = 1 if any(marker in title for marker in _RECAP_TITLE_MARKERS) else 0
+        low_headline = headline.lower()
+        driving = 0 if any(k in low_headline for k in _DRIVING_KEYWORDS) else 1
         scored.append(
             (
                 0 if by_evidence else 1,
                 0 if in_title else 1,
                 0 if in_content else 1,
-                recap,
+                driving,
                 index,
                 _node(
                     event_id=None,  # 检索来源无中台权威 id（不冒充）
@@ -376,7 +759,7 @@ def _search_candidates(
             )
         )
     scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
-    return [item[5] for item in scored]
+    return [item[5] for item in scored], rejected
 
 
 def _is_same_event(left: dict[str, object], right: dict[str, object]) -> bool:
@@ -401,9 +784,16 @@ def _child_events(
     snapshot: dict[str, object],
     warehouse_events: list[dict[str, object]],
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """板块事件节点集合：中台优先 → 检索补漏 → 去重 → 上限（返回节点 + 留痕计数）。"""
+    """板块事件节点集合：中台优先 → 检索补漏 → 去重 → 上限（返回节点 + 留痕计数）。
+
+    `rejected_not_driving` = 检索补漏里被"非驱动原因（行情综述/现象）"准入挡下的条数
+    （留痕/调参用；中台事件不参与该筛选）。
+    """
     candidates = _warehouse_candidates(sector, warehouse_events)
-    candidates.extend(_search_candidates(sector, trace_result, snapshot))
+    search_candidates, rejected_not_driving = _search_candidates(
+        sector, trace_result, snapshot
+    )
+    candidates.extend(search_candidates)
     kept: list[dict[str, object]] = []
     dropped = 0
     for candidate in candidates:
@@ -427,6 +817,7 @@ def _child_events(
         "search": sum(1 for e in events if e["source"] == _EVENT_SOURCE_SEARCH),
         "deduped": dropped,
         "capped": max(capped, 0),
+        "rejected_not_driving": rejected_not_driving,
     }
     return events, stats
 
@@ -557,16 +948,22 @@ def assemble_attribution_chain(
         sector = str(getattr(res, "sector", "") or "")
         trace_result = getattr(res, "trace_result", {}) or {}
         snapshot_dict = getattr(res, "snapshot", {}) or {}
+        trace_result_dict = trace_result if isinstance(trace_result, dict) else {}
         pct = _pct_from(snapshot_dict) if isinstance(snapshot_dict, dict) else None
         # 链事件层（spec §3.2-4）：中台优先 → 检索补漏 → 去重 → 上限；无命中为空数组
         events, event_stats = _child_events(
             sector,
-            trace_result if isinstance(trace_result, dict) else {},
+            trace_result_dict,
             snapshot_dict if isinstance(snapshot_dict, dict) else {},
             warehouse_events or [],
         )
-        if events or event_stats["deduped"] or event_stats["capped"]:
-            # 判定留痕（spec §3.2-4 去重/上限口径调参用）
+        if (
+            events
+            or event_stats["deduped"]
+            or event_stats["capped"]
+            or event_stats["rejected_not_driving"]
+        ):
+            # 判定留痕（spec §3.2-4 去重/上限口径调参用；含"综述被拒"计数）
             logger.info(
                 "chain_sector_events",
                 report_date=report_date,
@@ -574,6 +971,17 @@ def assemble_attribution_chain(
                 **event_stats,
             )
         extraction = _sector_extraction(res)
+        # 迭代 4：摘要与事件层一致性裁决——否定句摘要 + 有事件 → 摘要让位（见 `_trace_summary`）
+        report_summary = _trace_summary_from_report(trace_result_dict)
+        trace_summary = _trace_summary(trace_result_dict, events=events)
+        if trace_summary != report_summary:
+            logger.info(
+                "chain_trace_summary_overridden_by_events",
+                report_date=report_date,
+                sector=sector,
+                from_summary=report_summary,
+                to_headline=trace_summary,
+            )
         child: dict[str, object] = {
             "sector": sector,
             # R14：板块标识增强（ts_code/sector_std，取自溯源命中的快照权威行）——
@@ -581,7 +989,7 @@ def assemble_attribution_chain(
             **_sector_meta(sector, getattr(res, "sector_row", None)),
             "relation": judge_sector_driver_relation(pct, index_pct),
             "pct": pct,
-            "trace_summary": _trace_summary(trace_result),
+            "trace_summary": trace_summary,
             "events": events,
         }
         # Task 9.1：兜底命中（无主链 → 候选链/快照）标弱依据，供展示层提示证据不足；

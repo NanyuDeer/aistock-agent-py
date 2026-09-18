@@ -11,7 +11,13 @@ import pytest
 
 from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
 from aistock_agent.schemas.sector_trace import SectorChainResult, SectorStage
-from aistock_agent.services.attribution_chain import assemble_attribution_chain
+from aistock_agent.services.attribution_chain import (
+    _trace_summary,
+    assemble_attribution_chain,
+    event_summary_reason,
+    is_driving_event,
+    is_page_noise_url,
+)
 
 
 def _review_payload():
@@ -93,12 +99,75 @@ def test_trace_summary_extracted_from_real_chain_dump():
     assert chain["children"][0]["trace_summary"] == "美对华设备出口限制落地"
 
 
-def test_trace_summary_fallback_when_insufficient():
-    """I-1：attribution_status=insufficient → 不再显示'板块溯源完成'占位。"""
+def test_trace_summary_taken_from_report_when_insufficient():
+    """B（2026-09-18）：报告有归因句时链摘要取它——`insufficient` **不得**触发兜底覆盖。
+
+    生产实证（2026-09-17 玉米）：同一板块在 `GET /api/agent/sector-insight/:date` 的
+    `trace.summary` 有内容（"未出现单一独立公告；催化来自…"），链却是
+    "溯源未确认驱动原因"；根因是旧实现拿 `attribution_status == "insufficient"`
+    直接返回兜底文案（app-api `extractTraceSummary` 从不看该字段）。
+    两个前端页面按摘要判"有无归因"，口径必须一致 → 有内容就不许覆盖。
+    """
+    summary = "未出现单一独立公告；催化来自超强厄尔尼诺供给扰动预期"
     chain = assemble_attribution_chain(
         report_date="2026-09-03",
         review_payload=_review_payload(),
-        sector_results=[_sector_result("半导体材料", -3.0, "疑似外部限制", status="insufficient")],
+        sector_results=[_sector_result("玉米", -3.0, summary, status="insufficient")],
+    )
+    assert chain["children"][0]["trace_summary"] == summary
+
+
+def test_trace_summary_prefers_report_summary_field():
+    """B：报告自身带非空 summary（字段形态）→ 优先取它（trigger 只是次选）。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "summary": "报告主句：设备出口限制落地",
+            "stages": [
+                {"kind": "phenomenon", "headline": "今日大幅波动", "claims": []},
+                {"kind": "trigger", "headline": "触发句", "claims": []},
+            ],
+            "attribution_status": "sufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "报告主句：设备出口限制落地"
+
+
+def test_trace_summary_falls_back_to_trigger_claim_when_headline_empty():
+    """B：报告 summary 为空（trigger 无标题）→ 退回 trigger claim（仍非现象/非兜底）。"""
+
+    class R:
+        sector = "半导体材料"
+        trace_result = {
+            "stages": [
+                {"kind": "phenomenon", "headline": "今日大幅波动", "claims": []},
+                {"kind": "trigger", "headline": "", "claims": ["某部委发布出口管制清单"]},
+            ],
+            "attribution_status": "insufficient",
+        }
+        snapshot = {"sector": {"name": "半导体材料", "pct_change": -3.0}}
+
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[R()],
+    )
+    assert chain["children"][0]["trace_summary"] == "某部委发布出口管制清单"
+
+
+def test_trace_summary_fallback_when_report_summary_empty():
+    """B：报告确实无内容（trigger headline/claims 皆空）→ 才用中性兜底文案。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-03",
+        review_payload=_review_payload(),
+        sector_results=[_sector_result("半导体材料", -3.0, "")],
     )
     assert chain["children"][0]["trace_summary"] == "溯源未确认驱动原因"
 
@@ -352,7 +421,7 @@ def test_index_pct_non_numeric_change_pct_falls_back_then_none():
 # --- Task 2.1：链事件节点契约（children[].events: warehouse/search，spec §3.2-4） ---
 
 # 与 sector_trace_snapshot._sector_evidence_queries 第 1 组同形（检索补漏来源的 kind 后缀）
-_SEARCH_QUERY = "2026-09-03 半导体材料 板块 暴跌 大涨 原因"
+_SEARCH_QUERY = "2026-09-03 半导体材料 政策 监管 调查 部委 试点"
 
 
 def _warehouse_event(
@@ -603,7 +672,7 @@ def test_child_events_prefers_trigger_evidence_source():
                 "半导体材料",
                 -3.0,
                 sources=[
-                    _search_source("半导体材料板块今日收评：资金净流出", url="https://news.example.com/f1"),
+                    _search_source("半导体材料板块库存去化快于预期", url="https://news.example.com/f1"),
                     _search_source("半导体材料出口管制升级落地", url="https://news.example.com/f2"),
                 ],
                 trigger_evidence=[
@@ -891,4 +960,649 @@ def test_child_meta_is_json_friendly() -> None:
     assert isinstance(child["sector_std"], str)
     dumped = json.dumps(chain, ensure_ascii=False)
     assert "885525.TI" in dumped
+
+
+# --- 2026-09-18：事件准入只收「驱动原因」，拒收「行情综述/现象」（组长口径） ---
+#
+# 生产实证（2026-09-17 CRO 概念）：事件层被"A股收評|滬指跌0.41%…""今天A股，三大指数
+# 集体下跌 - 时间线- 搜狐"这类**行情综述**填充——它们回答不了"为什么动"。口径：宁可
+# 漏判（少放）也不把综述当原因；筛完为空即 events=[]（如实交空，不得回退成综述）。
+
+# 综述/现象形态（含生产实证两例 + 简繁 + 英文）
+_RECAP_HEADLINES = [
+    "A股收評| 滬指跌0.41% 三大指數收跌農業板塊逆勢大漲",
+    "今天A股，三大指数集体下跌 - 时间线- 搜狐",
+    "半导体材料板块今日收评：主力资金净流出居前",
+    "半导体材料板块复盘：午后跌幅扩大",
+    "两市成交额跌破万亿，沪指跌0.41%",
+    "涨跌家数显示市场情绪转弱，盘面承压",
+    "券商板块午评：早盘冲高回落",
+    "Closing Bell: S&P 500 falls 0.4% as tech slides",
+]
+
+# 驱动原因形态（政策/监管/供需/价格/公司公告/行业事件）
+_DRIVING_HEADLINES = [
+    "工信部发布光伏制造行业规范条件 推动落后产能退出",
+    "商务部对原产于X的进口多晶硅加征关税",
+    "某公司公告：拟收购XX股权并复牌",
+    "多晶硅价格上涨 供需缺口扩大",
+]
+
+
+@pytest.mark.parametrize("headline", _RECAP_HEADLINES)
+def test_is_driving_event_rejects_recap_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _DRIVING_HEADLINES)
+def test_is_driving_event_keeps_driving_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+def test_recap_search_sources_produce_empty_events(capsys: pytest.CaptureFixture[str]) -> None:
+    """综述类 headline 不产事件节点（含源标题与板块词命中，仍被准入拦下）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块今日收评：主力资金净流出居前"),
+                    _search_source("今天A股，三大指数集体下跌 - 时间线- 搜狐"),
+                ],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    # 被拒留痕：结构化日志键 + 原因 + 汇总计数（条数可观测）
+    assert "chain_event_rejected_not_driving" in out
+    assert "summary_marker" in out
+    assert "rejected_not_driving" in out
+
+
+def test_recap_headline_truncated_in_rejection_log(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """留痕的 headline 必须截断（长标题不整条进日志）。"""
+    long_title = "半导体材料板块今日收评：" + "资金净流出居前" * 10
+    assert len(long_title) > 60
+    assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("半导体材料", -3.0, sources=[_search_source(long_title)])
+        ],
+    )
+    out = capsys.readouterr().out
+    assert long_title not in out
+
+
+def test_recap_rejected_does_not_fall_back_to_recap() -> None:
+    """全部被拒 → events=[]（如实交空），**不得**回退成综述兜底。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[_search_source("A股收評| 滬指跌0.41% 三大指數收跌農業板塊逆勢大漲")],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+
+
+def test_driving_search_source_kept_recap_rejected() -> None:
+    """同一板块下：驱动原因保留、综述被拒（互不影响）。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块今日收评：主力资金净流出居前"),
+                    _search_source("半导体材料出口管制升级落地", url="https://news.example.com/b"),
+                ],
+            )
+        ],
+    )
+    events = chain["children"][0]["events"]
+    assert [e["headline"] for e in events] == ["半导体材料出口管制升级落地"]
+
+
+def test_driving_keyword_outranks_plain_headline_in_search_candidates() -> None:
+    """正向要求：能回答"为什么动"的事件（公告/政策/价格类）排序靠前。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                -3.0,
+                sources=[
+                    _search_source("半导体材料板块近期持续承压", url="https://news.example.com/g1"),
+                    _search_source("半导体材料公司公告：扩产计划获批", url="https://news.example.com/g2"),
+                ],
+            )
+        ],
+    )
+    assert [e["ref"] for e in chain["children"][0]["events"]] == [
+        "https://news.example.com/g2",
+        "https://news.example.com/g1",
+    ]
+
+
+def test_warehouse_event_path_ignores_admission_filter() -> None:
+    """回归：中台存量事件（event_id 非空）**不受**准入筛选影响（warehouse 路径逐字不变）。"""
+    title = "半导体材料板块今日收评：资金净流出"
+    chain = assemble_attribution_chain(
+        report_date="2026-09-17",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("半导体材料", -3.0)],
+        warehouse_events=[
+            _warehouse_event("2026-09-17-abc1234567890", title, keywords=["半导体材料"])
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": "2026-09-17-abc1234567890",
+            "ref": "event:2026-09-17-abc1234567890",
+            "headline": title,
+            "source": "warehouse",
+        }
+    ]
+
+
+# --- 2026-09-18 迭代：判据由「命中现象即拒」改为「命中现象 且 无原因词 → 拒」 ---
+#
+# 生产实证（2026-09-18 归因链 children[].events，均 source=search）：两条**无百分号**的
+# 现象标题漏网——旧规则只看 marker / 百分号 / 两市 / 时段，把「八个点」「全线上涨」
+# 「涨幅第一」「沪指站上五日均线」这类写法全放过。新判据：现象形态 **且** 原因词未命中
+# 才拒；现象外壳但讲清原因（政策/公告/供需/价格…）必须放行，不误杀真驱动。
+
+# 今日两条实证（原样字符串，含站点后缀）+ 同族现象写法（动作词/涨幅语/个点/新高/普涨）
+_RECAP_HEADLINES_V2 = [
+    "注册制次新股大涨八个点，A股市场全线拉升，沪指站上五日均线 - 网易",
+    "全线上涨！A股这一板块，涨幅第一！ - 21财经",
+    "沪指站上3400点，两市普涨",
+    "大盘走弱，创业板指跌破2000点",
+    "A股集体上涨，涨幅居前的是半导体板块",
+    "两市成交额创年内新高",
+    "半导体板块大涨五个点",
+]
+
+# 现象外壳但含原因词 → 必须放行（新判据的核心：不误杀真驱动）
+_CAUSE_BEARING_HEADLINES = [
+    "某政策落地带动光伏板块大涨",
+    "国家大基金三期落地，半导体设备订单放量",
+    "多晶硅价格上涨 供需缺口扩大",
+    "工信部发布光伏行业规范条件",
+    "A股全线上涨背后：国常会部署新一轮稳增长政策",
+]
+
+# 综述体裁词（收评/复盘…）本身就是综述，**不因**含原因词而放行
+_MARKER_WITH_CAUSE_HEADLINES = [
+    "今日收评：某政策落地带动光伏板块大涨",
+    "市场复盘：国常会部署稳增长政策",
+]
+
+
+@pytest.mark.parametrize("headline", _RECAP_HEADLINES_V2)
+def test_is_driving_event_rejects_phenomenon_without_cause(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _CAUSE_BEARING_HEADLINES)
+def test_is_driving_event_keeps_phenomenon_with_cause(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+@pytest.mark.parametrize("headline", _MARKER_WITH_CAUSE_HEADLINES)
+def test_summary_marker_rejected_even_with_cause_tokens(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+def test_missed_phenomenon_headlines_rejected_with_new_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """今日两条实证（source=search）→ events=[]，留痕 reason=phenomenon_without_cause。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "半导体材料",
+                3.0,
+                sources=[
+                    _search_source(_RECAP_HEADLINES_V2[0]),
+                    _search_source(_RECAP_HEADLINES_V2[1]),
+                ],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "phenomenon_without_cause" in out
+    assert "rejected_not_driving" in out
+
+
+def test_cause_bearing_phenomenon_headline_survives_search_admission() -> None:
+    """现象外壳 + 原因词（价格上涨/供需缺口）→ 检索补漏里正常放行。"""
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "多晶硅",
+                3.0,
+                sources=[_search_source("多晶硅价格上涨 供需缺口扩大")],
+            )
+        ],
+    )
+    assert [e["headline"] for e in chain["children"][0]["events"]] == [
+        "多晶硅价格上涨 供需缺口扩大"
+    ]
+
+
+# --- 2026-09-18 迭代 3：页面噪声拒收（标题级 + URL 级，同一原因词豁免口径） ---
+#
+# 生产实证（2026-09-18 归因链 children[].events，source=search）：漏网
+# 「国家大基金持股 - 行情中心- 同花顺」（URL http://q.10jqka.com.cn/gn/detail/code/…）。
+# 它是**行情页/UI 页面标题**——既无现象词也无原因词，按旧规则"判不出即放行"进了事件层，
+# 但页面标题回答不了"为什么动"，属纯噪声。两道网（豁免口径一致：headline 命中任一原因词
+# 即放行——站点名/页面形态不是拒收理由）：
+#
+#   1. **标题级** `_PAGE_NOISE_TOKENS`：命中页面噪声词 **且** 原因词未命中 → 拒
+#      （reason=``page_noise``）；
+#   2. **URL 级** `is_page_noise_url`：URL 是行情页/股吧/F10 页 **且** headline 无原因词
+#      → 拒（reason=``page_noise_url``）。
+#
+# 「同花顺：某公司公告中标5亿元订单」这类**站点名 + 真驱动**必须留下——误拒成本高于误留。
+
+# 页面噪声词各 1 例（首条为今日生产实证原样字符串）
+#
+# 注意：「资金流向表」同时命中 marker「资金流向」（reason=summary_marker，仍被拒）；
+# 「公告列表」必然含原因词「公告」→ 被豁免放行（词表保留是为与建议口径对齐，
+# 该词在现有原因词表下不可达，调参时可直接删除）。
+_PAGE_NOISE_HEADLINES = [
+    "国家大基金持股 - 行情中心- 同花顺",
+    "半导体板块行情中心 - 东方财富",
+    "XX概念 F10 资料",
+    "某股 股吧 讨论",
+    "个股行情查询 - 行情报价",
+    "概念行情走势中心",
+    "资金流向表 - 数据中心",
+    "资讯中心：今日要闻",
+    "研报中心 - 机构观点汇总",
+    "盘口数据一览",
+    "Stock Quote Page - Market Center",
+]
+
+# 站点名/页面词 + 原因词 → 必须放行（不误杀真驱动）
+_PAGE_NOISE_WITH_CAUSE_HEADLINES = [
+    "同花顺：某公司公告中标5亿元订单",
+    "东方财富数据显示，多晶硅价格上涨",
+    "同花顺财经：某公司披露并购重组预案",
+    "数据中心：某公司公告扩产计划获批",
+]
+
+
+@pytest.mark.parametrize("headline", _PAGE_NOISE_HEADLINES)
+def test_is_driving_event_rejects_page_noise_headlines(headline: str) -> None:
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("headline", _PAGE_NOISE_WITH_CAUSE_HEADLINES)
+def test_is_driving_event_keeps_page_noise_headline_with_cause(headline: str) -> None:
+    assert is_driving_event(headline) is True
+
+
+def test_event_summary_reason_separates_page_noise_from_phenomenon() -> None:
+    """页面噪声与现象共用"无原因词才拒"口径，但原因码必须可区分（统计/调参用）。"""
+    assert event_summary_reason("某股 股吧 讨论") == "page_noise"
+    assert event_summary_reason("国家大基金持股 - 行情中心- 同花顺") == "page_noise"
+    # 现象形态优先（先现象后页面噪声的顺序），原因码仍是既有 phenomenon_without_cause
+    assert event_summary_reason("行情中心：沪指跌0.41%") == "phenomenon_without_cause"
+    # 含原因词 → 放行（站点名不构成拒收理由）
+    assert event_summary_reason("同花顺：某公司公告中标5亿元订单") == ""
+
+
+def test_page_noise_headline_rejected_in_search(capsys: pytest.CaptureFixture[str]) -> None:
+    """生产实证原样字符串（source=search）→ 不产节点，留痕 reason=page_noise 且计数 +1。"""
+    source = _search_source("国家大基金持股 - 行情中心- 同花顺")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("国家大基金持股", 3.0, sources=[source])],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "chain_event_rejected_not_driving" in out
+    assert "page_noise" in out
+    assert "rejected_not_driving" in out
+    # 计数 +1 直测出参（日志渲染格式随全局 structlog 配置变化，不按字符串断言数值）
+    from aistock_agent.services.attribution_chain import _child_events
+
+    events, stats = _child_events("国家大基金持股", {}, {"sources": [source]}, [])
+    assert events == []
+    assert stats["rejected_not_driving"] == 1
+
+
+# --- 迭代 3 网 2：URL 级页面噪声（行情页/股吧/F10 页 URL 不承载原因） ---
+#
+# headline 可能是干净的（如「国家大基金持股最新动态」），但 URL 指向行情页/股吧/F10 页——
+# 这类页面的正文是表格/讨论，不是原因。故对补漏候选项加 URL 判据；豁免口径与标题级一致
+# （headline 命中任一原因词即放行：真驱动可能恰好被行情站转载）。
+
+# URL 命中页面级特征（主机是行情/数据站点域下的页面模块子域，或路径含页面段）
+_PAGE_NOISE_URLS = [
+    "http://q.10jqka.com.cn/gn/detail/code/30",  # 今日生产实证原样 URL
+    "https://guba.eastmoney.com/news,600519,123.html",
+    "https://www.example.com/quote/600519",
+    "https://xueqiu.com/f10/600519",
+    "https://www.example.com/stock/f10/profile",
+    "https://www.example.com/detail/code/30",
+]
+
+# 正常新闻页 URL（不因 URL 被判页面噪声）
+_PLAIN_URLS = [
+    "https://news.example.com/2026/09/18/semiconductor-policy",
+    "https://finance.sina.com.cn/stock/2026-09-18/doc-abc.shtml",
+    "",
+]
+
+
+@pytest.mark.parametrize("url", _PAGE_NOISE_URLS)
+def test_is_page_noise_url_true(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
+@pytest.mark.parametrize("url", [*_PLAIN_URLS, None])
+def test_is_page_noise_url_false(url: object) -> None:
+    assert is_page_noise_url(url) is False
+
+
+def test_page_noise_url_rejected_when_headline_has_no_cause(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """URL 是行情页且 headline 无原因词 → 不产节点，留痕 reason=page_noise_url 且计数 +1。"""
+    source = _search_source(
+        "国家大基金持股最新动态", url="http://q.10jqka.com.cn/gn/detail/code/30"
+    )
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[_sector_with_evidence("国家大基金持股", 3.0, sources=[source])],
+    )
+    assert chain["children"][0]["events"] == []
+    out = capsys.readouterr().out
+    assert "chain_event_rejected_not_driving" in out
+    assert "page_noise_url" in out
+    assert "rejected_not_driving" in out
+    # 计数 +1 直测出参（日志渲染格式随全局 structlog 配置变化，不按字符串断言数值）
+    from aistock_agent.services.attribution_chain import _child_events
+
+    events, stats = _child_events("国家大基金持股", {}, {"sources": [source]}, [])
+    assert events == []
+    assert stats["rejected_not_driving"] == 1
+
+
+def test_page_noise_url_kept_when_headline_carries_cause() -> None:
+    """同一行情页 URL，但 headline 含原因词 → **不得**因 URL 被拒，节点照常产出。"""
+    url = "http://q.10jqka.com.cn/gn/detail/code/30"
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence(
+                "国家大基金持股",
+                3.0,
+                sources=[_search_source("国家大基金持股：某公司公告中标5亿元订单", url=url)],
+            )
+        ],
+    )
+    assert chain["children"][0]["events"] == [
+        {
+            "event_id": None,
+            "ref": url,
+            "headline": "国家大基金持股：某公司公告中标5亿元订单",
+            "source": "search",
+        }
+    ]
+
+
+# --- 迭代 3 收窄（2026-09-18）：站点名不再单独构成拒收理由 + URL 主机按「站点域 + 页面模块」判 ---
+#
+# 上一轮如实登记的两处误伤风险：
+#   ① 标题级词表曾含**站点名**（同花顺/东方财富）——它们是**来源品牌**不是页面形态，真原因标题
+#      若只带站点名而不含任何原因词（「同花顺：国家大基金三期成立」）会被 `page_noise` 误拒；
+#   ② URL 主机曾做**任意子串**匹配（`guba`/`f10`/`quote`）：`f10.example.com`、
+#      `quotes.example.com` 这类非行情站域名被误判成"页面噪声页面"。
+# 收窄口径：① 站点名移出标题级词表（生产实证那条靠「行情中心」即可命中，覆盖不丢）；
+# ② 主机改为**站点域后缀 + 站内页面模块首段标签**双条件（路径段判据 `/detail/code/` 等不变）。
+
+# 站点名单独出现（无页面形态词、无原因词）→ 必须放行
+_STATION_NAME_ONLY_HEADLINES = [
+    "同花顺：国家大基金三期成立",
+    "同花顺财经：某行业龙头企业挂牌上市",
+    "东方财富：某公司实控人变更",
+]
+
+# 站点名 + 页面形态词（行情中心）→ 仍拒（生产实证路径不受影响）
+_STATION_NAME_WITH_PAGE_FORM_HEADLINES = [
+    "国家大基金持股 - 行情中心- 同花顺",
+    "半导体板块行情中心 - 东方财富",
+]
+
+# 行情/数据站点下的**页面模块子域**（或路径含页面段）→ 判页面噪声
+_PAGE_MODULE_URLS = [
+    "https://quote.eastmoney.com/600519.html",
+    "https://f10.eastmoney.com/f10_v2/CompanyInfo.aspx",
+    "https://guba.eastmoney.com/news,600519,123.html",
+    "https://data.10jqka.com.cn/gn/detail/code/30",
+    "https://stockpage.10jqka.com.cn/600519/",
+]
+
+# 主机含 guba/f10/quote 子串但**不属于**已知行情/数据站点 → 不得判页面噪声
+_NOT_PAGE_NOISE_URLS = [
+    "https://f10.example.com/profile",
+    "https://quotes.example.com/600519",
+    "https://guba.example.com/thread/1",
+    "https://www.eastmoney.com/news/2026/x.html",
+    "https://finance.eastmoney.com/news/2026/x.html",
+]
+
+
+@pytest.mark.parametrize("headline", _STATION_NAME_ONLY_HEADLINES)
+def test_station_name_alone_is_not_page_noise(headline: str) -> None:
+    """站点名是来源品牌，不是页面形态——不得单独构成拒收理由（2026-09-18 收窄）。"""
+    assert event_summary_reason(headline) == ""
+    assert is_driving_event(headline) is True
+
+
+@pytest.mark.parametrize("headline", _STATION_NAME_WITH_PAGE_FORM_HEADLINES)
+def test_station_name_with_page_form_still_rejected(headline: str) -> None:
+    """站点名 + 页面形态词 → 仍判页面噪声（生产实证路径不受影响）。"""
+    assert event_summary_reason(headline) == "page_noise"
+
+
+@pytest.mark.parametrize("url", _PAGE_MODULE_URLS)
+def test_page_module_urls_still_noise(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
+@pytest.mark.parametrize("url", _NOT_PAGE_NOISE_URLS)
+def test_non_market_site_urls_are_not_noise(url: str) -> None:
+    """主机出现 guba/f10/quote 子串但非行情站 → 不得误判（收窄 ② 的红线）。"""
+    assert is_page_noise_url(url) is False
+
+
+# 2026-09-18 收窄的**覆盖回归**（生产实证）：把站点名移出 `_PAGE_NOISE_TOKENS` 后，
+# `股票频道- 东方财富网`（ref `https://stock.eastmoney.com/`）不再被任何判据拦住——它是
+# **站点栏目首页**（既非现象也非原因，按"判不出即放行"漏进事件层），迭代 4 的一致性裁决
+# 还会把它提升成板块摘要，暴露面反而变大。补两道**形态类**判据（不恢复站点名，避免回到
+# "同花顺：国家大基金三期成立"被误拒）：
+#   1. 标题级：栏目/首页形态词（频道/首页/栏目/导航）——栏目名不是事件标题；
+#   2. URL 级：已知行情/数据站点域（含子域）的**站点/栏目首页**（path 为空/`/`/`index.*`）。
+_PAGE_FORM_HEADLINES = [
+    "股票频道- 东方财富网",
+    "财经首页 - 某站",
+    "基金栏目 - 某站",
+    "行情导航页",
+]
+
+_SITE_ROOT_URLS = [
+    "https://stock.eastmoney.com/",
+    "https://stock.eastmoney.com",
+    "https://www.eastmoney.com/index.html",
+    "https://data.10jqka.com.cn/",
+]
+
+
+@pytest.mark.parametrize("headline", _PAGE_FORM_HEADLINES)
+def test_page_form_headlines_rejected(headline: str) -> None:
+    assert event_summary_reason(headline) == "page_noise"
+    assert is_driving_event(headline) is False
+
+
+@pytest.mark.parametrize("url", _SITE_ROOT_URLS)
+def test_site_root_urls_are_noise(url: str) -> None:
+    assert is_page_noise_url(url) is True
+
+
+# --- 迭代 4（2026-09-18）：摘要与事件层一致性（"结论不得与证据相反"）---
+#
+# 生产实证（2026-09-18 重跑）：同一板块 `children[].trace_summary` =
+# "未检索到可明确解释当日行情的独立触发事件"（溯源阶段 trigger headline），而
+# `children[].events` 非空（检索补漏路径从同一快照的 `sector_event:*` 候选里放行了一条）
+# ——同一个板块卡片上"没找到原因"和"有原因事件"同时成立。
+#
+# 口径：**证据存在则结论不得与证据相反**。`events` 非空且摘要是否定句 → 摘要让位给事件首条
+# headline（摘要代表"该板块的驱动原因"，有事件节点就等于有原因）；无事件、摘要非否定句、
+# 或不传 `events`（既有调用方）→ 逐字保持既有行为。
+#
+# 刻意只认**无歧义的否定词**：肯定归因句里的"不足/没有/缺少"（"供给不足推动多晶硅价格上涨"）
+# 不得被当成否定句，否则会把真有归因的摘要错误让位。
+
+_NEGATIVE_TRACE_SUMMARY = "未检索到可明确解释当日行情的独立触发事件"
+
+
+def _trace_result_with_summary(headline: str, *, status: str = "insufficient") -> dict:
+    return {
+        "stages": [
+            {"kind": "phenomenon", "headline": "板块当日大涨", "claims": []},
+            {"kind": "trigger", "headline": headline, "claims": [headline] if headline else []},
+        ],
+        "attribution_status": status,
+    }
+
+
+def _event_node(headline: str) -> dict:
+    return {
+        "event_id": None,
+        "ref": "https://example.com/x",
+        "headline": headline,
+        "source": "search",
+    }
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        _NEGATIVE_TRACE_SUMMARY,
+        "未找到可解释该板块异动的事件",
+        "未发现明确触发事件",
+        "无法确认驱动原因",
+        "暂无独立触发事件",
+        "溯源未确认驱动原因",
+    ],
+)
+def test_trace_summary_yields_to_events_when_summary_negative(summary: str) -> None:
+    """否定句摘要 + 有事件 → 摘要让位（事件是证据，摘要不得与证据相反）。"""
+    out = _trace_summary(
+        _trace_result_with_summary(summary),
+        events=[_event_node("某公司公告中标5亿元订单")],
+    )
+    assert out == "某公司公告中标5亿元订单"
+
+
+def test_trace_summary_keeps_positive_summary_even_with_events() -> None:
+    """肯定归因句 + 有事件 → 摘要保留（它是更完整的归因叙述，事件只是它的支撑节点）。"""
+    summary = "政策落地带动板块大涨"
+    out = _trace_summary(
+        _trace_result_with_summary(summary), events=[_event_node("某公司公告中标")]
+    )
+    assert out == summary
+
+
+def test_trace_summary_keeps_negative_summary_when_no_events() -> None:
+    """无事件 → 否定句摘要如实保留；不传 events（既有调用方）行为逐字不变。"""
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY), events=[])
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY))
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+
+
+def test_trace_summary_not_fooled_by_positive_summary_with_ambiguous_negation() -> None:
+    """肯定句含"不足"（"供给不足推动涨价"）不得被当成否定句而错误让位。"""
+    summary = "供给不足推动多晶硅价格上涨"
+    out = _trace_summary(
+        _trace_result_with_summary(summary), events=[_event_node("某公司公告扩产")]
+    )
+    assert out == summary
+
+
+@pytest.mark.parametrize("events", [[], [{"headline": "  "}], [{"headline": ""}, {}], [None]])
+def test_trace_summary_keeps_negative_summary_when_event_headline_blank(events: list) -> None:
+    """事件节点无可用 headline（空/空白/非 dict）→ 让不了位，如实保留否定句摘要。"""
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY), events=events)
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+
+
+def test_chain_trace_summary_follows_events_with_override_trace(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """集成：链上 events 非空 + 溯源摘要否定 → children[].trace_summary 跟随事件，并留痕。"""
+    source = _search_source("注册制次新股：某公司公告中标5亿元订单")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("注册制次新股", 7.3, _NEGATIVE_TRACE_SUMMARY, sources=[source])
+        ],
+    )
+    child = chain["children"][0]
+    assert child["events"], "前置：事件层确实放行了该条（否则本用例测不到让位）"
+    assert child["trace_summary"] == "注册制次新股：某公司公告中标5亿元订单"
+    assert "chain_trace_summary_overridden_by_events" in capsys.readouterr().out
+
+
+def test_chain_trace_summary_untouched_when_events_rejected(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """集成：事件被准入拒收 → events 空 → 否定句摘要如实保留（不得为空气让位）。"""
+    source = _search_source("注册制次新股大涨八个点，A股市场全线拉升")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("注册制次新股", 7.3, _NEGATIVE_TRACE_SUMMARY, sources=[source])
+        ],
+    )
+    child = chain["children"][0]
+    assert child["events"] == []
+    assert child["trace_summary"] == _NEGATIVE_TRACE_SUMMARY
+    assert "chain_trace_summary_overridden_by_events" not in capsys.readouterr().out
 

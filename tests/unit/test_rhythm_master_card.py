@@ -11,7 +11,10 @@ from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
 
 
 def _win():
-    return type("W", (), {"events": [], "high_events": [], "source_missing": False})()
+    return type("W", (), {
+        "events": [], "high_events": [], "source_missing": False,
+        "calendar_uncovered": False,
+    })()
 
 
 def _card():
@@ -89,7 +92,8 @@ def test_dead_fields_are_empty_and_documented_without_polluting_gaps():
         evidence=RhythmEvidence(stage="ice", certainty="low"), synthesis=None,
         synthesis_available=False,
     )
-    win = type("W", (), {"events": [], "source_missing": False})()
+    win = type("W", (), {"events": [], "source_missing": False,
+                         "calendar_uncovered": False})()
     out = wm._build_rhythm_card(card, win, [])
     # 未接线的两个字段：显式空（不得静默渲染假数据）
     assert out["temperature_series"] == []
@@ -123,6 +127,197 @@ def test_next_event_anchor_counts_from_target_date_not_basis_date():
     # 09-16 − 目标日 09-14 = 2 天；若误用证据日 09-11 则为 5 天
     assert anchor["days_until"] == 2
     assert anchor["note"] == "2 天后"
+
+
+def _card_at(target_date: str, stage: str | None = "ebb") -> MasterRhythmCard:
+    return MasterRhythmCard(
+        basis_date="2026-09-16", target_date=target_date, refresh_slot="after_close",
+        evidence=RhythmEvidence(stage=stage),  # type: ignore[arg-type]
+    )
+
+
+def test_card_event_window_and_hint_open_to_medium() -> None:
+    """§5.1/§5.2：交割日（medium）必须进入 event_window 并可产出提示。"""
+    win = _win()
+    win.events = [{"date": "2026-09-18", "type": "delivery",
+                   "title": "2026-09 股指期货交割日", "importance": "medium",
+                   "source": "L1"}]
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert out["next_event_anchor"] is not None
+    assert out["next_event_anchor"]["importance"] == "medium"
+    assert out["next_event_anchor"]["note"] == "明日"
+    assert out["event_window"] == [{"date": "2026-09-18", "type": "delivery",
+                                    "title": "2026-09 股指期货交割日",
+                                    "importance": "medium"}]
+    assert "不改仓位倾向" in out["event_high_hint"]
+
+
+def test_medium_event_does_not_change_position_text() -> None:
+    """验收 3：只被看见不改数值——仅中级事件时仓位文案与"无事件"基线逐字相同。"""
+    rows = _rows(60, high=3010.0, low=2990.0)
+    baseline = _build_rhythm_card(_card_at("2026-09-17"), _win(), rows)
+    win = _win()
+    win.events = [{"date": "2026-09-18", "type": "delivery",
+                   "title": "2026-09 股指期货交割日", "importance": "medium",
+                   "source": "L1"}]
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, rows)
+    assert out["position_band"]["text"] == baseline["position_band"]["text"]
+
+
+def test_card_uncovered_calendar_reports_event_source_missing() -> None:
+    """日历未覆盖目标日期时不得显示为"窗口内无事件"。
+
+    该路径 EventWindow 恒为 events=[] 且 source_missing=False（见 event_calendar
+    的年份越界 fail-close）。若只透出 source_missing，前端三态会落到第三态
+    「未来 5 个交易日暂无已登记事件」——对同一天作出与日历网格相反的**事实断言**，
+    而实际情况是"该维度数据不可得"。故须复用既有的 event_source_missing 布尔，
+    使其如实为 True（不新增第四态）。
+    """
+    win = _win()
+    win.calendar_uncovered = True
+    assert win.source_missing is False and win.events == []
+    out = _build_rhythm_card(_card_at("2027-01-04"), win, _rows(60, high=3010.0, low=2990.0))
+    assert out["event_window"] == []
+    assert out["event_source_missing"] is True
+
+
+def test_card_exposes_phase_from_stage() -> None:
+    """§5.6：卡片必须产出 phase（前端情绪周期块 v-if 依赖它）。"""
+    rows = _rows(60, high=3010.0, low=2990.0)
+    for stage in ("ice", "launch", "rally", "overheat", "ebb"):
+        out = _build_rhythm_card(_card_at("2026-09-17", stage), _win(), rows)
+        assert out["phase"] == stage
+
+
+def test_card_phase_none_when_stage_missing() -> None:
+    rows = _rows(60, high=3010.0, low=2990.0)
+    out = _build_rhythm_card(_card_at("2026-09-17", None), _win(), rows)
+    assert out["phase"] is None
+
+
+def _win_with_highs(*dates: str):
+    win = _win()
+    highs = [{"date": d, "title": f"事件{d}", "importance": "high", "source": "L3"}
+             for d in dates]
+    win.events = list(highs)
+    win.high_events = list(highs)
+    return win
+
+
+def test_branches_never_exceed_three_with_two_high_events() -> None:
+    """§5.7：两个 high 事件不得产出 3(技术)+3+3=9 条分支。"""
+    win = _win_with_highs("2026-09-18", "2026-09-21")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) <= 3
+
+
+def test_branches_defer_event_node_and_record_reason() -> None:
+    """§5.7：技术分档优先占满预算时，事件节点被让位必须留痕。"""
+    win = _win_with_highs("2026-09-18")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) == 3
+    assert all(b["condition"]["kind"] == "interval" for b in out["branches"])
+    assert any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
+def test_branches_no_deferral_trace_when_event_out_of_branch_window() -> None:
+    """终审 I2：首个高级事件超出事件分支窗口（交易日差 > 上限）时本就无分支产出，
+    不得把它归因为"因分支预算未展示"（对外可见的错误归因）。"""
+    from datetime import date as _date
+
+    from aistock_agent.services.rhythm_engine import EVENT_BRANCH_MAX_D
+    from aistock_agent.utils.date import trading_days_between
+
+    target, event_date = "2026-09-14", "2026-09-18"
+    d = trading_days_between(_date.fromisoformat(target), _date.fromisoformat(event_date))
+    # 前置：该事件确实落在事件分支窗口之外（防 fixture 因节假日漂移而失去判别力）
+    assert d is not None and d > EVENT_BRANCH_MAX_D
+    win = _win_with_highs(event_date)
+    out = _build_rhythm_card(_card_at(target), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) == 3
+    assert all(b["condition"]["kind"] == "interval" for b in out["branches"])
+    assert not any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
+def test_branches_empty_normal_path_records_degradation_once() -> None:
+    """§5.7：两个来源皆不可得（正常路径）→ branches=[] 且留痕，且只写一次。"""
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(), _rows(60, high=None, low=None))
+    assert out["branches"] == []
+    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+
+
+def test_branches_event_only_source_used_when_technical_unavailable() -> None:
+    """§5.7：技术分档不可用时才让位给事件三情景——两来源互斥，不并存。"""
+    win = _win_with_highs("2026-09-18")
+    out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=None, low=None))
+    assert 0 < len(out["branches"]) <= 3
+    assert all(b["condition"]["kind"] == "enum" for b in out["branches"])
+    assert not any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
+def test_branches_exception_path_records_degradation_once(monkeypatch) -> None:
+    """§5.7：分支生成异常 → branches=[] + 留痕，且不与正常路径重复写同一条。"""
+    from aistock_agent.services import rhythm_engine
+
+    def _boom(**_kwargs: object) -> list[dict[str, object]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rhythm_engine, "build_technical_branches", _boom)
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win_with_highs("2026-09-18"),
+                             _rows(60, high=3010.0, low=2990.0))
+    assert out["branches"] == []
+    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+
+
+def test_reason_carries_mainline_strength_within_limit() -> None:
+    """§5.10.4：溯源行须含板块名 + 强弱标记 + 超额 + 数据日，且整串不超 72 字上限。"""
+    facts = {"state": "established", "name": "半导体", "strength": "strong",
+             "excess": 6.12, "data_date": "2026-09-16", "attention": "ai_tech",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert "半导体" in reason and "·强" in reason and "+6.12pct" in reason
+    assert "2026-09-16" in reason
+    assert len(reason) <= 72
+
+
+def test_reason_keeps_technical_conclusion_at_widened_cap() -> None:
+    """§5.10.4 回归护栏：60 字上限会吃掉技术结论，72 字才容得下完整一句。
+
+    长板块名（17 字）把整串推到 63 字，正好落在 (60, 72] 区间——这是唯一能区分
+    "上限是 72 还是 60" 的构造。`assert len(reason) > 60` 是反回退护栏：一旦上限被
+    改回 60，本串必被截短、尾部结论随之丢失，两条断言同时变红。
+    """
+    facts = {"state": "established",
+             "name": "半导体设备材料与人工智能算力产业链", "strength": "strong",
+             "excess": 6.12, "data_date": "2026-09-16", "attention": "ai_tech",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert len(reason) > 60
+    assert reason.endswith("｜技术位数据不足")
+    assert len(reason) <= 72
+
+
+def test_reason_marks_weak_mainline() -> None:
+    facts = {"state": "established", "name": "创新药", "strength": "weak",
+             "excess": 1.2, "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    assert "·弱" in out["phase_evidence"]["reason"]
+
+
+def test_reason_marks_weak_when_strength_absent() -> None:
+    """strength 缺失/未知 → 按 `·弱` 渲染：只有字面 "strong" 才标强。"""
+    facts = {"state": "established", "name": "创新药", "excess": 1.2,
+             "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    assert "·弱" in out["phase_evidence"]["reason"]
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aistock_agent.agents.workers.review import ReviewRunResult
+from aistock_agent.config import settings
 from aistock_agent.services.event_bus import Event, EventBus
 from aistock_agent.services.event_consumers import (
     CHANNEL_BROADCAST,
@@ -14,6 +15,7 @@ from aistock_agent.services.event_consumers import (
     CHANNEL_REVIEW_FULL,
     CHANNEL_REVIEW_QUICK,
     CHANNEL_SNAPSHOT,
+    BaseConsumer,
     BroadcastConsumer,
     ConsumerContext,
     IterateConsumer,
@@ -22,6 +24,7 @@ from aistock_agent.services.event_consumers import (
     ReviewFullConsumer,
     ReviewQuickConsumer,
     SnapshotConsumer,
+    _consumer_loop,
     start_all_consumers,
 )
 from aistock_agent.services.prediction_service import (
@@ -742,3 +745,97 @@ async def test_snapshot_consumer_review_degraded_forces_degraded(mock_event_bus,
     assert kwargs["content"]["review_status"] == "degraded"
     # build_snapshot 虽成功，但 review 已降级 → 快照仍被标记为降级
     assert kwargs["content"]["snapshot"]["degraded"] is True
+
+
+# ============================================================================
+# 消费循环的 PEL 恢复（追加认领步骤，复用既有 handler 分发）
+# ============================================================================
+
+
+class _RecordingConsumer(BaseConsumer):
+    """记录被分发的事件 id（验证认领消息复用既有分发分支）。"""
+
+    def __init__(self, ctx: ConsumerContext) -> None:
+        super().__init__(ctx)
+        self.handled: list[str] = []
+
+    @property
+    def channel(self) -> str:
+        return CHANNEL_SNAPSHOT
+
+    async def handle(self, event: Event) -> None:
+        self.handled.append(event.event_id)
+
+
+class _FailingConsumer(_RecordingConsumer):
+    """处理必失败（验证失败不 XACK）。"""
+
+    async def handle(self, event: Event) -> None:
+        raise ValueError("handler boom")
+
+
+def _reclaim_bus(reclaimed: list[Event]) -> AsyncMock:
+    """消费循环用的事件总线 mock：认领返回给定事件，consume 立即退出循环。"""
+    bus = AsyncMock(spec=EventBus)
+    bus.ack = AsyncMock()
+    bus.retry = AsyncMock()
+    bus.reclaim_pending = AsyncMock(return_value=reclaimed)
+    bus.consume = AsyncMock(side_effect=asyncio.CancelledError)
+    return bus
+
+
+def _reclaimed_event(event_id: str) -> Event:
+    return Event(
+        event_id=event_id,
+        channel=CHANNEL_SNAPSHOT,
+        payload={"report_date": "2026-07-30", "snapshot_kind": "full"},
+        group="evening_chain",
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_loop_reclaims_pending_and_reuses_handler_dispatch():
+    """PEL 认领回来的事件走既有 handler + XACK 分支（不复制分发逻辑）。"""
+    bus = _reclaim_bus([_reclaimed_event("evt-pel-1")])
+    consumer = _RecordingConsumer(ConsumerContext(bus, AsyncMock()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _consumer_loop(consumer, "snapshot_consumer")
+
+    assert consumer.handled == ["evt-pel-1"]
+    bus.ack.assert_awaited_once_with(CHANNEL_SNAPSHOT, "evt-pel-1", group="evening_chain")
+    bus.reclaim_pending.assert_awaited_once_with(
+        CHANNEL_SNAPSHOT,
+        "snapshot_consumer",
+        group=None,
+        min_idle_ms=settings.event_bus_pel_min_idle_ms,
+        count=settings.event_bus_pel_reclaim_batch,
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_loop_skips_reclaim_when_disabled(monkeypatch):
+    """event_bus_pel_reclaim_enabled=False → 完全不调用认领（零行为变化）。"""
+    monkeypatch.setattr(settings, "event_bus_pel_reclaim_enabled", False)
+    bus = _reclaim_bus([])
+    consumer = _RecordingConsumer(ConsumerContext(bus, AsyncMock()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _consumer_loop(consumer, "snapshot_consumer")
+
+    bus.reclaim_pending.assert_not_called()
+    bus.consume.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_consumer_loop_does_not_ack_reclaimed_event_on_handler_error():
+    """认领回来的消息处理失败 → 走既有 retry 分支、不 XACK（留在 PEL 等下次认领）。"""
+    bus = _reclaim_bus([_reclaimed_event("evt-pel-2")])
+    consumer = _FailingConsumer(ConsumerContext(bus, AsyncMock()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _consumer_loop(consumer, "snapshot_consumer")
+
+    bus.ack.assert_not_called()
+    bus.retry.assert_awaited_once()
+    assert bus.retry.await_args.args[0].event_id == "evt-pel-2"

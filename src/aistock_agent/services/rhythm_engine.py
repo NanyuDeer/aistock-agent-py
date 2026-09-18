@@ -113,7 +113,10 @@ def compose_score(
     fg_available: bool,
     penalty: float = 0.0,
 ) -> tuple[float, list[str]]:
-    """节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
+    """未接线说明（2026-09-18）：本函数与 `level_from_score` 在 rhythm 链路**无调用点**——
+    生产的档位真相源是 `schemas/rhythm_master.STAGE_TO_LEVEL`（由 `stage` 派生）。
+    保留原因：08-29 spec §3/§3.1 依据 + 阈值校准（G7/D9）可能复用。
+    节奏分 0-100 + 缺失标注。缺失因子降权重归一（§10）。
 
     penalty≤0（顶背离降档）在最后应用；ice 为下界封顶由 level_from_score
     阈值天然提供，不引入独立降档函数（C2）。
@@ -501,6 +504,9 @@ def build_event_branch(
     origin_date 提供时启用 d 约束：交易日差 d > EVENT_BRANCH_MAX_D 的事件不产分支
     （避免「闸门说无影响 vs 分支说超预期加仓」的同卡矛盾，spec §5.5.2）。
     返回 [] 表示非 high 事件（无事件分支）或 d 超限（同语义不产分支）。
+
+    公布后"点亮/置灰"能力当前未接线（spec D3 拆契约），故分支不含 met 键；
+    event_ref 保留供验证器使用。
     """
     if event.get("importance") != "high":
         return []
@@ -540,7 +546,6 @@ def build_event_branch(
                     "note": "结果待公布，公布后按预期差落档" + note_suffix,
                 },
                 "event_ref": {"event_date": str(event.get("date", "")), "title": title},
-                "met": None,
             }
         )
     return branches
@@ -551,32 +556,78 @@ def build_next_event_anchor(
 ) -> dict[str, object] | None:
     """下一重大事件锚点（design-debate P1，2026-09-02）。
 
-    取窗口内首条 high 事件（顺序继承 app-api 事件日历下发顺序，
-    Python 侧不重排）；N = event_date 与 origin_date **交易日差**（D7，spec §5.5.2）。
+    取窗口内最近事件（high 优先，无 high 退 medium）；同级内顺序继承 app-api
+    事件日历下发顺序，Python 侧不重排；N = event_date 与 origin_date **交易日差**
+    （D7，spec §5.5.2）。
 
     原点由调用方给出：节奏大师传**目标交易日**（该卡所描述的那一天，盘前/午间档
     即当天、收盘基准档为次一交易日），使「距今天数」相对卡片描述的那一天。
     注意卡片 `basis_date` 自 2026-09-14 起表示**证据日**（K 线末日），不可用作本处原点。
 
-    无 high 事件返回 None（前端整块不渲染，对齐空串先例 §7.1）。
+    A2 双通道：本函数属**展示/提示通道**，故放开 medium；返回值的 `importance`
+    供 `build_event_hint` 分级，档位通道（`event_d`/`event_result`）仍只认 high。
+    无 high/medium 事件返回 None（前端整块不渲染，对齐空串先例 §7.1）。
     日期解析失败跳过错该事件（G6 不抛异常纪律）；越年交易日差不可算（None）
     同语义跳过，不抛异常。
     """
-    for e in events:
-        if e.get("importance") != "high":
-            continue
-        event_date = str(e.get("date") or "")
-        title = str(e.get("title") or "")
-        if not event_date or not title:
-            continue
-        try:
-            # 交易日差（(origin, event_date] 内交易日数）；origin==event_date→0（"今日"）
-            days_until = trading_days_between(date.fromisoformat(origin_date),
-                                              date.fromisoformat(event_date))
-        except ValueError:
-            continue  # 日期格式异常：跳过错该事件，不抛异常穿透
-        if days_until is None:
-            continue  # 越年/非法 → 与坏日期同语义：跳过错该事件（不抛异常）
-        note = "今日" if days_until == 0 else ("明日" if days_until == 1 else f"{days_until} 天后")
-        return {"title": title, "event_date": event_date, "days_until": days_until, "note": note}
+    for wanted in ("high", "medium"):
+        for e in events:
+            if e.get("importance") != wanted:
+                continue
+            event_date = str(e.get("date") or "")
+            title = str(e.get("title") or "")
+            if not event_date or not title:
+                continue
+            try:
+                # 交易日差（(origin, event_date] 内交易日数）；origin==event_date→0（"今日"）
+                days_until = trading_days_between(date.fromisoformat(origin_date),
+                                                  date.fromisoformat(event_date))
+            except ValueError:
+                continue  # 日期格式异常：跳过错该事件，不抛异常穿透
+            if days_until is None:
+                continue  # 越年/非法 → 与坏日期同语义：跳过错该事件（不抛异常）
+            note = ("今日" if days_until == 0
+                    else ("明日" if days_until == 1 else f"{days_until} 天后"))
+            return {"title": title, "event_date": event_date,
+                    "days_until": days_until, "note": note, "importance": wanted}
     return None
+
+
+_EVENT_TYPE_FALLBACK = "seed"
+_EVENT_TYPES = ("delivery", "earnings", "seed", "macro")
+
+
+def project_event_window(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """卡片事件日历投影（spec §5.2）：`{date,type,title,importance}` 四键。
+
+    前端 `RhythmEvent` 契约只认这四键（`RhythmCard.vue` 事件日历块）；`type` 缺失
+    或非法 → 落 `seed`（前端 eventTypeLabel 有该映射），不返回 null。
+    """
+    out: list[dict[str, object]] = []
+    for e in events:
+        title = str(e.get("title") or "")
+        if not title:
+            continue
+        etype = str(e.get("type") or "")
+        if etype not in _EVENT_TYPES:
+            etype = _EVENT_TYPE_FALLBACK
+        out.append({
+            "date": str(e.get("date") or ""),
+            "type": etype,
+            "title": title,
+            "importance": str(e.get("importance") or "medium"),
+        })
+    return out
+
+
+def build_event_hint(anchor: dict[str, object] | None) -> str:
+    """事件临近提示（spec §5.1）：按 importance 分级，只提示不改数值。"""
+    if not anchor:
+        return ""
+    head = (
+        f"{anchor.get('title')}（{anchor.get('event_date')}，"
+        f"{anchor.get('note')}）："
+    )
+    if anchor.get("importance") == "high":
+        return head + "事件临近，注意确定性风险"
+    return head + "事件临近，注意事件扰动（不改仓位倾向）"

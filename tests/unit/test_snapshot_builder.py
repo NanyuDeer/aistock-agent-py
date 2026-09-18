@@ -1,5 +1,6 @@
 """快照生成器 core 测试 — 文件I/O、MA计算、manifest、板块匹配"""
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -122,6 +123,10 @@ def test_llm_evaluate_dimensions_success(mock_get_llm, mock_append_aliases):
     assert result["dimension_3"]["attribution_match_rate"] == 0.33
     assert result["dimension_4"]["bias"] == 0.5
     assert "new_aliases" in result
+    # 调用处必须把"本次观察到的板块名单"（代码未匹配的板块并集）传给写入侧做噪声校验
+    mock_append_aliases.assert_called_once()
+    assert mock_append_aliases.call_args.args[0] == {"新能源": ["绿色能源"]}
+    assert mock_append_aliases.call_args.args[1] == {"新能源", "绿色能源"}
 
 
 @patch("aistock_agent.services.snapshot_builder.get_deep_think", side_effect=Exception("LLM down"))
@@ -191,39 +196,34 @@ def test_llm_evaluate_dimensions_malformed_new_aliases(
     assert result["new_aliases"] == {"新能源": "绿色能源"}
 
 
-def test_append_new_aliases_rejects_non_list_values():
-    """_append_new_aliases 拒绝非 list 类型的别名值，不损坏 sector_aliases.json
+def test_append_new_aliases_rejects_non_list_values(tmp_path: Path) -> None:
+    """_append_new_aliases 拒绝非 list 类型的别名值，不损坏别名字典
 
     若 ``{"新能源": "绿色能源"}`` 未被校验，``for alias in aliases`` 会逐字符
     迭代，将 "绿"/"色"/"能"/"源" 四个单字写入字典。此测试验证该值被整体跳过。
     """
+    from aistock_agent.services import sector_aliases_store
     from aistock_agent.services.snapshot_builder import _append_new_aliases
 
+    learned = tmp_path / "sector_aliases_learned.json"
     malformed = {"新能源": "绿色能源"}  # type: ignore[list-item]
-    with patch(
-        "aistock_agent.services.snapshot_builder._load_aliases", return_value={}
-    ), patch(
-        "aistock_agent.services.snapshot_builder.ALIASES_FILE"
-    ) as mock_file:
-        _append_new_aliases(malformed)  # type: ignore[arg-type]
-    # 无合法条目可写 → write_text 必须未被调用
-    mock_file.write_text.assert_not_called()
+    with patch.object(sector_aliases_store, "LEARNED_ALIASES_FILE", learned):
+        _append_new_aliases(malformed, {"新能源", "绿色能源"})  # type: ignore[arg-type]
+    # 无合法条目可写 → 学习文件不落盘
+    assert not learned.exists()
 
 
-def test_append_new_aliases_rejects_non_str_entries():
+def test_append_new_aliases_rejects_non_str_entries(tmp_path: Path) -> None:
     """_append_new_aliases 拒绝 list 中的非 str 别名，仅保留合法别名"""
+    from aistock_agent.services import sector_aliases_store
     from aistock_agent.services.snapshot_builder import _append_new_aliases
 
+    learned = tmp_path / "sector_aliases_learned.json"
     mixed = {"新能源": [123, "绿色能源"]}  # type: ignore[list-item]
-    with patch(
-        "aistock_agent.services.snapshot_builder._load_aliases", return_value={}
-    ), patch(
-        "aistock_agent.services.snapshot_builder.ALIASES_FILE"
-    ) as mock_file:
-        _append_new_aliases(mixed)  # type: ignore[arg-type]
-    # 仅合法 str 别名被写入
-    mock_file.write_text.assert_called_once()
-    written = json.loads(mock_file.write_text.call_args.args[0])
+    with patch.object(sector_aliases_store, "LEARNED_ALIASES_FILE", learned):
+        _append_new_aliases(mixed, {"新能源", "绿色能源"})  # type: ignore[arg-type]
+    # 仅合法 str 别名被写入学习文件（仓库文件绝不被写）
+    written = json.loads(learned.read_text(encoding="utf-8"))
     assert written == {"新能源": ["绿色能源"]}
 
 

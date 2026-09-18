@@ -1,4 +1,5 @@
 import json
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -272,6 +273,178 @@ async def test_run_sector_trace_publishes_report() -> None:
     mock_save.assert_called_once()
     assert result.report_type == "sector_trace"
     assert result.snapshot == snapshot  # 溯源快照随结果返回（级联预判的 sector_snapshot 输入）
+
+
+# --- 2026-09-18：写入收敛（多板块一天一份报告；默认单板块自写行为不变） ---
+#
+# 背景：调用方 SectorTraceConsumer 同日逐板块各写一次同键报告 → Node upsert 互相
+# 覆盖，报告层只剩 1 个板块。收敛口径：多板块调用方传 persist_report=False，gather
+# 结束后由 save_sector_trace_report 聚合写一次。
+
+
+def _sector_chain_fake() -> object:
+    """SectorChainResult 桩（chain_id=x1 / sector=存储板块 / 单 trigger stage）。"""
+    from aistock_agent.schemas.sector_trace import SectorChainResult
+
+    return SectorChainResult(
+        chain_id="x1",
+        sector="存储板块",
+        stages=[
+            {
+                "kind": "trigger",
+                "headline": "韩检突袭存储三巨头",
+                "claims": [],
+                "evidence": [
+                    {"url": "https://e.com/a", "occurred_at": "2026-07-16T09:00:00Z"}
+                ],
+            }
+        ],
+        attribution_status="insufficient",
+    )
+
+
+def _sector_trace_patches() -> tuple[object, ...]:
+    from aistock_agent.agents.workers import sector_trace as st
+
+    return (
+        patch.object(
+            st,
+            "build_sector_snapshot",
+            AsyncMock(return_value={"sector": {"name": "存储板块"}}),
+        ),
+        patch.object(
+            st,
+            "_generate_sector_trace_with_retry",
+            AsyncMock(return_value=_sector_chain_fake()),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_sector_trace_default_content_shape_unchanged() -> None:
+    """默认（persist_report=True）单板块自写：落库 content 形状与既有契约逐字一致。
+
+    回归锁：run()/iterate/replay 等既有单板块调用方读到的 content 不得因本轮
+    「多板块聚合」而变（不含加性字段 sector_traces，market_trace 仍是当板块）。
+    """
+    from aistock_agent.agents.workers import sector_trace as st
+
+    with ExitStack() as stack:
+        for item in _sector_trace_patches():
+            stack.enter_context(item)  # type: ignore[arg-type]
+        mock_save = stack.enter_context(
+            patch.object(st.node_api, "save_analysis_report", AsyncMock(return_value={}))
+        )
+        result = await st.run_sector_trace(
+            report_date="2026-07-16",
+            sector_name="存储板块",
+            sector_row={"pct_change": -4.2},
+        )
+    content = mock_save.await_args.kwargs["content"]
+    assert content["schema_version"] == "2.1"
+    assert content["display_report"] == {"summary": "", "sectors": ["存储板块"], "risks": []}
+    assert set(content["market_trace"]) == {"snapshot", "trace"}
+    assert content["market_trace"]["trace"]["chain_id"] == "x1"
+    assert result.trace_result["chain_id"] == "x1"
+
+
+@pytest.mark.asyncio
+async def test_run_sector_trace_persist_report_false_skips_save() -> None:
+    """persist_report=False（多板块聚合调用方）→ 不落库，仍返回结果供聚合与链组装。"""
+    from aistock_agent.agents.workers import sector_trace as st
+
+    with ExitStack() as stack:
+        for item in _sector_trace_patches():
+            stack.enter_context(item)  # type: ignore[arg-type]
+        mock_save = stack.enter_context(
+            patch.object(st.node_api, "save_analysis_report", AsyncMock(return_value={}))
+        )
+        result = await st.run_sector_trace(
+            report_date="2026-07-16",
+            sector_name="存储板块",
+            sector_row={"pct_change": -4.2},
+            parent_trace_ref={"source_report_type": "review", "report_date": "2026-07-16"},
+            persist_report=False,
+        )
+    mock_save.assert_not_called()
+    assert result.sector == "存储板块"
+    assert result.trace_result["chain_id"] == "x1"
+    # 父链引用照常随结果携带（链组装 _attribution_parent 消费），与是否落库无关
+    assert result.attribution_parent["source_report_type"] == "review"
+
+
+def _run_result(sector: str, chain_id: str) -> object:
+    from aistock_agent.agents.workers.sector_trace import SectorTraceRunResult
+
+    return SectorTraceRunResult(
+        report_date="2026-07-16",
+        sector=sector,
+        trace_result={"chain_id": chain_id, "sector": sector},
+        snapshot={"sector": {"name": sector}},
+    )
+
+
+def test_build_sector_trace_report_content_dedups_by_sector_name() -> None:
+    """聚合 content：sectors 按 results 顺序去重（同名只留首次），trace 按名可索引。"""
+    from aistock_agent.agents.workers.sector_trace import build_sector_trace_report_content
+
+    content = build_sector_trace_report_content(
+        [
+            _run_result("玉米", "a"),
+            _run_result("玉米", "a2"),
+            _run_result("先进封装", "b"),
+        ],
+        parent_trace_ref={"source_report_type": "review", "report_date": "2026-07-16"},
+    )
+    assert content is not None
+    assert content["display_report"]["sectors"] == ["玉米", "先进封装"]
+    assert content["display_report"]["sector_traces"] == {
+        "玉米": {"chain_id": "a", "sector": "玉米"},
+        "先进封装": {"chain_id": "b", "sector": "先进封装"},
+    }
+    # market_trace 取首个板块（T1 主链命中在前）→ 既有单板块读取方契约不变
+    assert content["market_trace"]["trace"]["chain_id"] == "a"
+    assert content["schema_version"] == "2.1"
+    assert content["attribution_parent"]["report_date"] == "2026-07-16"
+
+
+def test_build_sector_trace_report_content_none_when_no_successful_sector() -> None:
+    """无成功溯源板块（全失败/空入参）→ 不产 content（不写空报告）。"""
+    from aistock_agent.agents.workers.sector_trace import build_sector_trace_report_content
+
+    assert build_sector_trace_report_content([]) is None
+    assert build_sector_trace_report_content([_run_result("", "a")]) is None
+
+
+@pytest.mark.asyncio
+async def test_save_sector_trace_report_writes_all_sectors_once() -> None:
+    """聚合写入：一次 save_analysis_report，content 含全部已溯源板块，返回板块名清单。"""
+    from aistock_agent.agents.workers import sector_trace as st
+
+    with patch.object(st.node_api, "save_analysis_report", AsyncMock(return_value={})) as mock_save:
+        written = await st.save_sector_trace_report(
+            report_date="2026-07-16",
+            results=[_run_result("玉米", "a"), _run_result("先进封装", "b")],
+            parent_trace_ref={"source_report_type": "review", "report_date": "2026-07-16"},
+        )
+    assert written == ["玉米", "先进封装"]
+    mock_save.assert_awaited_once()
+    kwargs = mock_save.await_args.kwargs
+    assert kwargs["report_type"] == "sector_trace"
+    assert kwargs["report_date"] == "2026-07-16"
+    assert kwargs["data_source"] == "sector_trace_agent"
+    assert kwargs["content"]["display_report"]["sectors"] == ["玉米", "先进封装"]
+
+
+@pytest.mark.asyncio
+async def test_save_sector_trace_report_skips_write_without_successful_sector() -> None:
+    """无成功板块 → 一次都不写（返回空清单，不覆盖当天已有报告）。"""
+    from aistock_agent.agents.workers import sector_trace as st
+
+    with patch.object(st.node_api, "save_analysis_report", AsyncMock(return_value={})) as mock_save:
+        written = await st.save_sector_trace_report(report_date="2026-07-16", results=[])
+    assert written == []
+    mock_save.assert_not_called()
 
 
 # --- validate_sector_chain（T3 review 补测：#1 日期比较 + 降级契约） ---

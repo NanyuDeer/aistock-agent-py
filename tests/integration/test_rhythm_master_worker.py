@@ -105,7 +105,8 @@ async def test_after_close_full_compose_and_persist(
     assert content["target_date"] == report_date
     assert content["basis_date"] == "2026-08-28"
     assert "rhythm_card" in content
-    assert content["rhythm_card"]["data_missing"] == []
+    # A1：mock 的 index-map 为空 → 候选全部「代码未命中」，主线不可用须如实留痕
+    assert any("主线候选不可用" in m for m in content["rhythm_card"]["data_missing"])
     # I1：无 high 事件时 event_high_hint 为空串（前端 v-if 不渲染）。
     # 冻结：当前无键恒真（Task 2）；Task 10 后恒产键且空仍真，无需再改。
     assert content["rhythm_card"].get("event_high_hint", "") == ""
@@ -174,7 +175,10 @@ async def test_morning_inherits_base_no_recompose(
 async def test_midday_event_delta_lands_branch_by_result(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """12:30 事件落档：d=0 且 result=超预期 → 仓位文案按事件结果定档（八成~满仓），主档位不变。"""
+    """12:30 事件落档：d=0 且 result=超预期 → 仓位文案按事件结果定档（八成~满仓），主档位不变。
+
+    §5.7 后分支预算（≤3）由技术三档整体占满：事件情景让位，不产出 event_ref 分支，仅留痕。
+    """
     mock_api.get_rhythm_report.return_value = {
         "content": {
             "target_date": "2026-08-31",
@@ -209,9 +213,11 @@ async def test_midday_event_delta_lands_branch_by_result(
     assert content["rhythm_card"]["score"] == 60.0
     # d=0 且已落档（超预期）→ 事件结果定档：base 3 + 1 = 4（八成~满仓）
     assert content["rhythm_card"]["position_band"]["text"] == "建议仓位：八成~满仓"
-    # 事件分支仍产出（d=0 在 EVENT_BRANCH_MAX_D 内），且注明不改变主档位
-    event_branch = [b for b in content["rhythm_card"]["branches"] if b.get("event_ref")]
-    assert event_branch and "不改变主档位" in event_branch[0]["conclusion"]["note"]
+    # §5.7 分支预算（≤3）互斥使用：技术三档占满预算，事件情景让位（不产出 event_ref 分支）且必须留痕
+    branches = content["rhythm_card"]["branches"]
+    assert branches and all(b["condition"]["kind"] == "interval" for b in branches)
+    assert all("event_ref" not in b for b in branches)
+    assert "事件节点因分支预算（≤3）未展示" in content["rhythm_card"]["data_missing"]
 
 
 @pytest.mark.asyncio
