@@ -220,6 +220,25 @@ def test_branches_defer_event_node_and_record_reason() -> None:
     assert any("事件节点因分支预算" in m for m in out["data_missing"])
 
 
+def test_branches_no_deferral_trace_when_event_out_of_branch_window() -> None:
+    """终审 I2：首个高级事件超出事件分支窗口（交易日差 > 上限）时本就无分支产出，
+    不得把它归因为"因分支预算未展示"（对外可见的错误归因）。"""
+    from datetime import date as _date
+
+    from aistock_agent.services.rhythm_engine import EVENT_BRANCH_MAX_D
+    from aistock_agent.utils.date import trading_days_between
+
+    target, event_date = "2026-09-14", "2026-09-18"
+    d = trading_days_between(_date.fromisoformat(target), _date.fromisoformat(event_date))
+    # 前置：该事件确实落在事件分支窗口之外（防 fixture 因节假日漂移而失去判别力）
+    assert d is not None and d > EVENT_BRANCH_MAX_D
+    win = _win_with_highs(event_date)
+    out = _build_rhythm_card(_card_at(target), win, _rows(60, high=3010.0, low=2990.0))
+    assert len(out["branches"]) == 3
+    assert all(b["condition"]["kind"] == "interval" for b in out["branches"])
+    assert not any("事件节点因分支预算" in m for m in out["data_missing"])
+
+
 def test_branches_empty_normal_path_records_degradation_once() -> None:
     """§5.7：两个来源皆不可得（正常路径）→ branches=[] 且留痕，且只写一次。"""
     out = _build_rhythm_card(_card_at("2026-09-17"), _win(), _rows(60, high=None, low=None))

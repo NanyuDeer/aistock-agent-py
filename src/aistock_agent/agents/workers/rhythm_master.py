@@ -115,6 +115,20 @@ def _amount_yi(raw: float | None) -> float:
     return (raw * engine.QIAN_YUAN_TO_YI) if raw is not None else 0.0
 
 
+def _event_branchable(event: dict[str, Any], origin_date: str) -> bool:
+    """首个高级事件是否落在事件分支窗口内（即"本可成支"）。
+
+    终审 I2：预算让位留痕只能描述真实发生的让位。交易日差超出事件分支窗口上限的事件，
+    即使预算无上限也不会产出分支 —— 把它归因为"因分支预算未展示"是对外可见的错误归因。
+    判据不在此重复维护 d 阈值，统一问引擎（对非 high / 非法日期 / d 超限一律返回 []，
+    且自身不抛异常；此处再兜一层，任何意外都不影响 branches 结果）。
+    """
+    try:
+        return bool(engine.build_event_branch(event, origin_date))
+    except Exception:
+        return False
+
+
 def _load_sentiment_series(
     days: int = 7,
 ) -> tuple[list[dict[str, Any]], list[float], int, str | None]:
@@ -422,7 +436,10 @@ def _build_rhythm_card(
         )
         if tech_branches:
             branches = list(tech_branches[:3])
-            if win_highs_for_budget:
+            # 终审 I2：只有"本可成支"的事件才谈得上被预算让位（否则归因错误）。
+            if win_highs_for_budget and _event_branchable(
+                win_highs_for_budget[0], card.target_date
+            ):
                 data_missing_container.append("事件节点因分支预算（≤3）未展示")
         else:
             for e in win_highs_for_budget[:1]:
