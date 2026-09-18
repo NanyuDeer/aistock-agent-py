@@ -75,6 +75,29 @@ def _event_confirm(events: list[dict[str, Any]]) -> bool:
     )
 
 
+def _stage_from_report(report: object) -> Stage | None:
+    """从节奏卡响应提取主阶段（缺失/越界一律 None）。
+
+    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，业务对象把 `content`
+    放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+
+    越界 stage 必须在此拦截：该值会流入 `RhythmEvidence.stage`（`Stage | None` 的
+    Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新。
+    """
+    if not isinstance(report, dict):
+        return None
+    content = report.get("content")
+    if not isinstance(content, dict):
+        return None
+    evidence = content.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    stage = evidence.get("stage")
+    if not isinstance(stage, str) or not stage or stage not in get_args(Stage):
+        return None
+    return cast("Stage", stage)
+
+
 def _inherit_basis_stage(
     slot: str, basis_response: object
 ) -> tuple[str | None, str] | None:
@@ -84,8 +107,8 @@ def _inherit_basis_stage(
     stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
     G2：消灭「同日日历格 ice / 详情页 low」的自相矛盾。
 
-    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，`get_rhythm_report`
-    返回的业务对象把 `content` 放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+    与 `_stage_from_report` 的分工：本函数负责「同日基准」的语义与文案，阶段校验
+    统一委托给 `_stage_from_report`（单一收口，防两处规则漂移）。
     """
     if slot not in {"morning", "midday"}:
         return None
@@ -97,12 +120,8 @@ def _inherit_basis_stage(
     evidence = content.get("evidence")
     if not isinstance(evidence, dict):
         return None
-    stage = evidence.get("stage")
-    if not isinstance(stage, str) or not stage:
-        return None
-    # 越界 stage 必须在此拦截：该值会流入 RhythmEvidence.stage（Stage|None 的
-    # Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新
-    if stage not in get_args(Stage):
+    stage = _stage_from_report(basis_response)
+    if stage is None:
         return None
     basis_date = content.get("basis_date")
     reason = str(evidence.get("stage_reason") or "")
