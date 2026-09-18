@@ -160,5 +160,19 @@ def test_medium_event_does_not_change_position_text() -> None:
     assert out["position_band"]["text"] == baseline["position_band"]["text"]
 
 
+def test_card_exposes_phase_from_stage() -> None:
+    """§5.6：卡片必须产出 phase（前端情绪周期块 v-if 依赖它）。"""
+    rows = _rows(60, high=3010.0, low=2990.0)
+    for stage in ("ice", "launch", "rally", "overheat", "ebb"):
+        out = _build_rhythm_card(_card_at("2026-09-17", stage), _win(), rows)
+        assert out["phase"] == stage
+
+
+def test_card_phase_none_when_stage_missing() -> None:
+    rows = _rows(60, high=3010.0, low=2990.0)
+    out = _build_rhythm_card(_card_at("2026-09-17", None), _win(), rows)
+    assert out["phase"] is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -488,6 +488,8 @@ def _build_rhythm_card(
     event_high_hint = engine.build_event_hint(next_anchor)
     return {
         "score": score,
+        # §5.6：phase 供前端情绪周期块（stage 原样透出，含 launch/rally）
+        "phase": card.evidence.stage,
         "level": level,
         "position_band": {
             "text": pos_text,
