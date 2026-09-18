@@ -28,8 +28,10 @@ from aistock_agent.agents.workers.sector_trace import (
     SOURCE_CANDIDATE_CLAIM,
     SOURCE_SNAPSHOT,
     SectorHit,
+    SectorTraceRunResult,
     extract_primary_sectors,
     run_sector_trace,
+    save_sector_trace_report,
 )
 from aistock_agent.config import settings
 from aistock_agent.services.attribution_chain import index_pct_from_snapshot
@@ -476,20 +478,22 @@ class SectorTraceConsumer(BaseConsumer):
             logger.info("sector_trace_skip_no_primary_sector", report_date=report_date)
             return
         index_pct = _review_index_pct(report)
-        parent_ref = {
+        # 显式 dict[str, object]：dict 值类型不变，字面量推断出的窄联合类型无法传给
+        # run_sector_trace/save_sector_trace_report 的 dict[str, object] 形参
+        parent_ref: dict[str, object] = {
             "source_report_type": "review",
             "report_date": report_date,
             "index_pct": index_pct,
         }
 
-        results: list[object] = []
         # 级联预判入参（板块名 + 溯源快照 + 提取来源/弱标记），链保存后再消费（P0' 时序）
         cascades: list[tuple[str, dict[str, object], str, bool]] = []
 
-        async def _one(hit: SectorHit, *, fallback_level: str = "") -> None:
+        async def _one(hit: SectorHit, *, fallback_level: str = "") -> SectorTraceRunResult | None:
             # 兜底命中（T2/T3）必须真跑一遍板块溯源（不是只点名入链）：fallback_level
             # 非空即代表该板块来自兜底（补跑），补跑前后各记一条留痕日志
             # （sector / 来源级别 T2|T3 / 耗时），与 T1 日志分离便于对账。
+            # 返回成功结果供 gather 汇总（失败返回 None 且逐项隔离，见 except）。
             if fallback_level:
                 logger.info(
                     "sector_trace_fallback_started",
@@ -505,6 +509,9 @@ class SectorTraceConsumer(BaseConsumer):
                     sector_name=hit.name,
                     sector_row=hit.row,
                     parent_trace_ref=parent_ref,
+                    # 逐板块不自写报告：gather 结束后由 save_sector_trace_report 聚合写
+                    # 一次（同键 upsert 下逐板块各写一次会互相覆盖，报告层只剩最后一个）
+                    persist_report=False,
                 )
                 # Task 9.1：提取来源/弱标记随溯源结果携带（链组装 children[].extraction
                 # 与 root.evidence_weak 消费）——主链命中为正常依据，T2/T3 兜底为弱依据
@@ -512,7 +519,6 @@ class SectorTraceConsumer(BaseConsumer):
                 # R14：命中的快照行随结果携带（链组装 children[].ts_code/sector_std 消费，
                 # 供前端按权威名/代码桥接角色徽）
                 result.sector_row = dict(hit.row)
-                results.append(result)
                 cascades.append((hit.name, result.snapshot, hit.source, hit.weak))
                 logger.info(
                     "sector_trace_done",
@@ -530,6 +536,7 @@ class SectorTraceConsumer(BaseConsumer):
                         extraction_source=hit.source,
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                     )
+                return result
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "sector_trace_one_failed",
@@ -549,6 +556,7 @@ class SectorTraceConsumer(BaseConsumer):
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                         error=str(exc),
                     )
+                return None
 
         # 兜底命中（T2/T3，弱依据）与主链命中（T1）**分流**后一并并行溯源：
         # - T1 命中：fallback_level 恒为空 → 调用次数/入参/日志与既有行为逐字一致；
@@ -571,13 +579,44 @@ class SectorTraceConsumer(BaseConsumer):
             )
             fallback_hits = fallback_hits[:SECTOR_TRACE_FALLBACK_MAX_SECTORS]
 
-        await asyncio.gather(
+        gathered = await asyncio.gather(
             *(_one(hit) for hit in primary_hits),
             *(
                 _one(hit, fallback_level=_fallback_level(hit.source))
                 for hit in fallback_hits
             ),
         )
+        # gather 返回顺序 = 入参顺序（T1 主链命中在前、兜底命中按提取顺序在后）→
+        # 聚合报告的板块顺序确定，不随各板块完成先后漂移；失败项为 None（逐项隔离）。
+        traced: list[SectorTraceRunResult] = [item for item in gathered if item is not None]
+        # 链组装沿用既有 list[object] 契约（attribution_chain 按属性鸭子类型消费结果）
+        results: list[object] = list(traced)
+
+        # 写入收敛为**一次**：当天全部已溯源板块落进同一份 sector_trace 报告。
+        # 此前逐板块各写一次同键 (report_type, report_date, COALESCE(user_id,'')) 报告
+        # → Node upsert 互相覆盖，报告层只剩最后一个板块（生产实证全库仅 2 条、
+        # display_report.sectors 长度恒为 1），app-api sector-insight 的 review_primary
+        # 候选随之退化。写失败只 warning（对齐既有"单板块写失败=只留痕"语义，不把
+        # review_done 事件拖进 retry/DLQ）；失败板块不在 results 中故不进 sectors。
+        if traced:
+            try:
+                written = await save_sector_trace_report(
+                    report_date=report_date,
+                    results=traced,
+                    parent_trace_ref=parent_ref,
+                )
+                logger.info(
+                    "sector_trace_report_saved",
+                    report_date=report_date,
+                    sector_count=len(written),
+                    sectors=written,
+                )
+            except Exception as exc:  # noqa: BLE001 — 报告写失败只留痕，不阻断链/预判
+                logger.warning(
+                    "sector_trace_report_save_failed",
+                    report_date=report_date,
+                    error=str(exc),
+                )
 
         # P1a-3：溯源完成（results 非空）→ 组装大盘-板块归因链并 internal 保存。
         # 链保存失败只 warning 不阻断（溯源已逐板块落库，兼容降级约束）。

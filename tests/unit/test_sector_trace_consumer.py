@@ -12,6 +12,7 @@ Task 9.1 三级兜底：兜底命中（candidate_claim/snapshot）仍照常溯�
 但携带弱依据标记（链组装 children[].extraction / 预判留痕 attribution_weak）。
 """
 
+from collections.abc import Iterator
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -491,6 +492,9 @@ async def test_primary_hit_path_does_not_trigger_fallback_pass(
             "report_date": "2026-09-17",
             "index_pct": -0.9,
         },
+        # 2026-09-18 写入收敛：逐板块不再自写报告（聚合写入由 handle 统一做），
+        # 除该新增入参外 T1 路径的调用次数/其余入参/日志逐字不变
+        "persist_report": False,
     }
     out = capsys.readouterr().out
     assert "sector_trace_fallback_started" not in out
@@ -498,4 +502,130 @@ async def test_primary_hit_path_does_not_trigger_fallback_pass(
     chain = store.save.await_args.args[1]
     assert "extraction" not in chain["children"][0]
     assert "evidence_weak" not in chain["root"]
+
+
+# --- 2026-09-18：写入收敛为「当天一份报告」（sector-insight review_primary 不再只剩 1 个）---
+#
+# 背景：写入侧每个板块各写一次 report_type="sector_trace" 报告，Node upsert 键
+# (report_type, report_date, COALESCE(user_id,'')) 让同日多板块互相覆盖 → 生产全库
+# 仅 2 条、display_report.sectors 长度恒为 1（2026-09-17 ["玉米"]、09-18 ["先进封装"]），
+# app-api sector-insight 的 review_primary 候选随之退化成单板块。
+# 口径：逐板块溯源不再各自落库（persist_report=False），gather 结束后由**一处**写
+# 当天报告；sectors = 当天全部**成功**溯源板块（按提取顺序去重）；每板块 trace 详情
+# 进加性字段 display_report.sector_traces；market_trace 保持单板块既有形状。
+
+_REPORT_SAVE_TARGET = (
+    "aistock_agent.agents.workers.sector_trace.node_api.save_analysis_report"
+)
+
+
+@pytest.fixture(autouse=True)
+def report_write() -> Iterator[AsyncMock]:
+    """隔离报告落库（聚合写入是 handle 的固定动作）。
+
+    聚合写入走 `aistock_agent.agents.workers.sector_trace.node_api`（与
+    event_consumers 引用同一单例）：不隔离会真的发 HTTP（本地 HttpClientPool 未
+    初始化 → error 日志）并写全局 `report_cache`，污染其它用例。
+    """
+    with patch(_REPORT_SAVE_TARGET, AsyncMock(return_value={})) as save:
+        yield save
+
+
+def _report_content(save: AsyncMock) -> dict[str, object]:
+    content = save.await_args.kwargs["content"]
+    assert isinstance(content, dict)
+    return content
+
+
+@pytest.mark.asyncio
+async def test_multi_sector_run_writes_report_once_with_all_sectors(
+    report_write: AsyncMock,
+) -> None:
+    """T1 + 兜底多板块 → 只写一次报告，sectors = 全部板块（提取顺序、去重）。"""
+    hits = [_hit(), _fallback_hit("转基因"), _fallback_hit("玉米")]
+    patches, run, _store = _fallback_stack(
+        hits, lambda **kw: _fallback_trace_result(str(kw["sector_name"]))
+    )
+    await _handle_with(patches, "2026-09-18")
+
+    assert report_write.await_count == 1
+    kwargs = report_write.await_args.kwargs
+    assert kwargs["report_type"] == "sector_trace"
+    assert kwargs["report_date"] == "2026-09-18"
+    assert kwargs["data_source"] == "sector_trace_agent"
+    assert _report_content(report_write)["display_report"]["sectors"] == [
+        "存储板块",
+        "转基因",
+        "玉米",
+    ]
+    # 写入收敛：逐板块溯源不再各自落库（否则同键 upsert 互相覆盖）
+    assert all(call.kwargs["persist_report"] is False for call in run.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_multi_sector_report_keeps_each_sector_trace_by_name(
+    report_write: AsyncMock,
+) -> None:
+    """每板块 trace 详情进加性字段 display_report.sector_traces（按板块名可索引）。"""
+    hits = [_hit(), _fallback_hit("玉米")]
+    patches, _run, _store = _fallback_stack(
+        hits, lambda **kw: _fallback_trace_result(str(kw["sector_name"]))
+    )
+    await _handle_with(patches, "2026-09-18")
+
+    content = _report_content(report_write)
+    traces = content["display_report"]["sector_traces"]
+    assert set(traces) == {"存储板块", "玉米"}
+    assert traces["玉米"]["chain_id"] == "sc-玉米"
+    assert traces["玉米"]["stages"][1]["headline"] == "玉米受出口管制预期压制"
+    # 兼容契约（app-api extractSectorTraceInfo 读它取 summary / 既有 market_trace 读取方）：
+    # market_trace 仍是单板块形状，取首个板块（T1 主链命中在入参顺序上居前）
+    assert content["market_trace"]["trace"]["sector"] == "存储板块"
+    assert content["market_trace"]["snapshot"]["sector"]["name"] == "存储板块"
+    assert content["schema_version"] == "2.1"
+
+
+@pytest.mark.asyncio
+async def test_failed_sector_excluded_from_sectors_and_others_written(
+    report_write: AsyncMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """单板块溯源失败 → 该板块不进 sectors（只统计成功溯源），其它板块照写、不 panic。"""
+    hits = [_fallback_hit("CRO概念"), _fallback_hit("转基因"), _fallback_hit("玉米")]
+
+    def _trace(**kw: object) -> SimpleNamespace:
+        name = str(kw["sector_name"])
+        if name == "转基因":
+            raise RuntimeError("tavily down")
+        return _fallback_trace_result(name)
+
+    patches, run, _store = _fallback_stack(hits, _trace)
+    await _handle_with(patches, "2026-09-18")
+
+    assert run.await_count == 3  # 逐项独立：失败不阻止其它板块被调用
+    assert report_write.await_count == 1
+    content = _report_content(report_write)
+    assert content["display_report"]["sectors"] == ["CRO概念", "玉米"]
+    assert "转基因" not in content["display_report"]["sector_traces"]
+    # 既有兜底留痕不丢
+    out = capsys.readouterr().out
+    assert "sector_trace_fallback_done" in out
+    assert "sector_trace_fallback_failed" in out
+
+
+@pytest.mark.asyncio
+async def test_same_day_rerun_keeps_sectors_deduplicated(report_write: AsyncMock) -> None:
+    """同一天重复跑（重放/补跑）→ 每次写入的板块清单一致且不重复。"""
+    hits = [_hit(), _fallback_hit("转基因"), _fallback_hit("玉米")]
+    patches, _run, _store = _fallback_stack(
+        hits, lambda **kw: _fallback_trace_result(str(kw["sector_name"]))
+    )
+    await _handle_with(patches, "2026-09-18")
+    await _handle_with(patches, "2026-09-18")
+
+    assert report_write.await_count == 2
+    for call in report_write.await_args_list:
+        sectors = call.kwargs["content"]["display_report"]["sectors"]
+        assert sectors == ["存储板块", "转基因", "玉米"]
+        assert len(sectors) == len(set(sectors))
 

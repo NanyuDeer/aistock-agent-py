@@ -4,6 +4,7 @@ review_done 事件触发的板块级事件归因：对主因板块回答「今�
 异动归因」。复用 CausalChain/ChainStage 的链结构语义；独立报告
 report_type="sector_trace"。
 """
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -287,7 +288,19 @@ async def run_sector_trace(
     sector_name: str,
     sector_row: dict[str, object] | None,
     parent_trace_ref: dict[str, object] | None = None,  # P1：大盘归因父链引用
+    persist_report: bool = True,
 ) -> SectorTraceRunResult:
+    """单板块溯源（板块级事件层归因）。
+
+    ``persist_report`` 决定是否**自写**一份该板块的 sector_trace 报告：
+    - True（默认）：run()/iterate/replay 等既有单板块调用方的行为**逐字不变**
+      （content 形状不变，落库一次）；
+    - False：多板块调用方（SectorTraceConsumer）传——逐板块并行时只做溯源并回传
+      结果，由 :func:`save_sector_trace_report` 在 gather 结束后**一次**写当天全部
+      板块的报告。逐板块各写一次会因 Node upsert 键 (report_type, report_date,
+      COALESCE(user_id,'')) 互相覆盖，报告层只剩最后一个板块（生产实证：全库仅 2 条、
+      ``display_report.sectors`` 长度恒为 1）。
+    """
     # 定向事件检索路径在 snapshot 内部走 TavilyService.search（D4.5 接线，
     # 无外部上下文注入；快照内失败静默降级语义不变）
     snapshot = await build_sector_snapshot(
@@ -296,19 +309,23 @@ async def run_sector_trace(
         sector_row=sector_row,
     )
     trace_result = await _generate_sector_trace_with_retry(snapshot, captured_at=report_date)
-    content = {
-        "display_report": {"summary": "", "sectors": [sector_name], "risks": []},
-        "schema_version": "2.1",
-        "market_trace": {"snapshot": snapshot, "trace": trace_result.model_dump(mode="json")},
-    }
-    if parent_trace_ref:
-        content["attribution_parent"] = parent_trace_ref
-    await node_api.save_analysis_report(
-        report_type="sector_trace",
-        report_date=report_date,
-        data_source="sector_trace_agent",
-        content=content,
-    )
+    if persist_report:
+        content = {
+            "display_report": {"summary": "", "sectors": [sector_name], "risks": []},
+            "schema_version": "2.1",
+            "market_trace": {
+                "snapshot": snapshot,
+                "trace": trace_result.model_dump(mode="json"),
+            },
+        }
+        if parent_trace_ref:
+            content["attribution_parent"] = parent_trace_ref
+        await node_api.save_analysis_report(
+            report_type="sector_trace",
+            report_date=report_date,
+            data_source="sector_trace_agent",
+            content=content,
+        )
     return SectorTraceRunResult(
         report_date=report_date,
         sector=sector_name,
@@ -316,6 +333,90 @@ async def run_sector_trace(
         snapshot=snapshot,
         attribution_parent=dict(parent_trace_ref or {}),
     )
+
+
+def build_sector_trace_report_content(
+    results: Sequence[SectorTraceRunResult],
+    *,
+    parent_trace_ref: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    """多板块聚合的 sector_trace 报告 content（无成功板块返回 None）。
+
+    结构（对既有读取方纯加性，本次不改 app-api）：
+
+    - ``display_report.sectors``：当天**全部已溯源**板块名（按 results 顺序去重）——
+      app-api `sector-insight` 的 `review_primary` 候选集与 `sector_wind_prediction`
+      的主因排除集都只读这个字符串数组，故必须一次带全（此前逐板块各写一份报告、
+      同键 upsert 互相覆盖，报告层只剩 1 个板块）；**失败板块不在 results 中**（调用
+      方逐项隔离后只收集成功项）→ 不进 sectors：该字段语义是"已溯源确认的板块"，
+      把失败板块写进去会让 `review_primary` 出现无 trace 支撑的候选（宁缺毋滥）。
+    - ``display_report.sector_traces``：**新增加性字段** ``{板块名: trace 序列化}``——
+      ``market_trace.trace`` 只能承载一个板块的 trace，多板块日其余板块的
+      attribution_status/stages/missing_evidence 无处安放；按板块名索引既不破坏
+      既有"单 trace"形状（app-api `extractSectorTraceInfo` / `extractTraceSummary`
+      读它取 summary），也便于 app-api 与前端后续**按需**消费（本次不改 app-api）。
+    - ``market_trace``：首个板块（T1 主链命中在调用方入参顺序上居前）的
+      snapshot+trace，保持既有单板块形状与语义。
+    - ``schema_version`` 仍 ``"2.1"``：既有键类型/语义未变、仅新增键，非破坏性变更。
+    - ``attribution_parent``：与单板块报告同键同值（链组装回读口径一致）。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    sector_traces: dict[str, object] = {}
+    first: SectorTraceRunResult | None = None
+    for result in results:
+        name = str(result.sector or "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        sector_traces[name] = dict(result.trace_result)
+        if first is None:
+            first = result
+    if first is None:
+        return None
+    content: dict[str, object] = {
+        "display_report": {
+            "summary": "",
+            "sectors": names,
+            "risks": [],
+            "sector_traces": sector_traces,
+        },
+        "schema_version": "2.1",
+        "market_trace": {
+            "snapshot": dict(first.snapshot),
+            "trace": dict(first.trace_result),
+        },
+    }
+    if parent_trace_ref:
+        content["attribution_parent"] = dict(parent_trace_ref)
+    return content
+
+
+async def save_sector_trace_report(
+    *,
+    report_date: str,
+    results: Sequence[SectorTraceRunResult],
+    parent_trace_ref: dict[str, object] | None = None,
+) -> list[str]:
+    """聚合写入当天 sector_trace 报告（一天一份，含全部**成功**溯源板块）。
+
+    由多板块调用方在 gather 结束后调**一次**：写入收敛到单点，避免并行逐板块
+    read-modify-write 与同键 upsert 互相覆盖。返回写入的板块名清单（报告顺序、
+    已去重）；无成功板块返回 ``[]`` 且**不写**（不覆盖当天已有报告）。
+    """
+    content = build_sector_trace_report_content(results, parent_trace_ref=parent_trace_ref)
+    if content is None:
+        return []
+    await node_api.save_analysis_report(
+        report_type="sector_trace",
+        report_date=report_date,
+        data_source="sector_trace_agent",
+        content=content,
+    )
+    display = content["display_report"]
+    sectors: object = display.get("sectors") if isinstance(display, dict) else None
+    return [str(name) for name in sectors] if isinstance(sectors, list) else []
 
 
 async def run(state: dict[str, object]) -> dict[str, object]:
