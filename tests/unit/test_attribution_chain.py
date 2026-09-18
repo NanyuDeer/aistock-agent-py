@@ -12,6 +12,7 @@ import pytest
 from aistock_agent.agents.workers.sector_trace import judge_sector_driver_relation
 from aistock_agent.schemas.sector_trace import SectorChainResult, SectorStage
 from aistock_agent.services.attribution_chain import (
+    _trace_summary,
     assemble_attribution_chain,
     event_summary_reason,
     is_driving_event,
@@ -1440,4 +1441,135 @@ def test_page_module_urls_still_noise(url: str) -> None:
 def test_non_market_site_urls_are_not_noise(url: str) -> None:
     """主机出现 guba/f10/quote 子串但非行情站 → 不得误判（收窄 ② 的红线）。"""
     assert is_page_noise_url(url) is False
+
+
+# --- 迭代 4（2026-09-18）：摘要与事件层一致性（"结论不得与证据相反"）---
+#
+# 生产实证（2026-09-18 重跑）：同一板块 `children[].trace_summary` =
+# "未检索到可明确解释当日行情的独立触发事件"（溯源阶段 trigger headline），而
+# `children[].events` 非空（检索补漏路径从同一快照的 `sector_event:*` 候选里放行了一条）
+# ——同一个板块卡片上"没找到原因"和"有原因事件"同时成立。
+#
+# 口径：**证据存在则结论不得与证据相反**。`events` 非空且摘要是否定句 → 摘要让位给事件首条
+# headline（摘要代表"该板块的驱动原因"，有事件节点就等于有原因）；无事件、摘要非否定句、
+# 或不传 `events`（既有调用方）→ 逐字保持既有行为。
+#
+# 刻意只认**无歧义的否定词**：肯定归因句里的"不足/没有/缺少"（"供给不足推动多晶硅价格上涨"）
+# 不得被当成否定句，否则会把真有归因的摘要错误让位。
+
+_NEGATIVE_TRACE_SUMMARY = "未检索到可明确解释当日行情的独立触发事件"
+
+
+def _trace_result_with_summary(headline: str, *, status: str = "insufficient") -> dict:
+    return {
+        "stages": [
+            {"kind": "phenomenon", "headline": "板块当日大涨", "claims": []},
+            {"kind": "trigger", "headline": headline, "claims": [headline] if headline else []},
+        ],
+        "attribution_status": status,
+    }
+
+
+def _event_node(headline: str) -> dict:
+    return {
+        "event_id": None,
+        "ref": "https://example.com/x",
+        "headline": headline,
+        "source": "search",
+    }
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        _NEGATIVE_TRACE_SUMMARY,
+        "未找到可解释该板块异动的事件",
+        "未发现明确触发事件",
+        "无法确认驱动原因",
+        "暂无独立触发事件",
+        "溯源未确认驱动原因",
+    ],
+)
+def test_trace_summary_yields_to_events_when_summary_negative(summary: str) -> None:
+    """否定句摘要 + 有事件 → 摘要让位（事件是证据，摘要不得与证据相反）。"""
+    out = _trace_summary(
+        _trace_result_with_summary(summary),
+        events=[_event_node("某公司公告中标5亿元订单")],
+    )
+    assert out == "某公司公告中标5亿元订单"
+
+
+def test_trace_summary_keeps_positive_summary_even_with_events() -> None:
+    """肯定归因句 + 有事件 → 摘要保留（它是更完整的归因叙述，事件只是它的支撑节点）。"""
+    summary = "政策落地带动板块大涨"
+    out = _trace_summary(
+        _trace_result_with_summary(summary), events=[_event_node("某公司公告中标")]
+    )
+    assert out == summary
+
+
+def test_trace_summary_keeps_negative_summary_when_no_events() -> None:
+    """无事件 → 否定句摘要如实保留；不传 events（既有调用方）行为逐字不变。"""
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY), events=[])
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY))
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+
+
+def test_trace_summary_not_fooled_by_positive_summary_with_ambiguous_negation() -> None:
+    """肯定句含"不足"（"供给不足推动涨价"）不得被当成否定句而错误让位。"""
+    summary = "供给不足推动多晶硅价格上涨"
+    out = _trace_summary(
+        _trace_result_with_summary(summary), events=[_event_node("某公司公告扩产")]
+    )
+    assert out == summary
+
+
+@pytest.mark.parametrize("events", [[], [{"headline": "  "}], [{"headline": ""}, {}], [None]])
+def test_trace_summary_keeps_negative_summary_when_event_headline_blank(events: list) -> None:
+    """事件节点无可用 headline（空/空白/非 dict）→ 让不了位，如实保留否定句摘要。"""
+    assert (
+        _trace_summary(_trace_result_with_summary(_NEGATIVE_TRACE_SUMMARY), events=events)
+        == _NEGATIVE_TRACE_SUMMARY
+    )
+
+
+def test_chain_trace_summary_follows_events_with_override_trace(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """集成：链上 events 非空 + 溯源摘要否定 → children[].trace_summary 跟随事件，并留痕。"""
+    source = _search_source("注册制次新股：某公司公告中标5亿元订单")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("注册制次新股", 7.3, _NEGATIVE_TRACE_SUMMARY, sources=[source])
+        ],
+    )
+    child = chain["children"][0]
+    assert child["events"], "前置：事件层确实放行了该条（否则本用例测不到让位）"
+    assert child["trace_summary"] == "注册制次新股：某公司公告中标5亿元订单"
+    assert "chain_trace_summary_overridden_by_events" in capsys.readouterr().out
+
+
+def test_chain_trace_summary_untouched_when_events_rejected(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """集成：事件被准入拒收 → events 空 → 否定句摘要如实保留（不得为空气让位）。"""
+    source = _search_source("注册制次新股大涨八个点，A股市场全线拉升")
+    chain = assemble_attribution_chain(
+        report_date="2026-09-18",
+        review_payload=_review_payload(),
+        sector_results=[
+            _sector_with_evidence("注册制次新股", 7.3, _NEGATIVE_TRACE_SUMMARY, sources=[source])
+        ],
+    )
+    child = chain["children"][0]
+    assert child["events"] == []
+    assert child["trace_summary"] == _NEGATIVE_TRACE_SUMMARY
+    assert "chain_trace_summary_overridden_by_events" not in capsys.readouterr().out
 

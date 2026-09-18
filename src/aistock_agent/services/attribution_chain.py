@@ -13,6 +13,18 @@ logger = structlog.get_logger()
 # insufficient 或无法从 stages 提取 trigger 结论时，如实说明原因未确认）。
 _FALLBACK_TRACE_SUMMARY = "溯源未确认驱动原因"
 
+# 「否定句摘要」标记词（2026-09-18 迭代 4）：溯源阶段如实说明"没找到原因"的句式。
+# 这类句子的存在前提是**事件层也为空**——`children[].events` 非空却写着"未检索到触发事件"
+# 就是结论与证据相反（生产实证：同一板块卡片上两句话并存）。
+#
+# 刻意只用**无歧义的否定词**：肯定归因句里的"不足/没有/缺少/缺乏"（如"供给不足推动多晶硅
+# 价格上涨"）一旦入表就会被误判成否定句、把真有归因的摘要错误让位给事件标题，故不收。
+_NEGATIVE_SUMMARY_MARKERS = (
+    "未检索到", "未找到", "未发现", "未确认", "未明确", "未识别", "未匹配",
+    "没有检索到", "没有找到", "没有发现",
+    "无法确认", "无法判断", "不能确认", "暂无", "尚未",
+)
+
 # 弱依据日（无主链：板块提取走候选链/快照兜底）链根摘要回退文案：报告中
 # attribution_summary 空缺时用中性表述，不编造主因（Task 9.1）。
 _WEAK_ATTRIBUTION_SUMMARY = "证据不足，未确认主因"
@@ -91,26 +103,24 @@ def index_pct_from_snapshot(snapshot: dict[str, object]) -> float | None:
     return None
 
 
-def _trace_summary(trace_result: dict[str, object]) -> str:
-    """链 children[].trace_summary：优先取该板块 sector_trace 报告的非空摘要。
+def _is_negative_summary(text: str) -> bool:
+    """摘要是否为「未找到原因」的否定句（`_NEGATIVE_SUMMARY_MARKERS`，纯子串判定）。"""
+    return any(marker in text for marker in _NEGATIVE_SUMMARY_MARKERS)
 
-    取源优先级（**报告有内容就不得被兜底覆盖**）：
 
-    1. 报告顶层 `summary`（写入侧若提供非空字符串，直接采用）；
-    2. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
-    3. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
-    4. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
+def _first_event_headline(events: object) -> str:
+    """事件层首条可用 headline（空/空白/非 dict/非字符串一律跳过），取不到返回 ``""``。"""
+    if not isinstance(events, list):
+        return ""
+    for node in events:
+        headline = node.get("headline") if isinstance(node, dict) else None
+        if isinstance(headline, str) and headline.strip():
+            return headline.strip()
+    return ""
 
-    为什么去掉"attribution_status == insufficient → 直接兜底"：生产实证
-    （2026-09-17 玉米）同一板块在 `GET /api/agent/sector-insight/:date` 的
-    `trace.summary`（app-api `extractTraceSummary` 取 trigger headline，从不看该字段）
-    是有内容的归因句，链却是"溯源未确认驱动原因"——前端两页（市场洞见按链摘要判
-    "有无归因"、板块四环按 sector-insight 主因）口径必须一致，故摘要只按"有没有内容"
-    决定是否兜底。
 
-    刻意**不**回退 phenomenon/首 stage 的 headline：那是现象描述（"今日大幅波动"），
-    拿它当驱动原因正是本次要修的问题；无 trigger 即无归因，如实走中性兜底。
-    """
+def _trace_summary_from_report(trace_result: dict[str, object]) -> str:
+    """`_trace_summary` 的报告侧取源（1→4 优先级），不含事件层裁决。"""
     if not isinstance(trace_result, dict):
         return _FALLBACK_TRACE_SUMMARY
     summary = trace_result.get("summary")
@@ -134,6 +144,40 @@ def _trace_summary(trace_result: dict[str, object]) -> str:
             if isinstance(claim, str) and claim.strip():
                 return claim.strip()
     return _FALLBACK_TRACE_SUMMARY
+
+
+def _trace_summary(trace_result: dict[str, object], *, events: object = ()) -> str:
+    """链 children[].trace_summary：优先取该板块 sector_trace 报告的非空摘要。
+
+    取源优先级（**报告有内容就不得被兜底覆盖**）：
+
+    1. 报告顶层 `summary`（写入侧若提供非空字符串，直接采用）；
+    2. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
+    3. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
+    4. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
+
+    为什么去掉"attribution_status == insufficient → 直接兜底"：生产实证
+    （2026-09-17 玉米）同一板块在 `GET /api/agent/sector-insight/:date` 的
+    `trace.summary`（app-api `extractTraceSummary` 取 trigger headline，从不看该字段）
+    是有内容的归因句，链却是"溯源未确认驱动原因"——前端两页（市场洞见按链摘要判
+    "有无归因"、板块四环按 sector-insight 主因）口径必须一致，故摘要只按"有没有内容"
+    决定是否兜底。
+
+    刻意**不**回退 phenomenon/首 stage 的 headline：那是现象描述（"今日大幅波动"），
+    拿它当驱动原因正是本次要修的问题；无 trigger 即无归因，如实走中性兜底。
+
+    **迭代 4（2026-09-18）：结论不得与证据相反**——`events` 非空（事件层确有驱动事件）
+    且上面取到的摘要是否定句（`_is_negative_summary`）时，摘要让位给事件首条 headline。
+    依据：`trace_summary` 语义是"该板块的驱动原因"，而 `events` 是它的支撑证据；链上已经
+    有事件节点却写着"未检索到触发事件"，同一个板块卡片上两句话自相矛盾（生产实证）。
+    事件首条 headline 也取不到时（节点无标题）让不了位，如实保留否定句。
+    """
+    summary = _trace_summary_from_report(trace_result)
+    if _is_negative_summary(summary):
+        headline = _first_event_headline(events)
+        if headline:
+            return headline
+    return summary
 
 
 def _pct_from(snapshot: dict[str, object]) -> float | None:
@@ -881,11 +925,12 @@ def assemble_attribution_chain(
         sector = str(getattr(res, "sector", "") or "")
         trace_result = getattr(res, "trace_result", {}) or {}
         snapshot_dict = getattr(res, "snapshot", {}) or {}
+        trace_result_dict = trace_result if isinstance(trace_result, dict) else {}
         pct = _pct_from(snapshot_dict) if isinstance(snapshot_dict, dict) else None
         # 链事件层（spec §3.2-4）：中台优先 → 检索补漏 → 去重 → 上限；无命中为空数组
         events, event_stats = _child_events(
             sector,
-            trace_result if isinstance(trace_result, dict) else {},
+            trace_result_dict,
             snapshot_dict if isinstance(snapshot_dict, dict) else {},
             warehouse_events or [],
         )
@@ -903,6 +948,17 @@ def assemble_attribution_chain(
                 **event_stats,
             )
         extraction = _sector_extraction(res)
+        # 迭代 4：摘要与事件层一致性裁决——否定句摘要 + 有事件 → 摘要让位（见 `_trace_summary`）
+        report_summary = _trace_summary_from_report(trace_result_dict)
+        trace_summary = _trace_summary(trace_result_dict, events=events)
+        if trace_summary != report_summary:
+            logger.info(
+                "chain_trace_summary_overridden_by_events",
+                report_date=report_date,
+                sector=sector,
+                from_summary=report_summary,
+                to_headline=trace_summary,
+            )
         child: dict[str, object] = {
             "sector": sector,
             # R14：板块标识增强（ts_code/sector_std，取自溯源命中的快照权威行）——
@@ -910,7 +966,7 @@ def assemble_attribution_chain(
             **_sector_meta(sector, getattr(res, "sector_row", None)),
             "relation": judge_sector_driver_relation(pct, index_pct),
             "pct": pct,
-            "trace_summary": _trace_summary(trace_result),
+            "trace_summary": trace_summary,
             "events": events,
         }
         # Task 9.1：兜底命中（无主链 → 候选链/快照）标弱依据，供展示层提示证据不足；
