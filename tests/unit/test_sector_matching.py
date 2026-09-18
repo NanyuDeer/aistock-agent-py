@@ -76,10 +76,12 @@ def test_sector_code_match_aliases_for_granularity_gap():
     assert "AI/CPO/半导体" in overlap
     # CRO/医药 命中 医药电商（同属医药）
     assert "CRO/医药" in overlap
+    # 2026-09-18 别名扩充：可燃冰 已登记为「石油石化/能源」与「原油/能源」的别名
+    # → 晨报"石油石化"命中复盘"可燃冰"（同属油气能源链），故从 missing 移到 overlap
+    assert "石油石化" in overlap
     # 真实未预测到的方向仍计入 missing
     assert "芬太尼" in missing
     assert "禽流感" in missing
-    assert "可燃冰" in missing
     # 真实未兑现的晨报方向计入 over_focused
     assert "新型电力系统/特高压" in over_focused
 
