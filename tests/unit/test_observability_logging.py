@@ -158,6 +158,25 @@ def test_invalid_level_falls_back_to_info():
     assert data["event"] == "still_works"
 
 
+def test_log_output_includes_traceback_for_exc_info():
+    """logger.exception 时输出真实 traceback（format_exc_info 生效，回归：曾只留 exc_info=true）"""
+    setup_logging("INFO")
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            get_logger("test").exception("err_event")
+    line = buf.getvalue().strip()
+    assert line
+    data = json.loads(line)
+    assert data["event"] == "err_event"
+    assert data["level"] == "error"
+    rendered = json.dumps(data, ensure_ascii=False)
+    assert "Traceback" in rendered
+    assert "ValueError: boom" in rendered
+
+
 def test_setup_logging_is_idempotent():
     """多次调用 setup_logging 不抛异常，配置以最后一次为准"""
     setup_logging("DEBUG")

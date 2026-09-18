@@ -12,18 +12,20 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Any, Literal
 
+from aistock_agent.config import settings
+from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services.data_client import node_api
 from aistock_agent.utils.date import add_trading_days, shanghai_today
+from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
 Result = Literal["hit", "miss", "insufficient"]
 
-# 验证统计归档
-verification_dir = Path("docs/agent-outputs/rhythm")
+# 验证统计归档（settings 值 + 仓库根解析，不依赖 CWD）
+verification_dir = project_root() / settings.rhythm_output_dir
 
 WINDOW_DAYS = 5
 
@@ -77,6 +79,48 @@ def evaluate_branch(
     event_title = str(ref["title"]) if isinstance(ref, dict) and ref.get("title") else None
     if not _triggered(cond, rows, event_results, event_title):
         return "insufficient"
+    # 有 anchor：以 direction + 触发位机械判 hit/miss（Task3）。
+    # bullish → 站上触发位（cond.lo），bearish → 跌破触发位（cond.hi），
+    # neutral → 沿 conclusion.range；均要求窗口内连续 2 日成立才算 hit（站稳）。
+    # 仅对"上证指数点位"触发做机械锚定判定；成交额（单位亿元）与 enum 事件分支
+    # 无同量纲点位触发，回退到 conclusion.range（恒为点位区间）判定，避免"指数点位 vs 亿元"错配。
+    anchor = branch.get("anchor")
+    if isinstance(anchor, dict):
+        direction = anchor.get("direction")
+        point_trigger = cond.get("indicator") == "上证指数点位"
+        trigger_val: float | None = None
+        if point_trigger and cond.get("kind") == "interval":
+            if direction == "bullish":
+                lo = cond.get("lo")
+                trigger_val = float(lo) if lo is not None else None
+            elif direction == "bearish":
+                hi = cond.get("hi")
+                trigger_val = float(hi) if hi is not None else None
+        # 机械判定前提：仅点位触发 + bullish/bearish 且能定位触发位；enum 事件/成交额分支
+        # 触发位单位≠点位，不在此判定，落回下方 range 回退（D11：事件落档后按 range 判 hit/miss）。
+        can_judge = (
+            point_trigger and direction in ("bullish", "bearish") and trigger_val is not None
+        )
+        if can_judge:
+            consecutive = 0
+            for row in rows:
+                close = row.get("close")
+                if close is None:
+                    continue
+                ok = False
+                if direction == "bullish":
+                    ok = float(close) > float(trigger_val)
+                elif direction == "bearish":
+                    ok = float(close) < float(trigger_val)
+                if ok:
+                    consecutive += 1
+                    if consecutive >= 2:
+                        return "hit"
+                else:
+                    consecutive = 0
+            return "miss"
+        # 其余（成交额分支 / enum 事件分支 / neutral / 无机械触发位）：落到下方原 range 回退逻辑
+    # 无 anchor（或 anchor 无法机械判定）：回退旧 range 判定（兼容）
     parsed = _parse_range(str(conclusion.get("range", "")))
     if parsed is None:
         return "miss"
@@ -133,17 +177,34 @@ async def run_once(report_date: str | None = None) -> dict[str, Any]:
             start_date=target.replace("-", ""),
             end_date=end.isoformat().replace("-", ""),
         )
-        rows = list(rows_raw) if isinstance(rows_raw, list) else []
+        rows: list[Any] = list(rows_raw) if isinstance(rows_raw, list) else []
+        # 量纲对齐（G6/P0-3）：Node 返回 amount=千元，branches 阈值=亿元；
+        # 在数据边界一次性换算，使 evaluate_branch/_triggered 的 amount 口径恒为"亿元"。
+        for r in rows:
+            if isinstance(r, dict) and r.get("amount") is not None:
+                r["amount"] = float(r["amount"]) * engine.QIAN_YUAN_TO_YI
         if not rows:
             return {"report_date": target, "evaluated": 0, "error": "窗口 K 线不可用"}
-        # 事件落档只发生在 morning/midday 版本，after_close 为占位（D11）
+        # 事件落档只发生在 morning/midday 版本，after_close 为占位（D11）。
+        # 方案丙（2026-09-05 产品拍板）：after_close 存储 report_date=target_date（次日），
+        # 故 run_once 不按"当天 report_date 精确匹配"读后收盘基准；改为读最新 after_close
+        # 卡并校验 content.basis_date 为最近交易日。morning/midday 仍按 target 精确读。
+        # 本任务为 min 边界：Node 无"最新卡"端点，只对齐"当天精确命中"语义（storage 的
+        # report_date 不改），Node 侧"最新卡"契约改造另立任务（见 Task 8 开放项）。
         base = None
-        for slot in ("midday", "morning", "after_close"):
+        for slot in ("midday", "morning"):
             resp = await node_api.get_rhythm_report(target, slot)
             content = resp.get("content") if isinstance(resp, dict) else None
             if isinstance(content, dict) and "rhythm_card" in content:
                 base = resp
                 break
+        if base is None:
+            # after_close 兜底：仍有 rhythm_card 则取用（run_once 依赖 content.rhythm_card
+            # 的 branches，无 rhythm_card 的基座对 run_once 无用）；未命中保持"基准报告缺失"降级。
+            resp = await node_api.get_rhythm_report(target, "after_close")
+            content = resp.get("content") if isinstance(resp, dict) else None
+            if isinstance(content, dict) and "rhythm_card" in content:
+                base = resp
         if not isinstance(base, dict):
             return {"report_date": target, "evaluated": 0, "error": "基准报告缺失"}
         content = base.get("content")

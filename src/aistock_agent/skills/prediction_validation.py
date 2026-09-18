@@ -22,9 +22,6 @@ from typing import cast
 import structlog
 from pydantic import BaseModel, Field
 
-from aistock_agent.prompts.workers.prediction_validation import (
-    PREDICTION_VALIDATION_PROMPT,
-)
 from aistock_agent.schemas.market_trace import MarketTraceResult
 from aistock_agent.schemas.target import Target
 from aistock_agent.services.cache import (
@@ -49,9 +46,22 @@ _CNF_WINDOW_DAYS = 10
 
 
 def _record_target(prediction: object) -> str | None:
-    """取 prediction 的首个非空 target 字符串（画像分 target 重算用）。"""
+    """取 prediction 的目标串（画像分 target 重算用）。
+
+    Task 0.5：**优先**取结构化 ``prediction["target"]`` 的 ``internal_id``（稳定标识，
+    数据卫生 §2.1；板块 = resolved ts_code，防改名断画像）→ ``name``（内层回退）；
+    无结构化 target（旧记录）→ 回退首个非空 ``horizons[].target`` 字符串（向后兼容）。
+    理由：板块预判的 ``horizons[].target`` 是 LLM 自由文本（prompt 要求"验证对象优先用
+    指数名"），常写成"上证指数"，按字符串与板块 ts_code/板块名比对必然 miss（画像恒空）。
+    """
     if not isinstance(prediction, dict):
         return None
+    target = prediction.get("target")
+    if isinstance(target, dict):
+        for key in ("internal_id", "name"):
+            value = target.get(key)
+            if isinstance(value, str) and value:
+                return value
     horizons = prediction.get("horizons")
     if isinstance(horizons, list):
         for h in horizons:
@@ -82,15 +92,18 @@ def _slice_horizon(profile: dict[str, object], horizon: str) -> dict[str, object
 
 
 async def _collect_target_entries(target: Target) -> list[dict[str, object]]:
-    """从 verified 记录中收集该 target 的验证 entry（缓存 miss 时的重算数据源）。
+    """从全部记录中收集该 target 的验证 entry（缓存 miss 时的重算数据源）。
 
+    D3（2026-09-03）：数据源从 list_verified_predictions 改为 list_all_predictions
+    （pending+verified 档位级扫描）——status=verified 需全档完结（long 2027），只读
+    verified 画像恒空；short/mid 到期写入即有 result 即计入。
     按 record 级 target 字符串匹配（== internal_id 或 == name），把该记录的
     verification 下所有带 result 的 entry 归入 target。数据源故障返回空列表（降级，
     build_validation_profile 得零画像，不 crash）。
     """
     entries: list[dict[str, object]] = []
     try:
-        records = await node_api.list_verified_predictions(limit=500)
+        records = await node_api.list_all_predictions()
     except Exception:
         logger.debug("read_validation_profile_fetch_failed", target=target.internal_id,
                      exc_info=True)
@@ -134,7 +147,8 @@ async def _collect_target_confirmations(
     同一(idx prediction+scenario)的确认信号跨日去重，避免窗口重扫把同一次印证重复计数。
     失败/无报告统一降级返回 []。板块/个股画像渠道B回扫见计划跟随项。
     """
-    from datetime import date as date_type, timedelta
+    from datetime import date as date_type
+    from datetime import timedelta
 
     confirmations: list[dict[str, object]] = []
     seen: set[tuple[object, object]] = set()
@@ -226,10 +240,13 @@ def _default_explanation(profile: dict[str, object]) -> dict[str, object]:
     else:
         implications = ["命中率处于正常区间，历史验证对当前预判不做额外约束"]
     return {
-        "summary": f"该 target 已验证 {n} 档，命中率 {rate:.0%}，样本{'充足' if sufficient else '不足'}",
+        "summary": (
+            f"该 target 已验证 {n} 档，命中率 {rate:.0%}，"
+            f"样本{'充足' if sufficient else '不足'}"
+        ),
         "miss_reasons": [miss_text] if miss_text else ["无失手样本可归类"],
         "condition_met_insights": (
-            [f"条件化判定已确认 {cond_rate:.0%} 成立"] if isinstance(cond_rate, (int, float))
+            [f"条件化判定已确认 {cond_rate:.0%} 成立"] if isinstance(cond_rate, int | float)
             else ["条件化判定样本尚不足"]
         ),
         "prediction_implications": implications,
@@ -239,6 +256,45 @@ def _default_explanation(profile: dict[str, object]) -> dict[str, object]:
 # 低命中率判定阈值：sufficient_sample（样本充足）且 hit_rate 低于该值 → 提示降置信/补条件
 _LOW_HIT_RATE_THRESHOLD = 0.5
 
+# 档位级弱化置信门槛（B 期 Task5）：mid/long 档该档样本≥3 且命中率<0.4 → 附提示。
+# 覆盖所有 mid/long 档（含 policy_macro/trend_fundamental 下 required 的 mid/long）：画像
+# horizon_breakdown 不带 driver 上下文，无法区分 required/optional；optional 集合 ⊆ {mid,long}，
+# 固定查 mid/long 即覆盖全部 optional 形态，required 形态一并覆盖（近似，控制器裁定接受）。
+# 提示只用于弱化置信/谨慎表述，不裁剪产出——required 档不可裁语义由归一化强制层保证；
+# 不查 short：short 恒为 required 主判定（预判必需），不做档位级提示。
+_HORIZON_MIN_SAMPLES = 3
+_HORIZON_LOW_HIT_RATE = 0.4
+_HORIZON_CHECKED = ("mid", "long")
+
+
+def _horizon_suppress_note(profile: dict[str, object]) -> str | None:
+    """horizon_breakdown 中 mid/long 档「样本≥3 且命中率<0.4」→ 弱化置信提示文本。
+
+    覆盖所有 mid/long 档（含 policy_macro/trend_fundamental 下 required 的 mid/long——画像
+    horizon_breakdown 不带 driver 上下文，无法区分 required/optional，统一按档检查）。
+    命中档位可能多个，合并进同一句（None 表示无档位命中，调用方不附 note）。
+    提示仅供弱化置信/谨慎表述，不裁剪产出：required 档不可裁语义由归一化强制层保证。
+    本层只读画像附加输入提示，不改写判定/不产交易指令（红线与 _LOW_HIT_RATE_THRESHOLD 分支一致）。
+    """
+    hd = profile.get("horizon_breakdown")
+    if not isinstance(hd, dict):
+        return None
+    flagged: list[str] = []
+    for h in _HORIZON_CHECKED:
+        sub = hd.get(h)
+        if not isinstance(sub, dict):
+            continue
+        n = int(cast(float, sub.get("n", 0) or 0))
+        rate = float(cast(float, sub.get("hit_rate", 0.0) or 0.0))
+        if n >= _HORIZON_MIN_SAMPLES and rate < _HORIZON_LOW_HIT_RATE:
+            flagged.append(f"{h} 档（n={n}，命中率 {rate:.0%}）")
+    if not flagged:
+        return None
+    return (
+        "；".join(flagged)
+        + "历史印证少，该档预判建议降低置信/补充更严条件或暂缓；仅供输入参考，不产交易指令。"
+    )
+
 
 def enrich_prediction_input(
     base_input: dict[str, object], profile: dict[str, object]
@@ -247,6 +303,10 @@ def enrich_prediction_input(
 
     新增 ``validation_profile`` 块（target/n/hit_rate/sufficient_sample/condition_met_rate），
     样本充足且命中率低时附 ``note``（"该 target 同类条件历史命中率低，请降低置信/补充条件"）。
+    另有 B 期 horizon 级反哺：horizon_breakdown 中 mid/long 档「样本≥3 且命中率<0.4」
+    时，同键 ``note`` 附对应档位的弱化置信提示——覆盖所有 mid/long 档（含
+    policy_macro/trend_fundamental 下 required 的 mid/long；提示仅供 LLM 弱化置信/谨慎表述，
+    不裁剪产出，required 档不可裁语义由归一化强制层保证；与全局低命中提示并存时拼接）。
 
     红线：只作**输入参考**——不改写 hit/miss 判定、不产交易指令、不在代码层钳制
     confidence（A3 置信钳制仍由产出方后处理覆盖，此处仅是 LLM 输入提示词上下文）。
@@ -270,6 +330,15 @@ def enrich_prediction_input(
             f"该 target 同类条件历史命中率低（{rate:.0%}，n={n}），"
             "预判时刻意降低置信/补充更严条件；仅供输入参考，不产交易指令。"
         )
+    # B 期 Task5：mid/long 档低命中反哺（覆盖全部 mid/long 档，含 required 形态）——命中档位
+    # 附弱化置信提示（不裁剪产出，required 不可裁由归一化强制层保证）；与全局 note 并存时拼接
+    horizon_note = _horizon_suppress_note(profile)
+    if horizon_note:
+        if ctx.get("note"):
+            # 分号拼接前句尾句号去除其一，避免"句号；"连用病句
+            ctx["note"] = f"{ctx['note'].rstrip('。')}；{horizon_note}"
+        else:
+            ctx["note"] = horizon_note
     out = dict(base_input)
     out["validation_profile"] = ctx
     # Spec Cbis（渠道B）：被现实多次印证的场景 → 给 LLM 提权提示（纯输入参考）

@@ -160,19 +160,30 @@ class NodeApiClient:
         body: dict[str, object],
         *,
         timeout: float | None = None,
+        error_out: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         """POST 请求 Node.js 内部 API
 
         Args:
             path: 路径，如 /internal/analysis-reports
             body: JSON 请求体
+            error_out: 可选出参——失败时写入 ``{"stage": ..., "detail": ...}``，供调用方把
+                **真实原因**并入自己的告警。为什么需要（2026-09-18，R17 遗留）：本方法吞错
+                返回 None，真实原因只在 `node_api_post_business_error` / `node_api_post_http_error`
+                那几条**独立**日志里 → `attribution_chain.save_failed` 文案笼统，生产排障必须
+                交叉 grep。**仅在失败时写入**（成功路径保持空 dict）。
 
         Returns:
             业务数据（已解包 data 字段）；请求失败或业务码非 0/200/201 返回 None。
             仅返回 dict 类型——Node.js ``data`` 为列表时返回 None。
         """
-        data = await self._post_request(path, body, timeout=timeout)
-        return data if isinstance(data, dict) else None
+        data = await self._post_request(path, body, timeout=timeout, error_out=error_out)
+        if isinstance(data, dict):
+            return data
+        if error_out is not None and data is not None:
+            error_out["stage"] = "data_not_dict"
+            error_out["detail"] = f"data 为 {type(data).__name__}（按契约应为 dict）"
+        return None
 
     async def semantic_search_industries(
         self, embedding: list[float], threshold: float = 0.7, limit: int = 5
@@ -201,17 +212,29 @@ class NodeApiClient:
         return []
 
     async def _post_request(
-        self, path: str, body: dict[str, object], *, timeout: float | None = None
+        self,
+        path: str,
+        body: dict[str, object],
+        *,
+        timeout: float | None = None,
+        error_out: dict[str, object] | None = None,
     ) -> object | None:
         """POST 请求 Node.js 内部 API，返回解包后的 data 字段。
 
         ``post`` 的共享实现：统一处理 HTTP 错误、业务码校验、payload 解包。
+        `error_out`：失败分支写入 `{"stage", "detail"}`（成功不写），供调用方合并告警原因。
         """
         url = f"{self._base_url}{path}"
         headers = {
             "X-Internal-Token": self._token,
             "Content-Type": "application/json",
         }
+
+        def _mark(stage: str, detail: str) -> None:
+            """把失败原因写进出参（未传 error_out 时是 no-op）。"""
+            if error_out is not None:
+                error_out["stage"] = stage
+                error_out["detail"] = detail
 
         try:
             client = await HttpClientPool.get_client()
@@ -228,10 +251,15 @@ class NodeApiClient:
                     url=url,
                     payload=str(payload)[:200],
                 )
+                _mark("unexpected_payload", f"payload 非 dict：{str(payload)[:200]}")
                 return None
             if payload.get("code") not in (0, 200, 201):
                 logger.error("node_api_post_business_error", url=url, code=payload.get("code"),
                              message=payload.get("message"))
+                _mark(
+                    "business_error",
+                    f"code={payload.get('code')} message={payload.get('message')}",
+                )
                 return None
             return payload.get("data")
         except httpx.HTTPStatusError as e:
@@ -241,10 +269,16 @@ class NodeApiClient:
                 status=e.response.status_code,
                 response_body=e.response.text[:500],
             )
+            _mark(
+                "http_error",
+                f"status={e.response.status_code} body={e.response.text[:200]}",
+            )
         except httpx.RequestError as e:
             logger.error("node_api_post_request_error", url=url, error=str(e))
+            _mark("request_error", str(e))
         except Exception as e:
             logger.error("node_api_post_unexpected_error", url=url, error=str(e))
+            _mark("unexpected_error", str(e))
 
         return None
 
@@ -423,12 +457,34 @@ class NodeApiClient:
         result = await self._post_request("/internal/calendar/events", body)
         return result if isinstance(result, dict) else None
 
+    async def post_event_entity(self, body: dict[str, object]) -> dict[str, object] | None:
+        """POST /internal/event-entities（Event Entity 物化，spec §10.2）。
+
+        权威 event_id 由 app-api 生成；本方法失败返回 None（调用方降级跳过，
+        不阻断抓取/传导主链路）。body 契约见方案实施计划 Global Constraints 接口先决依赖。
+        """
+        result = await self._post_request("/internal/event-entities", body)
+        return result if isinstance(result, dict) else None
+
+    async def get_event_entities(
+        self, params: dict[str, str] | None = None
+    ) -> list[dict[str, object]] | None:
+        """GET /internal/event-entities（status/日期过滤查询，spec §10.2）。"""
+        query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+        path = "/internal/event-entities" + (f"?{query}" if query else "")
+        result = await self.get(path)
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            return result["items"]
+        return None
+
     async def get_rhythm_report(
         self, target_date: str, refresh_slot: str
     ) -> dict[str, object] | None:
         """GET /internal/analysis-reports/rhythm_master/{date}/{slot}
 
-        morning/midday 读 16:05 基准（D13）。
+        调用方：① `rhythm_verification.run_once`（命中率验证）；②
+        `rhythm_master._compose_card`（morning/midday 读 `slot="after_close"`
+        的基准卡以沿用主档位，2026-09-14 P0-2）。
         """
         result = await self._request(
             f"/internal/analysis-reports/rhythm_master/{target_date}/{refresh_slot}"
@@ -487,7 +543,12 @@ class NodeApiClient:
         return result
 
     async def put(self, path: str, body: dict[str, object]) -> dict[str, object] | None:
-        """PUT Node 内部 API，并返回已解包的对象 data。"""
+        """PUT Node 内部 API，并返回已解包的对象 data。
+
+        D4（2026-09-03）：与 post/patch/delete 不同，put 仅用于预测验证回写，调用方
+        （run_once/backfill）依赖异常感知真实写失败以正确计数与告警——HTTP/请求/业务
+        失败一律**抛出**，不再吞错返回 None（吞 5xx 曾致 updated 虚增、D1 生产被静默）。
+        """
         url = f"{self._base_url}{path}"
         headers = {"X-Internal-Token": self._token, "Content-Type": "application/json"}
         try:
@@ -495,18 +556,15 @@ class NodeApiClient:
             response = await client.put(url, json=body, headers=headers)
             response.raise_for_status()
             payload = response.json()
-            if not isinstance(payload, dict) or payload.get("code") != 200:
-                logger.error("node_api_put_business_error", url=url)
-                return None
-            data = payload.get("data")
-            return data if isinstance(data, dict) else None
-        except httpx.HTTPStatusError as exc:
-            logger.error("node_api_put_http_error", url=url, status=exc.response.status_code)
-        except httpx.RequestError as exc:
-            logger.error("node_api_put_request_error", url=url, error=str(exc))
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            raise  # 让调用方 try/except 感知回写失败
         except Exception as exc:
-            logger.error("node_api_put_unexpected_error", url=url, error=str(exc))
-        return None
+            raise RuntimeError(f"node_api_put_unexpected_error url={url}: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            code = payload.get("code") if isinstance(payload, dict) else "?"
+            raise RuntimeError(f"node_api_put_business_error url={url} code={code}")
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
 
     # ─── 预测能力落库与验证（大盘溯源预测 → prediction_records）───
 
@@ -540,6 +598,32 @@ class NodeApiClient:
         """读取已验证预测记录（统计出口 D3，GET /internal/predictions?status=verified）。"""
         return await self.get_list(f"/internal/predictions?status=verified&limit={limit}") or []
 
+    async def list_all_predictions(self, limit: int = 200) -> list[dict[str, object]]:
+        """D3（2026-09-03）：全部预测记录（pending 游标分页 + verified 存量）供档位级扫描。
+
+        Node 判定 status=verified 需 short/mid/long 全档完结（long 到期 2027），画像/统计
+        若只读 verified 将数月恒空；画像数据源改为扫全部记录中含 result 的档位
+        （short/mid 到期写入即计入），status 保留全档完结语义，仅消费侧解耦。
+        """
+        records: list[dict[str, object]] = []
+        cursor: int | None = None
+        while True:
+            batch = await self.list_pending_predictions(limit=limit, before_id=cursor)
+            if not batch:
+                break
+            records.extend(batch)
+            last_id = batch[-1].get("id")
+            if isinstance(last_id, str) and last_id.isdigit():
+                cursor = int(last_id)
+            elif isinstance(last_id, int):
+                cursor = last_id
+            else:
+                break
+            if len(batch) < limit:
+                break
+        records.extend(await self.list_verified_predictions(limit=500))
+        return records
+
     async def get_index_kline(
         self, code: str, days: int = 130,
         start_date: str | None = None, end_date: str | None = None,
@@ -547,8 +631,9 @@ class NodeApiClient:
         """指数日 K（GET /internal/index/:code/kline）。
         可选区间参数：start_date/end_date 存在时按区间拉取。
 
-        返回 [{trade_date, open, high, low, close, pct_chg}, ...]（日期升序，Tushare index_daily）
-        或 None（接口失败/无数据）。"""
+        返回 [{trade_date, open, high, low, close, pct_chg, vol, amount}, ...]
+        （日期升序，Tushare index_daily；vol=手、amount=千元，缺失为 null，
+        2026-09-05 核实修复后接口透传 vol/amount）或 None（接口失败/无数据）。"""
         path = f"/internal/index/{code}/kline?days={days}"
         if start_date is not None:
             path += f"&start_date={start_date}"
@@ -606,11 +691,54 @@ class NodeApiClient:
         self, code: str, start: str, end: str,
     ) -> list[dict[str, object]] | None:
         """板块区间日 K（GET /internal/ths/{code}/daily?start&end）。
-        返回升序 [{trade_date, pct_chg}]。失败/异常返回 None。"""
+        返回升序 [{trade_date, pct_chg, close, vol, amount}]（T9 `edb9941` 起透传
+        close/vol 供 condition_met 技术位判定；amount 上游 ths_daily 无此字段 → 恒 null，
+        缺失为 null 不丢行）。失败/异常返回 None。"""
         result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
             return result["rows"]
         return None
+
+    async def get_attribution_chain(self, date: str) -> dict[str, object] | None:
+        """读取当日大盘归因链树（GET /api/agent/attribution-chain/{date}，Task 3.1）。
+
+        路径与信封两点与 /internal/* 惯例不同，均为 Node 侧既定事实（已核对
+        `aistock-app-api/src/core/routes/attributionChainRouter.ts:180` + `src/index.ts:164`）：
+        ① 该路由挂在 ``/api`` 下（``GET /api/agent/attribution-chain/:date``），base_url
+           不含 /api，故路径必须带 /api 前缀（对齐 tools/market_tools.py 的 /api/gb/... 先例）——
+           chain 写入路径同理（Task 3.1b 已补为 ``/api/internal/attribution-chain``，此前缺
+           /api 前缀导致生产恒 404、链从未落库）；
+        ② 响应为**裸体** ``{date, chain|null}``（非 ``{code,data}`` 信封），不能走 self.get
+           的信封解包（会恒返回 None）。此处直接发请求并容忍裸体/信封两种形状。
+
+        无链（chain=null / 空对象）与请求失败均返回 None——调用方据 None 省略注入键。
+        """
+        url = f"{self._base_url}/api/agent/attribution-chain/{date}"
+        headers = {"X-Internal-Token": self._token}
+        try:
+            client = await HttpClientPool.get_client()
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "attribution_chain_read_http_error", url=url, status=exc.response.status_code
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.error("attribution_chain_read_request_error", url=url, error=str(exc))
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.error("attribution_chain_read_unexpected_error", url=url, error=str(exc))
+            return None
+        if not isinstance(payload, dict):
+            logger.error(
+                "attribution_chain_read_invalid_payload", url=url, payload=str(payload)[:200]
+            )
+            return None
+        data = payload.get("data") if payload.get("code") == 200 else payload
+        chain = data.get("chain") if isinstance(data, dict) else None
+        return chain if isinstance(chain, dict) and chain else None
 
     async def list_predictions(self, source_id: str) -> list[dict[str, object]]:
         """按 source_id 查询预测记录（GET /internal/predictions?source_id=...）。
@@ -628,9 +756,17 @@ class NodeApiClient:
         horizon: str,
         entry: dict[str, object],
     ) -> dict[str, object] | None:
-        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。"""
-        body: dict[str, object] = {"horizon": horizon}
-        body.update(entry)
+        """回写单档位到期验证结果（PUT /internal/predictions/:id/verification）。
+
+        D5（2026-09-03）：jsonb key 恒用 horizon 参数，entry 自带 horizon 字段不得覆盖——
+        condition 路径 key=c{i} 而 entry.horizon=anchor 档位（short/mid），两者语义不同；
+        此前 body.update(entry) 使 condition 全部错位写到 anchor 档位键下并互相覆盖。
+        anchor 档位经 anchor_horizon 透传，Node 端写回 entry.horizon 供统计按档位分桶。
+        """
+        body: dict[str, object] = dict(entry)
+        body["horizon"] = horizon
+        if isinstance(entry.get("horizon"), str) and entry["horizon"] != horizon:
+            body["anchor_horizon"] = entry["horizon"]
         return await self.put(f"/internal/predictions/{prediction_id}/verification", body)
 
     async def get_analysis_report(
@@ -776,6 +912,17 @@ class NodeApiClient:
         """
         return await self.get("/internal/market/quick-snapshot")
 
+    async def get_intraday_sectors(self) -> dict[str, object] | None:
+        """拉取盘内板块快照（午间报机会/风险候选源）。
+
+        走 GET /internal/market/sectors（腾讯源，绕开 15:30 门禁），供 midday
+        agent 在 12:05 取得当日真实板块/指数/宽度数据，用于机会/风险数据锚定。
+
+        Returns:
+            dict（indexes/breadth/gainers/losers/availability）；失败或 data 非 dict 返回 None。
+        """
+        return await self.get("/internal/market/sectors")
+
     async def get_last_close_snapshot(self) -> dict[str, object] | None:
         """拉取最近一个已完成交易日的收盘快照（跳过时钟门禁）。
 
@@ -786,6 +933,26 @@ class NodeApiClient:
             dict（status='complete'），或 None（数据不可用/服务异常）。
         """
         return await self.get("/internal/market/last-close-snapshot")
+
+    async def get_close_snapshot(
+        self, snapshot_date: str
+    ) -> dict[str, object] | None:
+        """拉取**指定交易日**的收盘快照（G1：证据日同源）。
+
+        snapshot_date 为 YYYYMMDD（Tushare K 线 trade_date 格式），内部转
+        YYYY-MM-DD 拼 query。Node 端点 GET /internal/market/close-snapshot?date=
+        对已收盘交易日返回 status='complete'；未收盘/非交易日返回 409 语义
+        （self.get 归一为 None）。
+
+        Returns:
+            dict（含 breadth），或 None（未就绪/非交易日/服务异常）。
+        """
+        ymd = str(snapshot_date).replace("-", "")
+        if len(ymd) != 8 or not ymd.isdigit():
+            logger.warning("close_snapshot_invalid_date", snapshot_date=snapshot_date)
+            return None
+        iso = f"{ymd[0:4]}-{ymd[4:6]}-{ymd[6:8]}"
+        return await self.get(f"/internal/market/close-snapshot?date={iso}")
 
     async def get_review_analysis_report(
         self,

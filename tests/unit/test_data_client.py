@@ -55,6 +55,47 @@ async def test_list_analysis_reports_reads_the_type_date_list_endpoint() -> None
     assert url.endswith("/internal/analysis-reports/event_conduction/2026-07-24/list")
 
 
+@pytest.mark.asyncio
+async def test_get_intraday_sectors_returns_dict() -> None:
+    payload = {
+        "indexes": [{"code": "000001", "name": "上证指数", "pct_chg": 0.35}],
+        "breadth": {"advance_ratio": 0.62, "avg_change_pct": 0.4},
+        "gainers": [{"name": "半导体", "pct_change": 3.2}],
+        "losers": [{"name": "光伏设备", "pct_change": -2.1}],
+        "availability": {"state": "available"},
+    }
+    response = MagicMock()
+    response.json.return_value = {"code": 200, "data": payload}
+    client = AsyncMock()
+    client.get.return_value = response
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_intraday_sectors()
+
+    assert result == payload
+    url = client.get.await_args.args[0]
+    assert url.endswith("/internal/market/sectors")
+
+
+@pytest.mark.asyncio
+async def test_get_intraday_sectors_returns_none_on_data_not_dict() -> None:
+    response = MagicMock()
+    response.json.return_value = {"code": 200, "data": [1, 2, 3]}  # list 非 dict
+    client = AsyncMock()
+    client.get.return_value = response
+
+    with patch(
+        "aistock_agent.services.data_client.HttpClientPool.get_client",
+        new=AsyncMock(return_value=client),
+    ):
+        result = await NodeApiClient().get_intraday_sectors()
+
+    assert result is None
+
+
 def _response(status_code: int, payload: object | None = None) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code

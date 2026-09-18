@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from aistock_agent.config import settings
 from aistock_agent.schemas.market_trace import (
+    CandidateExplanation,
     MarketTraceResult,
     MarketTraceSnapshot,
     ReviewArtifact,
@@ -18,6 +19,7 @@ from aistock_agent.services.prediction_service import (
     PredictionRunResult,
     TraceUnavailableError,
     _apply_confidence_cap,
+    _build_prediction_input,
     _load_horizon_stats,
     corroborate_evidence,
     predict_from_trace,
@@ -57,11 +59,28 @@ def _make_snapshot(trade_date="2026-08-10") -> MarketTraceSnapshot:
 
 
 def _make_trace(attribution_status="confirmed") -> MarketTraceResult:
+    # 动态档位（Task4）：大盘溯源候选恒含 4 类（review 固定），confirmed/hypothesis 态
+    # 主因 = supported 候选。取 market_positioning_liquidity（资金面）→ sector_rotation
+    # 白名单 {short, mid}，与 _VALID_LLM_JSON 两档形态自洽（mid 不被裁剪、不 degraded）。
+    # insufficient 态无主因（不进预测门禁，gate_skipped）。
+    has_primary = attribution_status in {"confirmed", "hypothesis"}
     return MarketTraceResult(
         schema_version="1.1",
         attribution_status=attribution_status,
-        candidates=[],
-        primary_chain_id=None,
+        candidates=[
+            CandidateExplanation(
+                id="market_positioning_liquidity",
+                category="market_positioning_liquidity",
+                status="supported",
+                verdict="资金与情绪主导短线走势，无中期基本面依据",
+                chain=None,
+                supporting_evidence_ids=["m1"],
+                counter_evidence_ids=[],
+            ),
+        ]
+        if has_primary
+        else [],
+        primary_chain_id="market_positioning_liquidity" if has_primary else None,
         alternative_chain_id=None,
         confidence="high" if attribution_status == "confirmed" else "low",
         unresolved_questions=[],
@@ -271,6 +290,41 @@ async def test_run_predict_llm_failed_on_llm_error():
 
 
 # ---------- predict_from_trace（独立入口：缓存直读 → DB 重建 → run_predict → 落库） ----------
+
+
+def test_build_prediction_input_a_share_indexes_block_not_empty():
+    """快照真实键为 a_share.indexes → prompt 输入 a_share.indices 块非空。
+
+    旧实现只读 a_share["indices"]（生产快照不存在该键）→ 指数事实整块为 None，
+    LLM 拿不到大盘指数背景。key 名保持输出侧契约不变（indices）。
+    """
+    snapshot = _make_snapshot()
+    snapshot.a_share = {
+        "indexes": {
+            "SH000001": {
+                "ts_code": "000001.SH",
+                "name": "上证指数",
+                "close": 3200.0,
+                "change_pct": -0.9,
+            }
+        },
+        "sectors": {"top_losers": [{"name": "半导体"}]},
+    }
+    prompt_input = _build_prediction_input(_make_trace(), snapshot)
+    a_share_input = prompt_input["a_share"]
+    assert isinstance(a_share_input, dict)
+    assert a_share_input["indices"]  # 非空（此前恒 None）
+    assert a_share_input["sectors"] == {"top_losers": [{"name": "半导体"}]}
+
+
+def test_build_prediction_input_a_share_indices_legacy_key_compatible():
+    """向后兼容：快照用旧键 indices 时仍原样透传。"""
+    snapshot = _make_snapshot()
+    snapshot.a_share = {"indices": [{"name": "上证指数", "change_pct": -0.9}], "sectors": {}}
+    prompt_input = _build_prediction_input(_make_trace(), snapshot)
+    a_share_input = prompt_input["a_share"]
+    assert isinstance(a_share_input, dict)
+    assert a_share_input["indices"] == [{"name": "上证指数", "change_pct": -0.9}]
 
 
 def _make_review_artifact_dict(trade_date="2026-08-10") -> dict[str, object]:

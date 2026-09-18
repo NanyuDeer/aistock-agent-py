@@ -131,3 +131,20 @@ async def test_real_http_unwraps_code200_envelope() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_get_close_snapshot_uses_dated_path(monkeypatch):
+    from aistock_agent.services import data_client as dc
+
+    calls: list[str] = []
+
+    async def fake_get(self, path, *args, **kwargs):
+        calls.append(path)
+        return {"breadth": {"total_count": 100, "advance_count": 60}}
+
+    monkeypatch.setattr(dc.NodeApiClient, "get", fake_get, raising=True)
+    api = dc.NodeApiClient()
+    out = await api.get_close_snapshot("20260911")
+    assert out == {"breadth": {"total_count": 100, "advance_count": 60}}
+    assert calls == ["/internal/market/close-snapshot?date=2026-09-11"]

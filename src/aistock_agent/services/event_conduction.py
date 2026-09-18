@@ -10,7 +10,7 @@
 
 import asyncio
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 import structlog
@@ -60,6 +60,8 @@ class EventConductionResult:
     # 第三阶段：event_scope=STOCK 被入口过滤（未执行 event_agent.run），
     # 与"真实失败"区分——不进入 GI、不计入传导失败统计的语义由调用方按需处理。
     event_conduction_skipped: bool = False
+    # 重大事件时间线（spec §6.2）：传导阶段标记（"pre"/"post"）；未来事件守卫置 "pre"
+    event_conduction_phase: str | None = None
 
 
 @dataclass
@@ -165,8 +167,41 @@ async def run_single_event_conduction(
 
     logger.info("event_conduction_start", title=title[:50])
 
+    # ── 重大事件时间线（spec §6.2 红线，design-debate A6 裁决）：未来事件守卫 ──
+    # scheduled/upcoming 事件绝不被当作已发生事件传导（Pre 双套分析属 P2 未落地），
+    # 标记 event_conduction_phase="pre" 后跳过（success=False + skipped=True，
+    # _to_gi_events 过滤不进入 GI）。status 仅由物化回填（开关开启时才有），
+    # 缺省 None = 未物化 → 走旧路径（翻转前行为逐字节不变）。
+    app_event_status = str(event.get("app_event_status") or "").strip()
+    if app_event_status in ("scheduled", "upcoming"):
+        pre_event_id = str(event.get("app_event_id") or "").strip()
+        logger.info(
+            "EVENT_CONDUCTION_FILTER",
+            event_id=pre_event_id or title[:30],
+            title=title[:50],
+            action="skip_conduction",
+            reason="future_event_pre_phase",
+            event_status=app_event_status,
+        )
+        return EventConductionOutput(
+            status=EventConductionResult(
+                success=False,
+                event_id=pre_event_id,
+                title=title,
+                event_generated=False,
+                persisted=False,
+                error="future event pre-conduction phase (P2 双套未落地，跳过已发生传导)",
+                error_type="future_event_pre_phase",
+                event_conduction_skipped=True,
+                event_conduction_phase="pre",
+            ),
+        )
+
     user_message = _build_event_message(event)
-    event_id = f"evt_{hashlib.md5(user_message.encode()).hexdigest()[:8]}"
+    # 重大事件时间线（spec §4.2/§5A.3）：app-api 权威 event_id 优先作传导隔离键；
+    # 缺省回退既有 evt_md5（execution_id 语义），历史行为逐字节不变。
+    app_event_id = str(event.get("app_event_id") or "").strip()
+    event_id = app_event_id or f"evt_{hashlib.md5(user_message.encode()).hexdigest()[:8]}"
 
     # 来源元数据：从 major_events 的 url 字段提取，通过 state.analysis_reports.event_source
     # 传递给 event agent，使后者能在 event_meta.source 中落库真实来源 URL。
@@ -180,7 +215,13 @@ async def run_single_event_conduction(
         "intent": "event",
         "symbol": None,
         "tag_code": None,
-        "analysis_reports": {"event_source": event_source},
+        "analysis_reports": {
+            # 来源元数据 + P0.5 收口：把 app-api 权威 id/status 注入 state，供 worker
+            # 持久化时优先消费（spec §4.3 全链贯穿；worker event_meta.eventId 优先读此）
+            "event_source": event_source,
+            "event_id": event_id,
+            "event_status": app_event_status,
+        },
         "final_response": None,
     }
 

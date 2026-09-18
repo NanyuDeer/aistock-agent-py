@@ -192,6 +192,147 @@ def _extract_event_input(content: dict[str, object]) -> dict[str, object] | None
     }
 
 
+def chain_dominant_direction(
+    chain: object,
+    ratio: float | None = None,
+) -> str:
+    """计算 chain 主导方向（bullish/bearish/neutral）。
+
+    以 impact_strength 为权重：
+    - bullish 权重 ≥ bearish × ratio → bullish
+    - bearish 权重 ≥ bullish × ratio → bearish
+    - 否则 → neutral
+
+    Args:
+        chain: 事件传导 impact_chain（item 含 industry/direction/impact_strength）。
+        ratio: 主导方向判定阈值，默认 settings.gi_consistency_ratio（1.5）。
+
+    Returns:
+        "bullish" | "bearish" | "neutral"
+    """
+    if ratio is None:
+        ratio = settings.gi_consistency_ratio
+    if not isinstance(chain, list):
+        return "neutral"
+    bullish_w = 0.0
+    bearish_w = 0.0
+    for item in chain:
+        if not isinstance(item, dict):
+            continue
+        direction = str(item.get("direction", ""))
+        strength = _safe_float(item.get("impact_strength"))
+        if direction == "bullish":
+            bullish_w += strength
+        elif direction == "bearish":
+            bearish_w += strength
+    if bullish_w == 0 and bearish_w == 0:
+        return "neutral"
+    if bullish_w >= bearish_w * ratio:
+        return "bullish"
+    if bearish_w >= bullish_w * ratio:
+        return "bearish"
+    return "neutral"
+
+
+def _gi_event_from_event(
+    event: dict[str, object],
+    direction: str,
+) -> dict[str, object]:
+    """从 GI 输入事件构造前端兼容的 top_bullish/bearish_event 结构（候选替换用）。"""
+    proxy = candidate_importance_score(event)
+    reason = str(
+        event.get("investment_conclusion")
+        or event.get("mechanism")
+        or event.get("summary")
+        or ""
+    )
+    return {
+        "event_id": str(event.get("event_id", "")),
+        "direction": direction,
+        "importance_level": _proxy_to_level(proxy),
+        "reason": reason[:200],
+    }
+
+
+def _find_next_candidate(
+    events: list[dict[str, object]],
+    exclude_event_id: str,
+    direction: str,
+    ratio: float | None = None,
+) -> dict[str, object] | None:
+    """在全量事件池中找 chain 主导方向一致的下一候选（proxy 降序）。
+
+    GI LLM 只返回每个方向的 top1，候选替换只能基于代理分排序的剩余事件，
+    不重新调用 LLM（保持最小改动）。
+    """
+    candidates = [
+        e for e in events
+        if isinstance(e, dict)
+        and str(e.get("event_id", "")) != exclude_event_id
+        and chain_dominant_direction(e.get("impact_chain"), ratio) == direction
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=candidate_importance_score, reverse=True)
+    return candidates[0]
+
+
+def _enforce_full_gi_consistency(
+    top_bullish: dict[str, object] | None,
+    top_bearish: dict[str, object] | None,
+    events: list[dict[str, object]],
+    ratio: float | None = None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """全量 GI 结果与 chain 主导方向一致性最终校验 + 候选替换。
+
+    - top_bullish 对应事件的 chain 主导方向必须 bullish；top_bearish 必须 bearish。
+    - 冲突/neutral（或找不到原事件）→ 拒绝该候选，从事件池按 proxy 降序找下一候选。
+    - 只有所有候选都不合格才置空并记录日志（允许为空）。
+
+    禁止通过修改 chain / 行业方向来迎合 GI——这里只换候选，不改 chain。
+    """
+    def _check(
+        candidate: dict[str, object] | None,
+        direction: str,
+    ) -> dict[str, object] | None:
+        if candidate is None:
+            return None
+        event_id = str(candidate.get("event_id", ""))
+        event = next(
+            (e for e in events if isinstance(e, dict) and str(e.get("event_id", "")) == event_id),
+            None,
+        )
+        if event is not None:
+            dominant = chain_dominant_direction(event.get("impact_chain"), ratio)
+            if dominant == direction:
+                return candidate
+            logger.warning(
+                "gi_direction_conflict_reject",
+                event_id=event_id,
+                gi_direction=direction,
+                chain_dominant=dominant,
+            )
+        else:
+            logger.warning(
+                "gi_direction_candidate_not_found",
+                event_id=event_id,
+                gi_direction=direction,
+            )
+        # 冲突/找不到原事件 → 找下一合格候选
+        replacement = _find_next_candidate(events, event_id, direction, ratio)
+        if replacement is not None:
+            logger.info(
+                "gi_direction_conflict_replaced",
+                direction=direction,
+                replacement_event_id=str(replacement.get("event_id", "")),
+            )
+            return _gi_event_from_event(replacement, direction)
+        logger.warning("gi_direction_no_valid_candidate", direction=direction)
+        return None
+
+    return _check(top_bullish, "bullish"), _check(top_bearish, "bearish")
+
+
 async def _load_recent_event_reports(
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, object]]:
@@ -444,6 +585,15 @@ async def run_global_importance_evaluation(
                     "importance_level": str(raw_bearish.get("importance_level", "")),
                     "reason": str(raw_bearish.get("reason", "")),
                 }
+
+            # ── GI 方向一致性最终校验（2026-09-02）──
+            # top_bullish 对应事件 chain 主导方向必须 bullish；top_bearish 必须 bearish。
+            # 冲突/neutral → 拒绝该候选并从事件池找下一合格候选（不改 chain/行业方向）。
+            top_bullish_event, top_bearish_event = _enforce_full_gi_consistency(
+                top_bullish_event,
+                top_bearish_event,
+                event_list,
+            )
 
             logger.info(
                 "global_importance_done",
@@ -775,7 +925,11 @@ def _candidate_dict(
     direction: str,
     proxy: float,
 ) -> dict[str, object]:
-    """从 GI 输入事件构造候选条目（存入状态）。"""
+    """从 GI 输入事件构造候选条目（存入状态）。
+
+    2026-09-02 新增 chain_direction：候选对应的 chain 主导方向，
+    供最终结果方向一致性兜底使用（max 冲突/neutral 时沿 Top-K 换候选）。
+    """
     title = str(event.get("original_event") or event.get("summary") or "")[:50]
     return {
         "event_id": str(event.get("event_id", "")),
@@ -785,6 +939,7 @@ def _candidate_dict(
         "proxy_score": round(proxy, 3),
         "importance_level": _proxy_to_level(proxy),
         "reason": str(event.get("investment_conclusion", ""))[:50],
+        "chain_direction": chain_dominant_direction(event.get("impact_chain")),
     }
 
 
@@ -813,20 +968,56 @@ def _to_gi_event(candidate: object, direction: str) -> dict[str, object] | None:
     }
 
 
+def _consistent_candidate(
+    max_cand: object,
+    top3: object,
+    direction: str,
+) -> dict[str, object] | None:
+    """增量候选方向一致性兜底：返回 direction 对应且 chain 主导方向一致的候选。
+
+    - 优先 max_cand（chain_direction 与 direction 一致或缺失[旧数据无法校验]则采用）；
+    - 冲突/neutral → 沿 top3（proxy 降序）取第一个 chain_direction 一致者；
+    - 全部不合格 → None（允许空，记录日志）。
+    """
+    def _chain_ok(cand: dict[str, object]) -> bool:
+        cd = str(cand.get("chain_direction", ""))
+        # 缺失（旧数据无法校验）放行；冲突/neutral 拒绝
+        return not cd or cd == direction
+
+    if isinstance(max_cand, dict) and max_cand.get("event_id") and _chain_ok(max_cand):
+        return max_cand
+    if isinstance(top3, list):
+        for cand in top3:
+            if isinstance(cand, dict) and cand.get("event_id") and _chain_ok(cand):
+                return cand
+        # 仅在"确实有候选但全部方向冲突"时告警（空池不告警）
+        if any(isinstance(c, dict) and c.get("event_id") for c in top3):
+            logger.warning("gi_direction_no_valid_incremental_candidate", direction=direction)
+    return None
+
+
 def _state_to_result(state: dict[str, object]) -> dict[str, object]:
-    """状态 → GI 结果结构（落库用，前端读取 top_bullish_event/top_bearish_event）。"""
+    """状态 → GI 结果结构（落库用，前端读取 top_bullish_event/top_bearish_event）。
+
+    2026-09-02 起增加 chain 主导方向一致性兜底：max 与 chain 主导方向冲突/neutral 时，
+    沿 Top-K 取第一个方向一致的候选，避免"重大机会对应 bearish chain"等方向冲突。
+    """
+    bullish_cand = _consistent_candidate(
+        state.get("max_bullish"), state.get("top3_bullish"), "bullish"
+    )
+    bearish_cand = _consistent_candidate(
+        state.get("max_bearish"), state.get("top3_bearish"), "bearish"
+    )
     summary_parts: list[str] = []
-    max_bullish = state.get("max_bullish")
-    max_bearish = state.get("max_bearish")
-    if isinstance(max_bullish, dict) and max_bullish.get("event_id"):
-        summary_parts.append(f"最大利好：{max_bullish.get('title', '')}")
-    if isinstance(max_bearish, dict) and max_bearish.get("event_id"):
-        summary_parts.append(f"最大利空：{max_bearish.get('title', '')}")
+    if bullish_cand is not None:
+        summary_parts.append(f"最大利好：{bullish_cand.get('title', '')}")
+    if bearish_cand is not None:
+        summary_parts.append(f"最大利空：{bearish_cand.get('title', '')}")
     return {
         "as_of": str(state.get("date", "")),
         "summary": "；".join(summary_parts)[:50],
-        "top_bullish_event": _to_gi_event(max_bullish, "bullish"),
-        "top_bearish_event": _to_gi_event(max_bearish, "bearish"),
+        "top_bullish_event": _to_gi_event(bullish_cand, "bullish"),
+        "top_bearish_event": _to_gi_event(bearish_cand, "bearish"),
     }
 
 

@@ -1,0 +1,816 @@
+"""`condition_met` 确定性判定纯函数单测（条件化 spec §4.2；计划 Task 3 Step 1）。
+
+口径：`judge_condition_met` 只返回 True（条件成立）或 None（不成立/无法判定），**不返回 False**
+（计划 D1 D2，第①段"只写 true"）；`judge_condition_met_state`（Task 6.1 新增）返回三值——
+True=成立 / **False=确定性不成立** / None=无法判定，供到期未成立态写入 `condition_met=false`。
+覆盖三类：volume 类（首批 omit）、技术位类（MA/前低/新高）、涨跌幅/点位类（含 sector 链路
+仅 pct_chgs 的回退路径）。
+"""
+
+import pytest
+
+from aistock_agent.services.condition_met_judge import (
+    classify_condition_domain,
+    has_or_connector,
+    infer_condition_class,
+    judge_condition_met,
+    judge_condition_met_state,
+    split_condition_clauses,
+)
+
+UPTREND = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
+DOWNTREND = list(reversed(UPTREND))
+
+
+def test_breakdown_ma20_met_when_close_below() -> None:
+    assert judge_condition_met(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_breakdown_ma20_not_met_when_above() -> None:
+    assert judge_condition_met(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_reclaim_ma20_met_when_close_above() -> None:
+    assert judge_condition_met(
+        "站上 MA20", direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_prior_low_break_met() -> None:
+    closes = [100.0, 99.0, 98.0, 97.0, 96.0]
+    assert judge_condition_met(
+        "跌破前低", direction="bearish", threshold_pct=None,
+        closes=closes, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_pct_threshold_met() -> None:
+    assert judge_condition_met(
+        "若上涨", direction="bullish", threshold_pct=2.0,
+        closes=[100.0, 103.0], pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_pct_threshold_not_met() -> None:
+    assert judge_condition_met(
+        "若上涨", direction="bullish", threshold_pct=2.0,
+        closes=[100.0, 100.5], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_volume_class_omitted_first_batch() -> None:
+    assert judge_condition_met(
+        "若放量站上 3000 点", direction="bullish", threshold_pct=1.0,
+        closes=UPTREND, pct_chgs=[], volumes=[1e8, 2e8],
+    ) is None
+
+
+@pytest.mark.parametrize("closes", [[], [100.0]])
+def test_insufficient_closes_returns_none(closes: list[float]) -> None:
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=closes, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_pct_only_uses_pct_chgs_when_closes_missing() -> None:
+    """sector 链路端点不返回 close → 涨跌幅类必须能只用 pct_chgs 复利累计判定。"""
+    assert judge_condition_met(
+        "若上涨 2%", direction="bullish", threshold_pct=2.0,
+        closes=[], pct_chgs=[1.0, 1.5], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "若上涨 2%", direction="bullish", threshold_pct=2.0,
+        closes=[], pct_chgs=[0.5, 0.5], volumes=[],
+    ) is None
+
+
+def test_neutral_flat_met_and_not_met() -> None:
+    """neutral（横盘）：|窗口累计| ≤ 0.5% 成立，超出则不成立（None）。"""
+    assert judge_condition_met(
+        "维持横盘", direction="neutral", threshold_pct=None,
+        closes=[100.0, 100.2], pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "维持横盘", direction="neutral", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_single_data_point_returns_none_before_judging() -> None:
+    """最小样本守卫：窗口仅 1 行（created_at == today）时不判定，恒 None。
+
+    单行时 closes 不足 2 个 → 回退 pct_chgs 复利累计，而单行 pct_chg 累计恰为自身，
+    neutral 分支（|累计| ≤ 0.5%）会在"累计=0"这类单日样本上**立即点亮 true**，
+    且 true 一旦写入不可撤回 → 必须在入口挡住 < 2 个可用数据点。
+    """
+    assert judge_condition_met(
+        "维持横盘", direction="neutral", threshold_pct=None,
+        closes=[100.0], pct_chgs=[0.0], volumes=[],
+    ) is None
+    assert judge_condition_met(
+        "若上涨", direction="bullish", threshold_pct=0.0,
+        closes=[100.0], pct_chgs=[0.5], volumes=[],
+    ) is None
+
+
+# ============ 终审 #2：绝对点位条件不得误走技术位分支 ============
+
+
+@pytest.mark.parametrize("text,direction,closes", [
+    ("若突破 3300 点", "bullish", UPTREND),   # 收盘 > MA20，旧路由误判 True
+    ("站上 3000 点", "bullish", UPTREND),
+    ("站上 82.50 元", "bullish", UPTREND),
+    ("若跌破 3300", "bearish", DOWNTREND),    # 收盘 < MA20，旧路由误判 True
+])
+def test_absolute_level_conditions_omitted_first_batch(
+    text: str, direction: str, closes: list[float]
+) -> None:
+    """#2（阻塞）：条件含绝对点位（"数字+点/元"或"站上/突破/跌破+紧邻数字"）→ 首批 omit
+    （恒 None）。旧路由会把它们丢进技术位分支，在顺势 close 序列上误判 True（不可撤回
+    的错写：只写 true 不写 false），故必须优先短路。"""
+    assert judge_condition_met(
+        text, direction=direction, threshold_pct=None,
+        closes=closes, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_explicit_tech_level_still_uses_tech_branch() -> None:
+    """明示技术位（均线 / MA\\d+ / 前低 / 新高）仍走技术位判定，不被点位短路误伤。"""
+    assert judge_condition_met(
+        "站上均线", direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "突破 MA20", direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "若跌破 20 日线", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_pct_threshold_with_digits_still_uses_pct_branch() -> None:
+    """涨跌幅类（"上涨 2%"）含数字但非点位 → 不得被点位短路吞掉，仍走涨跌幅判定。"""
+    assert judge_condition_met(
+        "若上涨 2%", direction="bullish", threshold_pct=2.0,
+        closes=[100.0, 103.0], pct_chgs=[], volumes=[],
+    ) is True
+
+
+# ============ Task 5.1：条件类型确定性推断（不新增 condition_type 字段） ============
+
+
+@pytest.mark.parametrize("metric,event_ref,text,expected", [
+    ("close", "evt_1", "若细则落地", "event"),          # event_ref 存在 → 事件类（最高优先）
+    ("close", None, "板块放量至 1.2 亿手", "volume"),     # 文本含量词
+    ("amount", None, "成交额放大至 900 亿", "volume"),    # metric 量类
+    ("volume", None, "量能配合", "volume"),
+    ("ma20", None, "条件", "tech"),                      # metric 技术位
+    ("prior_high", None, "条件", "tech"),
+    (None, None, "站上均线", "tech"),                     # 文本明示技术位
+    ("today_high", None, "站上今日高点", "ref_level"),    # metric 参考位
+    ("today_open", None, "跌破今日开盘价", "ref_level"),
+    ("close", None, "若上涨 2%", "pct"),                  # 其余 → 涨跌幅/点位
+    (None, None, "", "pct"),
+])
+def test_infer_condition_class(
+    metric: str | None, event_ref: str | None, text: str, expected: str
+) -> None:
+    """类型推断规则（写进代码注释与报告）：event_ref → 事件类；metric 量类/文本量词 → 量类；
+    metric 均线前低新高/文本明示技术位 → 技术位；metric 今日开高低 → 参考位；否则涨跌幅。"""
+    assert infer_condition_class(metric=metric, event_ref=event_ref, text=text) == expected
+
+
+def test_infer_condition_class_event_ref_wins_over_volume_metric() -> None:
+    """优先级：event_ref > metric/文本。事件类条件即使带量能文本也走事件三层（状态锚）。"""
+    assert infer_condition_class(
+        metric="volume", event_ref="evt_9", text="若细则落地且放量"
+    ) == "event"
+
+
+# ============ Task 5.1：量类判定（窗口 max/min 与 level 按 op 比较） ============
+
+
+def test_volume_gte_met_on_window_max() -> None:
+    """放量类：op=gte 取窗口 max 与 level 比较（曾放量到该量级即成立）。"""
+    assert judge_condition_met(
+        "板块放量至 1.5 亿手以上", direction="bullish", threshold_pct=3.0,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8, 1.2e8],
+        metric="volume", op="gte", level=1.5e8,
+    ) is True
+
+
+def test_volume_gte_not_met_when_window_max_below_level() -> None:
+    assert judge_condition_met(
+        "板块放量至 3 亿手以上", direction="bullish", threshold_pct=3.0,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8, 1.2e8],
+        metric="volume", op="gte", level=3.0e8,
+    ) is None
+
+
+def test_volume_lte_met_on_window_min() -> None:
+    """缩量类：op=lte 取窗口 min（曾缩到该量级以下即成立）。"""
+    assert judge_condition_met(
+        "缩量至 1.1 亿手以下", direction="neutral", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8, 1.2e8],
+        metric="volume", op="lte", level=1.1e8,
+    ) is True
+
+
+def test_volume_cross_above_uses_adjacent_rows() -> None:
+    """cross_* 口径：相邻日比较（前一日 < level 且最新日 >= level）。"""
+    assert judge_condition_met(
+        "放量上穿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 1.5e8],
+        metric="volume", op="cross_above", level=1.4e8,
+    ) is True
+    assert judge_condition_met(
+        "放量上穿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.5e8, 1.6e8],
+        metric="volume", op="cross_above", level=1.4e8,
+    ) is None  # 前一日已在 level 上方 → 非"穿越"
+
+
+def test_volume_op_defaults_from_text_before_direction() -> None:
+    """op 缺省：先按文本（放量→gte / 缩量→lte）再按 direction。
+
+    "放量下跌"（direction=bearish）若按 direction 兜底会选 lte（取窗口 min）→ 语义反向；
+    文本量能方向才是正解 → 此处必须用 gte（max ≥ level 成立）。
+    """
+    assert judge_condition_met(
+        "放量下跌", direction="bearish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op=None, level=1.5e8,
+    ) is True
+    assert judge_condition_met(
+        "缩量整理", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op=None, level=1.1e8,
+    ) is True
+
+
+def test_volume_requires_level_or_op_is_noop() -> None:
+    """无 level（生成侧未给量化阈值）→ 不可判定（不得凭"放量"字样点亮）。"""
+    assert judge_condition_met(
+        "板块放量", direction="bullish", threshold_pct=3.0,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op=None, level=None,
+    ) is None
+
+
+def test_volume_unit_mismatch_guard_returns_none() -> None:
+    """量级护栏（R9 防误点亮）：level 与窗口量能不具可比性（单位错配，如元 vs 手）→ 不判。
+
+    `lte` 在 level 远大于实际量能时会恒真（如 level=2.2e12 元 vs vol≈1e8 手）→ 必须挡住。
+    """
+    assert judge_condition_met(
+        "缩量至 2.2 万亿以下", direction="neutral", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="amount", op="lte", level=2.2e12,
+    ) is None
+    assert judge_condition_met(
+        "放量至 2 手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op="gte", level=2.0,
+    ) is None
+
+
+def test_volume_series_insufficient_returns_none() -> None:
+    """最小样本守卫（量类）：窗口量能不足 2 个 → 不判。"""
+    assert judge_condition_met(
+        "板块放量至 1.0 亿手以上", direction="bullish", threshold_pct=3.0,
+        closes=[], pct_chgs=[], volumes=[2.0e8],
+        metric="volume", op="gte", level=1.0e8,
+    ) is None
+
+
+def test_amount_metric_uses_amount_series_and_degrades_without_it() -> None:
+    """amount 类用成交额序列；取数层不可得（sector 恒 null）→ 降级 None。"""
+    assert judge_condition_met(
+        "两市成交额破 1.2 万亿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8], amounts=[1.0e12, 1.5e12],
+        metric="amount", op="gte", level=1.3e12,
+    ) is True
+    assert judge_condition_met(
+        "两市成交额破 1.2 万亿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 1.1e8], amounts=[],
+        metric="amount", op="gte", level=1.3e12,
+    ) is None
+
+
+# ============ Task 5.1：技术位按 metric 显式选用 + 参考位降级 ============
+
+
+def test_metric_prior_low_uses_window_extreme() -> None:
+    """metric=prior_low → 末值 vs 窗口前 N-1 极值（文本未明示技术位也可判定）。"""
+    assert judge_condition_met(
+        "条件A", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0, 98.0, 97.0], pct_chgs=[], volumes=[],
+        metric="prior_low", op="below",
+    ) is True
+
+
+def test_metric_ma60_uses_60_day_window() -> None:
+    """metric=ma60 → 用 60 日窗口均线（文本未点名 MA60 也走 60 日）。"""
+    closes = [100.0 - i * 0.1 for i in range(70)]
+    assert judge_condition_met(
+        "条件B", direction="bearish", threshold_pct=None,
+        closes=closes, pct_chgs=[], volumes=[],
+        metric="ma60", op="below",
+    ) is True
+
+
+def test_ref_level_metrics_degrade_to_none() -> None:
+    """参考位（today_open/high/low）当前取数层不可得（日 K 不透传 open/high/low）→ 恒 None。"""
+    for metric in ("today_open", "today_high", "today_low"):
+        assert judge_condition_met(
+            "跌破今日盘中低点", direction="bearish", threshold_pct=None,
+            closes=[100.0, 99.0, 98.0], pct_chgs=[], volumes=[],
+            metric=metric, op="below", level=None,
+        ) is None
+
+
+def test_event_class_returns_none_in_pure_judge() -> None:
+    """事件类由调用方（状态锚 / 受限 LLM）处理；纯函数恒 None，不得凭行情误点亮。"""
+    assert judge_condition_met(
+        "若出口限制细则落地", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0], pct_chgs=[], volumes=[],
+        metric="close", event_ref="evt_20260917_001",
+    ) is None
+
+
+# ============ Task 6.1：三值判定（到期未成立态 condition_met=false 的判定依据） ============
+# 语义：True=成立 / False=**确定性不成立** / None=无法判定（不得写 false）。
+# `judge_condition_met`（第①段"只写 true"）行为不变：False 折叠回 None。
+
+
+def test_state_pct_not_met_is_false() -> None:
+    """涨跌幅类：窗口累计未达阈值 → 确定性不成立（false），可用于到期写未成立态。"""
+    assert judge_condition_met_state(
+        "若未来 1 周累计上涨超 1%", direction="bullish", threshold_pct=1.0,
+        closes=[100.0, 100.5, 100.8], pct_chgs=[], volumes=[],
+    ) is False
+    # 两值口径（第①段）仍折叠为 None，行为与改造前一致
+    assert judge_condition_met(
+        "若未来 1 周累计上涨超 1%", direction="bullish", threshold_pct=1.0,
+        closes=[100.0, 100.5, 100.8], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_state_tech_not_met_is_false() -> None:
+    """技术位类：末值未跌破 MA20 → 确定性不成立（false）。"""
+    assert judge_condition_met_state(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0 + i for i in range(25)], pct_chgs=[], volumes=[],
+    ) is False
+
+
+def test_state_volume_not_met_is_false() -> None:
+    """量类：窗口 max 低于 level（op=gte）→ 确定性不成立（false）。"""
+    assert judge_condition_met_state(
+        "放量至 3 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op="gte", level=3.0e8,
+    ) is False
+
+
+def test_state_unjudgeable_stays_none() -> None:
+    """无法判定的三类（参考位降级 / 无 level 的量类 / 单样本）恒 None——绝不写 false。"""
+    assert judge_condition_met_state(
+        "跌破今日盘中低点", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0], pct_chgs=[], volumes=[], metric="today_low", op="below",
+    ) is None
+    assert judge_condition_met_state(
+        "放量至 3 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8], metric="volume", op="gte",
+    ) is None
+    assert judge_condition_met_state(
+        "若跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_state_cross_op_not_crossed_is_none() -> None:
+    """cross_* 语义为"相邻两日穿越"：当日未穿越不能断言"窗口内从未穿越" → None（不写 false）。"""
+    assert judge_condition_met_state(
+        "放量上穿", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.5e8, 1.6e8],
+        metric="volume", op="cross_above", level=1.4e8,
+    ) is None
+
+
+def test_state_event_class_stays_none_in_pure_judge() -> None:
+    """事件类在纯函数中仍为 None（三值化只覆盖市场类；事件类三层在调用方）。"""
+    assert judge_condition_met_state(
+        "若出口限制细则落地", direction="bearish", threshold_pct=None,
+        closes=[100.0, 99.0], pct_chgs=[], volumes=[], event_ref="evt_1",
+    ) is None
+
+
+# ============ 参考位类（today_open/high/low）接通：取数层补当日行后可得 ============
+# 口径（写入实现 docstring）：today_open/high/low 一律取**窗口最后一行（当日）**的
+# 开/高/低，与同一行的 close 比较；cross_* 对单日参考位无跨日稳定阈值 → 恒 None。
+
+
+def test_ref_level_met_when_close_breaks_today_high() -> None:
+    """站上今日高点：末日 close > 当日 high → True（此前取数层无 high → 恒 None 降级）。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is True
+
+
+def test_ref_level_not_met_returns_false_when_close_below_today_high() -> None:
+    """确定性不成立：末日 close 未站上当日 high → False（到期可写未成立态）。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 101.5, "high": 102.0},
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "metric,direction,text,ref,expected,",
+    [
+        ("today_low", "bearish", "跌破今日盘中低点",
+         {"close": 98.0, "low": 99.0}, True),
+        ("today_low", "bearish", "跌破今日盘中低点",
+         {"close": 99.5, "low": 99.0}, False),
+        ("today_open", "bearish", "跌破今日开盘价",
+         {"close": 97.9, "open": 98.0}, True),
+        ("today_open", "bullish", "站上今日开盘价",
+         {"close": 98.1, "open": 98.0}, True),
+    ],
+)
+def test_ref_level_text_and_direction_resolve_op(
+    metric: str, direction: str, text: str, ref: dict[str, float], expected: bool,
+) -> None:
+    """op 缺省时方向由文本（跌破/站上）→ direction 兜底解析；显式 op 优先。"""
+    assert judge_condition_met_state(
+        text, direction=direction, threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric=metric, today_ref=ref,
+    ) is expected
+
+
+def test_ref_level_cross_op_stays_none() -> None:
+    """cross_* 不适用单日参考位（参考位是当日值，无跨日稳定阈值）→ 恒 None。"""
+    for op in ("cross_above", "cross_below"):
+        assert judge_condition_met_state(
+            "站上今日高点", direction="bullish", threshold_pct=None,
+            closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+            metric="today_high", op=op,
+            today_ref={"close": 103.0, "high": 102.0},
+        ) is None
+
+
+def test_ref_level_missing_data_or_direction_stays_none() -> None:
+    """缺字段（无 today_ref / 缺对应参考位 / 缺 close）与方向不明（neutral 且无动词）→ None。"""
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+    ) is None
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0},  # 缺 high（数据源未透传该字段）
+    ) is None
+    assert judge_condition_met_state(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0, 101.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"high": 102.0},  # 缺 close → 无比较基准
+    ) is None
+    assert judge_condition_met_state(
+        "今日高点", direction="neutral", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is None
+
+
+def test_ref_level_two_value_judge_keeps_only_true() -> None:
+    """两值口径（第①段只写 true）：参考位成立 → True，未成立 → None。"""
+    assert judge_condition_met(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 103.0, "high": 102.0},
+    ) is True
+    assert judge_condition_met(
+        "站上今日高点", direction="bullish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+        metric="today_high", op="above",
+        today_ref={"close": 101.0, "high": 102.0},
+    ) is None
+
+
+# ============ G1/G2 保守化护栏（R9 误点亮防复发，spec §12.3/§12.7） ============
+# 三条生产实证文本（当日真实误点亮，已人工回滚）——防复发回归锚点：
+#   ① id=214 c2：情绪口径（炸板/涨停家数）被**价格/量口径**判成成立；
+#   ② id=18  c2：海外利率口径（10 年期美债）同上被点亮；
+#   ③ id=158 c1：复合条件前半句（技术位）可判、后半句（资金流）判不了，旧实现只判一半即命中。
+_CASE_214_C2 = (
+    "炸板家数回落至10家以内、涨停家数回升至50家以上，"
+    "且半导体相关板块（存储芯片/先进封装）同步走强"
+)
+_CASE_18_C2 = "10年期美债收益率站上5%"
+_CASE_158_C1 = "猪肉板块指数跌破近期支撑位且主力资金持续净流出"
+
+
+def test_case_214_sentiment_caliber_is_unjudgeable() -> None:
+    """id=214 c2：情绪口径不得用价格/量判径（旧实现 closes 上涨 6% → 误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_214_C2, direction="bullish", threshold_pct=2.0,
+            closes=UPTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_case_18_overseas_rate_caliber_is_unjudgeable() -> None:
+    """id=18 c2：海外利率口径不得用 A 股价格/技术位判径（旧实现 close>MA20 → 误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_18_C2, direction="bullish", threshold_pct=None,
+            closes=UPTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_case_158_compound_capital_flow_clause_blocks_whole() -> None:
+    """id=158 c1：任一子句判不了（资金流）→ 整体 unjudgeable，不得半判命中。
+
+    旧实现把整段当技术位判（closes 下行 → 末值 < MA20）→ 只判前半句即点亮 True。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_158_C1, direction="bearish", threshold_pct=None,
+            closes=DOWNTREND, pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_classify_condition_domain_three_calibers() -> None:
+    """领域分类（常量表 + 单点函数）：三类非价格/量口径命中，量类/技术位不误伤。"""
+    assert classify_condition_domain(_CASE_18_C2) == "overseas_macro"
+    assert classify_condition_domain(_CASE_214_C2) == "sentiment"
+    assert classify_condition_domain(_CASE_158_C1) == "capital_flow"
+    # 不误伤清单：成交额/成交量/换手率（量类可判）、支撑位/前低/MA20（技术位可判）
+    assert classify_condition_domain("两市成交额放大至 1.2 万亿") is None
+    assert classify_condition_domain("成交量放大、换手率提升") is None
+    assert classify_condition_domain("跌破近期支撑位并回踩前低 MA20") is None
+
+
+# ============ G1 口径清单扩展（2026-09-18：三组新词补齐） ============
+# 目标：把生产/生成侧高频的"非 A 股价格/量可判"口径补齐进 `_NON_PRICE_DOMAIN_KEYWORDS`，
+# 防其被价格/量/技术位口径近似点亮（true 不可撤回）。**只加词，不加新机制**。
+
+
+@pytest.mark.parametrize("text,expected", [
+    # 情绪口径：封单/开板/连板晋级等情绪家数类指标
+    ("封单量显著放大", "sentiment"),
+    ("涨停开板家数增加", "sentiment"),
+    ("连板晋级率提升", "sentiment"),
+    ("封成率回升", "sentiment"),
+    ("炸板率下降至 10% 以内", "sentiment"),
+    ("首板数量明显增加", "sentiment"),
+    ("二板成功率提升", "sentiment"),
+    ("空间板高度打开", "sentiment"),
+    ("情绪温度回升至 60", "sentiment"),
+    # 资金流口径：大单/龙虎榜/ETF 份额/两融/互联互通席位
+    ("大单净额由负转正", "capital_flow"),
+    ("龙虎榜出现机构专用席位", "capital_flow"),
+    ("ETF 份额持续增加", "capital_flow"),
+    ("融资买入额占比提升", "capital_flow"),
+    ("南向资金加速流入", "capital_flow"),
+    ("沪股通净买入额扩大", "capital_flow"),
+    ("深股通持股比例提升", "capital_flow"),
+    ("机构席位集中买入", "capital_flow"),
+    # 海外/宏观口径：经济数据/议息/汇率/大宗/外盘指数
+    ("美国非农数据超预期", "overseas_macro"),
+    ("CPI 同比回落", "overseas_macro"),
+    ("9 月议息会议结果落地", "overseas_macro"),
+    ("人民币汇率中间价上调", "overseas_macro"),
+    ("黄金价格创新高", "overseas_macro"),
+    ("伦铜库存持续下降", "overseas_macro"),
+    ("A50 期货夜盘走强", "overseas_macro"),
+    ("日经指数大幅低开", "overseas_macro"),
+])
+def test_classify_condition_domain_extended_keywords(text: str, expected: str) -> None:
+    """扩展后的三组口径词必须被分类命中（否则这些条件会被行情口径近似点亮）。"""
+    assert classify_condition_domain(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "两市成交额放大至 1.2 万亿",
+    "成交量放大、换手率提升",
+    "跌破近期支撑位并回踩前低 MA20",
+    "板块指数上涨 3%",
+    "缩量回踩 5 日均线",
+    # 「金价」而非「黄金」：A 股有"黄金/贵金属"板块，用「黄金」会误伤这些可判条件
+    "黄金板块指数站上 MA20",
+    "黄金/贵金属板块放量上涨",
+])
+def test_classify_condition_domain_extended_no_false_positive(text: str) -> None:
+    """扩展不得误伤：量类/技术位/纯涨跌幅口径 + A 股「黄金」板块名**仍可判**（classify → None）。"""
+    assert classify_condition_domain(text) is None
+
+
+def test_extended_capital_flow_keyword_unjudgeable_end_to_end() -> None:
+    """端到端：新词条件（龙虎榜机构席位）在顺势序列下不得被涨跌幅口径点亮。
+
+    旧实现：纯涨跌幅类（metric 缺省）→ 窗口累计 +6% > 0 → 误点亮 True（不可撤回）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            "龙虎榜出现机构专用席位", direction="bullish", threshold_pct=None,
+            closes=[100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0],
+            pct_chgs=[], volumes=[],
+        ) is None
+
+
+def test_split_condition_clauses_connectors_and_comma_boundary() -> None:
+    """子句切分规则：连接词（且/并且/同时/而且/以及）切分；中文逗号**不切**（并列列举同一子句）。"""
+    assert split_condition_clauses("跌破 MA20 且 跌破前低") == ["跌破 MA20", "跌破前低"]
+    assert split_condition_clauses("A 并且 B") == ["A", "B"]   # 多字连接词优先于单字「且」
+    assert split_condition_clauses("A 同时 B") == ["A", "B"]
+    assert split_condition_clauses("A 而且 B") == ["A", "B"]
+    assert split_condition_clauses("A 以及 B") == ["A", "B"]
+    # 逗号/顿号不切（214 原文本即"顿号并列同一子句"）
+    assert split_condition_clauses(
+        "炸板家数回落至10家以内、涨停家数回升至50家以上"
+    ) == ["炸板家数回落至10家以内、涨停家数回升至50家以上"]
+    # 无连接词 → 原文本单元素（后续按逐字不变的单子句路径判定）
+    assert split_condition_clauses("跌破 MA20") == ["跌破 MA20"]
+
+
+def test_single_clause_tech_and_volume_still_light_up() -> None:
+    """回归（重点）：单子句技术位/量类条件行为逐字不变，数据满足时正常点亮。"""
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "成交量放大至 1.5 亿手以上", direction="bullish", threshold_pct=None,
+        closes=[], pct_chgs=[], volumes=[1.0e8, 2.0e8],
+        metric="volume", op="gte", level=1.5e8,
+    ) is True
+
+
+def test_compound_all_clauses_met_lights_up() -> None:
+    """回归：复合条件全部子句可判且都成立 → 点亮 True。"""
+    assert judge_condition_met_state(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+
+
+def test_compound_all_judgeable_one_false_is_deterministic_false() -> None:
+    """回归：全部子句可判但有一句不成立 → 整体不点亮且**非 unjudgeable**（三值=False）。"""
+    text = "站上 MA20 且 跌破前低"
+    assert judge_condition_met_state(
+        text, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is False
+    # 两值口径（第①段）：确定性不成立折叠回 None（只写 true，不产键）
+    assert judge_condition_met(
+        text, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_single_clause_insufficient_data_stays_none() -> None:
+    """回归：单子句 + 数据不足 → 仍为 None（不写键），不得被 G2 改成 False。"""
+    assert judge_condition_met_state(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=[100.0], pct_chgs=[], volumes=[],
+    ) is None
+
+
+def test_event_ref_bypasses_domain_guard_in_pure_judge() -> None:
+    """事件类优先级高于 G1：带 event_ref 的条件即使文本命中口径词也不走价格/量判径。
+
+    纯函数对事件类恒 None（交调用方三层判定）——G1 不得把事件类条件"改写"为
+    unjudgeable 语义之外的分流（调用方扫描层行为见 test_prediction_validator）。
+    """
+    assert infer_condition_class(
+        metric="close", event_ref="evt_1", text=_CASE_18_C2
+    ) == "event"
+    assert judge_condition_met_state(
+        _CASE_18_C2, direction="bullish", threshold_pct=None,
+        closes=UPTREND, pct_chgs=[], volumes=[], event_ref="evt_1",
+    ) is None
+
+
+# ============ G3 方向动词 + 百分数口径守卫（R21 误点亮防复发，spec §13.6 R21） ============
+# 生产实证：id=24 c1「重组蛋白板块指数相对当前收盘价跌破 -3%」（anchor: metric=close、
+# threshold="-4%"、direction=bearish）被**技术位判径**（裸"跌破" → 末值 vs MA20）判成
+# condition_met=true（误，已人工回滚）。根因：metric=close 是 schema 缺省值、不携带口径信息
+# → 文本兜底把"相对百分比"错归技术位类；且文本百分数（-3%）与 anchor.threshold（-4%）
+# 不一致 → 该形态**没有可靠判定标准** → 一律不判（与 G1 同源：口径不确定就不判）。
+_CASE_24_C1 = "重组蛋白板块指数相对当前收盘价跌破 -3%"
+
+
+def test_case_24_direction_verb_with_pct_is_unjudgeable() -> None:
+    """id=24 c1：方向动词 + 百分数且无明示技术位 → 不得走技术位近似。
+
+    旧实现：closes 下行 → 末值 < MA20 → 误点亮 True（true 不可撤回）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            _CASE_24_C1, direction="bearish", threshold_pct=-4.0,
+            closes=DOWNTREND, pct_chgs=[], volumes=[], metric="close",
+        ) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["板块指数突破 +3%", "板块指数站上3%", "指数失守 -1.5%", "指数收回 +2%"],
+)
+def test_direction_verb_with_pct_variants_are_unjudgeable(text: str) -> None:
+    """变体：带符号/不带符号/不同方向动词 均不判（顺势序列下旧实现会误点亮 True）。"""
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            text, direction="bullish", threshold_pct=3.0,
+            closes=UPTREND, pct_chgs=[], volumes=[], metric="close",
+        ) is None
+
+
+def test_explicit_tech_level_with_pct_still_uses_tech_branch() -> None:
+    """不误伤：文本明示技术位（均线/MA\\d+/日线/前低/新高）时仍走技术位判径，照常点亮。"""
+    assert judge_condition_met(
+        "板块指数相对 5 日均线跌破 3%", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[], metric="close",
+    ) is True
+
+
+def test_pct_words_without_direction_verb_unaffected() -> None:
+    """不误伤：无方向动词的纯涨跌幅条件仍走涨跌幅判径（G3 只作用于方向动词 + 百分数）。"""
+    assert judge_condition_met(
+        "指数上涨超过 5%", direction="bullish", threshold_pct=2.0,
+        closes=UPTREND, pct_chgs=[], volumes=[], metric="close",
+    ) is True
+
+
+# ============ G4 「或」复合条件守卫（2026-09-18） ============
+# 「或」是"任一子句成立"语义，与 G2 的"全部成立"**相反**：正确实现需三值或运算
+# （任一 True → True；全部可判且全 False → False；含不可判子句且无 True → None）。
+# 现状：**生产 0 条**含「或」的条件（2026-09-18 全库 372 条条件实测 with_or=0）→
+# 不做 or 运算（零收益却新增误判面），改为**一律不可判**，堵掉"整段当单子句近似判"的
+# 潜在误点亮（true 不可撤回）。若生成侧后续真产出「或」条件，再按三值或语义实现。
+
+
+def test_has_or_connector_detects_and_excludes_idiom() -> None:
+    """识别「或」，但排除"不可或缺"等固定搭配里的「或」。"""
+    assert has_or_connector("放量突破 或 缩量回踩") is True
+    assert has_or_connector("跌破 MA20 或者 跌破前低") is True
+    assert has_or_connector("不可或缺的支撑位") is False
+    assert has_or_connector("跌破 MA20") is False
+    assert has_or_connector("") is False
+
+
+def test_or_compound_condition_is_unjudgeable() -> None:
+    """含「或」的复合条件 → 整体 unjudgeable（不产键），不得整段当单子句判。
+
+    旧实现：「跌破 MA20 或 放量下跌」里 `_TECH_RE` 命中"跌破" → 归技术位类 →
+    下行序列末值 < MA20 → 误点亮 True（而"或"语义要求逐子句判定）。
+    """
+    for judge in (judge_condition_met_state, judge_condition_met):
+        assert judge(
+            "跌破 MA20 或 放量下跌", direction="bearish", threshold_pct=None,
+            closes=DOWNTREND, pct_chgs=[], volumes=[1.0e8, 9.0e7],
+            metric="close",
+        ) is None
+
+
+def test_or_guard_does_not_touch_and_compounds_or_single_clause() -> None:
+    """不误伤：G2 的「且」系复合（无「或」）与单子句行为**逐字不变**。"""
+    assert judge_condition_met(
+        "跌破 MA20 且 跌破前低", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+    assert judge_condition_met(
+        "跌破 MA20", direction="bearish", threshold_pct=None,
+        closes=DOWNTREND, pct_chgs=[], volumes=[],
+    ) is True
+

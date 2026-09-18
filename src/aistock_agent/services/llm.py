@@ -81,7 +81,13 @@ def _effective_temperature(base: float, override: float | None) -> float:
     return base
 
 
-def get_quick_think(*, observe: bool = True, temperature: float | None = None) -> ChatOpenAI:
+def get_quick_think(
+    *,
+    observe: bool = True,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> ChatOpenAI:
     """快速模型，用于意图分类和简单任务。
 
     Args:
@@ -91,6 +97,9 @@ def get_quick_think(*, observe: bool = True, temperature: float | None = None) -
             2026-08-11 拍板），该旁路 token 不计入用户账单。
         temperature: 按调用覆盖温度（C-1，2026-08-14）；None 时回退
             AISTOCK_LLM_TEMPERATURE_OVERRIDE env，再回退 settings 默认。
+        max_tokens: 按调用覆盖全局 quick_think_max_tokens（结构化大输出场景，
+            2026-09-03 预判链：2000 默认下 deepseek thinking 占满被截断）。
+        extra_body: 透传厂商扩展参数（如 deepseek 禁用 thinking）。
     """
     return ChatOpenAI(
         model=settings.quick_think_model,
@@ -98,7 +107,8 @@ def get_quick_think(*, observe: bool = True, temperature: float | None = None) -
         base_url=_normalize_openai_base_url(settings.openai_base_url),
         temperature=_effective_temperature(settings.quick_think_temperature, temperature),
         # max_tokens 是 ChatOpenAI 的 Pydantic Field，mypy 无 plugin 无法识别
-        max_tokens=settings.quick_think_max_tokens,  # type: ignore[call-arg]
+        max_tokens=max_tokens if max_tokens is not None else settings.quick_think_max_tokens,  # type: ignore[call-arg]
+        extra_body=extra_body,
         # 可观测性回调：token 用量统计 + agent 追踪（不侵入业务逻辑）
         # observe=False 时（reasoning 旁路）不挂，token 不计入用户账单（问题 17）
         callbacks=_get_observability_callbacks() if observe else None,

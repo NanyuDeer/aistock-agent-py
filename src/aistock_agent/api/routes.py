@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.api.deps import (
@@ -1497,6 +1498,91 @@ async def readiness(response: Response) -> dict[str, object]:
 # ── 管理员手动触发（Gap 1: 灰度验证用） ──────────────────────────────
 
 
+class ReviewFullTriggerBody(BaseModel):
+    """POST /admin/trigger/review_full 请求体。
+
+    `with_chain`（缺省 False，保持既有行为）：复盘成功后补发 `review_done`，驱动链组装/
+    级联预判消费者——手动触发不走 `ReviewFullConsumer`，不补发就无法手动验证全链路。
+    """
+
+    report_date: str | None = None
+    with_chain: bool = False
+
+
+async def _publish_review_done_for_chain(report_date: str, trace_id: str) -> bool:
+    """手动触发复盘后补发 `review_done`（`with_chain=true` 专用）。
+
+    背景：`run_review` 只写报告，`review_done` 由 `ReviewFullConsumer` 在调度路径发布；
+    管理员手动 trigger 直接调 `run_review` → 链/预判消费者永不触发（2026-09-17 手动验证踩坑）。
+
+    发布路径（两级，均不向调用方抛出）：
+    ① 会话内默认总线（`main.lifespan` `set_default_bus`）可用 → 直接 `publish_review_done`；
+    ② 默认总线为 None（未起消费者/lifespan 未建）→ 用 `RedisPool` 单例客户端临时建 `EventBus`
+       发布；单例未初始化（RuntimeError）→ 按 `settings.redis_url` 临时连一个客户端
+       （URL 取配置，可被 `APP_ENV` 覆写，不写死），**临时连接用后即关**（`RedisPool` 单例属
+       全局资源，不关）。
+    两条路都失败 → 只 warning 并返回 False，**不影响已完成的复盘返回**。
+    返回值语义 = "发布路径执行完成（未抛异常）"：`publish_review_done` 内部吞掉 Redis 异常并
+    warning（既有"发布失败不阻断 review"契约），故极端情况下可能乐观为 True（同义告警在日志）。
+    """
+    from aistock_agent.services.event_bus import EventBus, get_default_bus
+    from aistock_agent.services.event_consumers import publish_review_done
+
+    logger = structlog.get_logger()
+    bus = get_default_bus()
+    if bus is not None:
+        try:
+            await publish_review_done(bus, report_date=report_date, trace_id=trace_id)
+            return True
+        except Exception as exc:  # noqa: BLE001 — 发布失败不得影响复盘返回
+            logger.warning(
+                "manual_review_done_publish_failed",
+                report_date=report_date,
+                error=str(exc),
+            )
+            return False
+
+    redis_client: object | None = None
+    close_redis = False
+    try:
+        import redis.asyncio as aioredis
+
+        try:
+            client = await RedisPool.get_client()
+        except RuntimeError:  # lifespan 未初始化 RedisPool → 临时连接
+            # redis.asyncio.from_url 无类型存根（no-untyped-call），此处按既有用法显式豁免
+            client = aioredis.from_url(settings.redis_url)  # type: ignore[no-untyped-call]
+            close_redis = True
+        redis_client = client
+        temp_bus = EventBus(
+            client,
+            max_retries=settings.event_bus_max_retries,
+            deadletter_prefix=settings.event_bus_deadletter_prefix,
+            consumer_group=settings.event_bus_consumer_group,
+            stream_max_len=settings.event_stream_max_len,
+        )
+        await publish_review_done(temp_bus, report_date=report_date, trace_id=trace_id)
+        logger.info(
+            "manual_review_done_published_via_temp_bus", report_date=report_date
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — 同上：降级路径失败只告警
+        logger.warning(
+            "manual_review_done_publish_failed",
+            report_date=report_date,
+            error=str(exc),
+        )
+        return False
+    finally:
+        if close_redis and redis_client is not None:
+            try:  # 临时连接用后即关（关闭失败不影响返回）
+                aclose = getattr(redis_client, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception:  # noqa: BLE001
+                logger.debug("manual_review_done_temp_redis_close_failed")
+
+
 @router.post("/admin/trigger/review_quick")
 async def trigger_review_quick(
     body: dict[str, str] | None = None,
@@ -1542,15 +1628,22 @@ async def trigger_review_quick(
 
 @router.post("/admin/trigger/review_full")
 async def trigger_review_full(
-    body: dict[str, str] | None = None,
+    body: ReviewFullTriggerBody | None = None,
     _: None = Depends(verify_internal_token),
 ) -> dict[str, object]:
     """手动触发 full review（20:30 Tushare 完整数据版）。
     供管理员灰度验证用。绕过 is_trading_day() 检查。
+
+    `with_chain=true`（可选，缺省 false 保持既有行为）：复盘成功后补发 `review_done`
+    （见 `_publish_review_done_for_chain`），使链组装/级联预判消费者被触发——手动验证
+    全链路必需；返回体带 `chain_published` 便于观测（发布失败只 warning，不影响复盘结果）。
     """
     from aistock_agent.agents.workers.review import run_review
 
-    report_date = _resolve_manual_report_date(body)
+    report_date = _resolve_manual_report_date(
+        {"report_date": body.report_date} if body and body.report_date else None
+    )
+    with_chain = bool(body.with_chain) if body is not None else False
     trace_id = f"manual-full-{report_date}-{int(time.time())}"
     logger = structlog.get_logger()
     logger.info("manual_trigger_review_full", report_date=report_date, trace_id=trace_id)
@@ -1567,6 +1660,12 @@ async def trigger_review_full(
             "manual_trigger_review_full_done",
             status=result.status, elapsed=elapsed, trace_id=trace_id,
         )
+        # 仅 status=ok 且显式请求联动时才发布（对齐调度路径"仅 ok 发 review_done"硬约束）
+        chain_published = (
+            await _publish_review_done_for_chain(result.report_date, result.trace_id)
+            if with_chain and result.status == "ok"
+            else False
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1574,6 +1673,7 @@ async def trigger_review_full(
             "trace_id": result.trace_id,
             "elapsed_seconds": elapsed,
             "markdown_preview": result.markdown[:200] if result.markdown else "",
+            "chain_published": chain_published,
         }
     except Exception as e:
         logger.error(

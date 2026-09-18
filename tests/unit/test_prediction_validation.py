@@ -48,7 +48,8 @@ async def test_read_validation_profile_cache_hit():
     with patch.object(pv, "get_cached_validation_profile",
                       new=AsyncMock(return_value=cached)) as getc, \
          patch.object(pv, "_collect_target_entries", new=AsyncMock(return_value=[])) as collect, \
-         patch.object(pv, "set_cached_validation_profile", new=AsyncMock(return_value=True)) as setc:
+         patch.object(pv, "set_cached_validation_profile",
+                      new=AsyncMock(return_value=True)) as setc:
         out = await pv.read_validation_profile(_STOCK, horizon="short")
     assert out["source"] == "cache" and out["cached"] is True
     assert out["horizon"] == "short" and out["hit_rate"] == 1.0
@@ -169,3 +170,130 @@ def test_enrich_prediction_input_low_rate_sufficient_notes():
     # 命中率正常 → 不附 note
     ok = pv.enrich_prediction_input({}, _profile(n=40, hit_rate=0.6, sufficient_sample=True))
     assert "note" not in ok["validation_profile"]
+
+
+def test_enrich_horizon_low_hit_attaches_warning():
+    """Task5（B 期）：mid/long 档样本≥3 且命中率<0.4 → note 附抑制提示；样本不足档不提示。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {
+                   "short": {"n": 6, "hit_rate": 0.67},
+                   "mid": {"n": 4, "hit_rate": 0.25},   # n>=3 且 <0.4 → 抑制提示
+                   "long": {"n": 1, "hit_rate": 0.0},   # n<3 → 不提示
+               }}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    txt = str(out.get("validation_profile", {}).get("note", ""))
+    assert "mid" in txt and "印证少" in txt
+    assert "long" not in txt  # 无样本档不提示
+
+
+def test_enrich_horizon_ok_no_warning():
+    """Task5（B 期）：mid 档命中率正常（≥0.4）→ 不附任何 note。"""
+    profile = {"target": "000001", "n": 10, "hit_rate": 0.5, "sufficient_sample": True,
+               "horizon_breakdown": {"mid": {"n": 4, "hit_rate": 0.6}}}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    assert "note" not in out.get("validation_profile", {})
+
+
+# ---------- Task 0.5：匹配口径（结构化 target 优先，horizons 字符串回退） ----------
+
+# 板块 target 的稳定 key = resolved ts_code（services/sector_target.py:15-25），
+# 与板块链路 sector_target_from_resolved 同源。
+_SECTOR = Target(kind="sector", internal_id="885001.TI", code="885001.TI", name="存储板块")
+
+
+def _sector_record(prediction: dict[str, object]) -> dict[str, object]:
+    """板块预判记录（list_all_predictions 形状：prediction + verification entry）。"""
+    return {
+        "id": "p1",
+        "prediction": prediction,
+        "verification": {
+            "short": {"result": "hit", "horizon": "short", "methodology_version": "3.0",
+                      "target_type": "sector", "approximate": False},
+        },
+    }
+
+
+def test_record_target_prefers_structured_target():
+    """Task 0.5：结构化 target（PredictionResult.target）优先，horizons 自由文本次之。"""
+    prediction = {
+        "target": {"kind": "sector", "internal_id": "885001.TI", "code": "885001.TI",
+                   "name": "存储板块"},
+        "horizons": [{"horizon": "short", "target": "上证指数"}],
+    }
+    assert pv._record_target(prediction) == "885001.TI"
+
+
+@pytest.mark.asyncio
+async def test_collect_entries_matches_sector_by_structured_internal_id():
+    """Task 0.5：板块记录 horizons[].target 是 LLM 自由文本（prompt 要求"优先用指数名"
+    → 常写"上证指数"），按 ts_code/板块名匹配必然 miss；改后按 prediction.target.internal_id
+    （= resolved ts_code）命中 → 画像非空（改造前 n=0）。"""
+    record = _sector_record({
+        "target": {"kind": "sector", "internal_id": "885001.TI", "code": "885001.TI",
+                   "name": "存储板块"},
+        "horizons": [{"horizon": "short", "target": "上证指数"}],
+    })
+    with patch.object(pv.node_api, "list_all_predictions",
+                      new=AsyncMock(return_value=[record])):
+        entries = await pv._collect_target_entries(_SECTOR)
+    assert len(entries) == 1
+    assert entries[0]["result"] == "hit"
+
+
+@pytest.mark.asyncio
+async def test_collect_entries_skips_other_sector_ts_code():
+    """Task 0.5：结构化 target 指向别的板块（ts_code 不同）→ 不并入本板块画像。"""
+    record = _sector_record({
+        "target": {"kind": "sector", "internal_id": "886001.TI", "code": "886001.TI",
+                   "name": "光模块概念"},
+        "horizons": [{"horizon": "short", "target": "上证指数"}],
+    })
+    with patch.object(pv.node_api, "list_all_predictions",
+                      new=AsyncMock(return_value=[record])):
+        entries = await pv._collect_target_entries(_SECTOR)
+    assert entries == []
+
+
+@pytest.mark.asyncio
+async def test_collect_entries_falls_back_to_horizons_target():
+    """Task 0.5 向后兼容：旧记录无结构化 target → 回退 horizons[].target 字符串匹配。"""
+    record = _sector_record({"horizons": [{"horizon": "short", "target": "存储板块"}]})
+    with patch.object(pv.node_api, "list_all_predictions",
+                      new=AsyncMock(return_value=[record])):
+        entries = await pv._collect_target_entries(_SECTOR)
+    assert len(entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_validation_profile_sector_structured_target_hits():
+    """Task 0.5 端到端：板块 target（ts_code）读画像——结构化 target 命中 → n>0。"""
+    record = _sector_record({
+        "target": {"kind": "sector", "internal_id": "885001.TI", "code": "885001.TI",
+                   "name": "存储板块"},
+        "horizons": [{"horizon": "short", "target": "上证指数"}],
+    })
+    with patch.object(pv, "get_cached_validation_profile",
+                      new=AsyncMock(return_value=None)), \
+         patch.object(pv.node_api, "list_all_predictions",
+                      new=AsyncMock(return_value=[record])), \
+         patch.object(pv, "_collect_target_confirmations",
+                      new=AsyncMock(return_value=[])), \
+         patch.object(pv, "set_cached_validation_profile",
+                      new=AsyncMock(return_value=True)):
+        out = await pv.read_validation_profile(_SECTOR)
+    assert out["target"] == "885001.TI"
+    assert out["n"] == 1 and out["hit_rate"] == 1.0
+
+
+def test_enrich_global_and_horizon_notes_concat_no_punct_clash():
+    """FixRound：全局 sufficient 低命中 note 与 mid 低命中 horizon note 并存 → 同键拼接含两者，
+    且拼接处无"句号+分号"连用病句（分号前句尾句号去除其一）。"""
+    profile = {"target": "000001", "n": 40, "hit_rate": 0.25, "sufficient_sample": True,
+               "horizon_breakdown": {"mid": {"n": 4, "hit_rate": 0.25}}}
+    out = pv.enrich_prediction_input({"trace": "x"}, profile)
+    note = out["validation_profile"].get("note")
+    assert note
+    assert "该 target 同类条件历史命中率低" in note  # 全局低命中 note 在
+    assert "mid" in note and "历史印证少" in note     # horizon note 在
+    assert "。；" not in note                        # 无句号+分号病句
+

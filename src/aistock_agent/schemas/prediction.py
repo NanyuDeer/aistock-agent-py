@@ -16,8 +16,16 @@ PredictionHorizonType = Literal["short", "mid", "long"]
 PredictionPhase = Literal["building", "peaking", "decaying", "returning"]
 # 条件化预判方向（§3.1，anchor 自带 direction，不依赖 horizons[].direction）
 PredictionDirection = Literal["bullish", "bearish", "neutral"]
-# 验证标的（§3.1 anchor.metric）
-PredictionMetric = Literal["close", "high", "low", "volume", "index_close"]
+# 验证标的（§3.1 anchor.metric）。2026-09-17 扩展（spec §12.3）：新增量类 amount、
+# 技术位 ma20/ma60/prior_low/prior_high、参考位 today_open/today_high/today_low。
+# 该枚举是生成侧 prompt 与判定层共用的唯一白名单（禁止两侧各写一套，防再次口径脱节）。
+PredictionMetric = Literal[
+    "close", "high", "low", "volume", "index_close",
+    "amount", "ma20", "ma60", "prior_low", "prior_high",
+    "today_open", "today_high", "today_low",
+]
+# 判定原子操作（§12.3）：gte/above/lte/below 用于窗口极值比较；cross_* 用于相邻日穿越。
+PredictionAnchorOp = Literal["gte", "lte", "above", "below", "cross_above", "cross_below"]
 
 
 class PredictionHorizon(BaseModel):
@@ -26,6 +34,11 @@ class PredictionHorizon(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     horizon: PredictionHorizonType
+    label: str = Field(
+        default="",
+        description="该档基准走势短语（4~6 字，如 恐慌出清为主/震荡磨底/震荡走强；"
+        "洞见卡基准行“基准 · {label}”展示；旧记录为空则前端回退不渲染）。",
+    )
     remaining_estimate: str  # 还能持续多久（定性估算，如 "2-4 周"）
     phase: PredictionPhase  # 当前演化阶段
     direction: Literal["bullish", "bearish", "neutral"]  # 该档位影响方向
@@ -75,6 +88,19 @@ class PredictionAnchor(BaseModel):
     threshold: str  # 验证阈值（涨跌幅 %，如 "+5%"/"-3%"），到期比对用
     metric: PredictionMetric = "close"  # 验证标的，缺省 close；大盘用 index_close
     direction: PredictionDirection = "neutral"  # 情景方向；缺省 neutral，LLM 不产时归一化层兜底
+    # 事件类条件的锚（spec §13.2，状态锚前置）：指向 Event Entity 的 event_id，判定层据此
+    # 走 event_status 迁移自动点亮。可空：仅事件类条件填写，非事件类留空；旧记录缺省即
+    # None，向后兼容、不升 schema_version（3.0）。extra="forbid" 下该键必须与 prompt 键清单
+    # 同批同步，否则 LLM 多吐该键会整条预判校验失败。缺失的事件类条件由判定层按
+    # unjudgeable（met=null）处理，不误点亮。
+    event_ref: str | None = None
+    # 判定操作（spec §12.3，2026-09-17 P4'）：与 level 配对使用，声明"如何比较"。
+    # 可空（旧记录缺省 None）→ 判定层按 direction 兜底选择 gte/lte；不升 schema_version。
+    op: PredictionAnchorOp | None = None
+    # 数值阈值（spec §12.3）：与用于涨跌幅的 threshold（百分比字符串）并存——
+    # threshold 管"涨跌幅 %"，level 管"绝对量/价格"（如成交量 2.2e8 手、均线点位 82.5）。
+    # 可空：无量化阈值 → 判定层视为不可判定（met 不写），不得凭文本关键词点亮。
+    level: float | None = None
 
 
 class PredictionCondition(BaseModel):
@@ -86,9 +112,44 @@ class PredictionCondition(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    condition: str  # 触发条件（可验证的事实描述）
+    condition: str  # 触发条件（完整可量化事实描述，长句保留，供详细报告原文展示）
+    label: str = Field(
+        default="",
+        description="路径短语名，固定两段式“{市场状态/触发条件，≈4 字，≤6} · {触发后走势，≈4 字，≤6}”，"
+        "如 恐慌出清 · 下跌中继 / 缩量企稳 · 平台修复（洞见卡路径首行加粗展示；"
+        "旧记录为空则前端回退用 condition 主干）。",
+    )
     scenario: str  # 条件满足后的走势预判（尽量含幅度/目标位）
     anchor: PredictionAnchor  # 验证锚点（horizon + threshold + metric + direction）
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="简洁展示用关键词（1~2 个，单条 ≤10 字、硬上限 15 字，如 两市放量≥2.2万亿）；"
+        "condition 本体不受影响仍为完整句。旧记录为空数组。",
+    )
+    scenario_keywords: list[str] = Field(
+        default_factory=list,
+        description="预判关键词（2026-09-03）：scenario 的简洁展示摘要（1~2 个，单条 ≤10 字、"
+        "硬上限 15 字），侧重**触发后的方向与幅度**（如 上探+3%~+5% / 回踩-3%内 / 窄幅±1%）；"
+        "与 keywords（触发前提）语义互补、禁止与 label 后段/condition 大段重复；"
+        "scenario 本体不受影响仍为完整句。旧记录为空数组。",
+    )
+
+
+class OmittedHorizon(BaseModel):
+    """被省略（未产出）档位的显式留痕（spec §5.3）：供产品解释与画像诊断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: PredictionHorizonType
+    reason: str  # LLM 产出；归一化层校验非空、非空泛
+
+    @model_validator(mode="after")
+    def _reason_not_blank(self) -> "OmittedHorizon":
+        # spec §5.4：归一化层校验非空——空白/纯空格 reason 无解释价值，拒绝（空泛词
+        # 由提示词约束 + LLM 侧控制，此处只挡结构空值）。
+        if not self.reason.strip():
+            raise ValueError("omitted reason must not be blank")
+        return self
 
 
 class PredictionResult(BaseModel):
@@ -99,6 +160,7 @@ class PredictionResult(BaseModel):
     schema_version: Literal["3.0"]
     prediction_status: Literal["confirmed", "hypothesis", "insufficient"]
     horizons: list[PredictionHorizon] = Field(...)  # 多档位并存
+    omitted_horizons: list[OmittedHorizon] = Field(default_factory=list)  # 缺档留痕（spec §5.3）
     # 条件化预判（§3.1）；旧 2.0 记录为空
     conditions: list[PredictionCondition] = Field(default_factory=list)
     target: Target | None = None  # 关联统一 Target 维度（§3.3/全局 §2）；旧记录为 None
@@ -109,6 +171,25 @@ class PredictionResult(BaseModel):
     evidence_ids: list[str]  # 只引用溯源证据，禁止编造外部事实
     attribution_summary: str | None = None  # 一句话预测结论（随报告展示）
     evidence_corroboration: dict[str, object] | None = None  # A2 独立源冲突检测结果
+    # 依据增强留痕（spec §4.2，2026-09-17 P2'）：本次预判输入**实际注入**的事件 id /
+    # 检索 ref 列表（链上事件 + 中台匹配事件），供审计与后续效果归因。
+    # **由系统在产出后填充，非 LLM 产出**（两个 prompt 已登记"不得产出"）；纯留痕、
+    # 不改输出语义，故不升 schema_version（3.0）；无注入为空数组（不是 None）。
+    input_event_refs: list[str] = Field(default_factory=list)
+    # 弱依据留痕（2026-09-17 Task 9.1）：级联板块预判的板块提取走候选链
+    # （candidate_claim）/快照（snapshot）兜底时由**系统**点亮；主链（primary_claim）
+    # 路径恒 False + 空串。纯留痕、不改输出语义，故不升 schema_version（3.0）；
+    # LLM 不得产出（两个 prompt 已登记）——extra="forbid" 下多吐键会整条预判丢失。
+    attribution_weak: bool = False
+    extraction_source: str = ""
+
+    @model_validator(mode="after")
+    def _check_omitted_not_overlap(self) -> "PredictionResult":
+        produced = {h.horizon for h in self.horizons}
+        for o in self.omitted_horizons:
+            if o.horizon in produced:
+                raise ValueError(f"horizon {o.horizon} 同时出现在 horizons 与 omitted_horizons")
+        return self
 
     @model_validator(mode="after")
     def _require_horizons(self) -> "PredictionResult":

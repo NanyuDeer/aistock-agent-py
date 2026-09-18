@@ -344,9 +344,11 @@ async def _format_prediction_iteration(
             sd = sd if isinstance(sd, dict) else {}
             vtype = _variant_map(best).get("type", "")
             miss = _miss_brief(sd.get("miss_insights"))
+            # 键存在但值为 None（无 false entry 时条件维度不计分）→ 回落 '-'，避免渲染"条件 None"
+            cond_rate = sd.get("condition_met_rate")
             detail = (
                 f"，方向 {sd.get('direction_score', '-')}"
-                f"，条件 {sd.get('condition_met_rate', '-')}"
+                f"，条件 {cond_rate if cond_rate is not None else '-'}"
                 + (f"，失效 {miss}" if miss else "")
             )
             lines.append(

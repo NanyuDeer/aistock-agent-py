@@ -554,6 +554,24 @@ async def test_reclaim_dlq_discards_only_expired_dead_letters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reclaim_dlq_tolerates_bytes_message_ids() -> None:
+    """真实 redis-py 的 xrange 返回 bytes 消息 id（decode_responses=False），
+    DLQ 巡检不得抛 TypeError（回归：曾以 str.split 作用在 bytes 上崩溃，巡检持续失败）。"""
+    from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
+
+    client = FakeRedisForDlq()
+    old_ms = int((time.time() - 25 * 3600) * 1000)  # 25h 前入库，超过默认保留期 24h
+    client.dlq = [
+        (f"{old_ms}-0".encode(), {b"error_code": b"INVALID_JOB_MESSAGE"}),
+    ]
+    consumer = StockTraceConsumer(  # type: ignore[arg-type]
+        client, StockTraceNodeClient(FakeNodeClient()), CompletedWorker()
+    )
+    await consumer._reclaim_dlq(time.time())
+    assert client.dlq == []
+
+
+@pytest.mark.asyncio
 async def test_metrics_endpoint_returns_stock_trace_gauges() -> None:
     """/metrics 观测：stock_trace 计数器 + Redis 实时 gauge（连接失败降级为 0 不阻塞）。"""
     from aistock_agent.api.routes import get_stock_trace_observability

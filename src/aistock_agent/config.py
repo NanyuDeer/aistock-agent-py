@@ -234,23 +234,53 @@ class Settings(BaseSettings):
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
     scheduler_review_quick_cron: str = "30 15 * * 0-4"
-    # full review：20:30 Tushare 完整数据覆盖 quick
-    scheduler_review_full_cron: str = "30 20 * * 0-4"
+    # full review：18:30 收盘后完整数据覆盖 quick（2026-09-03 组长裁决 20:30→18:30）
+    scheduler_review_full_cron: str = "30 18 * * 0-4"
     scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
     # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
     scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
-    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 21:30 收盘后对 leaders
+    # ── 溯源弱反馈观测层（spec §13.3 / 计划 Phase 7 Task 7.1，P6'） ──
+    # **本期只有观测层**：聚合链上溯源信号 × 预判验证结果 → 建议（降权/提级/观望）→ 落审计表；
+    # 不修改溯源 prompt / 驱动类型判定 / 预判输入，也不真正应用权重（应用层待真实样本后立项）。
+    # mode: observe=只记录建议（默认）；off=运维开关（不读不写）；apply 未实现（配置为其他值
+    # 会告警回落 observe）。
+    attribution_feedback_mode: str = "observe"
+    # 观察窗口（交易日数）与最小样本守卫（样本不足 → 建议"样本不足-观望"）
+    attribution_feedback_window: int = 60
+    attribution_feedback_min_samples: int = 10
+    # 建议阈值：hit_rate < low → 建议降权；> high → 建议提级；其余观望（需 0<=low<high<=1）
+    attribution_feedback_low_threshold: float = 0.35
+    attribution_feedback_high_threshold: float = 0.65
+    # 聚合单元 key：relation(默认，链上驱动关系) / relation_sector / sector /
+    # driver_type / driver_type_sector（后两者需回读复盘报告取大盘 driver_type）
+    attribution_feedback_unit: str = "relation"
+    # 16:10（prediction_validate 16:00 + stats 16:05 之后）工作日执行，观测期持续采样
+    scheduler_attribution_feedback_cron: str = "10 16 * * 0-4"
+    # 条件成立判定·事件类 ② 层受限 LLM 开关（spec §12.4，Task 5.1，2026-09-17）：
+    # 默认 False——condition_met 是"只写 true 不可撤回"的写入，LLM 半确定性结论先不放开；
+    # 开启后仅事件类条件、输入限定"事件标题+进展摘要+条件文本"，每次判定留痕。
+    condition_met_event_llm_enabled: bool = False
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）已于 2026-09-13 彻底移除：
+    # scheduler_light_predict_midday_cron / scheduler_light_predict_close_cron 两个字段已删除
     # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
-    # 时刻选 21:30 的原因：review_full 20:30 会再触发主因板块级联预判落库，其后拉榜做
+    # 时刻选 19:30 的原因：review_full 18:30 会再触发主因板块级联预判落库，其后拉榜做
     # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
+    # （2026-09-03 组长裁决：review_full 20:30→18:30、板块批量 21:30→19:30，整体前移。）
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
-    scheduler_sector_wind_prediction_cron: str = "30 21 * * 0-4"
+    scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
     # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
-    scheduler_rhythm_after_close_cron: str = "5 16 * * 1-5"
+    # 收盘基准（周一至周五；APScheduler 0=周一，禁用 1-5）
+    scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
+    rhythm_mainline_enabled: bool = True
+    # 重大事件时间线（Event Entity）物化开关（spec §10.2）：app-api /internal/event-entities
+    # 端点落地前保持 False，避免每次抓取打不存在的端点（EVENT_ENTITY_ENABLED）
+    event_entity_enabled: bool = False
     # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
     scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
     scheduler_event_scrape_intraday_cron: str = (
@@ -271,6 +301,10 @@ class Settings(BaseSettings):
     gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
     gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
     gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（当日过期）
+    # ── GI 准入过滤（2026-09-02，盘面/行情类事件不进 GI 候选） ──
+    gi_admittance_enabled: bool = True               # GI 准入过滤总开关（只影响 GI，不涉事件传导）
+    gi_admittance_llm_enabled: bool = True           # GI 外部催化 LLM 开关（关=保守 KEEP）
+    gi_consistency_ratio: float = 1.5                # 主导方向阈值（bullish ≥ bearish × ratio）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
@@ -341,6 +375,9 @@ class Settings(BaseSettings):
     sentiment_ice_consecutive_days: int = 2
     # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
     sentiment_output_dir: str = "docs/agent-outputs/sentiment"
+
+    # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
+    rhythm_output_dir: str = "docs/agent-outputs/rhythm"
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）

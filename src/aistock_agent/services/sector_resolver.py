@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from functools import lru_cache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TAG_CODES_FILE = _DATA_DIR / "sector_tag_codes.json"
@@ -23,20 +26,29 @@ _ALIASES_FILE = _DATA_DIR / "sector_aliases.json"
 
 
 @lru_cache(maxsize=1)
-def _load_tag_codes() -> dict[str, str]:
-    """加载 {标准板块名: BK 代码} 映射；非法值过滤，不抛异常。"""
+def _load_tag_codes_cached() -> tuple[bool, dict[str, str]]:
+    """缓存只存「加载成功」；失败返回 (False, {})，由调用方负责 warning。"""
     try:
         with _TAG_CODES_FILE.open("r", encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
-        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("板块映射表缺失（sector_tag_codes.json）：%s", exc)
+        return False, {}
     if not isinstance(raw, dict):
-        return {}
-    return {
+        return False, {}
+    codes = {
         name: code
         for name, code in raw.items()
         if isinstance(name, str) and isinstance(code, str) and code
     }
+    return bool(codes), codes
+
+
+def _load_tag_codes() -> dict[str, str]:
+    ok, codes = _load_tag_codes_cached()
+    if not ok:
+        return {}
+    return codes
 
 
 @lru_cache(maxsize=1)
