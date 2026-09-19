@@ -1,7 +1,7 @@
 """stock_trace_lookup Skill — 自选股异动溯源（只读价格异动/涨停雷达归因结果）。
 
 阶段 2.2：对话内可查登录用户自选股的异动溯源（stock_trace 链路：午尾盘价格异动
-mv 事件 + 涨停雷达触发，五层候选归因 primary_cause）。
+mv 事件 + 涨停雷达触发，分层候选归因 primary_cause；capital 自 2026-09-18 起为条件准入层）。
 走 Node internal 只读端点（openid 过滤 user_stocks 归属），不触发任何写操作。
 入参 {symbol?: "6位代码"}，无 symbol 返回用户自选股全部异动溯源，有 symbol 只查单只。
 user_id（openid）由 qa_router postprocess 确定性注入（登录态）。
