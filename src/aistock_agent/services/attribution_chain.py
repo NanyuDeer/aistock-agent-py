@@ -120,9 +120,19 @@ def _first_event_headline(events: object) -> str:
 
 
 def _trace_summary_from_report(trace_result: dict[str, object]) -> str:
-    """`_trace_summary` 的报告侧取源（1→4 优先级），不含事件层裁决。"""
+    """`_trace_summary` 的报告侧取源（1→5 优先级），不含事件层裁决。
+
+    R25（2026-09-18）：`conclusion`（LLM 产出的一句话归因结论）**优先**——它才是
+    "该板块为什么动"的结论句。修复前本 schema 无 conclusion 字段，摘要只能落到
+    trigger 阶段 headline（原因的第 1 段），于是市场洞见链分支 / 板块预判页 / 板块详情页
+    三处折叠卡显示的都是「触发」而不是结论。
+    `summary` 保留为旧数据兼容层（历史报告可能写过顶层 summary），其后才是 trigger 兜底。
+    """
     if not isinstance(trace_result, dict):
         return _FALLBACK_TRACE_SUMMARY
+    conclusion = trace_result.get("conclusion")
+    if isinstance(conclusion, str) and conclusion.strip():
+        return conclusion.strip()
     summary = trace_result.get("summary")
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
@@ -151,10 +161,11 @@ def _trace_summary(trace_result: dict[str, object], *, events: object = ()) -> s
 
     取源优先级（**报告有内容就不得被兜底覆盖**）：
 
-    1. 报告顶层 `summary`（写入侧若提供非空字符串，直接采用）；
-    2. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
-    3. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
-    4. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
+    1. 报告 `conclusion`（**R25 新增：LLM 一句话归因结论**，非空即采用——折叠卡展示的就是它）；
+    2. 报告顶层 `summary`（旧数据兼容层，写入侧若提供非空字符串则采用）；
+    3. trigger 阶段 headline（事件主因句；**不看 `attribution_status`**）；
+    4. trigger 阶段首个非空 claim（报告无标题时的同源兜底）；
+    5. `_FALLBACK_TRACE_SUMMARY`（报告确实无内容时才出现的中性兜底）。
 
     为什么去掉"attribution_status == insufficient → 直接兜底"：生产实证
     （2026-09-17 玉米）同一板块在 `GET /api/agent/sector-insight/:date` 的

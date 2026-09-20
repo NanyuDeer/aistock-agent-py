@@ -2,6 +2,112 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+
+## \[changer\] 2026-09-20 — 主线候选清单增加维护机制（确定性去重 / 降级留痕拆分 / CI 守门）
+
+**开发者**: 37588
+
+### 修复
+
+- 候选清单此前无维护机制：板块代码或板名重复出现时被静默接受，胜出候选的**按名反查**可能落到另一只板块；同时「已入库但算不出超额」的候选（区间行数恰好等于入库下限 20 根）被静默丢弃，最终只报「无清晰主线」，把归因指向错误方向。现于加载阶段做**确定性去重**（代码与归一化板名双唯一，保留清单中首次出现者并留痕），并把「取数失败 / 序列不足 / **不可评分**」三类降级**分开记入**缺失清单，禁止互相掩盖。
+- 板块表重复代码此前按接口返回顺序**静默覆盖**（同一输入结果不可复现）；现改为确定性保留首次并留痕。
+
+### 改进
+
+- 新增候选清单 **CI 守门**：直接读取真实清单文件，逐条校验「候选名称与其板块代码反查到的真实板名一致」，并要求代码与板名各自唯一。此前这类校验只在生产现场生效，清单里别名写错/写空在 CI 全绿。
+
+### 测试
+
+- 新增 5 条候选清单用例（读真实清单 + 模拟板块表）；**修正 2 条与实现脱节的存量用例**（GI 准入改走确定性规则后「调用模型次数」应为 0；迭代适配注册表已含个股预判条目）。
+- **承接主分支**：手动触发节奏卡的端点新增可选参数后，3 条存量断言未同步（断言 2 个入参、实调 3 个，报 `expected await not found`）；已按当前契约对齐，并顺带修正该端点一处超长行，使分支恢复全绿。
+- 全量单元测试 **3295 passed / 1 skipped / 0 failed**；节奏相关集成 18 passed；lint 改动文件零新增（仅余 1 条既有超长行，非本批引入、已用基线核对）。
+
+### 硬约束（未触碰）
+
+- 主线判定层返回结构、阈值、状态值域、候选池优先级**全部未改动**；主线结论的对外可见形态（溯源行 / 仓位文案）未改动；**不新增对外字段**。
+
+## \[changer\] 2026-09-19 — 阶段兜底启用「前一交易日」修复热度轴整条消失（X2）
+
+**开发者**: 37588
+
+### 修复
+
+- 证据中性时 `detect_stage` 会走兜底「沿用前阶段」，但生产调用点固定传 `prev_phase=None`，使该兜底失效 → `stage=None` → `level`/`score`/`phase` 整条热度轴消失（2026-09-19 生产实测：`technical.index_breakdown=true` 而三键全 `null`，卡片只剩一句「空仓观望」）。现读「前一交易日 `after_close` 卡」的主阶段作为 `prev_phase` 传入，使兜底按原设计生效。
+- 降级留痕：仅当「本地无阶段可归」且「前卡也拿不到阶段」时写一条 `data_missing`；并按硬约束 12 把「取数失败」与「卡存在但阶段非法」分开措辞（避免把失败归因为数据问题，也避免每卡常驻噪音）。
+
+### 改进
+
+- 抽出纯函数 `_stage_from_report` 作为「从节奏卡响应提取主阶段」的**单一校验收口**（缺失/越界一律 `None`），既有同日沿用函数 `_inherit_basis_stage` 改为复用它，防止两处规则漂移。
+
+### 硬约束（未触碰）
+
+- 未改 `detect_stage` 判据、未改 `STAGE_TO_LEVEL`、未新增档位；`score`/`level` 仍由 `stage` 派生（09-18 硬约束 6）。
+
+## \[changer\] 2026-09-19 — 修复主线候选取数日期格式导致主线不可用（X1）
+
+**开发者**: 37588
+
+### 修复
+
+- 主线（板块）候选区间日 K 取数传入 ISO 连字符日期（`2026-05-11`），而 Node 侧 `/internal/ths/:code/daily` 硬校验 `^\d{8}$` → 请求**恒 400**；失败被 `get()` 归为 `None` 后又被 `or []` 静默吞掉，导致 5 个候选全部被误记为「序列不足」→ 主线恒不可用（`有效候选 0/3`），节奏卡仓位文案失去主线驱动。现于取数边界（`data_client.get_ths_daily_range`）统一归一为紧凑 `YYYYMMDD`。
+- 留痕归因纠偏：新增纯函数 `mainline_engine.build_mainline_notes`，把「取数失败（请求失败/异常 → None）」与「数据不足（`pct_chg` 行数 < `MA20_MIN_BARS`）」**分开留痕**。此前把 400 写成「序列不足 5」，把排查方向误导为数据问题。`fetch_failed == 0` 时文案与既有实现逐字一致（零回归）。
+
+### 新增
+
+- 主线留痕新增「主线候选取数失败（N 个）」标注；worker 区分 `None`（取数失败）与行数不足（数据不足）两条降级路径。
+- 单元用例：`build_mainline_notes` 的「legacy 文案零回归」「两类失败不混写」「候选充足不留痕」三条断言；`get_ths_daily_range` 的 ISO 归一 / 紧凑格式不变 / 失败返回 None 三条断言。
+
+## \[main\] 2026-09-19 — 条件点亮专项：新增「未点亮」归因码审计（方案 A，判定口径不变）
+
+**开发者**: Aria
+
+### 新增
+
+- `condition_met_judge.explain_unjudgeable_reason`：**纯诊断函数**（不参与判定、不产键），为"判不出（`None`）"的条件归因原因码——`event_channel` / `guard_domain`(G1) / `guard_dir_pct`(G3) / `guard_or`(G4) / `compound_other_unjudgeable` / `single_other_unjudgeable`；守卫口径与 `_judge_clause_state` **逐子句同序**。
+- `prediction_validator._scan_condition_met` 按记录聚合落 `prediction_condition_met_unlit_reasons`（`{id, checked, lit, reasons}`），用于回答"条件为什么不亮"。
+
+### 修复
+
+- 专项取证（三仓交叉）：`/internal/ths/:code/daily` 对 ISO 日期**恒 400** → **板块条件判定取数全空 → 一律 None**（该缺陷已由 app-api X1 修复并部署，实测 ISO 入参 200）；剩余原因 = **32/32 复合「且」条件** + **14/32 含已下线的板块资金流口径**，叠加 G2（复合不得半判）→ 整体 None。**四道护栏与全部判定行为一律未改**（只加观测，不加点亮）。
+
+### 测试
+
+- `tests/unit/test_condition_met_judge.py` +7 例、`tests/unit/test_prediction_validator.py` +1 例（先红后绿）；定向 193 passed；全量 `tests/unit` 3277 passed / 8 failed（8 条为文档化存量红，零新增）。
+
+### 后续任务
+
+- 为「板块主力资金 / 情绪家数 / 外盘走势」等**无数据源口径补数据源**（不采用"生成侧禁写"，避免阉割预判信息量）；事件类判径（状态锚 → 受限 LLM，默认关）已具备，**无需新建验证 agent**。
+
+---
+
+## \[main\] 2026-09-18 — 板块溯源新增「归因结论」`conclusion`（折叠卡不再显示「触发」）
+
+**开发者**: Aria
+
+### 新增
+
+- `schemas/sector_trace.py::SectorChainResult` 加性新增 `conclusion: str = ""`（不升 `schema_version`，缺省空串不编造）；因 `trace_result = model_dump(mode="json")`，新键自动流进 `display_report.sector_traces[板块名]` 与 `market_trace.trace`，中间层零改动。
+- `prompts/workers/sector_trace.py` 输出字段加 `conclusion`，并新增【conclusion 约束】镜像大盘【attribution_summary 约束】：仅 `attribution_status === "sufficient"` 时给一句 30-40 字综合该板块当日驱动原因的结论，其余输出空串；只讲原因本身，不混现象描述/涨跌幅数据/事件罗列，不用冒号或列表，语义须与 stages 一致。
+
+### 修复
+
+- 链 `children[].trace_summary` 取源改为 `conclusion` → 顶层 `summary`（旧数据兼容层）→ trigger headline → trigger claims → 中性兜底。根因：板块溯源 schema 此前无结论字段，`_trace_summary_from_report` 读 `trace_result.get("summary")` 永远读不到，摘要只能落 trigger 段 headline（原因第 1 段），导致市场洞见链分支 / 板块预判页 / 板块详情页三处折叠卡显示的都是「触发」。
+- 事件让位裁决（`_is_negative_summary` / `_NEGATIVE_SUMMARY_MARKERS`）逐字不变；老数据无 `conclusion` 自动回退旧口径（零变化）。
+
+### 测试
+
+- `tests/unit/test_attribution_chain.py` +4 例、`tests/unit/test_sector_trace_worker.py` +2 例（先红后绿）；定向 5 个 sector/chain spec 201 passed；全量 `tests/unit` 3263 passed / 8 failed（8 条均为文档化存量红，零新增）；`ruff` 改动文件通过；`mypy` 仅 1 条 HEAD 存量。
+
+---
+
+## \[changer\] 2026-09-18 — 节奏大师新增手动触发端点（补跑 / 补发）
+
+**开发者**: 37588
+
+### 新增
+
+- 新增 `POST /api/agent/briefing/rhythm-master/trigger`：管理员可手动触发节奏大师卡生成，无需等待三时点定时任务。入参 `refresh_slot`（缺省 after_close，仅接受三时点枚举）与 `report_date`（缺省上海当天，语义为**基准日**）；返回统一 `{"success", "data"}` 契约并回带 `target_date` / `basis_date` / `refresh_slot` / `synthesis_available` / `rhythm_card`，便于补跑后当场核验卡片内容。非法 slot 与 worker 无产出均返回结构化错误体，不抛 500。
+- 三时点分发函数支持显式传入基准日：定时任务路径仍用上海当天，手动补跑可指向最近一个有 K 线的交易日（否则 after_close 的"基准日无当日K线"门禁会使档位降级为空）。
 ## \[junliang] 2026-09-18 — 异动归因：资金维度降级为条件准入层 + 反证校验补齐
 
 **开发者**: Aria
@@ -27,6 +133,7 @@
 - `tests/unit/test_insight_report.py`：章节标题断言同步。
 
 ---
+
 
 ## \[changer\] 2026-09-18 — 节奏大师事件可见性与报告逻辑修复（事件维度可见 + 市场主线可信）
 

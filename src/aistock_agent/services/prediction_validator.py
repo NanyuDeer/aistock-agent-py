@@ -38,6 +38,7 @@ from aistock_agent.config import settings
 from aistock_agent.services.cache import set_cached_validation_profile
 from aistock_agent.services.condition_met_judge import (
     CONDITION_CLASS_EVENT,
+    explain_unjudgeable_reason,
     infer_condition_class,
     judge_condition_met_state,
 )
@@ -923,6 +924,10 @@ async def _scan_condition_met(
     verification = record.get("verification")
     ver_map = verification if isinstance(verification, dict) else {}
     out: dict[str, dict[str, object]] = {}
+    # 2026-09-19 审计（组长裁定方案 A 的观测项）：按记录聚合"未点亮"归因码，落一条日志，
+    # 用于回答"条件为什么不亮"（四道护栏 vs 数据缺失 vs 确定性不成立）。不改判定行为。
+    unlit_reasons: dict[str, int] = {}
+    checked = 0
     for i, cond in enumerate(conditions):
         key = f"c{i}"
         if not isinstance(cond, dict):
@@ -942,6 +947,7 @@ async def _scan_condition_met(
         if not due_date or due_date <= today:
             continue  # 已到期/无 due → 交 _verify_conditions 第②段
         # 判定与到期未成立态**共用**（Task 6.1）：本段只取 True 点亮，False/None 一律不产键。
+        checked += 1
         met = await _judge_condition_met_once(
             cond,
             target_type=target_type,
@@ -951,6 +957,17 @@ async def _scan_condition_met(
             event_cache=events,
         )
         if met is not True:
+            # 归因码（纯诊断）：False=确定性不成立；None=判不出 → 交 explain 函数细分类
+            reason = (
+                "deterministic_false"
+                if met is False
+                else explain_unjudgeable_reason(
+                    str(cond.get("condition") or ""),
+                    metric=str(anchor.get("metric") or "") or None,
+                    event_ref=str(anchor.get("event_ref") or "") or None,
+                )
+            )
+            unlit_reasons[reason] = unlit_reasons.get(reason, 0) + 1
             continue  # 不成立/无法判定 → 不产键（只写 true，D1）
         out[key] = {
             **base,
@@ -961,6 +978,14 @@ async def _scan_condition_met(
             "threshold": str(anchor.get("threshold") or ""),
             "condition_met": True,
         }
+    if checked:
+        logger.info(
+            "prediction_condition_met_unlit_reasons",
+            id=record.get("id"),
+            checked=checked,
+            lit=len(out),
+            reasons=unlit_reasons,
+        )
     return out
 
 

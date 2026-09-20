@@ -666,6 +666,46 @@ def judge_condition_met_state(
     )
 
 
+def explain_unjudgeable_reason(
+    condition_text: str,
+    *,
+    metric: str | None = None,
+    event_ref: str | None = None,
+) -> str:
+    """为**判不出（`None`）**的条件归因一个 reason 码 —— **纯诊断**，不参与判定、不产键。
+
+    背景（2026-09-19 组长裁定方案 A）：生产上条件"永不点亮"曾长期无解释。需要区分
+    「被四道保守化护栏拦住」与「数据缺失/未触发」，否则无法判断该补数据源还是该改护栏。
+    本函数与 `judge_condition_met_state` **共用同一批纯函数**（`has_or_connector` /
+    `_is_unjudgeable_domain` / `is_dir_verb_pct_ambiguous` / `split_condition_clauses`），
+    故口径一致；但**判定顺序需与之保持同步**（后者改顺序时同步此处）。
+    调用方只在 `judge_condition_met_state` 返回 `None` 时调用；`False`（确定性不成立）
+    由调用方自行归类为 `deterministic_false`，不走本函数。
+
+    返回码：
+    - `event_channel`：事件类（带非空 `event_ref`）——判径在状态锚 / 受限 LLM，本纯函数不介入；
+    - `guard_domain`：命中情绪/海外宏观/资金流口径且无对应 metric（G1，`_is_unjudgeable_domain`）；
+    - `guard_dir_pct`：方向动词 + 百分数且未明示技术位（G3）；
+    - `guard_or`：含「或」（G4，不做 or 运算，一律不判）；
+    - `compound_other_unjudgeable`：复合条件、无上述守卫命中，但仍判不出（子句数据/样本/绝对点位）；
+    - `single_other_unjudgeable`：单子句、无守卫命中仍判不出（无锚/数据缺失/参考位降级）。
+    """
+    text = condition_text or ""
+    if isinstance(event_ref, str) and event_ref.strip():
+        return "event_channel"
+    clauses = split_condition_clauses(text) or [text]
+    # 守卫与 `_judge_clause_state` **逐子句同序**（G1 → G3 → G4）：复合条件按子句查，
+    # 单子句即整段；取第一个命中的守卫作为主因（复合条件里"任一子句不可判"即整体不可判）。
+    for clause in clauses:
+        if _is_unjudgeable_domain(clause, metric):
+            return "guard_domain"
+        if is_dir_verb_pct_ambiguous(clause):
+            return "guard_dir_pct"
+        if has_or_connector(clause):
+            return "guard_or"
+    return "compound_other_unjudgeable" if len(clauses) >= 2 else "single_other_unjudgeable"
+
+
 def judge_condition_met(
     condition_text: str,
     *,

@@ -709,6 +709,121 @@ async def trigger_event_scrape(
         return {"success": False, "message": f"事件抓取失败: {str(exc)}"}
 
 
+@router.post("/briefing/rhythm-master/trigger")
+async def trigger_rhythm_master(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发节奏大师卡生成（补跑 / 补发，供管理员 curl 触发）。
+
+    body: {"refresh_slot": "after_close|morning|midday",  # 缺省 after_close
+           "report_date": "YYYY-MM-DD",                    # 缺省上海当天
+           "target_date": "YYYY-MM-DD"}                    # 可选，仅 after_close 补跑用
+
+    ``report_date`` 是**基准日**（basis 取数日），不是卡片描述的目标日：
+    after_close 的 target_date = 基准日的次一交易日；morning / midday = 基准日当天。
+    非交易日补跑必须显式传最近一个有 K 线的交易日，否则 after_close 的基准门禁会
+    降级为"基准日无当日K线"（卡上档位为空）。
+
+    ``target_date`` 可选，仅 after_close 手动补跑使用：显式指定落库目标日，
+    把基于 ``report_date`` 数据算出的卡落回该日键（例：重算 09-18 数据并让前端
+    09-18 页显示 → 传 report_date=2026-09-18, target_date=2026-09-18）；缺省
+    按 slot 推导（after_close=基准日次一交易日 / 其余=基准日当天）。
+
+    三时点按 (target_date, refresh_slot) 独立落盘，重跑同键为 upsert 覆盖。
+
+    返回契约（对齐既有 trigger 接口 success/message 风格）：
+    - 成功: {"success": True, "data": {target_date, basis_date, refresh_slot,
+             synthesis_available, rhythm_card}}
+    - 失败: {"success": False, "message": ...}
+      非法 refresh_slot 与 worker 无产出均走结构化错误体，不抛 500。
+    """
+    from aistock_agent.agents.workers.rhythm_master import REFRESH_SLOTS
+    from aistock_agent.services.scheduler import _dispatch_rhythm_master
+
+    logger = structlog.get_logger()
+    payload = body or {}
+    refresh_slot = str(payload.get("refresh_slot", "after_close"))
+    if refresh_slot not in REFRESH_SLOTS:
+        logger.warning(
+            "manual_trigger_rhythm_master_invalid_slot",
+            refresh_slot=refresh_slot,
+            valid_slots=list(REFRESH_SLOTS),
+        )
+        return {
+            "success": False,
+            "message": f"未知 refresh_slot: {refresh_slot!r}，合法值: {list(REFRESH_SLOTS)}",
+        }
+
+    report_date = _resolve_manual_report_date(payload)
+    # target_date（可选，仅 after_close 补跑用）：显式指定落库目标日，格式同 report_date。
+    target_date: str | None = None
+    raw_target = payload.get("target_date")
+    if raw_target:
+        try:
+            parsed_target = date.fromisoformat(raw_target)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="target_date 必须是有效的 YYYY-MM-DD"
+            ) from exc
+        if parsed_target.isoformat() != raw_target:
+            raise HTTPException(
+                status_code=422, detail="target_date 必须是有效的 YYYY-MM-DD"
+            )
+        target_date = raw_target
+    logger.info(
+        "manual_trigger_rhythm_master_start",
+        refresh_slot=refresh_slot,
+        report_date=report_date,
+        target_date=target_date,
+    )
+
+    try:
+        result = await _dispatch_rhythm_master(refresh_slot, report_date, target_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "manual_trigger_rhythm_master_failed",
+            refresh_slot=refresh_slot,
+            report_date=report_date,
+            target_date=target_date,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"success": False, "message": f"节奏大师生成失败: {str(exc)}"}
+
+    analysis_reports = result.get("analysis_reports", {})
+    content = (
+        analysis_reports.get("rhythm_master") if isinstance(analysis_reports, dict) else None
+    )
+    if not isinstance(content, dict):
+        logger.error(
+            "manual_trigger_rhythm_master_no_card",
+            refresh_slot=refresh_slot,
+            report_date=report_date,
+            final_response=result.get("final_response"),
+        )
+        return {
+            "success": False,
+            "message": str(result.get("final_response") or "节奏大师无产出"),
+        }
+
+    logger.info(
+        "manual_trigger_rhythm_master_done",
+        target_date=content.get("target_date"),
+        refresh_slot=content.get("refresh_slot"),
+    )
+    return {
+        "success": True,
+        "data": {
+            "target_date": content.get("target_date"),
+            "basis_date": content.get("basis_date"),
+            "refresh_slot": content.get("refresh_slot"),
+            "synthesis_available": content.get("synthesis_available"),
+            "rhythm_card": content.get("rhythm_card"),
+        },
+    }
+
+
 @router.get("/event/scrape-list")
 async def event_scrape_list(date: str) -> dict[str, object]:
     """按日期读取当日抓取事件列表（事件抓取中台查询接口）。

@@ -469,17 +469,34 @@ async def _run_rhythm_master_midday() -> None:
     await _dispatch_rhythm_master("midday")
 
 
-async def _dispatch_rhythm_master(slot: str) -> None:
+async def _dispatch_rhythm_master(
+    slot: str, report_date: str | None = None, target_date: str | None = None
+) -> dict[str, object]:
+    """生成节奏大师卡并返回 worker 的 run() 结果（手动触发端点透传用）。
+
+    ``report_date`` 是基准日（basis 取数日），非目标日：定时任务路径缺省用上海
+    当天；手动补跑可显式传入——非交易日补跑必须指向最近一个有 K 线的交易日，
+    否则 after_close 的基准门禁会降级为"基准日无当日K线"（卡上档位为空）。
+
+    ``target_date`` 是落库目标日（可选，仅手动补跑 after_close 用）：缺省由
+    slot 推导（after_close=次一交易日 / 其余=基准日当天）；显式传入则卡落在该日
+    键，供"基于某日数据重算该日节奏"场景（见 routes.trigger_rhythm_master）。
+    """
     from aistock_agent.agents.workers.rhythm_master import run as run_rhythm_master
 
-    state = _make_scheduled_state(shanghai_today().isoformat(), intent="rhythm_master")
+    state = _make_scheduled_state(
+        report_date or shanghai_today().isoformat(), intent="rhythm_master"
+    )
     # session_id 带 slot 后缀：三时点会话 trace 隔离（_make_scheduled_state 固定生成）
     state["session_id"] = f"{state['session_id']}_{slot}"
     state["refresh_slot"] = slot
+    if target_date:
+        state["target_date"] = target_date
     try:
-        await run_rhythm_master(state)
+        return await run_rhythm_master(state)
     except Exception:
         logger.warning("rhythm_master.task_failed", slot=slot, exc_info=True)
+        return {}
 
 
 async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:

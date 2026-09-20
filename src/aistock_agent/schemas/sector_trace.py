@@ -27,6 +27,11 @@ class SectorChainResult(BaseModel):
     stages: list[SectorStage]
     attribution_status: Literal["sufficient", "insufficient"] = "insufficient"
     missing_evidence: list[str] = Field(default_factory=list)
+    # R25（2026-09-18）加性字段：给用户看的**一句话归因结论**（回答"今天为什么动"），
+    # 与大盘溯源的 attribution_summary 同款。此前本 schema 无结论字段 →
+    # 链/接口侧的"摘要"只能落 trigger headline（= 原因第 1 段），三处折叠卡因此显示"触发"。
+    # 缺省空串：老数据/未产出/insufficient 一律为空（不编造结论）。
+    conclusion: str = ""
 
 
 def validate_sector_chain(result: SectorChainResult, *, captured_at: str) -> None:

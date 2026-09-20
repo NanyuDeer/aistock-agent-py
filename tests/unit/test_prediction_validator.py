@@ -1317,6 +1317,25 @@ async def test_scan_condition_met_no_entry_when_not_met() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_condition_met_logs_unlit_reasons(capsys) -> None:
+    """2026-09-19 方案 A 观测项：未点亮的条件按原因码聚合落一条审计日志（不改判定行为）。"""
+    record = _pending_condition_record(
+        due="2026-09-30", direction="bullish", condition="板块主力资金延续净流入")
+    rows = _scan_rows([130.0 - i for i in range(25)])
+    with (
+        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
+        patch("aistock_agent.services.prediction_validator.shanghai_today",
+              return_value=date(2026, 9, 16)),
+    ):
+        out = await pv._scan_condition_met(record)
+
+    assert out == {}  # 不可判 → 不产键（行为不变）
+    captured = capsys.readouterr().out
+    assert "prediction_condition_met_unlit_reasons" in captured
+    assert "guard_domain" in captured  # 资金流口径命中 G1
+
+
+@pytest.mark.asyncio
 async def test_scan_condition_met_skips_when_already_true() -> None:
     """T4 幂等：已有 condition_met=true → 跳过（不重复点亮，且不拉行情）。"""
     record = _pending_condition_record(

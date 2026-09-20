@@ -22,6 +22,8 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
+    RET_WINDOW,
+    build_mainline_notes,
     candidate_name_matches,
     detect_breakdown,
     judge_mainline,
@@ -31,7 +33,12 @@ from aistock_agent.services.mainline_engine import (
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.services.trend_reversal import detect_trend_reversal
-from aistock_agent.utils.date import add_trading_days, shanghai_today, trading_days_between
+from aistock_agent.utils.date import (
+    add_trading_days,
+    prev_trading_day,
+    shanghai_today,
+    trading_days_between,
+)
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
@@ -74,6 +81,29 @@ def _event_confirm(events: list[dict[str, Any]]) -> bool:
     )
 
 
+def _stage_from_report(report: object) -> Stage | None:
+    """从节奏卡响应提取主阶段（缺失/越界一律 None）。
+
+    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，业务对象把 `content`
+    放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+
+    越界 stage 必须在此拦截：该值会流入 `RhythmEvidence.stage`（`Stage | None` 的
+    Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新。
+    """
+    if not isinstance(report, dict):
+        return None
+    content = report.get("content")
+    if not isinstance(content, dict):
+        return None
+    evidence = content.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    stage = evidence.get("stage")
+    if not isinstance(stage, str) or not stage or stage not in get_args(Stage):
+        return None
+    return cast("Stage", stage)
+
+
 def _inherit_basis_stage(
     slot: str, basis_response: object
 ) -> tuple[str | None, str] | None:
@@ -83,8 +113,8 @@ def _inherit_basis_stage(
     stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
     G2：消灭「同日日历格 ice / 详情页 low」的自相矛盾。
 
-    真实契约：`NodeApiClient._request` 已解包 `code==200` 信封，`get_rhythm_report`
-    返回的业务对象把 `content` 放在顶层（对齐 rhythm_verification.py 的 `resp.get("content")`）。
+    与 `_stage_from_report` 的分工：本函数负责「同日基准」的语义与文案，阶段校验
+    统一委托给 `_stage_from_report`（单一收口，防两处规则漂移）。
     """
     if slot not in {"morning", "midday"}:
         return None
@@ -96,12 +126,8 @@ def _inherit_basis_stage(
     evidence = content.get("evidence")
     if not isinstance(evidence, dict):
         return None
-    stage = evidence.get("stage")
-    if not isinstance(stage, str) or not stage:
-        return None
-    # 越界 stage 必须在此拦截：该值会流入 RhythmEvidence.stage（Stage|None 的
-    # Literal），一旦是 Node 侧回读的野值，将在构造时抛 ValidationError 打断整轮刷新
-    if stage not in get_args(Stage):
+    stage = _stage_from_report(basis_response)
+    if stage is None:
         return None
     basis_date = content.get("basis_date")
     reason = str(evidence.get("stage_reason") or "")
@@ -182,22 +208,25 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 
 
 async def _compose_card(
-    run_date: str, slot: str
+    run_date: str, slot: str, target_date: str | None = None
 ) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
     """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
 
     `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
     对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
+    显式传入 `target_date` 时覆盖推导（手动补跑 after_close 用：把基于历史某日
+    数据算出的卡落回该日键，见 routes.trigger_rhythm_master）。
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
     win 为当前窗口 EventWindow（事件分支/锚点来源）。
     """
-    target_date = (
+    target_date = target_date or (
         add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
         if slot == "after_close"
         else run_date
     )
     basis_inherit_note: str | None = None
+    stage_inherit_note: str | None = None
     run_ymd = date_cls.fromisoformat(run_date).strftime("%Y%m%d")
     kline = (
         await node_api.get_index_kline(INDEX_CODE, days=KLINE_LOOKBACK, end_date=run_ymd) or []
@@ -249,9 +278,20 @@ async def _compose_card(
         else:
             index_resp = await node_api.get_ths_index_map()
             index_map = index_resp if isinstance(index_resp, list) else []
-            idx_by_code = {
-                str(i.get("ts_code")): str(i.get("name") or "") for i in index_map
-            }
+            # 板块表同码重复 → 保留首次（确定性：以接口声明序为准），并留痕。
+            # 原先的字典推导是静默 last-wins（结果随接口返回序漂移，不可复现）。
+            idx_by_code: dict[str, str] = {}
+            dup_index_codes = 0
+            for i in index_map:
+                code_i = str(i.get("ts_code"))
+                if code_i in idx_by_code:
+                    dup_index_codes += 1
+                    continue
+                idx_by_code[code_i] = str(i.get("name") or "")
+            if dup_index_codes:
+                mainline_notes.append(
+                    f"板块表存在重复代码（{dup_index_codes} 个，已按声明序保留首次）"
+                )
             start = (
                 date_cls.fromisoformat(evidence_date)
                 - timedelta(days=SECTOR_LOOKBACK_NATURAL_DAYS)
@@ -260,6 +300,7 @@ async def _compose_card(
             code_skipped = 0
             name_skipped = 0
             thin_skipped = 0
+            fetch_failed = 0
             for c in cands:
                 code = str(c.get("tag_code") or "")
                 if code not in idx_by_code:
@@ -268,7 +309,10 @@ async def _compose_card(
                 if not candidate_name_matches(c, idx_by_code[code]):
                     name_skipped += 1
                     continue  # §5.10.3 名称不一致 → 剔除（防"代码存在但语义错"）
-                rows_b = await node_api.get_ths_daily_range(code, start, evidence_date) or []
+                rows_b = await node_api.get_ths_daily_range(code, start, evidence_date)
+                if rows_b is None:
+                    fetch_failed += 1
+                    continue  # 降级 5：取数失败（≠ 数据不足，硬约束 12 禁混写归因）
                 pk = [p for p in rows_b if p.get("pct_chg") is not None]
                 if len(pk) < MA20_MIN_BARS:
                     thin_skipped += 1
@@ -279,14 +323,25 @@ async def _compose_card(
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
-            if name_skipped:
-                mainline_notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
-            if len(valid) < MIN_CANDIDATES:
-                mainline_notes.append(
-                    f"主线候选不可用（有效候选 {len(valid)}/{MIN_CANDIDATES}；"
-                    f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}）"
+            # 已过入库门槛但算不出超额的候选（len(pct_chgs) <= RET_WINDOW）：单独计数，
+            # 避免被判定层的"候选齐备但无清晰主线"掩盖真实根因（硬约束 12 同族）。
+            unscorable = sum(
+                1
+                for c in valid
+                if len(cast(list[float], c["pct_chgs"])) <= RET_WINDOW
+            )
+            mainline_notes.extend(
+                build_mainline_notes(
+                    valid_count=len(valid),
+                    min_candidates=MIN_CANDIDATES,
+                    code_skipped=code_skipped,
+                    name_skipped=name_skipped,
+                    thin_skipped=thin_skipped,
+                    fetch_failed=fetch_failed,
+                    unscorable=unscorable,
                 )
-            else:
+            )
+            if len(valid) >= MIN_CANDIDATES:
                 index_pct_chgs = [
                     float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
                 ]
@@ -339,12 +394,33 @@ async def _compose_card(
         stage = None
         stage_reason = "基准日无当日K线，趋势/量能判定不适用"
     else:
+        # X2（spec §5.12.2 / R11）：证据中性时 detect_stage 会走兜底「沿用前阶段」，但生产调用点
+        # 固定传 prev_phase=None 使该兜底失效 → stage=None → level/score/phase 整条热度轴消失
+        # （2026-09-19 生产实测：index_breakdown=true 而三键全 null）。改为读「前一交易日
+        # after_close 卡」的主阶段传入；不改任何判据。
+        # 作用域收口（controller 裁决）：仅 after_close 查询——morning/midday 已有同日 after_close
+        # 沿用（下方 P0-2/G2 块），此处再查前一交易日会多一次取数并破坏既有 await 次数断言。
+        prev_resp: object = None
+        prev_stage: Stage | None = None
+        if slot == "after_close":
+            prev_date = prev_trading_day(date_cls.fromisoformat(run_date)).isoformat()
+            prev_resp = await node_api.get_rhythm_report(prev_date, "after_close")
+            prev_stage = _stage_from_report(prev_resp)
         stage, stage_reason = ev.detect_stage(
             breadth=breadth, closes=closes, amounts=amounts,
             sentiment_scores=sentiment_scores,
             fg=fg if isinstance(fg, int | float) else None,
-            prev_phase=None,
+            prev_phase=prev_stage,
         )
+        # 降级留痕：仅当 after_close 且「本地无阶段可归」且「前卡也拿不到阶段」时才提示——避免每卡
+        # 常驻噪音（对齐 2026-09-14 裁决：已知空置字段不写入 data_missing）。两类根因分开措辞
+        # （硬约束 12）：取数失败 ≠ 卡存在但阶段非法。
+        if slot == "after_close" and stage is None and prev_stage is None:
+            stage_inherit_note = (
+                "前一交易日基准卡读取失败（主阶段未沿用）"
+                if prev_resp is None
+                else "前一交易日基准卡无有效主阶段（主阶段未沿用）"
+            )
     # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
     if slot in {"morning", "midday"} and stage is not None:
         basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
@@ -371,6 +447,8 @@ async def _compose_card(
         missing.append("宽度快照缺失（证据日无收盘快照）")
     if basis_inherit_note:
         missing.append(basis_inherit_note)
+    if stage_inherit_note:
+        missing.append(stage_inherit_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
@@ -562,7 +640,10 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         if slot not in REFRESH_SLOTS:
             slot = "after_close"
         basis = str(state.get("report_date") or shanghai_today().isoformat())
-        card, rows, win = await _compose_card(basis, slot)
+        target_override = state.get("target_date")
+        if not (isinstance(target_override, str) and target_override):
+            target_override = None
+        card, rows, win = await _compose_card(basis, slot, target_override)
         if not card.synthesis_available:
             logger.warning(
                 "rhythm_master.degraded reason=%s slot=%s target_date=%s",

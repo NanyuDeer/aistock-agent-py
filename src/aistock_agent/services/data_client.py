@@ -694,7 +694,12 @@ class NodeApiClient:
         返回升序 [{trade_date, pct_chg, close, vol, amount}]（T9 `edb9941` 起透传
         close/vol 供 condition_met 技术位判定；amount 上游 ths_daily 无此字段 → 恒 null，
         缺失为 null 不丢行）。失败/异常返回 None。"""
-        result = await self.get(f"/internal/ths/{code}/daily?start={start}&end={end}")
+        result = await self.get(
+            # 路由 /internal/ths/:code/daily 硬校验 ^\d{8}$（X1：传 ISO 连字符恒 400，
+            # 失败又被 get() 归为 None → 候选取数被误记为"序列不足"）。故在此收口归一。
+            f"/internal/ths/{code}/daily"
+            f"?start={start.replace('-', '')}&end={end.replace('-', '')}"
+        )
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
             return result["rows"]
         return None
