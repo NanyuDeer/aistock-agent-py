@@ -32,16 +32,24 @@ def test_candidate_name_matches_by_name_or_alias() -> None:
 
 
 def test_candidates_tag_codes_are_replaced_with_verified_values() -> None:
-    """§5.10.2：实测有效代码；占位/错误代码不得回归。"""
+    """§5.10.2：既有 5 条实测映射不得改写；占位/错误代码不得回归。
+
+    C1 起候选池允许【加性新增】（从 5 → 35），故不再断言全表精确相等，
+    改为逐一断言既有 5 条映射不变 + 占位码禁令延续（不写死新增候选数量）。
+    """
     data = json.loads(CANDIDATES.read_text(encoding="utf-8"))
     got = {c["name"]: c["tag_code"] for c in data["candidates"]}
-    assert got == {
+    legacy = {
         "AI 算力": "886050.TI",
         "AI 应用": "886108.TI",
         "半导体": "881121.TI",
         "低空经济": "886067.TI",
         "创新药": "886015.TI",
     }
+    for name, code in legacy.items():
+        assert got.get(name) == code, (
+            f"既有候选「{name}」tag_code 被改写：{got.get(name)} != {code}"
+        )
     for bad in ("885896.TI", "885913.TI", "885851.TI", "885938.TI", "884110.TI"):
         assert bad not in got.values()
 
@@ -87,13 +95,47 @@ def test_build_mainline_notes_silent_when_enough_candidates() -> None:
 
 # 实测板名（2026-09-20 只读调 Tushare ths_index 反查，ts_code → name）：
 # 886050→算力租赁(N) / 886108→AI应用(N) / 881121→半导体(I) / 886067→低空经济(N) / 886015→创新药(N)
+# C1 扩容至 35：既有 5 条为实测真板名；新增 30 条真板名 == 候选 name（照 §1 表格）。
 VERIFIED_BOARD_NAMES = {
     "886050.TI": "算力租赁",
     "886108.TI": "AI应用",
     "881121.TI": "半导体",
     "886067.TI": "低空经济",
     "886015.TI": "创新药",
+    "886033.TI": "共封装光学(CPO)",
+    "885959.TI": "PCB概念",
+    "886044.TI": "液冷服务器",
+    "886042.TI": "存储芯片",
+    "885908.TI": "第三代半导体",
+    "886009.TI": "先进封装",
+    "885957.TI": "东数西算(算力)",
+    "885887.TI": "数据中心(AIDC)",
+    "886019.TI": "AIGC概念",
+    "886099.TI": "AI智能体",
+    "886062.TI": "多模态AI",
+    "884091.TI": "半导体材料",
+    "884229.TI": "半导体设备",
+    "884287.TI": "数字芯片设计",
+    "885893.TI": "国家大基金持股",
+    "885864.TI": "光刻胶",
+    "886054.TI": "光刻机",
+    "881172.TI": "电子化学品",
+    "886041.TI": "数据要素",
+    "885362.TI": "云计算",
+    "881164.TI": "文化传媒",
+    "884093.TI": "被动元件",
+    "885937.TI": "培育钻石",
+    "886048.TI": "英伟达概念",
+    "885881.TI": "云办公",
+    "886084.TI": "光纤概念",
+    "884092.TI": "印制电路板",
+    "884090.TI": "分立器件",
+    "881130.TI": "计算机设备",
+    "884262.TI": "通信网络设备及器件",
 }
+
+# 主线三分类枚举（C1 守门：mainline 缺省/空 或 必须 ∈ 此枚举）
+MAINLINE_ENUM = {"AI硬件", "AI软件", "半导体"}
 
 
 def test_candidates_pass_name_gate_against_verified_boards() -> None:
@@ -109,13 +151,33 @@ def test_candidates_pass_name_gate_against_verified_boards() -> None:
         )
 
 
+def test_candidates_mainline_in_enum_or_absent() -> None:
+    """C1 守门（读真 JSON）：`mainline` 缺省/空 或 ∈ {AI硬件,AI软件,半导体}。"""
+    data = json.loads(CANDIDATES.read_text(encoding="utf-8"))
+    for c in data["candidates"]:
+        ml = c.get("mainline")
+        if ml is None or ml == "":
+            continue
+        assert ml in MAINLINE_ENUM, (
+            f"候选「{c['name']}」mainline 非法值：{ml!r}"
+        )
+
+
 def test_candidates_unique_by_tag_code_and_normalized_name() -> None:
-    """确定性唯一性：tag_code 与归一化 name 均须唯一（winner 反查依赖 name 无歧义）。"""
+    """确定性唯一性：tag_code、归一化 name 均唯一，且 name∪aliases 跨候选无碰撞。"""
     data = json.loads(CANDIDATES.read_text(encoding="utf-8"))
     codes = [str(c["tag_code"]) for c in data["candidates"]]
     names = [normalize_board_name(str(c["name"])) for c in data["candidates"]]
     assert len(codes) == len(set(codes)), f"tag_code 重复：{codes}"
     assert len(names) == len(set(names)), f"板名归一化重复：{names}"
+    # C1 扩展：任一候选的 alias 不得与任何候选的 name/alias 归一化相等
+    # （归一化到同一板名会导致实盘命中歧义，无法确定该归属哪条候选）
+    pool_terms: list[str] = []
+    for c in data["candidates"]:
+        terms = [str(c["name"])] + [str(a) for a in (c.get("aliases") or [])]
+        pool_terms += [normalize_board_name(t) for t in terms]
+    dupes = sorted({t for t in pool_terms if pool_terms.count(t) > 1})
+    assert not dupes, f"name∪aliases 归一化碰撞：{dupes}"
 
 
 def test_loader_drops_duplicates_keeping_first(
