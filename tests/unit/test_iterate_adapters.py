@@ -13,14 +13,17 @@ from aistock_agent.iterate.adapters import (
 def test_registry_contains_review_and_event_analyst_and_prediction() -> None:
     # Spec C §4.1：预判接入迭代注册表（验证驱动，非归因监督式）
     # Spec D（D6）：板块溯源/预判两条链路浅挂载（attribution/verification 评分器分离）
+    # Spec D 同构：个股预判 stock_prediction 并入验证驱动迭代环（与 sector_prediction 同为
+    # verification 评分器，入口 predict_stock，回放由 case.meta 重建）
     assert set(iterable_agent_ids()) == {
         "review",
         "event_analyst",
         "prediction",
         "sector_trace",
         "sector_prediction",
+        "stock_prediction",
     }
-    assert len(ITERABLE_AGENTS) == 5
+    assert len(ITERABLE_AGENTS) == 6
 
 
 def test_review_adapter_fields() -> None:

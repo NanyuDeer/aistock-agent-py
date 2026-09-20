@@ -85,7 +85,14 @@ def test_has_market_signal():
 
 @pytest.mark.asyncio
 async def test_drop_pure_market_review_events():
-    """纯收评/快评/行情回顾，无外部催化 → 全部 DROP。"""
+    """纯收评/快评/行情回顾，无外部催化 → 全部 DROP（**确定性规则**，零 LLM 成本）。
+
+    这些事件命中分层规则的规则 2「面板类栏目（收评/午评/快评/涨停分析）且 mechanism 无政策
+    锚点」→ 在规则层**确定性 DROP**，不会进入规则 5 的 LLM 兜底 → `llm_checked` 恒为 0。
+    这正是 `gi_admittance.py` docstring「2026-09-02 生产验证后改为确定性规则优先」的预期行为
+    （原因：quick_think 对外部催化判定不可靠，且确定性规则零 token）。
+    LLM 兜底路径（规则 5）由 `test_drop_background_or_irrelevant_catalyst` 覆盖。
+    """
     events = [
         make_event(
             "e1",
@@ -118,7 +125,7 @@ async def test_drop_pure_market_review_events():
         kept, stats = await filter_gi_eligible_events(events)
     assert kept == []
     assert stats["dropped"] == 5
-    assert stats["llm_checked"] == 5
+    assert stats["llm_checked"] == 0
 
 
 # ── KEEP：板块异动 + 明确外部催化 ──
