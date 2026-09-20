@@ -9,10 +9,10 @@ from aistock_agent.services.mainline_engine import (
     normalize_board_name,
 )
 
-CANDIDATES = (
-    Path(__file__).resolve().parents[2]
-    / "src" / "aistock_agent" / "data" / "mainline_candidates.json"
-)
+# 守门对象 = 活动配置（v35 灰度档）；v5 基线（mainline_candidates.json）另作回滚守卫。
+_DATA_DIR = Path(__file__).resolve().parents[2] / "src" / "aistock_agent" / "data"
+CANDIDATES = _DATA_DIR / "mainline_candidates.v35.json"
+BASELINE = _DATA_DIR / "mainline_candidates.json"
 
 
 def test_normalize_board_name_strips_noise() -> None:
@@ -178,6 +178,61 @@ def test_candidates_unique_by_tag_code_and_normalized_name() -> None:
         pool_terms += [normalize_board_name(t) for t in terms]
     dupes = sorted({t for t in pool_terms if pool_terms.count(t) > 1})
     assert not dupes, f"name∪aliases 归一化碰撞：{dupes}"
+
+
+def test_candidates_v35_is_active_config() -> None:
+    """C5 守门：v35 为活动配置（35 条、tag_code 唯一、含 mainline 字段）。
+    防 v35 与 v5 基线（仅 5 条、无 mainline）搞混——默认 loader 读 v5，切换 env 才读 v35。
+    """
+    data = json.loads(CANDIDATES.read_text(encoding="utf-8"))
+    cands = data["candidates"]
+    assert len(cands) == 35
+    codes = [str(c["tag_code"]) for c in cands]
+    assert len(codes) == len(set(codes)), f"v35 tag_code 重复：{codes}"
+    assert any(c.get("mainline") for c in cands), "v35 应含 mainline 字段（与 v5 基线区分）"
+
+
+def test_baseline_v5_kept_for_rollback() -> None:
+    """C5 灰度守卫：mainline_candidates.json（v5 冻结基线）仍为原始 5 条映射，
+    保证运维通过恢复 env（切回基线）即可回滚。基线含 priority 属历史快照，不看 mainline。
+    """
+    data = json.loads(BASELINE.read_text(encoding="utf-8"))
+    got = {c["name"]: c["tag_code"] for c in data["candidates"]}
+    assert got == {
+        "AI 算力": "886050.TI",
+        "AI 应用": "886108.TI",
+        "半导体": "881121.TI",
+        "低空经济": "886067.TI",
+        "创新药": "886015.TI",
+    }
+
+
+def test_loader_honors_env_path_override_and_restores_default(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """C5 灰度切换：env MAINLINE_CANDIDATES_PATH 指向 → loader 读该配置；收尾恢复默认。
+
+    必须真实 reload 模块（env 在 import 时读一次），不能用内联 sys.path hack；try/finally
+    保证不污染后续测试（恢复到 DEFAULT_CANDIDATES_PATH）。
+    """
+    import importlib
+
+    engine = importlib.import_module("aistock_agent.services.mainline_engine")
+    tmp_cfg = tmp_path / "cand.json"
+    tmp_cfg.write_text(json.dumps({"candidates": [
+        {"name": "A", "group": "ai_tech", "tag_code": "111111.TI", "aliases": []},
+        {"name": "B", "group": "default", "tag_code": "222222.TI", "aliases": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    try:
+        monkeypatch.setenv("MAINLINE_CANDIDATES_PATH", str(tmp_cfg))
+        importlib.reload(engine)
+        assert str(engine.CANDIDATES_PATH) == str(tmp_cfg)
+        ok, cands = engine.load_mainline_candidates()
+        assert ok is True and [c["name"] for c in cands] == ["A", "B"]
+    finally:
+        monkeypatch.delenv("MAINLINE_CANDIDATES_PATH", raising=False)
+        importlib.reload(engine)
+        assert str(engine.CANDIDATES_PATH) == str(engine.DEFAULT_CANDIDATES_PATH)
 
 
 def test_loader_drops_duplicates_keeping_first(

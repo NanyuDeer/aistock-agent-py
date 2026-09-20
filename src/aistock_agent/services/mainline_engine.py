@@ -6,15 +6,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
-CANDIDATES_PATH = project_root() / "src" / "aistock_agent" / "data" / "mainline_candidates.json"
+DEFAULT_CANDIDATES_PATH = (
+    project_root() / "src" / "aistock_agent" / "data" / "mainline_candidates.json"
+)
+CANDIDATES_PATH = Path(
+    os.environ.get("MAINLINE_CANDIDATES_PATH", str(DEFAULT_CANDIDATES_PATH))
+)
 
 # ---- 阈值表（spec T1 / T2，本文件为唯一权威）----
 RET_WINDOW = 20            # 累计涨幅窗口（交易日）
