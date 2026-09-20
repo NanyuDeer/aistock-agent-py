@@ -22,6 +22,7 @@ from aistock_agent.services.event_calendar import EventWindow, load_event_window
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
+    RET_WINDOW,
     build_mainline_notes,
     candidate_name_matches,
     detect_breakdown,
@@ -275,9 +276,20 @@ async def _compose_card(
         else:
             index_resp = await node_api.get_ths_index_map()
             index_map = index_resp if isinstance(index_resp, list) else []
-            idx_by_code = {
-                str(i.get("ts_code")): str(i.get("name") or "") for i in index_map
-            }
+            # 板块表同码重复 → 保留首次（确定性：以接口声明序为准），并留痕。
+            # 原先的字典推导是静默 last-wins（结果随接口返回序漂移，不可复现）。
+            idx_by_code: dict[str, str] = {}
+            dup_index_codes = 0
+            for i in index_map:
+                code_i = str(i.get("ts_code"))
+                if code_i in idx_by_code:
+                    dup_index_codes += 1
+                    continue
+                idx_by_code[code_i] = str(i.get("name") or "")
+            if dup_index_codes:
+                mainline_notes.append(
+                    f"板块表存在重复代码（{dup_index_codes} 个，已按声明序保留首次）"
+                )
             start = (
                 date_cls.fromisoformat(evidence_date)
                 - timedelta(days=SECTOR_LOOKBACK_NATURAL_DAYS)
@@ -309,6 +321,13 @@ async def _compose_card(
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
+            # 已过入库门槛但算不出超额的候选（len(pct_chgs) <= RET_WINDOW）：单独计数，
+            # 避免被判定层的"候选齐备但无清晰主线"掩盖真实根因（硬约束 12 同族）。
+            unscorable = sum(
+                1
+                for c in valid
+                if len(cast(list[float], c["pct_chgs"])) <= RET_WINDOW
+            )
             mainline_notes.extend(
                 build_mainline_notes(
                     valid_count=len(valid),
@@ -317,6 +336,7 @@ async def _compose_card(
                     name_skipped=name_skipped,
                     thin_skipped=thin_skipped,
                     fetch_failed=fetch_failed,
+                    unscorable=unscorable,
                 )
             )
             if len(valid) >= MIN_CANDIDATES:
