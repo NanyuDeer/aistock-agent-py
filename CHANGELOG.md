@@ -55,6 +55,29 @@
 - 主线留痕新增「主线候选取数失败（N 个）」标注；worker 区分 `None`（取数失败）与行数不足（数据不足）两条降级路径。
 - 单元用例：`build_mainline_notes` 的「legacy 文案零回归」「两类失败不混写」「候选充足不留痕」三条断言；`get_ths_daily_range` 的 ISO 归一 / 紧凑格式不变 / 失败返回 None 三条断言。
 
+## \[main\] 2026-09-19 — 条件点亮专项：新增「未点亮」归因码审计（方案 A，判定口径不变）
+
+**开发者**: Aria
+
+### 新增
+
+- `condition_met_judge.explain_unjudgeable_reason`：**纯诊断函数**（不参与判定、不产键），为"判不出（`None`）"的条件归因原因码——`event_channel` / `guard_domain`(G1) / `guard_dir_pct`(G3) / `guard_or`(G4) / `compound_other_unjudgeable` / `single_other_unjudgeable`；守卫口径与 `_judge_clause_state` **逐子句同序**。
+- `prediction_validator._scan_condition_met` 按记录聚合落 `prediction_condition_met_unlit_reasons`（`{id, checked, lit, reasons}`），用于回答"条件为什么不亮"。
+
+### 修复
+
+- 专项取证（三仓交叉）：`/internal/ths/:code/daily` 对 ISO 日期**恒 400** → **板块条件判定取数全空 → 一律 None**（该缺陷已由 app-api X1 修复并部署，实测 ISO 入参 200）；剩余原因 = **32/32 复合「且」条件** + **14/32 含已下线的板块资金流口径**，叠加 G2（复合不得半判）→ 整体 None。**四道护栏与全部判定行为一律未改**（只加观测，不加点亮）。
+
+### 测试
+
+- `tests/unit/test_condition_met_judge.py` +7 例、`tests/unit/test_prediction_validator.py` +1 例（先红后绿）；定向 193 passed；全量 `tests/unit` 3277 passed / 8 failed（8 条为文档化存量红，零新增）。
+
+### 后续任务
+
+- 为「板块主力资金 / 情绪家数 / 外盘走势」等**无数据源口径补数据源**（不采用"生成侧禁写"，避免阉割预判信息量）；事件类判径（状态锚 → 受限 LLM，默认关）已具备，**无需新建验证 agent**。
+
+---
+
 ## \[main\] 2026-09-18 — 板块溯源新增「归因结论」`conclusion`（折叠卡不再显示「触发」）
 
 **开发者**: Aria

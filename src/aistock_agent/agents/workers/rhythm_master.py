@@ -208,17 +208,19 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 
 
 async def _compose_card(
-    run_date: str, slot: str
+    run_date: str, slot: str, target_date: str | None = None
 ) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
     """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
 
     `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
     对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
+    显式传入 `target_date` 时覆盖推导（手动补跑 after_close 用：把基于历史某日
+    数据算出的卡落回该日键，见 routes.trigger_rhythm_master）。
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
     win 为当前窗口 EventWindow（事件分支/锚点来源）。
     """
-    target_date = (
+    target_date = target_date or (
         add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
         if slot == "after_close"
         else run_date
@@ -638,7 +640,9 @@ async def run(state: dict[str, object]) -> dict[str, object]:
         if slot not in REFRESH_SLOTS:
             slot = "after_close"
         basis = str(state.get("report_date") or shanghai_today().isoformat())
-        card, rows, win = await _compose_card(basis, slot)
+        target_override = state.get("target_date")
+        target_override = target_override if isinstance(target_override, str) and target_override else None
+        card, rows, win = await _compose_card(basis, slot, target_override)
         if not card.synthesis_available:
             logger.warning(
                 "rhythm_master.degraded reason=%s slot=%s target_date=%s",

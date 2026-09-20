@@ -1309,3 +1309,57 @@ async def test_evening_chain_returns_failed_stage_when_review_invalid() -> None:
 
     assert result["status"] == "failed"
     assert result["stage"] == "review"
+
+
+# ── 节奏大师手动补跑 target_date 覆盖（2026-09-19：重算 09-18 数据落回 09-18 键） ──
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rhythm_master_explicit_target_date_writes_state() -> None:
+    """显式 target_date 时写入 state 并透传给 worker.run()。"""
+    from datetime import date
+
+    import aistock_agent.agents.workers.rhythm_master as rhythm_master_module
+    from aistock_agent.services import scheduler
+
+    mock_run = AsyncMock(return_value={"analysis_reports": {"rhythm_master": {}}})
+    captured = {}
+
+    async def capture_run(state):
+        captured["state"] = state
+        return await mock_run(state)
+
+    with (
+        patch.object(rhythm_master_module, "run", new=capture_run),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 9, 18)),
+    ):
+        await scheduler._dispatch_rhythm_master("after_close", "2026-09-18", "2026-09-18")
+
+    state = captured["state"]
+    assert state["report_date"] == "2026-09-18"
+    assert state["refresh_slot"] == "after_close"
+    assert state["target_date"] == "2026-09-18"
+    assert state["session_id"].endswith("_after_close")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rhythm_master_without_target_date_keeps_default() -> None:
+    """缺省 target_date 时不写入 state（保留按 slot 推导的既有行为）。"""
+    from datetime import date as _date
+
+    import aistock_agent.agents.workers.rhythm_master as rhythm_master_module
+    from aistock_agent.services import scheduler
+
+    captured = {}
+
+    async def capture_run(state):
+        captured["state"] = state
+        return {"analysis_reports": {"rhythm_master": {}}}
+
+    with (
+        patch.object(rhythm_master_module, "run", new=capture_run),
+        patch.object(scheduler, "shanghai_today", return_value=_date(2026, 9, 18)),
+    ):
+        await scheduler._dispatch_rhythm_master("after_close", "2026-09-18")
+
+    assert "target_date" not in captured["state"]
