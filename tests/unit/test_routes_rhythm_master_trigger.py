@@ -61,7 +61,7 @@ class TestTriggerRhythmMaster:
     """POST /api/agent/briefing/rhythm-master/trigger"""
 
     def test_success_returns_unified_contract(self, client):
-        """正常触发 → {"success": True, "data": 卡摘要}，参数按 (slot, report_date) 透传。"""
+        """正常触发 → data 为卡摘要；参数按 (slot, report_date, target_date) 透传。"""
         with patch(
             DISPATCH_PATH, new_callable=AsyncMock, return_value=_dispatch_result()
         ) as mock_dispatch:
@@ -74,7 +74,7 @@ class TestTriggerRhythmMaster:
         assert body["data"]["refresh_slot"] == "after_close"
         assert body["data"]["synthesis_available"] is True
         assert body["data"]["rhythm_card"]["phase"] == "ebb"
-        mock_dispatch.assert_awaited_once_with("after_close", "2026-09-18")
+        mock_dispatch.assert_awaited_once_with("after_close", "2026-09-18", None)
 
     def test_defaults_slot_and_uses_shanghai_today(self, client):
         """缺省 refresh_slot=after_close、缺省 report_date=上海当天。"""
@@ -84,7 +84,9 @@ class TestTriggerRhythmMaster:
             resp = client.post(URL, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         assert resp.json()["success"] is True
-        mock_dispatch.assert_awaited_once_with("after_close", shanghai_today().isoformat())
+        mock_dispatch.assert_awaited_once_with(
+            "after_close", shanghai_today().isoformat(), None
+        )
 
     def test_passes_midday_slot_through(self, client):
         """refresh_slot=midday 透传，data 回显 midday。"""
@@ -100,7 +102,7 @@ class TestTriggerRhythmMaster:
             )
         assert resp.status_code == 200
         assert resp.json()["data"]["refresh_slot"] == "midday"
-        mock_dispatch.assert_awaited_once_with("midday", "2026-09-18")
+        mock_dispatch.assert_awaited_once_with("midday", "2026-09-18", None)
 
     def test_unknown_slot_returns_structured_error(self, client):
         """非法 refresh_slot → {"success": False, ...}（不抛 500，调度器不被调用）。"""

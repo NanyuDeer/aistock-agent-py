@@ -641,7 +641,8 @@ async def run(state: dict[str, object]) -> dict[str, object]:
             slot = "after_close"
         basis = str(state.get("report_date") or shanghai_today().isoformat())
         target_override = state.get("target_date")
-        target_override = target_override if isinstance(target_override, str) and target_override else None
+        if not (isinstance(target_override, str) and target_override):
+            target_override = None
         card, rows, win = await _compose_card(basis, slot, target_override)
         if not card.synthesis_available:
             logger.warning(
