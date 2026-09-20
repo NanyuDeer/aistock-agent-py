@@ -320,5 +320,42 @@ def test_reason_marks_weak_when_strength_absent() -> None:
     assert "·弱" in out["phase_evidence"]["reason"]
 
 
+def test_reason_prefixes_mainline_label() -> None:
+    """溯源行 head 加方向标签前缀：`主线：AI硬件·液冷服务器（…）`。"""
+    facts = {"state": "established", "name": "液冷服务器", "strength": "strong",
+             "excess": 5.2, "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None, "mainline_label": "AI硬件"}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert reason.startswith("主线：AI硬件·液冷服务器（主线成立·强，")
+    assert "+5.2pct" in reason and "2026-09-16" in reason
+    assert len(reason) <= 72
+
+
+def test_reason_dedupes_label_equal_to_name() -> None:
+    """label 等于 name 时去重：不得出现 `半导体·半导体`。"""
+    facts = {"state": "established", "name": "半导体", "strength": "strong",
+             "excess": 6.12, "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None, "mainline_label": "半导体"}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert reason.startswith("主线：半导体（主线成立·")
+    assert "半导体·半导体" not in reason
+
+
+def test_reason_longest_label_plus_board_within_cap() -> None:
+    """最坏组合（长板块名 + 方向标签）仍在 72 字上限内。"""
+    facts = {"state": "established", "name": "通信网络设备及器件", "strength": "strong",
+             "excess": 3.4, "data_date": "2026-09-16", "attention": "all",
+             "breakdown": None, "nav": None, "mainline_label": "AI硬件"}
+    out = _build_rhythm_card(_card_at("2026-09-17"), _win(),
+                             _rows(60, high=3010.0, low=2990.0), facts)
+    reason = out["phase_evidence"]["reason"]
+    assert reason.startswith("主线：AI硬件·通信网络设备及器件（主线成立·强，")
+    assert len(reason) <= 72
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

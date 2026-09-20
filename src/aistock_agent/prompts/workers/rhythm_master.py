@@ -20,11 +20,22 @@ def build_synthesis_prompt(
     mainline_facts_text = "确定性主线事实：无（mainline 必须为 []）"
     if mainline_facts and mainline_facts.get("state") == "established" \
             and mainline_facts.get("name"):
-        mainline_facts_text = (
-            "确定性主线事实："
-            f"{mainline_facts.get('name')}（strength={mainline_facts.get('strength')}，"
-            f"excess={mainline_facts.get('excess')}pct，data_date={mainline_facts.get('data_date')}）"
-        )
+        label = mainline_facts.get("mainline_label") or ""
+        if label:
+            mainline_facts_text = (
+                "确定性主线事实："
+                f"{label}方向（{mainline_facts.get('name')}，"
+                f"strength={mainline_facts.get('strength')}，"
+                f"excess={mainline_facts.get('excess')}pct，"
+                f"data_date={mainline_facts.get('data_date')}）"
+            )
+        else:
+            mainline_facts_text = (
+                "确定性主线事实："
+                f"{mainline_facts.get('name')}（strength={mainline_facts.get('strength')}，"
+                f"excess={mainline_facts.get('excess')}pct，"
+                f"data_date={mainline_facts.get('data_date')}）"
+            )
     return (
         "你是节奏大师研研判层。基于下列确定性证据，输出结构化判断。\n"
         f"当前主力阶段：{evidence.stage or '未知'}（{evidence.stage_reason or ''}）\n"
@@ -33,8 +44,11 @@ def build_synthesis_prompt(
         f"仓位：{evidence.position.text if evidence.position else '无'}\n"
         f"{mainline_facts_text}\n\n"
         "要求：\n"
-        "1. 主线段只能引用上方「确定性主线事实」中的候选，name 须与其一致、"
-        "data_date 须与数据日一致；不得自创主线；未提供确定性主线事实时 mainline 必须为 []。\n"
+        "1. 主线段只能引用上方「确定性主线事实」中的候选，mainline[].name 须与事实中的"
+        "板块名精确一致、不得用方向标签代替（如「AI硬件」只是方向标签，"
+        "name 必须写真实板块名如「液冷服务器」）；"
+        "data_date 须与数据日一致；narrative 可引用方向标签（如「AI硬件方向」）；"
+        "不得自创主线；未提供确定性主线事实时 mainline 必须为 []。\n"
         "2. 启动节点段（假设推演）只在存在 high 事件锚点时输出元素：仅当「事件锚点」段"
         "不是「无 high 事件锚点」时才输出元素；当事件锚点为「无 high 事件锚点」时，"
         "launch_outlook 必须为 []（空数组），禁止用占位文本或臆造方向填充。\n"

@@ -368,10 +368,12 @@ async def _compose_card(
                         else:
                             wnav = nav_from_pct(winner["pct_chgs"])  # type: ignore[arg-type]
                             brk = detect_breakdown(closes, wnav)
+                            label = str(winner.get("mainline") or "")
                             mainline = {
                                 **mainline,
                                 "nav": wnav,
                                 "breakdown": brk["mainline_breakdown"],
+                                "mainline_label": label,
                             }
 
     breadth = None
@@ -583,8 +585,12 @@ def _build_rhythm_card(
     mstate = mainline_facts.get("state")
     if mstate == "established":
         ml_strength = "强" if mainline_facts.get("strength") == "strong" else "弱"
+        head_name = mainline_facts.get("name") or "未知"
+        label = mainline_facts.get("mainline_label")
+        if label and label != head_name:
+            head_name = f"{label}·{head_name}"
         head = (
-            f"主线：{mainline_facts.get('name') or '未知'}（主线成立·{ml_strength}，"
+            f"主线：{head_name}（主线成立·{ml_strength}，"
             f"超额 +{mainline_facts.get('excess')}pct，"
             f"数据日 {mainline_facts.get('data_date') or ''}）"
         )
