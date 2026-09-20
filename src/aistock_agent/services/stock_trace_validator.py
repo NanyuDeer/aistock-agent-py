@@ -1,13 +1,36 @@
 """Stock Trace 的确定性跨对象校验。"""
 
-from aistock_agent.schemas.stock_trace import StockTraceResult, StockTraceSnapshot
+from aistock_agent.schemas.stock_trace import (
+    StockSourceRecord,
+    StockTraceResult,
+    StockTraceSnapshot,
+)
 from aistock_agent.trace.chain import TRACE_CHAIN_STAGES
 
 STAGES = TRACE_CHAIN_STAGES
 
+# 需校验"反向事实必须引用反证"的层：(候选层, 对应快照 kind)
+_COUNTER_EVIDENCE_LAYERS: tuple[tuple[str, str], ...] = (
+    ("sector", "sector_fact"),
+    ("market", "market_fact"),
+)
+
 
 class StockTraceValidationError(ValueError):
     """LLM 输出虽满足 Schema、但不满足证据或时序约束。"""
+
+
+def _value_direction(source: StockSourceRecord) -> str | None:
+    """从 payload 推断事实方向（与 Node `valueDirection` 口径一致）。"""
+    numeric = source.payload.get("change_pct", source.payload.get("pct_change"))
+    if isinstance(numeric, (int, float)) and not isinstance(numeric, bool):
+        return "up" if numeric > 0 else "down" if numeric < 0 else "neutral"
+    impact = str(source.payload.get("impact") or "").lower()
+    if "利好" in impact or "positive" in impact:
+        return "up"
+    if "利空" in impact or "negative" in impact:
+        return "down"
+    return None
 
 
 def validate_stock_trace_result(result: StockTraceResult, snapshot: StockTraceSnapshot) -> None:
@@ -44,6 +67,27 @@ def validate_stock_trace_result(result: StockTraceResult, snapshot: StockTraceSn
                 raise StockTraceValidationError(
                     "not established node cannot carry positive evidence"
                 )
+
+    # 2026-09-18：镜像 Node `validateStockTraceResult` 的 missing_counter_evidence 规则——
+    # 窗口内存在与个股方向相反的板块/大盘事实时，仍把该层置 supported 的候选必须引用反证。
+    # 镜像的目的是让 LLM 纠错重试有机会修正；Node 侧是回写后的终态门，
+    # 被拒只会变成 partial（无 artifact），没有重试机会。
+    for layer, kind in _COUNTER_EVIDENCE_LAYERS:
+        has_opposite_fact = any(
+            source.kind == kind
+            and source.occurred_at is not None
+            and source.occurred_at <= snapshot.trigger_event.window_end_at
+            and _value_direction(source) not in {None, "neutral", snapshot.trigger_event.direction}
+            for source in snapshot.source_records
+        )
+        candidate = next((item for item in result.candidates if item.layer == layer), None)
+        if (
+            has_opposite_fact
+            and candidate is not None
+            and candidate.status == "supported"
+            and not candidate.counter_evidence_ids
+        ):
+            raise StockTraceValidationError(f"candidate:{layer}:missing_counter_evidence")
 
     if result.primary_chain_id and result.primary_chain_id not in chain_by_id:
         raise StockTraceValidationError("primary chain does not exist")

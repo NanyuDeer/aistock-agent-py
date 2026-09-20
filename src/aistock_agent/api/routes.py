@@ -2097,3 +2097,26 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── 完整洞察报告 PDF 渲染 ──────────────────────────────────────────
+
+
+@router.post("/insight-report/render")
+async def render_insight_report_pdf(
+    payload: dict[str, object],
+    _: None = Depends(verify_internal_token),
+) -> Response:
+    """完整洞察报告 PDF 渲染：
+    app-api 组装数据 → 本端点纯模板渲染（无 LLM）→ 返回 application/pdf。"""
+    from aistock_agent.services.insight_report import (  # noqa: PLC0415
+        build_report_sections,
+        render_insight_report,
+    )
+
+    pdf = render_insight_report(build_report_sections(payload))
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="insight-report.pdf"'},
+    )

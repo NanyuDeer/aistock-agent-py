@@ -1155,11 +1155,9 @@ async def test_run_once_normalizes_string_record_id_d2():
     assert entry["result"] == "hit"
 
 
-# --- light_predict 下游就绪：带交易所后缀 ts_code 归一化（个股验证环） ---
-
-
+# --- 个股预判下游就绪：带交易所后缀 ts_code 归一化（个股验证环） ---
 def test_resolve_index_or_stock_suffixed_stock_code():
-    """带后缀 ts_code（600519.SH / 000001.SZ）→ 个股裸码（个股 light_predict 通道）。"""
+    """带后缀 ts_code（600519.SH / 000001.SZ）→ 个股裸码（个股预判通道）。"""
     code, target_type = pv._resolve_index_or_stock("600519.SH")
     assert code == "600519"
     assert target_type == "stock"
@@ -1207,7 +1205,7 @@ async def test_resolve_verify_target_suffixed_stock_skips_sector_resolve():
 
 @pytest.mark.asyncio
 async def test_run_once_verifies_suffixed_stock_horizon():
-    """light_predict 通道（target=带后缀 ts_code）到期验证落地 hit，不再 no_source。"""
+    """个股预判通道（target=带后缀 ts_code）到期验证落地 hit，不再 no_source。"""
     record = _pending_record(due="2026-08-10", target="600519.SH")
     with (
         patch.object(

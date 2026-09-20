@@ -194,7 +194,7 @@ class StockTraceWorker:
                                 f"校验错误详情：{last_error}\n"
                                 "请对照上面错误逐项修正（缺失字段补齐、未引用的 source_id 删除、"
                                 "选中链补全六阶段、confirmed 条件不满足时降级为"
-                                " probable/insufficient）。"
+                                " hypothesis/insufficient）。"
                             )
                         ))
                     response = await structured_llm.ainvoke(messages)

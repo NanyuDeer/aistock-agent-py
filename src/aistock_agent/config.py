@@ -261,10 +261,8 @@ class Settings(BaseSettings):
     # 开启后仅事件类条件、输入限定"事件标题+进展摘要+条件文本"，每次判定留痕。
     condition_met_event_llm_enabled: bool = False
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
-    # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）+ 15:20
-    # 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖；对齐 Node 打点 cron 0-4 工作日口径
-    scheduler_light_predict_midday_cron: str = "40 11 * * 0-4"
-    scheduler_light_predict_close_cron: str = "20 15 * * 0-4"
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）已于 2026-09-13 彻底移除：
+    # scheduler_light_predict_midday_cron / scheduler_light_predict_close_cron 两个字段已删除
     # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
     # 时刻选 19:30 的原因：review_full 18:30 会再触发主因板块级联预判落库，其后拉榜做
     # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
