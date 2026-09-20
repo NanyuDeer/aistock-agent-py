@@ -1,11 +1,11 @@
 {
   "schema_version": "1.0",
   "candidates": [
-    {"name": "AI 算力", "group": "ai_tech", "priority": 1, "tag_code": "886050.TI", "aliases": ["算力租赁"], "mainline": "AI硬件"},
-    {"name": "AI 应用", "group": "ai_tech", "priority": 1, "tag_code": "886108.TI", "aliases": ["人工智能"], "mainline": "AI软件"},
-    {"name": "半导体", "group": "ai_tech", "priority": 2, "tag_code": "881121.TI", "aliases": ["芯片"], "mainline": "半导体"},
-    {"name": "低空经济", "group": "default", "priority": 3, "tag_code": "886067.TI", "aliases": ["飞行汽车"]},
-    {"name": "创新药", "group": "default", "priority": 4, "tag_code": "886015.TI", "aliases": []},
+    {"name": "AI 算力", "group": "ai_tech", "tag_code": "886050.TI", "aliases": ["算力租赁"], "mainline": "AI硬件"},
+    {"name": "AI 应用", "group": "ai_tech", "tag_code": "886108.TI", "aliases": ["人工智能"], "mainline": "AI软件"},
+    {"name": "半导体", "group": "ai_tech", "tag_code": "881121.TI", "aliases": ["芯片"], "mainline": "半导体"},
+    {"name": "低空经济", "group": "default", "tag_code": "886067.TI", "aliases": ["飞行汽车"]},
+    {"name": "创新药", "group": "default", "tag_code": "886015.TI", "aliases": []},
     {"name": "共封装光学(CPO)", "group": "default", "tag_code": "886033.TI", "aliases": ["CPO"], "mainline": "AI硬件"},
     {"name": "PCB概念", "group": "default", "tag_code": "885959.TI", "aliases": ["PCB"], "mainline": "AI硬件"},
     {"name": "液冷服务器", "group": "default", "tag_code": "886044.TI", "aliases": ["液冷"], "mainline": "AI硬件"},
