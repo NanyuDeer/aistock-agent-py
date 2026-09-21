@@ -143,10 +143,13 @@ class StockTraceResult(StockTraceResultPayload):
     @model_validator(mode="after")
     def _validate_selected_chain_shape(self) -> "StockTraceResult":
         candidate_layers = {candidate.layer for candidate in self.candidates}
-        required_layers = {"company", "sector", "market", "capital", "technical"}
+        # 2026-09-18 决策：capital 由必产层降级为条件准入层——资金净流入/流出与价格涨跌是同义
+        # 反复，不产出该层候选不应阻塞结果；其余四层仍必须产出。capital 仍在 layer 枚举中，
+        # 存量结果（含 capital 候选）继续通过校验。
+        required_layers = {"company", "sector", "market", "technical"}
         if not required_layers.issubset(candidate_layers):
             raise ValueError(
-                "candidates must cover company, sector, market, capital and technical layers"
+                "candidates must cover company, sector, market and technical layers"
             )
         selected = {item for item in (self.primary_chain_id, self.alternative_chain_id) if item}
         chain_ids = {chain.chain_id for chain in self.chains}

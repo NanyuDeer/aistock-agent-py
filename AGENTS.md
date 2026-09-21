@@ -590,6 +590,8 @@ pm2 logs aistock-agent --lines 50
 - 关闭顺序：lifespan 退出时先 `cancel()` consumer task → 等待 CancelledError → 关闭独立 redis 连接 → 再关 RedisPool / HttpClientPool
 - **五层候选归因（2026-08-15）**：归因链路从三层（company/sector/market）扩展为五层（company/sector/market/capital/technical）：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层；`services/insight_validator.py` 适配五层分类校验
 - **primary_phrase 主因短语（2026-08-19）**：`StockTraceResultPayload` 新增必填字段 `primary_phrase`（≤20 字，LLM 生成的简短主因短语，供列表/卡片展示；`attribution_status` 为 insufficient 时给出简短结论如"证据不足"）。`prompts/workers/stock_trace.py` 提示词增加对应输出要求。Node 端持久化为 `stock_trace_results.primary_phrase`，列表接口透传为 `primary_cause`。
+- **capital 候选层降级为条件准入层（2026-09-18）**：资金净流入/流出方向与价格涨跌是同一事实的两种记账方式，据此归因属**同义反复**且是五层中最易置 supported 的一层 → 会挤压 company/sector/market 真因；但资金的结构/来源/背离（分单结构、席位来源、量价背离）含价格读不出的增量信息，故**保留维度、收紧准入**而非删除。改动：`schemas/stock_trace.py` `_validate_selected_chain_shape` 的 `required_layers` 由五层改为 `{company, sector, market, technical}`（`capital` 仍在 `TraceCandidate.layer` 枚举中，存量结果继续通过校验）；`prompts/workers/stock_trace.py` 新增 capital 专项规则（禁同义反复；仅结构/来源/背离类证据可置 supported/weak；**时效分档**——trade_date 等于异动交易日可 supported，T-1 及更早最高只能 weak 且不得作为 primary_chain 支撑；仅方向性数据置 insufficient），并删除 primary_phrase 旧示例"主力资金撤离"；配套证据侧由 app-api `toCapitalSourceRecord` 补齐原先被丢弃的 `orders`（分单结构）与 `windows`（1/5/10/20 日拆解）；`services/insight_report.py` PDF 章节标题"五层候选归因"→"分层候选归因"。Node 侧 `validateStockTraceResult` 本就只强制 company/sector/market，无需改动。
+- **反向事实反证要求 + 纠错提示语修正（2026-09-18）**：① 提示词新增"若板块/大盘事实与个股方向相反（如个股上涨而板块/大盘下跌）仍将该层置 supported，必须在 `counter_evidence_ids` 中引用该反向 source_id，否则只能置 weak"；② `services/stock_trace_validator.py` **镜像** Node `validateStockTraceResult` 的 `missing_counter_evidence` 规则（Node 侧是回写后的终态门、被拒只会变 `partial` 且无 artifact；Python 侧失败会触发 LLM 纠错重试才有机会修，故两侧同规则）；③ `agents/workers/stock_trace.py` 纠错提示语的非法枚举值 `probable` 改为 `hypothesis`（`attribution_status` 合法值仅 confirmed/hypothesis/insufficient/not_applicable，原值会让重试再次校验失败）。
 
 ## 关键约束
 
@@ -709,9 +711,13 @@ content = {
 - 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
 - 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式
 
-### 2026-09-03 更新：自选股洞察阶段 2（定时轻量预判 + forecast 落库）
+### 2026-09-03 更新：自选股洞察阶段 2（定时轻量预判 + forecast 落库）——已于 2026-09-13 移除
 
-- 定时调度：新增 `light_predict_midday`（11:40，工作日）/ `light_predict_close`（15:20）两 cron；slot 级分存互不覆盖。env：`SCHEDULER_LIGHT_PREDICT_MIDDAY_CRON`（默认 `40 11 * * 0-4`）、`SCHEDULER_LIGHT_PREDICT_CLOSE_CRON`（默认 `20 15 * * 0-4`）。
-- 新文件：`services/light_predictor.py`（`run_light_prediction(slot)`）；`prompts/workers/light_predict.py`（`PREDICTION_LIGHT_PROMPT`）；`schemas/prediction.py` 新增 `LightForecast`（summary + conditions[min1,max3]，复用 anchor 契约）。
-- Node 侧配合接口（internal，见 app-api）：`GET /internal/stock-trace/light-predict-targets?trade_date=`、`PATCH /internal/stock-trace/events/:eventId/forecast`、`PATCH /internal/stock-info/judgements/:id/forecast`（data_client：`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）。
-- iterate 回放隔离：data_client 新增网络方法（get_quote/get_stock_flow/list_light_predict_targets/set_event_forecast/set_judgement_forecast）已在 `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 登记（经 get/patch 间接隔离）。
+> light_predict（轻量预判）功能已彻底下线。以下全部内容已在 Task 4（2026-09-13）中移除：
+>
+> - cron `light_predict_midday`（11:40）/ `light_predict_close`（15:20）已删除。
+> - `services/light_predictor.py`（`run_light_prediction(slot)`）已删除。
+> - `prompts/workers/light_predict.py`（`PREDICTION_LIGHT_PROMPT`）已删除。
+> - `schemas/prediction.py` 的 `LightForecast` 已删除。
+> - Node 侧配合接口（`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）已删除，data_client 对应方法已清理。
+> - `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 对应登记条目已清理。

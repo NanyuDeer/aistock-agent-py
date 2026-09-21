@@ -194,32 +194,8 @@ def start_scheduler() -> None:
         name="attribution weak feedback (observe)",
         replace_existing=True,
     )
-    # 自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行（11:30 打点后）
-    # + 15:20 收盘终版（15:05 settle+归因后）；slot 级分存互不覆盖
-    scheduler.add_job(
-        _run_light_predict_task,
-        CronTrigger.from_crontab(
-            settings.scheduler_light_predict_midday_cron,
-            timezone=settings.scheduler_timezone,
-        ),
-        kwargs={"slot": "midday"},
-        id="light_predict_midday",
-        name="watchlist light predict (midday)",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_light_predict_task,
-        CronTrigger.from_crontab(
-            settings.scheduler_light_predict_close_cron,
-            timezone=settings.scheduler_timezone,
-        ),
-        kwargs={"slot": "close"},
-        id="light_predict_close",
-        name="watchlist light predict (close)",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）已于 2026-09-13 彻底移除：
+    # light_predict_midday / light_predict_close 两个 job 与 _run_light_predict_task 已删除
     # 每日长线风口板块批量预判（板块四环 spec §6.3）：19:30 收盘后逐板块
     # predict_sector（幂等跳过 + 主因板块排除；review_full 18:30 级联预判落库后执行）
     scheduler.add_job(
@@ -1199,26 +1175,7 @@ async def _run_attribution_feedback_task() -> None:
         logger.error("scheduler_attribution_feedback_failed", error=str(e), exc_info=True)
 
 
-async def _run_light_predict_task(*, slot: str) -> None:
-    """自选股洞察轻量预判（阶段 2，2026-09-03）：11:40 午盘先行 / 15:20 收盘终版。
-
-    slot ∈ {midday, close}，对应 light_predict_midday/light_predict_close 两个
-    cron job；slot 级分存互不覆盖。委托 services/light_predictor.run_light_prediction。
-    """
-    if not is_trading_day(shanghai_today()):
-        logger.info("scheduler_skip_non_trading_day", task="light_predict", slot=slot)
-        return
-    from aistock_agent.services.light_predictor import (  # noqa: PLC0415
-        run_light_prediction,
-    )
-
-    try:
-        updated = await run_light_prediction(slot)
-        logger.info("scheduler_light_predict_done", slot=slot, updated=updated)
-    except Exception as e:
-        logger.error("scheduler_light_predict_failed", slot=slot, error=str(e), exc_info=True)
-
-
+# 自选股洞察轻量预判任务（_run_light_predict_task）已于 2026-09-13 彻底移除
 async def _run_sector_wind_prediction_task() -> None:
     """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 19:30 收盘后）。"""
     if not is_trading_day(shanghai_today()):

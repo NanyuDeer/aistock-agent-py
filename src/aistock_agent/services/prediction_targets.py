@@ -70,7 +70,7 @@ _STOCK_SUFFIX_RE = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$")
 def resolve_index_or_stock_code(target: str) -> tuple[str | None, str]:
     """指数/个股 target → (code, kind)，纯同步、不发网络请求（验证器/预判入口共用）。
 
-    支持三种形态（个股 light_predict 通道按 Target.internal_id=带后缀 ts_code）：
+    支持三种形态（个股预判通道按 Target.internal_id=带后缀 ts_code）：
     1. 指数别名/裸码（“上证指数”/“000001”）→ INDEX_TARGETS 命中 → (code, "index")；
     2. 带交易所后缀 ts_code（600519.SH / 000001.SZ / 000001.SH）：后缀与指数期望
        一致（000001.SH=上证指数）→ ("000001", "index")；否则按个股裸码 → stock；

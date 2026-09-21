@@ -134,6 +134,32 @@
 
 - 新增 `POST /api/agent/briefing/rhythm-master/trigger`：管理员可手动触发节奏大师卡生成，无需等待三时点定时任务。入参 `refresh_slot`（缺省 after_close，仅接受三时点枚举）与 `report_date`（缺省上海当天，语义为**基准日**）；返回统一 `{"success", "data"}` 契约并回带 `target_date` / `basis_date` / `refresh_slot` / `synthesis_available` / `rhythm_card`，便于补跑后当场核验卡片内容。非法 slot 与 worker 无产出均返回结构化错误体，不抛 500。
 - 三时点分发函数支持显式传入基准日：定时任务路径仍用上海当天，手动补跑可指向最近一个有 K 线的交易日（否则 after_close 的"基准日无当日K线"门禁会使档位降级为空）。
+## \[junliang] 2026-09-18 — 异动归因：资金维度降级为条件准入层 + 反证校验补齐
+
+**开发者**: Aria
+
+### 改进
+
+- **资金（capital）候选层由"必产层"降级为"条件准入层"**（`schemas/stock_trace.py`）：资金净流入/流出方向与价格涨跌是同一事实的两种记账方式，据此归因属同义反复；且资金证据"永远存在且天然与价格同向"，是五层中最易被置 supported 的一层，会挤压 company/sector/market 真因。`_validate_selected_chain_shape` 的 `required_layers` 由 `{company, sector, market, capital, technical}` 改为 `{company, sector, market, technical}`（`capital` 仍保留在 `TraceCandidate.layer` 枚举中，存量结果继续通过校验）。
+- **提示词新增 capital 专项规则**（`prompts/workers/stock_trace.py`）：① 禁同义反复——不得以"股价上涨/下跌是因为主力资金净流入/流出"作为 supported 依据；② 仅当资金证据含价格读不出的增量信息（结构/来源/背离三类，如分单结构、主力与散户方向分化、席位来源、量价背离）时才可置 supported/weak；③ **时效分档**——`trade_date` 等于异动交易日可 supported，T-1 及更早最高只能 weak（可作 alternative 链驱动）且不得作为 primary_chain 支撑证据；④ 仅含方向性净流入/流出时必须置 insufficient。同时删除 `primary_phrase` 旧示例"主力资金撤离"（本身即同义反复）。
+- **反向事实反证要求**：提示词新增"板块/大盘事实与个股方向相反、仍将该层置 supported 时必须引用 `counter_evidence_ids`，否则只能置 weak"；`services/stock_trace_validator.py` **镜像** Node `validateStockTraceResult` 的 `missing_counter_evidence` 规则（Node 侧是回写后的终态门、无重试，Python 侧失败才能触发 LLM 纠错重试）。
+
+### 修复
+
+- `agents/workers/stock_trace.py` 纠错提示语的非法枚举值 `probable` 改为 `hypothesis`（`attribution_status` 合法值仅 confirmed/hypothesis/insufficient/not_applicable，原值会让纠错重试再次校验失败）。
+
+### 文档
+
+- PDF 报告章节标题"五层候选归因"改为"分层候选归因"（`services/insight_report.py`；capital 不再恒产，标题需与口径一致）。
+- `AGENTS.md` 登记本次决策与配套改动。
+
+### 测试
+
+- `tests/test_stock_trace_validator.py`：新增 capital 可选用例（不产出该层不阻塞校验）、原"缺 capital 报错"改为"缺 technical 报错"、新增提示词语义断言、新增反向事实反证三例（要求反证/引用后放行/非 supported 不误伤）。
+- `tests/unit/test_insight_report.py`：章节标题断言同步。
+
+---
+
 
 ## \[changer\] 2026-09-18 — 节奏大师事件可见性与报告逻辑修复（事件维度可见 + 市场主线可信）
 
@@ -159,6 +185,7 @@
 ### 文档
 
 - 修正节奏引擎能力描述的文档漂移，并标注未接线的合成函数。
+
 ## \[main] 2026-09-17 — condition\_met 终审修复（阻塞 #2 + 重要 #3/#4/#5）
 
 **开发者**: Aria

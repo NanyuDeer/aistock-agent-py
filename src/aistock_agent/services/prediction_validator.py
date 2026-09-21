@@ -323,7 +323,7 @@ async def _verify_horizon(
     due_dates = record.get("due_dates")
     due_date = str(due_dates.get(horizon) or "") if isinstance(due_dates, dict) else ""
     target = str(entry.get("target") or "")
-    # Spec B/light_predict：index 别名/裸码/带后缀 ts_code/6 位个股裸码统一在此解析
+    # Spec B：index 别名/裸码/带后缀 ts_code/6 位个股裸码统一在此解析
     # （纯同步免网络），未命中才走板块 resolve（H3）。
     code, target_type = _resolve_index_or_stock(target)
     matched: dict[str, str] | None = None

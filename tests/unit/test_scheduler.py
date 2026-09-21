@@ -94,8 +94,8 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
             with patch.object(scheduler.AsyncIOScheduler, "start"):
                 scheduler.start_scheduler()
 
-        # 18 个业务 job（light_predict×2 / attribution_feedback 等）+ heartbeat
-        assert from_crontab.call_count == 19
+        # 16 个业务 job（主干 attribution_feedback 等 + 已移除 light_predict×2）+ heartbeat
+        assert from_crontab.call_count == 17
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1115,8 +1115,6 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
             mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
             mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
             mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
-            mock_settings.scheduler_light_predict_midday_cron = "40 11 * * 0-4"
-            mock_settings.scheduler_light_predict_close_cron = "20 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1164,8 +1162,6 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
             mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
             mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
             mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
-            mock_settings.scheduler_light_predict_midday_cron = "40 11 * * 0-4"
-            mock_settings.scheduler_light_predict_close_cron = "20 15 * * 0-4"
             mock_settings.scheduler_timezone = "Asia/Shanghai"
             start_scheduler()
 
@@ -1180,48 +1176,6 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     assert "rhythm_master_midday" in job_ids
     assert "sector_wind_prediction" in job_ids
     assert "review_quick" not in job_ids
-
-
-# ── 自选股洞察轻量预判调度任务（阶段 2，2026-09-03） ──
-
-
-@pytest.mark.asyncio
-async def test_light_predict_task_delegates_to_light_predictor():
-    """_run_light_predict_task 交易日调用 run_light_prediction(slot)。"""
-    import aistock_agent.services.light_predictor as light_predictor_module
-    from aistock_agent.services import scheduler
-
-    with (
-        patch.object(scheduler, "is_trading_day", return_value=True),
-        patch.object(
-            light_predictor_module,
-            "run_light_prediction",
-            new_callable=AsyncMock,
-            return_value=3,
-        ) as mock_run,
-    ):
-        await scheduler._run_light_predict_task(slot="midday")
-
-    mock_run.assert_awaited_once_with("midday")
-
-
-@pytest.mark.asyncio
-async def test_light_predict_task_skips_non_trading_day():
-    """非交易日跳过轻量预判（不调用业务模块）。"""
-    import aistock_agent.services.light_predictor as light_predictor_module
-    from aistock_agent.services import scheduler
-
-    with (
-        patch.object(scheduler, "is_trading_day", return_value=False),
-        patch.object(
-            light_predictor_module,
-            "run_light_prediction",
-            new_callable=AsyncMock,
-        ) as mock_run,
-    ):
-        await scheduler._run_light_predict_task(slot="close")
-
-    mock_run.assert_not_awaited()
 
 
 # ── 手动补跑晚间链路（/admin/trigger/evening_chain 支持） ──

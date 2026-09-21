@@ -82,7 +82,7 @@ async def test_predict_stock_invokes_llm_and_persists_pending() -> None:
 
 @pytest.mark.asyncio
 async def test_predict_stock_normalizes_suffixed_ts_code() -> None:
-    """带后缀 ts_code（600519.SH，light_predict/Target.internal_id 形态）→ 归一裸码落库。"""
+    """带后缀 ts_code（600519.SH，个股预判 Target.internal_id 形态）→ 归一裸码落库。"""
     llm, _ = _make_llm(_stock_prediction())
     with (
         patch.object(ps, "get_quick_think", return_value=llm),

@@ -1,4 +1,3 @@
-from aistock_agent.prompts.workers.light_predict import PREDICTION_LIGHT_PROMPT
 from aistock_agent.prompts.workers.prediction import (
     PREDICTION_CHAT_PROMPT,
     PREDICTION_PROMPT,
@@ -41,9 +40,6 @@ def test_prediction_prompts_declare_anchor_event_ref():
     for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
         assert "event_ref" in prompt
         assert "仅事件类条件填写" in prompt
-    # 轻量预判（LightForecast 复用 PredictionCondition）的 anchor 键清单同批同步
-    assert "event_ref" in PREDICTION_LIGHT_PROMPT
-    assert "仅事件类条件填写" in PREDICTION_LIGHT_PROMPT
 
 
 def test_prediction_prompt_horizon_policy_semantics():
@@ -112,7 +108,7 @@ def test_prediction_prompts_declare_anchor_op_level_and_metric_enum():
     # spec §12.3 / Task 5.1：anchor 键清单须登记 op/level，metric 可选值清单与
     # schemas/prediction.py::PredictionMetric 同批（extra="forbid" 下：prompt 多吐 schema 未收的键
     # → 整条预判丢失；schema 收了 prompt 不吐 → 条件永远不可判定，覆盖率回归 5.5%）。
-    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT, PREDICTION_LIGHT_PROMPT):
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
         assert "op" in prompt and "level" in prompt
         for metric in ("volume", "amount", "ma20", "ma60", "prior_low", "prior_high",
                        "today_open", "today_high", "today_low"):
@@ -132,6 +128,6 @@ def test_prediction_prompts_declare_threshold_caliber():
     （id=24 c1 实证：条件文本"跌破 -3%"而 threshold "-4%"）→ 该条件判定标准不可靠
     （判定层 G3 已按"口径不确定就不判"兜住，但生成侧须收敛）。此处锁定三条 prompt 的取值口径。
     """
-    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT, PREDICTION_LIGHT_PROMPT):
+    for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
         assert "触发阈值" in prompt, "涨跌幅口径条件的 threshold 取值口径未写明"
         assert "同值同号" in prompt, "threshold 与条件文本百分数的一致性要求未写明"
