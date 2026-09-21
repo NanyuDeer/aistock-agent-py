@@ -1,5 +1,5 @@
-from aistock_agent.schemas.rhythm_master import RhythmEvidence
 from aistock_agent.prompts.workers.rhythm_master import build_synthesis_prompt
+from aistock_agent.schemas.rhythm_master import RhythmEvidence
 
 
 def test_prompt_contains_evidence_and_constraints():
@@ -48,3 +48,24 @@ def test_prune_invalid_drops_only_bad_elements():
     assert [m.name for m in pruned.mainline] == ["AI"]
     assert len(pruned.launch_outlook) == 1
     assert pruned.narrative == "一句话结论"
+
+
+def test_prompt_includes_mainline_direction_label():
+    ev = RhythmEvidence(stage="launch")
+    facts = {"state": "established", "name": "液冷服务器", "strength": "strong",
+             "excess": 5.2, "data_date": "2026-09-18", "mainline_label": "AI硬件"}
+    prompt = build_synthesis_prompt(ev, facts)
+    assert "AI硬件方向（液冷服务器" in prompt
+    assert "液冷服务器（strength=strong" not in prompt
+    assert "不得自创主线" in prompt
+    assert "mainline 必须为 []" in prompt
+    assert "主线段只能引用上方「确定性主线事实」中的候选" in prompt
+
+
+def test_prompt_keeps_legacy_format_without_label():
+    ev = RhythmEvidence(stage="launch")
+    facts = {"state": "established", "name": "液冷服务器", "strength": "strong",
+             "excess": 5.2, "data_date": "2026-09-18"}
+    prompt = build_synthesis_prompt(ev, facts)
+    assert "确定性主线事实：液冷服务器（strength=strong" in prompt
+    assert "方向（" not in prompt

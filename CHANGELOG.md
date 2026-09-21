@@ -2,6 +2,25 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-21 — 主线候选池扩容至 35 真实板块与 3 主线标签展示（P3″）
+
+**开发者**: changer-collab
+
+### 新增
+
+- 主线候选池 5 → 35 真实同花顺板块：活动配置 `mainline_candidates.v35.json`（每条含 `mainline` 分组字段：AI硬件 10 / 半导体 11 / AI软件 9 / 无标签 5），`mainline_candidates.json` 收敛为 v5 冻结基线（只读回滚态）；loader 新增 `MAINLINE_CANDIDATES_PATH` env 灰度切换（下个 slot 冷生效，回滚 = 恢复 env）。`judge_mainline` 与阈值/返回结构零改动（H2）。
+- 3 主线（AI硬件/半导体/AI软件）以分组口径接入展示层：溯源行 head 升级为 `主线：{label}·{name}（主线成立·强，超额 +x pct，数据日 …）`（label==name 去重、无 label 原样）；LLM 叙事确定性事实带 `{label}方向（…）` 前缀，narrative 可引用方向标签、mainline[].name 仍只放行真实板块名。不新增对外字段（H6）。
+
+### 改进
+
+- 守门扩展：`VERIFIED_BOARD_NAMES` 实测表扩至 35；新增 `mainline` 枚举守门与 name∪aliases 跨候选碰撞守门（H11）；H5 口径迁移为「既有 5 条映射不得改写 + 允许加性新增」。
+- 移除候选配置中的 `priority` 死字段（loader 本就不消费）。
+
+### 文档
+
+- 契约文档 rhythm-master-logic.md §9.1/9.1.1/9.2/9.4/§11/§14/§16 同步至 v35 灰度架构；spec §7.2/§7.3/§8.12 勾销实施状态。
+
+---
 
 ## \[changer\] 2026-09-20 — 主线候选清单增加维护机制（确定性去重 / 降级留痕拆分 / CI 守门）
 
@@ -25,6 +44,13 @@
 ### 硬约束（未触碰）
 
 - 主线判定层返回结构、阈值、状态值域、候选池优先级**全部未改动**；主线结论的对外可见形态（溯源行 / 仓位文案）未改动；**不新增对外字段**。
+
+### 文档（2026-09-20 P3″ 扩容同步，非本 commit 代码改动的分量）
+
+- **主线候选池扩容至 35 真实板块**：`mainline_candidates.v35.json`（35 条活动配置）+ `mainline_candidates.json`（v5 冻结基线，5 条只读）+ `MAINLINE_CANDIDATES_PATH` 环境变量灰度切换（下个 slot 冷生效，恢复 env 即回滚基线）。`judge_mainline` 零改动。
+- **3 主线标签（AI硬件 / 半导体 / AI软件）接入**溯源行（head `主线：{label}·{name}`，`label==name` 去重）与 LLM 叙事（`确定性主线事实：{label}方向（…）`）；展示 A/B 落地，judge 层零改动，不新增对外字段。
+- **守门扩展**：`VERIFIED_BOARD_NAMES` 实测定长表扩至 35（守门测试读 v35）；新增 `mainline` 枚举与 `name∪aliases` 跨候选碰撞守门（H11）；H5 口径迁移为"既有 5 条映射不得改写 + 允许加性新增"。
+- **`priority` 死字段删除**（C2，独立 commit）；loader 不再读它。
 
 ## \[changer\] 2026-09-19 — 阶段兜底启用「前一交易日」修复热度轴整条消失（X2）
 
@@ -247,6 +273,8 @@
 ### 新增
 
 - `services/mainline_engine.py`（主线判定纯函数 + `load_mainline_candidates()` + 破位判据，阈值全绝对锚定 H1）；`services/trend_reversal.py`（放量阴线后摆动点抬高的趋势反转确定性判定）；`data/mainline_candidates.json`（AI 科技组优先）。
+
+> **2026-09-20 起**：`data/mainline_candidates.json` 现为 v5 冻结基线，活动配置为 `mainline_candidates.v35.json`（35 条，2026-09-20 扩容后）；loader 经 `MAINLINE_CANDIDATES_PATH` env 灰度切换。
 - `services/rhythm_engine.py`：`POSITION_LADDER` 五档仓位阶梯 + `derive_position_text`（指数趋势定 base → 硬闸门 → 主线 strong/none 调整 → 事件档位 → clamp）+ `build_event_branch` 的 d 约束（>3 交易日不产分支）。
 - `services/event_calendar.py` 读取端升格 L3 宏观事件为 high（关键词 ⊆ app-api macro 正则词元 H3）；worker 接线 position_band.text（主线驱动）/ event_high_hint / phase_evidence.technical 确定性生产者 + 盘中档剔除未完成 bar；synthesis 主线段受确定性事实约束（不得自创主线）。
 - 开关 `rhythm_mainline_enabled`（env `RHYTHM_MAINLINE_ENABLED`，默认 True）。
