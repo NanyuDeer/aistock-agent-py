@@ -2,6 +2,26 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-21 — 主线候选池扩容至 35 真实板块与 3 主线标签展示（P3″）
+
+**开发者**: changer-collab
+
+### 新增
+
+- 主线候选池 5 → 35 真实同花顺板块：活动配置 `mainline_candidates.v35.json`（每条含 `mainline` 分组字段：AI硬件 10 / 半导体 11 / AI软件 9 / 无标签 5），`mainline_candidates.json` 收敛为 v5 冻结基线（只读回滚态）；loader 新增 `MAINLINE_CANDIDATES_PATH` env 灰度切换（下个 slot 冷生效，回滚 = 恢复 env）。`judge_mainline` 与阈值/返回结构零改动（H2）。
+- 3 主线（AI硬件/半导体/AI软件）以分组口径接入展示层：溯源行 head 升级为 `主线：{label}·{name}（主线成立·强，超额 +x pct，数据日 …）`（label==name 去重、无 label 原样）；LLM 叙事确定性事实带 `{label}方向（…）` 前缀，narrative 可引用方向标签、mainline[].name 仍只放行真实板块名。不新增对外字段（H6）。
+
+### 改进
+
+- 守门扩展：`VERIFIED_BOARD_NAMES` 实测表扩至 35；新增 `mainline` 枚举守门与 name∪aliases 跨候选碰撞守门（H11）；H5 口径迁移为「既有 5 条映射不得改写 + 允许加性新增」。
+- 移除候选配置中的 `priority` 死字段（loader 本就不消费）。
+
+### 文档
+
+- 契约文档 rhythm-master-logic.md §9.1/9.1.1/9.2/9.4/§11/§14/§16 同步至 v35 灰度架构；spec §7.2/§7.3/§8.12 勾销实施状态。
+
+---
+
 ## \[changer\] 2026-09-20 — 主线候选清单增加维护机制（确定性去重 / 降级留痕拆分 / CI 守门）
 
 **开发者**: 37588
