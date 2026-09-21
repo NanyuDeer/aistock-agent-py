@@ -186,8 +186,8 @@ def test_event_confirm_requires_high_importance():
 @pytest.mark.parametrize(
     ("events", "expected_confirm"),
     [
-        ([{"importance": "medium", "result": "超预期"}], False),
-        ([{"importance": "high", "result": "超预期"}], True),
+        ([{"date": "2026-09-11", "importance": "medium", "result": "超预期"}], False),
+        ([{"date": "2026-09-11", "importance": "high", "result": "超预期"}], True),
     ],
 )
 async def test_compose_card_feeds_event_confirm_into_detect_certainty(events, expected_confirm):

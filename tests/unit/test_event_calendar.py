@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aistock_agent.services import event_calendar
-from aistock_agent.services.event_calendar import load_event_window
+from aistock_agent.services.event_calendar import (
+    load_event_window,
+    split_analysis_window,
+)
 
 
 @pytest.fixture
@@ -71,6 +74,64 @@ async def test_earnings_density_non_dict_returns_empty(mock_api: AsyncMock) -> N
     mock_api.get.return_value = ["unexpected"]
     density = await event_calendar.load_earnings_density("2026-09-01", "2026-09-05")
     assert density == []
+
+
+@pytest.mark.asyncio
+async def test_load_event_window_none_horizon_full_year_end(mock_api: AsyncMock) -> None:
+    """horizon_days=None → 展示窗全量：拉 target_date 起到 CALENDAR_MAX_YEAR 年末。
+
+    G3 越年截断：不调 add_trading_days（不抛 ValueError）、不置 calendar_uncovered，
+    避免前端误显"数据源未接入"。display_events 与 events 同源。
+    """
+    mock_api.get_calendar_events.return_value = [
+        {"date": "2026-12-30", "title": "远期宏观事件", "importance": "high", "source": "L3"},
+    ]
+    win = await load_event_window("2026-09-01", horizon_days=None)
+    assert win.calendar_uncovered is False
+    assert win.source_missing is False
+    assert win.display_events == win.events == [mock_api.get_calendar_events.return_value[0]]
+    date_from, date_to = mock_api.get_calendar_events.call_args.args
+    assert date_from == "2026-09-01"
+    assert date_to == "2026-12-31"  # CALENDAR_MAX_YEAR 年末截断
+
+
+@pytest.mark.asyncio
+async def test_load_event_window_none_horizon_source_missing(
+    mock_api: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全量窗数据源缺失 → source_missing（不影响 fail-close 区分）。"""
+    mock_api.get_calendar_events.return_value = None
+    win = await load_event_window("2026-09-01", horizon_days=None)
+    assert win.events == [] and win.source_missing is True
+    assert win.display_events == []
+
+
+def test_split_analysis_window_keeps_only_5_trading_days() -> None:
+    """A2 裁决：分析子窗按交易日差 <=4 切分（含 target 当日共 5 交易日）。
+
+    第 6 个交易日（d>4）的事件不得纳入分析窗，防止 event_d/锚点/分支日数漂移；
+    display_events 透传全量；坏/非法/越年日期跳过。"""
+    events = [
+        {"date": "2026-09-01", "importance": "high"},     # 当日 → d=0
+        {"date": "2026-09-06", "importance": "high"},     # 周日 → (09-01,09-06] 交易=3
+        {"date": "2026-09-07", "importance": "high"},     # 周一 → 交易日差=4（第5个交易日）
+        {"date": "2026-09-08", "importance": "high"},     # 周二 → 交易日差=5 → 超窗
+        {"date": "なし", "importance": "high"},           # 坏日期 → 跳过
+        {"date": "2026-99-99", "importance": "high"},     # 非法日期 → 跳过
+    ]
+    win = split_analysis_window(events, "2026-09-01")
+    assert [e["date"] for e in win.events] == ["2026-09-01", "2026-09-06", "2026-09-07"]
+    assert win.high_events == win.events
+    assert win.display_events == events  # 全量透传，供展示投影
+
+
+def test_split_analysis_window_non_trading_gap_not_taken() -> None:
+    """跨周末：target 周五 2026-09-04 → 下周一 09-07 的交易日差=2（不含周末）应纳入。
+
+    验证交易日差口径而非自然日差（防反方 A2 指出的周末漂移）。"""
+    events = [{"date": "2026-09-07", "importance": "high"}]  # 周一
+    win = split_analysis_window(events, "2026-09-04")
+    assert [e["date"] for e in win.events] == ["2026-09-07"]
 
 
 @pytest.mark.asyncio
