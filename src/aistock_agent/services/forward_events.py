@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aistock_agent.services.data_client import node_api
-from aistock_agent.utils.date import shanghai_today
+from aistock_agent.utils.date import prev_trading_day, shanghai_today
 
 logger = logging.getLogger(__name__)
 
@@ -203,3 +205,108 @@ async def run_calendar_import(report_date: str | None = None) -> dict[str, objec
     seed = await import_seed_events(report_date)
     cand = await process_candidate_promotions(report_date)
     return {"seed": seed, "candidates": cand}
+
+
+async def _search_actual_value(title: str) -> dict[str, object]:
+    """抓公布值（搜索兜底）：命中正文含数字才视为有原值，否则返回空（日内重试）。"""
+    import asyncio
+
+    from aistock_agent.services.tavily import TavilyService
+    result = await asyncio.to_thread(
+        TavilyService().search, f"{title} 公布 实际值", topic="news", max_results=5)
+    return result if isinstance(result, dict) else {}
+
+
+def _extract_actual_from_search(search: dict[str, object]) -> str | None:
+    """从搜索结果里提取首个数字型公布值（含可选正负号/百分号/小数）；提取不到返回 None。
+
+    YAGNI：简单数字即可满足测试与生产基本需求，不做过度解析（spec §5.11）。
+    """
+    from aistock_agent.services.forward_event_llm import _ACTUAL_RE
+    results = search.get("results") or []
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        for field in ("content", "title"):
+            text = str(item.get(field) or "")
+            m = _ACTUAL_RE.search(text)
+            if m:
+                return m.group(0).strip()
+    return None
+
+
+async def _llm_judge(title: str, consensus: str, actual: str) -> str | None:
+    """LLM 判定预期差（事实层）；失败返回 None（宁缺勿猜）。"""
+    from aistock_agent.services.forward_event_llm import _build_judge_prompt
+    from aistock_agent.services.llm import get_chat_model
+    try:
+        model = get_chat_model(temperature=0.0)
+        resp = await model.ainvoke(_build_judge_prompt(title, consensus, actual))
+        return str(getattr(resp, "content", resp) or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("forward_events.llm_judge_failed", error=str(exc))
+        return None
+
+
+async def run_expectation_diff(report_date: str | None = None) -> dict[str, object]:
+    """预期差判定与落档（裁决 C3 / 硬约束 X2）。
+
+    谓词：event_date ∈ [昨日,今日] 且 result 为空 且 consensus 非空（已公布）。
+    昨日事件不在分析窗 → 须单独查询昨日+今日 high 事件（get_calendar_events importance=high）。
+    result_attempted_at 日内重试：抓不到原值/LLM 失败 → 更新 attempted_at 留痕（非 24h 冷却）。
+    """
+    from aistock_agent.services.forward_event_llm import (
+        _extract_consensus,
+        judge_expectation_diff,
+    )
+
+    today = report_date and date.fromisoformat(report_date) or shanghai_today()
+    yesterday = prev_trading_day(today)
+    # 单独查询 [昨日,今日] high 事件（分析窗不覆盖昨日，须单独查询）
+    rows = await node_api.get_calendar_events(
+        yesterday.isoformat(), today.isoformat(), importance="high") or []
+    now_iso = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+    judged = skipped_consensus = skipped_past_window = attempted = 0
+    for ev in rows:
+        ev_date = str(ev.get("event_date") or ev.get("date") or "")
+        # 谓词：event_date ∈ [昨日,今日]
+        if not ev_date or ev_date not in {yesterday.isoformat(), today.isoformat()}:
+            skipped_past_window += 1
+            continue
+        if ev.get("result"):
+            continue  # 已落档
+        consensus = _extract_consensus(str(ev.get("detail") or ""))
+        if not consensus:
+            skipped_consensus += 1
+            continue  # 硬约束 5：consensus 缺失不落档
+        # 抓原值 → LLM 判定
+        search = await _search_actual_value(str(ev.get("title") or ""))
+        actual = _extract_actual_from_search(search)
+        if not actual:
+            # 日内重试：更新 result_attempted_at 留痕，不落 result
+            await node_api.post_calendar_event({
+                "event_date": ev_date, "title": str(ev.get("title") or ""),
+                "result_attempted_at": now_iso,
+            })
+            attempted += 1
+            continue
+        verdict = await _llm_judge(str(ev.get("title") or ""), consensus, actual)
+        result_val = judge_expectation_diff(
+            str(ev.get("title") or ""), consensus, actual, verdict=verdict)
+        if not result_val:
+            await node_api.post_calendar_event({
+                "event_date": ev_date, "title": str(ev.get("title") or ""),
+                "result_attempted_at": now_iso,
+            })
+            attempted += 1
+            continue
+        await node_api.post_calendar_event({
+            "event_date": ev_date, "title": str(ev.get("title") or ""),
+            "result": result_val, "result_source": "auto",
+            "result_attempted_at": now_iso,
+        })
+        judged += 1
+    return {"judged": judged, "skipped_consensus": skipped_consensus,
+            "skipped_past_window": skipped_past_window, "attempted": attempted}
