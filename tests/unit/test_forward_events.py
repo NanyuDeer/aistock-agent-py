@@ -1,0 +1,127 @@
+"""forward_events 种子导入与候选晋升（C1/C2 + X5 + O1 consensus 并入 detail + 硬约束 4 预检）。
+
+C1：种子全量 upsert 显式 source='L4'（X5）；
+C2：confirmed 预检定位命中 → 升 importance=high（source='L4'）；未命中 → data_missing 跳过、绝不静默新建（硬约束 4）；
+O1：consensus 并入 detail（``｜consensus:`` 全角分隔，body 不放 consensus 键）。
+"""
+import json
+
+import pytest
+
+from aistock_agent.services import forward_events
+
+SEED = __import__("pathlib").Path("src/aistock_agent/data/calendar_seed.json")
+
+
+@pytest.mark.asyncio
+async def test_import_seed_explicit_source_l4(monkeypatch, tmp_path):
+    posted: list[dict[str, object]] = []
+
+    async def fake_post(body):
+        posted.append(body)
+        return {"id": 1, "upserted": True}  # 模拟 node_api.post_calendar_event 解包后的 data 对象
+
+    monkeypatch.setattr(forward_events.node_api, "post_calendar_event", fake_post)
+    monkeypatch.setattr(forward_events, "SEED_PATH", tmp_path / "seed.json")
+    seed = json.loads(SEED.read_text(encoding="utf-8"))
+    (tmp_path / "seed.json").write_text(
+        json.dumps({"schema_version": "1.0", "events": seed["events"][:2]},
+                   ensure_ascii=False), encoding="utf-8")
+
+    result = await forward_events.import_seed_events()
+    assert result["imported"] == 2
+    for body in posted:
+        assert body["source"] == "L4", "X5：种子导入必须显式传 source=L4"
+        assert body["event_date"] and body["title"]
+        assert body["importance"] in {"high", "medium", "low"}
+
+
+@pytest.mark.asyncio
+async def test_seed_consensus_merged_into_detail(monkeypatch, tmp_path):
+    """O1 控制台裁决：consensus 并入 detail（``｜consensus:`` 全角），body 不放 consensus 键。"""
+    posted: list[dict[str, object]] = []
+
+    async def fake_post(body):
+        posted.append(body)
+        return {"id": 1, "upserted": True}
+
+    monkeypatch.setattr(forward_events.node_api, "post_calendar_event", fake_post)
+    monkeypatch.setattr(forward_events, "SEED_PATH", tmp_path / "seed.json")
+    (tmp_path / "seed.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "events": [{
+            "event_date": "2026-10-13", "title": "中国9月金融数据",
+            "importance": "high", "market": "CN", "event_type": "macro_data",
+            "consensus": "社融同比小幅多增", "detail": "央行披露窗口",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    result = await forward_events.import_seed_events()
+    assert result["imported"] == 1
+    body = posted[0]
+    assert "consensus" not in body, "O1：body 不得携带 consensus 键（app-api 不接收）"
+    assert body["detail"] == "央行披露窗口｜consensus:社融同比小幅多增"
+
+
+@pytest.mark.asyncio
+async def test_candidate_confirmed_promotes_to_high(monkeypatch, tmp_path):
+    posted: list[dict[str, object]] = []
+    deleted: list[tuple[str, str]] = []
+
+    async def fake_get(date_from, date_to, *, importance=None):
+        return [{"event_date": date_from, "title": "英伟达 FY27Q3 财报", "importance": "medium"}]
+
+    async def fake_post(body):
+        posted.append(body)
+        return {"id": 1, "upserted": True}
+
+    async def fake_delete(d, t):
+        deleted.append((d, t))
+        return True
+
+    monkeypatch.setattr(forward_events.node_api, "get_calendar_events", fake_get)
+    monkeypatch.setattr(forward_events.node_api, "post_calendar_event", fake_post)
+    monkeypatch.setattr(forward_events.node_api, "delete_calendar_event", fake_delete)
+    monkeypatch.setattr(forward_events, "CANDIDATES_PATH", tmp_path / "cand.json")
+    (tmp_path / "cand.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "pending": [],
+        "confirmed": [{"event_date": "2026-09-25", "title": "英伟达 FY27Q3 财报",
+                       "confirmed_at": "2026-09-20", "confirmed_by": "product"}],
+        "rejected": [{"event_date": "2026-09-22", "title": "某公司业绩说明会"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    result = await forward_events.process_candidate_promotions()
+    assert result["promoted"] == 1
+    assert posted and posted[0]["importance"] == "high"
+    assert posted[0]["source"] == "L4"
+    assert deleted == [("2026-09-22", "某公司业绩说明会")]
+    assert result["rejected_cleared"] == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_confirmed_not_found_leaves_trace(monkeypatch, tmp_path):
+    """硬约束 4 真实现：confirmed 预检定位不到 → data_missing 留痕 + skipped，禁止静默新建。"""
+    post_calls = 0
+
+    async def fake_get(date_from, date_to, *, importance=None):
+        return []  # PG 中无该行/无标题匹配
+
+    async def fake_post(body):
+        nonlocal post_calls
+        post_calls += 1
+        return {"upserted": True}
+
+    monkeypatch.setattr(forward_events.node_api, "get_calendar_events", fake_get)
+    monkeypatch.setattr(forward_events.node_api, "post_calendar_event", fake_post)
+    monkeypatch.setattr(forward_events, "CANDIDATES_PATH", tmp_path / "cand.json")
+    (tmp_path / "cand.json").write_text(json.dumps({
+        "schema_version": "1.0", "pending": [], "rejected": [],
+        "confirmed": [{"event_date": "2026-09-25", "title": "不存在的行",
+                       "confirmed_at": "2026-09-20", "confirmed_by": "product"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    result = await forward_events.process_candidate_promotions()
+    assert result["skipped"] == 1
+    assert any("confirmed" in m for m in result["data_missing"])
+    assert post_calls == 0, "硬约束 4：未命中不得 POST 静默新建"
