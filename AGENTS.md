@@ -432,7 +432,10 @@ src/aistock_agent/
 │   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close；2026-09-03 分支新增 position_action/anchor/touch_strength；2026-09-04 build_event_branch 三情景展开，结论 range 降级为辅助；2026-09-18 移除未接线的 met 中间状态键）
 │   ├── rhythm_dense_band.py # 历史密集触碰带（2026-09-03 design-debate A1 裁决）：确定性纯函数 dense_band，touch_gap 容差带 + 量能加权选带，替代 max/min(20日极值)×MA20 系数
 │   ├── prediction_invalidation.py # 预测失效"读数触发式"复核触发器（A1，2026-08-31）：update_trigger_state 三态迟滞状态机 + scan_active_pending 早退扫描
-│   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events）
+│   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events；2026-09-22 移除读侧词表升格，`is_high_importance_event` 已删，`MACRO_EVENT_TERMS` 保留）
+│   ├── forward_events.py # 事件前瞻主体化（2026-09-22）：种子导入 `source='L4'`（X5）+ 候选晋升（GET 存在性预检）+ 预期差 `run_expectation_diff`（谓词 [昨日,今日] 已公布 + `result_attempted_at` 日内重试 X2）→ /internal/calendar/events 与 DELETE
+│   ├── forward_event_sources.py # L3 前瞻迁移（query 族 6 条，`L3_QUERY_HARD_LIMIT=6` / `L3_DAILY_SOFT_LIMIT=12`，collect_jiuyan 退化留痕）
+│   ├── forward_event_llm.py # 预期差 LLM 只产 result 事实（不产展望/方向）
 │   ├── search_cache.py  # 搜索缓存（TTL 削峰，供节奏大师等重复检索复用）
 │   ├── rhythm_verification.py # 节奏验证（回放隔离 + 校验，`RHYTHM_VERIFICATION_ENABLED` 开关）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）

@@ -2,6 +2,24 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-22 — 事件前瞻主体化（种子 / 候选晋升 / 预期差 / 读侧折叠）
+
+**开发者**: changer-collab
+
+### 新增
+
+- `services/forward_events.py`：事件前瞻主体化——种子导入（`source='L4'`，**X5：显式 L4，`upsertEvent` 缺省 L3 会把种子归成 earnings 污染 typeFromSource**）+ 候选晋升（逐条带 GET 存在性预检，rejected 不写入）+ 预期差 `run_expectation_diff`（谓词 **[昨日,今日]** 已公布事件 + `result_attempted_at` 日内重试 X2）。
+- `services/forward_event_sources.py`:L3 前瞻迁入（query 族 6 条，`L3_QUERY_HARD_LIMIT=6` / `L3_DAILY_SOFT_LIMIT=12`，collect_jiuyan 退化留痕）；`services/forward_event_llm.py`：预期差 LLM 只产 result 事实（不产展望/方向）。
+- `rhythm_master` 新增 `event_window_near_end_date`（近 5 交易日末日，越年 null，`NEAR_HINT_DAYS=5`）；scheduler 注册 4 job（种子 07:30 / 抓取 07:40 / 预期差 08:00+11:30+13:00，misfire_grace）。
+
+### 改进
+
+- `event_calendar.py` 移除读侧词表升格（`is_high_importance_event` 已删，`MACRO_EVENT_TERMS` 保留）。
+
+### 契约（跨仓）
+
+- 预期差 `result` 经 app-api `toContractEvent.detail`（`x｜consensus:N` 前缀，O1）读回——**读侧必须与写侧同通道（C1）**，跨仓契约断裂会让 job 空转。
+
 ## \[changer\] 2026-09-21 — 节奏大师事件日历提前展示（全量窗 + 展示/分析分离 + L3 前瞻扩窗）
 
 **开发者**: changer-collab
