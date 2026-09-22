@@ -290,6 +290,11 @@ class Settings(BaseSettings):
         "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
     scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）──
+    scheduler_calendar_seed_cron: str = "30 7 * * 0-4"       # 种子导入+候选晋升（盘前）
+    scheduler_calendar_scrape_cron: str = "40 7 * * 0-4"     # 韭研+L3 搜索兜底（盘前）
+    scheduler_expectation_diff_cron: str = "0 8 * * 0-4"     # 预期差首判（隔夜 US_OVERNIGHT）
+    scheduler_expectation_diff_intraday_cron: str = "30 11,13 * * 0-4"  # 预期差补判（A股上午/午后）
     # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
     event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
     event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）

@@ -129,3 +129,17 @@ async def collect_l3_forward(score_date: str, cache: SearchCache) -> list[dict[s
                 logger.warning("forward_event_l3.post_failed", event_date=ev.get("event_date"))
         parsed_events.extend(events)
     return parsed_events
+
+
+async def collect_jiuyan(score_date: str, cache: SearchCache) -> list[dict]:
+    """韭研源（N1，spec §5.6）抓取入口——最小退化实现。
+
+    控制台裁决 ②（O2 风险登记）：韭研反爬/合规评估未通过前，跳过抓取并留
+    ``data_missing``，不阻断主体调度链（spec §5.6 降级链路）。
+
+    TODO 实施路径：app-api 侧既有 crawler 工具（走 LLM 抽取后封顶 medium 入库）
+    或 agent-py 侧 requests + LLM 抽取（spec §5.6）；评估通过后替换本退化 stub。
+    """
+    _ = (score_date, cache)  # 退化路径暂不消费入参（保留签名契约）
+    logger.warning("collect_jiuyan degraded: jiuyan 源未接入（O2 风险登记），跳过并留 data_missing")
+    return []
