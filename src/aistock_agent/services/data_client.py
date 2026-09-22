@@ -282,27 +282,40 @@ class NodeApiClient:
 
         return None
 
-    async def delete(self, path: str) -> dict[str, object] | None:
+    async def delete(
+        self, path: str, body: dict[str, object] | None = None
+    ) -> dict[str, object] | None:
         """DELETE 请求 Node.js 内部 API
 
         Args:
             path: 路径，如 /internal/analysis-reports/cleanup
+            body: 可选 JSON 请求体（如按 (event_date,title) 删行，裁决 C2 G3）。
+                None 时行为与历史保持完全一致（不携带请求体，向后兼容既有调用方，
+                如 analysis-reports cleanup）；非 None 时携带 json body 与 Content-Type。
 
         Returns:
             业务数据（已解包 `data` 字段）；请求失败返回 None。
         """
         url = f"{self._base_url}{path}"
         headers = {"X-Internal-Token": self._token}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
 
         try:
             client = await HttpClientPool.get_client()
-            resp = await client.delete(url, headers=headers)
+            if body is None:
+                resp = await client.delete(url, headers=headers)
+            else:
+                resp = await client.delete(url, json=body, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
 
             if not isinstance(payload, dict):
                 return None
-            if payload.get("code") != 200:
+            # 对 0/200 双认：跨仓信封对齐（app-api DELETE /internal/calendar/events
+            # 返回 {code:0,data:{deleted}}；memory 教训 #59——信封 code 两端不对齐
+            # 会致生产恒降级），风格对齐 _post_request 的 code not in (0, 200, 201)。
+            if payload.get("code") not in (0, 200):
                 logger.error("node_api_delete_error", url=url, code=payload.get("code"))
                 return None
             return payload.get("data") if isinstance(payload.get("data"), dict) else None
@@ -441,21 +454,42 @@ class NodeApiClient:
     # ---------- 节奏大师（rhythm_master）----------
 
     async def get_calendar_events(
-        self, date_from: str, date_to: str
+        self, date_from: str, date_to: str, *, importance: str | None = None
     ) -> list[dict[str, object]] | None:
-        """GET /internal/calendar/events（L1 交割日 + market_calendar_events 合并窗口）。"""
-        resp = await self._request(
-            f"/internal/calendar/events?dateFrom={date_from}&dateTo={date_to}"
-        )
+        """GET /internal/calendar/events（L1 交割日 + market_calendar_events 合并窗口）。
+
+        importance 可选：非 None 时追加 &importance= 过滤（预期差 job 读昨日 high
+        事件用，分析窗不覆盖昨日、须单独查询，spec §5.11）。
+        """
+        url = f"/internal/calendar/events?dateFrom={date_from}&dateTo={date_to}"
+        if importance:
+            url += f"&importance={importance}"
+        resp = await self._request(url)
         if not isinstance(resp, dict):
             return None
         events = resp.get("events")
         return events if isinstance(events, list) else None
 
     async def post_calendar_event(self, body: dict[str, object]) -> dict[str, object] | None:
-        """POST /internal/calendar/events（L3 前瞻解析产物 upsert，§4.4/§4.8 C1）。"""
+        """POST /internal/calendar/events（L3 前瞻解析产物 upsert，§4.4/§4.8 C1）。
+
+        body 可含 result/result_source/result_attempted_at（Task 4 后 app-api 接受）。
+        """
         result = await self._post_request("/internal/calendar/events", body)
         return result if isinstance(result, dict) else None
+
+    async def delete_calendar_event(self, event_date: str, title: str) -> bool:
+        """DELETE /internal/calendar/events — 按 (event_date,title) 删行（裁决 C2 G3）。
+
+        供候选 rejected 清场 / 种子删除；返回 False 表示不存在或删除失败（幂等）。
+        """
+        result = await self.delete(
+            "/internal/calendar/events", {"event_date": event_date, "title": title}
+        )
+        if not isinstance(result, dict):
+            return False
+        data = result.get("data")
+        return bool(data.get("deleted")) if isinstance(data, dict) else False
 
     async def post_event_entity(self, body: dict[str, object]) -> dict[str, object] | None:
         """POST /internal/event-entities（Event Entity 物化，spec §10.2）。
