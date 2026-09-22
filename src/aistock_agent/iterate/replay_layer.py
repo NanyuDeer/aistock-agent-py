@@ -183,6 +183,11 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         "NodeApiClient.update_prediction_verification",
         # 经 delete 间接隔离（delete → node_noop 返回 None）
         "NodeApiClient.cleanup_expired_reports",
+        # 经 delete 间接隔离（delete → node_noop 返回 None）：delete_calendar_event 内部
+        # `await self.delete("/internal/calendar/events", ...)`（data_client.py），无独立
+        # 网络入口；回放时 delete 返回 None → `not isinstance(result, dict)` 返回 False
+        # （幂等，不触达真实 Node 后端）。终审归类：节奏大师写方法（2026-09-22 新增登记）
+        "NodeApiClient.delete_calendar_event",
         # 写副作用由 _ASYNC_SIDE_EFFECT_TARGETS 单独隔离（_make_noop 返回
         # True，调用方 `if not await save_analysis_report(...)` 判为成功）
         "NodeApiClient.save_analysis_report",

@@ -290,6 +290,56 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
+    # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）：种子 07:30 / 抓取 07:40
+    #    预期差 08:00 + 11:30 + 13:00 ──
+    # 种子 job 须 misfire_grace + 告警：种子是 high 唯一来源，静默失败会让"重大"消失一天（裁决 7）
+    scheduler.add_job(
+        _run_calendar_seed_import,
+        CronTrigger.from_crontab(
+            settings.scheduler_calendar_seed_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="calendar_seed_import",
+        name="calendar seed import + candidate promotion",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_calendar_scrape,
+        CronTrigger.from_crontab(
+            settings.scheduler_calendar_scrape_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="calendar_scrape",
+        name="calendar jiuyan + L3 scrape",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_expectation_diff,
+        CronTrigger.from_crontab(
+            settings.scheduler_expectation_diff_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "morning"},
+        id="expectation_diff_morning",
+        name="expectation diff morning (overnight US)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_expectation_diff,
+        CronTrigger.from_crontab(
+            settings.scheduler_expectation_diff_intraday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "intraday"},
+        id="expectation_diff_intraday",
+        name="expectation diff intraday (11:30/13:00)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     if settings.iterate_enabled:
         from aistock_agent.iterate.scheduler import register_iterate_jobs
 
@@ -497,6 +547,49 @@ async def _dispatch_rhythm_master(
     except Exception:
         logger.warning("rhythm_master.task_failed", slot=slot, exc_info=True)
         return {}
+
+
+async def _run_calendar_seed_import() -> None:
+    """种子导入 + 候选晋升（交易日 07:30；裁决 C7：misfire_grace + 告警）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_events import run_calendar_import
+    try:
+        result = await run_calendar_import()
+        logger.info("calendar_seed_import_done", **result)
+        if result.get("seed", {}).get("imported", 0) == 0:
+            logger.warning("calendar_seed_import_empty", date=shanghai_today().isoformat())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("calendar_seed_import_failed", error=str(exc), exc_info=True)
+
+
+async def _run_calendar_scrape() -> None:
+    """韭研 + L3 搜索兜底（交易日 07:40；封顶 medium，缺失容忍）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_event_sources import collect_l3_forward
+    from aistock_agent.services.search_cache import SearchCache
+    try:
+        today = shanghai_today().isoformat()
+        cache = SearchCache()
+        await collect_l3_forward(today, cache)
+        # 韭研抓取（N1，spec §5.6）：LLM 抽取后封顶 medium 入库
+        from aistock_agent.services.forward_event_sources import collect_jiuyan
+        await collect_jiuyan(today, cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("calendar_scrape_failed", error=str(exc), exc_info=True)
+
+
+async def _run_expectation_diff(slot: str) -> None:
+    """预期差判定与落档（08:00 首判 / 11:30+13:00 补判）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_events import run_expectation_diff
+    try:
+        result = await run_expectation_diff()
+        logger.info("expectation_diff_done", slot=slot, **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("expectation_diff_failed", slot=slot, error=str(exc), exc_info=True)
 
 
 async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:

@@ -1,9 +1,9 @@
-"""L3 前瞻捕捉（§4.3/§4.8）：4 query 硬上限 + 8 次软上限 + 日期解析 + 负缓存。"""
+"""L3 前瞻捕捉（§4.3/§4.8 → §5.7 迁出）：6 query 硬上限 + 12 次软上限 + 日期解析 + 负缓存。"""
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aistock_agent.services import event_scrape_sources as src
+from aistock_agent.services import forward_event_sources as src
 from aistock_agent.services.search_cache import SearchCache
 
 
@@ -42,22 +42,22 @@ async def test_collect_l3_forward_parses_date_and_upserts(mock_tavily: AsyncMock
 
 
 @pytest.mark.asyncio
-async def test_hard_limit_four_queries(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_hard_limit_six_queries(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(src, "_run_search", AsyncMock(side_effect=lambda q: calls.append(q) or {"results": [], "provider": "anysearch", "outcome": "empty"}))
     monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
     await src.collect_l3_forward("2026-08-28", cache)
-    assert len(src.L3_FORWARD_QUERIES) == 4
-    assert len(calls) == 4  # 硬上限 4 条/日
+    assert len(src.L3_FORWARD_QUERIES) == 6
+    assert len(calls) == 6  # 硬上限 6 条/日
 
 
 @pytest.mark.asyncio
-async def test_soft_limit_eight_per_day(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
-    """软上限 8 次/日（provider failover 重试不计入）：同日重复调用累计超 8 跳过后续。"""
+async def test_soft_limit_twelve_per_day(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
+    """软上限 12 次/日（provider failover 重试不计入）：同日重复调用累计超 12 跳过后续。"""
     monkeypatch.setattr(src, "_run_search", AsyncMock(return_value={"results": [], "provider": "anysearch", "outcome": "empty"}))
     monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
-    src._l3_daily_count["2026-08-28"] = 8  # 就地填充（不清引用）；残留由 autouse fixture 清理
-    # 同日已用满 8 → 直接跳过
+    src._l3_daily_count["2026-08-28"] = 12  # 就地填充（不清引用）；残留由 autouse fixture 清理
+    # 同日已用满 12 → 直接跳过
     events = await src.collect_l3_forward("2026-08-28", cache)
     assert events == []
 

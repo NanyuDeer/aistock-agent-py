@@ -2,9 +2,6 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from aistock_agent.services.event_calendar import is_high_importance_event
 from aistock_agent.services.rhythm_engine import (
     POSITION_LADDER,
     build_event_branch,
@@ -13,31 +10,8 @@ from aistock_agent.services.rhythm_engine import (
 from aistock_agent.services.trend_reversal import detect_trend_reversal
 
 
-@pytest.mark.parametrize("title", [
-    "美联储 9 月议息会议",
-    "美国 8 月 CPI 数据公布",
-    "9 月 FOMC 利率决议",
-])
-def test_macro_titles_promoted(title):
-    assert is_high_importance_event(title, "L3") is True
-
-
-@pytest.mark.parametrize("title", [
-    "某公司回应关税影响，公司股价大跌",
-    "英伟达发布新一代 GPU",
-    "300750 宁王 8 月销量",
-    "美联储官员内部讲话纪要（正文超过四十个字符的标题会被截断处理以保护布局）",
-])
-def test_company_or_long_titles_not_promoted(title):
-    assert is_high_importance_event(title, "L3") is False
-
-
-def test_elevated_source_l2_loose_match():
-    assert is_high_importance_event("美 CPI 前瞻", "L2") is True
-    assert is_high_importance_event("CPI", None) is True
-
-
-def test_load_event_window_normalizes_importance():
+def test_load_event_window_does_not_upgrade_l3_medium():
+    """R3：读侧不再做词表升格——L3 命中宏观词元仍封顶 medium。"""
     from aistock_agent.services import event_calendar as ec
 
     with patch.object(ec, "node_api") as api:
@@ -48,9 +22,9 @@ def test_load_event_window_normalizes_importance():
              "source": "L3", "type": "macro"},
         ])
         win = asyncio.run(ec.load_event_window("2026-09-15"))
-    assert win.events[0]["importance"] == "high"
+    assert win.events[0]["importance"] == "medium"
     assert win.events[1]["importance"] == "medium"
-    assert len(win.high_events) == 1
+    assert win.high_events == []
 
 
 def test_position_ladder_is_absolute():

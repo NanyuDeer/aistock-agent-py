@@ -486,3 +486,21 @@ async def test_after_close_no_note_when_stage_locally_decided(
     content = mock_api.save_analysis_report.call_args.kwargs["content"]
     assert content["evidence"]["stage"] is not None
     assert not any("前一交易日基准卡" in m for m in content["evidence"]["data_missing"])
+
+
+def test_near_window_end_date_trading_days():
+    """event_window_near_end_date（裁决 C4）：工作日内 → 近窗口末日非 None。
+
+    NEAR_HINT_DAYS=5（add_trading_days 不含当日向后推 5 个交易日）；精确值现场核验：
+    2026-09-21 起 5 个交易日 = 2026-09-29（09-28 为节假日跳过）。
+    """
+    from aistock_agent.agents.workers.rhythm_master import _near_window_end_date
+
+    assert _near_window_end_date("2026-09-21") == "2026-09-29"
+
+
+def test_near_window_end_date_cross_year_null():
+    """2026-12-28 起 5 交易日越出 chinese_calendar 覆盖（CALENDAR_MAX_YEAR=2026）→ None。"""
+    from aistock_agent.agents.workers.rhythm_master import _near_window_end_date
+
+    assert _near_window_end_date("2026-12-28") is None
