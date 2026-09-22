@@ -1,7 +1,8 @@
 """forward_events 种子导入与候选晋升（C1/C2 + X5 + O1 consensus 并入 detail + 硬约束 4 预检）。
 
 C1：种子全量 upsert 显式 source='L4'（X5）；
-C2：confirmed 预检定位命中 → 升 importance=high（source='L4'）；未命中 → data_missing 跳过、绝不静默新建（硬约束 4）；
+C2：confirmed 预检定位命中 → 升 importance=high（source='L4'）；
+    未命中 → data_missing 跳过、绝不静默新建（硬约束 4）；
 O1：consensus 并入 detail（``｜consensus:`` 全角分隔，body 不放 consensus 键）。
 """
 import json
@@ -125,3 +126,18 @@ async def test_candidate_confirmed_not_found_leaves_trace(monkeypatch, tmp_path)
     assert result["skipped"] == 1
     assert any("confirmed" in m for m in result["data_missing"])
     assert post_calls == 0, "硬约束 4：未命中不得 POST 静默新建"
+
+
+# ---- I1：公布值提取防日期/年份误抓 ----
+def test_extract_actual_prefers_percent_and_skips_year():
+    s = {"results": [{"content": "2026-09-21 公布，CPI 同比 0.9%，前值 0.3%", "title": "CPI"}]}
+    assert forward_events._extract_actual_from_search(s) == "0.9%"  # 跳过日期/年份片段，取带 % 数字
+
+
+def test_extract_actual_leading_year_not_misread_as_value():
+    """内容含 2026 前导年份时，不得把 2026 当公布值（应取后续数字或 None）。"""
+    s = {"results": [{"content": "2026 年国民经济运行情况 CPI 同比上涨 0.5%", "title": "CPI"}]}
+    assert forward_events._extract_actual_from_search(s) == "0.5%"
+    # 无可用数字（仅年份）→ None
+    s2 = {"results": [{"content": "2026 年发布日程已更新，详情稍后披露", "title": "发布会"}]}
+    assert forward_events._extract_actual_from_search(s2) is None

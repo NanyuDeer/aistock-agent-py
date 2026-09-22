@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import unicodedata
 from datetime import date, datetime
 from pathlib import Path
@@ -218,22 +219,39 @@ async def _search_actual_value(title: str) -> dict[str, object]:
 
 
 def _extract_actual_from_search(search: dict[str, object]) -> str | None:
-    """从搜索结果里提取首个数字型公布值（含可选正负号/百分号/小数）；提取不到返回 None。
+    """从搜索结果里提取公布值；提取不到返回 None。
 
-    YAGNI：简单数字即可满足测试与生产基本需求，不做过度解析（spec §5.11）。
+    规避误抓（I1）：先剔除日期/年份类命中（独立四位年份、ISO 日期、x月x日、x年），
+    否则 `2026`/`9月` 会被_ACTUAL_RE 误当公布值。其余数字/百分比才作为公布值；
+    同一段内优先取带 `%` 的数字（百分比语义更强）。YAGNI，不做过度解析（spec §5.11）。
     """
     from aistock_agent.services.forward_event_llm import _ACTUAL_RE
     results = search.get("results") or []
     if not isinstance(results, list):
         return None
+    # 日期/年份形态：这些片段内的数字不得当公布值（防 `2026`/`9月21日` 误抓）
+    date_year_re = re.compile(r"\d{4}-\d{2}(?:-\d{2})?|\d{1,2}月\d{1,2}日|\d{4}年|\b\d{4}\b")
     for item in results:
         if not isinstance(item, dict):
             continue
         for field in ("content", "title"):
             text = str(item.get(field) or "")
-            m = _ACTUAL_RE.search(text)
-            if m:
-                return m.group(0).strip()
+            # 预计算日期/年份片段的 [start,end) 区间
+            date_spans = [m.span() for m in date_year_re.finditer(text)]
+            candidates: list[str] = []
+            for m in _ACTUAL_RE.finditer(text):
+                ms, me = m.span()
+                # 命中坐标落在任一日期片段内 → 跳过（I1）
+                if any(ms < de and me > ds for ds, de in date_spans):
+                    continue
+                candidates.append(m.group(0).strip())
+            if not candidates:
+                continue
+            # 优先取带 % 的数字（百分比语义更强），否则取首个
+            for c in candidates:
+                if c.endswith("%"):
+                    return c
+            return candidates[0]
     return None
 
 
@@ -270,7 +288,8 @@ async def run_expectation_diff(report_date: str | None = None) -> dict[str, obje
     now_iso = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
     judged = skipped_consensus = skipped_past_window = attempted = 0
     for ev in rows:
-        ev_date = str(ev.get("event_date") or ev.get("date") or "")
+        ev_date = str(ev.get("date") or ev.get("event_date") or "")
+        # 读侧契约键为 date（C1/M1），回退 event_date 保兼容
         # 谓词：event_date ∈ [昨日,今日]
         if not ev_date or ev_date not in {yesterday.isoformat(), today.isoformat()}:
             skipped_past_window += 1
