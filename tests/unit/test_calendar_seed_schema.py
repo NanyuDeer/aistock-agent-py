@@ -25,13 +25,22 @@ def test_seed_event_type_coverage():
 
 
 def test_seed_event_date_and_time():
+    import re
+    import datetime as dt
     data = json.loads(SEED.read_text(encoding="utf-8"))
     for e in data["events"]:
-        assert len(e["event_date"]) == 10, f"event_date 须 YYYY-MM-DD：{e}"
+        # event_date 格式与合法性（YYYY-MM-DD，fromisoformat 抛错兜非法月/日）
+        assert re.match(r"^\d{4}-\d{2}-\d{2}$", e["event_date"]), f"event_date 须 YYYY-MM-DD：{e}"
+        dt.date.fromisoformat(e["event_date"])
         # X3：event_time 显式上海时间；缺省允许（按当日），但给了必须 HH:MM
         if e.get("event_time"):
-            import re
             assert re.match(r"^\d{2}:\d{2}$", e["event_time"]), f"event_time 须 HH:MM：{e}"
+        # X3 契约（种子侧输入守门）：US_OVERNIGHT 事件凡给出 event_time 必须 ≥15:00（上海盘后时刻），
+        # 否则 app-api isOvernightEvent(h>=15) 不执行顺延 -> event_date 无法折算到 A 股反应日。
+        # （读侧顺延由 app-api 既有 isOvernightEvent 承担；对未给 event_time 的简要条目沿用 X3 缺省按当日。）
+        if e.get("market") == "US_OVERNIGHT" and e.get("event_time"):
+            hour = int(e["event_time"].split(":")[0])
+            assert hour >= 15, f"US_OVERNIGHT event_time 须 ≥15:00（上海盘后），实 {e['event_time']}：{e}"
 
 
 def test_candidates_schema():
