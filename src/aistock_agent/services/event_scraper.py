@@ -21,7 +21,12 @@ from typing import Any
 import structlog
 
 from aistock_agent.config import settings
-from aistock_agent.services import event_scoring_llm, event_scrape_sources, event_store
+from aistock_agent.services import (
+    event_scoring_llm,
+    event_scrape_sources,
+    event_store,
+    forward_event_sources,
+)
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.search_cache import SearchCache
 from aistock_agent.utils.date import shanghai_now, shanghai_today
@@ -210,9 +215,10 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     # L3 前瞻捕捉（§4.3）：best-effort 辅助，主通道 L1/L2/L4 不受影响；失败不 fail 链。
     # 当日门控：对齐上方 collect_global_markets 先例（score_date == _today() 才挂载），
     # 历史回补日不写"下周前瞻"，避免把前瞻事件写进过去日期。
+    # 2026-09（Task 9 方案 A 迁出）：L3 前瞻迁至 forward_event_sources，中台回归当日已发生事件。
     if score_date == _today():
         try:
-            await event_scrape_sources.collect_l3_forward(score_date, _L3_CACHE)
+            await forward_event_sources.collect_l3_forward(score_date, _L3_CACHE)
         except Exception:  # noqa: BLE001
             logger.warning("event_scrape_l3.skipped", exc_info=True)
     return result
