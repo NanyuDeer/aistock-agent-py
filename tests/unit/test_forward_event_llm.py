@@ -99,3 +99,39 @@ async def test_run_expectation_diff_consensus_unreachable_skips(monkeypatch):
     assert result["skipped_consensus"] == 1
     assert result["judged"] == 0
     assert result["attempted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_expectation_diff_importance_guard_skips_medium(monkeypatch):
+    """终审 C2 纵深防御：importance != high 的事件即便在窗口内也绝不被判。
+
+    即使 app-api query 过滤失效返回了 medium 行，谓词守卫也必须跳过（不落 result）。
+    """
+    async def fake_get(d_from, d_to, importance=None):
+        return [
+            {"date": "2026-09-21", "title": "medium 却在窗口", "importance": "medium",
+             "result": None, "detail": "x｜consensus:1%"},
+        ]
+
+    posted: list[dict[str, object]] = []
+
+    async def fake_post(body):
+        posted.append(body)
+        return {"code": 0, "data": {"id": 1, "upserted": False}}
+
+    m = monkeypatch
+    m.setattr(
+        "aistock_agent.services.forward_events.node_api.get_calendar_events", fake_get)
+    m.setattr(
+        "aistock_agent.services.forward_events.node_api.post_calendar_event", fake_post)
+    m.setattr(
+        "aistock_agent.services.forward_events.shanghai_today",
+        lambda: date(2026, 9, 22))
+    m.setattr(
+        "aistock_agent.services.forward_events.prev_trading_day",
+        lambda d: date(2026, 9, 21))
+
+    result = await run_expectation_diff("2026-09-22")
+    assert result["skipped_importance"] == 1
+    assert result["judged"] == 0
+    assert posted == [], "importance!=high 不得回写任何 result/留痕"

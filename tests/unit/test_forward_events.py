@@ -141,3 +141,46 @@ def test_extract_actual_leading_year_not_misread_as_value():
     # 无可用数字（仅年份）→ None
     s2 = {"results": [{"content": "2026 年发布日程已更新，详情稍后披露", "title": "发布会"}]}
     assert forward_events._extract_actual_from_search(s2) is None
+
+
+# ---- 终审 C1：US 隔夜预期差回写必须用原始 event_date（防幽灵行）----
+@pytest.mark.asyncio
+async def test_run_expectation_diff_overnight_writeback_uses_original_event_date(monkeypatch):
+    """US 隔夜展示 date=10-29（反应日，在窗口内）但原始 event_date=10-28 → 回写必须 10-28。
+
+    若回写错用展示 date（10-29），会对原 event_date=10-28 的行算出新 dedup_hash →
+    生成缺省 medium 幽灵行，真 high 行永不落 result（终审 C1 root cause）。RED 即 FAIL。
+    """
+    posted: list[dict[str, object]] = []
+
+    async def fake_get(d_from, d_to, importance=None):
+        return [{
+            "date": "2026-10-29", "event_date": "2026-10-28",
+            "title": "FOMC", "importance": "high", "result": None,
+            "detail": "美联储议息｜consensus:维持利率",
+        }]
+
+    async def fake_post(body):
+        posted.append(body)
+        return {"code": 0, "data": {"id": 1, "upserted": False}}
+
+    async def fake_search(title):
+        return {"outcome": "ok", "results": [{"title": title, "content": "2%"}]}
+
+    async def fake_judge(title, consensus, actual):
+        return "符合预期"
+
+    m = monkeypatch
+    m.setattr("aistock_agent.services.forward_events.node_api.get_calendar_events", fake_get)
+    m.setattr("aistock_agent.services.forward_events.node_api.post_calendar_event", fake_post)
+    m.setattr("aistock_agent.services.forward_events._search_actual_value", fake_search)
+    m.setattr("aistock_agent.services.forward_events._llm_judge", fake_judge)
+    m.setattr("aistock_agent.services.forward_events.prev_trading_day",
+              lambda d: __import__("datetime").date(2026, 10, 28))
+
+    result = await forward_events.run_expectation_diff("2026-10-29")
+    assert result["judged"] == 1
+    assert len(posted) == 1
+    # 回写定位 dedup 键必须用原始 event_date（10-28），不得用展示 date（10-29）
+    assert posted[0]["event_date"] == "2026-10-28"
+    assert posted[0]["result_source"] == "auto"

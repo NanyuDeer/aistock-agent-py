@@ -208,6 +208,16 @@ async def run_calendar_import(report_date: str | None = None) -> dict[str, objec
     return {"seed": seed, "candidates": cand}
 
 
+def _write_event_date(ev: dict[str, object]) -> str:
+    """回写用原始 event_date（终审 C1）：US 隔夜展示 date 顺延反应日后 ≠ 原始 event_date。
+
+    谓词/窗口判断用展示 date（`ev["date"] or ev["event_date"]`），但回写（result /
+    result_attempted_at）必须用原始 event_date 定位 dedup 键——若用顺延后的 date，
+    会对原始 event_date 的行算出新 dedup_hash 生成幽灵行。优先级反转：event_date 优先。
+    """
+    return str(ev.get("event_date") or ev.get("date") or "")
+
+
 async def _search_actual_value(title: str) -> dict[str, object]:
     """抓公布值（搜索兜底）：命中正文含数字才视为有原值，否则返回空（日内重试）。"""
     import asyncio
@@ -286,13 +296,17 @@ async def run_expectation_diff(report_date: str | None = None) -> dict[str, obje
     rows = await node_api.get_calendar_events(
         yesterday.isoformat(), today.isoformat(), importance="high") or []
     now_iso = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
-    judged = skipped_consensus = skipped_past_window = attempted = 0
+    judged = skipped_consensus = skipped_past_window = skipped_importance = attempted = 0
     for ev in rows:
         ev_date = str(ev.get("date") or ev.get("event_date") or "")
         # 读侧契约键为 date（C1/M1），回退 event_date 保兼容
         # 谓词：event_date ∈ [昨日,今日]
         if not ev_date or ev_date not in {yesterday.isoformat(), today.isoformat()}:
             skipped_past_window += 1
+            continue
+        # 终审 C2 纵深防御：即便 query 过滤失败也绝不判 medium（importance != high 直接跳过）
+        if str(ev.get("importance")) != "high":
+            skipped_importance += 1
             continue
         if ev.get("result"):
             continue  # 已落档
@@ -304,9 +318,9 @@ async def run_expectation_diff(report_date: str | None = None) -> dict[str, obje
         search = await _search_actual_value(str(ev.get("title") or ""))
         actual = _extract_actual_from_search(search)
         if not actual:
-            # 日内重试：更新 result_attempted_at 留痕，不落 result
+            # 日内重试：更新 result_attempted_at 留痕，不落 result（回写用原始 event_date）
             await node_api.post_calendar_event({
-                "event_date": ev_date, "title": str(ev.get("title") or ""),
+                "event_date": _write_event_date(ev), "title": str(ev.get("title") or ""),
                 "result_attempted_at": now_iso,
             })
             attempted += 1
@@ -316,16 +330,17 @@ async def run_expectation_diff(report_date: str | None = None) -> dict[str, obje
             str(ev.get("title") or ""), consensus, actual, verdict=verdict)
         if not result_val:
             await node_api.post_calendar_event({
-                "event_date": ev_date, "title": str(ev.get("title") or ""),
+                "event_date": _write_event_date(ev), "title": str(ev.get("title") or ""),
                 "result_attempted_at": now_iso,
             })
             attempted += 1
             continue
         await node_api.post_calendar_event({
-            "event_date": ev_date, "title": str(ev.get("title") or ""),
+            "event_date": _write_event_date(ev), "title": str(ev.get("title") or ""),
             "result": result_val, "result_source": "auto",
             "result_attempted_at": now_iso,
         })
         judged += 1
     return {"judged": judged, "skipped_consensus": skipped_consensus,
-            "skipped_past_window": skipped_past_window, "attempted": attempted}
+            "skipped_past_window": skipped_past_window, "attempted": attempted,
+            "skipped_importance": skipped_importance}
