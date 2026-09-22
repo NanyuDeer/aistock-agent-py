@@ -2,6 +2,27 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## \[changer\] 2026-09-21 — 节奏大师事件日历提前展示（全量窗 + 展示/分析分离 + L3 前瞻扩窗）
+
+**开发者**: changer-collab
+
+### 新增
+
+- 节奏卡事件日历改为**全量展示窗**：`load_event_window(horizon_days=None)` 自 target_date 拉到当年年末（越年截断留痕，不误显"数据源未接入"）；`EventWindow` 新增 `display_events` 承载展示窗事件，新增 `split_analysis_window()` 按**交易日差 ≤4** 切分析子窗（A2 裁决：单次请求超集，HTTP 仍 1 次/卡/时点）。
+
+### 改进
+
+- `event_window` 投影从"5 交易日全部事件"改为"全量事件（过滤 importance≥medium + 上限 30，防财报季噪音）"；分析链路（event_d / 锚点 / 分支 / certainty）**维持 5 交易日口径不变**（临近=证据语义不被远期事件污染）。
+- L3 前瞻捕捉查询族由"下周"口径扩为"本月 + 下月"，让 FOMC/CPI/财报季等远期宏观日程提前 3-4 周入库；查询族仍恒 4 条（与硬上限 1:1），成本不增。
+
+### 测试
+
+- `tests/unit/test_event_calendar.py`：全量窗越年截断 / 数据源缺失 / 子窗交易日差切分（含跨周末不误纳）用例。
+- `tests/unit/test_rhythm_engine.py`：`project_event_window` importance 过滤 + limit 上限用例。
+- `tests/unit/test_rhythm_master_compose_card.py`：事件 fixture 补齐 date 字段对齐真实契约。
+
+---
+
 ## \[changer\] 2026-09-21 — 主线候选池扩容至 35 真实板块与 3 主线标签展示（P3″）
 
 **开发者**: changer-collab

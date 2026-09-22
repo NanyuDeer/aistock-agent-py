@@ -18,7 +18,11 @@ from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_calendar import EventWindow, load_event_window
+from aistock_agent.services.event_calendar import (
+    EventWindow,
+    load_event_window,
+    split_analysis_window,
+)
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
@@ -259,7 +263,15 @@ async def _compose_card(
         for r in rows[-120:]
     ]
     fg = (await node_api.get_fear_greed() or {}).get("index")
-    win = await load_event_window(target_date)
+    # 需求 2：事件提前展示（不限 5 交易日）。单次拉全量展示窗（到 CALENDAR_MAX_YEAR
+    # 年末截断，G3 越年留痕），再切 ≤5 交易日分析子窗喂 event_confirm/event_d/锚点/
+    # 分支——A2 裁决：单请求超集 + 交易日差口径切分，HTTP 仍 1 次/卡/时点，且分析
+    # 链路永不接触全量（"临近=证据"语义不被远期事件污染）。
+    win_full = await load_event_window(target_date, horizon_days=None)
+    win = split_analysis_window(win_full.events, target_date)
+    # getattr 兼容只声明 events 的旧测试替身（对齐 L509 同款惯例）
+    win.source_missing = getattr(win_full, "source_missing", False)
+    win.calendar_uncovered = getattr(win_full, "calendar_uncovered", False)
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
 
     # 主线判定（spec §5.1，确定性；失败/数据不足 → unavailable + 留痕，H5）
@@ -623,8 +635,14 @@ def _build_rhythm_card(
         # 已知空置（spec §7 S4/S5，仅 temperature_series）：字段未接线（数据源已接入，
         # 见函数 docstring）——显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
         "temperature_series": [],
-        # 展示通道：全部已接入事件（含 medium）；档位通道见上方 win_highs（仅 high）
-        "event_window": engine.project_event_window(win.events),
+        # 展示通道：全量展示窗（需求 2，不限 5 交易日；display_events 为空=旧构造/
+        # 分析子窗/旧测试替身场景 → 回退 events 保持契约稳定）。过滤 high/medium +
+        # 上限 30（G1 防 earnings 密集噪音 / 列表爆炸）；档位通道见上方 win_highs（仅 high）。
+        "event_window": engine.project_event_window(
+            getattr(win, "display_events", None) or win.events,
+            importance_min="medium",
+            limit=30,
+        ),
         "event_source_missing": (
             win.source_missing or getattr(win, "calendar_uncovered", False)
         ),

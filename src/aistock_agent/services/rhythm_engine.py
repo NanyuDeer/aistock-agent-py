@@ -596,17 +596,36 @@ def build_next_event_anchor(
 _EVENT_TYPE_FALLBACK = "seed"
 _EVENT_TYPES = ("delivery", "earnings", "seed", "macro")
 
+# importance 档序（展示过滤用）：high > medium > low。
+_IMPORTANCE_ORDER: dict[str, int] = {"high": 2, "medium": 1, "low": 0}
 
-def project_event_window(events: list[dict[str, object]]) -> list[dict[str, object]]:
-    """卡片事件日历投影（spec §5.2）：`{date,type,title,importance}` 四键。
+
+def _importance_ge(importance: str, minimum: str) -> bool:
+    return _IMPORTANCE_ORDER.get(importance, 0) >= _IMPORTANCE_ORDER.get(minimum, 1)
+
+
+def project_event_window(
+    events: list[dict[str, object]],
+    *,
+    importance_min: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    """卡片事件日历投影（spec §5.2 + 2026-09-21 需求 2）：`{date,type,title,importance}` 四键。
 
     前端 `RhythmEvent` 契约只认这四键（`RhythmCard.vue` 事件日历块）；`type` 缺失
     或非法 → 落 `seed`（前端 eventTypeLabel 有该映射），不返回 null。
+
+    `importance_min`（可选）：仅保留 importance >= 该档的事件（high>medium>low），
+    展示窗放全量后用于丢弃 low 噪音（G1）；缺省 None = 不过滤（既有契约不变）。
+    `limit`（可选）：投影结果条数上限（防 30 日/全量窗列表爆炸）；缺省 None = 不限。
     """
     out: list[dict[str, object]] = []
     for e in events:
         title = str(e.get("title") or "")
         if not title:
+            continue
+        importance = str(e.get("importance") or "medium")
+        if importance_min is not None and not _importance_ge(importance, importance_min):
             continue
         etype = str(e.get("type") or "")
         if etype not in _EVENT_TYPES:
@@ -615,8 +634,10 @@ def project_event_window(events: list[dict[str, object]]) -> list[dict[str, obje
             "date": str(e.get("date") or ""),
             "type": etype,
             "title": title,
-            "importance": str(e.get("importance") or "medium"),
+            "importance": importance,
         })
+        if limit is not None and len(out) >= limit:
+            break
     return out
 
 

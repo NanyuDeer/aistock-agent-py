@@ -315,11 +315,15 @@ async def collect_global_markets() -> list[EventRecord]:
 
 
 # ---------- L3 前瞻捕捉（§4.3/§4.8）----------
+# 2026-09-21（需求 2：事件提前展示，不限 5 交易日）：前瞻窗口由"下周"扩为
+# **本月 + 下月**，让 FOMC/CPI/财报季等远期宏观日程提前 3-4 周入库 → 卡片事件日历
+# 与日历面板可"提前展示"远事件。查询族仍恒 4 条（与 L3_QUERY_HARD_LIMIT 1:1 防失控），
+# 计数上限不变（L3_DAILY_SOFT_LIMIT=8），只改措辞不加数量，成本不增。
 L3_FORWARD_QUERIES: tuple[str, ...] = (
-    "下周 财经日历 重要事件 A股",
-    "下周 A股 财报 业绩预告",
-    "美联储 下周 议息 讲话 经济数据",
-    "下周 宏观数据 发布 CPI PPI PMI 社融",
+    "本月 下月 财经日历 重要事件 A股",
+    "本月 下月 A股 财报 业绩预告",
+    "美联储 本月 下月 议息 讲话 经济数据 发布时间表",
+    "本月 下月 宏观数据 发布 日程 CPI PPI PMI 社融",
 )
 L3_QUERY_HARD_LIMIT = 4          # §4.8：与前瞻子查询族 1:1，防失控
 L3_DAILY_SOFT_LIMIT = 8          # §4.8：按 query 计数，provider failover 重试不计入

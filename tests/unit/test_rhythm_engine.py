@@ -392,3 +392,20 @@ def test_project_event_window_contract_keys() -> None:
                       "title": "2026-09 股指期货交割日", "importance": "medium"}
     assert out[1]["type"] == "seed"
     assert set(out[1].keys()) == {"date", "type", "title", "importance"}
+
+
+def test_project_event_window_importance_min_and_limit() -> None:
+    """展示窗过滤：importance_min 丢弃 low 噪音（G1），limit 防列表爆炸；缺省不过滤。"""
+    events = [
+        {"date": "2026-09-20", "type": "macro", "title": "CPI 数据公布", "importance": "low"},
+        {"date": "2026-09-22", "type": "earnings", "title": "某公司财报", "importance": "medium"},
+        {"date": "2026-09-25", "type": "macro", "title": "FOMC 议息", "importance": "high"},
+    ]
+    assert [e["title"] for e in project_event_window(events)] == ["CPI 数据公布", "某公司财报", "FOMC 议息"]
+    filtered = project_event_window(events, importance_min="medium")
+    assert [e["title"] for e in filtered] == ["某公司财报", "FOMC 议息"]
+    assert [e["importance"] for e in project_event_window(events, limit=2)] == ["low", "medium"]
+    # 过滤 + 上限叠加
+    assert [e["title"] for e in project_event_window(events, importance_min="high", limit=5)] == ["FOMC 议息"]
+    # 缺省 importance → 按 medium 参与排序（不过滤时不丢弃）
+    assert [e["title"] for e in project_event_window([{"date": "2026-09-20", "title": "无 importance"}])] == ["无 importance"]
