@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -34,27 +33,10 @@ HORIZON_TRADING_DAYS = 4
 HORIZON_DISPLAY_YEAR_END_DAY = 31
 HORIZON_DISPLAY_YEAR_END_MONTH = 12
 
-# H3：必须逐字等于 app-api typeFromSource macro 正则词元，禁止各自维护
+# H3：必须逐字等于 app-api typeFromSource macro 正则词元，禁止各自维护。
+# R3：词表仅供 app-api 做 macro 类型分类（跨仓一致），不再用于读侧 high 升格——
+# high 仅由种子（source=L4）显式录入或候选晋升产生。
 MACRO_EVENT_TERMS: tuple[str, ...] = ("发布日程", "CPI", "PPI", "PMI", "社融", "FOMC", "议息")
-EVENT_TITLE_MAX_CHARS = 40
-_COMPANY_TOKENS: tuple[str, ...] = (
-    "股份", "科技", "集团", "有限公司", "银行", "证券", "医药", "公司",
-)
-
-
-def is_high_importance_event(title: str, source: str | None) -> bool:
-    """三判据同时满足才升格 high（黑名单优先于白名单，spec §4.4）。
-
-    P1 超长直接弃（禁止截断取前 N 字）；P2 含 6 位数字或公司主体词 → 否；
-    P3 词元包含命中（L3 前瞻标题为「美联储 X 月议息会议」「美国 X 月 CPI 数据公布」
-    等宏观日程句式，严格头/尾锚定会漏命中；防误升格由 P1/P2 承担）。
-    """
-    t = (title or "").strip()
-    if not t or len(t) > EVENT_TITLE_MAX_CHARS:
-        return False
-    if re.search(r"\d{6}", t) or any(k in t for k in _COMPANY_TOKENS):
-        return False
-    return any(k in t for k in MACRO_EVENT_TERMS)
 
 
 @dataclass
@@ -107,16 +89,8 @@ async def load_event_window(
     if raw is None:
         return EventWindow(source_missing=True)
     events = list(raw)
-    # 读取端 importance 归一（spec §4.4）：L3 前瞻入库 importance 恒 medium，
-    # 命中宏观词元则升格 high；copy-on-write，不污染上游列表。下游
-    # _event_confirm / build_event_branch / build_next_event_anchor 自动共享。
-    normalized: list[dict[str, object]] = []
-    for e in events:
-        if e.get("source") == "L3" and e.get("importance") != "high" \
-                and is_high_importance_event(str(e.get("title") or ""), "L3"):
-            e = {**e, "importance": "high"}
-        normalized.append(e)
-    events = normalized
+    # R3：读侧不再做词表升格——high 仅由种子（source=L4）显式录入或候选晋升
+    # 产生；抓取源（L3/N1）即便命中宏观词元也封顶 medium，原样透传。
     high_events = [e for e in events if e.get("importance") == "high"]
     win = EventWindow(events=events, high_events=high_events, source_missing=False)
     if horizon_days is None:
