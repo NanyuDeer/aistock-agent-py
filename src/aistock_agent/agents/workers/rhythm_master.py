@@ -38,6 +38,7 @@ from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.services.trend_reversal import detect_trend_reversal
 from aistock_agent.utils.date import (
+    CALENDAR_MAX_YEAR,
     add_trading_days,
     prev_trading_day,
     shanghai_today,
@@ -59,6 +60,13 @@ KLINE_LOOKBACK = 200  # 对齐 Node /internal/index/:code/kline 的 days 上限�
 MIN_KLINE_ROWS = 20   # 对齐 rhythm_rebuilt_evidence._trend_score/_volume_score 的
 # len<20 短路下限（G2 裁决）
 SECTOR_LOOKBACK_NATURAL_DAYS = 130  # spec §5.4.1 T4：板块取数窗口（≥65 个交易日行）
+
+# 事件近窗口交易日数（裁决 C4/A2）：前端按 `event_window_near_end_date` 切分平铺/折叠。
+# add_trading_days 语义为"不含 d 向后推 n 个交易日"，故借助该函数取 NEAR_HINT_DAYS 个
+# 交易日得到近窗口末日。无既有数值常量可复用（event_high_hint 仅按 importance 分级，
+# 无日数阈值；event_calendar.HORIZON_TRADING_DAYS=4 是"含当日共 5 交易日"的分析窗偏移，
+# 语义=再加 target 当日，与"近窗口末日"口径不同），此处定为单一取值源，防两处数字分叉。
+NEAR_HINT_DAYS = 5
 
 DEGRADED_TEXT = "节奏大师生成暂时不可用，请稍后重试"
 
@@ -484,6 +492,25 @@ async def _compose_card(
     )
 
 
+def _near_window_end_date(target_date: str) -> str | None:
+    """近窗口（NEAR_HINT_DAYS=5 交易日）末日；越年/异常 → None（裁决 C4）。
+
+    前端按 `event.date <= near_end_date` 切分平铺/折叠；越年（超出 chinese_calendar
+    覆盖 CALENDAR_MAX_YEAR=2026）→ None 时前端近窗全部平铺。与 event_high_hint 阈值
+    同源数值（NEAR_HINT_DAYS）。
+    """
+    try:
+        target = date_cls.fromisoformat(target_date)
+        if target.year > CALENDAR_MAX_YEAR:
+            return None
+        end = add_trading_days(target, NEAR_HINT_DAYS)
+        if end.year > CALENDAR_MAX_YEAR:
+            return None
+        return end.isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_rhythm_card(
     card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]],
     mainline: dict[str, object] | None = None,
@@ -648,6 +675,9 @@ def _build_rhythm_card(
         ),
         # 原点 = 目标交易日（该卡描述的那一天）；basis_date 已是证据日，不可用作原点
         "next_event_anchor": next_anchor,
+        # 近窗口末日（裁决 C4）：前端按 event.date <= near_end_date 切分平铺/折叠；
+        # 越年 → None（前端近窗全部平铺）。与 event_high_hint 同源数值 NEAR_HINT_DAYS。
+        "event_window_near_end_date": _near_window_end_date(card.target_date),
         # 事件临近提示（与 next_event_anchor 同源，共用 skip 逻辑）
         "event_high_hint": event_high_hint,
         # 暂无冲突检测器（Phase 4 态 ↔ Stage 5 态不同源，见 spec §2.2）：恒 False。
