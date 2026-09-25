@@ -81,8 +81,13 @@ def _build_event_message(event: dict[str, object]) -> str:
     title = str(event.get("title", "未知事件"))
     summary = str(event.get("summary", ""))
     url = str(event.get("url", ""))
+    # 数据源显式来源名（如"外盘行情"）：拼入消息文本，LLM 理解阶段直接沿用，
+    # 避免外盘等无 URL 行情事件判不出媒体名恒显示"未知来源"（2026-09-24）。
+    source_name = str(event.get("source_name") or "").strip()
 
     user_message = f"请分析以下重大事件：{title}"
+    if source_name:
+        user_message += f"\n\n事件来源：{source_name}"
     if summary:
         user_message += f"\n\n事件概述：{summary}"
     if url:
