@@ -2,6 +2,32 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [xusiyun] 2026-09-25 — 未来事件影响板块预计算 + 物化时间兜底 + 来源名透传
+
+**开发者**: xusiyun
+
+### 新增
+
+- `services/impact_sectors_precompute.py`：未来 calendar 事件（`source_type='calendar'` 且 `status∈{scheduled,upcoming}` 且 `impact_sectors` 为空）→ 行业向量（KG 语义）匹配（阈值 0.7）取 Top3 写回 `/internal/event-entities`；无可靠行业保持 `[]`（方案 A，不 LLM 强猜）；独立 cron 每日 07:00（在 app-api Calendar 物化 06:40 之后）；幂等守卫「仅列为空才处理」（`updated_at` 节流不可靠，Calendar 物化 cron 会刷新）。
+- `config.py` 新增 `impact_sectors_precompute_enabled`（默认 True）与 `scheduler_impact_sectors_precompute_cron`（`0 7 * * *`）；`scheduler.py` 注册该 job（misfire_grace_time=3600）。
+- 物化时间兜底（spec §5B.3）：抽不出绝对日期时改用发布时间兜底（`publish_time_fallback`，`time_confidence=0.5`）；`_extract_publish_time` 字段序 publish_time→published_at→event_time→ctime_stamp→ctime→create_time→date，`_normalize_datetime_to_iso` 兼容 ISO/无时区/unix 秒毫秒；仅落已发生/当日，不投未来。
+
+### 修复
+
+- 新增 STOCK 事件守卫：`event_scope='STOCK'` 的普通个股事件不物化为 Event Entity（不进重大事件时间线），记 `event_entity_materialize_skipped_stock`。
+- `collect_ths_original` 补齐 `source_url` → `url` 映射（Node 侧字段为 `source_url`，`normalize_event` 只认 `url/link`，否则同花顺原创事件 url 恒空）。
+- 外盘行情事件携带 `source_name="外盘行情"`：经 `event_store`/`event_conduction` 透传并拼入 user_msg「事件来源：X」，修外盘无 URL 事件恒显示「未知来源」。
+
+### 改进
+
+- `config.py`：`event_entity_enabled` 默认由 False 翻为 True（app-api 端点已落地，News 通道重大事件开始物化）。
+
+### 测试
+
+- `tests/unit/test_impact_sectors_precompute.py`（13 passed）、`tests/unit/test_event_entity_time_extract.py`。
+
+---
+
 ## \[changer\] 2026-09-22 — 事件前瞻主体化（种子 / 候选晋升 / 预期差 / 读侧折叠）
 
 **开发者**: changer-collab

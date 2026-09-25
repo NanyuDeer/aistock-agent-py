@@ -66,6 +66,9 @@ class EventRecord(TypedDict):
     # 重大事件时间线（spec §6.1/§6.2）：物化响应回填的 event_status（写库快照/读时重算，
     # app-api 权威）；缺省 None（未物化/开关关闭）时传导走旧路径（逐字节不变）。
     app_event_status: str | None
+    # 数据源携带的来源名称（如"外盘行情"）：经传导 user_msg 透传，LLM 理解阶段
+    # 可直接判定媒体名，避免外盘等无 URL 行情事件恒显示"未知来源"（2026-09-24）。
+    source_name: str | None
 
 
 def event_content_hash(title: str, url: str) -> str:
@@ -144,6 +147,9 @@ def normalize_event(
     if source_level not in ("A", "B", "C", "D"):
         source_level = "C"
 
+    # 数据源携带的来源名称（如"外盘行情"）；无则 None，传导阶段回退 LLM 判定
+    source_name = str(raw.get("source_name") or "").strip() or None
+
     content_hash = event_content_hash(title, url)
     event_id = f"{score_date}-{content_hash[:16]}"
 
@@ -173,6 +179,7 @@ def normalize_event(
         symbol=symbol,
         stock_name=stock_name,
         industry=industry,
+        source_name=source_name,
         event_scope=detection["event_scope"],
         event_scope_source=detection["event_scope_source"],
         event_scope_confidence=detection["event_scope_confidence"],
