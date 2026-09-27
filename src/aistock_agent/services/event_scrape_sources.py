@@ -198,6 +198,10 @@ async def collect_ths_original(score_date: str) -> list[EventRecord]:
             continue
         raw: dict[str, Any] = dict(row)
         raw.setdefault("direction", "neutral")
+        # 对齐字段：Node insight/sources 行字段为 source_url（非 url/link），
+        # normalize_event 只认 url/link → 这里补齐，否则同花顺原创事件 url 恒空
+        # （2026-09-24：与 eastmoney 的 detail_url 映射对齐，I2 同类问题）。
+        raw.setdefault("url", raw.get("source_url") or raw.get("detail_url") or "")
         # Min-1：显式映射 summary/involved_keywords（Node 源字段为 content/keywords）。
         # keywords 是 JSONB，可能已解析为 list 或仍为 JSON 字符串，做防御解析。
         raw["summary"] = str(raw.get("content") or raw.get("summary") or "").strip()
@@ -298,6 +302,10 @@ async def collect_global_markets() -> list[EventRecord]:
                 "title": f"{name} 隔夜表现",
                 "summary": f"{name}: {price} ({pct}%)",
                 "url": "",
+                # 外盘行情快照无原文 URL 且无媒体名：显式携带来源名，
+                # 经 normalize_event/传导透传，避免 LLM 判不出媒体恒显示"未知来源"
+                # （2026-09-24）。
+                "source_name": "外盘行情",
                 "direction": (
                     "positive" if pct > 0 else "negative" if pct < 0 else "neutral"
                 ),
@@ -386,36 +394,125 @@ def _extract_event_start_time(title: str, content: str, ref_date: str) -> str | 
     return None
 
 
+def _normalize_datetime_to_iso(value: str) -> str | None:
+    """把各类发布时间字符串归一到上海时区 ISO（publish_time_fallback 用）。
+
+    支持：ISO（含 +08:00/Z）、'YYYY-MM-DD HH:mm[:ss]'、'YYYY-MM-DD'、unix 秒/毫秒。
+    无时区/仅日期的输入一律按上海时区计（对齐 _event_shanghai_date 惯例）；
+    解析失败返回 None（best-effort，绝不猜时间）。
+    """
+    text = str(value).strip()
+    if not text:
+        return None
+    # unix 秒/毫秒（纯数字）
+    if text.isdigit():
+        ts = int(text)
+        if ts > 10_000_000_000:  # 毫秒 → 秒
+            ts //= 1000
+        try:
+            return datetime.fromtimestamp(ts, _SHANGHAI_TZ).isoformat(timespec="seconds")
+        except (ValueError, OverflowError, OSError):
+            return None
+    # ISO 以 Z 结尾 → 补 +00:00（Python 3.10 fromisoformat 不支持 Z，统一兜底）
+    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_SHANGHAI_TZ)
+    return dt.astimezone(_SHANGHAI_TZ).isoformat(timespec="seconds")
+
+
+def _extract_publish_time(event: EventRecord) -> str | None:
+    """从事件原始数据抽取发布时间（spec §5B.3 publish_time_fallback）。
+
+    字段优先级（覆盖各源通用名）：publish_time → published_at → event_time →
+    ctime_stamp → ctime → create_time → date；payload 与 EventRecord 顶层都试
+    （normalize_event 保留原始 raw 于 payload）。
+    抽不出 → None（外层跳过物化——无法确定事件时间，不硬塞时间线）。
+    """
+    candidates: list[object] = []
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        for key in (
+            "publish_time",
+            "published_at",
+            "event_time",
+            "ctime_stamp",
+            "ctime",
+            "create_time",
+            "date",
+        ):
+            value = payload.get(key)
+            if value is not None:
+                candidates.append(value)
+    for key in ("publish_time", "published_at"):
+        value = event.get(key)
+        if value is not None:
+            candidates.append(value)
+    for value in candidates:
+        iso = _normalize_datetime_to_iso(str(value).strip())
+        if iso:
+            return iso
+    return None
+
+
 async def _materialize_event_entity(
     event: EventRecord, now_iso: str
 ) -> dict[str, str] | None:
     """事件物化到 /internal/event-entities（spec §5A.3/§5B.3 P0.5 收口）。
 
     「有明确绝对日期即物化」——未来/已发生都落（spec §5B.3 第 4 条，时间三分离：
-    `event_start_time` 只认抽取的绝对日期）；抽不出日期（publish_time_fallback
-    语义，spec §5B.3 第 3 条）→ 返回 None，不 SUP 注入。
-    `time_confidence=0.9` = 抽取方法确定性（正则命中绝对日期；措辞分档归 P1，
-    design-debate A5 裁决，绝不 LLM 猜日期）。
+    `event_start_time` 只认抽取的绝对日期）；抽不出日期 → 发布时间兜底
+    （spec §5B.3 第 3 条 publish_time_fallback，`time_source` 区分），让全部重大
+    新闻事件都能进时间线（2026-09-24 用户需求收口）；两者都没有 → 返回 None。
+    `time_confidence`：news_extraction=0.9（正则命中绝对日期，确定性高）、
+    publish_time_fallback=0.5（derived 低置信，前端可提示「以发布时间计」）；
+    绝不 LLM 猜日期。
     端点未落地/失败 → warning、返回 None，绝不阻断抓取/传导主链路。
     返回 `{"event_id", "event_status"}` 供外层物化循环回填 EventRecord（A1a 裁决：
     本函数只物化不写回；None → 外层置未回填标记，守卫兜底走旧路径）。
     """
     if not settings.event_entity_enabled:
         return None
+    # 事件范围收口（重大事件时间线）：普通个股事件不进时间线。
+    # STOCK 事件在传导入口已被过滤（由个股情报 Agent 消费），时间线同样不收——
+    # 否则「某公司高管变动/订单/业绩」等个股事件会挤占重大事件池。
+    # 重大公司事件（重组/并购/技术突破等）的白名单放行属后续增强，本期一律不物化。
+    if str(event.get("event_scope") or "").strip().upper() == "STOCK":
+        logger.info(
+            "event_entity_materialize_skipped_stock",
+            title=str(event.get("title", ""))[:50],
+            event_scope_source=str(event.get("event_scope_source", "")),
+        )
+        return None
     event_start = _extract_event_start_time(
         str(event.get("title", "")),
         str(event.get("summary", "")),
         str(event.get("score_date", now_iso[:10])),
     )
-    if not event_start:
-        return None
-    body: dict[str, object] = {
-        "title": str(event.get("title", "")),
-        "source_type": "news",
-        "event_start_time": f"{event_start}T00:00:00+08:00",
-        "time_source": "news_extraction",
-        "time_confidence": 0.9,
-    }
+    if event_start:
+        body: dict[str, object] = {
+            "title": str(event.get("title", "")),
+            "source_type": "news",
+            "event_start_time": f"{event_start}T00:00:00+08:00",
+            "time_source": "news_extraction",
+            "time_confidence": 0.9,
+        }
+    else:
+        # 抽不出绝对日期 → 发布时间兜底：事件时间 = 新闻发布时间（已发生事件按
+        # 发布时间落时间线过去/今天；发布时间恒 ≤ now，不会误投为未来事件）。
+        publish_iso = _extract_publish_time(event)
+        if not publish_iso:
+            return None
+        body = {
+            "title": str(event.get("title", "")),
+            "source_type": "news",
+            "event_start_time": publish_iso,
+            "time_source": "publish_time_fallback",
+            "time_confidence": 0.5,
+        }
     try:
         resp = await node_api.post_event_entity(body)
         if isinstance(resp, dict) and resp.get("event_id"):
