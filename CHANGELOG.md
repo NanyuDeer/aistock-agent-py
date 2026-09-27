@@ -2,6 +2,31 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-09-26 — 洞察报告改结构化 blocks 输出（移除 reportlab）+ 异动解读「分析维度三」改三列表格
+
+**开发者**: 李俊良
+
+### 新增
+
+- `services/insight_report.py`：`build_report_blocks(data)`（原 `build_report_sections` 的 `lines` 彻底移除）；Block 判别联合 6 类（`kv`/`verdict`/`candidates`/`chain`/`evidence`/`list`）；空节 → `blocks: []`（规则统一为"源数据非空才出块"）。
+- 六阶段因果链**只取 `role=primary` 主链**（真实 artifact 通常有 primary + alternative 两条链、各 6 个节点，旧实现把 12 个节点平铺、无任何分界，是"看不出这是因果链"的根因之一）；链节点与候选项**同时输出中文标签与机器 key**（`stageKey`/`epistemicKey`/`statusKey`），供前端做中性弱化判定而不必匹配中文标签（改文案即静默失效）。
+- `POST /api/agent/insight-report/sections`（替代 `/insight-report/render`）。
+
+### 变更
+
+- AI 异动解读「分析维度三：产业链机会」改为三列表格：`MASTER_PROMPT` 强制单行表格「环节 | 标的 | 理由」——一行一环节、标的只写名称不带代码、理由 ≤8 字、禁止留空单元格、总行数 3~5 行；`GRAPH_DIVERGE_PROMPT` 输出口径同步收紧（示例理由改短句 + 同口径硬性要求），让 Master 拿到干净素材、减少格式漂移。
+- 删除 reportlab 渲染与内嵌字体（2.33MB）；`pyproject.toml` 移除 reportlab 依赖。
+
+### 测试
+
+- `tests/unit/test_insight_report.py` 重写为 blocks 断言（主链筛选 / 无 primary 降级 / 无链空节 / 脏数据跳过 / `*Key` 字段 / 空节规则 / 中文化回归），**25 passed**；`tests/integration/test_alert_agent.py` **10 passed**。
+- `ruff check` 改动文件 All checks passed（注意 ruff 的 E501 按 **CJK 双宽**计，中文 prompt 单行约 50 字即到 100 上限）。
+- 实测：真实跑一次 alert 分析（603065）输出即三列表格（标的无代码、理由 6 字、无空单元格），且 `display_report.stocks` 仍为代码数组；**独立脚本直跑 worker 必须先 `await HttpClientPool.init(...)`**，否则 `node_api` 全部报 `not initialized`、子 Agent 静默降级（资讯/图谱工具全失败），输出不可信。
+
+### 文档
+
+- `AGENTS.md` / `README.md` 同步 blocks 口径（章节构建改为纯模板 JSON blocks，无 LLM / 无字体依赖）。
+
 ## \[changer\] 2026-09-22 — 事件前瞻主体化（种子 / 候选晋升 / 预期差 / 读侧折叠）
 
 **开发者**: changer-collab
