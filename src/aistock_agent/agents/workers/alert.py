@@ -15,8 +15,9 @@
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime
+from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -26,17 +27,21 @@ from aistock_agent.constants import SSEEventType
 from aistock_agent.prompts.workers.alert import (
     GRAPH_DIVERGE_PROMPT,
     MASTER_DETAIL_PROMPT,
-    MASTER_PROMPT,          # 仍被 stream() 使用；Task 5 重写 stream() 后连同常量一并移除
     MASTER_PREVIEW_PROMPT,
     NEWS_INTEL_PROMPT,
     RISK_DIAG_PROMPT,
 )
+from aistock_agent.prompts.workers.alert_reasoning import (
+    ALERT_REASONING_FALLBACKS,
+    heartbeat_fallback,
+    render_alert_reasoning_prompt,
+)
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think, get_quick_think
+from aistock_agent.services.reasoning_stream import stream_reasoning_text
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
 from aistock_agent.utils.message import extract_final_ai_response
-from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 logger = structlog.get_logger()
 
@@ -178,6 +183,62 @@ def _merge_report(
     }
 
 
+# 心跳节奏与上限（2026-09-30）：长等待期持续给用户反馈，但要有界
+ALERT_REASONING_HEARTBEAT_SEC = 8.0
+ALERT_REASONING_MAX_HEARTBEATS = 8
+
+
+async def _heartbeat_loop(
+    sink: Callable[[dict[str, object]], Awaitable[None]],
+    *,
+    node: str,
+    symbol: str,
+    stage: str,
+    stop_event: asyncio.Event,
+    done_steps: list[str],
+) -> None:
+    """阶段进行中每 ALERT_REASONING_HEARTBEAT_SEC 推一条解说，阶段结束即停。"""
+    elapsed = 0.0
+    for _ in range(ALERT_REASONING_MAX_HEARTBEATS):
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=ALERT_REASONING_HEARTBEAT_SEC
+            )
+            return  # 阶段已结束
+        except TimeoutError:
+            pass
+        elapsed += ALERT_REASONING_HEARTBEAT_SEC
+        prompt = render_alert_reasoning_prompt(
+            scene="alert_heartbeat",
+            symbol=symbol,
+            stage=stage,
+            elapsed_sec=int(elapsed),
+            done_steps="、".join(done_steps) or "暂无",
+        )
+        await stream_reasoning_text(
+            sink, prompt=prompt, node=node, fallback_label=heartbeat_fallback()
+        )
+
+
+async def _drain_until_done(
+    work: asyncio.Future[Any], queue: asyncio.Queue[dict[str, object]]
+) -> AsyncGenerator[dict[str, object], None]:
+    """在 work 运行期间把 queue 中的帧逐条吐出（0.2s 轮询，兼顾延迟与开销）。"""
+    while not work.done() or not queue.empty():
+        try:
+            yield await asyncio.wait_for(queue.get(), timeout=0.2)
+        except TimeoutError:
+            continue
+
+
+async def _drain_queue(
+    queue: asyncio.Queue[dict[str, object]]
+) -> AsyncGenerator[dict[str, object], None]:
+    """排空 queue 中剩余帧（非阻塞）。"""
+    while not queue.empty():
+        yield queue.get_nowait()
+
+
 # ── SSE 流式接口 ──────────────────────────────────────────────────────────────
 
 
@@ -210,134 +271,154 @@ def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
 
 
 async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], None]:
-    """异动提醒 SSE 流：并行子 Agent → Master 流式输出"""
+    """异动提醒 SSE 流：并行子 Agent → Master（速览/详情并行）→ 逐帧推送。
+
+    2026-09-30 改造：由"直接 yield"改为 asyncio.Queue + sink，使等待期可以
+    并发推送 reasoning 解说（含心跳）与 preview 速览帧。
+    """
     symbol = str(state.get("symbol") or "")
     cycle_label = _resolve_cycle(state)
 
-    # ═══════ 阶段 1：并行执行 3 个子 Agent ═══════
-    yield {"type": SSEEventType.TOOL_START, "tool": "sub_agents",
-           "label": "正在启动多维分析（资讯情报 + 盘口风控 + 图谱发散）"}
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
-    results = await asyncio.gather(
-        _run_sub_agent(
-            name="资讯情报", prompt_template=NEWS_INTEL_PROMPT, tools=get_tools("alert_news"),
-            model_type="quick", symbol=symbol, cycle_label=cycle_label,
-            user_instruction=f"查询 {symbol} 的最新资讯，找出异动原因",
-        ),
-        _run_sub_agent(
-            name="盘口风控", prompt_template=RISK_DIAG_PROMPT, tools=get_tools("alert_risk"),
-            model_type="deep", symbol=symbol, cycle_label=cycle_label,
-            user_instruction=f"分析 {symbol} 的盘口结构和资金面，判断真实意图",
-        ),
-        _run_sub_agent(
-            name="图谱发散",
-            prompt_template=GRAPH_DIVERGE_PROMPT,
-            tools=get_tools("alert_graph"),
-            model_type="quick", symbol=symbol, cycle_label=cycle_label,
-            user_instruction=f"以 {symbol} 为中心，用知识图谱寻找产业链补涨标的",
-        ),
-    )
+    async def _sink(payload: dict[str, object]) -> None:
+        await queue.put(payload)
 
-    news_result, risk_result, graph_result = results
-
-    yield {"type": SSEEventType.TOOL_END, "tool": "sub_agents"}
-
-    # ═══════ 阶段 2：Master Agent 汇聚 ═══════
-    yield {"type": SSEEventType.TOOL_START, "tool": "master",
-           "label": "正在生成异动深度研判"}
-
-    master_prompt = MASTER_PROMPT.format(symbol=symbol, cycle=cycle_label)
-    master_input = f"""请基于以下三份子Agent分析报告，生成 {symbol} 的异动深度研判：
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-【资讯情报Agent报告】
-{news_result}
-
-【盘口风控Agent报告】
-{risk_result}
-
-【图谱发散Agent报告】
-{graph_result}
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-请按输出格式生成完整研判报告。"""
-
-    llm = get_deep_think()
-    master_agent = create_react_agent(llm, [])  # Master 不调用工具，纯融合
-
-    _llm_started = False
-    _response_chunks: list[str] = []
+    async def _flush(
+        bg: list[asyncio.Task[Any]]
+    ) -> AsyncGenerator[dict[str, object], None]:
+        if bg:
+            await asyncio.gather(*bg, return_exceptions=True)
+        async for frame in _drain_queue(queue):
+            yield frame
 
     try:
-        async for event in master_agent.astream_events(
-            {
-                "messages": [
-                    SystemMessage(content=master_prompt),
-                    HumanMessage(content=master_input),
-                ]
-            },
-            version="v2",
-        ):
-            sse_event = map_langgraph_event_to_sse(event)
-            if sse_event is None:
-                continue
+        # ═══════ 阶段 1：并行执行 3 个子 Agent（带解说 + 心跳）═══════
+        yield {"type": SSEEventType.TOOL_START, "tool": "sub_agents",
+               "label": "正在启动多维分析（资讯情报 + 盘口风控 + 图谱发散）"}
 
-            event_t = sse_event.get("type")
-            if event_t == SSEEventType.TEXT:
-                # 收集 LLM 输出 chunk 用于后续解析，但不向前端 yield TEXT 事件
-                # 原因：Master 输出是 JSON 双层结构（display_report + podcast_brief），
-                # 流式吐 token 会让前端看到原始 JSON 文本（含 stocks/risks 等内部字段）。
-                # 改为：流式过程只发进度事件，done 前发 result 事件携带解析后结构。
-                content = sse_event.get("content", "")
-                if isinstance(content, str):
-                    _response_chunks.append(content)
-                if not _llm_started:
-                    _llm_started = True
-                    yield {"type": SSEEventType.TOOL_END, "tool": "master"}
-                    yield {"type": SSEEventType.LLM_START, "label": "正在生成异动深度研判"}
+        phase1_stop = asyncio.Event()
+        phase1_bg = [
+            asyncio.create_task(stream_reasoning_text(
+                _sink,
+                prompt=render_alert_reasoning_prompt(
+                    scene="alert_scan", symbol=symbol, cycle=cycle_label,
+                ),
+                node="alert_scan",
+                fallback_label=ALERT_REASONING_FALLBACKS["alert_scan"],
+            )),
+            asyncio.create_task(_heartbeat_loop(
+                _sink, node="alert_scan", symbol=symbol, stage="多维分析",
+                stop_event=phase1_stop, done_steps=["多维分析"],
+            )),
+        ]
+        work1 = asyncio.gather(
+            _run_sub_agent(
+                name="资讯情报", prompt_template=NEWS_INTEL_PROMPT, tools=get_tools("alert_news"),
+                model_type="quick", symbol=symbol, cycle_label=cycle_label,
+                user_instruction=f"查询 {symbol} 的最新资讯，找出异动原因",
+            ),
+            _run_sub_agent(
+                name="盘口风控", prompt_template=RISK_DIAG_PROMPT, tools=get_tools("alert_risk"),
+                model_type="deep", symbol=symbol, cycle_label=cycle_label,
+                user_instruction=f"分析 {symbol} 的盘口结构和资金面，判断真实意图",
+            ),
+            _run_sub_agent(
+                name="图谱发散", prompt_template=GRAPH_DIVERGE_PROMPT,
+                tools=get_tools("alert_graph"),
+                model_type="quick", symbol=symbol, cycle_label=cycle_label,
+                user_instruction=f"以 {symbol} 为中心，用知识图谱寻找产业链补涨标的",
+            ),
+        )
+        async for frame in _drain_until_done(work1, queue):
+            yield frame
+        phase1_stop.set()
+        news_result, risk_result, graph_result = await work1
+        async for frame in _flush(phase1_bg):
+            yield frame
 
-        # 流结束后解析 + 缓存
-        final_response = "".join(_response_chunks)
-        if final_response:
-            _cache_alert_result(state, final_response)
+        yield {"type": SSEEventType.TOOL_END, "tool": "sub_agents"}
 
-            # 解析双层结构，通过 result 事件把结构化数据发给前端
-            display_report: dict[str, object] | None = None
-            podcast_brief: str | None = None
-            try:
-                parsed = json.loads(final_response)
-                if isinstance(parsed, dict):
-                    display_report = parsed.get("display_report")
-                    podcast_brief = parsed.get("podcast_brief")
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("alert_result_parse_failed", symbol=symbol)
+        # ═══════ 阶段 2：Master 速览 + 详情并行 ═══════
+        yield {"type": SSEEventType.TOOL_START, "tool": "master",
+               "label": "正在生成异动深度研判"}
 
-            # 持久化到数据库（user_id=symbol，前端可按 symbol+date 查询缓存）
-            # 与 run() 函数的 scheduler 分支一致，但 data_source 标记为 'user'
-            report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
-            try:
-                await node_api.save_analysis_report(
-                    report_type="alert",
-                    report_date=report_date,
-                    user_id=symbol,
-                    data_source="user",
-                    content={
-                        "symbol": symbol,
-                        "display_report": display_report or {},
-                        "podcast_brief": podcast_brief or "",
-                    },
-                )
-                logger.info("alert_persisted_for_user", symbol=symbol, report_date=report_date)
-            except Exception as e:
-                logger.warning("alert_persist_failed", symbol=symbol, error=str(e))
+        master_reports = (news_result, risk_result, graph_result)
+        digest = " / ".join(
+            f"【{name}】{(text or '')[:80]}"
+            for name, text in zip(("资讯情报", "盘口风控", "图谱发散"), master_reports)
+        )
 
-            yield {
-                "type": "result",
-                "display_report": display_report or {},
-                "podcast_brief": podcast_brief or "",
-                "raw": final_response,  # 兜底：解析失败时前端可用 raw 渲染
-            }
+        phase2_stop = asyncio.Event()
+        phase2_bg = [
+            asyncio.create_task(stream_reasoning_text(
+                _sink,
+                prompt=render_alert_reasoning_prompt(
+                    scene="alert_master", symbol=symbol, cycle=cycle_label, digest=digest,
+                ),
+                node="alert_master",
+                fallback_label=ALERT_REASONING_FALLBACKS["alert_master"],
+            )),
+            asyncio.create_task(_heartbeat_loop(
+                _sink, node="alert_master", symbol=symbol, stage="汇聚研判",
+                stop_event=phase2_stop, done_steps=["多维分析", "汇聚研判"],
+            )),
+        ]
 
+        preview_task = asyncio.create_task(
+            _run_master_preview(symbol, cycle_label, master_reports)
+        )
+        detail_task = asyncio.create_task(
+            _run_master_detail(symbol, cycle_label, master_reports)
+        )
+
+        # 速览先到 → 立即推 preview 帧（首屏提前）
+        async for frame in _drain_until_done(preview_task, queue):
+            yield frame
+        preview_fields = await preview_task
+        yield {"type": SSEEventType.PREVIEW, "display_report": dict(preview_fields)}
+
+        # 详情到齐 → 合并、落库、推 result
+        async for frame in _drain_until_done(detail_task, queue):
+            yield frame
+        detail_fields, podcast_brief = await detail_task
+        phase2_stop.set()
+
+        display_report = _merge_report(preview_fields, detail_fields)
+        raw_json = json.dumps(
+            {"display_report": display_report, "podcast_brief": podcast_brief},
+            ensure_ascii=False,
+        )
+        _cache_alert_result(dict(state), raw_json)
+
+        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        try:
+            await node_api.save_analysis_report(
+                report_type="alert",
+                report_date=report_date,
+                user_id=symbol,
+                data_source="user",
+                content={
+                    "symbol": symbol,
+                    "display_report": display_report,
+                    "podcast_brief": podcast_brief,
+                },
+            )
+            logger.info("alert_persisted_for_user", symbol=symbol, report_date=report_date)
+        except Exception as e:
+            logger.warning("alert_persist_failed", symbol=symbol, error=str(e))
+
+        yield {"type": SSEEventType.TOOL_END, "tool": "master"}
+        yield {"type": SSEEventType.LLM_START, "label": "正在生成异动深度研判"}
+        async for frame in _flush(phase2_bg):
+            yield frame
+
+        yield {
+            "type": "result",
+            "display_report": display_report,
+            "podcast_brief": podcast_brief,
+            "raw": raw_json,
+        }
         yield {"type": SSEEventType.DONE}
     except Exception as e:
         logger.error("alert_master_failed", symbol=symbol, error=str(e), exc_info=True)
