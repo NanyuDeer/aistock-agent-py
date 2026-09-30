@@ -314,3 +314,39 @@ async def test_master_split_merges_preview_and_detail():
         "risks": ["风险A"],
     }
     assert merged["podcast_brief"] == "异动摘要"
+
+
+@pytest.mark.asyncio
+async def test_run_tolerates_detail_failure_keeps_preview():
+    """详情抛异常时 run() 用速览降级合并、不抛异常（合并前必修 A）。
+
+    修复前 gather 无 return_exceptions，_run_master_detail 抛异常会整体上抛 →
+    run() 落入 except 返回降级提示文本，速览已成功的结果被连带丢弃；
+    本用例在未修实现下应因 final_response 非常规 JSON 而失败（RED）。
+    """
+    with (
+        patch("aistock_agent.agents.workers.alert._run_sub_agent",
+              autospec=True, return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_master_preview",
+              new=AsyncMock(return_value={
+                  "summary": "异动结论", "impact": "利好", "keywords": ["涨价"],
+              })),
+        patch("aistock_agent.agents.workers.alert._run_master_detail",
+              new=AsyncMock(side_effect=RuntimeError("detail boom"))),
+        patch("aistock_agent.agents.workers.alert._cache_alert_result"),
+    ):
+        result = await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+        })
+
+    merged = json.loads(result["final_response"])
+    assert merged["display_report"] == {
+        "summary": "异动结论",
+        "impact": "利好",
+        "keywords": ["涨价"],
+        "details": "",
+        "stocks": [],
+        "risks": [],
+    }
+    assert merged["podcast_brief"] == ""

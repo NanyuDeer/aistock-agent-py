@@ -153,6 +153,30 @@ async def test_aclose_stops_bg_tasks_without_leak():
 
 
 @pytest.mark.asyncio
+async def test_loads_object_warns_on_malformed_json():
+    """合并前必修 B：_loads_object 解析失败/非 dict 时发出 alert_json_parse_failed（带截断原文）。"""
+    with patch(f"{_ALERT_MOD}.logger") as mock_logger:
+        assert alert_mod._loads_object('{"summary": broken json') == {}
+        assert alert_mod._loads_object("[1, 2, 3]") == {}
+
+    assert mock_logger.warning.call_count == 2
+    events = [c.args[0] for c in mock_logger.warning.call_args_list]
+    assert events == ["alert_json_parse_failed", "alert_json_parse_failed"]
+    # 原文预览被截断，避免畸形 JSON 刷爆日志
+    raw_preview = mock_logger.warning.call_args_list[0].kwargs["raw_preview"]
+    assert "broken json" in raw_preview
+    assert len(raw_preview) <= 200
+
+
+@pytest.mark.asyncio
+async def test_loads_object_valid_dict_no_warning():
+    """合并前必修 B：合法 dict 输入不应触发解析失败日志。"""
+    with patch(f"{_ALERT_MOD}.logger") as mock_logger:
+        assert alert_mod._loads_object('{"summary": "ok"}') == {"summary": "ok"}
+    mock_logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_calls_match_real_signature():
     """回归护栏：_run_sub_agent 的每个调用都必须与真实形参签名匹配。
 

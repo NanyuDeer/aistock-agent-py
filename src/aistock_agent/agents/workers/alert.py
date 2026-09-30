@@ -126,12 +126,32 @@ async def _invoke_master(llm, prompt: str, user_input: str) -> str:
 
 
 def _loads_object(raw: str) -> dict[str, object]:
-    """宽松解析：失败/非 dict 一律返回空 dict。"""
+    """宽松解析：失败/非 dict 一律返回空 dict。
+
+    2026-09-30 合并前必修：LLM 输出畸形 JSON 属高频故障模式，静默吞掉会让
+    "字段全空"无从定位，故失败时打一条带截断原文的 warning 供可观测。
+    注意：保持纯函数签名（无 symbol）——不受影响地服务多处调用。
+    """
     try:
         parsed = json.loads(raw) if raw else {}
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(
+            "alert_json_parse_failed",
+            raw_preview=_truncate(str(raw)),
+            error=str(e),
+        )
         return {}
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "alert_json_parse_failed",
+            raw_preview=_truncate(str(raw)),
+        )
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _truncate(text: str, limit: int = 200) -> str:
+    """截断日志原文预览，避免畸形 JSON 刷爆日志（默认 200 字符）。"""
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 async def _run_master_preview(
@@ -484,10 +504,31 @@ async def run(state: AgentState) -> dict[str, object]:
         news_result, risk_result, graph_result = results
 
         master_reports = (news_result, risk_result, graph_result)
-        preview_fields, (detail_fields, podcast_brief) = await asyncio.gather(
+        # 2026-09-30 合并前必修：gather 需 return_exceptions —— 详情走 get_deep_think
+        # （更慢、更易失败），若任一失败即整体异常，速览已成功的结果会被连带丢弃；
+        # 改为逐侧降级为空值并打 warning，再交由 _merge_report 的 or 兜底合并。
+        results = await asyncio.gather(
             _run_master_preview(str(symbol), cycle_label, master_reports),
             _run_master_detail(str(symbol), cycle_label, master_reports),
+            return_exceptions=True,
         )
+        preview_res, detail_res = results
+        if isinstance(preview_res, BaseException):
+            logger.warning(
+                "alert_master_preview_failed",
+                symbol=str(symbol),
+                error=str(preview_res),
+            )
+            preview_res = {}
+        if isinstance(detail_res, BaseException):
+            logger.warning(
+                "alert_master_detail_failed",
+                symbol=str(symbol),
+                error=str(detail_res),
+            )
+            detail_res = ({}, "")
+        preview_fields = preview_res
+        detail_fields, podcast_brief = detail_res
         display_report = _merge_report(preview_fields, detail_fields)
 
         # 供后续 save 分支使用（保持原有变量语义）

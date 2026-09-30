@@ -60,7 +60,7 @@ async def stream_reasoning_text(
 
 
 async def _with_timeout(aiter: Any, seconds: float) -> Any:
-    """给 async iterator 加首块超时（首个 chunk 之后不再限制）。"""
+    """给 async iterator 加逐块超时：循环内对每一块都 wait_for(seconds)。"""
     async def _next() -> Any:
         return await aiter.__anext__()
 
