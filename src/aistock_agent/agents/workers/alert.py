@@ -331,18 +331,18 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         work1 = asyncio.gather(
             _run_sub_agent(
                 name="资讯情报", prompt_template=NEWS_INTEL_PROMPT, tools=get_tools("alert_news"),
-                model_type="quick", symbol=symbol, cycle=cycle_label,
+                model_type="quick", symbol=symbol, cycle_label=cycle_label,
                 user_instruction=f"查询 {symbol} 的最新资讯，找出异动原因",
             ),
             _run_sub_agent(
                 name="盘口风控", prompt_template=RISK_DIAG_PROMPT, tools=get_tools("alert_risk"),
-                model_type="deep", symbol=symbol, cycle=cycle_label,
+                model_type="deep", symbol=symbol, cycle_label=cycle_label,
                 user_instruction=f"分析 {symbol} 的盘口结构和资金面，判断真实意图",
             ),
             _run_sub_agent(
                 name="图谱发散", prompt_template=GRAPH_DIVERGE_PROMPT,
                 tools=get_tools("alert_graph"),
-                model_type="quick", symbol=symbol, cycle=cycle_label,
+                model_type="quick", symbol=symbol, cycle_label=cycle_label,
                 user_instruction=f"以 {symbol} 为中心，用知识图谱寻找产业链补涨标的",
             ),
         )

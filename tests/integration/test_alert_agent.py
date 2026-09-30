@@ -103,7 +103,7 @@ async def test_master_synthesizes_sub_agent_results():
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=agents),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         mock_sub.side_effect = [
             "资讯情报分析结果",
@@ -135,7 +135,7 @@ async def test_scheduler_persists_alert_with_symbol_bound_real_structure():
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         await run({
@@ -173,7 +173,7 @@ async def test_sub_agent_failure_not_crash():
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=agents),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         # 模拟盘口风控子 Agent 降级
         mock_sub.side_effect = [
@@ -198,7 +198,7 @@ async def test_run_uses_both_llm_types():
         patch(_GET_DEEP, return_value=MagicMock()) as mock_deep,
         patch(_GET_QUICK, return_value=MagicMock()) as mock_quick,
         patch(_CREATE_REACT, side_effect=agents),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         mock_sub.return_value = "子Agent结果"
 
@@ -221,7 +221,7 @@ async def test_stock_trace_saves_with_correct_contract():
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         result = await run({
@@ -270,7 +270,7 @@ async def test_user_trigger_does_not_save_report(
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         result = await run({
@@ -295,7 +295,7 @@ async def test_master_split_merges_preview_and_detail():
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=agents),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
     ):
         result = await run({
             "symbol": "600519",

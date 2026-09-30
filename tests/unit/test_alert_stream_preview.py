@@ -1,5 +1,6 @@
 """alert 流式帧时序单测 — preview 先于 result、reasoning 帧存在。"""
 import asyncio
+import inspect
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,7 +26,8 @@ async def _collect(state, *, preview=None, detail=None, delay=0.0):
         )
 
     with (
-        patch(f"{_ALERT_MOD}._run_sub_agent", new=AsyncMock(return_value="子报告")),
+        patch(f"{_ALERT_MOD}._run_sub_agent",
+              new=AsyncMock(return_value="子报告")) as mock_sub,
         patch(f"{_ALERT_MOD}._run_master_preview", new=fake_preview),
         patch(f"{_ALERT_MOD}._run_master_detail", new=fake_detail),
         patch(f"{_ALERT_MOD}.stream_reasoning_text", new=AsyncMock()) as mock_reason,
@@ -34,12 +36,12 @@ async def _collect(state, *, preview=None, detail=None, delay=0.0):
         patch(f"{_ALERT_MOD}._cache_alert_result"),
     ):
         frames = [f async for f in alert_mod.stream(state)]
-    return frames, mock_reason
+    return frames, mock_reason, mock_sub
 
 
 @pytest.mark.asyncio
 async def test_preview_frame_precedes_result():
-    frames, _ = await _collect({"symbol": "600519"})
+    frames, _, _ = await _collect({"symbol": "600519"})
     types = [f.get("type") for f in frames]
     assert "preview" in types and "result" in types
     assert types.index("preview") < types.index("result")
@@ -49,7 +51,7 @@ async def test_preview_frame_precedes_result():
 
 @pytest.mark.asyncio
 async def test_result_contains_merged_six_fields():
-    frames, _ = await _collect({"symbol": "600519"})
+    frames, _, _ = await _collect({"symbol": "600519"})
     result = next(f for f in frames if f.get("type") == "result")
     assert result["display_report"] == {
         "summary": "异动结论",
@@ -65,7 +67,7 @@ async def test_result_contains_merged_six_fields():
 @pytest.mark.asyncio
 async def test_reasoning_started_once_per_phase():
     """两个阶段各启动一次解说（心跳由独立循环承担，不在本断言内）。"""
-    _, mock_reason = await _collect({"symbol": "600519"})
+    _, mock_reason, _ = await _collect({"symbol": "600519"})
     nodes = [c.kwargs["node"] for c in mock_reason.call_args_list]
     assert nodes.count("alert_scan") == 1
     assert nodes.count("alert_master") == 1
@@ -73,7 +75,7 @@ async def test_reasoning_started_once_per_phase():
 
 @pytest.mark.asyncio
 async def test_stream_ends_with_done():
-    frames, _ = await _collect({"symbol": "600519"})
+    frames, _, _ = await _collect({"symbol": "600519"})
     assert frames[-1].get("type") == "done"
 
 
@@ -148,3 +150,30 @@ async def test_aclose_stops_bg_tasks_without_leak():
         leftover = set(asyncio.all_tasks()) - before
 
     assert not leftover  # 修复前 slow_detail 等后台任务孤儿化，此处失败
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_calls_match_real_signature():
+    """回归护栏：_run_sub_agent 的每个调用都必须与真实形参签名匹配。
+
+    背景：AsyncMock 会照单全收任意关键字参数，把 `_run_sub_agent` 的
+    `cycle_label=` 转写成 `cycle=` 这类错误会被 mock 静默吞掉（曾致生产回归）。
+    此处用 inspect.signature().bind() 对每个实参做真实签名绑定，参数名写错
+    （不存在的关键字）会直接抛 TypeError，从而让该护栏在未修状态下必红。
+    """
+    _, _, mock_sub = await _collect({"symbol": "600519"})
+    assert mock_sub.call_count == 3
+
+    sig = inspect.signature(alert_mod._run_sub_agent)
+    allowed = set(sig.parameters)
+    model_types = []
+    for call in mock_sub.call_args_list:
+        # 先做最直观的子集校验：传了签名不存在的关键字（如把 cycle_label 写成
+        # cycle=）立即以浏览器同款报错文本暴露问题。
+        unknown = set(call.kwargs) - allowed
+        assert not unknown, f"_run_sub_agent() got an unexpected keyword argument: {sorted(unknown)!r}"
+        sig.bind(*call.args, **call.kwargs)  # 再按真实签名全量绑定，缺参/错序也会抛 TypeError
+        model_types.append(call.kwargs.get("model_type"))
+
+    # 分工约定：资讯情报(quick) / 盘口风控(deep) / 图谱发散(quick)
+    assert model_types == ["quick", "deep", "quick"]
