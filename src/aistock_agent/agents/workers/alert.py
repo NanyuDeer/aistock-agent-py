@@ -25,7 +25,9 @@ from langgraph.prebuilt import create_react_agent
 from aistock_agent.constants import SSEEventType
 from aistock_agent.prompts.workers.alert import (
     GRAPH_DIVERGE_PROMPT,
-    MASTER_PROMPT,
+    MASTER_DETAIL_PROMPT,
+    MASTER_PROMPT,          # 仍被 stream() 使用；Task 5 重写 stream() 后连同常量一并移除
+    MASTER_PREVIEW_PROMPT,
     NEWS_INTEL_PROMPT,
     RISK_DIAG_PROMPT,
 )
@@ -85,6 +87,95 @@ async def _run_sub_agent(
             exc_info=True,
         )
         return f"[{name}] 分析暂时不可用: {e}"
+
+
+def _build_master_input(symbol: str, reports: tuple[str, str, str]) -> str:
+    """把三份子报告拼成 Master 的输入（速览/详情共用同一份输入）。"""
+    news_result, risk_result, graph_result = reports
+    return f"""请基于以下三份子Agent分析报告，生成 {symbol} 的异动深度研判：
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+【资讯情报Agent报告】
+{news_result}
+
+【盘口风控Agent报告】
+{risk_result}
+
+【图谱发散Agent报告】
+{graph_result}
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+请按输出格式生成完整研判报告。"""
+
+
+async def _invoke_master(llm, prompt: str, user_input: str) -> str:
+    """跑一次 Master（无工具 ReAct agent），返回原始文本。"""
+    agent = create_react_agent(llm, [])
+    result = await agent.ainvoke({
+        "messages": [
+            SystemMessage(content=prompt),
+            HumanMessage(content=user_input),
+        ]
+    })
+    return extract_final_ai_response(result.get("messages", []))
+
+
+def _loads_object(raw: str) -> dict[str, object]:
+    """宽松解析：失败/非 dict 一律返回空 dict。"""
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def _run_master_preview(
+    symbol: str, cycle_label: str, reports: tuple[str, str, str]
+) -> dict[str, object]:
+    """速览：quick 模型，只出 summary / impact / keywords。"""
+    raw = await _invoke_master(
+        get_quick_think(),
+        MASTER_PREVIEW_PROMPT.format(symbol=symbol, cycle=cycle_label),
+        _build_master_input(symbol, reports),
+    )
+    parsed = _loads_object(raw)
+    return {
+        "summary": parsed.get("summary") or "",
+        "impact": parsed.get("impact") or "",
+        "keywords": parsed.get("keywords") or [],
+    }
+
+
+async def _run_master_detail(
+    symbol: str, cycle_label: str, reports: tuple[str, str, str]
+) -> tuple[dict[str, object], str]:
+    """详情：deep 模型，只出 details / stocks / risks 与播报稿。"""
+    raw = await _invoke_master(
+        get_deep_think(),
+        MASTER_DETAIL_PROMPT.format(symbol=symbol, cycle=cycle_label),
+        _build_master_input(symbol, reports),
+    )
+    parsed = _loads_object(raw)
+    detail = {
+        "details": parsed.get("details") or "",
+        "stocks": parsed.get("stocks") or [],
+        "risks": parsed.get("risks") or [],
+    }
+    return detail, str(parsed.get("podcast_brief") or "")
+
+
+def _merge_report(
+    preview: dict[str, object], detail: dict[str, object]
+) -> dict[str, object]:
+    """合并速览与详情为对外 6 字段 display_report（字段固定，顺序稳定）。"""
+    return {
+        "summary": preview.get("summary") or "",
+        "impact": preview.get("impact") or "",
+        "keywords": preview.get("keywords") or [],
+        "details": detail.get("details") or "",
+        "stocks": detail.get("stocks") or [],
+        "risks": detail.get("risks") or [],
+    }
 
 
 # ── SSE 流式接口 ──────────────────────────────────────────────────────────────
@@ -286,60 +377,25 @@ async def run(state: AgentState) -> dict[str, object]:
 
         news_result, risk_result, graph_result = results
 
-        master_prompt = MASTER_PROMPT.format(symbol=str(symbol), cycle=cycle_label)
-        master_input = f"""请基于以下三份子Agent分析报告，生成 {symbol} 的异动深度研判：
+        master_reports = (news_result, risk_result, graph_result)
+        preview_fields, (detail_fields, podcast_brief) = await asyncio.gather(
+            _run_master_preview(str(symbol), cycle_label, master_reports),
+            _run_master_detail(str(symbol), cycle_label, master_reports),
+        )
+        display_report = _merge_report(preview_fields, detail_fields)
 
-━━━━━━━━━━━━━━━━━━━━━━━━
-【资讯情报Agent报告】
-{news_result}
-
-【盘口风控Agent报告】
-{risk_result}
-
-【图谱发散Agent报告】
-{graph_result}
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-请按输出格式生成完整研判报告。"""
-
-        llm = get_deep_think()
-        master_agent = create_react_agent(llm, [])
-        result = await master_agent.ainvoke({
-            "messages": [
-                SystemMessage(content=master_prompt),
-                HumanMessage(content=master_input),
-            ]
-        })
-
-        final_response = extract_final_ai_response(result.get("messages", []))
-
-        # 解析双层输出
-        display_report: dict[str, object] | None = None
-        podcast_brief: str | None = None
-        try:
-            parsed = json.loads(final_response) if final_response else {}
-            if isinstance(parsed, dict):
-                display_report = parsed.get("display_report")
-                podcast_brief = parsed.get("podcast_brief")
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("alert_output_parse_failed", symbol=symbol)
-
-        # 缓存到本地（前端报告列表查询用）
+        # 供后续 save 分支使用（保持原有变量语义）
         report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
         trigger_source = state.get("trigger_source")
 
-        # stock_trace 不写按日无 symbol 的缓存，避免覆盖不同股票的 alert
+        final_response = json.dumps(
+            {"display_report": display_report, "podcast_brief": podcast_brief},
+            ensure_ascii=False,
+        )
+
+        # stock_trace 不写按日缓存，避免覆盖不同股票的 alert（保持既有决策，勿去掉该守卫）
         if trigger_source != "stock_trace":
-            try:
-                from aistock_agent.services.report_cache import set_report
-                content_cache: dict[str, object] = {
-                    "display_report": display_report or {},
-                    "podcast_brief": podcast_brief or "",
-                }
-                set_report("alert", report_date, content_cache)
-                logger.info("alert_cached_for_list", report_date=report_date)
-            except Exception as e:
-                logger.warning("alert_cache_failed", error=str(e))
+            _cache_alert_result(dict(state), final_response)
 
         # 持久化到数据库
         if final_response:
