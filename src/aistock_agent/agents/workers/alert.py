@@ -280,6 +280,10 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
     cycle_label = _resolve_cycle(state)
 
     queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    # 审阅修复（2026-09-30）：收敛管理该函数创建的全部并发对象与 stop 事件，
+    # 保证异常 / 断连（GeneratorExit）路径也能无条件回收后台任务并置位 *_stop。
+    pending: list[asyncio.Future[Any]] = []
+    stops: list[asyncio.Event] = []
 
     async def _sink(payload: dict[str, object]) -> None:
         await queue.put(payload)
@@ -292,12 +296,23 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         async for frame in _drain_queue(queue):
             yield frame
 
+    async def _finalize() -> None:
+        """无条件收敛：置位所有 stop、cancel 未完成并发对象并回收，杜绝孤儿任务。"""
+        for stop in stops:
+            stop.set()
+        for fut in pending:
+            if not fut.done():
+                fut.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     try:
         # ═══════ 阶段 1：并行执行 3 个子 Agent（带解说 + 心跳）═══════
         yield {"type": SSEEventType.TOOL_START, "tool": "sub_agents",
                "label": "正在启动多维分析（资讯情报 + 盘口风控 + 图谱发散）"}
 
         phase1_stop = asyncio.Event()
+        stops.append(phase1_stop)
         phase1_bg = [
             asyncio.create_task(stream_reasoning_text(
                 _sink,
@@ -312,24 +327,26 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
                 stop_event=phase1_stop, done_steps=["多维分析"],
             )),
         ]
+        pending.extend(phase1_bg)
         work1 = asyncio.gather(
             _run_sub_agent(
                 name="资讯情报", prompt_template=NEWS_INTEL_PROMPT, tools=get_tools("alert_news"),
-                model_type="quick", symbol=symbol, cycle_label=cycle_label,
+                model_type="quick", symbol=symbol, cycle=cycle_label,
                 user_instruction=f"查询 {symbol} 的最新资讯，找出异动原因",
             ),
             _run_sub_agent(
                 name="盘口风控", prompt_template=RISK_DIAG_PROMPT, tools=get_tools("alert_risk"),
-                model_type="deep", symbol=symbol, cycle_label=cycle_label,
+                model_type="deep", symbol=symbol, cycle=cycle_label,
                 user_instruction=f"分析 {symbol} 的盘口结构和资金面，判断真实意图",
             ),
             _run_sub_agent(
                 name="图谱发散", prompt_template=GRAPH_DIVERGE_PROMPT,
                 tools=get_tools("alert_graph"),
-                model_type="quick", symbol=symbol, cycle_label=cycle_label,
+                model_type="quick", symbol=symbol, cycle=cycle_label,
                 user_instruction=f"以 {symbol} 为中心，用知识图谱寻找产业链补涨标的",
             ),
         )
+        pending.append(work1)
         async for frame in _drain_until_done(work1, queue):
             yield frame
         phase1_stop.set()
@@ -350,6 +367,7 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         )
 
         phase2_stop = asyncio.Event()
+        stops.append(phase2_stop)
         phase2_bg = [
             asyncio.create_task(stream_reasoning_text(
                 _sink,
@@ -364,13 +382,16 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
                 stop_event=phase2_stop, done_steps=["多维分析", "汇聚研判"],
             )),
         ]
+        pending.extend(phase2_bg)
 
         preview_task = asyncio.create_task(
             _run_master_preview(symbol, cycle_label, master_reports)
         )
+        pending.append(preview_task)
         detail_task = asyncio.create_task(
             _run_master_detail(symbol, cycle_label, master_reports)
         )
+        pending.append(detail_task)
 
         # 速览先到 → 立即推 preview 帧（首屏提前）
         async for frame in _drain_until_done(preview_task, queue):
@@ -423,6 +444,10 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
     except Exception as e:
         logger.error("alert_master_failed", symbol=symbol, error=str(e), exc_info=True)
         yield {"type": SSEEventType.ERROR, "message": f"异动分析生成失败: {e}"}
+    finally:
+        # GeneratorExit 是 BaseException，except Exception 不会捕获；必须在 finally
+        # 中无条件回收：置位 stop、cancel 未完成并发对象并 gather 吞掉结果。
+        await _finalize()
 
 
 # ── 非流式接口（Graph 节点用）────────────────────────────────────────────────

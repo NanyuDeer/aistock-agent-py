@@ -75,3 +75,76 @@ async def test_reasoning_started_once_per_phase():
 async def test_stream_ends_with_done():
     frames, _ = await _collect({"symbol": "600519"})
     assert frames[-1].get("type") == "done"
+
+
+@pytest.mark.asyncio
+async def test_detail_exception_converges_and_reclaims_tasks():
+    """审阅问题 1：_run_master_detail 抛异常时不得泄漏孤儿任务、须在超时内收敛出 error 帧。
+
+    修复前：异常落到 except 后再无 finally，phase2_stop 不置位、仍在跑的
+    detail 深度调用成为孤儿任务 → 用例因残留任务失败；修复后 finally 全量回收。
+    """
+    async def fake_preview(symbol, cycle, reports):
+        return {"summary": "异动结论", "impact": "利好", "keywords": ["涨价"]}
+
+    async def boom_detail(symbol, cycle, reports):
+        await asyncio.sleep(0.2)          # 保证在回收前仍是"在运行"的任务
+        raise RuntimeError("detail boom")  # 异动详情失败
+
+    with (
+        patch(f"{_ALERT_MOD}._run_sub_agent", new=AsyncMock(return_value="子报告")),
+        patch(f"{_ALERT_MOD}._run_master_preview", new=fake_preview),
+        patch(f"{_ALERT_MOD}._run_master_detail", new=boom_detail),
+        patch(f"{_ALERT_MOD}.stream_reasoning_text", new=AsyncMock()),
+        patch(f"{_ALERT_MOD}.render_alert_reasoning_prompt", return_value="PROMPT"),
+        patch(f"{_ALERT_MOD}.node_api.save_analysis_report", new=AsyncMock()),
+        patch(f"{_ALERT_MOD}._cache_alert_result"),
+        patch(f"{_ALERT_MOD}.ALERT_REASONING_HEARTBEAT_SEC", 0.05),
+    ):
+        before = set(asyncio.all_tasks())
+
+        async def _run():
+            return [f async for f in alert_mod.stream({"symbol": "600519"})]
+
+        frames = await asyncio.wait_for(_run(), timeout=3.0)
+        leftover = set(asyncio.all_tasks()) - before
+
+    assert any(f.get("type") == "error" for f in frames)
+    assert not leftover  # 修复前 detail 孤儿任务会残留，此处失败
+
+
+@pytest.mark.asyncio
+async def test_aclose_stops_bg_tasks_without_leak():
+    """审阅问题 2：消费方 aclose()（GeneratorExit）必须回收全部后台任务、不抛异常。
+
+    修复前无 finally，GeneratorExit 穿过 stream() 后后台任务（含仍在跑的 detail）
+    全部孤儿化 → leftover 非空失败；修复后 finally 无条件回收。
+    """
+    async def fake_preview(symbol, cycle, reports):
+        return {"summary": "异动结论", "impact": "利好", "keywords": ["涨价"]}
+
+    async def slow_detail(symbol, cycle, reports):
+        await asyncio.sleep(5.0)
+        return ({"details": "## 详情"}, "摘要")
+
+    with (
+        patch(f"{_ALERT_MOD}._run_sub_agent", new=AsyncMock(return_value="子报告")),
+        patch(f"{_ALERT_MOD}._run_master_preview", new=fake_preview),
+        patch(f"{_ALERT_MOD}._run_master_detail", new=slow_detail),
+        patch(f"{_ALERT_MOD}.stream_reasoning_text", new=AsyncMock()),
+        patch(f"{_ALERT_MOD}.render_alert_reasoning_prompt", return_value="PROMPT"),
+        patch(f"{_ALERT_MOD}.node_api.save_analysis_report", new=AsyncMock()),
+        patch(f"{_ALERT_MOD}._cache_alert_result"),
+        patch(f"{_ALERT_MOD}.ALERT_REASONING_HEARTBEAT_SEC", 0.05),
+    ):
+        before = set(asyncio.all_tasks())
+        agen = alert_mod.stream({"symbol": "600519"})
+        taken = 0
+        async for _f in agen:
+            taken += 1
+            if taken >= 4:            # 已越过 phase2 任务创建点、detail 仍在运行，此刻断连
+                await agen.aclose()
+                break
+        leftover = set(asyncio.all_tasks()) - before
+
+    assert not leftover  # 修复前 slow_detail 等后台任务孤儿化，此处失败
