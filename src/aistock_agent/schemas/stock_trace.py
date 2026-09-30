@@ -59,6 +59,10 @@ class TriggerEvent(BaseModel):
     threshold_value: float
     severity: Literal["medium", "high", "critical"]
     rule_version: str
+    # 涨停标记：Node 侧 buildTriggerEvent 会随 PriceFact 透传（camelCase → is_limit_up）。
+    # 该字段出现在冻结的 trigger_event_json 里，缺声明会被 extra="forbid" 拒绝，
+    # 导致整条归因在 model_validate 处硬失败（2026-09-24 宿迁联盛事故）。
+    is_limit_up: bool | None = None
 
 
 class StockTraceSnapshot(BaseModel):
