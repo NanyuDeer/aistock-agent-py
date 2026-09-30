@@ -366,6 +366,24 @@ START → supervisor(quick_think, 意图路由)
   - `api/ws.py` `_forward_until_done_or_cmd` 加 **静默段看门狗**（`_FORWARD_STALL_TIMEOUT_SEC=240`）：events 长度无新增且 recv 无新消息超阈值 → `chat_task_manager.cancel(session_id)` + 补发 error「生成超时，请重试」。**只依赖 660s 总超时不够**（<660s 悬挂 + timeout 可能被吞），看门狗保证前端绝不无限转圈。finally 补 `await gather` 收尾。
   - **经验**：`asyncio.timeout(660)` 对 <660s 悬挂是 no-op；查连接类问题优先 `ss -tnp | grep pid` 看 CLOSE-WAIT 堆积（比 attach py-spy 更易得，perf_event_paranoid/无 sudo 时唯一手段）。
 
+### 2026-09-30 更新：AI 异动解读——思考过程流式 + 速览/详情并行
+
+设计文档：`docs/superpowers/specs/2026-09-30-alert-ai-analysis-thinking-stream-design.md`；实施计划：`docs/superpowers/plans/2026-09-30-alert-ai-analysis-thinking-stream.md`。
+
+针对「个股情报 → AI 解读」页长等待期无反馈、首屏慢两个痛点：等待期可见"AI 在做什么"，并让一句话速览真实提前。
+
+- **帧协议（纯加性，语义只增不改）**：SSE 新增 `reasoning` 与 `preview` 两帧（`SSEEventType.REASONING` / `SSEEventType.PREVIEW`）。
+  - `reasoning`：`{"type":"reasoning","node":"alert_scan|alert_master","chunk":"..."}`。**`node` 恒为阶段名**（`alert_scan` / `alert_master`），前端据此把该阶段的**启动解说与后续心跳聚合为同一个步骤**（文本持续增长）。旁路解说由独立 quick LLM（`get_quick_think(observe=False)`）生成，逐 chunk 流式，**不计用户账单**。
+  - `preview`：`{"type":"preview","display_report":{"summary","impact","keywords"}}`，速览三件套里 quick 先到先渲染（字段可缺省）。
+  - 既有 `tool_start/tool_end/llm_start/result/done/error` 全部保留、语义不变。
+- **prompt 场景 key 与节点 node 是两回事**：`prompts/workers/alert_reasoning.py` 的 `render_alert_reasoning_prompt(scene=...)` 场景 key 有 `alert_scan` / `alert_master` / `alert_heartbeat` 三个（心跳场景 key 只用于渲染、没有独立 node）；而帧里的 `node` 只有前两者。心跳复用所在阶段的 node，以聚合成同一个步骤。`ALERT_REASONING_FALLBACKS` 仅覆盖两个 node；心跳兜底走独立的 `heartbeat_fallback()`。
+- **通用解说流抽取**：新增 `services/reasoning_stream.py::stream_reasoning_text(sink, *, prompt, node, fallback_label, event_type="reasoning", timeout_sec=None)`——LLM 流式 + 首块超时（`REASONING_TIMEOUT_SEC=2.0`，`timeout_sec=None` 时**在调用时**读取常量便于测试 patch）+ 失败/超时发静态兜底、任何异常不向上抛、`observe=False` 不计费。`graph/nodes/_reasoning.py::stream_reasoning` 迁移为内部调用该通用函数，**对外签名与行为不变**，chat 侧零改动；既有单测 `test_reasoning_streamer.py` 的 patch 目标 `graph.nodes._reasoning.get_quick_think` / `_REASONING_TIMEOUT_SEC` 随迁移改指 `services.reasoning_stream.*`，断言未动。
+- **Master 拆为并发双调用（职责不重叠，总耗时≈不变、首屏提前）**：`agents/workers/alert.py` 新增 `_run_master_preview`（quick 模型，只出 `summary/impact/keywords` 速览三件套）与 `_run_master_detail`（deep 模型，只出 `details/stocks/risks` + `podcast_brief` 详情四件套 + 播报稿），共用同一份子报告输入 `_build_master_input`，`_merge_report` 合并后 `display_report` 仍是既有 **6 字段**（summary/impact/keywords/details/stocks/risks）。prompt 拆分见 `prompts/workers/alert.py` 的 `MASTER_PREVIEW_PROMPT` / `MASTER_DETAIL_PROMPT`（删除了旧 `MASTER_PROMPT`）。
+- **心跳参数**：`ALERT_REASONING_HEARTBEAT_SEC=8.0`（阶段进行中每 8s 一条解说）、`ALERT_REASONING_MAX_HEARTBEATS=8`（每阶段上限，防超长请求无上限调用）；阶段结束 `stop_event.set()` 立即停心跳。心跳输入为**轻上下文**（不带 3 份子报告全文，只传阶段名/已用秒数/已完成步骤），保证快且便宜。
+- **`stream()` 改为 asyncio.Queue + sink**：由"直接 yield"改 `queue` + `_sink`，使等待期能并发推送 reasoning/心跳与 preview 帧；`_drain_until_done` / `_drain_queue` / `_flush` 负责吞吐与收尾。**`try/finally` 无条件回收**：`_finalize()` 统一置位所有 `*_stop`、cancel 未完成并发对象并 gather 吞掉结果（`GeneratorExit` 是 `BaseException`，`except Exception` 捕获不到，必须在 `finally` 回收，杜绝孤儿任务）。
+- **持久化与口径一致**：流式 `stream()`、非流式 `run()`（scheduler/stock_trace）、`_cache_alert_result` / `save_analysis_report` 均走同一组 helper 合并后落库（`display_report` 仍是完整 6 字段双层结构），缓存契约不变。
+- **发布顺序不敏感**：新帧是纯加性，老前端遇到未知 `type` 走 switch default 无副作用；先发后端数据已下发但前端不渲染，先发前端则 reasoning/preview 永不出现，页面退回现状。前端 side 配套见 `src/modules/market/AGENTS.md`。
+
 ## 目录结构
 
 > Phase 4 重构后（2026-07-07）。agents/ 物理分层为 supervisor/ + general/ + workers/。
