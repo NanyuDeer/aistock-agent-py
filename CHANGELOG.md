@@ -2,6 +2,31 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [xusiyun] 2026-10-02 — 重大事件时间线物化 id 全链路修复（物化先于落库 + 重放透传）
+
+**开发者**: xusiyun
+
+### 修复
+
+- **物化先于落库**（`services/event_scraper.py`）：抽出 `_materialize_events(events)`（开关内短路、失败只置 `event_entity_unfilled` 不阻断主链路），`scrape_full_daily` / `scrape_intraday` 改为在 `save_event_scrape` **之前**物化本批重大事件，使权威 `app_event_id` / `app_event_status` 随事件库 content 一并持久化。此前「先落库、后物化」导致 id 只写内存、**从不落库**：任何「从事件库重读再传导」的路径（晨报 I4 兜底、缓存命中重放）都拿不到权威 id，传导报告退回 `evt_md5` 键，而 app-api 时间线的 occurred 准入要求 `agent_analysis_reports.user_id == event_entities.event_id` → 该事件被静默丢弃（症状：事件传导列表有、时间线没有）。物化作用于整批（幂等 upsert 不产生重复实体），顺带覆盖「已入库但当时未物化」的补漏；`_spawn_conduction` 守卫语义不变（同一批对象、`added>0` 才传导）。
+- **重放透传权威 id**（`agents/workers/morning.py`）：`_event_records_to_major_events` 从事件库重放时条件透传 `app_event_id` / `app_event_status`（非空才落键，与 `_trigger_conduction` 同款，`major_events` 形状向后兼容）。
+- **重放保留来源名**（`services/event_store.py`）：`load_event_scrape` 构造 `EventRecord` 时补 `source_name`（有值保留、缺省 None），修掉「从事件库重读再传导」丢媒体名 → LLM 判不出媒体 → 前端恒显示「未知来源」的同族缺陷（2026-09-24 `source_name` 透传只覆盖了同批路径）。
+- **`_safe_float` 消除 mypy strict 告警**（`services/event_store.py`）：`float(object)` → 先按 JSON 标量窄化（int/float 直转，其余走 `str` 兜底解析），实现对齐同包 `global_importance_evaluation._safe_float`；数字字符串 / 可字符串化数值对象仍可转，None/畸形结构/非数值串回落默认值（契约由 `test_safe_float_contract` 锁定）。修复后 `mypy event_scraper.py event_store.py morning.py` 三文件 **0 error**。
+
+### 改进
+
+- `services/event_store.py`：`EventRecord` 加性声明 `event_entity_unfilled: NotRequired[bool]`（stdlib `typing`，Python ≥3.11；仅写不读的排查标记，构造时无需提供）。
+
+### 测试
+
+- `tests/integration/test_event_scraper_conduction_payload.py` 新增 `test_scrape_intraday_persists_app_event_id_into_event_store`、`test_scrape_full_daily_persists_app_event_id_into_event_store`、`test_scrape_intraday_switch_off_skips_materialize_but_conduces`（走真实 `save_event_scrape`，用 JSON 快照捕获落库 content —— 修复前必失败）。
+- `tests/unit/test_morning_event_store_integration.py` 新增「透传 id/status」与「缺省不落键」两例。
+- `tests/unit/test_event_scraper.py`、`tests/unit/test_event_scraper_conduction.py` 共 7 个既有用例补 `_materialize_event_entity` 隔离 patch（防测试打真实 HTTP）。
+- `tests/unit/test_event_store.py` 新增「重放必须保留 `source_name`」与 `test_safe_float_contract`（9 组畸形/可转值参数化：None/畸形结构/非数值串回落默认值，数字字符串/Decimal/bool 仍可转）两例。
+- 受影响 9 文件：`124 passed, 3 skipped`（3 skipped 为需本地 app-api 的 e2e）；`mypy` 目标三文件 0 error。
+
+---
+
 ## [xusiyun] 2026-09-25 — 未来事件影响板块预计算 + 物化时间兜底 + 来源名透传
 
 **开发者**: xusiyun

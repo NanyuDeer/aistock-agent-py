@@ -38,6 +38,8 @@ def _event_record(**overrides: object) -> dict[str, object]:
         "scrape_at": "2026-08-12 10:00:00",
         "score_date": "2026-08-12",
         "payload": {},
+        "app_event_id": None,
+        "app_event_status": None,
     }
     base.update(overrides)
     return base
@@ -430,3 +432,74 @@ async def test_morning_cache_hit_falls_back_to_details_when_all_events_minor():
     titles = [str(ev.get("title", "")) for ev in major_events]
     assert "普通证据B" not in titles
     assert "旧LLM事件" in titles
+
+
+# ── 缺陷B：缓存命中路径重放时透传权威 app_event_id / app_event_status ──
+
+
+@pytest.mark.asyncio
+async def test_morning_cache_hit_passes_through_app_event_id():
+    """缓存命中：从事件库重放的 major_events 透传权威 id/status（缺陷B修复）。
+
+    否则传导链条拿不到权威 id → 报告退回 evt_md5 键 → 时间线 occurred 准入
+    （要求两侧 id 相等）失败 → 事件被静默丢弃。修复前此断言必须失败。
+    """
+    from aistock_agent.agents.workers.morning import run
+
+    events = [_event_record(title="事件A", event_id="e1",
+                            app_event_id="EVT-0001", app_event_status="occurred")]
+    with (
+        patch(
+            "aistock_agent.agents.workers.morning.get_cached_briefing",
+            new=AsyncMock(return_value=_cached_briefing_json()),
+        ),
+        patch(
+            "aistock_agent.services.event_store.load_event_scrape",
+            new=AsyncMock(return_value=events),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning._safe_process_market_push",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning.persist_morning_report",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await run({"analysis_reports": {}})
+
+    assert result["analysis_reports"]["cached"] is True
+    major_events = result["analysis_reports"]["major_events"]
+    assert major_events[0]["app_event_id"] == "EVT-0001"
+    assert major_events[0]["app_event_status"] == "occurred"
+
+
+@pytest.mark.asyncio
+async def test_morning_cache_hit_omits_app_event_keys_when_absent():
+    """缓存命中：事件库记录无 app 字段时，major_events 不落 id/status 键（向后兼容）。"""
+    from aistock_agent.agents.workers.morning import run
+
+    events = [_event_record(title="事件A", event_id="e1")]
+    with (
+        patch(
+            "aistock_agent.agents.workers.morning.get_cached_briefing",
+            new=AsyncMock(return_value=_cached_briefing_json()),
+        ),
+        patch(
+            "aistock_agent.services.event_store.load_event_scrape",
+            new=AsyncMock(return_value=events),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning._safe_process_market_push",
+            new=AsyncMock(),
+        ),
+        patch(
+            "aistock_agent.agents.workers.morning.persist_morning_report",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await run({"analysis_reports": {}})
+
+    major_events = result["analysis_reports"]["major_events"]
+    assert "app_event_id" not in major_events[0]
+    assert "app_event_status" not in major_events[0]

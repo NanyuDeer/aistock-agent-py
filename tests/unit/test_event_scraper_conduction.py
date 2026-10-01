@@ -189,6 +189,10 @@ async def test_scrape_full_daily_triggers_conduction_when_persisted():
             }
         ),
     ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
     ) as mock_spawn:
@@ -239,6 +243,10 @@ async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
             }
         ),
     ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
     ) as mock_spawn:
@@ -287,6 +295,10 @@ async def test_scrape_full_daily_skips_conduction_when_all_deduped():
                 "error": None,
             }
         ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
@@ -367,6 +379,10 @@ async def test_scrape_intraday_triggers_conduction_when_persisted():
             }
         ),
     ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
     ) as mock_spawn:
@@ -402,6 +418,10 @@ async def test_scrape_intraday_skips_conduction_when_nothing_persisted():
                 "error": "persist failed",
             }
         ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
