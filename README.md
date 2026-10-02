@@ -57,6 +57,7 @@ mypy src/
 - 境外数据: yfinance（美股/亚太/大宗/汇率）
 - 全网搜索: 多供应商 failover（Tavily 主源 → Doubao → AnySearch 兜底，链路顺序固定，`SEARCH_ENABLED_PROVIDERS` 只控制启停不控制顺序）
 - 抖音视频转写: requests + ffmpeg-python（硅基流动 SenseVoice；FFmpeg/FFprobe 为宿主二进制依赖）
+- 洞察报告章节构建: 纯模板 JSON blocks（`services/insight_report.py`，无 LLM/无字体依赖；六类 block 供前端按类型渲染，六阶段因果链为纵向时间轴）
 - 配置: pydantic-settings
 
 > **全网搜索削峰现状（2026-08-18，如实记录）**：需求侧 TTL 缓存尚未上线，当前容量仅由
@@ -445,6 +446,7 @@ src/aistock_agent/
 | POST | `/api/agent/briefing/broadcast/only` | 仅重新生成双人播报（不重跑报告，需 X-Internal-Token） |
 | POST | `/api/agent/briefing/wind-leader/trigger` | 手动触发风口龙头 Agent 报告生成（需 X-Internal-Token，数据为空时自动 refresh 补数据） |
 | POST | `/api/agent/briefing/trend-score/trigger` | 手动触发趋势股评分 Agent 报告生成（需 X-Internal-Token） |
+| POST | `/api/agent/insight-report/sections` | 构建完整洞察报告章节（app-api 组装报告数据 → 纯模板构建，无 LLM；需 X-Internal-Token；返回 `{header, sections:[{heading, blocks}]}`，由 app-api 分块推 SSE） |
 | GET | `/api/agent/skills` | 已注册工具列表 |
 | GET | `/health` | Liveness 健康检查（始终 200，不检查依赖，K8s livenessProbe 用） |
 | GET | `/health/ready` | Readiness 健康检查（检查 Redis/Node.js/LLM 连通性，失败返回 503 + degraded） |

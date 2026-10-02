@@ -2099,24 +2099,20 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
     )
 
 
-# ── 完整洞察报告 PDF 渲染 ──────────────────────────────────────────
+# ── 完整洞察报告章节构建（供 app-api 分块推 SSE） ──────────────────
 
 
-@router.post("/insight-report/render")
-async def render_insight_report_pdf(
+@router.post("/insight-report/sections")
+async def build_insight_report_sections(
     payload: dict[str, object],
     _: None = Depends(verify_internal_token),
-) -> Response:
-    """完整洞察报告 PDF 渲染：
-    app-api 组装数据 → 本端点纯模板渲染（无 LLM）→ 返回 application/pdf。"""
+) -> dict[str, object]:
+    """完整洞察报告章节构建：
+    app-api 组装数据 → 本端点纯模板构建（无 LLM）→ 返回 {header, sections}，
+    sections 元素为 {heading, blocks}；由 app-api 分块推送 SSE，
+    前端按 block.type 渲染（六阶段因果链为纵向时间轴）。"""
     from aistock_agent.services.insight_report import (  # noqa: PLC0415
-        build_report_sections,
-        render_insight_report,
+        build_report_response,
     )
 
-    pdf = render_insight_report(build_report_sections(payload))
-    return Response(
-        content=pdf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="insight-report.pdf"'},
-    )
+    return build_report_response(payload)
