@@ -87,6 +87,10 @@ async def test_scrape_intraday_only_persists_major_events():
         "aistock_agent.services.event_store.save_event_scrape",
         new=save,
     ), patch(
+        # 隔离真实物化（HTTP）：走物化分支但不联网，避免既有用例潜伏 flake
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),
     ) as mock_spawn:
@@ -122,6 +126,10 @@ async def test_scrape_intraday_skips_conduction_when_all_deduped():
                 "error": None,
             }
         ),
+    ), patch(
+        # 隔离真实物化（HTTP）：此用例标题无日期，未隔离会多出 1 次真实调用（潜伏 flake）
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
     ), patch(
         "aistock_agent.services.event_scraper._spawn_conduction",
         new=MagicMock(),

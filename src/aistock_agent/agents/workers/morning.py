@@ -615,24 +615,33 @@ def _event_records_to_major_events(
         if score < MAJOR_IMPACT_THRESHOLD:
             continue
         keywords = ev.get("involved_keywords")
-        result.append(
-            {
-                "event_id": str(ev.get("event_id", "")),
-                "title": title,
-                "summary": str(ev.get("summary", "")),
-                "url": str(ev.get("url", "")),
-                "impact_score": score,
-                "direction": str(ev.get("direction", "neutral")),
-                "involved_keywords": (
-                    [str(k) for k in keywords if isinstance(k, str)]
-                    if isinstance(keywords, list)
-                    else []
-                ),
-                # 第三阶段：透传 event_scope（缺失默认 UNKNOWN），使 scheduler I4 兜底
-                # 路径经 run_single_event_conduction 统一防护点过滤 STOCK 事件
-                "event_scope": str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN"),
-            }
-        )
+        item: dict[str, object] = {
+            "event_id": str(ev.get("event_id", "")),
+            "title": title,
+            "summary": str(ev.get("summary", "")),
+            "url": str(ev.get("url", "")),
+            "impact_score": score,
+            "direction": str(ev.get("direction", "neutral")),
+            "involved_keywords": (
+                [str(k) for k in keywords if isinstance(k, str)]
+                if isinstance(keywords, list)
+                else []
+            ),
+            # 第三阶段：透传 event_scope（缺失默认 UNKNOWN），使 scheduler I4 兜底
+            # 路径经 run_single_event_conduction 统一防护点过滤 STOCK 事件
+            "event_scope": str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN"),
+        }
+        # 重大事件时间线（缺陷B修复，2026-10-02）：缓存命中从事件库重放时，
+        # 条件透传权威 app_event_id/app_event_status（与 _trigger_conduction 同款，
+        # 非空才落键，保持既有 dict 形状断言不破）。否则传导拿不到权威 id → 报告
+        # 退回 evt_md5 键 → 时间线 occurred 准入两侧 id 不等 → 事件被静默丢弃。
+        app_event_id = str(ev.get("app_event_id") or "").strip()
+        if app_event_id:
+            item["app_event_id"] = app_event_id
+        app_event_status = str(ev.get("app_event_status") or "").strip()
+        if app_event_status:
+            item["app_event_status"] = app_event_status
+        result.append(item)
     return result
 
 
