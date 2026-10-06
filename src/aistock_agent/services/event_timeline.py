@@ -70,3 +70,79 @@ def to_timeline_event(entity: dict[str, object]) -> dict[str, object] | None:
         "title": title,
         "importance": grade_importance(entity),
     }
+
+
+from aistock_agent.services.data_client import node_api
+from aistock_agent.services.event_calendar import (
+    HORIZON_TRADING_DAYS,
+    EventWindow,
+)
+from aistock_agent.utils.date import (
+    CALENDAR_MAX_YEAR,
+    CALENDAR_MIN_YEAR,
+    add_trading_days,
+)
+
+_HORIZON_DISPLAY_YEAR_END_MONTH = 12
+_HORIZON_DISPLAY_YEAR_END_DAY = 31
+
+
+def _merge_events(
+    schedules: list[dict[str, object]], events: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """规则日程在前 + 时间线事件在后；按 (date,title) 去重保留首次；按 date 稳定排序。"""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, object]] = []
+    for e in [*schedules, *events]:
+        key = (str(e.get("date") or ""), str(e.get("title") or ""))
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    out.sort(key=lambda e: str(e.get("date") or ""))
+    return out
+
+
+async def load_event_timeline(
+    target_date: str, horizon_days: int | None = HORIZON_TRADING_DAYS
+) -> EventWindow:
+    """统一时间线事件窗口。
+
+    - 事件 = `GET /internal/event-entities`（按 event_start_time 上海日过滤，含未来事件）；
+    - 日程 = `GET /internal/calendar/events` 中 `source == "L1"` 的规则交割日（合成补充项）；
+    - 越年（超出 CALENDAR_MIN_YEAR..MAX_YEAR）→ fail-close（calendar_uncovered）。
+    """
+    target = date.fromisoformat(target_date)
+    if not CALENDAR_MIN_YEAR <= target.year <= CALENDAR_MAX_YEAR:
+        logger.warning("event_timeline.calendar_uncovered target_date=%s", target_date)
+        return EventWindow(calendar_uncovered=True)
+    if horizon_days is None:
+        end = date(
+            CALENDAR_MAX_YEAR,
+            _HORIZON_DISPLAY_YEAR_END_MONTH,
+            _HORIZON_DISPLAY_YEAR_END_DAY,
+        )
+    else:
+        try:
+            end = add_trading_days(target, horizon_days)
+        except ValueError:
+            logger.warning("event_timeline.calendar_uncovered target_date=%s", target_date)
+            return EventWindow(calendar_uncovered=True)
+    date_from, date_to = target_date, end.isoformat()
+
+    entities = await node_api.get_event_entities({"dateFrom": date_from, "dateTo": date_to})
+    if entities is None:
+        return EventWindow(source_missing=True)
+    timeline_events = [ev for ev in (to_timeline_event(e) for e in entities) if ev]
+
+    raw_calendar = await node_api.get_calendar_events(date_from, date_to)
+    l1_schedules = [
+        e for e in (raw_calendar or []) if str(e.get("source") or "") == "L1"
+    ]
+
+    merged = _merge_events(l1_schedules, timeline_events)
+    high = [e for e in merged if e.get("importance") == "high"]
+    win = EventWindow(events=merged, high_events=high, source_missing=False)
+    if horizon_days is None:
+        win.display_events = merged
+    return win
