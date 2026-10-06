@@ -789,6 +789,26 @@ class NodeApiClient:
         """
         return await self.get_list(f"/internal/predictions?source_id={source_id}") or []
 
+    async def list_predictions_strict(self, source_id: str) -> list[dict[str, object]]:
+        """按 source_id 查询预测记录，**不吞失败**（fail-closed 入口）。
+
+        与 :meth:`list_predictions` 的区别：后者在请求失败/响应非列表时被
+        ``get_list`` 折叠为 ``[]``（"查不到" 与 "无记录" 不可区分）。对
+        "已验证拒覆盖 (SPEC S6)" 这类安全防御，把失败当作"无记录"会放行落库，
+        进而让 app-api upsert 覆盖已 verified 记录的正文——故此处显式抛出，
+        调用方（from-stock-info 端点）据此返回 502 拒绝落库（宁可不写也不覆盖验证结果）。
+
+        Args:
+            source_id: 幂等键，如 ``stock_info:300750:2026-10-08``。
+
+        Returns:
+            该 source_id 下的全部记录行；**查询失败时抛 ``RuntimeError``**（不返回 None/[]）。
+        """
+        data = await self.get_list(f"/internal/predictions?source_id={source_id}")
+        if data is None:
+            raise RuntimeError(f"list_predictions 查询失败（fail-closed）: source_id={source_id}")
+        return data
+
     async def update_prediction_verification(
         self,
         prediction_id: int,

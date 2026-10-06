@@ -4,11 +4,30 @@
 红线：conditions 恒空、horizons 恒 1 档、prediction_status 恒 hypothesis、summary 原文引用。
 """
 from aistock_agent.services.stock_info_prediction import (
+    REASON_BELOW_THRESHOLD,
+    REASON_INVALID_INPUT,
+    REASON_SAVED,
+    REASON_UNMAPPED_VALUE,
     StockInfoPredictionRequest,
     build_stock_info_prediction,
+    build_stock_info_prediction_with_reason,
     meets_entry_threshold,
     stock_info_source_id,
 )
+
+
+def _build_with_reason(**overrides: object):
+    base: dict[str, object] = {
+        "symbol": "300750",
+        "stock_name": "宁德时代",
+        "published_date": "2026-10-08",
+        "ai_impact": "重大利好",
+        "ai_horizon": "中期",
+        "ai_summary": "公司获海外大额订单，预计中期业绩改善。",
+        "url": "https://example.com/a",
+    }
+    base.update(overrides)
+    return build_stock_info_prediction_with_reason(**base)  # type: ignore[arg-type]
 
 
 def _build(**overrides: object):
@@ -116,3 +135,48 @@ def test_request_model_rejects_extra_key() -> None:
             symbol="300750", stock_name="宁德时代", published_date="2026-10-08",
             ai_impact="利好", ai_horizon="中期", ai_summary="x", url=None, extra_key=1,
         )
+
+
+# ── 终审 #2：build_..._with_reason 须区分三类 skipped 与 saved（app-api 据此分诊） ──
+
+
+def test_build_with_reason_saved() -> None:
+    p, code = _build_with_reason()
+    assert p is not None
+    assert code == REASON_SAVED
+
+
+def test_build_with_reason_below_threshold() -> None:
+    p, code = _build_with_reason(ai_impact="利好", ai_horizon="短期")
+    assert p is None
+    assert code == REASON_BELOW_THRESHOLD
+    # 中性同样属门槛未达（预期正常降级）
+    _, code_neutral = _build_with_reason(ai_impact="中性", ai_horizon="长期")
+    assert code_neutral == REASON_BELOW_THRESHOLD
+
+
+def test_build_with_reason_invalid_input() -> None:
+    p, code = _build_with_reason(symbol="ABC")
+    assert p is None
+    assert code == REASON_INVALID_INPUT
+    _, code_date = _build_with_reason(published_date="2026/10/08")
+    assert code_date == REASON_INVALID_INPUT
+
+
+def test_build_with_reason_unmapped_value() -> None:
+    # 前缀 99 不在交易所映射表 → 映射缺档（门槛已过）
+    p, code = _build_with_reason(symbol="999999")
+    assert p is None
+    assert code == REASON_UNMAPPED_VALUE
+
+
+def test_build_stock_info_prediction_wrapper_unchanged() -> None:
+    """薄封装须与 with_reason 同口径：成功仍返回 PredictionResult，失败仍 None。"""
+    assert build_stock_info_prediction(
+        symbol="300750", stock_name="宁德时代", published_date="2026-10-08",
+        ai_impact="重大利好", ai_horizon="中期", ai_summary="x", url=None,
+    ) is not None
+    assert build_stock_info_prediction(
+        symbol="300750", stock_name="宁德时代", published_date="2026-10-08",
+        ai_impact="利好", ai_horizon="短期", ai_summary="x", url=None,
+    ) is None

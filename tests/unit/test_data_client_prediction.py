@@ -150,3 +150,32 @@ async def test_get_ths_index_map_returns_ts_codes(client: NodeApiClient):
 async def test_get_ths_index_map_returns_none_on_failure(client: NodeApiClient):
     with patch.object(client, "get", new=AsyncMock(return_value=None)):
         assert await client.get_ths_index_map() is None
+
+
+# ── 终审 #3：list_predictions_strict 为 fail-closed 入口（查不到 ≠ 无记录） ──
+
+
+@pytest.mark.asyncio
+async def test_list_predictions_swallows_failure_to_empty(client: NodeApiClient):
+    """既有行为不变：查询失败（get_list 返回 None）→ 空列表（其他调用点零变化）。"""
+    with patch.object(client, "get_list", new=AsyncMock(return_value=None)):
+        assert await client.list_predictions("stock_info:300750:2026-10-08") == []
+
+
+@pytest.mark.asyncio
+async def test_list_predictions_strict_returns_rows(client: NodeApiClient):
+    rows = [{"id": 1, "verification": {"mid": {"result": "hit"}}}]
+    with patch.object(client, "get_list", new=AsyncMock(return_value=rows)) as get_list:
+        out = await client.list_predictions_strict("stock_info:300750:2026-10-08")
+    get_list.assert_awaited_once_with(
+        "/internal/predictions?source_id=stock_info:300750:2026-10-08"
+    )
+    assert out == rows
+
+
+@pytest.mark.asyncio
+async def test_list_predictions_strict_raises_on_failure(client: NodeApiClient):
+    """fail-closed：查询失败（get_list 返回 None）→ 抛 RuntimeError，不折叠为 []。"""
+    with patch.object(client, "get_list", new=AsyncMock(return_value=None)):
+        with pytest.raises(RuntimeError):
+            await client.list_predictions_strict("stock_info:300750:2026-10-08")

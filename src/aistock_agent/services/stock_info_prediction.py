@@ -74,6 +74,13 @@ _SUFFIX_MAP: dict[str, str] = dict(_EXCHANGE_PREFIX_TO_SUFFIX)
 _SYMBOL_RE = re.compile(r"\d{6}")
 _PUBLISHED_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+# 原因码（机器可读，随端点响应回给 app-api）：app-api 据此区分"正常降级"与"系统性失败"，
+# 避免门槛未达 / 输入非法 / 映射缺档被折叠成同一个 skipped 而整批静默。
+REASON_SAVED = "saved"
+REASON_BELOW_THRESHOLD = "below_threshold"
+REASON_INVALID_INPUT = "invalid_input"
+REASON_UNMAPPED_VALUE = "unmapped_value"
+
 
 def stock_info_source_id(symbol: str, published_date: str) -> str:
     """个股情报 predication_records 的 source_id（spec §6.2，幂等键）。
@@ -100,6 +107,113 @@ def _resolve_exchange_suffix(symbol: str) -> str | None:
     return _SUFFIX_MAP.get(symbol[:2])
 
 
+def build_stock_info_prediction_with_reason(
+    *,
+    symbol: str,
+    stock_name: str,
+    published_date: str,
+    ai_impact: str,
+    ai_horizon: str,
+    ai_summary: str,
+    url: str | None,
+) -> tuple[PredictionResult | None, str]:
+    """确定性映射并**同时返回原因码**（app-api 靠它区分正常降级与系统性失败）。
+
+    与 :func:`build_stock_info_prediction` 完全同口径（后者是本函数的薄封装，只取
+    ``PredictionResult`` 部分，签名与语义维持不变）。原因码取值：
+
+    - ``saved``：成功产出 ``PredictionResult``；
+    - ``invalid_input``：``symbol`` 非 6 位数字 / ``published_date`` 非 ``YYYY-MM-DD``；
+    - ``below_threshold``：未达入环门槛（**预期正常**，app-api 据此静默）；
+    - ``unmapped_value``：交易所前缀不在映射表 / ``ai_impact``/``ai_horizon`` 无法映射 /
+      构造 ``PredictionResult`` 触发 ``ValidationError``（映射缺档，系统性失败信号）。
+    """
+    if not _SYMBOL_RE.fullmatch(symbol) or not _PUBLISHED_DATE_RE.fullmatch(published_date):
+        logger.info(
+            "stock_info_prediction.invalid_input",
+            symbol=symbol,
+            published_date=published_date,
+        )
+        return None, REASON_INVALID_INPUT
+    if not meets_entry_threshold(ai_impact, ai_horizon):
+        logger.info(
+            "stock_info_prediction.below_threshold",
+            symbol=symbol,
+            published_date=published_date,
+            ai_impact=ai_impact,
+            ai_horizon=ai_horizon,
+        )
+        return None, REASON_BELOW_THRESHOLD
+    suffix = _resolve_exchange_suffix(symbol)
+    if suffix is None:
+        logger.info(
+            "stock_info_prediction.unknown_exchange",
+            symbol=symbol,
+            published_date=published_date,
+        )
+        return None, REASON_UNMAPPED_VALUE
+    horizon = _HORIZON_BY_AI_HORIZON.get(ai_horizon)
+    remaining = _REMAINING_BY_AI_HORIZON.get(ai_horizon)
+    direction = _DIRECTION_BY_IMPACT.get(ai_impact)
+    if horizon is None or remaining is None or direction is None:
+        # 门槛已覆盖常规组合，此分支仅防御未知取值（映射缺档），不编造兜底值
+        logger.info(
+            "stock_info_prediction.unmapped_value",
+            symbol=symbol,
+            published_date=published_date,
+            ai_impact=ai_impact,
+            ai_horizon=ai_horizon,
+        )
+        return None, REASON_UNMAPPED_VALUE
+    ts_code = f"{symbol}.{suffix}"
+    try:
+        return (
+            PredictionResult(
+                schema_version="3.0",
+                prediction_status="hypothesis",
+                horizons=[
+                    PredictionHorizon(
+                        horizon=horizon,
+                        label="",
+                        remaining_estimate=remaining,
+                        phase="building",
+                        direction=direction,
+                        target=symbol,
+                        metric_projection=(
+                            f"{ai_impact}/{ai_horizon}：到期窗口累计涨跌幅与预判方向同向即命中"
+                        ),
+                        confidence="low",
+                        confidence_source="deterministic",
+                    )
+                ],
+                omitted_horizons=[],
+                conditions=[],
+                evolution_narrative=ai_summary,
+                evolution_steps=[],
+                risks=[],
+                evidence_ids=[stock_info_source_id(symbol, published_date)]
+                + ([url] if url else []),
+                attribution_summary=ai_summary,
+                target=Target(
+                    kind="stock",
+                    internal_id=symbol,
+                    code=ts_code,
+                    name=stock_name or symbol,
+                ),
+                extraction_source="stock_info_judge",
+            ),
+            REASON_SAVED,
+        )
+    except ValidationError as exc:
+        logger.warning(
+            "stock_info_prediction.build_failed",
+            symbol=symbol,
+            published_date=published_date,
+            error=str(exc),
+        )
+        return None, REASON_UNMAPPED_VALUE
+
+
 def build_stock_info_prediction(
     *,
     symbol: str,
@@ -118,91 +232,23 @@ def build_stock_info_prediction(
     - 交易所后缀无法判定 / 映射缺档（防御未知 ``ai_horizon``）；
     - ``PredictionResult`` 构造触发 ``ValidationError``。
 
+    本函数是 :func:`build_stock_info_prediction_with_reason` 的薄封装（签名/语义不变）；
+    需要区分失败原因（如端点回 ``reason_code``）时用后者。
+
     Returns:
         合法 ``PredictionResult``（``conditions`` 空、``horizons`` 1 档、
         ``prediction_status="hypothesis"``、summary 原文引用）；否则 ``None``。
     """
-    if not _SYMBOL_RE.fullmatch(symbol) or not _PUBLISHED_DATE_RE.fullmatch(published_date):
-        logger.info(
-            "stock_info_prediction.invalid_input",
-            symbol=symbol,
-            published_date=published_date,
-        )
-        return None
-    if not meets_entry_threshold(ai_impact, ai_horizon):
-        logger.info(
-            "stock_info_prediction.below_threshold",
-            symbol=symbol,
-            published_date=published_date,
-            ai_impact=ai_impact,
-            ai_horizon=ai_horizon,
-        )
-        return None
-    suffix = _resolve_exchange_suffix(symbol)
-    if suffix is None:
-        logger.info(
-            "stock_info_prediction.unknown_exchange",
-            symbol=symbol,
-            published_date=published_date,
-        )
-        return None
-    horizon = _HORIZON_BY_AI_HORIZON.get(ai_horizon)
-    remaining = _REMAINING_BY_AI_HORIZON.get(ai_horizon)
-    direction = _DIRECTION_BY_IMPACT.get(ai_impact)
-    if horizon is None or remaining is None or direction is None:
-        # 门槛已覆盖常规组合，此分支仅防御未知取值（映射缺档），不编造兜底值
-        logger.info(
-            "stock_info_prediction.unmapped_value",
-            symbol=symbol,
-            published_date=published_date,
-            ai_impact=ai_impact,
-            ai_horizon=ai_horizon,
-        )
-        return None
-    ts_code = f"{symbol}.{suffix}"
-    try:
-        return PredictionResult(
-            schema_version="3.0",
-            prediction_status="hypothesis",
-            horizons=[
-                PredictionHorizon(
-                    horizon=horizon,
-                    label="",
-                    remaining_estimate=remaining,
-                    phase="building",
-                    direction=direction,
-                    target=symbol,
-                    metric_projection=(
-                        f"{ai_impact}/{ai_horizon}：到期窗口累计涨跌幅与预判方向同向即命中"
-                    ),
-                    confidence="low",
-                    confidence_source="deterministic",
-                )
-            ],
-            omitted_horizons=[],
-            conditions=[],
-            evolution_narrative=ai_summary,
-            evolution_steps=[],
-            risks=[],
-            evidence_ids=[stock_info_source_id(symbol, published_date)]
-            + ([url] if url else []),
-            attribution_summary=ai_summary,
-            target=Target(
-                kind="stock",
-                internal_id=symbol,
-                code=ts_code,
-                name=stock_name or symbol,
-            ),
-            extraction_source="stock_info_judge",
-        )
-    except ValidationError as exc:
-        logger.warning(
-            "stock_info_prediction.build_failed",
-            symbol=symbol,
-            published_date=published_date,
-            error=str(exc),
-        )
-        return None
+    result, _reason = build_stock_info_prediction_with_reason(
+        symbol=symbol,
+        stock_name=stock_name,
+        published_date=published_date,
+        ai_impact=ai_impact,
+        ai_horizon=ai_horizon,
+        ai_summary=ai_summary,
+        url=url,
+    )
+    return result
 
 
 class StockInfoPredictionRequest(BaseModel):

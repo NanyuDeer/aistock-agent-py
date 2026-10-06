@@ -2035,14 +2035,20 @@ async def predictions_from_stock_info(
     """
     from aistock_agent.services.prediction_service import _compute_due_dates
     from aistock_agent.services.stock_info_prediction import (
-        build_stock_info_prediction,
+        build_stock_info_prediction_with_reason,
         stock_info_source_id,
     )
 
     logger = structlog.get_logger()
+    # 各失败原因码对应的人类可读文案（reason_code 为机器可读，供 app-api 区分正常降级/系统性失败）
+    skip_reason_text: dict[str, str] = {
+        "below_threshold": "未达入环门槛",
+        "invalid_input": "输入非法（symbol/published_date）",
+        "unmapped_value": "映射缺档（交易所前缀或 ai_impact/ai_horizon 未知）",
+    }
     source_id = stock_info_source_id(body.symbol, body.published_date)
     try:
-        prediction = build_stock_info_prediction(
+        prediction, reason_code = build_stock_info_prediction_with_reason(
             symbol=body.symbol,
             stock_name=body.stock_name,
             published_date=body.published_date,
@@ -2052,13 +2058,25 @@ async def predictions_from_stock_info(
             url=body.url,
         )
         if prediction is None:
-            reason = "未达入环门槛或输入非法"
-            logger.info("stock_info_prediction_skipped", source_id=source_id, reason=reason)
-            return {"status": "skipped", "reason": reason, "record": None}
+            reason = skip_reason_text.get(reason_code, "未达入环门槛或输入非法")
+            logger.info(
+                "stock_info_prediction_skipped",
+                source_id=source_id,
+                reason_code=reason_code,
+                reason=reason,
+            )
+            return {
+                "status": "skipped",
+                "reason_code": reason_code,
+                "reason": reason,
+                "record": None,
+            }
 
         # 已验证拒覆盖防御（SPEC S6）：同 source_id 已有记录且 verification 非空 dict
-        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预判被静默重写
-        existing = await node_api.list_predictions(source_id)
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预判被静默重写。
+        # fail-closed：必须用 strict 查询——查询失败（抛错）不得被当作"无记录"放行，
+        # 否则 app-api upsert 会无条件覆盖已 verified 记录的正文，导致"验证结果与预判正文错位"。
+        existing = await node_api.list_predictions_strict(source_id)
         for existing_record in existing:
             verification = existing_record.get("verification")
             if isinstance(verification, dict) and verification:
@@ -2081,7 +2099,7 @@ async def predictions_from_stock_info(
             # data_client.post 吞异常返回 None；不判会把这句"落库失败"报成 saved 假成功
             raise HTTPException(status_code=502, detail="save_prediction returned None")
         logger.info("stock_info_prediction_saved", source_id=source_id, due_dates=due_dates)
-        return {"status": "saved", "reason": None, "record": record}
+        return {"status": "saved", "reason_code": "saved", "reason": None, "record": record}
     except HTTPException:
         # 409 等业务拒绝直接透传
         raise
