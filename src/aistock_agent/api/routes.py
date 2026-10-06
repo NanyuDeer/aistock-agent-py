@@ -2077,6 +2077,9 @@ async def predictions_from_stock_info(
         if approximate_horizons:
             payload["due_dates_approximate"] = approximate_horizons
         record = await node_api.save_prediction(payload)
+        if record is None:
+            # data_client.post 吞异常返回 None；不判会把这句"落库失败"报成 saved 假成功
+            raise HTTPException(status_code=502, detail="save_prediction returned None")
         logger.info("stock_info_prediction_saved", source_id=source_id, due_dates=due_dates)
         return {"status": "saved", "reason": None, "record": record}
     except HTTPException:

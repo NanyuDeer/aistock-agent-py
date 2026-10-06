@@ -136,3 +136,16 @@ def test_save_failure_returns_502(client):
             resp = client.post(URL, headers=AUTH_HEADERS, json=_VALID_BODY)
     assert resp.status_code == 502
     assert "node down" in resp.json()["detail"]
+
+
+def test_save_returns_none_returns_502(client):
+    """落库返回 None（data_client.post 吞异常的真实失败模式）→ 502 而非假 saved。
+
+    生产中 app-api 侧 HTTP/业务错误不会抛异常，而是被 ``data_client.post``
+    吞掉返回 None；若 handler 不判 None，会把"没落库"报成 ``status="saved"``。
+    """
+    with patch(_NODE_API_LIST, new_callable=AsyncMock, return_value=[]):
+        with patch(_NODE_API_SAVE, new_callable=AsyncMock, return_value=None):
+            resp = client.post(URL, headers=AUTH_HEADERS, json=_VALID_BODY)
+    assert resp.status_code == 502
+    assert resp.json().get("status") != "saved"
