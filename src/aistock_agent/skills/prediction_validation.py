@@ -140,6 +140,17 @@ def _extract_primary_confirmed(trace: dict[str, object]) -> list[dict[str, objec
     return out
 
 
+def _extract_root_confirmed(trace: dict[str, object]) -> list[dict[str, object]]:
+    """取归因结论层（root）的渠道B 确认（2026-10-06：大盘 primary 链恒空，改由结论层承载）。
+
+    脏值（None/非 list/非 dict 元素）一律过滤，不抛异常。
+    """
+    raw = trace.get("confirmed_prediction")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
 async def _collect_target_confirmations(
     target: Target, window_days: int = _CNF_WINDOW_DAYS
 ) -> list[dict[str, object]]:
@@ -169,7 +180,8 @@ async def _collect_target_confirmations(
                     trace = MarketTraceResult.model_validate(trace_data).model_dump(mode="json")
                 except Exception:
                     continue
-                for item in _extract_primary_confirmed(trace):
+                items = _extract_root_confirmed(trace) or _extract_primary_confirmed(trace)
+                for item in items:
                     key = (item.get("prediction_id"), item.get("scenario"))
                     if key in seen:
                         continue
