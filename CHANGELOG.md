@@ -2,6 +2,25 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 准确性体检：review 404 噪音修复（fix6）+ 历史事件 DateWindow 补置 + 断链①复核
+
+**开发者**: Aria
+
+### 修复
+
+- `agents/workers/review.py`：quick 覆盖检查由 `node_api.get_analysis_report(...)` 改为 `get_analysis_report_quiet(...)`——quick 先于 full 生成时报告不存在（404）属常态，此前每次落 error 噪音；已在服务器部署并 `pm2 restart aistock-agent`，噪音消除。
+
+### 新增（运维脚本）
+
+- `scripts/backfill_event_entities_0924_1006.py`：对 2026-09-24 ~ 2026-09-30 历史政策事件按 DateWindow 补置资讯并幂等 upsert（`canonical_event_key` 冲突更新）。8 条 **8/8 成功**、重跑返回相同 `EVT-*`；L2 与检索结果**零差异**（时点/工具名/金额/利率全对）。
+
+### 复核结论（非代码 bug，附证留档）
+
+- **断链①「已到期未验证」**：以真实取值函数 `_verify_horizon` 精确定量——`pending_total=178` 中 63=窗口未满的合法等待、38=已回写仅等 long 档、**仅 18 条真滞后**（全为 `sector_prediction`/short/到期 09-24）；根因为板块日线 16:00 尚未入库 + 国庆长假断档。手动 `run_once()` → `updated=71`，复核 `truly_missing=0`。原报告「漏验 65 条」属高估，已纠正。
+- **「市场洞见每天都证据不足」**：`attribution_status=hypothesis` 时系统强制清空 `primary_chain_id` 并把 supported 降级 weak → `primaryCause` 恒 null。属**证据门槛错配**（非崩溃、非数据缺失），改由 App 前端展示口径解决。
+
+---
+
 ## [xusiyun] 2026-10-02 — 重大事件时间线物化 id 全链路修复（物化先于落库 + 重放透传）
 
 **开发者**: xusiyun

@@ -1306,8 +1306,9 @@ async def run_review(
     )
 
     # 覆盖检查：quick 时如果已有 full 报告，跳过
+    # 用 quiet 版：报告不存在(404)是常态（quick 先于 full 生成），静默返回 None，不打 error 噪音
     if snapshot_kind == "quick":
-        existing = await node_api.get_analysis_report("review", report_date)
+        existing = await node_api.get_analysis_report_quiet("review", report_date)
         if _is_full_report(existing):
             logger.info(
                 "run_review_skipped_quick_overridden_by_full",
