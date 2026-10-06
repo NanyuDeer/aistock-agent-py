@@ -160,11 +160,18 @@ def _bucket_metrics(entries: list[dict[str, object]]) -> dict[str, object]:
 
     调用方负责先按统一口径过滤（当前版本 + hit/miss + 非近似；迭代桶再排除 long）。
     - n = 已结算数；无样本时 ``hit_rate=None``（**不用 0**，与 app-api 同口径）；
-    - ``sufficient_sample`` 沿用既有阈值 ``n >= 30``；
+    - ``sufficient_sample`` 与聚合桶同判据：``n >= 30 and n_predictions >= 30``
+      （n_predictions = 该桶内**不同预测数**，按 prediction_id 去重——防同一预测的
+      多档位被当成多条独立样本的相关性膨胀；旧记录无 prediction_id 时退化为档位数）；
     - ``flat_rate`` 分母 = 该组内**方向预判已结算数**（bullish/bearish；无方向样本 → None）。
     """
     n = len(entries)
     hits = sum(1 for e in entries if e.get("result") == "hit")
+    n_predictions = len(
+        {e.get("prediction_id") for e in entries if e.get("prediction_id") is not None}
+    )
+    if n_predictions == 0:
+        n_predictions = n  # 旧记录无 prediction_id 时退化为档位数（与 _summary 同口径）
     directional = [e for e in entries if e.get("direction") in {"bullish", "bearish"}]
     flat_count = sum(1 for e in directional if e.get("flat") is True)
     directional_count = len(directional)
@@ -172,7 +179,7 @@ def _bucket_metrics(entries: list[dict[str, object]]) -> dict[str, object]:
         "n": n,
         "hits": hits,
         "hit_rate": round(hits / n, 4) if n else None,
-        "sufficient_sample": n >= 30,
+        "sufficient_sample": n >= 30 and n_predictions >= 30,
         "flat_rate": round(flat_count / directional_count, 4) if directional_count else None,
         "flat_count": flat_count,
         "directional_count": directional_count,

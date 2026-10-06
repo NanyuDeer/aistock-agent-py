@@ -611,3 +611,34 @@ def test_bucket_summary_includes_direction_and_horizon_buckets():
     assert b["sector"]["horizon_buckets"]["mid"]["n"] == 1
     assert b["sector"]["horizon_buckets"]["short"]["n"] == 0
     assert b["combined"]["direction_buckets"]["bullish"]["n"] == 1
+
+
+def test_sub_bucket_sufficient_sample_dedups_by_prediction():
+    """下钻桶 sufficient_sample 与聚合桶同判据：n>=30 **且** 不同预测数>=30。
+
+    15 条预测各产出 2 条已结算档位（同方向 bullish）→ bullish 桶 n=30、n_predictions=15
+    → sufficient_sample=False。旧判据（仅 n>=30）会误判为 True（相关性膨胀假信心）。
+    """
+    entries = [
+        _h_entry(direction="bullish", result="hit", horizon="short", prediction_id=i)
+        for i in range(15)
+    ] + [
+        _h_entry(direction="bullish", result="miss", horizon="mid", prediction_id=i)
+        for i in range(15)
+    ]
+    s = hit_rate_summary(entries)
+    b = s["direction_buckets"]["bullish"]
+    assert b["n"] == 30
+    assert b["sufficient_sample"] is False
+
+
+def test_sub_bucket_sufficient_sample_true_only_with_30_predictions():
+    """n>=30 且不同预测数>=30 → sufficient_sample=True（锁死判据不误伤充足样本）。"""
+    entries = [
+        _h_entry(direction="bullish", result="hit", horizon="short", prediction_id=i)
+        for i in range(30)
+    ]
+    s = hit_rate_summary(entries)
+    b = s["direction_buckets"]["bullish"]
+    assert b["n"] == 30
+    assert b["sufficient_sample"] is True
