@@ -2,6 +2,39 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-07 — 新增 Redis 检查点后端依赖并修正其类型/可达性（B11）
+
+**开发者**: Aria
+
+### 依赖
+
+- **新增 `langgraph-checkpoint-redis`（uv 解析为 `>=0.1.3`，锁定 `0.1.3`）**：`memory/checkpointer.py` 的 `CHECKPOINTER_BACKEND=redis` 分支此前从未在 `pyproject.toml` / `uv.lock` 声明该包，任何走 pyproject 的构建（含 Docker `pip install .`）都不含它 → 该分支运行期 `ImportError` → 永远降级 MemorySaver（死分支）。现正式入列。
+  - **兼容性依据**：`langgraph-checkpoint-redis 0.1.3` 要求 `langgraph-checkpoint>=2.0.21,<3.0.0`、`redis>=5.2.1,<7`；仓库现有 `langgraph-checkpoint 2.1.2`、`redis 5.2.1`、`langgraph 0.2.74` 均落在区间内，uv 未改动任何既有版本，仅连带新增 `redisvl` / `orjson` / `python-ulid` / `ml-dtypes` / `jsonpath-ng` 等传递依赖。
+  - **副作用（预期）**：Docker 镜像及运行时环境会多装该包与其传递依赖，**镜像体积与依赖面增大**——这是「正式装包」的预期代价。
+
+### 修复
+
+- **`memory/checkpointer.py` redis 分支消 `import-not-found` + `union-attr`**：不再对模块级 `_checkpointer_cm` 直接调 `__enter__`，改用局部变量 `cm` 承接 `RedisSaver.from_conn_string(...)` 返回后再赋给单例。查依赖真实源码（`langgraph/checkpoint/redis/__init__.py:1096-1105`：`@classmethod` + `@contextmanager` 生成器，恒 yield 一次）确认 `from_conn_string` 及其 `__enter__()` **都不可能返回 None**，故**不设 None 降级分支、也不用 assert**；既有 `except ImportError → MemorySaver` 降级语义不变，默认后端不变。
+  - 备注：`from_conn_string(...).__enter__()` 内部会 `client_setinfo` 发起真实建连，Redis 不可达时抛 `redis.exceptions.ConnectionError`（**不走 ImportError 分支**）；此属既有行为，本次未改（超出本批范围）。
+
+### 测试
+
+- 新增 `tests/unit/test_checkpointer_redis_backend.py`（4 用例）：① 装包后 `backend=redis` 可达——mock 掉 `RedisConnectionFactory.get_redis_connection`（不真连 Redis）后能构造出 `RedisSaver`，且传入的正是 `settings.redis_url`；② 构造确实读取 `settings.redis_url`；③ 锁住代码默认后端仍为 `memory`（`Settings.model_fields` 级，防本次装包改变默认）；④ 子包缺失时仍按既有语义降级 `MemorySaver`。
+
+### 验证
+
+- `uv run python -m pytest tests/unit -q` → **3443 passed / 9 failed / 1 skipped**（9 条与既有基线同集：`test_industry_vector_search` ×6 + `test_scheduler` ×3；通过数 3439 → 3443，**零新增失败**）。
+- 新增用例 RED→GREEN：`uv pip uninstall langgraph-checkpoint-redis` 后 `uv run --no-sync pytest tests/unit/test_checkpointer_redis_backend.py -q` → **2 failed / 2 passed**（RedisSaver 分支不可达 = 装包前症状）；恢复依赖后同文件 → **4 passed**。
+- `uv run mypy src` → **215 → 213**（−2：即 `checkpointer.py` 的 `import-not-found` 与 `union-attr`；49 files 不变，零新增）。
+- `uv run ruff check src/aistock_agent/memory/checkpointer.py tests/unit/test_checkpointer_redis_backend.py` → **All checks passed**。
+- `uv run python -c "import langgraph.checkpoint.redis"` → ok。
+
+### 未改变
+
+- **默认后端仍为 `memory`**（`config.py:169 checkpointer_backend: str = "memory"`）；redis 分支仅在显式配置 `CHECKPOINTER_BACKEND=redis` 时启用。未改对话业务逻辑、未改任何判定口径/阈值/表结构。
+
+---
+
 ## [main] 2026-10-06 — B 档类型精化批次（晚间链路 payload / final_response / escalate / Literal）+ 六项已核实小修
 
 **开发者**: Aria

@@ -15,6 +15,10 @@ dependencies = [
     "langgraph-checkpoint-sqlite==2.0.11",
     "aiosqlite>=0.22,<0.23",
 
+    # Redis 检查点后端（可选；默认后端仍是 memory，不因装此包而改变）。
+    # 0.1.3 要求 langgraph-checkpoint>=2.0.21,<3 → 与仓库现有 2.1.2 兼容。
+    "langgraph-checkpoint-redis>=0.1.3",
+
     # FastAPI 服务层
     "fastapi==0.115.12",
     "uvicorn[standard]==0.34.2",
