@@ -10,7 +10,7 @@ from typing import Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aistock_agent.schemas.prediction import PredictionResult
-from aistock_agent.trace.chain import CausalChain
+from aistock_agent.trace.chain import CausalChain, PredictionConfirmation
 from aistock_agent.trace.chain import CausalNode as CausalNode
 
 # 市场现象 kind 的 Literal 别名。
@@ -204,6 +204,8 @@ class MarketTraceResult(BaseModel):
     attribution_summary: str | None = None
     # 预判对照（增量字段，默认 None 兼容旧缓存）
     prediction_validation: PredictionValidation | None = None
+    # 渠道B：溯源结论印证的历史预判场景（增量字段，默认空兼容旧缓存）
+    confirmed_prediction: list[PredictionConfirmation] = Field(default_factory=list)
 
 
 class MarketTraceSnapshot(BaseModel):
