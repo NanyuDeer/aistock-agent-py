@@ -2,6 +2,34 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 个股情报入环 P2：个股粒度首次进入验证环
+
+**开发者**: Aria
+
+### 新增
+
+- **端点** `POST /api/agent/internal/predictions/from-stock-info`（`api/routes.py`）：接收个股情报（`symbol`/`stock_name`/`published_date`/`ai_impact`/`ai_horizon`/`ai_summary`/`url`），确定性映射为 `PredictionResult` 后落 `prediction_records`（`source_type='stock_info'`、`source_id=stock_info:{symbol}:{published_date}`）。校验内部令牌；门槛未达/输入非法 → 200 `skipped`（带机器可读 `reason_code`）；同 `source_id` 已验证 → 409 拒覆盖；落库失败或其它意外异常 → 502。
+- **模块** `services/stock_info_prediction.py`：个股情报 → `PredictionResult` 的**确定性映射**（不调 LLM、不发网络），含**全系统唯一的入环门槛判定点**（重大利好/重大利空恒入环；利好/利空仅中期/中长期/长期入环；中性不入环）。`conditions` 恒空、`horizons` 恒 1 档、`prediction_status` 恒 `hypothesis`；`evolution_narrative`/`attribution_summary` 为 `ai_summary` 逐字原文。
+- `services/data_client.py`：新增 `list_predictions_strict(source_id)`（查询失败抛错，而非折叠为空列表）。
+
+### 修复
+
+- 落库失败（`save_prediction` 吞异常返回 `None`）此前报成 `200 saved` 假成功 → 改判 `502`。
+- `skipped` 语义混淆（门槛未达 / 输入非法 / 取值无法映射同码）→ 新增 `reason_code` 区分，供调用方只对「门槛未达」静默。
+- 409「已验证拒覆盖」防线在 `list_predictions` 查询失败时被静默绕过（失败被折叠为空列表）→ 改走 strict 入口 **fail-closed**，拒绝落库以免已验证记录正文被覆盖。
+
+### 验证
+
+- `pytest tests/ -q` = `32 failed / 3889 passed / 4 skipped`，失败集与基线（`32 failed / 3877 passed`）一致 → **新增失败 0**（+12 为本次新增用例）；`ruff check src/` = 65（基线 65）；`mypy src/` = 297（基线 297）→ 新增 0。
+- 新增/扩展单测：`tests/unit/test_stock_info_prediction.py`、`test_stock_info_prediction_route.py`、`test_data_client_prediction.py`。
+
+### 说明
+
+- `due_dates` 复用既有 `_compute_due_dates`（与 index/sector 保持单一口径，不新增第二套交易日历）；未改动 `prediction_validator` / `_METHODOLOGY_VERSION` / 阈值 / 表结构。
+- **尚未部署**。验收需部署后**次日 16:00 后**执行（P2-V1~V4/V6/V7）；`short` 档到期 = `published_date` + 5 交易日，**在此之前不得宣称「个股已入验证环闭环」**。
+
+---
+
 ## [main] 2026-10-06 — 准确性体检：review 404 噪音修复（fix6）+ 历史事件 DateWindow 补置 + 断链①复核
 
 **开发者**: Aria
