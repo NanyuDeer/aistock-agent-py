@@ -277,6 +277,7 @@ async def _compose_card(
     # 链路永不接触全量（"临近=证据"语义不被远期事件污染）。
     win_full = await load_event_timeline(target_date, horizon_days=None)
     win = split_analysis_window(win_full.events, target_date)
+    # getattr 兜底：兼容只声明 events 的旧测试替身（缺这两键时按 False）。
     win.source_missing = getattr(win_full, "source_missing", False)
     win.calendar_uncovered = getattr(win_full, "calendar_uncovered", False)
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)

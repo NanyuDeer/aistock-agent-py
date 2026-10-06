@@ -174,14 +174,14 @@ async def test_morning_inherits_base_no_recompose(
 
 
 @pytest.mark.asyncio
-async def test_midday_event_delta_lands_branch_by_result(
+async def test_midday_event_no_result_caps_base(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """12:30 事件当期（d=0，未落档）：统一时间线事件不含 result → 走「未落档」分支封顶低仓。
+    """12:30 事件当期（d=0）且无 result → 未落档 → base 封顶轻仓。
 
-    新口径 = 时间线：`load_event_timeline` 产出的 high 事件仅带 date/type/title/importance，
+    时间线口径：`load_event_timeline` 产出的 high 事件仅带 date/type/title/importance，
     不含 result（handoff §9：result 无写入者，「按预期差落档」为死路）→ d=0 未落档 →
-    base 封顶 1（轻仓~三成）。
+    base 封顶 1（轻仓~三成）。故主档位不由事件「预期差」决定，而由「无 result」决定。
     §5.7 后分支预算（≤3）由技术三档整体占满：事件情景让位，不产出 event_ref 分支，仅留痕。
     """
     mock_api.get_rhythm_report.return_value = {
