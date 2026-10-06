@@ -20,9 +20,9 @@ from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_calendar import (
     EventWindow,
-    load_event_window,
     split_analysis_window,
 )
+from aistock_agent.services.event_timeline import load_event_timeline
 from aistock_agent.services.mainline_engine import (
     MA20_MIN_BARS,
     MIN_CANDIDATES,
@@ -275,9 +275,8 @@ async def _compose_card(
     # 年末截断，G3 越年留痕），再切 ≤5 交易日分析子窗喂 event_confirm/event_d/锚点/
     # 分支——A2 裁决：单请求超集 + 交易日差口径切分，HTTP 仍 1 次/卡/时点，且分析
     # 链路永不接触全量（"临近=证据"语义不被远期事件污染）。
-    win_full = await load_event_window(target_date, horizon_days=None)
+    win_full = await load_event_timeline(target_date, horizon_days=None)
     win = split_analysis_window(win_full.events, target_date)
-    # getattr 兼容只声明 events 的旧测试替身（对齐 L509 同款惯例）
     win.source_missing = getattr(win_full, "source_missing", False)
     win.calendar_uncovered = getattr(win_full, "calendar_uncovered", False)
     _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
