@@ -2,6 +2,150 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 末项 Important 修复：下钻桶 sufficient_sample 对齐复合判据
+
+**开发者**: Aria
+
+### 修复
+
+- **问题**：本批新增的下钻桶（`direction_buckets` / `horizon_buckets`，含 `long`）的 `sufficient_sample` 仅用 `n >= 30`，而既有聚合桶 `_summary` 已是 `n >= 30 and n_predictions >= 30`（`n_predictions` = 不同预测数，按 `prediction_id` 去重）。同响应内因此会出现 `combined.sufficient_sample=false` 而 `direction_buckets.bullish.sufficient_sample=true` 的自相矛盾。
+- **改法**：`services/prediction_stats.py` 的 `_bucket_metrics`（方向/档位/long 桶的唯一聚合实现）改为 `n >= 30 and n_predictions >= 30`；`n_predictions = len({e.get("prediction_id") ...})`，全 None（旧记录）时退化为 `n`——与 `_summary` 逐字同口径。`_summary` 及复用它的 `build_validation_profile` / `horizon_breakdown` 不变（本就复合判据）。
+- **行为变更（有意收紧）**：仅新增下钻桶由 `n>=30` 收紧为复合判据（更保守，不会反向）；聚合桶行为不变。收紧后与 app-api 侧判据完全一致。
+
+### 验证
+
+- **测试**：`test_prediction_stats.py` +2（RED→GREEN：15 预测 × 2 档 = n30/pred15 → False；30 预测 × 1 档 → True）。
+- **验证**：`pytest tests/unit/test_prediction_stats.py -q` → 49 passed；`pytest tests/unit -q` → 3457 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）。
+
+---
+
+## [main] 2026-10-06 — 终评修复：迭代看板补方向桶 × 档位桶（§8-3）+ `_judge_window` k 注释
+
+**开发者**: Aria
+
+### 新增
+
+- **I2（§8-3 落地下钻桶）**：`services/prediction_stats.py` 新增共用聚合 `_bucket_metrics`（给定一组 entry → n/hits/hit_rate/sufficient_sample/flat_*）与 `_dimension_buckets`（按维度切分复用）：`hit_rate_summary` 与 `bucket_summary` 的每个桶新增 `direction_buckets`（bullish/bearish/neutral 各带 `flat_rate`，分母 = 该方向已结算数）与 `horizon_buckets`（short/mid/long；**long 单列并标注 `iteration_board=False`**）。口径与主桶逐条一致：methodology_version=4.0、排除 approximate、long 不入迭代桶、无样本 hit_rate=None（不用 0）、`sufficient_sample=n>=30`、小数 `round(...,4)`。
+- **M4**：`prediction_validator._judge_window` 的 `k` 形参加内联注释，明示「4.0 调用方必须显式传入 k（唯一来源 `k_band_table.k_for`）；k is None → ValueError」（仅注释，判定行为不变）。
+
+### 验证
+
+- **测试**：`test_prediction_stats.py` +7（方向桶与整体桶不同且正确、方向桶 flat_rate 分母为该方向数、无样本 None / neutral flat_rate None、档位桶含 long `iteration_board=False`、approximate/旧版本不入任何新桶、bucket_summary 各桶补两维桶）。
+- **验证**：`pytest tests/unit -q` → 3455 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）；`test_prediction_stats.py` → 47 passed。
+
+---
+
+## [main] 2026-10-06 — Task 7：验证侧下线条件判定链路（+4 项结转小修）
+
+**开发者**: Aria
+
+### 重构
+
+- **主体（1 服务 + 1 测试）**：`services/prediction_validator.py` 的 `run_once` 移除两处条件判定调用——第①段 `_scan_condition_met`（点亮 `c{i}.condition_met=true`）与第②段 `_verify_conditions`（到期 hit/miss），并删除仅供条件路径使用的 `scan_cache`/`event_cache` 局部量；补退役注释（日期 + 范围限 `prediction_records.conditions` + 节奏 `branches` 不受影响 + 不删文件）。退役后 `run_once` 不再写入任何 `c{i}` entry（旧记录保持只读可查、不清洗）。
+- **保留不删**：`_scan_condition_met` / `_verify_conditions` / `_judge_condition_met_once` / `condition_met_judge` 均保留——存量回溯入口 `backfill_condition_met` 仍调用 `_judge_condition_met_once`；故无死 import / 死常量（`_CONDITION_SCAN_*` 等仍被 `backfill_condition_met` 与 `_condition_scan_range` 引用）。物理删除留待后续单独清理。
+
+### 测试
+
+- `test_prediction_validator.py` 新增 `test_run_once_writes_no_condition_entries`（RED→GREEN：退役前 payload 出现 `c0`）、`test_run_once_ignores_conditions_after_retire`；原 `test_run_once_scans_condition_met_before_due` / `test_run_once_memoizes_condition_scan_fetch_per_window` 改为退役护栏（零 `c{i}` 回写、零条件取数）。
+
+### 改进
+
+- **结转 A**：`prompts/workers/prediction.py` 两处说明行加「字段」二字（`- conditions 字段：**不再产出**…`）；`test_prediction_prompt_no_conditions.py` 恢复字面断言 `"conditions：" not in prompt`，并加复归护栏 `'"condition"' not in prompt`。
+- **结转 B**：`test_v4_single_band` 追加 3 组边界用例（x 恰等于 ±k），锁死 `>=`/`<=` 语义。
+- **结转 C**：`_compound_pct` docstring 去掉「全项目唯一 / 禁止再用 sum(window)」绝对化断言，改为「4.0 主链唯一口径」并注明退役的条件链路（仅 backfill 可及）是已退役例外。
+- **结转 D**：`skills/prediction_validation.py` 的 `scenario_signal.note` 去掉「预判时可适当提高其 conditions[] 权重」（该文案会注入 LLM，与不再产出 conditions 相抵），改为不含 conditions 的参考提示。
+
+### 验证
+
+- `test_prediction_validator.py` → 93 passed；节奏护栏 `test_rhythm_verification.py + test_rhythm_engine.py` → 47 passed；`test_prediction_prompt_no_conditions.py + test_prediction_validation_cbis.py + test_backfill_condition_met.py + test_condition_met_judge.py` → 134 passed；`tests/unit -q` → 3448 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）。ruff 改动行无新增。
+- **提交**：主体 `feat(prediction): retire conditional-branch verification path`；结转（含本记录）见本任务第二个 commit（chore(prediction): clean up retired-condition residuals）。
+
+---
+
+## [main] 2026-10-06 — Task 5 二轮修复：insufficient 计 pending 定调 + 舍入对齐 + 全 pending 产出
+
+**开发者**: Aria
+
+### 修复
+
+- **I1（定义确认，不改行为）**：`prediction_stats._settled_ratio` 的 pending 分支补「为什么」注释——insufficient 属**数据可用性状态**（数据源故障/无数据）、非**判定结论**，故计入 pending_slots（保留原行为，不做双排除）。新增测试 `test_settled_ratio_counts_insufficient_as_pending`（scope={4.0 hit, 4.0 insufficient} → settled_ratio==0.5）。
+- **M1（舍入对齐）**：agent-py 既有 `round(...,4)` 保持不变；新增测试 `test_settled_ratio_and_flat_rate_rounded_to_4dp` 锁死 1/3 → 0.3333（与 app-api 新增的 `round4` 同值）。
+- **M2（边界对齐）**：`prediction_validator._report_stats` 提前 return 由 `if not entries` 改为 `if not entries and not slots`——全 pending（有声明档位槽、无任何 verification entry）时仍产出统计且 settled_ratio==0（None 仅在分母为 0 时使用）。新增测试 `test_report_stats_emits_zero_settled_ratio_when_all_pending`。
+
+### 验证
+
+- `pytest tests/unit -q` → 3446 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）。
+
+---
+
+## [main] 2026-10-06 — Task 5 修复：settled_ratio 统一口径 + long 命中率交付 + direction/flat 限 4.0
+
+**开发者**: Aria
+
+### 修复
+
+- **Important 1（settled_ratio 三处口径不一致 → 统一「声明档位槽」口径）**：`services/prediction_stats.py` 弃用 `_scope`，改为 `_slots_from_entries` / `_bucket_slots` / `_settled_ratio`：分母 = 记录**声明**的非-long、非-近似档位槽（含真 pending，来源 `record.prediction.horizons` 而非已存在的 verification entry）；分子 = 其中 result ∈ {hit,miss} 且 version=="4.0"；分母 = 分子 + pending；**旧版本（2.0/3.0/无版本）已结算槽位既不入分子也不入 pending**（口径隔离）。`hit_rate_summary` / `bucket_summary` 新增显式 `scope_slots` 关键字参数（缺省 None → 回退用 entries 自身作槽位；`_summary` 无槽位时 settled_ratio=None，不再隐式 1.0）；调用方 `prediction_validator._report_stats` 用 `prediction.horizons` + `due_dates_approximate` 构造槽位传入。
+- **Important 2（long 命中率交付）**：`long{n,hits,hit_rate}` 口径对齐 app-api —— long + 非近似 + version 4.0 + result ∈ {hit,miss}；无样本 hit_rate=None（原 0.0）。`long_excluded` 仍按「存在当前版本非近似 long 档（任意 result）」判定。
+- **Minor（direction/flat 仅 4.0 写入）**：`prediction_validator._verify_horizon` 的 `direction` 与 `flat` 改为**仅 `methodology_version=="4.0"` 分支写入**；v2/v3 存量 entry 不再新增这些键（无消费者依赖 v2/v3 的 direction）。
+
+### 验证
+
+- **测试**：`test_prediction_stats.py` +5（真 pending 使 settled_ratio<1、旧版本已结算双隔离、无槽位=None、bucket 按桶槽位、long 展示仅 hit/miss 且排除近似）。
+- **验证**：`pytest tests/unit -q` → 3442 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）。
+
+---
+
+## [main] 2026-10-06 — Task 5：long 档不计入迭代看板 + 补看板指标（settled_ratio / flat_rate）
+
+**开发者**: Aria
+
+### 新增
+
+- **改动（2 文件 + 2 测试文件）**：`services/prediction_stats.py`——`_filter_v2` 追加 `horizon != "long"`（long 档排除出迭代看板命中率分子）；新增 `_scope`（settled_ratio 分母 = 统计范围内全部非-long 档位条目，含未结算）与 `_long_entries`（long 单列汇总）；`_summary` 增补 `settled_ratio` / `flat_rate` / `flat_count` / `directional_count` / `long_excluded` / `long{n,hits,hit_rate}`；`hit_rate_summary` / `bucket_summary` 三桶同口径接入。`services/prediction_validator.py`——`_verify_horizon` 的 v4 分支新增结构化 `flat` 标记（direction ∈ {bullish,bearish} 且 |x| < k → `flat: True`；字段驱动、无值即无键），并落 `direction` 字段。
+- **三处对计划原文的有意修正/新增**：① `flat` 判据依赖 k，而 k 唯一来源在 Python（`k_band_table.k_for`）→ 定在**写入侧**落标记，app-api 只读计数、不复制 k；② `flat_rate` 分母改为**方向预判已结算数** `directional_count`（非计划原文 `flat_count + n`，n 含 neutral 会稀释，得不到设计 §4.3 的「33% ≈ 瞎猜」基准线）；③ entry 新增 `direction` 字段（flat_rate 分母所需；与 reason 的"方向="同源），供读取侧计数。
+
+### 验证
+
+- **测试**：`test_prediction_stats.py` +8（long 排除/单列、settled_ratio 含 pending、flat_rate 分母锁定 1/2≠1/5、无方向样本 flat_rate=None、bucket 同口径）；`test_prediction_validator.py` +3（入带 flat=True、出带不写 flat 键、neutral 不写 flat）。
+- **验证**：`pytest tests/unit -q` → 3438 passed / 9 既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3，与本改动无关）。
+- **未提交**：无（随本任务 commit 提交）。app-api 侧同口径改动见该仓 commit。
+
+---
+
+## [main] 2026-10-06 — Task 4：单带宽 k 判定（v4，替换纯符号 + 两套阈值）
+
+**开发者**: Aria
+
+### 改进
+
+- **改动（1 文件 + 测试）**：`src/aistock_agent/services/prediction_validator.py`——`_judge_window` 新增 v4 分支：单带宽 k（`bullish hit ⟺ x ≥ +k`、`bearish ⟺ x ≤ -k`、`neutral ⟺ -k < x < +k`，x=`_compound_pct(window)` 复利）；`|x| < k` 时方向预判记 miss（不再"涨 0.01% 也算命中"）。新增 `k: float | None = None` 关键字参数，v4 下 `k is None` → ValueError（fail loud，禁止静默回退默认带宽）。`_verify_horizon` 调用点改为**按版本分流**：`methodology_version=="4.0"` → `k=k_for(target_type)` + `baseline_neutral` 同谓词（`-k < x < k`）；`"2.0"/"3.0"` 存量路径逐字不变（仍用 legacy 阈值）。v4 起 `threshold_version`（sector）改记 k 表版本 `"4.0"`（legacy 仍 `"1.0"`）。
+- **对计划 Step 5 的偏离（有意）**：计划要求删除两套阈值常量并把调用点无条件改 `k_for`；实际 v2 是 backfill 存量回补口径（`_BACKFILL_METHODOLOGY_VERSION="2.0"`），无条件改写会篡改 v2/v3 存量判定语义。故**保留** `_LEGACY_SECTOR_THRESHOLDS`/`_LEGACY_INDEX_THRESHOLDS`（连同 `_NEUTRAL_PCT_THRESHOLD`/`_STRONG_PCT`/`_THRESHOLD_VERSION`），收拢进带 `# ⚠️ legacy` 标注的区块，仅供 v2/v3 使用；4.0 主链阈值唯一来源 = `k_band_table.k_for`。
+
+### 验证
+
+- **测试**：新增 `test_v4_single_band`（7 参数化）、`test_v4_single_band_uses_compound_over_four_days`、`test_v4_requires_k_fail_loud`、`test_k_for_dispatches_by_target_type_and_falls_back_index`、`test_v2_path_unchanged_by_v4`，以及**护栏用例** `test_legacy_v3_sector_index_thresholds_unchanged_by_v4`（锁死 v3 存量 sector=0.25 / index=0.5 阈值区分未被 v4 影响）；同步更新 sector entry 断言（`threshold_version` → `"4.0"`；v4 不再产 `grade`；sector 用例 pct_chg 调至 ≥ sector k）。
+- **验证**：`pytest tests/unit/test_prediction_validator.py -q` → 89 passed；`tests/unit` 全量 → 9 条既有基线失败（`test_industry_vector_search.py` 6 + `test_scheduler.py` 3）与本改动无关；ruff 改动后错误数与 HEAD 持平（18=18，无新增）。
+- **未提交**：无（随本任务 commit 提交）。
+
+---
+
+## [main] 2026-10-06 — Task 3：验证器 actual 统一为复利口径（_compound_pct）
+
+**开发者**: Aria
+
+### 修复
+
+- **改动（1 文件 + 测试）**：`src/aistock_agent/services/prediction_validator.py` 新增唯一复利实现 `_compound_pct(window) = ∏(1+p/100) − 1`（与 `scripts/calibration/k_band.py#cumulative_returns` 同口径）；`_verify_horizon` 的展示/落库 `actual` 由 `sum(window)` 改为 `_compound_pct(window)`。
+- **严格边界（只改 actual）**：`_judge_window` v2/v3 分支的判定 `sum(window)` 保持原样（历史口径，改动会篡改存量回测语义）；`_verify_conditions` 的 scenario 累计判定不动；v4 复利判定属 Task 4，未提前实现。
+
+### 验证
+
+- **测试**：`tests/unit/test_prediction_validator.py` +2 用例（`_compound_pct` 复利口径 `[1,1]→+2.01%`、`[-1,1]→-0.01%`；`_verify_horizon` 集成点 4×+1% → `actual=+4.06%`，锁死与简单求和的差异）。
+- **验证**：`python -m pytest tests/unit/test_prediction_validator.py -q` → 77 passed；`tests/unit` 全量 9 条既有基线失败（industry_vector_search/scheduler）与本改动无关。
+- **未提交**：无（本任务随 commit 一并提交）。
+
+---
+
 ## [main] 2026-10-06 — 个股情报入环 P2：个股粒度首次进入验证环
 
 **开发者**: Aria
@@ -46,6 +190,10 @@
 
 - **断链①「已到期未验证」**：以真实取值函数 `_verify_horizon` 精确定量——`pending_total=178` 中 63=窗口未满的合法等待、38=已回写仅等 long 档、**仅 18 条真滞后**（全为 `sector_prediction`/short/到期 09-24）；根因为板块日线 16:00 尚未入库 + 国庆长假断档。手动 `run_once()` → `updated=71`，复核 `truly_missing=0`。原报告「漏验 65 条」属高估，已纠正。
 - **「市场洞见每天都证据不足」**：`attribution_status=hypothesis` 时系统强制清空 `primary_chain_id` 并把 supported 降级 weak → `primaryCause` 恒 null。属**证据门槛错配**（非崩溃、非数据缺失），改由 App 前端展示口径解决。
+- **fear-greed（fix3）**：`composite` 非 9/27 冻结；实测 9/27–9/30 仍波动，**10/01 起恒 5.38 恰为国庆休市**，`breadth_daily`/`limit_daily` 最新 9/30，复牌自动更新。
+- **日历预期差（fix4）**：`expectation_diff` 每日运行但 judged/skipped/attempted 全 0，因 20 条 high 事件**全在未来**（观察窗 [昨日,今日] 内无发生）；未来事件 result 空=设计正确，0 条已过期 high 缺 result。
+- **watchlist（fix2）**：2026-08-30 已并入 stock-trace，Node/前端均改读等价新链，9/04 停更是预期；`watchlist_insight_*` 为遗留死表。
+- **stock_monitor_events（fix5）**：遗留死表；监控端点 `service.ts` 已改读 `stock_info_judgements`。
 
 ---
 
@@ -214,6 +362,27 @@
 - **守门扩展**：`VERIFIED_BOARD_NAMES` 实测定长表扩至 35（守门测试读 v35）；新增 `mainline` 枚举与 `name∪aliases` 跨候选碰撞守门（H11）；H5 口径迁移为"既有 5 条映射不得改写 + 允许加性新增"。
 - **`priority` 死字段删除**（C2，独立 commit）；loader 不再读它。
 
+## [main] 2026-09-19 — 节奏大师手动补跑支持 `target_date` 覆盖落库键（R-节奏-补跑）
+
+**开发者**: Aria
+
+### 新增
+
+- **背景（用户实测）**：手动触发 `POST /api/agent/briefing/rhythm-master/trigger` 传 `report_date=2026-09-18` 重算后，**前端 9-18 页仍显示 9-17 内容**。查实为**日期语义错位**：落库键 = `target_date`（worker `report_date=card.target_date`），而 `after_close` 的 target_date = 基准日的**次一交易日**；手动端点的 `report_date` 又是**基准日** → 重算结果落到了 `09-21` 键，前端 9-18 页读到的是 09-17 自动跑生成的旧卡（basis=09-17）。
+- **改动（3 文件 + 测试）**：
+  - `src/aistock_agent/agents/workers/rhythm_master.py`：`_compose_card(run_date, slot, target_date=None)` 显式 target_date 覆盖推导；`run(state)` 读取 `state["target_date"]` 透传（非空 str 才生效）。
+  - `src/aistock_agent/services/scheduler.py`：`_dispatch_rhythm_master(slot, report_date, target_date=None)` 写入 `state["target_date"]`；docstring 说明基准日/目标日语义。
+  - `src/aistock_agent/api/routes.py`：`trigger_rhythm_master` 解析可选 `target_date`（YYYY-MM-DD 校验，非法 422），透传并记日志。
+  - `tests/unit/test_scheduler.py`：+2 用例（显式 target_date 写 state / 缺省不写，保持按 slot 推导）。
+- **用法**：重算 9-18 数据并让前端 9-18 页显示 → `{"refresh_slot":"after_close","report_date":"2026-09-18","target_date":"2026-09-18"}`。
+
+### 验证
+
+- `pytest tests/unit/test_scheduler.py` 50 passed；`tests/unit/test_rhythm_master_compose_card.py` + `test_rhythm_wiring.py` 23 passed。
+- **未提交**：用户选择暂不 commit/push/部署。
+
+---
+
 ## \[changer\] 2026-09-19 — 阶段兜底启用「前一交易日」修复热度轴整条消失（X2）
 
 **开发者**: 37588
@@ -265,6 +434,329 @@
 ### 后续任务
 
 - 为「板块主力资金 / 情绪家数 / 外盘走势」等**无数据源口径补数据源**（不采用"生成侧禁写"，避免阉割预判信息量）；事件类判径（状态锚 → 受限 LLM，默认关）已具备，**无需新建验证 agent**。
+
+---
+
+## [main] 2026-09-18 — 板块定向检索 query 换词：现象式问句 → 5 个事件族
+
+**开发者**: Aria
+
+### 改进
+
+- **背景（组长口径「检索的关键词也需要改进，要更容易找到真正的驱动事件」）**：`sector_trace_snapshot._sector_evidence_queries` 原本 3 组定向 query，其中
+  1. `{date} {板块} 板块 暴跌 大涨 原因` 是**现象式问句**——检索器返回的正是「注册制次新股大涨八个点」「全线上涨！涨幅第一」这类行情综述，而准入层（`is_driving_event`）刚写好规则专门拒它们：等于**捞回来再扔掉**，白花检索配额；
+  2. `{date} {板块} 板块 反垄断 调查 监管` 是早前某次「存储狙击」案例的**特化词**，只有板块恰在被调查时才命中，绝大多数日子空转；
+  3. 三条 query 只有 `事件 公告 政策` 一条是通用事件导向，召回面太窄。
+- **改动（`services/sector_trace_snapshot.py`，单文件、单函数）**：改成 **5 组事件族**，族间词不重叠（族内为并列同义词），每族仍注入 `report_date` 与板块名、中文空格连接：
+  | 族 | query |
+  |---|---|
+  | 政策监管 | `{date} {板块} 政策 监管 调查 部委 试点` |
+  | 公司硬事件 | `{date} {板块} 公告 中标 订单 获批 并购` |
+  | 供需价格 | `{date} {板块} 涨价 减产 扩产 供需 库存` |
+  | 技术产业 | `{date} {板块} 量产 投产 认证 技术突破 招标` |
+  | 海外贸易 | `{date} {板块} 出口 关税 制裁 海外订单 豁免` |
+
+  **不再出现任何现象词**（原因/暴跌/大涨/涨幅）；保住原第 3 组的监管意图（`监管 调查` 进政策族），另把此前完全没覆盖的公司级硬事件、供需价格、技术产业、海外贸易四类补上。**副作用（如实登记）**：每板块检索条数 3×5=15 → 5×5=25（Tavily 调用 +67%），换来召回面与精确度同时提升。
+- **连带**：`tests/unit/test_attribution_chain.py` 的 `_SEARCH_QUERY` fixture（"与第 1 组同形"的 kind 标签）同步改为新第 1 组，保持"同形"注释不假。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_sector_trace_snapshot.py` +1 例（现象词一律不得出现 + 10 个事件族代表词必须命中 + query 条数 = 5）；既有 `test_sector_queries_include_regulatory` 加强为"每条 query 都带板块名与日期"。RED 取证：`1 failed, 1 passed` → GREEN。
+- `pytest -q tests/unit/test_sector_trace_snapshot.py tests/unit/test_attribution_chain.py tests/unit/test_sector_trace_worker.py` → **165 passed / 0 failed**；`ruff check` 两个改动文件 `All checks passed!`。
+- **评估后暂缓（已登记 AGENTS.md，未做）**：① **龙头股名扩展**（`{板块} {龙头股} 公告 中标 订单`）——`lead_stock` 已在快照 `fact` 里可直接取用；② **Tavily `days` / `include_domains` 参数**——用时间过滤替代"日期关键词" + 站点白名单从源头掐掉行情页/栏目页噪声；二者都需改 `TavilyService.search` 包装并确认 failover 链（tavily→doubao→anysearch）都支持，故本轮未做。
+- **跨端**：仅改 agent-py（1 源文件 + 2 测试文件 + `AGENTS.md` + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 文档更新（跨页口径已根治 + 问题 1 样本补第 4 条）
+
+**开发者**: Aria
+
+### 文档
+
+- **`AGENTS.md` 链式溯源闭环 ① 段**：「残留（如实登记）」改为「**残留（2026-09-18 当晚已根治）**」——板块详情页 `trace.summary` 已由 app-api `848669e` 改为**读当日链**（`pickSectorTraceSummary` 链优先），与「市场洞见」页同源；agent-py 侧 0 改动。
+- **`AGENTS.md` 待观察样本清单补第 ④ 条**（目标 3–5 条，现 4 条）：2026-09-18 当日最后一次重跑（14:31）`科创次新股` 的 `政策支持集成电路发展，科创综指ETF华夏(589000)昨日净流入超1200万元_每日经济新闻` —— **"资金流报道"族**：主体是 ETF 净流入/主力资金，靠夹带的「政策支持」被 `_CAUSE_TOKENS` 豁免。关键落差：`_NON_PRICE_DOMAIN_KEYWORDS` 的资金流词族**只作用于条件点亮 G1，不作用于事件准入** → 候选修法是在事件准入侧补资金流/份额/净流入类词并与 G1 词表对齐。
+
+### 验证
+
+- **无代码改动**（本轮 agent-py 生产代码与测试 0 改动）；验证：该次重跑链 `CONTRADICTION=0`、`PAGE_NOISE_IN_EVENTS=0`，3 个板块各有自己的链摘要。
+
+---
+
+## [main] 2026-09-18 — 页面噪声**覆盖回归补偿**（站点栏目名 + 站点入口首页）
+
+**开发者**: Aria
+
+### 修复
+
+- **背景（迭代 4 复核时暴露）**：收窄提交 `38284cb` 把站点名（同花顺/东方财富）移出 `_PAGE_NOISE_TOKENS` 后，`股票频道- 东方财富网`（ref `https://stock.eastmoney.com/`）**再无任何判据可拦**——它既非现象也非原因，按"判不出即放行"进了事件层；迭代 4 的一致性裁决还会把它**提升成板块摘要**。这是收窄引入的**覆盖回归**——但不能恢复站点名（那会退回"同花顺：国家大基金三期成立"被误拒）。
+- **改动（`services/attribution_chain.py`，单文件）**：补两道**形态类**判据，与站点名这条"品牌类"判据解耦：
+  - **标题级**：`_PAGE_NOISE_TOKENS` 增栏目/首页形态词 `频道/頻道/首页/首頁/栏目/欄目/导航/導航`——拦的是"栏目名"这一**体裁形态**（`股票频道- 东方财富网`），不是品牌；含站点名但无栏目形态的真事件标题照常放行。
+  - **URL 级**：新增 `_PAGE_NOISE_URL_ROOT_PATHS = ("", "/", "/index.html", "/index.htm", "/index.shtml", "/index.php")` 与纯函数 `_is_site_root(host, path)`——已知行情/数据站点域（`10jqka.com.cn`/`eastmoney.com`，**含任意子域**）的**站点/栏目首页**判噪声。与既有页面模块子域判据正交：`stock.eastmoney.com/`（频道首页）判噪声，`www.eastmoney.com/news/…`（站内报道页）不判。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+8 例**（4 条栏目/首页标题必拒 + 4 条站点首页 URL 必判噪声）。RED 取证：`7 failed, 3 passed`（4 例 `assert '' == 'page_noise'` + 3 例 `assert False is True`）→ GREEN **144 passed**。
+- `pytest -q tests/unit/test_attribution_chain.py` **144 passed**；全量 `tests/unit` **3224 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 两个改动文件 `All checks passed!`；`mypy` 改动源文件 **1 条**（与 HEAD 同一条、仅行号平移 → 新增 0 条）。
+- **另登记（暂不改）**：本次生产复核还捞出两条**问题 1 族**漏网（组长裁定先攒样本），新增到 `AGENTS.md`「待观察样本清单」：② `国家大基金持股概念涨4.03%，主力资金净流入39股-证券之星`；③ `今日A股上演魔幻一幕，完全看不懂了…… - 股票`（"情绪化评论体裁"族，需 `commentary_without_event` 判据）。
+- **跨端**：仅改 agent-py（1 源文件 + 1 测试文件 + `AGENTS.md` + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 迭代 4：摘要与事件层一致性（"结论不得与证据相反"）
+
+**开发者**: Aria
+
+### 新增
+
+- **背景（生产实证）**：2026-09-18 重跑后同一板块卡片上两句话并存 —— `children[].trace_summary` = `未检索到可明确解释当日行情的独立触发事件`（溯源阶段 trigger headline），而 `children[].events` 非空（检索补漏路径从同一快照的 `sector_event:*` 候选里放行了一条）。组长口径：**逻辑通顺完整** —— 结论不得与证据相反。
+- **改动（`services/attribution_chain.py`，单文件）**：
+  - 新增常量 `_NEGATIVE_SUMMARY_MARKERS`（未检索到/未找到/未发现/未确认/未明确/未识别/未匹配/没有检索到·找到·发现/无法确认/无法判断/不能确认/暂无/尚未）。**刻意不收"不足/没有/缺少/缺乏"**：肯定归因句会被误判成否定句、把真有归因的摘要错误让位给事件标题。
+  - 新增纯函数 `_is_negative_summary(text)` 与 `_first_event_headline(events)`（事件节点空/空白/非 dict/非字符串一律跳过）。
+  - 原 `_trace_summary` 的报告侧取源（报告 summary → trigger headline → claims → 中性兜底）**原样抽成** `_trace_summary_from_report(trace_result)`；`_trace_summary(trace_result, *, events=())` 变为"取源 + 一致性裁决"：摘要为否定句 **且** `events` 非空 → 让位给事件首条非空 headline；事件无可用标题则让不了位、如实保留否定句。**不传 `events` 的调用方行为逐字不变**。
+  - 调用侧（`assemble_attribution_chain` children 组装）：`trace_result` 归一化为 `trace_result_dict` 后**先算 events、再定摘要**（顺序即语义），改写发生时留痕 `chain_trace_summary_overridden_by_events`（`report_date`/`sector`/`from_summary`/`to_headline`），可审计、可对账。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+15 例**（否定句 6 种写法 × 有事件必让位 / 肯定句 + 有事件必保留 / 无事件保留且不传 events 行为不变 / 肯定句含"不足"不被误判 / 事件 headline 空或非 dict 让不了位 + 集成 2 例）。RED 取证：`14 failed, 8 passed` → GREEN **136 passed**。
+- `pytest -q tests/unit/test_attribution_chain.py` **136 passed**；`-k "chain or sector_trace or consumer or condition_met or attribution or review"` **657 passed / 2 failed**（2 条为基线存量）；全量 `tests/unit` **3216 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 两个改动文件 `All checks passed!`；`mypy` 改动源文件 **1 条**（与 HEAD 同一条、仅行号平移 → 新增 0 条）。
+- **残留（如实登记，未做）**：板块详情页 `/api/agent/sector-insight/:date` 的 `trace.summary` 仍由 app-api `extractTraceSummary` 取 `market_trace.trace` 的 trigger headline（agent-py 侧本轮 0 改动）→ 两页可能不一致；根治方向：让 sector-insight 改读当日链 `children[].trace_summary`（单一真相源），跨仓未做，已登记 AGENTS.md。
+- **另登记（暂不改）**：事件准入现存一类漏网 —— **研报观点/展望体裁**标题既非现象也非基本事件，靠弱原因词「落地」被 `_CAUSE_TOKENS` 豁免放行。组长裁定**先攒样本（目标 3–5 条）再定词表**。
+- **跨端**：仅改 agent-py（1 源文件 + 1 测试文件 + `AGENTS.md` + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 页面噪声判据**收窄**（消上一轮如实登记的两处误伤）
+
+**开发者**: Aria
+
+### 修复
+
+- **背景**：上一轮（`45a0cd9`）落地两道网时已登记两处误伤风险，本轮就地收窄：① 标题级词表含**站点名**（同花顺/东方财富）——它们是**来源品牌**不是页面形态，真原因标题若只带站点名而不含原因词会被 `page_noise` 误拒；② URL 主机做**任意子串**匹配（`guba`/`f10`/`quote`）——`f10.example.com` 这类非行情站域名被误判成"页面噪声页面"。
+- **改动（`services/attribution_chain.py`，单文件）**：
+  - **收窄 ①**：`_PAGE_NOISE_TOKENS` 删除 `同花顺/同花順/东方财富/東方財富` 四个词条（留注释说明**为何刻意不入表**）。覆盖不丢——生产实证那条「国家大基金持股 - 行情中心- 同花顺」靠「行情中心」仍判 `page_noise`（测试固化为正例）。
+  - **收窄 ②**：`_PAGE_NOISE_URL_HOST_TOKENS = ("q.10jqka.com.cn","guba","f10","quote")`（子串匹配）**替换**为双条件常量 `_PAGE_NOISE_URL_SITE_DOMAINS = ("10jqka.com.cn","eastmoney.com")` + `_PAGE_NOISE_URL_PAGE_LABELS = ("q","data","stockpage","quote","f10","guba")`，新增纯函数 `_is_page_noise_host(host)`——**仅当主机落在已知行情/数据站点域下、且其首段子域是页面模块标签**时才判噪声；主机解析顺带剥 userinfo 与端口。路径段判据（`/detail/code/`、`/quote/`、`/f10/`、`/guba/`）与"原因词豁免"口径**逐字不变**。
+  - **副作用（正向）**：站点首页（`www.eastmoney.com`）与站内**报道页**（`finance.eastmoney.com/news/…`）不再被判页面噪声；新增 `stockpage.10jqka.com.cn`、`data.10jqka.com.cn`、`quote.eastmoney.com`、`f10.eastmoney.com` 四类页面模块子域覆盖。
+  - 同步更新块注释、`is_page_noise_url`/`event_summary_reason` docstring（删除"站点名"相关措辞）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+15 例**——站点名单独出现必须放行 3 例、站点名+页面形态词仍拒 2 例、页面模块子域 URL 判噪声 5 例、非行情站 URL 不判 5 例。RED 取证：`7 failed, 8 passed` → GREEN **121 passed**。
+- `pytest -q tests/unit/test_attribution_chain.py` **121 passed**；`-k "chain or sector_trace or consumer or condition_met or attribution"` **571 passed, 2639 deselected**；`ruff check` 两个改动文件 `All checks passed!`。
+- **仍存风险（如实登记，无实锤样本）**：① 站点域白名单只覆盖 `10jqka.com.cn`/`eastmoney.com`——其它行情站只能靠**路径段**判据命中，主机级漏判属"多放行"（方向安全）；② 站点内非页面模块子域（`www.`/`finance.`/`news.`）一律放行，若日后出现这些子域下的纯行情表格页误入，需扩 `_PAGE_NOISE_URL_PAGE_LABELS`。
+- **跨端**：仅改 agent-py（1 源文件 + 1 测试文件 + `AGENTS.md` 链事件准入 ⑤ 段 + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 链事件准入补「页面噪声」两道网（标题级 `page_noise` + URL 级 `page_noise_url`）
+
+**开发者**: Aria
+
+### 新增
+
+- **背景（今日生产实证）**：链 `children[].events`（`source="search"`）混入「国家大基金持股 - 行情中心- 同花顺」（URL `http://q.10jqka.com.cn/gn/detail/code/…`）——它是**行情页/UI 页面标题**，既无现象词也无原因词，按"判不出即放行"通过旧准入；但页面标题回答不了"为什么动"，是纯噪声。
+- **改动（`services/attribution_chain.py`，单文件）**：
+  - **网 1（标题级）**：新增 `_PAGE_NOISE_TOKENS`（行情中心/行情页/行情查询/行情报价/行情走势/个股行情/概念行情/板块行情/资金流向表/数据中心/资讯中心/研报中心/公告列表/F10(f10)/股吧/盘口/同花顺/东方财富，＋英文 `quote page`/`market center`/`stock quote`，匹配统一对 `lower()` 文本）。`event_summary_reason` 判据由两条扩为三条，判定顺序 **marker → 现象 → 页面噪声**：两者**都不命中 → 放行**；命中任一者 **且** `_CAUSE_TOKENS` 全不命中才拒（现象→既有 `phenomenon_without_cause`，页面噪声→新码 `page_noise`）。
+  - **网 2（URL 级）**：新增纯函数 `is_page_noise_url(url) -> bool`——主机含 `q.10jqka.com.cn`/`guba`/`f10`/`quote`，或路径含 `/detail/code/`、`/quote/`、`/f10/`、`/guba/`（无 scheme 裸域按首段判主机）。`_search_candidates` 在标题准入后新增该门槛：URL 命中 **且** headline 不含原因词 → 拒收（reason `page_noise_url`，同一 `chain_event_rejected_not_driving` 留痕）；**headline 含原因词时不因 URL 被拒**。
+  - 抽出 `_has_cause_token(low)` 供两道网共用**同一原因词豁免口径**。中台 `warehouse` 路径照旧**不经**该准入（回归锁保持绿）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+29 例**——标题级拒 11 例（首条为生产实证原样字符串）、标题级放行 4 例、原因码区分 1 例、标题级检索集成 1 例；URL 纯函数 6 真 + 4 假、URL 级集成 2 例。RED 取证：`12 failed, 5 passed` → `ImportError: cannot import name 'is_page_noise_url'` → GREEN **106 passed**。
+- `pytest -q tests/unit/test_attribution_chain.py` **106 passed**；`-k "chain or sector_trace or consumer"` **350 passed, 3335 deselected**；全量 `tests/unit` **3186 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 两个改动文件 `All checks passed!`；`mypy` 改动**源文件 1 条**（`attribution_chain.py:947` `len(chain.get(...))`，与 HEAD 同一条 → 新增 0 条）。
+- **误伤风险（如实登记）**：① 站点名入噪声词——真原因标题若只含站点名而**不含任何** `_CAUSE_TOKENS` 会被 `page_noise` 误拒；② URL 规则的 `quote`/`f10` 是**主机子串**匹配，`f10.example.com` 之类会被判页面噪声（含原因词即豁免）；③ 路径段匹配刻意**带斜杠**（`/quote/`、`/f10/`）；④「公告列表」噪声词在现原因词表下**不可达**（必然含「公告」→ 被豁免），保留仅对齐建议口径。
+- **跨端**：仅改 agent-py（1 源文件 + 1 测试文件 + `AGENTS.md` 链事件准入一段 + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 事件准入判据修订：由「命中现象即拒」改为「命中现象 且 无原因词 → 拒」
+
+**开发者**: Aria
+
+### 修复
+
+- **背景（今日生产实证漏网，组长口径修订）**：链 `children[].events`（`source="search"`）混入两条**无百分号**现象标题——`注册制次新股大涨八个点，A股市场全线拉升，沪指站上五日均线 - 网易`、`全线上涨！A股这一板块，涨幅第一！ - 21财经`。旧判据（marker / 涨跌幅 `%` / 两市＋成交 / 时段＋涨跌）只认"百分号式"行情复述，对"八个点""全线上涨""涨幅第一""站上五日均线"全漏；同时旧判据一旦命中现象即拒，会误杀"现象外衣＋真原因"（如政策落地带动板块大涨）。修订口径：**是原因不是现象** → 现象 **且** 无原因词才拒。
+- **改动（`services/attribution_chain.py`，单文件）**：
+  - 新增现象词族：`_MARKET_ACTION_TOKENS`（站上/失守/跌破/拉升/上涨/下跌/走强/走弱/回落/低开/高开，简繁）、`_RALLY_PHRASES`（全线上涨/全线拉升/集体上涨/集体拉升/普涨/涨幅第一/涨幅居前/涨幅榜/领涨两市）、`_POINT_MOVE_RE`（"大涨八个点"/"涨了3个点"：涨跌＋中文/阿拉伯数字＋个点）、`_NEW_HIGH_PHRASES`×`_NEW_HIGH_QUALIFIERS`（创新高限与板块/指数/两市同现）；`_MARKET_WIDE_TOKENS` 补 `大盘/大盤`。
+  - 新增原因词表 `_CAUSE_TOKENS`（政策/监管/部委/国常会/发改委/工信部/证监会/央行/国务院/公告/披露/预案/中标/订单/签约/招标/获批/牌照/涨跌价/减产/扩产/投产/产能/供需/需求/供给/库存/出口/进口/关税/补贴/试点/并购/重组/收购/增持/回购/业绩/财报/落地/细则/方案/规划/标准，简繁同列；按需增补 `价格`/`供给`）。刻意与只做排序加权的 `_DRIVING_KEYWORDS` 分开。
+  - 判据重构：抽出纯函数 `_has_phenomenon(low)`，`event_summary_reason` 改为 ①`summary_marker`（综述体裁词，**不因**含原因词放行）→ ②现象形态 **且** `_CAUSE_TOKENS` 全不命中 → `phenomenon_without_cause`；含原因词即放行。原 `index_pct_recap`/`turnover_recap`/`session_recap` 三个码被"现象＋无原因"统一取代（留痕键位不变）。
+  - 中台 `warehouse` 路径照旧**不经**该准入（回归锁测试保持绿）；判不出即放行的"宁可漏判"原则不变。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+16 例**（`_RECAP_HEADLINES_V2` 7 例含今日两条实证原样字符串；`_CAUSE_BEARING_HEADLINES` 5 例必须放行；`_MARKER_WITH_CAUSE_HEADLINES` 2 例；检索路径集成 2 例）。RED 取证：`6 failed, 71 passed` → GREEN **77 passed**。
+- `pytest -q tests/unit/test_attribution_chain.py` **77 passed**；`-k "chain or sector_trace or consumer"` **321 passed, 3335 deselected**；全量 `tests/unit` **3157 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 两个改动文件 `All checks passed!`；`mypy` 源文件 1 条（HEAD 已存在 → 新增 0 条）。
+- **误伤风险（如实登记）**：① 现象词族含单字级方向语义（`上涨`/`下跌`/`上升`），若真原因标题里出现方向词而**恰好不带** `_CAUSE_TOKENS` 任何词，会被 `phenomenon_without_cause` 误拒；② `创新高` 已限板块/指数/两市同现，个股新高不受影响；③ 简繁原因词为手工列举，繁体原因标题存在漏配→误拒余量。
+- **跨端**：仅改 agent-py（1 个源文件 + 1 个测试文件 + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — sector_trace 报告写入收敛：多板块「一天一份」（修报告层只剩 1 个板块）
+
+**开发者**: Aria
+
+### 修复
+
+- **背景（生产实证）**：`run_sector_trace` 每个板块各写一次 `report_type="sector_trace"` 报告，Node upsert 键 `(report_type, report_date, COALESCE(user_id,''))` 让同日多板块**互相覆盖**——`agent_analysis_reports` 全库仅 2 条、`display_report.sectors` 长度**恒为 1**（`2026-09-17 → ["玉米"]`、`2026-09-18 → ["先进封装"]`）。app-api `sector-insight` 用它作 `review_primary` 候选集 → 多主因日在报告层不成立；R16 兜底补跑并行跑多板块后更明显（仍只剩最后一个）。本条即上一条记录"未解决/风险 ①"的闭环。
+- **改动（agent-py 2 个源文件，最小追加）**：
+  - `agents/workers/sector_trace.py`：`run_sector_trace` 增 `persist_report: bool = True`——**默认行为逐字不变**（单板块自写、content 形状不变）；`False` 时只溯源+回传结果。新增 `build_sector_trace_report_content(results, *, parent_trace_ref)`（纯函数，多板块聚合 content，无成功板块返回 `None`）与 `save_sector_trace_report(*, report_date, results, parent_trace_ref)`（聚合写**一次**，返回写入的板块名清单）。
+  - `services/event_consumers.py::SectorTraceConsumer.handle`：`_one` 传 `persist_report=False` 并 `return result`（失败 `return None`）；`asyncio.gather` 返回值按入参顺序汇总为 `traced`（顺序确定），gather 后调 `save_sector_trace_report` **一次**，留痕 `sector_trace_report_saved`（`sector_count`/`sectors`）；写失败只 warning `sector_trace_report_save_failed`（不把 review_done 拖进 retry/DLQ）。顺手把 `parent_ref` 显式标注为 `dict[str, object]`（消掉存量 arg-type 报错）。
+- **报告结构（加性，不改 app-api / 不改 Node upsert 键）**：`display_report.sectors` = 当天**全部成功**溯源板块名（gather 入参顺序去重，T1 在前）；新增 `display_report.sector_traces = {板块名: trace 序列化}`；`market_trace` 保持**单板块**形状（首个板块 snapshot+trace，app-api 契约不变）；`schema_version` 仍 `"2.1"`。
+- **失败隔离**：溯源失败板块**不进 `sectors`**，其它板块照写、不 panic。**幂等**：按板块名去重，同日重放/补跑覆盖同一行且清单一致。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_sector_trace_worker.py` **+6 例**（默认 content 形状回归锁、`persist_report=False` 不落库、聚合去重/market_trace 取首板块、空入参返回 None、聚合写一次、无成功板块不写）+ `tests/unit/test_sector_trace_consumer.py` **+4 例** + 该文件新增 autouse fixture 隔离真实报告落库。RED 取证：`9 failed, 84 passed`。
+- `pytest -q tests/unit/test_sector_trace_consumer.py tests/unit/test_attribution_chain.py` **77 passed**；`-k "sector_trace or chain or consumer or iterate"` **533 passed / 1 failed**（唯一红为存量 `test_iterate_adapters`）；全量 `tests/unit` **3141 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 4 个改动文件 `All checks passed!`；`mypy` 改动源文件 **17 条（基线 18 条）→ 新增 0 条**。
+- **未闭环/风险**：app-api/前端仍只读 `display_report.sectors` 与 `market_trace.trace`（单板块 summary）——多板块日的 `sector_traces` 暂无消费方（本轮跨仓 0 改动，纯写入侧收敛）；`sector_wind_prediction._load_cause_sector_codes` 走 `list_analysis_reports` 逐份读 `display_report.sectors`，收敛后一份报告即含全部板块（排除集更完整，正向副作用）。
+- **跨端**：仅改 agent-py（2 源文件 + 2 测试文件 + `AGENTS.md` 18:30 链路一行 + spec §13.8 + 本记录）；app-api / 两个前端 / 组件库 **0 改动**。
+
+---
+
+## [main] 2026-09-18 — 弱归因兜底板块「补跑板块溯源」显式化（上限 + 逐项隔离 + 留痕）
+
+**开发者**: Aria
+
+### 改进
+
+- **背景（组长口径，R16 续）**：R16 三级兜底（T1 主链 claim → T2 全部候选链 claim → T3 快照 `top_losers`）落地后，兜底命中会照常溯源，但"兜底必须真跑一遍板块溯源"这条口径在代码里是**隐式**的（T1/兜底混在同一 `asyncio.gather` 里，无兜底专属留痕、无补跑上限、无截断日志），弱归因日一旦上游放宽提取上限或某板块失败，无法从日志对账"到底补跑了几个、哪些失败"。
+- **改动（`services/event_consumers.py`，最小追加，不动其它消费者）**：
+  - 新增常量 `SECTOR_TRACE_FALLBACK_MAX_SECTORS = 3`（与 `extract_primary_sectors` 的 `max_sectors` 默认同值）+ 来源级别标签 `_fallback_level(source)`（`candidate_claim`→`T2`／`snapshot`→`T3`）。
+  - `SectorTraceConsumer.handle`：命中按弱标记**分流**为 `primary_hits`（T1）与 `fallback_hits`（T2/T3），兜底侧先按上限**截断并留痕** `sector_trace_fallback_truncated`（`total/kept/dropped`），再与 T1 一并 `asyncio.gather` 并行溯源；`_one(hit, *, fallback_level="")` 逐板块记 `sector_trace_fallback_started` / `_done` / `_failed`（字段 `sector`、`fallback_level`、`extraction_source`、`elapsed_ms`；失败另带 `error`）。
+  - **为什么是"分流"而不是"对同一板块再跑一遍"**：兜底板块本就在同一次 gather 中溯源（R16），再补一遍会把弱归因日的 LLM/检索成本翻倍（每板块 3 次 Tavily 定向检索 + 1~2 次 deep-think LLM）。分流保留"兜底必跑"的语义与并行度，成本与 R16 持平（≤3 板块 × 并行）。
+  - 既有语义逐字保留：`sector_trace_done` / `sector_trace_one_failed` 两个日志键与字段不变（T1 路径**无任何行为变化**）；兜底补跑发生**在链组装/保存之前**；失败仍逐项隔离；无证据时照旧如实降级（`attribution_status="insufficient"` + 中性摘要），**未放宽上一轮的 `is_driving_event` 事件准入**。
+- **关系标记**：核查确认 `children[].relation` 一向走既有 `judge_sector_driver_relation(pct, index_pct)` 真实判定，**不存在硬编码/推断值**，故本轮无改动（存量已满足）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_sector_trace_consumer.py` **+5 例**——T2 命中 3 板块→3 次 `run_sector_trace`；T3（快照来源）同样补跑且日志带 `T3`；命中 5 个→只补跑前 3 个 + `sector_trace_fallback_truncated`；其中 1 个抛异常→其余板块入链且链仍保存成功 + `sector_trace_fallback_failed`；T1 路径调用入参逐字比对 + 无兜底日志。（其中两例在基线即绿——它们是**回归锁**。）RED 取证：`3 failed, 2 passed`。
+- `-k "sector_trace or chain or consumer"` **295 passed**；全量 `tests/unit` **3131 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 两个改动文件 `All checks passed!`；`mypy` 改动源文件 **18 条存量 → 新增 0 条**。
+- **未解决/风险（如实登记）**：① 前端 `sector-insight` 的 `trace` 仍只覆盖 1 个板块——`run_sector_trace` 落库键同日多板块**互相覆盖**（最后一次写赢）；**本轮不改**（需 app-api/前端配合，超出授权范围）；前端已有 R17 兜底（以链 `children` 为主合成 `chain_only` 候选）→ 用户可见内容已由链侧承载。② 补跑上限目前恒不触发（提取层已限 3），仅作上游放宽时的成本护栏。
+- **跨端**：仅改 agent-py（1 个源文件 + 1 个测试文件 + spec §13.7 + 本记录）；app-api / 两个前端 / 组件库 **0 改动**（`children[]` 字段契约未变，纯行为补全）。
+
+---
+
+## [main] 2026-09-18 — 链事件层只收「驱动原因」+ 链摘要取源修正（现象 vs 原因）
+
+**开发者**: Aria
+
+### 修复
+
+- **背景（生产实证 2026-09-17，CRO 概念）**：链路 `attribution_chains.children[].events[]` 存的是**行情综述**而非驱动原因——`{"headline": "A股收評| 滬指跌0.41% 三大指數收跌農業板塊逆勢大漲", "source": "search"}`、`{"headline": "今天A股，三大指数集体下跌 - 时间线- 搜狐", "source": "search"}`。综述只复述"发生了什么"，回答不了"为什么动"。**组长口径**：要溯源到基本事件（是原因，不是现象）；找不到原因事件时**宁可 `events: []`（如实交空）**，不得拿综述兜底。
+- **A. 检索补漏准入收紧（`services/attribution_chain.py`）**：
+  - 新增确定性单点判定 `event_summary_reason(headline) -> str`（`""` = 放行）+ 薄包装 `is_driving_event(headline) -> bool`；只作用于**检索补漏**（`source="search"`），**中台 `warehouse` 路径逐字不变**（回归用例锁定）。
+  - 拒收形态（reason 码）：① `summary_marker`＝`收评/收盤/收盘/午评/早评/复盘/盘点/盘面/三大指数/涨跌家数/时间线/资金流向/涨停潮/异动`（简繁同列）＋英文 `closing bell/market wrap/market recap/daily recap`；② `index_pct_recap`＝市场级词元＋涨跌幅式描述（`[涨漲跌][幅超逾]?\d+(\.\d+)?%`）；③ `turnover_recap`＝`两市`＋成交额/家数/涨跌综述；④ `session_recap`＝时段词（午后/早盘/盘中/尾盘/开盘）＋涨跌幅式描述或涨跌动词。匹配统一对 `lower()` 后文本做。
+  - **判不出即放行**（宁可漏判）；被拒即不产节点，全部被拒 → `events: []`（不回退成综述）。留痕：逐条 `chain_event_rejected_not_driving`（`sector`/`reason`/`headline[:60]` 截断）；汇总计数 `chain_sector_events.rejected_not_driving`。
+  - 正向要求：检索候选排序末位信号由旧「综述降权」改为「**含驱动类关键词加权**」（`_DRIVING_KEYWORDS`：政策/监管/部委/公告/披露/供需/涨价/减产/扩产/并购/关税/补贴/试点…；仅加权不排除）。
+  - 生成侧同批收紧（`prompts/workers/sector_trace.py`，双保险）：phenomenon 只描述盘面现象不得写原因；trigger 必须是能解释「为什么动」的基本事件，**禁止把收评/复盘/指数涨跌幅/涨跌家数/成交额综述当 trigger 或 evidence 标题**；无可解释事件时 `attribution_status="insufficient"` + missing_evidence 如实说明。
+- **B. 链 `children[].trace_summary` 取源修正**：原实现在 `attribution_status == "insufficient"` 时直接返回中性兜底，**覆盖了报告已有的归因句**。改为：报告非空 `summary` → trigger headline → trigger claims → 兜底 `溯源未确认驱动原因`（**兜底只在确实无内容时出现、不得覆盖已有内容**）；刻意**不**回退 phenomenon/首 stage 标题（那是现象）。口径对齐 app-api `extractTraceSummary`（前端两页「有无归因」判定一致，前端 0 改动）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` **+21 例**——`is_driving_event` 参数化（8 综述形态含生产实证两例＋简繁＋英文 / 4 驱动形态）、综述源不产节点且日志键+原因+计数出现、长标题截断留痕、全被拒 → `events: []`、同板块综述被拒而驱动保留、驱动关键词排序靠前、**中台路径不受准入影响**、`trace_summary` 三例 + 报告空摘要仍兜底；另**改写**两处旧用例。RED 取证：`ImportError: cannot import name 'is_driving_event'`（collection error）。
+- `-k "chain or sector_trace or consumer or event"` RED(1 error) → **794 passed / 6 failed**（6 条红均为存量且与改动文件无关）；全量 `tests/unit` **3126 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff check` 三个改动文件 `All checks passed!`；`mypy` 两个改动源文件 **1 条（`attribution_chain.py:778` 未改动行存量）→ 新增 0 条**。
+- **误伤风险（已知、按"宁可漏判"接受）**：① 时段词＋涨跌动词规则会误拒"午后公告提价""早盘发布涨价函"这类**含时段词的真驱动**；② `收盘/盘面/异动/时间线` 等词若出现在真事件标题里（如"公司公告…收盘价"，罕见）会被拒；③ 英文仅覆盖 limited 词表（`closing bell/market wrap`）＋指数名＋百分比。
+- **跨端**：仅改 agent-py（准入 + 摘要取源 + prompt）；app-api / 前端 0 改动——本次是让链的口径**向**前端既有判定（`isUnconfirmedAttribution` 按摘要判「有无归因」）与 sector-insight `trace.summary` 对齐。
+
+---
+
+## [main] 2026-09-18 — EventBus PEL 恢复（XAUTOCLAIM 认领 + XPENDING/XCLAIM 降级，spec §13.6 遗留项）
+
+**开发者**: Aria
+
+### 修复
+
+- **背景**：`services/event_bus.py` + `event_consumers._consumer_loop` 走 XREADGROUP(">")/XACK，但**无任何 PEL 恢复**：消费进程在「读到消息」与 `XACK` 之间崩溃/重启，该消息永久滞留在组 PEL（`>` 只投递新消息）→ **静默丢事件**（表现为某天链/快照/播报莫名没跑）。注：`workers/insight_consumer.py`、`workers/stock_trace_consumer.py` 早已有 `xautoclaim`，缺口只在 evening_chain 事件总线这条链路。
+- **实现（最小追加，不动既有语义）**：
+  - `config.py` 新增 `event_bus_pel_reclaim_enabled: bool = True`、`event_bus_pel_min_idle_ms: int = 300000`、`event_bus_pel_reclaim_batch: int = 10`（行内注释写明默认值理由：5 分钟 > 正常单条处理耗时，避免抢回在途消息）。
+  - `EventBus.reclaim_pending(channel, consumer_name, *, group, min_idle_ms, count)`：XAUTOCLAIM（min-idle 过滤 + `start_id="0-0"`）→ 归一为与 `consume` 同形的 `Event`；XAUTOCLAIM 不可用（Redis < 6.2 / 老客户端 / 任意异常）降级 `XPENDING(idle=…) + XCLAIM`；仍失败只 `logger.warning("event_bus_pel_reclaim_failed")` 返回空，**不抛出**（总线不可用不影响主链路）。成功认领记 `event_bus_pel_reclaimed`。
+  - 抽出 `EventBus._parse_entries`（**consume 与认领共用**，含"payload 非法 JSON → error 日志 + XACK 丢弃"语义，避免毒消息被反复认领）；`consume` 改为收集条目后调用它，行为不变。
+  - `event_consumers._consumer_loop`：每轮先 `reclaim_pending(...)` 再 `consume(...)`；新增 `_dispatch_events(consumer, events)` 承载既有「handle → ack / except → retry」分支，**认领消息与新消息共用同一分发代码**。批量大小、XACK 时机、异常吞错策略均未改。
+  - 顺带修一个被复用的旧缺陷：`_parse_entries` 里 `str(msg_id)`（bytes）会得到 `"b'1234-0'"` → 非法 payload 的 `XACK` 其实匹配不到消息（毒消息永远留在 PEL）。改为 bytes 先 `decode` 归一，认领路径因此不会死循环。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_event_bus.py` **+6 例**（正常认领并断言 `xautoclaim` 的 group/consumer/min_idle/count 与"认领本身不 XACK"、未超阈值不认领、XAUTOCLAIM 异常降级 XPENDING+XCLAIM、降级也失败只返回空、毒消息复用丢弃语义）；`tests/unit/test_event_consumers.py` **+3 例**（认领消息走既有分发并 XACK、`enabled=False` 零调用、认领消息处理失败不 XACK 而走 retry）。RED 取证：9 failed（`AttributeError: 'EventBus' object has no attribute 'reclaim_pending'` ×6 等）。
+- `-k "event_bus or consumer"` **87 passed + 9 failed → 96 passed**；全量 `tests/unit` **3092 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败；通过数 = 基线 3083 + 新增 9）；`ruff check`（config/event_bus/event_consumers）`All checks passed!`；`mypy` 三个改动源文件 **23 → 21 条**，其中 event_bus.py **5 → 3 条**。
+- **命名/幂等核查（重复投递副作用）**：① 消费者名 `f"{c.channel}_consumer"`（如 `snapshot_consumer`）**按通道稳定、但不含主机/PID** → 同代码多实例共享同名消费者（Redis 视为同一 consumer），XAUTOCLAIM 到同名即"改派给自己"；② 落库类均幂等：`snapshot`/`iterate`/`review` 走 `POST /internal/analysis-reports`，Node 侧 `ON CONFLICT ... DO UPDATE`；③ **非幂等副作用**：重投 `review_quick`/`review_full` 会重跑 LLM 并**再发一次 snapshot/iterate/broadcast**（这三个 publish 未带 event_id → 无幂等去重），`IterateConsumer` 会**重复发迭代邮件**，`BroadcastConsumer` 会重复生成播报；故 min_idle 必须大于最慢 handler 耗时。
+- **风险点**：① 默认 300000ms 对 `ReviewQuickConsumer` 偏紧（最多 3 次 `run_review` + 60/120s 退避，最坏可逼近 5 分钟）→ 极端情况下可能重复执行；建议按通道观测后上调或分通道配阈值（本轮未做）。② 认领每轮执行且 `start_id` 固定 `"0-0"`（不追 next cursor）：只读时开销可忽略；若某消息反复处理失败且 `retry()` 也失败（未 ack），会被每轮反复认领。③ 消费循环内的 XAUTOCLAIM 是额外一次 Redis 往返（有消息时每轮一次），负载可忽略。
+- **跨端**：仅改 agent-py（event_bus/event_consumers/config），未触碰 Node/前端；`/internal/analysis-reports` 契约未变 → 无跨端同步项。
+
+---
+
+## [main] 2026-09-18 — quick 手动触发对称补齐 `with_chain`（review_quick 联动 review_done）
+
+**开发者**: Aria
+
+### 新增
+
+- **背景**：手动触发入口 `trigger_review_full` 已支持可选 `with_chain`（ok 后补发 `review_done`，驱动链组装/级联预判消费者），但姊妹入口 `trigger_review_quick`（15:30 盘中快复盘）**结构同缺** → 运维无法手动复现/验证 quick 路径的链路。
+- **实现（就地对称，不抽公共函数）**：`src/aistock_agent/api/routes.py` 新增 `ReviewQuickTriggerBody`（`report_date: str | None`、`with_chain: bool = False`，与 `ReviewFullTriggerBody` 同形，docstring 对应 `ReviewQuickConsumer`）；`trigger_review_quick` 形参 `body: dict[str, str] | None` → `ReviewQuickTriggerBody | None`，`report_date` 改走同一解析，`with_chain = bool(body.with_chain) if body is not None else False`；复用既有私有 helper `_publish_review_done_for_chain`（**未改其实现**）；发布条件与 full 逐字一致（`with_chain and result.status == "ok"`），返回体加同名字段 `chain_published`；日志键不新增。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_admin_trigger_review_full_chain.py` **+7 例**（quick 用例逐条镜像 full：缺省不发布/返回 `chain_published=False`、true+ok 走默认总线发布一次且 kwargs 带 `manual-quick-*` trace_id、status≠ok 不发布、无默认总线用 RedisPool 单例临时总线（单例不关）、RedisPool 未初始化按 `settings.redis_url` 临时连并关闭、发布异常不影响复盘返回、非法日期仍 422）。RED 取证：6 failed（1×`KeyError: 'chain_published'` + 5×`assert 422 == 200`）。
+- `-k "trigger_review or review_full or review_quick"` **27 → 34 passed**；全量 `tests/unit` **3083 passed / 8 failed / 1 skipped**（8 条红与基线**同集**且**逐文件复核**：`test_gi_admittance.py` + `test_industry_vector_search.py` + `test_iterate_adapters.py` 三文件 `-q` 恰为 `8 failed` → 零新增失败）；`ruff check`（routes.py + 测试文件）`All checks passed!`；`mypy routes.py` **26 条 → 26 条**（**新增 0 条**，行号位移）。
+- **取舍（需复核）**：返回体按 full 的既有做法**无条件带** `chain_published`（缺省时 `False`）而非"缺省时省略该键"——取"与 full 完全对称 + 可 diff 对照"优先；若要求缺省响应体逐字段不变，只需把该键改为 `with_chain` 为真时才写（2 行改动），测试同步改 `assert "chain_published" not in body`。
+- **跨端**：`trigger/review_quick|full` 仅被 agent-py 自身测试/文档引用（全仓 grep 无前端/Node 调用）→ 无跨端同步项。
+
+---
+
+## [main] 2026-09-18 — 收口四项：R22 threshold 口径收敛 / G1 词表扩展 / G4「或」守卫 / 告警原因合并
+
+**开发者**: Aria
+
+### 修复
+
+- **R22 生成侧 `threshold` 口径脱节 → prompt 收敛**（真根因比"文本与锚不一致"更深）：`anchor.threshold` 被三方赋予两种语义——① spec §12.3 ① 的涨跌幅类条件 = 触发阈值（判定层 `_judge_pct_state` 据此判 `condition_met`）② prompt 示例（量类/参考位类）教的是**情景验证幅度** ③ 生成侧对"条件本身即涨跌幅口径"**无任何示例** → LLM 按 ② 填 → 涨跌幅类条件拿到情景幅度而非触发阈值 → 判定层用错数字（id=24 c1 文本 `-3%` 的触发线按锚 `-4%` 判）。**修复**：三条 prompt（`PREDICTION_PROMPT` / `PREDICTION_CHAT_PROMPT` / `PREDICTION_LIGHT_PROMPT`）同批写明取值口径——涨跌幅口径条件下 `threshold` 必须 = 该条件的触发阈值且与 condition 文本百分数**同值同号**；其余口径填情景验证幅度。**判定层不动**（存量仍走 G3 不判）。测试：`test_prediction_prompt.py` 新增 `test_prediction_prompts_declare_threshold_caliber`。
+- **G1 词表扩展**（R20 遗留"未覆盖口径"）：`sentiment` 补 封单/开板/晋级率/封成率/炸板率/首板/二板/空间板/情绪温度；`capital_flow` 补 大单净额/龙虎榜/ETF/份额/融资买入额/南向/沪股通/深股通/席位；`overseas_macro` 补 非农/CPI/议息/汇率中间价/金价/伦铜/A50/日经。**关键取舍**：海外组用「**金价**」不写「黄金」——A 股有"黄金/贵金属"板块（`sector_aliases.json` 标准名），裸用「黄金」会把「黄金板块指数站上 MA20」这类**可判**条件整体拦成不可判；「金价」既覆盖"黄金价格创新高"（含子串）又不撞板块名。
+- **G4「或」守卫**：文本含「或」（排除"不可或缺"）→ 一律 `unjudgeable`（不产键）。**为什么不做 or 运算**：「或」= "任一子句成立"，与 G2 的"全部成立"**相反**，正确实现需三值或运算；而**生产实测 0 条**（全库 372 条条件 `with_or=0`）→ 零收益却新增误判面 → 按"宁可 None"一致性一律不判（日后真产出再按三值或实现）。护栏数由 3 → 4（同点单测锁定）。
+- **告警原因合并**（R17 遗留）：`data_client.post` / `_post_request` 新增可选出参 `error_out`，失败分支写入 `{stage, detail}`（成功路径**不写**）；`AttributionChainStore.save` 把真实原因（`business_error code=… message=…` / `http_error status=… body=…` / `request_error`）并入同一条 `attribution_chain.save_failed`，不必再交叉 grep 独立日志。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` **+4 例**（25 条新词分类命中 + 不误伤含 A 股"黄金"板块名 + 端到端 unjudgeable + 「或」检测与不误伤"不可或缺"/「且」系与单子句逐字不变）；`test_prediction_prompt.py` **+1 例**；`test_attribution_chain.py` **+2 例**（save 文案带 stage/detail；`_post_request` 业务错填出参、成功路径不写）。RED 取证：`ImportError: cannot import name 'has_or_connector'`、`TypeError: _post_request() got an unexpected keyword argument 'error_out'`。
+- `tests/unit` **3076 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败；通过数 +45）；`test_condition_met_judge.py` 108→111、`test_prediction_prompt.py` 13→14、`test_attribution_chain.py` 38→40；`ruff` 改动文件 `All checks passed!`；`mypy` 改动的 3 个源文件：`condition_met_judge` 干净，`data_client` 6 条报错**全在未改动行**。
+- **遗留**：① 存量不一致条件（含 id=24）不因 prompt 收敛而改变，仍走 G3 不可判；② `份额`/`席位`/`ETF` 属较宽词，命中即不判（保守侧可接受，会损失本可判的收益）；刻意**不入表**的宽泛词：`美国`/`隔夜`/`指数`/`大涨`；③ 「或」若日后真出现，需补三值或真值表实现；④ 三口径按表中顺序 `overseas_macro → sentiment → capital_flow` 取**首个命中**，分类标签可能与直觉不符（仅影响标签，不影响"不可判"结果）。
+
+---
+
+## [main] 2026-09-18 — 溯源背离报告（Phase 7 收口：§13.3 验收第一条）
+
+**开发者**: Aria
+
+### 新增
+
+- **背景**：Phase 7「溯源弱反馈」观测层早已落地（16:10 cron + `attribution_feedback_signals` + `POST /api/internal/attribution-feedback` + `GET /api/agent/attribution-feedback/:date`，`mode` 默认 `observe`），但 spec §13.3 的验收第一条——"**能给出「某板块溯源反复与验证结果背离」的报告条目**"——一直只以原始统计行的形式输出（`unit 样本= 命中= 未中= 命中率= → 建议（原因码）`），既没把"背离"从"观望/样本不足"里挑出来，也没给"影响对象（板块）"。
+- **组长裁决（2026-09-18）**：**应用层（真正按建议调溯源权重）本轮不做**——每 unit 需 ≥10 样本才出建议，当前样本天数不足 → 全线 `insufficient`，此时写加权等于对着空数据写规则；且加权会改变链产出，需先有真实样本才能验证效果。**重启条件**：审计表出现稳定 `downgrade`/`upgrade` 条目后再立项。故本轮只补**只读的背离报告**，零行为变更。
+- **实现**：
+  - `services/attribution_feedback.py` 新增 **`divergence_entries`**（纯函数）：背离 = 样本充分且命中率越阈值（`suggestion ∈ {downgrade, upgrade}`），**观望 `hold` 与样本不足 `insufficient` 只计数不成条目**；排序口径（可复现、无随机）① **降权侧在前**（对应 §13.3 原始场景"溯源到但预判未中"，人工复核优先看）② 同侧按**背离强度** `|hit_rate-0.5|` 降序 ③ 样本量降序 ④ `unit_key` 升序定序。
+  - `scripts/attribution_feedback.py` 新增 **`render_divergence_report`**（纯函数）：输出「背离条目 N 条｜观望 x｜样本不足 y（unit=…；触发规则 样本≥10 且 命中率<0.35 降权 / >0.65 提级）」+ 每条 `unit_key / 样本= / 命中=未中= / 命中率= / 越阈方向 → 建议降权|提级` + **板块抽样**（`detail.sectors`，≤5 个，超出标"共 N"）；无条目时明确打「无背离：所有单元均落在观望区间或样本不足」；末行固定声明**只读**（不改变溯源权重、应用层未启用）。已并入 `render_report` 输出（第二段），并更新脚本 docstring（含 `--unit sector` 看板块维度的说明）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_feedback.py` **+6 例**——只收越阈单元（hold/insufficient 被排除）/ 排序（降权侧优先 → 强度 → 样本量 → key 稳定序，含同强度同样本并列）/ 全观望时零条目 / 渲染含证据（样本·命中率·越阈方向·板块抽样）/ 空态与只读声明 / `render_report` 追加背离段。RED 取证：`ImportError: cannot import name 'render_divergence_report'`。
+- `tests/unit/test_attribution_feedback.py` **50 passed**（基线 44，+6）；`-k "attribution_feedback or scheduler"` **152 passed**；`ruff` 3 个改动文件 `All checks passed!`；`mypy attribution_feedback.py` 0 报错。
+- **遗留**：① **应用层未做**（见上，重启条件明确）；② 审计数据仍无自动消费方（报告靠人工跑 CLI 看）；③ `unit` 默认 `relation`，"某板块"维度需显式 `--unit sector`/`relation_sector`（样本更少，可能长期 `insufficient`）。
+
+---
+
+## [main] 2026-09-18 — 条件点亮 G3 守卫（方向动词 + 百分数口径不确定就不判）
+
+**开发者**: Aria
+
+### 修复
+
+- **生产误点亮第 4 条（R21，已人工回滚）**：`id=24 c1`「重组蛋白板块指数**相对当前收盘价跌破 -3%**」（anchor：`metric=close` / `threshold="-4%"` / `direction=bearish`，点亮于 2026-09-17T13:54Z）。**发现路径**：R19 修好回滚脚本后跑全量 `--dry-run` 扫 true 值时暴露（它不在 backfill 报告里——已有布尔 `condition_met` 的 entry 被 backfill **幂等跳过**，只有扫 true 的回滚脚本看得到）。
+- **根因（确定性，非 LLM）**：`PredictionAnchor.metric` 在 schema 里**缺省即 `close`**（不携带口径信息）→ `infer_condition_class` 落**文本兜底**；裸方向动词「跌破」命中 `_TECH_RE` → 归**技术位类** → `_judge_tech_state` 用 **MA20** 近似（`末值 < MA20` 成立）→ 假 `true`。既有两道护栏都拦不住：G1 只认情绪/海外/资金流关键词（`收盘价` 不在表内）；绝对点位守卫 `_ABS_LEVEL_VERB_RE` 要求"动词 + **纯数字**"，而 `-3%` 有符号 + 百分号。
+- **修复（G3，`condition_met_judge.py`）**：新增常量 `_DIR_VERB_PCT_RE`（方向动词集合**与 `_TECH_RE` 逐字同集**：跌破/下破/失守/站上/突破/收回；**不含 上穿/击穿**——二者本就不进技术位判径，走涨跌幅口径属正常判定）与 `_TECH_LEVEL_HINT_RE`（均线/日线/周线/月线/`MA\d+`/前低/新高）+ **单点函数** `is_dir_verb_pct_ambiguous`；在 `_judge_clause_state` 中紧跟 G1 早退：**方向动词 + 百分数、且未明示技术位 → 整体 `unjudgeable`（None，不产键）**，不得走技术位近似。事件类（`anchor.event_ref`）仍首行短路，不受 G3 影响。
+- **为什么"不判"而不是"按 `anchor.threshold` 走涨跌幅口径"**：取证发现该形态**文本与锚本身就不一致**——文本写「跌破 **-3%**」而 `anchor.threshold = "-4%"` → 按显示值判或按锚值判都说不通（口径不确定就不判，与 G1 同源）。已登记为生成侧遗留 **R22**（prompt/归一化层收敛后可评估放宽为涨跌幅判径）。**规模**：全库同形态条件 `same_pattern = 3`。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` 新增 **7 例**（4 例变体参数化）——`跌破 -3%`/`突破 +3%`/`站上3%`/`失守 -1.5%`/`收回 +2%` 均 `None`；**不误伤 2 例**：明示技术位「相对 5 日均线跌破 3%」仍走技术位（`True`）、无方向动词「指数上涨超过 5%」仍走涨跌幅（`True`）。RED 取证：5 failed（复现生产误判）、2 passed；实现后 75 passed。
+- `-k "condition_met or validator"` → **200 passed**；全量 `tests/unit` → **3031 passed / 8 failed / 1 skipped**（8 条红与基线**同集** → 零新增失败）；`ruff` 改动文件 `All checks passed!`；`mypy` 0 报错。
+- **遗留**：① **R22 生成侧文本/锚阈值不一致**（上）；② **无方向动词的相对百分比**（如「回调 3%」）不受 G3 影响，仍走涨跌幅口径正常判定——若后续发现同源误判需再扩词表；③ 回滚 id=24 后它会在下次扫描**走同一条 bug 路径被重新点亮**，故本提交须在次日 16:00 判定前部署。
 
 ---
 
@@ -348,7 +840,298 @@
 
 - 修正节奏引擎能力描述的文档漂移，并标注未接线的合成函数。
 
-## \[main] 2026-09-17 — condition\_met 终审修复（阻塞 #2 + 重要 #3/#4/#5）
+## [main] 2026-09-17 — 条件点亮双护栏 G1/G2（防情绪·海外·资金流口径误点亮与复合条件半判）
+
+**开发者**: Aria
+
+### 修复
+
+- **生产误点亮（当日实证，已人工回滚，须防复发）**：① `id=214 c2`「**炸板家数**回落至10家以内、**涨停家数**回升至50家以上，且半导体相关板块…」→ 被**价格/量口径**判成 `condition_met=true`；② `id=18 c2`「**10 年期美债收益率**站上5%」→ 同上被点亮（海外利率指标）；③ `id=158 c1`「猪肉板块指数跌破近期支撑位**且主力资金持续净流出**」→ 前半句（技术位）确可判、后半句（资金流）判不了，旧实现**只判一半即命中**（半判点亮）。误点亮不可撤回（只写 true + jsonb 键级浅合并无删键，spec §12.7 R9）。
+- **G1 口径不对应就不判**（`condition_met_judge.py`）：新增常量表 `_NON_PRICE_DOMAIN_KEYWORDS`（三口径：`overseas_macro` 美债/美元指数/美股/道指/纳指/标普/恒生/人民币汇率/美联储/加息/降息/原油；`sentiment` 涨停/跌停/炸板/封板/连板/家数/涨跌家数/赚钱效应；`capital_flow` 净流入/净流出/主力资金/北向/融资余额/融券）+ **单点函数** `classify_condition_domain` / `_is_unjudgeable_domain`；命中且 anchor 无**对应** metric（`_DOMAIN_EXEMPT_METRICS` 映射，当前三口径对应集均为空——`PredictionMetric` 白名单内无这些维度，保留结构作单点扩展位）→ 整体 `unjudgeable`（None，不产键）。**无配置开关**（行为确定、可测）。**刻意不误伤**：成交额/成交量/换手率（量类）、支撑位/前低/MA20（技术位）。
+- **G2 复合条件不得半判**：新增 `split_condition_clauses`——按连接词（`并且|而且|以及|同时|且`，长词优先防单字「且」拆断多字连接词）切分，**不按中文逗号切**（逗号/顿号多用于并列列举同一子句内对象，如 id=214 的「炸板家数…、涨停家数…」）；子句端点剥标点、丢空子句，≥2 子句才启用复合判定：全部子句可判且都成立 → `True`；任一子句判不了（含被 G1 拦截/缺 metric/数据不足）→ `None`；全部可判但有子句不成立 → `False`（确定性不成立）。**单子句走 `_judge_clause_state`（原判定体，逐字搬移），行为逐字不变**。
+- **作用范围（两段判定共用）**：护栏加在 `judge_condition_met_state`（第①段扫描与到期未成立态共用入口），两值口径 `judge_condition_met` 为其折叠（False→None）。**只影响"点亮 True"**：§12.5 到期写 `false` 与 `checked_at` 逻辑、写库契约、链/溯源/事件路径**零改动**。**事件类优先短路**：带 `anchor.event_ref` 的条件在本纯函数恒 None（交调用方状态锚→受限 LLM→None 三层），G1/G2 **不介入**，不与 §12.4 冲突。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` +10 例（214/18/158 三条生产文本 → unjudgeable；领域分类三口径 + 不误伤清单；切分规则与逗号边界；单子句技术位/量类回归点亮；复合全成立点亮；复合全可判有一句不成立 → 三值 `False` 且两值 `None`；单子句数据不足 → None；event_ref 不被 G1 拦截）+ `test_prediction_validator.py` +1 例。RED 取证：新增 API `ImportError`；临时禁用两护栏后 3 条生产文本断言 `assert True is None`（复现生产误点亮 True）。
+- `tests/unit/test_condition_met_judge.py + test_prediction_validator.py` → **142 passed / 0 failed**；`-k "condition_met or validator"` → **187 passed / 0 failed**；全量 `tests/unit` → **8 failed / 3024 passed / 1 skipped**（8 条红与改动前基线**同集** → 零新增失败）；ruff 改动文件 `All checks passed!`；mypy `condition_met_judge.py` 0 报错。
+- **遗留（口径未覆盖）**：① 情绪类仅覆盖"涨跌停/封板/家数/赚钱效应"词表，**未覆盖**「封单额、开板次数、连板高度、涨停封成率、晋级率」等同源情绪口径；② 资金流未覆盖「大单净额、龙虎榜、ETF 份额、融资买入额、南向」等；③ 海外/宏观未覆盖「非农、CPI、GDP、议息、汇率中间价、黄金、伦铜、A50、日经」等；④ **复合条件只有"且"系连接词**——"或"（任一子句成立）语义未实现；⑤ G1 判定为纯文本关键词命中，未做否定语境识别；⑥ 存量已误点亮的记录修复需走 `scripts/rollback_condition_met.py`（本期未批量回滚）。
+
+---
+
+## [main] 2026-09-17 — `trigger_review_full` 支持 `with_chain`（手动触发联动发布 `review_done`）
+
+**开发者**: Aria
+
+### 新增
+
+- **缺口（2026-09-17 手动验证实际踩坑）**：`POST /admin/trigger/review_full` 直接调 `run_review`（不走 `ReviewFullConsumer`）→ **不发布 `review_done`** → `SectorTraceConsumer`/`PredictionConsumer` 永不触发 → 手动验证"复盘 → 链 → 级联预判"全链路必然看不到任何下游产物（缺的正是"链条触发的那一下"）。
+- **接口**（`api/routes.py`）：body 由 `dict[str, str]` 升级为 `ReviewFullTriggerBody`（`report_date: str | None`、`with_chain: bool = False`）——**必须换类型**：`dict[str, str]` 下 JSON `true` 会被 FastAPI 校验拒为 422（RED 阶段实测 6 例 422 取证）。`with_chain` 缺省 false → **既有行为逐字不变**（不触碰总线、不发布）。
+- **发布链路**（`_publish_review_done_for_chain`，仅 `with_chain=true` 且 `result.status == "ok"` 时调用，对齐调度路径"仅 ok 发 `review_done`"硬约束）：
+  ① `get_default_bus()`（`main.lifespan` 已 `set_default_bus`）可用 → 复用会话内总线 `publish_review_done`（幂等 `event_id=review_done_{date}_{trace_id}`，与消费者路径同源）；
+  ② 总线为 None → **降级**：`RedisPool.get_client()` 取单例客户端临时建 `EventBus`（单例属全局资源**不关**）；`RedisPool` 未初始化（RuntimeError）→ 按 `settings.redis_url` 临时连（URL **取配置不写死**，`APP_ENV` 决定实际值），发布后 `aclose()` 关闭临时连接；
+  ③ 两条路失败 → 只 `manual_review_done_publish_failed` warning + 返回 `chain_published=False`，**不影响已完成的复盘返回**；返回体加 `chain_published: true|false` 观测（语义 = 发布路径执行完成未抛异常）。
+- **`trigger_review_quick` 保持不动**（按要求只做 full）：核查确认它**结构上同样缺**，但①本期验收路径走 full；② quick 与 full 同日各发一次会双启链/级联 → 是否放开留待决策，**未擅自扩展**。（后于 2026-09-18 对称补齐，见该日条目。）
+
+### 验证
+
+- **测试（TDD 先红后绿，新增 `tests/unit/test_admin_trigger_review_full_chain.py` 7 例）**：缺省不发布（`get_default_bus` 未被调用 + `publish_review_done` 未 await）/ true+ok 用默认总线发布一次（bus 与 kwargs 断言）/ status=degraded 不发布 / 总线 None → 走 `RedisPool` 单例临时总线且**不关单例** / `RedisPool` 未初始化 → `from_url(settings.redis_url)` 且**关临时连接** / 发布抛异常 → 响应仍 200 + `chain_published=False` / 非法 report_date 仍 422 且 `run_review` 未调用。RED 取证：6 failed（5 例 `422 != 200` + 1 例 `KeyError: 'chain_published'`）。
+- 新增 7 例 + 既有 `tests/test_admin_trigger.py`/`tests/e2e/test_quick_snapshot_flow.py`/`tests/unit/test_admin_trigger_midday.py` → **12 passed / 0 failed**；ruff 改动文件 `All checks passed!`；mypy `routes.py` 报错行全部在**未改动行**。
+- **遗留**：① `trigger_review_quick` 未加同款开关（见上）；② 端到端未在真实服务器跑（需 `with_chain=true` + Redis 可用）；③ `chain_published` 的"乐观 True"语义如上。
+
+---
+
+## [main] 2026-09-17 — 参考位取数层接通：`today_open/high/low` 条件可判（Phase 5 遗留收口）
+
+**开发者**: Aria
+
+### 新增
+
+- **结论：上游**有**字段，取数层未透传 → 已接通（不是"上游缺字段"）**。证据链：① index 日 K（`/internal/index/:code/kline`，`internal.ts:382-387`）已返回 `open/high/low`；个股日 K（`/internal/quote/:code/kline`，TushareKlineService）同；② 板块日 K 上游 Tushare `ths_daily` **本身返回** `open/high/low`（`TushareService.getThsDaily` fields 含 `ts_code,trade_date,close,open,high,low,pre_close,change,pct_change,vol,turnover_rate`），但映射层 `ThsBoardService.getBoardDailyRange` 只映射 `trade_date/pct_chg/close/vol/amount` → 契约 `ThsBoardDailyRow` 丢弃三字段；③ agent-py `prediction_validator._fetch_kline_range` 解析时同样只取 `pct_chg/close/vol/amount`。故三处**均补齐**（两仓）。
+- **取数层（agent-py）**：`_fetch_kline_range` 行加 `open`/`high`/`low`（`_num` 归一，缺值 None 占位不丢行）；新增 `_today_ref_from_window(window)` 产出当日参考位 `{close, open, high, low}`（只取**窗口最后一行**，无 close 或三个参考位全缺 → `None`）。
+- **判定层（agent-py）**：`condition_met_judge` 新增 `today_ref` 入参（`judge_condition_met_state` / `judge_condition_met`）与 `_judge_ref_level_state` / `_resolve_ref_op`；**口径**（spec §12.3 只写"需取数层补当日行"，未定明细，此处定死）：`today_open/high/low` 一律取**窗口最后一行（当日）**的开/高/低，与**同一行 close** 比较——不用窗口极值（条件文本写"今日高点/今日开盘价"，用窗口极值会把 N 日前极值当"今日"参考位误判，且 true 不可撤回），同行取值也避免逐维度剔 None 后列表错位；方向 = 显式 `op`（gte/above/lte/below）> 文本动词（跌破/下破/失守 → below；站上/突破/收回 → above）> `direction`；**`cross_*` 恒 None**（单日参考位无跨日稳定阈值）；缺 `today_ref`/缺对应参考位/缺 close/无方向线索 → `None`（降级）；同一行决定性比较 → 可给 `False`（到期未成立态），且**不需要** 2 样本守卫。
+- **app-api 配套（同批部署，先行）**：`ThsBoardDailyRow` 加 `open/high/low`（`number | null`，缺值保 null 键存在，H7）+ `getBoardDailyRange` 三处映射（含中文键兜底 `开盘价/最高价/最低价`）+ 路由 docstring；`/internal/ths/:code/daily` 契约因此补齐（sector 目标类型的参考位条件才可判）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` +9 例（站上高点成立 / 未站上 False / op 缺省按文本+direction 4 参数化 / cross_* → None / 缺 today_ref、缺 high、缺 close、neutral 无动词 → None / 两值口径只留 true）；`test_prediction_validator.py` +3 例（带 open/high/low 点亮 / 未成立不产 entry / `_fetch_kline_range` 三字段透传）+ 4 处行契约断言补 `open/high/low: None`；app-api `internal.ths.test.ts` 扩 1 例（含缺值保 null 与中文键兜底）。RED 取证：agent-py 15 failed；app-api 1 failed（`actual undefined - expected 1650`）。
+- agent-py `-k "condition_met or validator or backfill"` → **177 passed / 0 failed**；ruff 改动文件 0（余 18 处 E501/F841 全在**未改动行**）；mypy `condition_met_judge.py` 0 报错、`prediction_validator.py` 9 处报错全在未改动行；app-api `node --import tsx --test src/core/routes/internal.ths.test.ts` → **10 passed / 0 failed** + `npx tsc --noEmit` 0 错误。
+- **遗留**：① **存量记录收益有限**——`anchor.metric=today_*` 需生成侧产出（存量 326 条件多为量类文本且无 op/level）→ 收益面向新生成记录；② 参考位判定按"最新数据行"（未收盘时即前一日行）比较，与第①段扫描窗口 `[created_at, today]` 同源；③ 生产覆盖率复测仍未跑（`NODE_API_BASE_URL=localhost` 不可达）。
+
+---
+
+## [main] 2026-09-17 — 链板块落「权威名 + ts_code」（R14，消除前端匹配不上角色徽）
+
+**开发者**: Aria
+
+### 新增
+
+- **缺口（spec §13.6 R14）**：链 `children[].sector` 用的是复盘报告原始名（如"黄金概念"），前端候选板块名来自 THS 权威榜（app-api `resolveBoardName` 归一后的 `name`）→ 命名漂移时 `findChainChild` 精确/归一化匹配双双落空 → 页面出现"有链但角色徽 / 驱动句不显示"。
+- **加性字段**（`services/attribution_chain.py` `assemble_attribution_chain`）：每个 child 新增 **可选** `ts_code`（快照权威行 `ts_code`，如 `885525.TI`）与 `sector_std`（归一化权威名）；**取不到即省略键**（不写 `null`，与仓库"无匹配省略键"惯例一致）；`sector` 保持复盘原始名**逐字不变**（app-api `/api/internal/attribution-chain` 校验要求非空字符串，向后兼容）。两字段均为 `str`，序列化 JSON 友好（无 Pydantic 对象）。
+- **归一化口径逐字对齐前端**（`_SECTOR_STD_SPACE_RE`/`_SECTOR_STD_SUFFIX_RE` + `normalize_sector_std`）：去空白/括号 → 剥「（A股）/概念/板块/行业/产业链」后缀 → 小写，与 app-api `ThsBoardService.normName`、app-frontend `utils/sectorInsight.normalizeSectorName` 完全同口径（顺序也一致）。**未新造第二套口径**：仓库 Python 侧既有 `prediction_service._normalize_sector_name`（仅去非字母数字）与前端口径不等价，若复用会再造成一次漂移，故按前端口径实现并注明同源关系。
+- **取数来源（三条提取路径统一）**：`ts_code`/`sector_std` 取 `extract_primary_sectors` 命中的快照行（T1 `primary_claim` / T2 `candidate_claim` / T3 `snapshot` 三条路径的 `SectorHit.row` 都含 `name`/`ts_code`）→ 新增 `SectorTraceRunResult.sector_row` 字段由 `SectorTraceConsumer._one` 写入（`dict(hit.row)`），链组装 `getattr(res, "sector_row", None)` 读取（旧调用方/回放无该属性 → 省略 `ts_code`，`sector_std` 回退复盘原始名归一，不崩）。
+- **跨仓零改动**：app-api 校验只认 `sector`/`relation`/`pct`/`events`（多字段忽略），前端类型加性可选 → 两仓本次均未改（前端未来可按 `ts_code`/`sector_std` 匹配，`sector_std` 口径已与前端归一化函数一致）。
+
+### 验证
+
+- **测试（TDD 先红后绿，`test_attribution_chain.py` +6 例 / `test_sector_trace_consumer.py` +1 断言）**：三条来源各断言 `ts_code`+`sector_std` 正确（`sector_std` 取权威行名而非原始名）/ 行缺 `name` 回退原始名归一 / 无 `sector_row` 与行内 `ts_code` 缺失 → 省略键不崩 / 空板块名不产 `sector_std` / 新字段均为 `str` 且 `json.dumps` 可序列化。RED 取证：`KeyError: 'ts_code'` ×4、`KeyError: 'sector_std'` ×2。
+- `-k "chain or sector_trace or consumer"` → **235 passed / 0 failed**；ruff 改动文件 `All checks passed!`；mypy 1 处报错落在**未改动行**（`attribution_chain.py:641` `len(chain.get("children", []))`，仅行号位移）。
+- **遗留**：① 前端尚未按 `ts_code`/`sector_std` 匹配（本期只落数据，前端改造独立排期）；② `sector_std` 在快照行缺 `name` 时回退原始名归一（权威性较弱，仅作桥接键）；③ Web 端（`aistock-frontend`）类型未同步（与 P1d 遗留同源）。
+
+---
+
+## [main] 2026-09-17 — 弱归因日板块提取三级兜底（候选链 → 快照）+ 弱依据标注（Task 9.1，链式溯源 R15）
+
+**开发者**: Aria
+
+### 新增
+
+- **生产缺口（2026-09-17 18:30 复盘）**：`attribution_status=hypothesis`、`primary_chain_id` 为空（4 个候选全 `status=weak`，各自带 6 节点完整链）→ 主链 claim 零命中 → `extract_primary_sectors` 返回 `[]` → `SectorTraceConsumer.handle` 打 `sector_trace_skip_no_primary_sector` 直接 return → `attribution_chains` 表空、无溯源、无级联预判（快照 `a_share.sectors.top_losers/top_gainers` 有明确异动板块却无人消费）。
+- **三级兜底（`agents/workers/sector_trace.py`）**：T1 主链 claim 命中（现有行为逐字不变，source=`primary_claim`）→ T2 候选链（含 `status=weak`）claim 命中（source=`candidate_claim`）→ T3 快照头部兜底（`top_losers` 优先、不足补 `top_gainers`，source=`snapshot`）。**仅上一级无产出才降级**；跨层/跨来源按板块名去重（同名收最先命中来源）；上限仍 `max_sectors=3`；空/畸形快照与畸形 payload 一律返回 `[]` 不抛错。新增 `SectorHit{name,row,source}`（`weak = source != "primary_claim"`）+ helper `_candidate_chain_claims` / `_sector_rows` / `_claim_hits` / `_snapshot_hits`，均可单独单测；**`extract_primary_sector`（单数版）显式收敛为 T1-only**，旧语义"不取桶首行兜底"逐字保留。
+- **弱依据标注（链）**：`SectorTraceRunResult.extraction`（新可选字段）由 consumer 写入 `{source, weak}` → `assemble_attribution_chain` 在兜底路径写 `children[].extraction={source, weak:true}`，并在 root 写 `evidence_weak: true` + 报告 `attribution_status`；`root.summary` 原文空缺时用中性表述「证据不足，未确认主因」（不编造主因）。**T1 正常路径不写这些键**（不污染正常链）。`sector_trace_done` 日志补 `extraction_source`/`extraction_weak`（观测）。
+- **弱依据标注（级联预判）**：兜底命中仍照常触发 `predict_sector`（不跳过）；`predict_sector(..., extraction_source, attribution_weak)` 把标记系统填充进预判产物（`schemas/prediction.py` 新增可选字段 `attribution_weak: bool = False` / `extraction_source: str = ""`，不升 schema_version；两个 prompt 键清单已同步登记"由系统填充、LLM 不得产出"，防 `extra="forbid"` 整条丢预判）。可选字段加性扩展 → 旧记录反序列化零破坏。
+- **跨端核对**：app-api `attributionChainRouter`（无字段白名单，仅校验已知键类型）与前端 `AttributionChainView.vue`/`attributionChain.ts`（只读 `root.summary/index_pct`/`children[]`）对新增可选键天然容忍 → **app-api/前端零改动**。
+
+### 验证
+
+- **测试（TDD 先红后绿，新增 23 例，其中 `-k "sector_trace or chain or consumer"` 子集内 +19 例）**：`test_sector_trace_extract.py` 重写为 15 例（T1 回归 3 例断言不变 / T1 有产出不降级 / T2 候选顺序与跨候选去重与上限 / T3 losers 优先+gainers 补齐+去重+跳过空名 / 三层皆空 / 畸形 payload 与空快照不崩）；`test_attribution_chain.py` +5；`test_sector_trace_consumer.py` +3；`test_prediction_sector_service.py` +3、`test_prediction_prompt.py` +1。RED 取证：`ImportError: cannot import name 'SOURCE_CANDIDATE_CLAIM'`、`TypeError: cannot unpack non-iterable SectorHit object`、`KeyError: 'evidence_weak'`、`TypeError: predict_sector() got an unexpected keyword argument`。
+- `-k "sector_trace or chain or consumer"` → **228 passed / 0 failed**（基线 209）；全量 `tests/unit` → **2986 passed / 8 failed**（8 例与基线一致，零新增）；ruff 改动行 0；mypy 新增错误 0。
+- **遗留与风险**：① 兜底命中的板块**证据弱**，仅以 `extraction.weak`/`evidence_weak` 标注（展示层暂未渲染弱提示，前端本期不改）；② T3 快照兜底会在「无 trace / trace 无候选」的日子也产出链（上限 3），属口径内行为，观察线上板块选择质量；③ T2 依赖候选链 claim 文本含板块名（与 T1 同款子串匹配），命名漂移（R14）仍可能漏配。
+
+---
+
+## [main] 2026-09-17 — 溯源弱反馈：观测层（聚合+建议+审计上报，默认 observe 零副作用）（Task 7.1，spec §13.3）
+
+**开发者**: Aria
+
+### 新增
+
+- **定位（本期只做观测层）**：把「链上溯源信号」× 「预判验证结果」关联聚合 → 产出建议（建议降权/建议提级/观望）→ 落审计表（app-api `attribution_feedback_signals`，可查、幂等）。**不修改**溯源 prompt / 驱动类型判定 / 预判输入与任何既有写入，**不真正应用权重**（应用层待积累真实样本后单独立项）；遵守总纲 §3.4「迭代双链路分离」：弱反馈只用于溯源侧信号，**不得直接改写预判**。
+- **单元 key 口径（关键取舍，NEEDS_CONTEXT）**：计划原定默认 `driver_type`（复用 `prediction_service._TRACE_CATEGORY_TO_DRIVER`/`_extract_driver_for_trace`），但核查发现 **`driver_type` 未落库**——链 `children[]` 只有 `{sector, relation, pct, trace_summary, events}`，`prediction_records` 也无该列 → 未硬造标识：**默认 `unit="relation"`**（`judge_sector_driver_relation` 的确定性产物、链上唯一持久化的溯源侧标识）；同时**提供** `driver_type` / `driver_type_sector` 可选口径（回读该日复盘报告 `market_trace.trace` 复用既有映射，报告不可读 → 整日跳过并计数 `driver_unavailable`，不猜）。可选 unit 全集：`relation` / `relation_sector` / `sector` / `driver_type` / `driver_type_sector`（`SUPPORTED_UNITS`）。
+- **关联与样本口径**（`services/attribution_feedback.py`）：窗口 = 过去 N 个交易日（含末点，非交易日末点回退最近交易日）；样本 = 链 `children[]` 板块 × `source_id` **精确匹配** `sector:{链上板块名}:{date}`，匹配不上 → 跳过并计数 `unmatched`；档位样本 = `verification[short|mid|long].result ∈ {hit,miss}`（`insufficient` 只进 detail）；`c{i}` 条件层 result/`condition_met` 布尔**只进 detail**，不与档位样本混桶；只收 `source_id` 前缀 `sector:` 的记录（大盘/个股不参与）。
+- **建议规则**（可配置阈值）：`sample_size < min_samples(默认10)` → `insufficient`；否则 `hit_rate < low(0.35)` → `downgrade`；`> high(0.65)` → `upgrade`；其余 `hold`（边界取严格不等，等于阈值 → 观望）；`hit_rate` 样本 0 → `None`（不写 0 冒充 0%），4 位小数。阈值自洽性守卫（`0<=low<high<=1`、`min_samples>=1`）不满足 → 显式报错，不静默产出错误建议。
+- **写侧**（`AttributionFeedbackStore`）：`POST /api/internal/attribution-feedback`（**路径带 `/api` 前缀**，R13 教训：不带会命中错误 router 恒 404）；失败（返回 None / 抛异常）**只 warning 不抛出**，`write_failed` 计数。
+- **CLI/调度**：新增 `scripts/attribution_feedback.py`（`--date` / `--dry-run`（默认）/ `--execute` / `--window` / `--unit`；独立运行初始化 `HttpClientPool`）；新增 cron `attribution_feedback`（`scheduler_attribution_feedback_cron="10 16 * * 0-4"`，在 `prediction_validate` 16:00 与 `prediction_stats` 16:05 之后采样，`dry_run=False` 但 `mode=observe` → 只写审计表）；`attribution_feedback_mode=off` 为运维开关（不读不写）。
+- **配置项与默认值**（`config.py`）：`attribution_feedback_mode="observe"` / `attribution_feedback_window=60` / `attribution_feedback_min_samples=10` / `attribution_feedback_low_threshold=0.35` / `attribution_feedback_high_threshold=0.65` / `attribution_feedback_unit="relation"` / `scheduler_attribution_feedback_cron="10 16 * * 0-4"`。
+
+### 验证
+
+- **测试（TDD 先红后绿，新增 44 例）**：`tests/unit/test_attribution_feedback.py` —— 关联正确性、`source_id` 匹配失败/无链/空白板块名跳过并计数、条件层不污染档位样本、**dry-run 零写入**、**observe 零副作用**（唯一写入 = 审计表端点，`save_prediction`/`update_prediction_verification`/`save_analysis_report`/`put`/`patch`/`delete` 任一被调用即 fail；读入链/记录对象逐字节不变）、上报失败只 warning、路径 `/api` 前缀负向断言、driver_type 口径与报告不可用跳过、配置默认值锁定、阈值不自洽报错、CLI 装配默认 dry-run、报告渲染。RED 取证：`ImportError: cannot import name 'attribution_feedback'`。
+- `pytest tests/unit -q -k "feedback or chain or prediction"` → **579 passed / 1 存量红**（`test_iterate_adapters::test_registry_...`）；`test_scheduler.py` 3 处同步；ruff 改动行 0（`All checks passed!`）；mypy `Success: no issues found`。
+- **遗留**：① **应用层未做**（真正影响溯源信号权重）→ 待观测期积累真实样本后单独立项；② 未接入任何消费方（GET 只读端点供人工/前端查，agent 侧未消费建议）；③ `unmatched` 可能偏高（链 `children[].sector` 用复盘原始名、预判 `source_id` 用 THS resolved 名，R14 同源）；④ 生产未跑（`localhost` app-api 不可达）→ 待部署后验证。
+
+---
+
+## [main] 2026-09-17 — 条件"未成立态"落地 + 历史回溯补算（Task 6.1/6.2，spec §12.5/§12.6）
+
+**开发者**: Aria
+
+### 新增
+
+- **判定层三值化**（`services/condition_met_judge.py`）：新增 `judge_condition_met_state`（`True`=成立 / **`False`=确定性不成立** / `None`=无法判定），内部 `_judge_tech/_judge_volume/_judge_pct` 改为三值 `*_state`；`judge_condition_met` 保持**两值契约**（False 折叠回 None）→ 第①段扫描行为逐字不变（其单测 49 例全绿）。给 False 的三类：涨跌幅累计未达阈值、技术位末值未触发（均线/前极值）、量类 `_compare` 不成立；**cross_\* 未穿越仍 None**（相邻两日语义）；参考位降级 / 无 level 量类 / 量级护栏 / 单样本 / 绝对点位守卫 / 事件类恒 None。
+- **到期写未成立态**（`services/prediction_validator.py::_verify_conditions`）：`result` 落库那一刻对确定性未成立条件写 `condition_met=false` + `checked_at`（判定时间 ISO 日期）；判定窗口 = `[created_at, due]`（第①段是 `[created_at, today]`）；**已点亮 true 显式防御不回退**；**无法判定不写该键（绝不写 null）**；`wait`（窗口未满）分支不写；已含 result 的 c{i} 提前跳过 → 重复扫描零重复副作用。判定逻辑抽公共 `_judge_condition_met_once`（第①/②段**同源**）；`_verify_conditions` 新增可选 `scan_cache/event_cache`（与第①段共用取数/事件记忆化，key 含窗口不串用）。
+- **事件类到期语义**：`_judge_event_condition(..., at_due=True)` 时 `scheduled/upcoming` → 确定性 `False`（到期未落地）；未到期仍 `None`（第①段只写 true）。
+- **历史回溯补算**：新增 `backfill_condition_met(*, dry_run=True, limit, batch_size, sleep_seconds, max_records, sample_size)` 服务函数（`services/prediction_validator.py`）+ `scripts/backfill_condition_met.py` CLI（**默认 dry-run 零写入**，`--execute` 才写库；默认限速 每 20 条 / 0.5s；统计 scanned/candidates/judgeable/lit/unmet/unjudgeable/in_flight/written/write_failed + 抽样明细）。目标集合 = `schema_version='3.0'` + `prediction.conditions[]` 非空 + `verification[c{i}]` **无布尔 `condition_met`**；只补 `condition_met`/`checked_at`，**既有 entry 整条回传**防 Node 默认值（`actual:''`/`reason:''`/`verified_at`）覆盖已判档位；未到期只写 true（§12.5）；CLI 独立运行初始化 `HttpClientPool`（修 "HttpClientPool not initialized" → 统计恒 0）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` +6 例（三值 ×3 / 不可判 / cross 未穿越 / 两值契约回归）；`test_prediction_validator.py` 改 1 增 4（到期 false+checked_at / 已点亮不回退 / 不可判不写键 / run_once 重复扫描零副作用）；新增 `test_backfill_condition_met.py` 9 例（dry-run 零写入+统计 / 只补目标键且既有键逐字节保留 / 幂等跳过 / 未到期不写 false / 判定成立点亮 / 不可判不写 / 写失败不炸批 / CLI 装配默认 dry-run / 报告渲染）。RED 取证：judge 导入失败、validator `KeyError: 'condition_met'` + `assert_not_awaited` 失败。
+- `pytest tests/unit -q -k "condition_met or validator or prediction"` → **506 passed / 1 存量红**（`test_iterate_adapters::test_registry_...`；加 `or backfill` → 507/1）；全量 `tests/unit` → 2919 passed / 8 failed（8 例全为既有基线红）；ruff 改动行 0（余 2 处 E501 落在**未改动行** `prediction_validator.py:237-238`）。
+- **遗留**：① **生产 dry-run 未跑**（`NODE_API_BASE_URL=localhost:3000` 不可达 → CLI 输出 `scanned=0` + 明确提示）→ 需在服务器按"先 dry-run 报告 → 人工确认 → `--execute`"执行；② 回溯收益受 spec §12.2 约束（存量 326 条件多无量级/技术位口径）→ 只能补可判定的少数；③ 参考位（today_open/high/low）仍降级 None（取数层未补当日行）。
+
+---
+
+## [main] 2026-09-17 — 条件可判定性契约：anchor 扩展 `metric/op/level` + 判定分流（量类/技术位/参考位）+ 事件三层状态锚 + 误点亮回滚预案（Task 5.1/5.2，spec §12.3/§12.4/§12.7 R9）
+
+**开发者**: Aria
+
+### 新增
+
+- **schema 扩展（可选字段，不升 `schema_version`）**：`schemas/prediction.py` `PredictionMetric` 由 5 值扩到 13 值（+`amount`/`ma20`/`ma60`/`prior_low`/`prior_high`/`today_open`/`today_high`/`today_low`）；新增 `PredictionAnchorOp = Literal[gte|lte|above|below|cross_above|cross_below]`；`PredictionAnchor` 加 `op`/`level: float | None = None`（默认 None → 旧记录反序列化零破坏）。**不新增 `condition_type` 字段**（`extra="forbid"` 下新增字段会整条丢预判）。
+- **类型确定性推断**（`services/condition_met_judge.py::infer_condition_class`，判定侧唯一实现）：`event_ref` 非空 → 事件类；显式 `metric`（量类→技术位→参考位）优先于文本；无显式 metric 时文本兜底（量词→技术位词）；否则涨跌幅/点位类。**偏差说明**：任务书的推断顺序把"文本明示技术位"排在参考位之前，实现改为**显式 metric 优先于文本**——否则 `metric=today_high` + 文本"站上今日高点"会被判成技术位并用 MA 近似点亮（true 不可撤回）。
+- **判定分流**：① 事件类 → 调用方三层（状态锚/受限 LLM/None，纯函数恒 None）；② 量类 → 窗口 `vol`/`amount` 与 `level` 按 `op` 比较，口径 = `gte`/`above` 取窗口 **max**（"曾放量到该量级"）、`lte`/`below` 取 **min**、`cross_*` 用**相邻两日**穿越、`op` 缺省先按文本（放量→gte/缩量→lte）再按 direction；三道守卫（无 `level`、样本 < 2、`level/max(series)` 越出 [1e-3,1e3]（**量级/单位护栏**）→ 恒 None）；③ 技术位 → 显式 `metric`（ma20/ma60/prior_low/prior_high）优先，回退文本/`direction`；④ **参考位 → 恒 None（降级）**：日 K 取数层只透传 `trade_date/pct_chg/close/vol/amount`，`today_open/high/low` 不可得；⑤ 涨跌幅类语义不变（绝对点位守卫保留）。
+- **取数层加性扩展**：`_fetch_kline_range` 行新增 `amount` 键（index/stock 上游有值、sector 恒 null）→ `metric=amount` 量类可得；四处既有行契约单测同步补 `"amount": None` 断言。
+- **事件三层①（状态锚，确定性）**：`_scan_condition_met` 事件类条件**不拉行情**，改读 `node_api.get_event_entities({dateFrom,dateTo})`（扫描窗口 ISO 化；同批次按窗口记忆化）→ `event_status ∈ {ongoing, occurred}` 点亮；`scheduled/upcoming` → 不点亮；事件缺失/未物化/读失败 → ②/③（fail-safe 不点亮）。② **受限 LLM 层**：`_judge_event_condition_llm`（输入限定 事件标题 + 摘要 + 条件文本；输出 true/false/unknown + 置信；low 置信与异常 → None）由 `settings.condition_met_event_llm_enabled`（**默认 False**，新增 config 项）控制，开启时每次判定写 `condition_met_event_llm_judged` 留痕。③ 兜底 None。
+- **生成侧同批同步**（`prompts/workers/prediction.py` 双 prompt + `light_predict.py`）：anchor 键清单加 `op`/`level`，`metric` 可选值清单同步扩展，新增「可判定性硬约束」（每条条件至少映射一个可判定维度；量化条件必须给 `level` 或 `threshold`；`level` 只能取输入中真实量级），示例 JSON 补**量类**与**参考位类**各一条；「字段归属」段同步列明 anchor 只允许 7 个键（多吐未登记键 → 整条预判校验失败）。
+- **Task 5.2 误点亮回滚预案**（`scripts/rollback_condition_met.py`，**不自动执行**）：应用侧无回退手段——Node PUT 只放行 `condition_met===true`/带 `result`，写 `false`/`null` 恒 400，且 jsonb 键级浅合并不表达"删键" → 唯一路径是 DB 级 `verification #- '{c{i},condition_met}'`。脚本只读生产（GET /internal/predictions）+ 生成 SQL（`--dry-run` 默认仅列清单，`--sql-out` 落盘），`WHERE id = … AND verification #> '{c{i},condition_met}' = 'true'::jsonb` 幂等守卫、**不触碰 `result`**；优先 `--prediction-id`+`--condition-index` 精确到单键。用法/风险/使用条件写入脚本 docstring 与 `README.md`。
+- **事件类条件不依赖行情源**（`_scan_condition_met`，commit `d0a7fb4`）：移除 `code is None → return {}` 的提前返回（改为行情类条件逐条 `continue`）——目标资产解析失败时事件类条件（只读 Event Entity 状态）此前会被无关的行情解析失败连带跳过；新增回归守卫用例。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_condition_met_judge.py` +23 例（推断规则 11 参数化、量类成立/不成立/无 level/量级护栏/样本不足/amount 降级/adjacent cross/文本兜底 op、技术位 metric 显式、参考位降级、事件类纯函数 None）；`test_prediction_validator.py` +8 例 + 4 处 `amount` 契约断言；`test_prediction_schema.py` +12 例；`test_prediction_prompt.py` +1 例；新增 `test_rollback_condition_met.py` 9 例。RED 取证：schema 16 failed、judge 导入失败、validator 3 failed → 全 GREEN。
+- **提交**：`89020fd`（schema+双 prompt 同批）/ `3757ec1`（判定扩展）/ `3ada752`（回滚预案）/ `d0a7fb4`（事件类不受行情源影响）。
+- `pytest tests/unit -q -k "condition_met or validator or prediction"` → **485 passed / 1 failed**（唯一红 = 存量 `test_iterate_adapters`，由既有 `5d07eed` 注册引入，非本次改动）；全量 `tests/unit` → **2897 passed / 8 failed**（8 例均为既有基线红）；ruff 改动行 0；mypy 7 处报错经 `git diff -U0` 核对全部落在未改动行。
+- **遗留**：① **参考位不可得→降级**（日 K 无 open/high/low，sector 上游亦无）→ 待取数层补当日行；② **存量覆盖率不因本次改动提升**：生产 146 条/326 条件无 `op`/`level` → 仍不可判；收益面向**新生成**记录；本次**未能**复跑生产样本（`NODE_API_BASE_URL=localhost:3000` 连接失败）；③ 事件状态锚依赖 Event Entity 物化（`EVENT_ENTITY_ENABLED` 默认 False）；④ 量类 `level` 单位口径依赖生成侧"取输入真实量级"约束，跨源由量级护栏兜底为"不判"。
+
+---
+
+## [main] 2026-09-17 — 修正链写入路径缺 `/api` 前缀（Task 3.1b，Critical：生产链从未落库）
+
+**开发者**: Aria
+
+### 修复
+
+- **根因**（`services/attribution_chain.py:527-533` `AttributionChainStore.save`，commit `fa8f566`）：写入走 `node_api.post("/internal/attribution-chain", …)`，但 app-api 中 `attributionChainRouter` 挂在 `app.use('/api', …)`（`aistock-app-api/src/index.ts:165`），写接口绝对路径为 **`POST /api/internal/attribution-chain`**；`/internal` 是另一个 router 的挂载点（`index.ts:631`）→ 实际请求 `http://localhost:56790/internal/attribution-chain` **恒 404**，且 `data_client.post`/`_post_request`（`data_client.py:203-210`，`url = f"{self._base_url}{path}"` 逐字拼接）失败时**吞错返回 None** → 只打 `attribution_chain.save_failed` warning，**静默不落库**。生产佐证：`select count(*) from attribution_chains` → `relation "attribution_chains" does not exist`（从未成功写入，表未建）。
+- **修复**：路径改为 `"/api/internal/attribution-chain"` + 就地注释说明为何必须带前缀（防再次漏掉）；行内无其它逻辑改动（None 判定/告警语义保持）。`services/data_client.py:709-714` 的 `get_attribution_chain` docstring 原记「写入路径同样缺 /api，属 Node 侧既有口径，本任务不改」→ 已同步为「Task 3.1b 已补」，避免留下误导性事实。
+- **逐条核对（重点：避免误改）**：`grep -rn 'post("/internal'` in `src/aistock_agent/services/` 共 8 处 + 全仓 `"/internal/…"` 字面量逐条判定，结论 = **唯一需要补 /api 的只有链写入这一处**——`attributionChainRouter.ts:132` 是全 app-api 唯一声明绝对 `/internal/…` 路径的 router，且它是唯一被挂到 `/api` 的那个。其余全部命中 `app.use('/internal', internalRouter)` 或 `/internal/{stock-trace,insight,predictions,calendar,event-entities,stock-info}` 子挂载 → **一律保持不动**。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_attribution_chain.py` `test_save_posts_to_internal` → 重命名 `test_save_posts_to_api_internal`，断言由 `== "/internal/attribution-chain"`（旧路径被测试**锁死**，正是这次能长期存活的原因）改为 `startswith("/api/internal/attribution-chain")` + **负向断言** `not startswith("/internal/")`。RED（改前）：`1 failed` → GREEN。
+- `.venv\Scripts\python.exe -m pytest tests/unit -q -k "chain"` → **128 passed / 0 failed**（无存量红）；`test_data_client_attribution_chain.py + test_attribution_chain.py` → **33 passed**；ruff 三文件 `All checks passed!`；mypy `attribution_chain.py` 1 处报错落在**未改动行** `:545 children=len(chain.get("children", []))`。
+- **遗留（部署前置，必须先做再部署）**：① 生产库需执行 `020_attribution_chains.sql` 建表（当前表不存在，即使路径修好也无法落库）；② 历史缺失的链无法回溯补齐（写入是事件驱动、非幂等重放）；③ 本任务只修写入，读取侧（`get_attribution_chain`）已在 Task 3.1 修正；④ 建议 spec §13.6 登记 R13。
+
+---
+
+## [main] 2026-09-17 — 预判依据增强：链上事件 + 中台事件 + 大盘归因注入（Task 3.1，spec §4.2/§4.4）
+
+**开发者**: Aria
+
+### 新增
+
+- **链读取能力**（`services/data_client.py:706` `get_attribution_chain(date)`）：Node 侧端点为 `GET /api/agent/attribution-chain/:date`（路由 `attributionChainRouter.ts:180` 挂在 `app.use('/api', …)`，`index.ts:164`），与 `/internal/*` 惯例有两点不同——① 路径必须带 `/api` 前缀（base_url 不含 /api，先例 `tools/market_tools.py:53`）；② 响应是**裸体** `{date, chain|null}`（非 `{code,data}` 信封），走 `self.get` 的信封解包会恒返 None → 该方法自行发请求并容忍裸体/信封两种形状；无链（null/空对象）与请求失败统一归一为 None。
+- **大盘路径注入**（`prediction_service.py` `run_predict:741-748`）：`_build_prediction_input` + 画像之后并入 `chain_events`（当日链**全部 children** 事件，≤5、按链序、按 event_id/ref 去重）、`warehouse_events`（当日中台存量事件按链上主驱动板块名匹配，≤3）、`attribution_summary`（链根 summary 优先，无链回退 `trace.attribution_summary`，同源）；留痕在 `:816` 写回产物。
+- **板块路径注入**（`predict_sector:1910-1917`）：`_build_event_input(report_date, [sector_name, target.name])` 结果并入 `extra_input` 交 `_sector_prediction_core` 的 prompt_input——只注入该板块在链上的 `children[].events`（≤5，未入链省略该键）+ 中台匹配（≤3）；`market_trace_brief` 原样保留；不注入 `attribution_summary`（大盘结论已由 brief 承载，避免同义键重复）。
+- **上限与降级**：任一来源为空 → **省略对应键**（不注入空数组/占位）；中台匹配复用链事件层同源读取（`load_chain_warehouse_events` → `event_store.load_event_scrape`，一次报告读，**无新增检索/LLM 成本**）与同一权重函数（实体 > 关键词 > 标题 > 摘要）；`_build_event_input` 整体 fail-safe（异常 → warning + 空块），依据增强失败绝不丢整条预判（对齐 spec §4.4）。
+- **留痕**（`schemas/prediction.py:181` `PredictionResult.input_event_refs: list[str] = []`）：**系统填充、非 LLM 产出**（两个 prompt 均已登记"由系统填充，LLM 不得产出该键"）；值 = 注入事件的中台权威 event_id（检索来源无 id 用 ref），顺序与注入一致、跨键去重；无注入为空数组（非 None）；不升 schema_version（3.0）；Node 侧零改动（整条 prediction jsonb 落库）。
+- **prompt 同步**（`prompts/workers/prediction.py`）：`PREDICTION_PROMPT` 与 `PREDICTION_CHAT_PROMPT` 均新增「事件驱动说明」段——输入含 `chain_events`/`warehouse_events`(/`attribution_summary`) 时结论必须说明**是否受事件驱动**（事件驱动/非事件驱动/跟随大盘）并点明所依据事件；无事件块时按现有依据推演、禁止编造事件。**输出结构不变**。
+- **回放隔离**：`run_predict` 在 `replay_context` 非空时不注入（P4 回放零 DB/网络访问）；`iterate/replay_layer.py` `_SERVICE_ISOLATION_TARGETS` 登记 `NodeApiClient.get_attribution_chain: node_read`（直接 httpx 方法，I-3 清单封闭测试强制）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：新增 `tests/unit/test_prediction_input_events.py`（8 例：大盘有链注入/无链无匹配全省略/无链回退溯源结论/回放不读链/板块注入自身事件/板块未入链只注中台/板块无链全省略 + 留痕随 payload 落库）+ `tests/unit/test_data_client_attribution_chain.py`（6 例）+ `test_prediction_prompt.py` 2 例。RED：9 failed（`AttributeError: get_attribution_chain` ×7 + prompt 断言 ×2）→ GREEN 25 passed。
+- `-k "prediction or chain"` → **500 passed / 1 failed**（存量红 `test_iterate_adapters`，stash 基线复核确认）；全量 `tests/unit` → **2832 passed / 8 failed**（8 例均既有基线红）；ruff 改动文件 0；mypy 10 处报错全部落在未改动行。
+- **遗留**：① 中台匹配词来自链 children 板块名（大盘路径）/目标板块名（板块路径）→ **无链时大盘路径不注入 `warehouse_events`**（无匹配词源）；② 注入事件不进入 `evidence_ids` 允许集；③ Node 侧 chain 写入路径 `/internal/attribution-chain` 缺 `/api` 前缀（与本次读取侧发现同源，未改，待部署核对）。
+
+---
+
+## [main] 2026-09-17 — 链组装先于级联预判（Task 1.1，P0' 时序，spec §13.1 方案 A）
+
+**开发者**: Aria
+
+### 改进
+
+- **时序调整**（`services/event_consumers.py` `SectorTraceConsumer.handle`，commit `a7f8ca4`）：级联预判从 `asyncio.gather` 内部的 `_one`（旧 `:473-477`）**移到链组装/保存之后**（新 `:505-524`）。`_one`（新 `:467-484`）只做 `run_sector_trace` + `results.append` + `cascades.append((sector_name, result.snapshot))` + 失败 warning；溯源 gather（`:486`）→ `if results:` 组装并保存链（`:488-504`，逻辑逐字未动）→ `if cascades: await asyncio.gather(*(_cascade_one(name, snap) for name, snap in cascades))`（`:523-524`）。背景：预判输入组装（P2' 依据增强）需读当日链，旧时序下链在 gather 之后才组装 → 级联路径永远拿不到当日链（§13.1 问题陈述）。
+- **并行 + 两个独立 try**：级联用 `asyncio.gather` 并行（**未**写串行 for，避免每板块一次 LLM 调用线性累加）；隔离用**每项自带 try/except**（`_cascade_one :508-521`，与既有 `_one` 风格一致，未用 `return_exceptions=True`——需按板块记日志字段），与链保存 try 完全独立：链保存失败不跳过级联，级联失败不影响已保存的链；`extract_primary_sectors` 为空仍直接 return（不溯源/不写链/不级联），`results` 为空时 `cascades` 亦空。级联入参仍为 `sector_name` + 溯源 `snapshot`（签名未变，`_cascade_sector_prediction` 本身已是 fail-safe 吞错）。
+- **日志键分离**（审查 Minor 15）：`_one` 的 except 只剩溯源失败 → `sector_trace_one_failed`（语义恢复正确）；级联失败新键 `sector_cascade_predict_failed`（字段沿用 `sector`/`error`，另带 `report_date`）。改前 stdout 取证：级联抛错被记为 `sector_trace_one_failed error='cascade down'`（错误归因）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_sector_consumer_multi.py` 新增 4 例——链保存先于级联（`call_order` mock 记录顺序）/ 链保存抛错仍触发级联且不向外抛 / 级联抛错不影响链保存结果且不向外抛 / 级联并行（mock 计数 in-flight 峰值=2，串行 for 会得 1）。RED（改前）：3 failed（均 `assert 'cascade' == 'chain_save'`）+ 1 passed（并行守卫在旧代码下也成立，属回归锁）；GREEN：23 passed。
+- 回归 `-k "sector or chain"` → **294 passed / 0 failed**；`-k "sector or chain or consumer"` → **331 passed**；ruff 0；mypy 18 处报错均在未改动行。
+- **遗留**：本任务只保证"链已写在前"，级联预判**读取**当日链由 Phase 3（Task 3.1 依据增强）落地；§13.1 验收项"预判记录注入的链事件 id 非空"待 3.1 后可验。提交遇环境级 git 写盘拦截（`.git/objects` Permission denied），按既有绕过方案（`GIT_OBJECT_DIRECTORY` → C: 临时目录 + `GIT_ALTERNATE_OBJECT_DIRECTORIES` 指回原对象库，提交后 PowerShell 复制回 `.git/objects`）完成，`git fsck` 无 missing/corrupt，临时目录已删除。
+
+---
+
+## [main] 2026-09-17 — 板块预判落库前归一 prediction.target（Task 0.5b，补 0.5 写入侧缺口）
+
+**开发者**: Aria
+
+### 修复
+
+- **写入侧归一**（`services/prediction_service.py:1551-1567`，`_sector_prediction_core:1452`）：新增 keyword 参数 `resolved_target: Target | None`，在 A3 置信钳制之后、`return prediction` 之前——有 resolved Target 时 `model_copy(update={"target": resolved_target})` **一律覆盖**（含 LLM 自产的 index 类 target）；无 resolved（回放态无 ts_code）→ 不伪造（保持原样/None）+ `logger.warning("sector_prediction.target_unresolved")` 留痕。背景：板块所用 `PREDICTION_CHAT_PROMPT` 未定义顶层 `target`（仅 `PREDICTION_PROMPT:57` 有），`PredictionResult.target` 缺省 None → 0.5 的画像结构化匹配仍恒 miss（n=0）。
+- **接线**（`:1699-1702` `predict_sector`）：落库前传 `resolved_target=target`（即 `sector_target_from_resolved` 产物，`internal_id=code=ts_code`）。批量路径 `sector_wind_prediction` 经 `predict_sector` 同受益。
+- **未复用 `_repair_llm_target_internal_id`（已核对）**：它只在 `run_predict`（大盘）调用（`:759`），无 kind 分支，且语义是 `make_target(name)` 补 `internal_id` —— 板块名经 make_target 会剥后缀（"存储板块"→"存储"）+ `code=None`，与画像 key（ts_code）口径冲突；板块直接采用 resolve 结果，`sector_target_from_resolved` 已是唯一 Target 构造点，未新增第二套归一。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`tests/unit/test_prediction_sector_service.py` 新增 4 例（落库 payload target=resolved ts_code / LLM 产 index target 被覆盖 / 无 resolved 不伪造+warning / 落库 payload 直喂 `read_validation_profile` 端到端 n=1）；helper `_sector_prediction` 增 `target`、`horizon_target` 两个可选参数（默认值保持原行为）。RED（改前）：4 failed（`target is None` / `assert '000001.SH' == 'BK1001'` / 无 warning / `assert 0 == 1`）→ GREEN。
+- 验收 `-k "prediction or validation"` → **383 passed / 1 failed**（存量 `test_iterate_adapters`）；全量 `tests/unit` → **2798 passed / 8 failed**（8 例均既有基线红）；ruff 0；mypy 与 HEAD baseline 逐行一致（4 处存量报错，仅行号位移）。
+
+---
+
+## [main] 2026-09-17 — 板块预判注入验证画像（Task 0.5）
+
+**开发者**: Aria
+
+### 改进
+
+- **匹配口径**（`skills/prediction_validation.py:48` `_record_target`）：改为**优先**取结构化 `prediction["target"]["internal_id"]`（稳定标识 = 板块 resolved ts_code，数据卫生 §2.1）→ `["name"]`（内层回退）→ 无结构化 target（旧记录）回退 `horizons[].target` 字符串。背景：板块预判 `horizons[].target` 是 LLM 自由文本（prompt 要求"验证对象优先用指数名"→ 常写"上证指数"），按字符串与板块 ts_code/板块名比对必然 miss → 画像恒空。返回类型与调用方（同文件 `_collect_target_entries` 81-109）不变。
+- **Target 直读**（`services/prediction_service.py:1149`）：新增 `_enrich_predict_input_for_target(prompt_input, target)`；原 `_enrich_predict_input_for_symbol` 退化为薄封装（`make_target` → 转调），大盘/回放/chat 行为不变（日志字段 symbol → target.internal_id）。
+- **板块注入**（`services/prediction_service.py:1671-1682`）：`predict_sector` 在 `sector_target_from_resolved` 之后按 resolved ts_code 读画像，经 `extra_input` 并入 `_sector_prediction_core` 的 prompt_input（与大盘同构）；无画像/读取失败 → 空 dict 不并入（省略该块，不报错、不阻断产出）。
+
+### 验证
+
+- **测试**：`test_prediction_validation.py` 新增 5 例、`test_prediction_sector_service.py` 新增 2 例；RED（改前）4 failed（`assert '上证指数' == '885001.TI'` / `assert 0 == 1` / `mock_read awaited 0 times`）→ GREEN。验收 `-k "prediction or validation"` → **379 passed / 1 failed**（存量 `test_iterate_adapters`）；全量 `tests/unit` → **2794 passed / 8 failed**（8 例均既有基线红，与本次 diff 零交集）；ruff 0；mypy 与 HEAD baseline 逐行一致（5 处存量报错，改动行内无新增）。
+- **遗留**：① 渠道 B（`_collect_target_confirmations` 只扫 review 报告）不覆盖板块，列为后续；② **写入侧未强制**——板块记录 `prediction.target` 仍由 LLM 自由文本决定（`_repair_llm_target_internal_id` 只作用于 run_predict），匹配口径虽已支持结构化 target，生产板块记录需写入侧补 `target = resolved Target` 才能稳定命中；③ `skills/scene_probe.py:56` 同名 `_record_target` 未同步（渠道 B 探针路径）。
+
+---
+
+## [main] 2026-09-17 — 快照键名不一致修复（大盘涨跌幅 / 预判输入指数块）
+
+**开发者**: Aria
+
+### 修复
+
+- **Bug A（功能性）**：归因链与板块父链引用读的大盘涨跌幅键在**生产快照并不存在**。`attribution_chain.assemble_attribution_chain`（原 73-79 行）与 `event_consumers._review_index_pct`（原 516-519 行）按 `index_change_pct/index_pct/benchmark_change_pct/sh_change_pct` 读取，而 `normalize_a_share`（`services/market_trace_snapshot.py:292-314`）产出的真实形状是 **`a_share["indexes"]`（dict，key=`SH000001` → 项含 `ts_code`/`name`/`change_pct`）**；旧四键仅存在于测试 fixture → `root.index_pct` 恒 `None` → `judge_sector_driver_relation` 恒返回 `unknown` → 链上 children relation 恒 unknown（前端不渲染角色徽），`parent_trace_ref["index_pct"]` 同样恒 None。
+- **修法**：新增共用助手 `index_pct_from_snapshot(snapshot) -> float | None`（`services/attribution_chain.py:58-84`，配套私有 `_index_items`/`_is_shanghai_index`/`_numeric_pct`）：① 优先 `a_share.indexes` 中上证指数项（name 含"上证"或 code 为 `000001`/`000001.SH`/`SH000001`），找不到取首项；值非数值视为缺失；② 兼容指数项为 dict（归一化后）与 list（归一化前原始载荷，字段 `change_pct` 优先、`pct_chg` 兜底）两种形状；③ indexes 不可用 → 回退旧四键；④ 全缺失 → `None`（保持"未知"，不伪造 0——0 会被判成 market_follow）。两处调用点改为共用该助手；`summary` 逻辑与 children 结构未动。
+- **Bug B**：`prediction_service._build_prediction_input`（237 行）读 `a_share.get("indices")`（生产键为 `indexes`）→ 指数事实整块为 `None`，LLM 拿不到大盘指数背景。改为 `a_share.get("indexes") or a_share.get("indices") or []`；**输出侧 key 保持 `indices` 不变**（`prompts/workers/prediction.py` 仅描述"输入为溯源结果 + 快照关键字段"，未约定该块键名；prompt_input 以 `json.dumps` 整体注入，见 `prediction_service.py:739`，无键名依赖）。
+
+### 验证
+
+- **测试（TDD 先红后绿）**：`test_attribution_chain.py` 新增 5 例（真实 list 形状 → `index_pct==-0.9` 且 relation `self_driven`；dict 形状优先上证；无上证取首项；仅旧键兼容；非数值回退/全缺失 None）；`test_sector_consumer_multi.py` 参数表新增 3 例 + 1 例 `parent_trace_ref["index_pct"]` 真实形状非 None；`test_prediction_service.py` 新增 2 例（真实 `indexes` → `a_share.indices` 非空；旧 `indices` 键兼容透传）。RED 证据（改前）：7 failed（含 `assert None == -0.9` / `assert None`）；GREEN 后：3 文件 **89 passed**。
+- 取证命令与存量红：`pytest tests/unit/test_attribution_chain.py tests/unit -q -k "attribution or prediction"` → **13 passed**；`pytest tests/unit -q` → **2778 passed, 8 failed**，其中 1 例存量红 `test_iterate_adapters::test_registry_contains_review_and_event_analyst_and_prediction`（期望集缺 `stock_prediction`，非本次引入），另 7 例为 `test_industry_vector_search.py` 存量红（本次 diff 仅 6 文件，均不在该模块路径上）。ruff 通过；mypy 报错行均落在未改动行。
+
+---
+
+## [main] 2026-09-17 — condition_met 终审复审后小修（3 项）
+
+**开发者**: Aria
+
+### 修复
+
+- **最小样本守卫**（`services/condition_met_judge.py`）：`judge_condition_met` 入口新增 `max(len(closes), len(pct_chgs)) < 2 → None`。背景：`created_at == today` 时窗口仅 1 行，`_judge_pct` 的 `closes` 不足 2 个会回退 `pct_chgs` 复利累计，而单日累计恰为自身 → neutral 分支（|累计| ≤ 0.5%）在 0 涨跌幅单日样本上**立即点亮 true**（true 不可撤回）→ 宁可 None（不产键）。"closes 优先、pct_chgs 回退"语义不变（守卫取 `max`，任一维度 ≥ 2 即照常判定）。
+- **报告文案**（`iterate/reporter.py` `_format_prediction_iteration`）：`condition_met_rate` 键存在但值为 `None`（无 false entry 时条件维度不计分）会渲染"条件 None" → 改局部变量回落 `'-'`。
+- **文档/注释漂移校正**：① `condition_met_judge.py` 模块 docstring 的 ③ 条目补"或含裸方向动词（跌破/下破/失守/站上/突破/收回）"，与 `_TECH_RE` 实际口径对齐；② `prediction_validator.py` 的 `_KLINE_FETCH_DAYS`/`_STOCK_KLINE_FETCH_DAYS` 注释函数名 `_fetch_kline_window` → `_fetch_kline_range`（index/stock 取数已迁至后者）；③ `docs/specs/2026-08-31-预判验证-design.md` §4.2 第①段"扫描最近 60 个交易日窗口" → `[created_at, today]` 区间（120 自然日上限），并注明以条件化 spec §4.2 为准。
+
+### 验证
+
+- **测试**：`test_condition_met_judge.py` 新增 `test_single_data_point_returns_none_before_judging`（先红：`True is None`）；`test_iterate_reporter.py` 新增 `test_build_daily_report_condition_rate_none_renders_dash`（先红：`'条件 -' not in md`）。验收：`test_condition_met_judge + test_prediction_validator + test_prediction_stats + test_iterate_verification + test_iterate_reporter` → **123 passed**。
+- **未改**：判定语义（除守卫）、窗口口径、stage② 逻辑、Node 契约；第 4 条复审项（0.2 权重维度退出评分）为设计权衡，保留为遗留。
+
+---
+
+## \[main\] 2026-09-17 — condition\_met 终审修复（阻塞 #2 + 重要 #3/#4/#5）
 
 **开发者**: Aria
 
@@ -516,6 +1299,39 @@
 
 ---
 
+## [main] 2026-09-08 — 生产事故修复：PR #131 后调度器停摆（9/6、9/7 定时任务未跑）
+
+**开发者**: Aria
+
+### 修复
+
+- 生产事故修复：**9/5 部署 PR #131 后调度器停摆（9/6、9/7 全部定时任务未跑）**，根因是 9/3 junliang 分支「轻量预判阶段 2」代码不完整，两处缺失：
+  - `src/aistock_agent/services/scheduler.py`：`start_scheduler()` 引用 `_run_light_predict_task` 未定义 → 启动即 `NameError` → main.lifespan 捕获降级为无调度运行（进程 online 但 heartbeat 停在 9/5 13:40Z）。修复：新增 `_run_light_predict_task(*, slot)`，委托 `light_predictor.run_light_prediction(slot)`（交易日守卫 + 函数内 import + try/except，对齐既有 task 风格）。
+  - `src/aistock_agent/schemas/prediction.py`：`LightForecast` schema 缺失（AGENTS.md 已记载应有）→ `light_predictor` 模块 import 即失败。修复：新增 `LightForecast`（summary + conditions 1-3 条复用 PredictionCondition）。
+
+### 测试
+
+- `test_scheduler.py` 补 2 个 light_predict 任务用例（交易日委托 / 非交易日跳过）；`test_light_predictor.py` 3 个 LLM 用例补 `get_quick_think` mock（消除无 OPENAI_API_KEY 环境依赖，见 9/5 备注的 2 失败）；`test_lifespan.py` autouse mock scheduler 启停（此前真实启动 AsyncIOScheduler 依赖 running loop，靠 NameError 才碰巧通过）。
+- **验证**：scheduler + light_predictor + lifespan + prediction 相关 **210 passed**。
+- **部署**：commit + push 后服务器 `git pull && pm2 restart aistock-agent`，重启后须确认 `scheduler_started` / `scheduler_heartbeat` 恢复。
+
+---
+
+## [main] 2026-09-05 — 合并 PR #131（自选股洞察升级整线）至 main
+
+**开发者**: Aria
+
+### 改进
+
+- 合并 PR #131（自选股洞察升级整线：涨停雷达并入 stock-trace + 读层 skill + 轻量预判 forecast，49 commits）至 main 并 push。
+  - 冲突解决：`config.py`（保留 junliang 轻量预判 `scheduler_light_predict_midday/close_cron`，板块批量注释以 main 的 19:30 为准）、`schemas/prediction.py`（保留 main `omitted_horizons`）、`services/scheduler.py`（保留 junliang light_predict 任务注册 + main 板块预判注释）。
+
+### 验证
+
+- 改动文件 py_compile 通过；单测 **54 passed，2 失败**为环境缺 OPENAI_API_KEY（junliang 分支同现，非合并引入）。
+
+---
+
 ## \[changer\] 2026-09-05 — 节奏大师量能单位归一 + 指数 K 线契约同步
 
 **开发者**: 37588
@@ -559,6 +1375,27 @@
 - 全量回归：失败集与改动前一致，新增失败为零。
 
 ***
+
+## [main] 2026-09-04 — 链归因 Task3 审查修复 + sector_trace 主驱动板块集合提取
+
+**开发者**: Aria
+
+### 修复
+
+- `src/aistock_agent/services/attribution_chain.py` + `tests/unit/test_attribution_chain.py`（Task3 审查修复，见 `.superpowers/sdd/2026-09-03-P1-chain-attribution/task-3-report.md`）：
+  - I-1：`_trace_summary` 候选键与真实板块溯源 schema（`SectorChainResult.model_dump(mode="json")`：chain_id/sector/stages[{kind,headline,claims,evidence}]/attribution_status）零交集致生产恒回退"板块溯源完成"占位 → 改为从 trigger stage headline/claims 摘一句话；attribution_status=insufficient 或无法提取（无 stages/无 trigger/无文本）回退"溯源未确认驱动原因"，不再显示完成占位。
+  - M-1：`AttributionChainStore.save` 检查 `node_api.post` 返回（data_client.post 失败/业务码异常吞错返回 None）——None 时 logger.warning("attribution_chain.save_failed") 而非打 saved 成功日志；`_pct_from` 补 today_change 回退注释（兼容 wind-leaders 快照行）。
+- 测试：helper 改用真实 SectorChainResult dump 形状，新增 insufficient/无 trigger/空 trace_result 回退 + save None 告警用例；三套件 27 passed、ruff 0 违规。
+
+### 新增
+
+- `src/aistock_agent/agents/workers/sector_trace.py` + `tests/unit/test_sector_trace_extract.py`（commit 59de3fa，spec P1a-1 单→多）：新增 `extract_primary_sectors(payload, max_sectors=3)` 按 primary 链 claim 顺序提取主驱动板块集合（跌市 losers 优先于涨市 gainers、去重、上限 max_sectors、无命中返回 `[]`）；原 `extract_primary_sector` 改为委托取首个，既有 event_consumers 调用方零改动。TDD 4 新用例 + 既有 sector_trace 3 套件 18 passed。
+
+### 说明
+
+- 备注：brief 测试样例 claim 原文含 "AI 算力"（带空格），与板块名 "AI算力" 的连续子串匹配语义不符致用例必红，按 brief 预期 4 passed 修正样例数据去掉空格（实现逐字未改）。
+
+---
 
 ## \[changer] 2026-09-04 — 节奏大师「大师级判断」重建
 
@@ -617,6 +1454,55 @@
 - `services/rhythm_verification.py`：`evaluate_branch` 改用 `anchor.direction`/`anchor.threshold` 机械判 hit/miss（仅对"上证指数点位"触发做点位机械判定，成交额/enum 分支回退到 `conclusion.range`，避免"指数点位 vs 亿元"单位错配）；保留 `_triggered` 前置判断（条件未发生 → insufficient）；事件分支落档后按 range 判 hit/miss（D11 保持）
 
 ***
+
+## [main] 2026-09-03 — 预判验证链路修复（D1-D6）+ 动态档位·影响时长分流 + 板块别名/运维等多项
+
+**开发者**: Aria
+
+### 新增
+
+- `src/aistock_agent/data/sector_aliases.json`：扩充板块别名映射（指数/农业种业/半导体存储/6G 等，+86/-3），commit 1f38694。
+- **label 展示字段**（2026-09-03）：PredictionHorizon.label（基准走势 4~6 字，如 恐慌出清为主）+ PredictionCondition.label（两段式路径名"状态 · 走势"，各段 ≤6 字，如 恐慌出清 · 下跌中继），prompt（PREDICTION_PROMPT/PREDICTION_CHAT_PROMPT）加生成约束，缺省空串兼容旧记录；测试 test_labels_default_empty_and_parse 18 passed。
+- **动态档位·影响时长分流改造**（spec：`docs/specs/2026-09-03-动态档位-影响时长分流-design.md`，方案 A 核心 + B 画像门槛；commits 22a04ab→d2fee9a + 收口 commit）：
+  - 策略层（22a04ab）：新增 `services/prediction_horizon_policy.py`——driver_type（5 类：policy_macro/trend_fundamental/sector_rotation/event_shock/transient_market）× target_kind → horizon 白名单 required/optional 纯函数推断 + `classify_driver`（未知类别回落 transient_market，宁少产 mid/long）。
+  - schema（a55331a）：`PredictionResult.omitted_horizons: list[OmittedHorizon]`（horizon+reason，缺省空，schema_version 保持 3.0 向后兼容）+ 与 horizons 互斥校验（required 缺档由归一化层兜底）。
+  - prompt（08a14ee）：注入 driver_type 与白名单实例（required=[...] / optional=[...]），输出规则反转为"required 必产、optional 有据才产并自证、未产档写 omitted_horizons、禁止越白名单"；移除"无法判断 confidence=low 仍三档并列"语言。
+  - 归一化强制层（caf7e49）：`apply_horizon_policy`（model_validate 后、due_dates 前确定性调用）——越界裁剪 + short 恒产 + required 缺档不硬补：写系统留痕 reason + `prediction_status` 降 `hypothesis`（spec §9 决策③ degraded，宁缺毋滥、可审计）+ omitted 归一（区分"依据不足未产出"与"越界被裁剪"）。
+  - 注入接线（83ed1d6）：run_predict/chat/sector 三入口统一经 `_inject_horizon_policy` 注入白名单、产物过强制层，driver 与 prompt 注入同一值。
+  - 画像 B 期（64e2e13/d2fee9a）：enrich_prediction_input 读 profile.horizon_breakdown——optional mid/long 档样本 n>=3 且 hit_rate<0.4 → prompt 附"历史印证少倾向不产"抑制提示 + note 拼接文案修正。
+  - 收口：预测相关 18 测试文件 249 passed 全绿（omitted_horizons 带缺省，存量 fixture 零同步）；全量 tests/unit 9 failed 均为存量基线红；ruff 修复 schemas/prediction.py 两处存量 E501。
+
+### 修复
+
+- `src/aistock_agent/workers/stock_trace_consumer.py`：修复 DLQ 巡检对 bytes 消息 id 崩溃（`_reclaim_dlq` 先 `_text` 归一再 split），commit 27e7f48；`tests/unit/test_stock_trace.py` 新增 `test_reclaim_dlq_tolerates_bytes_message_ids` 回归测试。
+- `src/aistock_agent/observability/logging.py`：processors 增加 `format_exc_info`，异常日志输出真实 traceback（曾只留 `exc_info: true`），commit 121cbc5；`tests/unit/test_observability_logging.py` 新增 traceback 输出断言测试。
+- **预判验证链路修复（D1-D4，commit aab4e92；见测试报告 + docs/specs/2026-08-31-预判验证-design.md §10）**：
+  - D2：`prediction_validator.run_once`/cursor 兼容 string id（Node 已归一治本，此处双保险），不再全量跳过。
+  - D3：画像/统计/技能数据源改档位级扫描——`data_client.list_all_predictions`（pending+verified 全记录，按档位 result 计入），`_write_validation_profiles`/`_report_stats`/`skills.prediction_validation._collect_target_entries` 全部切换；画像不再等 long(2027) 全档 verified。
+  - D4：`data_client.put()` 失败改抛异常（仅验证回写用，run_once/backfill 已包 try/except），updated 不再虚增、写失败可告警。
+  - 测试：新增 D2 string id 归一、D3 pending 记录计入画像两个回归；相关 5 文件 78 passed。
+- **补跑取证发现并修复（commit 29cc358；见 spec §10）**：
+  - D5：`data_client.update_prediction_verification` body.update(entry) 被 entry.horizon 覆盖 jsonb key → condition 全部错位写到 anchor 档位键下并互相覆盖；修复为 key 恒用 horizon 参数 + anchor 经 anchor_horizon 透传（Node PUT 解耦 key 与 entry.horizon）。
+  - D6：`_verify_conditions` 对未来 due 落 insufficient no_data（违反窗口语义）→ 未来 due 跳过；`_verify_horizon`/`_verify_conditions` 到期日当天 K 未出（盘中）→ wait 而非 insufficient（避免被 _should_skip_horizon 拦下永久写死）。
+  - 测试：新增 D5 condition key 回归（data_client）、D6 未来 due 跳过/今日无 K wait 回归；60+26 通过。
+- **cron 前移（commit dda52ea/4bf3e61，2026-09-03 组长裁决）**：review_full `30 20`→`30 18`、板块批量预判 `30 21`→`30 19`（config.py 默认 + scheduler/sector_wind/event_consumers/review 注释 + AGENTS.md 同步）；顺带修 config 存量 E501×4。服务器已 scp 同步并重启（cron 实测 `30 18`/`30 19`）。
+- **最终审查修复（commit d2a1d70，见 `.superpowers/sdd/2026-09-03-dynamic-horizon/task-final-fix-report.md`）**：
+  - A：`apply_horizon_policy` degraded 不再提级原 `insufficient`——大盘入口 LLM 自判 insufficient 保持 insufficient，不升 hypothesis。
+  - B：个股入口 `_stock_prediction_core` 补接 `apply_horizon_policy` 强制层（driver 复用 prompt 注入同值 transient_market），对齐 chat 语义，置于 direction 归一化前。
+  - C：`_extract_driver_for_sector` 文本 fallback 命中 policy/宏观强词收敛上限 `trend_fundamental`（long required→optional），不因大盘政策主因强制板块硬产 long。
+  - D：`OmittedHorizon.reason` model_validator 拒绝空白/纯空格。
+  - E：prompt 收束句（两处）区分 required/optional：required 无法可靠判断 confidence=low；optional 无证据则省略写 omitted_horizons。
+  - 测试：相关 5 套件 105 passed 全绿、ruff 改动文件全绿。
+
+### 说明
+
+- 服务器受控补验（2026-09-03 12:47）：id=34 short 档真实判定回写成功 → `prediction:profile:399006` 首次非空落盘（n=1, hit_rate=1.0）——画像/回流链路打通。
+- 服务器受控补跑（12:51）：真实判定 5 条落库（id=1 hit +0.99 / id=4 hit +10.83 / id=3 miss -1.99 / id=5 miss +2.47 / id=7 miss -4.01，与同事干跑完全吻合）；wait 2 条（id 9/10 窗口未满）。误写 21 档（11 条 sector/review 未来 due + condition 错位）经用户确认 SQL 清理（verification 重置 {}，保留真实判定）。修复后盘中复验：run_once updated=0、无污染。
+- 补漏（13:03）：7 条记录（id 19/25/26/27/29/34/35）因 D5 condition 错位覆盖 short/mid/long 三键被错误置 verified——经用户确认重置 verification={} + status=pending 后修复逻辑重跑：id=34 short/mid 真实判定恢复、condition 走正确 c{i} 键（c0/c1 miss）、VERIFIED_COUNT=0、POLLUTION_SCAN=0。
+- 服务器运维：pm2 清空固化的空 `INSIGHT_REDIS_URL`（delete+重建进程）；本地手工改动（已被远程包含）备份后清理。
+- 待办：服务器 GitHub 出站不稳定，121cbc5 已本地 push 但服务器未 pull 成功（logging.py 已 scp 同步部署）；网络恢复后服务器执行 `git checkout -- src/aistock_agent/observability/logging.py && git pull origin main` 对齐。aab4e92 的 3 个 src 文件已 scp 部署；网络恢复后对 aistock-agent-py 与 aistock-app-api 两仓库 `git checkout -- . && git pull`（注意 app-api 需重新 build）对齐。
+
+---
 
 ## \[changer] 2026-09-03 — 盘中报「午后前瞻」schema 2.1（机会/风险短词契约）
 
