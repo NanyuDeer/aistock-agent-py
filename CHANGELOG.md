@@ -2,6 +2,33 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 修复 3 处既有真缺陷（LLM 判定 ImportError / stdlib logger kwargs / httpx delete json）
+
+**开发者**: Aria
+
+### 修复
+
+- **三处均为仓库既有缺陷，不是本次改造引入**（源自 mypy 存量甄别 A 档，本轮只做「确证级」真 bug）：
+  - **① `services/forward_events.py` `_llm_judge` 调用不存在的 `get_chat_model` → 一执行即 `ImportError`**：`services/llm.py` 只导出 `get_quick_think`/`get_deep_think`，且该 import 在 `try` 之外、兜底接不住，导致「事件预期差 LLM 判定」这条链路从未生效（一直静默走兜底）。改调 `get_quick_think(temperature=0.0)`（轻量三分类判定，T=0 保确定性；调用范式对齐同类实现 `event_scoring_llm`）。
+  - **② `services/forward_events.py` 结构化日志 kwargs 打在 stdlib logger 上 → `TypeError`**：文件用 `logging.getLogger` 却按 structlog 风格传 `logger.warning(..., title=...)`（共 16 处），stdlib `Logger._log()` 不接受任意 kwarg → `warning` 分支必抛，把「单条失败跳过」的容错反成中断整批的炸点；最危险的是 `_llm_judge` 的失败兜底 `forward_events.llm_judge_failed`（缺陷①触发时兜底也会炸）。切 `structlog.get_logger()`，与 `services/` 下 20+ 模块口径一致。
+  - **③ `services/data_client.py` `delete()` 带 body 时传 `json=` 给 httpx `delete()` → `TypeError`（删除路径不可用）**：`httpx.AsyncClient.delete()` 无 `json` 参数，异常被 `delete()` 的宽 `except` 吞掉 → 请求从未发出、恒返回 `None`，「候选 rejected 清场」链路失效。接收端 app-api `DELETE /internal/calendar/events` 读 `req.body`（`internalRouter.ts:94`），故改用 `client.request("DELETE", url, json=body, headers=headers)` 承载 JSON body。
+- **行为变更（重要）**：缺陷①修复后，事件预期差 LLM 判定**从「恒 ImportError、从未生效」变为「真正调用 LLM」**；LLM 失败时兜底（返回 `None`、`宁缺勿猜`）经验证仍能正确接管。
+
+### 验证
+
+- 新增 RED→GREEN 回归测试：`test_llm_judge_uses_existing_model_factory`、`test_seed_post_failure_logs_without_typeerror`、`test_llm_judge_failure_fallback_does_not_raise`（RED = `ImportError` / `TypeError: ...unexpected keyword argument 'title'`）、`test_delete_calendar_event_sends_json_body`（RED = httpx `TypeError` 被吞 → 请求未发出）。
+- 定向 `test_forward_events + test_forward_event_llm + test_data_client_calendar` → **19 passed**。
+- `uv run mypy src` → **290 → 272**（−18：forward_events `call-arg` 16 + data_client `call-arg` 1 + forward_events `attr-defined` 1），**零新增**。
+- `uv run python -m pytest tests/unit -q` → **3437 passed / 9 failed / 1 skipped**（9 条与既有基线同集；通过数 +4 = 本次新增用例）。
+- `uv run ruff check <4 个改动文件>` → **All checks passed!**
+
+### 说明
+
+- 仅修上述 3 处确证缺陷；mypy 存量 B/C 档约 270 条本轮不动。
+- 另发现一处**既有、非本次范围**缺陷（未修，留待跟进）：`data_client.delete_calendar_event` 中 `delete()` 已解包 `data`（返回 `{deleted:...}`），而该函数又读 `result["data"]` → 恒返回 `False`，导致 rejected 清场即便请求成功也不计数。
+
+---
+
 ## [main] 2026-10-06 — 清理存量真问题 ruff 告警 96 条（保留 E501）
 
 **开发者**: Aria

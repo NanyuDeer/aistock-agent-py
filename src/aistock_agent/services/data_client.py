@@ -306,7 +306,9 @@ class NodeApiClient:
             if body is None:
                 resp = await client.delete(url, headers=headers)
             else:
-                resp = await client.delete(url, json=body, headers=headers)
+                # httpx 的 delete() 无 json= 参数（传则 TypeError）；接收端 app-api
+                # DELETE /internal/calendar/events 读 req.body → 用 request() 承载 JSON body。
+                resp = await client.request("DELETE", url, json=body, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
 

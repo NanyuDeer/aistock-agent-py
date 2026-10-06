@@ -1,7 +1,11 @@
 """data_client 日历写删读契约（预期差闭环前置，spec §5.11/裁决 C3）。"""
+import json
+
+import httpx
 import pytest
 
 from aistock_agent.services.data_client import NodeApiClient
+from aistock_agent.services.http_client import HttpClientPool
 
 
 @pytest.mark.asyncio
@@ -35,6 +39,41 @@ async def test_delete_calendar_event(monkeypatch):
     assert ok is True
     assert captured["path"] == "/internal/calendar/events"
     assert captured["body"] == {"event_date": "2026-10-01", "title": "测试事件"}
+
+
+@pytest.mark.asyncio
+async def test_delete_calendar_event_sends_json_body(monkeypatch):
+    """缺陷③回归：带 body 的 DELETE 必须真的发出请求并携带 JSON body。
+
+    httpx.AsyncClient.delete() 没有 json= 参数（RED 时抛 TypeError，被 NodeApiClient.delete
+    的宽泛 except 吞掉 → 请求从未发出、恒返回 False，「候选 rejected 清场」链路不可用）。
+    接收端 app-api DELETE /internal/calendar/events 读 req.body（internalRouter.ts:94），
+    故必须走 client.request("DELETE", ..., json=body) 携带 JSON body。
+    """
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"code": 0, "data": {"deleted": True}})
+
+    real_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def fake_get_client():
+        return real_client
+
+    monkeypatch.setattr(HttpClientPool, "get_client", fake_get_client)
+
+    client = NodeApiClient()
+    try:
+        # 断言：请求真的发出且携带 JSON body（证明不再被 httpx 的 delete() 签名拒绝）。
+        # 注：返回值另有既有缺陷——delete() 已解包 data（返回 {deleted:...}），而
+        # delete_calendar_event 又读 result["data"] → 恒 False；不属本次三处缺陷，未修，见报告。
+        await client.delete_calendar_event("2026-10-01", "测试事件")
+    finally:
+        await real_client.aclose()
+    assert captured.get("method") == "DELETE", "RED：请求从未发出（TypeError 被吞 → 恒返回 False）"
+    assert captured.get("body") == {"event_date": "2026-10-01", "title": "测试事件"}
 
 
 @pytest.mark.asyncio
