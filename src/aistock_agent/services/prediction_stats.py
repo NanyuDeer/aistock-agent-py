@@ -2,6 +2,14 @@
 
 纯函数，不依赖网络/LLM。baseline 来源：验证回写 entry 的 baseline_neutral
 （同窗口恒中性预测命中标记），由验证器在 _verify_horizon 计算（H6 同口径）。
+
+迭代看板三项口径裁决（2026-10-06，防将来重蹈争议）：
+① **`insufficient` 计入 `pending_slots`**（`settled_ratio` 分母）：insufficient 是**数据可用性状态**
+   （数据源故障/无数据），不是对预判对错的**判定结论** → 未产出 hit/miss 即算「未结算」。
+② **`flat_rate` 分母 = 方向预判已结算数**（bullish/bearish 的 hit/miss，**不含 neutral**），
+   不是 `flat + n`：分子分母同为方向预判，才能让 `flat_rate ≈ 1/3` 成为跨粒度「瞎猜基准线」。
+③ **`settled_ratio` 的 scope = 记录声明的档位槽**（非 verification 已存在的 entry）——
+   含「声明了却无 entry」的真 pending；**旧版本已结算档位双排除**（不入分子也不入 pending，口径隔离）。
 """
 
 from math import sqrt
@@ -21,8 +29,10 @@ def wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (round(lo, 4), round(hi, 4))
 
 
-# 当前生产版本（统计默认过滤，防跳变/混桶；版本 4.0 与 validator._METHODOLOGY_VERSION、
-# Node publicRouter.CURRENT_METHODOLOGY_VERSION、backfill 目标版本同步更新）
+# 当前生产版本（统计默认过滤，防跳变/混桶）。
+# 四处同批保持 4.0：本常量 / validator._METHODOLOGY_VERSION /
+# skills.prediction_validation._PROFILE_METHODOLOGY_VERSION / Node publicRouter.CURRENT_METHODOLOGY_VERSION。
+# ⚠️ validator._BACKFILL_METHODOLOGY_VERSION（"2.0"）是**存量回补口径**、独立保持不动，不在此清单。
 _CURRENT_METHODOLOGY_VERSION = "4.0"
 
 
@@ -204,7 +214,7 @@ def hit_rate_summary(
     """汇总已验证档位（仅默认版本的 hit/miss 参与；insufficient/其他版本/approximate/long 剔除）。
 
     target_type 过滤：None=聚合全部（兼容旧调用），"index"/"sector" 只统计该桶（H3 防桶污染）。
-    methodology_version：默认当前生产版本（防跳变）；传 "3.0" 可观测 3.0 分桶（阶段 0）。
+    methodology_version：默认现役版本 4.0（防跳变）；显式传旧版本（如 "3.0"）只作存量分桶观测。
     scope_slots：显式「声明档位槽」（生产由 `_report_stats` 用 record.prediction.horizons 构造，
     含真 pending）；缺省 None → 回退用传入 entries 自身作为槽位集合（纯函数调用）。
     Returns: {n, hits, hit_rate, ci, n_predictions, sufficient_sample,

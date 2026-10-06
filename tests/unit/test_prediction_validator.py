@@ -162,8 +162,8 @@ async def test_run_once_skips_not_due_and_unknown_target():
 
 
 @pytest.mark.asyncio
-async def test_v3_verify_bullish_window_hit_with_grade():
-    """3.0：bullish 档窗口累计 sum>0 → hit；due 当日未命中、窗口无 >=5% → 普通 hit。"""
+async def test_v4_verify_bullish_window_hit_without_grade():
+    """4.0（现役）：bullish 档窗口复利累计 >= index k(0.9201) → hit；单带宽判定不产 grade。"""
     record = _pending_record(due="2026-08-10", direction="bullish")
     kline_rows = [
         {"trade_date": "2026-08-10", "pct_chg": -0.5},  # due 当日（未命中）
@@ -531,8 +531,8 @@ async def test_fetch_kline_window_sector_calls_ths_range():
 
 
 @pytest.mark.asyncio
-async def test_v3_neutral_grade_is_null():
-    """G14：neutral 档不输出 grade（strong_hit 语义与 neutral 方向反转）。"""
+async def test_v4_neutral_grade_is_null():
+    """4.0（现役）：neutral 档复利累计落在带宽内（-k < x < k）→ hit；v4 恒不输出 grade。"""
     record = _pending_record(due="2026-08-10", direction="neutral")
     kline_rows = [
         {"trade_date": "2026-08-10", "pct_chg": 0.2},   # mean(|p|)=0.3 < 0.5 → hit
@@ -834,7 +834,7 @@ def test_result_entry_skips():
     assert _should_skip_horizon(entry) is True
 
 
-# ============ 阶段 0：3.0 窗口累计主判 ============
+# ============ legacy 3.0 窗口累计主判（存量重验口径，非现役主链） ============
 
 def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=None):
     """直接调 _verify_horizon（不经 run_once），mock kline + 今日。"""
@@ -973,7 +973,7 @@ async def test_v3_vs_v2_baseline_neutral_differs():
 
 @pytest.mark.asyncio
 async def test_backfill_no_data_rewrites_keep_v2_version():
-    """阶段 0：backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'（不混版本）。"""
+    """backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'（不混版本）。"""
     record = _verified_no_data_record()
     kline = [
         {"trade_date": "2026-08-10", "pct_chg": 1.0},   # 单日 +1.0%（2.0 any>0 → hit）

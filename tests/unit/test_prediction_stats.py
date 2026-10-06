@@ -65,7 +65,7 @@ def test_hit_rate_summary_default_filters_current_version_only():
 
 
 def test_hit_rate_summary_filters_by_methodology_version():
-    """阶段 0：显式传 methodology_version='3.0' 只统计 3.0 记录（2.0 被隔离，观测通道）。"""
+    """显式传 methodology_version='3.0' 只统计 3.0 存量记录（2.0 被隔离，观测通道）。"""
     entries = [
         _entry("index", "hit", 1, "2.0"),
         _entry("index", "miss", 1, "2.0"),
@@ -78,7 +78,7 @@ def test_hit_rate_summary_filters_by_methodology_version():
 
 
 def test_bucket_summary_filters_by_methodology_version():
-    """阶段 0：bucket_summary 传版本只统计该版本（3.0 桶观测）。"""
+    """bucket_summary 传版本只统计该版本（3.0 存量桶观测）。"""
     entries = [
         _entry("index", "hit", 1, "2.0"),
         _entry("index", "hit", 2, "3.0"),
@@ -91,7 +91,7 @@ def test_bucket_summary_filters_by_methodology_version():
 
 
 def test_baseline_neutral_summary_filters_by_methodology_version():
-    """阶段 0：baseline 同套版本过滤（3.0 记录单独分桶）。"""
+    """baseline 同套版本过滤（3.0 存量记录单独分桶）。"""
     entries = [
         _entry("index", "hit", 1, "2.0"),
         _entry("index", "hit", 2, "3.0"),
@@ -166,8 +166,8 @@ def _v3_entry(result="hit", horizon="short", grade=None, method="3.0",
     return e
 
 
-# 画像针对 run_once 当前写入的 3.0 现役档（_METHODOLOGY_VERSION）；stats 默认 2.0 是
-# 存量统计口径，画像读取/接管需显式传 3.0 才能框住现役已验证档（防混桶）。
+# 画像口径由调用方显式传入 methodology_version；本组用例固定用 "3.0" 作为**存量档**样本
+# 来框定一个稳定分桶（与现役 4.0 主链隔离），仅作纯函数行为验证，不代表现役写入版本。
 _PROFILE_V3 = {"methodology_version": "3.0"}
 
 

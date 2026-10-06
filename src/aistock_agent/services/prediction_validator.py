@@ -1,24 +1,33 @@
 """预测到期验证服务 — 收盘后扫描到期预测，对照实际行情判 hit/miss 并回写。
 
-v2 对照口径（P0 预测验证升级）：
-- 数据源：指数走 /internal/index/:code/kline（Tushare index_daily 历史日 K），
-  不再用当日 /internal/index/quotes 快照。
-- 判定：取 [due, due+3 交易日] 窗口日 K 涨跌幅符号命中主判（bullish 任一日>0→hit，
-  bearish 任一日<0→hit，neutral 任一日 |pct|<0.5%→hit）；无累计净值兜底（G13：bullish/bearish
-  下无符号命中日 ⇒ 累计必不命中，数学死代码）。
-- grade：仅 bullish/bearish 计算（G14）；strong_hit=due 当日命中或窗口内同向 |pct|>=5%，
-  strong_miss=全反向且窗口内反向 |pct|>=5%；neutral 恒不输出 grade。
+现役判定口径（4.0，`_METHODOLOGY_VERSION`）：
+- 数据源：指数走 /internal/index/:code/kline（Tushare index_daily 历史日 K），板块走 ths_daily、
+  个股走 stock kline；不再用当日 /internal/index/quotes 快照。
+- 判定：取 [due, due+3 交易日] 窗口日 K 的**复利累计涨跌幅** x（x = ∏(1+p/100) − 1，唯一口径
+  见 `_compound_pct`），按**单带宽 k** 主判：bullish x >= +k / bearish x <= -k / neutral -k < x < +k；
+  |x| < k（带内噪声、不构成方向性 claim）时 bullish/bearish 记 **miss** 并计入统计 flat_rate。
+- 口径语义：验证的是**到期后 3 个交易日的方向延续性**，不是「档位声明区间内的方向兑现」。
+  k 只按粒度（index / sector / stock）标定、**不按档位细分**（窗口恒为 4 日）；唯一读取入口
+  `k_band_table.k_for(target_type)`，禁止内联或另建一份。
+- grade：4.0 恒不产出（None）；strong_hit / strong_miss 为 legacy v2/v3 语义。
+- long 档：保留 120 交易日定义，但**不计入迭代看板**（仅单独展示命中率，§4.7）。
 - approximate 档（越年近似到期日）显式标记 approximate=True 不进主统计（H2）。
-- 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
 - 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
-- 【已于 2026-10-06 退役】条件化预判两段判定（Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）
+- 版本分桶：entry 带 methodology_version（H1）。**v2("2.0") / v3("3.0") 为存量回补/重验口径，
+  仅 legacy 路径（backfill 或显式传参）可达，非现役主链**；现役主链恒写 4.0。
+- 【已于 2026-10-06 退役】条件化预判两段判定（范围仅 `prediction_records.conditions`：生成侧
+  prompt 不再产出、验证侧 run_once 不再写 `c{i}`；Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）
   ——退役后 run_once 不再调用下列判定链，以下为退役前的历史行为，不再在主链执行：
   ① 到期前 `_scan_condition_met` 条件一成立即点亮 `verification[c{i}].condition_met=true`
   （确定性判定，无 result，**只写 true**）；
   ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true；**对确定性未成立的条件写
   `condition_met=false` + `checked_at`**（到期未成立态，与 true 对称的布尔；无法判定保持键缺失、
   绝不写 null；已点亮 true 显式防御不回退）。
+- 退役后的存活边界（Task 7）：`_scan_condition_met` / `_verify_conditions` 已**无生产调用方、
+  仅单测引用**（待后续独立清理）；`_judge_condition_met_once` / `condition_met_judge` 因存量回溯
+  `backfill_condition_met`（scripts/backfill_condition_met.py，默认 dry-run、需 --execute）而保留；
+  节奏大师的 `branches` **未受影响**（其 met 由节奏报告引擎负责，本验证器从不写入）。
 - 【同为退役历史】条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
   `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
   事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
@@ -73,7 +82,7 @@ _NEUTRAL_PCT_THRESHOLD = 0.5
 _WINDOW_DAYS_AFTER_DUE = 3      # 验证窗口 [due, due+3] 交易日
 _METHODOLOGY_VERSION = "4.0"    # 验证器主链写入版本（4.0 单带宽 k 复利主判；H1 版本分桶）
 # 存量回补目标版本：backfill 只回补 2.0 时代遗留 no_data，用 2.0 口径重验、写 2.0（不混版本）。
-# 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
+# **独立保持 2.0，不参与「四处同批」**（它是存量回补口径，与现役口径版本无关）。
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
 _STRONG_PCT = 5.0              # legacy：v2/v3 grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_range index 分支）
@@ -289,16 +298,17 @@ def _judge_window(
 ) -> tuple[str, str | None]:
     """窗口主判。返回 (result, grade)。
 
-    - v4（"4.0"，当前生产口径）：**单带宽 k**（三方向命中区域互补），x = 复利累计：
+    - v4（"4.0"，**现役主链**口径）：**单带宽 k**（三方向命中区域互补），x = 复利累计：
       bullish hit ⟺ x >= +k；bearish hit ⟺ x <= -k；neutral hit ⟺ -k < x < +k。
       **为什么 |x| < k 时方向预判记 miss**：k 是"横盘噪声带宽"（标定为 |x| 的 1/3 分位），
       带内涨跌与随机噪声不可区分、不足以支撑方向性 claim，故不计命中（统计侧计入 flat_rate）。
       v4 恒不产 grade（None），不再有 strong_hit/strong_miss。
       k 必须显式传入（唯一来源 `k_band_table.k_for`）；k is None → ValueError（fail loud，
       禁止静默回退默认带宽——否则 sector/stock 会用错带宽且无从察觉）。
-    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，历史生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+    - v2（"2.0"，**存量回补**口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，**历史重验**口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
 
+    v2/v3 均为**存量回补/重验**口径（仅 legacy 路径可达），**非现役主链**；现役主链恒走 v4/4.0。
     v2/v3 grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向
     |pct|>=strong_pct；strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。
     neutral 恒 None。
@@ -357,7 +367,7 @@ async def _verify_horizon(
     approximate（越年近似档结构化标记，统计剔除，H2）、
     target_type/matched_*（H8）、threshold_version（sector，H3）、prediction_id（H4）。
     methodology_version 参数：主链默认 _METHODOLOGY_VERSION（4.0）；backfill 传
-    _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量口径不混版本（阶段 0）。
+    _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量回补口径不混版本。
     返回语义（D1/D7）：正常 → hit/miss entry；窗口未满 → {"wait": True}（run_once 收到
     wait 则 continue 不回写，下次再验）；数据源故障/无数据 → insufficient entry（落库可追溯）。
     """
@@ -1080,8 +1090,8 @@ async def backfill_no_data() -> int:
     index 档位按区间重验（D4）。
 
     幂等：仅重验 entry 为 insufficient/no_data 的档位，hit/miss 不回补；sector 回补
-    依赖 resolve，主链路已处理新记录，此处只回补 index。重验沿用存量版本口径
-    （阶段 0：2.0 记录用 2.0 主判、写 2.0，不混入 3.0）。返回成功覆盖回写的档位数。
+    依赖 resolve，主链路已处理新记录，此处只回补 index。重验沿用存量回补口径
+    （2.0 记录用 2.0 主判、写 2.0，不混入现役 4.0）。返回成功覆盖回写的档位数。
     """
     records = await node_api.list_verified_predictions(limit=500)
     updated = 0
