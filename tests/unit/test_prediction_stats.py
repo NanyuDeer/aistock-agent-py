@@ -444,3 +444,50 @@ def test_long_display_counts_hit_miss_only_and_excludes_approximate():
     assert s["long"]["n"] == 2 and s["long"]["hits"] == 1
     assert s["long"]["hit_rate"] == 0.5
     assert s["long_excluded"] is True
+
+
+# ============ Task 5 二轮修复：insufficient 计 pending + 舍入对齐 ============
+
+
+def test_settled_ratio_counts_insufficient_as_pending():
+    """I1 裁决：4.0 的 insufficient **计入 pending_slots**（非双排除）。
+
+    insufficient 是「数据可用性状态」（数据源故障/无数据），不是对预判对错的「判定结论」；
+    settled_ratio 语义 = 预判语料里已被判定的比例，未产出 hit/miss 的档位槽都算未结算。
+    构造 scope = {4.0 hit, 4.0 insufficient} → 1 settled / (1 + 1 pending) = 0.5
+    （若把 insufficient 双排除会得 1.0）。
+    """
+    hit = _h_entry(horizon="short", result="hit")
+    insuff = _h_entry(horizon="mid", result="insufficient")
+    slots = [
+        {"horizon": "short", "target_type": "index", "entry": hit},
+        {"horizon": "mid", "target_type": "index", "entry": insuff},
+    ]
+    s = hit_rate_summary([hit, insuff], scope_slots=slots)
+    assert s["n"] == 1                      # 分子只含 hit（insufficient 非 hit/miss）
+    assert s["settled_ratio"] == 0.5        # 1 settled / (1 settled + 1 insufficient pending)
+
+
+def test_settled_ratio_and_flat_rate_rounded_to_4dp():
+    """M1：settled_ratio / flat_rate 两侧统一舍入到 4 位小数（与 app-api 同值）。
+
+    非整除场景：1/3 不应产出 0.3333333333333333；两侧都必须为 0.3333。
+    """
+    # settled_ratio：1 settled + 2 真 pending = 1/3
+    settled = _h_entry(horizon="short", result="hit")
+    slots = [
+        {"horizon": "short", "target_type": "index", "entry": settled},
+        {"horizon": "mid", "target_type": "index", "entry": None},
+        {"horizon": "mid", "target_type": "index", "entry": None},
+    ]
+    s1 = hit_rate_summary([settled], scope_slots=slots)
+    assert s1["settled_ratio"] == 0.3333
+    # flat_rate：3 方向已结算、1 个 flat = 1/3
+    entries = [
+        _h_entry(horizon="short", result="hit", direction="bullish", flat=True),
+        _h_entry(horizon="mid", result="hit", direction="bearish"),
+        _h_entry(horizon="short", result="miss", direction="bullish"),
+    ]
+    s2 = hit_rate_summary(entries)
+    assert s2["directional_count"] == 3 and s2["flat_count"] == 1
+    assert s2["flat_rate"] == 0.3333

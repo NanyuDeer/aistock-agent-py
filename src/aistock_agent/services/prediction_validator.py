@@ -1514,7 +1514,11 @@ async def _report_stats() -> None:
             if slot_entry is not None and isinstance(slot_entry.get("target_type"), str):
                 slot_tt = slot_entry["target_type"]
             slots.append({"horizon": name, "target_type": slot_tt, "entry": slot_entry})
-    if not entries:
+    # M2：全 pending（有声明档位槽、但没有任何 verification entry）时仍要产出统计——
+    # settled_ratio == 0（分母非 0），与 app-api 口径一致；不得提前 return 导致不产出。
+    # 仅当「既无 entry 也无声明档位槽」时无统计可言（settled_ratio 为 None，分母为 0）。
+    # 该 return 之后只做纯统计与日志（summary/buckets/baseline/logger），空 entries 全部可安全承载。
+    if not entries and not slots:
         return
     summary = hit_rate_summary(entries, scope_slots=slots)
     buckets = bucket_summary(entries, scope_slots=slots)

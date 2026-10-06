@@ -113,6 +113,9 @@ def _settled_ratio(
                 settled += 1
             # else：旧版本已结算 → 口径隔离，分子分母都不进
             continue
+        # 为什么计入 pending：insufficient 等非 hit/miss 是**数据可用性状态**
+        # （数据源故障/无数据），不是对预判对错的**判定结论**；settled_ratio 的语义是
+        # 「预判语料里已被判定的比例」，故未产出 hit/miss 的档位槽都算「未结算」（有意决定）。
         pending += 1
     denom = settled + pending
     return round(settled / denom, 4) if denom else None

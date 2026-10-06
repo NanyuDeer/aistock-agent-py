@@ -2067,3 +2067,39 @@ async def test_verify_horizon_no_flat_marker_for_neutral():
     assert entry["result"] == "hit"       # -k < x < k → neutral hit
     assert "flat" not in entry
     assert entry["direction"] == "neutral"
+
+
+# ============ Task 5 二轮修复：全 pending 时仍产出 settled_ratio == 0 ============
+
+
+@pytest.mark.asyncio
+async def test_report_stats_emits_zero_settled_ratio_when_all_pending() -> None:
+    """M2：有声明档位槽但**没有任何 verification entry**（全 pending）时，`_report_stats`
+    仍产出统计且 settled_ratio == 0；不得提前 return 导致不产出，也不得为 None
+    （None 只在分母为 0——即无任何非-long、非-近似声明档位槽——时使用）。"""
+    record = {
+        "id": 1,
+        "source_type": "market_trace",
+        "source_id": "review:2026-08-01",
+        "prediction": {"horizons": [{"horizon": "short"}, {"horizon": "mid"}]},
+        "verification": {},
+    }
+    captured: dict[str, object] = {}
+
+    def _capture(event: str, **kw: object) -> None:
+        captured["event"] = event
+        captured.update(kw)
+
+    with (
+        patch.object(prediction_validator.node_api, "list_all_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.logger, "info", new=_capture),
+    ):
+        await pv._report_stats()
+    assert captured["event"] == "prediction_stats_summary"
+    buckets = captured["buckets"]
+    assert isinstance(buckets, dict)
+    combined = buckets["combined"]
+    assert isinstance(combined, dict)
+    # 2 个声明的非-long 档位槽、0 个已结算 → 0 / (0 + 2) = 0.0（不是 None）
+    assert combined["settled_ratio"] == 0.0
