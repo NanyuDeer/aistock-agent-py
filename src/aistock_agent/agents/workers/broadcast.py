@@ -30,6 +30,17 @@ def _scheduled_brief_type(state: AgentState) -> Literal["morning", "evening"]:
     return "evening" if state.get("brief_type") == "evening" else "morning"
 
 
+def _report_text(value: object, default: str) -> str:
+    """state.analysis_reports 取值兜底：仅非空字符串直接采用，否则回退 default。
+
+    analysis_reports 的值类型是 object（可能缺键/None/非字符串）。旧写法
+    `dict.get(key, default)` 在「键存在但值为 None/非 str」时会返回该脏值，随后
+    `str.replace(..., None)` 抛 TypeError；这里显式收窄（等价于 `or default` 语义，
+    并额外挡住非 str），既消类型告警又抗未来脏值。
+    """
+    return value if isinstance(value, str) and value else default
+
+
 def _format_evening_brief_for_prompt(report: dict[str, object] | None) -> str:
     """Format valid controlled evening-brief items as prompt facts."""
     unavailable = "晚报事实输入暂不可用；请明确说明当前数据不足以判断。"
@@ -224,31 +235,26 @@ async def run(state: AgentState) -> dict[str, object]:
 
         if scheduled_brief_type == "evening":
             evening_brief = _format_evening_brief_for_prompt(evening_brief_report)
-        else:
-            # 降级到 state.analysis_reports（实时请求或数据库未命中）
-            if not morning_report:
-                morning_report = analysis_reports.get("morning", "暂无晨报")
-            if not wind_leader_report:
-                wind_leader_report = analysis_reports.get("wind_leader", "暂无长线风口分析")
-            if not hot_burst_report:
-                hot_burst_report = analysis_reports.get("hot_burst", "暂无机构调研分析")
-            if not trend_score_report:
-                trend_score_report = analysis_reports.get("trend_score", "暂无趋势股评分分析")
-
-        logger.info(
-            "broadcast_agent_start",
-            report_date=report_date,
-            has_morning=bool(morning_report),
-            has_wind_leader=bool(wind_leader_report),
-            has_hot_burst=bool(hot_burst_report),
-            has_trend_score=bool(trend_score_report),
-        )
-
-        if scheduled_brief_type == "evening":
             prompt = EVENING_BROADCAST_ANALYST_PROMPT.replace("{{EVENING_BRIEF}}", evening_brief)
             user_content = "生成今日收盘播报"
         else:
-            # 构造提示词（占位符替换）
+            # 降级到 state.analysis_reports（实时请求或数据库未命中）
+            if not morning_report:
+                morning_report = _report_text(analysis_reports.get("morning"), "暂无晨报")
+            if not wind_leader_report:
+                wind_leader_report = _report_text(
+                    analysis_reports.get("wind_leader"), "暂无长线风口分析"
+                )
+            if not hot_burst_report:
+                hot_burst_report = _report_text(
+                    analysis_reports.get("hot_burst"), "暂无机构调研分析"
+                )
+            if not trend_score_report:
+                trend_score_report = _report_text(
+                    analysis_reports.get("trend_score"), "暂无趋势股评分分析"
+                )
+            # 构造提示词（占位符替换）。与上方兜底同处一个分支，使类型检查据此把四个
+            # 变量收窄为 str（跨两个 `if scheduled_brief_type` 分支 mypy 无法关联收窄）。
             prompt = BROADCAST_ANALYST_PROMPT.replace(
                 "{{MORNING_BRIEF}}", morning_report
             ).replace(
@@ -259,6 +265,15 @@ async def run(state: AgentState) -> dict[str, object]:
                 "{{TREND_SCORE}}", trend_score_report
             )
             user_content = "生成今日盘前播报"
+
+        logger.info(
+            "broadcast_agent_start",
+            report_date=report_date,
+            has_morning=bool(morning_report),
+            has_wind_leader=bool(wind_leader_report),
+            has_hot_burst=bool(hot_burst_report),
+            has_trend_score=bool(trend_score_report),
+        )
 
         # Step 1: 生成双人对话文本
         llm = get_deep_think()

@@ -37,6 +37,7 @@ from aistock_agent.services.mainline_engine import (
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.services.trend_reversal import detect_trend_reversal
+from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import (
     CALENDAR_MAX_YEAR,
     add_trading_days,
@@ -688,7 +689,11 @@ def _build_rhythm_card(
     }
 
 
-async def run(state: dict[str, object]) -> dict[str, object]:
+async def run(state: AgentState) -> dict[str, object]:
+    """生成并落库节奏大师卡。
+
+    state 为 scheduler 注入的 AgentState（含 refresh_slot/target_date）。
+    """
     try:
         slot = str(state.get("refresh_slot") or "after_close")
         if slot not in REFRESH_SLOTS:

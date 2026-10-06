@@ -2,6 +2,35 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — B 档类型精化批次（晚间链路 payload / final_response / escalate / Literal）+ 六项已核实小修
+
+**开发者**: Aria
+
+### 类型精化
+
+- **组 A（晚间链路 payload 契约化）**：`EventBus` 新增按通道 TypedDict（`ReviewPayload` / `SnapshotPayload` / `ReportPayload` / `ReviewDonePayload`，覆盖 review_quick、review_full、snapshot、iterate、broadcast、review_done 共 6 通道）；发布方以 TypedDict 注解 payload 字面量、消费方在边界 cast 取值，两者共用同一份类型，把隐式契约显式化；`EventBus.publish` 形参由 `dict[str, object]` 放宽为 `Mapping[str, object]` 以接纳 TypedDict（TypedDict 是 Mapping 子类型但不是 dict 子类型）；`ConsumerContext.node_api` 由 `object` 补为 `NodeApiClient`（缺注解导致 `attr-defined`），`_make_consumer_state` 返回 `AgentState`。消 13 arg-type + 2 attr-defined，**逻辑零变化**（`.get` 默认值、缺键降级语义全部保留）。
+- **组 B（`final_response` 统一可空）**：`state/chat_schema.py` 的 `final_response: str` → `str | None`，与 `state/schema.py` 及 `ws.py` 每轮归零的用法对齐；消 `ws.py:709` typeddict-item。已 grep 核实全部读取点均为 `.get()` + 真值判断，无需连带改动，且「还没答完」与「答了但为空」的区分不受影响。
+- **组 C（escalate worker 统一形态）**：删除 `WorkerHandle` Protocol 与 `getattr(worker, "run", None) or worker` 双形态 shim（生产恒为裸函数、`.run` 仅出现在测试 mock），`ESCALATION_MAP` 统一为 `dict[str, Callable[[AgentState], Awaitable[dict[str, object]]]]`；同步把 `tests/unit/test_escalate.py` 的 `.run` mock 改为裸 `AsyncMock`。消 3 dict-item + 1 operator。
+- **组 D（5 处 Literal 收窄，纯类型精化、零运行风险）**：`chat_contract.py` 抽 `InsightIntent` / `ChatSourceKind` 别名并复用（`InsightGoal.intent`、`SkillCall.skill_name`、`ChatSource.kind`）；`skills/adapters.py` 的 `_TOOL_SOURCE_KIND` / `_DEFAULT_SOURCE_KIND` 标 `ChatSourceKind`；`qa_router.py` 的 `intent_map` 值标 `InsightIntent`（并删除失效的 `# type: ignore[index]`）；`rhythm_rebuilt_evidence.py` 的 `_STAGE_POSITION` 升级为 `dict[Stage, PositionBand]`；`sentiment_temp.py` 的 `prev_phase` 标 `Phase | None`（集合守卫后 cast）；`routes.py` 的 `brief_type` 成员守卫后 cast `BriefType`。
+
+### 修复（已核实小修）
+
+- **`main.py`**：`from_url` 结果先落局部变量再传 `StockTraceConsumer`，消声明宽度导致的 `Redis | None` 误报（**非运行时缺陷**；不放宽 `StockTraceConsumer` 签名）。
+- **`agents/workers/broadcast.py`**：新增 `_report_text` 显式收窄 `analysis_reports` 的 `object` 取值（旧 `.get(k, default)` 在「键存在但值为 None/非 str」时返回脏值 → `str.replace(..., None)` 抛 `TypeError`；当前无写入方写 None，属理论风险，本次一并防御），并合并两处 `if scheduled_brief_type` 分支使类型收窄成立。消 8 条。
+- **`agents/workers/rhythm_master.py` + `services/rhythm_engine.py` / `services/trend_reversal.py`**：按 engine **真实契约**把 `build_technical_branches` 的 `highs/lows`、`detect_trend_reversal` 的 `opens/highs/lows` 形参放宽为 `list[float | None]`（engine 内部已过滤 None / highs/lows 仅参与 zip 保持列对齐）。**未在构造处过滤 None**——那会破坏 zip 列对齐、静默错位。消 5 条。
+- **`state/chat_schema.py`**：删除 6 处 TypedDict 字段的 `= None` 默认值（该 TypedDict 为 `total=False`，键本就可缺省，`X | None` 已表达值可空；TypedDict 默认值运行期被忽略）。消 6 条 misc。
+- **`state/schema.py` + `rhythm_master.run`**：`AgentState` 补运行期注入的约定键 `refresh_slot` / `target_date`，并使 `rhythm_master.run` 形参对齐 `AgentState`。消 `scheduler.py` 557/559/561 共 3 条。
+- **`services/stock_basic_index.py`**：改为 `for row in (rows or [])`，显式表达既有的「None → 降级为空索引」语义（不改变降级行为，仅去除对异常的隐式依赖）。
+- **`services/prediction_service.py`**：`_build_prediction_llm` 返回注解由 `object` 修正为 `ChatOpenAI`（照 `llm.py` 真实返回）。消 4 条。
+
+### 验证
+
+- `uv run python -m pytest tests/unit -q` → **3439 passed / 9 failed / 1 skipped**（9 条与既有基线同集：`test_industry_vector_search` ×6 + `test_scheduler` ×3）；定向 `test_escalate.py` → **9 passed**。
+- `uv run mypy src` → **270 → 215**（−55，零新增）。
+- `uv run ruff check <改动文件>` → 仅剩**既有** E501（`qa_router.py` 269/588，非本次引入）；本次新代码无告警。
+
+---
+
 ## [main] 2026-10-06 — 修复最后一处「stdlib logger 传 kwargs」缺陷（report_parser）
 
 **开发者**: Aria
