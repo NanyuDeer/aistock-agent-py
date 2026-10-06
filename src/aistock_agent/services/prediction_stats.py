@@ -150,6 +150,67 @@ def _long_entries(
     ]
 
 
+# 迭代看板下钻维度（§8-3：「粒度 × 方向 × 档位」）
+_DIRECTIONS = ("bullish", "bearish", "neutral")
+_ITERATION_HORIZONS = ("short", "mid")
+
+
+def _bucket_metrics(entries: list[dict[str, object]]) -> dict[str, object]:
+    """给定一组 entry → 命中率子桶摘要（方向桶 / 档位桶复用的唯一聚合实现）。
+
+    调用方负责先按统一口径过滤（当前版本 + hit/miss + 非近似；迭代桶再排除 long）。
+    - n = 已结算数；无样本时 ``hit_rate=None``（**不用 0**，与 app-api 同口径）；
+    - ``sufficient_sample`` 沿用既有阈值 ``n >= 30``；
+    - ``flat_rate`` 分母 = 该组内**方向预判已结算数**（bullish/bearish；无方向样本 → None）。
+    """
+    n = len(entries)
+    hits = sum(1 for e in entries if e.get("result") == "hit")
+    directional = [e for e in entries if e.get("direction") in {"bullish", "bearish"}]
+    flat_count = sum(1 for e in directional if e.get("flat") is True)
+    directional_count = len(directional)
+    return {
+        "n": n,
+        "hits": hits,
+        "hit_rate": round(hits / n, 4) if n else None,
+        "sufficient_sample": n >= 30,
+        "flat_rate": round(flat_count / directional_count, 4) if directional_count else None,
+        "flat_count": flat_count,
+        "directional_count": directional_count,
+    }
+
+
+def _dimension_buckets(
+    entries: list[dict[str, object]],
+    methodology_version: str,
+    target_type: str | None = None,
+) -> dict[str, object]:
+    """方向桶 + 档位桶（与主桶逐条同口径：当前版本 + hit/miss + 非近似）。
+
+    - ``direction_buckets``：bullish / bearish / neutral 各一桶；每个方向桶带 ``flat_rate``
+      （分母 = **该方向已结算数**，用于回答「看多方向是否特别容易落在无信息带」）。
+      方向桶不纳入 long（long 不进迭代看板）。
+    - ``horizon_buckets``：short / mid / long 各一桶；long 单列并显式标注
+      ``iteration_board=False``（§4.7：不参与迭代判读，与既有 ``long`` 字段口径一致）。
+    """
+    settled = _filter_v2(entries, target_type, methodology_version)  # 非 long 已结算
+    direction_buckets = {
+        d: _bucket_metrics([e for e in settled if e.get("direction") == d])
+        for d in _DIRECTIONS
+    }
+    horizon_buckets: dict[str, object] = {
+        h: _bucket_metrics([e for e in settled if e.get("horizon") == h])
+        for h in _ITERATION_HORIZONS
+    }
+    long_settled = [
+        e for e in _long_entries(entries, target_type, methodology_version)
+        if e.get("result") in {"hit", "miss"}
+    ]
+    long_bucket = _bucket_metrics(long_settled)
+    long_bucket["iteration_board"] = False  # 显式标注：long 不参与迭代判读
+    horizon_buckets["long"] = long_bucket
+    return {"direction_buckets": direction_buckets, "horizon_buckets": horizon_buckets}
+
+
 def _summary(
     entries: list[dict[str, object]],
     scope_slots: list[dict[str, object]] | None = None,
@@ -219,14 +280,17 @@ def hit_rate_summary(
     含真 pending）；缺省 None → 回退用传入 entries 自身作为槽位集合（纯函数调用）。
     Returns: {n, hits, hit_rate, ci, n_predictions, sufficient_sample,
               settled_ratio, flat_rate, flat_count, directional_count, long_excluded, long}
+              + direction_buckets / horizon_buckets（§8-3 方向 × 档位下钻；同口径）
     """
     slots = scope_slots if scope_slots is not None else _slots_from_entries(entries, target_type)
-    return _summary(
+    summary = _summary(
         _filter_v2(entries, target_type, methodology_version),
         scope_slots=slots,
         long_entries=_long_entries(entries, target_type, methodology_version),
         methodology_version=methodology_version,
     )
+    summary.update(_dimension_buckets(entries, methodology_version, target_type))
+    return summary
 
 
 def bucket_summary(
@@ -238,29 +302,26 @@ def bucket_summary(
     """三桶：combined 仅描述性；index/sector 各自判定 sufficient_sample（H3 防桶污染）。
 
     long 档同口径排除；每桶含 settled_ratio / flat_rate / flat_count / directional_count /
-    long_excluded / long（与 hit_rate_summary 对齐）。
+    long_excluded / long（与 hit_rate_summary 对齐），并补 direction_buckets / horizon_buckets
+    （按该 target_type 桶切分，§8-3）。
     scope_slots：与 hit_rate_summary 同义的显式声明档位槽（生产传入；缺省回退 entries）。
     """
     slots = scope_slots if scope_slots is not None else _slots_from_entries(entries, None)
+
+    def build(target_type: str | None) -> dict[str, object]:
+        bucket = _summary(
+            _filter_v2(entries, target_type, methodology_version),
+            scope_slots=_bucket_slots(slots, target_type),
+            long_entries=_long_entries(entries, target_type, methodology_version),
+            methodology_version=methodology_version,
+        )
+        bucket.update(_dimension_buckets(entries, methodology_version, target_type))
+        return bucket
+
     return {
-        "combined": _summary(
-            _filter_v2(entries, None, methodology_version),
-            scope_slots=_bucket_slots(slots, None),
-            long_entries=_long_entries(entries, None, methodology_version),
-            methodology_version=methodology_version,
-        ),
-        "index": _summary(
-            _filter_v2(entries, "index", methodology_version),
-            scope_slots=_bucket_slots(slots, "index"),
-            long_entries=_long_entries(entries, "index", methodology_version),
-            methodology_version=methodology_version,
-        ),
-        "sector": _summary(
-            _filter_v2(entries, "sector", methodology_version),
-            scope_slots=_bucket_slots(slots, "sector"),
-            long_entries=_long_entries(entries, "sector", methodology_version),
-            methodology_version=methodology_version,
-        ),
+        "combined": build(None),
+        "index": build("index"),
+        "sector": build("sector"),
     }
 
 

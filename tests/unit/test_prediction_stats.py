@@ -491,3 +491,123 @@ def test_settled_ratio_and_flat_rate_rounded_to_4dp():
     s2 = hit_rate_summary(entries)
     assert s2["directional_count"] == 3 and s2["flat_count"] == 1
     assert s2["flat_rate"] == 0.3333
+
+
+# ============ 迭代看板补桶：方向桶 × 档位桶（§8-3） ============
+
+
+def test_direction_buckets_split_and_differ_from_combined():
+    """方向桶：bullish/bearish/neutral 各一桶，命中率与整体桶不同且各自正确。
+
+    bullish 全 hit、bearish 全 miss → 两桶 hit_rate 分别为 1.0 / 0.0，combined = 0.5。
+    """
+    entries = [
+        _h_entry(direction="bullish", result="hit"),
+        _h_entry(direction="bullish", result="hit"),
+        _h_entry(direction="bearish", result="miss"),
+        _h_entry(direction="bearish", result="miss"),
+    ]
+    s = hit_rate_summary(entries)
+    d = s["direction_buckets"]
+    assert set(d) == {"bullish", "bearish", "neutral"}
+    assert d["bullish"]["n"] == 2 and d["bullish"]["hits"] == 2
+    assert d["bullish"]["hit_rate"] == 1.0
+    assert d["bearish"]["n"] == 2 and d["bearish"]["hits"] == 0
+    assert d["bearish"]["hit_rate"] == 0.0
+    assert s["hit_rate"] == 0.5                       # 整体桶 2/4
+    assert d["bullish"]["hit_rate"] != s["hit_rate"]  # 与整体桶不同
+
+
+def test_direction_bucket_flat_rate_uses_that_direction_denominator():
+    """方向桶 flat_rate 分母 = **该方向已结算数**（不是整体数）。
+
+    bullish：2 已结算、1 flat → 0.5；bearish：2 已结算、0 flat → 0.0；
+    整体 flat_rate = 1/4 = 0.25（与 bullish 桶不同，锁死分母口径）。
+    """
+    entries = [
+        _h_entry(direction="bullish", result="hit", flat=True),
+        _h_entry(direction="bullish", result="hit"),
+        _h_entry(direction="bearish", result="miss"),
+        _h_entry(direction="bearish", result="miss"),
+    ]
+    s = hit_rate_summary(entries)
+    d = s["direction_buckets"]
+    assert d["bullish"]["flat_count"] == 1 and d["bullish"]["directional_count"] == 2
+    assert d["bullish"]["flat_rate"] == 0.5
+    assert d["bearish"]["flat_count"] == 0 and d["bearish"]["flat_rate"] == 0.0
+    assert s["flat_rate"] == 0.25                 # 整体 1/4，≠ bullish 桶 0.5
+    assert d["bullish"]["flat_rate"] != s["flat_rate"]
+
+
+def test_direction_bucket_no_sample_is_none_and_neutral_flat_rate_none():
+    """某方向无样本 → n=0、hit_rate=None（不用 0）/ sufficient_sample=False；neutral 无方向 → flat_rate=None。"""
+    entries = [_h_entry(direction="bullish", result="hit")]
+    s = hit_rate_summary(entries)
+    for d in ("bearish", "neutral"):
+        assert s["direction_buckets"][d]["n"] == 0
+        assert s["direction_buckets"][d]["hit_rate"] is None
+        assert s["direction_buckets"][d]["sufficient_sample"] is False
+    # neutral 桶无方向预判 → flat_rate None（分母为 0，不产出 0）
+    assert s["direction_buckets"]["neutral"]["flat_rate"] is None
+    assert s["direction_buckets"]["neutral"]["directional_count"] == 0
+
+
+def test_horizon_buckets_split_and_long_marked_not_iteration():
+    """档位桶：short/mid/long 各一桶；long 显式标注 iteration_board=False（不参与迭代判读）。"""
+    entries = [
+        _h_entry(horizon="short", result="hit"),
+        _h_entry(horizon="short", result="miss"),
+        _h_entry(horizon="mid", result="hit"),
+        _h_entry(horizon="long", result="hit"),
+        _h_entry(horizon="long", result="miss"),
+    ]
+    s = hit_rate_summary(entries)
+    h = s["horizon_buckets"]
+    assert h["short"]["n"] == 2 and h["short"]["hit_rate"] == 0.5
+    assert h["mid"]["n"] == 1 and h["mid"]["hit_rate"] == 1.0
+    assert h["long"]["n"] == 2 and h["long"]["hit_rate"] == 0.5   # long 单列（hit/miss）
+    assert h["long"]["iteration_board"] is False                  # 显式标注不参与迭代判读
+    # short/mid 属迭代看板；long 不计入主桶
+    assert "iteration_board" not in h["short"]
+    assert s["n"] == 3                                            # 主桶不含 long
+
+
+def test_horizon_bucket_no_sample_is_none():
+    """档位桶无样本 → n=0、hit_rate=None（不用 0），与 app-api 同口径。"""
+    s = hit_rate_summary([_h_entry(horizon="short", result="hit")])
+    for h in ("mid", "long"):
+        assert s["horizon_buckets"][h]["n"] == 0
+        assert s["horizon_buckets"][h]["hit_rate"] is None
+
+
+def test_new_buckets_exclude_approximate_old_version_and_long():
+    """approximate / 旧版本 entry 不进任何新桶（方向桶 + 档位桶）；long 不进方向桶。"""
+    entries = [
+        _h_entry(direction="bullish", result="hit", horizon="short"),
+        _h_entry(direction="bullish", result="hit", horizon="short", approximate=True),
+        _h_entry(direction="bearish", result="miss", horizon="mid", methodology_version="3.0"),
+        _h_entry(direction="bullish", result="hit", horizon="long"),
+    ]
+    s = hit_rate_summary(entries)
+    d = s["direction_buckets"]
+    h = s["horizon_buckets"]
+    assert d["bullish"]["n"] == 1 and d["bullish"]["hits"] == 1   # 近似档被排除
+    assert d["bearish"]["n"] == 0                                 # 旧版本被排除
+    assert h["short"]["n"] == 1                                   # 近似档被排除
+    assert h["mid"]["n"] == 0                                     # 旧版本被排除
+    assert h["long"]["n"] == 1                                    # long 单列（仅此一处）
+
+
+def test_bucket_summary_includes_direction_and_horizon_buckets():
+    """bucket_summary 的 index/sector 桶各自补方向桶 + 档位桶（按桶口径切分）。"""
+    entries = [
+        _h_entry(target_type="index", direction="bullish", result="hit", horizon="short"),
+        _h_entry(target_type="sector", direction="bearish", result="miss", horizon="mid"),
+    ]
+    b = bucket_summary(entries)
+    assert b["index"]["direction_buckets"]["bullish"]["n"] == 1
+    assert b["index"]["direction_buckets"]["bearish"]["n"] == 0
+    assert b["sector"]["direction_buckets"]["bearish"]["n"] == 1
+    assert b["sector"]["horizon_buckets"]["mid"]["n"] == 1
+    assert b["sector"]["horizon_buckets"]["short"]["n"] == 0
+    assert b["combined"]["direction_buckets"]["bullish"]["n"] == 1

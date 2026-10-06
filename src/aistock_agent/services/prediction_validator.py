@@ -294,7 +294,7 @@ def _judge_window(
     strong_pct: float = _STRONG_PCT,
     methodology_version: str = _METHODOLOGY_VERSION,
     *,
-    k: float | None = None,
+    k: float | None = None,  # 4.0 调用方**必须显式传入** k（唯一来源 k_band_table.k_for）；k is None → ValueError
 ) -> tuple[str, str | None]:
     """窗口主判。返回 (result, grade)。
 
