@@ -6,6 +6,7 @@ run_event_analysis_pipeline`（运行期取源模块属性），monkeypatch 必�
 `_mark_conduction_triggered` 必须 patch 防真实 Redis 写入。
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -162,3 +163,187 @@ async def test_scrape_intraday_backfills_app_ids_before_conduction(monkeypatch):
     passed = mock_spawn.call_args.args[0]
     assert passed[0]["app_event_id"] == "EVT-0001"
     assert passed[0]["app_event_status"] == "scheduled"
+
+
+def _major_event(app_event_id=None, app_event_status=None) -> dict[str, object]:
+    """构造满足 is_major_event 的 EventRecord 形状 dict（内容复用既有 major 样例）。"""
+    return {
+        "event_id": "2026-09-15-abcdef1234567890",
+        "title": "华为将于 2026-09-23 发布新品",
+        "summary": "",
+        "url": "",
+        "impact_score": 5,
+        "direction": "unknown",
+        "involved_keywords": [],
+        "source": "calendar",
+        "source_level": "A",
+        "content_hash": "abcdef1234567890",
+        "scrape_at": "2026-09-15 08:00:00",
+        "score_date": "2026-09-15",
+        "payload": {},
+        "symbol": "",
+        "stock_name": "",
+        "industry": "",
+        "event_scope": "UNKNOWN",
+        "event_scope_source": "rule",
+        "event_scope_confidence": 0.0,
+        "app_event_id": app_event_id,
+        "app_event_status": app_event_status,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_persists_app_event_id_into_event_store(monkeypatch):
+    """缺陷A：物化先于落库，落库 content 的 events 声明权威 app_event_id。
+
+    走**真实** save_event_scrape（仅 patch node_api 捕获入参，不做整函数替换），
+    断言写进事件库(content)里的那条事件带 app_event_id/app_event_status，
+    而不是只在内存 added_events 回填——否则「从事件库重放再传导」拿不到权威 id，
+    时间线 occurred 准入会因两侧 id 不等静默丢弃该事件。修复前此断言必须失败。
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from aistock_agent.config import settings
+    from aistock_agent.services.event_scraper import scrape_intraday
+
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    # 模拟真实 node_api：在调用时刻就把 content 序列化为 JSON 快照（而非持有
+    # dict 引用）。否则物化后原地回填会"穿透"引用让修复前误通过；只有物化
+    # 先于落库，快照才含权威 id（这才是缺陷A的真实判定点）。
+    captured_content: dict[str, object] = {}
+
+    async def fake_save(**kwargs: object) -> dict[str, str]:
+        captured_content["value"] = json.loads(json.dumps(kwargs["content"]))
+        return {"id": "r1"}
+
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[_major_event()]),
+    ), patch(
+        "aistock_agent.services.event_store.node_api",
+    ) as mock_api, patch(
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001", "event_status": "occurred"}),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        # save_event_scrape 内部先读当日已有（空库 → 空列表）再合并落库
+        mock_api.get_analysis_report_quiet = AsyncMock(return_value=None)
+        mock_api.save_analysis_report = fake_save
+        await scrape_intraday("2026-09-15")
+
+    store_events = captured_content["value"]["events"]
+    assert len(store_events) == 1
+    assert store_events[0]["app_event_id"] == "EVT-0001"
+    assert store_events[0]["app_event_status"] == "occurred"
+    # 传导仍触发，且传导收到的就是同一批已回填对象（权威 id 进入 payload）
+    mock_spawn.assert_called_once()
+    passed = mock_spawn.call_args.args[0]
+    assert passed[0]["app_event_id"] == "EVT-0001"
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_persists_app_event_id_into_event_store(monkeypatch):
+    """缺陷A（full_daily 同构回归）：物化先于落库，落库 content 的 events 声明权威 app_event_id。
+
+    与 `test_scrape_intraday_persists_app_event_id_into_event_store` 完全同构：
+    走**真实** save_event_scrape（仅 patch node_api 捕获入参）、只 patch
+    `_materialize_event_entity` 返回权威 id、并以 JSON 快照捕获 content（物化在
+    落库前的判定点）。full_daily 分支曾可能因物化错位而漏写权威 id，
+    此用例保证 full_daily 与 intraday 行为一致，避免该分支再次错位无人拦截。
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from aistock_agent.config import settings
+    from aistock_agent.services.event_scraper import scrape_full_daily
+
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    captured_content: dict[str, object] = {}
+
+    async def fake_save(**kwargs: object) -> dict[str, str]:
+        captured_content["value"] = json.loads(json.dumps(kwargs["content"]))
+        return {"id": "r1"}
+
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[_major_event()]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scraper.forward_event_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.node_api",
+    ) as mock_api, patch(
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001", "event_status": "occurred"}),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        mock_api.get_analysis_report_quiet = AsyncMock(return_value=None)
+        mock_api.save_analysis_report = fake_save
+        await scrape_full_daily("2026-09-15")
+
+    store_events = captured_content["value"]["events"]
+    assert len(store_events) == 1
+    assert store_events[0]["app_event_id"] == "EVT-0001"
+    assert store_events[0]["app_event_status"] == "occurred"
+    # 传导仍触发，且传导收到的就是同一批已回填对象（权威 id 进入 payload）
+    mock_spawn.assert_called_once()
+    passed = mock_spawn.call_args.args[0]
+    assert passed[0]["app_event_id"] == "EVT-0001"
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_switch_off_skips_materialize_but_conduces(monkeypatch):
+    """开关关闭：物化 helper 短路（不调用 _materialize_event_entity）、
+    落库不含 app_event_id、传导仍触发（旧路径逐字节不变）。"""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from aistock_agent.config import settings
+    from aistock_agent.services.event_scraper import scrape_intraday
+
+    monkeypatch.setattr(settings, "event_entity_enabled", False)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[_major_event()]),
+    ), patch(
+        "aistock_agent.services.event_store.node_api",
+    ) as mock_api, patch(
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001", "event_status": "occurred"}),
+    ) as mock_materialize, patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        mock_api.get_analysis_report_quiet = AsyncMock(return_value=None)
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        await scrape_intraday("2026-09-15")
+
+    mock_materialize.assert_not_awaited()
+    # 开关关闭：app 字段保持 None（未被物化回填）。注意键恒存在（normalize_event
+    # 的 EventRecord 恒声明 app_event_id/app_event_status=None），因此断言值而非键。
+    call_kwargs = mock_api.save_analysis_report.call_args.kwargs
+    store_events = call_kwargs["content"]["events"]
+    assert store_events[0].get("app_event_id") is None
+    assert store_events[0].get("app_event_status") is None
+    # 开关关闭不影响传导触发（旧路径逐字节不变）
+    mock_spawn.assert_called_once()

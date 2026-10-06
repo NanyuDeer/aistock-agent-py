@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped
 from aistock_agent.config import settings
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.impact_sectors_precompute import run_impact_sectors_precompute
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.brief_contract import (
     build_iterate_brief_summary,
@@ -147,6 +148,20 @@ def start_scheduler() -> None:
         kwargs={"scrape_mode": "full_daily"},
         id="event_scrape_close",
         name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 未来事件影响板块预计算（时间线 impact_sectors，2026-09-24）：每日 07:00
+    # 在 app-api Calendar 物化 cron（06:40）之后运行，对 calendar 未来事件做
+    # 行业向量（KG 语义）匹配 Top3 写回；无可靠行业保持 []（不 LLM 强猜）
+    scheduler.add_job(
+        run_impact_sectors_precompute,
+        CronTrigger.from_crontab(
+            settings.scheduler_impact_sectors_precompute_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="impact_sectors_precompute",
+        name="impact sectors precompute (future calendar events)",
         replace_existing=True,
         misfire_grace_time=3600,
     )

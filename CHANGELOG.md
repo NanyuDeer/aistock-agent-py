@@ -16,6 +16,129 @@
 
 ---
 
+## [main] 2026-10-06 — 个股情报入环 P2：个股粒度首次进入验证环
+
+**开发者**: Aria
+
+### 新增
+
+- **端点** `POST /api/agent/internal/predictions/from-stock-info`（`api/routes.py`）：接收个股情报（`symbol`/`stock_name`/`published_date`/`ai_impact`/`ai_horizon`/`ai_summary`/`url`），确定性映射为 `PredictionResult` 后落 `prediction_records`（`source_type='stock_info'`、`source_id=stock_info:{symbol}:{published_date}`）。校验内部令牌；门槛未达/输入非法 → 200 `skipped`（带机器可读 `reason_code`）；同 `source_id` 已验证 → 409 拒覆盖；落库失败或其它意外异常 → 502。
+- **模块** `services/stock_info_prediction.py`：个股情报 → `PredictionResult` 的**确定性映射**（不调 LLM、不发网络），含**全系统唯一的入环门槛判定点**（重大利好/重大利空恒入环；利好/利空仅中期/中长期/长期入环；中性不入环）。`conditions` 恒空、`horizons` 恒 1 档、`prediction_status` 恒 `hypothesis`；`evolution_narrative`/`attribution_summary` 为 `ai_summary` 逐字原文。
+- `services/data_client.py`：新增 `list_predictions_strict(source_id)`（查询失败抛错，而非折叠为空列表）。
+
+### 修复
+
+- 落库失败（`save_prediction` 吞异常返回 `None`）此前报成 `200 saved` 假成功 → 改判 `502`。
+- `skipped` 语义混淆（门槛未达 / 输入非法 / 取值无法映射同码）→ 新增 `reason_code` 区分，供调用方只对「门槛未达」静默。
+- 409「已验证拒覆盖」防线在 `list_predictions` 查询失败时被静默绕过（失败被折叠为空列表）→ 改走 strict 入口 **fail-closed**，拒绝落库以免已验证记录正文被覆盖。
+
+### 验证
+
+- `pytest tests/ -q` = `32 failed / 3889 passed / 4 skipped`，失败集与基线（`32 failed / 3877 passed`）一致 → **新增失败 0**（+12 为本次新增用例）；`ruff check src/` = 65（基线 65）；`mypy src/` = 297（基线 297）→ 新增 0。
+- 新增/扩展单测：`tests/unit/test_stock_info_prediction.py`、`test_stock_info_prediction_route.py`、`test_data_client_prediction.py`。
+
+### 说明
+
+- `due_dates` 复用既有 `_compute_due_dates`（与 index/sector 保持单一口径，不新增第二套交易日历）；未改动 `prediction_validator` / `_METHODOLOGY_VERSION` / 阈值 / 表结构。
+- **尚未部署**。验收需部署后**次日 16:00 后**执行（P2-V1~V4/V6/V7）；`short` 档到期 = `published_date` + 5 交易日，**在此之前不得宣称「个股已入验证环闭环」**。
+
+---
+
+## [main] 2026-10-06 — 准确性体检：review 404 噪音修复（fix6）+ 历史事件 DateWindow 补置 + 断链①复核
+
+**开发者**: Aria
+
+### 修复
+
+- `agents/workers/review.py`：quick 覆盖检查由 `node_api.get_analysis_report(...)` 改为 `get_analysis_report_quiet(...)`——quick 先于 full 生成时报告不存在（404）属常态，此前每次落 error 噪音；已在服务器部署并 `pm2 restart aistock-agent`，噪音消除。
+
+### 新增（运维脚本）
+
+- `scripts/backfill_event_entities_0924_1006.py`：对 2026-09-24 ~ 2026-09-30 历史政策事件按 DateWindow 补置资讯并幂等 upsert（`canonical_event_key` 冲突更新）。8 条 **8/8 成功**、重跑返回相同 `EVT-*`；L2 与检索结果**零差异**（时点/工具名/金额/利率全对）。
+
+### 复核结论（非代码 bug，附证留档）
+
+- **断链①「已到期未验证」**：以真实取值函数 `_verify_horizon` 精确定量——`pending_total=178` 中 63=窗口未满的合法等待、38=已回写仅等 long 档、**仅 18 条真滞后**（全为 `sector_prediction`/short/到期 09-24）；根因为板块日线 16:00 尚未入库 + 国庆长假断档。手动 `run_once()` → `updated=71`，复核 `truly_missing=0`。原报告「漏验 65 条」属高估，已纠正。
+- **「市场洞见每天都证据不足」**：`attribution_status=hypothesis` 时系统强制清空 `primary_chain_id` 并把 supported 降级 weak → `primaryCause` 恒 null。属**证据门槛错配**（非崩溃、非数据缺失），改由 App 前端展示口径解决。
+
+---
+
+## [xusiyun] 2026-10-02 — 重大事件时间线物化 id 全链路修复（物化先于落库 + 重放透传）
+
+**开发者**: xusiyun
+
+### 修复
+
+- **物化先于落库**（`services/event_scraper.py`）：抽出 `_materialize_events(events)`（开关内短路、失败只置 `event_entity_unfilled` 不阻断主链路），`scrape_full_daily` / `scrape_intraday` 改为在 `save_event_scrape` **之前**物化本批重大事件，使权威 `app_event_id` / `app_event_status` 随事件库 content 一并持久化。此前「先落库、后物化」导致 id 只写内存、**从不落库**：任何「从事件库重读再传导」的路径（晨报 I4 兜底、缓存命中重放）都拿不到权威 id，传导报告退回 `evt_md5` 键，而 app-api 时间线的 occurred 准入要求 `agent_analysis_reports.user_id == event_entities.event_id` → 该事件被静默丢弃（症状：事件传导列表有、时间线没有）。物化作用于整批（幂等 upsert 不产生重复实体），顺带覆盖「已入库但当时未物化」的补漏；`_spawn_conduction` 守卫语义不变（同一批对象、`added>0` 才传导）。
+- **重放透传权威 id**（`agents/workers/morning.py`）：`_event_records_to_major_events` 从事件库重放时条件透传 `app_event_id` / `app_event_status`（非空才落键，与 `_trigger_conduction` 同款，`major_events` 形状向后兼容）。
+- **重放保留来源名**（`services/event_store.py`）：`load_event_scrape` 构造 `EventRecord` 时补 `source_name`（有值保留、缺省 None），修掉「从事件库重读再传导」丢媒体名 → LLM 判不出媒体 → 前端恒显示「未知来源」的同族缺陷（2026-09-24 `source_name` 透传只覆盖了同批路径）。
+- **`_safe_float` 消除 mypy strict 告警**（`services/event_store.py`）：`float(object)` → 先按 JSON 标量窄化（int/float 直转，其余走 `str` 兜底解析），实现对齐同包 `global_importance_evaluation._safe_float`；数字字符串 / 可字符串化数值对象仍可转，None/畸形结构/非数值串回落默认值（契约由 `test_safe_float_contract` 锁定）。修复后 `mypy event_scraper.py event_store.py morning.py` 三文件 **0 error**。
+
+### 改进
+
+- `services/event_store.py`：`EventRecord` 加性声明 `event_entity_unfilled: NotRequired[bool]`（stdlib `typing`，Python ≥3.11；仅写不读的排查标记，构造时无需提供）。
+
+### 测试
+
+- `tests/integration/test_event_scraper_conduction_payload.py` 新增 `test_scrape_intraday_persists_app_event_id_into_event_store`、`test_scrape_full_daily_persists_app_event_id_into_event_store`、`test_scrape_intraday_switch_off_skips_materialize_but_conduces`（走真实 `save_event_scrape`，用 JSON 快照捕获落库 content —— 修复前必失败）。
+- `tests/unit/test_morning_event_store_integration.py` 新增「透传 id/status」与「缺省不落键」两例。
+- `tests/unit/test_event_scraper.py`、`tests/unit/test_event_scraper_conduction.py` 共 7 个既有用例补 `_materialize_event_entity` 隔离 patch（防测试打真实 HTTP）。
+- `tests/unit/test_event_store.py` 新增「重放必须保留 `source_name`」与 `test_safe_float_contract`（9 组畸形/可转值参数化：None/畸形结构/非数值串回落默认值，数字字符串/Decimal/bool 仍可转）两例。
+- 受影响 9 文件：`124 passed, 3 skipped`（3 skipped 为需本地 app-api 的 e2e）；`mypy` 目标三文件 0 error。
+
+---
+
+## [junliang] 2026-09-26 — 洞察报告改结构化 blocks 输出（移除 reportlab）+ 异动解读「分析维度三」改三列表格
+
+**开发者**: 李俊良
+
+### 新增
+
+- `services/insight_report.py`：`build_report_blocks(data)`（原 `build_report_sections` 的 `lines` 彻底移除）；Block 判别联合 6 类（`kv`/`verdict`/`candidates`/`chain`/`evidence`/`list`）；空节 → `blocks: []`（规则统一为"源数据非空才出块"）。
+- 六阶段因果链**只取 `role=primary` 主链**（真实 artifact 通常有 primary + alternative 两条链、各 6 个节点，旧实现把 12 个节点平铺、无任何分界，是"看不出这是因果链"的根因之一）；链节点与候选项**同时输出中文标签与机器 key**（`stageKey`/`epistemicKey`/`statusKey`），供前端做中性弱化判定而不必匹配中文标签（改文案即静默失效）。
+- `POST /api/agent/insight-report/sections`（替代 `/insight-report/render`）。
+
+### 变更
+
+- AI 异动解读「分析维度三：产业链机会」改为三列表格：`MASTER_PROMPT` 强制单行表格「环节 | 标的 | 理由」——一行一环节、标的只写名称不带代码、理由 ≤8 字、禁止留空单元格、总行数 3~5 行；`GRAPH_DIVERGE_PROMPT` 输出口径同步收紧（示例理由改短句 + 同口径硬性要求），让 Master 拿到干净素材、减少格式漂移。
+- 删除 reportlab 渲染与内嵌字体（2.33MB）；`pyproject.toml` 移除 reportlab 依赖。
+
+### 测试
+
+- `tests/unit/test_insight_report.py` 重写为 blocks 断言（主链筛选 / 无 primary 降级 / 无链空节 / 脏数据跳过 / `*Key` 字段 / 空节规则 / 中文化回归），**25 passed**；`tests/integration/test_alert_agent.py` **10 passed**。
+- `ruff check` 改动文件 All checks passed（注意 ruff 的 E501 按 **CJK 双宽**计，中文 prompt 单行约 50 字即到 100 上限）。
+- 实测：真实跑一次 alert 分析（603065）输出即三列表格（标的无代码、理由 6 字、无空单元格），且 `display_report.stocks` 仍为代码数组；**独立脚本直跑 worker 必须先 `await HttpClientPool.init(...)`**，否则 `node_api` 全部报 `not initialized`、子 Agent 静默降级（资讯/图谱工具全失败），输出不可信。
+
+### 文档
+
+- `AGENTS.md` / `README.md` 同步 blocks 口径（章节构建改为纯模板 JSON blocks，无 LLM / 无字体依赖）。
+
+## [xusiyun] 2026-09-25 — 未来事件影响板块预计算 + 物化时间兜底 + 来源名透传
+
+**开发者**: xusiyun
+
+### 新增
+
+- `services/impact_sectors_precompute.py`：未来 calendar 事件（`source_type='calendar'` 且 `status∈{scheduled,upcoming}` 且 `impact_sectors` 为空）→ 行业向量（KG 语义）匹配（阈值 0.7）取 Top3 写回 `/internal/event-entities`；无可靠行业保持 `[]`（方案 A，不 LLM 强猜）；独立 cron 每日 07:00（在 app-api Calendar 物化 06:40 之后）；幂等守卫「仅列为空才处理」（`updated_at` 节流不可靠，Calendar 物化 cron 会刷新）。
+- `config.py` 新增 `impact_sectors_precompute_enabled`（默认 True）与 `scheduler_impact_sectors_precompute_cron`（`0 7 * * *`）；`scheduler.py` 注册该 job（misfire_grace_time=3600）。
+- 物化时间兜底（spec §5B.3）：抽不出绝对日期时改用发布时间兜底（`publish_time_fallback`，`time_confidence=0.5`）；`_extract_publish_time` 字段序 publish_time→published_at→event_time→ctime_stamp→ctime→create_time→date，`_normalize_datetime_to_iso` 兼容 ISO/无时区/unix 秒毫秒；仅落已发生/当日，不投未来。
+
+### 修复
+
+- 新增 STOCK 事件守卫：`event_scope='STOCK'` 的普通个股事件不物化为 Event Entity（不进重大事件时间线），记 `event_entity_materialize_skipped_stock`。
+- `collect_ths_original` 补齐 `source_url` → `url` 映射（Node 侧字段为 `source_url`，`normalize_event` 只认 `url/link`，否则同花顺原创事件 url 恒空）。
+- 外盘行情事件携带 `source_name="外盘行情"`：经 `event_store`/`event_conduction` 透传并拼入 user_msg「事件来源：X」，修外盘无 URL 事件恒显示「未知来源」。
+
+### 改进
+
+- `config.py`：`event_entity_enabled` 默认由 False 翻为 True（app-api 端点已落地，News 通道重大事件开始物化）。
+
+### 测试
+
+- `tests/unit/test_impact_sectors_precompute.py`（13 passed）、`tests/unit/test_event_entity_time_extract.py`。
+
+---
+
 ## \[changer\] 2026-09-22 — 事件前瞻主体化（种子 / 候选晋升 / 预期差 / 读侧折叠）
 
 **开发者**: changer-collab

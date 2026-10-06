@@ -179,6 +179,11 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # （data_client.py:493），无独立网络入口；回放时 get_list 返回 None，
         # `or []` 兜底返回空列表（fail-closed，绝不触达真实 Node 后端）
         "NodeApiClient.list_predictions",
+        # 终审 #3（fail-closed）：list_predictions_strict 与 list_predictions 同型——内部
+        # `await self.get_list(f"/internal/predictions?source_id={source_id}")`，无独立
+        # httpx 网络入口；回放时 get_list（node_read）返回 None → strict 抛 RuntimeError
+        # 走调用方失败降级（from-stock-info 端点兜底 502，绝不触达真实 Node 后端）
+        "NodeApiClient.list_predictions_strict",
         # 经 put 间接隔离（put → node_noop 返回 None）
         "NodeApiClient.update_prediction_verification",
         # 经 delete 间接隔离（delete → node_noop 返回 None）

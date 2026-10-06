@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import unicodedata
 from datetime import datetime
-from typing import Any, TypedDict
+from difflib import SequenceMatcher
+from typing import Any, NotRequired, TypedDict
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -66,11 +68,70 @@ class EventRecord(TypedDict):
     # 重大事件时间线（spec §6.1/§6.2）：物化响应回填的 event_status（写库快照/读时重算，
     # app-api 权威）；缺省 None（未物化/开关关闭）时传导走旧路径（逐字节不变）。
     app_event_status: str | None
+    # 数据源携带的来源名称（如"外盘行情"）：经传导 user_msg 透传，LLM 理解阶段
+    # 可直接判定媒体名，避免外盘等无 URL 行情事件恒显示"未知来源"（2026-09-24）。
+    source_name: str | None
+    # 物化未回填（开关关闭/失败）时置位的兜底标记：随事件库 content 持久化，
+    # 供后续排查；非落库契约必需键，故 NotRequired（构造时无需提供）。
+    event_entity_unfilled: NotRequired[bool]
 
 
 def event_content_hash(title: str, url: str) -> str:
     """生成事件去重键（sha1 of title+url）。"""
     return hashlib.sha1(f"{title}|{url}".encode()).hexdigest()
+
+
+# 近似去重标题相似度阈值：归一化标题 SequenceMatcher 比值超过该值视为近重复
+# （对齐 forward_events._normalize_title 的轻归一口径，仅作标题语义近似判断）
+TITLE_SIMILARITY_THRESHOLD = 0.9
+
+
+def _normalize_title(s: str) -> str:
+    """轻归一标题：去空白 + 去标点/符号 + 转小写（对齐 forward_events 同款实现）。
+
+    仅用于近似去重（近重复标题判断），不做语义归并；两事件标题归一化后
+    高度相似且同数据源时，视为同一事件的重复发稿（如财联社同日两条几乎
+    相同的电报），吸收进已有事件而非新建。
+
+    实现说明：Python 标准库 re 不支持 \\p{..} Unicode 属性转义，故用
+    unicodedata.category 过滤等价实现（Punctuation/Symbol/空白）。
+    """
+    out: list[str] = []
+    for ch in s.lower():
+        if ch.isspace() or ch == "_":
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("P") or cat.startswith("S"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _title_similarity(norm_a: str, norm_b: str) -> float:
+    """两个归一化标题的相似度（SequenceMatcher ratio，0~1）。空串相似度为 0。"""
+    if not norm_a or not norm_b:
+        return 0.0
+    return SequenceMatcher(None, norm_a, norm_b).ratio()
+
+
+def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
+    """判断 ev 是否为 pool 中某事件的近重复（同数据源 + 归一化标题高相似）。
+
+    仅限同数据源（source 相同），防止跨源相似标题误吸收（不同媒体对同一
+    事件的独立报道应各自保留）。标题归一化后为空（无实质内容）不参与判断。
+    """
+    norm = _normalize_title(ev["title"])
+    if not norm:
+        return False
+    for other in pool:
+        if other["source"] != ev["source"]:
+            continue
+        other_norm = _normalize_title(other["title"])
+        if not other_norm:
+            continue
+        if _title_similarity(norm, other_norm) > TITLE_SIMILARITY_THRESHOLD:
+            return True
+    return False
 
 
 def _normalize_symbol(value: str) -> str:
@@ -84,10 +145,19 @@ def _normalize_symbol(value: str) -> str:
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
-    """安全转 float，失败返回默认值（历史数据字段畸形不炸整批）。"""
-    try:
+    """安全转 float，失败返回默认值（历史数据字段畸形不炸整批）。
+
+    实现对齐同包 `global_importance_evaluation._safe_float`：先按 JSON 标量窄化
+    （int/float 直转，其余走 str 兜底解析），消除 `float(object)` 在 mypy strict
+    下的 arg-type 告警；数字字符串 / 可字符串化的数值对象（如 Decimal）仍可转，
+    失败（None/畸形结构/非数值串）一律回落 default。契约由
+    `test_safe_float_contract` 锁定（2026-10-02）。
+    """
+    if isinstance(value, (int, float)):
         return float(value)
-    except (TypeError, ValueError):
+    try:
+        return float(str(value))
+    except (ValueError, TypeError):
         return default
 
 
@@ -144,6 +214,9 @@ def normalize_event(
     if source_level not in ("A", "B", "C", "D"):
         source_level = "C"
 
+    # 数据源携带的来源名称（如"外盘行情"）；无则 None，传导阶段回退 LLM 判定
+    source_name = str(raw.get("source_name") or "").strip() or None
+
     content_hash = event_content_hash(title, url)
     event_id = f"{score_date}-{content_hash[:16]}"
 
@@ -173,6 +246,7 @@ def normalize_event(
         symbol=symbol,
         stock_name=stock_name,
         industry=industry,
+        source_name=source_name,
         event_scope=detection["event_scope"],
         event_scope_source=detection["event_scope_source"],
         event_scope_confidence=detection["event_scope_confidence"],
@@ -225,13 +299,23 @@ async def save_event_scrape(
         merged = {e["content_hash"]: e for e in existing}
         added_events: list[EventRecord] = []
         seen_added: set[str] = set()
+        # 近似去重池：当日已有事件 + 本批已吸收新增（近似去重按源+归一化标题判断）
+        near_pool = list(existing)
+        # 被近似去重吸收的事件（content_hash 精确去重之外被吸收的近重复标题事件）
+        near_absorbed: list[EventRecord] = []
         for ev in events:
             h = ev["content_hash"]
             if h in existing_hashes or h in seen_added:
                 continue
+            # 近似去重：同数据源 + 归一化标题高相似 → 吸收进已有事件，不触发传导
+            # （财联社等数据源对同一事件可能发两条几乎相同的电报，见 2026-09-30 时间轴重复）
+            if _is_near_duplicate(ev, near_pool):
+                near_absorbed.append(ev)
+                continue
             seen_added.add(h)
             added_events.append(ev)
             merged[h] = ev
+            near_pool.append(ev)
         unique = list(merged.values())
 
         # 去重计数：本批中因重复被吸收的条数（同批内重复 + 与当日已有重复）
@@ -242,6 +326,8 @@ async def save_event_scrape(
                 deduped += 1
             else:
                 seen.add(ev["content_hash"])
+        # 近似去重吸收的条数叠加进 deduped
+        deduped += len(near_absorbed)
 
         try:
             result = await node_api.save_analysis_report(
@@ -341,6 +427,13 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                     event_scope_source=str(ev.get("event_scope_source", "unknown")),
                     event_scope_confidence=_safe_float(
                         ev.get("event_scope_confidence"), 0.0
+                    ),
+                    # 数据源携带的来源名称（如"外盘行情"）：重放路径必须保留，
+                    # 否则「从事件库重读再传导」丢媒体名 → LLM 判不出 → 前端恒显示
+                    # 「未知来源」（2026-10-02 修复，与 app_event_id 同族）；历史
+                    # 数据无该键 → None（不臆造）
+                    source_name=(
+                        str(ev["source_name"]) if ev.get("source_name") else None
                     ),
                     # 重大事件时间线（spec §4.2）：存储有值保留；历史数据无该键 → None
                     app_event_id=(

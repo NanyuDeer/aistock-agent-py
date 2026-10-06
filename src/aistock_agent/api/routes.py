@@ -41,6 +41,7 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.stock_info_prediction import StockInfoPredictionRequest
 from aistock_agent.services.token_usage import reset_token_usage
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.date import shanghai_today
@@ -2018,6 +2019,100 @@ async def trigger_predictions_from_trace(
         raise HTTPException(status_code=502, detail=f"predictions from-trace failed: {exc}")
 
 
+# ── 个股情报 → 可验证预判落库（抓取时已产出 ai_impact/ai_horizon 的确定性映射，P2/T2） ──
+
+
+@router.post("/internal/predictions/from-stock-info")
+async def predictions_from_stock_info(
+    body: StockInfoPredictionRequest,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """个股情报（抓取时已产出）→ 可验证预判落库（P2 个股粒度入验证环）。
+
+    确定性映射，不调 LLM；``due_dates`` 复用 ``_compute_due_dates``（与 index/sector
+    同口径）。门槛不达 → 200 skipped（不落库）；同 source_id 已验证 → 409 拒覆盖；
+    意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import _compute_due_dates
+    from aistock_agent.services.stock_info_prediction import (
+        build_stock_info_prediction_with_reason,
+        stock_info_source_id,
+    )
+
+    logger = structlog.get_logger()
+    # 各失败原因码对应的人类可读文案（reason_code 为机器可读，供 app-api 区分正常降级/系统性失败）
+    skip_reason_text: dict[str, str] = {
+        "below_threshold": "未达入环门槛",
+        "invalid_input": "输入非法（symbol/published_date）",
+        "unmapped_value": "映射缺档（交易所前缀或 ai_impact/ai_horizon 未知）",
+    }
+    source_id = stock_info_source_id(body.symbol, body.published_date)
+    try:
+        prediction, reason_code = build_stock_info_prediction_with_reason(
+            symbol=body.symbol,
+            stock_name=body.stock_name,
+            published_date=body.published_date,
+            ai_impact=body.ai_impact,
+            ai_horizon=body.ai_horizon,
+            ai_summary=body.ai_summary,
+            url=body.url,
+        )
+        if prediction is None:
+            reason = skip_reason_text.get(reason_code, "未达入环门槛或输入非法")
+            logger.info(
+                "stock_info_prediction_skipped",
+                source_id=source_id,
+                reason_code=reason_code,
+                reason=reason,
+            )
+            return {
+                "status": "skipped",
+                "reason_code": reason_code,
+                "reason": reason,
+                "record": None,
+            }
+
+        # 已验证拒覆盖防御（SPEC S6）：同 source_id 已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预判被静默重写。
+        # fail-closed：必须用 strict 查询——查询失败（抛错）不得被当作"无记录"放行，
+        # 否则 app-api upsert 会无条件覆盖已 verified 记录的正文，导致"验证结果与预判正文错位"。
+        existing = await node_api.list_predictions_strict(source_id)
+        for existing_record in existing:
+            verification = existing_record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        due_dates, approximate_horizons = _compute_due_dates(
+            body.published_date, prediction.horizons
+        )
+        payload: dict[str, object] = {
+            "source_type": "stock_info",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        record = await node_api.save_prediction(payload)
+        if record is None:
+            # data_client.post 吞异常返回 None；不判会把这句"落库失败"报成 saved 假成功
+            raise HTTPException(status_code=502, detail="save_prediction returned None")
+        logger.info("stock_info_prediction_saved", source_id=source_id, due_dates=due_dates)
+        return {"status": "saved", "reason_code": "saved", "reason": None, "record": record}
+    except HTTPException:
+        # 409 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "stock_info_prediction_failed",
+            source_id=source_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-stock-info failed: {exc}")
+
+
 @router.post("/qa")
 async def qa_endpoint(req: QARequest) -> StreamingResponse:
     """CHAT QA 链路 SSE 端点。
@@ -2099,24 +2194,20 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
     )
 
 
-# ── 完整洞察报告 PDF 渲染 ──────────────────────────────────────────
+# ── 完整洞察报告章节构建（供 app-api 分块推 SSE） ──────────────────
 
 
-@router.post("/insight-report/render")
-async def render_insight_report_pdf(
+@router.post("/insight-report/sections")
+async def build_insight_report_sections(
     payload: dict[str, object],
     _: None = Depends(verify_internal_token),
-) -> Response:
-    """完整洞察报告 PDF 渲染：
-    app-api 组装数据 → 本端点纯模板渲染（无 LLM）→ 返回 application/pdf。"""
+) -> dict[str, object]:
+    """完整洞察报告章节构建：
+    app-api 组装数据 → 本端点纯模板构建（无 LLM）→ 返回 {header, sections}，
+    sections 元素为 {heading, blocks}；由 app-api 分块推送 SSE，
+    前端按 block.type 渲染（六阶段因果链为纵向时间轴）。"""
     from aistock_agent.services.insight_report import (  # noqa: PLC0415
-        build_report_sections,
-        render_insight_report,
+        build_report_response,
     )
 
-    pdf = render_insight_report(build_report_sections(payload))
-    return Response(
-        content=pdf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="insight-report.pdf"'},
-    )
+    return build_report_response(payload)
