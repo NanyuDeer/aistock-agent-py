@@ -1,10 +1,10 @@
 """双层报告解析工具单测"""
 
 from aistock_agent.utils.report_parser import (
-    parse_report_content,
-    extract_podcast_brief,
     extract_display_report,
+    extract_podcast_brief,
     parse_dual_layer_response,
+    parse_report_content,
 )
 
 

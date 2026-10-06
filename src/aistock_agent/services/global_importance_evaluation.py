@@ -49,7 +49,7 @@ def _safe_str(value: object, default: str = "") -> str:
 
 def _safe_float(value: object, default: float = 0.0) -> float:
     """安全提取浮点数。"""
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
     try:
         return float(str(value))

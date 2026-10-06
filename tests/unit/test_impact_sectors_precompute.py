@@ -6,7 +6,6 @@
 - _non_empty_sectors：非法/缺失/空数组视为空
 """
 
-import pytest
 
 from aistock_agent.services.impact_sectors_precompute import (
     _eligible_for_precompute,

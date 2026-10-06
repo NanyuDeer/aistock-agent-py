@@ -1,5 +1,5 @@
 """skill_executor 节点单元测试。"""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,7 +12,7 @@ def _evidence(skill: str, degraded: bool = False) -> Evidence:
     return Evidence(
         facts=[f"{skill} fact"],
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         degraded=degraded,
         skill_name=skill,
     )

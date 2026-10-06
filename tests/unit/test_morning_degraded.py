@@ -7,6 +7,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from aistock_agent.agents.workers.morning import _is_degraded_report
 
 # ── _is_degraded_report 测试 ─────────────────────────────────

@@ -167,7 +167,7 @@ async def test_run_uses_both_llm_types():
     mock_agent = _make_mock_agent("result")
     with (
         patch(_GET_DEEP, return_value=MagicMock()) as mock_deep,
-        patch(_GET_QUICK, return_value=MagicMock()) as mock_quick,
+        patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, return_value=mock_agent),
         patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
     ):

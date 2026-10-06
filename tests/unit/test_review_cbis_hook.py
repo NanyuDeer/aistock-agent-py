@@ -1,7 +1,5 @@
 from datetime import datetime
 
-import pytest
-
 from aistock_agent.agents.workers.review import attach_confirmations_to_trace
 from aistock_agent.schemas.market_trace import CandidateExplanation, MarketTraceResult
 from aistock_agent.trace.chain import CausalChain, CausalNode, PredictionConfirmation

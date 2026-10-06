@@ -23,9 +23,8 @@ v1 仅实现两档：
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 import structlog
+from pydantic import BaseModel
 
 from aistock_agent.config import settings
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output

@@ -1,5 +1,6 @@
 # tests/unit/test_rhythm_rebuilt_evidence_certainty.py
-from aistock_agent.services.rhythm_rebuilt_evidence import detect_certainty, compute_position
+from aistock_agent.services.rhythm_rebuilt_evidence import compute_position, detect_certainty
+
 
 def test_high_certainty_on_event_and_volume_confirm():
     cert, _ = detect_certainty(

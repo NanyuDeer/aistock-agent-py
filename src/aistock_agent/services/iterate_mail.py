@@ -42,7 +42,7 @@ def _fmt_metric(key: str, value: float) -> str:
 def _to_text(value: object, max_len: int) -> str:
     if isinstance(value, str):
         text = value.strip()
-    elif isinstance(value, (dict, list)):
+    elif isinstance(value, dict | list):
         text = json.dumps(value, ensure_ascii=False, default=str)
     else:
         text = str(value)
@@ -154,7 +154,7 @@ def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[st
                 parts = [
                     _fmt_metric(k, v)
                     for k, v in metrics.items()
-                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    if isinstance(v, int | float) and not isinstance(v, bool)
                 ]
                 if parts:
                     lines.append("　指标：" + "，".join(parts))

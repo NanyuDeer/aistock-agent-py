@@ -1,5 +1,5 @@
 """/api/agent/qa 端点集成测试。"""
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient

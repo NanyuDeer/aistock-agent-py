@@ -153,7 +153,7 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     失败（None/畸形结构/非数值串）一律回落 default。契约由
     `test_safe_float_contract` 锁定（2026-10-02）。
     """
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
     try:
         return float(str(value))

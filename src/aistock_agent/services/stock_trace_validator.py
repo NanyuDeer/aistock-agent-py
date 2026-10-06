@@ -23,7 +23,7 @@ class StockTraceValidationError(ValueError):
 def _value_direction(source: StockSourceRecord) -> str | None:
     """从 payload 推断事实方向（与 Node `valueDirection` 口径一致）。"""
     numeric = source.payload.get("change_pct", source.payload.get("pct_change"))
-    if isinstance(numeric, (int, float)) and not isinstance(numeric, bool):
+    if isinstance(numeric, int | float) and not isinstance(numeric, bool):
         return "up" if numeric > 0 else "down" if numeric < 0 else "neutral"
     impact = str(source.payload.get("impact") or "").lower()
     if "利好" in impact or "positive" in impact:

@@ -2,6 +2,31 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 清理存量真问题 ruff 告警 96 条（保留 E501）
+
+**开发者**: Aria
+
+### 改进
+
+- **存量 ruff 告警 296 → 199，清掉 96 条真问题/格式告警**（保留 `E501` 行长；200 → 199 中 −1 为 I001 自动修的良性副作用）：
+  - **自动修 83 条**（`ruff check --fix`，未用 `--unsafe-fixes`）：`I001` ×27、`F401` ×19、`F541` ×15、`W292` ×13、`UP017` ×7、`W605` ×1、`UP032` ×1。
+  - **人工修 13 条**：`UP038` ×6（`isinstance(x, (A, B))` → `isinstance(x, A | B)`）、`F841` ×4（删除未使用赋值；含 2 处仅去掉 `as xxx` 绑定、保留 `patch(...)` 副作用）、`E402` ×2（`scripts/export_langgraph_graphs.py` 第三方 import 上移；第一方因 `sys.path` hack 保留既有 `# noqa: E402`）、`N806` ×1（`insight_candidate.py` 局部 `EVIDENCE_WINDOW` → `evidence_window`）。
+  - **未触碰 `E501`**：不修行长、不加 `noqa`、不改 `pyproject.toml`（`line-length`/`select`/既有 `per-file-ignores` 均不动）。
+- **`UP017` 运行时安全已核实保留**：`datetime.UTC` 需 py3.11+，而 `Dockerfile` = `python:3.11-slim`、`requires-python >=3.11`、ruff `target-version=py311`、`uv.lock requires-python >=3.11`，无 <3.11 部署路径。
+- **`F401` 删除导入未破坏导出**：58 个改动文件不含任何 `__init__.py`，未触及 re-export / `__all__`。
+
+### 验证
+
+- `uv run ruff check src tests scripts --statistics` → **296 → 199**（仅剩 `199 E501`）。
+- `uv run python -m pytest tests/unit -q` → **3433 passed / 9 failed / 1 skipped**，9 条与既有基线同集（`test_industry_vector_search.py` ×6 + `test_scheduler.py` ×3）→ **零新增失败**。
+- 根级 `tests/*.py` → **56 passed**；`tests/integration tests/e2e tests/diagnostics --collect-only` → **450 collected / 0 errors**（无 ImportError）。
+
+### 说明
+
+- 58 文件、+100 / −131；单文件改动均为格式/死导入/现代化改写，无业务语义变更。
+
+---
+
 ## [main] 2026-10-06 — 收口改动文件剩余 28 处 ruff 告警 + 修复 scripts 包解析
 
 **开发者**: Aria
