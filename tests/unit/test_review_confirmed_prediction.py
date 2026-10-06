@@ -1,5 +1,9 @@
 """P1：渠道B 印证结果在结论层（root）承载。"""
+from datetime import UTC, datetime
+
+from aistock_agent.agents.workers.review import attach_confirmations_to_trace
 from aistock_agent.schemas.market_trace import MarketTraceResult
+from aistock_agent.trace.chain import PredictionConfirmation
 
 
 def _minimal_trace(**overrides: object) -> dict[str, object]:
@@ -39,18 +43,13 @@ def test_market_trace_result_accepts_confirmed_prediction_at_root():
     assert trace.confirmed_prediction[0].prediction_id == "183"
 
 
-from aistock_agent.agents.workers.review import attach_confirmations_to_trace
-from aistock_agent.trace.chain import PredictionConfirmation
-from datetime import datetime, timezone
-
-
 def _cnf(pid: str = "183") -> PredictionConfirmation:
     return PredictionConfirmation(
         prediction_id=pid,
         scenario="量能萎缩后回踩",
         source_trace_id="review:2026-10-06",
         confirmed_kind="scene_match",
-        confirmed_at=datetime(2026, 10, 6, 8, 0, tzinfo=timezone.utc),
+        confirmed_at=datetime(2026, 10, 6, 8, 0, tzinfo=UTC),
     )
 
 
