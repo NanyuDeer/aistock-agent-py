@@ -21,9 +21,9 @@ def wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (round(lo, 4), round(hi, 4))
 
 
-# 当前生产版本（统计默认过滤，防跳变/混桶；3.0 切换时与 validator._METHODOLOGY_VERSION、
-# Node publicRouter.CURRENT_METHODOLOGY_VERSION、backfill 目标版本四处同步更新）
-_CURRENT_METHODOLOGY_VERSION = "2.0"
+# 当前生产版本（统计默认过滤，防跳变/混桶；版本 4.0 与 validator._METHODOLOGY_VERSION、
+# Node publicRouter.CURRENT_METHODOLOGY_VERSION、backfill 目标版本同步更新）
+_CURRENT_METHODOLOGY_VERSION = "4.0"
 
 
 def _filter_v2(

@@ -19,13 +19,13 @@ def test_wilson_ci_zero_n():
     assert wilson_ci(0, 0) == (0.0, 0.0)
 
 
-def test_hit_rate_summary_filters_v2_only():
+def test_hit_rate_summary_filters_current_version_only():
     entries = [
-        {"result": "hit", "methodology_version": "2.0"},
-        {"result": "miss", "methodology_version": "2.0"},
-        {"result": "hit", "methodology_version": "1.0"},   # v1 不参与（H1 分桶）
-        {"result": "insufficient", "methodology_version": "2.0"},  # 不参与分母（P0-2）
-        {"result": "hit", "methodology_version": "2.0", "approximate": True},  # D2：近似档剔除
+        {"result": "hit", "methodology_version": "4.0"},
+        {"result": "miss", "methodology_version": "4.0"},
+        {"result": "hit", "methodology_version": "1.0"},   # 旧版本不参与（H1 分桶）
+        {"result": "insufficient", "methodology_version": "4.0"},  # 不参与分母（P0-2）
+        {"result": "hit", "methodology_version": "4.0", "approximate": True},  # D2：近似档剔除
     ]
     s = hit_rate_summary(entries)
     assert s["n"] == 2
@@ -35,7 +35,7 @@ def test_hit_rate_summary_filters_v2_only():
 
 
 def test_hit_rate_summary_sample_threshold():
-    entries = [{"result": "hit", "methodology_version": "2.0"} for _ in range(30)]
+    entries = [{"result": "hit", "methodology_version": "4.0"} for _ in range(30)]
     assert hit_rate_summary(entries)["sufficient_sample"] is True
 
 
@@ -47,18 +47,18 @@ def test_baseline_compare_excess():
     assert r["better_than_baseline"] is True
 
 
-def _entry(target_type, result="hit", prediction_id=1, methodology_version="2.0"):
+def _entry(target_type, result="hit", prediction_id=1, methodology_version="4.0"):
     return {"methodology_version": methodology_version, "result": result, "target_type": target_type,
             "approximate": False, "prediction_id": prediction_id}
 
 
-def test_hit_rate_summary_default_filters_v2_only():
-    """阶段 0：默认（不传版本）只统计 2.0——混合 1.0/2.0/3.0 记录时 n 只含 2.0（防跳变/混桶）。"""
+def test_hit_rate_summary_default_filters_current_version_only():
+    """默认（不传版本）只统计当前生产版本 4.0——混合 1.0/3.0/4.0 记录时 n 只含 4.0（防跳变/混桶）。"""
     entries = [
         _entry("index", "hit", 1, "1.0"),
-        _entry("index", "hit", 2, "2.0"),
-        _entry("index", "miss", 2, "2.0"),
-        _entry("index", "hit", 3, "3.0"),
+        _entry("index", "hit", 2, "3.0"),
+        _entry("index", "hit", 2, "4.0"),
+        _entry("index", "miss", 2, "4.0"),
     ]
     s = hit_rate_summary(entries)
     assert s["n"] == 2 and s["hits"] == 1
@@ -269,3 +269,10 @@ def test_clamp_respects_cap_floor():
     base = {"n": 40, "hits": 24, "hit_rate": 0.60}
     cap, _ = clamp_confidence_by_bucket("short", hit, base, cap_floor="low")
     assert cap == "low"
+
+
+def test_default_methodology_version_includes_v4_records():
+    """默认口径 = 4.0，v4 记录必须进分母（防止写入 4.0 / 统计滤 3.0 的口径断裂）。"""
+    from aistock_agent.services.prediction_stats import _CURRENT_METHODOLOGY_VERSION
+
+    assert _CURRENT_METHODOLOGY_VERSION == "4.0"

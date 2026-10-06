@@ -67,9 +67,9 @@ _INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 # neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
 _NEUTRAL_PCT_THRESHOLD = 0.5
 
-# v2/v3 口径常量（H1/D1/D6/G13/G14；阶段 0 起 _METHODOLOGY_VERSION 为 3.0 窗口累计主判）
+# v2/v3/v4 口径常量（H1/D1/D6/G13/G14；4.0 起单带宽 k 复利主判）
 _WINDOW_DAYS_AFTER_DUE = 3      # 验证窗口 [due, due+3] 交易日
-_METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计主判；H1 版本分桶）
+_METHODOLOGY_VERSION = "4.0"    # 验证器主链写入版本（4.0 单带宽 k 复利主判；H1 版本分桶）
 # 存量回补目标版本：backfill 只回补 2.0 时代遗留 no_data，用 2.0 口径重验、写 2.0（不混版本）。
 # 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
@@ -305,13 +305,13 @@ async def _verify_horizon(
     horizon: str,
     methodology_version: str = _METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """到期验证：取 [due, due+3] 窗口 kline，按版本口径主判（默认 3.0 窗口累计）。
+    """到期验证：取 [due, due+3] 窗口 kline，按版本口径主判（默认 _METHODOLOGY_VERSION=4.0）。
 
     entry 新增 methodology_version（H1）、grade（仅 bullish/bearish，G14）、
     baseline_neutral（同窗口恒中性预测命中标记，供 baseline 对照，H6）、
     approximate（越年近似档结构化标记，统计剔除，H2）、
     target_type/matched_*（H8）、threshold_version（sector，H3）、prediction_id（H4）。
-    methodology_version 参数：主链默认 _METHODOLOGY_VERSION（3.0）；backfill 传
+    methodology_version 参数：主链默认 _METHODOLOGY_VERSION（4.0）；backfill 传
     _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量口径不混版本（阶段 0）。
     返回语义（D1/D7）：正常 → hit/miss entry；窗口未满 → {"wait": True}（run_once 收到
     wait 则 continue 不回写，下次再验）；数据源故障/无数据 → insufficient entry（落库可追溯）。

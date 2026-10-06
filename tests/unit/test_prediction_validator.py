@@ -170,7 +170,7 @@ async def test_v3_verify_bullish_window_hit_with_grade():
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
     assert entry["grade"] == "hit"        # 非 due 当日命中、窗口无 >=5% → 普通 hit
-    assert entry["methodology_version"] == "3.0"
+    assert entry["methodology_version"] == "4.0"
     assert "baseline_neutral" in entry
 
 
@@ -537,7 +537,7 @@ async def test_v3_neutral_grade_is_null():
         updated = await run_once()
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
-    assert entry["methodology_version"] == "3.0"
+    assert entry["methodology_version"] == "4.0"
     assert "grade" not in entry
 
 
@@ -992,11 +992,11 @@ async def test_write_validation_profiles_groups_by_target():
     # stock target（600519）与 index target（000001 -> 000001.SH code）
     records = [
         _verified_rec("600519", [
-            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
-            {"result": "miss", "methodology_version": "3.0", "target_type": "stock"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "stock"},
+            {"result": "miss", "methodology_version": "4.0", "target_type": "stock"},
         ]),
         _verified_rec("上证指数", [
-            {"result": "hit", "methodology_version": "3.0", "target_type": "index"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "index"},
         ]),
     ]
     written: dict[str, object] = {}
@@ -1023,7 +1023,7 @@ async def test_write_validation_profiles_skips_early_exit_no_result():
     records = [
         _verified_rec("600519", [
             {"meaning": "early_exit", "horizon": "mid"},  # 无 result → 不计入
-            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "stock"},
         ]),
         {"id": 9, "prediction": {"horizons": []}, "verification": {"h": {"result": "miss"}}},
     ]
@@ -1057,11 +1057,11 @@ async def test_write_validation_profiles_scans_pending_records_d3():
             {"horizon": "mid", "target": "600519", "direction": "bullish"},
         ]},
         # short 已写 hit；mid 未到期无 result → 不计入
-        "verification": {"short": {"result": "hit", "methodology_version": "3.0",
+        "verification": {"short": {"result": "hit", "methodology_version": "4.0",
                                    "target_type": "stock"}},
     }
     verified_rec = _verified_rec("上证指数", [
-        {"result": "miss", "methodology_version": "3.0", "target_type": "index"},
+        {"result": "miss", "methodology_version": "4.0", "target_type": "index"},
     ])
     written: dict[str, object] = {}
     async def _set(key, profile, ttl=None):
@@ -1090,8 +1090,8 @@ async def test_run_once_writes_profile_after_verification():
                      new=AsyncMock(side_effect=[[], [{  # backfill 空 + 画像窗口含 600519 hit
                          "id": 1,
                          "prediction": {"horizons": [{"target": "600519"}]},
-                         "verification": {"h": {"result": "hit", "methodology_version": "3.0",
-                                                "target_type": "stock"}},
+                         "verification": {"h": {"result": "hit", "methodology_version": "4.0",
+                                               "target_type": "stock"}},
                      }]])),
         patch.object(prediction_validator.node_api, "get_stock_kline",
                      new=AsyncMock(return_value=[

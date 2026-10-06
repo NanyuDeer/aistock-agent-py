@@ -10,8 +10,8 @@
 - read_validation_profile：缓存优先，miss 时拉 verified 重算（key 用 internal_id，§4.4）
 - explain_verification / enrich_prediction_input：预判反哺入口（P3/P5 实现）
 
-注意：profile 口径用 _PROFILE_METHODOLOGY_VERSION（=validator 现役 3.0），与
-prediction_stats 默认的存量 2.0 口径分开——本层框住 run_once 当前写入的现役档。
+注意：profile 口径用 _PROFILE_METHODOLOGY_VERSION（=validator 现役 4.0），与
+prediction_stats 默认的存量统计口径分开——本层框住 run_once 当前写入的现役档。
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ from aistock_agent.services.prediction_stats import build_validation_profile
 
 logger = structlog.get_logger()
 
-# 画像口径 = 验证器现役写入版本（prediction_validator._METHODOLOGY_VERSION=3.0）。
-# 与 stats 默认 2.0（存量统计口径）刻意分开：画像要框住 run_once 当前写入的现役档（防混桶）。
-_PROFILE_METHODOLOGY_VERSION = "3.0"
+# 画像口径 = 验证器现役写入版本（prediction_validator._METHODOLOGY_VERSION=4.0）。
+# 与 stats 默认（存量统计口径）刻意分开：画像要框住 run_once 当前写入的现役档（防混桶）。
+_PROFILE_METHODOLOGY_VERSION = "4.0"
 
 # 画像缓存 TTL（秒）：run_once 每日 16:00 更新，86400 即每日失效重算。
 _PROFILE_CACHE_TTL = 86400
