@@ -376,3 +376,71 @@ def test_bucket_summary_excludes_long_and_reports_metrics():
     assert b["sector"]["n"] == 1 and b["sector"]["flat_count"] == 1
     assert b["sector"]["directional_count"] == 1
     assert b["sector"]["flat_rate"] == 1.0
+
+
+# ============ Task 5 修复：settled_ratio 统一口径（声明档位槽）============
+
+
+def test_settled_ratio_true_pending_slot_lowers_ratio():
+    """声明档位槽含真 pending（声明了却无 verification entry）→ settled_ratio < 1。
+
+    锁死「分母含真 pending」：旧实现分母只取已存在的 verification entry，真 pending
+    永不进分母 → settled_ratio 恒为 1.0、指标失去意义。
+    """
+    settled = _h_entry(horizon="short", result="hit")
+    slots = [
+        {"horizon": "short", "target_type": "index", "entry": settled},
+        {"horizon": "mid", "target_type": "index", "entry": None},  # 真 pending
+    ]
+    s = hit_rate_summary([settled], scope_slots=slots)
+    assert s["n"] == 1
+    assert s["settled_ratio"] == 0.5   # 1 settled / (1 settled + 1 pending)
+
+
+def test_settled_ratio_old_version_settled_excluded_from_both():
+    """旧版本已结算档位既不入分子也不入 pending（口径隔离：旧样本不污染 4.0 沉淀率）。"""
+    old = _h_entry(horizon="short", result="hit", methodology_version="3.0")
+    new = _h_entry(horizon="mid", result="miss", methodology_version="4.0")
+    slots = [
+        {"horizon": "short", "target_type": "index", "entry": old},
+        {"horizon": "mid", "target_type": "index", "entry": new},
+    ]
+    s = hit_rate_summary([old, new], scope_slots=slots)
+    assert s["n"] == 1                 # 分子只含 4.0（3.0 被 _filter_v2 隔离）
+    assert s["settled_ratio"] == 1.0   # 分母只含 4.0 已结算（old 未计入 pending，故非 0.5）
+
+
+def test_settled_ratio_without_scope_slots_is_none_not_implicit_one():
+    """未传 scope_slots 且无 entries → settled_ratio 为 None（不再用「恒等 1.0」的隐式口径）。"""
+    assert hit_rate_summary([])["settled_ratio"] is None
+
+
+def test_bucket_summary_settled_ratio_uses_scope_slots_per_bucket():
+    """bucket_summary 按桶取声明档位槽：combined 合并、index/sector 各取本桶槽位。"""
+    idx_hit = _h_entry(horizon="short", result="hit", target_type="index")
+    slots = [
+        {"horizon": "short", "target_type": "index", "entry": idx_hit},
+        {"horizon": "mid", "target_type": "sector", "entry": None},
+    ]
+    b = bucket_summary([idx_hit], scope_slots=slots)
+    assert b["index"]["settled_ratio"] == 1.0       # 1 settled / 1
+    assert b["sector"]["settled_ratio"] == 0.0      # 0 settled / 1 pending
+    assert b["combined"]["settled_ratio"] == 0.5    # 1 / (1 + 1)
+
+
+def test_long_display_counts_hit_miss_only_and_excludes_approximate():
+    """long 命中率展示口径与 app-api 一致：long + 非近似 + result ∈ {hit,miss}。
+
+    insufficient / approximate 的 long 档不进 n/hits；long_excluded 仍按「存在当前版本 long 档」判定。
+    """
+    entries = [
+        _h_entry(horizon="short", result="hit"),
+        _h_entry(horizon="long", result="hit"),
+        _h_entry(horizon="long", result="miss"),
+        _h_entry(horizon="long", result="insufficient"),            # 不进 long 命中率
+        _h_entry(horizon="long", result="hit", approximate=True),   # 近似 → 不进 long
+    ]
+    s = hit_rate_summary(entries)
+    assert s["long"]["n"] == 2 and s["long"]["hits"] == 1
+    assert s["long"]["hit_rate"] == 0.5
+    assert s["long_excluded"] is True

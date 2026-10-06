@@ -473,12 +473,15 @@ async def _verify_horizon(
     out = {**base, "result": result, "actual": actual_str, "reason": reason,
            "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
            "baseline_neutral": baseline_neutral}
-    if flat_flag:
-        # 字段驱动、无值即无键（不写 flat:false 噪声）；仅 4.0 新样本有，存量记录天然无。
-        out["flat"] = True
-    # direction 供迭代看板：flat_rate 分母 = 方向预判已结算数（排除 neutral），并按方向分桶判读。
-    # 与 reason 的"方向="同源；写入侧落结构化值，读取侧（app-api）只计数、不复制判定逻辑。
-    out["direction"] = direction
+    if methodology_version == "4.0":
+        # 迭代看板辅助字段（flat / direction）**仅 4.0 路径**写入——授权范围只含 4.0，
+        # v2/v3 存量 entry 不新增这些键（防超出授权、防旧样本混入 4.0 的 flat_rate/direction 计数）。
+        if flat_flag:
+            # 字段驱动、无值即无键（不写 flat:false 噪声）。
+            out["flat"] = True
+        # direction 供迭代看板：flat_rate 分母 = 方向预判已结算数（排除 neutral），并按方向分桶判读。
+        # 与 reason 的"方向="同源；写入侧落结构化值，读取侧（app-api）只计数、不复制判定逻辑。
+        out["direction"] = direction
     if target_type == "sector":
         # H3：sector 阈值版本 → v4 记 k 表版本（"4.0"）、legacy 记 G0c（"1.0"）
         out["threshold_version"] = threshold_version
@@ -1478,16 +1481,43 @@ async def _report_stats() -> None:
     if not records:
         return
     entries: list[dict[str, object]] = []
+    # settled_ratio 分母 = 记录**声明**的档位槽（含真 pending）——用 prediction.horizons 构造，
+    # 而非仅已存在的 verification entry；后者会让未到期 pending 档永不进分母（审查 Important 1）。
+    slots: list[dict[str, object]] = []
     for rec in records:
         ver = rec.get("verification")
-        if isinstance(ver, dict):
-            for h, entry in ver.items():
-                if isinstance(entry, dict):
-                    entries.append(entry)
+        ver_map = ver if isinstance(ver, dict) else {}
+        for entry in ver_map.values():
+            if isinstance(entry, dict):
+                entries.append(entry)
+        prediction = rec.get("prediction")
+        horizons = prediction.get("horizons") if isinstance(prediction, dict) else None
+        if not isinstance(horizons, list):
+            continue
+        approx = prediction.get("due_dates_approximate")
+        approx_set = (
+            {a for a in approx if isinstance(a, str)} if isinstance(approx, list) else set()
+        )
+        # 记录级 target_type 兜底：声明档无 entry 时按 record 内其它 entry 归属；缺省 index
+        record_tt = "index"
+        for cand in ver_map.values():
+            if isinstance(cand, dict) and isinstance(cand.get("target_type"), str):
+                record_tt = cand["target_type"]
+                break
+        for item in horizons:
+            name = item.get("horizon") if isinstance(item, dict) else None
+            if not isinstance(name, str) or name == "long" or name in approx_set:
+                continue  # 统一口径：scope 排除 long 与 approximate（含无 entry 的真 pending 档）
+            entry = ver_map.get(name)
+            slot_entry = entry if isinstance(entry, dict) else None
+            slot_tt = record_tt
+            if slot_entry is not None and isinstance(slot_entry.get("target_type"), str):
+                slot_tt = slot_entry["target_type"]
+            slots.append({"horizon": name, "target_type": slot_tt, "entry": slot_entry})
     if not entries:
         return
-    summary = hit_rate_summary(entries)
-    buckets = bucket_summary(entries)
+    summary = hit_rate_summary(entries, scope_slots=slots)
+    buckets = bucket_summary(entries, scope_slots=slots)
     baseline = baseline_neutral_summary(entries)
     logger.info(
         "prediction_stats_summary",
