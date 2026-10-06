@@ -49,6 +49,18 @@ def test_index_code_map_contains_common_indexes():
     assert _INDEX_CODE_MAP["沪深300"] == "000300"
 
 
+def test_actual_uses_compound_not_simple_sum():
+    """窗口累计涨跌幅统一为复利口径 x=∏(1+p/100)−1（与 k_band 标定脚本一致）。
+
+    简单求和会把"两日各 +1%"算成 +2.00%，复利应为 +2.01%；"-1% 后 +1%"算成 0.00%，
+    复利应为 -0.01%。此为全项目唯一口径，禁止再用 sum(window) 算 actual。
+    """
+    from aistock_agent.services.prediction_validator import _compound_pct
+
+    assert _compound_pct([1.0, 1.0]) == pytest.approx(2.01, abs=1e-6)
+    assert _compound_pct([-1.0, 1.0]) == pytest.approx(-0.01, abs=1e-6)
+
+
 @pytest.mark.asyncio
 async def test_run_once_verifies_due_horizon():
     record = _pending_record(due="2026-08-10")
@@ -837,6 +849,24 @@ def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=
             return await pv._verify_horizon(record, horizon, methodology_version=methodology_version)
 
     return _run()
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_actual_is_compound():
+    """集成点：_verify_horizon 落库/展示的 actual 走复利（Task 3）。
+
+    窗口 4×+1% → 复利 +4.06%；若仍用 sum(window) 会得到 +4.00%（断言锁死差异）。
+    """
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.0},
+        {"trade_date": "2026-08-11", "pct_chg": 1.0},
+        {"trade_date": "2026-08-12", "pct_chg": 1.0},
+        {"trade_date": "2026-08-13", "pct_chg": 1.0},
+    ]
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["actual"] == "+4.06%"
+    assert "窗口累计=+4.06%" in entry["reason"]
 
 
 @pytest.mark.asyncio

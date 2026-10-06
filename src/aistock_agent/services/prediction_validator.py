@@ -255,6 +255,20 @@ def _condition_scan_range(record: dict[str, object], today: str) -> tuple[str, s
     return start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d")
 
 
+def _compound_pct(window: list[float]) -> float:
+    """窗口复利累计涨跌幅（%，全项目唯一口径）。
+
+    x = ∏(1 + p_i/100) − 1 —— 与 ``scripts/calibration/k_band.py`` 的
+    ``cumulative_returns`` 同口径（Task 3）。为什么必须复利：单日 pct_chg 是相对前收的
+    比率，多日累计应按净值连乘；简单求和会忽略跨日复合效应（连续两日 +1%：复利 +2.01%
+    vs 求和 +2.00%），导致 actual 展示值与复利判定依据不一致。**禁止再用 sum(window) 算 actual。**
+    """
+    acc = 1.0
+    for p in window:
+        acc *= 1.0 + p / 100.0
+    return (acc - 1.0) * 100.0
+
+
 def _judge_window(
     direction: str,
     window: list[float],
@@ -396,7 +410,7 @@ async def _verify_horizon(
         neutral_pct=float(thresholds["neutral_pct"]),
         strong_pct=float(thresholds["strong_pct"]),
         methodology_version=methodology_version)
-    cumulative = sum(window)
+    cumulative = _compound_pct(window)
     actual_str = f"{cumulative:+.2f}%"
     reason = f"方向={direction}, 窗口累计={actual_str}"
     if is_approximate:
