@@ -7,9 +7,14 @@ schema_version 2.0: content = {"display_report": {...}, "podcast_brief": "...", 
 from __future__ import annotations
 
 import json
-import logging
 
-logger = logging.getLogger(__name__)
+import structlog
+
+# 本模块按 structlog 风格记结构化日志（事件名 + kwargs）；此前误用 stdlib
+# logging.getLogger，logger.warning(..., error=...) 会在运行期抛 TypeError，
+# 把 except 兜底变成炸点（与 forward_events 同批修复）。切 structlog
+# 与 services/ 下其余模块口径一致。
+logger = structlog.get_logger()
 
 
 def parse_report_content(content: dict) -> tuple[str, str]:

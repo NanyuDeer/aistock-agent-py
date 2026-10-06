@@ -2,6 +2,26 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 修复最后一处「stdlib logger 传 kwargs」缺陷（report_parser）
+
+**开发者**: Aria
+
+### 修复
+
+- **`utils/report_parser.py` 的 `logger.warning(..., error=str(e))` 必抛 `TypeError`（既有缺陷，与 forward_events 同批的同类问题）**：该文件用 stdlib `logging.getLogger` 却按 structlog 风格传结构化 kwargs。已切 `structlog.get_logger()`，与 `services/` 其余模块口径一致。
+  - **必现触发点**：`repair_dual_layer_with_llm` 的 except 兜底（现 L173）—— LLM 修复失败时，**兜底日志自己会抛**，把「返回 None 让调用方降级」的设计变成崩溃。
+  - **另一处 L111（`logger.debug(..., error=...)`）**：stdlib 的 `debug`/`warning` 会先判 `isEnabledFor` 再进 `_log`，故 `debug` 那条**仅在日志级别为 DEBUG 时**才抛 —— 属潜在缺陷而非必现，一并修掉。
+  - **全仓排查结论**：仓库另有 12 个文件使用 stdlib logging，但均为安全的 `%s` 位置格式化 + `exc_info=`；**本文件是最后一处同类问题**，此类缺陷至此清零。
+
+### 验证
+
+- **RED → GREEN**：临时回退实现跑出 RED —— `TypeError: Logger._log() got an unexpected keyword argument 'error'`（traceback 显示 `if self.isEnabledFor(WARNING)` 后进入 `_log`，印证「warning 必抛、debug 视级别」）；切 structlog 后 GREEN。
+- 新增回归 `test_repair_failure_logs_without_typeerror`（LLM 抛错时安全返回 `None`，而非在兜底再抛），`test_report_parser.py` → **21 passed**。
+- `uv run python -m pytest tests/unit -q` → **3439 passed / 9 failed / 1 skipped**（9 条与既有基线同集）。
+- `uv run mypy src` → **272 → 270**（−2，零新增）；改动文件 ruff 仅剩 4 条 **既有** E501（经回退对比确认非本次引入）。
+
+---
+
 ## [main] 2026-10-06 — 修复第 4 处既有真缺陷：`delete_calendar_event` 恒返回 False（被「契约写错」的测试掩盖）
 
 **开发者**: Aria
