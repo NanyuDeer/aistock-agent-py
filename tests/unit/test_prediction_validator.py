@@ -93,8 +93,8 @@ async def test_run_once_verifies_due_horizon():
         updated = await run_once()
     assert updated == 1
     entry = update.await_args.args[2]
-    assert entry["result"] == "hit"
-    assert entry["grade"] == "strong_hit"  # due 当日命中
+    assert entry["result"] == "hit"  # 窗口复利 +1.40% >= index k(0.9201)
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
     assert entry["actual"] == "+1.40%"
 
 
@@ -180,8 +180,8 @@ async def test_v3_verify_bullish_window_hit_with_grade():
         updated = await run_once()
     assert updated == 1
     entry = update.await_args.args[2]
-    assert entry["result"] == "hit"
-    assert entry["grade"] == "hit"        # 非 due 当日命中、窗口无 >=5% → 普通 hit
+    assert entry["result"] == "hit"  # 窗口复利 +1.39% >= index k(0.9201)
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
     assert entry["methodology_version"] == "4.0"
     assert "baseline_neutral" in entry
 
@@ -485,8 +485,8 @@ async def test_verify_horizon_yyyymmdd_trade_date_matches_due():
         ),
     ):
         entry = await pv._verify_horizon(record, "mid")
-    assert entry["result"] == "hit"  # 不再 no_data
-    assert entry["grade"] == "strong_hit"
+    assert entry["result"] == "hit"  # 不再 no_data（复利 +1.40% >= index k）
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
     assert entry["actual"] == "+1.40%"
 
 
@@ -495,7 +495,7 @@ async def test_verify_horizon_sector_yyyymmdd_matches_due():
     """回归（sector 分支）：ths daily 同样 YYYYMMDD → 归一化后到期日匹配成功。"""
     record = _pending_sector_record(due="2026-08-10", direction="bullish")
     kline_rows = [
-        {"trade_date": "20260810", "pct_chg": 1.0},
+        {"trade_date": "20260810", "pct_chg": 1.5},  # v4 sector k=1.2935：4 日复利 +1.50% ≥ k
         {"trade_date": "20260811", "pct_chg": 0.3},
         {"trade_date": "20260812", "pct_chg": -0.2},
         {"trade_date": "20260813", "pct_chg": -0.1},
@@ -588,9 +588,11 @@ def _verified_no_data_record(
 @pytest.mark.asyncio
 async def test_verify_sector_target_resolves_and_hit():
     """H3/H8：板块 target resolve 命中 → 走 sector kline，entry 带 target_type/
-    matched_ts_code/matched_name/threshold_version/prediction_id。"""
+    matched_ts_code/matched_name/threshold_version/prediction_id。
+    v4：sector 阈值来源为 k 表 → threshold_version 记 k 表版本 "4.0"
+    （非 legacy G0c "1.0"）。"""
     record = _pending_sector_record(direction="bullish")
-    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.0},  # >0 hit
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.5},  # 复利 +1.50% ≥ sector k → hit
              {"trade_date": "2026-08-11", "pct_chg": 0.3},
              {"trade_date": "2026-08-12", "pct_chg": -0.2},
              {"trade_date": "2026-08-13", "pct_chg": -0.1}]
@@ -620,7 +622,7 @@ async def test_verify_sector_target_resolves_and_hit():
     assert entry["target_type"] == "sector"
     assert entry["matched_ts_code"] == "881121.TI"
     assert entry["matched_name"] == "半导体"
-    assert entry["threshold_version"] == "1.0"
+    assert entry["threshold_version"] == "4.0"  # v4：sector 阈值来源 = k 表（4.0）
     assert "prediction_id" in entry
 
 
@@ -651,13 +653,15 @@ async def test_verify_sector_target_unresolved_is_no_source():
 
 
 @pytest.mark.asyncio
-async def test_sector_neutral_uses_sector_threshold():
-    """H3：板块 neutral 阈值 0.25%（index 0.5% 复用会使命中率显著偏低——G0c 实证）。"""
+async def test_sector_neutral_uses_sector_k_band():
+    """v4：neutral 命中带按粒度取 k——x 落在 index k(0.9201) 与 sector k(1.2935) 之间时，
+    板块记 neutral hit（误用 index 带宽会判 miss），锁死 k_for 的 sector 分派。"""
     record = _pending_sector_record(direction="neutral")
-    kline = [{"trade_date": "2026-08-10", "pct_chg": 0.3},  # |0.3|>0.25 → 非 neutral hit
-             {"trade_date": "2026-08-11", "pct_chg": 0.4},
-             {"trade_date": "2026-08-12", "pct_chg": -0.4},
-             {"trade_date": "2026-08-13", "pct_chg": 0.35}]
+    # 4 日复利 x = +1.10%：|x| < sector k(1.2935) → hit；|x| > index k(0.9201)
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.1},
+             {"trade_date": "2026-08-11", "pct_chg": 0.0},
+             {"trade_date": "2026-08-12", "pct_chg": 0.0},
+             {"trade_date": "2026-08-13", "pct_chg": 0.0}]
     with (
         patch.object(
             pv.node_api, "resolve_ths_name",
@@ -679,7 +683,7 @@ async def test_sector_neutral_uses_sector_threshold():
     ):
         await pv.run_once()
     entry = update.await_args.args[2]
-    assert entry["result"] == "miss"  # 板块阈值下无 |pct|<0.25 日（index 0.5 阈值下为 hit）
+    assert entry["result"] == "hit"  # sector k=1.2935 内（index 带宽下会 miss）
 
 
 @pytest.mark.asyncio
@@ -1897,3 +1901,115 @@ async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
     assert kline.await_count == 2  # rec1 共享一次；rec2 窗口不同 → 各一次
     keys = {(c.args[0], c.args[1]) for c in update.call_args_list}
     assert keys == {(1, "c0"), (1, "c1"), (2, "c0")}
+
+
+# ============ Task 4：单带宽 k 判定（v4） ============
+
+
+@pytest.mark.parametrize("direction,x,k,expected", [
+    ("bullish", 2.0, 1.0, "hit"),
+    ("bullish", 0.5, 1.0, "miss"),   # |x| < k → miss（不再算命中）
+    ("bullish", -2.0, 1.0, "miss"),
+    ("bearish", -2.0, 1.0, "hit"),
+    ("bearish", -0.5, 1.0, "miss"),
+    ("neutral", 0.5, 1.0, "hit"),
+    ("neutral", 1.5, 1.0, "miss"),
+])
+def test_v4_single_band(direction, x, k, expected):
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    window = [x]  # 单日窗口即累计 = x
+    result, _grade = _judge_window(direction, window, k=k, methodology_version="4.0")
+    assert result == expected
+
+
+def test_v4_single_band_uses_compound_over_four_days():
+    """4 日窗口：x 必须是复利累计（避免单日窗口特例掩盖复利/求和差异），且 v4 恒不产 grade。
+
+    [1.0, 1.0, 1.0, 1.0] → 复利 +4.0604%（简单求和仅 +4.00%）；取 k=4.02：
+    复利 4.06 >= 4.02 → hit；若误用 sum(window)=4.00 < 4.02 → miss（锁死复利差异）。
+    """
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    window = [1.0, 1.0, 1.0, 1.0]
+    result, grade = _judge_window("bullish", window, k=4.02, methodology_version="4.0")
+    assert result == "hit"
+    assert grade is None
+
+
+def test_v4_requires_k_fail_loud():
+    """methodology_version=4.0 但未传 k → ValueError（fail loud）。
+
+    禁止静默回退成 index 的 k：sector/stock 会用错带宽且无从察觉。
+    默认 methodology_version 即 4.0，故不传 k 必须立即报错而非产出错误命中。
+    """
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    with pytest.raises(ValueError):
+        _judge_window("bullish", [1.0], methodology_version="4.0")
+
+
+def test_k_for_dispatches_by_target_type_and_falls_back_index():
+    """k 唯一来源按粒度分派：sector/stock 各用自己的 k，未知粒度回退 index。"""
+    from aistock_agent.services.k_band_table import K_BAND, k_for
+
+    assert k_for("index") == K_BAND["index"]
+    assert k_for("sector") == K_BAND["sector"]
+    assert k_for("stock") == K_BAND["stock"]
+    # 三粒度带宽确实不同（若相同则分派测试失去意义）
+    assert K_BAND["sector"] != K_BAND["index"]
+    assert K_BAND["stock"] != K_BAND["index"]
+    for unknown in ("unknown", "", "etf"):
+        assert k_for(unknown) == K_BAND["index"]
+
+
+def test_v2_path_unchanged_by_v4():
+    """回归：非 4.0（2.0 存量回补）路径行为未被 v4 改动——bullish 任一日 >0 → hit。"""
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    # window[0]=-1 不构成 strong，窗口内 0.5>0 → 普通 hit（无 k 参与、无复利）
+    result, grade = _judge_window(
+        "bullish", [-1.0, 0.5, -0.3, 0.2],
+        neutral_pct=0.5, strong_pct=5.0, methodology_version="2.0")
+    assert result == "hit"
+    assert grade == "hit"
+
+
+@pytest.mark.asyncio
+async def test_legacy_v3_sector_index_thresholds_unchanged_by_v4():
+    """护栏（Task 4 偏离计划的风险点）：v4 改造不得改动 v2/v3 存量路径的 sector/index 阈值区分。
+
+    `_verify_horizon(methodology_version="3.0")` 的 neutral 主判仍按粒度取 legacy 阈值：
+    index = 0.5（`_LEGACY_INDEX_THRESHOLDS`）、sector = 0.25（`_LEGACY_SECTOR_THRESHOLDS`），
+    均为 `mean(|p_i|) < thr`。构造同一窗口 mean(|p|)=0.4 落在 (0.25, 0.5)：
+    index → hit、sector → miss。若 v4 改造误把 4.0 的 k 分流无条件套到 v3，本用例会红。
+    """
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.4},
+        {"trade_date": "2026-08-11", "pct_chg": 0.4},
+        {"trade_date": "2026-08-12", "pct_chg": 0.4},
+        {"trade_date": "2026-08-13", "pct_chg": 0.4},
+    ]  # mean(|p|)=0.4：<0.5（index hit）且 >=0.25（sector miss）
+    # index（上证指数）：legacy index 阈值 0.5 → hit
+    index_entry = await _verify_direct(
+        _pending_record(direction="neutral"), methodology_version="3.0", kline_rows=kline)
+    assert index_entry["methodology_version"] == "3.0"
+    assert index_entry["result"] == "hit"
+    assert index_entry["baseline_neutral"] is True   # mean 0.4 < 0.5
+    # sector（半导体板块）：legacy sector 阈值 0.25 → miss
+    with (
+        patch.object(
+            pv.node_api, "resolve_ths_name",
+            new=AsyncMock(return_value={"ts_code": "881121.TI", "name": "半导体"}),
+        ),
+        patch.object(pv.node_api, "get_ths_daily_range", new=AsyncMock(return_value=kline)),
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        sector_entry = await pv._verify_horizon(
+            _pending_sector_record(direction="neutral"), "mid", methodology_version="3.0")
+    assert sector_entry["methodology_version"] == "3.0"
+    assert sector_entry["result"] == "miss"          # mean 0.4 >= 0.25
+    assert sector_entry["baseline_neutral"] is False  # mean 0.4 >= 0.25

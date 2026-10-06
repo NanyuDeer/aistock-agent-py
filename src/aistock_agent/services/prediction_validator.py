@@ -43,6 +43,7 @@ from aistock_agent.services.condition_met_judge import (
     judge_condition_met_state,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.k_band_table import K_BAND_META, k_for
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
     bucket_summary,
@@ -64,7 +65,7 @@ logger = structlog.get_logger()
 # target（指数名）→ 6 位代码（G6 外置到 prediction_targets.py；别名兼容既有引用名）
 _INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 
-# neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
+# neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中（legacy：仅 v2/v3 与条件判定用）
 _NEUTRAL_PCT_THRESHOLD = 0.5
 
 # v2/v3/v4 口径常量（H1/D1/D6/G13/G14；4.0 起单带宽 k 复利主判）
@@ -73,7 +74,7 @@ _METHODOLOGY_VERSION = "4.0"    # 验证器主链写入版本（4.0 单带宽 k 
 # 存量回补目标版本：backfill 只回补 2.0 时代遗留 no_data，用 2.0 口径重验、写 2.0（不混版本）。
 # 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
-_STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
+_STRONG_PCT = 5.0              # legacy：v2/v3 grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_range index 分支）
 # 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_range stock 分支）
 _STOCK_KLINE_FETCH_DAYS = 120
@@ -91,11 +92,13 @@ _CONDITION_SCAN_MAX_DAYS = 120
 # 窗口本身是自然日区间，故取数长度由 _CONDITION_SCAN_MAX_DAYS 约束、此处只做尾部截取。
 _CONDITION_SCAN_WINDOW = 60
 
-# H3：板块验证阈值（G0c 标定 neutral 0.25%/strong 3.0%，版本 1.0）；
-# index 保持 0.5/5.0（_INDEX_THRESHOLDS 复用既有常量，_judge_window 默认参数行为不变）
-SECTOR_THRESHOLDS: dict[str, float] = {"neutral_pct": 0.25, "strong_pct": 3.0}
-_THRESHOLD_VERSION = "1.0"
-_INDEX_THRESHOLDS: dict[str, float] = {
+# ⚠️ legacy 阈值 —— 仅 v2 存量回补路径使用；4.0 起阈值唯一来源是 k_band_table.k_for。
+#   · 4.0 单带宽 k 判定不再读下表；保留 SECTOR/INDEX 两套是为了让 backfill 的 2.0 口径
+#     （sector 与 index 阈值不同）逐字不变——删掉就必须再造一遍。
+#   · 任何 4.0 主链代码禁止引用 _LEGACY_*_THRESHOLDS。
+_THRESHOLD_VERSION = "1.0"     # legacy：sector 阈值版本标记（H3，仅 v2 口径语义）
+_LEGACY_SECTOR_THRESHOLDS: dict[str, float] = {"neutral_pct": 0.25, "strong_pct": 3.0}
+_LEGACY_INDEX_THRESHOLDS: dict[str, float] = {
     "neutral_pct": _NEUTRAL_PCT_THRESHOLD,
     "strong_pct": _STRONG_PCT,
 }
@@ -275,17 +278,39 @@ def _judge_window(
     neutral_pct: float = _NEUTRAL_PCT_THRESHOLD,
     strong_pct: float = _STRONG_PCT,
     methodology_version: str = _METHODOLOGY_VERSION,
+    *,
+    k: float | None = None,
 ) -> tuple[str, str | None]:
-    """窗口主判（阶段 0 起默认 3.0 窗口累计口径）。返回 (result, grade)。
+    """窗口主判。返回 (result, grade)。
 
+    - v4（"4.0"，当前生产口径）：**单带宽 k**（三方向命中区域互补），x = 复利累计：
+      bullish hit ⟺ x >= +k；bearish hit ⟺ x <= -k；neutral hit ⟺ -k < x < +k。
+      **为什么 |x| < k 时方向预判记 miss**：k 是"横盘噪声带宽"（标定为 |x| 的 1/3 分位），
+      带内涨跌与随机噪声不可区分、不足以支撑方向性 claim，故不计命中（统计侧计入 flat_rate）。
+      v4 恒不产 grade（None），不再有 strong_hit/strong_miss。
+      k 必须显式传入（唯一来源 `k_band_table.k_for`）；k is None → ValueError（fail loud，
+      禁止静默回退默认带宽——否则 sector/stock 会用错带宽且无从察觉）。
     - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+    - v3（"3.0"，历史生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
 
-    grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=strong_pct；
-    strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。neutral 恒 None。
-
-    H3：默认参数即 index 阈值（0.5/5.0），行为不变；sector 调用注入 0.25/3.0。
+    v2/v3 grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向
+    |pct|>=strong_pct；strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。
+    neutral 恒 None。
+    默认 neutral_pct/strong_pct 为 legacy index 阈值，仅 v2/v3 分支使用。
     """
+    if methodology_version == "4.0":
+        # v4：单带宽 k（三方向命中区域互补；|x| < k → miss）
+        if k is None:
+            raise ValueError(
+                "_judge_window: methodology_version='4.0' 必须显式传入 k"
+                "（单带宽唯一来源 k_band_table.k_for）；禁止静默回退默认带宽"
+            )
+        x = _compound_pct(window)
+        if direction == "bullish":
+            return ("hit" if x >= k else "miss"), None
+        if direction == "bearish":
+            return ("hit" if x <= -k else "miss"), None
+        return ("hit" if -k < x < k else "miss"), None
     if methodology_version == "2.0":
         # v2：任一日符号命中（G13，无累计净值兜底）
         if direction == "bullish":
@@ -403,30 +428,47 @@ async def _verify_horizon(
             reason = f"{reason}（板块指数数据可能停更）"
         return {**base, "wait": True, "reason": reason}
     direction = str(entry.get("direction") or "neutral")
-    # H3：sector 注入 0.25/3.0 阈值（G0c 标定），index 保持默认 0.5/5.0
-    thresholds = SECTOR_THRESHOLDS if target_type == "sector" else _INDEX_THRESHOLDS
-    result, grade = _judge_window(
-        direction, window,
-        neutral_pct=float(thresholds["neutral_pct"]),
-        strong_pct=float(thresholds["strong_pct"]),
-        methodology_version=methodology_version)
+    if methodology_version == "4.0":
+        # v4：单带宽 k，唯一来源 k_band_table.k_for(target_type)（index/sector/stock 各一套）
+        k_band = k_for(target_type)
+        result, grade = _judge_window(
+            direction, window, k=k_band, methodology_version=methodology_version)
+        # v4 baseline_neutral 与主判**同一谓词**（-k < x < k）：恒中性预测的命中标记必须与
+        # v4 判定口径一致，否则 LLM vs baseline 的对照失去意义（neutral_pct 已非判定依据）。
+        baseline_neutral = -k_band < _compound_pct(window) < k_band
+        # v4 起 sector 的阈值来源改为 k 表（不再用 G0c legacy 0.25/3.0）→ threshold_version
+        # 取 k 表标定口径版本（"4.0"）；legacy 路径（v2/v3）仍记 G0c 的 "1.0"（见 else 分支）。
+        # 字段语义是"该 sector entry 所用阈值来自哪一版标定"，故随来源切换而变。
+        threshold_version = str(K_BAND_META["methodology_version"])
+    else:
+        # v2/v3 存量口径（backfill 传 2.0）：sector/index 各用 legacy 阈值，行为逐字不变
+        thresholds = (
+            _LEGACY_SECTOR_THRESHOLDS if target_type == "sector" else _LEGACY_INDEX_THRESHOLDS
+        )
+        result, grade = _judge_window(
+            direction, window,
+            neutral_pct=float(thresholds["neutral_pct"]),
+            strong_pct=float(thresholds["strong_pct"]),
+            methodology_version=methodology_version)
+        # baseline_neutral（H6）随版本口径：v2 任一日 |p|<thr；v3 mean(|p_i|)<thr
+        if methodology_version == "2.0":
+            baseline_neutral = any(abs(p) < float(thresholds["neutral_pct"]) for p in window)
+        else:
+            baseline_neutral = (
+                sum(abs(p) for p in window) / len(window) < float(thresholds["neutral_pct"])
+            )
+        threshold_version = _THRESHOLD_VERSION  # legacy G0c 标定版本（仅 v2/v3 语义）
     cumulative = _compound_pct(window)
     actual_str = f"{cumulative:+.2f}%"
     reason = f"方向={direction}, 窗口累计={actual_str}"
     if is_approximate:
         reason = f"(approximate_due_date) {reason}"
-    # baseline_neutral（H6）随版本口径：v2 任一日 |p|<thr；v3 mean(|p_i|)<thr
-    if methodology_version == "2.0":
-        baseline_neutral = any(abs(p) < float(thresholds["neutral_pct"]) for p in window)
-    else:
-        baseline_neutral = (
-            sum(abs(p) for p in window) / len(window) < float(thresholds["neutral_pct"])
-        )
     out = {**base, "result": result, "actual": actual_str, "reason": reason,
            "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
            "baseline_neutral": baseline_neutral}
     if target_type == "sector":
-        out["threshold_version"] = _THRESHOLD_VERSION  # H3：sector 阈值版本（1.0）
+        # H3：sector 阈值版本 → v4 记 k 表版本（"4.0"）、legacy 记 G0c（"1.0"）
+        out["threshold_version"] = threshold_version
     if grade is not None:
         out["grade"] = grade
     return out
