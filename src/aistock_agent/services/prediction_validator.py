@@ -295,8 +295,10 @@ def _judge_window(
       v4 恒不产 grade（None），不再有 strong_hit/strong_miss。
       k 必须显式传入（唯一来源 `k_band_table.k_for`）；k is None → ValueError（fail loud，
       禁止静默回退默认带宽——否则 sector/stock 会用错带宽且无从察觉）。
-    - v2（"2.0"，**存量回补**口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，**历史重验**口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+    - v2（"2.0"，**存量回补**口径）：bullish 任一日 >0；bearish 任一日 <0；
+      neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，**历史重验**口径）：bullish 累计 sum>0；bearish 累计 sum<0；
+      neutral mean(|p_i|)<neutral_pct
 
     v2/v3 均为**存量回补/重验**口径（仅 legacy 路径可达），**非现役主链**；现役主链恒走 v4/4.0。
     v2/v3 grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向

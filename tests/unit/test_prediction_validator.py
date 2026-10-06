@@ -172,10 +172,22 @@ async def test_v4_verify_bullish_window_hit_without_grade():
         {"trade_date": "2026-08-13", "pct_chg": -0.1},
     ]  # sum=1.4 > 0
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
         updated = await run_once()
     assert updated == 1
@@ -197,10 +209,22 @@ async def test_v2_bullish_no_sign_hit_is_miss_without_fallback():
         {"trade_date": "2026-08-13", "pct_chg": -0.3},
     ]
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
         updated = await run_once()
     assert updated == 1
@@ -285,7 +309,7 @@ async def test_run_once_h7_missing_pct_chg_rows_insufficient():
 @pytest.mark.asyncio
 async def test_fetch_kline_window_malformed_due_returns_none():
     """脏 due_date（非 %Y-%m-%d）→ 窗口无法确定 → 返回 None（数据源故障语义），不抛异常。"""
-    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])) as m:
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])):
         out = await pv._fetch_kline_window("index", "000001", "not-a-date")
     assert out is None
 
@@ -518,12 +542,24 @@ async def test_v4_neutral_grade_is_null():
         {"trade_date": "2026-08-13", "pct_chg": 0.3},
     ]
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
-        updated = await run_once()
+        await run_once()
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
     assert entry["methodology_version"] == "4.0"
@@ -827,7 +863,9 @@ def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=
                 return_value=date(2026, 8, 13),
             ),
         ):
-            return await pv._verify_horizon(record, horizon, methodology_version=methodology_version)
+            return await pv._verify_horizon(
+                record, horizon, methodology_version=methodology_version,
+            )
 
     return _run()
 
@@ -950,7 +988,8 @@ async def test_v3_vs_v2_baseline_neutral_differs():
 
 @pytest.mark.asyncio
 async def test_backfill_no_data_rewrites_keep_v2_version():
-    """backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'（不混版本）。"""
+    """backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'
+    （不混版本）。"""
     record = _verified_no_data_record()
     kline = [
         {"trade_date": "2026-08-10", "pct_chg": 1.0},   # 单日 +1.0%（2.0 any>0 → hit）

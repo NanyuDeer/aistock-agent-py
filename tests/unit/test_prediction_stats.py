@@ -2,8 +2,8 @@
 from aistock_agent.services.prediction_stats import (
     baseline_compare,
     baseline_neutral_summary,
-    build_validation_profile,
     bucket_summary,
+    build_validation_profile,
     clamp_confidence_by_bucket,
     hit_rate_summary,
     wilson_ci,
@@ -48,8 +48,8 @@ def test_baseline_compare_excess():
 
 
 def _entry(target_type, result="hit", prediction_id=1, methodology_version="4.0"):
-    return {"methodology_version": methodology_version, "result": result, "target_type": target_type,
-            "approximate": False, "prediction_id": prediction_id}
+    return {"methodology_version": methodology_version, "result": result,
+            "target_type": target_type, "approximate": False, "prediction_id": prediction_id}
 
 
 def test_hit_rate_summary_default_filters_current_version_only():
@@ -186,7 +186,9 @@ def test_build_validation_profile_empty():
 
 
 def test_build_validation_profile_hit_rate():
-    """Spec B §7 P1：单 target 命中率/n/样本判定正确；非当前版本 & insufficient & approximate 剔除。"""
+    """Spec B §7 P1：单 target 命中率/n/样本判定正确；
+    非当前版本 & insufficient & approximate 剔除。
+    """
     entries = [
         _v3_entry("hit"),
         _v3_entry("miss"),
@@ -214,7 +216,9 @@ def test_build_validation_profile_horizon_breakdown():
 
 
 def test_build_validation_profile_miss_patterns():
-    """Spec B §7 P1：miss_patterns 归类——strong_miss→strong_reversal，其余 plain_miss，按 count 降序。"""
+    """Spec B §7 P1：miss_patterns 归类——strong_miss→strong_reversal，
+    其余 plain_miss，按 count 降序。
+    """
     entries = [
         _v3_entry("miss", grade="strong_miss"),
         _v3_entry("miss"),

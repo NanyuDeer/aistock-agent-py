@@ -50,7 +50,8 @@ def _filter_v2(
     """
     return [
         e for e in entries
-        if e.get("methodology_version") == methodology_version and e.get("result") in {"hit", "miss"}
+        if e.get("methodology_version") == methodology_version
+        and e.get("result") in {"hit", "miss"}
         and not e.get("approximate")
         and e.get("horizon") != "long"      # long 档不计入迭代看板
         and (target_type is None or e.get("target_type") == target_type)
