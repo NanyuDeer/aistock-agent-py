@@ -41,6 +41,7 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.services.stock_info_prediction import StockInfoPredictionRequest
 from aistock_agent.services.token_usage import reset_token_usage
 from aistock_agent.state.chat_schema import QuestionState
 from aistock_agent.utils.date import shanghai_today
@@ -2016,6 +2017,79 @@ async def trigger_predictions_from_trace(
             exc_info=True,
         )
         raise HTTPException(status_code=502, detail=f"predictions from-trace failed: {exc}")
+
+
+# ── 个股情报 → 可验证预判落库（抓取时已产出 ai_impact/ai_horizon 的确定性映射，P2/T2） ──
+
+
+@router.post("/internal/predictions/from-stock-info")
+async def predictions_from_stock_info(
+    body: StockInfoPredictionRequest,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """个股情报（抓取时已产出）→ 可验证预判落库（P2 个股粒度入验证环）。
+
+    确定性映射，不调 LLM；``due_dates`` 复用 ``_compute_due_dates``（与 index/sector
+    同口径）。门槛不达 → 200 skipped（不落库）；同 source_id 已验证 → 409 拒覆盖；
+    意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import _compute_due_dates
+    from aistock_agent.services.stock_info_prediction import (
+        build_stock_info_prediction,
+        stock_info_source_id,
+    )
+
+    logger = structlog.get_logger()
+    source_id = stock_info_source_id(body.symbol, body.published_date)
+    try:
+        prediction = build_stock_info_prediction(
+            symbol=body.symbol,
+            stock_name=body.stock_name,
+            published_date=body.published_date,
+            ai_impact=body.ai_impact,
+            ai_horizon=body.ai_horizon,
+            ai_summary=body.ai_summary,
+            url=body.url,
+        )
+        if prediction is None:
+            reason = "未达入环门槛或输入非法"
+            logger.info("stock_info_prediction_skipped", source_id=source_id, reason=reason)
+            return {"status": "skipped", "reason": reason, "record": None}
+
+        # 已验证拒覆盖防御（SPEC S6）：同 source_id 已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预判被静默重写
+        existing = await node_api.list_predictions(source_id)
+        for existing_record in existing:
+            verification = existing_record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        due_dates, approximate_horizons = _compute_due_dates(
+            body.published_date, prediction.horizons
+        )
+        payload: dict[str, object] = {
+            "source_type": "stock_info",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        record = await node_api.save_prediction(payload)
+        logger.info("stock_info_prediction_saved", source_id=source_id, due_dates=due_dates)
+        return {"status": "saved", "reason": None, "record": record}
+    except HTTPException:
+        # 409 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "stock_info_prediction_failed",
+            source_id=source_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-stock-info failed: {exc}")
 
 
 @router.post("/qa")
