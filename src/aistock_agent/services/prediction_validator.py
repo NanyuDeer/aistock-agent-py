@@ -259,12 +259,17 @@ def _condition_scan_range(record: dict[str, object], today: str) -> tuple[str, s
 
 
 def _compound_pct(window: list[float]) -> float:
-    """窗口复利累计涨跌幅（%，全项目唯一口径）。
+    """窗口复利累计涨跌幅（%，4.0 主链判定唯一口径）。
 
     x = ∏(1 + p_i/100) − 1 —— 与 ``scripts/calibration/k_band.py`` 的
     ``cumulative_returns`` 同口径（Task 3）。为什么必须复利：单日 pct_chg 是相对前收的
     比率，多日累计应按净值连乘；简单求和会忽略跨日复合效应（连续两日 +1%：复利 +2.01%
-    vs 求和 +2.00%），导致 actual 展示值与复利判定依据不一致。**禁止再用 sum(window) 算 actual。**
+    vs 求和 +2.00%），导致 actual 展示值与复利判定依据不一致。
+
+    例外（已退役、不属 4.0 判定口径）：条件链路 ``_verify_conditions`` 的 scenario actual
+    仍用 ``sum(window)``——2026-10-06 条件化预判退出验证环后该函数不再被 ``run_once`` 调用，
+    仅存量回溯 ``backfill_condition_met`` 可及。4.0 主链（_verify_horizon / _judge_window）
+    一律用本函数，不再有例外。
     """
     acc = 1.0
     for p in window:

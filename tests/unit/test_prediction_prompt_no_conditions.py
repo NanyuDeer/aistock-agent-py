@@ -15,11 +15,13 @@ def test_prediction_prompts_do_not_request_conditions():
 
     for prompt in (PREDICTION_PROMPT, PREDICTION_CHAT_PROMPT):
         assert "条件化预判核心" not in prompt
-        # 注：brief Step 1 原断言 `assert "conditions：" not in prompt` 与 Step 3 要求补写的
-        # 兼容说明行 `- conditions：**不再产出**…` 直接冲突（后者含 "conditions："）。
-        # 故按语义收窄：锁定「旧的必须产出要求已删 + 兼容说明已补」。
+        # 兼容说明行已加「字段」二字 → "conditions："（紧跟全角冒号）不再出现。
+        assert "conditions：" not in prompt
         assert "必须非空" not in prompt  # 旧「必须非空，2-3 条」要求段已删
         assert "不再产出" in prompt       # 输出契约补兼容说明（字段保留但不产出）
+        # 复归护栏：拦截「只把示例 JSON {"condition": …} 加回来」的退化；
+        # 说明行写作 "conditions 字段："，不含带引号的 "condition"，两者兼容。
+        assert '"condition"' not in prompt
 
 
 def test_rhythm_master_prompt_untouched():

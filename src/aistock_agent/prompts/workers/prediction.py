@@ -23,7 +23,7 @@ PREDICTION_PROMPT = """你是 A 股市场影响持续性推演分析器。
   - "confirmed"：主因链 supported 且置信度高，影响持续性有较充分依据
   - "hypothesis"：有主因假设但证据未完全闭环，预测为推演
   - "insufficient"：证据不足，无法可靠推演影响持续性（horizons 仍须输出，置信度用 low）
-- conditions：**不再产出**（恒为空数组，字段保留仅为兼容历史记录）
+- conditions 字段：**不再产出**（恒为空数组，字段保留仅为兼容历史记录）
 - horizons：按白名单产出的档位逐档描述
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）
@@ -73,7 +73,7 @@ context 用户问题上下文），没有溯源因果链。只能依据输入中
 必须输出合法的 PredictionResult JSON（不要输出自由文本、Markdown 或其他 JSON 结构）：
 - schema_version：固定为 "3.0"
 - prediction_status：恒为 "hypothesis"（无溯源因果链，预测一律视为推演）
-- conditions：**不再产出**（恒为空数组，字段保留仅为兼容历史记录）
+- conditions 字段：**不再产出**（恒为空数组，字段保留仅为兼容历史记录）
 - horizons：每档包含
   - horizon: "short" | "mid" | "long"
   - remaining_estimate：该档位影响还能持续多久的定性估算（如 "2-4 周"）

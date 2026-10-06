@@ -1921,6 +1921,10 @@ async def test_run_once_ignores_conditions_after_retire() -> None:
     ("bearish", -0.5, 1.0, "miss"),
     ("neutral", 0.5, 1.0, "hit"),
     ("neutral", 1.5, 1.0, "miss"),
+    # 边界（x 恰等于 ±k）：锁死 >= / <= 语义——若实现误写成 > / <，上面用例仍会全绿。
+    ("bullish", 1.0, 1.0, "hit"),    # x == +k → hit（>=）
+    ("bearish", -1.0, 1.0, "hit"),   # x == -k → hit（<=）
+    ("neutral", 1.0, 1.0, "miss"),   # x == +k → 不在开区间 (-k, +k) → miss
 ])
 def test_v4_single_band(direction, x, k, expected):
     from aistock_agent.services.prediction_validator import _judge_window

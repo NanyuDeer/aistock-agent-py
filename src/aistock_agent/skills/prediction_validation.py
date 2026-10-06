@@ -367,8 +367,11 @@ def enrich_prediction_input(
                     {"scenario": sc, "count": c}
                     for sc, c in ranked
                 ],
+                # 2026-10-06 条件退役：原句"预判时可适当提高其 conditions[] 权重"指向已退役字段，
+                # 会作为上下文注入 LLM 并引导其继续使用/产出 conditions（与生成侧退役相抵）→ 改写为
+                # 不含 conditions 的参考提示；scenario_signal 的其余语义（排序/结果集）不变。
                 "note": (
-                    "以下场景在历史溯源中被现实多次印证，预判时可适当提高其 conditions[] 权重；"
+                    "以下场景在历史溯源中被现实多次印证，可作预判参考；"
                     "仅供输入参考，不产交易指令。"
                 ),
             }
