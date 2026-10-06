@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "provenance": {
+    "source": "aistock-app-api/src/data/kg-cache/concept_industry_relations.json + industries.json",
+    "method": "Tushare ths_member 成分股重叠度（overlapRatio）Top-1；同率按 industryId 升序",
+    "extracted_for": "rhythm sector scope (spec 2026-10-06 §6)"
+  },
+  "baseline": [
+    {"concept": "AI 算力", "concept_code": "886050.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "AI 应用", "concept_code": "886108.TI", "industry": "软件开发", "industry_code": "881272.TI"},
+    {"concept": "半导体", "concept_code": "881121.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "低空经济", "concept_code": "886067.TI", "industry": "汽车零部件", "industry_code": "881126.TI"},
+    {"concept": "创新药", "concept_code": "886015.TI", "industry": "化学制药", "industry_code": "881140.TI"}
+  ],
+  "additive": [
+    {"concept": "共封装光学(CPO)", "concept_code": "886033.TI", "industry": "元件", "industry_code": "881270.TI"},
+    {"concept": "PCB概念", "concept_code": "885959.TI", "industry": "元件", "industry_code": "881270.TI"},
+    {"concept": "液冷服务器", "concept_code": "886044.TI", "industry": "通用设备", "industry_code": "881117.TI"},
+    {"concept": "存储芯片", "concept_code": "886042.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "第三代半导体", "concept_code": "885908.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "先进封装", "concept_code": "886009.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "东数西算(算力)", "concept_code": "885957.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "数据中心(AIDC)", "concept_code": "885887.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "AIGC概念", "concept_code": "886019.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "AI智能体", "concept_code": "886099.TI", "industry": "软件开发", "industry_code": "881272.TI"},
+    {"concept": "多模态AI", "concept_code": "886062.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "国家大基金持股", "concept_code": "885893.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "光刻胶", "concept_code": "885864.TI", "industry": "化学制品", "industry_code": "881109.TI"},
+    {"concept": "光刻机", "concept_code": "886054.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "数据要素", "concept_code": "886041.TI", "industry": "软件开发", "industry_code": "881272.TI"},
+    {"concept": "云计算", "concept_code": "885362.TI", "industry": "IT服务", "industry_code": "881271.TI"},
+    {"concept": "培育钻石", "concept_code": "885937.TI", "industry": "通用设备", "industry_code": "881117.TI"},
+    {"concept": "英伟达概念", "concept_code": "886048.TI", "industry": "半导体", "industry_code": "881121.TI"},
+    {"concept": "云办公", "concept_code": "885881.TI", "industry": "软件开发", "industry_code": "881272.TI"},
+    {"concept": "光纤概念", "concept_code": "886084.TI", "industry": "通信设备", "industry_code": "881129.TI"}
+  ]
+}
