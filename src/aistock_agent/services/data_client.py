@@ -485,13 +485,15 @@ class NodeApiClient:
 
         供候选 rejected 清场 / 种子删除；返回 False 表示不存在或删除失败（幂等）。
         """
+        # 注意：self.delete() 已解包信封、只返回 data（即 {deleted: ...}），
+        # 故此处**不能**再取一层 "data"——曾因多取一层导致恒返回 False，
+        # 使 forward_events 的「候选 rejected 清场」计数恒为 0。
         result = await self.delete(
             "/internal/calendar/events", {"event_date": event_date, "title": title}
         )
         if not isinstance(result, dict):
             return False
-        data = result.get("data")
-        return bool(data.get("deleted")) if isinstance(data, dict) else False
+        return bool(result.get("deleted"))
 
     async def post_event_entity(self, body: dict[str, object]) -> dict[str, object] | None:
         """POST /internal/event-entities（Event Entity 物化，spec §10.2）。

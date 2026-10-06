@@ -2,6 +2,27 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 修复第 4 处既有真缺陷：`delete_calendar_event` 恒返回 False（被「契约写错」的测试掩盖）
+
+**开发者**: Aria
+
+### 修复
+
+- **`services/data_client.py` 的 `delete_calendar_event` 恒返回 `False`（既有缺陷，随同批修复）**：`NodeApiClient.delete()` 已解包信封、直接返回 `data`（即 `{deleted: ...}`），而该函数又取了一层 `result["data"]` → 恒取不到 → 无论删除成功与否都返回 `False`。
+  - **影响**：消费方 `services/forward_events.py:174` 是 `if await node_api.delete_calendar_event(...): rejected_cleared += 1` → **「候选 rejected 清场」计数在生产中恒为 0**（删除请求其实发出去了，但成功从不被计入），该清场指标长期失真。
+  - **修法**：按 `delete()` 的**真实契约**判定 —— `return bool(result.get("deleted"))`，并加注释说明不可再取一层 `data`。
+  - **为何长期未被发现**：既有测试 `test_delete_calendar_event` 的 fake 返回的是**整个信封** `{"code":0,"data":{"deleted":True}}`，与真实 `delete()` 的返回契约不一致 —— 这个「契约写错的 mock」正好掩盖了实现里多取一层的缺陷。本次一并把该 fake 改为按真实契约返回 `{"deleted": True}`。
+
+### 验证
+
+- **RED → GREEN**：先修正测试契约并跑出 RED —— `assert False is True`（`tests/unit/test_data_client_calendar.py:46`），证明缺陷真实存在；修实现后转 GREEN。
+- 新增 `test_delete_calendar_event_false_when_not_deleted`（`deleted: False` 与返回非 dict 两种情形均判失败，锁住幂等语义、不误报成功）。
+- 定向 `test_data_client_calendar + test_forward_events` → **15 passed**。
+- `uv run python -m pytest tests/unit -q` → **3438 passed / 9 failed / 1 skipped**（9 条与既有基线同集）。
+- `uv run ruff check <改动文件>` → **All checks passed!**；`uv run mypy src` → **272**（不变，零新增）。
+
+---
+
 ## [main] 2026-10-06 — 修复 3 处既有真缺陷（LLM 判定 ImportError / stdlib logger kwargs / httpx delete json）
 
 **开发者**: Aria
@@ -25,7 +46,7 @@
 ### 说明
 
 - 仅修上述 3 处确证缺陷；mypy 存量 B/C 档约 270 条本轮不动。
-- 另发现一处**既有、非本次范围**缺陷（未修，留待跟进）：`data_client.delete_calendar_event` 中 `delete()` 已解包 `data`（返回 `{deleted:...}`），而该函数又读 `result["data"]` → 恒返回 `False`，导致 rejected 清场即便请求成功也不计数。
+- 另发现一处**既有**缺陷：`data_client.delete_calendar_event` 中 `delete()` 已解包 `data`（返回 `{deleted:...}`），而该函数又读 `result["data"]` → 恒返回 `False`，导致 rejected 清场即便请求成功也不计数。**已随本轮修复**，见上一条 CHANGELOG 记录。
 
 ---
 
