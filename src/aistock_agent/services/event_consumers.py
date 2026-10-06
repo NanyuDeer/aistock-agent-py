@@ -18,6 +18,7 @@ import asyncio
 import json
 import time
 from abc import ABC, abstractmethod
+from typing import cast
 
 from structlog import get_logger
 
@@ -36,8 +37,15 @@ from aistock_agent.agents.workers.sector_trace import (
 from aistock_agent.config import settings
 from aistock_agent.services.attribution_chain import index_pct_from_snapshot
 from aistock_agent.services.briefing import build_and_persist_brief
-from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_bus import Event, EventBus
+from aistock_agent.services.data_client import NodeApiClient, node_api
+from aistock_agent.services.event_bus import (
+    Event,
+    EventBus,
+    ReportPayload,
+    ReviewDonePayload,
+    ReviewPayload,
+    SnapshotPayload,
+)
 from aistock_agent.services.prediction_service import (
     TraceUnavailableError,
     predict_from_trace,
@@ -45,6 +53,7 @@ from aistock_agent.services.prediction_service import (
     save_skipped_prediction,
 )
 from aistock_agent.services.snapshot_builder import build_snapshot
+from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.brief_contract import (
     build_iterate_brief_summary,
     build_market_snapshot_brief_summary,
@@ -93,9 +102,11 @@ class PredictionRetryExhaustedError(Exception):
 class ConsumerContext:
     """消费者共享上下文。"""
 
-    def __init__(self, event_bus: EventBus, node_api_client: object = None) -> None:
+    def __init__(
+        self, event_bus: EventBus, node_api_client: NodeApiClient | None = None
+    ) -> None:
         self.event_bus = event_bus
-        self.node_api = node_api_client or node_api
+        self.node_api: NodeApiClient = node_api_client or node_api
 
 
 class BaseConsumer(ABC):
@@ -120,9 +131,10 @@ class BaseConsumer(ABC):
 async def publish_review_done(event_bus: EventBus, *, report_date: str, trace_id: str) -> None:
     """发布 review_done（幂等 event_id=review_done_{date}_{trace_id}；失败仅告警不阻断 review）。"""
     try:
+        payload: ReviewDonePayload = {"report_date": report_date, "trace_id": trace_id}
         await event_bus.publish(
             CHANNEL_REVIEW_DONE,
-            payload={"report_date": report_date, "trace_id": trace_id},
+            payload=payload,
             event_id=f"review_done_{report_date}_{trace_id}",
         )
         logger.info("review_done_published", report_date=report_date, trace_id=trace_id)
@@ -138,8 +150,9 @@ class ReviewQuickConsumer(BaseConsumer):
         return CHANNEL_REVIEW_QUICK
 
     async def handle(self, event: Event) -> None:
-        report_date = event.payload["report_date"]
-        trace_id = event.payload.get("trace_id", event.event_id)
+        payload = cast(ReviewPayload, event.payload)
+        report_date = payload["report_date"]
+        trace_id = payload.get("trace_id", event.event_id)
 
         # 有限退避重试：review 瞬时故障（LLM/数据源抖动）自愈，持续故障降级。
         # 为什么内联 sleep 而非 EventBus.retry：该通道一天仅一次，内联最直观、不进
@@ -170,14 +183,15 @@ class ReviewQuickConsumer(BaseConsumer):
 
         # quick review 完成后触发 quick snapshot。degraded 即使重试耗尽也照常发布，
         # 由 SnapshotConsumer 构造降级快照 → 广播，晚报不静默丢失（Task 2 兜底）。
+        snapshot_payload: SnapshotPayload = {
+            "report_date": report_date,
+            "snapshot_kind": "quick",
+            "review_degraded": review_degraded,
+            "review_status": review_status,
+        }
         await self.ctx.event_bus.publish(
             CHANNEL_SNAPSHOT,
-            payload={
-                "report_date": report_date,
-                "snapshot_kind": "quick",
-                "review_degraded": review_degraded,
-                "review_status": review_status,
-            },
+            payload=snapshot_payload,
         )
         logger.info("review_quick_done", report_date=report_date, trace_id=trace_id)
 
@@ -190,8 +204,9 @@ class ReviewFullConsumer(BaseConsumer):
         return CHANNEL_REVIEW_FULL
 
     async def handle(self, event: Event) -> None:
-        report_date = event.payload["report_date"]
-        trace_id = event.payload.get("trace_id", event.event_id)
+        payload = cast(ReviewPayload, event.payload)
+        report_date = payload["report_date"]
+        trace_id = payload.get("trace_id", event.event_id)
 
         result = await run_review(
             report_date=report_date,
@@ -209,13 +224,14 @@ class ReviewFullConsumer(BaseConsumer):
             )
 
         # full review 完成后触发 full snapshot -> iterate -> broadcast 完整链路
+        snapshot_payload: SnapshotPayload = {
+            "report_date": report_date,
+            "snapshot_kind": "full",
+            "trace_id": trace_id,
+        }
         await self.ctx.event_bus.publish(
             CHANNEL_SNAPSHOT,
-            payload={
-                "report_date": report_date,
-                "snapshot_kind": "full",
-                "trace_id": trace_id,
-            },
+            payload=snapshot_payload,
         )
         logger.info("review_full_done", report_date=report_date, trace_id=trace_id)
 
@@ -263,13 +279,14 @@ class SnapshotConsumer(BaseConsumer):
         return CHANNEL_SNAPSHOT
 
     async def handle(self, event: Event) -> None:
-        report_date = event.payload["report_date"]
-        snapshot_kind = event.payload.get("snapshot_kind", "full")
+        payload = cast(SnapshotPayload, event.payload)
+        report_date = payload["report_date"]
+        snapshot_kind = payload.get("snapshot_kind", "full")
         # 显式消费 quick 链路透传的降级契约（Task 1 发布、本处消费）；直接触发的
         # snapshot（如 full 链路）无该字段 → 缺省视为未降级，消除隐性耦合。
-        review_degraded: bool = bool(event.payload.get("review_degraded", False))
+        review_degraded: bool = bool(payload.get("review_degraded", False))
         review_status: str = str(
-            event.payload.get("review_status")
+            payload.get("review_status")
             or ("degraded" if review_degraded else "ok")
         )
 
@@ -313,9 +330,10 @@ class SnapshotConsumer(BaseConsumer):
 
         # 仅 full snapshot 触发后续 iterate -> broadcast 链路
         if snapshot_kind == "full":
+            iterate_payload: ReportPayload = {"report_date": report_date}
             await self.ctx.event_bus.publish(
                 CHANNEL_ITERATE,
-                payload={"report_date": report_date},
+                payload=iterate_payload,
             )
         elif snapshot_kind == "quick":
             # quick snapshot 直接触发 broadcast（晚间双人播报）。
@@ -323,9 +341,10 @@ class SnapshotConsumer(BaseConsumer):
             # 不依赖 iterate 分析；quick 链路补跑 iterate 是重复 LLM 消耗且无消费方。
             # 此前 quick 链路止步 snapshot 不触发 broadcast，15:30 无晚间双人播报
             # （2026-08-16 修复）。
+            broadcast_payload: ReportPayload = {"report_date": report_date}
             await self.ctx.event_bus.publish(
                 CHANNEL_BROADCAST,
-                payload={"report_date": report_date},
+                payload=broadcast_payload,
             )
 
         logger.info("snapshot_done", report_date=report_date, snapshot_kind=snapshot_kind)
@@ -339,7 +358,8 @@ class IterateConsumer(BaseConsumer):
         return CHANNEL_ITERATE
 
     async def handle(self, event: Event) -> None:
-        report_date = event.payload["report_date"]
+        payload = cast(ReportPayload, event.payload)
+        report_date = payload["report_date"]
         state = _make_consumer_state(report_date, intent=None)
         result = await iterate_agent.run(state)
 
@@ -371,9 +391,10 @@ class IterateConsumer(BaseConsumer):
             payload=iterate_payload,
         )
 
+        broadcast_payload: ReportPayload = {"report_date": report_date}
         await self.ctx.event_bus.publish(
             CHANNEL_BROADCAST,
-            payload={"report_date": report_date},
+            payload=broadcast_payload,
         )
         logger.info("iterate_done", report_date=report_date)
 
@@ -386,7 +407,8 @@ class BroadcastConsumer(BaseConsumer):
         return CHANNEL_BROADCAST
 
     async def handle(self, event: Event) -> None:
-        report_date = event.payload["report_date"]
+        payload = cast(ReportPayload, event.payload)
+        report_date = payload["report_date"]
 
         brief_saved = await build_and_persist_brief("evening", report_date)
         if not brief_saved:
@@ -414,7 +436,7 @@ class PredictionConsumer(BaseConsumer):
         return CHANNEL_REVIEW_DONE
 
     async def handle(self, event: Event) -> None:
-        payload = event.payload
+        payload = cast(ReviewDonePayload, event.payload)
         report_date = str(payload.get("report_date") or "")
         trace_id = str(payload.get("trace_id") or "")
 
@@ -470,7 +492,7 @@ class SectorTraceConsumer(BaseConsumer):
         return CHANNEL_REVIEW_DONE
 
     async def handle(self, event: Event) -> None:
-        payload = event.payload or {}
+        payload = cast(ReviewDonePayload, event.payload or {})
         report_date = str(payload.get("report_date") or "")
         report = await node_api.get_analysis_report(report_type="review", report_date=report_date)
         sectors = extract_primary_sectors({"report": report})
@@ -675,12 +697,15 @@ class SectorTraceConsumer(BaseConsumer):
             await asyncio.gather(*(_cascade_one(*item) for item in cascades))
 
 
-def _review_index_pct(report: dict[str, object]) -> float | None:
+def _review_index_pct(report: dict[str, object] | None) -> float | None:
     """从 review 报告快照解析大盘指数涨跌幅（缺失返回 None）。
 
     解析规则与归因链共用 attribution_chain.index_pct_from_snapshot：真实快照键为
     a_share.indexes（旧四候选键仅作兼容回退），避免两处漂移导致
     parent_trace_ref.index_pct 恒 None。
+
+    形参允许 None（get_analysis_report 可返回 None）：下方 isinstance(report, dict)
+    守卫对 None 直接降级为 None，语义不变。
     """
     content = report.get("content") if isinstance(report, dict) else None
     content = content if isinstance(content, dict) else None
@@ -745,9 +770,9 @@ def _make_consumer_state(
     *,
     intent: str | None = None,
     brief_type: str | None = None,
-) -> dict[str, object]:
+) -> AgentState:
     """构造 consumer 触发的 AgentState（trigger_source=scheduler 使报告写 DB）。"""
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [],
         "session_id": f"event_chain_{intent or brief_type or 'report'}_{report_date}",
         "user_id": None,

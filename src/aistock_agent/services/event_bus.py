@@ -11,6 +11,7 @@
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import NotRequired, TypedDict
 
 import redis.asyncio as aioredis
 from structlog import get_logger
@@ -28,6 +29,45 @@ class Event:
     payload: dict[str, object]
     group: str  # 事件所属消费组（每个事件都来自某个消费组，必填）
     retry_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# 通道 payload 契约（晚间链路）：payload 的键按「通道」固定，故按通道定义 TypedDict，
+# 让发布方与消费方共用同一份类型（把隐式契约显式化，逻辑零变化）。
+# 事件经 Redis Stream 序列化为 JSON、再由 _parse_entries 还原为 dict[str, object]
+# （wire 形态），因此消费端在边界 cast 为对应 TypedDict（生产者侧由注解静态校验）。
+# ---------------------------------------------------------------------------
+class ReviewPayload(TypedDict):
+    """review_quick / review_full 通道 payload（scheduler 发布，Review*Consumer 消费）。"""
+
+    report_date: str
+    trace_id: NotRequired[str]
+
+
+class SnapshotPayload(TypedDict):
+    """snapshot 通道 payload（Review*Consumer 发布，SnapshotConsumer 消费）。
+
+    quick 链路带 review_degraded/review_status，full 链路带 trace_id；键互为缺省。
+    """
+
+    report_date: str
+    snapshot_kind: str
+    trace_id: NotRequired[str]
+    review_degraded: NotRequired[bool]
+    review_status: NotRequired[str]
+
+
+class ReportPayload(TypedDict):
+    """iterate / broadcast 通道 payload（仅 report_date）。"""
+
+    report_date: str
+
+
+class ReviewDonePayload(TypedDict):
+    """review_done 通道 payload（publish_review_done 发布；Prediction/SectorTrace 消费）。"""
+
+    report_date: str
+    trace_id: str
 
 
 # Redis Stream 原始条目：(msg_id, fields)，xreadgroup / xautoclaim / xclaim 同形
@@ -55,12 +95,16 @@ class EventBus:
     async def publish(
         self,
         channel: str,
-        payload: dict[str, object],
+        payload: Mapping[str, object],
         *,
         event_id: str | None = None,
     ) -> str:
         """发布事件到 Redis Stream。返回 event_id。
-        如果传入 event_id，会设置幂等 key（24h TTL）。"""
+        如果传入 event_id，会设置幂等 key（24h TTL）。
+
+        payload 形参取 Mapping：允许调用方按通道 TypedDict 字面量传参（TypedDict 是
+        Mapping[str, object] 的子类型，但不是 dict[str, object] 的子类型）。
+        """
         # 确保消费者组存在（首次发布时创建）
         await self._ensure_group(channel)
 
