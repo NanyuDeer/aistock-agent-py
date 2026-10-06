@@ -101,17 +101,24 @@ def attach_confirmations_to_trace(
     trace: MarketTraceResult,
     confirmations: list[PredictionConfirmation],
 ) -> bool:
-    """把采集到的渠道B确认写回 primary 链（若无 primary 链或确认非空链时不动）.
+    """把采集到的渠道B确认写回归因结论层（root）——不依赖 primary 链存在。
+
+    2026-10-06：大盘 primary_chain_id 长期为空（attribution_status=hypothesis 时系统强制
+    清空），旧实现要求 primary 链非空才回填 → 渠道B 从未生效。改为「结论层必写 + primary
+    链存在时双写」，保持既有链语义的同时让回路真正闭合。
 
     返回是否发生了回填（供调用方判断是否值得打日志）。
     """
-    if not confirmations or trace.primary_chain_id is None:
+    if not confirmations:
         return False
+    trace.confirmed_prediction = list(confirmations)
+    if trace.primary_chain_id is None:
+        return True
     for candidate in trace.candidates:
         if candidate.id == trace.primary_chain_id and candidate.chain is not None:
-            candidate.chain.confirmed_prediction = [c for c in confirmations]
-            return True
-    return False
+            candidate.chain.confirmed_prediction = list(confirmations)
+            break
+    return True
 
 
 def _trace_conclusion_summary(trace: MarketTraceResult) -> str:
@@ -130,11 +137,12 @@ def _trace_conclusion_summary(trace: MarketTraceResult) -> str:
 
 async def _attach_scene_confirmations(trace: MarketTraceResult, report_date: str) -> None:
     """Spec Cbis：溯源归因结论产出后，顺手核对大盘历史预判场景，回填渠道B确认.
-    不改变归因职责；探针失败降级为无确认，不阻断后续步骤/不向调用方抛异常。
+
+    2026-10-06：改为不依赖 primary 链——只要归因结论非空即可核对（结论取值走
+    ``_trace_conclusion_summary``，其本身已支持无 primary 链时退化为 attribution_summary）。
+    探针失败降级为无确认，不阻断后续步骤/不向调用方抛异常。
     """
-    # 无 primary 链（no_phenomenon/insufficient 或降级）时无结论可核对，
-    # 直接跳过，避免白白发起 list_verified_predictions 网络调用。
-    if trace.primary_chain_id is None:
+    if not _trace_conclusion_summary(trace):
         return
     # 函数内 import 避免与 aistock_agent.skills（→ evidence_resolver → review）
     # 形成循环依赖，与 _publish_review_done_if_available 的延迟 import 同模式。
