@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import AsyncGenerator
 from datetime import date
+from typing import cast
 from uuid import uuid4
 
 import structlog
@@ -32,7 +33,7 @@ from aistock_agent.observability.metrics import get_metrics_collector as _get_me
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
-from aistock_agent.services.briefing import build_and_persist_brief
+from aistock_agent.services.briefing import BriefType, build_and_persist_brief
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.qa_briefing import (
@@ -1288,7 +1289,8 @@ async def run_qa_briefing(
 
     report_date = _resolve_qa_report_date(body)
     try:
-        return await run_qa_brief_chain(brief_type, report_date, run_id)
+        # 上方成员守卫已保证 brief_type ∈ {"morning","evening"}，cast 仅告知类型检查器
+        return await run_qa_brief_chain(cast(BriefType, brief_type), report_date, run_id)
     except QaBriefingPrerequisiteError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except QaBriefingRunError as exc:

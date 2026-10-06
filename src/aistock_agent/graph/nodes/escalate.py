@@ -8,7 +8,8 @@ synth_answer 统一出口（Task 4 做 deep 代码加工）。
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -30,18 +31,10 @@ logger = structlog.get_logger()
 # escalate 只兜 worker 抛异常 / 空 final_response 的极端情况。
 _DEGRADED_TEXT = "深度分析暂时不可用，请稍后重试"
 
-
-@runtime_checkable
-class WorkerHandle(Protocol):
-    """Worker 执行协议（D1：A 起步，留 C 统一协议接口）。
-
-    副作用契约：worker 内部落库/缓存副作用必须以 state.trigger_source == "scheduler"
-    守卫；escalate 固定传 trigger_source="user_chat" 抑制（D7）。
-    C 扩展点：未来统一 worker 协议（参数解析/流式/副作用声明）在此演进，本阶段不实现。
-    """
-
-    async def run(self, state: AgentState) -> dict[str, object]: ...
-
+# worker 统一形态 = 裸可调用（worker 模块的 run 函数本身）。
+# 副作用契约：worker 内部落库/缓存副作用必须以 state.trigger_source == "scheduler"
+# 守卫；escalate 固定传 trigger_source="user_chat" 抑制（D7）。
+WorkerRun = Callable[[AgentState], Awaitable[dict[str, object]]]
 
 # intent（qa_router goal.intent）→ worker 名映射（D6 前置：hot_burst 意图已入契约）
 INTENT_TO_WORKER: dict[str, str] = {
@@ -52,7 +45,9 @@ INTENT_TO_WORKER: dict[str, str] = {
     "hot_burst": "hot_burst",
 }
 
-ESCALATION_MAP: dict[str, WorkerHandle] = {
+# 生产注册的 3 个 worker run 裸函数（无 .run 属性）；旧 WorkerHandle 协议的双形态
+# 兼容 shim 已删除——生产与测试统一按裸可调用契约（D1）。
+ESCALATION_MAP: dict[str, WorkerRun] = {
     "stock": stock_run,
     "sector": sector_run,
     "hot_burst": hot_burst_run,
@@ -130,11 +125,8 @@ async def escalate_node(state: QuestionState) -> dict[str, Any]:
 
     try:
         # T6 缺陷修复（验证发现，契约级）：ESCALATION_MAP 存的是 worker 裸 run 函数
-        # （§3.3「3 worker run functions」，无 .run 属性）；WorkerHandle 协议/测试 mock
-        # 则是 .run 形状（§3.2「直调 worker.run」）。两种形态并存，统一取可调用目标，
-        # 否则真实 deep 路径必炸 `'function' object has no attribute 'run'`。
-        worker_callable = getattr(worker, "run", None) or worker
-        result = await worker_callable(agent_state)
+        # （§3.3「3 worker run functions」，无 .run 属性），故直接调用（D1 统一形态）。
+        result = await worker(agent_state)
     except Exception as exc:  # worker 自带顶层 try-catch，此处为防御性兜底
         logger.warning(
             "escalate.failed",

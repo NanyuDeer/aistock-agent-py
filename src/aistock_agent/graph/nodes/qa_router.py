@@ -19,7 +19,12 @@ from aistock_agent.prompts.general.system import (
     CAPABILITY_REPLY,
     COMPLIANCE_REPLY,
 )
-from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall, SubGoal
+from aistock_agent.schemas.chat_contract import (
+    InsightGoal,
+    InsightIntent,
+    SkillCall,
+    SubGoal,
+)
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
@@ -1892,8 +1897,8 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
                 "clarification": _STOCK_SYMBOL_CLARIFICATION,
                 "complexity": "light",
             }
-        # 推断 intent
-        intent_map = {
+        # 推断 intent（值标注为 InsightIntent 闭集：映射与 InsightGoal.intent 同源）
+        intent_map: dict[str, InsightIntent] = {
             "capital_flow": "capital_flow",
             "compare_stocks": "compare_stocks",
             "douyin_video": "douyin_video",
@@ -1913,7 +1918,7 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         }
         goal = InsightGoal(
             question=message,
-            intent=intent_map[fallback_call.skill_name],  # type: ignore[index]
+            intent=intent_map[fallback_call.skill_name],
             constraints={"router_fallback": "true"},
         )
         # 指数行情兜底：SkillCall 携带 index_name 时透传到 goal.constraints（spec 3a 消费者）

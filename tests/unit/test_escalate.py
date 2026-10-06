@@ -1,14 +1,15 @@
-"""escalate 节点单元测试 — WorkerHandle 协议 + deep 分支 worker 调度（Task 2）。
+"""escalate 节点单元测试 — worker 裸可调用契约 + deep 分支 worker 调度（Task 2）。
 
 锁定契约：
 - 意图 → worker 名映射（INTENT_TO_WORKER）与 worker 注册表（ESCALATION_MAP）
+- ESCALATION_MAP 值统一为裸可调用（worker run 函数本身），escalate 直接 await 调用
 - AgentState 只填 worker 消费字段，trigger_source="user_chat" 固定（D7）
 - sector 未命中 tag_code → fallback_to_skill（D24），不调 worker
 - worker 异常 / 空 final_response → 降级文本，不抛（两层降级体系）
 - deep_source 只写合法 worker 名
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -44,18 +45,16 @@ def _goal(intent: str, **kwargs: object) -> InsightGoal:
     return InsightGoal(question=kwargs.pop("question", "分析 600519"), intent=intent, **kwargs)
 
 
-def _make_worker(result: dict | None = None, exc: Exception | None = None) -> MagicMock:
-    """构造 WorkerHandle 形状的 mock：`run(state) -> Awaitable[dict]`（A 契约）。
+def _make_worker(result: dict | None = None, exc: Exception | None = None) -> AsyncMock:
+    """构造裸可调用 worker mock：`await worker(state) -> dict`（D1 统一契约）。
 
-    escalate 以 `await worker.run(agent_state)` 调用，因此 mock 必须暴露
-    AsyncMock 属性的 run（直接放 AsyncMock 实例会被当成 run 方法本身）。
+    ESCALATION_MAP 存的是 worker run 裸函数，escalate 直接 `await worker(agent_state)`
+    调用，故 mock 本身即 AsyncMock（不再包一层 .run 属性）。
     """
-    worker = MagicMock()
-    worker.run = AsyncMock(return_value=result, side_effect=exc)
-    return worker
+    return AsyncMock(return_value=result, side_effect=exc)
 
 
-def test_worker_handle_protocol_maps_cover_expected_intents():
+def test_escalation_map_covers_expected_intents():
     """升级意图 → worker 名映射与 ESCALATION_MAP 注册覆盖锁定（D6/D1）。"""
     assert set(INTENT_TO_WORKER) == {
         "stock_snapshot",
@@ -80,7 +79,7 @@ async def test_escalate_stock_passes_symbol_and_user_chat():
     with patch.dict(ESCALATION_MAP, {"stock": mock_worker}):
         result = await escalate_node(state)
 
-    args = mock_worker.run.await_args.args[0]
+    args = mock_worker.await_args.args[0]
     assert args["symbol"] == "600519"
     assert args["tag_code"] is None
     assert args["trigger_source"] == "user_chat"
@@ -106,7 +105,7 @@ async def test_escalate_sector_resolves_tag_code():
     ):
         result = await escalate_node(state)
 
-    args = mock_worker.run.await_args.args[0]
+    args = mock_worker.await_args.args[0]
     assert args["tag_code"] == "BK0477"
     assert args["symbol"] is None
     assert args["trigger_source"] == "user_chat"
@@ -130,7 +129,7 @@ async def test_escalate_sector_fallback_to_skill():
         result = await escalate_node(state)
 
     assert result == {"fallback_to_skill": True}
-    mock_worker.run.assert_not_awaited()
+    mock_worker.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -142,7 +141,7 @@ async def test_escalate_hot_burst_no_params():
     with patch.dict(ESCALATION_MAP, {"hot_burst": mock_worker}):
         result = await escalate_node(state)
 
-    args = mock_worker.run.await_args.args[0]
+    args = mock_worker.await_args.args[0]
     assert args["symbol"] is None
     assert args["tag_code"] is None
     assert args["trigger_source"] == "user_chat"
@@ -173,7 +172,7 @@ async def test_escalate_unknown_intent_falls_back():
         result = await escalate_node(state)
 
     assert result == {"fallback_to_skill": True}
-    mock_worker.run.assert_not_awaited()
+    mock_worker.assert_not_awaited()
 
 
 @pytest.mark.asyncio

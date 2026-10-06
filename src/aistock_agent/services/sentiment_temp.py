@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import structlog
 
@@ -380,15 +381,16 @@ async def compute_and_persist_sentiment_temp(
         payload = build_sentiment_payload(report_date, score, level, metrics, ice, prediction)
         # 契约 #5：可选键 cycle_phase（§5 四态，实验性判定；量能佐证缺省，engine 侧重算）
         try:
-            from aistock_agent.services.rhythm_engine import detect_phase
+            from aistock_agent.services.rhythm_engine import Phase, detect_phase
 
             scores = _load_recent_scores(root, report_date, days=5)
-            prev_phase = None
+            prev_phase: Phase | None = None
             if prev is not None and isinstance(prev, dict):
-                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘
+                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘。
+                # 集合守卫已保证取值合法，cast 仅把该保证告知类型检查器（非假保证）。
                 raw_phase = prev.get("cycle_phase")
                 prev_phase = (
-                    raw_phase
+                    cast(Phase, raw_phase)
                     if isinstance(raw_phase, str)
                     and raw_phase in {"ice", "warm_up", "overheat", "ebb"}
                     else None

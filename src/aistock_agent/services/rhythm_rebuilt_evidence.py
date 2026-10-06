@@ -114,12 +114,13 @@ def detect_stage(
     return None, "证据不足，无前阶段"
 
 
-_STAGE_POSITION: dict[str, dict[str, str]] = {
-    "ice": {"text": "空仓~观察", "action": "hold", "direction": "neutral"},
-    "launch": {"text": "轻仓~半仓试探", "action": "add", "direction": "bullish"},
-    "rally": {"text": "6~8 成顺势持有", "action": "add", "direction": "bullish"},
-    "overheat": {"text": "半仓~减仓防退潮", "action": "reduce", "direction": "bearish"},
-    "ebb": {"text": "轻仓~观望", "action": "hold", "direction": "neutral"},
+# 常量表以模型承载（键为 Stage 闭集，值 action/direction 由 PositionBand 校验为闭集字面量）
+_STAGE_POSITION: dict[Stage, PositionBand] = {
+    "ice": PositionBand(text="空仓~观察", action="hold", direction="neutral"),
+    "launch": PositionBand(text="轻仓~半仓试探", action="add", direction="bullish"),
+    "rally": PositionBand(text="6~8 成顺势持有", action="add", direction="bullish"),
+    "overheat": PositionBand(text="半仓~减仓防退潮", action="reduce", direction="bearish"),
+    "ebb": PositionBand(text="轻仓~观望", action="hold", direction="neutral"),
 }
 
 
@@ -150,11 +151,11 @@ def compute_position(
     if stage is None or certainty is None:
         return None
     base = _STAGE_POSITION[stage]
-    if certainty == "low":
-        action = "hold" if base["action"] != "reduce" else "reduce"
-    else:
-        action = base["action"]
-    return PositionBand(text=base["text"], action=action, direction=base["direction"])
+    # certainty=low 且档位非 reduce → 统一降为 hold（逻辑与旧 dict 取值等价）
+    action = base.action
+    if certainty == "low" and action != "reduce":
+        action = "hold"
+    return PositionBand(text=base.text, action=action, direction=base.direction)
 
 
 def build_event_anchors(events: list[dict[str, Any]]) -> list[EventAnchor]:

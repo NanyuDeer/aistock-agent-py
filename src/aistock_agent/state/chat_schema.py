@@ -49,7 +49,9 @@ class QuestionState(TypedDict, total=False):
     skill_calls: list[SkillCall]
     evidences: list[Evidence]
     insight: Insight | None
-    final_response: str
+    # 每轮被重置的 transient 字段（ws.py 入口归零）→ 与 AgentState 一致声明为可空：
+    # 「还没答完」与「答了但为空」由真值判断/图事件流区分，可空性不改变该语义。
+    final_response: str | None
     trace: AnswerTrace | None
     clarification: str | None
     # P1（D4）：复杂度判定。qa_router 写，conditional 路由消费（Task 2）
@@ -85,22 +87,22 @@ class QuestionState(TypedDict, total=False):
     # 追问面板（Task 5，2026-08-26）：synth_answer 汇总写（与 cards 同源，透出到
     # WS DONE / HTTP ChatResponse / SSE DONE）。LangGraph 通道机制必需声明（节点
     # 返回未声明键会触发 InvalidUpdateError —— 对齐 L62-63 fallback_to_skill 先例）。
-    questions: list[str] | None = None
+    questions: list[str] | None
     # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发写，synth_answer 短路透出，
     # ws.py 转 confirm_request 终态）。单轮 transient，不落 trace/insight。
-    confirm: dict | None = None
+    confirm: dict | None
     # Phase 4-2：阶段 2 续跑输入信号（ws.py 写，qa_router 消费）——用户点选的标的
     # （{"symbol": 6位代码, "label": 选项 label}）与确认超时标记。单轮 transient 输入，
     # 不写回图状态输出；由 ws.py 每轮入口归零（对齐 deep_source/goals 先例）。
-    confirm_choice: dict | None = None
-    confirm_timeout: bool | None = None
+    confirm_choice: dict | None
+    confirm_timeout: bool | None
     # Phase 4-3（改进 15）：用户画像（ws.py/routes.py 入口按 user_id 拉取注入）。
     # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
     # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
-    user_profile: dict | None = None
+    user_profile: dict | None
     # Phase 5（Task 1）：长会话超窗确定性摘要（零 LLM、幂等、无累积）。
     # qa_router 仅在超窗（summary 非 None）时写入，随 checkpointer 持久化（write-only，
     # 供可观测/未来语义摘要锚点）；synth_answer 不读该字段，消费侧从当前 messages
     # 确定性重算（防跨轮陈旧残留，G6）。值每轮重算，不累积；短会话（≤12 条）不写该
     # 键 → 零变化硬约束。
-    messages_summary: str | None = None
+    messages_summary: str | None
