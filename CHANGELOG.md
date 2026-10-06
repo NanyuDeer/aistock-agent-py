@@ -2,6 +2,34 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 退役条件链死代码清理（物理删除）+ 本轮新增 ruff 告警清零
+
+**开发者**: Aria
+
+### 重构
+
+- **物理删除退役条件链死代码**（`src/aistock_agent/services/prediction_validator.py`，−844/+51）：删 `_verify_conditions`（162 行）、`_scan_condition_met`（132 行）、`_judge_condition_hit`（20 行）及仅供它们使用的 import。三者自 2026-10-06 条件退役起已无生产调用方（`run_once` 已摘除调用），仅单测引用。
+- 同步删除 `tests/unit/test_prediction_validator.py` 中**只测这两个函数**的 24 个用例与 3 个专属 fixture helper（`_anchor_condition_record` / `_ref_level_rows` / `_event_condition_record`）；该文件用例数 87 → 63。
+- 保留（仍被存活路径引用）：`condition_met_judge.py`、`_judge_condition_met_once`、`_condition_scan_range`、`_CONDITION_SCAN_*`、`_should_skip_horizon`，以及存量回溯入口 `scripts/backfill_condition_met.py` / `rollback_condition_met.py`。
+- 同步更正文档/注释：模块 docstring（不再描述已删的①②两段链路）、`_compound_pct` docstring（删掉指向已删函数的例外说明）、`run_once` 注释、`condition_met_judge` 调用方引用、`skills/prediction_validation.py` 顶部注释、`AGENTS.md`（L59/L561）。
+
+### 改进
+
+- **本轮新增 ruff 告警清零**：对改动文件做基线对照（基线 `cfe8af4`）后，把本轮引入的 **13 处 `E501 Line too long (>100)` 全部修掉**（拆行/缩短注释，语义与文案不变）。改动文件告警数 **41 → 28 = 基线**，既有告警一行未动，未加 `noqa`、未放宽 `pyproject.toml` 配置。
+
+### 验证
+
+- `uv run pytest tests/unit -q` → **3433 passed / 9 failed / 1 skipped**，9 条与基线同集（`test_industry_vector_search.py` ×6 + `test_scheduler.py` ×3）→ **零新增失败**。
+- 定向 `test_prediction_validator + test_condition_met_judge + test_backfill_condition_met` → **199 passed**。
+- **节奏护栏**：`test_rhythm_verification.py + test_rhythm_engine.py` → **47 passed**（节奏链路未受影响）。
+- `uv run ruff check <改动文件>` → 28（= 基线）。
+
+### 说明
+
+- **mypy 包解析报错属项目既有配置缺口**（非本次引入）：`test_k_band.py` 以 `scripts.calibration.k_band` 模块名引用、命令行又按路径传入 → 双模块名；既有 `compute_delta` / `report_judge_bias` 配对同样可复现，且仓内规范入口为 `mypy src/`。故**未改配置**，登记为遗留。
+
+---
+
 ## [main] 2026-10-06 — 末项 Important 修复：下钻桶 sufficient_sample 对齐复合判据
 
 **开发者**: Aria
