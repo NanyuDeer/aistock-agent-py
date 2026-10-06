@@ -1541,10 +1541,8 @@ async def test_run_once_writes_no_condition_entries() -> None:
     assert updated == 0
     update.assert_not_awaited()  # 不再为任何档位/条件回写
     kline.assert_not_awaited()   # 条件扫描/判定不再取数
-    # 双保险：即便有回写，回写 key 也不得是 c{digit}
-    for call in update.call_args_list:
-        key = call.args[1]
-        assert not (isinstance(key, str) and key.startswith("c") and key[1:].isdigit())
+    # 回写 key 不得是 c{digit} 的断言由 update.assert_not_awaited() 覆盖：
+    # 无回写 → call_args_list 恒空，无需再遍历（遍历无断言力）。
 
 
 @pytest.mark.asyncio

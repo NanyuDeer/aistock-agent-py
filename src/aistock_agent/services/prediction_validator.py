@@ -12,13 +12,14 @@ v2 对照口径（P0 预测验证升级）：
 - 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
 - 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
-- 条件化预判两段判定（Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）：
+- 【已于 2026-10-06 退役】条件化预判两段判定（Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）
+  ——退役后 run_once 不再调用下列判定链，以下为退役前的历史行为，不再在主链执行：
   ① 到期前 `_scan_condition_met` 条件一成立即点亮 `verification[c{i}].condition_met=true`
   （确定性判定，无 result，**只写 true**）；
   ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true；**对确定性未成立的条件写
   `condition_met=false` + `checked_at`**（到期未成立态，与 true 对称的布尔；无法判定保持键缺失、
   绝不写 null；已点亮 true 显式防御不回退）。
-- 条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
+- 【同为退役历史】条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
   `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
   事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
   → ② 受限 LLM（`settings.condition_met_event_llm_enabled` 默认关，开启才调，带留痕）
@@ -267,9 +268,9 @@ def _compound_pct(window: list[float]) -> float:
     vs 求和 +2.00%），导致 actual 展示值与复利判定依据不一致。
 
     例外（已退役、不属 4.0 判定口径）：条件链路 ``_verify_conditions`` 的 scenario actual
-    仍用 ``sum(window)``——2026-10-06 条件化预判退出验证环后该函数不再被 ``run_once`` 调用，
-    仅存量回溯 ``backfill_condition_met`` 可及。4.0 主链（_verify_horizon / _judge_window）
-    一律用本函数，不再有例外。
+    仍用 ``sum(window)``——2026-10-06 条件化预判退役后该函数已无生产调用方（run_once 已摘除、
+    仅单测引用，属待清理的生产死代码，物理删除留待后续），故 4.0 主链
+    （_verify_horizon / _judge_window）一律用本函数，不再有例外。
     """
     acc = 1.0
     for p in window:
@@ -555,6 +556,10 @@ async def _verify_conditions(
     event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
+
+    【已于 2026-10-06 退役】本函数自退役起无生产调用方（run_once 已摘除调用、仅单测引用，
+    属待清理的生产死代码）。以下判定语义与「run_once 幂等跳过」等描述均为退役前的历史描述，
+    不再在主链执行。
 
     - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
     - 到期未成立态（spec §12.5，Task 6.1）：`result` 落库那一刻按第①段**同一判定能力**对
@@ -944,6 +949,10 @@ async def _scan_condition_met(
     event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
 ) -> dict[str, dict[str, object]]:
     """条件化预判第①段：到期前条件扫描（只点亮 `condition_met=true`，§4.2）。
+
+    【已于 2026-10-06 退役】本函数自退役起无生产调用方（run_once 已摘除调用、仅单测引用，
+    属待清理的生产死代码）。以下「与 _verify_conditions 同一 16:00 任务内执行（D4）」「同一次
+    run_once 内取数记忆化」等语义均为退役前的历史描述，不再在主链执行。
 
     与 _verify_conditions（第②段·到期 hit/miss）同一 16:00 任务内执行（D4）；逐条 condition：
 
@@ -1397,11 +1406,14 @@ async def run_once() -> int:
                     exc_info=True,
                 )
         # 2026-10-06 退役：条件化预判退出验证环（范围限定 prediction_records.conditions）——
-        # 不再调用 _scan_condition_met（第①段点亮）/ _verify_conditions（第②段到期判定），
+        # 不再调用 _scan_condition_met（第①段点亮）/ _verify_conditions（第②段到期判定）。
+        # 这两个判定函数自退役起无生产调用方、仅单测引用（生产死代码，保留是为等后续单独清理）。
         # 新记录 conditions 恒为空、旧记录已写出的 c{i} entry 保持只读可查（不清洗历史）。
         # 节奏大师的 branches 不受影响（其 met 由节奏报告引擎负责，本验证器从不写入）。
-        # 两个判定函数与 condition_met_judge 保留（存量回溯 backfill_condition_met 仍在用），
-        # 本任务仅停此调用、不删文件（物理删除留待后续单独清理）。
+        # _judge_condition_met_once 与 condition_met_judge 的判定能力仍被存量回溯
+        # backfill_condition_met（scripts/backfill_condition_met.py，默认 dry-run、需 --execute）
+        # 使用，故连带保留；该回溯只处理 schema_version=="3.0" 且 conditions 非空的存量记录，
+        # Task 6 之后新记录 conditions==[] 永不进入该链路。本任务只停此调用、不删文件。
     # 日志输出（P0-2）
     if target_counter:
         logger.info("prediction_target_distribution", distribution=target_counter)

@@ -90,6 +90,9 @@ def test_enrich_surfaces_confirmed_scenarios() -> None:
     found = [s["scenario"] for s in out["scenario_signal"]["confirmed"]]
     assert "降息预期兑现" in found
     assert out["scenario_signal"]["confirmed"][0]["count"] >= out["scenario_signal"]["confirmed"][1]["count"]
+    # 2026-10-06 条件退役护栏：note 作为预判 LLM 输入上下文，不得再提 conditions
+    # （防文案回归引导 LLM 继续使用/产出已退役字段）
+    assert "conditions" not in out["scenario_signal"]["note"]
 
 
 def test_enrich_no_harvest_no_signal() -> None:
