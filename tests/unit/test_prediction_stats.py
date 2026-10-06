@@ -276,3 +276,103 @@ def test_default_methodology_version_includes_v4_records():
     from aistock_agent.services.prediction_stats import _CURRENT_METHODOLOGY_VERSION
 
     assert _CURRENT_METHODOLOGY_VERSION == "4.0"
+
+
+# ============ Task 5：long 档不计入迭代看板 + 补看板指标 ============
+
+
+def _h_entry(horizon="short", result="hit", target_type="index", direction="bullish",
+             flat=False, prediction_id=1, methodology_version="4.0",
+             approximate=False, **kw):
+    """迭代看板档位 entry（horizon/direction/flat 齐备）；result=None 表示未结算占位。"""
+    e: dict[str, object] = {
+        "horizon": horizon, "target_type": target_type, "direction": direction,
+        "prediction_id": prediction_id, "methodology_version": methodology_version,
+        "approximate": approximate,
+    }
+    if result is not None:
+        e["result"] = result
+    if flat:
+        e["flat"] = True
+    e.update(kw)
+    return e
+
+
+def test_long_horizon_excluded_from_iteration_board():
+    """long 档（120 交易日）不计入迭代看板分母/命中率；单独汇总仍可查（§4.7）。"""
+    entries = [_h_entry(horizon="long", result="hit"),
+               _h_entry(horizon="short", result="hit")]
+    s = hit_rate_summary(entries)
+    assert s["long_excluded"] is True
+    assert s["n"] == 1                       # 只有 short 进分母
+    assert s["hits"] == 1
+    assert s["long"]["n"] == 1 and s["long"]["hits"] == 1   # 单独可查
+
+
+def test_summary_reports_settled_ratio_and_flat_rate():
+    """统计输出新增 settled_ratio / flat_rate / 计数键（迭代看板必需）。"""
+    s = hit_rate_summary([_h_entry(horizon="short", result="hit")])
+    for key in ("settled_ratio", "flat_rate", "flat_count", "directional_count",
+                "long_excluded"):
+        assert key in s
+
+
+def test_flat_rate_denominator_is_directional_only():
+    """flat_rate 分母 = **方向预判已结算数**（非计划原文的 flat_count + n，后者含 neutral）。
+
+    4 个已结算档（2 方向 + 2 neutral）、1 个带 flat → 1/2；若误用 flat/(flat+n) 会得 1/5。
+    """
+    entries = [
+        _h_entry(direction="bullish", result="hit"),
+        _h_entry(direction="bullish", result="miss", flat=True),
+        _h_entry(direction="neutral", result="hit"),
+        _h_entry(direction="neutral", result="miss"),
+    ]
+    s = hit_rate_summary(entries)
+    assert s["n"] == 4
+    assert s["directional_count"] == 2
+    assert s["flat_count"] == 1
+    assert s["flat_rate"] == 0.5                 # 1/2（方向数）
+    assert s["flat_rate"] != round(1 / (1 + 4), 4)  # 锁死：不是 1/5
+
+
+def test_settled_ratio_includes_pending_slots_excludes_long():
+    """settled_ratio 分母含未结算（无 result）的非-long 档位；long 不进分子也不进分母。"""
+    entries = [
+        _h_entry(horizon="short", result="hit"),
+        _h_entry(horizon="mid", result=None),     # 未结算占位 → 只在分母
+        _h_entry(horizon="long", result="hit"),   # long 排除
+    ]
+    s = hit_rate_summary(entries)
+    assert s["n"] == 1
+    assert s["settled_ratio"] == 0.5             # 1 / 2（short + mid）
+
+
+def test_settled_ratio_none_when_no_slots():
+    """无任何档位 → settled_ratio 为 None（不得除零）。"""
+    assert hit_rate_summary([])["settled_ratio"] is None
+
+
+def test_flat_rate_none_when_no_directional_samples():
+    """无方向样本（全 neutral）→ flat_rate 为 None（不得为 0 或除零）。"""
+    entries = [_h_entry(direction="neutral", result="hit"),
+               _h_entry(direction="neutral", result="miss")]
+    s = hit_rate_summary(entries)
+    assert s["directional_count"] == 0
+    assert s["flat_rate"] is None
+
+
+def test_bucket_summary_excludes_long_and_reports_metrics():
+    """bucket_summary 三桶同口径：long 排除、指标透出。"""
+    entries = [
+        _h_entry(horizon="long", result="hit", target_type="index"),
+        _h_entry(horizon="short", result="hit", target_type="index"),
+        _h_entry(horizon="mid", result="miss", target_type="sector", flat=True),
+    ]
+    b = bucket_summary(entries)
+    assert b["combined"]["long_excluded"] is True
+    assert b["combined"]["n"] == 2
+    assert b["index"]["n"] == 1
+    assert b["sector"]["n"] == 1 and b["sector"]["flat_count"] == 1
+    assert b["sector"]["directional_count"] == 1
+    assert b["sector"]["flat_rate"] == 1.0

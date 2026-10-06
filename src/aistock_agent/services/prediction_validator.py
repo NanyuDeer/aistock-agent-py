@@ -428,14 +428,21 @@ async def _verify_horizon(
             reason = f"{reason}（板块指数数据可能停更）"
         return {**base, "wait": True, "reason": reason}
     direction = str(entry.get("direction") or "neutral")
+    flat_flag = False
     if methodology_version == "4.0":
         # v4：单带宽 k，唯一来源 k_band_table.k_for(target_type)（index/sector/stock 各一套）
         k_band = k_for(target_type)
         result, grade = _judge_window(
             direction, window, k=k_band, methodology_version=methodology_version)
+        x_band = _compound_pct(window)
         # v4 baseline_neutral 与主判**同一谓词**（-k < x < k）：恒中性预测的命中标记必须与
         # v4 判定口径一致，否则 LLM vs baseline 的对照失去意义（neutral_pct 已非判定依据）。
-        baseline_neutral = -k_band < _compound_pct(window) < k_band
+        baseline_neutral = -k_band < x_band < k_band
+        # 方向预判落在无信息带（|x| < k）→ 该档被判 miss 且属"瞎猜带"，落结构化 flat 标记
+        # 供迭代看板 flat_rate 计数（design §4.3）。为什么在**写入侧**判：判据依赖 k，而 k 的
+        # 唯一来源是 Python 的 k_band_table.k_for（app-api/TS 不得自行复制 k）→ 写入侧落标记、
+        # 读取侧只做计数。仅 4.0 新样本有该键，存量记录天然无（与版本过滤一致，无需回填）。
+        flat_flag = direction in {"bullish", "bearish"} and abs(x_band) < k_band
         # v4 起 sector 的阈值来源改为 k 表（不再用 G0c legacy 0.25/3.0）→ threshold_version
         # 取 k 表标定口径版本（"4.0"）；legacy 路径（v2/v3）仍记 G0c 的 "1.0"（见 else 分支）。
         # 字段语义是"该 sector entry 所用阈值来自哪一版标定"，故随来源切换而变。
@@ -466,6 +473,12 @@ async def _verify_horizon(
     out = {**base, "result": result, "actual": actual_str, "reason": reason,
            "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
            "baseline_neutral": baseline_neutral}
+    if flat_flag:
+        # 字段驱动、无值即无键（不写 flat:false 噪声）；仅 4.0 新样本有，存量记录天然无。
+        out["flat"] = True
+    # direction 供迭代看板：flat_rate 分母 = 方向预判已结算数（排除 neutral），并按方向分桶判读。
+    # 与 reason 的"方向="同源；写入侧落结构化值，读取侧（app-api）只计数、不复制判定逻辑。
+    out["direction"] = direction
     if target_type == "sector":
         # H3：sector 阈值版本 → v4 记 k 表版本（"4.0"）、legacy 记 G0c（"1.0"）
         out["threshold_version"] = threshold_version

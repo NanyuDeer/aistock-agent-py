@@ -2013,3 +2013,57 @@ async def test_legacy_v3_sector_index_thresholds_unchanged_by_v4():
     assert sector_entry["methodology_version"] == "3.0"
     assert sector_entry["result"] == "miss"          # mean 0.4 >= 0.25
     assert sector_entry["baseline_neutral"] is False  # mean 0.4 >= 0.25
+
+
+# ============ Task 5：写入侧 flat 标记（|x| < k 的方向预判）+ direction 落库 ============
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_writes_flat_marker_for_directional_miss_in_band():
+    """v4：bullish 且 |x| < k（无信息带）→ miss 且写结构化 flat 标记（供 flat_rate 计数）。
+
+    为什么在**写入侧**判 flat：判据 |x| < k 依赖 k，而 k 的唯一来源是 Python 的
+    k_band_table.k_for（app-api/TS 不得自行复制 k）→ 写入侧落标记，读取侧只做计数。
+    """
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.1},
+        {"trade_date": "2026-08-11", "pct_chg": 0.1},
+        {"trade_date": "2026-08-12", "pct_chg": 0.1},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]  # 复利 +0.40% < index k(0.9201) → miss 且落在带内
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "miss"
+    assert entry["flat"] is True
+    assert entry["direction"] == "bullish"
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_no_flat_marker_when_directional_miss_out_of_band():
+    """v4：bullish 强反向（|x| >= k）→ miss 但**不写** flat 键（无值即无键，避免 flat:false 噪声）。"""
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": -3.0},
+        {"trade_date": "2026-08-11", "pct_chg": -3.0},
+        {"trade_date": "2026-08-12", "pct_chg": -3.0},
+        {"trade_date": "2026-08-13", "pct_chg": -3.0},
+    ]  # 复利约 -11.5%，|x| >= k
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "miss"
+    assert "flat" not in entry
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_no_flat_marker_for_neutral():
+    """v4：neutral 恒不写 flat（flat 只针对方向预判落在无信息带的情形）。"""
+    record = _pending_record(due="2026-08-10", direction="neutral")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.1},
+        {"trade_date": "2026-08-11", "pct_chg": 0.1},
+        {"trade_date": "2026-08-12", "pct_chg": 0.1},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "hit"       # -k < x < k → neutral hit
+    assert "flat" not in entry
+    assert entry["direction"] == "neutral"

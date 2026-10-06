@@ -31,15 +31,63 @@ def _filter_v2(
     target_type: str | None = None,
     methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> list[dict[str, object]]:
+    """迭代看板命中率分子：当前版本、hit/miss、非近似、**非 long**、可选按 target_type 分桶。
+
+    为什么排除 long：long 档 = 120 交易日（≈ 半年）才产出一个样本，混入命中率会误导
+    迭代判读（§4.7：保留定义但**不计入迭代看板**）；其命中率由 `_long_entries` 单独汇总展示。
+    """
     return [
         e for e in entries
         if e.get("methodology_version") == methodology_version and e.get("result") in {"hit", "miss"}
         and not e.get("approximate")
+        and e.get("horizon") != "long"      # long 档不计入迭代看板
         and (target_type is None or e.get("target_type") == target_type)
     ]
 
 
-def _summary(entries: list[dict[str, object]]) -> dict[str, object]:
+def _scope(
+    entries: list[dict[str, object]],
+    target_type: str | None = None,
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
+) -> list[dict[str, object]]:
+    """`settled_ratio` 分母：统计范围内**全部**非 long 档位条目（含未结算/insufficient/近似）。
+
+    不含 result 的占位 entry 也计入（反映"预判语料里有多大比例已被判定"）；long 与目标桶外剔除。
+    口径与 app-api 对齐（分母 = 统计范围内档位总数，排除 long）。
+    """
+    return [
+        e for e in entries
+        if e.get("methodology_version") == methodology_version
+        and e.get("horizon") != "long"
+        and (target_type is None or e.get("target_type") == target_type)
+    ]
+
+
+def _long_entries(
+    entries: list[dict[str, object]],
+    target_type: str | None = None,
+    methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
+) -> list[dict[str, object]]:
+    """long 档条目（保留展示；不进迭代看板分子/分母，§4.7）。"""
+    return [
+        e for e in entries
+        if e.get("methodology_version") == methodology_version
+        and e.get("horizon") == "long"
+        and (target_type is None or e.get("target_type") == target_type)
+    ]
+
+
+def _summary(
+    entries: list[dict[str, object]],
+    scope: list[dict[str, object]] | None = None,
+    long_entries: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """已结算命中率汇总 + 迭代看板辅助指标（settled_ratio / flat_rate / long 单列）。
+
+    - entries：已过滤的命中率分子集合（hit/miss、非近似、非 long）。
+    - scope：`settled_ratio` 分母（统计范围内全部非 long 档位，含未结算）；缺省回落到 entries。
+    - long_entries：long 档条目（单独汇总展示，不进分子/分母）。
+    """
     n = len(entries)
     hits = sum(1 for e in entries if e.get("result") == "hit")
     lo, hi = wilson_ci(hits, n)
@@ -48,10 +96,34 @@ def _summary(entries: list[dict[str, object]]) -> dict[str, object]:
     )
     if n_predictions == 0:
         n_predictions = n  # 旧记录无 prediction_id 时退化为档位数
+    scope_n = len(scope) if scope is not None else n
+    # flat_rate 分母 = **方向预判已结算数**（排除 neutral）。
+    # 有意修正计划原文的 flat_count / (flat_count + n)：n 含 neutral，会把 neutral 计入
+    # 分母而稀释 flat 占比，得不到设计要求的「33% ≈ 瞎猜」跨粒度基准线（design §4.3）。
+    directional_count = sum(
+        1 for e in entries if e.get("direction") in {"bullish", "bearish"}
+    )
+    flat_count = sum(
+        1 for e in entries
+        if e.get("direction") in {"bullish", "bearish"} and e.get("flat") is True
+    )
+    long_list = long_entries or []
+    long_n = len(long_list)
+    long_hits = sum(1 for e in long_list if e.get("result") == "hit")
     return {
         "n": n, "hits": hits, "hit_rate": round(hits / n, 4) if n else 0.0,
         "ci": [lo, hi], "n_predictions": n_predictions,
         "sufficient_sample": n >= 30 and n_predictions >= 30,
+        "settled_ratio": round(n / scope_n, 4) if scope_n else None,
+        "flat_rate": round(flat_count / directional_count, 4) if directional_count else None,
+        "flat_count": flat_count,
+        "directional_count": directional_count,
+        "long_excluded": long_n > 0,
+        # long 档单列（仅展示命中率，不进迭代判读）
+        "long": {
+            "n": long_n, "hits": long_hits,
+            "hit_rate": round(long_hits / long_n, 4) if long_n else 0.0,
+        },
     }
 
 
@@ -60,26 +132,45 @@ def hit_rate_summary(
     target_type: str | None = None,
     methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """汇总已验证档位（仅默认版本的 hit/miss 参与；insufficient/其他版本/approximate 剔除）。
+    """汇总已验证档位（仅默认版本的 hit/miss 参与；insufficient/其他版本/approximate/long 剔除）。
 
     target_type 过滤：None=聚合全部（兼容旧调用），"index"/"sector" 只统计该桶（H3 防桶污染）。
     methodology_version：默认当前生产版本（防跳变）；传 "3.0" 可观测 3.0 分桶（阶段 0）。
-    Returns: {n, hits, hit_rate, ci, n_predictions,
-              sufficient_sample: n>=30 且 n_predictions>=30}
+    Returns: {n, hits, hit_rate, ci, n_predictions, sufficient_sample,
+              settled_ratio, flat_rate, flat_count, directional_count, long_excluded, long}
     """
-    return _summary(_filter_v2(entries, target_type, methodology_version))
+    return _summary(
+        _filter_v2(entries, target_type, methodology_version),
+        scope=_scope(entries, target_type, methodology_version),
+        long_entries=_long_entries(entries, target_type, methodology_version),
+    )
 
 
 def bucket_summary(
     entries: list[dict[str, object]],
     methodology_version: str = _CURRENT_METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """三桶：combined 仅描述性；index/sector 各自判定 sufficient_sample（H3 防桶污染）。"""
-    v2 = _filter_v2(entries, None, methodology_version)
+    """三桶：combined 仅描述性；index/sector 各自判定 sufficient_sample（H3 防桶污染）。
+
+    long 档同口径排除；每桶含 settled_ratio / flat_rate / flat_count / directional_count /
+    long_excluded（与 hit_rate_summary 对齐）。
+    """
     return {
-        "combined": _summary(v2),
-        "index": _summary(_filter_v2(entries, "index", methodology_version)),
-        "sector": _summary(_filter_v2(entries, "sector", methodology_version)),
+        "combined": _summary(
+            _filter_v2(entries, None, methodology_version),
+            scope=_scope(entries, None, methodology_version),
+            long_entries=_long_entries(entries, None, methodology_version),
+        ),
+        "index": _summary(
+            _filter_v2(entries, "index", methodology_version),
+            scope=_scope(entries, "index", methodology_version),
+            long_entries=_long_entries(entries, "index", methodology_version),
+        ),
+        "sector": _summary(
+            _filter_v2(entries, "sector", methodology_version),
+            scope=_scope(entries, "sector", methodology_version),
+            long_entries=_long_entries(entries, "sector", methodology_version),
+        ),
     }
 
 
