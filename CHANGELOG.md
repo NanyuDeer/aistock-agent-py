@@ -2,6 +2,29 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-06 — 收口改动文件剩余 28 处 ruff 告警 + 修复 scripts 包解析
+
+**开发者**: Aria
+
+### 改进
+
+- **清掉改动文件里剩余的 28 处 ruff 告警**（`prediction_stats.py` / `prediction_validator.py` / `test_prediction_stats.py` / `test_prediction_validation_cbis.py` / `test_prediction_validator.py`）：25 处 `E501`（正当换行，语义与文案不变）、2 处 `F841`（删除未使用的赋值）、1 处 `I001` 与 1 处 `W292`（ruff 自动修）。这 5 个文件现 **`All checks passed!`**；全仓 `ruff check src tests scripts` **324 → 296**（只减本次这 28 处，未波及其它文件）。
+- **修复 `scripts/` 的 mypy 包解析**：新增 `scripts/__init__.py` 与 `scripts/calibration/__init__.py`（各一句中文 docstring，风格同既有）。根因是混合文件列表下 mypy 报 `Source file found twice under different module names: "k_band" and "scripts.calibration.k_band"`；补 `__init__.py` 使包语义明确后该错消失。**未改任何 mypy 配置**，`mypy src` 存量错误数 **290 → 290 零恶化**。
+
+### 验证
+
+- `uv run ruff check <5 个改动文件>` → **All checks passed!**
+- `uv run mypy src/aistock_agent/services/k_band_table.py scripts/calibration/k_band.py` → **Success: no issues found in 2 source files**（原报错场景已修复）
+- `uv run mypy src` → 290 errors / 53 files（与改前一致，零恶化）
+- `uv run pytest tests/unit -q` → **3433 passed / 9 failed / 1 skipped**（9 条与基线同集）
+- 定向 `test_prediction_validator + test_prediction_stats + test_prediction_validation_cbis + test_k_band` → **130 passed**
+
+### 说明
+
+- 全仓仍有约 **296 条 `E501` 存量** 与 **290 条 mypy strict 存量**（`mypy src` 的 53 个文件），属**仓库既有积压、与本次改造无关**，本轮未处理（不在「本次改动文件」范围内）。
+
+---
+
 ## [main] 2026-10-06 — 退役条件链死代码清理（物理删除）+ 本轮新增 ruff 告警清零
 
 **开发者**: Aria
