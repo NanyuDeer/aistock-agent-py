@@ -3,7 +3,7 @@
 设计定位（不设独立 agent，预判 skill 同步调用）：
 - 判定永远走确定性代码（prediction_validator._verify_horizon + run_once），
   本层只在判定之上做「画像读取 + LLM 解释」。
-  （条件链路的 _verify_conditions 已于 2026-10-06 退役，run_once 不再调用它。）
+  （条件链路的 _verify_conditions 已于 2026-10-06 退役并物理删除，run_once 不再涉及。）
 - 画像计算是纯函数（prediction_stats.build_validation_profile），本层管缓存与拉取编排。
 - LLM 只做解释层（explain_verification，P3）；红线：只解释、不改判定、不产交易指令。
 

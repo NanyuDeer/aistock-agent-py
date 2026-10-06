@@ -9,7 +9,8 @@
 ② **`flat_rate` 分母 = 方向预判已结算数**（bullish/bearish 的 hit/miss，**不含 neutral**），
    不是 `flat + n`：分子分母同为方向预判，才能让 `flat_rate ≈ 1/3` 成为跨粒度「瞎猜基准线」。
 ③ **`settled_ratio` 的 scope = 记录声明的档位槽**（非 verification 已存在的 entry）——
-   含「声明了却无 entry」的真 pending；**旧版本已结算档位双排除**（不入分子也不入 pending，口径隔离）。
+   含「声明了却无 entry」的真 pending；**旧版本已结算档位双排除**（不入分子也不入
+   pending，口径隔离）。
 """
 
 from math import sqrt
@@ -31,7 +32,8 @@ def wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 # 当前生产版本（统计默认过滤，防跳变/混桶）。
 # 四处同批保持 4.0：本常量 / validator._METHODOLOGY_VERSION /
-# skills.prediction_validation._PROFILE_METHODOLOGY_VERSION / Node publicRouter.CURRENT_METHODOLOGY_VERSION。
+# skills.prediction_validation._PROFILE_METHODOLOGY_VERSION /
+# Node publicRouter.CURRENT_METHODOLOGY_VERSION。
 # ⚠️ validator._BACKFILL_METHODOLOGY_VERSION（"2.0"）是**存量回补口径**、独立保持不动，不在此清单。
 _CURRENT_METHODOLOGY_VERSION = "4.0"
 
@@ -80,7 +82,9 @@ def _slots_from_entries(
 
 
 def _slot_target_type(slot: dict[str, object]) -> str:
-    """槽位的 target_type 归属；缺失/脏值按既有约定归 ``index``（旧记录无 target_type 视为 index）。"""
+    """槽位的 target_type 归属；缺失/脏值按既有约定归 ``index``
+    （旧记录无 target_type 视为 index）。
+    """
     tt = slot.get("target_type")
     return tt if isinstance(tt, str) and tt else "index"
 
@@ -138,7 +142,8 @@ def _long_entries(
 ) -> list[dict[str, object]]:
     """long 档条目（保留展示；不进迭代看板分子/分母，§4.7）。
 
-    口径与 app-api ``bucketStats`` 的 longScope 一致：long + 当前版本 + **非近似**（含各种 result）。
+    口径与 app-api ``bucketStats`` 的 longScope 一致：long + 当前版本 + **非近似**
+    （含各种 result）。
     命中率展示再从中取 result ∈ {hit, miss}（见 `_summary`）。
     """
     return [

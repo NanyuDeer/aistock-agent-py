@@ -53,7 +53,9 @@ def _entry(target_type, result="hit", prediction_id=1, methodology_version="4.0"
 
 
 def test_hit_rate_summary_default_filters_current_version_only():
-    """默认（不传版本）只统计当前生产版本 4.0——混合 1.0/3.0/4.0 记录时 n 只含 4.0（防跳变/混桶）。"""
+    """默认（不传版本）只统计当前生产版本 4.0——混合 1.0/3.0/4.0 记录时
+    n 只含 4.0（防跳变/混桶）。
+    """
     entries = [
         _entry("index", "hit", 1, "1.0"),
         _entry("index", "hit", 2, "3.0"),
@@ -431,7 +433,8 @@ def test_bucket_summary_settled_ratio_uses_scope_slots_per_bucket():
 def test_long_display_counts_hit_miss_only_and_excludes_approximate():
     """long 命中率展示口径与 app-api 一致：long + 非近似 + result ∈ {hit,miss}。
 
-    insufficient / approximate 的 long 档不进 n/hits；long_excluded 仍按「存在当前版本 long 档」判定。
+    insufficient / approximate 的 long 档不进 n/hits；long_excluded 仍按
+    「存在当前版本 long 档」判定。
     """
     entries = [
         _h_entry(horizon="short", result="hit"),
@@ -540,7 +543,9 @@ def test_direction_bucket_flat_rate_uses_that_direction_denominator():
 
 
 def test_direction_bucket_no_sample_is_none_and_neutral_flat_rate_none():
-    """某方向无样本 → n=0、hit_rate=None（不用 0）/ sufficient_sample=False；neutral 无方向 → flat_rate=None。"""
+    """某方向无样本 → n=0、hit_rate=None（不用 0）/ sufficient_sample=False；
+    neutral 无方向 → flat_rate=None。
+    """
     entries = [_h_entry(direction="bullish", result="hit")]
     s = hit_rate_summary(entries)
     for d in ("bearish", "neutral"):
