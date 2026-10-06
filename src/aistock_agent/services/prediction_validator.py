@@ -1349,10 +1349,6 @@ async def run_once() -> int:
         return 0
     updated = 0
     target_counter: dict[str, int] = {}
-    # stage① 取数记忆化（终审附带成本项）：同一批次内相同 (target_type, code, 窗口) 只取一次
-    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] = {}
-    # 事件类条件用的事件列表记忆化（Task 5.1）：同批次内相同 (dateFrom, dateTo) 只取一次
-    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
     for record in records:
         record_id = record.get("id")
         # D2：Node internal 归一后为 number；兼容历史 string（曾致 isinstance(int) 门禁全量跳过）
@@ -1395,70 +1391,12 @@ async def run_once() -> int:
                     error=str(exc),
                     exc_info=True,
                 )
-        # Spec A §4.2/§11：条件化预判两点判定——第①段（到期前扫描）先执行：条件一成立即
-        # 点亮 condition_met=true（无 result，Node 端放行中间态），前端洞见卡"待验证"分支
-        # 立即亮起；第②段（到期判定）照常写 result。幂等：已点亮/已有 result/已到期者跳过。
-        # 单记录异常只 warning 不中断整批（与相邻写回循环同风格）。
-        try:
-            lit_entries = await _scan_condition_met(
-                record, scan_cache=scan_cache, event_cache=event_cache
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "prediction_condition_scan_failed",
-                id=record_id,
-                error=str(exc),
-                exc_info=True,
-            )
-            lit_entries = {}
-        for lit_key, lit_entry in lit_entries.items():
-            if _should_skip_horizon(verification.get(lit_key)):
-                continue  # 兜底：已有 result 的 key 不再写
-            try:
-                await node_api.update_prediction_verification(record_id, lit_key, lit_entry)
-                updated += 1
-                logger.info(
-                    "prediction_condition_lit",
-                    id=record_id,
-                    key=lit_key,
-                    condition_met=lit_entry.get("condition_met"),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "prediction_condition_lit_write_failed",
-                    id=record_id,
-                    key=lit_key,
-                    error=str(exc),
-                    exc_info=True,
-                )
-        # Spec A §4.2/§11：条件化预判双验证调度——3.0 记录对每条 condition 另产 c{i}
-        # entry（c{i} key 与 horizon key 并存，A1 early_exit 不冲突）；已存在 result
-        # 的 c{i} 幂等跳过。取数/事件记忆化与第①段共用（key 含窗口，不串用）。
-        cond_entries = await _verify_conditions(
-            record, scan_cache=scan_cache, event_cache=event_cache
-        )
-        for ckey, centry in cond_entries.items():
-            if centry.get("wait"):
-                continue  # D1：窗口未满不回写，下次补齐再验
-            if _should_skip_horizon(verification.get(ckey)):
-                continue  # 幂等：上一轮已产出 result 的 condition 跳过
-            try:
-                await node_api.update_prediction_verification(record_id, ckey, centry)
-                updated += 1
-                logger.info(
-                    "prediction_condition_verified",
-                    id=record_id,
-                    key=ckey,
-                    result=centry["result"],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "prediction_condition_verify_write_failed",
-                    id=record_id,
-                    key=ckey,
-                    error=str(exc),
-                    exc_info=True,
-                )
+        # 2026-10-06 退役：条件化预判退出验证环（范围限定 prediction_records.conditions）——
+        # 不再调用 _scan_condition_met（第①段点亮）/ _verify_conditions（第②段到期判定），
+        # 新记录 conditions 恒为空、旧记录已写出的 c{i} entry 保持只读可查（不清洗历史）。
+        # 节奏大师的 branches 不受影响（其 met 由节奏报告引擎负责，本验证器从不写入）。
+        # 两个判定函数与 condition_met_judge 保留（存量回溯 backfill_condition_met 仍在用），
+        # 本任务仅停此调用、不删文件（物理删除留待后续单独清理）。
     # 日志输出（P0-2）
     if target_counter:
         logger.info("prediction_target_distribution", distribution=target_counter)

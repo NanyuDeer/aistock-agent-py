@@ -1519,27 +1519,32 @@ async def test_run_once_condition_verify_idempotent_no_repeat_side_effects() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_once_scans_condition_met_before_due() -> None:
-    """T6 端到端：due 在未来但条件已成立的 pending 记录 → 回写 (id, 'c0', 点亮 entry)。"""
+async def test_run_once_writes_no_condition_entries() -> None:
+    """T7 退役：prediction_records.verification 里不再出现 c{i} 键。
+
+    记录带非空 conditions（存量 3.0 契约）且 due 在未来、条件在扫描窗口内已成立——
+    退役前会点亮 c0 并回写；退役后 run_once 不得再写任何 c{i} entry。
+    """
     record = _pending_condition_record(due="2026-09-30", direction="bearish")
-    rows = _scan_rows([130.0 - i for i in range(25)])
+    rows = _scan_rows([130.0 - i for i in range(25)])  # 条件成立（跌破 MA20）
     with (
         patch.object(prediction_validator.node_api, "list_pending_predictions",
                      new=AsyncMock(return_value=[record])),
         patch.object(prediction_validator.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)),
+                     new=AsyncMock(return_value=rows)) as kline,
         patch.object(prediction_validator.node_api, "update_prediction_verification",
                      new=AsyncMock(return_value={"id": 1})) as update,
         patch("aistock_agent.services.prediction_validator.shanghai_today",
               return_value=date(2026, 9, 16)),
     ):
         updated = await run_once()
-    assert updated == 1
-    update.assert_awaited_once()
-    pid, ckey, entry = update.await_args.args
-    assert (pid, ckey) == (1, "c0")
-    assert entry["condition_met"] is True
-    assert "result" not in entry
+    assert updated == 0
+    update.assert_not_awaited()  # 不再为任何档位/条件回写
+    kline.assert_not_awaited()   # 条件扫描/判定不再取数
+    # 双保险：即便有回写，回写 key 也不得是 c{digit}
+    for call in update.call_args_list:
+        key = call.args[1]
+        assert not (isinstance(key, str) and key.startswith("c") and key[1:].isdigit())
 
 
 @pytest.mark.asyncio
@@ -1879,9 +1884,12 @@ def _two_condition_record(record_id: int, created_at: str, due: str = "2026-09-3
 
 
 @pytest.mark.asyncio
-async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
-    """成本（终审附带）：同一 run_once 内 stage① 取数记忆化——同记录多条 condition 只取
-    一次数；不同 created_at（窗口不同）不串用缓存（不得用他记录的窗口结果判定）。"""
+async def test_run_once_ignores_conditions_after_retire() -> None:
+    """T7 退役：run_once 不再触碰 conditions——多条件记录零 c{i} 回写、零条件取数。
+
+    取代原 stage① 记忆化用例（该路径已退出验证环）：退役前两条记录会把 c0/c1/c0
+    全部点亮并取数两次；退役后应完全无副作用。
+    """
     rec1 = _two_condition_record(1, "2026-09-01")
     rec2 = _pending_condition_record(record_id=2, due="2026-09-30", direction="bearish")
     rec2["created_at"] = "2026-09-10"
@@ -1897,10 +1905,9 @@ async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
               return_value=date(2026, 9, 16)),
     ):
         updated = await run_once()
-    assert updated == 3            # rec1 两条 + rec2 一条，全部点亮
-    assert kline.await_count == 2  # rec1 共享一次；rec2 窗口不同 → 各一次
-    keys = {(c.args[0], c.args[1]) for c in update.call_args_list}
-    assert keys == {(1, "c0"), (1, "c1"), (2, "c0")}
+    assert updated == 0
+    update.assert_not_awaited()  # 无任何 c{i}/档位回写
+    kline.assert_not_awaited()   # 条件扫描/判定不再取数
 
 
 # ============ Task 4：单带宽 k 判定（v4） ============
