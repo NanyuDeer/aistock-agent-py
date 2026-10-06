@@ -5,10 +5,13 @@ from aistock_agent.services.event_timeline import _merge_events, load_event_time
 
 
 def test_merge_events_schedules_first_and_dedup_and_sorted():
-    schedules = [{"date": "2026-10-09", "title": "交割日", "type": "delivery", "importance": "medium"}]
+    schedules = [
+        {"date": "2026-10-09", "title": "交割日", "type": "delivery", "importance": "medium"}
+    ]
     events = [
         {"date": "2026-10-16", "title": "CPI", "type": "macro", "importance": "high"},
-        {"date": "2026-10-09", "title": "交割日", "type": "delivery", "importance": "medium"},  # dup
+        # dup
+        {"date": "2026-10-09", "title": "交割日", "type": "delivery", "importance": "medium"},
     ]
     out = _merge_events(schedules, events)
     assert [e["title"] for e in out] == ["交割日", "CPI"]
@@ -53,3 +56,25 @@ async def test_load_event_timeline_merges_l1_and_timeline(monkeypatch):
 async def test_load_event_timeline_calendar_uncovered():
     win = await load_event_timeline("2035-01-01")
     assert win.calendar_uncovered is True
+
+
+@pytest.mark.asyncio
+async def test_load_event_timeline_horizon_none_displays_full_window(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_get_entities(params):
+        captured["params"] = params
+        return [
+            {"title": "9月CPI发布", "event_start_time": "2026-10-09", "source_type": "calendar"},
+            {"title": "年末重要会议", "event_start_time": "2026-12-20", "source_type": "manual"},
+        ]
+
+    async def fake_get_calendar(date_from, date_to):
+        return []
+
+    monkeypatch.setattr(event_timeline.node_api, "get_event_entities", fake_get_entities)
+    monkeypatch.setattr(event_timeline.node_api, "get_calendar_events", fake_get_calendar)
+    win = await load_event_timeline("2026-10-06", horizon_days=None)
+    assert win.events
+    assert win.display_events == win.events
+    assert captured["params"]["dateTo"] == "2026-12-31"

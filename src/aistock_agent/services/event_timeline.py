@@ -10,7 +10,17 @@ import logging
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from aistock_agent.services.event_calendar import MACRO_EVENT_TERMS
+from aistock_agent.services.data_client import node_api
+from aistock_agent.services.event_calendar import (
+    HORIZON_TRADING_DAYS,
+    MACRO_EVENT_TERMS,
+    EventWindow,
+)
+from aistock_agent.utils.date import (
+    CALENDAR_MAX_YEAR,
+    CALENDAR_MIN_YEAR,
+    add_trading_days,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +55,8 @@ def shanghai_start_date(event_start_time: object) -> str | None:
 
 
 def grade_importance(entity: dict[str, object]) -> str:
-    """确定性分级：manual/agent 或标题命中宏观词元 → high；news/calendar/announcement → medium；其余 → low。"""
+    """确定性分级：manual/agent 或标题命中宏观词元 → high；
+    news/calendar/announcement → medium；其余 → low。"""
     title = str(entity.get("title") or "")
     source_type = str(entity.get("source_type") or "")
     if source_type in {"manual", "agent"}:
@@ -71,17 +82,6 @@ def to_timeline_event(entity: dict[str, object]) -> dict[str, object] | None:
         "importance": grade_importance(entity),
     }
 
-
-from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_calendar import (
-    HORIZON_TRADING_DAYS,
-    EventWindow,
-)
-from aistock_agent.utils.date import (
-    CALENDAR_MAX_YEAR,
-    CALENDAR_MIN_YEAR,
-    add_trading_days,
-)
 
 _HORIZON_DISPLAY_YEAR_END_MONTH = 12
 _HORIZON_DISPLAY_YEAR_END_DAY = 31
