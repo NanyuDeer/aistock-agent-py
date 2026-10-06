@@ -54,3 +54,17 @@ def test_to_timeline_event_maps_fields():
 def test_to_timeline_event_skips_bad_date_or_empty_title():
     assert to_timeline_event({"title": "x", "event_start_time": "bad"}) is None
     assert to_timeline_event({"title": "  ", "event_start_time": "2026-10-09"}) is None
+
+
+def test_cross_day_attributes_to_start_day():
+    # 跨日事件 start=10-06 20:00(+08) end=10-07 → 归属 10-06
+    assert shanghai_start_date("2026-10-06T20:00:00+08:00") == "2026-10-06"
+
+
+def test_naive_datetime_treated_as_shanghai():
+    assert shanghai_start_date("2026-10-06T00:30:00") == "2026-10-06"
+
+
+def test_utc_evening_rolls_to_next_shanghai_day():
+    # 10-06T16:30Z = 上海 10-07 00:30
+    assert shanghai_start_date("2026-10-06T16:30:00Z") == "2026-10-07"
