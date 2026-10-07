@@ -1,5 +1,5 @@
 """L3 前瞻捕捉（§4.3/§4.8 → §5.7 迁出）：6 query 硬上限 + 12 次软上限 + 日期解析 + 负缓存。"""
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 

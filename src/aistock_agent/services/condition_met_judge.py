@@ -12,7 +12,7 @@
 共用同一份白名单 `schemas/prediction.py::PredictionMetric`，防两侧口径再次脱节）。
 优先级：`event_ref` > **显式 metric**（量类 → 技术位 → 参考位）> **文本兜底**（量词 → 技术位词）
 > 涨跌幅（显式 metric 是生成侧强声明，优先于文本证据；无 metric 时文本才作为识别依据）：
-  ① `event_ref` 非空 → **事件类**（判定在调用方 `prediction_validator._scan_condition_met`：
+  ① `event_ref` 非空 → **事件类**（判定在调用方 `prediction_validator._judge_condition_met_once`：
      状态锚 → 受限 LLM（开关默认关）→ None；本纯函数对事件类恒 `None`）；
   ② `metric ∈ {volume, amount}`，或（无显式 metric 时）文本含量词（放量/缩量/成交额/成交量/量能）
      → **量类**；
@@ -729,7 +729,7 @@ def judge_condition_met(
     - `closes`/`pct_chgs`/`volumes`/`amounts` 均为升序且已剔除 None（空列表表示该维度无数据）。
     - `metric`/`op`/`level`/`event_ref` 为 anchor 的判定维度（spec §12.3，2026-09-17 扩展）；
       缺省（旧记录）时行为与扩展前一致（由文本推断类型）。
-    - 事件类：本纯函数恒 `None`（无 IO）；由调用方 `_scan_condition_met` 走三层判定。
+    - 事件类：本纯函数恒 `None`（无 IO）；由调用方 `_judge_condition_met_once` 走三层判定。
     - 参考位类：`today_ref`（当日行 open/high/low + close）有值即可判；缺数据 → `None`。
     - 路由与守卫见模块 docstring（绝对点位 → None 的守卫对未显式声明判定维度的 anchor 保留）。
     """

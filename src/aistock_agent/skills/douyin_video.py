@@ -74,7 +74,7 @@ async def douyin_video(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     )
 
 
-def _doctor_summary(client: DouyinClient) -> dict:
+def _doctor_summary(client: DouyinClient) -> dict[str, Any]:
     """附带依赖自检结果（失败不阻断，仅记录）。"""
     from aistock_agent.skills.douyin_client import run_doctor
 

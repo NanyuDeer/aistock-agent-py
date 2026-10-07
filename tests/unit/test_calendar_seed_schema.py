@@ -25,8 +25,8 @@ def test_seed_event_type_coverage():
 
 
 def test_seed_event_date_and_time():
-    import re
     import datetime as dt
+    import re
     data = json.loads(SEED.read_text(encoding="utf-8"))
     for e in data["events"]:
         # event_date 格式与合法性（YYYY-MM-DD，fromisoformat 抛错兜非法月/日）

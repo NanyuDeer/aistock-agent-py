@@ -101,7 +101,7 @@ def evaluate_branch(
         can_judge = (
             point_trigger and direction in ("bullish", "bearish") and trigger_val is not None
         )
-        if can_judge:
+        if can_judge and trigger_val is not None:
             consecutive = 0
             for row in rows:
                 close = row.get("close")

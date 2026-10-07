@@ -131,7 +131,7 @@ async def collect_l3_forward(score_date: str, cache: SearchCache) -> list[dict[s
     return parsed_events
 
 
-async def collect_jiuyan(score_date: str, cache: SearchCache) -> list[dict]:
+async def collect_jiuyan(score_date: str, cache: SearchCache) -> list[dict[str, object]]:
     """韭研源（N1，spec §5.6）抓取入口——最小退化实现。
 
     控制台裁决 ②（O2 风险登记）：韭研反爬/合规评估未通过前，跳过抓取并留

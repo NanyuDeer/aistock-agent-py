@@ -1,5 +1,6 @@
 """归因链组装与保存（spec P1a-3：大盘-板块-事件 链树的 agent 侧产物）。"""
 import re
+from typing import cast
 from urllib.parse import urlparse
 
 import structlog
@@ -1063,5 +1064,5 @@ class AttributionChainStore:
         logger.info(
             "attribution_chain.saved",
             report_date=report_date,
-            children=len(chain.get("children", [])),
+            children=len(cast(list[object], chain.get("children", []))),
         )

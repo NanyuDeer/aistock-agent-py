@@ -122,7 +122,7 @@ def _strip_post_window_market_references(
     }
     if not late_market_ids:
         return
-    for candidate in payload.get("candidates", []):
+    for candidate in cast(list[object], payload.get("candidates", [])):
         if not isinstance(candidate, dict):
             continue
         for field in ("supporting_evidence_ids", "counter_evidence_ids"):
@@ -131,7 +131,7 @@ def _strip_post_window_market_references(
                 for source_id in candidate.get(field, [])
                 if source_id not in late_market_ids
             ]
-    for chain in payload.get("chains", []):
+    for chain in cast(list[object], payload.get("chains", [])):
         if not isinstance(chain, dict):
             continue
         for node in chain.get("nodes", []):

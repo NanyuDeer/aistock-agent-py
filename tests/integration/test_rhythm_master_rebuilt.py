@@ -96,9 +96,10 @@ async def test_run_output_contains_rhythm_card_contract():
 
 @pytest.mark.asyncio
 async def test_run_persisted_content_has_rhythm_card_branches():
+    from unittest.mock import patch
+
     from aistock_agent.agents.workers.rhythm_master import run
     from aistock_agent.utils.date import shanghai_today
-    from unittest.mock import patch
 
     basis = shanghai_today().isoformat()
     state = {"refresh_slot": "after_close", "report_date": basis}

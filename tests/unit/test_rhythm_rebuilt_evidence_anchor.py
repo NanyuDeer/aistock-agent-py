@@ -1,6 +1,7 @@
 # tests/unit/test_rhythm_rebuilt_evidence_anchor.py
 from aistock_agent.services.rhythm_rebuilt_evidence import build_event_anchors
 
+
 def test_anchors_only_high_importance():
     events = [
         {"date": "2026-09-08", "title": "CPI 公布", "importance": "high"},

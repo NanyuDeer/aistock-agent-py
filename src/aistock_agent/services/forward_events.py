@@ -16,17 +16,22 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import unicodedata
 from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
+
+import structlog
 
 from aistock_agent.services.data_client import node_api
 from aistock_agent.utils.date import prev_trading_day, shanghai_today
 
-logger = logging.getLogger(__name__)
+# 本模块全篇按 structlog 风格记结构化日志（事件名 + kwargs）；此前误用 stdlib
+# logging.getLogger，logger.warning(..., title=...) 会在运行期抛 TypeError，
+# 把 except 兜底变成炸点。切 structlog 与 services/ 下其余模块口径一致。
+logger = structlog.get_logger()
 
 SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "calendar_seed.json"
 CANDIDATES_PATH = Path(__file__).resolve().parent.parent / "data" / "calendar_candidates.json"
@@ -41,7 +46,8 @@ _CONSENSUS_PREFIX = "consensus:"  # 原 detail 为空时无前置分隔，直接
 def _load_json(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"schema_version": "1.0", "events": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    # json.loads 返回 Any；种子文件契约恒为对象，cast 收窄（零运行时影响）
+    return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
 
 
 def _normalize_title(s: str) -> str:
@@ -268,9 +274,11 @@ def _extract_actual_from_search(search: dict[str, object]) -> str | None:
 async def _llm_judge(title: str, consensus: str, actual: str) -> str | None:
     """LLM 判定预期差（事实层）；失败返回 None（宁缺勿猜）。"""
     from aistock_agent.services.forward_event_llm import _build_judge_prompt
-    from aistock_agent.services.llm import get_chat_model
+    from aistock_agent.services.llm import get_quick_think
     try:
-        model = get_chat_model(temperature=0.0)
+        # 轻量三分类判定（超预期/符合/不及预期）→ 走 quick_think；T=0 保证确定性。
+        # 此前误调不存在的 get_chat_model，import 即抛 ImportError，该 LLM 判定从未生效。
+        model = get_quick_think(temperature=0.0)
         resp = await model.ainvoke(_build_judge_prompt(title, consensus, actual))
         return str(getattr(resp, "content", resp) or "").strip()
     except Exception as exc:  # noqa: BLE001

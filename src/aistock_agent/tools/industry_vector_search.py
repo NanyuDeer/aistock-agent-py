@@ -80,7 +80,7 @@ async def semantic_match_industries(
         model=settings.embedding_model,
         input=query_text,
     )
-    embedding = response.data[0].embedding  # type: ignore[union-attr]
+    embedding = response.data[0].embedding
 
     # 3. 调用 Node.js pgvector 搜索
     industries = await node_api.semantic_search_industries(

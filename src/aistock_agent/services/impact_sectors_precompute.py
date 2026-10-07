@@ -16,8 +16,9 @@
 - 失败容错：单行失败 log 后继续，不中断整批；抓取/传导主链路不受影响（独立 cron）。
 """
 
-import structlog
 from datetime import timedelta
+
+import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api

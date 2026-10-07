@@ -531,7 +531,7 @@ async def test_persisted_target_hits_task05_profile_matching() -> None:
         "id": "p1",
         "prediction": mock_save.await_args.args[0]["prediction"],
         "verification": {
-            "short": {"result": "hit", "horizon": "short", "methodology_version": "3.0",
+            "short": {"result": "hit", "horizon": "short", "methodology_version": "4.0",
                       "target_type": "sector", "approximate": False},
         },
     }

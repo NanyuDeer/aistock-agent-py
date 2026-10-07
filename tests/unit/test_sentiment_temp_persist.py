@@ -1,5 +1,4 @@
 """情绪温度落盘/加载/晨报上下文测试。"""
-import json
 
 import pytest
 

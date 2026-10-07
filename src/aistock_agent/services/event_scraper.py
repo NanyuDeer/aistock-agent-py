@@ -52,6 +52,32 @@ def _spawn_conduction(events: list[event_store.EventRecord]) -> None:
     task.add_done_callback(_pending_conduction_tasks.discard)
 
 
+async def _materialize_events(events: list[event_store.EventRecord]) -> None:
+    """把本批事件物化到 Event Entity（开关内短路，失败只打标不阻断主链路）。
+
+    必须在校验/落库**之前**调用：权威 event_id 要随本次落库写进事件库，
+    否则「从事件库重放再传导」的路径拿不到 app_event_id，传导报告会退回
+    evt_md5 键，而时间线的 occurred 准入要求两侧 id 相等 → 事件被静默丢弃。
+    物化按 canonical_event_key 幂等 upsert，重复物化只更新同一行。
+
+    事件对象在此被**原地回填**（app_event_id/app_event_status 写进同一 dict），随后
+    save_event_scrape 落库的就是同一批对象，权威 id 一并持久化（缺陷A修复）。
+    """
+    if not settings.event_entity_enabled:
+        return
+    _now_iso = shanghai_now().isoformat()
+    for _ev in events:
+        _info = await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
+        if _info:
+            _ev["app_event_id"] = _info["event_id"]
+            _ev["app_event_status"] = _info["event_status"]
+        else:
+            # 未物化/失败 → 守卫兜底走旧路径。此处不再补日志：跳过/失败原因
+            # 由 _materialize_event_entity 内部分别落 info（STOCK 设计性跳过）
+            # 与 warning（真实失败），避免对设计性跳过误报告警。
+            _ev["event_entity_unfilled"] = True
+
+
 def _today() -> str:
     """上海时区自然日（作为报告交易日，对齐 utils/date.py 惯例）。"""
     return shanghai_today().isoformat()
@@ -191,19 +217,12 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
 
     major = [ev for ev in events if event_store.is_major_event(ev)]
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
+    # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：新增事件物化必须在落库**之前**
+    # （缺陷A修复，2026-10-02）：权威 app_event_id 要随本批落库写进事件库，否则
+    # 「从事件库重放再传导」拿不到权威 id → 时间线 occurred 准入两侧 id 不等被丢弃。
+    # 开关内短路，失败不阻断抓取/传导主链路；原地回填同一批对象供落库并持久化。
+    await _materialize_events(major)
     result = await event_store.save_event_scrape(major, score_date)
-    # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：新增事件物化到 /internal/event-entities
-    # （开关内短路，失败不阻断抓取/传导主链路）→ 回填 app_event_id/app_event_status，
-    # 时序在 _spawn_conduction 之前：物化产出的权威 id 进入传导 payload（A1a 裁决）。
-    if settings.event_entity_enabled:
-        _now_iso = shanghai_now().isoformat()
-        for _ev in result.get("added_events") or []:
-            _info = await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
-            if _info:
-                _ev["app_event_id"] = _info["event_id"]
-                _ev["app_event_status"] = _info["event_status"]
-            else:
-                _ev["event_entity_unfilled"] = True  # 未物化/失败 → 守卫兜底走旧路径
     # 落库成功且有新增重大事件 → 触发事件传导（Task 5：传导统一由中台负责，
     # 晨报/scheduler 不再直接触发）。I3：守卫用 added（本批真正新增数）而非
     # persisted（合并后库中总数）——07:30 全量后每小时全去重批次 persisted>0
@@ -235,17 +254,10 @@ async def scrape_intraday(score_date: str) -> dict[str, Any]:
     if settings.event_scoring_llm_enabled:
         events = await event_scoring_llm.score_events_llm(events, score_date=score_date)
     logger.info("event_scrape_intraday", total=len(events))
+    # 重大事件时间线（缺陷A修复，2026-10-02）：物化先于落库，
+    # 权威 app_event_id 随本批落库写进事件库（供「从库重放」路径消费）
+    await _materialize_events(events)
     result = await event_store.save_event_scrape(events, score_date)
-    # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：盘中新增事件物化 → 回填 app id/status
-    if settings.event_entity_enabled:
-        _now_iso = shanghai_now().isoformat()
-        for _ev in result.get("added_events") or []:
-            _info = await event_scrape_sources._materialize_event_entity(_ev, _now_iso)
-            if _info:
-                _ev["app_event_id"] = _info["event_id"]
-                _ev["app_event_status"] = _info["event_status"]
-            else:
-                _ev["event_entity_unfilled"] = True
     # 同上（I3）：守卫用 added>0 且只传新增子集（全去重批次不重复触发传导）
     if events and result.get("added", 0) > 0:
         _spawn_conduction(result.get("added_events") or [])

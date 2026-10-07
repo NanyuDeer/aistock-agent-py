@@ -688,7 +688,7 @@ async def test_run_caches_and_persists_when_normal():
     ) as mock_archive, patch(
         "aistock_agent.agents.workers.morning.persist_morning_report",
         new_callable=AsyncMock, return_value=True,
-    ) as mock_persist, patch(
+    ), patch(
         "aistock_agent.agents.workers.morning._safe_process_market_push",
         new_callable=AsyncMock,
     ), patch(

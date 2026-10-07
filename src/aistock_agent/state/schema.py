@@ -50,5 +50,10 @@ class AgentState(TypedDict):
     report_date: NotRequired[str | None]  # YYYY-MM-DD
     brief_type: NotRequired[str | None]  # "morning" | "evening"
     trace_id: NotRequired[str | None]  # 个股或市场触发链路关联 ID
+    # 节奏大师：三时点刷新槽位（after_close/morning/midday）与落库目标日。
+    # scheduler 运行期注入（state["refresh_slot"]/state["target_date"]），
+    # rhythm_master.run 读取；缺省由 slot 推导。
+    refresh_slot: NotRequired[str | None]
+    target_date: NotRequired[str | None]
     # 最终响应
     final_response: str | None

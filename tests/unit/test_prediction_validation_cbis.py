@@ -22,12 +22,15 @@ def _review_report_with_confirmations(date: str) -> dict[str, object]:
         "source_trace_id": "tr1", "confirmed_kind": "scene_match",
         "confirmed_at": "2026-09-01T00:00:00Z",
     }
-    chain = {"nodes": [{"stage": "trigger", "claim": "x", "evidence_ids": []}], "confirmed_prediction": [conf]}
+    chain = {"nodes": [{"stage": "trigger", "claim": "x", "evidence_ids": []}],
+             "confirmed_prediction": [conf]}
     candidate = {"id": "c1", "category": "domestic_macro_policy", "status": "supported",
-                 "verdict": "v", "chain": chain, "supporting_evidence_ids": [], "counter_evidence_ids": []}
+                 "verdict": "v", "chain": chain, "supporting_evidence_ids": [],
+                 "counter_evidence_ids": []}
     trace = {"schema_version": "1.1", "attribution_status": "confirmed", "candidates": [candidate],
              "primary_chain_id": "c1", "alternative_chain_id": None, "confidence": "high",
-             "unresolved_questions": [], "attribution_summary": "降息预期兑现驱动上行", "prediction_validation": None}
+             "unresolved_questions": [], "attribution_summary": "降息预期兑现驱动上行",
+             "prediction_validation": None}
     return {"status": "completed", "content": {"market_trace": {"trace": trace, "snapshot": {
         "snapshot_id": "s1", "trade_date": date, "captured_at": "2026-09-01T00:00:00Z",
         "a_share": {}, "sources": {}, "missing_fields": [],
@@ -89,7 +92,11 @@ def test_enrich_surfaces_confirmed_scenarios() -> None:
     assert "scenario_signal" in out
     found = [s["scenario"] for s in out["scenario_signal"]["confirmed"]]
     assert "降息预期兑现" in found
-    assert out["scenario_signal"]["confirmed"][0]["count"] >= out["scenario_signal"]["confirmed"][1]["count"]
+    assert (out["scenario_signal"]["confirmed"][0]["count"]
+            >= out["scenario_signal"]["confirmed"][1]["count"])
+    # 2026-10-06 条件退役护栏：note 作为预判 LLM 输入上下文，不得再提 conditions
+    # （防文案回归引导 LLM 继续使用/产出已退役字段）
+    assert "conditions" not in out["scenario_signal"]["note"]
 
 
 def test_enrich_no_harvest_no_signal() -> None:

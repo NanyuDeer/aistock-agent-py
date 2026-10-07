@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -5,6 +6,7 @@ import pytest
 
 from aistock_agent.services.event_store import (
     EventRecord,
+    _safe_float,
     event_content_hash,
     load_event_scrape,
     normalize_event,
@@ -31,6 +33,31 @@ def _make_event(**overrides: Any) -> EventRecord:
     }
     ev.update(overrides)
     return cast(EventRecord, ev)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1.25, 1.25),
+        (2, 2.0),
+        (" 3.5 ", 3.5),
+        ("abc", -1.0),  # 非数值字符串 → 默认值
+        (None, -1.0),  # 缺字段 → 默认值
+        ({"a": 1}, -1.0),  # 畸形结构 → 默认值
+        ([1, 2], -1.0),
+        (True, 1.0),  # bool 是 int 子类（保持旧行为 True→1.0）
+        (Decimal("4.5"), 4.5),  # 非 JSON 标量但可字符串化 → 仍可转
+    ],
+)
+def test_safe_float_contract(value: object, expected: float) -> None:
+    """_safe_float 契约：畸形/缺失一律回落默认值，可转值仍可转、绝不抛异常。
+
+    default 传 -1.0 以证明失败分支真的用了入参默认值。
+    护栏用途：防止后续为过 mypy 把实现收窄到「只认 int/float」，从而让数字字符串 /
+    Decimal 等可转值静默变成默认值（对齐 global_importance_evaluation._safe_float
+    的同款窄化 + str 兜底实现）。
+    """
+    assert _safe_float(value, -1.0) == expected
 
 
 def test_event_content_hash_is_stable_sha1() -> None:
@@ -125,7 +152,8 @@ async def test_save_event_scrape_dedupes_same_batch() -> None:
 async def test_save_event_scrape_merges_with_existing_same_day() -> None:
     # 第二次调用：当日已有 1 个旧事件，本批新增 1 个 → 落库 content 含 2 个事件
     old_event = _make_event(event_id="old", content_hash="oldhash")
-    new_event = _make_event(event_id="new", content_hash="newhash")
+    # 标题与 old 不同（近似去重层只吸收同源+高相似标题，标题不同必须新增）
+    new_event = _make_event(event_id="new", content_hash="newhash", title="事件B")
     with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
         "aistock_agent.services.event_store.load_event_scrape",
         new=AsyncMock(return_value=[old_event]),
@@ -237,6 +265,23 @@ async def test_load_event_scrape_reads_by_date() -> None:
         mock_api.get_analysis_report_quiet.assert_awaited_once_with(
             "event_scrape", "2026-08-12"
         )
+
+
+@pytest.mark.asyncio
+async def test_load_event_scrape_preserves_source_name() -> None:
+    """重放路径必须保留 source_name（如"外盘行情"）——与 app_event_id 同族缺陷。
+
+    否则「从事件库重读再传导」的事件丢媒体名 → LLM 判不出媒体 → 前端恒显示
+    「未知来源」。历史数据无该键 → None（不臆造）。
+    """
+    with_source = _make_event(source_name="外盘行情")
+    with patch("aistock_agent.services.event_store.node_api") as mock_api:
+        mock_api.get_analysis_report_quiet = AsyncMock(
+            return_value={"content": {"events": [with_source, _make_event()]}}
+        )
+        events = await load_event_scrape("2026-08-12")
+    assert events[0]["source_name"] == "外盘行情"
+    assert events[1]["source_name"] is None
 
 
 @pytest.mark.asyncio
@@ -402,3 +447,94 @@ async def test_save_event_scrape_concurrent_batches_no_loss() -> None:
             save_event_scrape([_ev("e2", "bbb")], "2026-08-12"),  # type: ignore[arg-type]
         )
     assert len(store["2026-08-12"]) == 2
+
+
+# ========== 近似去重（近重复标题，同数据源） ==========
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_absorbs_near_duplicate_title_same_source() -> None:
+    """近似去重：财联社两条电报标题仅差"汽车"二字（2495917/2495923），
+    同 source=cls → 新事件被吸收进已有事件，不触发传导（added=0）。"""
+    old_event = _make_event(
+        event_id="evt_210710f9",
+        content_hash="h_old",
+        title="中国汽车流通协会：9月经销商库存预警指数63.2%",
+        url="https://www.cls.cn/detail/2495917",
+    )
+    near_event = _make_event(
+        event_id="evt_13176f7d",
+        content_hash="h_new",
+        title="中国汽车流通协会：9月汽车经销商库存预警指数63.2%",
+        url="https://www.cls.cn/detail/2495923",
+    )
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[old_event]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        result = await save_event_scrape([near_event], "2026-08-12")
+        assert result["deduped"] == 1
+        assert result["added"] == 0  # 不触发传导
+        assert result["added_events"] == []
+        assert result["persisted"] == 1  # 库中仅保留已有事件
+        call_kwargs = mock_api.save_analysis_report.call_args.kwargs
+        assert len(call_kwargs["content"]["events"]) == 1
+        assert call_kwargs["content"]["events"][0]["content_hash"] == "h_old"
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_keeps_similar_title_different_source() -> None:
+    """近似去重仅限同数据源：不同 source 的相似标题不吸收（防止跨源误杀）。"""
+    old_event = _make_event(
+        event_id="e_old", content_hash="h_old", title="央行宣布降准",
+        source="cls",
+    )
+    new_event = _make_event(
+        event_id="e_new", content_hash="h_new", title="央行宣布降准0.5个百分点",
+        source="eastmoney",
+    )
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[old_event]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        result = await save_event_scrape([new_event], "2026-08-12")
+        assert result["deduped"] == 0
+        assert result["added"] == 1  # 跨源必须保留
+        assert len(result["added_events"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_absorbs_near_duplicate_within_batch() -> None:
+    """同批内两条近似标题（同 source）：后到者吸收，只新增 1 条。"""
+    ev1 = _make_event(event_id="e1", content_hash="h1", title="央行宣布降准0.5个百分点")
+    ev2 = _make_event(event_id="e2", content_hash="h2", title="央行宣布降准0.50个百分点")
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        result = await save_event_scrape([ev1, ev2], "2026-08-12")
+        assert result["deduped"] == 1
+        assert result["added"] == 1
+        assert len(result["added_events"]) == 1
+        call_kwargs = mock_api.save_analysis_report.call_args.kwargs
+        assert len(call_kwargs["content"]["events"]) == 1
+
+
+def test_title_similarity_helpers() -> None:
+    """_normalize_title / _title_similarity 契约：轻归一化后相似度判定。"""
+    from aistock_agent.services.event_store import (
+        _normalize_title,
+        _title_similarity,
+    )
+
+    norm_old = _normalize_title("中国汽车流通协会：9月经销商库存预警指数63.2%")
+    norm_new = _normalize_title("中国汽车流通协会：9月汽车经销商库存预警指数63.2%")
+    assert norm_old == "中国汽车流通协会9月经销商库存预警指数632"
+    assert norm_new == "中国汽车流通协会9月汽车经销商库存预警指数632"
+    assert _title_similarity(norm_old, norm_new) > 0.9
+    # 不同主题标题相似度低
+    assert _title_similarity(norm_old, "央行宣布降准05个百分点") < 0.5
+    # 空标题不参与近似去重（不抛异常）
+    assert _title_similarity("", "abc") == 0.0

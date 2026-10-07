@@ -1,5 +1,11 @@
-from aistock_agent.schemas.rhythm_master import RhythmSynthesis, LaunchOutlook, MainlineRef, RhythmEvidence
-from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis, _contains_price_point
+from aistock_agent.schemas.rhythm_master import (
+    LaunchOutlook,
+    MainlineRef,
+    RhythmEvidence,
+    RhythmSynthesis,
+)
+from aistock_agent.services.rhythm_rebuilt_validate import _contains_price_point, validate_synthesis
+
 
 def test_reject_price_point_in_narrative():
     assert _contains_price_point("预计目标点位 3800 点")

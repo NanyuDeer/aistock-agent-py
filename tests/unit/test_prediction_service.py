@@ -991,9 +991,9 @@ def test_apply_cap_long_never_capped():
 
 
 def _entry(result, baseline=None):
-    # 对齐验证器真实回写结构：methodology_version=2.0 是 hit_rate_summary /
+    # 对齐验证器真实回写结构：methodology_version=4.0 是 hit_rate_summary /
     # baseline_neutral_summary 的过滤前提（缺失会被整体过滤为 n=0，fixture 偏差已修正）
-    e = {"methodology_version": "2.0", "result": result}
+    e = {"methodology_version": "4.0", "result": result}
     if baseline is not None:
         e["baseline_neutral"] = baseline
     return e

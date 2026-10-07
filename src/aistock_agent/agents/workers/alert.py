@@ -21,6 +21,7 @@ from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.constants import SSEEventType
@@ -62,7 +63,7 @@ def _resolve_cycle(state: dict[str, object]) -> str:
 async def _run_sub_agent(
     name: str,
     prompt_template: str,
-    tools: list,
+    tools: list[BaseTool],
     model_type: str,
     symbol: str,
     cycle_label: str,

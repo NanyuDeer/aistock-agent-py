@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import cast
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langgraph.graph.state import CompiledStateGraph
@@ -19,6 +20,7 @@ from aistock_agent.schemas.chat_contract import ChatCard
 from aistock_agent.services.chat_task_manager import ChatRunState, chat_task_manager
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.token_usage import get_token_usage, reset_token_usage
+from aistock_agent.state.chat_schema import QuestionState, UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ _REASONING_DRAIN_TIMEOUT_SEC = 2.5
 _FORWARD_STALL_TIMEOUT_SEC = 240.0
 
 
-async def _drain_reasoning_tasks(tasks: list[asyncio.Task]) -> None:
+async def _drain_reasoning_tasks(tasks: list[asyncio.Task[None]]) -> None:
     """等待所有 reasoning task 完成；超时则取消未完成 task，不阻塞 DONE。
 
     根因：create_task 返回的 task 若不保存引用，会被垃圾回收而在执行前/中被取消
@@ -102,12 +104,12 @@ async def _drain_reasoning_tasks(tasks: list[asyncio.Task]) -> None:
 async def _run_chat_graph_to_events(
     state: ChatRunState,
     graph: CompiledStateGraph,
-    initial_state: dict[str, object],
+    initial_state: QuestionState,
     message: str,
     session_id: str,
     user_id: str | None,
     run_id: str = "",
-) -> dict | None:
+) -> dict[str, object] | None:
     """后台执行 chat 图，把 WS 就绪事件 append 进 state.events 并唤醒等待者。
 
     与 WS 连接解耦：连接断开不影响本协程。结束返回终态 payload
@@ -117,7 +119,7 @@ async def _run_chat_graph_to_events(
     供前端确认后原样带回校验匹配）；默认 "" 兼容既有测试调用。
     """
 
-    async def sink(payload: dict) -> None:
+    async def sink(payload: dict[str, object]) -> None:
         state.events.append(payload)
         state.notify()
 
@@ -128,11 +130,11 @@ async def _run_chat_graph_to_events(
     cards: list[ChatCard] | None = None
     questions: list[str] | None = None
     seen_nodes: set[str] = set()
-    reasoning_tasks: list[asyncio.Task] = []
+    reasoning_tasks: list[asyncio.Task[None]] = []
     current_node: str = ""
     # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发 + synth_answer 短路透出；
     # 捕获而非中途 return——让图正常跑完，终态再转 confirm_request，替代 DONE）
-    confirm_payload: dict | None = None
+    confirm_payload: dict[str, object] | None = None
     try:
         async for event in graph.astream_events(
             initial_state,
@@ -265,7 +267,7 @@ async def _run_chat_graph_to_events(
 
 async def _forward(
     state: ChatRunState,
-    send: Callable[[dict], Awaitable[None]],
+    send: Callable[[dict[str, object]], Awaitable[None]],
     replay: bool,
 ) -> None:
     """把 state.events 转发到当前连接。
@@ -323,12 +325,14 @@ class ConfirmWaitResult:
     - stopped: 等待期收到 stop（cancelled 终态，不重跑）
     """
 
-    choice: dict | None = None
-    displaced: dict | None = None
+    choice: dict[str, object] | None = None
+    displaced: dict[str, object] | None = None
     stopped: bool = False
 
 
-def _normalize_confirm_choice(choice: object | None, options: list | None) -> dict | None:
+def _normalize_confirm_choice(
+    choice: object | None, options: list[dict[str, str]] | None
+) -> dict[str, object] | None:
     """confirm_response 的 choice 归一化（单一事实源，两条消费路径共用）。
 
     _wait_confirm_response（同连接等待）与主循环 resume 消费分支都调用本函数，
@@ -362,7 +366,7 @@ async def _wait_confirm_response(
     websocket: WebSocket,
     session_id: str,
     run_id: str,
-    confirm_payload: dict,
+    confirm_payload: dict[str, object],
 ) -> ConfirmWaitResult:
     """等待用户确认响应（交互式确认阶段 1 → 阶段 2 编排）。
 
@@ -441,7 +445,9 @@ async def _wait_confirm_response(
                 recv_task = asyncio.create_task(websocket.receive_json())
                 continue
             choice = _normalize_confirm_choice(
-                msg.get("choice"), confirm_payload.get("options")
+                msg.get("choice"),
+                # cast：confirm_payload 为通用 dict，取值点收窄为 options 契约形状
+                cast("list[dict[str, str]] | None", confirm_payload.get("options")),
             )
             if choice is None:
                 # 空 /「都不是」（none）/ 空 symbol → 按确认超时重跑
@@ -584,7 +590,7 @@ async def _run_confirm_stage2(
     message: str,
     raw_user_id: object,
     force_deep: bool,
-    choice: object | None,
+    choice: dict[str, object] | None,
 ) -> None:
     """交互式确认阶段 2：携带 confirm_choice / confirm_timeout 重跑同 session 图。
 
@@ -605,10 +611,11 @@ async def _run_confirm_stage2(
     initial_state2["user_id"] = user_id_value2
     # Phase 4-3（改进 15）：阶段 2 重跑同 thread 同样无条件注入（对齐阶段 1；
     # 5min 缓存窗口内命中，不产生额外 HTTP；匿名显式 None 覆盖 checkpoint）。
-    initial_state2["user_profile"] = (
+    initial_state2["user_profile"] = cast(
+        "UserProfile | None",
         await node_api.get_user_profile(user_id_value2)
         if user_id_value2
-        else None
+        else None,
     )
     # Phase 4-2 修复：阶段 2 重跑同 session（thread_id）图时 messages 必须置空。
     # build_chat_initial_state 携带的 [HumanMessage(message)]（无 id）经
@@ -633,12 +640,12 @@ async def _run_confirm_stage2(
     async def producer2(
         st: ChatRunState,
         g: CompiledStateGraph = graph2,
-        is_: dict[str, object] = initial_state2,
+        is_: QuestionState = initial_state2,
         m: str = message,
         sid: str = session_id,
         uid: str | None = user_id_for_billing2,
         rid: str = run_id2,
-    ) -> dict | None:
+    ) -> dict[str, object] | None:
         return await _run_chat_graph_to_events(st, g, is_, m, sid, uid, rid)
 
     state2 = chat_task_manager.start(
@@ -654,7 +661,7 @@ async def _run_confirm_stage2(
 
 
 async def _handle_user_message(
-    websocket: WebSocket, data: dict, session_id: str
+    websocket: WebSocket, data: dict[str, object], session_id: str
 ) -> None:
     """普通消息处理 + 交互式确认两阶段编排（原 ws_chat 主循环 L522-661 抽出）。
 
@@ -665,7 +672,9 @@ async def _handle_user_message(
     - 等待期收到 stop → cancelled 终态，不重跑。
     本函数不返回值。
     """
-    message = data.get("message", "")
+    # cast：入参为外部 JSON（dict[str, object]），message 契约恒为 str，取值点收窄；
+    # 保留原 `if not message` 的空值拒绝语义（cast 零运行时影响）。
+    message = cast("str", data.get("message", ""))
     if not message:
         await websocket.send_json({"type": WSEventType.ERROR, "content": "消息不能为空"})
         return
@@ -696,10 +705,11 @@ async def _handle_user_message(
     # Phase 4-3（改进 15）：user_profile 按 user_id 拉取注入（Redis 5min 缓存，
     # 失败/空画像返回 None/{} 不阻断）。必须无条件赋值：匿名显式写 None 覆盖
     # checkpointer 上一轮的旧值（条件注入会在同 thread 多轮间跨轮污染画像）。
-    initial_state["user_profile"] = (
+    initial_state["user_profile"] = cast(
+        "UserProfile | None",
         await node_api.get_user_profile(user_id_value)
         if user_id_value
-        else None
+        else None,
     )
     # T6/M3：单轮 transient 路由信号每轮归零（对齐 reset_transient_state；
     # last_deep_report / pending_clarification 跨轮保留，不入归零）。
@@ -720,12 +730,12 @@ async def _handle_user_message(
     async def producer(
         st: ChatRunState,
         g: CompiledStateGraph = graph,
-        is_: dict[str, object] = initial_state,
+        is_: QuestionState = initial_state,
         m: str = message,
         sid: str = session_id,
         uid: str | None = user_id_for_billing,
         rid: str = run_id,
-    ) -> dict | None:
+    ) -> dict[str, object] | None:
         return await _run_chat_graph_to_events(st, g, is_, m, sid, uid, rid)
 
     state = chat_task_manager.start(session_id, run_id, producer, user_id_for_billing)
@@ -836,7 +846,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # None / "none" / 空 symbol → None → _run_confirm_stage2 走 confirm_timeout 回退。
                 choice = _normalize_confirm_choice(
                     data.get("choice"),
-                    pending.get("options") if isinstance(pending, dict) else None,
+                    # cast：pending 缓存为通用 dict，取值点收窄为 options 契约形状
+                    cast(
+                        "list[dict[str, str]] | None",
+                        pending.get("options") if isinstance(pending, dict) else None,
+                    ),
                 )
                 chat_task_manager.clear_pending_confirm(session_id)
                 await _run_confirm_stage2(

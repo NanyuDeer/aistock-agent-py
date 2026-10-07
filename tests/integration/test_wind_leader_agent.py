@@ -3,14 +3,13 @@
 覆盖：工具集绑定 + 提示词注入 + 响应提取 + 异常降级
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aistock_agent.agents.workers.wind_leader import run
 from aistock_agent.prompts.workers.wind_leader import WIND_LEADER_ANALYST_PROMPT
-from aistock_agent.tools.sector_tools import get_wind_leaders
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.wind_leader.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.wind_leader.get_deep_think"

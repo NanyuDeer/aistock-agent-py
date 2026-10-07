@@ -37,6 +37,7 @@ from aistock_agent.services.mainline_engine import (
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
 from aistock_agent.services.trend_reversal import detect_trend_reversal
+from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import (
     CALENDAR_MAX_YEAR,
     add_trading_days,
@@ -263,11 +264,13 @@ async def _compose_card(
     kline_short = len(rows) < MIN_KLINE_ROWS
     if kline_short:
         logger.warning("rhythm_master.kline_insufficient n=%s basis=%s", len(rows), run_date)
-    closes = [float(r["close"]) for r in rows[-65:]]
+    closes = [float(cast("float", r["close"])) for r in rows[-65:]]
     # Tushare index_daily amount 千元 → 亿元（engine 单位契约；2026-09-05 核实修复：
     # Node /internal/index/:code/kline 此前丢弃 vol/amount，恒 null → 量能伪分支）
     amounts = [
-        _amount_yi(float(r["amount"]) if r.get("amount") is not None else None)
+        _amount_yi(
+            float(cast("float", r["amount"])) if r.get("amount") is not None else None
+        )
         for r in rows[-120:]
     ]
     fg = (await node_api.get_fear_greed() or {}).get("index")
@@ -339,7 +342,7 @@ async def _compose_card(
                     continue  # 降级 4：pct_chg 序列不足 → 剔除
                 valid.append({
                     **c,
-                    "pct_chgs": [float(p["pct_chg"]) for p in pk],
+                    "pct_chgs": [float(cast("float", p["pct_chg"])) for p in pk],
                     "last_trade_date": _normalize_ymd(rows_b[-1].get("trade_date"))
                     if rows_b else None,
                 })
@@ -363,7 +366,8 @@ async def _compose_card(
             )
             if len(valid) >= MIN_CANDIDATES:
                 index_pct_chgs = [
-                    float(r["pct_chg"]) for r in rows if r.get("pct_chg") is not None
+                    float(cast("float", r["pct_chg"]))
+                    for r in rows if r.get("pct_chg") is not None
                 ]
                 mainline = judge_mainline(valid, index_pct_chgs, evidence_date)
                 if mainline.get("state") == "established":
@@ -396,7 +400,7 @@ async def _compose_card(
                                 "mainline_label": label,
                             }
 
-    breadth = None
+    breadth: dict[str, Any] | None = None
     snapshot_missing = False
     # G1：宽度证据必须与 K 线证据日同源（此前 get_last_close_snapshot() 取
     # 「严格早于今天」的最近交易日 → after_close(周五) 实际取周四宽度）。
@@ -405,7 +409,9 @@ async def _compose_card(
     else:
         snap = await node_api.get_close_snapshot(last_trade_date)
         if isinstance(snap, dict):
-            breadth = snap.get("breadth")
+            # cast：快照 breadth 为外部 JSON 字典；保留 | None —— 「breadth 键缺失」
+            # 时必须仍是 None，不能伪装成非空（下游 engine 形参本身即接受 None）。
+            breadth = cast("dict[str, Any] | None", snap.get("breadth"))
         else:
             snapshot_missing = True
 
@@ -533,13 +539,21 @@ def _build_rhythm_card(
     level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
     level = level_entry["level"] if level_entry else None
     score = level_entry["score"] if level_entry else None
-    closes = [float(r["close"]) for r in rows[-65:] if r.get("close") is not None]
+    closes = [float(cast("float", r["close"])) for r in rows[-65:] if r.get("close") is not None]
     amounts = [
-        _amount_yi(float(r["amount"]) if r.get("amount") is not None else None)
+        _amount_yi(
+            float(cast("float", r["amount"])) if r.get("amount") is not None else None
+        )
         for r in rows[-120:]
     ]
-    highs = [float(r["high"]) if r.get("high") is not None else None for r in rows[-120:]]
-    lows = [float(r["low"]) if r.get("low") is not None else None for r in rows[-120:]]
+    highs = [
+        float(cast("float", r["high"])) if r.get("high") is not None else None
+        for r in rows[-120:]
+    ]
+    lows = [
+        float(cast("float", r["low"])) if r.get("low") is not None else None
+        for r in rows[-120:]
+    ]
     missing = list(card.evidence.data_missing)
     data_missing_container: list[str] = list(card.evidence.data_missing)
     # §5.7 预算裁决：总数 ≤3（条目数）；两个来源互斥使用，被让位方留痕。
@@ -575,7 +589,9 @@ def _build_rhythm_card(
 
     # 主线/技术佐证（spec §5.4.2 detect_breakdown 单一判据）
     mainline_facts = mainline or {}
-    tech = detect_breakdown(closes, mainline_facts.get("nav"))
+    tech = detect_breakdown(
+        closes, cast("list[float] | None", mainline_facts.get("nav"))
+    )
     if tech["insufficient"]:
         missing.append("MA 技术位数据不足")
     # ② 趋势反转（spec §5.4.2；已完成 bar 不足 → 视为未确认 + 留痕，H5）
@@ -584,11 +600,21 @@ def _build_rhythm_card(
         c = r.get("close")
         if c is None:
             continue
-        rev_closes.append(float(c))
-        rev_opens.append(float(r["open"]) if r.get("open") is not None else None)
-        rev_highs.append(float(r["high"]) if r.get("high") is not None else None)
-        rev_lows.append(float(r["low"]) if r.get("low") is not None else None)
-        rev_amounts.append(_amount_yi(float(r["amount"]) if r.get("amount") is not None else None))
+        rev_closes.append(float(cast("float", c)))
+        rev_opens.append(
+            float(cast("float", r["open"])) if r.get("open") is not None else None
+        )
+        rev_highs.append(
+            float(cast("float", r["high"])) if r.get("high") is not None else None
+        )
+        rev_lows.append(
+            float(cast("float", r["low"])) if r.get("low") is not None else None
+        )
+        rev_amounts.append(
+            _amount_yi(
+                float(cast("float", r["amount"])) if r.get("amount") is not None else None
+            )
+        )
     reversal = detect_trend_reversal(rev_closes, rev_opens, rev_highs, rev_lows, rev_amounts)
     if reversal["insufficient"]:
         missing.append("反转确认数据不足（完成 bar < 22）")
@@ -688,7 +714,11 @@ def _build_rhythm_card(
     }
 
 
-async def run(state: dict[str, object]) -> dict[str, object]:
+async def run(state: AgentState) -> dict[str, object]:
+    """生成并落库节奏大师卡。
+
+    state 为 scheduler 注入的 AgentState（含 refresh_slot/target_date）。
+    """
     try:
         slot = str(state.get("refresh_slot") or "after_close")
         if slot not in REFRESH_SLOTS:

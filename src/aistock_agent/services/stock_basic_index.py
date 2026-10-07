@@ -45,9 +45,11 @@ async def _load_from_api() -> None:
     global _loaded
     try:
         rows = await node_api.get_list("/internal/stocks/basic")
+        # get_list 声明可为 None；显式按空索引处理（等价于既有 try/except 降级为空索引
+        # 语义，但不依赖异常，语义更直白——对齐 data_client 内 `... or []` 既有惯例）。
         names = {
             str(row.get("name", "")).strip()
-            for row in rows
+            for row in (rows or [])
             if isinstance(row, dict) and str(row.get("name", "")).strip()
         }
         _build_index(names)

@@ -10,6 +10,41 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+# 意图/技能名闭集：InsightGoal.intent 与 SkillCall.skill_name 取值集合一致，抽为别名
+# 复用（qa_router 的 intent_map 值也标注为该别名，使「键 → 意图」映射闭集化）。
+InsightIntent = Literal[
+    "capital_flow",
+    "evidence_resolver",
+    "hot_burst",
+    "industry_relation",
+    "market_snapshot",
+    "report_lookup",
+    "sector_snapshot",
+    "stock_news",
+    "stock_snapshot",
+    "trace_lookup",
+    "compare_stocks",
+    "stock_history",
+    "trend_ranking",
+    "index_snapshot",
+    "douyin_video",
+    "prediction",
+    "insight_lookup",
+    "stock_trace_lookup",
+]
+
+# CHAT 来源卡片类型闭集（ChatSource.kind；skills/adapters 的 tool→kind 表复用同一别名）。
+ChatSourceKind = Literal[
+    "db_report",
+    "realtime_quote",
+    "news",
+    "trace",
+    "industry",
+    "capital_flow",
+    "insight",
+    "stock_trace",
+]
+
 
 class InsightGoal(BaseModel):
     """用户问题目标契约，由 QA Router 产出。"""
@@ -18,26 +53,7 @@ class InsightGoal(BaseModel):
     symbols: list[str] = []
     tag_codes: list[str] = []
     time_range: Literal["realtime", "today", "recent", "history"] = "today"
-    intent: Literal[
-        "capital_flow",
-        "evidence_resolver",
-        "hot_burst",
-        "industry_relation",
-        "market_snapshot",
-        "report_lookup",
-        "sector_snapshot",
-        "stock_news",
-        "stock_snapshot",
-        "trace_lookup",
-        "compare_stocks",
-        "stock_history",
-        "trend_ranking",
-        "index_snapshot",
-        "douyin_video",
-        "prediction",
-        "insight_lookup",
-        "stock_trace_lookup",
-    ]
+    intent: InsightIntent
     # QA Router 不填，由 synth_answer 通过 _infer_answer_mode 推断
     answer_mode: Literal["predict", "trace", "validate"] | None = None
     # constraints.answer_mode 可作为显式覆盖出口
@@ -87,16 +103,7 @@ class ChatSource(BaseModel):
     """CHAT 专用 Source 类型，不与 PROD 的 SourceRecord 双源。"""
 
     source_id: str
-    kind: Literal[
-        "db_report",
-        "realtime_quote",
-        "news",
-        "trace",
-        "industry",
-        "capital_flow",
-        "insight",
-        "stock_trace",
-    ]
+    kind: ChatSourceKind
     title: str
     url: str | None = None
     snippet: str
@@ -141,26 +148,7 @@ class Insight(BaseModel):
 class SkillCall(BaseModel):
     """QA Router 产出的计划项。"""
 
-    skill_name: Literal[
-        "capital_flow",
-        "evidence_resolver",
-        "hot_burst",
-        "industry_relation",
-        "market_snapshot",
-        "report_lookup",
-        "sector_snapshot",
-        "stock_news",
-        "stock_snapshot",
-        "trace_lookup",
-        "compare_stocks",
-        "stock_history",
-        "trend_ranking",
-        "index_snapshot",
-        "douyin_video",
-        "prediction",
-        "insight_lookup",
-        "stock_trace_lookup",
-    ]
+    skill_name: InsightIntent
     args: dict[str, Any]
     depends_on: list[str] = []
     # D34：归属子目标（goals 非空时引用 g1..gN；单意图恒为 None）

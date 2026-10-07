@@ -3,7 +3,6 @@
 覆盖 4 条降级路径 + output_parser fail-safe 核心保留校验。
 """
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,7 +13,6 @@ from aistock_agent.services.event_graph_resolver import (
     resolve_industry_graph_evidence,
 )
 from aistock_agent.utils.output_parser import transform_to_frontend
-
 
 # ── 行业名称标准化 ─────────────────────────────────────────────────
 
@@ -211,19 +209,6 @@ def test_parser_keeps_core_with_nonstandard_relation() -> None:
         {"industry": "半导体", "relation": "核心", "level": 1,
          "direction": "bullish", "impactStrength": 0.9, "reason": "影响"},
     ]
-    degraded_evidence: list[dict[str, object]] = [{
-        "status": "invalid_response",
-        "degraded": True,
-        "scope": "one_hop",
-        "source": None,
-        "industry": None,
-        "upstream": None,
-        "downstream": None,
-        "graphVersion": None,
-        "updatedAt": None,
-        "missingBoundary": "未取得图谱事实",
-    }]
-
     result = transform_to_frontend(
         understanding={"summary": "标题"},
         transmission={

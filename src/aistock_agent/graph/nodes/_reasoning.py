@@ -24,7 +24,7 @@ _FALLBACK_LABELS: dict[str, str] = {
 
 
 async def stream_reasoning(
-    sink: Callable[[dict], Awaitable[None]], node: str, message: str
+    sink: Callable[[dict[str, object]], Awaitable[None]], node: str, message: str
 ) -> None:
     """异步流式生成 reasoning 文本并通过 sink 转发（签名与行为保持不变）。"""
     fallback = _FALLBACK_LABELS.get(node, "处理中...")

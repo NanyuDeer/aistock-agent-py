@@ -19,13 +19,18 @@ import concurrent.futures
 import threading
 from collections.abc import Coroutine
 from contextlib import AbstractContextManager
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from aistock_agent.config import settings
+
+if TYPE_CHECKING:
+    # aiosqlite 为 sqlite 后端专属依赖，运行时在 _build_async_sqlite_saver 内懒加载
+    # （见该函数 global 说明）；此处仅为类型检查器声明模块级名称，避免 name-defined 误报。
+    import aiosqlite
 
 logger = structlog.get_logger()
 
@@ -178,8 +183,15 @@ def get_checkpointer() -> BaseCheckpointSaver[str]:
         try:
             from langgraph.checkpoint.redis import RedisSaver
 
-            _checkpointer_cm = RedisSaver.from_conn_string(settings.redis_url)
-            _checkpointer = _checkpointer_cm.__enter__()
+            # from_conn_string 是 @contextmanager 装饰的生成器（依赖 0.1.3 源码
+            # langgraph/checkpoint/redis/__init__.py:1096-1105 恒 yield 一次）：
+            # 调用结果是非 None 的 context manager、__enter__() 返回非 None 的
+            # RedisSaver，故不存在 None 降级分支（无需 assert）。用局部变量承接
+            # CM 再赋给模块单例 _checkpointer_cm：由后者长期持有，避免 CM 被 GC
+            # 提前触发 GeneratorExit 关闭 Redis 客户端（见 _checkpointer_cm 定义处）。
+            cm = RedisSaver.from_conn_string(settings.redis_url)
+            _checkpointer_cm = cm
+            _checkpointer = cm.__enter__()
             logger.info(
                 "checkpointer_initialized", backend="redis", url=settings.redis_url
             )
