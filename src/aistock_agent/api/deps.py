@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from typing import Literal
+
 import redis.asyncio as aioredis
 from fastapi import Header, HTTPException
 from langchain_core.messages import HumanMessage
@@ -91,7 +93,18 @@ def build_chat_initial_state(message: str) -> QuestionState:
 # checkpointer 写进 checkpoint，阶段 2 完成前同 session 的 SSE 请求会读到残留
 # confirm → synth_answer 二次短路；confirm_choice/confirm_timeout 残留会被
 # qa_router 误消费（重跑旧点选/误触发超时回退）。
-_TRANSIENT_KEYS = (
+_TRANSIENT_KEYS: tuple[
+    Literal[
+        "deep_source",
+        "final_response",
+        "goals",
+        "general_source",
+        "confirm",
+        "confirm_choice",
+        "confirm_timeout",
+    ],
+    ...,
+] = (
     "deep_source",
     "final_response",
     "goals",

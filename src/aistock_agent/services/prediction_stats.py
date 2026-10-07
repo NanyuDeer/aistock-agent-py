@@ -516,13 +516,13 @@ def clamp_confidence_by_bucket(
 
     controller 输出即生效，不读 settings。cap_floor 为可钳制到的最低档。
     """
-    n = int(hit_summary.get("n", 0) or 0)
+    n = int(cast(int, hit_summary.get("n", 0) or 0))
     if n < 30:
         return None, f"{horizon} 样本不足 (n={n}<30)，不动作"
     ci = hit_summary.get("ci")
     if not isinstance(ci, tuple | list) or len(ci) != 2:
         return None, f"{horizon} ci 缺失，不动作"
-    base_rate = float(baseline_summary.get("hit_rate", 0.0) or 0.0)
+    base_rate = float(cast(float, baseline_summary.get("hit_rate", 0.0) or 0.0))
     if float(ci[1]) < base_rate:
         return cap_floor, (
             f"{horizon} 命中率 CI 上界 {float(ci[1]):.3f} < baseline {base_rate:.3f}，"

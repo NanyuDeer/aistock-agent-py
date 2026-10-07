@@ -349,7 +349,7 @@ def enrich_prediction_input(
     if horizon_note:
         if ctx.get("note"):
             # 分号拼接前句尾句号去除其一，避免"句号；"连用病句
-            ctx["note"] = f"{ctx['note'].rstrip('。')}；{horizon_note}"
+            ctx["note"] = f"{cast(str, ctx['note']).rstrip('。')}；{horizon_note}"
         else:
             ctx["note"] = horizon_note
     out = dict(base_input)

@@ -34,7 +34,7 @@ _REASONING_TIMEOUT_SEC = 2.0
 
 
 async def stream_reasoning(
-    sink: Callable[[dict], Awaitable[None]], node: str, message: str
+    sink: Callable[[dict[str, object]], Awaitable[None]], node: str, message: str
 ) -> None:
     """异步流式生成 reasoning 文本并通过 sink 转发。
 

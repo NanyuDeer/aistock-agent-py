@@ -11,9 +11,10 @@
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import NotRequired, TypedDict
+from typing import NotRequired, TypedDict, cast
 
 import redis.asyncio as aioredis
+from redis.typing import EncodableT
 from structlog import get_logger
 
 from aistock_agent.config import settings
@@ -114,7 +115,7 @@ class EventBus:
                 logger.info("event_bus_skip_duplicate", event_id=event_id, channel=channel)
                 return event_id
 
-        fields: dict[str, str] = {
+        fields: dict[EncodableT, EncodableT] = {
             "payload": json.dumps(payload, ensure_ascii=False, default=str),
         }
         if event_id is not None:
@@ -309,14 +310,19 @@ class EventBus:
 
     async def retry(self, event: Event) -> None:
         """重试事件。超过 max_retries 移入死信队列。"""
-        current_retry = event.payload.get("retry_count", event.retry_count)
+        current_retry = cast(int, event.payload.get("retry_count", event.retry_count))
         new_retry_count = current_retry + 1
 
         if new_retry_count >= self._max_retries:
             await self.mark_deadletter(event, reason=f"max_retries_exceeded:{new_retry_count}")
             return
 
-        payload = {**event.payload, "retry_count": new_retry_count}
+        # event.payload 为 dict[str, object]（wire 形态）；xadd 需 EncodableT 键值 dict，
+        # 此处 cast 收窄（零运行时影响）
+        payload = cast(
+            "dict[EncodableT, EncodableT]",
+            {**event.payload, "retry_count": new_retry_count},
+        )
         await self._redis.xadd(event.channel, payload,
                                maxlen=self._max_len, approximate=True)
         await self.ack(event.channel, event.event_id, group=event.group)

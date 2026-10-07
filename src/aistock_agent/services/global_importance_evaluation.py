@@ -20,7 +20,7 @@
 import asyncio
 import json
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -474,6 +474,7 @@ async def run_global_importance_evaluation(
     """
     # ── 步骤 1: 获取事件集合 ──
     as_of = date.today().isoformat()
+    global_input: dict[str, object]
     if events is not None:
         global_input = {"as_of": as_of, "events": events}
     else:
@@ -793,10 +794,11 @@ async def _test_run() -> None:
     bullish = result.get("top_bullish_event")
     print("\n📈 最大利好事件 (top_bullish_event):")
     if bullish:
-        print(f"  event_id: {bullish.get('event_id')}")
-        print(f"  direction: {bullish.get('direction')}")
-        print(f"  level: {bullish.get('importance_level')}")
-        print(f"  reason: {bullish.get('reason')}")
+        bullish_event = cast(dict[str, object], bullish)
+        print(f"  event_id: {bullish_event.get('event_id')}")
+        print(f"  direction: {bullish_event.get('direction')}")
+        print(f"  level: {bullish_event.get('importance_level')}")
+        print(f"  reason: {bullish_event.get('reason')}")
     else:
         print("  (null)")
 
@@ -804,10 +806,11 @@ async def _test_run() -> None:
     bearish = result.get("top_bearish_event")
     print("\n📉 最大利空事件 (top_bearish_event):")
     if bearish:
-        print(f"  event_id: {bearish.get('event_id')}")
-        print(f"  direction: {bearish.get('direction')}")
-        print(f"  level: {bearish.get('importance_level')}")
-        print(f"  reason: {bearish.get('reason')}")
+        bearish_event = cast(dict[str, object], bearish)
+        print(f"  event_id: {bearish_event.get('event_id')}")
+        print(f"  direction: {bearish_event.get('direction')}")
+        print(f"  level: {bearish_event.get('importance_level')}")
+        print(f"  reason: {bearish_event.get('reason')}")
     else:
         print("  (null)")
     print("=" * 60)
@@ -952,7 +955,9 @@ def _insert_top_k(
     """按 proxy_score 降序插入候选，截断到 top_k。返回新列表。"""
     merged = [c for c in top3 if c.get("event_id") != candidate.get("event_id")]
     merged.append(candidate)
-    merged.sort(key=lambda c: float(c.get("proxy_score", 0) or 0), reverse=True)
+    merged.sort(
+        key=lambda c: float(cast(float, c.get("proxy_score", 0) or 0)), reverse=True
+    )
     return merged[: max(1, top_k)]
 
 
@@ -1040,7 +1045,7 @@ async def _load_gi_state_from_db(score_date: str) -> dict[str, object]:
             for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
                           "top3_bearish", "compared_event_ids", "llm_used_today"):
                 if field in saved:
-                    state[field] = saved[field]  # type: ignore[literal-required]
+                    state[field] = saved[field]
             state["updated_at"] = str(saved.get("updated_at", ""))
             return state
         # 旧版报告：仅恢复 max（单槽位，Top-3 退化）
@@ -1089,7 +1094,7 @@ async def load_gi_state(score_date: str) -> dict[str, object]:
                 for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
                               "top3_bearish", "compared_event_ids", "llm_used_today"):
                     if field in parsed:
-                        state[field] = parsed[field]  # type: ignore[literal-required]
+                        state[field] = parsed[field]
                 state["updated_at"] = str(parsed.get("updated_at", ""))
                 return state
     except Exception as exc:  # noqa: BLE001
@@ -1168,8 +1173,8 @@ def _classify_candidate(
     """
     if not top3:
         return "enter"
-    top3_min = float(top3[-1].get("proxy_score", 0) or 0)
-    max_proxy = float(top3[0].get("proxy_score", 0) or 0)
+    top3_min = float(cast(float, top3[-1].get("proxy_score", 0) or 0))
+    max_proxy = float(cast(float, top3[0].get("proxy_score", 0) or 0))
     # 池未满：优先填充替补（入池不改变 max），避免 top3_min==max 时中间
     # 代理分事件被误 skip；无代理分（proxy<=0）的事件不入池。
     if len(top3) < max(1, top_k):
@@ -1207,8 +1212,8 @@ async def incremental_gi(
         return {**_state_to_result(_empty_gi_state(score_date or shanghai_today().isoformat())), "persisted": False, "state": None}
     day = score_date or shanghai_today().isoformat()
     state = await load_gi_state(day)
-    compared = set(state.get("compared_event_ids") or [])
-    llm_used = int(state.get("llm_used_today", 0) or 0)
+    compared = set(cast(list[str], state.get("compared_event_ids") or []))
+    llm_used = int(cast(int, state.get("llm_used_today", 0) or 0))
     llm_cap = max(0, settings.gi_max_llm_calls_per_day)
     epsilon = settings.gi_compare_epsilon
     top_k = max(1, settings.gi_top_k)
@@ -1235,28 +1240,34 @@ async def incremental_gi(
             "direction": direction,
             "proxy": proxy,
         })
-    candidates.sort(key=lambda c: float(c["proxy"]), reverse=True)
+    candidates.sort(key=lambda c: float(cast(float, c["proxy"])), reverse=True)
 
     for cand in candidates:
         event_id = str(cand["event_id"])
         direction = str(cand["direction"])
-        proxy = float(cand["proxy"])
+        proxy = float(cast(float, cand["proxy"]))
         top3_key = f"top3_{direction}"
-        top3: list[dict[str, object]] = list(state.get(top3_key) or [])
+        top3: list[dict[str, object]] = list(
+            cast(list[dict[str, object]], state.get(top3_key) or [])
+        )
         outcome = _classify_candidate(proxy, top3, epsilon, top_k)
 
         if outcome == "skip":
             compared.add(event_id)
             continue
 
-        candidate = _candidate_dict(cand["event"], direction=direction, proxy=proxy)
+        candidate = _candidate_dict(
+            cast(dict[str, object], cand["event"]), direction=direction, proxy=proxy
+        )
 
         if outcome == "llm" and llm_used < llm_cap:
             # 与当前 max（Top-3 首位）比较；LLM 判定/异常一律以判定为准
             current_max = top3[0] if top3 else None
             if current_max is not None and current_max.get("event_id") != event_id:
                 try:
-                    verdict = await _llm_compare(cand["event"], current_max)
+                    verdict = await _llm_compare(
+                        cast(dict[str, object], cand["event"]), current_max
+                    )
                 except Exception:  # noqa: BLE001 — LLM 异常不得影响 GI/传导
                     verdict = {"replace": False, "reason": ""}
                 llm_used += 1
@@ -1268,8 +1279,10 @@ async def incremental_gi(
             elif top3:
                 # replace=False：不得替换 max，但合格候选进入 Top-3 作替补——
                 # 代理分封顶在 max 之下（不越位），池满时由 _insert_top_k 按 proxy 截断
-                if float(candidate["proxy_score"]) >= float(top3[0]["proxy_score"]):
-                    capped = max(0.0, float(top3[0]["proxy_score"]) - 0.001)
+                if float(cast(float, candidate["proxy_score"])) >= float(
+                    cast(float, top3[0]["proxy_score"])
+                ):
+                    capped = max(0.0, float(cast(float, top3[0]["proxy_score"])) - 0.001)
                     candidate = {**candidate, "proxy_score": round(capped, 3)}
                 top3 = _insert_top_k(top3, candidate, top_k=top_k)
             state[f"max_{direction}"] = top3[0] if top3 else None
@@ -1282,7 +1295,9 @@ async def incremental_gi(
             top3 = _insert_top_k(top3, candidate, top_k=top_k)
         elif llm_used >= llm_cap:
             # 预算耗尽：仅当代理分不低于 Top-3 最低时入池（不强换 max）
-            if not top3 or proxy >= float(top3[-1].get("proxy_score", 0) or 0) - epsilon:
+            if not top3 or proxy >= float(
+                cast(float, top3[-1].get("proxy_score", 0) or 0)
+            ) - epsilon:
                 top3 = _insert_top_k(top3, candidate, top_k=top_k)
         compared.add(event_id)
         state[f"max_{direction}"] = top3[0] if top3 else None

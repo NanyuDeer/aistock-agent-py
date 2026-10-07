@@ -37,6 +37,42 @@ class DeepReportRef(TypedDict, total=False):
     created_at: str
 
 
+class PendingClarification(TypedDict):
+    """澄清续跑 pending 上下文（M1）。
+
+    qa_router 写并消费：resolve 未命中/postprocess 澄清时快照原问题上下文，
+    下一轮用户补全代码/名称时按 intent 续跑；最长存活一轮。
+    """
+
+    question: str
+    intent: str
+    constraints: dict[str, str]
+
+
+class ConfirmRequest(TypedDict):
+    """交互式确认负载（Phase 4-2 改进 13）。
+
+    qa_router 触发时写，synth_answer 短路透出，ws.py 转 confirm_request 终态。
+    options 每项为 {key, label}（key 为 6 位代码或 "none"）。
+    """
+
+    question: str
+    options: list[dict[str, str]]
+
+
+class UserProfile(TypedDict, total=False):
+    """用户画像（Phase 4-3 改进 15）。
+
+    ws.py/routes.py 按 user_id 从 Node 拉取后注入（Redis 5min 缓存）；值为外部 JSON。
+    声明消费侧实际读取的字段（synth_answer 个性化 / qa_router 参考段），
+    全部可选（缺字段/未登录 None → 零行为变化）。
+    """
+
+    nickname: str
+    investment_preferences: list[str]
+    risk_tolerance: str
+
+
 class QuestionState(TypedDict, total=False):
     """CHAT QA 链路状态。
 
@@ -79,7 +115,7 @@ class QuestionState(TypedDict, total=False):
     # M1（2026-08-11）：澄清续跑 pending 上下文。qa_router 写澄清时快照原问题上下文，
     # 下一轮用户补全代码/名称时续跑原意图。跨轮有意（最长存活一轮：消费即清 /
     # 下轮未消费由 qa_router_node 包装层清空），明确不在 reset_transient_state 归零清单内。
-    pending_clarification: dict | None
+    pending_clarification: PendingClarification | None
     # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3）；
     # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
     cards: list[ChatCard] | None
@@ -90,16 +126,20 @@ class QuestionState(TypedDict, total=False):
     questions: list[str] | None
     # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发写，synth_answer 短路透出，
     # ws.py 转 confirm_request 终态）。单轮 transient，不落 trace/insight。
-    confirm: dict | None
+    confirm: ConfirmRequest | None
     # Phase 4-2：阶段 2 续跑输入信号（ws.py 写，qa_router 消费）——用户点选的标的
     # （{"symbol": 6位代码, "label": 选项 label}）与确认超时标记。单轮 transient 输入，
     # 不写回图状态输出；由 ws.py 每轮入口归零（对齐 deep_source/goals 先例）。
-    confirm_choice: dict | None
+    # 用 dict[str, object] 而非 TypedDict：消费侧 qa_router 对 "symbol"/"key" 双键
+    # 防御读取（归一化函数的兼容分支），TypedDict 无法表达该可选键语义。
+    confirm_choice: dict[str, object] | None
     confirm_timeout: bool | None
     # Phase 4-3（改进 15）：用户画像（ws.py/routes.py 入口按 user_id 拉取注入）。
     # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
     # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
-    user_profile: dict | None
+    # UserProfile（declared keys）：synth_answer 按 risk_tolerance/investment_preferences
+    # 取具体类型消费（dict[str, object] 会让 .get 落 object 而破坏其签名匹配）。
+    user_profile: UserProfile | None
     # Phase 5（Task 1）：长会话超窗确定性摘要（零 LLM、幂等、无累积）。
     # qa_router 仅在超窗（summary 非 None）时写入，随 checkpointer 持久化（write-only，
     # 供可观测/未来语义摘要锚点）；synth_answer 不读该字段，消费侧从当前 messages

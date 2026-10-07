@@ -2,6 +2,41 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-07 — mypy 类型检查存量清零（213 → 0，254 个源文件全绿）
+
+**开发者**: Aria
+
+### 改进
+
+- **`mypy src` 存量报错 213 条 → 0 条**（`Success: no issues found in 254 source files`）。至此 `strict = true` 真正生效，可作为后续 CI 门禁。
+- 处理口径（按性质分类）：
+  - **`type-arg`（裸 `dict`/`list`/`Task` 缺泛型参数，50 条）**：补**最精确可推导**的泛型参数，未一律填 `Any`。
+  - **`arg-type`（70 条，最大一块）**：键固定的内部数据 → 定义准确类型并让生产端/消费端共用（如 `state/chat_schema.py` 新增 `PendingClarification` / `ConfirmRequest` / `UserProfile` 三个 TypedDict，被 `qa_router` / `synth_answer` / `ws.py` / `routes.py` 共用）；来自外部 JSON / 请求体的 → 在取值点收窄。
+  - **`attr-defined`（25 条）**：多数是「缺注解导致类型被推断成 `object`」，补注解解决；`broadcast` 处改用真实 `isinstance` 收窄。
+  - **`name-defined`（4 条，mypy 误报）**：本仓「用到才加载库」的懒加载写法，mypy 看不懂。用**真修法**解决 —— `memory/checkpointer.py` 改为 `if TYPE_CHECKING: import aiosqlite` 并给模块级全局显式注解，运行时懒加载行为不变；**未使用裸忽略**。
+  - **`unused-ignore`（10 条）**：删除多余的 `# type: ignore`。
+  - **`import-untyped`（2 条）**：`requests` / `ffmpeg` 缺类型存根 → 在 `pyproject.toml` 增加 `[[tool.mypy.overrides]]`（`ignore_missing_imports = true`），**仅对这两个模块**放宽。若日后希望 `requests` 受严格检查，可改装 `types-requests` 并删除该覆盖。
+- **未使用任何新 `# type: ignore`（新增 0 条）**，未启用 `Any` 兜底式消错。
+
+### 关于 `cast` 的取舍（**请知悉**）
+
+本次新增 **90 处 `cast`**、**35 处 `Any`**。已人工审计新增的 cast，结论：
+
+- **绝大多数 `cast` 是安全的**：凡源表达式可能为 `None` 的，都**保留了 `| None`**（如 `cast("dict[str, int] | None", result.get("token_usage"))`）或**给了默认值**（如 `cast(list[object], payload.get("candidates", []))`）。
+- **审计发现并修正 1 处**：`agents/workers/rhythm_master.py` 原写作 `cast("dict[str, Any]", snap.get("breadth"))` —— 把「键缺失时为 None」伪装成了非空。已改为 `cast("dict[str, Any] | None", ...)`（下游 engine 形参本身即接受 None，零运行时差异）。
+- ⚠️ **`cast` 的语义是「人工声明」而非「运行时校验」**：它零运行时开销，但也意味着这些类型**不会在运行时被验证**。本次全部为**类型层面改动，未改变任何运行时行为**（既有分支、降级路径、空值处理均保持原样）。
+- 若日后希望把「人工声明」升级为「边界校验」，可在外部数据入口（接口 / JSON 解析处）引入 Pydantic 模型做一次校验收窄 —— 属独立议题，本次未做。
+
+### 验证
+
+- `uv run mypy src` → **Success: no issues found in 254 source files**
+- `uv run python -m pytest tests/unit -q` → **3443 passed / 9 failed / 1 skipped**（9 条与既有基线同集，零新增失败）
+- 节奏链路定向 `pytest -k rhythm` → **196 passed**
+- `uv run ruff check <改动文件>` → 无新增告警
+- 净改动：50 files changed, +431 / −231
+
+---
+
 ## [main] 2026-10-07 — 新增 Redis 检查点后端依赖并修正其类型/可达性（B11）
 
 **开发者**: Aria

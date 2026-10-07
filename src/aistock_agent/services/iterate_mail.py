@@ -140,8 +140,10 @@ def build_iterate_attachment_md(payload: object, report_date: str) -> dict[str, 
 
 def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[str]:
     """可读摘要（每维度：中文名 + 指标 + 汉化分析 + 优化建议）。"""
-    scorecard = payload.get("scorecard") if isinstance(payload.get("scorecard"), dict) else {}
-    analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+    raw_scorecard = payload.get("scorecard")
+    scorecard: dict[str, object] = raw_scorecard if isinstance(raw_scorecard, dict) else {}
+    raw_analysis = payload.get("analysis")
+    analysis: dict[str, object] = raw_analysis if isinstance(raw_analysis, dict) else {}
 
     lines: list[str] = [f"状态：需关注（共 {len(trig)} 个维度触发阈值）"]
     for idx, dim in enumerate(trig, start=1):
@@ -167,12 +169,13 @@ def _format_alert_digest(payload: dict[str, object], trig: list[str]) -> list[st
         lines.append("\n优化建议：")
         for sug in suggestions[:6]:
             if isinstance(sug, dict):
-                dim = sug.get("dimension")
-                label = _DIM_LABELS.get(str(dim)) if isinstance(dim, str) else ""
+                # 用独立变量名，避免与外层维度循环变量 dim/label 冲突
+                sug_dim = sug.get("dimension")
+                sug_label = _DIM_LABELS.get(str(sug_dim)) if isinstance(sug_dim, str) else ""
                 human = _pick_human_text(sug)
                 if not human:
                     human = str(sug)
-                prefix = f"  - [{label}] " if label else "  - "
+                prefix = f"  - [{sug_label}] " if sug_label else "  - "
                 lines.append(prefix + _to_text(_localize_terms(human), 400))
             else:
                 lines.append("  - " + _to_text(sug, 300))

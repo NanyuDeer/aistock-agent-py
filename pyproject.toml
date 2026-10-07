@@ -86,3 +86,10 @@ strict = true
 # scripts/*.py 单文件分析时本地包按第一方源码解析（否则 aistock_agent 被当
 # 已安装第三方包跳过 → import-untyped；五期 Task 5 report_event_attainment 引入）
 mypy_path = "src"
+
+# 第三方库缺类型存根：requests 未装 types-requests、ffmpeg 无官方存根
+# → 仅对这两个库放宽「必须可分析」，避免 import-untyped 阻塞 mypy 全局清零。
+# （若日后希望 requests 受严格检查，可改装 types-requests 并删除本条覆盖。）
+[[tool.mypy.overrides]]
+module = ["requests", "requests.*", "ffmpeg", "ffmpeg.*"]
+ignore_missing_imports = true

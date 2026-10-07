@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import date
+from typing import cast
 
 import structlog
 
@@ -477,7 +478,7 @@ def _extract_analysis_payload(
                 })
             # 从 chain[] 提取行业名称去重
             impact_industries = list({
-                c["industry"] for c in impact_chain if isinstance(c, dict)
+                cast(str, c["industry"]) for c in impact_chain if isinstance(c, dict)
             })
 
     # key_variables: event_transmission.variables[] → [{name, direction, strength}]

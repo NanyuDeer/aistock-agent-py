@@ -795,7 +795,9 @@ async def backfill_no_data() -> int:
             if re_entry.get("wait") or re_entry.get("result") == "insufficient":
                 continue  # 仍不可验则不覆盖
             try:
-                await node_api.update_prediction_verification(int(record["id"]), horizon, re_entry)
+                await node_api.update_prediction_verification(
+                    int(cast(int, record["id"])), horizon, re_entry
+                )
                 updated += 1
             except Exception as exc:
                 logger.warning(
@@ -1130,7 +1132,9 @@ async def _report_stats() -> None:
             if isinstance(entry, dict):
                 entries.append(entry)
         prediction = rec.get("prediction")
-        horizons = prediction.get("horizons") if isinstance(prediction, dict) else None
+        if not isinstance(prediction, dict):
+            continue
+        horizons = prediction.get("horizons")
         if not isinstance(horizons, list):
             continue
         approx = prediction.get("due_dates_approximate")

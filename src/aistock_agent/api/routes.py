@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import date
 from typing import cast
 from uuid import uuid4
@@ -31,6 +31,7 @@ from aistock_agent.graph.nodes.qa_router import _STOCK_SYMBOL_CLARIFICATION
 from aistock_agent.memory.checkpointer import delete_thread
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
+from aistock_agent.schemas.chat_contract import ChatCard
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
 from aistock_agent.services.briefing import BriefType, build_and_persist_brief
@@ -44,7 +45,8 @@ from aistock_agent.services.qa_briefing import (
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.stock_info_prediction import StockInfoPredictionRequest
 from aistock_agent.services.token_usage import reset_token_usage
-from aistock_agent.state.chat_schema import QuestionState
+from aistock_agent.state.chat_schema import QuestionState, UserProfile
+from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
@@ -130,8 +132,9 @@ async def chat_message(
     initial_state["user_id"] = user_id_value
     # Phase 4-3（改进 15）：无条件注入 user_profile（对齐 ws.py；匿名显式 None
     # 覆盖 checkpoint 旧值防跨轮污染；拉取失败 None 不阻断）
-    initial_state["user_profile"] = (
-        await node_api.get_user_profile(user_id_value) if user_id_value else None
+    initial_state["user_profile"] = cast(
+        "UserProfile | None",
+        await node_api.get_user_profile(user_id_value) if user_id_value else None,
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
@@ -145,27 +148,31 @@ async def chat_message(
         if isinstance(step, dict) and "synth_answer" in step:
             result = step["synth_answer"]  # 终节点，最后一次命中即本轮输出
     # 澄清分支显式置 None
+    # result 为图 synth_answer 输出（LangGraph 动态返回 dict[str, object]），
+    # 各字段类型由 synth_answer 契约保证 → 取值点 cast 收窄，零运行时影响。
     if not result.get("final_response") and result.get("confirm"):
         return ChatResponse(
             content=_STOCK_SYMBOL_CLARIFICATION,
             session_id=session_id,
-            token_usage=result.get("token_usage"),
+            token_usage=cast("dict[str, int] | None", result.get("token_usage")),
             last_deep_report=None,
             cards=None,
             questions=None,  # 追问面板：澄清出口恒空
         )
-    content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+    content = cast(
+        "str", result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
+    )
     return ChatResponse(
         content=content,
         session_id=session_id,
-        token_usage=result.get("token_usage"),
-        last_deep_report=result.get("last_deep_report"),
+        token_usage=cast("dict[str, int] | None", result.get("token_usage")),
+        last_deep_report=cast("dict[str, object] | None", result.get("last_deep_report")),
         cards=(
-            [c.model_dump() for c in result["cards"]]
+            [c.model_dump() for c in cast("list[ChatCard]", result["cards"])]
             if result.get("cards")
             else None
         ),
-        questions=result.get("questions"),  # 追问面板（2026-08-26）
+        questions=cast("list[str] | None", result.get("questions")),  # 追问面板（2026-08-26）
     )
 
 
@@ -202,7 +209,7 @@ def _ensure_update_queue(session_id: str) -> asyncio.Queue[object | None]:
 
 async def _run_graph_to_queue(
     graph: CompiledStateGraph,
-    initial_state: dict[str, object],
+    initial_state: Mapping[str, object],
     session_id: str,
 ) -> None:
     """后台执行 graph，所有 ``astream_events`` 事件推入两个独立 Queue（fan-out）。
@@ -232,7 +239,7 @@ async def _run_graph_to_queue(
 
 async def _stream_messages(
     graph: CompiledStateGraph,
-    initial_state: dict[str, object],
+    initial_state: Mapping[str, object],
     session_id: str,
 ) -> AsyncGenerator[dict[str, object], None]:
     """messages 流 — 从 message Queue 读事件，发射 TEXT + LLM_START + DONE"""
@@ -367,8 +374,9 @@ async def chat_stream_messages(
     initial_state["user_id"] = user_id_value
     # Phase 4-3（改进 15）：SSE 路径同样无条件注入 user_profile（对齐 ws.py；
     # 匿名显式 None 覆盖 checkpoint 旧值防跨轮污染）
-    initial_state["user_profile"] = (
-        await node_api.get_user_profile(user_id_value) if user_id_value else None
+    initial_state["user_profile"] = cast(
+        "UserProfile | None",
+        await node_api.get_user_profile(user_id_value) if user_id_value else None,
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
@@ -482,7 +490,7 @@ async def trigger_morning_briefing(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
         "session_id": f"trigger_morning_{report_date}",
         "user_id": None,
@@ -881,7 +889,7 @@ async def trigger_review_briefing(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成今日复盘溯源"}],
         "session_id": f"trigger_review_{report_date}",
         "user_id": None,
@@ -953,7 +961,7 @@ async def trigger_broadcast_chain(
 
     start = time.time()
 
-    def _make_state(intent: str | None = None) -> dict[str, object]:
+    def _make_state(intent: str | None = None) -> AgentState:
         """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，
         与 09:00 调度任务一致）"""
         return {
@@ -1089,7 +1097,7 @@ async def trigger_broadcast_only(
 
     start = time.time()
     try:
-        state: dict[str, object] = {
+        state: AgentState = {
             "messages": [],
             "session_id": f"manual_broadcast_only_{today}",
             "user_id": None,
@@ -1157,7 +1165,7 @@ async def trigger_wind_leader(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成风口龙头分析报告"}],
         "session_id": f"manual_wind_leader_{today}",
         "user_id": None,
@@ -1224,7 +1232,7 @@ async def trigger_trend_score(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成趋势股评分分析报告"}],
         "session_id": f"manual_trend_score_{today}",
         "user_id": None,
@@ -1315,7 +1323,7 @@ async def trigger_stock_trace(
     trace_id = req.trace_id or uuid4().hex
     report_date = req.report_date or shanghai_today()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": f"分析 {symbol} 的异动情况"}],
         "session_id": f"stock_trace_{trace_id}",
         "user_id": None,
@@ -1349,7 +1357,7 @@ async def trigger_stock_trace(
             )
 
         trace_persisted = result.get("trace_persisted", False)
-        report_id = result.get("report_id")
+        report_id = cast("str | int | None", result.get("report_id"))
 
         if trace_persisted and report_id is not None:
             _trace_logger.info(
@@ -1490,13 +1498,18 @@ async def get_stock_trace_observability() -> dict[str, object]:
     from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
 
     snapshot = get_metrics()
-    stock_trace = dict(snapshot.get("stock_trace", {}))
-    search = dict(snapshot.get("search", {}))  # type: ignore[call-overload]
+    # snapshot 为 dict[str, object]（get_metrics 快照），子项契约恒为计数字典 →
+    # cast 收窄；仍保留 dict(...) 浅拷贝，避免返回对象与内部指标快照共享引用。
+    stock_trace = dict(cast("dict[str, object]", snapshot.get("stock_trace", {})))
+    search = dict(cast("dict[str, object]", snapshot.get("search", {})))
     gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
     try:
         import redis.asyncio as aioredis
 
-        redis_client = aioredis.from_url(settings.stock_trace_redis_url)
+        # redis.asyncio.from_url 无类型存根（no-untyped-call）：cast 为类型化可调用
+        # 后再调用（零运行时影响），返回值收窄为 Redis。
+        _from_url = cast("Callable[..., aioredis.Redis]", aioredis.from_url)
+        redis_client = _from_url(settings.stock_trace_redis_url)
         try:
             gauges["dlq_length"] = await redis_client.xlen(DLQ_STREAM)
             groups = await redis_client.xinfo_groups(STREAM)
@@ -1984,8 +1997,8 @@ async def trigger_predictions_from_trace(
         # 已验证拒覆盖防御（SPEC S6）：同交易日已有记录且 verification 非空 dict
         # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预测被静默重写
         existing = await node_api.list_predictions(f"review:{trade_date}")
-        for record in existing:
-            verification = record.get("verification")
+        for existing_record in existing:
+            verification = existing_record.get("verification")
             if isinstance(verification, dict) and verification:
                 raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
 
@@ -2135,16 +2148,16 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         "clarification": None,
     }
 
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
-
-    async def event_stream():
+    async def event_stream() -> AsyncGenerator[str, None]:
         import time as _time
 
         e2e_start = _time.monotonic()
         try:
             graph = compile_chat_graph()
             async for event in graph.astream_events(
-                initial_state, config=config, version="v2"
+                initial_state,
+                config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
+                version="v2",
             ):
                 event_name = event.get("event", "")
                 node_name = event.get("name", "")

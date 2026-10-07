@@ -7,6 +7,8 @@ schema_version 2.0: content = {"display_report": {...}, "podcast_brief": "...", 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from typing import cast
 
 import structlog
 
@@ -17,7 +19,7 @@ import structlog
 logger = structlog.get_logger()
 
 
-def parse_report_content(content: dict) -> tuple[str, str]:
+def parse_report_content(content: Mapping[str, object]) -> tuple[str, str]:
     """解析报告 content，返回 (display_text, podcast_brief)
 
     兼容 1.0 单层和 2.0 双层结构。
@@ -50,15 +52,16 @@ def parse_report_content(content: dict) -> tuple[str, str]:
         else:
             display_text = ""
 
-        podcast_brief = content.get("podcast_brief", "") or ""
+        # content 为外部 JSONB；契约恒为 str，取值点 cast 收窄（零运行时影响）
+        podcast_brief = cast(str, content.get("podcast_brief", "") or "")
         return (display_text, podcast_brief)
 
     # 1.0 单层结构
-    text = content.get("text", "") or ""
+    text = cast(str, content.get("text", "") or "")
     return (text, "")
 
 
-def extract_podcast_brief(content: dict) -> str:
+def extract_podcast_brief(content: Mapping[str, object]) -> str:
     """只提取 podcast_brief（供 broadcast_agent 使用）
 
     1.0 版本返回空字符串（无播报摘要）。
@@ -67,7 +70,7 @@ def extract_podcast_brief(content: dict) -> str:
     return podcast_brief
 
 
-def extract_display_report(content: dict) -> str:
+def extract_display_report(content: Mapping[str, object]) -> str:
     """只提取 display_report 文本（供 broadcast_agent 消费）
 
     1.0 版本返回 text 字段。
@@ -76,7 +79,7 @@ def extract_display_report(content: dict) -> str:
     return display_text
 
 
-def parse_dual_layer_response(final_response: str) -> dict:
+def parse_dual_layer_response(final_response: str) -> dict[str, object]:
     """解析 LLM 返回的双层 JSON 响应，持久化到 DB content 字段
 
     如果 LLM 未返回有效 JSON，降级为单层结构（display_report.details = 原文本）。
@@ -121,7 +124,7 @@ def parse_dual_layer_response(final_response: str) -> dict:
     }
 
 
-def is_dual_layer_valid(content: dict) -> bool:
+def is_dual_layer_valid(content: Mapping[str, object]) -> bool:
     """检查双层结构是否有效（summary 非空）。
 
     当 LLM 返回非 JSON 纯文本时，parse_dual_layer_response 降级生成
@@ -150,7 +153,7 @@ _REPAIR_PROMPT = """将以下分析文本转换为标准 JSON 格式。严格按
 {text}"""
 
 
-async def repair_dual_layer_with_llm(final_response: str) -> dict | None:
+async def repair_dual_layer_with_llm(final_response: str) -> dict[str, object] | None:
     """当 parse_dual_layer_response 解析失败时，调用 quick_think LLM 将纯文本转为标准双层 JSON。
 
     Returns:
@@ -166,7 +169,8 @@ async def repair_dual_layer_with_llm(final_response: str) -> dict | None:
             [HumanMessage(content=_REPAIR_PROMPT.format(text=final_response))]
         )
         repaired_text = result.content if hasattr(result, "content") else str(result)
-        repaired = parse_dual_layer_response(repaired_text)
+        # LLM 消息 content 可能是 str 或分段 list；契约要求纯文本，cast 收窄（零运行时影响）
+        repaired = parse_dual_layer_response(cast(str, repaired_text))
         if is_dual_layer_valid(repaired):
             return repaired
         logger.warning("repair_dual_layer_with_llm: repaired result still invalid")

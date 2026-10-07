@@ -19,13 +19,18 @@ import concurrent.futures
 import threading
 from collections.abc import Coroutine
 from contextlib import AbstractContextManager
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from aistock_agent.config import settings
+
+if TYPE_CHECKING:
+    # aiosqlite 为 sqlite 后端专属依赖，运行时在 _build_async_sqlite_saver 内懒加载
+    # （见该函数 global 说明）；此处仅为类型检查器声明模块级名称，避免 name-defined 误报。
+    import aiosqlite
 
 logger = structlog.get_logger()
 

@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -30,6 +30,10 @@ from aistock_agent.utils.brief_contract import (
     build_market_snapshot_brief_summary,
 )
 from aistock_agent.utils.date import is_trading_day, shanghai_today
+
+if TYPE_CHECKING:
+    # EventBus 运行时在 _get_event_bus 内懒加载，此处仅为返回注解提供类型名
+    from aistock_agent.services.event_bus import EventBus
 
 logger = structlog.get_logger()
 
@@ -509,7 +513,7 @@ async def _run_sentiment_temp_task() -> None:
                 "sentiment_temp_done",
                 date=payload.get("date"),
                 score=payload.get("score"),
-                is_ice=payload.get("ice", {}).get("is_ice"),
+                is_ice=cast(dict[str, object], payload.get("ice", {})).get("is_ice"),
             )
     except Exception:  # noqa: BLE001
         logger.warning("sentiment_temp_task_failed", exc_info=True)
@@ -572,7 +576,7 @@ async def _run_calendar_seed_import() -> None:
     try:
         result = await run_calendar_import()
         logger.info("calendar_seed_import_done", **result)
-        if result.get("seed", {}).get("imported", 0) == 0:
+        if cast(dict[str, object], result.get("seed", {})).get("imported", 0) == 0:
             logger.warning("calendar_seed_import_empty", date=shanghai_today().isoformat())
     except Exception as exc:  # noqa: BLE001
         logger.error("calendar_seed_import_failed", error=str(exc), exc_info=True)
@@ -634,12 +638,14 @@ async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
     async with _midday_llm_semaphore:
         try:
             result = await midday_agent.run(state)
+            # 绑定局部变量再收窄：isinstance 收窄无法跨表达式传播到重复取值
+            analysis_reports = result.get("analysis_reports")
             generated = bool(
-                result.get("analysis_reports", {}).get("midday_generated")
-            ) if isinstance(result.get("analysis_reports"), dict) else False
+                analysis_reports.get("midday_generated")
+            ) if isinstance(analysis_reports, dict) else False
             persisted = bool(
-                result.get("analysis_reports", {}).get("midday_persisted")
-            ) if isinstance(result.get("analysis_reports"), dict) else False
+                analysis_reports.get("midday_persisted")
+            ) if isinstance(analysis_reports, dict) else False
             logger.info(
                 "scheduler_midday_done",
                 report_date=report_date,
@@ -1026,7 +1032,7 @@ async def _publish_review_full_event() -> None:
         logger.error("scheduler_review_full_publish_failed", error=str(exc), exc_info=True)
 
 
-async def _get_event_bus():
+async def _get_event_bus() -> "EventBus | None":
     """获取全局 EventBus 实例（由 main.py lifespan 初始化）。"""
     from aistock_agent.services.event_bus import EventBus
     from aistock_agent.services.redis_pool import RedisPool

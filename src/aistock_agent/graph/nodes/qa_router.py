@@ -28,7 +28,7 @@ from aistock_agent.schemas.chat_contract import (
 from aistock_agent.services.llm import get_quick_think, with_chat_structured_output
 from aistock_agent.services.name_resolver import resolve_symbol
 from aistock_agent.services.sector_resolver import resolve_tag_code
-from aistock_agent.state.chat_schema import DeepReportRef, QuestionState
+from aistock_agent.state.chat_schema import DeepReportRef, QuestionState, UserProfile
 from aistock_agent.utils.context_window import build_summary_context, trim_messages
 from aistock_agent.utils.message import extract_last_human_message
 
@@ -130,7 +130,7 @@ def _build_followup_context(last_deep_report: DeepReportRef | None) -> str:
     )
 
 
-def _build_user_profile_context(profile: dict | None) -> str:
+def _build_user_profile_context(profile: UserProfile | None) -> str:
     """Phase 4-3（改进 15）：构造用户画像参考段（仅称呼/回答风格/优先级微调）。
 
     只作 LLM 路由与回答风格的参考，不改变技能清单/闸门规则/JSON 输出契约；
@@ -567,7 +567,7 @@ def _clean_name_segments(
         cleaned = cleaned.replace(w, "")
     for w in _STOPWORDS_SORTED:
         cleaned = cleaned.replace(w, "")
-    runs = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
+    runs: list[str] = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned)
     if not runs:
         return None
     return max(runs, key=len) if select == "max" else runs[-1]
@@ -948,7 +948,7 @@ def _build_fallback_subgoal(
     if dimension == "trace":
         intent = "trace_lookup"
     elif target is None or target.kind == "index":
-        intent: str = "market_snapshot"
+        intent = "market_snapshot"
     elif target.kind == "sector":
         intent = "sector_snapshot"
     else:
@@ -1030,9 +1030,11 @@ async def _build_fallback_goals(
             continue
         if dim == "trace":
             # D3：trace 维度走 trace_lookup（溯源数据而非 validate 快照）
-            call = SkillCall(skill_name="trace_lookup", args={})
+            # 用独立变量名 trace_call：下方 validate 分支的 call 可能为 None，
+            # 复用同一变量会让首次赋值的 SkillCall 类型与后续 SkillCall | None 冲突。
+            trace_call = SkillCall(skill_name="trace_lookup", args={})
             subgoals.append(_build_fallback_subgoal(sg_id, dim, target))
-            calls.append(call.model_copy(update={"goal_id": sg_id}))
+            calls.append(trace_call.model_copy(update={"goal_id": sg_id}))
             continue
         call = await _validate_call_for_target(target, message)
         if call is None:
@@ -1182,7 +1184,7 @@ async def _postprocess_skill_calls(
         # 4.8 P5（D42）：trend_ranking 参数白名单（limit 整数化：非法/缺失 → 20，上限 50）
         if call.skill_name == "trend_ranking":
             try:
-                args["limit"] = min(max(int(args.get("limit") or 20), 1), 50)  # type: ignore[arg-type]
+                args["limit"] = min(max(int(args.get("limit") or 20), 1), 50)
             except (TypeError, ValueError):
                 args["limit"] = 20
 
@@ -1802,12 +1804,12 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
                 resolved = await _resolve_stock_from_message(message)
                 if resolved is not None:
                     skill_name = _infer_stock_skill(message)
-                    args: dict[str, Any] = {"symbol": resolved}
+                    fallback_args: dict[str, Any] = {"symbol": resolved}
                     if skill_name == "stock_news":
-                        args["limit"] = 10
+                        fallback_args["limit"] = 10
                     fallback_call = SkillCall(
                         skill_name=skill_name,  # type: ignore[arg-type]
-                        args=args,
+                        args=fallback_args,
                     )
                 elif fallback_call.skill_name in _STOCK_SKILLS:
                     fallback_call = None

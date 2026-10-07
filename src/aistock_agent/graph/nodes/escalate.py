@@ -9,7 +9,7 @@ synth_answer 统一出口（Task 4 做 deep 代码加工）。
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -88,8 +88,8 @@ async def escalate_node(state: QuestionState) -> dict[str, Any]:
         return {"fallback_to_skill": True}
 
     worker_name = INTENT_TO_WORKER.get(goal.intent)
-    worker = ESCALATION_MAP.get(worker_name) if worker_name else None
-    if worker is None:
+    worker = ESCALATION_MAP.get(worker_name) if worker_name is not None else None
+    if worker is None or worker_name is None:
         logger.info(
             "escalate.fallback",
             reason="unknown_intent",
@@ -116,12 +116,15 @@ async def escalate_node(state: QuestionState) -> dict[str, Any]:
 
     # D1/D3/D7：只填 worker 消费字段；trigger_source="user_chat" 固定，
     # 抑制 worker 内部以 scheduler 守卫的落库/缓存副作用。
-    agent_state: AgentState = {
+    # cast：worker（WorkerRun 契约）只消费这几个字段，此处刻意构造局部 AgentState
+    # （session_id/user_id/favorites/intent/analysis_reports/final_response 留空），
+    # 不补默认值以免改变 worker 对缺失字段的读取语义。
+    agent_state = cast("AgentState", {
         "messages": state.get("messages", [])[-5:],
         "symbol": goal.symbols[0] if goal.symbols else None,
         "tag_code": tag_code,
         "trigger_source": "user_chat",
-    }
+    })
 
     try:
         # T6 缺陷修复（验证发现，契约级）：ESCALATION_MAP 存的是 worker 裸 run 函数

@@ -512,7 +512,7 @@ class NodeApiClient:
         path = "/internal/event-entities" + (f"?{query}" if query else "")
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("items"), list):
-            return result["items"]
+            return cast(list[dict[str, object]], result["items"])
         return None
 
     async def get_rhythm_report(
@@ -679,7 +679,7 @@ class NodeApiClient:
             path += f"&end_date={end_date}"
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     async def get_stock_kline(
@@ -697,7 +697,7 @@ class NodeApiClient:
             path += f"&end_date={end_date}"
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     # ── 阶段 2：自选股洞察轻量预判（2026-09-03）──
@@ -714,7 +714,7 @@ class NodeApiClient:
         """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
         result = await self.get("/internal/ths/index-map")
         if isinstance(result, dict) and isinstance(result.get("ts_codes"), list):
-            return result["ts_codes"]
+            return cast(list[dict[str, object]], result["ts_codes"])
         return None
 
     async def resolve_ths_name(self, name: str) -> dict[str, object] | None:
@@ -722,7 +722,7 @@ class NodeApiClient:
         from urllib.parse import quote
         result = await self.get(f"/internal/ths/resolve?name={quote(name)}")
         if isinstance(result, dict):
-            return result.get("matched") or None
+            return cast(dict[str, object] | None, result.get("matched") or None)
         return None
 
     async def get_ths_daily_range(
@@ -739,7 +739,7 @@ class NodeApiClient:
             f"?start={start.replace('-', '')}&end={end.replace('-', '')}"
         )
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     async def get_attribution_chain(self, date: str) -> dict[str, object] | None:

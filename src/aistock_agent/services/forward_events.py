@@ -20,6 +20,7 @@ import re
 import unicodedata
 from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -45,7 +46,8 @@ _CONSENSUS_PREFIX = "consensus:"  # 原 detail 为空时无前置分隔，直接
 def _load_json(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"schema_version": "1.0", "events": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    # json.loads 返回 Any；种子文件契约恒为对象，cast 收窄（零运行时影响）
+    return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
 
 
 def _normalize_title(s: str) -> str:

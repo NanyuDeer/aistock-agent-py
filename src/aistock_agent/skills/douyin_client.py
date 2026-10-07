@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -39,9 +39,9 @@ REQUEST_TIMEOUT_DOWNLOAD = 120
 REQUEST_TIMEOUT_TRANSCRIBE = 300
 
 
-def _load_ffmpeg():
+def _load_ffmpeg() -> Any:
     try:
-        import ffmpeg  # type: ignore[import-not-found]
+        import ffmpeg
     except ImportError as exc:  # pragma: no cover - 环境缺失分支
         raise RuntimeError(
             "缺少依赖 ffmpeg-python，请安装（pyproject dependencies）。"
@@ -144,7 +144,7 @@ class DouyinClient:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="douyin_"))
 
     # ── 链接解析 ──
-    def parse_share_url(self, share_text: str) -> dict:
+    def parse_share_url(self, share_text: str) -> dict[str, str]:
         urls = re.findall(
             r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+",
             share_text,
@@ -189,7 +189,7 @@ class DouyinClient:
         return {"url": video_url, "title": desc, "video_id": video_id}
 
     # ── 下载 ──
-    def download_video(self, video_info: dict, output_dir: Path | None = None) -> Path:
+    def download_video(self, video_info: dict[str, str], output_dir: Path | None = None) -> Path:
         if output_dir is None:
             output_dir = self.temp_dir
         else:
@@ -243,13 +243,14 @@ class DouyinClient:
                 timeout=REQUEST_TIMEOUT_TRANSCRIBE,
             )
             response.raise_for_status()
-            result = response.json()
+            # 转写接口契约恒为 {"text": str}；cast 收窄返回类型（零运行时影响）
+            result = cast(dict[str, str], response.json())
         return result.get("text", response.text)
 
     # ── 一键：链接 → 文本 + transcript.md ──
     def extract_text(
         self, share_link: str, output_dir: Path, save_video: bool = False
-    ) -> dict:
+    ) -> dict[str, Any]:
         video_info = self.parse_share_url(share_link)
         video_path = self.download_video(video_info)
         audio_path = self.extract_audio(video_path)

@@ -314,8 +314,13 @@ async def run(state: AgentState) -> dict[str, object]:
                     "audio_path": None,
                 }
 
-                if source_brief_report and isinstance(source_brief_report.get("content"), dict):
-                    brief_content = source_brief_report["content"]
+                # 先取内容再 isinstance 收窄（原内联 source_brief_report.get("content")
+                # 无法把 brief_content 收窄为 dict → 后续 .get 触发 attr-defined）；
+                # 保留 source_brief_report 真值判断以维持其非空收窄（下方读 .get("id")）。
+                brief_content = (
+                    source_brief_report.get("content") if source_brief_report else None
+                )
+                if source_brief_report and isinstance(brief_content, dict):
                     content["source_brief"] = {
                         "id": source_brief_report.get("id"),
                         "report_type": f"brief_{brief_type}",

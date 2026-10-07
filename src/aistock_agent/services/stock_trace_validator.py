@@ -80,12 +80,14 @@ def validate_stock_trace_result(result: StockTraceResult, snapshot: StockTraceSn
             and _value_direction(source) not in {None, "neutral", snapshot.trigger_event.direction}
             for source in snapshot.source_records
         )
-        candidate = next((item for item in result.candidates if item.layer == layer), None)
+        matching = [item for item in result.candidates if item.layer == layer]
+        # 用独立变量名：candidate 已在上方 for 循环中绑定为 TraceCandidate（非可选）
+        layer_candidate = matching[0] if matching else None
         if (
             has_opposite_fact
-            and candidate is not None
-            and candidate.status == "supported"
-            and not candidate.counter_evidence_ids
+            and layer_candidate is not None
+            and layer_candidate.status == "supported"
+            and not layer_candidate.counter_evidence_ids
         ):
             raise StockTraceValidationError(f"candidate:{layer}:missing_counter_evidence")
 

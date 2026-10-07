@@ -5,8 +5,9 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.services.data_client import node_api
@@ -25,9 +26,11 @@ async def index_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence:
 
     data = await node_api.get("/internal/index/quotes?symbols=" + ",".join(symbols))
     now = datetime.now(UTC)
-    indices: list[dict] = []
+    indices: list[dict[str, object]] = []
     if isinstance(data, dict):
-        indices = [i for i in data.get("indices", []) if isinstance(i, dict)]
+        # 外部 JSON；契约恒为可迭代列表，cast 收窄（零运行时影响）
+        raw_indices = cast(Iterable[object], data.get("indices", []))
+        indices = [i for i in raw_indices if isinstance(i, dict)]
 
     facts: list[str] = []
     sources: list[ChatSource] = []
@@ -64,7 +67,7 @@ async def index_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         facts=facts,
         sources=sources,
         as_of=now,
-        symbols=[i.get("index") or "" for i in indices],
+        symbols=[cast(str, i.get("index")) or "" for i in indices],
         degraded=degraded,
         degraded_reason="index quotes unavailable" if degraded else None,
         skill_name="index_snapshot",

@@ -794,7 +794,7 @@ def _make_consumer_state(
 # 消费者生命周期管理
 # ============================================================================
 
-_all_tasks: list[asyncio.Task] = []
+_all_tasks: list[asyncio.Task[None]] = []
 
 
 async def _dispatch_events(consumer: BaseConsumer, events: list[Event]) -> None:
@@ -866,7 +866,7 @@ async def _consumer_loop(
             await asyncio.sleep(1)
 
 
-def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task]:
+def start_all_consumers(ctx: ConsumerContext) -> list[asyncio.Task[None]]:
     """启动全部 7 个消费者。返回 Task 列表用于管理。
 
     消费组：PredictionConsumer 走独立组 prediction_chain；SectorTraceConsumer
