@@ -17,6 +17,29 @@ _NODE_API = "aistock_agent.tools.industry_vector_search.node_api"
 _OPENAI_CLIENT = "aistock_agent.tools.industry_vector_search.OpenAI"
 
 
+@pytest.fixture(autouse=True)
+def _embedding_credentials(monkeypatch):
+    """为用例补上前置条件：embedding 凭据。
+
+    ``semantic_match_industries`` 在**无 embedding 凭据**时会快速短路返回 []，
+    这是有意设计（避免无效网络请求）。但本仓测试环境没有 .env，
+    ``settings.embedding_api_key`` 与 ``settings.openai_api_key`` 都是空串 ——
+    若不补，凡断言「走到 embedding 再搜索」的用例都会在守卫处直接降级成
+    「未找到匹配行业」而失败（2026-10 修复：此前 6 个用例长期因此失败）。
+
+    「无凭据降级」这条路径本身另有专门用例覆盖（见文件末尾）。
+    """
+    from aistock_agent.tools import industry_vector_search as ivs
+
+    fake = MagicMock()
+    fake.embedding_api_key = "test-embedding-key"
+    fake.openai_api_key = ""
+    fake.embedding_base_url = ""
+    fake.openai_base_url = ""
+    fake.embedding_model = "text-embedding-3-small"
+    monkeypatch.setattr(ivs, "settings", fake)
+
+
 # ── 工具注册验证 ──
 
 
@@ -218,3 +241,30 @@ async def test_match_industry_by_keywords_missing_name_field():
 
     assert "未知行业" in result
     assert "0.75" in result
+
+
+# ── 无凭据降级（本文件其余用例依赖上面的 _embedding_credentials fixture） ──
+
+
+@pytest.mark.asyncio
+async def test_match_industry_by_keywords_no_credentials_degrades(monkeypatch):
+    """无 embedding 凭据 → 快速降级返回"未找到匹配行业"，且不发 embedding / 不搜索。
+
+    这是 ``semantic_match_industries`` 的有意守卫（避免无效网络请求）。
+    本用例覆盖该守卫，同时也说明了上面那个 autouse fixture 为何必须存在。
+    """
+    from aistock_agent.tools import industry_vector_search as ivs
+
+    ivs._embedding_client = None
+    no_cred = MagicMock()
+    no_cred.embedding_api_key = ""
+    no_cred.openai_api_key = ""
+    monkeypatch.setattr(ivs, "settings", no_cred)
+
+    with patch(_NODE_API) as mock_node:
+        mock_node.semantic_search_industries = AsyncMock()
+        result = await ivs.match_industry_by_keywords.ainvoke({"keywords": ["新能源汽车"]})
+
+    assert "未找到匹配行业" in result
+    mock_node.semantic_search_industries.assert_not_called()
+    assert ivs._embedding_client is None, "无凭据时不应构造 embedding 客户端"

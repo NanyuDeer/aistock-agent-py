@@ -2,6 +2,53 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-07 — 修复单元测试既有失败、修正一处自引入回归，并将 pytest 纳入 CI 门禁
+
+**开发者**: Aria
+
+### 修复
+
+- **修复 `tests/unit` 的 9 条既有失败用例**（此前长期为红，成因均为**测试过时**，非产品缺陷）：
+  - **`test_industry_vector_search.py` ×6**：实现后来加了「**无 embedding 凭据 → 快速降级返回 []**」的守卫（有意设计，避免无效网络请求），而本仓测试环境无 `.env`，`embedding_api_key` / `openai_api_key` 均为空串 → 用例在守卫处直接降级，**根本没走到 mock**。新增 autouse fixture `_embedding_credentials` 补上前置条件；并**新增专门用例** `test_match_industry_by_keywords_no_credentials_degrades` 覆盖该守卫本身（此前无覆盖，正是它造成误解）。
+  - **`test_scheduler.py` ×3**：① 两个 mock 用例的 fixture 逐个列举 cron 配置，**新增 `scheduler_impact_sectors_precompute_cron` 后漏配** → MagicMock 被当字符串传入 `CronTrigger.from_crontab`，内部 `len(expr.split())` 得 0 → `ValueError: Wrong number of fields; got 0, expected 5`；改为由 `config.Settings` 的**真实默认值自动填充**全部 `scheduler_*_cron`（新增调度项不再需要补 fixture）。② 一个用例硬编码 `from_crontab.call_count == 21`（实际 22），且注释里的 job 拆分明细已失真；改为断言**不变式**「注册 job 数 == from_crontab 调用数」（`scheduler.py` 中所有 `add_job` 均由 `from_crontab` 构造），既免去每次新增 job 都要改用例，又保留「漏传 timezone」的检出能力。
+
+### ⚠️ 修正一处**本会话自己引入的回归**（如实记录）
+
+- 本会话前序「B 档类型精化」批次中，曾把 `graph/nodes/escalate.py` 的 worker 取用方式从
+  `getattr(worker, "run", None) or worker`（**双形态兼容**）改为只支持裸可调用，理由是「`.run` 只出现在测试 mock 里」。
+  **该判断不完整**：integration 测试的文档注释明确写着 `ESCALATION_MAP（WorkerHandle 形状：对象带 run(state) 方法）`，
+  `.run` 是**成文契约**，被 4 个测试文件依赖。原代码注释亦标明该 shim 是「**T6 缺陷修复（契约级）**」。
+  改动导致 `tests/integration` 新增 **3 条**失败（`run 被 await 0 次`），而当时只跑了 `tests/unit` 未察觉。
+- **修正方式（保留契约 + 类型干净）**：恢复双形态支持，并抽出显式解析函数 ——
+  `WorkerRun = Callable[[AgentState], Awaitable[dict[str, object]]]`、
+  `ESCALATION_MAP: dict[str, WorkerHandle | WorkerRun]`、
+  `_resolve_worker()` 用 `runtime_checkable` 协议按「是否具备 run 属性」判定（具备取 `.run`，否则取裸可调用本身）。
+  同时把 `tests/unit/test_escalate.py` 还原为 `.run` 契约写法。
+  **`mypy src` 仍为 0 错误**，integration 相关失败回到改动前水平。
+
+### 改进
+
+- **CI 门禁纳入 pytest**：`.github/workflows/ci.yml` 增加 `pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e`
+  （unit + 根级 + diagnostics，**3511 条，当前全绿**）。
+- **更正一处此前的错误认知**：此前记录的「既有 9 条失败」实为**只看 `tests/unit` 的局部口径**。
+  完整口径下既有失败是 **35 条**：`tests/unit` 9（本条目已修）+ `tests/integration` 20 + `tests/e2e` 6。
+  **integration / e2e 这 20 条（回归修正后为 14 + 6）暂未纳入门禁**，成因三类：
+  ① **日期相关** —— 测试假定「今天是交易日」，休市日必然失败（例如输出多一句"今天是 A 股非交易日…"前缀）；
+  ② **依赖外部凭据/服务** —— 如 `EMBEDDING_*`/`OPENAI_API_KEY`、真实行情；
+  ③ **测试过时** —— 如 patch 了已不存在的属性（`market_tools.yf`）、期望值随重构变化而未更新（如 `'validate' == 'trace'`、`'degraded' == 'skipped'`）。
+  待 ①③ 修好、② 改为 skip/打桩后，再把这两个目录纳入门禁。
+
+### 验证
+
+- `uv run python -m pytest tests/unit -q` → **3453 passed / 1 skipped / 0 failed**
+- `uv run python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e` → **3511 passed / 1 skipped / 0 failed**（CI 将执行的同一命令）
+- `uv run python -m pytest tests/integration -q` → 14 failed（修正回归前为 20）/ 367 passed
+- `uv run python -m pytest tests/e2e -q` → 6 failed / 58 passed（既有）
+- `uv run mypy src` → **Success: no issues found in 254 source files**
+- `uv run ruff check src tests scripts` → **All checks passed!**
+
+---
+
 ## [main] 2026-10-07 — 正式豁免 E501，并为 CI 门禁（mypy strict + ruff）做前置准备
 
 **开发者**: Aria

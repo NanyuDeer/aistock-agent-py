@@ -94,9 +94,15 @@ def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None
             with patch.object(scheduler.AsyncIOScheduler, "start"):
                 scheduler.start_scheduler()
 
-        # 16 个业务 job（主干 attribution_feedback 等 + 已移除 light_predict×2）+ heartbeat
-        # + 节奏大师 3 + 事件前瞻 4（C7，2026-09-22）
-        assert from_crontab.call_count == 21
+        # 本用例真正要守的是「每个 CronTrigger 都显式绑定配置时区」（见下方断言）。
+        # 原先此处硬编码 job 数量（21）+ 手写拆分明细，每新增一个调度项就要改一次、
+        # 且明细会随之失真（2026-10 即因新增 impact_sectors_precompute 而失败）。
+        # 改为断言**不变式**：scheduler.py 中所有 add_job 的触发器均由
+        # CronTrigger.from_crontab 构造（该文件无其它触发器类型），故
+        # 「注册 job 数 == from_crontab 调用数」。这样新增 job 不必再改本用例，
+        # 而「某个 job 漏传 timezone」仍会被下面那条断言抓住。
+        registered_jobs = scheduler.get_scheduler().get_jobs()
+        assert from_crontab.call_count == len(registered_jobs) > 0
         assert all(
             call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
             for call in from_crontab.call_args_list
@@ -1086,6 +1092,34 @@ async def test_publish_review_quick_event_skips_non_trading_day():
         await _publish_review_quick_event()  # 不应抛异常
 
 
+def _scheduler_settings_mock(**overrides):
+    """构造 ``services.scheduler.settings`` 的 MagicMock。
+
+    先把 ``config.Settings`` 中**全部** ``scheduler_*_cron`` 按真实默认值填好，
+    再套用 overrides。原因：漏配某个 cron 时，MagicMock 属性会被当作字符串传进
+    ``CronTrigger.from_crontab``，其内部对表达式做 ``len(expr.split())`` 得到 0 →
+    ``ValueError: Wrong number of fields; got 0, expected 5``
+    （2026-10 即因新增 ``scheduler_impact_sectors_precompute_cron`` 而失败）。
+    改为从真实默认值自动填充后，以后新增调度项无需再逐个补 fixture。
+    """
+    from unittest.mock import MagicMock
+
+    from aistock_agent.config import Settings
+
+    mock = MagicMock()
+    for name, field in Settings.model_fields.items():
+        if (
+            name.startswith("scheduler_")
+            and name.endswith("_cron")
+            and isinstance(field.default, str)
+        ):
+            setattr(mock, name, field.default)
+    mock.scheduler_timezone = Settings.model_fields["scheduler_timezone"].default
+    for key, value in overrides.items():
+        setattr(mock, key, value)
+    return mock
+
+
 def test_start_scheduler_registers_quick_full_crons_when_enabled():
     """quick_snapshot_enabled=True 时注册 review_quick/review_full cron。"""
     from unittest.mock import MagicMock, patch
@@ -1093,34 +1127,15 @@ def test_start_scheduler_registers_quick_full_crons_when_enabled():
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()
+    mock_settings = _scheduler_settings_mock(
+        qa_mode_enabled=False,
+        scheduler_enabled=True,
+        quick_snapshot_enabled=True,
+        scheduler_review_quick_cron="30 15 * * 0-4",
+        scheduler_review_full_cron="30 20 * * 0-4",
+    )
     with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
-        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
-            mock_settings.qa_mode_enabled = False
-            mock_settings.scheduler_enabled = True
-            mock_settings.quick_snapshot_enabled = True
-            mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
-            mock_settings.scheduler_midday_cron = "5 12 * * 0-4"
-            mock_settings.scheduler_midday_broadcast_cron = "15 12 * * 0-4"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
-            mock_settings.scheduler_review_quick_cron = "30 15 * * 0-4"
-            mock_settings.scheduler_review_full_cron = "30 20 * * 0-4"
-            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 0-4"
-            mock_settings.scheduler_prediction_stats_cron = "5 16 * * 0-4"
-            mock_settings.scheduler_attribution_feedback_cron = "10 16 * * 0-4"
-            mock_settings.scheduler_sector_wind_prediction_cron = "30 21 * * 0-4"
-            mock_settings.scheduler_event_scrape_cron = "45 8 * * 0-4"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
-            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
-            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
-            mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
-            mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
-            mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
-            mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
-            mock_settings.scheduler_calendar_seed_cron = "30 7 * * 0-4"
-            mock_settings.scheduler_calendar_scrape_cron = "40 7 * * 0-4"
-            mock_settings.scheduler_expectation_diff_cron = "0 8 * * 0-4"
-            mock_settings.scheduler_expectation_diff_intraday_cron = "30 11,13 * * 0-4"
-            mock_settings.scheduler_timezone = "Asia/Shanghai"
+        with patch("aistock_agent.services.scheduler.settings", mock_settings):
             start_scheduler()
 
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
@@ -1145,33 +1160,14 @@ def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()
+    mock_settings = _scheduler_settings_mock(
+        qa_mode_enabled=False,
+        scheduler_enabled=True,
+        quick_snapshot_enabled=False,
+        scheduler_review_cron="30 15 * * 0-4",
+    )
     with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
-        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
-            mock_settings.qa_mode_enabled = False
-            mock_settings.scheduler_enabled = True
-            mock_settings.quick_snapshot_enabled = False
-            mock_settings.scheduler_morning_cron = "50 8 * * 0-4"
-            mock_settings.scheduler_midday_cron = "5 12 * * 0-4"
-            mock_settings.scheduler_midday_broadcast_cron = "15 12 * * 0-4"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 0-4"
-            mock_settings.scheduler_review_cron = "30 15 * * 0-4"
-            mock_settings.scheduler_prediction_validate_cron = "0 16 * * 0-4"
-            mock_settings.scheduler_prediction_stats_cron = "5 16 * * 0-4"
-            mock_settings.scheduler_attribution_feedback_cron = "10 16 * * 0-4"
-            mock_settings.scheduler_sector_wind_prediction_cron = "30 21 * * 0-4"
-            mock_settings.scheduler_event_scrape_cron = "45 8 * * 0-4"
-            mock_settings.scheduler_event_scrape_intraday_cron = "0 10-14 * * 0-4"
-            mock_settings.scheduler_event_scrape_early_cron = "45 8 * * 0-4"
-            mock_settings.scheduler_event_scrape_close_cron = "5 15 * * 0-4"
-            mock_settings.scheduler_sentiment_cron = "45 15 * * 0-4"
-            mock_settings.scheduler_rhythm_after_close_cron = "5 16 * * 0-4"
-            mock_settings.scheduler_rhythm_morning_cron = "0 9 * * 0-4"
-            mock_settings.scheduler_rhythm_midday_cron = "30 12 * * 0-4"
-            mock_settings.scheduler_calendar_seed_cron = "30 7 * * 0-4"
-            mock_settings.scheduler_calendar_scrape_cron = "40 7 * * 0-4"
-            mock_settings.scheduler_expectation_diff_cron = "0 8 * * 0-4"
-            mock_settings.scheduler_expectation_diff_intraday_cron = "30 11,13 * * 0-4"
-            mock_settings.scheduler_timezone = "Asia/Shanghai"
+        with patch("aistock_agent.services.scheduler.settings", mock_settings):
             start_scheduler()
 
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
