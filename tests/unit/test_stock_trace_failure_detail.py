@@ -13,6 +13,7 @@ from aistock_agent.agents.workers.stock_trace import (
     StockTraceWorker,
     StockTraceWorkerOutcome,
 )
+from aistock_agent.config import settings
 from aistock_agent.services.stock_trace_client import StockTraceNodeClient
 from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
 
@@ -120,10 +121,16 @@ class FailureOutcomeWorker:
 class FakeRedisCtx:
     def __init__(self) -> None:
         self.acked: list[tuple[str, str, str]] = []
+        self.dlq_fields: list[dict[str, str]] = []
 
     async def xack(self, stream: str, group: str, message_id: str) -> int:
         self.acked.append((stream, group, message_id))
         return 1
+
+    async def xadd(self, stream: str, fields: dict[str, str]) -> str:
+        del stream
+        self.dlq_fields.append(fields)
+        return "1-1"
 
 
 @pytest.mark.asyncio
@@ -147,6 +154,34 @@ async def test_consumer_failure_passes_error_detail_to_report_job() -> None:
     ]
     assert failure_calls, "应至少有一次 status=failed 的 report_job 调用"
     assert failure_calls[0].get("last_error_detail") == "RuntimeError: explode"
+
+
+@pytest.mark.asyncio
+async def test_consumer_dead_letter_passes_error_detail_to_report_job(monkeypatch) -> None:
+    """尝试耗尽走死信路径：dead_letter 的 report_job 调用也要带上 error_detail。
+
+    max_attempts=1 会让 attemptCount=1 即触发耗尽，真正走进 _dead_letter，
+    守护 report_job(error_detail=...) 的透传不被误删。
+    """
+    monkeypatch.setattr(settings, "stock_trace_max_attempts", 1)
+    recording = RecordingPatchClient()
+    node_client = StockTraceNodeClient(recording)  # type: ignore[arg-type]
+    consumer = StockTraceConsumer(
+        FakeRedisCtx(),  # type: ignore[arg-type]
+        node_client,  # type: ignore[arg-type]
+        FailureOutcomeWorker(),  # type: ignore[arg-type]
+    )
+    await consumer._consume_message("m-1", {
+        "job_id": "job-1",
+        "event_id": VALID_EVENT,
+        "trigger_revision": "1",
+        "analysis_version": "llm-stock-trace-v1",
+    })
+    dead_letter_calls = [
+        body for body in recording.bodies if body.get("status") == "dead_letter"
+    ]
+    assert dead_letter_calls, "应至少有一次 status=dead_letter 的 report_job 调用"
+    assert dead_letter_calls[0].get("last_error_detail") == "RuntimeError: explode"
 
 
 class RecordingPatchClient:
