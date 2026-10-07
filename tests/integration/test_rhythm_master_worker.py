@@ -66,6 +66,7 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         }
     )
     api.get_calendar_events = AsyncMock(return_value=[])
+    api.get_event_entities = AsyncMock(return_value=[])
     api.get_ths_index_map = AsyncMock(return_value=[])  # 未接线 → 主线 unavailable
     api.get_close_snapshot = AsyncMock(
         return_value={"breadth": {"total_count": 100, "advance_count": 60}}
@@ -73,11 +74,13 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     api.save_analysis_report = AsyncMock(return_value={"id": 1})
     api.get_rhythm_report = AsyncMock(return_value=None)
     monkeypatch.setattr(worker_mod, "node_api", api)
-    # load_event_window 内部绑定的是 event_calendar 模块的 node_api 引用，
+    # load_event_timeline 内部绑定的是 event_timeline 模块的 node_api 引用，
     # 需一并替换，否则会打到真实 NodeApiClient（数据源"未接"语义分叉）。
     from aistock_agent.services import event_calendar as event_calendar_mod
+    from aistock_agent.services import event_timeline as event_timeline_mod
 
     monkeypatch.setattr(event_calendar_mod, "node_api", api)
+    monkeypatch.setattr(event_timeline_mod, "node_api", api)
     return api
 
 
@@ -119,14 +122,11 @@ async def test_after_close_event_high_hint_present(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
     """I1（验收 3）：16:05 基准卡存在 high 事件时写入 event_high_hint（与增量同文案）。"""
-    mock_api.get_calendar_events.return_value = [
+    mock_api.get_event_entities.return_value = [
         {
-            "date": "2026-08-31",
-            "type": "earnings",
             "title": "英伟达财报",
-            "importance": "high",
-            "source": "L3",
-            "result": None,
+            "event_start_time": "2026-08-31",
+            "source_type": "manual",
         },
     ]
     out = await run(
@@ -174,11 +174,14 @@ async def test_morning_inherits_base_no_recompose(
 
 
 @pytest.mark.asyncio
-async def test_midday_event_delta_lands_branch_by_result(
+async def test_midday_event_no_result_caps_base(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """12:30 事件落档：d=0 且 result=超预期 → 仓位文案按事件结果定档（八成~满仓），主档位不变。
+    """12:30 事件当期（d=0）且无 result → 未落档 → base 封顶轻仓。
 
+    时间线口径：`load_event_timeline` 产出的 high 事件仅带 date/type/title/importance，
+    不含 result（handoff §9：result 无写入者，「按预期差落档」为死路）→ d=0 未落档 →
+    base 封顶 1（轻仓~三成）。故主档位不由事件「预期差」决定，而由「无 result」决定。
     §5.7 后分支预算（≤3）由技术三档整体占满：事件情景让位，不产出 event_ref 分支，仅留痕。
     """
     mock_api.get_rhythm_report.return_value = {
@@ -194,14 +197,11 @@ async def test_midday_event_delta_lands_branch_by_result(
             },
         }
     }
-    mock_api.get_calendar_events.return_value = [
+    mock_api.get_event_entities.return_value = [
         {
-            "date": "2026-08-31",
-            "type": "macro",
             "title": "英伟达财报",
-            "importance": "high",
-            "source": "L3",
-            "result": "超预期",
+            "event_start_time": "2026-08-31",
+            "source_type": "manual",
         },
     ]
     await run(
@@ -213,8 +213,8 @@ async def test_midday_event_delta_lands_branch_by_result(
     assert content["refresh_slot"] == "midday"
     # 主档位沿用收盘基准 stage（rally），score 由 STAGE_TO_LEVEL 确定性派生
     assert content["rhythm_card"]["score"] == 60.0
-    # d=0 且已落档（超预期）→ 事件结果定档：base 3 + 1 = 4（八成~满仓）
-    assert content["rhythm_card"]["position_band"]["text"] == "建议仓位：八成~满仓"
+    # d=0 且未落档（时间线事件无 result）→ base 封顶 1（轻仓~三成）
+    assert content["rhythm_card"]["position_band"]["text"] == "建议仓位：轻仓~三成"
     # §5.7 分支预算（≤3）互斥使用：技术三档占满预算，事件情景让位（不产出 event_ref 分支）且必须留痕
     branches = content["rhythm_card"]["branches"]
     assert branches and all(b["condition"]["kind"] == "interval" for b in branches)
@@ -231,11 +231,14 @@ async def test_worker_top_level_degrade(
     api.get_index_kline = AsyncMock(return_value=None)
     api.get_fear_greed = AsyncMock(return_value=None)
     api.get_calendar_events = AsyncMock(return_value=None)
+    api.get_event_entities = AsyncMock(return_value=None)
     api.save_analysis_report = AsyncMock(return_value={"id": 1})
     monkeypatch.setattr(worker_mod, "node_api", api)
     from aistock_agent.services import event_calendar as event_calendar_mod
+    from aistock_agent.services import event_timeline as event_timeline_mod
 
     monkeypatch.setattr(event_calendar_mod, "node_api", api)
+    monkeypatch.setattr(event_timeline_mod, "node_api", api)
     out = await run(
         {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
     )
@@ -288,9 +291,9 @@ async def test_conflict_uses_pre_tech_phase(
 async def test_after_close_card_includes_next_event_anchor_when_high_event(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None,
 ) -> None:
-    mock_api.get_calendar_events = AsyncMock(return_value=[
-        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
-         "importance": "high", "source": "L3", "event_time": "22:00"},
+    mock_api.get_event_entities = AsyncMock(return_value=[
+        {"title": "FOMC 议息", "event_start_time": "2026-08-31T22:00:00",
+         "source_type": "calendar"},
     ])
     out = await run(
         {"trigger_source": "scheduler", "refresh_slot": "after_close", "report_date": "2026-08-28"}
@@ -319,9 +322,9 @@ async def test_morning_delta_refreshes_anchor(
             },
         }
     })
-    mock_api.get_calendar_events = AsyncMock(return_value=[
-        {"date": "2026-08-31", "type": "macro", "title": "FOMC 议息",
-         "importance": "high", "source": "L3", "event_time": "22:00"},
+    mock_api.get_event_entities = AsyncMock(return_value=[
+        {"title": "FOMC 议息", "event_start_time": "2026-08-31T22:00:00",
+         "source_type": "calendar"},
     ])
     out = await run(
         {"trigger_source": "scheduler", "refresh_slot": "morning", "report_date": "2026-08-31"}
@@ -367,7 +370,7 @@ async def test_degraded_model_not_polluting_evidence(
 
     import aistock_agent.agents.workers.rhythm_master as wm
 
-    with patch.object(wm, "load_event_window", AsyncMock(return_value=monkey_event)), \
+    with patch.object(wm, "load_event_timeline", AsyncMock(return_value=monkey_event)), \
          patch.object(wm, "run_synthesis", AsyncMock(return_value=None)), \
          patch.object(wm, "validate_synthesis", return_value=False):
         out = await run({"trigger_source": "scheduler", "refresh_slot": "after_close",

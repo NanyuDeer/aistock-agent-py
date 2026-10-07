@@ -36,7 +36,7 @@ async def test_compose_card_short_kline_forces_stage_none_and_missing():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
@@ -66,7 +66,7 @@ async def test_compose_card_passes_historical_kline_params():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
@@ -119,7 +119,7 @@ async def _compose(slot: str, basis: str, kline_value):
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.node_api.get_rhythm_report",
@@ -210,7 +210,7 @@ async def test_compose_card_feeds_event_confirm_into_detect_certainty(events, ex
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {
             "events": events,
             "high_events": [e for e in events if e.get("importance") == "high"],
@@ -242,7 +242,7 @@ async def test_breadth_snapshot_uses_kline_last_date():
         patch.object(worker_mod.node_api, "get_index_kline", AsyncMock(return_value=kline)),
         patch.object(worker_mod.node_api, "get_close_snapshot", snap),
         patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
-        patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod, "load_event_timeline", AsyncMock(return_value=win_stub)),
         patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
@@ -285,7 +285,7 @@ async def test_card_basis_date_is_evidence_date():
         patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
         patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
         patch.object(
-            worker_mod, "load_event_window",
+            worker_mod, "load_event_timeline",
             AsyncMock(return_value=type("W", (), {
                 "events": [], "high_events": [], "source_missing": False,
             })()),
@@ -344,7 +344,7 @@ async def test_mainline_none_state_is_not_marked_data_missing():
                 "breakdown": None, "nav": None,
             },
         ),
-        patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod, "load_event_timeline", AsyncMock(return_value=win_stub)),
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):

@@ -35,7 +35,7 @@ async def test_after_close_produces_master_card():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_fear_greed",
         AsyncMock(return_value={"index": 65}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=await _window_cls()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
