@@ -7,6 +7,7 @@ mock create_react_agent + asyncio.gather，验证：
 - symbol 缺失时返回提示文本
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,6 +31,18 @@ def _make_mock_agent(*responses: str) -> MagicMock:
 
     mock_agent.ainvoke = fake_ainvoke
     return mock_agent
+
+
+def _make_split_mocks(preview_json: str, detail_json: str):
+    """构造速览/详情两个 mock agent（按 create_react_agent 调用顺序返回）。"""
+    return [_make_mock_agent(preview_json), _make_mock_agent(detail_json)]
+
+
+_PREVIEW_JSON = '{"summary":"异动结论","impact":"利好","keywords":["涨价"]}'
+_DETAIL_JSON = (
+    '{"details":"## 详情","stocks":["600519"],"risks":["风险A"],'
+    '"podcast_brief":"异动摘要"}'
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -85,12 +98,12 @@ async def test_symbol_missing_returns_hint():
 @pytest.mark.asyncio
 async def test_master_synthesizes_sub_agent_results():
     """3 个子 Agent 各自返回结果，Master 拿到全部结果后生成最终报告。"""
-    mock_agent = _make_mock_agent("Master 合成报告")
+    agents = _make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)
     with (
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch(_CREATE_REACT, side_effect=agents),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         mock_sub.side_effect = [
             "资讯情报分析结果",
@@ -102,21 +115,27 @@ async def test_master_synthesizes_sub_agent_results():
 
     # 3 个子 Agent 各被调用一次
     assert mock_sub.call_count == 3
-    assert result["final_response"] == "Master 合成报告"
+    merged = json.loads(result["final_response"])
+    assert merged["display_report"] == {
+        "summary": "异动结论",
+        "impact": "利好",
+        "keywords": ["涨价"],
+        "details": "## 详情",
+        "stocks": ["600519"],
+        "risks": ["风险A"],
+    }
     assert "analysis_reports" in result
 
 
 @pytest.mark.asyncio
 async def test_scheduler_persists_alert_with_symbol_bound_real_structure():
     """调度产生的 alert 以股票代码作为实体键，并写入可校验的 content 结构。"""
-    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
-    mock_agent = _make_mock_agent(final_response)
     save_report = AsyncMock()
     with (
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         await run({
@@ -131,7 +150,14 @@ async def test_scheduler_persists_alert_with_symbol_bound_real_structure():
         "report_date": "2026-07-10",
         "content": {
             "symbol": "600519",
-            "display_report": {"summary": "异动结论"},
+            "display_report": {
+                "summary": "异动结论",
+                "impact": "利好",
+                "keywords": ["涨价"],
+                "details": "## 详情",
+                "stocks": ["600519"],
+                "risks": ["风险A"],
+            },
             "podcast_brief": "异动摘要",
         },
         "user_id": "600519",
@@ -142,12 +168,12 @@ async def test_scheduler_persists_alert_with_symbol_bound_real_structure():
 @pytest.mark.asyncio
 async def test_sub_agent_failure_not_crash():
     """某个子 Agent 失败时返回降级文本，不中断整体流程。"""
-    mock_agent = _make_mock_agent("降级后的 Master 报告")
+    agents = _make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)
     with (
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch(_CREATE_REACT, side_effect=agents),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         # 模拟盘口风控子 Agent 降级
         mock_sub.side_effect = [
@@ -158,24 +184,27 @@ async def test_sub_agent_failure_not_crash():
 
         result = await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
 
-    assert result["final_response"] == "降级后的 Master 报告"
+    # 子 Agent 降级不影响速览/详情双调用输出合并报告
+    merged = json.loads(result["final_response"])
+    assert merged["display_report"]["summary"] == "异动结论"
+    assert merged["podcast_brief"] == "异动摘要"
 
 
 @pytest.mark.asyncio
 async def test_run_uses_both_llm_types():
     """alert_agent run() 中 Master 使用 get_deep_think，子 Agent 按分工分配模型。"""
-    mock_agent = _make_mock_agent("result")
+    agents = _make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)
     with (
         patch(_GET_DEEP, return_value=MagicMock()) as mock_deep,
-        patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent") as mock_sub,
+        patch(_GET_QUICK, return_value=MagicMock()) as mock_quick,
+        patch(_CREATE_REACT, side_effect=agents),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):
         mock_sub.return_value = "子Agent结果"
 
         await run({"symbol": "600519", "messages": [HumanMessage(content="分析 600519 异动")]})
 
-    assert mock_deep.call_count >= 1  # Master Agent 用了 deep_think
+    assert mock_deep.call_count >= 1  # 详情 Master 用了 deep_think
     # 验证 3 个子 Agent 调用：资讯情报(quick) + 盘口风控(deep) + 图谱发散(quick)
     assert mock_sub.call_count == 3
     actual_calls = [c.kwargs for c in mock_sub.call_args_list]
@@ -187,14 +216,12 @@ async def test_run_uses_both_llm_types():
 @pytest.mark.asyncio
 async def test_stock_trace_saves_with_correct_contract():
     """stock_trace trigger_source 以 symbol 为 user_id，写入 stock_trace.v1 payload。"""
-    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
-    mock_agent = _make_mock_agent(final_response)
     save_report = AsyncMock(return_value={"id": 123})
     with (
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         result = await run({
@@ -215,7 +242,14 @@ async def test_stock_trace_saves_with_correct_contract():
             "schema_version": "stock_trace.v1",
             "trace_id": "trace-abc-123",
             "symbol": "600519",
-            "display_report": {"summary": "异动结论"},
+            "display_report": {
+                "summary": "异动结论",
+                "impact": "利好",
+                "keywords": ["涨价"],
+                "details": "## 详情",
+                "stocks": ["600519"],
+                "risks": ["风险A"],
+            },
             "podcast_brief": "异动摘要",
         },
     }
@@ -231,14 +265,12 @@ async def test_user_trigger_does_not_save_report(
     mock_set_report: MagicMock,
 ):
     """trigger_source=user 时只缓存，不调用 save_analysis_report。"""
-    final_response = '{"display_report":{"summary":"异动结论"},"podcast_brief":"异动摘要"}'
-    mock_agent = _make_mock_agent(final_response)
     save_report = AsyncMock()
     with (
         patch(_GET_DEEP, return_value=MagicMock()),
         patch(_GET_QUICK, return_value=MagicMock()),
-        patch(_CREATE_REACT, return_value=mock_agent),
-        patch("aistock_agent.agents.workers.alert._run_sub_agent", return_value="子报告"),
+        patch(_CREATE_REACT, side_effect=_make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
         patch("aistock_agent.agents.workers.alert.node_api.save_analysis_report", save_report),
     ):
         result = await run({
@@ -253,3 +285,68 @@ async def test_user_trigger_does_not_save_report(
     # user 写 report_cache（供列表查询）
     assert mock_set_report.called
     assert result.get("final_response") is not None
+
+
+@pytest.mark.asyncio
+async def test_master_split_merges_preview_and_detail():
+    """速览与详情合并成 6 字段 display_report（职责不重叠）。"""
+    agents = _make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)
+    with (
+        patch(_GET_DEEP, return_value=MagicMock()),
+        patch(_GET_QUICK, return_value=MagicMock()),
+        patch(_CREATE_REACT, side_effect=agents),
+        patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True, return_value="子报告"),
+    ):
+        result = await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+            "trigger_source": "user",
+            "report_date": "2026-07-10",
+        })
+
+    merged = json.loads(result["final_response"])
+    assert merged["display_report"] == {
+        "summary": "异动结论",
+        "impact": "利好",
+        "keywords": ["涨价"],
+        "details": "## 详情",
+        "stocks": ["600519"],
+        "risks": ["风险A"],
+    }
+    assert merged["podcast_brief"] == "异动摘要"
+
+
+@pytest.mark.asyncio
+async def test_run_tolerates_detail_failure_keeps_preview():
+    """详情抛异常时 run() 用速览降级合并、不抛异常（合并前必修 A）。
+
+    修复前 gather 无 return_exceptions，_run_master_detail 抛异常会整体上抛 →
+    run() 落入 except 返回降级提示文本，速览已成功的结果被连带丢弃；
+    本用例在未修实现下应因 final_response 非常规 JSON 而失败（RED）。
+    """
+    with (
+        patch("aistock_agent.agents.workers.alert._run_sub_agent",
+              autospec=True, return_value="子报告"),
+        patch("aistock_agent.agents.workers.alert._run_master_preview",
+              new=AsyncMock(return_value={
+                  "summary": "异动结论", "impact": "利好", "keywords": ["涨价"],
+              })),
+        patch("aistock_agent.agents.workers.alert._run_master_detail",
+              new=AsyncMock(side_effect=RuntimeError("detail boom"))),
+        patch("aistock_agent.agents.workers.alert._cache_alert_result"),
+    ):
+        result = await run({
+            "symbol": "600519",
+            "messages": [HumanMessage(content="分析 600519 异动")],
+        })
+
+    merged = json.loads(result["final_response"])
+    assert merged["display_report"] == {
+        "summary": "异动结论",
+        "impact": "利好",
+        "keywords": ["涨价"],
+        "details": "",
+        "stocks": [],
+        "risks": [],
+    }
+    assert merged["podcast_brief"] == ""

@@ -171,7 +171,8 @@ class StockTraceConsumer:
             # 不确认消息：快照就绪后由 pending reclaim 重新执行。
             return
         await self._handle_failure(
-            message_id, fields, job_id, outcome.error_code or "WORKER_FAILED"
+            message_id, fields, job_id, outcome.error_code or "WORKER_FAILED",
+            error_detail=outcome.error_detail,
         )
 
     async def _snapshot_pending_expired(self, job_id: str) -> bool:
@@ -189,9 +190,12 @@ class StockTraceConsumer:
         return False
 
     async def _handle_failure(
-        self, message_id: str, fields: dict[str, str], job_id: str, error_code: str
+        self, message_id: str, fields: dict[str, str], job_id: str, error_code: str,
+        error_detail: str | None = None,
     ) -> None:
-        result = await self._node_client.report_job(job_id, "failed", error_code=error_code)
+        result = await self._node_client.report_job(
+            job_id, "failed", error_code=error_code, error_detail=error_detail,
+        )
         raw_attempt_count = result.get("attemptCount", 0) if result else None
         attempt_count = (
             int(raw_attempt_count)
@@ -199,7 +203,7 @@ class StockTraceConsumer:
             else settings.stock_trace_max_attempts
         )
         if attempt_count >= settings.stock_trace_max_attempts:
-            await self._dead_letter(message_id, fields, error_code)
+            await self._dead_letter(message_id, fields, error_code, error_detail)
 
     async def _reclaim_dlq(self, now: float) -> None:
         """自治回收：将滞留超过保留期的死信直接丢弃（记日志留审计）。
@@ -239,7 +243,10 @@ class StockTraceConsumer:
             retention_seconds=retention,
         )
 
-    async def _dead_letter(self, message_id: str, fields: dict[str, str], error_code: str) -> None:
+    async def _dead_letter(
+        self, message_id: str, fields: dict[str, str], error_code: str,
+        error_detail: str | None = None,
+    ) -> None:
         payload: dict[EncodableT, EncodableT] = {
             "error_code": error_code,
             "failed_at": "consumer",
@@ -249,7 +256,9 @@ class StockTraceConsumer:
         await self._redis.xadd(DLQ_STREAM, payload)
         job_id = fields.get("job_id")
         if job_id:
-            await self._node_client.report_job(job_id, "dead_letter", error_code=error_code)
+            await self._node_client.report_job(
+                job_id, "dead_letter", error_code=error_code, error_detail=error_detail,
+            )
         await self._redis.xack(STREAM, self._group, message_id)
         _metrics.record_stock_trace_dlq_total(error_code)
         logger.warning("stock_trace_job_dead_letter", job_id=job_id, error_code=error_code)

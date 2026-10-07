@@ -21,6 +21,9 @@ class SSEEventType:
     ERROR = "error"
     AGENT_SWITCH = "agent_switch"
     INTERMEDIATE = "intermediate"
+    # 2026-09-30：alert 链路新增——旁路解说分片 / 速览先行
+    REASONING = "reasoning"
+    PREVIEW = "preview"
 
 
 class LangGraphEventType:

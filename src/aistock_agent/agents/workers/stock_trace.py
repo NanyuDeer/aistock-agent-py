@@ -54,6 +54,7 @@ class StockTraceWorkerOutcome:
     status: str
     result: StockTraceResult | None = None
     error_code: str | None = None
+    error_detail: str | None = None
 
 
 def _first_json_object(value: str) -> str:
@@ -267,9 +268,20 @@ class StockTraceWorker:
                     )
                     last_error = str(exc)
                     continue
-            return StockTraceWorkerOutcome(status="failed", error_code="VALIDATION_REJECTED")
+            # 校验失败（高频）也带上最后一条失败原因，供失败可查；last_error
+            # 只在循环内校验异常时赋值，此处做 None 容忍以防边界未覆盖。
+            return StockTraceWorkerOutcome(
+                status="failed",
+                error_code="VALIDATION_REJECTED",
+                error_detail=(last_error[:500] if last_error else None),
+            )
         except Exception as exc:
             logger.exception("stock_trace_worker_failed", event_id=event_id, error=str(exc))
+            # 兜底只落笼统码会丢失真实根因（2026-09-30 事故教训），把"类名: 消息"
+            # 截断 500 字随 outcome 上报；错误码不动以维持重投语义。
+            detail = f"{type(exc).__name__}: {exc}"
             return StockTraceWorkerOutcome(
-                status="failed", error_code="LLM_OR_DEPENDENCY_UNAVAILABLE"
+                status="failed",
+                error_code="LLM_OR_DEPENDENCY_UNAVAILABLE",
+                error_detail=detail[:500],
             )

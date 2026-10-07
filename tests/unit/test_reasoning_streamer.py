@@ -22,7 +22,7 @@ async def test_stream_reasoning_sends_chunks():
         for chunk in ["我先拆", "问题拆解", "为两步"]:
             yield MagicMock(content=chunk)
 
-    with patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm, \
+    with patch("aistock_agent.services.reasoning_stream.get_quick_think") as mock_llm, \
          patch("aistock_agent.graph.nodes._reasoning.render_reasoning_prompt") as mock_render:
         mock_render.return_value = "prompt"
         mock_llm.return_value.astream = fake_astream
@@ -49,7 +49,7 @@ async def test_stream_reasoning_llm_failure_falls_back_to_label():
     ws.send_json = AsyncMock()
 
     with (
-        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch("aistock_agent.services.reasoning_stream.get_quick_think") as mock_llm,
         patch(
             "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
             return_value="prompt",
@@ -78,7 +78,7 @@ async def test_stream_reasoning_timeout_falls_back():
         yield MagicMock(content="never")  # type: ignore[unreachable]
 
     with (
-        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch("aistock_agent.services.reasoning_stream.get_quick_think") as mock_llm,
         patch(
             "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
             return_value="prompt",
@@ -86,7 +86,7 @@ async def test_stream_reasoning_timeout_falls_back():
     ):
         mock_llm.return_value.astream = slow_astream
         # 把超时缩短到 0.1s 加速测试
-        with patch("aistock_agent.graph.nodes._reasoning._REASONING_TIMEOUT_SEC", 0.1):
+        with patch("aistock_agent.services.reasoning_stream.REASONING_TIMEOUT_SEC", 0.1):
             await stream_reasoning(ws.send_json, "qa_router", "查 600519 的行情")
 
     assert ws.send_json.await_count >= 1
@@ -98,7 +98,7 @@ async def test_stream_reasoning_empty_message_uses_fallback():
     ws = MagicMock()
     ws.send_json = AsyncMock()
 
-    with patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm:
+    with patch("aistock_agent.services.reasoning_stream.get_quick_think") as mock_llm:
         await stream_reasoning(ws.send_json, "qa_router", "")
 
     # 不应调用 LLM
@@ -122,7 +122,7 @@ async def test_stream_reasoning_not_billed():
         yield MagicMock(content="我在分析")
 
     with (
-        patch("aistock_agent.graph.nodes._reasoning.get_quick_think") as mock_llm,
+        patch("aistock_agent.services.reasoning_stream.get_quick_think") as mock_llm,
         patch(
             "aistock_agent.graph.nodes._reasoning.render_reasoning_prompt",
             return_value="prompt",

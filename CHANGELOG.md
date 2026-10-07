@@ -2,6 +2,46 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-10-07 — AI 异动解读「思考流式 + 速览/详情并行」（Task 1-9）+ 归因失败可观测与容错修复
+
+**开发者**: yueqili778-arch
+
+### 新增
+
+- `services/reasoning_stream.py`：把 chat 链路已有的「旁路 LLM 解说流」（LLM 流式 + 2s 首块超时 + 失败/超时静态兜底 + `observe=False` 不计费）抽为通用模块，供 alert 链路复用；`graph/nodes/_reasoning.py` 迁移到该模块，对外 `stream_reasoning(sink, node, message)` 签名与运行时行为不变。
+- `prompts/workers/alert_reasoning.py`：alert 链路旁路解说模板（第一人称、只描述"做什么+为什么"、禁下结论/编造/JSON），渲染 `alert_scan` / `alert_master` / `alert_heartbeat` 三场景，并导出 `ALERT_REASONING_FALLBACKS` / `heartbeat_fallback()`；场景 key 与 node 分离（心跳复用所在阶段 node 以聚合成同一步骤）。
+- `constants.SSEEventType` 新增 `REASONING = "reasoning"` / `PREVIEW = "preview"` 两个 SSE 帧类型。
+- alert prompt 拆分：新增 `MASTER_PREVIEW_PROMPT`（速览三件套 summary/impact/keywords，显式禁止引入新结论）与 `MASTER_DETAIL_PROMPT`（详情四件套 details/stocks/risks + podcast_brief，不重复速览字段）。
+- `agents/workers/stock_trace.py`：归因失败上报真实异常明细 `error_detail`（通用 `except` 与 `VALIDATION_REJECTED` 路径写 `f"{type(exc).__name__}: {exc}"`、截断 500 字）；错误码与 `REPLAYABLE_ERROR_CODES` 不变。
+- `schemas/stock_trace.py`：`TriggerEvent` 新增可选字段 `is_limit_up: bool | None = None`（保持 `extra="forbid"`，显式声明而非放宽为 `ignore`）。
+
+### 变更
+
+- `agents/workers/alert.py::stream()` 由「直接 yield」改为 asyncio.Queue + sink：等待期可并发推送 reasoning 解说（含心跳）与 preview 速览帧。帧序列：`tool_start(sub_agents)` → `reasoning(alert_scan)*` → `tool_end(sub_agents)` → `tool_start(master)` → `reasoning(alert_master)*` → `preview`（速览先到先渲染）→ `tool_end(master)` → `llm_start` → `result`（合并 6 字段 + podcast_brief + raw）→ `done`。
+- 新增模块级常量 `ALERT_REASONING_HEARTBEAT_SEC = 8.0` / `ALERT_REASONING_MAX_HEARTBEATS = 8`（调用时读取，可被测试 patch）及 helper `_heartbeat_loop` / `_drain_until_done` / `_drain_queue`。
+- `alert.py::run()` 由「一次 deep Master 调用」改为 `asyncio.gather` 并发 preview + detail，合并后 `json.dumps(ensure_ascii=False)` 再按原签名 `_cache_alert_result(state, final_response)` 落缓存；新增 helper `_build_master_input` / `_invoke_master` / `_loads_object` / `_run_master_preview` / `_run_master_detail` / `_merge_report`。
+- 移除失效的 `MASTER_PROMPT`（worker import + `prompts/workers/alert.py` 常量整段）与失效 import `map_langgraph_event_to_sse`；`git grep MASTER_PROMPT` 零命中（仅 CHANGELOG 历史提及）。
+
+### 修复
+
+- **致命回归**：`stream()` 三处 `_run_sub_agent(..., cycle=cycle_label)` 参数名拼错（应为 `cycle_label=`）→ 任意股票 SSE 秒级失败；改为正确关键字，并补 `inspect.signature(_run_sub_agent).bind(...)` 签名护栏；`tests/integration/test_alert_agent.py` 8 处桩改 `autospec=True`。
+- `run()` 的 gather 加 `return_exceptions=True` 并降级失败侧：一侧（深详情）失败不再拖垮整个 gather、保住已成功的速览。
+- `_loads_object()` 对畸形 LLM JSON 由静默吞掉改为截断 warning（保持纯函数签名）。
+- `stream()` 以 try/finally 无条件回收后台任务并置位 `*_stop`，修复异常/断连导致的泄漏。
+- `TriggerEvent` 未声明 `is_limit_up` → `StockTraceSnapshot.model_validate` 抛 `ValidationError`，被外层 `except Exception` 兜成 `LLM_OR_DEPENDENCY_UNAVAILABLE` → 3 次确定性秒失败进 dead_letter、无 result（宿迁联盛 2026-09-24 事故根因）。
+
+### 测试
+
+- 新增 `tests/unit/test_reasoning_stream.py`（5 项）、`test_alert_reasoning_templates.py`（6 项）、`test_alert_prompts.py`（4 项）、`test_alert_stream_preview.py`（preview 先于 result / 合并 6 字段 / 每阶段各一次解说 / 以 done 收尾）与 `test_alert_reasoning.py` 心跳用例；`test_reasoning_streamer.py` patch 目标随迁移改指 `services.reasoning_stream.*`（断言未动）。
+- `tests/unit/test_stock_trace.py` 新增 `is_limit_up` 用例与 `error_detail`（dead_letter 透传 + `VALIDATION_REJECTED` 明细）用例。
+- 验证：alert 相关单测全绿；`ruff check` 改动文件 All checks passed；`mypy` 仅剩基线既有 2 项，本任务新增 0 项。
+
+### 文档
+
+- `AGENTS.md`：新增「AI 异动解读——思考过程流式 + 速览/详情并行」契约说明（`reasoning`/`preview` 帧载荷与语义、心跳参数、Master 拆分、发布顺序约束）与「归因失败明细 `error_detail`」条目。
+
+---
+
 ## [main] 2026-10-07 — 修复单元测试既有失败、修正一处自引入回归，并将 pytest 纳入 CI 门禁
 
 **开发者**: Aria

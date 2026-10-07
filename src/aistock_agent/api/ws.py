@@ -68,7 +68,7 @@ def _sanitize_label(label: str | None) -> str:
 
 
 # P3-fix-2 T1.1：reasoning task 收集后 DONE 前的等待超时。
-# 略大于 _reasoning.py 的 _REASONING_TIMEOUT_SEC=2.0，保证兜底 label 有机会发出。
+# 略大于 services/reasoning_stream.py 的 REASONING_TIMEOUT_SEC=2.0，保证兜底 label 有机会发出。
 _REASONING_DRAIN_TIMEOUT_SEC = 2.5
 
 # 问题 20 止血（2026-08-17）：_forward_until_done_or_cmd 静默段看门狗。
