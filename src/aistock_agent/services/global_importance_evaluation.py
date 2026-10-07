@@ -19,7 +19,7 @@
 
 import asyncio
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 import structlog
@@ -81,7 +81,7 @@ def _calc_event_age_days(publish_time_str: str) -> int:
             pub_dt = datetime.fromisoformat(publish_time_str.split(".")[0])
         else:
             pub_dt = datetime.strptime(publish_time_str, "%Y-%m-%d")
-        delta = date.today() - pub_dt.date()
+        delta = shanghai_today() - pub_dt.date()
         return max(0, delta.days)
     except (ValueError, TypeError):
         return _DEFAULT_LOOKBACK_DAYS
@@ -352,7 +352,8 @@ async def _load_recent_event_reports(
     Returns:
         结构化的 content 列表（agent_analysis_reports 表中 content 列的值）。
     """
-    today = date.today()
+    # 回看窗口锚定上海自然日（容器 UTC 下 date.today() 会整体偏移一天）
+    today = shanghai_today()
     seen_event_ids: set[str] = set()
     all_contents: list[dict[str, object]] = []
 
@@ -436,7 +437,7 @@ async def build_global_importance_input(
             events.append(event_input)
 
     return {
-        "as_of": date.today().isoformat(),
+        "as_of": shanghai_today().isoformat(),
         "events": events,
     }
 
@@ -473,7 +474,7 @@ async def run_global_importance_evaluation(
         }
     """
     # ── 步骤 1: 获取事件集合 ──
-    as_of = date.today().isoformat()
+    as_of = shanghai_today().isoformat()
     global_input: dict[str, object]
     if events is not None:
         global_input = {"as_of": as_of, "events": events}
@@ -690,10 +691,9 @@ async def save_global_importance_report(
     Returns:
         True 表示持久化成功，False 表示失败。
     """
-    from datetime import datetime
-
     if report_date is None:
-        report_date = datetime.now().strftime("%Y-%m-%d")
+        # 默认报告日取上海自然日（业务日期）
+        report_date = shanghai_today().isoformat()
 
     content: dict[str, object] = {
         "as_of": str(result.get("as_of", report_date)),

@@ -16,7 +16,6 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -43,6 +42,7 @@ from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.services.reasoning_stream import stream_reasoning_text
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
 
 logger = structlog.get_logger()
@@ -278,7 +278,8 @@ def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+    # 兜底日期用上海自然日（报告日，非展示时间戳）
+    report_date = str(state.get("report_date") or shanghai_today().isoformat())
     try:
         from aistock_agent.services.report_cache import set_report
         # content 中记录 symbol，避免同日多股票 alert 互相覆盖后无法区分
@@ -434,7 +435,7 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         )
         _cache_alert_result(dict(state), raw_json)
 
-        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        report_date = str(state.get("report_date") or shanghai_today().isoformat())
         try:
             await node_api.save_analysis_report(
                 report_type="alert",
@@ -537,7 +538,7 @@ async def run(state: AgentState) -> dict[str, object]:
         display_report = _merge_report(preview_fields, detail_fields)
 
         # 供后续 save 分支使用（保持原有变量语义）
-        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        report_date = str(state.get("report_date") or shanghai_today().isoformat())
         trigger_source = state.get("trigger_source")
 
         final_response = json.dumps(

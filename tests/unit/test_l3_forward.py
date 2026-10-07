@@ -34,7 +34,8 @@ def mock_tavily(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 @pytest.mark.asyncio
 async def test_collect_l3_forward_parses_date_and_upserts(mock_tavily: AsyncMock, cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
     posted: list[dict] = []
-    monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(side_effect=lambda b: posted.append(b) or {"id": 1, "upserted": True}))
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(src.node_api), "post_calendar_event", AsyncMock(side_effect=lambda b: posted.append(b) or {"id": 1, "upserted": True}))
     events = await src.collect_l3_forward("2026-08-28", cache)
     assert len(events) >= 1
     assert events[0]["source"] == "L3"
@@ -45,7 +46,7 @@ async def test_collect_l3_forward_parses_date_and_upserts(mock_tavily: AsyncMock
 async def test_hard_limit_six_queries(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(src, "_run_search", AsyncMock(side_effect=lambda q: calls.append(q) or {"results": [], "provider": "anysearch", "outcome": "empty"}))
-    monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
+    monkeypatch.setattr(type(src.node_api), "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
     await src.collect_l3_forward("2026-08-28", cache)
     assert len(src.L3_FORWARD_QUERIES) == 6
     assert len(calls) == 6  # 硬上限 6 条/日
@@ -55,7 +56,7 @@ async def test_hard_limit_six_queries(cache: SearchCache, monkeypatch: pytest.Mo
 async def test_soft_limit_twelve_per_day(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
     """软上限 12 次/日（provider failover 重试不计入）：同日重复调用累计超 12 跳过后续。"""
     monkeypatch.setattr(src, "_run_search", AsyncMock(return_value={"results": [], "provider": "anysearch", "outcome": "empty"}))
-    monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
+    monkeypatch.setattr(type(src.node_api), "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
     src._l3_daily_count["2026-08-28"] = 12  # 就地填充（不清引用）；残留由 autouse fixture 清理
     # 同日已用满 12 → 直接跳过
     events = await src.collect_l3_forward("2026-08-28", cache)
@@ -66,7 +67,7 @@ async def test_soft_limit_twelve_per_day(cache: SearchCache, monkeypatch: pytest
 async def test_cache_skip_second_call_same_day(cache: SearchCache, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
     monkeypatch.setattr(src, "_run_search", AsyncMock(side_effect=lambda q: called.append(q) or {"results": [], "provider": "anysearch", "outcome": "empty"}))
-    monkeypatch.setattr(src.node_api, "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
+    monkeypatch.setattr(type(src.node_api), "post_calendar_event", AsyncMock(return_value={"id": 1, "upserted": True}))
     await src.collect_l3_forward("2026-08-28", cache)
     n1 = len(called)
     await src.collect_l3_forward("2026-08-28", cache)
@@ -85,7 +86,7 @@ async def test_invalid_calendar_dates_dropped(cache: SearchCache, monkeypatch: p
         return {"results": [], "provider": "anysearch", "outcome": "empty"}
     monkeypatch.setattr(src, "_run_search", AsyncMock(side_effect=lambda q, **kw: fake_search(q, **kw)))
     post = AsyncMock(return_value={"id": 1, "upserted": True})
-    monkeypatch.setattr(src.node_api, "post_calendar_event", post)
+    monkeypatch.setattr(type(src.node_api), "post_calendar_event", post)
     events = await src.collect_l3_forward("2026-08-28", cache)
     assert events == []
     post.assert_not_awaited()

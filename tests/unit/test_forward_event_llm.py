@@ -29,7 +29,7 @@ async def test_run_expectation_diff_only_yesterday_today(monkeypatch):
     """
     fetched: list[tuple[str, str, str | None]] = []
 
-    async def fake_get(d_from, d_to, importance=None):
+    async def fake_get(_self, d_from, d_to, importance=None):
         fetched.append((d_from, d_to, importance))
         return [
             {"date": "2026-09-21", "title": "昨日事件", "importance": "high",
@@ -38,7 +38,7 @@ async def test_run_expectation_diff_only_yesterday_today(monkeypatch):
              "result": None, "detail": "x｜consensus:1%"},
         ]
 
-    async def fake_post(body):
+    async def fake_post(_self, body):
         return {"code": 0, "data": {"id": 1, "upserted": False}}
 
     async def fake_search(title):
@@ -48,10 +48,11 @@ async def test_run_expectation_diff_only_yesterday_today(monkeypatch):
         return "超预期"
 
     m = monkeypatch
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.get_calendar_events", fake_get)
+        "aistock_agent.services.data_client.NodeApiClient.get_calendar_events", fake_get)
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.post_calendar_event", fake_post)
+        "aistock_agent.services.data_client.NodeApiClient.post_calendar_event", fake_post)
     m.setattr(
         "aistock_agent.services.forward_events.shanghai_today",
         lambda: date(2026, 9, 22))
@@ -74,20 +75,20 @@ async def test_run_expectation_diff_consensus_unreachable_skips(monkeypatch):
     detail 必须透传才判（app-api toContractEvent 加性透传 detail 后可达；
     若透传被移除，本判例会因 detail 缺失而 skipped_consensus → 可证伪 C1 修复）。
     """
-    async def fake_get(d_from, d_to, importance=None):
+    async def fake_get(_self, d_from, d_to, importance=None):
         return [
             {"date": "2026-09-21", "title": "有日期无 detail 事件", "importance": "high",
              "result": None, "detail": None},
         ]
 
-    async def fake_post(body):
+    async def fake_post(_self, body):
         return {"code": 0, "data": {"id": 1, "upserted": False}}
 
     m = monkeypatch
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.get_calendar_events", fake_get)
+        "aistock_agent.services.data_client.NodeApiClient.get_calendar_events", fake_get)
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.post_calendar_event", fake_post)
+        "aistock_agent.services.data_client.NodeApiClient.post_calendar_event", fake_post)
     m.setattr(
         "aistock_agent.services.forward_events.shanghai_today",
         lambda: date(2026, 9, 22))
@@ -107,7 +108,7 @@ async def test_run_expectation_diff_importance_guard_skips_medium(monkeypatch):
 
     即使 app-api query 过滤失效返回了 medium 行，谓词守卫也必须跳过（不落 result）。
     """
-    async def fake_get(d_from, d_to, importance=None):
+    async def fake_get(_self, d_from, d_to, importance=None):
         return [
             {"date": "2026-09-21", "title": "medium 却在窗口", "importance": "medium",
              "result": None, "detail": "x｜consensus:1%"},
@@ -115,15 +116,15 @@ async def test_run_expectation_diff_importance_guard_skips_medium(monkeypatch):
 
     posted: list[dict[str, object]] = []
 
-    async def fake_post(body):
+    async def fake_post(_self, body):
         posted.append(body)
         return {"code": 0, "data": {"id": 1, "upserted": False}}
 
     m = monkeypatch
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.get_calendar_events", fake_get)
+        "aistock_agent.services.data_client.NodeApiClient.get_calendar_events", fake_get)
     m.setattr(
-        "aistock_agent.services.forward_events.node_api.post_calendar_event", fake_post)
+        "aistock_agent.services.data_client.NodeApiClient.post_calendar_event", fake_post)
     m.setattr(
         "aistock_agent.services.forward_events.shanghai_today",
         lambda: date(2026, 9, 22))

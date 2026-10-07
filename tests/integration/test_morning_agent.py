@@ -37,7 +37,7 @@ def test_is_trading_day_national_holiday():
 
 
 def test_is_trading_day_no_arg_returns_bool():
-    # 不传参数时调用 date.today()，验证不崩溃且返回 bool
+    # 不传参数时用上海自然日（shanghai_today()），验证不崩溃且返回 bool
     result = is_trading_day()
     assert isinstance(result, bool)
 

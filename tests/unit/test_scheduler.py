@@ -24,6 +24,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aistock_agent.utils.date import shanghai_today
+
 
 @pytest.fixture(autouse=True)
 def _reset_scheduler_singleton():
@@ -811,8 +813,6 @@ async def test_event_analysis_pipeline_task_delegates_to_pipeline():
 
 @pytest.mark.asyncio
 async def test_scheduler_review_task_passes_persistence_context():
-    from datetime import date
-
     from aistock_agent.agents.workers import review as review_module
     from aistock_agent.services.scheduler import _run_review_task
 
@@ -823,7 +823,8 @@ async def test_scheduler_review_task_passes_persistence_context():
 
     state = mock_run.await_args.args[0]
     assert state["trigger_source"] == "scheduler"
-    assert state["report_date"] == date.today().isoformat()
+    # 与产品代码同源：调度器用上海自然日（UTC runner 下 date.today 会错位）
+    assert state["report_date"] == shanghai_today().isoformat()
 
 
 # ── schema 2.0 持久化契约：market_snapshot / iterate 不得写入原始 JSON ──

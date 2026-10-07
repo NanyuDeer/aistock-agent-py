@@ -27,7 +27,9 @@ def is_trading_day(d: date | None = None) -> bool:
         不在支持范围（不承诺 2027 精确节假日）；chinese_calendar 库升级
         （覆盖 2027+）后 try 分支自动恢复精确判断，无需改代码。
     """
-    target = d or date.today()
+    # 默认取上海自然日：容器/服务器可能为 UTC，date.today() 语义会偏移一天，
+    # 与下方 shanghai_today()（业务交易日口径）不一致（防服务器/容器时区漂移）。
+    target = d or shanghai_today()
     if target.weekday() >= 5:
         return False
     # 补充节假日表优先（HOLIDAYS_EXTRA，YYYY-MM-DD；
@@ -47,7 +49,8 @@ def prev_trading_day(d: date | None = None) -> date:
 
     用于非交易日提示：向前回溯跳过周末与法定节假日，返回最近交易日。
     """
-    target = d or date.today()
+    # 默认取上海自然日（理由同 is_trading_day）
+    target = d or shanghai_today()
     cursor = target - timedelta(days=1)
     while not is_trading_day(cursor):
         cursor -= timedelta(days=1)

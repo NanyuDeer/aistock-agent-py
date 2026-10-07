@@ -1059,10 +1059,12 @@ async def _run_review_task() -> None:
     logger.info("scheduler_review_start")
     from aistock_agent.agents.workers import review as review_agent
 
-    today = date.today().isoformat()
+    # 上海自然日（对齐 `_run_morning_task`；date.today() 用容器本地时区，
+    # UTC 部署下会与交易日判定/落库日错位）
+    today = shanghai_today().isoformat()
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_review_{date.today().isoformat()}",
+        "session_id": f"scheduled_review_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": "review",
@@ -1117,7 +1119,7 @@ async def _run_iterate_task() -> None:
 
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_iterate_{date.today().isoformat()}",
+        "session_id": f"scheduled_iterate_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": None,

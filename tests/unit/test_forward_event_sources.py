@@ -58,11 +58,14 @@ async def test_collect_l3_forward_respects_soft_limit_and_cache(monkeypatch):
     monkeypatch.setattr("aistock_agent.services.forward_event_sources._run_search", fake_search)
     posted: list[dict[str, object]] = []
 
-    async def fake_post(body):
+    async def fake_post(_self, body):
         posted.append(body)
         return {"code": 0, "data": {"id": 1, "upserted": True}}
 
-    monkeypatch.setattr("aistock_agent.services.forward_event_sources.node_api.post_calendar_event", fake_post)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(
+        "aistock_agent.services.data_client.NodeApiClient.post_calendar_event", fake_post
+    )
 
     events = await collect_l3_forward("2026-09-20", FakeCache())
     assert len(called) == 6  # 6 条 query 全查

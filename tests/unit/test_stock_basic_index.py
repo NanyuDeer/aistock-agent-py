@@ -22,13 +22,14 @@ def _reset_index(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_loaded_builds_index_from_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_get_list(path: str) -> list[dict[str, object]]:
+    async def fake_get_list(_self, path: str) -> list[dict[str, object]]:
         return [
             {"symbol": "600519", "name": "贵州茅台", "industry": "白酒"},
             {"symbol": "300750", "name": "宁德时代", "industry": "电池"},
         ]
 
-    monkeypatch.setattr(sbi.node_api, "get_list", fake_get_list)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(sbi.node_api), "get_list", fake_get_list)
 
     await sbi.ensure_loaded()
 
@@ -46,10 +47,10 @@ def test_longest_match_prefers_longer_name() -> None:
 async def test_api_failure_degrades_to_empty_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_get_list(path: str) -> list[dict[str, object]]:
+    async def fake_get_list(_self, path: str) -> list[dict[str, object]]:
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(sbi.node_api, "get_list", fake_get_list)
+    monkeypatch.setattr(type(sbi.node_api), "get_list", fake_get_list)
 
     await sbi.ensure_loaded()
 

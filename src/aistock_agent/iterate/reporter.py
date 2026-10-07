@@ -14,13 +14,15 @@ import structlog
 from aistock_agent.iterate.case_builder import get_data_dir
 from aistock_agent.iterate.ground_truth import list_pending_review
 from aistock_agent.services.mail_sender import send_mail
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
 
 async def build_daily_report(report_date: date | None = None) -> str:
     """构建每日汇总 Markdown。无重要结果也发（设计文档 9.1）。"""
-    day = report_date or date.today()
+    # 默认报告日取上海自然日（与实验记录 created_at 同源，防 UTC 错位）
+    day = report_date or shanghai_today()
     experiments = _read_experiments(day)
     pending = list_pending_review()
 
@@ -69,7 +71,7 @@ async def run_daily_report(report_date: date | None = None) -> None:
     邮件正文信息不足——只想看"改了什么"需要完整补丁）。
     """
     md = await build_daily_report(report_date)
-    day = report_date or date.today()
+    day = report_date or shanghai_today()
     subject = f"迭代Agent每日汇总 {day.isoformat()}"
     ok = send_report_via_smtp(
         md, subject=subject, attachments=_collect_experiment_attachments(day)
@@ -201,7 +203,7 @@ def _format_system_status() -> str:
 def _write_report_fallback(markdown: str) -> None:
     root = get_data_dir() / "reports"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{date.today().isoformat()}.md"
+    path = root / f"{shanghai_today().isoformat()}.md"
     path.write_text(markdown, encoding="utf-8")
     logger.info("iterate_report_written_fallback", path=str(path))
 

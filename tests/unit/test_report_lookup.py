@@ -18,7 +18,7 @@ def _goal() -> InsightGoal:
 async def test_report_lookup_chat_analysis_reads_db(monkeypatch):
     """登录 → get_analysis_report 命中 → Evidence（facts 含 details/summary，degraded=False）。"""
 
-    async def fake_get(report_type, report_date, user_id):
+    async def fake_get(_self, report_type, report_date, user_id):
         return {
             "id": "rep_1",
             "content": {
@@ -32,7 +32,8 @@ async def test_report_lookup_chat_analysis_reads_db(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(node_api, "get_analysis_report", fake_get)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(node_api), "get_analysis_report", fake_get)
     ev = await report_lookup(
         {"report_type": "chat_analysis", "date": "2026-08-02", "user_id": "u_42"},
         _goal(),
@@ -53,7 +54,7 @@ async def test_report_lookup_chat_analysis_session_fallback(monkeypatch):
         called = True
         return None
 
-    monkeypatch.setattr(node_api, "get_analysis_report", fake_get)
+    monkeypatch.setattr(type(node_api), "get_analysis_report", fake_get)
     ev = await report_lookup(
         {
             "report_type": "chat_analysis",
@@ -75,7 +76,7 @@ async def test_report_lookup_chat_analysis_db_miss_degraded(monkeypatch):
     async def fake_get(*a, **k):
         return None
 
-    monkeypatch.setattr(node_api, "get_analysis_report", fake_get)
+    monkeypatch.setattr(type(node_api), "get_analysis_report", fake_get)
     ev = await report_lookup(
         {"report_type": "chat_analysis", "date": "2026-08-02", "user_id": "u_42"},
         _goal(),
