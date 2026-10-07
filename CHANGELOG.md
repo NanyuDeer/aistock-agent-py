@@ -2,6 +2,24 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-07 — 修复 CI 首跑暴露的 2 条晨报用例时区误红（测试侧）
+
+**开发者**: Aria
+
+### 修复（测试侧，产品代码零改动）
+
+- **现象**：`ci.yml` 上线后首次运行（UTC 17:03，上海已是次日）`pytest tests/ -q` 报 2 failed（4016 passed / 4 skipped），均在 `tests/integration/test_morning_agent.py`：`test_morning_run_persists_with_morning_type_and_null_user_id`（actual `2026-10-08` vs expected `2026-10-07`）与 `test_morning_run_system_message_injected`（期望 `2026年10月07日`，实际注入 `2026年10月08日`）。
+- **根因**：`morning.run()` 刻意取**上海自然日**（`utils.date.shanghai_today`，防宿主机/容器时区漂移），而这两条用例的**期望值**用 `datetime.now()` 取 **CI runner 本地时区** → 仅当「runner 本地日 ≠ 上海日」时不等，即 UTC runner 上 **16:00–24:00 UTC**（北京 00:00–08:00）必红；开发者北京时间机器上两者恰好一致，故此前长期未暴露。
+- **修法**：期望值改为与产品代码同源 —— `shanghai_today().isoformat()` / `shanghai_today().strftime("%Y年%m月%d日")`，并补 `from aistock_agent.utils.date import shanghai_today`。
+- **同类排查**：`tests/` 其余 `datetime.now()` / `date.today()` 用法在同一次 UTC 运行中均未失败（自洽），本次不动。
+
+### 验证
+
+- `uv run --frozen python -m pytest tests/integration/test_morning_agent.py -q` → **30 passed**；`ruff check` 改动文件 All checks passed。
+- 最终判据取 CI（UTC runner）二次运行结果。
+
+---
+
 ## [junliang] 2026-10-07 — AI 异动解读「思考流式 + 速览/详情并行」（Task 1-9）+ 归因失败可观测与容错修复
 
 **开发者**: yueqili778-arch
