@@ -75,7 +75,7 @@ async def test_historical_snapshot_matches_independent_label(
     """
     close_snapshot = _load_close_snapshot(case)
 
-    async def fake_get(path: str) -> dict[str, object] | None:
+    async def fake_get(_self: object, path: str) -> dict[str, object] | None:
         # 三期：close-snapshot 调用带 ?date={report_date}，必须用 startswith 匹配
         if path.startswith("/internal/market/close-snapshot"):
             return close_snapshot
@@ -83,7 +83,12 @@ async def test_historical_snapshot_matches_independent_label(
             return {"items": []}
         raise AssertionError("unexpected Node path: " + path)
 
-    monkeypatch.setattr(snapshot_module.node_api, "get", fake_get)
+    # 必须 patch 类方法，而不是单例实例属性（node_api.get）：monkeypatch 还原
+    # 实例属性时执行 setattr(instance, name, 原类属性绑定方法)，会在单例上
+    # 永久留下同名实例属性，遮蔽类属性 NodeApiClient.get；后续 replay_layer
+    # .apply_replay_patches 仅补丁类属性，被该实例属性遮蔽 → 回放隔离失效，
+    # 真实 get/_request 触网（跨目录状态污染，见 fix-pollution-report.md）。
+    monkeypatch.setattr(type(snapshot_module.node_api), "get", fake_get)
     monkeypatch.setattr(snapshot_module, "collect_global_market_facts", AsyncMock(return_value=[]))
     monkeypatch.setattr(snapshot_module.TavilyService, "search", lambda **_kwargs: {})
 

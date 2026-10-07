@@ -1447,9 +1447,10 @@ async def test_run_review_quick_success(mocker):
 @pytest.mark.asyncio
 async def test_run_review_quick_skipped_when_full_exists(mocker):
     """run_review(quick) 在已有 full 报告时返回 status=skipped。"""
+    # 1e5a5aa 起 quick 覆盖检查改用 quiet 版（避免 404 噪音），patch 目标随之更新
     mocker.patch.object(
         review_agent.node_api,
-        "get_analysis_report",
+        "get_analysis_report_quiet",
         new=AsyncMock(
             return_value={
                 "report_type": "review",

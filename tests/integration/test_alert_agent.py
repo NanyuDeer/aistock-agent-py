@@ -196,7 +196,7 @@ async def test_run_uses_both_llm_types():
     agents = _make_split_mocks(_PREVIEW_JSON, _DETAIL_JSON)
     with (
         patch(_GET_DEEP, return_value=MagicMock()) as mock_deep,
-        patch(_GET_QUICK, return_value=MagicMock()) as mock_quick,
+        patch(_GET_QUICK, return_value=MagicMock()),
         patch(_CREATE_REACT, side_effect=agents),
         patch("aistock_agent.agents.workers.alert._run_sub_agent", autospec=True) as mock_sub,
     ):

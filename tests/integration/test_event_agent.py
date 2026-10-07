@@ -298,7 +298,9 @@ async def test_run_regenerates_cache_without_verifiable_graph_boundary() -> None
         ) as mock_u:
             result = await run({"messages": [HumanMessage(content="测试事件")]})  # type: ignore[arg-type]
 
-    mock_u.assert_awaited_once()
+    # P1-1（b4a816c）：understanding 失败会重试一次，故返回 None 时被调用 2 次
+    assert mock_u.await_count == 2
+    assert [c.args[0] for c in mock_u.await_args_list] == ["测试事件", "测试事件"]
     assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
     assert result["analysis_reports"]["event_cached"] is False
 
@@ -1415,7 +1417,12 @@ async def test_run_rejects_legacy_cache_without_any_status_fields() -> None:
                         {"messages": [HumanMessage(content="美联储紧急降息50基点")]}
                     )
 
-    mock_u.assert_awaited_once()
+    # P1-1（b4a816c）：understanding 失败会重试一次，故返回 None 时被调用 2 次
+    assert mock_u.await_count == 2
+    assert [c.args[0] for c in mock_u.await_args_list] == [
+        "美联储紧急降息50基点",
+        "美联储紧急降息50基点",
+    ]
     mock_persist.assert_not_called()
     assert result["final_response"] == "事件分析暂时不可用，请稍后重试"
     assert result["analysis_reports"]["event_cached"] is False
@@ -1445,9 +1452,9 @@ async def test_run_empty_title_event_generated_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_invalid_podcast_event_generated_false() -> None:
-    """播报校验失败（brief 过短且无可扩充事实）→ event_generated 必须为 False，
-    不得计入生成成功。"""
+async def test_run_invalid_podcast_generated_but_cannot_persist() -> None:
+    """播报校验失败（brief 过短且无可扩充事实）→ can_persist=False，
+    但分析流程已完成（understanding+event_id+title）→ event_generated=True。"""
     s, mock_persist, _ = _mock_run(
         understanding=_mock_understanding("某事件"),  # title 非空
         transmission=_mock_transmission(),
@@ -1455,15 +1462,19 @@ async def test_run_invalid_podcast_event_generated_false() -> None:
         investment=_mock_investment(""),
         podcast_text="A" * 10,  # 远低于 150，且 conclusion 为空难以扩充
     )
+    mock_persist.return_value = True
     with s:
         result = await run({"messages": [HumanMessage(content="某重大事件")]})
 
     analysis_reports = result["analysis_reports"]
-    # 播报校验失败 → event_generated=False
-    assert analysis_reports["event_generated"] is False
-    assert analysis_reports["event_persisted"] is False
-    assert analysis_reports["event_cached"] is False
-    mock_persist.assert_not_called()
+    # P0-1（b4a816c）：event_generated 语义已拆分为"分析完成"
+    # （understanding + event_id + title 均成功）；展示完整性由 can_persist 承担，
+    # 不再阻断落库/缓存
+    assert analysis_reports["event_generated"] is True
+    assert analysis_reports["can_persist"] is False
+    mock_persist.assert_called_once()
+    assert analysis_reports["event_persisted"] is True
+    assert analysis_reports["event_cached"] is True
 
 
 @pytest.mark.asyncio

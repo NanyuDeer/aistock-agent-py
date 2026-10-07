@@ -42,6 +42,43 @@
 
 ---
 
+## [main] 2026-10-07 — 清掉合并引入的新债、修复全部 20 条 integration/e2e 既有失败与跨目录测试污染；CI 门禁纳入完整测试套件
+
+**开发者**: Aria
+
+### 修复
+
+- **清理合并引入的新欠账**（合并 junliang / changer 的分支后，本仓 `mypy` 由 0 → 4、`ruff` 出现 5 条）：
+  - `services/reasoning_stream.py:23`：`Callable[[dict], ...]` 缺泛型参数 → 补为 `dict[str, object]`（与调用方 `graph/nodes/_reasoning.py` 的签名一致）。
+  - `agents/workers/alert.py:117`：`_invoke_master` 的 `llm` 参数缺注解 → 补 `ChatOpenAI`（依据 `services/llm.py` 中 `get_quick_think/get_deep_think -> ChatOpenAI`）。
+  - `agents/workers/alert.py:511/516`：**不是运行时缺陷** —— 第二次 `asyncio.gather`（2 个协程）复用了前一个 3 元组变量 `results`，导致静态检查仍按 3 元组推断（报 `assignment` / 「期望 2 个值，实际提供 3 个」）。改用独立变量名 `master_results` 消除，**未使用 cast / ignore**。
+  - `tests/integration/test_alert_agent.py:198`：`as mock_quick` 绑定未使用 → 去掉绑定（保留 patch 本身）。4 处文件末尾缺换行由 ruff 自动修。
+- **修复全部 20 条 `tests/integration` / `tests/e2e` 既有失败**（14 + 6）。已逐条取证并**确认 0 条为产品缺陷**，根因全在测试侧：
+  - **A 组 9 条 = 测试过时**（产品行为系有意变更，已用 git 历史取证）：如 `event_generated` 语义在 `b4a816c` 被有意拆分、业绩类工具在 `d3f6930` 有意新增（故工具集断言需更新）、`review` 的 patch 目标已从 `get_analysis_report` 改名为 `get_analysis_report_quiet`、`_analyze_understanding` 的**两次调用是「首次返回假值时重试一次」的有意设计**（非重复调用缺陷）。
+  - **B 组 6 条 = 日期/时段相关**（测试假定「今天是交易日」，休市日必失败）→ 一律改为**注入交易时段桩**使其日期无关，**未使用 skip**。
+  - **D 组 5 条 = 经人类决策后处理**：① `test_full_flow_stock` / `test_full_flow_event` / `test_full_flow_sector` 由**旧单一 graph 路径**改写为**面向 chat 子图直驱**（`/chat/message` 早已切到 chat 子图，旧路径不可达），照 `tests/integration/test_chat_e2e_direct.py` 既有范式并全 mock，**无凭据、无外部服务即可运行**；② `test_full_flow_tool_failure_degradation` **下沉为 worker 层单测**（新增 `tests/unit/test_worker_tool_degradation.py`，直接引用 `tools/base.py` 的 `DEGRADED_MESSAGE`）；③ hot_burst「公共输出契约示例」原先指向 `docs/agent-outputs/hot_burst/` 下一个**从未生成**（该目录被 `.gitignore` 忽略）的路径 → 该示例本质是**供前端预览/文档使用的策划产物**，故**新建 `tests/fixtures/hot_burst_dual_layer_report.json` 并入库**（按提示词定义的真实章节结构编写，满足契约断言：`podcast_brief` 长度 163 ∈ [150,200]、含 `## 风险提示`、无内部术语）。
+- **修复跨目录测试污染（真实隐患）**：`tests/integration/test_historical_phenomena.py` 的 `monkeypatch.setattr(snapshot_module.node_api, "get", ...)` 打在**单例的实例属性**上；monkeypatch 还原时会留下一个**永久实例属性**遮蔽类属性 `NodeApiClient.get`，使 `iterate/replay_layer` 的**类级补丁失效** → 后续用例真实触网。
+  - 影响：**各目录单独跑全绿，但仓库文档入口 `pytest tests/ -v` 会失败**（README / AGENTS.md 均以此为标准入口）。
+  - 修法（治本）：改为 patch **类方法** `monkeypatch.setattr(type(node_api), "get", fake)`，使 monkeypatch 能干净还原。
+  - 注：`tests/` 中另有约 9 个文件使用同类「实例级 monkeypatch」写法，为潜在同类泄漏源（本轮未触发），建议后续统一。
+
+### 改进
+
+- **CI 门禁改为运行完整测试套件**：`.github/workflows/ci.yml` 的 pytest 步骤由「unit + 根级 + diagnostics」升级为 **`pytest tests/ -q`（全量：unit + integration + e2e + diagnostics + 根级）**。集成与端到端用例经上述改造后已可**无凭据、无外部服务、日期无关**地稳定运行。
+
+### 验证
+
+- `uv run python -m pytest tests/ -q` → **4018 passed / 4 skipped / 0 failed**（连续两次一致）
+- 分套件：`tests/unit` 3514 passed / 1 skipped；`tests/integration` 383 passed / 3 skipped；`tests/e2e` 63 passed；`tests/diagnostics` 2 passed —— **全部 0 failed**
+- `uv run mypy src` → **Success: no issues found in 258 source files**
+- `uv run ruff check src tests scripts` → **All checks passed!**
+
+### 说明
+
+- 本条目所述的 CI 工作流文件仍因**推送凭据缺少 GitHub `workflow` 权限**而未能入库（`GH013`），需补权限后推送或经网页端添加；**在此之前门禁尚未生效**。
+
+---
+
 ## [main] 2026-10-07 — 修复单元测试既有失败、修正一处自引入回归，并将 pytest 纳入 CI 门禁
 
 **开发者**: Aria
