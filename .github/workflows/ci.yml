@@ -1,0 +1,53 @@
+# 持续集成门禁：代码检查（ruff）+ 类型检查（mypy strict）+ 测试（pytest）
+#
+# 目的：防止「检查 / 测试」欠账再次累积。
+# 背景：2026-10 之前本仓没有任何 CI，导致 mypy 存量 290 条、ruff 存量 296 条、
+# 以及 35 条既有失败测试长期无人清理（并掩盖了多处真实缺陷）。现均已清零，
+# 任何**新增**违规都会在这里被拦下，不会再悄悄堆积。
+#
+# 门禁跑**完整**测试套件 `pytest tests/ -q`（unit + integration + e2e +
+# diagnostics + 根级，4018 条全绿）。集成/端到端用例此前长期失败、且依赖真实
+# 凭据与「今天是交易日」，本轮已改为「图直驱 + 全 mock + 日期无关」，
+# 因此可**无凭据、无外部服务**地在 CI 中稳定运行。
+#
+# mypy 现为 0 错误（strict = true，258 个源文件）；ruff 已按要求豁免 E501
+# （见 pyproject.toml 的注释），所以本门禁当前即为绿。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-types:
+    name: 类型检查与代码检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv 与 Python 3.11
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      # --frozen：严格按 uv.lock 安装；若 pyproject 与 uv.lock 不一致则直接失败
+      - name: 同步依赖
+        run: uv sync --frozen --extra dev
+
+      - name: ruff 代码检查
+        run: uv run --frozen ruff check src tests scripts
+
+      - name: mypy 类型检查（strict）
+        run: uv run --frozen mypy src
+
+      - name: pytest 全量测试
+        run: uv run --frozen python -m pytest tests/ -q
