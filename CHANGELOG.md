@@ -2,6 +2,33 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-08 — 默认业务日期改用上海自然日（原写死 UTC 日，京时凌晨会查成前一天）+ 回归测试
+
+**开发者**: Aria
+
+### 修复
+
+- **4 处默认业务日期由「UTC 日」改为「上海自然日」**（`shanghai_today()`）。原实现写死 `datetime.now(UTC)` —— 这类**改宿主 TZ 无效**：北京时间 **00:00–08:00** 期间 UTC 日仍是前一天，会整体落到前一天。
+  - `skills/report_lookup.py`（默认报告日期）、`skills/trace_lookup.py`、`skills/evidence_resolver.py` —— 三处均为**用户对话可触发**：用户此刻问「今天的复盘/溯源」会去查**昨天**的报告。
+  - `iterate/case_scanner.py:69`（电报事件扫描锚点）—— 原口径与姊妹源 `iterate/case_sourcers.py` 的 `shanghai_today()` **不一致**；定时任务 16:30 跑时两者同日、无差异，但手动/其它时段运行会整体漂一天，故统一口径。
+  - 注：`as_of` 等**绝对时刻**仍用 UTC，语义未变。
+- **顺带修一处真实缺陷**：`report_lookup.py` 在 `if user_id:` 分支内存在一个**函数内**的 `from ... import shanghai_today`。函数体里一旦出现该名字的绑定，整个函数内它就按**局部名**解析，而该函数在分支之前（默认日期处）也要用它 → 运行时抛 `UnboundLocalError`。由本次新增的回归测试**当场抓出**；已删除该局部导入、统一走模块顶层 import。
+  （已核查其余局部导入 `qa_router` / `synth_answer` / `sector_tools` 均为「同函数内导入即用」，不构成此问题。）
+
+### 新增
+
+- `tests/unit/test_skill_default_report_date.py`（5 例）。手法：把各模块命名空间里的 `shanghai_today` **打桩为哨兵日期**，以「不传 date」调用，断言**下游实际收到的日期 == 哨兵** —— 从而锁死「默认业务日期必须由上海日工具产生」这一契约，而非同义反复。
+  - 该断言在旧实现下**必然失败**（旧代码完全不引用 `shanghai_today`）：已验证 **RED（旧实现 5 failed）→ GREEN（现实现 5 passed）**。
+  - 另含一条「显式传入 `date` 时不得被上海日覆盖」的用例，防过度纠正。
+
+### 验证
+
+- `uv run python -m pytest tests/ -q` → **4023 passed / 4 skipped / 0 failed**
+- `uv run mypy src` → **Success: no issues found in 258 source files**
+- `uv run ruff check src tests scripts` → **All checks passed!**
+
+---
+
 ## [main] 2026-10-07 — 修复 CI 首跑暴露的 2 条晨报用例时区误红（测试侧）
 
 **开发者**: Aria

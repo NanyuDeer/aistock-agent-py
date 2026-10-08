@@ -6,15 +6,17 @@
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from aistock_agent.schemas.chat_contract import Evidence, InsightGoal
 from aistock_agent.skills.base import skill
 from aistock_agent.skills.evidence_resolver import resolve_trace_evidence
+from aistock_agent.utils.date import shanghai_today
 
 
 @skill
 async def trace_lookup(args: dict[str, Any], goal: InsightGoal) -> Evidence:
-    date_str = args.get("date") or datetime.now(UTC).strftime("%Y-%m-%d")
+    # 默认报告日期取**上海自然日**（勿用 datetime.now(UTC)：UTC 日在京时 00:00–08:00
+    # 期间会落到前一天，用户此刻问"今天的溯源"会查到昨天）。
+    date_str = args.get("date") or shanghai_today().isoformat()
     return await resolve_trace_evidence(date_str, skill_name="trace_lookup")
