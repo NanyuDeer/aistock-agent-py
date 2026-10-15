@@ -165,6 +165,104 @@ async def test_start_scheduler_registers_event_scrape_jobs():
     shutdown_scheduler()
 
 
+# ── 非交易日独立 Job（2026-10-14）──
+
+
+@pytest.mark.asyncio
+async def test_non_trading_event_scrape_job_skips_trading_day():
+    """交易日反向守卫：交易日直接 return，不调用 run_event_scrape。"""
+    from aistock_agent.services import scheduler
+
+    with (
+        patch("aistock_agent.services.scheduler.is_trading_day", return_value=True),
+        patch(
+            "aistock_agent.services.event_scraper.run_event_scrape",
+            new_callable=AsyncMock,
+        ) as mock_run,
+    ):
+        await scheduler._run_non_trading_event_scrape_job()
+    mock_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_trading_event_scrape_job_runs_on_non_trading_day():
+    """非交易日执行 run_event_scrape(intraday, allow_latest_fallback=False)。"""
+    from aistock_agent.services import scheduler
+
+    with (
+        patch("aistock_agent.services.scheduler.is_trading_day", return_value=False),
+        patch(
+            "aistock_agent.services.event_scraper.run_event_scrape",
+            new_callable=AsyncMock,
+            return_value={"scrape_mode": "intraday", "persisted": 1, "deduped": 0, "error": None},
+        ) as mock_run,
+        patch("aistock_agent.services.scheduler.logger") as mock_logger,
+    ):
+        await scheduler._run_non_trading_event_scrape_job()
+    mock_run.assert_awaited_once_with(
+        "intraday",
+        score_date=shanghai_today().isoformat(),
+        allow_latest_fallback=False,
+    )
+    mock_logger.info.assert_called_once_with(
+        "non_trading_event_scrape_job_done",
+        scrape_mode="intraday",
+        persisted=1,
+        deduped=0,
+        error=None,
+    )
+    mock_logger.exception.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_trading_event_scrape_job_swallows_exception():
+    """run_event_scrape 抛异常时 job 不向上抛（记录 non_trading_event_scrape_job_failed）。"""
+    from aistock_agent.services import scheduler
+
+    with (
+        patch("aistock_agent.services.scheduler.is_trading_day", return_value=False),
+        patch(
+            "aistock_agent.services.event_scraper.run_event_scrape",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("non-trading scrape boom"),
+        ),
+        patch("aistock_agent.services.scheduler.logger") as mock_logger,
+    ):
+        await scheduler._run_non_trading_event_scrape_job()  # 不应抛异常
+    mock_logger.exception.assert_called_once_with(
+        "non_trading_event_scrape_job_failed",
+        error="non-trading scrape boom",
+    )
+
+
+def test_non_trading_event_scrape_cron_config():
+    """非交易日 cron：每日 08:30/12:00/18:00/22:00（周几不限）。"""
+    from aistock_agent.config import settings
+
+    assert settings.scheduler_event_scrape_non_trading_cron == "30 8,12,18,22 * * *"
+
+
+@pytest.mark.asyncio
+async def test_start_scheduler_registers_non_trading_event_scrape_job():
+    """start_scheduler 注册 event_scrape_non_trading 独立 job。"""
+    from aistock_agent.services.scheduler import (
+        get_scheduler,
+        shutdown_scheduler,
+        start_scheduler,
+    )
+
+    start_scheduler()
+    try:
+        job_ids = {j.id for j in get_scheduler().get_jobs()}
+        assert "event_scrape_non_trading" in job_ids
+        # 交易日 Job 不受影响（回归保护）
+        assert "event_scrape_daily" in job_ids
+        assert "event_scrape_intraday" in job_ids
+        assert "event_scrape_close" in job_ids
+    finally:
+        shutdown_scheduler()
+
+
 # ── I4 兜底放宽（H7，Task 2 / Phase-3b）──
 
 

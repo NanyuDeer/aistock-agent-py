@@ -89,6 +89,7 @@ START → supervisor(quick_think, 意图路由)
 定时链路（APScheduler, 非LangGraph图内边）：
   07:00 impact_sectors_precompute（未来事件影响板块预计算，2026-09-24：calendar + scheduled/upcoming + impact_sectors 列为空的事件，`semantic_match_industries`（KG 行业向量，阈值 0.7）对 title+summary 匹配 Top3 写回 POST /internal/event-entities；宏观事件无可靠行业保持 [] 不 LLM 强猜；排在 app-api Calendar 物化 cron（06:40）之后，时间线 impactSectors 兜底数据源）
   08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
+  08:30/12:00/18:00/22:00 event_scrape_non_trading（**非交易日**档，2026-10-14：cron `30 8,12,18,22 * * *`；反向守卫——交易日跳过（`non_trading_event_scrape_skipped_trading_day`）、非交易日执行 `run_event_scrape("intraday", allow_latest_fallback=False)`，禁用跨日 `/internal/news/latest` 兜底防上一交易日消息重入；交易日 Job 守卫与行为完全不变，二者互斥）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）；午后前瞻输出 opportunities 关键词（4-5 个 ≤8字）+ risks 短词（schema 2.1）

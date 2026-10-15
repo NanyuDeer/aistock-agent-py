@@ -243,9 +243,22 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     return result
 
 
-async def scrape_intraday(score_date: str) -> dict[str, Any]:
-    """盘中增量采集：仅电报 + 东财新增，去重后落库（供传导更新）。"""
-    cls_events = await event_scrape_sources.collect_cls_telegraph(score_date)
+async def scrape_intraday(
+    score_date: str,
+    *,
+    allow_latest_fallback: bool = True,
+) -> dict[str, Any]:
+    """盘中增量采集：仅电报 + 东财新增，去重后落库（供传导更新）。
+
+    Args:
+        score_date: 归属日期（YYYY-MM-DD）。
+        allow_latest_fallback: 财联社当日电报为空/降级时是否允许回退
+            /internal/news/latest（跨日最新）。交易日默认 True（保持原行为）；
+            非交易日 Job 传 False，避免上一交易日消息被当作非交易日事件入库。
+    """
+    cls_events = await event_scrape_sources.collect_cls_telegraph(
+        score_date, allow_latest_fallback=allow_latest_fallback
+    )
     em_events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
     events = [
         ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
@@ -305,6 +318,7 @@ async def run_event_scrape(
     *,
     score_date: str | None = None,
     event: dict[str, Any] | None = None,
+    allow_latest_fallback: bool = True,
 ) -> dict[str, Any]:
     """条件边路由入口。
 
@@ -312,6 +326,9 @@ async def run_event_scrape(
         scrape_mode: full_daily / intraday / event_triggered。
         score_date: 交易日（YYYY-MM-DD），默认今天。
         event: event_triggered 模式的事件载荷（含 symbol 等）。
+        allow_latest_fallback: intraday 模式下当日电报为空/降级时是否允许回退
+            /internal/news/latest（跨日最新）。默认 True（保持交易日行为不变）；
+            非交易日 Job 传 False，禁止跨日 latest 降级。
 
     Returns:
         {"scrape_mode", "persisted", "deduped", "error"}。
@@ -323,7 +340,9 @@ async def run_event_scrape(
     if scrape_mode == "full_daily":
         result = await scrape_full_daily(day)
     elif scrape_mode == "intraday":
-        result = await scrape_intraday(day)
+        result = await scrape_intraday(
+            day, allow_latest_fallback=allow_latest_fallback
+        )
     else:
         result = await scrape_event_triggered(event or {})
 
