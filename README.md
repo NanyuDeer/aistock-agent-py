@@ -279,13 +279,16 @@ content = {
 | 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
 | 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集；传导失败重试 1 次（`error` 非空或异常时重试，仍失败记 error 日志不抛，H7，2026-08-13） |
 
-**调度时间窗**（APScheduler，交易日，Asia/Shanghai）：
+**调度时间窗**（APScheduler，Asia/Shanghai）：
 
 | job_id | cron | 说明 |
 |--------|------|------|
 | `event_scrape_daily` | `45 8 * * 1-5` | 08:45 盘前档，full_daily 全量抓取（2026-08-13 起由 07:30 调整，紧邻晨报 08:50） |
 | `event_scrape_intraday` | `0 10-14 * * 1-5` | 10:00-14:00 每小时（含 12:00 午间档），intraday 增量抓取（2026-08-13 恢复 12:00） |
 | `event_scrape_close` | `5 15 * * 1-5` | 15:05 收盘汇总档，full_daily 全天事件补抓（复盘/播报消费，H5，2026-08-13） |
+| `event_scrape_non_trading` | `30 8,12,18,22 * * *` | **非交易日**档（2026-10-14）：08:30/12:00/18:00/22:00 触发，intraday 增量抓取；反向守卫（交易日跳过、非交易日执行），并传 `allow_latest_fallback=False` 禁用跨日 `/internal/news/latest` 兜底，避免上一交易日消息被重新入库 |
+
+> 上表前三行为交易日 Job，受 cron 周几 + `is_trading_day` 双重守卫（非交易日 `event_scrape_skipped_non_trading_day` 跳过）；第四行为非交易日专档，反向守卫（交易日 `non_trading_event_scrape_skipped_trading_day` 跳过）。二者互斥、互不干扰。
 
 **事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`、`symbol`、`stock_name`、`industry`、`event_scope`（STOCK/UNKNOWN）、`event_scope_source`（规则标识：eastmoney_rule/company_event_rule/unknown）、`event_scope_confidence`（置信度 0.0~1.0）。其中 `symbol/stock_name/industry` 仅记录不参与个股判定；`event_scope` 历史数据缺失默认 UNKNOWN（未知不拦截）。
 

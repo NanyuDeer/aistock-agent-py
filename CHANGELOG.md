@@ -2,6 +2,33 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-10-14 — 新增非交易日事件抓取独立 Job（解决周末/节假日事件时间轴断档）
+
+**开发者**: Aria
+
+### 新增
+
+- **非交易日事件抓取 Job `event_scrape_non_trading`**：交易日抓取 Job 受 cron 周几（`0-4`）+ 函数内 `is_trading_day` 双重守卫，非交易日完全不抓取 → 事件传导/时间轴断档。新增独立 Job 复用现有抓取入口，**不复制任何抓取逻辑**。
+  - `config.py`：新增 `scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"`（非交易日 08:30/12:00/18:00/22:00 触发）。
+  - `services/scheduler.py`：新增包装协程 `_run_non_trading_event_scrape_job()`（**反向守卫**：交易日 `return`，非交易日调 `run_event_scrape("intraday", score_date=today, allow_latest_fallback=False)`）+ 注册 Job。**交易日三 Job 与 `if not is_trading_day(report_day): return` 守卫逐字未改**。
+- **跨日降级保护参数 `allow_latest_fallback`**（默认 `True`，交易日行为零变化）：
+  - `services/event_scraper.py`：`run_event_scrape` / `scrape_intraday` 新增关键字参数并透传。
+  - `services/event_scrape_sources.py`：`collect_cls_telegraph` 新增该参数；`False` 时当日电报为空/降级即返回 `[]`，不再回退 `/internal/news/latest`，避免上一交易日消息被重新作为非交易日事件入库。
+
+### 未改动（约束）
+
+- 数据库表结构、`event_id` 生成规则、`content_hash` 规则、去重逻辑、`event_start_time` 逻辑、API 接口、前端展示 —— 全部不变（现有展示链路已支持非交易日事件，事件一旦落库即可正常进入传导/GI/时间轴）。
+- `event_conduction` / global_importance 无隐性交易日限制，无需改动。
+
+### 验证
+
+- `python -m pytest tests/unit/test_event_scrape_sources.py tests/unit/test_scheduler_event_scrape.py tests/unit/test_event_scraper.py -q` → **50 passed**
+- `python -m pytest tests/unit/test_event_scraper_conduction.py tests/unit/test_scheduler.py tests/integration/test_event_scraper_conduction_payload.py tests/unit/test_event_store.py -q` → **110 passed**
+- `python -m mypy src/aistock_agent/services/scheduler.py src/aistock_agent/services/event_scraper.py src/aistock_agent/services/event_scrape_sources.py src/aistock_agent/config.py` → **Success: no issues found in 4 source files**
+- 新增回归用例：非交易日 Job 反向守卫 / 参数透传 / `collect_cls_telegraph` 禁用降级返回空（见 `tests/unit/test_scheduler_event_scrape.py`、`tests/unit/test_event_scraper.py`、`tests/unit/test_event_scrape_sources.py`）。
+
+---
+
 ## [main] 2026-10-08 — 默认业务日期改用上海自然日（原写死 UTC 日，京时凌晨会查成前一天）+ 回归测试
 
 **开发者**: Aria
