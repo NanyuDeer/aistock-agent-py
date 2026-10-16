@@ -376,7 +376,8 @@ async def collect_jin10(score_date: str) -> list[EventRecord]:
         raw_time = str(item.get("time") or "")
         if not raw_time or _event_shanghai_date(raw_time) != score_date:
             continue
-        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        item_data = item.get("data")
+        data: dict[str, Any] = item_data if isinstance(item_data, dict) else {}
         content = str(data.get("content") or "")
         title = content.split("】")[0].lstrip("【") if "【" in content else content[:60]
         if not str(title).strip():
