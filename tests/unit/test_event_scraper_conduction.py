@@ -84,6 +84,9 @@ async def test_trigger_conduction_maps_major_event_fields():
         await _trigger_conduction(events)
     called = mock_pipeline.await_args.args[0]
     assert len(called) == 1
+    # spec §5 回归面：本样例标题「美联储加息」命中海外宏观词，event_scope 单一裁决
+    # （resolve_event_scope）现判 MARKET（旧 detect_stock_event 口径为 UNKNOWN）；
+    # 按新口径更新期望（2026-10-15 Task 3）。
     assert called[0] == {
         "event_id": events[0]["event_id"],
         "title": "美联储加息",
@@ -92,7 +95,7 @@ async def test_trigger_conduction_maps_major_event_fields():
         "impact_score": 5,
         "direction": "negative",
         "involved_keywords": ["美股", "美元"],
-        "event_scope": "UNKNOWN",
+        "event_scope": "MARKET",
     }
 
 

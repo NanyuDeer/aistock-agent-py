@@ -538,3 +538,23 @@ def test_title_similarity_helpers() -> None:
     assert _title_similarity(norm_old, "央行宣布降准05个百分点") < 0.5
     # 空标题不参与近似去重（不抛异常）
     assert _title_similarity("", "abc") == 0.0
+
+
+def test_normalize_event_sets_origin_and_scope():
+    ev = normalize_event({"title": "美联储加息预期升温", "url": "https://x"}, source="cls", score_date="2026-10-15")
+    assert ev is not None
+    assert ev["event_scope"] == "MARKET"
+    assert ev["event_origin"] == "peripheral"
+
+
+def test_load_event_scrape_recomputes_legacy_rows():
+    # 存量行无 event_origin 键 → 读时按 source 重算，不回落空串
+    import aistock_agent.services.event_store as es
+    legacy = {"event_id": "2026-10-08-abc", "title": "恒生指数 隔夜表现", "summary": "",
+              "url": "", "impact_score": 5, "direction": "neutral",
+              "involved_keywords": [], "source": "global_markets", "source_level": "C",
+              "content_hash": "abc", "scrape_at": "2026-10-08T07:30:00", "score_date": "2026-10-08",
+              "payload": {}, "symbol": "", "stock_name": "", "industry": "",
+              "event_scope": "UNKNOWN", "event_scope_source": "unknown", "event_scope_confidence": 0.0}
+    rows = es._rebuild_event_record(legacy)   # 读时重算的纯函数（见实现）
+    assert rows["event_origin"] == "peripheral"
