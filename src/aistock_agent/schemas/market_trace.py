@@ -33,6 +33,9 @@ class SourceRecord(BaseModel):
     occurred_at: datetime | None
     captured_at: datetime
     source_level: Literal["primary", "reporting", "market_data"]
+    # 溯源证据地域（外围资讯标记，2026-10-15 批次）：domestic/peripheral；
+    # 无 extra="forbid"，加性可选字段，旧缓存/旧 facts 缺省 None 兼容。
+    origin: Literal["domestic", "peripheral"] | None = None
 
 
 class DataReadiness(BaseModel):

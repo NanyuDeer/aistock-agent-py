@@ -27,6 +27,7 @@ from aistock_agent.services import (
     event_store,
     forward_event_sources,
 )
+from aistock_agent.services.event_origin import is_peripheral
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.search_cache import SearchCache
 from aistock_agent.utils.date import shanghai_now, shanghai_today
@@ -115,6 +116,19 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
     # UNKNOWN（含缺失默认）一律放行——可能含行业/市场/产业链事件，不能过滤。
     allowed_events: list[event_store.EventRecord] = []
     for ev in events:
+        # S5 旁支：peripheral（外围资讯）不进 event_agent/GI；事件仍保留在事件库
+        # dict(ev)：is_peripheral 形参为 dict[str, Any]，EventRecord(TypedDict) 需转换
+        # （对齐 attribution_chain 既有惯例；谓词只读，浅拷贝无副作用）。
+        if is_peripheral(dict(ev)):
+            logger.info(
+                "EVENT_CONDUCTION_FILTER",
+                event_id=ev.get("event_id", ""),
+                title=str(ev.get("title", ""))[:50],
+                event_scope=str(ev.get("event_scope", "")),
+                action="skip_conduction",
+                reason="peripheral_event",
+            )
+            continue
         event_scope = str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN")
         if event_scope == "STOCK":
             logger.info(
@@ -201,6 +215,7 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     ]
     if score_date == _today():
         tasks.append(event_scrape_sources.collect_global_markets())
+        tasks.append(event_scrape_sources.collect_jin10(score_date))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     events: list[event_store.EventRecord] = []
@@ -260,8 +275,9 @@ async def scrape_intraday(
         score_date, allow_latest_fallback=allow_latest_fallback
     )
     em_events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
+    jin10_events = await event_scrape_sources.collect_jin10(score_date)
     events = [
-        ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
+        ev for ev in (cls_events + em_events + jin10_events) if event_store.is_major_event(ev)
     ]
     # Phase-2 LLM 精评（2026-08-13）：同上，盘中增量同样接入
     if settings.event_scoring_llm_enabled:

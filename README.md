@@ -260,6 +260,8 @@ content = {
 | 16:10 | 溯源弱反馈观测 | `attribution_feedback` | 聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表（`attribution_feedback_signals`）。**默认 `observe`：只落建议、不改写溯源判定与预判、不应用权重**；`ATTRIBUTION_FEEDBACK_MODE=off` 可关闭（不读不写） |
 
 > **事件传导分析（event conduction）**：2026-08-12 起触发归属统一事件抓取中台——`event_scrape_daily`/`event_scrape_intraday` 入库且有**新增**重大事件（`added>0`，非合并后总数 persisted）时，由中台 fire-and-forget 触发 `run_event_analysis_pipeline`（Task 5，Event Conduction → Global Importance 全链路；final review 修复：全去重批次不再重复触发，只传新增子集；传导失败重试 1 次——`error` 非空或异常时重试，两次失败放弃并记 error 级日志不抛，H7，2026-08-13；中台触发即写当日防双跑标记 `conduction_triggered:{date}`，TTL 6h）；晨报定时任务与手动晨报入口仅在"（当日事件库为空 或 无当日传导报告）且未被中台标记"时降级兜底触发（I4 放宽，2026-08-13，防中台抓取全失败时传导静默缺失、同时避免与中台双跑）。**双层个股过滤（2026-08-25）**：采集层 `event_scope=STOCK` 粗筛（规则识别，不依赖 LLM）→ 传导层 Call1 事件传导价值判断精判（`is_stock_only=true` 且 `transmission_needed=false` 的纯个股事件在 Call1 后立即终止，不执行图谱查询/Call2-5，不落库、不进 GI、不进传导前端；字段缺失默认放行）。
+>
+> **外围资讯标记与传导收口（2026-10-16）**：`event_scope`（主体层级）由 `{STOCK, UNKNOWN}` 扩为 `{STOCK, MARKET, UNKNOWN}`（`STOCK > MARKET > UNKNOWN` 单一裁决，只在 `normalize_event` 一处写入），并新增正交字段 `event_origin`（地域：`domestic/peripheral/unknown`，单一真源 `derive_event_origin`）；**「外围资讯」= `event_scope == "MARKET"` 且 `event_origin == "peripheral"`**。外围资讯在传导入口即被跳过（不进 event_agent/GI，日志 `EVENT_CONDUCTION_FILTER reason="peripheral_event"`），但**完整保留在事件库**（路由而非删除，写路径不变），并经大盘归因链 `root.peripheral_events` 纯持久化通道透出（供后续外围传导分析）。**已知边界**：晨报兜底重放与手动触发两条旁路当前未做外围门控（列入下批待办）。
 
 复盘流水线（review → snapshot → iterate）三个任务间隔 5 分钟顺序执行，通过文件 I/O 传递数据：复盘 agent 生成复盘报告文件 → 快照生成器读取晨报 + 复盘文件生成快照 JSON → 迭代 agent 读取快照 + rolling_stats 判断阈值。每个任务独立 try/except，前一步失败不阻塞后一步（后一步检测到文件缺失会降级）。开发/测试环境可设 `SCHEDULER_ENABLED=false` 关闭调度。
 
@@ -271,10 +273,10 @@ content = {
 
 | 层 | 模块 | 职责 |
 |----|------|------|
-| 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册**；L3 前瞻（2026-08-30）：前瞻查询走 `/internal/calendar/events` 事件日历（含 earnings-density） |
-| 规则评分层 | `services/event_scoring.py` | `apply_rule_score(raw, source=...)` 确定性规则评分（cls/ths/tavily 三源接入）：强词 5 分过阈 / 弱词 3 分不过阈 / 语境词降权防误判；已有有效 impact_score 不覆盖（eastmoney ai_impact 优先级更高） |
+| 采集层 | `services/event_scrape_sources.py` | 直调 Node.js `/internal/*` 复用既有爬虫管线（财联社电报/最新、东财、同花顺、外盘、**金十快讯**）；Tavily 全网检索 Python 侧直连；**不新增 @tool 注册**；L3 前瞻（2026-08-30）：前瞻查询走 `/internal/calendar/events` 事件日历（含 earnings-density）。**金十（2026-10-16 新增）**：直接 HTTP 快讯采集，**fail-safe**（失败即返回 `[]`、不抛不重试）、**仅当日**（调用点当日门控）、**逐条日期过滤**（条目 `time` 过上海日期、非当日即丢）；只取资讯文本、**不采其行情数值** |
+| 规则评分层 | `services/event_scoring.py` | **单一真源**：`apply_source_score(raw, *, source, origin=None)` 全源分发——`global_markets`→方向恒 `neutral`（行情事实无多空语义）；`eastmoney`→`_apply_eastmoney_ai_impact`（原采集层内联块已搬入）；其余→`apply_rule_score(raw, *, source, origin=None)`（cls/ths/tavily）：强词 5 分过阈 / 弱词 3 分不过阈 / 语境词降权防误判；已有有效 impact_score 不覆盖。**`origin == "peripheral"` 时跳过 A 股强/弱词表、方向恒 `neutral`**（2026-10-16 口径纠偏，修正「加息→利好」式误标） |
 | LLM 精评层 | `services/event_scoring_llm.py` | Phase-2：`score_events_llm` 入口（开关 `EVENT_SCORING_LLM_ENABLED` 默认关闭）→ 候选门槛 ≥3 送 quick_think 批量粗筛（`_quick_filter`，batch 20）→ deep_think 逐条精评（`_deep_score`，direction 校验 + 分数截断 [1,5]）→ `apply_llm_scores` 按 content_hash 合并覆盖规则分；`event_score:{content_hash}` Redis 缓存 TTL 24h；全链降级不阻断抓取 |
-| 归一化层 | `services/event_store.py` + `services/stock_event_detector.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级；`normalize_event` 调用 `detect_stock_event` 做个股事件识别（event_scope=STOCK/UNKNOWN 二值 + 规则来源 + 置信度，不依赖 LLM） |
+| 归一化层 | `services/event_store.py` + `services/stock_event_detector.py` | 统一 `EventRecord` 模型（收敛旧两套 SourceRecord）；`content_hash = sha1(title|url)` 去重；`source_level` A/B/C/D 分级；`normalize_event` 调用 **`resolve_event_scope`**（主体层级单一裁决 `STOCK > MARKET > UNKNOWN`，内部复用 `detect_stock_event` 的 STOCK/UNKNOWN 二值）并同 pass 调 **`derive_event_origin`**（地域判定），二者均为纯函数、零 LLM。新增纯函数模块 `services/event_origin.py`（`derive_event_origin`/`is_peripheral`/`OVERSEAS_MACRO_KEYWORDS`）与 `services/event_scope_resolver.py`（`classify_event_scope`/`resolve_event_scope`） |
 | 筛选层 | `services/event_store.py` | `impact_score >= MAJOR_IMPACT_THRESHOLD` 判重大事件 |
 | 入库层 | `services/event_store.py::save_event_scrape` | 幂等 upsert（content_hash 去重），返回 `{persisted, deduped, added, added_events}`（`added`=本批真正新增数，供传导守卫；final review 修复） |
 | 传导层 | `services/event_scraper.py` | 入库有**新增**重大事件（`added>0`）时 fire-and-forget 触发 `run_event_analysis_pipeline`（Event Conduction → Global Importance 全链路），只传新增子集；传导失败重试 1 次（`error` 非空或异常时重试，仍失败记 error 日志不抛，H7，2026-08-13） |
@@ -290,7 +292,7 @@ content = {
 
 > 上表前三行为交易日 Job，受 cron 周几 + `is_trading_day` 双重守卫（非交易日 `event_scrape_skipped_non_trading_day` 跳过）；第四行为非交易日专档，反向守卫（交易日 `non_trading_event_scrape_skipped_trading_day` 跳过）。二者互斥、互不干扰。
 
-**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`、`symbol`、`stock_name`、`industry`、`event_scope`（STOCK/UNKNOWN）、`event_scope_source`（规则标识：eastmoney_rule/company_event_rule/unknown）、`event_scope_confidence`（置信度 0.0~1.0）。其中 `symbol/stock_name/industry` 仅记录不参与个股判定；`event_scope` 历史数据缺失默认 UNKNOWN（未知不拦截）。
+**事件模型（EventRecord）**：`event_id`（`{score_date}-{content_hash[:16]}`）、`title`、`summary`、`url`、`impact_score`、`direction`、`involved_keywords`、`source`、`source_level`（A/B/C/D）、`content_hash`、`scrape_at`、`score_date`、`payload`、`symbol`、`stock_name`、`industry`、`event_scope`（**STOCK/MARKET/UNKNOWN**，2026-10-16 扩值）、`event_scope_source`（规则标识：eastmoney_rule/company_event_rule/**market_rule**/unknown）、`event_scope_confidence`（置信度 0.0~1.0）、**`event_origin`（`domestic`/`peripheral`/`unknown`）+ `event_origin_source` + `event_origin_confidence`（2026-10-16 新增三键）**。其中 `symbol/stock_name/industry` 仅记录不参与个股判定；`event_scope` 历史数据缺失默认 UNKNOWN（未知不拦截）；新增三键一律 `NotRequired`，**读侧「有键读键、无键按 `derive_event_origin` 重算」**（`load_event_scrape` 逐字段重建，**不回落空串**，存量行可被重判）。
 
 **接口清单**：
 
@@ -303,7 +305,7 @@ content = {
 **下游消费与降级**：
 
 - 晨报：`load_event_scrape(report_date)` 读库优先（日志 `morning_event_store_loaded`），缺库降级自主检索（不再直接触发 event_analyst）
-- 大盘溯源：`_normalize_event_store_facts` 读库优先（日志 `review_event_store_used`），缺库/空/读失败降级 telegraph/latest 直采
+- 大盘溯源：`_normalize_event_store_facts` 读库优先（日志 `review_event_store_used`），缺库/空/读失败降级 telegraph/latest 直采；来源证据写 `origin`（外围→`peripheral`），复盘校验「外围证据仅可支撑 `global_risk_liquidity` / `market_positioning_liquidity`，违规整份降级」；归因链 `load_chain_warehouse_events` 默认剔除外围（children 匹配池），另由 `load_chain_peripheral_events` 供 root 的 `peripheral_events` 通道
 - stock_trace（Node 侧）：`loadEventStoreEvidence` → Python `GET /api/agent/event/scrape-by-symbol/:symbol?date=当日`（`AGENT_PY_URL || PYTHON_AGENT_URL` + X-Internal-Token），空/失败降级原采集
 
 ### 目录结构
@@ -384,6 +386,8 @@ src/aistock_agent/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── stock_event_detector.py  # 个股事件检测器（event_store.normalize_event 调用；STOCK/UNKNOWN 二值判定，规则可注入股票名称索引）
 │   ├── stock_basic_index.py     # 股票名称索引（GET /internal/stocks/basic 拉取全量 A 股名称，最长匹配优先；接口失败降级空索引，不阻塞抓取）
+│   ├── event_origin.py          # 事件地域判定纯函数（derive_event_origin / is_peripheral / OVERSEAS_MACRO_KEYWORDS，单一真源、零 LLM）
+│   ├── event_scope_resolver.py  # event_scope 单一裁决（resolve_event_scope，STOCK > MARKET > UNKNOWN；复用 detect_stock_event）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
 │   ├── cache.py         # 晨报缓存服务（基于 RedisPool，存储双层 JSON）
@@ -595,6 +599,10 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `ATTRIBUTION_FEEDBACK_UNIT` | 聚合单元 key（`relation` / `relation_sector` / `sector` / `driver_type` / `driver_type_sector`） | `relation` |
 | `SCHEDULER_ATTRIBUTION_FEEDBACK_CRON` | 溯源弱反馈观测 cron（工作日 16:10，晚于 16:00 到期验证与 16:05 统计） | `10 16 * * 0-4` |
 | `EVENT_SCORING_LLM_ENABLED` | 事件抓取中台 LLM 精评总开关（Phase-2，默认关闭灰度开启；开启后规则评分候选 ≥3 送 quick 粗筛 + deep 精评） | `false` |
+| `JIN10_ENABLED` | 金十快讯源采集开关（外围资讯源，2026-10-16；fail-safe、仅当日、逐条日期过滤） | `true` |
+| `JIN10_FLASH_URL` | 金十快讯接口地址（外部接口，默认值见代码常量） | - |
+| `JIN10_APP_ID` | 金十客户端标识（外部标识，**非凭据**；值不入公开面） | - |
+| `JIN10_VERSION` | 金十客户端版本标识 | `1.0.0` |
 | `MARKET_EVENT_UP_THRESHOLD` | 市场事件上涨阈值（%） | `1.5` |
 | `MARKET_EVENT_DOWN_THRESHOLD` | 市场事件下跌阈值（%） | `-1.5` |
 | `MARKET_EVENT_MAX_PUSHES` | 每次晨报最多推送条数 | `2` |

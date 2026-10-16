@@ -27,7 +27,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
-| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density） | 无（代码管线） | P0（中台底座） |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density；**Phase-5 外围资讯标记 2026-10-16**：采集层新增金十快讯源（fail-safe、仅当日、逐条日期过滤）；`event_scope` 由 STOCK/UNKNOWN 扩为 STOCK/MARKET/UNKNOWN（单一裁决 `resolve_event_scope`），新增 `event_origin` 三键（单一真源 `derive_event_origin`）；评分口径收敛到 `event_scoring`（`apply_source_score`，peripheral 恒 neutral）；外围资讯（MARKET+peripheral）在 `_trigger_conduction` 跳过事件传导/GI（reason=peripheral_event），但保留在事件库；大盘归因链 root 增 `peripheral_events` 通道、children 匹配池则剔除外围。**已知边界**：晨报兜底重放与手动触发两条旁路未做外围门控，列入下批待办） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |

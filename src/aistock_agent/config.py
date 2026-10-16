@@ -303,6 +303,12 @@ class Settings(BaseSettings):
     # 由 scheduler 侧反向守卫（非交易日才执行）拦截，交易日直接 return，互不干扰。
     # 复用现有 run_event_scrape(mode="intraday")，不新增抓取逻辑。
     scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"
+    # ── 金十快讯（外围资讯源，2026-10-15 外围资讯标记批次）──
+    jin10_enabled: bool = True
+    jin10_flash_url: str = "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1"
+    # 客户端标识（外部标识，非凭据；禁止明文写入 AGENTS.md / 公开面）
+    jin10_app_id: str = "bVBF4FyRTn5NJF5n"
+    jin10_version: str = "1.0.0"
     # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）──
     scheduler_calendar_seed_cron: str = "30 7 * * 0-4"       # 种子导入+候选晋升（盘前）
     scheduler_calendar_scrape_cron: str = "40 7 * * 0-4"     # 韭研+L3 搜索兜底（盘前）

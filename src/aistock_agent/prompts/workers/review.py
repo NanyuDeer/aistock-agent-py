@@ -14,10 +14,15 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 - snapshot_id, trade_date, captured_at：快照元数据
 - a_share：A 股收盘事实（指数、广度、成交额、涨跌停、板块、主力资金等）
 - sources：SourceRecord 字典，key 是 source_id，
-  value 包含 provider/title/content/url/occurred_at/source_level
+  value 包含 provider/title/content/url/occurred_at/source_level/origin
 - phenomenon_discovery：已冻结的确定性现象发现；primary 是唯一归因对象，
   concurrent_phenomena 只可作为上下文，不得替代 primary
 - missing_fields：快照中缺失的字段列表
+
+【origin 消费规则】
+- origin="peripheral"（外围资讯）的 event_evidence 只能支撑 global_risk_liquidity
+  与 market_positioning_liquidity 两个候选；不得支撑 domestic_macro_policy /
+  industry_technology_supply。
 
 【输出格式】
 仅输出一个 JSON 对象，符合 MarketTraceResult schema：

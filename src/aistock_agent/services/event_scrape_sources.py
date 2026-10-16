@@ -17,8 +17,13 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_scoring import apply_rule_score
+from aistock_agent.services.event_origin import (
+    OVERSEAS_MACRO_KEYWORDS as _JIN10_MACRO_KEYWORDS,
+)
+from aistock_agent.services.event_origin import derive_event_origin
+from aistock_agent.services.event_scoring import apply_source_score
 from aistock_agent.services.event_store import EventRecord, normalize_event
+from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -78,6 +83,15 @@ def _event_shanghai_date(published: str) -> str:
         return raw[:10]
 
 
+def _origin_for(raw: dict[str, Any], source: str) -> str:
+    """采集侧 origin（与 normalize_event 同口径：title + summary/ai_summary）。"""
+    return derive_event_origin(
+        source,
+        str(raw.get("title") or ""),
+        str(raw.get("summary") or raw.get("ai_summary") or ""),
+    )[0]
+
+
 async def collect_cls_telegraph(
     score_date: str,
     *,
@@ -118,7 +132,7 @@ async def collect_cls_telegraph(
         raw: dict[str, Any] = dict(item)
         raw.setdefault("title", raw.get("content", ""))
         raw.setdefault("url", "")
-        apply_rule_score(raw, source="cls")
+        apply_source_score(raw, source="cls", origin=_origin_for(raw, "cls"))
         event = normalize_event(raw, source="cls", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -167,23 +181,7 @@ async def collect_eastmoney_judgements(score_date: str) -> list[EventRecord]:
         # normalize_event 只认 url/link → 这里补齐，否则东财事件 url 恒空
         # （I2：大盘溯源 causal_ready_count 不计入、stock_trace canonicalUrl 缺失）
         raw.setdefault("url", raw.get("detail_url") or "")
-        # 对齐字段：ai_impact → direction 映射
-        impact = str(raw.get("ai_impact", "")).strip()
-        if "利好" in impact and "重大" in impact:
-            raw["direction"] = "positive"
-            raw["impact_score"] = 5
-        elif "利空" in impact and "重大" in impact:
-            raw["direction"] = "negative"
-            raw["impact_score"] = 5
-        elif "利好" in impact:
-            raw["direction"] = "positive"
-            raw["impact_score"] = 3
-        elif "利空" in impact:
-            raw["direction"] = "negative"
-            raw["impact_score"] = 3
-        else:
-            raw["direction"] = "neutral"
-            raw["impact_score"] = 1
+        apply_source_score(raw, source="eastmoney")
         event = normalize_event(raw, source="eastmoney", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -232,7 +230,9 @@ async def collect_ths_original(score_date: str) -> list[EventRecord]:
                 raw["involved_keywords"] = []
         else:
             raw["involved_keywords"] = []
-        apply_rule_score(raw, source="ths_original")
+        apply_source_score(
+            raw, source="ths_original", origin=_origin_for(raw, "ths_original")
+        )
         event = normalize_event(raw, source="ths_original", score_date=score_date)
         if event is not None:
             events.append(event)
@@ -261,7 +261,7 @@ async def collect_tavily(score_date: str) -> list[EventRecord]:
             logger.warning("tavily_search_failed", query=query, error=str(exc))
             continue
         # T4：溯源透传 — 读 result 的 provider 键（failover 命中 doubao/anysearch 时
-        # 评分 apply_rule_score 不读 source，事件 source 保留真实命中源不破坏评分）。
+        # 评分 apply_source_score 不读 source 做词表评分口径，事件 source 保留真实命中源）。
         provider = str(result.get("provider", "tavily"))
         hits = _extract_items(result, key="results")
         for hit in hits:
@@ -272,7 +272,9 @@ async def collect_tavily(score_date: str) -> list[EventRecord]:
                 "summary": str(hit.get("content", "")),
                 "url": str(hit.get("url", "")),
             }
-            apply_rule_score(raw, source=provider)
+            apply_source_score(
+                raw, source=provider, origin=_origin_for(raw, provider)
+            )
             event = normalize_event(raw, source=provider, score_date=score_date)
             if event is not None:
                 events.append(event)
@@ -317,18 +319,82 @@ async def collect_global_markets() -> list[EventRecord]:
                 # 经 normalize_event/传导透传，避免 LLM 判不出媒体恒显示"未知来源"
                 # （2026-09-24）。
                 "source_name": "外盘行情",
-                "direction": (
-                    "positive" if pct > 0 else "negative" if pct < 0 else "neutral"
-                ),
                 # Important 2：波动 >= 1% 记为重大事实（impact_score=5）过
                 # is_major_event 落库；< 1% 为 1（full_daily 分支被过滤不落库）
                 "impact_score": 5 if abs(pct) >= 1 else 1,
             }
+            apply_source_score(raw, source="global_markets", origin="peripheral")
             event = normalize_event(raw, source="global_markets", score_date=score_date)
             if event is not None:
                 events.append(event)
     except Exception as exc:  # noqa: BLE001
         logger.warning("global_markets_failed", error=str(exc))
+    return events
+
+
+_JIN10_DETAIL_URL = "https://flash.jin10.com/detail/{id}"
+
+# 海外宏观强词单一真源：event_origin.OVERSEAS_MACRO_KEYWORDS（见顶部 import 别名）
+
+
+def _jin10_impact(item: dict[str, Any], text: str) -> int:
+    """金十条目 → impact 档位（important==1→5；important==0 且宏观强词→4；其余→1）。"""
+    if int(item.get("important", 0) or 0) == 1:
+        return 5
+    if any(k in text for k in _JIN10_MACRO_KEYWORDS):
+        return 4
+    return 1
+
+
+async def collect_jin10(score_date: str) -> list[EventRecord]:
+    """金十快讯（外围资讯源）。失败 fail-safe 返回 []，绝不抛异常。
+
+    逐条日期过滤对齐 eastmoney 先例（_event_shanghai_date）；当日门控由调用方
+    （scrape_full_daily / scrape_intraday）保证。
+    """
+    if not settings.jin10_enabled:
+        return []
+    try:
+        client = await HttpClientPool.get_client()
+        resp = await client.get(
+            settings.jin10_flash_url,
+            headers={"x-app-id": settings.jin10_app_id, "x-version": settings.jin10_version},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — fail-safe：绝不阻断抓取
+        logger.warning("jin10_fetch_failed", date=score_date)
+        return []
+
+    events: list[EventRecord] = []
+    for item in _extract_items(
+        {"data": payload.get("data") if isinstance(payload, dict) else None},
+        key="data",
+    ):
+        if not isinstance(item, dict):
+            continue
+        raw_time = str(item.get("time") or "")
+        if not raw_time or _event_shanghai_date(raw_time) != score_date:
+            continue
+        item_data = item.get("data")
+        data: dict[str, Any] = item_data if isinstance(item_data, dict) else {}
+        content = str(data.get("content") or "")
+        title = content.split("】")[0].lstrip("【") if "【" in content else content[:60]
+        if not str(title).strip():
+            continue
+        raw: dict[str, Any] = {
+            "title": title,
+            "summary": content,
+            # link 空 → 兜底详情页（实测 302 可达；契约要求 url 非空）
+            "url": str(data.get("link") or "") or _JIN10_DETAIL_URL.format(id=item.get("id", "")),
+            "impact_score": _jin10_impact(item, f"{title} {content}"),
+            "source_name": "金十数据",
+            "involved_keywords": item.get("tags") if isinstance(item.get("tags"), list) else [],
+        }
+        event = normalize_event(raw, source="jin10", score_date=score_date)
+        if event is not None:
+            events.append(event)
+    logger.info("jin10_collected", date=score_date, count=len(events))
     return events
 
 

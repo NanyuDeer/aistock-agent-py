@@ -215,6 +215,10 @@ async def test_sector_trace_consumer_keeps_weak_fallback_with_marks(
             AsyncMock(return_value=[]),
         ),
         patch(
+            "aistock_agent.services.attribution_chain.load_chain_peripheral_events",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
             "aistock_agent.services.attribution_chain.assemble_attribution_chain",
             MagicMock(return_value={"date": "2026-09-17", "root": {}, "children": []}),
         ) as mock_assemble,
@@ -269,6 +273,10 @@ async def test_sector_trace_consumer_primary_hit_carries_no_weak_mark() -> None:
         ),
         patch(
             "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_peripheral_events",
             AsyncMock(return_value=[]),
         ),
         patch(
@@ -357,6 +365,10 @@ def _fallback_stack(
         ),
         patch(
             "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_peripheral_events",
             AsyncMock(return_value=[]),
         ),
         patch(

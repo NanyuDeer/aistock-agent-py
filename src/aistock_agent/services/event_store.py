@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.stock_event_detector import detect_stock_event
+from aistock_agent.services.event_origin import derive_event_origin
+from aistock_agent.services.event_scope_resolver import resolve_event_scope
 
 logger = structlog.get_logger()
 
@@ -74,6 +75,11 @@ class EventRecord(TypedDict):
     # 物化未回填（开关关闭/失败）时置位的兜底标记：随事件库 content 持久化，
     # 供后续排查；非落库契约必需键，故 NotRequired（构造时无需提供）。
     event_entity_unfilled: NotRequired[bool]
+    # 事件地域标记（外围资讯，2026-10-15 批次）：单一真源 derive_event_origin；
+    # 读侧有键读键、无键重算（load_event_scrape）。NotRequired 对齐 event_entity_unfilled 先例。
+    event_origin: NotRequired[str]
+    event_origin_source: NotRequired[str]
+    event_origin_confidence: NotRequired[float]
 
 
 def event_content_hash(title: str, url: str) -> str:
@@ -132,6 +138,27 @@ def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
         if _title_similarity(norm, other_norm) > TITLE_SIMILARITY_THRESHOLD:
             return True
     return False
+
+
+def _is_cross_source_absorbable(ev: EventRecord, other: EventRecord) -> bool:
+    """跨源近重复吸收：仅当『至少一侧 event_origin==peripheral』且标题相似度 >0.9。
+
+    同源近重复由 _is_near_duplicate 负责（本函数对同源直接返回 False）。
+    收紧条件（至少一侧 peripheral）避免破坏「独立媒体各自保留」既有口径。
+    """
+    if other.get("source") == ev["source"]:
+        return False
+    if not (
+        ev.get("event_origin") == "peripheral" or other.get("event_origin") == "peripheral"
+    ):
+        return False
+    return (
+        _title_similarity(
+            _normalize_title(ev["title"]),
+            _normalize_title(str(other.get("title") or "")),
+        )
+        > TITLE_SIMILARITY_THRESHOLD
+    )
 
 
 def _normalize_symbol(value: str) -> str:
@@ -226,8 +253,9 @@ def normalize_event(
     stock_name = str(raw.get("stock_name", "")).strip()
     industry = str(raw.get("industry", "")).strip()
 
-    # 个股事件识别标记（STOCK/UNKNOWN 二值；结果始终存在，不依赖 LLM）
-    detection = detect_stock_event(title, summary, raw, source)
+    # event_scope 单一裁决（STOCK > MARKET > UNKNOWN）+ event_origin 同 pass 计算
+    scope, scope_source, scope_conf = resolve_event_scope(source, title, summary, raw)
+    origin, origin_source, origin_conf = derive_event_origin(source, title, summary)
 
     return EventRecord(
         event_id=event_id,
@@ -247,9 +275,12 @@ def normalize_event(
         stock_name=stock_name,
         industry=industry,
         source_name=source_name,
-        event_scope=detection["event_scope"],
-        event_scope_source=detection["event_scope_source"],
-        event_scope_confidence=detection["event_scope_confidence"],
+        event_scope=scope,
+        event_scope_source=scope_source,
+        event_scope_confidence=scope_conf,
+        event_origin=origin,
+        event_origin_source=origin_source,
+        event_origin_confidence=origin_conf,
         # 来源侧无 app-api 权威 id/status：缺省 None（由上层物化/透传链路挂接）
         app_event_id=None,
         app_event_status=None,
@@ -309,8 +340,20 @@ async def save_event_scrape(
                 continue
             # 近似去重：同数据源 + 归一化标题高相似 → 吸收进已有事件，不触发传导
             # （财联社等数据源对同一事件可能发两条几乎相同的电报，见 2026-09-30 时间轴重复）
-            if _is_near_duplicate(ev, near_pool):
+            same_source_near = _is_near_duplicate(ev, near_pool)
+            # 跨源二次去重（S6）：仅当至少一侧 peripheral 且标题高度相似（防库膨胀 + 防传导双跑）
+            cross_source_near = any(
+                _is_cross_source_absorbable(ev, other) for other in near_pool
+            )
+            if same_source_near or cross_source_near:
                 near_absorbed.append(ev)
+                if cross_source_near:
+                    logger.info(
+                        "event_cross_source_absorbed",
+                        event_id=str(ev.get("event_id", "")),
+                        title=str(ev.get("title", ""))[:50],
+                        source=str(ev.get("source", "")),
+                    )
                 continue
             seen_added.add(h)
             added_events.append(ev)
@@ -358,6 +401,48 @@ async def save_event_scrape(
             }
 
 
+def _rebuild_event_record(ev: dict[str, Any]) -> EventRecord:
+    """读时逐字段安全重建 EventRecord（含 event_origin 读时重算）。
+
+    有键读键、无键 derive_event_origin 重算（存量行可被重判，不回落空串）。
+    impact_score 畸形（非数值）抛 ValueError，由调用侧捕获跳过该条
+    （保持「单条畸形只跳过该条」既有语义）。
+    """
+    impact_score = int(ev.get("impact_score", 0) or 0)
+    origin = str(ev.get("event_origin") or "").strip() or derive_event_origin(
+        str(ev.get("source") or ""), str(ev.get("title") or ""), str(ev.get("summary") or "")
+    )[0]
+    return EventRecord(
+        event_id=str(ev.get("event_id", "")),
+        title=str(ev.get("title", "")),
+        summary=str(ev.get("summary", "")),
+        url=str(ev.get("url", "")),
+        impact_score=impact_score,
+        direction=str(ev.get("direction", "neutral")),
+        involved_keywords=[
+            str(k) for k in ev.get("involved_keywords", []) if isinstance(k, str)
+        ],
+        source=str(ev.get("source", "")),
+        source_level=str(ev.get("source_level", "C")),
+        content_hash=str(ev.get("content_hash", "")),
+        scrape_at=str(ev.get("scrape_at", "")),
+        score_date=str(ev.get("score_date", "")),
+        payload=(ev.get("payload", {}) if isinstance(ev.get("payload", {}), dict) else {}),
+        symbol=str(ev.get("symbol", "")),
+        stock_name=str(ev.get("stock_name", "")),
+        industry=str(ev.get("industry", "")),
+        event_scope=str(ev.get("event_scope", "UNKNOWN")),
+        event_scope_source=str(ev.get("event_scope_source", "unknown")),
+        event_scope_confidence=_safe_float(ev.get("event_scope_confidence"), 0.0),
+        source_name=(str(ev["source_name"]) if ev.get("source_name") else None),
+        app_event_id=(str(ev["app_event_id"]) if ev.get("app_event_id") else None),
+        app_event_status=(str(ev["app_event_status"]) if ev.get("app_event_status") else None),
+        event_origin=origin,
+        event_origin_source=str(ev.get("event_origin_source") or "recomputed"),
+        event_origin_confidence=_safe_float(ev.get("event_origin_confidence"), 0.0),
+    )
+
+
 async def load_event_scrape(score_date: str) -> list[EventRecord]:
     """按日期读取当日抓取事件列表。
 
@@ -387,63 +472,16 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
         for ev in events:
             if not isinstance(ev, dict):
                 continue
+            # 逐字段安全构造 + event_origin 读时重算（见 _rebuild_event_record）；
+            # 单条事件字段畸形（如 impact_score 非数值）只跳过该条，不炸整批。
             try:
-                impact_score = int(ev.get("impact_score", 0) or 0)
+                result.append(_rebuild_event_record(ev))
             except (TypeError, ValueError):
                 logger.warning(
                     "event_scrape_load_skip_malformed",
                     event_id=str(ev.get("event_id", ""))[:32],
                 )
                 continue
-            result.append(
-                EventRecord(
-                    event_id=str(ev.get("event_id", "")),
-                    title=str(ev.get("title", "")),
-                    summary=str(ev.get("summary", "")),
-                    url=str(ev.get("url", "")),
-                    impact_score=impact_score,
-                    direction=str(ev.get("direction", "neutral")),
-                    involved_keywords=[
-                        str(k)
-                        for k in ev.get("involved_keywords", [])
-                        if isinstance(k, str)
-                    ],
-                    source=str(ev.get("source", "")),
-                    source_level=str(ev.get("source_level", "C")),
-                    content_hash=str(ev.get("content_hash", "")),
-                    scrape_at=str(ev.get("scrape_at", "")),
-                    score_date=str(ev.get("score_date", "")),
-                    payload=(
-                        ev.get("payload", {})
-                        if isinstance(ev.get("payload", {}), dict)
-                        else {}
-                    ),
-                    # 历史数据无新字段：默认值兜底（symbol/stock_name/industry 空串，
-                    # event_scope 默认 UNKNOWN——未知不拦截，保持旧行为）
-                    symbol=str(ev.get("symbol", "")),
-                    stock_name=str(ev.get("stock_name", "")),
-                    industry=str(ev.get("industry", "")),
-                    event_scope=str(ev.get("event_scope", "UNKNOWN")),
-                    event_scope_source=str(ev.get("event_scope_source", "unknown")),
-                    event_scope_confidence=_safe_float(
-                        ev.get("event_scope_confidence"), 0.0
-                    ),
-                    # 数据源携带的来源名称（如"外盘行情"）：重放路径必须保留，
-                    # 否则「从事件库重读再传导」丢媒体名 → LLM 判不出 → 前端恒显示
-                    # 「未知来源」（2026-10-02 修复，与 app_event_id 同族）；历史
-                    # 数据无该键 → None（不臆造）
-                    source_name=(
-                        str(ev["source_name"]) if ev.get("source_name") else None
-                    ),
-                    # 重大事件时间线（spec §4.2）：存储有值保留；历史数据无该键 → None
-                    app_event_id=(
-                        str(ev["app_event_id"]) if ev.get("app_event_id") else None
-                    ),
-                    app_event_status=(
-                        str(ev["app_event_status"]) if ev.get("app_event_status") else None
-                    ),
-                )
-            )
         return result
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_load_failed", error=str(exc))
