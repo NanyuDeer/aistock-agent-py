@@ -140,6 +140,27 @@ def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
     return False
 
 
+def _is_cross_source_absorbable(ev: EventRecord, other: dict[str, Any]) -> bool:
+    """跨源近重复吸收：仅当『至少一侧 event_origin==peripheral』且标题相似度 >0.9。
+
+    同源近重复由 _is_near_duplicate 负责（本函数对同源直接返回 False）。
+    收紧条件（至少一侧 peripheral）避免破坏「独立媒体各自保留」既有口径。
+    """
+    if other.get("source") == ev["source"]:
+        return False
+    if not (
+        ev.get("event_origin") == "peripheral" or other.get("event_origin") == "peripheral"
+    ):
+        return False
+    return (
+        _title_similarity(
+            _normalize_title(ev["title"]),
+            _normalize_title(str(other.get("title") or "")),
+        )
+        > TITLE_SIMILARITY_THRESHOLD
+    )
+
+
 def _normalize_symbol(value: str) -> str:
     """归一化股票代码：剥 SH/SZ/BJ 前缀，保留 6 位数字；非法返回空串。"""
     code = value.strip().upper()
@@ -319,8 +340,20 @@ async def save_event_scrape(
                 continue
             # 近似去重：同数据源 + 归一化标题高相似 → 吸收进已有事件，不触发传导
             # （财联社等数据源对同一事件可能发两条几乎相同的电报，见 2026-09-30 时间轴重复）
-            if _is_near_duplicate(ev, near_pool):
+            same_source_near = _is_near_duplicate(ev, near_pool)
+            # 跨源二次去重（S6）：仅当至少一侧 peripheral 且标题高度相似（防库膨胀 + 防传导双跑）
+            cross_source_near = any(
+                _is_cross_source_absorbable(ev, other) for other in near_pool
+            )
+            if same_source_near or cross_source_near:
                 near_absorbed.append(ev)
+                if cross_source_near:
+                    logger.info(
+                        "event_cross_source_absorbed",
+                        event_id=str(ev.get("event_id", "")),
+                        title=str(ev.get("title", ""))[:50],
+                        source=str(ev.get("source", "")),
+                    )
                 continue
             seen_added.add(h)
             added_events.append(ev)

@@ -558,3 +558,12 @@ def test_load_event_scrape_recomputes_legacy_rows():
               "event_scope": "UNKNOWN", "event_scope_source": "unknown", "event_scope_confidence": 0.0}
     rows = es._rebuild_event_record(legacy)   # 读时重算的纯函数（见实现）
     assert rows["event_origin"] == "peripheral"
+
+
+def test_cross_source_absorb_requires_peripheral_side():
+    from aistock_agent.services.event_store import _is_cross_source_absorbable
+    a = {"source": "jin10", "event_origin": "peripheral", "title": "美联储维持利率不变"}
+    b = {"source": "cls", "event_origin": "domestic", "title": "美联储维持利率不变"}
+    assert _is_cross_source_absorbable(a, b) is True
+    c = {"source": "cls", "event_origin": "domestic", "title": "美联储维持利率不变"}
+    assert _is_cross_source_absorbable(c, b) is False   # 两侧都非 peripheral → 不吸收
