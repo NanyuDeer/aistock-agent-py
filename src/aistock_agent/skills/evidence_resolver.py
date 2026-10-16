@@ -22,6 +22,7 @@ from aistock_agent.schemas.market_trace import ReviewArtifact
 from aistock_agent.services.cache import get_cached_review
 from aistock_agent.services.trace_loader import load_validated_trace
 from aistock_agent.skills.base import skill
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -163,10 +164,12 @@ async def evidence_resolver(args: dict[str, Any], goal: InsightGoal) -> Evidence
     """evidence_resolver Skill — 只读市场 ReviewArtifact 证据。
 
     args:
-        "date": 报告日期 YYYY-MM-DD（默认当前 UTC 日期）。
+        "date": 报告日期 YYYY-MM-DD（默认当前上海自然日）。
 
     Returns:
         包含证据事实的 Evidence；无可验证工件时 degraded。
     """
-    date_str = args.get("date") or datetime.now(UTC).strftime("%Y-%m-%d")
+    # 默认报告日期取**上海自然日**（勿用 datetime.now(UTC)：UTC 日在京时 00:00–08:00
+    # 期间会落到前一天）。now 仍用 UTC 绝对时刻，供 as_of 使用。
+    date_str = args.get("date") or shanghai_today().isoformat()
     return await resolve_trace_evidence(date_str, skill_name="evidence_resolver")

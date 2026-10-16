@@ -1,4 +1,3 @@
-import pytest
 
 from aistock_agent.services.event_scoring import apply_rule_score
 

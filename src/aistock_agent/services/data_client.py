@@ -306,7 +306,9 @@ class NodeApiClient:
             if body is None:
                 resp = await client.delete(url, headers=headers)
             else:
-                resp = await client.delete(url, json=body, headers=headers)
+                # httpx 的 delete() 无 json= 参数（传则 TypeError）；接收端 app-api
+                # DELETE /internal/calendar/events 读 req.body → 用 request() 承载 JSON body。
+                resp = await client.request("DELETE", url, json=body, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
 
@@ -483,13 +485,15 @@ class NodeApiClient:
 
         供候选 rejected 清场 / 种子删除；返回 False 表示不存在或删除失败（幂等）。
         """
+        # 注意：self.delete() 已解包信封、只返回 data（即 {deleted: ...}），
+        # 故此处**不能**再取一层 "data"——曾因多取一层导致恒返回 False，
+        # 使 forward_events 的「候选 rejected 清场」计数恒为 0。
         result = await self.delete(
             "/internal/calendar/events", {"event_date": event_date, "title": title}
         )
         if not isinstance(result, dict):
             return False
-        data = result.get("data")
-        return bool(data.get("deleted")) if isinstance(data, dict) else False
+        return bool(result.get("deleted"))
 
     async def post_event_entity(self, body: dict[str, object]) -> dict[str, object] | None:
         """POST /internal/event-entities（Event Entity 物化，spec §10.2）。
@@ -508,7 +512,7 @@ class NodeApiClient:
         path = "/internal/event-entities" + (f"?{query}" if query else "")
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("items"), list):
-            return result["items"]
+            return cast(list[dict[str, object]], result["items"])
         return None
 
     async def get_rhythm_report(
@@ -675,7 +679,7 @@ class NodeApiClient:
             path += f"&end_date={end_date}"
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     async def get_stock_kline(
@@ -693,7 +697,7 @@ class NodeApiClient:
             path += f"&end_date={end_date}"
         result = await self.get(path)
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     # ── 阶段 2：自选股洞察轻量预判（2026-09-03）──
@@ -710,7 +714,7 @@ class NodeApiClient:
         """板块名→885 全表（GET /internal/ths/index-map）。失败/异常返回 None。"""
         result = await self.get("/internal/ths/index-map")
         if isinstance(result, dict) and isinstance(result.get("ts_codes"), list):
-            return result["ts_codes"]
+            return cast(list[dict[str, object]], result["ts_codes"])
         return None
 
     async def resolve_ths_name(self, name: str) -> dict[str, object] | None:
@@ -718,7 +722,7 @@ class NodeApiClient:
         from urllib.parse import quote
         result = await self.get(f"/internal/ths/resolve?name={quote(name)}")
         if isinstance(result, dict):
-            return result.get("matched") or None
+            return cast(dict[str, object] | None, result.get("matched") or None)
         return None
 
     async def get_ths_daily_range(
@@ -735,7 +739,7 @@ class NodeApiClient:
             f"?start={start.replace('-', '')}&end={end.replace('-', '')}"
         )
         if isinstance(result, dict) and isinstance(result.get("rows"), list):
-            return result["rows"]
+            return cast(list[dict[str, object]], result["rows"])
         return None
 
     async def get_attribution_chain(self, date: str) -> dict[str, object] | None:

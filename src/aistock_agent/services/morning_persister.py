@@ -7,7 +7,6 @@
 若为 LLM 解析失败的降级文本则跳过持久化，避免污染数据库导致 brief_morning 聚合异常。
 """
 
-from datetime import datetime
 
 import structlog
 

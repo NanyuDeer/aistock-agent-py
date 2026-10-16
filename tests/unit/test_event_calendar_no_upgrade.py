@@ -7,15 +7,14 @@ from aistock_agent.services.event_calendar import load_event_window
 
 @pytest.mark.asyncio
 async def test_l3_medium_not_upgraded(monkeypatch):
-    async def fake_get(d_from, d_to):
+    async def fake_get(_self, d_from, d_to):
         return [
             {"date": "2026-10-01", "title": "美联储 10 月议息会议", "importance": "medium",
              "type": "macro", "source": "L3"},
         ]
 
-    monkeypatch.setattr(
-        "aistock_agent.services.event_calendar.node_api.get_calendar_events", fake_get
-    )
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(m.node_api), "get_calendar_events", fake_get)
     win = await load_event_window("2026-09-20", horizon_days=4)
     assert win.high_events == []
     assert win.events[0]["importance"] == "medium"  # 不再升 high

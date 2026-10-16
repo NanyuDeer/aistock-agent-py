@@ -125,10 +125,10 @@ def test_trace_loader_exits_naturally_with_cacheprovider(tmp_path: Path) -> None
     except subprocess.TimeoutExpired:
         pytest.fail(
             textwrap.dedent(
-                """
-                pytest with cacheprovider 挂起（>{seconds}s 未退出）。
+                f"""
+                pytest with cacheprovider 挂起（>{_TIMEOUT_SECONDS}s 未退出）。
                 请收集 faulthandler 输出与线程 dump 进一步定位。
-                """.format(seconds=_TIMEOUT_SECONDS)
+                """
             ).strip()
         )
 

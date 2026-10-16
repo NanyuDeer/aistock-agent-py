@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.skills.base import skill
@@ -79,8 +79,8 @@ async def compare_stocks(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         if p.get("available") is True and isinstance(p.get("change_pct"), int | float)
     ]
     if len(success) >= 2:
-        best = max(success, key=lambda p: float(p["change_pct"]))
-        worst = min(success, key=lambda p: float(p["change_pct"]))
+        best = max(success, key=lambda p: float(cast(int | float, p["change_pct"])))
+        worst = min(success, key=lambda p: float(cast(int | float, p["change_pct"])))
         facts.append(
             f"对比结论：{best['name']} 涨幅最高（{best['change_pct']:+.2f}%），"
             f"{worst['name']} 涨幅最低（{worst['change_pct']:+.2f}%）"

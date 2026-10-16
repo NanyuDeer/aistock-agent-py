@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -66,7 +67,10 @@ async def scan_major_events(days: int) -> list[dict[str, object]]:
     T = 聚类窗口末条电报时间；telegraph_records 为聚类窗口内所有电报
     （含未命中关键词的后续报道，供 agent 获取完整事件语料）。
     """
-    today = datetime.now(UTC).date()
+    # 扫描锚点用**上海自然日**，与姊妹源 iterate/case_sourcers.py 的 shanghai_today()
+    # 保持同一口径（原用 datetime.now(UTC).date()：定时任务 16:30 跑时两者同日无差异，
+    # 但手动/其它时段运行会整体漂一天）。
+    today = shanghai_today()
     candidates: list[dict[str, object]] = []
     for offset in range(days):
         day = (today - timedelta(days=offset)).isoformat()

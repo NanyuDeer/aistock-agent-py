@@ -7,7 +7,6 @@ import pytest
 from aistock_agent.tools.base import DEGRADED_MESSAGE
 from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
 
-
 # ── get_hot_burst ────────────────────────────────────────────────
 
 

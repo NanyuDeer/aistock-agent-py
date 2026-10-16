@@ -39,9 +39,9 @@ def _rising(points: list[float]) -> bool:
 
 def detect_trend_reversal(
     closes: list[float],
-    opens: list[float],
-    highs: list[float],
-    lows: list[float],
+    opens: list[float | None],
+    highs: list[float | None],
+    lows: list[float | None],
     amounts: list[float],
 ) -> dict[str, object]:
     """趋势反转确定性判定（spec §5.4.2 / 需求②）。
@@ -49,6 +49,10 @@ def detect_trend_reversal(
     前置事件 = 最近一根「放量阴线」（close < open 且 amount > 前 20 根均量 × VOL_UP_RATIO）；
     确认条件 = 观察起点之后已完成 bar ≥ SWING_CONFIRM_BARS，且最近两个 swing low / swing high
     各自依次抬高 → confirmed=True。open 缺失的行剔除不参与（H5 fail-safe）。
+
+    opens/highs/lows 形参声明为 list[float | None]（真实契约，且与调用处同形）：
+    本函数按 `o is not None and c is not None` 过滤行，highs/lows 仅参与 zip 以保持
+    列对齐、不参与计算——故承载缺失值安全，切勿在调用处过滤（会破坏 zip 对齐）。
     """
     rows = [
         (c, o, h, low_v, a)

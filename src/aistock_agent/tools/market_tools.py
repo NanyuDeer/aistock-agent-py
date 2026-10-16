@@ -13,6 +13,7 @@ Redis 缓存，与网页前端市场概览同源）。该接口支持：
 """
 
 from datetime import UTC, datetime
+from typing import cast
 
 from langchain_core.tools import tool
 
@@ -90,7 +91,7 @@ async def get_global_markets() -> str:
             change_pct = fact.get("change_pct")
             if price is not None:
                 change_str = f" ({change_pct:+.2f}%)" if change_pct is not None else ""
-                results.append(f"{display_name}: {float(price):.2f}{change_str}")
+                results.append(f"{display_name}: {float(cast(float, price)):.2f}{change_str}")
             else:
                 results.append(f"{display_name}: 数据暂不可用")
 

@@ -22,6 +22,7 @@ from typing import Literal, cast
 import chinese_calendar  # type: ignore[import-untyped]  # 覆盖 2004-2026，与 utils/date.py 同源
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
 from aistock_agent.config import settings
 from aistock_agent.prompts.workers.prediction import (
@@ -486,8 +487,10 @@ def _corroboration_inputs(
 # ============================================================================
 
 
-def _build_prediction_llm(*, deep: bool = False) -> object:
+def _build_prediction_llm(*, deep: bool = False) -> ChatOpenAI:
     """构建预测结构化输出 LLM（大盘溯源内联/个股/板块 chat 全链路统一）。
+
+    返回类型即 llm.py 的 get_deep_think / get_quick_think 真实返回（ChatOpenAI）。
 
     2026-09-03：deepseek thinking 的 reasoning 会占满默认 max_tokens 使
     PredictionResult JSON 被截断（9-3 板块批量 7/13 因此失败）→ 显式禁用

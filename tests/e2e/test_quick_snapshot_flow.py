@@ -1,12 +1,13 @@
 """E2E 测试：通过 HTTP 端点验证 quick snapshot 触发流程。"""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from aistock_agent.api.routes import router
 from aistock_agent.config import settings
-from fastapi import FastAPI
 
 AUTH_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from aistock_agent.schemas.rhythm_master import RhythmEvidence, RhythmSynthesis
+from aistock_agent.schemas.rhythm_master import MainlineRef, RhythmEvidence, RhythmSynthesis
 
 _VALID_CONFIDENCE = {"high", "medium", "low"}
 _VALID_DIRECTION = {"bullish", "bearish", "neutral"}
@@ -18,7 +18,7 @@ def _grounded(mainline_source: str, mainline_date: str) -> bool:
 
 
 def _keep_mainline(
-    m, candidate_names: set[str] | None, evidence_date: str | None
+    m: MainlineRef, candidate_names: set[str] | None, evidence_date: str | None
 ) -> bool:
     """单条 mainline 校验：基础规则 + 主线候选集/证据日约束（spec §7 / H2）。"""
     if m.confidence not in _VALID_CONFIDENCE:

@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -30,6 +30,10 @@ from aistock_agent.utils.brief_contract import (
     build_market_snapshot_brief_summary,
 )
 from aistock_agent.utils.date import is_trading_day, shanghai_today
+
+if TYPE_CHECKING:
+    # EventBus 运行时在 _get_event_bus 内懒加载，此处仅为返回注解提供类型名
+    from aistock_agent.services.event_bus import EventBus
 
 logger = structlog.get_logger()
 
@@ -148,6 +152,21 @@ def start_scheduler() -> None:
         kwargs={"scrape_mode": "full_daily"},
         id="event_scrape_close",
         name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息，
+    # 交易日 Job 的 cron 0-4 + is_trading_day 双重守卫会让非交易日事件断档。
+    # 本 Job 每日 08:30/12:00/18:00/22:00 触发，由 _run_non_trading_event_scrape_job
+    # 内反向守卫（非交易日才执行）拦截，与现有交易日 Job 互不重叠、互不干扰。
+    scheduler.add_job(
+        _run_non_trading_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_non_trading_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="event_scrape_non_trading",
+        name="event scrape non trading day",
         replace_existing=True,
         misfire_grace_time=3600,
     )
@@ -509,7 +528,7 @@ async def _run_sentiment_temp_task() -> None:
                 "sentiment_temp_done",
                 date=payload.get("date"),
                 score=payload.get("score"),
-                is_ice=payload.get("ice", {}).get("is_ice"),
+                is_ice=cast(dict[str, object], payload.get("ice", {})).get("is_ice"),
             )
     except Exception:  # noqa: BLE001
         logger.warning("sentiment_temp_task_failed", exc_info=True)
@@ -572,7 +591,7 @@ async def _run_calendar_seed_import() -> None:
     try:
         result = await run_calendar_import()
         logger.info("calendar_seed_import_done", **result)
-        if result.get("seed", {}).get("imported", 0) == 0:
+        if cast(dict[str, object], result.get("seed", {})).get("imported", 0) == 0:
             logger.warning("calendar_seed_import_empty", date=shanghai_today().isoformat())
     except Exception as exc:  # noqa: BLE001
         logger.error("calendar_seed_import_failed", error=str(exc), exc_info=True)
@@ -634,12 +653,14 @@ async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
     async with _midday_llm_semaphore:
         try:
             result = await midday_agent.run(state)
+            # 绑定局部变量再收窄：isinstance 收窄无法跨表达式传播到重复取值
+            analysis_reports = result.get("analysis_reports")
             generated = bool(
-                result.get("analysis_reports", {}).get("midday_generated")
-            ) if isinstance(result.get("analysis_reports"), dict) else False
+                analysis_reports.get("midday_generated")
+            ) if isinstance(analysis_reports, dict) else False
             persisted = bool(
-                result.get("analysis_reports", {}).get("midday_persisted")
-            ) if isinstance(result.get("analysis_reports"), dict) else False
+                analysis_reports.get("midday_persisted")
+            ) if isinstance(analysis_reports, dict) else False
             logger.info(
                 "scheduler_midday_done",
                 report_date=report_date,
@@ -740,6 +761,33 @@ async def _run_event_scrape_job(scrape_mode: str) -> None:
         logger.info("event_scrape_job_done", **result)
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
+
+
+async def _run_non_trading_event_scrape_job() -> None:
+    """定时执行非交易日事件抓取（反向守卫 + fire-and-forget）。
+
+    与 _run_event_scrape_job 相反：交易日直接 return，非交易日才执行。
+    复用现有 run_event_scrape(mode="intraday")，不复制任何抓取逻辑；
+    非交易日禁用跨日 latest 降级（allow_latest_fallback=False），
+    避免上一交易日消息被重新作为非交易日事件入库。
+    """
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if is_trading_day(report_day):
+            # 交易日由 event_scrape_daily/intraday/close 负责，本 Job 不介入
+            logger.info("non_trading_event_scrape_skipped_trading_day", date=today)
+            return
+        result = await run_event_scrape(
+            "intraday",
+            score_date=today,
+            allow_latest_fallback=False,
+        )
+        logger.info("non_trading_event_scrape_job_done", **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("non_trading_event_scrape_job_failed", error=str(exc))
 
 
 def _make_scheduled_state(
@@ -1026,7 +1074,7 @@ async def _publish_review_full_event() -> None:
         logger.error("scheduler_review_full_publish_failed", error=str(exc), exc_info=True)
 
 
-async def _get_event_bus():
+async def _get_event_bus() -> "EventBus | None":
     """获取全局 EventBus 实例（由 main.py lifespan 初始化）。"""
     from aistock_agent.services.event_bus import EventBus
     from aistock_agent.services.redis_pool import RedisPool
@@ -1053,10 +1101,12 @@ async def _run_review_task() -> None:
     logger.info("scheduler_review_start")
     from aistock_agent.agents.workers import review as review_agent
 
-    today = date.today().isoformat()
+    # 上海自然日（对齐 `_run_morning_task`；date.today() 用容器本地时区，
+    # UTC 部署下会与交易日判定/落库日错位）
+    today = shanghai_today().isoformat()
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_review_{date.today().isoformat()}",
+        "session_id": f"scheduled_review_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": "review",
@@ -1111,7 +1161,7 @@ async def _run_iterate_task() -> None:
 
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_iterate_{date.today().isoformat()}",
+        "session_id": f"scheduled_iterate_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": None,

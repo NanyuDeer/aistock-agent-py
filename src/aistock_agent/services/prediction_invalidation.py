@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -106,7 +106,7 @@ async def scan_active_pending() -> list[str]:
         kline = await node_api.get_index_kline(code, days=130)
         if not kline:
             continue  # 数据源故障：跳过该记录，不抛异常，下轮再扫
-        closes = [float(r["close"]) for r in kline if r.get("close") is not None]
+        closes = [float(cast(float, r["close"])) for r in kline if r.get("close") is not None]
         if len(closes) < 21:
             continue
         ma20 = _ma(closes, 20)
@@ -135,7 +135,7 @@ async def scan_active_pending() -> list[str]:
                 triggered.append(str(rec["id"]))
             try:
                 await node_api.update_prediction_verification(
-                    rec["id"], horizon, {"type": "early_exit", "early_exit": early_exit}
+                    cast(int, rec["id"]), horizon, {"type": "early_exit", "early_exit": early_exit}
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

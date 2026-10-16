@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Literal
 
 import structlog
 from pydantic import BaseModel

@@ -14,7 +14,6 @@ import pytest
 
 from aistock_agent.constants import SSEEventType
 
-
 # ── 辅助：构造 mock 事件 ──
 
 

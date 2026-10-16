@@ -77,20 +77,21 @@ async def test_compose_card_routes_timeline_events_into_card_output(
         ]
     )
     monkeypatch.setattr(rm, "load_event_timeline", fake_timeline)
-    monkeypatch.setattr(rm.node_api, "get_calendar_events", calendar_spy)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(rm.node_api), "get_calendar_events", calendar_spy)
     monkeypatch.setattr(
-        rm.node_api, "get_index_kline", AsyncMock(return_value=_kline_rows())
+        type(rm.node_api), "get_index_kline", AsyncMock(return_value=_kline_rows())
     )
     monkeypatch.setattr(
-        rm.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})
+        type(rm.node_api), "get_fear_greed", AsyncMock(return_value={"index": 40})
     )
     monkeypatch.setattr(
-        rm.node_api,
+        type(rm.node_api),
         "get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 60}}),
     )
     monkeypatch.setattr(
-        rm.node_api, "get_rhythm_report", AsyncMock(return_value=None)
+        type(rm.node_api), "get_rhythm_report", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(rm, "load_mainline_candidates", lambda: (False, []))
     monkeypatch.setattr(rm, "run_synthesis", AsyncMock(return_value=None))

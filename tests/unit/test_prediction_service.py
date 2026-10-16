@@ -884,12 +884,13 @@ async def test_run_chat_prediction_restores_due_dates_and_persists(monkeypatch):
     )
     saved: dict[str, object] = {}
 
-    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+    async def _fake_save(_self, payload: dict[str, object]) -> dict[str, object]:
         saved.update(payload)
         return {"id": 1, **payload}
 
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
     monkeypatch.setattr(
-        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
+        "aistock_agent.services.data_client.NodeApiClient.save_prediction", _fake_save
     )
     llm, structured_ainvoke = _make_chat_llm(prediction=_chat_prediction(_VALID_LLM_JSON))
     with patch(
@@ -918,12 +919,12 @@ async def test_run_chat_prediction_stock_target_routed_to_pending(monkeypatch):
     )
     saved: dict[str, object] = {}
 
-    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+    async def _fake_save(_self, payload: dict[str, object]) -> dict[str, object]:
         saved.update(payload)
         return {"id": 1, **payload}
 
     monkeypatch.setattr(
-        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
+        "aistock_agent.services.data_client.NodeApiClient.save_prediction", _fake_save
     )
     llm, structured_ainvoke = _make_chat_llm(
         prediction=PredictionResult(
@@ -991,9 +992,9 @@ def test_apply_cap_long_never_capped():
 
 
 def _entry(result, baseline=None):
-    # 对齐验证器真实回写结构：methodology_version=2.0 是 hit_rate_summary /
+    # 对齐验证器真实回写结构：methodology_version=4.0 是 hit_rate_summary /
     # baseline_neutral_summary 的过滤前提（缺失会被整体过滤为 n=0，fixture 偏差已修正）
-    e = {"methodology_version": "2.0", "result": result}
+    e = {"methodology_version": "4.0", "result": result}
     if baseline is not None:
         e["baseline_neutral"] = baseline
     return e

@@ -849,7 +849,7 @@ def transform_to_frontend(
             for c in chain
             if isinstance(c, dict)
         ]
-        chain_items.sort(key=lambda item: item["impactStrength"], reverse=True)
+        chain_items.sort(key=lambda item: cast(float, item["impactStrength"]), reverse=True)
         chain_names = _build_chain_industry_set(chain_items)
 
         reports["event_transmission"] = {

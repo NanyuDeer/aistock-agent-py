@@ -301,8 +301,8 @@ def _range_below(value: float, delta: float) -> str:
 def build_technical_branches(
     *,
     closes: list[float],
-    highs: list[float],
-    lows: list[float],
+    highs: list[float | None],
+    lows: list[float | None],
     amounts: list[float],
     dense_support: float | None = None,
     dense_pressure: float | None = None,
@@ -315,6 +315,9 @@ def build_technical_branches(
     - amount 缺失 → 退化为指数点位三档（站上压力/跌破支撑/区间内）。
     - high/low 空值兜底（2026-09-05 裁决）：剔除空值行，整体仍不可得则
       返回空 branches 并在 data_missing 留痕，绝不伪造支撑/压力点位。
+
+    highs/lows 形参声明为 list[float | None]（真实契约）：K 线原始行的 high/low
+    可能缺失，本函数内部按行过滤 None（下方 recent_highs/recent_lows），故可安全承载。
     """
     if len(closes) < 20:
         return []

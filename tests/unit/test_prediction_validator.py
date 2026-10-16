@@ -49,6 +49,18 @@ def test_index_code_map_contains_common_indexes():
     assert _INDEX_CODE_MAP["沪深300"] == "000300"
 
 
+def test_actual_uses_compound_not_simple_sum():
+    """窗口累计涨跌幅统一为复利口径 x=∏(1+p/100)−1（与 k_band 标定脚本一致）。
+
+    简单求和会把"两日各 +1%"算成 +2.00%，复利应为 +2.01%；"-1% 后 +1%"算成 0.00%，
+    复利应为 -0.01%。此为全项目唯一口径，禁止再用 sum(window) 算 actual。
+    """
+    from aistock_agent.services.prediction_validator import _compound_pct
+
+    assert _compound_pct([1.0, 1.0]) == pytest.approx(2.01, abs=1e-6)
+    assert _compound_pct([-1.0, 1.0]) == pytest.approx(-0.01, abs=1e-6)
+
+
 @pytest.mark.asyncio
 async def test_run_once_verifies_due_horizon():
     record = _pending_record(due="2026-08-10")
@@ -81,8 +93,8 @@ async def test_run_once_verifies_due_horizon():
         updated = await run_once()
     assert updated == 1
     entry = update.await_args.args[2]
-    assert entry["result"] == "hit"
-    assert entry["grade"] == "strong_hit"  # due 当日命中
+    assert entry["result"] == "hit"  # 窗口复利 +1.40% >= index k(0.9201)
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
     assert entry["actual"] == "+1.40%"
 
 
@@ -150,8 +162,8 @@ async def test_run_once_skips_not_due_and_unknown_target():
 
 
 @pytest.mark.asyncio
-async def test_v3_verify_bullish_window_hit_with_grade():
-    """3.0：bullish 档窗口累计 sum>0 → hit；due 当日未命中、窗口无 >=5% → 普通 hit。"""
+async def test_v4_verify_bullish_window_hit_without_grade():
+    """4.0（现役）：bullish 档窗口复利累计 >= index k(0.9201) → hit；单带宽判定不产 grade。"""
     record = _pending_record(due="2026-08-10", direction="bullish")
     kline_rows = [
         {"trade_date": "2026-08-10", "pct_chg": -0.5},  # due 当日（未命中）
@@ -160,17 +172,29 @@ async def test_v3_verify_bullish_window_hit_with_grade():
         {"trade_date": "2026-08-13", "pct_chg": -0.1},
     ]  # sum=1.4 > 0
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
         updated = await run_once()
     assert updated == 1
     entry = update.await_args.args[2]
-    assert entry["result"] == "hit"
-    assert entry["grade"] == "hit"        # 非 due 当日命中、窗口无 >=5% → 普通 hit
-    assert entry["methodology_version"] == "3.0"
+    assert entry["result"] == "hit"  # 窗口复利 +1.39% >= index k(0.9201)
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
+    assert entry["methodology_version"] == "4.0"
     assert "baseline_neutral" in entry
 
 
@@ -185,10 +209,22 @@ async def test_v2_bullish_no_sign_hit_is_miss_without_fallback():
         {"trade_date": "2026-08-13", "pct_chg": -0.3},
     ]
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
         updated = await run_once()
     assert updated == 1
@@ -273,7 +309,7 @@ async def test_run_once_h7_missing_pct_chg_rows_insufficient():
 @pytest.mark.asyncio
 async def test_fetch_kline_window_malformed_due_returns_none():
     """脏 due_date（非 %Y-%m-%d）→ 窗口无法确定 → 返回 None（数据源故障语义），不抛异常。"""
-    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])) as m:
+    with patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=[])):
         out = await pv._fetch_kline_window("index", "000001", "not-a-date")
     assert out is None
 
@@ -347,29 +383,6 @@ async def test_run_once_verifies_stock_horizon():
     assert entry["result"] == "hit"
     assert entry["target_type"] == "stock"
     assert entry["actual"] == "+1.40%"
-
-
-@pytest.mark.asyncio
-async def test_verify_conditions_skips_future_due_d6():
-    """D6（2026-09-03）回归：condition 到期日仍在未来 → 不产 entry（未到验证窗口）。
-    此前对未来 due（如 09-09）落 insufficient no_data，违反窗口语义。"""
-    record = {
-        "id": 1,
-        "prediction": {
-            "horizons": [{"horizon": "short", "target": "上证指数", "direction": "bullish"}],
-            "conditions": [{
-                "condition": "若未来 1 周累计上涨超 1%",
-                "scenario": "后续 1-4 周上行",
-                "anchor": {"horizon": "short", "direction": "bullish", "threshold": "+1%"},
-            }],
-        },
-        "due_dates": {"short": "2026-09-09"},
-        "verification": {},
-    }
-    with patch("aistock_agent.services.prediction_validator.shanghai_today",
-               return_value=date(2026, 9, 3)):
-        out = await pv._verify_conditions(record)
-    assert out == {}
 
 
 @pytest.mark.asyncio
@@ -473,8 +486,8 @@ async def test_verify_horizon_yyyymmdd_trade_date_matches_due():
         ),
     ):
         entry = await pv._verify_horizon(record, "mid")
-    assert entry["result"] == "hit"  # 不再 no_data
-    assert entry["grade"] == "strong_hit"
+    assert entry["result"] == "hit"  # 不再 no_data（复利 +1.40% >= index k）
+    assert "grade" not in entry      # v4 单带宽判定不再产出 grade
     assert entry["actual"] == "+1.40%"
 
 
@@ -483,7 +496,7 @@ async def test_verify_horizon_sector_yyyymmdd_matches_due():
     """回归（sector 分支）：ths daily 同样 YYYYMMDD → 归一化后到期日匹配成功。"""
     record = _pending_sector_record(due="2026-08-10", direction="bullish")
     kline_rows = [
-        {"trade_date": "20260810", "pct_chg": 1.0},
+        {"trade_date": "20260810", "pct_chg": 1.5},  # v4 sector k=1.2935：4 日复利 +1.50% ≥ k
         {"trade_date": "20260811", "pct_chg": 0.3},
         {"trade_date": "20260812", "pct_chg": -0.2},
         {"trade_date": "20260813", "pct_chg": -0.1},
@@ -519,8 +532,8 @@ async def test_fetch_kline_window_sector_calls_ths_range():
 
 
 @pytest.mark.asyncio
-async def test_v3_neutral_grade_is_null():
-    """G14：neutral 档不输出 grade（strong_hit 语义与 neutral 方向反转）。"""
+async def test_v4_neutral_grade_is_null():
+    """4.0（现役）：neutral 档复利累计落在带宽内（-k < x < k）→ hit；v4 恒不输出 grade。"""
     record = _pending_record(due="2026-08-10", direction="neutral")
     kline_rows = [
         {"trade_date": "2026-08-10", "pct_chg": 0.2},   # mean(|p|)=0.3 < 0.5 → hit
@@ -529,15 +542,27 @@ async def test_v3_neutral_grade_is_null():
         {"trade_date": "2026-08-13", "pct_chg": 0.3},
     ]
     with (
-        patch.object(prediction_validator.node_api, "list_pending_predictions", new=AsyncMock(return_value=[record])),
-        patch.object(prediction_validator.node_api, "get_index_kline", new=AsyncMock(return_value=kline_rows)),
-        patch.object(prediction_validator.node_api, "update_prediction_verification", new=AsyncMock(return_value={"id": 1})) as update,
-        patch("aistock_agent.services.prediction_validator.shanghai_today", return_value=date(2026, 8, 13)),
+        patch.object(
+            prediction_validator.node_api, "list_pending_predictions",
+            new=AsyncMock(return_value=[record]),
+        ),
+        patch.object(
+            prediction_validator.node_api, "get_index_kline",
+            new=AsyncMock(return_value=kline_rows),
+        ),
+        patch.object(
+            prediction_validator.node_api, "update_prediction_verification",
+            new=AsyncMock(return_value={"id": 1}),
+        ) as update,
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
     ):
-        updated = await run_once()
+        await run_once()
     entry = update.await_args.args[2]
     assert entry["result"] == "hit"
-    assert entry["methodology_version"] == "3.0"
+    assert entry["methodology_version"] == "4.0"
     assert "grade" not in entry
 
 
@@ -576,9 +601,11 @@ def _verified_no_data_record(
 @pytest.mark.asyncio
 async def test_verify_sector_target_resolves_and_hit():
     """H3/H8：板块 target resolve 命中 → 走 sector kline，entry 带 target_type/
-    matched_ts_code/matched_name/threshold_version/prediction_id。"""
+    matched_ts_code/matched_name/threshold_version/prediction_id。
+    v4：sector 阈值来源为 k 表 → threshold_version 记 k 表版本 "4.0"
+    （非 legacy G0c "1.0"）。"""
     record = _pending_sector_record(direction="bullish")
-    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.0},  # >0 hit
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.5},  # 复利 +1.50% ≥ sector k → hit
              {"trade_date": "2026-08-11", "pct_chg": 0.3},
              {"trade_date": "2026-08-12", "pct_chg": -0.2},
              {"trade_date": "2026-08-13", "pct_chg": -0.1}]
@@ -608,7 +635,7 @@ async def test_verify_sector_target_resolves_and_hit():
     assert entry["target_type"] == "sector"
     assert entry["matched_ts_code"] == "881121.TI"
     assert entry["matched_name"] == "半导体"
-    assert entry["threshold_version"] == "1.0"
+    assert entry["threshold_version"] == "4.0"  # v4：sector 阈值来源 = k 表（4.0）
     assert "prediction_id" in entry
 
 
@@ -639,13 +666,15 @@ async def test_verify_sector_target_unresolved_is_no_source():
 
 
 @pytest.mark.asyncio
-async def test_sector_neutral_uses_sector_threshold():
-    """H3：板块 neutral 阈值 0.25%（index 0.5% 复用会使命中率显著偏低——G0c 实证）。"""
+async def test_sector_neutral_uses_sector_k_band():
+    """v4：neutral 命中带按粒度取 k——x 落在 index k(0.9201) 与 sector k(1.2935) 之间时，
+    板块记 neutral hit（误用 index 带宽会判 miss），锁死 k_for 的 sector 分派。"""
     record = _pending_sector_record(direction="neutral")
-    kline = [{"trade_date": "2026-08-10", "pct_chg": 0.3},  # |0.3|>0.25 → 非 neutral hit
-             {"trade_date": "2026-08-11", "pct_chg": 0.4},
-             {"trade_date": "2026-08-12", "pct_chg": -0.4},
-             {"trade_date": "2026-08-13", "pct_chg": 0.35}]
+    # 4 日复利 x = +1.10%：|x| < sector k(1.2935) → hit；|x| > index k(0.9201)
+    kline = [{"trade_date": "2026-08-10", "pct_chg": 1.1},
+             {"trade_date": "2026-08-11", "pct_chg": 0.0},
+             {"trade_date": "2026-08-12", "pct_chg": 0.0},
+             {"trade_date": "2026-08-13", "pct_chg": 0.0}]
     with (
         patch.object(
             pv.node_api, "resolve_ths_name",
@@ -667,7 +696,7 @@ async def test_sector_neutral_uses_sector_threshold():
     ):
         await pv.run_once()
     entry = update.await_args.args[2]
-    assert entry["result"] == "miss"  # 板块阈值下无 |pct|<0.25 日（index 0.5 阈值下为 hit）
+    assert entry["result"] == "hit"  # sector k=1.2935 内（index 带宽下会 miss）
 
 
 @pytest.mark.asyncio
@@ -818,7 +847,7 @@ def test_result_entry_skips():
     assert _should_skip_horizon(entry) is True
 
 
-# ============ 阶段 0：3.0 窗口累计主判 ============
+# ============ legacy 3.0 窗口累计主判（存量重验口径，非现役主链） ============
 
 def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=None):
     """直接调 _verify_horizon（不经 run_once），mock kline + 今日。"""
@@ -834,9 +863,29 @@ def _verify_direct(record, horizon="mid", methodology_version="3.0", kline_rows=
                 return_value=date(2026, 8, 13),
             ),
         ):
-            return await pv._verify_horizon(record, horizon, methodology_version=methodology_version)
+            return await pv._verify_horizon(
+                record, horizon, methodology_version=methodology_version,
+            )
 
     return _run()
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_actual_is_compound():
+    """集成点：_verify_horizon 落库/展示的 actual 走复利（Task 3）。
+
+    窗口 4×+1% → 复利 +4.06%；若仍用 sum(window) 会得到 +4.00%（断言锁死差异）。
+    """
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 1.0},
+        {"trade_date": "2026-08-11", "pct_chg": 1.0},
+        {"trade_date": "2026-08-12", "pct_chg": 1.0},
+        {"trade_date": "2026-08-13", "pct_chg": 1.0},
+    ]
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["actual"] == "+4.06%"
+    assert "窗口累计=+4.06%" in entry["reason"]
 
 
 @pytest.mark.asyncio
@@ -939,7 +988,8 @@ async def test_v3_vs_v2_baseline_neutral_differs():
 
 @pytest.mark.asyncio
 async def test_backfill_no_data_rewrites_keep_v2_version():
-    """阶段 0：backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'（不混版本）。"""
+    """backfill 重验存量 2.0/no_data 记录——用 2.0 口径、写回 methodology_version='2.0'
+    （不混版本）。"""
     record = _verified_no_data_record()
     kline = [
         {"trade_date": "2026-08-10", "pct_chg": 1.0},   # 单日 +1.0%（2.0 any>0 → hit）
@@ -992,11 +1042,11 @@ async def test_write_validation_profiles_groups_by_target():
     # stock target（600519）与 index target（000001 -> 000001.SH code）
     records = [
         _verified_rec("600519", [
-            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
-            {"result": "miss", "methodology_version": "3.0", "target_type": "stock"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "stock"},
+            {"result": "miss", "methodology_version": "4.0", "target_type": "stock"},
         ]),
         _verified_rec("上证指数", [
-            {"result": "hit", "methodology_version": "3.0", "target_type": "index"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "index"},
         ]),
     ]
     written: dict[str, object] = {}
@@ -1023,7 +1073,7 @@ async def test_write_validation_profiles_skips_early_exit_no_result():
     records = [
         _verified_rec("600519", [
             {"meaning": "early_exit", "horizon": "mid"},  # 无 result → 不计入
-            {"result": "hit", "methodology_version": "3.0", "target_type": "stock"},
+            {"result": "hit", "methodology_version": "4.0", "target_type": "stock"},
         ]),
         {"id": 9, "prediction": {"horizons": []}, "verification": {"h": {"result": "miss"}}},
     ]
@@ -1057,11 +1107,11 @@ async def test_write_validation_profiles_scans_pending_records_d3():
             {"horizon": "mid", "target": "600519", "direction": "bullish"},
         ]},
         # short 已写 hit；mid 未到期无 result → 不计入
-        "verification": {"short": {"result": "hit", "methodology_version": "3.0",
+        "verification": {"short": {"result": "hit", "methodology_version": "4.0",
                                    "target_type": "stock"}},
     }
     verified_rec = _verified_rec("上证指数", [
-        {"result": "miss", "methodology_version": "3.0", "target_type": "index"},
+        {"result": "miss", "methodology_version": "4.0", "target_type": "index"},
     ])
     written: dict[str, object] = {}
     async def _set(key, profile, ttl=None):
@@ -1090,8 +1140,8 @@ async def test_run_once_writes_profile_after_verification():
                      new=AsyncMock(side_effect=[[], [{  # backfill 空 + 画像窗口含 600519 hit
                          "id": 1,
                          "prediction": {"horizons": [{"target": "600519"}]},
-                         "verification": {"h": {"result": "hit", "methodology_version": "3.0",
-                                                "target_type": "stock"}},
+                         "verification": {"h": {"result": "hit", "methodology_version": "4.0",
+                                               "target_type": "stock"}},
                      }]])),
         patch.object(prediction_validator.node_api, "get_stock_kline",
                      new=AsyncMock(return_value=[
@@ -1241,7 +1291,7 @@ async def test_run_once_verifies_suffixed_stock_horizon():
     assert entry["actual"] == "+1.40%"
 
 
-# ============ condition_met 两段判定（T4 点亮 / T5 保留 / T6 接线） ============
+# ============ condition 退役接线：run_once 不再写 c{i}（T6 幂等 / T7 退役） ============
 
 
 def _pending_condition_record(
@@ -1282,177 +1332,6 @@ def _scan_rows(closes, pct_chg=-1.0, vol=1e8):
 
 
 @pytest.mark.asyncio
-async def test_scan_condition_met_lights_up_when_met() -> None:
-    """T4 第①段：未到期但条件已成立（末日跌破 MA20）→ 产 condition_met=True entry。"""
-    record = _pending_condition_record(due="2026-09-30", direction="bearish")
-    rows = _scan_rows([130.0 - i for i in range(25)])  # 末日 106 < MA20 115.5
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    assert "result" not in out["c0"]  # 第①段只点亮，不写 result
-    assert out["c0"]["condition_index"] == 0
-    assert out["c0"]["horizon"] == "short"  # D5：anchor 档位（data_client → anchor_horizon）
-    assert out["c0"]["target_type"] == "index"
-    assert out["c0"]["prediction_id"] == 1
-    assert out["c0"]["verified_at"] == "2026-09-16"
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_no_entry_when_not_met() -> None:
-    """T4 第①段：条件不成立 → 不产 entry（只写 true，不写 false，D1）。"""
-    record = _pending_condition_record(
-        due="2026-09-30", direction="bullish", condition="若站上 MA20")
-    rows = _scan_rows([130.0 - i for i in range(25)])  # 下行 → 未站上 MA20
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out == {}
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_logs_unlit_reasons(capsys) -> None:
-    """2026-09-19 方案 A 观测项：未点亮的条件按原因码聚合落一条审计日志（不改判定行为）。"""
-    record = _pending_condition_record(
-        due="2026-09-30", direction="bullish", condition="板块主力资金延续净流入")
-    rows = _scan_rows([130.0 - i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-
-    assert out == {}  # 不可判 → 不产键（行为不变）
-    captured = capsys.readouterr().out
-    assert "prediction_condition_met_unlit_reasons" in captured
-    assert "guard_domain" in captured  # 资金流口径命中 G1
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_skips_when_already_true() -> None:
-    """T4 幂等：已有 condition_met=true → 跳过（不重复点亮，且不拉行情）。"""
-    record = _pending_condition_record(
-        record_id=7, verification={"c0": {"condition_met": True}})
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out == {}
-    kline.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_skips_due_and_result_entries() -> None:
-    """T4：已到期（due<=today，交 stage②）与已到期末判定（有 result）的 c{i} 都不产 entry。"""
-    due_record = _pending_condition_record(due="2026-09-16")  # due == today
-    result_record = _pending_condition_record(verification={"c0": {"result": "hit"}})
-    rows = _scan_rows([130.0 - i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(due_record) == {}
-        assert await pv._scan_condition_met(result_record) == {}
-    kline.assert_not_awaited()  # 两条都在取数前短路
-
-
-@pytest.mark.asyncio
-async def test_verify_conditions_preserves_lit_condition_met() -> None:
-    """T5：stage① 已点亮 true → stage② 到期判定不得覆盖为 null。"""
-    record = _pending_condition_record(
-        due="2026-09-09", direction="bearish",
-        verification={"c0": {"condition_met": True, "condition_index": 0}},
-    )
-    rows = _scan_rows([100.0 + i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._verify_conditions(record)
-    assert out["c0"]["result"] == "hit"          # 到期判定照常写 result
-    assert out["c0"]["condition_met"] is True    # 但点亮状态被保留
-
-
-@pytest.mark.asyncio
-async def test_verify_conditions_writes_false_when_not_lit() -> None:
-    """Task 6.1（spec §12.5）：到期对**确定性未成立**的条件写 condition_met=false + checked_at。
-
-    与第①段的 true 形成完整布尔；checked_at 记录到期判定时间（便于审计与回溯区分）。
-    """
-    record = _pending_condition_record(due="2026-09-09", direction="bearish")
-    rows = _scan_rows([100.0 + i for i in range(25)])  # 上行 → 未跌破 MA20 → 确定性不成立
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._verify_conditions(record)
-    assert out["c0"]["result"] == "hit"           # scenario 命中（pct_chg 恒 -1）与条件成立无关
-    assert out["c0"]["condition_met"] is False    # 到期未成立态
-    assert out["c0"]["checked_at"] == "2026-09-16"
-    assert out["c0"]["condition_index"] == 0
-
-
-@pytest.mark.asyncio
-async def test_verify_conditions_lit_true_not_downgraded_to_false() -> None:
-    """Task 6.1 不可回退：已点亮 true 的条件到期**不得**被改写成 false（显式防御）。"""
-    record = _pending_condition_record(
-        due="2026-09-09", direction="bearish",
-        verification={"c0": {"condition_met": True, "condition_index": 0}},
-    )
-    rows = _scan_rows([100.0 + i for i in range(25)])  # 判定口径会得 False，但已点亮必须保留
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._verify_conditions(record)
-    assert out["c0"]["condition_met"] is True
-    assert "checked_at" not in out["c0"]  # 不回退即不产生新的到期判定留痕
-
-
-@pytest.mark.asyncio
-async def test_verify_conditions_omits_condition_met_when_unjudgeable() -> None:
-    """Task 6.1：无法判定（参考位降级）→ **不写该键**（保持缺失，绝不写 null）。"""
-    record = {
-        "id": 1,
-        "prediction": {
-            "horizons": [{"horizon": "short", "target": "上证指数", "direction": "bearish"}],
-            "conditions": [{
-                "condition": "若跌破今日盘中低点",
-                "scenario": "后续继续下行",
-                "anchor": {"horizon": "short", "direction": "bearish",
-                           "threshold": "", "metric": "today_low", "op": "below"},
-            }],
-        },
-        "due_dates": {"short": "2026-09-09"},
-        "verification": {},
-    }
-    rows = _scan_rows([100.0 + i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._verify_conditions(record)
-    assert out["c0"]["result"] == "hit"
-    assert "condition_met" not in out["c0"]
-    assert "checked_at" not in out["c0"]
-
-
-@pytest.mark.asyncio
 async def test_run_once_condition_verify_idempotent_no_repeat_side_effects() -> None:
     """Task 6.1 幂等：重复到期扫描（c{i} 已有 result）不产生任何重复副作用（不重复回写）。"""
     record = _pending_condition_record(
@@ -1485,27 +1364,30 @@ async def test_run_once_condition_verify_idempotent_no_repeat_side_effects() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_once_scans_condition_met_before_due() -> None:
-    """T6 端到端：due 在未来但条件已成立的 pending 记录 → 回写 (id, 'c0', 点亮 entry)。"""
+async def test_run_once_writes_no_condition_entries() -> None:
+    """T7 退役：prediction_records.verification 里不再出现 c{i} 键。
+
+    记录带非空 conditions（存量 3.0 契约）且 due 在未来、条件在扫描窗口内已成立——
+    退役前会点亮 c0 并回写；退役后 run_once 不得再写任何 c{i} entry。
+    """
     record = _pending_condition_record(due="2026-09-30", direction="bearish")
-    rows = _scan_rows([130.0 - i for i in range(25)])
+    rows = _scan_rows([130.0 - i for i in range(25)])  # 条件成立（跌破 MA20）
     with (
         patch.object(prediction_validator.node_api, "list_pending_predictions",
                      new=AsyncMock(return_value=[record])),
         patch.object(prediction_validator.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)),
+                     new=AsyncMock(return_value=rows)) as kline,
         patch.object(prediction_validator.node_api, "update_prediction_verification",
                      new=AsyncMock(return_value={"id": 1})) as update,
         patch("aistock_agent.services.prediction_validator.shanghai_today",
               return_value=date(2026, 9, 16)),
     ):
         updated = await run_once()
-    assert updated == 1
-    update.assert_awaited_once()
-    pid, ckey, entry = update.await_args.args
-    assert (pid, ckey) == (1, "c0")
-    assert entry["condition_met"] is True
-    assert "result" not in entry
+    assert updated == 0
+    update.assert_not_awaited()  # 不再为任何档位/条件回写
+    kline.assert_not_awaited()   # 条件扫描/判定不再取数
+    # 回写 key 不得是 c{digit} 的断言由 update.assert_not_awaited() 覆盖：
+    # 无回写 → call_args_list 恒空，无需再遍历（遍历无断言力）。
 
 
 @pytest.mark.asyncio
@@ -1531,110 +1413,7 @@ async def test_run_once_does_not_rewrite_already_lit_condition() -> None:
     kline.assert_not_awaited()
 
 
-# ============ Task 5.1：anchor.metric/op/level 分流（量类 / 参考位 / 事件状态锚） ============
-
-
-def _anchor_condition_record(anchor_extra: dict, condition: str, record_id: int = 1) -> dict:
-    """带扩展 anchor 字段的 pending 记录（量类 / 参考位 / 事件类共用）。"""
-    record = _pending_condition_record(
-        record_id=record_id, due="2026-09-30", condition=condition)
-    record["prediction"]["conditions"][0]["anchor"].update(anchor_extra)
-    return record
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_volume_class_lights_up() -> None:
-    """量类：anchor.metric=volume + op/level → 窗口 max 达标 → 点亮（无需 close/pct_chg）。"""
-    record = _anchor_condition_record(
-        {"metric": "volume", "op": "gte", "level": 1.5e8, "threshold": "+3%"},
-        "板块放量至 1.5 亿手以上",
-    )
-    rows = [
-        {"trade_date": "2026-09-14", "pct_chg": None, "close": None, "vol": 1.0e8},
-        {"trade_date": "2026-09-15", "pct_chg": None, "close": None, "vol": 2.0e8},
-    ]
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    assert out["c0"]["condition_index"] == 0
-    assert "result" not in out["c0"]
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_volume_class_not_met_on_small_volume() -> None:
-    """量类：窗口 max 未达 level → 不产 entry（只写 true）。"""
-    record = _anchor_condition_record(
-        {"metric": "volume", "op": "gte", "level": 5.0e8}, "板块放量至 5 亿手以上")
-    rows = [
-        {"trade_date": "2026-09-14", "pct_chg": None, "close": None, "vol": 1.0e8},
-        {"trade_date": "2026-09-15", "pct_chg": None, "close": None, "vol": 2.0e8},
-    ]
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(record) == {}
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_ref_level_degrades_to_none() -> None:
-    """参考位：日 K 未透传 open/high/low（旧端点/字段缺失）→ 仍降级 None（不点亮）。"""
-    record = _anchor_condition_record(
-        {"metric": "today_high", "op": "above"}, "站上今日高点")
-    rows = _scan_rows([100.0, 101.0, 102.0])
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(record) == {}
-
-
-def _ref_level_rows(last_close: float, *, open_=None, high=None, low=None) -> list[dict]:
-    """带 open/high/low 的日 K 行（末日 = 当日参考位；前几日用于满足窗口语义）。"""
-    return [
-        {"trade_date": "2026-09-14", "pct_chg": -1.0, "close": 100.0,
-         "vol": 1e8, "open": 101.0, "high": 101.5, "low": 99.5},
-        {"trade_date": "2026-09-15", "pct_chg": -1.0, "close": 101.0,
-         "vol": 1e8, "open": 100.0, "high": 102.0, "low": 99.8},
-        {"trade_date": "2026-09-16", "pct_chg": 1.0, "close": last_close,
-         "vol": 1e8, "open": open_, "high": high, "low": low},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_ref_level_lights_up_with_open_high_low() -> None:
-    """参考位接通：末日 close 站上当日 high → 点亮（此前恒降级 None）。"""
-    record = _anchor_condition_record(
-        {"metric": "today_high", "op": "above"}, "站上今日高点")
-    rows = _ref_level_rows(last_close=103.0, open_=100.5, high=102.0, low=99.9)
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    assert "result" not in out["c0"]
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_ref_level_not_met_no_entry() -> None:
-    """参考位未成立（末日 close 在当日 high 之下）→ 不产 entry（第①段只写 true）。"""
-    record = _anchor_condition_record(
-        {"metric": "today_low", "op": "below"}, "跌破今日盘中低点")
-    rows = _ref_level_rows(last_close=100.2, open_=100.5, high=102.0, low=99.9)
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock(return_value=rows)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(record) == {}
+# ============ 取数层 open/high/low 透传（参考位判定数据源） ============
 
 
 @pytest.mark.asyncio
@@ -1652,186 +1431,6 @@ async def test_fetch_kline_range_keeps_open_high_low() -> None:
     assert (out[1]["open"], out[1]["high"], out[1]["low"]) == (None, None, None)
 
 
-def _event_condition_record(event_ref: str = "EVT-1", record_id: int = 1) -> dict:
-    """事件类条件记录：anchor 带 event_ref（类型推断 → 事件类，走状态锚）。"""
-    record = _pending_condition_record(
-        record_id=record_id, due="2026-09-30", direction="bearish",
-        condition="若出口限制细则落地")
-    record["created_at"] = "2026-09-10T09:00:00+08:00"
-    record["prediction"]["conditions"][0]["anchor"]["event_ref"] = event_ref
-    return record
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_event_status_anchor_lights_up() -> None:
-    """事件三层①（状态锚）：event_status=ongoing/occurred → 确定性点亮，且不拉行情。"""
-    for status in ("ongoing", "occurred"):
-        record = _event_condition_record()
-        entities = [{"event_id": "EVT-1", "event_status": status, "title": "出口限制细则"}]
-        with (
-            patch.object(pv.node_api, "get_event_entities",
-                         new=AsyncMock(return_value=entities)) as events,
-            patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
-            patch("aistock_agent.services.prediction_validator.shanghai_today",
-                  return_value=date(2026, 9, 16)),
-        ):
-            out = await pv._scan_condition_met(record)
-        assert out["c0"]["condition_met"] is True
-        kline.assert_not_awaited()  # 事件类不需要行情
-        events.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_event_status_not_yet_returns_empty() -> None:
-    """事件未落地（scheduled/upcoming）→ 不点亮（不得按"尚未发生"误判为成立）。"""
-    for status in ("scheduled", "upcoming"):
-        record = _event_condition_record()
-        entities = [{"event_id": "EVT-1", "event_status": status}]
-        with (
-            patch.object(pv.node_api, "get_event_entities",
-                         new=AsyncMock(return_value=entities)),
-            patch("aistock_agent.services.prediction_validator.shanghai_today",
-                  return_value=date(2026, 9, 16)),
-        ):
-            assert await pv._scan_condition_met(record) == {}
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_event_missing_or_read_failure_returns_empty() -> None:
-    """事件三层③（兜底）：event_ref 无对应事件 / 读接口失败 → None（不点亮）。
-    ②层（受限 LLM）默认开关关闭（config.condition_met_event_llm_enabled=False）。"""
-    record = _event_condition_record(event_ref="EVT-NOT-FOUND")
-    with (
-        patch.object(pv.node_api, "get_event_entities",
-                     new=AsyncMock(return_value=[{"event_id": "EVT-OTHER",
-                                                   "event_status": "occurred"}])),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(record) == {}
-    with (
-        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=None)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        assert await pv._scan_condition_met(record) == {}
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_event_lit_without_market_source() -> None:
-    """事件类条件不依赖行情：目标资产解析失败（无行情数据源）仍按状态锚点亮。
-
-    回归守卫：早期实现把"无数据源"提前 return，会让可判定的事件条件被无关的行情解析失败连带跳过。
-    """
-    record = _event_condition_record()
-    record["prediction"]["horizons"][0]["target"] = "某不存在的板块名"
-    entities = [{"event_id": "EVT-1", "event_status": "occurred"}]
-    with (
-        patch.object(prediction_validator, "resolve_sector_target",
-                     new=AsyncMock(return_value=None)),
-        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=entities)),
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    # classify_target 按"板块"标记归类（与是否有数据源无关）
-    assert out["c0"]["target_type"] == "sector"
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_event_class_bypasses_domain_guard() -> None:
-    """G1 只作用于价格/量/技术位判径：事件类条件文本含"美债"仍按状态锚点亮，不被口径护栏拦截。"""
-    record = _event_condition_record()
-    record["prediction"]["conditions"][0]["condition"] = "10年期美债收益率站上5%"
-    entities = [{"event_id": "EVT-1", "event_status": "occurred", "title": "美债收益率上行"}]
-    with (
-        patch.object(pv.node_api, "get_event_entities", new=AsyncMock(return_value=entities)),
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    kline.assert_not_awaited()  # 事件类不拉行情（G1 未介入）
-
-
-# ============ 终审 #3/#5：第①段扫描窗口 = [created_at, today]（上限 120 自然日） ============
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_far_due_uses_created_at_window() -> None:
-    """#3：due 在 60 天后（旧 [due-20, due+10] 窗口过滤后对今天为空 → 静默跳过、长档
-    几乎永不点亮）→ 第①段改用 [created_at, today] 窗口，远端 due 也能点亮；
-    且请求区间只由 created_at/today 决定，不依赖 due。"""
-    record = _pending_condition_record(due="2026-11-15", direction="bearish")
-    record["created_at"] = "2026-09-01T10:20:30.000Z"
-    rows = _scan_rows([130.0 - i for i in range(25)])  # 末日 106 < MA20 115.5
-    with (
-        patch.object(pv.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    _, kwargs = kline.call_args
-    assert kwargs["start_date"] == "20260901"   # created_at（不是 due-20 = 20261026）
-    assert kwargs["end_date"] == "20260916"     # today（不是 due+10 = 20261125）
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_empty_window_skips_without_request() -> None:
-    """#3/#5：窗口为空（created_at 为未来脏值 → 裁剪后 start > end）→ 不产 entry，
-    且**不发起请求**（避免必然空请求）。"""
-    record = _pending_condition_record(due="2026-11-15", direction="bearish")
-    record["created_at"] = "2026-10-01"  # 晚于 today → 空窗
-    with (
-        patch.object(pv.node_api, "get_index_kline", new=AsyncMock()) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out == {}
-    kline.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_missing_created_at_falls_back_120d() -> None:
-    """#3：created_at 缺失 → 回退 today-120 自然日，不报错且仍能点亮。"""
-    record = _pending_condition_record(due="2026-11-15", direction="bearish")  # 无 created_at
-    rows = _scan_rows([130.0 - i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        out = await pv._scan_condition_met(record)
-    assert out["c0"]["condition_met"] is True
-    _, kwargs = kline.call_args
-    assert kwargs["start_date"] == "20260519"   # 2026-09-16 - 120 自然日
-    assert kwargs["end_date"] == "20260916"
-
-
-@pytest.mark.asyncio
-async def test_scan_condition_met_clamps_window_to_120_days() -> None:
-    """#3/#5：created_at 早于 today-120 自然日 → 越界裁剪到 120 日上限（不超额拉取）。"""
-    record = _pending_condition_record(due="2026-11-15", direction="bearish")
-    record["created_at"] = "2026-01-01T00:00:00+08:00"  # 远超 120 天
-    rows = _scan_rows([130.0 - i for i in range(25)])
-    with (
-        patch.object(pv.node_api, "get_index_kline",
-                     new=AsyncMock(return_value=rows)) as kline,
-        patch("aistock_agent.services.prediction_validator.shanghai_today",
-              return_value=date(2026, 9, 16)),
-    ):
-        await pv._scan_condition_met(record)
-    _, kwargs = kline.call_args
-    assert kwargs["start_date"] == "20260519"   # today - 120d（裁剪后）
-    assert kwargs["end_date"] == "20260916"
-
-
 def _two_condition_record(record_id: int, created_at: str, due: str = "2026-09-30") -> dict:
     """同一记录两条 condition（共用 anchor 档位 → 同一扫描窗口）。"""
     record = _pending_condition_record(record_id=record_id, due=due, direction="bearish")
@@ -1845,9 +1444,12 @@ def _two_condition_record(record_id: int, created_at: str, due: str = "2026-09-3
 
 
 @pytest.mark.asyncio
-async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
-    """成本（终审附带）：同一 run_once 内 stage① 取数记忆化——同记录多条 condition 只取
-    一次数；不同 created_at（窗口不同）不串用缓存（不得用他记录的窗口结果判定）。"""
+async def test_run_once_ignores_conditions_after_retire() -> None:
+    """T7 退役：run_once 不再触碰 conditions——多条件记录零 c{i} 回写、零条件取数。
+
+    取代原 stage① 记忆化用例（该路径已退出验证环）：退役前两条记录会把 c0/c1/c0
+    全部点亮并取数两次；退役后应完全无副作用。
+    """
     rec1 = _two_condition_record(1, "2026-09-01")
     rec2 = _pending_condition_record(record_id=2, due="2026-09-30", direction="bearish")
     rec2["created_at"] = "2026-09-10"
@@ -1863,7 +1465,214 @@ async def test_run_once_memoizes_condition_scan_fetch_per_window() -> None:
               return_value=date(2026, 9, 16)),
     ):
         updated = await run_once()
-    assert updated == 3            # rec1 两条 + rec2 一条，全部点亮
-    assert kline.await_count == 2  # rec1 共享一次；rec2 窗口不同 → 各一次
-    keys = {(c.args[0], c.args[1]) for c in update.call_args_list}
-    assert keys == {(1, "c0"), (1, "c1"), (2, "c0")}
+    assert updated == 0
+    update.assert_not_awaited()  # 无任何 c{i}/档位回写
+    kline.assert_not_awaited()   # 条件扫描/判定不再取数
+
+
+# ============ Task 4：单带宽 k 判定（v4） ============
+
+
+@pytest.mark.parametrize("direction,x,k,expected", [
+    ("bullish", 2.0, 1.0, "hit"),
+    ("bullish", 0.5, 1.0, "miss"),   # |x| < k → miss（不再算命中）
+    ("bullish", -2.0, 1.0, "miss"),
+    ("bearish", -2.0, 1.0, "hit"),
+    ("bearish", -0.5, 1.0, "miss"),
+    ("neutral", 0.5, 1.0, "hit"),
+    ("neutral", 1.5, 1.0, "miss"),
+    # 边界（x 恰等于 ±k）：锁死 >= / <= 语义——若实现误写成 > / <，上面用例仍会全绿。
+    ("bullish", 1.0, 1.0, "hit"),    # x == +k → hit（>=）
+    ("bearish", -1.0, 1.0, "hit"),   # x == -k → hit（<=）
+    ("neutral", 1.0, 1.0, "miss"),   # x == +k → 不在开区间 (-k, +k) → miss
+])
+def test_v4_single_band(direction, x, k, expected):
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    window = [x]  # 单日窗口即累计 = x
+    result, _grade = _judge_window(direction, window, k=k, methodology_version="4.0")
+    assert result == expected
+
+
+def test_v4_single_band_uses_compound_over_four_days():
+    """4 日窗口：x 必须是复利累计（避免单日窗口特例掩盖复利/求和差异），且 v4 恒不产 grade。
+
+    [1.0, 1.0, 1.0, 1.0] → 复利 +4.0604%（简单求和仅 +4.00%）；取 k=4.02：
+    复利 4.06 >= 4.02 → hit；若误用 sum(window)=4.00 < 4.02 → miss（锁死复利差异）。
+    """
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    window = [1.0, 1.0, 1.0, 1.0]
+    result, grade = _judge_window("bullish", window, k=4.02, methodology_version="4.0")
+    assert result == "hit"
+    assert grade is None
+
+
+def test_v4_requires_k_fail_loud():
+    """methodology_version=4.0 但未传 k → ValueError（fail loud）。
+
+    禁止静默回退成 index 的 k：sector/stock 会用错带宽且无从察觉。
+    默认 methodology_version 即 4.0，故不传 k 必须立即报错而非产出错误命中。
+    """
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    with pytest.raises(ValueError):
+        _judge_window("bullish", [1.0], methodology_version="4.0")
+
+
+def test_k_for_dispatches_by_target_type_and_falls_back_index():
+    """k 唯一来源按粒度分派：sector/stock 各用自己的 k，未知粒度回退 index。"""
+    from aistock_agent.services.k_band_table import K_BAND, k_for
+
+    assert k_for("index") == K_BAND["index"]
+    assert k_for("sector") == K_BAND["sector"]
+    assert k_for("stock") == K_BAND["stock"]
+    # 三粒度带宽确实不同（若相同则分派测试失去意义）
+    assert K_BAND["sector"] != K_BAND["index"]
+    assert K_BAND["stock"] != K_BAND["index"]
+    for unknown in ("unknown", "", "etf"):
+        assert k_for(unknown) == K_BAND["index"]
+
+
+def test_v2_path_unchanged_by_v4():
+    """回归：非 4.0（2.0 存量回补）路径行为未被 v4 改动——bullish 任一日 >0 → hit。"""
+    from aistock_agent.services.prediction_validator import _judge_window
+
+    # window[0]=-1 不构成 strong，窗口内 0.5>0 → 普通 hit（无 k 参与、无复利）
+    result, grade = _judge_window(
+        "bullish", [-1.0, 0.5, -0.3, 0.2],
+        neutral_pct=0.5, strong_pct=5.0, methodology_version="2.0")
+    assert result == "hit"
+    assert grade == "hit"
+
+
+@pytest.mark.asyncio
+async def test_legacy_v3_sector_index_thresholds_unchanged_by_v4():
+    """护栏（Task 4 偏离计划的风险点）：v4 改造不得改动 v2/v3 存量路径的 sector/index 阈值区分。
+
+    `_verify_horizon(methodology_version="3.0")` 的 neutral 主判仍按粒度取 legacy 阈值：
+    index = 0.5（`_LEGACY_INDEX_THRESHOLDS`）、sector = 0.25（`_LEGACY_SECTOR_THRESHOLDS`），
+    均为 `mean(|p_i|) < thr`。构造同一窗口 mean(|p|)=0.4 落在 (0.25, 0.5)：
+    index → hit、sector → miss。若 v4 改造误把 4.0 的 k 分流无条件套到 v3，本用例会红。
+    """
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.4},
+        {"trade_date": "2026-08-11", "pct_chg": 0.4},
+        {"trade_date": "2026-08-12", "pct_chg": 0.4},
+        {"trade_date": "2026-08-13", "pct_chg": 0.4},
+    ]  # mean(|p|)=0.4：<0.5（index hit）且 >=0.25（sector miss）
+    # index（上证指数）：legacy index 阈值 0.5 → hit
+    index_entry = await _verify_direct(
+        _pending_record(direction="neutral"), methodology_version="3.0", kline_rows=kline)
+    assert index_entry["methodology_version"] == "3.0"
+    assert index_entry["result"] == "hit"
+    assert index_entry["baseline_neutral"] is True   # mean 0.4 < 0.5
+    # sector（半导体板块）：legacy sector 阈值 0.25 → miss
+    with (
+        patch.object(
+            pv.node_api, "resolve_ths_name",
+            new=AsyncMock(return_value={"ts_code": "881121.TI", "name": "半导体"}),
+        ),
+        patch.object(pv.node_api, "get_ths_daily_range", new=AsyncMock(return_value=kline)),
+        patch(
+            "aistock_agent.services.prediction_validator.shanghai_today",
+            return_value=date(2026, 8, 13),
+        ),
+    ):
+        sector_entry = await pv._verify_horizon(
+            _pending_sector_record(direction="neutral"), "mid", methodology_version="3.0")
+    assert sector_entry["methodology_version"] == "3.0"
+    assert sector_entry["result"] == "miss"          # mean 0.4 >= 0.25
+    assert sector_entry["baseline_neutral"] is False  # mean 0.4 >= 0.25
+
+
+# ============ Task 5：写入侧 flat 标记（|x| < k 的方向预判）+ direction 落库 ============
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_writes_flat_marker_for_directional_miss_in_band():
+    """v4：bullish 且 |x| < k（无信息带）→ miss 且写结构化 flat 标记（供 flat_rate 计数）。
+
+    为什么在**写入侧**判 flat：判据 |x| < k 依赖 k，而 k 的唯一来源是 Python 的
+    k_band_table.k_for（app-api/TS 不得自行复制 k）→ 写入侧落标记，读取侧只做计数。
+    """
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.1},
+        {"trade_date": "2026-08-11", "pct_chg": 0.1},
+        {"trade_date": "2026-08-12", "pct_chg": 0.1},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]  # 复利 +0.40% < index k(0.9201) → miss 且落在带内
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "miss"
+    assert entry["flat"] is True
+    assert entry["direction"] == "bullish"
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_no_flat_marker_when_directional_miss_out_of_band():
+    """v4：bullish 强反向（|x| >= k）→ miss 但**不写** flat 键
+    （无值即无键，避免 flat:false 噪声）。
+    """
+    record = _pending_record(due="2026-08-10", direction="bullish")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": -3.0},
+        {"trade_date": "2026-08-11", "pct_chg": -3.0},
+        {"trade_date": "2026-08-12", "pct_chg": -3.0},
+        {"trade_date": "2026-08-13", "pct_chg": -3.0},
+    ]  # 复利约 -11.5%，|x| >= k
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "miss"
+    assert "flat" not in entry
+
+
+@pytest.mark.asyncio
+async def test_verify_horizon_no_flat_marker_for_neutral():
+    """v4：neutral 恒不写 flat（flat 只针对方向预判落在无信息带的情形）。"""
+    record = _pending_record(due="2026-08-10", direction="neutral")
+    kline = [
+        {"trade_date": "2026-08-10", "pct_chg": 0.1},
+        {"trade_date": "2026-08-11", "pct_chg": 0.1},
+        {"trade_date": "2026-08-12", "pct_chg": 0.1},
+        {"trade_date": "2026-08-13", "pct_chg": 0.1},
+    ]
+    entry = await _verify_direct(record, methodology_version="4.0", kline_rows=kline)
+    assert entry["result"] == "hit"       # -k < x < k → neutral hit
+    assert "flat" not in entry
+    assert entry["direction"] == "neutral"
+
+
+# ============ Task 5 二轮修复：全 pending 时仍产出 settled_ratio == 0 ============
+
+
+@pytest.mark.asyncio
+async def test_report_stats_emits_zero_settled_ratio_when_all_pending() -> None:
+    """M2：有声明档位槽但**没有任何 verification entry**（全 pending）时，`_report_stats`
+    仍产出统计且 settled_ratio == 0；不得提前 return 导致不产出，也不得为 None
+    （None 只在分母为 0——即无任何非-long、非-近似声明档位槽——时使用）。"""
+    record = {
+        "id": 1,
+        "source_type": "market_trace",
+        "source_id": "review:2026-08-01",
+        "prediction": {"horizons": [{"horizon": "short"}, {"horizon": "mid"}]},
+        "verification": {},
+    }
+    captured: dict[str, object] = {}
+
+    def _capture(event: str, **kw: object) -> None:
+        captured["event"] = event
+        captured.update(kw)
+
+    with (
+        patch.object(prediction_validator.node_api, "list_all_predictions",
+                     new=AsyncMock(return_value=[record])),
+        patch.object(prediction_validator.logger, "info", new=_capture),
+    ):
+        await pv._report_stats()
+    assert captured["event"] == "prediction_stats_summary"
+    buckets = captured["buckets"]
+    assert isinstance(buckets, dict)
+    combined = buckets["combined"]
+    assert isinstance(combined, dict)
+    # 2 个声明的非-long 档位槽、0 个已结算 → 0 / (0 + 2) = 0.0（不是 None）
+    assert combined["settled_ratio"] == 0.0

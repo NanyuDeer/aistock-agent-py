@@ -1,29 +1,32 @@
 """预测到期验证服务 — 收盘后扫描到期预测，对照实际行情判 hit/miss 并回写。
 
-v2 对照口径（P0 预测验证升级）：
-- 数据源：指数走 /internal/index/:code/kline（Tushare index_daily 历史日 K），
-  不再用当日 /internal/index/quotes 快照。
-- 判定：取 [due, due+3 交易日] 窗口日 K 涨跌幅符号命中主判（bullish 任一日>0→hit，
-  bearish 任一日<0→hit，neutral 任一日 |pct|<0.5%→hit）；无累计净值兜底（G13：bullish/bearish
-  下无符号命中日 ⇒ 累计必不命中，数学死代码）。
-- grade：仅 bullish/bearish 计算（G14）；strong_hit=due 当日命中或窗口内同向 |pct|>=5%，
-  strong_miss=全反向且窗口内反向 |pct|>=5%；neutral 恒不输出 grade。
+现役判定口径（4.0，`_METHODOLOGY_VERSION`）：
+- 数据源：指数走 /internal/index/:code/kline（Tushare index_daily 历史日 K），板块走 ths_daily、
+  个股走 stock kline；不再用当日 /internal/index/quotes 快照。
+- 判定：取 [due, due+3 交易日] 窗口日 K 的**复利累计涨跌幅** x（x = ∏(1+p/100) − 1，唯一口径
+  见 `_compound_pct`），按**单带宽 k** 主判：bullish x >= +k / bearish x <= -k /
+  neutral -k < x < +k；
+  |x| < k（带内噪声、不构成方向性 claim）时 bullish/bearish 记 **miss** 并计入统计 flat_rate。
+- 口径语义：验证的是**到期后 3 个交易日的方向延续性**，不是「档位声明区间内的方向兑现」。
+  k 只按粒度（index / sector / stock）标定、**不按档位细分**（窗口恒为 4 日）；唯一读取入口
+  `k_band_table.k_for(target_type)`，禁止内联或另建一份。
+- grade：4.0 恒不产出（None）；strong_hit / strong_miss 为 legacy v2/v3 语义。
+- long 档：保留 120 交易日定义，但**不计入迭代看板**（仅单独展示命中率，§4.7）。
 - approximate 档（越年近似到期日）显式标记 approximate=True 不进主统计（H2）。
-- 版本分桶：entry 带 methodology_version="2.0"（H1，与 schema_version 2.0 同步，D6）。
 - 窗口未满（due+3 交易日尚未走完）→ 返回 {"wait": True}，run_once continue 不回写（D1）；
   数据源故障/到期日行情缺失 → 落 insufficient（可追溯，不混用 None 语义，D7）。
-- 条件化预判两段判定（Spec A §4.2；spec §12.5，2026-09-17 Task 6.1）：
-  ① 到期前 `_scan_condition_met` 条件一成立即点亮 `verification[c{i}].condition_met=true`
-  （确定性判定，无 result，**只写 true**）；
-  ② 到期 `_verify_conditions` 照常写 hit/miss 并保留①已点亮的 true；**对确定性未成立的条件写
-  `condition_met=false` + `checked_at`**（到期未成立态，与 true 对称的布尔；无法判定保持键缺失、
-  绝不写 null；已点亮 true 显式防御不回退）。
-- 条件类型分流（spec §12.3，2026-09-17 P4'）：`condition_met_judge.infer_condition_class` 按
-  `anchor.metric/op/level/event_ref` + 条件文本确定性推断（事件类/量类/技术位/参考位/涨跌幅）；
-  事件类三层（§12.4）：① 状态锚（Event Entity `event_status` ongoing/occurred → 确定性点亮）
-  → ② 受限 LLM（`settings.condition_met_event_llm_enabled` 默认关，开启才调，带留痕）
-  → ③ None 兜底；参考位类（today_open/high/low）取数层已透传 open/high/low（Task 10.1），
-  以当日行（窗口最后一行）参考位与同行 close 判定，字段缺失时才降级 None。
+- 版本分桶：entry 带 methodology_version（H1）。**v2("2.0") / v3("3.0") 为存量回补/重验口径，
+  仅 legacy 路径（backfill 或显式传参）可达，非现役主链**；现役主链恒写 4.0。
+- 【已于 2026-10-06 退役并**物理删除**】条件化预判两段判定（范围仅 `prediction_records.conditions`：
+  生成侧 prompt 不再产出、验证侧 run_once 不再写 `c{i}`；Spec A §4.2；spec §12.5，2026-09-17
+  Task 6.1）——退役前的两个判定入口 `_verify_conditions`（第②段到期 hit/miss）与
+  `_scan_condition_met`（第①段到期前点亮）已**整段删除**（本文件不再存在），run_once 不再调用。
+- 仍存活的存量回溯判定能力：`condition_met_judge`（条件类型分流 / 三值判定，含事件类三层）与
+  `_judge_condition_met_once` / `_condition_scan_range` / `_CONDITION_SCAN_*` 因存量回溯
+  `backfill_condition_met`（scripts/backfill_condition_met.py，默认 dry-run、需 --execute）而保留；
+  该回溯只处理 schema_version=="3.0" 且 `conditions` 非空的存量记录，Task 6 后新记录
+  `conditions==[]` 永不进入。节奏大师的 `branches` **未受影响**（其 met 由节奏报告引擎负责，
+  本验证器从不写入）。
 """
 
 import asyncio
@@ -38,11 +41,11 @@ from aistock_agent.config import settings
 from aistock_agent.services.cache import set_cached_validation_profile
 from aistock_agent.services.condition_met_judge import (
     CONDITION_CLASS_EVENT,
-    explain_unjudgeable_reason,
     infer_condition_class,
     judge_condition_met_state,
 )
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.k_band_table import K_BAND_META, k_for
 from aistock_agent.services.prediction_stats import (
     baseline_neutral_summary,
     bucket_summary,
@@ -64,16 +67,16 @@ logger = structlog.get_logger()
 # target（指数名）→ 6 位代码（G6 外置到 prediction_targets.py；别名兼容既有引用名）
 _INDEX_CODE_MAP: dict[str, str] = INDEX_TARGETS
 
-# neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中
+# neutral 方向判定阈值：涨跌幅绝对值低于该值视为横盘命中（legacy：仅 v2/v3 与条件判定用）
 _NEUTRAL_PCT_THRESHOLD = 0.5
 
-# v2/v3 口径常量（H1/D1/D6/G13/G14；阶段 0 起 _METHODOLOGY_VERSION 为 3.0 窗口累计主判）
+# v2/v3/v4 口径常量（H1/D1/D6/G13/G14；4.0 起单带宽 k 复利主判）
 _WINDOW_DAYS_AFTER_DUE = 3      # 验证窗口 [due, due+3] 交易日
-_METHODOLOGY_VERSION = "3.0"    # 验证器主链写入版本（3.0 窗口累计主判；H1 版本分桶）
+_METHODOLOGY_VERSION = "4.0"    # 验证器主链写入版本（4.0 单带宽 k 复利主判；H1 版本分桶）
 # 存量回补目标版本：backfill 只回补 2.0 时代遗留 no_data，用 2.0 口径重验、写 2.0（不混版本）。
-# 与 stats._CURRENT_METHODOLOGY_VERSION、Node publicRouter.CURRENT_METHODOLOGY_VERSION 同批切换。
+# **独立保持 2.0，不参与「四处同批」**（它是存量回补口径，与现役口径版本无关）。
 _BACKFILL_METHODOLOGY_VERSION = "2.0"
-_STRONG_PCT = 5.0              # grade strong_hit/strong_miss 幅度阈值
+_STRONG_PCT = 5.0              # legacy：v2/v3 grade strong_hit/strong_miss 幅度阈值
 _KLINE_FETCH_DAYS = 200        # 区间拉取 days 上限（_fetch_kline_range index 分支）
 # 区间拉取 days 上限（stock 端点校验 1-120；_fetch_kline_range stock 分支）
 _STOCK_KLINE_FETCH_DAYS = 120
@@ -91,11 +94,13 @@ _CONDITION_SCAN_MAX_DAYS = 120
 # 窗口本身是自然日区间，故取数长度由 _CONDITION_SCAN_MAX_DAYS 约束、此处只做尾部截取。
 _CONDITION_SCAN_WINDOW = 60
 
-# H3：板块验证阈值（G0c 标定 neutral 0.25%/strong 3.0%，版本 1.0）；
-# index 保持 0.5/5.0（_INDEX_THRESHOLDS 复用既有常量，_judge_window 默认参数行为不变）
-SECTOR_THRESHOLDS: dict[str, float] = {"neutral_pct": 0.25, "strong_pct": 3.0}
-_THRESHOLD_VERSION = "1.0"
-_INDEX_THRESHOLDS: dict[str, float] = {
+# ⚠️ legacy 阈值 —— 仅 v2 存量回补路径使用；4.0 起阈值唯一来源是 k_band_table.k_for。
+#   · 4.0 单带宽 k 判定不再读下表；保留 SECTOR/INDEX 两套是为了让 backfill 的 2.0 口径
+#     （sector 与 index 阈值不同）逐字不变——删掉就必须再造一遍。
+#   · 任何 4.0 主链代码禁止引用 _LEGACY_*_THRESHOLDS。
+_THRESHOLD_VERSION = "1.0"     # legacy：sector 阈值版本标记（H3，仅 v2 口径语义）
+_LEGACY_SECTOR_THRESHOLDS: dict[str, float] = {"neutral_pct": 0.25, "strong_pct": 3.0}
+_LEGACY_INDEX_THRESHOLDS: dict[str, float] = {
     "neutral_pct": _NEUTRAL_PCT_THRESHOLD,
     "strong_pct": _STRONG_PCT,
 }
@@ -218,8 +223,8 @@ async def _fetch_kline_range(
 async def _fetch_kline_window(
     kind: str, code: str, due_date: str
 ) -> list[dict[str, object]] | None:
-    """按 due 区间（[due-20, due+10] 自然日）拉取日 K —— **stage②（horizon/到期 condition）
-    专用窗口，语义不变**；stage① 扫描另走 `_condition_scan_range` + `_fetch_kline_range`。"""
+    """按 due 区间（[due-20, due+10] 自然日）拉取日 K —— horizon 到期验证专用窗口。
+    存量回溯另走 `_condition_scan_range` + `_fetch_kline_range`。"""
     rng = _range_around_due(due_date)
     if rng is None:
         # 脏 due_date 无法确定窗口 → 数据源故障语义（_verify_horizon 落 insufficient）
@@ -255,23 +260,65 @@ def _condition_scan_range(record: dict[str, object], today: str) -> tuple[str, s
     return start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d")
 
 
+def _compound_pct(window: list[float]) -> float:
+    """窗口复利累计涨跌幅（%，4.0 主链判定唯一口径）。
+
+    x = ∏(1 + p_i/100) − 1 —— 与 ``scripts/calibration/k_band.py`` 的
+    ``cumulative_returns`` 同口径（Task 3）。为什么必须复利：单日 pct_chg 是相对前收的
+    比率，多日累计应按净值连乘；简单求和会忽略跨日复合效应（连续两日 +1%：复利 +2.01%
+    vs 求和 +2.00%），导致 actual 展示值与复利判定依据不一致。
+
+    4.0 主链（_verify_horizon / _judge_window）一律用本函数。
+    """
+    acc = 1.0
+    for p in window:
+        acc *= 1.0 + p / 100.0
+    return (acc - 1.0) * 100.0
+
+
 def _judge_window(
     direction: str,
     window: list[float],
     neutral_pct: float = _NEUTRAL_PCT_THRESHOLD,
     strong_pct: float = _STRONG_PCT,
     methodology_version: str = _METHODOLOGY_VERSION,
+    *,
+    # 4.0 调用方**必须显式传入** k（唯一来源 k_band_table.k_for）；k is None → ValueError
+    k: float | None = None,
 ) -> tuple[str, str | None]:
-    """窗口主判（阶段 0 起默认 3.0 窗口累计口径）。返回 (result, grade)。
+    """窗口主判。返回 (result, grade)。
 
-    - v2（"2.0"，存量回补口径）：bullish 任一日 >0；bearish 任一日 <0；neutral 任一日 |pct|<neutral_pct
-    - v3（"3.0"，当前生产口径）：bullish 累计 sum>0；bearish 累计 sum<0；neutral mean(|p_i|)<neutral_pct
+    - v4（"4.0"，**现役主链**口径）：**单带宽 k**（三方向命中区域互补），x = 复利累计：
+      bullish hit ⟺ x >= +k；bearish hit ⟺ x <= -k；neutral hit ⟺ -k < x < +k。
+      **为什么 |x| < k 时方向预判记 miss**：k 是"横盘噪声带宽"（标定为 |x| 的 1/3 分位），
+      带内涨跌与随机噪声不可区分、不足以支撑方向性 claim，故不计命中（统计侧计入 flat_rate）。
+      v4 恒不产 grade（None），不再有 strong_hit/strong_miss。
+      k 必须显式传入（唯一来源 `k_band_table.k_for`）；k is None → ValueError（fail loud，
+      禁止静默回退默认带宽——否则 sector/stock 会用错带宽且无从察觉）。
+    - v2（"2.0"，**存量回补**口径）：bullish 任一日 >0；bearish 任一日 <0；
+      neutral 任一日 |pct|<neutral_pct
+    - v3（"3.0"，**历史重验**口径）：bullish 累计 sum>0；bearish 累计 sum<0；
+      neutral mean(|p_i|)<neutral_pct
 
-    grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向 |pct|>=strong_pct；
-    strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。neutral 恒 None。
-
-    H3：默认参数即 index 阈值（0.5/5.0），行为不变；sector 调用注入 0.25/3.0。
+    v2/v3 均为**存量回补/重验**口径（仅 legacy 路径可达），**非现役主链**；现役主链恒走 v4/4.0。
+    v2/v3 grade 仅 bullish/bearish（G14）：strong_hit = due 当日命中 或 窗口内同向
+    |pct|>=strong_pct；strong_miss = 全反向 且 窗口内反向 |pct|>=strong_pct；否则 hit/miss。
+    neutral 恒 None。
+    默认 neutral_pct/strong_pct 为 legacy index 阈值，仅 v2/v3 分支使用。
     """
+    if methodology_version == "4.0":
+        # v4：单带宽 k（三方向命中区域互补；|x| < k → miss）
+        if k is None:
+            raise ValueError(
+                "_judge_window: methodology_version='4.0' 必须显式传入 k"
+                "（单带宽唯一来源 k_band_table.k_for）；禁止静默回退默认带宽"
+            )
+        x = _compound_pct(window)
+        if direction == "bullish":
+            return ("hit" if x >= k else "miss"), None
+        if direction == "bearish":
+            return ("hit" if x <= -k else "miss"), None
+        return ("hit" if -k < x < k else "miss"), None
     if methodology_version == "2.0":
         # v2：任一日符号命中（G13，无累计净值兜底）
         if direction == "bullish":
@@ -305,14 +352,14 @@ async def _verify_horizon(
     horizon: str,
     methodology_version: str = _METHODOLOGY_VERSION,
 ) -> dict[str, object]:
-    """到期验证：取 [due, due+3] 窗口 kline，按版本口径主判（默认 3.0 窗口累计）。
+    """到期验证：取 [due, due+3] 窗口 kline，按版本口径主判（默认 _METHODOLOGY_VERSION=4.0）。
 
     entry 新增 methodology_version（H1）、grade（仅 bullish/bearish，G14）、
     baseline_neutral（同窗口恒中性预测命中标记，供 baseline 对照，H6）、
     approximate（越年近似档结构化标记，统计剔除，H2）、
     target_type/matched_*（H8）、threshold_version（sector，H3）、prediction_id（H4）。
-    methodology_version 参数：主链默认 _METHODOLOGY_VERSION（3.0）；backfill 传
-    _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量口径不混版本（阶段 0）。
+    methodology_version 参数：主链默认 _METHODOLOGY_VERSION（4.0）；backfill 传
+    _BACKFILL_METHODOLOGY_VERSION（2.0）保持存量回补口径不混版本。
     返回语义（D1/D7）：正常 → hit/miss entry；窗口未满 → {"wait": True}（run_once 收到
     wait 则 continue 不回写，下次再验）；数据源故障/无数据 → insufficient entry（落库可追溯）。
     """
@@ -389,30 +436,65 @@ async def _verify_horizon(
             reason = f"{reason}（板块指数数据可能停更）"
         return {**base, "wait": True, "reason": reason}
     direction = str(entry.get("direction") or "neutral")
-    # H3：sector 注入 0.25/3.0 阈值（G0c 标定），index 保持默认 0.5/5.0
-    thresholds = SECTOR_THRESHOLDS if target_type == "sector" else _INDEX_THRESHOLDS
-    result, grade = _judge_window(
-        direction, window,
-        neutral_pct=float(thresholds["neutral_pct"]),
-        strong_pct=float(thresholds["strong_pct"]),
-        methodology_version=methodology_version)
-    cumulative = sum(window)
+    flat_flag = False
+    if methodology_version == "4.0":
+        # v4：单带宽 k，唯一来源 k_band_table.k_for(target_type)（index/sector/stock 各一套）
+        k_band = k_for(target_type)
+        result, grade = _judge_window(
+            direction, window, k=k_band, methodology_version=methodology_version)
+        x_band = _compound_pct(window)
+        # v4 baseline_neutral 与主判**同一谓词**（-k < x < k）：恒中性预测的命中标记必须与
+        # v4 判定口径一致，否则 LLM vs baseline 的对照失去意义（neutral_pct 已非判定依据）。
+        baseline_neutral = -k_band < x_band < k_band
+        # 方向预判落在无信息带（|x| < k）→ 该档被判 miss 且属"瞎猜带"，落结构化 flat 标记
+        # 供迭代看板 flat_rate 计数（design §4.3）。为什么在**写入侧**判：判据依赖 k，而 k 的
+        # 唯一来源是 Python 的 k_band_table.k_for（app-api/TS 不得自行复制 k）→ 写入侧落标记、
+        # 读取侧只做计数。仅 4.0 新样本有该键，存量记录天然无（与版本过滤一致，无需回填）。
+        flat_flag = direction in {"bullish", "bearish"} and abs(x_band) < k_band
+        # v4 起 sector 的阈值来源改为 k 表（不再用 G0c legacy 0.25/3.0）→ threshold_version
+        # 取 k 表标定口径版本（"4.0"）；legacy 路径（v2/v3）仍记 G0c 的 "1.0"（见 else 分支）。
+        # 字段语义是"该 sector entry 所用阈值来自哪一版标定"，故随来源切换而变。
+        threshold_version = str(K_BAND_META["methodology_version"])
+    else:
+        # v2/v3 存量口径（backfill 传 2.0）：sector/index 各用 legacy 阈值，行为逐字不变
+        thresholds = (
+            _LEGACY_SECTOR_THRESHOLDS if target_type == "sector" else _LEGACY_INDEX_THRESHOLDS
+        )
+        result, grade = _judge_window(
+            direction, window,
+            neutral_pct=float(thresholds["neutral_pct"]),
+            strong_pct=float(thresholds["strong_pct"]),
+            methodology_version=methodology_version)
+        # baseline_neutral（H6）随版本口径：v2 任一日 |p|<thr；v3 mean(|p_i|)<thr
+        if methodology_version == "2.0":
+            baseline_neutral = any(abs(p) < float(thresholds["neutral_pct"]) for p in window)
+        else:
+            baseline_neutral = (
+                sum(abs(p) for p in window) / len(window) < float(thresholds["neutral_pct"])
+            )
+        threshold_version = _THRESHOLD_VERSION  # legacy G0c 标定版本（仅 v2/v3 语义）
+    cumulative = _compound_pct(window)
     actual_str = f"{cumulative:+.2f}%"
     reason = f"方向={direction}, 窗口累计={actual_str}"
     if is_approximate:
         reason = f"(approximate_due_date) {reason}"
-    # baseline_neutral（H6）随版本口径：v2 任一日 |p|<thr；v3 mean(|p_i|)<thr
-    if methodology_version == "2.0":
-        baseline_neutral = any(abs(p) < float(thresholds["neutral_pct"]) for p in window)
-    else:
-        baseline_neutral = (
-            sum(abs(p) for p in window) / len(window) < float(thresholds["neutral_pct"])
-        )
     out = {**base, "result": result, "actual": actual_str, "reason": reason,
            "approximate": is_approximate,  # H2 结构化标记（Task 4 统计过滤依据）
            "baseline_neutral": baseline_neutral}
+    if methodology_version == "4.0":
+        # 迭代看板辅助字段（flat / direction）**仅 4.0 路径**写入——授权范围只含
+        # 4.0，v2/v3 存量 entry 不新增这些键（防超出授权、防旧样本混入 4.0 的
+        # flat_rate/direction 计数）。
+        if flat_flag:
+            # 字段驱动、无值即无键（不写 flat:false 噪声）。
+            out["flat"] = True
+        # direction 供迭代看板：flat_rate 分母 = 方向预判已结算数（排除 neutral），
+        # 并按方向分桶判读。
+        # 与 reason 的"方向="同源；写入侧落结构化值，读取侧（app-api）只计数、不复制判定逻辑。
+        out["direction"] = direction
     if target_type == "sector":
-        out["threshold_version"] = _THRESHOLD_VERSION  # H3：sector 阈值版本（1.0）
+        # H3：sector 阈值版本 → v4 记 k 表版本（"4.0"）、legacy 记 G0c（"1.0"）
+        out["threshold_version"] = threshold_version
     if grade is not None:
         out["grade"] = grade
     return out
@@ -446,188 +528,6 @@ def _parse_threshold(value: str) -> float | None:
         return None
     m = re.search(r"[-+]?\d+(?:\.\d+)?", value)
     return float(m.group(0)) if m else None
-
-
-def _judge_condition_hit(
-    direction: str, threshold_val: float | None, cumulative: float
-) -> bool:
-    """condition scenario 是否命中：按 anchor.direction + threshold 比对窗口累计。
-
-    显式阈值（如 "+5%"/"-3%"）存在 → 与窗口累计累计直接比对（scenario 命中主判）；
-    阈值缺省 → 退化为方向符号主判（bullish>0 / bearish<0 / neutral 横盘），
-    对齐 _judge_window 语义。spec §9-5：条件成立两段判定推迟，此处仅起见
-    scenario 命中与否。
-    """
-    if threshold_val is not None:
-        if direction == "bullish":
-            return cumulative >= max(threshold_val, 0.0)
-        if direction == "bearish":
-            return cumulative <= min(threshold_val, 0.0)
-    if direction == "bullish":
-        return cumulative > 0
-    if direction == "bearish":
-        return cumulative < 0
-    return abs(cumulative) < _NEUTRAL_PCT_THRESHOLD
-
-
-async def _verify_conditions(
-    record: dict[str, object],
-    methodology_version: str = _METHODOLOGY_VERSION,
-    *,
-    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] | None = None,
-    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
-) -> dict[str, object]:
-    """条件化预判到期验证：对 conditions 的每条生成 c{i} entry（方案一，§4.2）。
-
-    - 目标资产复用 record 的 horizons[0].target 解析（大盘/板块，§9-5 首批范围）；
-    - 到期未成立态（spec §12.5，Task 6.1）：`result` 落库那一刻按第①段**同一判定能力**对
-      确定性未成立的条件写 `condition_met=false` + `checked_at`（窗口 = [created_at, due]）；
-      已点亮 `true` 的 entry 显式防御、不得回退为 false；无法判定 → 不写该键（绝不写 null）；
-    - scenario 命中用 anchor.direction + threshold 比对窗口累计；
-    - entry 显式补 target_type（index/sector，§4.2/§11）避免统计漏桶；
-    - 窗口未满 → {"wait": True}，run_once continue 不回写，下次补齐再验（D1 语义）；
-    - 返回 {c{i}: entry}，run_once 对已存在 result 的 c{i} 幂等跳过。
-    - `scan_cache`/`event_cache`：与第①段共用的取数/事件记忆化（key 含窗口，不串用）。
-    """
-    prediction = record.get("prediction")
-    if not isinstance(prediction, dict):
-        return {}
-    conditions = prediction.get("conditions")
-    if not isinstance(conditions, list) or not conditions:
-        return {}  # 2.0 旧记录/无条件预判无 c{i} 验证
-    horizons = prediction.get("horizons")
-    tgt = ""
-    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
-        tgt = str(horizons[0].get("target") or "")
-    code, target_type, matched = await _resolve_verify_target(tgt)
-    base: dict[str, object] = {
-        "verified_at": shanghai_today().isoformat(),
-        "methodology_version": methodology_version,
-        "prediction_id": record.get("id"),
-        "target_type": target_type,
-    }
-    if matched:
-        base["matched_ts_code"] = str(matched["ts_code"])
-        base["matched_name"] = str(matched["name"])
-    due_dates = record.get("due_dates")
-    due_dates_map = due_dates if isinstance(due_dates, dict) else {}
-    verification = record.get("verification")
-    ver_map = verification if isinstance(verification, dict) else {}
-    out: dict[str, object] = {}
-    today = shanghai_today().isoformat()
-    for i, cond in enumerate(conditions):
-        key = f"c{i}"
-        if not isinstance(cond, dict):
-            continue
-        anchor = cond.get("anchor") if isinstance(cond.get("anchor"), dict) else {}
-        horizon = anchor.get("horizon")
-        due_date = str(due_dates_map.get(horizon) or "") if horizon else ""
-        direction = str(anchor.get("direction") or "neutral")
-        threshold = str(anchor.get("threshold") or "")
-        # D6（2026-09-03）：条件到期日仍在未来 → 未到验证窗口，跳过不产 entry（run_once 会在
-        # 到期后自然处理）；此前对未来 due 落 insufficient no_data 违反窗口语义。
-        if due_date and due_date > today:
-            continue
-        entry: dict[str, object] = {
-            **base,
-            "condition_index": i,
-            "horizon": horizon,
-            "condition": cond.get("condition"),
-            "scenario": cond.get("scenario"),
-            "threshold": threshold,
-        }
-        # 第①段（_scan_condition_met）已点亮的 condition_met=true 必须原样带出——Node 端
-        # verification[c{i}] 为键级浅合并，不写该键即保留旧值，但显式写 null 会抹掉点亮。
-        existing = ver_map.get(key)
-        if isinstance(existing, dict) and existing.get("condition_met") is True:
-            entry["condition_met"] = True
-        if code is None:
-            out[key] = {**entry, "result": "insufficient", "subtype": "no_source",
-                        "actual": "", "reason": f"target '{tgt}' 无验证数据源"}
-            continue
-        if not due_date:
-            out[key] = {**entry, "result": "insufficient", "subtype": "no_due_date",
-                        "actual": "", "reason": "condition anchor 无对应 due_date"}
-            continue
-        rows = await _fetch_kline_window(target_type, code, due_date)
-        if rows is None:
-            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
-                        "actual": "", "reason": "到期行情不可用"}
-            continue
-        missing = sum(1 for r in rows if r.get("pct_chg") is None)
-        if missing > 0:
-            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
-                        "actual": "", "reason": f"行情数据缺失 {missing} 行"}
-            continue
-        idx = next((j for j, r in enumerate(rows) if r.get("trade_date") == due_date), None)
-        if idx is None:
-            # D6：到期日当天日 K 未出（盘中/收盘前）→ wait 待收盘后判定，不落 insufficient
-            if due_date >= today:
-                out[key] = {**entry, "wait": True,
-                            "reason": f"到期日 {due_date} 当日行情未出，等待收盘后判定"}
-                continue
-            out[key] = {**entry, "result": "insufficient", "subtype": "no_data",
-                        "actual": "", "reason": f"到期日 {due_date} 行情缺失"}
-            continue
-        window = [float(cast(float, r["pct_chg"]))
-                  for r in rows[idx: idx + _WINDOW_DAYS_AFTER_DUE + 1]]
-        if len(window) < _WINDOW_DAYS_AFTER_DUE + 1:
-            # D1：窗口未满不回写，下次 run_once 补齐再验
-            wait_reason = (
-                f"验证窗口未满（{len(window)}/{_WINDOW_DAYS_AFTER_DUE + 1}），等待补齐"
-            )
-            out[key] = {**entry, "wait": True, "reason": wait_reason}
-            continue
-        cumulative = sum(window)
-        hit = _judge_condition_hit(direction, _parse_threshold(threshold), cumulative)
-        out[key] = {
-            **entry,
-            "result": "hit" if hit else "miss",
-            "actual": f"{cumulative:+.2f}%",
-            "reason": f"direction={direction}, threshold={threshold or 'N/A'}, "
-                      f"窗口累计={f'{cumulative:+.2f}%'}",
-        }
-    # 到期末成立态（spec §12.5，Task 6.1）：result 落库那一刻对**未触发**条件写
-    # `condition_met=false` + `checked_at`——与第①段的 true 形成完整布尔，前端"到期未触发"
-    # 与"在途未触发"从此可区分（此前只能以卡级 verification 近似）。三条硬约束：
-    #   ① **不得回退**：已点亮 true 的条件不得改写成 false（jsonb 键级浅合并天然保留，
-    #      此处显式防御）；
-    #   ② **不写 null**：无法判定（参考位降级/无 level 量类/无数据/无行情源）→ 不写该键，
-    #      保持缺失（前端按"未触发/在途"处理）；
-    #   ③ **只在此刻写**：wait（窗口未满）分支不产 result 故不写；已含 result 的 c{i} 由
-    #      run_once 的幂等守卫跳过，重复扫描不产生重复副作用。
-    cache_scan = scan_cache if scan_cache is not None else {}
-    cache_events = event_cache if event_cache is not None else {}
-    for key, entry in out.items():
-        if "result" not in entry or entry.get("condition_met") is True:
-            continue  # 未到期末判定 / 已点亮 true（第①段点亮或上方带出）
-        existing = ver_map.get(key)
-        if isinstance(existing, dict) and "result" in existing:
-            # 该 c{i} 已到期末判定（run_once 会幂等跳过回写）→ 不再重复判定/取数
-            continue
-        idx = entry.get("condition_index")
-        if not isinstance(idx, int) or not 0 <= idx < len(conditions):
-            continue
-        cond = conditions[idx]
-        if not isinstance(cond, dict):
-            continue
-        horizon = entry.get("horizon")
-        cond_due = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
-        met = await _judge_condition_met_once(
-            cond,
-            target_type=target_type,
-            code=code,
-            # 到期判定窗口 = [created_at, due]（第①段是 [created_at, today]）
-            window_range=_condition_scan_range(record, cond_due) if cond_due else None,
-            scan_cache=cache_scan,
-            event_cache=cache_events,
-            at_due=True,
-        )
-        if met is None:
-            continue  # 无法判定 → 保持键缺失
-        entry["condition_met"] = met
-        entry["checked_at"] = today
-    return out
 
 
 # ── 事件类条件三层判定（spec §12.4，Task 5.1）──
@@ -859,143 +759,13 @@ async def _judge_condition_met_once(
     )
 
 
-async def _scan_condition_met(
-    record: dict[str, object],
-    methodology_version: str = _METHODOLOGY_VERSION,
-    *,
-    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] | None = None,
-    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] | None = None,
-) -> dict[str, dict[str, object]]:
-    """条件化预判第①段：到期前条件扫描（只点亮 `condition_met=true`，§4.2）。
-
-    与 _verify_conditions（第②段·到期 hit/miss）同一 16:00 任务内执行（D4）；逐条 condition：
-
-    - 已有 `condition_met is True` → 跳过（幂等：不重复点亮）；
-    - 已有 `result` → 跳过（已到期末判定，不得覆盖）；
-    - `due_date <= today` → 跳过，交由 _verify_conditions 处理；
-    - 否则按 `infer_condition_class` 分流（spec §12.3，Task 5.1）：
-      · 事件类 → 三层判定（状态锚 → 受限 LLM（默认关）→ None），**不拉行情**；
-      · 其余 → 拉扫描窗口行情（终审 #3：**窗口 = [created_at, today]，上限 120 自然日**，
-        见 `_condition_scan_range`；旧实现误用 due 区间导致远端 due 恒空窗）→ 组装
-        closes/pct_chgs/volumes/amounts（各自剔除 None）→ `judge_condition_met_state`
-        （确定性，禁 LLM）。
-    目标资产无法解析（无行情数据源）时只跳过行情类条件，事件类条件仍按状态锚判定。
-
-    判定为 True 才产 entry（`{condition_index, horizon(anchor 档位，D5), condition, scenario,
-    threshold, condition_met: True, ...base}`，**不含 result**）；不成立/无法判定（含参考位降级、
-    无 level 的量类）不产 entry —— 只写 true 不写 false（D1）。
-
-    `scan_cache`：同一次 run_once 内 stage① 取数记忆化（key=(target_type, code, start, end)，
-    含窗口以防跨记录串用——不同 created_at 的窗口不同）。传 None 时仅在本记录内生效。
-    `event_cache`：同一次 run_once 内 Event Entity 列表记忆化（key=(dateFrom, dateTo)，
-    避免每条事件类条件重复拉全表）；传 None 时仅在本记录内生效。
-    """
-    prediction = record.get("prediction")
-    if not isinstance(prediction, dict):
-        return {}
-    conditions = prediction.get("conditions")
-    if not isinstance(conditions, list) or not conditions:
-        return {}
-    today = shanghai_today().isoformat()
-    scan_range = _condition_scan_range(record, today)
-    if scan_range is None:
-        return {}  # 空窗：不产 entry 且不发请求（避免必然空请求）
-    horizons = prediction.get("horizons")
-    tgt = ""
-    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
-        tgt = str(horizons[0].get("target") or "")
-    code, target_type, matched = await _resolve_verify_target(tgt)
-    # 目标资产无法解析（无行情数据源）时**不提前 return**：事件类条件不依赖 kline（只读事件
-    # status），提前 return 会让可判定的事件条件被无关的行情解析失败连带跳过；行情类条件在
-    # 下方逐条 `continue`（本段不产点亮 entry，交 _verify_conditions 第②段落 insufficient）。
-    cache = scan_cache if scan_cache is not None else {}
-    events = event_cache if event_cache is not None else {}
-    base: dict[str, object] = {
-        "verified_at": today,
-        "methodology_version": methodology_version,
-        "prediction_id": record.get("id"),
-        "target_type": target_type,
-    }
-    if matched:
-        base["matched_ts_code"] = str(matched["ts_code"])
-        base["matched_name"] = str(matched["name"])
-    due_dates = record.get("due_dates")
-    due_dates_map = due_dates if isinstance(due_dates, dict) else {}
-    verification = record.get("verification")
-    ver_map = verification if isinstance(verification, dict) else {}
-    out: dict[str, dict[str, object]] = {}
-    # 2026-09-19 审计（组长裁定方案 A 的观测项）：按记录聚合"未点亮"归因码，落一条日志，
-    # 用于回答"条件为什么不亮"（四道护栏 vs 数据缺失 vs 确定性不成立）。不改判定行为。
-    unlit_reasons: dict[str, int] = {}
-    checked = 0
-    for i, cond in enumerate(conditions):
-        key = f"c{i}"
-        if not isinstance(cond, dict):
-            continue
-        existing = ver_map.get(key)
-        if isinstance(existing, dict):
-            if existing.get("condition_met") is True:
-                continue  # 幂等：已点亮不重复写
-            if "result" in existing:
-                continue  # 已到期末判定，不覆盖
-        anchor_raw = cond.get("anchor")
-        anchor: dict[str, object] = (
-            cast(dict[str, object], anchor_raw) if isinstance(anchor_raw, dict) else {}
-        )
-        horizon = anchor.get("horizon")
-        due_date = str(due_dates_map.get(str(horizon)) or "") if horizon else ""
-        if not due_date or due_date <= today:
-            continue  # 已到期/无 due → 交 _verify_conditions 第②段
-        # 判定与到期未成立态**共用**（Task 6.1）：本段只取 True 点亮，False/None 一律不产键。
-        checked += 1
-        met = await _judge_condition_met_once(
-            cond,
-            target_type=target_type,
-            code=code,
-            window_range=scan_range,
-            scan_cache=cache,
-            event_cache=events,
-        )
-        if met is not True:
-            # 归因码（纯诊断）：False=确定性不成立；None=判不出 → 交 explain 函数细分类
-            reason = (
-                "deterministic_false"
-                if met is False
-                else explain_unjudgeable_reason(
-                    str(cond.get("condition") or ""),
-                    metric=str(anchor.get("metric") or "") or None,
-                    event_ref=str(anchor.get("event_ref") or "") or None,
-                )
-            )
-            unlit_reasons[reason] = unlit_reasons.get(reason, 0) + 1
-            continue  # 不成立/无法判定 → 不产键（只写 true，D1）
-        out[key] = {
-            **base,
-            "condition_index": i,
-            "horizon": horizon,  # D5：anchor 档位（data_client 以 anchor_horizon 透传）
-            "condition": cond.get("condition"),
-            "scenario": cond.get("scenario"),
-            "threshold": str(anchor.get("threshold") or ""),
-            "condition_met": True,
-        }
-    if checked:
-        logger.info(
-            "prediction_condition_met_unlit_reasons",
-            id=record.get("id"),
-            checked=checked,
-            lit=len(out),
-            reasons=unlit_reasons,
-        )
-    return out
-
-
 async def backfill_no_data() -> int:
     """存量 no_data 回补：扫描 verified 记录中 _BACKFILL_METHODOLOGY_VERSION/no_data 的
     index 档位按区间重验（D4）。
 
     幂等：仅重验 entry 为 insufficient/no_data 的档位，hit/miss 不回补；sector 回补
-    依赖 resolve，主链路已处理新记录，此处只回补 index。重验沿用存量版本口径
-    （阶段 0：2.0 记录用 2.0 主判、写 2.0，不混入 3.0）。返回成功覆盖回写的档位数。
+    依赖 resolve，主链路已处理新记录，此处只回补 index。重验沿用存量回补口径
+    （2.0 记录用 2.0 主判、写 2.0，不混入现役 4.0）。返回成功覆盖回写的档位数。
     """
     records = await node_api.list_verified_predictions(limit=500)
     updated = 0
@@ -1025,7 +795,9 @@ async def backfill_no_data() -> int:
             if re_entry.get("wait") or re_entry.get("result") == "insufficient":
                 continue  # 仍不可验则不覆盖
             try:
-                await node_api.update_prediction_verification(int(record["id"]), horizon, re_entry)
+                await node_api.update_prediction_verification(
+                    int(cast(int, record["id"])), horizon, re_entry
+                )
                 updated += 1
             except Exception as exc:
                 logger.warning(
@@ -1277,10 +1049,6 @@ async def run_once() -> int:
         return 0
     updated = 0
     target_counter: dict[str, int] = {}
-    # stage① 取数记忆化（终审附带成本项）：同一批次内相同 (target_type, code, 窗口) 只取一次
-    scan_cache: dict[tuple[str, str, str, str], list[dict[str, object]] | None] = {}
-    # 事件类条件用的事件列表记忆化（Task 5.1）：同批次内相同 (dateFrom, dateTo) 只取一次
-    event_cache: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
     for record in records:
         record_id = record.get("id")
         # D2：Node internal 归一后为 number；兼容历史 string（曾致 isinstance(int) 门禁全量跳过）
@@ -1323,70 +1091,15 @@ async def run_once() -> int:
                     error=str(exc),
                     exc_info=True,
                 )
-        # Spec A §4.2/§11：条件化预判两点判定——第①段（到期前扫描）先执行：条件一成立即
-        # 点亮 condition_met=true（无 result，Node 端放行中间态），前端洞见卡"待验证"分支
-        # 立即亮起；第②段（到期判定）照常写 result。幂等：已点亮/已有 result/已到期者跳过。
-        # 单记录异常只 warning 不中断整批（与相邻写回循环同风格）。
-        try:
-            lit_entries = await _scan_condition_met(
-                record, scan_cache=scan_cache, event_cache=event_cache
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "prediction_condition_scan_failed",
-                id=record_id,
-                error=str(exc),
-                exc_info=True,
-            )
-            lit_entries = {}
-        for lit_key, lit_entry in lit_entries.items():
-            if _should_skip_horizon(verification.get(lit_key)):
-                continue  # 兜底：已有 result 的 key 不再写
-            try:
-                await node_api.update_prediction_verification(record_id, lit_key, lit_entry)
-                updated += 1
-                logger.info(
-                    "prediction_condition_lit",
-                    id=record_id,
-                    key=lit_key,
-                    condition_met=lit_entry.get("condition_met"),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "prediction_condition_lit_write_failed",
-                    id=record_id,
-                    key=lit_key,
-                    error=str(exc),
-                    exc_info=True,
-                )
-        # Spec A §4.2/§11：条件化预判双验证调度——3.0 记录对每条 condition 另产 c{i}
-        # entry（c{i} key 与 horizon key 并存，A1 early_exit 不冲突）；已存在 result
-        # 的 c{i} 幂等跳过。取数/事件记忆化与第①段共用（key 含窗口，不串用）。
-        cond_entries = await _verify_conditions(
-            record, scan_cache=scan_cache, event_cache=event_cache
-        )
-        for ckey, centry in cond_entries.items():
-            if centry.get("wait"):
-                continue  # D1：窗口未满不回写，下次补齐再验
-            if _should_skip_horizon(verification.get(ckey)):
-                continue  # 幂等：上一轮已产出 result 的 condition 跳过
-            try:
-                await node_api.update_prediction_verification(record_id, ckey, centry)
-                updated += 1
-                logger.info(
-                    "prediction_condition_verified",
-                    id=record_id,
-                    key=ckey,
-                    result=centry["result"],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "prediction_condition_verify_write_failed",
-                    id=record_id,
-                    key=ckey,
-                    error=str(exc),
-                    exc_info=True,
-                )
+        # 2026-10-06 退役：条件化预判退出验证环（范围限定 prediction_records.conditions）——
+        # 两个判定入口 _scan_condition_met（第①段点亮）/ _verify_conditions（第②段到期判定）
+        # 已**整段物理删除**（本文件不再存在），此环不再有任何调用。
+        # 新记录 conditions 恒为空、旧记录已写出的 c{i} entry 保持只读可查（不清洗历史）。
+        # 节奏大师的 branches 不受影响（其 met 由节奏报告引擎负责，本验证器从不写入）。
+        # _judge_condition_met_once 与 condition_met_judge 的判定能力仍被存量回溯
+        # backfill_condition_met（scripts/backfill_condition_met.py，默认 dry-run、需 --execute）
+        # 使用，故连带保留；该回溯只处理 schema_version=="3.0" 且 conditions 非空的存量记录，
+        # Task 6 之后新记录 conditions==[] 永不进入该链路。
     # 日志输出（P0-2）
     if target_counter:
         logger.info("prediction_target_distribution", distribution=target_counter)
@@ -1409,16 +1122,49 @@ async def _report_stats() -> None:
     if not records:
         return
     entries: list[dict[str, object]] = []
+    # settled_ratio 分母 = 记录**声明**的档位槽（含真 pending）——用 prediction.horizons 构造，
+    # 而非仅已存在的 verification entry；后者会让未到期 pending 档永不进分母（审查 Important 1）。
+    slots: list[dict[str, object]] = []
     for rec in records:
         ver = rec.get("verification")
-        if isinstance(ver, dict):
-            for h, entry in ver.items():
-                if isinstance(entry, dict):
-                    entries.append(entry)
-    if not entries:
+        ver_map = ver if isinstance(ver, dict) else {}
+        for entry in ver_map.values():
+            if isinstance(entry, dict):
+                entries.append(entry)
+        prediction = rec.get("prediction")
+        if not isinstance(prediction, dict):
+            continue
+        horizons = prediction.get("horizons")
+        if not isinstance(horizons, list):
+            continue
+        approx = prediction.get("due_dates_approximate")
+        approx_set = (
+            {a for a in approx if isinstance(a, str)} if isinstance(approx, list) else set()
+        )
+        # 记录级 target_type 兜底：声明档无 entry 时按 record 内其它 entry 归属；缺省 index
+        record_tt = "index"
+        for cand in ver_map.values():
+            if isinstance(cand, dict) and isinstance(cand.get("target_type"), str):
+                record_tt = cand["target_type"]
+                break
+        for item in horizons:
+            name = item.get("horizon") if isinstance(item, dict) else None
+            if not isinstance(name, str) or name == "long" or name in approx_set:
+                continue  # 统一口径：scope 排除 long 与 approximate（含无 entry 的真 pending 档）
+            entry = ver_map.get(name)
+            slot_entry = entry if isinstance(entry, dict) else None
+            slot_tt = record_tt
+            if slot_entry is not None and isinstance(slot_entry.get("target_type"), str):
+                slot_tt = slot_entry["target_type"]
+            slots.append({"horizon": name, "target_type": slot_tt, "entry": slot_entry})
+    # M2：全 pending（有声明档位槽、但没有任何 verification entry）时仍要产出统计——
+    # settled_ratio == 0（分母非 0），与 app-api 口径一致；不得提前 return 导致不产出。
+    # 仅当「既无 entry 也无声明档位槽」时无统计可言（settled_ratio 为 None，分母为 0）。
+    # 该 return 之后只做纯统计与日志（summary/buckets/baseline/logger），空 entries 全部可安全承载。
+    if not entries and not slots:
         return
-    summary = hit_rate_summary(entries)
-    buckets = bucket_summary(entries)
+    summary = hit_rate_summary(entries, scope_slots=slots)
+    buckets = bucket_summary(entries, scope_slots=slots)
     baseline = baseline_neutral_summary(entries)
     logger.info(
         "prediction_stats_summary",

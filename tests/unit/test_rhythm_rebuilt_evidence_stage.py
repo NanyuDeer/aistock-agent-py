@@ -1,6 +1,7 @@
 # tests/unit/test_rhythm_rebuilt_evidence_stage.py
 from aistock_agent.services.rhythm_rebuilt_evidence import detect_stage
 
+
 def test_rally_when_breadth_up_volume_up_and_ma_bullish():
     breadth = {"advance_count": 3800, "decline_count": 900, "total_count": 5000}
     closes = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109,

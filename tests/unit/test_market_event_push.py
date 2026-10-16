@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aistock_agent.utils.date import shanghai_today
+
 # ── 1. _parse_market_event_pushes 解析测试 ─────────────────────
 
 MORNING_MODULE = "aistock_agent.agents.workers.morning"
@@ -204,10 +206,9 @@ class TestMarketPushSentCache:
 
     @pytest.mark.asyncio
     async def test_try_set_key_has_date_market_hash(self):
-        from datetime import datetime
-
         from aistock_agent.services.cache import try_set_cached_market_push_sent
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 与产品代码同源：市场推送去重键用上海自然日
+        today = shanghai_today().isoformat()
         with patch(f"{CACHE_MODULE}.RedisPool") as mock_pool:
             mock_client = AsyncMock()
             mock_client.set = AsyncMock(return_value=True)

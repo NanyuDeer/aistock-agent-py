@@ -1,13 +1,11 @@
 """管理员 trigger 端点测试。"""
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from aistock_agent.api.routes import router
 from aistock_agent.config import settings
-from aistock_agent.api.deps import verify_internal_token
-
-from fastapi import FastAPI
 
 AUTH_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
@@ -21,7 +19,7 @@ def client():
 
 def test_trigger_review_quick_returns_200(client):
     """POST /api/agent/admin/trigger/review_quick 返回 200 + success。"""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
 
     with patch("aistock_agent.agents.workers.review.run_review", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = type("R", (), {
@@ -42,7 +40,7 @@ def test_trigger_review_quick_returns_200(client):
 
 def test_trigger_review_full_returns_200(client):
     """POST /api/agent/admin/trigger/review_full 返回 200 + success。"""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
 
     with patch("aistock_agent.agents.workers.review.run_review", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = type("R", (), {

@@ -1,5 +1,5 @@
 """CHAT QA 链路数据契约校验测试。"""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -51,7 +51,7 @@ def test_chat_source_kind_literal():
             kind="invalid_kind",
             title="t",
             snippet="s",
-            captured_at=datetime.now(timezone.utc),
+            captured_at=datetime.now(UTC),
         )
 
 
@@ -64,7 +64,7 @@ def test_evidence_degraded_default_false():
     ev = Evidence(
         facts=["x"],
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         skill_name="report_lookup",
     )
     assert ev.degraded is False
@@ -105,7 +105,7 @@ def _ev(skill_name: str = "stock_snapshot") -> Evidence:
     return Evidence(
         facts=["f"],
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         skill_name=skill_name,
     )
 

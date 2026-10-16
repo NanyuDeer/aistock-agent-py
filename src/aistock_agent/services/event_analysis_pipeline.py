@@ -25,7 +25,6 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.event_conduction import (
-    AnalysisReportPayload,
     EventConductionOutput,
     run_event_conduction_batch,
 )

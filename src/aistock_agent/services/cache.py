@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 
 import structlog
 
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,8 @@ async def get_cached_briefing(report_type: str = "morning") -> str | None:
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 缓存键按上海自然日：容器为 UTC 时，北京 00:00-08:00 不会命中"昨天"的键
+        today = shanghai_today().isoformat()
         cache_key = f"briefing:{report_type}:{today}"
         cached = await client.get(cache_key)
         if cached:
@@ -59,7 +60,7 @@ async def set_cached_briefing(content: str, ttl: int = 86400, report_type: str =
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = shanghai_today().isoformat()
         cache_key = f"briefing:{report_type}:{today}"
         await client.setex(cache_key, ttl, content)
     except Exception:
@@ -213,7 +214,8 @@ async def try_set_cached_market_push_sent(market: str, event_hash: str) -> bool:
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 去重标记按上海自然日（与产品报告日同源，见模块顶部说明）
+        today = shanghai_today().isoformat()
         key = f"market_push_sent:{today}:{market}:{event_hash}"
         result = await client.set(key, "1", nx=True, ex=86400)
         return result is True
@@ -243,7 +245,7 @@ async def release_cached_market_push_sent(market: str, event_hash: str) -> None:
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = shanghai_today().isoformat()
         key = f"market_push_sent:{today}:{market}:{event_hash}"
         await client.delete(key)
     except Exception:

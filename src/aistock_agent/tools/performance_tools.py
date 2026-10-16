@@ -4,6 +4,8 @@
 注册分类：stock（个股分析 worker）、general（兜底对话）。
 """
 
+from typing import cast
+
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
@@ -16,7 +18,7 @@ def _to_yi(value: object) -> str:
     if value is None or value == "":
         return "—"
     try:
-        num = float(value)
+        num = float(cast(float, value))
     except (TypeError, ValueError):
         return "—"
     return f"{num / 1e8:.2f} 亿元"
@@ -27,7 +29,7 @@ def _to_num(value: object, digits: int = 2) -> str:
     if value is None or value == "":
         return "—"
     try:
-        num = float(value)
+        num = float(cast(float, value))
     except (TypeError, ValueError):
         return "—"
     return f"{num:.{digits}f}"

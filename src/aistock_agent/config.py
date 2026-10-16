@@ -297,6 +297,12 @@ class Settings(BaseSettings):
         "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
     scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息 ──
+    # 交易日 Job 受 cron 0-4（周一到周五）+ 函数内 is_trading_day 双重守卫，
+    # 非交易日不抓取 → 事件时间轴断档。此 cron 每日 08:30/12:00/18:00/22:00 触发，
+    # 由 scheduler 侧反向守卫（非交易日才执行）拦截，交易日直接 return，互不干扰。
+    # 复用现有 run_event_scrape(mode="intraday")，不新增抓取逻辑。
+    scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"
     # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）──
     scheduler_calendar_seed_cron: str = "30 7 * * 0-4"       # 种子导入+候选晋升（盘前）
     scheduler_calendar_scrape_cron: str = "40 7 * * 0-4"     # 韭研+L3 搜索兜底（盘前）

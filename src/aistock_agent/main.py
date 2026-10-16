@@ -1,8 +1,9 @@
 """FastAPI 应用入口"""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import cast
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -93,11 +94,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             import aistock_agent.workers.stock_trace_consumer as _stc_module
             from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
 
-            stock_trace_redis = aioredis.from_url(
+            # 局部变量收窄：from_url 无注解（返回 Any），直接赋回声明为 Redis | None 的
+            # stock_trace_redis 会被退回声明类型而报「Redis | None 传给要求 Redis 的
+            # StockTraceConsumer」——运行期 from_url 恒返回 Redis。此处先落局部变量再传。
+            # redis.asyncio.from_url 无类型存根（no-untyped-call）：cast 为类型化可调用
+            # 后再调用（零运行时影响），返回值收窄为 Redis。
+            _from_url = cast("Callable[..., aioredis.Redis]", aioredis.from_url)
+            redis_client = _from_url(
                 settings.stock_trace_redis_url,
                 max_connections=settings.redis_max_connections,
             )
-            consumer = StockTraceConsumer(stock_trace_redis)
+            stock_trace_redis = redis_client
+            consumer = StockTraceConsumer(redis_client)
             stock_trace_consumer_task = asyncio.create_task(consumer.run_forever())
             # 标记 consumer 已启用，供 /health/ready 检查心跳
             _stc_module._stock_trace_consumer_enabled = True

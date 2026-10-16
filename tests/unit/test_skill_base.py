@@ -1,5 +1,5 @@
 """@skill 装饰器异常捕获与 degraded Evidence 生成测试。"""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +12,7 @@ async def ok_skill(args: dict, goal) -> Evidence:
     return Evidence(
         facts=["ok"],
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         skill_name="ok_skill",
     )
 

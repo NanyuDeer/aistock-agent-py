@@ -6,6 +6,7 @@ DeepSeek thinking 不支持 tool_choice，必须走 json_mode 绕开（llm.py L1
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aistock_agent.prompts.workers.rhythm_master import build_synthesis_prompt
 from aistock_agent.schemas.rhythm_master import RhythmEvidence, RhythmSynthesis
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_synthesis(
-    evidence: RhythmEvidence, mainline_facts: dict | None = None
+    evidence: RhythmEvidence, mainline_facts: dict[str, Any] | None = None
 ) -> RhythmSynthesis | None:
     try:
         structured_llm = with_chat_structured_output(get_deep_think(), RhythmSynthesis)

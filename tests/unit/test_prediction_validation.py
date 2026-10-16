@@ -63,9 +63,9 @@ async def test_read_validation_profile_cache_hit():
 async def test_read_validation_profile_cache_miss_rebuild():
     """Spec B §7 P2：缓存 miss → 拉 verified 计算 → 落缓存 → 返回 rebuilt。"""
     entries = [
-        {"result": "hit", "methodology_version": "3.0", "horizon": "short",
+        {"result": "hit", "methodology_version": "4.0", "horizon": "short",
          "target_type": "stock", "approximate": False},
-        {"result": "miss", "methodology_version": "3.0", "horizon": "short",
+        {"result": "miss", "methodology_version": "4.0", "horizon": "short",
          "target_type": "stock", "approximate": False},
     ]
     with patch.object(pv, "get_cached_validation_profile",
@@ -207,7 +207,7 @@ def _sector_record(prediction: dict[str, object]) -> dict[str, object]:
         "id": "p1",
         "prediction": prediction,
         "verification": {
-            "short": {"result": "hit", "horizon": "short", "methodology_version": "3.0",
+            "short": {"result": "hit", "horizon": "short", "methodology_version": "4.0",
                       "target_type": "sector", "approximate": False},
         },
     }

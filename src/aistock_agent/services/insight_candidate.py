@@ -187,11 +187,11 @@ def extract_candidates(title: str, keywords: list[str], content: str) -> list[Ca
     # L1：正文结构信号（"行业原因：..." / "公司原因：..." 直接引用）
     # 证据引用不做截断（用户要求保留完整证据），随信号起句截取正文至句末；
     # 上游正文本身长度受限，起句窗口取 500 字符即可覆盖完整证据句。
-    EVIDENCE_WINDOW = 500
+    evidence_window = 500
     for signal, category in BODY_SIGNALS.items():
         idx = content.find(signal)
         if idx >= 0:
-            snippet = content[idx : idx + EVIDENCE_WINDOW]
+            snippet = content[idx : idx + evidence_window]
             add(
                 f"{signal}:{snippet[:20]}",
                 category,

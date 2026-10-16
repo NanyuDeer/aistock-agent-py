@@ -78,11 +78,18 @@ def _event_shanghai_date(published: str) -> str:
         return raw[:10]
 
 
-async def collect_cls_telegraph(score_date: str) -> list[EventRecord]:
+async def collect_cls_telegraph(
+    score_date: str,
+    *,
+    allow_latest_fallback: bool = True,
+) -> list[EventRecord]:
     """财联社当日全量电报（按日全量）。失败降级 /internal/news/latest。
 
     Args:
         score_date: 交易日（YYYY-MM-DD）。
+        allow_latest_fallback: 当日电报为空/降级时是否允许回退 /internal/news/latest
+            （跨日最新）。交易日默认 True（保持原行为）；非交易日任务传 False，
+            当日无数据即返回 []，禁止把上一交易日消息重新作为非交易日事件入库。
 
     Returns:
         归一化 EventRecord 列表（source=cls）。
@@ -96,6 +103,10 @@ async def collect_cls_telegraph(score_date: str) -> list[EventRecord]:
         if degraded or not items:
             raise RuntimeError(f"telegraph degraded or empty: {resp}")
     except Exception:  # noqa: BLE001
+        if not allow_latest_fallback:
+            # 非交易日保护：禁止跨日 latest 降级，避免上一交易日消息被重新入库
+            logger.info("cls_telegraph_empty_no_fallback", date=score_date)
+            return []
         logger.warning("cls_telegraph_failed_fallback_latest", date=score_date)
         resp = await node_api.get("/internal/news/latest")
         items = _extract_items(resp)

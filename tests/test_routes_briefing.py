@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from aistock_agent.config import settings
 
-
 # 使用实际配置的内部 token（.env 可能覆盖默认值）
 AUTH_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 WRONG_HEADERS = {"X-Internal-Token": "wrong-token"}
@@ -24,9 +23,9 @@ WRONG_HEADERS = {"X-Internal-Token": "wrong-token"}
 @pytest.fixture
 def client():
     """构造 FastAPI TestClient，只挂载 router（不启动 lifespan/scheduler）"""
-    from aistock_agent.api.routes import router
-
     from fastapi import FastAPI
+
+    from aistock_agent.api.routes import router
     app = FastAPI()
     app.include_router(router, prefix="/api/agent")
     return TestClient(app)
@@ -249,7 +248,7 @@ class TestTriggerMorningBriefing:
             )
         body = resp.json()
         assert "elapsed_seconds" in body
-        assert isinstance(body["elapsed_seconds"], (int, float))
+        assert isinstance(body["elapsed_seconds"], int | float)
 
     def test_default_date_uses_shanghai_calendar_day_and_matches_worker_state(self, client):
         """UTC 2026-07-25 17:00 已是上海 2026-07-26，晨报必须全程使用后者。"""
@@ -479,16 +478,6 @@ class TestTriggerEventBriefing:
 
     def test_endpoint_exists(self, client):
         """端点存在且返回 JSON（mock event_agent.run 避免真实 LLM 调用）"""
-        mock_result = {
-            "final_response": "测试播报摘要",
-            "analysis_reports": {
-                "event_understanding": {"summary": "测试事件"},
-                "event_generated": True,
-                "event_persisted": True,
-                "event_cached": True,
-                "event_id": "evt_test123",
-            },
-        }
         with patch(
             "aistock_agent.services.event_conduction.run_single_event_conduction",
             new_callable=AsyncMock,

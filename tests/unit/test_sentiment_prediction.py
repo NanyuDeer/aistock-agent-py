@@ -1,5 +1,5 @@
 """冰点预判生成测试（降级路径 + 成功路径）。"""
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 

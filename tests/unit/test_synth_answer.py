@@ -835,7 +835,7 @@ async def test_deep_branch_persists_chat_analysis_for_logged_in(monkeypatch) -> 
     """登录用户 deep 升级 → save_analysis_report 被调（chat_analysis/today/user_id/D18 双层）。"""
     saved: dict[str, object] = {}
 
-    async def fake_save(report_type, report_date, content, user_id=None, **kw):
+    async def fake_save(_self, report_type, report_date, content, user_id=None, **kw):
         saved.update(
             report_type=report_type,
             report_date=report_date,
@@ -845,7 +845,8 @@ async def test_deep_branch_persists_chat_analysis_for_logged_in(monkeypatch) -> 
         )
         return {"id": "rep_1", "report_type": report_type, "report_date": report_date}
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(_state_with_deep(user_id="u_42"))
 
     assert saved["report_type"] == "chat_analysis"
@@ -867,7 +868,7 @@ async def test_deep_branch_skips_persist_for_anonymous(monkeypatch) -> None:
         called = True
         return {"id": "x"}
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(_state_with_deep(user_id=None))
 
     assert called is False
@@ -881,7 +882,7 @@ async def test_deep_branch_persist_failure_degrades_quietly(monkeypatch) -> None
     async def fake_save(*args, **kw):
         raise RuntimeError("node down")
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(_state_with_deep(user_id="u_42"))
 
     assert out["final_response"]
@@ -897,7 +898,7 @@ async def test_deep_branch_writes_last_deep_report(monkeypatch) -> None:
     async def fake_save(*args, **kw):
         return {"id": "rep_1", "report_type": "chat_analysis", "report_date": "2026-08-02"}
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(
         _state_with_deep(user_id="u_42", message="深度分析一下贵州茅台")
     )
@@ -922,7 +923,7 @@ async def test_deep_branch_writes_last_deep_report_anonymous(monkeypatch) -> Non
         called = True
         return {"id": "x"}
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(_state_with_deep(user_id=None))
 
     assert called is False
@@ -937,7 +938,7 @@ async def test_deep_branch_last_deep_report_on_persist_failure(monkeypatch) -> N
     async def fake_save(*args, **kw):
         raise RuntimeError("node down")
 
-    monkeypatch.setattr(node_api, "save_analysis_report", fake_save)
+    monkeypatch.setattr(type(node_api), "save_analysis_report", fake_save)
     out = await synth_answer_node(_state_with_deep(user_id="u_42"))
 
     assert out["last_deep_report"] is not None

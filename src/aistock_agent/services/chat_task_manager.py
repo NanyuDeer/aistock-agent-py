@@ -11,6 +11,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +23,21 @@ _RUN_TOTAL_TIMEOUT_SEC = 660
 _CONFIRM_TTL_SEC = 600  # pending confirm 保留 10 分钟（对齐 result TTL；确认窗口 60s 远小于 TTL）
 
 # 事件 sink：接收一个 WS 就绪 payload dict
-EventSink = Callable[[dict], Awaitable[None]]
+EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
 class ChatRunState:
     session_id: str
     run_id: str
-    task: asyncio.Task
+    task: asyncio.Task[None]
     user_id: str | None = None  # 归属（P0 服务端注入值，未登录 None；resume/stop 越权校验用）
-    events: list[dict] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     waiters: set[asyncio.Event] = field(default_factory=set)
     done: bool = False
     finalizing: bool = False  # producer 已产出终态 result，进入收尾（cancel 拒绝窗口）
     cancelled: bool = False  # cancelled 终态标记（done 后为 True 表示被用户停止）
-    result: dict | None = None
+    result: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.monotonic)
     done_at: float | None = None
 
@@ -60,13 +61,13 @@ class ChatTaskManager:
     # Phase 4 验收修复（B2/C2）：pending-confirm 独立缓存，keyed by session_id，
     # 存活于 ChatRunState 之外——阶段 2 start() 会覆盖 _states[session_id]，
     # 若只放 state 上会被新 run 冲掉；独立缓存才能支撑 resume 后补发/消费与幂等。
-    _pending_confirm: dict[str, dict] = {}
+    _pending_confirm: dict[str, dict[str, Any]] = {}
 
-    def set_pending_confirm(self, session_id: str, payload: dict) -> None:
+    def set_pending_confirm(self, session_id: str, payload: dict[str, Any]) -> None:
         payload["created_at"] = time.monotonic()
         self._pending_confirm[session_id] = payload
 
-    def get_pending_confirm(self, session_id: str) -> dict | None:
+    def get_pending_confirm(self, session_id: str) -> dict[str, Any] | None:
         p = self._pending_confirm.get(session_id)
         if p is None:
             return None
@@ -82,7 +83,7 @@ class ChatTaskManager:
         self,
         session_id: str,
         run_id: str,
-        producer: Callable[[ChatRunState], Awaitable[dict | None]],
+        producer: Callable[[ChatRunState], Awaitable[dict[str, Any] | None]],
         user_id: str | None = None,
     ) -> ChatRunState | None:
         """启动后台生成任务。

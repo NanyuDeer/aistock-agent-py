@@ -11,12 +11,12 @@ Task 5 新增不可变事实归档：
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import structlog
 
 from aistock_agent.schemas.market_trace import MarketTraceSnapshot
+from aistock_agent.utils.date import shanghai_now
 
 logger = structlog.get_logger()
 
@@ -32,7 +32,9 @@ def archive_morning(content: str) -> None:
     """
     try:
         MORNING_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+        # 文件名日期前缀被 snapshot_builder._find_report 按日期匹配消费 →
+        # 必须用上海自然日，否则 UTC 容器下归档日与查询日错位、晨报找不到
+        timestamp = shanghai_now().strftime("%Y-%m-%d-%H%M")
         filepath = MORNING_OUTPUT_DIR / f"{timestamp}-briefing.md"
         filepath.write_text(content, encoding="utf-8")
         logger.info("morning_archived", path=str(filepath))
@@ -91,7 +93,8 @@ def archive_review(markdown: str, snapshot_id: str) -> bool:
                 snapshot_id=snapshot_id,
             )
             return False
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+        # 日期前缀同样被 _find_report 消费（见 archive_morning 注释）
+        timestamp = shanghai_now().strftime("%Y-%m-%d-%H%M")
         filepath = REVIEW_OUTPUT_DIR / f"{timestamp}-review.md"
         content = f"快照编号：{snapshot_id}\n{markdown}"
         filepath.write_text(content, encoding="utf-8")

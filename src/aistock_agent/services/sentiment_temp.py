@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import structlog
 
@@ -24,7 +26,7 @@ def _num(value: object) -> float:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0.0
 
 
-def _segment(value: float, segments: list[tuple[float, float]]) -> float:
+def _segment(value: float, segments: Sequence[tuple[float, float]]) -> float:
     """分段映射：segments 为 [(下界, 分数)]，取 value >= 下界 的最大档；否则取最末档。"""
     for lo, score in segments:
         if value >= lo:
@@ -271,7 +273,8 @@ def load_previous_archive(output_dir: str, report_date: str) -> dict[str, object
 def _format_score(score: object) -> str:
     """温度展示：整数值省略小数位（52 而非 52.0）。"""
     try:
-        numeric = float(score)
+        # score 为外部取值；float() 接收面比 object 窄，cast 收窄（零运行时影响，异常仍走 except）
+        numeric = float(cast(float, score))
     except (TypeError, ValueError):
         return str(score)
     return str(int(numeric)) if numeric.is_integer() else str(numeric)
@@ -373,29 +376,32 @@ async def compute_and_persist_sentiment_temp(
         prediction: dict[str, object] = {"generated": False}
         if ice["is_ice"]:
             generated, text = await generate_ice_prediction(
-                metrics, score, level, int(ice["consecutive_ice_days"])
+                cast(dict[str, float], metrics), score, level,
+                int(cast(int, ice["consecutive_ice_days"])),
             )
             prediction = {"generated": generated, "text": text}
 
         payload = build_sentiment_payload(report_date, score, level, metrics, ice, prediction)
         # 契约 #5：可选键 cycle_phase（§5 四态，实验性判定；量能佐证缺省，engine 侧重算）
         try:
-            from aistock_agent.services.rhythm_engine import detect_phase
+            from aistock_agent.services.rhythm_engine import Phase, detect_phase
 
             scores = _load_recent_scores(root, report_date, days=5)
-            prev_phase = None
+            prev_phase: Phase | None = None
             if prev is not None and isinstance(prev, dict):
-                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘
+                # 四态收窄（P7 加固）：脏值不透传 detect_phase，防 cycle_phase 污染落盘。
+                # 集合守卫已保证取值合法，cast 仅把该保证告知类型检查器（非假保证）。
                 raw_phase = prev.get("cycle_phase")
                 prev_phase = (
-                    raw_phase
+                    cast(Phase, raw_phase)
                     if isinstance(raw_phase, str)
                     and raw_phase in {"ice", "warm_up", "overheat", "ebb"}
                     else None
                 )
+            ice_state = cast(dict[str, object], payload.get("ice") or {})
             phase, _evidence = detect_phase(
                 history=scores,
-                consecutive_ice=int(payload.get("ice", {}).get("consecutive_ice_days", 0)),
+                consecutive_ice=int(cast(int, ice_state.get("consecutive_ice_days", 0) or 0)),
                 volume_weak=None,
                 prev_phase=prev_phase,
             )

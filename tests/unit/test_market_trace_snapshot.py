@@ -1484,9 +1484,7 @@ async def test_snapshot_targeted_search_queries_loser_sectors(mocker) -> None:
     import copy
 
     from aistock_agent.services.market_trace_snapshot import (
-        TavilyService,
         build_market_trace_snapshot,
-        extract_morning_forecast,
         node_api,
     )
 
@@ -1578,7 +1576,6 @@ async def test_snapshot_search_filters_undated_items_in_historical_backfill(mock
     import copy
 
     from aistock_agent.services.market_trace_snapshot import (
-        TavilyService,
         build_market_trace_snapshot,
         node_api,
     )

@@ -202,9 +202,9 @@ def _excess_pct(nav: list[float], index_nav: list[float], window: int) -> float 
     return (nav[-1] / nav[-1 - window] - index_nav[-1] / index_nav[-1 - window]) * 100.0
 
 
-def _pool_best(pool: list[dict], index_nav: list[float],
-               ret_window: int) -> list[tuple[dict, float]]:
-    scored: list[tuple[dict, float]] = []
+def _pool_best(pool: list[dict[str, Any]], index_nav: list[float],
+               ret_window: int) -> list[tuple[dict[str, Any], float]]:
+    scored: list[tuple[dict[str, Any], float]] = []
     for c in pool:
         excess = _excess_pct(nav_from_pct(c["pct_chgs"]), index_nav, ret_window)
         if excess is not None and isfinite(excess):
@@ -213,8 +213,8 @@ def _pool_best(pool: list[dict], index_nav: list[float],
     return scored
 
 
-def _established_top1(scored, *, weak: float, strong: float,
-                      gap: float) -> tuple[dict, float] | None:
+def _established_top1(scored: list[tuple[dict[str, Any], float]], *, weak: float,
+                      strong: float, gap: float) -> tuple[dict[str, Any], float] | None:
     """判池内是否成立；单候选时收窄为 strong（spec 自审 4c，防间距不可算放松）。"""
     if not scored:
         return None
@@ -227,7 +227,7 @@ def _established_top1(scored, *, weak: float, strong: float,
 
 
 def judge_mainline(
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     index_pct_chgs: list[float],
     evidence_date: str,
     *,
@@ -245,7 +245,7 @@ def judge_mainline(
         return {"state": "unavailable", "name": None, "strength": None,
                 "excess": None, "data_date": None, "attention": "有效候选不足"}
 
-    def _pick(pool_name: str, pool: list[dict]) -> dict[str, object] | None:
+    def _pick(pool_name: str, pool: list[dict[str, Any]]) -> dict[str, object] | None:
         scored = _pool_best(pool, index_nav, ret_window)
         hit = _established_top1(scored, weak=excess_weak, strong=excess_strong, gap=gap_excess)
         if hit is None:

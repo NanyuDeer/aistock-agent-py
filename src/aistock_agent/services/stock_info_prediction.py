@@ -180,7 +180,8 @@ def build_stock_info_prediction_with_reason(
                         direction=direction,
                         target=symbol,
                         metric_projection=(
-                            f"{ai_impact}/{ai_horizon}：到期窗口累计涨跌幅与预判方向同向即命中"
+                            f"{ai_impact}/{ai_horizon}：到期后 3 个交易日方向延续"
+                            "（复利累计同向、超噪声带宽）即命中"
                         ),
                         confidence="low",
                         confidence_source="deterministic",

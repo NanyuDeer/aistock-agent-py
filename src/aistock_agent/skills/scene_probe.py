@@ -7,9 +7,9 @@
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime, timezone
 import re
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import structlog
 
@@ -114,7 +114,7 @@ async def probe_scene_confirmation(
         return []
     if fetched_predictions is None:
         fetched_predictions = await _fetch_target_predictions(target)
-    confirmed_at = datetime.now(timezone.utc)
+    confirmed_at = datetime.now(UTC)
     confirmations: list[PredictionConfirmation] = []
     accepted_targets = {target.internal_id, target.name}
     for rec in fetched_predictions:

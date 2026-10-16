@@ -1,4 +1,3 @@
-import pytest
 
 from aistock_agent.services.prediction_stats import build_scenario_harvest, build_validation_profile
 

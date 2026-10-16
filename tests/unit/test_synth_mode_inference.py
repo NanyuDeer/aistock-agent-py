@@ -1,5 +1,5 @@
 """synth_answer 模式推断规则单元测试。"""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aistock_agent.graph.nodes.synth_answer import _infer_answer_mode
 from aistock_agent.schemas.chat_contract import Evidence, InsightGoal
@@ -18,7 +18,7 @@ def _evidence(degraded: bool = False) -> Evidence:
     return Evidence(
         facts=["x"],
         sources=[],
-        as_of=datetime.now(timezone.utc),
+        as_of=datetime.now(UTC),
         degraded=degraded,
         skill_name="test",
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 import structlog
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from aistock_agent.graph.nodes.escalate import escalate_node
 from aistock_agent.graph.nodes.general_fallback import general_fallback_node
@@ -104,7 +105,7 @@ def build_chat_graph() -> StateGraph:
 
 def compile_chat_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
-):
+) -> CompiledStateGraph:
     """构建并编译 CHAT QA 子图。
 
     Args:

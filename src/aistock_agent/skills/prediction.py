@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from aistock_agent.prompts.general.system import PREDICT_DEGRADED_HINT
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
@@ -176,11 +176,13 @@ async def prediction(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         # 且指数无个股资金流 → 改走 node_api 指数行情，flow 整体跳过
         data = await node_api.get("/internal/index/quotes?symbols=" + symbol)
         matched = None
-        if isinstance(data, dict) and isinstance(data.get("indices"), list):
+        # 绑定局部变量再收窄：isinstance 收窄无法跨表达式传播到下标取值
+        indices = data.get("indices") if isinstance(data, dict) else None
+        if isinstance(indices, list):
             matched = next(
                 (
                     i
-                    for i in data["indices"]
+                    for i in indices
                     if isinstance(i, dict) and i.get("index") == symbol
                 ),
                 None,
@@ -198,6 +200,9 @@ async def prediction(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         else:
             quote_text = f"{name}({symbol}) 最新价 {price}"
     else:
+        # gather(return_exceptions=True) 的联合返回类型 mypy 无法自行确定；显式声明为 object
+        quote_raw: object
+        flow_raw: object
         quote_raw, flow_raw = await asyncio.gather(
             get_quote.ainvoke({"symbol": symbol}),
             get_capital_flow.ainvoke({"symbol": symbol}),
@@ -227,8 +232,12 @@ async def prediction(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     if flow_payload is not None:
         snapshot["flow"] = flow_payload
         snapshot["flow_evidence_id"] = f"flow:{symbol}"
-    news = args.get("news") if isinstance(args.get("news"), list) else []
-    context = {"question": goal.question, "time_range": goal.time_range}
+    raw_news = args.get("news")
+    # news 为外部注入；契约要求 [{...}]，cast 收窄（零运行时影响）
+    news: list[dict[str, object]] = (
+        cast(list[dict[str, object]], raw_news) if isinstance(raw_news, list) else []
+    )
+    context: dict[str, object] = {"question": goal.question, "time_range": goal.time_range}
     result = await run_chat_prediction(snapshot, news, context)
     if result is None:
         return _degraded_evidence(symbol, "门禁不过/LLM 未产出预测")

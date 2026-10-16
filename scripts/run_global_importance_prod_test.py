@@ -50,7 +50,7 @@ async def fetch_event_detail(event_id: str) -> dict | None:
 
 def extract_from_prod(content: dict) -> dict | None:
     """从生产 API 返回的 content 中提取 Adapter 所需字段"""
-    from aistock_agent.services.global_importance_evaluation import _safe_str, _safe_list
+    from aistock_agent.services.global_importance_evaluation import _safe_list, _safe_str
 
     ar = content.get("analysis_reports") or {}
     understanding = ar.get("event_understanding") or {}
@@ -151,10 +151,12 @@ async def test_llm_call(events: list[dict]) -> dict | None:
     print("=" * 70)
 
     from datetime import date
-    from aistock_agent.services.llm import get_quick_think
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
     from aistock_agent.prompts.workers.global_importance import GLOBAL_IMPORTANCE_PROMPT
+    from aistock_agent.services.llm import get_quick_think
     from aistock_agent.utils.output_parser import _parse_json
-    from langchain_core.messages import SystemMessage, HumanMessage
 
     global_input = {
         "as_of": date.today().isoformat(),
@@ -177,21 +179,21 @@ async def test_llm_call(events: list[dict]) -> dict | None:
     ])
     text = str(response.content) if hasattr(response, "content") else str(response)
 
-    print(f"\n  📋 LLM 原始返回（完整 JSON）:")
+    print("\n  📋 LLM 原始返回（完整 JSON）:")
     print(f"  {text}")
 
     # 解析
     parsed = _parse_json(text)
     if not isinstance(parsed, dict):
-        print(f"  ❌ LLM 返回非 dict 结构")
+        print("  ❌ LLM 返回非 dict 结构")
         return None
 
     rankings = parsed.get("rankings")
     if not isinstance(rankings, list):
-        print(f"  ❌ LLM 返回缺少 rankings 数组")
+        print("  ❌ LLM 返回缺少 rankings 数组")
         return None
 
-    print(f"\n  📊 排序结果:")
+    print("\n  📊 排序结果:")
     for item in sorted(rankings, key=lambda x: x.get("rank", 999)):
         print(f"    #{item.get('rank')} | score={item.get('importance_score')} | "
               f"{item.get('impact_scope')}/{item.get('impact_period')} | "
@@ -242,7 +244,7 @@ async def test_normalize(parsed: dict) -> dict:
         "events": normalized,
     }
 
-    print(f"\n  📦 标准化输出:")
+    print("\n  📦 标准化输出:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     expected = ["event_id", "rank", "importance_score", "importance_level",
@@ -265,18 +267,18 @@ async def test_persist(result: dict) -> None:
 
     from aistock_agent.services.global_importance_evaluation import save_global_importance_report
 
-    print(f"\n  调用 save_global_importance_report()...")
-    print(f"  report_type: global_importance")
+    print("\n  调用 save_global_importance_report()...")
+    print("  report_type: global_importance")
     print(f"  content keys: {list(result.keys())}")
     print(f"  events count: {len(result['events'])}")
 
     persisted = await save_global_importance_report(result)
 
     if persisted:
-        print(f"  ✅ 持久化成功")
+        print("  ✅ 持久化成功")
     else:
-        print(f"  ⚠️  持久化返回 False（本地 DB 未运行，属正常降级）")
-        print(f"     不写入生产环境，不污染数据")
+        print("  ⚠️  持久化返回 False（本地 DB 未运行，属正常降级）")
+        print("     不写入生产环境，不污染数据")
 
 
 async def main():
@@ -325,13 +327,13 @@ async def main():
         print("\n" + "=" * 70)
         print("✅  Global Importance 真实数据链路验证全部通过")
         print("=" * 70)
-        print(f"\n  验证覆盖:")
+        print("\n  验证覆盖:")
         print(f"  ✅ 生产 API 数据读取（{len(contents)} 个事件详情）")
         print(f"  ✅ Adapter 字段映射（{len(events)} 个事件）")
-        print(f"  ✅ 真实 LLM 调用（quick_think + GLOBAL_IMPORTANCE_PROMPT）")
-        print(f"  ✅ JSON 解析与字段完整性")
-        print(f"  ✅ Service 标准化输出")
-        print(f"  ✅ 持久化异常降级（DB 未运行时正确捕获）")
+        print("  ✅ 真实 LLM 调用（quick_think + GLOBAL_IMPORTANCE_PROMPT）")
+        print("  ✅ JSON 解析与字段完整性")
+        print("  ✅ Service 标准化输出")
+        print("  ✅ 持久化异常降级（DB 未运行时正确捕获）")
         print(f"\n  数据源: {PROD_API}")
         print(f"  事件: {', '.join(e['event_id'] for e in events)}")
         print(f"  排序摘要: {result.get('summary', '')}")

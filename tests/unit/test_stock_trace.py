@@ -167,12 +167,39 @@ def valid_result() -> StockTraceResult:
     })
 
 
+class FakeNodeClientWithLimitUp(FakeNodeClient):
+    """复现 Node 侧在 triggerEvent 里透传 isLimitUp 的载荷。"""
+
+    async def get(self, path: str) -> dict[str, object] | None:
+        if "analysis-context" not in path:
+            return None
+        payload = snapshot_payload()
+        trigger = dict(payload["triggerEvent"])  # type: ignore[arg-type]
+        trigger["isLimitUp"] = False
+        payload["triggerEvent"] = trigger
+        return payload
+
+
 def test_node_client_normalizes_node_camel_case_analysis_context() -> None:
     client = StockTraceNodeClient(FakeNodeClient())
     snapshot = asyncio.run(client.get_analysis_context("mv:000004:2026-07-30:1:up", 1))
     assert snapshot is not None
     assert snapshot.trigger_event.event_id == snapshot.event_id
     assert snapshot.source_records[0].source_level == "A"
+
+
+def test_node_client_accepts_is_limit_up_in_trigger_event() -> None:
+    """Node 的 triggerEvent 携带 isLimitUp 时必须可解析。
+
+    2026-09-24 生产事故（宿迁联盛 mv:603065:2026-09-24:1790233504581:up）：
+    TriggerEvent 的 extra="forbid" 拒绝该字段 → ValidationError 在 worker
+    内层 try 之外抛出 → 被外层兜成 LLM_OR_DEPENDENCY_UNAVAILABLE → 归因 3 次
+    确定性秒失败进 dead_letter，前端恒显示「归因中」。
+    """
+    client = StockTraceNodeClient(FakeNodeClientWithLimitUp())
+    snapshot = asyncio.run(client.get_analysis_context("mv:000004:2026-07-30:1:up", 1))
+    assert snapshot is not None
+    assert snapshot.trigger_event.is_limit_up is False
 
 
 def test_validator_accepts_a_level_confirmed_company_cause() -> None:

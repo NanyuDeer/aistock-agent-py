@@ -6,7 +6,7 @@ facts 含时段提示。
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.services.data_client import node_api
@@ -37,7 +37,7 @@ def _build_flow_payload(data: dict[str, object]) -> dict[str, object] | None:
         if value is None:
             continue
         try:
-            payload[en_key] = float(value)
+            payload[en_key] = float(cast(float, value))
         except (TypeError, ValueError):
             continue
     payload["flow_5d"] = []

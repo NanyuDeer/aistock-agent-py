@@ -19,11 +19,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-
 from langchain_core.runnables.graph import Graph as DrawableGraph
 from langgraph.graph import END, START
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
 from aistock_agent.graph.builder import build_graph  # noqa: E402
 from aistock_agent.graph.chat_builder import build_chat_graph  # noqa: E402

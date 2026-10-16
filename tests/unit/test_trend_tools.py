@@ -11,7 +11,6 @@ from aistock_agent.tools.trend_tools import (
     get_trend_top_stocks,
 )
 
-
 # ── get_trend_score ───────────────────────────────────────────────
 
 

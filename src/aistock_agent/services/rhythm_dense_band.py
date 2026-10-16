@@ -49,8 +49,10 @@ def dense_band(
     def candle_weight(j: int) -> float:
         if not use_amount:
             return 1.0
-        if j < len(amount_w) and amount_w[j] is not None:
-            return float(amount_w[j])
+        if j < len(amount_w):
+            amt = amount_w[j]
+            if amt is not None:
+                return float(amt)
         return 0.0
 
     # 收集候选触碰价，带上该根 K 线的权重

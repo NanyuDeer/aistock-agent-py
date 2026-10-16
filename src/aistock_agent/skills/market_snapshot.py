@@ -346,9 +346,9 @@ async def market_snapshot(args: dict[str, Any], goal: InsightGoal) -> Evidence: 
     # ── 并发获取 ──
     coros: list[asyncio.Task[tuple[str, list[str], list[ChatSource], bool]]] = []
     if scope in ("a_share", "both"):
-        coros.append(asyncio.create_task(_fetch_a_share()))  # type: ignore[arg-type]
+        coros.append(asyncio.create_task(_fetch_a_share()))
     if scope in ("global", "both"):
-        coros.append(asyncio.create_task(_fetch_global()))  # type: ignore[arg-type]
+        coros.append(asyncio.create_task(_fetch_global()))
 
     results = await asyncio.gather(*coros, return_exceptions=True)
 

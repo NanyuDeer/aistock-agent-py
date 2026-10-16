@@ -8,7 +8,7 @@
 纯确定性评分，不调 LLM，按 present 维度权重重归一化（对齐 evaluate_attribution）。
 """
 
-from aistock_agent.iterate.evaluator import evaluate_verification, VerificationScore
+from aistock_agent.iterate.evaluator import VerificationScore, evaluate_verification
 from aistock_agent.schemas.prediction import (
     PredictionAnchor,
     PredictionCondition,

@@ -16,7 +16,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 from typing import Literal, cast
 
@@ -35,6 +34,7 @@ from aistock_agent.iterate.evaluator import (
     verification_gt_from_case,
 )
 from aistock_agent.services import llm as llm_service
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -820,5 +820,6 @@ def _compute_variant_hash(variant: VariantPlan) -> str:
 
 
 def _now_iso_date() -> str:
-    """实验记录 created_at：ISO 日期（YYYY-MM-DD，本地时区），供报告按日过滤。"""
-    return date.today().isoformat()
+    """实验记录 created_at：ISO 日期（YYYY-MM-DD，上海自然日），供报告按日过滤。"""
+    # 必须与 reporter 的报告日同源（上海自然日），否则 UTC runner 上按日过滤错位
+    return shanghai_today().isoformat()

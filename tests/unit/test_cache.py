@@ -24,6 +24,7 @@ from aistock_agent.schemas.market_trace import (
 )
 from aistock_agent.services import cache
 from aistock_agent.services.cache import get_cached_review, set_cached_review
+from aistock_agent.utils.date import shanghai_today
 
 # ============================================================================
 # 测试 fixture — REVIEW_ARTIFACT（最小合法 ReviewArtifact 实例）
@@ -90,7 +91,8 @@ async def test_get_cached_briefing_hit():
         result = await cache.get_cached_briefing()
 
     assert result == "cached content"
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 与产品代码同源：cache 键用上海自然日（UTC runner 下 datetime.now 会错位）
+    today = shanghai_today().isoformat()
     mock_client.get.assert_awaited_once_with(f"briefing:morning:{today}")
 
 
@@ -153,7 +155,7 @@ async def test_set_cached_briefing_writes():
         mock_pool.get_client = AsyncMock(return_value=mock_client)
         await cache.set_cached_briefing("briefing content")
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = shanghai_today().isoformat()
     mock_client.setex.assert_awaited_once_with(
         f"briefing:morning:{today}",
         86400,
@@ -189,7 +191,7 @@ async def test_set_cached_briefing_custom_ttl():
         mock_pool.get_client = AsyncMock(return_value=mock_client)
         await cache.set_cached_briefing("content", ttl=3600)
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = shanghai_today().isoformat()
     mock_client.setex.assert_awaited_once_with(
         f"briefing:morning:{today}",
         3600,
