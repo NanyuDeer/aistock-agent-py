@@ -66,6 +66,8 @@ docs/outputs/
 docs/*-SPEC.md
 docs/2026-08-01-chat-agent-architecture-discussion.md
 docs/2026-08-01-chat-agent-subagents-design.md
+# 部署清单/上线操作手册（内部运维文档，含服务器路径，不提交不推送）
+docs/2026-09-15-event-entity-deploy-checklist.md
 
 # Claude / Kiro CLI（本地开发工具配置，不提交）
 .claude/
