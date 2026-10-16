@@ -201,6 +201,7 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     ]
     if score_date == _today():
         tasks.append(event_scrape_sources.collect_global_markets())
+        tasks.append(event_scrape_sources.collect_jin10(score_date))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     events: list[event_store.EventRecord] = []
@@ -260,8 +261,9 @@ async def scrape_intraday(
         score_date, allow_latest_fallback=allow_latest_fallback
     )
     em_events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
+    jin10_events = await event_scrape_sources.collect_jin10(score_date)
     events = [
-        ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
+        ev for ev in (cls_events + em_events + jin10_events) if event_store.is_major_event(ev)
     ]
     # Phase-2 LLM 精评（2026-08-13）：同上，盘中增量同样接入
     if settings.event_scoring_llm_enabled:

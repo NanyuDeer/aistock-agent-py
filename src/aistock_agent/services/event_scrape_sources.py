@@ -19,6 +19,7 @@ from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.event_scoring import apply_rule_score
 from aistock_agent.services.event_store import EventRecord, normalize_event
+from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -329,6 +330,75 @@ async def collect_global_markets() -> list[EventRecord]:
                 events.append(event)
     except Exception as exc:  # noqa: BLE001
         logger.warning("global_markets_failed", error=str(exc))
+    return events
+
+
+_JIN10_DETAIL_URL = "https://flash.jin10.com/detail/{id}"
+
+# 海外宏观强词（本任务先用内联元组；Task 2 起改为 import event_origin.OVERSEAS_MACRO_KEYWORDS）
+_JIN10_MACRO_KEYWORDS: tuple[str, ...] = (
+    "美联储", "鲍威尔", "加息", "降息", "非农", "CPI", "PCE", "美债", "美元指数",
+    "欧央行", "日央行", "关税", "制裁", "地缘",
+)
+
+
+def _jin10_impact(item: dict[str, Any], text: str) -> int:
+    """金十条目 → impact 档位（important==1→5；important==0 且宏观强词→4；其余→1）。"""
+    if int(item.get("important", 0) or 0) == 1:
+        return 5
+    if any(k in text for k in _JIN10_MACRO_KEYWORDS):
+        return 4
+    return 1
+
+
+async def collect_jin10(score_date: str) -> list[EventRecord]:
+    """金十快讯（外围资讯源）。失败 fail-safe 返回 []，绝不抛异常。
+
+    逐条日期过滤对齐 eastmoney 先例（_event_shanghai_date）；当日门控由调用方
+    （scrape_full_daily / scrape_intraday）保证。
+    """
+    if not settings.jin10_enabled:
+        return []
+    try:
+        client = await HttpClientPool.get_client()
+        resp = await client.get(
+            settings.jin10_flash_url,
+            headers={"x-app-id": settings.jin10_app_id, "x-version": settings.jin10_version},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — fail-safe：绝不阻断抓取
+        logger.warning("jin10_fetch_failed", date=score_date)
+        return []
+
+    events: list[EventRecord] = []
+    for item in _extract_items(
+        {"data": payload.get("data") if isinstance(payload, dict) else None},
+        key="data",
+    ):
+        if not isinstance(item, dict):
+            continue
+        raw_time = str(item.get("time") or "")
+        if not raw_time or _event_shanghai_date(raw_time) != score_date:
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        content = str(data.get("content") or "")
+        title = content.split("】")[0].lstrip("【") if "【" in content else content[:60]
+        if not str(title).strip():
+            continue
+        raw: dict[str, Any] = {
+            "title": title,
+            "summary": content,
+            # link 空 → 兜底详情页（实测 302 可达；契约要求 url 非空）
+            "url": str(data.get("link") or "") or _JIN10_DETAIL_URL.format(id=item.get("id", "")),
+            "impact_score": _jin10_impact(item, f"{title} {content}"),
+            "source_name": "金十数据",
+            "involved_keywords": item.get("tags") if isinstance(item.get("tags"), list) else [],
+        }
+        event = normalize_event(raw, source="jin10", score_date=score_date)
+        if event is not None:
+            events.append(event)
+    logger.info("jin10_collected", date=score_date, count=len(events))
     return events
 
 
