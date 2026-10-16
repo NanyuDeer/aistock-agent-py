@@ -878,7 +878,7 @@ def _peripheral_event_refs(events: list[dict[str, object]]) -> list[dict[str, ob
 
     def _key(e: dict[str, object]) -> int:
         raw = e.get("impact_score")
-        if isinstance(raw, (int, float)):  # bool 是 int 子类，True → 1
+        if isinstance(raw, int | float):  # bool 是 int 子类，True → 1
             return int(raw)
         if isinstance(raw, str):
             try:
