@@ -834,16 +834,69 @@ def _child_events(
     return events, stats
 
 
-async def load_chain_warehouse_events(report_date: str) -> list[dict[str, object]]:
+async def load_chain_warehouse_events(
+    report_date: str, *, include_peripheral: bool = False
+) -> list[dict[str, object]]:
     """读当日中台存量事件（事件抓取中台 report_type=event_scrape）供链事件层匹配。
 
     复用 event_store.load_event_scrape（内部已吞异常返回 []，空事件库是常态）：
     链事件层不因中台不可用而失败——events 退化为检索补漏或空数组。
+
+    默认剔除 peripheral（外围资讯只走 root.peripheral_events 通道，不进 children
+    匹配池；事件库数据保留，此处只做路由）；include_peripheral=True 时全量返回（诊断用）。
     """
+    from aistock_agent.services.event_origin import is_peripheral  # noqa: PLC0415
     from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
 
     events = await load_event_scrape(report_date)
-    return [dict(event) for event in events if isinstance(event, dict)]
+    rows = [dict(event) for event in events if isinstance(event, dict)]
+    if include_peripheral:
+        return rows
+    return [row for row in rows if not is_peripheral(row)]
+
+
+async def load_chain_peripheral_events(report_date: str) -> list[dict[str, object]]:
+    """root 层专用：只取 peripheral（与 children 匹配池互不干扰）。
+
+    复用 event_store.load_event_scrape（内部已吞异常返回 []）：外围事件读取失败
+    只退化为空通道，不阻断链组装/保存。
+    """
+    from aistock_agent.services.event_origin import is_peripheral  # noqa: PLC0415
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    events = await load_event_scrape(report_date)
+    rows = [dict(event) for event in events if isinstance(event, dict)]
+    return [row for row in rows if is_peripheral(row)]
+
+
+def _peripheral_event_refs(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """root.peripheral_events 纯持久化通道：取 impact 最高的至多 5 条外围事件引用。
+
+    仅做键映射（event_id/ref/headline/occurred_at），无 event_id 的事件直接丢弃
+    （无法被第二 spec 稳定引用）。
+    """
+
+    def _key(e: dict[str, object]) -> int:
+        raw = e.get("impact_score")
+        if isinstance(raw, (int, float)):  # bool 是 int 子类，True → 1
+            return int(raw)
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+        return 0  # 缺字段/None/不可解析 → 0
+
+    kept = sorted((e for e in events if e.get("event_id")), key=_key, reverse=True)[:5]
+    return [
+        {
+            "event_id": e.get("event_id"),
+            "ref": e.get("url") or "",
+            "headline": str(e.get("title") or ""),
+            "occurred_at": e.get("scrape_at"),
+        }
+        for e in kept
+    ]
 
 
 def _attribution_parent(result: object) -> dict[str, object]:
@@ -921,11 +974,16 @@ def assemble_attribution_chain(
     review_payload: dict[str, object],
     sector_results: list[object],
     warehouse_events: list[dict[str, object]] | None = None,
+    peripheral_events: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """组装 大盘(market) → 主驱动板块(self_driven/follow) 归因链。
 
     `warehouse_events` 为当日中台存量事件（`load_chain_warehouse_events` 产物，供
     children[].events 的"中台优先"匹配）；缺省 None = 不做中台匹配，只走检索补漏。
+
+    `peripheral_events` 为当日外围事件（`load_chain_peripheral_events` 产物）——
+    本函数为同步纯组装，外围事件由异步调用方读出后经此参数传入（对齐
+    `warehouse_events` 参数模式，不在组装内 await）；缺省 None = root 外围通道为空。
 
     Task 9.1：sector_results 携带的 extraction（板块提取来源/弱标记，见
     SectorTraceRunResult.extraction）为弱依据时 → children[] 写 extraction 标弱、
@@ -1028,6 +1086,9 @@ def assemble_attribution_chain(
         root["evidence_weak"] = True
         if not summary:
             root["summary"] = _WEAK_ATTRIBUTION_SUMMARY
+
+    # root 外围事件通道（S4）：纯持久化，供第二 spec 消费；不进 children 匹配池
+    root["peripheral_events"] = _peripheral_event_refs(peripheral_events or [])
 
     return {
         "date": report_date,
