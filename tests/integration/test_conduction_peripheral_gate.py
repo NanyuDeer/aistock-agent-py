@@ -4,8 +4,9 @@
 事件仍保留在事件库（本任务不动写路径）；major_events 键集合不变。
 """
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from aistock_agent.services import event_scraper as scr
 
