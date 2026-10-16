@@ -562,8 +562,13 @@ def test_load_event_scrape_recomputes_legacy_rows():
 
 def test_cross_source_absorb_requires_peripheral_side():
     from aistock_agent.services.event_store import _is_cross_source_absorbable
-    a = {"source": "jin10", "event_origin": "peripheral", "title": "美联储维持利率不变"}
-    b = {"source": "cls", "event_origin": "domestic", "title": "美联储维持利率不变"}
-    assert _is_cross_source_absorbable(a, b) is True
-    c = {"source": "cls", "event_origin": "domestic", "title": "美联储维持利率不变"}
-    assert _is_cross_source_absorbable(c, b) is False   # 两侧都非 peripheral → 不吸收
+
+    peripheral = _make_event(source="jin10", event_origin="peripheral", title="美联储维持利率不变")
+    domestic = _make_event(source="cls", event_origin="domestic", title="美联储维持利率不变")
+    other_domestic = _make_event(
+        source="eastmoney", event_origin="domestic", title="美联储维持利率不变"
+    )
+    # 至少一侧 peripheral + 异源 + 标题高度相似 → 可吸收
+    assert _is_cross_source_absorbable(peripheral, domestic) is True
+    # 异源、标题完全相同，但两侧皆非 peripheral → 不吸收（锁定核心不变量）
+    assert _is_cross_source_absorbable(domestic, other_domestic) is False

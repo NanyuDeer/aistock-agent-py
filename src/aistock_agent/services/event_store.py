@@ -140,7 +140,7 @@ def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
     return False
 
 
-def _is_cross_source_absorbable(ev: EventRecord, other: dict[str, Any]) -> bool:
+def _is_cross_source_absorbable(ev: EventRecord, other: EventRecord) -> bool:
     """跨源近重复吸收：仅当『至少一侧 event_origin==peripheral』且标题相似度 >0.9。
 
     同源近重复由 _is_near_duplicate 负责（本函数对同源直接返回 False）。
