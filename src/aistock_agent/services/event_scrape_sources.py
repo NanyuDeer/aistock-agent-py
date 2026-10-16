@@ -17,6 +17,9 @@ import structlog
 
 from aistock_agent.config import settings
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.event_origin import (
+    OVERSEAS_MACRO_KEYWORDS as _JIN10_MACRO_KEYWORDS,
+)
 from aistock_agent.services.event_scoring import apply_rule_score
 from aistock_agent.services.event_store import EventRecord, normalize_event
 from aistock_agent.services.http_client import HttpClientPool
@@ -335,11 +338,7 @@ async def collect_global_markets() -> list[EventRecord]:
 
 _JIN10_DETAIL_URL = "https://flash.jin10.com/detail/{id}"
 
-# 海外宏观强词（本任务先用内联元组；Task 2 起改为 import event_origin.OVERSEAS_MACRO_KEYWORDS）
-_JIN10_MACRO_KEYWORDS: tuple[str, ...] = (
-    "美联储", "鲍威尔", "加息", "降息", "非农", "CPI", "PCE", "美债", "美元指数",
-    "欧央行", "日央行", "关税", "制裁", "地缘",
-)
+# 海外宏观强词单一真源：event_origin.OVERSEAS_MACRO_KEYWORDS（见顶部 import 别名）
 
 
 def _jin10_impact(item: dict[str, Any], text: str) -> int:
