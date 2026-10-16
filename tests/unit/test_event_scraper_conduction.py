@@ -65,15 +65,19 @@ async def test_trigger_conduction_calls_pipeline():
 @pytest.mark.asyncio
 async def test_trigger_conduction_maps_major_event_fields():
     """EventRecord → major_events 字段映射（event_id/title/summary/url/impact_score/
-    direction/involved_keywords），多余字段不传给流水线。"""
+    direction/involved_keywords），多余字段不传给流水线。
+
+    样例须为**非外围**事件（否则被 S5 传导门控 `is_peripheral` 跳过，见 Task 9）：
+    「大盘午后跳水」命中市场级 token → event_scope=MARKET，且不命中海外宏观词
+    → 非 peripheral。"""
     events = [
         _make_event(
-            title="美联储加息",
+            title="大盘午后跳水",
             impact_score=5,
-            summary="加息25bp",
-            url="https://example.com/fed",
+            summary="午后跌幅扩大",
+            url="https://example.com/mkt",
             direction="negative",
-            involved_keywords=["美股", "美元"],
+            involved_keywords=["券商", "银行"],
             source_level="A",
         )
     ]
@@ -84,17 +88,16 @@ async def test_trigger_conduction_maps_major_event_fields():
         await _trigger_conduction(events)
     called = mock_pipeline.await_args.args[0]
     assert len(called) == 1
-    # spec §5 回归面：本样例标题「美联储加息」命中海外宏观词，event_scope 单一裁决
-    # （resolve_event_scope）现判 MARKET（旧 detect_stock_event 口径为 UNKNOWN）；
-    # 按新口径更新期望（2026-10-15 Task 3）。
+    # spec §5 回归面：本样例标题「大盘午后跳水」命中市场级 token，event_scope 单一裁决
+    # （resolve_event_scope）判 MARKET；且不命中海外宏观词 → 非 peripheral（不被 S5 门控跳过）。
     assert called[0] == {
         "event_id": events[0]["event_id"],
-        "title": "美联储加息",
-        "summary": "加息25bp",
-        "url": "https://example.com/fed",
+        "title": "大盘午后跳水",
+        "summary": "午后跌幅扩大",
+        "url": "https://example.com/mkt",
         "impact_score": 5,
         "direction": "negative",
-        "involved_keywords": ["美股", "美元"],
+        "involved_keywords": ["券商", "银行"],
         "event_scope": "MARKET",
     }
 
@@ -589,8 +592,12 @@ async def test_trigger_conduction_allows_unknown_event():
 
 @pytest.mark.asyncio
 async def test_trigger_conduction_defaults_missing_scope_to_unknown():
-    """历史事件无 event_scope（美联储降息）→ 默认 UNKNOWN → 正常进入传导（向后兼容）。"""
-    events = [_scope_event(event_id="e_old", title="美联储降息")]
+    """历史事件无 event_scope（半导体板块异动）→ 默认 UNKNOWN → 正常进入传导（向后兼容）。
+
+    样例须为**非外围**事件（否则被 S5 传导门控 `is_peripheral` 跳过，见 Task 9）；
+    「半导体板块异动」不命中海外宏观词 → 非 peripheral，且不命中市场级 token → 仍 UNKNOWN。
+    """
+    events = [_scope_event(event_id="e_old", title="半导体板块异动")]
     with patch(
         _PIPELINE_PATH,
         new=AsyncMock(return_value={"event_count": 1}),
