@@ -686,6 +686,11 @@ def _build_rhythm_card(
             index_closes=closes, mainline=mainline_facts,
             event_d=event_d, event_result=str(event_result) if event_result is not None else None,
         )
+    # 事件当期（d=0）未落档 → 统一封顶「轻仓~三成」：继承来的仓位文案同样过闸门。
+    # 基准卡生成时事件可能尚未入库（盘后财报等），次日午间才知道的事件不能因
+    # 「沿用基准仓位」被放过（spec step3；test_midday_event_no_result_caps_base 契约）。
+    if event_d == 0 and event_result not in engine.EVENT_RESULT_ENUM:
+        pos_text = engine.cap_position_text_on_event_no_result(pos_text)
 
     # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:

@@ -495,6 +495,42 @@ EVENT_ANCHOR_THRESHOLD = {
     "符合": "符合 -> 震荡",
     "不及预期": "不及预期 -> 跌破",
 }
+# 事件当期（d=0）结果未落档时的仓位封顶（spec §5.2.2 step3）：继承来的仓位文案
+# （盘前/午间沿用基准卡、中性沿用阶段自带文案）也要过同一道闸门——基准卡生成时
+# 事件可能尚未入库（如盘后公布的财报），次日才看到的事件不能因「沿用」被放过。
+EVENT_NO_RESULT_CAP_TEXT: str = "建议仓位：" + POSITION_LADDER[1]
+
+# 卡片 position_band.text 的封闭枚举 → 阶梯序。来源只有两处：本模块 POSITION_LADDER
+# 与 POSITION_BANDS / rhythm_rebuilt_evidence._STAGE_POSITION 的阶段自带文案；
+# 新增文案需在此登记（未登记按「无法判定」原样返回，避免把低仓反向放宽）。
+_POSITION_TEXT_RANK: dict[str, int] = {
+    "空仓观望": 0,
+    "空仓~观察": 0,
+    "空仓~观察（冰点修复窗口属博弈，非确定性加仓信号）": 0,
+    "轻仓~三成": 1,
+    "轻仓~观望": 1,
+    "轻仓~半仓试探": 1,
+    "五成~六成": 2,
+    "半仓~6 成，中性偏多": 2,
+    "半仓~减仓，防退潮回落": 2,
+    "半仓~减仓防退潮": 2,
+    "七成~八成": 3,
+    "6~8 成，顺势持有": 3,
+    "6~8 成顺势持有": 3,
+    "八成~满仓": 4,
+}
+
+
+def cap_position_text_on_event_no_result(position_text: str) -> str:
+    """d==0 且结果未落档 → 仓位文案封顶「轻仓~三成」（spec §5.2.2 step3）。
+
+    只降不升：轻仓及以下原样返回；未登记文案不猜（原样返回）。
+    """
+    raw = position_text.removeprefix("建议仓位：").strip()
+    rank = _POSITION_TEXT_RANK.get(raw)
+    if rank is None or rank <= 1:
+        return position_text
+    return EVENT_NO_RESULT_CAP_TEXT
 
 
 def build_event_branch(
