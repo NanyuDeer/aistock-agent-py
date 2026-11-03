@@ -246,3 +246,43 @@ async def test_morning_still_prefers_basis_over_local_stage():
     )
     assert card.evidence.stage == "ebb"
     assert card.evidence.stage_source == "inherited_basis"
+
+
+@pytest.mark.asyncio
+async def test_temperature_series_filled_from_archive(monkeypatch, tmp_path):
+    """C1：temperature_series 不再是空数组，透出近 7 日温度（情绪强度维度）。"""
+    import json
+
+    from aistock_agent.agents.workers import rhythm_master
+
+    (tmp_path / "2026-11-02.json").write_text(
+        json.dumps({"date": "2026-11-02", "score": 81.5, "ice": {"consecutive_ice_days": 0}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "2026-11-01.json").write_text(
+        json.dumps({"date": "2026-11-01", "score": 31.9, "ice": {"consecutive_ice_days": 0}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    card, rows, win = await _run_compose_full(
+        "after_close", _bull_kline(), {"total_count": 100, "advance_count": 90}, 75, None
+    )
+    rhythm_card = rhythm_master._build_rhythm_card(card, win, rows)
+    assert rhythm_card["temperature_series"] == [
+        {"date": "2026-11-01", "score": 31.9},
+        {"date": "2026-11-02", "score": 81.5},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_temperature_series_empty_when_archive_missing(monkeypatch, tmp_path):
+    """归档缺失 → 空数组（前端 v-if 自然隐藏），不伪造占位。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path / "nope")
+    card, rows, win = await _run_compose_full(
+        "after_close", _bull_kline(), {"total_count": 100, "advance_count": 90}, 75, None
+    )
+    rhythm_card = rhythm_master._build_rhythm_card(card, win, rows)
+    assert rhythm_card["temperature_series"] == []

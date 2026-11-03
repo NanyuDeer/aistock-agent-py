@@ -559,6 +559,10 @@ def _build_rhythm_card(
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 
+    # C1（2026-11-03）：temperature_series 接线。此前该字段恒为空数组（spec §7 S4/S5 已知空置），
+    # 前端 v-if 渲染早已就绪。归档缺失/为空时返回空数组，不伪造（前端自然隐藏该区块）。
+    temp_series, _, _, _ = _load_sentiment_series(days=7)
+
     level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
     level = level_entry["level"] if level_entry else None
     score = level_entry["score"] if level_entry else None
@@ -715,9 +719,8 @@ def _build_rhythm_card(
             "stage_source": card.evidence.stage_source,
         },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
-        # 已知空置（spec §7 S4/S5，仅 temperature_series）：字段未接线（数据源已接入，
-        # 见函数 docstring）——显式空且不写入缺失清单，避免健康卡常驻对用户可见的无关提示
-        "temperature_series": [],
+        # C1：近 7 日情绪温度序列（情绪强度维度，与趋势档位分开表达）；无归档 → 空数组
+        "temperature_series": temp_series,
         # 展示通道：全量展示窗（需求 2，不限 5 交易日；display_events 为空=旧构造/
         # 分析子窗/旧测试替身场景 → 回退 events 保持契约稳定）。过滤 high/medium +
         # 上限 30（G1 防 earnings 密集噪音 / 列表爆炸）；档位通道见上方 win_highs（仅 high）。
