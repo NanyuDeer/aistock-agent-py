@@ -516,22 +516,45 @@ async def _run_morning_task() -> None:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
 
+# 情绪温度任务重试间隔（秒）：快照就绪时间不确定（Tushare 日线推送有延迟），
+# 17:00 首次执行 + 10/20 分钟各重试一次。全部失败才放弃并留 gave_up 告警。
+_SENTIMENT_RETRY_DELAYS_SECONDS: tuple[int, ...] = (0, 600, 1200)
+
+
 async def _run_sentiment_temp_task() -> None:
-    """15:45 短线情绪温度计算（标注为独立任务，失败不阻塞其他链路）。"""
+    """17:00 短线情绪温度计算（独立任务，失败不阻塞其他链路）。
+
+    2026-11-03：原 15:45 触发时 close-snapshot 尚未 complete（Tushare 日线未推完），
+    任务每天空跑（生产日志累计 19 次 sentiment_temp_snapshot_missing，归档恒空）。
+    改为 17:00 起按 not_ready 语义重试三次。
+    """
     from aistock_agent.services.sentiment_temp import compute_and_persist_sentiment_temp
     from aistock_agent.utils.date import shanghai_today
 
-    try:
-        payload = await compute_and_persist_sentiment_temp(shanghai_today().isoformat())
+    target = shanghai_today().isoformat()
+    for attempt, delay in enumerate(_SENTIMENT_RETRY_DELAYS_SECONDS, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            payload = await compute_and_persist_sentiment_temp(target)
+        except Exception:  # noqa: BLE001
+            logger.warning("sentiment_temp_task_failed", attempt=attempt, exc_info=True)
+            continue
         if payload is not None:
             logger.info(
                 "sentiment_temp_done",
                 date=payload.get("date"),
                 score=payload.get("score"),
                 is_ice=cast(dict[str, object], payload.get("ice", {})).get("is_ice"),
+                attempt=attempt,
             )
-    except Exception:  # noqa: BLE001
-        logger.warning("sentiment_temp_task_failed", exc_info=True)
+            return
+        logger.warning("sentiment_temp_snapshot_not_ready", date=target, attempt=attempt)
+    logger.warning(
+        "sentiment_temp_gave_up",
+        date=target,
+        attempts=len(_SENTIMENT_RETRY_DELAYS_SECONDS),
+    )
 
 
 async def _run_rhythm_master_after_close() -> None:
