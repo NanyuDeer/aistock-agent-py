@@ -35,7 +35,9 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 > **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
 >
-> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；收盘基准错峰晚于 sentiment_temp（15:45）。
+> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；sentiment_temp 已由 15:45 移至 **17:00**（close-snapshot 未就绪时 10/20 分钟重试，见下），16:05 收盘基准读取的是**截至前一交易日**的温度归档序列。
+>
+> **仓位口径同源 + 事件封顶（2026-11-03）**：morning/midday 沿用基准卡档位时，`position_band.text` 一并继承（`MasterRhythmCard.inherited_position_text`，优先级：中性沿用降级 > 继承的基准仓位 > 本地 `derive_position_text`），修复 11-02「档位=当日基准、仓位=前一日 K 线重算」的跨日错配；**事件当期（d=0）结果未落档时仍统一封顶「轻仓~三成」**——本地 derive 与继承文案同过该闸门（`engine.cap_position_text_on_event_no_result`），基准卡生成后才入库的事件不会因「沿用」被放过。
 >
 > **边界（2026-09-14 spec §10 / S1 未闭环）**：是否引入「仅有新事件才刷新」的事件门控属产品口径，尚未裁决；当前 morning/midday 仍按时点无条件执行，但**不再无条件改写主档位**。
 >
@@ -95,9 +97,9 @@ START → supervisor(quick_think, 意图路由)
   12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）；午后前瞻输出 opportunities 关键词（4-5 个 ≤8字）+ risks 短词（schema 2.1）
   12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
-  15:45 sentiment_temp（短线情绪温度计算，冰点≤20 触发 quick_think 预判，落盘 docs/agent-outputs/sentiment，次日晨报引用）
-  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；错峰晚于 sentiment_temp 15:45；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
+  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；早于 sentiment_temp 17:00，故当日温度次日才进入序列；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
   16:10 attribution_feedback（溯源弱反馈观测层，Task 7.1 / spec §13.3：聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表；**默认 `attribution_feedback_mode=observe`，只落建议、不改写溯源判定与预判、不应用权重**；`off` 可运维关闭；置于 16:00 prediction_validate 与 16:05 prediction_stats 之后。**背离报告（2026-09-18 补）**：`scripts/attribution_feedback.py` 输出第二段「溯源背离报告」（`divergence_entries` 口径 + `render_divergence_report`）——只列样本充分且命中率越阈值的单元（降权侧优先 → 背离强度 → 样本量 → unit_key），观望/样本不足只计数；含样本数与板块抽样，**只读审计产物，不改变溯源权重**；看"某板块"维度条目用 `--unit sector`）
+  17:00 sentiment_temp（短线情绪温度计算，close-snapshot 未就绪时 10/20 分钟重试共 3 次，落盘 docs/agent-outputs/sentiment，次日晨报/节奏卡引用；cron `0 17 * * 0-4`）
   次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
   12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
   18:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → **逐板块并行** run_sector_trace（`persist_report=False`，不自写报告）→ gather 后 `save_sector_trace_report` **一次**写 report_type="sector_trace" 当天报告（Spec D 板块溯源，2026-09-02；`display_report.sectors` = 当天全部已溯源板块，缺省单板块自写路径不变；2026-09-18 写入收敛：修同日多板块同键 upsert 互相覆盖、报告层只剩 1 个板块）；2026-09-03 组长裁决 20:30→18:30）

@@ -565,9 +565,9 @@ def _build_rhythm_card(
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
     - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
       事件（含 medium），供前端事件日历渲染；
-    - `temperature_series` 仍为已知空置字段（前端 v-if 兜底）：数据源已接入并被判定层
-      消费，尚未透出到卡片字段（接入立项 spec §7 S4/S5）；该属架构说明，
-      **不写入缺失清单**（对齐 spec §2.2 / G4）。
+    - `temperature_series` 已由 C1（2026-11-03）接线：读 sentiment 归档近 7 个交易日
+      序列透出到卡片字段（归档缺失/为空时返回空数组，不伪造；前端 v-if 自然隐藏），
+      不再属缺失清单（对齐 spec §2.2 / G4）。
     """
     from aistock_agent.schemas.rhythm_master import STAGE_TO_LEVEL  # F3 常量，score 派生同源
 

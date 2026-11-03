@@ -2,6 +2,32 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-11-03 — 情绪任务 17:00+重试 & 仓位口径同源（PR #156 合入 + 部署）
+
+**开发者**: NanyuDeer（合入/CI 修复/部署）、changer-collab（PR #156）
+
+### 修复 / 新增
+
+- **合并 PR #156**：`scheduler_sentiment_cron` 15:45 → **17:00**（close-snapshot 未就绪时按 10/20 分钟重试共 3 次，日志带 `attempt`）；`MasterRhythmCard` 新增 `inherited_position_text`，morning/midday 仓位随档位一并继承基准卡（优先级：中性沿用降级 > 继承的基准仓位 > 本地 `derive_position_text`），修复 11-02「档位=当日基准、仓位=前一日 K 线重算」的跨日错配。
+- **CI 回归修复**：新增 `rhythm_engine.cap_position_text_on_event_no_result`——事件当期（d=0）结果未落档时，继承来的仓位文案仍统一封顶「轻仓~三成」（原 `test_midday_event_no_result_caps_base` 因继承优先级变更而失败）。
+- **temperature_series 接线**（PR C1）：`_build_rhythm_card` 读 sentiment 归档近 7 个交易日序列透出卡片字段，归档缺失返回空数组不伪造；同步修正 docstring 的「已知空置」旧描述。
+
+### 文档
+
+- `AGENTS.md`：三时点时间线 sentiment_temp 更新为 17:00（并调整到 16:05/16:10 之后）；新增「仓位口径同源 + 事件封顶」约定。
+
+### 部署与验证（华为云 121.37.46.229）
+
+- bundle 增量部署至 `53c0b49`，`pm2 delete + pm2 start deploy/ecosystem.config.json + pm2 save`；`GET /health` 200、`/health/ready` scheduler ok；心跳 jobs 含 `sentiment_temp`；`config.py` cron = `0 17 * * 0-4`。
+- 情绪归档补跑：2026-10-30 42.8/低迷、2026-11-02 81.5/亢奋、2026-11-03 51.0/常温；11-02 三时点重跑后均为 `ebb / 建议仓位：轻仓~观望`，after_close `temperature_series` 非空。
+
+### 测试
+
+- PR 分支：`pytest tests -q` → **4084 passed / 5 skipped**；新增单测 + 集成回归均绿；ruff/mypy 改动文件通过。
+- 合并后关键用例（scheduler/sentiment/rhythm/health）→ **144 passed**；GitHub main CI 绿。
+
+---
+
 ## [main] 2026-11-03 — 调度器心跳可观测性修复（“P0 停摆”误判收口）
 
 **开发者**: NanyuDeer
