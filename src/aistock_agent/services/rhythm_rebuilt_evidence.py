@@ -8,6 +8,10 @@ from aistock_agent.schemas.rhythm_master import Certainty, EventAnchor, Position
 _CERTAINTY_SET = {"high", "medium", "low"}
 _CONF_SET = {"high", "medium", "low"}
 
+# 中性兜底沿用前一交易日阶段时的固定文案（单一副本：detect_stage 产出、worker 判路径共用，
+# 避免两处字面量漂移导致 stage_source 误判）。
+INHERIT_PREV_PHASE_REASON = "沿用前阶段（证据中性）"
+
 
 def _advance_ratio(breadth: dict[str, Any] | None) -> float | None:
     if not breadth:
@@ -110,7 +114,7 @@ def detect_stage(
     if score <= -0.5:
         return "ebb", "温度回落/量能转弱，退潮"
     if prev_phase is not None:
-        return prev_phase, "沿用前阶段（证据中性）"
+        return prev_phase, INHERIT_PREV_PHASE_REASON
     return None, "证据不足，无前阶段"
 
 

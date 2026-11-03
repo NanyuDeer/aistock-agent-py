@@ -14,7 +14,12 @@ from datetime import timedelta
 from typing import Any, cast, get_args
 
 from aistock_agent.config import settings
-from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence, Stage
+from aistock_agent.schemas.rhythm_master import (
+    MasterRhythmCard,
+    RhythmEvidence,
+    Stage,
+    StageSource,
+)
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
@@ -415,6 +420,7 @@ async def _compose_card(
         else:
             snapshot_missing = True
 
+    stage_source: StageSource | None = None
     if kline_short:
         stage: Stage | None = None
         stage_reason = "指数K线不足20根，趋势/量能判定不可用"
@@ -440,6 +446,14 @@ async def _compose_card(
             fg=fg if isinstance(fg, int | float) else None,
             prev_phase=prev_stage,
         )
+        # 判定路径（问题 1）：只有在本地依当日证据判出方向时才算 computed，
+        # 中性兜底沿用前一交易日卡的一律标记，供前端区分"沿用"与"判定"。
+        if stage is not None:
+            stage_source = (
+                "inherited_prev_day"
+                if stage_reason == ev.INHERIT_PREV_PHASE_REASON
+                else "computed"
+            )
         # 降级留痕：仅当 after_close 且「本地无阶段可归」且「前卡也拿不到阶段」时才提示——避免每卡
         # 常驻噪音（对齐 2026-09-14 裁决：已知空置字段不写入 data_missing）。两类根因分开措辞
         # （硬约束 12）：取数失败 ≠ 卡存在但阶段非法。
@@ -455,6 +469,7 @@ async def _compose_card(
         inherited = _inherit_basis_stage(slot, basis_resp)
         if inherited is not None:
             stage, stage_reason = cast("tuple[Stage | None, str]", inherited)
+            stage_source = "inherited_basis"
         elif basis_resp is None:
             basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
     event_confirm = _event_confirm(win.events)
@@ -478,7 +493,8 @@ async def _compose_card(
     if stage_inherit_note:
         missing.append(stage_inherit_note)
     evidence = RhythmEvidence(
-        stage=stage, stage_reason=stage_reason, certainty=cert, certainty_reason=cert_reason,
+        stage=stage, stage_reason=stage_reason, stage_source=stage_source,
+        certainty=cert, certainty_reason=cert_reason,
         position=position, event_anchors=anchors, data_missing=missing,
     )
     # 需求①：无清晰主线 → 仓位动作强制 hold（与「空仓观望」自洽，spec §5.2.2）
@@ -633,10 +649,15 @@ def _build_rhythm_card(
         except ValueError:
             event_d = None
         event_result = first_high.get("result")
-    pos_text = engine.derive_position_text(
-        index_closes=closes, mainline=mainline_facts,
-        event_d=event_d, event_result=str(event_result) if event_result is not None else None,
-    )
+    if card.evidence.stage_source == "inherited_prev_day" and card.evidence.position is not None:
+        # 问题 3（2026-11-03）：中性兜底沿用来的档位没有独立空头证据，
+        # 不套用「指数破位 → 空仓」的强口径，回落到 stage 档位自带的仓位文案。
+        pos_text = f"建议仓位：{card.evidence.position.text}"
+    else:
+        pos_text = engine.derive_position_text(
+            index_closes=closes, mainline=mainline_facts,
+            event_d=event_d, event_result=str(event_result) if event_result is not None else None,
+        )
 
     # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:
@@ -683,6 +704,8 @@ def _build_rhythm_card(
             "slope": None,
             "technical": tech,
             "reversal": reversal,
+            # 判定路径（问题 1）：前端据此区分「沿用」与「判定」，避免中性兜底被当成强结论
+            "stage_source": card.evidence.stage_source,
         },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
         # 已知空置（spec §7 S4/S5，仅 temperature_series）：字段未接线（数据源已接入，
