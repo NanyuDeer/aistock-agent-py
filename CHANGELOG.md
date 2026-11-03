@@ -2,6 +2,28 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-11-03 — 调度器心跳可观测性修复（“P0 停摆”误判收口）
+
+**开发者**: NanyuDeer
+
+### 修复
+
+- `src/aistock_agent/services/scheduler.py`：`scheduler_heartbeat` 同时写入进程内时间戳 `_scheduler_last_heartbeat`，`start_scheduler()` 成功后写入 `_scheduler_started_at`——**心跳不再只依赖日志落盘**。2026-10-19 16:05 服务器磁盘写满（ENOSPC）导致 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录；但调度实际持续运行（10-20 起每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物均照常落盘）→ 此前“调度停摆”结论被日志假象误导。心跳间隔超过 7 分钟会额外打 `scheduler_heartbeat_gap` 警告。
+- `src/aistock_agent/services/scheduler.py`：心跳 job 改为**先于** misfire 循环注册，并显式 `misfire_grace_time=3600`。原顺序使诊断 job 仍是默认 1s grace，event loop 繁忙 5 秒就会被跳过（2026-10-22 生产日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
+- `src/aistock_agent/api/routes.py`：`/health/ready` 新增 `scheduler` 检查项——调度启用但未 start → `error: scheduler not started`；启动后首心跳未到 → `pending`；心跳超过 7 分钟 → `error: heartbeat stale`；正常 → `ok (Ns)`；调度禁用/QA 模式 → `skipped`。
+
+### 测试
+
+- `tests/unit/test_scheduler.py` 新增 3 例：心跳写入时间戳、start 记录启动时间、心跳 job 拿到 1h misfire grace。
+- `tests/e2e/test_health.py` 新增 4 例：心跳过期 503、调度未启动 503、首心跳前 pending、调度禁用 skipped。
+- `pytest tests -q` → **4085 passed / 5 skipped**；`ruff check` 改动文件 → All checks passed。
+
+### 文档
+
+- `AGENTS.md` 新增“调度器心跳与 readiness”约定（含“日志无心跳 ≠ 调度停摆”的排查口径）。
+
+---
+
 ## [changer] 2026-10-16 — 外围资讯接入与大盘归因外围维度增强
 
 **开发者**: changer-collab

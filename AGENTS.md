@@ -631,6 +631,12 @@ pm2 logs aistock-agent --lines 50
 - **归因失败明细上报 `error_detail`（2026-10-06，可观测性）**：与上一条同源痛点——worker 外层 `except Exception` 会把一切非校验异常兜成**误导性**错误码 `LLM_OR_DEPENDENCY_UNAVAILABLE`，而真实异常文本（异常类名 + 消息）既没落库、日志也未留存，导致 `dead_letter` 事后**完全无法定位根因**（2026-09-30 海正生材 688203 即如此）。改动：`agents/workers/stock_trace.py` 的 `StockTraceWorkerOutcome` 新增可选 `error_detail`，通用 `except` 与 `VALIDATION_REJECTED` 路径均写 `f"{type(exc).__name__}: {exc}"`（**统一截断 500 字符**）；`workers/stock_trace_consumer.py` 的 `_handle_failure` / `_dead_letter` 透传；`services/stock_trace_client.py::StockTraceNodeClient.report_job` 按存在性**条件写入** `last_error_detail`（None/空串不写，保持既有载荷形状）。**不变量：错误码与 `REPLAYABLE_ERROR_CODES` 未改**（重投语义不变）。app-api 侧对应用 migration 024 新增 `stock_trace_jobs.last_error_detail`，并在 `PATCH /internal/stock-trace/jobs/:jobId` 服务端再截断一次 500（两处截断极限必须一致）。
   - **已知未覆盖**：占死信约 **85%** 的 `NODE_WRITEBACK_FAILED` 仍不带明细——`write_result` 失败时返回 `None` 而非抛异常，确无可捕异常文本；若要覆盖需改造 `write_result` 以回报 HTTP 状态/响应摘要（尚未决策）。
 
+### 调度器心跳与 readiness（2026-11-03，P0 误判收口）
+
+- **心跳不只写日志**：`scheduler_heartbeat`（每 2 分钟）同时写进程内时间戳 `_scheduler_last_heartbeat`；`start_scheduler()` 成功后写 `_scheduler_started_at`。`GET /health/ready` 的 `scheduler` 检查项：调度启用但未 start → `error: scheduler not started`；启动后首心跳未到 → `pending`；心跳超过 7 分钟（`HEARTBEAT_STALE_SECONDS=420`）→ `error: heartbeat stale`；正常 → `ok (Ns)`；`SCHEDULER_ENABLED=false` / `QA_MODE=true` → `skipped`。
+- **为什么**：2026-10-19 16:05 服务器磁盘写满（ENOSPC）使 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录，但调度实际持续运行（每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物照常落盘）。**“日志无心跳”不能证明调度停摆**，必须看 `/health/ready` 的 `scheduler`。
+- **misfire grace**：心跳 job 必须先于 misfire 循环注册（或显式 `misfire_grace_time=3600`）。默认 1s 会让诊断 job 在 event loop 繁忙时被跳过（2026-10-22 日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
+
 ## 关键约束
 
 - 禁止在 Python 重复实现 A 股数据获取逻辑
