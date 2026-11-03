@@ -124,7 +124,7 @@ def _stage_from_report(report: object) -> Stage | None:
 
 def _inherit_basis_stage(
     slot: str, basis_response: object
-) -> tuple[str | None, str] | None:
+) -> tuple[Stage, str, str | None] | None:
     """morning/midday 主档位沿用最近 after_close 基准（对齐 AGENTS.md 节奏大师三时点契约）。
 
     仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
@@ -133,6 +133,9 @@ def _inherit_basis_stage(
 
     与 `_stage_from_report` 的分工：本函数负责「同日基准」的语义与文案，阶段校验
     统一委托给 `_stage_from_report`（单一收口，防两处规则漂移）。
+
+    2026-11-03：第三个返回值是基准卡的 `position_band.text`。档位既已沿用，仓位也必须
+    同源——否则 morning/midday 用前一交易日 K 线重算仓位，会出现「同日档位一致、仓位打架」。
     """
     if slot not in {"morning", "midday"}:
         return None
@@ -149,7 +152,14 @@ def _inherit_basis_stage(
         return None
     basis_date = content.get("basis_date")
     reason = str(evidence.get("stage_reason") or "")
-    return stage, f"沿用收盘基准（{basis_date or '—'}）：{reason}"
+    position_text: str | None = None
+    basis_card = content.get("rhythm_card")
+    if isinstance(basis_card, dict):
+        band = basis_card.get("position_band")
+        if isinstance(band, dict):
+            text = band.get("text")
+            position_text = text if isinstance(text, str) and text else None
+    return stage, f"沿用收盘基准（{basis_date or '—'}）：{reason}", position_text
 
 
 def _amount_yi(raw: float | None) -> float:
@@ -471,11 +481,12 @@ async def _compose_card(
     # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
     # D1（2026-11-03）：去掉 `and stage is not None` —— 本地判空时恰恰最需要基准兜底，
     # 否则盘前/午间卡恒为 stage=null，前端只能回退旧卡。
+    inherited_position_text: str | None = None
     if slot in {"morning", "midday"}:
         basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
         inherited = _inherit_basis_stage(slot, basis_resp)
         if inherited is not None:
-            stage, stage_reason = cast("tuple[Stage | None, str]", inherited)
+            stage, stage_reason, inherited_position_text = inherited
             stage_source = "inherited_basis"
         elif basis_resp is None:
             basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
@@ -515,6 +526,7 @@ async def _compose_card(
             basis_date=evidence_date, target_date=target_date, refresh_slot=slot,
             evidence=evidence, synthesis=synthesis if synthesis_ok else None,
             synthesis_available=synthesis_ok, mainline_facts=mainline,
+            inherited_position_text=inherited_position_text,
         ),
         rows,
         win,
@@ -664,11 +676,21 @@ def _build_rhythm_card(
         # 问题 3（2026-11-03）：中性兜底沿用来的档位没有独立空头证据，
         # 不套用「指数破位 → 空仓」的强口径，回落到 stage 档位自带的仓位文案。
         pos_text = f"建议仓位：{card.evidence.position.text}"
+    elif card.inherited_position_text:
+        # 2026-11-03：盘前/午间档位沿用基准卡时，仓位也必须同源。
+        # 否则会出现「档位＝11-02 收盘基准、仓位＝10-30 均线重算」的跨日错配，
+        # 同一日三个时点给出互相矛盾的仓位建议。
+        pos_text = card.inherited_position_text
     else:
         pos_text = engine.derive_position_text(
             index_closes=closes, mainline=mainline_facts,
             event_d=event_d, event_result=str(event_result) if event_result is not None else None,
         )
+    # 事件当期（d=0）未落档 → 统一封顶「轻仓~三成」：继承来的仓位文案同样过闸门。
+    # 基准卡生成时事件可能尚未入库（盘后财报等），次日午间才知道的事件不能因
+    # 「沿用基准仓位」被放过（spec step3；test_midday_event_no_result_caps_base 契约）。
+    if event_d == 0 and event_result not in engine.EVENT_RESULT_ENUM:
+        pos_text = engine.cap_position_text_on_event_no_result(pos_text)
 
     # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:

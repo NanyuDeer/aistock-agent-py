@@ -262,9 +262,24 @@ def test_inherit_basis_stage_only_for_intraday_slots():
                         "basis_date": "2026-09-11"}}
     # after_close 不继承
     assert _inherit_basis_stage("after_close", resp) is None
-    # morning/midday 继承
-    assert _inherit_basis_stage("morning", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
-    assert _inherit_basis_stage("midday", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
+    # morning/midday 继承（第三项为基准卡仓位文案，无 rhythm_card 时为 None）
+    assert _inherit_basis_stage("morning", resp) == (
+        "ice", "沿用收盘基准（2026-09-11）：冰点筑底", None,
+    )
+    assert _inherit_basis_stage("midday", resp) == (
+        "ice", "沿用收盘基准（2026-09-11）：冰点筑底", None,
+    )
+    # 基准卡带 position_band → 一并继承，保证档位与仓位同源
+    resp_with_band = {
+        "content": {
+            "evidence": {"stage": "ebb", "stage_reason": "退潮"},
+            "basis_date": "2026-11-02",
+            "rhythm_card": {"position_band": {"text": "建议仓位：轻仓~观望"}},
+        }
+    }
+    assert _inherit_basis_stage("morning", resp_with_band) == (
+        "ebb", "沿用收盘基准（2026-11-02）：退潮", "建议仓位：轻仓~观望",
+    )
     # 基准缺失 / stage 为空 → None
     assert _inherit_basis_stage("morning", None) is None
     assert _inherit_basis_stage("morning", {"content": {"evidence": {"stage": None}}}) is None

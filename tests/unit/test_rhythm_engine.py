@@ -409,3 +409,16 @@ def test_project_event_window_importance_min_and_limit() -> None:
     assert [e["title"] for e in project_event_window(events, importance_min="high", limit=5)] == ["FOMC 议息"]
     # 缺省 importance → 按 medium 参与排序（不过滤时不丢弃）
     assert [e["title"] for e in project_event_window([{"date": "2026-09-20", "title": "无 importance"}])] == ["无 importance"]
+
+def test_cap_position_text_on_event_no_result() -> None:
+    """事件当期（d=0）未落档：继承来的仓位文案也要过「封顶轻仓」闸门（spec step3）。"""
+    cap = rhythm_engine.cap_position_text_on_event_no_result
+    # 高于轻仓 → 封顶到阶梯 1
+    assert cap("建议仓位：七成~八成") == "建议仓位：轻仓~三成"
+    assert cap("建议仓位：6~8 成，顺势持有") == "建议仓位：轻仓~三成"
+    assert cap("建议仓位：半仓~减仓，防退潮回落") == "建议仓位：轻仓~三成"
+    # 轻仓及以下 → 原样保留（不得反向放宽）
+    assert cap("建议仓位：轻仓~观望") == "建议仓位：轻仓~观望"
+    assert cap("建议仓位：空仓观望") == "建议仓位：空仓观望"
+    # 未登记文案不猜、原样返回（枚举只剩本仓两套来源）
+    assert cap("建议仓位：自定义仓位") == "建议仓位：自定义仓位"

@@ -88,3 +88,7 @@ class MasterRhythmCard(BaseModel):
     # 确定性主线事实（judge_mainline 输出 + 胜出候选 nav，worker 内部接线用；
     # 不直接序列化进 content，供 _build_rhythm_card 派生仓位文案/技术佐证）
     mainline_facts: dict[str, Any] | None = None
+    # 盘前/午间沿用收盘基准时，一并沿用基准卡的仓位文案（2026-11-03）：
+    # 档位来自 after_close 卡，仓位却用前一交易日 K 线重算会造成同日三时点口径打架，
+    # 故继承时把基准卡 position_band.text 一并带过来，保证档位与仓位同源。
+    inherited_position_text: str | None = None
