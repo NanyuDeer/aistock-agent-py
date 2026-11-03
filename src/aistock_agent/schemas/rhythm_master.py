@@ -10,6 +10,13 @@ Certainty = Literal["high", "medium", "low"]
 Direction = Literal["bullish", "bearish", "neutral"]
 PositionAction = Literal["add", "hold", "reduce"]
 
+# 阶段判定路径（2026-11-03）：区分「有独立证据算出」与「沿用别处结论」，
+# 避免把中性兜底的沿用当成强判定展示（问题 1）。
+# - computed：本地 detect_stage 依当日证据判出方向
+# - inherited_prev_day：本地证据中性 → 沿用前一交易日 after_close 卡的主阶段
+# - inherited_basis：盘前/午间 → 沿用同日 after_close 收盘基准卡的主阶段
+StageSource = Literal["computed", "inherited_prev_day", "inherited_basis"]
+
 # F3 裁决（2026-09-05）：score 由 level 派生同源（score=LEVEL_IDX×20，0-100 语义），
 # Stage→前端五档映射表（对齐 frontend RhythmCard.vue LEVEL_META：ice/低/常/活/亢）。
 # 确定性映射，禁止在 LLM/提示词层做。None（证据不足/数据缺）→ None（前端灰格）。
@@ -40,6 +47,8 @@ class EventAnchor(BaseModel):
 class RhythmEvidence(BaseModel):
     stage: Stage | None = None
     stage_reason: str = ""
+    # 判定路径（问题 1）：None = 无阶段；computed = 本地独立判定；其余为沿用。
+    stage_source: StageSource | None = None
     certainty: Certainty | None = None
     certainty_reason: str = ""
     position: PositionBand | None = None
