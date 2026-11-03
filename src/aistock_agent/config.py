@@ -416,6 +416,10 @@ class Settings(BaseSettings):
     # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
     rhythm_output_dir: str = "docs/agent-outputs/rhythm"
 
+    # 节奏卡「沿用前阶段」的时效窗口（交易日）：前卡基准日距今超过该值则不再沿用，
+    # 防止一张错卡沿链无限传播（2026-11-03 D2）。
+    rhythm_prev_phase_max_gap_days: int = 3
+
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）
     prediction_conf_cap_short: str = "high"

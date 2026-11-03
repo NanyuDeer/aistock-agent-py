@@ -439,7 +439,12 @@ async def _compose_card(
         if slot == "after_close":
             prev_date = prev_trading_day(date_cls.fromisoformat(run_date)).isoformat()
             prev_resp = await node_api.get_rhythm_report(prev_date, "after_close")
-            prev_stage = _stage_from_report(prev_resp)
+            # D2 双闸（2026-11-03）：时效 + 拒绝二手阶段，防止错卡沿链传播
+            prev_stage = ev.resolve_prev_phase(
+                prev_resp,
+                run_date=run_date,
+                max_gap_days=settings.rhythm_prev_phase_max_gap_days,
+            )
         stage, stage_reason = ev.detect_stage(
             breadth=breadth, closes=closes, amounts=amounts,
             sentiment_scores=sentiment_scores,
@@ -464,7 +469,9 @@ async def _compose_card(
                 else "前一交易日基准卡无有效主阶段（主阶段未沿用）"
             )
     # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
-    if slot in {"morning", "midday"} and stage is not None:
+    # D1（2026-11-03）：去掉 `and stage is not None` —— 本地判空时恰恰最需要基准兜底，
+    # 否则盘前/午间卡恒为 stage=null，前端只能回退旧卡。
+    if slot in {"morning", "midday"}:
         basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
         inherited = _inherit_basis_stage(slot, basis_resp)
         if inherited is not None:

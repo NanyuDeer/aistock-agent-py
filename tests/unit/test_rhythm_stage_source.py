@@ -215,3 +215,34 @@ async def test_position_band_keeps_gate_when_stage_computed():
     rhythm_card = _build_rhythm_card(card, win, rows)
     assert rhythm_card["phase_evidence"]["stage_source"] == "computed"
     assert rhythm_card["position_band"]["text"].startswith("建议仓位：")
+
+
+@pytest.mark.asyncio
+async def test_morning_inherits_basis_when_local_stage_is_none():
+    """D1：盘前本地判空时也应继承同日收盘基准（改前会直接留空）。"""
+    basis = _prev_report("ebb", shanghai_today().isoformat())
+    card = await _run_compose(
+        "morning",
+        _mild_kline(),
+        {"total_count": 100, "advance_count": 50},
+        45,
+        basis,
+    )
+    assert card.evidence.stage == "ebb"
+    assert card.evidence.stage_source == "inherited_basis"
+    assert "沿用收盘基准" in card.evidence.stage_reason
+
+
+@pytest.mark.asyncio
+async def test_morning_still_prefers_basis_over_local_stage():
+    """D1 不放宽语义：本地有方向时，同日档位仍以收盘基准为准（G2 契约）。"""
+    basis = _prev_report("ebb", shanghai_today().isoformat())
+    card = await _run_compose(
+        "morning",
+        _bull_kline(),
+        {"total_count": 100, "advance_count": 90},
+        75,
+        basis,
+    )
+    assert card.evidence.stage == "ebb"
+    assert card.evidence.stage_source == "inherited_basis"
