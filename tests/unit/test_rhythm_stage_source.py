@@ -73,6 +73,21 @@ def _prev_report(stage: str, basis_date: str, reason: str = "温度回落/量能
     }
 
 
+def _prev_report_with_band(
+    stage: str,
+    basis_date: str,
+    position_text: str,
+    reason: str = "温度回落/量能转弱，退潮",
+):
+    return {
+        "content": {
+            "basis_date": basis_date,
+            "evidence": {"stage": stage, "stage_reason": reason},
+            "rhythm_card": {"position_band": {"text": position_text}},
+        }
+    }
+
+
 def _patches(kline, breadth, fg, rhythm_report):
     return (
         patch(
@@ -286,3 +301,43 @@ async def test_temperature_series_empty_when_archive_missing(monkeypatch, tmp_pa
     )
     rhythm_card = rhythm_master._build_rhythm_card(card, win, rows)
     assert rhythm_card["temperature_series"] == []
+
+
+@pytest.mark.asyncio
+async def test_morning_inherits_basis_position_band():
+    """档位继承自基准卡时，仓位也必须同源（不得用前一交易日 K 线重算）。"""
+    from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
+
+    basis = _prev_report_with_band("ebb", shanghai_today().isoformat(), "建议仓位：轻仓~观望")
+    card, rows, win = await _run_compose_full(
+        "morning",
+        _mild_kline(),
+        {"total_count": 100, "advance_count": 50},
+        45,
+        basis,
+    )
+    assert card.evidence.stage_source == "inherited_basis"
+    assert card.inherited_position_text == "建议仓位：轻仓~观望"
+
+    rhythm_card = _build_rhythm_card(card, win, rows)
+    # 若走本地 derive_position_text（破位闸门）会得到「空仓观望」，与基准卡打架
+    assert rhythm_card["position_band"]["text"] == "建议仓位：轻仓~观望"
+
+
+@pytest.mark.asyncio
+async def test_morning_falls_back_to_local_position_when_basis_has_no_band():
+    """基准卡缺 position_band（旧卡）→ 回退本地计算，不伪造。"""
+    from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
+
+    basis = _prev_report("ebb", shanghai_today().isoformat())  # 无 rhythm_card
+    card, rows, win = await _run_compose_full(
+        "morning",
+        _mild_kline(),
+        {"total_count": 100, "advance_count": 50},
+        45,
+        basis,
+    )
+    assert card.evidence.stage_source == "inherited_basis"
+    assert card.inherited_position_text is None
+    rhythm_card = _build_rhythm_card(card, win, rows)
+    assert rhythm_card["position_band"]["text"].startswith("建议仓位：")
