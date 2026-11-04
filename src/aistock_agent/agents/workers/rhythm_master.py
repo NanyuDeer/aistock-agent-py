@@ -480,6 +480,31 @@ def _load_sentiment_series(
     return series, scores, consecutive_ice, latest_phase
 
 
+def _temperature_note(series: list[dict[str, Any]]) -> str | None:
+    """证据区温度因子一行（T7 / 职责 spec §3）。
+
+    温度是 `detect_stage` 的 sentiment 因子来源（判定用的是**近 N 日斜率**，不是当日
+    绝对值），已从卡片主视觉移除但保留在证据链中，让用户能看懂「为什么判这个阶段」。
+
+    口径三条：
+    - 只给数值与差值，**不引分档词**（冰点/低迷/常温/活跃/亢奋 归情绪温度，节奏侧
+      不得借用该套语汇，否则又回到「一名多义」）
+    - 明确标「近 N 日」，不谎称是 7 日 —— 归档可能缺日，按实际样本数报
+    - 序列为空 → None（前端不渲染该行，不伪造）
+    """
+    scores: list[float] = []
+    for item in series:
+        raw = item.get("score")
+        if isinstance(raw, int | float):
+            scores.append(float(raw))
+    if not scores:
+        return None
+    if len(scores) == 1:
+        return f"情绪温度 {scores[-1]:.1f}"
+    delta = scores[-1] - scores[0]
+    return f"情绪温度 {scores[-1]:.1f}（近 {len(scores)} 日 {delta:+.1f}）"
+
+
 def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
     """按量能三档 + 阶段给量价确认方向（确定性，不靠 LLM）。"""
     if len(amounts) < 20 or stage is None:
@@ -1040,6 +1065,10 @@ def _build_rhythm_card(
     # 前端 v-if 渲染早已就绪。归档缺失/为空时返回空数组，不伪造（前端自然隐藏该区块）。
     temp_series, _, _, _ = _load_sentiment_series(days=7)
 
+    # DEPRECATED（2026-11-04，职责重定义 T4）：level / score 仅为未升级客户端兼容保留产出，
+    # 前端已零引用。切勿置 None 或删除 —— uni-app 三端，App 用户不升级即长期跑旧版，
+    # 小程序有审核延迟，置 null 会让未升级用户的日历整片变灰。语义废弃靠「前端零引用」
+    # 完成，接口上保留原值。新代码请用 position_index / position_ledger。
     level_entry = STAGE_TO_LEVEL.get(card.evidence.stage)
     level = level_entry["level"] if level_entry else None
     score = level_entry["score"] if level_entry else None
@@ -1197,6 +1226,7 @@ def _build_rhythm_card(
     next_anchor = engine.build_next_event_anchor(win.events, card.target_date)
     event_high_hint = engine.build_event_hint(next_anchor)
     return {
+        # DEPRECATED（2026-11-04 T4）：见上方 level_entry 处说明，仅兼容旧客户端，勿删勿置 null
         "score": score,
         # §5.6：phase 供前端情绪周期块（stage 原样透出，含 launch/rally）
         "phase": card.evidence.stage,
@@ -1227,6 +1257,10 @@ def _build_rhythm_card(
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
         # C1：近 7 日情绪温度序列（情绪强度维度，与趋势档位分开表达）；无归档 → 空数组
         "temperature_series": temp_series,
+        # T7（spec §3）：证据区温度因子一行。温度是 detect_stage 的 sentiment 因子来源，
+        # 已从主视觉移除但保留在证据链中；只给数值与差值，**不引分档词**（冰点/低迷等
+        # 归情绪温度，节奏侧不得再借用语汇）。无归档 → None（前端不渲染该行）。
+        "temperature_note": _temperature_note(temp_series),
         # 展示通道：全量展示窗（需求 2，不限 5 交易日；display_events 为空=旧构造/
         # 分析子窗/旧测试替身场景 → 回退 events 保持契约稳定）。过滤 high/medium +
         # 上限 30（G1 防 earnings 密集噪音 / 列表爆炸）；档位通道见上方 win_highs（仅 high）。

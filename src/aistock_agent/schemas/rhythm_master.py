@@ -18,8 +18,13 @@ PositionAction = Literal["add", "hold", "reduce"]
 StageSource = Literal["computed", "inherited_prev_day", "inherited_basis"]
 
 # F3 裁决（2026-09-05）：score 由 level 派生同源（score=LEVEL_IDX×20，0-100 语义），
-# Stage→前端五档映射表（对齐 frontend RhythmCard.vue LEVEL_META：ice/低/常/活/亢）。
 # 确定性映射，禁止在 LLM/提示词层做。None（证据不足/数据缺）→ None（前端灰格）。
+#
+# DEPRECATED（2026-11-04，职责重定义 T4）：level / score 已不是产品概念。
+#   - 节奏的核心产出是仓位档位（position_index 0-4），上色/短码一律走它
+#   - 本表仅为未升级客户端兼容而保留产出，**不得删除、不得置 None**
+#     （uni-app 三端，App 不升级即长期跑旧版，置 null 会让其日历变灰）
+#   - 新代码禁止消费；前端已零引用，靠「零引用」完成语义废弃
 STAGE_TO_LEVEL: dict[str | None, dict[str, Any] | None] = {
     "ice": {"level": "ice", "score": 0},
     "ebb": {"level": "low", "score": 20},
