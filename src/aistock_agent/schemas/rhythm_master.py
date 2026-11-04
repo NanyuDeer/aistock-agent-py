@@ -34,6 +34,61 @@ class PositionBand(BaseModel):
     text: str
     action: PositionAction
     direction: Direction
+    # 仓位档位序号（0-4，因果输出 spec §4.1）；None = 未经 derive_position_index 产出
+    index: int | None = None
+
+
+class LedgerItem(BaseModel):
+    """仓位账本单行（因果输出 spec §4.1）：原生数值 + 判定 + 对档位的作用。
+
+    status 语义：blocking=正在压低档位 / neutral=有数据但无影响 /
+    supporting=在抬高档位 / missing=数据不可用（**不得**当作 neutral）。
+    """
+
+    key: Literal["trend", "mainline", "event", "breadth"]
+    value_text: str
+    judgement: str
+    effect: str
+    status: Literal["blocking", "neutral", "supporting", "missing"]
+
+
+class CandidateOutlook(BaseModel):
+    name: str
+    excess: float
+
+
+class WatchPoint(BaseModel):
+    """变奏观察点（因果输出 spec §4.2）：当前未满足项 + 当前距离。"""
+
+    key: Literal["mainline", "gate", "event"]
+    condition: str
+    current_text: str
+    sufficient_alone: bool
+    candidates: list[CandidateOutlook] | None = None
+
+
+class PositionLedger(BaseModel):
+    """仓位推导账本（因果输出 spec §4.1）：position_index 的唯一真相源。
+
+    items 恒 4 项且顺序固定 trend / mainline / event / breadth；缺失项
+    status=missing 显式标注，不省略键。
+    """
+
+    items: list[LedgerItem]
+    base_index: int | None = None
+    adjust: int = 0
+    final_index: int | None = None
+    # 仅指数硬闸门（close<ma20 且 ma5<ma10<ma20）；语义不含主线破位/数据不足
+    gate_hit: bool = False
+    # 主线板块破位；None = 状态未知（无主线输入）
+    mainline_breakdown: bool | None = None
+    # K 线不足 20 根（趋势不可判，H5 禁止 +1）
+    insufficient: bool = False
+    # 真实「禁止 +1」标志 = gate_hit or mainline_breakdown or insufficient
+    gate_blocked: bool = False
+    mainline_state: str | None = None
+    watch_points: list[WatchPoint] = Field(default_factory=list)
+    ledger_version: str = "1.0"
 
 
 class EventAnchor(BaseModel):

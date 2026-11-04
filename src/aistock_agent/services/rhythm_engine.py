@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
+from aistock_agent.schemas.rhythm_master import LedgerItem, PositionLedger
 from aistock_agent.utils.date import trading_days_between
 
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
@@ -164,22 +165,33 @@ def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, A
     return {"direction": d, "change": change, "band": band}
 
 
-def derive_position_text(
+def derive_position_index(
     *,
     index_closes: list[float],
     mainline: dict[str, object] | None,
     event_d: int | None,
     event_result: str | None,
-) -> str:
-    """仓位阶梯文案（spec §5.2.2 合成序，H1 绝对锚定；H11：只作用于 stage→level 之后的文案层）。
+    breadth: dict[str, Any] | None = None,
+) -> tuple[int, PositionLedger]:
+    """仓位档位序号 0-4 + 推导账本（因果输出 spec §4.1，H1 绝对锚定）。
 
     step0 指数趋势定 base（多头 3 / 其余 2 / 破位 0）→ step1 硬闸门（指数
     close<ma20 且 ma5<ma10<ma20，或主线板块破位）可否决一切 +1 → step2 主线
     调整（strong +1 / weak 0 / none 强制 0）→ step3 事件档位（d∈{1,2} 且强主线
     +1；d==0 未落档 → min(base,1)；d==0 已落档 → 按预期差方向相对 base 调档）→
-    step4 clamp 后取阶梯文案。
+    step4 clamp 后取序号。
+
+    **判据唯一真相源**：本函数是 step0-4 的唯一实现，账本只是把中间量
+    （base / adj / gate_hit / mainline_state）结构化，不得在此新增或改动判据。
+
+    breadth 仅用于账本展示（宽度只参与 certainty，**不参与档位判定**），
+    不影响返回值中的序号。
     """
-    if len(index_closes) >= 20:
+    bars = len(index_closes)
+    trend_known = bars >= 20
+    c: float | None = None
+    ma20: float | None = None
+    if trend_known:
         c = index_closes[-1]
         ma5 = sum(index_closes[-5:]) / 5
         ma10 = sum(index_closes[-10:]) / 10
@@ -197,8 +209,15 @@ def derive_position_text(
     else:
         base = 2
     # step1 硬闸门：命中 → base=0 且禁止 +1；数据不足（<20 根）→ 闸门状态未知 → 禁止 +1（H5）
-    gate_blocked = gate_hit or ml_breakdown or len(index_closes) < 20
-    state = (mainline or {}).get("state")
+    gate_blocked = gate_hit or ml_breakdown or bars < 20
+    # 闭集归一（2026-11-04 裁决）：账本只允许 established / none / unavailable / None，
+    # 未知态按「数据不可用」处理，不把原始值透出到卡面。
+    state: str | None = None
+    raw_state = (mainline or {}).get("state")
+    if raw_state in ("established", "none", "unavailable"):
+        state = str(raw_state)
+    elif raw_state is not None:
+        state = "unavailable"
     strength = (mainline or {}).get("strength")
     adj = 0
     if not gate_blocked:
@@ -223,7 +242,330 @@ def derive_position_text(
     if event_d == 0 and event_result not in EVENT_RESULT_ENUM:
         final = min(final, 1)
     final = max(LADDER_MIN, min(LADDER_MAX, final))
-    return "建议仓位：" + POSITION_LADDER[final]
+    ledger = _build_position_ledger(
+        final=final,
+        base=base,
+        adj=adj,
+        gate_hit=gate_hit,
+        ml_breakdown=ml_breakdown,
+        gate_blocked=gate_blocked,
+        trend_known=trend_known,
+        bull=bull,
+        bars=bars,
+        close=c,
+        ma20=ma20,
+        state=state,
+        strength=strength,
+        mainline=mainline,
+        event_d=event_d,
+        event_result=event_result,
+        breadth=breadth,
+    )
+    return final, ledger
+
+
+def _build_position_ledger(
+    *,
+    final: int,
+    base: int,
+    adj: int,
+    gate_hit: bool,
+    ml_breakdown: bool,
+    gate_blocked: bool,
+    trend_known: bool,
+    bull: bool,
+    bars: int,
+    close: float | None,
+    ma20: float | None,
+    state: object,
+    strength: object,
+    mainline: dict[str, object] | None,
+    event_d: int | None,
+    event_result: str | None,
+    breadth: dict[str, Any] | None,
+) -> PositionLedger:
+    """把 step0-4 的中间量组织成账本（纯展示层，不参与任何判定）。
+
+    只做「已算出的量 → 文本」的翻译；任何判定分支必须留在 `derive_position_index`，
+    防止账本反向成为第二真相源。
+    """
+    # 闸门禁止 +1 的具体原因（用于 miss/supporting 说明）
+    if gate_hit:
+        block_reason = "闸门命中"
+    elif ml_breakdown:
+        block_reason = "主线破位"
+    elif not trend_known:
+        block_reason = "趋势数据不足"
+    else:
+        block_reason = ""
+    trend_base = 3 if bull else 2
+
+    # —— trend ——
+    if close is not None and ma20 is not None:
+        trend_value = f"{close:.2f} / ma20 {ma20:.2f}"
+    else:
+        trend_value = f"仅 {bars} 根 K 线（需 20）"
+    if gate_hit:
+        trend_item = LedgerItem(
+            key="trend",
+            value_text=trend_value,
+            judgement="闸门命中",
+            effect="base→0，禁止 +1",
+            status="blocking",
+        )
+    elif not trend_known:
+        trend_item = LedgerItem(
+            key="trend",
+            value_text=trend_value,
+            judgement="数据不可用",
+            effect="base=2（趋势不可判），禁止 +1",
+            status="missing",
+        )
+    elif ml_breakdown:
+        trend_item = LedgerItem(
+            key="trend",
+            value_text=trend_value,
+            judgement="多头排列" if bull else "震荡",
+            effect=f"base={trend_base}，被主线破位覆盖",
+            status="neutral",
+        )
+    else:
+        trend_item = LedgerItem(
+            key="trend",
+            value_text=trend_value,
+            judgement="多头排列" if bull else "震荡",
+            effect=f"base={trend_base}",
+            status="supporting" if bull else "neutral",
+        )
+
+    # —— mainline ——
+    ml_name = (mainline or {}).get("name")
+    ml_excess = (mainline or {}).get("excess")
+    if ml_breakdown:
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text=f"{ml_name} 破位" if ml_name else "破位标记",
+            judgement="主线破位",
+            effect="base→0，禁止 +1",
+            status="blocking",
+        )
+    elif state == "none":
+        excess_text = f"（最高超额 +{ml_excess}pct）" if ml_excess is not None else ""
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text=f"无清晰主线{excess_text}",
+            judgement="未成立",
+            effect="base 强制 0",
+            status="blocking",
+        )
+    elif state == "established" and strength == "strong":
+        if gate_blocked:
+            mainline_item = LedgerItem(
+                key="mainline",
+                value_text=f"{ml_name or '主线'}（成立·强）",
+                judgement="成立·强",
+                effect=f"不改档（{block_reason}，禁止 +1）",
+                status="neutral",
+            )
+        elif event_d == 0 and event_result in EVENT_RESULT_ENUM:
+            mainline_item = LedgerItem(
+                key="mainline",
+                value_text=f"{ml_name or '主线'}（成立·强）",
+                judgement="成立·强",
+                effect="+1（被事件落档覆盖）",
+                status="neutral",
+            )
+        else:
+            mainline_item = LedgerItem(
+                key="mainline",
+                value_text=f"{ml_name or '主线'}（成立·强）",
+                judgement="成立·强",
+                effect="+1",
+                status="supporting",
+            )
+    elif state == "established":
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text=f"{ml_name or '主线'}（成立·弱）",
+            judgement="成立·弱",
+            effect="不改档",
+            status="neutral",
+        )
+    else:
+        # None / "unavailable"：数据不可用必须显式标注，不得伪装中性
+        # （未知态已在入口归一为 "unavailable"，此处不再透出原始值）
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text="无主线数据" if state is None else "候选数据不足",
+            judgement="数据不可用",
+            effect="不改档",
+            status="missing",
+        )
+
+    # —— event ——
+    event_item = _build_event_ledger_item(
+        event_d=event_d,
+        event_result=event_result,
+        gate_blocked=gate_blocked,
+        block_reason=block_reason,
+        state=state,
+        strength=strength,
+    )
+
+    # —— breadth ——
+    breadth_item = _build_breadth_ledger_item(breadth)
+
+    return PositionLedger(
+        items=[trend_item, mainline_item, event_item, breadth_item],
+        base_index=base,
+        adjust=adj,
+        final_index=final,
+        gate_hit=gate_hit,
+        mainline_breakdown=None if mainline is None else ml_breakdown,
+        insufficient=not trend_known,
+        gate_blocked=gate_blocked,
+        mainline_state=state if isinstance(state, str) else None,
+        watch_points=[],
+        ledger_version="1.0",
+    )
+
+
+def _breadth_number(value: object) -> float | None:
+    """数值化（bool 不是比例，按缺失处理）。"""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _breadth_ratio(breadth: dict[str, Any] | None) -> float | None:
+    """上涨占比（0-1）：优先 advance_ratio，缺失时按 advance_count/total_count 算。"""
+    if not breadth:
+        return None
+    ratio = _breadth_number(breadth.get("advance_ratio"))
+    if ratio is not None and 0.0 <= ratio <= 1.0:
+        return ratio
+    total = _breadth_number(breadth.get("total_count"))
+    advance = _breadth_number(breadth.get("advance_count"))
+    if total is not None and advance is not None and total > 0:
+        value = advance / total
+        if 0.0 <= value <= 1.0:
+            return value
+    return None
+
+
+def _build_breadth_ledger_item(breadth: dict[str, Any] | None) -> LedgerItem:
+    """宽度项账本：只展示，不参与档位判定（宽度仅参与 certainty）。"""
+    ratio = _breadth_ratio(breadth)
+    if ratio is None:
+        return LedgerItem(
+            key="breadth",
+            value_text="上涨占比不可用",
+            judgement="数据不可用",
+            effect="仅参与 certainty，不改档",
+            status="missing",
+        )
+    if ratio >= 0.6:
+        judgement = "偏强"
+    elif ratio <= 0.35:
+        judgement = "偏弱"
+    else:
+        judgement = "中性"
+    return LedgerItem(
+        key="breadth",
+        value_text=f"上涨占比 {ratio * 100:.0f}%",
+        judgement=judgement,
+        effect="仅参与 certainty，不改档",
+        status="neutral",
+    )
+
+
+def _build_event_ledger_item(
+    *,
+    event_d: int | None,
+    event_result: str | None,
+    gate_blocked: bool,
+    block_reason: str,
+    state: object,
+    strength: object,
+) -> LedgerItem:
+    """事件项账本：只翻译 step3 已产生的效果，不做判定。"""
+    if event_d is None:
+        return LedgerItem(
+            key="event",
+            value_text="无事件 / d 不可用",
+            judgement="数据缺失",
+            effect="不改档",
+            status="missing",
+        )
+    if event_d == 0 and event_result in EVENT_RESULT_ENUM:
+        value_text = f"d=0，结果 {event_result}"
+    elif event_d == 0:
+        value_text = "d=0，事件未落档"
+    elif event_d in (1, 2):
+        value_text = f"d={event_d}，窗口内"
+    else:
+        value_text = f"d={event_d}，窗口外"
+
+    if gate_blocked:
+        detail = "事件档位未生效" if event_d == 0 else "禁止 +1"
+        return LedgerItem(
+            key="event", value_text=value_text, judgement="无修正",
+            effect=f"不改档（{block_reason}，{detail}）", status="neutral",
+        )
+    if event_d in (1, 2):
+        if state == "established" and strength == "strong":
+            return LedgerItem(
+                key="event", value_text=value_text, judgement="事件 +1",
+                effect="+1", status="supporting",
+            )
+        return LedgerItem(
+            key="event", value_text=value_text, judgement="无修正",
+            effect="不改档（主线未强）", status="neutral",
+        )
+    if event_d == 0 and event_result in EVENT_RESULT_ENUM:
+        direction = EVENT_RESULT_DIRECTION[event_result]
+        if direction == "bullish":
+            return LedgerItem(
+                key="event", value_text=value_text, judgement="事件 +1",
+                effect=f"adj=+1（{event_result}）", status="supporting",
+            )
+        if direction == "bearish":
+            return LedgerItem(
+                key="event", value_text=value_text, judgement="事件 -1",
+                effect=f"adj=-1（{event_result}）", status="blocking",
+            )
+        return LedgerItem(
+            key="event", value_text=value_text, judgement="无修正",
+            effect=f"adj=0（{event_result}）", status="neutral",
+        )
+    if event_d == 0:
+        return LedgerItem(
+            key="event", value_text=value_text, judgement="封顶轻仓",
+            effect="base 封顶 1，最终档位 ≤1", status="blocking",
+        )
+    return LedgerItem(
+        key="event", value_text=value_text, judgement="无修正",
+        effect="不改档", status="neutral",
+    )
+
+
+def derive_position_text(
+    *,
+    index_closes: list[float],
+    mainline: dict[str, object] | None,
+    event_d: int | None,
+    event_result: str | None,
+) -> str:
+    """仓位阶梯文案（薄包装，判定全部在 `derive_position_index`）。
+
+    保留纯字符串入口供既有调用方/测试使用；文案与序号必同源（同一次 idx 取
+    `POSITION_LADDER[idx]`），禁止另行重算。
+    """
+    idx, _ = derive_position_index(
+        index_closes=index_closes, mainline=mainline,
+        event_d=event_d, event_result=event_result,
+    )
+    return "建议仓位：" + POSITION_LADDER[idx]
 
 
 def detect_phase(

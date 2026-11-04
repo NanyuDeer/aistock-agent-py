@@ -201,6 +201,8 @@ def detect_certainty(
 def compute_position(
     *, stage: Stage | None, certainty: Certainty | None,
 ) -> PositionBand | None:
+    """DEPRECATED（2026-11-04）：已被 rhythm_engine.derive_position_index 取代，待 rhythm_master 接线后删除。
+    """
     if stage is None or certainty is None:
         return None
     base = _STAGE_POSITION[stage]
