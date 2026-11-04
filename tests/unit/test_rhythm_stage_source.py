@@ -127,7 +127,10 @@ async def _run_compose_full(slot: str, kline, breadth, fg, rhythm_report):
     vs = ps[-1]
     with ps[0], ps[1], ps[2], ps[3], ps[4], ps[5], vs:
         vs.return_value = True
-        return await _compose_card(shanghai_today().isoformat(), slot)
+        card, rows, win, source, _intraday = await _compose_card(
+            shanghai_today().isoformat(), slot
+        )
+        return card, rows, win, source
 
 
 async def _run_compose(slot: str, kline, breadth, fg, rhythm_report):

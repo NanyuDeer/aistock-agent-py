@@ -5,7 +5,8 @@
 - morning（target_date=运行日）：证据重算后**串行继承** after_close 的档位，只允许
   事件维度 ±1 修正（职责重定义 spec §4.1/§4.2）；
 - midday（target_date=运行日）：证据重算后串行继承 **morning** 的档位（morning 不可用
-  才回退 after_close），保证盘前的事件修正不被覆盖。
+  才回退 after_close），再用当日盘中数据做**单向降档**（spec §4.3），并把盘中因子
+  恒落库到 `phase_evidence.intraday_factors`（spec §4.4，阈值可回测的前提）。
 
 继承链是**串联**的：after_close → morning → midday。为控制成本，过度重生成的缓存
 优化列入开放点。
@@ -31,6 +32,7 @@ from aistock_agent.schemas.rhythm_master import (
     Stage,
     StageSource,
 )
+from aistock_agent.services import intraday_snapshot_archive as intraday_archive
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
@@ -50,6 +52,12 @@ from aistock_agent.services.mainline_engine import (
     load_mainline_candidates,
     nav_from_pct,
     rank_candidates,
+)
+from aistock_agent.services.rhythm_intraday import (
+    IntradayFactors,
+    apply_intraday_rules,
+    derive_intraday_factors,
+    is_intraday_usable,
 )
 from aistock_agent.services.rhythm_position_ledger import (
     build_watch_points,
@@ -488,10 +496,47 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
     return None
 
 
+INTRADAY_UNAVAILABLE_NOTE = "盘中数据不可用（档位未修正）"
+INTRADAY_NO_WORSENING_NOTE = "盘中未见恶化"
+
+
+async def _load_intraday_snapshot(target_date: str) -> dict[str, Any] | None:
+    """midday 盘中快照：优先读 T0 归档（12:25），归档缺失才实时取数（spec §4.3）。
+
+    归档存在即代表「12:30 决策时刻可拿到的口径」，直接读文件可避免同一端点重复
+    请求；归档缺失（job 未跑 / 历史补跑）才回退 ``get_intraday_sectors()``，保证
+    midday 不因归档缺失而失去盘中修正能力。两种失败都返回 None，由调用方按
+    「盘中数据不可用」处理——不得默认按「未恶化」处理，也不得伪造中性输入。
+    """
+    path = (
+        intraday_archive.archive_dir
+        / f"{target_date}-{intraday_archive._SNAPSHOT_SUFFIX}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # 不存在 / 权限 / 坏 JSON / 编码错误
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    try:
+        fetched = await node_api.get_intraday_sectors()
+    except Exception:
+        logger.warning("rhythm_master.intraday_fetch_failed", exc_info=True)
+        return None
+    return cast("dict[str, Any]", fetched) if isinstance(fetched, dict) else None
+
+
+
 async def _compose_card(
     run_date: str, slot: str, target_date: str | None = None
-) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow, str | None]:
-    """三时点证据流水线：返回 (MasterRhythmCard, rows, win, position_source) 四元组。
+) -> tuple[
+    MasterRhythmCard,
+    list[dict[str, object]],
+    EventWindow,
+    str | None,
+    IntradayFactors | None,
+]:
+    """三时点证据流水线：返回 (MasterRhythmCard, rows, win, position_source, 盘中因子)。
 
     `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
     对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
@@ -500,8 +545,11 @@ async def _compose_card(
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
     win 为当前窗口 EventWindow（事件分支/锚点来源）；
-    position_source 为盘前事件修正判定出的档位来源（`event_adjusted` /
-    `inherited_basis`），None = 未走继承链，由 `_build_rhythm_card` 按 stage_source 归类。
+    position_source 为盘前事件修正 / 盘中降档判定出的档位来源（`event_adjusted` /
+    `intraday_adjusted` / `intraday_unavailable` / `inherited_basis`），None = 未走
+    继承链，由 `_build_rhythm_card` 按 stage_source 归类；
+    intraday_factors 仅 midday 有值（spec §4.4，不可用时也返回含 null 的模型），
+    其他时点为 None。
     """
     target_date = target_date or (
         add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
@@ -807,6 +855,62 @@ async def _compose_card(
                 candidates=mainline_candidates,
             )
 
+    # spec §4.3 / §4.4：midday 盘中修正（**只降不升**）。盘中数据源优先读 12:25 归档，
+    # 缺失才实时取数（正常路径只有一次请求）。无论可用与否，盘中因子都要落库——这是
+    # 阈值未来可回测的唯一自变量来源。
+    intraday_factors: IntradayFactors | None = None
+    midday_adjust_note: str | None = None
+    if slot == "midday":
+        snapshot_payload = await _load_intraday_snapshot(target_date)
+        intraday_factors = derive_intraday_factors(
+            snapshot_payload,
+            closes,
+            mainline_name=cast("str | None", mainline.get("name")),
+            version=settings.rhythm_intraday_thresholds_version,
+        )
+        if not is_intraday_usable(snapshot_payload, intraday_factors):
+            # `availability.state != "available"` / 点位缺失 / `intr_close <= 0` 一律
+            # 不修正，且**必须留痕**——不得默认按「未恶化」处理（spec §4.3）。
+            midday_adjust_note = INTRADAY_UNAVAILABLE_NOTE
+            if inherited_basis:
+                position_source_hint = "intraday_unavailable"
+        elif inherited_basis and inherited_position_index is not None:
+            base_index = inherited_position_index
+            new_index, rules = apply_intraday_rules(
+                base_index, intraday_factors, snapshot_payload,
+            )
+            intraday_factors = intraday_factors.model_copy(
+                update={"triggered_rules": rules}
+            )
+            if new_index != base_index:
+                delta = new_index - base_index
+                ledger = inherited_position_ledger
+                if ledger is not None:
+                    # 档位变了 → adjust / final_index 同步；观察点必须按新档位重算
+                    ledger = ledger.model_copy(update={
+                        "adjust": ledger.adjust + delta,
+                        "final_index": new_index,
+                    })
+                    ledger = ledger.model_copy(update={"watch_points": build_watch_points(
+                        ledger, mainline_facts=mainline, event_d=event_d,
+                        closes=closes, candidates=mainline_candidates,
+                    )})
+                    inherited_position_ledger = ledger
+                inherited_position_index = new_index
+                position_source_hint = "intraday_adjusted"
+                midday_adjust_note = (
+                    f"盘中修正：命中规则 {'+'.join(rules)}，档位由 {base_index} 降至 {new_index}"
+                )
+            elif rules:
+                # 规则命中但已在下限（如 0 档）：如实记录命中，不冒充「未恶化」
+                midday_adjust_note = (
+                    f"盘中命中规则 {'+'.join(rules)}，档位已在下限（{base_index}）"
+                )
+            else:
+                midday_adjust_note = INTRADAY_NO_WORSENING_NOTE
+        elif inherited_basis:
+            midday_adjust_note = "基准卡无有效档位（盘中修正未执行）"
+
     # 确信度 / 事件锚点必须用**最终** stage（继承后）计算，不可用继承前值
     event_confirm = _event_confirm(win.events)
     volume_direction = _volume_confirm(amounts, stage)
@@ -860,6 +964,8 @@ async def _compose_card(
         missing.append(stage_inherit_note)
     if morning_adjust_note:
         missing.append(morning_adjust_note)
+    if midday_adjust_note:
+        missing.append(midday_adjust_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, stage_source=stage_source,
         certainty=cert, certainty_reason=cert_reason,
@@ -878,6 +984,7 @@ async def _compose_card(
         rows,
         win,
         position_source_hint,
+        intraday_factors,
     )
 
 
@@ -905,6 +1012,7 @@ def _build_rhythm_card(
     mainline: dict[str, object] | None = None,
     *,
     position_source_hint: str | None = None,
+    intraday_factors: IntradayFactors | None = None,
 ) -> dict[str, object]:
     """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决 + 本批主线/仓位接线）。
 
@@ -914,9 +1022,11 @@ def _build_rhythm_card(
       （2026-11-04 单一真相源：不再有 inherited/derive_position_text 三分支）；
       `position_index` / `position_ledger` / `position_source` 同期透出；
       `causality_text` 与账本 `watch_points` 同源于同一份 PositionLedger（T8）；
-    - `position_source_hint`：由 `_compose_card` 判定的档位来源（盘前事件修正是否真的
-      改了档位），仅用于 morning/midday 的 inherited_basis 分支；缺省 None = 按
-      stage_source 归类（旧调用点行为不变）；
+    - `position_source_hint`：由 `_compose_card` 判定的档位来源（盘前事件修正 / 盘中
+      降档是否真的改了档位），仅用于 morning/midday 的 inherited_basis 分支；缺省
+      None = 按 stage_source 归类（旧调用点行为不变）；
+    - `intraday_factors`：盘中因子（spec §4.4），仅 midday 非 None；其余时点写 None，
+      保证键结构稳定、历史样本可回测；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
     - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
       事件（含 medium），供前端事件日历渲染；
@@ -1108,6 +1218,11 @@ def _build_rhythm_card(
             "reversal": reversal,
             # 判定路径（问题 1）：前端据此区分「沿用」与「判定」，避免中性兜底被当成强结论
             "stage_source": card.evidence.stage_source,
+            # 盘中因子（spec §4.4）：仅 midday 有值；不可用时字段存在且为 null，
+            # 使「数据不可用」本身也成为可统计样本（阈值离线寻优的自变量来源）
+            "intraday_factors": (
+                intraday_factors.model_dump() if intraday_factors is not None else None
+            ),
         },
         "basis_data_date": _normalize_ymd(rows[-1].get("trade_date")) if rows else None,
         # C1：近 7 日情绪温度序列（情绪强度维度，与趋势档位分开表达）；无归档 → 空数组
@@ -1151,7 +1266,9 @@ async def run(state: AgentState) -> dict[str, object]:
         target_override = state.get("target_date")
         if not (isinstance(target_override, str) and target_override):
             target_override = None
-        card, rows, win, position_source = await _compose_card(basis, slot, target_override)
+        card, rows, win, position_source, intraday_factors = await _compose_card(
+            basis, slot, target_override
+        )
         if not card.synthesis_available:
             logger.warning(
                 "rhythm_master.degraded reason=%s slot=%s target_date=%s",
@@ -1168,6 +1285,7 @@ async def run(state: AgentState) -> dict[str, object]:
             "rhythm_card": _build_rhythm_card(
                 card, win, rows, card.mainline_facts,
                 position_source_hint=position_source,
+                intraday_factors=intraday_factors,
             ),
         }
         await node_api.save_analysis_report(

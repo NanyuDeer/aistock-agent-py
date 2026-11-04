@@ -73,6 +73,12 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     )
     api.save_analysis_report = AsyncMock(return_value={"id": 1})
     api.get_rhythm_report = AsyncMock(return_value=None)
+    # 盘中快照：默认不可用（midday 不得因此改档），且归档目录重定向到不存在路径，
+    # 避免本地 docs/agent-outputs/intraday 的真实文件污染断言。
+    api.get_intraday_sectors = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        worker_mod.intraday_archive, "archive_dir", Path("__no_intraday_archive__")
+    )
     monkeypatch.setattr(worker_mod, "node_api", api)
     # load_event_timeline 内部绑定的是 event_timeline 模块的 node_api 引用，
     # 需一并替换，否则会打到真实 NodeApiClient（数据源"未接"语义分叉）。
@@ -218,7 +224,16 @@ async def test_midday_inherits_basis_position_without_recompute(
     # 旧基准卡无 position_index → 不猜序号，只回放继承文案
     assert rhythm_card["position_index"] is None
     assert rhythm_card["position_ledger"] is None
-    assert rhythm_card["position_source"] == "inherited_basis"
+    # midday 盘中快照不可用（fixture 默认 None）→ 档位不修正，来源如实标注
+    assert rhythm_card["position_source"] == "intraday_unavailable"
+    assert "盘中数据不可用（档位未修正）" in rhythm_card["data_missing"]
+    # 因子恒落库（spec §4.4）：不可用时字段存在且为 null
+    factors = rhythm_card["phase_evidence"]["intraday_factors"]
+    assert factors is not None
+    assert factors["intr_close"] is None and factors["intr_pct"] is None
+    assert factors["intr_ratio"] is None and factors["intr_ma20"] is None
+    assert factors["mainline_pct"] is None and factors["triggered_rules"] == []
+    assert factors["threshold_version"]
     assert rhythm_card["position_band"]["text"] == "建议仓位：七成~八成"
     # evidence 与 rhythm_card 同源：档位不可用时 position 也必须为空（不伪造 band）
     assert content["evidence"]["position"] is None
@@ -289,7 +304,7 @@ async def test_conflict_uses_pre_tech_phase(
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, _, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
+        card, _, _, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
     out = wm_build(card, type("W", (), {"events": [], "source_missing": False})(), [])
     assert out["conflict"] is False
     assert "conflict_detail" not in out

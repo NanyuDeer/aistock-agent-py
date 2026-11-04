@@ -174,7 +174,13 @@ async def _compose(
     with ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
-        return await wm._compose_card(run_date, slot)
+        # 本文件只断言档位/账本；盘中取数固定为「不可用」，避免 midday 打真实端点。
+        # 盘中降档链路见 tests/unit/test_rhythm_intraday.py。
+        with patch.object(wm, "_load_intraday_snapshot", AsyncMock(return_value=None)):
+            card, composed_rows, composed_win, source, _ = await wm._compose_card(
+                run_date, slot
+            )
+        return card, composed_rows, composed_win, source
 
 
 def _rhythm_card(card, rows, win, source) -> dict[str, object]:
@@ -398,7 +404,8 @@ async def test_morning_event_plus_one_is_inherited_by_midday() -> None:
 
     # 核心断言：midday 继承 morning 的 3 档，而不是 after_close 的 2 档
     assert midday_card["position_index"] == 3
-    assert midday_card["position_source"] == "inherited_basis"
+    # 盘中数据不可用（helper 固定返回 None）→ 不修正，来源如实标注（spec §4.3）
+    assert midday_card["position_source"] == "intraday_unavailable"
     assert midday_card["position_ledger"]["final_index"] == 3
     assert "沿用盘前基准" in card2.evidence.stage_reason
     # 回退留痕不得出现（这次是正常串联）

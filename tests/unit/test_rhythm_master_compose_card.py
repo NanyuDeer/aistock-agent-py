@@ -45,7 +45,7 @@ async def test_compose_card_short_kline_forces_stage_none_and_missing():
         "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
     ) as vs:
         vs.return_value = True
-        card, _, _, _ = await _compose_card(basis, "after_close")
+        card, _, _, _, _ = await _compose_card(basis, "after_close")
     assert card.evidence.stage is None
     assert "指数K线不足" in card.evidence.data_missing
 
@@ -131,7 +131,7 @@ async def _compose(slot: str, basis: str, kline_value):
         "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
     ) as vs:
         vs.return_value = True
-        card, rows, _, _ = await _compose_card(basis, slot)
+        card, rows, _, _, _ = await _compose_card(basis, slot)
     return card
 
 
@@ -350,7 +350,7 @@ async def test_card_basis_date_is_evidence_date():
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, _, _, _ = await _compose_card("2026-09-14", "morning")
+        card, _, _, _, _ = await _compose_card("2026-09-14", "morning")
 
     assert card.basis_date == "2026-09-11"   # 证据日（K 线末日）
     assert card.target_date == "2026-09-14"  # 运行日
@@ -405,7 +405,7 @@ async def test_mainline_none_state_is_not_marked_data_missing():
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, rows, win, _ = await worker_mod._compose_card("2026-09-10", "after_close")
+        card, rows, win, _, _ = await worker_mod._compose_card("2026-09-10", "after_close")
         rhythm_card = worker_mod._build_rhythm_card(card, win, rows, card.mainline_facts)
 
     # 前提：候选齐备（未触发不可用降级）且主线判定为 none

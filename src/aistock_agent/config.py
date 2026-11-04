@@ -424,6 +424,14 @@ class Settings(BaseSettings):
     # 防止一张错卡沿链无限传播（2026-11-03 D2）。
     rhythm_prev_phase_max_gap_days: int = 3
 
+    # 盘中修正阈值（职责重定义 spec §4.3 / §11.2）：midday 只降不升，阈值参数化。
+    # version 随每张卡落库（phase_evidence.intraday_factors.threshold_version），
+    # 换阈值前后可分桶回测——版本号不变而改数值会让历史样本不可区分。
+    rhythm_intraday_thresholds_version: str = "v1-20261104"
+    rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
+    rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
+
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）
     prediction_conf_cap_short: str = "high"
