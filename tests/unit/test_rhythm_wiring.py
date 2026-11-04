@@ -37,8 +37,19 @@ def test_mainline_wiring_present_in_worker():
     assert "judge_mainline(" in worker_text
     assert "detect_breakdown(" in worker_text
     assert "event_high_hint" in worker_text
-    assert "derive_position_text(" in worker_text
+    # 2026-11-04 单一真相源：仓位唯一入口是 derive_position_index（derive_position_text
+    # 只是纯字符串薄包装，worker 不得再调用，否则又出现「序号/文案各算一次」）
+    assert "derive_position_index(" in worker_text
+    assert "derive_position_text(" not in worker_text
     assert "load_mainline_candidates()" in worker_text
+
+
+def test_stage_driven_position_table_deleted():
+    """双真相源已删除：stage → 仓位查表（compute_position / _STAGE_POSITION）不得回归。"""
+    from aistock_agent.services import rhythm_rebuilt_evidence as ev
+
+    assert not hasattr(ev, "compute_position")
+    assert not hasattr(ev, "_STAGE_POSITION")
 
 
 def test_deleted_symbols_absent_from_engine_source():

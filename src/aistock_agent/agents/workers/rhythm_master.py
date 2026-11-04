@@ -13,9 +13,14 @@ from datetime import date as date_cls
 from datetime import timedelta
 from typing import Any, cast, get_args
 
+from pydantic import ValidationError
+
 from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import (
+    CandidateOutlook,
     MasterRhythmCard,
+    PositionBand,
+    PositionLedger,
     RhythmEvidence,
     Stage,
     StageSource,
@@ -38,6 +43,11 @@ from aistock_agent.services.mainline_engine import (
     judge_mainline,
     load_mainline_candidates,
     nav_from_pct,
+    rank_candidates,
+)
+from aistock_agent.services.rhythm_position_ledger import (
+    build_watch_points,
+    render_causality,
 )
 from aistock_agent.services.rhythm_rebuilt_synthesis import run_synthesis
 from aistock_agent.services.rhythm_rebuilt_validate import validate_synthesis
@@ -124,7 +134,7 @@ def _stage_from_report(report: object) -> Stage | None:
 
 def _inherit_basis_stage(
     slot: str, basis_response: object
-) -> tuple[Stage, str, str | None] | None:
+) -> tuple[Stage, str, str | None, int | None, PositionLedger | None] | None:
     """morning/midday 主档位沿用最近 after_close 基准（对齐 AGENTS.md 节奏大师三时点契约）。
 
     仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
@@ -134,8 +144,10 @@ def _inherit_basis_stage(
     与 `_stage_from_report` 的分工：本函数负责「同日基准」的语义与文案，阶段校验
     统一委托给 `_stage_from_report`（单一收口，防两处规则漂移）。
 
-    2026-11-03：第三个返回值是基准卡的 `position_band.text`。档位既已沿用，仓位也必须
-    同源——否则 morning/midday 用前一交易日 K 线重算仓位，会出现「同日档位一致、仓位打架」。
+    返回 `(stage, reason, position_text, position_index, position_ledger)`：
+    档位既已沿用，仓位序号与账本也必须同源（2026-11-04 单一真相源）——
+    morning/midday 用前一交易日 K 线重算仓位会造成同日三时点口径打架。
+    基准卡是旧数据、无 `position_index` 时返回 None（调用方置灰，**不得按文案反推序号**）。
     """
     if slot not in {"morning", "midday"}:
         return None
@@ -153,13 +165,35 @@ def _inherit_basis_stage(
     basis_date = content.get("basis_date")
     reason = str(evidence.get("stage_reason") or "")
     position_text: str | None = None
+    position_index: int | None = None
+    position_ledger: PositionLedger | None = None
     basis_card = content.get("rhythm_card")
     if isinstance(basis_card, dict):
         band = basis_card.get("position_band")
         if isinstance(band, dict):
             text = band.get("text")
             position_text = text if isinstance(text, str) and text else None
-    return stage, f"沿用收盘基准（{basis_date or '—'}）：{reason}", position_text
+        raw_index = basis_card.get("position_index")
+        # 序号越界/非整数一律视为不可用（fail closed，不猜、不 clamp）
+        if (
+            isinstance(raw_index, int)
+            and not isinstance(raw_index, bool)
+            and engine.LADDER_MIN <= raw_index <= engine.LADDER_MAX
+        ):
+            position_index = raw_index
+        raw_ledger = basis_card.get("position_ledger")
+        if isinstance(raw_ledger, dict):
+            try:
+                position_ledger = PositionLedger.model_validate(raw_ledger)
+            except ValidationError:
+                position_ledger = None
+    return (
+        stage,
+        f"沿用收盘基准（{basis_date or '—'}）：{reason}",
+        position_text,
+        position_index,
+        position_ledger,
+    )
 
 
 def _amount_yi(raw: float | None) -> float:
@@ -307,6 +341,9 @@ async def _compose_card(
         "breakdown": None, "nav": None,
     }
     mainline_notes: list[str] = []
+    # 主线候选排名（因果输出 spec §6.4）：供变奏观察点的候选池展示。必须在主线判定
+    # 块之前初始化——`valid`/`index_pct_chgs` 只在判定分支内可见，块外不得引用。
+    mainline_candidates: list[CandidateOutlook] = []
     if not settings.rhythm_mainline_enabled:
         mainline_notes.append("主线判定未启用")
     else:
@@ -385,6 +422,8 @@ async def _compose_card(
                     for r in rows if r.get("pct_chg") is not None
                 ]
                 mainline = judge_mainline(valid, index_pct_chgs, evidence_date)
+                # 与 judge_mainline 同源（同一 _pool_best），只做展示截断，不改判据
+                mainline_candidates = rank_candidates(valid, index_pct_chgs)
                 if mainline.get("state") == "established":
                     winner = next(
                         (c for c in valid if c.get("name") == mainline.get("name")), None
@@ -482,12 +521,22 @@ async def _compose_card(
     # D1（2026-11-03）：去掉 `and stage is not None` —— 本地判空时恰恰最需要基准兜底，
     # 否则盘前/午间卡恒为 stage=null，前端只能回退旧卡。
     inherited_position_text: str | None = None
+    inherited_position_index: int | None = None
+    inherited_position_ledger: PositionLedger | None = None
+    inherited_basis = False
     if slot in {"morning", "midday"}:
         basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
         inherited = _inherit_basis_stage(slot, basis_resp)
         if inherited is not None:
-            stage, stage_reason, inherited_position_text = inherited
+            (
+                stage,
+                stage_reason,
+                inherited_position_text,
+                inherited_position_index,
+                inherited_position_ledger,
+            ) = inherited
             stage_source = "inherited_basis"
+            inherited_basis = True
         elif basis_resp is None:
             basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
     event_confirm = _event_confirm(win.events)
@@ -496,8 +545,55 @@ async def _compose_card(
         event_confirm=event_confirm, volume_direction=volume_direction,
         stage=stage, breadth=breadth,
     )
-    position = ev.compute_position(stage=stage, certainty=cert)
     anchors = ev.build_event_anchors(win.events)
+
+    # 事件档位（需求⑤）：d 与 next_event_anchor 同函数同源。必须在构造 evidence 前算好，
+    # 因为仓位判定（derive_position_index step3）要用同一对 d/result。
+    win_highs = getattr(win, "high_events", None) or []
+    event_d: int | None = None
+    event_result: str | None = None
+    if win_highs:
+        first_high = win_highs[0]
+        try:
+            event_d = trading_days_between(
+                date_cls.fromisoformat(target_date),
+                date_cls.fromisoformat(str(first_high.get("date") or "")),
+            )
+        except ValueError:
+            event_d = None
+        raw_result = first_high.get("result")
+        event_result = str(raw_result) if raw_result is not None else None
+
+    # 仓位唯一真相源（因果输出 spec §3）：序号 / 文案 / 账本全部来自同一次
+    # derive_position_index。morning/midday 继承基准卡档位时直接沿用其序号与账本，
+    # 不重算——否则盘中会用前一交易日 K 线得出第二套仓位（双真相源）。旧基准卡无
+    # position_index → 序号为 None（前端灰格），不得按文案反推。
+    position_index: int | None = None
+    position_ledger: PositionLedger | None = None
+    if inherited_basis:
+        # 继承路径不重算：观察点已在基准卡账本里，连同账本一起沿用（否则同日三时点
+        # 会算出互相矛盾的观察点）。
+        position_index = inherited_position_index
+        position_ledger = inherited_position_ledger
+    else:
+        position_index, position_ledger = engine.derive_position_index(
+            index_closes=closes, mainline=mainline,
+            event_d=event_d, event_result=event_result, breadth=breadth,
+        )
+        # 变奏观察点：纯函数不回填，由本处写回账本（因果输出 spec §6）。event_d=None
+        # 时不产出事件项，不得用 0 伪装「事件当日」。
+        watch_points = build_watch_points(
+            position_ledger, mainline_facts=mainline, event_d=event_d,
+            closes=closes, candidates=mainline_candidates,
+        )
+        position_ledger = position_ledger.model_copy(update={"watch_points": watch_points})
+    position: PositionBand | None = None
+    if position_index is not None:
+        action, direction = engine.position_action(position_index)
+        position = PositionBand(
+            text=engine.POSITION_LADDER[position_index],
+            action=action, direction=direction, index=position_index,
+        )
 
     missing: list[str] = list(mainline_notes)
     if kline_short:
@@ -513,12 +609,9 @@ async def _compose_card(
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, stage_source=stage_source,
         certainty=cert, certainty_reason=cert_reason,
-        position=position, event_anchors=anchors, data_missing=missing,
+        position=position, position_ledger=position_ledger,
+        event_anchors=anchors, data_missing=missing,
     )
-    # 需求①：无清晰主线 → 仓位动作强制 hold（与「空仓观望」自洽，spec §5.2.2）
-    if mainline.get("state") == "none" and position is not None:
-        position = position.model_copy(update={"action": "hold"})
-        evidence = evidence.model_copy(update={"position": position})
     synthesis = await run_synthesis(evidence, mainline_facts=mainline)
     synthesis_ok = synthesis is not None and validate_synthesis(synthesis, evidence)
     return (
@@ -560,8 +653,10 @@ def _build_rhythm_card(
 
     - score 由 level 派生同源（score=level_idx×20，见 STAGE_TO_LEVEL）；
     - branches 由 rhythm_engine 确定性生成（technical + event），不靠 LLM；
-    - `position_band.text` 改由 `derive_position_text` 主线驱动（H11：只覆盖文案层，
-      `evidence.position` 原样保留）；
+    - `position_band.text` 唯一来源 = `evidence.position.index` 查 `POSITION_LADDER`
+      （2026-11-04 单一真相源：不再有 inherited/derive_position_text 三分支）；
+      `position_index` / `position_ledger` / `position_source` 同期透出；
+      `causality_text` 与账本 `watch_points` 同源于同一份 PositionLedger（T8）；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
     - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
       事件（含 medium），供前端事件日历渲染；
@@ -658,34 +753,29 @@ def _build_rhythm_card(
     if reversal["insufficient"]:
         missing.append("反转确认数据不足（完成 bar < 22）")
 
-    # 事件档位（需求⑤）：d 与 next_event_anchor 同函数同源
-    win_highs = getattr(win, "high_events", None) or []
-    event_d: int | None = None
-    event_result: object | None = None
-    if win_highs:
-        first_high = win_highs[0]
-        try:
-            event_d = trading_days_between(
-                date_cls.fromisoformat(card.target_date),
-                date_cls.fromisoformat(str(first_high.get("date") or "")),
-            )
-        except ValueError:
-            event_d = None
-        event_result = first_high.get("result")
-    if card.evidence.stage_source == "inherited_prev_day" and card.evidence.position is not None:
-        # 问题 3（2026-11-03）：中性兜底沿用来的档位没有独立空头证据，
-        # 不套用「指数破位 → 空仓」的强口径，回落到 stage 档位自带的仓位文案。
-        pos_text = f"建议仓位：{card.evidence.position.text}"
-    elif card.inherited_position_text:
-        # 2026-11-03：盘前/午间档位沿用基准卡时，仓位也必须同源。
-        # 否则会出现「档位＝11-02 收盘基准、仓位＝10-30 均线重算」的跨日错配，
-        # 同一日三个时点给出互相矛盾的仓位建议。
-        pos_text = card.inherited_position_text
+    # 仓位单一来源（2026-11-04）：序号来自 `_compose_card` 的唯一一次
+    # derive_position_index（或继承的基准卡同源序号）。文案只由序号查表，禁止另行重算。
+    position = card.evidence.position
+    position_index = position.index if position is not None else None
+    if position_index is not None:
+        pos_text = "建议仓位：" + engine.POSITION_LADDER[position_index]
     else:
-        pos_text = engine.derive_position_text(
-            index_closes=closes, mainline=mainline_facts,
-            event_d=event_d, event_result=str(event_result) if event_result is not None else None,
-        )
+        # 档位不可用（旧基准卡无 position_index / 无档位）：只回放继承文案，不猜序号
+        pos_text = card.inherited_position_text or ""
+    ledger = card.evidence.position_ledger
+    position_ledger = ledger.model_dump() if ledger is not None else None
+    # 溯源文案同样从账本派生（硬约束：与 position_index / 观察点同一份账本）
+    causality_text = render_causality(ledger).model_dump() if ledger is not None else None
+    position_source: str | None
+    if card.refresh_slot == "after_close" and card.evidence.stage_source != "inherited_prev_day":
+        position_source = "after_close_base"
+    elif card.evidence.stage_source == "inherited_prev_day":
+        position_source = "inherited_prev_day"
+    elif card.refresh_slot in {"morning", "midday"} \
+            and card.evidence.stage_source == "inherited_basis":
+        position_source = "inherited_basis"
+    else:
+        position_source = None
 
     # phase_evidence.reason：主线结论 + 闸门/趋势结论（V10，≤72 字）
     if tech["insufficient"]:
@@ -727,6 +817,13 @@ def _build_rhythm_card(
         "position_band": {
             "text": pos_text,
         },
+        # 仓位档位序号（0-4）与推导账本：日历上色 / 溯源区的唯一依据（因果输出 spec §4.3）
+        "position_index": position_index,
+        "position_ledger": position_ledger,
+        # 仓位来源（与 stage_source 独立）：描述本卡档位从哪来，null = 无法归类
+        "position_source": position_source,
+        # 溯源主区文案（Python 侧确定性生成）：{lead, lines}；无账本 → null
+        "causality_text": causality_text,
         "phase_evidence": {
             "reason": reason,
             "slope": None,

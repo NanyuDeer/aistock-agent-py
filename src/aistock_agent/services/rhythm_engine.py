@@ -9,9 +9,14 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from aistock_agent.schemas.rhythm_master import LedgerItem, PositionLedger
+from aistock_agent.schemas.rhythm_master import (
+    Direction,
+    LedgerItem,
+    PositionAction,
+    PositionLedger,
+)
 from aistock_agent.utils.date import trading_days_between
 
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
@@ -262,6 +267,26 @@ def derive_position_index(
         breadth=breadth,
     )
     return final, ledger
+
+
+# 档位序号 → (action, direction)：**仅审计/展示用，不参与任何判定**。
+# 档位的唯一真相源是 `derive_position_index` 返回的序号；本表只把已定好的序号翻译成
+# PositionBand 的字面量字段，禁止任何逻辑按 action/direction 反推档位（否则就是第三套规则）。
+# 原 `compute_position` 中「certainty=low 就降为 hold」的规则随该函数一并取消：
+# certainty 只描述证据强度，不改档位（双真相源的一部分）。
+_POSITION_ACTION_BY_INDEX: dict[int, tuple[str, str]] = {
+    0: ("hold", "neutral"),   # 空仓观望
+    1: ("add", "bullish"),    # 轻仓试探
+    2: ("hold", "bullish"),   # 半仓持有
+    3: ("add", "bullish"),    # 重仓顺势
+    4: ("reduce", "bearish"),  # 满仓该减
+}
+
+
+def position_action(idx: int) -> tuple[PositionAction, Direction]:
+    """档位序号 → (action, direction)（纯翻译，不参与判定，见上表注释）。"""
+    action, direction = _POSITION_ACTION_BY_INDEX[idx]
+    return cast("PositionAction", action), cast("Direction", direction)
 
 
 def _build_position_ledger(

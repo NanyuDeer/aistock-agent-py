@@ -12,6 +12,7 @@ def test_evidence_defaults():
     assert ev.stage is None
     assert ev.certainty is None
     assert ev.position is None
+    assert ev.position_ledger is None
     assert ev.event_anchors == []
     assert ev.data_missing == []
 

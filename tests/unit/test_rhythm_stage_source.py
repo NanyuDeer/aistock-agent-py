@@ -194,9 +194,11 @@ async def test_stage_source_none_when_stage_missing():
 
 
 @pytest.mark.asyncio
-async def test_position_band_downgraded_when_inherited_prev_day():
-    """问题 3：中性沿用来的档位无独立空头证据，仓位不套用「指数破位 → 空仓」口径。"""
+async def test_position_band_single_source_when_inherited_prev_day():
+    """2026-11-04 单一真相源：档位沿用前一交易日时，仓位仍由 derive_position_index 产出
+    （不再按 stage 查表降级），文案必须等于 POSITION_LADDER[position_index]。"""
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
+    from aistock_agent.services.rhythm_engine import POSITION_LADDER
 
     prev = _prev_report("ebb", "2026-10-30")
     card, rows, win = await _run_compose_full(
@@ -207,17 +209,28 @@ async def test_position_band_downgraded_when_inherited_prev_day():
         prev,
     )
     assert card.evidence.stage_source == "inherited_prev_day"
+    # evidence.position 与账本同源：index 必可追溯，账本 final_index 与之一致
+    assert card.evidence.position is not None
+    pos_index = card.evidence.position.index
+    assert pos_index is not None
+    assert card.evidence.position_ledger is not None
+    assert card.evidence.position_ledger.final_index == pos_index
+    assert card.evidence.position.text == POSITION_LADDER[pos_index]
+
     rhythm_card = _build_rhythm_card(card, win, rows)
     assert rhythm_card["phase_evidence"]["stage_source"] == "inherited_prev_day"
-    # ebb 档 evidence.position = 轻仓~观望；不应被破位闸门压成「空仓观望」
-    assert "轻仓" in rhythm_card["position_band"]["text"]
-    assert "空仓" not in rhythm_card["position_band"]["text"]
+    assert rhythm_card["position_source"] == "inherited_prev_day"
+    assert rhythm_card["position_index"] == pos_index
+    assert rhythm_card["position_band"]["text"] == "建议仓位：" + POSITION_LADDER[pos_index]
+    assert rhythm_card["position_ledger"] is not None
+    assert rhythm_card["position_ledger"]["final_index"] == pos_index
 
 
 @pytest.mark.asyncio
 async def test_position_band_keeps_gate_when_stage_computed():
-    """硬判场景仍走 derive_position_text（破位闸门语义不被削弱）。"""
+    """硬判场景仍走 derive_position_index（破位闸门语义不被削弱）。"""
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
+    from aistock_agent.services.rhythm_engine import POSITION_LADDER
 
     card, rows, win = await _run_compose_full(
         "after_close",
@@ -229,7 +242,77 @@ async def test_position_band_keeps_gate_when_stage_computed():
     assert card.evidence.stage_source == "computed"
     rhythm_card = _build_rhythm_card(card, win, rows)
     assert rhythm_card["phase_evidence"]["stage_source"] == "computed"
-    assert rhythm_card["position_band"]["text"].startswith("建议仓位：")
+    assert rhythm_card["position_source"] == "after_close_base"
+    idx = rhythm_card["position_index"]
+    assert idx is not None
+    assert rhythm_card["position_band"]["text"] == "建议仓位：" + POSITION_LADDER[idx]
+    # T8 接线：观察点已回填进账本，溯源文案从同一份账本派生
+    from aistock_agent.services.rhythm_position_ledger import render_causality
+
+    ledger = card.evidence.position_ledger
+    assert ledger is not None
+    assert ledger.watch_points
+    assert rhythm_card["position_ledger"]["watch_points"] == [
+        p.model_dump() for p in ledger.watch_points
+    ]
+    assert rhythm_card["causality_text"] == render_causality(ledger).model_dump()
+
+
+@pytest.mark.asyncio
+async def test_morning_inherits_basis_ledger_without_recompute():
+    """继承路径沿用基准卡的序号/账本/观察点，不得用盘中 K 线重算（单一真相源）。"""
+    from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
+    from aistock_agent.services.rhythm_engine import derive_position_index
+    from aistock_agent.services.rhythm_position_ledger import (
+        build_watch_points,
+        render_causality,
+    )
+
+    # 基准卡账本：空头闸门 → idx=0，且带 gate 观察点
+    bear = [3400.0 - i * 5 for i in range(25)]
+    base_idx, base_ledger = derive_position_index(
+        index_closes=bear, mainline={"state": "unavailable"},
+        event_d=None, event_result=None, breadth={"advance_ratio": 0.5},
+    )
+    base_ledger = base_ledger.model_copy(update={"watch_points": build_watch_points(
+        base_ledger, mainline_facts={"state": "unavailable"}, event_d=None, closes=bear,
+    )})
+    assert base_idx == 0
+    assert base_ledger.watch_points
+
+    basis = {
+        "content": {
+            "basis_date": shanghai_today().isoformat(),
+            "evidence": {"stage": "ebb", "stage_reason": "退潮"},
+            "rhythm_card": {
+                "position_index": base_idx,
+                "position_ledger": base_ledger.model_dump(),
+                "position_band": {"text": "基准卡文案"},
+            },
+        }
+    }
+    # 盘中 K 线是多头（本地重算会得 3 档）→ 断言沿用 0 档才证明「不重算」
+    card, rows, win = await _run_compose_full(
+        "morning",
+        _bull_kline(),
+        {"total_count": 100, "advance_count": 90},
+        75,
+        basis,
+    )
+    assert card.evidence.stage_source == "inherited_basis"
+    assert card.evidence.position is not None
+    assert card.evidence.position.index == 0
+    assert card.evidence.position_ledger is not None
+    assert card.evidence.position_ledger.final_index == 0
+    assert card.evidence.position_ledger.watch_points == base_ledger.watch_points
+
+    rhythm_card = _build_rhythm_card(card, win, rows)
+    assert rhythm_card["position_index"] == 0
+    assert rhythm_card["position_source"] == "inherited_basis"
+    assert rhythm_card["position_ledger"]["watch_points"] == [
+        p.model_dump() for p in base_ledger.watch_points
+    ]
+    assert rhythm_card["causality_text"] == render_causality(base_ledger).model_dump()
 
 
 @pytest.mark.asyncio
@@ -305,7 +388,11 @@ async def test_temperature_series_empty_when_archive_missing(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_morning_inherits_basis_position_band():
-    """档位继承自基准卡时，仓位也必须同源（不得用前一交易日 K 线重算）。"""
+    """档位继承自基准卡时，仓位也必须同源（不得用前一交易日 K 线重算）。
+
+    旧基准卡无 `position_index` → 序号必须为 null（前端灰格），只回放继承文案，
+    **不得按文案反推序号**（反推就是第二套算法）。
+    """
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
 
     basis = _prev_report_with_band("ebb", shanghai_today().isoformat(), "建议仓位：轻仓~观望")
@@ -318,15 +405,21 @@ async def test_morning_inherits_basis_position_band():
     )
     assert card.evidence.stage_source == "inherited_basis"
     assert card.inherited_position_text == "建议仓位：轻仓~观望"
+    # 旧基准卡无序号 → evidence.position 不可用（不猜）
+    assert card.evidence.position is None
+    assert card.evidence.position_ledger is None
 
     rhythm_card = _build_rhythm_card(card, win, rows)
-    # 若走本地 derive_position_text（破位闸门）会得到「空仓观望」，与基准卡打架
+    # 若走本地 derive_position_index（破位闸门）会得到「空仓观望」，与基准卡打架
     assert rhythm_card["position_band"]["text"] == "建议仓位：轻仓~观望"
+    assert rhythm_card["position_index"] is None
+    assert rhythm_card["position_ledger"] is None
+    assert rhythm_card["position_source"] == "inherited_basis"
 
 
 @pytest.mark.asyncio
-async def test_morning_falls_back_to_local_position_when_basis_has_no_band():
-    """基准卡缺 position_band（旧卡）→ 回退本地计算，不伪造。"""
+async def test_morning_does_not_guess_index_when_basis_has_no_index():
+    """基准卡缺 position_index（旧卡）→ 不重算、不猜，序号为 null（前端灰格）。"""
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
 
     basis = _prev_report("ebb", shanghai_today().isoformat())  # 无 rhythm_card
@@ -339,5 +432,8 @@ async def test_morning_falls_back_to_local_position_when_basis_has_no_band():
     )
     assert card.evidence.stage_source == "inherited_basis"
     assert card.inherited_position_text is None
+    assert card.evidence.position is None
     rhythm_card = _build_rhythm_card(card, win, rows)
-    assert rhythm_card["position_band"]["text"].startswith("建议仓位：")
+    assert rhythm_card["position_index"] is None
+    assert rhythm_card["position_source"] == "inherited_basis"
+    assert rhythm_card["position_band"]["text"] == ""

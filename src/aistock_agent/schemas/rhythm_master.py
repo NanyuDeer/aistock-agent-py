@@ -91,6 +91,16 @@ class PositionLedger(BaseModel):
     ledger_version: str = "1.0"
 
 
+class CausalityText(BaseModel):
+    """溯源主区文案（因果输出 spec §5.1）：首句 + 逐条阻塞明细。
+
+    文案全部在 Python 侧确定性产出，前端只按序拼接，不拼字符串、不判阈值（G19）。
+    """
+
+    lead: str
+    lines: list[str] = Field(default_factory=list)
+
+
 class EventAnchor(BaseModel):
     event_date: str
     title: str
@@ -107,6 +117,9 @@ class RhythmEvidence(BaseModel):
     certainty: Certainty | None = None
     certainty_reason: str = ""
     position: PositionBand | None = None
+    # 仓位推导账本（因果输出 spec §4.3）：与 position.index 同源同值，
+    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 档位不可用（旧基准卡）。
+    position_ledger: PositionLedger | None = None
     event_anchors: list[EventAnchor] = Field(default_factory=list)
     data_missing: list[str] = Field(default_factory=list)
 

@@ -174,15 +174,16 @@ async def test_morning_inherits_base_no_recompose(
 
 
 @pytest.mark.asyncio
-async def test_midday_event_no_result_caps_base(
+async def test_midday_inherits_basis_position_without_recompute(
     temp_sentiment: Path, mock_api: AsyncMock, mock_llm: None
 ) -> None:
-    """12:30 事件当期（d=0）且无 result → 未落档 → base 封顶轻仓。
+    """12:30 仓位必须沿用收盘基准，不得用前一交易日 K 线重算（单一真相源）。
 
-    时间线口径：`load_event_timeline` 产出的 high 事件仅带 date/type/title/importance，
-    不含 result（handoff §9：result 无写入者，「按预期差落档」为死路）→ d=0 未落档 →
-    base 封顶 1（轻仓~三成）。故主档位不由事件「预期差」决定，而由「无 result」决定。
-    §5.7 后分支预算（≤3）由技术三档整体占满：事件情景让位，不产出 event_ref 分支，仅留痕。
+    2026-11-04：midday 的档位来自 after_close 基准卡，仓位序号/账本随档位一起继承。
+    旧基准卡（本例）无 position_index → 序号为 null（前端灰格），只回放继承文案，
+    **不得本地重算**——否则同日三时点各有一套仓位（本用例原断言「d=0 封顶轻仓」
+    正是被删除的那套算法）。d=0 封顶语义仍由 after_close 的 derive_position_index 承担。
+    §5.7 分支预算（≤3）由技术三档整体占满：事件情景让位，不产出 event_ref 分支，仅留痕。
     """
     mock_api.get_rhythm_report.return_value = {
         "content": {
@@ -213,13 +214,20 @@ async def test_midday_event_no_result_caps_base(
     assert content["refresh_slot"] == "midday"
     # 主档位沿用收盘基准 stage（rally），score 由 STAGE_TO_LEVEL 确定性派生
     assert content["rhythm_card"]["score"] == 60.0
-    # d=0 且未落档（时间线事件无 result）→ base 封顶 1（轻仓~三成）
-    assert content["rhythm_card"]["position_band"]["text"] == "建议仓位：轻仓~三成"
+    rhythm_card = content["rhythm_card"]
+    # 旧基准卡无 position_index → 不猜序号，只回放继承文案
+    assert rhythm_card["position_index"] is None
+    assert rhythm_card["position_ledger"] is None
+    assert rhythm_card["position_source"] == "inherited_basis"
+    assert rhythm_card["position_band"]["text"] == "建议仓位：七成~八成"
+    # evidence 与 rhythm_card 同源：档位不可用时 position 也必须为空（不伪造 band）
+    assert content["evidence"]["position"] is None
+    assert content["evidence"]["position_ledger"] is None
     # §5.7 分支预算（≤3）互斥使用：技术三档占满预算，事件情景让位（不产出 event_ref 分支）且必须留痕
-    branches = content["rhythm_card"]["branches"]
+    branches = rhythm_card["branches"]
     assert branches and all(b["condition"]["kind"] == "interval" for b in branches)
     assert all("event_ref" not in b for b in branches)
-    assert "事件节点因分支预算（≤3）未展示" in content["rhythm_card"]["data_missing"]
+    assert "事件节点因分支预算（≤3）未展示" in rhythm_card["data_missing"]
 
 
 @pytest.mark.asyncio
