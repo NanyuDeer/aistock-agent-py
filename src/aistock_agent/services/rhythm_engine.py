@@ -21,6 +21,8 @@ from aistock_agent.utils.date import trading_days_between
 
 Phase = Literal["ice", "warm_up", "overheat", "ebb"]
 Level = Literal["ice", "low", "normal", "active", "euphoria"]
+# 事件调整的已计入类型（「临近 +1」与「按结果定档」语义不同，盘前处理方式也不同）
+EventAppliedKind = Literal["approaching", "result"]
 
 # spec §5.2.1 T3 / §5.4.1 T4
 POSITION_LADDER: list[str] = [
@@ -211,6 +213,115 @@ def position_band_to_action(
     }
 
 
+def _mainline_adjustment(state: str | None, strength: object) -> int:
+    """step2 主线增量：成立·强 → +1，其余 0（无主线强制 0 由调用方改 base）。
+
+    `event_adjustment` 的事件落档为**绝对定档**（覆盖主线增量），需扣除本增量才能
+    换算成相对调整量，故两处共用同一表达式，防判据漂移。
+    """
+    return 1 if state == "established" and strength == "strong" else 0
+
+
+# 「d==0 未落档 → 档位封顶 1」的契约常量（`event_adjustment` 的 reason 逐字等于它）。
+# 调用方用**精确比较**识别该上界约束，禁止按文案模糊匹配。
+EVENT_CAP_REASON = "d=0 事件未落档 → 档位封顶 1"
+
+
+def event_adjustment(
+    *,
+    event_d: int | None,
+    event_result: str | None,
+    mainline_state: str | None,
+    mainline_strength: object,
+    gate_blocked: bool,
+    base_index: int,
+) -> tuple[int, str]:
+    """step3 事件档位调整量 —— 唯一判据（spec §5.2 / 职责重定义 spec §4.2）。
+
+    返回 `(delta, reason)`：delta 是相对**当前档位** `base_index`（step0-2 已完成，
+    即 base + 主线增量）的调整量，调用方一律 `clamp(base_index + delta, 0, 4)`；
+    本函数**不做** clamp。
+
+    `d == 0` 未落档的上界约束「封顶 1」**已按 base_index 折算进 delta**
+    （`min(base_index, 1) - base_index`，base_index > 1 时为负），因此两个调用方
+    （`derive_position_index` 收盘定档 / worker 盘前事件修正）拿到完全一致的语义：
+    `base_index + delta` 即封顶后的档位，无需各自再判 `min(idx, 1)`。
+    `reason == EVENT_CAP_REASON`（逐字相等）供调用方识别该约束并改写账本文案。
+
+    判据与抽取前的 step3 逐行一致：
+    - `d == 0` 且结果未落档 → 封顶 1（该约束与闸门无关，历史行为如此）
+    - 闸门命中 / K 线不足 → 0（禁止 +1）
+    - `d ∈ {1,2}` 且主线成立·强 → +1
+    - `d == 0` 已落档 → 事件结果绝对定档（覆盖主线增量）→ `target - 主线增量`
+    """
+    if event_d == 0 and event_result not in EVENT_RESULT_ENUM:
+        return min(base_index, 1) - base_index, EVENT_CAP_REASON
+    if gate_blocked:
+        return 0, "闸门命中或数据不足，事件档位不生效"
+    if (
+        event_d is not None
+        and event_d in (1, 2)
+        and mainline_state == "established"
+        and mainline_strength == "strong"
+    ):
+        return 1, f"d={event_d} 事件窗口内 + 主线成立·强 → +1"
+    if event_d == 0:
+        direction = EVENT_RESULT_DIRECTION[cast("str", event_result)]
+        target = 1 if direction == "bullish" else (-1 if direction == "bearish" else 0)
+        ml_adj = _mainline_adjustment(mainline_state, mainline_strength)
+        return target - ml_adj, f"d=0 事件已落档（{event_result}）→ 事件档位 {target:+d}"
+    return 0, "无事件档位调整"
+
+
+def event_applied_kind(
+    *,
+    event_d: int | None,
+    event_result: str | None,
+    gate_blocked: bool,
+    delta: int,
+    reason: str,
+) -> EventAppliedKind | None:
+    """事件调整的**已计入类型**（幂等闸门，职责重定义 spec §4.1）。
+
+    - 闸门命中 → None（事件未生效）；
+    - `d == 0` 已落档 → "result"（含 delta==0：结果确已用于定档，不得按同一条再计）；
+    - `d ∈ {1,2}` 且主线强（delta>0）→ "approaching"（临近 +1，结果未知，盘前可撤销重算）；
+    - `d == 0` 未落档（封顶）→ None：封顶是「结果未知」的安全约束，不是按结果调过，
+      morning 拿到结果后仍须能正确应用。
+    """
+    if gate_blocked:
+        return None
+    if event_d == 0 and event_result in EVENT_RESULT_ENUM:
+        return "result"
+    if delta > 0 and reason != EVENT_CAP_REASON:
+        return "approaching"
+    return None
+
+
+def event_ledger_item(
+    *,
+    event_d: int | None,
+    event_result: str | None,
+    gate_blocked: bool,
+    block_reason: str,
+    mainline_state: str | None,
+    mainline_strength: object,
+) -> LedgerItem:
+    """事件账本行（`_build_event_ledger_item` 的唯一公开入口）：文案单一来源。
+
+    盘前事件修正改写账本行时必须复用本函数：同一份账本里不允许出现两套事件表述
+    （`value_text` 说「未落档」而 `judgement` 说「+1」）。
+    """
+    return _build_event_ledger_item(
+        event_d=event_d,
+        event_result=event_result,
+        gate_blocked=gate_blocked,
+        block_reason=block_reason,
+        state=mainline_state,
+        strength=mainline_strength,
+    )
+
+
 def derive_position_index(
     *,
     index_closes: list[float],
@@ -223,9 +334,9 @@ def derive_position_index(
 
     step0 指数趋势定 base（多头 3 / 其余 2 / 破位 0）→ step1 硬闸门（指数
     close<ma20 且 ma5<ma10<ma20，或主线板块破位）可否决一切 +1 → step2 主线
-    调整（strong +1 / weak 0 / none 强制 0）→ step3 事件档位（d∈{1,2} 且强主线
-    +1；d==0 未落档 → min(base,1)；d==0 已落档 → 按预期差方向相对 base 调档）→
-    step4 clamp 后取序号。
+    调整（strong +1 / weak 0 / none 强制 0）→ step3 事件档位（判据全部委托
+    `event_adjustment`：d∈{1,2} 且强主线 +1；d==0 未落档 → 封顶 1；d==0 已落档
+    → 按预期差方向覆盖主线增量）→ step4 clamp 后取序号。
 
     **判据唯一真相源**：本函数是 step0-4 的唯一实现，账本只是把中间量
     （base / adj / gate_hit / mainline_state）结构化，不得在此新增或改动判据。
@@ -265,29 +376,35 @@ def derive_position_index(
     elif raw_state is not None:
         state = "unavailable"
     strength = (mainline or {}).get("strength")
-    adj = 0
+    ml_adj = 0
     if not gate_blocked:
         # step2 主线调整
-        if state == "established" and strength == "strong":
-            adj += 1
-        elif state == "none":
+        ml_adj = _mainline_adjustment(state, strength)
+        if state == "none":
             base = 0  # 需求①：无清晰主线 → 空仓观望
-        # step3 事件档位（仅闸门未禁止时生效）
-        if event_d is not None and event_d in (1, 2) \
-                and state == "established" and strength == "strong":
-            adj += 1
-        elif event_d == 0:
-            if event_result in EVENT_RESULT_ENUM:
-                # 已落档：按事件结果直接定档（EVENT_BAND_KEY 语义，覆盖主线/事件增量）
-                direction = EVENT_RESULT_DIRECTION[event_result]
-                adj = 1 if direction == "bullish" else (-1 if direction == "bearish" else 0)
-            else:
-                base = min(base, 1)  # 观望/低仓
-    final = base + adj
-    # d==0 且未落档 → 最终档位封顶 1（观望/低仓，spec step3）
-    if event_d == 0 and event_result not in EVENT_RESULT_ENUM:
-        final = min(final, 1)
-    final = max(LADDER_MIN, min(LADDER_MAX, final))
+    # step3 事件档位：唯一判据在 event_adjustment（d==0 未落档的「封顶 1」已折算进
+    # delta），本函数只负责统一 clamp，不再另判。
+    base_after_mainline = base + ml_adj
+    event_delta, event_reason = event_adjustment(
+        event_d=event_d,
+        event_result=event_result,
+        mainline_state=state,
+        mainline_strength=strength,
+        gate_blocked=gate_blocked,
+        base_index=base_after_mainline,
+    )
+    adj = ml_adj + event_delta
+    final = max(LADDER_MIN, min(LADDER_MAX, base_after_mainline + event_delta))
+    # 事件前档位（step2 结束、step3 之前）：盘前撤销「临近 +1」的唯一无歧义基线
+    event_off_index = max(LADDER_MIN, min(LADDER_MAX, base_after_mainline))
+    # 幂等闸门（职责重定义 spec §4.1）：事件调整「已计入」的类型（approaching / result）
+    applied_kind = event_applied_kind(
+        event_d=event_d,
+        event_result=event_result,
+        gate_blocked=gate_blocked,
+        delta=event_delta,
+        reason=event_reason,
+    )
     ledger = _build_position_ledger(
         final=final,
         base=base,
@@ -305,6 +422,8 @@ def derive_position_index(
         mainline=mainline,
         event_d=event_d,
         event_result=event_result,
+        event_off_index=event_off_index,
+        event_applied_kind=applied_kind,
         breadth=breadth,
     )
     return final, ledger
@@ -348,6 +467,8 @@ def _build_position_ledger(
     mainline: dict[str, object] | None,
     event_d: int | None,
     event_result: str | None,
+    event_off_index: int,
+    event_applied_kind: EventAppliedKind | None,
     breadth: dict[str, Any] | None,
 ) -> PositionLedger:
     """把 step0-4 的中间量组织成账本（纯展示层，不参与任何判定）。
@@ -491,6 +612,8 @@ def _build_position_ledger(
         insufficient=not trend_known,
         gate_blocked=gate_blocked,
         mainline_state=state if isinstance(state, str) else None,
+        event_off_index=event_off_index,
+        event_applied_kind=event_applied_kind,
         watch_points=[],
         ledger_version="1.0",
     )

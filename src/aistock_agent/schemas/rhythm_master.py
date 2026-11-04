@@ -87,6 +87,15 @@ class PositionLedger(BaseModel):
     # 真实「禁止 +1」标志 = gate_hit or mainline_breakdown or insufficient
     gate_blocked: bool = False
     mainline_state: str | None = None
+    # 事件调整**生效前**的档位 = clamp(base + 主线调整)，即 step2 结束、step3 之前的值
+    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`继承序号 − 1` 在
+    # 4 档上界把 +1 吃掉时会多撤一档，只有事件前档位能无歧义还原。
+    event_off_index: int | None = None
+    # 事件调整的**已计入类型**（幂等闸门，职责重定义 spec §4.1/§4.2）：
+    # - "approaching"：d∈{1,2} 的临近事件 +1 已计入（结果未知 → 盘前拿到结果后须先撤销）；
+    # - "result"：已按事件结果定档（含结果「符合」导致 delta==0 的情形，不得重复计）；
+    # - None：未计入事件调整（含 d==0 未落档的封顶——那是「结果未知」的安全约束）。
+    event_applied_kind: Literal["approaching", "result"] | None = None
     watch_points: list[WatchPoint] = Field(default_factory=list)
     ledger_version: str = "1.0"
 

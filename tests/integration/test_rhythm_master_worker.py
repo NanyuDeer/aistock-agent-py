@@ -289,7 +289,7 @@ async def test_conflict_uses_pre_tech_phase(
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
+        card, _, _, _ = await worker_mod._compose_card("2026-08-28", "after_close")
     out = wm_build(card, type("W", (), {"events": [], "source_missing": False})(), [])
     assert out["conflict"] is False
     assert "conflict_detail" not in out

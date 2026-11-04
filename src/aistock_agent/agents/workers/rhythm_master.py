@@ -1,9 +1,14 @@
 """节奏大师 Worker（spec §8/D13）。
 
 三时点统一走 `_compose_card` 三层证据流水线：
-- after_close（target_date=下一交易日）：全量证据重算 + 合成 → 落盘；
-- morning / midday（target_date=运行日）：读最新事件 result / kline 后重算证据，
-  天然满足事件驱动增量语义；为控制成本，过度重生成的缓存优化列入开放点。
+- after_close（target_date=下一交易日）：全量证据重算 + 合成 → **定档**（唯一有权确立档位）；
+- morning（target_date=运行日）：证据重算后**串行继承** after_close 的档位，只允许
+  事件维度 ±1 修正（职责重定义 spec §4.1/§4.2）；
+- midday（target_date=运行日）：证据重算后串行继承 **morning** 的档位（morning 不可用
+  才回退 after_close），保证盘前的事件修正不被覆盖。
+
+继承链是**串联**的：after_close → morning → midday。为控制成本，过度重生成的缓存
+优化列入开放点。
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ from pydantic import ValidationError
 from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import (
     CandidateOutlook,
+    LedgerItem,
     MasterRhythmCard,
     PositionBand,
     PositionLedger,
@@ -132,10 +138,68 @@ def _stage_from_report(report: object) -> Stage | None:
     return cast("Stage", stage)
 
 
+def _report_position_index(report: object) -> int | None:
+    """从节奏卡响应提取 `content.rhythm_card.position_index`（0-4 整数）。
+
+    越界 / 非整数 / 缺失一律 None（fail closed，不猜、不 clamp）。单一收口：
+    `_inherit_basis_stage` 与 `_resolve_basis_card` 共用同一份校验，防两处规则漂移。
+    """
+    if not isinstance(report, dict):
+        return None
+    content = report.get("content")
+    if not isinstance(content, dict):
+        return None
+    card = content.get("rhythm_card")
+    if not isinstance(card, dict):
+        return None
+    raw_index = card.get("position_index")
+    if (
+        isinstance(raw_index, int)
+        and not isinstance(raw_index, bool)
+        and engine.LADDER_MIN <= raw_index <= engine.LADDER_MAX
+    ):
+        return raw_index
+    return None
+
+
+# midday 回退收盘基准时的留痕文案（前端/审计据此区分「串联」与「回退」）
+BASIS_FALLBACK_NOTE = "morning 卡缺失/无有效档位，回退收盘基准"
+
+
+async def _resolve_basis_card(
+    slot: str, target_date: str
+) -> tuple[dict[str, object] | None, str | None]:
+    """按期次解析继承基准卡（职责重定义 spec §4.1：串联继承链，非并行）。
+
+    `after_close`（定档）→ `morning`（读 after_close，做事件修正）→
+    `midday`（读 morning，做盘中修正；morning 不可用才回退 after_close）。
+
+    - `morning`：读 `(target_date, after_close)`；
+    - `midday`：**先**读 `(target_date, morning)`，其 `content.rhythm_card.
+      position_index` 为 0-4 整数才采用；否则回退 `(target_date, after_close)`。
+    - `after_close`：不继承，返回 `(None, None)`。
+
+    返回 `(report, fallback_note)`：`fallback_note` 非 None 表示「先读的一环不可用、
+    已回退收盘基准」，调用方**必须**写入 `data_missing`（不许静默回退）。两环都读不到
+    时返回 `(None, None)`，由调用方的「收盘基准卡缺失」统一留痕（不重复报回退）。
+    """
+    if slot == "morning":
+        return await node_api.get_rhythm_report(target_date, "after_close"), None
+    if slot != "midday":
+        return None, None
+    morning = await node_api.get_rhythm_report(target_date, "morning")
+    if _report_position_index(morning) is not None:
+        return morning, None
+    basis = await node_api.get_rhythm_report(target_date, "after_close")
+    if basis is None:
+        return None, None
+    return basis, BASIS_FALLBACK_NOTE
+
+
 def _inherit_basis_stage(
     slot: str, basis_response: object
 ) -> tuple[Stage, str, str | None, int | None, PositionLedger | None] | None:
-    """morning/midday 主档位沿用最近 after_close 基准（对齐 AGENTS.md 节奏大师三时点契约）。
+    """morning/midday 主档位沿用上游基准卡（对齐 AGENTS.md 节奏大师三时点契约）。
 
     仅 after_close 之外的两个时点继承；无基准卡时返回 None（调用方留痕）；基准
     stage 非法/为空或 evidence 残缺时返回 None（调用方本地重算，不另留痕）。
@@ -148,6 +212,10 @@ def _inherit_basis_stage(
     档位既已沿用，仓位序号与账本也必须同源（2026-11-04 单一真相源）——
     morning/midday 用前一交易日 K 线重算仓位会造成同日三时点口径打架。
     基准卡是旧数据、无 `position_index` 时返回 None（调用方置灰，**不得按文案反推序号**）。
+
+    基准来源由 `_resolve_basis_card` 决定：morning 的上游是 after_close，midday 的
+    上游是 morning（缺失才回退 after_close）。文案据基准卡自身的 `refresh_slot`
+    区分「收盘基准」与「盘前基准」，避免 midday 把盘前卡说成收盘卡。
     """
     if slot not in {"morning", "midday"}:
         return None
@@ -163,9 +231,10 @@ def _inherit_basis_stage(
     if stage is None:
         return None
     basis_date = content.get("basis_date")
+    basis_label = "盘前基准" if content.get("refresh_slot") == "morning" else "收盘基准"
     reason = str(evidence.get("stage_reason") or "")
     position_text: str | None = None
-    position_index: int | None = None
+    position_index: int | None = _report_position_index(basis_response)
     position_ledger: PositionLedger | None = None
     basis_card = content.get("rhythm_card")
     if isinstance(basis_card, dict):
@@ -173,14 +242,6 @@ def _inherit_basis_stage(
         if isinstance(band, dict):
             text = band.get("text")
             position_text = text if isinstance(text, str) and text else None
-        raw_index = basis_card.get("position_index")
-        # 序号越界/非整数一律视为不可用（fail closed，不猜、不 clamp）
-        if (
-            isinstance(raw_index, int)
-            and not isinstance(raw_index, bool)
-            and engine.LADDER_MIN <= raw_index <= engine.LADDER_MAX
-        ):
-            position_index = raw_index
         raw_ledger = basis_card.get("position_ledger")
         if isinstance(raw_ledger, dict):
             try:
@@ -189,11 +250,169 @@ def _inherit_basis_stage(
                 position_ledger = None
     return (
         stage,
-        f"沿用收盘基准（{basis_date or '—'}）：{reason}",
+        f"沿用{basis_label}（{basis_date or '—'}）：{reason}",
         position_text,
         position_index,
         position_ledger,
     )
+
+
+def _morning_event_item(
+    *,
+    event_item: LedgerItem,
+    canonical: LedgerItem,
+    delta: int,
+    clamped: bool,
+    revoked: bool,
+    net: int,
+) -> LedgerItem:
+    """按盘前事件修正改写事件账本行（其余 3 行原样继承，`net == 0` 时整行不动）。
+
+    - `delta`：相对「撤销临近 +1 后的基准」的事件方向调整量；
+    - `net`：相对**继承序号**的净变化（含撤销临近 +1 带来的 −1）。
+
+    未收敛时取 `engine.event_ledger_item` 的规范文案（盘前事件数据已更新，只改
+    judgement 会出现「value_text 说未落档、judgement 说 +1」的自相矛盾）；方向调整
+    被 ±1 截断时按实调量改写；发生撤销时补一句净变化，避免「调整量」与账本 `adjust`
+    对不上。
+    """
+    if not clamped:
+        item = canonical
+    else:
+        item = event_item.model_copy(update={
+            "value_text": canonical.value_text,
+            "judgement": "事件 +1" if delta > 0 else "事件 -1",
+            "effect": f"{delta:+d}（盘前事件修正，受 ±1 限制）",
+            "status": "supporting" if delta > 0 else "blocking",
+        })
+    if revoked:
+        net_text = f"{net:+d}" if net else "0"
+        item = item.model_copy(update={
+            "effect": f"{item.effect}；已撤销临近 +1（净 {net_text}）",
+        })
+    return item
+
+
+def _apply_morning_event_adjustment(
+    *,
+    base_index: int,
+    base_ledger: PositionLedger | None,
+    event_d: int | None,
+    event_result: str | None,
+    mainline: dict[str, object],
+    closes: list[float],
+    candidates: list[CandidateOutlook],
+) -> tuple[int, PositionLedger | None, str, str | None]:
+    """morning 事件修正（spec §4.2）：在继承档位上按事件调档，其余维度不重算。
+
+    返回 `(position_index, position_ledger, position_source, note)`：
+    - `position_source`：`event_adjusted`（档位确有变化）/ `inherited_basis`（无修正）；
+    - `note`：发生封顶 / 收敛 / 跳过时的留痕文案，由调用方写入 `data_missing`。
+
+    **按继承账本的 `event_applied_kind` 三分支**（spec §4.1/§4.2 裁决）：
+
+    - `"result"`：收盘基准已按这条结果定过档 → 整体跳过，不得重复计；
+    - `"approaching"`：收盘基准只有「临近事件 +1」（结果未知）→ **先撤销该 +1**
+      （`start = 账本 event_off_index`，即 step2 结束、step3 之前的档位），再以 `start`
+      为基准按结果重算。不撤销就会把「临近 +1」和「结果定档」叠在一起：利空落地仍停在
+      原档，等于坏消息不降档；
+    - `None`：未计入过 → 以继承序号为基准，行为与首版一致。
+
+    **幅度约束**：`|事件方向调整| ≤ 1`；但 `d==0 未落档 → 封顶 1` 是安全规则，
+    **优先于 ±1 收敛、完整执行**（spec §4.2/§8.4 裁决）并在 `data_missing` 留痕。
+    撤销临近 +1 不属于「方向调整」，故 morning 相对收盘基准的变化可达 2 档。
+    """
+    kind = base_ledger.event_applied_kind if base_ledger is not None else None
+    if kind == "result":
+        return (
+            base_index,
+            base_ledger,
+            "inherited_basis",
+            "盘前事件已由收盘基准按结果计入，不重复调整",
+        )
+    # "approaching"：收盘基准的 +1 建立在「事件临近」上，结果未知；盘前先撤销再加。
+    # 撤销基线取账本的 `event_off_index`（step2 结束、step3 之前的档位）：不能用
+    # `继承序号 − 1`，4 档上界会把 +1 整个吃掉（base3+主线1+事件1=5→4），此时
+    # 「继承序号 − 1」等于撤掉一个从未加上的 +1，后续结果调整基准偏低一档。
+    revoked = kind == "approaching"
+    note: str | None = None
+    if revoked:
+        start = base_ledger.event_off_index if base_ledger is not None else None
+        if start is None:
+            # 旧卡无该字段：按「继承序号 − 1」近似（并在 data_missing 注明是近似）
+            start = max(engine.LADDER_MIN, base_index - 1)
+            note = "旧基准卡无事件前档位（盘前撤销按 继承序号−1 近似）"
+        start = max(engine.LADDER_MIN, min(engine.LADDER_MAX, start))
+    else:
+        start = base_index
+    gate_blocked = bool(base_ledger.gate_blocked) if base_ledger is not None else False
+    mainline_state = str(mainline.get("state") or "") or None
+    mainline_strength = mainline.get("strength")
+    delta, reason = engine.event_adjustment(
+        event_d=event_d,
+        event_result=event_result,
+        mainline_state=mainline_state,
+        mainline_strength=mainline_strength,
+        gate_blocked=gate_blocked,
+        base_index=start,
+    )
+    capped = reason == engine.EVENT_CAP_REASON
+    if capped:
+        # 安全封顶优先于 ±1：完整执行到 min(档位, 1)，不得被幅度约束截断
+        new_index = min(start, 1)
+        clamped = False
+        if new_index != base_index:
+            note = f"盘前发现未落档高影响事件（d=0），档位由 {base_index} 封顶至 {new_index}"
+    else:
+        bounded = max(-1, min(1, delta))
+        new_index = max(engine.LADDER_MIN, min(engine.LADDER_MAX, start + bounded))
+        clamped = bounded != delta
+        if clamped:
+            note = (
+                f"盘前事件修正幅度超 ±1（{delta:+d}），"
+                f"已收敛为 {new_index - start:+d} 档"
+            )
+    net = new_index - base_index
+    ledger = base_ledger
+    if ledger is not None:
+        canonical = engine.event_ledger_item(
+            event_d=event_d,
+            event_result=event_result,
+            gate_blocked=gate_blocked,
+            block_reason="盘前继承基准卡闸门",
+            mainline_state=mainline_state,
+            mainline_strength=mainline_strength,
+        )
+        ledger = ledger.model_copy(update={
+            "items": [
+                _morning_event_item(
+                    event_item=item, canonical=canonical,
+                    delta=new_index - start, clamped=clamped,
+                    revoked=revoked, net=net,
+                )
+                # 撤销路径即使净变化为 0 也要改写：盘前结果已落档，事件行的
+                # value_text 若仍停在「d=1 事件临近」就是过期事实
+                if item.key == "event" and (net or revoked) else item
+                for item in ledger.items
+            ],
+            "adjust": ledger.adjust + net,
+            "final_index": new_index,
+            "event_applied_kind": engine.event_applied_kind(
+                event_d=event_d,
+                event_result=event_result,
+                gate_blocked=gate_blocked,
+                delta=delta,
+                reason=reason,
+            ),
+        })
+        # 档位变了 → 观察点必然变：按新档位重算（不得沿用基准卡的旧观察点）；
+        # 档位未变时原样继承，避免用盘中数据无谓改写基准卡的反解结果。
+        if net:
+            ledger = ledger.model_copy(update={"watch_points": build_watch_points(
+                ledger, mainline_facts=mainline, event_d=event_d,
+                closes=closes, candidates=candidates,
+            )})
+    return new_index, ledger, ("event_adjusted" if net else "inherited_basis"), note
 
 
 def _amount_yi(raw: float | None) -> float:
@@ -271,8 +490,8 @@ def _volume_confirm(amounts: list[float], stage: str | None) -> str | None:
 
 async def _compose_card(
     run_date: str, slot: str, target_date: str | None = None
-) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow]:
-    """三时点证据流水线：返回 (MasterRhythmCard, rows, win) 三元组。
+) -> tuple[MasterRhythmCard, list[dict[str, object]], EventWindow, str | None]:
+    """三时点证据流水线：返回 (MasterRhythmCard, rows, win, position_source) 四元组。
 
     `run_date` 为运行时日期（scheduler 传入的 shanghai_today）；卡片 `basis_date`
     对外表示**证据日**（K 线末日），`target_date` 按 slot 由运行日推导（P1-6/G9）。
@@ -280,7 +499,9 @@ async def _compose_card(
     数据算出的卡落回该日键，见 routes.trigger_rhythm_master）。
 
     rows 为 close 非空过滤后的 K 线行（供 _build_rhythm_card 复用，避免二次取数）；
-    win 为当前窗口 EventWindow（事件分支/锚点来源）。
+    win 为当前窗口 EventWindow（事件分支/锚点来源）；
+    position_source 为盘前事件修正判定出的档位来源（`event_adjusted` /
+    `inherited_basis`），None = 未走继承链，由 `_build_rhythm_card` 按 stage_source 归类。
     """
     target_date = target_date or (
         add_trading_days(date_cls.fromisoformat(run_date), 1).isoformat()
@@ -517,38 +738,9 @@ async def _compose_card(
                 if prev_resp is None
                 else "前一交易日基准卡无有效主阶段（主阶段未沿用）"
             )
-    # P0-2/G2：morning/midday 主档位沿用 after_close 基准，消除同日双档矛盾
-    # D1（2026-11-03）：去掉 `and stage is not None` —— 本地判空时恰恰最需要基准兜底，
-    # 否则盘前/午间卡恒为 stage=null，前端只能回退旧卡。
-    inherited_position_text: str | None = None
-    inherited_position_index: int | None = None
-    inherited_position_ledger: PositionLedger | None = None
-    inherited_basis = False
-    if slot in {"morning", "midday"}:
-        basis_resp = await node_api.get_rhythm_report(target_date, "after_close")
-        inherited = _inherit_basis_stage(slot, basis_resp)
-        if inherited is not None:
-            (
-                stage,
-                stage_reason,
-                inherited_position_text,
-                inherited_position_index,
-                inherited_position_ledger,
-            ) = inherited
-            stage_source = "inherited_basis"
-            inherited_basis = True
-        elif basis_resp is None:
-            basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
-    event_confirm = _event_confirm(win.events)
-    volume_direction = _volume_confirm(amounts, stage)
-    cert, cert_reason = ev.detect_certainty(
-        event_confirm=event_confirm, volume_direction=volume_direction,
-        stage=stage, breadth=breadth,
-    )
-    anchors = ev.build_event_anchors(win.events)
-
-    # 事件档位（需求⑤）：d 与 next_event_anchor 同函数同源。必须在构造 evidence 前算好，
-    # 因为仓位判定（derive_position_index step3）要用同一对 d/result。
+    # 事件档位（需求⑤）：d 与 next_event_anchor 同函数同源。必须在继承块与构造 evidence
+    # 之前算好——盘前事件修正（spec §4.2）与仓位判定（derive_position_index step3）要用
+    # 同一对 d/result。
     win_highs = getattr(win, "high_events", None) or []
     event_d: int | None = None
     event_result: str | None = None
@@ -564,6 +756,66 @@ async def _compose_card(
         raw_result = first_high.get("result")
         event_result = str(raw_result) if raw_result is not None else None
 
+    # P0-2/G2：morning/midday 主档位**逐级**沿用上游基准（spec §4.1 串联继承链）：
+    # after_close（定档）→ morning（读 after_close，做事件修正）→
+    # midday（读 morning，做盘中修正；morning 不可用才回退 after_close）。
+    # D1（2026-11-03）：去掉 `and stage is not None` —— 本地判空时恰恰最需要基准兜底，
+    # 否则盘前/午间卡恒为 stage=null，前端只能回退旧卡。
+    inherited_position_text: str | None = None
+    inherited_position_index: int | None = None
+    inherited_position_ledger: PositionLedger | None = None
+    inherited_basis = False
+    position_source_hint: str | None = None
+    if slot in {"morning", "midday"}:
+        basis_resp, fallback_note = await _resolve_basis_card(slot, target_date)
+        if fallback_note:
+            basis_inherit_note = fallback_note
+        inherited = _inherit_basis_stage(slot, basis_resp)
+        if inherited is not None:
+            (
+                stage,
+                stage_reason,
+                inherited_position_text,
+                inherited_position_index,
+                inherited_position_ledger,
+            ) = inherited
+            stage_source = "inherited_basis"
+            inherited_basis = True
+        elif basis_resp is None:
+            basis_inherit_note = "收盘基准卡缺失（主档位未沿用）"
+
+    # spec §4.2：morning 只允许「事件 ±1」修正档位。趋势 / 量能 / 宽度维度一律继承
+    # 基准卡（09:00 无当日盘面数据），**不得**调 derive_position_index 重算。
+    morning_adjust_note: str | None = None
+    if slot == "morning" and inherited_basis:
+        if inherited_position_index is None:
+            # 旧基准卡无档位 → 不修正、保持 null（前端灰格），只留痕
+            morning_adjust_note = "基准卡无有效档位（盘前事件修正未执行）"
+        else:
+            (
+                inherited_position_index,
+                inherited_position_ledger,
+                position_source_hint,
+                morning_adjust_note,
+            ) = _apply_morning_event_adjustment(
+                base_index=inherited_position_index,
+                base_ledger=inherited_position_ledger,
+                event_d=event_d,
+                event_result=event_result,
+                mainline=mainline,
+                closes=closes,
+                candidates=mainline_candidates,
+            )
+
+    # 确信度 / 事件锚点必须用**最终** stage（继承后）计算，不可用继承前值
+    event_confirm = _event_confirm(win.events)
+    volume_direction = _volume_confirm(amounts, stage)
+    cert, cert_reason = ev.detect_certainty(
+        event_confirm=event_confirm, volume_direction=volume_direction,
+        stage=stage, breadth=breadth,
+    )
+    anchors = ev.build_event_anchors(win.events)
+
     # 仓位唯一真相源（因果输出 spec §3）：序号 / 文案 / 账本全部来自同一次
     # derive_position_index。morning/midday 继承基准卡档位时直接沿用其序号与账本，
     # 不重算——否则盘中会用前一交易日 K 线得出第二套仓位（双真相源）。旧基准卡无
@@ -571,8 +823,8 @@ async def _compose_card(
     position_index: int | None = None
     position_ledger: PositionLedger | None = None
     if inherited_basis:
-        # 继承路径不重算：观察点已在基准卡账本里，连同账本一起沿用（否则同日三时点
-        # 会算出互相矛盾的观察点）。
+        # 继承路径不重算：观察点已在基准卡账本里（morning 事件修正后按新档位重算），
+        # 连同账本一起沿用（否则同日三时点会算出互相矛盾的观察点）。
         position_index = inherited_position_index
         position_ledger = inherited_position_ledger
     else:
@@ -606,6 +858,8 @@ async def _compose_card(
         missing.append(basis_inherit_note)
     if stage_inherit_note:
         missing.append(stage_inherit_note)
+    if morning_adjust_note:
+        missing.append(morning_adjust_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, stage_source=stage_source,
         certainty=cert, certainty_reason=cert_reason,
@@ -623,6 +877,7 @@ async def _compose_card(
         ),
         rows,
         win,
+        position_source_hint,
     )
 
 
@@ -648,6 +903,8 @@ def _near_window_end_date(target_date: str) -> str | None:
 def _build_rhythm_card(
     card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]],
     mainline: dict[str, object] | None = None,
+    *,
+    position_source_hint: str | None = None,
 ) -> dict[str, object]:
     """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决 + 本批主线/仓位接线）。
 
@@ -657,6 +914,9 @@ def _build_rhythm_card(
       （2026-11-04 单一真相源：不再有 inherited/derive_position_text 三分支）；
       `position_index` / `position_ledger` / `position_source` 同期透出；
       `causality_text` 与账本 `watch_points` 同源于同一份 PositionLedger（T8）；
+    - `position_source_hint`：由 `_compose_card` 判定的档位来源（盘前事件修正是否真的
+      改了档位），仅用于 morning/midday 的 inherited_basis 分支；缺省 None = 按
+      stage_source 归类（旧调用点行为不变）；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
     - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
       事件（含 medium），供前端事件日历渲染；
@@ -788,7 +1048,9 @@ def _build_rhythm_card(
         position_source = "inherited_prev_day"
     elif card.refresh_slot in {"morning", "midday"} \
             and card.evidence.stage_source == "inherited_basis":
-        position_source = "inherited_basis"
+        # 盘前事件修正是否真的改了档位由 `_compose_card` 判定（`event_adjusted`），
+        # 本处只决定「未修正」时的归类；缺省（None）= 未经过 _compose_card 的旧调用。
+        position_source = position_source_hint or "inherited_basis"
     else:
         position_source = None
 
@@ -889,7 +1151,7 @@ async def run(state: AgentState) -> dict[str, object]:
         target_override = state.get("target_date")
         if not (isinstance(target_override, str) and target_override):
             target_override = None
-        card, rows, win = await _compose_card(basis, slot, target_override)
+        card, rows, win, position_source = await _compose_card(basis, slot, target_override)
         if not card.synthesis_available:
             logger.warning(
                 "rhythm_master.degraded reason=%s slot=%s target_date=%s",
@@ -903,7 +1165,10 @@ async def run(state: AgentState) -> dict[str, object]:
             "evidence": card.evidence.model_dump(),
             "synthesis": card.synthesis.model_dump() if card.synthesis else None,
             "synthesis_available": card.synthesis_available,
-            "rhythm_card": _build_rhythm_card(card, win, rows, card.mainline_facts),
+            "rhythm_card": _build_rhythm_card(
+                card, win, rows, card.mainline_facts,
+                position_source_hint=position_source,
+            ),
         }
         await node_api.save_analysis_report(
             report_type="rhythm_master", report_date=card.target_date,

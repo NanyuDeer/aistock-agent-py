@@ -131,7 +131,7 @@ async def _run_compose_full(slot: str, kline, breadth, fg, rhythm_report):
 
 
 async def _run_compose(slot: str, kline, breadth, fg, rhythm_report):
-    card, _, _ = await _run_compose_full(slot, kline, breadth, fg, rhythm_report)
+    card, _, _, _ = await _run_compose_full(slot, kline, breadth, fg, rhythm_report)
     return card
 
 
@@ -201,7 +201,7 @@ async def test_position_band_single_source_when_inherited_prev_day():
     from aistock_agent.services.rhythm_engine import POSITION_LADDER
 
     prev = _prev_report("ebb", "2026-10-30")
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "after_close",
         _mild_kline(),
         {"total_count": 100, "advance_count": 50},
@@ -232,7 +232,7 @@ async def test_position_band_keeps_gate_when_stage_computed():
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
     from aistock_agent.services.rhythm_engine import POSITION_LADDER
 
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "after_close",
         _bull_kline(),
         {"total_count": 100, "advance_count": 90},
@@ -292,7 +292,7 @@ async def test_morning_inherits_basis_ledger_without_recompute():
         }
     }
     # 盘中 K 线是多头（本地重算会得 3 档）→ 断言沿用 0 档才证明「不重算」
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "morning",
         _bull_kline(),
         {"total_count": 100, "advance_count": 90},
@@ -363,7 +363,7 @@ async def test_temperature_series_filled_from_archive(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
 
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "after_close", _bull_kline(), {"total_count": 100, "advance_count": 90}, 75, None
     )
     rhythm_card = rhythm_master._build_rhythm_card(card, win, rows)
@@ -379,7 +379,7 @@ async def test_temperature_series_empty_when_archive_missing(monkeypatch, tmp_pa
     from aistock_agent.agents.workers import rhythm_master
 
     monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path / "nope")
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "after_close", _bull_kline(), {"total_count": 100, "advance_count": 90}, 75, None
     )
     rhythm_card = rhythm_master._build_rhythm_card(card, win, rows)
@@ -396,7 +396,7 @@ async def test_morning_inherits_basis_position_band():
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
 
     basis = _prev_report_with_band("ebb", shanghai_today().isoformat(), "建议仓位：轻仓~观望")
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "morning",
         _mild_kline(),
         {"total_count": 100, "advance_count": 50},
@@ -423,7 +423,7 @@ async def test_morning_does_not_guess_index_when_basis_has_no_index():
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
 
     basis = _prev_report("ebb", shanghai_today().isoformat())  # 无 rhythm_card
-    card, rows, win = await _run_compose_full(
+    card, rows, win, _ = await _run_compose_full(
         "morning",
         _mild_kline(),
         {"total_count": 100, "advance_count": 50},
