@@ -18,9 +18,12 @@
 - `tests/unit/test_event_store.py`：新增 `_rebuild_event_record` 混合源重算用例（peripheral → domestic / unknown）。
 - `pytest tests -q` → **4100 passed / 5 skipped**；ruff/mypy 改动文件通过。
 
-### 部署与验证（待执行）
+### 部署与验证（华为云 121.37.46.229，2026-11-04 18:18 CST）
 
-- 部署后手动重跑 2026-11-04 review，确认 `/api/agent/report/review/2026-11-04` 非空且 DB 出现 `report_type='review'` 行。
+- PR #157 合入 `f1a1992`，main CI success；服务器 fast-forward 至 `f1a1992`，`pm2 restart aistock-agent` 后 `/health/ready` 返回 scheduler ok。
+- 手动触发 2026-11-04 review：70.13 秒完成，`run_review_done status=ok`，report id **4722** `status=completed`，content 99,670 字符。
+- 18:30 定时 full review 自动执行并成功：`snapshot_kind=full`、`run_review_done status=ok`、`analysis_report_saved`，未再出现 `run_review_trace_validation_failed`。
+- 接口 `GET /api/agent/report/review/2026-11-04` 返回 `id=4722 / status=completed / snapshot=trace-20261104-20261104T103000014493Z`；DB `agent_analysis_reports` 对应行 completed，前端页面可正常取到最新复盘。
 
 ---
 
