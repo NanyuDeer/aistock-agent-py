@@ -2,6 +2,28 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-11-04 — 混合源地域误判修复（复盘报告恢复落库）
+
+**开发者**: NanyuDeer
+
+### 修复
+
+- **jin10 不再是整体外围源**：`services/event_origin.py` 将 `jin10` 从 `_PERIPHERAL_SOURCES` 移入 `_MIXED_SOURCES`。混合源按内容判定：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（不再回落 peripheral）。
+- **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存 `event_origin`，按内容重新判定。否则 2026-10-16 起已写成 `peripheral` 的境内 jin10 快讯仍会让复盘校验失败。
+- **根因**：复盘 `_validate_origin_consumption` 要求 peripheral 证据只能支撑全球风险/市场定位类归因。2026-11-04 的「沪深两市成交额突破2万亿元」「多只科创半导体ETF涨超10%」「长鑫科技回购」均被整源白名单误标 peripheral，quick 复盘连续 3 次失败 → 整份降级且不落库 → 前端显示「复盘报告未能完成」。
+
+### 测试
+
+- `tests/unit/test_event_origin.py`：更新源白名单用例；新增混合源境内/海外/未知 6 条参数化回归 + `is_peripheral` 读时重算用例。
+- `tests/unit/test_event_store.py`：新增 `_rebuild_event_record` 混合源重算用例（peripheral → domestic / unknown）。
+- `pytest tests -q` → **4100 passed / 5 skipped**；ruff/mypy 改动文件通过。
+
+### 部署与验证（待执行）
+
+- 部署后手动重跑 2026-11-04 review，确认 `/api/agent/report/review/2026-11-04` 非空且 DB 出现 `report_type='review'` 行。
+
+---
+
 ## [main] 2026-11-03 — 情绪任务 17:00+重试 & 仓位口径同源（PR #156 合入 + 部署）
 
 **开发者**: NanyuDeer（合入/CI 修复/部署）、changer-collab（PR #156）

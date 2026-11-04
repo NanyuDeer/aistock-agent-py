@@ -560,6 +560,46 @@ def test_load_event_scrape_recomputes_legacy_rows():
     assert rows["event_origin"] == "peripheral"
 
 
+def test_rebuild_event_record_recomputes_mixed_source_origin():
+    # 存量 jin10 行曾按整源白名单写成 peripheral → 读时按内容重算，境内事实改判 domestic
+    import aistock_agent.services.event_store as es
+
+    legacy = {
+        "event_id": "2026-11-04-abc",
+        "title": "沪深两市成交额突破2万亿元",
+        "summary": "",
+        "url": "",
+        "impact_score": 5,
+        "direction": "neutral",
+        "involved_keywords": [],
+        "source": "jin10",
+        "source_level": "C",
+        "content_hash": "abc",
+        "scrape_at": "2026-11-04T15:30:00",
+        "score_date": "2026-11-04",
+        "payload": {},
+        "symbol": "",
+        "stock_name": "",
+        "industry": "",
+        "event_scope": "MARKET",
+        "event_scope_source": "unknown",
+        "event_scope_confidence": 0.0,
+        "event_origin": "peripheral",
+        "event_origin_source": "source_whitelist",
+        "event_origin_confidence": 0.95,
+    }
+    row = es._rebuild_event_record(legacy)
+    assert row["event_origin"] == "domestic"
+    assert row["event_origin_source"] == "mixed_source_rule"
+    assert row["event_origin_confidence"] == 0.85
+
+    # 无境内标记/海外强词的混合源行 → unknown，绝不再回落 peripheral
+    legacy["title"] = "长鑫科技：公司董事长提议增加回购股份金额"
+    legacy["event_id"] = "2026-11-04-def"
+    row = es._rebuild_event_record(legacy)
+    assert row["event_origin"] == "unknown"
+
+
 def test_cross_source_absorb_requires_peripheral_side():
     from aistock_agent.services.event_store import _is_cross_source_absorbable
 

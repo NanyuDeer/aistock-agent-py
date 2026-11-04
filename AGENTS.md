@@ -639,6 +639,13 @@ pm2 logs aistock-agent --lines 50
 - **为什么**：2026-10-19 16:05 服务器磁盘写满（ENOSPC）使 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录，但调度实际持续运行（每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物照常落盘）。**“日志无心跳”不能证明调度停摆**，必须看 `/health/ready` 的 `scheduler`。
 - **misfire grace**：心跳 job 必须先于 misfire 循环注册（或显式 `misfire_grace_time=3600`）。默认 1s 会让诊断 job 在 event loop 繁忙时被跳过（2026-10-22 日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
 
+### 事件地域判定与复盘落库（2026-11-04）
+
+- **jin10 是混合源，不是整体外围源**：`services/event_origin.py` 的 `_PERIPHERAL_SOURCES` 只保留 `global_markets`；`jin10` 归入 `_MIXED_SOURCES`，按内容重判：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（**不得回落 peripheral**）。
+- **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存的 `event_origin`，按内容重新判定。原因是 2026-10-16 上线的整源白名单已把大量境内 jin10 快讯写成 `peripheral`，仅改分类器不重算存量仍会复发。
+- **为什么必须修**：复盘 `_validate_origin_consumption` 规定 peripheral 证据只能支撑全球风险/市场定位类归因；误标的境内证据会让整份报告降级且**不落库**（quick 3 次重试后前端显示“复盘报告未能完成”）。2026-11-04 生产事故即 `沪深两市成交额`、`科创半导体ETF`、`长鑫科技回购` 三条境内证据被标 peripheral。
+- **验证口径**：改完不止看单测，要确认 2026-11-04 复盘重新生成后 `/api/agent/report/review/2026-11-04` 返回非空、`agent_analysis_reports` 出现 `report_type='review'` 行。
+
 ## 关键约束
 
 - 禁止在 Python 重复实现 A 股数据获取逻辑
