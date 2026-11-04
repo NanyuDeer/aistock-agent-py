@@ -951,6 +951,7 @@ async def _compose_card(
     # position_index → 序号为 None（前端灰格），不得按文案反推。
     position_index: int | None = None
     position_ledger: PositionLedger | None = None
+    event_cap_note: str | None = None
     if inherited_basis:
         # 继承路径不重算：观察点已在基准卡账本里（morning 事件修正后按新档位重算），
         # 连同账本一起沿用（否则同日三时点会算出互相矛盾的观察点）。
@@ -968,6 +969,30 @@ async def _compose_card(
             closes=closes, candidates=mainline_candidates,
         )
         position_ledger = position_ledger.model_copy(update={"watch_points": watch_points})
+
+    # 事件当期（d=0）结果未落档 → 档位封顶 1（spec §5.2.2 step3 安全线）。
+    # 为什么要有这道「出口闸」：after_close 定档时事件可能尚未入库（盘后财报等），
+    # morning/midday 沿用基准档位时若不过闸门，就会因「沿用」被放过。11:30 / 13:00
+    # 的预期差扫描也可能让 midday 才看到当天的事件——所以必须按**本卡自己**的
+    # event_d/event_result 在档位层面兜一次，而不是在文案层面反推档位
+    # （远端 be1c558 曾用 _POSITION_TEXT_RANK 把文案映射回序号，那正是本次重构
+    #   拆掉的反向推断，已弃用）。
+    if (event_d == 0 and event_result not in engine.EVENT_RESULT_ENUM
+            and position_index is not None and position_index > 1):
+        capped_index = 1
+        if position_ledger is not None:
+            position_ledger = position_ledger.model_copy(update={
+                "adjust": position_ledger.adjust + (capped_index - position_index),
+                "final_index": capped_index,
+                "watch_points": build_watch_points(
+                    position_ledger, mainline_facts=mainline, event_d=event_d,
+                    closes=closes, candidates=mainline_candidates,
+                ),
+            })
+        event_cap_note = (
+            f"事件当期未落档（d=0），档位由 {position_index} 封顶至 {capped_index}"
+        )
+        position_index = capped_index
     position: PositionBand | None = None
     if position_index is not None:
         action, direction = engine.position_action(position_index)
@@ -991,6 +1016,8 @@ async def _compose_card(
         missing.append(morning_adjust_note)
     if midday_adjust_note:
         missing.append(midday_adjust_note)
+    if event_cap_note:
+        missing.append(event_cap_note)
     evidence = RhythmEvidence(
         stage=stage, stage_reason=stage_reason, stage_source=stage_source,
         certainty=cert, certainty_reason=cert_reason,
@@ -1176,6 +1203,7 @@ def _build_rhythm_card(
     else:
         # 档位不可用（旧基准卡无 position_index / 无档位）：只回放继承文案，不猜序号
         pos_text = card.inherited_position_text or ""
+    # 账本与序号同源：都从 evidence 取，禁止本处另算（双真相源红线）
     ledger = card.evidence.position_ledger
     position_ledger = ledger.model_dump() if ledger is not None else None
     # 溯源文案同样从账本派生（硬约束：与 position_index / 观察点同一份账本）

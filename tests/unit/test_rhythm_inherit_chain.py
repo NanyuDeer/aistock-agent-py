@@ -777,3 +777,43 @@ async def test_after_close_still_computes_locally() -> None:
         breadth={"total_count": 100, "advance_count": 50},
     )
     assert rhythm_card["position_index"] == expected
+
+
+@pytest.mark.asyncio
+async def test_same_day_event_without_result_caps_inherited_index() -> None:
+    """事件当期（d=0）结果未落档 → 继承来的高档位也必须封顶 1。
+
+    场景来源（远端 be1c558）：after_close 定档时事件尚未入库（盘后财报等），
+    morning/midday 沿用基准档位时不能因「沿用」被放过；11:30 / 13:00 的预期差
+    扫描也可能让 midday 才看到当天的事件。
+
+    实现方式与 be1c558 不同：不在文案层反推档位（那是本次重构拆掉的反向推断），
+    而是在档位层面按本卡自己的 event_d/event_result 兜一次出口闸。
+    """
+    basis = _report(3, _ledger_for(3))
+    event = {"date": TARGET, "title": "盘后财报", "importance": "high"}
+    card, rows, win, source = await _compose(
+        "midday", reports={"morning": basis}, events=[event],
+    )
+    rhythm_card = _rhythm_card(card, rows, win, source)
+
+    assert rhythm_card["position_index"] == 1
+    assert rhythm_card["position_ledger"]["final_index"] == 1
+    assert any("封顶" in str(m) for m in rhythm_card["data_missing"])
+
+
+@pytest.mark.asyncio
+async def test_same_day_event_with_result_does_not_cap() -> None:
+    """结果已落档 → 不该触发封顶（否则等于把已兑现的事件当未知风险）。"""
+    basis = _report(3, _ledger_for(3))
+    event = {
+        "date": TARGET, "title": "盘后财报", "importance": "high", "result": "符合",
+    }
+    card, rows, win, source = await _compose(
+        "midday", reports={"morning": basis}, events=[event],
+    )
+    rhythm_card = _rhythm_card(card, rows, win, source)
+
+    assert rhythm_card["position_index"] != 1 or "封顶" not in str(
+        rhythm_card["data_missing"]
+    )

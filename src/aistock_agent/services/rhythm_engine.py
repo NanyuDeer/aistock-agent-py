@@ -1050,6 +1050,11 @@ EVENT_ANCHOR_THRESHOLD = {
     "符合": "符合 -> 震荡",
     "不及预期": "不及预期 -> 跌破",
 }
+# DEPRECATED 并已移除（2026-11-04）：远端 be1c558 曾以「仓位文案 → 阶梯序」的映射
+# 实现 d=0 未落档封顶（cap_position_text_on_event_no_result）。该做法是反向推断，
+# 与本次重构「序号是唯一真相源、文案只能由序号派生」的原则冲突，且重构后该函数零调用点。
+# 等价语义已改在档位层面实现：rhythm_master._compose_card 的「事件当期出口闸」
+# （position_index 封顶 1，不受 ±1 约束），并有单测覆盖。
 
 
 def build_event_branch(

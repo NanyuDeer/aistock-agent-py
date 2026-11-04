@@ -155,7 +155,9 @@ async def test_stage_source_computed_when_local_stage_decided():
 @pytest.mark.asyncio
 async def test_stage_source_inherited_prev_day_when_neutral_and_prev_available():
     # 均线多头但缩量 → 综合分 +0.5 落死区，沿用前一交易日 after_close 卡
-    prev = _prev_report("ebb", "2026-10-30")
+    # 基日必须相对「今天」取：resolve_prev_phase 有 max_gap_days=3 的时效闸，
+    # 硬编码 2026-10-30 会随真实日期推移超过窗口而必然被拒（时间炸弹）。
+    prev = _prev_report("ebb", shanghai_today().isoformat())
     card = await _run_compose(
         "after_close",
         _mild_kline(),
@@ -203,7 +205,9 @@ async def test_position_band_single_source_when_inherited_prev_day():
     from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
     from aistock_agent.services.rhythm_engine import POSITION_LADDER
 
-    prev = _prev_report("ebb", "2026-10-30")
+    # 基日必须相对「今天」取：resolve_prev_phase 有 max_gap_days=3 的时效闸，
+    # 硬编码 2026-10-30 会随真实日期推移超过窗口而必然被拒（时间炸弹）。
+    prev = _prev_report("ebb", shanghai_today().isoformat())
     card, rows, win, _ = await _run_compose_full(
         "after_close",
         _mild_kline(),
