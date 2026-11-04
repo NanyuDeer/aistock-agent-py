@@ -695,11 +695,21 @@ def _build_rhythm_card(
     # 技术不可用且有关键事件时才让位给事件三情景。
     # 注意：用 getattr 兼容只声明 events/source_missing 的旧测试替身（无 high_events 属性）。
     win_highs_for_budget = getattr(win, "high_events", None) or []
+    # 分支接档位（因果输出 spec §7）：position_action 必须从本卡当前档位出发，
+    # 闸门命中时 bullish 分支被压制为「暂不加」——否则 0 档卡会写出「加仓」，
+    # 承诺一个 derive_position_index 自己不会执行的动作。缺失 → None，分支回退旧静态文案。
     branches: list[dict[str, object]] = []
+    branch_from_index = card.evidence.position.index if card.evidence.position else None
+    branch_gate_blocked = (
+        card.evidence.position_ledger.gate_blocked
+        if card.evidence.position_ledger
+        else False
+    )
     try:
         tech_branches = engine.build_technical_branches(
             closes=closes, highs=highs, lows=lows, amounts=amounts,
             data_missing=data_missing_container,
+            from_index=branch_from_index, gate_blocked=branch_gate_blocked,
         )
         if tech_branches:
             branches = list(tech_branches[:3])
@@ -710,7 +720,12 @@ def _build_rhythm_card(
                 data_missing_container.append("事件节点因分支预算（≤3）未展示")
         else:
             for e in win_highs_for_budget[:1]:
-                branches.extend(engine.build_event_branch(e, card.target_date))
+                branches.extend(
+                    engine.build_event_branch(
+                        e, card.target_date,
+                        from_index=branch_from_index, gate_blocked=branch_gate_blocked,
+                    )
+                )
             branches = branches[:3]
     except Exception:
         logger.warning("rhythm_master.rhythm_card_branches_failed", exc_info=True)

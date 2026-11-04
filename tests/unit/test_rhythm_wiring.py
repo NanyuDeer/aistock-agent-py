@@ -57,3 +57,20 @@ def test_deleted_symbols_absent_from_engine_source():
     engine_text = (SRC / "services" / "rhythm_engine.py").read_text(encoding="utf-8")
     assert "def ma_breadth" not in engine_text
     assert "LADDER_MAX_LEVEL" not in engine_text
+
+
+def test_branches_wired_to_current_position_index():
+    """因果输出 spec §7：分支的 position_action 必须接当前档位（不是写死常量）。
+
+    worker 侧须把当前档位与闸门状态传进分支构造；engine 侧 7 处调用点
+    （技术成交额版 3 + 技术点位版 3 + 事件版 1）须逐一透传。
+    """
+    worker_text = (SRC / "agents" / "workers" / "rhythm_master.py").read_text(encoding="utf-8")
+    assert "card.evidence.position.index" in worker_text
+    assert "card.evidence.position_ledger.gate_blocked" in worker_text
+    assert "from_index=branch_from_index" in worker_text
+    assert "gate_blocked=branch_gate_blocked" in worker_text
+
+    engine_text = (SRC / "services" / "rhythm_engine.py").read_text(encoding="utf-8")
+    # 7 处 position_band_to_action 调用全部带 from_index / gate_blocked
+    assert engine_text.count("from_index=from_index, gate_blocked=gate_blocked") == 7

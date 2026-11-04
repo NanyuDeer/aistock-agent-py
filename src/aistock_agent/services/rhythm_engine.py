@@ -154,20 +154,61 @@ def level_from_score(score: float) -> Level:
     return "euphoria"
 
 
-def position_band_to_action(band: dict[str, Any], direction: str) -> dict[str, Any]:
-    """按 direction 生成结构化仓位动作。
+def position_band_to_action(
+    band: dict[str, Any],
+    direction: str,
+    *,
+    from_index: int | None = None,
+    gate_blocked: bool = False,
+) -> dict[str, Any]:
+    """按 direction 生成结构化仓位动作，并接到当前档位（因果输出 spec §7）。
 
-    direction: bullish→add / bearish→reduce / neutral→hold。
-    change 成数按保守区间确定性取值（不靠 LLM 拍脑袋，硬约束 #7）。
+    direction: bullish→add（+2 档）/ bearish→reduce（−1 档）/ neutral→hold（维持），
+    `to_index = clamp(from_index + delta, LADDER_MIN, LADDER_MAX)`。
+
+    **闸门压制**（spec §7.2）：`gate_blocked and bullish` → `to_index = from_index`、
+    `blocked_by_gate = True`、`change = "闸门未解除，暂不加"`。理由：闸门命中时
+    `derive_position_index` 会把档位压到 0 并禁止 +1，此时承诺「加仓」是系统自身
+    不会执行的动作。
+
+    **边界钳制**：`change` 取**实际兑现步长**（`to_index - from_index`），故 clamp
+    生效时不虚报 —— 4 档无法再加、0 档无法再减 → `"维持"`；3 档 bullish 只到 4 档
+    → `"+1 档"`（名义 +2）。分支不得写出未兑现的步长。
+
+    `from_index is None`（旧卡 / 未接线调用）→ `from_index` / `to_index` 均为 None、
+    `blocked_by_gate=False`，`change` **回退旧静态文案**（「+2 成」/「-1 成」/「持仓不变」），
+    保证旧报告与旧调用点行为不变（spec §8）。
+
+    有 from_index 时 `change` 一律以「档」为单位（spec §7.3）：「成」是仓位比例，
+    「档」是本系统阶梯序号，混用即 §1.2 矛盾的根源。
     """
     d = "add" if direction == "bullish" else ("reduce" if direction == "bearish" else "hold")
-    if d == "add":
-        change = "+2 成"
-    elif d == "reduce":
-        change = "-1 成"
+    delta = 2 if direction == "bullish" else (-1 if direction == "bearish" else 0)
+    if from_index is None:
+        # 旧静态文案（兼容旧报告/旧测试）：语义已被 §7 取代，仅在无档位可接时使用。
+        change = "+2 成" if d == "add" else ("-1 成" if d == "reduce" else "持仓不变")
+        to_index: int | None = None
+        blocked_by_gate = False
     else:
-        change = "持仓不变"
-    return {"direction": d, "change": change, "band": band}
+        blocked_by_gate = bool(gate_blocked and direction == "bullish")
+        if blocked_by_gate:
+            to_index = from_index
+            change = "闸门未解除，暂不加"
+        else:
+            to_index = max(LADDER_MIN, min(LADDER_MAX, from_index + delta))
+            step = to_index - from_index
+            if step == 0:
+                change = "维持"
+            else:
+                change = f"+{step} 档" if step > 0 else f"{step} 档"
+    return {
+        "direction": d,
+        "change": change,
+        "band": band,
+        "from_index": from_index,
+        "to_index": to_index,
+        "blocked_by_gate": blocked_by_gate,
+    }
 
 
 def derive_position_index(
@@ -674,6 +715,8 @@ def build_technical_branches(
     dense_support: float | None = None,
     dense_pressure: float | None = None,
     data_missing: list[str] | None = None,
+    from_index: int | None = None,
+    gate_blocked: bool = False,
 ) -> list[dict[str, Any]]:
     """确定性技术点位节点（§19.2，G19：点位由 engine 按当日行情计算）。
 
@@ -682,6 +725,10 @@ def build_technical_branches(
     - amount 缺失 → 退化为指数点位三档（站上压力/跌破支撑/区间内）。
     - high/low 空值兜底（2026-09-05 裁决）：剔除空值行，整体仍不可得则
       返回空 branches 并在 data_missing 留痕，绝不伪造支撑/压力点位。
+
+    `from_index` / `gate_blocked` 透传给全部 `position_band_to_action` 调用点
+    （因果输出 spec §7）：分支的仓位动作必须接当前档位，闸门命中时 bullish
+    分支被压制，不得承诺系统不会执行的加仓。
 
     highs/lows 形参声明为 list[float | None]（真实契约）：K 线原始行的 high/low
     可能缺失，本函数内部按行过滤 None（下方 recent_highs/recent_lows），故可安全承载。
@@ -723,7 +770,10 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": f"放量（>{avg20 * 1.2:.0f}亿）",
                 },
-                "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
+                "position_action": position_band_to_action(
+                    POSITION_BANDS["active"], "bullish",
+                    from_index=from_index, gate_blocked=gate_blocked,
+                ),
                 "anchor": {
                     "metric": "index_close",
                     "threshold": "站稳 +0.5%",
@@ -746,7 +796,10 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": f"缩量（<{avg20 * 0.8:.0f}亿）",
                 },
-                "position_action": position_band_to_action(POSITION_BANDS["ice"], "bearish"),
+                "position_action": position_band_to_action(
+                    POSITION_BANDS["ice"], "bearish",
+                    from_index=from_index, gate_blocked=gate_blocked,
+                ),
                 "anchor": {
                     "metric": "index_close",
                     "threshold": "跌破 -0.5%",
@@ -769,7 +822,10 @@ def build_technical_branches(
                     "unit": "亿元",
                     "label": "平量",
                 },
-                "position_action": position_band_to_action(POSITION_BANDS["normal"], "neutral"),
+                "position_action": position_band_to_action(
+                    POSITION_BANDS["normal"], "neutral",
+                    from_index=from_index, gate_blocked=gate_blocked,
+                ),
                 "anchor": {
                     "metric": "index_close",
                     "threshold": "区间震荡",
@@ -793,7 +849,10 @@ def build_technical_branches(
                 "hi": None,
                 "label": f"收盘站上 {pressure:.0f} 压力位",
             },
-            "position_action": position_band_to_action(POSITION_BANDS["active"], "bullish"),
+            "position_action": position_band_to_action(
+                POSITION_BANDS["active"], "bullish",
+                from_index=from_index, gate_blocked=gate_blocked,
+            ),
             "anchor": {
                 "metric": "index_close",
                 "threshold": "站稳 +0.5%",
@@ -815,7 +874,10 @@ def build_technical_branches(
                 "hi": round(support, 2),
                 "label": f"收盘跌破 {support:.0f} 支撑位",
             },
-            "position_action": position_band_to_action(POSITION_BANDS["ice"], "bearish"),
+            "position_action": position_band_to_action(
+                POSITION_BANDS["ice"], "bearish",
+                from_index=from_index, gate_blocked=gate_blocked,
+            ),
             "anchor": {
                 "metric": "index_close",
                 "threshold": "跌破 -0.5%",
@@ -837,7 +899,10 @@ def build_technical_branches(
                 "hi": round(pressure, 2),
                 "label": "支撑-压力区间内",
             },
-            "position_action": position_band_to_action(POSITION_BANDS["normal"], "neutral"),
+            "position_action": position_band_to_action(
+                POSITION_BANDS["normal"], "neutral",
+                from_index=from_index, gate_blocked=gate_blocked,
+            ),
             "anchor": {
                 "metric": "index_close",
                 "threshold": "区间震荡",
@@ -865,7 +930,11 @@ EVENT_ANCHOR_THRESHOLD = {
 
 
 def build_event_branch(
-    event: dict[str, Any], origin_date: str | None = None
+    event: dict[str, Any],
+    origin_date: str | None = None,
+    *,
+    from_index: int | None = None,
+    gate_blocked: bool = False,
 ) -> list[dict[str, Any]]:
     """事件节点（spec §19.2/D10/D15 + 本 spec §5.4/G12）：枚举分档（预期差）。
 
@@ -874,6 +943,9 @@ def build_event_branch(
     origin_date 提供时启用 d 约束：交易日差 d > EVENT_BRANCH_MAX_D 的事件不产分支
     （避免「闸门说无影响 vs 分支说超预期加仓」的同卡矛盾，spec §5.5.2）。
     返回 [] 表示非 high 事件（无事件分支）或 d 超限（同语义不产分支）。
+
+    `from_index` / `gate_blocked` 透传给 `position_band_to_action`（因果输出 spec §7）：
+    「超预期 → 加仓」同样要接当前档位，闸门命中时不得承诺加仓。
 
     公布后"点亮/置灰"能力当前未接线（spec D3 拆契约），故分支不含 met 键；
     event_ref 保留供验证器使用。
@@ -902,7 +974,10 @@ def build_event_branch(
                     "value": value,
                     "label": value,
                 },
-                "position_action": position_band_to_action(POSITION_BANDS[band_key], direction),
+                "position_action": position_band_to_action(
+                    POSITION_BANDS[band_key], direction,
+                    from_index=from_index, gate_blocked=gate_blocked,
+                ),
                 "anchor": {
                     "metric": "index_close",
                     "threshold": EVENT_ANCHOR_THRESHOLD[value],

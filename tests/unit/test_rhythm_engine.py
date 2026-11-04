@@ -342,6 +342,130 @@ def test_position_band_to_action_neutral():
     assert action["change"] == "持仓不变"
 
 
+# ---- 分支接档位（因果输出 spec §7）：position_action 必须接当前档位 ----------
+
+_BULL_BAND = {"text": "6~8 成，顺势持有"}
+_ICE_BAND = {"text": "空仓~观察"}
+
+
+def test_position_band_to_action_gate_suppresses_bullish() -> None:
+    """§7.2：0 档 + 闸门命中 → bullish 不得承诺加仓（to_index 原地不动）。"""
+    action = rhythm_engine.position_band_to_action(
+        _BULL_BAND, "bullish", from_index=0, gate_blocked=True,
+    )
+    assert action["direction"] == "add"
+    assert action["from_index"] == 0
+    assert action["to_index"] == 0
+    assert action["blocked_by_gate"] is True
+    assert action["change"] == "闸门未解除，暂不加"
+
+
+def test_position_band_to_action_bullish_steps_two_bands() -> None:
+    action = rhythm_engine.position_band_to_action(_BULL_BAND, "bullish", from_index=2)
+    assert (action["from_index"], action["to_index"]) == (2, 4)
+    assert action["change"] == "+2 档"
+    assert action["blocked_by_gate"] is False
+
+
+def test_position_band_to_action_bearish_steps_one_band() -> None:
+    action = rhythm_engine.position_band_to_action(_ICE_BAND, "bearish", from_index=2)
+    assert (action["from_index"], action["to_index"]) == (2, 1)
+    assert action["change"] == "-1 档"
+    assert action["blocked_by_gate"] is False
+
+
+def test_position_band_to_action_clamped_at_ladder_bounds() -> None:
+    """4 档不再 +2、0 档不再 −1：clamp 回原档位时文案为「维持」，不写未兑现的步长。"""
+    top = rhythm_engine.position_band_to_action(_BULL_BAND, "bullish", from_index=4)
+    assert top["to_index"] == 4 and top["change"] == "维持"
+    bottom = rhythm_engine.position_band_to_action(_ICE_BAND, "bearish", from_index=0)
+    assert bottom["to_index"] == 0 and bottom["change"] == "维持"
+
+
+def test_position_band_to_action_change_is_realized_step() -> None:
+    """3 档 bullish 只到 4 档（名义 +2 被 clamp）→ change 必须写实际兑现的「+1 档」。"""
+    action = rhythm_engine.position_band_to_action(_BULL_BAND, "bullish", from_index=3)
+    assert action["to_index"] == 4
+    assert action["change"] == "+1 档"
+
+
+def test_position_band_to_action_without_from_index_falls_back_to_legacy_text() -> None:
+    """spec §8：旧卡无档位 → 回退「成」文案，to_index 为 None（不伪造目标档）。"""
+    bull = rhythm_engine.position_band_to_action(_BULL_BAND, "bullish")
+    assert bull["change"] == "+2 成"
+    assert bull["from_index"] is None and bull["to_index"] is None
+    assert bull["blocked_by_gate"] is False
+    bear = rhythm_engine.position_band_to_action(_ICE_BAND, "bearish")
+    assert bear["change"] == "-1 成" and bear["to_index"] is None
+    flat = rhythm_engine.position_band_to_action({"text": "半仓"}, "neutral")
+    assert flat["change"] == "持仓不变" and flat["to_index"] is None
+
+
+def _tech_fixture() -> dict[str, list[float]]:
+    closes = [float(3000 + (i % 7)) for i in range(30)]
+    return {
+        "closes": closes,
+        "highs": [c + 5.0 for c in closes],
+        "lows": [c - 5.0 for c in closes],
+    }
+
+
+def test_technical_branches_gate_suppresses_bullish_both_paths() -> None:
+    """闸门命中 → 成交额版与点位版的 bullish 分支均被压制；bearish/neutral 不受影响。"""
+    fx = _tech_fixture()
+    for amounts in ([100.0] * 30, []):  # 前者成交额三档，后者点位三档
+        branches = build_technical_branches(
+            **fx, amounts=amounts, from_index=0, gate_blocked=True,
+        )
+        by_dir = {b["conclusion"]["direction"]: b["position_action"] for b in branches}
+        assert set(by_dir) == {"bullish", "bearish", "neutral"}, amounts
+        assert by_dir["bullish"]["blocked_by_gate"] is True
+        assert by_dir["bullish"]["to_index"] == 0
+        assert by_dir["bullish"]["change"] == "闸门未解除，暂不加"
+        assert by_dir["bearish"]["blocked_by_gate"] is False
+        assert by_dir["neutral"]["blocked_by_gate"] is False
+
+
+def test_technical_branches_carry_from_index_and_no_cheng_unit() -> None:
+    """全部技术分支都接上 from_index，且文案不再出现「成」（spec §7.3）。"""
+    fx = _tech_fixture()
+    for amounts in ([100.0] * 30, []):
+        branches = build_technical_branches(**fx, amounts=amounts, from_index=1)
+        assert len(branches) == 3
+        for b in branches:
+            action = b["position_action"]
+            assert action["from_index"] == 1, action
+            assert "成" not in action["change"], action
+
+
+def test_event_branch_gate_suppresses_bullish() -> None:
+    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
+    by_value = {
+        b["condition"]["value"]: b["position_action"]
+        for b in build_event_branch(event, from_index=0, gate_blocked=True)
+    }
+    assert by_value["超预期"]["blocked_by_gate"] is True
+    assert by_value["超预期"]["to_index"] == 0
+    assert by_value["超预期"]["change"] == "闸门未解除，暂不加"
+    assert by_value["符合"]["blocked_by_gate"] is False
+    assert by_value["不及预期"]["blocked_by_gate"] is False
+    assert all("成" not in a["change"] for a in by_value.values())
+
+
+def test_event_branch_bullish_steps_from_current_index() -> None:
+    event = {"date": "2026-09-02", "title": "英伟达财报", "importance": "high"}
+    by_value = {
+        b["condition"]["value"]: b["position_action"]
+        for b in build_event_branch(event, from_index=2)
+    }
+    assert by_value["超预期"]["to_index"] == 4
+    assert by_value["超预期"]["change"] == "+2 档"
+    assert by_value["不及预期"]["to_index"] == 1
+    assert by_value["不及预期"]["change"] == "-1 档"
+    assert by_value["符合"]["to_index"] == 2
+    assert by_value["符合"]["change"] == "维持"
+
+
 def test_qian_yuan_to_yi_constant_exposed():
     from aistock_agent.services.rhythm_engine import QIAN_YUAN_TO_YI
 

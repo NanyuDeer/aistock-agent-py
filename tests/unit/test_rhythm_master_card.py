@@ -357,5 +357,51 @@ def test_reason_longest_label_plus_board_within_cap() -> None:
     assert len(reason) <= 72
 
 
+def _card_with_position(index: int, gate_blocked: bool) -> MasterRhythmCard:
+    """构造带档位与账本的卡（分支接档位 spec §7 的输入面）。"""
+    from aistock_agent.schemas.rhythm_master import LedgerItem, PositionBand, PositionLedger
+
+    items = [
+        LedgerItem(key=k, value_text="-", judgement="-", effect="-", status="missing")
+        for k in ("trend", "mainline", "event", "breadth")
+    ]
+    ledger = PositionLedger(items=items, final_index=index, gate_blocked=gate_blocked)
+    position = PositionBand(text="空仓观望", action="hold", direction="neutral", index=index)
+    return MasterRhythmCard(
+        basis_date="2026-09-16", target_date="2026-09-17", refresh_slot="after_close",
+        evidence=RhythmEvidence(stage="ebb", position=position, position_ledger=ledger),
+    )
+
+
+def test_worker_passes_position_index_and_gate_to_branches() -> None:
+    """H10 接线：worker 必须把 from_index / gate_blocked 传给分支构造。
+
+    0 档 + 闸门命中时 bullish 分支不得写「加仓」——这是「分支承诺系统自身
+    不会执行的动作」的回归防线（因果输出 spec §7.2）。
+    """
+    out = _build_rhythm_card(
+        _card_with_position(0, True), _win(), _rows(60, high=3010.0, low=2990.0)
+    )
+    actions = [b["position_action"] for b in out["branches"]]
+    assert actions
+    bulls = [a for a in actions if a["direction"] == "add"]
+    assert bulls and all(a["blocked_by_gate"] is True for a in bulls)
+    assert all(a["from_index"] == 0 for a in actions)
+    assert all("成" not in a["change"] for a in actions)
+
+
+def test_worker_passes_position_index_without_gate() -> None:
+    """无闸门时同理：分支从 2 档出发，bullish 走到 4 档而不是静态「+2 成」。"""
+    out = _build_rhythm_card(
+        _card_with_position(2, False), _win(), _rows(60, high=3010.0, low=2990.0)
+    )
+    bulls = [
+        b["position_action"] for b in out["branches"]
+        if b["position_action"]["direction"] == "add"
+    ]
+    assert bulls and all(a["from_index"] == 2 and a["to_index"] == 4 for a in bulls)
+    assert all(a["change"] == "+2 档" for a in bulls)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
