@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.event_origin import derive_event_origin
+from aistock_agent.services.event_origin import derive_event_origin, is_mixed_source
 from aistock_agent.services.event_scope_resolver import resolve_event_scope
 
 logger = structlog.get_logger()
@@ -409,9 +409,21 @@ def _rebuild_event_record(ev: dict[str, Any]) -> EventRecord:
     （保持「单条畸形只跳过该条」既有语义）。
     """
     impact_score = int(ev.get("impact_score", 0) or 0)
-    origin = str(ev.get("event_origin") or "").strip() or derive_event_origin(
-        str(ev.get("source") or ""), str(ev.get("title") or ""), str(ev.get("summary") or "")
-    )[0]
+    source = str(ev.get("source") or "")
+    title = str(ev.get("title") or "")
+    summary = str(ev.get("summary") or "")
+    stored_origin = str(ev.get("event_origin") or "").strip()
+    if stored_origin and not is_mixed_source(source):
+        origin = stored_origin
+        origin_source = str(ev.get("event_origin_source") or "recomputed")
+        origin_confidence = _safe_float(ev.get("event_origin_confidence"), 0.0)
+    elif is_mixed_source(source):
+        # 混合源（jin10）存量标签不可信（可能来自整源白名单）→ 按内容重算
+        origin, origin_source, origin_confidence = derive_event_origin(source, title, summary)
+    else:
+        origin = derive_event_origin(source, title, summary)[0]
+        origin_source = "recomputed"
+        origin_confidence = 0.0
     return EventRecord(
         event_id=str(ev.get("event_id", "")),
         title=str(ev.get("title", "")),
@@ -438,8 +450,8 @@ def _rebuild_event_record(ev: dict[str, Any]) -> EventRecord:
         app_event_id=(str(ev["app_event_id"]) if ev.get("app_event_id") else None),
         app_event_status=(str(ev["app_event_status"]) if ev.get("app_event_status") else None),
         event_origin=origin,
-        event_origin_source=str(ev.get("event_origin_source") or "recomputed"),
-        event_origin_confidence=_safe_float(ev.get("event_origin_confidence"), 0.0),
+        event_origin_source=origin_source,
+        event_origin_confidence=origin_confidence,
     )
 
 
