@@ -276,6 +276,9 @@ class Settings(BaseSettings):
     scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
+    scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
     rhythm_mainline_enabled: bool = True

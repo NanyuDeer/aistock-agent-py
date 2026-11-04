@@ -292,6 +292,19 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于节奏 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」；独立任务，失败不阻塞任何其他链路。
+    scheduler.add_job(
+        _run_intraday_snapshot_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_intraday_snapshot_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="intraday_snapshot",
+        name="intraday snapshot archive (12:25)",
+        replace_existing=True,
+    )
+
     # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
     scheduler.add_job(
         _run_rhythm_master_after_close,
@@ -555,6 +568,19 @@ async def _run_sentiment_temp_task() -> None:
         date=target,
         attempts=len(_SENTIMENT_RETRY_DELAYS_SECONDS),
     )
+
+
+async def _run_intraday_snapshot_task() -> None:
+    """12:25 盘中快照归档（独立任务，失败不阻塞其他链路）。
+
+    非交易日由 archive_intraday_snapshot 内部守卫（不落空文件），此处只管兜异常。
+    """
+    from aistock_agent.services.intraday_snapshot_archive import archive_intraday_snapshot
+
+    try:
+        await archive_intraday_snapshot()
+    except Exception:  # noqa: BLE001
+        logger.warning("intraday_snapshot_task_failed", exc_info=True)
 
 
 async def _run_rhythm_master_after_close() -> None:
