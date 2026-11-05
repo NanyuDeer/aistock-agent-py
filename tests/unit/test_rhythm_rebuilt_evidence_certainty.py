@@ -1,5 +1,5 @@
 # tests/unit/test_rhythm_rebuilt_evidence_certainty.py
-from aistock_agent.services.rhythm_rebuilt_evidence import compute_position, detect_certainty
+from aistock_agent.services.rhythm_rebuilt_evidence import detect_certainty
 
 
 def test_high_certainty_on_event_and_volume_confirm():
@@ -15,14 +15,3 @@ def test_low_certainty_when_nothing_confirms():
         breadth={"advance_count": 800, "decline_count": 3900, "total_count": 5000},
     )
     assert cert == "low"
-
-def test_position_match_rally_high():
-    pos = compute_position(stage="rally", certainty="high")
-    assert pos is not None
-    assert pos.action == "add"
-    assert pos.direction == "bullish"
-
-def test_position_hold_on_low_certainty():
-    pos = compute_position(stage="ice", certainty="low")
-    assert pos is not None
-    assert pos.action == "hold"

@@ -12,6 +12,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
+from aistock_agent.schemas.rhythm_master import CandidateOutlook
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
@@ -266,3 +267,30 @@ def judge_mainline(
         return hit
     return {"state": "none", "name": None, "strength": None,
             "excess": None, "data_date": None, "attention": "候选齐备但无清晰主线"}
+
+
+def rank_candidates(
+    candidates: list[dict[str, Any]],
+    index_pct_chgs: list[float],
+    *,
+    ret_window: int = RET_WINDOW,
+    limit: int = 3,
+) -> list[CandidateOutlook]:
+    """主线候选排名（因果输出 spec §6.4）：按 ret_window 日超额降序，最多 `limit` 个。
+
+    与 `judge_mainline` 同源：同样走 `_pool_best`（nav 换算 + 超额 + 降序），
+    只做展示层截断——**不改判据、不影响主线成立与否**。供变奏观察点的
+    「候选池前 3 名」使用：只给「最高 +0.8」用户无代入感，给出是谁在领先才有。
+
+    候选不足 `limit` → 有几个返回几个（不补位）；无候选或全算不出超额 → []。
+    """
+    if limit <= 0:
+        return []
+    # 调用方可能传「取数后全量」而非 judge_mainline 内部的 valid 子集；
+    # 无 pct_chgs 的条目直接跳过（与 _excess_pct「数据不足 → None」同语义）。
+    pool = [c for c in candidates if c.get("pct_chgs")]
+    scored = _pool_best(pool, nav_from_pct(index_pct_chgs), ret_window)
+    return [
+        CandidateOutlook(name=str(c["name"]), excess=round(excess, 2))
+        for c, excess in scored[:limit]
+    ]

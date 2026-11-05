@@ -18,8 +18,13 @@ PositionAction = Literal["add", "hold", "reduce"]
 StageSource = Literal["computed", "inherited_prev_day", "inherited_basis"]
 
 # F3 裁决（2026-09-05）：score 由 level 派生同源（score=LEVEL_IDX×20，0-100 语义），
-# Stage→前端五档映射表（对齐 frontend RhythmCard.vue LEVEL_META：ice/低/常/活/亢）。
 # 确定性映射，禁止在 LLM/提示词层做。None（证据不足/数据缺）→ None（前端灰格）。
+#
+# DEPRECATED（2026-11-04，职责重定义 T4）：level / score 已不是产品概念。
+#   - 节奏的核心产出是仓位档位（position_index 0-4），上色/短码一律走它
+#   - 本表仅为未升级客户端兼容而保留产出，**不得删除、不得置 None**
+#     （uni-app 三端，App 不升级即长期跑旧版，置 null 会让其日历变灰）
+#   - 新代码禁止消费；前端已零引用，靠「零引用」完成语义废弃
 STAGE_TO_LEVEL: dict[str | None, dict[str, Any] | None] = {
     "ice": {"level": "ice", "score": 0},
     "ebb": {"level": "low", "score": 20},
@@ -34,6 +39,80 @@ class PositionBand(BaseModel):
     text: str
     action: PositionAction
     direction: Direction
+    # 仓位档位序号（0-4，因果输出 spec §4.1）；None = 未经 derive_position_index 产出
+    index: int | None = None
+
+
+class LedgerItem(BaseModel):
+    """仓位账本单行（因果输出 spec §4.1）：原生数值 + 判定 + 对档位的作用。
+
+    status 语义：blocking=正在压低档位 / neutral=有数据但无影响 /
+    supporting=在抬高档位 / missing=数据不可用（**不得**当作 neutral）。
+    """
+
+    key: Literal["trend", "mainline", "event", "breadth"]
+    value_text: str
+    judgement: str
+    effect: str
+    status: Literal["blocking", "neutral", "supporting", "missing"]
+
+
+class CandidateOutlook(BaseModel):
+    name: str
+    excess: float
+
+
+class WatchPoint(BaseModel):
+    """变奏观察点（因果输出 spec §4.2）：当前未满足项 + 当前距离。"""
+
+    key: Literal["mainline", "gate", "event"]
+    condition: str
+    current_text: str
+    sufficient_alone: bool
+    candidates: list[CandidateOutlook] | None = None
+
+
+class PositionLedger(BaseModel):
+    """仓位推导账本（因果输出 spec §4.1）：position_index 的唯一真相源。
+
+    items 恒 4 项且顺序固定 trend / mainline / event / breadth；缺失项
+    status=missing 显式标注，不省略键。
+    """
+
+    items: list[LedgerItem]
+    base_index: int | None = None
+    adjust: int = 0
+    final_index: int | None = None
+    # 仅指数硬闸门（close<ma20 且 ma5<ma10<ma20）；语义不含主线破位/数据不足
+    gate_hit: bool = False
+    # 主线板块破位；None = 状态未知（无主线输入）
+    mainline_breakdown: bool | None = None
+    # K 线不足 20 根（趋势不可判，H5 禁止 +1）
+    insufficient: bool = False
+    # 真实「禁止 +1」标志 = gate_hit or mainline_breakdown or insufficient
+    gate_blocked: bool = False
+    mainline_state: str | None = None
+    # 事件调整**生效前**的档位 = clamp(base + 主线调整)，即 step2 结束、step3 之前的值
+    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`继承序号 − 1` 在
+    # 4 档上界把 +1 吃掉时会多撤一档，只有事件前档位能无歧义还原。
+    event_off_index: int | None = None
+    # 事件调整的**已计入类型**（幂等闸门，职责重定义 spec §4.1/§4.2）：
+    # - "approaching"：d∈{1,2} 的临近事件 +1 已计入（结果未知 → 盘前拿到结果后须先撤销）；
+    # - "result"：已按事件结果定档（含结果「符合」导致 delta==0 的情形，不得重复计）；
+    # - None：未计入事件调整（含 d==0 未落档的封顶——那是「结果未知」的安全约束）。
+    event_applied_kind: Literal["approaching", "result"] | None = None
+    watch_points: list[WatchPoint] = Field(default_factory=list)
+    ledger_version: str = "1.0"
+
+
+class CausalityText(BaseModel):
+    """溯源主区文案（因果输出 spec §5.1）：首句 + 逐条阻塞明细。
+
+    文案全部在 Python 侧确定性产出，前端只按序拼接，不拼字符串、不判阈值（G19）。
+    """
+
+    lead: str
+    lines: list[str] = Field(default_factory=list)
 
 
 class EventAnchor(BaseModel):
@@ -52,6 +131,9 @@ class RhythmEvidence(BaseModel):
     certainty: Certainty | None = None
     certainty_reason: str = ""
     position: PositionBand | None = None
+    # 仓位推导账本（因果输出 spec §4.3）：与 position.index 同源同值，
+    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 档位不可用（旧基准卡）。
+    position_ledger: PositionLedger | None = None
     event_anchors: list[EventAnchor] = Field(default_factory=list)
     data_missing: list[str] = Field(default_factory=list)
 

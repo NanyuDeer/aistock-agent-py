@@ -97,7 +97,7 @@ async def test_compose_card_routes_timeline_events_into_card_output(
     monkeypatch.setattr(rm, "run_synthesis", AsyncMock(return_value=None))
     monkeypatch.setattr(rm, "validate_synthesis", lambda *args, **kwargs: False)
 
-    card, rows, win = await rm._compose_card("2026-09-10", "after_close")
+    card, rows, win, _, _ = await rm._compose_card("2026-09-10", "after_close")
     rhythm_card = rm._build_rhythm_card(card, win, rows, card.mainline_facts)
 
     # 接线 1：必须经时间线加载器取数，且请求全量展示窗（horizon_days=None，需求 2）。

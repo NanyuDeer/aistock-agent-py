@@ -276,6 +276,9 @@ class Settings(BaseSettings):
     scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
+    scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
     rhythm_mainline_enabled: bool = True
@@ -420,6 +423,14 @@ class Settings(BaseSettings):
     # 节奏卡「沿用前阶段」的时效窗口（交易日）：前卡基准日距今超过该值则不再沿用，
     # 防止一张错卡沿链无限传播（2026-11-03 D2）。
     rhythm_prev_phase_max_gap_days: int = 3
+
+    # 盘中修正阈值（职责重定义 spec §4.3 / §11.2）：midday 只降不升，阈值参数化。
+    # version 随每张卡落库（phase_evidence.intraday_factors.threshold_version），
+    # 换阈值前后可分桶回测——版本号不变而改数值会让历史样本不可区分。
+    rhythm_intraday_thresholds_version: str = "v1-20261104"
+    rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
+    rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）

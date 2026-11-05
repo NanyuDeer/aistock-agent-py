@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, cast, get_args
 
-from aistock_agent.schemas.rhythm_master import Certainty, EventAnchor, PositionBand, Stage
+from aistock_agent.schemas.rhythm_master import Certainty, EventAnchor, Stage
 from aistock_agent.utils.date import trading_days_between
 
 _CERTAINTY_SET = {"high", "medium", "low"}
@@ -167,16 +167,6 @@ def detect_stage(
     return None, "证据不足，无前阶段"
 
 
-# 常量表以模型承载（键为 Stage 闭集，值 action/direction 由 PositionBand 校验为闭集字面量）
-_STAGE_POSITION: dict[Stage, PositionBand] = {
-    "ice": PositionBand(text="空仓~观察", action="hold", direction="neutral"),
-    "launch": PositionBand(text="轻仓~半仓试探", action="add", direction="bullish"),
-    "rally": PositionBand(text="6~8 成顺势持有", action="add", direction="bullish"),
-    "overheat": PositionBand(text="半仓~减仓防退潮", action="reduce", direction="bearish"),
-    "ebb": PositionBand(text="轻仓~观望", action="hold", direction="neutral"),
-}
-
-
 def detect_certainty(
     *,
     event_confirm: bool,
@@ -196,19 +186,6 @@ def detect_certainty(
     if confirms >= 1:
         return "medium", "部分维度确认，待更多信号"
     return "low", "多空未共振，观望"
-
-
-def compute_position(
-    *, stage: Stage | None, certainty: Certainty | None,
-) -> PositionBand | None:
-    if stage is None or certainty is None:
-        return None
-    base = _STAGE_POSITION[stage]
-    # certainty=low 且档位非 reduce → 统一降为 hold（逻辑与旧 dict 取值等价）
-    action = base.action
-    if certainty == "low" and action != "reduce":
-        action = "hold"
-    return PositionBand(text=base.text, action=action, direction=base.direction)
 
 
 def build_event_anchors(events: list[dict[str, Any]]) -> list[EventAnchor]:
