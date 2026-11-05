@@ -158,6 +158,154 @@ def _build_user_profile_context(profile: UserProfile | None) -> str:
     )
 
 
+# 用户画像自动挖掘一期（Task 7）：推断注入白名单 / 阈值 / 渲染上限。
+# active_hours / watchlist_breadth 按 spec §3.3 表格「进 prompt = ❌」不渲染。
+_INFERENCE_PROMPT_DIMENSIONS = ("preferred_sectors", "question_topics", "watch_events")
+_INFERENCE_CONFIDENCE_THRESHOLD = 0.55
+_INFERENCE_MAX_CHARS = 300
+_INFERENCE_EVENT_TYPE_LABELS = {
+    "limit_up_radar": "涨停雷达",
+    "up_move": "上涨异动",
+    "down_move": "下跌异动",
+}
+
+
+def _render_inference_sentence(dimension: str, value: dict[str, object]) -> str:
+    """把单个维度的 value 渲染为一句自然语言（无可用数据 → ""）。"""
+    items = value.get("items")
+    if not isinstance(items, list):
+        return ""
+
+    if dimension == "preferred_sectors":
+        names: list[str] = []
+        weight_sum = 0.0
+        weight_ok = True
+        for item in items:
+            if len(names) >= 3:  # Top3 截断，控制渲染长度
+                break
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not (isinstance(name, str) and name.strip()):
+                continue
+            names.append(name.strip())
+            weight = item.get("weight")
+            if isinstance(weight, int | float) and not isinstance(weight, bool):
+                weight_sum += float(weight)
+            else:
+                weight_ok = False
+        if not names:
+            return ""
+        pct = (
+            f"（占比 {round(weight_sum * 100)}%）"
+            if weight_ok and weight_sum > 0
+            else ""
+        )
+        return "用户自选股集中于" + "、".join(names) + pct + "。"
+
+    if dimension == "question_topics":
+        topics: list[str] = []
+        for item in items:
+            if len(topics) >= 3:
+                break
+            if not isinstance(item, dict):
+                continue
+            topic = item.get("topic")
+            if isinstance(topic, str) and topic.strip():
+                topics.append(topic.strip())
+        if not topics:
+            return ""
+        return "用户近期提问多集中于" + "、".join(topics) + "等主题。"
+
+    if dimension == "watch_events":
+        labels: list[str] = []
+        for item in items:
+            if len(labels) >= 3:
+                break
+            if not isinstance(item, dict):
+                continue
+            event_type = item.get("type")
+            if not isinstance(event_type, str):
+                continue
+            label = _INFERENCE_EVENT_TYPE_LABELS.get(event_type)
+            if label is not None and label not in labels:
+                labels.append(label)
+        if not labels:
+            return ""
+        return "用户关注的事件类型以" + "、".join(labels) + "为主。"
+
+    return ""
+
+
+def _build_inference_context(
+    inferences: list[dict[str, object]] | None,
+    profile: UserProfile | None,
+) -> str:
+    """用户画像自动挖掘一期（Task 7）：构造推断参考段（spec §3.7 合并规则）。
+
+    - 阈值过滤：``confidence < 0.55`` 的维度整体丢弃（字符串形式容错 float()）。
+    - 显式优先：profile 的 ``investment_preferences`` 非空 → 丢弃 ``preferred_sectors``
+      （同类信息显式优先）；``risk_tolerance`` 非空时本段不渲染任何风险措辞，
+      不改写风险段强度。
+    - 维度白名单：仅 preferred_sectors / question_topics / watch_events 进 prompt。
+    - 合规红线：整段标注「系统推测」；不改变技能清单/闸门规则/JSON 输出契约。
+    - 渲染上限：拼接文本 ≤ 300 字；无可用推断（None / [] / 全被过滤）→ ""（prompt
+      字节不变，零行为变化）。
+    """
+    if not inferences:
+        return ""
+
+    explicit_prefs = False
+    if isinstance(profile, dict):
+        prefs = profile.get("investment_preferences")
+        if isinstance(prefs, list):
+            explicit_prefs = any(isinstance(p, str) and p.strip() for p in prefs)
+
+    sentences: list[str] = []
+    seen: set[str] = set()
+    for row in inferences:
+        if not isinstance(row, dict):
+            continue
+        dimension = row.get("dimension")
+        if not isinstance(dimension, str) or dimension in seen:
+            continue
+        seen.add(dimension)
+        if dimension not in _INFERENCE_PROMPT_DIMENSIONS:
+            continue  # active_hours / watchlist_breadth 仅供推送时段，不进 prompt
+        if dimension == "preferred_sectors" and explicit_prefs:
+            continue
+
+        confidence_raw = row.get("confidence")
+        if isinstance(confidence_raw, str):
+            try:
+                confidence = float(confidence_raw)
+            except ValueError:
+                continue
+        elif isinstance(confidence_raw, int | float) and not isinstance(
+            confidence_raw, bool
+        ):
+            confidence = float(confidence_raw)
+        else:
+            continue
+        if confidence < _INFERENCE_CONFIDENCE_THRESHOLD:
+            continue
+
+        value = row.get("value")
+        if not isinstance(value, dict):
+            continue
+        sentence = _render_inference_sentence(dimension, value)
+        if sentence:
+            sentences.append(sentence)
+
+    if not sentences:
+        return ""
+    text = (
+        "\n\n用户画像推断参考（系统推测，仅供参考，不改变上述技能与闸门规则）："
+        + "".join(sentences)
+    )
+    return text[:_INFERENCE_MAX_CHARS]
+
+
 class QARouterOutput(BaseModel):
     """QA Router LLM 输出契约。"""
 
@@ -1662,6 +1810,11 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         # Phase 4-3（改进 15）：注入 user_profile 参考段（profile 为 None 时返回 ""，
         # prompt 字节不变；仅回答风格微调，不改技能/闸门规则）
         profile_context = _build_user_profile_context(state.get("user_profile"))
+        # 用户画像自动挖掘一期（Task 7）：推断参考段（阈值过滤 + 显式优先 + 推测
+        # 标注）。无推断返回 ""，prompt 字节不变；不改动 profile_context 本身。
+        inference_context = _build_inference_context(
+            state.get("user_profile_inferences"), state.get("user_profile")
+        )
         # Phase 5（Task 1）：长会话滑动窗口——LLM prompt 只喂最近 12 条（window），
         # 超窗部分收敛为零 LLM 确定性摘要（此前对话摘要段）；短会话 summary=None →
         # summary_context="" → prompt 字节不变。state.messages 保持全量（checkpointer
@@ -1669,7 +1822,12 @@ async def _qa_router_node_core(state: QuestionState) -> dict[str, Any]:
         window, summary = trim_messages(list(messages))
         summary_context = build_summary_context(summary)
         prompt = (
-            SYSTEM_PROMPT + followup_context + gate4_context + profile_context + summary_context
+            SYSTEM_PROMPT
+            + followup_context
+            + gate4_context
+            + profile_context
+            + inference_context
+            + summary_context
         )
         # 把窗口内对话历史传给 LLM，支持多轮指代解析（如"它今天怎么样"）
         llm_messages = [HumanMessage(content=prompt)] + window
