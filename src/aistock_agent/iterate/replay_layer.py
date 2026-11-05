@@ -153,6 +153,13 @@ _ISOLATION_EXEMPT_METHODS: frozenset[str] = frozenset(
         # 内部 `await self.get_list(f"/internal/predictions?status=verified&limit={limit}")`
         # （data_client.py:494），无独立网络入口；回放时 `or []` 兜底返回空列表（P0 统计出口）
         "NodeApiClient.list_verified_predictions",
+        # 经 get_list 间接隔离（get_list → node_read 返回 None）：
+        # get_user_profile_inferences 内部 `await self.get_list(
+        # "/internal/user-profile-inferences/{user_id}")`（data_client.py），无独立
+        # 网络入口；回放时 get_list 返回 None → 方法返回 None → 上层
+        # qa_router._build_inference_context 收到 None 返回 ""（prompt 字节不变）
+        # （用户画像自动挖掘一期新增，I-3 清单封闭测试强制登记）
+        "NodeApiClient.get_user_profile_inferences",
         # 经 get 间接隔离（get → node_read 返回 None）：get_index_kline 内部
         # `await self.get(f"/internal/index/{code}/kline?days={days}")`（data_client.py:496），
         # 无独立网络入口；回放时 get 返回 None → `not isinstance(result, dict)` 走
