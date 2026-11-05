@@ -136,6 +136,13 @@ async def chat_message(
         "UserProfile | None",
         await node_api.get_user_profile(user_id_value) if user_id_value else None,
     )
+    # 用户画像自动挖掘一期：推断同样无条件显式赋值（匿名写 None 覆盖 checkpoint
+    # 旧值；拉取失败 None 仅 warning，不阻断对话）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
+    )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
     # G1 修订（2026-08-17 design-debate 定案）：值源 = 末节点 synth_answer 输出
@@ -377,6 +384,12 @@ async def chat_stream_messages(
     initial_state["user_profile"] = cast(
         "UserProfile | None",
         await node_api.get_user_profile(user_id_value) if user_id_value else None,
+    )
+    # 用户画像自动挖掘一期：SSE 路径同样无条件注入推断（对齐 ws.py）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）

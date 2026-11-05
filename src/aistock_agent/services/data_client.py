@@ -1215,9 +1215,58 @@ class NodeApiClient:
             logger.debug("get_user_profile_cache_write_failed", exc_info=True)
         return data
 
+    async def get_user_profile_inferences(
+        self, user_id: str
+    ) -> list[dict[str, object]] | None:
+        """按 user_id 拉取自动挖掘的画像推断（用户画像自动挖掘一期）。
+
+        调用 Node.js ``GET /internal/user-profile-inferences/{user_id}``；Redis
+        TTL 5min 缓存（``user_profile_inferences:{user_id}``，JSON 序列化），
+        与 ``get_user_profile`` 同 db / 同 TTL。
+
+        Args:
+            user_id: 用户 openid（P0 可信 user_id）。
+
+        Returns:
+            推断列表（每项含 dimension / value / confidence / sample_size /
+            window_days / inferred_at）；``[]`` = 已确认无推断（写缓存，区别于
+            拉取失败）；失败返回 None（不写缓存，仅 warning；"永不阻断主流程"）。
+        """
+        cache_key = f"user_profile_inferences:{user_id}"
+        try:
+            client = await RedisPool.get_client()
+            cached = await client.get(cache_key)
+            if cached:
+                raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [item for item in parsed if isinstance(item, dict)]
+        except Exception:
+            logger.debug("get_user_profile_inferences_cache_miss", exc_info=True)
+
+        data = await self.get_list(f"/internal/user-profile-inferences/{user_id}")
+        if data is None:
+            logger.warning("get_user_profile_inferences_failed", user_id=user_id)
+            return None
+
+        try:
+            client = await RedisPool.get_client()
+            await client.setex(
+                cache_key,
+                _USER_PROFILE_INFERENCES_TTL_SECONDS,
+                json.dumps(data, ensure_ascii=False),
+            )
+        except Exception:
+            logger.debug(
+                "get_user_profile_inferences_cache_write_failed", exc_info=True
+            )
+        return data
+
 
 # 用户画像缓存 TTL（5 分钟；失败/空画像同样缓存，避免每轮重复拉取）
 _USER_PROFILE_TTL_SECONDS = 300
+# 画像推断缓存 TTL（5 分钟；与 user_profile 对齐同 db / 同窗口）
+_USER_PROFILE_INFERENCES_TTL_SECONDS = 300
 
 
 # 全局单例
