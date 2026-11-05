@@ -617,6 +617,14 @@ async def _run_confirm_stage2(
         if user_id_value2
         else None,
     )
+    # 用户画像自动挖掘一期：阶段 2 无条件注入推断（对齐阶段 1 / user_profile；
+    # 匿名显式 None 覆盖 checkpointer 上一轮旧值，防跨轮残留）。
+    initial_state2["user_profile_inferences"] = cast(
+        "list[dict[str, object]] | None",
+        await node_api.get_user_profile_inferences(user_id_value2)
+        if user_id_value2
+        else None,
+    )
     # Phase 4-2 修复：阶段 2 重跑同 session（thread_id）图时 messages 必须置空。
     # build_chat_initial_state 携带的 [HumanMessage(message)]（无 id）经
     # add_messages reducer 会被追加进 checkpoint 历史 → 线程消息变 [m1, m1]，
@@ -708,6 +716,14 @@ async def _handle_user_message(
     initial_state["user_profile"] = cast(
         "UserProfile | None",
         await node_api.get_user_profile(user_id_value)
+        if user_id_value
+        else None,
+    )
+    # 用户画像自动挖掘一期：推断同样无条件显式赋值（匿名写 None 覆盖 checkpointer
+    # 上一轮旧值；拉取失败返回 None 仅 warning，不阻断对话）。
+    initial_state["user_profile_inferences"] = cast(
+        "list[dict[str, object]] | None",
+        await node_api.get_user_profile_inferences(user_id_value)
         if user_id_value
         else None,
     )

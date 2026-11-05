@@ -140,6 +140,11 @@ class QuestionState(TypedDict, total=False):
     # UserProfile（declared keys）：synth_answer 按 risk_tolerance/investment_preferences
     # 取具体类型消费（dict[str, object] 会让 .get 落 object 而破坏其签名匹配）。
     user_profile: UserProfile | None
+    # 用户画像自动挖掘一期：自动挖掘的高置信推断（ws.py/routes.py 入口按 user_id
+    # 拉取注入）。[] = 已确认无推断，None = 未登录/拉取失败（两者区分见 data_client）。
+    # 仅 qa_router 参考段消费；入口必须无条件显式赋值（含匿名写 None），防
+    # checkpointer 跨轮残留（对齐 user_profile 的 Phase 4-3 教训）。
+    user_profile_inferences: list[dict[str, object]] | None
     # Phase 5（Task 1）：长会话超窗确定性摘要（零 LLM、幂等、无累积）。
     # qa_router 仅在超窗（summary 非 None）时写入，随 checkpointer 持久化（write-only，
     # 供可观测/未来语义摘要锚点）；synth_answer 不读该字段，消费侧从当前 messages
