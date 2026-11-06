@@ -478,7 +478,7 @@ def _build_position_ledger(
     """
     # 闸门禁止 +1 的具体原因（用于 miss/supporting 说明）
     if gate_hit:
-        block_reason = "闸门命中"
+        block_reason = "关键条件不满足"
     elif ml_breakdown:
         block_reason = "主线破位"
     elif not trend_known:
@@ -489,15 +489,15 @@ def _build_position_ledger(
 
     # —— trend ——
     if close is not None and ma20 is not None:
-        trend_value = f"{close:.2f} / ma20 {ma20:.2f}"
+        trend_value = f"收盘 {close:.2f} 点，20 日均线 {ma20:.2f} 点"
     else:
-        trend_value = f"仅 {bars} 根 K 线（需 20）"
+        trend_value = f"只有 {bars} 根 K 线，至少要 20 根"
     if gate_hit:
         trend_item = LedgerItem(
             key="trend",
             value_text=trend_value,
-            judgement="闸门命中",
-            effect="base→0，禁止 +1",
+            judgement="关键条件不满足",
+            effect="一票否决：直接压到空仓",
             status="blocking",
         )
     elif not trend_known:
@@ -505,7 +505,7 @@ def _build_position_ledger(
             key="trend",
             value_text=trend_value,
             judgement="数据不可用",
-            effect="base=2（趋势不可判），禁止 +1",
+            effect="趋势判不了，先按两成算，但不能加",
             status="missing",
         )
     elif ml_breakdown:
@@ -513,7 +513,7 @@ def _build_position_ledger(
             key="trend",
             value_text=trend_value,
             judgement="多头排列" if bull else "震荡",
-            effect=f"base={trend_base}，被主线破位覆盖",
+            effect=f"按 {trend_base} 成打底，但主线破位压到空仓",
             status="neutral",
         )
     else:
@@ -521,7 +521,7 @@ def _build_position_ledger(
             key="trend",
             value_text=trend_value,
             judgement="多头排列" if bull else "震荡",
-            effect=f"base={trend_base}",
+            effect=f"按 {trend_base} 成打底",
             status="supporting" if bull else "neutral",
         )
 
@@ -533,16 +533,16 @@ def _build_position_ledger(
             key="mainline",
             value_text=f"{ml_name} 破位" if ml_name else "破位标记",
             judgement="主线破位",
-            effect="base→0，禁止 +1",
+            effect="一票否决：直接压到空仓",
             status="blocking",
         )
     elif state == "none":
-        excess_text = f"（最高超额 +{ml_excess}pct）" if ml_excess is not None else ""
+        excess_text = f"（最高超额 +{ml_excess:.1f} 个百分点）" if ml_excess is not None else ""
         mainline_item = LedgerItem(
             key="mainline",
             value_text=f"无清晰主线{excess_text}",
-            judgement="未成立",
-            effect="base 强制 0",
+            judgement="没有出现",
+            effect="直接压到空仓",
             status="blocking",
         )
     elif state == "established" and strength == "strong":
@@ -551,7 +551,7 @@ def _build_position_ledger(
                 key="mainline",
                 value_text=f"{ml_name or '主线'}（成立·强）",
                 judgement="成立·强",
-                effect=f"不改档（{block_reason}，禁止 +1）",
+                effect=f"暂不加仓（{block_reason}）",
                 status="neutral",
             )
         elif event_d == 0 and event_result in EVENT_RESULT_ENUM:
@@ -559,7 +559,7 @@ def _build_position_ledger(
                 key="mainline",
                 value_text=f"{ml_name or '主线'}（成立·强）",
                 judgement="成立·强",
-                effect="+1（被事件落档覆盖）",
+                effect="本可加仓，但事件落档已覆盖",
                 status="neutral",
             )
         else:
@@ -567,7 +567,7 @@ def _build_position_ledger(
                 key="mainline",
                 value_text=f"{ml_name or '主线'}（成立·强）",
                 judgement="成立·强",
-                effect="+1",
+                effect="可以加仓",
                 status="supporting",
             )
     elif state == "established":
@@ -575,7 +575,7 @@ def _build_position_ledger(
             key="mainline",
             value_text=f"{ml_name or '主线'}（成立·弱）",
             judgement="成立·弱",
-            effect="不改档",
+            effect="不影响仓位",
             status="neutral",
         )
     else:
@@ -585,7 +585,7 @@ def _build_position_ledger(
             key="mainline",
             value_text="无主线数据" if state is None else "候选数据不足",
             judgement="数据不可用",
-            effect="不改档",
+            effect="不影响仓位",
             status="missing",
         )
 
@@ -650,7 +650,7 @@ def _build_breadth_ledger_item(breadth: dict[str, Any] | None) -> LedgerItem:
             key="breadth",
             value_text="上涨占比不可用",
             judgement="数据不可用",
-            effect="仅参与 certainty，不改档",
+            effect="只影响把握程度，不改仓位",
             status="missing",
         )
     if ratio >= 0.6:
@@ -663,7 +663,7 @@ def _build_breadth_ledger_item(breadth: dict[str, Any] | None) -> LedgerItem:
         key="breadth",
         value_text=f"上涨占比 {ratio * 100:.0f}%",
         judgement=judgement,
-        effect="仅参与 certainty，不改档",
+        effect="只影响把握程度，不改仓位",
         status="neutral",
     )
 
@@ -683,58 +683,57 @@ def _build_event_ledger_item(
             key="event",
             value_text="无事件 / d 不可用",
             judgement="数据缺失",
-            effect="不改档",
+            effect="不影响仓位",
             status="missing",
         )
     if event_d == 0 and event_result in EVENT_RESULT_ENUM:
-        value_text = f"d=0，结果 {event_result}"
+        value_text = f"事件当天，结果{event_result}"
     elif event_d == 0:
-        value_text = "d=0，事件未落档"
+        value_text = "事件当天，结果还没出来"
     elif event_d in (1, 2):
-        value_text = f"d={event_d}，窗口内"
+        value_text = f"距事件还有 {event_d} 个交易日，在观察窗口内"
     else:
-        value_text = f"d={event_d}，窗口外"
+        value_text = f"距事件还有 {event_d} 个交易日"
 
     if gate_blocked:
-        detail = "事件档位未生效" if event_d == 0 else "禁止 +1"
         return LedgerItem(
-            key="event", value_text=value_text, judgement="无修正",
-            effect=f"不改档（{block_reason}，{detail}）", status="neutral",
+            key="event", value_text=value_text, judgement="没有变化",
+            effect=f"暂不加仓（{block_reason}）", status="neutral",
         )
     if event_d in (1, 2):
         if state == "established" and strength == "strong":
             return LedgerItem(
-                key="event", value_text=value_text, judgement="事件 +1",
-                effect="+1", status="supporting",
+                key="event", value_text=value_text, judgement="事件支持加仓",
+                effect="可以加仓", status="supporting",
             )
         return LedgerItem(
-            key="event", value_text=value_text, judgement="无修正",
-            effect="不改档（主线未强）", status="neutral",
+            key="event", value_text=value_text, judgement="没有变化",
+            effect="暂不加仓（主线还不够强）", status="neutral",
         )
     if event_d == 0 and event_result in EVENT_RESULT_ENUM:
         direction = EVENT_RESULT_DIRECTION[event_result]
         if direction == "bullish":
             return LedgerItem(
-                key="event", value_text=value_text, judgement="事件 +1",
-                effect=f"adj=+1（{event_result}）", status="supporting",
+                key="event", value_text=value_text, judgement="事件支持加仓",
+                effect=f"加仓（{event_result}）", status="supporting",
             )
         if direction == "bearish":
             return LedgerItem(
-                key="event", value_text=value_text, judgement="事件 -1",
-                effect=f"adj=-1（{event_result}）", status="blocking",
+                key="event", value_text=value_text, judgement="事件要求减仓",
+                effect=f"减仓（{event_result}）", status="blocking",
             )
         return LedgerItem(
-            key="event", value_text=value_text, judgement="无修正",
-            effect=f"adj=0（{event_result}）", status="neutral",
+            key="event", value_text=value_text, judgement="没有变化",
+            effect=f"不调整（{event_result}）", status="neutral",
         )
     if event_d == 0:
         return LedgerItem(
-            key="event", value_text=value_text, judgement="封顶轻仓",
-            effect="base 封顶 1，最终档位 ≤1", status="blocking",
+            key="event", value_text=value_text, judgement="仓位封顶轻仓",
+            effect="仓位最多一成，不能再加", status="blocking",
         )
     return LedgerItem(
-        key="event", value_text=value_text, judgement="无修正",
-        effect="不改档", status="neutral",
+        key="event", value_text=value_text, judgement="没有变化",
+        effect="不影响仓位", status="neutral",
     )
 
 

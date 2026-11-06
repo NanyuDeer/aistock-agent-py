@@ -65,8 +65,8 @@ def test_hard_gate_hits_zero_and_blocks_add() -> None:
     trend = ledger.items[0]
     assert trend.key == "trend"
     assert trend.status == "blocking"
-    assert trend.judgement == "闸门命中"
-    assert "禁止 +1" in trend.effect
+    assert trend.judgement == "关键条件不满足"
+    assert trend.effect == "一票否决：直接压到空仓"
 
 
 def test_mainline_none_forces_zero() -> None:
@@ -76,9 +76,9 @@ def test_mainline_none_forces_zero() -> None:
     ml = ledger.items[1]
     assert ml.key == "mainline"
     assert ml.status == "blocking"
-    assert ml.judgement == "未成立"
-    assert ml.effect == "base 强制 0"
-    assert "最高超额 +0.8pct" in ml.value_text
+    assert ml.judgement == "没有出现"
+    assert ml.effect == "直接压到空仓"
+    assert "最高超额 +0.8 个百分点" in ml.value_text
 
 
 def test_insufficient_bars_does_not_raise_and_marks_missing() -> None:
@@ -131,7 +131,7 @@ def test_mainline_breakdown_blocks_and_is_recorded() -> None:
     item = ledger.items[1]
     assert item.status == "blocking"
     assert item.judgement == "主线破位"
-    assert item.effect == "base→0，禁止 +1"
+    assert item.effect == "一票否决：直接压到空仓"
 
 
 def test_mainline_not_breakdown_is_false_not_none() -> None:
@@ -191,8 +191,8 @@ def test_event_day_without_result_caps_low() -> None:
     assert idx == 1
     ev = ledger.items[2]
     assert ev.status == "blocking"
-    assert ev.judgement == "封顶轻仓"
-    assert "封顶 1" in ev.effect
+    assert ev.judgement == "仓位封顶轻仓"
+    assert ev.effect == "仓位最多一成，不能再加"
 
 
 def test_event_landed_bearish_overrides_mainline_add() -> None:
@@ -202,8 +202,8 @@ def test_event_landed_bearish_overrides_mainline_add() -> None:
     assert ledger.adjust == -1
     ev = ledger.items[2]
     assert ev.status == "blocking"
-    assert ev.judgement == "事件 -1"
-    assert "adj=-1" in ev.effect
+    assert ev.judgement == "事件要求减仓"
+    assert ev.effect == "减仓（不及预期）"
     # 主线 +1 被事件落档覆盖：不得记为 supporting
     ml = ledger.items[1]
     assert ml.status == "neutral"
@@ -215,12 +215,12 @@ def test_event_near_window_adds_one_only_with_strong_mainline() -> None:
     idx_strong, ledger_strong = _derive(OSC, STRONG, 1, None)
     assert idx_strong == 4
     assert ledger_strong.items[2].status == "supporting"
-    assert ledger_strong.items[2].judgement == "事件 +1"
+    assert ledger_strong.items[2].judgement == "事件支持加仓"
 
     idx_weak, ledger_weak = _derive(OSC, WEAK, 1, None)
     assert idx_weak == 2
     assert ledger_weak.items[2].status == "neutral"
-    assert ledger_weak.items[2].judgement == "无修正"
+    assert ledger_weak.items[2].judgement == "没有变化"
 
 
 @pytest.mark.parametrize(

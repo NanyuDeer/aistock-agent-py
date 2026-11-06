@@ -423,7 +423,7 @@ async def test_morning_event_window_plus_one_with_strong_mainline() -> None:
     rhythm_card = _rhythm_card(card, rows, win, source)
     assert rhythm_card["position_index"] == 3
     assert rhythm_card["position_source"] == "event_adjusted"
-    assert rhythm_card["position_ledger"]["items"][2]["judgement"] == "事件 +1"
+    assert rhythm_card["position_ledger"]["items"][2]["judgement"] == "事件支持加仓"
 
 
 # ============ 4. midday 回退 ============
@@ -567,7 +567,7 @@ async def test_morning_event_adjusted_ledger_is_synced() -> None:
     ledger_payload = rhythm_card["position_ledger"]
     assert ledger_payload["final_index"] == rhythm_card["position_index"]
     assert ledger_payload["adjust"] == basis_ledger.adjust + 1
-    assert ledger_payload["items"][2]["judgement"] == "事件 +1"
+    assert ledger_payload["items"][2]["judgement"] == "事件支持加仓"
     # 观察点按新档位重算，不再是基准卡的旧观察点
     assert ledger_payload["watch_points"] != [stale_point.model_dump()]
     ledger = card.evidence.position_ledger
@@ -627,7 +627,7 @@ async def test_morning_cap_can_be_unlocked_by_new_result() -> None:
     assert rhythm_card["position_index"] == 2
     assert rhythm_card["position_source"] == "event_adjusted"
     assert rhythm_card["position_ledger"]["event_applied_kind"] == "result"
-    assert rhythm_card["position_ledger"]["items"][2]["judgement"] == "事件 +1"
+    assert rhythm_card["position_ledger"]["items"][2]["judgement"] == "事件支持加仓"
 
 
 # ============ 6b. approaching → 撤销临近 +1 后按结果重算（坏消息必须能降档）============
@@ -658,7 +658,7 @@ async def test_morning_revokes_approaching_add_then_applies_result(
     assert rhythm_card["position_ledger"]["final_index"] == expected_index
     # 事件行按盘前看到的新事实改写（不得仍写「d=1 事件临近」）
     event_row = rhythm_card["position_ledger"]["items"][2]
-    assert event_row["value_text"] == f"d=0，结果 {result}"
+    assert event_row["value_text"] == f"事件当天，结果{result}"
 
 
 @pytest.mark.asyncio

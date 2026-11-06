@@ -27,8 +27,19 @@ from aistock_agent.services.mainline_engine import (
     MIN_CANDIDATES,
 )
 
-# 账本 trend 行的原生数值格式："3480.00 / ma20 3520.00"（rhythm_engine 产出）
-_TREND_VALUE_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*/\s*ma20\s+(-?\d+(?:\.\d+)?)")
+# 新格式（2026-11 文案去工程化）："收盘 3689.91 点，20 日均线 3701.53 点"
+_TREND_VALUE_RE = re.compile(r"收盘\s*(-?\d+(?:\.\d+)?)\s*点.*?20\s*日均线\s*(-?\d+(?:\.\d+)?)")
+# 旧格式（历史卡，生产库仍是此形状）："3689.91 / ma20 3701.53" —— 不得删，旧卡继承要解析
+_TREND_VALUE_LEGACY_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*/\s*ma20\s+(-?\d+(?:\.\d+)?)")
+
+
+def _parse_trend_value(text: str) -> tuple[float, float] | None:
+    """解析 trend 行原生数值，新旧两种格式都认（旧卡兼容）。"""
+    for pattern in (_TREND_VALUE_RE, _TREND_VALUE_LEGACY_RE):
+        hit = pattern.search(text or "")
+        if hit:
+            return float(hit.group(1)), float(hit.group(2))
+    return None
 
 # 排序权重（spec §6.3）：闸门是硬约束，先解；同组内固定顺序。
 _WATCH_ORDER: dict[str, int] = {"gate": 0, "mainline": 1, "event": 2}
@@ -62,9 +73,9 @@ def _close_and_ma20(
         return closes[-1], sum(closes[-20:]) / 20
     for item in ledger.items:
         if item.key == "trend":
-            hit = _TREND_VALUE_RE.search(item.value_text)
-            if hit:
-                return float(hit.group(1)), float(hit.group(2))
+            parsed = _parse_trend_value(item.value_text)
+            if parsed is not None:
+                return parsed
     return None, None
 
 
@@ -225,10 +236,10 @@ def build_watch_points(
 
 def _trend_line(item: LedgerItem) -> str:
     """trend 阻塞行：数值从 value_text 解析，解析不出就用原文（不猜点位）。"""
-    hit = _TREND_VALUE_RE.search(item.value_text)
-    if not hit:
+    parsed = _parse_trend_value(item.value_text)
+    if parsed is None:
         return f"指数 {item.value_text}，且均线空头排列"
-    close, ma20 = float(hit.group(1)), float(hit.group(2))
+    close, ma20 = parsed
     return f"指数 {close:.2f} 跌破 20 日线 {ma20:.2f}，且均线空头排列"
 
 
@@ -239,7 +250,8 @@ def _mainline_line(item: LedgerItem, ledger: PositionLedger) -> str:
 
 
 def _event_line(item: LedgerItem) -> str:
-    if item.judgement == "封顶轻仓":
+    # 旧卡仍是「封顶轻仓」，新文案为「仓位封顶轻仓」——两种都要认，否则会掉进「档位下调」
+    if item.judgement in ("封顶轻仓", "仓位封顶轻仓"):
         return "事件未落档，档位封顶轻仓"
     detail = item.judgement.removeprefix("事件").strip()
     return f"事件 {detail}，档位下调" if detail else "事件未落档，档位封顶轻仓"
