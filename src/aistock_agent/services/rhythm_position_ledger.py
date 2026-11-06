@@ -46,8 +46,8 @@ _WATCH_ORDER: dict[str, int] = {"gate": 0, "mainline": 1, "event": 2}
 _LEDGER_ORDER: dict[str, int] = {"trend": 0, "mainline": 1, "event": 2, "breadth": 3}
 
 # 事件观察点文案（无事件标题入参，用统一指代，避免在生产侧伪造事件名）
-_EVENT_CONDITION = "高影响事件进入 3 个交易日内且主线转强"
-_MAINLINE_MISSING = "候选数据不足"
+_EVENT_CONDITION = "3 天内有重要数据或事件，同时主线转强"
+_MAINLINE_MISSING = "板块数据不足"
 
 
 def _blocking_keys(ledger: PositionLedger) -> list[str]:
@@ -96,13 +96,13 @@ def _gate_watch_point(
         close, ma20 = _close_and_ma20(ledger, closes)
         if ma20 is None:
             # 数据不足时退化到不带点位的条件（仍如实描述需满足的形态）
-            condition = "收盘站上 20 日线且 ma5 回到 ma10 上方"
+            condition = "收盘站上 20 日均线，且 5 日均线回到 10 日均线上方"
         else:
-            condition = f"收盘站上 {ma20:.2f} 且 ma5 回到 ma10 上方"
+            condition = f"收盘站上 {ma20:.2f} 点，且 5 日均线回到 10 日均线上方"
         if close is None or ma20 is None:
             current_text = "收盘价不可用"
         else:
-            current_text = f"收盘 {close:.2f}（差 {ma20 - close:.2f} 点）"
+            current_text = f"收盘 {close:.2f} 点，还差 {ma20 - close:.2f} 点"
         return WatchPoint(
             key="gate", condition=condition, current_text=current_text,
             sufficient_alone=alone,
@@ -124,8 +124,8 @@ def _excess_clause() -> str:
     此时主线不成立的**真实原因只剩间距**——故省掉超额子句，只留间距约束。
     """
     if EXCESS_WEAK > 0:
-        return f"5 日超额 ≥{EXCESS_WEAK:.1f}pct 且领先第 2 名 ≥{GAP_EXCESS:.1f}pct"
-    return f"5 日超额领先第 2 名 ≥{GAP_EXCESS:.1f}pct"
+        return f"近 5 天超额 {EXCESS_WEAK:.1f} 个百分点以上，且领先第二名 {GAP_EXCESS:.1f} 个百分点以上"
+    return f"近 5 天超额领先第二名 {GAP_EXCESS:.1f} 个百分点以上"
 
 
 def _mainline_current_text(top3: list[CandidateOutlook]) -> str:
@@ -139,15 +139,15 @@ def _mainline_current_text(top3: list[CandidateOutlook]) -> str:
         return _MAINLINE_MISSING
     best = top3[0]
     if best.excess < EXCESS_WEAK:
-        return f"最高 {best.excess:+.1f}pct（差 {EXCESS_WEAK - best.excess:.2f}）"
+        return f"最高 {best.excess:+.1f} 个百分点（还差 {EXCESS_WEAK - best.excess:.1f} 个百分点）"
     if len(top3) < 2:
         # 单候选无法算间距（judge 此时收窄为 strong），指向候选数而非间距
-        return f"仅 {len(top3)} 个候选，需 ≥{MIN_CANDIDATES} 个"
+        return f"只有 {len(top3)} 个候选板块，至少要 {MIN_CANDIDATES} 个"
     gap = best.excess - top3[1].excess
     if gap >= GAP_EXCESS and len(top3) < MIN_CANDIDATES:
         # 间距已达标却仍未成立 → 真实成因是有效候选数不足（rank_candidates 只收到这些）
-        return f"仅 {len(top3)} 个候选，需 ≥{MIN_CANDIDATES} 个"
-    return f"领先第 2 名 +{gap:.2f}pct（需 ≥{GAP_EXCESS:.1f}）"
+        return f"只有 {len(top3)} 个候选板块，至少要 {MIN_CANDIDATES} 个"
+    return f"领先第二名 {gap:.2f} 个百分点（需要 {GAP_EXCESS:.1f} 个百分点以上）"
 
 
 def _mainline_watch_point(
@@ -158,7 +158,7 @@ def _mainline_watch_point(
 ) -> WatchPoint | None:
     """mainline 观察点：`state != "established"` 才产出（spec §6.1）。
 
-    `unavailable` / 无数据 → 只写「候选数据不足」，不伪造 condition、不带候选。
+    `unavailable` / 无数据 → 只写「板块数据不足」，不伪造 condition、不带候选。
     """
     state = ledger.mainline_state
     if state == "established":
@@ -170,7 +170,7 @@ def _mainline_watch_point(
         )
     top3 = list(candidates or [])[:3] or None
     return WatchPoint(
-        key="mainline", condition=f"某板块 {_excess_clause()}",
+        key="mainline", condition=f"某个板块{_excess_clause()}",
         current_text=_mainline_current_text(top3 or []),
         sufficient_alone=alone, candidates=top3,
     )
@@ -190,7 +190,7 @@ def _event_watch_point(
     if event_d in (1, 2) and strength == "strong":
         return None
     return WatchPoint(
-        key="event", condition=_EVENT_CONDITION, current_text=f"当前 d={event_d}",
+        key="event", condition=_EVENT_CONDITION, current_text=f"距事件还有 {event_d} 个交易日",
         sufficient_alone=alone,
     )
 
@@ -240,21 +240,22 @@ def _trend_line(item: LedgerItem) -> str:
     if parsed is None:
         return f"指数 {item.value_text}，且均线空头排列"
     close, ma20 = parsed
-    return f"指数 {close:.2f} 跌破 20 日线 {ma20:.2f}，且均线空头排列"
+    return f"指数 {close:.2f} 点跌破 20 日均线 {ma20:.2f} 点，且均线空头排列"
 
 
 def _mainline_line(item: LedgerItem, ledger: PositionLedger) -> str:
     if ledger.mainline_breakdown or item.judgement == "主线破位":
         return "主线板块破位"
-    return f"无板块 {_excess_clause()}，主线未成立"
+    return f"没有板块{_excess_clause()}，主线未成立"
 
 
 def _event_line(item: LedgerItem) -> str:
-    # 旧卡仍是「封顶轻仓」，新文案为「仓位封顶轻仓」——两种都要认，否则会掉进「档位下调」
+    # 旧卡仍是「封顶轻仓」，新文案为「仓位封顶轻仓」——两种都要认
     if item.judgement in ("封顶轻仓", "仓位封顶轻仓"):
-        return "事件未落档，档位封顶轻仓"
-    detail = item.judgement.removeprefix("事件").strip()
-    return f"事件 {detail}，档位下调" if detail else "事件未落档，档位封顶轻仓"
+        return "事件没有落地，仓位封顶在轻仓"
+    if item.judgement == "事件要求减仓":
+        return "事件结果偏空，仓位下调"
+    return "事件没有落地，仓位封顶在轻仓"
 
 
 def _blocking_line(item: LedgerItem, ledger: PositionLedger) -> str:
@@ -269,24 +270,28 @@ def _blocking_line(item: LedgerItem, ledger: PositionLedger) -> str:
 
 def _positive_lead(ledger: PositionLedger) -> str:
     """无阻塞时的正向推导（spec §5.1 第三种首句）。"""
+    from aistock_agent.services.rhythm_engine import POSITION_LADDER
+
     trend = next((i for i in ledger.items if i.key == "trend"), None)
     mainline = next((i for i in ledger.items if i.key == "mainline"), None)
     trend_j = "数据不可用" if trend is None else trend.judgement
     if trend_j == "多头排列":
         trend_j = "多头"
     ml_j = "数据不可用" if mainline is None else mainline.judgement
-    adj = ledger.adjust
-    adj_text = f"{adj:+d}" if adj else "0"
-    base_text = "?" if ledger.base_index is None else str(ledger.base_index)
-    final_text = "?" if ledger.final_index is None else str(ledger.final_index)
-    return f"均线{trend_j}，base={base_text}；主线{ml_j}，{adj_text} → {final_text} 档"
+    idx = ledger.final_index
+    final_text = (
+        POSITION_LADDER[idx]
+        if idx is not None and 0 <= idx < len(POSITION_LADDER)
+        else "未知仓位"
+    )
+    return f"均线{trend_j}，主线{ml_j}，最后给到{final_text}"
 
 
 def render_causality(ledger: PositionLedger) -> CausalityText:
     """溯源主区文案（spec §5.1）：按 trend > mainline > event 收集 blocking，最多 2 条。
 
     条数与 blocking 项一一对应，前端只拼接不推断（G19）。`lead` 是首句：0 条时为
-    完整正向推导；1 条时为「唯一压制项：」，明细在 `lines[0]`；2 条时为固定提示语。
+    完整正向推导；1 条时为「只差这一条：」，明细在 `lines[0]`；2 条时为固定提示语。
     前端按 `lead + lines` 顺序拼接即得主区文案。
 
     「最多 2 条」成立的原因：优先级 1、2 任一为真都会把 base 压到 0，此时事件项
@@ -298,9 +303,9 @@ def render_causality(ledger: PositionLedger) -> CausalityText:
     )[:2]
     lines = [_blocking_line(item, ledger) for item in blocking]
     if len(blocking) >= 2:
-        lead = "两条闸门同时压到底，任一解除都不能升档"
+        lead = "两个条件同时卡着，只解决一个也还不能加仓"
     elif len(blocking) == 1:
-        lead = "唯一压制项："
+        lead = "只差这一条："
     else:
         lead = _positive_lead(ledger)
     return CausalityText(lead=lead, lines=lines)

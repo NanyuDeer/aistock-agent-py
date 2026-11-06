@@ -74,3 +74,61 @@ def test_all_ledger_copy_passes_guard(name, kwargs):
     for item in ledger.items:
         for field in (item.effect, item.judgement, item.value_text):
             assert find_engineering_terms(field) == [], f"{name}/{item.key} 命中工程词：{field!r}"
+
+
+CAUSALITY_CASES = {
+    "双条件卡着": dict(gate_hit=True, gate_blocked=True, state="none", base=0),
+    "只差主线": dict(gate_hit=False, gate_blocked=True, state="none", base=0),
+    "主线破位": dict(gate_hit=False, gate_blocked=True, ml_breakdown=True, bull=True, base=3),
+    "无阻塞正向": dict(gate_hit=False, gate_blocked=False, state="established", strength="strong", bull=True, base=3, adj=1, final=4),
+    "事件封顶": dict(gate_hit=False, gate_blocked=False, state="none", event_d=0, base=2),
+}
+
+
+@pytest.mark.parametrize("name,kwargs", CAUSALITY_CASES.items())
+def test_causality_copy_passes_guard(name, kwargs):
+    """溯源主区文案（lead + lines）全分支过门禁。"""
+    from aistock_agent.services.rhythm_position_ledger import render_causality
+
+    text = render_causality(_ledger(**kwargs))
+    for piece in [text.lead, *text.lines]:
+        assert find_engineering_terms(piece) == [], f"{name} 命中工程词：{piece!r}"
+
+
+def test_watch_point_copy_passes_guard():
+    """变奏观察点 condition / current_text 全分支过门禁。"""
+    from aistock_agent.schemas.rhythm_master import CandidateOutlook
+    from aistock_agent.services.rhythm_position_ledger import build_watch_points
+
+    closes = [3600.0] * 19 + [3689.91]
+    candidates = [
+        CandidateOutlook(name="AI 应用", excess=0.3),
+        CandidateOutlook(name="低空经济", excess=-1.13),
+        CandidateOutlook(name="液冷服务器", excess=-4.85),
+    ]
+    cases = [
+        dict(gate_hit=True, gate_blocked=True, state="none", base=0),
+        dict(gate_hit=False, gate_blocked=True, ml_breakdown=True, bull=True, base=3),
+        dict(gate_hit=False, gate_blocked=True, state="unavailable", base=0),
+        dict(gate_hit=False, gate_blocked=False, state="none", base=2),
+        dict(gate_hit=False, gate_blocked=False, state="none", base=2, event_d=0),
+        dict(gate_hit=False, gate_blocked=False, state="none", base=2, event_d=9),
+    ]
+    for kwargs in cases:
+        ledger = _ledger(**kwargs)
+        for wp in build_watch_points(
+            ledger, mainline_facts={"name": "AI 应用", "strength": "weak"},
+            event_d=kwargs.get("event_d"), closes=closes, candidates=candidates,
+        ):
+            for field in (wp.condition, wp.current_text):
+                assert find_engineering_terms(field) == [], f"{wp.key} 命中工程词：{field!r}"
+
+
+def test_causality_keeps_stock_words():
+    """L1 炒股词（主线/超额/均线）必须放行——禁的是计算机语言，不是炒股语言。"""
+    from aistock_agent.services.rhythm_position_ledger import render_causality
+
+    text = render_causality(_ledger(gate_hit=False, gate_blocked=True, state="none", base=0))
+    joined = " ".join([text.lead, *text.lines])
+    assert "主线" in joined or "超额" in joined
+    assert find_engineering_terms(joined) == []
