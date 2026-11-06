@@ -164,6 +164,7 @@ def test_data_missing_has_no_legacy_jargon():
         "data_date=", "证据日=", "宽度快照", "分支生成降级",
         "候选不可评分", "主线候选不可用", "主线候选取数失败",
         "名称校验不通过", "事件当期未落档", "继承序号",
+        "d 不可用", "无事件 / ",
     ]
     offenders = []
     for path in root.rglob("*.py"):
@@ -172,3 +173,25 @@ def test_data_missing_has_no_legacy_jargon():
             if word in text:
                 offenders.append(f"{path.name}: {word}")
     assert offenders == [], f"仍存在工程语：{offenders}"
+
+
+def test_causality_joined_sentence_has_no_broken_punctuation():
+    """lead + lines 是按「；」拼接上屏的：lead 以冒号收尾会拼出「：；」，读起来断掉。"""
+    from aistock_agent.services.rhythm_position_ledger import render_causality
+
+    for name, kwargs in CAUSALITY_CASES.items():
+        text = render_causality(_ledger(**kwargs))
+        joined = "；".join([text.lead, *text.lines])
+        assert "：；" not in joined, f"{name}: {joined}"
+        assert "；；" not in joined, f"{name}: {joined}"
+        assert not joined.startswith("；"), f"{name}: {joined}"
+
+
+def test_cheng_numbers_use_chinese_numerals():
+    """仓位成数一律中文数字：「两成」不是「2 成」（同一张卡里不许两种写法并存）。"""
+    for kwargs in LEDGER_CASES.values():
+        for item in _ledger(**kwargs).items:
+            assert " 2 成" not in item.effect, item.effect
+            assert " 3 成" not in item.effect, item.effect
+            # 中文数字与「成」之间不留空格：「按两成打底」不是「按 两 成打底」
+            assert " 成" not in item.effect, item.effect

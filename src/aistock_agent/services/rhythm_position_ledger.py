@@ -284,14 +284,14 @@ def _positive_lead(ledger: PositionLedger) -> str:
         if idx is not None and 0 <= idx < len(POSITION_LADDER)
         else "未知仓位"
     )
-    return f"均线{trend_j}，主线{ml_j}，最后给到{final_text}"
+    return f"均线{trend_j}，主线{ml_j}，最后仓位定在{final_text}"
 
 
 def render_causality(ledger: PositionLedger) -> CausalityText:
     """溯源主区文案（spec §5.1）：按 trend > mainline > event 收集 blocking，最多 2 条。
 
     条数与 blocking 项一一对应，前端只拼接不推断（G19）。`lead` 是首句：0 条时为
-    完整正向推导；1 条时为「只差这一条：」，明细在 `lines[0]`；2 条时为固定提示语。
+    完整正向推导；1 条时为「目前只卡在这一条」，明细在 `lines[0]`；2 条时为固定提示语。
     前端按 `lead + lines` 顺序拼接即得主区文案。
 
     「最多 2 条」成立的原因：优先级 1、2 任一为真都会把 base 压到 0，此时事件项
@@ -305,7 +305,7 @@ def render_causality(ledger: PositionLedger) -> CausalityText:
     if len(blocking) >= 2:
         lead = "两个条件同时卡着，只解决一个也还不能加仓"
     elif len(blocking) == 1:
-        lead = "只差这一条："
+        lead = "目前只卡在这一条"
     else:
         lead = _positive_lead(ledger)
     return CausalityText(lead=lead, lines=lines)

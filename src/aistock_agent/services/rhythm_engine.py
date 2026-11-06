@@ -456,6 +456,15 @@ def position_action(idx: int) -> tuple[PositionAction, Direction]:
     return cast("PositionAction", action), cast("Direction", direction)
 
 
+# 成数用中文数字（「两成」不是「2 成」）：面向用户的仓位文案统一口径
+_CHENG_CN: dict[int, str] = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五"}
+
+
+def _cheng_cn(n: int) -> str:
+    """档位/成数 → 中文数字（未知值原样返回，不猜）。"""
+    return _CHENG_CN.get(n, str(n))
+
+
 def _build_position_ledger(
     *,
     final: int,
@@ -520,7 +529,7 @@ def _build_position_ledger(
             key="trend",
             value_text=trend_value,
             judgement="多头排列" if bull else "震荡",
-            effect=f"按 {trend_base} 成打底，但主线破位压到空仓",
+            effect=f"按{_cheng_cn(trend_base)}成打底，但主线破位压到空仓",
             status="neutral",
         )
     else:
@@ -528,7 +537,7 @@ def _build_position_ledger(
             key="trend",
             value_text=trend_value,
             judgement="多头排列" if bull else "震荡",
-            effect=f"按 {trend_base} 成打底",
+            effect=f"按{_cheng_cn(trend_base)}成打底",
             status="supporting" if bull else "neutral",
         )
 
@@ -538,7 +547,7 @@ def _build_position_ledger(
     if ml_breakdown:
         mainline_item = LedgerItem(
             key="mainline",
-            value_text=f"{ml_name} 破位" if ml_name else "破位标记",
+            value_text=f"{ml_name} 破位" if ml_name else "主线板块破位",
             judgement="主线破位",
             effect="一票否决：直接压到空仓",
             status="blocking",
@@ -688,7 +697,7 @@ def _build_event_ledger_item(
     if event_d is None:
         return LedgerItem(
             key="event",
-            value_text="无事件 / d 不可用",
+            value_text="没有事件，距事件天数也算不出",
             judgement="数据缺失",
             effect="不影响仓位",
             status="missing",

@@ -304,7 +304,7 @@ def test_causality_two_blocking_items() -> None:
 
 def test_causality_single_blocking_item() -> None:
     text = render_causality(_ledger(BEAR, STRONG))
-    assert text.lead == "只差这一条："
+    assert text.lead == "目前只卡在这一条"
     assert len(text.lines) == 1
     assert "跌破 20 日均线" in text.lines[0]
 
@@ -312,14 +312,14 @@ def test_causality_single_blocking_item() -> None:
 def test_causality_no_blocking_item_gives_positive_lead() -> None:
     text = render_causality(_ledger(OSC, STRONG))
     assert text.lines == []
-    assert text.lead == "均线震荡，主线成立·强，最后给到七成~八成"
+    assert text.lead == "均线震荡，主线成立·强，最后仓位定在七成~八成"
 
 
 def test_causality_mainline_breakdown_line() -> None:
     ml = {"state": "established", "name": "AI 算力", "strength": "strong", "breakdown": True}
     text = render_causality(_ledger(BULL, ml))
     assert text.lines == ["主线板块破位"]
-    assert text.lead == "只差这一条："
+    assert text.lead == "目前只卡在这一条"
 
 
 # ============ 10. event_d=None 不产出事件观察点 ============
