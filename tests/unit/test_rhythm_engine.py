@@ -533,3 +533,41 @@ def test_project_event_window_importance_min_and_limit() -> None:
     assert [e["title"] for e in project_event_window(events, importance_min="high", limit=5)] == ["FOMC 议息"]
     # 缺省 importance → 按 medium 参与排序（不过滤时不丢弃）
     assert [e["title"] for e in project_event_window([{"date": "2026-09-20", "title": "无 importance"}])] == ["无 importance"]
+
+
+def test_branch_band_matches_to_index_when_gate_blocked():
+    """闸门命中时 band 文案必须等于实际档位，不得出现「半仓~6 成」配 to_index=0（spec §11-3）。"""
+    from aistock_agent.services.rhythm_engine import (
+        POSITION_BANDS,
+        POSITION_LADDER,
+        position_band_to_action,
+    )
+
+    out = position_band_to_action(
+        POSITION_BANDS["normal"], "neutral", from_index=0, gate_blocked=True,
+    )
+    assert out["to_index"] == 0
+    assert out["band"]["text"] == POSITION_LADDER[0] == "空仓观望"
+
+
+def test_branch_band_matches_to_index_when_free():
+    from aistock_agent.services.rhythm_engine import (
+        POSITION_BANDS,
+        POSITION_LADDER,
+        position_band_to_action,
+    )
+
+    out = position_band_to_action(
+        POSITION_BANDS["normal"], "bullish", from_index=2, gate_blocked=False,
+    )
+    assert out["to_index"] == 4
+    assert out["band"]["text"] == POSITION_LADDER[4]
+
+
+def test_branch_band_legacy_when_no_from_index():
+    """无档位可接（旧卡/旧调用）仍回退静态文案，行为不变。"""
+    from aistock_agent.services.rhythm_engine import POSITION_BANDS, position_band_to_action
+
+    out = position_band_to_action(POSITION_BANDS["normal"], "neutral")
+    assert out["band"] is POSITION_BANDS["normal"]
+    assert out["to_index"] is None

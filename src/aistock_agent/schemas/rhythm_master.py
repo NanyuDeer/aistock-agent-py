@@ -13,8 +13,8 @@ PositionAction = Literal["add", "hold", "reduce"]
 # 阶段判定路径（2026-11-03）：区分「有独立证据算出」与「沿用别处结论」，
 # 避免把中性兜底的沿用当成强判定展示（问题 1）。
 # - computed：本地 detect_stage 依当日证据判出方向
-# - inherited_prev_day：本地证据中性 → 沿用前一交易日 after_close 卡的主阶段
-# - inherited_basis：盘前/午间 → 沿用同日 after_close 收盘基准卡的主阶段
+# - inherited_prev_day：本地证据中性 → 沿用前一交易日 after_close 卡的市场阶段
+# - inherited_basis：盘前/午间 → 沿用同日 after_close 收盘卡的市场阶段
 StageSource = Literal["computed", "inherited_prev_day", "inherited_basis"]
 
 # F3 裁决（2026-09-05）：score 由 level 派生同源（score=LEVEL_IDX×20，0-100 语义），
@@ -62,6 +62,22 @@ class CandidateOutlook(BaseModel):
     excess: float
 
 
+class GapValue(BaseModel):
+    """观察点距离的结构化数值（spec §5.1）：供跨日 delta 做差，避免解析中文串。
+
+    `gap` 恒为正（>=0）：等于 0 表示该约束的数值部分已达标，卡点在别处
+    （例如主线超额间距够了、但候选板块数不够）——与 `current_text` 的分工就在这里。
+    """
+
+    key: Literal["mainline", "gate", "event"]
+    current: float
+    target: float
+    gap: float
+    unit: Literal["点", "pct", "交易日"]
+    # 需向哪个方向才满足：up = 当前值要涨到 target；down = 当前值要降到 target
+    direction: Literal["up", "down"]
+
+
 class WatchPoint(BaseModel):
     """变奏观察点（因果输出 spec §4.2）：当前未满足项 + 当前距离。"""
 
@@ -70,6 +86,8 @@ class WatchPoint(BaseModel):
     current_text: str
     sufficient_alone: bool
     candidates: list[CandidateOutlook] | None = None
+    # 结构化距离（spec §5.1）：单条件不可量化时为 None，前端继续用 current_text
+    gap: GapValue | None = None
 
 
 class PositionLedger(BaseModel):
@@ -93,7 +111,7 @@ class PositionLedger(BaseModel):
     gate_blocked: bool = False
     mainline_state: str | None = None
     # 事件调整**生效前**的档位 = clamp(base + 主线调整)，即 step2 结束、step3 之前的值
-    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`继承序号 − 1` 在
+    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`沿用序号 − 1` 在
     # 4 档上界把 +1 吃掉时会多撤一档，只有事件前档位能无歧义还原。
     event_off_index: int | None = None
     # 事件调整的**已计入类型**（幂等闸门，职责重定义 spec §4.1/§4.2）：
@@ -132,19 +150,10 @@ class RhythmEvidence(BaseModel):
     certainty_reason: str = ""
     position: PositionBand | None = None
     # 仓位推导账本（因果输出 spec §4.3）：与 position.index 同源同值，
-    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 档位不可用（旧基准卡）。
+    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 仓位不可用（旧卡）。
     position_ledger: PositionLedger | None = None
     event_anchors: list[EventAnchor] = Field(default_factory=list)
     data_missing: list[str] = Field(default_factory=list)
-
-
-class MainlineRef(BaseModel):
-    name: str
-    stage: str
-    source: str
-    data_date: str
-    direction: Direction
-    confidence: str
 
 
 class LaunchOutlook(BaseModel):
@@ -155,9 +164,13 @@ class LaunchOutlook(BaseModel):
 
 
 class RhythmSynthesis(BaseModel):
-    mainline: list[MainlineRef] = Field(default_factory=list)
+    """研研判层输出（2026-11 收缩）：仅保留事件情景预判。
+
+    `narrative` 已删（复述确定性结论且会抄错仓位）；`mainline` 已删（抄写确定性事实）。
+    `launch_outlook` 本批恒为空数组（缺 consensus 数据源），字段保留不破契约。
+    """
+
     launch_outlook: list[LaunchOutlook] = Field(default_factory=list)
-    narrative: str = ""
 
 
 class MasterRhythmCard(BaseModel):
@@ -170,7 +183,70 @@ class MasterRhythmCard(BaseModel):
     # 确定性主线事实（judge_mainline 输出 + 胜出候选 nav，worker 内部接线用；
     # 不直接序列化进 content，供 _build_rhythm_card 派生仓位文案/技术佐证）
     mainline_facts: dict[str, Any] | None = None
-    # 盘前/午间沿用收盘基准时，一并沿用基准卡的仓位文案（2026-11-03）：
+    # 盘前/午间沿用收盘卡时，一并沿用上游卡的仓位文案（2026-11-03）：
     # 档位来自 after_close 卡，仓位却用前一交易日 K 线重算会造成同日三时点口径打架，
-    # 故继承时把基准卡 position_band.text 一并带过来，保证档位与仓位同源。
+    # 故继承时把上游卡 position_band.text 一并带过来，保证档位与仓位同源。
     inherited_position_text: str | None = None
+
+
+LedgerKey = Literal["trend", "mainline", "event"]
+
+
+class DeltaRef(BaseModel):
+    """上一张卡的定位信息。"""
+
+    target_date: str
+    slot: str
+    created_at: str | None = None
+    # 两张卡的证据日相隔交易日数；>1 = 中间卡缺失
+    lag_days: int = 0
+    # 严格上一条缺失，已回落取更早的 slot
+    slot_fallback: bool = False
+
+
+class DeltaPosition(BaseModel):
+    from_index: int | None = None
+    to_index: int | None = None
+    changed: bool = False
+
+
+class DeltaBlocking(BaseModel):
+    resolved: list[LedgerKey] = Field(default_factory=list)
+    added: list[LedgerKey] = Field(default_factory=list)
+    persisting: list[LedgerKey] = Field(default_factory=list)
+
+
+class DeltaGap(BaseModel):
+    key: Literal["mainline", "gate", "event"]
+    from_gap: float | None = None
+    to_gap: float | None = None
+    unit: str = ""
+
+
+class DeltaMainline(BaseModel):
+    from_name: str | None = None
+    to_name: str | None = None
+    from_excess: float | None = None
+    to_excess: float | None = None
+    strength_changed: bool = False
+
+
+class DeltaReview(BaseModel):
+    """昨日判断 vs 昨日盘面，只陈述事实，不判对错（spec §6.2）。"""
+
+    prev_target_date: str
+    prev_position_text: str
+    index_pct_chg: float
+    up_ratio: float | None = None
+
+
+class RhythmDelta(BaseModel):
+    prev: DeltaRef
+    position: DeltaPosition
+    stage: dict[str, str | None] = Field(default_factory=dict)
+    blocking: DeltaBlocking = Field(default_factory=DeltaBlocking)
+    gaps: list[DeltaGap] = Field(default_factory=list)
+    mainline: DeltaMainline | None = None
+    review: DeltaReview | None = None
+    default_key: Literal["position", "gate", "mainline", "event", "none"] = "none"
+    version: str = "1.0"

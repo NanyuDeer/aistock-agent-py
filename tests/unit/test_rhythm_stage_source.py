@@ -335,7 +335,7 @@ async def test_morning_inherits_basis_when_local_stage_is_none():
     )
     assert card.evidence.stage == "ebb"
     assert card.evidence.stage_source == "inherited_basis"
-    assert "沿用收盘基准" in card.evidence.stage_reason
+    assert "沿用收盘判断" in card.evidence.stage_reason
 
 
 @pytest.mark.asyncio

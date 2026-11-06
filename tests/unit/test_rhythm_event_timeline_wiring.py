@@ -115,3 +115,19 @@ async def test_compose_card_routes_timeline_events_into_card_output(
     assert _TIMELINE_TITLE in rhythm_card["event_high_hint"]
     assert rhythm_card["next_event_anchor"]["title"] == _TIMELINE_TITLE
     assert _CALENDAR_TITLE not in str(rhythm_card)
+
+
+def test_event_window_dedup_and_noise_filter():
+    """同日交割日只留一条；境外休市/他国制度类不进 A 股节奏卡（spec §11-4）。"""
+    from aistock_agent.agents.workers.rhythm_master import _filter_event_window
+
+    raw = [
+        {"date": "2026-11-20", "type": "delivery", "title": "2026-11 股指期货交割日", "importance": "medium"},
+        {"date": "2026-11-20", "type": "macro", "title": "A股股指期货11月交割日", "importance": "medium"},
+        {"date": "2026-11-26", "type": "macro", "title": "美股感恩节休市（预计）", "importance": "medium"},
+        {"date": "2026-11-19", "type": "seed", "title": "为配合韩国高考 韩国股市11月19日交易时间顺延一小时", "importance": "medium"},
+        {"date": "2026-11-10", "type": "macro", "title": "中国10月CPI/PPI年率", "importance": "high"},
+    ]
+    out = _filter_event_window(raw)
+    titles = [e["title"] for e in out]
+    assert titles == ["中国10月CPI/PPI年率", "2026-11 股指期货交割日"]

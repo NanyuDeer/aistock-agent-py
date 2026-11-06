@@ -522,7 +522,7 @@ class NodeApiClient:
 
         调用方：① `rhythm_verification.run_once`（命中率验证）；②
         `rhythm_master._compose_card`（morning/midday 读 `slot="after_close"`
-        的基准卡以沿用主档位，2026-09-14 P0-2）。
+        的上游卡以沿用仓位，2026-09-14 P0-2）。
         """
         result = await self._request(
             f"/internal/analysis-reports/rhythm_master/{target_date}/{refresh_slot}"

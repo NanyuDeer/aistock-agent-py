@@ -14,9 +14,7 @@ def test_synthesis_prompt_contains_json_and_schema_fields():
     ev = RhythmEvidence(stage="rally", certainty="high")
     prompt = build_synthesis_prompt(ev)
     assert "json" in prompt.lower()
-    assert "mainline" in prompt
     assert "launch_outlook" in prompt
-    assert "narrative" in prompt
 
 
 def test_synthesis_prompt_pins_enums_and_anchor_guard():
@@ -34,20 +32,20 @@ def test_synthesis_prompt_pins_enums_and_anchor_guard():
 
 
 def test_prune_invalid_drops_only_bad_elements():
-    from aistock_agent.schemas.rhythm_master import LaunchOutlook, MainlineRef, RhythmSynthesis
+    from aistock_agent.schemas.rhythm_master import LaunchOutlook, RhythmSynthesis
     from aistock_agent.services.rhythm_rebuilt_validate import prune_invalid
 
-    good = MainlineRef(name="AI", stage="launch", source="P0/板块", data_date="2026-09-11",
-                       direction="bullish", confidence="high")
-    bad = MainlineRef(name="X", stage="launch", source="", data_date="",
-                      direction="bullish", confidence="high")  # 缺来源/日期 → 剔除
     ok_out = LaunchOutlook(anchor_date="2026-09-18", title="交割日",
                            if_confirmed_direction="neutral", confidence="low")
-    syn = RhythmSynthesis(mainline=[good, bad], launch_outlook=[ok_out], narrative="一句话结论")
+    # Literal 无法直接构造非法值：绕过 pydantic 模拟上游原始输出 → 应被剔除
+    bad_out = LaunchOutlook.model_construct(
+        anchor_date="2026-09-19", title="臆造",
+        if_confirmed_direction="待定", confidence="high",
+    )
+    syn = RhythmSynthesis(launch_outlook=[ok_out, bad_out])
     pruned = prune_invalid(syn)
-    assert [m.name for m in pruned.mainline] == ["AI"]
     assert len(pruned.launch_outlook) == 1
-    assert pruned.narrative == "一句话结论"
+    assert pruned.launch_outlook[0].title == "交割日"
 
 
 def test_prompt_includes_mainline_direction_label():

@@ -436,7 +436,7 @@ async def test_midday_downgrade_syncs_ledger_watch_points_and_source() -> None:
     assert ledger["adjust"] == _ledger_for(3).adjust - 1
     # 档位变了 → 观察点按新档位重算（基准账本 watch_points 为空，重算后应产出条目）
     assert ledger["watch_points"]
-    assert any("盘中修正" in m for m in rhythm_card["data_missing"])
+    assert any("盘中走弱" in m for m in rhythm_card["data_missing"])
     # 因子恒落库：触发规则写入
     payload = rhythm_card["phase_evidence"]["intraday_factors"]
     assert factors is not None
@@ -466,7 +466,7 @@ async def test_midday_unavailable_keeps_index_and_marks_source() -> None:
 
     assert rhythm_card["position_index"] == 4
     assert rhythm_card["position_source"] == "intraday_unavailable"
-    assert "盘中数据不可用（档位未修正）" in rhythm_card["data_missing"]
+    assert "盘中数据不可用，仓位这次没有跟着改" in rhythm_card["data_missing"]
     payload = rhythm_card["phase_evidence"]["intraday_factors"]
     assert payload is not None
     assert payload["intr_close"] is None

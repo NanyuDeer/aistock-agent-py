@@ -4,6 +4,8 @@
 branches + data_missing 留痕；本测试锁定"缺失行直传 None（而非 0.0）"不会被
 引擎误当有效点位，从而不伪造支撑/压力。
 """
+import inspect
+
 import pytest
 
 from aistock_agent.agents.workers.rhythm_master import _build_rhythm_card
@@ -211,13 +213,13 @@ def test_branches_never_exceed_three_with_two_high_events() -> None:
     assert len(out["branches"]) <= 3
 
 
-def test_branches_defer_event_node_and_record_reason() -> None:
-    """§5.7：技术分档优先占满预算时，事件节点被让位必须留痕。"""
+def test_branches_defer_event_node_without_user_facing_trace() -> None:
+    """§5.7：技术分档优先占满条数上限时，事件节点让位不再向用户暴露实现细节。"""
     win = _win_with_highs("2026-09-18")
     out = _build_rhythm_card(_card_at("2026-09-17"), win, _rows(60, high=3010.0, low=2990.0))
     assert len(out["branches"]) == 3
     assert all(b["condition"]["kind"] == "interval" for b in out["branches"])
-    assert any("事件节点因分支预算" in m for m in out["data_missing"])
+    assert not any("事件节点因分支预算" in m for m in out["data_missing"])
 
 
 def test_branches_no_deferral_trace_when_event_out_of_branch_window() -> None:
@@ -243,7 +245,7 @@ def test_branches_empty_normal_path_records_degradation_once() -> None:
     """§5.7：两个来源皆不可得（正常路径）→ branches=[] 且留痕，且只写一次。"""
     out = _build_rhythm_card(_card_at("2026-09-17"), _win(), _rows(60, high=None, low=None))
     assert out["branches"] == []
-    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+    assert out["data_missing"].count("这次没有生成情景分支") == 1
 
 
 def test_branches_event_only_source_used_when_technical_unavailable() -> None:
@@ -266,7 +268,7 @@ def test_branches_exception_path_records_degradation_once(monkeypatch) -> None:
     out = _build_rhythm_card(_card_at("2026-09-17"), _win_with_highs("2026-09-18"),
                              _rows(60, high=3010.0, low=2990.0))
     assert out["branches"] == []
-    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+    assert out["data_missing"].count("这次没有生成情景分支") == 1
 
 
 def test_reason_carries_mainline_strength_within_limit() -> None:
@@ -401,6 +403,14 @@ def test_worker_passes_position_index_without_gate() -> None:
     ]
     assert bulls and all(a["from_index"] == 2 and a["to_index"] == 4 for a in bulls)
     assert all(a["change"] == "+2 档" for a in bulls)
+
+
+def test_no_budget_jargon_in_data_missing():
+    """分支预算属实现细节，不得作为 data_missing 上屏（spec §11-5）。"""
+    from aistock_agent.agents.workers import rhythm_master as rm
+
+    source = inspect.getsource(rm)
+    assert "分支预算" not in source
 
 
 if __name__ == "__main__":

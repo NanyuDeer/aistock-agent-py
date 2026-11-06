@@ -117,7 +117,7 @@ async def test_after_close_full_compose_and_persist(
     assert content["basis_date"] == "2026-08-28"
     assert "rhythm_card" in content
     # A1：mock 的 index-map 为空 → 候选全部「代码未命中」，主线不可用须如实留痕
-    assert any("主线候选不可用" in m for m in content["rhythm_card"]["data_missing"])
+    assert any("主线板块不够用" in m for m in content["rhythm_card"]["data_missing"])
     # I1：无 high 事件时 event_high_hint 为空串（前端 v-if 不渲染）。
     # 冻结：当前无键恒真（Task 2）；Task 10 后恒产键且空仍真，无需再改。
     assert content["rhythm_card"].get("event_high_hint", "") == ""
@@ -226,7 +226,7 @@ async def test_midday_inherits_basis_position_without_recompute(
     assert rhythm_card["position_ledger"] is None
     # midday 盘中快照不可用（fixture 默认 None）→ 档位不修正，来源如实标注
     assert rhythm_card["position_source"] == "intraday_unavailable"
-    assert "盘中数据不可用（档位未修正）" in rhythm_card["data_missing"]
+    assert "盘中数据不可用，仓位这次没有跟着改" in rhythm_card["data_missing"]
     # 因子恒落库（spec §4.4）：不可用时字段存在且为 null
     factors = rhythm_card["phase_evidence"]["intraday_factors"]
     assert factors is not None
@@ -238,11 +238,12 @@ async def test_midday_inherits_basis_position_without_recompute(
     # evidence 与 rhythm_card 同源：档位不可用时 position 也必须为空（不伪造 band）
     assert content["evidence"]["position"] is None
     assert content["evidence"]["position_ledger"] is None
-    # §5.7 分支预算（≤3）互斥使用：技术三档占满预算，事件情景让位（不产出 event_ref 分支）且必须留痕
+    # §5.7 分支条目数上限（≤3）互斥使用：技术三档占满，事件情景让位（不产出 event_ref 分支）；
+    # 让位原因属实现细节，不得写入 data_missing 上屏（spec §11-5）
     branches = rhythm_card["branches"]
     assert branches and all(b["condition"]["kind"] == "interval" for b in branches)
     assert all("event_ref" not in b for b in branches)
-    assert "事件节点因分支预算（≤3）未展示" in rhythm_card["data_missing"]
+    assert "事件节点因分支预算（≤3）未展示" not in rhythm_card["data_missing"]
 
 
 @pytest.mark.asyncio
@@ -377,7 +378,7 @@ async def test_morning_inherits_after_close_main_level(
     assert content["evidence"]["stage"] == "ice"
     assert content["rhythm_card"]["level"] == "ice"
     assert content["rhythm_card"]["score"] == 0
-    assert "沿用收盘基准" in content["evidence"]["stage_reason"]
+    assert "沿用收盘判断" in content["evidence"]["stage_reason"]
     # G9：基准卡必须按 (运行日, after_close) 精确读取一次
     mock_api.get_rhythm_report.assert_awaited_once_with("2026-08-28", "after_close")
 
@@ -464,7 +465,7 @@ async def test_after_close_inherits_prev_trading_day_stage_when_neutral(
     ).isoformat()
     assert mock_api.get_rhythm_report.call_args.args[1] == "after_close"
     # 成功沿用 → 不写降级留痕
-    assert not any("前一交易日基准卡" in m for m in content["evidence"]["data_missing"])
+    assert not any("上一交易日的收盘卡" in m for m in content["evidence"]["data_missing"])
 
 
 @pytest.mark.asyncio
@@ -479,7 +480,9 @@ async def test_after_close_notes_fetch_failure_when_prev_card_missing(
     )
     content = mock_api.save_analysis_report.call_args.kwargs["content"]
     assert content["evidence"]["stage"] is None
-    assert "前一交易日基准卡读取失败（主阶段未沿用）" in content["evidence"]["data_missing"]
+    assert any(
+        "上一交易日的收盘卡没读到" in m for m in content["evidence"]["data_missing"]
+    )
     assert content["rhythm_card"]["level"] is None  # 观行为不变
 
 
@@ -497,7 +500,9 @@ async def test_after_close_notes_invalid_prev_stage(
     )
     content = mock_api.save_analysis_report.call_args.kwargs["content"]
     assert content["evidence"]["stage"] is None
-    assert "前一交易日基准卡无有效主阶段（主阶段未沿用）" in content["evidence"]["data_missing"]
+    assert any(
+        "上一交易日的收盘卡没有有效阶段" in m for m in content["evidence"]["data_missing"]
+    )
 
 
 @pytest.mark.asyncio
@@ -511,7 +516,7 @@ async def test_after_close_no_note_when_stage_locally_decided(
     )
     content = mock_api.save_analysis_report.call_args.kwargs["content"]
     assert content["evidence"]["stage"] is not None
-    assert not any("前一交易日基准卡" in m for m in content["evidence"]["data_missing"])
+    assert not any("上一交易日的收盘卡" in m for m in content["evidence"]["data_missing"])
 
 
 def test_near_window_end_date_trading_days():

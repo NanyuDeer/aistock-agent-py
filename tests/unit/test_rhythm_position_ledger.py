@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
 from aistock_agent.services.mainline_engine import (
     EXCESS_WEAK,
@@ -84,7 +86,7 @@ def test_single_gate_watch_point_is_sufficient_alone() -> None:
     points = _points(ledger, mainline_facts=STRONG, event_d=None, closes=BEAR)
     assert [p.key for p in points] == ["gate"]
     assert points[0].sufficient_alone is True
-    assert "ma5 回到 ma10 上方" in points[0].condition
+    assert "5 日均线回到 10 日均线上方" in points[0].condition
     assert "差" in points[0].current_text
 
 
@@ -128,7 +130,7 @@ def test_mainline_unavailable_watch_point_has_no_condition_or_candidates() -> No
         candidates=[CandidateOutlook(name="半导体", excess=1.2)],
     )
     ml = _by_key(points)["mainline"]
-    assert ml.condition == "候选数据不足"
+    assert ml.condition == "板块数据不足"
     assert ml.candidates is None
 
 
@@ -165,14 +167,14 @@ def test_rank_candidates_empty_and_unscorable_return_empty() -> None:
 
 
 def _expected_excess_clause() -> str:
-    """超额子句：EXCESS_WEAK<=0 时省掉超额门槛（否则写出「≥0.0pct」空条件）。"""
+    """超额子句：EXCESS_WEAK<=0 时省掉超额门槛（否则写出「0.0 个百分点以上」空条件）。"""
     if EXCESS_WEAK > 0:
-        return f"5 日超额 ≥{EXCESS_WEAK:.1f}pct 且领先第 2 名 ≥{GAP_EXCESS:.1f}pct"
-    return f"5 日超额领先第 2 名 ≥{GAP_EXCESS:.1f}pct"
+        return f"近 5 天超额 {EXCESS_WEAK:.1f} 个百分点以上，且领先第二名 {GAP_EXCESS:.1f} 个百分点以上"
+    return f"近 5 天超额领先第二名 {GAP_EXCESS:.1f} 个百分点以上"
 
 
 def _expected_mainline_condition() -> str:
-    return f"某板块 {_expected_excess_clause()}"
+    return f"某个板块{_expected_excess_clause()}"
 
 
 def test_mainline_watch_point_carries_top3_candidates() -> None:
@@ -184,15 +186,15 @@ def test_mainline_watch_point_carries_top3_candidates() -> None:
     assert [c.name for c in ml.candidates] == ["半导体", "算力", "CPO"]
     assert ml.condition == _expected_mainline_condition()
     # 超额已过门槛，真正卡住的是间距（0.8 − 0.3 = 0.5 < 2.0）
-    assert ml.current_text == f"领先第 2 名 +0.50pct（需 ≥{GAP_EXCESS:.1f}）"
+    assert ml.current_text == f"领先第二名 0.50 个百分点（需要 {GAP_EXCESS:.1f} 个百分点以上）"
 
 
 def test_mainline_condition_has_no_empty_threshold() -> None:
-    """EXCESS_WEAK=0.0 时「≥0.0pct」是空门槛（任何正超额都过），文案不得出现。"""
+    """EXCESS_WEAK=0.0 时「0.0 个百分点以上」是空门槛（任何正超额都过），文案不得出现。"""
     ledger = _ledger(OSC, NONE)
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC))["mainline"]
-    assert "≥0.0pct" not in ml.condition
-    assert f"领先第 2 名 ≥{GAP_EXCESS:.1f}pct" in ml.condition
+    assert "超额 0.0 个百分点" not in ml.condition
+    assert f"近 5 天超额领先第二名 {GAP_EXCESS:.1f} 个百分点以上" in ml.condition
 
 
 def test_mainline_current_text_gap_when_excess_far_above_threshold() -> None:
@@ -206,7 +208,7 @@ def test_mainline_current_text_gap_when_excess_far_above_threshold() -> None:
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC,
                          candidates=cands))["mainline"]
     assert "差 -" not in ml.current_text
-    assert ml.current_text == f"仅 2 个候选，需 ≥{MIN_CANDIDATES} 个"
+    assert ml.current_text == f"只有 2 个候选板块，至少要 {MIN_CANDIDATES} 个"
     assert ml.candidates and [c.excess for c in ml.candidates] == [24.2, 11.53]
 
 
@@ -219,7 +221,7 @@ def test_mainline_current_text_gap_when_enough_candidates() -> None:
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC,
                          candidates=cands))["mainline"]
     assert "差 -" not in ml.current_text
-    assert ml.current_text == f"领先第 2 名 +1.20pct（需 ≥{GAP_EXCESS:.1f}）"
+    assert ml.current_text == f"领先第二名 1.20 个百分点（需要 {GAP_EXCESS:.1f} 个百分点以上）"
 
 
 def test_mainline_current_text_gap_insufficient() -> None:
@@ -229,18 +231,18 @@ def test_mainline_current_text_gap_insufficient() -> None:
              CandidateOutlook(name="算力", excess=0.5)]
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC,
                          candidates=cands))["mainline"]
-    assert ml.current_text == f"领先第 2 名 +0.50pct（需 ≥{GAP_EXCESS:.1f}）"
+    assert ml.current_text == f"领先第二名 0.50 个百分点（需要 {GAP_EXCESS:.1f} 个百分点以上）"
 
 
 def test_mainline_current_text_excess_below_threshold() -> None:
-    """超额未达门槛 → 指向超额缺口，且「差」必为正（不得出现负数差）。"""
+    """超额未达门槛 → 指向超额缺口，且「还差」必为正（不得出现负数差）。"""
     ledger = _ledger(OSC, NONE)
     cands = [CandidateOutlook(name="半导体", excess=-1.5),
              CandidateOutlook(name="算力", excess=-2.0)]
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC,
                          candidates=cands))["mainline"]
     assert "差 -" not in ml.current_text
-    assert ml.current_text == f"最高 -1.5pct（差 {EXCESS_WEAK + 1.5:.2f}）"
+    assert ml.current_text == f"最高 -1.5 个百分点（还差 {EXCESS_WEAK + 1.5:.1f} 个百分点）"
 
 
 def test_mainline_current_text_single_candidate() -> None:
@@ -248,13 +250,13 @@ def test_mainline_current_text_single_candidate() -> None:
     ledger = _ledger(OSC, NONE)
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC,
                          candidates=[CandidateOutlook(name="半导体", excess=6.0)]))["mainline"]
-    assert ml.current_text == f"仅 1 个候选，需 ≥{MIN_CANDIDATES} 个"
+    assert ml.current_text == f"只有 1 个候选板块，至少要 {MIN_CANDIDATES} 个"
 
 
 def test_mainline_watch_point_without_candidates_says_data_missing() -> None:
     ledger = _ledger(OSC, NONE)
     ml = _by_key(_points(ledger, mainline_facts=NONE, event_d=None, closes=OSC))["mainline"]
-    assert ml.current_text == "候选数据不足"
+    assert ml.current_text == "板块数据不足"
     assert ml.candidates is None
 
 
@@ -274,7 +276,7 @@ def test_no_watch_points_when_everything_satisfied() -> None:
 
 def test_sort_puts_sufficient_alone_first() -> None:
     # 震荡 + 主线候选不可用 + 事件在窗口外：blocking 为空，base=2 → 事件项可单独 +1；
-    # 主线项是「候选数据不足」，不能承诺单独满足即升档 → False（故被排到后面）。
+    # 主线项是「板块数据不足」，不能承诺单独满足即升档 → False（故被排到后面）。
     ledger = _ledger(OSC, UNAVAILABLE, event_d=5)
     assert ledger.base_index == 2 and ledger.adjust == 0
     assert ledger.gate_blocked is False
@@ -296,30 +298,30 @@ def test_sort_ties_follow_gate_mainline_event_order() -> None:
 
 def test_causality_two_blocking_items() -> None:
     text = render_causality(_ledger(BEAR, NONE))
-    assert text.lead == "两条闸门同时压到底，任一解除都不能升档"
+    assert text.lead == "两个条件同时卡着，只解决一个也还不能加仓"
     assert len(text.lines) == 2
-    assert "跌破 20 日线" in text.lines[0] and "均线空头排列" in text.lines[0]
-    assert text.lines[1] == f"无板块 {_expected_excess_clause()}，主线未成立"
+    assert "跌破 20 日均线" in text.lines[0] and "均线空头排列" in text.lines[0]
+    assert text.lines[1] == f"没有板块{_expected_excess_clause()}，主线未成立"
 
 
 def test_causality_single_blocking_item() -> None:
     text = render_causality(_ledger(BEAR, STRONG))
-    assert text.lead == "唯一压制项："
+    assert text.lead == "目前只卡在这一条"
     assert len(text.lines) == 1
-    assert "跌破 20 日线" in text.lines[0]
+    assert "跌破 20 日均线" in text.lines[0]
 
 
 def test_causality_no_blocking_item_gives_positive_lead() -> None:
     text = render_causality(_ledger(OSC, STRONG))
     assert text.lines == []
-    assert text.lead == "均线震荡，base=2；主线成立·强，+1 → 3 档"
+    assert text.lead == "均线震荡，主线成立·强，最后仓位定在七成~八成"
 
 
 def test_causality_mainline_breakdown_line() -> None:
     ml = {"state": "established", "name": "AI 算力", "strength": "strong", "breakdown": True}
     text = render_causality(_ledger(BULL, ml))
     assert text.lines == ["主线板块破位"]
-    assert text.lead == "唯一压制项："
+    assert text.lead == "目前只卡在这一条"
 
 
 # ============ 10. event_d=None 不产出事件观察点 ============
@@ -334,11 +336,92 @@ def test_event_watch_point_absent_when_event_d_is_none() -> None:
 def test_event_watch_point_produced_outside_window() -> None:
     ledger = _ledger(OSC, WEAK, event_d=5)
     ev = _by_key(_points(ledger, mainline_facts=WEAK, event_d=5, closes=OSC))["event"]
-    assert ev.current_text == "当前 d=5"
-    assert ev.condition == "高影响事件进入 3 个交易日内且主线转强"
+    assert ev.current_text == "距事件还有 5 个交易日"
+    assert ev.condition == "3 天内有重要数据或事件，同时主线转强"
 
 
 def test_event_watch_point_produced_in_window_with_weak_mainline() -> None:
     ledger = _ledger(OSC, WEAK, event_d=1)
     ev = _by_key(_points(ledger, mainline_facts=WEAK, event_d=1, closes=OSC))["event"]
-    assert ev.current_text == "当前 d=1"
+    assert ev.current_text == "距事件还有 1 个交易日"
+
+
+# ============ 11. 结构化距离 gap（spec §5.1） ============
+
+
+def test_gate_watch_point_gap():
+    """gate：close 跌破 ma20 时给出「还差多少点」，方向 up。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _gate_watch_point
+
+    ledger = PositionLedger(items=[], gate_blocked=True, gate_hit=True)
+    wp = _gate_watch_point(
+        ledger, closes=[3702.14] * 19 + [3689.91], mainline_facts=None, alone=False,
+    )
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "gate"
+    assert wp.gap.unit == "点" and wp.gap.direction == "up"
+    assert wp.gap.current == pytest.approx(3689.91, abs=0.01)
+    assert wp.gap.target == pytest.approx(3701.53, abs=0.01)
+    assert wp.gap.gap == pytest.approx(11.62, abs=0.02)
+
+
+def test_gate_watch_point_no_gap_when_above_ma20():
+    """close 已站上 ma20 时不产出 gap（这条约束已满足，无距离可言）。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _gate_watch_point
+
+    ledger = PositionLedger(items=[], gate_blocked=True, gate_hit=True)
+    wp = _gate_watch_point(
+        ledger, closes=[3600.0] * 19 + [3800.0], mainline_facts=None, alone=False,
+    )
+    assert wp is not None and wp.gap is None
+
+
+def test_mainline_watch_point_gap():
+    """mainline：current=第一名超额，target=第二名超额+GAP_EXCESS，方向 up。"""
+    from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _mainline_watch_point
+
+    ledger = PositionLedger(items=[], mainline_state="none")
+    cands = [
+        CandidateOutlook(name="AI 应用", excess=0.3),
+        CandidateOutlook(name="低空经济", excess=-1.13),
+    ]
+    wp = _mainline_watch_point(ledger, candidates=cands, alone=False)
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "mainline"
+    assert wp.gap.unit == "pct" and wp.gap.direction == "up"
+    assert wp.gap.current == pytest.approx(0.3, abs=0.01)
+    assert wp.gap.target == pytest.approx(0.87, abs=0.01)   # -1.13 + 2.0
+    assert wp.gap.gap == pytest.approx(0.57, abs=0.01)
+
+
+def test_mainline_watch_point_no_gap_for_single_candidate():
+    """只有一个候选时算不出间距 → gap=None（继续用 current_text 说「候选不够」）。"""
+    from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _mainline_watch_point
+
+    ledger = PositionLedger(items=[], mainline_state="none")
+    wp = _mainline_watch_point(
+        ledger, candidates=[CandidateOutlook(name="AI 应用", excess=0.3)], alone=False,
+    )
+    assert wp is not None and wp.gap is None
+
+
+def test_event_watch_point_gap():
+    """event：target=EVENT_WATCH_D(3)，direction down；窗口内 d<=3 时为 0。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _event_watch_point
+
+    wp = _event_watch_point(PositionLedger(items=[]), mainline_facts=None, event_d=5, alone=False)
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "event"
+    assert wp.gap.unit == "交易日" and wp.gap.direction == "down"
+    assert wp.gap.current == pytest.approx(5.0)
+    assert wp.gap.target == pytest.approx(3.0)
+    assert wp.gap.gap == pytest.approx(2.0)
+
+    inside = _event_watch_point(PositionLedger(items=[]), mainline_facts=None, event_d=2, alone=False)
+    assert inside is not None and inside.gap is not None
+    assert inside.gap.gap == pytest.approx(0.0)   # 天数已进窗口，卡点是主线没转强
