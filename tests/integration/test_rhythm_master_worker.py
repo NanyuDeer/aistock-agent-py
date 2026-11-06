@@ -238,11 +238,12 @@ async def test_midday_inherits_basis_position_without_recompute(
     # evidence 与 rhythm_card 同源：档位不可用时 position 也必须为空（不伪造 band）
     assert content["evidence"]["position"] is None
     assert content["evidence"]["position_ledger"] is None
-    # §5.7 分支预算（≤3）互斥使用：技术三档占满预算，事件情景让位（不产出 event_ref 分支）且必须留痕
+    # §5.7 分支条目数上限（≤3）互斥使用：技术三档占满，事件情景让位（不产出 event_ref 分支）；
+    # 让位原因属实现细节，不得写入 data_missing 上屏（spec §11-5）
     branches = rhythm_card["branches"]
     assert branches and all(b["condition"]["kind"] == "interval" for b in branches)
     assert all("event_ref" not in b for b in branches)
-    assert "事件节点因分支预算（≤3）未展示" in rhythm_card["data_missing"]
+    assert "事件节点因分支预算（≤3）未展示" not in rhythm_card["data_missing"]
 
 
 @pytest.mark.asyncio
