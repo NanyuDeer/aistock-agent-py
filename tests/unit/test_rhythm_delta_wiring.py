@@ -147,3 +147,24 @@ async def test_midday_falls_back_to_after_close(monkeypatch) -> None:
         )
     assert payload is not None
     assert payload["prev"]["slot_fallback"] is True
+
+
+def test_build_review_skipped_when_rows_not_on_basis_date() -> None:
+    """K 线末日不是证据日（当日 K 线未到 / 补跑）→ 不产复盘，避免「昨日」错位一天。"""
+    from aistock_agent.agents.workers.rhythm_master import _build_review
+
+    prev_content = {
+        "target_date": "2026-11-05",
+        "rhythm_card": {"position_band": {"text": "建议仓位：空仓观望"}},
+    }
+    rows: list[dict[str, object]] = [
+        {"trade_date": "20261103", "close": 3600.0},
+        {"trade_date": "20261104", "close": 3650.0},
+    ]
+    assert _build_review(prev_content, rows, "2026-11-05") is None
+
+    rows[1]["trade_date"] = "20261105"
+    out = _build_review(prev_content, rows, "2026-11-05")
+    assert out is not None
+    assert out.index_pct_chg == pytest.approx(1.39, abs=0.01)
+    assert out.up_ratio is None

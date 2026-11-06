@@ -1119,7 +1119,7 @@ async def _build_delta_payload(
             card.evidence.data_missing.append("交易日历算不出上一条卡距今几天，这次不显示变化")
             return None, None
 
-        review = _build_review(prev_content, rows) if slot == "after_close" else None
+        review = _build_review(prev_content, rows, basis_date) if slot == "after_close" else None
         delta = delta_svc.build_delta(
             prev_content=prev_content, card=card, mainline_facts=mainline_facts,
             lag_days=lag, slot_fallback=fallback, review=review,
@@ -1140,10 +1140,16 @@ async def _build_delta_payload(
 
 
 def _build_review(
-    prev_content: dict[str, Any], rows: list[dict[str, object]]
+    prev_content: dict[str, Any], rows: list[dict[str, object]], basis_date: str
 ) -> DeltaReview | None:
-    """昨日复盘：昨日档位 + 昨日上证涨跌幅。取不到就返回 None（整行不渲染）。"""
+    """昨日复盘：昨日档位 + 昨日上证涨跌幅。取不到就返回 None（整行不渲染）。
+
+    `rows[-1]` 必须是证据日当天的 K 线，否则「昨日」会整体错位一天
+    （basis_gate 分支：当日 K 线未到、非交易日补跑）。比对前先归一到 YYYYMMDD。
+    """
     if len(rows) < 2:
+        return None
+    if _normalize_ymd(rows[-1].get("trade_date")) != _normalize_ymd(basis_date):
         return None
     try:
         close = float(rows[-1]["close"])  # type: ignore[arg-type]
