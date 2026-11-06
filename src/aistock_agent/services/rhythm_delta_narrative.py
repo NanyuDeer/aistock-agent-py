@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 _VALID_KEYS = {"gate", "mainline", "event", "position", "none"}
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
-_IMPERATIVE = ("买入", "卖出", "满仓", "清仓", "加仓", "减仓")
-# 「离加仓还差 11.62 点」「暂不加仓」是条件/状态描述，不是指令；动作词只有跟在
-# 距离/否定/条件前缀之后才放行，其余（含「建议满仓」这类祈使句）一律判为指令式。
-_CONDITIONAL_PREFIXES = ("离", "距", "不", "别", "未", "暂", "才", "够")
+# spec §7.4 第 3 条：禁止的是「直接下交易指令」的表述。
+# 只装祈使句里真正的动作/仓位指令；「加仓 / 减仓」**不入表** —— 它们是描述性说法
+# （spec §7.5 自己的模板句就是「离加仓还差 11.62 点」），禁掉会把正确文案也判死。
+_IMPERATIVE = ("买入", "卖出", "满仓", "清仓")
 _DISCLAIMER = "不构成投资建议"
 _NUM_TOLERANCE = 0.01
 
@@ -105,15 +105,8 @@ def _key_present(delta: RhythmDelta, key: str) -> bool:
 
 
 def _has_imperative(text: str) -> bool:
-    """是否含指令式表述：动作词前无否定/距离/条件前缀即视为在下指令。"""
-    for word in _IMPERATIVE:
-        start = text.find(word)
-        while start >= 0:
-            prefix = text[max(0, start - 1) : start]
-            if prefix not in _CONDITIONAL_PREFIXES:
-                return True
-            start = text.find(word, start + len(word))
-    return False
+    """是否含指令式表述（直接下交易指令）。"""
+    return any(w in text for w in _IMPERATIVE)
 
 
 def _delta_numbers(delta: RhythmDelta) -> list[float]:

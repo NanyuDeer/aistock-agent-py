@@ -125,3 +125,9 @@ async def test_run_falls_back_when_output_is_not_json(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "get_deep_think", lambda: _Llm())
     assert await mod.run(_delta()) == fallback_text(_delta())
+
+
+def test_allows_descriptive_position_words() -> None:
+    """「离加仓还差 X 点」是描述性说法（spec §7.5 模板原句），不是交易指令，必须放行。"""
+    ok, _ = validate_narrative(_delta(), {"main_key": "gate", "text": "离加仓还差 11.62 点"})
+    assert ok is True
