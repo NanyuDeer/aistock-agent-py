@@ -35,28 +35,6 @@ _GAP_UNIT: dict[Literal["gate", "mainline", "event"], str] = {
     "event": "交易日",
 }
 _GAP_KEY_ORDER: tuple[Literal["gate", "mainline", "event"], ...] = ("gate", "mainline", "event")
-_POSITION_PREFIX = "建议仓位："
-
-
-def render_review(
-    *,
-    prev_target_date: str,
-    prev_position_text: str,
-    index_pct_chg: float,
-    up_ratio: float | None,
-) -> str:
-    """昨日复盘事实句（spec §8.2）：只陈述，不判对错、不打分。
-
-    例：`昨日说空仓观望，昨天上证 -0.62%，41% 的股票上涨`
-    `up_ratio` 缺失（本批恒缺）→ 整句止于涨跌幅，不留半句、不写「基准」二字。
-    """
-    pos = (prev_position_text or "").removeprefix(_POSITION_PREFIX) or "未给出仓位"
-    head = f"昨日说{pos}，昨天上证 {index_pct_chg:+.2f}%"
-    if up_ratio is None:
-        return head
-    return f"{head}，{round(up_ratio)}% 的股票上涨"
-
-
 def resolve_prev(target_date: str, slot: str, basis_date: str) -> tuple[str, str, bool]:
     """返回 (查询日期, 查询 slot, 是否 slot 回落)。"""
     if slot == "after_close":
