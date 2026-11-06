@@ -157,22 +157,31 @@ def validate_narrative(delta: RhythmDelta, raw: dict[str, Any]) -> tuple[bool, s
     return True, ""
 
 
-async def run(delta: RhythmDelta) -> str:
-    """LLM 生成；任何失败（调用异常 / 解析失败 / 校验不过）都落模板句，永不空、不抛。"""
+async def run(delta: RhythmDelta) -> tuple[str, bool]:
+    """LLM 生成，返回 `(文案, 是否真失败)`。永不空、不抛。
+
+    两类降级要分开（spec §9）：
+    - 调用异常 / 输出解析不出 JSON → `degraded=True`：属于「LLM 层没工作」，调用方写 data_missing；
+    - 输出合规但校验不过 → `degraded=False`：只是模型没按规矩说，记日志即可，不上屏留痕。
+    """
     try:
         llm = get_deep_think()
         resp = await llm.ainvoke(
             [{"role": "user", "content": build_delta_prompt(delta.model_dump())}]
         )
         raw = _parse_json(str(getattr(resp, "content", "") or ""))
+        if not raw:
+            logger.warning("rhythm_delta.narrative_unparsable")
+            return fallback_text(delta), True
         ok, reason = validate_narrative(delta, raw)
         if not ok:
             logger.info("rhythm_delta.narrative_rejected reason=%s", reason)
-            return fallback_text(delta)
-        return _strip_disclaimer(str(raw.get("text") or "")) or fallback_text(delta)
+            return fallback_text(delta), False
+        text = _strip_disclaimer(str(raw.get("text") or "")) or fallback_text(delta)
+        return text, False
     except Exception:
         logger.warning("rhythm_delta.narrative_failed", exc_info=True)
-        return fallback_text(delta)
+        return fallback_text(delta), True
 
 
 def _parse_json(text: str) -> dict[str, Any]:

@@ -108,7 +108,9 @@ async def test_run_falls_back_when_llm_raises(monkeypatch) -> None:
             raise RuntimeError("boom")
 
     monkeypatch.setattr(mod, "get_deep_think", lambda: _Boom())
-    assert await mod.run(_delta()) == fallback_text(_delta())
+    text, degraded = await mod.run(_delta())
+    assert text == fallback_text(_delta())
+    assert degraded is True   # 调用异常 = LLM 层真没工作 → 调用方要留痕
 
 
 @pytest.mark.asyncio
@@ -124,7 +126,9 @@ async def test_run_falls_back_when_output_is_not_json(monkeypatch) -> None:
             return _Resp()
 
     monkeypatch.setattr(mod, "get_deep_think", lambda: _Llm())
-    assert await mod.run(_delta()) == fallback_text(_delta())
+    text, degraded = await mod.run(_delta())
+    assert text == fallback_text(_delta())
+    assert degraded is True   # 解析不出 JSON 同样视为没工作
 
 
 def test_allows_descriptive_position_words() -> None:

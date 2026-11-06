@@ -39,7 +39,7 @@ async def test_delta_payload_when_enabled(monkeypatch) -> None:
         AsyncMock(return_value=_prev_resp("2026-11-04")),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.delta_narrative.run",
-        AsyncMock(return_value="仓位从轻仓~三成调到空仓观望"),
+        AsyncMock(return_value=("仓位从轻仓~三成调到空仓观望", False)),
     ):
         payload, narrative = await rm._build_delta_payload(
             card=_card(), slot="after_close", basis_date="2026-11-05",
@@ -81,7 +81,7 @@ async def test_delta_old_card_records_data_missing(monkeypatch) -> None:
         AsyncMock(return_value=_prev_resp("2026-11-04")),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.delta_narrative.run",
-        AsyncMock(return_value="x"),
+        AsyncMock(return_value=("x", False)),
     ):
         payload, _ = await rm._build_delta_payload(
             card=card, slot="after_close", basis_date="2026-11-05",
@@ -139,7 +139,7 @@ async def test_midday_falls_back_to_after_close(monkeypatch) -> None:
         AsyncMock(side_effect=_fake),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.delta_narrative.run",
-        AsyncMock(return_value="x"),
+        AsyncMock(return_value=("x", False)),
     ):
         payload, _ = await rm._build_delta_payload(
             card=card, slot="midday", basis_date="2026-11-05",
@@ -168,3 +168,48 @@ def test_build_review_skipped_when_rows_not_on_basis_date() -> None:
     assert out is not None
     assert out.index_pct_chg == pytest.approx(1.39, abs=0.01)
     assert out.up_ratio is None
+
+
+@pytest.mark.asyncio
+async def test_delta_narrative_degraded_records_data_missing(monkeypatch) -> None:
+    """LLM 层真没工作 → 留痕；这是 spec §9 要求的「不许静默降级」。"""
+    from aistock_agent.agents.workers import rhythm_master as rm
+
+    monkeypatch.setattr(rm.settings, "rhythm_delta_enabled", True)
+    card = _card()
+    with patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_rhythm_report",
+        AsyncMock(return_value=_prev_resp("2026-11-04")),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.delta_narrative.run",
+        AsyncMock(return_value=("和上一条比没有实质变化，仓位和卡住的原因都没动", True)),
+    ):
+        payload, narrative = await rm._build_delta_payload(
+            card=card, slot="after_close", basis_date="2026-11-05",
+            mainline_facts=None, rows=[],
+        )
+    assert payload is not None
+    assert narrative is not None
+    assert "变更解读没生成出来" in " ".join(card.evidence.data_missing)
+
+
+@pytest.mark.asyncio
+async def test_delta_narrative_rejected_does_not_record_data_missing(monkeypatch) -> None:
+    """校验不过只是模型措辞问题，落模板句但不上屏留痕。"""
+    from aistock_agent.agents.workers import rhythm_master as rm
+
+    monkeypatch.setattr(rm.settings, "rhythm_delta_enabled", True)
+    card = _card()
+    with patch(
+        "aistock_agent.agents.workers.rhythm_master.node_api.get_rhythm_report",
+        AsyncMock(return_value=_prev_resp("2026-11-04")),
+    ), patch(
+        "aistock_agent.agents.workers.rhythm_master.delta_narrative.run",
+        AsyncMock(return_value=("托盘句", False)),
+    ):
+        payload, _ = await rm._build_delta_payload(
+            card=card, slot="after_close", basis_date="2026-11-05",
+            mainline_facts=None, rows=[],
+        )
+    assert payload is not None
+    assert all("变更解读" not in m for m in card.evidence.data_missing)

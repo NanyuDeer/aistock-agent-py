@@ -1131,7 +1131,11 @@ async def _build_delta_payload(
         if lag > 1:
             card.evidence.data_missing.append(f"上一条卡是 {lag} 个交易日前的")
 
-        narrative = await delta_narrative.run(delta)
+        narrative, degraded = await delta_narrative.run(delta)
+        if degraded:
+            # 只有 LLM 层真没工作（调用异常 / 输出解析失败）才留痕；
+            # 校验不过是模型措辞问题，记日志即可，不上屏（spec §9）
+            card.evidence.data_missing.append("这次的变更解读没生成出来，只给确定性结论")
         return delta.model_dump(), narrative
     except Exception:
         logger.warning("rhythm_master.delta_failed", exc_info=True)
