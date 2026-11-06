@@ -175,9 +175,18 @@ async def run(delta: RhythmDelta) -> tuple[str, bool]:
             return fallback_text(delta), True
         ok, reason = validate_narrative(delta, raw)
         if not ok:
-            logger.info("rhythm_delta.narrative_rejected reason=%s", reason)
+            logger.info(
+                "rhythm_delta.narrative_rejected reason=%s main_key=%s default_key=%s",
+                reason, raw.get("main_key"), delta.default_key,
+            )
             return fallback_text(delta), False
         text = _strip_disclaimer(str(raw.get("text") or "")) or fallback_text(delta)
+        # 影子期观测（spec §10）：记录 LLM 判的主次与确定性兜底是否一致，用于算
+        # 「main_key != default_key 的比例」（10%~40% 为合格区间）
+        logger.info(
+            "rhythm_delta.narrative_accepted main_key=%s default_key=%s",
+            raw.get("main_key"), delta.default_key,
+        )
         return text, False
     except Exception:
         logger.warning("rhythm_delta.narrative_failed", exc_info=True)
