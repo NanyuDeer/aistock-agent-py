@@ -17,6 +17,7 @@ from typing import Any
 from aistock_agent.schemas.rhythm_master import (
     CandidateOutlook,
     CausalityText,
+    GapValue,
     LedgerItem,
     PositionLedger,
     WatchPoint,
@@ -26,6 +27,7 @@ from aistock_agent.services.mainline_engine import (
     GAP_EXCESS,
     MIN_CANDIDATES,
 )
+from aistock_agent.services.rhythm_engine import EVENT_WATCH_D
 
 # 新格式（2026-11 文案去工程化）："收盘 3689.91 点，20 日均线 3701.53 点"
 _TREND_VALUE_RE = re.compile(r"收盘\s*(-?\d+(?:\.\d+)?)\s*点.*?20\s*日均线\s*(-?\d+(?:\.\d+)?)")
@@ -103,9 +105,17 @@ def _gate_watch_point(
             current_text = "收盘价不可用"
         else:
             current_text = f"收盘 {close:.2f} 点，还差 {ma20 - close:.2f} 点"
+        gap = (
+            GapValue(
+                key="gate", current=round(close, 2), target=round(ma20, 2),
+                gap=round(ma20 - close, 2), unit="点", direction="up",
+            )
+            if (close is not None and ma20 is not None and ma20 > close)
+            else None
+        )
         return WatchPoint(
             key="gate", condition=condition, current_text=current_text,
-            sufficient_alone=alone,
+            sufficient_alone=alone, gap=gap,
         )
     if ledger.mainline_breakdown:
         name = (mainline_facts or {}).get("name")
@@ -169,10 +179,17 @@ def _mainline_watch_point(
             current_text=_MAINLINE_MISSING, sufficient_alone=alone, candidates=None,
         )
     top3 = list(candidates or [])[:3] or None
+    gap_obj = None
+    if top3 and len(top3) >= 2:
+        target = top3[1].excess + GAP_EXCESS
+        gap_obj = GapValue(
+            key="mainline", current=round(top3[0].excess, 2), target=round(target, 2),
+            gap=round(max(target - top3[0].excess, 0.0), 2), unit="pct", direction="up",
+        )
     return WatchPoint(
         key="mainline", condition=f"某个板块{_excess_clause()}",
         current_text=_mainline_current_text(top3 or []),
-        sufficient_alone=alone, candidates=top3,
+        sufficient_alone=alone, candidates=top3, gap=gap_obj,
     )
 
 
@@ -190,8 +207,13 @@ def _event_watch_point(
     if event_d in (1, 2) and strength == "strong":
         return None
     return WatchPoint(
-        key="event", condition=_EVENT_CONDITION, current_text=f"距事件还有 {event_d} 个交易日",
+        key="event", condition=_EVENT_CONDITION,
+        current_text=f"距事件还有 {event_d} 个交易日",
         sufficient_alone=alone,
+        gap=GapValue(
+            key="event", current=float(event_d), target=float(EVENT_WATCH_D),
+            gap=float(max(event_d - EVENT_WATCH_D, 0)), unit="交易日", direction="down",
+        ),
     )
 
 

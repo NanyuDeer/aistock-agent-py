@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
 from aistock_agent.services.mainline_engine import (
     EXCESS_WEAK,
@@ -342,3 +344,84 @@ def test_event_watch_point_produced_in_window_with_weak_mainline() -> None:
     ledger = _ledger(OSC, WEAK, event_d=1)
     ev = _by_key(_points(ledger, mainline_facts=WEAK, event_d=1, closes=OSC))["event"]
     assert ev.current_text == "距事件还有 1 个交易日"
+
+
+# ============ 11. 结构化距离 gap（spec §5.1） ============
+
+
+def test_gate_watch_point_gap():
+    """gate：close 跌破 ma20 时给出「还差多少点」，方向 up。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _gate_watch_point
+
+    ledger = PositionLedger(items=[], gate_blocked=True, gate_hit=True)
+    wp = _gate_watch_point(
+        ledger, closes=[3702.14] * 19 + [3689.91], mainline_facts=None, alone=False,
+    )
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "gate"
+    assert wp.gap.unit == "点" and wp.gap.direction == "up"
+    assert wp.gap.current == pytest.approx(3689.91, abs=0.01)
+    assert wp.gap.target == pytest.approx(3701.53, abs=0.01)
+    assert wp.gap.gap == pytest.approx(11.62, abs=0.02)
+
+
+def test_gate_watch_point_no_gap_when_above_ma20():
+    """close 已站上 ma20 时不产出 gap（这条约束已满足，无距离可言）。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _gate_watch_point
+
+    ledger = PositionLedger(items=[], gate_blocked=True, gate_hit=True)
+    wp = _gate_watch_point(
+        ledger, closes=[3600.0] * 19 + [3800.0], mainline_facts=None, alone=False,
+    )
+    assert wp is not None and wp.gap is None
+
+
+def test_mainline_watch_point_gap():
+    """mainline：current=第一名超额，target=第二名超额+GAP_EXCESS，方向 up。"""
+    from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _mainline_watch_point
+
+    ledger = PositionLedger(items=[], mainline_state="none")
+    cands = [
+        CandidateOutlook(name="AI 应用", excess=0.3),
+        CandidateOutlook(name="低空经济", excess=-1.13),
+    ]
+    wp = _mainline_watch_point(ledger, candidates=cands, alone=False)
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "mainline"
+    assert wp.gap.unit == "pct" and wp.gap.direction == "up"
+    assert wp.gap.current == pytest.approx(0.3, abs=0.01)
+    assert wp.gap.target == pytest.approx(0.87, abs=0.01)   # -1.13 + 2.0
+    assert wp.gap.gap == pytest.approx(0.57, abs=0.01)
+
+
+def test_mainline_watch_point_no_gap_for_single_candidate():
+    """只有一个候选时算不出间距 → gap=None（继续用 current_text 说「候选不够」）。"""
+    from aistock_agent.schemas.rhythm_master import CandidateOutlook, PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _mainline_watch_point
+
+    ledger = PositionLedger(items=[], mainline_state="none")
+    wp = _mainline_watch_point(
+        ledger, candidates=[CandidateOutlook(name="AI 应用", excess=0.3)], alone=False,
+    )
+    assert wp is not None and wp.gap is None
+
+
+def test_event_watch_point_gap():
+    """event：target=EVENT_WATCH_D(3)，direction down；窗口内 d<=3 时为 0。"""
+    from aistock_agent.schemas.rhythm_master import PositionLedger
+    from aistock_agent.services.rhythm_position_ledger import _event_watch_point
+
+    wp = _event_watch_point(PositionLedger(items=[]), mainline_facts=None, event_d=5, alone=False)
+    assert wp is not None and wp.gap is not None
+    assert wp.gap.key == "event"
+    assert wp.gap.unit == "交易日" and wp.gap.direction == "down"
+    assert wp.gap.current == pytest.approx(5.0)
+    assert wp.gap.target == pytest.approx(3.0)
+    assert wp.gap.gap == pytest.approx(2.0)
+
+    inside = _event_watch_point(PositionLedger(items=[]), mainline_facts=None, event_d=2, alone=False)
+    assert inside is not None and inside.gap is not None
+    assert inside.gap.gap == pytest.approx(0.0)   # 天数已进窗口，卡点是主线没转强
