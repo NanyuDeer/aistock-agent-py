@@ -195,3 +195,32 @@ def test_cheng_numbers_use_chinese_numerals():
             assert " 3 成" not in item.effect, item.effect
             # 中文数字与「成」之间不留空格：「按两成打底」不是「按 两 成打底」
             assert " 成" not in item.effect, item.effect
+
+
+@pytest.mark.parametrize(
+    "key,pos",
+    [
+        ("position", dict(from_index=1, to_index=0, changed=True)),
+        ("gate", dict(from_index=0, to_index=0)),
+        ("mainline", dict(from_index=0, to_index=0)),
+        ("event", dict(from_index=0, to_index=0)),
+        ("none", dict(from_index=0, to_index=0)),
+    ],
+)
+def test_fallback_templates_pass_copy_guard(key, pos):
+    """所有兜底模板都必须过 §12.6 黑名单（含各 default_key 分支）。"""
+    from aistock_agent.schemas.rhythm_master import (
+        DeltaBlocking, DeltaGap, DeltaPosition, DeltaRef, RhythmDelta,
+    )
+    from aistock_agent.services.rhythm_delta_narrative import fallback_text
+
+    delta = RhythmDelta(
+        prev=DeltaRef(target_date="2026-11-05", slot="after_close"),
+        position=DeltaPosition(**pos),
+        blocking=DeltaBlocking(),
+        gaps=[DeltaGap(key="gate", from_gap=21.53, to_gap=11.62, unit="点")],
+        default_key=key,
+    )
+    text = fallback_text(delta)
+    assert text.strip() != ""
+    check_copy(text)
