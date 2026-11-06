@@ -1045,6 +1045,48 @@ def _near_window_end_date(target_date: str) -> str | None:
         return None
 
 
+# 与 A 股节奏无关的事件标题特征（spec §11-4）：只滤「明显无关」，不做语义分类，
+# 避免误杀真正有用的境外宏观（美联储议息 / 美国 CPI 等仍在窗内）。
+_IRRELEVANT_EVENT_KEYWORDS = (
+    "美股感恩节", "美股圣诞节", "美股独立日",
+    "韩国高考", "韩国股市", "日本股市休市",
+)
+# 交割日同一天只留一条（delivery 优先于 macro）
+_DELIVERY_TITLE_KEY = "交割日"
+
+
+def _filter_event_window(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """事件窗去重 + 噪音过滤（spec §11-4）。
+
+    - 噪音：境外休市 / 他国交易制度类 → 剔除；
+    - 同日同题：按 (date, title) 去重；
+    - 同日交割日：只留一条，`type=delivery` 优先于 `macro` 的同义条；
+    - 输出按日期升序（同日保持原有相对顺序），卡片按时间顺读。
+    """
+    kept: list[dict[str, Any]] = []
+    delivery_at: dict[str, int] = {}
+    seen: set[tuple[str, str]] = set()
+    for item in events:
+        title = str(item.get("title") or "")
+        date_s = str(item.get("date") or "")
+        if any(kw in title for kw in _IRRELEVANT_EVENT_KEYWORDS):
+            continue
+        key = (date_s, title.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        if _DELIVERY_TITLE_KEY in title:
+            if date_s in delivery_at:
+                idx = delivery_at[date_s]
+                if item.get("type") == "delivery" and kept[idx].get("type") != "delivery":
+                    kept[idx] = item  # delivery 优先，替换先前留下的 macro 同义条
+                continue
+            delivery_at[date_s] = len(kept)
+        kept.append(item)
+    kept.sort(key=lambda e: str(e.get("date") or ""))  # 稳定排序，同日保序
+    return kept
+
+
 def _build_rhythm_card(
     card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]],
     mainline: dict[str, object] | None = None,
@@ -1272,10 +1314,13 @@ def _build_rhythm_card(
         # 归情绪温度，节奏侧不得再借用语汇）。无归档 → None（前端不渲染该行）。
         "temperature_note": _temperature_note(temp_series),
         # 展示通道：全量展示窗（需求 2，不限 5 交易日；display_events 为空=旧构造/
-        # 分析子窗/旧测试替身场景 → 回退 events 保持契约稳定）。过滤 high/medium +
+        # 分析子窗/旧测试替身场景 → 回退 events 保持契约稳定）。先过滤噪音/同日重复
+        # 再投影，使 limit=30 在去噪音后才生效（spec §11-4）；过滤 high/medium +
         # 上限 30（G1 防 earnings 密集噪音 / 列表爆炸）；档位通道见上方 win_highs（仅 high）。
         "event_window": engine.project_event_window(
-            getattr(win, "display_events", None) or win.events,
+            _filter_event_window(
+                list(getattr(win, "display_events", None) or win.events)
+            ),
             importance_min="medium",
             limit=30,
         ),
