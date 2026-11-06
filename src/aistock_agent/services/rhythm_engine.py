@@ -583,7 +583,7 @@ def _build_position_ledger(
         # （未知态已在入口归一为 "unavailable"，此处不再透出原始值）
         mainline_item = LedgerItem(
             key="mainline",
-            value_text="无主线数据" if state is None else "候选数据不足",
+            value_text="无主线数据" if state is None else "板块数据不足",
             judgement="数据不可用",
             effect="不影响仓位",
             status="missing",
