@@ -132,3 +132,43 @@ def test_causality_keeps_stock_words():
     joined = " ".join([text.lead, *text.lines])
     assert "主线" in joined or "超额" in joined
     assert find_engineering_terms(joined) == []
+
+
+def test_mainline_notes_pass_guard():
+    """主线留痕文案全分支过门禁，且四类根因仍可区分（硬约束 12）。"""
+    from aistock_agent.services.mainline_engine import build_mainline_notes
+    from aistock_agent.services.user_facing_copy import find_engineering_terms
+
+    combos = [
+        dict(valid_count=3, min_candidates=3, code_skipped=0, name_skipped=0, thin_skipped=0, fetch_failed=0),
+        dict(valid_count=2, min_candidates=3, code_skipped=1, name_skipped=2, thin_skipped=3, fetch_failed=0),
+        dict(valid_count=0, min_candidates=3, code_skipped=0, name_skipped=1, thin_skipped=0, fetch_failed=4),
+        dict(valid_count=3, min_candidates=3, code_skipped=0, name_skipped=0, thin_skipped=0, fetch_failed=0, unscorable=2),
+    ]
+    for kwargs in combos:
+        for note in build_mainline_notes(**kwargs):
+            assert find_engineering_terms(note) == [], f"命中工程词：{note!r}"
+
+    merged = " ".join(build_mainline_notes(**combos[2]))
+    assert "取不到" in merged and "不够用" in merged  # 取数失败与数据不足不得合并
+
+
+def test_data_missing_has_no_legacy_jargon():
+    """data_missing / block_reason 的存量工程语不得回潮（源码级守卫）。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "src" / "aistock_agent"
+    legacy = [
+        "基准卡", "收盘基准", "主档位", "主阶段",
+        "档位由", "档位已在下限", "命中规则", "封顶至",
+        "data_date=", "证据日=", "宽度快照", "分支生成降级",
+        "候选不可评分", "主线候选不可用", "主线候选取数失败",
+        "名称校验不通过", "事件当期未落档", "继承序号",
+    ]
+    offenders = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for word in legacy:
+            if word in text:
+                offenders.append(f"{path.name}: {word}")
+    assert offenders == [], f"仍存在工程语：{offenders}"

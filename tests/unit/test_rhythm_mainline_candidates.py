@@ -60,25 +60,28 @@ def test_candidates_tag_codes_are_replaced_with_verified_values() -> None:
 # 硬约束 12：取数失败与数据不足必须分开留痕，禁止把请求失败归因为"数据不足"。
 
 
-def test_build_mainline_notes_legacy_wording_unchanged() -> None:
-    """无取数失败时，文案必须与既有实现逐字一致（零回归）。"""
+def test_build_mainline_notes_lists_all_four_causes_when_short() -> None:
+    """候选不足时四类根因逐项列出，一句话说不清就不合并。"""
     notes = build_mainline_notes(
         valid_count=0, min_candidates=3,
         code_skipped=0, name_skipped=0, thin_skipped=5, fetch_failed=0,
     )
-    assert notes == ["主线候选不可用（有效候选 0/3；代码未命中 0、名称不符 0、序列不足 5）"]
+    assert notes == [
+        "主线板块不够用（只凑到 0 个，至少需要 3 个）："
+        "0 个代码对不上、0 个名字不符、5 个数据太短"
+    ]
 
 
 def test_build_mainline_notes_distinguishes_fetch_failure_from_thin() -> None:
-    """取数失败（None）不得被归因为"序列不足"。"""
+    """取数失败（None）不得被归因为"数据太短"。"""
     notes = build_mainline_notes(
         valid_count=0, min_candidates=3,
         code_skipped=0, name_skipped=0, thin_skipped=0, fetch_failed=5,
     )
-    assert "主线候选取数失败（5 个）" in notes
-    unavailable = next(n for n in notes if n.startswith("主线候选不可用"))
-    assert "取数失败 5" in unavailable
-    assert "序列不足 0" in unavailable
+    assert "有 5 个板块数据取不到" in notes
+    unavailable = next(n for n in notes if n.startswith("主线板块不够用"))
+    assert "5 个取数失败" in unavailable
+    assert "0 个数据太短" in unavailable
 
 
 def test_build_mainline_notes_silent_when_enough_candidates() -> None:
@@ -260,7 +263,7 @@ def test_build_mainline_notes_reports_unscorable_without_mainline_word() -> None
         valid_count=4, min_candidates=3, code_skipped=0, name_skipped=0,
         thin_skipped=0, fetch_failed=0, unscorable=3,
     )
-    assert any("候选不可评分" in n for n in notes)
+    assert any("K 线太短" in n for n in notes)
     assert not any("主线" in n for n in notes)
 
 

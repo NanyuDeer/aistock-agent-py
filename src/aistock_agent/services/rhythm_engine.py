@@ -1095,7 +1095,7 @@ def build_event_branch(
         if d is None or d > EVENT_BRANCH_MAX_D:
             return []
     title = str(event.get("title", "关键事件"))
-    note_suffix = "（该情景为条件态，不改变主档位）"
+    note_suffix = "（该情景为条件态，不改仓位）"
     branches: list[dict[str, Any]] = []
     for value in EVENT_RESULT_ENUM:
         direction = EVENT_RESULT_DIRECTION[value]
@@ -1140,7 +1140,7 @@ def build_next_event_anchor(
     （D7，spec §5.5.2）。
 
     原点由调用方给出：节奏大师传**目标交易日**（该卡所描述的那一天，盘前/午间档
-    即当天、收盘基准档为次一交易日），使「距今天数」相对卡片描述的那一天。
+    即当天、收盘定档为次一交易日），使「距今天数」相对卡片描述的那一天。
     注意卡片 `basis_date` 自 2026-09-14 起表示**证据日**（K 线末日），不可用作本处原点。
 
     A2 双通道：本函数属**展示/提示通道**，故放开 medium；返回值的 `importance`

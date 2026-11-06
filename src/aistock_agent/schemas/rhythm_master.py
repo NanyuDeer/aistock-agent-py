@@ -13,8 +13,8 @@ PositionAction = Literal["add", "hold", "reduce"]
 # 阶段判定路径（2026-11-03）：区分「有独立证据算出」与「沿用别处结论」，
 # 避免把中性兜底的沿用当成强判定展示（问题 1）。
 # - computed：本地 detect_stage 依当日证据判出方向
-# - inherited_prev_day：本地证据中性 → 沿用前一交易日 after_close 卡的主阶段
-# - inherited_basis：盘前/午间 → 沿用同日 after_close 收盘基准卡的主阶段
+# - inherited_prev_day：本地证据中性 → 沿用前一交易日 after_close 卡的市场阶段
+# - inherited_basis：盘前/午间 → 沿用同日 after_close 收盘卡的市场阶段
 StageSource = Literal["computed", "inherited_prev_day", "inherited_basis"]
 
 # F3 裁决（2026-09-05）：score 由 level 派生同源（score=LEVEL_IDX×20，0-100 语义），
@@ -93,7 +93,7 @@ class PositionLedger(BaseModel):
     gate_blocked: bool = False
     mainline_state: str | None = None
     # 事件调整**生效前**的档位 = clamp(base + 主线调整)，即 step2 结束、step3 之前的值
-    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`继承序号 − 1` 在
+    # （职责重定义 spec §4.1）。盘前撤销「临近事件 +1」以它为基线：`沿用序号 − 1` 在
     # 4 档上界把 +1 吃掉时会多撤一档，只有事件前档位能无歧义还原。
     event_off_index: int | None = None
     # 事件调整的**已计入类型**（幂等闸门，职责重定义 spec §4.1/§4.2）：
@@ -132,7 +132,7 @@ class RhythmEvidence(BaseModel):
     certainty_reason: str = ""
     position: PositionBand | None = None
     # 仓位推导账本（因果输出 spec §4.3）：与 position.index 同源同值，
-    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 档位不可用（旧基准卡）。
+    # position_index / 溯源 / 观察点全部从这一份账本派生；None = 仓位不可用（旧卡）。
     position_ledger: PositionLedger | None = None
     event_anchors: list[EventAnchor] = Field(default_factory=list)
     data_missing: list[str] = Field(default_factory=list)
@@ -170,7 +170,7 @@ class MasterRhythmCard(BaseModel):
     # 确定性主线事实（judge_mainline 输出 + 胜出候选 nav，worker 内部接线用；
     # 不直接序列化进 content，供 _build_rhythm_card 派生仓位文案/技术佐证）
     mainline_facts: dict[str, Any] | None = None
-    # 盘前/午间沿用收盘基准时，一并沿用基准卡的仓位文案（2026-11-03）：
+    # 盘前/午间沿用收盘卡时，一并沿用上游卡的仓位文案（2026-11-03）：
     # 档位来自 after_close 卡，仓位却用前一交易日 K 线重算会造成同日三时点口径打架，
-    # 故继承时把基准卡 position_band.text 一并带过来，保证档位与仓位同源。
+    # 故继承时把上游卡 position_band.text 一并带过来，保证档位与仓位同源。
     inherited_position_text: str | None = None

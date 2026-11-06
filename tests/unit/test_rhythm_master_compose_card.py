@@ -135,7 +135,7 @@ async def _compose(slot: str, basis: str, kline_value):
     return card
 
 
-_GATE_MSG = "基准日无当日K线"
+_GATE_MSG = "当天没有 K 线数据"
 
 
 @pytest.mark.asyncio
@@ -288,10 +288,10 @@ def test_inherit_basis_stage_only_for_intraday_slots():
     assert _inherit_basis_stage("after_close", resp) is None
     # morning/midday 继承（后三项为基准卡仓位文案/序号/账本，无 rhythm_card 时均为 None）
     assert _inherit_basis_stage("morning", resp) == (
-        "ice", "沿用收盘基准（2026-09-11）：冰点筑底", None, None, None,
+        "ice", "沿用收盘判断（2026-09-11）：冰点筑底", None, None, None,
     )
     assert _inherit_basis_stage("midday", resp) == (
-        "ice", "沿用收盘基准（2026-09-11）：冰点筑底", None, None, None,
+        "ice", "沿用收盘判断（2026-09-11）：冰点筑底", None, None, None,
     )
     # 基准卡带 position_band（旧卡无序号）→ 文案照搬，但序号/账本为 None（不得按文案反推）
     resp_with_band = {
@@ -302,7 +302,7 @@ def test_inherit_basis_stage_only_for_intraday_slots():
         }
     }
     assert _inherit_basis_stage("morning", resp_with_band) == (
-        "ebb", "沿用收盘基准（2026-11-02）：退潮", "建议仓位：轻仓~观望", None, None,
+        "ebb", "沿用收盘判断（2026-11-02）：退潮", "建议仓位：轻仓~观望", None, None,
     )
     # 基准卡带 position_index + position_ledger → 一并继承（同日三时点同源）
     resp_with_index = {

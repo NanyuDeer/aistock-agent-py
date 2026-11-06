@@ -187,7 +187,7 @@ async def run_once(report_date: str | None = None) -> dict[str, Any]:
             return {"report_date": target, "evaluated": 0, "error": "窗口 K 线不可用"}
         # 事件落档只发生在 morning/midday 版本，after_close 为占位（D11）。
         # 方案丙（2026-09-05 产品拍板）：after_close 存储 report_date=target_date（次日），
-        # 故 run_once 不按"当天 report_date 精确匹配"读后收盘基准；改为读最新 after_close
+        # 故 run_once 不按"当天 report_date 精确匹配"读后收盘卡；改为读最新 after_close
         # 卡并校验 content.basis_date 为最近交易日。morning/midday 仍按 target 精确读。
         # 本任务为 min 边界：Node 无"最新卡"端点，只对齐"当天精确命中"语义（storage 的
         # report_date 不改），Node 侧"最新卡"契约改造另立任务（见 Task 8 开放项）。

@@ -407,7 +407,7 @@ async def test_morning_event_plus_one_is_inherited_by_midday() -> None:
     # 盘中数据不可用（helper 固定返回 None）→ 不修正，来源如实标注（spec §4.3）
     assert midday_card["position_source"] == "intraday_unavailable"
     assert midday_card["position_ledger"]["final_index"] == 3
-    assert "沿用盘前基准" in card2.evidence.stage_reason
+    assert "沿用盘前判断" in card2.evidence.stage_reason
     # 回退留痕不得出现（这次是正常串联）
     assert wm.BASIS_FALLBACK_NOTE not in midday_card["data_missing"]
 
@@ -519,7 +519,7 @@ async def test_morning_cap_is_not_limited_by_plus_minus_one(basis_index: int) ->
     assert rhythm_card["position_index"] == min(basis_index, 1)
     if basis_index > 1:
         assert rhythm_card["position_source"] == "event_adjusted"
-        assert any("封顶" in m for m in rhythm_card["data_missing"])
+        assert any("重要事件结果未出" in m for m in rhythm_card["data_missing"])
 
 
 @pytest.mark.asyncio
@@ -591,7 +591,7 @@ async def test_morning_cap_breaks_plus_minus_one_bound() -> None:
     assert rhythm_card["position_index"] == 1
     assert rhythm_card["position_source"] == "event_adjusted"
     assert any(
-        "封顶" in m and "4" in m and "1" in m for m in rhythm_card["data_missing"]
+        "重要事件结果未出" in m for m in rhythm_card["data_missing"]
     ), rhythm_card["data_missing"]
     ledger = card.evidence.position_ledger
     assert ledger is not None
@@ -727,7 +727,7 @@ async def test_morning_revoke_falls_back_when_event_off_index_missing() -> None:
     rhythm_card = _rhythm_card(card, rows, win, source)
     assert rhythm_card["position_index"] == 2  # start = 3 − 1，符合 → 2
     assert rhythm_card["position_source"] == "event_adjusted"
-    assert any("旧基准卡无事件前档位" in m for m in rhythm_card["data_missing"])
+    assert any("缺少事件前的仓位记录" in m for m in rhythm_card["data_missing"])
 
 
 # ============ 7. 无事件修正 → inherited_basis ============
@@ -756,7 +756,7 @@ async def test_morning_keeps_null_index_for_old_basis_card() -> None:
     rhythm_card = _rhythm_card(card, rows, win, source)
     assert rhythm_card["position_index"] is None
     assert rhythm_card["position_source"] == "inherited_basis"
-    assert any("基准卡无有效档位" in m for m in rhythm_card["data_missing"])
+    assert any("没有有效仓位" in m for m in rhythm_card["data_missing"])
 
 
 # ============ 8. 本地重算兜底不受影响 ============
@@ -799,7 +799,7 @@ async def test_same_day_event_without_result_caps_inherited_index() -> None:
 
     assert rhythm_card["position_index"] == 1
     assert rhythm_card["position_ledger"]["final_index"] == 1
-    assert any("封顶" in str(m) for m in rhythm_card["data_missing"])
+    assert any("事件当天结果还没出来" in str(m) for m in rhythm_card["data_missing"])
 
 
 @pytest.mark.asyncio
@@ -814,6 +814,6 @@ async def test_same_day_event_with_result_does_not_cap() -> None:
     )
     rhythm_card = _rhythm_card(card, rows, win, source)
 
-    assert rhythm_card["position_index"] != 1 or "封顶" not in str(
+    assert rhythm_card["position_index"] != 1 or "事件当天结果还没出来" not in str(
         rhythm_card["data_missing"]
     )

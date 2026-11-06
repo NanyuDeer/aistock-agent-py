@@ -322,7 +322,7 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
+    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
     scheduler.add_job(
         _run_rhythm_master_after_close,
         CronTrigger.from_crontab(

@@ -245,7 +245,7 @@ def test_branches_empty_normal_path_records_degradation_once() -> None:
     """§5.7：两个来源皆不可得（正常路径）→ branches=[] 且留痕，且只写一次。"""
     out = _build_rhythm_card(_card_at("2026-09-17"), _win(), _rows(60, high=None, low=None))
     assert out["branches"] == []
-    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+    assert out["data_missing"].count("这次没有生成情景分支") == 1
 
 
 def test_branches_event_only_source_used_when_technical_unavailable() -> None:
@@ -268,7 +268,7 @@ def test_branches_exception_path_records_degradation_once(monkeypatch) -> None:
     out = _build_rhythm_card(_card_at("2026-09-17"), _win_with_highs("2026-09-18"),
                              _rows(60, high=3010.0, low=2990.0))
     assert out["branches"] == []
-    assert out["data_missing"].count("分支生成降级（无分支）") == 1
+    assert out["data_missing"].count("这次没有生成情景分支") == 1
 
 
 def test_reason_carries_mainline_strength_within_limit() -> None:
