@@ -183,9 +183,14 @@ def position_band_to_action(
 
     有 from_index 时 `change` 一律以「档」为单位（spec §7.3）：「成」是仓位比例，
     「档」是本系统阶梯序号，混用即 §1.2 矛盾的根源。
+
+    返回的 `band` 服从**实际档位**（spec §11-3）：有 from_index 时取
+    `{"text": POSITION_LADDER[to_index]}`，闸门压制/边界钳制后不会与 `to_index` 打架；
+    无 from_index（旧卡/旧调用）时原样回传入参 band，行为不变。
     """
     d = "add" if direction == "bullish" else ("reduce" if direction == "bearish" else "hold")
     delta = 2 if direction == "bullish" else (-1 if direction == "bearish" else 0)
+    band_out: dict[str, Any] = band
     if from_index is None:
         # 旧静态文案（兼容旧报告/旧测试）：语义已被 §7 取代，仅在无档位可接时使用。
         change = "+2 成" if d == "add" else ("-1 成" if d == "reduce" else "持仓不变")
@@ -203,10 +208,12 @@ def position_band_to_action(
                 change = "维持"
             else:
                 change = f"+{step} 档" if step > 0 else f"{step} 档"
+        # 文案服从实际档位（spec §11-3）：band 是静态表值，闸门/钳制后可能与 to_index 打架
+        band_out = {"text": POSITION_LADDER[to_index]}
     return {
         "direction": d,
         "change": change,
-        "band": band,
+        "band": band_out,
         "from_index": from_index,
         "to_index": to_index,
         "blocked_by_gate": blocked_by_gate,
