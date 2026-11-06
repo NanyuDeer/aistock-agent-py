@@ -57,3 +57,22 @@ def test_watch_point_gap_optional_and_validated():
 def test_gap_value_rejects_unknown_unit():
     with pytest.raises(Exception):
         GapValue(key="gate", current=1.0, target=2.0, gap=1.0, unit="元", direction="up")
+
+
+def test_rhythm_delta_roundtrip() -> None:
+    from aistock_agent.schemas.rhythm_master import (
+        DeltaBlocking,
+        DeltaPosition,
+        DeltaRef,
+        RhythmDelta,
+    )
+
+    d = RhythmDelta(
+        prev=DeltaRef(target_date="2026-11-05", slot="after_close", created_at=None, lag_days=1),
+        position=DeltaPosition(from_index=1, to_index=0, changed=True),
+        stage={"from": "ebb", "to": "overheat"},
+        blocking=DeltaBlocking(resolved=[], added=["trend"], persisting=["mainline"]),
+        default_key="gate",
+    )
+    dumped = d.model_dump()
+    assert RhythmDelta.model_validate(dumped).default_key == "gate"

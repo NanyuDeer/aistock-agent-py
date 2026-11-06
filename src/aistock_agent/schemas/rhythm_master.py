@@ -192,3 +192,66 @@ class MasterRhythmCard(BaseModel):
     # 档位来自 after_close 卡，仓位却用前一交易日 K 线重算会造成同日三时点口径打架，
     # 故继承时把上游卡 position_band.text 一并带过来，保证档位与仓位同源。
     inherited_position_text: str | None = None
+
+
+LedgerKey = Literal["trend", "mainline", "event"]
+
+
+class DeltaRef(BaseModel):
+    """上一张卡的定位信息。"""
+
+    target_date: str
+    slot: str
+    created_at: str | None = None
+    # 两张卡的证据日相隔交易日数；>1 = 中间卡缺失
+    lag_days: int = 0
+    # 严格上一条缺失，已回落取更早的 slot
+    slot_fallback: bool = False
+
+
+class DeltaPosition(BaseModel):
+    from_index: int | None = None
+    to_index: int | None = None
+    changed: bool = False
+
+
+class DeltaBlocking(BaseModel):
+    resolved: list[LedgerKey] = Field(default_factory=list)
+    added: list[LedgerKey] = Field(default_factory=list)
+    persisting: list[LedgerKey] = Field(default_factory=list)
+
+
+class DeltaGap(BaseModel):
+    key: Literal["mainline", "gate", "event"]
+    from_gap: float | None = None
+    to_gap: float | None = None
+    unit: str = ""
+
+
+class DeltaMainline(BaseModel):
+    from_name: str | None = None
+    to_name: str | None = None
+    from_excess: float | None = None
+    to_excess: float | None = None
+    strength_changed: bool = False
+
+
+class DeltaReview(BaseModel):
+    """昨日判断 vs 昨日盘面，只陈述事实，不判对错（spec §6.2）。"""
+
+    prev_target_date: str
+    prev_position_text: str
+    index_pct_chg: float
+    up_ratio: float | None = None
+
+
+class RhythmDelta(BaseModel):
+    prev: DeltaRef
+    position: DeltaPosition
+    stage: dict[str, str | None] = Field(default_factory=dict)
+    blocking: DeltaBlocking = Field(default_factory=DeltaBlocking)
+    gaps: list[DeltaGap] = Field(default_factory=list)
+    mainline: DeltaMainline | None = None
+    review: DeltaReview | None = None
+    default_key: Literal["position", "gate", "mainline", "event", "none"] = "none"
+    version: str = "1.0"
