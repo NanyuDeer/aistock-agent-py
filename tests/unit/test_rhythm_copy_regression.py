@@ -210,7 +210,11 @@ def test_cheng_numbers_use_chinese_numerals():
 def test_fallback_templates_pass_copy_guard(key, pos):
     """所有兜底模板都必须过 §12.6 黑名单（含各 default_key 分支）。"""
     from aistock_agent.schemas.rhythm_master import (
-        DeltaBlocking, DeltaGap, DeltaPosition, DeltaRef, RhythmDelta,
+        DeltaBlocking,
+        DeltaGap,
+        DeltaPosition,
+        DeltaRef,
+        RhythmDelta,
     )
     from aistock_agent.services.rhythm_delta_narrative import fallback_text
 
