@@ -62,6 +62,22 @@ class CandidateOutlook(BaseModel):
     excess: float
 
 
+class GapValue(BaseModel):
+    """观察点距离的结构化数值（spec §5.1）：供跨日 delta 做差，避免解析中文串。
+
+    `gap` 恒为正（>=0）：等于 0 表示该约束的数值部分已达标，卡点在别处
+    （例如主线超额间距够了、但候选板块数不够）——与 `current_text` 的分工就在这里。
+    """
+
+    key: Literal["mainline", "gate", "event"]
+    current: float
+    target: float
+    gap: float
+    unit: Literal["点", "pct", "交易日"]
+    # 需向哪个方向才满足：up = 当前值要涨到 target；down = 当前值要降到 target
+    direction: Literal["up", "down"]
+
+
 class WatchPoint(BaseModel):
     """变奏观察点（因果输出 spec §4.2）：当前未满足项 + 当前距离。"""
 
@@ -70,6 +86,8 @@ class WatchPoint(BaseModel):
     current_text: str
     sufficient_alone: bool
     candidates: list[CandidateOutlook] | None = None
+    # 结构化距离（spec §5.1）：单条件不可量化时为 None，前端继续用 current_text
+    gap: GapValue | None = None
 
 
 class PositionLedger(BaseModel):
