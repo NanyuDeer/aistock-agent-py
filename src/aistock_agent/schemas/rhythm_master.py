@@ -156,15 +156,6 @@ class RhythmEvidence(BaseModel):
     data_missing: list[str] = Field(default_factory=list)
 
 
-class MainlineRef(BaseModel):
-    name: str
-    stage: str
-    source: str
-    data_date: str
-    direction: Direction
-    confidence: str
-
-
 class LaunchOutlook(BaseModel):
     anchor_date: str
     title: str
@@ -173,9 +164,13 @@ class LaunchOutlook(BaseModel):
 
 
 class RhythmSynthesis(BaseModel):
-    mainline: list[MainlineRef] = Field(default_factory=list)
+    """研研判层输出（2026-11 收缩）：仅保留事件情景预判。
+
+    `narrative` 已删（复述确定性结论且会抄错仓位）；`mainline` 已删（抄写确定性事实）。
+    `launch_outlook` 本批恒为空数组（缺 consensus 数据源），字段保留不破契约。
+    """
+
     launch_outlook: list[LaunchOutlook] = Field(default_factory=list)
-    narrative: str = ""
 
 
 class MasterRhythmCard(BaseModel):

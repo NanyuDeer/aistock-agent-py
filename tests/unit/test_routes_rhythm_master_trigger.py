@@ -50,7 +50,7 @@ def _dispatch_result(
                 "target_date": target_date,
                 "basis_date": "2026-09-18",
                 "refresh_slot": refresh_slot,
-                "synthesis_available": True,
+                "synthesis_available": False,  # LLM 复述层已下线，生产路径恒 False
                 "rhythm_card": {"level": "ebb", "phase": "ebb", "data_missing": []},
             }
         },
@@ -72,7 +72,7 @@ class TestTriggerRhythmMaster:
         assert body["data"]["target_date"] == "2026-09-21"
         assert body["data"]["basis_date"] == "2026-09-18"
         assert body["data"]["refresh_slot"] == "after_close"
-        assert body["data"]["synthesis_available"] is True
+        assert body["data"]["synthesis_available"] is False
         assert body["data"]["rhythm_card"]["phase"] == "ebb"
         mock_dispatch.assert_awaited_once_with("after_close", "2026-09-18", None)
 

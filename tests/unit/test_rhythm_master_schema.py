@@ -22,13 +22,14 @@ def test_evidence_defaults():
 
 def test_card_builds_from_evidence_and_synthesis():
     ev = RhythmEvidence(stage="rally", certainty="high")
-    synth = RhythmSynthesis(mainline=[], launch_outlook=[], narrative="主线共振，主升阶段。")
+    synth = RhythmSynthesis(launch_outlook=[])
     card = MasterRhythmCard(
         basis_date="2026-09-03", target_date="2026-09-04", refresh_slot="after_close",
-        evidence=ev, synthesis=synth, synthesis_available=True,
+        evidence=ev, synthesis=synth, synthesis_available=False,
     )
     assert card.synthesis is not None
-    assert card.synthesis_available is True
+    # 本批 LLM 复述层（narrative/mainline）已下线，launch_outlook 恒空 → 不可用
+    assert card.synthesis_available is False
     assert card.evidence.stage == "rally"
 
 def test_stage_to_level_mapping_matches_frontend_five_levels():
