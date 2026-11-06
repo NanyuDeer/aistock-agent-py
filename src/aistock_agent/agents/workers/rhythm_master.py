@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import (
     CandidateOutlook,
+    DeltaReview,
     LedgerItem,
     MasterRhythmCard,
     PositionBand,
@@ -33,6 +34,8 @@ from aistock_agent.schemas.rhythm_master import (
     StageSource,
 )
 from aistock_agent.services import intraday_snapshot_archive as intraday_archive
+from aistock_agent.services import rhythm_delta as delta_svc
+from aistock_agent.services import rhythm_delta_narrative as delta_narrative
 from aistock_agent.services import rhythm_engine as engine
 from aistock_agent.services import rhythm_rebuilt_evidence as ev
 from aistock_agent.services.data_client import node_api
@@ -1078,12 +1081,95 @@ def _filter_event_window(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
+async def _build_delta_payload(
+    *,
+    card: MasterRhythmCard,
+    slot: str,
+    basis_date: str,
+    mainline_facts: dict[str, Any] | None,
+    rows: list[dict[str, object]],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """取上一条卡 → 算 delta → 生成叙事。永不抛异常，缺什么就留痕什么。"""
+    if not settings.rhythm_delta_enabled:
+        return None, None
+    try:
+        prev_date, prev_slot, allow_fallback = delta_svc.resolve_prev(
+            target_date=card.target_date, slot=slot, basis_date=basis_date,
+        )
+        prev_resp = await node_api.get_rhythm_report(prev_date, prev_slot)
+        fallback = False
+        if not isinstance(prev_resp, dict) and allow_fallback:
+            prev_resp = await node_api.get_rhythm_report(card.target_date, "after_close")
+            fallback = True
+        prev_content = prev_resp.get("content") if isinstance(prev_resp, dict) else None
+        if not isinstance(prev_content, dict):
+            card.evidence.data_missing.append("没有上一条节奏卡可比，这次不显示变化")
+            return None, None
+
+        prev_basis = str(prev_content.get("basis_date") or "")
+        lag = None
+        try:
+            lag = trading_days_between(
+                date_cls.fromisoformat(prev_basis), date_cls.fromisoformat(basis_date),
+            )
+        except (ValueError, TypeError):
+            lag = None
+        if lag is None:
+            # 越出交易日历覆盖范围（chinese_calendar 仅到 2026 年底）→ 不得静默当 0 天
+            card.evidence.data_missing.append("交易日历算不出上一条卡距今几天，这次不显示变化")
+            return None, None
+
+        review = _build_review(prev_content, rows) if slot == "after_close" else None
+        delta = delta_svc.build_delta(
+            prev_content=prev_content, card=card, mainline_facts=mainline_facts,
+            lag_days=lag, slot_fallback=fallback, review=review,
+        )
+        if delta is None:
+            return None, None
+        if not (prev_content.get("rhythm_card") or {}).get("position_ledger"):
+            card.evidence.data_missing.append("上一条卡的判断依据缺失，只能对比仓位变化")
+        if lag > 1:
+            card.evidence.data_missing.append(f"上一条卡是 {lag} 个交易日前的")
+
+        narrative = await delta_narrative.run(delta)
+        return delta.model_dump(), narrative
+    except Exception:
+        logger.warning("rhythm_master.delta_failed", exc_info=True)
+        card.evidence.data_missing.append("这次没能对比出上一条卡的变化")
+        return None, None
+
+
+def _build_review(
+    prev_content: dict[str, Any], rows: list[dict[str, object]]
+) -> DeltaReview | None:
+    """昨日复盘：昨日档位 + 昨日上证涨跌幅。取不到就返回 None（整行不渲染）。"""
+    if len(rows) < 2:
+        return None
+    try:
+        close = float(rows[-1]["close"])  # type: ignore[arg-type]
+        prev_close = float(rows[-2]["close"])  # type: ignore[arg-type]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if prev_close == 0:
+        return None
+    pct = (close - prev_close) / prev_close * 100
+    band = ((prev_content.get("rhythm_card") or {}).get("position_band") or {}).get("text") or ""
+    return DeltaReview(
+        prev_target_date=str(prev_content.get("target_date") or ""),
+        prev_position_text=str(band),
+        index_pct_chg=round(pct, 2),
+        up_ratio=None,  # 宽度口径需与 K 线同日，本批未接线 → 整半句不渲染（spec §8.2）
+    )
+
+
 def _build_rhythm_card(
     card: MasterRhythmCard, win: EventWindow, rows: list[dict[str, object]],
     mainline: dict[str, object] | None = None,
     *,
     position_source_hint: str | None = None,
     intraday_factors: IntradayFactors | None = None,
+    delta_payload: dict[str, Any] | None = None,
+    delta_narrative: str | None = None,
 ) -> dict[str, object]:
     """按前端 RhythmCard 契约构造 rhythm_card（2026-09-05 裁决 + 本批主线/仓位接线）。
 
@@ -1098,6 +1184,8 @@ def _build_rhythm_card(
       None = 按 stage_source 归类（旧调用点行为不变）；
     - `intraday_factors`：盘中因子（spec §4.4），仅 midday 非 None；其余时点写 None，
       保证键结构稳定、历史样本可回测；
+    - `delta_payload` / `delta_narrative`：跨日变更归因（spec §10），开关关闭时均为 None；
+    - `mainline_snapshot`：本卡主线事实快照，落库供下一张卡算 delta；
     - `phase_evidence.technical` / `event_high_hint` 为既有契约槽的确定性生产者；
     - `event_window` 已接线（A2）：由 `engine.project_event_window` 投影**全部**已接入
       事件（含 medium），供前端事件日历渲染；
@@ -1330,6 +1418,16 @@ def _build_rhythm_card(
         "conflict": False,
         "branches": branches,
         "data_missing": missing,
+        # 跨日变更归因（spec §10）：默认关 → null；开关打开后由 _build_delta_payload 产出
+        "delta": delta_payload,
+        "delta_narrative": delta_narrative,
+        # 下一张卡算 delta 的输入（必须落库，否则下一张只能比仓位）
+        "mainline_snapshot": {
+            "name": (mainline or {}).get("name"),
+            "excess": (mainline or {}).get("excess"),
+            "strength": (mainline or {}).get("strength"),
+            "state": (mainline or {}).get("state"),
+        },
     }
 
 
@@ -1354,6 +1452,12 @@ async def run(state: AgentState) -> dict[str, object]:
                 "rhythm_master.degraded reason=%s slot=%s target_date=%s",
                 DEGRADED_MODEL, card.refresh_slot, card.target_date,
             )
+        # delta 必须先算完：它会往 card.evidence.data_missing 追加留痕，
+        # 而 _build_rhythm_card 会把这份留痕带进 payload。
+        delta_payload, narrative_text = await _build_delta_payload(
+            card=card, slot=slot, basis_date=card.basis_date,
+            mainline_facts=card.mainline_facts, rows=rows,
+        )
         content = {
             "schema_version": "1.0",
             "target_date": card.target_date,
@@ -1366,6 +1470,8 @@ async def run(state: AgentState) -> dict[str, object]:
                 card, win, rows, card.mainline_facts,
                 position_source_hint=position_source,
                 intraday_factors=intraday_factors,
+                delta_payload=delta_payload,
+                delta_narrative=narrative_text,
             ),
         }
         await node_api.save_analysis_report(

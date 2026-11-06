@@ -280,6 +280,8 @@ class Settings(BaseSettings):
     # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
     scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
+    rhythm_delta_enabled: bool = False
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
     rhythm_mainline_enabled: bool = True
     # 重大事件时间线（Event Entity）物化开关（spec §5A.3/§10.2）：app-api /internal/event-entities
