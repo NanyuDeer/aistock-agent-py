@@ -380,6 +380,7 @@ src/aistock_agent/
 ├── services/
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list / post）
 │   ├── stock_event_detector.py  # 个股事件检测器（event_store.normalize_event 调用；STOCK/UNKNOWN 二值判定，规则可注入股票名称索引）
+│   ├── sector_tagging.py        # 板块标签（板块消息 → 关联个股）：别名词典纯规则打标 + 个股板块名归一（stock_trace sector_news 证据源）
 │   ├── stock_basic_index.py     # 股票名称索引（GET /internal/stocks/basic 拉取全量 A 股名称，最长匹配优先；接口失败降级空索引，不阻塞抓取）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）

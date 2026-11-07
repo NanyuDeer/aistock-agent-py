@@ -42,9 +42,10 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
   仍将该层候选置 supported 时，必须在该候选的 counter_evidence_ids 中引用该反向 source_id；
   未引用时该层候选只能置 weak。
 - sector 候选证据要求：只要上下文中存在板块/行业联动相关 source（如新闻提及该股所属概念/板块联动、
-  sector_fact 板块涨跌幅事实等），sector 候选就必须引用至少一条此类 source 作为支撑证据，
-  并根据联动强度置 supported 或 weak，不得置 insufficient 且留空支撑证据
+  sector_fact 板块涨跌幅事实、sector_news 板块消息等），sector 候选就必须引用至少一条此类 source
+  作为支撑证据，并根据联动强度置 supported 或 weak，不得置 insufficient 且留空支撑证据
   （如"光缆概念活跃但仅为跟涨"→ weak）；
+  sector_news 是板块级消息（不含个股主体），只能用于支撑 sector 层，不得当作公司个体事实引用。
   仅当上下文完全不存在任何板块相关 source 时，才允许 sector 候选为 insufficient。
 - primary_chain_id 指向的链必须标记 role=primary；
   alternative_chain_id 指向的链必须标记 role=alternative。

@@ -12,12 +12,17 @@ import hashlib
 import unicodedata
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 import structlog
 
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.sector_tagging import (
+    expand_sector_names,
+    is_broad_sector_name,
+    tag_sectors,
+)
 from aistock_agent.services.stock_event_detector import detect_stock_event
 
 logger = structlog.get_logger()
@@ -57,6 +62,12 @@ class EventRecord(TypedDict):
     symbol: str
     stock_name: str
     industry: str
+    # 板块标签（标准板块名，纯规则从 title/summary/keywords 计算）：供
+    # stock_trace 按「个股所属板块」召回板块消息（2026-10-16）。
+    sector_tags: list[str]
+    # 按标的读取时的匹配方式（仅在调用方传 sectors 时写入）：
+    # symbol=个股命中 / sector=仅板块命中 / both=两者都命中
+    match_type: NotRequired[str]
     # 个股事件识别标记（第一阶段：STOCK/UNKNOWN 二值 + 规则来源 + 置信度）
     event_scope: str
     event_scope_source: str
@@ -229,6 +240,9 @@ def normalize_event(
     # 个股事件识别标记（STOCK/UNKNOWN 二值；结果始终存在，不依赖 LLM）
     detection = detect_stock_event(title, summary, raw, source)
 
+    # 板块标签：纯规则（别名词典），与个股所属板块求交后供 stock_trace 召回板块消息
+    sector_tags = tag_sectors(f"{title} {summary} {' '.join(involved_keywords)}")
+
     return EventRecord(
         event_id=event_id,
         title=title,
@@ -246,6 +260,7 @@ def normalize_event(
         symbol=symbol,
         stock_name=stock_name,
         industry=industry,
+        sector_tags=sector_tags,
         source_name=source_name,
         event_scope=detection["event_scope"],
         event_scope_source=detection["event_scope_source"],
@@ -395,19 +410,31 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                     event_id=str(ev.get("event_id", ""))[:32],
                 )
                 continue
+            title = str(ev.get("title", ""))
+            summary = str(ev.get("summary", ""))
+            keywords = [
+                str(k) for k in ev.get("involved_keywords", []) if isinstance(k, str)
+            ]
+            stored_tags = ev.get("sector_tags")
+            sector_tags = (
+                [str(tag) for tag in stored_tags if isinstance(tag, str)]
+                if isinstance(stored_tags, list)
+                else []
+            )
+            if not sector_tags:
+                # 存量事件（sector_tags 上线前入库）读时补算，无需回填迁移
+                sector_tags = tag_sectors(
+                    f"{title} {summary} {' '.join(keywords)}"
+                )
             result.append(
                 EventRecord(
                     event_id=str(ev.get("event_id", "")),
-                    title=str(ev.get("title", "")),
-                    summary=str(ev.get("summary", "")),
+                    title=title,
+                    summary=summary,
                     url=str(ev.get("url", "")),
                     impact_score=impact_score,
                     direction=str(ev.get("direction", "neutral")),
-                    involved_keywords=[
-                        str(k)
-                        for k in ev.get("involved_keywords", [])
-                        if isinstance(k, str)
-                    ],
+                    involved_keywords=keywords,
                     source=str(ev.get("source", "")),
                     source_level=str(ev.get("source_level", "C")),
                     content_hash=str(ev.get("content_hash", "")),
@@ -423,6 +450,7 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
                     symbol=str(ev.get("symbol", "")),
                     stock_name=str(ev.get("stock_name", "")),
                     industry=str(ev.get("industry", "")),
+                    sector_tags=sector_tags,
                     event_scope=str(ev.get("event_scope", "UNKNOWN")),
                     event_scope_source=str(ev.get("event_scope_source", "unknown")),
                     event_scope_confidence=_safe_float(
@@ -450,15 +478,75 @@ async def load_event_scrape(score_date: str) -> list[EventRecord]:
         return []
 
 
-async def load_event_scrape_by_symbol(symbol: str, score_date: str) -> list[EventRecord]:
-    """按标的读取当日抓取事件（stock_trace 证据源用）。"""
+def _event_matches_sectors(
+    event: EventRecord,
+    sectors: list[str],
+    expanded_sectors: set[str],
+) -> bool:
+    """判断事件是否属于给定板块（板块消息 → 关联个股）。
+
+    两条路径（任一命中即可）：
+    1. 事件 `sector_tags` 与「个股板块名归一后的标准名集合」求交；
+    2. 板块名本身直接出现在标题/摘要/关键词里 —— 覆盖别名词典未收录的
+       `stock_concept_mapping` 板块名（否则这些股票永远召回不到板块消息）。
+    """
+    tags = {str(tag) for tag in event.get("sector_tags", []) if isinstance(tag, str)}
+    if tags & expanded_sectors:
+        return True
+    text = (
+        f"{event.get('title', '')} {event.get('summary', '')} "
+        + " ".join(str(k) for k in event.get("involved_keywords", []))
+    )
+    return any(len(name.strip()) >= 2 and name.strip() in text for name in sectors)
+
+
+async def load_event_scrape_by_symbol(
+    symbol: str,
+    score_date: str,
+    sectors: list[str] | None = None,
+) -> list[EventRecord]:
+    """按标的读取当日抓取事件（stock_trace 证据源用）。
+
+    Args:
+        symbol: 6 位股票代码；空串时返回当日全部事件（旧行为）。
+        score_date: 事件归属日（YYYY-MM-DD）。
+        sectors: 可选，个股所属板块名（stock_concept_mapping 口径）。传入时额外
+            召回「板块标签命中」的事件，并为每条结果写入 match_type：
+            ``symbol``（个股命中）/ ``sector``（仅板块命中）/ ``both``（两者都命中）。
+
+    不传 sectors 时行为与旧版一致（仅 payload.symbol / involved_keywords 子串匹配）。
+    """
     events = await load_event_scrape(score_date)
     if not symbol:
         return events
     lowered = symbol.lower()
-    return [
-        ev
-        for ev in events
-        if lowered in str(ev.get("payload", {}).get("symbol", "")).lower()
-        or any(lowered in str(k).lower() for k in ev.get("involved_keywords", []))
+    # 宽基/两融/互联互通板块在两条匹配路径上都要剔除：它们几乎覆盖全市场，
+    # 命中结果无法解释个股异动（且字面兜底会把成分股公告全部召回）。
+    effective_sectors = [
+        name for name in (sectors or []) if not is_broad_sector_name(name)
     ]
+    expanded_sectors = (
+        expand_sector_names(effective_sectors) if effective_sectors else set()
+    )
+    result: list[EventRecord] = []
+    for event in events:
+        symbol_hit = (
+            lowered in str(event.get("payload", {}).get("symbol", "")).lower()
+            or any(
+                lowered in str(keyword).lower()
+                for keyword in event.get("involved_keywords", [])
+            )
+        )
+        sector_hit = (
+            _event_matches_sectors(event, effective_sectors, expanded_sectors)
+            if effective_sectors
+            else False
+        )
+        if not symbol_hit and not sector_hit:
+            continue
+        matched = dict(event)
+        matched["match_type"] = (
+            "both" if symbol_hit and sector_hit else "symbol" if symbol_hit else "sector"
+        )
+        result.append(cast(EventRecord, matched))
+    return result

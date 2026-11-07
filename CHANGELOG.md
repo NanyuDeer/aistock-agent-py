@@ -2,6 +2,60 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [junliang] 2026-10-17 — 收紧板块召回：排除宽基板块 + 取消跨概念大扩张
+
+**开发者**: NanyuDeer
+
+### 修复
+
+- `sector_tagging.py` 新增 `is_broad_sector_name`：宽基指数（`*成份股`）、两融、互联互通（沪股通/深股通/港股通）不参与板块归一与召回。
+- `expand_sector_names` 新增跨概念扩张黑名单：`DeepSeek概念` 只代表自身，不再展开到「AI/算力/半导体」「AI应用/办公软件」——否则一只概念股会把所有 AI/宏观新闻（含"人工智能"）召回成板块消息。
+- `load_event_scrape_by_symbol` 在两条匹配路径（标签求交 + 字面兜底）前统一过滤宽基板块。
+
+### 验证
+
+- `test_sector_tagging.py` / `test_event_store_sector_match.py` / `test_event_scrape_query.py` 37 passed；`mypy` 通过。
+- 江淮汽车 600418 重采后板块消息噪声 5 → 0，板块证据变为「换电概念 / 飞行汽车(eVTOL) / 智能座舱」。
+
+## [junliang] 2026-10-16 — 板块消息「关联到个股」：事件板块标签 + 按板块召回
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `services/sector_tagging.py`：
+  - `tag_sectors(text) -> list[str]`：基于人工别名 `data/sector_aliases.json`（+ 运行时 learned，`sector_aliases_store.load_merged_aliases` 单点合并）构建「标准名 / 别名 / 标准名「/」分段 → 标准名集合」反向索引，对事件文本打**标准板块名**标签。**纯规则、无 LLM、无 DB**；短 ASCII 泛化词守卫（`AI` 不参与，`5G` 这类含数字的短词保留）；结果去重、字典序稳定、上限 8 个。
+  - `expand_sector_names(names) -> set[str]`：把个股所属板块名（如「光模块」）归一到「自身 + 所属标准名」，与事件标签求交。
+- 测试 `tests/unit/test_sector_tagging.py`（6 + 4 例）、`tests/unit/test_event_store_sector_match.py`（6 例）。
+
+### 变更
+
+- `services/event_store.py`：
+  - `EventRecord` 增 `sector_tags: list[str]` 与 `match_type: NotRequired[str]`。
+  - `normalize_event()` 计算 `sector_tags`（title + summary + involved_keywords）。
+  - `load_event_scrape()` 读取存量 `sector_tags`，缺失/空时**读时补算**（无需回填迁移）。
+  - `load_event_scrape_by_symbol(symbol, score_date, sectors=None)`：传入 `sectors` 时额外召回「板块标签命中」的事件，并写 `match_type`（`symbol` / `sector` / `both`）；另含「板块名直接出现在标题/摘要/关键词」的字面兜底（覆盖别名词典未收录的 `stock_concept_mapping` 板块名）。不传 `sectors` 时匹配语义不变。
+- `api/routes.py`：`GET /api/agent/event/scrape-by-symbol/{symbol}` 增可选 query `sectors`（逗号分隔，≤10 项、单项 2~32 字符，去重保序；非法值忽略不 400）。
+- `schemas/stock_trace.py`：`SourceKind` 增 `sector_news`。
+- `services/insight_report.py`：`_KIND_LABELS` 增 `sector_news: "板块消息"`。
+- `prompts/workers/stock_trace.py`：sector 候选证据要求由「sector_fact 板块涨跌幅」扩为「sector_fact 或 sector_news 板块消息」，并明确 `sector_news` **只能支撑 sector 层、不得当作公司个体事实**。
+
+### 设计说明
+
+- **归属规则**：同一事件既命中 `symbol` 又命中板块时写 `match_type='both'`，由 app-api 归 company 域（news）；sector 域只收「仅板块命中」，**同一事件不跨域重复计数**。
+- **刻意限制**：`sector_news` 不参与 `confirmed` 的独立事实门槛、也不作为反向事实强制反证 —— 新闻方向可靠性低于行情事实，保持弱证据定位。
+- **采集侧不变**：`scrape_event_triggered` 仍只按 symbol 过滤入库，不按板块展开写库（避免写放大）。
+
+### 测试
+
+- `pytest tests/unit/test_sector_tagging.py tests/unit/test_event_store_sector_match.py tests/unit/test_event_scrape_query.py` → **27 passed**
+- `pytest tests/unit` 全量 → **3502 passed / 3 failed**（均为环境预存问题：`langgraph.checkpoint.redis` 缺失 2 例、`test_config` 读取本机 `.env` 的隧道 Redis URL 1 例，与本次改动无关）
+- `ruff check`（改动文件）All checks passed；`mypy`（改动文件）no issues
+
+### 文档
+
+- `AGENTS.md`：stock_trace 段落末尾新增 2026-10-16 条目；`README.md` services 树补 `sector_tagging.py`
+
 ## [junliang] 2026-10-07 — AI 异动解读「思考流式 + 速览/详情并行」（Task 1-9）+ 归因失败可观测与容错修复
 
 **开发者**: yueqili778-arch

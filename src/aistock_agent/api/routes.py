@@ -107,6 +107,26 @@ def _validate_scrape_date(date_str: str) -> str:
     return date_str
 
 
+def _parse_sectors_param(sectors: str | None) -> list[str]:
+    """解析可选的 ``sectors`` 查询参数（逗号分隔板块名）。
+
+    加性参数：非法值一律忽略而不是 400 —— 板块名是调用方的展示口径，
+    校验失败不应让 stock_trace 证据读取整条失败。规则：最多 10 项、单项
+    长度 2~32、去重保序。
+    """
+    if not sectors:
+        return []
+    parsed: list[str] = []
+    for item in sectors.split(","):
+        name = item.strip()
+        if not (2 <= len(name) <= 32) or name in parsed:
+            continue
+        parsed.append(name)
+        if len(parsed) >= 10:
+            break
+    return parsed
+
+
 def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
     """QA runner 必须显式指定固定上海日期，禁止回退到当天。"""
     if not body or "report_date" not in body:
@@ -850,12 +870,18 @@ async def event_scrape_list(date: str) -> dict[str, object]:
 
 
 @router.get("/event/scrape-by-symbol/{symbol}")
-async def event_scrape_by_symbol(symbol: str, date: str) -> dict[str, object]:
+async def event_scrape_by_symbol(
+    symbol: str, date: str, sectors: str | None = None
+) -> dict[str, object]:
     """按标的读取当日抓取事件（stock_trace 证据源用）。
 
     URL 参数：
         symbol: 6 位股票代码（必填）。
         date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+        sectors: 可选，个股所属板块名（逗号分隔，如 ``半导体,光模块``）。
+            传入时额外召回「板块标签命中」的事件（板块消息 → 关联个股），
+            并为每条结果写入 ``match_type``（symbol/sector/both）。
+            非法值（空项/超长/超量）按忽略处理，不返回 400。
     返回: {"events": [EventRecord, ...]}；按 payload.symbol / involved_keywords
     子串过滤（"000" 类短符号可能误命中多股，对 stock_trace 证据源可接受，
     Task 2 评审备注）。
@@ -865,7 +891,8 @@ async def event_scrape_by_symbol(symbol: str, date: str) -> dict[str, object]:
     )
 
     date = _validate_scrape_date(date)
-    events = await load_event_scrape_by_symbol(symbol, date)
+    sector_names = _parse_sectors_param(sectors)
+    events = await load_event_scrape_by_symbol(symbol, date, sector_names or None)
     return {"events": events}
 
 
