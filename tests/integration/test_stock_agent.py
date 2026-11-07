@@ -1,7 +1,8 @@
 """stock_agent run() 单元测试 — 个股综合分析
 
 mock create_react_agent（不依赖真实 LLM/网络），验证：
-- 工具集绑定正确（get_quote, get_capital_flow, get_profit_forecast, search_cls_news）
+- 工具集绑定正确（get_quote, get_capital_flow, get_profit_forecast, search_cls_news,
+  get_performance_report）
 - SystemMessage 注入（内容为 STOCK_ANALYST_PROMPT）
 - final_response 提取（取最后一条 AI 回复）
 - symbol 缺失时返回提示文本（入口校验）
@@ -19,7 +20,14 @@ _CREATE_REACT_AGENT = "aistock_agent.agents.workers.stock.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.stock.get_deep_think"
 
 # 期望绑定的工具集（集合断言，不依赖顺序）
-EXPECTED_TOOL_NAMES = {"get_quote", "get_capital_flow", "get_profit_forecast", "search_cls_news"}
+# d3f6930 起 stock 新增业绩报告查询工具 get_performance_report（registry 正规注册）
+EXPECTED_TOOL_NAMES = {
+    "get_quote",
+    "get_capital_flow",
+    "get_profit_forecast",
+    "search_cls_news",
+    "get_performance_report",
+}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -31,7 +39,7 @@ def _make_mock_agent(messages: list) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_stock_agent_tools_bound_correctly():
-    """create_react_agent 被调用时 tools 参数为正确的 4 个工具。"""
+    """create_react_agent 被调用时 tools 参数为正确的工具集。"""
     mock_agent = _make_mock_agent([AIMessage(content="分析完成")])
     with patch(_GET_DEEP_THINK, return_value=MagicMock()):
         with patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create:

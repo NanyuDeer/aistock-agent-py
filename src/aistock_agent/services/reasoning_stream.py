@@ -21,7 +21,7 @@ REASONING_TIMEOUT_SEC = 2.0
 
 
 async def stream_reasoning_text(
-    sink: Callable[[dict], Awaitable[None]],
+    sink: Callable[[dict[str, object]], Awaitable[None]],
     *,
     prompt: str,
     node: str,

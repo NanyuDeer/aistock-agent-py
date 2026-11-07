@@ -27,7 +27,7 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
 | 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
-| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density） | 无（代码管线） | P0（中台底座） |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density；**Phase-5 外围资讯标记 2026-10-16**：采集层新增金十快讯源（fail-safe、仅当日、逐条日期过滤）；`event_scope` 由 STOCK/UNKNOWN 扩为 STOCK/MARKET/UNKNOWN（单一裁决 `resolve_event_scope`），新增 `event_origin` 三键（单一真源 `derive_event_origin`）；评分口径收敛到 `event_scoring`（`apply_source_score`，peripheral 恒 neutral）；外围资讯（MARKET+peripheral）在 `_trigger_conduction` 跳过事件传导/GI（reason=peripheral_event），但保留在事件库；大盘归因链 root 增 `peripheral_events` 通道、children 匹配池则剔除外围。**已知边界**：晨报兜底重放与手动触发两条旁路未做外围门控，列入下批待办） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
@@ -35,7 +35,9 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 
 > **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
 >
-> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；收盘基准错峰晚于 sentiment_temp（15:45）。
+> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；sentiment_temp 已由 15:45 移至 **17:00**（close-snapshot 未就绪时 10/20 分钟重试，见下），16:05 收盘基准读取的是**截至前一交易日**的温度归档序列。
+>
+> **仓位口径同源 + 事件封顶（2026-11-03）**：morning/midday 沿用基准卡档位时，`position_band.text` 一并继承（`MasterRhythmCard.inherited_position_text`，优先级：中性沿用降级 > 继承的基准仓位 > 本地 `derive_position_text`），修复 11-02「档位=当日基准、仓位=前一日 K 线重算」的跨日错配；**事件当期（d=0）结果未落档时仍统一封顶「轻仓~三成」**——本地 derive 与继承文案同过该闸门（`engine.cap_position_text_on_event_no_result`），基准卡生成后才入库的事件不会因「沿用」被放过。
 >
 > **边界（2026-09-14 spec §10 / S1 未闭环）**：是否引入「仅有新事件才刷新」的事件门控属产品口径，尚未裁决；当前 morning/midday 仍按时点无条件执行，但**不再无条件改写主档位**。
 >
@@ -89,14 +91,15 @@ START → supervisor(quick_think, 意图路由)
 定时链路（APScheduler, 非LangGraph图内边）：
   07:00 impact_sectors_precompute（未来事件影响板块预计算，2026-09-24：calendar + scheduled/upcoming + impact_sectors 列为空的事件，`semantic_match_industries`（KG 行业向量，阈值 0.7）对 title+summary 匹配 Top3 写回 POST /internal/event-entities；宏观事件无可靠行业保持 [] 不 LLM 强猜；排在 app-api Calendar 物化 cron（06:40）之后，时间线 impactSectors 兜底数据源）
   08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
+  08:30/12:00/18:00/22:00 event_scrape_non_trading（**非交易日**档，2026-10-14：cron `30 8,12,18,22 * * *`；反向守卫——交易日跳过（`non_trading_event_scrape_skipped_trading_day`）、非交易日执行 `run_event_scrape("intraday", allow_latest_fallback=False)`，禁用跨日 `/internal/news/latest` 兜底防上一交易日消息重入；交易日 Job 守卫与行为完全不变，二者互斥）
   08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
   12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）；午后前瞻输出 opportunities 关键词（4-5 个 ≤8字）+ risks 短词（schema 2.1）
   12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
   15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
-  15:45 sentiment_temp（短线情绪温度计算，冰点≤20 触发 quick_think 预判，落盘 docs/agent-outputs/sentiment，次日晨报引用）
-  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；错峰晚于 sentiment_temp 15:45；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
+  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；早于 sentiment_temp 17:00，故当日温度次日才进入序列；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
   16:10 attribution_feedback（溯源弱反馈观测层，Task 7.1 / spec §13.3：聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表；**默认 `attribution_feedback_mode=observe`，只落建议、不改写溯源判定与预判、不应用权重**；`off` 可运维关闭；置于 16:00 prediction_validate 与 16:05 prediction_stats 之后。**背离报告（2026-09-18 补）**：`scripts/attribution_feedback.py` 输出第二段「溯源背离报告」（`divergence_entries` 口径 + `render_divergence_report`）——只列样本充分且命中率越阈值的单元（降权侧优先 → 背离强度 → 样本量 → unit_key），观望/样本不足只计数；含样本数与板块抽样，**只读审计产物，不改变溯源权重**；看"某板块"维度条目用 `--unit sector`）
+  17:00 sentiment_temp（短线情绪温度计算，close-snapshot 未就绪时 10/20 分钟重试共 3 次，落盘 docs/agent-outputs/sentiment，次日晨报/节奏卡引用；cron `0 17 * * 0-4`）
   次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
   12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
   18:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → **逐板块并行** run_sector_trace（`persist_report=False`，不自写报告）→ gather 后 `save_sector_trace_report` **一次**写 report_type="sector_trace" 当天报告（Spec D 板块溯源，2026-09-02；`display_report.sectors` = 当天全部已溯源板块，缺省单板块自写路径不变；2026-09-18 写入收敛：修同日多板块同键 upsert 互相覆盖、报告层只剩 1 个板块）；2026-09-03 组长裁决 20:30→18:30）
@@ -631,6 +634,19 @@ pm2 logs aistock-agent --lines 50
   - **已知未覆盖**：占死信约 **85%** 的 `NODE_WRITEBACK_FAILED` 仍不带明细——`write_result` 失败时返回 `None` 而非抛异常，确无可捕异常文本；若要覆盖需改造 `write_result` 以回报 HTTP 状态/响应摘要（尚未决策）。
 - **板块消息 → 关联个股（2026-10-16，`sector_news` 证据域）**：事件库里的板块级新闻既无 `symbol` 也从不填 `industry`，`load_event_scrape_by_symbol` 永远匹配不到，导致 stock_trace 的 sector 域只能引用板块涨跌幅事实。改动：① 新增 `services/sector_tagging.py`（`tag_sectors` / `expand_sector_names`，**纯规则**：人工别名字典反向索引 + 标准名「/」分段 + 短 ASCII 泛化词守卫，无 LLM/DB）；② `EventRecord` 增 `sector_tags`（`normalize_event` 计算；`load_event_scrape` 对存量事件**读时补算**，无需回填）与 `match_type`（`NotRequired`）；③ `load_event_scrape_by_symbol(symbol, score_date, sectors=None)` 传入 `sectors` 时额外召回「板块标签命中」的事件，并写 `match_type`（`symbol`/`sector`/`both`）；不传时行为逐字不变；④ 路由 `GET /api/agent/event/scrape-by-symbol/{symbol}` 增可选 `sectors`（逗号分隔，≤10 项、单项 2~32，非法忽略不 400）；⑤ `SourceKind` 增 `sector_news`，`_KIND_LABELS` 映射「板块消息」，提示词允许 sector 候选引用它并禁止当公司个体事实。**归属规则**：`both` 事件归 company 域（news），sector 域只收「仅板块命中」，同一事件不重复计数。**刻意限制**：`sector_news` 不参与 `confirmed` 独立事实门槛、也不作为反向事实强制反证（新闻方向可靠性低于行情事实）。测试 `tests/unit/test_sector_tagging.py` + `test_event_store_sector_match.py`。
 - **板块召回收紧（2026-10-17）**：首次端到端验证发现 5 条 `sector_news` 全为噪声，根因有二：① 宽基板块（上证180成份股/两融/沪股通）几乎覆盖全市场，字面兜底会把成分股公告全部召回；② `DeepSeek概念` 同时是「AI/算力/半导体」「AI应用/办公软件」的别名，扩张后一只概念股会召回所有 AI/宏观新闻（含"人工智能"）。改动：`sector_tagging.py` 新增 `is_broad_sector_name`（名称含「成份股/成分股」+ 显式名单）与 `_NO_EXPANSION_NAMES`（`DeepSeek概念` 只保留自身）；`load_event_scrape_by_symbol` 在标签求交与字面兜底两条路径前统一过滤宽基板块。app-api 侧同步新增 `isBroadSectorName` / `selectSectorBoardNames`（排除宽基 + 按成分股数升序取 3），两侧宽基名单需同步维护。
+
+### 调度器心跳与 readiness（2026-11-03，P0 误判收口）
+
+- **心跳不只写日志**：`scheduler_heartbeat`（每 2 分钟）同时写进程内时间戳 `_scheduler_last_heartbeat`；`start_scheduler()` 成功后写 `_scheduler_started_at`。`GET /health/ready` 的 `scheduler` 检查项：调度启用但未 start → `error: scheduler not started`；启动后首心跳未到 → `pending`；心跳超过 7 分钟（`HEARTBEAT_STALE_SECONDS=420`）→ `error: heartbeat stale`；正常 → `ok (Ns)`；`SCHEDULER_ENABLED=false` / `QA_MODE=true` → `skipped`。
+- **为什么**：2026-10-19 16:05 服务器磁盘写满（ENOSPC）使 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录，但调度实际持续运行（每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物照常落盘）。**“日志无心跳”不能证明调度停摆**，必须看 `/health/ready` 的 `scheduler`。
+- **misfire grace**：心跳 job 必须先于 misfire 循环注册（或显式 `misfire_grace_time=3600`）。默认 1s 会让诊断 job 在 event loop 繁忙时被跳过（2026-10-22 日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
+
+### 事件地域判定与复盘落库（2026-11-04）
+
+- **jin10 是混合源，不是整体外围源**：`services/event_origin.py` 的 `_PERIPHERAL_SOURCES` 只保留 `global_markets`；`jin10` 归入 `_MIXED_SOURCES`，按内容重判：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（**不得回落 peripheral**）。
+- **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存的 `event_origin`，按内容重新判定。原因是 2026-10-16 上线的整源白名单已把大量境内 jin10 快讯写成 `peripheral`，仅改分类器不重算存量仍会复发。
+- **为什么必须修**：复盘 `_validate_origin_consumption` 规定 peripheral 证据只能支撑全球风险/市场定位类归因；误标的境内证据会让整份报告降级且**不落库**（quick 3 次重试后前端显示“复盘报告未能完成”）。2026-11-04 生产事故即 `沪深两市成交额`、`科创半导体ETF`、`长鑫科技回购` 三条境内证据被标 peripheral。
+- **验证口径**：改完不止看单测，要确认 2026-11-04 复盘重新生成后 `/api/agent/report/review/2026-11-04` 返回非空、`agent_analysis_reports` 出现 `report_type='review'` 行。
 
 ## 关键约束
 

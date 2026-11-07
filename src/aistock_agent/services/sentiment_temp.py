@@ -336,7 +336,11 @@ async def compute_and_persist_sentiment_temp(
             return None
 
         root = output_dir or settings.sentiment_output_dir
-        close_data = await node_api.get("/internal/market/close-snapshot")
+        # 必须按 report_date 取快照：不带 date 时 Node 只返回"今天"的实时快照，
+        # 盘中必被 15:30 门禁拦（409），且历史日期永远补不回来（2026-11-03 修复）。
+        close_data = await node_api.get(
+            f"/internal/market/close-snapshot?date={report_date}"
+        )
         if not isinstance(close_data, dict) or close_data.get("status") != "complete":
             logger.warning("sentiment_temp_snapshot_missing", date=report_date)
             return None

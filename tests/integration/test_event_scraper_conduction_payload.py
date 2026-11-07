@@ -18,7 +18,7 @@ from aistock_agent.services.event_store import EventRecord
 def _rec(app_event_id=None, app_event_status=None) -> EventRecord:
     return EventRecord(
         event_id="2026-09-15-abcdef1234567890",
-        title="美联储议息",
+        title="半导体板块异动",
         summary="9/17",
         url="http://x",
         impact_score=5,

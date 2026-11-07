@@ -16,12 +16,12 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from datetime import datetime
 from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from aistock_agent.constants import SSEEventType
@@ -42,6 +42,7 @@ from aistock_agent.services.llm import get_deep_think, get_quick_think
 from aistock_agent.services.reasoning_stream import stream_reasoning_text
 from aistock_agent.state.schema import AgentState
 from aistock_agent.tools.registry import get_tools
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
 
 logger = structlog.get_logger()
@@ -114,7 +115,7 @@ def _build_master_input(symbol: str, reports: tuple[str, str, str]) -> str:
 请按输出格式生成完整研判报告。"""
 
 
-async def _invoke_master(llm, prompt: str, user_input: str) -> str:
+async def _invoke_master(llm: ChatOpenAI, prompt: str, user_input: str) -> str:
     """跑一次 Master（无工具 ReAct agent），返回原始文本。"""
     agent = create_react_agent(llm, [])
     result = await agent.ainvoke({
@@ -277,7 +278,8 @@ def _cache_alert_result(state: dict[str, object], final_response: str) -> None:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+    # 兜底日期用上海自然日（报告日，非展示时间戳）
+    report_date = str(state.get("report_date") or shanghai_today().isoformat())
     try:
         from aistock_agent.services.report_cache import set_report
         # content 中记录 symbol，避免同日多股票 alert 互相覆盖后无法区分
@@ -433,7 +435,7 @@ async def stream(state: dict[str, object]) -> AsyncGenerator[dict[str, object], 
         )
         _cache_alert_result(dict(state), raw_json)
 
-        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        report_date = str(state.get("report_date") or shanghai_today().isoformat())
         try:
             await node_api.save_analysis_report(
                 report_type="alert",
@@ -508,12 +510,15 @@ async def run(state: AgentState) -> dict[str, object]:
         # 2026-09-30 合并前必修：gather 需 return_exceptions —— 详情走 get_deep_think
         # （更慢、更易失败），若任一失败即整体异常，速览已成功的结果会被连带丢弃；
         # 改为逐侧降级为空值并打 warning，再交由 _merge_report 的 or 兜底合并。
-        results = await asyncio.gather(
+        # 换用独立变量名：上面的 results 是 3 元组（子 Agent 三侧），这里是 2 元组
+        # （速览/详情）。复用同一变量会让静态检查仍按前者的形状推断，报
+        # assignment / misc（「期望 2 个值，实际提供 3 个」）——运行时无影响，属类型误报。
+        master_results = await asyncio.gather(
             _run_master_preview(str(symbol), cycle_label, master_reports),
             _run_master_detail(str(symbol), cycle_label, master_reports),
             return_exceptions=True,
         )
-        preview_res, detail_res = results
+        preview_res, detail_res = master_results
         if isinstance(preview_res, BaseException):
             logger.warning(
                 "alert_master_preview_failed",
@@ -533,7 +538,7 @@ async def run(state: AgentState) -> dict[str, object]:
         display_report = _merge_report(preview_fields, detail_fields)
 
         # 供后续 save 分支使用（保持原有变量语义）
-        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        report_date = str(state.get("report_date") or shanghai_today().isoformat())
         trigger_source = state.get("trigger_source")
 
         final_response = json.dumps(

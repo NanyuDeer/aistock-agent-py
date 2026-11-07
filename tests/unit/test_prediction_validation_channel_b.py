@@ -77,8 +77,9 @@ async def test_collect_confirmations_prefers_root_and_skips_primary(monkeypatch)
     assert target is not None
     root_item = _confirmation("183", "量能萎缩后回踩")
     trace = _minimal_trace([root_item], [_confirmation("999", "不应被取到")])
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
     monkeypatch.setattr(
-        "aistock_agent.skills.prediction_validation.node_api.list_analysis_reports",
+        "aistock_agent.services.data_client.NodeApiClient.list_analysis_reports",
         AsyncMock(return_value=[_review_report(trace)]),
     )
     probed: list[dict[str, object]] = []
@@ -106,7 +107,7 @@ async def test_collect_confirmations_falls_back_to_primary_when_root_empty(monke
     primary_item = _confirmation("999", "降息预期兑现")
     trace = _minimal_trace([], [primary_item])
     monkeypatch.setattr(
-        "aistock_agent.skills.prediction_validation.node_api.list_analysis_reports",
+        "aistock_agent.services.data_client.NodeApiClient.list_analysis_reports",
         AsyncMock(return_value=[_review_report(trace)]),
     )
     probed: list[dict[str, object]] = []

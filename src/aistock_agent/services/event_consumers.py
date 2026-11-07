@@ -647,17 +647,21 @@ class SectorTraceConsumer(BaseConsumer):
                 from aistock_agent.services.attribution_chain import (
                     AttributionChainStore,
                     assemble_attribution_chain,
+                    load_chain_peripheral_events,
                     load_chain_warehouse_events,
                 )
 
                 # 链事件层（spec §3.2-4）：当日中台存量事件读一次，供全部板块做
-                # "中台优先"匹配（检索补漏由各板块溯源快照自带的定向检索来源承担）
+                # "中台优先"匹配（检索补漏由各板块溯源快照自带的定向检索来源承担）；
+                # 外围事件单独读出，仅走 root.peripheral_events 通道（不进 children 池）。
                 warehouse_events = await load_chain_warehouse_events(report_date)
+                peripheral_events = await load_chain_peripheral_events(report_date)
                 chain = assemble_attribution_chain(
                     report_date,
                     {"report": report},
                     results,
                     warehouse_events=warehouse_events,
+                    peripheral_events=peripheral_events,
                 )
                 await AttributionChainStore().save(report_date, chain)
             except Exception as exc:  # noqa: BLE001 — 链保存失败不阻断（溯源已落库）

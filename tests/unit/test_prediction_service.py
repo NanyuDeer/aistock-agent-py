@@ -884,12 +884,13 @@ async def test_run_chat_prediction_restores_due_dates_and_persists(monkeypatch):
     )
     saved: dict[str, object] = {}
 
-    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+    async def _fake_save(_self, payload: dict[str, object]) -> dict[str, object]:
         saved.update(payload)
         return {"id": 1, **payload}
 
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
     monkeypatch.setattr(
-        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
+        "aistock_agent.services.data_client.NodeApiClient.save_prediction", _fake_save
     )
     llm, structured_ainvoke = _make_chat_llm(prediction=_chat_prediction(_VALID_LLM_JSON))
     with patch(
@@ -918,12 +919,12 @@ async def test_run_chat_prediction_stock_target_routed_to_pending(monkeypatch):
     )
     saved: dict[str, object] = {}
 
-    async def _fake_save(payload: dict[str, object]) -> dict[str, object]:
+    async def _fake_save(_self, payload: dict[str, object]) -> dict[str, object]:
         saved.update(payload)
         return {"id": 1, **payload}
 
     monkeypatch.setattr(
-        "aistock_agent.services.prediction_service.node_api.save_prediction", _fake_save
+        "aistock_agent.services.data_client.NodeApiClient.save_prediction", _fake_save
     )
     llm, structured_ainvoke = _make_chat_llm(
         prediction=PredictionResult(

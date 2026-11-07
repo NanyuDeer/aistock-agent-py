@@ -556,6 +556,15 @@ async def test_guardrail_and_light_do_not_persist():
         for ctx in _patch_common(MagicMock(), qa_llm, synth_llm):
             stack.enter_context(ctx)
         stack.enter_context(
+            # 固定交易时段，去掉对运行时段/交易日历的依赖：非交易时段时
+            # synth_answer 会前置"今日尚未开盘…"提示（3091e6e，有意行为），
+            # 破坏 startswith 语义
+            patch(
+                "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+                return_value=("trading", ""),
+            )
+        )
+        stack.enter_context(
             patch("aistock_agent.skills.stock_snapshot.get_quote", new=fake_get_quote)
         )
         stack.enter_context(patch.object(node_api, "save_analysis_report", fake_save))

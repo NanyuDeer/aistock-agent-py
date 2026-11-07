@@ -37,6 +37,15 @@ dependencies = [
     "python-dotenv==1.1.0",
     "structlog==25.3.0",
 
+    # 时区数据库（显式声明，**勿删**）：utils/date 的 shanghai_today()/shanghai_now()
+    # 依赖 zoneinfo.ZoneInfo("Asia/Shanghai")。Linux 上 zoneinfo 读系统时区库
+    # （/usr/share/zoneinfo），而 tzdata 在依赖树里只带 sys_platform == 'win32' 标记
+    # （由 pandas / tzlocal 传递而来）—— 即 **Linux 下不会被安装**。若运行环境恰好
+    # 没有系统时区库（如未装 tzdata 的精简容器），ZoneInfo(...) 会抛
+    # ZoneInfoNotFoundError。故此处置为**无条件依赖**，保证任何环境都有时区数据
+    # （代价约 700KB）。若要改回条件依赖，须先确认所有部署环境都自带系统时区库。
+    "tzdata>=2026.2",
+
     # 定时调度
     "apscheduler==3.10.4",      # AsyncIOScheduler — 交易日定时任务（晨报/复盘/快照/迭代）
 

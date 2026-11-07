@@ -248,6 +248,11 @@ def _sector_handle_patches(*, cascade: AsyncMock, store_patch: object) -> Iterat
             "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
             AsyncMock(return_value=[]),
         ),
+        # Task 8：外围事件通道（root.peripheral_events），同样避免真实读库
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_peripheral_events",
+            AsyncMock(return_value=[]),
+        ),
         store_patch,
     ):
         yield
@@ -341,6 +346,10 @@ async def test_handle_passes_warehouse_events_to_chain_assembly() -> None:
             "aistock_agent.services.attribution_chain.load_chain_warehouse_events",
             AsyncMock(return_value=warehouse),
         ) as mock_load,
+        patch(
+            "aistock_agent.services.attribution_chain.load_chain_peripheral_events",
+            AsyncMock(return_value=[]),
+        ),
         patch(
             "aistock_agent.services.attribution_chain.assemble_attribution_chain",
             MagicMock(

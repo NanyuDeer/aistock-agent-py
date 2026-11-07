@@ -35,7 +35,7 @@ async def test_after_close_produces_master_card():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_fear_greed",
         AsyncMock(return_value={"index": 65}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=await _window_cls()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
@@ -68,7 +68,8 @@ async def test_run_output_contains_rhythm_card_contract():
     with patch("aistock_agent.agents.workers.rhythm_master._compose_card") as cc, \
          patch("aistock_agent.agents.workers.rhythm_master.node_api") as api:
         from aistock_agent.schemas.rhythm_master import MasterRhythmCard, RhythmEvidence
-        # _compose_card 现返回三元组 (MasterRhythmCard, rows, win)
+        # _compose_card 现返回五元组
+        # (MasterRhythmCard, rows, win, position_source, intraday_factors)
         win = type(
             "W",
             (),
@@ -84,6 +85,8 @@ async def test_run_output_contains_rhythm_card_contract():
             ),
             [],
             win,
+            None,
+            None,
         )
         api.save_analysis_report = AsyncMock(return_value={"id": 1})
         res = await run(state)
@@ -114,6 +117,8 @@ async def test_run_persisted_content_has_rhythm_card_branches():
             ),
             [{"close": 3000.0, "amount": 100.0, "high": 3010.0, "low": 2990.0}] * 60,
             type("W", (), {"events": [], "high_events": [], "source_missing": False})(),
+            None,
+            None,
         )
         api.save_analysis_report.return_value = {"id": 2}
         await run(state)

@@ -12,6 +12,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
+from aistock_agent.schemas.rhythm_master import CandidateOutlook
 from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
@@ -72,29 +73,29 @@ def build_mainline_notes(
 
     取数失败（路由非 200 / 网络异常 → None）与数据不足（行数 < MA20_MIN_BARS）
     是两类不同根因，混写会把排查方向带偏——2026-09-19 生产实测：Python 传 ISO 日期
-    致路由恒 400，却被写成"序列不足 5"，使团队误判为数据问题。`fetch_failed == 0`
-    时文案与既有实现逐字一致（零回归）。
+    致路由恒 400，却被写成"5 个板块数据太短"，使团队误判为数据问题。四类根因
+    （代码对不上 / 名字不符 / 数据太短 / 取数失败）逐项列出，不合并成一句笼统归因。
     """
     notes: list[str] = []
     if name_skipped:
-        notes.append(f"主线候选名称校验不通过（{name_skipped} 个，已剔除）")
+        notes.append(f"有 {name_skipped} 个板块名字对不上，已剔除")
     if fetch_failed:
-        notes.append(f"主线候选取数失败（{fetch_failed} 个）")
+        notes.append(f"有 {fetch_failed} 个板块数据取不到")
     if valid_count < min_candidates:
         detail = (
-            f"有效候选 {valid_count}/{min_candidates}；"
-            f"代码未命中 {code_skipped}、名称不符 {name_skipped}、序列不足 {thin_skipped}"
+            f"{code_skipped} 个代码对不上、{name_skipped} 个名字不符、"
+            f"{thin_skipped} 个数据太短"
         )
         if fetch_failed:
-            detail += f"、取数失败 {fetch_failed}"
-        notes.append(f"主线候选不可用（{detail}）")
+            detail += f"、{fetch_failed} 个取数失败"
+        notes.append(
+            f"主线板块不够用（只凑到 {valid_count} 个，至少需要 {min_candidates} 个）：{detail}"
+        )
     # 入库门槛（MA20_MIN_BARS）与可评分门槛（RET_WINDOW+1）是两道不同语义的闸门：
     # 恰好 20 根的候选能进 valid、却算不出超额（_excess_pct 需 window+1 根）→ 会被
     # 静默丢弃并让最终文案误报"候选齐备但无清晰主线"。此处独立留痕以拆开归因。
     if unscorable:
-        notes.append(
-            f"候选不可评分（{unscorable} 个，K 线不足 {RET_WINDOW + 1} 根）"
-        )
+        notes.append(f"有 {unscorable} 个板块 K 线太短，算不出超额")
     return notes
 
 
@@ -266,3 +267,30 @@ def judge_mainline(
         return hit
     return {"state": "none", "name": None, "strength": None,
             "excess": None, "data_date": None, "attention": "候选齐备但无清晰主线"}
+
+
+def rank_candidates(
+    candidates: list[dict[str, Any]],
+    index_pct_chgs: list[float],
+    *,
+    ret_window: int = RET_WINDOW,
+    limit: int = 3,
+) -> list[CandidateOutlook]:
+    """主线候选排名（因果输出 spec §6.4）：按 ret_window 日超额降序，最多 `limit` 个。
+
+    与 `judge_mainline` 同源：同样走 `_pool_best`（nav 换算 + 超额 + 降序），
+    只做展示层截断——**不改判据、不影响主线成立与否**。供变奏观察点的
+    「候选池前 3 名」使用：只给「最高 +0.8」用户无代入感，给出是谁在领先才有。
+
+    候选不足 `limit` → 有几个返回几个（不补位）；无候选或全算不出超额 → []。
+    """
+    if limit <= 0:
+        return []
+    # 调用方可能传「取数后全量」而非 judge_mainline 内部的 valid 子集；
+    # 无 pct_chgs 的条目直接跳过（与 _excess_pct「数据不足 → None」同语义）。
+    pool = [c for c in candidates if c.get("pct_chgs")]
+    scored = _pool_best(pool, nav_from_pct(index_pct_chgs), ret_window)
+    return [
+        CandidateOutlook(name=str(c["name"]), excess=round(excess, 2))
+        for c, excess in scored[:limit]
+    ]

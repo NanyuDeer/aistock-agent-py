@@ -27,13 +27,22 @@ WEAK_NEGATIVE = ("利空", "下滑", "亏损", "下调", "看空", "回落", "�
 NEUTRAL_CONTEXT = ("休市", "节假日", "放假", "公告提醒", "风险提示", "澄清")
 
 
-def apply_rule_score(raw: dict[str, Any], *, source: str) -> dict[str, Any]:
+def apply_rule_score(
+    raw: dict[str, Any], *, source: str, origin: str | None = None
+) -> dict[str, Any]:
     """按规则词表为 raw 就地设置 impact_score/direction 并返回 raw。
 
+    origin == "peripheral"（外围资讯）时跳过 A 股强/弱词表、方向恒 neutral
+    （impact 保留既定字段/金十档位）。
     - 已有有效评分（impact_score 非 0）时不覆盖（eastmoney 的 ai_impact
       映射优先级更高）。
     - NEUTRAL_CONTEXT 判定优先于强/弱词，避免非事件语境误判 5 分。
     """
+    if origin == "peripheral":
+        raw["direction"] = "neutral"
+        if int(raw.get("impact_score", 0) or 0) == 0:
+            raw["impact_score"] = 1
+        return raw
     try:
         existing = int(raw.get("impact_score", 0) or 0)
     except (TypeError, ValueError):
@@ -64,4 +73,32 @@ def apply_rule_score(raw: dict[str, Any], *, source: str) -> dict[str, Any]:
         return raw
     raw["impact_score"] = 1
     raw["direction"] = "neutral"
+    return raw
+
+
+def apply_source_score(
+    raw: dict[str, Any], *, source: str, origin: str | None = None
+) -> dict[str, Any]:
+    """全源方向/评分分发（单一真源）：global_markets / eastmoney / 其余。"""
+    if source == "global_markets":
+        raw["direction"] = "neutral"  # 行情事实无多空语义
+        return raw
+    if source == "eastmoney":
+        return _apply_eastmoney_ai_impact(raw)
+    return apply_rule_score(raw, source=source, origin=origin)
+
+
+def _apply_eastmoney_ai_impact(raw: dict[str, Any]) -> dict[str, Any]:
+    """东财 ai_impact → direction/impact 映射（由 event_scrape_sources 内联块整体搬入）。"""
+    impact = str(raw.get("ai_impact", "")).strip()
+    if "利好" in impact and "重大" in impact:
+        raw["direction"], raw["impact_score"] = "positive", 5
+    elif "利空" in impact and "重大" in impact:
+        raw["direction"], raw["impact_score"] = "negative", 5
+    elif "利好" in impact:
+        raw["direction"], raw["impact_score"] = "positive", 3
+    elif "利空" in impact:
+        raw["direction"], raw["impact_score"] = "negative", 3
+    else:
+        raw["direction"], raw["impact_score"] = "neutral", 1
     return raw

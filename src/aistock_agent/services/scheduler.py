@@ -45,14 +45,30 @@ _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
 _scheduler: AsyncIOScheduler | None = None
 
+# 调度器启动/心跳时间戳（2026-11-03）：心跳只写日志不足以判断调度存活——
+# 2026-10-19 pm2 日志流因磁盘写满（ENOSPC）中断，进程与调度实际仍在运行
+# （10-20 起 08:51 晨报、09:01 trend_score 等产物照常落盘），却看起来像“停摆”。
+# 进程内时间戳由 /health/ready 读取，不依赖日志落盘。
+_scheduler_started_at: float | None = None
+_scheduler_last_heartbeat: float | None = None
+# 心跳间隔 2 分钟；7 分钟（3 个周期）无心跳即判定停摆，容忍 loop 短暂繁忙
+HEARTBEAT_STALE_SECONDS = 420
+
 
 async def _scheduler_heartbeat() -> None:
     """调度器心跳（诊断）：验证运行进程内 cron 调度链路是否存活。
 
-    每 2 分钟触发一次并打印日志；若长时间无 heartbeat，
-    说明 AsyncIOScheduler 在 uvicorn 进程内未按时调度（misfire 或
-    event loop 阻塞），可据此定位定时任务不触发问题。
+    每 2 分钟触发一次并打印日志；同时写入进程内时间戳供 readiness 检查
+    （日志可能因磁盘写满/日志流中断而丢失，不能作为唯一存活证据）。
     """
+    global _scheduler_last_heartbeat
+    now = time.time()
+    previous = _scheduler_last_heartbeat
+    _scheduler_last_heartbeat = now
+    if previous is not None:
+        gap = now - previous
+        if gap > HEARTBEAT_STALE_SECONDS:
+            logger.warning("scheduler_heartbeat_gap", gap_seconds=round(gap, 1))
     logger.info(
         "scheduler_heartbeat",
         jobs=[job.id for job in get_scheduler().get_jobs()],
@@ -74,6 +90,7 @@ def start_scheduler() -> None:
     quick_snapshot_enabled=true 时注册 review_quick/review_full 两个 cron，
     并启动事件消费者；false 时保留旧 _run_evening_chain_task 串行链路。
     """
+    global _scheduler_started_at
     if settings.qa_mode_enabled:
         logger.info("scheduler_disabled_by_qa_mode")
         return
@@ -152,6 +169,21 @@ def start_scheduler() -> None:
         kwargs={"scrape_mode": "full_daily"},
         id="event_scrape_close",
         name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息，
+    # 交易日 Job 的 cron 0-4 + is_trading_day 双重守卫会让非交易日事件断档。
+    # 本 Job 每日 08:30/12:00/18:00/22:00 触发，由 _run_non_trading_event_scrape_job
+    # 内反向守卫（非交易日才执行）拦截，与现有交易日 Job 互不重叠、互不干扰。
+    scheduler.add_job(
+        _run_non_trading_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_non_trading_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="event_scrape_non_trading",
+        name="event scrape non trading day",
         replace_existing=True,
         misfire_grace_time=3600,
     )
@@ -277,7 +309,20 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于节奏 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」；独立任务，失败不阻塞任何其他链路。
+    scheduler.add_job(
+        _run_intraday_snapshot_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_intraday_snapshot_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="intraday_snapshot",
+        name="intraday snapshot archive (12:25)",
+        replace_existing=True,
+    )
+
+    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
     scheduler.add_job(
         _run_rhythm_master_after_close,
         CronTrigger.from_crontab(
@@ -365,14 +410,9 @@ def start_scheduler() -> None:
         register_iterate_jobs(scheduler)
         logger.info("iterate_jobs_registered_via_main_scheduler")
 
-    # 触发时刻 event loop 若短暂繁忙，APScheduler 默认 misfire_grace_time=1s
-    # 会直接跳过任务（表现为"cron 未触发"且无任何日志）。放宽到 1 小时，
-    # 并在 loop 恢复后补跑；coalesce=False 保留每次错过的触发。
-    for job in scheduler.get_jobs():
-        job.misfire_grace_time = 3600
-        job.coalesce = False
-
-    # 心跳 job：每 2 分钟验证调度链路存活（诊断定时任务不触发问题）
+    # 心跳 job：每 2 分钟验证调度链路存活（诊断定时任务不触发问题）。
+    # 必须先于下方 misfire 循环注册：心跳同样要拿到 1h grace——默认 1s 会让这个
+    # “诊断 job”自己先被跳过（2026-10-22 生产日志 “heartbeat ... missed by 0:00:05”）。
     scheduler.add_job(
         _scheduler_heartbeat,
         CronTrigger.from_crontab(
@@ -382,9 +422,18 @@ def start_scheduler() -> None:
         id="scheduler_heartbeat",
         name="scheduler heartbeat",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
+    # 触发时刻 event loop 若短暂繁忙，APScheduler 默认 misfire_grace_time=1s
+    # 会直接跳过任务（表现为"cron 未触发"且无任何日志）。放宽到 1 小时，
+    # 并在 loop 恢复后补跑；coalesce=False 保留每次错过的触发。
+    for job in scheduler.get_jobs():
+        job.misfire_grace_time = 3600
+        job.coalesce = False
+
     scheduler.start()
+    _scheduler_started_at = time.time()
     logger.info("scheduler_started", jobs=[job.id for job in scheduler.get_jobs()])
 
 
@@ -395,12 +444,14 @@ def shutdown_scheduler() -> None:
     若仅 get_scheduler() 创建但未 start（state=STOPPED），直接置 None 避免触发
     SchedulerNotRunningError。幂等：多次调用安全。
     """
-    global _scheduler
+    global _scheduler, _scheduler_started_at, _scheduler_last_heartbeat
     if _scheduler is not None:
         # running 属性 = state != STOPPED；未 start 的调度器 running=False
         if _scheduler.running:
             _scheduler.shutdown(wait=True)
         _scheduler = None
+        _scheduler_started_at = None
+        _scheduler_last_heartbeat = None
         logger.info("scheduler_stopped")
 
 
@@ -501,22 +552,58 @@ async def _run_morning_task() -> None:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
 
 
+# 情绪温度任务重试间隔（秒）：快照就绪时间不确定（Tushare 日线推送有延迟），
+# 17:00 首次执行 + 10/20 分钟各重试一次。全部失败才放弃并留 gave_up 告警。
+_SENTIMENT_RETRY_DELAYS_SECONDS: tuple[int, ...] = (0, 600, 1200)
+
+
 async def _run_sentiment_temp_task() -> None:
-    """15:45 短线情绪温度计算（标注为独立任务，失败不阻塞其他链路）。"""
+    """17:00 短线情绪温度计算（独立任务，失败不阻塞其他链路）。
+
+    2026-11-03：原 15:45 触发时 close-snapshot 尚未 complete（Tushare 日线未推完），
+    任务每天空跑（生产日志累计 19 次 sentiment_temp_snapshot_missing，归档恒空）。
+    改为 17:00 起按 not_ready 语义重试三次。
+    """
     from aistock_agent.services.sentiment_temp import compute_and_persist_sentiment_temp
     from aistock_agent.utils.date import shanghai_today
 
-    try:
-        payload = await compute_and_persist_sentiment_temp(shanghai_today().isoformat())
+    target = shanghai_today().isoformat()
+    for attempt, delay in enumerate(_SENTIMENT_RETRY_DELAYS_SECONDS, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            payload = await compute_and_persist_sentiment_temp(target)
+        except Exception:  # noqa: BLE001
+            logger.warning("sentiment_temp_task_failed", attempt=attempt, exc_info=True)
+            continue
         if payload is not None:
             logger.info(
                 "sentiment_temp_done",
                 date=payload.get("date"),
                 score=payload.get("score"),
                 is_ice=cast(dict[str, object], payload.get("ice", {})).get("is_ice"),
+                attempt=attempt,
             )
+            return
+        logger.warning("sentiment_temp_snapshot_not_ready", date=target, attempt=attempt)
+    logger.warning(
+        "sentiment_temp_gave_up",
+        date=target,
+        attempts=len(_SENTIMENT_RETRY_DELAYS_SECONDS),
+    )
+
+
+async def _run_intraday_snapshot_task() -> None:
+    """12:25 盘中快照归档（独立任务，失败不阻塞其他链路）。
+
+    非交易日由 archive_intraday_snapshot 内部守卫（不落空文件），此处只管兜异常。
+    """
+    from aistock_agent.services.intraday_snapshot_archive import archive_intraday_snapshot
+
+    try:
+        await archive_intraday_snapshot()
     except Exception:  # noqa: BLE001
-        logger.warning("sentiment_temp_task_failed", exc_info=True)
+        logger.warning("intraday_snapshot_task_failed", exc_info=True)
 
 
 async def _run_rhythm_master_after_close() -> None:
@@ -746,6 +833,33 @@ async def _run_event_scrape_job(scrape_mode: str) -> None:
         logger.info("event_scrape_job_done", **result)
     except Exception as exc:  # noqa: BLE001
         logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
+
+
+async def _run_non_trading_event_scrape_job() -> None:
+    """定时执行非交易日事件抓取（反向守卫 + fire-and-forget）。
+
+    与 _run_event_scrape_job 相反：交易日直接 return，非交易日才执行。
+    复用现有 run_event_scrape(mode="intraday")，不复制任何抓取逻辑；
+    非交易日禁用跨日 latest 降级（allow_latest_fallback=False），
+    避免上一交易日消息被重新作为非交易日事件入库。
+    """
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if is_trading_day(report_day):
+            # 交易日由 event_scrape_daily/intraday/close 负责，本 Job 不介入
+            logger.info("non_trading_event_scrape_skipped_trading_day", date=today)
+            return
+        result = await run_event_scrape(
+            "intraday",
+            score_date=today,
+            allow_latest_fallback=False,
+        )
+        logger.info("non_trading_event_scrape_job_done", **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("non_trading_event_scrape_job_failed", error=str(exc))
 
 
 def _make_scheduled_state(
@@ -1059,10 +1173,12 @@ async def _run_review_task() -> None:
     logger.info("scheduler_review_start")
     from aistock_agent.agents.workers import review as review_agent
 
-    today = date.today().isoformat()
+    # 上海自然日（对齐 `_run_morning_task`；date.today() 用容器本地时区，
+    # UTC 部署下会与交易日判定/落库日错位）
+    today = shanghai_today().isoformat()
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_review_{date.today().isoformat()}",
+        "session_id": f"scheduled_review_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": "review",
@@ -1117,7 +1233,7 @@ async def _run_iterate_task() -> None:
 
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_iterate_{date.today().isoformat()}",
+        "session_id": f"scheduled_iterate_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": None,

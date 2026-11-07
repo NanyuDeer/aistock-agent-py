@@ -5,16 +5,17 @@
 - 缓存 key 按 report_type 拼接：briefing:{report_type}:{YYYY-MM-DD}（防盘中报撞键）
 - 默认 report_type="morning" 时保持现有调用行为（regression-free）
 """
-from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aistock_agent.services import cache
+from aistock_agent.utils.date import shanghai_today
 
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    # 与产品代码同源：cache 键用上海自然日（UTC runner 下 datetime.now 会错位）
+    return shanghai_today().isoformat()
 
 
 def test_get_cached_briefing_signature_has_report_type():

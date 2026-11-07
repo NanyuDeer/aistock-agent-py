@@ -37,8 +37,19 @@ def test_mainline_wiring_present_in_worker():
     assert "judge_mainline(" in worker_text
     assert "detect_breakdown(" in worker_text
     assert "event_high_hint" in worker_text
-    assert "derive_position_text(" in worker_text
+    # 2026-11-04 单一真相源：仓位唯一入口是 derive_position_index（derive_position_text
+    # 只是纯字符串薄包装，worker 不得再调用，否则又出现「序号/文案各算一次」）
+    assert "derive_position_index(" in worker_text
+    assert "derive_position_text(" not in worker_text
     assert "load_mainline_candidates()" in worker_text
+
+
+def test_stage_driven_position_table_deleted():
+    """双真相源已删除：stage → 仓位查表（compute_position / _STAGE_POSITION）不得回归。"""
+    from aistock_agent.services import rhythm_rebuilt_evidence as ev
+
+    assert not hasattr(ev, "compute_position")
+    assert not hasattr(ev, "_STAGE_POSITION")
 
 
 def test_deleted_symbols_absent_from_engine_source():
@@ -46,3 +57,20 @@ def test_deleted_symbols_absent_from_engine_source():
     engine_text = (SRC / "services" / "rhythm_engine.py").read_text(encoding="utf-8")
     assert "def ma_breadth" not in engine_text
     assert "LADDER_MAX_LEVEL" not in engine_text
+
+
+def test_branches_wired_to_current_position_index():
+    """因果输出 spec §7：分支的 position_action 必须接当前档位（不是写死常量）。
+
+    worker 侧须把当前档位与闸门状态传进分支构造；engine 侧 7 处调用点
+    （技术成交额版 3 + 技术点位版 3 + 事件版 1）须逐一透传。
+    """
+    worker_text = (SRC / "agents" / "workers" / "rhythm_master.py").read_text(encoding="utf-8")
+    assert "card.evidence.position.index" in worker_text
+    assert "card.evidence.position_ledger.gate_blocked" in worker_text
+    assert "from_index=branch_from_index" in worker_text
+    assert "gate_blocked=branch_gate_blocked" in worker_text
+
+    engine_text = (SRC / "services" / "rhythm_engine.py").read_text(encoding="utf-8")
+    # 7 处 position_band_to_action 调用全部带 from_index / gate_blocked
+    assert engine_text.count("from_index=from_index, gate_blocked=gate_blocked") == 7

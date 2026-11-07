@@ -130,16 +130,15 @@ async def test_e2e_stock_snapshot():
 
 @pytest.mark.asyncio
 async def test_e2e_stock_news():
-    qa_out, synth_out = _mock_llm_output(
+    _qa_out, synth_out = _mock_llm_output(
         "stock_news", "stock_news", "茅台近期发布半年报", "trace",
         skill_args={"symbol": "600519"},
     )
     mock_llm = MagicMock()
+    # 闸门 2（qa_router.py:1509-1569）在中文名 resolve 命中时短路、不消费 qa LLM 输出，
+    # 故 with_structured_output 只提供 synth 一项，避免 qa/synth 次序错位
     mock_llm.with_structured_output = MagicMock(
-        side_effect=[
-            MagicMock(ainvoke=AsyncMock(return_value=qa_out)),
-            MagicMock(ainvoke=AsyncMock(return_value=synth_out)),
-        ]
+        side_effect=[MagicMock(ainvoke=AsyncMock(return_value=synth_out))]
     )
     with patch(
         "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
@@ -149,8 +148,9 @@ async def test_e2e_stock_news():
         "aistock_agent.graph.nodes.qa_router.resolve_symbol",
         new=AsyncMock(return_value="600519"),
     ), patch(
+        # 5253fb4 起 search_cls_news 走 StructuredTool.ainvoke，需显式挂 ainvoke
         "aistock_agent.skills.stock_news.search_cls_news",
-        new=AsyncMock(return_value="茅台发布半年报"),
+        new=MagicMock(ainvoke=AsyncMock(return_value="茅台发布半年报")),
     ):
         graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
@@ -291,8 +291,10 @@ async def test_e2e_market_snapshot():
     ), patch(
         "aistock_agent.skills.market_snapshot.node_api",
     ) as mock_api, patch(
-        "aistock_agent.skills.market_snapshot.asyncio.to_thread",
-    ) as mock_to_thread:
+        # 1415406 起全球行情改走 market_tools.node_api（/api/gb/index/quotes），
+        # 已无 yfinance/asyncio.to_thread 路径
+        "aistock_agent.tools.market_tools.node_api",
+    ) as mock_market_api:
         mock_api.get_quick_snapshot = AsyncMock(return_value={
             "schema_version": "1.0", "status": "complete", "snapshot_kind": "quick",
             "trade_date": "20260730", "captured_at": "2026-07-30T07:30:00.000Z",
@@ -305,9 +307,11 @@ async def test_e2e_market_snapshot():
             "main_force": {"large_and_extra_large_net_yuan": 5_000_000_000},
             "sectors": {"top_gainers": [], "top_losers": [], "top_inflows": [], "top_outflows": []},
         })
-        mock_to_thread.side_effect = lambda fn, arg: [
-            {"ticker": "^GSPC", "name": "标普500", "price": 5500.0, "change_pct": 0.36},
-        ]
+        mock_market_api.get = AsyncMock(return_value={
+            "行情": [
+                {"指数代码": "SPX", "指数简称": "标普500", "最新价": 5500.0, "涨跌幅": 0.36},
+            ],
+        })
 
         graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {
@@ -399,8 +403,9 @@ async def test_e2e_industry_relation():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
+        # 5253fb4 起 industry_relation 走 StructuredTool.ainvoke({...})，需显式挂 ainvoke
         "aistock_agent.skills.industry_relation.match_industry_by_keywords",
-        new=AsyncMock(return_value="白酒 → 食品饮料"),
+        new=MagicMock(ainvoke=AsyncMock(return_value="白酒 → 食品饮料")),
     ):
         graph = compile_chat_graph(checkpointer=None)
         state: QuestionState = {

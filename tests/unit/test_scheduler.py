@@ -20,9 +20,12 @@ mock 路径说明：
 """
 
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from aistock_agent.utils.date import shanghai_today
 
 
 @pytest.fixture(autouse=True)
@@ -811,8 +814,6 @@ async def test_event_analysis_pipeline_task_delegates_to_pipeline():
 
 @pytest.mark.asyncio
 async def test_scheduler_review_task_passes_persistence_context():
-    from datetime import date
-
     from aistock_agent.agents.workers import review as review_module
     from aistock_agent.services.scheduler import _run_review_task
 
@@ -823,7 +824,8 @@ async def test_scheduler_review_task_passes_persistence_context():
 
     state = mock_run.await_args.args[0]
     assert state["trigger_source"] == "scheduler"
-    assert state["report_date"] == date.today().isoformat()
+    # 与产品代码同源：调度器用上海自然日（UTC runner 下 date.today 会错位）
+    assert state["report_date"] == shanghai_today().isoformat()
 
 
 # ── schema 2.0 持久化契约：market_snapshot / iterate 不得写入原始 JSON ──
@@ -1322,3 +1324,53 @@ async def test_dispatch_rhythm_master_without_target_date_keeps_default() -> Non
         await scheduler._dispatch_rhythm_master("after_close", "2026-09-18")
 
     assert "target_date" not in captured["state"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_records_timestamp_for_readiness():
+    """心跳必须写入进程内时间戳：日志流中断时 /health/ready 仍能判断调度存活。
+
+    2026-10-19 pm2 日志因磁盘写满（ENOSPC）中断，但调度实际仍在跑；只写日志的
+    心跳会让人误判“调度停摆”，因此心跳戳不依赖日志落盘。
+    """
+    from aistock_agent.services import scheduler
+
+    scheduler._scheduler_last_heartbeat = None
+    started = time.time()
+    await scheduler._scheduler_heartbeat()
+
+    assert scheduler._scheduler_last_heartbeat is not None
+    assert scheduler._scheduler_last_heartbeat >= started
+
+
+@pytest.mark.asyncio
+async def test_start_scheduler_marks_started_at():
+    """成功 start 后记录启动时间，供 readiness 区分“未启动”与“已启动无心跳”。"""
+    from aistock_agent.services import scheduler
+
+    scheduler._scheduler_started_at = None
+    scheduler.start_scheduler()
+    try:
+        assert scheduler._scheduler_started_at is not None
+        assert scheduler.get_scheduler().running is True
+    finally:
+        # 在 loop 仍存活时 shutdown，避免单例绑定到已关闭的 loop 泄漏到后续测试
+        scheduler.shutdown_scheduler()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_job_misfire_grace_is_extended():
+    """心跳 job 也必须拿到 1h misfire grace。
+
+    APScheduler 默认 1s：loop 繁忙时诊断 job 会被直接跳过（2026-10-22 生产日志
+    “scheduler heartbeat ... was missed by 0:00:05” 即此因），从而制造“调度停摆”假象。
+    """
+    from aistock_agent.services import scheduler
+
+    scheduler.start_scheduler()
+    try:
+        job = scheduler.get_scheduler().get_job("scheduler_heartbeat")
+        assert job is not None
+        assert job.misfire_grace_time == 3600
+    finally:
+        scheduler.shutdown_scheduler()

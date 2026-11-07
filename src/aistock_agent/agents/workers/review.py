@@ -690,6 +690,32 @@ def validate_trace_against_snapshot(
                 "prediction_validation.status=no_forecast 时 sector_hits/event_hits 必须为空"
             )
 
+    _validate_origin_consumption(trace, snapshot)
+
+
+_OVERSEAS_MACRO_ALLOWED_CATEGORIES = frozenset(
+    {"global_risk_liquidity", "market_positioning_liquidity"}
+)
+
+
+def _validate_origin_consumption(
+    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+) -> None:
+    """外围证据不得支撑非外盘类别（违反 → ValueError → degraded）。"""
+    for candidate in trace.candidates:
+        cited = set(candidate.supporting_evidence_ids) | set(candidate.counter_evidence_ids)
+        if candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                cited |= set(node.evidence_ids)
+        for sid in cited:
+            src = snapshot.sources.get(sid)
+            if src is None or src.kind != "event_evidence" or src.origin != "peripheral":
+                continue
+            if candidate.category not in _OVERSEAS_MACRO_ALLOWED_CATEGORIES:
+                raise ValueError(
+                    f"peripheral evidence {sid} cannot support {candidate.category}"
+                )
+
 
 # ============================================================================
 # Markdown 渲染 — 从已验证的 JSON 工件渲染展示层

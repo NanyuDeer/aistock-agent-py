@@ -2,7 +2,8 @@
 
 验证「HTTP → middleware → graph → supervisor(意图分类) → worker agent →
 create_react_agent → 真实工具执行 → mocked node_api → 最终响应」全链路跑通，
-覆盖 5 类意图 + 工具失败降级 + Redis 缓存命中。
+覆盖晨报 SSE + Redis 缓存命中；个股/新闻/板块全流程用例直接驱动 chat 子图
+（/chat/message 已切 chat 子图）；工具失败降级已下沉为 tests/unit 单测。
 
 与现有测试的层次区别（互补，不重复）：
 - ``tests/e2e/test_chat_message.py``：mock 各 agent.run —— 验证路由 + HTTP 契约，
@@ -35,13 +36,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
 from aistock_agent.config import settings
 from aistock_agent.constants import SSEEventType
+from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.main import app
+from aistock_agent.schemas.chat_contract import InsightGoal, SkillCall
+from aistock_agent.state.chat_schema import QuestionState
 
 _CHAT_URL = "/api/agent/chat/message"
 _BRIEFING_URL = "/api/agent/briefing/morning"
@@ -222,155 +226,221 @@ def _patch_llms(
     return stack, quick, deep
 
 
-# ── /chat/message：5 类意图全链路 ─────────────────────────────────
+# ── /chat/message：chat 子图全链路 ───────────────────────────────
+# 注：/chat/message 早已切到 chat 子图（api/routes.py 的 _select_graph 恒返回
+# compile_chat_graph()），旧的 supervisor 图驱动方式已不可达。以下个股/新闻用例
+# 直接驱动 chat 子图，范式照抄 tests/integration/test_chat_e2e_direct.py：
+# compile_chat_graph(checkpointer=None) + ainvoke + mock
+# get_quick_think/get_deep_think + 各 skill 依赖。
+
+
+def _chat_llm_output(
+    intent: str,
+    skill: str,
+    conclusion: str,
+    mode: str = "validate",
+    *,
+    skill_args: dict | None = None,
+):
+    """构造 chat 子图 qa_router/synth_answer 的结构化 mock 输出（照抄 direct 范式）。"""
+    from aistock_agent.graph.nodes.qa_router import QARouterOutput
+    from aistock_agent.graph.nodes.synth_answer import SynthInsightOutput, SynthOutput
+
+    qa_output = QARouterOutput(
+        goal=InsightGoal(question="test", intent=intent),
+        plan="direct",
+        skill_calls=[SkillCall(skill_name=skill, args=skill_args or {})],
+        complexity="light",
+    )
+    synth_output = SynthOutput(
+        insight=SynthInsightOutput(
+            conclusion=conclusion,
+            basis_indices=[1],
+            confidence="medium",
+            uncertainty=[],
+            answer_mode=mode,
+        )
+    )
+    return qa_output, synth_output
+
+
+def _chat_mock_llm(qa_output, synth_output) -> MagicMock:
+    """构造同时服务 qa_router 与 synth_answer 的 mock LLM。
+
+    qa_router 调 with_structured_output(QARouterOutput).ainvoke → 第 1 个；
+    synth_answer 调 with_structured_output(SynthOutput).ainvoke → 第 2 个。
+    """
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output = MagicMock(
+        side_effect=[
+            MagicMock(ainvoke=AsyncMock(return_value=qa_output)),
+            MagicMock(ainvoke=AsyncMock(return_value=synth_output)),
+        ]
+    )
+    return mock_llm
+
+
+def _chat_state(message: str) -> QuestionState:
+    """chat 子图初始 state（照抄 direct 范式的最小合法结构）。"""
+    return {
+        "messages": [HumanMessage(content=message)],
+        "goal": None,
+        "plan": "direct",
+        "skill_calls": [],
+        "evidences": [],
+        "insight": None,
+        "final_response": "",
+        "trace": None,
+    }
 
 
 @pytest.mark.asyncio
-async def test_full_flow_stock(mock_node_api):
-    """stock 意图全链路：supervisor 分类 → stock_analyst ReAct → get_quote 真实执行。
+async def test_full_flow_stock():
+    """个股全流程（chat 子图）：qa_router 规划 stock_snapshot → skill 执行 get_quote
+    → synth 产出含该个股行情的回答。
 
-    验证三件事（区别于 mock agent.run 的 test_chat_message.py）：
-    1. ``create_react_agent`` 真实运行、``get_quote`` 真实执行（非 mock agent）；
-    2. node_api 被打到 ``/internal/quote/600519``（证明 LLM→tool→node_api 链路未断）；
-    3. 工具结果回流，最终响应含行情信息。
+    原意图（旧 supervisor e2e）：问个股问题，回答里含该个股信息（1688）。
+    迁移到 chat 子图后保留同一意图，并强化为「工具真实产出流入 Evidence + 回答含该信息」。
     """
-    mock_node_api.get.return_value = {
-        "股票简称": "贵州茅台",
-        "最新价": 1688.00,
-        "涨跌幅": 0.75,
-    }
-    with _patch_llms(
-        quick_responses=[_text("stock")],  # supervisor 意图分类
-        deep_responses=[  # stock_analyst ReAct：先调 get_quote，再给最终回复
-            _tc("get_quote", {"symbol": "600519"}),
-            _text("贵州茅台最新价1688元，涨幅0.75%，主力资金呈净流出。"),
-        ],
-    )[0]:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.post(
-                _CHAT_URL,
-                json={"message": "分析一下贵州茅台 600519", "session_id": "e2e-stock"},
-                headers=_VALID_HEADERS,
-            )
+    qa_out, synth_out = _chat_llm_output(
+        "stock_snapshot",
+        "stock_snapshot",
+        "贵州茅台最新价1688元，涨幅0.75%。",
+        skill_args={"symbol": "600519"},
+    )
+    mock_llm = _chat_mock_llm(qa_out, synth_out)
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        # 固定交易时段，去掉对运行时钟/交易日历的依赖（非交易时段 stock_snapshot 会降级）
+        "aistock_agent.skills.stock_snapshot.trading_session_status",
+        return_value=("trading", ""),
+    ), patch(
+        # 5253fb4 起 get_quote 走 StructuredTool.ainvoke({"symbol": ...})，需显式挂 ainvoke
+        "aistock_agent.skills.stock_snapshot.get_quote",
+        new=MagicMock(
+            ainvoke=AsyncMock(return_value="【贵州茅台】最新价: 1688.0  涨跌幅: 0.75%")
+        ),
+    ), patch("aistock_agent.skills.stock_snapshot.node_api") as mock_api:
+        mock_api.get = AsyncMock(
+            return_value={
+                "股票代码": "600519",
+                "股票简称": "贵州茅台",
+                "最新价": 1688.00,
+                "涨跌幅": 0.75,
+            }
+        )
+        graph = compile_chat_graph(checkpointer=None)
+        result = await graph.ainvoke(_chat_state("分析一下贵州茅台 600519"))
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "1688" in body["content"]
-    assert body["session_id"] == "e2e-stock"
-    # 关键断言：工具真实执行，node_api 被打到 /internal/quote/600519
-    mock_node_api.get.assert_any_await("/internal/quote/600519")
+    assert result["insight"] is not None
+    assert len(result["evidences"]) == 1
+    ev = result["evidences"][0]
+    assert ev.skill_name == "stock_snapshot"
+    assert ev.degraded is False
+    # 工具真实产出该个股行情并流入 Evidence（证明「该个股」全流程取数未断）
+    assert any("1688" in fact for fact in ev.facts)
+    # 回答包含该个股信息（保留原断言意图，未降级为 is not None）
+    assert "1688" in result["final_response"]
 
 
 @pytest.mark.asyncio
-async def test_full_flow_sector(mock_node_api):
-    """sector 意图全链路：supervisor → sector_analyst → get_leader_stocks。
+async def test_full_flow_sector():
+    """板块全流程（chat 子图）：qa_router 规划 sector_snapshot(tag_code=BK0475)
+    → skill 执行 node_api /internal/leader/BK0475 → synth 产出含该板块的回答。
 
-    验证：tag_code 从用户消息提取（BK0475），node_api 打到
-    ``/internal/leader/BK0475``，最终响应含板块分析。
+    原意图（旧 supervisor sector_analyst → get_leader_stocks）：问板块强弱，回答里
+    含板块关键词（白酒/板块），且 node_api 打到 /internal/leader/BK0475。
+    /chat/message 已切 chat 子图（api/routes.py 的 _select_graph 恒返回
+    compile_chat_graph()），旧 supervisor 驱动方式不可达；chat 子图无独立 sector worker，
+    板块能力由 sector_snapshot skill 承担，故按既有 direct 范式
+    （tests/integration/test_chat_e2e_direct.py::test_e2e_sector_snapshot，
+    compile_chat_graph(checkpointer=None) + ainvoke + mock qa/synth LLM + mock skill 依赖）驱动。
     """
-    mock_node_api.get.return_value = {
-        "tag_code": "BK0475",
-        "leaders": [{"name": "贵州茅台", "code": "600519", "change_pct": 0.75}],
-    }
-    with _patch_llms(
-        quick_responses=[_text("sector")],
-        deep_responses=[
-            _tc("get_leader_stocks", {"tag_code": "BK0475"}),
-            _text("白酒板块今日表现偏强，龙头贵州茅台涨0.75%。"),
-        ],
-    )[0]:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.post(
-                _CHAT_URL,
-                json={"message": "今天哪些板块比较强 BK0475", "session_id": "e2e-sector"},
-                headers=_VALID_HEADERS,
-            )
+    qa_out, synth_out = _chat_llm_output(
+        "sector_snapshot",
+        "sector_snapshot",
+        "今日白酒板块表现偏强，龙头贵州茅台涨0.75%。",
+        "validate",
+        skill_args={"tag_code": "BK0475"},
+    )
+    mock_llm = _chat_mock_llm(qa_out, synth_out)
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        # 闸门 2：消息无 6 位代码时会尝试 resolve_symbol(candidate)（真实打 Node 网络），
+        # 固定返回 None → 落「非个股意图（板块）」放行分支走 LLM 路径，避免真实网络请求
+        "aistock_agent.graph.nodes.qa_router.resolve_symbol",
+        new=AsyncMock(return_value=None),
+    ), patch("aistock_agent.skills.sector_snapshot.node_api") as mock_api:
+        mock_api.get = AsyncMock(
+            return_value={
+                "tag_code": "BK0475",
+                "leaders": [{"name": "贵州茅台", "code": "600519", "change_pct": 0.75}],
+            }
+        )
+        graph = compile_chat_graph(checkpointer=None)
+        result = await graph.ainvoke(_chat_state("今天哪些板块比较强 BK0475"))
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "白酒" in body["content"] or "板块" in body["content"]
-    mock_node_api.get.assert_any_await("/internal/leader/BK0475")
+    assert result["insight"] is not None
+    # sector_snapshot 未在 _DEFAULT_MODE 表中 → synth 推断为 validate（synth_answer.py:343-367）
+    assert result["insight"].answer_mode == "validate"
+    assert len(result["evidences"]) == 1
+    ev = result["evidences"][0]
+    assert ev.skill_name == "sector_snapshot"
+    assert ev.degraded is False
+    # 工具真实产出该板块龙头并流入 Evidence（保留原「板块」语义，且比原断言更具体）
+    assert any("贵州茅台" in fact for fact in ev.facts)
+    # 板块龙头数据打到原用例同一路径（对应原断言 mock_node_api.get "/internal/leader/BK0475"）
+    mock_api.get.assert_any_await("/internal/leader/BK0475")
+    # 回答含板块关键词（保留原断言意图；原为「白酒」或「板块」，此处断言更具体的「白酒」）
+    assert "白酒" in result["final_response"]
 
 
 @pytest.mark.asyncio
-async def test_full_flow_event(mock_node_api):
-    """event 意图全链路：supervisor → event_analyst v3 → get_news_fulltext。
+async def test_full_flow_event():
+    """事件/新闻全流程（chat 子图）：qa_router 规划 stock_news → skill 执行
+    search_cls_news → synth 产出含该事件关键词的回答。
 
-    v3 拆分为 5 个 LLM 调用：
-    - Call 1 understanding (flash): 事件理解 JSON
-    - Call 2 transmission (deep, ReAct): 调 get_news_fulltext → 传导 JSON
-    - Call 3 history (flash, ReAct): 历史 JSON 数组（无工具调用）
-    - Call 4 investment (flash): 投资建议 JSON
-    - Call 5 podcast (flash): 播报文本
-
-    quick LLM 消费顺序：supervisor → understanding → history → investment → podcast
-    deep LLM 消费顺序：transmission(ReAct tool_call) → transmission(ReAct final JSON)
+    原意图（旧 supervisor event_analyst）：问事件/新闻类问题，回答里含事件关键词
+    （美联储）。chat 子图无独立 event worker，新闻/事件能力由 stock_news skill 承担，
+    故按 direct 范式（test_chat_e2e_direct.py::test_e2e_stock_news）驱动。
     """
-    mock_node_api.get.return_value = {
-        "title": "美联储维持利率不变",
-        "content": "美联储7月议息会议决定维持联邦基金利率目标区间不变。",
-    }
-    _understanding = json.dumps({
-        "summary": "美联储维持利率不变",
-        "coreChanges": [{"variable": "利率", "before": "不确定", "after": "维持不变"}],
-    })
-    _transmission = json.dumps({
-        "mechanism": "利率维持不变，市场流动性预期稳定",
-        "variables": [{"name": "利率", "direction": "neutral", "strength": 0.5,
-                        "explanation": "维持不变"}],
-        "coreIndustry": {"name": "科技", "impact": "中性偏正", "reason": "低利率环境利好成长股"},
-        "chain": [{"industry": "科技", "relation": "核心行业", "level": 1,
-                    "direction": "bullish", "impactStrength": 0.6, "reason": "低利率利好"}],
-    })
-    _history = json.dumps([{
-        "historyId": "h001", "year": "2024", "title": "上次维持利率",
-        "eventType": "市场动态", "sentiment": "neutral",
-        "industryChange": "市场波动不大", "changePercentage": 0.5,
-    }])
-    _investment = json.dumps({
-        "conclusion": "美联储维持利率不变，A股整体偏中性，关注科技板块。",
-        "keyPoints": ["利率不变"],
-        "focusIndustries": [{"name": "科技", "direction": "positive",
-                              "reason": "利率稳定利好成长股"}],
-        "opportunities": ["科技板块"],
-        "risks": ["外部不确定性"],
-        "rating": "neutral",
-    })
-    with _patch_llms(
-        quick_responses=[
-            _text("event"),           # supervisor 意图分类
-            _text(_understanding),     # Call 1: understanding (flash, no tools)
-            _text(_history),           # Call 3: history (flash, ReAct, no tool calls)
-            _text(_investment),        # Call 4: investment (flash, no tools)
-            _text("美联储维持利率不变，对A股整体偏中性，关注科技板块。"),  # Call 5: podcast
-        ],
-        deep_responses=[
-            _tc("get_news_fulltext", {"news_id": "20260708"}),  # Call 2: transmission ReAct
-            _text(_transmission),     # Call 2: transmission final JSON
-        ],
-    )[0]:
-        with patch("aistock_agent.agents.workers.event.get_cached_event",
-                   AsyncMock(return_value=None)):
-            with patch("aistock_agent.agents.workers.event.set_cached_event", AsyncMock()):
-                with patch("aistock_agent.agents.workers.event.persist_event_report",
-                           AsyncMock()):
-                    async with httpx.AsyncClient(
-                        transport=httpx.ASGITransport(app=app), base_url="http://test",
-                    ) as client:
-                        resp = await client.post(
-                            _CHAT_URL,
-                            json={"message": "分析美联储加息的影响", "session_id": "e2e-event"},
-                            headers=_VALID_HEADERS,
-                        )
+    news_text = "美联储纪要显示降息预期升温，新能源板块估值有望修复"
+    qa_out, synth_out = _chat_llm_output(
+        "stock_news",
+        "stock_news",
+        "据财联社资讯，美联储纪要显示降息预期升温，新能源板块估值有望修复。",
+        "trace",
+        skill_args={"symbol": "300750", "limit": 10},
+    )
+    mock_llm = _chat_mock_llm(qa_out, synth_out)
+    with patch(
+        "aistock_agent.graph.nodes.qa_router.get_quick_think", return_value=mock_llm
+    ), patch(
+        "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
+    ), patch(
+        # 5253fb4 起 stock_news 走 search_cls_news.ainvoke({"symbol": ...})，需显式挂 ainvoke
+        "aistock_agent.skills.stock_news.search_cls_news",
+        new=MagicMock(ainvoke=AsyncMock(return_value=news_text)),
+    ):
+        graph = compile_chat_graph(checkpointer=None)
+        result = await graph.ainvoke(_chat_state("宁德时代最近有什么新闻 300750"))
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "美联储" in body["content"]
-    mock_node_api.get.assert_any_await("/internal/news/fulltext/20260708")
+    assert result["insight"] is not None
+    assert result["insight"].answer_mode == "trace"
+    assert len(result["evidences"]) == 1
+    ev = result["evidences"][0]
+    assert ev.skill_name == "stock_news"
+    assert ev.degraded is False
+    # 新闻工具真实产出流入 Evidence
+    assert any("美联储" in fact for fact in ev.facts)
+    # 回答包含该事件关键词（保留原断言意图，未降级为 is not None）
+    assert "美联储" in result["final_response"]
 
 
 @pytest.mark.asyncio
@@ -448,9 +518,16 @@ async def test_full_flow_morning(mock_node_api):
          patch("aistock_agent.agents.supervisor.node.get_quick_think", return_value=quick), \
          patch("aistock_agent.agents.workers.morning.get_deep_think", return_value=deep), \
          patch("aistock_agent.agents.workers.morning.is_trading_day", return_value=True), \
-         patch("aistock_agent.tools.market_tools.yf"), \
+         patch("aistock_agent.tools.market_tools.node_api") as mock_market_api, \
          patch("tavily.TavilyClient"):
         mock_pool.get_client = AsyncMock(return_value=mock_redis)
+        # 1415406 起全球行情改走 market_tools.node_api（/api/gb/index/quotes），
+        # 已无 yfinance（原 patch("...market_tools.yf") 目标不存在）
+        mock_market_api.get = AsyncMock(return_value={
+            "行情": [
+                {"指数代码": "SPX", "指数简称": "标普500", "最新价": 5500.0, "涨跌幅": 0.36},
+            ],
+        })
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
         ) as client:
@@ -473,41 +550,9 @@ async def test_full_flow_morning(mock_node_api):
     mock_node_api.get.assert_any_await("/internal/news/latest?limit=10")
 
 
-# ── 异常路径：工具失败降级 ────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_full_flow_tool_failure_degradation(mock_node_api):
-    """工具失败降级：node_api.get 抛异常 → safe_tool_call 返回降级文本，agent 不崩溃。
-
-    模拟 /internal/quote 返回 500（node_api._request 捕获 HTTPStatusError 后返回 None，
-    这里直接让 mock.get 抛 RuntimeError 模拟底层异常被 safe_tool_call 捕获）。
-    验证：HTTP 仍返回 200（非 500），响应为降级文本而非报错。
-    """
-    mock_node_api.get.side_effect = RuntimeError("upstream 500")
-
-    with _patch_llms(
-        quick_responses=[_text("stock")],
-        deep_responses=[
-            _tc("get_quote", {"symbol": "600519"}),
-            _text("行情数据暂不可用，请稍后重试。"),
-        ],
-    )[0], patch("aistock_agent.tools.market_tools.yf"), patch("tavily.TavilyClient"):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.post(
-                _CHAT_URL,
-                json={"message": "分析 600519", "session_id": "e2e-degrade"},
-                headers=_VALID_HEADERS,
-            )
-
-    # 关键断言：工具失败不传播为 HTTP 500，agent 仍正常响应（降级文本）
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "暂不可用" in body["content"]
-    # 工具确实被尝试调用过（失败发生在工具内部，被 safe_tool_call 捕获）
-    mock_node_api.get.assert_any_await("/internal/quote/600519")
+# 注：原 test_full_flow_tool_failure_degradation（工具失败降级）已下沉为
+# tests/unit/test_worker_tool_degradation.py 的单元测试——该 e2e 走旧 supervisor 路径
+# （/chat/message 已切 chat 子图）不可达，且降级点在工具/worker 层，用单测覆盖更直接。
 
 
 # ── 缓存路径：Redis 缓存命中 ──────────────────────────────────────
@@ -551,6 +596,11 @@ async def test_full_flow_redis_cache_hit():
     assert SSEEventType.TOOL_START not in types
     # done 携带 final_response（缓存内容）
     done_events = [e for e in events if e.get("type") == SSEEventType.DONE]
-    assert done_events and done_events[0].get("final_response") == cached_content
+    assert done_events
+    # 7065b7f 起晨报缓存读取侧返回双层 JSON（schema 1.0）：旧纯文本被包装进
+    # display_report.details，故解析后比较 details 而非整体字符串
+    payload = json.loads(done_events[0].get("final_response", ""))
+    assert payload["schema_version"] == "1.0"
+    assert payload["display_report"]["details"] == cached_content
     # LLM 未被调用（哨兵未触发 AssertionError 即证明）
     deep_sentinel.assert_not_called()

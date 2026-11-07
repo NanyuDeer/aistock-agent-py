@@ -36,7 +36,7 @@ async def test_compose_card_short_kline_forces_stage_none_and_missing():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
@@ -45,7 +45,7 @@ async def test_compose_card_short_kline_forces_stage_none_and_missing():
         "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
     ) as vs:
         vs.return_value = True
-        card, _, _ = await _compose_card(basis, "after_close")
+        card, _, _, _, _ = await _compose_card(basis, "after_close")
     assert card.evidence.stage is None
     assert "指数K线不足" in card.evidence.data_missing
 
@@ -66,7 +66,7 @@ async def test_compose_card_passes_historical_kline_params():
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.run_synthesis",
@@ -119,7 +119,7 @@ async def _compose(slot: str, basis: str, kline_value):
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {"events": [], "high_events": []})()),
     ), patch(
         "aistock_agent.agents.workers.rhythm_master.node_api.get_rhythm_report",
@@ -131,11 +131,11 @@ async def _compose(slot: str, basis: str, kline_value):
         "aistock_agent.agents.workers.rhythm_master.validate_synthesis",
     ) as vs:
         vs.return_value = True
-        card, rows, _ = await _compose_card(basis, slot)
+        card, rows, _, _, _ = await _compose_card(basis, slot)
     return card
 
 
-_GATE_MSG = "基准日无当日K线"
+_GATE_MSG = "当天没有 K 线数据"
 
 
 @pytest.mark.asyncio
@@ -210,7 +210,7 @@ async def test_compose_card_feeds_event_confirm_into_detect_certainty(events, ex
         "aistock_agent.agents.workers.rhythm_master.node_api.get_close_snapshot",
         AsyncMock(return_value={"breadth": {"total_count": 100, "advance_count": 50}}),
     ), patch(
-        "aistock_agent.agents.workers.rhythm_master.load_event_window",
+        "aistock_agent.agents.workers.rhythm_master.load_event_timeline",
         AsyncMock(return_value=type("W", (), {
             "events": events,
             "high_events": [e for e in events if e.get("importance") == "high"],
@@ -242,7 +242,7 @@ async def test_breadth_snapshot_uses_kline_last_date():
         patch.object(worker_mod.node_api, "get_index_kline", AsyncMock(return_value=kline)),
         patch.object(worker_mod.node_api, "get_close_snapshot", snap),
         patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
-        patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod, "load_event_timeline", AsyncMock(return_value=win_stub)),
         patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
@@ -254,6 +254,30 @@ async def test_breadth_snapshot_uses_kline_last_date():
     assert snap.await_args.args[0] == "20260911"
 
 
+_LEDGER_PAYLOAD = {
+    "items": [
+        {"key": "trend", "value_text": "3000 / ma20 2990", "judgement": "震荡",
+         "effect": "base=2", "status": "neutral"},
+        {"key": "mainline", "value_text": "无主线数据", "judgement": "数据不可用",
+         "effect": "不改档", "status": "missing"},
+        {"key": "event", "value_text": "无事件 / d 不可用", "judgement": "数据缺失",
+         "effect": "不改档", "status": "missing"},
+        {"key": "breadth", "value_text": "上涨占比 50%", "judgement": "中性",
+         "effect": "仅参与 certainty，不改档", "status": "neutral"},
+    ],
+    "base_index": 2,
+    "adjust": 0,
+    "final_index": 2,
+    "gate_hit": False,
+    "mainline_breakdown": None,
+    "insufficient": False,
+    "gate_blocked": False,
+    "mainline_state": None,
+    "watch_points": [],
+    "ledger_version": "1.0",
+}
+
+
 def test_inherit_basis_stage_only_for_intraday_slots():
     from aistock_agent.agents.workers.rhythm_master import _inherit_basis_stage
 
@@ -262,9 +286,42 @@ def test_inherit_basis_stage_only_for_intraday_slots():
                         "basis_date": "2026-09-11"}}
     # after_close 不继承
     assert _inherit_basis_stage("after_close", resp) is None
-    # morning/midday 继承
-    assert _inherit_basis_stage("morning", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
-    assert _inherit_basis_stage("midday", resp) == ("ice", "沿用收盘基准（2026-09-11）：冰点筑底")
+    # morning/midday 继承（后三项为基准卡仓位文案/序号/账本，无 rhythm_card 时均为 None）
+    assert _inherit_basis_stage("morning", resp) == (
+        "ice", "沿用收盘判断（2026-09-11）：冰点筑底", None, None, None,
+    )
+    assert _inherit_basis_stage("midday", resp) == (
+        "ice", "沿用收盘判断（2026-09-11）：冰点筑底", None, None, None,
+    )
+    # 基准卡带 position_band（旧卡无序号）→ 文案照搬，但序号/账本为 None（不得按文案反推）
+    resp_with_band = {
+        "content": {
+            "evidence": {"stage": "ebb", "stage_reason": "退潮"},
+            "basis_date": "2026-11-02",
+            "rhythm_card": {"position_band": {"text": "建议仓位：轻仓~观望"}},
+        }
+    }
+    assert _inherit_basis_stage("morning", resp_with_band) == (
+        "ebb", "沿用收盘判断（2026-11-02）：退潮", "建议仓位：轻仓~观望", None, None,
+    )
+    # 基准卡带 position_index + position_ledger → 一并继承（同日三时点同源）
+    resp_with_index = {
+        "content": {
+            "evidence": {"stage": "ebb", "stage_reason": "退潮"},
+            "basis_date": "2026-11-02",
+            "rhythm_card": {
+                "position_band": {"text": "建议仓位：五成~六成"},
+                "position_index": 2,
+                "position_ledger": _LEDGER_PAYLOAD,
+            },
+        }
+    }
+    inherited = _inherit_basis_stage("midday", resp_with_index)
+    assert inherited is not None
+    assert inherited[0] == "ebb"
+    assert inherited[3] == 2
+    assert inherited[4] is not None
+    assert inherited[4].final_index == 2
     # 基准缺失 / stage 为空 → None
     assert _inherit_basis_stage("morning", None) is None
     assert _inherit_basis_stage("morning", {"content": {"evidence": {"stage": None}}}) is None
@@ -285,7 +342,7 @@ async def test_card_basis_date_is_evidence_date():
         patch.object(worker_mod.node_api, "get_fear_greed", AsyncMock(return_value={"index": 40})),
         patch.object(worker_mod.node_api, "get_rhythm_report", AsyncMock(return_value=None)),
         patch.object(
-            worker_mod, "load_event_window",
+            worker_mod, "load_event_timeline",
             AsyncMock(return_value=type("W", (), {
                 "events": [], "high_events": [], "source_missing": False,
             })()),
@@ -293,7 +350,7 @@ async def test_card_basis_date_is_evidence_date():
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, _, _ = await _compose_card("2026-09-14", "morning")
+        card, _, _, _, _ = await _compose_card("2026-09-14", "morning")
 
     assert card.basis_date == "2026-09-11"   # 证据日（K 线末日）
     assert card.target_date == "2026-09-14"  # 运行日
@@ -344,11 +401,11 @@ async def test_mainline_none_state_is_not_marked_data_missing():
                 "breakdown": None, "nav": None,
             },
         ),
-        patch.object(worker_mod, "load_event_window", AsyncMock(return_value=win_stub)),
+        patch.object(worker_mod, "load_event_timeline", AsyncMock(return_value=win_stub)),
         patch.object(worker_mod, "run_synthesis", AsyncMock(return_value=None)),
         patch.object(worker_mod, "validate_synthesis", return_value=False),
     ):
-        card, rows, win = await worker_mod._compose_card("2026-09-10", "after_close")
+        card, rows, win, _, _ = await worker_mod._compose_card("2026-09-10", "after_close")
         rhythm_card = worker_mod._build_rhythm_card(card, win, rows, card.mainline_facts)
 
     # 前提：候选齐备（未触发不可用降级）且主线判定为 none

@@ -186,7 +186,8 @@ class Settings(BaseSettings):
     scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
     scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
     # 短线情绪温度：收盘后 15:45（紧随快照 15:35）。
-    scheduler_sentiment_cron: str = "45 15 * * 0-4"
+    # 17:00（2026-11-03）：原 15:45 早于 Tushare 日线就绪，任务每日空跑导致归档恒空
+    scheduler_sentiment_cron: str = "0 17 * * 0-4"
     scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
     scheduler_broadcast_cron: str = "0 9 * * 0-4"
@@ -269,13 +270,18 @@ class Settings(BaseSettings):
     # （2026-09-03 组长裁决：review_full 20:30→18:30、板块批量 21:30→19:30，整体前移。）
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
     scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘基准 + 次日 9:00 盘前 + 12:30 午间
-    # 16:05 收盘基准（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
-    # 收盘基准（周一至周五；APScheduler 0=周一，禁用 1-5）
+    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # 16:05 收盘定档（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
+    # 收盘定档（周一至周五；APScheduler 0=周一，禁用 1-5）
     scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
+    scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
+    rhythm_delta_enabled: bool = False
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
     rhythm_mainline_enabled: bool = True
     # 重大事件时间线（Event Entity）物化开关（spec §5A.3/§10.2）：app-api /internal/event-entities
@@ -297,6 +303,18 @@ class Settings(BaseSettings):
         "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
     )
     scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息 ──
+    # 交易日 Job 受 cron 0-4（周一到周五）+ 函数内 is_trading_day 双重守卫，
+    # 非交易日不抓取 → 事件时间轴断档。此 cron 每日 08:30/12:00/18:00/22:00 触发，
+    # 由 scheduler 侧反向守卫（非交易日才执行）拦截，交易日直接 return，互不干扰。
+    # 复用现有 run_event_scrape(mode="intraday")，不新增抓取逻辑。
+    scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"
+    # ── 金十快讯（外围资讯源，2026-10-15 外围资讯标记批次）──
+    jin10_enabled: bool = True
+    jin10_flash_url: str = "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1"
+    # 客户端标识（外部标识，非凭据；禁止明文写入 AGENTS.md / 公开面）
+    jin10_app_id: str = "bVBF4FyRTn5NJF5n"
+    jin10_version: str = "1.0.0"
     # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）──
     scheduler_calendar_seed_cron: str = "30 7 * * 0-4"       # 种子导入+候选晋升（盘前）
     scheduler_calendar_scrape_cron: str = "40 7 * * 0-4"     # 韭研+L3 搜索兜底（盘前）
@@ -403,6 +421,18 @@ class Settings(BaseSettings):
 
     # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
     rhythm_output_dir: str = "docs/agent-outputs/rhythm"
+
+    # 节奏卡「沿用前阶段」的时效窗口（交易日）：前卡基准日距今超过该值则不再沿用，
+    # 防止一张错卡沿链无限传播（2026-11-03 D2）。
+    rhythm_prev_phase_max_gap_days: int = 3
+
+    # 盘中修正阈值（职责重定义 spec §4.3 / §11.2）：midday 只降不升，阈值参数化。
+    # version 随每张卡落库（phase_evidence.intraday_factors.threshold_version），
+    # 换阈值前后可分桶回测——版本号不变而改数值会让历史样本不可区分。
+    rhythm_intraday_thresholds_version: str = "v1-20261104"
+    rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
+    rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
     # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）

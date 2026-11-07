@@ -52,6 +52,30 @@ async def test_collect_cls_telegraph_falls_back_to_latest():
 
 
 @pytest.mark.asyncio
+async def test_collect_cls_telegraph_no_fallback_returns_empty():
+    """非交易日保护：allow_latest_fallback=False 时当日为空不降级 /latest。
+
+    防止上一交易日消息被重新作为非交易日事件入库：telegraph 失败直接返回 []，
+    且不再发起 /internal/news/latest 请求（node_api.get 仅调用一次）。
+    """
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(side_effect=RuntimeError("telegraph failed"))
+        events = await collect_cls_telegraph("2026-08-15", allow_latest_fallback=False)
+        assert events == []
+        mock_api.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_collect_cls_telegraph_no_fallback_with_empty_items():
+    """非交易日保护：telegraph 返回空 items（非交易日无数据）也不降级。"""
+    with patch("aistock_agent.services.event_scrape_sources.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"items": [], "degraded": False})
+        events = await collect_cls_telegraph("2026-08-15", allow_latest_fallback=False)
+        assert events == []
+        mock_api.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_collect_eastmoney_judgements_reads_existing_table():
     """C1：Node getEvents 返回 {total, events}（键名 events 非 items），真实键名可读。"""
     rows = [

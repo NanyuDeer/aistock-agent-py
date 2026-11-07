@@ -921,6 +921,10 @@ async def _warehouse_event_items(
     load_event_scrape`，**仅一次报告读，无新增检索/LLM 成本**）与同一匹配权重函数
     （实体 > 关键词 > 标题 > 摘要），保证与 children[].events 的中台口径一致。
     无板块词/读库失败/无命中 → ([], [])。
+
+    `include_peripheral=True`：预判输入**不属于链 children 匹配池**（Task 8 把外围
+    事件从链层路由到 root.peripheral_events），此处刻意保留全量中台池，维持预判
+    注入的既有语义不被链层改动波及。
     """
     from aistock_agent.services.attribution_chain import (  # noqa: PLC0415
         _sector_tokens,
@@ -935,7 +939,9 @@ async def _warehouse_event_items(
     if not tokens:
         return [], []
     try:
-        warehouse_events = await load_chain_warehouse_events(report_date)
+        warehouse_events = await load_chain_warehouse_events(
+            report_date, include_peripheral=True
+        )
     except Exception as exc:  # noqa: BLE001 — 注入失败不阻断预判产出
         logger.warning(
             "predict_input.warehouse_read_failed", date=report_date, error=str(exc)

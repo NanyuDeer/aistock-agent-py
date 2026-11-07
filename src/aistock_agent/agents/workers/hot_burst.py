@@ -2,7 +2,6 @@
 
 import json
 import re
-from datetime import datetime
 
 import structlog
 from langchain_core.messages import SystemMessage
@@ -171,7 +170,8 @@ async def run(state: AgentState) -> dict[str, object]:
 
         final_response = extract_final_ai_response(result.get("messages", []))
 
-        report_date = str(state.get("report_date") or datetime.now().strftime("%Y-%m-%d"))
+        # 兜底日期用上海自然日（报告日，非展示时间戳；state 通常已注入 report_date）
+        report_date = str(state.get("report_date") or shanghai_today().isoformat())
 
         if final_response:
             # 解析双层输出

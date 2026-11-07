@@ -664,6 +664,33 @@ def _normalize_global_facts(
     )
 
 
+def _event_evidence_source(
+    *,
+    source_id: str,
+    provider: str,
+    title: str,
+    content: str,
+    url: str | None,
+    occurred_at: datetime | None,
+    captured_at: datetime,
+    source_level: Literal["primary", "reporting", "market_data"],
+    origin: Literal["domestic", "peripheral"],
+) -> SourceRecord:
+    """event_evidence 的 SourceRecord 共享构造器：origin 必填（漏传即 mypy 报错）。"""
+    return SourceRecord(
+        source_id=source_id,
+        kind="event_evidence",
+        provider=provider,
+        title=title,
+        content=content,
+        url=url,
+        occurred_at=occurred_at,
+        captured_at=captured_at,
+        source_level=source_level,
+        origin=origin,
+    )
+
+
 def _normalize_news_facts(
     news_data: dict[str, object] | None,
     sources: dict[str, SourceRecord],
@@ -712,9 +739,8 @@ def _normalize_news_facts(
                 url = f"https://www.cls.cn/detail/{item_id}"
         news_counter += 1
         source_id = f"NEWS_{news_counter:03d}"
-        sources[source_id] = SourceRecord(
+        sources[source_id] = _event_evidence_source(
             source_id=source_id,
-            kind="event_evidence",
             provider="cls",
             title=_safe_str(item.get("title"), "无标题"),
             content=_safe_str(item.get("brief", item.get("content", "")))[:500],
@@ -722,6 +748,7 @@ def _normalize_news_facts(
             occurred_at=occurred_at,
             captured_at=captured_at,
             source_level="reporting",
+            origin="domestic",
         )
         if url:
             causal_ready_count += 1
@@ -826,9 +853,8 @@ def _normalize_event_store_facts(
         occurred_at = _parse_news_datetime(ev["scrape_at"])
         if occurred_at is None:
             occurred_at = captured_at
-        sources[source_id] = SourceRecord(
+        sources[source_id] = _event_evidence_source(
             source_id=source_id,
-            kind="event_evidence",
             provider=_safe_str(ev["source"], "event_store"),
             title=_safe_str(ev["title"], "无标题"),
             content=summary[:500] if summary else _safe_str(ev["title"], "无标题"),
@@ -836,6 +862,9 @@ def _normalize_event_store_facts(
             occurred_at=occurred_at,
             captured_at=captured_at,
             source_level=_map_event_store_source_level(ev["source_level"]),
+            origin=(
+                "peripheral" if ev.get("event_origin") == "peripheral" else "domestic"
+            ),
         )
         if url:
             causal_ready_count += 1
@@ -930,9 +959,8 @@ def _normalize_search_facts(
             search_counter += 1
             source_count += 1
             source_id = f"SEARCH_{search_counter:03d}"
-            sources[source_id] = SourceRecord(
+            sources[source_id] = _event_evidence_source(
                 source_id=source_id,
-                kind="event_evidence",
                 provider=provider,
                 title=_safe_str(item.get("title"), "无标题"),
                 content=_safe_str(item.get("content", ""))[:500],
@@ -940,6 +968,9 @@ def _normalize_search_facts(
                 occurred_at=occurred_at,
                 captured_at=captured_at,
                 source_level="reporting",
+                origin=(
+                    "peripheral" if status_key == "tavily_global_risk" else "domestic"
+                ),
             )
             if url:
                 causal_ready_count += 1
@@ -1021,9 +1052,8 @@ def _normalize_targeted_search_facts(
             url = _safe_optional_str(item.get("url"))
             counter += 1
             source_id = f"SEARCH_S{counter:02d}"
-            sources[source_id] = SourceRecord(
+            sources[source_id] = _event_evidence_source(
                 source_id=source_id,
-                kind="event_evidence",
                 provider=provider,
                 title=title,
                 content=content,
@@ -1031,6 +1061,7 @@ def _normalize_targeted_search_facts(
                 occurred_at=trade_date_dt,
                 captured_at=captured_at,
                 source_level="reporting",
+                origin="domestic",
             )
     return counter
 

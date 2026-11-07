@@ -54,6 +54,41 @@ async def test_run_event_scrape_unknown_mode_raises():
         await run_event_scrape("unknown_mode", score_date="2026-08-12")
 
 
+@pytest.mark.asyncio
+async def test_run_event_scrape_intraday_passes_through_allow_latest_fallback():
+    """intraday 透传 allow_latest_fallback（非交易日 False 关闭跨日降级）。
+
+    回归保护：默认 True（交易日行为不变），显式 False 时逐层传到 collect_cls_telegraph。
+    """
+    cls_mock = AsyncMock(return_value=[])
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=cls_mock,
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 0,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
+    ):
+        # 默认（交易日）：allow_latest_fallback 缺省 True
+        await run_event_scrape("intraday", score_date="2026-08-15")
+        assert cls_mock.await_args.kwargs["allow_latest_fallback"] is True
+        # 非交易日：显式 False
+        await run_event_scrape(
+            "intraday", score_date="2026-08-15", allow_latest_fallback=False
+        )
+        assert cls_mock.await_args.kwargs["allow_latest_fallback"] is False
+
+
 def _make_event(*, title: str, impact_score: int, **extra: object):
     """构造归一化事件（normalize_event 兜底 symbol/involved_keywords 进 payload）。"""
     raw: dict[str, object] = {"title": title, "impact_score": impact_score}

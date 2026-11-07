@@ -16,6 +16,7 @@ from typing import Any
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.services.cache import get_cached_briefing, get_cached_review
 from aistock_agent.skills.base import skill
+from aistock_agent.utils.date import shanghai_today
 
 
 def _extract_details(artifact: object) -> str:
@@ -49,7 +50,10 @@ def _extract_summary(artifact: object) -> str:
 @skill
 async def report_lookup(args: dict[str, Any], goal: InsightGoal) -> Evidence:
     report_type = args.get("report_type", "review")
-    date_str = args.get("date") or datetime.now(UTC).strftime("%Y-%m-%d")
+    # 默认报告日期取**上海自然日**（勿用 datetime.now(UTC)：UTC 日在京时 00:00–08:00
+    # 期间会落到前一天，用户此刻问"今天的复盘"会查到昨天的报告）。
+    # as_of 仍是绝对时刻，保持 UTC 不变。
+    date_str = args.get("date") or shanghai_today().isoformat()
     now = datetime.now(UTC)
 
     if report_type == "review":
@@ -118,8 +122,11 @@ async def report_lookup(args: dict[str, Any], goal: InsightGoal) -> Evidence:
         # D38：未登录走 summary_fallback（会话内摘要），不读 DB。
         user_id = args.get("user_id")
         if user_id:
+            # 注：此处原有一个**函数内**的 `from ... import shanghai_today`。函数体里只要
+            # 存在该名字的绑定，整个函数内它就按**局部名**解析，而本函数在分支之前
+            # （默认报告日期处）也要用它 → 会抛 UnboundLocalError。现统一由模块顶层
+            # import 提供，故删除该局部导入。
             from aistock_agent.services.data_client import node_api
-            from aistock_agent.utils.date import shanghai_today
 
             artifact = await node_api.get_analysis_report(
                 report_type="chat_analysis",

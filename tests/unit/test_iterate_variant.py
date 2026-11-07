@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -21,6 +20,7 @@ from aistock_agent.iterate.variant_engine import (
     generate_variant,
     restore_baseline,
 )
+from aistock_agent.utils.date import shanghai_today
 
 
 def _sample_variant() -> VariantPlan:
@@ -151,7 +151,8 @@ async def test_experiment_record_has_real_variant_hash(iterate_data_dir: object)
     expected = _compute_variant_hash(variant)
     assert record["variant_hash"] == expected
     assert "git_commit" not in record
-    assert record["created_at"] == date.today().isoformat()
+    # 与产品代码同源：created_at 用上海自然日（_now_iso_date）
+    assert record["created_at"] == shanghai_today().isoformat()
     path = _Path(iterate_data_dir) / "experiments" / "case_test_variant_hash_r1.json"  # type: ignore[arg-type]
     assert path.exists()
     on_disk = _json.loads(path.read_text(encoding="utf-8"))

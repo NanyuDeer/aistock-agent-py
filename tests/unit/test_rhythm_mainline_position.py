@@ -44,7 +44,7 @@ def test_event_branch_kept_when_d_within_max():
     ev = {"date": "2026-09-18", "title": "FOMC 议息", "importance": "high"}
     out = build_event_branch(ev, origin_date="2026-09-16")
     assert len(out) == 3
-    assert "不改变主档位" in out[0]["conclusion"]["note"]
+    assert "不改仓位" in out[0]["conclusion"]["note"]
 
 
 def test_event_branch_without_origin_unchanged():

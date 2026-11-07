@@ -156,6 +156,13 @@ async def chat_message(
         "UserProfile | None",
         await node_api.get_user_profile(user_id_value) if user_id_value else None,
     )
+    # 用户画像自动挖掘一期：推断同样无条件显式赋值（匿名写 None 覆盖 checkpoint
+    # 旧值；拉取失败 None 仅 warning，不阻断对话）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
+    )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
     # G1 修订（2026-08-17 design-debate 定案）：值源 = 末节点 synth_answer 输出
@@ -397,6 +404,12 @@ async def chat_stream_messages(
     initial_state["user_profile"] = cast(
         "UserProfile | None",
         await node_api.get_user_profile(user_id_value) if user_id_value else None,
+    )
+    # 用户画像自动挖掘一期：SSE 路径同样无条件注入推断（对齐 ws.py）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
     )
     initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
     reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
@@ -1641,6 +1654,28 @@ async def readiness(response: Response) -> dict[str, object]:
     except Exception as e:
         _health_logger.warning("health_check_stock_trace_consumer_failed", error=str(e))
         checks["stock_trace_consumer"] = f"error: {e}"
+
+    # 调度器心跳（2026-11-03）：pm2 日志流曾因磁盘写满（ENOSPC）中断，“没有心跳日志”
+    # 不代表调度停摆（进程内调度实际仍在跑）。心跳戳写在进程内，readiness 直接读它，
+    # 真正停摆时才会 degraded，避免再被日志丢失误导。
+    try:
+        import aistock_agent.services.scheduler as _sched_module
+
+        if not settings.scheduler_enabled or settings.qa_mode_enabled:
+            checks["scheduler"] = "skipped"
+        elif _sched_module._scheduler_started_at is None:
+            checks["scheduler"] = "error: scheduler not started"
+        elif _sched_module._scheduler_last_heartbeat is None:
+            checks["scheduler"] = "pending"
+        else:
+            age = max(0.0, time.time() - _sched_module._scheduler_last_heartbeat)
+            if age > _sched_module.HEARTBEAT_STALE_SECONDS:
+                checks["scheduler"] = f"error: heartbeat stale ({age:.0f}s)"
+            else:
+                checks["scheduler"] = f"ok ({age:.0f}s)"
+    except Exception as e:
+        _health_logger.warning("health_check_scheduler_failed", error=str(e))
+        checks["scheduler"] = f"error: {e}"
 
     # "skipped"/"pending" 不算失败，只有非 ok/非 skipped/非 pending 的检查项才判定 degraded
     degraded = any(

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -32,6 +32,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from aistock_agent.services import sector_aliases_store
 from aistock_agent.services.llm import get_deep_think
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -506,7 +507,8 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
         快照字典。文件不存在时返回降级快照（标注 error）。
     """
     if date_str is None:
-        date_str = date.today().isoformat()
+        # 默认报告日取上海自然日（与归档文件名日期前缀同源，见 archiver）
+        date_str = shanghai_today().isoformat()
 
     # 查找晨报和复盘文件
     morning_file = _find_report(MORNING_DIR, date_str)

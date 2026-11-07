@@ -29,11 +29,5 @@ async def run_synthesis(
         return None
     if not isinstance(resp, RhythmSynthesis):
         return None
-    # P1-2：按元素保全（剔除非法项），避免全丢；主线受确定性事实约束（spec §7/H2）
-    names = set()
-    if mainline_facts and mainline_facts.get("name"):
-        names.add(str(mainline_facts["name"]))
-    evidence_date = None
-    if mainline_facts and mainline_facts.get("data_date"):
-        evidence_date = str(mainline_facts["data_date"])
-    return prune_invalid(resp, candidate_names=names or None, evidence_date=evidence_date)
+    # P1-2：按元素保全（剔除非法项），避免全丢
+    return prune_invalid(resp)

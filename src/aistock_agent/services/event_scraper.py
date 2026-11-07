@@ -27,6 +27,7 @@ from aistock_agent.services import (
     event_store,
     forward_event_sources,
 )
+from aistock_agent.services.event_origin import is_peripheral
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.search_cache import SearchCache
 from aistock_agent.utils.date import shanghai_now, shanghai_today
@@ -115,6 +116,19 @@ async def _trigger_conduction(events: list[event_store.EventRecord]) -> None:
     # UNKNOWN（含缺失默认）一律放行——可能含行业/市场/产业链事件，不能过滤。
     allowed_events: list[event_store.EventRecord] = []
     for ev in events:
+        # S5 旁支：peripheral（外围资讯）不进 event_agent/GI；事件仍保留在事件库
+        # dict(ev)：is_peripheral 形参为 dict[str, Any]，EventRecord(TypedDict) 需转换
+        # （对齐 attribution_chain 既有惯例；谓词只读，浅拷贝无副作用）。
+        if is_peripheral(dict(ev)):
+            logger.info(
+                "EVENT_CONDUCTION_FILTER",
+                event_id=ev.get("event_id", ""),
+                title=str(ev.get("title", ""))[:50],
+                event_scope=str(ev.get("event_scope", "")),
+                action="skip_conduction",
+                reason="peripheral_event",
+            )
+            continue
         event_scope = str(ev.get("event_scope", "UNKNOWN") or "UNKNOWN")
         if event_scope == "STOCK":
             logger.info(
@@ -201,6 +215,7 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     ]
     if score_date == _today():
         tasks.append(event_scrape_sources.collect_global_markets())
+        tasks.append(event_scrape_sources.collect_jin10(score_date))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     events: list[event_store.EventRecord] = []
@@ -243,12 +258,26 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
     return result
 
 
-async def scrape_intraday(score_date: str) -> dict[str, Any]:
-    """盘中增量采集：仅电报 + 东财新增，去重后落库（供传导更新）。"""
-    cls_events = await event_scrape_sources.collect_cls_telegraph(score_date)
+async def scrape_intraday(
+    score_date: str,
+    *,
+    allow_latest_fallback: bool = True,
+) -> dict[str, Any]:
+    """盘中增量采集：仅电报 + 东财新增，去重后落库（供传导更新）。
+
+    Args:
+        score_date: 归属日期（YYYY-MM-DD）。
+        allow_latest_fallback: 财联社当日电报为空/降级时是否允许回退
+            /internal/news/latest（跨日最新）。交易日默认 True（保持原行为）；
+            非交易日 Job 传 False，避免上一交易日消息被当作非交易日事件入库。
+    """
+    cls_events = await event_scrape_sources.collect_cls_telegraph(
+        score_date, allow_latest_fallback=allow_latest_fallback
+    )
     em_events = await event_scrape_sources.collect_eastmoney_judgements(score_date)
+    jin10_events = await event_scrape_sources.collect_jin10(score_date)
     events = [
-        ev for ev in (cls_events + em_events) if event_store.is_major_event(ev)
+        ev for ev in (cls_events + em_events + jin10_events) if event_store.is_major_event(ev)
     ]
     # Phase-2 LLM 精评（2026-08-13）：同上，盘中增量同样接入
     if settings.event_scoring_llm_enabled:
@@ -305,6 +334,7 @@ async def run_event_scrape(
     *,
     score_date: str | None = None,
     event: dict[str, Any] | None = None,
+    allow_latest_fallback: bool = True,
 ) -> dict[str, Any]:
     """条件边路由入口。
 
@@ -312,6 +342,9 @@ async def run_event_scrape(
         scrape_mode: full_daily / intraday / event_triggered。
         score_date: 交易日（YYYY-MM-DD），默认今天。
         event: event_triggered 模式的事件载荷（含 symbol 等）。
+        allow_latest_fallback: intraday 模式下当日电报为空/降级时是否允许回退
+            /internal/news/latest（跨日最新）。默认 True（保持交易日行为不变）；
+            非交易日 Job 传 False，禁止跨日 latest 降级。
 
     Returns:
         {"scrape_mode", "persisted", "deduped", "error"}。
@@ -323,7 +356,9 @@ async def run_event_scrape(
     if scrape_mode == "full_daily":
         result = await scrape_full_daily(day)
     elif scrape_mode == "intraday":
-        result = await scrape_intraday(day)
+        result = await scrape_intraday(
+            day, allow_latest_fallback=allow_latest_fallback
+        )
     else:
         result = await scrape_event_triggered(event or {})
 

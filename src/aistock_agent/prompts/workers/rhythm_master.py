@@ -27,14 +27,14 @@ def build_synthesis_prompt(
                 f"{label}方向（{mainline_facts.get('name')}，"
                 f"strength={mainline_facts.get('strength')}，"
                 f"excess={mainline_facts.get('excess')}pct，"
-                f"data_date={mainline_facts.get('data_date')}）"
+                f"数据日={mainline_facts.get('data_date')}）"
             )
         else:
             mainline_facts_text = (
                 "确定性主线事实："
                 f"{mainline_facts.get('name')}（strength={mainline_facts.get('strength')}，"
                 f"excess={mainline_facts.get('excess')}pct，"
-                f"data_date={mainline_facts.get('data_date')}）"
+                f"数据日={mainline_facts.get('data_date')}）"
             )
     return (
         "你是节奏大师研研判层。基于下列确定性证据，输出结构化判断。\n"

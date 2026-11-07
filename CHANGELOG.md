@@ -2,6 +2,189 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-11-04 — 混合源地域误判修复（复盘报告恢复落库）
+
+**开发者**: NanyuDeer
+
+### 修复
+
+
+- **jin10 不再是整体外围源**：`services/event_origin.py` 将 `jin10` 从 `_PERIPHERAL_SOURCES` 移入 `_MIXED_SOURCES`。混合源按内容判定：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（不再回落 peripheral）。
+- **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存 `event_origin`，按内容重新判定。否则 2026-10-16 起已写成 `peripheral` 的境内 jin10 快讯仍会让复盘校验失败。
+- **根因**：复盘 `_validate_origin_consumption` 要求 peripheral 证据只能支撑全球风险/市场定位类归因。2026-11-04 的「沪深两市成交额突破2万亿元」「多只科创半导体ETF涨超10%」「长鑫科技回购」均被整源白名单误标 peripheral，quick 复盘连续 3 次失败 → 整份降级且不落库 → 前端显示「复盘报告未能完成」。
+
+### 测试
+
+- `tests/unit/test_event_origin.py`：更新源白名单用例；新增混合源境内/海外/未知 6 条参数化回归 + `is_peripheral` 读时重算用例。
+- `tests/unit/test_event_store.py`：新增 `_rebuild_event_record` 混合源重算用例（peripheral → domestic / unknown）。
+- `pytest tests -q` → **4100 passed / 5 skipped**；ruff/mypy 改动文件通过。
+
+### 部署与验证（华为云 121.37.46.229，2026-11-04 18:18 CST）
+
+- PR #157 合入 `f1a1992`，main CI success；服务器 fast-forward 至 `f1a1992`，`pm2 restart aistock-agent` 后 `/health/ready` 返回 scheduler ok。
+- 手动触发 2026-11-04 review：70.13 秒完成，`run_review_done status=ok`，report id **4722** `status=completed`，content 99,670 字符。
+- 18:30 定时 full review 自动执行并成功：`snapshot_kind=full`、`run_review_done status=ok`、`analysis_report_saved`，未再出现 `run_review_trace_validation_failed`。
+- 接口 `GET /api/agent/report/review/2026-11-04` 返回 `id=4722 / status=completed / snapshot=trace-20261104-20261104T103000014493Z`；DB `agent_analysis_reports` 对应行 completed，前端页面可正常取到最新复盘。
+
+---
+
+## [main] 2026-11-03 — 情绪任务 17:00+重试 & 仓位口径同源（PR #156 合入 + 部署）
+
+**开发者**: NanyuDeer（合入/CI 修复/部署）、changer-collab（PR #156）
+
+### 修复 / 新增
+
+- **合并 PR #156**：`scheduler_sentiment_cron` 15:45 → **17:00**（close-snapshot 未就绪时按 10/20 分钟重试共 3 次，日志带 `attempt`）；`MasterRhythmCard` 新增 `inherited_position_text`，morning/midday 仓位随档位一并继承基准卡（优先级：中性沿用降级 > 继承的基准仓位 > 本地 `derive_position_text`），修复 11-02「档位=当日基准、仓位=前一日 K 线重算」的跨日错配。
+- **CI 回归修复**：新增 `rhythm_engine.cap_position_text_on_event_no_result`——事件当期（d=0）结果未落档时，继承来的仓位文案仍统一封顶「轻仓~三成」（原 `test_midday_event_no_result_caps_base` 因继承优先级变更而失败）。
+- **temperature_series 接线**（PR C1）：`_build_rhythm_card` 读 sentiment 归档近 7 个交易日序列透出卡片字段，归档缺失返回空数组不伪造；同步修正 docstring 的「已知空置」旧描述。
+
+### 文档
+
+- `AGENTS.md`：三时点时间线 sentiment_temp 更新为 17:00（并调整到 16:05/16:10 之后）；新增「仓位口径同源 + 事件封顶」约定。
+
+### 部署与验证（华为云 121.37.46.229）
+
+- bundle 增量部署至 `53c0b49`，`pm2 delete + pm2 start deploy/ecosystem.config.json + pm2 save`；`GET /health` 200、`/health/ready` scheduler ok；心跳 jobs 含 `sentiment_temp`；`config.py` cron = `0 17 * * 0-4`。
+- 情绪归档补跑：2026-10-30 42.8/低迷、2026-11-02 81.5/亢奋、2026-11-03 51.0/常温；11-02 三时点重跑后均为 `ebb / 建议仓位：轻仓~观望`，after_close `temperature_series` 非空。
+
+### 测试
+
+- PR 分支：`pytest tests -q` → **4084 passed / 5 skipped**；新增单测 + 集成回归均绿；ruff/mypy 改动文件通过。
+- 合并后关键用例（scheduler/sentiment/rhythm/health）→ **144 passed**；GitHub main CI 绿。
+
+---
+
+## [main] 2026-11-03 — 调度器心跳可观测性修复（“P0 停摆”误判收口）
+
+**开发者**: NanyuDeer
+
+### 修复
+
+- `src/aistock_agent/services/scheduler.py`：`scheduler_heartbeat` 同时写入进程内时间戳 `_scheduler_last_heartbeat`，`start_scheduler()` 成功后写入 `_scheduler_started_at`——**心跳不再只依赖日志落盘**。2026-10-19 16:05 服务器磁盘写满（ENOSPC）导致 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录；但调度实际持续运行（10-20 起每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物均照常落盘）→ 此前“调度停摆”结论被日志假象误导。心跳间隔超过 7 分钟会额外打 `scheduler_heartbeat_gap` 警告。
+- `src/aistock_agent/services/scheduler.py`：心跳 job 改为**先于** misfire 循环注册，并显式 `misfire_grace_time=3600`。原顺序使诊断 job 仍是默认 1s grace，event loop 繁忙 5 秒就会被跳过（2026-10-22 生产日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
+- `src/aistock_agent/api/routes.py`：`/health/ready` 新增 `scheduler` 检查项——调度启用但未 start → `error: scheduler not started`；启动后首心跳未到 → `pending`；心跳超过 7 分钟 → `error: heartbeat stale`；正常 → `ok (Ns)`；调度禁用/QA 模式 → `skipped`。
+
+### 测试
+
+- `tests/unit/test_scheduler.py` 新增 3 例：心跳写入时间戳、start 记录启动时间、心跳 job 拿到 1h misfire grace。
+- `tests/e2e/test_health.py` 新增 4 例：心跳过期 503、调度未启动 503、首心跳前 pending、调度禁用 skipped。
+- `pytest tests -q` → **4085 passed / 5 skipped**；`ruff check` 改动文件 → All checks passed。
+
+### 文档
+
+- `AGENTS.md` 新增“调度器心跳与 readiness”约定（含“日志无心跳 ≠ 调度停摆”的排查口径）。
+
+---
+
+## [changer] 2026-10-16 — 外围资讯接入与大盘归因外围维度增强
+
+**开发者**: changer-collab
+
+### 新增
+
+- **外围资讯数据源接入**：事件中台新增一路外围快讯源，补齐外盘/涉外宏观资讯的当日采集覆盖面。采集全程安全降级（失败即返回空，不阻断抓取、不重试），且仅服务当日、按条目日期逐条过滤，历史不回溯。
+- **外围资讯标记（双维度）**：事件在事件中台内被显式标记两个正交维度——地域（境内／外围／未知）与主体层级（个股／大盘／未知），二者同时命中即为「外围资讯」，使外围资讯在事件中台可识别。
+- **大盘归因链外围事件通道**：归因链新增外围事件引用通道（纯持久化，供后续外围传导分析消费），与板块驱动事件互不干扰。
+
+### 改进
+
+- **评分口径纠偏**：外围（涉外宏观）事件不再套用 A 股多空词表，方向统一判定为中性，避免「加息→利好」一类方向误标；境内事件口径保持不变。
+- **溯源证据地域标注**：复盘事实快照的来源证据补充地域标注；复盘校验新增「外围证据仅可支撑全球风险／市场定位类归因」的约束，违规即整份降级。
+- **跨源去重收敛**：事件库跨源近重复吸收收紧为「至少一侧为外围资讯」才可吸收，既防库膨胀、也防重复分析，同时不破坏「独立媒体各自保留」的既有口径。
+- **传导范围收口**：外围资讯不再进入事件传导与全局重要性评估，但仍完整保留在事件库（路由而非删除），事件数据不丢失。
+
+### 重构
+
+- 事件方向与重大度判定由多处内联收敛为单一来源，消除口径分叉。
+
+### 验证
+
+- 全量单元测试通过（无新增失败）；静态类型检查与代码风格检查零错误。
+- 跨仓契约以真实联调验证：大盘归因链携外围事件通道往返读写一致（写入校验通过、回读包含该通道）。
+
+---
+
+## [changer] 2026-10-16 — 忽略内部部署操作手册文档（仓库卫生）
+
+**开发者**: 37588
+
+### 改进
+
+- `.gitignore`：新增 `docs/2026-09-15-event-entity-deploy-checklist.md` 忽略项——内部运维文档含服务器路径，不纳入版本控制、不进公开面（呼应「公开面禁明文」约束）。
+
+---
+
+## [main] 2026-10-14 — 新增非交易日事件抓取独立 Job（解决周末/节假日事件时间轴断档）
+
+**开发者**: Aria
+
+### 新增
+
+- **非交易日事件抓取 Job `event_scrape_non_trading`**：交易日抓取 Job 受 cron 周几（`0-4`）+ 函数内 `is_trading_day` 双重守卫，非交易日完全不抓取 → 事件传导/时间轴断档。新增独立 Job 复用现有抓取入口，**不复制任何抓取逻辑**。
+  - `config.py`：新增 `scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"`（非交易日 08:30/12:00/18:00/22:00 触发）。
+  - `services/scheduler.py`：新增包装协程 `_run_non_trading_event_scrape_job()`（**反向守卫**：交易日 `return`，非交易日调 `run_event_scrape("intraday", score_date=today, allow_latest_fallback=False)`）+ 注册 Job。**交易日三 Job 与 `if not is_trading_day(report_day): return` 守卫逐字未改**。
+- **跨日降级保护参数 `allow_latest_fallback`**（默认 `True`，交易日行为零变化）：
+  - `services/event_scraper.py`：`run_event_scrape` / `scrape_intraday` 新增关键字参数并透传。
+  - `services/event_scrape_sources.py`：`collect_cls_telegraph` 新增该参数；`False` 时当日电报为空/降级即返回 `[]`，不再回退 `/internal/news/latest`，避免上一交易日消息被重新作为非交易日事件入库。
+
+### 未改动（约束）
+
+- 数据库表结构、`event_id` 生成规则、`content_hash` 规则、去重逻辑、`event_start_time` 逻辑、API 接口、前端展示 —— 全部不变（现有展示链路已支持非交易日事件，事件一旦落库即可正常进入传导/GI/时间轴）。
+- `event_conduction` / global_importance 无隐性交易日限制，无需改动。
+
+### 验证
+
+- `python -m pytest tests/unit/test_event_scrape_sources.py tests/unit/test_scheduler_event_scrape.py tests/unit/test_event_scraper.py -q` → **50 passed**
+- `python -m pytest tests/unit/test_event_scraper_conduction.py tests/unit/test_scheduler.py tests/integration/test_event_scraper_conduction_payload.py tests/unit/test_event_store.py -q` → **110 passed**
+- `python -m mypy src/aistock_agent/services/scheduler.py src/aistock_agent/services/event_scraper.py src/aistock_agent/services/event_scrape_sources.py src/aistock_agent/config.py` → **Success: no issues found in 4 source files**
+- 新增回归用例：非交易日 Job 反向守卫 / 参数透传 / `collect_cls_telegraph` 禁用降级返回空（见 `tests/unit/test_scheduler_event_scrape.py`、`tests/unit/test_event_scraper.py`、`tests/unit/test_event_scrape_sources.py`）。
+
+---
+
+## [main] 2026-10-08 — 默认业务日期改用上海自然日（原写死 UTC 日，京时凌晨会查成前一天）+ 回归测试
+
+**开发者**: Aria
+
+### 修复
+
+- **4 处默认业务日期由「UTC 日」改为「上海自然日」**（`shanghai_today()`）。原实现写死 `datetime.now(UTC)` —— 这类**改宿主 TZ 无效**：北京时间 **00:00–08:00** 期间 UTC 日仍是前一天，会整体落到前一天。
+  - `skills/report_lookup.py`（默认报告日期）、`skills/trace_lookup.py`、`skills/evidence_resolver.py` —— 三处均为**用户对话可触发**：用户此刻问「今天的复盘/溯源」会去查**昨天**的报告。
+  - `iterate/case_scanner.py:69`（电报事件扫描锚点）—— 原口径与姊妹源 `iterate/case_sourcers.py` 的 `shanghai_today()` **不一致**；定时任务 16:30 跑时两者同日、无差异，但手动/其它时段运行会整体漂一天，故统一口径。
+  - 注：`as_of` 等**绝对时刻**仍用 UTC，语义未变。
+- **顺带修一处真实缺陷**：`report_lookup.py` 在 `if user_id:` 分支内存在一个**函数内**的 `from ... import shanghai_today`。函数体里一旦出现该名字的绑定，整个函数内它就按**局部名**解析，而该函数在分支之前（默认日期处）也要用它 → 运行时抛 `UnboundLocalError`。由本次新增的回归测试**当场抓出**；已删除该局部导入、统一走模块顶层 import。
+  （已核查其余局部导入 `qa_router` / `synth_answer` / `sector_tools` 均为「同函数内导入即用」，不构成此问题。）
+
+### 新增
+
+- `tests/unit/test_skill_default_report_date.py`（5 例）。手法：把各模块命名空间里的 `shanghai_today` **打桩为哨兵日期**，以「不传 date」调用，断言**下游实际收到的日期 == 哨兵** —— 从而锁死「默认业务日期必须由上海日工具产生」这一契约，而非同义反复。
+  - 该断言在旧实现下**必然失败**（旧代码完全不引用 `shanghai_today`）：已验证 **RED（旧实现 5 failed）→ GREEN（现实现 5 passed）**。
+  - 另含一条「显式传入 `date` 时不得被上海日覆盖」的用例，防过度纠正。
+
+### 验证
+
+- `uv run python -m pytest tests/ -q` → **4023 passed / 4 skipped / 0 failed**
+- `uv run mypy src` → **Success: no issues found in 258 source files**
+- `uv run ruff check src tests scripts` → **All checks passed!**
+
+---
+
+## [main] 2026-10-07 — 修复 CI 首跑暴露的 2 条晨报用例时区误红（测试侧）
+
+**开发者**: Aria
+
+### 修复（测试侧，产品代码零改动）
+
+- **现象**：`ci.yml` 上线后首次运行（UTC 17:03，上海已是次日）`pytest tests/ -q` 报 2 failed（4016 passed / 4 skipped），均在 `tests/integration/test_morning_agent.py`：`test_morning_run_persists_with_morning_type_and_null_user_id`（actual `2026-10-08` vs expected `2026-10-07`）与 `test_morning_run_system_message_injected`（期望 `2026年10月07日`，实际注入 `2026年10月08日`）。
+- **根因**：`morning.run()` 刻意取**上海自然日**（`utils.date.shanghai_today`，防宿主机/容器时区漂移），而这两条用例的**期望值**用 `datetime.now()` 取 **CI runner 本地时区** → 仅当「runner 本地日 ≠ 上海日」时不等，即 UTC runner 上 **16:00–24:00 UTC**（北京 00:00–08:00）必红；开发者北京时间机器上两者恰好一致，故此前长期未暴露。
+- **修法**：期望值改为与产品代码同源 —— `shanghai_today().isoformat()` / `shanghai_today().strftime("%Y年%m月%d日")`，并补 `from aistock_agent.utils.date import shanghai_today`。
+- **同类排查**：`tests/` 其余 `datetime.now()` / `date.today()` 用法在同一次 UTC 运行中均未失败（自洽），本次不动。
+
+### 验证
+
+- `uv run --frozen python -m pytest tests/integration/test_morning_agent.py -q` → **30 passed**；`ruff check` 改动文件 All checks passed。
+- 最终判据取 CI（UTC runner）二次运行结果。
+
+---
 ## [junliang] 2026-10-17 — 收紧板块召回：排除宽基板块 + 取消跨概念大扩张
 
 **开发者**: NanyuDeer
@@ -93,6 +276,43 @@
 ### 文档
 
 - `AGENTS.md`：新增「AI 异动解读——思考过程流式 + 速览/详情并行」契约说明（`reasoning`/`preview` 帧载荷与语义、心跳参数、Master 拆分、发布顺序约束）与「归因失败明细 `error_detail`」条目。
+
+---
+
+## [main] 2026-10-07 — 清掉合并引入的新债、修复全部 20 条 integration/e2e 既有失败与跨目录测试污染；CI 门禁纳入完整测试套件
+
+**开发者**: Aria
+
+### 修复
+
+- **清理合并引入的新欠账**（合并 junliang / changer 的分支后，本仓 `mypy` 由 0 → 4、`ruff` 出现 5 条）：
+  - `services/reasoning_stream.py:23`：`Callable[[dict], ...]` 缺泛型参数 → 补为 `dict[str, object]`（与调用方 `graph/nodes/_reasoning.py` 的签名一致）。
+  - `agents/workers/alert.py:117`：`_invoke_master` 的 `llm` 参数缺注解 → 补 `ChatOpenAI`（依据 `services/llm.py` 中 `get_quick_think/get_deep_think -> ChatOpenAI`）。
+  - `agents/workers/alert.py:511/516`：**不是运行时缺陷** —— 第二次 `asyncio.gather`（2 个协程）复用了前一个 3 元组变量 `results`，导致静态检查仍按 3 元组推断（报 `assignment` / 「期望 2 个值，实际提供 3 个」）。改用独立变量名 `master_results` 消除，**未使用 cast / ignore**。
+  - `tests/integration/test_alert_agent.py:198`：`as mock_quick` 绑定未使用 → 去掉绑定（保留 patch 本身）。4 处文件末尾缺换行由 ruff 自动修。
+- **修复全部 20 条 `tests/integration` / `tests/e2e` 既有失败**（14 + 6）。已逐条取证并**确认 0 条为产品缺陷**，根因全在测试侧：
+  - **A 组 9 条 = 测试过时**（产品行为系有意变更，已用 git 历史取证）：如 `event_generated` 语义在 `b4a816c` 被有意拆分、业绩类工具在 `d3f6930` 有意新增（故工具集断言需更新）、`review` 的 patch 目标已从 `get_analysis_report` 改名为 `get_analysis_report_quiet`、`_analyze_understanding` 的**两次调用是「首次返回假值时重试一次」的有意设计**（非重复调用缺陷）。
+  - **B 组 6 条 = 日期/时段相关**（测试假定「今天是交易日」，休市日必失败）→ 一律改为**注入交易时段桩**使其日期无关，**未使用 skip**。
+  - **D 组 5 条 = 经人类决策后处理**：① `test_full_flow_stock` / `test_full_flow_event` / `test_full_flow_sector` 由**旧单一 graph 路径**改写为**面向 chat 子图直驱**（`/chat/message` 早已切到 chat 子图，旧路径不可达），照 `tests/integration/test_chat_e2e_direct.py` 既有范式并全 mock，**无凭据、无外部服务即可运行**；② `test_full_flow_tool_failure_degradation` **下沉为 worker 层单测**（新增 `tests/unit/test_worker_tool_degradation.py`，直接引用 `tools/base.py` 的 `DEGRADED_MESSAGE`）；③ hot_burst「公共输出契约示例」原先指向 `docs/agent-outputs/hot_burst/` 下一个**从未生成**（该目录被 `.gitignore` 忽略）的路径 → 该示例本质是**供前端预览/文档使用的策划产物**，故**新建 `tests/fixtures/hot_burst_dual_layer_report.json` 并入库**（按提示词定义的真实章节结构编写，满足契约断言：`podcast_brief` 长度 163 ∈ [150,200]、含 `## 风险提示`、无内部术语）。
+- **修复跨目录测试污染（真实隐患）**：`tests/integration/test_historical_phenomena.py` 的 `monkeypatch.setattr(snapshot_module.node_api, "get", ...)` 打在**单例的实例属性**上；monkeypatch 还原时会留下一个**永久实例属性**遮蔽类属性 `NodeApiClient.get`，使 `iterate/replay_layer` 的**类级补丁失效** → 后续用例真实触网。
+  - 影响：**各目录单独跑全绿，但仓库文档入口 `pytest tests/ -v` 会失败**（README / AGENTS.md 均以此为标准入口）。
+  - 修法（治本）：改为 patch **类方法** `monkeypatch.setattr(type(node_api), "get", fake)`，使 monkeypatch 能干净还原。
+  - 注：`tests/` 中另有约 9 个文件使用同类「实例级 monkeypatch」写法，为潜在同类泄漏源（本轮未触发），建议后续统一。
+
+### 改进
+
+- **CI 门禁改为运行完整测试套件**：`.github/workflows/ci.yml` 的 pytest 步骤由「unit + 根级 + diagnostics」升级为 **`pytest tests/ -q`（全量：unit + integration + e2e + diagnostics + 根级）**。集成与端到端用例经上述改造后已可**无凭据、无外部服务、日期无关**地稳定运行。
+
+### 验证
+
+- `uv run python -m pytest tests/ -q` → **4018 passed / 4 skipped / 0 failed**（连续两次一致）
+- 分套件：`tests/unit` 3514 passed / 1 skipped；`tests/integration` 383 passed / 3 skipped；`tests/e2e` 63 passed；`tests/diagnostics` 2 passed —— **全部 0 failed**
+- `uv run mypy src` → **Success: no issues found in 258 source files**
+- `uv run ruff check src tests scripts` → **All checks passed!**
+
+### 说明
+
+- 本条目所述的 CI 工作流文件仍因**推送凭据缺少 GitHub `workflow` 权限**而未能入库（`GH013`），需补权限后推送或经网页端添加；**在此之前门禁尚未生效**。
 
 ---
 
@@ -238,6 +458,20 @@
 ### 未改变
 
 - **默认后端仍为 `memory`**（`config.py:169 checkpointer_backend: str = "memory"`）；redis 分支仅在显式配置 `CHECKPOINTER_BACKEND=redis` 时启用。未改对话业务逻辑、未改任何判定口径/阈值/表结构。
+
+---
+
+## [changer] 2026-10-06 — 节奏大师事件窗口接入统一事件时间线 + 大概念→行业板块归属映射
+
+**开发者**: changer-collab
+
+### 新增
+
+- 新增「大概念→具体行业板块」的确定性归属映射能力：为大概念给出稳定、可复现的具体行业板块归属（本期先沉淀能力，暂未接入展示）。
+
+### 改进
+
+- 节奏大师事件窗口改由统一事件时间线提供：事件按「事件发生日的上海日」展示，并纳入未来（预告中）事件；交割日规则日程仍由日历规则合成，与时间线事件合并去重后一并展示。
 
 ---
 
