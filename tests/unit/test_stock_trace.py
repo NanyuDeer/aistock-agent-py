@@ -1,6 +1,7 @@
 import asyncio
+import json
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -249,6 +250,44 @@ async def test_worker_returns_validated_structured_result() -> None:
     assert outcome.result.attribution_status == "confirmed"
     assert FakeLlm.structured_schema is StockTraceResultPayload
     assert FakeLlm.structured_method == "function_calling"
+
+
+@pytest.mark.asyncio
+async def test_worker_filters_late_market_and_downgrades_unsupported_cause() -> None:
+    later = (NOW + timedelta(minutes=10)).isoformat()
+
+    class SnapshotClient(FakeNodeClient):
+        async def get(self, path: str) -> dict[str, object] | None:
+            snapshot = snapshot_payload()
+            snapshot["triggerEvent"]["windowEndAt"] = later
+            sources = snapshot["sourceRecords"]
+            sources[1]["windowEnd"] = later
+            sources.append({
+                **sources[0], "sourceId": "late-market", "kind": "market_fact",
+                "occurredAt": later, "capturedAt": later,
+            })
+            return snapshot
+
+    class UnsupportedCauseLlm(FakeLlm):
+        async def ainvoke(self, messages: list[object]) -> StockTraceResultPayload:
+            snapshot = json.loads(messages[1].content)
+            assert {source["source_id"] for source in snapshot["source_records"]} == {
+                "announcement-1", "trigger-1",
+            }
+            assert snapshot["data_readiness"]["market"] == "missing"
+            payload = await super().ainvoke(messages)
+            payload.attribution_status = "hypothesis"
+            payload.candidates[0].supporting_evidence_ids = ["trigger-1"]
+            return payload
+
+    worker = StockTraceWorker(StockTraceNodeClient(SnapshotClient()), llm_factory=UnsupportedCauseLlm)
+    outcome = await worker.analyze("mv:000004:2026-07-30:1:up", 1, "llm-stock-trace-v1")
+    assert outcome.status == "completed"
+    assert outcome.result is not None
+    assert outcome.result.attribution_status == "insufficient"
+    assert outcome.result.primary_phrase == "证据不足"
+    assert outcome.result.confidence_level == "low"
+    assert outcome.result.primary_chain_id is None
 
 
 class FakeLlmFailsFirst:
