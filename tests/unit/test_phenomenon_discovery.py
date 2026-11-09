@@ -315,6 +315,44 @@ def test_style_divergence_uses_only_csi300_and_csi1000_at_opposite_thresholds() 
     assert _diagnostic_ids(discovery, "style_divergence") == expected_ids
 
 
+def test_style_divergence_detects_same_direction_spread_2026_11_05() -> None:
+    """11-05 实测：沪深300 +0.29% vs 国证2000 +2.40%，同向但差 2.11pp。
+
+    旧判据要求「一正一负」，该日会漏检 → 掉进 sentiment_extreme 兜底桶
+    → 现象变成「炸板率极端」、原因变成「资金分歧」，形成同义反复。
+    新增幅度判据后应判为 style_divergence。
+    """
+    facts = _neutral_facts()
+    _set_index_change(facts, "SH000001", 0.10)
+    _set_index_change(facts, "SZ399001", 1.19)
+    _set_index_change(facts, "SZ399006", 0.87)
+    _set_index_change(facts, "SH000300", 0.29)
+    _set_index_change(facts, "SH000905", 0.50)
+    _set_index_change(facts, "SH000852", 2.40)
+
+    discovery = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+
+    assert discovery.status == "detected"
+    assert discovery.primary is not None
+    assert discovery.primary.kind == "style_divergence"
+    expected_ids = ["INDEX_000300_SH", "INDEX_000852_SH"]
+    assert discovery.primary.fact_ids == expected_ids
+
+
+def test_style_divergence_rejects_small_same_direction_spread() -> None:
+    """同向但差值不足阈值时不判分化（保护单边温和上涨行情）。"""
+    facts = _neutral_facts()
+    _set_index_change(facts, "SH000300", 1.20)
+    _set_index_change(facts, "SH000852", 1.40)
+
+    discovery = discover_market_phenomenon(facts, _all_market_sources(), _CAPTURED_AT, [])
+
+    assert (
+        next(item for item in discovery.diagnostics if item.rule == "style_divergence").matched
+        is False
+    )
+
+
 def test_style_divergence_rejects_same_direction_designated_indexes() -> None:
     facts = _neutral_facts()
     _set_index_change(facts, "SH000300", 0.5)
