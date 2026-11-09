@@ -232,6 +232,9 @@ async def scrape_full_daily(score_date: str) -> dict[str, Any]:
 
     major = [ev for ev in events if event_store.is_major_event(ev)]
     logger.info("event_scrape_full_daily", total=len(events), major=len(major))
+    # 批内近重复先吸收再物化（2026-11-06 回归）：cls/jin10 对同一条公告的措辞差异
+    # 会让两条事件各自物化成 Event Entity 并各自触发传导（事件传导页重复卡片）。
+    major = event_store.dedupe_batch_events(major)
     # 重大事件时间线（spec §5A.3/§6.2 P0.5 收口）：新增事件物化必须在落库**之前**
     # （缺陷A修复，2026-10-02）：权威 app_event_id 要随本批落库写进事件库，否则
     # 「从事件库重放再传导」拿不到权威 id → 时间线 occurred 准入两侧 id 不等被丢弃。
@@ -283,6 +286,8 @@ async def scrape_intraday(
     if settings.event_scoring_llm_enabled:
         events = await event_scoring_llm.score_events_llm(events, score_date=score_date)
     logger.info("event_scrape_intraday", total=len(events))
+    # 批内近重复先吸收再物化（同 full_daily：避免重复 Event Entity 与传导双跑）
+    events = event_store.dedupe_batch_events(events)
     # 重大事件时间线（缺陷A修复，2026-10-02）：物化先于落库，
     # 权威 app_event_id 随本批落库写进事件库（供「从库重放」路径消费）
     await _materialize_events(events)

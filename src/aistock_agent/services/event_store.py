@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import unicodedata
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -123,8 +124,8 @@ def _title_similarity(norm_a: str, norm_b: str) -> float:
 def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
     """判断 ev 是否为 pool 中某事件的近重复（同数据源 + 归一化标题高相似）。
 
-    仅限同数据源（source 相同），防止跨源相似标题误吸收（不同媒体对同一
-    事件的独立报道应各自保留）。标题归一化后为空（无实质内容）不参与判断。
+    仅限同数据源（source 相同）；跨源近重复由 _is_cross_source_absorbable 负责。
+    标题归一化后为空（无实质内容）不参与判断。
     """
     norm = _normalize_title(ev["title"])
     if not norm:
@@ -140,25 +141,68 @@ def _is_near_duplicate(ev: EventRecord, pool: list[EventRecord]) -> bool:
     return False
 
 
+def _title_digits(title: str) -> tuple[str, ...]:
+    """标题中的数字序列（整数/小数），用作跨源近似去重的差异守卫。
+
+    同一事件的不同媒体措辞通常只差虚词；数字（金额/比例/日期）不同则
+    极可能是不同事件（如净利同比 10.5% vs 20.5%），不得合并。
+    """
+    return tuple(re.findall(r"\d+(?:\.\d+)?", title))
+
+
 def _is_cross_source_absorbable(ev: EventRecord, other: EventRecord) -> bool:
-    """跨源近重复吸收：仅当『至少一侧 event_origin==peripheral』且标题相似度 >0.9。
+    """跨源近重复吸收：异源 + 归一化标题相似度 >0.9 + 数字序列一致。
 
     同源近重复由 _is_near_duplicate 负责（本函数对同源直接返回 False）。
-    收紧条件（至少一侧 peripheral）避免破坏「独立媒体各自保留」既有口径。
+    2026-11-06 回归：cls 与 jin10 对同一条商务部公告的措辞差异（「进行/发起」、
+    「和/、」）导致 content_hash 不同；旧口径要求「至少一侧 peripheral」才吸收，
+    于是国内政策新闻同日入库两条并各自触发传导（事件传导页 15:06 两张卡片）。
+    现放宽为异源高相似即吸收，仅以数字序列守卫区分「相似但不同」的事件。
     """
     if other.get("source") == ev["source"]:
         return False
-    if not (
-        ev.get("event_origin") == "peripheral" or other.get("event_origin") == "peripheral"
+    other_title = str(other.get("title") or "")
+    if (
+        _title_similarity(_normalize_title(ev["title"]), _normalize_title(other_title))
+        <= TITLE_SIMILARITY_THRESHOLD
     ):
         return False
-    return (
-        _title_similarity(
-            _normalize_title(ev["title"]),
-            _normalize_title(str(other.get("title") or "")),
-        )
-        > TITLE_SIMILARITY_THRESHOLD
-    )
+    if _title_digits(ev["title"]) != _title_digits(other_title):
+        return False
+    # 股票代码守卫：两侧都带代码且不同 → 不同个股事件，不得吸收
+    ev_symbol = _normalize_symbol(str(ev.get("symbol") or ""))
+    other_symbol = _normalize_symbol(str(other.get("symbol") or ""))
+    if ev_symbol and other_symbol and ev_symbol != other_symbol:
+        return False
+    return True
+
+
+def dedupe_batch_events(events: list[EventRecord]) -> list[EventRecord]:
+    """批内近似去重（物化前调用）：同源/跨源近重复只保留先到者。
+
+    必须在 ``_materialize_events`` **之前**调用：事件实体按归一化标题生成
+    canonical key，措辞不同的转载会各自物化成一条 Event Entity，导致事件
+    时间线出现重复卡片；随后 save_event_scrape 虽会吸收，实体已建好无法回收。
+    与当日已有事件的跨批去重仍由 save_event_scrape 的 near_pool 负责。
+    """
+    kept: list[EventRecord] = []
+    seen_hashes: set[str] = set()
+    for ev in events:
+        if ev["content_hash"] in seen_hashes:
+            continue
+        cross_source_near = any(_is_cross_source_absorbable(ev, other) for other in kept)
+        if _is_near_duplicate(ev, kept) or cross_source_near:
+            logger.info(
+                "event_batch_near_duplicate_absorbed",
+                event_id=str(ev.get("event_id", "")),
+                title=str(ev.get("title", ""))[:50],
+                source=str(ev.get("source", "")),
+                cross_source=cross_source_near,
+            )
+            continue
+        seen_hashes.add(ev["content_hash"])
+        kept.append(ev)
+    return kept
 
 
 def _normalize_symbol(value: str) -> str:
