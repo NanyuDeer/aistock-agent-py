@@ -139,7 +139,7 @@ def _parse(data: dict[str, object]) -> CausalGraph:
             raise ValueError("causal node must be an object")
         node = CausalNode(
             id=str(item["id"]),
-            kind=item["kind"],  # type: ignore[arg-type]
+            kind=item["kind"],
             name=str(item["name"]),
         )
         nodes[node.id] = node
@@ -158,11 +158,11 @@ def _parse(data: dict[str, object]) -> CausalGraph:
             CausalEdge(
                 source=source,
                 target=target,
-                direction=int(item["direction"]),  # type: ignore[arg-type]
-                lag_days=int(item["lag_days"]),  # type: ignore[arg-type]
-                decay=float(item["decay"]),  # type: ignore[arg-type]
-                condition=item.get("condition"),  # type: ignore[arg-type]
-                prior_source=item["prior_source"],  # type: ignore[arg-type]
+                direction=int(item["direction"]),
+                lag_days=int(item["lag_days"]),
+                decay=float(item["decay"]),
+                condition=item.get("condition"),
+                prior_source=item["prior_source"],
                 note=str(item.get("note", "")),
             )
         )

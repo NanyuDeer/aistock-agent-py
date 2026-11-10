@@ -192,6 +192,16 @@ def _score_rules(
         and csi1000 is not None
         and abs(csi300 - csi1000) >= settings.phenomenon_style_divergence_spread_pct
     )
+    # 普涨/普跌日抑制幅度背离（2026-11-10 回归修复）。
+    # 普涨日里大小盘差 2 个点很常见（2024-09-30、2024-10-08、2025-04-07 三个历史标注
+    # 案例均因此被误报为「普涨 + 风格分化」并发）。那种差异是普涨的一部分，不是独立现象。
+    # 符号背离（一正一负）不受此限制——那才是真正的分化。
+    broad_hit = (
+        scores.get("broad_rally", 0) >= settings.phenomenon_min_match_score
+        or scores.get("broad_decline", 0) >= settings.phenomenon_min_match_score
+    )
+    if broad_hit and spread_style and not opposite_style:
+        spread_style = False
     scores["style_divergence"] = 2 if (opposite_style or spread_style) else 0
 
     strongest = _number(gainers[0].get("pct_change")) if gainers else 0.0
