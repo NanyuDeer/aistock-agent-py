@@ -389,6 +389,10 @@ class Settings(BaseSettings):
     # 现象发现：风格分化阈值。
     # CSI300 与 CSI1000 反向涨跌幅阈值（方向相反且绝对值均超过此值）。
     phenomenon_style_divergence_change_pct: float = 0.5
+    # CSI300 与 CSI1000 的涨跌幅差值阈值（同向不同幅的幅度分化）。
+    # 2026-11-09 新增：11-05 实测沪深300 +0.29% vs 国证2000 +2.40%（差 2.11pp）
+    # 属极端风格分化，但旧判据只认「一正一负」，漏检后掉进 sentiment_extreme 兜底桶。
+    phenomenon_style_divergence_spread_pct: float = 2.0
 
     # 现象发现：板块集中异动阈值。
     # 板块相对大盘中位数的绝对异动阈值。
@@ -412,6 +416,20 @@ class Settings(BaseSettings):
     phenomenon_min_match_score: int = 2
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
+
+    # 异常检测（与现象分类解耦的前置判断，2026-11-09 新增）。
+    # 目的：把「今天没事」和「今天动了但形态不认识」分开，避免后者被误判成前者。
+    # 任一核心指数涨跌幅绝对值超过此值 → price 异常。
+    anomaly_price_abs_pct: float = 1.5
+    # 成交额变化绝对值超过此值 → volume 异常。
+    anomaly_volume_change_pct: float = 30.0
+    # 涨停家数超过此值 → breadth 异常。
+    anomaly_breadth_limit_up: float = 50.0
+    # 跌停家数超过此值 → breadth 异常。
+    anomaly_breadth_limit_down: float = 30.0
+    # 大盘与中小盘涨跌幅差值超过此值 → sector_rotation 异常。
+    # 与 phenomenon_style_divergence_spread_pct 保持同值时，两处口径一致。
+    anomaly_style_spread_pct: float = 2.0
 
     # 短线情绪温度：冰点阈值与连冰升级天数。
     sentiment_ice_threshold: int = 20

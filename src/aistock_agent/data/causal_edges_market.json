@@ -1,0 +1,272 @@
+{
+  "_meta": {
+    "version": "m0-market-v1",
+    "updated_at": "2026-11-09",
+    "scope": "market",
+    "description": "机制图 · 市场版最小集。只覆盖大盘洞见需要的传导路径，不含个股/事件用的产业链多跳边（那些留到 M4）。",
+    "node_kinds": ["factor", "market", "sector", "theme", "flow"],
+    "edge_fields": {
+      "source": "起点节点 ID",
+      "target": "终点节点 ID",
+      "direction": "+1 表示 source 上行推涨 target；-1 表示 source 上行压跌 target",
+      "lag_days": "传导到位的中位滞后（交易日）",
+      "decay": "每跳衰减系数，多跳遍历用",
+      "condition": "仅在该条件成立时生效；null 为无条件边",
+      "prior_source": "theory | expert | data_fit —— 决定该边在投票中的权重"
+    }
+  },
+  "nodes": [
+    { "id": "FED_RATE", "kind": "factor", "name": "美联储政策利率" },
+    { "id": "US10Y", "kind": "factor", "name": "10Y 美债收益率" },
+    { "id": "USDCNH", "kind": "factor", "name": "人民币汇率 USDCNH" },
+    { "id": "VIX", "kind": "factor", "name": "VIX 波动率指数" },
+    { "id": "DR007", "kind": "factor", "name": "DR007 银行间质押回购利率" },
+    { "id": "POLICY_RATE", "kind": "factor", "name": "国内政策利率" },
+    { "id": "CORP_BUYBACK", "kind": "factor", "name": "产业资本回购增持强度" },
+    { "id": "EARNINGS_EXPECT", "kind": "factor", "name": "盈利预期（一致预期修正）" },
+
+    { "id": "IDX_SOX", "kind": "market", "name": "费城半导体指数" },
+    { "id": "IDX_NDX", "kind": "market", "name": "纳斯达克指数" },
+    { "id": "IDX_HSTECH", "kind": "market", "name": "恒生科技指数" },
+    { "id": "IDX_CSI300", "kind": "market", "name": "沪深300" },
+    { "id": "IDX_CSI1000", "kind": "market", "name": "国证2000" },
+    { "id": "IDX_GEM", "kind": "market", "name": "创业板指" },
+    { "id": "IDX_AVG_PRICE", "kind": "market", "name": "A股平均股价" },
+    { "id": "SEC_SEMI_KR", "kind": "market", "name": "韩国半导体（SK海力士/三星）" },
+
+    { "id": "SEC_SEMI", "kind": "sector", "name": "半导体" },
+    { "id": "SEC_MEMORY", "kind": "sector", "name": "存储" },
+    { "id": "SEC_OPTICAL", "kind": "sector", "name": "光模块" },
+    { "id": "SEC_PCB", "kind": "sector", "name": "PCB" },
+    { "id": "SEC_INFRA", "kind": "sector", "name": "基建" },
+
+    { "id": "THEME_AI_COMPUTE", "kind": "theme", "name": "AI算力" },
+    { "id": "THEME_DOMESTIC_SUB", "kind": "theme", "name": "国产替代" },
+
+    { "id": "FLOW_NORTH", "kind": "flow", "name": "北向资金" },
+    { "id": "FLOW_MARGIN", "kind": "flow", "name": "融资盘" },
+    { "id": "FLOW_NATIONAL", "kind": "flow", "name": "国家队（ETF 份额推断）" }
+  ],
+  "edges": [
+    {
+      "source": "FED_RATE",
+      "target": "US10Y",
+      "direction": 1,
+      "lag_days": 0,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "政策利率上行推升长端收益率"
+    },
+    {
+      "source": "US10Y",
+      "target": "IDX_GEM",
+      "direction": -1,
+      "lag_days": 1,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "贴现率上行压制成长股估值"
+    },
+    {
+      "source": "US10Y",
+      "target": "IDX_NDX",
+      "direction": -1,
+      "lag_days": 0,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "美债收益率与纳指负相关"
+    },
+    {
+      "source": "USDCNH",
+      "target": "FLOW_NORTH",
+      "direction": -1,
+      "lag_days": 1,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "人民币贬值对应外资流出压力"
+    },
+    {
+      "source": "VIX",
+      "target": "THEME_AI_COMPUTE",
+      "direction": -1,
+      "lag_days": 1,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "风险偏好收缩压制高波动题材"
+    },
+    {
+      "source": "DR007",
+      "target": "IDX_CSI1000",
+      "direction": -1,
+      "lag_days": 2,
+      "decay": 0.6,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "银行间利率上行收紧流动性，小盘更敏感"
+    },
+    {
+      "source": "IDX_SOX",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "隔夜费城半导体映射 A 股半导体链"
+    },
+    {
+      "source": "IDX_NDX",
+      "target": "IDX_GEM",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.6,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "隔夜纳指影响创业板风险偏好"
+    },
+    {
+      "source": "IDX_HSTECH",
+      "target": "THEME_AI_COMPUTE",
+      "direction": 1,
+      "lag_days": 0,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "港股科技与 A 股算力题材当日联动"
+    },
+    {
+      "source": "FLOW_NORTH",
+      "target": "IDX_CSI300",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "北向净流入推涨权重股"
+    },
+    {
+      "source": "FLOW_MARGIN",
+      "target": "IDX_CSI1000",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "杠杆资金偏好小盘"
+    },
+    {
+      "source": "FLOW_NATIONAL",
+      "target": "IDX_CSI300",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "expert",
+      "note": "宽基 ETF 份额净增视为托底；只能推断，不写事实"
+    },
+    {
+      "source": "POLICY_RATE",
+      "target": "IDX_GEM",
+      "direction": -1,
+      "lag_days": 3,
+      "decay": 0.6,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "政策利率下调推涨成长股（direction=-1 表示利率下行利好）"
+    },
+    {
+      "source": "POLICY_RATE",
+      "target": "SEC_INFRA",
+      "direction": -1,
+      "lag_days": 10,
+      "decay": 0.5,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "财政与利率宽松传导至基建，滞后较长"
+    },
+    {
+      "source": "SEC_MEMORY",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 5,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "expert",
+      "note": "存储涨价抬升半导体板块景气"
+    },
+    {
+      "source": "SEC_SEMI",
+      "target": "SEC_OPTICAL",
+      "direction": 1,
+      "lag_days": 8,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "expert",
+      "note": "半导体上游景气传导至光模块"
+    },
+    {
+      "source": "SEC_SEMI",
+      "target": "SEC_PCB",
+      "direction": 1,
+      "lag_days": 8,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "expert",
+      "note": "半导体上游传导至 PCB"
+    },
+    {
+      "source": "THEME_DOMESTIC_SUB",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 0,
+      "decay": 0.8,
+      "condition": "外部半导体下跌且国产替代叙事活跃",
+      "prior_source": "expert",
+      "note": "条件边：11-05 韩国 KOSPI 重挫 6%、SK海力士跌 10%，A 股半导体反而上涨，就是这条在起作用。用普通边会误判为「传导失效」"
+    },
+    {
+      "source": "POLICY_RATE",
+      "target": "CORP_BUYBACK",
+      "direction": -1,
+      "lag_days": 3,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "回购再贷款利率下调 → 回购成本下降 → 产业资本回购增加。中间变量「融资成本」不可直接观测，故合并进这一跳"
+    },
+    {
+      "source": "CORP_BUYBACK",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 2,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "expert",
+      "note": "龙头回购密集落地 → 半导体链资金流入。11-04 长鑫科技 08:45 提议回购，早于 10:00 的政策公告"
+    },
+    {
+      "source": "EARNINGS_EXPECT",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 3,
+      "decay": 0.8,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "三季报兑现 → 一致预期上修 → 半导体链走强。11-04 产业逻辑的主通道"
+    },
+    {
+      "source": "SEC_SEMI_KR",
+      "target": "SEC_SEMI",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.7,
+      "condition": null,
+      "prior_source": "data_fit",
+      "note": "韩国存储双雄与 A 股半导体链当日的情绪联动。11-05 KOSPI 重挫时该边指向压跌，被国产替代条件边对冲"
+    }
+  ]
+}

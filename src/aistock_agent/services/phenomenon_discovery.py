@@ -26,7 +26,7 @@ _RULE_ORDER: tuple[MarketPhenomenonKind, ...] = (
 _SUMMARIES: dict[MarketPhenomenonKind, str] = {
     "broad_rally": "今日沪深核心指数同步上涨，市场广度明显偏强，放量上行显示做多情绪升温",
     "broad_decline": "今日沪深核心指数同步下跌，市场广度明显偏弱，投资者情绪整体偏谨慎",
-    "style_divergence": "今日核心指数方向明显背离，市场风格分化加剧，成长与价值板块表现差异显著",
+    "style_divergence": "今日核心指数走势明显分化，大盘权重与中小盘表现差异显著",
     "sector_concentration": "今日概念板块集中异动且与大盘方向相反，行情结构分化，机会与风险并存",
     "sentiment_extreme": "今日涨跌停与炸板情绪指标出现极端值，短线情绪剧烈波动，多空分歧明显",
 }
@@ -168,7 +168,8 @@ def _score_rules(
     csi1000 = returns.get("000852.SH")
     gainers = _items(sectors.get("top_gainers"))
     losers = _items(sectors.get("top_losers"))
-    style_divergence = (
+    # 符号背离：一正一负且各自超过阈值
+    opposite_style = (
         csi300 is not None
         and csi1000 is not None
         and (
@@ -182,7 +183,26 @@ def _score_rules(
             )
         )
     )
-    scores["style_divergence"] = 2 if style_divergence else 0
+    # 幅度背离：同向不同幅（2026-11-09 新增）。
+    # 11-05 沪深300 +0.29% vs 国证2000 +2.40%，差值 2.11pp 属极端风格分化，
+    # 但符号背离判据要求一正一负，漏检后该日掉进 sentiment_extreme 兜底桶，
+    # 进而把「炸板率」当成现象、把「资金分歧」当成原因，形成同义反复。
+    spread_style = (
+        csi300 is not None
+        and csi1000 is not None
+        and abs(csi300 - csi1000) >= settings.phenomenon_style_divergence_spread_pct
+    )
+    # 普涨/普跌日抑制幅度背离（2026-11-10 回归修复）。
+    # 普涨日里大小盘差 2 个点很常见（2024-09-30、2024-10-08、2025-04-07 三个历史标注
+    # 案例均因此被误报为「普涨 + 风格分化」并发）。那种差异是普涨的一部分，不是独立现象。
+    # 符号背离（一正一负）不受此限制——那才是真正的分化。
+    broad_hit = (
+        scores.get("broad_rally", 0) >= settings.phenomenon_min_match_score
+        or scores.get("broad_decline", 0) >= settings.phenomenon_min_match_score
+    )
+    if broad_hit and spread_style and not opposite_style:
+        spread_style = False
+    scores["style_divergence"] = 2 if (opposite_style or spread_style) else 0
 
     strongest = _number(gainers[0].get("pct_change")) if gainers else 0.0
     weakest = _number(losers[0].get("pct_change")) if losers else 0.0
