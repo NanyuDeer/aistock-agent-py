@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from aistock_agent.services.stock_basic_index import match_stock_names
@@ -32,6 +33,19 @@ OVERSEAS_MACRO_KEYWORDS: tuple[str, ...] = (
     "关税", "制裁", "地缘",
 )
 
+# 「日央行」是日本央行简称，但「N日央行」（日期 + 境内央行）会天然拼出该
+# 子串：2026-11-06 生产事故，「2026年11月2日央行、金融监管总局…」被判外围，
+# 复盘引用被 _validate_origin_consumption 拒绝，整份报告降级。故「日央行」
+# 单独走正则：前置为数字或日期词时不命中，其余文本保持原有召回。
+_JAPAN_CB_SHORTHAND_RE = re.compile(r"(?<![\d昨今当次本])日央行")
+
+
+def _matches_overseas_macro(text: str) -> bool:
+    """海外宏观强词命中（「日央行」防日期拼接误判，其余关键词仍纯子串）。"""
+    if _JAPAN_CB_SHORTHAND_RE.search(text):
+        return True
+    return any(k in text for k in OVERSEAS_MACRO_KEYWORDS if k != "日央行")
+
 
 def is_mixed_source(source: str) -> bool:
     """混合源判定：存量地域标签不可信，读写路径都应按内容重算。"""
@@ -58,7 +72,7 @@ def derive_event_origin(source: str, title: str, summary: str) -> tuple[str, str
     if src in _MIXED_SOURCES:
         if any(k in text for k in _DOMESTIC_MARKERS):
             return ("domestic", "mixed_source_rule", 0.85)
-    if any(k in text for k in OVERSEAS_MACRO_KEYWORDS):
+    if _matches_overseas_macro(text):
         return ("peripheral", "content_rule", 0.7)
     if match_stock_names(text):
         return ("domestic", "entity_rule", 0.8)

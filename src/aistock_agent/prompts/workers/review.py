@@ -20,9 +20,9 @@ REVIEW_PROMPT = """你是 A 股收盘溯源分析师。基于已冻结的事实�
 - missing_fields：快照中缺失的字段列表
 
 【origin 消费规则】
-- origin="peripheral"（外围资讯）的 event_evidence 只能支撑 global_risk_liquidity
-  与 market_positioning_liquidity 两个候选；不得支撑 domestic_macro_policy /
-  industry_technology_supply。
+- origin="peripheral"（外围资讯）的 event_evidence 只能支撑 global_risk_liquidity、
+  market_positioning_liquidity 与 industry_technology_supply（产业链与科技供给
+  天然跨境）；不得支撑 domestic_macro_policy（境内政策只能由境内证据支撑）。
 
 【输出格式】
 仅输出一个 JSON 对象，符合 MarketTraceResult schema：

@@ -198,8 +198,8 @@ async def _generate_trace_with_retry(
     线上复盘多次因单次 LLM 输出不合规整份降级（2026-08-18：15:30 空响应 → JSON EOF；
     手动补跑 event_hits[].result 越界枚举 → literal_error），本函数在解析失败时
     重试一次，二次仍失败抛最后一次异常（调用方降级为"生成暂时不可用"）。
-    仅重试 LLM 输出解析；确定性语义校验（validate_trace_against_snapshot）不重试，
-    避免为低概率结构问题反复烧 LLM 成本。
+    仅重试 LLM 输出解析；确定性语义校验（validate_trace_against_snapshot）的
+    重试由 ``_generate_validated_trace`` 负责（带错误反馈、最多一次）。
     """
     last_error: Exception | None = None
     for attempt in range(2):
@@ -226,6 +226,44 @@ async def _generate_trace_with_retry(
                 continue
     assert last_error is not None
     raise last_error
+
+
+_VALIDATION_RETRY_INSTRUCTION = """上一条 MarketTraceResult 未通过确定性校验：{error}
+
+请重新输出完整 JSON（schema 不变），并确保：
+- 所有 evidence_ids / supporting_evidence_ids / counter_evidence_ids 必须来自输入
+  snapshot.sources 的 key，禁止臆造或改写 source_id；
+- origin="peripheral" 的 event_evidence 只能出现在 global_risk_liquidity、
+  market_positioning_liquidity 或 industry_technology_supply 候选（含链节点与反证）；
+- 四个固定 category 各一条候选，链阶段、primary_chain_id/alternative_chain_id、
+  attribution_status 等均需满足校验约束。
+只输出 JSON，不要 Markdown 或解释。"""
+
+
+async def _generate_validated_trace(
+    llm: object,
+    messages: Sequence[object],
+    snapshot: MarketTraceSnapshot,
+) -> MarketTraceResult:
+    """LLM 生成 + 确定性校验；校验失败带错误反馈重试一次。
+
+    2026-11-08 事故：模型连续违反已明示的确定性约束（外围证据写进境内类目、
+    臆造 source_id）→ 校验拒绝 → 整份报告降级、当日无归因链。此类错误模型可
+    按反馈自我纠正，失败即无报告，成本远高于一次重试；重试仍失败则照常降级。
+    """
+    trace = await _generate_trace_with_retry(llm, messages)
+    try:
+        validate_trace_against_snapshot(trace, snapshot)
+        return trace
+    except ValueError as e:
+        logger.warning("review_trace_validation_retry", error=str(e))
+        retry_messages = [
+            *messages,
+            HumanMessage(content=_VALIDATION_RETRY_INSTRUCTION.format(error=str(e))),
+        ]
+        trace = await _generate_trace_with_retry(llm, retry_messages)
+        validate_trace_against_snapshot(trace, snapshot)
+        return trace
 
 
 # ============================================================================
@@ -693,27 +731,44 @@ def validate_trace_against_snapshot(
     _validate_origin_consumption(trace, snapshot)
 
 
+# 外围事件可支撑的类目：全球风险/流动性、市场定位/流动性，以及产业技术供给。
+# 产业链与科技供给天然跨境（2026-11-08 事故：亚洲 AI 抛售、台股半导体暴跌是
+# A 股科技走弱的合法 trigger，旧集合只放行前两类 → 模型两次违规 → 当日降级）。
+# domestic_macro_policy 仍严格禁止：境内政策只能由境内证据支撑。
 _OVERSEAS_MACRO_ALLOWED_CATEGORIES = frozenset(
-    {"global_risk_liquidity", "market_positioning_liquidity"}
+    {
+        "global_risk_liquidity",
+        "market_positioning_liquidity",
+        "industry_technology_supply",
+    }
 )
 
 
 def _validate_origin_consumption(
     trace: MarketTraceResult, snapshot: MarketTraceSnapshot
 ) -> None:
-    """外围证据不得支撑非外盘类别（违反 → ValueError → degraded）。"""
+    """外围证据不得支撑非外盘类别（违反 → ValueError → 反馈重试/降级）。"""
     for candidate in trace.candidates:
-        cited = set(candidate.supporting_evidence_ids) | set(candidate.counter_evidence_ids)
+        cited: dict[str, list[str]] = {}
+        for field, source_ids in (
+            ("supporting", candidate.supporting_evidence_ids),
+            ("counter", candidate.counter_evidence_ids),
+        ):
+            for sid in source_ids:
+                cited.setdefault(sid, []).append(field)
         if candidate.chain is not None:
             for node in candidate.chain.nodes:
-                cited |= set(node.evidence_ids)
-        for sid in cited:
+                for sid in node.evidence_ids:
+                    cited.setdefault(sid, []).append(f"chain:{node.stage}")
+        for sid, locations in cited.items():
             src = snapshot.sources.get(sid)
             if src is None or src.kind != "event_evidence" or src.origin != "peripheral":
                 continue
             if candidate.category not in _OVERSEAS_MACRO_ALLOWED_CATEGORIES:
                 raise ValueError(
                     f"peripheral evidence {sid} cannot support {candidate.category}"
+                    f" (candidate={candidate.id}, status={candidate.status},"
+                    f" cited_in={','.join(locations)})"
                 )
 
 
@@ -1236,8 +1291,9 @@ async def run(state: AgentState) -> dict[str, object]:
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            trace = await _generate_trace_with_retry(llm, messages)
-        validate_trace_against_snapshot(trace, snapshot)
+            trace = await _generate_validated_trace(llm, messages, snapshot)
+        else:
+            validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
             "review_trace_validation_failed",
@@ -1455,8 +1511,9 @@ async def run_review(
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            trace = await _generate_trace_with_retry(llm, messages)
-        validate_trace_against_snapshot(trace, snapshot)
+            trace = await _generate_validated_trace(llm, messages, snapshot)
+        else:
+            validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
             "run_review_trace_validation_failed",

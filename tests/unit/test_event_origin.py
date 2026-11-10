@@ -41,6 +41,23 @@ def test_mixed_source_uses_content_not_whitelist(title, expected):
     assert derive_event_origin("jin10", title, "")[0] == expected
 
 
+def test_date_before_central_bank_is_not_boj():
+    # 2026-11-06 生产事故：日期「11月2日」后接「央行」天然拼出「日央行」子串，
+    # 被误判为日本央行（外围宏观）→ 复盘引用遭 _validate_origin_consumption
+    # 拒绝，3 次重试后整份报告降级且不落库。
+    summary = (
+        "同时，公司关注到2026年11月2日央行、金融监管总局等部门发布再贷款政策。"
+        "公司将结合回购再贷款政策、公司资金情况、市场走势等，充分运用政策工具。"
+    )
+    assert derive_event_origin("jin10", "东山精密：累计回购5000万元", summary)[0] != "peripheral"
+
+
+def test_boj_shorthand_still_detected():
+    # 非日期拼接的「日央行」仍按日本央行识别（不因防误判丢失召回）
+    assert derive_event_origin("jin10", "日央行行长：将继续实施宽松政策", "")[0] == "peripheral"
+    assert derive_event_origin("jin10", "昨日日央行宣布维持利率不变", "")[0] == "peripheral"
+
+
 def test_mixed_source_unknown_is_not_peripheral():
     # 无境内标记/海外强词的混合源快讯 → unknown，不得回落成 peripheral
     # （长鑫科技未上市时 entity_rule 也命中不了，是 2026-11-04 第三次失败证据）

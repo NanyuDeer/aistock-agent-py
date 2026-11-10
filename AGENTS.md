@@ -643,7 +643,9 @@ pm2 logs aistock-agent --lines 50
 
 - **jin10 是混合源，不是整体外围源**：`services/event_origin.py` 的 `_PERIPHERAL_SOURCES` 只保留 `global_markets`；`jin10` 归入 `_MIXED_SOURCES`，按内容重判：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（**不得回落 peripheral**）。
 - **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存的 `event_origin`，按内容重新判定。原因是 2026-10-16 上线的整源白名单已把大量境内 jin10 快讯写成 `peripheral`，仅改分类器不重算存量仍会复发。
-- **为什么必须修**：复盘 `_validate_origin_consumption` 规定 peripheral 证据只能支撑全球风险/市场定位类归因；误标的境内证据会让整份报告降级且**不落库**（quick 3 次重试后前端显示“复盘报告未能完成”）。2026-11-04 生产事故即 `沪深两市成交额`、`科创半导体ETF`、`长鑫科技回购` 三条境内证据被标 peripheral。
+- **为什么必须修**：复盘 `_validate_origin_consumption` 规定 peripheral 证据只能支撑 `global_risk_liquidity`、`market_positioning_liquidity` 与 `industry_technology_supply`（产业链与科技供给天然跨境），不得支撑 `domestic_macro_policy`；误标的境内证据会让整份报告降级且**不落库**（quick 3 次重试后前端显示“复盘报告未能完成”）。2026-11-04 生产事故即 `沪深两市成交额`、`科创半导体ETF`、`长鑫科技回购` 三条境内证据被标 peripheral。
+- **「日央行」不得纯子串匹配（2026-11-06 事故）**：`_matches_overseas_macro` 对「日央行」用 `(?<![\d昨今当次本])日央行` 正则——`2026年11月2日央行、金融监管总局…` 会天然拼出该子串，把东山精密回购误判 peripheral → 校验拒绝 → 整份降级。其余海外宏观关键词仍是纯子串。
+- **校验失败带反馈重试一次**：`_generate_validated_trace` 对任意确定性校验失败（origin 违规、source_id 臆造、链结构不合规）把错误原因追加为 HumanMessage 重试一次，二次仍失败才降级，避免一次违规就整份作废。
 - **验证口径**：改完不止看单测，要确认 2026-11-04 复盘重新生成后 `/api/agent/report/review/2026-11-04` 返回非空、`agent_analysis_reports` 出现 `report_type='review'` 行。
 
 ## 关键约束

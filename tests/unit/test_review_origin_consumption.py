@@ -8,8 +8,12 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
+from langchain_core.messages import SystemMessage
 
-from aistock_agent.agents.workers.review import _validate_origin_consumption
+from aistock_agent.agents.workers.review import (
+    _generate_validated_trace,
+    _validate_origin_consumption,
+)
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
     MarketTraceResult,
@@ -91,21 +95,24 @@ def _trace(
     )
 
 
-def test_origin_consumption_blocks_wrong_category():
+def test_origin_consumption_blocks_domestic_macro_policy():
+    # 境内政策只能由境内证据支撑，外围证据引用必拦
     with pytest.raises(ValueError):
         _validate_origin_consumption(
-            _trace("industry_technology_supply", ["EV_1"]), _snapshot(origin="peripheral")
+            _trace("domestic_macro_policy", ["EV_1"]), _snapshot(origin="peripheral")
         )
 
 
-def test_origin_consumption_allows_global_and_positioning():
-    # global_risk_liquidity / market_positioning_liquidity 引用 peripheral → 通过（不抛）
-    _validate_origin_consumption(
-        _trace("global_risk_liquidity", ["EV_1"]), _snapshot(origin="peripheral")
-    )
-    _validate_origin_consumption(
-        _trace("market_positioning_liquidity", ["EV_1"]), _snapshot(origin="peripheral")
-    )
+def test_origin_consumption_allows_global_positioning_industry():
+    # 全球风险/流动性、市场定位、产业技术供给均可引用 peripheral（不抛）
+    for category in (
+        "global_risk_liquidity",
+        "market_positioning_liquidity",
+        "industry_technology_supply",
+    ):
+        _validate_origin_consumption(
+            _trace(category, ["EV_1"]), _snapshot(origin="peripheral")
+        )
 
 
 def test_origin_consumption_checks_chain_nodes():
@@ -115,6 +122,60 @@ def test_origin_consumption_checks_chain_nodes():
             _trace("domestic_macro_policy", [], chain_evidence=["EV_1"]),
             _snapshot(origin="peripheral"),
         )
+
+
+@pytest.mark.asyncio
+async def test_origin_violation_retries_once_with_feedback(monkeypatch):
+    # 首次输出违规 → 带错误原因重试一次；第二次合规即返回，不再降级
+    outputs = [
+        _trace("domestic_macro_policy", ["EV_1"]).model_dump_json(),
+        _trace("global_risk_liquidity", ["EV_1"]).model_dump_json(),
+    ]
+    seen: list[list[object]] = []
+
+    class _FakeLLM:
+        async def ainvoke(self, messages):  # noqa: ANN001
+            seen.append(list(messages))
+            return type("Msg", (), {"content": outputs.pop(0)})()
+
+    monkeypatch.setattr(
+        "aistock_agent.agents.workers.review.validate_trace_against_snapshot",
+        lambda trace, snapshot: _validate_origin_consumption(trace, snapshot),
+    )
+    result = await _generate_validated_trace(
+        _FakeLLM(), [SystemMessage(content="s")], _snapshot()
+    )
+
+    assert result.candidates[0].category == "global_risk_liquidity"
+    assert len(seen) == 2
+    assert "cannot support domestic_macro_policy" in seen[1][-1].content
+
+
+@pytest.mark.asyncio
+async def test_other_validation_failure_retries_then_raises(monkeypatch):
+    # 任何确定性校验失败都只带反馈重试一次，二次仍失败照常抛出（由调用方降级）
+    calls = 0
+
+    class _FakeLLM:
+        async def ainvoke(self, messages):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            return type(
+                "Msg", (), {"content": _trace("global_risk_liquidity", ["EV_1"]).model_dump_json()}
+            )()
+
+    def _raise_other(trace, snapshot):  # noqa: ANN001
+        raise ValueError("other semantic error")
+
+    monkeypatch.setattr(
+        "aistock_agent.agents.workers.review.validate_trace_against_snapshot",
+        _raise_other,
+    )
+    with pytest.raises(ValueError, match="other semantic error"):
+        await _generate_validated_trace(
+            _FakeLLM(), [SystemMessage(content="s")], _snapshot()
+        )
+    assert calls == 2
 
 
 def test_origin_consumption_ignores_domestic_and_market_fact():
