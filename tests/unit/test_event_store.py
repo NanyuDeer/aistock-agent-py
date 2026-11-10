@@ -600,7 +600,7 @@ def test_rebuild_event_record_recomputes_mixed_source_origin():
     assert row["event_origin"] == "unknown"
 
 
-def test_cross_source_absorb_requires_peripheral_side():
+def test_cross_source_absorb_rules():
     from aistock_agent.services.event_store import _is_cross_source_absorbable
 
     peripheral = _make_event(source="jin10", event_origin="peripheral", title="美联储维持利率不变")
@@ -608,7 +608,111 @@ def test_cross_source_absorb_requires_peripheral_side():
     other_domestic = _make_event(
         source="eastmoney", event_origin="domestic", title="美联储维持利率不变"
     )
-    # 至少一侧 peripheral + 异源 + 标题高度相似 → 可吸收
+    # 至少一侧 peripheral + 异源 + 标题高度相似 → 可吸收（既有口径不变）
     assert _is_cross_source_absorbable(peripheral, domestic) is True
-    # 异源、标题完全相同，但两侧皆非 peripheral → 不吸收（锁定核心不变量）
-    assert _is_cross_source_absorbable(domestic, other_domestic) is False
+    # 两侧皆非 peripheral，但标题完全相同 → 同一事件的转载，吸收
+    # （2026-11-06 回归：cls/jin10 同题在国内政策事件上各存一条 → 事件库+传导双跑）
+    assert _is_cross_source_absorbable(domestic, other_domestic) is True
+    # 同源不归本函数管（由 _is_near_duplicate 负责）
+    assert _is_cross_source_absorbable(domestic, _make_event(source="cls")) is False
+    # 数字不同 → 不同事件，不吸收（防"50亿/120亿"式误合并）
+    assert (
+        _is_cross_source_absorbable(
+            _make_event(source="cls", title="某银行：第三季度净利润同比增长10.5%"),
+            _make_event(source="jin10", title="某银行：第三季度净利润同比增长20.5%"),
+        )
+        is False
+    )
+    # 股票代码不同 → 不同个股事件，不吸收
+    assert (
+        _is_cross_source_absorbable(
+            _make_event(source="cls", title="公司拟回购股份", symbol="300502"),
+            _make_event(source="jin10", title="公司拟回购股份", symbol="600519"),
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_absorbs_cross_source_same_event() -> None:
+    """回归（2026-11-06）：cls 与 jin10 同一政策事件标题仅措辞不同 → 跨源吸收。"""
+    cls_event = _make_event(
+        event_id="e_cls",
+        content_hash="h_cls",
+        source="cls",
+        event_origin="unknown",
+        title="商务部：对原产于欧盟和日本的进口乙叉降冰片烯进行反倾销立案调查",
+        url="https://www.cls.cn/detail/2527293",
+    )
+    jin10_event = _make_event(
+        event_id="e_jin10",
+        content_hash="h_jin10",
+        source="jin10",
+        event_origin="domestic",
+        title="商务部：对原产于欧盟、日本的进口乙叉降冰片烯发起反倾销立案调查",
+        url="https://flash.jin10.com/detail/20261106150116265800",
+    )
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        result = await save_event_scrape([cls_event, jin10_event], "2026-11-06")
+        assert result["deduped"] == 1
+        assert result["added"] == 1
+        assert [e["source"] for e in result["added_events"]] == ["cls"]
+
+
+@pytest.mark.asyncio
+async def test_save_event_scrape_keeps_cross_source_different_numbers() -> None:
+    """跨源近似标题但数字不同 → 不同事件，必须保留。"""
+    ev1 = _make_event(
+        event_id="e1", content_hash="h1", source="cls",
+        title="某银行：第三季度净利润同比增长10.5%",
+    )
+    ev2 = _make_event(
+        event_id="e2", content_hash="h2", source="jin10",
+        title="某银行：第三季度净利润同比增长20.5%",
+    )
+    with patch("aistock_agent.services.event_store.node_api") as mock_api, patch(
+        "aistock_agent.services.event_store.load_event_scrape",
+        new=AsyncMock(return_value=[]),
+    ):
+        mock_api.save_analysis_report = AsyncMock(return_value={"id": "r1"})
+        result = await save_event_scrape([ev1, ev2], "2026-11-06")
+        assert result["added"] == 2
+        assert result["deduped"] == 0
+
+
+def test_dedupe_batch_events_before_materialize() -> None:
+    """物化前的批内去重：同一事件的跨源重复只保留先到者。"""
+    from aistock_agent.services.event_store import dedupe_batch_events
+
+    cls_event = _make_event(
+        event_id="e_cls", content_hash="h_cls", source="cls",
+        title="商务部：对原产于欧盟和日本的进口乙叉降冰片烯进行反倾销立案调查",
+    )
+    jin10_event = _make_event(
+        event_id="e_jin10", content_hash="h_jin10", source="jin10",
+        title="商务部：对原产于欧盟、日本的进口乙叉降冰片烯发起反倾销立案调查",
+    )
+    other = _make_event(
+        event_id="e_other", content_hash="h_other", source="eastmoney",
+        title="国家能源局：进一步做大油气合作朋友圈",
+    )
+    kept = dedupe_batch_events([cls_event, jin10_event, other])
+    assert [e["event_id"] for e in kept] == ["e_cls", "e_other"]
+
+
+def test_dedupe_batch_events_keeps_distinct_numbers() -> None:
+    from aistock_agent.services.event_store import dedupe_batch_events
+
+    ev1 = _make_event(
+        event_id="e1", content_hash="h1", source="cls",
+        title="某银行：第三季度净利润同比增长10.5%",
+    )
+    ev2 = _make_event(
+        event_id="e2", content_hash="h2", source="jin10",
+        title="某银行：第三季度净利润同比增长20.5%",
+    )
+    assert [e["event_id"] for e in dedupe_batch_events([ev1, ev2])] == ["e1", "e2"]

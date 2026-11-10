@@ -2,6 +2,23 @@
 
 > 所有修改记录按时间倒序排列。每条记录标注分支、时间、开发者。
 
+## [main] 2026-11-06 — 跨源同题重复根治（事件近似去重放宽 + 物化前批内去重）
+
+**开发者**: Trae（AI 协作）
+
+### 修复
+
+- **跨源近似去重放宽**：`services/event_store.py::_is_cross_source_absorbable` 旧口径要求「至少一侧 `event_origin==peripheral`」才吸收跨源近重复；国内政策新闻两侧均非 peripheral → 同一事件入库两条并各自触发传导。新口径：异源 + 归一化标题相似度 > `TITLE_SIMILARITY_THRESHOLD`(0.9) + **数字序列一致**（新增 `_title_digits` 守卫，净利 10.5% vs 20.5%、南向 50 亿 vs 120 亿不得合并）+ 股票代码不冲突 → 视为同一事件，保留先到者。
+- **物化前批内去重**：新增 `event_store.dedupe_batch_events(events)`；`event_scraper.scrape_full_daily` / `scrape_intraday` 在 `_materialize_events` **之前**调用，避免转载各自物化成 Event Entity（canonical key 按归一化标题生成，措辞不同即不同 key），也避免传导双跑。跨批去重仍由 `save_event_scrape` 的 near_pool 承担。
+- **根因实例**：2026-11-06 15:06「商务部：对原产于欧盟和日本的进口乙叉降冰片烯进行/发起反倾销立案调查」cls 与 jin10 各一条（事件传导页两张卡片，15:06:03 / 15:06:11）；标题仅差「进行/发起」「和/、」，`content_hash=sha1(title|url)` 逐字比对拦不住，同源近似去重又不跨源。
+
+### 测试
+
+- `tests/unit/test_event_store.py`：原「异源同题不吸收」锁定用例改为新口径；新增真实标题回归（cls/jin10 吸收）、数字序列守卫、股票代码守卫、`dedupe_batch_events` 批内去重与数字不同保留用例。
+- `pytest tests/unit/test_event_store.py`（45 passed）+ 抓取/传导/调度相关 4 文件（87 passed）；`mypy --strict` 改动文件 0 error；生产 2026-11-06 事件库回放：102 → 100（仅吸收上述 cls/jin10 与「新易盛」两条跨源重复），10-31~11-07 其余日期 0 误吸收。
+
+---
+
 ## [main] 2026-11-04 — 混合源地域误判修复（复盘报告恢复落库）
 
 **开发者**: NanyuDeer
