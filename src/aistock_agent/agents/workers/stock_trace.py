@@ -7,7 +7,7 @@ Node 侧 Artifact 发布与用户授权边界。
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
 
 import structlog
@@ -18,6 +18,7 @@ from aistock_agent.config import settings
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.prompts.workers.stock_trace import STOCK_TRACE_PROMPT
 from aistock_agent.schemas.stock_trace import (
+    StockSourceRecord,
     StockTraceResult,
     StockTraceResultPayload,
     StockTraceSnapshot,
@@ -123,12 +124,24 @@ _SOURCE_DOMAINS = {
 _CHINA_TIME = timezone(timedelta(hours=8))
 
 
+def _observed_by_trigger(source: StockSourceRecord, cutoff: datetime) -> bool:
+    first_observed_at = source.payload.get("first_observed_at")
+    if not isinstance(first_observed_at, str):
+        return True
+    try:
+        observed = datetime.fromisoformat(first_observed_at)
+        return observed.tzinfo is not None and observed <= cutoff
+    except ValueError:
+        return False
+
+
 def _snapshot_at_trigger(snapshot: StockTraceSnapshot) -> StockTraceSnapshot:
     """Use the revision's trigger time, even when enrichment runs much later."""
     cutoff = snapshot.trigger_event.triggered_at
     sources = [
         source for source in snapshot.source_records
         if (source.occurred_at or source.captured_at) <= cutoff
+        and _observed_by_trigger(source, cutoff)
         and (
             source.kind in {"trigger_fact", "quote_fact"}
             or source.window_end is None
@@ -302,6 +315,10 @@ class StockTraceWorker:
                             chain["role"] = "primary"
                         elif chain["chain_id"] == alternative_chain_id:
                             chain["role"] = "alternative"
+                        for node in chain["nodes"]:
+                            if node["stage"] == "transmission" and node["epistemic_type"] != "fact":
+                                if node["status"] == "established":
+                                    node["status"] = "partial"
                     payload = _downgrade_unsupported_primary(
                         StockTraceResultPayload.model_validate(payload_data),
                         snapshot,

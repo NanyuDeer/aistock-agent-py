@@ -104,8 +104,9 @@ def validate_stock_trace_result(result: StockTraceResult, snapshot: StockTraceSn
     if candidate.layer != "company" or candidate.status != "supported":
         raise StockTraceValidationError("confirmed requires a supported company primary candidate")
     evidence = [source_by_id[source_id] for source_id in candidate.supporting_evidence_ids]
-    has_a = any(source.source_level == "A" for source in evidence)
-    has_b = any(source.source_level == "B" for source in evidence)
+    company_events = [source for source in evidence if source.kind in {"announcement", "news"}]
+    has_a = any(source.source_level == "A" for source in company_events)
+    has_b = any(source.source_level == "B" for source in company_events)
     has_independent_market_fact = any(
         source.kind == "market_fact" and source.source_level in {"A", "B"}
         for source in snapshot.source_records

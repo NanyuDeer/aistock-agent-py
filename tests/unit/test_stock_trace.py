@@ -266,6 +266,10 @@ async def test_worker_filters_late_market_and_downgrades_unsupported_cause() -> 
                 **sources[0], "sourceId": "late-market", "kind": "market_fact",
                 "occurredAt": later, "capturedAt": later,
             })
+            sources.append({
+                **sources[0], "sourceId": "late-ingested-news", "kind": "news",
+                "payload": {"first_observed_at": later},
+            })
             return snapshot
 
     class UnsupportedCauseLlm(FakeLlm):
