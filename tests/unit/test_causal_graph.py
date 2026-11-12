@@ -19,8 +19,8 @@ def graph():  # noqa: ANN201
 
 
 def test_market_graph_has_expected_shape(graph) -> None:  # noqa: ANN001
-    assert len(graph.nodes) == 26
-    assert len(graph.edges) == 22
+    assert len(graph.nodes) == 31
+    assert len(graph.edges) == 28
     kinds = {node.kind for node in graph.nodes.values()}
     assert kinds == {"factor", "market", "sector", "theme", "flow"}
 
