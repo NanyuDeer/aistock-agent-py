@@ -156,7 +156,23 @@ def test_scrape_by_symbol_returns_filtered_events(client: TestClient) -> None:
         )
     assert resp.status_code == 200
     assert resp.json() == {"events": expected}
-    mock_load.assert_awaited_once_with("600000", "2026-08-12")
+    # 第三参为可选 sectors（未传 → None，行为与旧版一致）
+    mock_load.assert_awaited_once_with("600000", "2026-08-12", None)
+
+
+def test_scrape_by_symbol_passes_parsed_sectors(client: TestClient) -> None:
+    """sectors 逗号分隔 → 去空/去重/上限 10 后透传服务层（非法值忽略、不 400）。"""
+    with patch(
+        "aistock_agent.services.event_store.load_event_scrape_by_symbol",
+        new_callable=AsyncMock,
+        return_value=[],
+    ) as mock_load:
+        resp = client.get(
+            "/api/agent/event/scrape-by-symbol/600000",
+            params={"date": "2026-08-12", "sectors": "半导体, 光模块 ,,半导体"},
+        )
+    assert resp.status_code == 200
+    mock_load.assert_awaited_once_with("600000", "2026-08-12", ["半导体", "光模块"])
 
 
 def test_scrape_by_symbol_invalid_date_returns_400(client: TestClient) -> None:

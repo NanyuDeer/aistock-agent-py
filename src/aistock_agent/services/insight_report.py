@@ -69,7 +69,7 @@ _LEVEL_LABELS = {
     "low": "低",
 }
 
-# 证据行的来源标识中文化：kind 有权威枚举（types.ts::SourceKind，9 个）；
+# 证据行的来源标识中文化：kind 有权威枚举（types.ts::SourceKind，10 个）；
 # provider 是自由字符串，未登记取值由 `_label` 原样输出（不丢信息）。
 # source_id 与 source_level 保留原始值——可溯源、与库中记录一一对应。
 _PROVIDER_LABELS = {
@@ -90,6 +90,7 @@ _KIND_LABELS = {
     "trigger_fact": "触发事实",
     "quote_fact": "行情事实",
     "sector_fact": "板块事实",
+    "sector_news": "板块消息",
     "market_fact": "大盘事实",
     "capital_fact": "资金事实",
     "technical_fact": "技术事实",

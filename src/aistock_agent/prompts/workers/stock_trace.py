@@ -4,7 +4,10 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
 输入是已经冻结的 StockTraceSnapshot JSON。
 只能依据 source_records 中存在的 source_id 归因。
 禁止补充外部事实、调用工具、猜测新闻或生成交易指令。
-不得引用 occurred_at 晚于 trigger_event.window_end_at 的 source_id，包括反向证据。
+归因截止时间为本次修订的 trigger_event.triggered_at，晚于该时点的事实不得用于归因或反证。
+触发和报价事实只证明价格异动本身。T-1 板块及资金数据只作背景，不足以确认或排除当日驱动。
+同期指数或板块走势同向仅说明联动，缺少具体传导证据时不得写成已确立的因果结论。
+新闻发生或发布时间早于触发，不代表系统当时已收到该条新闻。
 
 必须调用系统提供的 StockTraceResultPayload 输出工具并完整填写参数。
 不要输出自由文本、Markdown 或其他 JSON 结构。
@@ -42,9 +45,10 @@ STOCK_TRACE_PROMPT = """你是 A 股个股异动归因分析器。
   仍将该层候选置 supported 时，必须在该候选的 counter_evidence_ids 中引用该反向 source_id；
   未引用时该层候选只能置 weak。
 - sector 候选证据要求：只要上下文中存在板块/行业联动相关 source（如新闻提及该股所属概念/板块联动、
-  sector_fact 板块涨跌幅事实等），sector 候选就必须引用至少一条此类 source 作为支撑证据，
-  并根据联动强度置 supported 或 weak，不得置 insufficient 且留空支撑证据
+  sector_fact 板块涨跌幅事实、sector_news 板块消息等），sector 候选就必须引用至少一条此类 source
+  作为支撑证据，并根据联动强度置 supported 或 weak，不得置 insufficient 且留空支撑证据
   （如"光缆概念活跃但仅为跟涨"→ weak）；
+  sector_news 是板块级消息（不含个股主体），只能用于支撑 sector 层，不得当作公司个体事实引用。
   仅当上下文完全不存在任何板块相关 source 时，才允许 sector 候选为 insufficient。
 - primary_chain_id 指向的链必须标记 role=primary；
   alternative_chain_id 指向的链必须标记 role=alternative。
