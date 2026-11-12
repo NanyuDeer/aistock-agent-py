@@ -16,10 +16,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import quote
 
 import structlog
 
 from aistock_agent.services.causal_graph import CausalGraph, load_market_graph
+from aistock_agent.services.data_client import node_api
+from aistock_agent.tools.industry_vector_search import semantic_match_industries
 
 logger = structlog.get_logger(__name__)
 
@@ -211,3 +214,36 @@ async def get_event_node_mappings(
         logger.warning("event_node_mapping_store_failed", event_id=event_id, error=str(error))
 
     return mappings
+
+
+class DataClientMappingIO:
+    """走 ``data_client`` 的默认 IO 实现。
+
+    读缓存失败（返回 None）时视为未缓存并继续计算——Node 暂时不可用
+    不该让映射能力整体失效，只是这一次算不出缓存会写失败（已降级处理）。
+    """
+
+    async def read_cache(self, event_id: str) -> dict[str, object]:
+        data = await node_api.get(f"/internal/event-node-mappings?eventId={quote(event_id, safe='')}")
+        if not data:
+            return {"cached": False, "mappings": []}
+        mappings = data.get("mappings")
+        return {
+            "cached": bool(data.get("cached")),
+            "mappings": mappings if isinstance(mappings, list) else [],
+        }
+
+    async def write_cache(self, event_id: str, mappings: list[dict[str, object]]) -> int:
+        data = await node_api.post(
+            "/internal/event-node-mappings/upsert",
+            {"eventId": event_id, "mappings": mappings},
+        )
+        if not data:
+            return 0
+        written = data.get("written")
+        return int(written) if isinstance(written, int) else 0
+
+    async def recall(
+        self, keywords: list[str], threshold: float, limit: int
+    ) -> list[dict[str, object]]:
+        return await semantic_match_industries(keywords, threshold=threshold, limit=limit)
