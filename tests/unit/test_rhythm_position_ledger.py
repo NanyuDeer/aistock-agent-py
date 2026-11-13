@@ -274,16 +274,18 @@ def test_no_watch_points_when_everything_satisfied() -> None:
 # ============ 8. 排序：sufficient_alone 优先，其次 gate > mainline > event ============
 
 
-def test_sort_puts_sufficient_alone_first() -> None:
-    # 震荡 + 主线候选不可用 + 事件在窗口外：blocking 为空，base=2 → 事件项可单独 +1；
-    # 主线项是「板块数据不足」，不能承诺单独满足即升档 → False（故被排到后面）。
+def test_sort_degrades_to_fixed_order_when_base_is_low() -> None:
+    # 震荡 + 主线候选不可用 + 事件在窗口外。
+    # 2026-11-13 fail-safe 后 unavailable 的 base 被封顶到 1，`base+adjust>1` 不成立 →
+    # 事件项不再是 sufficient_alone，排序退化为固定顺序（gate → mainline → event）；
+    # 主线项作为唯一 blocking，仍标记为可单独满足。
     ledger = _ledger(OSC, UNAVAILABLE, event_d=5)
-    assert ledger.base_index == 2 and ledger.adjust == 0
+    assert ledger.base_index == 1 and ledger.adjust == 0
     assert ledger.gate_blocked is False
     points = _points(ledger, mainline_facts=UNAVAILABLE, event_d=5, closes=OSC)
-    assert [p.key for p in points] == ["event", "mainline"]
-    assert points[0].sufficient_alone is True
-    assert points[1].sufficient_alone is False
+    assert [p.key for p in points] == ["mainline", "event"]
+    # 轻仓状态下任何单项都不能声称「单独满足即可升档」
+    assert all(p.sufficient_alone is False for p in points)
 
 
 def test_sort_ties_follow_gate_mainline_event_order() -> None:
