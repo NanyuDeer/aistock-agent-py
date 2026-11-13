@@ -25,10 +25,11 @@ WEAK = {"state": "established", "name": "AI 算力", "strength": "weak", "excess
 NONE = {"state": "none", "name": None, "strength": None, "excess": 0.8}
 
 
-def _derive(closes, mainline=None, event_d=None, event_result=None, breadth=None):
+def _derive(closes, mainline=None, event_d=None, event_result=None, breadth=None, limit=None):
     return derive_position_index(
         index_closes=closes, mainline=mainline,
         event_d=event_d, event_result=event_result, breadth=breadth,
+        limit_indicators=limit,
     )
 
 
@@ -111,7 +112,8 @@ def test_mainline_unavailable_is_missing_not_neutral() -> None:
 def test_unknown_mainline_state_normalized_to_unavailable() -> None:
     """闭集归一：未知 state 不得原样透出，统一按 unavailable 处理。"""
     idx, ledger = _derive(OSC, {"state": "weird_state", "name": "X", "strength": "strong"})
-    assert idx == 2  # 判据不变：非 established / none → 不改档
+    # fail-safe（2026-11-13）：unavailable 不再落回默认 2 档，封顶轻仓 1 档
+    assert idx == 1
     assert ledger.mainline_state == "unavailable"
     ml = ledger.items[1]
     assert ml.status == "missing"
@@ -296,3 +298,147 @@ def test_position_band_index_field_defaults_none() -> None:
     assert PositionBand(
         text="轻仓~三成", action="hold", direction="neutral", index=1
     ).index == 1
+
+
+def test_mainline_unavailable_caps_at_light_position() -> None:
+    """fail-safe（2026-11-13）：主线数据不可用 → 封顶轻仓 1 档。
+
+    原实现「不改档」会落回默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向
+    相反。实测 2026-11-12 收盘后主线只到 11-11，11-13 卡给出五成~六成；补到当日
+    数据（判定无主线）后同一天应为空仓。
+    """
+    idx, ledger = _derive(OSC, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_unavailable_caps_even_in_bull_trend() -> None:
+    """多头排列默认 3 档，但主线不可用时同样封顶 1 档（数据不明不给高仓）。"""
+    idx, ledger = _derive(BULL, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_none_still_goes_to_zero() -> None:
+    """明确「无主线」仍是 0 档，与「不知道」区分开。"""
+    idx, ledger = _derive(OSC, {"state": "none"})
+    assert idx == 0
+
+
+def test_mainline_unavailable_caps_at_light_position() -> None:
+    """fail-safe（2026-11-13）：主线数据不可用 → 封顶轻仓 1 档。
+
+    原实现「不改档」会落回默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向
+    相反。实测 2026-11-12 收盘后主线只到 11-11，11-13 卡给出五成~六成；补到当日
+    数据（判定无主线）后同一天应为空仓。
+    """
+    idx, ledger = _derive(OSC, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_unavailable_caps_even_in_bull_trend() -> None:
+    """多头排列默认 3 档，但主线不可用时同样封顶 1 档（数据不明不给高仓）。"""
+    idx, ledger = _derive(BULL, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_none_still_goes_to_zero() -> None:
+    """明确「无主线」仍是 0 档，与「不知道」区分开。"""
+    idx, ledger = _derive(OSC, {"state": "none"})
+    assert idx == 0
+
+
+# ---- 退潮闸门（2026-11-13 裁决 C）：炸板率 > 50% → 次日封顶轻仓 ----
+
+def test_retreat_cap_triggers_when_break_rate_high() -> None:
+    """11-12 实测炸板率 54.76%：即便震荡 + 主线成立弱（base=2），也封顶 1 档。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 54.76, "seal_rate": 45.24},
+    )
+    assert ledger.base_index == 2
+    assert idx == 1
+    assert ledger.final_index == 1
+    retreat = [i for i in ledger.items if i.key == "retreat"]
+    assert len(retreat) == 1
+    assert "炸板率" in retreat[0].value_text
+
+
+def test_retreat_cap_not_triggered_below_threshold() -> None:
+    """11-11 炸板率 24.56%（正常）→ 不封顶，维持默认半仓。"""
+    idx, _ = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 24.56, "seal_rate": 75.44},
+    )
+    assert idx == 2
+
+
+def test_retreat_cap_never_raises_position() -> None:
+    """只封顶不抬升：已在 0 档时不反向加仓。"""
+    idx, ledger = _derive(
+        OSC, {"state": "none"}, limit={"break_rate": 80.0},
+    )
+    assert ledger.base_index == 0
+    assert idx == 0
+
+
+def test_retreat_cap_inactive_when_raw_missing() -> None:
+    """镜像未升级（无 raw）→ 闸门不生效，不拿 score 反推百分比。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit=None,
+    )
+    assert idx == 2
+    assert not [i for i in ledger.items if i.key == "retreat"]
+
+
+# ---- 退潮闸门（2026-11-13 裁决 C）：炸板率 > 50% → 次日封顶轻仓 ----
+
+def test_retreat_cap_triggers_when_break_rate_high() -> None:
+    """11-12 实测炸板率 54.76%：即便震荡 + 主线成立弱（base=2），也封顶 1 档。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 54.76, "seal_rate": 45.24},
+    )
+    assert ledger.base_index == 2
+    assert idx == 1
+    assert ledger.final_index == 1
+    retreat = [i for i in ledger.items if i.key == "retreat"]
+    assert len(retreat) == 1
+    assert "炸板率" in retreat[0].value_text
+
+
+def test_retreat_cap_not_triggered_below_threshold() -> None:
+    """11-11 炸板率 24.56%（正常）→ 不封顶，维持默认半仓。"""
+    idx, _ = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 24.56, "seal_rate": 75.44},
+    )
+    assert idx == 2
+
+
+def test_retreat_cap_never_raises_position() -> None:
+    """只封顶不抬升：已在 0 档时不反向加仓。"""
+    idx, ledger = _derive(
+        OSC, {"state": "none"}, limit={"break_rate": 80.0},
+    )
+    assert ledger.base_index == 0
+    assert idx == 0
+
+
+def test_retreat_cap_inactive_when_raw_missing() -> None:
+    """镜像未升级（无 raw）→ 闸门不生效，不拿 score 反推百分比。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit=None,
+    )
+    assert idx == 2
+    assert not [i for i in ledger.items if i.key == "retreat"]

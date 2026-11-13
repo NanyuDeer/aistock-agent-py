@@ -270,16 +270,34 @@ class Settings(BaseSettings):
     # （2026-09-03 组长裁决：review_full 20:30→18:30、板块批量 21:30→19:30，整体前移。）
     # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
     scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
-    # 16:05 收盘定档（周一至周五；周五收盘生成下周一预告，design-debate F2 修复，错峰晚于 15:45）
+    # 节奏大师三时点（spec §8/D13）：17:30 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # 17:30 收盘定档（周一至周五；周五收盘生成下周一预告）
+    # ⚠️ 2026-11-13 由 16:05 推后至 17:30：情绪归档 `scheduler_sentiment_cron` 在 17:00
+    #    起跑（Tushare 日线未推完会重试 10/20 分钟，最坏 17:20 落盘），而卡片读归档取
+    #    「近 7 个交易日」的尾部。16:05 早于归档，导致每张卡实际用的是 T-2 温度、
+    #    却声明 basis_date=T-1（诊断见 docs/superpowers/specs/2026-11-13-*-diagnosis.md）。
+    #    17:30 留 10 分钟余量。改动须与 sentiment 的 cron 联动，勿单独回调本项。
     # 收盘定档（周一至周五；APScheduler 0=周一，禁用 1-5）
-    scheduler_rhythm_after_close_cron: str = "5 16 * * mon-fri"
+    scheduler_rhythm_after_close_cron: str = "30 17 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 14:30 尾盘确认（当日节奏，只降不升）：midday 12:30 之后到收盘前没有任何修正点，
+    # 下午跳水（如 2026-11-12 中午 +0.2% → 收盘 -0.67%、炸板率 55%）无人捕捉。
+    # 继承 midday 的档位，用 14:25 快照做最后一道下调。
+    scheduler_rhythm_tail_cron: str = "30 14 * * mon-fri"
     # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
     # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
     scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
+    # 尾盘快照：14:25 早于 tail 14:30 五分钟，口径同 12:25（文件名后缀区分）
+    scheduler_intraday_snapshot_tail_cron: str = "25 14 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 退潮闸门（2026-11-13 裁决 C）：当日炸板率超过阈值 → 次日仓位封顶轻仓。
+    # 数据源：恐贪 indicators 的 break_rate（= 100 - seal_rate），随 after_close 的
+    # basis_date 取当日收盘口径。
+    # 背景：11-12 收盘炸板率 54.76%、涨停 86→38，但仓位判定只看均线/主线/事件，
+    # 退潮信号完全不在输入里，次日仍按默认半仓处理。
+    rhythm_retreat_break_rate_threshold: float = 50.0
+    rhythm_retreat_cap_index: int = 1
     # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
     rhythm_delta_enabled: bool = False
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
@@ -450,6 +468,11 @@ class Settings(BaseSettings):
     rhythm_intraday_thresholds_version: str = "v1-20261104"
     rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
     rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    # 规则 B1（2026-11-13 拆分）：宽度**单独**达标即降档，不要求指数跌幅同步达标。
+    # 背景：11-12 指数只跌 0.67%，但上涨占比 16%、炸板率 54.76%、涨停 86→38 ——
+    # 典型的「指数抗跌、个股普跌」。原判据要求「宽度 ≤35% 且 跌幅 ≤-1%」两条件同时
+    # 成立，这种日子一条都不触发，仓位停在默认半仓。
+    rhythm_intraday_breadth_ratio_strict: float = 0.25
     rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）

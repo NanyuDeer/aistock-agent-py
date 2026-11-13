@@ -322,7 +322,21 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # 尾盘快照归档：14:25 早于节奏 tail 14:30 五分钟，口径同 12:25。
+    scheduler.add_job(
+        _run_intraday_snapshot_tail_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_intraday_snapshot_tail_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="intraday_snapshot_tail",
+        name="intraday snapshot archive (14:25)",
+        replace_existing=True,
+    )
+
+    # 节奏大师四时点（spec §8/D13）：17:30 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # + 14:30 尾盘确认（只降不升）。17:30 见 config.scheduler_rhythm_after_close_cron
+    # 注释：须晚于情绪归档 17:00 落盘。
     scheduler.add_job(
         _run_rhythm_master_after_close,
         CronTrigger.from_crontab(
@@ -351,6 +365,16 @@ def start_scheduler() -> None:
         ),
         id="rhythm_master_midday",
         name="rhythm master midday",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_tail,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_tail_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_tail",
+        name="rhythm master tail",
         replace_existing=True,
     )
 
@@ -606,10 +630,28 @@ async def _run_intraday_snapshot_task() -> None:
         logger.warning("intraday_snapshot_task_failed", exc_info=True)
 
 
+async def _run_intraday_snapshot_tail_task() -> None:
+    """14:25 尾盘快照归档（独立任务，失败不阻塞其他链路）。
+
+    与 12:25 同口径，仅文件名后缀不同（`-1430.json`），供 tail 时点读取。
+    非交易日由 archive_intraday_snapshot 内部守卫（不落空文件）。
+    """
+    from aistock_agent.services.intraday_snapshot_archive import (
+        SNAPSHOT_SUFFIX_TAIL,
+        archive_intraday_snapshot,
+    )
+
+    try:
+        await archive_intraday_snapshot(SNAPSHOT_SUFFIX_TAIL)
+    except Exception:  # noqa: BLE001
+        logger.warning("intraday_snapshot_tail_task_failed", exc_info=True)
+
+
 async def _run_rhythm_master_after_close() -> None:
     if not is_trading_day(shanghai_today()):
         return
-    # 16:05 读前校验 basis_date 温度已落盘：缺失由 worker 内降级标注，不污染 basis 语义（G18）
+    # 17:30 读前校验 basis_date 温度与主线数据已落盘：缺失由 worker 内降级标注，
+    # 不污染 basis 语义（G18）。
     await _dispatch_rhythm_master("after_close")
 
 
@@ -623,6 +665,13 @@ async def _run_rhythm_master_midday() -> None:
     if not is_trading_day(shanghai_today()):
         return
     await _dispatch_rhythm_master("midday")
+
+
+async def _run_rhythm_master_tail() -> None:
+    """14:30 尾盘确认（只降不升）：midday 之后、收盘之前的最后一道修正。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("tail")
 
 
 async def _dispatch_rhythm_master(

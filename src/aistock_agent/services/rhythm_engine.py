@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal, cast
 
+from aistock_agent.config import settings
 from aistock_agent.schemas.rhythm_master import (
     Direction,
     LedgerItem,
@@ -229,6 +230,34 @@ def _mainline_adjustment(state: str | None, strength: object) -> int:
     return 1 if state == "established" and strength == "strong" else 0
 
 
+def _retreat_cap(
+    limit_indicators: dict[str, Any] | None,
+) -> tuple[int | None, str | None]:
+    """退潮闸门（2026-11-13 用户裁决 C）：炸板率超阈值 → 仓位封顶。
+
+    数据源：恐贪 `indicators` 里的 `break_rate`（= 100 - seal_rate），取 after_close
+    的 basis_date 当日收盘口径，作用于次日定档。
+
+    为什么只用炸板率：涨停家数腰斩需要绝对家数，镜像接口当前只给比率类指标；
+    而炸板率本身已经覆盖「封板失败变多」这同一现象（11-12 实测 54.76%，涨停
+    86→38）。单一确定性判据比两个模糊判据更好回测。
+
+    返回 (封顶档位, 留痕文案)；未命中返回 (None, None)。
+    """
+    if not isinstance(limit_indicators, dict):
+        return None, None
+    raw = limit_indicators.get("break_rate")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None, None
+    value = float(raw)
+    if value <= settings.rhythm_retreat_break_rate_threshold:
+        return None, None
+    return (
+        settings.rhythm_retreat_cap_index,
+        f"当日炸板率 {value:.0f}%，退潮封顶轻仓",
+    )
+
+
 # 「d==0 未落档 → 档位封顶 1」的契约常量（`event_adjustment` 的 reason 逐字等于它）。
 # 调用方用**精确比较**识别该上界约束，禁止按文案模糊匹配。
 EVENT_CAP_REASON = "d=0 事件未落档 → 档位封顶 1"
@@ -336,6 +365,7 @@ def derive_position_index(
     event_d: int | None,
     event_result: str | None,
     breadth: dict[str, Any] | None = None,
+    limit_indicators: dict[str, Any] | None = None,
 ) -> tuple[int, PositionLedger]:
     """仓位档位序号 0-4 + 推导账本（因果输出 spec §4.1，H1 绝对锚定）。
 
@@ -389,6 +419,13 @@ def derive_position_index(
         ml_adj = _mainline_adjustment(state, strength)
         if state == "none":
             base = 0  # 需求①：无清晰主线 → 空仓观望
+        elif state == "unavailable":
+            # fail-safe（2026-11-13）：主线数据不可用 ≠ 中性。原实现「不改档」会落回
+            # 默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向相反。
+            # 实测：11-12 收盘后生成 11-13 卡时主线只到 11-11，给出五成~六成；
+            # 补到当日数据后同一天应空仓。
+            # 明确「无主线」给 0 档，「不知道」给 1 档：不冒充空仓结论，也不给半仓。
+            base = min(base, 1)
     # step3 事件档位：唯一判据在 event_adjustment（d==0 未落档的「封顶 1」已折算进
     # delta），本函数只负责统一 clamp，不再另判。
     base_after_mainline = base + ml_adj
@@ -402,6 +439,11 @@ def derive_position_index(
     )
     adj = ml_adj + event_delta
     final = max(LADDER_MIN, min(LADDER_MAX, base_after_mainline + event_delta))
+    # step3.5 退潮闸门（2026-11-13 裁决 C）：炸板率超阈值 → 封顶轻仓。
+    # 只封顶不抬升：已在 0 档时 min(0,1)=0，不会反向加仓。
+    retreat_cap, retreat_reason = _retreat_cap(limit_indicators)
+    if retreat_cap is not None:
+        final = min(final, retreat_cap)
     # 事件前档位（step2 结束、step3 之前）：盘前撤销「临近 +1」的唯一无歧义基线
     event_off_index = max(LADDER_MIN, min(LADDER_MAX, base_after_mainline))
     # 幂等闸门（职责重定义 spec §4.1）：事件调整「已计入」的类型（approaching / result）
@@ -432,6 +474,8 @@ def derive_position_index(
         event_off_index=event_off_index,
         event_applied_kind=applied_kind,
         breadth=breadth,
+        retreat_cap=retreat_cap,
+        retreat_reason=retreat_reason,
     )
     return final, ledger
 
@@ -486,6 +530,8 @@ def _build_position_ledger(
     event_off_index: int,
     event_applied_kind: EventAppliedKind | None,
     breadth: dict[str, Any] | None,
+    retreat_cap: int | None = None,
+    retreat_reason: str | None = None,
 ) -> PositionLedger:
     """把 step0-4 的中间量组织成账本（纯展示层，不参与任何判定）。
 
@@ -594,12 +640,21 @@ def _build_position_ledger(
             effect="不影响仓位",
             status="neutral",
         )
-    else:
-        # None / "unavailable"：数据不可用必须显式标注，不得伪装中性
-        # （未知态已在入口归一为 "unavailable"，此处不再透出原始值）
+    elif state == "unavailable":
+        # fail-safe（2026-11-13）：数据不可用 → base 封顶轻仓。文案必须如实说明
+        # 「降了档」，否则账本写「不影响仓位」而实际降档，用户读不懂为什么仓变轻。
         mainline_item = LedgerItem(
             key="mainline",
-            value_text="无主线数据" if state is None else "板块数据不足",
+            value_text="板块数据不足",
+            judgement="数据不可用",
+            effect="仓位封顶轻仓，不能再加",
+            status="missing",
+        )
+    else:
+        # state is None：调用方未提供主线输入，不参与判定（不等于「数据不可用」）。
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text="无主线数据",
             judgement="数据不可用",
             effect="不影响仓位",
             status="missing",
@@ -618,8 +673,21 @@ def _build_position_ledger(
     # —— breadth ——
     breadth_item = _build_breadth_ledger_item(breadth)
 
+    # —— retreat（退潮闸门，2026-11-13 裁决 C）——
+    # status 用 neutral：本项只做展示，不进入 `_blocking_keys` 的阻塞集合，
+    # 避免改变 watch_points 的排序与「单独满足即升档」语义。
+    items = [trend_item, mainline_item, event_item, breadth_item]
+    if retreat_cap is not None:
+        items.append(LedgerItem(
+            key="retreat",
+            value_text=retreat_reason or "当日退潮",
+            judgement="退潮",
+            effect=f"仓位封顶{POSITION_LADDER[retreat_cap]}",
+            status="neutral",
+        ))
+
     return PositionLedger(
-        items=[trend_item, mainline_item, event_item, breadth_item],
+        items=items,
         base_index=base,
         adjust=adj,
         final_index=final,
