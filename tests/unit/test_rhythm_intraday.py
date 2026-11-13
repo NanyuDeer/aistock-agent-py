@@ -111,6 +111,44 @@ def test_rule_b_breadth_collapse_drops_one() -> None:
     assert new_index == 2
 
 
+def test_rule_b1_narrow_breadth_alone_triggers() -> None:
+    """规则 B1（2026-11-13 拆分）：宽度 ≤0.25 单独触发，不要求指数跌幅达标。
+
+    11-12 实测：指数只跌 0.67%，但上涨占比 16%、炸板率 54.76%、涨停 86→38。
+    原「宽度 ≤0.35 且 跌幅 ≤-1%」双条件对这类「指数抗跌、个股普跌」整天漏判。
+    """
+    snap = _snapshot(close=3250.0, pct=-0.3, ratio=0.20)
+    factors = _factors(RISING, snap)
+    new_index, rules = apply_intraday_rules(2, factors, snap)
+    assert rules == ["B"]
+    assert new_index == 1
+
+
+def test_rule_b1_boundary_at_025() -> None:
+    """边界：宽度恰为 0.25 → 触发；0.26 且跌幅不够 → 不触发。"""
+    at = _snapshot(close=3250.0, pct=-0.3, ratio=0.25)
+    assert apply_intraday_rules(2, _factors(RISING, at), at)[1] == ["B"]
+
+    above = _snapshot(close=3250.0, pct=-0.3, ratio=0.26)
+    assert apply_intraday_rules(2, _factors(RISING, above), above)[1] == []
+
+
+def test_rule_b2_keeps_original_double_condition() -> None:
+    """规则 B2 保留：宽度 0.30（未达 B1）+ 跌幅 -1.2% → 仍触发。"""
+    snap = _snapshot(close=3250.0, pct=-1.2, ratio=0.30)
+    new_index, rules = apply_intraday_rules(3, _factors(RISING, snap), snap)
+    assert rules == ["B"]
+    assert new_index == 2
+
+
+def test_rule_b_does_not_double_count_when_both_conditions_hit() -> None:
+    """B1 与 B2 同时满足时只降 1 档（合成同一个 RULE_B，不按 len(rules) 重复计分）。"""
+    snap = _snapshot(close=3250.0, pct=-2.0, ratio=0.10)
+    new_index, rules = apply_intraday_rules(3, _factors(RISING, snap), snap)
+    assert rules == ["B"]
+    assert new_index == 2
+
+
 def test_rule_c_mainline_breakdown_drops_one() -> None:
     """规则 C：主线板块当日跌幅 ≤-2.5% → 降 1 档。"""
     snap = _snapshot(

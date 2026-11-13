@@ -468,6 +468,11 @@ class Settings(BaseSettings):
     rhythm_intraday_thresholds_version: str = "v1-20261104"
     rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
     rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    # 规则 B1（2026-11-13 拆分）：宽度**单独**达标即降档，不要求指数跌幅同步达标。
+    # 背景：11-12 指数只跌 0.67%，但上涨占比 16%、炸板率 54.76%、涨停 86→38 ——
+    # 典型的「指数抗跌、个股普跌」。原判据要求「宽度 ≤35% 且 跌幅 ≤-1%」两条件同时
+    # 成立，这种日子一条都不触发，仓位停在默认半仓。
+    rhythm_intraday_breadth_ratio_strict: float = 0.25
     rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
 
     # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）

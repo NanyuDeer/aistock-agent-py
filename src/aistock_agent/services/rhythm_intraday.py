@@ -268,13 +268,21 @@ def apply_intraday_rules(
         and factors.intr_ma5 < factors.intr_ma10 < factors.intr_ma20
     ):
         rules.append(RULE_A)
-    # 规则 B：宽度崩塌（宽度与跌幅必须同时达标，单看一个会过度触发）
-    if (
+    # 规则 B：宽度崩塌（2026-11-13 拆为两条判据，命中仍只降 1 档）
+    #   B1 宽度极窄 → 单独触发：指数抗跌但个股普跌的日子（11-12 指数 -0.67%、
+    #      上涨占比 16%、炸板率 54.76%），原「宽度+跌幅」双条件会整条漏判。
+    #   B2 宽度差 + 跌幅达标 → 保留原判据（避免只靠宽度在普跌但指数大跌时重复计分）。
+    # 两条判据合成一个 RULE_B，因为降档按 len(rules) 计，拆成两条会降 2 档。
+    breadth_collapse = (
+        factors.intr_ratio is not None
+        and factors.intr_ratio <= settings.rhythm_intraday_breadth_ratio_strict
+    ) or (
         factors.intr_ratio is not None
         and factors.intr_pct is not None
         and factors.intr_ratio <= settings.rhythm_intraday_breadth_ratio
         and factors.intr_pct <= settings.rhythm_intraday_drop_pct
-    ):
+    )
+    if breadth_collapse:
         rules.append(RULE_B)
     # 规则 C：主线板块破位（盘中跌幅达阈值）
     if (
