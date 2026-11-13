@@ -322,6 +322,9 @@ def _legacy_derive(closes, mainline, event_d, event_result):  # noqa: ANN001
             adj += 1
         elif state == "none":
             base = 0
+        elif state == "unavailable":
+            # fail-safe（2026-11-13）：主线数据不可用 → 封顶轻仓，不再落回默认 2 档
+            base = min(base, 1)
         if event_d is not None and event_d in (1, 2) \
                 and state == "established" and strength == "strong":
             adj += 1

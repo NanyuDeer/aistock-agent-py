@@ -111,7 +111,8 @@ def test_mainline_unavailable_is_missing_not_neutral() -> None:
 def test_unknown_mainline_state_normalized_to_unavailable() -> None:
     """闭集归一：未知 state 不得原样透出，统一按 unavailable 处理。"""
     idx, ledger = _derive(OSC, {"state": "weird_state", "name": "X", "strength": "strong"})
-    assert idx == 2  # 判据不变：非 established / none → 不改档
+    # fail-safe（2026-11-13）：unavailable 不再落回默认 2 档，封顶轻仓 1 档
+    assert idx == 1
     assert ledger.mainline_state == "unavailable"
     ml = ledger.items[1]
     assert ml.status == "missing"
@@ -296,3 +297,53 @@ def test_position_band_index_field_defaults_none() -> None:
     assert PositionBand(
         text="轻仓~三成", action="hold", direction="neutral", index=1
     ).index == 1
+
+
+def test_mainline_unavailable_caps_at_light_position() -> None:
+    """fail-safe（2026-11-13）：主线数据不可用 → 封顶轻仓 1 档。
+
+    原实现「不改档」会落回默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向
+    相反。实测 2026-11-12 收盘后主线只到 11-11，11-13 卡给出五成~六成；补到当日
+    数据（判定无主线）后同一天应为空仓。
+    """
+    idx, ledger = _derive(OSC, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_unavailable_caps_even_in_bull_trend() -> None:
+    """多头排列默认 3 档，但主线不可用时同样封顶 1 档（数据不明不给高仓）。"""
+    idx, ledger = _derive(BULL, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_none_still_goes_to_zero() -> None:
+    """明确「无主线」仍是 0 档，与「不知道」区分开。"""
+    idx, ledger = _derive(OSC, {"state": "none"})
+    assert idx == 0
+
+
+def test_mainline_unavailable_caps_at_light_position() -> None:
+    """fail-safe（2026-11-13）：主线数据不可用 → 封顶轻仓 1 档。
+
+    原实现「不改档」会落回默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向
+    相反。实测 2026-11-12 收盘后主线只到 11-11，11-13 卡给出五成~六成；补到当日
+    数据（判定无主线）后同一天应为空仓。
+    """
+    idx, ledger = _derive(OSC, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_unavailable_caps_even_in_bull_trend() -> None:
+    """多头排列默认 3 档，但主线不可用时同样封顶 1 档（数据不明不给高仓）。"""
+    idx, ledger = _derive(BULL, {"state": "unavailable", "name": None, "strength": None})
+    assert idx == 1
+    assert ledger.base_index == 1
+
+
+def test_mainline_none_still_goes_to_zero() -> None:
+    """明确「无主线」仍是 0 档，与「不知道」区分开。"""
+    idx, ledger = _derive(OSC, {"state": "none"})
+    assert idx == 0

@@ -389,6 +389,13 @@ def derive_position_index(
         ml_adj = _mainline_adjustment(state, strength)
         if state == "none":
             base = 0  # 需求①：无清晰主线 → 空仓观望
+        elif state == "unavailable":
+            # fail-safe（2026-11-13）：主线数据不可用 ≠ 中性。原实现「不改档」会落回
+            # 默认 2 档（五成~六成）—— 数据越缺、仓位越高，与风控方向相反。
+            # 实测：11-12 收盘后生成 11-13 卡时主线只到 11-11，给出五成~六成；
+            # 补到当日数据后同一天应空仓。
+            # 明确「无主线」给 0 档，「不知道」给 1 档：不冒充空仓结论，也不给半仓。
+            base = min(base, 1)
     # step3 事件档位：唯一判据在 event_adjustment（d==0 未落档的「封顶 1」已折算进
     # delta），本函数只负责统一 clamp，不再另判。
     base_after_mainline = base + ml_adj
@@ -594,12 +601,21 @@ def _build_position_ledger(
             effect="不影响仓位",
             status="neutral",
         )
-    else:
-        # None / "unavailable"：数据不可用必须显式标注，不得伪装中性
-        # （未知态已在入口归一为 "unavailable"，此处不再透出原始值）
+    elif state == "unavailable":
+        # fail-safe（2026-11-13）：数据不可用 → base 封顶轻仓。文案必须如实说明
+        # 「降了档」，否则账本写「不影响仓位」而实际降档，用户读不懂为什么仓变轻。
         mainline_item = LedgerItem(
             key="mainline",
-            value_text="无主线数据" if state is None else "板块数据不足",
+            value_text="板块数据不足",
+            judgement="数据不可用",
+            effect="仓位封顶轻仓，不能再加",
+            status="missing",
+        )
+    else:
+        # state is None：调用方未提供主线输入，不参与判定（不等于「数据不可用」）。
+        mainline_item = LedgerItem(
+            key="mainline",
+            value_text="无主线数据",
             judgement="数据不可用",
             effect="不影响仓位",
             status="missing",
