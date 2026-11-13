@@ -291,6 +291,13 @@ class Settings(BaseSettings):
     # 尾盘快照：14:25 早于 tail 14:30 五分钟，口径同 12:25（文件名后缀区分）
     scheduler_intraday_snapshot_tail_cron: str = "25 14 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 退潮闸门（2026-11-13 裁决 C）：当日炸板率超过阈值 → 次日仓位封顶轻仓。
+    # 数据源：恐贪 indicators 的 break_rate（= 100 - seal_rate），随 after_close 的
+    # basis_date 取当日收盘口径。
+    # 背景：11-12 收盘炸板率 54.76%、涨停 86→38，但仓位判定只看均线/主线/事件，
+    # 退潮信号完全不在输入里，次日仍按默认半仓处理。
+    rhythm_retreat_break_rate_threshold: float = 50.0
+    rhythm_retreat_cap_index: int = 1
     # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
     rhythm_delta_enabled: bool = False
     # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）

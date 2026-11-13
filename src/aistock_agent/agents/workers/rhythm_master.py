@@ -449,6 +449,28 @@ def _amount_yi(raw: float | None) -> float:
     return (raw * engine.QIAN_YUAN_TO_YI) if raw is not None else 0.0
 
 
+def _extract_limit_indicators(payload: object) -> dict[str, float] | None:
+    """从恐贪镜像的 indicators 提取涨跌停类原始值（退潮闸门用）。
+
+    镜像保证 key/name/score/label/raw；`raw` 缺失（旧版 api 未升级）时返回 None，
+    闸门自动不生效 —— 不猜、不拿 0-100 的 score 反推百分比。
+    """
+    if not isinstance(payload, dict):
+        return None
+    arr = payload.get("indicators")
+    if not isinstance(arr, list):
+        return None
+    out: dict[str, float] = {}
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        raw = item.get("raw")
+        if isinstance(key, str) and isinstance(raw, int | float) and not isinstance(raw, bool):
+            out[key] = float(raw)
+    return out or None
+
+
 def _load_sentiment_series(
     days: int = 7,
     until: str | None = None,
@@ -630,7 +652,16 @@ async def _compose_card(
         )
         for r in rows[-120:]
     ]
-    fg = (await node_api.get_fear_greed() or {}).get("index")
+    fg_payload = await node_api.get_fear_greed() or {}
+    fg = fg_payload.get("index")
+    # 退潮闸门的数据源（2026-11-13 裁决 C）：恐贪 indicators 的 break_rate。
+    # 只在「当日盘后正常调度」时启用 —— `get_fear_greed()` 返回的是**最新**快照，
+    # 补跑历史卡时它会串到今天的值。evidence_date == run_date 即证明这是当日卡。
+    limit_indicators = (
+        _extract_limit_indicators(fg_payload)
+        if slot == "after_close" and evidence_date == run_date
+        else None
+    )
     # 需求 2：事件提前展示（不限 5 交易日）。单次拉全量展示窗（到 CALENDAR_MAX_YEAR
     # 年末截断，G3 越年留痕），再切 ≤5 交易日分析子窗喂 event_confirm/event_d/锚点/
     # 分支——A2 裁决：单请求超集 + 交易日差口径切分，HTTP 仍 1 次/卡/时点，且分析
@@ -976,6 +1007,7 @@ async def _compose_card(
         position_index, position_ledger = engine.derive_position_index(
             index_closes=closes, mainline=mainline,
             event_d=event_d, event_result=event_result, breadth=breadth,
+            limit_indicators=limit_indicators,
         )
         # 变奏观察点：纯函数不回填，由本处写回账本（因果输出 spec §6）。event_d=None
         # 时不产出事件项，不得用 0 伪装「事件当日」。

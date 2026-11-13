@@ -50,7 +50,7 @@ class LedgerItem(BaseModel):
     supporting=在抬高档位 / missing=数据不可用（**不得**当作 neutral）。
     """
 
-    key: Literal["trend", "mainline", "event", "breadth"]
+    key: Literal["trend", "mainline", "event", "breadth", "retreat"]
     value_text: str
     judgement: str
     effect: str
