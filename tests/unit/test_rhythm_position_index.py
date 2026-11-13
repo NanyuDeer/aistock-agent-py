@@ -25,10 +25,11 @@ WEAK = {"state": "established", "name": "AI 算力", "strength": "weak", "excess
 NONE = {"state": "none", "name": None, "strength": None, "excess": 0.8}
 
 
-def _derive(closes, mainline=None, event_d=None, event_result=None, breadth=None):
+def _derive(closes, mainline=None, event_d=None, event_result=None, breadth=None, limit=None):
     return derive_position_index(
         index_closes=closes, mainline=mainline,
         event_d=event_d, event_result=event_result, breadth=breadth,
+        limit_indicators=limit,
     )
 
 
@@ -347,3 +348,97 @@ def test_mainline_none_still_goes_to_zero() -> None:
     """明确「无主线」仍是 0 档，与「不知道」区分开。"""
     idx, ledger = _derive(OSC, {"state": "none"})
     assert idx == 0
+
+
+# ---- 退潮闸门（2026-11-13 裁决 C）：炸板率 > 50% → 次日封顶轻仓 ----
+
+def test_retreat_cap_triggers_when_break_rate_high() -> None:
+    """11-12 实测炸板率 54.76%：即便震荡 + 主线成立弱（base=2），也封顶 1 档。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 54.76, "seal_rate": 45.24},
+    )
+    assert ledger.base_index == 2
+    assert idx == 1
+    assert ledger.final_index == 1
+    retreat = [i for i in ledger.items if i.key == "retreat"]
+    assert len(retreat) == 1
+    assert "炸板率" in retreat[0].value_text
+
+
+def test_retreat_cap_not_triggered_below_threshold() -> None:
+    """11-11 炸板率 24.56%（正常）→ 不封顶，维持默认半仓。"""
+    idx, _ = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 24.56, "seal_rate": 75.44},
+    )
+    assert idx == 2
+
+
+def test_retreat_cap_never_raises_position() -> None:
+    """只封顶不抬升：已在 0 档时不反向加仓。"""
+    idx, ledger = _derive(
+        OSC, {"state": "none"}, limit={"break_rate": 80.0},
+    )
+    assert ledger.base_index == 0
+    assert idx == 0
+
+
+def test_retreat_cap_inactive_when_raw_missing() -> None:
+    """镜像未升级（无 raw）→ 闸门不生效，不拿 score 反推百分比。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit=None,
+    )
+    assert idx == 2
+    assert not [i for i in ledger.items if i.key == "retreat"]
+
+
+# ---- 退潮闸门（2026-11-13 裁决 C）：炸板率 > 50% → 次日封顶轻仓 ----
+
+def test_retreat_cap_triggers_when_break_rate_high() -> None:
+    """11-12 实测炸板率 54.76%：即便震荡 + 主线成立弱（base=2），也封顶 1 档。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 54.76, "seal_rate": 45.24},
+    )
+    assert ledger.base_index == 2
+    assert idx == 1
+    assert ledger.final_index == 1
+    retreat = [i for i in ledger.items if i.key == "retreat"]
+    assert len(retreat) == 1
+    assert "炸板率" in retreat[0].value_text
+
+
+def test_retreat_cap_not_triggered_below_threshold() -> None:
+    """11-11 炸板率 24.56%（正常）→ 不封顶，维持默认半仓。"""
+    idx, _ = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit={"break_rate": 24.56, "seal_rate": 75.44},
+    )
+    assert idx == 2
+
+
+def test_retreat_cap_never_raises_position() -> None:
+    """只封顶不抬升：已在 0 档时不反向加仓。"""
+    idx, ledger = _derive(
+        OSC, {"state": "none"}, limit={"break_rate": 80.0},
+    )
+    assert ledger.base_index == 0
+    assert idx == 0
+
+
+def test_retreat_cap_inactive_when_raw_missing() -> None:
+    """镜像未升级（无 raw）→ 闸门不生效，不拿 score 反推百分比。"""
+    idx, ledger = _derive(
+        OSC,
+        {"state": "established", "name": "X", "strength": "weak"},
+        limit=None,
+    )
+    assert idx == 2
+    assert not [i for i in ledger.items if i.key == "retreat"]
