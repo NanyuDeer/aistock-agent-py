@@ -127,6 +127,54 @@ class CausalGraph:
         return target in self.reachable(source, max_hops=max_hops)
 
 
+def _validate_structure(nodes: dict[str, CausalNode], edges: list[CausalEdge]) -> None:
+    """机制图的结构自检。
+
+    **这里只做结构检查，不做数据验证。** 通过本函数不代表边有效——
+    边的有效性需要「宏观 gap 序列 vs 目标节点收益序列」的滞后相关性检验
+    （见 spec 2026-11-12 §4）。当前数据不足，所有边仍是 prior_source=theory。
+
+    为什么要查这三项：
+      - lag_days 越界：宏观传导按月频给 3–10 天，超过 10 天说明标错了单位
+      - 环：传导链成环会让多跳遍历无限展开或重复计权
+      - prior_source 拼错：会让权重计算静默降级到默认分支，难以察觉
+    """
+    valid_prior = {"theory", "expert", "data_fit"}
+
+    for edge in edges:
+        if not 0 <= edge.lag_days <= 10:
+            raise ValueError(
+                f"edge lag_days out of range (0-10): {edge.source}->{edge.target} lag={edge.lag_days}"
+            )
+        if edge.prior_source not in valid_prior:
+            raise ValueError(
+                f"edge prior_source invalid: {edge.source}->{edge.target} got={edge.prior_source}"
+            )
+
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge.source, []).append(edge.target)
+
+    white, gray, black = 0, 1, 2
+    color = {node_id: white for node_id in nodes}
+
+    def visit(node_id: str, stack: list[str]) -> None:
+        color[node_id] = gray
+        stack.append(node_id)
+        for next_id in adjacency.get(node_id, []):
+            if color.get(next_id) == gray:
+                cycle = stack[stack.index(next_id):] + [next_id]
+                raise ValueError(f"causal graph has a cycle: {' -> '.join(cycle)}")
+            if color.get(next_id) == white:
+                visit(next_id, stack)
+        stack.pop()
+        color[node_id] = black
+
+    for node_id in nodes:
+        if color[node_id] == white:
+            visit(node_id, [])
+
+
 def _parse(data: dict[str, object]) -> CausalGraph:
     raw_nodes = data.get("nodes")
     raw_edges = data.get("edges")
@@ -167,6 +215,7 @@ def _parse(data: dict[str, object]) -> CausalGraph:
             )
         )
 
+    _validate_structure(nodes, edges)
     return CausalGraph(nodes, edges)
 
 
