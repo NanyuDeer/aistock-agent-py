@@ -444,3 +444,58 @@ async def test_morning_does_not_guess_index_when_basis_has_no_index():
     assert rhythm_card["position_index"] is None
     assert rhythm_card["position_source"] == "inherited_basis"
     assert rhythm_card["position_band"]["text"] == ""
+
+
+def _write_archives(root, items: list[tuple[str, float]]) -> None:
+    import json
+
+    for date, score in items:
+        (root / f"{date}.json").write_text(
+            json.dumps({"date": date, "score": score, "ice": {"consecutive_ice_days": 0}}),
+            encoding="utf-8",
+        )
+
+
+def test_load_sentiment_series_until_truncates_future(monkeypatch, tmp_path):
+    """until 截断：只取截止日及以前的归档（回补历史卡防未来温度串味）。
+
+    2026-11-13 诊断：归档目录按文件名取尾部，回补 11-11 卡会读到 11-12 的 52.2，
+    比原卡更错。until 必须把未来归档排除在外。
+    """
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(
+        tmp_path,
+        [("2026-11-10", 89.0), ("2026-11-11", 83.8), ("2026-11-12", 52.2)],
+    )
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, scores, _, _ = rhythm_master._load_sentiment_series(days=7, until="2026-11-11")
+    assert [x["date"] for x in series] == ["2026-11-10", "2026-11-11"]
+    assert scores[-1] == 83.8
+
+
+def test_load_sentiment_series_until_before_all_returns_empty(monkeypatch, tmp_path):
+    """until 早于全部归档 → 空序列，不伪造占位。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(tmp_path, [("2026-11-10", 89.0), ("2026-11-11", 83.8)])
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, scores, _, _ = rhythm_master._load_sentiment_series(days=7, until="2026-11-01")
+    assert series == []
+    assert scores == []
+
+
+def test_load_sentiment_series_without_until_keeps_latest(monkeypatch, tmp_path):
+    """不传 until 保持旧行为（调度路径不受影响）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(
+        tmp_path,
+        [("2026-11-10", 89.0), ("2026-11-11", 83.8), ("2026-11-12", 52.2)],
+    )
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, _, _, _ = rhythm_master._load_sentiment_series(days=2)
+    assert [x["date"] for x in series] == ["2026-11-11", "2026-11-12"]

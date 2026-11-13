@@ -432,13 +432,22 @@ def _amount_yi(raw: float | None) -> float:
 
 def _load_sentiment_series(
     days: int = 7,
+    until: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[float], int, str | None]:
-    """读 sentiment 归档近 N 个交易日序列。返回 (series, scores, consecutive_ice, latest_phase)。"""
+    """读 sentiment 归档近 N 个交易日序列。返回 (series, scores, consecutive_ice, latest_phase)。
+
+    `until` 为截止日（YYYY-MM-DD，含当日）。传值后只取该日及以前的归档 —— 手动补跑
+    历史卡时必备：归档目录按文件名倒序取尾部，不截断会把**未来**的温度算进来
+    （2026-11-13 诊断：回补 11-11 卡会读到 11-12 的 52.2，比原卡更错）。
+    """
     if not sentiment_archive_dir.exists():
         return [], [], 0, None
     files = sorted(sentiment_archive_dir.glob("*.json"))
     # latest.json 排除（避免与日期文件重复）
-    files = [f for f in files if f.name != "latest.json"][-days:]
+    files = [f for f in files if f.name != "latest.json"]
+    if until:
+        files = [f for f in files if f.stem <= until]
+    files = files[-days:]
     series: list[dict[str, Any]] = []
     scores: list[float] = []
     consecutive_ice = 0
@@ -612,7 +621,7 @@ async def _compose_card(
     # getattr 兜底：兼容只声明 events 的旧测试替身（缺这两键时按 False）。
     win.source_missing = getattr(win_full, "source_missing", False)
     win.calendar_uncovered = getattr(win_full, "calendar_uncovered", False)
-    _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
+    _, sentiment_scores, _, _ = _load_sentiment_series(days=7, until=evidence_date)
 
     # 主线判定（spec §5.1，确定性；失败/数据不足 → unavailable + 留痕，H5）
     mainline: dict[str, object] = {
@@ -1207,7 +1216,7 @@ def _build_rhythm_card(
 
     # C1（2026-11-03）：temperature_series 接线。此前该字段恒为空数组（spec §7 S4/S5 已知空置），
     # 前端 v-if 渲染早已就绪。归档缺失/为空时返回空数组，不伪造（前端自然隐藏该区块）。
-    temp_series, _, _, _ = _load_sentiment_series(days=7)
+    temp_series, _, _, _ = _load_sentiment_series(days=7, until=card.basis_date)
 
     # DEPRECATED（2026-11-04，职责重定义 T4）：level / score 仅为未升级客户端兼容保留产出，
     # 前端已零引用。切勿置 None 或删除 —— uni-app 三端，App 用户不升级即长期跑旧版，
