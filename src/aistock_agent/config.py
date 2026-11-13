@@ -281,9 +281,15 @@ class Settings(BaseSettings):
     scheduler_rhythm_after_close_cron: str = "30 17 * * mon-fri"
     scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
     scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 14:30 尾盘确认（当日节奏，只降不升）：midday 12:30 之后到收盘前没有任何修正点，
+    # 下午跳水（如 2026-11-12 中午 +0.2% → 收盘 -0.67%、炸板率 55%）无人捕捉。
+    # 继承 midday 的档位，用 14:25 快照做最后一道下调。
+    scheduler_rhythm_tail_cron: str = "30 14 * * mon-fri"
     # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
     # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
     scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
+    # 尾盘快照：14:25 早于 tail 14:30 五分钟，口径同 12:25（文件名后缀区分）
+    scheduler_intraday_snapshot_tail_cron: str = "25 14 * * mon-fri"
     rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
     # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
     rhythm_delta_enabled: bool = False

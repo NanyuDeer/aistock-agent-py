@@ -499,3 +499,52 @@ def test_load_sentiment_series_without_until_keeps_latest(monkeypatch, tmp_path)
 
     series, _, _, _ = rhythm_master._load_sentiment_series(days=2)
     assert [x["date"] for x in series] == ["2026-11-11", "2026-11-12"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_basis_card_tail_prefers_midday(monkeypatch):
+    """tail 优先继承当日 midday 的档位（串联继承，不是直接读 after_close）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    calls: list[str] = []
+
+    async def fake(target_date: str, slot: str):
+        calls.append(slot)
+        return {"content": {"rhythm_card": {"position_index": 1}}}
+
+    monkeypatch.setattr(rhythm_master.node_api, "get_rhythm_report", fake)
+    report, note = await rhythm_master._resolve_basis_card("tail", "2026-11-13")
+    assert calls == ["midday"]
+    assert note is None
+    assert report is not None
+
+
+@pytest.mark.asyncio
+async def test_resolve_basis_card_tail_falls_back_to_morning(monkeypatch):
+    """midday 缺档位时回退 morning，且必须给回退留痕（不许静默）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    calls: list[str] = []
+
+    async def fake(target_date: str, slot: str):
+        calls.append(slot)
+        if slot == "midday":
+            return {"content": {"rhythm_card": {"position_index": None}}}
+        return {"content": {"rhythm_card": {"position_index": 2}}}
+
+    monkeypatch.setattr(rhythm_master.node_api, "get_rhythm_report", fake)
+    report, note = await rhythm_master._resolve_basis_card("tail", "2026-11-13")
+    assert calls == ["midday", "morning"]
+    assert note is not None
+    assert report is not None
+
+
+def test_intraday_snapshot_suffixes_distinguish_decision_points():
+    """1225 / 1430 两个口径各落一个文件，互不覆盖。"""
+    from aistock_agent.services import intraday_snapshot_archive as archive
+
+    assert archive.SNAPSHOT_SUFFIX_MIDDAY == "1225"
+    assert archive.SNAPSHOT_SUFFIX_TAIL == "1430"
+    assert archive.SNAPSHOT_SUFFIX_MIDDAY != archive.SNAPSHOT_SUFFIX_TAIL
+    # 向后兼容别名仍指向 midday 口径
+    assert archive._SNAPSHOT_SUFFIX == archive.SNAPSHOT_SUFFIX_MIDDAY

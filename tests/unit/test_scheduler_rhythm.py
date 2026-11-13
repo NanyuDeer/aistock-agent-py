@@ -63,11 +63,12 @@ def _fire_weekdays(cron: str) -> set[int]:
     return out
 
 
-def test_rhythm_three_slots_share_mon_to_fri_weekday_window():
+def test_rhythm_all_slots_share_mon_to_fri_weekday_window():
     for cron in (
         settings.scheduler_rhythm_after_close_cron,
         settings.scheduler_rhythm_morning_cron,
         settings.scheduler_rhythm_midday_cron,
+        settings.scheduler_rhythm_tail_cron,
     ):
         assert cron.split()[4] in {"mon-fri", "0-4"}, f"cron weekday 口径非法: {cron}"
 
@@ -75,3 +76,18 @@ def test_rhythm_three_slots_share_mon_to_fri_weekday_window():
 def test_after_close_fires_on_monday_not_saturday():
     days = _fire_weekdays(settings.scheduler_rhythm_after_close_cron)
     assert days == {0, 1, 2, 3, 4}, f"after_close 应周一~周五，实际 {sorted(days)}"
+
+
+def test_tail_cron_is_1430_on_weekdays():
+    """尾盘确认 14:30，且必在 midday 12:30 之后、收盘之前。"""
+    parts = settings.scheduler_rhythm_tail_cron.split()
+    assert parts[0] == "30" and parts[1] == "14", settings.scheduler_rhythm_tail_cron
+    assert _fire_weekdays(settings.scheduler_rhythm_tail_cron) == {0, 1, 2, 3, 4}
+
+
+def test_tail_snapshot_cron_is_before_tail_card():
+    """快照必须早于卡片，否则 card 读不到当日归档（12:25 < 12:30 同款约束）。"""
+    snap = settings.scheduler_intraday_snapshot_tail_cron.split()
+    card = settings.scheduler_rhythm_tail_cron.split()
+    assert (int(snap[1]), int(snap[0])) == (14, 25), settings.scheduler_intraday_snapshot_tail_cron
+    assert int(snap[1]) * 60 + int(snap[0]) < int(card[1]) * 60 + int(card[0])

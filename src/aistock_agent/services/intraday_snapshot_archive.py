@@ -31,8 +31,13 @@ logger = structlog.get_logger()
 INTRADAY_OUTPUT_DIR = Path("docs/agent-outputs/intraday")
 archive_dir = project_root() / INTRADAY_OUTPUT_DIR
 
-# 文件名固定 1225 后缀：文件名本身即标注快照口径对应的决策时点
-_SNAPSHOT_SUFFIX = "1225"
+# 文件名后缀即标注快照口径对应的决策时点：
+#   1225 = 午间 midday 决策口径（12:25 采集，早于 12:30 五分钟）
+#   1430 = 尾盘 tail 决策口径（14:25 采集，早于 14:30 五分钟）
+SNAPSHOT_SUFFIX_MIDDAY = "1225"
+SNAPSHOT_SUFFIX_TAIL = "1430"
+# 向后兼容：历史调用方仍按 _SNAPSHOT_SUFFIX 读 midday 口径
+_SNAPSHOT_SUFFIX = SNAPSHOT_SUFFIX_MIDDAY
 
 
 def _number(value: object) -> float | None:
@@ -85,8 +90,13 @@ def _build_payload(today: date, raw: dict[str, Any] | None) -> dict[str, object]
     }
 
 
-async def archive_intraday_snapshot() -> dict[str, object] | None:
-    """归档当日 12:25 盘中快照。
+async def archive_intraday_snapshot(
+    suffix: str = SNAPSHOT_SUFFIX_MIDDAY,
+) -> dict[str, object] | None:
+    """归档当日盘中快照。
+
+    `suffix` 决定决策口径：`1225`（午间 midday）或 `1430`（尾盘 tail）。
+    同一交易日两个口径各落一个文件，互不覆盖。
 
     非交易日直接返回 None 且不落空文件（避免污染样本目录）。取数失败仍落盘，
     派生字段为 null —— 使「数据不可用」本身也成为可统计的样本（spec §4.4 同口径）。
@@ -118,7 +128,7 @@ async def archive_intraday_snapshot() -> dict[str, object] | None:
         )
 
     payload = _build_payload(today, raw)
-    path = archive_dir / f"{today.isoformat()}-{_SNAPSHOT_SUFFIX}.json"
+    path = archive_dir / f"{today.isoformat()}-{suffix}.json"
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(
