@@ -1,5 +1,27 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-14 — 午间播报生成失败 + 晚报缺洞见（周会任务 4）
+
+**开发者**: Aria
+
+### 修复
+
+- `report_parser.parse_report_content` 的 schema 判定改为接受全部 `2.x`：现网 midday 报告为 `schema_version="2.1"`，旧实现只认 `"2.0"`，导致 `podcast_brief` 解析为空，每日 12:15 报 `midday_broadcast_material_missing`，午间播报不生成。
+- `briefing._review_attribution_conclusion` 优先采用 `market_trace.trace.attribution_summary`（8–120 字、非原始 JSON）；旧逻辑只看 `attribution_status/candidates`，把真实归因降级成「今日证据不足，未确认主因」，晚报播报与 App 大盘洞见卡缺洞见。
+- 晚报播报提示词要求围绕「归因结论」这一核心洞见展开，其余素材仅作佐证。
+
+### 测试
+
+- `tests/unit/test_report_parser.py`：新增 schema 2.1、无 podcast_brief、数值 2.0 用例。
+- `tests/unit/test_briefing.py`：新增归因摘要优先、原始 JSON 回落两组用例。
+
+### 验证
+
+- `pytest tests/unit/test_report_parser.py tests/unit/test_briefing.py -q` → 45 passed。
+- 生产复核 2026-11-12：午报素材 37 字非空、播报对话 6 轮生成成功；`build_brief("evening")` 归因结论为真实洞见且 `missing_sources=[]`。
+
+---
+
 ## [junliang] 2026-11-11 — 异动溯源 P0 补充与体验修复
 
 **开发者**: junliang

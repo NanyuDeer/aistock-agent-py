@@ -357,6 +357,57 @@ async def test_brief_marks_missing_data_source_without_fabricating_evidence() ->
 
 
 @pytest.mark.asyncio
+async def test_evening_brief_uses_attribution_summary_as_insight() -> None:
+    """归因摘要存在时，晚报归因结论必须是该洞见，而不是「证据不足」。
+
+    回归背景：2026-11-12 周会任务 4 —— 复盘报告已有
+    market_trace.trace.attribution_summary，但旧逻辑只看
+    attribution_status/candidates，把真实洞见降级成缺失文案，
+    导致晚报播报与 App 大盘洞见卡都缺洞见。
+    """
+    from aistock_agent.services.briefing import build_brief
+
+    review = _structured_review_report(attribution_status="insufficient")
+    trace = review["content"]["market_trace"]["trace"]  # type: ignore[index]
+    insight = "高位题材集中兑现叠加放量资金净流出，短线情绪退潮主导当日全市场普跌。"
+    trace["attribution_summary"] = insight
+
+    api = AsyncMock()
+    api.get_analysis_report.side_effect = lambda report_type, _date: (
+        review if report_type == "review" else None
+    )
+
+    brief = await build_brief("evening", "2026-07-24", api=api)
+
+    attribution_item = next(
+        item for item in brief["items"] if item["title"] == "归因结论"
+    )
+    assert attribution_item["conclusion"] == insight
+
+
+@pytest.mark.asyncio
+async def test_evening_brief_rejects_raw_json_attribution_summary() -> None:
+    """归因摘要若是原始 JSON 片段，仍应回落「证据不足」，不能直接展示。"""
+    from aistock_agent.services.briefing import build_brief
+
+    review = _structured_review_report(attribution_status="insufficient")
+    trace = review["content"]["market_trace"]["trace"]  # type: ignore[index]
+    trace["attribution_summary"] = '{"trace": {"candidates": []}}'
+
+    api = AsyncMock()
+    api.get_analysis_report.side_effect = lambda report_type, _date: (
+        review if report_type == "review" else None
+    )
+
+    brief = await build_brief("evening", "2026-07-24", api=api)
+
+    attribution_item = next(
+        item for item in brief["items"] if item["title"] == "归因结论"
+    )
+    assert attribution_item["conclusion"] == "今日证据不足，未确认主因"
+
+
+@pytest.mark.asyncio
 async def test_brief_rejects_wrong_type_or_failed_persisted_rows() -> None:
     """报告类型或落库状态不可信时必须列为缺失，不能伪装成所需工件。"""
     from aistock_agent.services.briefing import build_brief

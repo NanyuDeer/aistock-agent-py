@@ -115,6 +115,14 @@ def _review_attribution_conclusion(content: dict[str, object]) -> str | None:
     trace = market_trace.get("trace")
     if not isinstance(trace, dict):
         return None
+    # 优先使用复盘 Agent 生成的归因摘要——它才是当天的核心洞见。
+    # 旧逻辑只看 attribution_status/candidates，摘要已存在但状态为 insufficient 时
+    # 会被降级成「证据不足」，导致晚报播报与 App 大盘洞见卡缺洞见。
+    summary = trace.get("attribution_summary")
+    if isinstance(summary, str):
+        cleaned_summary = summary.strip()
+        if 8 <= len(cleaned_summary) <= 120 and not _looks_like_raw_json(cleaned_summary):
+            return cleaned_summary
     status = trace.get("attribution_status")
     candidates = trace.get("candidates")
     primary_id = trace.get("primary_chain_id")

@@ -22,7 +22,7 @@ logger = structlog.get_logger()
 def parse_report_content(content: Mapping[str, object]) -> tuple[str, str]:
     """解析报告 content，返回 (display_text, podcast_brief)
 
-    兼容 1.0 单层和 2.0 双层结构。
+    兼容 1.0 单层和 2.x 双层结构。
 
     Args:
         content: 数据库 content 字段（JSONB 解析后的 dict）
@@ -36,8 +36,11 @@ def parse_report_content(content: Mapping[str, object]) -> tuple[str, str]:
         return ("", "")
 
     schema_version = content.get("schema_version", "1.0")
+    # 2.x 均为双层结构（现网 midday 使用 2.1）；只认 "2.0" 会让 2.1 落入 1.0 分支，
+    # 导致 podcast_brief 解析为空、午间播报因素材缺失而生成失败。
+    schema_text = str(schema_version or "1.0")
 
-    if schema_version == "2.0":
+    if schema_text.startswith("2."):
         # 双层结构
         display_report = content.get("display_report", {})
         if isinstance(display_report, dict):

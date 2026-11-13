@@ -780,3 +780,7 @@ content = {
 > - `schemas/prediction.py` 的 `LightForecast` 已删除。
 > - Node 侧配合接口（`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）已删除，data_client 对应方法已清理。
 > - `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 对应登记条目已清理。
+
+### 2026-11-12 播报/简报解析约定（周会任务 4）
+- 报告 schema_version 判定必须兼容全部 2.x（现网 midday=2.1），禁止精确等于 2.0，否则 podcast_brief 解析为空、午间播报因素材缺失不生成（`utils/report_parser.py`）。
+- 晚报「归因结论」优先取 `market_trace.trace.attribution_summary`（strip 后 8–120 字、非原始 JSON），否则回落 attribution_status/candidates 链式逻辑与「证据不足」文案（`services/briefing.py::_review_attribution_conclusion`）；晚报播报提示词要求围绕该归因结论洞见展开。

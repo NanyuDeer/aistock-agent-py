@@ -105,6 +105,37 @@ class TestSchemaV2:
         assert display == "只有详情"
 
 
+class TestSchemaV2Minor:
+    """schema_version 2.x（如 midday 的 2.1）也必须按双层结构解析。
+
+    回归背景：2026-11-12 周会任务 4 —— 原实现只认 "2.0"，midday 报告
+    schema_version="2.1" 落入 1.0 分支，podcast_brief 解析为空，
+    导致每天 12:15 午间播报因素材缺失而生成失败。
+    """
+
+    def test_v2_1_parses_podcast_brief(self):
+        content = {
+            "display_report": {"summary": "午间结论", "details": "午间详情"},
+            "podcast_brief": "午间播报摘要",
+            "schema_version": "2.1",
+        }
+        display, podcast = parse_report_content(content)
+        assert "午间结论" in display
+        assert "午间详情" in display
+        assert podcast == "午间播报摘要"
+
+    def test_v2_1_without_podcast_brief(self):
+        content = {"display_report": {"summary": "只有结论"}, "schema_version": "2.1"}
+        display, podcast = parse_report_content(content)
+        assert display == "只有结论"
+        assert podcast == ""
+
+    def test_numeric_schema_version_treated_as_v2(self):
+        content = {"display_report": {"summary": "结论"}, "schema_version": 2.0}
+        display, _ = parse_report_content(content)
+        assert display == "结论"
+
+
 class TestEdgeCases:
     """边界情况测试"""
 
