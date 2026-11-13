@@ -322,7 +322,8 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
 
-    # 节奏大师三时点（spec §8/D13）：16:05 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # 节奏大师三时点（spec §8/D13）：17:30 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # （17:30 见 config.scheduler_rhythm_after_close_cron 注释：须晚于情绪归档 17:00 落盘）
     scheduler.add_job(
         _run_rhythm_master_after_close,
         CronTrigger.from_crontab(

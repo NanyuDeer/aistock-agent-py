@@ -1,4 +1,4 @@
-"""scheduler 三时点注册（§8/D13）：16:05 收盘基准 + 9:00 盘前 + 12:30 午间。"""
+"""scheduler 三时点注册（§8/D13）：17:30 收盘基准 + 9:00 盘前 + 12:30 午间。"""
 from datetime import datetime, timedelta
 
 import pytest
