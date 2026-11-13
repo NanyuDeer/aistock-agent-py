@@ -81,7 +81,7 @@ from aistock_agent.utils.paths import project_root
 
 logger = logging.getLogger(__name__)
 
-REFRESH_SLOTS = ("after_close", "morning", "midday")
+REFRESH_SLOTS = ("after_close", "morning", "midday", "tail")
 
 # sentiment 归档目录（settings 值 + 仓库根解析，不依赖 CWD；测试可覆写）
 sentiment_archive_dir = project_root() / settings.sentiment_output_dir
@@ -183,19 +183,33 @@ async def _resolve_basis_card(
     """按期次解析要沿用的上游卡（职责重定义 spec §4.1：串联继承链，非并行）。
 
     `after_close`（定档）→ `morning`（读 after_close，做事件修正）→
-    `midday`（读 morning，做盘中修正；morning 不可用才回退 after_close）。
+    `midday`（读 morning，做盘中修正；morning 不可用才回退 after_close）→
+    `tail`（读 midday，做尾盘修正；不可用才依次回退 morning / after_close）。
 
     - `morning`：读 `(target_date, after_close)`；
     - `midday`：**先**读 `(target_date, morning)`，其 `content.rhythm_card.
       position_index` 为 0-4 整数才采用；否则回退 `(target_date, after_close)`。
+    - `tail`：**先**读 `(target_date, midday)`，规则同上；不可用再回退 morning、
+      最后回退 after_close。尾盘是收盘前最后一道修正，串联继承保证「只降不升」
+      的基准是当日已经生效的档位。
     - `after_close`：不继承，返回 `(None, None)`。
 
     返回 `(report, fallback_note)`：`fallback_note` 非 None 表示「先读的一环不可用、
-    已回退到收盘卡」，调用方**必须**写入 `data_missing`（不许静默回退）。两环都读不到
+    已回退到更上游」，调用方**必须**写入 `data_missing`（不许静默回退）。全部读不到
     时返回 `(None, None)`，由调用方的「上一交易日的收盘仓位没取到」统一留痕（不重复报回退）。
     """
     if slot == "morning":
         return await node_api.get_rhythm_report(target_date, "after_close"), None
+    if slot == "tail":
+        for fallback_slot in ("midday", "morning"):
+            report = await node_api.get_rhythm_report(target_date, fallback_slot)
+            if _report_position_index(report) is not None:
+                note = None if fallback_slot == "midday" else BASIS_FALLBACK_NOTE
+                return report, note
+        basis = await node_api.get_rhythm_report(target_date, "after_close")
+        if basis is None:
+            return None, None
+        return basis, BASIS_FALLBACK_NOTE
     if slot != "midday":
         return None, None
     morning = await node_api.get_rhythm_report(target_date, "morning")
@@ -228,7 +242,7 @@ def _inherit_basis_stage(
     上游是 morning（缺失才回退 after_close）。文案据上游卡自身的 `refresh_slot`
     区分「收盘卡」与「盘前卡」，避免 midday 把盘前卡说成收盘卡。
     """
-    if slot not in {"morning", "midday"}:
+    if slot not in {"morning", "midday", "tail"}:
         return None
     if not isinstance(basis_response, dict):
         return None
@@ -242,7 +256,12 @@ def _inherit_basis_stage(
     if stage is None:
         return None
     basis_date = content.get("basis_date")
-    basis_label = "盘前判断" if content.get("refresh_slot") == "morning" else "收盘判断"
+    # tail 的上游是 midday，不能沿用「非 morning 即收盘」的二值判断 —— 否则尾盘卡
+    # 会把午间卡说成「收盘判断」。
+    basis_label = {
+        "morning": "盘前判断",
+        "midday": "午间判断",
+    }.get(str(content.get("refresh_slot")), "收盘判断")
     reason = str(evidence.get("stage_reason") or "")
     position_text: str | None = None
     position_index: int | None = _report_position_index(basis_response)
@@ -432,13 +451,22 @@ def _amount_yi(raw: float | None) -> float:
 
 def _load_sentiment_series(
     days: int = 7,
+    until: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[float], int, str | None]:
-    """读 sentiment 归档近 N 个交易日序列。返回 (series, scores, consecutive_ice, latest_phase)。"""
+    """读 sentiment 归档近 N 个交易日序列。返回 (series, scores, consecutive_ice, latest_phase)。
+
+    `until` 为截止日（YYYY-MM-DD，含当日）。传值后只取该日及以前的归档 —— 手动补跑
+    历史卡时必备：归档目录按文件名倒序取尾部，不截断会把**未来**的温度算进来
+    （2026-11-13 诊断：回补 11-11 卡会读到 11-12 的 52.2，比原卡更错）。
+    """
     if not sentiment_archive_dir.exists():
         return [], [], 0, None
     files = sorted(sentiment_archive_dir.glob("*.json"))
     # latest.json 排除（避免与日期文件重复）
-    files = [f for f in files if f.name != "latest.json"][-days:]
+    files = [f for f in files if f.name != "latest.json"]
+    if until:
+        files = [f for f in files if f.stem <= until]
+    files = files[-days:]
     series: list[dict[str, Any]] = []
     scores: list[float] = []
     consecutive_ice = 0
@@ -511,18 +539,18 @@ INTRADAY_UNAVAILABLE_NOTE = "盘中数据不可用，仓位这次没有跟着改
 INTRADAY_NO_WORSENING_NOTE = "盘中未见恶化"
 
 
-async def _load_intraday_snapshot(target_date: str) -> dict[str, Any] | None:
-    """midday 盘中快照：优先读 T0 归档（12:25），归档缺失才实时取数（spec §4.3）。
+async def _load_intraday_snapshot(
+    target_date: str,
+    suffix: str = intraday_archive.SNAPSHOT_SUFFIX_MIDDAY,
+) -> dict[str, Any] | None:
+    """盘中快照：优先读 T0 归档（midday=12:25 / tail=14:25），归档缺失才实时取数。
 
-    归档存在即代表「12:30 决策时刻可拿到的口径」，直接读文件可避免同一端点重复
+    归档存在即代表「决策时刻可拿到的口径」，直接读文件可避免同一端点重复
     请求；归档缺失（job 未跑 / 历史补跑）才回退 ``get_intraday_sectors()``，保证
-    midday 不因归档缺失而失去盘中修正能力。两种失败都返回 None，由调用方按
+    盘中修正不因归档缺失而失效。两种失败都返回 None，由调用方按
     「盘中数据不可用」处理——不得默认按「未恶化」处理，也不得伪造中性输入。
     """
-    path = (
-        intraday_archive.archive_dir
-        / f"{target_date}-{intraday_archive._SNAPSHOT_SUFFIX}.json"
-    )
+    path = intraday_archive.archive_dir / f"{target_date}-{suffix}.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):  # 不存在 / 权限 / 坏 JSON / 编码错误
@@ -576,7 +604,7 @@ async def _compose_card(
     rows = [r for r in kline if r.get("close") is not None]
     # 未完成 bar 剔除（spec §5.4.2）：盘中档剔除 trade_date==run_ymd 的行，
     # 防 15:00 后补跑把当日未完成 bar 污染趋势/反转判定。
-    if slot in {"morning", "midday"}:
+    if slot in {"morning", "midday", "tail"}:
         rows = [r for r in rows if _normalize_ymd(r.get("trade_date")) != run_ymd]
     last_trade_date = _normalize_ymd(rows[-1].get("trade_date")) if rows else None
     # 证据日 = K 线末日（对外 basis_date 语义，P1-6/G9）；无 K 线时退回运行日。
@@ -612,7 +640,7 @@ async def _compose_card(
     # getattr 兜底：兼容只声明 events 的旧测试替身（缺这两键时按 False）。
     win.source_missing = getattr(win_full, "source_missing", False)
     win.calendar_uncovered = getattr(win_full, "calendar_uncovered", False)
-    _, sentiment_scores, _, _ = _load_sentiment_series(days=7)
+    _, sentiment_scores, _, _ = _load_sentiment_series(days=7, until=evidence_date)
 
     # 主线判定（spec §5.1，确定性；失败/数据不足 → unavailable + 留痕，H5）
     mainline: dict[str, object] = {
@@ -825,7 +853,7 @@ async def _compose_card(
     inherited_position_ledger: PositionLedger | None = None
     inherited_basis = False
     position_source_hint: str | None = None
-    if slot in {"morning", "midday"}:
+    if slot in {"morning", "midday", "tail"}:
         basis_resp, fallback_note = await _resolve_basis_card(slot, target_date)
         if fallback_note:
             basis_inherit_note = fallback_note
@@ -866,13 +894,18 @@ async def _compose_card(
                 candidates=mainline_candidates,
             )
 
-    # spec §4.3 / §4.4：midday 盘中修正（**只降不升**）。盘中数据源优先读 12:25 归档，
-    # 缺失才实时取数（正常路径只有一次请求）。无论可用与否，盘中因子都要落库——这是
-    # 阈值未来可回测的唯一自变量来源。
+    # spec §4.3 / §4.4：midday / tail 盘中修正（**只降不升**）。盘中数据源优先读
+    # 对应时点的归档（midday=12:25、tail=14:25），缺失才实时取数（正常路径只有一次请求）。
+    # 无论可用与否，盘中因子都要落库——这是阈值未来可回测的唯一自变量来源。
     intraday_factors: IntradayFactors | None = None
     midday_adjust_note: str | None = None
-    if slot == "midday":
-        snapshot_payload = await _load_intraday_snapshot(target_date)
+    if slot in {"midday", "tail"}:
+        snapshot_payload = await _load_intraday_snapshot(
+            target_date,
+            intraday_archive.SNAPSHOT_SUFFIX_TAIL
+            if slot == "tail"
+            else intraday_archive.SNAPSHOT_SUFFIX_MIDDAY,
+        )
         intraday_factors = derive_intraday_factors(
             snapshot_payload,
             closes,
@@ -1207,7 +1240,7 @@ def _build_rhythm_card(
 
     # C1（2026-11-03）：temperature_series 接线。此前该字段恒为空数组（spec §7 S4/S5 已知空置），
     # 前端 v-if 渲染早已就绪。归档缺失/为空时返回空数组，不伪造（前端自然隐藏该区块）。
-    temp_series, _, _, _ = _load_sentiment_series(days=7)
+    temp_series, _, _, _ = _load_sentiment_series(days=7, until=card.basis_date)
 
     # DEPRECATED（2026-11-04，职责重定义 T4）：level / score 仅为未升级客户端兼容保留产出，
     # 前端已零引用。切勿置 None 或删除 —— uni-app 三端，App 用户不升级即长期跑旧版，

@@ -444,3 +444,107 @@ async def test_morning_does_not_guess_index_when_basis_has_no_index():
     assert rhythm_card["position_index"] is None
     assert rhythm_card["position_source"] == "inherited_basis"
     assert rhythm_card["position_band"]["text"] == ""
+
+
+def _write_archives(root, items: list[tuple[str, float]]) -> None:
+    import json
+
+    for date, score in items:
+        (root / f"{date}.json").write_text(
+            json.dumps({"date": date, "score": score, "ice": {"consecutive_ice_days": 0}}),
+            encoding="utf-8",
+        )
+
+
+def test_load_sentiment_series_until_truncates_future(monkeypatch, tmp_path):
+    """until 截断：只取截止日及以前的归档（回补历史卡防未来温度串味）。
+
+    2026-11-13 诊断：归档目录按文件名取尾部，回补 11-11 卡会读到 11-12 的 52.2，
+    比原卡更错。until 必须把未来归档排除在外。
+    """
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(
+        tmp_path,
+        [("2026-11-10", 89.0), ("2026-11-11", 83.8), ("2026-11-12", 52.2)],
+    )
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, scores, _, _ = rhythm_master._load_sentiment_series(days=7, until="2026-11-11")
+    assert [x["date"] for x in series] == ["2026-11-10", "2026-11-11"]
+    assert scores[-1] == 83.8
+
+
+def test_load_sentiment_series_until_before_all_returns_empty(monkeypatch, tmp_path):
+    """until 早于全部归档 → 空序列，不伪造占位。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(tmp_path, [("2026-11-10", 89.0), ("2026-11-11", 83.8)])
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, scores, _, _ = rhythm_master._load_sentiment_series(days=7, until="2026-11-01")
+    assert series == []
+    assert scores == []
+
+
+def test_load_sentiment_series_without_until_keeps_latest(monkeypatch, tmp_path):
+    """不传 until 保持旧行为（调度路径不受影响）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    _write_archives(
+        tmp_path,
+        [("2026-11-10", 89.0), ("2026-11-11", 83.8), ("2026-11-12", 52.2)],
+    )
+    monkeypatch.setattr(rhythm_master, "sentiment_archive_dir", tmp_path)
+
+    series, _, _, _ = rhythm_master._load_sentiment_series(days=2)
+    assert [x["date"] for x in series] == ["2026-11-11", "2026-11-12"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_basis_card_tail_prefers_midday(monkeypatch):
+    """tail 优先继承当日 midday 的档位（串联继承，不是直接读 after_close）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    calls: list[str] = []
+
+    async def fake(target_date: str, slot: str):
+        calls.append(slot)
+        return {"content": {"rhythm_card": {"position_index": 1}}}
+
+    monkeypatch.setattr(rhythm_master.node_api, "get_rhythm_report", fake)
+    report, note = await rhythm_master._resolve_basis_card("tail", "2026-11-13")
+    assert calls == ["midday"]
+    assert note is None
+    assert report is not None
+
+
+@pytest.mark.asyncio
+async def test_resolve_basis_card_tail_falls_back_to_morning(monkeypatch):
+    """midday 缺档位时回退 morning，且必须给回退留痕（不许静默）。"""
+    from aistock_agent.agents.workers import rhythm_master
+
+    calls: list[str] = []
+
+    async def fake(target_date: str, slot: str):
+        calls.append(slot)
+        if slot == "midday":
+            return {"content": {"rhythm_card": {"position_index": None}}}
+        return {"content": {"rhythm_card": {"position_index": 2}}}
+
+    monkeypatch.setattr(rhythm_master.node_api, "get_rhythm_report", fake)
+    report, note = await rhythm_master._resolve_basis_card("tail", "2026-11-13")
+    assert calls == ["midday", "morning"]
+    assert note is not None
+    assert report is not None
+
+
+def test_intraday_snapshot_suffixes_distinguish_decision_points():
+    """1225 / 1430 两个口径各落一个文件，互不覆盖。"""
+    from aistock_agent.services import intraday_snapshot_archive as archive
+
+    assert archive.SNAPSHOT_SUFFIX_MIDDAY == "1225"
+    assert archive.SNAPSHOT_SUFFIX_TAIL == "1430"
+    assert archive.SNAPSHOT_SUFFIX_MIDDAY != archive.SNAPSHOT_SUFFIX_TAIL
+    # 向后兼容别名仍指向 midday 口径
+    assert archive._SNAPSHOT_SUFFIX == archive.SNAPSHOT_SUFFIX_MIDDAY
