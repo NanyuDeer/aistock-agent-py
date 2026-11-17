@@ -22,6 +22,7 @@ import structlog
 
 from aistock_agent.services.causal_graph import CausalGraph, load_market_graph
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.entity_recall import recall_sectors
 from aistock_agent.tools.industry_vector_search import semantic_match_industries
 
 logger = structlog.get_logger(__name__)
@@ -166,34 +167,54 @@ async def get_event_node_mappings(
             if isinstance(item, dict) and item.get("nodeId")
         ]
 
-    # 2) 向量召回。失败只记日志不抛——embedding 不可用时不能让整个归因流程崩。
-    try:
-        recalled = await io.recall(keywords, threshold, limit)
-    except Exception as error:  # noqa: BLE001 - embedding 失败必须降级
-        logger.warning("event_node_recall_failed", event_id=event_id, error=str(error))
-        recalled = []
-
     graph = graph or load_market_graph()
-
-    # 3) 归一 + 确认。归一不到的候选直接丢弃，不硬塞。
     mappings: list[NodeMapping] = []
-    for item in recalled:
-        name = _recall_name(item)
-        if not name:
-            continue
-        node_id = resolve_node_id(graph, name)
+
+    # 2) 实体识别优先。
+    #    2026-11-17 实测：向量召回判断不了「台积电属于半导体」（模型不认识公司归属），
+    #    也常因阈值丢掉正确结果（「铠侠存储」只拿到 0.44）。实体识别是精确匹配，
+    #    每条结果都能说清命中依据，且不依赖模型对公司/产业的认知。
+    text = " ".join(keywords)
+    for hit in recall_sectors(text):
+        node_id = resolve_node_id(graph, hit.sector)
         if node_id is None:
             continue
-        similarity = _recall_similarity(item)
         confirmed, reason = confirm_mapping(graph, node_id, scope_sectors)
         mappings.append(
             NodeMapping(
                 node_id=node_id,
-                similarity=similarity,
+                similarity=hit.confidence,
                 confirmed=confirmed,
-                reason=reason,
+                reason=f"{reason}|{hit.matched_by}",
             )
         )
+
+    # 3) 向量召回降级为兜底：只有实体一个都没命中时才试。
+    #    失败只记日志不抛——embedding 不可用时不能让整个归因流程崩。
+    if not mappings:
+        try:
+            recalled = await io.recall(keywords, threshold, limit)
+        except Exception as error:  # noqa: BLE001 - embedding 失败必须降级
+            logger.warning("event_node_recall_failed", event_id=event_id, error=str(error))
+            recalled = []
+
+        for item in recalled:
+            name = _recall_name(item)
+            if not name:
+                continue
+            node_id = resolve_node_id(graph, name)
+            if node_id is None:
+                continue
+            similarity = _recall_similarity(item)
+            confirmed, reason = confirm_mapping(graph, node_id, scope_sectors)
+            mappings.append(
+                NodeMapping(
+                    node_id=node_id,
+                    similarity=similarity,
+                    confirmed=confirmed,
+                    reason=reason,
+                )
+            )
 
     # 4) 落库。未确认的也存——冗余不丢，噪音不污染（只在证据矩阵展示）。
     #    落库失败只记日志：存不下不该导致拿不到答案。
