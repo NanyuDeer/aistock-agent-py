@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import importlib
 import json
 import time
 from datetime import date
@@ -20,6 +21,9 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
+# 仅为"按名取 worker 模块"提供包命名空间句柄（包 __init__ 是空的，无重依赖）。
+# 具体子模块仍在 _run_agent 里按需 import，保持既有的延迟加载约定。
+import aistock_agent.agents.workers as _workers_pkg
 from aistock_agent.config import settings
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
@@ -42,6 +46,55 @@ logger = structlog.get_logger()
 _midday_llm_semaphore = asyncio.Semaphore(1)
 
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
+
+
+def _use_task_runner(job_id: str) -> bool:
+    """该 job 是否走统一执行外壳（灰度判定）。
+
+    默认关闭；打开后可再用 ``SCHEDULER_TASK_RUNNER_TASKS`` 白名单逐个放行 ——
+    agent 任务换执行路径后，若有 worker 依赖了调用方的隐式行为，产出物会先在这里
+    露头，所以支持一个任务一个任务地开。
+    """
+    if not settings.scheduler_task_runner_enabled:
+        return False
+    raw = settings.scheduler_task_runner_tasks or ""
+    whitelist = {item.strip() for item in raw.split(",") if item.strip()}
+    return not whitelist or job_id in whitelist
+
+
+async def _run_agent(
+    job_id: str,
+    agent_name: str,
+    state: AgentState,
+) -> dict[str, object]:
+    """跑一个 agent 任务。
+
+    灰度打开时走 ``services/task_runner.py``（执行记录 + 传输层重试）；
+    关闭时按名懒加载 worker 模块并直调 ``run`` —— 与改造前
+    ``from ... import morning as morning_agent; await morning_agent.run(state)``
+    完全等价。
+
+    **为什么 legacy 路径必须 importlib 现取，不能读 registry**：
+    registry 在 import 时就把 ``spec.run`` 固定成原始函数对象；测试用的是
+    ``patch.object(workers.morning, "run", ...)``（改模块属性），从 registry 取
+    会绕过 patch → 单元测试直接打真实 agent（真实网络调用）。实测代价：
+    tests/unit 从 90s 变成卡死 5 分钟以上。现取模块属性则与 patch 天然对齐。
+
+    调用点全部是 ``agents/workers/<agent_name>.py``；general（在 agents/general/node.py）
+    不在 scheduler 路径上，故此处不处理。
+    """
+    if _use_task_runner(job_id):
+        from aistock_agent.services.task_runner import run_agent_task
+
+        task = await run_agent_task(job_id, agent_name, state)
+        return task.result or {}
+
+    # 先确保子模块已加载（首次会顺带把模块挂到包属性上），再从**包属性**取模块：
+    # importlib.import_module 查 sys.modules，会绕过 mock.patch 替换的包属性；
+    # getattr(包, 名) 才与既有测试的 patch 方式（patch("...workers.morning")）对齐。
+    importlib.import_module(f"aistock_agent.agents.workers.{agent_name}")
+    module = getattr(_workers_pkg, agent_name)
+    return await module.run(state)  # type: ignore[no-any-return]
 
 _scheduler: AsyncIOScheduler | None = None
 
@@ -501,7 +554,6 @@ async def _run_morning_task() -> None:
 
     logger.info("scheduler_morning_start")
     # 函数内 import：延迟加载 LangGraph/LangChain 重依赖，避免 scheduler 模块加载时拖慢启动
-    from aistock_agent.agents.workers import morning as morning_agent
 
     state: AgentState = {
         "messages": [],
@@ -517,7 +569,7 @@ async def _run_morning_task() -> None:
     }
 
     try:
-        result = await morning_agent.run(state)
+        result = await _run_agent("morning_briefing", "morning", state)
         logger.info(
             "scheduler_morning_done",
             has_response=bool(result.get("final_response")),
@@ -687,7 +739,6 @@ async def _dispatch_rhythm_master(
     slot 推导（after_close=次一交易日 / 其余=基准日当天）；显式传入则卡落在该日
     键，供"基于某日数据重算该日节奏"场景（见 routes.trigger_rhythm_master）。
     """
-    from aistock_agent.agents.workers.rhythm_master import run as run_rhythm_master
 
     state = _make_scheduled_state(
         report_date or shanghai_today().isoformat(), intent="rhythm_master"
@@ -698,7 +749,7 @@ async def _dispatch_rhythm_master(
     if target_date:
         state["target_date"] = target_date
     try:
-        return await run_rhythm_master(state)
+        return await _run_agent(f"rhythm_master_{slot}", "rhythm_master", state)
     except Exception:
         logger.warning("rhythm_master.task_failed", slot=slot, exc_info=True)
         return {}
@@ -767,13 +818,12 @@ async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
     report_date = day.isoformat()
 
     logger.info("scheduler_midday_start", report_date=report_date)
-    from aistock_agent.agents.workers import midday as midday_agent
 
     state = _make_scheduled_state(report_date, intent="midday")
 
     async with _midday_llm_semaphore:
         try:
-            result = await midday_agent.run(state)
+            result = await _run_agent("midday_briefing", "midday", state)
             # 绑定局部变量再收窄：isinstance 收窄无法跨表达式传播到重复取值
             analysis_reports = result.get("analysis_reports")
             generated = bool(
@@ -814,13 +864,12 @@ async def _run_midday_broadcast_task(report_date: str | None = None) -> dict[str
     report_date = day.isoformat()
 
     logger.info("scheduler_midday_broadcast_start", report_date=report_date)
-    from aistock_agent.agents.workers import midday_broadcast as midday_broadcast_agent
 
     state = _make_scheduled_state(report_date, intent="midday_broadcast")
 
     async with _midday_llm_semaphore:
         try:
-            result = await midday_broadcast_agent.run(state)
+            result = await _run_agent("midday_broadcast", "midday_broadcast", state)
             mb_info = result.get("midday_broadcast")
             generated = (
                 bool(mb_info.get("generated")) if isinstance(mb_info, dict) else False
@@ -1220,7 +1269,6 @@ async def _run_review_task() -> None:
         return
 
     logger.info("scheduler_review_start")
-    from aistock_agent.agents.workers import review as review_agent
 
     # 上海自然日（对齐 `_run_morning_task`；date.today() 用容器本地时区，
     # UTC 部署下会与交易日判定/落库日错位）
@@ -1240,7 +1288,7 @@ async def _run_review_task() -> None:
     }
 
     try:
-        result = await review_agent.run(state)
+        result = await _run_agent("review_full", "review", state)
         logger.info(
             "scheduler_review_done",
             has_response=bool(result.get("final_response")),
@@ -1278,7 +1326,6 @@ async def _run_iterate_task() -> None:
         return
 
     logger.info("scheduler_iterate_start")
-    from aistock_agent.agents.workers import iterate as iterate_agent
 
     state: AgentState = {
         "messages": [],
@@ -1293,7 +1340,7 @@ async def _run_iterate_task() -> None:
     }
 
     try:
-        result = await iterate_agent.run(state)
+        result = await _run_agent("iterate", "iterate", state)
         logger.info(
             "scheduler_iterate_done",
             has_response=bool(result.get("final_response")),
