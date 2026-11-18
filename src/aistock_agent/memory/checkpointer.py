@@ -35,22 +35,11 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def _ensure_aiosqlite_compat() -> None:
-    """补 aiosqlite.Connection.is_alive（langgraph-checkpoint-sqlite 2.0.11 需要）。
-
-    AsyncSqliteSaver.setup() 会调用 ``self.conn.is_alive()``，但该 API 截至
-    aiosqlite 0.22.1（PyPI 最新版）尚未发布，2.0.11 是 langgraph-checkpoint
-    2.1.2（langgraph 0.2.74 锁定）兼容的最新 sqlite 子包，无上游修复可用。
-    补等价实现：aiosqlite 连接延迟建立，底层 sqlite3 连接已建立即视为 alive。
-    幂等：目标已存在则不重复打补丁。
-    """
-    if hasattr(aiosqlite.Connection, "is_alive"):
-        return
-
-    def is_alive(self: aiosqlite.Connection) -> bool:
-        return self._connection is not None
-
-    aiosqlite.Connection.is_alive = is_alive  # type: ignore[attr-defined]
+# 2026-11-18（langgraph 1.2.22 / langgraph-checkpoint-sqlite 3.1.3）：
+# 原 ``_ensure_aiosqlite_compat`` 已删除 —— 该补丁只为 2.0.11 硬调
+# ``aiosqlite.Connection.is_alive()`` 而存在。3.1.3 在 aio.py 内改为
+# ``getattr(aiosqlite.Connection, "is_alive", None)``，缺失时回落
+# ``thread.is_alive()``，上游已自洽；继续打补丁反而绕开官方判定路径。
 
 # 单例缓存：首次调用初始化，后续返回同一实例（避免重复建连接 / 丢状态）
 # V=str 与 MemorySaver(BaseCheckpointSaver[str]) 一致；sqlite/redis 未安装时
@@ -124,7 +113,7 @@ async def _build_async_sqlite_saver() -> BaseCheckpointSaver[str]:
     # 连 memory 后端（docstring 声明"零依赖"）都无法启动，且 get_checkpointer()
     # 的 try/except ImportError 降级永远不会执行。改在此处导入，ImportError 会
     # 沿 _run_coro_sync 冒到 sqlite 分支的 except → 降级 MemorySaver。
-    # global：使绑定落在模块命名空间，供 _ensure_aiosqlite_compat() 引用。
+    # global：使绑定落在模块命名空间（供其余 sqlite 分支辅助函数复读）。
     global aiosqlite
     import aiosqlite
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -158,9 +147,6 @@ def get_checkpointer() -> BaseCheckpointSaver[str]:
             # 见 review 结论）。连接构造见 _build_async_sqlite_saver（直建连接、
             # 不经 async CM，CM 无法在同步入口下存活）。
             _checkpointer = _run_coro_sync(_build_async_sqlite_saver())
-            # aiosqlite 已在 _build_async_sqlite_saver 内懒加载成功，此处才可
-            # 引用；补丁必须在首次持久化（setup() 调 is_alive）前应用。
-            _ensure_aiosqlite_compat()
             # 注册退出时关闭连接（幂等，只注册一次）：aiosqlite 工作线程非
             # daemon，不关闭则解释器退出永久挂起（见 _close_sqlite_conn_on_exit）。
             # 不能用 atexit.register：CPython 3.11 实测 atexit 回调在
@@ -208,7 +194,7 @@ def get_checkpointer() -> BaseCheckpointSaver[str]:
 def delete_thread(thread_id: str) -> None:
     """删除指定 thread 的全部 checkpoint/writes（幂等；Phase 5 删会话联动）。
 
-    三个后端在 langgraph-checkpoint 2.1.2 下均确认有 ``adelete_thread``：
+    三个后端在 langgraph-checkpoint 4.3.2 下均确认有 ``adelete_thread``：
     - sqlite（AsyncSqliteSaver）：DELETE FROM checkpoints/writes WHERE thread_id，
       对不存在 thread 幂等不抛错；
     - memory（MemorySaver）：storage/writes/blobs 字典按 thread_id 清除，幂等；
