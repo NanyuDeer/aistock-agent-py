@@ -15,6 +15,7 @@ from aistock_agent.graph.nodes.general_fallback import general_fallback_node
 from aistock_agent.graph.nodes.qa_router import qa_router_node
 from aistock_agent.graph.nodes.skill_executor import skill_executor_node
 from aistock_agent.graph.nodes.synth_answer import synth_answer_node
+from aistock_agent.graph.retry import io_retry_policy
 from aistock_agent.memory.checkpointer import get_checkpointer
 from aistock_agent.state.chat_schema import QuestionState
 
@@ -79,7 +80,10 @@ def build_chat_graph() -> StateGraph:
     graph.add_node("escalate", escalate_node)
     graph.add_node("skill_executor", skill_executor_node)
     graph.add_node("synth_answer", synth_answer_node)
-    graph.add_node("general_fallback", general_fallback_node)
+    # 传输层重试只挂 general_fallback：内部是 create_react_agent，LLM 网络异常
+    # 会抛到图上。其余节点（qa_router/synth_answer/escalate/skill_executor）
+    # 不挂，理由见 graph/retry.py 模块注释。
+    graph.add_node("general_fallback", general_fallback_node, retry_policy=io_retry_policy())
 
     graph.add_edge(START, "qa_router")
     graph.add_conditional_edges(

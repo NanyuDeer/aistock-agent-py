@@ -19,6 +19,7 @@ from aistock_agent.agents.workers import stock as stock_analyst
 from aistock_agent.agents.workers import trend_score as trend_score_agent
 from aistock_agent.agents.workers import wind_leader as wind_leader_agent
 from aistock_agent.agents.workers.hot_burst import run as hot_burst_agent_run
+from aistock_agent.graph.retry import io_retry_policy
 from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.memory.checkpointer import get_checkpointer
 from aistock_agent.observability.callback import get_default_callbacks
@@ -52,9 +53,12 @@ def build_graph() -> StateGraph:
     graph.add_node("event_analyst", event_analyst.run)
     graph.add_node("wind_leader_agent", wind_leader_agent.run)
     graph.add_node("broadcast_agent", broadcast_agent.run)
-    graph.add_node("general_agent", general_agent.run)
+    # 传输层重试：仅 general/alert（内部 create_react_agent，LLM 网络异常会抛出）。
+    # 其余取数型 worker 自带顶层 try/except → 重试永不触发，故不挂。理由见
+    # graph/retry.py 模块注释。
+    graph.add_node("general_agent", general_agent.run, retry_policy=io_retry_policy())
     graph.add_node("hot_burst_agent", hot_burst_agent_run)
-    graph.add_node("alert_agent", alert_agent.run)
+    graph.add_node("alert_agent", alert_agent.run, retry_policy=io_retry_policy())
     graph.add_node("trend_score_agent", trend_score_agent.run)
 
     # 边：START → supervisor
