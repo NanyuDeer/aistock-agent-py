@@ -72,9 +72,9 @@ def route_after_escalate(state: QuestionState) -> str:
     return "synth_answer"
 
 
-def build_chat_graph() -> StateGraph:
+def build_chat_graph() -> StateGraph[QuestionState, None, QuestionState, QuestionState]:
     """构建 CHAT QA 状态图（纯拓扑，不挂载 checkpointer）。"""
-    graph = StateGraph(QuestionState)
+    graph: StateGraph[QuestionState, None, QuestionState, QuestionState] = StateGraph(QuestionState)
 
     graph.add_node("qa_router", qa_router_node)
     graph.add_node("escalate", escalate_node)
@@ -109,7 +109,7 @@ def build_chat_graph() -> StateGraph:
 
 def compile_chat_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
-) -> CompiledStateGraph:
+) -> CompiledStateGraph[QuestionState, None, QuestionState, QuestionState]:
     """构建并编译 CHAT QA 子图。
 
     Args:

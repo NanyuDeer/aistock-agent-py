@@ -113,7 +113,10 @@ async def _build_async_sqlite_saver() -> BaseCheckpointSaver[str]:
     import aiosqlite
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    conn = await aiosqlite.connect(
+    # mypy 不把函数内 `global X` + `import X` 视为模块级绑定，这里会报
+    # name-defined；运行时完全正常（绑定落在模块命名空间，供其他 sqlite
+    # 分支辅助函数复读）。不加模块级 import 是刻意的——见上方懒加载注释。
+    conn = await aiosqlite.connect(  # type: ignore[name-defined]
         settings.sqlite_path, timeout=settings.sqlite_busy_timeout
     )
     return AsyncSqliteSaver(conn)

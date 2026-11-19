@@ -28,21 +28,29 @@ class _Default:
 _DEFAULT = _Default()
 
 
-def build_graph() -> StateGraph:
+def build_graph() -> StateGraph[AgentState, None, AgentState, AgentState]:
     """构建 LangGraph 状态图
 
     拓扑：
         START → supervisor → [条件路由] → 各 Agent 节点 → END
     """
-    graph = StateGraph(AgentState)
+    graph: StateGraph[AgentState, None, AgentState, AgentState] = StateGraph(AgentState)
 
     # 节点由 registry 生成（agents/registry.py 单一真源）：节点名 = spec.node_name，
     # 运行体 = spec.run，重试 = spec.retryable。新增 agent 只需改 registry 一处。
     graph.add_node("supervisor", supervisor.run)
     for spec in GRAPH_AGENTS:
-        # retry_policy 只在 spec.retryable 为真时挂（理由见 graph/retry.py）
-        kwargs = {"retry_policy": io_retry_policy()} if spec.retryable else {}
-        graph.add_node(spec.node_name, spec.run, **kwargs)  # type: ignore[arg-type]
+        # retry_policy 只在 spec.retryable 为真时挂（理由见 graph/retry.py）。
+        # 不用 **kwargs 动态传：langgraph 1.x 的 add_node 是重载，动态 dict 会让
+        # mypy 匹配不上任何 overload（call-overload），拆成两个分支才能各归各位。
+        # spec.run 的静态类型是 Callable[[AgentState], Awaitable[dict[str, object]]]，
+        # 而 add_node 的泛型 _Node[NodeInputT] 要求具体节点签名——langgraph 没为
+        # "普通 async 函数"提供能匹配的 overload，只能就地 ignore。运行时没问题：
+        # registry 里的 run 就是 async def run(state: AgentState) -> dict。
+        if spec.retryable:
+            graph.add_node(spec.node_name, spec.run, retry_policy=io_retry_policy())  # type: ignore[arg-type]
+        else:
+            graph.add_node(spec.node_name, spec.run)  # type: ignore[arg-type]
 
     # 边：START → supervisor
     graph.add_edge(START, "supervisor")
@@ -60,7 +68,7 @@ def build_graph() -> StateGraph:
 def compile_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
     callbacks: list[BaseCallbackHandler] | None = None,
-) -> CompiledStateGraph:
+) -> CompiledStateGraph[AgentState, None, AgentState, AgentState]:
     """编译图（可直接调用 invoke / stream）。
 
     Args:

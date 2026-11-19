@@ -6,7 +6,7 @@ import re
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import date
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import structlog
@@ -51,7 +51,7 @@ from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 
-def _select_graph() -> CompiledStateGraph:
+def _select_graph() -> CompiledStateGraph[QuestionState, None, QuestionState, QuestionState]:
     """按入口路由选择 graph：Chat 入口（/chat/*、/ws/chat）恒走 ChatAgent。
 
     报告入口（/briefing/*、trigger 类）不经过本函数，直接使用 compile_graph()。
@@ -235,7 +235,7 @@ def _ensure_update_queue(session_id: str) -> asyncio.Queue[object | None]:
 
 
 async def _run_graph_to_queue(
-    graph: CompiledStateGraph,
+    graph: CompiledStateGraph[Any, Any, Any, Any],
     initial_state: Mapping[str, object],
     session_id: str,
 ) -> None:
@@ -265,7 +265,7 @@ async def _run_graph_to_queue(
 
 
 async def _stream_messages(
-    graph: CompiledStateGraph,
+    graph: CompiledStateGraph[Any, Any, Any, Any],
     initial_state: Mapping[str, object],
     session_id: str,
 ) -> AsyncGenerator[dict[str, object], None]:
