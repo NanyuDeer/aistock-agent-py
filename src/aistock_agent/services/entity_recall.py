@@ -94,6 +94,12 @@ def recall_sectors(text: str) -> list[EntityHit]:
     if not text:
         return []
 
+    # 基金/ETF 停牌公告不是产业事件。
+    # 实测「全球芯片LOF(501225)将于X月X日停牌」这一模板在 592 条里出现 5 次，
+    # 只因含「芯片」二字就被映射到半导体，属于纯噪音。停牌公告一律排除。
+    if "停牌" in text:
+        return []
+
     data = _load()
     hits: list[EntityHit] = []
 

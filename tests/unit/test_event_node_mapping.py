@@ -88,6 +88,7 @@ async def test_cache_hit_with_empty_mappings_still_skips_recall(graph) -> None: 
 
 @pytest.mark.asyncio
 async def test_cache_miss_recalls_and_stores(graph) -> None:  # noqa: ANN001
+    """实体没命中时，走向量召回兜底。文本要刻意不含任何实体词。"""
     io = FakeIO(
         recall_result=[
             {"industry": "半导体", "similarity": 0.81},
@@ -95,7 +96,7 @@ async def test_cache_miss_recalls_and_stores(graph) -> None:  # noqa: ANN001
         ]
     )
 
-    result = await get_event_node_mappings("evt_3", ["半导体"], io=io, graph=graph)
+    result = await get_event_node_mappings("evt_3", ["某行业会议纪要"], io=io, graph=graph)
 
     assert io.recall_calls == 1
     assert [item.node_id for item in result] == ["SEC_SEMI", "SEC_OPTICAL"]
@@ -103,11 +104,25 @@ async def test_cache_miss_recalls_and_stores(graph) -> None:  # noqa: ANN001
 
 
 @pytest.mark.asyncio
+async def test_entity_hit_skips_vector_recall(graph) -> None:  # noqa: ANN001
+    """实体命中时不该再调 embedding——这是 2026-11-17 改动的核心。"""
+    io = FakeIO(
+        recall_result=[{"industry": "半导体", "similarity": 0.99}],
+    )
+
+    result = await get_event_node_mappings("evt_3b", ["台积电发布财报"], io=io, graph=graph)
+
+    assert io.recall_calls == 0
+    assert [item.node_id for item in result] == ["SEC_SEMI"]
+    assert result[0].reason.startswith("direct_sector|overseas:台积电")
+
+
+@pytest.mark.asyncio
 async def test_recall_failure_degrades_to_empty(graph) -> None:  # noqa: ANN001
     """embedding 不可用时返回空，不能抛——否则整个归因流程崩。"""
     io = FakeIO(recall_error=RuntimeError("embedding service unavailable"))
 
-    result = await get_event_node_mappings("evt_4", ["半导体"], io=io, graph=graph)
+    result = await get_event_node_mappings("evt_4", ["某行业会议纪要"], io=io, graph=graph)
 
     assert result == []
 
