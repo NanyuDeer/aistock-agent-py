@@ -56,6 +56,53 @@
     "NVIDIA": "AI算力"
   },
 
+  "_macro_note": "宏观事件映射到 factor / flow 节点。值是节点 ID（不是中文名），因为宏观节点名太长且容易变。这类事件是市场根因，不是行业标的——confirm 时记 direct_factor。",
+  "macro_to_node": {
+    "美联储": "FED_RATE",
+    "FOMC": "FED_RATE",
+    "联邦基金利率": "FED_RATE",
+    "鲍威尔": "FED_RATE",
+
+    "日本央行": "GLOBAL_RATE",
+    "日银": "GLOBAL_RATE",
+    "澳洲联储": "GLOBAL_RATE",
+    "欧洲央行": "GLOBAL_RATE",
+    "英国央行": "GLOBAL_RATE",
+    "植田和男": "GLOBAL_RATE",
+
+    "USDCNH": "USDCNH",
+    "人民币汇率": "USDCNH",
+    "人民币中间价": "USDCNH",
+    "美元指数": "USDCNH",
+
+    "VIX": "VIX",
+    "恐慌指数": "VIX",
+
+    "北向资金": "FLOW_NORTH",
+    "北向": "FLOW_NORTH",
+    "陆股通": "FLOW_NORTH",
+    "融资余额": "FLOW_MARGIN",
+    "两融": "FLOW_MARGIN",
+
+    "居民消费价格": "MACRO_CPI",
+    "CPI": "MACRO_CPI",
+    "工业生产者出厂价格": "MACRO_PPI",
+    "PPI": "MACRO_PPI",
+    "社会融资": "MACRO_TSF",
+    "社融": "MACRO_TSF",
+    "M2": "MACRO_M2",
+    "制造业PMI": "MACRO_PMI",
+    "PMI": "MACRO_PMI",
+
+    "逆回购": "DR007",
+    "DR007": "DR007",
+    "银行间": "DR007",
+
+    "降准": "POLICY_RATE",
+    "LPR": "POLICY_RATE",
+    "政策利率": "POLICY_RATE"
+  },
+
   "confidence": {
     "_note": "不同来源的确定性不同，写入映射时作为 similarity 的替代（实体识别没有语义相似度）",
     "overseas_to_sector": 0.95,

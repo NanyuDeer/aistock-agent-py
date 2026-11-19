@@ -182,3 +182,48 @@ async def test_empty_event_id_raises(graph) -> None:  # noqa: ANN001
     io = FakeIO()
     with pytest.raises(ValueError, match="event_id must not be empty"):
         await get_event_node_mappings("", ["x"], io=io, graph=graph)
+
+
+# ---- 宏观根因进图谱（2026-11-19）----
+
+
+@pytest.mark.asyncio
+async def test_macro_event_maps_to_factor_with_direct_factor_reason(graph) -> None:  # noqa: ANN001
+    """宏观事件落到 factor 节点，reason 记 direct_factor 而不是 direct_sector。
+
+    为什么必须区分：板块是「被影响的对象」，宏观因子是「施加影响的源头」。
+    两者都通过确认，但下游要能分清自己拿到的是标的还是根因。
+    """
+    io = FakeIO()
+
+    result = await get_event_node_mappings("evt_macro_1", ["美联储宣布降息25bp"], io=io, graph=graph)
+
+    assert [item.node_id for item in result] == ["FED_RATE"]
+    assert result[0].reason.startswith("direct_factor|macro:美联储")
+    assert result[0].confirmed is True
+    assert io.recall_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_global_rate_factor_is_reachable(graph) -> None:  # noqa: ANN001
+    """日央行加息落到 GLOBAL_RATE，且能沿边传导到 A 股指数。"""
+    io = FakeIO()
+
+    result = await get_event_node_mappings("evt_macro_2", ["日本央行加息25个基点"], io=io, graph=graph)
+
+    assert [item.node_id for item in result] == ["GLOBAL_RATE"]
+    assert graph.path_exists("GLOBAL_RATE", "IDX_GEM")
+
+
+@pytest.mark.asyncio
+async def test_macro_and_sector_both_mapped(graph) -> None:  # noqa: ANN001
+    """一条事件同时含宏观与行业时，两个节点都该产出。"""
+    io = FakeIO()
+
+    result = await get_event_node_mappings(
+        "evt_macro_3", ["美联储降息预期升温，半导体板块大涨"], io=io, graph=graph
+    )
+
+    ids = {item.node_id for item in result}
+    assert ids == {"FED_RATE", "SEC_SEMI"}
+    assert io.recall_calls == 0
