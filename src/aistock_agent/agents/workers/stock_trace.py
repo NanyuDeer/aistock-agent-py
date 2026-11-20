@@ -5,7 +5,7 @@ Node 侧 Artifact 发布与用户授权边界。
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
@@ -25,6 +25,7 @@ from aistock_agent.schemas.stock_trace import (
 )
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.stock_trace_client import StockTraceNodeClient
+from aistock_agent.services.stock_trace_knowledge import collect_shadow_knowledge
 from aistock_agent.services.stock_trace_validator import (
     StockTraceValidationError,
     validate_stock_trace_result,
@@ -49,6 +50,11 @@ class StructuredStockTraceLlm(Protocol):
     async def ainvoke(
         self, messages: list[object]
     ) -> BaseModel | dict[str, object]: ...
+
+
+class StockTraceMetrics(Protocol):
+    def record_stock_trace_validation_failed(self, error_type: str) -> None: ...
+    def record_stock_trace_validation_retry_success(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -230,9 +236,13 @@ class StockTraceWorker:
         self,
         client: StockTraceNodeClient | None = None,
         llm_factory: Callable[[], StockTraceLlm] = _default_llm_factory,
+        knowledge_collector: Callable[[StockTraceSnapshot], Awaitable[dict[str, object] | None]] | None = None,
+        metrics: StockTraceMetrics | None = None,
     ) -> None:
         self._client = client or StockTraceNodeClient()
         self._llm_factory = llm_factory
+        self._knowledge_collector = knowledge_collector if knowledge_collector is not None else collect_shadow_knowledge
+        self._metrics = metrics if metrics is not None else _metrics
 
     async def analyze(
         self, event_id: str, trigger_revision: int, analysis_version: str
@@ -243,6 +253,7 @@ class StockTraceWorker:
             if snapshot is None or snapshot.event_id != event_id:
                 return StockTraceWorkerOutcome(status="failed", error_code="SNAPSHOT_NOT_READY")
             snapshot = _snapshot_at_trigger(snapshot)
+            await self._knowledge_collector(snapshot)
             llm = self._llm_factory()
             structured_llm = llm.with_structured_output(
                 StockTraceResultPayload,
@@ -333,11 +344,11 @@ class StockTraceWorker:
                     })
                     validate_stock_trace_result(result, snapshot)
                     if attempt == 1:
-                        _metrics.record_stock_trace_validation_retry_success()
+                        self._metrics.record_stock_trace_validation_retry_success()
                     return StockTraceWorkerOutcome(status="completed", result=result)
                 except (ValueError, StockTraceValidationError) as exc:
                     # 解析/校验类失败：记录 + 纠错重试一次（第二次循环直接落到返回值）
-                    _metrics.record_stock_trace_validation_failed(type(exc).__name__)
+                    self._metrics.record_stock_trace_validation_failed(type(exc).__name__)
                     logger.warning(
                         "stock_trace_validation_failed",
                         event_id=event_id, attempt=attempt + 1, error=str(exc),

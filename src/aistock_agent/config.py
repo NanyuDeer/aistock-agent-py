@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # false=需独立进程运行（python -m aistock_agent.workers.stock_trace_consumer）。
     # 默认启用；STOCK_TRACE_CONSUMER_ENABLED=false 可关闭回滚。
     stock_trace_consumer_enabled: bool = True
+    # Knowledge phase 1: shadow retrieval only; never inject into production inference.
+    stock_trace_knowledge_mode: Literal["off", "shadow"] = "off"
+    stock_trace_knowledge_symbols: str = ""
     # Tool calling provides a schema-bound response across OpenAI-compatible models.
     stock_trace_structured_output_method: Literal[
         "function_calling", "json_mode", "json_schema"

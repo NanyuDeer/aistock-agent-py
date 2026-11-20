@@ -590,6 +590,13 @@ async def _materialize_event_entity(
             "time_source": "publish_time_fallback",
             "time_confidence": 0.5,
         }
+    # EventRecord.event_id is the scrape-store source identity, never the app authority ID.
+    # Keep its namespace distinct from original-document IDs such as cninfo:<announcement>.
+    source_id = event.get("event_id")
+    if isinstance(source_id, str) and source_id.strip():
+        source_ref = f"event_scrape:{source_id.strip()}"
+        if len(source_ref) <= 128:  # existing event_entities.source_event_id column limit
+            body["source_event_id"] = source_ref
     try:
         resp = await node_api.post_event_entity(body)
         if isinstance(resp, dict) and resp.get("event_id"):
