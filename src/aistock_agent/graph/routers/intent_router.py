@@ -1,40 +1,25 @@
 """条件边函数 — supervisor 输出后根据 intent 路由到对应 Agent
 
-普通意图按 node_map 路由；未知 user 意图回退 general_agent。
+路由表由 ``agents/registry.py`` 生成（单一真源），本模块只保留路由函数本身。
+未知意图回落 general（历史行为，``tests/unit/test_constants.py`` 锁定）。
 """
 
+from aistock_agent.agents.registry import agent_for_intent, get_agent, routable_intents
 from aistock_agent.state.schema import AgentState
 
-VALID_INTENTS = {
-    "morning", "stock", "sector", "event", "wind_leader", "broadcast",
-    "hot_burst", "alert", "general", "trend_score", "review",
-}
+# 保留导出名：历史调用方/测试以 VALID_INTENTS 引用意图集合。
+VALID_INTENTS = set(routable_intents())
 
 
 def route_by_intent(state: AgentState) -> str:
-    """根据 state.intent 路由到对应 Agent 节点
+    """根据 state.intent 路由到对应 Agent 节点名。
 
     Returns:
-        节点名：morning_agent | stock_analyst | sector_analyst | event_analyst |
-                wind_leader_agent | broadcast_agent | hot_burst_agent | alert_agent |
-                general_agent
+        registry 里该意图对应 agent 的 ``node_name``；未知意图 → ``general_agent``。
+
+    注：意图 ``"review"`` 由 general 兜底（不是 review agent），见 registry 模块
+    docstring 的历史遗留说明 —— 不要在此"修正"，该行为被测试锁死。
     """
     intent = state.get("intent", "general") or "general"
-    if intent not in VALID_INTENTS:
-        intent = "general"
-
-    # intent → 节点名映射（scheduler 触发或其他情况）
-    node_map = {
-        "morning": "morning_agent",
-        "stock": "stock_analyst",
-        "sector": "sector_analyst",
-        "event": "event_analyst",
-        "wind_leader": "wind_leader_agent",
-        "broadcast": "broadcast_agent",
-        "general": "general_agent",
-        "hot_burst": "hot_burst_agent",
-        "alert": "alert_agent",
-        "trend_score": "trend_score_agent",
-        "review": "general_agent",
-    }
-    return node_map[intent]
+    spec = agent_for_intent(intent) or get_agent("general")
+    return spec.node_name

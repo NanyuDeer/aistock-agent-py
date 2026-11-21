@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langgraph.graph.state import CompiledStateGraph
@@ -103,7 +103,7 @@ async def _drain_reasoning_tasks(tasks: list[asyncio.Task[None]]) -> None:
 
 async def _run_chat_graph_to_events(
     state: ChatRunState,
-    graph: CompiledStateGraph,
+    graph: CompiledStateGraph[Any, Any, Any, Any],
     initial_state: QuestionState,
     message: str,
     session_id: str,
@@ -646,7 +646,7 @@ async def _run_confirm_stage2(
 
     async def producer2(
         st: ChatRunState,
-        g: CompiledStateGraph = graph2,
+        g: CompiledStateGraph[QuestionState, None, QuestionState, QuestionState] = graph2,
         is_: QuestionState = initial_state2,
         m: str = message,
         sid: str = session_id,
@@ -743,7 +743,7 @@ async def _handle_user_message(
 
     async def producer(
         st: ChatRunState,
-        g: CompiledStateGraph = graph,
+        g: CompiledStateGraph[QuestionState, None, QuestionState, QuestionState] = graph,
         is_: QuestionState = initial_state,
         m: str = message,
         sid: str = session_id,

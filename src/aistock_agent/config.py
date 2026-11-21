@@ -172,6 +172,17 @@ class Settings(BaseSettings):
     # sqlite busy_timeout（秒；sqlite3 默认 5.0）。多 worker 并发写短暂争用时
     # sqlite 抛 "database is locked"；30s 覆盖争用窗口（Phase 5 Task 3 低成本先行项）。
     sqlite_busy_timeout: float = 30.0
+    # 定时任务执行记录库（services/task_store.py）。与 .langgraph.db 同目录的
+    # 独立文件：检查点是 LangGraph 内部格式，执行记录是业务可查表，混放会让
+    # 两种生命周期互相牵制（清理检查点不该动执行历史）。
+    task_runs_path: str = "task_runs.db"
+    # 定时任务是否走统一执行外壳（services/task_runner.py）：拿到执行记录 + 传输层
+    # 重试。默认关闭 —— 灰度开关，关掉即回到改造前的直调路径。
+    scheduler_task_runner_enabled: bool = False
+    # 灰度白名单（逗号分隔 job id）。空 = 开关打开时全部走外壳。
+    # 建议按 job 逐个开并 diff 当日产出物：agent 任务改路径后若哪个 worker 依赖
+    # 了调用方的隐式行为，产出物会先在这里露头。
+    scheduler_task_runner_tasks: str = ""
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）

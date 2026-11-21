@@ -17,6 +17,7 @@
   },
   "nodes": [
     { "id": "FED_RATE", "kind": "factor", "name": "美联储政策利率" },
+    { "id": "GLOBAL_RATE", "kind": "factor", "name": "全球利率环境（日/欧/澳央行）" },
     { "id": "US10Y", "kind": "factor", "name": "10Y 美债收益率" },
     { "id": "USDCNH", "kind": "factor", "name": "人民币汇率 USDCNH" },
     { "id": "VIX", "kind": "factor", "name": "VIX 波动率指数" },
@@ -62,6 +63,16 @@
       "condition": null,
       "prior_source": "theory",
       "note": "政策利率上行推升长端收益率"
+    },
+    {
+      "source": "GLOBAL_RATE",
+      "target": "US10Y",
+      "direction": 1,
+      "lag_days": 1,
+      "decay": 0.6,
+      "condition": null,
+      "prior_source": "theory",
+      "note": "非美央行加息推升全球无风险利率；经套息交易平仓与资本回流，美债价格承压、收益率上行。衰减 0.6 低于 FED_RATE→US10Y 的 0.7——间接路径，强度更弱"
     },
     {
       "source": "US10Y",

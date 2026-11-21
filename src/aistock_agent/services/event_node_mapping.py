@@ -22,7 +22,7 @@ import structlog
 
 from aistock_agent.services.causal_graph import CausalGraph, load_market_graph
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.entity_recall import recall_sectors
+from aistock_agent.services.entity_recall import recall_nodes
 from aistock_agent.tools.industry_vector_search import semantic_match_industries
 
 logger = structlog.get_logger(__name__)
@@ -34,7 +34,14 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.6
 DEFAULT_RECALL_LIMIT = 5
 
 #: 事件作用域为空时，只接受本身就是板块/题材的节点
-_DIRECT_KINDS = frozenset({"sector", "theme"})
+# 事件可以映射到任意节点类型。
+#
+# 2026-11-19 之前这里只有 {"sector", "theme"}，后果是「美联储加息」「人民币贬值」
+# 「北向净流出」这类**市场根因**事件全被丢弃——而 M1 要回答的正是「今天为什么这样」，
+# 宏观因子本来就是主线，把它们挡在门外是方向性错误。
+#
+# 放开后仍要求名称精确相等：模糊匹配会把「半导体」塞进「半导体设备」。
+_MAPPABLE_KINDS = frozenset({"factor", "market", "sector", "theme", "flow"})
 
 
 @dataclass(frozen=True)
@@ -77,15 +84,21 @@ def _recall_similarity(item: dict[str, object]) -> float:
     return 0.0
 
 
-def resolve_node_id(graph: CausalGraph, industry_name: str) -> str | None:
-    """行业名 → 图谱节点 ID。
+def resolve_node_id(graph: CausalGraph, node_key: str) -> str | None:
+    """节点名称或 ID → 图谱节点 ID。
 
-    只匹配 sector / theme 节点，且要求名称完全相等。**不做模糊匹配**——
+    支持两种键：
+      - name（「半导体」「美联储政策利率」）——来自行业词/宏观词表
+      - id（「SEC_SEMI」「FED_RATE」）——宏观映射表直接用 ID，避免中文名太长
+
+    只匹配 _MAPPABLE_KINDS 里的类型，且要求完全相等。**不做模糊匹配**——
     模糊匹配会把「半导体」塞进「半导体设备」这类错误节点，而错映射比缺映射
     更难排查（下游会沿着错节点一路传导）。
     """
     for node in graph.nodes.values():
-        if node.kind in _DIRECT_KINDS and node.name == industry_name:
+        if node.kind not in _MAPPABLE_KINDS:
+            continue
+        if node.name == node_key or node.id == node_key:
             return node.id
     return None
 
@@ -100,18 +113,23 @@ def confirm_mapping(
     返回 (confirmed, reason)。
 
     规则：
-      1. 作用域为空 → 节点本身是板块/题材即通过（事件直接作用于板块）
+      1. 作用域为空 → 直接通过。板块/题材记 direct_sector，
+         宏观因子/指数/资金流记 direct_factor（语义不同：后者是根因，不是标的）
       2. 作用域非空 → 要求存在 node → 作用域内某板块 的路径（≤2 跳）
 
     「路径存在」只说明**可能相关**，不说明确实相关。真正的判定在检验层，
     这里不能越界。
     """
-    if not scope_sectors:
-        return True, "direct_sector"
-
     node = graph.node(node_id)
     if node is None:
         return False, "unknown_node"
+
+    if not scope_sectors:
+        # 板块/题材是「被影响的对象」，宏观因子是「施加影响的源头」。
+        # 两者都能通过，但下游要能区分——写成同一个 reason 会让人误读。
+        if node.kind in ("sector", "theme"):
+            return True, "direct_sector"
+        return True, "direct_factor"
 
     for sector in scope_sectors:
         target = resolve_node_id(graph, sector)
@@ -175,8 +193,8 @@ async def get_event_node_mappings(
     #    也常因阈值丢掉正确结果（「铠侠存储」只拿到 0.44）。实体识别是精确匹配，
     #    每条结果都能说清命中依据，且不依赖模型对公司/产业的认知。
     text = " ".join(keywords)
-    for hit in recall_sectors(text):
-        node_id = resolve_node_id(graph, hit.sector)
+    for hit in recall_nodes(text):
+        node_id = resolve_node_id(graph, hit.node_key)
         if node_id is None:
             continue
         confirmed, reason = confirm_mapping(graph, node_id, scope_sectors)

@@ -13,17 +13,20 @@ mock 策略（与 tests/integration/test_{stock,general,supervisor}_agent.py 一
 """
 
 from contextlib import ExitStack
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
 
+from aistock_agent.agents import registry as registry_module
 from aistock_agent.agents.general.node import run as general_run
 from aistock_agent.agents.supervisor.node import run as supervisor_run
 from aistock_agent.agents.workers.event import run as event_run
 from aistock_agent.agents.workers.morning import run as morning_run
 from aistock_agent.agents.workers.sector import run as sector_run
 from aistock_agent.agents.workers.stock import run as stock_run
+from aistock_agent.graph import builder as builder_module
 from aistock_agent.graph.builder import compile_graph
 
 # patch 路径（与各 agent 测试文件一致）
@@ -173,20 +176,34 @@ async def test_graph_continues_when_agent_returns_fallback():
     stock_return = {"final_response": _STOCK_FALLBACK}
 
     with ExitStack() as stack:
+        stock_mock = AsyncMock(return_value=stock_return)
         stack.enter_context(
             patch(NODE_PATHS["supervisor"], new=AsyncMock(return_value=supervisor_return))
         )
-        stack.enter_context(
-            patch(NODE_PATHS["stock"], new=AsyncMock(return_value=stock_return))
-        )
+        stack.enter_context(patch(NODE_PATHS["stock"], new=stock_mock))
         # 其他 agent 也 patch，避免误触达真实 LLM
+        others = {}
         for name in ("morning", "sector", "event", "general"):
-            stack.enter_context(
-                patch(
-                    NODE_PATHS[name],
-                    new=AsyncMock(return_value={"final_response": f"{name} response"}),
-                )
-            )
+            others[name] = AsyncMock(return_value={"final_response": f"{name} response"})
+            stack.enter_context(patch(NODE_PATHS[name], new=others[name]))
+
+        # registry 重构后 build_graph 遍历的是 registry.GRAPH_AGENTS 里固化的
+        # spec.run，只 patch 模块属性拿不到 mock（节点会跑真实逻辑并真的打 LLM）。
+        # 必须重建 spec 并把 builder 侧引用换掉。
+        mocks_by_node: dict[str, AsyncMock] = {
+            "stock_analyst": stock_mock,
+            "morning_agent": others["morning"],
+            "sector_analyst": others["sector"],
+            "event_analyst": others["event"],
+            "general_agent": others["general"],
+        }
+        patched_specs = tuple(
+            replace(spec, run=mocks_by_node[spec.node_name])
+            if spec.node_name in mocks_by_node
+            else spec
+            for spec in registry_module.GRAPH_AGENTS
+        )
+        stack.enter_context(patch.object(builder_module, "GRAPH_AGENTS", patched_specs))
 
         graph = compile_graph()
         result = await graph.ainvoke(

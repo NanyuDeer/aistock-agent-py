@@ -13,9 +13,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
 
-from aistock_agent.agents.workers.hot_burst import run as hot_burst_run
-from aistock_agent.agents.workers.sector import run as sector_run
-from aistock_agent.agents.workers.stock import run as stock_run
+from aistock_agent.agents.registry import get_agent
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.services.sector_resolver import (
     _load_alias_index,
@@ -50,7 +48,9 @@ class WorkerHandle(Protocol):
 WorkerRun = Callable[[AgentState], Awaitable[dict[str, object]]]
 
 
-# intent（qa_router goal.intent）→ worker 名映射（D6 前置：hot_burst 意图已入契约）
+# intent（qa_router goal.intent）→ agent 注册名。这是**chat 专有的**技能意图 →
+# agent 策略（哪个 Skill 意图该升级成哪个 agent 深度分析），不属于 agent 契约，
+# 故未进 registry。
 INTENT_TO_WORKER: dict[str, str] = {
     "stock_snapshot": "stock",
     "stock_news": "stock",
@@ -59,23 +59,24 @@ INTENT_TO_WORKER: dict[str, str] = {
     "hot_burst": "hot_burst",
 }
 
+# deep 升级目标 → 运行体。默认值来自 registry（单一真源）；保留模块级 dict 形态，
+# 因为测试用 patch.dict 替换它注入 mock（见 tests/unit/test_escalate.py）。
 ESCALATION_MAP: dict[str, WorkerHandle | WorkerRun] = {
-    "stock": stock_run,
-    "sector": sector_run,
-    "hot_burst": hot_burst_run,
+    name: get_agent(name).run for name in ("stock", "sector", "hot_burst")
 }
 
 
 def _resolve_worker(worker: WorkerHandle | WorkerRun) -> WorkerRun:
     """把两种 worker 形态统一解析成「可直接 await 的可调用目标」。
 
-    T6 缺陷修复（验证发现，**契约级**）保留：生产注册的是 worker 模块的裸 run
-    函数（无 ``.run`` 属性），而 WorkerHandle / 测试 mock 是 ``.run`` 形状 ——
-    两种形态并存，必须统一取可调用目标，否则真实 deep 路径会炸
-    ``'function' object has no attribute 'run'``。
+    2026-11-18（B1 registry 收敛）后的定位变化：**生产环境只有一种形态** ——
+    registry 的 ``spec.run`` 是裸可调用函数，``ESCALATION_MAP`` 默认值全部来自
+    registry。本函数现在只为**测试替身**保留：既有测试用「对象带 run(state)
+    方法」的 mock（``WorkerHandle`` 形状）经 ``patch.dict(ESCALATION_MAP, ...)``
+    注入，需要在这里被解成 ``.run``。
 
-    判定方式：按 runtime_checkable 协议「是否具备 run 属性」——具备则取 ``.run``，
-    否则视为裸可调用本身。
+    不要因为"看着多余"删掉它 —— 删了会打断 tests/unit/test_escalate.py 与
+    tests/integration/test_chat_escalate.py 的既有 mock 契约。
     """
     if isinstance(worker, WorkerHandle):
         return worker.run

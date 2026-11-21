@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from aistock_agent.api.middleware import setup_middleware
 from aistock_agent.api.routes import health_router
 from aistock_agent.api.routes import router as api_router
+from aistock_agent.api.tasks import router as tasks_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
 from aistock_agent.observability.logging import get_logger, setup_logging
@@ -199,6 +200,7 @@ setup_middleware(app)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/agent", tags=["agent"])
+app.include_router(tasks_router, prefix="/api/agent")
 app.include_router(ws_router, prefix="/api/agent", tags=["websocket"])
 # 健康检查挂载到根路径：/health（liveness）、/health/ready（readiness）
 app.include_router(health_router)

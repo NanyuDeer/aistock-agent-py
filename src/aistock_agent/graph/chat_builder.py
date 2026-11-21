@@ -15,6 +15,7 @@ from aistock_agent.graph.nodes.general_fallback import general_fallback_node
 from aistock_agent.graph.nodes.qa_router import qa_router_node
 from aistock_agent.graph.nodes.skill_executor import skill_executor_node
 from aistock_agent.graph.nodes.synth_answer import synth_answer_node
+from aistock_agent.graph.retry import io_retry_policy
 from aistock_agent.memory.checkpointer import get_checkpointer
 from aistock_agent.state.chat_schema import QuestionState
 
@@ -71,15 +72,18 @@ def route_after_escalate(state: QuestionState) -> str:
     return "synth_answer"
 
 
-def build_chat_graph() -> StateGraph:
+def build_chat_graph() -> StateGraph[QuestionState, None, QuestionState, QuestionState]:
     """构建 CHAT QA 状态图（纯拓扑，不挂载 checkpointer）。"""
-    graph = StateGraph(QuestionState)
+    graph: StateGraph[QuestionState, None, QuestionState, QuestionState] = StateGraph(QuestionState)
 
     graph.add_node("qa_router", qa_router_node)
     graph.add_node("escalate", escalate_node)
     graph.add_node("skill_executor", skill_executor_node)
     graph.add_node("synth_answer", synth_answer_node)
-    graph.add_node("general_fallback", general_fallback_node)
+    # 传输层重试只挂 general_fallback：内部是 create_react_agent，LLM 网络异常
+    # 会抛到图上。其余节点（qa_router/synth_answer/escalate/skill_executor）
+    # 不挂，理由见 graph/retry.py 模块注释。
+    graph.add_node("general_fallback", general_fallback_node, retry_policy=io_retry_policy())
 
     graph.add_edge(START, "qa_router")
     graph.add_conditional_edges(
@@ -105,7 +109,7 @@ def build_chat_graph() -> StateGraph:
 
 def compile_chat_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
-) -> CompiledStateGraph:
+) -> CompiledStateGraph[QuestionState, None, QuestionState, QuestionState]:
     """构建并编译 CHAT QA 子图。
 
     Args:

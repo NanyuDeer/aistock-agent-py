@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -257,13 +257,18 @@ class LatencyCallback(BaseCallbackHandler):
 
     def on_llm_new_token(
         self,
-        token: str,
+        token: str | list[str | dict[str, Any]],
         *,
+        chunk: object | None = None,
         run_id: UUID,
         parent_run_id: UUID | None = None,
-        **kwargs: object,
+        tags: list[str] | None = None,
+        **kwargs: Any,
     ) -> None:
-        del token, parent_run_id, kwargs
+        # 签名必须与 langchain 1.x 的 LLMManagerMixin.on_llm_new_token 兼容：
+        # token 放宽到 str | list（流式分片类型变了），并新增 chunk 关键字参数。
+        # 本类只做计时，全部丢弃。
+        del token, chunk, parent_run_id, tags, kwargs
         # 只记首个 token：首 token 延迟 = 对端开始输出所需时间（流式链路关键指标）。
         if run_id not in self._first_tokens:
             start = self._starts.get(run_id)
