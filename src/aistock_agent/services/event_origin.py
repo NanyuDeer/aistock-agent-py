@@ -23,6 +23,17 @@ _DOMESTIC_MARKERS: tuple[str, ...] = (
     "涨停", "跌停", "板块", "北向资金", "主力资金", "融资融券", "龙虎榜",
     "国内期货", "上交所", "深交所", "人民银行", "证监会", "发改委", "工信部",
     "国资委", "商务部", "我国", "国内", "离岸人民币", "在岸人民币", "人民币",
+    # 境内货币政策工具（2026-11-20：金十「LPR 按兵不动」因「降息」被误判
+    # 外围，复盘引用被拒 → 整份复盘失败；这些词只用于境内政策语境）
+    "LPR", "贷款市场报价利率", "政策利率", "公开市场操作", "逆回购", "MLF",
+    "降准", "存款准备金率",
+)
+
+# 境内「央行」：排除海外央行前缀与「日央行」简称，避免把日本/欧洲央行
+# 误判境内（境外内容宁可 unknown，也不冒充境内）。
+_DOMESTIC_CB_RE = re.compile(
+    r"(?<!日)(?<!日本)(?<!欧洲)(?<!英国)(?<!美国)(?<!韩国)(?<!澳洲)"
+    r"(?<!加拿大)(?<!瑞士)央行"
 )
 
 # 海外宏观强词（宏观域；刻意与 event_scoring 的 A 股强/弱词表分离）
@@ -70,7 +81,7 @@ def derive_event_origin(source: str, title: str, summary: str) -> tuple[str, str
         return ("peripheral", "source_whitelist", 0.95)
     text = f"{_fmt(title)} {_fmt(summary)}"
     if src in _MIXED_SOURCES:
-        if any(k in text for k in _DOMESTIC_MARKERS):
+        if any(k in text for k in _DOMESTIC_MARKERS) or _DOMESTIC_CB_RE.search(text):
             return ("domestic", "mixed_source_rule", 0.85)
     if _matches_overseas_macro(text):
         return ("peripheral", "content_rule", 0.7)

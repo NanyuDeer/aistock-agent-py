@@ -64,6 +64,27 @@ def test_mixed_source_unknown_is_not_peripheral():
     assert derive_event_origin("jin10", "长鑫科技：公司董事长提议增加回购股份金额", "")[0] != "peripheral"
 
 
+def test_domestic_lpr_policy_news_not_peripheral():
+    # 2026-11-20 生产回补：金十「LPR 按兵不动」因「降息」被 content_rule 判外围，
+    # 复盘引用该境内政策证据时被 _validate_origin_consumption 拒绝，
+    # 两次重试后整份复盘失败、不落库。LPR/政策利率必须是境内标记。
+    title = "LPR为何按兵不动？专家：政策利率换锚 短期降息空间有限"
+    summary = "今日，央行将一年期和五年期贷款市场报价利率（LPR）分别维持在3%和3.5%不变"
+    assert derive_event_origin("jin10", title, summary)[0] == "domestic"
+
+
+def test_domestic_central_bank_news_not_peripheral():
+    # 境内「央行」政策快讯同样不得因「降息/加息」判外围
+    assert derive_event_origin("jin10", "央行开展7000亿元逆回购操作", "")[0] == "domestic"
+    assert derive_event_origin("jin10", "央行宣布降准0.5个百分点", "")[0] == "domestic"
+
+
+def test_foreign_central_bank_news_stays_overseas():
+    # 海外央行不得因「央行」被误判境内（日本央行/欧洲央行）
+    assert derive_event_origin("jin10", "日本央行行长：将继续加息", "")[0] == "peripheral"
+    assert derive_event_origin("jin10", "欧洲央行维持利率不变", "")[0] != "domestic"
+
+
 def test_content_rule_marks_overseas_macro():
     o, s, c = derive_event_origin("cls", "美联储DALY：可能需要加息", "")
     assert (o, s) == ("peripheral", "content_rule") and c == 0.7
