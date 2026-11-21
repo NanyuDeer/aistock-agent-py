@@ -107,6 +107,37 @@ async def test_materialize_future_event_posts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_materialize_passes_summary_and_source_event_id(monkeypatch):
+    """物化必须带 summary 与 source_event_id，否则时间线摘要 100% 空。"""
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    rec = _rec("华为将于 9/23 发布新品", summary="华为秋季全场景新品发布会将在深圳举行")
+    with patch(
+        "aistock_agent.services.event_scrape_sources.node_api.post_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001"}),
+    ) as m:
+        await _materialize_event_entity(rec, "2026-09-15T09:00:00+08:00")
+    body = m.call_args.args[0]
+    assert body["summary"] == "华为秋季全场景新品发布会将在深圳举行"
+    assert body["source_event_id"] == rec["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_materialize_summary_falls_back_to_title(monkeypatch):
+    """summary 为空时回退 title，避免库内摘要为空。"""
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.node_api.post_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0001"}),
+    ) as m:
+        await _materialize_event_entity(
+            _rec("华为将于 9/23 发布新品"), "2026-09-15T09:00:00+08:00"
+        )
+    body = m.call_args.args[0]
+    assert body["summary"] == "华为将于 9/23 发布新品"
+    assert body["source_event_id"]
+
+
+@pytest.mark.asyncio
 async def test_materialize_skips_when_disabled(monkeypatch):
     # 开关默认 False（app-api 端点未落地）：短路、不发起 HTTP
     monkeypatch.setattr(settings, "event_entity_enabled", False)

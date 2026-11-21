@@ -564,14 +564,20 @@ async def _materialize_event_entity(
             event_scope_source=str(event.get("event_scope_source", "")),
         )
         return None
+    title = str(event.get("title", ""))
+    # 时间线展示需要摘要；summary 为空时回退 title，避免库内 100% 空。
+    summary = str(event.get("summary") or "").strip() or title
+    source_event_id = str(event.get("event_id") or "")
     event_start = _extract_event_start_time(
-        str(event.get("title", "")),
+        title,
         str(event.get("summary", "")),
         str(event.get("score_date", now_iso[:10])),
     )
     if event_start:
         body: dict[str, object] = {
-            "title": str(event.get("title", "")),
+            "title": title,
+            "summary": summary,
+            "source_event_id": source_event_id,
             "source_type": "news",
             "event_start_time": f"{event_start}T00:00:00+08:00",
             "time_source": "news_extraction",
@@ -584,7 +590,9 @@ async def _materialize_event_entity(
         if not publish_iso:
             return None
         body = {
-            "title": str(event.get("title", "")),
+            "title": title,
+            "summary": summary,
+            "source_event_id": source_event_id,
             "source_type": "news",
             "event_start_time": publish_iso,
             "time_source": "publish_time_fallback",
