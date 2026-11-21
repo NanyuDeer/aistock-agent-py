@@ -289,6 +289,48 @@ async def test_materialize_stock_skipped_even_with_publish_time(monkeypatch):
     m.assert_not_called()
 
 
+# ── 结束日语义：单个「至 Y」不是开始日（2026-11-22 基线事件时间抽错）──
+
+
+def test_extract_end_date_only_returns_none():
+    # 单个「至 Y」是结束日，不是开始日 → None（交给 publish_time_fallback）
+    assert (
+        _extract_event_start_time("公司股票暂停至 2027-01-10", "", "2026-11-20")
+        is None
+    )
+
+
+def test_extract_validity_end_date_returns_none():
+    assert (
+        _extract_event_start_time("该产品有效期至 2027年1月10日", "", "2026-11-20")
+        is None
+    )
+
+
+def test_extract_start_date_with_self_prefix_still_works():
+    assert (
+        _extract_event_start_time("自 2026-11-01 起停产", "", "2026-11-20")
+        == "2026-11-01"
+    )
+
+
+@pytest.mark.asyncio
+async def test_materialize_end_only_date_uses_publish_time(monkeypatch):
+    monkeypatch.setattr(settings, "event_entity_enabled", True)
+    rec = _rec(
+        "公司股票暂停至 2027-01-10",
+        payload={"publish_time": "2026-11-20 18:00:00"},
+    )
+    with patch(
+        "aistock_agent.services.event_scrape_sources.node_api.post_event_entity",
+        new=AsyncMock(return_value={"event_id": "EVT-0003"}),
+    ) as m:
+        await _materialize_event_entity(rec, "2026-11-20T18:30:00+08:00")
+    body = m.call_args.args[0]
+    assert body["time_source"] == "publish_time_fallback"
+    assert body["event_start_time"] == "2026-11-20T18:00:00+08:00"
+
+
 @pytest.mark.asyncio
 async def test_materialize_skips_without_date_and_publish_time(monkeypatch):
     """无绝对日期且无发布时间 → 仍返回 None（无法确定事件时间）。"""

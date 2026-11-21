@@ -427,6 +427,14 @@ def _parse_event_date(text: str, ref_year: int) -> str | None:
 
 _BARE_MD = _re.compile(r"(?<!\d)(\d{1,2})[-/月](\d{1,2})")
 
+# 结束语义前缀：单日期前出现这些词时，该日期是截止日而非开始日。
+# 例如「暂停至 2027-01-10」「有效期至 2027年1月10日」——若当开始日会让
+# 已发生事件被误投为未来事件（2026-11-22 基线）。
+_END_DATE_PREFIX_RE = _re.compile(
+    r"(?:至|到|截至|截止|直至|延长至|延期至|有效期至)\s*$"
+)
+_END_DATE_LOOKBACK = 8
+
 
 def _parse_event_date_flexible(frag: str, ref_year: int) -> str | None:
     """解析日期片段：年份形式（2026-09-17 / 2026年9月23日）优先；
@@ -437,6 +445,18 @@ def _parse_event_date_flexible(frag: str, ref_year: int) -> str | None:
     if parsed:
         return parsed
     return _parse_event_date(f"{ref_year}/{frag}", ref_year)
+
+
+def _first_absolute_date_match(text: str, ref_year: int) -> _re.Match[str] | None:
+    """按「年份形式 → M月D日 → 无年份 M/D」优先级返回第一个合法绝对日期。"""
+    for pat in _DATE_PATTERNS:
+        for match in pat.finditer(text):
+            if _parse_event_date(match.group(0), ref_year) is not None:
+                return match
+    for match in _BARE_MD.finditer(text):
+        if _parse_event_date_flexible(match.group(0), ref_year) is not None:
+            return match
+    return None
 
 
 def _extract_event_start_time(title: str, content: str, ref_date: str) -> str | None:
@@ -461,14 +481,15 @@ def _extract_event_start_time(title: str, content: str, ref_date: str) -> str | 
         )
         return _parse_event_date_flexible(start_m.group(0) if start_m else "", ref_year)
 
-    # 无区间：整个文本抽绝对日期（年份形式优先）；无年份 M/D 兜底
-    parsed = _parse_event_date(text, ref_year)
-    if parsed:
-        return parsed
-    bare = _BARE_MD.search(text)
-    if bare:
-        return _parse_event_date_flexible(bare.group(0), ref_year)
-    return None
+    # 无区间：取第一个绝对日期；若其前缀是「至/截至/截止/直至/延长至/有效期至」，
+    # 说明这是结束日而非开始日 → 返回 None，交给 publish_time_fallback。
+    first = _first_absolute_date_match(text, ref_year)
+    if first is None:
+        return None
+    prefix = text[max(0, first.start() - _END_DATE_LOOKBACK):first.start()]
+    if _END_DATE_PREFIX_RE.search(prefix):
+        return None
+    return _parse_event_date_flexible(first.group(0), ref_year)
 
 
 def _normalize_datetime_to_iso(value: str) -> str | None:
