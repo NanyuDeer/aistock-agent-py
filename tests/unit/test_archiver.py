@@ -187,3 +187,35 @@ def test_archive_review_returns_false_on_write_failure(
     monkeypatch.setattr(review_dir.__class__, "write_text", _raise)
     ok = archiver.archive_review(_SECTOR_MARKDOWN, snapshot.snapshot_id)
     assert ok is False
+
+
+# ============================================================================
+# 历史回补 — 文件名必须按 report_date，而非当前自然日
+# ============================================================================
+
+
+def test_archive_review_uses_report_date_prefix(review_dir: Path):
+    """回补历史日期：文件名前缀必须是 report_date，否则 snapshot 找不到复盘。
+
+    2026-11-22 回补 11-20 时，归档名用了当天 2026-11-22 → snapshot_builder
+    按 2026-11-20 前缀找不到复盘，报 snapshot_missing_reports（has_review=false）。
+    """
+    snapshot = _make_snapshot()
+    archiver.archive_market_trace_snapshot(snapshot)
+    ok = archiver.archive_review(
+        _SECTOR_MARKDOWN, snapshot.snapshot_id, report_date="2026-11-20"
+    )
+    assert ok is True
+    review_files = list(review_dir.glob("*-review.md"))
+    assert len(review_files) == 1
+    assert review_files[0].name.startswith("2026-11-20-")
+
+
+def test_archive_morning_uses_report_date_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """回补历史日期：晨报文件名前缀同样必须是 report_date。"""
+    target = tmp_path / "morning"
+    monkeypatch.setattr(archiver, "MORNING_OUTPUT_DIR", target)
+    archiver.archive_morning("# 晨报", report_date="2026-11-20")
+    files = list(target.glob("*-briefing.md"))
+    assert len(files) == 1
+    assert files[0].name.startswith("2026-11-20-")

@@ -788,7 +788,7 @@ async def run(state: AgentState) -> dict[str, object]:
         report_json = json.dumps(report, ensure_ascii=False)
         if not _is_degraded_report(report):
             await set_cached_briefing(report_json)
-            archive_morning(details)
+            archive_morning(details, report_date=report_date)
         else:
             logger.warning("morning_cache_skipped_degraded", date=report_date)
 

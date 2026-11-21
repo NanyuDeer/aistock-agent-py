@@ -1338,7 +1338,7 @@ async def run(state: AgentState) -> dict[str, object]:
 
     # 6. 归档复盘报告（仅在 facts.json 存在时创建 Markdown）
     #    严格失败顺序：归档失败 → 返回降级，不写 Redis / DB。
-    if not archive_review(markdown, snapshot.snapshot_id):
+    if not archive_review(markdown, snapshot.snapshot_id, report_date=report_date):
         logger.error(
             "review_archive_review_failed",
             agent="review",
@@ -1356,8 +1356,10 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 8. 持久化到 DB（仅 scheduler 触发）
-    persisted = await _persist_review_report(report_date, artifact)
+    # 8. 持久化到 DB（仅 scheduler/manual 触发；普通用户访问不写公共报告）
+    persisted = False
+    if state.get("trigger_source") in {"scheduler", "manual"}:
+        persisted = await _persist_review_report(report_date, artifact)
     # 双保险：确认写库后才补发 review_done，预测由 PredictionConsumer 独立消费；
     # 旧串行断链（无总线）由 helper 显式告警。
     if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
@@ -1562,7 +1564,7 @@ async def run_review(
     )
 
     # 归档 + 缓存
-    if not archive_review(markdown, snapshot.snapshot_id):
+    if not archive_review(markdown, snapshot.snapshot_id, report_date=report_date):
         logger.error(
             "run_review_archive_review_failed",
             snapshot_id=snapshot.snapshot_id,
