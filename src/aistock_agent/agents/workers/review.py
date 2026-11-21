@@ -1090,31 +1090,48 @@ def _build_review_report(artifact: ReviewArtifact) -> dict[str, object]:
     return content
 
 
-async def _persist_review_report(
-    state: AgentState,
-    artifact: ReviewArtifact,
-) -> None:
-    """按 schema v2 把复盘写入 Node 端 analysis_reports；仅 scheduler 触发时写库。
+_REVIEW_PERSIST_ATTEMPTS = 2
 
-    任何持久化异常都只打日志、不向上抛，保证复盘主流程的返回值不受影响。
+
+async def _persist_review_report(
+    report_date: str,
+    artifact: ReviewArtifact,
+    *,
+    data_source: str = "review_agent",
+) -> bool:
+    """把复盘写入 Node 端 analysis_reports；返回是否确认写库成功。
+
+    失败重试一次（Node 端偶发 5xx/网络抖动），仍失败只打 error 并返回 False，
+    不向上抛——复盘 markdown 仍要交付。调用方必须用返回值决定是否发布
+    review_done / 返回 status=ok，禁止把「未写库」当成功（2026-11-20 事故：
+    晚报因此读不到 review，降级为空壳）。
     """
-    if state.get("trigger_source") not in {"scheduler", "manual"}:
-        return
-    try:
-        report_date = state.get("report_date") or shanghai_today().isoformat()
-        content = _build_review_report(artifact)
-        await node_api.save_analysis_report(
-            report_type="review",
-            report_date=report_date,
-            data_source="review_agent",
-            content=content,
-        )
-    except Exception as e:
-        logger.warning(
-            "review_persist_failed",
-            error=str(e),
-            exc_info=True,
-        )
+    content = _build_review_report(artifact)
+    for attempt in range(1, _REVIEW_PERSIST_ATTEMPTS + 1):
+        try:
+            saved = await node_api.save_analysis_report(
+                report_type="review",
+                report_date=report_date,
+                data_source=data_source,
+                content=content,
+            )
+            if saved is not None:
+                return True
+            logger.error(
+                "review_persist_failed",
+                report_date=report_date,
+                attempt=attempt,
+                reason="save_analysis_report returned None",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "review_persist_failed",
+                report_date=report_date,
+                attempt=attempt,
+                error=str(e),
+                exc_info=True,
+            )
+    return False
 
 
 async def _publish_review_done_if_available(report_date: str) -> None:
@@ -1219,9 +1236,9 @@ async def run(state: AgentState) -> dict[str, object]:
                 sectors=_extract_review_sectors(rendered_markdown),
                 prediction=None,
             )
-            await _persist_review_report(state, rebuilt_artifact)
-            # 双保险：缓存命中成功持久化后同样补发 review_done（与持久化同守卫）
-            if state.get("trigger_source") in {"scheduler", "manual"}:
+            persisted = await _persist_review_report(report_date, rebuilt_artifact)
+            # 双保险：缓存命中且确认写库后才补发 review_done
+            if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
                 await _publish_review_done_if_available(report_date)
             # A-5 N2：缓存命中路径同样附带结构化 sectors
             return {
@@ -1340,10 +1357,10 @@ async def run(state: AgentState) -> dict[str, object]:
         return {"final_response": DEGRADED_RESPONSE}
 
     # 8. 持久化到 DB（仅 scheduler 触发）
-    await _persist_review_report(state, artifact)
-    # 双保险：成功持久化后补发 review_done（与持久化同守卫），预测由
-    # PredictionConsumer 独立消费；旧串行断链（无总线）由 helper 显式告警。
-    if state.get("trigger_source") in {"scheduler", "manual"}:
+    persisted = await _persist_review_report(report_date, artifact)
+    # 双保险：确认写库后才补发 review_done，预测由 PredictionConsumer 独立消费；
+    # 旧串行断链（无总线）由 helper 显式告警。
+    if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
         await _publish_review_done_if_available(report_date)
 
     # A-5 N2：附带结构化结果（sectors 确定性提取，供迭代评估端优先使用）
@@ -1573,21 +1590,26 @@ async def run_review(
             markdown=DEGRADED_RESPONSE,
         )
 
-    # 持久化到 DB
-    try:
-        content = _build_review_report(artifact)
-        await node_api.save_analysis_report(
-            report_type="review",
+    # 持久化到 DB：未确认写库不得返回 ok，否则 ReviewFullConsumer 会发布
+    # review_done，晚报/预测读到不存在的复盘（2026-11-20 事故）。
+    persisted = await _persist_review_report(
+        report_date,
+        artifact,
+        data_source=f"review_agent_{snapshot_kind}",
+    )
+    if not persisted:
+        logger.error(
+            "run_review_persist_failed_status_degraded",
             report_date=report_date,
-            data_source=f"review_agent_{snapshot_kind}",
-            content=content,
-        )
-    except Exception as e:
-        logger.warning(
-            "run_review_persist_failed",
-            error=str(e),
-            exc_info=True,
+            snapshot_kind=snapshot_kind,
             trace_id=trace_id,
+        )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=markdown,
         )
 
     # 预测记录落库已退役（PR-A/T4）：run_review 不再内联写预测，
