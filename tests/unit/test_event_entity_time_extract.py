@@ -118,7 +118,7 @@ async def test_materialize_passes_summary_and_source_event_id(monkeypatch):
         await _materialize_event_entity(rec, "2026-09-15T09:00:00+08:00")
     body = m.call_args.args[0]
     assert body["summary"] == "华为秋季全场景新品发布会将在深圳举行"
-    assert body["source_event_id"] == rec["event_id"]
+    assert body["source_event_id"] == f"event_scrape:{rec['event_id']}"
 
 
 @pytest.mark.asyncio

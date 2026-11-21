@@ -588,7 +588,6 @@ async def _materialize_event_entity(
     title = str(event.get("title", ""))
     # 时间线展示需要摘要；summary 为空时回退 title，避免库内 100% 空。
     summary = str(event.get("summary") or "").strip() or title
-    source_event_id = str(event.get("event_id") or "")
     event_start = _extract_event_start_time(
         title,
         str(event.get("summary", "")),
@@ -598,7 +597,6 @@ async def _materialize_event_entity(
         body: dict[str, object] = {
             "title": title,
             "summary": summary,
-            "source_event_id": source_event_id,
             "source_type": "news",
             "event_start_time": f"{event_start}T00:00:00+08:00",
             "time_source": "news_extraction",
@@ -613,12 +611,18 @@ async def _materialize_event_entity(
         body = {
             "title": title,
             "summary": summary,
-            "source_event_id": source_event_id,
             "source_type": "news",
             "event_start_time": publish_iso,
             "time_source": "publish_time_fallback",
             "time_confidence": 0.5,
         }
+    # EventRecord.event_id is the scrape-store source identity, never the app authority ID.
+    # Keep its namespace distinct from original-document IDs such as cninfo:<announcement>.
+    source_id = event.get("event_id")
+    if isinstance(source_id, str) and source_id.strip():
+        source_ref = f"event_scrape:{source_id.strip()}"
+        if len(source_ref) <= 128:  # existing event_entities.source_event_id column limit
+            body["source_event_id"] = source_ref
     try:
         resp = await node_api.post_event_entity(body)
         if isinstance(resp, dict) and resp.get("event_id"):
