@@ -652,6 +652,16 @@ pm2 logs aistock-agent --lines 50
 - **校验失败带反馈重试一次**：`_generate_validated_trace` 对任意确定性校验失败（origin 违规、source_id 臆造、链结构不合规）把错误原因追加为 HumanMessage 重试一次，二次仍失败才降级，避免一次违规就整份作废。
 - **验证口径**：改完不止看单测，要确认 2026-11-04 复盘重新生成后 `/api/agent/report/review/2026-11-04` 返回非空、`agent_analysis_reports` 出现 `report_type='review'` 行。
 
+### 播报与事件准确性修复（2026-11-22）
+
+- **复盘落库必须 fail loudly**：`review.py::_persist_review_report` 返回 `bool` 且失败重试 1 次；`saved is None` / 异常均记 `review_persist_failed` 并返回 `False`。`run()` 仅在 `persisted=True` 时发布 `review_done`；`run_review()` 持久化失败返回 `status="degraded"`，禁止“生成成功但未落库”静默通过。
+- **消费者二次回读**：`ReviewQuickConsumer` / `ReviewFullConsumer` 在 `status="ok"` 后必须 `get_analysis_report_quiet("review", report_date)` 校验可追溯（合法 id、`report_type="review"`、`status="completed"`、非空 `data_source`、非空 dict `content`）；不可追溯则降级并记 `review_report_missing_after_persist`，不得发布下游 `review_done` / snapshot。
+- **事件物化必须带摘要与溯源**：`_materialize_event_entity` 的 body 必须含 `summary`（空时回退 title）与 `source_event_id=event_scrape:<event_id>`（保留命名空间，避免与 `cninfo:` 等原文 ID 冲突）。`event_entities.summary` 依赖 app-api upsert 的 `summary = EXCLUDED.summary` 回填。
+- **事件开始时间不认结束日**：`_extract_event_start_time` 只认绝对日期；「暂停至 / 有效期至 / 截至 / 截止 Y」等结束语义返回 `None`，交 `publish_time_fallback`（信度 0.5），禁止把到期日排到未来。
+- **境内货币政策不得判外围**：`event_origin._DOMESTIC_MARKERS` 含 `LPR` / `贷款市场报价利率` / `政策利率` / `公开市场操作` / `逆回购` / `MLF` / `降准` / `存款准备金率`；`_DOMESTIC_CB_RE` 识别「央行」并排除日本/欧洲/英国/美国/韩国/澳洲/加拿大/瑞士前缀。2026-11-20 回补即因「LPR…降息」被判 peripheral 导致复盘两次失败。
+- **归档文件名按 report_date**：`archive_morning` / `archive_review` 接受 `report_date` 参数，历史回补必须传入；`snapshot_builder._find_report` 按交易日前缀查找，用当天自然日命名会导致 `snapshot_missing_reports`。
+- **回补验证口径**：`POST /api/agent/admin/trigger/evening_chain {"report_date":"YYYY-MM-DD"}` 后，须确认 `agent_analysis_reports` 中 review / brief_evening 均 `completed`、晚报 `degraded=false` 且 `missing_sources=[]`。
+
 ## 关键约束
 
 - 禁止在 Python 重复实现 A 股数据获取逻辑
