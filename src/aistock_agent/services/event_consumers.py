@@ -128,6 +128,31 @@ class BaseConsumer(ABC):
         """处理事件。失败时由 run_loop 统一 retry。"""
 
 
+def _has_traceable_review_report(report: object) -> bool:
+    """review 消费者二次确认：数据库里必须有可追溯、completed 且 content 非空的复盘。
+
+    2026-11-20 事故后加的双保险：即使未来持久化层再次吞掉失败，也不能让
+    review_done / 晚报消费到不存在的复盘。
+    """
+    if not isinstance(report, dict):
+        return False
+    report_id = report.get("id")
+    has_valid_id = (
+        isinstance(report_id, int) and not isinstance(report_id, bool) and report_id > 0
+    ) or (isinstance(report_id, str) and bool(report_id.strip()))
+    data_source = report.get("data_source")
+    content = report.get("content")
+    return (
+        has_valid_id
+        and report.get("report_type") == "review"
+        and report.get("status") == "completed"
+        and isinstance(data_source, str)
+        and bool(data_source.strip())
+        and isinstance(content, dict)
+        and bool(content)
+    )
+
+
 async def publish_review_done(event_bus: EventBus, *, report_date: str, trace_id: str) -> None:
     """发布 review_done（幂等 event_id=review_done_{date}_{trace_id}；失败仅告警不阻断 review）。"""
     try:
@@ -170,6 +195,19 @@ class ReviewQuickConsumer(BaseConsumer):
             if attempt < len(REVIEW_QUICK_RETRY_BACKOFF):
                 await asyncio.sleep(REVIEW_QUICK_RETRY_BACKOFF[attempt])
         review_status: str = result.status if result is not None else "degraded"
+        # 二次确认：status=ok 还必须能在 DB 读回可追溯的 completed 复盘，
+        # 否则持久化层再次静默失败时仍会推进晚报（2026-11-20 事故双保险）。
+        if review_status == "ok" and result is not None:
+            persisted = await self.ctx.node_api.get_analysis_report_quiet(
+                "review", result.report_date
+            )
+            if not _has_traceable_review_report(persisted):
+                logger.error(
+                    "review_report_missing_after_persist",
+                    report_date=result.report_date,
+                    trace_id=trace_id,
+                )
+                review_status = "degraded"
         review_degraded: bool = review_status != "ok"
 
         # 仅 status=ok 发布 review_done（与 ReviewFullConsumer 一致，硬约束 6）；
@@ -214,9 +252,23 @@ class ReviewFullConsumer(BaseConsumer):
             trace_id=trace_id,
         )
 
-        # 仅 status=ok 发布 review_done（硬约束 6）：降级/跳过不发；
+        # 二次确认：status=ok 还必须能在 DB 读回可追溯的 completed 复盘。
+        verified_ok = result.status == "ok"
+        if verified_ok:
+            persisted = await self.ctx.node_api.get_analysis_report_quiet(
+                "review", report_date
+            )
+            verified_ok = _has_traceable_review_report(persisted)
+            if not verified_ok:
+                logger.error(
+                    "review_report_missing_after_persist",
+                    report_date=report_date,
+                    trace_id=trace_id,
+                )
+
+        # 仅 verified_ok 发布 review_done（硬约束 6）：降级/跳过不发；
         # publish_review_done 内部吞掉发布异常，不阻断后续快照链路
-        if result.status == "ok":
+        if verified_ok:
             await publish_review_done(
                 self.ctx.event_bus,
                 report_date=result.report_date,
@@ -228,6 +280,8 @@ class ReviewFullConsumer(BaseConsumer):
             "report_date": report_date,
             "snapshot_kind": "full",
             "trace_id": trace_id,
+            "review_degraded": not verified_ok,
+            "review_status": "ok" if verified_ok else "degraded",
         }
         await self.ctx.event_bus.publish(
             CHANNEL_SNAPSHOT,

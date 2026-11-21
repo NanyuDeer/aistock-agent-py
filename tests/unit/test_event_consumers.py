@@ -46,6 +46,17 @@ def mock_event_bus():
 def mock_node_api():
     api = AsyncMock()
     api.get_analysis_report = AsyncMock(return_value=None)
+    # ReviewConsumer 会二次回读复盘，默认给一个可追溯的 completed 报告；
+    # 需要验证缺失场景的用例自行覆盖为 None。
+    api.get_analysis_report_quiet = AsyncMock(
+        return_value={
+            "id": 1,
+            "report_type": "review",
+            "status": "completed",
+            "data_source": "review_agent_quick",
+            "content": {"display_report": {"summary": "ok"}},
+        }
+    )
     api.save_analysis_report = AsyncMock(return_value={"code": 200})
     return api
 
