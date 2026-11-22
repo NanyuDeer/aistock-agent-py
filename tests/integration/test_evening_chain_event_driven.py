@@ -36,6 +36,19 @@ def event_bus():
 def ctx(event_bus):
     mock_node = AsyncMock()
     mock_node.get_analysis_report = AsyncMock(return_value=None)
+    # review 消费者用 get_analysis_report_quiet 做持久化二次确认
+    # （2026-11-20 事故后加的双保险）：DB 里必须有可追溯的 completed 复盘，
+    # 否则 status=ok 也会被降级成 degraded、review_done 不发布。
+    # 只 mock 旧方法 get_analysis_report 拿不到返回值，链路会静默断在这里。
+    mock_node.get_analysis_report_quiet = AsyncMock(
+        return_value={
+            "id": 1,
+            "report_type": "review",
+            "status": "completed",
+            "data_source": "review_agent_quick",
+            "content": {"schema_version": "2.0"},
+        }
+    )
     mock_node.save_analysis_report = AsyncMock(return_value={"code": 200})
     return ConsumerContext(event_bus, mock_node)
 

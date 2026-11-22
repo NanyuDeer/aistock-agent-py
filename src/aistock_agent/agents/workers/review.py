@@ -1236,7 +1236,12 @@ async def run(state: AgentState) -> dict[str, object]:
                 sectors=_extract_review_sectors(rendered_markdown),
                 prediction=None,
             )
-            persisted = await _persist_review_report(report_date, rebuilt_artifact)
+            # 与完整路径（步骤 8）保持一致：只有 scheduler / manual 触发才写公共报告。
+            # 普通用户访问命中缓存时不得写库——否则用户的每次浏览都会覆盖当日复盘，
+            # 而这份复盘的 data_source 和触发来源都不可控。
+            persisted = False
+            if state.get("trigger_source") in {"scheduler", "manual"}:
+                persisted = await _persist_review_report(report_date, rebuilt_artifact)
             # 双保险：缓存命中且确认写库后才补发 review_done
             if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
                 await _publish_review_done_if_available(report_date)

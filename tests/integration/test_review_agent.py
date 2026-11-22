@@ -646,6 +646,10 @@ async def test_scheduler_persist_failure_keeps_review_response(mocker):
     """scheduler 持久化失败不应影响复盘正常返回（降级吞掉异常）。"""
     _patch_snapshot_and_llm(mocker, VALID_TRACE_JSON)
     mocker.patch.object(review_agent, "archive_review")
+    # 强制缓存未命中：否则若外部缓存里有残留 artifact，run() 会走「缓存命中」
+    # 分支（见 review.py 的 artifact is not None 段落），它同样写 DB，
+    # 本用例要验证的是「完整路径下持久化异常被吞」，命中缓存就测不到。
+    mocker.patch.object(review_agent, "get_cached_review", new=AsyncMock(return_value=None))
 
     with patch.object(
         review_agent.node_api,
@@ -655,7 +659,9 @@ async def test_scheduler_persist_failure_keeps_review_response(mocker):
         result = await review_agent.run(SCHEDULER_STATE)
 
     assert "## 归因结论" in result["final_response"]
-    save.assert_awaited_once()
+    # 重试 2 次（_REVIEW_PERSIST_ATTEMPTS=2）：Node 端偶发 5xx 时不能一次就放弃。
+    # 原断言 assert_awaited_once 是重试机制加进来之前的写法。
+    assert save.await_count == 2
 
 
 # ============================================================================
@@ -1260,6 +1266,9 @@ async def test_redis_cache_failure_blocks_db_persistence(mocker):
     """Redis 缓存写入失败 → 不写 DB。"""
     order: list[str] = []
 
+    # 强制缓存未命中：命中分支会绕过「缓存写入失败」这条闸门直接写 DB。
+    mocker.patch.object(review_agent, "get_cached_review", new=AsyncMock(return_value=None))
+
     async def build_snapshot(_date: str):
         order.append("snapshot")
         return TRACE_SNAPSHOT
@@ -1275,7 +1284,7 @@ async def test_redis_cache_failure_blocks_db_persistence(mocker):
     mocker.patch.object(
         review_agent,
         "archive_review",
-        side_effect=lambda _md, _sid: order.append("markdown_archive") or True,
+        side_effect=lambda _md, _sid, **_kw: order.append("markdown_archive") or True,
     )
     # Redis 缓存写入返回 False（失败）
     mock_set_cache = mocker.patch.object(
@@ -1298,6 +1307,10 @@ async def test_full_success_sequence_is_snapshot_facts_llm_markdown_redis_db(moc
     """完整成功时序：snapshot → facts archive → LLM → markdown archive → Redis → DB。"""
     order: list[str] = []
 
+    # 强制缓存未命中：命中分支的时序是「重新渲染 → DB」，不含 snapshot / LLM，
+    # 与本法要验证的完整时序不是一回事。
+    mocker.patch.object(review_agent, "get_cached_review", new=AsyncMock(return_value=None))
+
     async def build_snapshot(_date: str):
         order.append("snapshot")
         return TRACE_SNAPSHOT
@@ -1316,7 +1329,7 @@ async def test_full_success_sequence_is_snapshot_facts_llm_markdown_redis_db(moc
     mocker.patch.object(
         review_agent,
         "archive_review",
-        side_effect=lambda _md, _sid: order.append("markdown_archive") or True,
+        side_effect=lambda _md, _sid, **_kw: order.append("markdown_archive") or True,
     )
 
     async def set_cache(_date: str, _artifact: dict) -> bool:
@@ -1327,6 +1340,9 @@ async def test_full_success_sequence_is_snapshot_facts_llm_markdown_redis_db(moc
 
     async def save_report(*_args, **_kwargs):
         order.append("db_persist")
+        # 必须返回非 None：实现里「返回 None」表示写入未确认，会触发重试，
+        # 于是 db_persist 会被记两次，时序断言失败。
+        return {"id": "test-report"}
 
     mocker.patch.object(review_agent.node_api, "save_analysis_report", new=save_report)
 
