@@ -90,6 +90,9 @@ async def test_hot_burst_agent_generates_dual_layer_response():
 
     tools = mock_create.call_args.args[1]
     assert {tool.name for tool in tools} == {"get_hot_burst_history"}
+    from aistock_agent.tools.hot_burst_tools import get_hot_burst_report_history
+    assert tools == [get_hot_burst_report_history]
+    assert "days" not in tools[0].args
     messages = mock_agent.ainvoke.call_args.args[0]["messages"]
     assert messages[0].content == HOT_BURST_ANALYST_PROMPT
 
@@ -310,6 +313,11 @@ async def test_hot_burst_invalid_json_falls_back_without_crashing():
         patch(_NODE_API) as mock_api,
         patch(_CREATE_REACT_AGENT, return_value=_mock_agent("普通文本报告")),
         patch(_GET_DEEP_THINK, return_value=MagicMock()),
+        patch(
+            "aistock_agent.agents.workers.hot_burst.repair_dual_layer_with_llm",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_repair,
     ):
         mock_api.get_hot_burst_data = AsyncMock(
             return_value=HotBurstReadResult("available", _SOURCE_DATA)
@@ -317,6 +325,7 @@ async def test_hot_burst_invalid_json_falls_back_without_crashing():
         mock_api.save_analysis_report = AsyncMock(return_value={"id": 4})
         result = await run(_state(scheduler=True))
 
+    mock_repair.assert_awaited_once_with("普通文本报告")
     assert result["final_response"] == "普通文本报告"
 
     persisted = mock_api.save_analysis_report.await_args.kwargs["content"]

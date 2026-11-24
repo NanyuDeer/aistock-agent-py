@@ -60,6 +60,19 @@ async def get_hot_burst_history(
     return _format_history(data)
 
 
+@tool("get_hot_burst_history")
+@safe_tool_call
+async def get_hot_burst_report_history(limit: int = 50, offset: int = 0) -> str:
+    """获取报告使用的最近24小时热门股历史，至少两源通过；时间范围固定，不可扩大。"""
+    return await get_hot_burst_history.ainvoke({
+        "limit": limit,
+        "offset": offset,
+        "days": 1,
+        "min_resonance_only": True,
+        "min_resonance": 2,
+    })
+
+
 def _format_hot_burst(data: dict[str, object]) -> str:
     """格式化机构调研推荐热门股检测结果（HotBurstResult）"""
     update_time = data.get("update_time", "-")
