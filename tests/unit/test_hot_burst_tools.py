@@ -115,3 +115,15 @@ async def test_get_hot_burst_history_supports_min_resonance():
         mock_api.get.assert_called_once_with(
             "/internal/institution-research/history?limit=50&min_resonance_only=true&days=1&min_resonance=2&offset=0"
         )
+
+
+def test_history_format_deduplicates_before_display_limit():
+    from aistock_agent.tools.hot_burst_tools import _format_history
+    rows = [{"symbol": "300308", "stock_name": "中际旭创", "detected_at": "最新"}]
+    rows += [{"symbol": "300308", "stock_name": "中际旭创", "detected_at": "更早"}] * 25
+    rows += [{"symbol": "300124", "stock_name": "汇川技术"}]
+    result = _format_history({"total": 27, "records": rows})
+    assert result.count("中际旭创(300308)") == 1
+    assert "汇川技术(300124)" in result
+    assert "历史记录总数: 27" in result
+    assert "本页去重股票数: 2" in result

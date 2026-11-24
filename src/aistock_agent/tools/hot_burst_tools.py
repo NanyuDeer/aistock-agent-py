@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
 from aistock_agent.tools.base import safe_tool_call
+from aistock_agent.utils.hot_burst_history import deduplicate_history
 
 
 @tool
@@ -110,7 +111,10 @@ def _format_history(data: dict[str, object]) -> str:
         lines.append("暂无历史记录。")
         return "\n".join(lines)
 
-    for item in records[:20]:
+    # 先在已返回的历史页内去重，再截取20只，避免同股快照占展示名额。
+    unique_records = deduplicate_history(records)
+    lines.append(f"本页去重股票数: {len(unique_records)}")
+    for item in unique_records[:20]:
         if not isinstance(item, dict):
             continue
         stock_name = item.get("stock_name", item.get("stockName", "-"))
