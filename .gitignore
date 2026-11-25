@@ -8,6 +8,7 @@ build/
 
 # 虚拟环境
 .venv/
+.venv*/
 venv/
 env/
 
@@ -20,8 +21,14 @@ env/
 .env
 .env.development
 .env.production
+.env.server
 # 仅提交模板
 !.env.example
+
+# LangGraph checkpointer sqlite 运行时数据库（checkpointer_backend=sqlite 时生成）
+.langgraph.db
+.langgraph.db-shm
+.langgraph.db-wal
 
 # 日志
 *.log
@@ -50,13 +57,29 @@ changelog-pending.md
 docs/agent-outputs/
 data/audio/
 
+# 运行时学到的板块别名（防止生产回写人工维护的 sector_aliases.json 造成 git 冲突）
+src/aistock_agent/data/sector_aliases_learned.json
+
 # Superpowers 计划/规格/审查文档（2026-08-02 决策：代码仓库只留代码，计划文档不跟踪）
 docs/superpowers/
 docs/outputs/
+# SPEC 设计文档（2026-08-14 决策：SPEC 不提交不推送，仅本地维护）
+docs/*-SPEC.md
 docs/2026-08-01-chat-agent-architecture-discussion.md
 docs/2026-08-01-chat-agent-subagents-design.md
+# 部署清单/上线操作手册（内部运维文档，含服务器路径，不提交不推送）
+docs/2026-09-15-event-entity-deploy-checklist.md
 
 # Claude / Kiro CLI（本地开发工具配置，不提交）
 .claude/
 CLAUDE.md
 # AGENTS.md 需要提交，供 AI 开发时参考
+
+# iterate 数据（切片/标准答案/实验/报告，仅存沙盒本地）
+data/cases/
+data/ground_truths/
+data/experiments/
+data/reports/
+
+# 人工校准数据（标注模板/回填/生成报告，仅存本地人工维护）
+data/calibration/

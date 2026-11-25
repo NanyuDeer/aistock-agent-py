@@ -1,4 +1,4 @@
-"""长线风口 Agent — 风口趋势分析
+"""风口龙头 Agent — 长短线风口趋势分析
 
 工具集：get_wind_leaders（从 sector_tools 注册到 wind_leader category）
 模型：deep_think（多维度风口研判）
@@ -41,7 +41,7 @@ def _is_wind_leaders_empty(data: dict[str, object] | None) -> bool:
 
 
 async def run(state: AgentState) -> dict[str, object]:
-    """长线风口分析：热门板块 + 龙头股"""
+    """风口龙头分析：长短线热门板块 + 龙头股"""
     try:
         # 预检：确保风口龙头数据可用（scheduler 触发时，最多重试3次）
         # 用户实时请求不预检（避免等待），工具本身有空数据降级处理
@@ -56,7 +56,7 @@ async def run(state: AgentState) -> dict[str, object]:
             ]
             if not await ensure_data_available(checks):
                 logger.warning("wind_leader_data_unavailable_after_retries")
-                return {"final_response": "长线风口分析暂时不可用：后端数据源为空，请稍后重试"}
+                return {"final_response": "风口龙头分析暂时不可用：后端数据源为空，请稍后重试"}
 
         llm = get_deep_think()
         tools = get_tools("wind_leader")
@@ -92,7 +92,7 @@ async def run(state: AgentState) -> dict[str, object]:
                         logger.warning("wind_leader_dual_layer_repair_failed_fallback_to_text")
                         dual_layer_content = {
                             "display_report": {
-                                "summary": "长线风口分析（结构异常，详见下文）",
+                                "summary": "风口龙头分析（结构异常，详见下文）",
                                 "details": final_response,
                             },
                             "podcast_brief": "",
@@ -115,7 +115,7 @@ async def run(state: AgentState) -> dict[str, object]:
         }
     except Exception as e:
         logger.error("agent_run_failed", agent="wind_leader", error=str(e), exc_info=True)
-        return {"final_response": "长线风口分析暂时不可用，请稍后重试"}
+        return {"final_response": "风口龙头分析暂时不可用，请稍后重试"}
 
 
 def _archive_wind_leader(content: str) -> None:

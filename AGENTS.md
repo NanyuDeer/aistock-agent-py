@@ -20,17 +20,54 @@ AiStock Agent 推理服务，基于 Python FastAPI + LangGraph，负责多 Agent
 | 个股分析 | agents/workers/stock.py | deep_think | P0 |
 | 板块分析 | agents/workers/sector.py | deep_think | P0 |
 | 事件传导链 | agents/workers/event.py | deep_think | P0 |
-| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0 |
+| 长线风口/风口龙头 | workers/wind_leader.py | deep_think | P0（报告区分短线/长线风口） |
 | 异动提醒/持仓监控 | workers/alert.py | deep_think | P1 |
+| 节奏大师 | agents/workers/rhythm_master.py | deep_think | P1 |
 | 个股异动溯源 | agents/workers/stock_trace.py | deep_think | P0 |
 | 机构调研热门股 | workers/hot_burst.py | deep_think | P1 |
 | 播报生成 | workers/broadcast.py | deep_think | P0（核心特色） |
-| 智能投顾 | workers/ai_advisor.py | deep_think | P0 |
-| 交易复盘 | workers/review.py | deep_think | P2 |
+| 交易复盘/大盘溯源 | workers/review.py | deep_think | P2 |
+| 统一事件抓取中台 | services/event_scraper.py（非 LLM Agent，pipeline：采集→规则评分→LLM 精评→归一化→筛选→入库→传导；Phase-2 LLM 精评 2026-08-13，默认关闭灰度开启；Phase-3 事件传导过滤 2026-08-25：event_scope=STOCK 事件跳过事件传导，不执行 event_agent，UNKNOWN 放行；Phase-4 纯个股事件过滤 2026-08-25：Call1 事件传导价值判断 is_stock_only/transmission_needed，纯个股事件在 Agent 内立即终止（不执行图谱查询/Call2-5、不落库、不进 GI、不进传导前端），字段缺失默认放行；L3 前瞻 2026-08-30：采集层前瞻查询走 `/internal/calendar/events` 事件日历，含 earnings-density；**Phase-5 外围资讯标记 2026-10-16**：采集层新增金十快讯源（fail-safe、仅当日、逐条日期过滤）；`event_scope` 由 STOCK/UNKNOWN 扩为 STOCK/MARKET/UNKNOWN（单一裁决 `resolve_event_scope`），新增 `event_origin` 三键（单一真源 `derive_event_origin`）；评分口径收敛到 `event_scoring`（`apply_source_score`，peripheral 恒 neutral）；外围资讯（MARKET+peripheral）在 `_trigger_conduction` 跳过事件传导/GI（reason=peripheral_event），但保留在事件库；大盘归因链 root 增 `peripheral_events` 通道、children 匹配池则剔除外围。**已知边界**：晨报兜底重放与手动触发两条旁路未做外围门控，列入下批待办） | 无（代码管线） | P0（中台底座） |
 | 十倍股评分 | workers/tenx.py（Phase 5+） | deep_think | P2 |
 | 趋势股评分 | workers/trend_score.py | deep_think | P2 |
 | 业绩预测 | workers/forecast.py（Phase 5+） | quick_think | 后续 |
 | 兜底对话 | agents/general/node.py | quick_think | P0 |
+
+> **命名澄清（2026-08-02 大盘溯源改进）**：`review_agent` 实际承担大盘溯源归因职责（输出 `MarketTraceResult` 4 候选 × 6 阶段链），前端"大盘溯源"页面读它的报告。晚报用的是 `broadcast_agent`，不要混淆。
+>
+> **节奏大师三时点（2026-08-30；2026-09-14 对齐实现）**：16:05 收盘基准 `after_close` 生成**次日节奏基准**；次日 9:00 `morning` + 12:30 `midday` 的**主档位（stage/level/score）沿用最近 `after_close` 基准卡**（基准卡缺失或不可用时本地重算，缺失时留痕），事件维度体现在 `branches`/`event_anchors`（当前仅认 `importance=="high"` 日历事件）；sentiment_temp 已由 15:45 移至 **17:00**（close-snapshot 未就绪时 10/20 分钟重试，见下），16:05 收盘基准读取的是**截至前一交易日**的温度归档序列。
+>
+> **仓位口径同源 + 事件封顶（2026-11-03）**：morning/midday 沿用基准卡档位时，`position_band.text` 一并继承（`MasterRhythmCard.inherited_position_text`，优先级：中性沿用降级 > 继承的基准仓位 > 本地 `derive_position_text`），修复 11-02「档位=当日基准、仓位=前一日 K 线重算」的跨日错配；**事件当期（d=0）结果未落档时仍统一封顶「轻仓~三成」**——本地 derive 与继承文案同过该闸门（`engine.cap_position_text_on_event_no_result`），基准卡生成后才入库的事件不会因「沿用」被放过。
+>
+> **边界（2026-09-14 spec §10 / S1 未闭环）**：是否引入「仅有新事件才刷新」的事件门控属产品口径，尚未裁决；当前 morning/midday 仍按时点无条件执行，但**不再无条件改写主档位**。
+>
+> **节奏大师降级链修复（2026-09-05，design-debate 裁决落地）**：K 线取数改 `days=200 & end_date=basis`（去 start_date，对齐 Node 1-200 上限；行数<20 → `stage=None` + `data_missing="指数K线不足"` 留痕）；synthesis prompt 补 "json" 字段锚定 + validate 三者皆空门槛；producer 补发 `content.rhythm_card`（`_build_rhythm_card`，level/score 由 `STAGE_TO_LEVEL` 常量同源派生，score=LEVEL_IDX×20，branches 由 engine 确定性生成）；`run_once` 方案丙 min 边界（morning/midday 优先 + after_close 兜底，存储 `report_date=target_date` 不改，Node 无"最新卡"端点待开放项）。
+>
+> **改进后能力**：含预判对照（`morning_forecast` 注入 + `prediction_validation` 输出）、证据源读统一事件库优先（`load_event_scrape(report_date)`，有库用事件库做 event_evidence、缺库降级到财联社电报当日全量爬取 `/internal/news/telegraph`，再降级 `/internal/news/latest`，2026-08-12 起）、外盘传导数据源强化（`GLOBAL_MARKET_TICKERS` 新增欧洲股市 ^GDAXI / ^FTSE / ^FCHI）。
+>
+> **大盘主线 / 主升浪仓位节奏（2026-09-14 spec 批次）**：新增 `services/mainline_engine.py`（主线判定纯函数 + `load_mainline_candidates()` 候选清单加载器 + `detect_sector_breakdown`/`detect_breakdown` 破位判据，阈值全部绝对锚定 H1）、`services/trend_reversal.py`（② 放量阴线后摆动点抬高的趋势反转确定性判定）、`data/mainline_candidates.json`（AI 科技组优先，`group="ai_tech"` 先判）；`services/rhythm_engine.py` 新增 `POSITION_LADDER` 五档仓位阶梯 + `derive_position_text`（合成序：指数趋势定 base → 硬闸门 → 主线 strong/none 调整 → 事件档位 → clamp）+ `build_event_branch` 的 d 约束（>3 交易日不产分支）；`services/event_calendar.py` 读取端关键词升格 L3 宏观事件为 high（关键词 ⊆ app-api macro 正则词元 H3；**2026-09-22 R3 裁决移除该读侧升格——high 仅种子/source=L4 或候选晋升产，读侧原样透传，`MACRO_EVENT_TERMS` 保留仅供 app-api 做 macro 类型分类**）。worker `_compose_card`/`_build_rhythm_card` 接线：`position_band.text` 改主线驱动（H11 只作用文案层，stage/继承语义不变）、`event_high_hint`/`phase_evidence.technical` 确定性生产者、`next_event_anchor` 改交易日差口径、盘中档剔除未完成 bar；synthesis 主线段受确定性事实约束（LLM 不得自创主线，`prune_invalid` 校验 name∈候选集 且 data_date==证据日）。开关 `rhythm_mainline_enabled`（env `RHYTHM_MAINLINE_ENABLED`，默认 True，False 回退旧主档文案）。跨仓：`aistock-app-api`/`aistock-app-frontend` 生产代码 0 改动（前端只读消费既有字段槽）。
+>
+> **重大事件时间线 Event Entity（2026-09-15，agent-py 侧接入 + 收口，spec 冻结版 §4.2/§5A.3/§5B.3/§6/§10）**：P0 做 app-api 权威 `event_id` 透传——`EventRecord` 增可选 `app_event_id`/`app_event_status`（既有 `event_id` 降级为 **source_event_id** 语义）；`event_scraper._trigger_conduction` 条件透传（缺省不落键，major_events 形状逐字节不变）；`event_conduction.run_single_event_conduction` 优先消费 `app_event_id` 作传导隔离键（缺省回退 `evt_md5`=execution_id，逐字节不变）并向 state 注入 `event_id/event_status` 供 worker 优先消费；`event_persister` content 加性回写 `appEventId/appEventStatus`。P0.5 做确定性事件时间抽取（`_extract_event_start_time`，只认明确绝对日期/区间，禁 LLM 猜日期）+ **有明确绝对日期即物化**（`_materialize_event_entity` → `node_api.post_event_entity`，未来/已发生都落，time_confidence=0.9=抽取方法确定性，挂接在 `scrape_full_daily`/`scrape_intraday` 的**落库之前**（`_materialize_events`，先物化再 `save_event_scrape`，2026-10-02 修正）并原地回填 app id/status）。**未来事件守卫（spec §6.2 红线）**：`app_event_status∈{scheduled,upcoming}` → 不执行已发生传导（`event_conduction_phase="pre"` 标记跳过，Pre 双套 P2 未落地）。开关 `event_entity_enabled`（env `EVENT_ENTITY_ENABLED`，默认 **True**（已启用））：app-api 端点已落地（2026-09-15，`aistock-app-api` migration 019 + `/internal/event-entities` POST/GET），本地真实 HTTP 联调通过（信封 code:200/幂等重放/读时重算 status/降级契约）。**STOCK 事件跳过物化**（`_materialize_event_entity` 守卫：`event_scope == 'STOCK'` 的普通个股事件不进重大事件时间线，由个股情报 Agent 消费，日志事件名 `event_entity_materialize_skipped_stock`；重大公司事件白名单放行属后续增强）。降级纪律：物化失败 warning、不阻断抓取/传导主链路；`event_status` 由 app-api 确定性计算（写库为 display-only 快照，读时重算为权威）。跨仓：`aistock-app-frontend` 0 改动；`event_status/canonical` 语义归 app-api。**2026-09-24 发布时间兜底物化**：`_materialize_event_entity` 抽不出绝对日期时，用 `_extract_publish_time`（遍历 payload/顶层时间字段：publish_time → published_at → event_time → ctime_stamp → ctime → create_time → date，`_normalize_datetime_to_iso` 兼容 ISO 带偏移/UTC Z/无时区绑上海/unix 秒毫秒）作 `event_start_time` 兜底 → `time_source=publish_time_fallback`、`time_confidence=0.5`（仅落已发生/当日，不投递为未来事件）；两值皆无才跳过物化（STOCK 守卫仍生效，`event_entity_materialize_skipped_stock`）。**2026-09-24 影响板块预计算**：新增 `services/impact_sectors_precompute.py` + cron `impact_sectors_precompute`（07:00，`scheduler_impact_sectors_precompute_cron`，开关 `impact_sectors_precompute_enabled` 默认 True）——对 `GET /internal/event-entities`（[今天, 今天+90]）中 calendar + scheduled/upcoming + `impact_sectors` 列为空的事件，`semantic_match_industries`（embedding→pgvector，阈值 0.7）对 title+summary 匹配 Top3（`_select_top_industries` similarity 降序去重）写回 POST upsert；宏观事件匹配不到保持 `[]`（方案 A，不 LLM 强猜）；单行失败 log 不中断；作为 app-api 时间线展示 `impactSectors` 兜底数据源（chain Top3 > 本列 > []）。
+>
+> **事件抓取近似去重（2026-09-30，时间轴重复事件根治）**：财联社等数据源对同一事件可能发两条几乎相同的电报（实测 9/30「中国汽车流通协会：9月经销商库存预警指数63.2%」两条原文 detail/2495917 与 2495923 标题仅差「汽车」二字，content_hash 逐字比对无法拦截 → 时间轴同日同主题重复）。修法：`event_store.save_event_scrape` 在 content_hash 精确去重之外增加**近似去重层**——`_is_near_duplicate(ev, near_pool)`：同数据源（`source` 相同）+ 归一化标题（`_normalize_title`，unicodedata 过滤空白/标点/符号 + 小写，对齐 forward_events 同款实现）`SequenceMatcher` 比值 > `TITLE_SIMILARITY_THRESHOLD`（0.9）→ 吸收进已有事件（计入 `deduped`、不进 `added_events`，传导守卫据此不重复触发）。近重复池 = 当日已有事件 + 本批已吸收新增（循环内增量）。跨源相似标题**当时**不吸收（不同媒体独立报道各自保留；2026-11-06 已修订，见下条）。空标题不参与判断。新增单测 4 个（同源吸收/跨源保留/批内吸收/辅助函数契约），`event_store.py` mypy strict 0 error。
+>
+> **跨源同题重复根治（2026-11-06）**：生产事件传导页出现同一事件两张卡片（11-06 15:06「商务部对原产于欧盟/日本的进口乙叉降冰片烯发起反倾销立案调查」cls 与 jin10 各一条，标题仅差「进行/发起」「和/、」）。根因：`content_hash=sha1(title|url)` 逐字比对拦不住措辞差异；同源近似去重 `_is_near_duplicate` 不跨源；跨源 `_is_cross_source_absorbable` 旧口径要求「至少一侧 `event_origin==peripheral`」才吸收，国内政策新闻两侧均非 peripheral → 两条都入库并各自触发传导。修法（两条）：①**放宽跨源吸收**——异源 + 归一化标题相似度 > `TITLE_SIMILARITY_THRESHOLD`(0.9) + **数字序列一致**（新增 `_title_digits` 守卫，净利 10.5% 与 20.5%、南向 50 亿与 120 亿不得合并）即视为同一事件，保留先到者；peripheral 路径仍被该口径覆盖。②**物化前批内去重**——新增 `event_store.dedupe_batch_events`，`scrape_full_daily`/`scrape_intraday` 在 `_materialize_events` **之前**调用，避免转载各自物化成 Event Entity 后在时间线留下重复卡片（save 层吸收无法回收已建实体）。跨批去重仍由 `save_event_scrape` 的 near_pool 负责。回归单测：真实两条标题吸收、数字不同保留、批内去重、跨源规则表。
+>
+> **重大事件时间线物化 id 全链路修复（2026-10-02）**：①**物化时机错位**（主因）——原实现「先 `save_event_scrape` 落库、再对 `added_events` 物化」，权威 `app_event_id` 只写进内存对象、**从不落库**；于是任何「从事件库重读事件再触发传导」的路径（晨报 I4 兜底、缓存命中重放）都拿不到权威 id，传导报告退回 `evt_md5` 键，而 app-api 时间线的 occurred 准入要求 `agent_analysis_reports.user_id == event_entities.event_id` → 该事件被静默丢弃（症状：事件传导列表有、时间线没有）。修法：抽出 `event_scraper._materialize_events`，`scrape_full_daily`/`scrape_intraday` 改为在 `save_event_scrape` **之前**物化本批重大事件（幂等 upsert 不产生重复实体，顺带覆盖「已入库但当时未物化」的补漏）；`_spawn_conduction` 守卫语义不变（仍是同一批对象、`added>0` 才传导；失败分支只置 `event_entity_unfilled` 打标，跳过/失败原因仍由 `_materialize_event_entity` 内部落日志，本层不再补 warning 以防 STOCK 设计性跳过误报）。②**重放丢字段**——`morning._event_records_to_major_events` 从事件库重放时未透传 `app_event_id`/`app_event_status`，修法为条件透传（非空才落键，与 `_trigger_conduction` 同款，`major_events` 形状向后兼容）；同族修掉 `event_store.load_event_scrape` 构造 `EventRecord` 时漏 `source_name`（重放路径丢媒体名 → LLM 判不出媒体 → 前端恒显示「未知来源」；有值保留、缺省 None 不臆造）。`EventRecord` 加性声明 `event_entity_unfilled: NotRequired[bool]`（stdlib `typing`，仅写不读的排查标记）；`event_store._safe_float` 由 `float(object)` 改为「JSON 标量窄化 + `str` 兜底」（对齐同包 `global_importance_evaluation._safe_float`），消除 mypy strict `arg-type` —— 修复后 `event_scraper.py`/`event_store.py`/`morning.py` 三文件 mypy 0 error。
+>
+> **链式溯源闭环 + 条件点亮护栏（2026-09-17/18，权威 spec `docs/specs/2026-09-03-链式溯源与事件驱动板块预判-design.md` §12/§13）**：① **链落库**：`attribution_chains`（app-api migration **020**，人工 psql）写路径 `POST {NODE_API_BASE_URL}/api/internal/attribution-chain`（**必须带 `/api` 前缀**——2026-09-17 因缺失导致生产恒 404、链从未落库，且 `post` 吞错只 warning）；响应契约 `{code:200,data:{ok:true}}`（agent `_post_request` 要求业务码 ∈{0,200,201} 且 `data` 为 dict，否则假 `save_failed`）。字段：`root{type,summary,index_pct,attribution_status,evidence_weak}` + `children[]{sector,sector_std,ts_code,relation,pct,trace_summary,events[],extraction{source,weak}}`；`events[]` 顺序=中台优先（命中必带 `event_id`，无 id 不产节点）→ 检索补漏（**复用**溯源快照 `kind="sector_event:*"`，零新增检索成本）→ 无命中 `[]`（**不编造**）。**2026-09-18 事件准入收紧（组长口径「要溯源到基本事件——是原因，不是现象」）**：检索补漏逐条过 `is_driving_event`（确定性纯函数，`event_summary_reason` 出原因码）——行情综述/现象形态一律拒收：① `收评/收盤/收盘/午评/早评/复盘/盘点/盘面/三大指数/涨跌家数/时间线/资金流向/涨停潮/异动`（简繁同列）＋英文 `Closing Bell/market wrap`；② 市场级词元（沪指/上证/深证成指/创业板指/两市/A股/S&P 500…）＋涨跌幅式描述（`跌0.41%`）；③ `两市`＋成交额/家数/涨跌综述；④ `午后/早盘/盘中/尾盘/开盘`＋涨跌幅式描述或涨跌动词（**2026-09-18 二次修订**：现象由「命中即拒」改为「命中 **且** 原因词 `_CAUSE_TOKENS`〔政策/监管/公告/披露/中标/订单/涨跌价/产能/供需/关税/补贴/并购/业绩/落地…，简繁同列〕**全不命中**才拒」——现象外衣但讲清原因必须放行）；⑤ **页面噪声（2026-09-18 迭代 3，两道网，同一原因词豁免口径；同日收窄误伤）**：标题级 `_PAGE_NOISE_TOKENS`（行情中心/行情页/行情查询/行情报价/行情走势/个股行情/概念行情/板块行情/资金流向表/数据中心/资讯中心/研报中心/公告列表/F10/股吧/盘口，简繁同列＋英文 `quote page`/`market center`/`stock quote`；**站点名（同花顺/东方财富）刻意不入表**——来源品牌不是页面形态，防误拒「同花顺：国家大基金三期成立」；生产实证那条「…行情中心- 同花顺」靠「行情中心」仍命中，覆盖不丢。**同日覆盖回归补偿**：站点名移出后 `股票频道- 东方财富网`（ref `https://stock.eastmoney.com/`）无一判据可拦 → 补**栏目/首页形态词**「频道/頻道/首页/首頁/栏目/欄目/导航/導航」——拦栏目名而不拦"站点名+真事件"）→ reason `page_noise`；URL 级纯函数 `is_page_noise_url(url)`（**站点域后缀 `10jqka.com.cn`/`eastmoney.com` ＋ 站内页面模块首段标签 `q`/`data`/`stockpage`/`quote`/`f10`/`guba` 双条件**，或该站点域（含任意子域）的**站点/栏目首页**（path 空/`/`/`index.*`，`_PAGE_NOISE_URL_ROOT_PATHS`），或路径含 `/detail/code/`、`/quote/`、`/f10/`、`/guba/`；无 scheme 裸域按首段判主机、剥 userinfo/端口；**刻意不做主机任意子串匹配**——`f10.example.com`/`quotes.example.com` 与非页面模块子域 `www.eastmoney.com`、`finance.eastmoney.com` 均**不判**；站点首页例外：`stock.eastmoney.com/` 判噪声、`www.eastmoney.com/news/…` 不判）→ reason `page_noise_url`，**headline 含原因词时不因 URL 被拒**；判定顺序 marker → 现象 → 页面噪声（同时命中时原因码取现象），判据互不命中即放行。被拒逐条留痕 `chain_event_rejected_not_driving`（reason 码 + headline 截断 60 字）并汇总计数 `chain_sector_events.rejected_not_driving`；**被拒即不产节点，全部被拒 → `events: []`（不得回退成综述）**；判不出即放行（宁可漏判）。**中台 `warehouse` 路径不参与该准入（逐字不变）**。检索候选排序改为「trigger 证据引用 → 标题命中 → 正文命中 → 含驱动类关键词（政策/公告/供需/价格…，仅加权不排除）→ 原序」；**定向检索 query 换词（2026-09-18）**：`sector_trace_snapshot._sector_evidence_queries` 由 3 组改 5 组**事件族**（政策监管`政策 监管 调查 部委 试点` / 公司硬事件`公告 中标 订单 获批 并购` / 供需价格`涨价 减产 扩产 供需 库存` / 技术产业`量产 投产 认证 技术突破 招标` / 海外贸易`出口 关税 制裁 海外订单 豁免`）——旧第 1 组 `{date} {板块} 板块 暴跌 大涨 原因` 是**现象式问句**，检索回来的正是准入层专门要拒的行情综述（等于捞回来再扔掉、白花配额），旧第 3 组 `反垄断 调查 监管` 是某次「存储狙击」案例的特化词、绝大多数日子空转；每族仍注入 `report_date`（弱锚）与板块名，族间词不重叠提多样性，每日耗检索条数 15→25。**未做**（评估后暂缓）：龙头股名扩展（`lead_stock` 已在快照 fact 里可直接用）、Tavily `days`/`include_domains` 参数（时间过滤替代日期关键词 + 站点白名单堵行情页），均需改 `TavilyService.search` 包装并确认 failover 链支持；生成侧同批收紧（`prompts/workers/sector_trace.py`：trigger 必须是能解释"为什么动"的基本事件，禁止拿行情综述充 trigger/evidence）——生成侧约束 + 准入侧护栏双保险。**2026-09-18 R25（"折叠卡显示的应该是归因结论、不是触发"）**：`schemas/sector_trace.py::SectorChainResult` **加性新增 `conclusion: str = ""`**（不升 schema_version；`trace_result = model_dump(mode="json")` → 自动流进 `display_report.sector_traces[板块名]` 与 `market_trace.trace`），prompt 输出字段同步加 `conclusion` + **【conclusion 约束】镜像大盘【attribution_summary 约束】**（仅 `sufficient` 时给一句 30-40 字综合该板块当日驱动原因的结论，其余输出空串；只讲原因本身，不混现象/涨跌幅/事件罗列，不用冒号或列表，语义须与 stages 一致）；**根因**：此前 schema 无结论字段 → `_trace_summary_from_report` 读 `trace_result.get("summary")` 永远读不到 → 摘要只能落 trigger headline（= 原因第 1 段）→ 三处折叠卡（市场洞见链分支 / 板块预判页 / 板块详情页）显示的其实都是「触发」。缺省空串 → 自动回退旧口径（老数据零变化、不编造）；**需重跑当日链才能看到结论句**。`children[].trace_summary` 取源改为：**报告 `conclusion`（2026-09-18 R25 新增：LLM 产出的一句话归因结论）** → 报告非空 `summary`（旧数据兼容层） → trigger headline → trigger claims → 中性兜底 `溯源未确认驱动原因`（**`attribution_status=insufficient` 不再直接兜底**——报告有内容就不得覆盖，口径对齐 app-api `extractTraceSummary` / sector-insight `trace.summary`，前端两页「有无归因」判定一致；刻意不回退 phenomenon 现象标题）。前端匹配优先级 `ts_code`（去 .TI）→ `sector_std` → `sector` → 归一化。**2026-09-18 迭代 4（摘要与事件层一致性，组长口径"逻辑通顺完整"）**：`_trace_summary(trace_result, *, events=())` 在上述取源之后加**一致性裁决** —— 摘要若是**否定句**（`_NEGATIVE_SUMMARY_MARKERS`：未检索到/未找到/未发现/未确认/未明确/未识别/未匹配/没有检索到·找到·发现/无法确认/无法判断/不能确认/暂无/尚未；**刻意不收"不足/没有/缺少/缺乏"**，否则肯定归因句"供给不足推动多晶硅价格上涨"会被误判）**且** `children[].events` 非空 → 摘要**让位**给事件首条非空 headline（**证据存在则结论不得与证据相反**：同一板块卡片上不能既写"未检索到触发事件"又挂着事件节点；事件节点无可用标题则让不了位、如实保留否定句）；事件被准入拒收 → `events` 空 → 否定句如实保留。改写发生留痕 `chain_trace_summary_overridden_by_events`（sector/from_summary/to_headline）可审计。不传 `events` 的调用方行为逐字不变。**残留（2026-09-18 当晚已根治）**：板块详情页 `/api/agent/sector-insight/:date` 的 `trace.summary` **已改为读当日链**（app-api `848669e`：`pickSectorTraceSummary` 链优先 `ts_code`→权威名→原始名 → 报告 `display_report.sector_traces[板块名]` → 旧单板块形状兜底），与「市场洞见」页同源；同时修掉"多板块日所有主因候选共用 `market_trace.trace` 第一个板块摘要"的老问题。agent-py 侧 0 改动。
+  >
+  > **待观察样本清单（事件准入"研报观点/展望"漏网，2026-09-18 组长裁定"先攒样本、暂不改词表"）**：现存一类漏网——**研报观点/展望体裁**标题既非现象也非基本事件，靠弱原因词（`落地`/`方案`/`规划`/`标准`/`业绩`/`财报`）被 `_CAUSE_TOKENS` 豁免放行。**攒够 3–5 条再定词表**（候选方向：把 `_CAUSE_TOKENS` 拆**硬事件信号**〔公告/披露/预案/中标/订单/签约/招标/获批/并购/重组/收购/增持/回购/立案/调查/涨价/提价/降价/减产/扩产/投产/关税/补贴/试点〕与弱词两级，弱词不再豁免**展望体裁**；再新增 `outlook_without_event` 判据：展望词〔或/有望/预计/料将/看好/空间/趋势/逻辑/建议/评级/目标价/首次覆盖/研报/分析师/观点/展望〕× 无硬事件信号 → 拒）。**已收样本**：① 2026-09-18（重跑）`注册制次新股`/`科创次新股` 各 1 条 —— `自主崛起叠加电动智能趋势，出海与具身智能落地或进一步打开空间 - 财闻`（`https://www.caiwennews.com/article/1612022.shtml`，靠「落地」豁免）；② 同日 `国家大基金持股` —— `国家大基金持股概念涨4.03%，主力资金净流入39股-证券之星`（`https://4g.stockstar.com/detail/IG2026091800026698`）**属"现象判据覆盖不足"族**：板块涨幅语 + 资金流，但无市场级词元（沪指/大盘/两市/A股）故 ② 判据〔`_MARKET_WIDE_TOKENS` × `_PCT_RECAP_RE`〕不生效 → 需放宽为"板块级涨幅式描述 + 资金流/家数"；③ 同日 `汽车芯片` —— `今日A股上演魔幻一幕，完全看不懂了…… - 股票`（`https://stock.jrj.com.cn/2026/09/18155458485706.shtml`）**属"情绪化评论体裁"族**（标题党/吐槽），需新增 `commentary_without_event` 判据；④ 2026-09-18（当日最后一次重跑 14:31）`科创次新股` —— `政策支持集成电路发展，科创综指ETF华夏(589000)昨日净流入超1200万元_每日经济新闻` **属"资金流报道"族**：主体是 ETF 净流入/主力资金（`_NON_PRICE_DOMAIN_KEYWORDS` 的资金流词族只作用于条件点亮 G1，**不作用于事件准入**），靠夹带的「政策支持」被 `_CAUSE_TOKENS` 豁免 → 需在事件准入侧补资金流/份额/净流入类词（与 G1 词表对齐）；⑤ 2026-09-18（换词后重跑 15:09，新 query 生效后的新样本）`汽车芯片` —— `声明`（**纯栏目/页脚碎片标题，仅 2 字**）**属"标题过短非事件"族**：它既非现象也非原因，靠正文命中板块词过相关性门槛 → 候选修法是加**标题长度下限**（如 headline 去空白后 < 6 字直接拒）——事件标题不可能只有两个字；同时把「声明/免责声明/风险提示/版权声明」入页面噪声词。
+> ② **弱归因兜底（R16）**：`primary_chain_id` 为空或主链未命中任何板块名（"证据不足但板块集中异动"日为**常态**，9/17 实测 4 候选全 weak）→ 严格降级三级：T1 主链 claim → T2 全部候选链 claim（含 `weak`）→ T3 快照 `top_losers` 头部（不足补 `top_gainers`）；上限 3、跨层去重，**上级有产出即不降级**。弱依据**必须标注**（`root.evidence_weak=true` + `children[].extraction.source/weak`，摘要空缺用中性「证据不足，未确认主因」禁编造主因；**T1 正常路径不得出现这些键**），**兜底板块照常级联预判**（不因弱而跳过）；前端据此出「归因较弱」/「依据较弱」/「无归因依据」。
+> ③ **条件点亮判定（`services/condition_met_judge.py`，**禁 LLM 的纯函数**）**：类型只由**已落库字段确定性推断**（优先级 `anchor.event_ref` > 显式 `metric`〔volume/amount → ma20/ma60/prior_low/prior_high → today_open/high/low〕> 文本兜底 > 涨跌幅），**不新增 `condition_type` 字段**（`extra="forbid"` 下新增字段会整条丢预判）；参考位口径=**窗口最后一行（当日）开/高/低 vs 同行 close**（非窗口极值），`cross_*` 恒 `None`。两值 `judge_condition_met`（到期前**只写 true**）与三值 `judge_condition_met_state`（`false`=确定性不成立 / `None`=无法判定**保持键缺失、绝不写 null**）路由与守卫**同源**。
+
+**2026-09-19（组长专项取证：条件为何永不点亮 + 方案 A）**：三仓交叉取证得三条结论——① **主因已修**：`/internal/ths/:code/daily` 对 ISO 日期**恒 400**（生产日志 2026-09-18T08:05 实证 `node_api_http_error` × N），导致**板块条件判定取数全空 → 一律 None**；该缺陷已由 app-api X1（Service 边界归一 `YYYYMMDD`）修复并部署，实测 ISO 入参已 `200`。② **剩余为口径分流问题**：2026-09-18 生产 32 条条件**全部 `met=null`（0 true / 0 false）**，其中 **32/32 是复合「且」条件**、**14/32 含「板块主力资金净流入」**——**板块级资金流数据源已于 2026-08-19 下线**，该子句永不可判，叠加 G2（复合不得半判）→ 整体 None。③ **本轮实施（方案 A 的可落地部分）**：新增 `condition_met_judge.explain_unjudgeable_reason`（**纯诊断、不参与判定**，守卫口径与 `_judge_clause_state` 逐子句同序：`event_channel` / `guard_domain`(G1) / `guard_dir_pct`(G3) / `guard_or`(G4) / `compound_other_unjudgeable` / `single_other_unjudgeable`；`False` 由调用方归为 `deterministic_false`），并在当时第①段 `_scan_condition_met`（已于 2026-10-06 条件链路清理时物理删除）按记录聚合落一条 `prediction_condition_met_unlit_reasons`（`{id, checked, lit, reasons}`）——**判定行为与四道护栏一律不变**。
+**⚠️ 后续任务（组长指定，暂不实施）**：为「板块主力资金 / 情绪家数 / 外盘走势」等**无数据源口径补数据源**——不采用"生成侧禁写"（会阉割预判信息量）；补齐后含该类子句的复合条件即可正常点亮。事件类条件的判径（状态锚 → 受限 LLM，默认关）已具备，**无需新建"验证 agent"**。
+> ④ **四道保守化护栏（防"不可撤回的假 true"，由生产 4 条误点亮驱动）**：**G1 口径不对应就不判**（常量表 `_NON_PRICE_DOMAIN_KEYWORDS`：海外宏观〔美债/美元指数/美股/纳指/标普/恒生/人民币汇率/美联储/加息/降息/原油；2026-09-18 补 非农/CPI/议息/汇率中间价/金价/伦铜/A50/日经——注意用「**金价**」而非「黄金」，后者是 A 股板块名会误伤〕、情绪家数〔涨停/跌停/炸板/封板/连板/家数/涨跌家数/赚钱效应；补 封单/开板/晋级率/封成率/炸板率/首板/二板/空间板/情绪温度〕、资金流〔净流入/净流出/主力资金/北向/融资余额/融券；补 大单净额/龙虎榜/ETF/份额/融资买入额/南向/沪股通/深股通/席位〕；命中且 anchor 无**对应** metric → 整体 `None` 不产键；刻意不误伤 成交额/成交量/换手率/支撑位/前低/MA20）；**G2 复合条件不得半判**（按 `且/并且/同时/而且/以及` 切子句——**不按中文逗号**，逗号多用于并列同一子句内对象；≥2 子句须**全部可判且全部成立**才点亮，任一判不了 → `None`）；**G3 方向动词 + 百分数不确定就不判**（`is_dir_verb_pct_ambiguous`：下跌/上行动词〔跌破/下破/失守/站上/突破/收回，与 `_TECH_RE` 逐字同集〕+ 百分数、且**未明示技术位**〔均线/日线/周线/月线/MA\d+/前低/新高〕→ 整体 `None`——`metric` 缺省即 `close` 不携带口径信息，会被文本兜底错归技术位类并用 MA20 近似判出假 true；**刻意不含 上穿/击穿**，二者本就不进技术位判径）；**G4 「或」复合条件不判**（`has_or_connector`：含「或」〔排除"不可或缺"〕→ 整体 `None`——「或」是"任一子句成立"，与 G2 相反，正确实现需三值或运算；**生产实测 0 条**〔全库 372 条条件 `with_or=0`〕→ 零收益不新增误判面，若日后真产出再实现）。事件类（`anchor.event_ref`）在判定体**首行短路**，四护栏均不介入。
+> ⑤ **口径**：`source_id` = `sector:{resolved 权威名}:{YYYY-MM-DD}`（级联与批量两路统一；落库前 `list_predictions(source_id)` fail-safe 跳过，防重复）；`condition_met_rate` = True 数 / **含布尔 `condition_met` 的 entry 数**，且**仅当出现 ≥1 个 `false` 时计算**（否则 `None`）。**`anchor.threshold` 双语义（2026-09-18 R22 收敛）**：① 条件本身是涨跌幅口径时 = **该条件的触发阈值**（判定层据此判 `condition_met`）② 其余口径（量能/技术位/参考位由 `metric+op+level` 判定触发）时 = **情景验证幅度**（到期比对）；三条 prompt 已同批写明"涨跌幅口径条件下必须=触发阈值且与 condition 文本百分数**同值同号**"（此前无此约定 → LLM 按示例填情景幅度 → id=24 c1 出现文本 -3% vs 锚 -4%，判定层 G3 已按"口径不确定就不判"兜住）。
+> ⑥ **运维工具（均 dry-run 默认、零写入，脚本须 `APP_ENV=production` 才读对 `.env`）**：`scripts/backfill_condition_met.py`（存量条件回溯补算，幂等/限速）、`scripts/rollback_condition_met.py`（误点亮回滚，`--sql-out` 出 SQL 由人工在 psql 执行；**脚本必须自建 `HttpClientPool.init`**——否则读接口恒失败而 `data_client` 吞错返回空列表 → 假阴性误报"无待回滚项"）、`scripts/attribution_feedback.py`（弱反馈观测）。
+> ⑦ **手动验证入口**：`POST /api/agent/admin/trigger/review_full`（20:30 full）与 `POST /api/agent/admin/trigger/review_quick`（15:30 quick，2026-09-18 **对称补齐**）共用一个可选参数 `with_chain`（**需 `X-Internal-Token`**）+ JSON body `{"report_date":"YYYY-MM-DD","with_chain":true}` → 复盘 `status=ok` 后自动发布 `review_done`（缺省总线，不可用则临时 RedisPool 建总线），链与级联预判一并触发，返回体含 `chain_published`；`with_chain` 缺省 `false` 时既有行为逐字不变（两入口请求体字段名/发布时机/降级策略/返回字段/日志键完全对称）。
+> ⑧ **未闭环/遗留**：生成侧 `condition` 文本百分数与 `anchor.threshold` **不一致**（R22，id=24 实证文本 -3% vs 锚 -4%）→ 收敛后可评估把 G3 放宽为涨跌幅口径；**弱反馈应用层未实现**（`attribution_feedback_mode` 仅 `off`/`observe`，只落建议不改写溯源，真正加权待立项）。
 
 ## 核心架构
 
@@ -46,18 +83,30 @@ START → supervisor(quick_think, 意图路由)
   ├── intent="hot_burst"     → hot_burst_agent（deep_think）
   ├── intent="alert"         → alert_agent（deep_think）
   ├── intent="broadcast"     → broadcast_agent（deep_think）
-  ├── intent="ai_advisor"    → ai_advisor_agent（deep_think）
   ├── intent="trend_score"   → trend_score_agent（deep_think）
   ├── intent="general"       → general_agent（quick_think）
-  └── [user触发, intent≠general/broadcast] → ai_advisor_agent（DB报告→整理回复）
+  └── [user触发, 未匹配 specialist intent] → general_agent（quick_think 兜底）
         │
         ▼
        END
 
 定时链路（APScheduler, 非LangGraph图内边）：
-  08:50 morning_agent → 提取major_events → 并行event_analyst(fire-and-forget)
+  07:00 impact_sectors_precompute（未来事件影响板块预计算，2026-09-24：calendar + scheduled/upcoming + impact_sectors 列为空的事件，`semantic_match_industries`（KG 行业向量，阈值 0.7）对 title+summary 匹配 Top3 写回 POST /internal/event-entities；宏观事件无可靠行业保持 [] 不 LLM 强猜；排在 app-api Calendar 物化 cron（06:40）之后，时间线 impactSectors 兜底数据源）
+  08:45 event_scrape_daily（盘前全量，2026-08-13 起由 07:30 调整，紧邻晨报）+ 10:00-14:00 每小时 event_scrape_intraday（含 12:00 午间档，2026-08-13 恢复）+ 15:05 event_scrape_close（收盘全天汇总，复盘/播报消费）（统一事件抓取中台，入库有新增（added>0）后触发事件传导，Task 5；早间刷新档与盘前档合并，2026-08-13）
+  08:30/12:00/18:00/22:00 event_scrape_non_trading（**非交易日**档，2026-10-14：cron `30 8,12,18,22 * * *`；反向守卫——交易日跳过（`non_trading_event_scrape_skipped_trading_day`）、非交易日执行 `run_event_scrape("intraday", allow_latest_fallback=False)`，禁用跨日 `/internal/news/latest` 兜底防上一交易日消息重入；交易日 Job 守卫与行为完全不变，二者互斥）
+  08:50 morning_agent（读事件库优先、缺库自主检索；（事件库为空 或 无当日传导报告）且未被中台标记时降级兜底触发传导，I4/H7，2026-08-12 起）
   09:00 morning(缓存)→wind_leader→hot_burst→trend_score→broadcast（串行，写DB+双人语音播报, 9:10前端可见）
-  15:30 review_agent → 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）
+  12:05 midday_briefing（盘中报「上午盘面回顾+午后前瞻」仅大盘：晨报结论+新闻+外盘+搜索组装式，quick_think（H4），get_tools("morning")（H6），report_type="midday" 存档不推送（H1），_midday_llm_semaphore=Semaphore(1) 调盘中自身 AI 段（H3，2026-08-24）；午后前瞻输出 opportunities 关键词（4-5 个 ≤8字）+ risks 短词（schema 2.1）
+  12:15 midday_broadcast（午报双人播报音频：读已落库 midday → deep_think 生成 host+analyst 对话 → app-api /internal/midday/generate-audio 合成 MP3 → audio_path 回填同一份 midday 报告 content.audio_path，方案 A 不产独立广播报告、不混入 morning/broadcast_morning，2026-08-24）
+  15:30 review_quick（quick 快照链路，不发 review_done）→ 15:35 snapshot_builder → 15:40 iterate_agent（复盘流水线, 文件I/O传递）；事件驱动 quick 链路 snapshot(quick) 完成后直接触发 broadcast（晚间双人播报，brief_evening 只聚合 review 报告不依赖 iterate，2026-08-16 修复）
+  16:05 rhythm_master_after_close（收盘基准：生成次日节奏基准，事件驱动；早于 sentiment_temp 17:00，故当日温度次日才进入序列；cron 周一至周五 `5 16 * * 1-5`，周五收盘生成下周一预告——design-debate F2 修复原 0-4 空窗导致的"周一 after_close 缺失"）
+  16:10 attribution_feedback（溯源弱反馈观测层，Task 7.1 / spec §13.3：聚合链上溯源信号 × 预判验证结果 → 建议降权/提级/观望 → 上报审计表；**默认 `attribution_feedback_mode=observe`，只落建议、不改写溯源判定与预判、不应用权重**；`off` 可运维关闭；置于 16:00 prediction_validate 与 16:05 prediction_stats 之后。**背离报告（2026-09-18 补）**：`scripts/attribution_feedback.py` 输出第二段「溯源背离报告」（`divergence_entries` 口径 + `render_divergence_report`）——只列样本充分且命中率越阈值的单元（降权侧优先 → 背离强度 → 样本量 → unit_key），观望/样本不足只计数；含样本数与板块抽样，**只读审计产物，不改变溯源权重**；看"某板块"维度条目用 `--unit sector`）
+  17:00 sentiment_temp（短线情绪温度计算，close-snapshot 未就绪时 10/20 分钟重试共 3 次，落盘 docs/agent-outputs/sentiment，次日晨报/节奏卡引用；cron `0 17 * * 0-4`）
+  次日 09:00 rhythm_master_morning（当日节奏 morning 档，事件驱动增量，主档位沿用收盘基准）
+  12:30 rhythm_master_midday（当日节奏 midday 档，事件驱动增量，主档位沿用收盘基准）
+  18:30 review_full（full 完成后 status=="ok" 发布 review_done{report_date,trace_id}，幂等 event_id=review_done_{date}_{trace_id}）→ 两个独立消费组同频道：prediction_chain 的 PredictionConsumer → predict_from_trace 落 prediction_records（大盘溯源后接预测独立模块，2026-08-14）；sector_chain 的 SectorTraceConsumer → 提取主因板块 → **逐板块并行** run_sector_trace（`persist_report=False`，不自写报告）→ gather 后 `save_sector_trace_report` **一次**写 report_type="sector_trace" 当天报告（Spec D 板块溯源，2026-09-02；`display_report.sectors` = 当天全部已溯源板块，缺省单板块自写路径不变；2026-09-18 写入收敛：修同日多板块同键 upsert 互相覆盖、报告层只剩 1 个板块）；2026-09-03 组长裁决 20:30→18:30）
+  19:30 sector_wind_prediction（每日长线风口板块批量预判，板块四环 spec §6.3）：对 leaders 页 hot-sectors 双榜并集（≤16 且 cycle != 'none'）逐板块 predict_sector 落 source_type="sector_prediction"（list_predictions 幂等跳过 + 当日 sector_trace 主因板块 ts_code 排除；排 18:30 review_full 之后执行保证主因排除准确；2026-09-03 组长裁决 21:30→19:30）
+  旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
 
 ### 多专家 Agent 协作体系（参考涨乐AI）
@@ -81,8 +130,6 @@ START → supervisor(quick_think, 意图路由)
        │
        ├──→ stock_analyst：个股深度分析
        │
-       ├──→ ai_advisor_agent：智能投顾（DB报告→整理回复）
-       │
        └──→ broadcast_agent：播报生成
               │
               ├──→ 输出双人对话格式（AI分析师 + AI主持人）
@@ -92,8 +139,16 @@ START → supervisor(quick_think, 意图路由)
 ### 数据流
 
 - Python 通过 `services/data_client.py`（httpx）回调 Node.js `/internal/*` 获取 A 股数据
-- 境外市场数据（yfinance）和全网搜索（Tavily）在 Python 侧直接调用
+- 境外市场数据（yfinance）和全网搜索（Tavily 主源 + Doubao / AnySearch 兜底的多供应商 failover）在 Python 侧直接调用
 - **禁止在 Python 重复实现 A 股数据获取逻辑**
+
+### 搜索多供应商 failover 配置（2026-08-18）
+
+- **链路顺序由配置决定（2026-08-24）**：`SEARCH_ENABLED_PROVIDERS` 同时控制启停与顺序（`_build_providers` 按配置顺序建链）；空值=默认 `tavily,doubao,anysearch`。生产配 `anysearch,tavily,doubao` 使 anysearch 优先（日 1000 次额度充足），tavily/doubao 兜底
+- **惰性注册**：未配置 key 的 provider 不注册进链路（如只配 Tavily key 则仅注册 tavily），全部未配时保底注册 Tavily 主源
+- **key 池**：`TAVILY_API_KEYS` / `DOUBAO_API_KEYS` / `ANYSEARCH_API_KEYS`（逗号分隔多成员共享额度），兼容单 key `*_API_KEY`；单 provider 多 key 用 `services/key_pool.py::KeyPool` 轮换 + 熔断（401/429 固定窗口冷却）
+- **fail-fast 预算**：`SEARCH_BUDGET_SECONDS`（默认 10.0s）为整链总预算，超时即返回当前错误集（`budget_exhausted`）
+- **工具输出契约**：`tavily_finance_search` 返回 `- {title}\n  {content[:200]}...\n  来源: {url}` 逐字节稳定（`tests/unit/test_search_contract.py` 回归锁定）；`TavilyService.search` 返回 `{"results", "provider", "outcome"}`（加性键，只读 title/content/url 的消费端零破坏）
 
 ### 双模型策略
 
@@ -102,12 +157,21 @@ START → supervisor(quick_think, 意图路由)
 
 ### CHAT QA 行为说明（2026-08-01）
 
+### CHAT QA 追问面板 questions 契约（2026-08-26）
+- **数据源契约**：`SynthInsightOutput.questions: list[str] = []`（LLM 结构化输出）+ `QuestionState.questions: list[str] | None`（LangGraph 通道声明，节点返回未声明键会 InvalidUpdateError）+ `ChatResponse.questions`（对外）
+- **生成规则**：light 正常路径 prompt 2b 指令生成 2-4 条问句（6-20 字、问句形态、与回答同主题）；deep 分支 `_build_deep_questions` 零 LLM 模板化（worker 名骨架，多子目标每节前 2 + 全局截 4）；澄清/闸门/无 goal/degraded 出口恒 `[]`；confirm 短路无 questions 键
+- **透出三通道**：WS DONE `questions` / HTTP 非流式 `ChatResponse.questions` / SSE DONE `round_questions`（G1 事件流采集模式，非 final_state.values）；synth_answer 7 个带 cards 返回点统一写 `questions`
+- **G21**：移除结论结尾引导句要求与固定引导句文本——问答不重复引导，追问统一交给 questions 字段
+- **前端契约**：`questions?: string[]`；`[]` 与 `undefined` 均视为"无建议"，前端面板须用 `msg.questions?.length` 判定（勿用真值判断）
+
 ### market_snapshot Skill 降级语义：2026-08-01
 - quick/full 快照失败（如非交易日 quick 409）时自动回退 `/internal/market/last-close-snapshot`
 - 回退成功：degraded=False，source title 标注"最近交易日快照 (trade_date)"，raw 含 used_last_close/trade_date
 - 回退失败：degraded=True
 - degraded 为整体标志：任一数据源缺失即 True（global 无 last-close 回退源，失败仍 degraded）
 - A 股 last-close 成功但 global 失败 → degraded=True，但 facts 仍含 A 股真实数据（source 标注 trade_date）；A 股部分可独立成功，不被 global 拖累
+- **facts 日期标注（P3-fix-3，2026-08-03）**：facts 始终带交易日——首行锚点 `数据日期：MM-DD`，指数行 `名称(MM-DD): 收盘 (涨跌幅)`，LLM 无法把最近交易日误标"今日"。
+- **非交易时段引导提示（P3-fix-3 + 路线 D 文案诚实化 2026-08-20）**：`synth_answer._append_non_trading_time_hint` 触发条件由"仅 degraded 行情"放宽为"行情类证据存在且数据非今日"（market_snapshot 看 `raw.used_last_close` / `raw.a_share_success`，其他行情 skill 看 `degraded`）；文案统一为自洽陈述并显式标注"非今日实时"（如"当前为 A 股午间休市（13:00 复盘），暂无今日盘中行情，以下为最近交易日（{date}）收盘数据（非今日实时）。"），**去掉反问句**「你说的是否是这个交易日的数据？」与误导措辞「综合回答生成受限」，不再对用户制造"数据当下/昨日"矛盾观感。数据确为今日（a_share_success=True 且无 used_last_close）时不触发。
 
 ### qa_router 增强：2026-08-01
 - 指数名（沪指/深成指/创业板指/科创50/沪深300/恒生等）→ market_snapshot（a_share + index_name）
@@ -120,7 +184,7 @@ START → supervisor(quick_think, 意图路由)
 **复杂度双模式（D4）**：
 - `QARouterOutput.complexity`（必填 Literal["light","deep"]）；`QuestionState` + `complexity`/`force_deep`/`deep_source`/`fallback_to_skill`（T1/T2）
 - 判定：LLM 结构化输出为主；LLM 失败按"意图（stock/sector/hot_burst）+ 分析类词"规则兜底（`_infer_complexity_by_fallback`）；hot_burst 兜底固定 deep
-- `force_deep`：ws.py 读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
+- `force_deep`：ws.py 与 routes.py（/chat/message、/chat/stream/messages，P3 对齐）读请求字段 → 构造 state 后追加（`build_chat_initial_state` 签名不变，先例 user_id）；仅 LLM/兜底区生效，**闸门 0/0.5/1/2/3 短路永远优先**（护栏不可被 force_deep 绕过）
 - hot_burst 意图（D6 前置）：`InsightGoal.intent`/`SkillCall.skill_name` Literal 加 `"hot_burst"`；KEYWORD_FALLBACK 加（机构调研/热门股/调研）；hot_burst 无对应 skill，light 会 skill_executor 空转 → 固定 deep 走 escalate
 
 **图外切换 + 统一出口（D1/D3/D7/D31）**：
@@ -136,8 +200,198 @@ START → supervisor(quick_think, 意图路由)
 - `skills/registry.py` 统一注册中心（手写 skill 优先，同名冲突拒绝适配覆盖）+ `skills/adapters.py`（tool→skill 适配：get_quote/get_capital_flow/search_cls_news/get_leader_stocks/get_global_markets/tavily_finance_search，Evidence.facts/sources/degraded/raw）
 - `skill_executor.SKILL_REGISTRY` 改从 registry 读取；qa_router SYSTEM_PROMPT Skill 清单由注册表动态渲染（方案 1：适配 skill 渲染入 prompt）
 - `ChatSource.kind` 复用既有 kind（get_quote→realtime_quote、get_capital_flow→capital_flow、search_cls_news→news、get_leader_stocks→industry、get_global_markets→realtime_quote、tavily_finance_search→news）
+- **阶段 2.1（2026-08-27）`insight_lookup` 读层 skill**：对话内查登录用户自选股洞察（涨停雷达/价格异动归因，只读）；入参 `{symbol?}`，user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/insight/events` 只读端点；`ChatSource.kind="insight"`；`qa_router` footer 白名单动态化——`_build_system_prompt` 从 registry 实时渲染 `goal.intent` 枚举（`__INTENT_ENUM__` 占位符替换，新增 skill 无需改硬编码）
+- **阶段 2.2（2026-08-27）`stock_trace_lookup` 读层 skill**：对话内查登录用户个股异动溯源（价格异动/涨停雷达归因结果，只读列表）；入参 `{symbol?}`（symbol 可空——无代码时返回该用户全部异动溯源），user_id 由 qa_router postprocess 登录态注入（未登录移除 call）；走 `/internal/stock-trace/events` 只读端点；`ChatSource.kind="stock_trace"`，source_id=`stock_trace:{event_id}`；**词条优先级**：`异动/异动归因/异动原因` → 本 skill（置于前），`涨停雷达/自选股/洞察/归因` → `insight_lookup`
+- **2026-08-30 链路合并后**：涨停雷达事件并入 stock-trace（Node 侧不再建 watchlist_insight_events），词条统一——`异动/涨停/涨停雷达/自选股/洞察/归因/异动归因/异动原因` 全部 → `stock_trace_lookup`；`insight_lookup` 从 registry/`_STOCK_SKILLS`/`_infer_stock_skill` 摘除路由（skill 文件保留不注册）；`schemas/stock_trace.py` `SourceKind` 增加 `insight_article`（Node 快照新增文章证据域，候选层仍强制五层）。
 
 **3 worker 契约（D6/D7/D22-D24）**：sector.run 读 `state.tag_code` 注入 SystemMessage（缺失时行为不变）；hot_burst `set_report` 加 `trigger_source=="scheduler"` 守卫（user_chat 不写报告缓存）；stock 缺 symbol 返回"请提供股票代码..."。
+
+### CHAT QA 落库与多轮（P2，2026-08-02）：D11/D15-D18/D12/D13/D38/D39/D14 + checkpointer 持久化
+
+- **user_id 透传（D11）**：`QuestionState.user_id`；ws.py 与 routes.py（/chat/message、/chat/stream/messages）构造 state 后追加（`build_chat_initial_state` 签名不变）；前端 `useChatStream.ts` / `agent.ts` 补传（**P0 起改为服务端注入，前端不再自报**）；**未登录（缺省/空串）为 None**
+- **chat_analysis 落库（D15-D18）**：deep 分支 `_persist_chat_analysis`（`graph/nodes/synth_answer.py`）——登录守卫（D38）+ D18 双层 content（summary=前160字/details=全文/stocks/risks=[]/schema_version="2.0"）+ `save_analysis_report(update_cache=False)`（排除 report_cache 公共列表）+ 失败降级不抛异常（warning 日志）；Node 侧 `VALID_REPORT_TYPES` 已含 `chat_analysis`（三元组 upsert 覆盖，7 天 TTL）
+- **last_deep_report（D12/D13/D38/D39 双写解耦）**：`DeepReportRef` 单引用（worker/report_id/question/summary≤160/symbols/tag_codes/created_at）；**无条件写**（与登录无关）；report_id 由落库回填（失败/未登录=None）；ws DONE 负载携带（null 兼容，前端 P3 消费）
+- **追问复用（D14/D17）**：qa_router `_build_followup_context` 节点内拼接摘要（**`SYSTEM_PROMPT` 常量字节不变**）；`_postprocess_skill_calls(output, message, state)` 对 `report_lookup(chat_analysis)` 确定性注入 `user_id`（登录）/ `summary_fallback`（未登录）/ 无引用移除 call；`skills/report_lookup.py` chat_analysis 分支（登录读 DB 三元组 / 未登录会话内摘要，review/morning 分支不变）
+- **每轮 transient 归零（T6 跨任务修复）**：`deep_source`/`final_response` 是单轮路由信号，ws.py/routes.py 入口按轮置 None——否则 checkpointer 跨轮残留会让追问轮被 synth_answer deep 分支劫持（P1 起存在，T6 发现修复）
+- **checkpointer 持久化（P9 前置）**：`CHECKPOINTER_BACKEND=sqlite` → AsyncSqliteSaver + aiosqlite（chat 图 async 执行必须用 AsyncSqliteSaver，sync 版 NotImplementedError）；`get_checkpointer()` 同步入口经 `_run_coro_sync` 桥接；`_ensure_aiosqlite_compat` 补 is_alive；`threading._register_atexit` 退出关闭连接（防进程挂起）；redis 后端需 Redis 6.2+/RedisJSON；依赖钉版 `langgraph-checkpoint-sqlite==2.0.11` + `aiosqlite>=0.22,<0.23`（勿装 3.x/最新版）
+- **已知限制**：周末日期语义（落库 shanghai_today vs 追问交易日解析 → 非交易日登录态追问 DB miss，会话 fallback 不受影响）；~~user_id 信任边界（WS 无客户端鉴权，P3 建议入口校验）~~ **已由 P0 解决（2026-08-11）**：app-api 验签 JWT 后注入 user_id（HTTP/WS 双面覆写，未登录 None），agent-py 侧 `data.get("user_id")` 恒为可信值，客户端自报失效；多 worker 并发写 SQLite checkpointer 有 SQLITE_BUSY 风险（单实例部署无碍）
+
+### CHAT QA P3-fix（2026-08-03）：reasoning 思维链 + 交易时段 5 状态降级
+
+- **reasoning 事件流**：`WSEventType.REASONING = "reasoning"`；`graph/nodes/_reasoning.py::stream_reasoning(websocket, node, message)` 每节点 start 时经 `asyncio.create_task` 异步启动（fire-and-forget，不阻塞主图），`get_quick_think` 按节点模板（`prompts/chat/reasoning.py`，qa_router/skill_executor/synth_answer/escalate）生成 50-100 字「我在做什么 + 为什么」，流式 chunk 经 WS `reasoning` 事件转发；失败/超时（2s）/空 message → 静态兜底 label（`_FALLBACK_LABELS`），不抛异常。**关键**：直接接收用户原始 `message` 字符串，不读 state（`initial_state` 在 `on_chain_start` 时 stale，且 QuestionState 消息存 `state["messages"]`，`state.get("message")` 恒 None）。`api/ws.py::_sanitize_label` 过滤异常 JSON label（intermediate/tool_start 均应用，前端 buildExecTree 双保险）
+- **交易时段 5 状态提示**：`utils/date.py` 新增 `is_trading_time`（9:30-11:30 / 13:00-15:00 含边界）+ `trading_session_status`（trading/pre_open/lunch_break/closed/non_trading_day）；`_append_non_trading_day_hint` 演进为 `_append_non_trading_time_hint`（degraded 与 LLM 成功路径均接入，行情类降级证据才提示，已含前缀不重复；旧函数保留为弃用别名）
+- **skill 降级语义增强**：`stock_snapshot`/`capital_flow` 空数据（`_EMPTY_MARKERS`）**或**非交易时段 → `degraded=True` + facts 带时段提示 + `raw.trading_status`（与 market_snapshot「非交易日回退最近交易日 degraded=False」语义对照，勿混）
+
+### CHAT QA P3-fix-2（2026-08-03）：reasoning 时序修正 + 节点过滤修正
+
+- **reasoning task 防 GC + DONE 前 drain**：`api/ws.py` 用 `reasoning_tasks: list[asyncio.Task]` 列表持有 `asyncio.create_task` 返回的引用（fire-and-forget task 若不保存引用会被 GC 在执行前取消，官方文档明确警告）；DONE 前 `await _drain_reasoning_tasks(reasoning_tasks)`（`_REASONING_DRAIN_TIMEOUT_SEC=2.5` 略大于 `_reasoning.py` 的 2.0s，超时 cancel 未完成 task，不阻塞 DONE）。**WS 事件协议不变**（reasoning 类型/字段不变），仅时序演进为 DONE 前集中发送（P3-fix 的"节点 start 即时转发"描述已过时）。
+- **`current_node` 状态替代失效的 v2 name 过滤**：LangGraph `astream_events v2` 的 `name` 在 ON_CHAT_MODEL_STREAM 时是模型名而非节点名，旧 `name in ("supervisor","qa_router")` 过滤永远失效 → qa_router/synth_answer/supervisor 的结构化 JSON 泄漏进 text 流。修复：on_chain_start 每次更新 `current_node = name`（置于 seen_nodes 守卫外），ON_CHAT_MODEL_STREAM 用 `current_node in (qa_router, synth_answer, supervisor)` 过滤；`on_chain_end` **仅当 `name == current_node` 时清除**（v2 对每个嵌套 runnable 都发 on_chain_end，无条件清除会在节点内多次 LLM 调用时中途放行 JSON）。
+- **测试**：`tests/unit/test_ws_chat_replacement.py`（T1 reasoning 时序/过滤/drain 超时 + 前序 D11/T4 补齐）+ `tests/integration/test_ws_chat_replacement.py`（按新过滤语义重写，`stream_reasoning` 全部 patch 防真实 LLM）。
+
+### CHAT QA P4（2026-08-03）：多意图（D34）+ 维度预筛（D30）+ 预测降级提示（D35）
+
+- **多子目标（D34）**：`SubGoal`（id/question/intent/dimension/symbols/tag_codes/time_range）；`QARouterOutput.goals` + `SkillCall.goal_id` + `Evidence.goal_id`（skill_executor 透传）+ `QuestionState.goals` + `AnswerTrace.goals`；qa_router 在闸门 3 之后做维度候选集提取（`_DIMENSION_KEYWORDS`：predict/trace/validate，predict 自动补同标的 validate）并注入 prompt；LLM 输出 goals 经 D27 后处理（id 重编号 g1..gN、goal_id 归一、goal 投影第一个子目标、**单非预测子目标坍缩回单意图**）；synth_answer 在 `state.goals` 非空时按子目标分节回答（先 validate/trace 现状数据后 predict 提示，每非预测子目标一次 deep_think，风险段全文单次、非交易时段提示一次文首）
+- **维度预筛（D30 闸门 4）**：只做预筛辅助不短路；LLM 失败时按候选集构建多子目标 compose 兜底（≥2 维度或单预测），单非预测维持现状关键词兜底；纯预测且命中非个股关键词意图时让位关键词兜底
+- **预测维降级（D35）**：`PREDICT_DEGRADED_HINT = "预测功能开发中，可先查看当前趋势分析。"` 代码生成（多个 predict 子目标只输出一次），不编造预测；predict 子目标可携带同标的 validate 取数作"当前趋势分析"依据；**单意图预测问题（闸门 1/2 短路命中 predict 词，如"茅台明天会涨吗"/"沪指明天会涨吗"）同样附加 predict 子目标**（不 bypass 闸门、不升级 deep）
+- **兼容**：单意图路径字节不变（唯一例外为上述 D35 单意图预测附加）；`goals` 为单轮 transient（ws.py/routes.py 入口按轮归零）；WS/SSE 事件协议不变
+
+### CHAT QA P5（2026-08-04）：能力补齐（D40-D42）+ 快速指数快照 + P4 遗留优化
+
+- **4 个新 skill（契约 3 Literal 各追加 compare_stocks/stock_history/trend_ranking/index_snapshot）**：
+  - `compare_stocks`（D40）：`asyncio.gather` 并发 `get_quote.ainvoke`，2~5 标的，部分失败不整条丢弃（degraded + 标"数据暂不可用"），仅个股语义；`_extract_multi_symbols` + KEYWORD_FALLBACK 对比词条 + D27 白名单（<2 移除、>5 截断）
+  - `stock_history`（D41）：`node_api.get /internal/quote/{symbol}/kline`，`_DAYS_RE 近N天` 确定性短路（`_match_other_skill_intent` 排除其他意图词，防"600519 近5天新闻"被劫持）
+  - `trend_ranking`（D42）：`node_api.get_list /internal/trend/top`，空榜 degraded
+  - `index_snapshot`（工作线 B）：`/internal/index/quotes` 快速指数快照（几百 ms 绕开 quick 全市场 33s 慢路径），部分 null 不整体 degraded，失败不降级到 quick 全市场爬取
+- **§2.6 指数/个股消歧硬边界（单一事实源）**：指数语义**只由指数名触发**（沪指/上证指数/深成指/创业板指/科创50/沪深300 → index_snapshot）；裸 6 位代码（000001）恒为个股语义（平安银行）；指数名+代码并存（"沪指000001"）指数名优先；恒生/大盘/全市场词维持 `market_snapshot`（不变）
+- **P4 遗留 3 项**：闸门 1/2 单意图预测附加收紧为 `_STRONG_PREDICT_KEYWORDS = ("会涨","会跌","预测","展望","后市","未来")`（弱词仅闸门 4 候选注入）；兜底 validate+predict 同标的只发一条取数 call（`seen_calls` 去重）；兜底 trace 维度改走 `trace_lookup`
+
+### CHAT QA P7+P8 合并 + P9 纠错否定（2026-08-04，线 1）
+
+- **general 图外切换模式（复用 escalate 先例）**：`qa_router` conditional 三出口（escalate / skill_executor / general_fallback）→ `general_fallback` 节点 → synth_answer；`general_source` 单轮 transient 信号（science/gap，ws.py/routes.py 按轮归零）
+- **D32 科普升级**：education gate 0.5b 命中科普词不再固定话术，置 `general_source="science"` → `agents/general/chat.py` run_science 单次 quick_think 动态回答；产品内部概念（市场主线/风险提示）不纳入（防误伤 compose）
+- **科普句式补全（2026-08-07，问题 16）**：词表原仅"什么是X"前缀句式，"市盈率是什么"等后置问法漏过科普闸门 → 被误判个股名称 → 错误澄清。重构为 `_is_education_question` 三层判定：prefix 强信号词 + extra 通用问法词（怎么理解/是什么意思/啥意思/指什么/含义/干嘛）+ 后缀正则 `(是什么|是啥|是啥子)[？?]?$`；extra/后缀命中且 `_match_other_skill_intent`（命中大盘/市场/资金/新闻/行情等业务意图词）→ 放行不劫持（防"今天大盘是什么"被科普劫持）
+- **D37 能力缺口**：LLM 失败路径 keyword_miss 且非个股缺码澄清 → `general_source="gap"` → run_gap（ReAct + tavily_finance_search）+ `skill-requests.md` 标记（失败仅 warning）；个股缺码澄清路径不变
+- **P9 纠错否定**：强否定词（不是/我说的是/错了/改一下/不对/其实是）+ 上一轮有历史才触发；**无历史守卫必须前置**（无历史不触发）；新标的提取：显式代码 > 指数名 > 名称（剥否定词+是+停用词后取句末中文段）resolve
+- **降级**：双模式顶层 try-catch，返回规范降级文本（含"暂不可用"）不抛异常；WS/SSE reasoning label 与事件协议不变
+
+### CHAT QA P5-fix（2026-08-05）：对比问句短路 + 名称候选净化 + 前端会话持久化 + 多轮指代兜底
+
+- **问题 8（对比问句被闸门 2 澄清拦截）**：`_STOCK_NAME_STOPWORDS` 补对比口语词（哪个/更好/更强/比较/对比）；新增 `_COMPARE_KEYWORDS` 增强对比词表 + `_extract_multi_name_candidates`（按"和/与/还是/vs"分隔符切分逐段提取名称）+ async `_resolve_multi_symbols`（代码优先 + 中文名逐个 resolve，**过滤非 6 位代码候选**）；**对比闸门 2.5 独立于闸门 2 且在其之前**（含代码对比句"600519 和五粮液哪个更好"会跳过闸门 2，必须短路 compare_stocks 否则落 LLM flaky）；`route_by_keyword_fallback` 对比分支仅接受纯 6 位代码（同步兜底无法 resolve 中文名，交回 LLM/闸门 2.5）。注意：**"和/与"不进停用词**（由多标的切分处理，避免"贵州茅台宁德时代"粘连成单候选）
+- **问题 11（候选名被口语词污染 resolve 404）**：`_STOCK_NAME_STOPWORDS` 补意图词/连接词（新闻/资讯/消息/公告/有/是/说/它/这/那，与 `_infer_stock_skill` 意图词对齐）——"宁德时代最近有什么新闻" → 候选名"宁德时代" resolve 成功
+- **问题 14（多轮指代兜底，2026-08-05 前端复测补）**：`chatStore.setSessionId` + storage 持久化（`STORAGE_KEYS.CHAT_SESSION_ID`）+ `useChatStream` WS 路径首轮写回（前端 session_id 层）；**qa_router LLM 失败路径新增多轮指代兜底**——`len(messages)>=3`（有上一轮）且当前消息含指代词（它/这/那/该/其/刚才/上次/这只/那只）时，从上一轮 user 消息 resolve symbol 复用（`_infer_stock_skill` 推断意图，`multiturn_ref` 约束标记），不落澄清。**触发背景**：LLM 偶发输出非法 JSON（DeepSeek 非确定性）→ 关键词兜底解析不出当前消息名称 → 此前直接澄清"请提供 6 位代码"。守卫防"帮我推荐股票"等误指代
+- **测试注意**：时段敏感失败（test_chat_e2e_compose/test_chat_persist_followup/test_chat_escalate 等盘前 startswith 断言、AsyncMock coroutine 交互）为基线既有（git stash 已验证），与 P5-fix 无关；qa_router 单测必须 mock LLM（get_quick_think），否则真实 DeepSeek 偶发错乱导致 flaky（对比短路测试已稳定走闸门 2.5）
+
+### CHAT QA P10 线 2 + P11 线 3（2026-08-05）：token 计费采集 + 后端卡片结构化
+
+**P10 线 2（用户维度计费，billing）**：
+- **contextvar 采集层**：`services/token_usage.py`（新增）`TokenUsageAccumulator`/`TokenUsageContext` + 模块级 `reset_token_usage`/`get_token_usage`/`record_token_usage`。**为什么用 contextvar 而非 state 传参**：`TokenUsageCallback` 挂在 ChatOpenAI callbacks= 上（services/llm.py），回调层无法访问节点 state；contextvar 随 `asyncio.create_task` 继承（ws 后台图任务 `routes.py _run_graph_to_queue` 与节点内 LLM 调用发生在同一 context 副本），record 与读取天然对齐。`observability/callback.py` `on_llm_end` 在 record_llm_tokens 后追加 `record_token_usage`（非 chat 场景无读取方零副作用）
+- **synth_answer 收口**：原节点改名 `_synth_answer_node_core`，新增包装 `synth_answer_node`——core 任意 return 路径统一附加 `result["token_usage"] = get_token_usage()`（全 0/未采集为 None）；与 cards 汇总逻辑块（在 core 内）分居两层隔离，git 合并友好
+- **WS 计费落库（选项 A）**：ws.py 入口 `reset_token_usage()` 按轮重置；on_chain_end 一次性捕获 token_usage + cards；`_drain_reasoning_tasks` 后、发 DONE 前落库——仅 `user_id` 非空 **且** token_usage 非空时 `await node_api.save_token_usage(...)`（try/except + logger.warning，落库失败不阻断 DONE，"永不 500"）；DONE 负载新增 `token_usage` + `cards`（无则 None，null 兼容）
+- **HTTP/SSE 双通道**：routes.py `chat_message`（HTTP 非流式）+ `chat_stream_messages`（SSE）入口均 `reset_token_usage()` 按轮重置；SSE DONE（`_stream_messages`）从 final_state.values 附带 `token_usage` + `cards`（None 默认，仅展示不落库）；HTTP 非流式路径透出 `token_usage`（P10 线 2 缺口修复：前端降级分支读取展示，不落库）
+- **落库接口**：`NodeApiClient.save_token_usage(*, user_id, session_id, prompt_tokens, completion_tokens, total_tokens, question=None)` → `POST /internal/usage/records`（app-api）
+
+**P11 线 3（后端卡片结构化，cards）**：
+- **skills raw 结构化字段**：stock_snapshot `raw["quote"]`（`_QUOTE_FIELD_MAP` 中文键→英文键）、capital_flow `raw["flow"]`（`_FLOW_FIELD_MAP`，`flow_5d` 恒 []）、market_snapshot `raw["a_share_card"]`（`_build_a_share_card`，仅 scope 含 a_share 才写入）、compare_stocks `raw["parsed"]`（逐标的 `available` True/False 条目）；**get_quote/get_capital_flow 工具 TEXT 输出冻结不变**，结构化数据只在 raw（额外一次 /internal/quote、/internal/flow 取 dict）
+- **synth_answer cards 汇总**：`_synth_answer_node_core` 每个 return 都带 `cards`——no_goal/澄清/闸门短路/异常 → None；deep 分支 → `_build_deep_card(last_deep_report)`；LLM 成功与 `_synth_multi_goal` → `_build_cards(evidences)`（按 skill_name 经 `_CARD_HANDLERS` 分派 market_snapshot/stock_snapshot/capital_flow/compare_stocks，逐卡片 try-except 失败跳过该卡片，全部失败/无卡片化证据 → None 不破坏对话）；P10 包装 `synth_answer_node` 不动
+- **契约**：`schemas/chat_contract.py` `ChatCard`（card_type Literal[market_snapshot/stock_snapshot/capital_flow/deep/comparison] + title + data，extra="forbid"）；`QuestionState.cards`/`token_usage` 字段由 B-T1 定义（P11/P10 共享）
+
+### CHAT QA douyin_video（2026-08-08）：抖音视频读取 skill
+
+- **能力**：分享链接 → 解析无水印地址（`window._ROUTER_DATA`）→ 下载 mp4 → FFmpeg 抽音频（libmp3lame）→ 硅基流动 SenseVoice 转写 → Evidence（facts 含转写全文）+ 落盘 `data/douyin_transcripts/{video_id}/transcript.md`；skill 只做"视频 → 文本"，**不含分析**
+- **集成点**：`skills/registry.py` 注册（prompt_exposed 描述自动进 qa_router LLM 清单）+ `KEYWORD_FALLBACK` 词条 `["抖音", "douyin", "博主视频", "视频里的"]` + `chat_contract.py` 三处 Literal（InsightGoal/SubGoal/SkillCall）+ `_build_default_skill_call` douyin_video 分支（**返回空 args，防误传消息全文当 link**）+ `intent_map` 键
+- **工程要点**：① 阻塞 IO（下载/ffmpeg/转写）必须 `asyncio.to_thread` 包装防阻塞事件循环；② `requests` 必须显式 timeout（解析 30s/下载 120s/转写 300s），否则链接不可达时线程长期挂起耗尽线程池；③ FFmpeg/FFprobe 是**宿主二进制依赖**（ffmpeg-python 仅封装，底层仍走 cmd），生产需系统安装，WinError 5 权限隔离时提示路径配置；④ 依赖钉版 `requests==2.32.3` + `ffmpeg-python==0.2.0`；config 新增 `douyin_api_key`/`ffmpeg_binary`/`ffprobe_binary`
+- **数据源边界**：抖音/硅基流动属外部第三方内容服务，Python 直连**不违反**"禁止 Python 重复实现 A 股数据获取逻辑"硬约束（类比 yfinance/Tavily 直连先例）；A 股数据仍一律走 Node `/internal/*`
+
+### CHAT QA 断点续传（问题 15，2026-08-11）：生成任务与 WS 连接解耦
+
+- **根因**：ws.py 在 handler 内直接 `graph.astream_events`，连接断开即取消生成；light 结论仅 DONE 一次性下发，断连即丢。
+- **方案 B**：`services/chat_task_manager.py`（ChatTaskManager 单例）按 session 管理后台任务——`start(session_id, run_id, producer)`（同 session 活跃任务拒绝）、事件 append 进 `state.events` + `notify()`、终态 result 缓存 TTL 10 分钟（`get` 惰性清理）；`_run_chat_graph_to_events` 为生产者（跑图 + 事件 sink 进 events + token 计费收尾）；`_forward(state, send, replay)` 为转发器（断连仅终止转发不取消任务）。
+- **协议**：普通消息新增可选 `run_id`；控制消息 `{type:"resume", session_id}` → `resume_status`（none/running + run_id）/ done 直接补发终态 payload。`stream_reasoning` 签名改为 `(sink, node, message)`（sink 化解耦连接）。
+- **前端**：socket 模块级单例（页面生命周期不销毁连接）；`hasPendingRun()`（最后一条是 user）→ `onShow` 且断开时 `resume()`；`resume_status none` 自动重发最后一条 user 消息兜底。
+
+### CHAT QA 打断/停止/重试（Phase 2 Part 2，2026-08-11）：与 resume 共享 ChatTaskManager
+
+- **cancelled 终态**：`ChatRunState.cancelled`（done 后 True 表示被停止）+ `user_id` 归属字段；`_runner` 显式 `except asyncio.CancelledError` 置 `result={"type":"cancelled","content":"已停止生成"}`（CancelledError 继承 BaseException，默认不被 except Exception 捕获）。
+- **stop 协议**：请求 `{type:"stop", session_id}` → 响应 `stop_status`（cancelled / not_found）；cancelled 终态经 `_forward` 既有终态路径下发（DONE/ERROR/cancelled 三态统一）。
+- **转发/接收并行**：`_forward_until_done_or_cmd` 用 `asyncio.wait(FIRST_COMPLETED)` 竞速转发协程与接收协程——生成中收到 stop 即时 cancel（Task 3 的阻塞 `await _forward` 期间收不到控制消息，stop 必须依赖此结构）；live 转发传 `replay=True`（plan Task 9 文本一处 replay=False 以此修正为准——新轮起点 events 为空，回放语义与 live 无差异）。
+- **归属校验**：`_owns_run(state, data_user_id)`（resume/stop 共用）——双方 user_id 非空必须相等，任一 None 放行，None state 放行走 none/not_found；越权 → error "无权访问该会话" + WARN（绝不静默）。P0 后 `data.user_id` 为服务端注入可信值。
+
+### CHAT QA Phase 3 快赢补丁（2026-08-12）：用例 7 停用词 + 问题 17 reasoning 不计费
+
+- **用例 7**：`_STOCK_NAME_STOPWORDS` 补「深度」——「深度分析贵州茅台」→ 候选名"贵州茅台"（此前"深度贵州茅台" resolve 404 误澄清）；T1 859b91c。
+- **问题 17**：`get_quick_think(*, observe: bool = True)`（services/llm.py，observe=False 不挂计费 callbacks）；`graph/nodes/_reasoning.py::stream_reasoning` 改用 `observe=False` → reasoning 旁路 token 不进用户 contextvar 账单；主链路默认 True 零破坏；T2 1d31a47。
+- **验证**：全量 A/B 新增失败清零 + ruff 改动文件 0（2026-08-12，待部署验证，见 changelog）。
+
+### CHAT QA 问题 18 WS recv 竞态修复（2026-08-12）：done 后连接崩溃
+
+- **根因**：`_forward_until_done_or_cmd`（ws.py#L291-292）中 `recv_task.cancel()` 后未 await 收尾即 return，主循环随即 `websocket.receive_json()` → uvicorn `RuntimeError: cannot call recv while another coroutine is already waiting` → 每轮 done 后 WS 连接崩溃（closeCode=1005）；Phase 2（PR #64 断点续传）引入，Phase 3 生产冒烟 9 轮全部实证。
+- **修复**：cancel 后 `await asyncio.gather(recv_task, return_exceptions=True)` 再 return（ws.py#L293-296）；不改 resume/stop/归属校验协议与事件协议，前端零改动。
+- **验证**：test_ws_chat_replacement.py 新增 `_RecvTrackingWebSocket`（模拟 uvicorn 并发 recv 防护）+ `test_forward_until_done_or_cmd_clears_pending_recv_on_done` 回归（断言返回时无挂起 recv、主循环可安全发起下次 receive）。
+- **经验教训**：`task.cancel()` 仅请求取消，不同步 await 收尾则底层 I/O（uvicorn 同连接 recv 并发防护）未释放；凡"取消后立即继续用同一 I/O 对象"必须 `await asyncio.gather(task, return_exceptions=True)`（同条已记 project_memory 45）。
+
+### CHAT QA Phase 4-1 对话内预测打通（2026-08-12）：三段式"影响持续性推演"
+
+- **产品边界（用户拍板 2026-08-11）**：影响持续性推演**非点位预测**；固定免责声明 + 低置信度提示；v1 不落库（对话预测量大标的杂、对照数据源仅指数可用，落库 ROI 低；`prediction_records` 表语义绑定溯源报告 source_type/source_id 不污染）
+- **无溯源入口**：`prediction_service.run_chat_prediction(snapshot, news, context) -> PredictionResult | None`——门禁 quote 必填非空 dict + trade_date 可解析，**flow 可选**（指数无个股资金流属"不适用"非"缺失"）；后处理强制 `prediction_status="hypothesis"`（无溯源链不得 confirmed）+ `evidence_ids` 只保留输入快照/新闻存在项（过滤而非 raise，区别于 run_predict）；**到期日 best-effort**（`add_trading_days` 日历仅覆盖至当前年份，2027+ long 档超范围时仅 warning 跳过不阻断——v1 不落库、返回值无消费方）；**LLM = `get_quick_think()` + `with_chat_structured_output(PredictionResult)`（json_mode）**——spec §3.4 P10 计费口径对齐 skill_executor 其它 skill（deep_think 26-47s/次 UX 不可接受）；prompt 必含 `schema_version:"1.0"` 指令（冒烟实测缺该字段恒降级）
+- **prediction skill**：并发 `get_quote`/`get_capital_flow` 组快照；**指数路径仅由显式 `index_name` 触发**（走 `/internal/index/quotes`，禁靠代码判定——000001 同时是上证指数与平安银行）；三段式 facts（现状 + 影响持续性推演[假设推演标注/三档/置信/风险/演化] + `DISCLAIMER="以上为模型推演，仅供参考，不构成投资建议。"`，low 置信追加"市场变化快，该判断不确定性较高。"）；降级复用 `PREDICT_DEGRADED_HINT`
+- **qa_router 路由（C2/E1 裁决回写）**：`intent_map` 加 prediction 键；`_build_default_skill_call` prediction 分支（`_extract_stock_symbol` 无标的不硬塞返回 None）；**闸门 1/2 短路主入口（"茅台会涨吗"/"上证后市如何"）追加 prediction SkillCall（goal_id="g2"，validate call 保持 g1）**——三段式可达的关键；`_build_gate4_context` predict 分支去掉"不指定预测 skill"压制文案（E1）；非快照指数（恒指等无 index_code）不塞 prediction 维持 D35
+- **synth_answer 渲染**：`_build_predict_section` 重写——prediction Evidence 定位（primary `skill_name=="prediction"`，fallback `goal_id=="g2"`，**不按 sg.id**：predict 子目标 id="g1"、prediction Evidence goal_id="g2"）；非 degraded → 三段式（现状趋势[validate g1 facts] + 影响持续性[跳过 facts 首行"【…现状】"防重复] + 免责声明恰好一次[skill facts 已含，过滤去重]）；degraded/缺失 → D35 降级字节不变；多 predict 子目标 hint 只输出一次
+- **验证**：全量 A/B HEAD 28 failed ⊆ BASE 28 failed（新增清零）；ruff 改动文件 0 新增；**WS 冒烟 4/4**——"茅台会涨吗"（gate2）/ "上证后市如何"（gate1，C2 验证点）三段式 + 免责声明 + 假设推演标注 / "市盈率是什么"科普防误伤 / "今日大盘怎么样"非预测不变；spec 验收 1-5 全满足
+- **教训（新增）**：① json_mode 结构化输出缺 required 字段时 pydantic 校验失败 → 降级——prompt required 字段清单必须与 Pydantic 契约逐字对齐（schema_version 案例）；② 无消费方的"校验副作用"（到期日）不应因超日历范围阻断主结果——best-effort + warning；③ 指数语义防误判只能靠显式上下文（index_name）不能靠代码集合（000001 双义）；④ WS 冒烟是唯一能发现"LLM 输出缺字段恒降级"与"到期日跨年崩溃"的验证手段——单测只锁语义不锁真实 LLM 输出
+- 提交：c4b1030..d29597d（8 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-2 交互式确认（2026-08-12）：两阶段运行（改进 13）
+
+- **产品/协议（spec §4.2 按 Phase 2 实际协议修订）**：resolve-miss + 多候选（≥2 可 resolve 名称）时不再直接澄清——阶段 1 图终态负载 `confirm_request`（`{"confirm_request": {"request_id", "question", "options"}}` 替代 DONE，跳过落库）→ ws.py 等用户选择（60s 单调时钟 deadline）→ 阶段 2 携带 `confirm_choice` 重跑同 session → DONE；**超时 / 「都不是」→ `confirm_timeout` 重跑 → `_resolve_miss_clarification` 无条件回退既有澄清（不依赖 `len(messages)<=1` 守卫，该守卫是 D36 多轮设计约束）**；<2 候选维持澄清不弹窗
+- **ws.py 阶段 2 重跑**：`_run_chat_graph_to_events` 加 run_id 参数（阶段 2 新 run_id 后缀 `_confirm`）；`initial_state2["messages"] = []`（**空列表对 add_messages reducer 是 no-op**，防阶段 2 同 thread 重跑时无 id HumanMessage 追加进 checkpoint 历史造成消息重复污染）+ `reset_transient_state()` + `reset_token_usage()`；`_wait_confirm_response` 用 `asyncio.FIRST_COMPLETED` + 单调时钟（不用 `asyncio.wait_for` 防止 cancel 吞并响应竞态）+ `_owns_run` 归属校验 + recv 收尾 `await asyncio.gather(task, return_exceptions=True)`（问题 18 先例）
+- **qa_router**：confirm 触发（闸门 2 resolve-miss 分支）+ 消费（confirm_choice 直接构造 SkillCall 续跑；confirm_timeout 回退澄清）+ transient 三字段归零；**synth_answer confirm 短路在 goal is None 检查之前**（confirm 终态不渲染回答）
+- **前端（app-frontend）**：`useChatStream.ts` `case 'confirm_request'` 终态处理（doneReceived 置位 + pendingConfirm ref + 结算 send promise + 不 appendMessage）+ `sendConfirmResponse(request_id, choice)` **发送成功后 re-arm**（doneReceived=false/streaming=true/清 progressSteps/streamingText/currentRunReasoning/currentRunEvents——不复位则阶段 2 事件流被 doneReceived 丢弃，回答永不出现，review Critical 修复）；ConfirmSheet 弹框 submitted 防连点
+- **验证**：定向 4 新测试文件全绿；全量 A/B HEAD 失败集 = BASE（30=30）新增清零（1808→1829 passed）；ruff 改动文件 0 新增；**WS confirm 冒烟 5/5**（case1 点选续跑真实行情 / case2「都不是」澄清回退 / case3 非触发回归，每用例独立 session——同会话第 2 条消息不触发确认是 D36 设计守卫非缺陷）
+- **教训（新增）**：① 阶段 2 重跑复用同 thread checkpoint 必须清 messages（add_messages 对无 id 消息是追加）；② 两阶段交互的任何一阶段状态（doneReceived）不复位 = 后续事件全丢，re-arm 是发送成功的原子动作；③ 前端点选后的续跑是"新一次运行"，run_id 需区分以正确归属 token/事件
+- 提交：c742a93..232e361（3 commits，changer 未 push）；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 4-3 全局用户记忆（2026-08-12）：user_profile 注入 + 个性化消费（改进 15）
+
+- **存储/API（app-api）**：`user_profiles` 表 + `GET/PUT /api/user/profile`（JWT，部分更新）+ `GET /internal/user-profile/:user_id`（内部访问令牌，agent-py 检索用；无记录 200 + 空对象）
+- **拉取（`services/data_client.py`）**：`get_user_profile(user_id)`——Redis 缓存 `user_profile:{user_id}` TTL 300s（失败/空画像同样缓存防每轮重复拉取）→ `GET /internal/user-profile/{user_id}`；非 dict → None（失败降级，warning 不阻断，"永不 500"）；空画像 `{}` 与失败 `None` 语义分离
+- **注入（`QuestionState.user_profile` 可选字段）**：ws.py 阶段 1/2 + routes.py（/chat/message、/chat/stream/messages）**无条件显式赋值**——`user_id` 非空拉取注入，匿名写 `None` 覆盖 checkpointer 旧值（**条件注入会跨轮污染画像：上一轮登录态画像残留到匿名轮，集成冒烟实证**；对齐 T6/messages 置空先例）
+- **消费**：qa_router `_build_user_profile_context(profile)` 在 LLM prompt 追加"称呼/投资偏好/风险偏好"参考段（profile 为 None 返回 ""，SYSTEM_PROMPT 常量字节不变，不改技能/闸门规则）；synth_answer 风险段三档——`RISK_DISCLAIMER_CONSERVATIVE`（conservative 强化"风险较高，谨慎对待"，优先级高于动作词 strong 档，三档互斥去重）+ `_sort_goals_by_preferences` 多子目标按偏好重排（stable，不改 evidence 的 goal_id 关联）
+- **验证**：全量 A/B HEAD 失败集 ⊆ BASE（归一化后新增 0）；ruff 改动文件 0 新增；tsc 0；profile 定向 15/15；**集成冒烟全绿**——登录态 PUT→GET→internal 链路 + 对话 conservative 风险段生效 + 匿名常规档零行为变化
+- **教训（新增）**：① node-postgres 对 JSONB 参数必须传 JSON 字符串（JS 数组直传 500 "类型json的输入语法无效"）——app-api PUT profile 集成冒烟实证；② LangGraph checkpointer 跨轮状态：入口构造 state 时**未提供的键沿用上一轮 checkpoint 值**——注入类字段必须无条件赋值（匿名显式 None），不能条件设置
+- 提交：app-api a709928+159edb9；agent-py 2445417（注入）+ d9be256（消费）+ 4393ad9（防污染 fix），changer 未 push；详细记录 roadmap §2 Phase 4 行 + changelog-pending
+
+### CHAT QA Phase 5（2026-08-12）：长会话上下文管理（窗口 + 零 LLM 摘要 + 删会话联动 + busy_timeout）
+
+- **窗口语义（G6，spec §2.3/§4）**：`trim_messages` 纯函数（`utils/context_window.py`，DEFAULT_MAX_TURNS=6 → 窗口 12 条，DEFAULT_SUMMARY_CHARS=200）——**≤12 条消息原样透出（summary=None，短会话 prompt 字节不变硬约束）**；超窗 → LLM prompt 只喂最近 12 条（window），超窗部分收敛为**零 LLM 确定性摘要**（逐轮"用户：问句｜AI：回复片段"，AI 片段 ≤60 字，整体按 200 字截断，幂等无累积）；**state.messages 保持全量**（checkpointer 按 P2 语义全量持久化不裁剪），`messages_summary` 每轮由超窗部分确定性重算（不读上一轮值，防跨轮残留）
+- **注入点（D14 对齐）**：qa_router LLM prompt 与 synth_answer 各节 prompt 均在节点内拼接 `summary_context`（`build_summary_context`，None/空 → 空串），SYSTEM_PROMPT 常量字节不变；短会话 prompt 与 Phase 4 前逐字节一致
+- **删会话联动（Task 2）**：`DELETE /api/agent/internal/chat/threads/:session_id`（app-api 转发）→ `checkpointer.delete_thread()`（sqlite/memory 幂等，redis best-effort 吞异常）→ 该 thread 的 checkpoints/writes 全删；"永不 500"由调用侧保证
+- **busy_timeout（Task 3）**：`config.sqlite_busy_timeout`（默认 30s，sqlite3 默认 5.0）→ `_build_async_sqlite_saver` 的 `aiosqlite.connect(timeout=...)`，缓解多 worker 并发写 "database is locked"（低成本先行项；单实例默认仍不生效）
+- **验证**：TDD（busy_timeout 参数断言 RED→GREEN）；全量 A/B HEAD 失败集 ⊆ BASE（逐项一致，新增清零）；ruff 改动文件 0 新增；app-api tsc 0 + chat 定向 18/18；**集成冒烟 2/2**（`tests/integration/test_phase5_long_session_smoke.py`：7 轮 13 条 → 12 条窗口 + "此前对话摘要"注入 + messages_summary 持久化 + 删会话 thread 消失；1 轮短会话 prompt 无摘要、messages_summary 不持久化）
+- 提交：686e7df（窗口+摘要）+ d11cdc6（synth_answer 多子目标路径注入修复）+ 34ec113（删会话联动）+ 5699737（busy_timeout + 集成冒烟），changer 未 push；详细记录 roadmap §2 Phase 5 行 + changelog-pending
+
+### CHAT QA 批次 1 force_deep 边界修复（2026-08-13）：闸门 2 放行
+
+- **问题**：中文名问句 resolve 命中被闸门 2 短路固定 `light`（`qa_router.py`），「深度分析」按钮（force_deep 重发中文名问句）与"深度分析贵州茅台"（用例 7 交互）的深度意图均不满足
+- **修复**：闸门 2 resolve 成功分支 `if not (force_deep or _match_keywords(message, _DEEP_INTENT_KEYWORDS)):` 才短路——命中放行（`logger.info("qa_router.gate.stock_resolve_bypass_short_circuit")` 不 return）继续走后续闸门/LLM 路径；force_deep 由 LLM 成功路径 `complexity = "deep" if force_deep else ...` 强制 deep，深度意图词仅放行、复杂度由 LLM 判定
+- **`_DEEP_INTENT_KEYWORDS`**：`("深度分析","深入分析","详细分析","深度","深入","详析")`——刻意排除"分析/分析一下"（既有测试锁定闸门 2 light 快答）、"对比"（闸门 2.5 已独立处理）、"为什么/原因"（溯源语义）
+- **红线不变**：闸门 0（合规）/0.5（寒暄/科普）/1（指数）短路永远优先于 force_deep（放行点位于闸门 2 内，前序闸门仍先拦截）
+- **实现注意**：不能给 `if resolved is not None:` 直接加 `and not (...)`（放行时会误落入 `elif not _has_non_stock_intent` 澄清分支），必须显式短路块 + 放行分支不 return
+- **验证**：TDD 3 新单测（force_deep 放行 / 深度意图词放行 / 无深度信号仍短路回归）+ qa_router 相关 8 文件 183 passed + ruff 0 + 全量 A/B（BASE 6ac6b76）HEAD 20 ⊆ BASE 20 新增清零；commit 13a410c
+
+### CHAT QA 批次 2（2026-08-13）：回答内容流式（D9 节级伪流式）+ 事件通道
+
+- **立项门禁结论**：Task 0 spike（tests/unit/test_stream_spike.py，STREAM_SPIKE_RUN=1 显式触发）5 断言 3 失败——`with_chat_structured_output(json_mode)` 对 Pydantic schema 实际走 PydanticOutputParser，整段 JSON 完整才产出唯一实例（partials=1），**无逐字增量可 diff**；自定义事件传播机制单独验证通过（`adispatch_custom_event` 从节点内嵌套 LLM run 传播到顶层 `astream_events(version="v2")` on_custom_event 正常，langchain-core 0.3.58 的 adispatch_custom_event 不接受 version kwarg）。**用户裁决 D9 节级伪流式**。
+- **事件通道（Task 1）**：`WSEventType.CONTENT_DELTA="content_delta"` / `CONTENT_RESET="content_reset"`（constants.py）；ws.py `_run_chat_graph_to_events` 新增 `on_custom_event` 分支捕获 `chat_content_delta`/`chat_content_reset` → 统一 sink 入 state.events（resume 回放兼容）；**红线不动**：L156-158 `ON_CHAT_MODEL_STREAM` 过滤分支逐字节未改，新增事件只走显式事件名通道。
+- **节级伪流式（Task 2，synth_answer.py）**：维持 `ainvoke` 生产链（计费口径零变化，无新增 LLM 调用）；回答最终文本按 markdown 分节经 `adispatch_custom_event("chat_content_delta", {"content": 节文本})` 渐进下发（多子目标节标题先发、正文后发，DISCLAIMER/风险段最后统一补发）；**字节前缀契约**：dispatch 序列拼接 == final_response 逐字全等、任意累积为字节前缀（前端 done 前缀补尾）；**content_reset 统一语义**：凡流式已开始且终态文本非已流式内容前缀（结构化校验失败降级 / 节降级 / 流式中途异常降级全文）→ `adispatch_custom_event("chat_content_reset", {"content": 终态文本})` 整段替换；hint 单次取值（`trading_session_status` 只取一次），payload 恒 `{"content": str}`、空串/None 不分发。
+- **验证**：全量 A/B HEAD 失败集 = BASE（22=22，唯一差异 test_full_flow_stock 经 5 项证据判定为本地 sqlite checkpointer 跨次运行状态残留的环境卫生问题，全新 db 复测通过）+ ruff 改动文件 0 + 跨仓契约（事件名 ↔ ws.py ↔ 前端 case 标签）字段级一致。
+
+### CHAT QA 问题 20 对话卡死恢复止血（2026-08-15）：发消息没反应/一直转圈
+
+- **R2（次生缺陷）**：ws.py 主循环 `except WebSocketDisconnect` 不捕获 `RuntimeError`（ws.py#L826）——disconnect 被 `_forward_until_done_or_cmd` 的 recv_task 消费后主循环再 `receive_json()` 抛 starlette `RuntimeError("Cannot call "receive"...")` → handler 崩溃刷 error log。修复：`except (WebSocketDisconnect, RuntimeError) as exc`，**非 "receive" 的 RuntimeError 打 `chat.ws_main_loop_runtime_error` warning 保留可观测性**（不静默吞真实 bug，对齐经验 45/54 recv 异常双形态）。
+- **ChatTaskManager finalizing 护栏**：`ChatRunState.finalizing: bool`（producer 已产出终态 result 后 `_runner` 置位）→ `cancel()` 检查 `if s is None or s.done or s.finalizing: return False`——前端 idle 超时联动 stop 不误杀将成之轮（stop_status 落 not_found，前端已本地复位可重试）。
+- **总时长兜底（T2）**：`_RUN_TOTAL_TIMEOUT_SEC = 660`（LLM 单次 600s + 60s 余量，对齐 llm.py `_LLM_REQUEST_TIMEOUT_SECONDS`）；`_runner` 用 **`asyncio.timeout`**（内联执行 producer，无 wait_for 的独立内层 task 调度副作用）包裹 → 超时置 ERROR 终态「生成超时，请稍后重试」→ done → session 释放可重试；**必须显式 `except TimeoutError`**（继承 Exception，否则落 producer_failed 死区）；`chat.run_timeout` / `chat.run_finished`（elapsed_ms + done）观测日志。
+- **LLM 连接池复用 + WS 静默段看门狗（2026-08-17，问题 20 延续）**：线上偶发转圈追根为 **ChatOpenAI 底层 httpx 连接池泄漏**——现场 `ss` 观测 agent → DeepSeek(43.242.198.77:443) 累积 50+ CLOSE-WAIT，fd 增到 85。修复：
+  - `services/http_client.py` 新增 **`LlmHttpClient`**（LLM 专用 AsyncClient 单例，`httpx.Limits(max_connections=20, max_keepalive_connections=10)`）；`services/llm.py` 的 `get_quick_think/deep_think` 注入 `http_async_client=LlmHttpClient.client()`（**每实例新建 httpx client 是泄漏根因，必须复用共享池**）；`main.py` lifespan init/close；**`LlmHttpClient.close()` 跨 event loop 关闭防御（2026-08-30）**：close 必须在创建该 client 的 event loop 内调用，跨 loop 关闭（如 scheduler/线程池路径触发）需捕获 `RuntimeError` 兜底，避免关闭时抛异常打断 lifespan 收尾。
+  - `api/ws.py` `_forward_until_done_or_cmd` 加 **静默段看门狗**（`_FORWARD_STALL_TIMEOUT_SEC=240`）：events 长度无新增且 recv 无新消息超阈值 → `chat_task_manager.cancel(session_id)` + 补发 error「生成超时，请重试」。**只依赖 660s 总超时不够**（<660s 悬挂 + timeout 可能被吞），看门狗保证前端绝不无限转圈。finally 补 `await gather` 收尾。
+  - **经验**：`asyncio.timeout(660)` 对 <660s 悬挂是 no-op；查连接类问题优先 `ss -tnp | grep pid` 看 CLOSE-WAIT 堆积（比 attach py-spy 更易得，perf_event_paranoid/无 sudo 时唯一手段）。
+
+### 2026-09-30 更新：AI 异动解读——思考过程流式 + 速览/详情并行
+
+设计文档：`docs/superpowers/specs/2026-09-30-alert-ai-analysis-thinking-stream-design.md`；实施计划：`docs/superpowers/plans/2026-09-30-alert-ai-analysis-thinking-stream.md`。
+
+针对「个股情报 → AI 解读」页长等待期无反馈、首屏慢两个痛点：等待期可见"AI 在做什么"，并让一句话速览真实提前。
+
+- **帧协议（纯加性，语义只增不改）**：SSE 新增 `reasoning` 与 `preview` 两帧（`SSEEventType.REASONING` / `SSEEventType.PREVIEW`）。
+  - `reasoning`：`{"type":"reasoning","node":"alert_scan|alert_master","chunk":"..."}`。**`node` 恒为阶段名**（`alert_scan` / `alert_master`），前端据此把该阶段的**启动解说与后续心跳聚合为同一个步骤**（文本持续增长）。旁路解说由独立 quick LLM（`get_quick_think(observe=False)`）生成，逐 chunk 流式，**不计用户账单**。
+  - `preview`：`{"type":"preview","display_report":{"summary","impact","keywords"}}`，速览三件套里 quick 先到先渲染（字段可缺省）。
+  - 既有 `tool_start/tool_end/llm_start/result/done/error` 全部保留、语义不变。
+- **prompt 场景 key 与节点 node 是两回事**：`prompts/workers/alert_reasoning.py` 的 `render_alert_reasoning_prompt(scene=...)` 场景 key 有 `alert_scan` / `alert_master` / `alert_heartbeat` 三个（心跳场景 key 只用于渲染、没有独立 node）；而帧里的 `node` 只有前两者。心跳复用所在阶段的 node，以聚合成同一个步骤。`ALERT_REASONING_FALLBACKS` 仅覆盖两个 node；心跳兜底走独立的 `heartbeat_fallback()`。
+- **通用解说流抽取**：新增 `services/reasoning_stream.py::stream_reasoning_text(sink, *, prompt, node, fallback_label, event_type="reasoning", timeout_sec=None)`——LLM 流式 + 首块超时（`REASONING_TIMEOUT_SEC=2.0`，`timeout_sec=None` 时**在调用时**读取常量便于测试 patch）+ 失败/超时发静态兜底、任何异常不向上抛、`observe=False` 不计费。`graph/nodes/_reasoning.py::stream_reasoning` 迁移为内部调用该通用函数，**对外签名与行为不变**，chat 侧零改动；既有单测 `test_reasoning_streamer.py` 的 patch 目标 `graph.nodes._reasoning.get_quick_think` / `_REASONING_TIMEOUT_SEC` 随迁移改指 `services.reasoning_stream.*`，断言未动。
+- **Master 拆为并发双调用（职责不重叠，总耗时≈不变、首屏提前）**：`agents/workers/alert.py` 新增 `_run_master_preview`（quick 模型，只出 `summary/impact/keywords` 速览三件套）与 `_run_master_detail`（deep 模型，只出 `details/stocks/risks` + `podcast_brief` 详情四件套 + 播报稿），共用同一份子报告输入 `_build_master_input`，`_merge_report` 合并后 `display_report` 仍是既有 **6 字段**（summary/impact/keywords/details/stocks/risks）。prompt 拆分见 `prompts/workers/alert.py` 的 `MASTER_PREVIEW_PROMPT` / `MASTER_DETAIL_PROMPT`（删除了旧 `MASTER_PROMPT`）。
+- **心跳参数**：`ALERT_REASONING_HEARTBEAT_SEC=8.0`（阶段进行中每 8s 一条解说）、`ALERT_REASONING_MAX_HEARTBEATS=8`（每阶段上限，防超长请求无上限调用）；阶段结束 `stop_event.set()` 立即停心跳。心跳输入为**轻上下文**（不带 3 份子报告全文，只传阶段名/已用秒数/已完成步骤），保证快且便宜。
+- **`stream()` 改为 asyncio.Queue + sink**：由"直接 yield"改 `queue` + `_sink`，使等待期能并发推送 reasoning/心跳与 preview 帧；`_drain_until_done` / `_drain_queue` / `_flush` 负责吞吐与收尾。**`try/finally` 无条件回收**：`_finalize()` 统一置位所有 `*_stop`、cancel 未完成并发对象并 gather 吞掉结果（`GeneratorExit` 是 `BaseException`，`except Exception` 捕获不到，必须在 `finally` 回收，杜绝孤儿任务）。
+- **持久化与口径一致**：流式 `stream()`、非流式 `run()`（scheduler/stock_trace）、`_cache_alert_result` / `save_analysis_report` 均走同一组 helper 合并后落库（`display_report` 仍是完整 6 字段双层结构），缓存契约不变。
+- **发布顺序不敏感**：新帧是纯加性，老前端遇到未知 `type` 走 switch default 无副作用；先发后端数据已下发但前端不渲染，先发前端则 reasoning/preview 永不出现，页面退回现状。前端 side 配套见 `src/modules/market/AGENTS.md`。
 
 ## 目录结构
 
@@ -154,6 +408,8 @@ src/aistock_agent/
 │   ├── chat.py          # ChatRequest / ChatResponse
 │   ├── sse.py           # SSEEvent
 │   └── agents.py        # 各 Agent 输入/输出 schema
+├── trace/               # 溯源共享推理核心（B1a）：6 阶段链枚举/节点schema/按序校验
+│   └── chain.py         # ChainStage / TRACE_CHAIN_STAGES / CausalNode / CausalChain / validate_chain_stages
 ├── memory/              # 持久化记忆模块
 │   ├── checkpointer.py  # LangGraph checkpointer 工厂（MemorySaver 默认）
 │   ├── session_store.py # 会话历史读写
@@ -163,7 +419,7 @@ src/aistock_agent/
 │   ├── parser.py        # LLM 输出解析（parse_intent）
 │   ├── message.py       # 消息提取（extract_last_human_message / extract_final_ai_response）
 │   ├── output_parser.py # Event Agent 双层输出解析（display_report + podcast_brief）
-│   └── date.py          # 日期/交易日工具
+│   └── date.py          # 日期/交易日工具 + 交易时段判断（is_trading_time / trading_session_status 5 状态）
 ├── errors/              # 异常体系
 │   └── exceptions.py    # AgentError / DataUnavailableError / LLMTimeoutError / ToolExecutionError / RouteError
 ├── graph/
@@ -179,13 +435,15 @@ src/aistock_agent/
 │       ├── morning.py   # 晨报（ReAct + Redis 缓存）
 │       ├── stock.py     # 个股分析
 │       ├── sector.py    # 板块分析
+│       ├── rhythm_master.py # 节奏大师（三时点事件驱动，节奏状态报告，scheduler 触发）
 │       └── event.py     # 事件传导链（v2：Redis 缓存 + 双层输出解析 + 持久化）
 ├── tools/
 │   ├── base.py          # safe_tool_call 装饰器 + BaseToolMixin + DEGRADED_MESSAGE
 │   ├── stock_tools.py   # get_quote, get_capital_flow, get_profit_forecast
 │   ├── sector_tools.py  # get_leader_stocks, get_wind_leaders
 │   ├── news_tools.py    # search_cls_news, get_news_fulltext, get_cls_news
-│   ├── market_tools.py  # get_global_markets, tavily_finance_search
+│   ├── market_tools.py  # get_global_markets（纯 yfinance 行情）
+│   ├── search_tools.py  # tavily_finance_search（全网搜索，从 market_tools 拆出）
 │   ├── monitor_tools.py # get_stock_monitor, get_alert_history（Phase 5）
 │   ├── tenx_tools.py    # get_tenx_score, get_tenx_top_stocks（Phase 5）
 │   ├── trend_tools.py   # get_trend_score, get_trend_score_detail, get_trend_top_stocks
@@ -194,22 +452,35 @@ src/aistock_agent/
 ├── prompts/             # 分层对应 agents 目录
 │   ├── supervisor/routing.py
 │   ├── general/system.py
-│   └── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate}.py
+│   ├── workers/{morning,stock,sector,event,wind_leader,hot_burst,broadcast,ai_advisor,trend_score,alert,review,iterate,insight,rhythm_master}.py
+│   └── chat/reasoning.py # 节点推理提示词模板（qa_router/skill_executor/synth_answer/escalate，P3-fix）
 ├── services/
 │   ├── llm.py           # 双模型工厂（从 agents/base.py 迁移）
 │   ├── data_client.py   # httpx → Node.js /internal/* API（get / get_list）
+│   ├── rhythm_engine.py # 节奏大师引擎（三时点节奏生成：morning/midday/after_close；2026-09-03 分支新增 position_action/anchor/touch_strength；2026-09-04 build_event_branch 三情景展开，结论 range 降级为辅助；2026-09-18 移除未接线的 met 中间状态键）
+│   ├── rhythm_dense_band.py # 历史密集触碰带（2026-09-03 design-debate A1 裁决）：确定性纯函数 dense_band，touch_gap 容差带 + 量能加权选带，替代 max/min(20日极值)×MA20 系数
+│   ├── prediction_invalidation.py # 预测失效"读数触发式"复核触发器（A1，2026-08-31）：update_trigger_state 三态迟滞状态机 + scan_active_pending 早退扫描
+│   ├── event_calendar.py # 事件日历客户端（L1 交割日规则 + 前瞻查询 → /internal/calendar/events；2026-09-22 移除读侧词表升格，`is_high_importance_event` 已删，`MACRO_EVENT_TERMS` 保留）
+│   ├── forward_events.py # 事件前瞻主体化（2026-09-22）：种子导入 `source='L4'`（X5）+ 候选晋升（GET 存在性预检）+ 预期差 `run_expectation_diff`（谓词 [昨日,今日] 已公布 + `result_attempted_at` 日内重试 X2）→ /internal/calendar/events 与 DELETE
+│   ├── forward_event_sources.py # L3 前瞻迁移（query 族 6 条，`L3_QUERY_HARD_LIMIT=6` / `L3_DAILY_SOFT_LIMIT=12`，collect_jiuyan 退化留痕）
+│   ├── forward_event_llm.py # 预期差 LLM 只产 result 事实（不产展望/方向）
+│   ├── impact_sectors_precompute.py # 未来事件影响板块预计算（2026-09-24）：impact_sectors_precompute 独立 cron（07:00），`semantic_match_industries` 匹配 title+summary Top3 写回 /internal/event-entities；幂等守卫=仅处理 calendar+scheduled/upcoming+列值为空，宏观事件无可靠行业保持 []（不 LLM 强猜）
+│   ├── search_cache.py  # 搜索缓存（TTL 削峰，供节奏大师等重复检索复用）
+│   ├── rhythm_verification.py # 节奏验证（回放隔离 + 校验，`RHYTHM_VERIFICATION_ENABLED` 开关）
 │   ├── redis_pool.py    # Redis 连接池单例（lifespan 管理）
 │   ├── http_client.py   # httpx AsyncClient 连接池单例（lifespan 管理）
+│   ├── gi_admittance.py # GI 准入过滤（盘面/异动信号检测 + 外部催化判断，KEEP/DROP 二档，2026-09-02）
+│   ├── stock_info_prediction.py # 个股情报 → PredictionResult 确定性映射 + 入环门槛唯一判定点（meets_entry_threshold，P2；不调 LLM）
 │   └── cache.py         # 晨报缓存服务（基于 RedisPool）
 ├── observability/       # 可观测性包（Phase 5）
 │   ├── logging.py       # structlog JSON 日志配置（setup_logging / get_logger）
 │   ├── metrics.py       # MetricsCollector 线程安全计数器（token/call/error）
-│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace，零侵入业务逻辑）
+│   └── callback.py      # LangChain 回调（TokenUsage / AgentTrace / Latency；2026-08-25 加 LLM 前缀缓存命中观测：归一化 OpenAI cached_tokens / DeepSeek prompt_cache_hit_tokens，按 provider 分桶进 metrics["llm_cache"]，不进计费链，见 docs/2026-08-25-token-cache-observability.md）
 └── api/
-    ├── routes.py        # REST 接口（/chat/message + /chat/stream SSE + /briefing/morning + /skills + /health + /health/ready）
+    ├── routes.py        # REST 接口（/chat/* + /briefing/{morning,event,event-scrape,rhythm-master}/trigger + /skills + /health + /health/ready）
     ├── deps.py          # 依赖注入（verify_internal_token / build_initial_state）
     ├── middleware.py    # HTTP 中间件（request_id 注入、访问日志、CORS）（Phase 5）
-    └── ws.py            # WebSocket 流式接口（astream_events v2，7 种事件类型 + 节点标签映射）
+    └── ws.py            # WebSocket 流式接口（astream_events v2，8 种事件类型含 reasoning + _sanitize_label JSON 标签净化 + 节点标签映射）
 ```
 
 ## 开发规范
@@ -249,7 +520,7 @@ src/aistock_agent/
 
 ## Node.js 侧配合接口
 
-Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`）：
+Python 服务通过以下内部接口获取 A 股数据（需携带内部访问令牌）：
 
 | 接口 | 数据源 | 说明 |
 |------|--------|------|
@@ -261,6 +532,7 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/forecast/:symbol` | 同花顺 | 盈利预测 |
 | `GET /internal/wind-leaders` | 风口算法 | 风口龙头数据 |
 | `GET /internal/monitor/:symbol` | 异动引擎 | 个股异动数据 |
+| `GET /internal/monitor/alerts` | 异动引擎 | 预警历史（支持 `dateFrom=YYYY-MM-DDT00:00:00+08:00`，按 `published_at >= dateFrom` 窗口过滤，`days` 参数已弃用） |
 | `GET /internal/tenx/score/:symbol` | 十倍股评分 | 评分详情 |
 | `GET /internal/tenx/top` | 十倍股评分 | 排行列表 |
 | `GET /internal/trend/score/:symbol` | 趋势股评分 | 评分详情（4维度） |
@@ -270,7 +542,48 @@ Python 服务通过以下接口获取 A 股数据（需携带 `X-Internal-Token`
 | `GET /internal/graph/:concept` | 知识图谱 | 产业链图谱数据 |
 | `GET /internal/institution-research` | 机构调研热门股 | 共振检测结果 |
 | `GET /internal/institution-research/history` | 机构调研热门股 | 历史记录 |
+| `GET /internal/insight/events?openid=&symbol=&limit=` | 洞察模块 | 自选股洞察列表（阶段 2.1 读层：涨停雷达/价格异动归因结果，仅登录用户自选股命中事件；openid 必填、symbol 可选、limit 默认 50 上限 100） |
+| `GET /internal/insight/events/:eventId?openid=` | 洞察模块 | 自选股洞察详情（阶段 2.1 读层：事件 + 归因结果 + 最新证据包；openid 归属校验，无归属 404） |
+| `GET /internal/insight/events/:eventId/context` | 洞察模块 | 归因上下文（事件 + LEFT JOIN 来源 + 最新证据包 evidence_package） |
+| `PATCH /internal/insight/jobs/:jobId` | 洞察模块 | 任务状态回报（insight_consumer 调用，失败时 increment_attempt） |
+| `POST /internal/insight/results/external` | 洞察模块 | 归因结果回写（(event_id, analysis_version) upsert，Node 侧 isSubstantiveChange 决定是否 pushUpdated） |
+| `GET /internal/stock-trace/events?openid=&symbol=&limit=` | 异动溯源模块 | 个股异动溯源列表（阶段 2.2 读层：价格异动/涨停雷达归因结果，复用 `listUserEvents`；openid 必填、symbol 可选——为空返回该用户全部异动溯源、limit 默认 50 上限 100） |
 | `POST /internal/briefing/generate-audio` | 火山引擎/Azure TTS | 根据 broadcast 报告生成音频并写回 audio_path |
+| `POST /internal/midday/generate-audio` | 火山引擎/Azure TTS | 午报音频（方案 A）：根据请求体 `{date, dialogue}` 合成 MP3 并回填同一份 midday 报告 `content.audio_path` |
+| `GET /internal/market/quick-snapshot` | 腾讯+Tushare | 15:30 后简版收盘快照；**非交易日 409** → market_snapshot skill 自动回退 last-close |
+| `GET /internal/market/sectors` | 腾讯 | 盘内板块快照（indexes/breadth/gainers/losers/availability，绕开 15:30 门禁），午间报机会/风险候选源（data_client `get_intraday_sectors`；2026-09-04 解绑 H6） |
+| `GET /internal/market/close-snapshot` | Tushare | 当日完整收盘快照（15:30 门禁 + 交易日/完整性校验） |
+| `GET /internal/market/last-close-snapshot` | Tushare | **严格早于今天的最近交易日**快照（数据缺失则 409） |
+| `POST /internal/predictions` | prediction_records | 预测记录落库（大盘溯源预测；source_type/source_id/schema_version/prediction/due_dates；支持可选 status='pending'\|'skipped' 与 skip_reason——skip_reason 存 prediction 对象内） |
+| `GET /internal/predictions?status=pending` | prediction_records | 读取全部 pending 预测（到期验证扫描）；支持可选 `source_id`（如 `review:2026-08-14`）过滤 |
+| `PUT /internal/predictions/:id/verification` | prediction_records | 回写单档位验证结果（horizon/result/actual/reason → 全档位覆盖自动置 verified） |
+| `POST /internal/predictions/regenerate` | prediction_records | **按需/补偿预测代理**：仅限当日（trade_date===上海今日）+ Redis 限流（每 date 每小时 ≤3）+ 已验证拒覆盖 409 + 90s 超时，转发 Python `POST /api/agent/internal/predictions/from-trace`（body {trade_date, trace_id}） |
+| `POST /api/agent/internal/predictions/from-stock-info` | prediction_records | **agent-py 端点（app-api 转发调用，P2 个股情报入环）**：body `{symbol, stock_name, published_date, ai_impact, ai_horizon, ai_summary, url}`（`extra="forbid"`）→ 确定性映射（不调 LLM；`conditions` 空 / `horizons` 1 档 / `prediction_status=hypothesis`）→ 复用 `_compute_due_dates` 补 `due_dates` → 落 `prediction_records`（`source_type='stock_info'`、`source_id=stock_info:{symbol}:{published_date}`）；响应 `{status, reason_code, reason, record}`（`saved`/`skipped`；`reason_code ∈ {saved, below_threshold, invalid_input, unmapped_value}`，app-api 仅对 `below_threshold` 静默、其余告警）；状态码 403（内部令牌）/422（body 校验）/409（同 source_id 已验证拒覆盖）/502（**落库失败：`save_prediction` 返回 `None`；或按 source_id 查询失败——`list_predictions_strict` fail-closed，不覆盖已 verified 记录**） |
+| `GET /internal/ths/index-map` | Tushare 同花顺 | 板块名→885/886 全表（Node 进程缓存 6h TTL；**M2 板块验证**） |
+| `GET /internal/ths/resolve?name=` | Tushare 同花顺 | 板块名三级匹配（归一化精确 → 双向包含 → `{ts_code,name}` 或 null；**M2 板块验证**） |
+| `GET /internal/ths/:code/daily?start=&end=` | Tushare 同花顺 | 板块区间日 K（rows 升序，键 `trade_date`/`pct_chg`，None 保行为 null；**M2 板块验证**） |
+| `GET /internal/index/:code/kline?days=&start_date=&end_date=` | Tushare | 指数日 K（**M2 起支持可选区间参数**：start_date/end_date 存在时按区间过滤，days 忽略；缺省时 days 语义不变——H9 向后兼容；**2026-09-05 起返回行加性含 `vol`（手）/`amount`（千元）**，rhythm_master 消费时按 1e-5 折算亿元） |
+| `GET /internal/stocks/basic` | stocks 表 | 全量 A 股基础信息（symbol/name/industry），内存 6h 缓存；供 stock_basic_index 构建股票名称索引（最长匹配优先），支持 company_event_rule 实体匹配；接口失败降级空索引 |
+| `GET /internal/calendar/events` | market_calendar_events | 事件日历查询（L1 交割日规则 + 前瞻，rhythm_master 用；data_client `get_calendar_events`） |
+| `POST /internal/calendar/events` | market_calendar_events | 事件日历写入（幂等 upsert；data_client `post_calendar_event`） |
+| `GET /internal/calendar/earnings-density` | market_calendar_events | 业绩披露密度（rhythm_master 择时用） |
+| `GET /internal/fear-greed` | 聚合指标 | 恐惧贪婪指数（rhythm_master 情绪维度；data_client `get_fear_greed`） |
+| `GET /internal/analysis-reports/:type/:date/:slot` | agent_analysis_reports | 节奏大师报告读取（`rhythm_master` 按 target_date + refresh_slot 三元组；data_client `get_rhythm_report`） |
+| `POST /api/internal/attribution-feedback` | attribution_feedback_signals | **溯源弱反馈审计上报**（Task 7.1，2026-09-17；路径带 `/api` 前缀，同 attribution-chain）：body `{date, unit_key, mode, sample_size, hit_count, miss_count, hit_rate, suggestion, detail}`，`(date, unit_key)` upsert 幂等；失败只 warning 不抛（app-api 未部署 → 404/401 不影响其他链路）。**本期只落建议、不应用权重**（观测层，默认 `attribution_feedback_mode=observe`） |
+| `POST /internal/event-entities` | event_entities | Event Entity 物化 upsert（canonical_event_key 幂等；响应含权威 `event_id`/`event_status`；data_client `post_event_entity`；信封恒 code:200——禁止 code:0，记忆 #59） |
+| `GET /internal/event-entities` | event_entities | Event Entity 列表查询（status/dateFrom/dateTo AND 组合；status 读时重算；data_client `get_event_entities`；响应 `data.items`） |
+
+> **B2 预测能力（影响持续性推演，独立模块 2026-08-14）**：`schemas/prediction.py` 定义 `PredictionResult` 契约；`services/prediction_service.py` 执行推演（LLM 不输出日期，`due_dates` 由 `add_trading_days` 确定性计算）。**独立拆分后**：预测从 review 内联拆出，单一入口 `predict_from_trace(trace_id, trade_date)`（缓存直读 → DB `content.market_trace` 重建 → trade_date 校验 → `run_predict` 状态化契约 → 落 `prediction_records`，仅 full review 经 `review_done` 事件触发 + from-trace 端点手动触发两条路径写入）；`run_predict` 返回 `PredictionRunResult(status=ok|gate_skipped|llm_failed|parse_failed, ...)`——gate_skipped 落 skipped（skip_reason 存 prediction 对象内），llm/parse 失败可重试一次；**越年逐档容错（P2 裁决 2026-08-14）：chinese_calendar 覆盖 2004-2026 之外时不再整条 due_dates_failed，改为越年档按「周末+已发布节假日 HOLIDAYS_EXTRA」近似计算并显式标记 `due_dates_approximate`（wire 键，Node 合并进 prediction jsonb，`PredictionRunResult.approximate_horizons` 透传）**——理由：验证器对照扫描日单日涨跌幅符号（低信噪比），精确日历无统计增益，显式标注优于预测停产；验证器 reason 加 `(approximate_due_date)` 前缀，Node 统计 `approximateHorizonCount` 分桶（近似档不计入命中率分母）。大盘溯源页预判卡片统一读 `prediction_records`（G14 空态修复，不再读 trace.prediction）。`evolution_steps` 为可选字段，旧记录可能缺失；`evolution_narrative` 保留作展示兜底。
+>
+> **A1/A2/A3 预测增强（2026-08-31，TradingVane 研报借鉴 v2）**：
+> - **A3 确定性置信钳制**：`prediction_stats.clamp_confidence_by_bucket`（纯函数，Wilson 95%CI 上界 < baseline 命中率时钳制到 cap_floor，n<30 返回 None 不动作）；`PredictionHorizon.confidence_source: Literal["llm","deterministic"]|None`；启用规则写死：short 桶恒调用、mid 桶仅 `prediction_conf_cap_mid != "high"`、long 桶不启用（config 新增 `prediction_conf_cap_short/mid`，env `PREDICTION_CONF_CAP_SHORT/MID`，默认 high=不钳制）；run_predict/run_chat_prediction 落库前经 `_load_horizon_stats`（verification 按 horizon 聚合 hit/baseline，只取 result∈{hit,miss}）接线，统计加载失败降级不钳制。
+> - **A1 失效条件复核触发器**：新文件 `services/prediction_invalidation.py`——`update_trigger_state` 三态迟滞状态机（inactive→armed 连续 2 日跌破 → de_escalating → inactive 连续 3 日站回，单日抖动不迁移，计数随状态持久化于 `verification[horizon].early_exit`）；`scan_active_pending` 每日扫 pending 指数目标（MA20 读数触发，行情走 `node_api.get_index_kline`），有信号即写早退标记，inactive→armed 当日返回新触发 id；`PredictionRisk` 新增 6 可选字段（indicator/direction/window/measure/snapshot_value/triggered）；验证器 skip 判定改 `"result" in entry`（early_exit-only entry 不阻塞到期验证）——早退标记与最终 result 分离存储，同一价格信号不双用。
+> - **A2 独立源冲突检测**：`corroborate_evidence`（确定性方向符号 + 新闻多数票，5 类通道 quote/flow/news/calendar/global，claim/LLM 文本不计入，须 ≥2 通道且 ≥1 非价格源）→ `PredictionResult.evidence_corroboration: dict|None`（run_chat_prediction 接线三通道；run_predict 仅 quote 恒 insufficient 不误报）；不覆盖 confidence 字段。
+> **验证口径 3.0（阶段 0，2026-08-27）**：`prediction_validator._METHODOLOGY_VERSION` 升 `"3.0"`，`_judge_window` 主判改**窗口累计**（bullish: sum>0 / bearish: sum<0 / neutral: mean(|p_i|)<thr，v2 的"任一日符号命中"保留给存量回补）；`baseline_neutral` 随版本（v2: any(|p|)<thr / v3: mean(|p_i|)<thr）。**版本分桶隔离（四处同步）**：① `prediction_stats._CURRENT_METHODOLOGY_VERSION`（统计默认过滤，保持 `"2.0"` 防跳变/混桶）② `prediction_validator._METHODOLOGY_VERSION`（`"3.0"`，主链写入）③ `prediction_validator._BACKFILL_METHODOLOGY_VERSION`（`"2.0"`，`backfill_no_data` 只回补 2.0/no_data 存量、用 2.0 口径重验、写 2.0 不混版本）④ Node `publicRouter.CURRENT_METHODOLOGY_VERSION`（`bucketStats`/`computeStats` 命中率按版本过滤、档位进度全量；旧记录无 `methodology_version` 兼容视为 2.0）。3.0 切换为默认过滤版本前，以 2.0/3.0 桶命中率漂移 ≤±1pct 为观测信号（存量重验仅观测不落库）。
+>
+> **验证口径 4.0（现役，2026-10-06）**：`prediction_validator._METHODOLOGY_VERSION` 升 `"4.0"`，`_judge_window` 主判改**单带宽 k · 复利累计**——取 `[due, due+3 交易日]` 窗口日 K 的复利累计涨跌幅 `x = ∏(1+p/100) − 1`，`bullish hit ⟺ x ≥ +k` / `bearish hit ⟺ x ≤ -k` / `neutral hit ⟺ -k < x < +k`；**`|x| < k` 时方向预判记 miss 并计入 `flat_rate`**（带内涨跌与随机噪声不可区分，不构成方向性 claim）。**口径语义 = 「到期后 3 个交易日的方向延续性」，不是「档位声明区间内的方向兑现」**；因窗口恒为 4 日，**k 只按粒度标定、不按档位细分**，**唯一来源** `services/k_band_table.py::k_for(target_type)`（标定脚本 `scripts/calibration/k_band.py`，区间 20230101–20251231）：index `0.9201` / sector `1.2935` / stock `1.2555`。4.0 恒不产 `grade`（strong_hit/strong_miss 属 legacy v2/v3）。**版本四处同批切 4.0**：① `prediction_stats._CURRENT_METHODOLOGY_VERSION` ② `prediction_validator._METHODOLOGY_VERSION` ③ `skills/prediction_validation._PROFILE_METHODOLOGY_VERSION` ④ Node `publicRouter.CURRENT_METHODOLOGY_VERSION`；⚠️ `prediction_validator._BACKFILL_METHODOLOGY_VERSION = "2.0"` 是**存量回补口径、独立保持不动**（不在同批清单）。**long 档**保留 120 交易日定义但**不计入迭代看板**（仅单独展示命中率）。**条件化预判退役边界（Task 7，已于后续清理收口）**：仅 `prediction_records.conditions` 退役（生成侧 prompt 不再产出、验证侧 `run_once` 不再写 `c{i}`）；`_scan_condition_met` / `_verify_conditions` 已**物理删除**（本文件不再存在，其单测一并删除）；`_judge_condition_met_once` / `condition_met_judge` 因存量回溯 `backfill_condition_met`（默认 dry-run）保留；节奏大师 `branches` 未受影响。**迭代看板三项口径裁决**：① `insufficient` 计入 `settled_ratio` 分母（`pending_slots`，属数据可用性状态、非判定结论）；② `flat_rate` 分母 = 方向预判已结算数（不含 neutral，使 `≈1/3` 成为跨粒度「瞎猜基准线」）；③ `settled_ratio` 的 scope = 记录声明的档位槽（旧版本已结算档位双排除）。
+>
+> **M2 板块验证数据源（2026-08-15）**：sector target 走 `resolve_sector_target`（Node `/internal/ths/resolve` 三级匹配）→ `_fetch_kline_window("sector", ...)` 按 due 区间拉 `ths_daily`；**阈值参数化（H3）**：index 保持 neutral=0.5%/strong=5.0%，sector 用 G0c 分位标定 neutral=0.25%/strong=3.0%（entry 记 `threshold_version="1.0"`）；**entry 元数据（H8）**：`target_type`/`matched_ts_code`/`matched_name`/`prediction_id` 可审计；**按 due 区间拉取（Task 6）**：`_fetch_kline_window` 统一 index/sector，窗口 = due−20/+10 自然日（修复 index 200 天滚动窗口限制），**`trade_date` 归一化 YYYYMMDD→YYYY-MM-DD**（Node 返回 Tushare 原始格式而 due 为 YYYY-MM-DD，格式不匹配即存量 no_data 的根因，b4dc729）；H7 `pct_chg=None` 行保留占位计数，>0 落 insufficient；**存量回补（D4）**：`run_once` 每日尾随 `backfill_no_data()` 对 verified 中 2.0/no_data 的 index 档按区间重验（幂等，hit/miss 不回补，sector 走主链路）。**统计（Task 8，H3/H4）**：`hit_rate_summary`/`baseline_neutral_summary` 支持 `target_type` 过滤；`bucket_summary` 三桶（combined 仅描述性 + index/sector 各自判 `sufficient_sample`）；`n_predictions` 按 `prediction_id` 去重（旧记录无 id 退化为 n），`sufficient_sample = n≥30 且 n_predictions≥30`。
 
 ## 常用命令
 
@@ -291,23 +604,63 @@ python -c "from aistock_agent.graph.builder import compile_graph; compile_graph(
 `deploy/ecosystem.config.json` 为 PM2 配置，主进程内集成 Stock Trace Consumer（无需独立进程）。
 
 ```bash
-# 首次部署
-cd /home/aistock/aistock-agent-py
+# 首次部署（在项目根目录执行）
 pm2 start deploy/ecosystem.config.json
 pm2 save
 
 # 更新代码后重启（一次重启同时刷新主服务 + consumer）
-cd /home/aistock/aistock-agent-py && git pull && pm2 restart aistock-agent
+git pull && pm2 restart aistock-agent
 
 # 查看日志
 pm2 logs aistock-agent --lines 50
 ```
 
-### Stock Trace Consumer 集成模式（2026-08-01）
+### WS 网关待办（P9/P10/P11 部署前提，2026-08-05 方案 1 决策）
 
-- `STOCK_TRACE_CONSUMER_ENABLED=true`（默认）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
+外网 `wss://gupiao-api.yaozhineng.com/api/agent/ws/chat` 需 Caddy WS 转发修复（`flush_interval -1`，§roadmap 5.3）。未通期间：前端 WS→HTTP 非流式降级自动生效（`useChatStream` 3s 超时兜底，无需临时代码）；P10 计费仅 WS 路径落库（WS 修复后启用）；P11 cards 由线 5 前端消费（当前前端不渲染 cards，无损失）。
+
+### Stock Trace Consumer 集成模式（2026-08-01，2026-08-15 更新）
+
+- `STOCK_TRACE_CONSUMER_ENABLED=true`（默认，**2026-08-15 起 config.py 默认值改为 True**）：在 main.py lifespan 内用 `asyncio.create_task` 启动 consumer，与主服务共享进程但持有独立 aioredis 实例（db=2，不复用 RedisPool 单例 db=1）
 - `STOCK_TRACE_CONSUMER_ENABLED=false`：consumer 不启动，需独立进程运行 `python -m aistock_agent.workers.stock_trace_consumer`
 - 关闭顺序：lifespan 退出时先 `cancel()` consumer task → 等待 CancelledError → 关闭独立 redis 连接 → 再关 RedisPool / HttpClientPool
+- **五层候选归因（2026-08-15）**：归因链路从三层（company/sector/market）扩展为五层（company/sector/market/capital/technical）：`schemas/stock_trace.py` 新增 `capital`（资金流向）与 `technical`（技术指标）两层候选 schema；`prompts/workers/stock_trace.py` 提示词扩展为五层；`services/insight_validator.py` 适配五层分类校验
+- **primary_phrase 主因短语（2026-08-19）**：`StockTraceResultPayload` 新增必填字段 `primary_phrase`（≤20 字，LLM 生成的简短主因短语，供列表/卡片展示；`attribution_status` 为 insufficient 时给出简短结论如"证据不足"）。`prompts/workers/stock_trace.py` 提示词增加对应输出要求。Node 端持久化为 `stock_trace_results.primary_phrase`，列表接口透传为 `primary_cause`。
+- **capital 候选层降级为条件准入层（2026-09-18）**：资金净流入/流出方向与价格涨跌是同一事实的两种记账方式，据此归因属**同义反复**且是五层中最易置 supported 的一层 → 会挤压 company/sector/market 真因；但资金的结构/来源/背离（分单结构、席位来源、量价背离）含价格读不出的增量信息，故**保留维度、收紧准入**而非删除。改动：`schemas/stock_trace.py` `_validate_selected_chain_shape` 的 `required_layers` 由五层改为 `{company, sector, market, technical}`（`capital` 仍在 `TraceCandidate.layer` 枚举中，存量结果继续通过校验）；`prompts/workers/stock_trace.py` 新增 capital 专项规则（禁同义反复；仅结构/来源/背离类证据可置 supported/weak；**时效分档**——trade_date 等于异动交易日可 supported，T-1 及更早最高只能 weak 且不得作为 primary_chain 支撑；仅方向性数据置 insufficient），并删除 primary_phrase 旧示例"主力资金撤离"；配套证据侧由 app-api `toCapitalSourceRecord` 补齐原先被丢弃的 `orders`（分单结构）与 `windows`（1/5/10/20 日拆解）；`services/insight_report.py` PDF 章节标题"五层候选归因"→"分层候选归因"。Node 侧 `validateStockTraceResult` 本就只强制 company/sector/market，无需改动。
+- **反向事实反证要求 + 纠错提示语修正（2026-09-18）**：① 提示词新增"若板块/大盘事实与个股方向相反（如个股上涨而板块/大盘下跌）仍将该层置 supported，必须在 `counter_evidence_ids` 中引用该反向 source_id，否则只能置 weak"；② `services/stock_trace_validator.py` **镜像** Node `validateStockTraceResult` 的 `missing_counter_evidence` 规则（Node 侧是回写后的终态门、被拒只会变 `partial` 且无 artifact；Python 侧失败会触发 LLM 纠错重试才有机会修，故两侧同规则）；③ `agents/workers/stock_trace.py` 纠错提示语的非法枚举值 `probable` 改为 `hypothesis`（`attribution_status` 合法值仅 confirmed/hypothesis/insufficient/not_applicable，原值会让重试再次校验失败）。
+- **洞察报告由 PDF 渲染改为章节构建（2026-09-25）**：完整洞察报告改为"页面内 SSE 流式输出"（PDF 下载在移动端需外部阅读器、体验差），**PDF 链路整体移除**。`services/insight_report.py` 删除 `render_insight_report()` / reportlab imports / `_register_font` / `_FONT` / `_FONT_FILE` / `_DISCLAIMER` / `_escape`，改为纯模板构建章节：`build_report_response(data) -> {header, sections}`（`build_report_header` + `build_report_sections`）；`_localize` 及全部中文化映射表（provider/kind/术语/证据题名/摘要模板/compact 日期）保留，职责从"渲染 PDF 文本"变为"构建章节文本"。端点 `/api/agent/insight-report/render` → **`/api/agent/insight-report/sections`**（仍 `verify_internal_token`，返回 `application/json`）；由 app-api 分块推 SSE、前端在详情页逐章节渲染。`pyproject.toml` 删除 `reportlab` 依赖、`package-data` 回退为 `data/*.json`；删除字体资产 `assets/fonts/NotoSansSC-Regular-Subset.ttf`（2.33MB）。测试 `tests/unit/test_insight_report.py` 由 PDF 渲染改为章节构建（17 passed）。**保留的历史结论**：CID 字体（STSong-Light）必须内嵌、可变字体默认实例是 Thin 等教训仍是同类"服务端生成可视产物"问题的有效根因知识（见 project_memory）。
+- **报告章节内容由纯文本行改为结构化 blocks（2026-09-26）**：用户反馈"完整报告排版不美观"，六阶段因果链想要表格/流程图 → 纯文本 `lines: string[]` 无法做出节点/表格，故整份报告改结构化输出。`build_report_sections` → **`build_report_blocks(data) -> list[(heading, blocks)]`**；`build_report_response` 返回 `sections:[{heading, blocks}]`。Block 判别联合（`type` 区分，6 类）：`kv`（事件事实，键值两列）/ `verdict`（主因结论，正文 + 徽标）/ `candidates`（分层候选）/ `chain`（六阶段因果链）/ `evidence`（证据清单）/ `list`（未解问题）。**空节 → `blocks: []`**（前端渲染"暂缺"），判定规则统一为"源数据非空才出块"（`event` / `attr` / `candidates` / `stages` / `evidence` / `questions` 逐个 guard）。**关键设计**：① `chain` **只含主链**（新增 `_primary_chain()`：取 `role=primary`，缺失降级取第一条，脏数据跳过）——真实 artifact 通常有 primary + alternative 两条链、各 6 节点，旧实现把 12 个节点平铺混在一起，是"看不出是因果链"的根因之一；② 链节点与候选同时给出**中文标签**与**机器 key**（`stageKey` / `epistemicKey` / `statusKey`），前端据此做中性弱化判定，**不对中文标签做字符串匹配**；③ 主因正文的三级兜底（`primaryPhrase ?? primaryCandidate.verdict ?? primary_cause`）仍在 **app-api**，agent-py 不做重复兜底（get 到什么渲染什么，缺则"暂缺"），避免两条兜底链口径漂移；④ 事件事实删掉与页眉重复的「股票：xx（code）」行，涨跌幅拆出「最新价 / 昨收」两行并带 `tone`(up/down) 供涨跌着色。测试 `tests/unit/test_insight_report.py` 由行式断言改为 blocks 断言（25 passed，含主链筛选/兜底/脏数据/空节/中文化回归）。
+
+- **`TriggerEvent` 补声明 `is_limit_up`（2026-09-27，跨服务契约修复）**：Node 侧 `buildTriggerEvent` 会把涨停标记以 camelCase `isLimitUp` 透传，而 `trigger_event_json` 就是该函数产物的冻结副本；Python 侧 `TriggerEvent` 原为 `extra="forbid"` 且未声明该字段 → `StockTraceSnapshot.model_validate` 抛 `ValidationError`，且该调用位于 worker 内层 try **之外**（内层 try 从 LLM 循环才开始），被外层 `except Exception` 兜成 `LLM_OR_DEPENDENCY_UNAVAILABLE`（错误码具误导性，看起来像 LLM 故障）→ 同一 job 连续 3 次**确定性秒失败**进 `dead_letter`、永不产出 result，前端卡片恒显示「归因中」（2026-09-24 宿迁联盛 `mv:603065:2026-09-24:1790233504581:up`）。改动：`schemas/stock_trace.py` `TriggerEvent` 新增 `is_limit_up: bool | None = None`（**保持 `extra="forbid"`**，显式声明而非改成 `extra="ignore"`，以免掩盖后续字段漂移）；测试 `tests/unit/test_stock_trace.py` 新增 `FakeNodeClientWithLimitUp` + `test_node_client_accepts_is_limit_up_in_trigger_event`。**发布顺序约束**：app-api 侧 `buildTriggerEvent` 的 `isLimitUp` 为**无条件**写入（`Boolean(...)`），所以本修复必须**先于** app-api 相应版本部署，否则每条新事件的归因都会同样失败。
+- **归因失败明细上报 `error_detail`（2026-10-06，可观测性）**：与上一条同源痛点——worker 外层 `except Exception` 会把一切非校验异常兜成**误导性**错误码 `LLM_OR_DEPENDENCY_UNAVAILABLE`，而真实异常文本（异常类名 + 消息）既没落库、日志也未留存，导致 `dead_letter` 事后**完全无法定位根因**（2026-09-30 海正生材 688203 即如此）。改动：`agents/workers/stock_trace.py` 的 `StockTraceWorkerOutcome` 新增可选 `error_detail`，通用 `except` 与 `VALIDATION_REJECTED` 路径均写 `f"{type(exc).__name__}: {exc}"`（**统一截断 500 字符**）；`workers/stock_trace_consumer.py` 的 `_handle_failure` / `_dead_letter` 透传；`services/stock_trace_client.py::StockTraceNodeClient.report_job` 按存在性**条件写入** `last_error_detail`（None/空串不写，保持既有载荷形状）。**不变量：错误码与 `REPLAYABLE_ERROR_CODES` 未改**（重投语义不变）。app-api 侧对应用 migration 024 新增 `stock_trace_jobs.last_error_detail`，并在 `PATCH /internal/stock-trace/jobs/:jobId` 服务端再截断一次 500（两处截断极限必须一致）。
+  - **已知未覆盖**：占死信约 **85%** 的 `NODE_WRITEBACK_FAILED` 仍不带明细——`write_result` 失败时返回 `None` 而非抛异常，确无可捕异常文本；若要覆盖需改造 `write_result` 以回报 HTTP 状态/响应摘要（尚未决策）。
+- **板块消息 → 关联个股（2026-10-16，`sector_news` 证据域）**：事件库里的板块级新闻既无 `symbol` 也从不填 `industry`，`load_event_scrape_by_symbol` 永远匹配不到，导致 stock_trace 的 sector 域只能引用板块涨跌幅事实。改动：① 新增 `services/sector_tagging.py`（`tag_sectors` / `expand_sector_names`，**纯规则**：人工别名字典反向索引 + 标准名「/」分段 + 短 ASCII 泛化词守卫，无 LLM/DB）；② `EventRecord` 增 `sector_tags`（`normalize_event` 计算；`load_event_scrape` 对存量事件**读时补算**，无需回填）与 `match_type`（`NotRequired`）；③ `load_event_scrape_by_symbol(symbol, score_date, sectors=None)` 传入 `sectors` 时额外召回「板块标签命中」的事件，并写 `match_type`（`symbol`/`sector`/`both`）；不传时行为逐字不变；④ 路由 `GET /api/agent/event/scrape-by-symbol/{symbol}` 增可选 `sectors`（逗号分隔，≤10 项、单项 2~32，非法忽略不 400）；⑤ `SourceKind` 增 `sector_news`，`_KIND_LABELS` 映射「板块消息」，提示词允许 sector 候选引用它并禁止当公司个体事实。**归属规则**：`both` 事件归 company 域（news），sector 域只收「仅板块命中」，同一事件不重复计数。**刻意限制**：`sector_news` 不参与 `confirmed` 独立事实门槛、也不作为反向事实强制反证（新闻方向可靠性低于行情事实）。测试 `tests/unit/test_sector_tagging.py` + `test_event_store_sector_match.py`。
+- **板块召回收紧（2026-10-17）**：首次端到端验证发现 5 条 `sector_news` 全为噪声，根因有二：① 宽基板块（上证180成份股/两融/沪股通）几乎覆盖全市场，字面兜底会把成分股公告全部召回；② `DeepSeek概念` 同时是「AI/算力/半导体」「AI应用/办公软件」的别名，扩张后一只概念股会召回所有 AI/宏观新闻（含"人工智能"）。改动：`sector_tagging.py` 新增 `is_broad_sector_name`（名称含「成份股/成分股」+ 显式名单）与 `_NO_EXPANSION_NAMES`（`DeepSeek概念` 只保留自身）；`load_event_scrape_by_symbol` 在标签求交与字面兜底两条路径前统一过滤宽基板块。app-api 侧同步新增 `isBroadSectorName` / `selectSectorBoardNames`（排除宽基 + 按成分股数升序取 3），两侧宽基名单需同步维护。
+
+### 调度器心跳与 readiness（2026-11-03，P0 误判收口）
+
+- **心跳不只写日志**：`scheduler_heartbeat`（每 2 分钟）同时写进程内时间戳 `_scheduler_last_heartbeat`；`start_scheduler()` 成功后写 `_scheduler_started_at`。`GET /health/ready` 的 `scheduler` 检查项：调度启用但未 start → `error: scheduler not started`；启动后首心跳未到 → `pending`；心跳超过 7 分钟（`HEARTBEAT_STALE_SECONDS=420`）→ `error: heartbeat stale`；正常 → `ok (Ns)`；`SCHEDULER_ENABLED=false` / `QA_MODE=true` → `skipped`。
+- **为什么**：2026-10-19 16:05 服务器磁盘写满（ENOSPC）使 pm2 日志流中断（同日 09-15 也发生过），此后日志无任何 job 记录，但调度实际持续运行（每个交易日 08:51 晨报、09:01 trend_score、15:30 review、18:30 iterate 产物照常落盘）。**“日志无心跳”不能证明调度停摆**，必须看 `/health/ready` 的 `scheduler`。
+- **misfire grace**：心跳 job 必须先于 misfire 循环注册（或显式 `misfire_grace_time=3600`）。默认 1s 会让诊断 job 在 event loop 繁忙时被跳过（2026-10-22 日志 `scheduler heartbeat ... was missed by 0:00:05` 即此因）。
+
+### 事件地域判定与复盘落库（2026-11-04）
+
+- **jin10 是混合源，不是整体外围源**：`services/event_origin.py` 的 `_PERIPHERAL_SOURCES` 只保留 `global_markets`；`jin10` 归入 `_MIXED_SOURCES`，按内容重判：境内强标记（A股/沪深/两市/科创/人民银行/离岸人民币等）→ `domestic`，海外宏观强词 → `peripheral`，其余 → `unknown`（**不得回落 peripheral**）。
+- **存量数据读时重算**：`event_store._rebuild_event_record` 与 `is_peripheral` 对混合源忽略已存的 `event_origin`，按内容重新判定。原因是 2026-10-16 上线的整源白名单已把大量境内 jin10 快讯写成 `peripheral`，仅改分类器不重算存量仍会复发。
+- **为什么必须修**：复盘 `_validate_origin_consumption` 规定 peripheral 证据只能支撑 `global_risk_liquidity`、`market_positioning_liquidity` 与 `industry_technology_supply`（产业链与科技供给天然跨境），不得支撑 `domestic_macro_policy`；误标的境内证据会让整份报告降级且**不落库**（quick 3 次重试后前端显示“复盘报告未能完成”）。2026-11-04 生产事故即 `沪深两市成交额`、`科创半导体ETF`、`长鑫科技回购` 三条境内证据被标 peripheral。
+- **「日央行」不得纯子串匹配（2026-11-06 事故）**：`_matches_overseas_macro` 对「日央行」用 `(?<![\d昨今当次本])日央行` 正则——`2026年11月2日央行、金融监管总局…` 会天然拼出该子串，把东山精密回购误判 peripheral → 校验拒绝 → 整份降级。其余海外宏观关键词仍是纯子串。
+- **校验失败带反馈重试一次**：`_generate_validated_trace` 对任意确定性校验失败（origin 违规、source_id 臆造、链结构不合规）把错误原因追加为 HumanMessage 重试一次，二次仍失败才降级，避免一次违规就整份作废。
+- **验证口径**：改完不止看单测，要确认 2026-11-04 复盘重新生成后 `/api/agent/report/review/2026-11-04` 返回非空、`agent_analysis_reports` 出现 `report_type='review'` 行。
+
+### 播报与事件准确性修复（2026-11-22）
+
+- **复盘落库必须 fail loudly**：`review.py::_persist_review_report` 返回 `bool` 且失败重试 1 次；`saved is None` / 异常均记 `review_persist_failed` 并返回 `False`。`run()` 仅在 `persisted=True` 时发布 `review_done`；`run_review()` 持久化失败返回 `status="degraded"`，禁止“生成成功但未落库”静默通过。
+- **消费者二次回读**：`ReviewQuickConsumer` / `ReviewFullConsumer` 在 `status="ok"` 后必须 `get_analysis_report_quiet("review", report_date)` 校验可追溯（合法 id、`report_type="review"`、`status="completed"`、非空 `data_source`、非空 dict `content`）；不可追溯则降级并记 `review_report_missing_after_persist`，不得发布下游 `review_done` / snapshot。
+- **事件物化必须带摘要与溯源**：`_materialize_event_entity` 的 body 必须含 `summary`（空时回退 title）与 `source_event_id=event_scrape:<event_id>`（保留命名空间，避免与 `cninfo:` 等原文 ID 冲突）。`event_entities.summary` 依赖 app-api upsert 的 `summary = EXCLUDED.summary` 回填。
+- **事件开始时间不认结束日**：`_extract_event_start_time` 只认绝对日期；「暂停至 / 有效期至 / 截至 / 截止 Y」等结束语义返回 `None`，交 `publish_time_fallback`（信度 0.5），禁止把到期日排到未来。
+- **境内货币政策不得判外围**：`event_origin._DOMESTIC_MARKERS` 含 `LPR` / `贷款市场报价利率` / `政策利率` / `公开市场操作` / `逆回购` / `MLF` / `降准` / `存款准备金率`；`_DOMESTIC_CB_RE` 识别「央行」并排除日本/欧洲/英国/美国/韩国/澳洲/加拿大/瑞士前缀。2026-11-20 回补即因「LPR…降息」被判 peripheral 导致复盘两次失败。
+- **归档文件名按 report_date**：`archive_morning` / `archive_review` 接受 `report_date` 参数，历史回补必须传入；`snapshot_builder._find_report` 按交易日前缀查找，用当天自然日命名会导致 `snapshot_missing_reports`。
+- **回补验证口径**：`POST /api/agent/admin/trigger/evening_chain {"report_date":"YYYY-MM-DD"}` 后，须确认 `agent_analysis_reports` 中 review / brief_evening 均 `completed`、晚报 `degraded=false` 且 `missing_sources=[]`。
 
 ## 关键约束
 
@@ -348,7 +701,6 @@ pm2 logs aistock-agent --lines 50
 | event | `{"final_response": "事件分析暂时不可用，请稍后重试"}` |
 | review | `{"final_response": "复盘生成暂时不可用，请稍后重试"}` |
 | alert | `{"final_response": "异动提醒暂时不可用，请稍后重试"}` |
-| ai_advisor | `{"final_response": "智能投顾暂时不可用，请稍后重试"}` |
 | broadcast | `{"final_response": "播报生成暂时不可用，请稍后重试"}` |
 | trend_score | `{"final_response": "趋势股评分分析暂时不可用，请稍后重试"}` |
 | general | `{"final_response": "抱歉，我暂时无法处理您的请求，请稍后重试"}` |
@@ -364,7 +716,7 @@ pm2 logs aistock-agent --lines 50
 **为什么要做双层输出？（两个核心原因）**
 
 1. **前端展示需要**：前端页面需要"概要 + 完整报告内容"两层数据。`display_report.summary` 用于列表页/卡片快速浏览，`display_report.details` 用于详情页完整展示。单层 text 无法支撑结构化展示。
-2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 和 ai_advisor_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
+2. **省 token（核心动机）**：双人播报语音生成费用较高，不能把完整长报告（500-1500字）喂给播报模型。`podcast_brief` 作为 broadcast_agent 的原材料，只输入 150-200 字的摘要，大幅降低 token 消耗。如果喂整个报告，token 成本会高数倍且播报模型容易跑偏。
 
 双层结构定义如下：
 
@@ -382,12 +734,63 @@ content = {
 ```
 
 **消费方**：
-- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话
-- `ai_advisor_agent`：读取 `display_report`（通过 `extract_display_report`），整理成对话回复
+- `broadcast_agent`：读取 `podcast_brief`（通过 `extract_podcast_brief`），汇总生成双人对话；`podcast_brief` 缺失时降级读取 `display_report`（通过 `extract_display_report`，截取前 500 字）
 
 **兼容性**：`utils/report_parser.py` 自动兼容 1.0 单层 `{"text": "..."}` 和 2.0 双层结构，旧报告无需迁移。
 
 **LLM 输出要求**：Agent 提示词中须明确要求 LLM 在最终回复中输出 JSON 格式的双层内容。`parse_dual_layer_response` 函数会解析 JSON，解析失败时降级为单层（display_report.details = 原文本）。
 
-**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）、ai_advisor（尹辰）
+**已改造 Agent**：wind_leader（尹辰）、broadcast（尹辰）
 **待改造 Agent**：morning（王昌泽）、hot_burst（吴涵晶）、alert（李俊良）
+
+### iterate（迭代 Agent 自动闭环）
+- 用途：自动迭代 review/event_analyst 等归因类 agent 的提示词/工作流/数据源
+- 约束：回放层为 monkeypatch 注入（不改待迭代 agent 的 run()）；回放子进程所有写副作用 no-op；数据目录 data/ 全部 gitignore；LLM 走 get_deep_think 唯一入口
+- `iterate/case_scanner.py`：迭代切片数据扫描器——`find_recent_trading_day()`（最近已收盘交易日，Node close-snapshot/last-close 降级）、`scan_major_events(days)`（电报关键词 + 30 分钟窗口聚类重大事件）
+- `iterate/gt_validator.py`：标准答案一致性校验——`validate_gt_against_case(gt, case)` 三条规则（方向/板块/驱动必须可由切片数据推导），返回违反列表
+- `iterate/ground_truth.py::generate_data_constrained_gt(case, *, data_dir=None)`：数据约束标准答案生成（方向/板块确定性 + 驱动 LLM 仅基于切片语料，杜绝后验泄漏）
+- `scripts/build_iterate_cases.py`：切片生成 CLI（review 最近交易日 / event_analyst 电报事件），只在服务器沙盒运行；review 产片前校验快照数据完整性（`_snapshot_data_sufficient`：a_share.indexes 为空则拒绝产片，`--force` 可跳过，2026-08-13 case_20260731 全 0 分事故防御）
+- 回放隔离（fail-closed，2026-08-13 辩论裁决修复）：NodeApiClient 服务层清单制（get_industry_chain/报告读/put/delete/patch）；node_read 精确前缀白名单 + symbol/news_id 语义；persist_event_report 回放返回 False；切片 trade_date 时序断言 + time_unknown 标记；run_review 回放显式拒绝（走 run() 入口）+ 源模块双绑定；节奏大师（2026-08-30）：回放隔离清单（`_SERVICE_ISOLATION_TARGETS`）新增 rhythm_master 4 方法登记（get_calendar_events / post_calendar_event / get_rhythm_report / get_fear_greed）
+- 评分体系：归因相似度重归一化（空 GT 满分 1.0 消除）+ direction_present；judge 固定 len(truth) 分母 + corpus 引用机械核验；Tavily 死代码与"指数neutral"兜底删除
+- 变体引擎：目标区域补丁（ast 符号地图 + search/replace + fallback）；补丁规格落盘 + best.json 原子固化；轮级异常兜底 + 基线成功才落盘；`_compute_variant_hash` 含完整补丁规格（T9 M3）；`_cleanup_stale_experiments` 跨运行残留清理（T10 Q1）；失败轮 `is_failure` 显式标记 + `infra_failures` 连续计数（T11 M1/M2）；基线轮纳入 try/except（T11 M3）；`_recompute_best` 跳过 `is_failure` 记录（T11 M4）
+- 调度：iterated.json 单一权威去重 + 幂等迁移；no_improvement 校准前禁用 + score_then_stall；产片/消费双 job（16:30 产片 / 17:00 消费报告）+ status=complete 检查
+- 二期 case-sourcing（Task 1，2026-08-14）：`iterate/adapters.py` 新增 `CaseSourceSpec` 产片源声明模型与 `IterableAgentAdapter.case_sources` 字段——review 声明 `market_close_snapshot`、event_analyst 声明 `telegraph_keyword_scan(window_days=30)`；硬约束：全部已注册 agent 必须声明非空 case_sources（case_sourcers 注册表 provider 已完成 Task 2；通用流水线为二期后续 Task）
+- 二期 case-sourcing（Task 2，2026-08-14）：`iterate/case_sourcers.py` 新增 provider 注册表（`SOURCE_PROVIDERS` 清单封闭：`market_close_snapshot`/`telegraph_keyword_scan`）+ `source_cases(adapter, *, data_dir, force)` 采集入口（按 `adapter.case_sources` 逐个 provider 产片，单源失败降级跳过）+ `CaseCandidate`/`SourceContext` 模型；provider 逻辑迁移自 `scripts/build_iterate_cases.py`（telegraph_records 构造 / industry_graph 三时间戳结构 / `_snapshot_data_sufficient` 闸门与 force 语义 / meta 与原实现一致）
+- 二期 case-sourcing（Task 3，2026-08-14）：`iterate/case_pipeline.py` 通用产片流水线——`build_cases_for_adapter(adapter, *, data_dir, force)`（sourcing → 逐候选 build_case → 生成 GT → validate_gt_against_case → 违反且非 force 回滚，返回 `{"generated","rejected","case_ids","reasons"}`）+ `candidate_to_case_inputs`（data_deps 覆盖校验：candidate 缺 adapter.data_deps.values() 对应字段即 ValueError，空壳切片不得进闭环）；build_case 显式传 data_dir
+- 二期 case-sourcing（Task 4，2026-08-14）：`scripts/build_iterate_cases.py` CLI 改造——`_build_parser()` 提取（`--agent` choices 动态取自 `iterable_agent_ids()`，注册即生效）+ `main()` 删除 `if args.agent ==` 分支统一走 `build_cases_for_adapter`（`--window-days` 显式且 != 30 时经 `replace` 覆盖 provider 参数，默认 30 用 adapter 登记值）+ 删除旧函数（build_review_case / build_event_cases / _rollback / _source_to_record / _snapshot_data_sufficient / _collect_industry_graph，均已迁移到 iterate 包）；集成测试 4 用例迁移为 patch source_cases 注入候选（断言意图不变）
+- 二期 case-sourcing（Task 5，2026-08-14）：`iterate/scheduler.py` 产片 job 多 agent 循环——`_build_review_and_event_cases`（lazy import 已删的 scripts.build_iterate_cases.build_event_cases/build_review_case → 生产产片 ImportError 断链）删除，重构为 `produce_cases_daily()`（按 `ITERABLE_AGENTS` 循环调用 `build_cases_for_adapter`，未声明 `case_sources` 的 adapter 跳过，单 agent 失败 → D-3 告警邮件 + `{"error": ...}` 记录不阻断后续，整体性异常由 `_run_iterate_build_task` 外层兜底）；`build_cases_for_adapter`/`ITERABLE_AGENTS` 模块级 import（函数内 lazy import 会使 `monkeypatch.setattr(scheduler, ...)` 失效，Task 5 评审发现）；`case_scanner` import 随旧函数一并清理
+- 三期历史回补（Task 3，2026-08-14）：`scripts/build_iterate_cases.py` CLI 新增 `--date YYYY-MM-DD`（仅对 `market_close_snapshot` 产片源注入 `params["date"]`，review 历史回补用）；`--window-days`（telegraph_keyword_scan）与 `--date`（market_close_snapshot）合并进**一次** new_sources 构造循环按 provider 名分别注入（两参数同时传都生效、互不覆盖）；adapter 无对应 provider 时 stderr warning（与 `--window-days` 同模式，final review I-1）；保持无 `args.agent ==` 分支（按 provider 名判断
+）
+- 三期 monitor_tools dateFrom（Task 4，2026-08-14）：`tools/monitor_tools.py` `get_alert_history` 的 `?days=` 改为 `?dateFrom={shanghai_today()-days 天}&limit=20&offset=0`（days 钳制 max(days,1)，工具参数语义不变，Node 端点零改动）——消除 E-2 探查发现的 days 参数被 Node 静默忽略的失效窗口；`shanghai_today`/`timedelta` 顶部 import（patch 目标成立）；三期最终评审 I1（2026-08-14）：dateFrom 补东八区后缀 `YYYY-MM-DDT00:00:00+08:00`——纯日期 `YYYY-MM-DD` 的过滤语义依赖 DB session 时区，显式后缀消除时区漂移（与 Node 端既有消费先例一致，Node 端点零改动）
+- 三期历史回补（Task 2，2026-08-14）：`services/market_trace_snapshot.py` close-snapshot 调用带 `?date={report_date}`（Node 伪时刻重建；非交易日/缺失 → 409 → data_client.get 返回 None → 既有 last-close 降级链 + trade_date 校验不变）；`iterate/case_sourcers.py` `market_close_snapshot` 支持 `ctx.params["date"]` 非空直用（历史分支，不走 find_recent_trading_day），为空走二期行为；`find_recent_trading_day`/`build_market_trace_snapshot` 提升为模块级 import（brief 用例 patch 目标为模块属性）；`--date` CLI 注入为 Task 3；评审修复（IMP-1/2/3，2026-08-14）：date 分支在 `build_market_trace_snapshot` 返回后校验 `snapshot.trade_date == 请求 date`，不一致抛 RuntimeError「历史回补日期不一致」——防 Node 409 后 last-close 兜底静默产"最近交易日"case（回补失败 → provider 抛错 → source_cases 降级 0 候选）；`test_snapshot_date_mismatch_blocks_external_calls` side_effect 改 startswith 修测试假通过
+- 三期最终 whole-branch 评审修复（C1/C2/I1，2026-08-14）：C2 在 `build_market_trace_snapshot` last-close 兜底分支加 fail-loud（`_normalize_date_yyyymmdd` 规范化比较，兜底数据日 ≠ 请求日抛 `MarketTraceSnapshotUnavailable`「拒绝产片」）——从根源消除"快照盖章为请求日但数据是最近交易日"，使 case_sourcers 的 trade_date 守卫不再可能被死代码绕过；no-date 路径 report_date 即最近交易日，兜底 actual == report_date 正常通过，每日产片零影响。C1 两处测试 mock close-snapshot 精确匹配改 `startswith`（`test_historical_phenomena.py` 7 参数化用例 + `test_market_trace_event_store.py` 1 用例，URL 带 `?date=` 后落空的 8 个回归）。I1 `get_alert_history` dateFrom 补东八区后缀（与 Node 消费先例一致）。
+- 四期 Task 1（2026-08-14）：`iterate/case_sourcers.py` 新增 `event_store_scan` 产片源——逐日 `load_event_scrape`（近 window_days 天，`shanghai_today()` 起，只读消费统一事件抓取中台不改中台）→ `is_major_event`（impact_score>=4）过滤 → CaseCandidate（telegraph_records 用事件 summary/content 进 GT corpus；meta 带 source="event_store"/direction_hint/t_window）；中台契约：`score_date` 纯日期（YYYY-MM-DD）、`scrape_at` 上海 naive 时间（YYYY-MM-DD HH:MM:SS，无时区）、`direction` 值域 positive/negative/neutral（四期最终评审 C1/C2 修正后 event_time 用 scrape_at 补 +08:00 转 aware、direction 经 `_DIRECTION_MAP` 映射为 bullish/bearish/neutral 写 direction_hint，见下方评审修复条目）；单日读取失败 warning 降级跳过不阻断其他天；注册到 `SOURCE_PROVIDERS`（telegraph_keyword_scan 之前）。`adapters.py` event_analyst `case_sources` 更新为 `(event_store_scan, telegraph_keyword_scan)` 双源（事件库在前保证去重优先）。`load_event_scrape`/`is_major_event`/`shanghai_today` 提升为模块级 import（brief 用例 patch 目标是 case_sourcers 模块属性，对齐 market_close_snapshot 先例；无循环依赖）。
+- 四期 Task 2（2026-08-14）：`iterate/case_sourcers.py` 事件标题指纹去重——`_candidate_fingerprint`（`re.sub(r"[\s\W_]+", "", title).lower()` → sha1 hexdigest，空白/标点差异视为同事件）+ `source_cases` 合并候选后按指纹去重（首个保留，case_sources 顺序保证事件库在前优先；重复丢弃 info 日志 `case_source_candidate_deduped`；范围限单次调用内，跨日不重叠）；测试 2 用例（指纹归一化 / 两源同事件去重事件库优先，IterableAgentAdapter 按实际字段最小构造）
+- 四期 Task 3（2026-08-14）：`iterate/ground_truth.py` GT 事件库方向先验——`generate_data_constrained_gt` 读 `case.meta.direction_hint`（event_store_scan 写入，取值 bullish/bearish/neutral——中台 positive/negative/neutral 经 `_DIRECTION_MAP` 映射后写入，见四期最终评审 C2）→ `source_notes` 注入"事件库方向先验: X" + 驱动语料 corpus 追加一行（LLM 驱动提取输入增强）；非法/缺省无先验（source_notes 空列表）；`gt_version` 1→2（A-3 口径升级可追踪）；`attribution.direction` 保持 `_direction_from_snapshot` 快照市场方向不被覆盖（语义硬约束：GT direction=市场方向，evaluator 计分不变）；测试 2 用例（先验注入+direction 不变 / 非法+缺省无先验）
+- 四期最终 whole-branch 评审修复（C1/C2/I1/I2/I3，2026-08-14）：C1 `event_store_scan` 时区轴统一——中台 `score_date` 纯日期（评分日锚点）、`scrape_at` 上海 naive 时间，旧实现 event_time=score_date 补 UTC 零点 vs record=scrape_at 补 UTC（10:00）错位被 `_record_time_le` 全过滤成空壳 case；修复 scrape_at 补 `+08:00` 转 aware 作 event_time、`record_time=event_time.isoformat()`（aware 同轴，`_parse_record_time` 不二次补 UTC），scrape_at 缺失兜底 score_date 零点。C2 新增模块级 `_DIRECTION_MAP`（positive/negative/neutral → bullish/bearish/neutral）写 meta.direction_hint（GT 白名单才注入）。I1 单条事件时间畸形 per-event try/except（warning 跳过，不炸整源）。I2 `test_iterate_ground_truth.py` 2 用例改 `tmp_path`（删真实目录残留 gt_case_x/y.json）。I3 spec/changelog/AGENTS.md/测试数据同步真实契约（score_date 纯日期、direction positive/negative/neutral）；新增 C1 回归断言（`_dt_from_iso(record_time) <= event_time` 同轴）+ I1 单条畸形用例。
+- 四期 Task 4（2026-08-14）：`iterate/case_sourcers.py` `_collect_industry_graph` 采集重试加固——`for attempt in range(2)` 重试 1 次（首次异常或非 dict 均二次重试；warning `industry_graph_collect_failed` 含 attempt；两次均失败降级 None 不阻断产片）；成功后段（collected_at/三时间戳/posterior_exposure）不变；`NodeApiClient` 提升为模块级 import（brief 用例 patch 目标是 case_sourcers 模块属性，对齐 event_store_scan 先例；data_client 已被 market_trace_snapshot 传递加载，无循环依赖）；测试 2 用例（重试成功 / 两次失败降级）
+- 五期 Task 1（2026-08-14）：`scripts/calibration/compute_delta.py` δ=2σ 校准——`iter_experiment_scores(data_dir)` 读 `data/experiments/` 轮级 score（`*_r*.json` 含 `_r1_baseline` 与 `*_best.json`，单次 glob `experiments/*` 后按文件名过滤两族，天然排除 reporter 的 `{date}_experiments.json` 附件；损坏文件跳过）按 case_id 分组 + score 排序；`compute_delta_from_scores` 轮间相邻 |Δ| 样本 → `δ = 2×std(Δ)`，case < 10 或 Δ 样本 < 20 返回 None；CLI `--data-dir`（默认 data），数据不足打印"数据不足" exit 0（不产出配置），充足打印 δ + 样本摘要 + `ITERATE_NO_IMPROVE_DELTA=` 配置行；裁决书 D4/N3 语义（评分含 LLM judge 噪声，no_improvement 停滞判定需 δ=2σ 置信，T2 接入 run_case）；**五期最终 whole-branch 评审 I-3 修复（2026-08-14）**：轮次时序语义——轮文件按轮号（`_ROUND_FILE_RE` 锚定末尾提取 `_r1_baseline`/`_r{round}`）排序取相邻差（非按 score 值排序），`*_best.json` 不参与 δ 统计（轮文件已含 best 轮记录，重复计入产生伪零 Δ）
+- 五期 Task 2（2026-08-14）：`iterate/run_case.py` no_improvement 终止启用（默认禁用）——模块级纯函数 `_should_stop_no_improvement`（delta None 恒 False；否则 stalled >= max_stalls 且 abs(current-best) <= delta）+ 轮循环 stalled 计数后、score_reached 前插入终止分支（`stopped_reason="no_improvement"` + break）；`config.py` 新增 `iterate_no_improve_delta: float | None = None` + `no_improve_max_stalls: int = 4`（env 前缀 ITERATE_ 自动映射）；未配置行为零变化（集成回归 test_iterate_loop.py 15 用例锁定）；测试 2 用例（默认禁用 / 配置后启用 3 断言）
+- 五期 Task 3（2026-08-14）：`scripts/calibration/export_calibration_set.py` 人工校准集标注模板导出——`pick_calibration_samples(samples, target=10)` agent 均衡（每 agent ≥max(1,target//3)）+ 方向性覆盖（bullish/bearish 各 ≥1，每 agent 配额内方向优先）+ judge 分数分层（按分数均分低/中/高三桶逐桶轮转补足，防全落低分档）；样本不足（≤target）返回全部；`_collect_samples` 只收已迭代 case（`cases/{case_id}.iterated.json`），judge_score=best.json 的 score（`_recompute_best` 实际契约 {score,round,patch}，无 ground_truth_ref/attribution 字段），gt_id 取 case 文件 ground_truth_ref（缺失按 `gt_{case_id}` 前缀推导），agent_id 从 case 文件归档目录名反查（**agent_id 本身可含下划线如 event_analyst，`split("_")[2]` 会截断为 event，目录是权威来源**）；CLI `--data-dir`（默认 data）/`--target`（默认 10）输出 `calibration/human_scores.template.json`（ensure_ascii=False + indent=2，human 四空字段 direction/drivers/sectors/confidence 待人工回填），空数据导出空模板 exit 0；测试 4 用例（brief 2 + 组装/agent 反查 2）；**评审 I-1 修复（2026-08-14）**：模板补 agent 输出与 judge 维度分解——`_collect_samples` 新增 `_load_round_record` 按 best.round 匹配轮级实验记录（round==1 → `experiments/{case_id}_r1_baseline.json`，round>1 → `experiments/{case_id}_r{round}.json`，variant_engine L450 落盘约定）提取 `agent_output`（final_response 全文，缺失 ""）+ `judge_score_detail`（direction/drivers/sectors 三维分，缺失 {}），人工可对照 agent 输出与 judge 分档评分；`agent_best_attribution` 保留键兼容、值恒 {}（best.json 契约无该字段，见模块 docstring 数据契约）；测试 5 用例（round1→_r1_baseline 匹配并入组装用例 + round2→_r2.json 新增 + 记录缺失降级断言）
+- 五期 Task 4（2026-08-14）：`scripts/calibration/report_judge_bias.py` judge bias 对比报告——`compute_dimension_bias(rows, group_by=None)` 逐维度（direction/drivers/sectors）MAD + signed 平均偏差（正 = judge 偏高），维度缺值（human None，Task 3 模板初始态）跳过该行该维不当作 0；可选按字段分组（分组内递归）；`_resolve_gt_direction` 归一化 GT 方向（顶层 gt_direction 优先，其次 gt_attribution.direction——Task 3 模板无顶层字段；白名单 bullish/bearish/neutral 外/缺失 → "unknown" 不丢弃样本）；CLI `--data-dir`（默认 data）读 `calibration/human_scores.json`（缺失打印"请先用 export_calibration_set.py 导出模板并人工回填" exit 0）输出 `calibration/bias_report.md`（逐维度表 + 按 GT 方向分组 signed + 结论占位）；只产出报告、不自动改 evaluator；`.gitignore` 补 `data/calibration/`（人工标注数据族，与 data/experiments 一致）；测试 4 用例（brief 2 + 缺值跳过 + gt_direction 归一化）
+- 五期 Task 5（2026-08-14）：`scripts/calibration/report_event_attainment.py` event 达标线评估报告——达标判定**数据驱动**（stopped_reason 不落盘，iterated 标记仅 status/round_type）：达标 = `best_score >= target` 且 GT `confidence != "low"`（A-3 语义：low GT 不构成达标）；`_collect_event_cases(base)`（`experiments/*_best.json` → case_id 含 `_event_analyst_` 过滤 → `cases/{case_id}.iterated.json` 存在且 `status=iterated` → best.json 损坏跳过 → GT confidence 读 `ground_truths/gt_{case_id}.json`（缺失/损坏 → unknown，`gt_` 前缀与 case_builder ground_truth_ref L94 一致））；`compute_event_attainment(cases, *, target_score, max_rounds)`（达标率 + best_round 均值/中位 + max_rounds 耗尽数（best_round >= max_rounds）+ 空输入全零不崩）；CLI `--data-dir/--target/--max-rounds`（默认取 `settings.iterate_data_dir`/`iterate_target_score`/`iterate_max_rounds`）输出 `calibration/event_attainment_report.md`（写入前 `parent.mkdir`——空/不存在数据目录也 exit 0 全零报告）；只产出报告、不自动改达标线；测试 2 用例（brief 原文）；`pyproject.toml` [tool.mypy] 补 `mypy_path = "src"`（scripts 单文件 mypy 分析时本地包按第一方源码解析，否则 import-untyped；`mypy src/` 基线 211 行零回归）
+
+### mail_sender（通用 SMTP 邮件发送）
+- 用途：QQ 邮箱 SMTP 邮件发送（HTML 正文 + 可选附件），迭代报告每日汇总等场景复用
+- 配置：`services/mail_sender.py` 解析顺序为显式参数 → `settings.iterate_smtp_*` → SMTP 用户/授权码/收件人环境变量（名称见代码，同事交接约定）；授权码只放本地 .env，不进 git
+- 要点：`smtplib.SMTP_SSL("smtp.qq.com", 465)` + 授权码登录；附件按扩展名映射 MIME（避免 .bin）；中文文件名用 RFC 2231 tuple 形式
+
+### 2026-09-03 更新：自选股洞察阶段 2（定时轻量预判 + forecast 落库）——已于 2026-09-13 移除
+
+> light_predict（轻量预判）功能已彻底下线。以下全部内容已在 Task 4（2026-09-13）中移除：
+>
+> - cron `light_predict_midday`（11:40）/ `light_predict_close`（15:20）已删除。
+> - `services/light_predictor.py`（`run_light_prediction(slot)`）已删除。
+> - `prompts/workers/light_predict.py`（`PREDICTION_LIGHT_PROMPT`）已删除。
+> - `schemas/prediction.py` 的 `LightForecast` 已删除。
+> - Node 侧配合接口（`list_light_predict_targets`/`set_event_forecast`/`set_judgement_forecast`）已删除，data_client 对应方法已清理。
+> - `iterate/replay_layer.py` `_ISOLATION_EXEMPT_METHODS` 对应登记条目已清理。
+
+### 2026-11-12 播报/简报解析约定（周会任务 4）
+- 报告 schema_version 判定必须兼容全部 2.x（现网 midday=2.1），禁止精确等于 2.0，否则 podcast_brief 解析为空、午间播报因素材缺失不生成（`utils/report_parser.py`）。
+- 晚报「归因结论」优先取 `market_trace.trace.attribution_summary`（strip 后 8–120 字、非原始 JSON），否则回落 attribution_status/candidates 链式逻辑与「证据不足」文案（`services/briefing.py::_review_attribution_conclusion`）；晚报播报提示词要求围绕该归因结论洞见展开。

@@ -21,6 +21,9 @@ class SSEEventType:
     ERROR = "error"
     AGENT_SWITCH = "agent_switch"
     INTERMEDIATE = "intermediate"
+    # 2026-09-30：alert 链路新增——旁路解说分片 / 速览先行
+    REASONING = "reasoning"
+    PREVIEW = "preview"
 
 
 class LangGraphEventType:
@@ -45,17 +48,25 @@ class WSEventType:
     INTERMEDIATE = "intermediate"  # 中间进度（如"正在理解你的问题..."）
     LLM_START = "llm_start"        # LLM 开始生成
     TEXT = "text"                  # 逐 token 文本
+    # 改进 17（Task 1）：回答内容节级流式——文本增量 / 显式整段替换（D9 决策，2026-08-13）
+    CONTENT_DELTA = "content_delta"  # 流式文本增量（前端累积进 streamingText）
+    CONTENT_RESET = "content_reset"  # 显式整段替换（结构化校验失败时覆盖半截流式内容，D4）
     TOOL_START = "tool_start"      # 工具调用开始
     TOOL_END = "tool_end"          # 工具调用结束
+    REASONING = "reasoning"        # AI 思考文本（流式 chunk） → 新增此行
     DONE = "done"
     ERROR = "error"
+    # Phase 4-2（改进 13）：交互式确认——阶段 1 终态负载（替代 DONE，服务端 → 客户端）
+    CONFIRM_REQUEST = "confirm_request"
+    # 客户端 → 服务端控制消息（对齐 stop 协议：request_id 回带 + choice 点选）
+    CONFIRM_RESPONSE = "confirm_response"
 
 
 # 意图集合 —— 与 graph/routers/intent_router.py 的 VALID_INTENTS 对齐
 INTENT_SET = frozenset({
     "morning", "stock", "sector", "event",
     "wind_leader", "hot_burst", "broadcast",
-    "alert", "ai_advisor", "general", "review",
+    "alert", "general", "review",
     "trend_score",
 })
 

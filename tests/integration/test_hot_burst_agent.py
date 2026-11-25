@@ -14,9 +14,11 @@ from aistock_agent.services.data_client import HotBurstReadResult
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.hot_burst.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.hot_burst.get_deep_think"
 _NODE_API = "aistock_agent.agents.workers.hot_burst.node_api"
+# 该「公共输出契约示例」是供前端预览/文档使用的**策划产物**（不是运行生成物），
+# 因此跟随测试放在 tests/fixtures/ 下并入库。原先指向 docs/agent-outputs/ 下
+# 一个从未生成的路径（该目录被 .gitignore 忽略）→ 恒 FileNotFoundError。
 _EXAMPLE_PATH = (
-    Path(__file__).parents[2]
-    / "docs/agent-outputs/hot_burst/hot_burst-dual-layer-report.json"
+    Path(__file__).parents[1] / "fixtures" / "hot_burst_dual_layer_report.json"
 )
 
 _SOURCE_DATA = {

@@ -9,7 +9,7 @@
 测试风格与 ``tests/e2e/test_briefing_morning.py`` 一致，使用
 ``httpx.AsyncClient`` + ``ASGITransport``。
 """
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -55,8 +55,11 @@ async def test_chat_message_invalid_token_returns_403():
 @pytest.mark.asyncio
 async def test_chat_message_valid_token_passes_auth():
     """正确 X-Internal-Token 通过鉴权，返回 200（mock graph 避免真实 LLM 调用）"""
-    mock_graph = AsyncMock()
-    mock_graph.ainvoke = AsyncMock(return_value={"final_response": "mocked 回复"})
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {"synth_answer": {"final_response": "mocked 回复"}}
+
+    mock_graph = MagicMock()
+    mock_graph.astream = mock_astream
 
     with patch("aistock_agent.api.routes.compile_chat_graph",
                return_value=mock_graph):
@@ -76,16 +79,13 @@ async def test_chat_message_valid_token_passes_auth():
 
 
 @pytest.mark.asyncio
-async def test_chat_message_advisor_trace_always_none():
-    """M5 后 ChatAgent 无 advisor_trace，即使 graph 输出携带也固定返回 null。"""
-    trace = {
-        "schema_version": "advisor_trace.v1",
-        "subquestions": [],
-        "missing_sources": [],
-        "degraded": False,
-    }
-    mock_graph = AsyncMock()
-    mock_graph.ainvoke = AsyncMock(return_value={"final_response": "降级", "advisor_trace": trace})
+async def test_chat_message_response_omits_trace_field():
+    """M5 后 ChatAgent 响应不含已退役字段（字段消失，非 null）。"""
+    async def mock_astream(state, config=None, stream_mode="updates"):
+        yield {"synth_answer": {"final_response": "降级"}}
+
+    mock_graph = MagicMock()
+    mock_graph.astream = mock_astream
 
     with patch("aistock_agent.api.routes.compile_chat_graph", return_value=mock_graph):
         async with httpx.AsyncClient(
@@ -95,4 +95,5 @@ async def test_chat_message_advisor_trace_always_none():
                 _CHAT_URL, json={"message": "个股 600519"}, headers=_VALID_HEADERS
             )
 
-    assert resp.json()["advisor_trace"] is None
+    assert resp.status_code == 200
+    assert "advisor_trace" not in resp.json()

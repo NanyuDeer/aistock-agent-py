@@ -1,13 +1,11 @@
 """管理员 trigger 端点测试。"""
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from aistock_agent.api.routes import router
 from aistock_agent.config import settings
-from aistock_agent.api.deps import verify_internal_token
-
-from fastapi import FastAPI
 
 AUTH_HEADERS = {"X-Internal-Token": settings.internal_api_token}
 
@@ -21,7 +19,7 @@ def client():
 
 def test_trigger_review_quick_returns_200(client):
     """POST /api/agent/admin/trigger/review_quick 返回 200 + success。"""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
 
     with patch("aistock_agent.agents.workers.review.run_review", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = type("R", (), {
@@ -42,7 +40,7 @@ def test_trigger_review_quick_returns_200(client):
 
 def test_trigger_review_full_returns_200(client):
     """POST /api/agent/admin/trigger/review_full 返回 200 + success。"""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
 
     with patch("aistock_agent.agents.workers.review.run_review", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = type("R", (), {
@@ -59,6 +57,38 @@ def test_trigger_review_full_returns_200(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["snapshot_kind"] == "full"
+
+
+def test_trigger_evening_chain_returns_200(client):
+    """POST /api/agent/admin/trigger/evening_chain 返回 200 + 链路状态。"""
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "aistock_agent.services.scheduler._run_evening_chain_task",
+        new_callable=AsyncMock,
+    ) as mock_chain:
+        mock_chain.return_value = {
+            "status": "ok",
+            "report_date": "2026-07-30",
+            "stages": {
+                "review": "ok",
+                "market_snapshot": "ok",
+                "iterate": "ok",
+                "brief": "ok",
+                "broadcast": "ok",
+            },
+        }
+        response = client.post(
+            "/api/agent/admin/trigger/evening_chain",
+            headers=AUTH_HEADERS,
+            json={"report_date": "2026-07-30"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["stages"]["broadcast"] == "ok"
+    mock_chain.assert_awaited_once()
 
 
 def test_trigger_review_quick_requires_auth(client):

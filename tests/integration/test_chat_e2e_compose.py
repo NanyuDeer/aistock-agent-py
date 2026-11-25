@@ -96,11 +96,19 @@ async def test_compose_parallel_two_skills():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
-        "aistock_agent.skills.stock_snapshot.get_quote",
-        new=AsyncMock(return_value="600519 当前价 1800"),
+        # 固定为交易时段，使用例与运行时钟/交易日历无关：非交易时段
+        # stock_snapshot 会降级（stock_snapshot.py:69-72，有意行为）
+        "aistock_agent.skills.stock_snapshot.trading_session_status",
+        return_value=("trading", ""),
     ), patch(
+        # 5253fb4 起 get_quote 走 StructuredTool.ainvoke({"symbol": ...})，需显式挂 ainvoke
+        "aistock_agent.skills.stock_snapshot.get_quote",
+        new=MagicMock(ainvoke=AsyncMock(return_value="600519 当前价 1800")),
+    ), patch(
+        # 5253fb4 起 industry_relation 改走 StructuredTool.ainvoke({...})，
+        # 需显式挂 ainvoke=AsyncMock，否则 await 拿到 mock 对象、splitlines 崩溃
         "aistock_agent.skills.industry_relation.match_industry_by_keywords",
-        new=AsyncMock(return_value="白酒 → 食品饮料"),
+        new=MagicMock(ainvoke=AsyncMock(return_value="白酒 → 食品饮料")),
     ):
         graph = compile_chat_graph(checkpointer=None)
         result = await graph.ainvoke(_build_state("茅台现在怎么样 + 白酒板块上下游"))
@@ -218,14 +226,21 @@ async def test_compose_partial_degraded():
     ), patch(
         "aistock_agent.graph.nodes.synth_answer.get_deep_think", return_value=mock_llm
     ), patch(
-        "aistock_agent.skills.stock_snapshot.get_quote",
-        new=AsyncMock(return_value="600519 当前价 1800"),
+        # 同 test_compose_parallel_two_skills：固定交易时段，去掉对运行时段的依赖
+        "aistock_agent.skills.stock_snapshot.trading_session_status",
+        return_value=("trading", ""),
     ), patch(
+        # 5253fb4 起 get_quote 走 StructuredTool.ainvoke({"symbol": ...})，需显式挂 ainvoke
+        "aistock_agent.skills.stock_snapshot.get_quote",
+        new=MagicMock(ainvoke=AsyncMock(return_value="600519 当前价 1800")),
+    ), patch(
+        # search_cls_news 现为 StructuredTool（stock_news.py:21 走 .ainvoke），
+        # 用 MagicMock(ainvoke=AsyncMock(side_effect=...)) 才能真实抛错触发降级
         "aistock_agent.skills.stock_news.search_cls_news",
-        new=AsyncMock(side_effect=RuntimeError("cls api down")),
+        new=MagicMock(ainvoke=AsyncMock(side_effect=RuntimeError("cls api down"))),
     ), patch(
         "aistock_agent.skills.industry_relation.match_industry_by_keywords",
-        new=AsyncMock(return_value="白酒 → 食品饮料"),
+        new=MagicMock(ainvoke=AsyncMock(return_value="白酒 → 食品饮料")),
     ):
         graph = compile_chat_graph(checkpointer=None)
         result = await graph.ainvoke(_build_state("茅台行情+新闻+板块"))

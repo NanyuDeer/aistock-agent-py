@@ -1,8 +1,9 @@
 """FastAPI 应用入口"""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import cast
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -10,10 +11,11 @@ from fastapi import FastAPI
 from aistock_agent.api.middleware import setup_middleware
 from aistock_agent.api.routes import health_router
 from aistock_agent.api.routes import router as api_router
+from aistock_agent.api.tasks import router as tasks_router
 from aistock_agent.api.ws import router as ws_router
 from aistock_agent.config import settings
 from aistock_agent.observability.logging import get_logger, setup_logging
-from aistock_agent.services.http_client import HttpClientPool
+from aistock_agent.services.http_client import HttpClientPool, LlmHttpClient
 from aistock_agent.services.redis_pool import RedisPool
 from aistock_agent.services.scheduler import shutdown_scheduler, start_scheduler
 
@@ -22,14 +24,17 @@ setup_logging(settings.log_level)
 
 logger = get_logger(__name__)
 
+# LLM httpx 连接池默认超时（对齐 llm._LLM_REQUEST_TIMEOUT_SECONDS = 600）
+_LLM_HTTP_TIMEOUT = 600.0
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：启动初始化资源池，关闭优雅释放。
 
-    启动时初始化 Redis 连接池和 httpx AsyncClient，
+    启动时初始化 Redis 连接池、httpx AsyncClient 与 LLM 连接池，
     任一初始化失败不崩溃（降级运行，由调用方处理异常）。
-    关闭时无条件关闭两个池（close 幂等）。
+    关闭时无条件关闭所有池（close 幂等）。
     """
     logger.info("agent_service_started", host=settings.host, port=settings.port)
 
@@ -47,6 +52,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.error("http_client_pool_init_failed", exc_info=True)
 
+    # LLM 连接池（ChatOpenAI 复用受限 AsyncClient，防 DeepSeek CLOSE-WAIT 堆积）
+    try:
+        await LlmHttpClient.init(timeout=_LLM_HTTP_TIMEOUT)
+    except Exception:
+        logger.error("llm_http_client_init_failed", exc_info=True)
+
     # 启动定时调度（在连接池初始化之后；异常不崩溃，降级为无调度运行）
     try:
         start_scheduler()
@@ -56,9 +67,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 启动事件消费者（quick_snapshot_enabled 时）
     if settings.quick_snapshot_enabled:
         try:
-            from aistock_agent.services.event_bus import EventBus
+            from aistock_agent.services.event_bus import EventBus, set_default_bus
             from aistock_agent.services.event_consumers import ConsumerContext, start_all_consumers
-            from aistock_agent.services.redis_pool import RedisPool as _RP
+            from aistock_agent.services.redis_pool import RedisPool as _RP  # noqa: N814
 
             redis = await _RP.get_client()
             event_bus = EventBus(
@@ -68,6 +79,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 consumer_group=settings.event_bus_consumer_group,
                 stream_max_len=settings.event_stream_max_len,
             )
+            set_default_bus(event_bus)  # 供 review.run() 双保险补发 review_done 使用
             ctx = ConsumerContext(event_bus)
             start_all_consumers(ctx)
             logger.info("event_consumers_started")
@@ -80,14 +92,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     stock_trace_redis: aioredis.Redis | None = None
     if settings.stock_trace_consumer_enabled:
         try:
-            from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
             import aistock_agent.workers.stock_trace_consumer as _stc_module
+            from aistock_agent.workers.stock_trace_consumer import StockTraceConsumer
 
-            stock_trace_redis = aioredis.from_url(
+            # 局部变量收窄：from_url 无注解（返回 Any），直接赋回声明为 Redis | None 的
+            # stock_trace_redis 会被退回声明类型而报「Redis | None 传给要求 Redis 的
+            # StockTraceConsumer」——运行期 from_url 恒返回 Redis。此处先落局部变量再传。
+            # redis.asyncio.from_url 无类型存根（no-untyped-call）：cast 为类型化可调用
+            # 后再调用（零运行时影响），返回值收窄为 Redis。
+            _from_url = cast("Callable[..., aioredis.Redis]", aioredis.from_url)
+            redis_client = _from_url(
                 settings.stock_trace_redis_url,
                 max_connections=settings.redis_max_connections,
             )
-            consumer = StockTraceConsumer(stock_trace_redis)
+            stock_trace_redis = redis_client
+            consumer = StockTraceConsumer(redis_client)
             stock_trace_consumer_task = asyncio.create_task(consumer.run_forever())
             # 标记 consumer 已启用，供 /health/ready 检查心跳
             _stc_module._stock_trace_consumer_enabled = True
@@ -99,9 +118,47 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 await stock_trace_redis.aclose()
                 stock_trace_redis = None
 
+    # 启动自选股洞察 Consumer（集成模式）：独立 aioredis 连接（insight_redis_url, db=3），
+    # 不复用 RedisPool 单例（db=1）。worker 为真实归因 worker（Task 11，替换占位实现）。
+    insight_consumer_task: asyncio.Task[None] | None = None
+    insight_redis: aioredis.Redis | None = None
+    if settings.insight_consumer_enabled:
+        try:
+            from aistock_agent.workers.insight_consumer import InsightConsumer
+            from aistock_agent.workers.insight_worker import InsightWorker
+
+            insight_redis = aioredis.from_url(  # type: ignore[no-untyped-call]
+                settings.insight_redis_url,
+                max_connections=settings.redis_max_connections,
+            )
+            insight_consumer = InsightConsumer(
+                insight_redis, InsightWorker()  # type: ignore[arg-type]
+            )
+            insight_consumer_task = asyncio.create_task(insight_consumer.run_forever())
+            logger.info("insight_consumer_started_in_process")
+        except Exception:
+            logger.error("insight_consumer_start_failed", exc_info=True)
+            # 启动失败时清理已创建的 redis 连接
+            if insight_redis is not None:
+                await insight_redis.aclose()
+                insight_redis = None
+
     yield
 
-    # 关闭：先停 Stock Trace Consumer，再停事件消费者，再停调度器，最后关连接池
+    # 关闭：先停 insight Consumer，再停 Stock Trace Consumer，
+    # 再停事件消费者，再停调度器，最后关连接池
+    if insight_consumer_task is not None:
+        insight_consumer_task.cancel()
+        try:
+            await insight_consumer_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("insight_consumer_stop_failed", exc_info=True)
+    if insight_redis is not None:
+        await insight_redis.aclose()
+        logger.info("insight_consumer_stopped_in_process")
+
     if stock_trace_consumer_task is not None:
         stock_trace_consumer_task.cancel()
         try:
@@ -116,15 +173,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     if settings.quick_snapshot_enabled:
         try:
+            from aistock_agent.services.event_bus import set_default_bus
             from aistock_agent.services.event_consumers import stop_all_consumers
 
             await stop_all_consumers()
+            set_default_bus(None)  # 清除默认总线引用，防止关闭后泄漏
         except Exception:
             logger.error("event_consumers_stop_failed", exc_info=True)
 
     shutdown_scheduler()
     await RedisPool.close()
     await HttpClientPool.close()
+    await LlmHttpClient.close()
     logger.info("agent_service_stopped")
 
 
@@ -140,6 +200,7 @@ setup_middleware(app)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/agent", tags=["agent"])
+app.include_router(tasks_router, prefix="/api/agent")
 app.include_router(ws_router, prefix="/api/agent", tags=["websocket"])
 # 健康检查挂载到根路径：/health（liveness）、/health/ready（readiness）
 app.include_router(health_router)

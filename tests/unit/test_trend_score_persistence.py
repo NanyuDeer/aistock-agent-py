@@ -22,12 +22,13 @@ async def test_scheduler_persists_trend_score_with_data_source(monkeypatch):
     monkeypatch.setattr(trend_score, "get_tools", lambda _: [])
     monkeypatch.setattr(trend_score, "create_react_agent", lambda *_: agent)
     monkeypatch.setattr(trend_score, "_archive_trend_score", lambda _: None)
+    # 必须 patch 类方法：实例属性还原会在 node_api 单例上留下遮蔽类属性的实例属性（污染回放隔离）
     monkeypatch.setattr(
-        trend_score.node_api,
+        type(trend_score.node_api),
         "get_list",
         AsyncMock(return_value=[{"symbol": "600519"}]),
     )
-    monkeypatch.setattr(trend_score.node_api, "save_analysis_report", save_report)
+    monkeypatch.setattr(type(trend_score.node_api), "save_analysis_report", save_report)
 
     await trend_score.run({
         "messages": [],

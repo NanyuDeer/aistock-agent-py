@@ -24,9 +24,7 @@ def parse_intent(llm_output: str, user_message: str) -> dict[str, object]:
     tag_code: str | None = None
 
     # 从 LLM 输出解析意图（if-elif 顺序决定优先级）
-    if "ai_advisor" in output:
-        intent = "ai_advisor"
-    elif "trend_score" in output:
+    if "trend_score" in output:
         intent = "trend_score"
     elif "morning" in output:
         intent = "morning"

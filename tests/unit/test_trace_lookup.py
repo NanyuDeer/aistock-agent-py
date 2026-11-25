@@ -2,7 +2,7 @@
 
 覆盖四类 Node 返回场景：正常完成、Node 异常、跨对象校验失败、报告不存在。
 测试不调用 Redis、Node、LLM 或真实网络；用 NodeApiClient 构造器替身注入
-AsyncMock，并直接测试 services.market_trace_qa.load_validated_trace。
+AsyncMock，并直接测试 services.trace_loader.load_validated_trace。
 """
 
 from datetime import date
@@ -13,7 +13,7 @@ import pytest
 from aistock_agent.agents.workers import review as review_module
 from aistock_agent.services import data_client
 from aistock_agent.services.data_client import ReviewReportReadResult
-from aistock_agent.services.market_trace_qa import load_validated_trace
+from aistock_agent.services.trace_loader import load_validated_trace
 
 
 def _completed_report() -> dict[str, object]:

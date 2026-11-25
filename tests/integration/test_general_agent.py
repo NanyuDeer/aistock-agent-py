@@ -1,7 +1,7 @@
 """general_agent run() 单元测试 — 兜底节点
 
 mock create_react_agent，验证：
-- 工具集绑定（get_quote）
+- 工具集绑定（get_quote + 业绩报告查询工具）
 - SystemMessage 注入（GENERAL_PROMPT）
 - final_response 提取
 - 使用 get_quick_think（非 deep_think）— general 的关键差异，入口校验项
@@ -18,7 +18,12 @@ from aistock_agent.prompts.general.system import GENERAL_PROMPT
 _CREATE_REACT_AGENT = "aistock_agent.agents.general.node.create_react_agent"
 _GET_QUICK_THINK = "aistock_agent.agents.general.node.get_quick_think"
 
-EXPECTED_TOOL_NAMES = {"get_quote"}
+# d3f6930 起 general 新增业绩报告查询工具（registry 正规注册），期望集随之更新
+EXPECTED_TOOL_NAMES = {
+    "get_quote",
+    "get_performance_report",
+    "get_latest_performance_reports",
+}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -30,7 +35,7 @@ def _make_mock_agent(messages: list) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_general_agent_tools_bound_correctly():
-    """create_react_agent 被调用时 tools 参数为 get_quote。"""
+    """create_react_agent 被调用时 tools 参数为期望的工具集。"""
     mock_agent = _make_mock_agent([AIMessage(content="兜底回复")])
     with patch(_GET_QUICK_THINK, return_value=MagicMock()):
         with patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create:

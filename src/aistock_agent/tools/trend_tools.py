@@ -198,6 +198,6 @@ register("trend_score", get_trend_score)
 register("trend_score", get_trend_score_detail)
 register("trend_score", get_trend_top_stocks)
 
-# 同时注册到 general category，供 ai_advisor_agent 降级使用
+# 同时注册到 general category，供 trend_score 等 worker 兜底使用
 register("general", get_trend_score)
 register("general", get_trend_top_stocks)

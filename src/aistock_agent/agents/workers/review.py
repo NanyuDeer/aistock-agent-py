@@ -1,6 +1,7 @@
 """Review Agent — 收盘溯源归因（受限 JSON 推理）
 
-模式：单次 get_deep_think().ainvoke，输入系统提示词 + JSON 快照
+模式：get_deep_think().ainvoke，输入系统提示词 + JSON 快照；
+LLM 输出解析失败时重试一次（_generate_trace_with_retry，2026-08-18）
 校验：MarketTraceResult.model_validate_json + validate_trace_against_snapshot
 缓存：Redis TTL=2小时（briefing:review:YYYY-MM-DD）
 归档：docs/agent-outputs/review/YYYY-MM-DD-HHMM-review.md
@@ -9,13 +10,16 @@
 build_market_trace_snapshot 冻结的 MarketTraceSnapshot，LLM 只做归因推理。
 """
 
+import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.review import REVIEW_PROMPT
 from aistock_agent.schemas.market_trace import (
     CandidateExplanation,
@@ -26,6 +30,7 @@ from aistock_agent.schemas.market_trace import (
     ReviewArtifact,
     SourceRecord,
 )
+from aistock_agent.schemas.target import Target
 from aistock_agent.services.archiver import (
     archive_market_trace_snapshot,
     archive_review,
@@ -35,7 +40,15 @@ from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.services.market_trace_snapshot import build_market_trace_snapshot
 from aistock_agent.services.phenomenon_discovery import discover_market_phenomenon
+from aistock_agent.services.target_profile import make_target
 from aistock_agent.state.schema import AgentState
+from aistock_agent.trace.chain import (
+    TRACE_CHAIN_STAGES,
+    PredictionConfirmation,
+)
+from aistock_agent.trace.chain import (
+    validate_chain_stages as _validate_chain_stages,
+)
 from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
@@ -63,21 +76,87 @@ REQUIRED_CANDIDATE_CATEGORIES: set[str] = {
     "market_positioning_liquidity",
 }
 
-# primary/alternative chain 必须按顺序包含的 6 个阶段
-REQUIRED_CHAIN_STAGES: list[str] = [
-    "structural_root",
-    "trigger",
-    "transmission",
-    "exposure",
-    "repricing",
-    "observable_result",
-]
+# primary/alternative chain 必须按顺序包含的 6 个阶段（共享事实源 trace.chain）
+REQUIRED_CHAIN_STAGES: list[str] = list(TRACE_CHAIN_STAGES)
 
 # 降级文本 — 校验失败、LLM 异常、快照构建失败时返回
 DEGRADED_RESPONSE = "收盘溯源生成暂时不可用，请稍后重试"
 
+# MarketTraceResult 生成 max_tokens（2026-08-13 事故：默认 4000 下 deepseek
+# thinking 模式 reasoning_content 占用 token，JSON 截断 → 整份降级）。
+# 与变体生成 _MAX_VARIANT_OUTPUT_TOKENS(12000) 同量级，含完整 sources 结构。
+_REVIEW_TRACE_MAX_TOKENS = 16000
+
 # 代码围栏剥离 — 防御性处理 LLM 可能包裹的 ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+# 大盘溯源渠道B探针 target（对齐 Spec B _enrich_market_predict_input 绑定的上证指数）
+_INDEX_TARGET: Target = make_target("上证指数") or Target(
+    kind="index", internal_id="000001.SH", code="000001.SH", name="上证指数"
+)
+
+
+def attach_confirmations_to_trace(
+    trace: MarketTraceResult,
+    confirmations: list[PredictionConfirmation],
+) -> bool:
+    """把采集到的渠道B确认写回归因结论层（root）——不依赖 primary 链存在。
+
+    2026-10-06：大盘 primary_chain_id 长期为空（attribution_status=hypothesis 时系统强制
+    清空），旧实现要求 primary 链非空才回填 → 渠道B 从未生效。改为「结论层必写 + primary
+    链存在时双写」，保持既有链语义的同时让回路真正闭合。
+
+    返回是否发生了回填（供调用方判断是否值得打日志）。
+    """
+    if not confirmations:
+        return False
+    trace.confirmed_prediction = list(confirmations)
+    if trace.primary_chain_id is None:
+        return True
+    for candidate in trace.candidates:
+        if candidate.id == trace.primary_chain_id and candidate.chain is not None:
+            candidate.chain.confirmed_prediction = list(confirmations)
+            break
+    return True
+
+
+def _trace_conclusion_summary(trace: MarketTraceResult) -> str:
+    """取归因结论文本：优先 attribution_summary，None 时退化到 primary 链 observable_result。"""
+    if trace.attribution_summary:
+        return trace.attribution_summary
+    if trace.primary_chain_id is None:
+        return ""
+    for candidate in trace.candidates:
+        if candidate.id == trace.primary_chain_id and candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                if node.stage == "observable_result":
+                    return node.claim
+    return ""
+
+
+async def _attach_scene_confirmations(trace: MarketTraceResult, report_date: str) -> None:
+    """Spec Cbis：溯源归因结论产出后，顺手核对大盘历史预判场景，回填渠道B确认.
+
+    2026-10-06：改为不依赖 primary 链——只要归因结论非空即可核对（结论取值走
+    ``_trace_conclusion_summary``，其本身已支持无 primary 链时退化为 attribution_summary）。
+    探针失败降级为无确认，不阻断后续步骤/不向调用方抛异常。
+    """
+    if not _trace_conclusion_summary(trace):
+        return
+    # 函数内 import 避免与 aistock_agent.skills（→ evidence_resolver → review）
+    # 形成循环依赖，与 _publish_review_done_if_available 的延迟 import 同模式。
+    from aistock_agent.skills.scene_probe import probe_scene_confirmation
+
+    try:
+        confirmations = await probe_scene_confirmation(
+            target=_INDEX_TARGET,
+            trace_id=f"review:{report_date}",
+            conclusion=_trace_conclusion_summary(trace),
+        )
+        attach_confirmations_to_trace(trace, confirmations)
+    except Exception:
+        logger.debug("review_cbis_probe_failed", report_date=report_date, exc_info=True)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -86,6 +165,264 @@ def _strip_code_fences(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+def _build_trace_llm() -> object:
+    """构建复盘溯源 LLM：统一 run/run_review 两入口的配置。
+
+    2026-08-13 服务器事故：默认 max_tokens 4000 下 deepseek thinking 模式
+    reasoning_content 占用大量 token，MarketTraceResult JSON（含完整 sources）
+    被截断或输出为空 → model_validate_json EOF → 整份降级"收盘溯源生成暂时
+    不可用"。显式禁用 thinking + 加大 max_tokens（_REVIEW_TRACE_MAX_TOKENS，
+    与变体生成同量级）。run_review 曾遗漏本配置（get_deep_think() 默认参数）
+    导致偶发空输出降级（2026-08-18）——所有入口必须走本 helper。
+    """
+    base_url = (
+        settings.deep_think_base_url or settings.openai_base_url
+    ).lower()
+    extra_body = (
+        {"thinking": {"type": "disabled"}} if "deepseek" in base_url else None
+    )
+    return get_deep_think(
+        max_tokens=_REVIEW_TRACE_MAX_TOKENS,
+        extra_body=extra_body,
+    )
+
+
+async def _generate_trace_with_retry(
+    llm: object,
+    messages: Sequence[object],
+) -> MarketTraceResult:
+    """单次 LLM 推理生成 MarketTraceResult，输出解析失败时重试一次。
+
+    线上复盘多次因单次 LLM 输出不合规整份降级（2026-08-18：15:30 空响应 → JSON EOF；
+    手动补跑 event_hits[].result 越界枚举 → literal_error），本函数在解析失败时
+    重试一次，二次仍失败抛最后一次异常（调用方降级为"生成暂时不可用"）。
+    仅重试 LLM 输出解析；确定性语义校验（validate_trace_against_snapshot）的
+    重试由 ``_generate_validated_trace`` 负责（带错误反馈、最多一次）。
+    """
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            ai_message = await llm.ainvoke(messages)  # type: ignore[attr-defined]
+            raw_text = (
+                ai_message.content
+                if isinstance(ai_message.content, str)
+                else str(ai_message.content)
+            )
+            cleaned = _strip_code_fences(raw_text)
+            return MarketTraceResult.model_validate_json(
+                _normalize_llm_trace_json(cleaned)
+            )
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if attempt == 0:
+                logger.warning(
+                    "review_trace_llm_retry",
+                    retry_index=attempt,
+                    error=str(e),
+                    exc_info=True,
+                )
+                continue
+    assert last_error is not None
+    raise last_error
+
+
+_VALIDATION_RETRY_INSTRUCTION = """上一条 MarketTraceResult 未通过确定性校验：{error}
+
+请重新输出完整 JSON（schema 不变），并确保：
+- 所有 evidence_ids / supporting_evidence_ids / counter_evidence_ids 必须来自输入
+  snapshot.sources 的 key，禁止臆造或改写 source_id；
+- origin="peripheral" 的 event_evidence 只能出现在 global_risk_liquidity、
+  market_positioning_liquidity 或 industry_technology_supply 候选（含链节点与反证）；
+- 四个固定 category 各一条候选，链阶段、primary_chain_id/alternative_chain_id、
+  attribution_status 等均需满足校验约束。
+只输出 JSON，不要 Markdown 或解释。"""
+
+
+async def _generate_validated_trace(
+    llm: object,
+    messages: Sequence[object],
+    snapshot: MarketTraceSnapshot,
+) -> MarketTraceResult:
+    """LLM 生成 + 确定性校验；校验失败带错误反馈重试一次。
+
+    2026-11-08 事故：模型连续违反已明示的确定性约束（外围证据写进境内类目、
+    臆造 source_id）→ 校验拒绝 → 整份报告降级、当日无归因链。此类错误模型可
+    按反馈自我纠正，失败即无报告，成本远高于一次重试；重试仍失败则照常降级。
+    """
+    trace = await _generate_trace_with_retry(llm, messages)
+    try:
+        validate_trace_against_snapshot(trace, snapshot)
+        return trace
+    except ValueError as e:
+        logger.warning("review_trace_validation_retry", error=str(e))
+        retry_messages = [
+            *messages,
+            HumanMessage(content=_VALIDATION_RETRY_INSTRUCTION.format(error=str(e))),
+        ]
+        trace = await _generate_trace_with_retry(llm, retry_messages)
+        validate_trace_against_snapshot(trace, snapshot)
+        return trace
+
+
+# ============================================================================
+# LLM 输出字段名归一化 — prompt 强化的兜底
+# ============================================================================
+
+# LLM 常见错误字段名 → schema 正确字段名
+_SECTOR_HIT_FIELD_MAP: dict[str, str] = {
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+}
+
+_EVENT_HIT_FIELD_MAP: dict[str, str] = {
+    "event": "event_title",
+    "title": "event_title",
+    "predicted_direction": "morning_direction",
+    "expected_direction": "morning_direction",
+    "verification": "result",
+    "actual_effect": "actual_impact",
+    "impact": "actual_impact",
+}
+
+# 需要删除的多余字段
+_FIELDS_TO_REMOVE: set[str] = {"evidence_ids"}
+
+# 合法方向值
+_DIRECTION_VALUES: set[str] = {"bullish", "bearish", "neutral"}
+# SectorHit result 合法值
+_SECTOR_RESULT_VALUES: set[str] = {"hit", "miss"}
+
+# 相反方向映射（用于从 result=miss 推断 actual_direction）
+_OPPOSITE_DIRECTION: dict[str, str] = {
+    "bullish": "bearish",
+    "bearish": "bullish",
+    "neutral": "neutral",
+}
+
+# EventHit.result 合法值（LLM 常把 PredictionValidation.status 的合法值如
+# partial 填进来，越界取值须归一化，防整份报告降级，2026-08-18 线上事故）
+_EVENT_RESULT_VALUES: set[str] = {"hit", "miss", "unverifiable"}
+
+
+def _normalize_sector_hit(hit: dict[str, object]) -> dict[str, object]:
+    """归一化单个 SectorHit 字段名。"""
+    nh = dict(hit)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        nh.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _SECTOR_HIT_FIELD_MAP.items():
+        if wrong in nh:
+            if correct not in nh:
+                nh[correct] = nh[wrong]
+            nh.pop(wrong)
+    # 修正 actual_direction 被填入 result 值的情况（LLM 常犯错误）
+    actual = nh.get("actual_direction")
+    if actual and actual not in _DIRECTION_VALUES:
+        # actual_direction 被填成了 hit/miss，移动到 result
+        if actual in _SECTOR_RESULT_VALUES and "result" not in nh:
+            nh["result"] = actual
+        nh.pop("actual_direction", None)
+    # 如果 actual_direction 缺失但有 result，从 morning_direction + result 推断
+    if "result" in nh and "actual_direction" not in nh:
+        morning_val = nh.get("morning_direction", "neutral")
+        morning = morning_val if isinstance(morning_val, str) else "neutral"
+        if nh["result"] == "hit":
+            nh["actual_direction"] = morning
+        elif nh["result"] == "miss":
+            nh["actual_direction"] = _OPPOSITE_DIRECTION.get(morning, "neutral")
+        else:
+            nh["actual_direction"] = "neutral"
+    # 确保 deviation_note 存在
+    nh.setdefault("deviation_note", "")
+    return nh
+
+
+def _normalize_event_hit(evt: dict[str, object]) -> dict[str, object]:
+    """归一化单个 EventHit 字段名。"""
+    ne = dict(evt)
+    # 删除多余字段
+    for f in _FIELDS_TO_REMOVE:
+        ne.pop(f, None)
+    # 字段名映射
+    for wrong, correct in _EVENT_HIT_FIELD_MAP.items():
+        if wrong in ne:
+            if correct not in ne:
+                ne[correct] = ne[wrong]
+            ne.pop(wrong)
+    # 确保 actual_impact 存在
+    ne.setdefault("actual_impact", "")
+    # 确保 note 存在
+    ne.setdefault("note", "")
+    # 值归一化：LLM 常把 status 的合法值（如 partial）填进 EventHit.result，
+    # 越界取值兜底为 unverifiable（防 literal 校验失败拖垮整份报告，2026-08-18）
+    if ne.get("result") not in _EVENT_RESULT_VALUES:
+        ne["result"] = "unverifiable"
+    return ne
+
+
+def _normalize_prediction_validation(raw_pv: dict[str, object]) -> dict[str, object]:
+    """归一化 LLM 输出的 prediction_validation 字段名和值。
+
+    LLM 经常用 predicted_direction/event/verification 等字段名，
+    而非 schema 要求的 morning_direction/event_title/result。
+    此函数在 model_validate 前做字段名映射，作为 prompt 强化的兜底。
+    """
+    pv = dict(raw_pv)
+
+    # 归一化 sector_hits
+    raw_hits = pv.get("sector_hits", [])
+    if isinstance(raw_hits, list):
+        pv["sector_hits"] = [
+            _normalize_sector_hit(h) for h in raw_hits if isinstance(h, dict)
+        ]
+
+    # 归一化 event_hits
+    raw_events = pv.get("event_hits", [])
+    if isinstance(raw_events, list):
+        pv["event_hits"] = [
+            _normalize_event_hit(e) for e in raw_events if isinstance(e, dict)
+        ]
+
+    return pv
+
+
+def _normalize_llm_trace_json(raw_json: str) -> str:
+    """解析 LLM 输出的 JSON，归一化字段名与归因形态后返回。
+
+    如果解析失败或无 prediction_validation，原样返回。
+    除字段名归一化外，还兜底修正 hypothesis 归因的非法形态：
+    - attribution_status="hypothesis" 时强制清空 primary_chain_id
+      （hypothesis 表示证据不足、未确认主因，禁止选择主链）
+    - hypothesis 时把 supported 候选降为 weak
+      （hypothesis 只允许 weak 备选；LLM 可能在证据未闭环时误标 supported）
+    否则 LLM 输出自相矛盾会被 validate_trace_against_snapshot 拒绝，
+    导致整份报告降级为"生成暂时不可用"。
+    """
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return raw_json
+
+    if not isinstance(data, dict):
+        return raw_json
+
+    pv = data.get("prediction_validation")
+    if isinstance(pv, dict) and pv.get("status") != "no_forecast":
+        data["prediction_validation"] = _normalize_prediction_validation(pv)
+
+    if data.get("attribution_status") == "hypothesis":
+        if data.get("primary_chain_id") is not None:
+            data["primary_chain_id"] = None
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("status") == "supported":
+                    candidate["status"] = "weak"
+
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ============================================================================
@@ -152,11 +489,7 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
         primary = candidate_by_id.get(trace.primary_chain_id)
         if primary is None or primary.chain is None:
             raise ValueError("primary candidate has no chain")
-        primary_stages = [n.stage for n in primary.chain.nodes]
-        if primary_stages != REQUIRED_CHAIN_STAGES:
-            raise ValueError(
-                f"primary chain stages mismatch: {primary_stages} != {REQUIRED_CHAIN_STAGES}"
-            )
+        _validate_chain_stages(primary.chain.nodes)
 
     # 无论 primary 是否为 null，非空 alternative 都必须通过 6 阶段校验。
     # 修复前：primary_chain_id=None 时直接 return，跳过 alternative 校验，
@@ -165,11 +498,7 @@ def validate_chain_stages(trace: MarketTraceResult) -> None:
         alt = candidate_by_id.get(trace.alternative_chain_id)
         if alt is None or alt.chain is None:
             raise ValueError("alternative candidate has no chain")
-        alt_stages = [n.stage for n in alt.chain.nodes]
-        if alt_stages != REQUIRED_CHAIN_STAGES:
-            raise ValueError(
-                f"alternative chain stages mismatch: {alt_stages} != {REQUIRED_CHAIN_STAGES}"
-            )
+        _validate_chain_stages(alt.chain.nodes)
 
 
 def _normalize_discovery_for_comparison(
@@ -370,6 +699,78 @@ def validate_trace_against_snapshot(
                 f"{label} observable_result must reference primary phenomenon fact_ids"
             )
 
+    # ── prediction_validation 校验 ──
+    morning_forecast = snapshot.morning_forecast
+    pv = trace.prediction_validation
+
+    if morning_forecast is not None:
+        if pv is None:
+            raise ValueError(
+                "prediction_validation 不得为 None：snapshot.morning_forecast "
+                "非空时必须输出预判对照"
+            )
+        if pv.status == "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 不得为 no_forecast：morning_forecast 非空"
+            )
+        if pv.status in {"hit", "partial", "miss"} and len(pv.sector_hits) == 0:
+            raise ValueError(
+                f"prediction_validation.status={pv.status} 时 sector_hits 不得为空"
+            )
+    else:
+        # morning_forecast 为空时，pv 必须为 None 或 status=no_forecast
+        if pv is not None and pv.status != "no_forecast":
+            raise ValueError(
+                "prediction_validation.status 必须为 no_forecast：snapshot.morning_forecast 为空"
+            )
+        if pv is not None and (len(pv.sector_hits) > 0 or len(pv.event_hits) > 0):
+            raise ValueError(
+                "prediction_validation.status=no_forecast 时 sector_hits/event_hits 必须为空"
+            )
+
+    _validate_origin_consumption(trace, snapshot)
+
+
+# 外围事件可支撑的类目：全球风险/流动性、市场定位/流动性，以及产业技术供给。
+# 产业链与科技供给天然跨境（2026-11-08 事故：亚洲 AI 抛售、台股半导体暴跌是
+# A 股科技走弱的合法 trigger，旧集合只放行前两类 → 模型两次违规 → 当日降级）。
+# domestic_macro_policy 仍严格禁止：境内政策只能由境内证据支撑。
+_OVERSEAS_MACRO_ALLOWED_CATEGORIES = frozenset(
+    {
+        "global_risk_liquidity",
+        "market_positioning_liquidity",
+        "industry_technology_supply",
+    }
+)
+
+
+def _validate_origin_consumption(
+    trace: MarketTraceResult, snapshot: MarketTraceSnapshot
+) -> None:
+    """外围证据不得支撑非外盘类别（违反 → ValueError → 反馈重试/降级）。"""
+    for candidate in trace.candidates:
+        cited: dict[str, list[str]] = {}
+        for field, source_ids in (
+            ("supporting", candidate.supporting_evidence_ids),
+            ("counter", candidate.counter_evidence_ids),
+        ):
+            for sid in source_ids:
+                cited.setdefault(sid, []).append(field)
+        if candidate.chain is not None:
+            for node in candidate.chain.nodes:
+                for sid in node.evidence_ids:
+                    cited.setdefault(sid, []).append(f"chain:{node.stage}")
+        for sid, locations in cited.items():
+            src = snapshot.sources.get(sid)
+            if src is None or src.kind != "event_evidence" or src.origin != "peripheral":
+                continue
+            if candidate.category not in _OVERSEAS_MACRO_ALLOWED_CATEGORIES:
+                raise ValueError(
+                    f"peripheral evidence {sid} cannot support {candidate.category}"
+                    f" (candidate={candidate.id}, status={candidate.status},"
+                    f" cited_in={','.join(locations)})"
+                )
+
 
 # ============================================================================
 # Markdown 渲染 — 从已验证的 JSON 工件渲染展示层
@@ -489,6 +890,36 @@ def render_market_trace_markdown(
         lines.append("- 证据不足，未确认主因。")
     lines.append("")
 
+    # 预判对照章节
+    pv = trace.prediction_validation
+    lines.append("## 预判对照")
+    if pv is None or pv.status == "no_forecast":
+        lines.append("无晨报预测可对照。")
+    else:
+        status_map = {"hit": "全部命中", "partial": "部分命中", "miss": "全部偏离"}
+        lines.append(f"- 对照状态：{status_map.get(pv.status, pv.status)}")
+        if pv.sector_hits:
+            lines.append("- 板块方向对照：")
+            for hit in pv.sector_hits:
+                result_text = "命中" if hit.result == "hit" else "偏离"
+                line = (
+                    f"  - {hit.sector}：晨报看{hit.morning_direction}，"
+                    f"实际{hit.actual_direction}，{result_text}"
+                )
+                if hit.result == "miss" and hit.deviation_note:
+                    line += f"（原因：{hit.deviation_note}）"
+                lines.append(line)
+        if pv.event_hits:
+            lines.append("- 事件影响对照：")
+            for evt in pv.event_hits:
+                lines.append(
+                    f"  - {evt.event_title}：预期{evt.morning_direction}，"
+                    f"实际{evt.actual_impact}，{evt.result}"
+                )
+        if pv.overall_note:
+            lines.append(f"- 整体结论：{pv.overall_note}")
+    lines.append("")
+
     lines.append("## 候选解释与反证")
     if trace.candidates:
         for candidate in trace.candidates:
@@ -577,17 +1008,27 @@ def _first_effective_line(text: str) -> str:
 
 
 def _extract_trace_summary(markdown: str) -> str:
-    """从复盘 markdown 提取摘要（主导现象段首个有效行）。
+    """从复盘 markdown 提取摘要（主导现象段的可读摘要）。
 
     摘要提取顺序：
-    1. ``## 主导现象`` 段落的首个有效行（新 markdown 格式，render_market_trace_markdown 产出）
-    2. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
-    3. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
+    1. ``## 确认的市场现象`` 段落中 ``- 摘要：xxx`` 行的内容（新 markdown 格式，
+       render_market_trace_markdown 产出；该行是 LLM 生成的现象描述，易读中文，
+       约 15-30 字，符合晨报结论字数参考）
+    2. 回退：``## 主导现象`` 段落的首个有效行（旧格式或摘要行缺失）
+    3. ``## 步骤4`` 段落的首个有效行（旧 markdown 格式，兼容已缓存的旧报告）
+    4. 整段 markdown 的首个有效行（兜底，避免下游拿到空字符串）
     """
     summary = ""
     m = _DOMINANT_PHENOMENON_RE.search(markdown)
     if m:
-        summary = _first_effective_line(m.group(1))
+        section = m.group(1)
+        # 优先取 "- 摘要：xxx" 行内容（LLM 生成的现象描述，避免取到
+        # "- 类型：broad_rally" 这类内部字段行）
+        summary_match = re.search(r"^\s*-\s*摘要[：:]\s*(.+)$", section, re.MULTILINE)
+        if summary_match:
+            summary = _first_effective_line(summary_match.group(1))
+        if not summary:
+            summary = _first_effective_line(section)
     if not summary:
         m = _STEP_FOUR_RE.search(markdown)
         if m:
@@ -649,31 +1090,71 @@ def _build_review_report(artifact: ReviewArtifact) -> dict[str, object]:
     return content
 
 
-async def _persist_review_report(
-    state: AgentState,
-    artifact: ReviewArtifact,
-) -> None:
-    """按 schema v2 把复盘写入 Node 端 analysis_reports；仅 scheduler 触发时写库。
+_REVIEW_PERSIST_ATTEMPTS = 2
 
-    任何持久化异常都只打日志、不向上抛，保证复盘主流程的返回值不受影响。
+
+async def _persist_review_report(
+    report_date: str,
+    artifact: ReviewArtifact,
+    *,
+    data_source: str = "review_agent",
+) -> bool:
+    """把复盘写入 Node 端 analysis_reports；返回是否确认写库成功。
+
+    失败重试一次（Node 端偶发 5xx/网络抖动），仍失败只打 error 并返回 False，
+    不向上抛——复盘 markdown 仍要交付。调用方必须用返回值决定是否发布
+    review_done / 返回 status=ok，禁止把「未写库」当成功（2026-11-20 事故：
+    晚报因此读不到 review，降级为空壳）。
     """
-    if state.get("trigger_source") not in {"scheduler", "manual"}:
+    content = _build_review_report(artifact)
+    for attempt in range(1, _REVIEW_PERSIST_ATTEMPTS + 1):
+        try:
+            saved = await node_api.save_analysis_report(
+                report_type="review",
+                report_date=report_date,
+                data_source=data_source,
+                content=content,
+            )
+            if saved is not None:
+                return True
+            logger.error(
+                "review_persist_failed",
+                report_date=report_date,
+                attempt=attempt,
+                reason="save_analysis_report returned None",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "review_persist_failed",
+                report_date=report_date,
+                attempt=attempt,
+                error=str(e),
+                exc_info=True,
+            )
+    return False
+
+
+async def _publish_review_done_if_available(report_date: str) -> None:
+    """双保险：review 成功持久化后补发 review_done，供 PredictionConsumer 消费。
+
+    旧串行链路（run() 内联预测）已退役（PR-A/T4），预测改由 review_done
+    事件驱动；无默认总线时显式告警（旧串行断链可观测，验收 3）。函数体内
+    import 避免与 event_consumers（顶层 import review）形成循环依赖。
+    发布失败仅告警不阻断 review（永不 500）。
+    """
+    from aistock_agent.services.event_bus import get_default_bus
+    from aistock_agent.services.event_consumers import publish_review_done
+
+    bus = get_default_bus()
+    if bus is None:
+        logger.warning("review_done_skipped_no_event_bus", report_date=report_date)
         return
-    try:
-        report_date = state.get("report_date") or shanghai_today().isoformat()
-        content = _build_review_report(artifact)
-        await node_api.save_analysis_report(
-            report_type="review",
-            report_date=report_date,
-            data_source="review_agent",
-            content=content,
-        )
-    except Exception as e:
-        logger.warning(
-            "review_persist_failed",
-            error=str(e),
-            exc_info=True,
-        )
+    # 同一天重复触发时 event_id 幂等，publish_review_done 内部吞掉发布异常
+    await publish_review_done(
+        bus,
+        report_date=report_date,
+        trace_id=f"legacy-{report_date}",
+    )
 
 
 # ============================================================================
@@ -743,6 +1224,8 @@ async def run(state: AgentState) -> dict[str, object]:
             # 展示层字段，再传给 _persist_review_report 并返回。
             # 该路径禁止请求 Node 收盘数据、yfinance、财联社、Tavily 或 LLM；
             # 也不重写 Redis 缓存（命中即用，重写无收益且会增加风险）。
+            # 预测已退役（PR-A/T4）：prediction 一律置 None，markdown 不再拼接
+            # 预测章节（前端已改读 records）。
             rendered_markdown = render_market_trace_markdown(artifact.trace, artifact.snapshot)
             rebuilt_artifact = ReviewArtifact(
                 schema_version=artifact.schema_version,
@@ -751,9 +1234,22 @@ async def run(state: AgentState) -> dict[str, object]:
                 markdown=rendered_markdown,
                 trace_summary=_extract_trace_summary(rendered_markdown),
                 sectors=_extract_review_sectors(rendered_markdown),
+                prediction=None,
             )
-            await _persist_review_report(state, rebuilt_artifact)
-            return {"final_response": rendered_markdown}
+            # 与完整路径（步骤 8）保持一致：只有 scheduler / manual 触发才写公共报告。
+            # 普通用户访问命中缓存时不得写库——否则用户的每次浏览都会覆盖当日复盘，
+            # 而这份复盘的 data_source 和触发来源都不可控。
+            persisted = False
+            if state.get("trigger_source") in {"scheduler", "manual"}:
+                persisted = await _persist_review_report(report_date, rebuilt_artifact)
+            # 双保险：缓存命中且确认写库后才补发 review_done
+            if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
+                await _publish_review_done_if_available(report_date)
+            # A-5 N2：缓存命中路径同样附带结构化 sectors
+            return {
+                "final_response": rendered_markdown,
+                "sectors": _extract_review_sectors(rendered_markdown),
+            }
         # 缓存内容无效（如旧纯文本、日期不一致或语义非法），视为未命中，继续走完整路径
 
     # 2. 冻结事实快照（必须在 LLM 调用前）
@@ -808,21 +1304,18 @@ async def run(state: AgentState) -> dict[str, object]:
     # 4. detected 时单次 LLM 调用 + 解析 + 跨对象校验
     try:
         if trace is None:
-            llm = get_deep_think()
+            # _build_trace_llm 统一 run/run_review 的 LLM 配置（2026-08-13
+            # 事故：deepseek thinking 占满 max_tokens → 输出为空/截断 → EOF，
+            # 显式禁用 thinking + 加大 max_tokens，见 _build_trace_llm 注释）。
+            llm = _build_trace_llm()
             snapshot_json = snapshot.model_dump_json(indent=2)
             messages = [
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            ai_message = await llm.ainvoke(messages)
-            raw_text = (
-                ai_message.content
-                if isinstance(ai_message.content, str)
-                else str(ai_message.content)
-            )
-            cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
-        validate_trace_against_snapshot(trace, snapshot)
+            trace = await _generate_validated_trace(llm, messages, snapshot)
+        else:
+            validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
             "review_trace_validation_failed",
@@ -833,6 +1326,10 @@ async def run(state: AgentState) -> dict[str, object]:
         return {"final_response": DEGRADED_RESPONSE}
 
     # 5. 渲染 Markdown + 构造 ReviewArtifact
+    #    预测已退役（PR-A/T4）：内联 run_predict 删除，prediction 一律置 None，
+    #    预测改由 review_done 事件驱动 PredictionConsumer 完成。
+    #    Spec Cbis：校验通过后附着渠道B场景确认（探针失败降级，不阻断渲染）。
+    await _attach_scene_confirmations(trace, report_date)
     markdown = render_market_trace_markdown(trace, snapshot)
     artifact = ReviewArtifact(
         schema_version="1.1",
@@ -841,11 +1338,12 @@ async def run(state: AgentState) -> dict[str, object]:
         markdown=markdown,
         trace_summary=_extract_trace_summary(markdown),
         sectors=_extract_review_sectors(markdown),
+        prediction=None,
     )
 
     # 6. 归档复盘报告（仅在 facts.json 存在时创建 Markdown）
     #    严格失败顺序：归档失败 → 返回降级，不写 Redis / DB。
-    if not archive_review(markdown, snapshot.snapshot_id):
+    if not archive_review(markdown, snapshot.snapshot_id, report_date=report_date):
         logger.error(
             "review_archive_review_failed",
             agent="review",
@@ -863,10 +1361,20 @@ async def run(state: AgentState) -> dict[str, object]:
         )
         return {"final_response": DEGRADED_RESPONSE}
 
-    # 8. 持久化到 DB（仅 scheduler 触发）
-    await _persist_review_report(state, artifact)
+    # 8. 持久化到 DB（仅 scheduler/manual 触发；普通用户访问不写公共报告）
+    persisted = False
+    if state.get("trigger_source") in {"scheduler", "manual"}:
+        persisted = await _persist_review_report(report_date, artifact)
+    # 双保险：确认写库后才补发 review_done，预测由 PredictionConsumer 独立消费；
+    # 旧串行断链（无总线）由 helper 显式告警。
+    if persisted and state.get("trigger_source") in {"scheduler", "manual"}:
+        await _publish_review_done_if_available(report_date)
 
-    return {"final_response": markdown}
+    # A-5 N2：附带结构化结果（sectors 确定性提取，供迭代评估端优先使用）
+    return {
+        "final_response": markdown,
+        "sectors": _extract_review_sectors(markdown),
+    }
 
 
 # ============================================================================
@@ -888,11 +1396,22 @@ async def run_review(
 
     snapshot_kind 决定使用 quick 还是 full 快照：
     - quick: 调用 build_quick_snapshot（腾讯实时行情，15:30 可用）
-    - full:  调用 build_market_trace_snapshot（Tushare 完整数据，20:30 可用）
+    - full:  调用 build_market_trace_snapshot（Tushare 完整数据；cron 18:30 触发，
+      2026-09-03 组长裁决 20:30→18:30——若当日数据未全由既有降级/兜底处理）
 
     覆盖逻辑：snapshot_kind="quick" 时先检查是否已有 full 报告。
     如果已有 full，跳过持久化（quick 不覆盖 full），返回 status="skipped"。
+
+    B11/G11 修复：本函数体内有 `from ... import build_market_trace_snapshot` 等
+    运行时 from-import，会绕过 iterate replay 的模块属性 patch；迭代闭环
+    （iterate/run_case）回放必须显式拒绝本入口，防止未来接入时静默泄漏。
+    签名保持不变，仅加守卫（is_replay_mode 读 env REPLAY_CASE_ID）。
     """
+    from aistock_agent.iterate.replay_layer import is_replay_mode
+
+    if is_replay_mode():
+        raise RuntimeError("run_review 禁止在 iterate 回放模式调用：请使用 run() 入口")
+
     logger.info(
         "run_review_start",
         report_date=report_date,
@@ -901,8 +1420,9 @@ async def run_review(
     )
 
     # 覆盖检查：quick 时如果已有 full 报告，跳过
+    # 用 quiet 版：报告不存在(404)是常态（quick 先于 full 生成），静默返回 None，不打 error 噪音
     if snapshot_kind == "quick":
-        existing = await node_api.get_analysis_report("review", report_date)
+        existing = await node_api.get_analysis_report_quiet("review", report_date)
         if _is_full_report(existing):
             logger.info(
                 "run_review_skipped_quick_overridden_by_full",
@@ -1007,21 +1527,17 @@ async def run_review(
     # LLM 推理 + 校验
     try:
         if trace is None:
-            llm = get_deep_think()
+            # 统一配置见 _build_trace_llm（8-13 事故：deepseek thinking 占满
+            # max_tokens → 空输出 → EOF → 整份降级，run_review 曾遗漏此配置）。
+            llm = _build_trace_llm()
             snapshot_json = snapshot.model_dump_json(indent=2)
             messages = [
                 SystemMessage(content=REVIEW_PROMPT),
                 HumanMessage(content=snapshot_json),
             ]
-            ai_message = await llm.ainvoke(messages)
-            raw_text = (
-                ai_message.content
-                if isinstance(ai_message.content, str)
-                else str(ai_message.content)
-            )
-            cleaned = _strip_code_fences(raw_text)
-            trace = MarketTraceResult.model_validate_json(cleaned)
-        validate_trace_against_snapshot(trace, snapshot)
+            trace = await _generate_validated_trace(llm, messages, snapshot)
+        else:
+            validate_trace_against_snapshot(trace, snapshot)
     except Exception as e:
         logger.error(
             "run_review_trace_validation_failed",
@@ -1037,7 +1553,10 @@ async def run_review(
             markdown=DEGRADED_RESPONSE,
         )
 
-    # 渲染 + 构造 artifact
+    # 渲染 + 构造 artifact（预测已退役：run_review 不再内联 run_predict，
+    # 由 ReviewFullConsumer 在 status=ok 时发布 review_done 驱动预测，T2 已实现）
+    # Spec Cbis：校验通过后附着渠道B场景确认（探针失败降级，不阻断渲染）。
+    await _attach_scene_confirmations(trace, report_date)
     markdown = render_market_trace_markdown(trace, snapshot)
     artifact = ReviewArtifact(
         schema_version="1.1",
@@ -1046,10 +1565,11 @@ async def run_review(
         markdown=markdown,
         trace_summary=_extract_trace_summary(markdown),
         sectors=_extract_review_sectors(markdown),
+        prediction=None,
     )
 
     # 归档 + 缓存
-    if not archive_review(markdown, snapshot.snapshot_id):
+    if not archive_review(markdown, snapshot.snapshot_id, report_date=report_date):
         logger.error(
             "run_review_archive_review_failed",
             snapshot_id=snapshot.snapshot_id,
@@ -1077,22 +1597,31 @@ async def run_review(
             markdown=DEGRADED_RESPONSE,
         )
 
-    # 持久化到 DB
-    try:
-        content = _build_review_report(artifact)
-        await node_api.save_analysis_report(
-            report_type="review",
+    # 持久化到 DB：未确认写库不得返回 ok，否则 ReviewFullConsumer 会发布
+    # review_done，晚报/预测读到不存在的复盘（2026-11-20 事故）。
+    persisted = await _persist_review_report(
+        report_date,
+        artifact,
+        data_source=f"review_agent_{snapshot_kind}",
+    )
+    if not persisted:
+        logger.error(
+            "run_review_persist_failed_status_degraded",
             report_date=report_date,
-            data_source=f"review_agent_{snapshot_kind}",
-            content=content,
-        )
-    except Exception as e:
-        logger.warning(
-            "run_review_persist_failed",
-            error=str(e),
-            exc_info=True,
+            snapshot_kind=snapshot_kind,
             trace_id=trace_id,
         )
+        return ReviewRunResult(
+            status="degraded",
+            report_date=report_date,
+            snapshot_kind=snapshot_kind,
+            trace_id=trace_id,
+            markdown=markdown,
+        )
+
+    # 预测记录落库已退役（PR-A/T4）：run_review 不再内联写预测，
+    # 由 ReviewFullConsumer 发布 review_done → PredictionConsumer 完成（T2 已实现）。
+    # run_review 自身不发布 review_done（ReviewFullConsumer status=ok 时发布）。
 
     logger.info(
         "run_review_done",

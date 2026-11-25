@@ -8,18 +8,9 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from aistock_agent.agents.general import node as general_agent
+from aistock_agent.agents.registry import GRAPH_AGENTS
 from aistock_agent.agents.supervisor import node as supervisor
-from aistock_agent.agents.workers import ai_advisor as ai_advisor_agent
-from aistock_agent.agents.workers import alert as alert_agent
-from aistock_agent.agents.workers import broadcast as broadcast_agent
-from aistock_agent.agents.workers import event as event_analyst
-from aistock_agent.agents.workers import morning as morning_agent
-from aistock_agent.agents.workers import sector as sector_analyst
-from aistock_agent.agents.workers import stock as stock_analyst
-from aistock_agent.agents.workers import trend_score as trend_score_agent
-from aistock_agent.agents.workers import wind_leader as wind_leader_agent
-from aistock_agent.agents.workers.hot_burst import run as hot_burst_agent_run
+from aistock_agent.graph.retry import io_retry_policy
 from aistock_agent.graph.routers.intent_router import route_by_intent
 from aistock_agent.memory.checkpointer import get_checkpointer
 from aistock_agent.observability.callback import get_default_callbacks
@@ -37,27 +28,29 @@ class _Default:
 _DEFAULT = _Default()
 
 
-def build_graph() -> StateGraph:
+def build_graph() -> StateGraph[AgentState, None, AgentState, AgentState]:
     """构建 LangGraph 状态图
 
     拓扑：
         START → supervisor → [条件路由] → 各 Agent 节点 → END
     """
-    graph = StateGraph(AgentState)
+    graph: StateGraph[AgentState, None, AgentState, AgentState] = StateGraph(AgentState)
 
-    # 注册节点
+    # 节点由 registry 生成（agents/registry.py 单一真源）：节点名 = spec.node_name，
+    # 运行体 = spec.run，重试 = spec.retryable。新增 agent 只需改 registry 一处。
     graph.add_node("supervisor", supervisor.run)
-    graph.add_node("morning_agent", morning_agent.run)
-    graph.add_node("stock_analyst", stock_analyst.run)
-    graph.add_node("sector_analyst", sector_analyst.run)
-    graph.add_node("event_analyst", event_analyst.run)
-    graph.add_node("wind_leader_agent", wind_leader_agent.run)
-    graph.add_node("broadcast_agent", broadcast_agent.run)
-    graph.add_node("general_agent", general_agent.run)
-    graph.add_node("hot_burst_agent", hot_burst_agent_run)
-    graph.add_node("alert_agent", alert_agent.run)
-    graph.add_node("ai_advisor_agent", ai_advisor_agent.run)
-    graph.add_node("trend_score_agent", trend_score_agent.run)
+    for spec in GRAPH_AGENTS:
+        # retry_policy 只在 spec.retryable 为真时挂（理由见 graph/retry.py）。
+        # 不用 **kwargs 动态传：langgraph 1.x 的 add_node 是重载，动态 dict 会让
+        # mypy 匹配不上任何 overload（call-overload），拆成两个分支才能各归各位。
+        # spec.run 的静态类型是 Callable[[AgentState], Awaitable[dict[str, object]]]，
+        # 而 add_node 的泛型 _Node[NodeInputT] 要求具体节点签名——langgraph 没为
+        # "普通 async 函数"提供能匹配的 overload，只能就地 ignore。运行时没问题：
+        # registry 里的 run 就是 async def run(state: AgentState) -> dict。
+        if spec.retryable:
+            graph.add_node(spec.node_name, spec.run, retry_policy=io_retry_policy())  # type: ignore[arg-type]
+        else:
+            graph.add_node(spec.node_name, spec.run)  # type: ignore[arg-type]
 
     # 边：START → supervisor
     graph.add_edge(START, "supervisor")
@@ -66,14 +59,8 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges("supervisor", route_by_intent)
 
     # 各 Agent → END
-    agent_nodes = [
-        "morning_agent", "stock_analyst", "sector_analyst",
-        "event_analyst", "wind_leader_agent", "broadcast_agent", "general_agent",
-        "hot_burst_agent", "alert_agent", "ai_advisor_agent",
-        "trend_score_agent",
-    ]
-    for node in agent_nodes:
-        graph.add_edge(node, END)
+    for spec in GRAPH_AGENTS:
+        graph.add_edge(spec.node_name, END)
 
     return graph
 
@@ -81,7 +68,7 @@ def build_graph() -> StateGraph:
 def compile_graph(
     checkpointer: BaseCheckpointSaver[str] | None | _Default = _DEFAULT,
     callbacks: list[BaseCallbackHandler] | None = None,
-) -> CompiledStateGraph:
+) -> CompiledStateGraph[AgentState, None, AgentState, AgentState]:
     """编译图（可直接调用 invoke / stream）。
 
     Args:

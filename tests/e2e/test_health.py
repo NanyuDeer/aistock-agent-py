@@ -11,6 +11,7 @@
 下不运行，真实单例未初始化，故必须 mock get_client）。LLM 探测 patch
 services.llm.get_quick_think（routes 内惰性导入，patch 源模块即可生效）。
 """
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +38,14 @@ def mock_deps():
     ok_resp.raise_for_status = MagicMock()  # no-op for 2xx
     http_client.get = AsyncMock(return_value=ok_resp)
 
+    # 模拟调度器已启动且心跳新鲜（ASGITransport 不执行 lifespan，调度器不会真启动）。
+    # readiness 的 scheduler 检查依赖这两个进程内时间戳。
+    import aistock_agent.services.scheduler as scheduler_module
+
+    now = time.time()
+    scheduler_module._scheduler_started_at = now
+    scheduler_module._scheduler_last_heartbeat = now
+
     with patch("aistock_agent.api.routes.RedisPool") as mock_rp, \
          patch("aistock_agent.api.routes.HttpClientPool") as mock_hp:
         mock_rp.get_client = AsyncMock(return_value=redis_client)
@@ -45,6 +54,9 @@ def mock_deps():
             redis=redis_client, http=http_client,
             redis_pool=mock_rp, http_pool=mock_hp,
         )
+
+    scheduler_module._scheduler_started_at = None
+    scheduler_module._scheduler_last_heartbeat = None
 
 
 async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response:
@@ -99,6 +111,8 @@ async def test_readiness_all_healthy_returns_200(mock_deps):
     assert body["checks"]["node_api"] == "ok"
     # LLM 默认跳过（避免消耗 token）
     assert body["checks"]["llm"] == "skipped"
+    # 调度器已启动且心跳新鲜 → ok（携带心跳年龄）
+    assert body["checks"]["scheduler"].startswith("ok")
 
     # 确认 Node.js 探测打到了 {node_api_base_url}/internal/health
     mock_deps.http.get.assert_awaited_once()
@@ -216,3 +230,77 @@ async def test_readiness_llm_failure_returns_degraded(mock_deps, monkeypatch):
     body = resp.json()
     assert body["status"] == "degraded"
     assert body["checks"]["llm"].startswith("error")
+
+
+# ── readiness: 调度器心跳 ──────────────────────────────────────────
+# 2026-10-19 磁盘写满导致 pm2 日志流中断，日志里没有心跳，但调度实际仍在跑。
+# 心跳戳写在进程内，readiness 读它来区分“日志丢失”与“真的停摆”。
+
+
+@pytest.mark.asyncio
+async def test_readiness_scheduler_stale_heartbeat_returns_503(mock_deps):
+    """心跳超过阈值（7 分钟）→ 503，scheduler 标记 error（真实停摆可被发现）。"""
+    import aistock_agent.services.scheduler as scheduler_module
+
+    scheduler_module._scheduler_last_heartbeat = time.time() - 600
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await _get(client, "/health/ready")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["scheduler"].startswith("error: heartbeat stale")
+
+
+@pytest.mark.asyncio
+async def test_readiness_scheduler_not_started_returns_503(mock_deps):
+    """调度启用但从未 start（启动失败）→ 503，不能静默降级成“无调度运行”。"""
+    import aistock_agent.services.scheduler as scheduler_module
+
+    scheduler_module._scheduler_started_at = None
+    scheduler_module._scheduler_last_heartbeat = None
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await _get(client, "/health/ready")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["checks"]["scheduler"] == "error: scheduler not started"
+
+
+@pytest.mark.asyncio
+async def test_readiness_scheduler_pending_before_first_heartbeat(mock_deps):
+    """刚启动、首个心跳（≤2 分钟）未到 → pending，不算失败。"""
+    import aistock_agent.services.scheduler as scheduler_module
+
+    scheduler_module._scheduler_started_at = time.time()
+    scheduler_module._scheduler_last_heartbeat = None
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await _get(client, "/health/ready")
+
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["scheduler"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_readiness_scheduler_disabled_is_skipped(mock_deps, monkeypatch):
+    """SCHEDULER_ENABLED=false（开发/测试）→ skipped，不计入失败。"""
+    from aistock_agent.config import settings
+
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await _get(client, "/health/ready")
+
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["scheduler"] == "skipped"

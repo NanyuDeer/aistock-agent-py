@@ -33,7 +33,7 @@ async def _execute_skill_safe(
     if skill_func is None:
         from datetime import datetime
 
-        return Evidence(
+        ev = Evidence(
             facts=[],
             sources=[],
             as_of=datetime.now(UTC),
@@ -41,11 +41,15 @@ async def _execute_skill_safe(
             degraded_reason=f"skill not registered: {skill_call.skill_name}",
             skill_name=skill_call.skill_name,
         )
+        # D34：归属透传（SkillCall.goal_id → Evidence.goal_id；None 不覆盖）
+        if skill_call.goal_id is not None:
+            ev.goal_id = skill_call.goal_id
+        return ev
 
     # 若注册的是裸函数，用 @skill 再包一层；若已被 @skill 装饰，再包一层也不会出错
     # （@skill 内部已处理异常，外层 try 不会触发）
     try:
-        return await skill_func(skill_call.args, goal)
+        ev = await skill_func(skill_call.args, goal)
     except Exception:
         # 走到这里说明 SKILL_REGISTRY 注册的是裸函数（未装饰）
         # 用 @skill 临时包装后重试
@@ -54,7 +58,10 @@ async def _execute_skill_safe(
         # @skill 装饰器使用 func.__name__ 设置 skill_name，可能与注册名不同
         # 覆盖为 SkillCall 中的注册 skill_name
         ev.skill_name = skill_call.skill_name
-        return ev
+    # D34：归属透传（SkillCall.goal_id → Evidence.goal_id；None 不覆盖）
+    if skill_call.goal_id is not None:
+        ev.goal_id = skill_call.goal_id
+    return ev
 
 
 def _topo_sort(skill_calls: list[SkillCall]) -> list[list[SkillCall]]:

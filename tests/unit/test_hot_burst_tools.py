@@ -11,7 +11,6 @@ from aistock_agent.tools.hot_burst_tools import (
     get_hot_burst_history,
     get_hot_burst_report_history,
 )
-
 # ── get_hot_burst ────────────────────────────────────────────────
 
 

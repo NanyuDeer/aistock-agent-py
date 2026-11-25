@@ -1,5 +1,7 @@
 # tests/unit/test_chat_qa_metrics.py
 """CHAT QA 链路监控指标单元测试。"""
+import pytest
+
 from aistock_agent.observability.metrics import MetricsCollector
 
 
@@ -85,3 +87,35 @@ def test_get_metrics_preserves_existing_llm_fields():
     assert metrics["prompt_tokens"] == 10
     assert metrics["total_tokens"] == 15
     assert "chat_qa" in metrics
+
+
+# ── LLM 前缀缓存命中观测（2026-08-25 design-debate 产出）────────
+
+
+def test_record_llm_cache_hit_accumulates_by_provider():
+    mc = MetricsCollector()
+    mc.record_llm_cache_hit(prompt_tokens=100, cached_input_tokens=80, provider="openai")
+    mc.record_llm_cache_hit(prompt_tokens=50, cached_input_tokens=0, provider="openai")
+    mc.record_llm_cache_hit(
+        prompt_tokens=200, cached_input_tokens=150, provider="deepseek"
+    )
+    cache = mc.get_metrics()["llm_cache"]
+    assert cache["openai"]["prompt_tokens"] == 150
+    assert cache["openai"]["cached_tokens"] == 80
+    assert cache["openai"]["hit_rate"] == pytest.approx(80 / 150)
+    assert cache["deepseek"]["hit_rate"] == pytest.approx(0.75)
+
+
+def test_record_llm_cache_hit_zero_prompt_no_division_error():
+    """prompt_tokens 为 0 时 hit_rate 不除零。"""
+    mc = MetricsCollector()
+    mc.record_llm_cache_hit(prompt_tokens=0, cached_input_tokens=0, provider="openai")
+    cache = mc.get_metrics()["llm_cache"]
+    assert cache["openai"]["hit_rate"] == 0.0
+
+
+def test_reset_clears_llm_cache_metrics():
+    mc = MetricsCollector()
+    mc.record_llm_cache_hit(prompt_tokens=100, cached_input_tokens=80, provider="openai")
+    mc.reset()
+    assert mc.get_metrics()["llm_cache"] == {}

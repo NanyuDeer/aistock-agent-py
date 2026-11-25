@@ -15,7 +15,7 @@ _cache: dict[str, dict[str, object]] = {}
 
 REPORT_META: dict[str, dict[str, str]] = {
     "morning": {"label": "今日晨报", "icon": "sunrise"},
-    "wind_leader": {"label": "长线风口分析", "icon": "compass"},
+    "wind_leader": {"label": "风口龙头分析", "icon": "compass"},
     "hot_burst": {"label": "机构调研共振", "icon": "pulse"},
     "alert": {"label": "异动深度研判", "icon": "flash"},
     "broadcast": {"label": "双人财经播报", "icon": "podcast"},

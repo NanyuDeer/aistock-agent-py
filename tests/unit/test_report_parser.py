@@ -1,10 +1,13 @@
 """双层报告解析工具单测"""
 
+import pytest
+
 from aistock_agent.utils.report_parser import (
-    parse_report_content,
-    extract_podcast_brief,
     extract_display_report,
+    extract_podcast_brief,
     parse_dual_layer_response,
+    parse_report_content,
+    repair_dual_layer_with_llm,
 )
 
 
@@ -102,6 +105,37 @@ class TestSchemaV2:
         assert display == "只有详情"
 
 
+class TestSchemaV2Minor:
+    """schema_version 2.x（如 midday 的 2.1）也必须按双层结构解析。
+
+    回归背景：2026-11-12 周会任务 4 —— 原实现只认 "2.0"，midday 报告
+    schema_version="2.1" 落入 1.0 分支，podcast_brief 解析为空，
+    导致每天 12:15 午间播报因素材缺失而生成失败。
+    """
+
+    def test_v2_1_parses_podcast_brief(self):
+        content = {
+            "display_report": {"summary": "午间结论", "details": "午间详情"},
+            "podcast_brief": "午间播报摘要",
+            "schema_version": "2.1",
+        }
+        display, podcast = parse_report_content(content)
+        assert "午间结论" in display
+        assert "午间详情" in display
+        assert podcast == "午间播报摘要"
+
+    def test_v2_1_without_podcast_brief(self):
+        content = {"display_report": {"summary": "只有结论"}, "schema_version": "2.1"}
+        display, podcast = parse_report_content(content)
+        assert display == "只有结论"
+        assert podcast == ""
+
+    def test_numeric_schema_version_treated_as_v2(self):
+        content = {"display_report": {"summary": "结论"}, "schema_version": 2.0}
+        display, _ = parse_report_content(content)
+        assert display == "结论"
+
+
 class TestEdgeCases:
     """边界情况测试"""
 
@@ -166,3 +200,26 @@ class TestParseDualLayerResponse:
         assert result["schema_version"] == "2.0"
         assert result["display_report"]["details"] == ""
         assert result["podcast_brief"] == ""
+
+
+class TestStructuredLoggingRegression:
+    """回归：本模块按 structlog 风格记结构化日志（事件名 + kwargs）。
+
+    此前误用 stdlib ``logging.getLogger``，``logger.warning(msg, error=...)`` 在
+    WARNING 级别启用时会抛 ``TypeError: _log() got an unexpected keyword argument
+    'error'``——把 ``repair_dual_layer_with_llm`` 的 except 兜底**本身**变成炸点
+    （与 forward_events 同批修复的同一类缺陷）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_repair_failure_logs_without_typeerror(self, monkeypatch):
+        """LLM 修复过程抛错时应安全返回 None，而不是让兜底日志再抛 TypeError。"""
+
+        def fake_get_quick_think(*args, **kwargs):
+            raise RuntimeError("llm down")
+
+        # repair_dual_layer_with_llm 内部才 import，故按模块属性打补丁。
+        monkeypatch.setattr(
+            "aistock_agent.services.llm.get_quick_think", fake_get_quick_think
+        )
+        assert await repair_dual_layer_with_llm("这不是 JSON") is None

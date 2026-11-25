@@ -23,14 +23,16 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aistock_agent.services import sector_aliases_store
 from aistock_agent.services.llm import get_deep_think
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
@@ -40,9 +42,6 @@ ROLLING_STATS_FILE = Path("docs/agent-outputs/rolling_stats.json")
 MANIFEST_FILE = Path("docs/agent-outputs/manifest.json")
 MORNING_DIR = Path("docs/agent-outputs/morning")
 REVIEW_DIR = Path("docs/agent-outputs/review")
-
-# 板块别名字典路径
-ALIASES_FILE = Path("src/aistock_agent/data/sector_aliases.json")
 
 # LLM 4 维度评估 prompt（{{ }} 为 JSON 字面量大括号，str.format 不替换）
 _LLM_EVALUATION_PROMPT = """你是量化分析助手。对比晨报和复盘报告，
@@ -94,18 +93,15 @@ _LLM_EVALUATION_PROMPT = """你是量化分析助手。对比晨报和复盘报�
 
 
 def _load_aliases() -> dict[str, list[str]]:
-    """加载板块别名字典
+    """加载板块别名字典（仓库文件 + 运行时学习文件合并，仓库优先）
 
-    json.loads 返回动态类型，这里用带注解的局部变量承接，避免
-    --warn-return-any 告警（mypy strict 全局开启）。
-    运行时 JSON 结构由 sector_aliases.json 保证。
+    单点合并在 ``sector_aliases_store.load_merged_aliases``：人工维护的
+    sector_aliases.json 是权威，运行时学到的 sector_aliases_learned.json 只补充
+    仓库里不存在的标准名与别名；learned 缺失/损坏时退化为仓库内容（不抛错）。
     """
     try:
-        data: dict[str, list[str]] = json.loads(
-            ALIASES_FILE.read_text(encoding="utf-8")
-        )
-        return data
-    except Exception as e:
+        return sector_aliases_store.load_merged_aliases()
+    except Exception as e:  # pragma: no cover - load_merged_aliases 已 fail-safe
         logger.warning("load_aliases_failed", error=str(e))
         return {}
 
@@ -117,6 +113,32 @@ def _find_report(directory: Path, date_str: str) -> Path | None:
     for filepath in sorted(directory.glob(f"{date_str}-*.md"), reverse=True):
         return filepath
     return None
+
+
+def _norm_sector_name(name: str) -> str:
+    """去常见后缀（概念/板块/行业/指数）后的核心名，用于粗/细粒度包含匹配。"""
+    name = name.strip()
+    for suffix in ("概念", "板块", "行业", "指数"):
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+    return name.strip("/").strip()
+
+
+def _has_contains_match(name: str, norms: set[str]) -> bool:
+    """name 与任一规范化板块名存在双向包含关系（如 半导体 ↔ 半导体设备）。
+
+    仅作为别名字典匹配的补充兜底：morning 用粗粒度方向（AI/CPO/半导体），
+    review 用行情细粒度概念（存储芯片/光刻机），纯字典精确匹配会全部落空。
+    """
+    n = _norm_sector_name(name)
+    if len(n) < 2:
+        return False
+    for other in norms:
+        if len(other) < 2:
+            continue
+        if n in other or other in n:
+            return True
+    return False
 
 
 def match_sectors_code_level(
@@ -162,17 +184,21 @@ def match_sectors_code_level(
     for s in review_sectors:
         review_all |= standards_for(s)
 
+    # 规范化名集合，用于粗/细粒度包含匹配兜底
+    morning_norms = {_norm_sector_name(s) for s in morning_sectors}
+    review_norms = {_norm_sector_name(s) for s in review_sectors}
+
     overlap: list[str] = []
     over_focused: list[str] = []
     for s in morning_sectors:
-        if standards_for(s) & review_all:
+        if (standards_for(s) & review_all) or _has_contains_match(s, review_norms):
             overlap.append(s)
         else:
             over_focused.append(s)
 
     missing: list[str] = []
     for s in review_sectors:
-        if not (standards_for(s) & morning_all):
+        if not (standards_for(s) & morning_all) and not _has_contains_match(s, morning_norms):
             missing.append(s)
 
     return overlap, missing, over_focused
@@ -370,10 +396,13 @@ def llm_evaluate_dimensions(
             "new_aliases": parsed.get("new_aliases", {}),
         }
 
-        # 追加新别名到字典文件
+        # 追加新别名到运行时学习文件
+        # 观察集合 = 代码未匹配的板块名单（晨报 over_focused ∪ 复盘 missing）：
+        # new_aliases 的语义就是"代码未匹配的板块对"，标准名与别名都应出现在该名单中
         new_aliases = cast(dict[str, list[str]], result["new_aliases"])
         if new_aliases:
-            _append_new_aliases(new_aliases)
+            observed_sectors = set(unmatched_morning) | set(unmatched_review)
+            _append_new_aliases(new_aliases, observed_sectors)
 
         return result
 
@@ -388,18 +417,29 @@ def llm_evaluate_dimensions(
         }
 
 
-def _append_new_aliases(new_aliases: dict[str, list[str]]) -> None:
-    """将 LLM 发现的新别名追加到 sector_aliases.json
+def _append_new_aliases(
+    new_aliases: dict[str, list[str]],
+    observed_sectors: set[str],
+) -> None:
+    """将 LLM 发现的新别名追加到运行时学习文件 sector_aliases_learned.json
+
+    **绝不写回 sector_aliases.json**：那是人工维护的权威字典，运行时回写会让服务器
+    工作区长期脏、`git pull` 必然冲突（历史事故，2026-09-18 修复）。
 
     LLM 输出的 ``new_aliases`` 未经 ``_validate_llm_dimension`` 校验
-    （它不属于 4 个评估维度），因此必须在此处独立校验结构：
-      - 每个标准名对应的别名值必须是 ``list``，否则跳过该条目
-        （若为字符串，``for alias in aliases`` 会逐字符迭代，静默损坏字典）
-      - 每个别名必须是 ``str``，否则跳过该别名
+    （它不属于 4 个评估维度），因此必须在此处独立校验：
+      - 结构：每个标准名对应的别名值必须是 ``list``，否则跳过该条目
+        （若为字符串，``for alias in aliases`` 会逐字符迭代，静默损坏字典）；
+        每个别名必须是 ``str``，否则跳过该别名。
+      - 观察范围：标准名与该标准名的每个别名都必须出现在本次观察到的板块名单
+        （``observed_sectors``）中，否则丢弃并 warning（``alias_rejected_not_observed``）。
+        本函数的语义是"代码未匹配的**板块对**"，自由文本词汇（如"资金面""小盘风格"）
+        不属于板块名，必须被此校验拦下。
+
     校验失败时记录 warning，便于排查 LLM 输出质量问题。
     """
     try:
-        existing = _load_aliases()
+        existing = sector_aliases_store.load_learned_aliases()
         updated = False
         for standard, aliases in new_aliases.items():
             if not isinstance(aliases, list):
@@ -410,9 +450,15 @@ def _append_new_aliases(new_aliases: dict[str, list[str]]) -> None:
                     actual_type=type(aliases).__name__,
                 )
                 continue
-            if standard not in existing:
-                existing[standard] = []
-                updated = True
+            if standard not in observed_sectors:
+                # 标准名本身不在观察到的板块名单中 → 整条丢弃
+                logger.warning(
+                    "alias_rejected_not_observed",
+                    standard=standard,
+                    alias=standard,
+                )
+                continue
+            accepted: list[str] = []
             for alias in aliases:
                 if not isinstance(alias, str):
                     logger.warning(
@@ -421,15 +467,28 @@ def _append_new_aliases(new_aliases: dict[str, list[str]]) -> None:
                         actual_type=type(alias).__name__,
                     )
                     continue
+                if alias not in observed_sectors:
+                    logger.warning(
+                        "alias_rejected_not_observed",
+                        standard=standard,
+                        alias=alias,
+                    )
+                    continue
+                accepted.append(alias)
+            if not accepted:
+                continue
+            if standard not in existing:
+                existing[standard] = []
+            for alias in accepted:
                 if alias not in existing[standard]:
                     existing[standard].append(alias)
                     updated = True
         if updated:
-            ALIASES_FILE.write_text(
+            sector_aliases_store.LEARNED_ALIASES_FILE.write_text(
                 json.dumps(existing, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            logger.info("aliases_updated", new_count=len(new_aliases))
+            logger.info("aliases_learned", new_count=len(new_aliases))
     except Exception as e:
         logger.warning("append_aliases_failed", error=str(e))
 
@@ -448,7 +507,8 @@ def build_snapshot(date_str: str | None = None) -> dict[str, object]:
         快照字典。文件不存在时返回降级快照（标注 error）。
     """
     if date_str is None:
-        date_str = date.today().isoformat()
+        # 默认报告日取上海自然日（与归档文件名日期前缀同源，见 archiver）
+        date_str = shanghai_today().isoformat()
 
     # 查找晨报和复盘文件
     morning_file = _find_report(MORNING_DIR, date_str)

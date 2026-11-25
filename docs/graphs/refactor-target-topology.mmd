@@ -1,0 +1,156 @@
+---
+config:
+  flowchart:
+    curve: basis
+---
+flowchart TD
+
+    %% ============ 输入层 ============
+    subgraph IN["输入层"]
+        APP["App 对话 · AI 投顾"]
+        subgraph CRON["Scheduler 定时（只发布事件，不直接调 worker）"]
+            direction LR
+            C1["08:45 / 盘中 · 事件采集"]
+            C2["08:50 · 晨报（大盘预判）"]
+            C3["09:00 · 播报链"]
+            C4["15:30 / 20:30 · 复盘"]
+            C5["16:00 · 预测验证"]
+            C6["16:30 / 17:00 · 迭代"]
+        end
+        SRC["外部触发（异动 / 事件 / 手动）"]
+    end
+
+    %% ============ 推理层 ============
+    subgraph REASON["推理层 · aistock-agent-py"]
+        direction TB
+        subgraph MAIN["LangGraph 主图"]
+            direction TB
+            SUP["supervisor 意图路由"]
+            subgraph CHAT["对话子图（QuestionState）"]
+                direction LR
+                QAR["qa_router"] --> ESC["escalate 深度分析"]
+                QAR --> SKI["skill_executor 技能"]
+                QAR --> GF["general_fallback 兜底"]
+                ESC --> SYN["synth_answer 汇总"]
+                SKI --> SYN
+                GF --> SYN
+            end
+            subgraph PIPE["统一四步管线子图（subject 参数化：个股 / 大盘 / 板块 / 事件）"]
+                direction LR
+                PRED["01 预判 · 统一预判模块"] --> TRACE["02 溯源 · 统一归因引擎"] --> CMP["03 对照 · 快照 vs 预判"] --> ITER["04 迭代 · 偏差反馈"] --> REP["报告生成 · 双层契约 + 播报"]
+                ITER -. "闭环回环" .-> PRED
+            end
+            subgraph SPEC["专业分析 worker（保留独立报告，接入统一存储与播报）"]
+                direction LR
+                W1["wind_leader 风口龙头"]
+                W2["hot_burst 机构调研"]
+                W3["trend_score 趋势评分"]
+                W4["forecast 业绩预测"]
+            end
+        end
+        subgraph OUT["图外链路（事件驱动，非 LangGraph）"]
+            direction TB
+            SCRAPE["统一事件抓取中台 event_scrape"]
+            BUS["EventBus · Redis Stream"]
+            SC["stock_trace 消费者"]
+            RC["review / iterate 消费者"]
+            PC["prediction 消费者"]
+        end
+    end
+
+    %% ============ 能力层 ============
+    subgraph CAP["能力层 · aistock-app-api（确定性计算）"]
+        direction TB
+        DET["统一异动检测（stock-trace 统一，吸收 insight 资产）"]
+        EV["统一事件库（event 中台）"]
+        REPO["统一报告存储（subject × step × date）"]
+        DATA["行情 / 新闻 / 快照 数据服务"]
+        KG["知识图谱（行业 / 概念 / 上下游）"]
+        SCORE["评分内核（趋势 / 十倍共享计算函数）"]
+        PUSH["统一推送（WS / 微信 / 飞书）"]
+        PROFILE["用户画像"]
+    end
+
+    %% ============ 展示层 ============
+    subgraph UI["展示层 · App（主战场）"]
+        direction LR
+        U1["早点听 · 晨报播报"]
+        U2["AI 投顾 · 对话"]
+        U3["自选 · 个股详情"]
+        U4["异动捕手 · 溯源"]
+        U5["风口龙头"]
+        U6["机构调研热门"]
+        U7["趋势股评分"]
+        U8["业绩预测 / 报告"]
+        U9["大盘溯源 · 复盘"]
+        U10["事件传导"]
+        U11["预测验证"]
+    end
+
+    %% ============ 输入 → 推理 ============
+    APP --> SUP
+    SRC --> DET
+
+    %% 定时事件 → 各执行点（虚线：事件驱动，不直接调 worker）
+    C1 --> SCRAPE
+    C2 -. "晨报 = 大盘预判" .-> PRED
+    C3 -. "串行触发专业分析 worker + 播报" .-> REP
+    C3 -. "读各报告 podcast_brief" .-> W1
+    C3 -. "读各报告 podcast_brief" .-> W2
+    C3 -. "读各报告 podcast_brief" .-> W3
+    C4 -. "大盘溯源" .-> TRACE
+    C4 -. "快照对照" .-> CMP
+    C5 -. "到期验证" .-> CMP
+    C6 -. "偏差反馈" .-> ITER
+
+    %% 主图内部
+    SUP --> QAR
+    SUP --> PRED
+    SUP --> W1
+    SUP --> W2
+    SUP --> W3
+    SUP --> W4
+
+    %% 图外链路
+    SCRAPE --> BUS
+    DET --> SC
+    BUS --> RC
+    BUS --> PC
+
+    %% 图外 → 管线（虚线：事件驱动触发）
+    SC -. "个股异动事件" .-> TRACE
+    RC -. "快照 / 偏差" .-> CMP
+    PC -. "预判落库" .-> PRED
+
+    %% 能力层 → 推理层
+    EV --> TRACE
+    KG --> W1
+    KG --> W2
+    KG --> TRACE
+    DATA --> PRED
+    DATA --> TRACE
+    DATA --> W1
+    DATA --> W2
+    DATA --> W3
+    DATA --> W4
+    SCORE --> W3
+    SCORE --> W4
+    PROFILE --> QAR
+
+    %% 报告 → 统一存储
+    REP --> REPO
+    W1 --> REPO
+    W2 --> REPO
+    W3 --> REPO
+    W4 --> REPO
+
+    %% 存储 / 推送 → 展示层
+    REPO --> U1
+    REPO --> U5
+    REPO --> U6
+    REPO --> U7
+    REPO --> U8
+    REPO --> U9
+    REPO --> U11
+    PUSH --> U4
+    U3 --> DATA

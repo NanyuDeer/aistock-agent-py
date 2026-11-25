@@ -7,6 +7,7 @@ Node 侧 Artifact 发布与用户授权边界。
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
 
 import structlog
@@ -14,8 +15,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from aistock_agent.config import settings
+from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.prompts.workers.stock_trace import STOCK_TRACE_PROMPT
 from aistock_agent.schemas.stock_trace import (
+    StockSourceRecord,
     StockTraceResult,
     StockTraceResultPayload,
     StockTraceSnapshot,
@@ -28,6 +31,8 @@ from aistock_agent.services.stock_trace_validator import (
 )
 
 logger = structlog.get_logger()
+
+_metrics = get_metrics_collector()
 
 
 class StockTraceLlm(Protocol):
@@ -51,6 +56,7 @@ class StockTraceWorkerOutcome:
     status: str
     result: StockTraceResult | None = None
     error_code: str | None = None
+    error_detail: str | None = None
 
 
 def _first_json_object(value: str) -> str:
@@ -105,43 +111,108 @@ def _recover_tool_payload(raw_response: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _strip_post_window_market_references(
-    payload: dict[str, object], snapshot: StockTraceSnapshot
-) -> None:
-    """Keep the LLM bounded to the frozen event window before Node writeback."""
-    late_market_ids = {
-        source.source_id
+_SOURCE_DOMAINS = {
+    "news": "company",
+    "announcement": "company",
+    "sector_fact": "sector",
+    "sector_news": "sector",
+    "market_fact": "market",
+    "capital_fact": "capital",
+    "technical_fact": "technical",
+    "insight_article": "article",
+}
+_CHINA_TIME = timezone(timedelta(hours=8))
+
+
+def _observed_by_trigger(source: StockSourceRecord, cutoff: datetime) -> bool:
+    first_observed_at = source.payload.get("first_observed_at")
+    if not isinstance(first_observed_at, str):
+        return True
+    try:
+        observed = datetime.fromisoformat(first_observed_at)
+        return observed.tzinfo is not None and observed <= cutoff
+    except ValueError:
+        return False
+
+
+def _snapshot_at_trigger(snapshot: StockTraceSnapshot) -> StockTraceSnapshot:
+    """Use the revision's trigger time, even when enrichment runs much later."""
+    cutoff = snapshot.trigger_event.triggered_at
+    sources = [
+        source for source in snapshot.source_records
+        if (source.occurred_at or source.captured_at) <= cutoff
+        and _observed_by_trigger(source, cutoff)
+        and (
+            source.kind in {"trigger_fact", "quote_fact"}
+            or source.window_end is None
+            or source.window_end <= cutoff
+        )
+    ]
+    if len(sources) == len(snapshot.source_records):
+        return snapshot
+
+    retained_ids = {source.source_id for source in sources}
+    available = {_SOURCE_DOMAINS.get(source.kind) for source in sources}
+    removed = {
+        _SOURCE_DOMAINS[source.kind]
         for source in snapshot.source_records
-        if source.kind == "market_fact"
-        and source.occurred_at
-        and source.occurred_at > snapshot.trigger_event.window_end_at
+        if source.source_id not in retained_ids and source.kind in _SOURCE_DOMAINS
     }
-    if not late_market_ids:
-        return
-    for candidate in payload.get("candidates", []):
-        if not isinstance(candidate, dict):
-            continue
-        for field in ("supporting_evidence_ids", "counter_evidence_ids"):
-            candidate[field] = [
-                source_id
-                for source_id in candidate.get(field, [])
-                if source_id not in late_market_ids
-            ]
-    for chain in payload.get("chains", []):
-        if not isinstance(chain, dict):
-            continue
-        for node in chain.get("nodes", []):
-            if not isinstance(node, dict):
-                continue
-            for field in ("evidence_ids", "counter_evidence_ids"):
-                node[field] = [
-                    source_id
-                    for source_id in node.get(field, [])
-                    if source_id not in late_market_ids
-                ]
-            if node.get("epistemic_type") == "fact" and not node["evidence_ids"]:
-                node["epistemic_type"] = "inference"
-                node["status"] = "not_established"
+    readiness = dict(snapshot.data_readiness)
+    for domain in removed:
+        readiness[domain] = "partial" if domain in available else "missing"
+    missing = list(dict.fromkeys([
+        *snapshot.missing_fields, *(f"{domain}_context" for domain in sorted(removed)),
+    ]))
+    return snapshot.model_copy(update={
+        "source_records": sources,
+        "data_readiness": readiness,
+        "missing_fields": missing,
+    })
+
+
+def _downgrade_unsupported_primary(
+    payload: StockTraceResultPayload, snapshot: StockTraceSnapshot, primary_id: str | None,
+) -> StockTraceResultPayload:
+    primary = next((chain for chain in payload.chains if chain.chain_id == primary_id), None)
+    candidate = next(
+        (item for item in payload.candidates if primary and item.candidate_id == primary.candidate_id),
+        None,
+    )
+    support_ids = set(candidate.supporting_evidence_ids) if candidate else set()
+    trade_date = snapshot.trigger_event.trading_date
+    has_causal_support = any(
+        source.source_id in support_ids
+        and source.kind not in {"trigger_fact", "quote_fact"}
+        and not (
+            source.kind in {"capital_fact", "sector_fact"}
+            and (
+                (source.occurred_at or source.captured_at)
+                .astimezone(_CHINA_TIME).date().isoformat() < trade_date
+            )
+        )
+        for source in snapshot.source_records
+    )
+    if payload.attribution_status not in {"confirmed", "hypothesis"} or has_causal_support:
+        return payload
+
+    return payload.model_copy(update={
+        "attribution_status": "insufficient",
+        "primary_phrase": "证据不足",
+        "confidence_score": min(payload.confidence_score, 0.30),
+        "confidence_level": "low",
+        "primary_chain_id": None,
+        "alternative_chain_id": None,
+        "chains": [],
+        "candidates": [
+            item.model_copy(update={
+                "status": "insufficient",
+                "verdict": "缺少支持触发归因的有效证据",
+                "supporting_evidence_ids": [],
+            }) if item is candidate else item
+            for item in payload.candidates
+        ],
+    })
 
 
 def _default_llm_factory() -> StockTraceLlm:
@@ -171,79 +242,122 @@ class StockTraceWorker:
             snapshot = await self._client.get_analysis_context(event_id, trigger_revision)
             if snapshot is None or snapshot.event_id != event_id:
                 return StockTraceWorkerOutcome(status="failed", error_code="SNAPSHOT_NOT_READY")
+            snapshot = _snapshot_at_trigger(snapshot)
             llm = self._llm_factory()
             structured_llm = llm.with_structured_output(
                 StockTraceResultPayload,
                 method=settings.stock_trace_structured_output_method,
                 include_raw=True,
             )
-            response = await structured_llm.ainvoke([
-                SystemMessage(content=STOCK_TRACE_PROMPT),
-                HumanMessage(content=snapshot.model_dump_json()),
-            ])
-            if isinstance(response, dict) and "parsed" in response:
-                parsed = response.get("parsed")
-                raw_payload = (
-                    parsed.model_dump(mode="python")
-                    if isinstance(parsed, BaseModel)
-                    else parsed
-                )
-                if raw_payload is None:
-                    raw_payload = _recover_tool_payload(response.get("raw"))
-            else:
-                raw_payload = (
-                    response.model_dump(mode="python")
-                    if isinstance(response, BaseModel)
-                    else response
-                )
-            payload = StockTraceResultPayload.model_validate(raw_payload)
-            payload_data = payload.model_dump(mode="python")
-            _strip_post_window_market_references(payload_data, snapshot)
-            chain_ids = {chain["chain_id"] for chain in payload_data["chains"]}
-            primary_chain_id = payload.primary_chain_id
-            alternative_chain_id = payload.alternative_chain_id
-            if primary_chain_id not in chain_ids:
-                primary_chain_id = next(
-                    (
-                        chain["chain_id"]
-                        for chain in payload_data["chains"]
-                        if chain["role"] == "primary"
-                    ),
-                    next(iter(chain_ids), None),
-                )
-            if alternative_chain_id not in chain_ids:
-                alternative_chain_id = next(
-                    (
-                        chain["chain_id"]
-                        for chain in payload_data["chains"]
-                        if chain["role"] == "alternative"
-                    ),
-                    None,
-                )
-            payload_data["primary_chain_id"] = primary_chain_id
-            payload_data["alternative_chain_id"] = alternative_chain_id
-            # Chain role is redundant metadata: its only valid value is defined
-            # by the selected chain ids. Derive it here instead of letting an LLM
-            # create a conflicting second identity for the same chain.
-            for chain in payload_data["chains"]:
-                if chain["chain_id"] == primary_chain_id:
-                    chain["role"] = "primary"
-                elif chain["chain_id"] == alternative_chain_id:
-                    chain["role"] = "alternative"
-            result = StockTraceResult.model_validate({
-                "schema_version": "stock-trace-result-v1",
-                "event_id": event_id,
-                "snapshot_id": snapshot.snapshot_id,
-                "analysis_version": analysis_version,
-                **payload_data,
-            })
-            validate_stock_trace_result(result, snapshot)
-            return StockTraceWorkerOutcome(status="completed", result=result)
-        except (ValueError, StockTraceValidationError) as exc:
-            logger.warning("stock_trace_validation_failed", event_id=event_id, error=str(exc))
-            return StockTraceWorkerOutcome(status="failed", error_code="VALIDATION_REJECTED")
+            last_error: str | None = None
+            for attempt in range(2):  # 首次 + 校验失败纠错一次（token 保护，不无限重试）
+                try:
+                    messages: list[object] = [
+                        SystemMessage(content=STOCK_TRACE_PROMPT),
+                        HumanMessage(content=snapshot.model_dump_json()),
+                    ]
+                    if last_error is not None:
+                        messages.append(HumanMessage(
+                            content=(
+                                "你上一轮输出未通过确定性校验，请修正后重试。"
+                                f"校验错误详情：{last_error}\n"
+                                "请对照上面错误逐项修正（缺失字段补齐、未引用的 source_id 删除、"
+                                "选中链补全六阶段、confirmed 条件不满足时降级为"
+                                " hypothesis/insufficient）。"
+                            )
+                        ))
+                    response = await structured_llm.ainvoke(messages)
+                    if isinstance(response, dict) and "parsed" in response:
+                        parsed = response.get("parsed")
+                        raw_payload = (
+                            parsed.model_dump(mode="python")
+                            if isinstance(parsed, BaseModel)
+                            else parsed
+                        )
+                        if raw_payload is None:
+                            raw_payload = _recover_tool_payload(response.get("raw"))
+                    else:
+                        raw_payload = (
+                            response.model_dump(mode="python")
+                            if isinstance(response, BaseModel)
+                            else response
+                        )
+                    payload = StockTraceResultPayload.model_validate(raw_payload)
+                    payload_data = payload.model_dump(mode="python")
+                    chain_ids = {chain["chain_id"] for chain in payload_data["chains"]}
+                    primary_chain_id = payload.primary_chain_id
+                    alternative_chain_id = payload.alternative_chain_id
+                    if primary_chain_id not in chain_ids:
+                        primary_chain_id = next(
+                            (
+                                chain["chain_id"]
+                                for chain in payload_data["chains"]
+                                if chain["role"] == "primary"
+                            ),
+                            next(iter(chain_ids), None),
+                        )
+                    if alternative_chain_id not in chain_ids:
+                        alternative_chain_id = next(
+                            (
+                                chain["chain_id"]
+                                for chain in payload_data["chains"]
+                                if chain["role"] == "alternative"
+                            ),
+                            None,
+                        )
+                    payload_data["primary_chain_id"] = primary_chain_id
+                    payload_data["alternative_chain_id"] = alternative_chain_id
+                    # Chain role is redundant metadata: its only valid value is defined
+                    # by the selected chain ids. Derive it here instead of letting an LLM
+                    # create a conflicting second identity for the same chain.
+                    for chain in payload_data["chains"]:
+                        if chain["chain_id"] == primary_chain_id:
+                            chain["role"] = "primary"
+                        elif chain["chain_id"] == alternative_chain_id:
+                            chain["role"] = "alternative"
+                        for node in chain["nodes"]:
+                            if node["stage"] == "transmission" and node["epistemic_type"] != "fact":
+                                if node["status"] == "established":
+                                    node["status"] = "partial"
+                    payload = _downgrade_unsupported_primary(
+                        StockTraceResultPayload.model_validate(payload_data),
+                        snapshot,
+                        primary_chain_id,
+                    )
+                    result = StockTraceResult.model_validate({
+                        "schema_version": "stock-trace-result-v1",
+                        "event_id": event_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "analysis_version": analysis_version,
+                        **payload.model_dump(mode="python"),
+                    })
+                    validate_stock_trace_result(result, snapshot)
+                    if attempt == 1:
+                        _metrics.record_stock_trace_validation_retry_success()
+                    return StockTraceWorkerOutcome(status="completed", result=result)
+                except (ValueError, StockTraceValidationError) as exc:
+                    # 解析/校验类失败：记录 + 纠错重试一次（第二次循环直接落到返回值）
+                    _metrics.record_stock_trace_validation_failed(type(exc).__name__)
+                    logger.warning(
+                        "stock_trace_validation_failed",
+                        event_id=event_id, attempt=attempt + 1, error=str(exc),
+                    )
+                    last_error = str(exc)
+                    continue
+            # 校验失败（高频）也带上最后一条失败原因，供失败可查；last_error
+            # 只在循环内校验异常时赋值，此处做 None 容忍以防边界未覆盖。
+            return StockTraceWorkerOutcome(
+                status="failed",
+                error_code="VALIDATION_REJECTED",
+                error_detail=(last_error[:500] if last_error else None),
+            )
         except Exception as exc:
             logger.exception("stock_trace_worker_failed", event_id=event_id, error=str(exc))
+            # 兜底只落笼统码会丢失真实根因（2026-09-30 事故教训），把"类名: 消息"
+            # 截断 500 字随 outcome 上报；错误码不动以维持重投语义。
+            detail = f"{type(exc).__name__}: {exc}"
             return StockTraceWorkerOutcome(
-                status="failed", error_code="LLM_OR_DEPENDENCY_UNAVAILABLE"
+                status="failed",
+                error_code="LLM_OR_DEPENDENCY_UNAVAILABLE",
+                error_detail=detail[:500],
             )

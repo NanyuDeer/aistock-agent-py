@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from aistock_agent.agents.workers import morning as morning_agent
 from aistock_agent.agents.workers.morning import _ensure_dual_layer, is_trading_day
+from aistock_agent.utils.date import shanghai_today
 
 # ── is_trading_day 测试（不变）──────────────────────────────────
 
@@ -36,7 +37,7 @@ def test_is_trading_day_national_holiday():
 
 
 def test_is_trading_day_no_arg_returns_bool():
-    # 不传参数时调用 date.today()，验证不崩溃且返回 bool
+    # 不传参数时用上海自然日（shanghai_today()），验证不崩溃且返回 bool
     result = is_trading_day()
     assert isinstance(result, bool)
 
@@ -339,7 +340,9 @@ async def test_morning_run_extracts_major_events():
 async def test_morning_run_persists_with_morning_type_and_null_user_id():
     """持久化请求使用 report_type=morning + 当天日期 + user_id=null。"""
     mock_agent = _make_mock_morning_agent([AIMessage(content=_make_valid_dual_layer_json())])
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 与产品代码同源：morning.run() 取上海自然日；不能用 datetime.now()
+    # （后者是 CI runner 本地时区，UTC 下 16:00 后与上海日不在同一天，断言会误红）
+    today = shanghai_today().isoformat()
     with patch(_MORNING_GET_CACHED, AsyncMock(return_value=None)):
         with patch(_MORNING_GET_DEEP, return_value=MagicMock()):
             with patch(_MORNING_CREATE_AGENT, return_value=mock_agent):
@@ -502,7 +505,8 @@ async def test_morning_run_cache_miss_invokes_agent():
 @pytest.mark.asyncio
 async def test_morning_run_system_message_injected():
     """ainvoke 传入的 messages 首条为 SystemMessage，content 含今日日期。"""
-    today = datetime.now().strftime("%Y年%m月%d日")
+    # 同上：期望值必须与产品代码同源（上海自然日），否则 UTC runner 上会误红
+    today = shanghai_today().strftime("%Y年%m月%d日")
     captured: dict = {}
     mock_agent = MagicMock()
 
@@ -688,7 +692,7 @@ async def test_run_caches_and_persists_when_normal():
     ) as mock_archive, patch(
         "aistock_agent.agents.workers.morning.persist_morning_report",
         new_callable=AsyncMock, return_value=True,
-    ) as mock_persist, patch(
+    ), patch(
         "aistock_agent.agents.workers.morning._safe_process_market_push",
         new_callable=AsyncMock,
     ), patch(

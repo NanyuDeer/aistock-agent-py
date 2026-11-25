@@ -13,10 +13,13 @@ from aistock_agent.agents.workers import review
 from aistock_agent.schemas.market_trace import (
     DataReadiness,
     DetectedPhenomenon,
+    EventHit,
     MarketTraceResult,
     MarketTraceSnapshot,
     PhenomenonDiscoveryResult,
+    PredictionValidation,
     ReviewArtifact,
+    SectorHit,
     SourceRecord,
 )
 
@@ -400,3 +403,89 @@ def test_render_market_trace_markdown_uses_snapshot_discovery_text():
 
     assert "多个核心指数同步上涨，市场广度偏强" in markdown
     assert "dominant_phenomenon" not in MarketTraceResult.model_fields
+
+
+# ============================================================================
+# 新增：预判对照章节渲染测试（Task 9）
+# ============================================================================
+
+
+def test_render_markdown_with_prediction_validation():
+    """含 prediction_validation 时渲染预判对照章节。"""
+    pv = PredictionValidation(
+        status="partial",
+        sector_hits=[
+            SectorHit(
+                sector="券商",
+                morning_direction="bullish",
+                actual_direction="bearish",
+                result="miss",
+                deviation_note="政策利好未兑现",
+            ),
+        ],
+        event_hits=[
+            EventHit(
+                event_title="央行降准",
+                morning_direction="bullish",
+                actual_impact="利好兑现",
+                result="hit",
+            ),
+        ],
+        overall_note="板块方向部分偏离",
+    )
+    trace = _make_render_trace().model_copy(update={"prediction_validation": pv})
+    markdown = review.render_market_trace_markdown(trace, _RENDER_SNAPSHOT)
+
+    assert "## 预判对照" in markdown
+    assert "部分命中" in markdown
+    assert "券商" in markdown
+    assert "偏离" in markdown
+    assert "政策利好未兑现" in markdown
+    assert "央行降准" in markdown
+    assert "板块方向部分偏离" in markdown
+
+
+def test_render_markdown_prediction_validation_none_degraded():
+    """prediction_validation=None 时渲染降级文案。"""
+    trace = _make_render_trace()
+    # _make_render_trace 默认 prediction_validation=None
+    assert trace.prediction_validation is None
+    markdown = review.render_market_trace_markdown(trace, _RENDER_SNAPSHOT)
+
+    assert "## 预判对照" in markdown
+    assert "无晨报预测可对照" in markdown
+
+
+def test_extract_trace_summary_prefers_summary_line_over_type_line():
+    """摘要应提取"- 摘要：xxx"行（易读中文），而非"- 类型：broad_rally"内部字段行。"""
+    summary = review._extract_trace_summary(REVIEW_MARKDOWN)
+    assert summary == "市场风险偏好改善，科技板块领涨。"
+
+
+def test_extract_trace_summary_falls_back_to_first_line_without_summary_line():
+    """现象段缺失摘要行时，回退到段落首个有效行（兼容旧 markdown）。"""
+    markdown = """# A股收盘溯源｜2026-07-17
+
+## 确认的市场现象
+- 类型：sector_rotation
+- 严重度：medium
+
+## 归因结论
+- 证据不足，未确认主因。
+"""
+    summary = review._extract_trace_summary(markdown)
+    assert summary == "类型：sector_rotation"
+
+
+def test_extract_trace_summary_falls_back_to_step_four_for_legacy_markdown():
+    """旧 markdown 无现象段时，回退到 ## 步骤4 段首个有效行。"""
+    legacy = """# A股收盘溯源｜2026-07-17
+
+## 步骤4 输出核心结论
+今日市场震荡上行，结构性机会明显。
+
+## 归因结论
+- 未选定主因。
+"""
+    summary = review._extract_trace_summary(legacy)
+    assert summary == "今日市场震荡上行，结构性机会明显。"

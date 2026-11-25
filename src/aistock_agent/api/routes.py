@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import re
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import date
+from typing import Any, cast
 from uuid import uuid4
 
 import structlog
@@ -12,22 +14,28 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from aistock_agent.api.deps import (
     build_chat_initial_state,
     build_initial_state,
+    reset_transient_state,
     verify_internal_token,
 )
 from aistock_agent.config import settings
 from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
+from aistock_agent.graph.nodes.qa_router import _STOCK_SYMBOL_CLARIFICATION
+from aistock_agent.memory.checkpointer import delete_thread
 from aistock_agent.observability.metrics import get_metrics_collector as _get_metrics_collector
 from aistock_agent.schemas.chat import ChatRequest, ChatResponse
-from aistock_agent.schemas.market_trace_qa import MarketTraceQaRequest, MarketTraceQaResponse
+from aistock_agent.schemas.chat_contract import ChatCard
 from aistock_agent.schemas.qa_api import QARequest
 from aistock_agent.schemas.stock_trace import StockTraceTriggerRequest, StockTraceTriggerResponse
+from aistock_agent.services.briefing import BriefType, build_and_persist_brief
+from aistock_agent.services.data_client import node_api
 from aistock_agent.services.http_client import HttpClientPool
 from aistock_agent.services.qa_briefing import (
     QaBriefingPrerequisiteError,
@@ -35,12 +43,15 @@ from aistock_agent.services.qa_briefing import (
     run_qa_brief_chain,
 )
 from aistock_agent.services.redis_pool import RedisPool
-from aistock_agent.state.chat_schema import QuestionState
+from aistock_agent.services.stock_info_prediction import StockInfoPredictionRequest
+from aistock_agent.services.token_usage import reset_token_usage
+from aistock_agent.state.chat_schema import QuestionState, UserProfile
+from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.sse import map_langgraph_event_to_sse
 
 
-def _select_graph() -> CompiledStateGraph:
+def _select_graph() -> CompiledStateGraph[QuestionState, None, QuestionState, QuestionState]:
     """按入口路由选择 graph：Chat 入口（/chat/*、/ws/chat）恒走 ChatAgent。
 
     报告入口（/briefing/*、trigger 类）不经过本函数，直接使用 compile_graph()。
@@ -58,6 +69,10 @@ _health_logger = structlog.get_logger()
 _metrics = _get_metrics_collector()
 _qa_logger = structlog.get_logger()
 
+# session_id 格式与 app-api SESSION_ID_RE 对齐：仅字母/数字/_/-，长度 1-64
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_chat_logger = structlog.get_logger()
+
 
 def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
     """缺省使用上海当天；显式日期必须是有效的 YYYY-MM-DD。"""
@@ -72,6 +87,44 @@ def _resolve_manual_report_date(body: dict[str, str] | None) -> str:
     if parsed_date.isoformat() != report_date:
         raise HTTPException(status_code=422, detail="report_date 必须是有效的 YYYY-MM-DD")
     return report_date
+
+
+def _validate_scrape_date(date_str: str) -> str:
+    """校验事件抓取查询日期（YYYY-MM-DD），非法返回 400 结构化错误。
+
+    三层校验（对齐 Node 侧 /internal/analysis-reports 的日期校验惯例）：
+    正则格式 → fromisoformat 语义 → isoformat 回写一致性。非法格式与
+    语义非法日期（如 2026-13-45）均返回 400，避免把坏日期透传到事件库。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    try:
+        parsed_date = date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != date_str:
+        raise HTTPException(status_code=400, detail="date 必须是有效的 YYYY-MM-DD")
+    return date_str
+
+
+def _parse_sectors_param(sectors: str | None) -> list[str]:
+    """解析可选的 ``sectors`` 查询参数（逗号分隔板块名）。
+
+    加性参数：非法值一律忽略而不是 400 —— 板块名是调用方的展示口径，
+    校验失败不应让 stock_trace 证据读取整条失败。规则：最多 10 项、单项
+    长度 2~32、去重保序。
+    """
+    if not sectors:
+        return []
+    parsed: list[str] = []
+    for item in sectors.split(","):
+        name = item.strip()
+        if not (2 <= len(name) <= 32) or name in parsed:
+            continue
+        parsed.append(name)
+        if len(parsed) >= 10:
+            break
+    return parsed
 
 
 def _resolve_qa_report_date(body: dict[str, str] | None) -> str:
@@ -92,18 +145,61 @@ async def chat_message(
     保留兼容，前端全部切到双流后清理。
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：HTTP 非流式路径按轮重置（一致性；不落库，仅透出展示）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
-    result = await graph.ainvoke(
+    user_id_value = req.user_id or None  # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["user_id"] = user_id_value
+    # Phase 4-3（改进 15）：无条件注入 user_profile（对齐 ws.py；匿名显式 None
+    # 覆盖 checkpoint 旧值防跨轮污染；拉取失败 None 不阻断）
+    initial_state["user_profile"] = cast(
+        "UserProfile | None",
+        await node_api.get_user_profile(user_id_value) if user_id_value else None,
+    )
+    # 用户画像自动挖掘一期：推断同样无条件显式赋值（匿名写 None 覆盖 checkpoint
+    # 旧值；拉取失败 None 仅 warning，不阻断对话）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
+    )
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
+    # G1 修订（2026-08-17 design-debate 定案）：值源 = 末节点 synth_answer 输出
+    result: dict[str, object] = {}
+    async for step in graph.astream(
         initial_state,
         config={"configurable": {"thread_id": session_id}},
+        stream_mode="updates",
+    ):
+        if isinstance(step, dict) and "synth_answer" in step:
+            result = step["synth_answer"]  # 终节点，最后一次命中即本轮输出
+    # 澄清分支显式置 None
+    # result 为图 synth_answer 输出（LangGraph 动态返回 dict[str, object]），
+    # 各字段类型由 synth_answer 契约保证 → 取值点 cast 收窄，零运行时影响。
+    if not result.get("final_response") and result.get("confirm"):
+        return ChatResponse(
+            content=_STOCK_SYMBOL_CLARIFICATION,
+            session_id=session_id,
+            token_usage=cast("dict[str, int] | None", result.get("token_usage")),
+            last_deep_report=None,
+            cards=None,
+            questions=None,  # 追问面板：澄清出口恒空
+        )
+    content = cast(
+        "str", result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
     )
-    content = result.get("final_response") or "抱歉，我暂时无法处理您的请求。"
-    # ChatAgent 无 advisor_trace（新子图），固定 None
     return ChatResponse(
         content=content,
         session_id=session_id,
-        advisor_trace=None,
+        token_usage=cast("dict[str, int] | None", result.get("token_usage")),
+        last_deep_report=cast("dict[str, object] | None", result.get("last_deep_report")),
+        cards=(
+            [c.model_dump() for c in cast("list[ChatCard]", result["cards"])]
+            if result.get("cards")
+            else None
+        ),
+        questions=cast("list[str] | None", result.get("questions")),  # 追问面板（2026-08-26）
     )
 
 
@@ -139,8 +235,8 @@ def _ensure_update_queue(session_id: str) -> asyncio.Queue[object | None]:
 
 
 async def _run_graph_to_queue(
-    graph: CompiledStateGraph,
-    initial_state: dict[str, object],
+    graph: CompiledStateGraph[Any, Any, Any, Any],
+    initial_state: Mapping[str, object],
     session_id: str,
 ) -> None:
     """后台执行 graph，所有 ``astream_events`` 事件推入两个独立 Queue（fan-out）。
@@ -169,8 +265,8 @@ async def _run_graph_to_queue(
 
 
 async def _stream_messages(
-    graph: CompiledStateGraph,
-    initial_state: dict[str, object],
+    graph: CompiledStateGraph[Any, Any, Any, Any],
+    initial_state: Mapping[str, object],
     session_id: str,
 ) -> AsyncGenerator[dict[str, object], None]:
     """messages 流 — 从 message Queue 读事件，发射 TEXT + LLM_START + DONE"""
@@ -181,6 +277,11 @@ async def _stream_messages(
         asyncio.create_task(_run_graph_to_queue(graph, initial_state, session_id))
 
     _llm_started = False
+    # G1 修订（2026-08-17）：last_deep_report/cards 改为事件流采集
+    round_last_deep_report: dict[str, object] | None = None
+    round_cards: list[dict[str, object]] | None = None
+    # 追问面板（2026-08-26）：questions 同事件流采集（与 cards 同模式）
+    round_questions: list[str] | None = None
     try:
         while True:
             event = await queue.get()
@@ -189,11 +290,23 @@ async def _stream_messages(
                 final_state = await graph.aget_state(
                     config={"configurable": {"thread_id": session_id}}
                 )
+                # Phase 4-2（改进 13）：SSE 与 HTTP 同样无两阶段交互能力；qa_router
+                # 触发 confirm 时降级为既有澄清文本（等价 WS confirm_timeout 回退）。
+                final_response = final_state.values.get("final_response", "")
+                if not final_response and final_state.values.get("confirm"):
+                    final_response = _STOCK_SYMBOL_CLARIFICATION
                 yield {
                     "type": SSEEventType.DONE,
-                    "final_response": final_state.values.get("final_response", ""),
+                    "final_response": final_response,
                     "analysis_reports": final_state.values.get("analysis_reports", {}),
-                    "advisor_trace": final_state.values.get("advisor_trace"),
+                    # P10 线 2：SSE 降级路径同步附带（无则 None，null 兼容；
+                    # 仅供前端本地累加展示，本路径不落库）
+                    "token_usage": final_state.values.get("token_usage"),
+                    # G1 修订：DONE 补齐 last_deep_report（事件流采集值，非终态）
+                    "last_deep_report": round_last_deep_report,
+                    "cards": round_cards,
+                    # 追问面板（2026-08-26）：事件流采集值（同 cards 模式）
+                    "questions": round_questions,
                 }
                 break
             if not isinstance(event, dict):
@@ -201,6 +314,15 @@ async def _stream_messages(
             if "__error__" in event:
                 yield {"type": SSEEventType.ERROR, "message": event["__error__"]}
                 break
+
+            # G1 修订：采集 synth_answer 节点输出
+            if event.get("event") == "on_chain_end" and event.get("name") == "synth_answer":
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict):
+                    round_last_deep_report = output.get("last_deep_report")
+                    cards = output.get("cards")
+                    round_cards = [c.model_dump() for c in cards] if cards else None
+                    round_questions = output.get("questions")  # 追问面板（2026-08-26）
 
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
@@ -272,8 +394,25 @@ async def chat_stream_messages(
     yields: llm_start → text/text/... → done（带 final_response + analysis_reports）
     """
     graph = _select_graph()
+    reset_token_usage()  # P10 线 2：SSE 路径按轮重置（DONE 从 state.values 读快照）
     session_id = req.session_id or f"session_{id(req)}"
     initial_state = build_chat_initial_state(req.message)
+    user_id_value = req.user_id or None  # D11：HTTP 降级路径透传（对齐 WS）
+    initial_state["user_id"] = user_id_value
+    # Phase 4-3（改进 15）：SSE 路径同样无条件注入 user_profile（对齐 ws.py；
+    # 匿名显式 None 覆盖 checkpoint 旧值防跨轮污染）
+    initial_state["user_profile"] = cast(
+        "UserProfile | None",
+        await node_api.get_user_profile(user_id_value) if user_id_value else None,
+    )
+    # 用户画像自动挖掘一期：SSE 路径同样无条件注入推断（对齐 ws.py）
+    initial_state["user_profile_inferences"] = (
+        await node_api.get_user_profile_inferences(user_id_value)
+        if user_id_value
+        else None
+    )
+    initial_state["force_deep"] = req.force_deep     # D4：HTTP 降级路径透传（对齐 ws.py）
+    reset_transient_state(initial_state)  # M3：单轮 transient 每轮归零（对齐 ws.py）
 
     async def generator() -> AsyncGenerator[dict[str, str], None]:
         async for sse_event in _stream_messages(graph, initial_state, session_id):
@@ -300,6 +439,39 @@ async def chat_stream_updates(
             yield {"data": json.dumps(sse_event, ensure_ascii=False)}
 
     return EventSourceResponse(generator())
+
+
+# ── 会话 thread 管理（Phase 5：删会话联动删 checkpointer thread） ──
+
+
+@router.delete("/internal/chat/threads/{session_id}")
+async def delete_chat_thread(
+    session_id: str,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """删除 chat checkpointer thread（幂等；Phase 5 删会话联动删历史）。
+
+    app-api 在删除 chat_sessions 元数据成功后调用本端点，清理 sqlite
+    .langgraph.db 中按 thread_id（= session_id）存储的多轮检查点，避免
+    thread 成为孤儿、以及 session_id 复用导致的历史串扰。
+    - 鉴权：X-Internal-Token 缺失/不匹配 → 403；
+    - session_id 非法（非 [A-Za-z0-9_-]{1,64}）→ 400；
+    - thread 不存在 → 仍返回 200（幂等）；
+    - delete_thread 意外异常 → 500（"永不 500" 由 app-api 调用侧保证）。
+    """
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(
+            status_code=400,
+            detail="session_id 仅支持字母/数字/_/-，长度 1-64",
+        )
+    try:
+        delete_thread(session_id)
+    except Exception as exc:
+        _chat_logger.warning(
+            "delete_chat_thread_failed", session_id=session_id, error=str(exc)
+        )
+        raise HTTPException(status_code=500, detail="chat thread delete failed") from exc
+    return {"success": True, "message": "chat thread deleted"}
 
 
 @router.get("/briefing/morning")
@@ -334,12 +506,16 @@ async def trigger_morning_briefing(
     """手动触发晨报生成（非流式，供管理员 curl 触发）
 
     直接调用 morning_agent.run()，不走 graph SSE 流。
-    晨报完成后自动提取 major_events 并行执行事件传导分析，等待全部完成。
     返回 JSON 含 success / message / report_date / cached / 事件统计。
     管理员触发后可通过 ``pm2 log aistock-app-api --lines 50`` 查看 Node.js 日志。
+
+    事件传导：2026-08-12（Task 5）起传导触发统一由事件抓取中台负责
+    （event_scrape 入库成功后触发 run_event_analysis_pipeline），本入口不再直接触发
+    event conduction——否则对同批事件（07:30 全量/每小时增量已触发）双跑
+    （Task 4 评审 M2）。响应中的 event_*_count 字段保留并恒为 0（接口契约，
+    Node 侧 morning_trigger_handler 消费）。
     """
     from aistock_agent.agents.workers import morning as morning_agent
-    from aistock_agent.services.event_conduction import run_event_conduction_batch
 
     report_date = _resolve_manual_report_date(body)
     logger = structlog.get_logger()
@@ -347,7 +523,7 @@ async def trigger_morning_briefing(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成今日晨报"}],
         "session_id": f"trigger_morning_{report_date}",
         "user_id": None,
@@ -357,7 +533,7 @@ async def trigger_morning_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -376,25 +552,16 @@ async def trigger_morning_briefing(
             major_events = []
         has_major_events = bool(major_events)
 
-        # 事件传导统计
+        # 事件传导统计：传导统一由中台负责（Task 5），本入口不再触发，
+        # 字段保留恒 0（响应契约：Node 侧 morning_trigger_handler.ts 消费
+        # event_triggered_count / event_succeeded_count / event_failed_count /
+        # event_persisted_count / event_persist_failed_count）。
         major_event_count = len(major_events)
         event_triggered_count = 0
         event_succeeded_count = 0
         event_failed_count = 0
         event_persisted_count = 0
         event_persist_failed_count = 0
-
-        # 晨报成功生成（非降级）且有重大事件 → 触发事件传导
-        if morning_generated and has_major_events:
-            event_results = await run_event_conduction_batch(major_events)
-            event_triggered_count = len(event_results)
-            event_succeeded_count = sum(1 for r in event_results if r.event_generated)
-            event_failed_count = event_triggered_count - event_succeeded_count
-            # 只统计生成成功的事件的持久化状态
-            event_persisted_count = sum(
-                1 for r in event_results if r.event_generated and r.persisted
-            )
-            event_persist_failed_count = event_succeeded_count - event_persisted_count
 
         elapsed = time.time() - start
 
@@ -491,30 +658,30 @@ async def trigger_event_briefing(
         logger.info(
             "manual_trigger_event_done",
             event_title=event_title[:50] or "default",
-            event_generated=result.event_generated,
-            persisted=result.persisted,
-            cached=result.cached,
-            success=result.success,
+            event_generated=result.status.event_generated,
+            persisted=result.status.persisted,
+            cached=result.status.cached,
+            success=result.status.success,
         )
 
-        if result.success:
+        if result.status.success:
             return {
                 "success": True,
                 "message": "事件分析完成",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
                 # 从 event_agent 显式状态读取，禁止硬编码 False
-                "event_cached": result.cached,
+                "event_cached": result.status.cached,
             }
         else:
             return {
                 "success": False,
-                "message": f"事件分析失败: {result.error or '未知错误'}",
-                "event_id": result.event_id,
-                "event_generated": result.event_generated,
-                "event_persisted": result.persisted,
-                "event_cached": result.cached,
+                "message": f"事件分析失败: {result.status.error or '未知错误'}",
+                "event_id": result.status.event_id,
+                "event_generated": result.status.event_generated,
+                "event_persisted": result.status.persisted,
+                "event_cached": result.status.cached,
             }
     except Exception as e:
         logger.error(
@@ -531,6 +698,215 @@ async def trigger_event_briefing(
             "event_persisted": False,
             "event_cached": False,
         }
+
+
+@router.post("/briefing/event-scrape/trigger")
+async def trigger_event_scrape(
+    body: dict[str, object] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发统一事件抓取。
+
+    body: {"scrape_mode": "full_daily|intraday|event_triggered",
+           "score_date": "YYYY-MM-DD", "event": {...}}
+
+    返回契约（对齐既有 trigger 接口 success/message 风格）：
+    - 成功: {"success": True, "data": <run_event_scrape 结果>}
+    - 失败: {"success": False, "message": <错误说明>}
+      非法 scrape_mode 与 run_event_scrape 异常均走结构化错误体，不抛 500。
+    """
+    from aistock_agent.services.event_scraper import VALID_MODES, run_event_scrape
+
+    logger = structlog.get_logger()
+    payload = body or {}
+    scrape_mode = str(payload.get("scrape_mode", "full_daily"))
+    # allowlist 校验：非法值返回结构化错误，避免 run_event_scrape 抛 ValueError → 500
+    if scrape_mode not in VALID_MODES:
+        logger.warning(
+            "manual_trigger_event_scrape_invalid_mode",
+            scrape_mode=scrape_mode,
+            valid_modes=sorted(VALID_MODES),
+        )
+        return {
+            "success": False,
+            "message": f"未知 scrape_mode: {scrape_mode!r}，合法值: {sorted(VALID_MODES)}",
+        }
+    score_date = payload.get("score_date")
+    event = payload.get("event")
+    logger.info("manual_trigger_event_scrape_start", scrape_mode=scrape_mode)
+    try:
+        result = await run_event_scrape(
+            scrape_mode,
+            score_date=str(score_date) if score_date else None,
+            event=dict(event) if isinstance(event, dict) else None,
+        )
+        logger.info("manual_trigger_event_scrape_done", **result)
+        return {"success": True, "data": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "manual_trigger_event_scrape_failed",
+            scrape_mode=scrape_mode,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"success": False, "message": f"事件抓取失败: {str(exc)}"}
+
+
+@router.post("/briefing/rhythm-master/trigger")
+async def trigger_rhythm_master(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发节奏大师卡生成（补跑 / 补发，供管理员 curl 触发）。
+
+    body: {"refresh_slot": "after_close|morning|midday",  # 缺省 after_close
+           "report_date": "YYYY-MM-DD",                    # 缺省上海当天
+           "target_date": "YYYY-MM-DD"}                    # 可选，仅 after_close 补跑用
+
+    ``report_date`` 是**基准日**（basis 取数日），不是卡片描述的目标日：
+    after_close 的 target_date = 基准日的次一交易日；morning / midday = 基准日当天。
+    非交易日补跑必须显式传最近一个有 K 线的交易日，否则 after_close 的基准门禁会
+    降级为"基准日无当日K线"（卡上档位为空）。
+
+    ``target_date`` 可选，仅 after_close 手动补跑使用：显式指定落库目标日，
+    把基于 ``report_date`` 数据算出的卡落回该日键（例：重算 09-18 数据并让前端
+    09-18 页显示 → 传 report_date=2026-09-18, target_date=2026-09-18）；缺省
+    按 slot 推导（after_close=基准日次一交易日 / 其余=基准日当天）。
+
+    三时点按 (target_date, refresh_slot) 独立落盘，重跑同键为 upsert 覆盖。
+
+    返回契约（对齐既有 trigger 接口 success/message 风格）：
+    - 成功: {"success": True, "data": {target_date, basis_date, refresh_slot,
+             synthesis_available, rhythm_card}}
+    - 失败: {"success": False, "message": ...}
+      非法 refresh_slot 与 worker 无产出均走结构化错误体，不抛 500。
+    """
+    from aistock_agent.agents.workers.rhythm_master import REFRESH_SLOTS
+    from aistock_agent.services.scheduler import _dispatch_rhythm_master
+
+    logger = structlog.get_logger()
+    payload = body or {}
+    refresh_slot = str(payload.get("refresh_slot", "after_close"))
+    if refresh_slot not in REFRESH_SLOTS:
+        logger.warning(
+            "manual_trigger_rhythm_master_invalid_slot",
+            refresh_slot=refresh_slot,
+            valid_slots=list(REFRESH_SLOTS),
+        )
+        return {
+            "success": False,
+            "message": f"未知 refresh_slot: {refresh_slot!r}，合法值: {list(REFRESH_SLOTS)}",
+        }
+
+    report_date = _resolve_manual_report_date(payload)
+    # target_date（可选，仅 after_close 补跑用）：显式指定落库目标日，格式同 report_date。
+    target_date: str | None = None
+    raw_target = payload.get("target_date")
+    if raw_target:
+        try:
+            parsed_target = date.fromisoformat(raw_target)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="target_date 必须是有效的 YYYY-MM-DD"
+            ) from exc
+        if parsed_target.isoformat() != raw_target:
+            raise HTTPException(
+                status_code=422, detail="target_date 必须是有效的 YYYY-MM-DD"
+            )
+        target_date = raw_target
+    logger.info(
+        "manual_trigger_rhythm_master_start",
+        refresh_slot=refresh_slot,
+        report_date=report_date,
+        target_date=target_date,
+    )
+
+    try:
+        result = await _dispatch_rhythm_master(refresh_slot, report_date, target_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "manual_trigger_rhythm_master_failed",
+            refresh_slot=refresh_slot,
+            report_date=report_date,
+            target_date=target_date,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"success": False, "message": f"节奏大师生成失败: {str(exc)}"}
+
+    analysis_reports = result.get("analysis_reports", {})
+    content = (
+        analysis_reports.get("rhythm_master") if isinstance(analysis_reports, dict) else None
+    )
+    if not isinstance(content, dict):
+        logger.error(
+            "manual_trigger_rhythm_master_no_card",
+            refresh_slot=refresh_slot,
+            report_date=report_date,
+            final_response=result.get("final_response"),
+        )
+        return {
+            "success": False,
+            "message": str(result.get("final_response") or "节奏大师无产出"),
+        }
+
+    logger.info(
+        "manual_trigger_rhythm_master_done",
+        target_date=content.get("target_date"),
+        refresh_slot=content.get("refresh_slot"),
+    )
+    return {
+        "success": True,
+        "data": {
+            "target_date": content.get("target_date"),
+            "basis_date": content.get("basis_date"),
+            "refresh_slot": content.get("refresh_slot"),
+            "synthesis_available": content.get("synthesis_available"),
+            "rhythm_card": content.get("rhythm_card"),
+        },
+    }
+
+
+@router.get("/event/scrape-list")
+async def event_scrape_list(date: str) -> dict[str, object]:
+    """按日期读取当日抓取事件列表（事件抓取中台查询接口）。
+
+    URL 参数：
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+    返回: {"events": [EventRecord, ...]}；当日无抓取事件返回空列表。
+    """
+    from aistock_agent.services.event_store import load_event_scrape  # noqa: PLC0415
+
+    date = _validate_scrape_date(date)
+    events = await load_event_scrape(date)
+    return {"events": events}
+
+
+@router.get("/event/scrape-by-symbol/{symbol}")
+async def event_scrape_by_symbol(
+    symbol: str, date: str, sectors: str | None = None
+) -> dict[str, object]:
+    """按标的读取当日抓取事件（stock_trace 证据源用）。
+
+    URL 参数：
+        symbol: 6 位股票代码（必填）。
+        date: YYYY-MM-DD（必填）。非法格式/语义非法日期返回 400。
+        sectors: 可选，个股所属板块名（逗号分隔，如 ``半导体,光模块``）。
+            传入时额外召回「板块标签命中」的事件（板块消息 → 关联个股），
+            并为每条结果写入 ``match_type``（symbol/sector/both）。
+            非法值（空项/超长/超量）按忽略处理，不返回 400。
+    返回: {"events": [EventRecord, ...]}；按 payload.symbol / involved_keywords
+    子串过滤（"000" 类短符号可能误命中多股，对 stock_trace 证据源可接受，
+    Task 2 评审备注）。
+    """
+    from aistock_agent.services.event_store import (  # noqa: PLC0415
+        load_event_scrape_by_symbol,
+    )
+
+    date = _validate_scrape_date(date)
+    sector_names = _parse_sectors_param(sectors)
+    events = await load_event_scrape_by_symbol(symbol, date, sector_names or None)
+    return {"events": events}
 
 
 @router.post("/briefing/review/trigger")
@@ -553,7 +929,7 @@ async def trigger_review_briefing(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成今日复盘溯源"}],
         "session_id": f"trigger_review_{report_date}",
         "user_id": None,
@@ -563,7 +939,7 @@ async def trigger_review_briefing(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": report_date,
     }
 
@@ -625,8 +1001,9 @@ async def trigger_broadcast_chain(
 
     start = time.time()
 
-    def _make_state(intent: str | None = None) -> dict[str, object]:
-        """构造 manual 触发的 AgentState（trigger_source=manual 使报告写DB）"""
+    def _make_state(intent: str | None = None) -> AgentState:
+        """构造手动触发链路的 AgentState（trigger_source=scheduler 使报告写DB，
+        与 09:00 调度任务一致）"""
         return {
             "messages": [],
             "session_id": f"manual_broadcast_{today}",
@@ -637,7 +1014,7 @@ async def trigger_broadcast_chain(
             "tag_code": None,
             "analysis_reports": {},
             "final_response": None,
-            "trigger_source": "manual",
+            "trigger_source": "scheduler",
             "report_date": today,
         }
 
@@ -696,9 +1073,15 @@ async def trigger_broadcast_chain(
         logger.error("manual_trigger_broadcast_trend_failed", error=str(e), exc_info=True)
 
     # Step 4: 播报生成（从数据库读取报告）
+    # 与 09:00 调度链路（scheduler._run_broadcast_task）保持一致：
+    # 先聚合持久化 brief_{brief_type}，再运行 broadcast agent 生成双人播报。
+    # 若缺这一步，brief_morning 报告不存在 → broadcast 报告降级
+    # （has_source_brief=false）→ 前端 briefing 页 getBrief 查询 404。
     step_start = time.time()
     try:
-        broadcast_result = await broadcast_agent.run(_make_state())
+        if not await build_and_persist_brief("morning", today):
+            raise RuntimeError("brief 聚合持久化失败")
+        broadcast_result = await broadcast_agent.run({**_make_state(), "brief_type": "morning"})
         broadcast_ok = bool(broadcast_result.get("final_response"))
         _record("broadcast", broadcast_ok, time.time() - step_start)
         logger.info(
@@ -732,6 +1115,140 @@ async def trigger_broadcast_chain(
     }
 
 
+@router.post("/briefing/broadcast/only")
+async def trigger_broadcast_only(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """仅重新生成双人播报（不重跑 morning/wind_leader/hot_burst/trend_score 报告）。
+
+    broadcast_agent.run() 直接从数据库读取现有报告生成双人对话播报，
+    适合"报告已存在、仅播报失败/想重听"的场景。trigger_source=scheduler 使
+    播报文本写 DB + 生成双人音频（与 09:00 调度链路一致）。
+
+    请求体: {"report_date": "2026-08-07"}（可选，默认今天）
+    返回: {"success", "message", "report_date", "has_audio", "elapsed_seconds"}
+    """
+    from aistock_agent.agents.workers import broadcast as broadcast_agent
+
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_broadcast_only_start", report_date=today)
+
+    start = time.time()
+    try:
+        state: AgentState = {
+            "messages": [],
+            "session_id": f"manual_broadcast_only_{today}",
+            "user_id": None,
+            "favorites": [],
+            "intent": "broadcast",
+            "symbol": None,
+            "tag_code": None,
+            "analysis_reports": {},
+            "final_response": None,
+            "trigger_source": "scheduler",  # 使播报写 DB + 生成音频
+            "report_date": today,
+        }
+        result = await broadcast_agent.run(state)
+        generated = bool(result.get("final_response"))
+        has_audio = bool(result.get("audio_path"))
+        elapsed = time.time() - start
+        logger.info(
+            "manual_trigger_broadcast_only_done",
+            generated=generated,
+            has_audio=has_audio,
+            elapsed_seconds=round(elapsed, 2),
+        )
+        return {
+            "success": generated,
+            "message": (
+                "播报生成完成: 文本="
+                f"{'成功' if generated else '失败'} / 音频="
+                f"{'已生成' if has_audio else '未生成'}"
+            ),
+            "report_date": today,
+            "has_audio": has_audio,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_broadcast_only_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"播报生成失败: {str(e)}",
+            "report_date": today,
+            "has_audio": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
+@router.post("/briefing/wind-leader/trigger")
+async def trigger_wind_leader(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动触发风口龙头 Agent 报告生成（非流式，供管理员 curl 触发）
+
+    直接调用 wind_leader_agent.run()，生成 AI 分析报告并写入数据库。
+    trigger_source=scheduler 会先做数据预检：后端数据为空时自动调
+    ``POST /api/cn/wind-leaders/refresh`` 补数据，最多重试3次。
+    绕过 is_trading_day() 检查，非交易日也可手动测试。
+
+    返回 JSON 含 success / message / report_date / has_response / elapsed_seconds。
+    管理员触发后可通过 ``pm2 logs aistock-agent-py --lines 50`` 查看 Python 日志。
+    """
+    from aistock_agent.agents.workers import wind_leader as wind_leader_agent
+
+    today = (body or {}).get("report_date", shanghai_today().isoformat())
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_wind_leader_start", report_date=today)
+
+    start = time.time()
+
+    state: AgentState = {
+        "messages": [{"role": "user", "content": "生成风口龙头分析报告"}],
+        "session_id": f"manual_wind_leader_{today}",
+        "user_id": None,
+        "favorites": [],
+        "intent": None,
+        "symbol": None,
+        "tag_code": None,
+        "analysis_reports": {},
+        "final_response": None,
+        "trigger_source": "scheduler",
+        "report_date": today,
+    }
+
+    try:
+        result = await wind_leader_agent.run(state)
+        final_response = result.get("final_response")
+        generated = bool(final_response)
+        elapsed = time.time() - start
+
+        logger.info(
+            "manual_trigger_wind_leader_done",
+            generated=generated,
+            elapsed_seconds=round(elapsed, 2),
+        )
+
+        return {
+            "success": generated,
+            "message": "风口龙头报告生成完成" if generated else "风口龙头报告生成失败（降级）",
+            "report_date": today,
+            "has_response": generated,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except Exception as e:
+        logger.error("manual_trigger_wind_leader_failed", error=str(e), exc_info=True)
+        return {
+            "success": False,
+            "message": f"风口龙头报告生成失败: {str(e)}",
+            "report_date": today,
+            "has_response": False,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
+
+
 @router.post("/briefing/trend-score/trigger")
 async def trigger_trend_score(
     body: dict[str, str] | None = None,
@@ -755,7 +1272,7 @@ async def trigger_trend_score(
 
     start = time.time()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": "生成趋势股评分分析报告"}],
         "session_id": f"manual_trend_score_{today}",
         "user_id": None,
@@ -765,7 +1282,7 @@ async def trigger_trend_score(
         "tag_code": None,
         "analysis_reports": {},
         "final_response": None,
-        "trigger_source": "manual",
+        "trigger_source": "scheduler",
         "report_date": today,
     }
 
@@ -820,7 +1337,8 @@ async def run_qa_briefing(
 
     report_date = _resolve_qa_report_date(body)
     try:
-        return await run_qa_brief_chain(brief_type, report_date, run_id)
+        # 上方成员守卫已保证 brief_type ∈ {"morning","evening"}，cast 仅告知类型检查器
+        return await run_qa_brief_chain(cast(BriefType, brief_type), report_date, run_id)
     except QaBriefingPrerequisiteError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except QaBriefingRunError as exc:
@@ -845,7 +1363,7 @@ async def trigger_stock_trace(
     trace_id = req.trace_id or uuid4().hex
     report_date = req.report_date or shanghai_today()
 
-    state: dict[str, object] = {
+    state: AgentState = {
         "messages": [{"role": "user", "content": f"分析 {symbol} 的异动情况"}],
         "session_id": f"stock_trace_{trace_id}",
         "user_id": None,
@@ -879,7 +1397,7 @@ async def trigger_stock_trace(
             )
 
         trace_persisted = result.get("trace_persisted", False)
-        report_id = result.get("report_id")
+        report_id = cast("str | int | None", result.get("report_id"))
 
         if trace_persisted and report_id is not None:
             _trace_logger.info(
@@ -1006,26 +1524,58 @@ async def get_report(report_type: str, report_date: str) -> dict[str, object]:
     return {"code": 404, "message": "报告未生成", "data": None}
 
 
-# ── 市场复盘问答 ─────────────────────────────────────────────────
+# ── 观测指标 ──────────────────────────────────────────────────────
 
 
-@router.post("/market-trace-qa/message")
-async def market_trace_qa_message(
-    req: MarketTraceQaRequest,
-    _: None = Depends(verify_internal_token),
-) -> MarketTraceQaResponse:
-    """市场复盘问答 - 只回答已生成的市场收盘复盘，不重跑 Trace。
+async def get_stock_trace_observability() -> dict[str, object]:
+    """组装观测快照：stock_trace / search 进程内计数器 + Redis 实时 gauge。
 
-    调用链：前端 -> Node createAgentProxy -> 本接口 -> market_trace_qa 服务
-    -> 读取当日已持久化的 ReviewArtifact -> 返回结构化回答和证据元数据。
+    计数器来自 MetricsCollector（stock_trace 链路与搜索 provider 链路，Task 2 扩展）；
+    gauge 实时读 Redis（stream lag / DLQ 长度 / 未确认 pending），读失败以降级值返回，
+    不阻塞 /metrics。
     """
-    from aistock_agent.services.market_trace_qa import answer_market_trace_qa
+    from aistock_agent.observability.metrics import get_metrics
+    from aistock_agent.workers.stock_trace_consumer import DLQ_STREAM, STREAM
 
-    return await answer_market_trace_qa(
-        message=req.message,
-        report_date=req.report_date,
-        session_id=req.session_id,
-    )
+    snapshot = get_metrics()
+    # snapshot 为 dict[str, object]（get_metrics 快照），子项契约恒为计数字典 →
+    # cast 收窄；仍保留 dict(...) 浅拷贝，避免返回对象与内部指标快照共享引用。
+    stock_trace = dict(cast("dict[str, object]", snapshot.get("stock_trace", {})))
+    search = dict(cast("dict[str, object]", snapshot.get("search", {})))
+    gauges: dict[str, object] = {"stream_lag": 0, "dlq_length": 0, "pending_unacked": 0}
+    try:
+        import redis.asyncio as aioredis
+
+        # redis.asyncio.from_url 无类型存根（no-untyped-call）：cast 为类型化可调用
+        # 后再调用（零运行时影响），返回值收窄为 Redis。
+        _from_url = cast("Callable[..., aioredis.Redis]", aioredis.from_url)
+        redis_client = _from_url(settings.stock_trace_redis_url)
+        try:
+            gauges["dlq_length"] = await redis_client.xlen(DLQ_STREAM)
+            groups = await redis_client.xinfo_groups(STREAM)
+            if groups:
+                gauges["stream_lag"] = groups[0].get("lag", 0)
+            pending = await redis_client.xpending(
+                STREAM, settings.stock_trace_consumer_group
+            )
+            if pending:
+                # 未指定 count 时 xpending 返回摘要，首元素即 pending 计数
+                gauges["pending_unacked"] = pending[0]
+        finally:
+            await redis_client.aclose()
+    except Exception:
+        logger = structlog.get_logger()
+        logger.warning("metrics_redis_read_failed")
+    return {"stock_trace": {**stock_trace, **gauges}, "search": search}
+
+
+@health_router.get("/metrics")
+async def metrics() -> dict[str, object]:
+    """观测指标（Prometheus 语义的 JSON 快照）。含 stock_trace 计数与实时 gauge。
+
+    注意：挂在 health_router 下，/metrics 在根路径（main.py 挂载），不带 /api/agent 前缀。
+    """
+    return await get_stock_trace_observability()
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────
@@ -1105,6 +1655,28 @@ async def readiness(response: Response) -> dict[str, object]:
         _health_logger.warning("health_check_stock_trace_consumer_failed", error=str(e))
         checks["stock_trace_consumer"] = f"error: {e}"
 
+    # 调度器心跳（2026-11-03）：pm2 日志流曾因磁盘写满（ENOSPC）中断，“没有心跳日志”
+    # 不代表调度停摆（进程内调度实际仍在跑）。心跳戳写在进程内，readiness 直接读它，
+    # 真正停摆时才会 degraded，避免再被日志丢失误导。
+    try:
+        import aistock_agent.services.scheduler as _sched_module
+
+        if not settings.scheduler_enabled or settings.qa_mode_enabled:
+            checks["scheduler"] = "skipped"
+        elif _sched_module._scheduler_started_at is None:
+            checks["scheduler"] = "error: scheduler not started"
+        elif _sched_module._scheduler_last_heartbeat is None:
+            checks["scheduler"] = "pending"
+        else:
+            age = max(0.0, time.time() - _sched_module._scheduler_last_heartbeat)
+            if age > _sched_module.HEARTBEAT_STALE_SECONDS:
+                checks["scheduler"] = f"error: heartbeat stale ({age:.0f}s)"
+            else:
+                checks["scheduler"] = f"ok ({age:.0f}s)"
+    except Exception as e:
+        _health_logger.warning("health_check_scheduler_failed", error=str(e))
+        checks["scheduler"] = f"error: {e}"
+
     # "skipped"/"pending" 不算失败，只有非 ok/非 skipped/非 pending 的检查项才判定 degraded
     degraded = any(
         v not in ("ok", "skipped", "pending") and not v.startswith("ok ")
@@ -1119,17 +1691,120 @@ async def readiness(response: Response) -> dict[str, object]:
 # ── 管理员手动触发（Gap 1: 灰度验证用） ──────────────────────────────
 
 
+class ReviewFullTriggerBody(BaseModel):
+    """POST /admin/trigger/review_full 请求体。
+
+    `with_chain`（缺省 False，保持既有行为）：复盘成功后补发 `review_done`，驱动链组装/
+    级联预判消费者——手动触发不走 `ReviewFullConsumer`，不补发就无法手动验证全链路。
+    """
+
+    report_date: str | None = None
+    with_chain: bool = False
+
+
+async def _publish_review_done_for_chain(report_date: str, trace_id: str) -> bool:
+    """手动触发复盘后补发 `review_done`（`with_chain=true` 专用）。
+
+    背景：`run_review` 只写报告，`review_done` 由 `ReviewFullConsumer` 在调度路径发布；
+    管理员手动 trigger 直接调 `run_review` → 链/预判消费者永不触发（2026-09-17 手动验证踩坑）。
+
+    发布路径（两级，均不向调用方抛出）：
+    ① 会话内默认总线（`main.lifespan` `set_default_bus`）可用 → 直接 `publish_review_done`；
+    ② 默认总线为 None（未起消费者/lifespan 未建）→ 用 `RedisPool` 单例客户端临时建 `EventBus`
+       发布；单例未初始化（RuntimeError）→ 按 `settings.redis_url` 临时连一个客户端
+       （URL 取配置，可被 `APP_ENV` 覆写，不写死），**临时连接用后即关**（`RedisPool` 单例属
+       全局资源，不关）。
+    两条路都失败 → 只 warning 并返回 False，**不影响已完成的复盘返回**。
+    返回值语义 = "发布路径执行完成（未抛异常）"：`publish_review_done` 内部吞掉 Redis 异常并
+    warning（既有"发布失败不阻断 review"契约），故极端情况下可能乐观为 True（同义告警在日志）。
+    """
+    from aistock_agent.services.event_bus import EventBus, get_default_bus
+    from aistock_agent.services.event_consumers import publish_review_done
+
+    logger = structlog.get_logger()
+    bus = get_default_bus()
+    if bus is not None:
+        try:
+            await publish_review_done(bus, report_date=report_date, trace_id=trace_id)
+            return True
+        except Exception as exc:  # noqa: BLE001 — 发布失败不得影响复盘返回
+            logger.warning(
+                "manual_review_done_publish_failed",
+                report_date=report_date,
+                error=str(exc),
+            )
+            return False
+
+    redis_client: object | None = None
+    close_redis = False
+    try:
+        import redis.asyncio as aioredis
+
+        try:
+            client = await RedisPool.get_client()
+        except RuntimeError:  # lifespan 未初始化 RedisPool → 临时连接
+            # redis.asyncio.from_url 无类型存根（no-untyped-call），此处按既有用法显式豁免
+            client = aioredis.from_url(settings.redis_url)  # type: ignore[no-untyped-call]
+            close_redis = True
+        redis_client = client
+        temp_bus = EventBus(
+            client,
+            max_retries=settings.event_bus_max_retries,
+            deadletter_prefix=settings.event_bus_deadletter_prefix,
+            consumer_group=settings.event_bus_consumer_group,
+            stream_max_len=settings.event_stream_max_len,
+        )
+        await publish_review_done(temp_bus, report_date=report_date, trace_id=trace_id)
+        logger.info(
+            "manual_review_done_published_via_temp_bus", report_date=report_date
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — 同上：降级路径失败只告警
+        logger.warning(
+            "manual_review_done_publish_failed",
+            report_date=report_date,
+            error=str(exc),
+        )
+        return False
+    finally:
+        if close_redis and redis_client is not None:
+            try:  # 临时连接用后即关（关闭失败不影响返回）
+                aclose = getattr(redis_client, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception:  # noqa: BLE001
+                logger.debug("manual_review_done_temp_redis_close_failed")
+
+
+class ReviewQuickTriggerBody(BaseModel):
+    """POST /admin/trigger/review_quick 请求体。
+
+    `with_chain`（缺省 False，保持既有行为）：复盘成功后补发 `review_done`，驱动链组装/
+    级联预判消费者——手动触发不走 `ReviewQuickConsumer`，不补发就无法手动验证全链路。
+    """
+
+    report_date: str | None = None
+    with_chain: bool = False
+
+
 @router.post("/admin/trigger/review_quick")
 async def trigger_review_quick(
-    body: dict[str, str] | None = None,
+    body: ReviewQuickTriggerBody | None = None,
     _: None = Depends(verify_internal_token),
 ) -> dict[str, object]:
     """手动触发 quick review（15:30 腾迅实时行情版）。
     供管理员灰度验证用。绕过 is_trading_day() 检查。
+
+    `with_chain=true`（可选，缺省 false 保持既有行为）：复盘成功后补发 `review_done`
+    （见 `_publish_review_done_for_chain`），使链组装/级联预判消费者被触发——手动验证
+    全链路必需；返回体带 `chain_published` 便于观测（发布失败只 warning，不影响复盘结果）。
     """
     from aistock_agent.agents.workers.review import run_review
 
-    report_date = _resolve_manual_report_date(body)
+    report_date = _resolve_manual_report_date(
+        {"report_date": body.report_date} if body and body.report_date else None
+    )
+    with_chain = bool(body.with_chain) if body is not None else False
     trace_id = f"manual-quick-{report_date}-{int(time.time())}"
     logger = structlog.get_logger()
     logger.info("manual_trigger_review_quick", report_date=report_date, trace_id=trace_id)
@@ -1146,6 +1821,12 @@ async def trigger_review_quick(
             "manual_trigger_review_quick_done",
             status=result.status, elapsed=elapsed, trace_id=trace_id,
         )
+        # 仅 status=ok 且显式请求联动时才发布（对齐调度路径"仅 ok 发 review_done"硬约束）
+        chain_published = (
+            await _publish_review_done_for_chain(result.report_date, result.trace_id)
+            if with_chain and result.status == "ok"
+            else False
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1153,6 +1834,7 @@ async def trigger_review_quick(
             "trace_id": result.trace_id,
             "elapsed_seconds": elapsed,
             "markdown_preview": result.markdown[:200] if result.markdown else "",
+            "chain_published": chain_published,
         }
     except Exception as e:
         logger.error(
@@ -1164,15 +1846,22 @@ async def trigger_review_quick(
 
 @router.post("/admin/trigger/review_full")
 async def trigger_review_full(
-    body: dict[str, str] | None = None,
+    body: ReviewFullTriggerBody | None = None,
     _: None = Depends(verify_internal_token),
 ) -> dict[str, object]:
     """手动触发 full review（20:30 Tushare 完整数据版）。
     供管理员灰度验证用。绕过 is_trading_day() 检查。
+
+    `with_chain=true`（可选，缺省 false 保持既有行为）：复盘成功后补发 `review_done`
+    （见 `_publish_review_done_for_chain`），使链组装/级联预判消费者被触发——手动验证
+    全链路必需；返回体带 `chain_published` 便于观测（发布失败只 warning，不影响复盘结果）。
     """
     from aistock_agent.agents.workers.review import run_review
 
-    report_date = _resolve_manual_report_date(body)
+    report_date = _resolve_manual_report_date(
+        {"report_date": body.report_date} if body and body.report_date else None
+    )
+    with_chain = bool(body.with_chain) if body is not None else False
     trace_id = f"manual-full-{report_date}-{int(time.time())}"
     logger = structlog.get_logger()
     logger.info("manual_trigger_review_full", report_date=report_date, trace_id=trace_id)
@@ -1189,6 +1878,12 @@ async def trigger_review_full(
             "manual_trigger_review_full_done",
             status=result.status, elapsed=elapsed, trace_id=trace_id,
         )
+        # 仅 status=ok 且显式请求联动时才发布（对齐调度路径"仅 ok 发 review_done"硬约束）
+        chain_published = (
+            await _publish_review_done_for_chain(result.report_date, result.trace_id)
+            if with_chain and result.status == "ok"
+            else False
+        )
         return {
             "status": result.status,
             "report_date": result.report_date,
@@ -1196,6 +1891,7 @@ async def trigger_review_full(
             "trace_id": result.trace_id,
             "elapsed_seconds": elapsed,
             "markdown_preview": result.markdown[:200] if result.markdown else "",
+            "chain_published": chain_published,
         }
     except Exception as e:
         logger.error(
@@ -1205,7 +1901,293 @@ async def trigger_review_full(
         raise HTTPException(status_code=502, detail=f"review_full trigger failed: {e}")
 
 
-# ── CHAT QA ────────────────────────────────────────────────────────
+@router.post("/admin/trigger/evening_chain")
+async def trigger_evening_chain(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """一键补跑完整晚间链路（review → market_snapshot → iterate → evening Brief → broadcast）。
+
+    供管理员在错过 15:30 调度或灰度验证时使用。review 阶段命中 Redis 缓存
+    （TTL 2h）时快速返回；显式传入 report_date 时跳过交易日检查。
+    返回各阶段状态，供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_evening_chain_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-evening-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_evening_chain_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_evening_chain_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_evening_chain_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "stages": result.get("stages"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_evening_chain_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"evening_chain trigger failed: {e}")
+
+
+@router.post("/admin/trigger/midday")
+async def trigger_midday(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """手动补跑盘中报任务（12:05 调度）。
+
+    供管理员在错过 12:05 调度或验收时使用。仍会经过交易日守卫
+    （_run_midday_task 内部校验，非交易日返回 skipped）。
+    返回任务状态（skipped/ok/partial/failed），供前端/日志诊断。
+    """
+    from aistock_agent.services.scheduler import _run_midday_task
+
+    report_date = _resolve_manual_report_date(body)
+    trace_id = f"manual-midday-{report_date}-{int(time.time())}"
+    logger = structlog.get_logger()
+    logger.info("manual_trigger_midday_start", report_date=report_date, trace_id=trace_id)
+
+    start = time.time()
+    try:
+        result = await _run_midday_task(report_date=report_date)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "manual_trigger_midday_done",
+            status=result.get("status"),
+            report_date=report_date,
+            elapsed=elapsed,
+            trace_id=trace_id,
+        )
+        return {
+            "status": result.get("status"),
+            "report_date": result.get("report_date", report_date),
+            "reason": result.get("reason"),
+            "trace_id": trace_id,
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        logger.error(
+            "manual_trigger_midday_failed",
+            error=str(e), exc_info=True, trace_id=trace_id,
+        )
+        raise HTTPException(status_code=502, detail=f"midday trigger failed: {e}")
+
+
+@router.post("/admin/stock-trace/dlq/replay")
+async def replay_stock_trace_dlq(
+    _: None = Depends(verify_internal_token),
+    error_code: str = "",
+    job_id: str = "",
+    limit: int = 50,
+) -> dict[str, object]:
+    """把 DLQ 中可重投的死信重新入队回 stock-trace.jobs 主流。
+
+    结构性错误码（INVALID_JOB_MESSAGE 等）不在 REPLAYABLE_ERROR_CODES 白名单，
+    将直接跳过。error_code / job_id 可选，用于精确筛选。
+    """
+    import redis.asyncio as _aioredis
+
+    from aistock_agent.workers.stock_trace_consumer import replay_dlq
+
+    client = _aioredis.from_url(  # type: ignore[no-untyped-call]
+        settings.stock_trace_redis_url, max_connections=2
+    )
+    filter_criteria: dict[str, str] = {}
+    if error_code:
+        filter_criteria["error_code"] = error_code
+    if job_id:
+        filter_criteria["job_id"] = job_id
+    try:
+        limit = max(1, min(limit, 200))
+        replayed = await replay_dlq(client, filter_criteria, limit)
+    finally:
+        await client.aclose()
+    return {"replayed": replayed}
+
+
+# ── 大盘溯源后接预测（独立触发，PR-A/T5；T6 regenerate 代理的转发目标） ──
+
+
+@router.post("/internal/predictions/from-trace")
+async def trigger_predictions_from_trace(
+    body: dict[str, str] | None = None,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """大盘溯源后接预测独立触发端点（供 app-api /regenerate 代理转发）。
+
+    流程：trade_date 校验 → 已验证拒覆盖（409，SPEC S6）→ predict_from_trace →
+    TraceUnavailableError 落 skipped 记录并返回 200（硬约束 7：不静默缺失）。
+    成功/llm_failed/parse_failed 均返回 ``{status, reason, record}``（后两者
+    record=None 不落库，调用方（T6 代理）可重试）；意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import (
+        TraceUnavailableError,
+        predict_from_trace,
+        save_skipped_prediction,
+    )
+
+    if not body or not body.get("trade_date"):
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+    trade_date = body["trade_date"]
+    try:
+        parsed_date = date.fromisoformat(trade_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD") from exc
+    if parsed_date.isoformat() != trade_date:
+        raise HTTPException(status_code=400, detail="trade_date must be YYYY-MM-DD")
+
+    trace_id = body.get("trace_id") or "manual-regenerate"
+    logger = structlog.get_logger()
+    logger.info("predictions_from_trace_start", trade_date=trade_date, trace_id=trace_id)
+    try:
+        # 已验证拒覆盖防御（SPEC S6）：同交易日已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预测被静默重写
+        existing = await node_api.list_predictions(f"review:{trade_date}")
+        for existing_record in existing:
+            verification = existing_record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        result, record = await predict_from_trace(trace_id, trade_date)
+        logger.info(
+            "predictions_from_trace_done",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            status=result.status,
+        )
+        return {"status": result.status, "reason": result.reason, "record": record}
+    except TraceUnavailableError as exc:
+        # 溯源数据不可用：落 skipped 记录并原样暴露原因，不静默缺失（硬约束 7）
+        skipped = await save_skipped_prediction(f"review:{trade_date}", str(exc))
+        logger.warning(
+            "predictions_from_trace_trace_unavailable",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            reason=str(exc),
+        )
+        return {"status": "skipped", "reason": str(exc), "record": skipped}
+    except HTTPException:
+        # 409/400 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "predictions_from_trace_failed",
+            trade_date=trade_date,
+            trace_id=trace_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-trace failed: {exc}")
+
+
+# ── 个股情报 → 可验证预判落库（抓取时已产出 ai_impact/ai_horizon 的确定性映射，P2/T2） ──
+
+
+@router.post("/internal/predictions/from-stock-info")
+async def predictions_from_stock_info(
+    body: StockInfoPredictionRequest,
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """个股情报（抓取时已产出）→ 可验证预判落库（P2 个股粒度入验证环）。
+
+    确定性映射，不调 LLM；``due_dates`` 复用 ``_compute_due_dates``（与 index/sector
+    同口径）。门槛不达 → 200 skipped（不落库）；同 source_id 已验证 → 409 拒覆盖；
+    意外异常兜底 502（"永不 500"）。
+    """
+    from aistock_agent.services.prediction_service import _compute_due_dates
+    from aistock_agent.services.stock_info_prediction import (
+        build_stock_info_prediction_with_reason,
+        stock_info_source_id,
+    )
+
+    logger = structlog.get_logger()
+    # 各失败原因码对应的人类可读文案（reason_code 为机器可读，供 app-api 区分正常降级/系统性失败）
+    skip_reason_text: dict[str, str] = {
+        "below_threshold": "未达入环门槛",
+        "invalid_input": "输入非法（symbol/published_date）",
+        "unmapped_value": "映射缺档（交易所前缀或 ai_impact/ai_horizon 未知）",
+    }
+    source_id = stock_info_source_id(body.symbol, body.published_date)
+    try:
+        prediction, reason_code = build_stock_info_prediction_with_reason(
+            symbol=body.symbol,
+            stock_name=body.stock_name,
+            published_date=body.published_date,
+            ai_impact=body.ai_impact,
+            ai_horizon=body.ai_horizon,
+            ai_summary=body.ai_summary,
+            url=body.url,
+        )
+        if prediction is None:
+            reason = skip_reason_text.get(reason_code, "未达入环门槛或输入非法")
+            logger.info(
+                "stock_info_prediction_skipped",
+                source_id=source_id,
+                reason_code=reason_code,
+                reason=reason,
+            )
+            return {
+                "status": "skipped",
+                "reason_code": reason_code,
+                "reason": reason,
+                "record": None,
+            }
+
+        # 已验证拒覆盖防御（SPEC S6）：同 source_id 已有记录且 verification 非空 dict
+        # （对齐 app-api Object.keys 语义）→ 拒绝覆盖，避免验证过的预判被静默重写。
+        # fail-closed：必须用 strict 查询——查询失败（抛错）不得被当作"无记录"放行，
+        # 否则 app-api upsert 会无条件覆盖已 verified 记录的正文，导致"验证结果与预判正文错位"。
+        existing = await node_api.list_predictions_strict(source_id)
+        for existing_record in existing:
+            verification = existing_record.get("verification")
+            if isinstance(verification, dict) and verification:
+                raise HTTPException(status_code=409, detail="已验证预测拒绝覆盖")
+
+        due_dates, approximate_horizons = _compute_due_dates(
+            body.published_date, prediction.horizons
+        )
+        payload: dict[str, object] = {
+            "source_type": "stock_info",
+            "source_id": source_id,
+            "schema_version": prediction.schema_version,
+            "prediction": prediction.model_dump(mode="json"),
+            "due_dates": due_dates,
+        }
+        if approximate_horizons:
+            payload["due_dates_approximate"] = approximate_horizons
+        record = await node_api.save_prediction(payload)
+        if record is None:
+            # data_client.post 吞异常返回 None；不判会把这句"落库失败"报成 saved 假成功
+            raise HTTPException(status_code=502, detail="save_prediction returned None")
+        logger.info("stock_info_prediction_saved", source_id=source_id, due_dates=due_dates)
+        return {"status": "saved", "reason_code": "saved", "reason": None, "record": record}
+    except HTTPException:
+        # 409 等业务拒绝直接透传
+        raise
+    except Exception as exc:
+        logger.error(
+            "stock_info_prediction_failed",
+            source_id=source_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f"predictions from-stock-info failed: {exc}")
 
 
 @router.post("/qa")
@@ -1228,16 +2210,16 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         "clarification": None,
     }
 
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
-
-    async def event_stream():
+    async def event_stream() -> AsyncGenerator[str, None]:
         import time as _time
 
         e2e_start = _time.monotonic()
         try:
             graph = compile_chat_graph()
             async for event in graph.astream_events(
-                initial_state, config=config, version="v2"
+                initial_state,
+                config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
+                version="v2",
             ):
                 event_name = event.get("event", "")
                 node_name = event.get("name", "")
@@ -1287,3 +2269,22 @@ async def qa_endpoint(req: QARequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── 完整洞察报告章节构建（供 app-api 分块推 SSE） ──────────────────
+
+
+@router.post("/insight-report/sections")
+async def build_insight_report_sections(
+    payload: dict[str, object],
+    _: None = Depends(verify_internal_token),
+) -> dict[str, object]:
+    """完整洞察报告章节构建：
+    app-api 组装数据 → 本端点纯模板构建（无 LLM）→ 返回 {header, sections}，
+    sections 元素为 {heading, blocks}；由 app-api 分块推送 SSE，
+    前端按 block.type 渲染（六阶段因果链为纵向时间轴）。"""
+    from aistock_agent.services.insight_report import (  # noqa: PLC0415
+        build_report_response,
+    )
+
+    return build_report_response(payload)

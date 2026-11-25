@@ -80,6 +80,14 @@ def check_thresholds(
 # 四个合法维度 key
 _VALID_DIMENSIONS = frozenset({"dimension_1", "dimension_2", "dimension_3", "dimension_4"})
 
+# 各维度的证据来源类型（静态标注，LLM 不产出此值）
+_DIMENSION_EVIDENCE_KIND: dict[str, str] = {
+    "dimension_1": "deterministic",  # hit_rate/new_coverage_rate 来自确定性统计
+    "dimension_2": "llm_derived",    # mean_deviation 来自 LLM 偏差分析
+    "dimension_3": "llm_derived",    # attribution_match_rate 依赖 LLM 归因
+    "dimension_4": "llm_derived",    # sentiment_bias 来自 LLM 情绪判定
+}
+
 
 def build_scorecard(
     snapshot: dict[str, object],
@@ -96,7 +104,7 @@ def build_scorecard(
 
     Returns:
         四维评分卡 dict，key 为 dimension_1 ~ dimension_4，
-        value 含 metrics / thresholds / triggered 三个字段。
+        value 含 metrics / thresholds / triggered / evidence_kind 四个字段。
     """
     # 维度一：关注点重叠度
     dim1 = get_nested_dict(snapshot, "dimension_1_coverage")
@@ -122,21 +130,25 @@ def build_scorecard(
             "metrics": {"hit_rate": d1_hit_rate, "new_coverage_rate": d1_new_coverage},
             "thresholds": {"hit_rate_lt": 0.5, "new_coverage_rate_gt": 0.4},
             "triggered": d1_hit_rate < 0.5 or d1_new_coverage > 0.4,
+            "evidence_kind": _DIMENSION_EVIDENCE_KIND["dimension_1"],
         },
         "dimension_2": {
             "metrics": {"mean_deviation": d2_mean_dev, "ma10_mean_deviation": d2_ma10_dev},
             "thresholds": {"mean_deviation_abs_gt": 3.0, "ma10_mean_deviation_abs_gt": 1.5},
             "triggered": abs(d2_mean_dev) > 3 or abs(d2_ma10_dev) > 1.5,
+            "evidence_kind": _DIMENSION_EVIDENCE_KIND["dimension_2"],
         },
         "dimension_3": {
             "metrics": {"attribution_match_rate": d3_match_rate},
             "thresholds": {"attribution_match_rate_lt": 0.3},
             "triggered": d3_match_rate < 0.3,
+            "evidence_kind": _DIMENSION_EVIDENCE_KIND["dimension_3"],
         },
         "dimension_4": {
             "metrics": {"ma20_sentiment_bias": d4_sentiment_bias},
             "thresholds": {"ma20_sentiment_bias_abs_gt": 0.15},
             "triggered": abs(d4_sentiment_bias) > 0.15,
+            "evidence_kind": _DIMENSION_EVIDENCE_KIND["dimension_4"],
         },
     }
 

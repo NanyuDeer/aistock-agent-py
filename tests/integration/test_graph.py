@@ -3,11 +3,15 @@
 验证「完整消息流程：输入 → 路由 → agent → 回复」端到端跑通。
 覆盖 5 条 intent 路径 + 未知 intent 兜底 + 完整流程（含 state 传递）。
 
-关键模式（来自 Task 5 的 test_memory.py）：
-    LangGraph 在 ``build_graph()`` 时通过 ``graph.add_node("supervisor", supervisor.run)``
-    绑定节点函数引用。因此 patch 必须在 ``compile_graph()`` 之前生效——
-    在 ``with patch(...)`` 块内调用 ``compile_graph()``，``build_graph()`` 会读取
-    patch 后的模块属性，拿到 mock 函数。
+关键模式（2026-11-19 更新，registry 重构后）：
+    ``build_graph()`` 不再直接写 ``morning_agent.run``，而是遍历
+    ``registry.GRAPH_AGENTS`` 里的 ``spec.run``——那是 **import 时固化**的函数对象。
+    只 patch 模块属性（``workers.morning.run``）拿不到 mock，节点会跑真实逻辑，
+    导致 ``assert_awaited_once`` 全挂、且测试会真的去打 LLM（本地表现为卡死）。
+
+    所以必须**同时** patch 两处：
+      1. 模块属性（保留：其他测试/代码可能读它）
+      2. ``builder.GRAPH_AGENTS``——用 ``dataclasses.replace`` 把 spec.run 换成 mock
 
 mock 节点函数签名：
     supervisor.run(state) → {"intent": "...", "symbol": "...", "tag_code": "..."}
@@ -15,10 +19,13 @@ mock 节点函数签名：
 """
 
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aistock_agent.agents import registry as registry_module
+from aistock_agent.graph import builder as builder_module
 from aistock_agent.graph.builder import compile_graph
 
 # 节点函数 patch 路径（与 src/aistock_agent/graph/builder.py 导入路径一致）
@@ -29,6 +36,18 @@ NODE_PATHS: dict[str, str] = {
     "sector": "aistock_agent.agents.workers.sector.run",
     "event": "aistock_agent.agents.workers.event.run",
     "general": "aistock_agent.agents.general.node.run",
+}
+
+# registry 里 spec.node_name → 上面 mocks 的 key。
+# 其余 10 个 agent（trend_score / hot_burst / alert / broadcast / wind_leader…）
+# 不在这张表里：它们的 run 保持原样，但 supervisor 被 mock 成固定 intent，
+# 路由永远不会落到它们身上，所以不会触发真实调用。
+_NODE_TO_MOCK: dict[str, str] = {
+    "general_agent": "general",
+    "morning_agent": "morning",
+    "stock_analyst": "stock",
+    "sector_analyst": "sector",
+    "event_analyst": "event",
 }
 
 # 各 agent mock 的默认 final_response（互不相同，便于断言路由命中目标）
@@ -79,6 +98,11 @@ def _patch_nodes(supervisor_return: dict[str, object]):
 
     所有 agent 均被 patch，确保路由错误时不会触达真实 LLM/工具调用，
     保证测试确定性与隔离性。每个 mock 返回互不相同的 final_response。
+
+    两处都要打：
+      - 模块属性：兼容直接引用 ``xxx.run`` 的代码路径
+      - ``builder.GRAPH_AGENTS``：build_graph 实际遍历的是这份 registry 快照，
+        其中的 spec.run 在 import 时已固化，改模块属性影响不到它
     """
     mocks: dict[str, AsyncMock] = {
         "supervisor": AsyncMock(return_value=supervisor_return),
@@ -89,6 +113,15 @@ def _patch_nodes(supervisor_return: dict[str, object]):
     with ExitStack() as stack:
         for name in ("supervisor", "morning", "stock", "sector", "event", "general"):
             stack.enter_context(patch(NODE_PATHS[name], new=mocks[name]))
+
+        # registry 里的 spec.run 是 import 时固化的函数对象，必须重建 spec 才能换掉
+        patched_specs = tuple(
+            replace(spec, run=mocks[_NODE_TO_MOCK[spec.node_name]])
+            if spec.node_name in _NODE_TO_MOCK
+            else spec
+            for spec in registry_module.GRAPH_AGENTS
+        )
+        stack.enter_context(patch.object(builder_module, "GRAPH_AGENTS", patched_specs))
         yield mocks
 
 

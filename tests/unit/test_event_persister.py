@@ -172,3 +172,33 @@ async def test_persist_event_report_silent_failure():
     ):
         # Should not raise — silent degradation
         await persist_event_report(event_id, event_meta, event_text, analysis_reports)
+
+
+@pytest.mark.asyncio
+async def test_persist_event_report_includes_source_name_and_event_type():
+    """source_name/event_type 从 event_meta 落入 content JSONB 顶层（无需改表结构）。"""
+    event_id = "evt_meta_ext"
+    event_meta = {
+        "eventId": "evt_meta_ext",
+        "title": "测试事件",
+        "source": "https://m.sohu.com/a/123",
+        "source_name": "搜狐",
+        "event_type": "市场动态",
+    }
+    event_text = "事件原文"
+    analysis_reports = _make_analysis_reports()
+
+    with patch(
+        "aistock_agent.services.event_persister.node_api.post",
+        new_callable=AsyncMock,
+    ) as mock_post:
+        await persist_event_report(event_id, event_meta, event_text, analysis_reports)
+
+        body = mock_post.call_args.args[1]
+        content = body["content"]
+        # 新字段写入 content 顶层；旧字段保持
+        assert content["source_name"] == "搜狐"
+        assert content["event_type"] == "市场动态"
+        assert content["source"] == "https://m.sohu.com/a/123"
+        assert content["eventId"] == "evt_meta_ext"
+        assert content["analysis_reports"] == analysis_reports

@@ -20,9 +20,12 @@ mock 路径说明：
 """
 
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from aistock_agent.utils.date import shanghai_today
 
 
 @pytest.fixture(autouse=True)
@@ -72,20 +75,45 @@ async def test_start_scheduler_initializes_jobs():
 
 def test_start_scheduler_explicitly_passes_configured_timezone_to_cron() -> None:
     """CronTrigger 必须显式绑定调度配置时区，不能依赖进程本地时区。"""
+    import asyncio
+
     from aistock_agent.services import scheduler
 
-    with patch.object(
-        scheduler.CronTrigger,
-        "from_crontab",
-        wraps=scheduler.CronTrigger.from_crontab,
-    ) as from_crontab:
-        scheduler.start_scheduler()
+    # AsyncIOScheduler.start() 需要当前事件循环：同步测试里显式创建/清理，
+    # 避免依赖前面 async 测试遗留的 loop 状态（全套运行时无当前 loop 会抛
+    # "There is no current event loop"）。
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        with patch.object(
+            scheduler.CronTrigger,
+            "from_crontab",
+            wraps=scheduler.CronTrigger.from_crontab,
+        ) as from_crontab:
+            # 同步测试里没有 running loop，AsyncIOScheduler.start() 会抛
+            # RuntimeError: no running event loop（Python 3.13 get_running_loop）。
+            # 本用例只断言 from_crontab 的 timezone 传参，start 打桩为 no-op 即可，
+            # 不影响断言语义（job 注册全部在 start() 之前完成）。
+            with patch.object(scheduler.AsyncIOScheduler, "start"):
+                scheduler.start_scheduler()
 
-    assert from_crontab.call_count == 3
-    assert all(
-        call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
-        for call in from_crontab.call_args_list
-    )
+        # 本用例真正要守的是「每个 CronTrigger 都显式绑定配置时区」（见下方断言）。
+        # 原先此处硬编码 job 数量（21）+ 手写拆分明细，每新增一个调度项就要改一次、
+        # 且明细会随之失真（2026-10 即因新增 impact_sectors_precompute 而失败）。
+        # 改为断言**不变式**：scheduler.py 中所有 add_job 的触发器均由
+        # CronTrigger.from_crontab 构造（该文件无其它触发器类型），故
+        # 「注册 job 数 == from_crontab 调用数」。这样新增 job 不必再改本用例，
+        # 而「某个 job 漏传 timezone」仍会被下面那条断言抓住。
+        registered_jobs = scheduler.get_scheduler().get_jobs()
+        assert from_crontab.call_count == len(registered_jobs) > 0
+        assert all(
+            call.kwargs["timezone"] == scheduler.settings.scheduler_timezone
+            for call in from_crontab.call_args_list
+        )
+    finally:
+        scheduler.shutdown_scheduler()
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def test_qa_mode_hard_disables_scheduler_even_if_scheduler_enabled(monkeypatch) -> None:
@@ -625,15 +653,19 @@ def test_traceable_report_validation_rejects_invalid_required_fields(
     assert _is_traceable_completed_report(report, "iterate") is False
 
 
-# ── 事件传导：major_events → event agent ──
+# ── 事件传导触发归属：中台为主，晨报仅事件库为空时兜底（I4） ──
 
 
 @pytest.mark.asyncio
-async def test_morning_task_triggers_event_conduction_for_major_events():
-    """scheduler morning → major_events → event agent 传导"""
+async def test_morning_task_no_longer_triggers_event_conduction():
+    """事件库非空且当日已有传导报告时晨报不直接触发事件传导。
+
+    I4 放宽后（H7，2026-08-13）：仅库非空不再足以抑制兜底，还需当日传导报告
+    已落库（has_conduction=True）或中台已标记。本用例以"传导报告已存在"为
+    抑制条件，断言晨报不触发（中台负责，防同批事件双跑）。
+    """
     import asyncio
 
-    from aistock_agent.services.event_conduction import EventConductionResult
     from aistock_agent.services.scheduler import _run_morning_task
 
     major_events = [
@@ -649,31 +681,30 @@ async def test_morning_task_triggers_event_conduction_for_major_events():
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[{"event_id": "e1", "title": "存量重大事件"}]),
+            ), patch(
+                # 当日传导报告已存在（has_conduction=True → 抑制兜底）
+                "aistock_agent.services.scheduler.node_api.list_analysis_reports",
+                new=AsyncMock(return_value=[{"id": 1}]),
+            ), patch(
+                "aistock_agent.services.redis_pool.RedisPool"
+            ) as mock_pool, patch(
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
-            ) as mock_event:
-                mock_event.return_value = EventConductionResult(
-                    success=True,
-                    event_id="evt_test",
-                    title="test",
-                    event_generated=True,
-                    persisted=True,
-                )
+            ) as mock_pipeline:
+                fake_client = AsyncMock()
+                fake_client.get = AsyncMock(return_value=None)  # 未标记
+                mock_pool.get_client = AsyncMock(return_value=fake_client)
                 await _run_morning_task()
-                # fire-and-forget tasks 需要等事件循环处理
                 await asyncio.sleep(0.1)
 
-    # 验证每个 major_event 都触发了事件传导
-    assert mock_event.call_count == 2
-    called_events = [call.args[0] for call in mock_event.call_args_list]
-    called_titles = [e["title"] for e in called_events]
-    assert "美联储加息" in called_titles
-    assert "通胀数据公布" in called_titles
+    mock_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_morning_task_no_major_events_no_conduction():
-    """无 major_events 时不触发事件传导"""
+    """无 major_events 时不触发事件传导（无论事件库是否为空）。"""
     import asyncio
 
     from aistock_agent.services.scheduler import _run_morning_task
@@ -687,65 +718,102 @@ async def test_morning_task_no_major_events_no_conduction():
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
                 new_callable=AsyncMock,
-            ) as mock_event:
+            ) as mock_pipeline:
                 await _run_morning_task()
                 await asyncio.sleep(0.1)
 
-    mock_event.assert_not_called()
+    mock_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_morning_task_single_event_failure_does_not_block():
-    """单个事件失败不阻断其他事件"""
+async def test_morning_task_falls_back_to_conduction_when_event_store_empty():
+    """I4 兜底：当日事件库为空 且 晨报产出 major_events（自主检索兜底）→
+    降级 fire-and-forget 触发事件传导（中台抓取全部失败时的安全网）。"""
     import asyncio
 
-    from aistock_agent.services.event_conduction import EventConductionResult
     from aistock_agent.services.scheduler import _run_morning_task
 
     major_events = [
-        {"title": "正常事件"},
-        {"title": "崩溃事件"},
-        {"title": "另一个正常事件"},
+        {"title": "美联储加息", "summary": "加息25bp"},
+        {"title": "通胀数据公布", "summary": "CPI 3.2%"},
     ]
     morning_result = {
         "final_response": '{"display_report": {}}',
         "analysis_reports": {"major_events": major_events},
     }
 
-    call_count = [0]
-
-    async def mock_conduction(event):
-        call_count[0] += 1
-        if event["title"] == "崩溃事件":
-            raise RuntimeError("模拟崩溃")
-        return EventConductionResult(
-            success=True,
-            event_id=f"evt_{call_count[0]}",
-            title=event["title"],
-            event_generated=True,
-            persisted=True,
-        )
-
     with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
         with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
             mock_agent.run = AsyncMock(return_value=morning_result)
             with patch(
-                "aistock_agent.services.event_conduction.run_single_event_conduction",
-                side_effect=mock_conduction,
-            ):
+                "aistock_agent.services.event_store.load_event_scrape",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                # 无当日传导报告（I4 放宽后 has_conduction=False 同样触发兜底）
+                "aistock_agent.services.scheduler.node_api.list_analysis_reports",
+                new=AsyncMock(return_value=[]),
+            ), patch(
+                "aistock_agent.services.redis_pool.RedisPool"
+            ) as mock_pool, patch(
+                "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
+                new_callable=AsyncMock,
+            ) as mock_pipeline:
+                fake_client = AsyncMock()
+                fake_client.get = AsyncMock(return_value=None)  # 未标记
+                mock_pool.get_client = AsyncMock(return_value=fake_client)
                 await _run_morning_task()
-                await asyncio.sleep(0.2)
+                # fire-and-forget：等待后台 task 完成再断言
+                await asyncio.sleep(0.1)
 
-    # 3 个事件都被调用了（崩溃的不影响其他）
-    assert call_count[0] == 3
+    mock_pipeline.assert_awaited_once_with(major_events)
+
+
+@pytest.mark.asyncio
+async def test_morning_task_skips_fallback_when_major_events_not_list():
+    """I4 边界：analysis_reports 缺失 / major_events 非 list → 不触发兜底。"""
+    import asyncio
+
+    from aistock_agent.services.scheduler import _run_morning_task
+
+    for analysis_reports in (None, {"major_events": "not-a-list"}):
+        morning_result = {
+            "final_response": '{"display_report": {}}',
+            "analysis_reports": analysis_reports,
+        }
+        with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
+            with patch("aistock_agent.agents.workers.morning", create=True) as mock_agent:
+                mock_agent.run = AsyncMock(return_value=morning_result)
+                with patch(
+                    "aistock_agent.services.scheduler._run_event_analysis_pipeline_task",
+                    new_callable=AsyncMock,
+                ) as mock_pipeline:
+                    await _run_morning_task()
+                    await asyncio.sleep(0.1)
+        mock_pipeline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_event_analysis_pipeline_task_delegates_to_pipeline():
+    """_run_event_analysis_pipeline_task 保留供中台复用：委托 pipeline 执行。"""
+    from aistock_agent.services.scheduler import _run_event_analysis_pipeline_task
+
+    major_events = [{"title": "央行降准", "summary": "降准0.5个百分点"}]
+    with patch(
+        "aistock_agent.services.event_analysis_pipeline.run_event_analysis_pipeline",
+        new_callable=AsyncMock,
+    ) as mock_pipeline:
+        await _run_event_analysis_pipeline_task(major_events)
+
+    mock_pipeline.assert_awaited_once_with(major_events)
 
 
 @pytest.mark.asyncio
 async def test_scheduler_review_task_passes_persistence_context():
-    from datetime import date
-
     from aistock_agent.agents.workers import review as review_module
     from aistock_agent.services.scheduler import _run_review_task
 
@@ -756,7 +824,8 @@ async def test_scheduler_review_task_passes_persistence_context():
 
     state = mock_run.await_args.args[0]
     assert state["trigger_source"] == "scheduler"
-    assert state["report_date"] == date.today().isoformat()
+    # 与产品代码同源：调度器用上海自然日（UTC runner 下 date.today 会错位）
+    assert state["report_date"] == shanghai_today().isoformat()
 
 
 # ── schema 2.0 持久化契约：market_snapshot / iterate 不得写入原始 JSON ──
@@ -990,13 +1059,18 @@ def test_extract_iterate_summary_ignores_llm_summary_and_rejects_invalid_state()
 @pytest.mark.asyncio
 async def test_publish_review_quick_event_publishes_to_event_bus():
     """_publish_review_quick_event 成功发布事件。"""
-    from unittest.mock import AsyncMock, MagicMock, patch
+    from unittest.mock import AsyncMock, patch
+
     from aistock_agent.services.scheduler import _publish_review_quick_event
 
     mock_bus = AsyncMock()
     mock_bus.publish = AsyncMock(return_value="evt-1")
 
-    with patch("aistock_agent.services.scheduler._get_event_bus", new_callable=AsyncMock, return_value=mock_bus):
+    with patch(
+        "aistock_agent.services.scheduler._get_event_bus",
+        new_callable=AsyncMock,
+        return_value=mock_bus,
+    ):
         with patch("aistock_agent.services.scheduler.is_trading_day", return_value=True):
             with patch("aistock_agent.services.scheduler.shanghai_today") as mock_today:
                 from datetime import date
@@ -1013,53 +1087,290 @@ async def test_publish_review_quick_event_publishes_to_event_bus():
 async def test_publish_review_quick_event_skips_non_trading_day():
     """非交易日跳过。"""
     from unittest.mock import patch
+
     from aistock_agent.services.scheduler import _publish_review_quick_event
 
     with patch("aistock_agent.services.scheduler.is_trading_day", return_value=False):
         await _publish_review_quick_event()  # 不应抛异常
 
 
+def _scheduler_settings_mock(**overrides):
+    """构造 ``services.scheduler.settings`` 的 MagicMock。
+
+    先把 ``config.Settings`` 中**全部** ``scheduler_*_cron`` 按真实默认值填好，
+    再套用 overrides。原因：漏配某个 cron 时，MagicMock 属性会被当作字符串传进
+    ``CronTrigger.from_crontab``，其内部对表达式做 ``len(expr.split())`` 得到 0 →
+    ``ValueError: Wrong number of fields; got 0, expected 5``
+    （2026-10 即因新增 ``scheduler_impact_sectors_precompute_cron`` 而失败）。
+    改为从真实默认值自动填充后，以后新增调度项无需再逐个补 fixture。
+    """
+    from unittest.mock import MagicMock
+
+    from aistock_agent.config import Settings
+
+    mock = MagicMock()
+    for name, field in Settings.model_fields.items():
+        if (
+            name.startswith("scheduler_")
+            and name.endswith("_cron")
+            and isinstance(field.default, str)
+        ):
+            setattr(mock, name, field.default)
+    mock.scheduler_timezone = Settings.model_fields["scheduler_timezone"].default
+    for key, value in overrides.items():
+        setattr(mock, key, value)
+    return mock
+
+
 def test_start_scheduler_registers_quick_full_crons_when_enabled():
     """quick_snapshot_enabled=True 时注册 review_quick/review_full cron。"""
     from unittest.mock import MagicMock, patch
+
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()
+    mock_settings = _scheduler_settings_mock(
+        qa_mode_enabled=False,
+        scheduler_enabled=True,
+        quick_snapshot_enabled=True,
+        scheduler_review_quick_cron="30 15 * * 0-4",
+        scheduler_review_full_cron="30 20 * * 0-4",
+    )
     with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
-        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
-            mock_settings.qa_mode_enabled = False
-            mock_settings.scheduler_enabled = True
-            mock_settings.quick_snapshot_enabled = True
-            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
-            mock_settings.scheduler_review_quick_cron = "30 15 * * 1-5"
-            mock_settings.scheduler_review_full_cron = "30 20 * * 1-5"
-            mock_settings.scheduler_timezone = "Asia/Shanghai"
+        with patch("aistock_agent.services.scheduler.settings", mock_settings):
             start_scheduler()
 
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
     assert "review_quick" in job_ids
     assert "review_full" in job_ids
+    assert "prediction_validate" in job_ids
+    assert "attribution_feedback" in job_ids
+    assert "event_scrape_daily" in job_ids
+    assert "event_scrape_close" in job_ids
+    assert "sentiment_temp" in job_ids
+    assert "rhythm_master_after_close" in job_ids
+    assert "rhythm_master_morning" in job_ids
+    assert "rhythm_master_midday" in job_ids
+    assert "sector_wind_prediction" in job_ids
     assert "evening_chain" not in job_ids
 
 
 def test_start_scheduler_registers_legacy_evening_chain_when_disabled():
     """quick_snapshot_enabled=False 时保留旧 evening_chain。"""
     from unittest.mock import MagicMock, patch
+
     from aistock_agent.services.scheduler import start_scheduler
 
     mock_scheduler = MagicMock()
+    mock_settings = _scheduler_settings_mock(
+        qa_mode_enabled=False,
+        scheduler_enabled=True,
+        quick_snapshot_enabled=False,
+        scheduler_review_cron="30 15 * * 0-4",
+    )
     with patch("aistock_agent.services.scheduler.get_scheduler", return_value=mock_scheduler):
-        with patch("aistock_agent.services.scheduler.settings") as mock_settings:
-            mock_settings.qa_mode_enabled = False
-            mock_settings.scheduler_enabled = True
-            mock_settings.quick_snapshot_enabled = False
-            mock_settings.scheduler_morning_cron = "50 8 * * 1-5"
-            mock_settings.scheduler_broadcast_cron = "0 9 * * 1-5"
-            mock_settings.scheduler_review_cron = "30 15 * * 1-5"
-            mock_settings.scheduler_timezone = "Asia/Shanghai"
+        with patch("aistock_agent.services.scheduler.settings", mock_settings):
             start_scheduler()
 
     job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
     assert "evening_chain" in job_ids
+    assert "prediction_validate" in job_ids
+    assert "event_scrape_daily" in job_ids
+    assert "event_scrape_close" in job_ids
+    assert "sentiment_temp" in job_ids
+    assert "rhythm_master_after_close" in job_ids
+    assert "rhythm_master_morning" in job_ids
+    assert "rhythm_master_midday" in job_ids
+    assert "sector_wind_prediction" in job_ids
     assert "review_quick" not in job_ids
+
+
+# ── 手动补跑晚间链路（/admin/trigger/evening_chain 支持） ──
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_explicit_report_date_skips_trading_day_check() -> None:
+    """显式传 report_date 时跳过交易日检查（非交易日也执行完整链路）。"""
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import broadcast, iterate, review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(
+        side_effect=[
+            _traceable_report("review", 1, {"text": "review"}),
+            _traceable_report("market_snapshot", 2, {"text": "snapshot"}),
+            _traceable_report("iterate", 3, {"text": '{"status": "normal"}'}),
+        ]
+    )
+    api.save_analysis_report = AsyncMock(return_value={"id": 1})
+    build_brief = AsyncMock(return_value=True)
+
+    with (
+        # 非交易日：只有显式传日期的手动补跑才允许执行
+        patch.object(scheduler, "is_trading_day", return_value=False),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+        patch(
+            "aistock_agent.services.snapshot_builder.build_snapshot",
+            return_value={"date": "2026-07-24", "summary": "snapshot"},
+        ),
+        patch.object(
+            iterate,
+            "run",
+            new=AsyncMock(return_value={"final_response": '{"status": "normal"}'}),
+        ),
+        patch.object(scheduler, "build_and_persist_brief", build_brief),
+        patch.object(broadcast, "run", new=AsyncMock()),
+    ):
+        result = await scheduler._run_evening_chain_task(report_date="2026-07-24")
+
+    assert result["status"] == "ok"
+    assert result["report_date"] == "2026-07-24"
+    assert result["stages"]["broadcast"] == "ok"
+    build_brief.assert_awaited_once_with("evening", "2026-07-24")
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_without_date_skips_non_trading_day() -> None:
+    """缺省日期且非交易日时返回 skipped（原调度行为保持）。"""
+    from datetime import date
+
+    from aistock_agent.services import scheduler
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=False),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 26)),
+    ):
+        result = await scheduler._run_evening_chain_task()
+
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_evening_chain_returns_failed_stage_when_review_invalid() -> None:
+    """review 产物不可追溯时返回 failed + stage=review。"""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from aistock_agent.agents.workers import review
+    from aistock_agent.services import scheduler
+
+    api = MagicMock()
+    api.get_analysis_report = AsyncMock(return_value=None)
+
+    with (
+        patch.object(scheduler, "is_trading_day", return_value=True),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 7, 24)),
+        patch.object(scheduler, "node_api", api),
+        patch.object(review, "run", new=AsyncMock(return_value={"final_response": "review"})),
+    ):
+        result = await scheduler._run_evening_chain_task()
+
+    assert result["status"] == "failed"
+    assert result["stage"] == "review"
+
+
+# ── 节奏大师手动补跑 target_date 覆盖（2026-09-19：重算 09-18 数据落回 09-18 键） ──
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rhythm_master_explicit_target_date_writes_state() -> None:
+    """显式 target_date 时写入 state 并透传给 worker.run()。"""
+    from datetime import date
+
+    import aistock_agent.agents.workers.rhythm_master as rhythm_master_module
+    from aistock_agent.services import scheduler
+
+    mock_run = AsyncMock(return_value={"analysis_reports": {"rhythm_master": {}}})
+    captured = {}
+
+    async def capture_run(state):
+        captured["state"] = state
+        return await mock_run(state)
+
+    with (
+        patch.object(rhythm_master_module, "run", new=capture_run),
+        patch.object(scheduler, "shanghai_today", return_value=date(2026, 9, 18)),
+    ):
+        await scheduler._dispatch_rhythm_master("after_close", "2026-09-18", "2026-09-18")
+
+    state = captured["state"]
+    assert state["report_date"] == "2026-09-18"
+    assert state["refresh_slot"] == "after_close"
+    assert state["target_date"] == "2026-09-18"
+    assert state["session_id"].endswith("_after_close")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rhythm_master_without_target_date_keeps_default() -> None:
+    """缺省 target_date 时不写入 state（保留按 slot 推导的既有行为）。"""
+    from datetime import date as _date
+
+    import aistock_agent.agents.workers.rhythm_master as rhythm_master_module
+    from aistock_agent.services import scheduler
+
+    captured = {}
+
+    async def capture_run(state):
+        captured["state"] = state
+        return {"analysis_reports": {"rhythm_master": {}}}
+
+    with (
+        patch.object(rhythm_master_module, "run", new=capture_run),
+        patch.object(scheduler, "shanghai_today", return_value=_date(2026, 9, 18)),
+    ):
+        await scheduler._dispatch_rhythm_master("after_close", "2026-09-18")
+
+    assert "target_date" not in captured["state"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_records_timestamp_for_readiness():
+    """心跳必须写入进程内时间戳：日志流中断时 /health/ready 仍能判断调度存活。
+
+    2026-10-19 pm2 日志因磁盘写满（ENOSPC）中断，但调度实际仍在跑；只写日志的
+    心跳会让人误判“调度停摆”，因此心跳戳不依赖日志落盘。
+    """
+    from aistock_agent.services import scheduler
+
+    scheduler._scheduler_last_heartbeat = None
+    started = time.time()
+    await scheduler._scheduler_heartbeat()
+
+    assert scheduler._scheduler_last_heartbeat is not None
+    assert scheduler._scheduler_last_heartbeat >= started
+
+
+@pytest.mark.asyncio
+async def test_start_scheduler_marks_started_at():
+    """成功 start 后记录启动时间，供 readiness 区分“未启动”与“已启动无心跳”。"""
+    from aistock_agent.services import scheduler
+
+    scheduler._scheduler_started_at = None
+    scheduler.start_scheduler()
+    try:
+        assert scheduler._scheduler_started_at is not None
+        assert scheduler.get_scheduler().running is True
+    finally:
+        # 在 loop 仍存活时 shutdown，避免单例绑定到已关闭的 loop 泄漏到后续测试
+        scheduler.shutdown_scheduler()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_job_misfire_grace_is_extended():
+    """心跳 job 也必须拿到 1h misfire grace。
+
+    APScheduler 默认 1s：loop 繁忙时诊断 job 会被直接跳过（2026-10-22 生产日志
+    “scheduler heartbeat ... was missed by 0:00:05” 即此因），从而制造“调度停摆”假象。
+    """
+    from aistock_agent.services import scheduler
+
+    scheduler.start_scheduler()
+    try:
+        job = scheduler.get_scheduler().get_job("scheduler_heartbeat")
+        assert job is not None
+        assert job.misfire_grace_time == 3600
+    finally:
+        scheduler.shutdown_scheduler()

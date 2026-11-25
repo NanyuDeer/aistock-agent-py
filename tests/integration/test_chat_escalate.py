@@ -135,6 +135,13 @@ async def test_light_path_unchanged():
             {"stock": escalate_worker},
         ),
         patch(
+            # 固定交易时段，去掉对运行时段/交易日历的依赖：非交易时段时
+            # synth_answer 会前置"今日尚未开盘…"提示（3091e6e，有意行为），
+            # 破坏 startswith 语义
+            "aistock_agent.graph.nodes.synth_answer.trading_session_status",
+            return_value=("trading", ""),
+        ),
+        patch(
             "aistock_agent.skills.stock_snapshot.get_quote",
             new=fake_get_quote,
         ),

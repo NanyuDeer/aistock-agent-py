@@ -10,12 +10,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aistock_agent.trace.chain import ChainStage
+
 SourceLevel = Literal["A", "B", "C", "D"]
 SourceKind = Literal[
-    "trigger_fact", "quote_fact", "sector_fact", "market_fact", "announcement", "news"
-]
-ChainStage = Literal[
-    "structural_root", "trigger", "transmission", "exposure", "repricing", "observable_result"
+    "trigger_fact", "quote_fact", "sector_fact", "sector_news", "market_fact",
+    "announcement", "news", "capital_fact", "technical_fact",
+    "insight_article",
 ]
 
 
@@ -58,6 +59,10 @@ class TriggerEvent(BaseModel):
     threshold_value: float
     severity: Literal["medium", "high", "critical"]
     rule_version: str
+    # 涨停标记：Node 侧 buildTriggerEvent 会随 PriceFact 透传（camelCase → is_limit_up）。
+    # 该字段出现在冻结的 trigger_event_json 里，缺声明会被 extra="forbid" 拒绝，
+    # 导致整条归因在 model_validate 处硬失败（2026-09-24 宿迁联盛事故）。
+    is_limit_up: bool | None = None
 
 
 class StockTraceSnapshot(BaseModel):
@@ -81,7 +86,7 @@ class TraceCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: str
-    layer: Literal["company", "sector", "market"]
+    layer: Literal["company", "sector", "market", "capital", "technical"]
     rank: int = Field(ge=1)
     status: Literal["supported", "weak", "rejected", "insufficient"]
     verdict: str = Field(min_length=1)
@@ -126,6 +131,9 @@ class StockTraceResultPayload(BaseModel):
     contradictions: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
     suggested_actions: list[Literal["verify_announcement", "observe", "read_evidence"]]
+    # 简短主因短语（关键词/概括性短语，≤20 字），供列表/卡片展示；
+    # 无确立主因（insufficient）时给出简短结论（如"证据不足"）。
+    primary_phrase: str = Field(min_length=1, max_length=20)
 
 
 class StockTraceResult(StockTraceResultPayload):
@@ -139,9 +147,14 @@ class StockTraceResult(StockTraceResultPayload):
     @model_validator(mode="after")
     def _validate_selected_chain_shape(self) -> "StockTraceResult":
         candidate_layers = {candidate.layer for candidate in self.candidates}
-        required_layers = {"company", "sector", "market"}
+        # 2026-09-18 决策：capital 由必产层降级为条件准入层——资金净流入/流出与价格涨跌是同义
+        # 反复，不产出该层候选不应阻塞结果；其余四层仍必须产出。capital 仍在 layer 枚举中，
+        # 存量结果（含 capital 候选）继续通过校验。
+        required_layers = {"company", "sector", "market", "technical"}
         if not required_layers.issubset(candidate_layers):
-            raise ValueError("candidates must cover company, sector and market layers")
+            raise ValueError(
+                "candidates must cover company, sector, market and technical layers"
+            )
         selected = {item for item in (self.primary_chain_id, self.alternative_chain_id) if item}
         chain_ids = {chain.chain_id for chain in self.chains}
         if not selected.issubset(chain_ids):

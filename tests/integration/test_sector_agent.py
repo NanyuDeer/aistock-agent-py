@@ -1,7 +1,8 @@
 """sector_agent run() 单元测试 — 板块分析
 
 mock create_react_agent，验证：
-- 工具集绑定（get_leader_stocks, get_capital_flow）
+- 工具集绑定（get_leader_stocks, get_capital_flow, get_wind_leaders,
+  predict_sector_trend——板块预判对话入口，Spec D · 预判环）
 - SystemMessage 注入（SECTOR_ANALYST_PROMPT）
 - final_response 提取
 - 使用 get_deep_think（非 quick_think）— sector 的入口校验项
@@ -18,7 +19,12 @@ from aistock_agent.prompts.workers.sector import SECTOR_ANALYST_PROMPT
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.sector.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.sector.get_deep_think"
 
-EXPECTED_TOOL_NAMES = {"get_leader_stocks", "get_capital_flow"}
+EXPECTED_TOOL_NAMES = {
+    "get_leader_stocks",
+    "get_capital_flow",
+    "get_wind_leaders",
+    "predict_sector_trend",
+}
 
 
 def _make_mock_agent(messages: list) -> MagicMock:
@@ -30,7 +36,7 @@ def _make_mock_agent(messages: list) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_sector_agent_tools_bound_correctly():
-    """create_react_agent 被调用时 tools 参数为正确的 2 个工具。"""
+    """create_react_agent 被调用时 tools 参数包含板块分析 + 板块预判工具。"""
     mock_agent = _make_mock_agent([AIMessage(content="板块分析完成")])
     with patch(_GET_DEEP_THINK, return_value=MagicMock()):
         with patch(_CREATE_REACT_AGENT, return_value=mock_agent) as mock_create:

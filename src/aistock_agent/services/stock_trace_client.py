@@ -54,10 +54,15 @@ class StockTraceNodeClient:
 
     async def report_job(
         self, job_id: str, status: str, *, error_code: str | None = None,
-        increment_attempt: bool = False,
+        increment_attempt: bool = False, error_detail: str | None = None,
     ) -> dict[str, object] | None:
-        return await self._client.patch(f"/internal/stock-trace/jobs/{job_id}", {
+        body: dict[str, object] = {
             "status": status,
             "last_error_code": error_code,
             "increment_attempt": increment_attempt,
-        })
+        }
+        # 只在带明细时写入 last_error_detail；None/空串不写，避免无谓放大 payload。
+        # 客户端同样截断 500 字（服务端也已强制截断，双保险且省带宽）。
+        if error_detail:
+            body["last_error_detail"] = error_detail[:500]
+        return await self._client.patch(f"/internal/stock-trace/jobs/{job_id}", body)

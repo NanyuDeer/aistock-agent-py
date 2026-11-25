@@ -1,6 +1,6 @@
 """直接 fire-and-forget 触发 event_agent.run()，与 scheduler._run_event_task 一致。
 
-为什么不用 /api/agent/chat/stream/messages：supervisor 会路由到 ai_advisor（用户场景）。
+为什么不用 /api/agent/chat/stream/messages：旧图用户场景由 general 兜底。
 事件传导走的是 scheduler 链路：直接调 event_agent.run()。
 """
 import asyncio

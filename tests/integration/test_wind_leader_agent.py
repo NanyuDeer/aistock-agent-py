@@ -3,14 +3,13 @@
 覆盖：工具集绑定 + 提示词注入 + 响应提取 + 异常降级
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aistock_agent.agents.workers.wind_leader import run
 from aistock_agent.prompts.workers.wind_leader import WIND_LEADER_ANALYST_PROMPT
-from aistock_agent.tools.sector_tools import get_wind_leaders
 
 _CREATE_REACT_AGENT = "aistock_agent.agents.workers.wind_leader.create_react_agent"
 _GET_DEEP_THINK = "aistock_agent.agents.workers.wind_leader.get_deep_think"
@@ -86,6 +85,13 @@ async def test_wind_leader_scheduler_persists_real_source():
             new_callable=AsyncMock,
             return_value=True,
         ),
+        # mock 响应非双层 JSON，会触发 repair_dual_layer_with_llm 的真实 LLM 调用；
+        # 这里固定返回 None 走降级分支，避免依赖 OPENAI_API_KEY 等外部环境
+        patch(
+            "aistock_agent.agents.workers.wind_leader.repair_dual_layer_with_llm",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         patch("aistock_agent.agents.workers.wind_leader._archive_wind_leader"),
         patch("aistock_agent.agents.workers.wind_leader.node_api") as mock_api,
     ):
@@ -106,4 +112,4 @@ async def test_wind_leader_exception_degradation():
     with patch(_GET_DEEP_THINK, side_effect=Exception("LLM error")):
         result = await run({"messages": [], "analysis_reports": {}})
 
-    assert result["final_response"] == "长线风口分析暂时不可用，请稍后重试"
+    assert result["final_response"] == "风口龙头分析暂时不可用，请稍后重试"

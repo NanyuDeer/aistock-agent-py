@@ -1,0 +1,44 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	supervisor(supervisor)
+	morning_agent(morning_agent)
+	stock_analyst(stock_analyst)
+	sector_analyst(sector_analyst)
+	event_analyst(event_analyst)
+	wind_leader_agent(wind_leader_agent)
+	broadcast_agent(broadcast_agent)
+	general_agent(general_agent)
+	hot_burst_agent(hot_burst_agent)
+	alert_agent(alert_agent)
+	trend_score_agent(trend_score_agent)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> supervisor;
+	alert_agent --> __end__;
+	broadcast_agent --> __end__;
+	event_analyst --> __end__;
+	general_agent --> __end__;
+	hot_burst_agent --> __end__;
+	morning_agent --> __end__;
+	sector_analyst --> __end__;
+	stock_analyst --> __end__;
+	trend_score_agent --> __end__;
+	wind_leader_agent --> __end__;
+	supervisor -.-> morning_agent;
+	supervisor -.-> stock_analyst;
+	supervisor -.-> sector_analyst;
+	supervisor -.-> event_analyst;
+	supervisor -.-> wind_leader_agent;
+	supervisor -.-> broadcast_agent;
+	supervisor -.-> general_agent;
+	supervisor -.-> hot_burst_agent;
+	supervisor -.-> alert_agent;
+	supervisor -.-> trend_score_agent;
+	supervisor -.-> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

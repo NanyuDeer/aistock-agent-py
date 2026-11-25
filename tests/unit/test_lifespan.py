@@ -5,6 +5,11 @@
 - shutdown 关闭 RedisPool + HttpClientPool
 - Redis init 失败时 app 不崩溃，HTTP client 仍初始化，shutdown 仍关闭
 - HTTP init 失败时 app 不崩溃，shutdown 仍关闭
+
+scheduler 启停不在此验证（scheduler 模块自有单测覆盖）：本文件一律 mock
+main.start_scheduler/shutdown_scheduler，避免真实启动 AsyncIOScheduler 依赖
+running event loop（模块级单例跨测试共享，会与 pytest-asyncio 的 loop 生命周期
+冲突抛 Event loop is closed）。
 """
 
 from unittest.mock import AsyncMock, patch
@@ -14,6 +19,16 @@ from fastapi import FastAPI
 
 from aistock_agent.config import settings
 from aistock_agent.main import lifespan
+
+
+@pytest.fixture(autouse=True)
+def _mock_scheduler():
+    """隔离真实调度器：lifespan 用例只验证 pool 生命周期。"""
+    with (
+        patch("aistock_agent.main.start_scheduler") as mock_start,
+        patch("aistock_agent.main.shutdown_scheduler") as mock_shutdown,
+    ):
+        yield mock_start, mock_shutdown
 
 
 @pytest.mark.asyncio

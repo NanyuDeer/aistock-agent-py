@@ -76,6 +76,46 @@ class TestConfigDefaults:
         assert isinstance(s.log_level, str)
         assert s.log_level == "INFO"
 
+    # ---- 自选股洞察（watchlist insight）----
+    def test_insight_redis_url_default(self):
+        """insight 独立 Redis db=3，与 stock_trace db=2 隔离"""
+        s = Settings()
+        assert s.insight_redis_url == "redis://localhost:6379/3"
+
+    def test_insight_consumer_group_default(self):
+        s = Settings()
+        assert s.insight_consumer_group == "watchlist-insight-workers"
+
+    def test_insight_consumer_block_ms_default(self):
+        s = Settings()
+        assert s.insight_consumer_block_ms == 1000
+
+    def test_insight_pending_claim_idle_ms_default(self):
+        s = Settings()
+        assert s.insight_pending_claim_idle_ms == 3000
+
+    def test_insight_max_attempts_default(self):
+        s = Settings()
+        assert s.insight_max_attempts == 3
+
+    def test_insight_consumer_enabled_default(self):
+        s = Settings()
+        assert s.insight_consumer_enabled is True
+
+    def test_insight_structured_output_method_default(self):
+        """归因 LLM 结构化输出默认 json_mode"""
+        s = Settings()
+        assert s.insight_structured_output_method == "json_mode"
+
+    def test_insight_label_max_chars_default(self):
+        s = Settings()
+        assert s.insight_label_max_chars == 12
+
+    def test_insight_llm_model_default(self):
+        """归因任务轻，默认 quick_think"""
+        s = Settings()
+        assert s.insight_llm_model == "quick_think"
+
 
 # =============================================================================
 # 现象发现阈值默认值测试
@@ -166,6 +206,22 @@ class TestConfigEnvOverride:
         assert s.phenomenon_broad_index_change_pct == 1.25
         assert s.phenomenon_sentiment_broken_ratio == 0.50
 
+    def test_smtp_qq_env_alias(self, monkeypatch):
+        """QQ_SMTP_* 环境变量映射到 iterate_smtp_* 字段。
+
+        2026-08-14 事故：.env.development 用 QQ_SMTP_USER/AUTH/TO 键名，
+        与字段 iterate_smtp_user/password/mail_to（env 名 ITERATE_SMTP_*）
+        不匹配 → settings 读不到 → mail_not_configured → 报告无法发送
+        （LLM key 正常因为 OPENAI_API_KEY 与字段名恰好匹配）。
+        """
+        monkeypatch.setenv("QQ_SMTP_USER", "sender@qq.com")
+        monkeypatch.setenv("QQ_SMTP_AUTH", "authcode123")
+        monkeypatch.setenv("QQ_SMTP_TO", "receiver@qq.com")
+        s = Settings()
+        assert s.iterate_smtp_user == "sender@qq.com"
+        assert s.iterate_smtp_password == "authcode123"
+        assert s.iterate_mail_to == "receiver@qq.com"
+
     def test_quick_think_temperature_override(self, monkeypatch):
         monkeypatch.setenv("QUICK_THINK_TEMPERATURE", "0.5")
         assert Settings().quick_think_temperature == 0.5
@@ -230,6 +286,30 @@ class TestConfigEnvOverride:
 
         monkeypatch.setenv("QA_MODE", "1")
         assert Settings().qa_mode_enabled is False
+
+
+# =============================================================================
+# HOLIDAYS_EXTRA 补充节假日表测试
+# =============================================================================
+
+
+class TestHolidaysExtra:
+    """验证 holidays_extra 默认空列表 + env 解析（复用 cors_origins 解析模式）"""
+
+    def test_holidays_extra_default_empty(self):
+        """默认空列表：未配置时 is_trading_day 行为与拆分前逐字节一致"""
+        s = Settings()
+        assert s.holidays_extra == []
+
+    def test_holidays_extra_comma_separated(self, monkeypatch):
+        """逗号分隔格式：HOLIDAYS_EXTRA=2027-01-01,2027-10-01 → list"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", "2027-01-01,2027-10-01")
+        assert Settings().holidays_extra == ["2027-01-01", "2027-10-01"]
+
+    def test_holidays_extra_json_array(self, monkeypatch):
+        """JSON 数组格式：HOLIDAYS_EXTRA=["2027-01-01"] → ["2027-01-01"]"""
+        monkeypatch.setenv("HOLIDAYS_EXTRA", '["2027-01-01"]')
+        assert Settings().holidays_extra == ["2027-01-01"]
 
 
 # =============================================================================

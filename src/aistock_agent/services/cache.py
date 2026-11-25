@@ -10,27 +10,34 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 
 import structlog
 
 from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 
 logger = structlog.get_logger()
 
 
-async def get_cached_briefing() -> str | None:
-    """从 Redis 获取缓存晨报。
+async def get_cached_briefing(report_type: str = "morning") -> str | None:
+    """从 Redis 获取缓存晨报/盘中报。
 
-    缓存 key 格式：``briefing:morning:{YYYY-MM-DD}``
+    缓存 key 格式：``briefing:{report_type}:{YYYY-MM-DD}``
+
+    参数化 report_type（H2，2026-08-24）：盘中报复用同一函数但传
+    report_type="midday"，key 按类型隔离，避免与晨报撞键。
+
+    Args:
+        report_type: 报告类型，决定缓存 key 前缀（默认 morning 兼容既有调用）。
 
     Returns:
-        缓存的晨报文本，未命中或异常时返回 None。
+        缓存的报告文本，未命中或异常时返回 None。
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:morning:{today}"
+        # 缓存键按上海自然日：容器为 UTC 时，北京 00:00-08:00 不会命中"昨天"的键
+        today = shanghai_today().isoformat()
+        cache_key = f"briefing:{report_type}:{today}"
         cached = await client.get(cache_key)
         if cached:
             if isinstance(cached, bytes):
@@ -41,17 +48,20 @@ async def get_cached_briefing() -> str | None:
     return None
 
 
-async def set_cached_briefing(content: str, ttl: int = 86400) -> None:
-    """缓存晨报到 Redis。
+async def set_cached_briefing(content: str, ttl: int = 86400, report_type: str = "morning") -> None:
+    """缓存报告到 Redis。
+
+    缓存 key 格式：``briefing:{report_type}:{YYYY-MM-DD}``
 
     Args:
-        content: 晨报文本。
+        content: 报告文本。
         ttl: 缓存过期秒数，默认 86400（每日更新语义）。
+        report_type: 报告类型，决定缓存 key 前缀（默认 morning 兼容既有调用；H2）。
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"briefing:morning:{today}"
+        today = shanghai_today().isoformat()
+        cache_key = f"briefing:{report_type}:{today}"
         await client.setex(cache_key, ttl, content)
     except Exception:
         logger.debug("set_cached_briefing_failed", exc_info=True)
@@ -113,6 +123,47 @@ async def set_cached_review(
         return False
 
 
+async def get_cached_morning_forecast(report_date: str) -> dict[str, object] | None:
+    """从 Redis 获取缓存的晨报预测结构化摘要。
+
+    缓存 key 格式：``morning:forecast:{report_date}``
+    """
+    try:
+        client = await RedisPool.get_client()
+        cache_key = f"morning:forecast:{report_date}"
+        cached = await client.get(cache_key)
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        logger.debug("get_cached_morning_forecast_failed", exc_info=True)
+    return None
+
+
+async def set_cached_morning_forecast(
+    report_date: str,
+    forecast: dict[str, object],
+    ttl: int = 7200,
+) -> bool:
+    """缓存晨报预测结构化摘要到 Redis。
+
+    Args:
+        report_date: 报告日期 YYYY-MM-DD
+        forecast: MorningForecast 的 model_dump(mode="json") 输出
+        ttl: 缓存过期秒数，默认 7200（2 小时）
+    """
+    try:
+        client = await RedisPool.get_client()
+        cache_key = f"morning:forecast:{report_date}"
+        await client.setex(cache_key, ttl, json.dumps(forecast, ensure_ascii=False))
+        return True
+    except Exception:
+        logger.debug("set_cached_morning_forecast_failed", exc_info=True)
+        return False
+
+
 def _event_cache_key(user_input: str) -> str:
     """生成事件缓存 key：event:{md5}"""
     digest = hashlib.md5(user_input.encode()).hexdigest()
@@ -163,7 +214,8 @@ async def try_set_cached_market_push_sent(market: str, event_hash: str) -> bool:
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 去重标记按上海自然日（与产品报告日同源，见模块顶部说明）
+        today = shanghai_today().isoformat()
         key = f"market_push_sent:{today}:{market}:{event_hash}"
         result = await client.set(key, "1", nx=True, ex=86400)
         return result is True
@@ -193,7 +245,7 @@ async def release_cached_market_push_sent(market: str, event_hash: str) -> None:
     """
     try:
         client = await RedisPool.get_client()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = shanghai_today().isoformat()
         key = f"market_push_sent:{today}:{market}:{event_hash}"
         await client.delete(key)
     except Exception:
@@ -227,4 +279,60 @@ async def set_cached_event(
         return True
     except Exception:
         logger.debug("event_cache_set_failed", exc_info=True)
+        return False
+
+
+def _profile_cache_key(internal_id: str) -> str:
+    """验证画像缓存键（Spec B §4.4）：prediction:profile:{internal_id}。
+
+    Target 维度（全局 §2.1）：key 用 internal_id（稳定标识），不用 name/裸码，
+    防板块改名断画像 + index/stock 码空间冲突。
+    """
+    return f"prediction:profile:{internal_id}"
+
+
+async def get_cached_validation_profile(internal_id: str) -> dict[str, object] | None:
+    """读取 target 的验证画像缓存（Spec B §4.4）。
+
+    Returns:
+        命中 → 画像 dict；未命中/异常 → None（调用方走拉取重算降级）。
+    """
+    try:
+        client = await RedisPool.get_client()
+        cached = await client.get(_profile_cache_key(internal_id))
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        logger.debug("get_cached_validation_profile_failed", exc_info=True)
+    return None
+
+
+async def set_cached_validation_profile(
+    internal_id: str,
+    profile: dict[str, object],
+    ttl: int = 86400,
+) -> bool:
+    """写入 target 的验证画像缓存（Spec B §4.4）。
+
+    Args:
+        internal_id: target 稳定标识（画像 key）。
+        profile: build_validation_profile 的输出 dict。
+        ttl: 缓存过期秒数，默认 86400（每日 16:00 run_once 更新语义）。
+
+    Returns:
+        True 表示写入成功；False 表示写入失败。
+    """
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(
+            _profile_cache_key(internal_id),
+            ttl,
+            json.dumps(profile, ensure_ascii=False),
+        )
+        return True
+    except Exception:
+        logger.debug("set_cached_validation_profile_failed", exc_info=True)
         return False

@@ -1,0 +1,12 @@
+{
+  "gt_id": "gt_pending_low_confidence",
+  "case_id": "case_20260731_us_market_surge",
+  "confidence": "low",
+  "attribution": {
+    "direction": "neutral",
+    "drivers": [],
+    "transmission_path": [],
+    "affected_sectors": [],
+    "source_notes": []
+  }
+}

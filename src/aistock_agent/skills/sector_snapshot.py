@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeGuard
 
 from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
 from aistock_agent.services.data_client import node_api
@@ -20,7 +20,7 @@ _MAX_WIND_SECTORS = 8
 _MAX_WIND_STOCKS = 3
 
 
-def _is_six_digit_code(code: object) -> bool:
+def _is_six_digit_code(code: object) -> TypeGuard[str]:
     return isinstance(code, str) and bool(_RE_SIX_DIGIT.match(code))
 
 

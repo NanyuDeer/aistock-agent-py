@@ -22,7 +22,12 @@ import structlog
 from langchain_core.tools import BaseTool
 
 from aistock_agent.observability.metrics import get_metrics_collector
-from aistock_agent.schemas.chat_contract import ChatSource, Evidence, InsightGoal
+from aistock_agent.schemas.chat_contract import (
+    ChatSource,
+    ChatSourceKind,
+    Evidence,
+    InsightGoal,
+)
 from aistock_agent.skills.registry import SkillCallable, register_skill
 from aistock_agent.tools.base import DEGRADED_MESSAGE
 
@@ -38,8 +43,8 @@ ADAPTER_TOOL_NAMES: tuple[str, ...] = (
     "tavily_finance_search",
 )
 
-#: 工具名 → ChatSource.kind（复用既有 Literal；未覆盖工具用默认值）
-_TOOL_SOURCE_KIND: dict[str, str] = {
+#: 工具名 → ChatSource.kind（复用 ChatSourceKind 闭集；未覆盖工具用默认值）
+_TOOL_SOURCE_KIND: dict[str, ChatSourceKind] = {
     "get_quote": "realtime_quote",
     "get_capital_flow": "capital_flow",
     "search_cls_news": "news",
@@ -47,7 +52,7 @@ _TOOL_SOURCE_KIND: dict[str, str] = {
     "get_global_markets": "realtime_quote",
     "tavily_finance_search": "news",
 }
-_DEFAULT_SOURCE_KIND = "realtime_quote"
+_DEFAULT_SOURCE_KIND: ChatSourceKind = "realtime_quote"
 
 #: 工具名 → 所在模块（延迟导入触发自注册，避免顶层引入整棵 tools 依赖树）
 _TOOL_MODULE_BY_NAME: dict[str, str] = {

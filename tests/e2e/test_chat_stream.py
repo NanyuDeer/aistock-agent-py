@@ -198,8 +198,8 @@ async def test_chat_stream_messages_general_intent_events():
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_done_advisor_trace_none():
-    """M5 后 ChatAgent 的 QuestionState 无 advisor_trace，DONE 事件保持 null。"""
+async def test_chat_stream_done_omits_trace_field():
+    """M5 后 ChatAgent 的 QuestionState 无该字段，DONE 事件不含。"""
     mock_graph = _make_mock_graph(_empty_stream)
     mock_graph.aget_state = AsyncMock(return_value=MagicMock(values={
         "final_response": "降级",
@@ -214,7 +214,7 @@ async def test_chat_stream_done_advisor_trace_none():
             ) as resp:
                 events = _parse_sse(await _read_sse(resp))
 
-    assert events[-1]["advisor_trace"] is None
+    assert "advisor_trace" not in events[-1]
 
 
 @pytest.mark.asyncio

@@ -1,30 +1,42 @@
-"""全局重要性评估服务 — 投资者视角焦点事件识别
+"""全局重要性评估服务 — 投资者视角当日最大利好/最大利空事件识别
 
 职责：
-1. 查询近 7 天 event_conduction 报告（_load_recent_event_reports）
-2. 提取关键字段，构建 Global Importance Prompt 所需输入结构（build_global_importance_input）
-3. 调用 LLM 识别两个独立的焦点事件（run_global_importance_evaluation）：
-   - current_focus_event：当前最值得关注的事件（新事件优先）
-   - ongoing_significant_event：仍在影响市场的持续事件
+1. 接收当天 Event Conduction Pipeline 返回的已完成事件结果（外部注入）
+2. 构建 Global Importance Prompt 所需输入结构（build_global_importance_input）
+3. 调用 LLM 识别两个独立方向的焦点事件（eval_global_importance_from_events）：
+   - top_bullish_event：当日最大利好事件（direction=bullish）
+   - top_bearish_event：当日最大利空事件（direction=bearish）
 4. 持久化结果到 DB
+
+设计原则（2026-08-05 当天事件池重构）：
+    GI 只比较当天 Morning 产生并经过 Event Conduction 分析完成的事件，
+    禁止使用近 7 天 event_conduction 数据。
+    ``eval_global_importance_from_events(events)`` 是 pipeline 主入口，
+    入参 events 必须来自 event_analysis_pipeline 的当天传导结果。
+    ``persist_global_importance_evaluation(events=...)`` 向下兼容：
+    当 events 为 None 时回退到 DB 查询（用于 _test_run 手动调试）。
 """
 
 import asyncio
 import json
-from datetime import date, datetime, timedelta
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, cast
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
+from aistock_agent.config import settings
 from aistock_agent.prompts.workers.global_importance import GLOBAL_IMPORTANCE_PROMPT
 from aistock_agent.services.data_client import node_api
-from aistock_agent.services.llm import get_quick_think
+from aistock_agent.services.llm import get_deep_think, get_quick_think, with_chat_structured_output
+from aistock_agent.services.redis_pool import RedisPool
+from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.output_parser import _parse_json
 
 logger = structlog.get_logger()
 
-# 查询近 N 天的 event_conduction 报告
+# 查询近 N 天的 event_conduction 报告（历史兼容，仅用于 _test_run 手动入口）
 _DEFAULT_LOOKBACK_DAYS = 7
 
 
@@ -37,7 +49,7 @@ def _safe_str(value: object, default: str = "") -> str:
 
 def _safe_float(value: object, default: float = 0.0) -> float:
     """安全提取浮点数。"""
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
     try:
         return float(str(value))
@@ -69,7 +81,7 @@ def _calc_event_age_days(publish_time_str: str) -> int:
             pub_dt = datetime.fromisoformat(publish_time_str.split(".")[0])
         else:
             pub_dt = datetime.strptime(publish_time_str, "%Y-%m-%d")
-        delta = date.today() - pub_dt.date()
+        delta = shanghai_today() - pub_dt.date()
         return max(0, delta.days)
     except (ValueError, TypeError):
         return _DEFAULT_LOOKBACK_DAYS
@@ -180,10 +192,156 @@ def _extract_event_input(content: dict[str, object]) -> dict[str, object] | None
     }
 
 
+def chain_dominant_direction(
+    chain: object,
+    ratio: float | None = None,
+) -> str:
+    """计算 chain 主导方向（bullish/bearish/neutral）。
+
+    以 impact_strength 为权重：
+    - bullish 权重 ≥ bearish × ratio → bullish
+    - bearish 权重 ≥ bullish × ratio → bearish
+    - 否则 → neutral
+
+    Args:
+        chain: 事件传导 impact_chain（item 含 industry/direction/impact_strength）。
+        ratio: 主导方向判定阈值，默认 settings.gi_consistency_ratio（1.5）。
+
+    Returns:
+        "bullish" | "bearish" | "neutral"
+    """
+    if ratio is None:
+        ratio = settings.gi_consistency_ratio
+    if not isinstance(chain, list):
+        return "neutral"
+    bullish_w = 0.0
+    bearish_w = 0.0
+    for item in chain:
+        if not isinstance(item, dict):
+            continue
+        direction = str(item.get("direction", ""))
+        strength = _safe_float(item.get("impact_strength"))
+        if direction == "bullish":
+            bullish_w += strength
+        elif direction == "bearish":
+            bearish_w += strength
+    if bullish_w == 0 and bearish_w == 0:
+        return "neutral"
+    if bullish_w >= bearish_w * ratio:
+        return "bullish"
+    if bearish_w >= bullish_w * ratio:
+        return "bearish"
+    return "neutral"
+
+
+def _gi_event_from_event(
+    event: dict[str, object],
+    direction: str,
+) -> dict[str, object]:
+    """从 GI 输入事件构造前端兼容的 top_bullish/bearish_event 结构（候选替换用）。"""
+    proxy = candidate_importance_score(event)
+    reason = str(
+        event.get("investment_conclusion")
+        or event.get("mechanism")
+        or event.get("summary")
+        or ""
+    )
+    return {
+        "event_id": str(event.get("event_id", "")),
+        "direction": direction,
+        "importance_level": _proxy_to_level(proxy),
+        "reason": reason[:200],
+    }
+
+
+def _find_next_candidate(
+    events: list[dict[str, object]],
+    exclude_event_id: str,
+    direction: str,
+    ratio: float | None = None,
+) -> dict[str, object] | None:
+    """在全量事件池中找 chain 主导方向一致的下一候选（proxy 降序）。
+
+    GI LLM 只返回每个方向的 top1，候选替换只能基于代理分排序的剩余事件，
+    不重新调用 LLM（保持最小改动）。
+    """
+    candidates = [
+        e for e in events
+        if isinstance(e, dict)
+        and str(e.get("event_id", "")) != exclude_event_id
+        and chain_dominant_direction(e.get("impact_chain"), ratio) == direction
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=candidate_importance_score, reverse=True)
+    return candidates[0]
+
+
+def _enforce_full_gi_consistency(
+    top_bullish: dict[str, object] | None,
+    top_bearish: dict[str, object] | None,
+    events: list[dict[str, object]],
+    ratio: float | None = None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """全量 GI 结果与 chain 主导方向一致性最终校验 + 候选替换。
+
+    - top_bullish 对应事件的 chain 主导方向必须 bullish；top_bearish 必须 bearish。
+    - 冲突/neutral（或找不到原事件）→ 拒绝该候选，从事件池按 proxy 降序找下一候选。
+    - 只有所有候选都不合格才置空并记录日志（允许为空）。
+
+    禁止通过修改 chain / 行业方向来迎合 GI——这里只换候选，不改 chain。
+    """
+    def _check(
+        candidate: dict[str, object] | None,
+        direction: str,
+    ) -> dict[str, object] | None:
+        if candidate is None:
+            return None
+        event_id = str(candidate.get("event_id", ""))
+        event = next(
+            (e for e in events if isinstance(e, dict) and str(e.get("event_id", "")) == event_id),
+            None,
+        )
+        if event is not None:
+            dominant = chain_dominant_direction(event.get("impact_chain"), ratio)
+            if dominant == direction:
+                return candidate
+            logger.warning(
+                "gi_direction_conflict_reject",
+                event_id=event_id,
+                gi_direction=direction,
+                chain_dominant=dominant,
+            )
+        else:
+            logger.warning(
+                "gi_direction_candidate_not_found",
+                event_id=event_id,
+                gi_direction=direction,
+            )
+        # 冲突/找不到原事件 → 找下一合格候选
+        replacement = _find_next_candidate(events, event_id, direction, ratio)
+        if replacement is not None:
+            logger.info(
+                "gi_direction_conflict_replaced",
+                direction=direction,
+                replacement_event_id=str(replacement.get("event_id", "")),
+            )
+            return _gi_event_from_event(replacement, direction)
+        logger.warning("gi_direction_no_valid_candidate", direction=direction)
+        return None
+
+    return _check(top_bullish, "bullish"), _check(top_bearish, "bearish")
+
+
 async def _load_recent_event_reports(
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, object]]:
     """查询近 N 天的 event_conduction 报告。
+
+    .. deprecated::
+        自 2026-08-05 当天事件池重构起，此函数仅保留用于 ``_test_run`` 手动调试入口。
+        Pipeline 路径已改为 ``eval_global_importance_from_events(events)``，
+        直接接收当天 event_conduction pipeline 的外部注入结果，不再主动查询历史 DB。
 
     使用 node_api.list_analysis_reports 逐天查询，合并去重。
     只保留 status='completed' 且 event_generated 为 True 的有效报告。
@@ -194,7 +352,8 @@ async def _load_recent_event_reports(
     Returns:
         结构化的 content 列表（agent_analysis_reports 表中 content 列的值）。
     """
-    today = date.today()
+    # 回看窗口锚定上海自然日（容器 UTC 下 date.today() 会整体偏移一天）
+    today = shanghai_today()
     seen_event_ids: set[str] = set()
     all_contents: list[dict[str, object]] = []
 
@@ -278,166 +437,235 @@ async def build_global_importance_input(
             events.append(event_input)
 
     return {
-        "as_of": date.today().isoformat(),
+        "as_of": shanghai_today().isoformat(),
         "events": events,
     }
 
 
 async def run_global_importance_evaluation(
+    events: list[dict[str, object]] | None = None,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
 ) -> dict[str, object]:
     """全局重要性评估主入口。
 
+    支持两种模式：
+    1. **当天事件池模式（推荐）**：events 非空时，仅使用该列表做 LLM 判断，
+       不查询 DB（当日事件必须由 pipeline 外部注入）。
+    2. **DB 查询模式（历史兼容）**：events=None 时回退到
+       build_global_importance_input(lookback_days) 查近 N 天 DB 报告。
+
     逻辑：
-    1. 调用 build_global_importance_input() 获取近 N 天事件集合
+    1. 获取事件集合（外部注入或 DB 查询）
     2. events 为空时直接返回，不调用 LLM
     3. 构造 Prompt → 调用 quick_think
-    4. 解析 LLM JSON 结果 → 识别两个焦点事件 + 构建向后兼容 events
+    4. 解析 LLM JSON 结果 → 识别最大利好/最大利空两个事件
 
     Args:
-        lookback_days: 回看天数，默认 7 天。
+        events: 当天 event_conduction pipeline 结果列表（由 eval_global_importance_from_events 传入）。
+                为 None 时回退 DB 查询。
+        lookback_days: DB 回看天数（仅在 events=None 时生效）。
 
     Returns:
         {
             "as_of": "...",
-            "total_events": 2,
             "summary": "...",
-            "current_focus_event": {...} | None,       # 新 Schema
-            "ongoing_significant_event": {...} | None,  # 新 Schema
-            "events": [{...}, ...],                     # 向后兼容
+            "top_bullish_event": {...} | None,   # 当日最大利好事件
+            "top_bearish_event": {...} | None,   # 当日最大利空事件
         }
     """
-    # ── 步骤 1: 获取近 N 天事件集合 ──
-    global_input = await build_global_importance_input(lookback_days)
-    events = global_input.get("events", [])
-    if not isinstance(events, list) or not events:
-        logger.warning("global_importance_skip_empty", days=lookback_days)
-        return {"events": [], "current_focus_event": None, "ongoing_significant_event": None}
+    # ── 步骤 1: 获取事件集合 ──
+    as_of = shanghai_today().isoformat()
+    global_input: dict[str, object]
+    if events is not None:
+        global_input = {"as_of": as_of, "events": events}
+    else:
+        global_input = await build_global_importance_input(lookback_days)
+
+    event_list = global_input.get("events", [])
+    if not isinstance(event_list, list) or not event_list:
+        logger.warning("global_importance_skip_empty", days=lookback_days if events is None else 0)
+        return {"top_bullish_event": None, "top_bearish_event": None}
 
     logger.info(
         "global_importance_start",
-        event_count=len(events),
-        days=lookback_days,
+        event_count=len(event_list),
+        source="external_inject" if events is not None else "db_query",
     )
 
     # ── 步骤 2: 构造 Prompt ──
     input_json = json.dumps(global_input, ensure_ascii=False, indent=2)
     user_message = f"请识别当前最值得关注的焦点事件：\n\n{input_json}"
 
-    # ── 步骤 3: 调用 LLM ──
-    try:
-        llm = get_quick_think()
-        result = await llm.ainvoke([
-            SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
-            HumanMessage(content=user_message),
-        ])
-        text = str(result.content) if hasattr(result, "content") else str(result)
-    except Exception as e:
-        logger.error("global_importance_llm_failed", error=str(e), exc_info=True)
+    # ── 步骤 3: 调用 LLM（deep_think，每日仅一次，优先稳定性；空响应 retry 1 次）──
+    text = ""
+    for attempt in range(2):
+        try:
+            llm = get_deep_think()
+            result = await llm.ainvoke([
+                SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
+                HumanMessage(content=user_message),
+            ])
+            text = str(result.content) if hasattr(result, "content") else str(result)
+        except Exception as e:
+            logger.error(
+                "global_importance_llm_failed",
+                error=str(e),
+                attempt=attempt + 1,
+                exc_info=True,
+            )
+            text = ""
+        if text:
+            break
+        logger.warning(
+            "global_importance_empty_response",
+            attempt=attempt + 1,
+            event_count=len(event_list),
+            retry=attempt < 1,
+        )
+    if not text:
         return {
-            "events": [],
-            "current_focus_event": None,
-            "ongoing_significant_event": None,
-            "error": f"LLM 调用失败: {str(e)}",
+            "top_bullish_event": None,
+            "top_bearish_event": None,
+            "error": f"LLM 返回空响应（{2} 次尝试均失败）",
         }
 
     # ── 步骤 4: 解析 JSON ──
-    try:
-        parsed = _parse_json(text)
-        if not isinstance(parsed, dict):
-            logger.warning(
-                "global_importance_parse_not_dict",
-                text_preview=text[:300],
+    for attempt in range(2):
+        try:
+            parsed = _parse_json(text)
+            if not isinstance(parsed, dict):
+                if attempt < 1:
+                    logger.warning(
+                        "global_importance_parse_not_dict_retry",
+                        text_preview=text[:300],
+                        attempt=1,
+                    )
+                    # 重试：再次调用 LLM
+                    try:
+                        llm2 = get_deep_think()
+                        result2 = await llm2.ainvoke([
+                            SystemMessage(content=GLOBAL_IMPORTANCE_PROMPT),
+                            HumanMessage(content=user_message),
+                        ])
+                        text = str(result2.content) if hasattr(result2, "content") else str(result2)
+                    except Exception as e2:
+                        logger.error("global_importance_retry_llm_failed", error=str(e2), exc_info=True)
+                    if not text:
+                        break
+                    continue
+                logger.warning(
+                    "global_importance_parse_not_dict",
+                    text_preview=text[:300],
+                    attempts=attempt + 1,
+                )
+                return {
+                    "top_bullish_event": None,
+                    "top_bearish_event": None,
+                    "error": f"LLM 返回非 dict 结构（{attempt + 1} 次尝试）",
+                    "raw_response_preview": text[:200],
+                }
+            summary = str(parsed.get("summary", ""))
+
+            # ── 提取新 Schema 字段：top_bullish_event（最大利好） ──
+            raw_bullish = parsed.get("top_bullish_event")
+            top_bullish_event: dict[str, object] | None = None
+            if isinstance(raw_bullish, dict) and raw_bullish.get("event_id"):
+                top_bullish_event = {
+                    "event_id": str(raw_bullish.get("event_id", "")),
+                    "direction": str(raw_bullish.get("direction", "")),
+                    "importance_level": str(raw_bullish.get("importance_level", "")),
+                    "reason": str(raw_bullish.get("reason", "")),
+                }
+
+            # ── 提取新 Schema 字段：top_bearish_event（最大利空） ──
+            raw_bearish = parsed.get("top_bearish_event")
+            top_bearish_event: dict[str, object] | None = None
+            if isinstance(raw_bearish, dict) and raw_bearish.get("event_id"):
+                top_bearish_event = {
+                    "event_id": str(raw_bearish.get("event_id", "")),
+                    "direction": str(raw_bearish.get("direction", "")),
+                    "importance_level": str(raw_bearish.get("importance_level", "")),
+                    "reason": str(raw_bearish.get("reason", "")),
+                }
+
+            # ── GI 方向一致性最终校验（2026-09-02）──
+            # top_bullish 对应事件 chain 主导方向必须 bullish；top_bearish 必须 bearish。
+            # 冲突/neutral → 拒绝该候选并从事件池找下一合格候选（不改 chain/行业方向）。
+            top_bullish_event, top_bearish_event = _enforce_full_gi_consistency(
+                top_bullish_event,
+                top_bearish_event,
+                event_list,
+            )
+
+            logger.info(
+                "global_importance_done",
+                has_bullish=top_bullish_event is not None,
+                has_bearish=top_bearish_event is not None,
+            )
+
+            return {
+                "as_of": as_of,
+                "summary": summary,
+                "top_bullish_event": top_bullish_event,
+                "top_bearish_event": top_bearish_event,
+            }
+        except Exception as e:
+            if attempt < 1:
+                logger.warning("global_importance_parse_exception_retry", error=str(e))
+                continue
+            logger.error(
+                "global_importance_parse_failed",
+                error=str(e),
+                text_preview=text[:500],
+                exc_info=True,
             )
             return {
-                "events": [],
-                "current_focus_event": None,
-                "ongoing_significant_event": None,
-                "error": "LLM 返回非 dict 结构",
+                "top_bullish_event": None,
+                "top_bearish_event": None,
+                "error": f"解析失败: {str(e)}",
             }
+    # end for attempt in range(2) — parse + retry loop
+    return {
+        "top_bullish_event": None,
+        "top_bearish_event": None,
+        "error": "GI 解析重试耗尽（unreachable fallback）",
+    }
 
-        summary = str(parsed.get("summary", ""))
 
-        # ── 提取新 Schema 字段：current_focus_event ──
-        raw_focus = parsed.get("current_focus_event")
-        current_focus_event: dict[str, object] | None = None
-        if isinstance(raw_focus, dict) and raw_focus.get("event_id"):
-            current_focus_event = {
-                "event_id": str(raw_focus.get("event_id", "")),
-                "importance_level": str(raw_focus.get("importance_level", "")),
-                "impact_scope": str(raw_focus.get("impact_scope", "")),
-                "direction": str(raw_focus.get("direction", "")),
-                "reason": str(raw_focus.get("reason", "")),
-                "selection_reason": str(raw_focus.get("selection_reason", "")),
-            }
+async def eval_global_importance_from_events(
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    """从当天事件传导结果评估 Global Importance（当天事件池入口）。
 
-        # ── 提取新 Schema 字段：ongoing_significant_event ──
-        raw_ongoing = parsed.get("ongoing_significant_event")
-        ongoing_significant_event: dict[str, object] | None = None
-        if isinstance(raw_ongoing, dict) and raw_ongoing.get("event_id"):
-            ongoing_significant_event = {
-                "event_id": str(raw_ongoing.get("event_id", "")),
-                "importance_level": str(raw_ongoing.get("importance_level", "")),
-                "impact_scope": str(raw_ongoing.get("impact_scope", "")),
-                "direction": str(raw_ongoing.get("direction", "")),
-                "reason": str(raw_ongoing.get("reason", "")),
-                "selection_reason": str(raw_ongoing.get("selection_reason", "")),
-            }
+    这是 pipeline 主入口，与 run_global_importance_evaluation 不同：
+    本函数接收外部注入的当天 event_conduction 结果，
+    对其进行排序过滤（仅保留当日事件），然后调用 LLM 评估。
 
-        # ── 构建向后兼容的 events 数组 ──
-        backward_events: list[dict[str, object]] = []
-        for idx, item in enumerate(
-            filter(None, [current_focus_event, ongoing_significant_event]),
-            start=1,
-        ):
-            backward_events.append({
-                "event_id": str(item["event_id"]),
-                "rank": idx,
-                "importance_score": _score_from_level(
-                    str(item.get("importance_level", "")),
-                ),
-                "importance_level": str(item.get("importance_level", "")),
-                "impact_scope": str(item.get("impact_scope", "")),
-                "impact_period": "",
-                "direction": str(item.get("direction", "")),
-                "reason": str(item.get("reason", "")),
-            })
+    **当天校验**：每个输入事件必须满足 event_age_days == 0（即 event_date == today）。
+    若 event_age_days != 0，直接过滤，防止未来出现历史事件污染。
 
-        total = len(backward_events)
-        logger.info(
-            "global_importance_done",
-            total_events=total,
-            has_focus=current_focus_event is not None,
-            has_ongoing=ongoing_significant_event is not None,
+    Args:
+        events: 当天 event_conduction pipeline 的结果列表。
+            每个 dict 必须包含 event_id 等 GI 输入所需字段。
+
+    Returns:
+        {top_bullish_event, top_bearish_event, as_of, summary}
+    """
+    # ── 当天校验：仅保留 event_age_days == 0 的事件（event_date == today）──
+    today_events = [
+        e for e in events
+        if isinstance(e, dict) and e.get("event_age_days") == 0
+    ]
+    filtered_count = len(events) - len(today_events)
+    if filtered_count > 0:
+        logger.warning(
+            "global_importance_filtered_non_today",
+            total=len(events),
+            today_count=len(today_events),
+            filtered=filtered_count,
         )
 
-        return {
-            "as_of": date.today().isoformat(),
-            "total_events": total,
-            "summary": summary,
-            "current_focus_event": current_focus_event,
-            "ongoing_significant_event": ongoing_significant_event,
-            "events": backward_events,
-        }
-    except Exception as e:
-        logger.error(
-            "global_importance_parse_failed",
-            error=str(e),
-            text_preview=text[:500],
-            exc_info=True,
-        )
-        return {
-            "events": [],
-            "current_focus_event": None,
-            "ongoing_significant_event": None,
-            "error": f"解析失败: {str(e)}",
-        }
-
-
-def _score_from_level(level: str) -> float:
-    """将 importance_level 转换为 importance_score（向后兼容用）。"""
-    mapping = {"critical": 9.0, "important": 6.0, "notable": 3.0}
-    return mapping.get(level, 0.0)
+    return await run_global_importance_evaluation(events=today_events)
 
 
 # ── 持久化 ──
@@ -446,6 +674,8 @@ def _score_from_level(level: str) -> float:
 async def save_global_importance_report(
     result: dict[str, object],
     report_date: str | None = None,
+    *,
+    extra_content: dict[str, object] | None = None,
 ) -> bool:
     """将 Global Importance 评估结果持久化到 agent_analysis_reports。
 
@@ -455,23 +685,24 @@ async def save_global_importance_report(
     Args:
         result: run_global_importance_evaluation() 的返回结果。
         report_date: 报告日期（YYYY-MM-DD），默认当天。
+        extra_content: 附加 content 字段（增量 GI 状态等，合并进 JSONB，不覆盖
+            顶层 top_bullish_event/top_bearish_event——前端读取契约保持不变）。
 
     Returns:
         True 表示持久化成功，False 表示失败。
     """
-    from datetime import datetime
-
     if report_date is None:
-        report_date = datetime.now().strftime("%Y-%m-%d")
+        # 默认报告日取上海自然日（业务日期）
+        report_date = shanghai_today().isoformat()
 
     content: dict[str, object] = {
         "as_of": str(result.get("as_of", report_date)),
-        "total_events": result.get("total_events", 0),
         "summary": str(result.get("summary", "")),
-        "current_focus_event": result.get("current_focus_event"),
-        "ongoing_significant_event": result.get("ongoing_significant_event"),
-        "events": result.get("events", []),
+        "top_bullish_event": result.get("top_bullish_event"),
+        "top_bearish_event": result.get("top_bearish_event"),
     }
+    if extra_content:
+        content.update(extra_content)
 
     try:
         saved = await node_api.save_analysis_report(
@@ -488,7 +719,6 @@ async def save_global_importance_report(
         logger.info(
             "global_importance_persisted",
             date=report_date,
-            total_events=content["total_events"],
         )
         return True
     except Exception:
@@ -497,32 +727,40 @@ async def save_global_importance_report(
 
 
 async def persist_global_importance_evaluation(
-    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    events: list[dict[str, object]] | None = None,
+    lookback_days: int | None = None,
 ) -> dict[str, object]:
     """组合入口：执行评估 → 判断结果 → 持久化。
 
+    # Global Importance only evaluates today's completed event conduction results.
+    当 ``events`` 非空时使用外部注入的当天事件；为 None 时回退 DB 查询（_test_run 兼容）。
+
     流程：
-    1. 调用 run_global_importance_evaluation()
+    1. 调用 run_global_importance_evaluation(events=events, lookback_days=lookback_days)
     2. 若 events 为空或错误 → 不写数据库
     3. 若正常 → 调用 save_global_importance_report()
 
     Args:
-        lookback_days: 回看天数，默认 7 天。
+        events: 当天 event_conduction pipeline 结果列表（推荐），为 None 且 lookback_days 为 None 时跳过评估。
+        lookback_days: DB 回看天数（仅在 events=None 时生效）。默认 None，不查历史数据。
 
     Returns:
         同 run_global_importance_evaluation() 的结构，增加 persisted 状态。
     """
-    result = await run_global_importance_evaluation(lookback_days)
+    result = await run_global_importance_evaluation(
+        events=events,
+        lookback_days=lookback_days if lookback_days is not None else _DEFAULT_LOOKBACK_DAYS,
+    )
 
-    has_focus = result.get("current_focus_event") is not None
-    has_ongoing = result.get("ongoing_significant_event") is not None
+    has_bullish = result.get("top_bullish_event") is not None
+    has_bearish = result.get("top_bearish_event") is not None
     error = result.get("error", "")
 
     if error:
         logger.warning("global_importance_persist_skip_error", error=error)
         return {**result, "persisted": False}
 
-    if not has_focus and not has_ongoing:
+    if not has_bullish and not has_bearish:
         logger.warning("global_importance_persist_skip_empty")
         return {**result, "persisted": False}
 
@@ -552,43 +790,531 @@ async def _test_run() -> None:
 
     print(f"\n📝 摘要: {result.get('summary', '')}")
 
-    # ── 当前焦点事件 ──
-    focus = result.get("current_focus_event")
-    print("\n🎯 当前焦点事件 (current_focus_event):")
-    if focus:
-        print(f"  event_id: {focus.get('event_id')}")
-        print(f"  level: {focus.get('importance_level')}")
-        print(f"  scope: {focus.get('impact_scope')}")
-        print(f"  direction: {focus.get('direction')}")
-        print(f"  reason: {focus.get('reason')}")
-        print(f"  selection_reason: {focus.get('selection_reason')}")
+    # ── 最大利好事件 ──
+    bullish = result.get("top_bullish_event")
+    print("\n📈 最大利好事件 (top_bullish_event):")
+    if bullish:
+        bullish_event = cast(dict[str, object], bullish)
+        print(f"  event_id: {bullish_event.get('event_id')}")
+        print(f"  direction: {bullish_event.get('direction')}")
+        print(f"  level: {bullish_event.get('importance_level')}")
+        print(f"  reason: {bullish_event.get('reason')}")
     else:
         print("  (null)")
 
-    # ── 重大持续事件 ──
-    ongoing = result.get("ongoing_significant_event")
-    print("\n🔄 重大持续事件 (ongoing_significant_event):")
-    if ongoing:
-        print(f"  event_id: {ongoing.get('event_id')}")
-        print(f"  level: {ongoing.get('importance_level')}")
-        print(f"  scope: {ongoing.get('impact_scope')}")
-        print(f"  direction: {ongoing.get('direction')}")
-        print(f"  reason: {ongoing.get('reason')}")
-        print(f"  selection_reason: {ongoing.get('selection_reason')}")
+    # ── 最大利空事件 ──
+    bearish = result.get("top_bearish_event")
+    print("\n📉 最大利空事件 (top_bearish_event):")
+    if bearish:
+        bearish_event = cast(dict[str, object], bearish)
+        print(f"  event_id: {bearish_event.get('event_id')}")
+        print(f"  direction: {bearish_event.get('direction')}")
+        print(f"  level: {bearish_event.get('importance_level')}")
+        print(f"  reason: {bearish_event.get('reason')}")
     else:
         print("  (null)")
-
-    print("\n📋 向后兼容 events 数组:")
-    for ev in result.get("events", []):
-        print(
-            f"  #{ev.get('rank')} | score={ev.get('importance_score'):.1f} | "
-            f"{ev.get('impact_scope')} | "
-            f"{ev.get('direction')} | {ev.get('event_id')}"
-        )
-        if ev.get("reason"):
-            print(f"     → {ev.get('reason')}")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     asyncio.run(_test_run())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GI 盘中纯增量更新（2026-08-14）
+#
+# 目标：盘中随新增重大事件持续维护 current_max_bullish / current_max_bearish，
+#   以及每方向 Top-K 候选池，避免"每批新增都全量 deep_think 重算"。
+# 原则：
+#   - 每个新增事件都经过规则预筛（candidate_importance_score，零 Token）；
+#   - 只有可能进入 Top-K 的事件才调用 quick_think 决胜；
+#   - 不重新扫描当天全部事件；不新增收盘全量校准；
+#   - GI 异常（Redis/DB/LLM）一律不阻断抓取/入库/事件传导。
+# ══════════════════════════════════════════════════════════════════════
+
+_GI_STATE_PREFIX = "gi_state:"
+
+# importance_level → 竞争代理分（仅用于预筛，非 GI 真值）
+_LEVEL_PROXY = {"critical": 0.9, "important": 0.7, "notable": 0.5}
+
+
+class GiCompareOutput(BaseModel):
+    """quick_think 增量比较输出：新事件是否替代当前候选。"""
+
+    replace: bool
+    reason: str = ""
+
+
+def _level_to_proxy(level: object) -> float:
+    """importance_level（critical/important/notable）→ 代理分。未知值保守取 notable。"""
+    return _LEVEL_PROXY.get(str(level or "").lower(), _LEVEL_PROXY["notable"])
+
+
+def _proxy_to_level(proxy: float) -> str:
+    """代理分 → importance_level（落库展示用，兼容前端枚举）。"""
+    if proxy >= 0.8:
+        return "critical"
+    if proxy >= 0.6:
+        return "important"
+    return "notable"
+
+
+def candidate_importance_score(event: dict[str, object]) -> float:
+    """竞争代理分：max(impact_chain[].impact_strength)，0~1。
+
+    仅用于预筛排序，不作为 GI 最终真值；无 chain 或全空返回 0.0。
+    """
+    chain = event.get("impact_chain")
+    if not isinstance(chain, list):
+        return 0.0
+    strengths = [
+        float(item.get("impact_strength", 0) or 0)
+        for item in chain
+        if isinstance(item, dict)
+    ]
+    return max(strengths) if strengths else 0.0
+
+
+def _infer_direction(event: dict[str, object]) -> str:
+    """推断事件方向：优先 impact_chain 主导方向，fallback investment_rating。
+
+    无明确方向返回 "neutral"（不进入 bullish/bearish 槽位）。
+    """
+    chain = event.get("impact_chain")
+    bullish_s = bearish_s = 0.0
+    if isinstance(chain, list):
+        for item in chain:
+            if not isinstance(item, dict):
+                continue
+            direction = str(item.get("direction", ""))
+            strength = float(item.get("impact_strength", 0) or 0)
+            if direction == "bullish":
+                bullish_s += strength
+            elif direction == "bearish":
+                bearish_s += strength
+    if bullish_s > bearish_s:
+        return "bullish"
+    if bearish_s > bullish_s:
+        return "bearish"
+    rating = str(event.get("investment_rating", ""))
+    if rating == "positive":
+        return "bullish"
+    if rating == "negative":
+        return "bearish"
+    return "neutral"
+
+
+def _empty_gi_state(score_date: str) -> dict[str, object]:
+    """空 GI 增量状态。"""
+    return {
+        "date": score_date,
+        "max_bullish": None,
+        "max_bearish": None,
+        "top3_bullish": [],
+        "top3_bearish": [],
+        "compared_event_ids": [],
+        "llm_used_today": 0,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _state_key(score_date: str) -> str:
+    return f"{_GI_STATE_PREFIX}{score_date}"
+
+
+def _candidate_dict(
+    event: dict[str, object],
+    *,
+    direction: str,
+    proxy: float,
+) -> dict[str, object]:
+    """从 GI 输入事件构造候选条目（存入状态）。
+
+    2026-09-02 新增 chain_direction：候选对应的 chain 主导方向，
+    供最终结果方向一致性兜底使用（max 冲突/neutral 时沿 Top-K 换候选）。
+    """
+    title = str(event.get("original_event") or event.get("summary") or "")[:50]
+    return {
+        "event_id": str(event.get("event_id", "")),
+        "title": title,
+        "summary": str(event.get("summary", "")),
+        "direction": direction,
+        "proxy_score": round(proxy, 3),
+        "importance_level": _proxy_to_level(proxy),
+        "reason": str(event.get("investment_conclusion", ""))[:50],
+        "chain_direction": chain_dominant_direction(event.get("impact_chain")),
+    }
+
+
+def _insert_top_k(
+    top3: list[dict[str, object]],
+    candidate: dict[str, object],
+    *,
+    top_k: int,
+) -> list[dict[str, object]]:
+    """按 proxy_score 降序插入候选，截断到 top_k。返回新列表。"""
+    merged = [c for c in top3 if c.get("event_id") != candidate.get("event_id")]
+    merged.append(candidate)
+    merged.sort(
+        key=lambda c: float(cast(float, c.get("proxy_score", 0) or 0)), reverse=True
+    )
+    return merged[: max(1, top_k)]
+
+
+def _to_gi_event(candidate: object, direction: str) -> dict[str, object] | None:
+    """候选 → 前端兼容的 top_bullish/bearish_event 结构。"""
+    if not isinstance(candidate, dict) or not candidate.get("event_id"):
+        return None
+    return {
+        "event_id": str(candidate["event_id"]),
+        "direction": direction,
+        "importance_level": str(candidate.get("importance_level", "notable")),
+        "reason": str(candidate.get("reason", "")),
+    }
+
+
+def _consistent_candidate(
+    max_cand: object,
+    top3: object,
+    direction: str,
+) -> dict[str, object] | None:
+    """增量候选方向一致性兜底：返回 direction 对应且 chain 主导方向一致的候选。
+
+    - 优先 max_cand（chain_direction 与 direction 一致或缺失[旧数据无法校验]则采用）；
+    - 冲突/neutral → 沿 top3（proxy 降序）取第一个 chain_direction 一致者；
+    - 全部不合格 → None（允许空，记录日志）。
+    """
+    def _chain_ok(cand: dict[str, object]) -> bool:
+        cd = str(cand.get("chain_direction", ""))
+        # 缺失（旧数据无法校验）放行；冲突/neutral 拒绝
+        return not cd or cd == direction
+
+    if isinstance(max_cand, dict) and max_cand.get("event_id") and _chain_ok(max_cand):
+        return max_cand
+    if isinstance(top3, list):
+        for cand in top3:
+            if isinstance(cand, dict) and cand.get("event_id") and _chain_ok(cand):
+                return cand
+        # 仅在"确实有候选但全部方向冲突"时告警（空池不告警）
+        if any(isinstance(c, dict) and c.get("event_id") for c in top3):
+            logger.warning("gi_direction_no_valid_incremental_candidate", direction=direction)
+    return None
+
+
+def _state_to_result(state: dict[str, object]) -> dict[str, object]:
+    """状态 → GI 结果结构（落库用，前端读取 top_bullish_event/top_bearish_event）。
+
+    2026-09-02 起增加 chain 主导方向一致性兜底：max 与 chain 主导方向冲突/neutral 时，
+    沿 Top-K 取第一个方向一致的候选，避免"重大机会对应 bearish chain"等方向冲突。
+    """
+    bullish_cand = _consistent_candidate(
+        state.get("max_bullish"), state.get("top3_bullish"), "bullish"
+    )
+    bearish_cand = _consistent_candidate(
+        state.get("max_bearish"), state.get("top3_bearish"), "bearish"
+    )
+    summary_parts: list[str] = []
+    if bullish_cand is not None:
+        summary_parts.append(f"最大利好：{bullish_cand.get('title', '')}")
+    if bearish_cand is not None:
+        summary_parts.append(f"最大利空：{bearish_cand.get('title', '')}")
+    return {
+        "as_of": str(state.get("date", "")),
+        "summary": "；".join(summary_parts)[:50],
+        "top_bullish_event": _to_gi_event(bullish_cand, "bullish"),
+        "top_bearish_event": _to_gi_event(bearish_cand, "bearish"),
+    }
+
+
+async def _load_gi_state_from_db(score_date: str) -> dict[str, object]:
+    """从当天 global_importance DB 报告恢复状态（Redis 缺失时的真源回退）。
+
+    报告 content 的 gi_incremental_state 完整恢复；旧报告（无该字段）仅恢复
+    max_bullish/max_bearish（代理分用 importance_level 映射，Top-3 退化为单元素）。
+    """
+    state = _empty_gi_state(score_date)
+    try:
+        report = await node_api.get_analysis_report_quiet("global_importance", score_date)
+        if report is None:
+            return state
+        content = report.get("content")
+        if not isinstance(content, dict):
+            return state
+        saved = content.get("gi_incremental_state")
+        if isinstance(saved, dict):
+            for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
+                          "top3_bearish", "compared_event_ids", "llm_used_today"):
+                if field in saved:
+                    state[field] = saved[field]
+            state["updated_at"] = str(saved.get("updated_at", ""))
+            return state
+        # 旧版报告：仅恢复 max（单槽位，Top-3 退化）
+        top_bullish = content.get("top_bullish_event")
+        if isinstance(top_bullish, dict) and top_bullish.get("event_id"):
+            cand = {
+                "event_id": str(top_bullish["event_id"]),
+                "title": "",
+                "summary": "",
+                "direction": "bullish",
+                "proxy_score": _level_to_proxy(top_bullish.get("importance_level")),
+                "importance_level": str(top_bullish.get("importance_level", "notable")),
+                "reason": str(top_bullish.get("reason", "")),
+            }
+            state["max_bullish"] = cand
+            state["top3_bullish"] = [cand]
+        top_bearish = content.get("top_bearish_event")
+        if isinstance(top_bearish, dict) and top_bearish.get("event_id"):
+            cand = {
+                "event_id": str(top_bearish["event_id"]),
+                "title": "",
+                "summary": "",
+                "direction": "bearish",
+                "proxy_score": _level_to_proxy(top_bearish.get("importance_level")),
+                "importance_level": str(top_bearish.get("importance_level", "notable")),
+                "reason": str(top_bearish.get("reason", "")),
+            }
+            state["max_bearish"] = cand
+            state["top3_bearish"] = [cand]
+        return state
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gi_state_db_restore_failed", date=score_date, error=str(exc))
+        return state
+
+
+async def load_gi_state(score_date: str) -> dict[str, object]:
+    """加载当日 GI 增量状态：Redis 优先，缺失/异常回退 DB，DB 也失败返回空状态。"""
+    try:
+        client = await RedisPool.get_client()
+        cached = await client.get(_state_key(score_date))
+        if cached:
+            raw = cached.decode() if isinstance(cached, bytes) else str(cached)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                state = _empty_gi_state(score_date)
+                for field in ("date", "max_bullish", "max_bearish", "top3_bullish",
+                              "top3_bearish", "compared_event_ids", "llm_used_today"):
+                    if field in parsed:
+                        state[field] = parsed[field]
+                state["updated_at"] = str(parsed.get("updated_at", ""))
+                return state
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("gi_state_redis_load_failed", date=score_date, error=str(exc))
+    return await _load_gi_state_from_db(score_date)
+
+
+async def _save_gi_state(state: dict[str, object], score_date: str) -> dict[str, object]:
+    """保存 GI 状态：Redis 快速写（失败静默）+ DB upsert（真源）。"""
+    # Redis 快速状态（失败不阻断落库）
+    try:
+        client = await RedisPool.get_client()
+        await client.setex(
+            _state_key(score_date),
+            settings.gi_state_ttl,
+            json.dumps(state, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("gi_state_redis_save_failed", date=score_date, error=str(exc))
+
+    result = _state_to_result(state)
+    persisted = await save_global_importance_report(
+        result,
+        report_date=score_date,
+        extra_content={"gi_incremental_state": state},
+    )
+    return {**result, "persisted": persisted}
+
+
+async def _llm_compare(
+    new_event: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object]:
+    """quick_think 单次比较：新事件是否替代当前候选。
+
+    失败返回 {"replace": False}（保守：保留旧 max，不引入未经确认的替换）。
+    """
+    try:
+        llm = with_chat_structured_output(get_quick_think(), GiCompareOutput)
+        payload = {
+            "new_event": {
+                "title": str(new_event.get("original_event", ""))[:50],
+                "summary": str(new_event.get("summary", "")),
+                "impact_industries": new_event.get("impact_industries", []),
+                "mechanism": str(new_event.get("mechanism", "")),
+            },
+            "current_candidate": {
+                "title": str(candidate.get("title", "")),
+                "summary": str(candidate.get("summary", "")),
+                "importance_level": str(candidate.get("importance_level", "notable")),
+                "reason": str(candidate.get("reason", "")),
+            },
+        }
+        output = await llm.ainvoke(payload)
+        return {
+            "replace": bool(getattr(output, "replace", False)),
+            "reason": str(getattr(output, "reason", "") or ""),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gi_incremental_llm_compare_failed", error=str(exc))
+        return {"replace": False, "reason": "", "error": str(exc)}
+
+
+def _classify_candidate(
+    proxy: float,
+    top3: list[dict[str, object]],
+    epsilon: float,
+    top_k: int,
+) -> str:
+    """增量竞争分类（确定性规则，零 LLM 成本）。
+
+    Returns:
+        "enter"          : 入池/替换（空池、池未满、明显高于 max、池满但不挑战 max）
+        "skip"           : 池满且明显低于池底，或无代理分 → 丢弃，不调 LLM
+        "llm"            : 池满且与 max 接近 → 需 quick_think 决胜
+    """
+    if not top3:
+        return "enter"
+    top3_min = float(cast(float, top3[-1].get("proxy_score", 0) or 0))
+    max_proxy = float(cast(float, top3[0].get("proxy_score", 0) or 0))
+    # 池未满：优先填充替补（入池不改变 max），避免 top3_min==max 时中间
+    # 代理分事件被误 skip；无代理分（proxy<=0）的事件不入池。
+    if len(top3) < max(1, top_k):
+        return "skip" if proxy <= 0 else "enter"
+    # 池已满：明显低于池底 → 丢弃；明显高于 max → 直接替换；接近 max → LLM 决胜
+    if proxy < top3_min - epsilon:
+        return "skip"
+    if proxy > max_proxy + epsilon:
+        return "enter"
+    if proxy >= max_proxy - epsilon:
+        return "llm"
+    return "enter"
+
+
+async def incremental_gi(
+    new_events: list[dict[str, object]],
+    *,
+    score_date: str | None = None,
+) -> dict[str, object]:
+    """GI 盘中纯增量更新入口（生产盘中路径，替代全量 persist_global_importance_evaluation）。
+
+    每个新增事件经规则预筛进入对应方向 Top-K 竞争；仅"接近"候选时调用
+    quick_think；达到每日 LLM 上限后仅走规则判断。全程异常不外抛，不影响
+    抓取/入库/事件传导。
+
+    Args:
+        new_events: 本次批次事件传导结果（_to_gi_events 格式）。
+        score_date: 交易日（YYYY-MM-DD），默认上海当天。
+
+    Returns:
+        与全量 GI 同构的 {as_of, summary, top_bullish_event, top_bearish_event,
+        persisted, state}。
+    """
+    if not new_events:
+        return {**_state_to_result(_empty_gi_state(score_date or shanghai_today().isoformat())), "persisted": False, "state": None}
+    day = score_date or shanghai_today().isoformat()
+    state = await load_gi_state(day)
+    compared = set(cast(list[str], state.get("compared_event_ids") or []))
+    llm_used = int(cast(int, state.get("llm_used_today", 0) or 0))
+    llm_cap = max(0, settings.gi_max_llm_calls_per_day)
+    epsilon = settings.gi_compare_epsilon
+    top_k = max(1, settings.gi_top_k)
+
+    # 批次内先按 candidate_score 排序（降序），只处理最有竞争力的候选
+    candidates: list[dict[str, object]] = []
+    for ev in new_events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = str(ev.get("event_id", ""))
+        if not event_id or event_id in compared:
+            continue
+        direction = _infer_direction(ev)
+        if direction == "neutral":
+            compared.add(event_id)
+            continue
+        proxy = candidate_importance_score(ev)
+        if proxy <= 0 and not state.get(f"top3_{direction}"):
+            # 空池兜底：无代理分也允许首个候选进入（避免无 chain 事件被永久丢弃）
+            proxy = 0.5
+        candidates.append({
+            "event_id": event_id,
+            "event": ev,
+            "direction": direction,
+            "proxy": proxy,
+        })
+    candidates.sort(key=lambda c: float(cast(float, c["proxy"])), reverse=True)
+
+    for cand in candidates:
+        event_id = str(cand["event_id"])
+        direction = str(cand["direction"])
+        proxy = float(cast(float, cand["proxy"]))
+        top3_key = f"top3_{direction}"
+        top3: list[dict[str, object]] = list(
+            cast(list[dict[str, object]], state.get(top3_key) or [])
+        )
+        outcome = _classify_candidate(proxy, top3, epsilon, top_k)
+
+        if outcome == "skip":
+            compared.add(event_id)
+            continue
+
+        candidate = _candidate_dict(
+            cast(dict[str, object], cand["event"]), direction=direction, proxy=proxy
+        )
+
+        if outcome == "llm" and llm_used < llm_cap:
+            # 与当前 max（Top-3 首位）比较；LLM 判定/异常一律以判定为准
+            current_max = top3[0] if top3 else None
+            if current_max is not None and current_max.get("event_id") != event_id:
+                try:
+                    verdict = await _llm_compare(
+                        cast(dict[str, object], cand["event"]), current_max
+                    )
+                except Exception:  # noqa: BLE001 — LLM 异常不得影响 GI/传导
+                    verdict = {"replace": False, "reason": ""}
+                llm_used += 1
+            else:
+                verdict = {"replace": False, "reason": ""}
+            if verdict.get("replace"):
+                # replace=True：正常入池，可替换 max
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+            elif top3:
+                # replace=False：不得替换 max，但合格候选进入 Top-3 作替补——
+                # 代理分封顶在 max 之下（不越位），池满时由 _insert_top_k 按 proxy 截断
+                if float(cast(float, candidate["proxy_score"])) >= float(
+                    cast(float, top3[0]["proxy_score"])
+                ):
+                    capped = max(0.0, float(cast(float, top3[0]["proxy_score"])) - 0.001)
+                    candidate = {**candidate, "proxy_score": round(capped, 3)}
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+            state[f"max_{direction}"] = top3[0] if top3 else None
+            state[top3_key] = top3
+            compared.add(event_id)
+            continue
+
+        # outcome == "enter" 或 LLM 预算耗尽（fallback 规则判断）
+        if outcome == "enter":
+            top3 = _insert_top_k(top3, candidate, top_k=top_k)
+        elif llm_used >= llm_cap:
+            # 预算耗尽：仅当代理分不低于 Top-3 最低时入池（不强换 max）
+            if not top3 or proxy >= float(
+                cast(float, top3[-1].get("proxy_score", 0) or 0)
+            ) - epsilon:
+                top3 = _insert_top_k(top3, candidate, top_k=top_k)
+        compared.add(event_id)
+        state[f"max_{direction}"] = top3[0] if top3 else None
+        state[top3_key] = top3
+
+    state["compared_event_ids"] = sorted(compared)
+    state["llm_used_today"] = llm_used
+    state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    saved = await _save_gi_state(state, day)
+    logger.info(
+        "gi_incremental_done",
+        date=day,
+        new_events=len(new_events),
+        candidates=len(candidates),
+        llm_calls=llm_used,
+        has_bullish=saved.get("top_bullish_event") is not None,
+        has_bearish=saved.get("top_bearish_event") is not None,
+    )
+    return {**saved, "state": state}

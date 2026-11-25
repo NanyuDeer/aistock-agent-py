@@ -55,6 +55,7 @@ async def test_qa_runner_persists_complete_fixed_date_brief_then_generates_audio
         "morning": _report("morning", 11),
         "wind_leader": _report("wind_leader", 12),
         "hot_burst": _report("hot_burst", 13),
+        "trend_score": _report("trend_score", 14),
     }
     api.get_analysis_report.side_effect = lambda report_type, _date: reports.get(report_type)
     api.list_analysis_reports.return_value = []

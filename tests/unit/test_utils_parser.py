@@ -15,12 +15,6 @@ def test_event_intent():
     assert result["intent"] == "event"
 
 
-def test_ai_advisor_intent_for_multi_angle_request():
-    """多角度投顾请求保留 supervisor 的 ai_advisor 路由结果。"""
-    result = parse_intent("ai_advisor", "请同时看晨报、风口和机构调研")
-    assert result["intent"] == "ai_advisor"
-
-
 def test_trend_score_intent_keeps_persisted_report_route():
     """趋势评分必须保留为可映射的投顾意图。"""
     result = parse_intent("trend_score", "看看趋势股评分")

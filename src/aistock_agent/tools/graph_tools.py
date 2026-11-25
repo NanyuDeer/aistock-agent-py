@@ -52,7 +52,10 @@ async def get_graph_by_concept(concept: str) -> str:
 @tool
 @safe_tool_call
 async def get_industry_chain(industry_name: str) -> str:
-    """查询行业图谱中的直接上下游关系及行业龙头股，返回可审计 JSON 证据。
+    """（备用工具）查询行业图谱中的直接上下游关系及行业龙头股，返回可审计 JSON 证据。
+
+    正常情况下不调用此工具——产业链已被系统预先查询并注入 User Message
+    （industryGraphEvidence）。仅在证据缺失或需人工调试其他行业时使用。
 
     查询结果仅表示中心行业的直接上下游事实，不包含传导方向、影响强度或原因。
 

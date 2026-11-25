@@ -9,6 +9,7 @@
     add_log_level      → 注入 level 字段
     StackInfoRenderer  → 堆栈信息
     set_exc_info       → 异常信息
+    format_exc_info    → 将 exc_info 格式化为 traceback 文本（否则只留 "exc_info": true）
     TimeStamper(iso)   → 注入 timestamp 字段
     JSONRenderer       → 序列化为 JSON
 """
@@ -38,6 +39,8 @@ def setup_logging(level: str = "INFO") -> None:
             structlog.processors.add_log_level,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
+            # 消费 exc_info 生成 traceback 文本；缺省会静默丢弃，只留 "exc_info": true
+            structlog.processors.format_exc_info,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.JSONRenderer(),
         ],

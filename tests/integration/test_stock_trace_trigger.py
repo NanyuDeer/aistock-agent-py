@@ -8,11 +8,11 @@
 - review.run、run_review 调用数始终为 0
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 from aistock_agent.api.routes import router
 from aistock_agent.config import settings

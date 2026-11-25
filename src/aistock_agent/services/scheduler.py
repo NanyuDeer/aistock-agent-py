@@ -2,23 +2,32 @@
 
 在进程启动时自动开启，通过 AsyncIOScheduler 管理所有定时任务：
 - 08:50 晨报 analysis：morning agent（宏观策略4步框架，缓存+落盘）
-  → 完成后自动提取 major_events，并行触发 event agent 传导分析（fire-and-forget）
-- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→global_importance→broadcast
-  （global_importance 生成双榜单后写入 DB，broadcast 从 DB 读取报告）
+  （2026-08-12 起事件传导触发迁移到统一事件抓取中台 event_scrape 入库后，
+  见 Task 5；晨报仅在"（事件库为空 或 无当日传导报告）且未被中台标记"时降级
+  兜底触发 _run_event_analysis_pipeline_task，防中台抓取全失败时传导静默缺失，见 I4/H7。）
+- 09:00 播报链路 broadcast：串行执行 morning→wind_leader→hot_burst→trend_score→broadcast
+  （不依赖 event_conduction / global_importance）
 - 15:30 晚间链路：review → market_snapshot → iterate → Brief → broadcast
 """
 
 import asyncio
+import importlib
 import json
+import time
 from datetime import date
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
+# 仅为"按名取 worker 模块"提供包命名空间句柄（包 __init__ 是空的，无重依赖）。
+# 具体子模块仍在 _run_agent 里按需 import，保持既有的延迟加载约定。
+import aistock_agent.agents.workers as _workers_pkg
 from aistock_agent.config import settings
 from aistock_agent.services.briefing import build_and_persist_brief
 from aistock_agent.services.data_client import node_api
+from aistock_agent.services.impact_sectors_precompute import run_impact_sectors_precompute
 from aistock_agent.state.schema import AgentState
 from aistock_agent.utils.brief_contract import (
     build_iterate_brief_summary,
@@ -26,14 +35,98 @@ from aistock_agent.utils.brief_contract import (
 )
 from aistock_agent.utils.date import is_trading_day, shanghai_today
 
+if TYPE_CHECKING:
+    # EventBus 运行时在 _get_event_bus 内懒加载，此处仅为返回注解提供类型名
+    from aistock_agent.services.event_bus import EventBus
+
 logger = structlog.get_logger()
 
-# 保持 fire-and-forget task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
-_pending_event_tasks: set[asyncio.Task] = set()
+# H3（2026-08-24）：盘中报 12:05 AI 段与 event_scrape 串行化的最小实现。
+# 单进程单 loop（uvicorn），Semaphore(1) 足够；未来多 worker 需换 Redis 分布式锁。
+_midday_llm_semaphore = asyncio.Semaphore(1)
 
 _PERSISTABLE_ITERATE_STATUSES = frozenset({"normal", "alert"})
 
+
+def _use_task_runner(job_id: str) -> bool:
+    """该 job 是否走统一执行外壳（灰度判定）。
+
+    默认关闭；打开后可再用 ``SCHEDULER_TASK_RUNNER_TASKS`` 白名单逐个放行 ——
+    agent 任务换执行路径后，若有 worker 依赖了调用方的隐式行为，产出物会先在这里
+    露头，所以支持一个任务一个任务地开。
+    """
+    if not settings.scheduler_task_runner_enabled:
+        return False
+    raw = settings.scheduler_task_runner_tasks or ""
+    whitelist = {item.strip() for item in raw.split(",") if item.strip()}
+    return not whitelist or job_id in whitelist
+
+
+async def _run_agent(
+    job_id: str,
+    agent_name: str,
+    state: AgentState,
+) -> dict[str, object]:
+    """跑一个 agent 任务。
+
+    灰度打开时走 ``services/task_runner.py``（执行记录 + 传输层重试）；
+    关闭时按名懒加载 worker 模块并直调 ``run`` —— 与改造前
+    ``from ... import morning as morning_agent; await morning_agent.run(state)``
+    完全等价。
+
+    **为什么 legacy 路径必须 importlib 现取，不能读 registry**：
+    registry 在 import 时就把 ``spec.run`` 固定成原始函数对象；测试用的是
+    ``patch.object(workers.morning, "run", ...)``（改模块属性），从 registry 取
+    会绕过 patch → 单元测试直接打真实 agent（真实网络调用）。实测代价：
+    tests/unit 从 90s 变成卡死 5 分钟以上。现取模块属性则与 patch 天然对齐。
+
+    调用点全部是 ``agents/workers/<agent_name>.py``；general（在 agents/general/node.py）
+    不在 scheduler 路径上，故此处不处理。
+    """
+    if _use_task_runner(job_id):
+        from aistock_agent.services.task_runner import run_agent_task
+
+        task = await run_agent_task(job_id, agent_name, state)
+        return task.result or {}
+
+    # 先确保子模块已加载（首次会顺带把模块挂到包属性上），再从**包属性**取模块：
+    # importlib.import_module 查 sys.modules，会绕过 mock.patch 替换的包属性；
+    # getattr(包, 名) 才与既有测试的 patch 方式（patch("...workers.morning")）对齐。
+    importlib.import_module(f"aistock_agent.agents.workers.{agent_name}")
+    module = getattr(_workers_pkg, agent_name)
+    return await module.run(state)  # type: ignore[no-any-return]
+
 _scheduler: AsyncIOScheduler | None = None
+
+# 调度器启动/心跳时间戳（2026-11-03）：心跳只写日志不足以判断调度存活——
+# 2026-10-19 pm2 日志流因磁盘写满（ENOSPC）中断，进程与调度实际仍在运行
+# （10-20 起 08:51 晨报、09:01 trend_score 等产物照常落盘），却看起来像“停摆”。
+# 进程内时间戳由 /health/ready 读取，不依赖日志落盘。
+_scheduler_started_at: float | None = None
+_scheduler_last_heartbeat: float | None = None
+# 心跳间隔 2 分钟；7 分钟（3 个周期）无心跳即判定停摆，容忍 loop 短暂繁忙
+HEARTBEAT_STALE_SECONDS = 420
+
+
+async def _scheduler_heartbeat() -> None:
+    """调度器心跳（诊断）：验证运行进程内 cron 调度链路是否存活。
+
+    每 2 分钟触发一次并打印日志；同时写入进程内时间戳供 readiness 检查
+    （日志可能因磁盘写满/日志流中断而丢失，不能作为唯一存活证据）。
+    """
+    global _scheduler_last_heartbeat
+    now = time.time()
+    previous = _scheduler_last_heartbeat
+    _scheduler_last_heartbeat = now
+    if previous is not None:
+        gap = now - previous
+        if gap > HEARTBEAT_STALE_SECONDS:
+            logger.warning("scheduler_heartbeat_gap", gap_seconds=round(gap, 1))
+    logger.info(
+        "scheduler_heartbeat",
+        jobs=[job.id for job in get_scheduler().get_jobs()],
+        report_date=shanghai_today().isoformat(),
+    )
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -50,6 +143,7 @@ def start_scheduler() -> None:
     quick_snapshot_enabled=true 时注册 review_quick/review_full 两个 cron，
     并启动事件消费者；false 时保留旧 _run_evening_chain_task 串行链路。
     """
+    global _scheduler_started_at
     if settings.qa_mode_enabled:
         logger.info("scheduler_disabled_by_qa_mode")
         return
@@ -69,6 +163,98 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
+        _run_midday_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_midday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="midday_briefing",
+        name="midday briefing",
+        replace_existing=True,
+    )
+    # 午报播报（音频/双人）：12:15 错峰于 12:05 midday 落库之后（H3 信号量），回填 audio_path
+    scheduler.add_job(
+        _run_midday_broadcast_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_midday_broadcast_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="midday_broadcast",
+        name="midday broadcast",
+        replace_existing=True,
+    )
+    # ── 统一事件抓取中台（2026-08-12；2026-08-13 盘前全量 07:30→08:45，盘中 12:00 恢复） ──
+    # 盘前档（08:45 全量，紧邻晨报 08:50 前完成；原 07:30 太早，早间公告未出
+    # 全量价值低，故合并）与盘中档（10-14 点每小时增量，含 12:00 午间档——
+    # 午休期间仍有午间公告/新闻发布，2026-08-13 用户裁决恢复）；收盘汇总
+    # 15:05 复用 full_daily，供复盘/播报消费。
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_daily",
+        name="event scrape daily",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_intraday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "intraday"},
+        id="event_scrape_intraday",
+        name="event scrape intraday",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 收盘汇总（15:05）：全天事件汇总补抓，供复盘/播报消费（H5，2026-08-13）
+    scheduler.add_job(
+        _run_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"scrape_mode": "full_daily"},
+        id="event_scrape_close",
+        name="event scrape close summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息，
+    # 交易日 Job 的 cron 0-4 + is_trading_day 双重守卫会让非交易日事件断档。
+    # 本 Job 每日 08:30/12:00/18:00/22:00 触发，由 _run_non_trading_event_scrape_job
+    # 内反向守卫（非交易日才执行）拦截，与现有交易日 Job 互不重叠、互不干扰。
+    scheduler.add_job(
+        _run_non_trading_event_scrape_job,
+        CronTrigger.from_crontab(
+            settings.scheduler_event_scrape_non_trading_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="event_scrape_non_trading",
+        name="event scrape non trading day",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    # 未来事件影响板块预计算（时间线 impact_sectors，2026-09-24）：每日 07:00
+    # 在 app-api Calendar 物化 cron（06:40）之后运行，对 calendar 未来事件做
+    # 行业向量（KG 语义）匹配 Top3 写回；无可靠行业保持 []（不 LLM 强猜）
+    scheduler.add_job(
+        run_impact_sectors_precompute,
+        CronTrigger.from_crontab(
+            settings.scheduler_impact_sectors_precompute_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="impact_sectors_precompute",
+        name="impact sectors precompute (future calendar events)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
         _run_broadcast_task,
         CronTrigger.from_crontab(
             settings.scheduler_broadcast_cron,
@@ -78,9 +264,57 @@ def start_scheduler() -> None:
         name="morning broadcast chain",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_prediction_validate_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_prediction_validate_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="prediction_validate",
+        name="prediction due validation",
+        replace_existing=True,
+    )
+    # 预测验证统计出口（D3，独立调度与验证解耦）：16:05 验证落库后汇总命中率/baseline
+    scheduler.add_job(
+        _run_prediction_stats_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_prediction_stats_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="prediction_stats",
+        name="prediction hit-rate stats",
+        replace_existing=True,
+    )
+    # 溯源弱反馈观测层（spec §13.3 / Task 7.1）：16:10 在 prediction_validate(16:00) +
+    # prediction_stats(16:05) 之后采样，默认 observe（只写审计表建议，无其他副作用）；
+    # attribution_feedback_mode=off 时不读不写（运维开关）
+    scheduler.add_job(
+        _run_attribution_feedback_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_attribution_feedback_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="attribution_feedback",
+        name="attribution weak feedback (observe)",
+        replace_existing=True,
+    )
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）已于 2026-09-13 彻底移除：
+    # light_predict_midday / light_predict_close 两个 job 与 _run_light_predict_task 已删除
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：19:30 收盘后逐板块
+    # predict_sector（幂等跳过 + 主因板块排除；review_full 18:30 级联预判落库后执行）
+    scheduler.add_job(
+        _run_sector_wind_prediction_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_sector_wind_prediction_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="sector_wind_prediction",
+        name="daily wind sector prediction batch",
+        replace_existing=True,
+    )
 
     if settings.quick_snapshot_enabled:
-        # 新事件驱动链路：review_quick(15:30) + review_full(20:30)
+        # 新事件驱动链路：review_quick(15:30) + review_full(18:30)
         scheduler.add_job(
             _publish_review_quick_event,
             CronTrigger.from_crontab(
@@ -116,7 +350,167 @@ def start_scheduler() -> None:
         )
         logger.info("scheduler_legacy_evening_chain")
 
+    # 短线情绪温度：工作日 15:45（紧随快照 15:35，独立任务，失败不阻塞其他链路）
+    scheduler.add_job(
+        _run_sentiment_temp_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_sentiment_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="sentiment_temp",
+        name="sentiment temperature daily",
+        replace_existing=True,
+    )
+
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于节奏 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」；独立任务，失败不阻塞任何其他链路。
+    scheduler.add_job(
+        _run_intraday_snapshot_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_intraday_snapshot_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="intraday_snapshot",
+        name="intraday snapshot archive (12:25)",
+        replace_existing=True,
+    )
+
+    # 尾盘快照归档：14:25 早于节奏 tail 14:30 五分钟，口径同 12:25。
+    scheduler.add_job(
+        _run_intraday_snapshot_tail_task,
+        CronTrigger.from_crontab(
+            settings.scheduler_intraday_snapshot_tail_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="intraday_snapshot_tail",
+        name="intraday snapshot archive (14:25)",
+        replace_existing=True,
+    )
+
+    # 节奏大师四时点（spec §8/D13）：17:30 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # + 14:30 尾盘确认（只降不升）。17:30 见 config.scheduler_rhythm_after_close_cron
+    # 注释：须晚于情绪归档 17:00 落盘。
+    scheduler.add_job(
+        _run_rhythm_master_after_close,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_after_close_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_after_close",
+        name="rhythm master after-close",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_morning,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_morning_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_morning",
+        name="rhythm master morning",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_midday,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_midday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_midday",
+        name="rhythm master midday",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_rhythm_master_tail,
+        CronTrigger.from_crontab(
+            settings.scheduler_rhythm_tail_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="rhythm_master_tail",
+        name="rhythm master tail",
+        replace_existing=True,
+    )
+
+    # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）：种子 07:30 / 抓取 07:40
+    #    预期差 08:00 + 11:30 + 13:00 ──
+    # 种子 job 须 misfire_grace + 告警：种子是 high 唯一来源，静默失败会让"重大"消失一天（裁决 7）
+    scheduler.add_job(
+        _run_calendar_seed_import,
+        CronTrigger.from_crontab(
+            settings.scheduler_calendar_seed_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="calendar_seed_import",
+        name="calendar seed import + candidate promotion",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_calendar_scrape,
+        CronTrigger.from_crontab(
+            settings.scheduler_calendar_scrape_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        id="calendar_scrape",
+        name="calendar jiuyan + L3 scrape",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_expectation_diff,
+        CronTrigger.from_crontab(
+            settings.scheduler_expectation_diff_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "morning"},
+        id="expectation_diff_morning",
+        name="expectation diff morning (overnight US)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_expectation_diff,
+        CronTrigger.from_crontab(
+            settings.scheduler_expectation_diff_intraday_cron,
+            timezone=settings.scheduler_timezone,
+        ),
+        kwargs={"slot": "intraday"},
+        id="expectation_diff_intraday",
+        name="expectation diff intraday (11:30/13:00)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    if settings.iterate_enabled:
+        from aistock_agent.iterate.scheduler import register_iterate_jobs
+
+        register_iterate_jobs(scheduler)
+        logger.info("iterate_jobs_registered_via_main_scheduler")
+
+    # 心跳 job：每 2 分钟验证调度链路存活（诊断定时任务不触发问题）。
+    # 必须先于下方 misfire 循环注册：心跳同样要拿到 1h grace——默认 1s 会让这个
+    # “诊断 job”自己先被跳过（2026-10-22 生产日志 “heartbeat ... missed by 0:00:05”）。
+    scheduler.add_job(
+        _scheduler_heartbeat,
+        CronTrigger.from_crontab(
+            "*/2 * * * *",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="scheduler_heartbeat",
+        name="scheduler heartbeat",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # 触发时刻 event loop 若短暂繁忙，APScheduler 默认 misfire_grace_time=1s
+    # 会直接跳过任务（表现为"cron 未触发"且无任何日志）。放宽到 1 小时，
+    # 并在 loop 恢复后补跑；coalesce=False 保留每次错过的触发。
+    for job in scheduler.get_jobs():
+        job.misfire_grace_time = 3600
+        job.coalesce = False
+
     scheduler.start()
+    _scheduler_started_at = time.time()
     logger.info("scheduler_started", jobs=[job.id for job in scheduler.get_jobs()])
 
 
@@ -127,16 +521,23 @@ def shutdown_scheduler() -> None:
     若仅 get_scheduler() 创建但未 start（state=STOPPED），直接置 None 避免触发
     SchedulerNotRunningError。幂等：多次调用安全。
     """
-    global _scheduler
+    global _scheduler, _scheduler_started_at, _scheduler_last_heartbeat
     if _scheduler is not None:
         # running 属性 = state != STOPPED；未 start 的调度器 running=False
         if _scheduler.running:
             _scheduler.shutdown(wait=True)
         _scheduler = None
+        _scheduler_started_at = None
+        _scheduler_last_heartbeat = None
         logger.info("scheduler_stopped")
 
 
 # ─── 定时任务执行函数 ───
+
+# 保持 fire-and-forget 传导 task 的强引用，避免被 GC 回收导致事件传导分析静默丢失
+# （Task 4 删除晨报直接触发后该集合一并移除；I4 兜底分支恢复使用，AGENTS.md
+# 明确警告 "fire-and-forget task 若不保存引用会被 GC 在执行前取消"）。
+_pending_event_tasks: set[asyncio.Task[Any]] = set()
 
 
 async def _run_morning_task() -> None:
@@ -153,7 +554,6 @@ async def _run_morning_task() -> None:
 
     logger.info("scheduler_morning_start")
     # 函数内 import：延迟加载 LangGraph/LangChain 重依赖，避免 scheduler 模块加载时拖慢启动
-    from aistock_agent.agents.workers import morning as morning_agent
 
     state: AgentState = {
         "messages": [],
@@ -169,17 +569,24 @@ async def _run_morning_task() -> None:
     }
 
     try:
-        result = await morning_agent.run(state)
+        result = await _run_agent("morning_briefing", "morning", state)
         logger.info(
             "scheduler_morning_done",
             has_response=bool(result.get("final_response")),
         )
-
-        # 提取重大事件列表，并行触发事件传导分析（fire-and-forget）
-        # morning agent 在 analysis_reports 中写入 major_events 列表（Task 6 产出）
+        # 事件传导触发已迁移到统一事件抓取中台（2026-08-12）：
+        # Task 5 起由 scrape_full_daily / scrape_intraday 入库成功后触发。
+        # I4 兜底（中台抓取失败时的安全网）：当日（事件库为空 或 无当日传导报告）
+        # 且未被中台标记（conduction_triggered:{date} 不存在）时，若晨报 LLM 仍
+        # 识别出 major_events（自主检索兜底产出），降级 fire-and-forget 触发
+        # 事件传导——恢复 Task 4 删除晨报触发前的语义，避免"当日抓取全部失败
+        # → 传导静默缺失且无告警"。H7（2026-08-13）：中台触发传导即写当日标记，
+        # 晨报检查标记避免与中台双跑；传导报告已落库（has_conduction）同样抑制。
         analysis_reports = result.get("analysis_reports")
         raw_major_events = (
-            analysis_reports.get("major_events", []) if isinstance(analysis_reports, dict) else []
+            analysis_reports.get("major_events", [])
+            if isinstance(analysis_reports, dict)
+            else []
         )
         major_events: list[dict[str, object]] = (
             [event for event in raw_major_events if isinstance(event, dict)]
@@ -187,25 +594,370 @@ async def _run_morning_task() -> None:
             else []
         )
         if major_events:
-            event_tasks = []
-            for event in major_events:
-                if event.get("title"):
-                    task = asyncio.create_task(_run_event_task(event))
-                    _pending_event_tasks.add(task)
-                    task.add_done_callback(_pending_event_tasks.discard)
-                    event_tasks.append(task)
-            logger.info(
-                "scheduler_event_triggered",
-                total=len(event_tasks),
-                titles=[
-                    title[:30]
-                    for event in major_events
-                    if isinstance((title := event.get("title")), str)
-                ],
+            from aistock_agent.services.event_store import (  # noqa: PLC0415
+                load_event_scrape,
             )
-            # fire-and-forget: 各个事件 task 独立在后台运行，错误由 _run_event_task 内部捕获
+            from aistock_agent.services.redis_pool import RedisPool  # noqa: PLC0415
+
+            event_store_events = await load_event_scrape(report_date)
+            # I4 兜底放宽（H7，2026-08-13）：库空 或 库有数据但当日无传导报告，
+            # 且当日未被中台标记触发过 → 晨报降级触发（防"抓取成功但传导失败"静默缺失）。
+            # 中台触发时会设置 conduction_triggered:{date} 标记，此处检查避免双跑。
+            triggered = False
+            try:
+                client = await RedisPool.get_client()
+                triggered = bool(await client.get(f"conduction_triggered:{report_date}"))
+            except Exception:  # noqa: BLE001
+                logger.debug("morning_conduction_mark_check_failed", date=report_date)
+            has_conduction = bool(
+                await node_api.list_analysis_reports("event_conduction", report_date)
+            )
+            if (not event_store_events or not has_conduction) and not triggered:
+                logger.warning(
+                    "morning_conduction_fallback_triggered",
+                    event_store_empty=not bool(event_store_events),
+                    has_conduction=has_conduction,
+                    event_count=len(major_events),
+                )
+                task = asyncio.create_task(
+                    _run_event_analysis_pipeline_task(major_events)
+                )
+                _pending_event_tasks.add(task)
+                task.add_done_callback(_pending_event_tasks.discard)
     except Exception as e:
         logger.error("scheduler_morning_failed", error=str(e), exc_info=True)
+
+
+# 情绪温度任务重试间隔（秒）：快照就绪时间不确定（Tushare 日线推送有延迟），
+# 17:00 首次执行 + 10/20 分钟各重试一次。全部失败才放弃并留 gave_up 告警。
+_SENTIMENT_RETRY_DELAYS_SECONDS: tuple[int, ...] = (0, 600, 1200)
+
+
+async def _run_sentiment_temp_task() -> None:
+    """17:00 短线情绪温度计算（独立任务，失败不阻塞其他链路）。
+
+    2026-11-03：原 15:45 触发时 close-snapshot 尚未 complete（Tushare 日线未推完），
+    任务每天空跑（生产日志累计 19 次 sentiment_temp_snapshot_missing，归档恒空）。
+    改为 17:00 起按 not_ready 语义重试三次。
+    """
+    from aistock_agent.services.sentiment_temp import compute_and_persist_sentiment_temp
+    from aistock_agent.utils.date import shanghai_today
+
+    target = shanghai_today().isoformat()
+    for attempt, delay in enumerate(_SENTIMENT_RETRY_DELAYS_SECONDS, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            payload = await compute_and_persist_sentiment_temp(target)
+        except Exception:  # noqa: BLE001
+            logger.warning("sentiment_temp_task_failed", attempt=attempt, exc_info=True)
+            continue
+        if payload is not None:
+            logger.info(
+                "sentiment_temp_done",
+                date=payload.get("date"),
+                score=payload.get("score"),
+                is_ice=cast(dict[str, object], payload.get("ice", {})).get("is_ice"),
+                attempt=attempt,
+            )
+            return
+        logger.warning("sentiment_temp_snapshot_not_ready", date=target, attempt=attempt)
+    logger.warning(
+        "sentiment_temp_gave_up",
+        date=target,
+        attempts=len(_SENTIMENT_RETRY_DELAYS_SECONDS),
+    )
+
+
+async def _run_intraday_snapshot_task() -> None:
+    """12:25 盘中快照归档（独立任务，失败不阻塞其他链路）。
+
+    非交易日由 archive_intraday_snapshot 内部守卫（不落空文件），此处只管兜异常。
+    """
+    from aistock_agent.services.intraday_snapshot_archive import archive_intraday_snapshot
+
+    try:
+        await archive_intraday_snapshot()
+    except Exception:  # noqa: BLE001
+        logger.warning("intraday_snapshot_task_failed", exc_info=True)
+
+
+async def _run_intraday_snapshot_tail_task() -> None:
+    """14:25 尾盘快照归档（独立任务，失败不阻塞其他链路）。
+
+    与 12:25 同口径，仅文件名后缀不同（`-1430.json`），供 tail 时点读取。
+    非交易日由 archive_intraday_snapshot 内部守卫（不落空文件）。
+    """
+    from aistock_agent.services.intraday_snapshot_archive import (
+        SNAPSHOT_SUFFIX_TAIL,
+        archive_intraday_snapshot,
+    )
+
+    try:
+        await archive_intraday_snapshot(SNAPSHOT_SUFFIX_TAIL)
+    except Exception:  # noqa: BLE001
+        logger.warning("intraday_snapshot_tail_task_failed", exc_info=True)
+
+
+async def _run_rhythm_master_after_close() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    # 17:30 读前校验 basis_date 温度与主线数据已落盘：缺失由 worker 内降级标注，
+    # 不污染 basis 语义（G18）。
+    await _dispatch_rhythm_master("after_close")
+
+
+async def _run_rhythm_master_morning() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("morning")
+
+
+async def _run_rhythm_master_midday() -> None:
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("midday")
+
+
+async def _run_rhythm_master_tail() -> None:
+    """14:30 尾盘确认（只降不升）：midday 之后、收盘之前的最后一道修正。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    await _dispatch_rhythm_master("tail")
+
+
+async def _dispatch_rhythm_master(
+    slot: str, report_date: str | None = None, target_date: str | None = None
+) -> dict[str, object]:
+    """生成节奏大师卡并返回 worker 的 run() 结果（手动触发端点透传用）。
+
+    ``report_date`` 是基准日（basis 取数日），非目标日：定时任务路径缺省用上海
+    当天；手动补跑可显式传入——非交易日补跑必须指向最近一个有 K 线的交易日，
+    否则 after_close 的基准门禁会降级为"基准日无当日K线"（卡上档位为空）。
+
+    ``target_date`` 是落库目标日（可选，仅手动补跑 after_close 用）：缺省由
+    slot 推导（after_close=次一交易日 / 其余=基准日当天）；显式传入则卡落在该日
+    键，供"基于某日数据重算该日节奏"场景（见 routes.trigger_rhythm_master）。
+    """
+
+    state = _make_scheduled_state(
+        report_date or shanghai_today().isoformat(), intent="rhythm_master"
+    )
+    # session_id 带 slot 后缀：三时点会话 trace 隔离（_make_scheduled_state 固定生成）
+    state["session_id"] = f"{state['session_id']}_{slot}"
+    state["refresh_slot"] = slot
+    if target_date:
+        state["target_date"] = target_date
+    try:
+        return await _run_agent(f"rhythm_master_{slot}", "rhythm_master", state)
+    except Exception:
+        logger.warning("rhythm_master.task_failed", slot=slot, exc_info=True)
+        return {}
+
+
+async def _run_calendar_seed_import() -> None:
+    """种子导入 + 候选晋升（交易日 07:30；裁决 C7：misfire_grace + 告警）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_events import run_calendar_import
+    try:
+        result = await run_calendar_import()
+        logger.info("calendar_seed_import_done", **result)
+        if cast(dict[str, object], result.get("seed", {})).get("imported", 0) == 0:
+            logger.warning("calendar_seed_import_empty", date=shanghai_today().isoformat())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("calendar_seed_import_failed", error=str(exc), exc_info=True)
+
+
+async def _run_calendar_scrape() -> None:
+    """韭研 + L3 搜索兜底（交易日 07:40；封顶 medium，缺失容忍）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_event_sources import collect_l3_forward
+    from aistock_agent.services.search_cache import SearchCache
+    try:
+        today = shanghai_today().isoformat()
+        cache = SearchCache()
+        await collect_l3_forward(today, cache)
+        # 韭研抓取（N1，spec §5.6）：LLM 抽取后封顶 medium 入库
+        from aistock_agent.services.forward_event_sources import collect_jiuyan
+        await collect_jiuyan(today, cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("calendar_scrape_failed", error=str(exc), exc_info=True)
+
+
+async def _run_expectation_diff(slot: str) -> None:
+    """预期差判定与落档（08:00 首判 / 11:30+13:00 补判）。"""
+    if not is_trading_day(shanghai_today()):
+        return
+    from aistock_agent.services.forward_events import run_expectation_diff
+    try:
+        result = await run_expectation_diff()
+        logger.info("expectation_diff_done", slot=slot, **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("expectation_diff_failed", slot=slot, error=str(exc), exc_info=True)
+
+
+async def _run_midday_task(report_date: str | None = None) -> dict[str, object]:
+    """盘中报生成任务（工作日 12:05）。
+
+    交易日守卫 + H3 信号量串行化（与 event_scrape AI 段错峰） + 调用 midday.run。
+    report_date 缺省时使用上海当天做交易日检查；显式传入（YYYY-MM-DD）时同样
+    进行交易日校验，避免手动补跑时绕过守卫（controller 裁决，替代计划原始
+    "显式传入跳过检查"语义）。
+
+    返回状态 dict 供手动触发端点透传：
+    - skipped(non_trading_day) / ok / partial / failed
+    """
+    day = shanghai_today()
+    if report_date is not None:
+        day = date.fromisoformat(report_date)
+    if not is_trading_day(day):
+        logger.info("scheduler_skip_non_trading_day", task="midday")
+        return {"status": "skipped", "reason": "non_trading_day"}
+    report_date = day.isoformat()
+
+    logger.info("scheduler_midday_start", report_date=report_date)
+
+    state = _make_scheduled_state(report_date, intent="midday")
+
+    async with _midday_llm_semaphore:
+        try:
+            result = await _run_agent("midday_briefing", "midday", state)
+            # 绑定局部变量再收窄：isinstance 收窄无法跨表达式传播到重复取值
+            analysis_reports = result.get("analysis_reports")
+            generated = bool(
+                analysis_reports.get("midday_generated")
+            ) if isinstance(analysis_reports, dict) else False
+            persisted = bool(
+                analysis_reports.get("midday_persisted")
+            ) if isinstance(analysis_reports, dict) else False
+            logger.info(
+                "scheduler_midday_done",
+                report_date=report_date,
+                generated=generated,
+                persisted=persisted,
+            )
+            return {"status": "ok" if generated else "partial", "report_date": report_date}
+        except Exception as e:
+            # run() 已内层 try-catch；此处兜底
+            logger.error("scheduler_midday_failed", error=str(e), exc_info=True)
+            return {"status": "failed", "reason": str(e), "report_date": report_date}
+
+
+async def _run_midday_broadcast_task(report_date: str | None = None) -> dict[str, object]:
+    """午报播报生成任务（工作日 12:15）。
+
+    错峰于 12:05 ``_run_midday_task`` 落库之后；持 ``_midday_llm_semaphore``（H3）
+    使其对话 LLM 段不与 event_scrape 抢算力。调用 ``midday_broadcast.run``，
+    成功后 midday 报告 ``content.audio_path`` 已被回填。
+    """
+    day = shanghai_today()
+    if report_date is not None:
+        try:
+            day = date.fromisoformat(report_date)
+        except ValueError:
+            day = shanghai_today()
+    if not is_trading_day(day):
+        logger.info("scheduler_skip_non_trading_day", task="midday_broadcast")
+        return {"status": "skipped", "reason": "non_trading_day"}
+    report_date = day.isoformat()
+
+    logger.info("scheduler_midday_broadcast_start", report_date=report_date)
+
+    state = _make_scheduled_state(report_date, intent="midday_broadcast")
+
+    async with _midday_llm_semaphore:
+        try:
+            result = await _run_agent("midday_broadcast", "midday_broadcast", state)
+            mb_info = result.get("midday_broadcast")
+            generated = (
+                bool(mb_info.get("generated")) if isinstance(mb_info, dict) else False
+            )
+            audio_path = (
+                mb_info.get("audio_path") if isinstance(mb_info, dict) else None
+            )
+            logger.info(
+                "scheduler_midday_broadcast_done",
+                report_date=report_date,
+                generated=generated,
+                has_audio=bool(audio_path),
+            )
+            return {
+                "status": "ok" if generated else "partial",
+                "report_date": report_date,
+            }
+        except Exception as e:
+            # run() 已内层 try-catch；此处兜底
+            logger.error("scheduler_midday_broadcast_failed", error=str(e), exc_info=True)
+            return {"status": "failed", "reason": str(e), "report_date": report_date}
+
+
+async def _run_event_analysis_pipeline_task(major_events: list[dict[str, object]]) -> None:
+    """后台运行事件分析流水线（fire-and-forget 包装）。
+
+    委托给 services/event_analysis_pipeline.run_event_analysis_pipeline，
+    pipeline 内部完成 Event Conduction → Global Importance 全链路，
+    并自行处理超时/异常（不向上抛）。
+
+    调用方：I4 兜底（_run_morning_task 事件库为空时）与中台复用
+    （event_scraper 入库后触发；M1：Task 4 曾删除晨报触发使其无生产调用方，
+    I4 兜底恢复后重新被调用）。
+    """
+    from aistock_agent.services.event_analysis_pipeline import (  # noqa: PLC0415
+        run_event_analysis_pipeline,
+    )
+
+    logger.info("scheduler_event_pipeline_start", event_count=len(major_events))
+    await run_event_analysis_pipeline(major_events)
+    logger.info("scheduler_event_pipeline_done", event_count=len(major_events))
+
+
+async def _run_event_scrape_job(scrape_mode: str) -> None:
+    """定时执行事件抓取（交易日守卫 + fire-and-forget）。"""
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        # 上海时区自然日（对齐 _run_morning_task；date.today() 用服务器本地时区，
+        # 跨时区部署时与交易日判定/score_date 语义不一致）
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if not is_trading_day(report_day):
+            logger.info("event_scrape_skipped_non_trading_day", date=today)
+            return
+        result = await run_event_scrape(scrape_mode, score_date=today)
+        # result 已含 scrape_mode 键（run_event_scrape 返回 {"scrape_mode", ...}），
+        # 重复传 scrape_mode= 会抛 TypeError，被下方 except 吞成误报的 job_failed
+        logger.info("event_scrape_job_done", **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event_scrape_job_failed", scrape_mode=scrape_mode, error=str(exc))
+
+
+async def _run_non_trading_event_scrape_job() -> None:
+    """定时执行非交易日事件抓取（反向守卫 + fire-and-forget）。
+
+    与 _run_event_scrape_job 相反：交易日直接 return，非交易日才执行。
+    复用现有 run_event_scrape(mode="intraday")，不复制任何抓取逻辑；
+    非交易日禁用跨日 latest 降级（allow_latest_fallback=False），
+    避免上一交易日消息被重新作为非交易日事件入库。
+    """
+    from aistock_agent.services.event_scraper import run_event_scrape
+
+    try:
+        report_day = shanghai_today()
+        today = report_day.isoformat()
+        if is_trading_day(report_day):
+            # 交易日由 event_scrape_daily/intraday/close 负责，本 Job 不介入
+            logger.info("non_trading_event_scrape_skipped_trading_day", date=today)
+            return
+        result = await run_event_scrape(
+            "intraday",
+            score_date=today,
+            allow_latest_fallback=False,
+        )
+        logger.info("non_trading_event_scrape_job_done", **result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("non_trading_event_scrape_job_failed", error=str(exc))
 
 
 def _make_scheduled_state(
@@ -294,14 +1046,20 @@ def _extract_iterate_summary(iterate_payload: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-async def _run_evening_chain_task() -> None:
-    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。"""
-    report_day = shanghai_today()
-    if not is_trading_day(report_day):
-        logger.info("scheduler_skip_non_trading_day", task="evening_chain")
-        return
+async def _run_evening_chain_task(report_date: str | None = None) -> dict[str, object]:
+    """串行生成 review、market_snapshot、iterate、Brief 与晚间播报。
 
-    report_date = report_day.isoformat()
+    report_date 缺省时使用上海当天并做交易日检查；显式传入时视为管理员
+    手动补跑（/admin/trigger/evening_chain），跳过交易日检查。
+    返回各阶段状态 dict，供手动触发端点透传给调用方。
+    """
+    if report_date is None:
+        report_day = shanghai_today()
+        if not is_trading_day(report_day):
+            logger.info("scheduler_skip_non_trading_day", task="evening_chain")
+            return {"status": "skipped", "reason": "non_trading_day"}
+        report_date = report_day.isoformat()
+
     from aistock_agent.agents.workers import broadcast as broadcast_agent
     from aistock_agent.agents.workers import iterate as iterate_agent
     from aistock_agent.agents.workers import review as review_agent
@@ -312,20 +1070,27 @@ async def _run_evening_chain_task() -> None:
         review_report = await node_api.get_analysis_report("review", report_date)
         if not _is_traceable_completed_report(review_report, "review"):
             logger.error("scheduler_evening_review_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "review",
+                "error": "review report missing or incomplete",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_review_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "review", "error": str(exc)}
 
     try:
         snapshot = await asyncio.to_thread(build_snapshot, report_date)
         if not isinstance(snapshot, dict) or snapshot.get("error"):
+            error = (
+                snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"
+            )
             logger.error(
                 "scheduler_evening_snapshot_invalid",
                 report_date=report_date,
-                error=(snapshot.get("error") if isinstance(snapshot, dict) else "invalid_payload"),
+                error=error,
             )
-            return
+            return {"status": "failed", "stage": "market_snapshot", "error": error}
 
         # Brief 仅消费代码构造且可重建验证的 brief_summary.v1，不能读取原始快照。
         snapshot_summary = build_market_snapshot_brief_summary(snapshot)
@@ -343,10 +1108,14 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_snapshot_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {
+                "status": "failed",
+                "stage": "market_snapshot",
+                "error": "market_snapshot not traceable",
+            }
     except Exception as exc:
         logger.error("scheduler_evening_snapshot_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "market_snapshot", "error": str(exc)}
 
     try:
         iterate_result = await iterate_agent.run(_make_scheduled_state(report_date))
@@ -357,7 +1126,11 @@ async def _run_evening_chain_task() -> None:
             or iterate_payload.get("status") not in _PERSISTABLE_ITERATE_STATUSES
         ):
             logger.error("scheduler_evening_iterate_invalid", report_date=report_date)
-            return
+            return {
+                "status": "failed",
+                "stage": "iterate",
+                "error": "iterate payload invalid or not persistable",
+            }
 
         # 原始 LLM payload 仅用于本次调度诊断；Brief 事实由代码受控构造。
         iterate_summary = build_iterate_brief_summary(iterate_payload)
@@ -375,22 +1148,45 @@ async def _run_evening_chain_task() -> None:
                 "scheduler_evening_iterate_not_traceable",
                 report_date=report_date,
             )
-            return
+            return {"status": "failed", "stage": "iterate", "error": "iterate not traceable"}
+
+        # 每次 iterate 完成后推送通知邮件（2026-09-02；静默失败不阻断链路）
+        from aistock_agent.services.iterate_mail import maybe_notify_iterate_mail
+
+        await maybe_notify_iterate_mail(
+            report_date=report_date,
+            summary=iterate_summary,
+            payload=iterate_payload,
+        )
     except Exception as exc:
         logger.error("scheduler_evening_iterate_failed", error=str(exc), exc_info=True)
-        return
+        return {"status": "failed", "stage": "iterate", "error": str(exc)}
 
+    brief_saved = False
     try:
         brief_saved = await build_and_persist_brief("evening", report_date)
     except Exception as exc:
         logger.error("scheduler_evening_brief_failed", error=str(exc), exc_info=True)
-        brief_saved = False
 
+    broadcast_ok = False
     if brief_saved:
         try:
             await broadcast_agent.run(_make_scheduled_state(report_date, brief_type="evening"))
+            broadcast_ok = True
         except Exception as exc:
             logger.error("scheduler_evening_broadcast_failed", error=str(exc), exc_info=True)
+
+    return {
+        "status": "ok" if brief_saved else "partial",
+        "report_date": report_date,
+        "stages": {
+            "review": "ok",
+            "market_snapshot": "ok",
+            "iterate": "ok",
+            "brief": "ok" if brief_saved else "failed",
+            "broadcast": "ok" if broadcast_ok else ("skipped" if not brief_saved else "failed"),
+        },
+    }
 
 
 # ─── 事件驱动：EventBus 发布函数 ───
@@ -404,7 +1200,9 @@ async def _publish_review_quick_event() -> None:
         return
 
     report_date = report_day.isoformat()
-    trace_id = f"sched-quick-{report_date}-{int(asyncio.get_event_loop().time())}"
+    # 用单调时钟而非 asyncio.get_event_loop().time()：不隐式依赖"当前事件循环"
+    # （同步测试/多线程场景下可能无 loop 而抛 RuntimeError，trace_id 只需时间戳）
+    trace_id = f"sched-quick-{report_date}-{int(time.monotonic())}"
 
     try:
         event_bus = await _get_event_bus()
@@ -422,14 +1220,14 @@ async def _publish_review_quick_event() -> None:
 
 
 async def _publish_review_full_event() -> None:
-    """20:30 cron 触发：发布 review_full 事件到 EventBus。"""
+    """18:30 cron 触发：发布 review_full 事件到 EventBus。"""
     report_day = shanghai_today()
     if not is_trading_day(report_day):
         logger.info("scheduler_skip_non_trading_day", task="review_full")
         return
 
     report_date = report_day.isoformat()
-    trace_id = f"sched-full-{report_date}-{int(asyncio.get_event_loop().time())}"
+    trace_id = f"sched-full-{report_date}-{int(time.monotonic())}"
 
     try:
         event_bus = await _get_event_bus()
@@ -446,7 +1244,7 @@ async def _publish_review_full_event() -> None:
         logger.error("scheduler_review_full_publish_failed", error=str(exc), exc_info=True)
 
 
-async def _get_event_bus():
+async def _get_event_bus() -> "EventBus | None":
     """获取全局 EventBus 实例（由 main.py lifespan 初始化）。"""
     from aistock_agent.services.event_bus import EventBus
     from aistock_agent.services.redis_pool import RedisPool
@@ -471,12 +1269,13 @@ async def _run_review_task() -> None:
         return
 
     logger.info("scheduler_review_start")
-    from aistock_agent.agents.workers import review as review_agent
 
-    today = date.today().isoformat()
+    # 上海自然日（对齐 `_run_morning_task`；date.today() 用容器本地时区，
+    # UTC 部署下会与交易日判定/落库日错位）
+    today = shanghai_today().isoformat()
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_review_{date.today().isoformat()}",
+        "session_id": f"scheduled_review_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": "review",
@@ -489,7 +1288,7 @@ async def _run_review_task() -> None:
     }
 
     try:
-        result = await review_agent.run(state)
+        result = await _run_agent("review_full", "review", state)
         logger.info(
             "scheduler_review_done",
             has_response=bool(result.get("final_response")),
@@ -527,11 +1326,10 @@ async def _run_iterate_task() -> None:
         return
 
     logger.info("scheduler_iterate_start")
-    from aistock_agent.agents.workers import iterate as iterate_agent
 
     state: AgentState = {
         "messages": [],
-        "session_id": f"scheduled_iterate_{date.today().isoformat()}",
+        "session_id": f"scheduled_iterate_{shanghai_today().isoformat()}",
         "user_id": None,
         "favorites": [],
         "intent": None,
@@ -542,7 +1340,7 @@ async def _run_iterate_task() -> None:
     }
 
     try:
-        result = await iterate_agent.run(state)
+        result = await _run_agent("iterate", "iterate", state)
         logger.info(
             "scheduler_iterate_done",
             has_response=bool(result.get("final_response")),
@@ -554,9 +1352,11 @@ async def _run_iterate_task() -> None:
 async def _run_broadcast_task() -> None:
     """播报链路任务（交易日 09:00）。
 
-    串行执行：morning → wind_leader → hot_burst → trend_score → global_importance → broadcast。
+    串行执行：morning → wind_leader → hot_burst → trend_score → broadcast。
     每个 Agent 设置 trigger_source="scheduler" + report_date，使报告写入数据库。
-    global_importance 生成双榜单后落库，broadcast 从数据库读取报告生成双人语音播报。
+    本链路不依赖 event_conduction / global_importance：
+    Global Importance 由 08:50 morning 触发的事件分析流水线
+    （event_analysis_pipeline）在事件传导完成后生成。
 
     每个 Agent 异常独立捕获，不影响后续 Agent 执行。
     morning 在 08:50 已执行过，此处命中缓存快速返回（或重新生成）。
@@ -631,36 +1431,6 @@ async def _run_broadcast_task() -> None:
     except Exception as e:
         logger.error("scheduler_broadcast_trend_score_failed", error=str(e), exc_info=True)
 
-    # Step 3.6: 全局重要性评估（复用前七天的 event_conduction 数据）
-    try:
-        from aistock_agent.services.global_importance_evaluation import (  # type: ignore[import-untyped]  # noqa: PLC0415
-            persist_global_importance_evaluation,
-        )
-
-        gi_start = asyncio.get_running_loop().time()
-        gi_result = await persist_global_importance_evaluation(lookback_days=7)
-        gi_elapsed = round(asyncio.get_running_loop().time() - gi_start, 2)
-
-        has_focus = gi_result.get("current_focus_event") is not None
-        has_ongoing = gi_result.get("ongoing_significant_event") is not None
-        total = gi_result.get("total_events", 0)
-        persisted = gi_result.get("persisted", False)
-
-        logger.info(
-            "scheduler_broadcast_gi_done",
-            elapsed_seconds=gi_elapsed,
-            total_events=total,
-            has_current_focus=has_focus,
-            has_ongoing_significant=has_ongoing,
-            persisted=persisted,
-        )
-    except Exception as e:
-        logger.warning(
-            "scheduler_broadcast_gi_failed",
-            error=str(e),
-            exc_info=True,
-        )
-
     # Step 4: 播报生成（从数据库读取报告）
     try:
         if not await build_and_persist_brief("morning", today):
@@ -676,29 +1446,76 @@ async def _run_broadcast_task() -> None:
         logger.error("scheduler_broadcast_final_failed", error=str(e), exc_info=True)
 
 
-async def _run_event_task(event: dict[str, object]) -> None:
-    """单个事件传导分析任务。
+async def _run_prediction_validate_task() -> None:
+    """预测到期验证任务（交易日 16:00，收盘后）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="prediction_validate")
+        return
+    from aistock_agent.services.prediction_validator import run_once  # noqa: PLC0415
 
-    由 morning 任务完成后触发，每个 major_event 一个独立 task，
-    所有事件并行执行（asyncio.create_task）。失败不影响其他事件。
+    try:
+        updated = await run_once()
+        logger.info("scheduler_prediction_validate_done", updated=updated)
+    except Exception as e:
+        logger.error("scheduler_prediction_validate_failed", error=str(e), exc_info=True)
 
-    委托给 services.event_conduction.run_single_event_conduction，
-    避免在 scheduler 中重复 state 构造逻辑。
 
-    Args:
-        event: major_event dict，含 title/summary/url/impact_score/direction/involved_keywords
+async def _run_prediction_stats_task() -> None:
+    """预测验证统计出口（D3，交易日 16:05 独立调度，与验证解耦）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="prediction_stats")
+        return
+    from aistock_agent.services.prediction_validator import _report_stats  # noqa: PLC0415
+
+    try:
+        await _report_stats()
+        logger.info("scheduler_prediction_stats_done")
+    except Exception as e:
+        logger.error("scheduler_prediction_stats_failed", error=str(e), exc_info=True)
+
+
+async def _run_attribution_feedback_task() -> None:
+    """溯源弱反馈观测层（spec §13.3 / Task 7.1，工作日 16:10）。
+
+    默认 observe：只落审计表建议（不修改溯源 prompt / 驱动类型判定 / 预判输入，不应用权重）。
+    `attribution_feedback_mode=off` → 不读不写；异常只 error 日志，不影响其他链路。
     """
-    from aistock_agent.services.event_conduction import run_single_event_conduction
-
-    title = str(event.get("title", "未知事件"))
-    logger.info("scheduler_event_start", title=title[:50])
-
-    result = await run_single_event_conduction(event)
-    logger.info(
-        "scheduler_event_done",
-        title=title[:50],
-        success=result.success,
-        event_generated=result.event_generated,
-        persisted=result.persisted,
-        error=result.error,
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="attribution_feedback")
+        return
+    from aistock_agent.services.attribution_feedback import (  # noqa: PLC0415
+        run_attribution_feedback,
     )
+
+    try:
+        stats = await run_attribution_feedback(dry_run=False)
+        logger.info(
+            "scheduler_attribution_feedback_done",
+            date=stats.date,
+            mode=stats.mode,
+            signals=len(stats.signals),
+            written=stats.written,
+            write_failed=stats.write_failed,
+        )
+    except Exception as e:  # noqa: BLE001 —— 观测层失败不得影响主链路
+        logger.error("scheduler_attribution_feedback_failed", error=str(e), exc_info=True)
+
+
+# 自选股洞察轻量预判任务（_run_light_predict_task）已于 2026-09-13 彻底移除
+async def _run_sector_wind_prediction_task() -> None:
+    """每日长线风口板块批量预判（板块四环 spec §6.3，交易日 19:30 收盘后）。"""
+    if not is_trading_day(shanghai_today()):
+        logger.info("scheduler_skip_non_trading_day", task="sector_wind_prediction")
+        return
+    # 函数内 import：延迟加载业务模块（照抄 _run_prediction_validate_task 先例），
+    # 避免 scheduler 模块加载时拖慢启动
+    from aistock_agent.services.sector_wind_prediction import (  # noqa: PLC0415
+        run_sector_wind_prediction,
+    )
+
+    try:
+        stats = await run_sector_wind_prediction()
+        logger.info("scheduler_sector_wind_prediction_done", **stats)
+    except Exception as e:
+        logger.error("scheduler_sector_wind_prediction_failed", error=str(e), exc_info=True)
+

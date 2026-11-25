@@ -10,26 +10,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     user_id: str | None = None
     favorites: list[str] = Field(default_factory=list, description="用户自选股代码列表")
-
-
-class AdvisorSubquestionTrace(BaseModel):
-    """单个投顾子问题的来源和降级状态。"""
-
-    intent: str
-    reports: list[dict[str, object]]
-    sources: list[dict[str, object]]
-    as_of: str | None
-    missing_sources: list[str]
-    degraded: bool
-
-
-class AdvisorTrace(BaseModel):
-    """投顾回答的结构化可追溯状态。"""
-
-    schema_version: str
-    subquestions: list[AdvisorSubquestionTrace]
-    missing_sources: list[str]
-    degraded: bool
+    force_deep: bool = Field(default=False, description="强制深度分析（对齐 ws.py，D4）")
 
 
 class ChatResponse(BaseModel):
@@ -37,4 +18,11 @@ class ChatResponse(BaseModel):
 
     content: str
     session_id: str
-    advisor_trace: AdvisorTrace | None = None
+    # P10 线 2 缺口修复：HTTP 非流式降级路径透出本轮 token 用量（graph 未采集时为 None，null 兼容）
+    token_usage: dict[str, int] | None = None
+    # 深度分析引用 + 结构化卡片：WS 主路径已透传（ws.py DONE），HTTP 非流式降级路径
+    # 此前遗漏导致深度分析卡/卡片不渲染——此处补齐，与 WS 契约对齐（无则 None，null 兼容）。
+    last_deep_report: dict[str, object] | None = None
+    cards: list[dict[str, object]] | None = None
+    # 追问面板（Task 5，2026-08-26）：透出本轮 questions 建议（graph 未采集时为 None，null 兼容）
+    questions: list[str] | None = None

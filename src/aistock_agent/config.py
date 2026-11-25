@@ -5,8 +5,27 @@ import os
 import random
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
+
+
+def _parse_string_list(v: object) -> object:
+    """支持逗号分隔和 JSON 数组两种环境变量格式（cors_origins / holidays_extra 共用）。
+
+    NoDecode 阻止 pydantic-settings 预先 JSON 解析，原始字符串传入 before-validator。
+    此处先尝试 JSON 解析（处理 ["a","b"] 格式），失败则按逗号分割（处理 a,b 格式）。
+    """
+    if isinstance(v, str):
+        # 先尝试 JSON 数组格式（["a","b"]）
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # 退回逗号分隔格式（a,b）
+        return [item.strip() for item in v.split(",") if item.strip()]
+    return v
 
 
 class Settings(BaseSettings):
@@ -24,6 +43,11 @@ class Settings(BaseSettings):
     deep_think_api_key: str = ""
     deep_think_base_url: str = ""
     deep_think_model: str = "gpt-4o"
+    # Embedding — 行业语义匹配（对齐硬约束：必须独立配置，禁用 LLM 端点做 embedding）
+    # 未配置时仅 fallback 到 openai_*（供测试）；生产必须显式配置支持 embedding 的服务。
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-3-small"
     # 双模型参数 — 从配置读取，避免硬编码（services/llm.py 引用）
     quick_think_temperature: float = 0.1
     quick_think_max_tokens: int = 2000
@@ -43,12 +67,42 @@ class Settings(BaseSettings):
     stock_trace_max_attempts: int = 3
     # Consumer 集成模式开关：true=在 agent-py 主进程 lifespan 内启动（一次重启即可），
     # false=需独立进程运行（python -m aistock_agent.workers.stock_trace_consumer）。
-    # 生产环境推荐 true；开发/测试可设 false 避免意外消费 Stream。
+    # 默认启用；STOCK_TRACE_CONSUMER_ENABLED=false 可关闭回滚。
     stock_trace_consumer_enabled: bool = True
     # Tool calling provides a schema-bound response across OpenAI-compatible models.
     stock_trace_structured_output_method: Literal[
         "function_calling", "json_mode", "json_schema"
     ] = "function_calling"
+    # SNAPSHOT_NOT_READY 空转兜底：首次命中起超过该秒数仍未就绪 → SNAPSHOT_TIMEOUT 死信
+    stock_trace_snapshot_not_ready_timeout_seconds: int = 600
+    # DLQ 巡检：每隔 N 秒检查一次；DLQ 长度>0 持续超过该秒数触发告警
+    stock_trace_dlq_inspect_interval_seconds: int = 60
+    stock_trace_dlq_alert_after_seconds: int = 900
+    # DLQ 自治回收：死信滞留超过该秒数即自动丢弃（记日志留审计）。
+    # 结构性问题码（不可重投）与关联历史快照已结算的死信（如 snapshot 已清理）重试永远无法成功，
+    # 不应无限滞留 DLQ 积累告警；超过保留期由巡检统一回收，封顶堆积并消除反复告警。
+    stock_trace_dlq_retention_seconds: int = 86400
+
+    # ===== 自选股洞察（watchlist insight）=====
+    # 独立 Redis db，与 stock_trace db=2 隔离
+    insight_redis_url: str = "redis://localhost:6379/3"
+    insight_consumer_group: str = "watchlist-insight-workers"
+    insight_consumer_block_ms: int = 1000
+    # Pending 消息达到该空闲时间后，可由任意 Consumer 接管重试。
+    insight_pending_claim_idle_ms: int = 3000
+    insight_max_attempts: int = 3
+    # Consumer 集成模式开关：true=在主进程 lifespan 内启动（同 stock_trace）
+    insight_consumer_enabled: bool = True
+    # 归因 LLM 受约束选择用 json_mode 结构化输出（PRD 第 9 节）
+    insight_structured_output_method: Literal[
+        "function_calling", "json_mode", "json_schema"
+    ] = "json_mode"
+    # 主因 label 主题概括关键词长度上限（PRD：建议 ≤12 字）
+    insight_label_max_chars: int = 12
+    # 归因任务轻，默认 quick_think
+    insight_llm_model: Literal["quick_think", "deep_think"] = "quick_think"
+    # 午盘触发后补抓窗口（分钟，PRD §8：15-20 分钟；Node 侧 cron 使用）
+    insight_refetch_minutes: int = 20
 
     # HTTP 超时（main.py lifespan 传给 HttpClientPool.init）
     http_timeout_seconds: float = 10.0
@@ -58,9 +112,28 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_api_keys: str = ""
 
-    # 服务（Python 8000 / Node.js 3000）
+    # 搜索引擎多供应商 failover（辩论 2026-08-18）
+    # 逗号分隔多 key 池；缺配置则该 provider 惰性不注册
+    doubao_api_key: str = ""
+    doubao_api_keys: str = ""
+    anysearch_api_key: str = ""
+    anysearch_api_keys: str = ""
+    # 启用的 provider 集合，逗号分隔；空=默认 "tavily,doubao,anysearch"。
+    # 顺序即链路调用顺序：TavilyService.search 按此顺序逐个 provider failover。
+    # 注意：链路顺序由此配置决定，不再由 _build_providers 硬编码（2026-08-24）。
+    search_enabled_providers: str = ""
+    # 整链 fail-fast 总预算（秒）
+    search_budget_seconds: float = 10.0
+
+    # 抖音视频转写（硅基流动 SenseVoice；E:/changer_learning 已验证）
+    douyin_api_key: str = ""
+    # 可选：显式指定 ffmpeg/ffprobe 路径（默认走 PATH 查找）
+    ffmpeg_binary: str = ""
+    ffprobe_binary: str = ""
+
+    # 服务（Python 8080 / Node.js 3000）
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8080
     log_level: str = "INFO"
 
     # 内网鉴权
@@ -70,6 +143,12 @@ class Settings(BaseSettings):
     # 支持逗号分隔（CORS_ORIGINS=http://a,http://b）或 JSON 数组格式（CORS_ORIGINS=["a","b"]）
     # NoDecode 阻止 pydantic-settings 预先 JSON 解析，交给 _parse_cors_origins 统一处理
     cors_origins: Annotated[list[str], NoDecode] = ["*"]
+
+    # 补充节假日表（HOLIDAYS_EXTRA，YYYY-MM-DD 逗号分隔或 JSON 数组，复用 cors_origins 解析模式）
+    # 用途：chinese_calendar 1.11.0 仅覆盖 2004-2026，2027 起 is_trading_day 走越年 fallback
+    # （只跳周末，精度损失）。此列表提供覆盖范围之外的补充休市日，让越年判定恢复精度。
+    # 空列表时 is_trading_day 行为与拆分前逐字节一致。
+    holidays_extra: Annotated[list[str], NoDecode] = []
 
     # 健康检查：是否在 /health/ready 中探测 LLM 连通性。
     # 默认关闭——避免 readiness 探针每次消耗 token；需探测时设 HEALTH_CHECK_LLM=true。
@@ -90,27 +169,219 @@ class Settings(BaseSettings):
     checkpointer_backend: str = "memory"
     # sqlite backend 的数据库路径（仅 checkpointer_backend="sqlite" 时使用）
     sqlite_path: str = ".langgraph.db"
+    # sqlite busy_timeout（秒；sqlite3 默认 5.0）。多 worker 并发写短暂争用时
+    # sqlite 抛 "database is locked"；30s 覆盖争用窗口（Phase 5 Task 3 低成本先行项）。
+    sqlite_busy_timeout: float = 30.0
+    # 定时任务执行记录库（services/task_store.py）。与 .langgraph.db 同目录的
+    # 独立文件：检查点是 LangGraph 内部格式，执行记录是业务可查表，混放会让
+    # 两种生命周期互相牵制（清理检查点不该动执行历史）。
+    task_runs_path: str = "task_runs.db"
+    # 定时任务是否走统一执行外壳（services/task_runner.py）：拿到执行记录 + 传输层
+    # 重试。默认关闭 —— 灰度开关，关掉即回到改造前的直调路径。
+    scheduler_task_runner_enabled: bool = False
+    # 灰度白名单（逗号分隔 job id）。空 = 开关打开时全部走外壳。
+    # 建议按 job 逐个开并 diff 当日产出物：agent 任务改路径后若哪个 worker 依赖
+    # 了调用方的隐式行为，产出物会先在这里露头。
+    scheduler_task_runner_tasks: str = ""
 
     # 定时调度（APScheduler AsyncIOScheduler，集成到 main.py lifespan）
     # 关闭后 lifespan 不启动调度器（开发/测试环境可设 SCHEDULER_ENABLED=false）
+    # ⚠️ APScheduler day_of_week 编号与标准 crontab 不同：0=Monday（ISO），
+    #    标准 crontab 0=Sunday。from_crontab 直接按 APScheduler 语义解释数字，
+    #    "1-5" 实为周二~周六（周一=0 被跳过）。必须用 "0-4"（周一~周五）！
     scheduler_enabled: bool = True
-    scheduler_morning_cron: str = "50 8 * * 1-5"       # 晨报：工作日 08:50
-    scheduler_review_cron: str = "30 15 * * 1-5"       # 复盘：工作日 15:30
-    scheduler_snapshot_cron: str = "35 15 * * 1-5"     # 快照：工作日 15:35
-    scheduler_iterate_cron: str = "40 15 * * 1-5"      # 迭代：工作日 15:40
+    scheduler_morning_cron: str = "50 8 * * 0-4"       # 晨报：工作日 08:50
+    scheduler_midday_cron: str = "5 12 * * 0-4"        # 盘中报：工作日 12:05（错开 12:00 抓取,H3）
+    # 午报播报（音频/双人）：工作日 12:15，错峰于 12:05 midday 落库之后
+    scheduler_midday_broadcast_cron: str = "15 12 * * 0-4"
+    scheduler_review_cron: str = "30 15 * * 0-4"       # 复盘：工作日 15:30
+    scheduler_snapshot_cron: str = "35 15 * * 0-4"     # 快照：工作日 15:35
+    # 短线情绪温度：收盘后 15:45（紧随快照 15:35）。
+    # 17:00（2026-11-03）：原 15:45 早于 Tushare 日线就绪，任务每日空跑导致归档恒空
+    scheduler_sentiment_cron: str = "0 17 * * 0-4"
+    scheduler_iterate_cron: str = "40 15 * * 0-4"      # 迭代：工作日 15:40
     # 播报链路：工作日 09:00（morning→wind_leader→hot_burst→broadcast）
-    scheduler_broadcast_cron: str = "0 9 * * 1-5"
+    scheduler_broadcast_cron: str = "0 9 * * 0-4"
     scheduler_timezone: str = "Asia/Shanghai"
+
+    # ===== 迭代 Agent 自动闭环（iterate）=====
+    # 默认关闭；服务器沙盒 .env 设 ITERATE_ENABLED=true 开启
+    iterate_enabled: bool = False
+    # 数据目录（切片/标准答案/实验/报告，均 gitignore）
+    iterate_data_dir: str = "data"
+    # 每日消费/报告：工作日 17:00（产片 16:30 之后；错开 16:00 prediction_validate）
+    iterate_cron: str = "0 17 * * 0-4"
+    # 产片：工作日 16:30（收盘快照 15:35 之后；错开 16:00 prediction_validate）
+    iterate_case_build_cron: str = "30 16 * * 0-4"
+    iterate_max_rounds: int = 5            # 每案例变体轮数上限
+    iterate_target_score: float = 0.8      # 归因相似度达标值
+    iterate_max_daily_cases: int = 3       # 每日消费历史案例上限
+    iterate_round_timeout_seconds: int = 600  # 每轮实验子进程超时
+    # C-3（2026-08-14）：禁止作为迭代仓库根的路径黑名单（fail-closed），
+    # 防止对非 git 目录恢复基线失败后静默污染
+    iterate_forbidden_repo_roots: list[str] = []
+    # A-1（2026-08-14）：judge 上线前校准闸门（默认关闭）——开启时
+    # calibration.calibration_passed() 必须达标（命中率 >= 0.8）
+    iterate_calibration_required: bool = False
+    # ── 五期校准：no_improvement 终止（裁决书 D4/N3 落地）──
+    # delta 未配置（None）→ 禁用（现状：stalled 仅观测）；compute_delta.py 校准后
+    # 配置 ITERATE_NO_IMPROVE_DELTA 启用。
+    iterate_no_improve_delta: float | None = None
+    no_improve_max_stalls: int = 4
+    # SMTP 报告（QQ 邮箱授权码；2026-08-14 加 QQ_SMTP_* 别名——.env.development
+    # 用 QQ_SMTP_USER/AUTH/TO 键名，与字段名不匹配导致 settings 读不到 →
+    # mail_not_configured，报告无法发送；LLM key 正常因 OPENAI_API_KEY 恰好匹配）
+    iterate_smtp_host: str = ""
+    iterate_smtp_port: int = 465
+    iterate_smtp_user: str = Field(
+        default="", validation_alias=AliasChoices("QQ_SMTP_USER", "ITERATE_SMTP_USER")
+    )
+    iterate_smtp_password: str = Field(
+        default="",
+        validation_alias=AliasChoices("QQ_SMTP_AUTH", "ITERATE_SMTP_PASSWORD"),
+    )
+    iterate_mail_to: str = Field(
+        default="", validation_alias=AliasChoices("QQ_SMTP_TO", "ITERATE_MAIL_TO")
+    )
     # ---- evening_chain 事件驱动重构（spec: 2026-07-29）----
     # quick review：15:30 收盘后基于腾讯实时行情立即产出
-    scheduler_review_quick_cron: str = "30 15 * * 1-5"
-    # full review：20:30 Tushare 完整数据覆盖 quick
-    scheduler_review_full_cron: str = "30 20 * * 1-5"
+    scheduler_review_quick_cron: str = "30 15 * * 0-4"
+    # full review：18:30 收盘后完整数据覆盖 quick（2026-09-03 组长裁决 20:30→18:30）
+    scheduler_review_full_cron: str = "30 18 * * 0-4"
+    scheduler_prediction_validate_cron: str = "0 16 * * 0-4"  # 预测到期验证：工作日 16:00
+    # 预测验证统计出口（D3，与验证解耦独立调度）：16:05 验证落库后汇总命中率/baseline
+    scheduler_prediction_stats_cron: str = "5 16 * * 0-4"
+    # ── 溯源弱反馈观测层（spec §13.3 / 计划 Phase 7 Task 7.1，P6'） ──
+    # **本期只有观测层**：聚合链上溯源信号 × 预判验证结果 → 建议（降权/提级/观望）→ 落审计表；
+    # 不修改溯源 prompt / 驱动类型判定 / 预判输入，也不真正应用权重（应用层待真实样本后立项）。
+    # mode: observe=只记录建议（默认）；off=运维开关（不读不写）；apply 未实现（配置为其他值
+    # 会告警回落 observe）。
+    attribution_feedback_mode: str = "observe"
+    # 观察窗口（交易日数）与最小样本守卫（样本不足 → 建议"样本不足-观望"）
+    attribution_feedback_window: int = 60
+    attribution_feedback_min_samples: int = 10
+    # 建议阈值：hit_rate < low → 建议降权；> high → 建议提级；其余观望（需 0<=low<high<=1）
+    attribution_feedback_low_threshold: float = 0.35
+    attribution_feedback_high_threshold: float = 0.65
+    # 聚合单元 key：relation(默认，链上驱动关系) / relation_sector / sector /
+    # driver_type / driver_type_sector（后两者需回读复盘报告取大盘 driver_type）
+    attribution_feedback_unit: str = "relation"
+    # 16:10（prediction_validate 16:00 + stats 16:05 之后）工作日执行，观测期持续采样
+    scheduler_attribution_feedback_cron: str = "10 16 * * 0-4"
+    # 条件成立判定·事件类 ② 层受限 LLM 开关（spec §12.4，Task 5.1，2026-09-17）：
+    # 默认 False——condition_met 是"只写 true 不可撤回"的写入，LLM 半确定性结论先不放开；
+    # 开启后仅事件类条件、输入限定"事件标题+进展摘要+条件文本"，每次判定留痕。
+    condition_met_event_llm_enabled: bool = False
+    # 每日长线风口板块批量预判（板块四环 spec §6.3）：工作日 19:30 收盘后对 leaders
+    # 自选股洞察轻量预判（阶段 2，2026-09-03）已于 2026-09-13 彻底移除：
+    # scheduler_light_predict_midday_cron / scheduler_light_predict_close_cron 两个字段已删除
+    # 页风口板块逐板块 predict_sector（source_type=sector_prediction，幂等跳过）。
+    # 时刻选 19:30 的原因：review_full 18:30 会再触发主因板块级联预判落库，其后拉榜做
+    # "主因板块排除"才最准；同时错开 16:00 prediction_validate 到期验证高峰。
+    # （2026-09-03 组长裁决：review_full 20:30→18:30、板块批量 21:30→19:30，整体前移。）
+    # ⚠️ APScheduler day_of_week 0=周一，crontab 必须用 0-4 表示周一~周五，禁止写 1-5。
+    scheduler_sector_wind_prediction_cron: str = "30 19 * * 0-4"
+    # 节奏大师三时点（spec §8/D13）：17:30 收盘定档 + 次日 9:00 盘前 + 12:30 午间
+    # 17:30 收盘定档（周一至周五；周五收盘生成下周一预告）
+    # ⚠️ 2026-11-13 由 16:05 推后至 17:30：情绪归档 `scheduler_sentiment_cron` 在 17:00
+    #    起跑（Tushare 日线未推完会重试 10/20 分钟，最坏 17:20 落盘），而卡片读归档取
+    #    「近 7 个交易日」的尾部。16:05 早于归档，导致每张卡实际用的是 T-2 温度、
+    #    却声明 basis_date=T-1（诊断见 docs/superpowers/specs/2026-11-13-*-diagnosis.md）。
+    #    17:30 留 10 分钟余量。改动须与 sentiment 的 cron 联动，勿单独回调本项。
+    # 收盘定档（周一至周五；APScheduler 0=周一，禁用 1-5）
+    scheduler_rhythm_after_close_cron: str = "30 17 * * mon-fri"
+    scheduler_rhythm_morning_cron: str = "0 9 * * 0-4"  # 次日 9:00 盘前（当日节奏）
+    scheduler_rhythm_midday_cron: str = "30 12 * * 0-4"  # 12:30 午间（当日节奏）
+    # 14:30 尾盘确认（当日节奏，只降不升）：midday 12:30 之后到收盘前没有任何修正点，
+    # 下午跳水（如 2026-11-12 中午 +0.2% → 收盘 -0.67%、炸板率 55%）无人捕捉。
+    # 继承 midday 的档位，用 14:25 快照做最后一道下调。
+    scheduler_rhythm_tail_cron: str = "30 14 * * mon-fri"
+    # 盘中快照归档（spec §11.5 / T0）：12:25 早于 midday 12:30 五分钟，
+    # 归档存在即代表「决策时刻可拿到的口径」，为盘中阈值离线寻优积累样本。
+    scheduler_intraday_snapshot_cron: str = "25 12 * * mon-fri"
+    # 尾盘快照：14:25 早于 tail 14:30 五分钟，口径同 12:25（文件名后缀区分）
+    scheduler_intraday_snapshot_tail_cron: str = "25 14 * * mon-fri"
+    rhythm_verification_enabled: bool = False  # 分支验证每日 job 开关（v1 默认关）
+    # 退潮闸门（2026-11-13 裁决 C）：当日炸板率超过阈值 → 次日仓位封顶轻仓。
+    # 数据源：恐贪 indicators 的 break_rate（= 100 - seal_rate），随 after_close 的
+    # basis_date 取当日收盘口径。
+    # 背景：11-12 收盘炸板率 54.76%、涨停 86→38，但仓位判定只看均线/主线/事件，
+    # 退潮信号完全不在输入里，次日仍按默认半仓处理。
+    rhythm_retreat_break_rate_threshold: float = 50.0
+    rhythm_retreat_cap_index: int = 1
+    # 跨日变更归因（spec §10）：默认关，影子期 3 个交易日后再开
+    rhythm_delta_enabled: bool = False
+    # 节奏大师主线/仓位节奏开关（spec §9.2）：False=回退旧主档文案（RHYTHM_MAINLINE_ENABLED）
+    rhythm_mainline_enabled: bool = True
+    # 重大事件时间线（Event Entity）物化开关（spec §5A.3/§10.2）：app-api /internal/event-entities
+    # 端点已落地（app-api 2026-09-15 起），默认开启：News 通道的重大事件物化为 Event Entity，
+    # 供重大事件时间线展示。物化失败只 warning，不阻断抓取/传导主链路（EVENT_ENTITY_ENABLED）。
+    event_entity_enabled: bool = True
+    # 未来事件影响板块预计算（时间线 impact_sectors，2026-09-24）：对 calendar 未来事件做
+    # 行业向量（KG 语义）匹配 Top3 写回 /internal/event-entities；无可靠行业保持 []（不 LLM 强猜）。
+    # 独立 cron，失败只告警不阻断主链路（IMPACT_SECTORS_PRECOMPUTE_ENABLED）。
+    impact_sectors_precompute_enabled: bool = True
+    # 预计算 cron：每日 07:00（在 app-api Calendar 物化 cron 06:40 之后，吃当日新物化实体）
+    scheduler_impact_sectors_precompute_cron: str = "0 7 * * *"
+    # ── 统一事件抓取中台调度（2026-08-12；2026-08-13 盘前全量 07:30→08:45） ──
+    scheduler_event_scrape_cron: str = "45 8 * * 0-4"  # 盘前档：08:45 全量（紧邻晨报 08:50）
+    scheduler_event_scrape_intraday_cron: str = (
+        "0 10-14 * * 0-4"  # 盘中档：10:00-14:00 每小时（含 12:00，午间公告/新闻增量）
+    )
+    scheduler_event_scrape_early_cron: str = (
+        "45 8 * * 0-4"  # 早间刷新：08:45（晨报 08:50 前最后一刷，与盘前档合并）
+    )
+    scheduler_event_scrape_close_cron: str = "5 15 * * 0-4"   # 收盘汇总：15:05（复盘/播报消费）
+    # ── 非交易日事件抓取（2026-10-14）：周末/节假日仍有政策、公告等重大消息 ──
+    # 交易日 Job 受 cron 0-4（周一到周五）+ 函数内 is_trading_day 双重守卫，
+    # 非交易日不抓取 → 事件时间轴断档。此 cron 每日 08:30/12:00/18:00/22:00 触发，
+    # 由 scheduler 侧反向守卫（非交易日才执行）拦截，交易日直接 return，互不干扰。
+    # 复用现有 run_event_scrape(mode="intraday")，不新增抓取逻辑。
+    scheduler_event_scrape_non_trading_cron: str = "30 8,12,18,22 * * *"
+    # ── 金十快讯（外围资讯源，2026-10-15 外围资讯标记批次）──
+    jin10_enabled: bool = True
+    jin10_flash_url: str = "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1"
+    # 客户端标识（外部标识，非凭据；禁止明文写入 AGENTS.md / 公开面）
+    jin10_app_id: str = "bVBF4FyRTn5NJF5n"
+    jin10_version: str = "1.0.0"
+    # ── 节奏大师·事件前瞻（spec §5.11/裁决 C7）──
+    scheduler_calendar_seed_cron: str = "30 7 * * 0-4"       # 种子导入+候选晋升（盘前）
+    scheduler_calendar_scrape_cron: str = "40 7 * * 0-4"     # 韭研+L3 搜索兜底（盘前）
+    scheduler_expectation_diff_cron: str = "0 8 * * 0-4"     # 预期差首判（隔夜 US_OVERNIGHT）
+    scheduler_expectation_diff_intraday_cron: str = "30 11,13 * * 0-4"  # 预期差补判（A股上午/午后）
+    # ── 事件抓取中台 LLM 评分（Phase-2，2026-08-13） ──
+    event_scoring_llm_enabled: bool = False          # 总开关（默认关闭灰度开启）
+    event_scoring_candidate_threshold: int = 3       # 规则评分候选门槛（>=3 送 LLM）
+    event_scoring_quick_batch_size: int = 20         # quick_think 批量粗筛每批条数
+    event_scoring_cache_ttl: int = 86400             # 评分缓存 TTL（秒，24h）
+    # ── GI 盘中纯增量更新（2026-08-14） ──
+    gi_incremental_enabled: bool = False             # 总开关（默认关闭灰度开启）
+    gi_max_llm_calls_per_day: int = 10  # 每日 quick_think 比较次数上限（达上限仅规则判断）
+    gi_compare_epsilon: float = 0.1                  # 代理分接近阈值（|Δ|<=ε 触发 LLM 决胜）
+    gi_top_k: int = 3                                # 每方向 Top-K 候选池大小
+    gi_state_ttl: int = 86400                        # gi_state:{date} Redis TTL（当日过期）
+    # ── GI 准入过滤（2026-09-02，盘面/行情类事件不进 GI 候选） ──
+    gi_admittance_enabled: bool = True               # GI 准入过滤总开关（只影响 GI，不涉事件传导）
+    gi_admittance_llm_enabled: bool = True           # GI 外部催化 LLM 开关（关=保守 KEEP）
+    gi_consistency_ratio: float = 1.5                # 主导方向阈值（bullish ≥ bearish × ratio）
     # EventBus 配置
     event_bus_max_retries: int = 3
     event_bus_deadletter_prefix: str = "dlq:"
     event_bus_consumer_group: str = "evening_chain"
     event_stream_max_len: int = 10000
+    # ── EventBus PEL 恢复（spec §13.6）──
+    # 消费进程在「读到消息」与 XACK 之间崩溃/重启时，消息会滞留在消费者组 PEL，
+    # XREADGROUP(">") 不再投递它 → 静默丢事件。以下开关让消费循环定期认领超时
+    # 空闲的 pending 消息重新处理。关闭即回到认领前的行为（零行为变化，可回滚）。
+    event_bus_pel_reclaim_enabled: bool = True
+    # 认领下限空闲时间（毫秒）：**15 分钟** > 最慢 handler 耗时，避免把仍在处理中的
+    # 在途消息抢回来重复投递（重复执行会重跑 LLM、重发迭代邮件/播报，落库侧靠 upsert 兜底）。
+    # 取值依据（2026-09-18 复核）：review_quick 的 handler 最多 3 次 run_review + 60/120s
+    # 退避，最坏可逼近 5 分钟 → 取 5 分钟会重复执行，故上调到 15 分钟
+    # （宁可晚恢复，不可重复执行；日批管道晚 15 分钟恢复无影响）。
+    event_bus_pel_min_idle_ms: int = 900000
+    # 单轮最多认领条数：与消费批量同量级，避免一次认领过多挤占主链路处理时隙
+    event_bus_pel_reclaim_batch: int = 10
     # Feature Flag：quick snapshot 开关（false 时走旧 _run_evening_chain_task）
     quick_snapshot_enabled: bool = False
 
@@ -124,6 +395,10 @@ class Settings(BaseSettings):
     market_event_up_threshold: float = 1.5      # 指数涨幅 ≥ 1.5%
     market_event_down_threshold: float = -1.5   # 指数跌幅 ≤ -1.5%
     market_event_max_pushes: int = 2            # 每次晨报最多推送条数
+
+    # 事件分析流水线（event_analysis_pipeline）整体超时（秒）。
+    # 覆盖 Event Conduction → Global Importance 全链路，超时记录日志但不中断 broadcast。
+    event_analysis_pipeline_timeout_seconds: int = 900
 
     # 现象发现：同向指数异动与市场广度。
     # broad_rally / broad_decline 基础条件：至少 N 个核心指数同向超过 change_pct，且广度比例达标。
@@ -143,6 +418,10 @@ class Settings(BaseSettings):
     # 现象发现：风格分化阈值。
     # CSI300 与 CSI1000 反向涨跌幅阈值（方向相反且绝对值均超过此值）。
     phenomenon_style_divergence_change_pct: float = 0.5
+    # CSI300 与 CSI1000 的涨跌幅差值阈值（同向不同幅的幅度分化）。
+    # 2026-11-09 新增：11-05 实测沪深300 +0.29% vs 国证2000 +2.40%（差 2.11pp）
+    # 属极端风格分化，但旧判据只认「一正一负」，漏检后掉进 sentiment_extreme 兜底桶。
+    phenomenon_style_divergence_spread_pct: float = 2.0
 
     # 现象发现：板块集中异动阈值。
     # 板块相对大盘中位数的绝对异动阈值。
@@ -167,6 +446,52 @@ class Settings(BaseSettings):
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
 
+    # 异常检测（与现象分类解耦的前置判断，2026-11-09 新增）。
+    # 目的：把「今天没事」和「今天动了但形态不认识」分开，避免后者被误判成前者。
+    # 任一核心指数涨跌幅绝对值超过此值 → price 异常。
+    anomaly_price_abs_pct: float = 1.5
+    # 成交额变化绝对值超过此值 → volume 异常。
+    anomaly_volume_change_pct: float = 30.0
+    # 涨停家数超过此值 → breadth 异常。
+    anomaly_breadth_limit_up: float = 50.0
+    # 跌停家数超过此值 → breadth 异常。
+    anomaly_breadth_limit_down: float = 30.0
+    # 大盘与中小盘涨跌幅差值超过此值 → sector_rotation 异常。
+    # 与 phenomenon_style_divergence_spread_pct 保持同值时，两处口径一致。
+    anomaly_style_spread_pct: float = 2.0
+
+    # 短线情绪温度：冰点阈值与连冰升级天数。
+    sentiment_ice_threshold: int = 20
+    sentiment_ice_consecutive_days: int = 2
+    # 短线情绪温度：归档目录（沿用 docs/agent-outputs 惯例）。
+    sentiment_output_dir: str = "docs/agent-outputs/sentiment"
+
+    # 节奏分支验证归档目录（沿用 docs/agent-outputs 惯例）。
+    rhythm_output_dir: str = "docs/agent-outputs/rhythm"
+
+    # 节奏卡「沿用前阶段」的时效窗口（交易日）：前卡基准日距今超过该值则不再沿用，
+    # 防止一张错卡沿链无限传播（2026-11-03 D2）。
+    rhythm_prev_phase_max_gap_days: int = 3
+
+    # 盘中修正阈值（职责重定义 spec §4.3 / §11.2）：midday 只降不升，阈值参数化。
+    # version 随每张卡落库（phase_evidence.intraday_factors.threshold_version），
+    # 换阈值前后可分桶回测——版本号不变而改数值会让历史样本不可区分。
+    rhythm_intraday_thresholds_version: str = "v1-20261104"
+    rhythm_intraday_drop_pct: float = -1.0        # 规则 B 上证当日跌幅阈值
+    rhythm_intraday_breadth_ratio: float = 0.35   # 规则 B 实时上涨占比阈值
+    # 规则 B1（2026-11-13 拆分）：宽度**单独**达标即降档，不要求指数跌幅同步达标。
+    # 背景：11-12 指数只跌 0.67%，但上涨占比 16%、炸板率 54.76%、涨停 86→38 ——
+    # 典型的「指数抗跌、个股普跌」。原判据要求「宽度 ≤35% 且 跌幅 ≤-1%」两条件同时
+    # 成立，这种日子一条都不触发，仓位停在默认半仓。
+    rhythm_intraday_breadth_ratio_strict: float = 0.25
+    rhythm_intraday_mainline_pct: float = -2.5    # 规则 C 主线板块当日跌幅阈值
+
+    # 预测置信钳制（A3：LLM 不产数值，阈值/置信度/钳制全部确定性计算）
+    # env: PREDICTION_CONF_CAP_SHORT；short 桶恒启用（high=不钳制）
+    prediction_conf_cap_short: str = "high"
+    # env: PREDICTION_CONF_CAP_MID；仅当值 != "high" 时才启用 mid 桶
+    prediction_conf_cap_mid: str = "high"
+
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
         "env_file_encoding": "utf-8",
@@ -190,17 +515,17 @@ class Settings(BaseSettings):
         before-validator。此处先尝试 JSON 解析（处理 ["a","b"] 格式），
         失败则按逗号分割（处理 http://a,http://b 格式）。
         """
-        if isinstance(v, str):
-            # 先尝试 JSON 数组格式（CORS_ORIGINS=["http://a","http://b"]）
-            try:
-                parsed = json.loads(v)
-                if isinstance(parsed, list):
-                    return parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
-            # 退回逗号分隔格式（CORS_ORIGINS=http://a,http://b）
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+        return _parse_string_list(v)
+
+    @field_validator("holidays_extra", mode="before")
+    @classmethod
+    def _parse_holidays_extra(cls, v: object) -> object:
+        """HOLIDAYS_EXTRA 解析：复用 cors_origins 的逗号分隔/JSON 数组模式。
+
+        补充节假日表（YYYY-MM-DD 列表）：HOLIDAYS_EXTRA=2027-01-01,2027-10-01
+        或 HOLIDAYS_EXTRA=["2027-01-01","2027-10-01"]。
+        """
+        return _parse_string_list(v)
 
     @property
     def qa_mode_enabled(self) -> bool:
@@ -219,6 +544,24 @@ class Settings(BaseSettings):
             if keys:
                 return random.choice(keys)
         return self.tavily_api_key
+
+    def get_tavily_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.tavily_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.tavily_api_key.strip()] if k]
+
+    def get_doubao_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.doubao_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.doubao_api_key.strip()] if k]
+
+    def get_anysearch_keys(self) -> list[str]:
+        pool = [k.strip() for k in (self.anysearch_api_keys or "").split(",") if k.strip()]
+        if pool:
+            return pool
+        return [k for k in [self.anysearch_api_key.strip()] if k]
 
 
 settings = Settings()

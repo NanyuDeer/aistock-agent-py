@@ -11,11 +11,66 @@ from langgraph.graph.message import add_messages
 
 from aistock_agent.schemas.chat_contract import (
     AnswerTrace,
+    ChatCard,  # P11（线 3）：cards 卡片契约（B-T1 定义，与 P10 共享）
     Evidence,
     Insight,
     InsightGoal,
     SkillCall,
+    SubGoal,
 )
+
+
+class DeepReportRef(TypedDict, total=False):
+    """D12/D13：最近一次深度升级的引用 + 短摘要（单引用，不存全文）。
+
+    worker 由 escalate 写入的 deep_source 保证合法（stock/sector/hot_burst）。
+    report_id 为 chat_analysis 落库后 Node 返回的 id；落库失败/未登录为 None（D38）。
+    summary ≤200 字（D18 约定 final_response 前 160 字截取）。
+    """
+
+    worker: Literal["stock", "sector", "hot_burst"]
+    report_id: str | None
+    question: str
+    summary: str
+    symbols: list[str]
+    tag_codes: list[str]
+    created_at: str
+
+
+class PendingClarification(TypedDict):
+    """澄清续跑 pending 上下文（M1）。
+
+    qa_router 写并消费：resolve 未命中/postprocess 澄清时快照原问题上下文，
+    下一轮用户补全代码/名称时按 intent 续跑；最长存活一轮。
+    """
+
+    question: str
+    intent: str
+    constraints: dict[str, str]
+
+
+class ConfirmRequest(TypedDict):
+    """交互式确认负载（Phase 4-2 改进 13）。
+
+    qa_router 触发时写，synth_answer 短路透出，ws.py 转 confirm_request 终态。
+    options 每项为 {key, label}（key 为 6 位代码或 "none"）。
+    """
+
+    question: str
+    options: list[dict[str, str]]
+
+
+class UserProfile(TypedDict, total=False):
+    """用户画像（Phase 4-3 改进 15）。
+
+    ws.py/routes.py 按 user_id 从 Node 拉取后注入（Redis 5min 缓存）；值为外部 JSON。
+    声明消费侧实际读取的字段（synth_answer 个性化 / qa_router 参考段），
+    全部可选（缺字段/未登录 None → 零行为变化）。
+    """
+
+    nickname: str
+    investment_preferences: list[str]
+    risk_tolerance: str
 
 
 class QuestionState(TypedDict, total=False):
@@ -30,7 +85,9 @@ class QuestionState(TypedDict, total=False):
     skill_calls: list[SkillCall]
     evidences: list[Evidence]
     insight: Insight | None
-    final_response: str
+    # 每轮被重置的 transient 字段（ws.py 入口归零）→ 与 AgentState 一致声明为可空：
+    # 「还没答完」与「答了但为空」由真值判断/图事件流区分，可空性不改变该语义。
+    final_response: str | None
     trace: AnswerTrace | None
     clarification: str | None
     # P1（D4）：复杂度判定。qa_router 写，conditional 路由消费（Task 2）
@@ -43,3 +100,54 @@ class QuestionState(TypedDict, total=False):
     # LangGraph 通道机制必需声明（节点返回未声明键会触发 InvalidUpdateError）；
     # 不进 trace/insight，conditional 边消费后即弃。
     fallback_to_skill: bool | None
+    # P2（D11）：前端透传的用户身份。ws.py 写；chat_analysis 落库登录守卫（T3）与
+    # 追问复用 report_lookup（T5）消费；未登录为 None（D38 不落库）。
+    user_id: str | None
+    # P2（D12/D13/D39）：最近一次深度升级的引用（synth_answer deep 分支无条件写，
+    # 与登录无关）；供 T5 qa_router 追问注入摘要；更早的靠 messages 历史兜底。
+    last_deep_report: DeepReportRef | None
+    # P4（D34）：多子目标（多意图 compose 时非空；存量会话/单意图为 None）。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source）。
+    goals: list[SubGoal] | None
+    # P7+P8（D37/D32）：general 兜底来源标记。qa_router 写，conditional 路由消费。
+    # 单轮 transient 路由信号，ws.py/routes.py 入口按轮置 None（对齐 deep_source/goals 先例）。
+    general_source: Literal["science", "gap"] | None
+    # M1（2026-08-11）：澄清续跑 pending 上下文。qa_router 写澄清时快照原问题上下文，
+    # 下一轮用户补全代码/名称时续跑原意图。跨轮有意（最长存活一轮：消费即清 /
+    # 下轮未消费由 qa_router_node 包装层清空），明确不在 reset_transient_state 归零清单内。
+    pending_clarification: PendingClarification | None
+    # P11（线 3）/ P10（线 2）：cards 由 synth_answer 汇总写（线 3）；
+    # token_usage 由 P10 包装函数 synth_answer_node 收口写（LLM callback 层经 contextvar 采集）。
+    cards: list[ChatCard] | None
+    token_usage: dict[str, int] | None
+    # 追问面板（Task 5，2026-08-26）：synth_answer 汇总写（与 cards 同源，透出到
+    # WS DONE / HTTP ChatResponse / SSE DONE）。LangGraph 通道机制必需声明（节点
+    # 返回未声明键会触发 InvalidUpdateError —— 对齐 L62-63 fallback_to_skill 先例）。
+    questions: list[str] | None
+    # Phase 4-2（改进 13）：交互式确认负载（qa_router 触发写，synth_answer 短路透出，
+    # ws.py 转 confirm_request 终态）。单轮 transient，不落 trace/insight。
+    confirm: ConfirmRequest | None
+    # Phase 4-2：阶段 2 续跑输入信号（ws.py 写，qa_router 消费）——用户点选的标的
+    # （{"symbol": 6位代码, "label": 选项 label}）与确认超时标记。单轮 transient 输入，
+    # 不写回图状态输出；由 ws.py 每轮入口归零（对齐 deep_source/goals 先例）。
+    # 用 dict[str, object] 而非 TypedDict：消费侧 qa_router 对 "symbol"/"key" 双键
+    # 防御读取（归一化函数的兼容分支），TypedDict 无法表达该可选键语义。
+    confirm_choice: dict[str, object] | None
+    confirm_timeout: bool | None
+    # Phase 4-3（改进 15）：用户画像（ws.py/routes.py 入口按 user_id 拉取注入）。
+    # 供 qa_router/synth_answer 个性化消费（称呼/投资偏好/风险偏好）；空 dict 或 None
+    # 均视为无画像 → 零行为变化。缓存 5min，拉取失败仅 warning 不阻断。
+    # UserProfile（declared keys）：synth_answer 按 risk_tolerance/investment_preferences
+    # 取具体类型消费（dict[str, object] 会让 .get 落 object 而破坏其签名匹配）。
+    user_profile: UserProfile | None
+    # 用户画像自动挖掘一期：自动挖掘的高置信推断（ws.py/routes.py 入口按 user_id
+    # 拉取注入）。[] = 已确认无推断，None = 未登录/拉取失败（两者区分见 data_client）。
+    # 仅 qa_router 参考段消费；入口必须无条件显式赋值（含匿名写 None），防
+    # checkpointer 跨轮残留（对齐 user_profile 的 Phase 4-3 教训）。
+    user_profile_inferences: list[dict[str, object]] | None
+    # Phase 5（Task 1）：长会话超窗确定性摘要（零 LLM、幂等、无累积）。
+    # qa_router 仅在超窗（summary 非 None）时写入，随 checkpointer 持久化（write-only，
+    # 供可观测/未来语义摘要锚点）；synth_answer 不读该字段，消费侧从当前 messages
+    # 确定性重算（防跨轮陈旧残留，G6）。值每轮重算，不累积；短会话（≤12 条）不写该
+    # 键 → 零变化硬约束。
+    messages_summary: str | None

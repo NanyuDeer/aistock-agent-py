@@ -10,26 +10,6 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 
-class AdvisorSubquestionTrace(TypedDict):
-    """单个投顾子问题的持久化来源与降级状态。"""
-
-    intent: str
-    reports: list[dict[str, object]]
-    sources: list[dict[str, object]]
-    as_of: str | None
-    missing_sources: list[str]
-    degraded: bool
-
-
-class AdvisorTrace(TypedDict):
-    """投顾回答的可追溯状态，所有对话传输通道原样透传。"""
-
-    schema_version: str
-    subquestions: list[AdvisorSubquestionTrace]
-    missing_sources: list[str]
-    degraded: bool
-
-
 class AgentState(TypedDict):
     """LangGraph 全局状态
 
@@ -47,7 +27,6 @@ class AgentState(TypedDict):
         trigger_source: 触发来源（scheduler=定时任务, user=用户对话）
         report_date: 报告日期（YYYY-MM-DD，scheduler 写入，Agent 持久化用）
         final_response: 最终响应文本
-        advisor_trace: 投顾子问题的报告来源与降级状态
     """
 
     messages: Annotated[list[BaseMessage | dict[str, str]], add_messages]
@@ -71,6 +50,10 @@ class AgentState(TypedDict):
     report_date: NotRequired[str | None]  # YYYY-MM-DD
     brief_type: NotRequired[str | None]  # "morning" | "evening"
     trace_id: NotRequired[str | None]  # 个股或市场触发链路关联 ID
+    # 节奏大师：三时点刷新槽位（after_close/morning/midday）与落库目标日。
+    # scheduler 运行期注入（state["refresh_slot"]/state["target_date"]），
+    # rhythm_master.run 读取；缺省由 slot 推导。
+    refresh_slot: NotRequired[str | None]
+    target_date: NotRequired[str | None]
     # 最终响应
     final_response: str | None
-    advisor_trace: NotRequired[AdvisorTrace]

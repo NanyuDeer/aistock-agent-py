@@ -1,0 +1,609 @@
+"""event_scraper 传导触发测试 — 中台入库成功后触发事件分析流水线（Task 5）。
+
+覆盖：
+- `_trigger_conduction`：事件列表 → major_events 映射 → 调用 run_event_analysis_pipeline；
+  空列表不触发；流水线异常不向上抛（fire-and-forget 语义）
+- `_spawn_conduction`：fire-and-forget 包装，持有 task 强引用（防 GC，对齐 morning
+  时代 scheduler._pending_event_tasks 先例），完成后自动从集合移除
+- `scrape_full_daily` / `scrape_intraday`：落库成功（persisted>0）且有重大事件时才
+  触发 `_spawn_conduction`，不改变返回契约
+"""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aistock_agent.services.event_scraper import _spawn_conduction, _trigger_conduction
+from aistock_agent.services.event_store import normalize_event
+from aistock_agent.utils.date import shanghai_today
+
+# patch 目标说明：`_trigger_conduction` 内函数级 `from event_analysis_pipeline import
+# run_event_analysis_pipeline`（运行期从源模块取属性），必须 patch 源模块属性
+# （from-import 绑定陷阱，对齐 event_scraper 模块 docstring 备注）。
+_PIPELINE_PATH = "aistock_agent.services.event_analysis_pipeline.run_event_analysis_pipeline"
+
+
+def _make_event(*, title: str, impact_score: int, **extra: object) -> dict[str, object]:
+    """构造归一化 EventRecord（normalize_event 兜底 summary/url/direction 等默认值）。"""
+    raw: dict[str, object] = {"title": title, "impact_score": impact_score}
+    raw.update(extra)
+    ev = normalize_event(raw, source="eastmoney", score_date="2026-08-12")
+    assert ev is not None
+    return dict(ev)
+
+
+# ── _trigger_conduction ──
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_calls_pipeline():
+    events = [
+        {
+            "event_id": "e1",
+            "title": "央行降准",
+            "summary": "降准0.5个百分点",
+            "url": "https://example.com/1",
+            "impact_score": 5,
+            "direction": "positive",
+            "involved_keywords": ["银行"],
+            "source": "cls",
+            "source_level": "A",
+            "content_hash": "abc",
+            "scrape_at": "2026-08-12 10:00:00",
+            "score_date": "2026-08-12",
+            "payload": {},
+        }
+    ]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+        mock_pipeline.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_maps_major_event_fields():
+    """EventRecord → major_events 字段映射（event_id/title/summary/url/impact_score/
+    direction/involved_keywords），多余字段不传给流水线。
+
+    样例须为**非外围**事件（否则被 S5 传导门控 `is_peripheral` 跳过，见 Task 9）：
+    「大盘午后跳水」命中市场级 token → event_scope=MARKET，且不命中海外宏观词
+    → 非 peripheral。"""
+    events = [
+        _make_event(
+            title="大盘午后跳水",
+            impact_score=5,
+            summary="午后跌幅扩大",
+            url="https://example.com/mkt",
+            direction="negative",
+            involved_keywords=["券商", "银行"],
+            source_level="A",
+        )
+    ]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+    called = mock_pipeline.await_args.args[0]
+    assert len(called) == 1
+    # spec §5 回归面：本样例标题「大盘午后跳水」命中市场级 token，event_scope 单一裁决
+    # （resolve_event_scope）判 MARKET；且不命中海外宏观词 → 非 peripheral（不被 S5 门控跳过）。
+    assert called[0] == {
+        "event_id": events[0]["event_id"],
+        "title": "大盘午后跳水",
+        "summary": "午后跌幅扩大",
+        "url": "https://example.com/mkt",
+        "impact_score": 5,
+        "direction": "negative",
+        "involved_keywords": ["券商", "银行"],
+        "event_scope": "MARKET",
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_skips_empty_events():
+    """空列表直接返回，不调用流水线。"""
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(),
+    ) as mock_pipeline:
+        await _trigger_conduction([])
+        mock_pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_survives_pipeline_exception():
+    """流水线抛异常被捕获记日志，不向上抛（fire-and-forget 失败不阻断）。"""
+    events = [_make_event(title="重大事件", impact_score=5)]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(side_effect=RuntimeError("LLM 不可用")),
+    ):
+        # 不抛异常即通过
+        await _trigger_conduction(events)
+
+
+# ── _spawn_conduction ──
+
+
+@pytest.mark.asyncio
+async def test_spawn_conduction_keeps_reference_and_discards_on_done():
+    """_spawn_conduction 持有 task 强引用（防 GC 提前取消），完成后自动移除。
+
+    模块级集合可能含其他测试残留的未完成 task（不同 event loop），
+    断言基于快照差值，只观察本次创建的 task。
+    """
+    from aistock_agent.services import event_scraper as scraper_module
+
+    before = set(scraper_module._pending_conduction_tasks)
+    events = [_make_event(title="传导事件", impact_score=5)]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ):
+        _spawn_conduction(events)
+        spawned = scraper_module._pending_conduction_tasks - before
+        assert len(spawned) == 1
+        task = next(iter(spawned))
+        await task
+    assert len(scraper_module._pending_conduction_tasks - before) == 0
+
+
+# ── scrape_full_daily / scrape_intraday 触发条件 ──
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_triggers_conduction_when_persisted():
+    """full_daily：有重大事件且本批有新增（added>0）→ 触发 _spawn_conduction。
+
+    score_date 用 shanghai_today() 动态计算：collect_global_markets 仅在
+    score_date == 今日时才被采集，硬编码日期会在非当天运行必然失败
+    （Task 5 评审 Important 1 日期依赖时间炸弹）。
+    """
+    today = shanghai_today().isoformat()
+    major = _make_event(title="盘前重磅", impact_score=5)
+    normal = _make_event(title="普通公告", impact_score=1)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[normal]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_scraper.forward_event_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [major],
+                "error": None,
+            }
+        ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_full_daily
+
+        result = await scrape_full_daily(today)
+
+    assert result["persisted"] == 1
+    mock_spawn.assert_called_once()
+    # 仅重大事件（impact_score>=4）传入触发，且只传新增子集（I3）
+    passed = mock_spawn.call_args.args[0]
+    assert len(passed) == 1
+    assert passed[0]["title"] == "盘前重磅"
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_skips_conduction_when_nothing_persisted():
+    """full_daily：落库失败/未新增（added=0）→ 不触发传导。"""
+    today = shanghai_today().isoformat()
+    major = _make_event(title="盘前重磅", impact_score=5)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_scraper.forward_event_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_full_daily
+
+        await scrape_full_daily(today)
+
+    mock_spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_skips_conduction_when_all_deduped():
+    """I3 回归：全去重批次（合并后 persisted>0 但 added=0）→ 不触发传导。
+
+    模拟 07:30 全量落库后，每小时增量批次全为已有 content_hash：
+    旧守卫 persisted>0 会对整批重复触发传导（LLM 成本），added 守卫阻断。
+    """
+    today = shanghai_today().isoformat()
+    major = _make_event(title="盘前重磅", impact_score=5)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_scraper.forward_event_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 5,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": None,
+            }
+        ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_full_daily
+
+        result = await scrape_full_daily(today)
+
+    assert result["persisted"] == 5  # 合并后总数（对外契约不变）
+    mock_spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scrape_full_daily_skips_conduction_when_no_major_events():
+    """full_daily：无重大事件（全普通）→ 不触发传导。"""
+    today = shanghai_today().isoformat()
+    normal = _make_event(title="普通公告", impact_score=1)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_ths_original",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_tavily",
+        new=AsyncMock(return_value=[normal]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_global_markets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scraper.forward_event_sources.collect_l3_forward",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [normal],
+                "error": None,
+            }
+        ),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_full_daily
+
+        await scrape_full_daily(today)
+
+    mock_spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_triggers_conduction_when_persisted():
+    """intraday：有重大事件且本批有新增（added>0）→ 触发 _spawn_conduction。"""
+    major = _make_event(title="盘中异动公告", impact_score=5)
+    normal = _make_event(title="普通快讯", impact_score=1)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[normal]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 1,
+                "deduped": 0,
+                "added": 1,
+                "added_events": [major],
+                "error": None,
+            }
+        ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_intraday
+
+        result = await scrape_intraday("2026-08-12")
+
+    assert result["persisted"] == 1
+    mock_spawn.assert_called_once()
+    passed = mock_spawn.call_args.args[0]
+    assert len(passed) == 1
+    assert passed[0]["title"] == "盘中异动公告"
+
+
+@pytest.mark.asyncio
+async def test_scrape_intraday_skips_conduction_when_nothing_persisted():
+    """intraday：落库失败/未新增（added=0）→ 不触发传导。"""
+    major = _make_event(title="盘中异动公告", impact_score=5)
+    with patch(
+        "aistock_agent.services.event_scrape_sources.collect_cls_telegraph",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "aistock_agent.services.event_scrape_sources.collect_eastmoney_judgements",
+        new=AsyncMock(return_value=[major]),
+    ), patch(
+        "aistock_agent.services.event_store.save_event_scrape",
+        new=AsyncMock(
+            return_value={
+                "persisted": 0,
+                "deduped": 1,
+                "added": 0,
+                "added_events": [],
+                "error": "persist failed",
+            }
+        ),
+    ), patch(
+        # 隔离真实物化（HTTP）：本用例有重大事件会走进物化分支
+        "aistock_agent.services.event_scrape_sources._materialize_event_entity",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "aistock_agent.services.event_scraper._spawn_conduction",
+        new=MagicMock(),
+    ) as mock_spawn:
+        from aistock_agent.services.event_scraper import scrape_intraday
+
+        await scrape_intraday("2026-08-12")
+
+    mock_spawn.assert_not_called()
+
+
+# ── H7：传导结果消费与失败重试（Task 1 / Phase-3a）──
+
+
+def _major_event(event_id: str = "e1") -> dict[str, object]:
+    """构造最小 major_event dict（仅含 _trigger_conduction 映射所需字段）。"""
+    return {
+        "event_id": event_id,
+        "title": "央行降准",
+        "summary": "降准0.5个百分点",
+        "url": "https://example.com/1",
+        "impact_score": 5,
+        "direction": "positive",
+        "involved_keywords": ["银行"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_retries_once_on_error_result():
+    """H7：pipeline 返回 error 非空 → 重试 1 次；第二次成功不抛。"""
+    calls = 0
+
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"event_count": 1, "error": "boom", "conduction_results": [], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+        return {"event_count": 1, "error": None, "conduction_results": [{"ok": True}], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ):
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_success_no_retry():
+    calls = 0
+
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"event_count": 1, "error": None, "conduction_results": [], "gi_result": None, "timed_out": False, "elapsed_seconds": 1.0}
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ):
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_double_failure_logs_without_raise():
+    async def fake_pipeline(major_events: list[dict[str, object]]) -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    with patch(
+        _PIPELINE_PATH,
+        new=fake_pipeline,
+    ), patch("aistock_agent.services.event_scraper.logger") as mock_logger:
+        await _trigger_conduction([_major_event()])  # type: ignore[arg-type]
+    assert mock_logger.exception.call_count == 2
+
+
+# ── H7：中台触发即标记当日，晨报 I4 兜底据此防双跑（Task 2 / Phase-3b）──
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_marks_triggered():
+    """H7：触发传导时设置当日防双跑标记（Redis SETEX）。
+
+    中台触发传导即写 conduction_triggered:{date}（TTL 6h），
+    晨报 I4 兜底据此避免重复触发（防双跑）。
+    """
+    fake_client = AsyncMock()
+    # patch 目标为 RedisPool 源模块（event_scraper 顶部将新增 import；
+    # 函数内 from-import 约束同 _PIPELINE_PATH，patch 源模块属性才生效）
+    with patch("aistock_agent.services.event_scraper.RedisPool") as mock_pool, patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(
+            return_value={
+                "event_count": 1,
+                "error": None,
+                "conduction_results": [],
+                "gi_result": None,
+                "timed_out": False,
+                "elapsed_seconds": 1.0,
+            }
+        ),
+    ):
+        mock_pool.get_client = AsyncMock(return_value=fake_client)
+        # _major_event 无 score_date 字段，按简报备注补构造
+        await _trigger_conduction(
+            [{**_major_event(), "score_date": "2026-08-13"}]  # type: ignore[arg-type]
+        )
+    args = fake_client.setex.await_args
+    assert args is not None
+    assert args.args[0] == "conduction_triggered:2026-08-13"
+    assert args.args[1] == 21600
+
+
+# ── 第三阶段：event_scope 传导过滤（STOCK 不触发传导 / UNKNOWN 放行）──
+
+
+def _scope_event(
+    *, event_id: str, title: str, event_scope: str | None = None
+) -> dict[str, object]:
+    """构造含/不含 event_scope 的 EventRecord（模拟落库后新增事件）。"""
+    ev: dict[str, object] = {
+        "event_id": event_id,
+        "title": title,
+        "summary": "",
+        "url": "",
+        "impact_score": 5,
+        "direction": "positive",
+        "involved_keywords": [],
+        "score_date": "2026-08-12",
+    }
+    if event_scope is not None:
+        ev["event_scope"] = event_scope
+    return ev
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_skips_stock_event():
+    """STOCK 事件（贵州茅台回购股份）→ 不调用 run_event_analysis_pipeline，
+    事件保留 event_scrape 记录，仅跳过传导（action=skip_conduction）。"""
+    events = [_scope_event(event_id="e_stock", title="贵州茅台回购股份", event_scope="STOCK")]
+    with patch(_PIPELINE_PATH, new=AsyncMock()) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_allows_unknown_event():
+    """UNKNOWN 事件（新能源汽车产业链发展）→ 正常调用流水线，event_scope 透传。"""
+    events = [_scope_event(event_id="e_unknown", title="新能源汽车产业链发展", event_scope="UNKNOWN")]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_awaited_once()
+    called = mock_pipeline.await_args.args[0]
+    assert len(called) == 1
+    assert called[0]["event_id"] == "e_unknown"
+    assert called[0]["event_scope"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_trigger_conduction_defaults_missing_scope_to_unknown():
+    """历史事件无 event_scope（半导体板块异动）→ 默认 UNKNOWN → 正常进入传导（向后兼容）。
+
+    样例须为**非外围**事件（否则被 S5 传导门控 `is_peripheral` 跳过，见 Task 9）；
+    「半导体板块异动」不命中海外宏观词 → 非 peripheral，且不命中市场级 token → 仍 UNKNOWN。
+    """
+    events = [_scope_event(event_id="e_old", title="半导体板块异动")]
+    with patch(
+        _PIPELINE_PATH,
+        new=AsyncMock(return_value={"event_count": 1}),
+    ) as mock_pipeline:
+        await _trigger_conduction(events)
+    mock_pipeline.assert_awaited_once()
+    called = mock_pipeline.await_args.args[0]
+    assert len(called) == 1
+    assert called[0]["event_scope"] == "UNKNOWN"

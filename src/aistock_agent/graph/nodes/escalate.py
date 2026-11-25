@@ -8,13 +8,12 @@ synth_answer 统一出口（Task 4 做 deep 代码加工）。
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
 
-from aistock_agent.agents.workers.hot_burst import run as hot_burst_run
-from aistock_agent.agents.workers.sector import run as sector_run
-from aistock_agent.agents.workers.stock import run as stock_run
+from aistock_agent.agents.registry import get_agent
 from aistock_agent.observability.metrics import get_metrics_collector
 from aistock_agent.services.sector_resolver import (
     _load_alias_index,
@@ -43,7 +42,15 @@ class WorkerHandle(Protocol):
     async def run(self, state: AgentState) -> dict[str, object]: ...
 
 
-# intent（qa_router goal.intent）→ worker 名映射（D6 前置：hot_burst 意图已入契约）
+# worker 模块的**裸 run 函数**形态（§3.3「3 worker run functions」，无 .run 属性）。
+# 与 WorkerHandle（.run 形状，§3.2「直调 worker.run」）**两种形态并存** ——
+# 统一由下面 _resolve_worker 解析，不要只支持其中一种。
+WorkerRun = Callable[[AgentState], Awaitable[dict[str, object]]]
+
+
+# intent（qa_router goal.intent）→ agent 注册名。这是**chat 专有的**技能意图 →
+# agent 策略（哪个 Skill 意图该升级成哪个 agent 深度分析），不属于 agent 契约，
+# 故未进 registry。
 INTENT_TO_WORKER: dict[str, str] = {
     "stock_snapshot": "stock",
     "stock_news": "stock",
@@ -52,11 +59,28 @@ INTENT_TO_WORKER: dict[str, str] = {
     "hot_burst": "hot_burst",
 }
 
-ESCALATION_MAP: dict[str, WorkerHandle] = {
-    "stock": stock_run,
-    "sector": sector_run,
-    "hot_burst": hot_burst_run,
+# deep 升级目标 → 运行体。默认值来自 registry（单一真源）；保留模块级 dict 形态，
+# 因为测试用 patch.dict 替换它注入 mock（见 tests/unit/test_escalate.py）。
+ESCALATION_MAP: dict[str, WorkerHandle | WorkerRun] = {
+    name: get_agent(name).run for name in ("stock", "sector", "hot_burst")
 }
+
+
+def _resolve_worker(worker: WorkerHandle | WorkerRun) -> WorkerRun:
+    """把两种 worker 形态统一解析成「可直接 await 的可调用目标」。
+
+    2026-11-18（B1 registry 收敛）后的定位变化：**生产环境只有一种形态** ——
+    registry 的 ``spec.run`` 是裸可调用函数，``ESCALATION_MAP`` 默认值全部来自
+    registry。本函数现在只为**测试替身**保留：既有测试用「对象带 run(state)
+    方法」的 mock（``WorkerHandle`` 形状）经 ``patch.dict(ESCALATION_MAP, ...)``
+    注入，需要在这里被解成 ``.run``。
+
+    不要因为"看着多余"删掉它 —— 删了会打断 tests/unit/test_escalate.py 与
+    tests/integration/test_chat_escalate.py 的既有 mock 契约。
+    """
+    if isinstance(worker, WorkerHandle):
+        return worker.run
+    return worker
 
 
 def _extract_sector_name(question: str) -> str | None:
@@ -93,8 +117,8 @@ async def escalate_node(state: QuestionState) -> dict[str, Any]:
         return {"fallback_to_skill": True}
 
     worker_name = INTENT_TO_WORKER.get(goal.intent)
-    worker = ESCALATION_MAP.get(worker_name) if worker_name else None
-    if worker is None:
+    worker = ESCALATION_MAP.get(worker_name) if worker_name is not None else None
+    if worker is None or worker_name is None:
         logger.info(
             "escalate.fallback",
             reason="unknown_intent",
@@ -121,19 +145,19 @@ async def escalate_node(state: QuestionState) -> dict[str, Any]:
 
     # D1/D3/D7：只填 worker 消费字段；trigger_source="user_chat" 固定，
     # 抑制 worker 内部以 scheduler 守卫的落库/缓存副作用。
-    agent_state: AgentState = {
+    # cast：worker（WorkerRun 契约）只消费这几个字段，此处刻意构造局部 AgentState
+    # （session_id/user_id/favorites/intent/analysis_reports/final_response 留空），
+    # 不补默认值以免改变 worker 对缺失字段的读取语义。
+    agent_state = cast("AgentState", {
         "messages": state.get("messages", [])[-5:],
         "symbol": goal.symbols[0] if goal.symbols else None,
         "tag_code": tag_code,
         "trigger_source": "user_chat",
-    }
+    })
 
     try:
-        # T6 缺陷修复（验证发现，契约级）：ESCALATION_MAP 存的是 worker 裸 run 函数
-        # （§3.3「3 worker run functions」，无 .run 属性）；WorkerHandle 协议/测试 mock
-        # 则是 .run 形状（§3.2「直调 worker.run」）。两种形态并存，统一取可调用目标，
-        # 否则真实 deep 路径必炸 `'function' object has no attribute 'run'`。
-        worker_callable = getattr(worker, "run", None) or worker
+        # 两种 worker 形态（裸 run 函数 / .run 形状对象）统一解析（见 _resolve_worker）。
+        worker_callable = _resolve_worker(worker)
         result = await worker_callable(agent_state)
     except Exception as exc:  # worker 自带顶层 try-catch，此处为防御性兜底
         logger.warning(
