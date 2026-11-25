@@ -70,6 +70,12 @@ class RuleDiagnostic(BaseModel):
     rule: str
     matched: bool
     evidence_ids: list[str]
+    # 当日幅度在近 3 年（750 自然日，不含当日）的同百分位。None = 无历史判据
+    # （sector_concentration 没有可回放的口径，或窗口不足），此时保持旧行为。
+    rarity: float | None = None
+    # 阈值成立但因幅度不罕见被挡下（rarity < 闸门）。显式记录，
+    # 否则"matched=True 却没有 primary"会让人以为代码有 bug。
+    gated_by_rarity: bool = False
 
 
 class DetectedPhenomenon(BaseModel):
@@ -221,6 +227,9 @@ class MarketTraceSnapshot(BaseModel):
     sources: dict[str, SourceRecord]
     missing_fields: list[str]
     phenomenon_discovery: PhenomenonDiscoveryResult
+    # 每规则一个罕见度分位（rule -> 0~1）。**冻结在快照里**，不在发现时查库 ——
+    # review 会重算 discovery 并与快照比对，输入若来自实时查询就无法复现。
+    phenomenon_rarity: dict[str, float] = Field(default_factory=dict)
     data_availability: dict[str, DataAvailability] = Field(default_factory=dict)
     collection_status: dict[str, SourceCollectionStatus] = Field(default_factory=dict)
     # 早报预测（增量字段，默认 None 兼容旧缓存）

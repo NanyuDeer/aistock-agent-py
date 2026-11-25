@@ -296,9 +296,15 @@ def discover_market_phenomenon(
     sources: dict[str, SourceRecord],
     captured_at: datetime,
     missing_fields: list[str],
+    rarity: dict[str, float] | None = None,
 ) -> PhenomenonDiscoveryResult:
-    """在冻结事实上运行规则，并保留真实 source_id 与确定性顺序。"""
+    """在冻结事实上运行规则，并保留真实 source_id 与确定性顺序。
+
+    ``rarity``：每规则一个 0~1 的罕见度分位，**必须来自快照**（不能在此查库），
+    否则 review 的重算校验无法复现。缺省空 dict = 不启用闸门（旧行为）。
+    """
     scores = _score_rules(a_share, sources)
+    rarity = rarity or {}
     causal_readiness = classify_causal_evidence(sources, captured_at)
     indexes = _index_returns(a_share, sources)
     market_complete = len(indexes) >= 6
@@ -315,11 +321,18 @@ def discover_market_phenomenon(
         attribution_inputs=attribution_inputs,
         causal_evidence=causal_readiness,
     )
+    threshold = settings.phenomenon_rarity_min_percentile
     diagnostics = [
         RuleDiagnostic(
             rule=rule,
             matched=scores[rule] >= settings.phenomenon_min_match_score,
             evidence_ids=_rule_fact_ids(rule, a_share, sources),
+            rarity=rarity.get(rule),
+            gated_by_rarity=(
+                scores[rule] >= settings.phenomenon_min_match_score
+                and rarity.get(rule) is not None
+                and float(rarity[rule]) < threshold
+            ),
         )
         for rule in _RULE_ORDER
     ]
@@ -332,7 +345,17 @@ def discover_market_phenomenon(
             diagnostics=diagnostics,
         )
 
-    matched = [rule for rule in _RULE_ORDER if scores[rule] >= settings.phenomenon_min_match_score]
+    # 闸门：阈值成立只说明"够格"，还要"够罕见"才认。
+    # 现状是绝对阈值 —— `limit_up >= 50` 在 59.8% 的交易日成立，却叫 sentiment_extreme。
+    # 没有 rarity 的规则（sector_concentration）保持旧行为：我们不收紧没有证据的规则。
+    matched = []
+    for rule in _RULE_ORDER:
+        if scores[rule] < settings.phenomenon_min_match_score:
+            continue
+        r = rarity.get(rule)
+        if r is not None and float(r) < threshold:
+            continue
+        matched.append(rule)
     if not matched:
         return PhenomenonDiscoveryResult(
             status="no_phenomenon",
