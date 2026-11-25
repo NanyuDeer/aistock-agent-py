@@ -11,7 +11,7 @@ from aistock_agent.prompts.workers.hot_burst import HOT_BURST_ANALYST_PROMPT
 from aistock_agent.services.data_client import node_api
 from aistock_agent.services.llm import get_deep_think
 from aistock_agent.state.schema import AgentState
-from aistock_agent.tools.hot_burst_tools import get_hot_burst_history
+from aistock_agent.tools.hot_burst_tools import get_hot_burst_report_history
 from aistock_agent.utils.date import shanghai_today
 from aistock_agent.utils.message import extract_final_ai_response
 from aistock_agent.utils.report_parser import (
@@ -156,7 +156,7 @@ async def run(state: AgentState) -> dict[str, object]:
             }
 
         llm = get_deep_think()
-        tools = [get_hot_burst_history]
+        tools = [get_hot_burst_report_history]
         agent = create_react_agent(llm, tools)
 
         result = await agent.ainvoke(

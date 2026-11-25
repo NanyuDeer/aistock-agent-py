@@ -1,12 +1,16 @@
 """hot_burst_tools 测试 — 机构调研推荐热门股检测与历史"""
 
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from aistock_agent.tools.base import DEGRADED_MESSAGE
-from aistock_agent.tools.hot_burst_tools import get_hot_burst, get_hot_burst_history
-
+from aistock_agent.tools.hot_burst_tools import (
+    get_hot_burst,
+    get_hot_burst_history,
+    get_hot_burst_report_history,
+)
 # ── get_hot_burst ────────────────────────────────────────────────
 
 
@@ -114,3 +118,38 @@ async def test_get_hot_burst_history_supports_min_resonance():
         mock_api.get.assert_called_once_with(
             "/internal/institution-research/history?limit=50&min_resonance_only=true&days=1&min_resonance=2&offset=0"
         )
+
+
+def test_history_format_deduplicates_before_display_limit():
+    from aistock_agent.tools.hot_burst_tools import _format_history
+    rows = [{"symbol": "300308", "stock_name": "中际旭创", "detected_at": "最新"}]
+    rows += [{"symbol": "300308", "stock_name": "中际旭创", "detected_at": "更早"}] * 25
+    rows += [{"symbol": "300124", "stock_name": "汇川技术"}]
+    result = _format_history({"total": 27, "records": rows})
+    assert result.count("中际旭创(300308)") == 1
+    assert "汇川技术(300124)" in result
+    assert "历史记录总数: 27" in result
+    assert "本页去重股票数: 2" in result
+
+
+@pytest.mark.asyncio
+async def test_report_tool_always_requests_one_day_and_two_sources():
+    assert "days" not in get_hot_burst_report_history.args
+    assert "min_resonance" not in get_hot_burst_report_history.args
+    with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"total": 0, "records": []})
+        for args in ({}, {"limit": 100, "offset": 50}, {"days": 30}):
+            await get_hot_burst_report_history.ainvoke(args)
+            query = parse_qs(urlsplit(mock_api.get.call_args.args[0]).query)
+            assert query["days"] == ["1"]
+            assert query["min_resonance"] == ["2"]
+            assert query["min_resonance_only"] == ["true"]
+        assert query["limit"] == ["50"]
+
+
+@pytest.mark.asyncio
+async def test_generic_history_tool_still_allows_longer_window():
+    with patch("aistock_agent.tools.hot_burst_tools.node_api") as mock_api:
+        mock_api.get = AsyncMock(return_value={"total": 0, "records": []})
+        await get_hot_burst_history.ainvoke({"days": 30})
+        assert "days=30" in mock_api.get.call_args.args[0]
