@@ -122,3 +122,85 @@ CHAT_NODE_LABELS: dict[str, str] = {
     "skill_executor": "正在收集证据",
     "synth_answer": "正在综合回答",
 }
+
+
+# ---------------------------------------------------------------------------
+# 账本枚举（证据 / 论点）
+# ---------------------------------------------------------------------------
+# 契约：docs/superpowers/specs/2026-11-24-evidence-claim-ledger-contract.md
+# 表：aistock-app-api/src/db/migrations/031_evidence_claim_ledger.sql
+#
+# 为什么库里不锁枚举、改在应用层管（2026-11-25 组长裁决）：
+#   DDL 只加「格式」CHECK（小写字母开头、字母数字下划线），加新值不用改表；
+#   真正的白名单在这里，配合 tests/unit/test_ledger_kinds.py 拦住拼写错误。
+#   历史上 attribution_status 加值破坏过存量反序列化，这条教训要记着。
+#
+# **改这里的任何值，必须同步改契约文档，否则 CI 会失败。**
+
+
+class EvidenceKind:
+    """证据类型。``causal`` / ``flow`` 是 2026-11 新增。"""
+
+    MARKET = "market"           # 价格与成交的观测
+    EVENT = "event"             # 发生了一件事
+    ENTITY = "entity"           # 实体关系（产业链上下游）
+    FUNDAMENTAL = "fundamental"  # 财务与预期
+    CAUSAL = "causal"           # 机制传导路径（A 通过什么机制传到 B）
+    FLOW = "flow"               # 谁在买、谁在卖（北向、两融）
+    USER_CONTEXT = "user_context"
+
+
+EVIDENCE_KINDS = frozenset({
+    EvidenceKind.MARKET,
+    EvidenceKind.EVENT,
+    EvidenceKind.ENTITY,
+    EvidenceKind.FUNDAMENTAL,
+    EvidenceKind.CAUSAL,
+    EvidenceKind.FLOW,
+    EvidenceKind.USER_CONTEXT,
+})
+
+
+class ClaimKind:
+    """判断的**性质**，不是能力线。能力线见 ``Capability``。"""
+
+    TREND = "trend"
+    WIND = "wind"
+    EVENT = "event"
+    FUNDAMENTAL = "fundamental"
+    CAUSAL = "causal"
+    RISK = "risk"
+
+
+CLAIM_KINDS = frozenset({
+    ClaimKind.TREND,
+    ClaimKind.WIND,
+    ClaimKind.EVENT,
+    ClaimKind.FUNDAMENTAL,
+    ClaimKind.CAUSAL,
+    ClaimKind.RISK,
+})
+
+
+class Capability:
+    """能力线。与 ``ClaimKind`` 正交：一条 claim = 某个性质的判断 + 某条能力线产出。"""
+
+    INSIGHT = "insight"          # 市场洞见
+    RHYTHM = "rhythm"            # 节奏大师
+    TREND = "trend"
+    WIND = "wind"
+    EVENT = "event"
+    FUNDAMENTAL = "fundamental"
+
+
+CAPABILITIES = frozenset({
+    Capability.INSIGHT,
+    Capability.RHYTHM,
+    Capability.TREND,
+    Capability.WIND,
+    Capability.EVENT,
+    Capability.FUNDAMENTAL,
+})
+
+# 与 DDL 的格式 CHECK 保持一致：^[a-z][a-z0-9_]{1,31}$
+LEDGER_KIND_PATTERN = r"^[a-z][a-z0-9_]{1,31}$"
