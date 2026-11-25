@@ -109,6 +109,28 @@ START → supervisor(quick_think, 意图路由)
   旧串行链路（quick_snapshot_enabled=false）：_run_evening_chain_task 调 review.run()，成功持久化后同样补发 review_done（双保险）；无 EventBus 时显式告警 review_done_skipped_no_event_bus（断链不静默）
 ```
 
+### 智慧大脑主图（brain，P1 样板，2026-11-25）
+
+入口 `POST /api/agent/brain/run`（`brain_enabled=false` 时 404）。主图 = 入口感知 + 可插拔研究子图
++ 固定出口（`judgment_writer → briefing_writer`）：
+
+```text
+START → market_perception
+  → [已注册研究子图，按 register_subgraph 注册顺序串联，当前仅 insight_research]
+  → judgment_writer（产 judgment，写账本 source_type="judgment"）
+  → briefing_writer（judgment → brief.v1）
+  → END
+```
+
+- 代码：`graph/brain/{state,builder,orchestrator}.py` + `graph/brain/nodes/*`；契约 `schemas/judgment.py`；
+  账本 `services/judgment_ledger.py`（零迁移复用 `/internal/predictions`，`source_type="judgment"`）。
+- 硬约束：子图只读 evidence/claims，只写白名单通道（`evidence/claims/conflicts/method_prior/render_targets/trace/cost`）；
+  `judgment`/`brief`/`verified_result` 仅出口/校准节点可写；未落账不得渲染；
+  `confidence>=0.7` 必须 ≥2 独立来源（否则 `judgment.py` 自动降到 0.69 并记冲突）。
+- 接入规范见 `docs/智慧大脑-架构与研判契约.md`「子图接入规范」。
+- 评测：`.\.venv\Scripts\python.exe scripts\eval_brain.py`（24 题归因规则集，阈值 0.9）。
+- 已知边界（P1 不做）：`render` 只出 `brief.v1`，七出口分发、板块/个股真实证据链、旧链路口径对齐均在后续期。
+
 ### 多专家 Agent 协作体系（参考涨乐AI）
 
 ```

@@ -5,6 +5,8 @@
 - ``get_hot_burst_history``：历史检测记录（从数据库分页查询）
 """
 
+from typing import cast
+
 from langchain_core.tools import tool
 
 from aistock_agent.services.data_client import node_api
@@ -64,13 +66,16 @@ async def get_hot_burst_history(
 @safe_tool_call
 async def get_hot_burst_report_history(limit: int = 50, offset: int = 0) -> str:
     """获取报告使用的最近24小时热门股历史，至少两源通过；时间范围固定，不可扩大。"""
-    return await get_hot_burst_history.ainvoke({
+    # ainvoke 返回 Any（langchain BaseTool 签名），显式 cast 满足 strict mypy；
+    # 运行时不做类型转换，仍是工具原样返回的字符串。
+    payload = {
         "limit": limit,
         "offset": offset,
         "days": 1,
         "min_resonance_only": True,
         "min_resonance": 2,
-    })
+    }
+    return cast(str, await get_hot_burst_history.ainvoke(payload))
 
 
 def _format_hot_burst(data: dict[str, object]) -> str:

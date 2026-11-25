@@ -1056,6 +1056,11 @@ async def run_once() -> int:
             record_id = int(record_id)
         if not isinstance(record_id, int):
             continue
+        # 研判契约（source_type="judgment"）不归 16:00 到期验证环：它没有 horizons，
+        # 被当坏预测会写 insufficient 覆盖已验证结果。judgment 的到期复核走校准链路。
+        if record.get("source_type") == "judgment":
+            logger.info("prediction_validate_skip_judgment", id=record_id)
+            continue
         due_dates = record.get("due_dates")
         verification = record.get("verification")
         if not isinstance(due_dates, dict) or not isinstance(verification, dict):

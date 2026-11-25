@@ -139,6 +139,9 @@ class Settings(BaseSettings):
     # 内网鉴权
     internal_api_token: str = "change-me-in-production"
 
+    # 智慧大脑总开关：默认关闭；关闭时 /brain/run 返回 404（B 段组长独占验证期）
+    brain_enabled: bool = False
+
     # CORS 允许的源列表（api/middleware.py setup_middleware 读取）
     # 支持逗号分隔（CORS_ORIGINS=http://a,http://b）或 JSON 数组格式（CORS_ORIGINS=["a","b"]）
     # NoDecode 阻止 pydantic-settings 预先 JSON 解析，交给 _parse_cors_origins 统一处理

@@ -1,5 +1,60 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-25 — 智慧大脑 P1 骨架 + 市场研判样板链（Task 1~13）
+
+**开发者**: Aria
+
+### 新增
+
+- 研判契约 `schemas/judgment.py`：6 个 `Judgment*` 模型、5 条硬约束（ID 格式、单源高置信自动降级、反证必填、`verify_at=due+3` 交易日、7 个渲染出口齐全），全部 `extra="forbid"`。
+- `graph/brain/`：`state.py`（`BrainState` + 5 个 reducer）、`builder.py`（子图注册表 + 白名单挂载 + 主图装配）、`orchestrator.py`（`run_orchestrator` 唯一入口，超时/图异常/落账失败返回 partial）；6 个节点（感知 / 研究 / 多空 / 冲突 / 研判 / 表达）。
+- `tools/provenance.py`：工具溯源信封 + 6 个领域视图 + 证据转换。
+- `services/judgment_ledger.py`：研判零迁移落账（复用 `prediction_records`，`source_type="judgment"`，先查后写保证幂等）。
+- `config.py` 新增 `brain_enabled`（默认 `false`）；新增 `POST /api/agent/brain/run`（关闭时 404，鉴权复用 internal token）。
+- 归因规则 24 题离线评测集 `tests/fixtures/brain_eval_cases.json` + `scripts/eval_brain.py`（阈值 0.9，退出码门禁）。
+- 新增测试 10 个文件：契约 / 状态 / 信封 / 账本 / 验证器守卫 / 节点 / 集成 / e2e / 评测。
+
+### 修复
+
+- `prediction_validator.run_once()` 增加 judgment 跳过守卫，避免无 `horizons` 的研判记录被误判为 `insufficient`。
+- `tests/unit/test_judgment_ledger.py` 改为 patch 类方法，消除对 `NodeApiClient` 单例的跨文件污染（原实现导致 `test_prediction_service.py` 全量下 2 failed）。
+- CI 存量红灯：`tests/unit/test_hot_burst_tools.py` import 块补空行（ruff I001）；`tools/hot_burst_tools.py` 对 `ainvoke` 结果加 `cast(str, ...)`（mypy `no-any-return`，运行时行为不变）。
+
+### 文档
+
+- `docs/智慧大脑-架构与研判契约.md` 新增「子图接入规范（P1 落地口径）」。
+- `AGENTS.md` 新增「智慧大脑主图（brain，P1 样板）」一节。
+
+### 验证
+
+- `pytest tests/` 全量 **5153 passed / 5 skipped**；`pytest tests/unit` 4631 passed / 1 skipped。
+- `ruff check src tests scripts` 全绿；`mypy src` 293 文件 0 错误。
+- `scripts/eval_brain.py` → `total=24 contract_pass=24 attribution_rule_accuracy=1.0`，退出码 0。
+
+---
+
+## [main] 2026-11-22 — review 持久化与事件物化修复（补记）
+
+**开发者**: Aria
+
+> 补记：对应代码已在 `11c7f81 fix(review): fail loudly when review report persist fails` 提交，此前仅记录在 `changelog-pending.md`。
+
+### 修复
+
+- review 持久化静默失败：`_persist_review_report` 校验 `save_analysis_report` 返回值、失败重试 1 次、仍失败打 `review_persist_failed` 并返回 `False`；仅在 `persisted=True` 时发布 `review_done`。
+- review 消费者双保险：`status=ok` 后回读 DB，确认 completed 且 content 非空才发布 `review_done`，否则降级并标记 `review_report_missing_after_persist`。
+- 事件物化补 `summary` 与 `source_event_id`，`summary` 为空时回退 `title`。
+- 事件开始时间识别结束日语义（「暂停至/有效期至/截止」不再当开始日），避免已发生事件被误投为未来事件。
+- 事件地域判定补境内货币政策标记（LPR / 贷款市场报价利率 / MLF / 降准 / 逆回购等），并排除海外央行误判。
+- 归档文件名按 `report_date` 前缀，修复回补时的日期错位。
+- `run()` 复盘持久化按 `trigger_source ∈ {scheduler, manual}` 门控。
+
+### 测试
+
+- 新增 `tests/unit/test_review_persist.py`（4 个用例）、`tests/unit/test_event_consumers_review_guard.py`，并补充既有事件消费者测试。
+
+---
+
 ## [main] 2026-11-14 — 午间播报生成失败 + 晚报缺洞见（周会任务 4）
 
 **开发者**: Aria
