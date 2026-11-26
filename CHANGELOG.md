@@ -1,35 +1,19 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
-## [main] 2026-11-25 — 智慧大脑 P1 骨架 + 市场研判样板链（Task 1~13）
+## [main] 2026-11-27 — 归档并删除未上线 brain 错误原型
 
-**开发者**: Aria
+**开发者**: NanyuDeer
 
-### 新增
+### 清理
 
-- 研判契约 `schemas/judgment.py`：6 个 `Judgment*` 模型、5 条硬约束（ID 格式、单源高置信自动降级、反证必填、`verify_at=due+3` 交易日、7 个渲染出口齐全），全部 `extra="forbid"`。
-- `graph/brain/`：`state.py`（`BrainState` + 5 个 reducer）、`builder.py`（子图注册表 + 白名单挂载 + 主图装配）、`orchestrator.py`（`run_orchestrator` 唯一入口，超时/图异常/落账失败返回 partial）；6 个节点（感知 / 研究 / 多空 / 冲突 / 研判 / 表达）。
-- `tools/provenance.py`：工具溯源信封 + 6 个领域视图 + 证据转换。
-- `services/judgment_ledger.py`：研判零迁移落账（复用 `prediction_records`，`source_type="judgment"`，先查后写保证幂等）。
-- `config.py` 新增 `brain_enabled`（默认 `false`）；新增 `POST /api/agent/brain/run`（关闭时 404，鉴权复用 internal token）。
-- 归因规则 24 题离线评测集 `tests/fixtures/brain_eval_cases.json` + `scripts/eval_brain.py`（阈值 0.9，退出码门禁）。
-- 新增测试 10 个文件：契约 / 状态 / 信封 / 账本 / 验证器守卫 / 节点 / 集成 / e2e / 评测。
+- 删除 Python 仓库中的 brain 图、研判契约、账本、工具网关、API 入口、配置开关及其专用测试/评测集。
+- 删除前先将两个仓库的提交基线、完整已跟踪差异、brain 相关未跟踪文件及 SHA-256 清单归档到仓库外。
+- V4 不继承该原型或未落地的 brain_v3，后续以现有生产功能为迁移基线。
 
-### 修复
+### 数据库
 
-- `prediction_validator.run_once()` 增加 judgment 跳过守卫，避免无 `horizons` 的研判记录被误判为 `insufficient`。
-- `tests/unit/test_judgment_ledger.py` 改为 patch 类方法，消除对 `NodeApiClient` 单例的跨文件污染（原实现导致 `test_prediction_service.py` 全量下 2 failed）。
-- CI 存量红灯：`tests/unit/test_hot_burst_tools.py` import 块补空行（ruff I001）；`tools/hot_burst_tools.py` 对 `ainvoke` 结果加 `cast(str, ...)`（mypy `no-any-return`，运行时行为不变）。
-
-### 文档
-
-- `docs/智慧大脑-架构与研判契约.md` 新增「子图接入规范（P1 落地口径）」。
-- `AGENTS.md` 新增「智慧大脑主图（brain，P1 样板）」一节。
-
-### 验证
-
-- `pytest tests/` 全量 **5153 passed / 5 skipped**；`pytest tests/unit` 4631 passed / 1 skipped。
-- `ruff check src tests scripts` 全绿；`mypy src` 293 文件 0 错误。
-- `scripts/eval_brain.py` → `total=24 contract_pass=24 attribution_rule_accuracy=1.0`，退出码 0。
+- 服务器 PostgreSQL（docker `pg` 容器，postgres 17.10，库 `aistock`）已复核：`public` 下 97 张表无任何 `%brain%` 表，`brain_run_archives` **不存在**，无需清理迁移。
+- 生产部署端 `aistock-app-api` 无 brain 模块与迁移；`aistock-agent-py` 部署版本含 `brain_enabled=False` 的旧入口（`/brain/run` 返回 404），随下次部署消失。
 
 ---
 

@@ -25,7 +25,6 @@ from aistock_agent.api.deps import (
 )
 from aistock_agent.config import settings
 from aistock_agent.constants import CHAT_NODE_LABELS, SSEEventType
-from aistock_agent.graph.brain.orchestrator import run_orchestrator
 from aistock_agent.graph.builder import compile_graph
 from aistock_agent.graph.chat_builder import compile_chat_graph
 from aistock_agent.graph.nodes.qa_router import _STOCK_SYMBOL_CLARIFICATION
@@ -2289,39 +2288,3 @@ async def build_insight_report_sections(
     )
 
     return build_report_response(payload)
-
-
-class BrainRunRequest(BaseModel):
-    """智慧大脑触发入参（P1 只支持指数主体；个股/板块由 C 段子图接入后扩展）。"""
-
-    subject_code: str = "000001"
-    subject: str = "上证指数"
-    as_of: str | None = None
-
-
-@router.post("/brain/run")
-async def trigger_brain_run(
-    body: BrainRunRequest | None = None,
-    _: None = Depends(verify_internal_token),
-) -> dict[str, object]:
-    """智慧大脑唯一对外入口：跑主图 → 落账 → 返回研判 + brief。
-
-    开关语义：``brain_enabled=False`` 时返回 404，让未验证的样板链在环境里"不存在"，
-    避免 Node 侧或其他服务误接；开启动作由组长在 B 段验收后改 .env 完成。
-    不做业务分支——业务判断全在节点内，保证组员接入子图后本入口零改动。
-    """
-    if not settings.brain_enabled:
-        raise HTTPException(status_code=404, detail="brain not enabled")
-
-    req = body or BrainRunRequest()
-    result = await run_orchestrator(
-        subject_code=req.subject_code, subject=req.subject, as_of=req.as_of
-    )
-    return {
-        "run_id": result.run_id,
-        "partial": result.partial,
-        "record_id": result.record_id,
-        "errors": result.errors,
-        "judgment": result.judgment.model_dump(mode="json") if result.judgment else None,
-        "brief": result.brief,
-    }
