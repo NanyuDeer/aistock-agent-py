@@ -1,5 +1,28 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — V4 公共契约与确定性 state 基座（V4-01-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- 新建 `src/aistock_agent/brain_v4/`：独立于已删除的 `graph/brain`，不创建 `brain_v3`。
+- `contracts/research.py`：`ResearchRequest / Hypothesis / CausalEdge / ResearchGap / RevisionEvent / RoundLedger`；假设版本化（`ref = id:v{n}`），失效条件必填。
+- `contracts/evidence.py`：`EvidenceItem / EvidenceLedger`；含事件/发布/抓取三时间、`as_of`、质量与时间置信度、工具参数与响应摘要。
+- `contracts/judgment.py`：`V4Judgment`；结论完整性 `status` 与 `stop_reason` 分离。
+- `contracts/deliberation.py`：案卷、议程、立场、同伴摘要、信念更新、影响边、异议/答辩、回改提案、裁决与进度账本共 13 个模型。
+- `contracts/briefing.py`：`BriefingEnvelope` + 早/午/晚三个正文；午报强制 `parent_judgment_ids`。
+- `contracts/events.py`：`CanonicalEventRecord` + `EventObservation`；事件事实与分析结论分离。
+- `graph/state.py`：`BrainV4State`、并行追加/单写通道划分、顺序无关的 `merge_by_id`（同 ID 冲突显式化并保留摘要较小者）、`append_events`、`sum_usage`。
+
+### 验证
+
+- `pytest tests/unit/brain_v4 -q` → 11 passed。
+- `pytest tests/unit -q` → 4636 passed / 1 skipped。
+- `ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4` 全绿；`mypy src/aistock_agent/brain_v4` 10 文件 0 错误。
+
+---
+
 ## [main] 2026-11-27 — 归档并删除未上线 brain 错误原型
 
 **开发者**: NanyuDeer
