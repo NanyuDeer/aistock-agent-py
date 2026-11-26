@@ -131,3 +131,6 @@ class RoundLedger(V4Contract):
     stall_count: int = Field(ge=0)
     revision_budget_left: int = Field(ge=0)
     stop_reason: str | None = None
+    # Task 2 追加（向后兼容）：停止策略需要的显式质量信号，默认不改变旧行为。
+    sufficiency_passed: bool = False
+    oscillation_detected: bool = False

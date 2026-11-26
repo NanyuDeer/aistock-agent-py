@@ -1,0 +1,22 @@
+# 早/午/晚简报功能声明。状态 draft：生产仍由 legacy 服务，brain_v4 只做影子。
+id: briefing
+kind: feature
+owner: briefing-team
+status: draft
+profiles: [briefing_morning, briefing_midday, briefing_evening]
+contracts: [BriefingEnvelope.v1, MorningBody.v1, MiddayBody.v1, EveningBody.v1]
+capabilities: [market_snapshot, event_evidence, trend]
+dependencies: [market_trace]
+cutoff: briefing_profile_cutoff
+budgets:
+  timeout_s: 120
+  token_budget: 24000
+degradation:
+  missing_parent: insufficient
+  optional_capability_failure: partial
+active_owner: legacy
+shadow_owner: brain_v4
+legacy_deletion:
+  adapter: briefing_legacy_adapter
+  callers: [scheduler_briefing, admin_briefing_trigger]
+  delete_when: v4_100_percent_stable_10_trading_days

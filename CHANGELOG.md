@@ -1,5 +1,30 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — Profiles、停止策略与特性注册表（V4-02-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `graph/profiles.py`：不可变 `RunProfile` 注册表，覆盖 alert_hot / briefing_morning / briefing_midday / briefing_evening / market_trace / intraday / on_demand_deep / verify；`ledger_namespace(profile, run_id)` 保证同一 run_id 跨 profile 隔离。
+- `controller/stop_policy.py`：`BudgetState`、`StopDecision` 与 `evaluate_stop`，判定顺序固定为 sufficient > stall(>=2) > unstable > budget > continue。
+- `contracts/manifest.py`：`FeatureManifest`（id、kind、owner、status、profiles、contracts、capabilities、dependencies、cutoff、budgets、degradation、active_owner、shadow_owner、legacy_deletion），`extra="forbid"`。
+- `registry.py`：`load_registry / validate_registry / generate_registry_lock` 与 `python -m aistock_agent.brain_v4.registry --write-lock`；校验重复 id、依赖环、同一输出多 active owner、目录与 manifest 双向一致。
+- `features/briefing/manifest.yaml`、`features/market_trace/manifest.yaml`：draft 状态，`active_owner=legacy`、`shadow_owner=brain_v4`。
+- `generated/registry.lock`：CI 生成，registry_sha256 固定为 `433969d7a2c0ab3d17c17e479e7ff0796341f305ba67b8e3f4cd79b44e425629`。
+
+### 变更
+
+- `contracts/research.py`：`RoundLedger` 追加带默认值的可选字段 `sufficiency_passed`、`oscillation_detected`（默认 `False`，向后兼容）。
+
+### 验证
+
+- `pytest tests/unit/brain_v4 -q` → 26 passed。
+- `ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4` 全绿；`mypy src/aistock_agent/brain_v4` 15 文件 0 错误。
+- `registry --write-lock` 连续两次输出同一 registry_sha256。
+
+---
+
 ## [main] 2026-11-27 — V4 公共契约与确定性 state 基座（V4-01-P01）
 
 **开发者**: NanyuDeer

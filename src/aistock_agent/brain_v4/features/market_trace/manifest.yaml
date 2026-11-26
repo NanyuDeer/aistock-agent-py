@@ -1,0 +1,22 @@
+# 市场深度溯源功能声明。晚报复用其研判，白天提供按需溯源。
+id: market_trace
+kind: feature
+owner: market-trace-team
+status: draft
+profiles: [market_trace]
+contracts: [V4Judgment.v1]
+capabilities: [market_snapshot, event_evidence, trend, fundamental]
+dependencies: []
+cutoff: market_close_cn
+budgets:
+  timeout_s: 180
+  token_budget: 32000
+degradation:
+  missing_parent: insufficient
+  optional_capability_failure: partial
+active_owner: legacy
+shadow_owner: brain_v4
+legacy_deletion:
+  adapter: market_trace_legacy_adapter
+  callers: [admin_market_trace_trigger]
+  delete_when: v4_100_percent_stable_10_trading_days
