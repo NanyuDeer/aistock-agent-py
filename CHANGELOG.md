@@ -1,5 +1,33 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 案卷制分析师议会与协作路由（V4-05-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `deliberation/router.py`：`route_collaboration(...)` 用 profile 阈值（前两名假设分差、证据冲突、材料性、跨层冲突、剩余预算、专业缺口、发布状态）确定性选择 `SOLO_DEEP | LEAD_WITH_CONSULTANTS | ANALYST_COUNCIL | MANDATORY_RED_TEAM`；模型建议只写入 `suggested_mode`，`alert_hot` 恒为 `SOLO_DEEP` 且无额外席位。
+- `deliberation/agenda.py`：`build_agenda(...)` 只生成绑定假设 ID 的可裁决议题；`merge_submissions(...)` 为 append-only 归并，任意到达顺序结果一致。
+- `deliberation/roles.py`：确定性席位表、`build_role_context(...)`（R0 强制隐藏同伴摘要）与 `run_role_node(...)`（只返回 `submissions` 与 `usage`，不写规范图）。
+- `deliberation/peer_briefs.py`：R1+ 才生成 role-scoped `PeerBrief`，只含观点、证据引用、分歧与开放问题。
+- `deliberation/beliefs.py`：`validate_belief_update(...)` 拒绝无证据/无机制变化的置信度上调；`belief_update_from_peer_brief(...)` 产出 weaken、requested gaps 与 `search_direction` 影响边；hold 也落 `BeliefUpdate`。
+- `deliberation/convergence.py`：仅在新增证据、未解高严重度异议、拓扑变化或实质信念变化时继续；否则 `no_progress`；缺 `target_id`/`severity`/`kill_criterion` 的异议直接拒绝。
+- `deliberation/committer.py`：唯一写者 `RevisionCommitter.commit(proposal, state)`，只接受 accepted 提案，返回新的规范假设/因果图与 `RevisionEvent`。
+- `deliberation/judge.py`：`CouncilJudge` 只产出 `CouncilDecision`，拒绝引用冻结 `EvidenceLedger` 之外的证据，并保留少数意见。
+- `deliberation/graph.py`：用 `langgraph.graph.StateGraph` 组装 `case_freeze → agenda_build → r0_independent_positions → fact_normalize → peer_brief_reveal → cross_exam → belief_update → convergence_gate`；席位用 `Send` 并行、公共产物用 append-only reducer、席位草稿用私有 `SeatTask.scratch`、路由用 `Command`；定向研究递增 `case_version` 且只重跑受影响席位。
+- `tests/unit/brain_v4/test_collaboration_router.py`、`test_deliberation_reducers.py`、`test_belief_updates.py` 与 `tests/integration/brain_v4/test_analyst_council.py`：覆盖路由、顺序无关归并、单写、反羊群、异议校验、完整多轮议会与少数意见保留。
+
+### 验证
+
+- 红态：四个新测试文件均因 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.deliberation'` 收集失败。
+- `uv run pytest tests/unit/brain_v4/test_collaboration_router.py tests/unit/brain_v4/test_deliberation_reducers.py tests/unit/brain_v4/test_belief_updates.py tests/integration/brain_v4/test_analyst_council.py -q` → 28 passed。
+- `uv run pytest tests/unit/brain_v4 -q` → 87 passed。
+- `uv run pytest tests/integration/brain_v4 -q` → 1 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4 tests/integration/brain_v4` → All checks passed!
+- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 35 source files。
+
+---
+
 ## [main] 2026-11-27 — 研究控制器、充分性门禁与局部回改（V4-04-P01）
 
 **开发者**: NanyuDeer
