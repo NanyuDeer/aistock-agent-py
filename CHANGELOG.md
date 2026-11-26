@@ -1,5 +1,27 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 研究控制器、充分性门禁与局部回改（V4-04-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `controller/planner.py`：`ResearchPlan`、`EvidenceRequirement` 与纯确定性 `build_plan(request, hypotheses, profile, round_no=0)`；假设按置信度降序、同分按 id 排序，`plan_id` 由规范化载荷摘要派生，不读系统时间。
+- `controller/sufficiency.py`：`SufficiencyReport`、`SufficiencyScores` 与 `evaluate_sufficiency(...)`；逐项检查证据覆盖（含必需要证据类型）、时间顺序、机制、量级、替代解释、失效条件与无支撑边比例，只返回结构化 `ResearchGap`，`as_of` / `data_cutoff` 显式入参。
+- `controller/impact.py`：`ImpactResult` 与 `impacted_refs(graph, hypothesis_ref)`；沿因果边只遍历下游节点，版本无关地匹配同一假设主干，兄弟假设和无关 claim 不被波及。
+- `controller/revision.py`：`Contradiction`、`RevisionDecision`、`revise(...)` 与 `build_revision_event(...)`；动作集合为 `add_evidence | reweight | revise_hypothesis | split | merge | reject`，单假设超过 2 次回改返回 `reject`，A→B→A 振荡标记 `oscillation=True`；落 `RevisionEvent` 时把 `revise_hypothesis` 映射为既有 `RevisionAction.revise`。
+- `tests/unit/brain_v4/test_revision.py`、`test_sufficiency.py`、`test_planner.py`：覆盖流动性主因降级为放大器回归、影响遍历不波及兄弟分支、振荡与回改预算、门禁七维度与计划确定性。
+
+### 验证
+
+- 红态：`test_revision.py` → `ModuleNotFoundError: ...controller.impact`；`test_sufficiency.py` / `test_planner.py` → `ModuleNotFoundError: ...controller.sufficiency` / `...controller.planner`。
+- `uv run pytest tests/unit/brain_v4/test_revision.py tests/unit/brain_v4/test_sufficiency.py tests/unit/brain_v4/test_planner.py -q` → 24 passed。
+- `uv run pytest tests/unit/brain_v4 -q` → 60 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4` → All checks passed!
+- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 25 source files。
+
+---
+
 ## [main] 2026-11-27 — 统一证据网关与 canonical event 适配（V4-03-P01）
 
 **开发者**: NanyuDeer
