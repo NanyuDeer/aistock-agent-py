@@ -1,0 +1,305 @@
+{
+  "chain_id": "chain_20261106_briefing",
+  "evening": {
+    "confidence": 0.66,
+    "direction": "down",
+    "errors_and_unresolved": [
+      "板块轮动是否独立于风格分化仍待验证"
+    ],
+    "headline": "晚报：收盘风格分化主导，引用市场溯源研判归因",
+    "next_day_verification": [
+      "验证成长板块是否止跌",
+      "复核成交额与风格的联动"
+    ],
+    "risk_flags": [
+      "隔夜外部风险",
+      "风格分化延续"
+    ],
+    "risk_level": "high",
+    "summary": "收盘指数下跌、成长弱于防御；晚报直接引用当日市场溯源研判，不另起一套盘后归因。"
+  },
+  "evening_scores": [
+    {
+      "claim_ref": "hyp_morning_style",
+      "score": 0.72,
+      "source_profile": "briefing_morning",
+      "verdict": "confirmed"
+    },
+    {
+      "claim_ref": "hyp_morning_liquidity",
+      "score": 0.18,
+      "source_profile": "briefing_morning",
+      "verdict": "reversed"
+    },
+    {
+      "claim_ref": "hyp_morning_sector",
+      "score": 0.45,
+      "source_profile": "briefing_morning",
+      "verdict": "unresolved"
+    }
+  ],
+  "hypotheses": [
+    {
+      "claim_ref": "hyp_morning_style",
+      "confidence": 0.45,
+      "material": true,
+      "statement": "风格分化导致成长领跌"
+    },
+    {
+      "claim_ref": "hyp_morning_liquidity",
+      "confidence": 0.55,
+      "material": true,
+      "statement": "流动性收缩是今日下跌主因"
+    },
+    {
+      "claim_ref": "hyp_morning_sector",
+      "confidence": 0.35,
+      "material": true,
+      "statement": "板块轮动是次级因素"
+    }
+  ],
+  "items": [
+    {
+      "content": "隔夜海外风险资产走弱，风险偏好回落",
+      "event_time": "2026-11-05T22:00:00+08:00",
+      "published_at": "2026-11-06T07:00:00+08:00",
+      "source": "news:global_risk",
+      "source_id": "OVERNIGHT_GLOBAL_RISK",
+      "source_type": "event_evidence",
+      "tags": [
+        "risk_appetite"
+      ],
+      "title": "隔夜全球风险资产走弱"
+    },
+    {
+      "content": "稳增长政策延续，未出现超预期收紧",
+      "event_time": "2026-11-06T07:30:00+08:00",
+      "published_at": "2026-11-06T07:45:00+08:00",
+      "source": "news:policy",
+      "source_id": "MORNING_POLICY",
+      "source_type": "event_evidence",
+      "tags": [
+        "policy"
+      ],
+      "title": "盘前政策口径"
+    },
+    {
+      "content": "今日两只新股申购，解禁规模温和",
+      "event_time": "2026-11-06T08:00:00+08:00",
+      "published_at": "2026-11-06T08:05:00+08:00",
+      "source": "calendar:cn",
+      "source_id": "CALENDAR_MORNING",
+      "source_type": "calendar",
+      "tags": [
+        "calendar"
+      ],
+      "title": "今日新股与解禁"
+    },
+    {
+      "content": "growth_change_pct=-1.4, defensive_change_pct=0.3",
+      "event_time": "2026-11-06T10:10:00+08:00",
+      "published_at": "2026-11-06T10:20:00+08:00",
+      "source": "tushare:daily",
+      "source_id": "AM_STYLE_CONFIRM",
+      "source_type": "market_fact",
+      "tags": [
+        "style"
+      ],
+      "title": "上午成长继续领跌、防御抗跌"
+    },
+    {
+      "content": "amount_yuan=520000000000, previous_amount_yuan=480000000000",
+      "event_time": "2026-11-06T10:30:00+08:00",
+      "published_at": "2026-11-06T10:40:00+08:00",
+      "source": "tushare:daily",
+      "source_id": "AM_TURNOVER_CONFIRM",
+      "source_type": "market_fact",
+      "tags": [
+        "liquidity"
+      ],
+      "title": "上午成交额放大而非收缩"
+    },
+    {
+      "content": "intraday_low=3020.5, rebound_pct=0.4",
+      "event_time": "2026-11-06T13:05:00+08:00",
+      "published_at": "2026-11-06T11:20:00+08:00",
+      "source": "tushare:daily",
+      "source_id": "INTRADAY_BACKDATED",
+      "source_type": "market_fact",
+      "tags": [
+        "intraday"
+      ],
+      "title": "午后低位反弹"
+    },
+    {
+      "content": "close=3046.1, change_pct=-1.02",
+      "event_time": "2026-11-06T15:00:00+08:00",
+      "published_at": "2026-11-06T15:10:00+08:00",
+      "source": "tushare:index_daily",
+      "source_id": "CLOSE_INDEX",
+      "source_type": "market_fact",
+      "tags": [
+        "index"
+      ],
+      "title": "收盘上证指数"
+    },
+    {
+      "content": "large_cap_change_pct=-0.7, small_cap_change_pct=-1.5",
+      "event_time": "2026-11-06T15:00:00+08:00",
+      "published_at": "2026-11-06T15:10:00+08:00",
+      "source": "tushare:daily",
+      "source_id": "CLOSE_STYLE",
+      "source_type": "market_fact",
+      "tags": [
+        "style"
+      ],
+      "title": "收盘风格分化"
+    },
+    {
+      "content": "advance_count=2050, decline_count=2980, advance_ratio=0.394",
+      "event_time": "2026-11-06T15:00:00+08:00",
+      "published_at": "2026-11-06T15:10:00+08:00",
+      "source": "tushare:daily",
+      "source_id": "CLOSE_BREADTH",
+      "source_type": "market_fact",
+      "tags": [
+        "sector"
+      ],
+      "title": "收盘涨跌家数"
+    }
+  ],
+  "market_trace": {
+    "case_fixture": "brain_v4_evals/cases/market_trace/mt_04_council.json",
+    "case_id": "case_mt_04_council",
+    "judgment_role": "evening_closing_attribution"
+  },
+  "midday": {
+    "afternoon_opportunities": [
+      "成长板块超跌后的技术性修复"
+    ],
+    "afternoon_risks": [
+      "若午后成交额继续放大且成长继续走弱，风格分化加剧"
+    ],
+    "confidence": 0.7,
+    "direction": "down",
+    "headline": "午报：风格分化确认，流动性收缩假设被反向证据否定",
+    "new_drivers": [
+      "上午成交额放大",
+      "北向净流出收窄"
+    ],
+    "risk_flags": [
+      "成交额放大与流动性收缩假设相反"
+    ],
+    "risk_level": "medium",
+    "summary": "上午风格分化得到确认，成交额放大与流动性收缩假设相反；午后关注成长超跌修复的可持续性。"
+  },
+  "midday_changes": [
+    {
+      "claim_ref": "hyp_morning_style",
+      "evidence_source_ids": [
+        "AM_STYLE_CONFIRM"
+      ],
+      "reason": "上午成长继续领跌、防御抗跌，确认风格分化",
+      "relation": "confirm"
+    },
+    {
+      "claim_ref": "hyp_morning_liquidity",
+      "evidence_source_ids": [
+        "AM_TURNOVER_CONFIRM"
+      ],
+      "reason": "上午成交额放大而非收缩，反向证据否定流动性收缩主因",
+      "relation": "reverse"
+    }
+  ],
+  "morning": {
+    "confidence": 0.62,
+    "direction": "down",
+    "headline": "早报：隔夜风险偏好回落，关注风格分化",
+    "invalidators": [
+      "若成交额显著放大，则流动性收缩假设失效",
+      "若成长与防御同涨同跌，则风格分化假设失效"
+    ],
+    "key_event_source_ids": [
+      "OVERNIGHT_GLOBAL_RISK",
+      "MORNING_POLICY",
+      "CALENDAR_MORNING"
+    ],
+    "overnight_changes": [
+      "隔夜海外风险资产走弱",
+      "盘前政策口径延续稳增长"
+    ],
+    "risk_flags": [
+      "隔夜海外风险",
+      "解禁压力"
+    ],
+    "risk_level": "medium",
+    "scenarios": [
+      {
+        "expected_path": "指数低开后弱势震荡，成长板块领跌",
+        "invalidator": "若早盘成长板块逆势领涨，则本情景失效",
+        "label": "低开修复",
+        "scenario_id": "scn_risk_off",
+        "trigger_conditions": [
+          "隔夜风险资产走弱",
+          "早盘北向净流出"
+        ]
+      },
+      {
+        "expected_path": "指数窄幅震荡，风格再平衡",
+        "invalidator": "若成交额显著放大且指数单边下跌，则本情景失效",
+        "label": "区间震荡",
+        "scenario_id": "scn_range",
+        "trigger_conditions": [
+          "成交额温和",
+          "防御板块抗跌"
+        ]
+      }
+    ],
+    "style_sector_hypotheses": [
+      "风格分化：成长弱于防御",
+      "板块轮动：防御占优"
+    ],
+    "summary": "隔夜海外风险资产走弱，盘前政策未超预期收紧；开盘关注成长弱于防御的风格分化。",
+    "today_baseline": "指数低开概率较大，成交额与风格分化是盘中主要观察变量。"
+  },
+  "sessions": [
+    {
+      "as_of": "2026-11-06T08:30:00+08:00",
+      "data_cutoff": "2026-11-06T08:30:00+08:00",
+      "legacy_evidence_ids": [
+        "legacy_morning_ev_1"
+      ],
+      "legacy_headline": "旧链早报：隔夜风险偏好回落，低开概率大",
+      "legacy_run_id": "legacy_briefing_morning_20261106",
+      "profile": "briefing_morning",
+      "run_id": "run_briefing_morning_20261106",
+      "snapshot_id": "snap_briefing_morning_20261106"
+    },
+    {
+      "as_of": "2026-11-06T11:35:00+08:00",
+      "data_cutoff": "2026-11-06T11:30:00+08:00",
+      "legacy_evidence_ids": [
+        "legacy_midday_ev_1"
+      ],
+      "legacy_headline": "旧链午报：成长板块走弱，维持谨慎",
+      "legacy_run_id": "legacy_briefing_midday_20261106",
+      "profile": "briefing_midday",
+      "run_id": "run_briefing_midday_20261106",
+      "snapshot_id": "snap_briefing_midday_20261106"
+    },
+    {
+      "as_of": "2026-11-06T15:30:00+08:00",
+      "data_cutoff": "2026-11-06T15:00:00+08:00",
+      "legacy_evidence_ids": [
+        "legacy_evening_ev_1"
+      ],
+      "legacy_headline": "旧链晚报：流动性收缩与风格分化共同作用",
+      "legacy_run_id": "legacy_briefing_evening_20261106",
+      "profile": "briefing_evening",
+      "run_id": "run_briefing_evening_20261106",
+      "snapshot_id": "snap_briefing_evening_20261106"
+    }
+  ],
+  "subject_code": "000001.SH",
+  "trading_date": "2026-11-06"
+}

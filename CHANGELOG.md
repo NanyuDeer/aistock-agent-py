@@ -1,5 +1,33 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 验证学习、配对门禁与试点交接报告（V4-10-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/verification/verifier.py`：append-only `Verifier` / `verify_judgment`，产出不可变 `VerificationRecord`，只读取原 `V4Judgment`、绝不修改它；方向与主因分离判定。
+- `verification/error_tags.py`：`classify_error` 固定顺序输出错误标签；方向正确但主因错误只标 `cause_wrong`、不含 `direction_wrong`；高置信 miss 追加 `overconfidence`；另含 `time_leakage`、`shallow_evidence`、`unsupported_edge`、`insufficient_missed`。
+- `learning/candidates.py`：`MethodCandidate` 的 `draft` 恒为 `True`、`applied_to_production` 恒为 `False`；`create_candidate → record_replay → record_ab` 逐级门槛推进，**不提供任何直接写生产方法的 API**。
+- `learning/deliberation_metrics.py`：统计议会轮次、belief 更新/变化数、少数意见保留率、议会模式有效性、重复工具调用与时间泄漏。
+- `brain_v4_evals/ab/gates.py`：`evaluate_promotion` 门禁（时间泄漏=0、snapshot 一致、无生产污染、样本量≥20、质量阈值、P95/cost 回退、回滚已测），失败返回明确 `reason`。
+- `brain_v4_evals/cases/`：冻结 10 个完整交易日（briefing）与 10 个市场溯源案例（含 3 个已知浅层/失败、1 个议会+局部回改），`index.json` 登记 `case_sha256`、`snapshot_sha` 与 `expected_visibility`（可见性非结论）。
+- `brain_v4_evals/reports/pilot-report.md`：试点与交接报告，含全部要求指标、失败案例、V4.1 冻结版本、示例 Execution Packet、回滚步骤与首批迁移建议。
+- `tests/unit/brain_v4/test_verification.py`、`test_ab_gates.py`：覆盖 append-only、方向/主因分离、过度自信、候选门槛、议会指标、门禁原文断言与案例集 SHA/数量一致性。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_verification.py tests/unit/brain_v4/test_ab_gates.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.learning'` 与 `No module named 'brain_v4_evals.ab.gates'`。
+- `uv run pytest tests/unit/brain_v4/test_verification.py tests/unit/brain_v4/test_ab_gates.py -q` → `30 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `176 passed`。
+- `uv run pytest tests/unit -q` → `4767 passed, 1 skipped`。
+- `uv run ruff check src/aistock_agent/brain_v4 brain_v4_evals tests/unit/brain_v4 tests/integration/brain_v4` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4 brain_v4_evals` → `Success: no issues found in 66 source files`。
+- app-api（只读运行，未改文件）：`node --import tsx --test .../snapshot.spec.ts .../internalRouter.spec.ts` → `15 pass / 0 fail`；`pnpm build` → 成功。
+- 灰度结论：**不推荐晋级**（时间泄漏 6 > 0、`insufficient` 率 0.6、无人工盲评、灰度回滚未演练）。
+
+---
+
 ## [main] 2026-11-27 — 早午晚报日内链试点并冻结 V4.1 接口（V4-09-P01）
 
 **开发者**: NanyuDeer

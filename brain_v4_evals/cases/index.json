@@ -1,0 +1,744 @@
+{
+  "briefing_min_trading_days": 10,
+  "cases": [
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261102",
+      "case_sha256": "8c58e2010464392f7a6e654e70a4880afaa8dd4ed4a3213afd5a89e1d0c9781c",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-02T15:30:00+08:00",
+          "data_cutoff": "2026-11-02T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-02T11:35:00+08:00",
+          "data_cutoff": "2026-11-02T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-02T08:30:00+08:00",
+          "data_cutoff": "2026-11-02T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261102.json",
+      "snapshot_sha": "1de70e2f65ff179c06b3b41c4834448a39e397f9ba8a7df855b84fcd11716c7f"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261103",
+      "case_sha256": "061c6d58b9867d62d2d1089fdb372798353d87af55d47f9dcc53764682fa9292",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-03T15:30:00+08:00",
+          "data_cutoff": "2026-11-03T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-03T11:35:00+08:00",
+          "data_cutoff": "2026-11-03T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-03T08:30:00+08:00",
+          "data_cutoff": "2026-11-03T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261103.json",
+      "snapshot_sha": "a7d2c12023e86f5b0ffadd5bb8b1e7cc0362a8426be6388d6d5e497420a69d8c"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261104",
+      "case_sha256": "66483da95a7538e643b9409ae490e351f1046b308415bc9a3ec8473449aa108e",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-04T15:30:00+08:00",
+          "data_cutoff": "2026-11-04T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-04T11:35:00+08:00",
+          "data_cutoff": "2026-11-04T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-04T08:30:00+08:00",
+          "data_cutoff": "2026-11-04T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261104.json",
+      "snapshot_sha": "78f7381c584e4c4e2e603811953894c3bd830470fe1ed2f710a6ea26f7b02b4b"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261105",
+      "case_sha256": "5f49cea8c046d47e17022c6d58c55f492768c0b03b128114620d2f97f8a305d4",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-05T15:30:00+08:00",
+          "data_cutoff": "2026-11-05T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-05T11:35:00+08:00",
+          "data_cutoff": "2026-11-05T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-05T08:30:00+08:00",
+          "data_cutoff": "2026-11-05T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261105.json",
+      "snapshot_sha": "dd60e7e7a6d2ec3a0d436985c55a31e24eafa38ba4c356e2909ed90fe5a7be76"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261106",
+      "case_sha256": "797ca812571a28aab869fb532317570a3e543ae7aec78acf628aa3cf3643cf5e",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-06T15:30:00+08:00",
+          "data_cutoff": "2026-11-06T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-06T11:35:00+08:00",
+          "data_cutoff": "2026-11-06T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-06T08:30:00+08:00",
+          "data_cutoff": "2026-11-06T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261106.json",
+      "snapshot_sha": "a94dee3f87fd63e91934f01668b2e3a9ea201d37073df59b078434e9b18fed5d"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261109",
+      "case_sha256": "80f15cb6a562f6b0dec9a45d05baf9ba0ac57760dfb56311f5c4cbf73fdf5d6f",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-09T15:30:00+08:00",
+          "data_cutoff": "2026-11-09T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-09T11:35:00+08:00",
+          "data_cutoff": "2026-11-09T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-09T08:30:00+08:00",
+          "data_cutoff": "2026-11-09T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261109.json",
+      "snapshot_sha": "fed7b04d9327e565763de796f21842d263f5442d46ec3fd9b7b0cff545d8e67a"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261110",
+      "case_sha256": "359955f5ca8437af8e554891ce643e734932e5237d07cf1fb25e25e77be2b7ed",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-10T15:30:00+08:00",
+          "data_cutoff": "2026-11-10T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-10T11:35:00+08:00",
+          "data_cutoff": "2026-11-10T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-10T08:30:00+08:00",
+          "data_cutoff": "2026-11-10T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261110.json",
+      "snapshot_sha": "5b9cfa3fbafc194b36b4d3cda9d89fbd0252ede67b9baf32bd98156be9dfe5de"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261111",
+      "case_sha256": "d33b847dabf34f2192f9efc84e40cdb43c1d4ab747ecbd66679d8c86ff3c4498",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-11T15:30:00+08:00",
+          "data_cutoff": "2026-11-11T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-11T11:35:00+08:00",
+          "data_cutoff": "2026-11-11T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-11T08:30:00+08:00",
+          "data_cutoff": "2026-11-11T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261111.json",
+      "snapshot_sha": "bd733653b29e583c444ca01bb13ae8651900d9a774b15322bf6105f933872c4c"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261112",
+      "case_sha256": "df58dac435f4f5b2d515d1b19022e8afa06c1ae592f30196bf52e684477d6810",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-12T15:30:00+08:00",
+          "data_cutoff": "2026-11-12T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-12T11:35:00+08:00",
+          "data_cutoff": "2026-11-12T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-12T08:30:00+08:00",
+          "data_cutoff": "2026-11-12T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261112.json",
+      "snapshot_sha": "5ad9378f35c72020b57fe46b356046737e8f4cd0cff22dc5cfcb332cc04b7d71"
+    },
+    {
+      "case_class": "complete_trading_day",
+      "case_id": "case_briefing_20261113",
+      "case_sha256": "548c0cbd096f06e62b4dc86317f0ebdcd40ddee4f0159489416aa98fb6db68b4",
+      "council_revision": false,
+      "expected_visibility": {
+        "briefing_evening": {
+          "as_of": "2026-11-13T15:30:00+08:00",
+          "data_cutoff": "2026-11-13T15:00:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "CLOSE_BREADTH",
+            "CLOSE_INDEX",
+            "CLOSE_STYLE",
+            "INTRADAY_BACKDATED",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_midday": {
+          "as_of": "2026-11-13T11:35:00+08:00",
+          "data_cutoff": "2026-11-13T11:30:00+08:00",
+          "visible_source_ids": [
+            "AM_STYLE_CONFIRM",
+            "AM_TURNOVER_CONFIRM",
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        },
+        "briefing_morning": {
+          "as_of": "2026-11-13T08:30:00+08:00",
+          "data_cutoff": "2026-11-13T08:30:00+08:00",
+          "visible_source_ids": [
+            "CALENDAR_MORNING",
+            "MORNING_POLICY",
+            "OVERNIGHT_GLOBAL_RISK"
+          ]
+        }
+      },
+      "feature_id": "briefing",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/briefing/briefing_20261113.json",
+      "snapshot_sha": "90d42182a81e328c9eab69e146321eeb87e1f8c1bca036c82b28dff9738b2483"
+    },
+    {
+      "case_class": "shallow",
+      "case_id": "case_mt_00_shallow",
+      "case_sha256": "7738bf2c3860899b0e248b93b3c63a35cb6407455c9ad4fc5a23168e70f442b9",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-02T15:30:00+08:00",
+        "data_cutoff": "2026-11-02T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "EVENT_RATE_DECISION",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": true,
+      "path": "brain_v4_evals/cases/market_trace/mt_00_shallow.json",
+      "snapshot_sha": "52a55144aac556a57dbe64a2ddc3b9b53936ccbe8e1811c92544bc1846929de4"
+    },
+    {
+      "case_class": "failure",
+      "case_id": "case_mt_01_failure",
+      "case_sha256": "0f903adfe520f15b9b5fc78b77f96fef98dbefadb4f54d6df418ab1b8debf138",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-03T15:30:00+08:00",
+        "data_cutoff": "2026-11-03T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "EVENT_RATE_DECISION",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": true,
+      "path": "brain_v4_evals/cases/market_trace/mt_01_failure.json",
+      "snapshot_sha": "f46970ee83ff9c085245e29aca10b3be9084b4e7a68e1bad36ad5464660bfa6c"
+    },
+    {
+      "case_class": "shallow",
+      "case_id": "case_mt_02_shallow",
+      "case_sha256": "e068620dfe3e895181c6de784bb6a8d16415bf7f8a30ad5a09ced4673ce3ac13",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-04T15:30:00+08:00",
+        "data_cutoff": "2026-11-04T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "EVENT_RATE_DECISION",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": true,
+      "path": "brain_v4_evals/cases/market_trace/mt_02_shallow.json",
+      "snapshot_sha": "496b8586de9c0624c05cfbe877672abc85a94aae3683ebaba798699005a00edd"
+    },
+    {
+      "case_class": "local_revision",
+      "case_id": "case_mt_03_local_revision",
+      "case_sha256": "221bbff2083679293d4600c1b940c5681e0c49e906671f4594c9907023fafaa0",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-05T15:30:00+08:00",
+        "data_cutoff": "2026-11-05T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "EVENT_RATE_DECISION",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_03_local_revision.json",
+      "snapshot_sha": "dc44f0d3d07bdee78d4e530e5271751ef667c00b6c3b76c909226c89a64fdd77"
+    },
+    {
+      "case_class": "council",
+      "case_id": "case_mt_04_council",
+      "case_sha256": "7dfd0d8d0902b966ffc9dd2b9d815a1211d7575c620aa613769e9a01912895e6",
+      "council_revision": true,
+      "expected_visibility": {
+        "as_of": "2026-11-06T15:30:00+08:00",
+        "data_cutoff": "2026-11-06T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_04_council.json",
+      "snapshot_sha": "b53f49f82f58b46bf6db2f5589e3bba6d2c0c78dd94de1bc34038a7f00db8827"
+    },
+    {
+      "case_class": "standard",
+      "case_id": "case_mt_05_standard",
+      "case_sha256": "1e8059ddee0b2bc5dfd3e1ce0dcb5712a9627ac3b250beb0dfbf419ef30e92e8",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-09T15:30:00+08:00",
+        "data_cutoff": "2026-11-09T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_05_standard.json",
+      "snapshot_sha": "6bcfc9a2df56f4250494a456043b91f2623331285db351d3936101eff2e8f1fd"
+    },
+    {
+      "case_class": "standard",
+      "case_id": "case_mt_06_standard",
+      "case_sha256": "f4fbc858d5532bef55cc864f382d1fe8563e15f636ca154f467bb7368096f4cc",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-10T15:30:00+08:00",
+        "data_cutoff": "2026-11-10T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_06_standard.json",
+      "snapshot_sha": "aa3e55f0b3afa93c8e4776f05a05ac6b56d28956903cf05e85d41c57ae6b0674"
+    },
+    {
+      "case_class": "standard",
+      "case_id": "case_mt_07_standard",
+      "case_sha256": "a12b242dde308f4a985177cd52e85233eb7a527acb770c4d9c81d5c19057f9e0",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-11T15:30:00+08:00",
+        "data_cutoff": "2026-11-11T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_07_standard.json",
+      "snapshot_sha": "baa527265cff07da3d8af8229b23e8312e10f7dd0e5a6df335a26d907b95bb9f"
+    },
+    {
+      "case_class": "standard",
+      "case_id": "case_mt_08_standard",
+      "case_sha256": "b1c77daa528ccbc1002b619454fe3cc1816a0ea075b25b55cde62676c0a8dd6b",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-12T15:30:00+08:00",
+        "data_cutoff": "2026-11-12T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_08_standard.json",
+      "snapshot_sha": "520b2c40bc0a89db3aff14a0cb745d68105af15c86660a3a69ea2ec5064aa052"
+    },
+    {
+      "case_class": "standard",
+      "case_id": "case_mt_09_standard",
+      "case_sha256": "5e6ea71ec7859b56d3a04016f6898b5c4ac923670d487d67dda2b20e79a339f2",
+      "council_revision": false,
+      "expected_visibility": {
+        "as_of": "2026-11-13T15:30:00+08:00",
+        "data_cutoff": "2026-11-13T15:00:00+08:00",
+        "future_source_ids": [],
+        "visible_source_ids": [
+          "BREADTH_ALL",
+          "EVENT_GLOBAL_RISK",
+          "FUND_FLOW_NORTH",
+          "INDEX_000001_SH",
+          "SECTOR_DEFENSIVE",
+          "SECTOR_GROWTH",
+          "STYLE_LARGE_CAP",
+          "STYLE_SMALL_CAP",
+          "TURNOVER_ALL"
+        ]
+      },
+      "feature_id": "market_trace",
+      "known_failure": false,
+      "path": "brain_v4_evals/cases/market_trace/mt_09_standard.json",
+      "snapshot_sha": "15c135d8c573ab60942e515e4b449a1428ed06c965dc0e92980ae396aecd6230"
+    }
+  ],
+  "frozen_at": "2026-11-27",
+  "market_trace_min_cases": 10,
+  "market_trace_min_known_failures": 3,
+  "prerequisite_commit": "f01aaec",
+  "schema_version": "v1"
+}
