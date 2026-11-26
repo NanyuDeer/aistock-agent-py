@@ -19,7 +19,7 @@
 - `uv run pytest tests/integration/brain_v4/test_market_trace.py tests/integration/brain_v4/test_market_trace_comparison.py -q` → 14 passed。
 - `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → 133 passed。
 - `uv run ruff check src/aistock_agent/brain_v4 tests/integration/brain_v4 tests/fixtures/brain_v4` → All checks passed!
-- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 47 source files。
+- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 46 source files。
 - 报告：`brain_v4_evals/reports/market-trace/index.html`（页面 `<date>/market_trace.html`），含旧链/V4 双栏、结论、证据、假设、回改、降级状态、latency、cost、snapshot id+sha 与 data_cutoff；报告目录不提交。
 
 ---
