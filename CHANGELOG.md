@@ -1,5 +1,24 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 统一证据网关与 canonical event 适配（V4-03-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `tools/provenance.py`：`ToolEnvelope`（tool/params/evidence_id/event_time/published_at/fetched_at/as_of/quality/error）与 `GatewayError` 分类；`extra="forbid"`，不读系统时间。
+- `tools/memo.py`：参数规范化（键排序 + symbol 归一）、稳定 memo key、`evidence_id` 确定性派生，以及并发在途合并 `Memo`（同 key 只调用一次，失败不缓存可重试）。
+- `tools/gateway.py`：`ToolGateway(client, as_of=...)`；工具 allowlist、超时、`published_at > as_of` 返回 `error="future_data"` 且 `data is None`；未知工具 `not_allowed`、超时 `timeout`、上游异常 `upstream_error`；`fetched_at` 仅来自注入 clock。
+- `events/adapters.py`：agent `event_store`、app-api `event_entities`、calendar 行统一映射为 `EventObservation`；`resolve_canonical_events` 按 dedupe 指纹聚合为唯一 `CanonicalEventRecord`，更正递增 `lifecycle_version`，冲突记录到 `source_conflicts`；`can_mark_initial_trigger` 拒绝晚于价格起点的初始触发。
+
+### 验证
+
+- `uv run pytest tests/unit/brain_v4/test_tool_gateway.py tests/unit/brain_v4/test_canonical_events.py -q` → 10 passed。
+- `uv run pytest tests/unit/brain_v4 -q` → 36 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4` 全绿；`uv run mypy src/aistock_agent/brain_v4` 21 文件 0 错误。
+
+---
+
 ## [main] 2026-11-27 — Profiles、停止策略与特性注册表（V4-02-P01）
 
 **开发者**: NanyuDeer
