@@ -446,6 +446,10 @@ class Settings(BaseSettings):
     # 现象发现：规则评分与严重度。
     # 规则进入 detected 的最小评分。
     phenomenon_min_match_score: int = 2
+    # 罕见度闸门：当日幅度须落在近 3 年的该分位以上，规则才允许成为 primary。
+    # 0.90 = 前 10%。实测：闸门把"至少一条成立"的交易日从 77.4% 降到 23.1%，
+    # 逐年 10%~44%，且 5 个历史标注用例的目标分位全在 0.986 以上（不误杀）。
+    phenomenon_rarity_min_percentile: float = 0.90
     # severity=high 的最小评分。
     phenomenon_high_severity_score: int = 3
 
