@@ -1,5 +1,27 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 研究主图与受限分析师内核（V4-06-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `graph/builder.py`：`build_research_graph()` 组装 `START → profile → plan → dispatch → collect → analyze → assess → collaboration_router`，再按确定性路由进入 `solo / consult / council / red_team`，最终经 `revise / decision_gate / END`。研究/分析扇出用 `Send`，回改与议会推进用 `Command`；并行通道 `evidence_items / analyst_results / usage / errors / trace` 挂显式 reducer（复用 `merge_by_id / append_events / sum_usage`），单写通道不挂 reducer。研究循环按 profile 的 `max_research_rounds` 在有缺口时回到 `plan`，无缺口或预算耗尽后进入协作路由。
+- `graph/builder.py`：单写者 `commit_judgment(state) -> V4Judgment`，校验引用证据全部存在于 `EvidenceLedger`；议会/红队模式必须已有 R0 独立立场与 R1 `PeerBrief` + `BeliefUpdate`；`status` 只由 `decision` 推导，`stop_reason` 独立取自运行状态。`created_at` 取 `request.as_of`，不读系统时间。
+- `analysts/kernel.py`：`AnalystResult` 与 `run_analyst(...)` 使用 `langchain.agents.create_agent`，按 `RunProfile.analyst_max_steps` 注入 `ModelCallLimitMiddleware`、`ToolCallLimitMiddleware` 与精确步数中间件；模型/工具由调用方注入，离线假模型可运行；超步数返回结构化 `stalled`（`error_kind="step_limit"`），其他异常分类写入结果。
+- `analysts/profiles.py`：按 `max_deliberation_rounds` 把 profile 映射到 `deliberation/roles.py` 的席位表，并透传 profile 的显式工具组，不重复定义席位名单。
+- `tests/unit/brain_v4/test_no_deprecated_agent_api.py`、`tests/integration/brain_v4/test_research_loop.py`：覆盖旧 ReAct API 禁入、两轮研究循环、议会 R0/R1 前置条件、研究/议会轮次分离、双 ledger trace、同参数工具去重、内核步数上限与研判证据校验。
+
+### 验证
+
+- 红态：`uv run pytest tests/unit/brain_v4/test_no_deprecated_agent_api.py tests/integration/brain_v4/test_research_loop.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.analysts'`。
+- `uv run pytest tests/unit/brain_v4/test_no_deprecated_agent_api.py tests/integration/brain_v4/test_research_loop.py -q` → 6 passed。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → 94 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4 tests/integration/brain_v4` → All checks passed!
+- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 39 source files。
+
+---
+
 ## [main] 2026-11-27 — 案卷制分析师议会与协作路由（V4-05-P01）
 
 **开发者**: NanyuDeer

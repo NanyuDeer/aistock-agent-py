@@ -1,0 +1,1021 @@
+"""V4 研究主图：研究循环 + 协作路由 + 议会 + 单写研判提交。
+
+主路径（计划 Task 6）：
+`START -> profile -> plan -> dispatch -> collect -> analyze -> assess
+ -> collaboration_router`，随后按确定性路由进入 `solo / consult / council /
+ red_team`，再经 `revise / decision_gate / END`。
+
+通道纪律（团队接入规范 §2.8）：
+- 并行扇出只用 `Send`（假设 × 工具组、分析师席位）；
+- 并行通道 `evidence_items / analyst_results / usage / errors / trace` 必须挂
+  显式 reducer，并复用 `graph/state.py` 的 `merge_by_id / append_events /
+  sum_usage`；
+- `hypothesis_graph / causal_graph / council_decision / judgment_draft` 等单写
+  通道不挂 reducer；
+- 回改与议会推进用 `Command` 路由。
+
+时间纪律：所有节点只从 state 透传 `as_of / data_cutoff / snapshot_id`；
+研判的 `created_at` 取 `request.as_of`，绝不读取系统当前时间。
+"""
+
+import asyncio
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Annotated, Any, Literal, TypedDict, TypeVar, cast
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command, Send
+
+from ..analysts.kernel import AnalystResult, run_analyst
+from ..analysts.profiles import analyst_seats, analyst_tool_groups
+from ..contracts import V4Contract
+from ..contracts.deliberation import (
+    BeliefUpdate,
+    CaseFile,
+    CollaborationDecision,
+    CouncilDecision,
+    DeliberationRoundLedger,
+    InfluenceEdge,
+    Objection,
+    PeerBrief,
+    PositionPaper,
+    Rebuttal,
+    RevisionProposal,
+)
+from ..contracts.evidence import EvidenceItem, EvidenceLedger
+from ..contracts.judgment import V4Judgment
+from ..contracts.research import (
+    CausalEdge,
+    Hypothesis,
+    ResearchGap,
+    ResearchRequest,
+    RevisionEvent,
+    RoundLedger,
+)
+from ..controller.planner import ResearchPlan, build_plan
+from ..controller.sufficiency import evaluate_sufficiency
+from ..deliberation.graph import DeliberationState, build_council_graph
+from ..deliberation.router import route_collaboration
+from ..graph.profiles import RunProfile, get_profile
+from ..graph.state import append_events, canonical_digest, merge_by_id, sum_usage
+from ..tools.gateway import ToolClient, ToolGateway
+
+ModelT = TypeVar("ModelT", bound=V4Contract)
+StateT = TypeVar("StateT")
+
+#: 议会/红队模式在提交研判前必须具备的先行产物。
+_DELIBERATION_MODES: frozenset[str] = frozenset(
+    {"ANALYST_COUNCIL", "MANDATORY_RED_TEAM"}
+)
+
+
+def _merge_models(
+    left: Sequence[ModelT],
+    right: Sequence[ModelT],
+    *,
+    model: type[ModelT],
+    id_field: str,
+) -> list[ModelT]:
+    merged = merge_by_id(
+        [item.model_dump() for item in left],
+        [item.model_dump() for item in right],
+        id_field,
+    )
+    return [model.model_validate(item) for item in merged.items]
+
+
+def _merge_evidence(
+    left: Sequence[EvidenceItem], right: Sequence[EvidenceItem]
+) -> list[EvidenceItem]:
+    return _merge_models(left, right, model=EvidenceItem, id_field="evidence_id")
+
+
+def _merge_analyst_results(
+    left: Sequence[AnalystResult], right: Sequence[AnalystResult]
+) -> list[AnalystResult]:
+    return _merge_models(
+        left, right, model=AnalystResult, id_field="result_id"
+    )
+
+
+def _merge_usage(
+    left: Sequence[Mapping[str, Any]], right: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    return sum_usage(left, right)
+
+
+def _merge_errors(
+    left: Sequence[Mapping[str, Any]], right: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    return append_events(left, right, "error_id")
+
+
+def _merge_trace(
+    left: Sequence[Mapping[str, Any]], right: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    return append_events(left, right, "trace_id")
+
+
+class ResearchTask(TypedDict, total=False):
+    """单个“假设 × 工具组”研究任务，通过 `Send` 并行下发。"""
+
+    run_id: str
+    subject_code: str
+    round_no: int
+    tool_group: str
+    hypothesis_ref: str
+    as_of: datetime
+    data_cutoff: datetime
+    snapshot_id: str
+
+
+class AnalystTask(TypedDict, total=False):
+    """单个分析师席位子任务，通过 `Send` 并行下发。"""
+
+    role: str
+    round_no: int
+    profile_name: str
+    subject_code: str
+    hypothesis_refs: list[str]
+    evidence_ids: list[str]
+    task_text: str
+
+
+class ResearchGraphState(TypedDict, total=False):
+    """V4 主图状态；并行通道挂显式 reducer，单写通道不挂。"""
+
+    request: ResearchRequest
+    case_file: CaseFile
+    evidence_ledger: EvidenceLedger
+    hypotheses: list[Hypothesis]
+    hypothesis_graph: dict[str, Hypothesis]
+    causal_graph: list[CausalEdge]
+    plan: ResearchPlan
+    plan_id: str
+    research_gaps: list[ResearchGap]
+    round_ledgers: list[RoundLedger]
+    research_round_no: int
+    deliberation_round_no: int
+    case_version: int
+    sufficiency_passed: bool
+    publish_ready: bool
+    counter_evidence_coverage: float
+    parent_judgment_ids: list[str]
+    evidence_items: Annotated[list[EvidenceItem], _merge_evidence]
+    analyst_results: Annotated[list[AnalystResult], _merge_analyst_results]
+    submissions: list[PositionPaper]
+    objections: list[Objection]
+    rebuttals: list[Rebuttal]
+    peer_briefs: list[PeerBrief]
+    belief_updates: list[BeliefUpdate]
+    influence_edges: list[InfluenceEdge]
+    revision_proposals: list[RevisionProposal]
+    revision_events: list[RevisionEvent]
+    deliberation_round_ledgers: list[DeliberationRoundLedger]
+    council_decision: CouncilDecision
+    collaboration_decision: CollaborationDecision
+    judgment_draft: V4Judgment
+    run_status: str
+    stop_reason: str
+    usage: Annotated[list[dict[str, Any]], _merge_usage]
+    errors: Annotated[list[dict[str, Any]], _merge_errors]
+    trace: Annotated[list[dict[str, Any]], _merge_trace]
+
+
+class JudgmentEvidenceError(ValueError):
+    """研判引用了冻结 `EvidenceLedger` 之外的证据。"""
+
+
+class JudgmentGateError(ValueError):
+    """议会模式在 R0/PeerBrief/BeliefUpdate 就绪前试图提交研判。"""
+
+
+@dataclass
+class _Runtime:
+    """一次图运行的不可序列化依赖；只由 `profile` 节点初始化。"""
+
+    tool_client: ToolClient | None
+    model: BaseChatModel | None
+    gateway: ToolGateway | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+def _trace(trace_id: str, node: str, **fields: Any) -> dict[str, Any]:
+    return {"trace_id": trace_id, "node": node, **fields}
+
+
+def _require(state: Mapping[str, Any], key: str, expected: type[StateT]) -> StateT:
+    value = state.get(key)
+    if not isinstance(value, expected):
+        raise ValueError(f"research graph requires {expected.__name__} in state[{key!r}]")
+    return value
+
+
+def _round_of_evidence(item: EvidenceItem) -> int | None:
+    value = item.tool_params.get("round_no")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _referenced_evidence_ids(state: Mapping[str, Any]) -> set[str]:
+    referenced: set[str] = set()
+    for result in state.get("analyst_results", ()):
+        if isinstance(result, AnalystResult):
+            referenced.update(result.evidence_refs)
+    for paper in state.get("submissions", ()):
+        if isinstance(paper, PositionPaper):
+            referenced.update(paper.evidence_ids)
+    for belief in state.get("belief_updates", ()):
+        if isinstance(belief, BeliefUpdate):
+            referenced.update(belief.evidence_ids)
+    for rebuttal in state.get("rebuttals", ()):
+        if isinstance(rebuttal, Rebuttal):
+            referenced.update(rebuttal.evidence_ids)
+    for event in state.get("revision_events", ()):
+        if isinstance(event, RevisionEvent):
+            referenced.update(event.triggering_evidence_ids)
+    return referenced
+
+
+def _assert_council_ready(state: Mapping[str, Any]) -> None:
+    submissions = [
+        paper
+        for paper in state.get("submissions", ())
+        if isinstance(paper, PositionPaper)
+    ]
+    if not any(paper.position_id.startswith("pos_r00") for paper in submissions):
+        raise JudgmentGateError(
+            "council judgment requires R0 independent positions before commit"
+        )
+    briefs = [
+        brief
+        for brief in state.get("peer_briefs", ())
+        if isinstance(brief, PeerBrief)
+    ]
+    if not any(brief.deliberation_round >= 1 for brief in briefs):
+        raise JudgmentGateError(
+            "council judgment requires R1 peer briefs before commit"
+        )
+    updates = [
+        update
+        for update in state.get("belief_updates", ())
+        if isinstance(update, BeliefUpdate)
+    ]
+    if not any(update.deliberation_round >= 1 for update in updates):
+        raise JudgmentGateError(
+            "council judgment requires R1 belief updates before commit"
+        )
+
+
+def commit_judgment(state: Mapping[str, Any]) -> V4Judgment:
+    """唯一写者：把研究/议事结果落成 `V4Judgment`。
+
+    - 引用证据必须全部存在于 `EvidenceLedger`；
+    - 议会/红队模式必须已有 R0 独立立场与 R1 PeerBrief + BeliefUpdate；
+    - `status` 只由 `decision` 推导，`stop_reason` 独立取自运行状态，二者不互相替代。
+    """
+    request = _require(state, "request", ResearchRequest)
+    ledger = _require(state, "evidence_ledger", EvidenceLedger)
+    hypotheses = list(state.get("hypotheses", ()))
+    collaboration = state.get("collaboration_decision")
+    council = state.get("council_decision")
+
+    if (
+        isinstance(collaboration, CollaborationDecision)
+        and collaboration.mode in _DELIBERATION_MODES
+    ):
+        _assert_council_ready(state)
+
+    ledger_ids = {item.evidence_id for item in ledger.items}
+    referenced = _referenced_evidence_ids(state)
+    missing = sorted(referenced - ledger_ids)
+    if missing:
+        raise JudgmentEvidenceError(
+            "judgment references evidence outside the frozen ledger: "
+            + ", ".join(missing)
+        )
+
+    ranking = sorted(hypotheses, key=lambda item: (-item.prior_confidence, item.ref))
+    if isinstance(council, CouncilDecision):
+        selected = list(council.selected_hypothesis_refs)
+        rejected = list(council.rejected_hypothesis_refs)
+        minority = list(council.minority_opinions)
+        invalidators = list(council.invalidators)
+        decision: Literal["accept", "revise", "insufficient", "escalate"] = (
+            council.decision
+        )
+        confidence = council.confidence
+    else:
+        selected = [ranking[0].ref] if ranking else []
+        rejected = [hypothesis.ref for hypothesis in ranking[1:]]
+        minority = []
+        invalidators = sorted(
+            {
+                disconfirmer
+                for hypothesis in ranking
+                if hypothesis.ref in selected
+                for disconfirmer in hypothesis.disconfirmers
+            }
+        )
+        passed = bool(state.get("sufficiency_passed", False))
+        decision = "accept" if passed else "insufficient"
+        confidence = ranking[0].prior_confidence if ranking else 0.0
+
+    status: Literal["ok", "partial", "insufficient"]
+    if decision == "accept":
+        status = "ok"
+    elif decision == "revise":
+        status = "partial"
+    else:
+        status = "insufficient"
+
+    stop_reason = str(
+        state.get("stop_reason")
+        or ("sufficient" if state.get("sufficiency_passed") else "insufficient")
+    )
+    open_gaps = sorted(
+        gap.gap_id
+        for gap in state.get("research_gaps", ())
+        if isinstance(gap, ResearchGap) and gap.status in {"open", "researching"}
+    )
+    round_no = int(state.get("research_round_no", 0))
+
+    return V4Judgment(
+        judgment_id=f"jdg_{request.run_id}_{round_no:02d}",
+        run_id=request.run_id,
+        profile=request.profile,
+        subject_type=request.subject_type,
+        subject_code=request.subject_code,
+        horizon=request.horizon,
+        as_of=request.as_of,
+        data_cutoff=request.data_cutoff,
+        snapshot_id=request.snapshot_id,
+        decision=decision,
+        status=status,
+        stop_reason=stop_reason,
+        selected_hypothesis_refs=selected,
+        rejected_hypothesis_refs=rejected,
+        minority_opinions=minority,
+        invalidators=invalidators,
+        evidence_ids=sorted(ledger_ids | referenced),
+        unresolved_question_ids=open_gaps,
+        confidence=confidence,
+        parent_judgment_ids=list(state.get("parent_judgment_ids", ())),
+        relation=None,
+        config_version=request.config_version,
+        model_version=request.model_version,
+        prompt_version=request.prompt_version,
+        method_version=request.method_version,
+        created_at=request.as_of,
+    )
+
+
+def _deterministic_evidence(task: ResearchTask) -> EvidenceItem:
+    """无工具客户端时的离线证据桩，保证测试/回放不触网。"""
+    tool_group = task.get("tool_group", "market_snapshot")
+    round_no = int(task.get("round_no", 0))
+    hypothesis_ref = task.get("hypothesis_ref", "")
+    digest = canonical_digest(
+        {"tool": tool_group, "round": round_no, "hypothesis": hypothesis_ref}
+    )
+    as_of = _as_datetime(task.get("as_of"))
+    data_cutoff = _as_datetime(task.get("data_cutoff"))
+    return EvidenceItem(
+        evidence_id=f"ev_{digest[:24]}",
+        source="offline-fixture",
+        source_type=tool_group,
+        event_time=data_cutoff,
+        published_at=as_of,
+        fetched_at=as_of,
+        as_of=as_of,
+        evidence_kind="direct",
+        supports_hypothesis_refs=[hypothesis_ref] if hypothesis_ref else [],
+        data_quality="high",
+        time_confidence="high",
+        tool=tool_group,
+        tool_params={"round_no": round_no, "tool": tool_group},
+        response_digest=digest,
+        snapshot_id=task.get("snapshot_id", ""),
+    )
+
+
+def _deterministic_analyst(
+    task: AnalystTask, profile: RunProfile
+) -> AnalystResult:
+    """无模型时的离线分析师桩：只复述证据覆盖，不写规范图。"""
+    role = task.get("role", "lead_thesis")
+    round_no = int(task.get("round_no", 0))
+    evidence_ids = list(task.get("evidence_ids", ()))
+    hypothesis_refs = list(task.get("hypothesis_refs", ()))
+    return AnalystResult(
+        result_id=f"analyst_r{round_no:02d}_{role}",
+        role=role,
+        research_round=round_no,
+        claim=(
+            f"{role} reviewed {len(evidence_ids)} evidence items for "
+            + "/".join(hypothesis_refs)
+        ),
+        evidence_refs=evidence_ids,
+        confidence=0.5,
+        steps_used=0,
+        max_steps=profile.analyst_max_steps,
+    )
+
+
+def _as_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    raise ValueError("research task requires datetime boundaries from state")
+
+
+def build_research_graph(
+    *,
+    tool_client: ToolClient | None = None,
+    analyst_model: BaseChatModel | None = None,
+) -> CompiledStateGraph[
+    ResearchGraphState, None, ResearchGraphState, ResearchGraphState
+]:
+    """组装并编译 V4 研究主图。
+
+    `tool_client` 与 `analyst_model` 必须由调用方注入；缺省时图使用确定性
+    离线桩（不触网、不读 API key），仅用于拓扑验证与回放。
+    """
+    runtime = _Runtime(tool_client=tool_client, model=analyst_model)
+    council_graph = build_council_graph()
+
+    def profile_node(state: ResearchGraphState) -> dict[str, Any]:
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        if runtime.tool_client is not None:
+            runtime.gateway = ToolGateway(
+                runtime.tool_client,
+                as_of=request.as_of,
+                allowed_tools=analyst_tool_groups(profile),
+                clock=lambda: request.as_of,
+            )
+        case_file = state.get("case_file")
+        case_version = (
+            case_file.case_version if isinstance(case_file, CaseFile) else 1
+        )
+        return {
+            "research_round_no": int(state.get("research_round_no", 0)),
+            "deliberation_round_no": int(state.get("deliberation_round_no", 0)),
+            "case_version": case_version,
+            "usage": [],
+            "errors": [],
+            "trace": [
+                _trace("trace_profile", "profile", profile=profile.name)
+            ],
+        }
+
+    def plan_node(state: ResearchGraphState) -> dict[str, Any]:
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        round_no = int(state.get("research_round_no", 0))
+        plan = build_plan(
+            request, list(state.get("hypotheses", ())), profile, round_no
+        )
+        return {
+            "plan": plan,
+            "plan_id": plan.plan_id,
+            "trace": [
+                _trace(
+                    f"trace_plan_r{round_no:02d}",
+                    "plan",
+                    round_no=round_no,
+                    plan_id=plan.plan_id,
+                )
+            ],
+        }
+
+    def dispatch_node(state: ResearchGraphState) -> dict[str, Any]:
+        # 纯占位节点：真正的扇出由 `dispatch_research` 条件边完成。
+        return {}
+
+    def dispatch_research(state: ResearchGraphState) -> list[Send]:
+        request = _require(state, "request", ResearchRequest)
+        plan = state.get("plan")
+        if not isinstance(plan, ResearchPlan):
+            return []
+        round_no = int(state.get("research_round_no", 0))
+        tasks: list[Send] = []
+        for hypothesis_ref in plan.hypothesis_refs:
+            for tool_group in plan.tool_groups:
+                tasks.append(
+                    Send(
+                        "research_task",
+                        ResearchTask(
+                            run_id=request.run_id,
+                            subject_code=request.subject_code,
+                            round_no=round_no,
+                            tool_group=tool_group,
+                            hypothesis_ref=hypothesis_ref,
+                            as_of=request.as_of,
+                            data_cutoff=request.data_cutoff,
+                            snapshot_id=request.snapshot_id,
+                        ),
+                    )
+                )
+        return tasks
+
+    async def research_task_node(task: ResearchTask) -> dict[str, Any]:
+        round_no = int(task.get("round_no", 0))
+        tool_group = task.get("tool_group", "")
+        hypothesis_ref = task.get("hypothesis_ref", "")
+        gateway = runtime.gateway
+        if gateway is None:
+            item = _deterministic_evidence(task)
+            return {
+                "evidence_items": [item],
+                "usage": [{"key": "tool_calls", "value": 1}],
+                "trace": [
+                    _trace(
+                        f"trace_task_r{round_no:02d}_{tool_group}_{item.evidence_id}",
+                        "research_task",
+                        round_no=round_no,
+                        tool=tool_group,
+                        offline=True,
+                    )
+                ],
+            }
+
+        params: dict[str, Any] = {
+            "subject_code": task.get("subject_code", ""),
+            "round_no": round_no,
+            "tool": tool_group,
+        }
+        envelope = await gateway.call(tool_group, params)
+        if envelope.error is not None:
+            return {
+                "errors": [
+                    {
+                        "error_id": f"err_{envelope.evidence_id}",
+                        "node": "research_task",
+                        "error_kind": envelope.error,
+                        "detail": envelope.error_detail,
+                        "tool": tool_group,
+                        "round_no": round_no,
+                    }
+                ],
+                "usage": [{"key": "tool_calls", "value": 1}],
+                "trace": [
+                    _trace(
+                        f"trace_task_r{round_no:02d}_{tool_group}_{envelope.evidence_id}",
+                        "research_task",
+                        round_no=round_no,
+                        tool=tool_group,
+                        error=envelope.error,
+                    )
+                ],
+            }
+
+        data = envelope.data if isinstance(envelope.data, Mapping) else {}
+        raw_supports = data.get("supports")
+        supports = (
+            [str(ref) for ref in raw_supports]
+            if isinstance(raw_supports, list)
+            else ([hypothesis_ref] if hypothesis_ref else [])
+        )
+        item = EvidenceItem(
+            evidence_id=envelope.evidence_id,
+            source=tool_group,
+            source_type=tool_group,
+            event_time=envelope.event_time or _as_datetime(task.get("data_cutoff")),
+            published_at=envelope.published_at or _as_datetime(task.get("as_of")),
+            fetched_at=envelope.fetched_at,
+            as_of=envelope.as_of,
+            evidence_kind="direct",
+            supports_hypothesis_refs=sorted(set(supports)),
+            data_quality=envelope.quality,
+            time_confidence="high",
+            tool=tool_group,
+            tool_params={
+                "round_no": round_no,
+                "tool": tool_group,
+            },
+            response_digest=canonical_digest(data),
+            snapshot_id=task.get("snapshot_id", ""),
+        )
+        return {
+            "evidence_items": [item],
+            "usage": [{"key": "tool_calls", "value": 1}],
+            "trace": [
+                _trace(
+                    f"trace_task_r{round_no:02d}_{tool_group}_{item.evidence_id}",
+                    "research_task",
+                    round_no=round_no,
+                    tool=tool_group,
+                )
+            ],
+        }
+
+    def collect_node(state: ResearchGraphState) -> dict[str, Any]:
+        request = _require(state, "request", ResearchRequest)
+        ledger = state.get("evidence_ledger")
+        if not isinstance(ledger, EvidenceLedger):
+            ledger = EvidenceLedger(
+                run_id=request.run_id,
+                snapshot_id=request.snapshot_id,
+                as_of=request.as_of,
+                items=[],
+                conflict_ids=[],
+            )
+        incoming = list(state.get("evidence_items", ()))
+        merged = merge_by_id(
+            [item.model_dump() for item in ledger.items],
+            [item.model_dump() for item in incoming],
+            "evidence_id",
+        )
+        items = sorted(
+            (EvidenceItem.model_validate(record) for record in merged.items),
+            key=lambda item: item.evidence_id,
+        )
+        new_ledger = EvidenceLedger(
+            run_id=ledger.run_id,
+            snapshot_id=ledger.snapshot_id,
+            as_of=ledger.as_of,
+            items=items,
+            conflict_ids=sorted(ledger.conflict_ids),
+        )
+        round_no = int(state.get("research_round_no", 0))
+        return {
+            "evidence_ledger": new_ledger,
+            "trace": [
+                _trace(
+                    f"trace_collect_r{round_no:02d}",
+                    "collect",
+                    round_no=round_no,
+                    evidence_count=len(items),
+                )
+            ],
+        }
+
+    def analyze_node(state: ResearchGraphState) -> dict[str, Any]:
+        round_no = int(state.get("research_round_no", 0))
+        return {
+            "trace": [
+                _trace(
+                    f"trace_analyze_r{round_no:02d}",
+                    "analyze",
+                    round_no=round_no,
+                )
+            ]
+        }
+
+    def dispatch_analysis(state: ResearchGraphState) -> list[Send]:
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        ledger = state.get("evidence_ledger")
+        evidence_ids = (
+            sorted(item.evidence_id for item in ledger.items)
+            if isinstance(ledger, EvidenceLedger)
+            else []
+        )
+        hypotheses = list(state.get("hypotheses", ()))
+        hypothesis_refs = sorted(hypothesis.ref for hypothesis in hypotheses)
+        round_no = int(state.get("research_round_no", 0))
+        task_text = (
+            f"research_round={round_no}; subject={request.subject_code}; "
+            f"hypotheses={','.join(hypothesis_refs)}; "
+            f"evidence={','.join(evidence_ids)}"
+        )
+        return [
+            Send(
+                "analyst_seat",
+                AnalystTask(
+                    role=role,
+                    round_no=round_no,
+                    profile_name=profile.name,
+                    subject_code=request.subject_code,
+                    hypothesis_refs=hypothesis_refs,
+                    evidence_ids=evidence_ids,
+                    task_text=task_text,
+                ),
+            )
+            for role in analyst_seats(profile)
+        ]
+
+    async def analyst_seat_node(task: AnalystTask) -> dict[str, Any]:
+        profile = get_profile(task.get("profile_name", ""))
+        role = task.get("role", "")
+        round_no = int(task.get("round_no", 0))
+        if runtime.model is None:
+            result = _deterministic_analyst(task, profile)
+        else:
+            result = await asyncio.to_thread(
+                run_analyst,
+                role=role,
+                profile=profile,
+                model=runtime.model,
+                task=task.get("task_text", ""),
+                research_round=round_no,
+            )
+        return {
+            "analyst_results": [result],
+            "usage": [{"key": "analyst_steps", "value": result.steps_used}],
+        }
+
+    def assess_node(state: ResearchGraphState) -> Command[str]:
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        ledger = _require(state, "evidence_ledger", EvidenceLedger)
+        case_file = state.get("case_file")
+        issue_id = (
+            case_file.open_issue_ids[0]
+            if isinstance(case_file, CaseFile) and case_file.open_issue_ids
+            else f"issue_{request.run_id}"
+        )
+        report = evaluate_sufficiency(
+            run_id=request.run_id,
+            issue_id=issue_id,
+            as_of=request.as_of,
+            data_cutoff=request.data_cutoff,
+            hypotheses=list(state.get("hypotheses", ())),
+            evidence=list(ledger.items),
+            causal_edges=list(state.get("causal_graph", ())),
+        )
+        round_no = int(state.get("research_round_no", 0))
+        round_evidence = sorted(
+            item.evidence_id
+            for item in ledger.items
+            if _round_of_evidence(item) == round_no
+        )
+        prior_ledgers = list(state.get("round_ledgers", ()))
+        next_round = round_no + 1
+        can_continue = (
+            not report.passed and next_round < profile.max_research_rounds
+        )
+        round_ledger = RoundLedger(
+            round_no=round_no,
+            new_evidence_ids=round_evidence,
+            changed_hypothesis_ids=[],
+            unresolved_gaps=sorted(gap.gap_id for gap in report.gaps),
+            contradictions=[],
+            next_action="research" if can_continue else "collaborate",
+            progress_score=report.scores.evidence_coverage,
+            stall_count=0 if round_evidence else len(prior_ledgers),
+            revision_budget_left=max(
+                0,
+                profile.max_revisions - len(state.get("revision_events", ())),
+            ),
+            stop_reason="sufficient" if report.passed else None,
+            sufficiency_passed=report.passed,
+        )
+        update: dict[str, Any] = {
+            "research_gaps": report.gaps,
+            "round_ledgers": [*prior_ledgers, round_ledger],
+            "sufficiency_passed": report.passed,
+            "run_status": "researching",
+            "trace": [
+                _trace(
+                    f"trace_assess_r{round_no:02d}",
+                    "assess",
+                    plan_id=str(state.get("plan_id", "")),
+                    ledger_type="research",
+                    round_no=round_no,
+                    gaps=[gap.gap_id for gap in report.gaps],
+                )
+            ],
+        }
+        if can_continue:
+            update["research_round_no"] = next_round
+            return Command(goto="plan", update=update)
+
+        update["stop_reason"] = (
+            "sufficient" if report.passed else "research_budget_exhausted"
+        )
+        return Command(goto="collaboration_router", update=update)
+
+    def collaboration_router_node(state: ResearchGraphState) -> dict[str, Any]:
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        case_file = _require(state, "case_file", CaseFile)
+        ledger = _require(state, "evidence_ledger", EvidenceLedger)
+        hypotheses = list(state.get("hypotheses", ()))
+        scores = sorted(
+            (hypothesis.prior_confidence for hypothesis in hypotheses),
+            reverse=True,
+        )
+        conflict_score = 1.0 if ledger.conflict_ids else 0.0
+        open_gaps = [
+            gap
+            for gap in state.get("research_gaps", ())
+            if isinstance(gap, ResearchGap) and gap.status in {"open", "researching"}
+        ]
+        decision = route_collaboration(
+            profile=request.profile,
+            materiality=case_file.materiality,
+            hypothesis_scores=scores,
+            evidence_conflict_score=conflict_score,
+            cross_layer_conflict=bool(ledger.conflict_ids),
+            remaining_budget=profile.token_budget,
+            professional_gaps=len(open_gaps),
+            publish_ready=bool(state.get("publish_ready", False)),
+            counter_evidence_coverage=float(
+                state.get("counter_evidence_coverage", 1.0)
+            ),
+        )
+        return {
+            "collaboration_decision": decision,
+            "trace": [
+                _trace(
+                    "trace_collaboration_router",
+                    "collaboration_router",
+                    mode=decision.mode,
+                    trigger_codes=decision.trigger_codes,
+                )
+            ],
+        }
+
+    def route_mode(state: ResearchGraphState) -> str:
+        decision = state.get("collaboration_decision")
+        mode = (
+            decision.mode
+            if isinstance(decision, CollaborationDecision)
+            else "SOLO_DEEP"
+        )
+        return {
+            "SOLO_DEEP": "solo",
+            "LEAD_WITH_CONSULTANTS": "consult",
+            "ANALYST_COUNCIL": "council",
+            "MANDATORY_RED_TEAM": "red_team",
+        }[mode]
+
+    def solo_node(state: ResearchGraphState) -> dict[str, Any]:
+        return {
+            "run_status": "solo",
+            "trace": [_trace("trace_solo", "solo")],
+        }
+
+    def consult_node(state: ResearchGraphState) -> dict[str, Any]:
+        decision = state.get("collaboration_decision")
+        roles = (
+            list(decision.selected_roles)
+            if isinstance(decision, CollaborationDecision)
+            else []
+        )
+        return {
+            "run_status": "consult",
+            "trace": [
+                _trace("trace_consult", "consult", selected_roles=roles)
+            ],
+        }
+
+    async def _council_update(state: ResearchGraphState) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "case_file": state.get("case_file"),
+            "evidence_ledger": state.get("evidence_ledger"),
+            "hypotheses": list(state.get("hypotheses", ())),
+            "causal_graph": list(state.get("causal_graph", ())),
+            "research_gaps": list(state.get("research_gaps", ())),
+            "collaboration_decision": state.get("collaboration_decision"),
+            "conflicts": [],
+        }
+        result = await council_graph.ainvoke(
+            cast(DeliberationState, payload),
+            config=cast(RunnableConfig, {"recursion_limit": 100}),
+        )
+        update: dict[str, Any] = {
+            "trace": [
+                _trace(
+                    "trace_council",
+                    "council",
+                    ledger_type="deliberation",
+                    deliberation_round=max(
+                        (
+                            ledger.deliberation_round
+                            for ledger in result.get(
+                                "deliberation_round_ledgers", ()
+                            )
+                        ),
+                        default=0,
+                    ),
+                )
+            ]
+        }
+        for key in (
+            "submissions",
+            "objections",
+            "rebuttals",
+            "peer_briefs",
+            "belief_updates",
+            "influence_edges",
+            "revision_events",
+            "deliberation_round_ledgers",
+            "usage",
+        ):
+            if key in result:
+                update[key] = result[key]
+        ledgers = list(result.get("deliberation_round_ledgers", ()))
+        update["deliberation_round_no"] = max(
+            (ledger.deliberation_round for ledger in ledgers), default=0
+        )
+        if "council_decision" in result:
+            update["council_decision"] = result["council_decision"]
+        if "evidence_ledger" in result:
+            update["evidence_ledger"] = result["evidence_ledger"]
+        if "case_version" in result:
+            update["case_version"] = result["case_version"]
+        if result.get("run_status") is not None:
+            update["run_status"] = result["run_status"]
+        if result.get("stop_reason") is not None:
+            update["stop_reason"] = result["stop_reason"]
+        return update
+
+    async def council_node(state: ResearchGraphState) -> dict[str, Any]:
+        return await _council_update(state)
+
+    async def red_team_node(state: ResearchGraphState) -> dict[str, Any]:
+        return await _council_update(state)
+
+    def route_after_collaboration(state: ResearchGraphState) -> str:
+        decision = state.get("council_decision")
+        if isinstance(decision, CouncilDecision) and decision.decision == "revise":
+            return "revise"
+        return "decision_gate"
+
+    def revise_node(state: ResearchGraphState) -> dict[str, Any]:
+        return {
+            "run_status": "revised",
+            "trace": [_trace("trace_revise", "revise")],
+        }
+
+    def decision_gate_node(state: ResearchGraphState) -> dict[str, Any]:
+        judgment = commit_judgment(cast(Mapping[str, Any], state))
+        return {
+            "judgment_draft": judgment,
+            "run_status": judgment.status,
+            "stop_reason": judgment.stop_reason,
+            "trace": [
+                _trace(
+                    "trace_decision_gate",
+                    "decision_gate",
+                    judgment_id=judgment.judgment_id,
+                    decision=judgment.decision,
+                    status=judgment.status,
+                )
+            ],
+        }
+
+    builder: StateGraph[
+        ResearchGraphState, None, ResearchGraphState, ResearchGraphState
+    ] = StateGraph(ResearchGraphState)
+
+    builder.add_node("profile", profile_node)
+    builder.add_node("plan", plan_node)
+    builder.add_node("dispatch", dispatch_node)
+    builder.add_node(
+        "research_task",
+        research_task_node,  # type: ignore[arg-type]
+        input_schema=ResearchTask,
+    )
+    builder.add_node("collect", collect_node)
+    builder.add_node("analyze", analyze_node)
+    builder.add_node(
+        "analyst_seat",
+        analyst_seat_node,  # type: ignore[arg-type]
+        input_schema=AnalystTask,
+    )
+    builder.add_node("assess", assess_node)
+    builder.add_node("collaboration_router", collaboration_router_node)
+    builder.add_node("solo", solo_node)
+    builder.add_node("consult", consult_node)
+    builder.add_node("council", council_node)
+    builder.add_node("red_team", red_team_node)
+    builder.add_node("revise", revise_node)
+    builder.add_node("decision_gate", decision_gate_node)
+
+    builder.add_edge(START, "profile")
+    builder.add_edge("profile", "plan")
+    builder.add_edge("plan", "dispatch")
+    builder.add_conditional_edges(
+        "dispatch", dispatch_research, ["research_task"]
+    )
+    builder.add_edge("research_task", "collect")
+    builder.add_edge("collect", "analyze")
+    builder.add_conditional_edges(
+        "analyze", dispatch_analysis, ["analyst_seat"]
+    )
+    builder.add_edge("analyst_seat", "assess")
+    builder.add_conditional_edges(
+        "collaboration_router",
+        route_mode,
+        ["solo", "consult", "council", "red_team"],
+    )
+    builder.add_edge("solo", "decision_gate")
+    builder.add_edge("consult", "decision_gate")
+    builder.add_edge("red_team", "decision_gate")
+    builder.add_conditional_edges(
+        "council", route_after_collaboration, ["revise", "decision_gate"]
+    )
+    builder.add_edge("revise", "decision_gate")
+    builder.add_edge("decision_gate", END)
+
+    return builder.compile()
