@@ -1,11 +1,19 @@
 # 早/午/晚简报功能声明。状态 draft：生产仍由 legacy 服务，brain_v4 只做影子。
+# V4.1 冻结：三个时段共用 BriefingEnvelope，午报必须携带父判断，晚报只按 ID
+# 引用 market_trace 研判；render_targets 由 renderers/briefing.py 投影，不写入图输出。
 id: briefing
 kind: feature
 owner: briefing-team
 status: draft
 profiles: [briefing_morning, briefing_midday, briefing_evening]
-contracts: [BriefingEnvelope.v1, MorningBody.v1, MiddayBody.v1, EveningBody.v1]
-capabilities: [market_snapshot, event_evidence, trend]
+contracts:
+  - BriefingEnvelope.v1
+  - MorningBody.v1
+  - MiddayBody.v1
+  - EveningBody.v1
+  - Scenario.v1
+  - BriefingRelation.v1
+capabilities: [market_snapshot, event_evidence, trend, breaking_news]
 dependencies: [market_trace]
 cutoff: briefing_profile_cutoff
 budgets:
@@ -20,3 +28,4 @@ legacy_deletion:
   adapter: briefing_legacy_adapter
   callers: [scheduler_briefing, admin_briefing_trigger]
   delete_when: v4_100_percent_stable_10_trading_days
+

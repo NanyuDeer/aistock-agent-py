@@ -1,5 +1,36 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 早午晚报日内链试点并冻结 V4.1 接口（V4-09-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/features/briefing/profiles.py`：早/午/晚三档与不可变 `RunProfile` 的组合，声明输入/输出契约、parent 要求与渲染出口；ledger namespace 委托 `graph/profiles.py`，不重复定义任何阈值。
+- `features/briefing/adapter.py`：读取冻结日内链 fixture，按每个时段 `data_cutoff` 与 `as_of` 过滤证据（`event_time <= cutoff` 且 `published_at <= as_of`），三个时段各自独立 `run_id` / `snapshot_id` / `data_cutoff` / ledger namespace；`as_of` 全部来自 fixture，不读系统时间。
+- `features/briefing/projection.py`：早报输出基线、可证伪情景与失效条件；午报只对受影响 claim 追加 `ClaimChange`（含 `parent_judgment_id` + `BriefingRelation`），未变化证据按同一 evidence ID 复用；晚报不产生新 claim，只按 ID 引用市场溯源 judgment 并给早/午报 material claim 打分。
+- `features/briefing/evaluation.py`：为三个时段生成 `EvaluationEnvelope` 与旧链/V4 双栏静态报告，`market_trace_reference` 把 Task 8 研判投影为稳定 ID 引用；晚报信封携带真实 `market_trace_judgment_id` 与完整 parent chain。
+- `renderers/briefing.py`：`render(briefing, channel)` 支持 `app/web/text/audio`，headline、direction、relation、risk level、evidence IDs 与 confidence 跨通道一致；audio 只缩短措辞，不新增 claim。
+- `tests/fixtures/brain_v4/briefing/day_chain.json`：冻结日内链，含早报 cutoff 之后发布的重要消息、AM 确认/否定各一条、event_time 晚于午报 cutoff 的回填事件、收盘与市场溯源引用。
+- `tests/integration/brain_v4/test_briefing_chain.py`、`tests/unit/brain_v4/test_briefing_renderer.py`：覆盖时间泄漏隔离、三时段独立边界、午报 parent/增量、晚报引用 Task 8 judgment、评测 parent chain、四通道投影一致与渲染层离线扫描。
+
+### 变更
+
+- `features/briefing/manifest.yaml`：补充 `Scenario.v1`、`BriefingRelation.v1` 契约与 `breaking_news` 能力，保留 registry 可校验结构。
+- `src/aistock_agent/brain_v4/generated/registry.lock`：由 `uv run python -m aistock_agent.brain_v4.registry --write-lock` 重新生成（`registry_sha256` 433969d7… → 5c3229e9…，文件 SHA-256 32E874CE… → BF876AFF…）。
+- `docs/智慧大脑-V4-团队接入与迁移规范.md`（仓库外文档）：登记 V4.1 冻结契约、仅加性变更规则、红区兼容优先与时段隔离不变量。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/integration/brain_v4/test_briefing_chain.py tests/unit/brain_v4/test_briefing_renderer.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.features.briefing.adapter'`。
+- `uv run pytest tests/integration/brain_v4/test_briefing_chain.py tests/unit/brain_v4/test_briefing_renderer.py -q` → `13 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `146 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 53 source files`。
+- 报告：`brain_v4_evals/reports/briefing/index.html`（页面 `2026-11-26/briefing.html`），含三时段旧链/V4 双栏、parent chain、晚报 `market_trace_judgment_id=jdg_run_market_trace_liquidity_01`；报告目录不提交。
+
+---
+
 ## [main] 2026-11-27 — 市场溯源试点与双栏评测报告（V4-08-P01）
 
 **开发者**: NanyuDeer
