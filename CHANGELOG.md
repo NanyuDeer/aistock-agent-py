@@ -1,5 +1,29 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 影子归档、评测信封与执行包工具（V4-07-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `brain_v4_evals/contracts.py`：`EvaluationEnvelope`（`extra="forbid"`）固定 `is_shadow=True`，旧链输出与 V4 evidence 分离，旧链证据 ID 复用到 V4 evidence 时直接报错；`select_active` 提供“非影子”正式查询投影（影子信封恒被排除）。
+- `brain_v4_evals/ab/run_paired.py`：`build_envelope(legacy_run, v4_run, blind_seed)` 只在 `snapshot_id` 与 `snapshot_sha` 完全一致时形成 comparison；旧链与 V4 必须是不同 run；盲标由 `(seed, comparison_id)` 确定性派生，同 seed 同标签。
+- `brain_v4_evals/reporting/generate.py` + `static/`：生成离线 `index.html`、`<run-date>/<feature-id>.html` 与 `<run-date>/data/<comparison-id>.json`；页面含旧链/V4 双栏、snapshot id+sha、data_cutoff、假设/证据/反证/回改/未解决问题、latency/token/cost/降级状态与盲评字段；脚本无 fetch/XHR，纯相对路径静态资源。
+- `scripts/brain_v4/scaffold_feature.py`：仅生成 `manifest.yaml`、`profile.py`、`adapter.py`、`projection.py`、`fixtures/`、`tests/`，默认 `active_owner=legacy`、`shadow_owner=brain_v4`。
+- `scripts/brain_v4/verify_change_scope.py`：`verify_change_scope(packet, changed_paths)` 对越界与 forbidden paths 返回非空错误列表，附 CLI。
+- `src/aistock_agent/brain_v4/testing/contract_suite.py`：`run_contract_suite(feature_adapter)` 覆盖 as_of 显式、snapshot 一致、幂等、partial/insufficient 降级、shadow 隔离、renderer 不新增 claim，可被假 adapter 违规触发。
+- `tests/unit/brain_v4/test_evaluation_envelope.py`、`tests/integration/brain_v4/test_shadow_isolation.py`、`tests/unit/brain_v4/test_execution_packet_tools.py`：覆盖信封拒绝未知字段/非影子、快照不一致拒绝配对、报表双栏与离线资源、脚手架白名单、范围校验与六项契约检查。
+
+### 验证
+
+- 红态：`uv run pytest tests/unit/brain_v4/test_evaluation_envelope.py tests/integration/brain_v4/test_shadow_isolation.py tests/unit/brain_v4/test_execution_packet_tools.py -q` → 收集失败 `ModuleNotFoundError: No module named 'brain_v4_evals'` / `No module named 'aistock_agent.brain_v4.testing'`。
+- `uv run pytest tests/unit/brain_v4/test_evaluation_envelope.py tests/integration/brain_v4/test_shadow_isolation.py tests/unit/brain_v4/test_execution_packet_tools.py -q` → 25 passed。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → 119 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests brain_v4_evals scripts` → All checks passed!
+- `uv run mypy src/aistock_agent/brain_v4 brain_v4_evals` → Success: no issues found in 47 source files。
+
+---
+
 ## [main] 2026-11-27 — 研究主图与受限分析师内核（V4-06-P01）
 
 **开发者**: NanyuDeer
