@@ -549,6 +549,8 @@ def validate_snapshot_discovery(snapshot: MarketTraceSnapshot) -> None:
         snapshot.sources,
         snapshot.captured_at,
         snapshot.missing_fields,
+        # 罕见度必须取自快照本身：它是闸门的输入，从别处取会让重算与冻结结果不一致
+        rarity=snapshot.phenomenon_rarity,
     )
     if _normalize_discovery_for_comparison(
         recomputed

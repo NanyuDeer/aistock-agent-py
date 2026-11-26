@@ -1325,11 +1325,15 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         logger.info("targeted_search_facts_added", count=targeted_count)
 
     # ── 5. 在冻结事实和真实来源上确定性发现市场现象 ──
+    # 罕见度必须从快照数据里取（已随 close-snapshot 冻结），不能在这里查库：
+    # review 会重算 discovery 并与快照比对，任何实时输入都会让重算不可复现。
+    rarity = phenomenon_rarity_from_close(close_data)
     discovery = discover_market_phenomenon(
         normalized_a_share,
         sources,
         captured_at,
         missing_fields,
+        rarity=rarity,
     )
 
     # ── 5. 返回事实快照 ──
@@ -1348,10 +1352,57 @@ async def build_market_trace_snapshot(report_date: str) -> MarketTraceSnapshot:
         sources=sources,
         missing_fields=missing_fields,
         phenomenon_discovery=discovery,
+        phenomenon_rarity=rarity,
         data_availability=data_availability,
         collection_status=collection_status,
         morning_forecast=morning_forecast,
     )
+
+
+
+# ============================================================================
+# 现象罕见度（rule -> 分位）
+# ============================================================================
+
+# 规则 → state_rarity_daily 的列。sector_concentration 没有可回放的历史口径
+# （需要概念板块资金流，2026-03 才有），故不给 rarity，保持旧阈值行为。
+_RARITY_KEY_BY_RULE: dict[str, str] = {
+    "broad_rally": "breadth_rank",
+    "broad_decline": "decline_rank",
+    "style_divergence": "style_rank",
+    "sentiment_extreme": "limit_rank",
+}
+
+# 窗口内交易日数低于此值时，分位不可比（2016 年初预热期），按"无判据"处理
+_MIN_RARITY_WINDOW_DAYS = 250
+
+
+def phenomenon_rarity_from_close(close_data: dict[str, object] | None) -> dict[str, float]:
+    """从收盘快照的 state_rarity 块解析出 rule -> 分位。
+
+    缺失、未就绪（窗口不足）或越界时返回空 dict —— 空 dict 表示**不启用闸门**，
+    与改动前行为一致。这里刻意不抛错：罕见度是增强项，不应该让整条链路失败。
+    """
+    if not isinstance(close_data, dict):
+        return {}
+    raw = close_data.get("state_rarity")
+    if not isinstance(raw, dict):
+        return {}
+    try:
+        window = int(float(str(raw.get("window_days") or 0)))
+    except (TypeError, ValueError):
+        return {}
+    if window < _MIN_RARITY_WINDOW_DAYS:
+        return {}
+    out: dict[str, float] = {}
+    for rule, key in _RARITY_KEY_BY_RULE.items():
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            continue
+        val = float(value)
+        if 0.0 <= val <= 1.0:
+            out[rule] = val
+    return out
 
 
 # ============================================================================
@@ -1549,11 +1600,15 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
     )
 
     # ── 5. 确定性 discovery ──
+    # quick 快照同样带罕见度：盘中/15:30 的 state_rarity 是 T-1 收盘算的，
+    # 与收盘口径一致；缺数据时为空 dict（不启用闸门）。
+    rarity = phenomenon_rarity_from_close(close_data)
     discovery = discover_market_phenomenon(
         normalized_a_share,
         sources,
         captured_at,
         missing_fields,
+        rarity=rarity,
     )
 
     # ── 6. 返回事实快照 ──
@@ -1569,6 +1624,7 @@ async def build_quick_snapshot(report_date: str) -> MarketTraceSnapshot:
         sources=sources,
         missing_fields=missing_fields,
         phenomenon_discovery=discovery,
+        phenomenon_rarity=rarity,
         data_availability=data_availability,
         collection_status=collection_status,
         morning_forecast=morning_forecast,
