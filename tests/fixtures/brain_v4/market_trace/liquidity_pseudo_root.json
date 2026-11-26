@@ -1,0 +1,242 @@
+{
+  "case_id": "case_liquidity_pseudo_root",
+  "case_kind": "liquidity_pseudo_root",
+  "run_id": "run_market_trace_liquidity",
+  "subject_code": "000001.SH",
+  "materiality": "high",
+  "as_of": "2026-11-27T15:30:00+08:00",
+  "data_cutoff": "2026-11-27T15:00:00+08:00",
+  "hypothesis_seeds": [
+    {
+      "hypothesis_id": "hyp_liquidity",
+      "statement": "流动性收缩是结构根因",
+      "prior_confidence": 0.62,
+      "assumptions": ["北向资金净流出", "成交额下降"],
+      "disconfirmers": ["北向资金转为净流入", "成交额放大"],
+      "required_evidence_types": ["market_fact"],
+      "scope": "market"
+    },
+    {
+      "hypothesis_id": "hyp_style_divergence",
+      "statement": "风格分化是主要驱动",
+      "prior_confidence": 0.45,
+      "assumptions": ["成长板块领跌", "防御板块上涨"],
+      "disconfirmers": ["风格同步下跌"],
+      "required_evidence_types": ["market_fact"],
+      "scope": "market"
+    },
+    {
+      "hypothesis_id": "hyp_sector_rotation",
+      "statement": "板块轮动是主因",
+      "prior_confidence": 0.38,
+      "assumptions": ["板块涨跌分化"],
+      "disconfirmers": ["全板块同涨同跌"],
+      "required_evidence_types": ["market_fact"],
+      "scope": "market"
+    }
+  ],
+  "legacy": {
+    "run_id": "legacy_review_20261127",
+    "output": {
+      "headline": "旧链结论：流动性收缩是今日下跌主因",
+      "root_cause": "liquidity_contraction",
+      "confidence": "high",
+      "evidence_ids": ["legacy_review_ev_1"],
+      "narrative": "旧链将北向资金净流出直接当作主因，未比较风格分化。"
+    }
+  },
+  "snapshot": {
+    "snapshot_id": "trace-20261127-a1b2c3",
+    "trade_date": "20261127",
+    "captured_at": "2026-11-27T15:10:00+08:00",
+    "a_share": {
+      "trade_date": "20261127",
+      "indexes": {
+        "000001.SH": {
+          "ts_code": "000001.SH",
+          "name": "上证指数",
+          "trade_date": "20261127",
+          "close": 3012.4,
+          "change_pct": -1.18,
+          "amount": 410000000000,
+          "source": "tushare:index_daily"
+        }
+      },
+      "breadth": {
+        "total_count": 5200,
+        "advance_count": 1800,
+        "decline_count": 3200,
+        "flat_count": 200,
+        "advance_ratio": 0.346,
+        "source": "tushare:daily"
+      },
+      "turnover": {
+        "amount_yuan": 820000000000,
+        "previous_amount_yuan": 950000000000,
+        "change_pct": -0.137,
+        "source": "tushare:daily"
+      },
+      "style": {
+        "large_cap_change_pct": -0.4,
+        "small_cap_change_pct": -2.1,
+        "source": "tushare:daily"
+      },
+      "sectors": {
+        "defensive": {"change_pct": 0.6},
+        "growth": {"change_pct": -2.4}
+      }
+    },
+    "sources": {
+      "INDEX_000001_SH": {
+        "source_id": "INDEX_000001_SH",
+        "kind": "market_fact",
+        "provider": "tushare:index_daily",
+        "title": "上证指数",
+        "content": "trade_date=20261127, close=3012.4, change_pct=-1.18, amount=410000000000",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "BREADTH_ALL": {
+        "source_id": "BREADTH_ALL",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "全市场涨跌家数",
+        "content": "total=5200, advance=1800, decline=3200, flat=200, advance_ratio=0.346",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "TURNOVER_ALL": {
+        "source_id": "TURNOVER_ALL",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "全市场成交额",
+        "content": "amount_yuan=820000000000, previous_amount_yuan=950000000000, change_pct=-0.137",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "STYLE_LARGE_CAP": {
+        "source_id": "STYLE_LARGE_CAP",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "大盘风格",
+        "content": "large_cap_change_pct=-0.4",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "STYLE_SMALL_CAP": {
+        "source_id": "STYLE_SMALL_CAP",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "小盘风格",
+        "content": "small_cap_change_pct=-2.1",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "SECTOR_DEFENSIVE": {
+        "source_id": "SECTOR_DEFENSIVE",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "防御板块",
+        "content": "defensive_change_pct=0.6",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "SECTOR_GROWTH": {
+        "source_id": "SECTOR_GROWTH",
+        "kind": "market_fact",
+        "provider": "tushare:daily",
+        "title": "成长板块",
+        "content": "growth_change_pct=-2.4",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "FUND_FLOW_NORTH": {
+        "source_id": "FUND_FLOW_NORTH",
+        "kind": "market_fact",
+        "provider": "tushare:moneyflow",
+        "title": "北向资金",
+        "content": "northbound_net=-3800000000",
+        "url": null,
+        "occurred_at": "2026-11-27T15:00:00+08:00",
+        "captured_at": "2026-11-27T15:10:00+08:00",
+        "source_level": "market_data"
+      },
+      "EVENT_RATE_DECISION": {
+        "source_id": "EVENT_RATE_DECISION",
+        "kind": "event_evidence",
+        "provider": "news:rate_decision",
+        "title": "公开市场操作",
+        "content": "央行开展逆回购操作，净回笼 2000 亿元",
+        "url": "https://example.invalid/rate-decision",
+        "occurred_at": "2026-11-27T09:00:00+08:00",
+        "captured_at": "2026-11-27T09:05:00+08:00",
+        "source_level": "reporting",
+        "origin": "domestic"
+      },
+      "EVENT_GLOBAL_RISK": {
+        "source_id": "EVENT_GLOBAL_RISK",
+        "kind": "event_evidence",
+        "provider": "news:global_risk",
+        "title": "隔夜全球风险资产",
+        "content": "隔夜海外风险资产走弱，成长股估值承压",
+        "url": "https://example.invalid/global-risk",
+        "occurred_at": "2026-11-26T22:00:00+08:00",
+        "captured_at": "2026-11-27T08:00:00+08:00",
+        "source_level": "reporting",
+        "origin": "peripheral"
+      }
+    },
+    "missing_fields": [],
+    "phenomenon_discovery": {
+      "status": "detected",
+      "primary": {
+        "kind": "broad_decline",
+        "summary": "指数下跌且成长板块领跌",
+        "fact_ids": ["INDEX_000001_SH", "BREADTH_ALL"],
+        "tags": ["style_divergence"],
+        "severity": "high"
+      },
+      "concurrent_phenomena": [],
+      "data_readiness": {
+        "market_data": "complete",
+        "attribution_inputs": "partial",
+        "causal_evidence": "ready"
+      },
+      "diagnostics": []
+    },
+    "phenomenon_rarity": {"broad_decline": 0.82},
+    "data_availability": {
+      "index": {"state": "available", "available_fields": ["change_pct"]},
+      "breadth": {"state": "available", "available_fields": ["advance_ratio"]},
+      "turnover": {"state": "available", "available_fields": ["change_pct"]},
+      "style": {"state": "available", "available_fields": ["large_cap_change_pct", "small_cap_change_pct"]},
+      "sector": {"state": "available", "available_fields": ["defensive_change_pct", "growth_change_pct"]},
+      "fund": {
+        "state": "partial",
+        "available_fields": ["northbound_net"],
+        "approximate": true,
+        "reason": "intraday_only"
+      }
+    },
+    "collection_status": {
+      "fund": {"state": "degraded", "provider": "tushare", "item_count": 1, "reason": "northbound_partial"},
+      "global_news": {"state": "available", "provider": "news", "item_count": 2, "reason": null},
+      "research": {"state": "unavailable", "provider": "broker", "item_count": 0, "reason": "offline_fixture"}
+    },
+    "morning_forecast": null
+  }
+}

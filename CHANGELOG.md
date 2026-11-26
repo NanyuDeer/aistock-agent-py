@@ -1,5 +1,29 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 市场溯源试点与双栏评测报告（V4-08-P01）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/features/market_trace/adapter.py`：`load_frozen_snapshot` 读取冻结 `MarketTraceSnapshot` 案例；`snapshot_to_evidence` 只映射来源、事件/发布/抓取三时间、as_of、质量与采集错误分类，`supports_hypothesis_refs` 保持为空；`compute_snapshot_sha` 对规范化快照求 SHA-256，同一 SHA 产生同一 evidence 集合与 ID。
+- `features/market_trace/profile.py`：`run_market_trace` 编排竞争假设、六因子因果边、`evaluate_sufficiency` 门禁与结构化 Gap、一次定向补证、一次局部回改（“资金收缩是风险偏好切换后的放大器”）、`route_collaboration` 路由与 `commit_judgment` 单写研判；分数接近案例走完整 `ANALYST_COUNCIL`。
+- `features/market_trace/projection.py`：`project_six_factor` 只把已通过门禁的路径压缩为 `structural_root/trigger/transmission/exposure/repricing/observable_result`，无证据边标为假设，不新增 claim。
+- `features/market_trace/evaluation.py`：`build_market_trace_envelope` 复用 `brain_v4_evals` 构建 `EvaluationEnvelope`，旧链输出只进 `legacy_output`，V4 输出与 evidence 分离；snapshot SHA 不一致时拒绝配对；`generate_market_trace_report` 生成双栏静态 HTML。
+- `tests/fixtures/brain_v4/market_trace/`：冻结案例 `liquidity_pseudo_root.json` 与 `close_score_council.json`。
+- `tests/integration/brain_v4/test_market_trace.py`、`test_market_trace_comparison.py`：覆盖防污染、确定性、3 假设/Gap/补证/局部回改、议会独立性/role-scoped PeerBrief/证据支撑的 BeliefUpdate/少数意见/单写/有界终止、六因子投影、双栏报告与 SHA 不一致拒绝。
+
+### 验证
+
+- 红态：`uv run pytest tests/integration/brain_v4/test_market_trace.py tests/integration/brain_v4/test_market_trace_comparison.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.features.market_trace'`。
+- `uv run pytest tests/integration/brain_v4/test_market_trace.py tests/integration/brain_v4/test_market_trace_comparison.py -q` → 14 passed。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → 133 passed。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/integration/brain_v4 tests/fixtures/brain_v4` → All checks passed!
+- `uv run mypy src/aistock_agent/brain_v4` → Success: no issues found in 47 source files。
+- 报告：`brain_v4_evals/reports/market-trace/index.html`（页面 `<date>/market_trace.html`），含旧链/V4 双栏、结论、证据、假设、回改、降级状态、latency、cost、snapshot id+sha 与 data_cutoff；报告目录不提交。
+
+---
+
 ## [main] 2026-11-27 — 影子归档、评测信封与执行包工具（V4-07-P01）
 
 **开发者**: NanyuDeer
