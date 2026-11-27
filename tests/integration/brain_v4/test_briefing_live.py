@@ -141,8 +141,10 @@ class FakeNodeClient:
             raise TimeoutError(f"{name} timeout")
 
     async def get_close_snapshot(self, snapshot_date: str) -> dict[str, object] | None:
-        self._record("get_close_snapshot")
-        return dict(CLOSE_SNAPSHOT)
+        self._record(f"get_close_snapshot:{snapshot_date}")
+        # 快照必须回填真实交易日：早报取的是上一交易日收盘，如果所有日期都返回
+        # 同一个 trade_date，会被时间纪律整段过滤（这正是线上踩到的坑）。
+        return {**CLOSE_SNAPSHOT, "trade_date": snapshot_date}
 
     async def get_last_close_snapshot(self) -> dict[str, object] | None:
         self._record("get_last_close_snapshot")

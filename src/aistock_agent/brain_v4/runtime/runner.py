@@ -91,6 +91,30 @@ LiveStatus = Literal["ok", "partial", "insufficient"]
 
 _VERSION = "brain-v4-live-1"
 
+#: 只有日历/公告类证据时不允许调用分析师：没有行情事实时，任何归因都是编造。
+_MARKET_SOURCE_TOKENS = ("close-snapshot", "last-close-snapshot", "intraday")
+
+
+def _has_market_evidence(items: Sequence[object]) -> bool:
+    """窗口内是否含真实行情证据（收盘/上一收盘/盘中）。"""
+    for item in items:
+        source = getattr(item, "source", "")
+        if isinstance(source, str) and any(
+            token in source for token in _MARKET_SOURCE_TOKENS
+        ):
+            return True
+    return False
+
+
+def _llm_evidence_ok(items: Sequence[object]) -> bool:
+    """证据是否足以支撑一次真实研判：必须含行情事实。
+
+    实测故障：早报取数失败时窗口里只剩 2 条日历事件，分析师仍然被调用，
+    花掉 1.5 万 token 却写不出任何 claim。没有行情事实时任何归因都是编造，
+    因此这里只认行情证据，不按条数放行。
+    """
+    return _has_market_evidence(items)
+
 ArchiveFn = Callable[[dict[str, object]], Awaitable[None] | None]
 
 
@@ -535,7 +559,7 @@ async def _run_briefing(
         window = build_evidence_window(chain, profile)
         status = _briefing_status(bool(window.items), inputs.missing_fields)
 
-        if model is not None:
+        if model is not None and _llm_evidence_ok(window.items):
             # 注入模型时，由分析师内核产出 claim；成功则覆盖叙述字段，
             # 失败/无研判则保留确定性投影并显式记录降级原因。
             session = _session_for(chain, profile)
@@ -568,6 +592,8 @@ async def _run_briefing(
         else:
             llm_degraded = (
                 f"briefing_llm_unavailable:{model_degraded or 'model_not_injected'}"
+                if model is None
+                else f"briefing_evidence_too_thin:{len(window.items)}"
             )
 
         judgment = _briefing_judgment(
@@ -1100,3 +1126,6 @@ __all__ = [
     "reset_live_runs",
     "run_live",
 ]
+
+
+
