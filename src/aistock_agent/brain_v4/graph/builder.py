@@ -860,10 +860,83 @@ def build_research_graph(
             "MANDATORY_RED_TEAM": "red_team",
         }[mode]
 
-    def solo_node(state: ResearchGraphState) -> dict[str, Any]:
+    async def solo_node(state: ResearchGraphState) -> dict[str, Any]:
+        request = _require(state, "request", ResearchRequest)
+        # 确定性路径必须与旧实现逐字节一致：无模型时不派发分析师、不加 usage，
+        # 保证全部既有离线图测试零改动通过。
+        if runtime.model is None:
+            return {
+                "run_status": "solo",
+                "trace": [_trace("trace_solo", "solo")],
+            }
+
+        # SOLO_DEEP 也需要一个主分析师完成结构化研判，否则该路径一次 LLM
+        # 都不会被调用，无法审计 V4 的智能度。席位取 profile 第一个分析师
+        # （单人模式回落到 lead），任务文本只描述真实假设与证据，不含结论。
+        profile = get_profile(request.profile)
+        seats = analyst_seats(profile)
+        role = seats[0] if seats else "lead"
+        round_no = int(state.get("research_round_no", 0))
+        ledger = state.get("evidence_ledger")
+        evidence_ids = (
+            sorted(item.evidence_id for item in ledger.items)
+            if isinstance(ledger, EvidenceLedger)
+            else []
+        )
+        hypothesis_refs = sorted(
+            item.ref
+            for item in state.get("hypotheses", ())
+            if isinstance(item, Hypothesis)
+        )
+        task_text = (
+            f"mode=SOLO_DEEP; role={role}; research_round={round_no}; "
+            f"subject={request.subject_code}; goal={request.research_goal}; "
+            f"hypotheses={','.join(hypothesis_refs)}; "
+            f"evidence={','.join(evidence_ids)}"
+        )
+        try:
+            result = await run_analyst_async(
+                role=role,
+                profile=profile,
+                model=runtime.model,
+                task=task_text,
+                tools=runtime.analyst_tools,
+                research_round=round_no,
+                token_budget=profile.token_budget,
+                timeout_s=profile.timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - 分析师失败不得让图崩溃
+            return {
+                "run_status": "solo",
+                "analyst_results": [],
+                "usage": [{"key": "analyst_error", "value": 1}],
+                "trace": [
+                    _trace(
+                        "trace_solo",
+                        "solo",
+                        analyst_failed=True,
+                        error_kind=type(exc).__name__,
+                        detail=str(exc),
+                    )
+                ],
+            }
         return {
             "run_status": "solo",
-            "trace": [_trace("trace_solo", "solo")],
+            "analyst_results": [result],
+            "usage": [
+                {"key": "analyst_steps", "value": result.steps_used},
+                {"key": "analyst_tokens", "value": result.tokens_used},
+            ],
+            "trace": [
+                _trace(
+                    "trace_solo",
+                    "solo",
+                    analyst_role=role,
+                    analyst_result_id=result.result_id,
+                    analyst_status=result.status,
+                    analyst_tokens=result.tokens_used,
+                )
+            ],
         }
 
     def consult_node(state: ResearchGraphState) -> dict[str, Any]:

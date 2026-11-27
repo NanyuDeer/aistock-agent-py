@@ -1,5 +1,36 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — SOLO 路径启用主分析师并统一 CLI 事件循环（P7-solo-analyst）
+
+**开发者**: NanyuDeer
+
+### 修改
+
+- `src/aistock_agent/brain_v4/graph/builder.py`：`solo_node` 改为 async 节点。`runtime.model is None` 时返回与旧实现逐字节一致的 `{"run_status": "solo", "trace": [_trace("trace_solo", "solo")]}`，既有离线测试零改动通过；有模型时取 `analyst_seats(profile)` 第一席（无席位回落 `"lead"`），以真实 request/hypotheses/evidence 组成结构化任务调用 `run_analyst_async`，写回 `analyst_results`、`usage`（`analyst_steps`/`analyst_tokens`）与含 `analyst_result_id`/`analyst_tokens` 的 trace；分析师异常收敛为 `analyst_results=[]` + `usage{analyst_error:1}` + `trace{analyst_failed:True}`，不崩图。修复 SOLO_DEEP 路径一次 LLM 都不调、`usage.total_tokens=0` 的根因。
+- `src/aistock_agent/brain_v4/runtime/cli.py`：新增 `_run_all`；`main()` 只保留一次 `asyncio.run(_run_all(...))`，在其中顺序执行 `run_live` →（可选）`archive_run` →（可选）`write_daily_report`，三者共享同一事件循环，修复归档请求绑定已关闭循环导致 `archive.error="empty_response"` 的根因；输出/退出码语义（成功 0、live 失败 1、非法日期 2）不变。
+- `CHANGELOG.md`：追加本条目。
+- `docs/superpowers/packets/2026-11-27-brain-v4-P7-solo-analyst.md`：新增 P7 执行包记录。
+
+### 新增
+
+- `tests/unit/brain_v4/test_solo_analyst_llm.py`：FakeChatModel 注入后 SOLO 路径产出真实 `analyst_tokens>0` 与 `analyst_result_id`；`analyst_model=None` 时无模型 token 且 solo 不新增结果；分析师异常不崩图并留 `analyst_failed`/`analyst_error` 标记。全部离线。
+- `tests/unit/brain_v4/test_cli_single_loop.py`：monkeypatch `run_live`/`archive_run`/`write_daily_report`，断言三者顺序正确且运行在同一事件循环对象内。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_solo_analyst_llm.py tests/unit/brain_v4/test_cli_single_loop.py -q` → `3 failed, 1 passed`（solo trace 无 `analyst_result_id`；异常未标 `analyst_failed`；`write_daily_report` 触发 `RuntimeError: no running event loop`）。
+- 绿态（focused）：同命令 → `4 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `240 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改拓扑/reducer/`commit_judgment`、既有测试、app-api、features/、scheduler/config、services/、pyproject；未新增依赖、未用 `create_react_agent`；测试不触网、不调真实 LLM。
+
+### 说明
+
+`analyst_seat` 扇出在研究循环中始终先于协作路由执行，且 `decision_gate` 会覆盖 `run_status`，故“最终 `run_status=="solo"`”在现有拓扑下不可观测；测试改用 `collaboration_decision.mode=="SOLO_DEEP"` + `solo` 节点 trace 定位主分析师这一步，模型为 None 时改断言“无模型 token 且 solo 不新增主分析师结果”。未改拓扑与既有断言。
+
+---
+
 ## [main] 2026-11-27 — V4 实时取数初始化与真实 LLM 研究图（P6-live-fixes）
 
 **开发者**: NanyuDeer

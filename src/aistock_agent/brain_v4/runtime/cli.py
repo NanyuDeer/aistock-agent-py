@@ -117,26 +117,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    # 独立进程没有 FastAPI lifespan：必须在构造 Settings/NodeApiClient 之前
-    # 设置 APP_ENV（production → .env.production），否则取数/归档会全空。
-    ensure_app_env()
-    try:
-        trading_date = date_type.fromisoformat(args.date)
-    except ValueError:
-        print(f"非法 --date: {args.date!r}，需要 YYYY-MM-DD", file=sys.stderr)
-        return 2
+async def _run_all(args: argparse.Namespace, trading_date: date_type) -> int:
+    """在同一个事件循环内依次完成 live run、归档与报告写出。
 
+    为什么必须单循环：`HttpClientPool` 的 httpx.AsyncClient 绑定创建它的事件
+    循环；若 `archive_run` 用第二个 `asyncio.run`，归档请求会在已关闭的循环上
+    静默失败（`archive.error="empty_response"`）。
+    """
     try:
-        result = asyncio.run(run_live(args.profile, trading_date))
+        result = await run_live(args.profile, trading_date)
     except Exception as exc:  # noqa: BLE001 - CLI 边界统一转非零退出码
         print(f"V4 live run 失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
     archive: ArchiveResult | None = None
     if args.archive:
-        archive = asyncio.run(archive_run(result))
+        archive = await archive_run(result)
         if archive.archived:
             print(f"archived: run_id={archive.run_id}", file=sys.stderr)
         else:
@@ -161,6 +157,22 @@ def main(argv: list[str] | None = None) -> int:
         target = args.html_out / f"{result.run_id}.html"
         target.write_text(_render_html(result, summary), encoding="utf-8")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    # 独立进程没有 FastAPI lifespan：必须在构造 Settings/NodeApiClient 之前
+    # 设置 APP_ENV（production → .env.production），否则取数/归档会全空。
+    ensure_app_env()
+    try:
+        trading_date = date_type.fromisoformat(args.date)
+    except ValueError:
+        print(f"非法 --date: {args.date!r}，需要 YYYY-MM-DD", file=sys.stderr)
+        return 2
+
+    # 单事件循环：run_live → archive_run → write_daily_report 共享同一循环，
+    # 避免连接池绑定循环关闭后归档静默失败。输出/退出码语义保持不变。
+    return asyncio.run(_run_all(args, trading_date))
 
 
 if __name__ == "__main__":
