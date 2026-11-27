@@ -92,6 +92,10 @@ class NodeDataSource(Protocol):
         importance: str | None = None,
     ) -> list[dict[str, object]] | None: ...
 
+    async def get_news_telegraph(
+        self, date_iso: str, *, limit: int = 200
+    ) -> dict[str, object] | None: ...
+
     async def get_review_analysis_report(self, report_date: date) -> object: ...
 
 
@@ -146,6 +150,13 @@ class _Fetcher:
         return await self._fetch_list(
             self._client.get_calendar_events(day_iso, day_iso)
         )
+
+    async def news(self, day_iso: str) -> dict[str, object] | None:
+        # 老测试假客户端可能没有该方法：缺失即按「新闻不可用」降级，不中断 run。
+        getter = getattr(self._client, "get_news_telegraph", None)
+        if getter is None:
+            return None
+        return await self._fetch(getter(day_iso))
 
     async def review(self, report_date: date) -> object | None:
         self.calls += 1
@@ -441,6 +452,8 @@ def _source_record(
     occurred_at: datetime | None,
     captured_at: datetime,
     source_level: str,
+    url: str | None = None,
+    origin: Literal["domestic", "peripheral"] | None = None,
 ) -> SourceRecord:
     # 单一职责来源记录：时间和文本全部来自上游 payload，不补造数值。
     return SourceRecord(
@@ -449,7 +462,7 @@ def _source_record(
         provider=provider,
         title=title,
         content=content,
-        url=None,
+        url=url,
         occurred_at=occurred_at,
         captured_at=captured_at,
         source_level=(
@@ -459,6 +472,7 @@ def _source_record(
             if source_level == "primary"
             else "reporting"
         ),
+        origin=origin,
     )
 
 
@@ -511,6 +525,129 @@ def _review_fields(review: object | None) -> tuple[str, dict[str, object] | None
     return (status if isinstance(status, str) else "unavailable"), _as_mapping(report)
 
 
+#: 快照阶段预取的新闻条数上限。分析师任务文本预算有限（见
+#: `analysts/context.py`），条数过多会把每条正文压到不可读；缺口交给
+#: 分析过程中的按需检索（P27）补齐。
+NEWS_TOPN = 12
+
+#: 单条新闻写入证据的正文上限；标题单独保留，避免摘要把标题挤掉。
+_NEWS_CONTENT_CHARS = 300
+
+#: 市场级新闻重要性词表：命中越高越优先进入底稿。只影响排序，不改写内容。
+_NEWS_IMPORTANCE_TOKENS: tuple[tuple[str, int], ...] = (
+    ("中央经济工作会议", 5),
+    ("国常会", 5),
+    ("国家队", 5),
+    ("汇金", 5),
+    ("平准基金", 5),
+    ("国务院", 4),
+    ("政治局", 4),
+    ("央行", 4),
+    ("证监会", 4),
+    ("降准", 4),
+    ("降息", 4),
+    ("关税", 4),
+    ("美联储", 4),
+    ("印花税", 4),
+    ("财政部", 3),
+    ("发改委", 3),
+    ("金融监管", 3),
+    ("LPR", 3),
+    ("地缘", 3),
+    ("中东", 3),
+    ("俄乌", 3),
+    ("逆回购", 2),
+    ("IPO", 2),
+    ("汇率", 2),
+    ("人民币", 2),
+    ("北向", 2),
+    ("外资", 2),
+    ("政策", 1),
+    ("监管", 1),
+)
+
+
+def _news_published(item: Mapping[str, object]) -> datetime | None:
+    """电报发布时间：优先 unix 秒 `timestamp`，其次 `time`/`ctime`。"""
+    raw_ts = item.get("timestamp")
+    parsed = _as_datetime(raw_ts) if raw_ts is not None else None
+    if parsed is not None:
+        return parsed
+    for key in ("time", "ctime", "published_at"):
+        parsed = _as_datetime(item.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _news_title(item: Mapping[str, object]) -> str:
+    return _as_str(item.get("title")) or "无标题"
+
+
+def _news_body(item: Mapping[str, object]) -> str:
+    return _as_str(item.get("brief")) or _as_str(item.get("content")) or ""
+
+
+def _news_url(item: Mapping[str, object]) -> str | None:
+    url = _as_str(item.get("link")) or _as_str(item.get("url"))
+    if url:
+        return url
+    # 电报流无 link 字段；用财联社详情页兜底，保证可溯源。
+    raw_id = item.get("id")
+    if isinstance(raw_id, str | int) and not isinstance(raw_id, bool):
+        text = str(raw_id).strip()
+        if text.isdigit():
+            return f"https://www.cls.cn/detail/{text}"
+    return None
+
+
+def _news_score(title: str, body: str) -> int:
+    text = f"{title} {body}"
+    return sum(weight for token, weight in _NEWS_IMPORTANCE_TOKENS if token in text)
+
+
+def _news_items(payload: Mapping[str, object] | None) -> list[dict[str, object]]:
+    if payload is None:
+        return []
+    raw = payload.get("items", payload.get("news", []))
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _select_news(
+    items: Sequence[Mapping[str, object]], *, cutoff: datetime, limit: int
+) -> tuple[list[tuple[datetime, Mapping[str, object], str, str]], int]:
+    """过滤未来新闻、去重、按重要性选 TopN，返回 (入选, 未来条数)。
+
+    时间纪律：`published_at > cutoff` 一律剔除并计数，绝不让盘后/未来消息
+    进入因果证据。排序：重要性分 → 时间倒序 → 标题，保证结果确定可回放。
+    入选后按时间正序分配 `NEWS_xxx`，便于人读时间线。
+    """
+    seen: set[str] = set()
+    candidates: list[tuple[datetime, Mapping[str, object], str, str, int]] = []
+    future = 0
+    for item in items:
+        published = _news_published(item)
+        if published is None:
+            continue
+        if published > cutoff:
+            future += 1
+            continue
+        title = _news_title(item)
+        key = title.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        body = _news_body(item)
+        candidates.append((published, item, title, body, _news_score(title, body)))
+    candidates.sort(key=lambda row: (-row[4], -row[0].timestamp(), row[2]))
+    chosen = candidates[:limit]
+    chosen.sort(key=lambda row: (row[0], row[2]))
+    return [(row[0], row[1], row[2], row[3]) for row in chosen], future
+
+
+
 async def build_market_trace_case(
     client: NodeDataSource,
     as_of: datetime,
@@ -539,6 +676,8 @@ async def build_market_trace_case(
         else "node_api:close-snapshot"
     )
     calendar = await fetcher.calendar(day.isoformat())
+    # 新闻底稿：资深分析师开工前会预读当日快讯；预取失败只记缺失，不阻断归因。
+    news_payload = await fetcher.news(day.isoformat())
     review_status, legacy_report = _review_fields(
         await fetcher.review(day)
     )
@@ -734,6 +873,57 @@ async def build_market_trace_case(
         availability["cal"] = _availability("unavailable", [], "missing calendar")
         collection["cal"] = _collection(
             "unavailable", "node_api:calendar", 0, "missing calendar"
+        )
+
+    # 新闻证据（P26）：预取当日财联社电报 → 时间过滤 → 重要性 TopN → 冻结。
+    # 只保留 `published_at <= data_cutoff` 的条目，避免盘后消息污染归因。
+    raw_news = _news_items(news_payload)
+    selected_news, news_future = _select_news(
+        raw_news, cutoff=data_cutoff, limit=NEWS_TOPN
+    )
+    leakage += news_future
+    for position, (news_time, item, title, body) in enumerate(selected_news):
+        source_id = f"NEWS_{position:03d}"
+        content = f"{title}｜{body}" if body else title
+        sources[source_id] = _source_record(
+            source_id=source_id,
+            kind="event_evidence",
+            provider="cls:telegraph",
+            title=title,
+            content=content[:_NEWS_CONTENT_CHARS],
+            url=_news_url(item),
+            occurred_at=news_time,
+            captured_at=captured_at,
+            source_level="reporting",
+            origin="domestic",
+        )
+    if news_payload is None:
+        missing.append("news_telegraph")
+        availability["news"] = _availability(
+            "unavailable", [], "missing news telegraph"
+        )
+        collection["news"] = _collection(
+            "unavailable", "cls:telegraph", 0, "missing news telegraph"
+        )
+    elif not raw_news:
+        missing.append("news_telegraph")
+        availability["news"] = _availability(
+            "unavailable", [], "news telegraph empty"
+        )
+        collection["news"] = _collection(
+            "empty", "cls:telegraph", 0, "provider_returned_no_items"
+        )
+    else:
+        availability["news"] = _availability(
+            "available" if selected_news else "partial",
+            ["title", "published_at"],
+            None if selected_news else "all news filtered by cutoff",
+        )
+        collection["news"] = _collection(
+            "available" if selected_news else "invalid_for_causality",
+            "cls:telegraph",
+            len(selected_news),
+            None if selected_news else "no_news_before_cutoff",
         )
 
     discovery = _phenomenon_discovery(

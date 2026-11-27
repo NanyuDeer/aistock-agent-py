@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -21,6 +22,8 @@ from typing import Any, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
+
+from aistock_agent.services.tavily import TavilyService
 
 from ..contracts.deliberation import CaseFile, CollaborationDecision
 from ..contracts.evidence import EvidenceItem, EvidenceLedger
@@ -341,6 +344,8 @@ def _initial_state(
         "hypotheses": list(hypotheses),
         "causal_graph": [],
         "research_gaps": [],
+        # 按需检索历史（关键词去重 + run 级配额）；空列表代表本轮尚未检索。
+        "search_queries": [],
         "round_ledgers": [],
         "publish_ready": False,
         "counter_evidence_coverage": 1.0,
@@ -603,7 +608,7 @@ class LiveMarketToolClient:
 
     async def fetch(self, tool: str, params: Mapping[str, Any]) -> ToolClientResult:
         day = _resolve_day(params, self._as_of)
-        data = await self._load(tool.strip().lower(), day)
+        data = await self._load(tool.strip().lower(), day, params)
         payload: object = data if isinstance(data, Mapping) else {"items": data}
         return ToolClientResult(
             data=payload,
@@ -612,7 +617,9 @@ class LiveMarketToolClient:
             quality="high",
         )
 
-    async def _load(self, name: str, day: date) -> object:
+    async def _load(
+        self, name: str, day: date, params: Mapping[str, Any]
+    ) -> object:
         if name == "market_snapshot":
             compact = day.strftime("%Y%m%d")
             data = await self._call("get_close_snapshot", compact)
@@ -623,6 +630,8 @@ class LiveMarketToolClient:
         elif name in {"calendar_events", "event_evidence", "news"}:
             iso = day.isoformat()
             data = await self._call("get_calendar_events", iso, iso)
+        elif name == "news_search":
+            data = await self._search_news(params)
         elif name == "ths_index_map":
             data = await self._call("get_ths_index_map")
         elif name in {"index_kline", "trend", "stock_kline"}:
@@ -634,6 +643,27 @@ class LiveMarketToolClient:
         if data is None:
             raise RuntimeError(f"tool {name!r} returned no data")
         return data
+
+    async def _search_news(self, params: Mapping[str, Any]) -> dict[str, object]:
+        """按需检索新闻：关键词前加交易日，避免搜到跨度太大的旧闻。
+
+        Tavily 是同步客户端，放到线程里执行；回放层已经在
+        `TavilyService.search` 上做了切片替换，因此这里不需要额外的回放分支。
+        """
+        query = str(params.get("query") or "").strip()
+        if not query:
+            raise RuntimeError("news_search requires a non-empty query")
+        raw_limit = params.get("max_results")
+        limit = (
+            raw_limit
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+            else 5
+        )
+        limit = min(max(limit, 1), 5)
+        scoped = f"{self._data_cutoff.date().isoformat()} {query}"
+        return await asyncio.to_thread(
+            TavilyService.search, query=scoped, topic="news", max_results=limit
+        )
 
     async def _call(self, method: str, *args: object) -> object:
         func = getattr(self._client, method, None)

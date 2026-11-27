@@ -25,6 +25,9 @@ class RunProfile(V4Contract):
     timeout_s: int = Field(gt=0)
     token_budget: int = Field(gt=0)
     tool_groups: list[str] = Field(default_factory=list)
+    #: 分析过程中按需检索、但不参与预取扇出的原子工具（如 `news_search`）。
+    #: 声明后才进入网关 allowlist，且只能由缺口检索节点调用（需要模型给出 query）。
+    on_demand_tools: list[str] = Field(default_factory=list)
     data_cutoff_policy: str
     requires_parent_judgment: bool = False
     required_subprofiles: list[str] = Field(default_factory=list)
@@ -103,6 +106,7 @@ _PROFILES: dict[str, RunProfile] = {
         timeout_s=180,
         token_budget=32000,
         tool_groups=["market_snapshot", "event_evidence", "trend", "fundamental"],
+        on_demand_tools=["news_search"],
         data_cutoff_policy="market_close_cn",
         requires_parent_judgment=False,
         required_subprofiles=[],

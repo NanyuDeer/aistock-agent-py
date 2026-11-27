@@ -118,6 +118,16 @@ TOOL_MAP: Mapping[str, ToolSpec] = MappingProxyType(
             mirror_args=MappingProxyType({"date": ("date_to",)}),
             param_kinds=MappingProxyType({"date": "date_iso"}),
         ),
+        # 按需检索：分析师在分析中发现缺口时，用关键词检索新闻（Tavily topic=news）。
+        # 不是预取工具组，只允许在 profile 的 on_demand_tools 中声明后由缺口检索节点调用。
+        "news_search": ToolSpec(
+            method="search_news",
+            allowed_params=frozenset({"query", "max_results"}),
+            required_params=frozenset({"query"}),
+            source="tavily:news",
+            source_kind="search",
+            param_kinds=MappingProxyType({"query": "str", "max_results": "int"}),
+        ),
         "ths_index_map": ToolSpec(
             method="get_ths_index_map",
             allowed_params=frozenset(),
@@ -147,6 +157,9 @@ TOOL_GROUPS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "realtime_quote": ("quote",),
         "news": ("calendar_events",),
+        # 按需检索单独成组：它需要模型给出 query，不能进入预取扇出（research_task
+        # 没有 query 参数）。只由 `on_demand_tools` 声明后由缺口检索节点调用。
+        "news_search": ("news_search",),
         "market_snapshot": ("market_snapshot", "intraday_sectors"),
         "event_evidence": ("calendar_events",),
         "trend": ("ths_index_map", "index_kline"),

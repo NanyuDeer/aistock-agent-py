@@ -86,6 +86,9 @@ class NodeApiClient:
     #: 行情快照接口的专用超时：服务器实测 10.3~11.5s，默认 10s 会稳定超时
     #: 并让 V4 把「数据已就绪」误判成缺失（2026-11-27 实测）。
     _MARKET_SNAPSHOT_TIMEOUT_S = 30.0
+    #: 财联社当日电报要按日期分页回放（limit=200 实测数十秒），10s 默认超时会
+    #: 让 V4 把「当日有新闻」误判成缺失；与快照同档 30s。
+    _NEWS_TELEGRAPH_TIMEOUT_S = 30.0
 
     def __init__(self) -> None:
         self._base_url = settings.node_api_base_url.rstrip("/")
@@ -490,6 +493,20 @@ class NodeApiClient:
             return None
         events = resp.get("events")
         return events if isinstance(events, list) else None
+
+    async def get_news_telegraph(
+        self, date_iso: str, *, limit: int = 200
+    ) -> dict[str, object] | None:
+        """GET /internal/news/telegraph — 指定交易日的财联社全量电报。
+
+        返回 `{date, items: [{id,title,content,time,timestamp}], total, degraded}`；
+        供 V4 市场溯源在快照阶段预取新闻底稿（P26）。失败/超时返回 None，
+        由调用方记录缺失，绝不编造新闻。
+        """
+        return await self._get_dict(
+            f"/internal/news/telegraph?date={date_iso}&limit={limit}",
+            timeout=self._NEWS_TELEGRAPH_TIMEOUT_S,
+        )
 
     async def post_calendar_event(self, body: dict[str, object]) -> dict[str, object] | None:
         """POST /internal/calendar/events（L3 前瞻解析产物 upsert，§4.4/§4.8 C1）。

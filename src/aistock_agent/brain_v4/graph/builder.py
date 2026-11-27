@@ -75,6 +75,15 @@ _ANALYST_MAX_STEPS = 3
 #: 首调用即 budget_exhausted（2026-11-27 晚报 5 席位各 4800 → 全部 stalled）。
 _MIN_SEAT_BUDGET = 8000
 
+#: 按需检索配额与截断（north-star：检索要受控、可审计，不能无限搜）。
+_NEWS_SEARCH_RUN_QUOTA = 6
+_NEWS_SEARCH_SEAT_QUOTA = 2
+_NEWS_SEARCH_MAX_RESULTS = 5
+_NEWS_SEARCH_CONTENT_CHARS = 300
+
+#: 缺口关键词长度上限：分析师写的是检索词，不是长问题。
+_NEWS_QUERY_CHARS = 60
+
 
 def _plan_seats(
     seats: Sequence[str], remaining: int
@@ -233,6 +242,8 @@ class ResearchGraphState(TypedDict, total=False):
     parent_judgment_ids: list[str]
     evidence_items: Annotated[list[EvidenceItem], _merge_evidence]
     analyst_results: Annotated[list[AnalystResult], _merge_analyst_results]
+    #: 已执行的按需检索关键词（去重后的历史），用于 run 级配额与回放审计。
+    search_queries: list[str]
     submissions: list[PositionPaper]
     objections: list[Objection]
     rebuttals: list[Rebuttal]
@@ -293,6 +304,32 @@ def _round_of_evidence(item: EvidenceItem) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _normalize_search_query(text: str) -> str:
+    """把分析师写的缺口压成可检索关键词：折叠空白并限长。"""
+    return " ".join(str(text).split())[:_NEWS_QUERY_CHARS]
+
+
+def _round_gap_queries(state: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """取当前研究轮次各席位提出的检索缺口，每席位限量。
+
+    只取最近一轮：旧轮缺口若仍成立，分析师会在新一轮再次提出，避免同一问题
+    跨轮反复检索。返回 (席位, 关键词)，顺序确定以便回放。
+    """
+    round_no = int(state.get("research_round_no", 0))
+    results = [
+        result
+        for result in state.get("analyst_results", ())
+        if isinstance(result, AnalystResult) and result.research_round == round_no
+    ]
+    pairs: list[tuple[str, str]] = []
+    for result in sorted(results, key=lambda item: item.role):
+        for gap in list(result.requested_gaps)[:_NEWS_SEARCH_SEAT_QUOTA]:
+            query = _normalize_search_query(gap)
+            if query:
+                pairs.append((result.role, query))
+    return pairs
 
 
 def _referenced_evidence_ids(state: Mapping[str, Any]) -> set[str]:
@@ -558,7 +595,11 @@ def build_research_graph(
             runtime.gateway = ToolGateway(
                 runtime.tool_client,
                 as_of=request.as_of,
-                allowed_tools=analyst_tool_groups(profile),
+                # 预取组 + 展开后的原子工具 + profile 声明的按需检索工具。
+                allowed_tools=[
+                    *analyst_tool_groups(profile),
+                    *profile.on_demand_tools,
+                ],
                 clock=lambda: request.as_of,
             )
             # 工具名/参数只来自 profile 与 TOOL_MAP，构造阶段不触网。
@@ -917,6 +958,167 @@ def build_research_graph(
             ],
         }
 
+    async def gap_search_node(state: ResearchGraphState) -> dict[str, Any]:
+        """受控按需检索：把分析师提出的缺口变成关键词搜索并逐条入账。
+
+        为什么放在 assess 之前：新证据必须先进入 ledger，assess 才能按更新后的
+        证据判断是否需要下一轮；否则搜索结果只能停在审计里，无法影响研判。
+        配额（run 级 + 席位级）与关键词去重都在这里收口，保证检索可审计、可回放。
+        """
+        request = _require(state, "request", ResearchRequest)
+        profile = get_profile(request.profile)
+        gateway = runtime.gateway
+        candidates = _round_gap_queries(state)
+        if (
+            gateway is None
+            or "news_search" not in profile.on_demand_tools
+            or not candidates
+        ):
+            return {}
+
+        round_no = int(state.get("research_round_no", 0))
+        history = [str(item) for item in state.get("search_queries", ())]
+        seen = {item.lower() for item in history}
+        budget = max(0, _NEWS_SEARCH_RUN_QUOTA - len(history))
+        if budget <= 0:
+            return {
+                "trace": [
+                    _trace(
+                        f"trace_gap_search_r{round_no:02d}_quota",
+                        "gap_search",
+                        round_no=round_no,
+                        quota_exhausted=True,
+                    )
+                ]
+            }
+
+        ledger = state.get("evidence_ledger")
+        ledger_items = list(ledger.items) if isinstance(ledger, EvidenceLedger) else []
+        sources = dict(state.get("evidence_sources") or {})
+        new_items: list[EvidenceItem] = []
+        errors: list[dict[str, Any]] = []
+        traces: list[dict[str, Any]] = []
+        executed: list[str] = []
+        for role, query in candidates:
+            if budget <= 0:
+                break
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            budget -= 1
+            executed.append(query)
+            trace_id = f"trace_gap_search_r{round_no:02d}_{len(history) + len(executed):02d}"
+            envelope = await gateway.call(
+                "news_search",
+                {"query": query, "max_results": _NEWS_SEARCH_MAX_RESULTS},
+            )
+            if envelope.error is not None:
+                errors.append(
+                    {
+                        "error_id": f"err_{envelope.evidence_id}",
+                        "node": "gap_search",
+                        "error_kind": envelope.error,
+                        "detail": envelope.error_detail,
+                        "tool": "news_search",
+                        "query": query,
+                        "round_no": round_no,
+                    }
+                )
+                traces.append(
+                    _trace(
+                        trace_id,
+                        "gap_search",
+                        round_no=round_no,
+                        query=query,
+                        role=role,
+                        error=envelope.error,
+                    )
+                )
+                continue
+
+            data = envelope.data if isinstance(envelope.data, Mapping) else {}
+            raw_results = data.get("results")
+            results = raw_results if isinstance(raw_results, list) else []
+            provider = str(data.get("provider") or "tavily")
+            kept = 0
+            for index, hit in enumerate(results[:_NEWS_SEARCH_MAX_RESULTS]):
+                if not isinstance(hit, Mapping):
+                    continue
+                title = str(hit.get("title") or "").strip() or "无标题"
+                content = str(hit.get("content") or "").strip()[
+                    :_NEWS_SEARCH_CONTENT_CHARS
+                ]
+                url = str(hit.get("url") or "").strip() or None
+                digest = canonical_digest(
+                    {"query": query, "index": index, "title": title, "url": url}
+                )
+                evidence_id = f"ev_search_{digest[:12]}"
+                new_items.append(
+                    EvidenceItem(
+                        evidence_id=evidence_id,
+                        source="news_search",
+                        source_type="news",
+                        event_time=envelope.event_time or request.data_cutoff,
+                        published_at=envelope.published_at or request.as_of,
+                        fetched_at=envelope.fetched_at,
+                        as_of=envelope.as_of,
+                        evidence_kind="direct",
+                        supports_hypothesis_refs=[],
+                        data_quality=envelope.quality,
+                        # Tavily 结果无发布时间：按 as_of 底稿处理，置信度如实降为 medium。
+                        time_confidence="medium",
+                        tool="news_search",
+                        tool_params={
+                            "round_no": round_no,
+                            "query": query,
+                            "role": role,
+                            "url": url or "",
+                            "provider": provider,
+                        },
+                        response_digest=digest,
+                        snapshot_id=request.snapshot_id,
+                    )
+                )
+                sources[evidence_id] = f"{title}｜{content}" if content else title
+                kept += 1
+            traces.append(
+                _trace(
+                    trace_id,
+                    "gap_search",
+                    round_no=round_no,
+                    query=query,
+                    role=role,
+                    result_count=kept,
+                )
+            )
+
+        if not executed:
+            return {"trace": traces}
+        result: dict[str, Any] = {
+            "search_queries": [*history, *executed],
+            "trace": traces,
+            "usage": [{"key": "news_searches", "value": len(executed)}],
+            "evidence_sources": sources,
+        }
+        if new_items:
+            result["evidence_items"] = new_items
+        if isinstance(ledger, EvidenceLedger):
+            # 直接并入 ledger：即使 assess 判定充分、不再开新一轮，搜索结果
+            # 也已可被研判引用，不会因停在 evidence_items 而丢失。
+            result["evidence_ledger"] = EvidenceLedger(
+                run_id=ledger.run_id,
+                snapshot_id=ledger.snapshot_id,
+                as_of=ledger.as_of,
+                items=sorted(
+                    [*ledger_items, *new_items], key=lambda item: item.evidence_id
+                ),
+                conflict_ids=sorted(ledger.conflict_ids),
+            )
+        if errors:
+            result["errors"] = errors
+        return result
+
     def assess_node(state: ResearchGraphState) -> Command[str]:
         request = _require(state, "request", ResearchRequest)
         profile = get_profile(request.profile)
@@ -1266,6 +1468,7 @@ def build_research_graph(
         input_schema=AnalystTask,
     )
     builder.add_node("assess", assess_node)
+    builder.add_node("gap_search", gap_search_node)
     builder.add_node("collaboration_router", collaboration_router_node)
     builder.add_node("solo", solo_node)
     builder.add_node("consult", consult_node)
@@ -1285,7 +1488,8 @@ def build_research_graph(
     builder.add_conditional_edges(
         "analyze", dispatch_analysis, ["analyst_seat", "assess"]
     )
-    builder.add_edge("analyst_seat", "assess")
+    builder.add_edge("analyst_seat", "gap_search")
+    builder.add_edge("gap_search", "assess")
     builder.add_conditional_edges(
         "collaboration_router",
         route_mode,
