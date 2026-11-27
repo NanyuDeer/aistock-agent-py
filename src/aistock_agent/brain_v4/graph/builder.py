@@ -59,10 +59,6 @@ from ..contracts.research import (
     RoundLedger,
 )
 from ..controller.planner import ResearchPlan, build_plan
-
-#: 分析师步数上限：不持有取数工具后，3 步足够「读证据 → 综合 → 结构化输出」，
-#: 不再随 profile 配置的工具数量放大。
-_ANALYST_MAX_STEPS = 3
 from ..controller.sufficiency import evaluate_sufficiency
 from ..deliberation.graph import DeliberationState, build_council_graph
 from ..deliberation.router import route_collaboration
@@ -70,6 +66,10 @@ from ..graph.profiles import RunProfile, get_profile
 from ..graph.state import append_events, canonical_digest, merge_by_id, sum_usage
 from ..tools.gateway import ToolClient, ToolGateway
 from ..tools.tool_map import TOOL_GROUPS, TOOL_MAP, expand_groups
+
+#: 分析师步数上限：不持有取数工具后，3 步足够「读证据 → 综合 → 结构化输出」，
+#: 不再随 profile 配置的工具数量放大。
+_ANALYST_MAX_STEPS = 3
 
 ModelT = TypeVar("ModelT", bound=V4Contract)
 StateT = TypeVar("StateT")

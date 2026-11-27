@@ -36,6 +36,17 @@ _PROFILES = (
 )
 
 
+def _briefing_summary(result: LiveRunResult) -> object:
+    """从投影结果里取前端将展示的结论摘要；缺失返回 None。"""
+    payload = result.briefing_v1
+    if not isinstance(payload, dict):
+        return None
+    display = payload.get("display_report")
+    if not isinstance(display, dict):
+        return None
+    return display.get("summary")
+
+
 def _summary(
     result: LiveRunResult, archive: ArchiveResult | None = None
 ) -> dict[str, object]:
@@ -46,11 +57,7 @@ def _summary(
         "profile": result.profile,
         "status": result.status,
         # 审计需要直接看到"前端将消费的结论"，否则只能翻 payload 才能确认。
-        "briefing_summary": (
-            None
-            if result.briefing_v1 is None
-            else (result.briefing_v1.get("display_report") or {}).get("summary")
-        ),
+        "briefing_summary": _briefing_summary(result),
         "as_of": result.as_of.isoformat(),
         "data_cutoff": result.data_cutoff.isoformat(),
         "snapshot_id": result.snapshot_id,
