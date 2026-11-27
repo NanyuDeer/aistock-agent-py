@@ -332,6 +332,12 @@ def _initial_state(
         "request": request,
         "case_file": _case_file(case, request, hypotheses, items),
         "evidence_ledger": ledger,
+        # 分析师任务文本要写清“证据是什么”，而不是只给 ID；这里把冻结快照的
+        # 来源正文按 source_id 透传，供 analysts/context.py 生成摘要。
+        "evidence_sources": {
+            source_id: record.content
+            for source_id, record in case.snapshot.sources.items()
+        },
         "hypotheses": list(hypotheses),
         "causal_graph": [],
         "research_gaps": [],

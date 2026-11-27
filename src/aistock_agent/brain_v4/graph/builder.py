@@ -30,6 +30,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Send
 
+from ..analysts.context import build_analyst_task
 from ..analysts.kernel import AnalystResult, run_analyst_async
 from ..analysts.profiles import analyst_seats, analyst_tool_groups
 from ..analysts.tools import build_analyst_tools
@@ -58,6 +59,10 @@ from ..contracts.research import (
     RoundLedger,
 )
 from ..controller.planner import ResearchPlan, build_plan
+
+#: 分析师步数上限：不持有取数工具后，3 步足够「读证据 → 综合 → 结构化输出」，
+#: 不再随 profile 配置的工具数量放大。
+_ANALYST_MAX_STEPS = 3
 from ..controller.sufficiency import evaluate_sufficiency
 from ..deliberation.graph import DeliberationState, build_council_graph
 from ..deliberation.router import route_collaboration
@@ -817,10 +822,18 @@ def build_research_graph(
         # 才能让「run 级累计 ≤ 预算」在并行路径上真正成立。
         seats = analyst_seats(profile)
         per_seat_budget = remaining // max(1, len(seats))
-        task_text = (
-            f"research_round={round_no}; subject={request.subject_code}; "
-            f"hypotheses={','.join(hypothesis_refs)}; "
-            f"evidence={','.join(evidence_ids)}"
+        # 任务文本必须带假设陈述与证据摘要：只给 ID 会逼模型自己调工具取数，
+        # 工具一失败就耗尽步数（实测 analyst_stalled:step_limit ×4）。
+        sources = state.get("evidence_sources")
+        base_task = build_analyst_task(
+            mode="research",
+            role=", ".join(seats) or "lead",
+            round_no=round_no,
+            subject=request.subject_code,
+            goal=request.research_goal,
+            hypotheses=hypotheses,
+            evidence=list(ledger.items) if isinstance(ledger, EvidenceLedger) else [],
+            sources=sources if isinstance(sources, Mapping) else None,
         )
         return [
             Send(
@@ -832,7 +845,7 @@ def build_research_graph(
                     subject_code=request.subject_code,
                     hypothesis_refs=hypothesis_refs,
                     evidence_ids=evidence_ids,
-                    task_text=task_text,
+                    task_text=f"role={role}\n{base_task}",
                     token_budget=per_seat_budget,
                 ),
             )
@@ -851,14 +864,15 @@ def build_research_graph(
         if runtime.model is None:
             result = _deterministic_analyst(task, profile)
         else:
-            # 真实模型路径走异步内核：工具是异步 StructuredTool，且需要外层
-            # asyncio.wait_for 超时与 token 预算结构化降级。
+            # 取数已由 research_task 完成；分析师只负责解释证据，因此不再持有
+            # 取数工具，步数也收敛到 3，避免"工具越多、越容易耗尽步数"。
             result = await run_analyst_async(
                 role=role,
                 profile=profile,
                 model=runtime.model,
                 task=task.get("task_text", ""),
-                tools=runtime.analyst_tools,
+                tools=(),
+                max_steps=min(profile.analyst_max_steps, _ANALYST_MAX_STEPS),
                 research_round=round_no,
                 token_budget=token_budget,
                 timeout_s=profile.timeout_s,
@@ -1039,11 +1053,19 @@ def build_research_graph(
             for item in state.get("hypotheses", ())
             if isinstance(item, Hypothesis)
         )
-        task_text = (
-            f"mode=SOLO_DEEP; role={role}; research_round={round_no}; "
-            f"subject={request.subject_code}; goal={request.research_goal}; "
-            f"hypotheses={','.join(hypothesis_refs)}; "
-            f"evidence={','.join(evidence_ids)}"
+        hypotheses = [
+            item for item in state.get("hypotheses", ()) if isinstance(item, Hypothesis)
+        ]
+        sources = state.get("evidence_sources")
+        task_text = build_analyst_task(
+            mode="SOLO_DEEP",
+            role=role,
+            round_no=round_no,
+            subject=request.subject_code,
+            goal=request.research_goal,
+            hypotheses=hypotheses,
+            evidence=list(ledger.items) if isinstance(ledger, EvidenceLedger) else [],
+            sources=sources if isinstance(sources, Mapping) else None,
         )
         try:
             result = await run_analyst_async(
@@ -1051,7 +1073,9 @@ def build_research_graph(
                 profile=profile,
                 model=runtime.model,
                 task=task_text,
-                tools=runtime.analyst_tools,
+                # 取数由 research_task 完成，分析师只解释证据，不持有工具。
+                tools=(),
+                max_steps=min(profile.analyst_max_steps, _ANALYST_MAX_STEPS),
                 research_round=round_no,
                 token_budget=remaining,
                 timeout_s=profile.timeout_s,

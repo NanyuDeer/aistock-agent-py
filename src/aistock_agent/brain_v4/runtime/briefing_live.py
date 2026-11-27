@@ -36,6 +36,7 @@ from aistock_agent.brain_v4.features.briefing.adapter import (
     BriefingChainFixture,
     BriefingSessionSeed,
     build_evidence_window,
+    is_visible,
 )
 from aistock_agent.brain_v4.graph.builder import ResearchGraphState, build_research_graph
 from aistock_agent.brain_v4.tools.gateway import ToolClient
@@ -149,6 +150,23 @@ def _case_file(
     )
 
 
+def _source_briefs(
+    chain: BriefingChainFixture, session: BriefingSessionSeed
+) -> dict[str, str]:
+    """按提供方聚合该时段可见证据的内容摘要，供分析师任务文本使用。"""
+    grouped: dict[str, list[str]] = {}
+    for seed in chain.items:
+        if not is_visible(seed, session):
+            continue
+        content = seed.content.strip()
+        if not content:
+            continue
+        bucket = grouped.setdefault(seed.source, [])
+        if len(bucket) < 4:
+            bucket.append(content)
+    return {source: " | ".join(contents)[:600] for source, contents in grouped.items()}
+
+
 def _initial_state(
     chain: BriefingChainFixture,
     session: BriefingSessionSeed,
@@ -169,6 +187,9 @@ def _initial_state(
         "request": request,
         "case_file": _case_file(chain, session, request, hypotheses, items),
         "evidence_ledger": ledger,
+        # 分析师要看到“证据是什么”。简报证据的 `source` 是提供方标签（如
+        # node_api:close-snapshot），这里把同提供方的种子内容拼成一段摘要透传。
+        "evidence_sources": _source_briefs(chain, session),
         "hypotheses": list(hypotheses),
         "causal_graph": [],
         "research_gaps": [],
