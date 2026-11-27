@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 智慧大脑 V4 红区门禁：红区变更必须被执行包覆盖，否则拒绝提交。
+# 安装：cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# 绕过仅限明确知道后果时使用：git commit --no-verify
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# 取本次提交的已暂存文件（排除删除项）。
+git diff --cached --name-only --diff-filter=ACMR | python -m scripts.brain_v4.pre_commit_guard

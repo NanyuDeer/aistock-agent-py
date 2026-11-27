@@ -794,3 +794,51 @@ content = {
 ### 2026-11-12 播报/简报解析约定（周会任务 4）
 - 报告 schema_version 判定必须兼容全部 2.x（现网 midday=2.1），禁止精确等于 2.0，否则 podcast_brief 解析为空、午间播报因素材缺失不生成（`utils/report_parser.py`）。
 - 晚报「归因结论」优先取 `market_trace.trace.attribution_summary`（strip 后 8–120 字、非原始 JSON），否则回落 attribution_status/candidates 链式逻辑与「证据不足」文案（`services/briefing.py::_review_attribution_conclusion`）；晚报播报提示词要求围绕该归因结论洞见展开。
+
+## 智慧大脑 V4 红区变更强制流程（跨工具生效）
+
+> 本节对所有 AI 编码工具（Trae / Claude Code / Codex / WorkBuddy / Cursor 等）和人类开发者同等生效。
+> 其他工具不读 `.trae/rules/`，但都会读本文件；因此**跨工具的硬规则写在这里**。
+
+### 红区清单（改动前必须确认）
+
+~~~text
+aistock-agent-py/src/aistock_agent/brain_v4/contracts/
+aistock-agent-py/src/aistock_agent/brain_v4/graph/
+aistock-agent-py/src/aistock_agent/brain_v4/controller/
+aistock-agent-py/src/aistock_agent/brain_v4/deliberation/
+aistock-agent-py/src/aistock_agent/brain_v4/tools/
+aistock-agent-py/src/aistock_agent/brain_v4/generated/registry.lock
+aistock-agent-py/src/aistock_agent/brain_v4/registry.py
+aistock-agent-py/brain_v4_evals/contracts.py
+aistock-agent-py/brain_v4_evals/ab/
+aistock-app-api/src/modules/brain-v4/
+aistock-app-api/src/db/migrations/*brain_v4*
+~~~
+
+`brain_v4/features/**`、`brain_v4/runtime/**`、`brain_v4/analysts/**`、`brain_v4/renderers/**`、测试与 fixture 为绿区。
+
+### 强制步骤（缺一项即视为流程违规）
+
+1. **停止编码**：发现要改红区，先不要写实现代码。
+2. **建执行包**：在 `docs/brain-v4/packets/` 新建 `YYYY-MM-DD-brain-v4-<packet-id>.md`，必须含：`packet_id`、目标、`prerequisite_commit`、`allowed_files`（精确路径）、`forbidden_paths`、消费/产出契约、**一个先失败的测试**、实现步骤、验证命令、完成证据格式。
+3. **红区必须附失败案例**：contracts / graph / controller / deliberation 的改动，packet 中必须写明触发该改动的失败案例 ID 或失败测试名；没有失败证据不得改红区。
+4. **只改 allowlist**：提交前运行 `uv run python -m scripts.brain_v4.verify_change_scope <packet 文件>`（或等价 git 命令），越界即停止。
+5. **提交信息必须带 Packet**：`<type>(brain-v4): <说明>` 正文包含 `Packet: <packet-id>`。
+6. **冻结字段变更要升版本**：改动 §11 冻结契约的既有字段（删除/重命名/收紧必填/改变语义）必须升版本号并单独提交，不得与功能改动混在一起。
+
+### 禁止事项
+
+- 禁止"顺手"改红区：任何红区改动都必须先有 packet。
+- 禁止在同一提交里混合红区与绿区改动。
+- 禁止为了让测试通过而放宽既有断言。
+- 禁止在未运行验证命令的情况下声称完成。
+
+### 机器门禁（建议本地启用）
+
+~~~bash
+# 安装后，红区改动缺少 Packet 标记或越界会直接拒绝提交
+cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+~~~
+
+门禁脚本与上述规则使用同一份红区清单；规则改动时两处必须同步。

@@ -298,3 +298,77 @@ run_live -> brain_v4_runs（影子表）
 3. 只有离线 fixture 试点（Task 8/9）产出的评测台页面，与线上信号无关。
 
 补齐方式（建议独立执行包 P13）：在 `runtime/` 增加 `envelope` 适配器，把一次 `LiveRunResult` + 当天 `legacy_output` 映射为 `EvaluationEnvelope`，再调用 `generate_report` 输出 `reports/live/<date>/`。**这是当前唯一未满足的架构承诺**（§10 完成定义第 6 条）。
+
+## 15. 红区变更流程（跨工具强制）
+
+### 15.1 为什么要跨工具
+
+组内工具不统一（Trae、Claude Code、Codex、WorkBuddy、Cursor）。`.trae/rules/` 只对 Trae 生效；其他工具普遍读取仓库根 `AGENTS.md`。因此：
+
+- **规则正文写 `AGENTS.md`**（跨工具基线）；
+- **Trae 额外在 `.trae/rules/aistock-workflow.md` 引用同一份红区清单**，不重复定义；
+- **强制手段用机器门禁**（pre-commit + CI），不依赖模型自觉。
+
+### 15.2 红区清单（唯一来源）
+
+以 `aistock-agent-py/AGENTS.md` 的「红区清单」为准，代码侧同源实现为 `scripts/brain_v4/pre_commit_guard.py` 中的 `RED_ZONE_PREFIXES`。修改清单必须两处同步。
+
+### 15.3 六步强制流程
+
+1. 识别到红区路径 → **停止编码**。
+2. 在 `docs/brain-v4/packets/` 建执行包，写全 `packet_id`、目标、`prerequisite_commit`、`allowed_files`、`forbidden_paths`、消费/产出契约、**先失败的测试**、实现步骤、验证命令、完成证据。
+3. 红区（contracts / graph / controller / deliberation）改动必须附**失败案例 ID 或失败测试名**；没有失败证据不得改。
+4. 只改 allowlist；提交前用 `python -m scripts.brain_v4.pre_commit_guard` 或 `git diff --name-only` 自查。
+5. 提交信息正文含 `Packet: <packet-id>`。
+6. 冻结字段的语义变更必须升版本、单独提交。
+
+### 15.4 机器门禁
+
+~~~bash
+# 本地：安装 pre-commit 门禁
+cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+~~~
+
+门禁行为：暂存文件命中红区前缀，且 `docs/brain-v4/packets/` 中没有任何执行包的 allowlist 覆盖这些路径时，**直接拒绝提交**并列出缺失路径。
+
+安装后可用以下命令自测（预期被拒绝）：
+
+~~~bash
+echo 'touch src/aistock_agent/brain_v4/graph/_probe.py' >/dev/null
+~~~
+
+### 15.5 违规处理的既定动作
+
+发现"已合并但未走包"的红区改动时，不 revert 线上可用代码，而是：
+
+1. 补建追溯执行包，注明 `retroactive: true` 与实际提交 SHA；
+2. 在包内补写"该改动影响的 profile 与失败案例"；
+3. 由平台 owner 复核后合并追溯包；
+4. 下一个红区改动必须走完整前置包，不得再追溯。
+
+## 16. 运行不变量（V4.1.1 细化）
+
+以下不是新架构能力，而是让 §11 已声明的不变量**真正成立**的实现规则：
+
+### 16.1 run 级 token 预算
+
+- 预算口径：`RunProfile.token_budget` 为**单次 run 累计**上限，硬上限 = 1.2 × 预算。
+- 计数来源：必须取真实 usage（`llm_output["token_usage"]` 或 `AIMessage.usage_metadata`），不得使用模型自报值。
+- 并行扇出：席位并行时，剩余预算必须**按席位数均分**下发；每个席位不得拿到"剩余全额"。
+- 终局推理：启用 thinking 终局推理时，主工具循环只分配 90%，剩余 10% 留给终局调用。
+- 未达标判据：run 结束若 `total_tokens > 1.2 × token_budget`，视为预算不变量被破坏，必须修实现而不是调大预算。
+
+### 16.2 上下文与工具结果
+
+- 工具结果进入模型上下文前必须结构化压缩，保留全部 `evidence_id` 与关键数值，截断长尾并标 `truncated=true`。
+- 压缩只影响"给模型看的文本"，不得改变 `ToolEnvelope.data` 与证据账本。
+
+### 16.3 时段与 parent
+
+- 早/午/晚和市场溯源使用独立 `run_id`、`snapshot_id`、`data_cutoff`、ledger namespace；parent 关系只用于串联，不用于覆盖。
+
+## 17. 已知流程缺口（待补齐）
+
+1. **CI 尚未接入红区门禁**：目前只有本地 hook，可被 `--no-verify` 绕过；建议在 CI 增加同一脚本。
+2. **CODEOWNERS 未配置**：红区目录尚无强制 reviewer。
+3. **评测台未与线上 run 联动**：见 §14；规格见 `docs/brain-v4/evaluation-console-spec.md`。

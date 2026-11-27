@@ -1162,3 +1162,75 @@ latency_ms / token_usage / cost / quality_metrics / reviewer_score
 
 1. **评测台尚未与线上 run 联动**：真实 run 只写影子表并生成单栏审计页，未构造 `EvaluationEnvelope`、未调用 `generate_report`，因此缺旧链/V4 双栏与盲评字段。这对应正文 §10 完成定义第 6 条，需独立执行包补齐。
 2. 灰度晋级门禁仍未满足（时间泄漏、insufficient 率、人工盲评、回滚演练），当前 `active_owner` 仍为 legacy。
+
+## 附录 B：SOLO_DEEP 概念澄清与终局推理条款（2026-11-27 补充）
+
+### B.1 为什么"按计划完成"仍与设计有差距
+
+试点计划 Task 5 Step 1 的验收断言是：
+
+~~~python
+decision = route_collaboration(profile="alert_hot", materiality="high")
+assert decision.mode == "SOLO_DEEP"
+assert decision.selected_roles == []
+~~~
+
+而本规格 §2.5 对 `SOLO_DEEP` 的定义是"**一个主分析师**持续维护完整假设图；专家只供证据；正式逻辑 owner = Lead Analyst"。
+
+两者并不矛盾，是因为把**两个不同概念**混成了一个字段：
+
+| 概念 | 含义 | SOLO_DEEP 下的取值 |
+|---|---|---|
+| `collaboration seats`（协作席位） | 议会/顾问团里额外邀请的席位（alternative、risk、quant…） | **0 个**（`selected_roles == []` 正确） |
+| `lead analyst`（主分析师） | 承担该 run 正式逻辑的唯一分析师 | **1 个**（规格要求） |
+
+**裁定**：`selected_roles == []` 是正确的（无协作席位），但它**不等于**"该 run 没有任何分析师"。SOLO_DEEP 必须有一个 lead analyst 通过内核完成结构化研判；否则该模式实际上没有任何模型推理，只是"确定性桩 + 单写提交"，与规格承诺的深度不符。
+
+**打比方**：设计图纸要求"单人值班室必须有一名值班员"，施工清单只验了"门牌写着单人值班"，验收就通过了 —— 房子交付时门牌正确，但里面没人。
+
+**流程层面的教训**：计划的验收断言只覆盖了路由（"请不请顾问"），没有覆盖"主分析师是否真的工作"（"值班员在不在"）。后续任何 profile 的执行包，验收断言必须同时覆盖**路由结果**和**该模式下唯一的正式逻辑 owner 是否被真实调用**。
+
+### B.2 终局推理（thinking synthesis）
+
+**解决什么问题**：给"已有证据、需要下结论"的时刻保留推理深度。
+
+- 现有工具循环为满足 DeepSeek thinking 的接口限制关闭了 thinking（见 B.3），循环内只有浅层工具决策。
+- SOLO_DEEP 没有议会交叉质询，深度只能来自单分析师。
+- 终局推理在工具循环**结束之后**追加一次调用：输入是任务 + 已取证据摘要，不绑定工具，要求输出 `claim / confidence / uncertainties / requested_gaps`。
+
+**加之前 vs 加之后**：
+
+| 维度 | 加之前 | 加之后 |
+|---|---|---|
+| 结论来源 | 模型在工具循环里顺手生成的 `AnalystResult` | 专门一次推理，基于全部已取证据 |
+| 深度 | 受 tool_choice 限制，thinking 关闭 | thinking 开启，可长链推理 |
+| 成本 | N 次工具循环调用 | N 次 + 1 次（受预算 10% 预留约束） |
+| 失败影响 | — | 解析失败自动回退到原结果，不阻断 run |
+
+**边界（不可越界）**：
+1. 终局推理**只能重述已有证据**，不得引入新事实；其输入不含任何新工具结果。
+2. 它不产生证据，因此 `evidence_ids` 仍只来自 `EvidenceLedger`。
+3. 它不做裁决，`CouncilDecision` 依然只由 `CouncilJudge` 产出。
+4. 它属于可选增强：`thinking_model=None` 时完全退回原行为。
+
+### B.3 DeepSeek thinking 与工具的冲突及改法
+
+**冲突事实**：DeepSeek 的 thinking 模式不接受强制 `tool_choice`。LangChain 的 `ToolStrategy(AnalystResult)` 会强制模型调用结构化输出工具，因此请求返回 `400 Thinking mode does not support this tool_choice`。
+
+**当前改法（已实现，方案 A）**：工具循环关闭 thinking（`extra_body={"thinking":{"type":"disabled"}}`），循环结束后用不带工具的 thinking 模型做一次终局推理。
+
+**可选改法（方案 B，未实现，需单独执行包）**：保留 thinking，去掉 `ToolStrategy`：
+
+1. `create_agent(model, tools=..., system_prompt=...)` 不再传 `response_format`；
+2. 在系统提示中要求"最后一次回复只能是符合 schema 的 JSON"；
+3. 从最后一条 `AIMessage` 中提取 JSON 并 `AnalystResult.model_validate_json`；
+4. 解析失败时退回方案 A 或直接产出结构化 `error_kind="structured_output_invalid"`。
+
+| | 方案 A（当前） | 方案 B |
+|---|---|---|
+| 工具循环深度 | 无 thinking | 全程 thinking |
+| 稳定性 | 高（结构化输出由框架保证） | 依赖 JSON 解析与提示遵循 |
+| token | 较低 | 较高 |
+| 适用 | 默认所有 profile | 需要长链推理的深度场景（如 `market_trace`、`on_demand_deep`） |
+
+**建议**：方案 A 作为默认；方案 B 以 `RunProfile.analyst_output_mode: tool_strategy | json_freetext` 形式按 profile 开启。该字段属于 `RunProfile.v1` 冻结契约的**加性扩展**，需按 §11 第 1 条另开契约执行包，不得在本实现中顺带加入。

@@ -1,5 +1,26 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 红区门禁、SOLO 概念澄清与评测台规格
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `scripts/brain_v4/pre_commit_guard.py` + `scripts/git-hooks/pre-commit`：红区变更必须显式声明 `BRAIN_V4_PACKET=<packet-id>` 且被该包允许，否则拒绝提交；跨工具生效，不依赖模型自觉。
+- `docs/brain-v4/evaluation-console-spec.md`、`evaluation-console-plan.md`：旧链全量报告 + V4 新链报告的双栏评测台规格与四段实施计划（待评审，未实现）。
+
+### 文档
+
+- `AGENTS.md` 新增「智慧大脑 V4 红区变更强制流程」，作为 Codex / WorkBuddy / Trae 共用的跨工具基线。
+- 设计文档新增附录 B：澄清 `SOLO_DEEP` 的 `collaboration seats=0` 与 `lead analyst=1` 两个概念；补充终局推理条款与 DeepSeek thinking + 工具的两种改法。
+- 接入规范新增 §15 红区流程（跨工具）、§16 运行不变量（预算均分）、§17 已知流程缺口。
+
+### 测试
+
+- `tests/unit/brain_v4/test_pre_commit_guard.py`：6 例覆盖绿区放行、缺 packet 拒绝、未知 packet 拒绝、部分覆盖拒绝、Windows 路径归一化。
+
+---
+
 ## [main] 2026-11-27 — 真实 token 硬上限、工具结果压缩与 thinking 终局推理（P12-token-budget）
 
 **开发者**: NanyuDeer
