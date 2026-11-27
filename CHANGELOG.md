@@ -1,5 +1,36 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 实时数据运行器、briefing.v1 投影与 CLI（P3-live-runner）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/runtime/inputs.py`：`build_market_trace_case` / `build_briefing_chain` 用 `NodeApiClient` 只读方法构建 V4 输入；缺字段写入 `missing_fields` 并降级，`published_at`/`event_time` 超过 `as_of`/`data_cutoff` 的证据被隔离；旧链复盘只进 `legacy_output`，不进入 V4 证据。时间边界全部由入参决定，不读系统时间。
+- `src/aistock_agent/brain_v4/runtime/runner.py`：`run_live(profile, date, *, client, model, gateway, archiver)`；市场溯源复用 `run_market_trace` + `project_six_factor`，早/午/晚复用 `project_chain`；进程内同日同 profile 幂等，parent run/judgment 由链显式给出；取数失败/异常降级为 `partial` / `insufficient`，`archiver=None` 不落库。
+- `src/aistock_agent/brain_v4/runtime/briefing_projection.py`：`to_briefing_v1(result, session)` 输出严格 `briefing.v1` 信封（`schema_version` / `report_type` / `slot` / `date` / `as_of` / `display_report` / `podcast_brief` / `audio_path=None` / `judgment_ids` / `evening_extras`）；只引用既有 claim/judgment，不新增 claim。
+- `src/aistock_agent/brain_v4/runtime/cli.py`：`python -m aistock_agent.brain_v4.runtime.cli --profile ... --date ... [--json-out] [--html-out]`，输出 run 摘要 JSON，异常返回非零退出码。
+- `tests/integration/brain_v4/test_runner_real_data.py`：覆盖六因子与确定性 SHA、早/午/晚 parent、同日幂等不重复取数、取数失败降级、`published_at > cutoff` 证据隔离。
+- `tests/unit/brain_v4/test_briefing_projection_v1.py`：覆盖 `briefing.v1` 顶层字段集合、早/晚报 slot、`audio_path=None`、`evening_extras` 仅 post、投影不新增 claim。
+
+### 修改
+
+- `tools/tool_map.py`：新增 `TOOL_GROUPS` 与 `expand_groups`（`realtime_quote→[quote]`、`news→[calendar_events]`、`market_snapshot→[market_snapshot,intraday_sectors]`、`event_evidence→[calendar_events]`、`trend→[ths_index_map,index_kline]`、`fundamental→[]`、`verification→[legacy_review]`）；未知组跳过并记录。
+- `analysts/tools.py`：分析师工具改为按 `expand_groups` 展开原子工具生成，未知组跳过并记录，避免 alert_hot 等 profile 零工具。
+- `analysts/profiles.py`：`analyst_tool_groups` 同时返回原始组名与展开原子工具。主图 `research_task` 仍按组名扇出，分析师绑定原子工具；只返回一边会让另一边被网关判 `not_allowed`。
+- `tests/unit/brain_v4/test_analyst_model_injection.py`：两个断言更新为新契约（组名展开后生成原子工具；alert_hot 至少有 quote/calendar_events）。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/integration/brain_v4/test_runner_real_data.py tests/unit/brain_v4/test_briefing_projection_v1.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.runtime'`。
+- 绿态（focused）：同命令 → `7 passed in 5.97s`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `211 passed in 15.25s`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 68 source files`。
+- 未改 `features/` projection 语义、app-api、scheduler、`services/llm.py`、前端、pyproject；测试全部使用假 NodeApiClient + 假模型，未触网、未调用真实 LLM。
+
+---
+
 ## [main] 2026-11-27 — 真实模型与工具注入及预算控制（P2-live-model）
 
 **开发者**: NanyuDeer

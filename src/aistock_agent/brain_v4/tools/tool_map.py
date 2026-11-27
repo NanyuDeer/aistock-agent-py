@@ -5,10 +5,13 @@
 参数都在发请求之前被拒绝，避免越权读取或把脏参数拼进 URL。
 """
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 #: 参数取值类型。`date` 转 `datetime.date`（legacy 复盘接口只收 date）；
 #: `date_iso` 归一为 `YYYY-MM-DD` 字符串（Node 端点按该格式解析）。
@@ -133,6 +136,51 @@ TOOL_MAP: Mapping[str, ToolSpec] = MappingProxyType(
         ),
     }
 )
+
+
+#: profile 声明的工具组 → 允许触达的原子工具。
+#:
+#: 为什么不直接让模型调用工具组名：组名只是编排层概念，Node 端点按原子工具
+#: 一一对应；只有原子工具才登记了方法/参数白名单。`fundamental` 当前没有对应
+#: Node 端点，显式留空而不是伪造一个取不到数的工具，避免分析师“有工具但必失败”。
+TOOL_GROUPS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "realtime_quote": ("quote",),
+        "news": ("calendar_events",),
+        "market_snapshot": ("market_snapshot", "intraday_sectors"),
+        "event_evidence": ("calendar_events",),
+        "trend": ("ths_index_map", "index_kline"),
+        # 基本面端点尚未接入 Node 内部 API：留空并在这里说明原因。
+        "fundamental": (),
+        "verification": ("legacy_review",),
+    }
+)
+
+
+def expand_groups(groups: Iterable[str]) -> list[str]:
+    """把 profile 工具组展开为原子工具，保持声明顺序并按首次出现去重。
+
+    未知工具组跳过并记录日志：新建 profile 时多写一个组名不应让整个 run
+    因 KeyError 中断，也不应悄悄生成一个永远失败的工具。返回空列表代表该
+    profile 当前没有任何真实可用的原子工具，调用方据此决定降级策略。
+    """
+    expanded: list[str] = []
+    for group in groups:
+        key = group.strip().lower()
+        atoms = TOOL_GROUPS.get(key)
+        if atoms is None:
+            # 兼容直接写原子工具名的 profile：已是白名单工具则原样保留。
+            if key in TOOL_MAP:
+                atoms = (key,)
+            else:
+                logger.warning(
+                    "brain_v4_unknown_tool_group", extra={"tool_group": group}
+                )
+                continue
+        for atom in atoms:
+            if atom not in expanded:
+                expanded.append(atom)
+    return expanded
 
 
 def resolve_tool(tool: str) -> ToolSpec:

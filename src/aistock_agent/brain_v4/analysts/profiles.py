@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 from ..deliberation.roles import LEAD_ROLE, select_roles
 from ..graph.profiles import RunProfile
+from ..tools.tool_map import expand_groups
 
 
 def analyst_mode(profile: RunProfile) -> str:
@@ -29,5 +30,12 @@ def analyst_seats(profile: RunProfile) -> list[str]:
 
 
 def analyst_tool_groups(profile: RunProfile) -> list[str]:
-    """返回该 profile 允许的工具组，顺序与 profile 声明一致。"""
-    return list(profile.tool_groups)
+    """返回网关 allowlist：既有组名 + 展开后的原子工具。
+
+    为什么同时保留两者：主图 research_task 仍按组名扇出（组名是编排单位），
+    而分析师绑定的是展开后的原子工具。若只返回其中一边，另一边会被
+    `ToolGateway` 判为 not_allowed。展开规则集中在 `tool_map.expand_groups`。
+    """
+    raw = list(profile.tool_groups)
+    expanded = [atom for atom in expand_groups(profile.tool_groups) if atom not in raw]
+    return [*raw, *expanded]

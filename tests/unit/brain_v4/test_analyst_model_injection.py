@@ -127,7 +127,7 @@ def _profile_with(tool_groups: list[str]) -> RunProfile:
     return get_profile("market_trace").model_copy(update={"tool_groups": tool_groups})
 
 
-def test_tools_only_cover_profile_groups_registered_in_tool_map() -> None:
+def test_tools_expand_profile_groups_into_registered_atomic_tools() -> None:
     profile = _profile_with(["market_snapshot", "quote", "event_evidence"])
     gateway = ToolGateway(
         _RecordingClient(), as_of=AS_OF, allowed_tools=profile.tool_groups
@@ -136,19 +136,27 @@ def test_tools_only_cover_profile_groups_registered_in_tool_map() -> None:
     tools = build_analyst_tools(profile, gateway)
 
     names = {tool.name for tool in tools}
-    # event_evidence 只在网关 allowlist 中，未登记到 TOOL_MAP，无法真实取数 → 不生成。
-    assert names == {"market_snapshot", "quote"}
-    assert names <= set(profile.tool_groups)
+    # 组名先展开为原子工具：market_snapshot 同时包含盘内板块；event_evidence
+    # 落到 calendar_events；显式写出的原子工具 quote 原样保留。
+    assert names == {
+        "market_snapshot",
+        "intraday_sectors",
+        "quote",
+        "calendar_events",
+    }
     assert all(isinstance(tool, BaseTool) for tool in tools)
 
 
-def test_alert_hot_has_no_tool_when_groups_are_not_in_tool_map() -> None:
+def test_alert_hot_groups_expand_to_atomic_tools() -> None:
     profile = get_profile("alert_hot")
     gateway = ToolGateway(
         _RecordingClient(), as_of=AS_OF, allowed_tools=profile.tool_groups
     )
 
-    assert build_analyst_tools(profile, gateway) == []
+    # 展开后 alert_hot 至少有 quote / calendar_events 两个真实可用工具，
+    # 不再因为组名不在 TOOL_MAP 而得到零工具。
+    names = {tool.name for tool in build_analyst_tools(profile, gateway)}
+    assert names == {"quote", "calendar_events"}
 
 
 class _RecordingClient:

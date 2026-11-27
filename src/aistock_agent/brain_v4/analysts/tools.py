@@ -13,6 +13,7 @@
 """
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import cast
@@ -23,7 +24,7 @@ from pydantic.fields import FieldInfo
 
 from ..graph.profiles import RunProfile
 from ..tools.gateway import ToolGateway
-from ..tools.tool_map import TOOL_MAP, ParamKind, ToolSpec
+from ..tools.tool_map import TOOL_MAP, ParamKind, ToolSpec, expand_groups
 
 #: 工具参数到 Python 类型。日期类参数交给网关/客户端收敛，工具层按字符串接收。
 _PARAM_PYTHON_TYPES: dict[ParamKind, type] = {
@@ -123,22 +124,31 @@ def _make_coroutine(
 def build_analyst_tools(
     profile: RunProfile, gateway: ToolGateway
 ) -> list[BaseTool]:
-    """为 profile 的每个已登记工具组生成一个结构化工具。
+    """把 profile 的工具组展开为原子工具并生成结构化工具。
 
-    返回顺序与 `profile.tool_groups` 一致，便于 trace 对齐；未登记工具组被
-    跳过而不是报错，保证生产 profile 可以只用到当前已实现的取数映射。
+    为什么先展开：profile 里的 `realtime_quote` / `news` 是编排层组名，真正
+    能取数的是 `quote` / `calendar_events` 等原子工具。只按组名查 `TOOL_MAP`
+    会让 alert_hot 这类 profile 得到零工具。展开后未知组由 `expand_groups`
+    跳过并记录日志，保证“至少有可用工具”，同时不生成永远失败的工具。
+
+    返回顺序与展开顺序一致，便于 trace 对齐。
     """
     tools: list[BaseTool] = []
-    for group in profile.tool_groups:
-        spec = TOOL_MAP.get(group.strip().lower())
+    for tool_name in expand_groups(profile.tool_groups):
+        spec = TOOL_MAP.get(tool_name)
         if spec is None:
+            # 展开表登记了原子工具但 TOOL_MAP 尚未实现：这是配置缺口，
+            # 记录后跳过，避免把必然失败的工具交给模型。
+            logging.getLogger(__name__).warning(
+                "brain_v4_atomic_tool_not_mapped", extra={"tool": tool_name}
+            )
             continue
         tools.append(
             StructuredTool.from_function(
-                coroutine=_make_coroutine(group, gateway),
-                name=group,
-                description=_tool_description(group, spec),
-                args_schema=_args_schema(group, spec),
+                coroutine=_make_coroutine(tool_name, gateway),
+                name=tool_name,
+                description=_tool_description(tool_name, spec),
+                args_schema=_args_schema(tool_name, spec),
             )
         )
     return tools
