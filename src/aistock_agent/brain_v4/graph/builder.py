@@ -803,6 +803,11 @@ def build_research_graph(
         remaining = max(
             0, int(profile.token_budget - _analyst_tokens_used(state))
         )
+        # 席位是并行扇出的：若每个席位都拿完整 remaining，一轮实际消耗会是
+        # remaining × 席位数（实测 3.2 万预算跑出 8 万 token）。按席位数均分，
+        # 才能让「run 级累计 ≤ 预算」在并行路径上真正成立。
+        seats = analyst_seats(profile)
+        per_seat_budget = remaining // max(1, len(seats))
         task_text = (
             f"research_round={round_no}; subject={request.subject_code}; "
             f"hypotheses={','.join(hypothesis_refs)}; "
@@ -819,10 +824,10 @@ def build_research_graph(
                     hypothesis_refs=hypothesis_refs,
                     evidence_ids=evidence_ids,
                     task_text=task_text,
-                    token_budget=remaining,
+                    token_budget=per_seat_budget,
                 ),
             )
-            for role in analyst_seats(profile)
+            for role in seats
         ]
 
     async def analyst_seat_node(task: AnalystTask) -> dict[str, Any]:
