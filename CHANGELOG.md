@@ -1,5 +1,34 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — V4 实时取数初始化与真实 LLM 研究图（P6-live-fixes）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/runtime/bootstrap.py`：`ensure_app_env(default="production")` 在构造 `Settings`/`NodeApiClient` 前设置 `APP_ENV`；`ensure_runtime_pools(*, env=None)` 幂等初始化 `HttpClientPool`（及 `LlmHttpClient`），返回 `PoolStatus(http_ready, llm_ready, error)`，任何异常只记录不抛出。修复独立 CLI 进程没有 FastAPI lifespan 导致 `HttpClientPool._client is None`、取数全空与归档 `empty_response` 的根因 A。
+- `src/aistock_agent/brain_v4/runtime/graph_run.py`：`build_market_trace_request(case, *, run_id=None)` 把真实 case 映射为 `ResearchRequest`；`build_market_trace_hypotheses(case)` 从 case 的真实行情事实构造 3 个竞争假设（statement 不写死固定结论）；`run_research_graph(case, *, model, tool_client, gateway=None)` 用 `build_research_graph` `ainvoke` 真正执行 LLM 研究图，返回 `ResearchOutcome`（judgment/hypotheses/evidence_ledger/gaps/revision_events/collaboration_mode/sufficiency_passed/usage{token_source}/status/errors/graph_trace/causal_edges），失败收敛为 `status="degraded"`；`LiveMarketToolClient` 把工具组/原子工具名映射到 `NodeDataSource` 只读方法。修复根因 B（旧链是写死脚本、`model` 从未被调用）。
+- `tests/unit/brain_v4/test_live_bootstrap.py`、`test_graph_run_live.py`、`test_archive_error_surface.py`：覆盖连接池幂等初始化与异常收敛、真实 token/非固定假设/证据确定性/模型失败降级、归档错误三分类；全部离线（FakeChatModel + FakeToolClient + 假客户端），不触网、不调真实 LLM。
+
+### 修改
+
+- `src/aistock_agent/brain_v4/runtime/runner.py`：`run_live` 新增 `use_llm=True`，进入前 `ensure_app_env()` + `await ensure_runtime_pools()`；未注入模型时按 profile 构造真实分析师模型，失败记 `degraded_reason="model_unavailable:<原因>"`；market_trace 优先 `run_research_graph`（成功时 `audit.model_injected=True`、`usage.total_tokens` 来自真实模型、六因子用 outcome 的真实 hypotheses/causal_edges/evidence_ids），失败才回退 `run_market_trace` 并记 `research_graph_failed`；幂等/parent/状态字段语义不变。
+- `src/aistock_agent/brain_v4/runtime/archive.py`：`ArchiveResult` 新增 `error_detail`；`archive_run` 对含 `code` 的响应在 `code != 0` 或缺 `data` 时返回 `error="rejected:<message>"`，`RuntimeError` 分类为 `config_error` 并带出原文，`None` 仍为 `empty_response`；`NodeArchiveClient` 在连接池未初始化时显式抛 `RuntimeError`（`NodeApiClient.post` 会吞成 None，无法区分）。
+- `src/aistock_agent/brain_v4/runtime/cli.py`：`main` 入口调用 `ensure_app_env()`，其余不变。
+- `CHANGELOG.md`：追加本条目。
+- `docs/superpowers/packets/2026-11-27-brain-v4-P6-live-fixes.md`：新增 P6 执行包记录。
+
+### 验证
+
+- 红态（实现前）：新模块缺失 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.runtime.bootstrap'` / `...graph_run`；归档错误面 `assert 'unexpected_error' == 'config_error'`、`assert True is False`（业务拒绝被当成成功）。
+- 绿态（focused）：`uv run pytest tests/unit/brain_v4/test_live_bootstrap.py tests/unit/brain_v4/test_graph_run_live.py tests/unit/brain_v4/test_archive_error_surface.py -q` → `10 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `236 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改 `features/`、app-api、scheduler/config、services/、pyproject、既有测试；未新增依赖、未使用 `create_react_agent`。
+
+---
+
 ## [main] 2026-11-27 — V4 影子定时调度与开关（P5-scheduler）
 
 **开发者**: NanyuDeer

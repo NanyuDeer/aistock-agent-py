@@ -21,7 +21,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aistock_agent.brain_v4.contracts import V4Contract
 from aistock_agent.brain_v4.contracts.briefing import BriefingProfile
+from aistock_agent.brain_v4.contracts.evidence import EvidenceLedger
 from aistock_agent.brain_v4.contracts.judgment import V4Judgment
+from aistock_agent.brain_v4.contracts.research import (
+    CausalEdge,
+    Hypothesis,
+    ResearchGap,
+    RevisionEvent,
+)
 from aistock_agent.brain_v4.features.briefing.adapter import (
     BriefingChainFixture,
     MarketTraceReference,
@@ -46,9 +53,18 @@ from aistock_agent.brain_v4.features.market_trace.projection import (
     SixFactorChain,
     project_six_factor,
 )
+from aistock_agent.brain_v4.runtime.bootstrap import (
+    ensure_app_env,
+    ensure_runtime_pools,
+)
 from aistock_agent.brain_v4.runtime.briefing_projection import (
     ProjectionSession,
     to_briefing_v1,
+)
+from aistock_agent.brain_v4.runtime.graph_run import (
+    LiveMarketToolClient,
+    ResearchOutcome,
+    run_research_graph,
 )
 from aistock_agent.brain_v4.runtime.inputs import (
     BRIEFING_PROFILES,
@@ -132,6 +148,41 @@ def _ensure_client(client: NodeDataSource | None) -> NodeDataSource:
     return cast(NodeDataSource, NodeApiClient())
 
 
+def _resolve_model(
+    profile: str, model: BaseChatModel | None, use_llm: bool
+) -> tuple[BaseChatModel | None, str | None]:
+    """按 profile 构造分析师模型；失败只记录降级原因，不阻断运行。"""
+    if model is not None or not use_llm:
+        return model, None
+    try:
+        # 惰性导入：构造 ChatOpenAI 会读 settings；只有 use_llm 且未注入模型时才加载。
+        from aistock_agent.brain_v4.analysts.model_factory import build_analyst_model
+        from aistock_agent.brain_v4.graph.profiles import get_profile
+
+        return build_analyst_model(get_profile(profile)), None
+    except Exception as exc:  # noqa: BLE001 - 模型不可用时降级为确定性分析
+        return None, f"model_unavailable:{type(exc).__name__}: {exc}"
+
+
+def _usage_from_outcome(
+    source: dict[str, object], *, evidence_count: int
+) -> dict[str, int]:
+    """把研究图 usage 收敛成 `LiveRunResult.usage` 的整数字段，不虚报。"""
+    def _value(key: str) -> int:
+        value = source.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return value
+
+    return {
+        "prompt_tokens": _value("prompt_tokens"),
+        "completion_tokens": _value("completion_tokens"),
+        "total_tokens": _value("total_tokens"),
+        "tool_calls": _value("tool_calls"),
+        "evidence_count": evidence_count,
+    }
+
+
 async def run_live(
     profile: str,
     date: date_type,
@@ -140,29 +191,41 @@ async def run_live(
     model: BaseChatModel | None = None,
     gateway: ToolGateway | None = None,
     archiver: ArchiveFn | None = None,
+    use_llm: bool = True,
 ) -> LiveRunResult:
     """按 profile + date 运行 V4，返回统一结果；同日同 profile 幂等。
 
-    `model` / `gateway` 目前只记录到审计（features 链是确定性离线链），保留
-    入参是为了 P4 调度层统一签名；`archiver` 为 None 时不落库。
+    独立进程没有 FastAPI lifespan：进入前先确保 `APP_ENV` 与连接池就绪，
+    否则 `NodeApiClient` 的取数会被统一降级成 None。`use_llm` 为真且未注入
+    模型时尝试构造真实分析师模型；market_trace 会真正执行 LLM 研究图。
     """
     key = (date, profile)
     cached = _RUNS.get(key)
     if cached is not None:
         return cached
 
+    # 必须在构造 NodeApiClient / Settings 之前设置 APP_ENV，并幂等初始化连接池。
+    ensure_app_env()
+    await ensure_runtime_pools()
+
+    resolved_model, model_degraded = _resolve_model(profile, model, use_llm)
     data_source = _ensure_client(client)
     if profile == "market_trace":
         result = await _run_market_trace(
-            date, data_source, model=model, gateway=gateway
+            date,
+            data_source,
+            model=resolved_model,
+            gateway=gateway,
+            model_degraded=model_degraded,
         )
     elif profile in BRIEFING_PROFILES:
         result = await _run_briefing(
             cast(BriefingProfile, profile),
             date,
             data_source,
-            model=model,
+            model=resolved_model,
             gateway=gateway,
+            model_degraded=model_degraded,
         )
     else:
         raise ValueError(f"unknown V4 live profile: {profile!r}")
@@ -179,66 +242,149 @@ async def _run_market_trace(
     *,
     model: BaseChatModel | None,
     gateway: ToolGateway | None,
+    model_degraded: str | None = None,
 ) -> LiveRunResult:
     as_of, data_cutoff = _window_for("market_trace", day)
     snapshot_id = f"snap_market_trace_{day.strftime('%Y%m%d')}"
     inputs = await build_market_trace_case(client, as_of, data_cutoff, snapshot_id)
     case = inputs.case
+    snapshot_sha = compute_snapshot_sha(case.snapshot)
 
+    judgment: V4Judgment | None
+    hypotheses: list[Hypothesis]
+    ledger: EvidenceLedger | None
+    gaps: list[ResearchGap]
+    revisions: list[RevisionEvent]
+    causal_edges: list[CausalEdge]
+    collaboration_mode: str
+    sufficiency_passed: bool
+    six_factor: SixFactorChain
+    token_source: str
+    research_graph_failed: str | None = None
+    degraded_reason: str | None = None
+
+    outcome: ResearchOutcome | None
     try:
-        run = run_market_trace(case)
-        six_factor = _six_factor(run)
-        status = run.judgment.status
-        judgment: V4Judgment | None = run.judgment
-        degraded_reason: str | None = None
-    except Exception as exc:  # noqa: BLE001 - 编排层必须降级而不是抛裸异常
-        # 理论上 features 链对空证据是鲁棒的；这里兜底防止上游契约漂移。
-        run = None
-        six_factor = _empty_six_factor(case.snapshot.snapshot_id)
-        status = "insufficient"
-        judgment = _degraded_judgment(
-            run_id=case.run_id,
-            profile="market_trace",
-            subject_code=case.subject_code,
+        tool_client = LiveMarketToolClient(
+            client,
             as_of=as_of,
             data_cutoff=data_cutoff,
-            snapshot_id=snapshot_id,
-            parent_ids=[],
-            reason=f"runner_error:{type(exc).__name__}",
+            subject_code=case.subject_code,
         )
-        degraded_reason = f"{type(exc).__name__}: {exc}"
+        outcome = await run_research_graph(
+            case, model=model, tool_client=tool_client, gateway=gateway
+        )
+    except Exception as exc:  # noqa: BLE001 - 图执行失败才回退确定性脚本
+        outcome = None
+        research_graph_failed = f"{type(exc).__name__}: {exc}"
 
-    snapshot_sha = compute_snapshot_sha(case.snapshot)
-    evidence_ids = (
-        sorted(item.evidence_id for item in run.evidence_ledger.items)
-        if run is not None
-        else []
-    )
-    usage = _usage(tool_calls=inputs.tool_calls, evidence_count=len(evidence_ids))
+    if outcome is not None and outcome.status == "ok" and outcome.judgment is not None:
+        judgment = outcome.judgment
+        hypotheses = list(outcome.hypotheses)
+        ledger = outcome.evidence_ledger
+        gaps = list(outcome.gaps)
+        revisions = list(outcome.revision_events)
+        causal_edges = list(outcome.causal_edges)
+        collaboration_mode = outcome.collaboration_mode
+        sufficiency_passed = outcome.sufficiency_passed
+        token_source = str(outcome.usage.get("token_source") or "unavailable")
+        evidence_ids = (
+            sorted(item.evidence_id for item in ledger.items)
+            if ledger is not None
+            else []
+        )
+        six_factor = project_six_factor(
+            hypotheses=hypotheses,
+            causal_edges=causal_edges,
+            evidence_ids=set(evidence_ids),
+            snapshot_id=case.snapshot.snapshot_id,
+            gate_passed=sufficiency_passed,
+        )
+        usage = _usage_from_outcome(
+            outcome.usage, evidence_count=len(evidence_ids)
+        )
+    else:
+        if research_graph_failed is None and outcome is not None:
+            kinds = sorted(
+                str(error.get("error_kind") or error.get("error_id"))
+                for error in outcome.errors
+            )
+            research_graph_failed = "no_judgment" + (
+                f":{','.join(kinds)}" if kinds else ""
+            )
+        # 研究图失败才回退写死的确定性脚本，并在审计显式标记。
+        try:
+            run = run_market_trace(case)
+            judgment = run.judgment
+            hypotheses = list(run.hypotheses)
+            ledger = run.evidence_ledger
+            gaps = list(run.research_gaps)
+            revisions = list(run.revision_events)
+            collaboration_mode = run.collaboration_decision.mode
+            sufficiency_passed = run.sufficiency_passed
+            token_source = "unavailable"
+            evidence_ids = sorted(
+                item.evidence_id for item in run.evidence_ledger.items
+            )
+            six_factor = _six_factor(run)
+            usage = _usage(
+                tool_calls=inputs.tool_calls, evidence_count=len(evidence_ids)
+            )
+        except Exception as exc:  # noqa: BLE001 - 兜底降级，不抛裸异常
+            judgment = _degraded_judgment(
+                run_id=case.run_id,
+                profile="market_trace",
+                subject_code=case.subject_code,
+                as_of=as_of,
+                data_cutoff=data_cutoff,
+                snapshot_id=snapshot_id,
+                parent_ids=[],
+                reason=f"runner_error:{type(exc).__name__}",
+            )
+            hypotheses = []
+            ledger = None
+            gaps = []
+            revisions = []
+            collaboration_mode = "DEGRADED"
+            sufficiency_passed = False
+            token_source = "unavailable"
+            evidence_ids = []
+            six_factor = _empty_six_factor(case.snapshot.snapshot_id)
+            usage = _usage(
+                tool_calls=inputs.tool_calls, evidence_count=0
+            )
+            degraded_reason = f"{type(exc).__name__}: {exc}"
+
+    status: LiveStatus = judgment.status
     audit = _audit(
-        mode=(
-            run.collaboration_decision.mode if run is not None else "DEGRADED"
-        ),
+        mode=collaboration_mode,
         evidence_count=len(evidence_ids),
-        gap_count=len(run.research_gaps) if run is not None else 0,
-        revision_count=len(run.revision_events) if run is not None else 0,
+        gap_count=len(gaps),
+        revision_count=len(revisions),
         missing_fields=inputs.missing_fields,
         time_leakage_count=inputs.time_leakage_count,
         insufficient_reasons=(
-            []
-            if status == "ok"
-            else [judgment.stop_reason if judgment is not None else "judgment_missing"]
+            [] if status == "ok" else [judgment.stop_reason or "judgment_insufficient"]
         ),
         legacy_output_present=inputs.legacy_output is not None,
         model_injected=model is not None,
         gateway_injected=gateway is not None,
         snapshot_sha=snapshot_sha,
     )
+    audit["token_source"] = token_source
+    audit["usage_source"] = (
+        "deterministic_fallback"
+        if research_graph_failed is not None
+        else "research_graph"
+    )
+    if model_degraded is not None:
+        audit["degraded_reason"] = model_degraded
     if degraded_reason is not None:
         audit["degraded_reason"] = degraded_reason
+    if research_graph_failed is not None:
+        audit["research_graph_failed"] = research_graph_failed
 
     payload = _market_trace_payload(
-        run=run,
         case=case,
         judgment=judgment,
         six_factor=six_factor,
@@ -249,6 +395,11 @@ async def _run_market_trace(
         missing_fields=inputs.missing_fields,
         legacy_output=inputs.legacy_output,
         evidence_ids=evidence_ids,
+        evidence_ledger=ledger,
+        hypotheses=hypotheses,
+        gaps=gaps,
+        revisions=revisions,
+        collaboration_mode=collaboration_mode,
     )
     return LiveRunResult(
         run_id=case.run_id,
@@ -291,7 +442,6 @@ def _empty_six_factor(snapshot_id: str) -> SixFactorChain:
 
 def _market_trace_payload(
     *,
-    run: ResearchRun | None,
     case: MarketTraceCase,
     judgment: V4Judgment | None,
     six_factor: SixFactorChain,
@@ -302,6 +452,11 @@ def _market_trace_payload(
     missing_fields: list[str],
     legacy_output: dict[str, object] | None,
     evidence_ids: list[str],
+    evidence_ledger: EvidenceLedger | None,
+    hypotheses: list[Hypothesis],
+    gaps: list[ResearchGap],
+    revisions: list[RevisionEvent],
+    collaboration_mode: str,
 ) -> dict[str, object]:
     return {
         "run_id": case.run_id,
@@ -314,22 +469,11 @@ def _market_trace_payload(
         "judgment": _dump(judgment),
         "briefing_v1": None,
         "six_factor": six_factor.model_dump(mode="json"),
-        "evidence_ledger": _dump(run.evidence_ledger) if run is not None else None,
-        "hypotheses": [
-            hypothesis.model_dump(mode="json")
-            for hypothesis in (run.hypotheses if run is not None else [])
-        ],
-        "gaps": [
-            gap.model_dump(mode="json")
-            for gap in (run.research_gaps if run is not None else [])
-        ],
-        "revisions": [
-            event.model_dump(mode="json")
-            for event in (run.revision_events if run is not None else [])
-        ],
-        "collaboration_mode": (
-            run.collaboration_decision.mode if run is not None else "DEGRADED"
-        ),
+        "evidence_ledger": _dump(evidence_ledger),
+        "hypotheses": [hypothesis.model_dump(mode="json") for hypothesis in hypotheses],
+        "gaps": [gap.model_dump(mode="json") for gap in gaps],
+        "revisions": [event.model_dump(mode="json") for event in revisions],
+        "collaboration_mode": collaboration_mode,
         "usage": usage,
         "audit": audit,
         "parent_run_id": None,
@@ -339,7 +483,7 @@ def _market_trace_payload(
         "evidence_ids": evidence_ids,
         "evidence": [
             item.model_dump(mode="json")
-            for item in (run.evidence_ledger.items if run is not None else [])
+            for item in (evidence_ledger.items if evidence_ledger is not None else [])
         ],
         # 证据标题在 evidence 投影里被压缩掉；来源表保留它供审计/前端核对。
         "sources": [
@@ -356,14 +500,21 @@ async def _run_briefing(
     *,
     model: BaseChatModel | None,
     gateway: ToolGateway | None,
+    model_degraded: str | None = None,
 ) -> LiveRunResult:
     as_of, data_cutoff = _window_for(profile, day)
     inputs = await build_briefing_chain(client, day, profile)
     chain = inputs.chain
 
     # 晚报必须按 ID 引用当日市场溯源研判；若尚未运行则先补跑（幂等）。
+    # 模型已在上层解析，递归补跑禁止再次尝试建模型。
     market_trace = await run_live(
-        "market_trace", day, client=client, model=model, gateway=gateway
+        "market_trace",
+        day,
+        client=client,
+        model=model,
+        gateway=gateway,
+        use_llm=False,
     )
     reference = _market_trace_reference(market_trace)
     parent_run_id, parent_judgment_ids = _expected_parents(chain, profile)
@@ -434,6 +585,8 @@ async def _run_briefing(
     )
     if degraded_reason is not None:
         audit["degraded_reason"] = degraded_reason
+    elif model_degraded is not None:
+        audit["degraded_reason"] = model_degraded
 
     payload = _briefing_payload(
         profile=profile,

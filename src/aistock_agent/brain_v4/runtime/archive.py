@@ -38,6 +38,8 @@ class ArchiveResult:
     run_id: str
     error: str | None = None
     response: dict[str, object] | None = None
+    # 失败根因原文：区分“连接池未初始化”与“服务端业务拒绝”。
+    error_detail: str | None = None
 
 
 class ArchiveClient(Protocol):
@@ -73,6 +75,15 @@ class NodeArchiveClient:
         *,
         headers: dict[str, str] | None = None,
     ) -> dict[str, object] | None:
+        # `NodeApiClient.post` 会把连接池未初始化抛出的 RuntimeError 吞成 None，
+        # 使归档层无法区分“未初始化”与“空响应”。这里显式探测连接池状态，
+        # 让 RuntimeError 带出真实原因（上层据此分类为 config_error）。
+        from aistock_agent.services.http_client import HttpClientPool
+
+        try:
+            await HttpClientPool.get_client()
+        except RuntimeError as exc:
+            raise RuntimeError(str(exc)) from exc
         return await self._client.post(path, body)
 
 
@@ -249,6 +260,9 @@ def _classify_error(exc: Exception) -> str:
         return "http_error"
     if isinstance(exc, httpx.RequestError):
         return "request_error"
+    # 连接池未初始化等本地配置错误会以 RuntimeError 上抛；与上游故障区分开。
+    if isinstance(exc, RuntimeError):
+        return "config_error"
     return "unexpected_error"
 
 
@@ -275,10 +289,35 @@ async def archive_run(
         )
     except Exception as exc:  # noqa: BLE001 - 归档失败不得推翻已完成的研判
         return ArchiveResult(
-            archived=False, run_id=result.run_id, error=_classify_error(exc)
+            archived=False,
+            run_id=result.run_id,
+            error=_classify_error(exc),
+            error_detail=str(exc),
         )
     if response is None:
         return ArchiveResult(archived=False, run_id=result.run_id, error="empty_response")
+
+    # 响应可能是未解包的信封（含 code）：code != 0 或缺少 data 时按业务拒绝处理，
+    # 不再笼统报 empty_response。`NodeArchiveClient` 已解包的纯 data（无 code）照常成功。
+    if "code" in response:
+        code = response.get("code")
+        message = _as_str(response.get("message")) or "unknown"
+        if code not in (0, 200, 201):
+            return ArchiveResult(
+                archived=False,
+                run_id=result.run_id,
+                error=f"rejected:{message}",
+                response=response,
+                error_detail=message,
+            )
+        if response.get("data") is None:
+            return ArchiveResult(
+                archived=False,
+                run_id=result.run_id,
+                error=f"rejected:{message}",
+                response=response,
+                error_detail=message,
+            )
     return ArchiveResult(archived=True, run_id=result.run_id, response=response)
 
 

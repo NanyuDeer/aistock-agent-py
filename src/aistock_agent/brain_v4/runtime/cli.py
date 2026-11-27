@@ -25,6 +25,7 @@ from aistock_agent.brain_v4.runtime.archive import (
     archive_run,
     write_daily_report,
 )
+from aistock_agent.brain_v4.runtime.bootstrap import ensure_app_env
 from aistock_agent.brain_v4.runtime.runner import LiveRunResult, run_live
 
 _PROFILES = (
@@ -118,6 +119,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    # 独立进程没有 FastAPI lifespan：必须在构造 Settings/NodeApiClient 之前
+    # 设置 APP_ENV（production → .env.production），否则取数/归档会全空。
+    ensure_app_env()
     try:
         trading_date = date_type.fromisoformat(args.date)
     except ValueError:
