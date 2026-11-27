@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date as date_type
 from datetime import datetime, time, timedelta, timezone
 from typing import Literal, cast
