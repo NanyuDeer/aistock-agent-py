@@ -99,6 +99,9 @@ class MarketTraceInputs:
     time_leakage_count: int
     tool_calls: int
     legacy_output: dict[str, object] | None
+    #: 行情事实的实际来源：`close_snapshot` / `last_close` / `unavailable`。
+    #: 供审计区分「当日收盘快照」与「回退到上一交易日 last_close」。
+    data_source: str = "close_snapshot"
 
 
 @dataclass(frozen=True)
@@ -378,6 +381,22 @@ async def build_market_trace_case(
     day = as_of.date()
     date_compact = day.strftime("%Y%m%d")
     close = await fetcher.close_snapshot(date_compact)
+    # 当日收盘快照可能尚未生成（close-snapshot 409/None）。此时回退到
+    # last_close_snapshot 填充 indexes/breadth/sectors，而不是把这些字段判缺；
+    # 同时显式标注 data_source，避免把上一交易日数据伪装成当日。
+    data_source = "close_snapshot"
+    if close is None:
+        fallback = await fetcher.last_close()
+        if fallback is not None:
+            close = fallback
+            data_source = "last_close"
+        else:
+            data_source = "unavailable"
+    provider = (
+        "node_api:last-close-snapshot"
+        if data_source == "last_close"
+        else "node_api:close-snapshot"
+    )
     calendar = await fetcher.calendar(day.isoformat())
     review_status, legacy_report = _review_fields(
         await fetcher.review(day)
@@ -416,7 +435,7 @@ async def build_market_trace_case(
             sources[source_id] = _source_record(
                 source_id=source_id,
                 kind="market_fact",
-                provider=_as_str(info.get("source")) or "node_api:close-snapshot",
+                provider=_as_str(info.get("source")) or provider,
                 title=_as_str(info.get("name")) or code,
                 content=_format_pairs(info),
                 occurred_at=data_cutoff,
@@ -427,13 +446,13 @@ async def build_market_trace_case(
             "available", ["close", "change_pct"], None
         )
         collection["index"] = _collection(
-            "available", "node_api:close-snapshot", len(indexes), None
+            "available", provider, len(indexes), None
         )
     else:
         missing.append("indexes")
         availability["index"] = _availability("unavailable", [], "missing indexes")
         collection["index"] = _collection(
-            "unavailable", "node_api:close-snapshot", 0, "missing indexes"
+            "unavailable", provider, 0, "missing indexes"
         )
 
     breadth = _as_mapping(close.get("breadth")) if close is not None else None
@@ -442,7 +461,7 @@ async def build_market_trace_case(
         sources["BREADTH_ALL"] = _source_record(
             source_id="BREADTH_ALL",
             kind="market_fact",
-            provider="node_api:close-snapshot",
+            provider=provider,
             title="全市场涨跌家数",
             content=_format_pairs(breadth),
             occurred_at=data_cutoff,
@@ -453,13 +472,13 @@ async def build_market_trace_case(
             "available", ["advance_count", "decline_count"], None
         )
         collection["breadth"] = _collection(
-            "available", "node_api:close-snapshot", 1, None
+            "available", provider, 1, None
         )
     else:
         missing.append("breadth")
         availability["breadth"] = _availability("unavailable", [], "missing breadth")
         collection["breadth"] = _collection(
-            "unavailable", "node_api:close-snapshot", 0, "missing breadth"
+            "unavailable", provider, 0, "missing breadth"
         )
 
     for key, source_id, title in (
@@ -474,7 +493,7 @@ async def build_market_trace_case(
             sources[source_id] = _source_record(
                 source_id=source_id,
                 kind="market_fact",
-                provider="node_api:close-snapshot",
+                provider=provider,
                 title=title,
                 content=_format_pairs(section)
                 if key != "sectors"
@@ -489,13 +508,13 @@ async def build_market_trace_case(
             )
             availability[family] = _availability("available", [key], None)
             collection[family] = _collection(
-                "available", "node_api:close-snapshot", 1, None
+                "available", provider, 1, None
             )
         else:
             missing.append(key)
             availability[family] = _availability("unavailable", [], f"missing {key}")
             collection[family] = _collection(
-                "unavailable", "node_api:close-snapshot", 0, f"missing {key}"
+                "unavailable", provider, 0, f"missing {key}"
             )
 
     visible_events: list[dict[str, object]] = []
@@ -595,6 +614,7 @@ async def build_market_trace_case(
         time_leakage_count=leakage,
         tool_calls=fetcher.calls,
         legacy_output=legacy_report,
+        data_source=data_source,
     )
 
 

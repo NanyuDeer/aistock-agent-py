@@ -1,5 +1,35 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — run 级 token 预算封顶与收盘快照回退（P9-budget-and-last-close）
+
+**开发者**: NanyuDeer
+
+### 修改
+
+- `src/aistock_agent/brain_v4/graph/builder.py`：新增 `_analyst_tokens_used` / `_budget_allows_new_round`，按 `state.usage` 累计 `analyst_tokens` 计算 run 级剩余预算 `remaining=profile.token_budget-used`；`dispatch_analysis` 在剩余预算不足以再开一轮（含 `remaining<=0`）时不再创建分析师任务，改为把当前状态送入既有 `assess` 节点收敛（未新增/删除节点或边）；可派发时把 `token_budget=remaining` 通过 `AnalystTask` 下发 kernel；`assess_node` 的 `can_continue` 增加预算判定，`solo_node` 在预算不足时跳过主分析师派发；停止原因记 `research_budget_exhausted`。修复预算只在单分析师维度检查、run 级累计烧到 62 万 token 才停的根因。
+- `src/aistock_agent/brain_v4/runtime/inputs.py`：`build_market_trace_case` 在当日 `close_snapshot` 缺失/异常时回退 `get_last_close_snapshot()` 填充 indexes/breadth/turnover/style/sectors，来源 provider 标 `node_api:last-close-snapshot`；`MarketTraceInputs` 新增 `data_source`（`close_snapshot`/`last_close`/`unavailable`），两者都缺时仍如实记 `missing_fields`。
+- `CHANGELOG.md`：追加本条目。
+
+### 新增
+
+- `tests/unit/brain_v4/test_run_budget_cap.py`：固定 5000 tokens/次的 FakeChatModel + 记录型假 ToolClient，断言累计 `analyst_tokens <= profile.token_budget*1.2`、预算不足后不再新增模型调用（`model.calls == len(analyst_seats)`）、`stop_reason=="research_budget_exhausted"` 且图正常收敛出 judgment。
+- `tests/unit/brain_v4/test_inputs_last_close_fallback.py`：`close_snapshot` 抛异常/返回 None + `last_close` 有数据 → indexes/breadth/sectors 不再 missing 且 `data_source=="last_close"`、来源 provider 为 last-close；两者都缺 → 仍标 missing、`data_source=="unavailable"`。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_run_budget_cap.py tests/unit/brain_v4/test_inputs_last_close_fallback.py -q` → `4 failed`（累计 125000 tokens 超 38400；indexes 仍在 missing；无 `data_source`）。
+- 绿态（focused）：同命令 → `4 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `249 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改 services/、analytics/、features/、scheduler/config、analysts/kernel.py、runtime/runner.py；未新增依赖；测试不触网、不调真实 LLM。
+
+### 说明
+
+`remaining` 按 run 级累计 usage 计算并通过 `AnalystTask.token_budget` 下发；为避免并行席位把累计 token 顶过 1.2 倍上限，开新一轮前要求 `remaining >= 已完成轮次平均成本`，这是 `remaining<=0` 之外的保守前置条件。
+
+---
+
 ## [main] 2026-11-27 — 关闭 DeepSeek thinking 并修正研究任务工具参数（P8-thinking-and-tools）
 
 **开发者**: NanyuDeer

@@ -122,6 +122,37 @@ def _merge_trace(
     return append_events(left, right, "trace_id")
 
 
+def _analyst_tokens_used(state: Mapping[str, Any]) -> float:
+    """累计本次 run 已消耗的分析师 token（usage 通道按 key 求和）。"""
+    total = 0.0
+    for record in state.get("usage", ()):
+        if not isinstance(record, Mapping) or record.get("key") != "analyst_tokens":
+            continue
+        value = record.get("value")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            total += float(value)
+    return total
+
+
+def _budget_allows_new_round(
+    state: Mapping[str, Any], profile: RunProfile
+) -> bool:
+    """run 级累计预算是否还够再派发一整轮分析师。
+
+    为什么不能只看 ``remaining > 0``：分析师席位是并行扇出的，只要派发就会
+    产生一次模型调用；仅当剩余预算不小于「已完成轮次的平均成本」时，再开一轮
+    才不至于把累计 token 顶过 ``profile.token_budget`` 的 1.2 倍上限。
+    """
+    used = _analyst_tokens_used(state)
+    remaining = profile.token_budget - used
+    if remaining <= 0:
+        return False
+    rounds = int(state.get("research_round_no", 0))
+    if rounds <= 0:
+        return True
+    return remaining >= used / rounds
+
+
 class ResearchTask(TypedDict, total=False):
     """单个“假设 × 工具组”研究任务，通过 `Send` 并行下发。"""
 
@@ -145,6 +176,8 @@ class AnalystTask(TypedDict, total=False):
     hypothesis_refs: list[str]
     evidence_ids: list[str]
     task_text: str
+    #: run 级剩余预算（由 `dispatch_analysis` 按累计 usage 计算后下发）。
+    token_budget: int
 
 
 class ResearchGraphState(TypedDict, total=False):
@@ -762,6 +795,14 @@ def build_research_graph(
         hypotheses = list(state.get("hypotheses", ()))
         hypothesis_refs = sorted(hypothesis.ref for hypothesis in hypotheses)
         round_no = int(state.get("research_round_no", 0))
+        # run 级累计预算：先看是否还够再开一整轮。预算不足以支撑新一轮时不再
+        # 创建分析师任务，直接把当前状态送进 assess 收敛（不新增/不改变节点与
+        # 边，只切换既有条件边的目标），随后 assess 记 budget 停止。
+        if not _budget_allows_new_round(state, profile):
+            return [Send("assess", dict(state))]
+        remaining = max(
+            0, int(profile.token_budget - _analyst_tokens_used(state))
+        )
         task_text = (
             f"research_round={round_no}; subject={request.subject_code}; "
             f"hypotheses={','.join(hypothesis_refs)}; "
@@ -778,6 +819,7 @@ def build_research_graph(
                     hypothesis_refs=hypothesis_refs,
                     evidence_ids=evidence_ids,
                     task_text=task_text,
+                    token_budget=remaining,
                 ),
             )
             for role in analyst_seats(profile)
@@ -787,6 +829,11 @@ def build_research_graph(
         profile = get_profile(task.get("profile_name", ""))
         role = task.get("role", "")
         round_no = int(task.get("round_no", 0))
+        # run 级剩余预算由 dispatch 下发；缺失时回退到 profile 默认（离线/旧调用）。
+        raw_budget = task.get("token_budget")
+        token_budget = (
+            profile.token_budget if raw_budget is None else int(raw_budget)
+        )
         if runtime.model is None:
             result = _deterministic_analyst(task, profile)
         else:
@@ -799,7 +846,7 @@ def build_research_graph(
                 task=task.get("task_text", ""),
                 tools=runtime.analyst_tools,
                 research_round=round_no,
-                token_budget=profile.token_budget,
+                token_budget=token_budget,
                 timeout_s=profile.timeout_s,
             )
         return {
@@ -837,8 +884,11 @@ def build_research_graph(
         )
         prior_ledgers = list(state.get("round_ledgers", ()))
         next_round = round_no + 1
+        # 预算不足以再开一轮时不得继续 research，否则会无限回到 plan→dispatch。
         can_continue = (
-            not report.passed and next_round < profile.max_research_rounds
+            not report.passed
+            and next_round < profile.max_research_rounds
+            and _budget_allows_new_round(state, profile)
         )
         round_ledger = RoundLedger(
             round_no=round_no,
@@ -950,6 +1000,16 @@ def build_research_graph(
         # 都不会被调用，无法审计 V4 的智能度。席位取 profile 第一个分析师
         # （单人模式回落到 lead），任务文本只描述真实假设与证据，不含结论。
         profile = get_profile(request.profile)
+        # run 级预算不足以再开一轮时，不再派发主分析师，避免预算耗尽后仍新增
+        # 模型调用（与 research 席位同一判定口径）。
+        if not _budget_allows_new_round(state, profile):
+            return {
+                "run_status": "solo",
+                "trace": [_trace("trace_solo", "solo", budget_skipped=True)],
+            }
+        remaining = max(
+            0, int(profile.token_budget - _analyst_tokens_used(state))
+        )
         seats = analyst_seats(profile)
         role = seats[0] if seats else "lead"
         round_no = int(state.get("research_round_no", 0))
@@ -978,7 +1038,7 @@ def build_research_graph(
                 task=task_text,
                 tools=runtime.analyst_tools,
                 research_round=round_no,
-                token_budget=profile.token_budget,
+                token_budget=remaining,
                 timeout_s=profile.timeout_s,
             )
         except Exception as exc:  # noqa: BLE001 - 分析师失败不得让图崩溃
@@ -1162,7 +1222,7 @@ def build_research_graph(
     builder.add_edge("research_task", "collect")
     builder.add_edge("collect", "analyze")
     builder.add_conditional_edges(
-        "analyze", dispatch_analysis, ["analyst_seat"]
+        "analyze", dispatch_analysis, ["analyst_seat", "assess"]
     )
     builder.add_edge("analyst_seat", "assess")
     builder.add_conditional_edges(
