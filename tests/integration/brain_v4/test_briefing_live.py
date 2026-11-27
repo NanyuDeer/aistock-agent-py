@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aistock_agent.brain_v4.runtime import reset_live_runs, run_live
@@ -325,6 +325,52 @@ async def test_briefing_session_skips_research_tools() -> None:
     assert int(outcome.usage["tool_calls"]) == 0
     assert outcome.analyst_claims, "冻结证据下分析师仍应产出 claim"
     assert not [e for e in outcome.errors if "JudgmentEvidenceError" in e]
+
+
+async def test_briefing_task_includes_evidence_text() -> None:
+    """分析师必须看到证据正文（点位/涨跌幅/家数），而不是只有 ID 元数据。
+
+    真实故障：`evidence_sources` 未在 `ResearchGraphState` 声明，LangGraph 丢弃
+    该键 → 任务文本只剩 tool_params，claim 误报“缺少具体数值”。
+    """
+
+    class _UnusedToolClient:
+        async def fetch(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("briefing 不应调用取数工具")
+
+    class _RecordingAnalystModel(_StructuredAnalystModel):
+        prompts: list[str] = []
+
+        def _generate(
+            self,
+            messages: list[BaseMessage],
+            stop: list[str] | None = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            for message in messages:
+                if isinstance(message, HumanMessage) and "[evidence]" in message.content:
+                    self.prompts.append(message.content)
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    client = FakeNodeClient()
+    inputs = await build_briefing_chain(client, TRADING_DATE, "briefing_morning")
+    session = next(
+        item for item in inputs.chain.sessions if item.profile == "briefing_morning"
+    )
+    model = _RecordingAnalystModel()
+
+    await run_briefing_session(
+        inputs.chain,
+        session,
+        model=model,
+        tool_client=_UnusedToolClient(),
+    )
+
+    assert model.prompts, "分析师未收到任务文本"
+    joined = "\n".join(model.prompts)
+    assert "close=" in joined, "任务文本缺少指数点位"
+    assert "advance_count=" in joined, "任务文本缺少涨跌家数"
 
 
 async def test_evening_live_references_market_trace() -> None:

@@ -214,6 +214,10 @@ class ResearchGraphState(TypedDict, total=False):
     case_file: CaseFile
     evidence_ledger: EvidenceLedger
     hypotheses: list[Hypothesis]
+    #: 证据正文映射（evidence_id / tool_params.source_id → 文本）。必须是显式
+    #: state 通道：LangGraph 会丢弃未声明的键，之前漏声明导致分析师只看到
+    #: tool_params 元数据，claim 误报“缺少具体数值”（2026-11-27 实测）。
+    evidence_sources: dict[str, str]
     hypothesis_graph: dict[str, Hypothesis]
     causal_graph: list[CausalEdge]
     plan: ResearchPlan
