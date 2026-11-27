@@ -271,6 +271,131 @@ def _change_pct(info: Mapping[str, object]) -> float | None:
     return None
 
 
+#: 大小盘基准指数代码（不含交易所后缀，便于匹配 `000300.SH` 等形态）。
+_LARGE_CAP_BENCHMARKS: tuple[str, ...] = ("000300", "000016")
+_SMALL_CAP_BENCHMARKS: tuple[str, ...] = ("000852", "932000")
+
+#: 基准指数的人类可读名称；仅用于生成派生风格的说明文本，不影响数值。
+_INDEX_LABELS: dict[str, str] = {
+    "000300": "沪深300",
+    "000016": "上证50",
+    "000852": "中证1000",
+    "932000": "中证2000",
+}
+
+
+def _index_change_pct(info: Mapping[str, object]) -> float | None:
+    """从指数条目取涨跌幅；兼容 `change_pct`/`change`/`pct_change` 三种字段名。"""
+    for key in ("change_pct", "change", "pct_change"):
+        value = _as_float(info.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_indexes(raw: object) -> dict[str, dict[str, object]] | None:
+    """把快照 `indexes` 归一化成 `{code: info}` 映射。
+
+    为什么需要：服务器探针确认 close/last_close 的 `indexes` 实际是 list
+    （6 个元素），旧实现用 `_as_mapping` 直接把 list 判成 None，导致 indexes
+    长期误报缺失。这里同时兼容 list 与 dict 两种形态：list 元素用稳定键
+    （优先 `code`，其次 `symbol`，再退化为 `name`）归一化；非 mapping 元素
+    跳过；全空返回 None，交由调用方走 missing 分支。
+    """
+    if isinstance(raw, Mapping):
+        result: dict[str, dict[str, object]] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str):
+                continue
+            info = _as_mapping(value)
+            if info is None:
+                continue
+            result[key] = info
+        return result or None
+    if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
+        result = {}
+        for item in raw:
+            info = _as_mapping(item)
+            if info is None:
+                continue
+            code = (
+                _as_str(info.get("code"))
+                or _as_str(info.get("symbol"))
+                or _as_str(info.get("name"))
+            )
+            if code is None:
+                continue
+            result[code] = info
+        return result or None
+    return None
+
+
+def _match_benchmark(
+    indexes: Mapping[str, Mapping[str, object]],
+    candidates: tuple[str, ...],
+) -> tuple[str, float] | None:
+    """按候选代码前缀匹配基准指数并取涨跌幅；缺涨跌幅视为不可用。"""
+    for target in candidates:
+        for code in sorted(indexes):
+            bare = code.split(".")[0]
+            if bare == target or code.startswith(target):
+                change = _index_change_pct(indexes[code])
+                if change is not None:
+                    return code, change
+    return None
+
+
+def _derive_style(
+    indexes: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, object] | None:
+    """用真实基准指数涨跌幅确定性推导大小盘风格；缺任一侧基准返回 None。
+
+    规则（method=index_spread_v1）：`spread = 大盘基准涨跌幅 - 小盘基准涨跌幅`，
+    |spread| < 0.2 视为均衡。绝不使用单一指数猜测。
+    """
+    if not indexes:
+        return None
+    large = _match_benchmark(indexes, _LARGE_CAP_BENCHMARKS)
+    small = _match_benchmark(indexes, _SMALL_CAP_BENCHMARKS)
+    if large is None or small is None:
+        return None
+    large_code, large_change = large
+    small_code, small_change = small
+    spread = round(large_change - small_change, 4)
+    if abs(spread) < 0.2:
+        label = "均衡"
+    elif spread > 0:
+        label = "大盘占优"
+    else:
+        label = "小盘占优"
+    return {
+        "large_cap_code": large_code,
+        "large_cap_change": large_change,
+        "small_cap_code": small_code,
+        "small_cap_change": small_change,
+        "spread": spread,
+        "label": label,
+        "source": "derived:indexes",
+        "method": "index_spread_v1",
+    }
+
+
+def _format_style(style: Mapping[str, object]) -> str:
+    """把派生风格渲染成一行人类可读说明。"""
+    large_code = _as_str(style.get("large_cap_code")) or ""
+    small_code = _as_str(style.get("small_cap_code")) or ""
+    large_change = _as_float(style.get("large_cap_change")) or 0.0
+    small_change = _as_float(style.get("small_cap_change")) or 0.0
+    spread = _as_float(style.get("spread")) or 0.0
+    label = _as_str(style.get("label")) or "均衡"
+    large_name = _INDEX_LABELS.get(large_code.split(".")[0], large_code)
+    small_name = _INDEX_LABELS.get(small_code.split(".")[0], small_code)
+    return (
+        f"{large_name} {large_change:+.2f}% vs {small_name} {small_change:+.2f}%，"
+        f"价差 {spread:.2f} → {label}"
+    )
+
+
 def _severity(change: float | None) -> Literal["low", "medium", "high"]:
     magnitude = abs(change) if change is not None else 0.0
     if magnitude >= 1.5:
@@ -421,7 +546,9 @@ async def build_market_trace_case(
     index_info: dict[str, object] | None = None
     change: float | None = None
 
-    indexes = _as_mapping(close.get("indexes")) if close is not None else None
+    # 快照 `indexes` 是 list 形态（探针确认），必须归一化成 {code: info}；
+    # 否则 list 被 _as_mapping 判成 None 会让 indexes 长期误报缺失。
+    indexes = _normalize_indexes(close.get("indexes")) if close is not None else None
     if indexes:
         a_share["indexes"] = indexes
         for code in sorted(indexes):
@@ -481,6 +608,14 @@ async def build_market_trace_case(
             "unavailable", provider, 0, "missing breadth"
         )
 
+    # style 键在真实快照中不存在：当上游未提供 style 时，用 indexes 的真实
+    # 涨跌幅确定性推导大小盘风格；provider 标 derived:indexes，绝不编造数值。
+    derived_style = (
+        _derive_style(indexes)
+        if close is not None and _as_mapping(close.get("style")) is None
+        else None
+    )
+
     for key, source_id, title in (
         ("turnover", "TURNOVER_ALL", "全市场成交额"),
         ("style", "STYLE_ALL", "大小盘风格"),
@@ -509,6 +644,26 @@ async def build_market_trace_case(
             availability[family] = _availability("available", [key], None)
             collection[family] = _collection(
                 "available", provider, 1, None
+            )
+        elif key == "style" and derived_style is not None:
+            # 派生数据：来源标 derived:indexes，source_level 走 schema 允许的
+            # reporting（SourceRecord 的 Literal 无 derived 取值）。
+            a_share[key] = derived_style
+            sources[source_id] = _source_record(
+                source_id=source_id,
+                kind="market_fact",
+                provider="derived:indexes",
+                title=title,
+                content=_format_style(derived_style),
+                occurred_at=data_cutoff,
+                captured_at=captured_at,
+                source_level="reporting",
+            )
+            availability[family] = _availability(
+                "available", ["indexes"], "derived from indexes"
+            )
+            collection[family] = _collection(
+                "available", "derived:indexes", 1, None
             )
         else:
             missing.append(key)
@@ -961,7 +1116,7 @@ def _previous_close_items(
         else _at(morning_as_of.date() - timedelta(days=1), time(15, 0))
     )
     items: list[BriefingEvidenceSeed] = []
-    indexes = _as_mapping(last_close.get("indexes"))
+    indexes = _normalize_indexes(last_close.get("indexes"))
     if indexes:
         for code in sorted(indexes):
             info = _as_mapping(indexes[code])
@@ -1031,7 +1186,7 @@ def _close_items(
     captured_at = _as_datetime(close.get("captured_at")) or evening_as_of
     event_time = _at(evening_as_of.date(), time(15, 0))
     items: list[BriefingEvidenceSeed] = []
-    indexes = _as_mapping(close.get("indexes"))
+    indexes = _normalize_indexes(close.get("indexes"))
     if indexes:
         for code in sorted(indexes):
             info = _as_mapping(indexes[code])
@@ -1049,6 +1204,10 @@ def _close_items(
                     tags=["index"],
                 )
             )
+    # 收盘路径同样兼容 list 形态 indexes，并在缺失 style 时确定性派生。
+    derived_style = (
+        _derive_style(indexes) if _as_mapping(close.get("style")) is None else None
+    )
     for key, source_id, title, tags in (
         ("breadth", "BREADTH_ALL", "收盘涨跌家数", ["breadth"]),
         ("turnover", "TURNOVER_ALL", "收盘成交额", ["liquidity"]),
@@ -1057,6 +1216,19 @@ def _close_items(
     ):
         section = _as_mapping(close.get(key))
         if not section:
+            if key == "style" and derived_style is not None:
+                items.append(
+                    _seed(
+                        source_id=source_id,
+                        source="derived:indexes",
+                        source_type="market_fact",
+                        title=title,
+                        content=_format_style(derived_style),
+                        event_time=event_time,
+                        published_at=captured_at,
+                        tags=tags,
+                    )
+                )
             continue
         items.append(
             _seed(

@@ -1,5 +1,27 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — indexes 列表解析与大小盘风格派生（P11-index-style）
+
+**开发者**: NanyuDeer
+
+### 修改
+
+- `src/aistock_agent/brain_v4/runtime/inputs.py`：新增 `_normalize_indexes`，兼容快照 `indexes` 的 list/dict 两种形态，list 元素用稳定键（`code`→`symbol`→`name`）归一化为 `{code: info}`；新增 `_derive_style`，由沪深300/上证50 与中证1000/中证2000 的真实涨跌幅确定性推导大小盘风格（`spread=大盘-小盘`，`|spread|<0.2` 为均衡；缺任一侧返回 None），标注 `source="derived:indexes"`、`method="index_spread_v1"`，不编造数值。`build_market_trace_case` 改用归一化 indexes，并在快照无 `style` 键时派生写入 `a_share["style"]` 与 `sources["STYLE_ALL"]`（`provider="derived:indexes"`、`source_level="reporting"`，因 SourceRecord 的 Literal 无 derived 取值）；`build_briefing_chain` 的收盘快照路径（`_previous_close_items`/`_close_items`）同步使用归一化/派生逻辑。修复探针确认的 `indexes`/`style` 长期缺失根因：旧代码 `_as_mapping(list)` 恒为 None，且快照本无 `style` 键。
+- `CHANGELOG.md`：追加本条目。
+
+### 新增
+
+- `tests/unit/brain_v4/test_market_index_style.py`：list 形态归一化为 dict、dict 形态兼容、非 mapping 跳过、大小盘涨跌派生（`大盘占优`/`spread>0`/`source=derived:indexes`）、单侧基准返回 None、端到端 `missing_fields` 不含 `indexes`/`style` 且存在 `STYLE_ALL`。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_market_index_style.py -q` → `ImportError: cannot import name '_derive_style'`。
+- 绿态（focused）：同命令 → `6 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `255 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改 features/、app-api、services/、kernel、model_factory、scheduler/config、pyproject；未新增依赖；测试不触网、不读系统时间。
+
 ## [main] 2026-11-27 — run 级 token 预算封顶与收盘快照回退（P9-budget-and-last-close）
 
 **开发者**: NanyuDeer
