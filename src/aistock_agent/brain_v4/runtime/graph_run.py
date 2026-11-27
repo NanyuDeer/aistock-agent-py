@@ -408,6 +408,18 @@ def _derive_causal_edges(
     return edges
 
 
+def _build_thinking_model_safe() -> BaseChatModel | None:
+    """构造启用 thinking 的终局推理模型；失败返回 None 并保持主流程可用。"""
+    try:
+        from aistock_agent.brain_v4.analysts.model_factory import (
+            build_thinking_model,
+        )
+
+        return build_thinking_model()
+    except Exception:  # noqa: BLE001 - thinking 只是增强项，失败不应拖垮 run
+        return None
+
+
 def _degraded_outcome(
     exc: BaseException, *, hypotheses: Sequence[Hypothesis]
 ) -> ResearchOutcome:
@@ -529,8 +541,13 @@ async def run_research_graph(
     initial = _initial_state(case, request, hypotheses)
 
     try:
+        # 终局推理模型：仅在有真实分析师模型时启用；构造失败不影响主流程
+        # （thinking 只提升深度，不应成为可用性单点）。
+        thinking_model = _build_thinking_model_safe() if model is not None else None
         graph = build_research_graph(
-            analyst_model=model, tool_client=tool_client
+            analyst_model=model,
+            tool_client=tool_client,
+            thinking_model=thinking_model,
         )
         final = await graph.ainvoke(
             cast(ResearchGraphState, initial),

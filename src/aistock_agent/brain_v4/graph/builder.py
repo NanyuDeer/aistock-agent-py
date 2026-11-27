@@ -236,6 +236,9 @@ class _Runtime:
     tool_client: ToolClient | None
     model: BaseChatModel | None
     gateway: ToolGateway | None = None
+    # 终局推理模型：启用 thinking、不绑定工具，只用于分析师拿到证据后的
+    # 一次深度综合；None 时保持既有行为（零改动）。
+    thinking_model: BaseChatModel | None = None
     # 分析师工具只由 profile + gateway 派生，构造后整轮复用（工具本身无状态）。
     analyst_tools: list[BaseTool] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
@@ -500,6 +503,7 @@ def build_research_graph(
     *,
     tool_client: ToolClient | None = None,
     analyst_model: BaseChatModel | None = None,
+    thinking_model: BaseChatModel | None = None,
 ) -> CompiledStateGraph[
     ResearchGraphState, None, ResearchGraphState, ResearchGraphState
 ]:
@@ -507,8 +511,13 @@ def build_research_graph(
 
     `tool_client` 与 `analyst_model` 必须由调用方注入；缺省时图使用确定性
     离线桩（不触网、不读 API key），仅用于拓扑验证与回放。
+    `thinking_model` 可选：启用后会为每个分析师追加一次不带工具的深度综合。
     """
-    runtime = _Runtime(tool_client=tool_client, model=analyst_model)
+    runtime = _Runtime(
+        tool_client=tool_client,
+        model=analyst_model,
+        thinking_model=thinking_model,
+    )
     council_graph = build_council_graph()
 
     def profile_node(state: ResearchGraphState) -> dict[str, Any]:
@@ -853,6 +862,7 @@ def build_research_graph(
                 research_round=round_no,
                 token_budget=token_budget,
                 timeout_s=profile.timeout_s,
+                thinking_model=runtime.thinking_model,
             )
         return {
             "analyst_results": [result],
@@ -1045,6 +1055,7 @@ def build_research_graph(
                 research_round=round_no,
                 token_budget=remaining,
                 timeout_s=profile.timeout_s,
+                thinking_model=runtime.thinking_model,
             )
         except Exception as exc:  # noqa: BLE001 - 分析师失败不得让图崩溃
             return {
