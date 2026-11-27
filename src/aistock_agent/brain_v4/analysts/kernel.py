@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
@@ -26,8 +27,10 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
 )
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import Field
@@ -63,6 +66,69 @@ class TokenBudgetExceededError(RuntimeError):
     为什么不直接截断输出：截断会让模型误以为拿到了完整案卷；把整次运行标记为
     `budget_exhausted`，上层据此记 `partial` / `insufficient`，语义更诚实。
     """
+
+
+#: 真实 token 硬上限：允许在预算的 1.2 倍内浮动，超过即强制停止。
+_HARD_LIMIT_RATIO = 1.2
+
+
+def _extract_usage_total(response: Any) -> int | None:
+    """从一次 `LLMResult` 提取真实 token 总量。
+
+    优先 `llm_output.token_usage.total_tokens`；否则累计每条 generation 的
+    `message.usage_metadata.total_tokens`。两者都没有时返回 None（不虚报）。
+    """
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(llm_output, Mapping):
+        usage = llm_output.get("token_usage") or llm_output.get("usage")
+        if isinstance(usage, Mapping):
+            total = usage.get("total_tokens")
+            if isinstance(total, int) and not isinstance(total, bool):
+                return total
+
+    generations = getattr(response, "generations", None)
+    if not generations:
+        return None
+    total_sum = 0
+    found = False
+    for batch in generations:
+        for generation in batch:
+            message = getattr(generation, "message", None)
+            usage = getattr(message, "usage_metadata", None)
+            if not isinstance(usage, Mapping):
+                continue
+            total = usage.get("total_tokens")
+            if isinstance(total, int) and not isinstance(total, bool):
+                total_sum += total
+                found = True
+    return total_sum if found else None
+
+
+class _UsageBudgetCallback(BaseCallbackHandler):
+    """直接读真实 `LLMResult` 累计 token，并在超硬上限时中断本次运行。
+
+    为什么不用中间件 `response.result`：真实 ChatOpenAI/DeepSeek 路径下该字段
+    拿不到 `usage_metadata`，`tokens_used` 长期为 0，预算从未触发。回调挂在
+    `config["callbacks"]` 上，随每次模型调用自然收到真实 usage。`raise_error`
+    置 True 才能让 `TokenBudgetExceededError` 穿透回调管理器真正终止运行。
+    """
+
+    raise_error = True
+
+    def __init__(self, hard_limit: int | None = None) -> None:
+        super().__init__()
+        self.hard_limit = hard_limit
+        self.tokens_used = 0
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        total = _extract_usage_total(response)
+        if total is None:
+            return
+        self.tokens_used += total
+        if self.hard_limit is not None and self.tokens_used > self.hard_limit:
+            raise TokenBudgetExceededError(
+                f"analyst exceeded token hard_limit={self.hard_limit}"
+            )
 
 
 class AnalystResult(V4Contract):
@@ -153,6 +219,139 @@ class _StepBudgetMiddleware(AgentMiddleware[Any, Any]):
         return await handler(request)
 
 
+_SYNTHESIS_PROMPT = (
+    "你是终局推理席位。基于下列证据与初步结论，给出更审慎的最终判断。"
+    "只输出一个严格 JSON 对象，不得输出 JSON 之外任何文字。字段仅允许："
+    "claim(string)、confidence(0~1 之间的 number)、"
+    "uncertainties(string array)、requested_gaps(string array)。\n\n"
+    "任务：{task}\n\n初步结论 JSON：{seed}\n"
+)
+
+
+def _message_text(message: Any) -> str:
+    """把模型返回的 content 归一为纯文本，兼容字符串与内容块列表。"""
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, Mapping):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content)
+
+
+def _parse_synthesis(text: str) -> dict[str, Any] | None:
+    """解析终局推理 JSON；任一字段不合法即整体视为失败（返回 None）。"""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    claim = data.get("claim")
+    if not isinstance(claim, str) or not claim.strip():
+        return None
+    confidence = data.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+        return None
+    uncertainties = data.get("uncertainties")
+    requested_gaps = data.get("requested_gaps")
+    if not isinstance(uncertainties, list) or not all(
+        isinstance(item, str) for item in uncertainties
+    ):
+        return None
+    if not isinstance(requested_gaps, list) or not all(
+        isinstance(item, str) for item in requested_gaps
+    ):
+        return None
+    return {
+        "claim": claim,
+        "confidence": min(1.0, max(0.0, float(confidence))),
+        "uncertainties": list(uncertainties),
+        "requested_gaps": list(requested_gaps),
+    }
+
+
+def _synthesis_messages(
+    task: str, output: Mapping[str, Any]
+) -> list[HumanMessage] | None:
+    """只有拿到结构化结果时才值得做终局推理，否则返回 None。"""
+    structured = output.get("structured_response")
+    if not isinstance(structured, AnalystResult):
+        return None
+    seed = {
+        "claim": structured.claim,
+        "evidence_refs": list(structured.evidence_refs),
+        "confidence": structured.confidence,
+        "uncertainties": list(structured.uncertainties),
+        "requested_gaps": list(structured.requested_gaps),
+    }
+    prompt = _SYNTHESIS_PROMPT.format(
+        task=task, seed=json.dumps(seed, ensure_ascii=False, default=str)
+    )
+    return [HumanMessage(content=prompt)]
+
+
+def _synthesize_with_thinking(
+    model: BaseChatModel,
+    task: str,
+    output: Mapping[str, Any],
+    budget: _StepBudgetMiddleware,
+    *,
+    callback: _UsageBudgetCallback | None = None,
+) -> dict[str, Any] | None:
+    """追加一次启用 thinking 的终局推理；失败一律回退（返回 None）。
+
+    不带工具、不强制 `tool_choice`，因此可与 thinking 共存；合成消耗的 token
+    经同一 callback 计入累计与预算。超预算异常继续上抛，由内核转结构化降级。
+    """
+    messages = _synthesis_messages(task, output)
+    if messages is None:
+        return None
+    try:
+        bound = model.bind()
+        response = bound.invoke(
+            messages,
+            config={"callbacks": [callback]} if callback is not None else None,
+        )
+        return _parse_synthesis(_message_text(response))
+    except TokenBudgetExceededError:
+        raise
+    except Exception:  # noqa: BLE001 - 终局推理失败必须回退到原有结果
+        return None
+
+
+async def _asynthesize_with_thinking(
+    model: BaseChatModel,
+    task: str,
+    output: Mapping[str, Any],
+    budget: _StepBudgetMiddleware,
+    *,
+    callback: _UsageBudgetCallback | None = None,
+) -> dict[str, Any] | None:
+    """`_synthesize_with_thinking` 的异步版本，供 `run_analyst_async` 使用。"""
+    messages = _synthesis_messages(task, output)
+    if messages is None:
+        return None
+    try:
+        bound = model.bind()
+        response = await bound.ainvoke(
+            messages,
+            config={"callbacks": [callback]} if callback is not None else None,
+        )
+        return _parse_synthesis(_message_text(response))
+    except TokenBudgetExceededError:
+        raise
+    except Exception:  # noqa: BLE001 - 终局推理失败必须回退到原有结果
+        return None
+
+
 def _build_agent(
     *,
     model: BaseChatModel,
@@ -184,12 +383,21 @@ def _build_agent(
     return cast(AnalystAgentGraph, agent)
 
 
+def _effective_tokens(
+    budget: _StepBudgetMiddleware, usage: _UsageBudgetCallback | None
+) -> int:
+    """真实用量取回调与中间件累计的较大者：两者都只增不减，避免虚报/漏报。"""
+    callback_tokens = usage.tokens_used if usage is not None else 0
+    return max(budget.tokens_used, callback_tokens)
+
+
 def _result(
     *,
     role: str,
     research_round: int,
     max_steps: int,
     budget: _StepBudgetMiddleware,
+    usage: _UsageBudgetCallback | None = None,
     claim: str = "",
     evidence_refs: Sequence[str] = (),
     confidence: float = 0.0,
@@ -211,7 +419,7 @@ def _result(
         error_kind=error_kind,
         steps_used=budget.steps_used,
         max_steps=max_steps,
-        tokens_used=budget.tokens_used,
+        tokens_used=_effective_tokens(budget, usage),
         token_budget=budget.token_budget or 0,
     )
 
@@ -253,6 +461,8 @@ def _finalize(
     research_round: int,
     ceiling: int,
     budget: _StepBudgetMiddleware,
+    usage: _UsageBudgetCallback | None = None,
+    synthesis: Mapping[str, Any] | None = None,
 ) -> AnalystResult:
     structured = output.get("structured_response")
     if not isinstance(structured, AnalystResult):
@@ -261,10 +471,11 @@ def _finalize(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage,
             status="stalled",
             error_kind="no_structured_response",
         )
-    return structured.model_copy(
+    result = structured.model_copy(
         update={
             "result_id": f"analyst_r{research_round:02d}_{role}",
             "role": role,
@@ -273,10 +484,14 @@ def _finalize(
             "error_kind": None,
             "steps_used": budget.steps_used,
             "max_steps": ceiling,
-            "tokens_used": budget.tokens_used,
+            "tokens_used": _effective_tokens(budget, usage),
             "token_budget": budget.token_budget or 0,
         }
     )
+    if synthesis is not None:
+        # 终局推理只覆盖结论字段，运行元数据（id/步数/token/status）仍由内核掌控。
+        result = result.model_copy(update=dict(synthesis))
+    return result
 
 
 def run_analyst(
@@ -290,12 +505,14 @@ def run_analyst(
     system_prompt: str | None = None,
     max_steps: int | None = None,
     token_budget: int | None = None,
+    thinking_model: BaseChatModel | None = None,
 ) -> AnalystResult:
     """运行一个受限分析师实例并返回结构化结果。
 
     `model` 必须是调用方注入的聊天模型；测试可传入确定性假模型，
     因此本函数不会读取 API key 或触网。`max_steps` 默认取
-    `profile.analyst_max_steps`，不得退回到模块级默认值。
+    `profile.analyst_max_steps`，不得退回到模块级默认值。`thinking_model`
+    缺省为 None：不传时完全不改变既有行为。
     """
     ceiling, budget, agent = _prepare_run(
         role=role,
@@ -306,12 +523,18 @@ def run_analyst(
         max_steps=max_steps,
         token_budget=token_budget,
     )
+    usage_callback = _UsageBudgetCallback(
+        int(budget.token_budget * _HARD_LIMIT_RATIO)
+        if budget.token_budget is not None
+        else None
+    )
     if budget.token_budget is not None and budget.token_budget <= 0:
         return _result(
             role=role,
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="budget_exhausted",
         )
@@ -323,7 +546,11 @@ def run_analyst(
                 {"messages": [HumanMessage(content=task)]},
                 # 递归上限必须高于步数预算，否则 LangGraph 会先抛
                 # GraphRecursionError，掩盖我们自己的精确步数分类。
-                config={"recursion_limit": ceiling * 4 + 4},
+                # callbacks 传入真实 usage 计数器，预算由它而非模型自报驱动。
+                config={
+                    "recursion_limit": ceiling * 4 + 4,
+                    "callbacks": [usage_callback],
+                },
             ),
         )
     except StepLimitExceededError:
@@ -332,6 +559,7 @@ def run_analyst(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="step_limit",
         )
@@ -341,6 +569,7 @@ def run_analyst(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="budget_exhausted",
         )
@@ -350,10 +579,28 @@ def run_analyst(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="error",
             error_kind=type(exc).__name__,
             uncertainties=[str(exc)],
         )
+
+    synthesis: Mapping[str, Any] | None = None
+    if thinking_model is not None:
+        try:
+            synthesis = _synthesize_with_thinking(
+                thinking_model, task, output, budget, callback=usage_callback
+            )
+        except TokenBudgetExceededError:
+            return _result(
+                role=role,
+                research_round=research_round,
+                max_steps=ceiling,
+                budget=budget,
+                usage=usage_callback,
+                status="stalled",
+                error_kind="budget_exhausted",
+            )
 
     return _finalize(
         output,
@@ -361,6 +608,8 @@ def run_analyst(
         research_round=research_round,
         ceiling=ceiling,
         budget=budget,
+        usage=usage_callback,
+        synthesis=synthesis,
     )
 
 
@@ -376,13 +625,14 @@ async def run_analyst_async(
     max_steps: int | None = None,
     token_budget: int | None = None,
     timeout_s: float | None = None,
+    thinking_model: BaseChatModel | None = None,
 ) -> AnalystResult:
     """异步运行分析师，支持真实异步工具与外层超时。
 
     为什么需要异步版本：P2 之后工具是 `StructuredTool` 的异步执行体，直接调用
     `ToolGateway.call`；同步 `agent.invoke` 无法执行 coroutine。超时在 agent
     外层用 `asyncio.wait_for` 控制，超时被转换为结构化 `stalled/timeout`，
-    不会把异常抛给主图。
+    不会把异常抛给主图。`thinking_model` 缺省为 None：不传时零改动。
     """
     ceiling, budget, agent = _prepare_run(
         role=role,
@@ -393,23 +643,33 @@ async def run_analyst_async(
         max_steps=max_steps,
         token_budget=token_budget,
     )
+    usage_callback = _UsageBudgetCallback(
+        int(budget.token_budget * _HARD_LIMIT_RATIO)
+        if budget.token_budget is not None
+        else None
+    )
     if budget.token_budget is not None and budget.token_budget <= 0:
         return _result(
             role=role,
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="budget_exhausted",
         )
 
+    run_config: RunnableConfig = {
+        "recursion_limit": ceiling * 4 + 4,
+        "callbacks": [usage_callback],
+    }
     try:
         if timeout_s is None:
             output = cast(
                 Mapping[str, Any],
                 await agent.ainvoke(
                     {"messages": [HumanMessage(content=task)]},
-                    config={"recursion_limit": ceiling * 4 + 4},
+                    config=run_config,
                 ),
             )
         else:
@@ -418,7 +678,7 @@ async def run_analyst_async(
                 await asyncio.wait_for(
                     agent.ainvoke(
                         {"messages": [HumanMessage(content=task)]},
-                        config={"recursion_limit": ceiling * 4 + 4},
+                        config=run_config,
                     ),
                     timeout=timeout_s,
                 ),
@@ -429,6 +689,7 @@ async def run_analyst_async(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="timeout",
         )
@@ -438,6 +699,7 @@ async def run_analyst_async(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="step_limit",
         )
@@ -447,6 +709,7 @@ async def run_analyst_async(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="stalled",
             error_kind="budget_exhausted",
         )
@@ -456,10 +719,28 @@ async def run_analyst_async(
             research_round=research_round,
             max_steps=ceiling,
             budget=budget,
+            usage=usage_callback,
             status="error",
             error_kind=type(exc).__name__,
             uncertainties=[str(exc)],
         )
+
+    synthesis: Mapping[str, Any] | None = None
+    if thinking_model is not None:
+        try:
+            synthesis = await _asynthesize_with_thinking(
+                thinking_model, task, output, budget, callback=usage_callback
+            )
+        except TokenBudgetExceededError:
+            return _result(
+                role=role,
+                research_round=research_round,
+                max_steps=ceiling,
+                budget=budget,
+                usage=usage_callback,
+                status="stalled",
+                error_kind="budget_exhausted",
+            )
 
     return _finalize(
         output,
@@ -467,4 +748,6 @@ async def run_analyst_async(
         research_round=research_round,
         ceiling=ceiling,
         budget=budget,
+        usage=usage_callback,
+        synthesis=synthesis,
     )

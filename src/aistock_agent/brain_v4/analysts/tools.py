@@ -14,9 +14,9 @@
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
@@ -74,9 +74,85 @@ def _tool_description(tool: str, spec: ToolSpec) -> str:
     )
 
 
+#: 列表压缩时默认保留的前 N 项；其余只记总量，避免长尾把上下文撑爆。
+_COMPACT_LIST_ITEMS = 10
+#: 字符串截断下限：即便 max_chars 很小也保留可读预览。
+_MIN_STRING_LIMIT = 120
+
+
+def _compact_string(value: str, string_limit: int) -> str | dict[str, Any]:
+    """超长字符串截断为带元数据的对象，短字符串原样返回。"""
+    if len(value) <= string_limit:
+        return value
+    return {
+        "truncated": True,
+        "original_chars": len(value),
+        "preview": value[:string_limit],
+    }
+
+
+def _compact_value(
+    value: Any, *, max_items: int, string_limit: int
+) -> Any:
+    """递归压缩：字典保键、列表留前 N + 计数、长字符串截断。
+
+    只压缩“给模型看的文本”，不在这里做证据取舍：`evidence_id` / `code` /
+    `name` / `change_pct` / `amount*` 等短标量原样保留，保证结论口径不变。
+    """
+    if isinstance(value, Mapping):
+        return {
+            str(key): _compact_value(
+                item, max_items=max_items, string_limit=string_limit
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        head = [
+            _compact_value(item, max_items=max_items, string_limit=string_limit)
+            for item in list(value)[:max_items]
+        ]
+        if len(value) <= max_items:
+            return head
+        return {"items": head, "count": len(value), "truncated": True}
+    if isinstance(value, str):
+        return _compact_string(value, string_limit)
+    return value
+
+
+def _compact_tool_output(payload: Any, *, max_chars: int = 4000) -> str:
+    """把工具结果压成受长度约束、始终合法的 JSON 字符串。
+
+    为什么在这里压缩：模型每次调用都会携带完整工具 JSON，原始行情/板块/事件
+    单次可达上万 token。压缩保留全部关键标量与证据 ID，只截断长尾文本与超大
+    列表，不删除证据、不改变数值语义。
+    """
+    string_limit = max(_MIN_STRING_LIMIT, max_chars // 16)
+    max_items = _COMPACT_LIST_ITEMS
+    text = ""
+    for _ in range(4):
+        compacted = _compact_value(
+            payload, max_items=max_items, string_limit=string_limit
+        )
+        text = json.dumps(compacted, ensure_ascii=False, default=str)
+        if len(text) <= max_chars:
+            return text
+        string_limit = max(_MIN_STRING_LIMIT, string_limit // 2)
+        max_items = max(1, max_items // 2)
+
+    # 兜底：仍超长时返回带预览的合法 JSON，绝不放行原始大 JSON。
+    return json.dumps(
+        {
+            "truncated": True,
+            "original_chars": len(text),
+            "preview": text[: max_chars // 2],
+        },
+        ensure_ascii=False,
+    )
+
+
 def _error_payload(tool: str, error: str, detail: str) -> str:
     """工具边界的结构化错误：模型可读、调用方不需要捕获异常。"""
-    return json.dumps(
+    return _compact_tool_output(
         {
             "tool": tool,
             "evidence_id": None,
@@ -85,8 +161,7 @@ def _error_payload(tool: str, error: str, detail: str) -> str:
             "error": error,
             "error_detail": detail,
             "data": None,
-        },
-        ensure_ascii=False,
+        }
     )
 
 
@@ -101,7 +176,7 @@ def _make_coroutine(
             envelope = await gateway.call(tool, params)
         except Exception as exc:  # noqa: BLE001 - 工具边界必须降级为结构化错误
             return _error_payload(tool, type(exc).__name__, str(exc))
-        return json.dumps(
+        return _compact_tool_output(
             {
                 "tool": envelope.tool,
                 "evidence_id": envelope.evidence_id,
@@ -113,9 +188,7 @@ def _make_coroutine(
                 "error": envelope.error,
                 "error_detail": envelope.error_detail,
                 "data": envelope.data,
-            },
-            ensure_ascii=False,
-            default=str,
+            }
         )
 
     return _invoke

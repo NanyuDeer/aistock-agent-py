@@ -1,5 +1,33 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 真实 token 硬上限、工具结果压缩与 thinking 终局推理（P12-token-budget）
+
+**开发者**: NanyuDeer
+
+### 修改
+
+- `src/aistock_agent/brain_v4/analysts/kernel.py`：新增 `_UsageBudgetCallback(BaseCallbackHandler)`，`on_llm_end` 优先读 `llm_output.token_usage.total_tokens`，否则累计 `generations[*].message.usage_metadata.total_tokens`；`raise_error=True` 使累计超过 `token_budget*1.2` 时抛 `TokenBudgetExceededError` 真正中断。`run_analyst`/`run_analyst_async` 通过 `config={"callbacks":[...]}` 传入回调；`AnalystResult.tokens_used` 取回调与中间件累计的较大者。新增 `_synthesize_with_thinking`/`_asynthesize_with_thinking`：结构化结果产出后追加一次不带工具、不强制 `tool_choice` 的严格 JSON 终局推理，采用其 claim/confidence/uncertainties/requested_gaps，失败回退；新增可选参数 `thinking_model=None`，既有调用零改动。
+- `src/aistock_agent/brain_v4/analysts/tools.py`：新增 `_compact_tool_output(payload, max_chars=4000)`，递归压缩工具结果（保留 evidence_id/code/name/change_pct/amount*/count 等标量，列表前 10 项 + 计数，超长字符串截断并标注 `truncated`/`original_chars`），输出始终为合法 JSON；工具成功/错误返回值改走压缩，不改变 `ToolEnvelope` 错误分类与 data 保全。
+- `src/aistock_agent/brain_v4/analysts/model_factory.py`：新增 `build_thinking_model()`，调用 `get_deep_think(temperature=0)` 且不注入 `extra_body.thinking=disabled`，与 `build_analyst_model` 的关闭逻辑分离。
+- `CHANGELOG.md`：追加本条目。
+
+### 新增
+
+- `tests/unit/brain_v4/test_token_budget_accounting.py`：回调优先 llm_output / 回落 generations 计数、超硬限抛错、经 `run_analyst_async` 真实累计、超 1.2 倍返回 `stalled/budget_exhausted`。
+- `tests/unit/brain_v4/test_tool_result_compaction.py`：200KB 载荷压缩后 `len<=max_chars+200` 且合法 JSON、evidence_id 与关键数值保留、小载荷语义不变、超长字符串标注 `original_chars`。
+- `tests/unit/brain_v4/test_thinking_synthesis.py`：`build_thinking_model` 不关闭 thinking、合法 JSON 覆盖 claim/confidence 且合成 token 计入累计、非 JSON 回退、未传 thinking_model 不触发。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_token_budget_accounting.py tests/unit/brain_v4/test_tool_result_compaction.py tests/unit/brain_v4/test_thinking_synthesis.py -q` → `ImportError: cannot import name '_UsageBudgetCallback' / '_compact_tool_output' / 'build_thinking_model'`。
+- 绿态（focused）：同命令 → `13 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `268 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改 `services/`、features/、runtime/、app-api、scheduler/config、pyproject；未新增依赖；测试不触网、不调真实 LLM、不读系统时间。
+
+---
+
 ## [main] 2026-11-27 — indexes 列表解析与大小盘风格派生（P11-index-style）
 
 **开发者**: NanyuDeer

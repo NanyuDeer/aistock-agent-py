@@ -79,3 +79,14 @@ def build_analyst_model(profile: RunProfile) -> BaseChatModel:
     else:
         model = get_deep_think(temperature=_ANALYST_TEMPERATURE)
     return _disable_thinking_for_deepseek(model)
+
+
+def build_thinking_model() -> BaseChatModel:
+    """构造启用 thinking 的终局推理模型。
+
+    与 `build_analyst_model` 分离：分析师主循环需要 `tool_choice` 做结构化
+    输出，只能关闭 thinking；终局推理不带工具、不强制 `tool_choice`，因此
+    必须保留 thinking 以恢复推理深度。这里刻意不调用
+    `_disable_thinking_for_deepseek`，即不注入 `extra_body.thinking=disabled`。
+    """
+    return get_deep_think(temperature=_ANALYST_TEMPERATURE)
