@@ -82,7 +82,9 @@ class _FallbackNodeClient:
         self.calls.append("get_last_close_snapshot")
         return None if self._last_close is None else dict(self._last_close)
 
-    async def get_intraday_sectors(self) -> dict[str, object] | None:
+    async def get_intraday_sectors(
+        self, *, include_breadth: bool = True
+    ) -> dict[str, object] | None:
         self.calls.append("get_intraday_sectors")
         return None
 

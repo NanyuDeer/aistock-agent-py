@@ -150,7 +150,9 @@ class FakeNodeClient:
         self._record("get_last_close_snapshot")
         return dict(LAST_CLOSE_SNAPSHOT)
 
-    async def get_intraday_sectors(self) -> dict[str, object] | None:
+    async def get_intraday_sectors(
+        self, *, include_breadth: bool = True
+    ) -> dict[str, object] | None:
         self._record("get_intraday_sectors")
         return dict(INTRADAY_SECTORS)
 

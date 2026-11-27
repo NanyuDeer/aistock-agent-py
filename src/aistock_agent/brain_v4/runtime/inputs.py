@@ -77,7 +77,9 @@ class NodeDataSource(Protocol):
 
     async def get_last_close_snapshot(self) -> dict[str, object] | None: ...
 
-    async def get_intraday_sectors(self) -> dict[str, object] | None: ...
+    async def get_intraday_sectors(
+        self, *, include_breadth: bool = True
+    ) -> dict[str, object] | None: ...
 
     async def get_calendar_events(
         self,
@@ -131,7 +133,11 @@ class _Fetcher:
         return await self._fetch(self._client.get_last_close_snapshot())
 
     async def intraday_sectors(self) -> dict[str, object] | None:
-        return await self._fetch(self._client.get_intraday_sectors())
+        # 早午晚报只消费 indexes/gainers/losers；全市场宽度逐股批量拉取实测
+        # ~31.7s，会被 10s 客户端超时截断，因此显式关闭。
+        return await self._fetch(
+            self._client.get_intraday_sectors(include_breadth=False)
+        )
 
     async def calendar(self, day_iso: str) -> list[dict[str, object]] | None:
         return await self._fetch_list(
@@ -979,7 +985,10 @@ async def build_briefing_chain(
         trade_date = _as_trade_date(last_close.get("trade_date")) if last_close else None
         if last_close is not None and trade_date is not None and trade_date < day:
             prev_close = last_close
-    intraday = await fetcher.intraday_sectors()
+    # 早报在开盘前运行，盘中板块快照必然不存在：不请求，也不计入缺失，
+    # 否则早报会因一个它根本不消费的数据源被判 partial。
+    needs_intraday = profile in {"briefing_midday", "briefing_evening"}
+    intraday = await fetcher.intraday_sectors() if needs_intraday else None
     calendar = await fetcher.calendar(date_iso)
     review_status, legacy_report = _review_fields(await fetcher.review(day))
 
@@ -988,7 +997,7 @@ async def build_briefing_chain(
         missing.append("close_snapshot")
     if prev_close is None:
         missing.append("last_close_snapshot")
-    if intraday is None:
+    if needs_intraday and intraday is None:
         missing.append("intraday_sectors")
     if calendar is None:
         missing.append("calendar_events")

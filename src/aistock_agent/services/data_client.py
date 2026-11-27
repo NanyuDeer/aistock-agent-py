@@ -975,16 +975,24 @@ class NodeApiClient:
         """
         return await self.get("/internal/market/quick-snapshot")
 
-    async def get_intraday_sectors(self) -> dict[str, object] | None:
+    async def get_intraday_sectors(
+        self, *, include_breadth: bool = True
+    ) -> dict[str, object] | None:
         """拉取盘内板块快照（午间报机会/风险候选源）。
 
         走 GET /internal/market/sectors（腾讯源，绕开 15:30 门禁），供 midday
         agent 在 12:05 取得当日真实板块/指数/宽度数据，用于机会/风险数据锚定。
 
+        Args:
+            include_breadth: 是否请求全市场宽度。宽度需对全市场逐股批量拉取
+                （实测稳定 ~31.7s），V4 早午晚报只消费 indexes/gainers/losers，
+                传 False 可把响应压到秒级；默认 True 兼容 legacy 午报/节奏大师。
+
         Returns:
             dict（indexes/breadth/gainers/losers/availability）；失败或 data 非 dict 返回 None。
         """
-        return await self.get("/internal/market/sectors")
+        suffix = "" if include_breadth else "?include_breadth=false"
+        return await self.get(f"/internal/market/sectors{suffix}")
 
     async def get_last_close_snapshot(self) -> dict[str, object] | None:
         """拉取最近一个已完成交易日的收盘快照（跳过时钟门禁）。

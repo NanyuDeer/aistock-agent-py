@@ -71,7 +71,9 @@ class FakeNodeApiClient:
     async def get_ths_index_map(self) -> dict[str, object]:
         return await self._record("get_ths_index_map")
 
-    async def get_intraday_sectors(self) -> dict[str, object]:
+    async def get_intraday_sectors(
+        self, *, include_breadth: bool = True
+    ) -> dict[str, object]:
         return await self._record("get_intraday_sectors")
 
     async def get_last_close_snapshot(self) -> dict[str, object]:

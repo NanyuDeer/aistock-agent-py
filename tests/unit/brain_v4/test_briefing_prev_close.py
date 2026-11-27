@@ -27,7 +27,7 @@ class _CloseOnlyClient:
     async def get_last_close_snapshot(self):
         return None
 
-    async def get_intraday_sectors(self):
+    async def get_intraday_sectors(self, *, include_breadth: bool = True):
         return None
 
     async def get_calendar_events(self, date_from: str, date_to: str, **kwargs):
@@ -90,6 +90,8 @@ async def test_morning_summary_uses_previous_close_list_indexes() -> None:
     assert "+0.51%" in result.chain.morning.headline
     # 基线涨跌家数同样取上一交易日。
     assert "上涨 3000 家、下跌 2000 家" in result.chain.morning.today_baseline
+    # 早报不消费盘中板块快照，不得因它缺失被判 partial。
+    assert "intraday_sectors" not in result.missing_fields
 
 
 def test_snapshot_publish_time_uses_trade_date_not_capture_time() -> None:
