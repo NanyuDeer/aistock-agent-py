@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brain V4 评测 · briefing · 2026-11-26</title>
+  <link rel="stylesheet" href="../static/styles.css">
+</head>
+<body>
+  <nav class="back"><a href="../index.html">返回索引</a></nav>
+  <h1>briefing · 2026-11-26</h1>
+  <p class="hint">旧链不是标准答案；盲标用于人工质量比较，评测台不含研究逻辑。</p>
+  
+<section class="comparison-card" id="cmp_4b53aadf53e4a5ee">
+  <header class="comparison-header">
+    <h2>comparison cmp_4b53aadf53e4a5ee</h2>
+    <span class="tag">盲标 A</span>
+    <span class="tag">评分 未评分</span>
+    <span class="tag">降级状态 ok</span>
+  </header>
+  <table class="meta">
+    <tbody>
+      <tr><th>snapshot id</th><td>snap_briefing_morning_20261126</td></tr>
+      <tr><th>snapshot sha</th><td class="sha">00b7e639c3b9e393be57b2bd9164539b8cf26e214ac1d8e31e0a7e975676336b</td></tr>
+      <tr><th>as_of</th><td>2026-11-26T08:30:00+08:00</td></tr>
+      <tr><th>data_cutoff</th><td>2026-11-26T08:30:00+08:00</td></tr>
+      <tr><th>model / config / method</th><td>v4-briefing-1 / cfg_briefing_v1 / method_v4.1</td></tr>
+      <tr><th>legacy / v4 run</th><td>legacy_briefing_morning_20261126 / v4_run_briefing_morning_20261126</td></tr>
+    </tbody>
+  </table>
+  <div class="comparison-grid">
+    <article class="column legacy">
+      <h3>旧链 Legacy</h3>
+      <pre>{
+  &quot;evidence_ids&quot;: [
+    &quot;legacy_morning_ev_1&quot;
+  ],
+  &quot;headline&quot;: &quot;旧链早报：隔夜风险偏好回落，低开概率大&quot;
+}</pre>
+    </article>
+    <article class="column v4">
+      <h3>V4</h3>
+      <pre>{
+  &quot;body&quot;: {
+    &quot;invalidators&quot;: [
+      &quot;若成交额显著放大，则流动性收缩假设失效&quot;,
+      &quot;若成长与防御同涨同跌，则风格分化假设失效&quot;
+    ],
+    &quot;key_event_ids&quot;: [
+      &quot;ev_brief_1bb6a74a6636_overnight_global_risk&quot;,
+      &quot;ev_brief_ec47e98bf1bd_morning_policy&quot;,
+      &quot;ev_brief_7257bbf87fa3_calendar_morning&quot;
+    ],
+    &quot;overnight_changes&quot;: [
+      &quot;隔夜海外风险资产走弱&quot;,
+      &quot;盘前政策口径延续稳增长&quot;
+    ],
+    &quot;scenarios&quot;: [
+      {
+        &quot;expected_path&quot;: &quot;指数低开后弱势震荡，成长板块领跌&quot;,
+        &quot;invalidator&quot;: &quot;若早盘成长板块逆势领涨，则本情景失效&quot;,
+        &quot;label&quot;: &quot;低开修复&quot;,
+        &quot;scenario_id&quot;: &quot;scn_risk_off&quot;,
+        &quot;trigger_conditions&quot;: [
+          &quot;隔夜风险资产走弱&quot;,
+          &quot;早盘北向净流出&quot;
+        ]
+      },
+      {
+        &quot;expected_path&quot;: &quot;指数窄幅震荡，风格再平衡&quot;,
+        &quot;invalidator&quot;: &quot;若成交额显著放大且指数单边下跌，则本情景失效&quot;,
+        &quot;label&quot;: &quot;区间震荡&quot;,
+        &quot;scenario_id&quot;: &quot;scn_range&quot;,
+        &quot;trigger_conditions&quot;: [
+          &quot;成交额温和&quot;,
+          &quot;防御板块抗跌&quot;
+        ]
+      }
+    ],
+    &quot;style_sector_hypotheses&quot;: [
+      &quot;风格分化：成长弱于防御&quot;,
+      &quot;板块轮动：防御占优&quot;
+    ],
+    &quot;today_baseline&quot;: &quot;指数低开概率较大，成交额与风格分化是盘中主要观察变量。&quot;
+  },
+  &quot;claim_changes&quot;: [],
+  &quot;confidence&quot;: 0.62,
+  &quot;direction&quot;: &quot;down&quot;,
+  &quot;headline&quot;: &quot;早报：隔夜风险偏好回落，关注风格分化&quot;,
+  &quot;judgment_id&quot;: &quot;jdg_run_briefing_morning_20261126&quot;,
+  &quot;market_trace_judgment_id&quot;: null,
+  &quot;parent_judgment_ids&quot;: [],
+  &quot;parent_run_id&quot;: null,
+  &quot;relation&quot;: null,
+  &quot;risk_flags&quot;: [
+    &quot;隔夜海外风险&quot;,
+    &quot;解禁压力&quot;
+  ],
+  &quot;risk_level&quot;: &quot;medium&quot;,
+  &quot;scorecard&quot;: [],
+  &quot;summary&quot;: &quot;隔夜海外风险资产走弱，盘前政策未超预期收紧；开盘关注成长弱于防御的风格分化。&quot;
+}</pre>
+      <p class="evidence-summary">3 条冻结时段证据，3 条 claim</p>
+    </article>
+  </div>
+  <div class="detail-grid">
+    <section>
+      <h3>证据</h3>
+      <ul><li>ev_brief_1bb6a74a6636_overnight_global_risk</li><li>ev_brief_7257bbf87fa3_calendar_morning</li><li>ev_brief_ec47e98bf1bd_morning_policy</li></ul>
+    </section>
+    <section>
+      <h3>反证 / 反例</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>假设</h3>
+      <ul><li><strong>hyp_morning_style</strong> 风格分化导致成长领跌 <span class="tag">open</span> <span class="score">0.45</span></li><li><strong>hyp_morning_liquidity</strong> 流动性收缩是今日下跌主因 <span class="tag">open</span> <span class="score">0.55</span></li><li><strong>hyp_morning_sector</strong> 板块轮动是次级因素 <span class="tag">open</span> <span class="score">0.35</span></li></ul>
+    </section>
+    <section>
+      <h3>回改</h3>
+      <ul><li class="empty">无</li></ul>
+    </section>
+    <section>
+      <h3>未解决问题</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>性能与成本</h3>
+      <ul>
+        <li>latency 276 ms</li>
+        <li>tokens 1325（prompt 1080 / completion 245）</li>
+        <li>cost 0.0008</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+
+<section class="comparison-card" id="cmp_0094398fb47f8ad2">
+  <header class="comparison-header">
+    <h2>comparison cmp_0094398fb47f8ad2</h2>
+    <span class="tag">盲标 B</span>
+    <span class="tag">评分 未评分</span>
+    <span class="tag">降级状态 ok</span>
+  </header>
+  <table class="meta">
+    <tbody>
+      <tr><th>snapshot id</th><td>snap_briefing_midday_20261126</td></tr>
+      <tr><th>snapshot sha</th><td class="sha">66ece43ba54c51b01a318ce832c1fb49468de93c80b1eec01ed37460a57b9222</td></tr>
+      <tr><th>as_of</th><td>2026-11-26T11:35:00+08:00</td></tr>
+      <tr><th>data_cutoff</th><td>2026-11-26T11:30:00+08:00</td></tr>
+      <tr><th>model / config / method</th><td>v4-briefing-1 / cfg_briefing_v1 / method_v4.1</td></tr>
+      <tr><th>legacy / v4 run</th><td>legacy_briefing_midday_20261126 / v4_run_briefing_midday_20261126</td></tr>
+    </tbody>
+  </table>
+  <div class="comparison-grid">
+    <article class="column legacy">
+      <h3>旧链 Legacy</h3>
+      <pre>{
+  &quot;evidence_ids&quot;: [
+    &quot;legacy_midday_ev_1&quot;
+  ],
+  &quot;headline&quot;: &quot;旧链午报：成长板块走弱，维持谨慎&quot;
+}</pre>
+    </article>
+    <article class="column v4">
+      <h3>V4</h3>
+      <pre>{
+  &quot;body&quot;: {
+    &quot;afternoon_opportunities&quot;: [
+      &quot;成长板块超跌后的技术性修复&quot;
+    ],
+    &quot;afternoon_risks&quot;: [
+      &quot;若午后成交额继续放大且成长继续走弱，风格分化加剧&quot;
+    ],
+    &quot;confirmed_hypothesis_refs&quot;: [
+      &quot;hyp_morning_style&quot;
+    ],
+    &quot;falsified_hypothesis_refs&quot;: [
+      &quot;hyp_morning_liquidity&quot;
+    ],
+    &quot;new_drivers&quot;: [
+      &quot;上午成交额放大&quot;,
+      &quot;北向净流出收窄&quot;
+    ]
+  },
+  &quot;claim_changes&quot;: [
+    {
+      &quot;claim_ref&quot;: &quot;hyp_morning_liquidity&quot;,
+      &quot;evidence_ids&quot;: [
+        &quot;ev_brief_fdc1f2a3f9a8_am_turnover_confirm&quot;
+      ],
+      &quot;parent_judgment_id&quot;: &quot;jdg_run_briefing_morning_20261126&quot;,
+      &quot;reason&quot;: &quot;上午成交额放大而非收缩，反向证据否定流动性收缩主因&quot;,
+      &quot;relation&quot;: &quot;reverse&quot;
+    },
+    {
+      &quot;claim_ref&quot;: &quot;hyp_morning_style&quot;,
+      &quot;evidence_ids&quot;: [
+        &quot;ev_brief_7b36230d0332_am_style_confirm&quot;
+      ],
+      &quot;parent_judgment_id&quot;: &quot;jdg_run_briefing_morning_20261126&quot;,
+      &quot;reason&quot;: &quot;上午成长继续领跌、防御抗跌，确认风格分化&quot;,
+      &quot;relation&quot;: &quot;confirm&quot;
+    }
+  ],
+  &quot;confidence&quot;: 0.7,
+  &quot;direction&quot;: &quot;down&quot;,
+  &quot;headline&quot;: &quot;午报：风格分化确认，流动性收缩假设被反向证据否定&quot;,
+  &quot;judgment_id&quot;: &quot;jdg_run_briefing_midday_20261126&quot;,
+  &quot;market_trace_judgment_id&quot;: null,
+  &quot;parent_judgment_ids&quot;: [
+    &quot;jdg_run_briefing_morning_20261126&quot;
+  ],
+  &quot;parent_run_id&quot;: &quot;run_briefing_morning_20261126&quot;,
+  &quot;relation&quot;: &quot;revise&quot;,
+  &quot;risk_flags&quot;: [
+    &quot;成交额放大与流动性收缩假设相反&quot;
+  ],
+  &quot;risk_level&quot;: &quot;medium&quot;,
+  &quot;scorecard&quot;: [],
+  &quot;summary&quot;: &quot;上午风格分化得到确认，成交额放大与流动性收缩假设相反；午后关注成长超跌修复的可持续性。&quot;
+}</pre>
+      <p class="evidence-summary">5 条冻结时段证据，3 条 claim</p>
+    </article>
+  </div>
+  <div class="detail-grid">
+    <section>
+      <h3>证据</h3>
+      <ul><li>ev_brief_2a082ec30a4c_morning_policy</li><li>ev_brief_7b36230d0332_am_style_confirm</li><li>ev_brief_b940eddff4e8_calendar_morning</li><li>ev_brief_fc20be4854f5_overnight_global_risk</li><li>ev_brief_fdc1f2a3f9a8_am_turnover_confirm</li></ul>
+    </section>
+    <section>
+      <h3>反证 / 反例</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>假设</h3>
+      <ul><li><strong>hyp_morning_style</strong> 风格分化导致成长领跌 <span class="tag">open</span> <span class="score">0.45</span></li><li><strong>hyp_morning_liquidity</strong> 流动性收缩是今日下跌主因 <span class="tag">open</span> <span class="score">0.55</span></li><li><strong>hyp_morning_sector</strong> 板块轮动是次级因素 <span class="tag">open</span> <span class="score">0.35</span></li></ul>
+    </section>
+    <section>
+      <h3>回改</h3>
+      <ul><li><strong>rev_run_briefing_midday_20261126_hyp_morning_liquidity</strong> reverse · 上午成交额放大而非收缩，反向证据否定流动性收缩主因</li><li><strong>rev_run_briefing_midday_20261126_hyp_morning_style</strong> confirm · 上午成长继续领跌、防御抗跌，确认风格分化</li></ul>
+    </section>
+    <section>
+      <h3>未解决问题</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>性能与成本</h3>
+      <ul>
+        <li>latency 300 ms</li>
+        <li>tokens 1355（prompt 1080 / completion 275）</li>
+        <li>cost 0.0008</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+
+<section class="comparison-card" id="cmp_c57e461859e193d1">
+  <header class="comparison-header">
+    <h2>comparison cmp_c57e461859e193d1</h2>
+    <span class="tag">盲标 B</span>
+    <span class="tag">评分 未评分</span>
+    <span class="tag">降级状态 ok</span>
+  </header>
+  <table class="meta">
+    <tbody>
+      <tr><th>snapshot id</th><td>snap_briefing_evening_20261126</td></tr>
+      <tr><th>snapshot sha</th><td class="sha">51d6ea7b5e0f072434fefac0263ca15b516ce7c970345e60a3aa1fd89e8c829e</td></tr>
+      <tr><th>as_of</th><td>2026-11-26T15:30:00+08:00</td></tr>
+      <tr><th>data_cutoff</th><td>2026-11-26T15:00:00+08:00</td></tr>
+      <tr><th>model / config / method</th><td>v4-briefing-1 / cfg_briefing_v1 / method_v4.1</td></tr>
+      <tr><th>legacy / v4 run</th><td>legacy_briefing_evening_20261126 / v4_run_briefing_evening_20261126</td></tr>
+    </tbody>
+  </table>
+  <div class="comparison-grid">
+    <article class="column legacy">
+      <h3>旧链 Legacy</h3>
+      <pre>{
+  &quot;evidence_ids&quot;: [
+    &quot;legacy_evening_ev_1&quot;
+  ],
+  &quot;headline&quot;: &quot;旧链晚报：流动性收缩与风格分化共同作用&quot;
+}</pre>
+    </article>
+    <article class="column v4">
+      <h3>V4</h3>
+      <pre>{
+  &quot;body&quot;: {
+    &quot;closing_attribution_ref&quot;: &quot;market_trace:jdg_run_market_trace_liquidity_01&quot;,
+    &quot;errors_and_unresolved&quot;: [
+      &quot;板块轮动是否独立于风格分化仍待验证&quot;
+    ],
+    &quot;market_trace_judgment_id&quot;: &quot;jdg_run_market_trace_liquidity_01&quot;,
+    &quot;next_day_verification&quot;: [
+      &quot;验证成长板块是否止跌&quot;,
+      &quot;复核成交额与风格的联动&quot;
+    ],
+    &quot;prediction_scorecard&quot;: [
+      &quot;hyp_morning_style|confirmed|0.72|jdg_run_market_trace_liquidity_01&quot;,
+      &quot;hyp_morning_liquidity|reversed|0.18|jdg_run_market_trace_liquidity_01&quot;,
+      &quot;hyp_morning_sector|unresolved|0.45|jdg_run_market_trace_liquidity_01&quot;
+    ]
+  },
+  &quot;claim_changes&quot;: [],
+  &quot;confidence&quot;: 0.66,
+  &quot;direction&quot;: &quot;down&quot;,
+  &quot;headline&quot;: &quot;晚报：收盘风格分化主导，引用市场溯源研判归因&quot;,
+  &quot;judgment_id&quot;: &quot;jdg_run_briefing_evening_20261126&quot;,
+  &quot;market_trace_judgment_id&quot;: &quot;jdg_run_market_trace_liquidity_01&quot;,
+  &quot;parent_judgment_ids&quot;: [
+    &quot;jdg_run_briefing_morning_20261126&quot;,
+    &quot;jdg_run_briefing_midday_20261126&quot;
+  ],
+  &quot;parent_run_id&quot;: &quot;run_briefing_midday_20261126&quot;,
+  &quot;relation&quot;: &quot;verify&quot;,
+  &quot;risk_flags&quot;: [
+    &quot;隔夜外部风险&quot;,
+    &quot;风格分化延续&quot;
+  ],
+  &quot;risk_level&quot;: &quot;high&quot;,
+  &quot;scorecard&quot;: [
+    {
+      &quot;claim_ref&quot;: &quot;hyp_morning_style&quot;,
+      &quot;market_trace_judgment_id&quot;: &quot;jdg_run_market_trace_liquidity_01&quot;,
+      &quot;score&quot;: 0.72,
+      &quot;source_profile&quot;: &quot;briefing_morning&quot;,
+      &quot;verdict&quot;: &quot;confirmed&quot;
+    },
+    {
+      &quot;claim_ref&quot;: &quot;hyp_morning_liquidity&quot;,
+      &quot;market_trace_judgment_id&quot;: &quot;jdg_run_market_trace_liquidity_01&quot;,
+      &quot;score&quot;: 0.18,
+      &quot;source_profile&quot;: &quot;briefing_morning&quot;,
+      &quot;verdict&quot;: &quot;reversed&quot;
+    },
+    {
+      &quot;claim_ref&quot;: &quot;hyp_morning_sector&quot;,
+      &quot;market_trace_judgment_id&quot;: &quot;jdg_run_market_trace_liquidity_01&quot;,
+      &quot;score&quot;: 0.45,
+      &quot;source_profile&quot;: &quot;briefing_morning&quot;,
+      &quot;verdict&quot;: &quot;unresolved&quot;
+    }
+  ],
+  &quot;summary&quot;: &quot;收盘指数下跌、成长弱于防御；晚报直接引用当日市场溯源研判，不另起一套盘后归因。&quot;
+}</pre>
+      <p class="evidence-summary">9 条冻结时段证据，0 条 claim</p>
+    </article>
+  </div>
+  <div class="detail-grid">
+    <section>
+      <h3>证据</h3>
+      <ul><li>ev_brief_0ca4f166c994_morning_policy</li><li>ev_brief_0de18ab55c1c_intraday_backdated</li><li>ev_brief_2a7aae066b3c_close_index</li><li>ev_brief_3b180d9ed4b6_am_turnover_confirm</li><li>ev_brief_7ef089411999_close_breadth</li><li>ev_brief_9da12398c170_close_style</li><li>ev_brief_b6b6d03375d0_overnight_global_risk</li><li>ev_brief_c1f9aa27efb7_calendar_morning</li><li>ev_brief_ed3a7c05419f_am_style_confirm</li></ul>
+    </section>
+    <section>
+      <h3>反证 / 反例</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>假设</h3>
+      <ul><li class="empty">无</li></ul>
+    </section>
+    <section>
+      <h3>回改</h3>
+      <ul><li class="empty">无</li></ul>
+    </section>
+    <section>
+      <h3>未解决问题</h3>
+      <ul><li>板块轮动是否独立于风格分化仍待验证</li></ul>
+    </section>
+    <section>
+      <h3>性能与成本</h3>
+      <ul>
+        <li>latency 348 ms</li>
+        <li>tokens 1235（prompt 900 / completion 335）</li>
+        <li>cost 0.0007</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+  <script src="../static/index.js"></script>
+</body>
+</html>

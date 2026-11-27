@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brain V4 评测台</title>
+  <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+  <h1>Brain V4 评测台 · 2026-11-27</h1>
+  <section class="filters">
+    <label>日期 <select id="filter-date"><option value="">全部</option></select></label>
+    <label>Feature <select id="filter-feature"><option value="">全部</option></select></label>
+    <label>版本 <input id="filter-version" type="text" placeholder="method_version"></label>
+  </section>
+  <table class="index-table">
+    <thead>
+      <tr><th>comparison</th><th>feature</th><th>profile</th><th>blind</th><th>snapshot sha</th><th>版本</th></tr>
+    </thead>
+    <tbody id="comparison-rows"></tbody>
+  </table>
+  <script id="report-data" type="application/json">[{"blind_label": "B", "comparison_id": "cmp_686a7b48afe5af70", "feature_id": "market_trace", "method_version": "method_v4.0", "page": "2026-11-27/market_trace.html", "profile": "market_trace", "run_date": "2026-11-27", "snapshot_sha": "bc99e2bf09e12e67e6bec17595de4193d2994a085611799fc61928860f61b376"}, {"blind_label": "A", "comparison_id": "cmp_fa9de02a10ab37e1", "feature_id": "market_trace", "method_version": "method_v4.0", "page": "2026-11-27/market_trace.html", "profile": "market_trace", "run_date": "2026-11-27", "snapshot_sha": "c50f450ec05bd7ceb7fa83db1dc4c6d7a095fd3966aec7310de57cd16134d296"}]</script>
+  <script src="static/index.js"></script>
+</body>
+</html>

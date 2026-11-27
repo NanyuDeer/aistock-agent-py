@@ -1,0 +1,136 @@
+{
+  "as_of": "2026-11-26T08:30:00+08:00",
+  "blind_label": "A",
+  "comparison_id": "cmp_4b53aadf53e4a5ee",
+  "config_version": "cfg_briefing_v1",
+  "cost": 0.000795,
+  "data_cutoff": "2026-11-26T08:30:00+08:00",
+  "evidence_summary": {
+    "claim_ids": [
+      "hyp_morning_liquidity",
+      "hyp_morning_sector",
+      "hyp_morning_style",
+      "jdg_run_briefing_morning_20261126"
+    ],
+    "counter_evidence_ids": [],
+    "evidence_ids": [
+      "ev_brief_1bb6a74a6636_overnight_global_risk",
+      "ev_brief_7257bbf87fa3_calendar_morning",
+      "ev_brief_ec47e98bf1bd_morning_policy"
+    ],
+    "summary": "3 条冻结时段证据，3 条 claim"
+  },
+  "feature_id": "briefing",
+  "hypotheses": [
+    {
+      "confidence": 0.45,
+      "hypothesis_ref": "hyp_morning_style",
+      "statement": "风格分化导致成长领跌",
+      "status": "open"
+    },
+    {
+      "confidence": 0.55,
+      "hypothesis_ref": "hyp_morning_liquidity",
+      "statement": "流动性收缩是今日下跌主因",
+      "status": "open"
+    },
+    {
+      "confidence": 0.35,
+      "hypothesis_ref": "hyp_morning_sector",
+      "statement": "板块轮动是次级因素",
+      "status": "open"
+    }
+  ],
+  "is_shadow": true,
+  "latency_ms": 276,
+  "legacy_output": {
+    "evidence_ids": [
+      "legacy_morning_ev_1"
+    ],
+    "headline": "旧链早报：隔夜风险偏好回落，低开概率大"
+  },
+  "legacy_run_id": "legacy_briefing_morning_20261126",
+  "method_version": "method_v4.1",
+  "model_version": "v4-briefing-1",
+  "profile": "briefing_morning",
+  "quality_metrics": {
+    "claim_count": 3.0,
+    "evidence_coverage": 1.0,
+    "parent_chain_depth": 0.0
+  },
+  "reviewer_score": null,
+  "revisions": [],
+  "snapshot_id": "snap_briefing_morning_20261126",
+  "snapshot_sha": "00b7e639c3b9e393be57b2bd9164539b8cf26e214ac1d8e31e0a7e975676336b",
+  "subject": {
+    "subject_code": "000001.SH",
+    "subject_type": "market"
+  },
+  "token_usage": {
+    "completion_tokens": 245,
+    "prompt_tokens": 1080,
+    "total_tokens": 1325
+  },
+  "unresolved_questions": [],
+  "v4_output": {
+    "body": {
+      "invalidators": [
+        "若成交额显著放大，则流动性收缩假设失效",
+        "若成长与防御同涨同跌，则风格分化假设失效"
+      ],
+      "key_event_ids": [
+        "ev_brief_1bb6a74a6636_overnight_global_risk",
+        "ev_brief_ec47e98bf1bd_morning_policy",
+        "ev_brief_7257bbf87fa3_calendar_morning"
+      ],
+      "overnight_changes": [
+        "隔夜海外风险资产走弱",
+        "盘前政策口径延续稳增长"
+      ],
+      "scenarios": [
+        {
+          "expected_path": "指数低开后弱势震荡，成长板块领跌",
+          "invalidator": "若早盘成长板块逆势领涨，则本情景失效",
+          "label": "低开修复",
+          "scenario_id": "scn_risk_off",
+          "trigger_conditions": [
+            "隔夜风险资产走弱",
+            "早盘北向净流出"
+          ]
+        },
+        {
+          "expected_path": "指数窄幅震荡，风格再平衡",
+          "invalidator": "若成交额显著放大且指数单边下跌，则本情景失效",
+          "label": "区间震荡",
+          "scenario_id": "scn_range",
+          "trigger_conditions": [
+            "成交额温和",
+            "防御板块抗跌"
+          ]
+        }
+      ],
+      "style_sector_hypotheses": [
+        "风格分化：成长弱于防御",
+        "板块轮动：防御占优"
+      ],
+      "today_baseline": "指数低开概率较大，成交额与风格分化是盘中主要观察变量。"
+    },
+    "claim_changes": [],
+    "confidence": 0.62,
+    "direction": "down",
+    "headline": "早报：隔夜风险偏好回落，关注风格分化",
+    "judgment_id": "jdg_run_briefing_morning_20261126",
+    "market_trace_judgment_id": null,
+    "parent_judgment_ids": [],
+    "parent_run_id": null,
+    "relation": null,
+    "risk_flags": [
+      "隔夜海外风险",
+      "解禁压力"
+    ],
+    "risk_level": "medium",
+    "scorecard": [],
+    "summary": "隔夜海外风险资产走弱，盘前政策未超预期收紧；开盘关注成长弱于防御的风格分化。"
+  },
+  "v4_run_id": "v4_run_briefing_morning_20261126"
+}

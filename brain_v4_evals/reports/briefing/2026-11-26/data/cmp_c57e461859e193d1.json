@@ -1,0 +1,121 @@
+{
+  "as_of": "2026-11-26T15:30:00+08:00",
+  "blind_label": "B",
+  "comparison_id": "cmp_c57e461859e193d1",
+  "config_version": "cfg_briefing_v1",
+  "cost": 0.000741,
+  "data_cutoff": "2026-11-26T15:00:00+08:00",
+  "evidence_summary": {
+    "claim_ids": [
+      "jdg_run_briefing_evening_20261126"
+    ],
+    "counter_evidence_ids": [],
+    "evidence_ids": [
+      "ev_brief_0ca4f166c994_morning_policy",
+      "ev_brief_0de18ab55c1c_intraday_backdated",
+      "ev_brief_2a7aae066b3c_close_index",
+      "ev_brief_3b180d9ed4b6_am_turnover_confirm",
+      "ev_brief_7ef089411999_close_breadth",
+      "ev_brief_9da12398c170_close_style",
+      "ev_brief_b6b6d03375d0_overnight_global_risk",
+      "ev_brief_c1f9aa27efb7_calendar_morning",
+      "ev_brief_ed3a7c05419f_am_style_confirm"
+    ],
+    "summary": "9 条冻结时段证据，0 条 claim"
+  },
+  "feature_id": "briefing",
+  "hypotheses": [],
+  "is_shadow": true,
+  "latency_ms": 348,
+  "legacy_output": {
+    "evidence_ids": [
+      "legacy_evening_ev_1"
+    ],
+    "headline": "旧链晚报：流动性收缩与风格分化共同作用"
+  },
+  "legacy_run_id": "legacy_briefing_evening_20261126",
+  "method_version": "method_v4.1",
+  "model_version": "v4-briefing-1",
+  "profile": "briefing_evening",
+  "quality_metrics": {
+    "claim_count": 0.0,
+    "evidence_coverage": 1.0,
+    "parent_chain_depth": 2.0
+  },
+  "reviewer_score": null,
+  "revisions": [],
+  "snapshot_id": "snap_briefing_evening_20261126",
+  "snapshot_sha": "51d6ea7b5e0f072434fefac0263ca15b516ce7c970345e60a3aa1fd89e8c829e",
+  "subject": {
+    "subject_code": "000001.SH",
+    "subject_type": "market"
+  },
+  "token_usage": {
+    "completion_tokens": 335,
+    "prompt_tokens": 900,
+    "total_tokens": 1235
+  },
+  "unresolved_questions": [
+    "板块轮动是否独立于风格分化仍待验证"
+  ],
+  "v4_output": {
+    "body": {
+      "closing_attribution_ref": "market_trace:jdg_run_market_trace_liquidity_01",
+      "errors_and_unresolved": [
+        "板块轮动是否独立于风格分化仍待验证"
+      ],
+      "market_trace_judgment_id": "jdg_run_market_trace_liquidity_01",
+      "next_day_verification": [
+        "验证成长板块是否止跌",
+        "复核成交额与风格的联动"
+      ],
+      "prediction_scorecard": [
+        "hyp_morning_style|confirmed|0.72|jdg_run_market_trace_liquidity_01",
+        "hyp_morning_liquidity|reversed|0.18|jdg_run_market_trace_liquidity_01",
+        "hyp_morning_sector|unresolved|0.45|jdg_run_market_trace_liquidity_01"
+      ]
+    },
+    "claim_changes": [],
+    "confidence": 0.66,
+    "direction": "down",
+    "headline": "晚报：收盘风格分化主导，引用市场溯源研判归因",
+    "judgment_id": "jdg_run_briefing_evening_20261126",
+    "market_trace_judgment_id": "jdg_run_market_trace_liquidity_01",
+    "parent_judgment_ids": [
+      "jdg_run_briefing_morning_20261126",
+      "jdg_run_briefing_midday_20261126"
+    ],
+    "parent_run_id": "run_briefing_midday_20261126",
+    "relation": "verify",
+    "risk_flags": [
+      "隔夜外部风险",
+      "风格分化延续"
+    ],
+    "risk_level": "high",
+    "scorecard": [
+      {
+        "claim_ref": "hyp_morning_style",
+        "market_trace_judgment_id": "jdg_run_market_trace_liquidity_01",
+        "score": 0.72,
+        "source_profile": "briefing_morning",
+        "verdict": "confirmed"
+      },
+      {
+        "claim_ref": "hyp_morning_liquidity",
+        "market_trace_judgment_id": "jdg_run_market_trace_liquidity_01",
+        "score": 0.18,
+        "source_profile": "briefing_morning",
+        "verdict": "reversed"
+      },
+      {
+        "claim_ref": "hyp_morning_sector",
+        "market_trace_judgment_id": "jdg_run_market_trace_liquidity_01",
+        "score": 0.45,
+        "source_profile": "briefing_morning",
+        "verdict": "unresolved"
+      }
+    ],
+    "summary": "收盘指数下跌、成长弱于防御；晚报直接引用当日市场溯源研判，不另起一套盘后归因。"
+  },
+  "v4_run_id": "v4_run_briefing_evening_20261126"
+}

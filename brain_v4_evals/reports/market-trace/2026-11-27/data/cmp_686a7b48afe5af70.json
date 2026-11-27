@@ -1,0 +1,193 @@
+{
+  "as_of": "2026-11-26T15:30:00+08:00",
+  "blind_label": "B",
+  "comparison_id": "cmp_686a7b48afe5af70",
+  "config_version": "cfg_market_trace_v1",
+  "cost": 0.001116,
+  "data_cutoff": "2026-11-26T15:00:00+08:00",
+  "evidence_summary": {
+    "claim_ids": [
+      "hyp_liquidity:v1",
+      "hyp_risk_pref:v1",
+      "jdg_run_market_trace_council_00"
+    ],
+    "counter_evidence_ids": [],
+    "evidence_ids": [
+      "ev_bc99e2bf09e1_breadth_all",
+      "ev_bc99e2bf09e1_event_global_risk",
+      "ev_bc99e2bf09e1_fund_flow_north",
+      "ev_bc99e2bf09e1_index_000001_sh",
+      "ev_bc99e2bf09e1_sector_defensive",
+      "ev_bc99e2bf09e1_sector_growth",
+      "ev_bc99e2bf09e1_style_large_cap",
+      "ev_bc99e2bf09e1_style_small_cap",
+      "ev_bc99e2bf09e1_turnover_all",
+      "ev_research_v2"
+    ],
+    "summary": "10 条冻结快照证据，2 个竞争假设"
+  },
+  "feature_id": "market_trace",
+  "hypotheses": [
+    {
+      "confidence": 0.56,
+      "hypothesis_ref": "hyp_liquidity:v1",
+      "statement": "流动性收缩是主因",
+      "status": "open"
+    },
+    {
+      "confidence": 0.52,
+      "hypothesis_ref": "hyp_risk_pref:v1",
+      "statement": "风险偏好回落是主因",
+      "status": "open"
+    }
+  ],
+  "is_shadow": true,
+  "latency_ms": 360,
+  "legacy_output": {
+    "confidence": "medium",
+    "evidence_ids": [
+      "legacy_review_ev_2"
+    ],
+    "headline": "旧链结论：风险偏好回落是今日下跌主因",
+    "narrative": "旧链只引用一条风格证据，未比较流动性解释。",
+    "root_cause": "risk_appetite"
+  },
+  "legacy_run_id": "legacy_review_20261126",
+  "method_version": "method_v4.0",
+  "model_version": "v4-market-trace-1",
+  "profile": "market_trace",
+  "quality_metrics": {
+    "evidence_coverage": 1.0,
+    "hypothesis_count": 2.0,
+    "unsupported_edge_ratio": 0.0
+  },
+  "reviewer_score": null,
+  "revisions": [
+    {
+      "action": "add_evidence",
+      "reason": "定向研究补充 Gap: gap_pre_move_trigger",
+      "revision_id": "rev_rp_v2_hyp_liquidity",
+      "target_refs": [
+        "hyp_liquidity:v1"
+      ],
+      "triggering_evidence_ids": [
+        "ev_research_v2"
+      ]
+    }
+  ],
+  "snapshot_id": "trace-20261126-d4e5f6",
+  "snapshot_sha": "bc99e2bf09e12e67e6bec17595de4193d2994a085611799fc61928860f61b376",
+  "subject": {
+    "subject_code": "000001.SH",
+    "subject_type": "market"
+  },
+  "token_usage": {
+    "completion_tokens": 500,
+    "prompt_tokens": 1360,
+    "total_tokens": 1860
+  },
+  "unresolved_questions": [],
+  "v4_output": {
+    "collaboration_mode": "ANALYST_COUNCIL",
+    "conclusion": "流动性收缩是主因",
+    "decision": "insufficient",
+    "depth_level": "D3",
+    "hypothesis_only_edge_ids": [],
+    "invalidators": [
+      "北向资金转为净流入"
+    ],
+    "minority_opinions": [
+      "alternative 保留 hyp_risk_pref:v1（置信度 0.52）",
+      "mechanism 保留 hyp_risk_pref:v1（置信度 0.52）"
+    ],
+    "rejected_hypothesis_refs": [
+      "hyp_risk_pref:v1"
+    ],
+    "selected_hypothesis_refs": [
+      "hyp_liquidity:v1"
+    ],
+    "six_factor_chain": [
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_structural_root"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "structural_root",
+        "statement": "结构根因：流动性收缩是主因",
+        "status": "supported"
+      },
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_trigger"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "trigger",
+        "statement": "触发：盘前信号确认结构压力",
+        "status": "supported"
+      },
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_transmission"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "transmission",
+        "statement": "传导：资金与风格通过风险预算传导",
+        "status": "supported"
+      },
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_exposure"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "exposure",
+        "statement": "暴露：高 beta 与成长板块暴露更高",
+        "status": "supported"
+      },
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_repricing"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "repricing",
+        "statement": "重定价：暴露板块估值下修",
+        "status": "supported"
+      },
+      {
+        "confidence": 0.56,
+        "edge_ids": [
+          "edge_hyp_liquidity_observable_result"
+        ],
+        "evidence_ids": [
+          "ev_bc99e2bf09e1_fund_flow_north",
+          "ev_bc99e2bf09e1_turnover_all"
+        ],
+        "stage": "observable_result",
+        "statement": "观察结果：指数与广度同步下跌",
+        "status": "supported"
+      }
+    ],
+    "status": "insufficient",
+    "stop_reason": "no_progress"
+  },
+  "v4_run_id": "v4_run_market_trace_council"
+}

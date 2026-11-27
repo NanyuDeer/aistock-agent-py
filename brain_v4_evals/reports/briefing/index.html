@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brain V4 评测台</title>
+  <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+  <h1>Brain V4 评测台 · 2026-11-26</h1>
+  <section class="filters">
+    <label>日期 <select id="filter-date"><option value="">全部</option></select></label>
+    <label>Feature <select id="filter-feature"><option value="">全部</option></select></label>
+    <label>版本 <input id="filter-version" type="text" placeholder="method_version"></label>
+  </section>
+  <table class="index-table">
+    <thead>
+      <tr><th>comparison</th><th>feature</th><th>profile</th><th>blind</th><th>snapshot sha</th><th>版本</th></tr>
+    </thead>
+    <tbody id="comparison-rows"></tbody>
+  </table>
+  <script id="report-data" type="application/json">[{"blind_label": "A", "comparison_id": "cmp_4b53aadf53e4a5ee", "feature_id": "briefing", "method_version": "method_v4.1", "page": "2026-11-26/briefing.html", "profile": "briefing_morning", "run_date": "2026-11-26", "snapshot_sha": "00b7e639c3b9e393be57b2bd9164539b8cf26e214ac1d8e31e0a7e975676336b"}, {"blind_label": "B", "comparison_id": "cmp_0094398fb47f8ad2", "feature_id": "briefing", "method_version": "method_v4.1", "page": "2026-11-26/briefing.html", "profile": "briefing_midday", "run_date": "2026-11-26", "snapshot_sha": "66ece43ba54c51b01a318ce832c1fb49468de93c80b1eec01ed37460a57b9222"}, {"blind_label": "B", "comparison_id": "cmp_c57e461859e193d1", "feature_id": "briefing", "method_version": "method_v4.1", "page": "2026-11-26/briefing.html", "profile": "briefing_evening", "run_date": "2026-11-26", "snapshot_sha": "51d6ea7b5e0f072434fefac0263ca15b516ce7c970345e60a3aa1fd89e8c829e"}]</script>
+  <script src="static/index.js"></script>
+</body>
+</html>

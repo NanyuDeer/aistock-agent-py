@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brain V4 评测 · market_trace · 2026-11-27</title>
+  <link rel="stylesheet" href="../static/styles.css">
+</head>
+<body>
+  <nav class="back"><a href="../index.html">返回索引</a></nav>
+  <h1>market_trace · 2026-11-27</h1>
+  <p class="hint">旧链不是标准答案；盲标用于人工质量比较，评测台不含研究逻辑。</p>
+  
+<section class="comparison-card" id="cmp_686a7b48afe5af70">
+  <header class="comparison-header">
+    <h2>comparison cmp_686a7b48afe5af70</h2>
+    <span class="tag">盲标 B</span>
+    <span class="tag">评分 未评分</span>
+    <span class="tag">降级状态 insufficient</span>
+  </header>
+  <table class="meta">
+    <tbody>
+      <tr><th>snapshot id</th><td>trace-20261126-d4e5f6</td></tr>
+      <tr><th>snapshot sha</th><td class="sha">bc99e2bf09e12e67e6bec17595de4193d2994a085611799fc61928860f61b376</td></tr>
+      <tr><th>as_of</th><td>2026-11-26T15:30:00+08:00</td></tr>
+      <tr><th>data_cutoff</th><td>2026-11-26T15:00:00+08:00</td></tr>
+      <tr><th>model / config / method</th><td>v4-market-trace-1 / cfg_market_trace_v1 / method_v4.0</td></tr>
+      <tr><th>legacy / v4 run</th><td>legacy_review_20261126 / v4_run_market_trace_council</td></tr>
+    </tbody>
+  </table>
+  <div class="comparison-grid">
+    <article class="column legacy">
+      <h3>旧链 Legacy</h3>
+      <pre>{
+  &quot;confidence&quot;: &quot;medium&quot;,
+  &quot;evidence_ids&quot;: [
+    &quot;legacy_review_ev_2&quot;
+  ],
+  &quot;headline&quot;: &quot;旧链结论：风险偏好回落是今日下跌主因&quot;,
+  &quot;narrative&quot;: &quot;旧链只引用一条风格证据，未比较流动性解释。&quot;,
+  &quot;root_cause&quot;: &quot;risk_appetite&quot;
+}</pre>
+    </article>
+    <article class="column v4">
+      <h3>V4</h3>
+      <pre>{
+  &quot;collaboration_mode&quot;: &quot;ANALYST_COUNCIL&quot;,
+  &quot;conclusion&quot;: &quot;流动性收缩是主因&quot;,
+  &quot;decision&quot;: &quot;insufficient&quot;,
+  &quot;depth_level&quot;: &quot;D3&quot;,
+  &quot;hypothesis_only_edge_ids&quot;: [],
+  &quot;invalidators&quot;: [
+    &quot;北向资金转为净流入&quot;
+  ],
+  &quot;minority_opinions&quot;: [
+    &quot;alternative 保留 hyp_risk_pref:v1（置信度 0.52）&quot;,
+    &quot;mechanism 保留 hyp_risk_pref:v1（置信度 0.52）&quot;
+  ],
+  &quot;rejected_hypothesis_refs&quot;: [
+    &quot;hyp_risk_pref:v1&quot;
+  ],
+  &quot;selected_hypothesis_refs&quot;: [
+    &quot;hyp_liquidity:v1&quot;
+  ],
+  &quot;six_factor_chain&quot;: [
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_structural_root&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;structural_root&quot;,
+      &quot;statement&quot;: &quot;结构根因：流动性收缩是主因&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_trigger&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;trigger&quot;,
+      &quot;statement&quot;: &quot;触发：盘前信号确认结构压力&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_transmission&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;transmission&quot;,
+      &quot;statement&quot;: &quot;传导：资金与风格通过风险预算传导&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_exposure&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;exposure&quot;,
+      &quot;statement&quot;: &quot;暴露：高 beta 与成长板块暴露更高&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_repricing&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;repricing&quot;,
+      &quot;statement&quot;: &quot;重定价：暴露板块估值下修&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.56,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_liquidity_observable_result&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_bc99e2bf09e1_fund_flow_north&quot;,
+        &quot;ev_bc99e2bf09e1_turnover_all&quot;
+      ],
+      &quot;stage&quot;: &quot;observable_result&quot;,
+      &quot;statement&quot;: &quot;观察结果：指数与广度同步下跌&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    }
+  ],
+  &quot;status&quot;: &quot;insufficient&quot;,
+  &quot;stop_reason&quot;: &quot;no_progress&quot;
+}</pre>
+      <p class="evidence-summary">10 条冻结快照证据，2 个竞争假设</p>
+    </article>
+  </div>
+  <div class="detail-grid">
+    <section>
+      <h3>证据</h3>
+      <ul><li>ev_bc99e2bf09e1_breadth_all</li><li>ev_bc99e2bf09e1_event_global_risk</li><li>ev_bc99e2bf09e1_fund_flow_north</li><li>ev_bc99e2bf09e1_index_000001_sh</li><li>ev_bc99e2bf09e1_sector_defensive</li><li>ev_bc99e2bf09e1_sector_growth</li><li>ev_bc99e2bf09e1_style_large_cap</li><li>ev_bc99e2bf09e1_style_small_cap</li><li>ev_bc99e2bf09e1_turnover_all</li><li>ev_research_v2</li></ul>
+    </section>
+    <section>
+      <h3>反证 / 反例</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>假设</h3>
+      <ul><li><strong>hyp_liquidity:v1</strong> 流动性收缩是主因 <span class="tag">open</span> <span class="score">0.56</span></li><li><strong>hyp_risk_pref:v1</strong> 风险偏好回落是主因 <span class="tag">open</span> <span class="score">0.52</span></li></ul>
+    </section>
+    <section>
+      <h3>回改</h3>
+      <ul><li><strong>rev_rp_v2_hyp_liquidity</strong> add_evidence · 定向研究补充 Gap: gap_pre_move_trigger</li></ul>
+    </section>
+    <section>
+      <h3>未解决问题</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>性能与成本</h3>
+      <ul>
+        <li>latency 360 ms</li>
+        <li>tokens 1860（prompt 1360 / completion 500）</li>
+        <li>cost 0.0011</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+
+<section class="comparison-card" id="cmp_fa9de02a10ab37e1">
+  <header class="comparison-header">
+    <h2>comparison cmp_fa9de02a10ab37e1</h2>
+    <span class="tag">盲标 A</span>
+    <span class="tag">评分 未评分</span>
+    <span class="tag">降级状态 ok</span>
+  </header>
+  <table class="meta">
+    <tbody>
+      <tr><th>snapshot id</th><td>trace-20261127-a1b2c3</td></tr>
+      <tr><th>snapshot sha</th><td class="sha">c50f450ec05bd7ceb7fa83db1dc4c6d7a095fd3966aec7310de57cd16134d296</td></tr>
+      <tr><th>as_of</th><td>2026-11-27T15:30:00+08:00</td></tr>
+      <tr><th>data_cutoff</th><td>2026-11-27T15:00:00+08:00</td></tr>
+      <tr><th>model / config / method</th><td>v4-market-trace-1 / cfg_market_trace_v1 / method_v4.0</td></tr>
+      <tr><th>legacy / v4 run</th><td>legacy_review_20261127 / v4_run_market_trace_liquidity</td></tr>
+    </tbody>
+  </table>
+  <div class="comparison-grid">
+    <article class="column legacy">
+      <h3>旧链 Legacy</h3>
+      <pre>{
+  &quot;confidence&quot;: &quot;high&quot;,
+  &quot;evidence_ids&quot;: [
+    &quot;legacy_review_ev_1&quot;
+  ],
+  &quot;headline&quot;: &quot;旧链结论：流动性收缩是今日下跌主因&quot;,
+  &quot;narrative&quot;: &quot;旧链将北向资金净流出直接当作主因，未比较风格分化。&quot;,
+  &quot;root_cause&quot;: &quot;liquidity_contraction&quot;
+}</pre>
+    </article>
+    <article class="column v4">
+      <h3>V4</h3>
+      <pre>{
+  &quot;collaboration_mode&quot;: &quot;SOLO_DEEP&quot;,
+  &quot;conclusion&quot;: &quot;风格分化是主要驱动&quot;,
+  &quot;decision&quot;: &quot;accept&quot;,
+  &quot;depth_level&quot;: &quot;D3&quot;,
+  &quot;hypothesis_only_edge_ids&quot;: [
+    &quot;edge_hyp_sector_rotation_exposure&quot;,
+    &quot;edge_hyp_sector_rotation_observable_result&quot;,
+    &quot;edge_hyp_sector_rotation_repricing&quot;,
+    &quot;edge_hyp_sector_rotation_structural_root&quot;,
+    &quot;edge_hyp_sector_rotation_transmission&quot;,
+    &quot;edge_hyp_sector_rotation_trigger&quot;
+  ],
+  &quot;invalidators&quot;: [
+    &quot;风格同步下跌&quot;
+  ],
+  &quot;minority_opinions&quot;: [],
+  &quot;rejected_hypothesis_refs&quot;: [
+    &quot;hyp_sector_rotation:v1&quot;,
+    &quot;hyp_liquidity:v2&quot;
+  ],
+  &quot;selected_hypothesis_refs&quot;: [
+    &quot;hyp_style_divergence:v1&quot;
+  ],
+  &quot;six_factor_chain&quot;: [
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_structural_root&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;structural_root&quot;,
+      &quot;statement&quot;: &quot;结构根因：风格分化是主要驱动&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_trigger&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;trigger&quot;,
+      &quot;statement&quot;: &quot;触发：盘前信号确认结构压力&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_transmission&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;transmission&quot;,
+      &quot;statement&quot;: &quot;传导：资金与风格通过风险预算传导&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_exposure&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;exposure&quot;,
+      &quot;statement&quot;: &quot;暴露：高 beta 与成长板块暴露更高&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_repricing&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;repricing&quot;,
+      &quot;statement&quot;: &quot;重定价：暴露板块估值下修&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    },
+    {
+      &quot;confidence&quot;: 0.58,
+      &quot;edge_ids&quot;: [
+        &quot;edge_hyp_style_divergence_observable_result&quot;
+      ],
+      &quot;evidence_ids&quot;: [
+        &quot;ev_c50f450ec05b_style_large_cap&quot;,
+        &quot;ev_c50f450ec05b_style_small_cap&quot;,
+        &quot;ev_supp_style_df0cb4a9ca2a&quot;
+      ],
+      &quot;stage&quot;: &quot;observable_result&quot;,
+      &quot;statement&quot;: &quot;观察结果：指数与广度同步下跌&quot;,
+      &quot;status&quot;: &quot;supported&quot;
+    }
+  ],
+  &quot;status&quot;: &quot;ok&quot;,
+  &quot;stop_reason&quot;: &quot;sufficient&quot;
+}</pre>
+      <p class="evidence-summary">11 条冻结快照证据，3 个竞争假设</p>
+    </article>
+  </div>
+  <div class="detail-grid">
+    <section>
+      <h3>证据</h3>
+      <ul><li>ev_c50f450ec05b_breadth_all</li><li>ev_c50f450ec05b_event_global_risk</li><li>ev_c50f450ec05b_event_rate_decision</li><li>ev_c50f450ec05b_fund_flow_north</li><li>ev_c50f450ec05b_index_000001_sh</li><li>ev_c50f450ec05b_sector_defensive</li><li>ev_c50f450ec05b_sector_growth</li><li>ev_c50f450ec05b_style_large_cap</li><li>ev_c50f450ec05b_style_small_cap</li><li>ev_c50f450ec05b_turnover_all</li><li>ev_supp_style_df0cb4a9ca2a</li></ul>
+    </section>
+    <section>
+      <h3>反证 / 反例</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>假设</h3>
+      <ul><li><strong>hyp_liquidity:v2</strong> 资金收缩是风险偏好切换后的放大器 <span class="tag">weakened</span> <span class="score">0.30</span></li><li><strong>hyp_style_divergence:v1</strong> 风格分化是主要驱动 <span class="tag">open</span> <span class="score">0.45</span></li><li><strong>hyp_sector_rotation:v1</strong> 板块轮动是主因 <span class="tag">open</span> <span class="score">0.38</span></li></ul>
+    </section>
+    <section>
+      <h3>回改</h3>
+      <ul><li><strong>rev_run_market_trace_liquidity_hyp_liquidity_amplifier</strong> revise · 风格分化与板块分化证据显示：流动性是风险偏好切换后的放大器</li></ul>
+    </section>
+    <section>
+      <h3>未解决问题</h3>
+      <p class="empty">无</p>
+    </section>
+    <section>
+      <h3>性能与成本</h3>
+      <ul>
+        <li>latency 372 ms</li>
+        <li>tokens 1960（prompt 1440 / completion 520）</li>
+        <li>cost 0.0012</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+  <script src="../static/index.js"></script>
+</body>
+</html>
