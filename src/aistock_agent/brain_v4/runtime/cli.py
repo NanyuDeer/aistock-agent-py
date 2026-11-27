@@ -45,6 +45,12 @@ def _summary(
         "run_id": result.run_id,
         "profile": result.profile,
         "status": result.status,
+        # 审计需要直接看到"前端将消费的结论"，否则只能翻 payload 才能确认。
+        "briefing_summary": (
+            None
+            if result.briefing_v1 is None
+            else (result.briefing_v1.get("display_report") or {}).get("summary")
+        ),
         "as_of": result.as_of.isoformat(),
         "data_cutoff": result.data_cutoff.isoformat(),
         "snapshot_id": result.snapshot_id,
