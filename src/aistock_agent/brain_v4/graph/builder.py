@@ -18,7 +18,6 @@
 研判的 `created_at` 取 `request.as_of`，绝不读取系统当前时间。
 """
 
-import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,12 +25,14 @@ from typing import Annotated, Any, Literal, TypedDict, TypeVar, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Send
 
-from ..analysts.kernel import AnalystResult, run_analyst
+from ..analysts.kernel import AnalystResult, run_analyst_async
 from ..analysts.profiles import analyst_seats, analyst_tool_groups
+from ..analysts.tools import build_analyst_tools
 from ..contracts import V4Contract
 from ..contracts.deliberation import (
     BeliefUpdate,
@@ -201,6 +202,8 @@ class _Runtime:
     tool_client: ToolClient | None
     model: BaseChatModel | None
     gateway: ToolGateway | None = None
+    # 分析师工具只由 profile + gateway 派生，构造后整轮复用（工具本身无状态）。
+    analyst_tools: list[BaseTool] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -460,6 +463,8 @@ def build_research_graph(
                 allowed_tools=analyst_tool_groups(profile),
                 clock=lambda: request.as_of,
             )
+            # 工具名/参数只来自 profile 与 TOOL_MAP，构造阶段不触网。
+            runtime.analyst_tools = build_analyst_tools(profile, runtime.gateway)
         case_file = state.get("case_file")
         case_version = (
             case_file.case_version if isinstance(case_file, CaseFile) else 1
@@ -709,17 +714,24 @@ def build_research_graph(
         if runtime.model is None:
             result = _deterministic_analyst(task, profile)
         else:
-            result = await asyncio.to_thread(
-                run_analyst,
+            # 真实模型路径走异步内核：工具是异步 StructuredTool，且需要外层
+            # asyncio.wait_for 超时与 token 预算结构化降级。
+            result = await run_analyst_async(
                 role=role,
                 profile=profile,
                 model=runtime.model,
                 task=task.get("task_text", ""),
+                tools=runtime.analyst_tools,
                 research_round=round_no,
+                token_budget=profile.token_budget,
+                timeout_s=profile.timeout_s,
             )
         return {
             "analyst_results": [result],
-            "usage": [{"key": "analyst_steps", "value": result.steps_used}],
+            "usage": [
+                {"key": "analyst_steps", "value": result.steps_used},
+                {"key": "analyst_tokens", "value": result.tokens_used},
+            ],
         }
 
     def assess_node(state: ResearchGraphState) -> Command[str]:

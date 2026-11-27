@@ -1,5 +1,30 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 真实模型与工具注入及预算控制（P2-live-model）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/analysts/model_factory.py`：`build_analyst_model(profile)` 按 profile 选择 quick/deep 模型——`alert_hot`、`max_research_rounds<=1` 或 `max_deliberation_rounds==0` 走 `get_quick_think`，其余走 `get_deep_think`；温度固定 0 保证可复现；导入阶段不构造任何客户端。
+- `src/aistock_agent/brain_v4/analysts/tools.py`：`build_analyst_tools(profile, gateway)` 只为 `profile.tool_groups` 中登记在 `TOOL_MAP` 的工具组生成异步 `StructuredTool`；参数 schema 用 Pydantic 按白名单生成；工具内部 `await gateway.call`，把 `ToolEnvelope` 的 data/error/as_of/quality 以结构化 JSON 返回；工具异常降级为结构化错误而非裸抛。
+
+### 修改
+
+- `analysts/kernel.py`：`AnalystResult` 增加 `tokens_used` / `token_budget`；预算中间件累计模型 `usage_metadata.total_tokens`，超 `profile.token_budget` 抛 `TokenBudgetExceededError` 并返回结构化 `budget_exhausted`；新增 `run_analyst_async`（外层 `asyncio.wait_for` 超时 → 结构化 `stalled/timeout`），既有 `run_analyst` 的步数/结构化断言保持不变。
+- `graph/builder.py`：profile 节点按已建 gateway 构造分析师工具；analyst 席位改为注入 model/tools/token_budget/timeout_s 的异步内核调用，usage 追加 `analyst_tokens`；图拓扑未改动。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_analyst_model_injection.py -q` → `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.analysts.model_factory'`。
+- 绿态（focused）：同命令 → `11 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `204 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 63 source files`。
+- 未改 `services/llm.py`、features、runtime、scheduler、app-api、前端与 pyproject；未使用 `create_react_agent`；测试全部使用离线假模型/假客户端。
+
+---
+
 ## [main] 2026-11-27 — 实时取数 NodeToolClient 与工具白名单（P1-live-tools）
 
 **开发者**: NanyuDeer
