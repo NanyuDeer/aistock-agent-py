@@ -584,6 +584,9 @@ async def _run_briefing(
                 evening_extras=inputs.evening_extras,
             ),
         )
+        # 投影可能拿不到 summary（种子缺摘要），导致前端看到空标题。此时用
+        # 分析师的首条 claim 回填，保证"花了 token"能变成可读结论。
+        _fill_summary_from_claims(briefing_v1, result)
     except Exception as exc:  # noqa: BLE001 - 数据缺口降级，不抛裸异常
         status = "insufficient"
         judgment = _degraded_judgment(
@@ -765,7 +768,37 @@ def _apply_analyst_claims(
         ref = analyst_claim.get("claim_ref")
         if isinstance(ref, str):
             by_ref[ref] = analyst_claim
-    if not by_ref or not result.claims:
+    if not by_ref:
+        return 0
+    if not result.claims:
+        # 确定性投影对某些日期/档位可能产出 0 条 claim；此时分析师结论无处
+        # 落地，会出现"花了 token 但早报没有结论"。按附录 C.2，claim 应由分析师
+        # 内核产出，因此这里用分析师结果补建 claim（不额外编造）。
+        rebuilt: list[BriefingClaim] = []
+        for item in analyst_claims:
+            ref = item.get("claim_ref")
+            statement = item.get("statement")
+            if not isinstance(ref, str) or not isinstance(statement, str):
+                continue
+            if not statement.strip():
+                continue
+            raw = item.get("confidence")
+            confidence = (
+                float(raw)
+                if isinstance(raw, int | float) and not isinstance(raw, bool)
+                else 0.5
+            )
+            rebuilt.append(
+                BriefingClaim(
+                    claim_ref=ref,
+                    source_profile=result.envelope.profile,
+                    statement=statement,
+                    confidence=min(1.0, max(0.0, confidence)),
+                )
+            )
+        if rebuilt:
+            result.claims = rebuilt
+            return len(rebuilt)
         return 0
 
     updated: list[BriefingClaim] = []
@@ -790,6 +823,24 @@ def _apply_analyst_claims(
         count += 1
     result.claims = updated
     return count
+
+
+def _fill_summary_from_claims(
+    briefing_v1: dict[str, object], result: BriefingResult
+) -> None:
+    """投影缺 summary 时用首条 claim 回填，避免前端出现空结论。"""
+    display = briefing_v1.get("display_report")
+    if not isinstance(display, dict):
+        return
+    current = display.get("summary")
+    if isinstance(current, str) and current.strip():
+        return
+    for claim in result.claims:
+        if claim.statement.strip():
+            display["summary"] = claim.statement
+            if not briefing_v1.get("podcast_brief"):
+                briefing_v1["podcast_brief"] = claim.statement
+            return
 
 
 def _briefing_status(has_evidence: bool, missing_fields: list[str]) -> LiveStatus:

@@ -250,7 +250,10 @@ def _claims_from_results(
     ordered = sorted(results, key=lambda item: (item.research_round, item.result_id))
     claims: list[dict[str, object]] = []
     for index, result in enumerate(ordered):
-        if result.status != "ok" or not result.claim.strip():
+        # 只要分析师给出了非空 claim 就纳入：stalled/error 往往发生在工具步数
+        # 耗尽之后，claim 仍可能是有效结论。之前按 status=="ok" 过滤，导致
+        # 真实 run 花掉 1.7 万 token 却一条 claim 都没进早报（llm_claim_count=0）。
+        if not result.claim.strip():
             continue
         claim_ref = _attributed_claim_ref(result, ref_to_claim, evidence_by_id)
         if claim_ref is None:
@@ -261,6 +264,9 @@ def _claims_from_results(
                 "statement": result.claim,
                 "confidence": float(result.confidence),
                 "evidence_ids": list(result.evidence_refs),
+                # 审计需要知道这条 claim 来自正常完成还是降级结果。
+                "analyst_status": result.status,
+                "analyst_error_kind": result.error_kind,
             }
         )
     return claims
@@ -320,6 +326,13 @@ async def run_briefing_session(
         for item in final.get("errors", ())
         if isinstance(item, Mapping)
     ]
+    # 分析师降级（stalled / error）必须显式进审计，否则只看到 token 花掉、
+    # 不知道结论为何薄弱。
+    for result in results:
+        if result.status != "ok":
+            errors.append(
+                f"analyst_{result.status}:{result.error_kind or 'unknown'}"
+            )
     if judgment is None and not errors:
         errors = ["judgment_missing"]
     status = "ok" if judgment is not None else "degraded"
