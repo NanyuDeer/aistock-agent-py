@@ -31,12 +31,14 @@ from aistock_agent.brain_v4.contracts.research import (
 )
 from aistock_agent.brain_v4.features.briefing.adapter import (
     BriefingChainFixture,
+    BriefingSessionSeed,
     MarketTraceReference,
     build_evidence_window,
     compute_window_sha,
 )
 from aistock_agent.brain_v4.features.briefing.projection import (
     BriefingChainResult,
+    BriefingClaim,
     BriefingResult,
     briefing_judgment_id,
     project_chain,
@@ -57,6 +59,7 @@ from aistock_agent.brain_v4.runtime.bootstrap import (
     ensure_app_env,
     ensure_runtime_pools,
 )
+from aistock_agent.brain_v4.runtime.briefing_live import run_briefing_session
 from aistock_agent.brain_v4.runtime.briefing_projection import (
     ProjectionSession,
     to_briefing_v1,
@@ -519,11 +522,54 @@ async def _run_briefing(
     reference = _market_trace_reference(market_trace)
     parent_run_id, parent_judgment_ids = _expected_parents(chain, profile)
 
+    # 分析师内核产出的 claim 是否可用；缺模型/图失败都回退确定性投影。
+    token_source = "unavailable"
+    llm_claim_count = 0
+    llm_degraded: str | None = None
+    usage_override: dict[str, int] | None = None
+    degraded_reason: str | None = None
+
     try:
         chain_result = project_chain(chain, reference)
         result = _pick_result(chain_result, profile)
         window = build_evidence_window(chain, profile)
         status = _briefing_status(bool(window.items), inputs.missing_fields)
+
+        if model is not None:
+            # 注入模型时，由分析师内核产出 claim；成功则覆盖叙述字段，
+            # 失败/无研判则保留确定性投影并显式记录降级原因。
+            session = _session_for(chain, profile)
+            tool_client = LiveMarketToolClient(
+                client,
+                as_of=as_of,
+                data_cutoff=data_cutoff,
+                subject_code=chain.subject_code,
+            )
+            outcome = await run_briefing_session(
+                chain, session, model=model, tool_client=tool_client
+            )
+            token_source = str(outcome.usage.get("token_source") or "unavailable")
+            usage_override = _session_usage(
+                outcome.usage,
+                tool_calls=inputs.tool_calls,
+                evidence_count=len(window.items),
+            )
+            if outcome.judgment is not None:
+                llm_claim_count = _apply_analyst_claims(
+                    result, outcome.analyst_claims
+                )
+            else:
+                reason = (
+                    "; ".join(outcome.errors) if outcome.errors else "no_judgment"
+                )
+                llm_degraded = f"briefing_graph_failed:{reason}"
+                if status == "ok":
+                    status = "partial"
+        else:
+            llm_degraded = (
+                f"briefing_llm_unavailable:{model_degraded or 'model_not_injected'}"
+            )
+
         judgment = _briefing_judgment(
             result=result,
             chain=chain,
@@ -538,7 +584,6 @@ async def _run_briefing(
                 evening_extras=inputs.evening_extras,
             ),
         )
-        degraded_reason: str | None = None
     except Exception as exc:  # noqa: BLE001 - 数据缺口降级，不抛裸异常
         status = "insufficient"
         judgment = _degraded_judgment(
@@ -555,6 +600,7 @@ async def _run_briefing(
         result = None
         window = None
         degraded_reason = f"{type(exc).__name__}: {exc}"
+        usage_override = None
 
     snapshot_id = (
         window.snapshot_id
@@ -565,7 +611,11 @@ async def _run_briefing(
     evidence_ids = (
         [item.evidence_id for item in window.items] if window is not None else []
     )
-    usage = _usage(tool_calls=inputs.tool_calls, evidence_count=len(evidence_ids))
+    usage = (
+        usage_override
+        if usage_override is not None
+        else _usage(tool_calls=inputs.tool_calls, evidence_count=len(evidence_ids))
+    )
     audit = _audit(
         mode="BRIEFING_CHAIN",
         evidence_count=len(evidence_ids),
@@ -583,8 +633,12 @@ async def _run_briefing(
         gateway_injected=gateway is not None,
         snapshot_sha=snapshot_sha,
     )
+    audit["llm_claim_count"] = llm_claim_count
+    audit["token_source"] = token_source
     if degraded_reason is not None:
         audit["degraded_reason"] = degraded_reason
+    elif llm_degraded is not None:
+        audit["degraded_reason"] = llm_degraded
     elif model_degraded is not None:
         audit["degraded_reason"] = model_degraded
 
@@ -667,6 +721,75 @@ def _expected_parents(
         briefing_judgment_id(morning.run_id),
         briefing_judgment_id(midday.run_id),
     ]
+
+
+def _session_for(
+    chain: BriefingChainFixture, profile: BriefingProfile
+) -> BriefingSessionSeed:
+    for session in chain.sessions:
+        if session.profile == profile:
+            return session
+    raise KeyError(f"briefing chain 缺少时段 {profile!r}")
+
+
+def _session_usage(
+    source: dict[str, object], *, tool_calls: int, evidence_count: int
+) -> dict[str, int]:
+    """把时段研究图 usage 收敛成 `LiveRunResult.usage`，不虚报 token。"""
+
+    def _value(key: str) -> int:
+        value = source.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return value
+
+    return {
+        "prompt_tokens": _value("prompt_tokens"),
+        "completion_tokens": _value("completion_tokens"),
+        "total_tokens": _value("total_tokens"),
+        "tool_calls": tool_calls,
+        "evidence_count": evidence_count,
+    }
+
+
+def _apply_analyst_claims(
+    result: BriefingResult, analyst_claims: list[dict[str, object]]
+) -> int:
+    """用分析师 claim 覆盖既有 claim 的 statement/confidence，返回覆盖条数。
+
+    只改叙述字段，保留 `claim_ref`、`changes`、`scores` 与 envelope 结构；
+    未匹配或文本为空的 claim 保持确定性投影原样，绝不新增 claim。
+    """
+    by_ref: dict[str, dict[str, object]] = {}
+    for analyst_claim in analyst_claims:
+        ref = analyst_claim.get("claim_ref")
+        if isinstance(ref, str):
+            by_ref[ref] = analyst_claim
+    if not by_ref or not result.claims:
+        return 0
+
+    updated: list[BriefingClaim] = []
+    count = 0
+    for claim in result.claims:
+        override = by_ref.get(claim.claim_ref)
+        statement = None if override is None else override.get("statement")
+        if override is None or not isinstance(statement, str) or not statement.strip():
+            updated.append(claim)
+            continue
+        confidence = claim.confidence
+        raw_confidence = override.get("confidence")
+        if isinstance(raw_confidence, int | float) and not isinstance(
+            raw_confidence, bool
+        ):
+            confidence = min(1.0, max(0.0, float(raw_confidence)))
+        updated.append(
+            claim.model_copy(
+                update={"statement": statement, "confidence": confidence}
+            )
+        )
+        count += 1
+    result.claims = updated
+    return count
 
 
 def _briefing_status(has_evidence: bool, missing_fields: list[str]) -> LiveStatus:

@@ -1,5 +1,32 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 早/午/晚报 live 接入分析师研判（P13-briefing-live-llm）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/runtime/briefing_live.py`：新增 `build_briefing_request`（按 `BriefingSessionSeed` 的 profile/subject/as_of/data_cutoff/snapshot_id 构造 `ResearchRequest`，不读系统时间）、`run_briefing_session`（以链上竞争假设为起点跑一次 `build_research_graph`，把 `AnalystResult` 收敛为带 `claim_ref/statement/confidence/evidence_ids` 的 claim；任何异常收敛为 degraded，不抛裸异常）、`BriefingSessionOutcome`（profile/judgment/analyst_claims/usage/status/errors）。刻意不构造 thinking 模型，保证测试与回放全离线。
+
+### 修改
+
+- `src/aistock_agent/brain_v4/runtime/runner.py`：`_run_briefing` 在注入模型时对当前 session 调 `run_briefing_session`；成功且有研判时用分析师 claim 覆盖 `BriefingResult.claims` 的 `statement`/`confidence`，保留 `claim_ref`、`changes`、`scores` 与 envelope 结构不变；缺模型写 `briefing_llm_unavailable:<原因>`，图失败写 `briefing_graph_failed:<原因>` 并把 `ok` 降级为 `partial`。`usage` 以 session outcome 真实 token 为准（无模型保持 0 且 `token_source="unavailable"`），`audit` 新增 `llm_claim_count`、`token_source`。既有早/午/晚 parent 链与晚报引用 market_trace judgment 的逻辑零改动。
+
+### 测试
+
+- `tests/integration/brain_v4/test_briefing_live.py`：5 例覆盖早报 live 真实 token + `llm_claim_count>=1`、午报 parent 与增量变化、晚报引用 market_trace judgment、缺模型保留确定性并写 `degraded_reason`、图失败回退且 `status != ok`。全部离线（fake client + FakeChatModel，autouse fixture 置空 `graph_run._build_thinking_model_safe`）。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/integration/brain_v4/test_briefing_live.py -q` → `KeyError: 'token_source'`。
+- 绿态（focused）：同命令 → `5 passed in 5.94s`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `280 passed in 25.68s`（275 既有 + 5 新增，既有断言零改动）。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 72 source files`。
+- 未改 `features/`、`graph/`、`contracts/`、`analysts/`、`tools/`、`events/`、`verification/`、`services/`、scheduler/config、app-api、前端、`pyproject`；未新增依赖；测试不触网、不调真实 LLM、不读系统时间。
+
+---
+
 ## [main] 2026-11-27 — 红区门禁、SOLO 概念澄清与评测台规格
 
 **开发者**: NanyuDeer
