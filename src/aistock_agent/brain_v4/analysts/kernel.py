@@ -628,6 +628,61 @@ def run_analyst(
     )
 
 
+async def _astalled_synthesis(
+    result: AnalystResult,
+    *,
+    thinking_model: BaseChatModel | None,
+    task: str,
+    budget: _StepBudgetMiddleware,
+    callback: _UsageBudgetCallback,
+) -> AnalystResult:
+    """步数耗尽时用一次无工具的 thinking 综合补出 claim。
+
+    为什么需要：工具循环因 max_steps 中止时框架拿不到结构化输出，claim 为空；
+    这会表现为"花了 token 却没有结论"（实测早报 1.7 万 token、0 条 claim）。
+    综合只重述任务里的假设与证据，不引入新事实；失败则原样返回。
+    """
+    if thinking_model is None:
+        return result
+    try:
+        # 步数耗尽时没有 structured_response，`_synthesis_messages` 会直接返回
+        # None，所以这里用空种子自行构造提示，只把任务（假设 + 证据 ID）交给模型。
+        seed = {
+            "claim": "",
+            "evidence_refs": [],
+            "confidence": 0.0,
+            "uncertainties": [],
+            "requested_gaps": [],
+        }
+        prompt = _SYNTHESIS_PROMPT.format(
+            task=task, seed=json.dumps(seed, ensure_ascii=False)
+        )
+        response = await thinking_model.bind().ainvoke(
+            [HumanMessage(content=prompt)],
+            config={"callbacks": [callback]},
+        )
+        synthesis = _parse_synthesis(_message_text(response))
+    except Exception:  # noqa: BLE001 - 兜底失败不改变既有 stalled 结果
+        return result
+    if not synthesis:
+        return result
+    claim = str(synthesis.get("claim") or "").strip()
+    if not claim:
+        return result
+    return result.model_copy(
+        update={
+            "claim": claim,
+            "confidence": float(synthesis.get("confidence") or result.confidence),
+            "uncertainties": list(
+                synthesis.get("uncertainties") or result.uncertainties
+            ),
+            "requested_gaps": list(
+                synthesis.get("requested_gaps") or result.requested_gaps
+            ),
+        }
+    )
+
+
 async def run_analyst_async(
     *,
     role: str,
@@ -711,14 +766,20 @@ async def run_analyst_async(
             error_kind="timeout",
         )
     except StepLimitExceededError:
-        return _result(
-            role=role,
-            research_round=research_round,
-            max_steps=ceiling,
+        return await _astalled_synthesis(
+            _result(
+                role=role,
+                research_round=research_round,
+                max_steps=ceiling,
+                budget=budget,
+                usage=usage_callback,
+                status="stalled",
+                error_kind="step_limit",
+            ),
+            thinking_model=thinking_model,
+            task=task,
             budget=budget,
-            usage=usage_callback,
-            status="stalled",
-            error_kind="step_limit",
+            callback=usage_callback,
         )
     except TokenBudgetExceededError:
         return _result(
