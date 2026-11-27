@@ -172,6 +172,31 @@ async def test_non_json_synthesis_falls_back_to_original_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_synthesis_budget_overflow_keeps_structured_claim() -> None:
+    """合成超预算不能把主循环已产出的 claim / gaps 整条丢掉。"""
+    profile = get_profile("market_trace")
+    # 主循环即使按步数上限反复调用也在硬上限内；合成 20000 会推过 8640。
+    model = _ThinkingFake(agent_tokens=500, synth_tokens=20000)
+
+    result = await run_analyst_async(
+        role="quant",
+        profile=profile,
+        model=model,
+        task="分析今日指数下跌主因",
+        token_budget=8000,
+        thinking_model=model,
+        timeout_s=10,
+    )
+
+    assert isinstance(result, AnalystResult)
+    assert result.error_kind is None, result.error_kind
+    assert result.status == "ok"
+    assert result.claim == "original claim"
+    assert result.requested_gaps == []
+    assert result.tokens_used > 8000
+
+
+@pytest.mark.asyncio
 async def test_no_thinking_model_skips_synthesis() -> None:
     profile = get_profile("market_trace")
     model = _ThinkingFake()

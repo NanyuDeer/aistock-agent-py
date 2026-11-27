@@ -615,15 +615,10 @@ def run_analyst(
                 thinking_model, task, output, budget, callback=usage_callback
             )
         except TokenBudgetExceededError:
-            return _result(
-                role=role,
-                research_round=research_round,
-                max_steps=ceiling,
-                budget=budget,
-                usage=usage_callback,
-                status="stalled",
-                error_kind="budget_exhausted",
-            )
+            # 终局合成只是增强项：主循环已经拿到结构化结论时，不能因为增强
+            # 超预算把 claim / requested_gaps 整条丢掉。实测 2026-11-27 四个
+            # 席位全部 stalled（claim=0、gaps=0），据此缺口检索永远触发不了。
+            synthesis = None
 
     return _finalize(
         output,
@@ -818,15 +813,9 @@ async def run_analyst_async(
                 thinking_model, task, output, budget, callback=usage_callback
             )
         except TokenBudgetExceededError:
-            return _result(
-                role=role,
-                research_round=research_round,
-                max_steps=ceiling,
-                budget=budget,
-                usage=usage_callback,
-                status="stalled",
-                error_kind="budget_exhausted",
-            )
+            # 同 `run_analyst`：终局合成超预算只放弃增强，不能丢掉主循环的
+            # 结构化 claim / requested_gaps（11-27 四席位全 stalled 的根因）。
+            synthesis = None
 
     return _finalize(
         output,
