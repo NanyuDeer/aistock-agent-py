@@ -509,9 +509,83 @@ def start_scheduler() -> None:
         job.misfire_grace_time = 3600
         job.coalesce = False
 
+    # V4 影子任务（P5，默认关闭）：必须放在既有 job 注册与上面 misfire 循环之后——
+    # 该循环会把所有 job 的 misfire_grace_time 改成 3600s，而 V4 组要求 600s；
+    # 关闭 brain_v4_enabled 即回滚，不改任何既有 job 的注册与语义。
+    _register_brain_v4_jobs(scheduler)
+
     scheduler.start()
     _scheduler_started_at = time.time()
     logger.info("scheduler_started", jobs=[job.id for job in scheduler.get_jobs()])
+
+
+def _brain_v4_job_specs() -> tuple[tuple[str, str, str, str], ...]:
+    """读取 settings 生成 V4 job 规格（函数内读取，便于测试 monkeypatch cron）。
+
+    profile 用 runner 的全名（market_trace / briefing_*），与 CLI --profile 对齐，
+    避免调度、归档、审计三处出现缩写漂移。
+    """
+    return (
+        (
+            "market_trace",
+            "brain_v4_market_trace",
+            settings.brain_v4_market_trace_cron,
+            "V4 market trace (15:37)",
+        ),
+        (
+            "briefing_morning",
+            "brain_v4_morning",
+            settings.brain_v4_morning_cron,
+            "V4 briefing morning (08:51)",
+        ),
+        (
+            "briefing_midday",
+            "brain_v4_midday",
+            settings.brain_v4_midday_cron,
+            "V4 briefing midday (12:06)",
+        ),
+        (
+            "briefing_evening",
+            "brain_v4_evening",
+            settings.brain_v4_evening_cron,
+            "V4 briefing evening (15:36)",
+        ),
+    )
+
+
+def _register_brain_v4_jobs(scheduler: AsyncIOScheduler) -> None:
+    """按开关注册 4 个 V4 影子定时任务（默认全关）。
+
+    为什么按开关而不是无条件注册：关掉 ``settings.brain_v4_enabled`` 即回滚，
+    不需要改代码；且只在 ``start_scheduler`` 末尾调用，测试/脚本 import
+    scheduler 不会产生注册副作用。
+    """
+    if settings.brain_v4_enabled is not True:
+        # 只接受真实的 True：既有测试会用 MagicMock 整体替换 settings，未显式设置的
+        # 属性是 truthy 的 MagicMock；若据此注册，cron 也会是 MagicMock 并被传给
+        # CronTrigger（Wrong number of fields），连带打断与 V4 无关的既有链路。
+        logger.info("brain_v4_jobs_disabled")
+        return
+
+    specs = _brain_v4_job_specs()
+    for profile, job_id, cron, name in specs:
+        scheduler.add_job(
+            _run_brain_v4_task,
+            CronTrigger.from_crontab(
+                cron,
+                timezone=settings.scheduler_timezone,
+            ),
+            kwargs={"profile": profile},
+            id=job_id,
+            name=name,
+            replace_existing=True,
+            # 一次 live run 可能数分钟：重叠执行会重复取数并抢 LLM/数据接口配额，
+            # 错过的那次直接丢弃等下一个 cron。
+            max_instances=1,
+            # 600s 宽于 APScheduler 默认 1s：loop 短暂繁忙不该静默跳过影子任务。
+            misfire_grace_time=600,
+        )
+    logger.info("brain_v4_jobs_registered", jobs=[job_id for _, job_id, _, _ in specs])
 
 
 def shutdown_scheduler() -> None:
@@ -1518,4 +1592,110 @@ async def _run_sector_wind_prediction_task() -> None:
         logger.info("scheduler_sector_wind_prediction_done", **stats)
     except Exception as e:
         logger.error("scheduler_sector_wind_prediction_failed", error=str(e), exc_info=True)
+
+
+#: runner 幂等命中时可能返回的等价状态；命中即不再重复归档，避免影子表重复写。
+_BRAIN_V4_ALREADY_EXISTS = "already_exists"
+
+
+async def _run_brain_v4_task(profile: str) -> None:
+    """执行一次 V4 影子运行并按幂等语义归档（非交易日直接跳过）。
+
+    为什么异常全部吞掉：V4 是影子任务，失败不能影响既有主链 cron 或进程存活；
+    失败重试 ``settings.brain_v4_retry`` 次后只记错误日志，由审计页/日志人工发现。
+    """
+    report_day = shanghai_today()
+    if not is_trading_day(report_day):
+        logger.info("scheduler_skip_non_trading_day", task=f"brain_v4_{profile}")
+        return
+
+    report_date = report_day.isoformat()
+    # 函数内 import：V4 依赖 langgraph/features 等重模块，顶层 import 会拖慢
+    # 服务启动（即便开关关闭也会被加载），与 _run_prediction_validate_task 同约定。
+    from aistock_agent.brain_v4.runtime.runner import LiveRunResult, run_live
+
+    attempts = max(1, settings.brain_v4_retry + 1)
+    result: LiveRunResult | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = await asyncio.wait_for(
+                run_live(profile, report_day),
+                timeout=settings.brain_v4_timeout_s,
+            )
+            break
+        except TimeoutError:
+            # 超时单独归一类：告警规则可区分"数据慢"与"代码异常"。
+            logger.warning(
+                "brain_v4_task_timeout",
+                profile=profile,
+                date=report_date,
+                attempt=attempt,
+                timeout_s=settings.brain_v4_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - 影子任务失败只记录，不向上抛
+            logger.warning(
+                "brain_v4_task_failed",
+                profile=profile,
+                date=report_date,
+                attempt=attempt,
+                error=f"{type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
+
+    if result is None:
+        logger.error(
+            "brain_v4_task_gave_up",
+            profile=profile,
+            date=report_date,
+            attempts=attempts,
+        )
+        return
+
+    logger.info(
+        "brain_v4_task_done",
+        profile=profile,
+        date=report_date,
+        run_id=result.run_id,
+        status=str(result.status),
+        shadow_only=settings.brain_v4_shadow_only,
+    )
+    if str(result.status) == _BRAIN_V4_ALREADY_EXISTS:
+        logger.info(
+            "brain_v4_archive_skipped_already_exists",
+            profile=profile,
+            date=report_date,
+            run_id=result.run_id,
+        )
+        return
+
+    from aistock_agent.brain_v4.runtime.archive import archive_run
+
+    try:
+        archive = await archive_run(result)
+    except Exception as exc:  # noqa: BLE001 - 归档失败不得推翻已完成的研判
+        logger.warning(
+            "brain_v4_archive_failed",
+            profile=profile,
+            date=report_date,
+            run_id=result.run_id,
+            error=f"{type(exc).__name__}: {exc}",
+            exc_info=True,
+        )
+        return
+
+    if archive.archived:
+        logger.info(
+            "brain_v4_archived",
+            profile=profile,
+            date=report_date,
+            run_id=result.run_id,
+        )
+    else:
+        logger.warning(
+            "brain_v4_archive_skipped",
+            profile=profile,
+            date=report_date,
+            run_id=result.run_id,
+            error=archive.error,
+        )
 

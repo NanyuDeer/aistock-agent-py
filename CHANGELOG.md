@@ -1,5 +1,32 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — V4 影子定时调度与开关（P5-scheduler）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/config.py`：追加 8 个 V4 调度配置项（全部默认关闭/保守值）：`brain_v4_enabled=False`、`brain_v4_shadow_only=True`、`brain_v4_morning_cron="51 8 * * 1-5"`、`brain_v4_midday_cron="6 12 * * 1-5"`、`brain_v4_evening_cron="36 15 * * 1-5"`、`brain_v4_market_trace_cron="37 15 * * 1-5"`、`brain_v4_timeout_s=900`、`brain_v4_retry=1`；不修改任何既有配置项与默认值。
+- `src/aistock_agent/services/scheduler.py`：`_register_brain_v4_jobs(scheduler)` 在 `brain_v4_enabled=True` 时注册 4 个影子 job（`brain_v4_market_trace` / `brain_v4_morning` / `brain_v4_midday` / `brain_v4_evening`），每个 job `max_instances=1`、`misfire_grace_time=600`、`replace_existing=True`，cron 全部读 settings；`_run_brain_v4_task(profile)` 非交易日跳过，交易日用 `asyncio.wait_for(..., timeout=brain_v4_timeout_s)` 调 `run_live(profile, date)`，失败按 `brain_v4_retry` 重试 1 次后只记告警不抛出；`status="already_exists"` 时跳过归档，归档失败不影响主流程；V4 相关 import 全在函数体内懒加载。`start_scheduler()` 在既有 job 注册与 misfire 循环之后按开关调用注册（保留 600s，不被全量 3600s 覆盖）。
+- `tests/unit/brain_v4/test_scheduler_brain_v4.py`：覆盖开关关闭不注册、开启恰好 4 个 job 且 cron 来自 settings / `max_instances=1` / `misfire_grace_time=600`、非交易日不触达 runner、交易日 profile 透传并归档、失败重试一次后放弃不抛、`already_exists` 不重复归档、归档异常不断主流程；全部用假 scheduler + monkeypatch，不触网。
+
+### 修改
+
+- `CHANGELOG.md`：追加本条目。
+- `docs/superpowers/packets/2026-11-27-brain-v4-P5-scheduler.md`：新增 P5 执行包记录。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_scheduler_brain_v4.py -q` → `9 failed, 3 errors`（`Settings` 无 `brain_v4_*` 字段；scheduler 无 `_run_brain_v4_task`）。
+- 绿态（focused）：`uv run pytest tests/unit/brain_v4/test_scheduler_brain_v4.py -q` → `9 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `226 passed`。
+- `uv run pytest tests/unit -q` → `4812 passed, 1 skipped in 358.26s`。
+- `uv run ruff check src/aistock_agent/config.py src/aistock_agent/services/scheduler.py src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 69 source files`。
+- 未改既有 cron/job 语义、未改 app-api/前端/pyproject、未新增依赖、未写生产表；关闭 `brain_v4_enabled` 即回滚。
+
+---
+
 ## [main] 2026-11-27 — 影子归档与每日审计页（P4-archive-audit）
 
 **开发者**: NanyuDeer

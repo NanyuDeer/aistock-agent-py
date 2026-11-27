@@ -496,6 +496,23 @@ class Settings(BaseSettings):
     # env: PREDICTION_CONF_CAP_MID；仅当值 != "high" 时才启用 mid 桶
     prediction_conf_cap_mid: str = "high"
 
+    # ===== 智慧大脑 V4 影子调度（P5，默认全关）=====
+    # 关掉 brain_v4_enabled 即停用全部 V4 shadow job，无需改代码（回滚开关）。
+    # 影子模式只写 brain_v4_runs 归档表，不写生产简报表；当前无生产归档路径，
+    # 该开关仅用于审计/日志标注，不改变归档目标。
+    brain_v4_enabled: bool = False
+    brain_v4_shadow_only: bool = True
+    # 时点取自 P5 执行包（08:51 / 12:06 / 15:36 / 15:37），交易日由 job 内
+    # is_trading_day 守卫兜底，cron 数字按执行包给定值原样使用。
+    brain_v4_morning_cron: str = "51 8 * * 1-5"
+    brain_v4_midday_cron: str = "6 12 * * 1-5"
+    brain_v4_evening_cron: str = "36 15 * * 1-5"
+    brain_v4_market_trace_cron: str = "37 15 * * 1-5"
+    # 单次 live run 超时（秒）：P3 取数 + 研判可能耗时数分钟，900s 留足重试余量。
+    brain_v4_timeout_s: int = 900
+    # 失败重试次数：1 = 首次失败后再试一次；仍失败只记告警，不无限重试。
+    brain_v4_retry: int = 1
+
     model_config = {
         "env_file": f".env.{os.getenv('APP_ENV', 'development')}",
         "env_file_encoding": "utf-8",
