@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Literal, Protocol
 
 from aistock_agent.brain_v4.contracts.briefing import Scenario
@@ -43,6 +45,7 @@ from aistock_agent.schemas.market_trace import (
     SourceCollectionStatus,
     SourceRecord,
 )
+from aistock_agent.utils.paths import project_root
 
 #: A 股统一使用东八区；不用系统本地时区，避免服务器时区漂移改变边界。
 CST = timezone(timedelta(hours=8))
@@ -988,7 +991,26 @@ async def build_briefing_chain(
     # 早报在开盘前运行，盘中板块快照必然不存在：不请求，也不计入缺失，
     # 否则早报会因一个它根本不消费的数据源被判 partial。
     needs_intraday = profile in {"briefing_midday", "briefing_evening"}
-    intraday = await fetcher.intraday_sectors() if needs_intraday else None
+    intraday: dict[str, object] | None = None
+    if needs_intraday:
+        # 优先读当日 12:25 归档：内容固定为 11:30 收盘口径，可安全回放。
+        intraday = _archived_intraday(day)
+        if intraday is None:
+            intraday = await fetcher.intraday_sectors()
+            # 实时接口的 captured_at 是请求时刻：只有“当日午休前后”取到的快照
+            # 才代表上午口径；日期不同（回放）或 13:00 之后（已是下午/收盘数据）
+            # 一律丢弃，避免把“现在”的盘面写进历史时段。
+            if intraday is not None:
+                captured_at = _as_datetime(intraday.get("captured_at"))
+                captured_cst = (
+                    captured_at.astimezone(CST) if captured_at is not None else None
+                )
+                if (
+                    captured_cst is None
+                    or captured_cst.date() != day
+                    or captured_cst.time() > time(13, 0)
+                ):
+                    intraday = None
     calendar = await fetcher.calendar(date_iso)
     review_status, legacy_report = _review_fields(await fetcher.review(day))
 
@@ -1006,7 +1028,7 @@ async def build_briefing_chain(
     items.extend(_previous_close_items(prev_close, morning_as_of))
     items.extend(_calendar_items(calendar or []))
     items.extend(_close_items(close, evening_as_of))
-    intraday_items = _intraday_items(intraday, midday_cutoff, midday_as_of)
+    intraday_items = _intraday_items(intraday, midday_cutoff)
     items.extend(intraday_items)
     # 固定按 source_id 排序，保证同一输入每次得到同一证据顺序。
     items.sort(key=lambda seed: seed.source_id)
@@ -1313,14 +1335,37 @@ def _close_items(
     return items
 
 
+#: 午间盘中快照归档（rhythm 12:25 任务落盘，内容固定为 11:30 收盘口径）。
+_INTRADAY_ARCHIVE_DIR = Path("docs/agent-outputs/intraday")
+_INTRADAY_ARCHIVE_SUFFIX = "1225"
+
+
+def _archived_intraday(day: date) -> dict[str, object] | None:
+    """读取当日 12:25 归档的盘中快照；缺失/损坏返回 None。
+
+    为什么优先归档：实时接口的 `captured_at` 是请求时刻，回放历史日期时会把
+    “现在”的盘面伪装成该日午间；归档按日期落盘且内容固定为上午收盘口径，
+    是唯一可安全回放的来源。
+    """
+    path = (
+        project_root()
+        / _INTRADAY_ARCHIVE_DIR
+        / f"{day.isoformat()}-{_INTRADAY_ARCHIVE_SUFFIX}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = payload.get("raw")
+    return raw if isinstance(raw, dict) else None
+
+
 def _intraday_items(
     intraday: dict[str, object] | None,
     cutoff: datetime,
-    as_of: datetime,
 ) -> list[BriefingEvidenceSeed]:
     if intraday is None:
         return []
-    captured_at = _as_datetime(intraday.get("captured_at")) or as_of
     gainers = _as_list(intraday.get("gainers")) or []
     losers = _as_list(intraday.get("losers")) or []
     content_parts: list[str] = []
@@ -1337,7 +1382,9 @@ def _intraday_items(
             title="上午板块快照",
             content="; ".join(content_parts) or "no sector rows",
             event_time=cutoff,
-            published_at=captured_at,
+            # 内容固定为上午收盘（11:30）口径：published_at 取 cutoff，而不是
+            # 取数时刻——否则 12:06 的实时取数晚于 11:35 的 as_of，会被整段过滤。
+            published_at=cutoff,
             tags=["sector", "style"],
         )
     ]
