@@ -261,6 +261,28 @@ def _attributed_claim_ref(
     return candidates[0] if candidates else None
 
 
+def _resolve_evidence_refs(
+    refs: Sequence[str], ledger_ids: set[str]
+) -> list[str]:
+    """把分析师引用的证据 ID 对齐到冻结 ledger。
+
+    模型偶尔会截断 ID（实测把 `ev_brief_<digest>_prev_index_000001_sh` 写成
+    `ev_brief_<digest>`），而 `commit_judgment` 会因“引用 ledger 外证据”整份
+    拒绝研判。这里做保守修复：精确命中保留；唯一前缀命中展开；其余丢弃。
+    """
+    resolved: list[str] = []
+    for ref in refs:
+        if not isinstance(ref, str) or not ref:
+            continue
+        if ref in ledger_ids:
+            resolved.append(ref)
+            continue
+        matches = sorted(item for item in ledger_ids if item.startswith(ref))
+        if len(matches) == 1:
+            resolved.append(matches[0])
+    return resolved
+
+
 def _claims_from_results(
     chain: BriefingChainFixture,
     results: Sequence[AnalystResult],
@@ -288,6 +310,9 @@ def _claims_from_results(
         else {}
     )
     ordered = sorted(results, key=lambda item: (item.research_round, item.result_id))
+    ledger_ids = (
+        {item.evidence_id for item in ledger.items} if ledger is not None else set()
+    )
     claims: list[dict[str, object]] = []
     for index, result in enumerate(ordered):
         # 只要分析师给出了非空 claim 就纳入：stalled/error 往往发生在工具步数
@@ -295,13 +320,14 @@ def _claims_from_results(
         # 真实 run 花掉 1.7 万 token 却一条 claim 都没进早报（llm_claim_count=0）。
         if not result.claim.strip():
             continue
+        evidence_ids = _resolve_evidence_refs(result.evidence_refs, ledger_ids)
         if profile == "briefing_evening":
             claims.append(
                 {
                     "claim_ref": EVENING_CLAIM_REF,
                     "statement": result.claim,
                     "confidence": float(result.confidence),
-                    "evidence_ids": list(result.evidence_refs),
+                    "evidence_ids": evidence_ids,
                     "analyst_status": result.status,
                     "analyst_error_kind": result.error_kind,
                 }
@@ -315,7 +341,7 @@ def _claims_from_results(
                 "claim_ref": claim_ref,
                 "statement": result.claim,
                 "confidence": float(result.confidence),
-                "evidence_ids": list(result.evidence_refs),
+                "evidence_ids": evidence_ids,
                 # 审计需要知道这条 claim 来自正常完成还是降级结果。
                 "analyst_status": result.status,
                 "analyst_error_kind": result.error_kind,

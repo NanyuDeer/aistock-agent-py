@@ -10,3 +10,4 @@ def test_prompt_requires_citing_evidence_values() -> None:
     assert "引用" in text
     assert "具体数值" in text
     assert "禁止笼统声称" in text
+    assert "完整复制" in text
