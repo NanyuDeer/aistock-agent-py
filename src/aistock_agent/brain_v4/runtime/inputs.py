@@ -940,6 +940,14 @@ def _event_tags(event: Mapping[str, object]) -> list[str]:
     return tags
 
 
+def _previous_weekday(day: date) -> date:
+    """返回 day 之前最近的周一~周五；只用入参推导，不读系统时间。"""
+    candidate = day - timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
 async def build_briefing_chain(
     client: NodeDataSource,
     day: date,
@@ -961,6 +969,12 @@ async def build_briefing_chain(
 
     close = await fetcher.close_snapshot(date_compact)
     last_close = await fetcher.last_close()
+    # 早报在开盘前运行，当日收盘快照必然不存在；`last-close-snapshot` 若上游
+    # 返回 None（接口抖动/当日尚无快照），早报就只剩日历事件，分析师无从立论。
+    # 这里按「上一交易日收盘快照」确定性回退，日期只由入参 day 推导，不读系统时间。
+    if last_close is None:
+        prev_day = _previous_weekday(day)
+        last_close = await fetcher.close_snapshot(prev_day.strftime("%Y%m%d"))
     intraday = await fetcher.intraday_sectors()
     calendar = await fetcher.calendar(date_iso)
     review_status, legacy_report = _review_fields(await fetcher.review(day))
