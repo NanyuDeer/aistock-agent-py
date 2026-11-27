@@ -126,3 +126,32 @@ async def test_runtime_error_is_config_error_with_detail() -> None:
     assert outcome.error == "config_error"
     assert outcome.error_detail is not None
     assert "HttpClientPool" in outcome.error_detail
+
+
+class _ErrorOutArchiveClient:
+    """模拟 NodeArchiveClient：把真实失败原因写进 ``error_out`` 后返回 None。"""
+
+    async def post(
+        self,
+        path: str,
+        body: dict[str, object],
+        *,
+        headers: dict[str, str] | None = None,
+        error_out: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        if error_out is not None:
+            error_out["stage"] = "http_error"
+            error_out["detail"] = "500 Internal Server Error: archive write failed"
+        return None
+
+
+async def test_empty_response_surfaces_real_error_out_detail() -> None:
+    """P8-C：无响应但有 error_out 详情时，不得只报 ``empty_response``。"""
+    outcome = await archive_run(_result(), client=_ErrorOutArchiveClient())
+
+    assert outcome.archived is False
+    assert outcome.error is not None
+    assert "empty_response" not in outcome.error
+    assert "500 Internal Server Error" in outcome.error
+    assert outcome.error_detail is not None
+    assert "500 Internal Server Error" in outcome.error_detail

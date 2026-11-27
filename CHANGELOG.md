@@ -1,5 +1,39 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 关闭 DeepSeek thinking 并修正研究任务工具参数（P8-thinking-and-tools）
+
+**开发者**: NanyuDeer
+
+### 修改
+
+- `src/aistock_agent/brain_v4/analysts/model_factory.py`：`build_analyst_model` 构造后检测实例 `openai_api_base`，含 `deepseek` 时用 `model_copy` 合并 `extra_body={"thinking": {"type": "disabled"}}`（保留既有键）；非 deepseek 不设置，模型不支持 `extra_body` 时记录并跳过。修复 DeepSeek thinking 默认开启导致 `Thinking mode does not support this tool_choice` 400、分析师全部失败、`usage.total_tokens=0` 的根因。
+- `src/aistock_agent/brain_v4/graph/builder.py`：`research_task_node` 用 `expand_groups` 把工具组展开为原子工具；未知组保留原名并记 `tool_group_unmapped`，已知空组（`fundamental`）记 `empty_tool_group` 且不产生调用；网关 `params` 只由 `TOOL_MAP` 白名单中可推导的键组成，`round_no/subject_code/tool/hypothesis_ref/tool_group` 不再进入 params；审计用 `EvidenceItem.tool_params` 仍保留 `round_no/tool/tool_group`。修复 `tool 'trend' is not allowed by the V4 tool map` 与 `got unexpected params` 的根因。
+- `src/aistock_agent/brain_v4/runtime/archive.py`：`NodeArchiveClient.post` 新增 `error_out` 并透传给 `NodeApiClient.post`；`archive_run` 按签名探测兼容旧替身，无响应但有 detail 时返回 `error=f"{stage}:{detail}"`（截断 200 字符）并写 `error_detail`，`empty_response` 仅保留给既无响应也无 detail 的情况。修复归档只报 `empty_response`、丢失真实原因的根因。
+- `tests/integration/brain_v4/test_research_loop.py`：契约同步。`CountingToolClient` 轮次识别改为“本轮到齐全部原子工具”推进（不再依赖 `params["round_no"]`），第 1 轮制造 `missing_evidence` gap、第 2 轮消除；调用计数改为 5 原子工具 × 2 轮 = 10，跨轮同参重复为契约变化后的预期，同轮内去重仍由 `ToolGateway` memo 保证。两轮 ledger、议会 R0/R1 门槛、证据冻结、离线确定性等原始断言原样保留。
+- `CHANGELOG.md`：追加本条目。
+- `docs/superpowers/packets/2026-11-27-brain-v4-P8-thinking-and-tools.md`：新增 P8 执行包记录（含「契约同步」一节）。
+
+### 新增
+
+- `tests/unit/brain_v4/test_model_thinking_mode.py`：deepseek base_url → `extra_body["thinking"]["type"]=="disabled"`；非 deepseek 不设置；既有 extra_body 键合并保留。真实构造 `ChatOpenAI` 但绝不发请求。
+- `tests/unit/brain_v4/test_research_task_tool_params.py`：记录型假网关断言 research_task 只传原子工具、参数为白名单子集、编排字段不进 params、`fundamental` 空组不调用。
+- `tests/unit/brain_v4/test_archive_error_surface.py`：新增“假客户端写 `error_out` 后返回 None → 暴露真实 detail、不含 `empty_response`”用例。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_model_thinking_mode.py tests/unit/brain_v4/test_research_task_tool_params.py tests/unit/brain_v4/test_archive_error_surface.py -q` → `4 failed, 3 passed`（extra_body 为 None；网关收到组名；归档 `empty_response`）。
+- 绿态（focused）：同命令 → `7 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `245 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 71 source files`。
+- 未改 `services/llm.py`、`services/data_client.py`、`tools/*`、app-api、features/、scheduler/config、pyproject；未新增依赖、未使用 `create_react_agent`；测试不触网、不调真实 LLM。
+
+### 说明
+
+`test_research_loop.py` 属有意契约同步（工具组→原子工具、编排字段不入 params），非放宽断言；保留项与改动细节见执行包 §4「契约同步」。
+
+---
+
 ## [main] 2026-11-27 — SOLO 路径启用主分析师并统一 CLI 事件循环（P7-solo-analyst）
 
 **开发者**: NanyuDeer

@@ -64,6 +64,7 @@ from ..deliberation.router import route_collaboration
 from ..graph.profiles import RunProfile, get_profile
 from ..graph.state import append_events, canonical_digest, merge_by_id, sum_usage
 from ..tools.gateway import ToolClient, ToolGateway
+from ..tools.tool_map import TOOL_GROUPS, TOOL_MAP, expand_groups
 
 ModelT = TypeVar("ModelT", bound=V4Contract)
 StateT = TypeVar("StateT")
@@ -438,6 +439,30 @@ def _as_datetime(value: Any) -> datetime:
     raise ValueError("research task requires datetime boundaries from state")
 
 
+def _whitelisted_task_params(tool: str, task: ResearchTask) -> dict[str, Any]:
+    """构造原子工具的工具参数：只保留 TOOL_MAP 白名单内可推导的键。
+
+    为什么不能沿用 ``round_no/subject_code/tool``：那些是研究编排字段，
+    不是工具契约参数；``NodeToolClient`` 会在发请求前以
+    ``unexpected params`` 拒绝。日期一律取 `data_cutoff`，绝不读系统时间。
+    """
+    spec = TOOL_MAP.get(tool)
+    if spec is None:
+        return {}
+    cutoff = _as_datetime(task.get("data_cutoff"))
+    subject_code = str(task.get("subject_code", ""))
+    candidates: dict[str, Any] = {
+        "date": cutoff.date().isoformat(),
+        "symbol": subject_code,
+        "ts_code": subject_code,
+    }
+    return {
+        name: candidates[name]
+        for name in spec.allowed_params
+        if name in candidates and candidates[name]
+    }
+
+
 def build_research_graph(
     *,
     tool_client: ToolClient | None = None,
@@ -551,75 +576,126 @@ def build_research_graph(
                 ],
             }
 
-        params: dict[str, Any] = {
-            "subject_code": task.get("subject_code", ""),
-            "round_no": round_no,
-            "tool": tool_group,
-        }
-        envelope = await gateway.call(tool_group, params)
-        if envelope.error is not None:
-            return {
-                "errors": [
+        # 工具组只是编排概念；真正能取数的是 TOOL_MAP 登记的原子工具。
+        atoms = expand_groups([tool_group])
+        unmapped = False
+        if not atoms:
+            if tool_group.strip().lower() in TOOL_GROUPS:
+                # 已知但映射为空（如 fundamental 暂无 Node 端点）：不产生调用，
+                # 避免把“必然失败的工具”写进证据账本。
+                return {
+                    "trace": [
+                        _trace(
+                            f"trace_task_r{round_no:02d}_{tool_group}_empty",
+                            "research_task",
+                            round_no=round_no,
+                            tool=tool_group,
+                            empty_tool_group=True,
+                        )
+                    ]
+                }
+            # 无映射：保留原名交给网关记录 not_allowed，并显式标记未映射。
+            atoms = [tool_group]
+            unmapped = True
+
+        evidence_items: list[EvidenceItem] = []
+        errors: list[dict[str, Any]] = []
+        traces: list[dict[str, Any]] = []
+        if unmapped:
+            traces.append(
+                _trace(
+                    f"trace_task_r{round_no:02d}_{tool_group}_unmapped",
+                    "research_task",
+                    round_no=round_no,
+                    tool_group=tool_group,
+                    tool_group_unmapped=True,
+                )
+            )
+
+        for atom in atoms:
+            # 只传该原子工具白名单内的参数；编排字段（round/subject/tool…）
+            # 一律不进 params，否则 NodeToolClient 会以 unexpected params 拒绝。
+            params = _whitelisted_task_params(atom, task)
+            trace_prefix = f"trace_task_r{round_no:02d}_{tool_group}_{atom}"
+            envelope = await gateway.call(atom, params)
+
+            if envelope.error is not None:
+                errors.append(
                     {
                         "error_id": f"err_{envelope.evidence_id}",
                         "node": "research_task",
                         "error_kind": envelope.error,
                         "detail": envelope.error_detail,
-                        "tool": tool_group,
+                        "tool": atom,
+                        "tool_group": tool_group,
                         "round_no": round_no,
                     }
-                ],
-                "usage": [{"key": "tool_calls", "value": 1}],
-                "trace": [
+                )
+                traces.append(
                     _trace(
-                        f"trace_task_r{round_no:02d}_{tool_group}_{envelope.evidence_id}",
+                        f"{trace_prefix}_{envelope.evidence_id}",
                         "research_task",
                         round_no=round_no,
-                        tool=tool_group,
+                        tool=atom,
+                        tool_group=tool_group,
                         error=envelope.error,
                     )
-                ],
-            }
+                )
+                continue
 
-        data = envelope.data if isinstance(envelope.data, Mapping) else {}
-        raw_supports = data.get("supports")
-        supports = (
-            [str(ref) for ref in raw_supports]
-            if isinstance(raw_supports, list)
-            else ([hypothesis_ref] if hypothesis_ref else [])
-        )
-        item = EvidenceItem(
-            evidence_id=envelope.evidence_id,
-            source=tool_group,
-            source_type=tool_group,
-            event_time=envelope.event_time or _as_datetime(task.get("data_cutoff")),
-            published_at=envelope.published_at or _as_datetime(task.get("as_of")),
-            fetched_at=envelope.fetched_at,
-            as_of=envelope.as_of,
-            evidence_kind="direct",
-            supports_hypothesis_refs=sorted(set(supports)),
-            data_quality=envelope.quality,
-            time_confidence="high",
-            tool=tool_group,
-            tool_params={
-                "round_no": round_no,
-                "tool": tool_group,
-            },
-            response_digest=canonical_digest(data),
-            snapshot_id=task.get("snapshot_id", ""),
-        )
-        return {
-            "evidence_items": [item],
-            "usage": [{"key": "tool_calls", "value": 1}],
-            "trace": [
+            data = envelope.data if isinstance(envelope.data, Mapping) else {}
+            raw_supports = data.get("supports")
+            supports = (
+                [str(ref) for ref in raw_supports]
+                if isinstance(raw_supports, list)
+                else ([hypothesis_ref] if hypothesis_ref else [])
+            )
+            evidence_items.append(
+                EvidenceItem(
+                    evidence_id=envelope.evidence_id,
+                    source=tool_group,
+                    source_type=tool_group,
+                    event_time=envelope.event_time
+                    or _as_datetime(task.get("data_cutoff")),
+                    published_at=envelope.published_at
+                    or _as_datetime(task.get("as_of")),
+                    fetched_at=envelope.fetched_at,
+                    as_of=envelope.as_of,
+                    evidence_kind="direct",
+                    supports_hypothesis_refs=sorted(set(supports)),
+                    data_quality=envelope.quality,
+                    time_confidence="high",
+                    tool=atom,
+                    # 审计字段可以保留 round/tool，以便 assess 按轮次统计新增证据；
+                    # 它们不是发给 Node 的工具参数。
+                    tool_params={
+                        "round_no": round_no,
+                        "tool": atom,
+                        "tool_group": tool_group,
+                    },
+                    response_digest=canonical_digest(data),
+                    snapshot_id=task.get("snapshot_id", ""),
+                )
+            )
+            traces.append(
                 _trace(
-                    f"trace_task_r{round_no:02d}_{tool_group}_{item.evidence_id}",
+                    f"{trace_prefix}_{envelope.evidence_id}",
                     "research_task",
                     round_no=round_no,
-                    tool=tool_group,
+                    tool=atom,
+                    tool_group=tool_group,
                 )
-            ],
+            )
+
+        result: dict[str, Any] = {
+            "usage": [{"key": "tool_calls", "value": len(atoms)}],
+            "trace": traces,
         }
+        if evidence_items:
+            result["evidence_items"] = evidence_items
+        if errors:
+            result["errors"] = errors
+        return result
 
     def collect_node(state: ResearchGraphState) -> dict[str, Any]:
         request = _require(state, "request", ResearchRequest)

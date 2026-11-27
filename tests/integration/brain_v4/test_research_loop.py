@@ -12,6 +12,7 @@
 
 import asyncio
 import json
+from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -37,6 +38,7 @@ from aistock_agent.brain_v4.graph.builder import (
 )
 from aistock_agent.brain_v4.graph.profiles import get_profile
 from aistock_agent.brain_v4.tools.gateway import ToolClientResult
+from aistock_agent.brain_v4.tools.tool_map import expand_groups
 
 AS_OF = datetime.fromisoformat("2026-11-27T10:00:00+08:00")
 DATA_CUTOFF = datetime.fromisoformat("2026-11-27T09:30:00+08:00")
@@ -157,22 +159,43 @@ def _initial_ledger() -> EvidenceLedger:
     )
 
 
+#: market_trace 的 4 个工具组展开后的原子工具数（fundamental 空组不计）。
+_EXPECTED_ATOMS = len(expand_groups(get_profile("market_trace").tool_groups))
+#: 研究轮次数：第 1 轮制造 gap，第 2 轮消除 gap。
+_EXPECTED_ROUNDS = 2
+
+
 class CountingToolClient:
-    """离线计数客户端：记录每次真实触达，并返回按轮次变化的证据。"""
+    """离线计数客户端：记录每次真实触达，并按轮次返回不同证据。
+
+    P8 契约同步：工具参数不再携带 ``round_no``（编排字段不得进入工具
+    params），原先靠 ``params["round_no"]`` 区分轮次的方式失效。这里改为由
+    客户端自身按“本轮到齐全部原子工具”推进轮次：market_trace 每轮固定触达
+    ``_EXPECTED_ATOMS`` 个原子工具，第 1 轮全部返回上游失败以制造
+    ``missing_evidence`` gap，第 2 轮返回同时支持两个假设的证据以消除 gap。
+    """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        # (round_no, tool, 规范化参数)；round_no 仅用于断言，不参与工具参数。
+        self.calls: list[tuple[int, str, str]] = []
+        self._round = 0
+        self._seen_tools: set[str] = set()
 
     async def fetch(self, tool: str, params: dict[str, Any]) -> ToolClientResult:
-        self.calls.append((tool, json.dumps(params, sort_keys=True, ensure_ascii=False)))
-        round_no = int(params["round_no"])
-        supports = (
-            [LIQUIDITY_REF]
-            if round_no == 0
-            else [LIQUIDITY_REF, RISK_REF]
-        )
+        key = json.dumps(params, sort_keys=True, ensure_ascii=False)
+        round_no = self._round
+        self.calls.append((round_no, tool, key))
+        # 本轮所有原子工具都已触达 → 后续调用进入下一研究轮次。
+        if tool not in self._seen_tools:
+            self._seen_tools.add(tool)
+            if len(self._seen_tools) >= _EXPECTED_ATOMS:
+                self._round += 1
+                self._seen_tools = set()
+        if round_no == 0:
+            # 第 1 轮模拟上游不可用：产生 missing_evidence gap。
+            raise RuntimeError(f"round 0 upstream unavailable for {tool}")
         return ToolClientResult(
-            data={"supports": supports, "round_no": round_no},
+            data={"supports": [LIQUIDITY_REF, RISK_REF]},
             event_time=EVENT_TIME,
             published_at=PUBLISHED_AT,
             quality="high",
@@ -292,10 +315,22 @@ def test_two_round_research_loop_selects_council_and_commits_judgment():
     assert "research" in ledger_types
     assert "deliberation" in ledger_types
 
-    # 同一工具同参数只触达一次客户端：4 个工具组 × 2 轮。
-    keys = [f"{tool}|{params}" for tool, params in client.calls]
-    assert len(keys) == len(set(keys))
-    assert len(client.calls) == 8
+    # P8 契约同步后的调用口径：工具组展开为 5 个原子工具（fundamental 空组
+    # 不计），round_no 不再进入工具参数，因此跨轮同 (tool, params) 会重复；
+    # ToolGateway memo 只保证**同一轮内**同参只触达一次。故调用总数 =
+    # 5 原子 × 2 轮 = 10，去重后的 (tool, params) 为 5，每个 key 恰好 2 次
+    # （每轮一次）；任何额外重复都会让计数超过 10。
+    keys = [f"{tool}|{params}" for _, tool, params in client.calls]
+    assert len(client.calls) == _EXPECTED_ATOMS * _EXPECTED_ROUNDS == 10
+    assert len(set(keys)) == _EXPECTED_ATOMS == 5
+    assert set(Counter(keys).values()) == {_EXPECTED_ROUNDS}
+    for round_no in range(_EXPECTED_ROUNDS):
+        round_keys = {
+            f"{tool}|{params}"
+            for rn, tool, params in client.calls
+            if rn == round_no
+        }
+        assert len(round_keys) == _EXPECTED_ATOMS
 
 
 class LoopingToolModel(BaseChatModel):

@@ -14,10 +14,11 @@
 from __future__ import annotations
 
 import html
+import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 
@@ -74,6 +75,7 @@ class NodeArchiveClient:
         body: dict[str, object],
         *,
         headers: dict[str, str] | None = None,
+        error_out: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         # `NodeApiClient.post` 会把连接池未初始化抛出的 RuntimeError 吞成 None，
         # 使归档层无法区分“未初始化”与“空响应”。这里显式探测连接池状态，
@@ -84,7 +86,25 @@ class NodeArchiveClient:
             await HttpClientPool.get_client()
         except RuntimeError as exc:
             raise RuntimeError(str(exc)) from exc
-        return await self._client.post(path, body)
+        # 透传 error_out：``NodeApiClient.post`` 失败时把 stage/detail 写进出参，
+        # 归档层据此暴露真实原因，不再只报 empty_response。
+        return await self._client.post(path, body, error_out=error_out)
+
+
+def _accepts_error_out(client: ArchiveClient) -> bool:
+    """判断注入的归档客户端是否支持 ``error_out`` 出参。
+
+    既有测试替身只实现 ``post(path, body, headers=...)``，无条件传 ``error_out``
+    会 TypeError；这里按签名探测，保持向后兼容。
+    """
+    try:
+        signature = inspect.signature(client.post)
+    except (TypeError, ValueError):
+        return False
+    return "error_out" in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def _mapping(value: object) -> dict[str, object] | None:
@@ -283,10 +303,17 @@ async def archive_run(
     """归档一次 V4 影子运行；失败只返回分类错误，绝不抛出裸异常。"""
     archive_client: ArchiveClient = client if client is not None else NodeArchiveClient()
     body = build_archive_payload(result)
+    error_out: dict[str, object] = {}
     try:
-        response = await archive_client.post(
-            ARCHIVE_PATH, body, headers=_archive_headers()
-        )
+        headers = _archive_headers()
+        if _accepts_error_out(archive_client):
+            response = await cast(Any, archive_client).post(
+                ARCHIVE_PATH, body, headers=headers, error_out=error_out
+            )
+        else:
+            response = await archive_client.post(
+                ARCHIVE_PATH, body, headers=headers
+            )
     except Exception as exc:  # noqa: BLE001 - 归档失败不得推翻已完成的研判
         return ArchiveResult(
             archived=False,
@@ -295,6 +322,17 @@ async def archive_run(
             error_detail=str(exc),
         )
     if response is None:
+        # 无响应但有 error_out 详情：暴露真实原因（截断到 200 字符），
+        # empty_response 仅保留给“既无响应也无 detail”的真·空响应。
+        detail = _as_str(error_out.get("detail"))
+        if detail is not None:
+            summary = f"{_as_str(error_out.get('stage')) or 'post_failed'}:{detail}"[:200]
+            return ArchiveResult(
+                archived=False,
+                run_id=result.run_id,
+                error=summary,
+                error_detail=summary,
+            )
         return ArchiveResult(archived=False, run_id=result.run_id, error="empty_response")
 
     # 响应可能是未解包的信封（含 code）：code != 0 或缺少 data 时按业务拒绝处理，
