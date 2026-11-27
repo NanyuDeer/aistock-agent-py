@@ -68,6 +68,8 @@ class BriefingSessionOutcome:
     usage: dict[str, object]
     status: str
     errors: list[str] = field(default_factory=list)
+    #: 每个分析师席位的结构化状态；用于审计「花了 token 为什么没有 claim」。
+    analyst_statuses: list[dict[str, object]] = field(default_factory=list)
 
 
 def build_briefing_request(
@@ -382,6 +384,18 @@ async def run_briefing_session(
     analyst_claims = _claims_from_results(
         chain, results, ledger, profile=profile
     )
+    analyst_statuses: list[dict[str, object]] = [
+        {
+            "result_id": result.result_id,
+            "role": result.role,
+            "status": result.status,
+            "error_kind": result.error_kind,
+            "claim_chars": len(result.claim),
+            "tokens": result.tokens_used,
+            "steps": result.steps_used,
+        }
+        for result in results
+    ]
     usage = _aggregate_usage(list(final.get("usage", ())))
     errors = [
         _error_text(dict(item))
@@ -405,6 +419,7 @@ async def run_briefing_session(
         usage=usage,
         status=status,
         errors=errors,
+        analyst_statuses=analyst_statuses,
     )
 
 

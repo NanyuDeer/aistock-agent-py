@@ -552,6 +552,7 @@ async def _run_briefing(
     llm_degraded: str | None = None
     usage_override: dict[str, int] | None = None
     degraded_reason: str | None = None
+    analyst_statuses: list[dict[str, object]] = []
 
     try:
         chain_result = project_chain(chain, reference)
@@ -573,6 +574,7 @@ async def _run_briefing(
                 chain, session, model=model, tool_client=tool_client
             )
             token_source = str(outcome.usage.get("token_source") or "unavailable")
+            analyst_statuses = list(outcome.analyst_statuses)
             usage_override = _session_usage(
                 outcome.usage,
                 tool_calls=inputs.tool_calls,
@@ -663,6 +665,7 @@ async def _run_briefing(
         snapshot_sha=snapshot_sha,
     )
     audit["llm_claim_count"] = llm_claim_count
+    audit["analyst_statuses"] = analyst_statuses
     audit["token_source"] = token_source
     if degraded_reason is not None:
         audit["degraded_reason"] = degraded_reason

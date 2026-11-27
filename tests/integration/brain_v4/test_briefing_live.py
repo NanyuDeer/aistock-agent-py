@@ -268,6 +268,10 @@ async def test_morning_live_uses_analyst_and_records_real_tokens() -> None:
     assert morning.audit["token_source"] != "unavailable"
     assert int(morning.usage["total_tokens"]) > 0
     assert int(morning.audit["llm_claim_count"]) >= 1
+    # 审计必须能看到每个分析师席位的状态，否则「花了 token 没有 claim」无法定位。
+    statuses = morning.audit["analyst_statuses"]
+    assert isinstance(statuses, list) and statuses
+    assert {"status", "claim_chars", "tokens"} <= set(statuses[0])
 
 
 async def test_midday_live_parent_and_incremental_changes() -> None:
