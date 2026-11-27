@@ -83,10 +83,21 @@ def _is_valid_industry_node(
 class NodeApiClient:
     """Node.js 内部 API 客户端"""
 
+    #: 行情快照接口的专用超时：服务器实测 10.3~11.5s，默认 10s 会稳定超时
+    #: 并让 V4 把「数据已就绪」误判成缺失（2026-11-27 实测）。
+    _MARKET_SNAPSHOT_TIMEOUT_S = 30.0
+
     def __init__(self) -> None:
         self._base_url = settings.node_api_base_url.rstrip("/")
         self._token = settings.internal_api_token
         self._fear_greed_cache: dict[str, object] | None = None
+
+    async def _get_dict(
+        self, path: str, *, timeout: float | None = None
+    ) -> dict[str, object] | None:
+        """GET 并只保留 dict 形态的 data（行情快照专用超时入口）。"""
+        data = await self._request(path, timeout=timeout)
+        return data if isinstance(data, dict) else None
 
     async def get(self, path: str) -> dict[str, object] | None:
         """GET 请求 Node.js 内部 API
@@ -352,19 +363,27 @@ class NodeApiClient:
             logger.error("node_api_patch_unexpected_error", url=url, error=str(exc))
         return None
 
-    async def _request(self, path: str) -> object | None:
+    async def _request(
+        self, path: str, *, timeout: float | None = None
+    ) -> object | None:
         """GET 请求 Node.js 内部 API，返回解包后的 data 字段（dict/list/标量）。
 
         ``get`` / ``get_list`` 的共享实现：统一处理 HTTP 错误、业务码校验、
         payload 解包。返回原始 ``data``（可能为 dict / list / None），
         由调用方按需做类型收敛。
+
+        ``timeout`` 为空时沿用连接池默认超时（10s）；行情快照类接口实测
+        10.3~11.5s，必须显式放宽，否则会被默认超时截断成「数据缺失」。
         """
         url = f"{self._base_url}{path}"
         headers = {"X-Internal-Token": self._token}
 
         try:
             client = await HttpClientPool.get_client()
-            resp = await client.get(url, headers=headers)
+            if timeout is None:
+                resp = await client.get(url, headers=headers)
+            else:
+                resp = await client.get(url, headers=headers, timeout=timeout)
             resp.raise_for_status()
             payload = resp.json()
 
@@ -1003,7 +1022,10 @@ class NodeApiClient:
         Returns:
             dict（status='complete'），或 None（数据不可用/服务异常）。
         """
-        return await self.get("/internal/market/last-close-snapshot")
+        return await self._get_dict(
+            "/internal/market/last-close-snapshot",
+            timeout=self._MARKET_SNAPSHOT_TIMEOUT_S,
+        )
 
     async def get_close_snapshot(
         self, snapshot_date: str
@@ -1023,7 +1045,10 @@ class NodeApiClient:
             logger.warning("close_snapshot_invalid_date", snapshot_date=snapshot_date)
             return None
         iso = f"{ymd[0:4]}-{ymd[4:6]}-{ymd[6:8]}"
-        return await self.get(f"/internal/market/close-snapshot?date={iso}")
+        return await self._get_dict(
+            f"/internal/market/close-snapshot?date={iso}",
+            timeout=self._MARKET_SNAPSHOT_TIMEOUT_S,
+        )
 
     async def get_review_analysis_report(
         self,
