@@ -28,7 +28,7 @@ from aistock_agent.brain_v4.analysts.profiles import analyst_seats
 from aistock_agent.brain_v4.contracts.deliberation import CaseFile
 from aistock_agent.brain_v4.contracts.evidence import EvidenceLedger
 from aistock_agent.brain_v4.contracts.research import Hypothesis, ResearchRequest
-from aistock_agent.brain_v4.graph.builder import build_research_graph
+from aistock_agent.brain_v4.graph.builder import _plan_seats, build_research_graph
 from aistock_agent.brain_v4.graph.profiles import get_profile
 from aistock_agent.brain_v4.tools.gateway import ToolClientResult
 
@@ -245,8 +245,10 @@ async def test_run_level_token_budget_caps_dispatch_and_stops() -> None:
     assert used <= profile.token_budget * 1.2
 
     # 2) 预算不足以支撑新一轮后，不再新增 analyst 模型调用：
-    #    只有第一轮派发的席位会调用模型（每席位固定 1 次）。
-    assert model.calls == len(seats)
+    #    只有第一轮派发的席位会调用模型（每席位固定 1 次）；席位本身也会按
+    #    「每席位最低可用预算」裁剪，故以 `_plan_seats` 的结果为准。
+    planned_seats, _ = _plan_seats(seats, profile.token_budget)
+    assert model.calls == len(planned_seats)
     assert used == model.calls * TOKENS_PER_CALL
 
     # 3) 停止原因显式标记为预算耗尽。

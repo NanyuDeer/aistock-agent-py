@@ -71,6 +71,28 @@ from ..tools.tool_map import TOOL_GROUPS, TOOL_MAP, expand_groups
 #: 不再随 profile 配置的工具数量放大。
 _ANALYST_MAX_STEPS = 3
 
+#: 单个席位的最低可用预算：实测一次主调用就要 5.7k~7.2k token，低于该值必然
+#: 首调用即 budget_exhausted（2026-11-27 晚报 5 席位各 4800 → 全部 stalled）。
+_MIN_SEAT_BUDGET = 8000
+
+
+def _plan_seats(
+    seats: Sequence[str], remaining: int
+) -> tuple[list[str], int]:
+    """按剩余预算裁剪席位数并均分预算；返回 (席位, 每席位预算)。
+
+    为什么不能直接 ``remaining // len(seats)``：席位越多每席位越少，一旦
+    低于「一次主调用」的最低成本，所有席位都会在第一步耗尽预算，花了 token
+    却拿不到任何结构化结论。席位不足时优先保留靠前（主分析师优先）的席位。
+    """
+    if not seats:
+        return [], remaining
+    if remaining <= 0:
+        return [seats[0]], 0
+    affordable = max(1, remaining // _MIN_SEAT_BUDGET)
+    chosen = list(seats[: min(len(seats), affordable)])
+    return chosen, remaining // len(chosen)
+
 ModelT = TypeVar("ModelT", bound=V4Contract)
 StateT = TypeVar("StateT")
 
@@ -824,10 +846,9 @@ def build_research_graph(
             0, int(profile.token_budget - _analyst_tokens_used(state))
         )
         # 席位是并行扇出的：若每个席位都拿完整 remaining，一轮实际消耗会是
-        # remaining × 席位数（实测 3.2 万预算跑出 8 万 token）。按席位数均分，
-        # 才能让「run 级累计 ≤ 预算」在并行路径上真正成立。
-        seats = analyst_seats(profile)
-        per_seat_budget = remaining // max(1, len(seats))
+        # remaining × 席位数（实测 3.2 万预算跑出 8 万 token）。按「最低可用
+        # 预算」裁剪席位数后再均分，避免 5 席位各 4800 全部首调用即耗尽。
+        seats, per_seat_budget = _plan_seats(analyst_seats(profile), remaining)
         # 任务文本必须带假设陈述与证据摘要：只给 ID 会逼模型自己调工具取数，
         # 工具一失败就耗尽步数（实测 analyst_stalled:step_limit ×4）。
         sources = state.get("evidence_sources")
