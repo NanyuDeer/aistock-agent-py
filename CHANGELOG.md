@@ -1,5 +1,26 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 实时取数 NodeToolClient 与工具白名单（P1-live-tools）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/tools/tool_map.py`：V4 实时取数静态白名单，登记 `quote` / `stock_kline` / `index_kline` / `market_snapshot` / `intraday_sectors` / `calendar_events` / `ths_index_map` / `legacy_review` 的方法、允许/必填参数、参数类型与来源标识；未知工具、未知参数、缺失必填参数在触网前分别抛 `UnknownToolError` / `InvalidToolParamsError`。
+- `src/aistock_agent/brain_v4/tools/node_client.py`：`NodeToolClient` 包装 `NodeApiClient` 只读方法，首次取数时才懒加载默认客户端（模块导入/对象构造不读环境）；从 payload 顶层 `published_at` / `publish_time` / `created_at` 提取发布时间，缺失即 `time_confidence="low"` 且 `quality="low"`，绝不默认 high；`legacy_review` 固定标记 `source_kind="legacy_output"`；路径参数做字符集校验，日期支持 ISO / 紧凑格式归一。
+- `tests/unit/brain_v4/test_node_tool_client.py`：17 个离线用例覆盖未知工具拒绝、未知/缺失参数拒绝、future_data、缺 published_at 降级、超时、memo 并发去重、来源信封，以及 kline / 快照 / 日历 / legacy 映射。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_node_tool_client.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.tools.node_client'`。
+- `uv run pytest tests/unit/brain_v4/test_node_tool_client.py -q` → `17 passed`。
+- `uv run pytest tests/unit/brain_v4 -q` → `159 passed`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests/unit/brain_v4` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 61 source files`。
+- 未改 `gateway.py`：复用既有 `ToolClient.fetch` 协议与 `as_of` / future_data / 超时 / memo 语义；未改 `data_client.py`、features、scheduler、app-api、前端与 pyproject。
+
+---
+
 ## [main] 2026-11-27 — 验证学习、配对门禁与试点交接报告（V4-10-P01）
 
 **开发者**: NanyuDeer
