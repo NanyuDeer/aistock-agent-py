@@ -1043,16 +1043,6 @@ def build_research_graph(
         role = seats[0] if seats else "lead"
         round_no = int(state.get("research_round_no", 0))
         ledger = state.get("evidence_ledger")
-        evidence_ids = (
-            sorted(item.evidence_id for item in ledger.items)
-            if isinstance(ledger, EvidenceLedger)
-            else []
-        )
-        hypothesis_refs = sorted(
-            item.ref
-            for item in state.get("hypotheses", ())
-            if isinstance(item, Hypothesis)
-        )
         hypotheses = [
             item for item in state.get("hypotheses", ()) if isinstance(item, Hypothesis)
         ]
