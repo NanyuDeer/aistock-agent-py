@@ -168,3 +168,37 @@ async def test_market_trace_list_indexes_fills_missing_and_derives_style() -> No
     assert style["label"] == "大盘占优"
     assert "STYLE_ALL" in snapshot.sources
     assert snapshot.sources["STYLE_ALL"].provider == "derived:indexes"
+
+# 真实快照形态（tushare:index_daily）：`ts_code` + `pct_chg`。
+# 之前只认 code/symbol/name 与 change_pct/change/pct_change，导致 style 永远缺失。
+REAL_INDEXES = [
+    {
+        "ts_code": "000300.SH",
+        "name": "沪深300",
+        "pct_chg": 0.8500,
+        "source": "tushare:index_daily",
+    },
+    {
+        "ts_code": "000852.SH",
+        "name": "中证1000",
+        "pct_chg": -0.6200,
+        "source": "tushare:index_daily",
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_real_ts_code_and_pct_chg_shape_derives_style() -> None:
+    client = _ListIndexesNodeClient({**LIST_INDEXES_CLOSE, "indexes": REAL_INDEXES})
+
+    inputs = await build_market_trace_case(
+        client, AS_OF, DATA_CUTOFF, "snap_p11_real_shape"
+    )
+
+    assert "style" not in inputs.missing_fields
+    style = inputs.case.snapshot.a_share.get("style")
+    assert isinstance(style, dict)
+    assert style["label"] == "大盘占优"
+    assert style["large_cap_code"] == "000300.SH"
+    assert style["small_cap_code"] == "000852.SH"
+

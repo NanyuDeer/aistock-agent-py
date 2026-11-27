@@ -285,8 +285,12 @@ _INDEX_LABELS: dict[str, str] = {
 
 
 def _index_change_pct(info: Mapping[str, object]) -> float | None:
-    """从指数条目取涨跌幅；兼容 `change_pct`/`change`/`pct_change` 三种字段名。"""
-    for key in ("change_pct", "change", "pct_change"):
+    """从指数条目取涨跌幅；兼容 `change_pct`/`change`/`pct_change`/`pct_chg`。
+
+    `pct_chg` 是 tushare:index_daily 的真实字段名（单位：百分数），不兼容它
+    会让派生风格永远拿不到涨跌幅。
+    """
+    for key in ("change_pct", "change", "pct_change", "pct_chg"):
         value = _as_float(info.get(key))
         if value is not None:
             return value
@@ -321,6 +325,9 @@ def _normalize_indexes(raw: object) -> dict[str, dict[str, object]] | None:
             code = (
                 _as_str(info.get("code"))
                 or _as_str(info.get("symbol"))
+                # 真实快照（tushare:index_daily）用 `ts_code`，形如 000300.SH；
+                # 不读取它会让所有指数退化成中文名，基准匹配必然失败。
+                or _as_str(info.get("ts_code"))
                 or _as_str(info.get("name"))
             )
             if code is None:
