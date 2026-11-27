@@ -246,6 +246,19 @@ def _message_text(message: Any) -> str:
     return str(content)
 
 
+def _loop_budget(
+    token_budget: int | None, thinking_model: BaseChatModel | None
+) -> int | None:
+    """给主工具循环分配预算；有 thinking 合成时预留 10% 给它。
+
+    token 硬上限只能在“一次模型调用结束后”检查，所以按调用粒度天然会有一次
+    溢出。把主循环压到 90%，合成再花掉剩余额度，run 总量才稳定落在 1.2 倍内。
+    """
+    if not token_budget or thinking_model is None:
+        return token_budget
+    return max(1, int(token_budget * 0.9))
+
+
 def _parse_synthesis(text: str) -> dict[str, Any] | None:
     """解析终局推理 JSON；任一字段不合法即整体视为失败（返回 None）。"""
     try:
@@ -521,7 +534,9 @@ def run_analyst(
         tools=tools,
         system_prompt=system_prompt,
         max_steps=max_steps,
-        token_budget=token_budget,
+        # 有终局 thinking 推理时预留 10% 预算给它，避免主循环吃满后
+        # 合成调用把 run 总消耗推过 1.2 倍硬上限。
+        token_budget=_loop_budget(token_budget, thinking_model),
     )
     usage_callback = _UsageBudgetCallback(
         int(budget.token_budget * _HARD_LIMIT_RATIO)
@@ -641,7 +656,9 @@ async def run_analyst_async(
         tools=tools,
         system_prompt=system_prompt,
         max_steps=max_steps,
-        token_budget=token_budget,
+        # 有终局 thinking 推理时预留 10% 预算给它，避免主循环吃满后
+        # 合成调用把 run 总消耗推过 1.2 倍硬上限。
+        token_budget=_loop_budget(token_budget, thinking_model),
     )
     usage_callback = _UsageBudgetCallback(
         int(budget.token_budget * _HARD_LIMIT_RATIO)
