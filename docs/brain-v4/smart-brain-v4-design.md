@@ -1234,3 +1234,43 @@ assert decision.selected_roles == []
 | 适用 | 默认所有 profile | 需要长链推理的深度场景（如 `market_trace`、`on_demand_deep`） |
 
 **建议**：方案 A 作为默认；方案 B 以 `RunProfile.analyst_output_mode: tool_strategy | json_freetext` 形式按 profile 开启。该字段属于 `RunProfile.v1` 冻结契约的**加性扩展**，需按 §11 第 1 条另开契约执行包，不得在本实现中顺带加入。
+
+## 附录 C：正式条款与未实现清单（2026-11-27）
+
+> C.1 与 C.2 为**规范性条款**，与正文同效；C.3 为当前实现状态，随实现推进更新。
+
+### C.1 SOLO_DEEP 的正式定义（澄清，替代模糊表述）
+
+`SOLO_DEEP` 由两部分组成，二者不可混淆：
+
+| 组成 | 取值 | 说明 |
+|---|---|---|
+| 协作席位 `collaboration seats` | **0** | 不邀请 alternative / risk / quant 等席位，`selected_roles == []` 正确 |
+| 主分析师 `lead analyst` | **1** | 承担该 run 唯一正式逻辑，必须经分析师内核真实调用 |
+
+规范性要求：
+
+1. `SOLO_DEEP` 下 `selected_roles == []` **不等于**该 run 没有分析师；必须存在一个 lead analyst。
+2. lead analyst 必须产出结构化 `AnalystResult`（claim / evidence_refs / confidence / uncertainties / requested_gaps），再由单写者提交研判。
+3. 只有显式离线/回放模式（`model=None`）允许跳过 lead analyst；此时 `audit.degraded_reason` 必须非空，且**不得**对外声称该 run 完成了真实研判。
+4. 后续任何 profile 的执行包，验收断言必须同时覆盖：**路由结果**与**该模式唯一的正式逻辑 owner 是否被真实调用**。只验路由视为验收不完整。
+
+### C.2 智能参与的通用要求
+
+1. `market_trace`、`briefing_morning`、`briefing_midday`、`briefing_evening` 四个试点 profile 的 claim 必须由分析师内核产出，不得只由确定性投影生成。
+2. 确定性脚本（如 `features/market_trace/profile.py::run_market_trace`、`features/briefing/projection.py::project_chain`）只允许作为**降级路径**，触发时必须写 `degraded_reason`，并在审计页显著标注。
+3. 降级路径不得被当作"试点通过"的证据。
+
+### C.3 未实现清单（按优先级）
+
+| # | 缺口 | 现状 | 目标 | 优先级 | 涉及区域 |
+|---|---|---|---|---|---|
+| 1 | 早/午/晚报 live 无 LLM 研判 | `runtime/runner.py` 走 `project_chain`，纯确定性投影；仅用真实数据填充结构 | 三个时段各自跑分析师内核产出 claim，再投影为 `briefing.v1` | P0 | runtime（绿）+ 可能 graph（红） |
+| 2 | 评测台未与线上 run 联动 | 只有影子表 + 单栏审计页 | 旧链全量 + V4 双栏，配对状态显式 | P1 | 规格已就绪，见 evaluation-console-spec |
+| 3 | 时段 parent 未在真实链路验证 | 代码有 parent 字段，briefing live 未跑过真实数据 | 跑通后断言午报引用早报 judgment、晚报引用 market_trace judgment | 随 #1 | runtime |
+| 4 | 到期验证未回写 | `verification/` 仅契约与离线测试 | 真实 run 到期自动生成 `VerificationRecord` 与错误标签 | P2 | verification |
+| 5 | Canonical events 未接入真实 run | `events/adapters.py` 仅在单测使用 | 真实 run 的事件证据经 adapter 统一 | P2 | runtime + events |
+| 6 | 音频/App/Web 投影未接入 live | 仅 `renderers/briefing.py` 有单测 | live briefing 复用同一投影 | P2 | renderers + runtime |
+| 7 | 灰度 active_owner 未切换过 | manifest 恒为 `active_owner=legacy` | 门禁满足后按 1%→10%→50%→100% | P3 | 平台 |
+
+**状态判定**：当前只有 `market_trace` 的 live run 满足 C.1（真实 LLM 调用、真实 token、可审计）；`briefing_*` 三个时段仅满足"结构可产出"，**不满足 C.2**，因此在 #1 完成前不得宣称早午晚报试点通过。
