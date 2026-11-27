@@ -372,3 +372,26 @@ echo 'touch src/aistock_agent/brain_v4/graph/_probe.py' >/dev/null
 1. **CI 尚未接入红区门禁**：目前只有本地 hook，可被 `--no-verify` 绕过；建议在 CI 增加同一脚本。
 2. **CODEOWNERS 未配置**：红区目录尚无强制 reviewer。
 3. **评测台未与线上 run 联动**：见 §14；规格见 `docs/brain-v4/evaluation-console-spec.md`。
+
+## 18. 2026-11-27 实测：简报数据口径与冻结证据
+
+以下均为服务器真实运行/探针证据，不是推测：
+
+1. **app-api `indexes` 是 list**：`close-snapshot` / `last-close-snapshot` 的元素字段为
+   `ts_code/name/close/pct_chg/amount/source`。任何 `_as_mapping(indexes)` 都会判成
+   None；统一走 `_normalize_indexes`。
+2. **早报基线必须取严格早于当日的 `prev_close`**：`last_close` 是“最新已收盘日”，
+   回放历史日期时会等于当日。
+3. **`/internal/market/sectors` 全市场宽度实测 31.7s**（逐股批量拉腾讯）；
+   V4 只消费 `indexes/gainers/losers`，用 `include_breadth=false` 后实测 **0.08s**。
+4. **午间盘中快照必须归档优先**：实时接口 `captured_at` 是请求时刻，
+   11:35 的 `as_of` 会把 12:06 的取数整段判为“未来”；优先读
+   `docs/agent-outputs/intraday/{date}-1225.json`，实时快照仅在「当日 13:00 前」可用。
+5. **冻结证据不再派发研究取数**：`case_file.decision_type=briefing_claim` 时
+   `dispatch_research` 直接进 `collect`；否则工具产出 `ev_*_sector_intraday` 等
+   ledger 外证据，commit 抛 `JudgmentEvidenceError`，整份 LLM claim 丢失。
+6. **证据正文按 evidence_id 精确映射**：简报同源多证据（6 指数 + 涨跌家数）不能
+   按 provider 聚合，否则 000300 的行里出现 000001 的数字。
+7. **晚报目前没有 claim 槽位**：分析师 graph 会跑（实测 34k tokens），但
+   `briefing_v1` 晚报只有评分卡，`llm_claim_count=0`；属待补齐项，不是数据故障。
+
