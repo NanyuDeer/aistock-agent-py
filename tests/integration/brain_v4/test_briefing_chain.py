@@ -31,6 +31,7 @@ from aistock_agent.brain_v4.features.briefing.evaluation import (
     market_trace_reference,
 )
 from aistock_agent.brain_v4.features.briefing.projection import (
+    EVENING_CLAIM_REF,
     project_chain,
     project_midday,
     project_morning,
@@ -217,9 +218,12 @@ def test_evening_references_task8_market_trace_and_scores_every_material_claim()
     ]
     assert result.evening.envelope.parent_run_id == result.midday.envelope.run_id
 
-    # 晚报不产生第二套主因判断：自身无 claim，只按 ID 引用市场溯源。
-    assert result.evening.claims == []
+    # 晚报只新增一条“盘后复核”claim，不改写早/午报 claim；主因仍由市场溯源承载。
+    assert [claim.claim_ref for claim in result.evening.claims] == [EVENING_CLAIM_REF]
     assert result.evening.judgment_id != judgment_id
+    assert {claim.claim_ref for claim in result.morning.claims}.isdisjoint(
+        {EVENING_CLAIM_REF}
+    )
 
     material_claims = {
         hypothesis.claim_ref for hypothesis in chain.hypotheses if hypothesis.material

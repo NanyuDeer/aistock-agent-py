@@ -39,6 +39,7 @@ from aistock_agent.brain_v4.features.briefing.adapter import (
     evidence_id_for,
     is_visible,
 )
+from aistock_agent.brain_v4.features.briefing.projection import EVENING_CLAIM_REF
 from aistock_agent.brain_v4.graph.builder import ResearchGraphState, build_research_graph
 from aistock_agent.brain_v4.tools.gateway import ToolClient
 
@@ -77,6 +78,12 @@ def build_briefing_request(
 ) -> ResearchRequest:
     """把时段的显式边界映射成研究请求；时间全部取自 session。"""
     goal = "Which claims should this briefing commit to, based on visible evidence?"
+    if session.profile == "briefing_evening":
+        # 晚报只复核既有 claim，不另起一套盘后归因（归因由市场溯源判断承载）。
+        goal = (
+            "Verify the earlier claims against closing evidence; do not introduce "
+            "new attribution. State what held, what reversed, and what stays unresolved."
+        )
     if event_ids:
         goal = f"{goal} focus_events={len(list(event_ids))}"
     return ResearchRequest(
@@ -256,11 +263,16 @@ def _claims_from_results(
     chain: BriefingChainFixture,
     results: Sequence[AnalystResult],
     ledger: EvidenceLedger | None,
+    *,
+    profile: str,
 ) -> list[dict[str, object]]:
     """把分析师结构化结果收敛成带 claim_ref 的 claim 列表。
 
     归属规则：优先用「分析师引用证据 → 证据支撑的假设 → claim_ref」溯源；
     无证据可溯源时按稳定顺序回落到链上 claim（不新增 claim、不虚构证据）。
+
+    晚报例外：晚报只有 `hyp_evening_setup` 一个“盘后复核”claim 槽位，
+    分析师结论统一落到该槽位；早/午报 claim 只被评分、不被改写。
     """
     claim_refs = [seed.claim_ref for seed in chain.hypotheses]
     if not claim_refs:
@@ -281,6 +293,18 @@ def _claims_from_results(
         # 真实 run 花掉 1.7 万 token 却一条 claim 都没进早报（llm_claim_count=0）。
         if not result.claim.strip():
             continue
+        if profile == "briefing_evening":
+            claims.append(
+                {
+                    "claim_ref": EVENING_CLAIM_REF,
+                    "statement": result.claim,
+                    "confidence": float(result.confidence),
+                    "evidence_ids": list(result.evidence_refs),
+                    "analyst_status": result.status,
+                    "analyst_error_kind": result.error_kind,
+                }
+            )
+            break
         claim_ref = _attributed_claim_ref(result, ref_to_claim, evidence_by_id)
         if claim_ref is None:
             claim_ref = claim_refs[index % len(claim_refs)]
@@ -355,7 +379,9 @@ async def run_briefing_session(
         for item in final.get("analyst_results", ())
         if isinstance(item, AnalystResult)
     ]
-    analyst_claims = _claims_from_results(chain, results, ledger)
+    analyst_claims = _claims_from_results(
+        chain, results, ledger, profile=profile
+    )
     usage = _aggregate_usage(list(final.get("usage", ())))
     errors = [
         _error_text(dict(item))

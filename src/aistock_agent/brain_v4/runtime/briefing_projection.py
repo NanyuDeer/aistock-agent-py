@@ -228,6 +228,21 @@ def _evening_sections(result: BriefingResult) -> list[dict[str, object]]:
                 is_headline=False,
             )
         )
+    # 晚报唯一的 claim 槽位：盘后复核结论（分析师可覆盖，不改写早/午报 claim）。
+    statements = [
+        claim.statement for claim in result.claims if claim.statement.strip()
+    ]
+    if statements:
+        sections.append(
+            _section(
+                section_id="evening-claims",
+                title="盘后复核",
+                conclusion="；".join(statements),
+                claim_ids=[claim.claim_ref for claim in result.claims],
+                judgment_id=result.judgment_id,
+                is_headline=False,
+            )
+        )
     if body.errors_and_unresolved:
         sections.append(
             _section(

@@ -80,6 +80,8 @@ def test_audio_shortens_wording_without_adding_claims_or_confidence_drift() -> N
     assert audio.claim_refs == web.claim_refs
 
     allowed = {score.claim_ref for score in result.evening.scores}
+    # 晚报新增的“盘后复核”claim 属于自身 claims（非评分项），也允许出现在投影里。
+    allowed |= {claim.claim_ref for claim in result.evening.claims}
     assert set(audio.claim_refs) <= allowed
     spoken_refs = set(re.findall(r"hyp_[a-z_]+", audio.body_text))
     assert spoken_refs <= allowed

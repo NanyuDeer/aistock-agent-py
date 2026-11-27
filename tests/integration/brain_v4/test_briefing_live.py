@@ -338,6 +338,10 @@ async def test_evening_live_references_market_trace() -> None:
     judgment_ids = evening.briefing_v1["judgment_ids"]
     assert isinstance(judgment_ids, list)
     assert market_trace.judgment.judgment_id in judgment_ids
+    # 晚报的唯一 claim 槽位必须被分析师结论覆盖，不能再是 0 条。
+    assert int(evening.audit["llm_claim_count"]) >= 1
+    assert evening.payload["hypotheses"], "晚报盘后复核 claim 未进入 payload"
+    assert evening.payload["hypotheses"][0]["claim_ref"] == "hyp_evening_setup"
 
 
 async def test_model_absent_keeps_deterministic_and_marks_degraded() -> None:

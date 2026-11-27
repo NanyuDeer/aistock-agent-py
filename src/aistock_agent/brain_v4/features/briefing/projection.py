@@ -38,6 +38,9 @@ _SCHEMA_VERSION = "v1"
 _CONFIRMING_RELATIONS: frozenset[str] = frozenset({"confirm", "verify"})
 _FALSIFYING_RELATIONS: frozenset[str] = frozenset({"reverse"})
 
+#: 晚报唯一的 claim 槽位：盘后复核结论（新增 claim，不改写早/午报 claim）。
+EVENING_CLAIM_REF = "hyp_evening_setup"
+
 
 class BriefingClaim(V4Contract):
     """早报声明的一条 claim；后续时段只引用不重写。"""
@@ -309,8 +312,23 @@ def project_evening(
         f"{score.claim_ref}|{score.verdict}|{score.score:.2f}|{judgment_id}"
         for score in scores
     ]
-
     seed = chain.evening
+    # 晚报只新增一条“盘后复核”claim（不改写早/午报 claim，遵守
+    # `BriefingClaim` 的“后续时段只引用不重写”契约）；分析师可覆盖其陈述。
+    confirmed = sum(1 for score in scores if score.verdict == "confirmed")
+    reversed_count = sum(1 for score in scores if score.verdict == "reversed")
+    unresolved = sum(1 for score in scores if score.verdict == "unresolved")
+    evening_claim = BriefingClaim(
+        claim_ref=EVENING_CLAIM_REF,
+        source_profile="briefing_evening",
+        statement=(
+            f"收盘复核：确认 {confirmed} 条、反转 {reversed_count} 条、"
+            f"未决 {unresolved} 条。"
+        ),
+        material=False,
+        confidence=seed.confidence,
+    )
+
     midday_ids = {item.evidence_id for item in window.items}
     body = EveningBody(
         closing_attribution_ref=f"market_trace:{judgment_id}",
@@ -339,7 +357,7 @@ def project_evening(
         direction=seed.direction,
         confidence=seed.confidence,
         risk_level=seed.risk_level,
-        claims=[],
+        claims=[evening_claim],
         scores=scores,
         market_trace_judgment_id=judgment_id,
     )
@@ -382,6 +400,7 @@ __all__ = [
     "BriefingResult",
     "ClaimChange",
     "ClaimScore",
+    "EVENING_CLAIM_REF",
     "briefing_judgment_id",
     "project_chain",
     "project_evening",
