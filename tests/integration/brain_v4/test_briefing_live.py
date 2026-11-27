@@ -29,6 +29,8 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aistock_agent.brain_v4.runtime import reset_live_runs, run_live
+from aistock_agent.brain_v4.runtime.briefing_live import run_briefing_session
+from aistock_agent.brain_v4.runtime.inputs import build_briefing_chain
 
 pytestmark = pytest.mark.asyncio
 
@@ -91,6 +93,7 @@ LAST_CLOSE_SNAPSHOT: dict[str, object] = {
 }
 
 INTRADAY_SECTORS: dict[str, object] = {
+    "captured_at": "2026-11-27T12:25:00+08:00",
     "availability": "available",
     "indexes": {
         "000001.SH": {"name": "上证指数", "price": 3020.1, "changePercent": -0.85}
@@ -278,6 +281,9 @@ async def test_midday_live_parent_and_incremental_changes() -> None:
 
     assert morning.judgment is not None
     assert morning.judgment.judgment_id in midday.parent_judgment_ids
+    # 冻结证据不取数：午报也必须拿到分析师 claim，而不是被工具证据拒绝。
+    assert int(midday.audit["llm_claim_count"]) >= 1
+    assert "JudgmentEvidenceError" not in str(midday.audit.get("degraded_reason") or "")
 
     revisions = midday.payload["revisions"]
     assert isinstance(revisions, list)
@@ -285,6 +291,36 @@ async def test_midday_live_parent_and_incremental_changes() -> None:
     for change in revisions:
         assert isinstance(change, dict)
         assert change["parent_judgment_id"] == morning.judgment.judgment_id
+
+
+async def test_briefing_session_skips_research_tools() -> None:
+    """冻结证据不得再派发研究取数：图内 tool_calls 必须为 0。
+
+    真实故障：午报研究任务取到 ledger 之外的 `ev_*_sector_intraday`，分析师引用后
+    commit 被 JudgmentEvidenceError 拒绝，整份 LLM claim 丢失。
+    """
+
+    class _NoToolClient:
+        async def fetch(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("briefing 不应调用取数工具")
+
+    client = FakeNodeClient()
+    inputs = await build_briefing_chain(client, TRADING_DATE, "briefing_morning")
+    session = next(
+        item for item in inputs.chain.sessions if item.profile == "briefing_morning"
+    )
+
+    outcome = await run_briefing_session(
+        inputs.chain,
+        session,
+        model=_StructuredAnalystModel(),
+        tool_client=_NoToolClient(),
+    )
+
+    assert outcome.judgment is not None
+    assert int(outcome.usage["tool_calls"]) == 0
+    assert outcome.analyst_claims, "冻结证据下分析师仍应产出 claim"
+    assert not [e for e in outcome.errors if "JudgmentEvidenceError" in e]
 
 
 async def test_evening_live_references_market_trace() -> None:

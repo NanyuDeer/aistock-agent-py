@@ -576,7 +576,13 @@ def build_research_graph(
         # 纯占位节点：真正的扇出由 `dispatch_research` 条件边完成。
         return {}
 
-    def dispatch_research(state: ResearchGraphState) -> list[Send]:
+    def dispatch_research(state: ResearchGraphState) -> list[Send] | str:
+        case_file = state.get("case_file")
+        # 简报证据已冻结（decision_type=briefing_claim）：不再派发研究取数任务。
+        # 否则工具会产出 ledger 之外的证据（实测午报 analyst 引用
+        # ev_*_sector_intraday），commit 时被 JudgmentEvidenceError 拒绝，LLM claim 全丢。
+        if isinstance(case_file, CaseFile) and case_file.decision_type == "briefing_claim":
+            return "collect"
         request = _require(state, "request", ResearchRequest)
         plan = state.get("plan")
         if not isinstance(plan, ResearchPlan):
@@ -1247,7 +1253,7 @@ def build_research_graph(
     builder.add_edge("profile", "plan")
     builder.add_edge("plan", "dispatch")
     builder.add_conditional_edges(
-        "dispatch", dispatch_research, ["research_task"]
+        "dispatch", dispatch_research, ["collect", "research_task"]
     )
     builder.add_edge("research_task", "collect")
     builder.add_edge("collect", "analyze")
