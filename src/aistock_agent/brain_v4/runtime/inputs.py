@@ -969,12 +969,16 @@ async def build_briefing_chain(
 
     close = await fetcher.close_snapshot(date_compact)
     last_close = await fetcher.last_close()
-    # 早报在开盘前运行，当日收盘快照必然不存在；`last-close-snapshot` 若上游
-    # 返回 None（接口抖动/当日尚无快照），早报就只剩日历事件，分析师无从立论。
-    # 这里按「上一交易日收盘快照」确定性回退，日期只由入参 day 推导，不读系统时间。
-    if last_close is None:
-        prev_day = _previous_weekday(day)
-        last_close = await fetcher.close_snapshot(prev_day.strftime("%Y%m%d"))
+    # 早报的“上一交易日收盘”必须严格早于 day。`last-close-snapshot` 返回的是
+    # 最新已收盘日：回放历史日期时它可能正好等于 day 本身，若直接拿来当上一日，
+    # 其 15:00 事件时间晚于早报 cutoff，会被时间纪律整段过滤（实测只剩 2 条日历）。
+    # 因此优先按 day 推导上一交易日；仅当它取不到且 last_close 确实早于 day 时才兜底。
+    prev_day = _previous_weekday(day)
+    prev_close = await fetcher.close_snapshot(prev_day.strftime("%Y%m%d"))
+    if prev_close is None:
+        trade_date = _as_trade_date(last_close.get("trade_date")) if last_close else None
+        if last_close is not None and trade_date is not None and trade_date < day:
+            prev_close = last_close
     intraday = await fetcher.intraday_sectors()
     calendar = await fetcher.calendar(date_iso)
     review_status, legacy_report = _review_fields(await fetcher.review(day))
@@ -982,7 +986,7 @@ async def build_briefing_chain(
     missing: list[str] = []
     if close is None:
         missing.append("close_snapshot")
-    if last_close is None:
+    if prev_close is None:
         missing.append("last_close_snapshot")
     if intraday is None:
         missing.append("intraday_sectors")
@@ -990,7 +994,7 @@ async def build_briefing_chain(
         missing.append("calendar_events")
     # 旧链复盘只进 legacy_output；缺失不得把 V4 状态降级。
     items: list[BriefingEvidenceSeed] = []
-    items.extend(_previous_close_items(last_close, morning_as_of))
+    items.extend(_previous_close_items(prev_close, morning_as_of))
     items.extend(_calendar_items(calendar or []))
     items.extend(_close_items(close, evening_as_of))
     intraday_items = _intraday_items(intraday, midday_cutoff, midday_as_of)
