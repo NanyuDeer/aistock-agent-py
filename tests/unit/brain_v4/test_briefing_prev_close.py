@@ -57,3 +57,20 @@ async def test_last_close_none_falls_back_to_previous_close() -> None:
     assert "20261125" in client.calls
     assert "last_close_snapshot" not in result.missing_fields
     assert runtime_inputs.__name__  # 保持显式引用，避免未使用告警
+
+
+def test_snapshot_publish_time_uses_trade_date_not_capture_time() -> None:
+    """补录快照的 captured_at 晚于时段，也必须按交易日推导可得时刻。"""
+    from datetime import datetime, timedelta, timezone
+
+    from aistock_agent.brain_v4.runtime.inputs import _snapshot_publish_time
+
+    cst = timezone(timedelta(hours=8))
+    snapshot = {
+        "trade_date": "20261125",
+        "captured_at": "2026-11-27T16:00:00+08:00",
+    }
+    published = _snapshot_publish_time(
+        snapshot, datetime(2026, 11, 26, 8, 30, tzinfo=cst)
+    )
+    assert published == datetime(2026, 11, 25, 15, 5, tzinfo=cst)

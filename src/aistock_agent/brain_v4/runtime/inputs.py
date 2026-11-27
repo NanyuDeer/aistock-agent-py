@@ -543,7 +543,7 @@ async def build_market_trace_case(
 
     captured_at = as_of
     if close is not None:
-        captured_at = _as_datetime(close.get("captured_at")) or as_of
+        captured_at = _snapshot_publish_time(close, as_of)
 
     a_share: dict[str, object] = {}
     sources: dict[str, SourceRecord] = {}
@@ -1124,12 +1124,46 @@ def _seed(
     )
 
 
+def _as_trade_date(value: object) -> date | None:
+    """解析快照的交易日；兼容 `YYYYMMDD` 与 ISO 两种形态。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) == 8 and text.isdigit():
+            try:
+                return date(int(text[0:4]), int(text[4:6]), int(text[6:8]))
+            except ValueError:
+                return None
+        parsed = _as_datetime(text)
+        return parsed.date() if parsed is not None else None
+    return None
+
+
+def _snapshot_publish_time(
+    snapshot: Mapping[str, object], fallback: datetime
+) -> datetime:
+    """收盘数据的“可得时刻”按交易日推导，而不是用补录时的 captured_at。
+
+    为什么必须这样：`captured_at` 是快照被生成的时间。历史回放时它可能是几天后
+    的补录时刻，直接当 published_at 会让早报/晚报把所有历史行情判成“未来数据”
+    而全部过滤掉（实测早报只剩 2 条日历证据）。
+    """
+    trade = _as_trade_date(snapshot.get("trade_date"))
+    if trade is not None:
+        # 收盘后约 5 分钟数据可得，早于晚报 as_of(15:30) 与市场溯源 as_of(15:35)。
+        return _at(trade, time(15, 5))
+    return _as_datetime(snapshot.get("captured_at")) or fallback
+
+
 def _previous_close_items(
     last_close: dict[str, object] | None, morning_as_of: datetime
 ) -> list[BriefingEvidenceSeed]:
     if last_close is None:
         return []
-    captured_at = _as_datetime(last_close.get("captured_at")) or morning_as_of
+    captured_at = _snapshot_publish_time(last_close, morning_as_of)
     trade_date = _as_datetime(last_close.get("trade_date"))
     event_time = (
         _at(trade_date.date(), time(15, 0))
@@ -1204,7 +1238,7 @@ def _close_items(
 ) -> list[BriefingEvidenceSeed]:
     if close is None:
         return []
-    captured_at = _as_datetime(close.get("captured_at")) or evening_as_of
+    captured_at = _snapshot_publish_time(close, evening_as_of)
     event_time = _at(evening_as_of.date(), time(15, 0))
     items: list[BriefingEvidenceSeed] = []
     indexes = _normalize_indexes(close.get("indexes"))
