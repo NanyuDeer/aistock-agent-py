@@ -36,6 +36,7 @@ from aistock_agent.brain_v4.features.briefing.adapter import (
     BriefingChainFixture,
     BriefingSessionSeed,
     build_evidence_window,
+    evidence_id_for,
     is_visible,
 )
 from aistock_agent.brain_v4.graph.builder import ResearchGraphState, build_research_graph
@@ -150,21 +151,24 @@ def _case_file(
     )
 
 
-def _source_briefs(
+def _evidence_briefs(
     chain: BriefingChainFixture, session: BriefingSessionSeed
 ) -> dict[str, str]:
-    """按提供方聚合该时段可见证据的内容摘要，供分析师任务文本使用。"""
-    grouped: dict[str, list[str]] = {}
+    """evidence_id → 该证据自己的内容摘要。
+
+    必须按证据 ID 映射，不能按 provider 聚合：同一提供方会同时产出多条证据
+    （6 个指数 + 涨跌家数都来自 last-close-snapshot），聚合后每条证据都会看到
+    整段混合文本，数字互相错配。
+    """
+    briefs: dict[str, str] = {}
     for seed in chain.items:
         if not is_visible(seed, session):
             continue
         content = seed.content.strip()
         if not content:
             continue
-        bucket = grouped.setdefault(seed.source, [])
-        if len(bucket) < 4:
-            bucket.append(content)
-    return {source: " | ".join(contents)[:600] for source, contents in grouped.items()}
+        briefs[evidence_id_for(seed, session)] = content[:300]
+    return briefs
 
 
 def _initial_state(
@@ -187,9 +191,10 @@ def _initial_state(
         "request": request,
         "case_file": _case_file(chain, session, request, hypotheses, items),
         "evidence_ledger": ledger,
-        # 分析师要看到“证据是什么”。简报证据的 `source` 是提供方标签（如
-        # node_api:close-snapshot），这里把同提供方的种子内容拼成一段摘要透传。
-        "evidence_sources": _source_briefs(chain, session),
+        # 分析师要看到“证据是什么”。这里按 evidence_id 逐条映射正文：
+        # 同提供方会同时产出多条证据（6 个指数 + 涨跌家数都来自
+        # last-close-snapshot），按提供方聚合会让每条证据看到同一段混合文本。
+        "evidence_sources": _evidence_briefs(chain, session),
         "hypotheses": list(hypotheses),
         "causal_graph": [],
         "research_gaps": [],
@@ -382,3 +387,4 @@ __all__ = [
     "build_briefing_request",
     "run_briefing_session",
 ]
+

@@ -33,6 +33,25 @@ def _hypothesis_block(hypotheses: Sequence[Hypothesis]) -> str:
     return "\n".join(lines)
 
 
+def _content_for(item: EvidenceItem, sources: Mapping[str, str]) -> str:
+    """按「evidence_id → tool_params.source_id → source」依次查找正文。
+
+    三种键各自对应真实调用方：
+    - evidence_id：早午晚报每个时段每个冻结来源一条证据；
+    - tool_params.source_id：市场溯源快照（`source` 是提供方，如
+      `node_api:last-close-snapshot`，同一提供方下有多条来源）；
+    - source：只有单一来源的简单场景。
+    """
+    tool_source_id = item.tool_params.get("source_id")
+    for key in (item.evidence_id, tool_source_id, item.source):
+        if not isinstance(key, str):
+            continue
+        content = sources.get(key)
+        if content:
+            return content.strip()
+    return ""
+
+
 def _evidence_block(
     items: Sequence[EvidenceItem],
     sources: Mapping[str, str],
@@ -44,7 +63,7 @@ def _evidence_block(
     per_item = max(80, budget // len(items))
     lines: list[str] = []
     for item in items:
-        content = sources.get(item.source, "").strip()
+        content = _content_for(item, sources)
         if content:
             snippet = content[:_MAX_SNIPPET]
         else:

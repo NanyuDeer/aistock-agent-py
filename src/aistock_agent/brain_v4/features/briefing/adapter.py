@@ -235,10 +235,22 @@ def is_visible(seed: BriefingEvidenceSeed, session: BriefingSessionSeed) -> bool
     return seed.event_time <= session.data_cutoff and seed.published_at <= session.as_of
 
 
+def evidence_id_for(
+    seed: BriefingEvidenceSeed, session: BriefingSessionSeed
+) -> str:
+    """种子 → 证据 ID 的唯一公式。
+
+    公开出来是为了让运行层能按 `evidence_id` 精确回填证据正文；此前运行层按
+    提供方聚合内容，导致 7 条同源证据被塞进同一段混合文本（000300 的行里出现
+    000001 的数字），模型据此误判"数据缺失"。
+    """
+    return f"ev_brief_{_digest({'snapshot_id': session.snapshot_id, 'source_id': seed.source_id})[:12]}_{seed.source_id.lower()}"
+
+
 def _to_evidence(
     seed: BriefingEvidenceSeed, session: BriefingSessionSeed
 ) -> EvidenceItem:
-    evidence_id = f"ev_brief_{_digest({'snapshot_id': session.snapshot_id, 'source_id': seed.source_id})[:12]}_{seed.source_id.lower()}"
+    evidence_id = evidence_id_for(seed, session)
     return EvidenceItem(
         evidence_id=evidence_id,
         source=seed.source,

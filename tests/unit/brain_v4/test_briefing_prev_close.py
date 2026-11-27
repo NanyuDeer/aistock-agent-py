@@ -59,6 +59,39 @@ async def test_last_close_none_falls_back_to_previous_close() -> None:
     assert runtime_inputs.__name__  # 保持显式引用，避免未使用告警
 
 
+@pytest.mark.asyncio
+async def test_morning_summary_uses_previous_close_list_indexes() -> None:
+    """真实 app-api 的 indexes 是 list，且早报基线必须取上一交易日快照。
+
+    实测故障：`_close_index` 用 `_as_mapping` 把 list 判成 None，`_morning_seed`
+    又拿 `last_close`（回放历史日期时它等于当日）当基线，早报 summary 恒为
+    “盘前基线数据缺失，早报只保留自身时间边界内的日历事件。”
+    """
+    snapshot = {
+        "status": "complete",
+        "trade_date": "20261125",
+        "indexes": [
+            {
+                "ts_code": "000001.SH",
+                "name": "上证指数",
+                "close": 3476.8816,
+                "pct_chg": 0.51,
+            }
+        ],
+        "breadth": {"advance_count": 3000, "decline_count": 2000},
+    }
+    client = _CloseOnlyClient({"20261125": snapshot})
+
+    result = await build_briefing_chain(client, date(2026, 11, 26), "briefing_morning")
+
+    assert "上证指数" in result.chain.morning.summary
+    assert "3476.8816" in result.chain.morning.summary
+    assert "数据缺失" not in result.chain.morning.summary
+    assert "+0.51%" in result.chain.morning.headline
+    # 基线涨跌家数同样取上一交易日。
+    assert "上涨 3000 家、下跌 2000 家" in result.chain.morning.today_baseline
+
+
 def test_snapshot_publish_time_uses_trade_date_not_capture_time() -> None:
     """补录快照的 captured_at 晚于时段，也必须按交易日推导可得时刻。"""
     from datetime import datetime, timedelta, timezone

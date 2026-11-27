@@ -1046,7 +1046,7 @@ async def build_briefing_chain(
     breadth = _as_mapping(close.get("breadth")) if close is not None else None
 
     morning = _morning_seed(
-        last_close=last_close,
+        prev_close=prev_close,
         visible=morning_visible,
     )
     midday = _midday_seed(
@@ -1429,7 +1429,10 @@ def _evening_scores(
 def _close_index(close: dict[str, object] | None) -> dict[str, object] | None:
     if close is None:
         return None
-    indexes = _as_mapping(close.get("indexes"))
+    # 真实 app-api 的 `indexes` 是 list（探针确认 6 个元素，字段含 ts_code/name/
+    # pct_chg）；此处若用 `_as_mapping` 会把 list 判成 None，早报/晚报因此长期
+    # 落到"盘前基线数据缺失"的降级文案。
+    indexes = _normalize_indexes(close.get("indexes"))
     if not indexes:
         return None
     first = _first_index(indexes)
@@ -1438,10 +1441,12 @@ def _close_index(close: dict[str, object] | None) -> dict[str, object] | None:
 
 def _morning_seed(
     *,
-    last_close: dict[str, object] | None,
+    prev_close: dict[str, object] | None,
     visible: Sequence[BriefingEvidenceSeed],
 ) -> MorningSeed:
-    index = _close_index(last_close)
+    # 必须用「严格早于当日」的上一交易日快照：`last_close` 是"最新已收盘日"，
+    # 回放历史日期时它可能等于当日，既有未来函数风险，也会把当日涨跌误当基线。
+    index = _close_index(prev_close)
     change = _change_pct(index) if index is not None else None
     name = _as_str(index.get("name")) if index is not None else None
     close_value = _as_float(index.get("close")) if index is not None else None
@@ -1456,7 +1461,7 @@ def _morning_seed(
         summary = "盘前基线数据缺失，早报只保留自身时间边界内的日历事件。"
 
     overnight = [seed.title for seed in visible if seed.source_id.startswith("CAL_")][:3]
-    breadth = _as_mapping(last_close.get("breadth")) if last_close is not None else None
+    breadth = _as_mapping(prev_close.get("breadth")) if prev_close is not None else None
     if breadth is not None:
         today_baseline = (
             f"上一交易日上涨 {_as_int(breadth.get('advance_count')) or 0} 家、"
@@ -1509,7 +1514,7 @@ def _midday_seed(
     intraday: dict[str, object] | None,
     new_drivers: Sequence[str],
 ) -> MiddaySeed:
-    indexes = _as_mapping(intraday.get("indexes")) if intraday is not None else None
+    indexes = _normalize_indexes(intraday.get("indexes")) if intraday is not None else None
     first = _first_index(indexes) if indexes else None
     change = _change_pct(first[1]) if first is not None else None
     name = _as_str(first[1].get("name")) if first is not None else None
@@ -1612,7 +1617,7 @@ def _evening_extras(close: dict[str, object] | None) -> dict[str, object] | None
     """只读投影收盘行情；缺失时返回 None，不编造空壳行情。"""
     if close is None:
         return None
-    indexes_payload = _as_mapping(close.get("indexes")) or {}
+    indexes_payload = _normalize_indexes(close.get("indexes")) or {}
     indexes: list[dict[str, object]] = []
     first_change: float | None = None
     for code in sorted(indexes_payload):
