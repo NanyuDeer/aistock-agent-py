@@ -291,8 +291,18 @@ async def run_briefing_session(
     try:
         request = build_briefing_request(chain, session)
         initial = _initial_state(chain, session, request, hypotheses)
-        # 刻意不构造 thinking 模型：该增强只属于市场溯源，且测试/回放必须全离线。
-        graph = build_research_graph(analyst_model=model, tool_client=tool_client)
+        # 工具循环可能因步数上限提前结束、拿不到结构化 claim；此时用一次
+        # 不带工具的 thinking 综合兜底产出结论（实测早报因此从 0 条 claim 修复）。
+        # 测试环境会把 `_build_thinking_model_safe` 替换成 None，保持全离线。
+        from aistock_agent.brain_v4.runtime.graph_run import (
+            _build_thinking_model_safe,
+        )
+
+        graph = build_research_graph(
+            analyst_model=model,
+            tool_client=tool_client,
+            thinking_model=_build_thinking_model_safe(),
+        )
         final = cast(
             Mapping[str, Any],
             await graph.ainvoke(
