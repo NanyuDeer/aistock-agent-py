@@ -34,6 +34,11 @@ class V4Judgment(V4Contract):
     evidence_ids: list[str] = Field(default_factory=list)
     unresolved_question_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
+    #: 分析师基于冻结证据给出的最终叙事（只拼接已有 claim，不新增事实）。
+    #: 默认空串，保证旧调用方/旧归档反序列化零破坏。
+    narrative: str = ""
+    #: 叙事中引用、且确实存在于冻结 ledger 的证据 ID（账本外引用一律剔除）。
+    narrative_evidence_ids: list[str] = Field(default_factory=list)
     parent_judgment_ids: list[str] = Field(default_factory=list)
     relation: str | None = None
     config_version: str

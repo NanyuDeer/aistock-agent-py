@@ -54,6 +54,8 @@ _SYSTEM_PROMPT = (
     "只能阅读给定案卷与证据，返回结构化 AnalystResult；"
     "不得撰写最终研判，不得修改假设图或因果图，不得编造证据 ID。"
     "claim 必须引用 [evidence] 中已有的具体数值（点位/涨跌幅/家数/成交额等）；"
+    "claim 必须给出因果判断（什么驱动了什么），并优先引用能解释盘面的"
+    "新闻/政策/资金证据，不要只复述涨跌幅；"
     "仅当 [evidence] 确实缺少某字段时才可声明该字段缺失，"
     "禁止笼统声称“缺少具体数值/数据”（实测模型会无视已给数值而误报缺失）。"
     "引用 evidence_id 时必须完整复制（含 digest 与来源后缀），不得截断或臆造。"
@@ -228,12 +230,21 @@ class _StepBudgetMiddleware(AgentMiddleware[Any, Any]):
 
 
 _SYNTHESIS_PROMPT = (
-    "你是终局推理席位。基于下列证据与初步结论，给出更审慎的最终判断。"
+    "你是终局推理席位。基于下列假设、证据摘要与初步结论，给出更审慎的最终判断。"
     "只输出一个严格 JSON 对象，不得输出 JSON 之外任何文字。字段仅允许："
     "claim(string)、confidence(0~1 之间的 number)、"
     "uncertainties(string array)、requested_gaps(string array)。\n\n"
-    "任务：{task}\n\n初步结论 JSON：{seed}\n"
+    "假设与证据摘要：\n{context}\n\n初步结论 JSON：{seed}\n"
 )
+
+#: 合成上下文字符上限：只带假设行与证据行摘要，绝不重复整份任务。
+#: 实测整份任务 5676 字；再发一次会让 8000 token 席位双倍计费并撞上
+#: 1.2 倍硬上限（2026-11-27 四个席位全部 budget_exhausted）。
+_SYNTHESIS_CONTEXT_CHARS = 2200
+#: 合成输入中单条证据的最大字符数；标题与关键数值优先保留。
+_SYNTHESIS_EVIDENCE_CHARS = 180
+#: 合成 token 估算的安全余量，避免边界抖动。
+_SYNTHESIS_TOKEN_MARGIN = 160
 
 
 def _message_text(message: Any) -> str:
@@ -299,6 +310,35 @@ def _parse_synthesis(text: str) -> dict[str, Any] | None:
     }
 
 
+def _compact_task_context(
+    task: str, *, max_chars: int = _SYNTHESIS_CONTEXT_CHARS
+) -> str:
+    """从分析师任务文本提取「假设 + 证据摘要」，供终局合成使用。
+
+    为什么不能直接复用 task：合成是同一席位的第二次模型调用，整份任务再发
+    一遍会双倍计费，把预算推过硬上限（实测 2026-11-27 四席位全部
+    budget_exhausted）。这里只保留 `- hyp_` 假设行与 `- ev_` 证据行的截断
+    版本，总长封顶；没有可提取行时退回任务前 max_chars 字。
+    """
+    hypotheses: list[str] = []
+    evidence: list[str] = []
+    for line in task.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("- hyp_"):
+            hypotheses.append(text)
+        elif text.startswith("- ev_"):
+            evidence.append(text[:_SYNTHESIS_EVIDENCE_CHARS])
+    blocks: list[str] = []
+    if hypotheses:
+        blocks.append("[hypotheses]\n" + "\n".join(hypotheses))
+    if evidence:
+        blocks.append("[evidence]\n" + "\n".join(evidence))
+    context = "\n\n".join(blocks) if blocks else task
+    return context[:max_chars]
+
+
 def _synthesis_messages(
     task: str, output: Mapping[str, Any]
 ) -> list[HumanMessage] | None:
@@ -314,9 +354,32 @@ def _synthesis_messages(
         "requested_gaps": list(structured.requested_gaps),
     }
     prompt = _SYNTHESIS_PROMPT.format(
-        task=task, seed=json.dumps(seed, ensure_ascii=False, default=str)
+        context=_compact_task_context(task),
+        seed=json.dumps(seed, ensure_ascii=False, default=str),
     )
     return [HumanMessage(content=prompt)]
+
+
+def _synthesis_affordable(
+    messages: Sequence[HumanMessage],
+    budget: _StepBudgetMiddleware,
+    callback: _UsageBudgetCallback | None,
+) -> bool:
+    """在发起合成前估算剩余额度；不够就直接跳过，绝不先花再报错。
+
+    `_UsageBudgetCallback` 的硬上限是 `token_budget * 1.2`；主循环已消耗的
+    token 只能从中间件与回调两处取较大者。中文按 1 字≈0.8 token 保守估算。
+    """
+    if budget.token_budget is None:
+        return True
+    used = max(
+        budget.tokens_used,
+        callback.tokens_used if callback is not None else 0,
+    )
+    remaining = int(budget.token_budget * _HARD_LIMIT_RATIO) - used
+    prompt_chars = sum(len(str(message.content)) for message in messages)
+    estimate = int(prompt_chars * 0.8)
+    return estimate + _SYNTHESIS_TOKEN_MARGIN <= remaining
 
 
 def _synthesize_with_thinking(
@@ -329,11 +392,11 @@ def _synthesize_with_thinking(
 ) -> dict[str, Any] | None:
     """追加一次启用 thinking 的终局推理；失败一律回退（返回 None）。
 
-    不带工具、不强制 `tool_choice`，因此可与 thinking 共存；合成消耗的 token
-    经同一 callback 计入累计与预算。超预算异常继续上抛，由内核转结构化降级。
+    不带工具、不强制 `tool_choice`，因此可与 thinking 共存。输入只带压缩后的
+    假设与证据摘要；剩余额度不足时直接跳过，而不是先发请求再超预算。
     """
     messages = _synthesis_messages(task, output)
-    if messages is None:
+    if messages is None or not _synthesis_affordable(messages, budget, callback):
         return None
     try:
         bound = model.bind()
@@ -358,7 +421,7 @@ async def _asynthesize_with_thinking(
 ) -> dict[str, Any] | None:
     """`_synthesize_with_thinking` 的异步版本，供 `run_analyst_async` 使用。"""
     messages = _synthesis_messages(task, output)
-    if messages is None:
+    if messages is None or not _synthesis_affordable(messages, budget, callback):
         return None
     try:
         bound = model.bind()
@@ -658,10 +721,14 @@ async def _astalled_synthesis(
             "requested_gaps": [],
         }
         prompt = _SYNTHESIS_PROMPT.format(
-            task=task, seed=json.dumps(seed, ensure_ascii=False)
+            context=_compact_task_context(task),
+            seed=json.dumps(seed, ensure_ascii=False),
         )
+        messages = [HumanMessage(content=prompt)]
+        if not _synthesis_affordable(messages, budget, callback):
+            return result
         response = await thinking_model.bind().ainvoke(
-            [HumanMessage(content=prompt)],
+            messages,
             config={"callbacks": [callback]},
         )
         synthesis = _parse_synthesis(_message_text(response))

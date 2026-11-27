@@ -60,8 +60,8 @@ def build_v4_run(case: MarketTraceCase, run: ResearchRun) -> dict[str, Any]:
     )
 
     selected = run.judgment.selected_hypothesis_refs
-    conclusion = ""
-    if selected:
+    conclusion = run.judgment.narrative.strip()
+    if not conclusion and selected:
         conclusion = next(
             (
                 hypothesis.statement

@@ -72,6 +72,9 @@ def _summary(
             "status": judgment.status,
             "stop_reason": judgment.stop_reason,
             "confidence": judgment.confidence,
+            # 最终叙事来自分析师 claim；旧运行/无 claim 时为空串。
+            "narrative": judgment.narrative,
+            "narrative_evidence_ids": judgment.narrative_evidence_ids,
             "evidence_ids": judgment.evidence_ids,
         },
         "six_factor": None

@@ -332,6 +332,120 @@ def _round_gap_queries(state: Mapping[str, Any]) -> list[tuple[str, str]]:
     return pairs
 
 
+#: 研判叙事长度上限：分析师 claim 的组合上限，超出按句子边界截断。
+_NARRATIVE_MAX_CHARS = 1600
+#: 叙事最多引用多少条冻结证据。
+_NARRATIVE_MAX_EVIDENCE = 24
+#: 席位顺序：主分析师优先，其次机制/量化/时间线，备选最后。
+_NARRATIVE_ROLE_ORDER = (
+    "lead_thesis",
+    "mechanism",
+    "quant",
+    "timeline",
+    "alternative",
+    "lead",
+)
+
+
+def _latest_analyst_claims(state: Mapping[str, Any]) -> list[AnalystResult]:
+    """每个席位取最新一轮的有效 claim（status=ok 且非空），按席位顺序排序。"""
+    latest: dict[str, AnalystResult] = {}
+    for result in state.get("analyst_results", ()):
+        if not isinstance(result, AnalystResult):
+            continue
+        if result.status != "ok" or not result.claim.strip():
+            continue
+        current = latest.get(result.role)
+        if current is None or result.research_round >= current.research_round:
+            latest[result.role] = result
+
+    def _order(item: AnalystResult) -> tuple[int, str]:
+        if item.role in _NARRATIVE_ROLE_ORDER:
+            return (_NARRATIVE_ROLE_ORDER.index(item.role), item.role)
+        return (len(_NARRATIVE_ROLE_ORDER), item.role)
+
+    return sorted(latest.values(), key=_order)
+
+
+def _external_ref_count(
+    result: AnalystResult,
+    lookup: Mapping[str, EvidenceItem],
+    ledger_ids: set[str],
+) -> int:
+    """统计该 claim 引用了多少条外部事件证据（新闻/按需检索）。"""
+    count = 0
+    for ref in result.evidence_refs:
+        if ref not in ledger_ids:
+            continue
+        item = lookup.get(ref)
+        if item is not None and (
+            item.source_type == "event_evidence" or item.tool == "news_search"
+        ):
+            count += 1
+    return count
+
+
+def _truncate_narrative(text: str, limit: int) -> str:
+    """超长叙事按句子边界截断，避免把一句话切成半个词。"""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    for separator in ("。", "\n", "；", "！", "？"):
+        index = head.rfind(separator)
+        if index >= limit // 2:
+            return head[: index + 1]
+    return head
+
+
+def _compose_narrative(
+    state: Mapping[str, Any], ledger: EvidenceLedger
+) -> tuple[str, list[str]]:
+    """用分析师 claim 组合最终叙事；只拼接，不改写、不新增事实。
+
+    - 主叙事取主分析师（lead_thesis）最新 claim；
+    - 若其他席位的 claim 引用了更多外部事件证据（新闻/按需检索），再补一段，
+      让“政策/事件催化”真正进入最终结论，而不是只留在证据账本里；
+    - 证据 ID 只保留冻结 ledger 内的引用，账本外一律剔除。
+    """
+    results = _latest_analyst_claims(state)
+    if not results:
+        return "", []
+    ledger_ids = {item.evidence_id for item in ledger.items}
+    lookup = {item.evidence_id: item for item in ledger.items}
+
+    chosen = [results[0]]
+    extras = sorted(
+        results[1:],
+        key=lambda item: (
+            -_external_ref_count(item, lookup, ledger_ids),
+            _NARRATIVE_ROLE_ORDER.index(item.role)
+            if item.role in _NARRATIVE_ROLE_ORDER
+            else len(_NARRATIVE_ROLE_ORDER),
+            item.role,
+        ),
+    )
+    if extras:
+        supplement = extras[0]
+        if (
+            _external_ref_count(supplement, lookup, ledger_ids) > 0
+            and len(supplement.claim.strip()) >= 40
+            and supplement.claim.strip() not in chosen[0].claim
+        ):
+            chosen.append(supplement)
+
+    narrative = _truncate_narrative(
+        "\n\n".join(item.claim.strip() for item in chosen), _NARRATIVE_MAX_CHARS
+    )
+    refs: list[str] = []
+    seen: set[str] = set()
+    for item in chosen:
+        for ref in item.evidence_refs:
+            if ref in ledger_ids and ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+    return narrative, refs[:_NARRATIVE_MAX_EVIDENCE]
+
+
 def _referenced_evidence_ids(state: Mapping[str, Any]) -> set[str]:
     referenced: set[str] = set()
     for result in state.get("analyst_results", ()):
@@ -454,6 +568,9 @@ def commit_judgment(state: Mapping[str, Any]) -> V4Judgment:
         if isinstance(gap, ResearchGap) and gap.status in {"open", "researching"}
     )
     round_no = int(state.get("research_round_no", 0))
+    # 最终叙事来自真实分析师 claim（只拼接 + 过滤账本内证据）；没有 claim 时
+    # 保持空串，由展示层回退到假设陈述，绝不编造结论。
+    narrative, narrative_evidence_ids = _compose_narrative(state, ledger)
 
     return V4Judgment(
         judgment_id=f"jdg_{request.run_id}_{round_no:02d}",
@@ -475,6 +592,8 @@ def commit_judgment(state: Mapping[str, Any]) -> V4Judgment:
         evidence_ids=sorted(ledger_ids | referenced),
         unresolved_question_ids=open_gaps,
         confidence=confidence,
+        narrative=narrative,
+        narrative_evidence_ids=narrative_evidence_ids,
         parent_judgment_ids=list(state.get("parent_judgment_ids", ())),
         relation=None,
         config_version=request.config_version,

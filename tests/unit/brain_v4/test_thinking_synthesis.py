@@ -58,6 +58,7 @@ class _ThinkingFake(BaseChatModel):
     synth_tokens: int = 40
     agent_calls: int = 0
     synth_calls: int = 0
+    last_synth_prompt: str = ""
 
     @property
     def _llm_type(self) -> str:
@@ -78,6 +79,7 @@ class _ThinkingFake(BaseChatModel):
         joined = " ".join(str(message.content) for message in messages)
         if "终局推理" in joined:
             self.synth_calls += 1
+            self.last_synth_prompt = joined
             return ChatResult(
                 generations=[
                     ChatGeneration(
@@ -172,28 +174,57 @@ async def test_non_json_synthesis_falls_back_to_original_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_synthesis_budget_overflow_keeps_structured_claim() -> None:
-    """合成超预算不能把主循环已产出的 claim / gaps 整条丢掉。"""
+async def test_synthesis_context_is_compact_not_full_task() -> None:
+    """合成不能再把整份任务（含超长证据正文）重发一遍。"""
     profile = get_profile("market_trace")
-    # 主循环即使按步数上限反复调用也在硬上限内；合成 20000 会推过 8640。
-    model = _ThinkingFake(agent_tokens=500, synth_tokens=20000)
+    long_body = "超长证据正文" * 800
+    task = (
+        "[hypotheses]\n"
+        "- hyp_liquidity:v1 status=open confidence=0.60 | 流动性收缩是结构根因\n\n"
+        "[evidence]\n"
+        "- ev_snapshot_000 source=cls time=2026-11-27T09:00:00+08:00 "
+        f"quality=high | {long_body}"
+    )
+    model = _ThinkingFake()
+
+    result = await run_analyst_async(
+        role="lead_thesis",
+        profile=profile,
+        model=model,
+        task=task,
+        token_budget=24000,
+        thinking_model=model,
+        timeout_s=10,
+    )
+
+    assert result.status == "ok"
+    assert model.synth_calls == 1
+    # 假设行保留，超长证据正文被截断，整体长度受控。
+    assert "hyp_liquidity" in model.last_synth_prompt
+    assert len(model.last_synth_prompt) < 3000
+    assert long_body[:1000] not in model.last_synth_prompt
+
+
+@pytest.mark.asyncio
+async def test_synthesis_skipped_when_remaining_budget_insufficient() -> None:
+    """剩余额度不够时直接跳过合成，不发起请求、也不丢主循环结论。"""
+    profile = get_profile("market_trace")
+    model = _ThinkingFake(agent_tokens=400)
 
     result = await run_analyst_async(
         role="quant",
         profile=profile,
         model=model,
-        task="分析今日指数下跌主因",
-        token_budget=8000,
+        task="[hypotheses]\n- hyp_broad:v1 | 广度驱动",
+        token_budget=700,
         thinking_model=model,
         timeout_s=10,
     )
 
     assert isinstance(result, AnalystResult)
-    assert result.error_kind is None, result.error_kind
     assert result.status == "ok"
     assert result.claim == "original claim"
-    assert result.requested_gaps == []
-    assert result.tokens_used > 8000
+    assert model.synth_calls == 0
 
 
 @pytest.mark.asyncio

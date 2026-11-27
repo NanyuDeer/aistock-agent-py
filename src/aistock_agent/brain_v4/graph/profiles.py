@@ -104,7 +104,9 @@ _PROFILES: dict[str, RunProfile] = {
         analyst_max_steps=8,
         max_revisions=2,
         timeout_s=180,
-        token_budget=32000,
+        # 48000 来自真实用量校准：11-27 重跑实际 39.9k~42.3k token（4 席位），
+        # 原 32000 会让每席位只剩 8000，主循环 + 终局 thinking 合成必然撞硬上限。
+        token_budget=48000,
         tool_groups=["market_snapshot", "event_evidence", "trend", "fundamental"],
         on_demand_tools=["news_search"],
         data_cutoff_policy="market_close_cn",
