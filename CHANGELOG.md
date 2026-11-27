@@ -1,5 +1,29 @@
 # CHANGELOG.md — aistock-agent-py 变更记录
 
+## [main] 2026-11-27 — 影子归档与每日审计页（P4-archive-audit）
+
+**开发者**: NanyuDeer
+
+### 新增
+
+- `src/aistock_agent/brain_v4/runtime/archive.py`：`build_archive_payload(result)` 把 `LiveRunResult` 收敛为固定十键 payload（`judgment` / `briefing_v1` / `evidence_ledger` / `hypotheses` / `gaps` / `revisions` / `collaboration_mode` / `six_factor` / `usage{tokens,cost,latency_ms}` / `audit{assumptions,evidence_count,gap_count,revision_count,mode,insufficient_reasons}`），缺失字段写 `None`/`[]`；`briefing_v1` 仅 briefing profile 有值、`six_factor` 仅 market_trace 有值。`archive_run(result, *, client=None)` 向 `/internal/brain-v4/archive` 发送带 `X-Internal-Token` 的请求，失败只返回 `archived=False` + 分类错误（`timeout` / `request_error` / `http_error` / `empty_response` / `unexpected_error`），不抛裸异常。`write_daily_report(results, out_dir)` 生成 `<out_dir>/<date>/index.html` 纯静态审计页（无 fetch/XHR）。
+- `tests/unit/brain_v4/test_archive_payload.py`：覆盖固定 payload 键集合、briefing/six_factor 互斥、缺失字段不编造、归档请求体与 token 头、失败分类、静态审计页无在线请求。
+
+### 修改
+
+- `src/aistock_agent/brain_v4/runtime/cli.py`：新增 `--archive`（默认关闭）与 `--report-dir`；归档成功/失败输出 `archived` 信息，`--report-dir` 写出每日审计页路径。
+
+### 验证
+
+- 红态（实现前）：`uv run pytest tests/unit/brain_v4/test_archive_payload.py -q` → 收集失败 `ModuleNotFoundError: No module named 'aistock_agent.brain_v4.runtime.archive'`。
+- 绿态（focused）：`uv run pytest tests/unit/brain_v4/test_archive_payload.py -q` → `6 passed`。
+- `uv run pytest tests/unit/brain_v4 tests/integration/brain_v4 -q` → `217 passed in 16.44s`。
+- `uv run ruff check src/aistock_agent/brain_v4 tests` → `All checks passed!`。
+- `uv run mypy src/aistock_agent/brain_v4` → `Success: no issues found in 69 source files`。
+- 未改 runner/features projection、app-api 表结构、前端；测试全部使用注入假客户端，未触网。
+
+---
+
 ## [main] 2026-11-27 — 实时数据运行器、briefing.v1 投影与 CLI（P3-live-runner）
 
 **开发者**: NanyuDeer

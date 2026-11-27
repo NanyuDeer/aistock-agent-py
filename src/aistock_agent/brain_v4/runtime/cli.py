@@ -2,10 +2,12 @@
 
 用法：
     python -m aistock_agent.brain_v4.runtime.cli \
-        --profile market_trace --date 2026-11-27 [--json-out PATH] [--html-out DIR]
+        --profile market_trace --date 2026-11-27 \
+        [--json-out PATH] [--html-out DIR] [--archive] [--report-dir DIR]
 
 为什么保留 CLI：P3 需要人工核验真实数据链路；P4 调度器之后复用同一 `run_live`，
-CLI 只做参数解析与摘要输出，不复制任何取数/研判逻辑。
+CLI 只做参数解析与摘要输出，不复制任何取数/研判逻辑。`--archive` 默认关闭，
+人工灰度时显式开启；`--report-dir` 生成每日静态审计页。
 """
 
 from __future__ import annotations
@@ -18,6 +20,11 @@ import sys
 from datetime import date as date_type
 from pathlib import Path
 
+from aistock_agent.brain_v4.runtime.archive import (
+    ArchiveResult,
+    archive_run,
+    write_daily_report,
+)
 from aistock_agent.brain_v4.runtime.runner import LiveRunResult, run_live
 
 _PROFILES = (
@@ -28,10 +35,12 @@ _PROFILES = (
 )
 
 
-def _summary(result: LiveRunResult) -> dict[str, object]:
+def _summary(
+    result: LiveRunResult, archive: ArchiveResult | None = None
+) -> dict[str, object]:
     judgment = result.judgment
     six_factor = result.six_factor
-    return {
+    summary: dict[str, object] = {
         "run_id": result.run_id,
         "profile": result.profile,
         "status": result.status,
@@ -64,6 +73,14 @@ def _summary(result: LiveRunResult) -> dict[str, object]:
         "usage": result.usage,
         "audit": result.audit,
     }
+    if archive is not None:
+        summary["archive"] = {
+            "archived": archive.archived,
+            "run_id": archive.run_id,
+            "error": archive.error,
+            "response": archive.response,
+        }
+    return summary
 
 
 def _render_html(result: LiveRunResult, summary: dict[str, object]) -> str:
@@ -84,6 +101,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--date", required=True, help="交易日，ISO 格式 YYYY-MM-DD")
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--html-out", type=Path, default=None)
+    parser.add_argument(
+        "--archive",
+        action="store_true",
+        default=False,
+        help="归档到 app-api 影子表（默认关闭）",
+    )
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="生成 <dir>/<date>/index.html 每日静态审计页",
+    )
     return parser.parse_args(argv)
 
 
@@ -101,7 +130,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"V4 live run 失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    summary = _summary(result)
+    archive: ArchiveResult | None = None
+    if args.archive:
+        archive = asyncio.run(archive_run(result))
+        if archive.archived:
+            print(f"archived: run_id={archive.run_id}", file=sys.stderr)
+        else:
+            print(
+                f"archive skipped: run_id={archive.run_id} error={archive.error}",
+                file=sys.stderr,
+            )
+
+    summary = _summary(result, archive)
+    if args.report_dir is not None:
+        report_path = write_daily_report([result], args.report_dir)
+        summary["report_file"] = str(report_path)
+
     text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
     print(text)
 
