@@ -88,6 +88,11 @@ class ResearchOutcome:
     errors: list[dict[str, object]] = field(default_factory=list)
     graph_trace: list[dict[str, object]] = field(default_factory=list)
     causal_edges: list[CausalEdge] = field(default_factory=list)
+    #: 每个分析师席位的状态（stalled/ok/tokens/requested_gaps 数），供审计定位
+    #: “花了 token 但没有 claim / 没有提出缺口”的情况。
+    analyst_statuses: list[dict[str, object]] = field(default_factory=list)
+    #: 本次 run 实际执行的按需检索关键词（去重后），null 表示从未检索。
+    search_queries: list[str] = field(default_factory=list)
 
 
 def _as_mapping(value: object) -> dict[str, object] | None:
@@ -462,6 +467,29 @@ def _degraded_outcome(
     )
 
 
+def _analyst_statuses(state: Mapping[str, Any]) -> list[dict[str, object]]:
+    """按真实 AnalystResult 汇总席位状态；没有结果时返回空列表。"""
+    from ..analysts.kernel import AnalystResult
+
+    statuses: list[dict[str, object]] = []
+    for result in state.get("analyst_results", ()):
+        if not isinstance(result, AnalystResult):
+            continue
+        statuses.append(
+            {
+                "role": result.role,
+                "round": result.research_round,
+                "status": result.status,
+                "error_kind": result.error_kind,
+                "claim_chars": len(result.claim or ""),
+                "evidence_refs": len(result.evidence_refs),
+                "requested_gaps": len(result.requested_gaps),
+                "tokens": result.tokens_used,
+            }
+        )
+    return statuses
+
+
 def _outcome_from_state(
     state: Mapping[str, Any], case: MarketTraceCase
 ) -> ResearchOutcome:
@@ -501,6 +529,8 @@ def _outcome_from_state(
         if isinstance(item, Mapping)
     ]
     usage = _aggregate_usage(state.get("usage", ()))
+    analyst_statuses = _analyst_statuses(state)
+    search_queries = [str(item) for item in state.get("search_queries", ())]
 
     if judgment is None:
         return ResearchOutcome(
@@ -516,6 +546,8 @@ def _outcome_from_state(
             errors=errors or [{"error_kind": "judgment_missing"}],
             graph_trace=trace,
             causal_edges=[],
+            analyst_statuses=analyst_statuses,
+            search_queries=search_queries,
         )
 
     causal_edges = _derive_causal_edges(
@@ -534,6 +566,8 @@ def _outcome_from_state(
         errors=errors,
         graph_trace=trace,
         causal_edges=causal_edges,
+        analyst_statuses=analyst_statuses,
+        search_queries=search_queries,
     )
 
 

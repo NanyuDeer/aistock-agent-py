@@ -305,6 +305,13 @@ async def _run_market_trace(
         outcome = None
         research_graph_failed = f"{type(exc).__name__}: {exc}"
 
+    # 席位状态与按需检索历史：用于回答“为什么花了 token 却没有 claim / 没有检索”。
+    analyst_statuses: list[dict[str, object]] = []
+    news_search_queries: list[str] = []
+    if outcome is not None:
+        analyst_statuses = list(outcome.analyst_statuses)
+        news_search_queries = list(outcome.search_queries)
+
     if outcome is not None and outcome.status == "ok" and outcome.judgment is not None:
         judgment = outcome.judgment
         hypotheses = list(outcome.hypotheses)
@@ -397,6 +404,8 @@ async def _run_market_trace(
         model_injected=model is not None,
         gateway_injected=gateway is not None,
         snapshot_sha=snapshot_sha,
+        analyst_statuses=analyst_statuses,
+        news_search_queries=news_search_queries,
     )
     audit["token_source"] = token_source
     audit["usage_source"] = (
@@ -1089,6 +1098,8 @@ def _audit(
     model_injected: bool,
     gateway_injected: bool,
     snapshot_sha: str,
+    analyst_statuses: list[dict[str, object]] | None = None,
+    news_search_queries: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "mode": mode,
@@ -1102,6 +1113,8 @@ def _audit(
         "model_injected": model_injected,
         "gateway_injected": gateway_injected,
         "snapshot_sha": snapshot_sha,
+        "analyst_statuses": list(analyst_statuses or []),
+        "news_search_queries": list(news_search_queries or []),
     }
 
 
