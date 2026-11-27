@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智慧大脑 · 功能链路对照（真实节点版）</title>
+<style>
+:root{
+  --bg:#f4f7fb;--panel:#fff;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;
+  --blue:#0b5fff;--blue-soft:#eef4ff;--teal:#0f766e;--teal-soft:#e8f6f3;
+  --violet:#7c3aed;--amber:#b45309;--green:#15803d;--rose:#be123c;--slate:#475569;
+  --soft:#f8fafc;--shadow:0 10px 30px rgba(15,23,42,.06);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--blue);text-decoration:none}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;padding:1px 5px;color:#334155}
+.wrap{max-width:1460px;margin:0 auto;padding:26px 22px 80px}
+.marker-defs{position:absolute;width:0;height:0;overflow:hidden}
+.toc{position:sticky;top:0;z-index:20;background:rgba(244,247,251,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.toc-inner{max-width:1460px;margin:0 auto;padding:9px 22px;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none}
+.toc-inner::-webkit-scrollbar{display:none}
+.toc a{flex:0 0 auto;font-size:12.5px;color:#475569;background:#fff;border:1px solid var(--line);border-radius:999px;padding:5px 11px;white-space:nowrap}
+.toc a:hover{border-color:#b9cdf5;color:var(--blue)}
+.hero{padding:26px 0 10px}
+.kicker{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);font-weight:700}
+h1{font-size:34px;line-height:1.25;margin:8px 0 12px;letter-spacing:-.02em}
+.lead{max-width:1000px;color:#334155;font-size:16px;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.meta span{font-size:12px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 10px;color:#475569}
+.sec{margin:34px 0 0}
+.sec-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:14px}
+.num{flex:0 0 auto;width:42px;height:42px;border-radius:12px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;box-shadow:var(--shadow)}
+.sec-head h2{font-size:24px;line-height:1.3;margin:0 0 4px}
+.sec-head p{margin:0;color:var(--muted);font-size:13.5px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+.pad{padding:20px}
+.skeleton{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:16px;background:var(--soft);border:1px solid var(--line);border-radius:14px}
+.skeleton i{font-style:normal;color:#94a3b8;font-size:12px}
+.sk{font-size:12px;font-weight:700;border-radius:8px;padding:5px 9px;border:1px solid transparent;white-space:nowrap}
+.sk.gt{background:#eef2f7;color:#475569;border-color:#dbe3ee}.sk.o1{background:#e6efff;color:#0b5fff;border-color:#c7d9ff}
+.sk.gp{background:#e8f1ff;color:#0b5fff;border-color:#cfdfff}.sk.gr{background:var(--teal-soft);color:var(--teal);border-color:#c7e8e2}
+.sk.gj{background:#fff4e6;color:#b45309;border-color:#fde3c3}.sk.mem{background:#f1f5f9;color:#475569;border-color:#dbe3ee}
+.sk.ge{background:#eaf7ee;color:var(--green);border-color:#cfe9d7}.sk.go{background:#fff1f2;color:var(--rose);border-color:#fbd5da}
+.side-notes{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:12.5px;color:var(--muted)}
+.side-notes b.violet{color:var(--violet)}.side-notes b.slate{color:var(--slate)}
+.legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:12px;font-size:12px;color:#475569}
+.legend .line{display:inline-block;width:24px;height:0;border-top:2px solid var(--blue);vertical-align:middle;margin-right:6px}
+.legend .line.teal{border-color:var(--teal)}.legend .line.violet{border-color:var(--violet);border-top-style:dashed}
+.legend .line.gray{border-color:#94a3b8;border-top-style:dashed}
+.badge-demo{display:inline-block;font-size:9px;background:#f1f5f9;color:#64748b;border-radius:7px;padding:2px 6px;margin-right:5px;vertical-align:1px}
+.matrix{width:100%;border-collapse:collapse;margin-top:16px;font-size:12.5px;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.matrix th,.matrix td{border-bottom:1px solid #edf1f7;padding:9px 10px;text-align:left;vertical-align:top}
+.matrix th{background:#f1f5f9;color:#475569;font-weight:700;white-space:nowrap}
+.matrix tr:last-child td{border-bottom:0}
+.matrix td:first-child{font-weight:700;color:#0f172a}
+.matrix .warn{color:var(--rose);font-weight:700}
+.node-dict{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.node-dict summary{cursor:pointer;padding:12px 14px;font-weight:700;font-size:13px;background:var(--soft);color:#334155}
+.dict-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 12px;padding:14px}
+.dict-item{font-size:12px;color:#475569;border-bottom:1px dashed #eef2f7;padding:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dict-item b{color:var(--blue);margin-right:4px}
+.dict-item code{font-size:10.5px;background:transparent;border:0;padding:0;color:#94a3b8}
+.dict-item span{display:block;font-size:11px;color:#94a3b8}
+.verify{background:#f7fbf8;border:1px solid #d8eee0;border-left:4px solid var(--green);border-radius:12px;padding:14px 16px;margin:16px 0}
+.verify-title{font-size:12px;font-weight:800;color:var(--green);letter-spacing:.04em;margin-bottom:6px}
+.verify ul{margin:0;padding-left:18px}
+.verify li{font-size:13px;color:#334155;margin:4px 0}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:18px 0}
+.phone{background:#0f172a;border-radius:28px;padding:9px;box-shadow:var(--shadow)}
+.phone-top{display:flex;justify-content:space-between;align-items:center;color:#cbd5e1;font-size:9.5px;padding:5px 10px 7px}
+.screen{background:#f6f8fc;border-radius:20px;padding:11px;min-height:390px;display:flex;flex-direction:column;gap:9px}
+.briefing-mock{background:var(--blue);color:#fff;border-radius:12px;padding:11px 12px}
+.briefing-mock.ok{background:#0f766e}
+.bm-title{font-size:13px;font-weight:800;display:flex;justify-content:space-between;gap:8px;align-items:center}
+.bm-sub{font-size:11px;opacity:.92;margin-top:4px}
+.mini-tag{font-size:9px;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:1px 6px;white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.chips span{font-size:9.5px;background:rgba(255,255,255,.16);border-radius:999px;padding:2px 7px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mini-card{background:#fff;border:1px solid #e5ebf3;border-radius:11px;padding:9px;min-height:104px}
+.mini-card b{font-size:11.5px;display:block}
+.mini-card small{font-size:9.5px;color:#94a3b8;display:block;margin:2px 0 6px}
+.row{display:flex;justify-content:space-between;gap:6px;font-size:9.5px;color:#64748b;border-top:1px dashed #eef2f7;padding:4px 0}
+.row em{font-style:normal;color:#0b5fff;white-space:nowrap}
+.row em.down{color:#be123c}.row em.up{color:#15803d}
+.phone-note{font-size:10px;color:#64748b;background:#fff;border:1px dashed #cbd5e1;border-radius:9px;padding:7px 9px;margin-top:auto}
+.phone-note b{color:#0f172a}
+.tabs-mock{display:flex;gap:4px;background:#fff;border:1px solid #e5ebf3;border-radius:9px;padding:4px}
+.tabs-mock span{flex:1;text-align:center;font-size:9px;color:#64748b;border-radius:6px;padding:3px 0}
+.tabs-mock .on{background:var(--blue);color:#fff;font-weight:700}
+.gate{background:#fff;border:1px solid #e5ebf3;border-radius:9px;padding:7px 9px;font-size:9.5px;color:#64748b;display:flex;justify-content:space-between;gap:8px}
+.gate b{color:#0f172a}
+.insight-main{background:#fff;border:1px solid #dbe7ff;border-radius:11px;padding:10px}
+.insight-main .label{font-size:9px;color:var(--blue);font-weight:800}
+.insight-main .title{font-size:12.5px;font-weight:800;margin:3px 0}
+.insight-main .meta-line{font-size:9.5px;color:#64748b}
+.evidence{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.evidence span{font-size:9px;border:1px solid #e5ebf3;background:#f8fafc;border-radius:999px;padding:1px 6px;color:#475569}
+.evidence span.no{border-color:#fbd5da;background:#fff1f2;color:#be123c}
+.evidence span.ok{border-color:#cfe9d7;background:#f0fdf4;color:#15803d}
+.list-mock{background:#fff;border:1px solid #e5ebf3;border-radius:11px;padding:7px 9px}
+.list-row{display:flex;justify-content:space-between;gap:8px;font-size:9.5px;color:#475569;border-bottom:1px dashed #eef2f7;padding:6px 0}
+.list-row:last-child{border-bottom:0}
+.list-row b{font-size:10px;color:#0f172a}
+.tag-mock{font-size:8.5px;border-radius:999px;padding:1px 6px;white-space:nowrap;background:#eef2f7;color:#475569}
+.tag-mock.up{background:#fee2e2;color:#b91c1c}.tag-mock.down{background:#dcfce7;color:#15803d}
+.tag-mock.blue{background:#e6efff;color:#0b5fff}.tag-mock.amber{background:#fff4e6;color:#b45309}
+.graph-card{margin:18px 0;background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:var(--shadow)}
+.graph-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}
+.graph-head h3{margin:0 0 3px;font-size:16px}
+.graph-head p{margin:0;color:var(--muted);font-size:12px}
+.pill{flex:0 0 auto;font-size:10.5px;font-weight:700;color:var(--blue);background:var(--blue-soft);border:1px solid #cfdfff;border-radius:999px;padding:3px 9px}
+.svg-wrap{overflow-x:auto;border:1px solid #eef2f7;border-radius:12px;background:#fcfdff;padding:4px}
+.arch-graph svg{display:block;width:100%;min-width:1240px;height:auto;font-family:inherit}
+.graph-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:10.5px;color:#64748b}
+.graph-legend i{display:inline-block;width:18px;border-top:2px solid var(--blue);vertical-align:middle;margin-right:4px}
+.graph-legend i.teal{border-color:var(--teal)}.graph-legend i.violet{border-color:var(--violet);border-top-style:dashed}
+.graph-legend i.gray{border-color:#94a3b8;border-top-style:dashed}
+.tool-line,.common-line{font-size:12px;color:#475569;margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0}
+.tool-line b,.common-line b{color:#0f172a}
+.common-line .em{color:var(--blue)}
+.steps{margin:14px 0 0;padding:0;list-style:none;counter-reset:step}
+.steps li{position:relative;padding:8px 0 8px 38px;font-size:13.5px;color:#334155;border-bottom:1px dashed #eef2f7}
+.steps li:last-child{border-bottom:0}
+.steps li:before{counter-increment:step;content:counter(step);position:absolute;left:0;top:9px;width:24px;height:24px;border-radius:8px;background:var(--blue-soft);color:var(--blue);font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center}
+.delta{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
+.delta>div{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.delta h4{margin:0 0 5px;font-size:12px;letter-spacing:.04em;color:#475569}
+.delta p{margin:0;font-size:12.5px;color:#334155}
+.caveat{background:#fff7ed;border:1px solid #fed7aa;border-left:4px solid #f97316;border-radius:12px;padding:13px 15px;margin:14px 0;font-size:13px;color:#9a3412}
+.caveat b{color:#7c2d12}
+.mock-col{display:flex;flex-direction:column;gap:6px;min-width:0}
+.mock-cap{font-size:12px;font-weight:800;color:#475569;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.mock-cap em{font-style:normal;color:var(--blue);font-weight:700;font-size:11px;background:var(--blue-soft);border:1px solid #cfdfff;border-radius:999px;padding:1px 7px;white-space:nowrap}
+.mock-cap.warn em{color:var(--rose);background:#fff1f2;border-color:#fbd5da}
+.timeline{width:100%;border-collapse:collapse;margin-top:14px;font-size:12.5px;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.timeline th,.timeline td{border-bottom:1px solid #edf1f7;padding:9px 10px;text-align:left;vertical-align:top}
+.timeline th{background:#f1f5f9;color:#475569;white-space:nowrap}
+.timeline tr:last-child td{border-bottom:0}
+.timeline td:first-child{white-space:nowrap;font-weight:700;color:#0f172a}
+.nt{display:inline-block;font-size:10.5px;font-weight:700;border-radius:6px;padding:1px 5px;margin:1px 2px;background:#eef2f7;color:#475569}
+.nt.gp{background:#e8f1ff;color:#0b5fff}.nt.gr{background:var(--teal-soft);color:var(--teal)}
+.nt.gj{background:#fff4e6;color:#b45309}.nt.gc{background:#f3ebff;color:var(--violet)}
+.nt.ge{background:#eaf7ee;color:var(--green)}.nt.go{background:#fff1f2;color:var(--rose)}
+.nt.mem{background:#f1f5f9;color:#475569;border:1px dashed #cbd5e1}
+.table-scroll{overflow-x:auto}
+.foot{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:#94a3b8}
+@media(max-width:1000px){.compare,.delta{grid-template-columns:1fr}.dict-grid{grid-template-columns:repeat(2,minmax(0,1fr))}h1{font-size:27px}}
+</style>
+</head>
+<body>
+<svg class="marker-defs" width="0" height="0" aria-hidden="true">
+  <defs>
+    <marker id="mk-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#0b5fff"/></marker>
+    <marker id="mk-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#0f766e"/></marker>
+    <marker id="mk-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#7c3aed"/></marker>
+    <marker id="mk-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#94a3b8"/></marker>
+  </defs>
+</svg>
+<nav class="toc"><div class="toc-inner">
+  <a href="#how">01 怎么读</a><a href="#layers">01B 九层白话</a><a href="#home">02 首页 · 早点听</a><a href="#chat">03 AI 对话</a>
+  <a href="#stock">04 个股详情</a><a href="#pick">05 选股</a><a href="#alert">06 提醒</a>
+  <a href="#day">07 一天传导</a><a href="#trace">08 大盘溯源</a><a href="#fix">09 修正与缺口</a><a href="#agent">10 Agent 改进</a>
+</div></nav>
+<main class="wrap">
+<header class="hero">
+  <div class="kicker">AI Stock · 智慧大脑</div>
+  <h1>功能链路对照 · 真实节点版</h1>
+  <p class="lead">上一版用的是“前端 / 主图 / 感知层 / 研究层 / 研判层 / 出口”六列泛化参与者，所以看不出和设计图的关系。这一版把每个功能换成设计图 v1.3 里的真实节点：只画该功能实际涉及的节点，六张图共用同一套泳道和记忆位，方便横向找共性。</p>
+  <div class="meta"><span>设计图 v1.3</span><span>契约 v0.5</span><span>代码核对 2026-11-22</span><span>只改文档，不改业务代码</span></div>
+</header>
+
+<section class="sec" id="how">
+  <div class="sec-head"><div class="num">01</div><div><h2>怎么读：六张图共用一条骨架</h2><p>先看骨架，再看每个功能站在骨架的哪一段；每张图里没出现的节点，表示这次不参与。</p></div></div>
+  <div class="panel pad">
+    <div class="skeleton">
+      <span class="sk gt">T* 触发</span><i>→</i><span class="sk o1">O1 编排</span><i>→</i>
+      <span class="sk gp">P* 感知</span><i>→</i><span class="sk mem">M1 证据</span><i>→</i>
+      <span class="sk gr">R* 研究</span><i>→</i><span class="sk mem">M2 论点</span><i>→</i>
+      <span class="sk gj">J1/J2</span><i>→</i><span class="sk gj">J3</span><i>→</i><span class="sk gj">J4</span><i>→</i>
+      <span class="sk mem">M3 研判</span><i>→</i><span class="sk ge">E* 表达</span><i>→</i><span class="sk go">U* 出口</span>
+    </div>
+    <div class="side-notes"><span><b class="violet">C1 → J4</b> 校准回灌</span><span><b class="slate">GX 工具带</b> 供 P/R 取数，app-api 是唯一数据 owner</span><span><b class="slate">M4-M6</b> 方法 / 图谱 / 治理，不在每条链路都出现</span></div>
+    <div class="side-notes" style="margin-top:6px"><span><b class="violet">执行形态</b> 下表的 R1-R8 是能力域；运行时收敛为 <b>R5 主控 + R2/R3/R4/R7/R8 子 agent + R1/R6 确定性计算</b>。每档 2 个必查 probe 保底，其余由 R5 按已有证据加查。详见设计图「③ 执行：规则层 + 研究层」与契约 §1.1 / §5.4。</span></div>
+    <div class="legend">
+      <span><i class="line"></i>蓝 = 主链路</span><span><i class="line teal"></i>青 = 研究层联动（板块⇄个股）</span>
+      <span><i class="line violet"></i>紫 = C1 校准</span><span><i class="line gray"></i>灰虚线 = 读写账本</span>
+      <span><i class="badge-demo">1·2</i>节点右上角 = 它读写哪本账（1=M1，2=M2，3=M3，5=M5）</span>
+    </div>
+    <table class="matrix">
+      <thead><tr><th>功能</th><th>触发</th><th>感知</th><th>研究</th><th>研判</th><th>出口</th><th>本功能特有</th></tr></thead>
+      <tbody>
+        <tr><td>首页 · 早点听</td><td>T1 / T3</td><td>P1 P2 P3</td><td>R2 R3 R5 R6</td><td>J1-J4 + C1</td><td>E1 → U1 / U4</td><td>四宫格是四个 claim 的投影；三时段只换 slot</td></tr>
+        <tr><td>AI 对话</td><td>T3</td><td>P1-P4</td><td>R1-R8</td><td>J1-J4 + C1</td><td>E4 → U5</td><td>按意图扇出；科普 / 纯概念可只走 E4 轻档</td></tr>
+        <tr><td>个股详情</td><td>T3</td><td>P1 P2 P3</td><td>R1 R2 R3 R5 R4</td><td>J1-J4 + C1</td><td>E2 → U2</td><td>综合洞见收敛为唯一 judgment</td></tr>
+        <tr><td>选股</td><td>T3</td><td>P1 P2 P3</td><td>R1 R2 R5 R4</td><td>J1-J4 + C1</td><td>E5 → U6</td><td>四个 Tab 只是排序偏好，不是四套模型</td></tr>
+        <tr><td>提醒</td><td>T1 T2 T3</td><td>P1 P2</td><td>R2 R3 R5</td><td>J1-J4 + C1</td><td>E3 → U4</td><td>只推变化 / 失效 / 高置信机会</td></tr>
+        <tr><td>大盘溯源</td><td>T1 / T3</td><td>P1 P2 P3</td><td>R1 R2 R3 R6</td><td>J1-J4 + C1</td><td>E1 → U1（下钻）</td><td>复盘是收盘后的 review 视图；主因 / 备选 / 被否 / 次日验证同源</td></tr>
+      </tbody>
+    </table>
+    <details class="node-dict">
+      <summary>展开节点字典（40 个功能节点 + 9 个泳道容器 = 设计图 v1.3 的 49 个节点）</summary>
+      <div class="dict-grid">
+        <div class="dict-item"><b>T1</b><code>time_trigger</code><span>时段触发：盘前/盘中/盘后/夜间</span></div>
+        <div class="dict-item"><b>T2</b><code>event_trigger</code><span>事件触发：新增事件/异动/失效条件</span></div>
+        <div class="dict-item"><b>T3</b><code>user_request</code><span>用户请求：页面/对话/手动刷新</span></div>
+        <div class="dict-item"><b>T4</b><code>verify_trigger</code><span>验证触发：due + 3 个交易日</span></div>
+        <div class="dict-item"><b>O1</b><code>run_orchestrator</code><span>选择运行档位/预算/并行扇出</span></div>
+        <div class="dict-item"><b>P1</b><code>market_perception</code><span>行情/指数/资金/板块/情绪快照</span></div>
+        <div class="dict-item"><b>P2</b><code>event_perception</code><span>新闻/公告/研报/事件 → 统一实体</span></div>
+        <div class="dict-item"><b>P3</b><code>entity_perception</code><span>实体链接/板块归属/产业链</span></div>
+        <div class="dict-item"><b>P4</b><code>user_perception</code><span>自选/持仓/画像/历史偏好</span></div>
+        <div class="dict-item"><b>R1</b><code>trend_research</code><span>确定性计算工具：趋势/支撑/压力</span></div>
+        <div class="dict-item"><b>R2</b><code>wind_research</code><span>子 agent：风口龙头/板块轮动</span></div>
+        <div class="dict-item"><b>R3</b><code>event_research</code><span>子 agent：事件传导/存活度</span></div>
+        <div class="dict-item"><b>R4</b><code>fundamental_research</code><span>子 agent：业绩/预测/机构调研</span></div>
+        <div class="dict-item"><b>R5</b><code>insight_research</code><span>研究层主控（lead agent）：异动归因/溯源</span></div>
+        <div class="dict-item"><b>R6</b><code>rhythm_research</code><span>确定性计算工具：仓位/情绪</span></div>
+        <div class="dict-item"><b>J1</b><code>bull_advocate</code><span>多头辩护：列出看多证据</span></div>
+        <div class="dict-item"><b>J2</b><code>bear_advocate</code><span>空头辩护：列出看空证据</span></div>
+        <div class="dict-item"><b>J3</b><code>conflict_resolver</code><span>冲突消解/主次/取舍</span></div>
+        <div class="dict-item"><b>J4</b><code>judgment_writer</code><span>direction/confidence/verify_at</span></div>
+        <div class="dict-item"><b>C1</b><code>calibrator</code><span>校准置信/权重</span></div>
+        <div class="dict-item"><b>C2</b><code>verifier</code><span>due+3 验证</span></div>
+        <div class="dict-item"><b>C3</b><code>method_evolver</code><span>方法/失败模式</span></div>
+        <div class="dict-item"><b>E1</b><code>briefing_writer</code><span>晨/午/晚三 slot</span></div>
+        <div class="dict-item"><b>E2</b><code>stock_view_writer</code><span>个股页/事件页</span></div>
+        <div class="dict-item"><b>E3</b><code>push_dispatcher</code><span>异动/失效推送</span></div>
+        <div class="dict-item"><b>E4</b><code>chat_responder</code><span>对话只读账本</span></div>
+        <div class="dict-item"><b>E5</b><code>pick_view_writer</code><span>选股榜单 / 筛选 / 信号 / 推荐</span></div>
+        <div class="dict-item"><b>U1</b><code>home_conclusion</code><span>App 首页 · 今日结论（含大盘溯源下钻）</span></div>
+        <div class="dict-item"><b>U2</b><code>stock_view</code><span>个股页 · 研判卡</span></div>
+        <div class="dict-item"><b>U3</b><code>event_view</code><span>事件页 · 事件研判</span></div>
+        <div class="dict-item"><b>U4</b><code>broadcast_push</code><span>播报 / 推送</span></div>
+        <div class="dict-item"><b>U5</b><code>chat_view</code><span>对话（只读账本）</span></div>
+        <div class="dict-item"><b>U6</b><code>pick_view</code><span>选股页 · 四个子 Tab</span></div>
+        <div class="dict-item"><b>M1</b><code>evidence_ledger</code><span>evidence/claims/conflicts</span></div>
+        <div class="dict-item"><b>M2</b><code>claim_graph</code><span>claim→evidence，invalidated_by</span></div>
+        <div class="dict-item"><b>M3</b><code>judgment_ledger</code><span>judgment_id / 版本 / 验证结果</span></div>
+        <div class="dict-item"><b>M4</b><code>method_library</code><span>方法与失败模式库</span></div>
+        <div class="dict-item"><b>M5</b><code>knowledge_graph</code><span>知识图谱 &amp; 向量库</span></div>
+        <div class="dict-item"><b>M6</b><code>governance</code><span>治理指标</span></div>
+        <div class="dict-item"><b>TOOL</b><code>toolbelt</code><span>24 个 LangChain StructuredTool</span></div>
+        <div class="dict-item"><b>GT/GP/GR/GJ/GC/GE/GO</b><code>lanes</code><span>7 条纵向泳道</span></div>
+        <div class="dict-item"><b>GM / GX</b><code>bands</code><span>记忆/治理带、工具带</span></div>
+      </div>
+    </details>
+
+    <h3 id="layers" style="margin:26px 0 6px;font-size:17px">九层到底各干什么：用大白话说一遍</h3>
+    <p style="margin:0 0 12px;color:#8fa3c0;line-height:1.75;font-size:13px">这里的“9 层”不是 9 个部门、也不是 9 套服务，而是<b>同一条流水线上的 7 道工序 + 2 个全厂共享设施</b>。7 道工序是 GT → GP → GR → GJ → GC → GE → GO；2 个共享设施是底部的 GM（台账）和左下的 GX（工具箱）。</p>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th>层</th><th>大白话：它负责什么</th><th>上游从哪来</th><th>下游给谁</th><th>一句话记住</th></tr></thead>
+        <tbody>
+          <tr><td><b>GT 触发</b></td><td>决定“什么时候、因为什么跑一次”：到点（早/午/晚）、出事（异动/新闻/失效）、用户点了、账本到期要复查。</td><td>定时器 / 事件流 / 前端 / M3 的复查时间</td><td>O1 编排</td><td>门铃：不负责分析，只负责叫人</td></tr>
+          <tr><td><b>GP 感知</b></td><td>把原始世界搬进来，并且只搬一次：行情、资金、指数、新闻、公告、研报、实体归属、用户自选与持仓，全部变成带来源的证据。</td><td>O1 派活</td><td>M1 证据账本</td><td>采购员：按清单买齐，记清从哪买的</td></tr>
+          <tr><td><b>GR 研究</b></td><td>六条研究线各算各的：趋势、风口/板块、事件传导、基本面、个股异动归因、节奏情绪。它们允许互相矛盾，也会互相修正（板块强会改个股结论，龙头异动也会反过来改板块强弱）。</td><td>M1 的证据切片</td><td>M2 论点账本</td><td>六个分析师：各写各的论点，不许互相抄结论</td></tr>
+          <tr><td><b>GJ 研判</b></td><td>把六个分析师关进一个会议室：J1 说看多理由，J2 专门唱反调并给失效条件，J3 消解冲突、该降权就降权，J4 写下一份最终结论（方向 / 置信度 / 什么时候复查）。</td><td>M2 的论点 + C1 的校准先验</td><td>M3 研判账本</td><td>投委会：只出一份纪要，但反方意见必须留档</td></tr>
+          <tr><td><b>GC 校准</b></td><td>负责“越用越准”：C1 用历史命中率校准今天的置信度；C2 到期（due + 3）拿真实行情回填命中/未命中；C3 把错误样本归纳成方法版本，写进方法库，再回灌研究。</td><td>M3 的历史研判</td><td>J4（先验）、M4（方法版本）</td><td>质检 + 复盘：不生产结论，只修正生产结论的方法</td></tr>
+          <tr><td><b>GE 表达</b></td><td>把同一份结论换几种说法：播报扩写成叙述、个股页写成研判卡、推送只写变化、对话写成带引用的回答、选股写成榜单。可以换语气，不许加新结论。</td><td>M3 的 judgment</td><td>GO 出口</td><td>翻译 + 排版：同一份原文，出五个版本</td></tr>
+          <tr><td><b>GO 出口</b></td><td>用户真正看到的六个地方：首页结论、个股页、事件页、播报/推送、对话、选股页。只渲染，不推理；页面上每个结论都能点回 judgment 和证据。</td><td>GE 渲染结果 / M3 只读投影</td><td>用户</td><td>柜台：只负责把货摆出来，不负责生产</td></tr>
+          <tr><td><b>GM 记忆 / 治理</b></td><td>六本共享台账：M1 证据、M2 论点、M3 研判、M4 方法、M5 知识图谱与研报、M6 治理指标。任何一层都能按需读切片、写新增，谁也不能私藏一份自己的数据。</td><td>所有层的写入</td><td>所有层的读取</td><td>共享台账：全厂只有一本账，不是每人一个 Excel</td></tr>
+          <tr><td><b>GX 工具带</b></td><td>24 个 LangChain 工具，把 app-api 的能力包成统一形状（数据 + 来源 + 质量 + 错误）。Agent 不直连外部数据源，也不允许“查不到就当 0”。</td><td>P / R 节点的调用</td><td>P / R 节点</td><td>公共工具箱：水电煤统一接，不许私拉电线</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin:12px 0 4px;line-height:1.8;font-size:13px"><b>它们怎么联系？</b>记一条竖线、两条横带就够了：竖线是 <span class="em">T → O1 → P → M1 → R → M2 → J → M3 → E → U</span>，一条业务从按门铃到上柜台；两条横带是 GM 和 GX，横穿所有工序。再记三句话：<b>数据只取一次</b>（P 写 M1，后面都读）、<b>结论只写一次</b>（J4 写 M3，全站引用同一个 judgment_id）、<b>出口只渲染</b>（E/U 不重新分析）。</p>
+    <p style="margin:0;color:#8fa3c0;line-height:1.75;font-size:12.5px">所以“9 层”不是把系统切碎，而是把一件事情的 responsibility 摆清楚：谁取数、谁研究、谁拍板、谁质检、谁说话、谁给用户看。同一张 LangGraph 里，不同功能只是启动不同的节点子集。</p>
+  </div>
+</section>
+<section class="sec" id="home">
+  <div class="sec-head"><div class="num">02</div><div><h2>首页 · 早点听</h2><p>页面形状（今日专属播报 + 四宫格）保持不变。变的只有一件事：四个格子不再各算一套，而是同一份证据与研判的四个投影。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>顶部“今日专属”播报</b>：<code>MorningContent.vue</code> 的 <code>useBriefingCard()</code> 调 <code>agentApi.getBriefing(slot, date)</code>；<code>BriefingSlot = 'pre' | 'mid' | 'post'</code>（<code>shared/types/briefing.ts</code>），三档共用 <code>briefing.v1</code> 信封。降级时显示“证据不完整”并列出 <code>missing_sources</code>。</li>
+        <li><b>市场洞见</b>：<code>agentApi.getRecentTradingDays(today, 3)</code> + <code>agentApi.getMarketTraceReview(date)</code>，副标题“市场异动溯源分析”。</li>
+        <li><b>消息洞见</b>：<code>getEventList({ page: 1, pageSize: 5 })</code>，卡片只渲染前 3 条，副标题“产业链追踪”。</li>
+        <li><b>风口洞见</b>：<code>stockApi.getWindLeaders(20)</code>，前端把双榜合并、筛 <code>cycle</code> 后按 <code>freq20</code> 取前 3，副标题“排行前三板块”。</li>
+        <li><b>节奏洞见</b>：<code>agentApi.getRhythmMasterCalendar(HOME_RHYTHM_DAYS)</code>，每行是仓位建议 + 档位色块，副标题“近 N 日 · 收盘基准”。</li>
+        <li><b>现状</b>：四个格子各自取数、各自生成标签；隐藏中的 <code>DynamicInsightCard</code>（<code>v-if="false"</code>）取数与跳转逻辑保留，但当前不参与渲染。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 四个格子各拉各的</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>早点听</span><span>100%</span></div>
+          <div class="screen">
+            <div class="briefing-mock">
+              <div class="bm-title"><span>今日专属 · 晨报</span><span class="mini-tag">brief</span></div>
+              <div class="bm-sub">3 条关键线索需关注</div>
+              <div class="chips"><span>算力</span><span>机器人</span><span>降息</span></div>
+            </div>
+            <div class="grid2">
+              <div class="mini-card"><b>市场洞见</b><small>市场异动溯源分析</small>
+                <div class="row"><span>沪指缩量</span><em>异动</em></div>
+                <div class="row"><span>两融回升</span><em>资金</em></div>
+              </div>
+              <div class="mini-card"><b>消息洞见</b><small>产业链追踪</small>
+                <div class="row"><span>算力招标</span><em class="up">利好</em></div>
+                <div class="row"><span>锂价下调</span><em class="down">利空</em></div>
+              </div>
+              <div class="mini-card"><b>风口洞见</b><small>排行前三板块</small>
+                <div class="row"><span>No.1 算力</span><em class="up">+4.2%</em></div>
+                <div class="row"><span>No.2 机器人</span><em class="up">+3.1%</em></div>
+              </div>
+              <div class="mini-card"><b>节奏洞见</b><small>近 5 日 · 收盘基准</small>
+                <div class="row"><span>11-21</span><em>六成</em></div>
+                <div class="row"><span>11-20</span><em>五成</em></div>
+              </div>
+            </div>
+            <div class="phone-note"><b>问题：</b>四个接口各算一套；播报只读 brief，页面和播报可能给出不同结论。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 同一份研判的四个投影</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>早点听</span><span>100%</span></div>
+          <div class="screen">
+            <div class="briefing-mock ok">
+              <div class="bm-title"><span>今日专属 · 晨报</span><span class="mini-tag">judgment #82</span></div>
+              <div class="bm-sub">3 条关键线索需关注</div>
+              <div class="chips"><span>算力</span><span>机器人</span><span>降息</span></div>
+            </div>
+            <div class="grid2">
+              <div class="mini-card"><b>市场洞见</b><small>R5 归因 · claim 投影</small>
+                <div class="row"><span>沪指缩量</span><em>大盘带的</em></div>
+                <div class="row"><span>两融回升</span><em>证据 12</em></div>
+              </div>
+              <div class="mini-card"><b>消息洞见</b><small>R3 传导 · claim 投影</small>
+                <div class="row"><span>算力招标</span><em class="up">A 级</em></div>
+                <div class="row"><span>锂价下调</span><em class="down">已衰减</em></div>
+              </div>
+              <div class="mini-card"><b>风口洞见</b><small>R2 板块 · claim 投影</small>
+                <div class="row"><span>No.1 算力</span><em>置信 0.72</em></div>
+                <div class="row"><span>No.2 机器人</span><em>置信 0.64</em></div>
+              </div>
+              <div class="mini-card"><b>节奏洞见</b><small>R6 仓位 · claim 投影</small>
+                <div class="row"><span>11-21</span><em>六成</em></div>
+                <div class="row"><span>11-20</span><em>五成</em></div>
+              </div>
+            </div>
+            <div class="phone-note"><b>页面没改版：</b>每张卡多了来源节点与失效条件；播报和卡片引用同一个 <code>judgment_id</code>。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · 首页</h3><p>只画本功能涉及的节点；同一 ID 在六张图里的纵向位置完全一致，方便横向比对。</p></div><span class="pill">18 个功能节点 + 3 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="home"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>节点右上徽标 = 该节点读写的账本（1=M1，2=M2，3=M3，5=M5）</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · flow · market · rotation · wind · news · announcement · research · graph · fear_greed · calendar · trace · audio · push</div>
+      <div class="common-line"><b>与总图的共性：</b><span class="em">T* → O1 → P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3 → E* → U*</span>。本图就是这条骨架在“首页”上的子集，一段不多、一段不少。</div>
+      <div class="common-line"><b>本功能特有：</b>四个格子只是 <span class="nt gr">R2</span><span class="nt gr">R3</span><span class="nt gr">R5</span><span class="nt gr">R6</span> 四条 claim 的投影；<span class="nt ge">E1</span> 用 <code>slot=pre/mid/post</code> 复用同一个出口，<span class="nt go">U1</span> 与 <span class="nt go">U4</span> 都读同一个 <code>judgment_id</code>。</div>
+    </div>
+
+    <ol class="steps">
+      <li><b>T1 / T3 触发。</b>盘前 06:30 定时触发（T1），或用户下拉刷新 / 打开首页（T3），都进同一个 <code>O1</code>。</li>
+      <li><b>O1 选档位。</b>晨间走全量档；用户手动刷新走增量档；预算与并行分支在这一步定，不再由 supervisor 单次路由。</li>
+      <li><b>P1 / P2 / P3 只取一次。</b>P1 取行情、资金、板块快照；P2 取新闻 / 公告 / 研报并合成事件主记录；P3 把事件挂到实体、板块、产业链。三份证据都写进 M1。</li>
+      <li><b>R2 / R3 / R5 / R6 各出 claim。</b>R2 先读市场基调再判板块热度与龙头；R3 出传导链与存活度；R5 判断异动是“大盘带的、板块带的、还是个股自己的事”；R6 出仓位 claim。四条 claim 写进 M2。</li>
+      <li><b>J1 / J2 / J3 / J4。</b>多方列证据、空方至少给 1 条反证或失效条件、J3 显式保留分歧，J4 落唯一 judgment；C1 用历史命中率给置信度先验，回灌 J4。</li>
+      <li><b>E1 → U1 / U4。</b>E1 按 slot 把同一个 <code>judgment_id</code> 扩写成播报（pre/mid/post 共用 <code>briefing.v1</code>）；U1 渲染四宫格，U4 出音频与推送。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>市场 / 消息 / 风口 / 节奏各调一个接口；标签由前端按字段拼；播报只读 brief。四个格子之间没有共享证据。</p></div>
+      <div><h4>现在</h4><p>四个格子是 M1/M2 的四个投影；每个标签背后是一条带 <code>evidence_id</code> 的 claim；播报读 M3 的 <code>judgment_id</code>。</p></div>
+      <div><h4>页面变化</h4><p>布局、文案、跳转都不变；卡片增加“来源节点 / 失效条件 / 证据条数”；<code>degraded</code> 从“证据不完整”细化为“哪本账缺证据”。</p></div>
+    </div>
+  </div>
+</section>
+<section class="sec" id="chat">
+  <div class="sec-head"><div class="num">03</div><div><h2>AI 对话</h2><p>对话形态不改造：还是问答 + 卡片 + 推理过程 + 深度分析 + 追问。变的只是“回答从哪来”——从某一个 worker 自己算，变成读同一本账。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>前端</b>：<code>aistock-app-frontend/src/pages-sub-app/chat/index.vue</code>，支持大盘 / 个股 / 资金 / 对比 / 新闻 / 科普等问法；有 <code>ReasoningPanel</code>（推理过程）、<code>CardRenderer</code>（结构化卡片）、<code>DeepSummaryCard</code>（深度总结）、token 用量、深度分析入口、追问。</li>
+        <li><b>后端现状</b>：<code>aistock-agent-py</code> 是 LangGraph <code>StateGraph</code>，<code>START → supervisor → intent_router</code>，路由到 10 个可路由 worker：<code>morning / stock / sector / event / wind_leader / broadcast / general / hot_burst / alert / trend_score</code>，执行后直接 <code>END</code>。</li>
+        <li><b>另有 5 个仅调度 worker</b>：<code>review / rhythm_master / midday / midday_broadcast / iterate</code>，不在对话路由表里。</li>
+        <li><b>关键限制</b>：一次对话只进一个 worker，worker 之间不共享 evidence / judgment；同一个问题问两次、或换个入口问，可能得到两套口径。</li>
+        <li><b>没有的东西</b>：当前没有“固定四段式回答”这种实现；目标 <code>E4</code> 也不规定回答结构，只规定“必须引用 <code>judgment_id</code> / <code>evidence_id</code>”。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 一次问答只走一个 worker</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>AI 投顾</span><span>100%</span></div>
+          <div class="screen">
+            <div class="gate"><b>你：</b><span>算力和机器人今天还能追吗？</span></div>
+            <div class="list-mock">
+              <div class="list-row"><b>推理</b><span>已选 wind_leader</span></div>
+              <div class="list-row"><b>回答</b><span>板块强度靠前，注意回撤</span></div>
+              <div class="list-row"><b>卡片</b><span>板块榜 3 条</span></div>
+            </div>
+            <div class="phone-note"><b>问题：</b>只走风口这一条线，没读事件存活度与个股归因；换个入口问，结论可能不一样。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 按意图扇出，回答带引用</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>AI 投顾</span><span>100%</span></div>
+          <div class="screen">
+            <div class="gate"><b>你：</b><span>算力和机器人今天还能追吗？</span></div>
+            <div class="insight-main">
+              <div class="label">引用 judgment #82 · 置信 0.71</div>
+              <div class="title">板块仍强，但只剩龙头有性价比</div>
+              <div class="meta-line">复查时间 11-25 · 失效条件：成交额跌破 5 日均量</div>
+              <div class="evidence"><span class="ok">R2 板块 claim</span><span class="ok">R3 存活度</span><span>R5 归因</span><span class="no">反方 1 条</span></div>
+            </div>
+            <div class="list-mock">
+              <div class="list-row"><b>推理</b><span>3 个研究子图并行</span></div>
+              <div class="list-row"><b>追问</b><span>为什么给机器人降权？</span></div>
+            </div>
+            <div class="phone-note"><b>对话形状没变：</b>多的是可点开的引用条；追问沿 claim → evidence 展开，不是重新编一段。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · AI 对话</h3><p>这是六张图里节点最全的一张：对话可以按意图触及任意研究子图，但每个子图仍然只写自己那类 claim。</p></div><span class="pill">19 个功能节点 + 4 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="chat"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>M5 只在这一张与个股详情里出现</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · kline · flow · market · news · announcement · research · forecast · institution · graph · event_entity · profile · trace · prediction</div>
+      <div class="common-line"><b>与总图的共性：</b>同样走 <span class="em">O1 → P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3</span>，只是出口换成 <span class="nt ge">E4</span> → <span class="nt go">U5</span>；<code>E4</code> 不产生新结论，只读账本。</div>
+      <div class="common-line"><b>本功能特有：</b>多一个 <span class="nt gp">P4</span>（自选 / 持仓 / 画像进入同一次 run）；多一本 <span class="nt mem">M5</span>（R4 读研报与实体）。科普 / 纯概念问题由 O1 判为轻档，只走 E4，不启动研究子图——这是唯一允许跳过 R/J 的合法路径。</div>
+    </div>
+
+    <ol class="steps">
+      <li><b>T3 用户提问。</b>问题带 subject（个股 / 板块 / 事件 / 大盘）和意图，统一进 O1，不再由前端决定调哪个接口。</li>
+      <li><b>O1 判档位。</b>“什么是市盈率”这类纯概念问题 → 轻档，直接 E4；“算力还能追吗” → 重档，扇出多个研究子图；“帮我看看宁德时代” → 个股档。</li>
+      <li><b>P1-P4 并行取证据。</b>P4 把自选、持仓、历史偏好带进同一次 run，让回答带用户上下文；四份证据统一写 M1。</li>
+      <li><b>R1-R8 按需并行。</b>板块问题会同时读 R2（板块热度）与 R3（事件存活度）；个股问题会加 R1 趋势、R5 归因、R7 资金；R4 通过 M5 读研报与实体，R8 提供环境松紧。子图之间用 claim 互相校验，不各说各话。</li>
+      <li><b>M2 → J1/J2/J3/J4。</b>多方与反方都从 claim 出发，J3 显式记录分歧，J4 落唯一 judgment；C1 用历史命中率校准置信度。</li>
+      <li><b>E4 → U5。</b>E4 只读 M3 / M2 投影组织回答，必须带 <code>judgment_id</code> 与 <code>evidence_id</code>；U5 渲染回答、引用条、追问入口。用户要新结论，就回写账本，而不是在对话里现编。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>一次问答只进一个 worker，10 选 1；worker 之间不共享证据；回答与页面结论可能不同源。</p></div>
+      <div><h4>现在</h4><p>一次 run 可并行多个研究子图；回答引用同一本账；新结论必须回写 M3 才能对外说。</p></div>
+      <div><h4>页面变化</h4><p>对话外观不变；新增引用条（可展开 claim → evidence）、结论版本号、失效条件；深度分析变成“展开证据链”，不是一个更长的段落。</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="stock">
+  <div class="sec-head"><div class="num">04</div><div><h2>个股详情</h2><p>“综合洞见”现在是前端 computed 拼出来的。改后它才第一次成为后端唯一 judgment，其余数据降级为证据附件。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>组件</b>：<code>aistock-app-frontend/src/modules/favorites/pages/detail.vue</code>，进入页面并发调用 <code>getQuote</code>、<code>getStockNews</code>、<code>getStockInfos</code>、<code>getStockEvents</code>、<code>getCapitalFlow</code>、<code>getSemiAnnualReport</code>、<code>getKLine</code>、<code>getTrendScore</code> / <code>refreshTrendScore</code>、<code>getIndustryHealth</code>、<code>getMidLongAnalysis</code> / <code>createMidLongAnalysis</code>、<code>getStockAnalysisHistory</code> / <code>getStockAnalysis</code> / <code>createStockAnalysis</code>、<code>createForecast</code>。</li>
+        <li><b>“综合洞见”不是后端接口</b>：它是前端 computed 链 <code>legacyOverallDecision</code> → <code>overallDecision</code> → <code>decisionInsight</code>，把短 / 中 / 长线信号（AI 分析、异动、资金、业绩预测、半年报、趋势评分）按固定规则拼成 summary + 机会 / 风险。</li>
+        <li><b>“AI 资讯洞见”</b>是短线视图里的 <code>getStockAnalysis</code>，与“综合洞见”是两套东西。</li>
+        <li><b>“最新重大异动”</b>只是事件列表展示，本身不产出结论。</li>
+        <li><b>现状问题</b>：同一只票，综合洞见、AI 资讯洞见、异动卡可能给出三个方向；哪一条对，用户无法判断。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 前端把多源信号拼成一段</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>宁德时代</span><span>100%</span></div>
+          <div class="screen">
+            <div class="insight-main">
+              <div class="label">综合洞见 · 前端 computed</div>
+              <div class="title">短线偏强，中线需观察，长线趋势向好</div>
+              <div class="meta-line">由 6 类信号按固定规则拼装</div>
+              <div class="evidence"><span>AI 分析</span><span>资金</span><span>业绩预测</span><span>趋势评分</span></div>
+            </div>
+            <div class="list-mock">
+              <div class="list-row"><b>AI 资讯洞见</b><span>偏多 · 另一套结论</span></div>
+              <div class="list-row"><b>最新重大异动</b><span>事件 2 条 · 无结论</span></div>
+            </div>
+            <div class="phone-note"><b>问题：</b>“综合洞见”和“AI 资讯洞见”各说各的；没有反方，没有失效条件，没有复查时间。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 一个 judgment + 证据附件</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>宁德时代</span><span>100%</span></div>
+          <div class="screen">
+            <div class="insight-main">
+              <div class="label">研判卡 · judgment #118 · 置信 0.68</div>
+              <div class="title">震荡偏强：板块带的，不是个股独立行情</div>
+              <div class="meta-line">复查 11-25 · 失效：跌破 20 日线且资金转出</div>
+              <div class="evidence"><span class="ok">R2 板块</span><span class="ok">R5 归因</span><span>R1 趋势</span><span class="no">反方：机构下调</span></div>
+            </div>
+            <div class="list-mock">
+              <div class="list-row"><b>证据附件</b><span>K 线 / 资金 / 财报 / 预测</span></div>
+              <div class="list-row"><b>事件</b><span>2 条 · 已挂 claim</span></div>
+            </div>
+            <div class="phone-note"><b>页面变化：</b>首屏先给方向、置信度、反方、失效条件；原来的图表改为“证据”折叠区，不再各自下结论。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · 个股详情</h3><p>与对话共用同一骨架，但研究层固定在个股相关子图；R5 是收口点，负责判断“谁带的”。</p></div><span class="pill">17 个功能节点 + 4 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="stock"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>R4 通过 M5 读研报 / 实体</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · kline · flow · trend · wind · news · announcement · research · forecast · institution · graph · trace</div>
+      <div class="common-line"><b>与总图的共性：</b>仍然是 <span class="em">T3 → O1 → P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3 → E2 → U2</span>；个股页没有任何特权通道。</div>
+      <div class="common-line"><b>本功能特有：</b>研究层的四个联动边在这里最关键：<span class="nt gr">R2→R1</span>（板块强度给趋势）、<span class="nt gr">R1→R5</span>（趋势给归因）、<span class="nt gr">R3→R5</span>（事件传导给归因）、<span class="nt gr">R2↔R5</span>（板块强弱与个股异动互相修正，反向修正读上一轮）、<span class="nt gr">R4→R5</span>（基本面校验）。K 线 / 资金 / 财报 / 业绩预测不再单独下结论，只作为证据附件。</div>
+    </div>
+
+    <ol class="steps">
+      <li><b>T3 进入个股页。</b>subject = 该股票代码，O1 生成一次按需 run；页面上的下拉刷新只是重新触发同一个 run。</li>
+      <li><b>P1 / P2 / P3。</b>P1 取该股行情、资金、K 线与所属板块快照；P2 取新闻、公告、研报；P3 把它挂到板块与产业链节点，三份证据写 M1。</li>
+      <li><b>R1 / R2 / R3 / R4 / R5 并行。</b>R1 出趋势与支撑压力；R2 出板块热度与龙头；R3 出事件传导与存活度；R4 经 M5 读研报与业绩预测；R5 汇总前四者，判断这次异动是“大盘带的、板块带的、还是个股自己的事”。</li>
+      <li><b>M2 → J1 / J2 / J3 / J4。</b>J1 列看多证据，J2 必须给至少 1 条反证或失效条件，J3 显式保留分歧（不强行合并），J4 落唯一 judgment；C1 用历史命中率校准置信度。</li>
+      <li><b>E2 渲染。</b>E2 把 judgment 转成研判卡结构：方向、置信度、核心逻辑、反方、失效条件、复查时间；M3 提供 <code>judgment_id</code>，M2 提供可展开的 claim 链。</li>
+      <li><b>U2 呈现。</b>首屏是研判卡；原有 K 线、资金、财报、业绩预测、行业政策、护城河、年报对比全部降级为“证据”附件，不再各写一段结论。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>13 个接口并发拉取；“综合洞见”由前端 computed 按固定规则拼；AI 资讯洞见另走一套；异动只有事件没有结论。</p></div>
+      <div><h4>现在</h4><p>一只票一个 judgment；综合洞见与 AI 资讯洞见合并为同一结论的不同展开层级；异动挂到 claim 上。</p></div>
+      <div><h4>页面变化</h4><p>首屏顺序改为“结论 → 反方 / 失效 → 证据”；图表保留但变成折叠证据；同一只票在全站（首页 / 对话 / 提醒）看到的方向一致。</p></div>
+    </div>
+  </div>
+</section>
+<section class="sec" id="pick">
+  <div class="sec-head"><div class="num">05</div><div><h2>选股</h2><p>四个 Tab 现在是四套取数、四套理由。改后是同一批候选、四条研究线各出 claim，J 层消解出一条可解释的排序。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>AI 帮我选</b>（<code>AiPickContent.vue</code>）：<code>aiStockSelectionApi.getLatest()</code> 读 <code>/ai-stock-selection/latest</code>；切方法时调 <code>getResults(horizon, methods)</code> 读 <code>/stock-selection/results</code>。排序由服务端给出 <code>rank</code>，前端默认按 <code>rank</code>，可切“推荐后累计涨幅 / 当日涨跌幅”。</li>
+        <li><b>每条数据的结构</b>：<code>entry</code>（入选日期、连续天数、基准价、累计涨幅）+ <code>signals</code>（<code>method / rank / score / reason / metrics / invalidation</code>）。<code>invalidation</code> 字段已存在，但目前只是文本说明。</li>
+        <li><b>趋势选股</b>（<code>TrendStockInsightContent.vue</code>）：<code>trendScoreApi.getTop(30)</code>，是趋势评分榜，不是“只看均线 / 量能”。</li>
+        <li><b>机构热门</b>（<code>HotBurstInsightContent.vue</code>）：<code>stockApi.getHotBurstHistory({ trading_days: 3, min_resonance: 2 })</code>，近 3 日热门爆发共振信号，前端按涨跌幅降序、按 <code>symbol</code> 去重，展示共振等级（critical / high / medium / low）、触发标签、板块；空态文案“暂无机构推荐热门股数据”。</li>
+        <li><b>业绩预测</b>（<code>ForecastInsightContent.vue</code>）：两个视图——盈利预测 <code>getProfitForecastList</code> / <code>searchProfitForecast</code>（净利润预测、EPS 预测、机构数量，多字段排序）；业绩报告 <code>getPerformanceReportList</code> / <code>getPerformanceRanking</code> / <code>searchPerformanceReport</code>（AI 评分、营收 / 净利同比）。</li>
+        <li><b>现状问题</b>：四个 Tab 各排各的；同一只票在“趋势”里第 3、在“机构热门”里没出现，用户无法知道为什么。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 四个 Tab 四套理由</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>AI 帮我选</span><span>100%</span></div>
+          <div class="screen">
+            <div class="tabs-mock"><span class="on">AI 帮我选</span><span>趋势</span><span>机构热门</span><span>业绩</span></div>
+            <div class="list-mock">
+              <div class="list-row"><b>1 宁德时代</b><span>rank 1 · 较高</span></div>
+              <div class="list-row"><b>2 中际旭创</b><span>rank 2 · 中等</span></div>
+              <div class="list-row"><b>3 汇川技术</b><span>rank 3 · 关注</span></div>
+            </div>
+            <div class="phone-note"><b>问题：</b>排序由各 Tab 自己算；<code>reason</code> 是一段话，<code>invalidation</code> 是静态文本；四个 Tab 之间不交叉验证。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 同一批候选，四条线交叉验证</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>AI 帮我选</span><span>100%</span></div>
+          <div class="screen">
+            <div class="tabs-mock"><span class="on">AI 帮我选</span><span>趋势</span><span>机构热门</span><span>业绩</span></div>
+            <div class="list-mock">
+              <div class="list-row"><b>1 宁德时代</b><span>judgment 0.68</span></div>
+              <div class="list-row"><b>2 中际旭创</b><span>judgment 0.61</span></div>
+              <div class="list-row"><b>3 汇川技术</b><span>judgment 0.55</span></div>
+            </div>
+            <div class="insight-main">
+              <div class="label">为什么排第 1 · 4 条 claim</div>
+              <div class="title">趋势 + 板块共振，业绩不下调</div>
+              <div class="meta-line">反方：机构热门未进前 20 · 失效：跌破 20 日线</div>
+              <div class="evidence"><span class="ok">R1</span><span class="ok">R2</span><span>R4</span><span class="no">R5 降权</span></div>
+            </div>
+            <div class="phone-note"><b>页面变化：</b>Tab 还在；排序统一为 judgment 分数；点开任一条能看到四条研究线各自的 claim 与降权理由。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · 选股</h3><p>选股链路和后端一样走完整条骨架，最后经 E5 渲染、U6 展示；不再停在 M3。</p></div><span class="pill">16 个功能节点 + 3 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="pick"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>E5 → U6 = 选股页出口</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · flow · trend · wind · rotation · news · announcement · research · forecast · institution · graph · screening</div>
+      <div class="common-line"><b>与总图的共性：</b>前半段完全一样：<span class="em">T3 → O1 → P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3</span>。选股不是新架构，只是换了一组 R 子图。</div>
+      <div class="common-line"><b>本功能特有：</b>研究层固定四条线 <span class="nt gr">R1</span><span class="nt gr">R2</span><span class="nt gr">R4</span><span class="nt gr">R5</span>；J 层要把“趋势强但机构没进榜”这类冲突显式保留，而不是直接加权平均；<code>rank</code> 改为 judgment 分数，<code>invalidation</code> 从静态文本升级为可触发的失效条件。</div>
+    </div>
+
+    <div class="caveat">
+      <b>出口已补齐（2026-11-22 更新）：</b>设计图 v1.3 的 <span class="nt go">GO</span> 原有 U1-U5，确实没有选股页；但选股页在代码里是真实存在的（四个子 Tab 分别读 <code>/ai-stock-selection/latest</code>、<code>/stock-selection/results</code>、<code>trendScoreApi.getTop(30)</code>、<code>getHotBurstHistory</code>、<code>getProfitForecastList</code> 等）。所以目标态不能是“没有出口”，本轮已在设计图补 <code>E5 pick_view_writer</code> 与 <code>U6 选股页</code>，边为 <code>J4 → E5 → U6</code> 和 <code>M3 → U6（只读）</code>；上图画的就是补齐后的链路。<b>当前代码</b>仍是页面直读接口，属于待迁移，不是设计缺口。
+    </div>
+
+    <ol class="steps">
+      <li><b>T3 打开选股页 / 切 Tab。</b>horizon（短线 / 中线）与 methods 作为 run 参数进 O1；切 Tab 不再换一套后端，只是换要看哪几条 claim。</li>
+      <li><b>P1 / P2 / P3。</b>P1 取全市场行情与资金，先做初筛；P2 取事件与研报；P3 把候选映射到板块与产业链，避免同一条产业链被重复计数。</li>
+      <li><b>R1 / R2 / R4 / R5 并行。</b>R1 趋势评分、R2 板块热度与龙头、R4 盈利预测与业绩报告（经 M5 读研报）、R5 异动归因。四条线对同一只票各出 claim，允许互相矛盾。</li>
+      <li><b>M2 → J1 / J2 / J3 / J4。</b>J1 列推荐理由，J2 列反方与失效条件（例如“机构热门未进前 20”），J3 消解冲突并记录降权原因，J4 落 judgment 与最终分数；C1 用历史胜率校准。</li>
+      <li><b>M3 存 judgment。</b>排序读 judgment 分数；<code>entry</code>（入选日期 / 连续天数 / 基准价 / 累计涨幅）与 <code>signals.metrics</code> 保留为证据附件，不再承担“解释为什么”的职责。</li>
+      <li><b>E5 → U6 出口。</b>E5 把选股 judgment 渲染成四个子 Tab 的列表结构；U6 只展示，并在每条上给出入选理由、反方与失效条件。页面不再自己排序，也不再各自写理由。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>四个 Tab 四套取数、四套排序、四段理由；<code>reason</code> 是自然语言，<code>invalidation</code> 不会触发。</p></div>
+      <div><h4>现在</h4><p>一批候选、四条研究线、一个 judgment；排序可解释，冲突被显式保留而不是抹平。</p></div>
+      <div><h4>页面变化</h4><p>Tab 保留；新增“为什么排这个位置”的四条 claim 展开；排序统一为 judgment 分数；失效条件变成可监控字段，触发后进提醒。</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="alert">
+  <div class="sec-head"><div class="num">06</div><div><h2>提醒</h2><p>提醒页是站内列表，不是推送通道。改后每条提醒都要挂在一个 judgment 上，告诉用户“这条会不会改变结论”。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>组件</b>：<code>aistock-app-frontend/src/modules/favorites/components/AlertContent.vue</code>（提醒 Tab，不是独立页面）。</li>
+        <li><b>个股情报</b>：登录后 <code>stockApi.getFavoritesNews({ limit: 20 })</code>；未登录 <code>stockApi.getTrendEvents({ limit: 20 })</code>。用 <code>ai_impact</code> 推断利好 / 利空 / 中性，<b>过滤掉中性</b>；三档“全部 / 利好 / 利空”；预览 3 行（<code>CAPTURE_ROW_COUNT = 3</code>）。</li>
+        <li><b>自选股洞察</b>：<code>stockTraceApi.list(20)</code> → <code>isUnattributableMovement</code> 过滤（含 <code>confidence_level === 'low'</code> 隐藏）→ <code>dedupeDailyMovements</code> 同日同股聚合 → 取前 6 条。未登录时用 3 条示例数据，不发请求。</li>
+        <li><b>主因三段式</b>：<code>primary_cause</code> → <code>movement_view.primaryCandidate.verdict</code> → <code>analysis_status</code>，逐级回退。</li>
+        <li><b>现状问题</b>：情报按条列、洞察按条列，都是“发生了什么”；用户要自己判断这条新闻是否改变了原来的看法。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 只告诉你发生了什么</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>提醒</span><span>100%</span></div>
+          <div class="screen">
+            <div class="tabs-mock"><span class="on">全部</span><span>利好</span><span>利空</span></div>
+            <div class="list-mock">
+              <div class="list-row"><b>宁德时代</b><span class="up">利好 · 签大单</span></div>
+              <div class="list-row"><b>中际旭创</b><span class="up">利好 · 扩产</span></div>
+              <div class="list-row"><b>汇川技术</b><span class="down">利空 · 减持</span></div>
+            </div>
+            <div class="list-mock">
+              <div class="list-row"><b>自选股洞察</b><span>3 条异动</span></div>
+              <div class="list-row"><b>主因</b><span>板块整体回调</span></div>
+            </div>
+            <div class="phone-note"><b>问题：</b>利好 / 利空来自 <code>ai_impact</code> 单字段；和原来的研判有没有关系，页面不说。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 每条都挂在 judgment 上</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>提醒</span><span>100%</span></div>
+          <div class="screen">
+            <div class="tabs-mock"><span class="on">全部</span><span>利好</span><span>利空</span></div>
+            <div class="list-mock">
+              <div class="list-row"><b>宁德时代</b><span class="up">强化原结论</span></div>
+              <div class="list-row"><b>中际旭创</b><span>不改变结论</span></div>
+              <div class="list-row"><b>汇川技术</b><span class="down">触发失效条件</span></div>
+            </div>
+            <div class="list-mock">
+              <div class="list-row"><b>自选股洞察</b><span>3 条 · 2 条已定性</span></div>
+              <div class="list-row"><b>主因</b><span>板块整体回调（R2）</span></div>
+            </div>
+            <div class="phone-note"><b>页面变化：</b>三档筛选保留；每条多了“对结论的影响”；洞察保留主因三段式，但主因来自 claim，不再只是文案。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · 提醒</h3><p>触发层用满四个入口；出口只到 E3 → U4，因为提醒页本身读的是 M3 / M1 的投影。</p></div><span class="pill">16 个功能节点 + 3 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="alert"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>E3 只推变化 / 失效 / 高置信机会</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · flow · wind · news · announcement · research · event_entity · trace · push</div>
+      <div class="common-line"><b>与总图的共性：</b>骨架不变：<span class="em">T* → O1 → P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3 → E3 → U4</span>。提醒只是把触发层从 T3 扩展到 T1 / T2，把出口收窄到 E3。</div>
+      <div class="common-line"><b>本功能特有：</b>触发层四个入口全部用上（盘前 / 盘中异动 / 用户打开 / 到期验证）；E3 不生成新结论，只做“新旧 judgment 对比”——结论变了、失效条件触发、出现高置信新机会，才推。提醒页列表读 M3 / M1 投影，不经过 E3。</div>
+    </div>
+
+    <ol class="steps">
+      <li><b>T1 / T2 / T3 触发。</b>盘前定时、盘中异动、用户打开提醒页，都进 O1；三类触发的预算和优先级不同，但走同一张图。</li>
+      <li><b>P1 / P2。</b>P1 取行情与资金异动（盘中高频）；P2 取新闻与公告。证据写 M1，并标注“新增 / 已存在”。</li>
+      <li><b>R2 / R3 / R5。</b>R2 判断板块层面是否共振；R3 判断事件传导与存活度；R5 判断个股异动归因。三条 claim 写 M2，与上一版对照。</li>
+      <li><b>J1 / J2 / J3 / J4。</b>对“这条新闻会不会改变原结论”做正反论证，J3 处理冲突，J4 落新 judgment 或维持原判；C1 校准置信度。</li>
+      <li><b>E3 对比新旧账本。</b>只推三类：结论方向变化、失效条件触发、高置信新机会；其余只入库，不打扰。</li>
+      <li><b>U4 / 提醒列表。</b>U4 负责播报与推送（含站内消息 target）；提醒页的“个股情报 / 自选股洞察”直接读 M3 / M1 投影，保留现有三档筛选、主因三段式、同日同股聚合。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>情报按 <code>ai_impact</code> 分利好 / 利空，中性被过滤；洞察按异动逐条列，主因三段式回退。</p></div>
+      <div><h4>现在</h4><p>每条提醒挂在 judgment 上，能回答“这条是否改变结论”；主因来自 claim，不是文案回退。</p></div>
+      <div><h4>页面变化</h4><p>三档筛选、预览 3 行、前 6 条洞察都保留；新增“对结论的影响”标记与结论版本号；推送频率下降，但每条都值得看。</p></div>
+    </div>
+  </div>
+</section>
+<section class="sec" id="day">
+  <div class="sec-head"><div class="num">07</div><div><h2>一天传导</h2><p>把六张图按时间铺开：同一张网在不同时段只启动不同子集。这张表是“为什么说它是一个大 LangGraph”的直接证据。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>现状的时段能力是分散的</b>：<code>morning</code>、<code>midday</code>、<code>midday_broadcast</code>、<code>broadcast</code>、<code>review</code>、<code>rhythm_master</code>、<code>iterate</code> 是彼此独立的 worker，各自被定时器或路由调用，没有共享 run 与账本。</li>
+        <li><b>前端时段</b>：首页顶部播报按 <code>pre / mid / post</code> 三档切换，来自 <code>getBriefing(slot, date)</code>；节奏洞见固定展示近 <code>HOME_RHYTHM_DAYS</code> 日。</li>
+        <li><b>验证</b>：目标节点 <code>T4</code>（due + 3 个交易日）、<code>C2</code>（回填）、<code>C3</code>（方法演化）、<code>M4</code>（方法账本）目前没有对应实现，属于目标态新增。</li>
+      </ul>
+    </div>
+
+    <table class="timeline">
+      <thead><tr><th>时间</th><th>触发</th><th>本次 run 的节点链</th><th>落到哪本账</th><th>前端看到什么</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>06:30</td>
+          <td><span class="nt">T1</span> 盘前</td>
+          <td><span class="nt">O1</span> 全量档 → <span class="nt gp">P1</span><span class="nt gp">P2</span><span class="nt gp">P3</span> → <span class="nt mem">M1</span> → <span class="nt gr">R2</span><span class="nt gr">R3</span><span class="nt gr">R6</span> → <span class="nt mem">M2</span> → <span class="nt gj">J1</span><span class="nt gj">J2</span><span class="nt gj">J3</span><span class="nt gj">J4</span> → <span class="nt mem">M3</span> → <span class="nt ge">E1</span>(pre) → <span class="nt go">U1</span><span class="nt go">U4</span></td>
+          <td>M1 证据 · M2 claim · M3 judgment</td>
+          <td>早点听四宫格 + 晨报</td>
+        </tr>
+        <tr>
+          <td>09:35</td>
+          <td><span class="nt">T2</span> 盘中异动</td>
+          <td><span class="nt">O1</span> 增量档 → <span class="nt gp">P1</span><span class="nt gp">P2</span> → <span class="nt gr">R2</span><span class="nt gr">R5</span> → <span class="nt gj">J4</span> → <span class="nt mem">M3</span> → <span class="nt ge">E3</span> → <span class="nt go">U4</span></td>
+          <td>只追加，不重算全量</td>
+          <td>提醒 / 推送（仅结论变化）</td>
+        </tr>
+        <tr>
+          <td>12:05</td>
+          <td><span class="nt">T1</span> 午间</td>
+          <td><span class="nt gr">R2</span><span class="nt gr">R5</span> 复核 → <span class="nt gj">J3</span><span class="nt gj">J4</span> → <span class="nt mem">M3</span> → <span class="nt ge">E1</span>(mid) → <span class="nt go">U1</span><span class="nt go">U4</span></td>
+          <td>复用 M1，部分刷新 M2</td>
+          <td>午间报（同一 judgment 的新版本）</td>
+        </tr>
+        <tr>
+          <td>15:10</td>
+          <td><span class="nt">T1</span> 盘后</td>
+          <td><span class="nt gp">P1</span><span class="nt gp">P2</span><span class="nt gp">P3</span> 收盘快照 → <span class="nt gr">R2</span><span class="nt gr">R3</span><span class="nt gr">R5</span><span class="nt gr">R6</span> → <span class="nt gj">J1</span><span class="nt gj">J2</span><span class="nt gj">J3</span><span class="nt gj">J4</span> → <span class="nt mem">M3</span> → <span class="nt ge">E1</span>(post) → <span class="nt go">U1</span><span class="nt go">U4</span></td>
+          <td>M3 新增一版，旧版保留</td>
+          <td>晚报 + 次日线索</td>
+        </tr>
+        <tr>
+          <td>15:30</td>
+          <td><span class="nt">T1</span> 收盘复盘 / <span class="nt">T3</span> 点“市场洞见”</td>
+          <td><span class="nt gp">P1</span><span class="nt gp">P2</span><span class="nt gp">P3</span> → <span class="nt gr">R1</span><span class="nt gr">R2</span><span class="nt gr">R3</span><span class="nt gr">R6</span> → <span class="nt gj">J1</span><span class="nt gj">J2</span><span class="nt gj">J3</span><span class="nt gj">J4</span> → <span class="nt mem">M3</span> → <span class="nt ge">E1</span>(review) → <span class="nt go">U1</span></td>
+          <td>M1 证据 · M2 claim · M3 复盘 judgment</td>
+          <td>大盘溯源（主因 / 备选 / 被否 / 次日验证）</td>
+        </tr>
+        <tr>
+          <td>任意</td>
+          <td><span class="nt">T3</span> 打开页面 / 对话</td>
+          <td><span class="nt">O1</span> 按需档 → <span class="nt gp">P*</span> → <span class="nt gr">R*</span> → <span class="nt gj">J*</span> → <span class="nt mem">M3</span> → <span class="nt ge">E2</span> / <span class="nt ge">E4</span> → <span class="nt go">U2</span> / <span class="nt go">U5</span></td>
+          <td>读 M3；有新证据才写</td>
+          <td>个股研判卡 / 带引用的对话</td>
+        </tr>
+        <tr>
+          <td>次日 15:30</td>
+          <td><span class="nt">T4</span> due + 3</td>
+          <td><span class="nt gc">C2</span> 用真实行情验证 → <span class="nt mem">M3</span> 回填命中 / 未命中 → <span class="nt gc">C3</span> 归因到方法 → <span class="nt mem">M4</span></td>
+          <td>M3 结果回填 · M4 方法版本</td>
+          <td>置信度变化；历史判断可查</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="common-line" style="margin-top:14px"><b>共性怎么看：</b>把每行横向比，<span class="em">P → M1 → R → M2 → J → M3 → E → U</span> 这一段在每一行里都重复；不同的只有两端的触发和出口。这就是“同一个大图里的不同子图”，不是七套系统。</div>
+
+    <div class="caveat">
+      <b>目标态才有的一环：</b><code>T4 → C2 → M3 → C3 → M4 → C1</code> 是“判断会不会越来越准”的闭环。目前代码里没有 due + 3 的验证调度，也没有方法版本账本；这也是 C1 校准暂时只能靠人工经验、不能靠真实命中率的原因。
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="trace">
+  <div class="sec-head"><div class="num">08</div><div><h2>大盘溯源</h2><p>这是首页“市场洞见”点进去的下钻页。页面形状（现象 / 溯源 / 预判三块）已经存在，缺的是“和早报、个股、板块共用同一份证据与结论”。</p></div></div>
+  <div class="panel pad">
+    <div class="verify">
+      <div class="verify-title">代码核实 · 2026-11-22</div>
+      <ul>
+        <li><b>入口</b>：首页 <code>MorningContent.vue</code> 的“市场洞见”卡片与底部条 <code>onBarNavigate('trace')</code> 都调 <code>goTraceability()</code>，跳 <code>/modules/analytics/pages/traceability</code>（<code>traceability.vue</code>）。</li>
+        <li><b>取数</b>：<code>agentApi.getMarketTraceReview(cdate)</code> 拉复盘报告；失败时按日期回退（报告日期 ≠ 请求日期会标 <code>isFallback</code>）；同时并行 <code>predictionApi.list({ source_id: 'review:&lt;date&gt;' })</code> 取次日预判，二者在 <code>toMarketTracePresentation(record, date, prediction)</code> 里合并。</li>
+        <li><b>能不能显示</b>：<code>toMarketTraceViewModel</code> 要求 <code>record.status === 'completed'</code> 且 <code>schema_version === '2.0'</code> 且 <code>summary / details</code> 都非空，否则整页空态；没有“部分可用”的降级。</li>
+        <li><b>页面结构</b>：<code>MarketInsightCard</code> 三块——现象（普涨 / 普跌 / 风格分化 / 板块集中异动 / 情绪极端 + 指数涨跌 + 领涨领跌）、溯源（主因 + 备选 + 被否）、预判（短 / 中 / 长三档 + 条件化预判 + 风险 + 演化步骤）。</li>
+        <li><b>主因四段式</b>：<code>MarketTracePrimaryCauseView</code> = <code>trigger → transmission → result → supportingEvidence[]</code>；备选还带 <code>counterEvidence[]</code>；被否带 <code>status: rejected / insufficient / weak</code> 与 <code>reason</code>。</li>
+        <li><b>归因链</b>：<code>AttributionChainView</code>（用户可见名“今日驱动板块”）按 <code>sectorStageMap</code> 展开“触发 / 传导 / 结果”三段；链路事件只展示 <code>warehouse</code> 来源，避免把资讯当既成事实。</li>
+        <li><b>次日验证</b>：<code>PredictionValidationPresentation</code> 给 <code>hit / partial / miss / no_forecast</code>，并按板块、事件分别列命中与偏差说明；没有预判时明确标 <code>no_forecast</code>，不硬算命中率。</li>
+        <li><b>现状问题</b>：复盘 Agent 自己抓数、自己归因、自己写 <code>market_trace</code>；主因是“一次生成的一段话”，和早报、个股、板块不共享证据；<code>rejected</code> 候选只留在报告里，没有进入校准。</li>
+      </ul>
+    </div>
+
+    <div class="compare">
+      <div class="mock-col">
+        <div class="mock-cap"><span>改前 · 复盘自成一套</span><em>当前代码</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>大盘溯源</span><span>100%</span></div>
+          <div class="screen">
+            <div class="briefing-mock">
+              <div class="bm-title"><span>10-31 大盘溯源</span><span class="mini-tag">schema 2.0</span></div>
+              <div class="insight-main">
+                <div class="label">现象</div>
+                <div class="title">普跌 · 指数 -1.8%</div>
+                <div class="meta-line">领跌：半导体 / 消费电子</div>
+              </div>
+              <div class="insight-main">
+                <div class="label">溯源 · 主因</div>
+                <div class="title">海外流动性收紧 → 成长股杀估值</div>
+                <div class="meta-line">一段结论，无法点回证据</div>
+              </div>
+              <div class="insight-main">
+                <div class="label">预判</div>
+                <div class="title">短线偏弱 · 3 日内修复</div>
+              </div>
+            </div>
+            <div class="phone-note"><b>问题：</b>复盘报告与早报 / 个股 / 板块各写一套；主因不可追溯；被否候选不留档；次日验证靠人工对照。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mock-col">
+        <div class="mock-cap"><span>改后 · 同一账本的复盘视图</span><em>目标 v1.3</em></div>
+        <div class="phone">
+          <div class="phone-top"><span>9:41</span><span>大盘溯源</span><span>100%</span></div>
+          <div class="screen">
+            <div class="briefing-mock">
+              <div class="bm-title"><span>10-31 大盘溯源</span><span class="mini-tag">judgment #A31</span></div>
+              <div class="insight-main">
+                <div class="label">现象 · P1 证据</div>
+                <div class="title">普跌 · 指数 -1.8%</div>
+                <div class="meta-line">领跌：半导体 / 消费电子 · evidence 12 条</div>
+              </div>
+              <div class="insight-main">
+                <div class="label">主因 · 四段式</div>
+                <div class="title">触发 → 传导 → 结果</div>
+                <div class="meta-line">置信 0.72 · 备选 2 · 被否 3 · 次日复查</div>
+                <div class="evidence"><span class="ok">E1</span><span class="ok">E7</span><span>E9</span><span class="no">被否 · 弱</span></div>
+              </div>
+              <div class="insight-main">
+                <div class="label">次日验证 · C2</div>
+                <div class="title">partial · 板块命中 2 / 3</div>
+                <div class="meta-line">偏差：修复晚一天 · 已回填 M3</div>
+              </div>
+            </div>
+            <div class="phone-note"><b>页面变化：</b>三块形状不变；主因能展开到 evidence；备选与被否留档；次日验证显示 hit / partial / miss，并回填同一个 judgment。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graph-card">
+      <div class="graph-head"><div><h3>真实节点链路 · 大盘溯源</h3><p>收盘后的 review 走完整条骨架，出口复用 E1 → U1；大盘溯源是首页结论的下钻，不是第 7 条独立链。</p></div><span class="pill">17 个功能节点 + 3 本账</span></div>
+      <div class="svg-wrap"><div class="arch-graph" data-graph="trace"></div></div>
+      <div class="graph-legend">
+        <span><i></i>主链路</span><span><i class="teal"></i>研究联动</span><span><i class="violet"></i>C1 校准</span><span><i class="gray"></i>账本读写</span><span>E1 → U1 = 复盘视图 + 首页下钻</span>
+      </div>
+      <div class="tool-line"><b>本功能调用工具：</b>quote · market · rotation · wind · news · announcement · research · calendar · fear_greed · trace · prediction · review</div>
+      <div class="common-line"><b>与总图的共性：</b>后半段和首页完全同源：<span class="em">P* → M1 → R* → M2 → J1/J2 → J3 → J4 → M3 → E1 → U1</span>。区别只在触发时机（收盘后）与研究线（指数 / 板块 / 事件 / 情绪）。</div>
+      <div class="common-line"><b>本功能特有：</b>主因必须写成四段式（触发 / 传导 / 结果 / 证据）；备选要带反证，被否要带 <code>rejected / insufficient / weak</code> 与原因；次日验证按板块、事件分别记 hit / miss，不用一句“基本符合”糊过去。</div>
+    </div>
+
+    <div class="caveat">
+      <b>如实说明：</b>大盘溯源页现在读的是复盘 Agent 单独生成的 <code>market_trace</code>（schema 2.0），不是目标图里的 M1 / M2 / M3 投影；<code>C2</code> 的 due + 3 自动回填与 <code>M4</code> 的方法版本也还没实现。所以本节画的是目标链路，代码迁移要等账本与验证闭环落地。
+    </div>
+
+    <ol class="steps">
+      <li><b>T1 收盘后 / T3 首页点“市场洞见”。</b>两种触发进同一个 O1；带 <code>report_date</code> 与 review 档位，切日期只是换参数。</li>
+      <li><b>P1 / P2 / P3。</b>P1 收盘快照（指数、涨跌家数、板块涨跌、资金），P2 当日新闻公告，P3 把事件映射到板块与产业链；全部写 M1，后面的节点不再重复取数。</li>
+      <li><b>R1 / R2 / R3 / R6。</b>R1 指数趋势与关键位，R2 板块强弱与龙头，R3 事件传导与存活度，R6 情绪与节奏；四组 claim 写 M2，允许互相矛盾。</li>
+      <li><b>J1 / J2 / J3 / J4。</b>J1 列支持主因的证据，J2 列反证与替代解释，J3 排主次并决定哪些候选被否（保留原因），J4 落 judgment（方向 / 置信度 / 复查时间）。</li>
+      <li><b>C1 + M3。</b>C1 用历史命中率校准置信度；M3 存这一版复盘与次日验证计划。目标态由 C2 到期回填 hit / partial / miss，并把错误样本交给 C3。</li>
+      <li><b>E1 → U1。</b>E1 渲染复盘视图（主因 / 备选 / 被否 / 风险 / 次日验证），U1 首页“市场洞见”下钻展示；所有块引用同一个 <code>judgment_id</code>，不再二次归因。</li>
+    </ol>
+
+    <div class="delta">
+      <div><h4>以前</h4><p>复盘 Agent 单独抓数、单独成稿；主因是一段话；备选与被否只留在报告里；次日验证靠人工。</p></div>
+      <div><h4>现在</h4><p>复盘是同一张图的 review 视图：证据、论点、结论都落账；主因四段式可追溯；被否候选留档；次日验证可回填。</p></div>
+      <div><h4>页面变化</h4><p>“现象 / 溯源 / 预判”三块形状不变；主因卡多出 judgment 号与证据折叠；备选、被否可展开；次日验证显示命中等级与偏差。</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="fix">
+  <div class="sec-head"><div class="num">09</div><div><h2>修正与缺口</h2><p>上一版说明里有一批描述与代码不符。这里逐条列出“上一版怎么写 → 代码实际是什么 → 本版怎么改”，并把已补项与仍存在的缺口分开标。</p></div></div>
+  <div class="panel pad">
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th>功能</th><th>上一版写法（错）</th><th>代码实际</th><th>本版写法</th></tr></thead>
+        <tbody>
+          <tr><td>机构热门选股</td><td>机构调研 / 持仓榜</td><td><code>getHotBurstHistory({trading_days:3,min_resonance:2})</code>，近 3 日热门爆发共振信号，按涨跌幅降序、按 symbol 去重</td><td>近 3 日共振信号榜，展示共振等级与触发标签</td></tr>
+          <tr><td>趋势选股</td><td>只看均线 / 量能</td><td><code>trendScoreApi.getTop(30)</code>，趋势评分榜</td><td>趋势评分榜，评分口径由 R1 统一</td></tr>
+          <tr><td>业绩预测</td><td>只看预测增速排序</td><td>盈利预测 + 业绩报告双视图，多字段排序（净利 / EPS / 机构数 / AI 评分 / 营收净利同比）</td><td>双视图、多字段排序，作为 R4 的证据附件</td></tr>
+          <tr><td>提醒</td><td>逐条新闻判利好利空</td><td>个股情报用 <code>ai_impact</code> 三档并过滤中性；自选股洞察走 stock-trace，主因三段式 + 低置信过滤 + 同日同股聚合</td><td>情报看“是否改变结论”；洞察主因来自 claim</td></tr>
+          <tr><td>个股综合洞见</td><td>三个接口各下结论</td><td>前端 computed 链 <code>legacyOverallDecision → overallDecision → decisionInsight</code> 规则拼装；AI 资讯洞见另走 <code>getStockAnalysis</code>；重大异动只是事件展示</td><td>唯一 judgment + 证据附件；两套洞见合并</td></tr>
+          <tr><td>首页四宫格</td><td>笼统说“多个接口”</td><td>市场 <code>getMarketTraceReview</code> / 消息 <code>getEventList</code> / 风口 <code>getWindLeaders</code> / 节奏 <code>getRhythmMasterCalendar</code>；顶部 <code>getBriefing(pre/mid/post)</code></td><td>四个具体接口 + 四个具体 R 节点</td></tr>
+          <tr><td>AI 对话</td><td>固定四段式回答</td><td>问答 + 卡片 + 推理 + 深度分析 + 追问；后端 10 个可路由 worker 单次路由</td><td>对话形态不变；目标 E4 只要求引用账本</td></tr>
+          <tr><td>选股出口</td><td>硬套首页 / 个股的 U 节点</td><td>选股页真实存在：四个 Tab 分别读 <code>/ai-stock-selection/latest</code>、<code>/stock-selection/results</code>、<code>trendScoreApi.getTop(30)</code>、<code>getHotBurstHistory</code>、<code>getProfitForecastList</code> 等，页面直读接口</td><td>设计图补真实出口 <code>E5</code>（选股渲染）+ <code>U6</code>（选股页），边为 <code>J4 → E5 → U6</code>、<code>M3 → U6（只读）</code></td></tr>
+          <tr><td>提醒出口</td><td>把提醒页等同于 E3 推送</td><td>提醒页是站内列表；E3 在目标里只推变化 / 失效 / 高置信机会</td><td>页面读 M3 / M1 投影；E3 只负责推送判断</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin:22px 0 8px;font-size:16px">已补项与仍存在的缺口</h3>
+    <div class="caveat">
+      <b>已补 · 选股出口。</b>设计图 v1.3 已新增 <code>E5 pick_view_writer</code> 与 <code>U6 选股页</code>：J4 落账后由 E5 渲染四个子 Tab，U6 只展示；同时保留 <code>M3 → U6</code> 只读投影。选股页不再处于“目标图没有出口”的状态。当前代码仍是页面直读接口，迁移属于落地待办，不是设计缺口。
+    </div>
+    <div class="caveat">
+      <b>仍存在 · 验证闭环没有实现。</b><code>C2</code>（due + 3 回填）、<code>C3</code>（方法演化）、<code>M4</code>（方法账本）在目标图里有，代码里没有。没有这一环，<code>C1</code> 的置信度校准就没有真实命中率来源，judgment 的 confidence 只能靠先验。
+    </div>
+
+    <h3 style="margin:22px 0 8px;font-size:16px">怎么用这份文档</h3>
+    <ol class="steps">
+      <li>先看 <b>01 怎么读</b> 的节点字典与 <b>01B 九层白话</b>，记住 40 个功能节点的 ID、所属泳道，以及每层负责什么。</li>
+      <li>再看任意一张功能图：把它和“与总图的共性”那一行对照，确认它只是骨架的一个子集。</li>
+      <li>再看 <b>07 一天传导</b> 与 <b>08 大盘溯源</b>：同一天不同时段只是启动不同子集；复盘也不是另起一条链。</li>
+      <li>要落地时，先补 <b>09</b> 里仍缺的 C2 / C3 / M4 验证闭环，再谈具体功能迁移；选股出口 E5 / U6 已在设计图补齐。</li>
+    </ol>
+  </div>
+</section>
+
+<section class="sec" id="agent">
+  <div class="sec-head"><div class="num">10</div><div><h2>Agent 还能怎么改进</h2><p>下面 8 条不是“再加功能”，而是让现有 Agent 更像一个可验证、可复盘的分析师。每条都对应架构里的一个已有位置，不需要推翻重来。</p></div></div>
+  <div class="panel pad">
+    <ol class="steps">
+      <li><b>让“证据不足”成为合法结论，而不是失败。</b>现在大盘溯源要 <code>status = completed</code>、<code>schema 2.0</code>、<code>summary / details</code> 齐全才显示，否则整页空态；这等于逼模型“必须编一个主因”。目标态应允许 <code>hypothesis</code> / <code>insufficient</code> 正常落 M3，页面明确写“证据不足，暂不下结论”，并列出缺哪类证据。对应：J4 状态位 + M3 落账。</li>
+      <li><b>把验证闭环真正做出来。</b>C2 到期（due + 3）自动回填真实走势，C3 把“错在哪”归成错误类型（方向错 / 幅度错 / 时点错 / 归因错），写进 M4；C1 才有真实命中率可用。没有这一环，置信度永远只是模型自评。</li>
+      <li><b>每条 claim 必须可证伪。</b>选股的 <code>signals.invalidation</code> 现在只是文本；应升级成“指标 + 阈值 + 观测窗口”，例如“收盘跌破 20 日线”或“板块热度掉出前 10”。到点由 C2 / T4 自动检查，触发后进提醒，而不是等人读出来。对应：M2 claim + E3 推送。</li>
+      <li><b>工具返回必须带 provenance / quality / error，空结果不许归零。</b>GX 的 24 个工具统一信封；取不到就说 <code>failed</code> 并写原因，让下游知道“这是没数据”还是“数据是 0”。这条能直接减少“看起来有结论、其实没证据”的错误。</li>
+      <li><b>记忆按切片读，不要每次塞全量上下文。</b>M1 只给下游该标的、该板块、该时段的证据投影；M2 只给相关 claim；对话走 M3 只读投影。这样既省 token，也避免模型被无关证据带偏。对应：M1 / M2 / M3 的投影接口。</li>
+      <li><b>反方不能只列观点，要带触发条件。</b>J2 现在可以写“机构热门未进前 20”，但更该写“如果 3 日内仍没进前 20，则下调一档”。反方有了阈值，J3 才能真的降权，C2 才能验证反方对不对。</li>
+      <li><b>给每次 run 设预算与降级路径。</b>O1 按档位分配工具调用数与超时；证据不完整时像晨报一样明示 <code>missing_sources</code>，先出“低置信版本”，而不是整页失败或无限重试。对应：O1 + E1 的降级展示。</li>
+      <li><b>做离线回放评测，再上线。</b>用 M3 里历史 judgment + 当时的行情做回放，按置信度分层算命中率，比较改提示词 / 改阈值前后的差异；结果写 M6。这样“分析变准了”有数字，不靠感觉。</li>
+    </ol>
+    <div class="caveat">
+      <b>优先级建议：</b>先做第 2 条（验证闭环）和第 3 条（可证伪），因为没有它们，后面所有“更准”都无法证明；再做第 1、4 条，减少“硬编结论”和“空数据当 0”；最后做第 5-8 条的成本、反方与评测优化。
+    </div>
+  </div>
+</section>
+<script>
+(function(){
+  var LANES=[
+    {id:'GT',t:'GT 触发层 · 统一入口',x:14,w:152,c:'#475569'},
+    {id:'GP',t:'GP 感知层 · 只取一次',x:174,w:168,c:'#0b5fff'},
+    {id:'GR',t:'GR 研究层 · 板块⇄个股',x:350,w:176,c:'#0f766e'},
+    {id:'GJ',t:'GJ 研判层 · 唯一 judgment',x:534,w:180,c:'#b45309'},
+    {id:'GC',t:'GC 校准层 · 验证回灌',x:722,w:152,c:'#7c3aed'},
+    {id:'GE',t:'GE 表达层 · 渲染同一研判',x:882,w:168,c:'#15803d'},
+    {id:'GO',t:'GO 出口 · 前端只渲染',x:1058,w:168,c:'#be123c'}
+  ];
+  var LM={}; LANES.forEach(function(l){LM[l.id]=l;});
+  var ORDER={
+    GT:['T1','T2','T3','T4','O1'], GP:['P1','P2','P3','P4'],
+    GR:['R1','R2','R3','R5','R4','R6'], GJ:['J1','J2','J3','J4'],
+    GC:['C1','C2','C3'], GE:['E1','E2','E3','E4','E5'], GO:['U1','U2','U3','U4','U5','U6']
+  };
+  var N={
+    T1:['GT','T1 时段触发','盘前 · 盘中 · 盘后',''],
+    T2:['GT','T2 事件触发','异动 / 失效 / 新增',''],
+    T3:['GT','T3 用户请求','页面 / 对话 / 刷新',''],
+    T4:['GT','T4 验证触发','due + 3 交易日',''],
+    O1:['GT','O1 编排','档位 · 预算 · 并行',''],
+    P1:['GP','P1 市场感知','行情 / 资金 / 板块','1'],
+    P2:['GP','P2 事件感知','新闻 / 公告 / 研报','1'],
+    P3:['GP','P3 实体感知','实体 / 板块 / 产业链','1'],
+    P4:['GP','P4 用户感知','自选 / 持仓 / 画像','1'],
+    R1:['GR','R1 趋势研究','趋势评分 / 支撑压力','1·2'],
+    R2:['GR','R2 风口研究','板块热度 / 龙头 / 轮动','1·2'],
+    R3:['GR','R3 事件研究','传导链 / 存活度','1·2'],
+    R5:['GR','R5 洞见研究','个股异动归因','1·2'],
+    R4:['GR','R4 基本面研究','业绩 / 预测 / 调研','1·2·5'],
+    R6:['GR','R6 节奏研究','仓位 / 情绪 / 择时','1·2·3'],
+    J1:['GJ','J1 多方论证','引用 evidence_id','2'],
+    J2:['GJ','J2 反方 / 红队','至少 1 条反证','2'],
+    J3:['GJ','J3 冲突消解','分级 / 降权 / 留分歧','2'],
+    J4:['GJ','J4 研判落账','dir · conf · verify_at','2·3'],
+    C1:['GC','C1 校准','历史命中率 → 先验','3·4'],
+    C2:['GC','C2 验证','due + 3 回填','3·4'],
+    C3:['GC','C3 方法演化','失败模式 → 版本','4'],
+    E1:['GE','E1 播报','pre / mid / post','3'],
+    E2:['GE','E2 个股研判文案','结构化渲染','2·3'],
+    E3:['GE','E3 推送','只推变化 / 失效','3'],
+    E4:['GE','E4 对话','只读账本 · 必引用','2·3'],
+    E5:['GE','E5 选股渲染','榜单 / 筛选 / 信号 / 推荐','2·3'],
+    U1:['GO','U1 首页结论','今日结论 + 证据 / 溯源下钻','3'],
+    U2:['GO','U2 个股研判卡','方向 / 置信 / 反方','3'],
+    U3:['GO','U3 事件研判','传导链 + 个股','3'],
+    U4:['GO','U4 播报 / 推送','音频 / 站内消息','3'],
+    U5:['GO','U5 对话视图','带引用的回答','3'],
+    U6:['GO','U6 选股页','四个子 Tab · 只渲染','3']
+  };
+  var M={
+    M1:{x:174,w:168,t:'M1 证据账本',s:'evidence / claims / conflicts'},
+    M2:{x:350,w:176,t:'M2 claim 账本',s:'research claims · 分歧'},
+    M3:{x:534,w:180,t:'M3 judgment 账本',s:'唯一结论 · 版本 · 复盘'},
+    M4:{x:722,w:152,t:'M4 方法账本',s:'方法版本 / 失败模式'},
+    M5:{x:882,w:168,t:'M5 知识库',s:'研报 / 实体 / 产业链'},
+    M6:{x:1058,w:168,t:'M6 治理账本',s:'权限 / 成本 / 审计'}
+  };
+  var G={
+    home:{
+      n:['T1','T3','O1','P1','P2','P3','R2','R3','R5','R6','J1','J2','J3','J4','C1','E1','U1','U4'],
+      m:['M1','M2','M3'], trig:['T1','T3'], fan:['P1','P2','P3'],
+      rs:[['R3','R2'],['R3','R5']], bi:['R2','R5'],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936]],
+      emit:'E1', outs:[['E1','U1'],['E1','U4']], label:'首页'
+    },
+    chat:{
+      n:['T3','O1','P1','P2','P3','P4','R1','R2','R3','R5','R4','R6','J1','J2','J3','J4','C1','E4','U5'],
+      m:['M1','M2','M3','M5'], trig:['T3'], fan:['P1','P2','P3','P4'],
+      rs:[['R1','R2'],['R3','R2'],['R3','R5'],['R4','R5']], bi:['R2','R5'],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936],['r2','M5','GR',472]],
+      emit:'E4', outs:[['E4','U5']], label:'AI 对话'
+    },
+    stock:{
+      n:['T3','O1','P1','P2','P3','R1','R2','R3','R5','R4','J1','J2','J3','J4','C1','E2','U2'],
+      m:['M1','M2','M3','M5'], trig:['T3'], fan:['P1','P2','P3'],
+      rs:[['R1','R2'],['R3','R2'],['R3','R5'],['R4','R5']], bi:['R2','R5'],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936],['r2','M5','GR',472]],
+      emit:'E2', outs:[['E2','U2']], label:'个股详情'
+    },
+    pick:{
+      n:['T3','O1','P1','P2','P3','R1','R2','R4','R5','J1','J2','J3','J4','C1','E5','U6'],
+      m:['M1','M2','M3'], trig:['T3'], fan:['P1','P2','P3'],
+      rs:[['R1','R2'],['R4','R5']], bi:['R2','R5'],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936]],
+      emit:'E5', outs:[['E5','U6']], label:'选股'
+    },
+    trace:{
+      n:['T1','T3','O1','P1','P2','P3','R1','R2','R3','R6','J1','J2','J3','J4','C1','E1','U1'],
+      m:['M1','M2','M3'], trig:['T1','T3'], fan:['P1','P2','P3'],
+      rs:[['R1','R2'],['R3','R2']],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936]],
+      emit:'E1', outs:[['E1','U1']], label:'大盘溯源'
+    },
+    alert:{
+      n:['T1','T2','T3','O1','P1','P2','R2','R3','R5','J1','J2','J3','J4','C1','E3','U4'],
+      m:['M1','M2','M3'], trig:['T1','T2','T3'], fan:['P1','P2'],
+      rs:[['R3','R2'],['R3','R5']], bi:['R2','R5'],
+      mem:[['w','GP','M1'],['r','M1','GR',408],['w','GR','M2'],['r','M2','GJ',594],['w','GJ','M3'],['r','M3','GE',936]],
+      emit:'E3', outs:[['E3','U4']], label:'提醒'
+    }
+  };
+  var BOX={};
+  function buildBox(id){
+    var d=N[id], ln=LM[d[0]], y=86+ORDER[d[0]].indexOf(id)*64;
+    BOX[id]={x:ln.x+10,y:y,w:ln.w-20,h:50,cx:ln.x+ln.w/2,cy:y+25,x2:ln.x+ln.w-10,y2:y+50};
+  }
+  Object.keys(N).forEach(buildBox);
+
+  function P(d,color,mk,dash,start){
+    return '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"'
+      +(mk?' marker-end="url(#'+mk+')"':'')+(start?' marker-start="url(#'+start+')"':'')
+      +(dash?' stroke-dasharray="4 4"':'')+'/>';
+  }
+  var BLUE='#0b5fff', TEAL='#0f766e', VIOLET='#7c3aed', GRAY='#94a3b8';
+
+  function render(key){
+    var g=G[key], out=[], bg=[], memL=[], ed=[], nodes=[], texts=[];
+    out.push('<svg viewBox="0 0 1240 720" role="img" aria-label="'+g.label+'功能链路图：只包含该功能涉及的目标架构节点">');
+    out.push('<rect x="0" y="0" width="1240" height="720" fill="#ffffff"/>');
+
+    LANES.forEach(function(l){
+      bg.push('<rect x="'+l.x+'" y="50" width="'+l.w+'" height="430" rx="12" fill="#fbfcfe" stroke="#e9eef6"/>');
+      texts.push('<text x="'+(l.x+10)+'" y="68" font-size="9.6" font-weight="800" fill="'+l.c+'">'+l.t+'</text>');
+    });
+    bg.push('<rect x="14" y="492" width="152" height="62" rx="10" fill="#f8fafc" stroke="#dbe3ee"/>');
+    texts.push('<text x="26" y="511" font-size="9.6" font-weight="800" fill="#475569">GX 工具带</text>');
+    texts.push('<text x="26" y="527" font-size="8.4" fill="#64748b">24 个 StructuredTool</text>');
+    texts.push('<text x="26" y="541" font-size="8.4" fill="#94a3b8">供 P* / R* 取数</text>');
+
+    bg.push('<rect x="14" y="566" width="1212" height="138" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>');
+    texts.push('<text x="26" y="585" font-size="9.8" font-weight="800" fill="#475569">GM 记忆 / 治理 · 全图共享（唯一证据与研判账本）</text>');
+
+    Object.keys(M).forEach(function(k){
+      var m=M[k], used=g.m.indexOf(k)>=0;
+      bg.push('<rect x="'+m.x+'" y="594" width="'+m.w+'" height="98" rx="9" fill="'+(used?'#ffffff':'#fbfcfe')+'" stroke="'+(used?'#cbd5e1':'#e9eef6')+'"'+(used?'':' stroke-dasharray="4 4"')+'/>');
+      if(used){
+        texts.push('<text x="'+(m.x+12)+'" y="615" font-size="10.4" font-weight="800" fill="#0f172a">'+m.t+'</text>');
+        texts.push('<text x="'+(m.x+12)+'" y="632" font-size="8.4" fill="#64748b">'+m.s+'</text>');
+      }else{
+        texts.push('<text x="'+(m.x+m.w/2)+'" y="648" font-size="8.2" fill="#cbd5e1" text-anchor="middle">未涉及</text>');
+      }
+    });
+
+    // 触发 → O1（合并成一条总线）
+    var o=BOX.O1, bxx=19, cys=g.trig.map(function(t){return BOX[t].cy;});
+    g.trig.forEach(function(t){ ed.push(P('M'+BOX[t].x+','+BOX[t].cy+' H'+bxx,BLUE)); });
+    ed.push(P('M'+bxx+','+Math.min.apply(null,cys)+' V'+o.cy,BLUE));
+    ed.push(P('M'+bxx+','+o.cy+' H'+o.x,BLUE,'mk-blue'));
+
+    // O1 → P*
+    var tx=170;
+    g.fan.forEach(function(t){
+      var b=BOX[t];
+      ed.push(P('M'+o.x2+','+o.cy+' H'+tx+' V'+b.cy+' H'+b.x,BLUE,'mk-blue'));
+    });
+
+    // 研究层联动
+    (g.rs||[]).forEach(function(e){
+      var a=BOX[e[0]], b=BOX[e[1]];
+      if(b.cy>a.cy) ed.push(P('M'+a.cx+','+a.y2+' V'+b.y,TEAL,'mk-teal'));
+      else ed.push(P('M'+(a.cx+24)+','+a.y+' V'+b.y2,TEAL,'mk-teal'));
+    });
+    if(g.bi){
+      var ba=BOX[g.bi[0]], bb=BOX[g.bi[1]], lx=ba.x-6;
+      ed.push(P('M'+ba.x+','+ba.cy+' H'+lx+' V'+bb.cy+' H'+bb.x,TEAL,'mk-teal',false,'mk-teal'));
+    }
+
+    // J1 / J2 → J3 合并总线；J3 → J4
+    var j3=BOX.J3, jbx=709, jcys=[BOX.J1.cy,BOX.J2.cy];
+    [BOX.J1,BOX.J2].forEach(function(a){ ed.push(P('M'+a.x2+','+a.cy+' H'+jbx,BLUE)); });
+    ed.push(P('M'+jbx+','+Math.min.apply(null,jcys)+' V'+j3.cy,BLUE));
+    ed.push(P('M'+jbx+','+j3.cy+' H'+j3.x2,BLUE,'mk-blue'));
+    ed.push(P('M'+j3.cx+','+j3.y2+' V'+BOX.J4.y,BLUE,'mk-blue'));
+
+    // C1 → J4 校准
+    ed.push(P('M'+BOX.C1.x+','+BOX.C1.cy+' H718 V'+BOX.J4.cy+' H'+BOX.J4.x2,VIOLET,'mk-violet',true));
+
+    // J4 → E*
+    if(g.emit){
+      var e=BOX[g.emit];
+      ed.push(P('M'+BOX.J4.x2+','+BOX.J4.cy+' H876 V'+e.cy+' H'+e.x,BLUE,'mk-blue'));
+      texts.push('<text x="790" y="'+(BOX.J4.cy-6)+'" font-size="8" font-weight="700" fill="#0b5fff" text-anchor="middle">judgment_id</text>');
+    }
+
+    // E* → U*
+    var ux=1054;
+    (g.outs||[]).forEach(function(p){
+      var a=BOX[p[0]], b=BOX[p[1]];
+      if(Math.abs(a.cy-b.cy)<1) ed.push(P('M'+a.x2+','+a.cy+' H'+b.x,BLUE,'mk-blue'));
+      else ed.push(P('M'+a.x2+','+a.cy+' H'+ux+' V'+b.cy+' H'+b.x,BLUE,'mk-blue'));
+    });
+
+    // 账本读写
+    (g.mem||[]).forEach(function(it){
+      if(it[0]==='w'){
+        var lane=LM[it[1]], m=M[it[2]], wx=lane.x+lane.w/2+18;
+        ed.push(P('M'+wx+',480 V594',GRAY,'mk-gray',true));
+        texts.push('<text x="'+(wx+5)+'" y="506" font-size="8" fill="'+GRAY+'">写</text>');
+      }else{
+        var mm=M[it[1]], lane2=LM[it[2]], ex=it[3], cy=(it[0]==='r2')?552:540;
+        ed.push(P('M'+(mm.x+mm.w/2-18)+',594 V'+cy+' H'+ex+' V480',GRAY,'mk-gray',true));
+        texts.push('<text x="'+(ex+6)+'" y="466" font-size="8" fill="'+GRAY+'">读</text>');
+      }
+    });
+
+    // 节点
+    g.n.forEach(function(id){
+      var b=BOX[id], d=N[id], ln=LM[d[0]], bw=10+d[3].length*4.6;
+      nodes.push('<rect x="'+b.x+'" y="'+b.y+'" width="'+b.w+'" height="'+b.h+'" rx="8" fill="#ffffff" stroke="#dbe3ee"/>');
+      nodes.push('<rect x="'+b.x+'" y="'+b.y+'" width="3.5" height="'+b.h+'" rx="1.75" fill="'+ln.c+'"/>');
+      nodes.push('<text x="'+(b.x+11)+'" y="'+(b.y+20)+'" font-size="10.8" font-weight="800" fill="#0f172a">'+d[1]+'</text>');
+      nodes.push('<text x="'+(b.x+11)+'" y="'+(b.y+34)+'" font-size="8.4" fill="#64748b">'+d[2]+'</text>');
+      if(d[3]){
+        var x0=b.x+b.w-8-bw;
+        nodes.push('<rect x="'+x0+'" y="'+(b.y+5)+'" width="'+bw+'" height="13" rx="6.5" fill="#f1f5f9" stroke="#dbe3ee"/>');
+        nodes.push('<text x="'+(x0+bw/2)+'" y="'+(b.y+14.4)+'" font-size="7.6" text-anchor="middle" fill="#475569">'+d[3]+'</text>');
+      }
+    });
+
+    // 选股：GO 缺口已在设计图补齐（E5 / U6），不再画虚线框
+
+    out=out.concat(bg,ed,texts,nodes);
+    out.push('</svg>');
+    return out.join('');
+  }
+
+  document.querySelectorAll('.arch-graph[data-graph]').forEach(function(el){
+    var key=el.getAttribute('data-graph');
+    if(G[key]) el.innerHTML=render(key);
+  });
+})();
+</script>
+</main>
+</body>
+</html>

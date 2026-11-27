@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Stock · 智慧大脑 V3 分层结构图</title>
+<style>
+  :root{
+    --bg:#070d18;--panel:#0a1322;--card:#111a2c;--card2:#151f35;
+    --line:#1e2b45;--line2:#2b3a56;--text:#e6edf7;--muted:#8fa3c0;--dim:#5f7291;
+    --in:#38bdf8;--or:#a78bfa;--se:#34d399;--kb:#fbbf24;--ag:#f472b6;
+    --ca:#22d3ee;--db:#fb7185;--mt:#c084fc;--ex:#4ade80;--ui:#94a3b8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;font-size:13px}
+  .top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:18px;padding:12px 22px;background:rgba(8,14,26,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+  .brand b{font-size:15px;letter-spacing:.4px}
+  .brand span{display:block;font-size:11px;color:var(--muted);margin-top:2px}
+  .tabs{display:flex;gap:5px;background:#0d1728;border:1px solid var(--line);border-radius:9px;padding:4px}
+  .tab{border:0;background:transparent;color:var(--muted);padding:6px 13px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:inherit}
+  .tab.active{background:#1b2a46;color:#fff}
+  .hint{margin-left:auto;font-size:11px;color:var(--dim);text-align:right;line-height:1.5}
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) 370px;min-height:calc(100vh - 60px)}
+  .stage{padding:18px 20px 60px;min-width:0}
+  .view{display:none}.view.active{display:block}
+  .lead{display:flex;align-items:flex-end;gap:14px;margin:0 0 12px}
+  .lead h1{font-size:17px;margin:0}
+  .lead p{margin:0;font-size:12px;color:var(--muted);line-height:1.6}
+  .legend{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+  .legend span{font-size:11px;color:#9fb2cf;border:1px solid var(--line2);background:#0d1728;border-radius:999px;padding:3px 9px}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+  .layer{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,#0c1526,#091120);padding:12px;margin:0 0 8px}
+  .layer-head{display:flex;flex-direction:column;gap:3px;padding:4px 2px}
+  .layer-head .no{font-size:18px;font-weight:800;line-height:1}
+  .layer-head .name{font-size:13.5px;font-weight:700}
+  .layer-head .prefix{font-size:10.5px;letter-spacing:1.2px;font-weight:700;color:var(--c)}
+  .layer-head .owner{font-size:10.5px;color:var(--dim);margin-top:4px}
+  .nodes{display:flex;flex-wrap:wrap;gap:8px;align-content:flex-start}
+  .node{position:relative;width:154px;min-height:74px;text-align:left;border:1px solid var(--line2);background:linear-gradient(180deg,var(--card2),var(--card));border-radius:9px;padding:8px 9px 7px 11px;cursor:pointer;font-family:inherit;color:var(--text);transition:.14s;overflow:hidden}
+  .node:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--c)}
+  .node:hover{border-color:var(--c);transform:translateY(-1px);box-shadow:0 8px 22px rgba(0,0,0,.35)}
+  .node.sel{border-color:var(--c);box-shadow:0 0 0 1px var(--c)}
+  .node .id{font-size:9.6px;letter-spacing:.6px;font-weight:800;color:var(--c)}
+  .node .nm{font-size:12.4px;font-weight:700;margin-top:2px;line-height:1.25}
+  .node .sb{font-size:10.4px;color:#93a6c4;line-height:1.35;margin-top:3px}
+  .kind{font-size:8.4px;padding:0 4px;border-radius:3px;border:1px solid currentColor;margin-left:4px;vertical-align:1px;letter-spacing:.3px;font-weight:700}
+  .kind.agent{color:#f472b6}
+  .kind.tool{color:#22d3ee}
+  .kind.llm{color:#fb7185}
+  .rt-row{display:flex;align-items:baseline;gap:10px;border-left:2px solid #1e2b45;padding:6px 10px;margin-left:6px}
+  .rt-row.agent{border-left-color:#f472b6;background:rgba(244,114,182,.05)}
+  .rt-row.offline{border-left-color:#c084fc;background:rgba(192,132,252,.05)}
+  .rt-id{font-family:Consolas,"Courier New",monospace;font-size:12px;color:#e6edf7;font-weight:700}
+  .rt-note{font-size:11.3px;color:#8fa3c0}
+  .rt-deliver{margin-left:auto;font-size:10.5px;color:#5eead4;white-space:nowrap}
+  .rt-sep{margin:14px 0 8px;font-size:11px;color:#8fa3c0;letter-spacing:1px;border-top:1px dashed #2b3a56;padding-top:10px}
+  .ph-tree{font-family:Consolas,"Courier New",monospace;font-size:12.2px;line-height:1.9;color:#cfe0f6;background:#0a1727;border:1px solid #1b2b45;border-radius:10px;padding:14px 16px}
+  .code-block{font-family:Consolas,"Courier New",monospace;font-size:11.5px;line-height:1.75;color:#9fd8e8;background:#0a1727;border:1px solid #1b2b45;border-radius:10px;padding:14px 16px;overflow:auto;margin:0}
+  .arrow{display:flex;justify-content:center;align-items:center;height:22px;color:#3b4f74;font-size:13px}
+  .inspector{position:sticky;top:60px;height:calc(100vh - 60px);overflow:auto;border-left:1px solid var(--line);background:linear-gradient(180deg,#0a1322,#08101d);padding:22px 22px 40px}
+  .inspector .kicker{font-size:10px;letter-spacing:1.2px;font-weight:800;text-transform:uppercase}
+  .inspector h2{font-size:19px;margin:5px 0 2px;line-height:1.3}
+  .inspector .sub{color:var(--muted);font-size:12px;margin:0 0 16px;line-height:1.55}
+  .sec{border-top:1px solid #17233a;padding-top:10px;margin:0 0 13px}
+  .sec h3{font-size:10.5px;color:#8fa3c0;margin:0 0 4px;letter-spacing:.7px}
+  .sec p{margin:0;font-size:12.3px;line-height:1.7;color:#cfdcef}
+  .empty{color:var(--muted);font-size:12.5px;line-height:1.8}
+  .empty b{color:#cfe0f6}
+  table{width:100%;border-collapse:collapse;font-size:11.8px}
+  th,td{border:1px solid #1c2a44;padding:7px 8px;text-align:left;vertical-align:top;line-height:1.55}
+  th{background:#0d1728;color:#9fb2cf;font-weight:700;font-size:11px}
+  td b{color:#e6edf7}
+  .tag{display:inline-block;font-size:9.8px;padding:1px 6px;border-radius:999px;border:1px solid #2a3d5c;color:#9fb2cf;margin-right:4px;white-space:nowrap}
+  .mono{font-family:Consolas,"Courier New",monospace;font-size:11px;color:#7dd3fc}
+  .note{margin:12px 0 0;padding:10px 12px;border:1px solid #1d3a4a;background:#0b1b26;border-radius:8px;color:#9fd8e8;font-size:11.6px;line-height:1.65}
+  .group-card{border:1px solid var(--line2);border-radius:12px;background:linear-gradient(180deg,#111a2c,#0c1526);padding:14px 16px;margin:0 0 10px}
+  .group-card h3{margin:0 0 6px;font-size:14px}
+  .group-card .who{font-size:11px;color:var(--dim);margin:0 0 8px}
+  .group-card p{margin:4px 0;font-size:12.2px;color:#c3d4e8;line-height:1.6}
+  @media(max-width:1100px){.wrap{grid-template-columns:1fr}.inspector{position:static;height:auto;border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand"><b>智慧大脑 V3 · 分层结构图</b><span>按“谁负责”分层 · 命名按前缀归组 · 一张图看懂</span></div>
+  <div class="tabs">
+    <button class="tab active" data-view="map">① 分层图</button>
+    <button class="tab" data-view="runtime">② 运行时链路</button>
+    <button class="tab" data-view="stack">③ Agent 与工具</button>
+    <button class="tab" data-view="collab">④ 协作与迁移</button>
+    <button class="tab" data-view="team">⑤ 分工表</button>
+    <button class="tab" data-view="rename">⑥ 更名映射</button>
+  </div>
+  <div class="hint">点击任意节点看职责<br>旧版 V2 图仅作历史参考</div>
+</div>
+
+<div class="wrap">
+  <div class="stage">
+    <section class="view active" id="view-map">
+      <div class="lead">
+        <h1>九层一张图：数据从哪来、谁在思考、谁签字、谁展示</h1>
+        <p>同层内节点可并行开发；层与层之间只认四种交付物：证据、论点、研判、渲染包。</p>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--in)"></i>IN 触发</span>
+        <span><i style="background:var(--or)"></i>OR 编排</span>
+        <span><i style="background:var(--se)"></i>SE 感知</span>
+        <span><i style="background:var(--kb)"></i>KB 记忆</span>
+        <span><i style="background:var(--ag)"></i>AG 研究 agent</span>
+        <span><i style="background:var(--ca)"></i>CA 计算</span>
+        <span><i style="background:var(--db)"></i>DB 研判</span>
+        <span><i style="background:var(--mt)"></i>MT 学习</span>
+        <span><i style="background:var(--ex)"></i>EX 表达</span>
+        <span><i style="background:var(--ui)"></i>UI 出口</span>
+      </div>
+      <div id="layers"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">目录：运行时 brain_v3/ 与离线 brain_evals/</h2>
+      <pre class="code-block">brain_v3/     运行时，打进生产镜像
+  contracts/    Pydantic 模型（唯一事实源）+ 生成的 JSON Schema（禁止手改）
+  graph/        主图装配、profile、运行入口
+  nodes/        规则层：感知、裁决、落账、渲染
+  probes/       wind / event / capital / fundamental / macro
+  tools/        app-api 内部接口的统一客户端 + run 级 memo（唯一取数入口）
+  adapters/     临时：包装旧 worker 输出为 claim（标注删除日期）
+  registry.yaml 手动登记表（唯一事实源）
+  registry.lock 生成的拓扑指纹基线（禁止手改）
+
+brain_evals/  离线，不进生产镜像、不被 brain_v3 运行时代码 import
+  cases/        判断质量评测集、规则回归集（rules_cause_cases.json）
+  replay/       历史回放、影子对照
+  ab/           A/B 脚本与配对统计
+  metrics/      run 级度量汇总、trace、成本读取</pre>
+      <div class="note">注册只认 registry.yaml：手动登记 + <code>python -m brain_v3.registry --check</code> 双向校验 + registry.lock 拓扑指纹（id + deps + required_for + profiles.needs|optional 的 sha256）。固定节点 market_perception / event_perception / conflict_resolver / judgment_writer / briefing_writer 不登记，用保留 ID。</div>
+      <div class="note">证据身份为 (source_type, source_id, snapshot_id)，subject 不进唯一键、可为空；snapshot_id = snap_{YYYYMMDD}_{HHMM} 由 OR-RUN 在 run 启动时生成、同 run 共用；evidence_id = ev_{source_type}_{sha1(source_id|snapshot_id)[:12]}。</div>
+    </section>
+
+    <section class="view" id="view-runtime">
+      <div class="lead">
+        <h1>一次 run 的完整链路：从触发到出口，节点之间怎么连</h1>
+        <p>缩进表示调用关系；箭头上的字是交付物。研究层内部是唯一有循环的地方，且是目标驱动的有限轮循环（契约见 §4.2.1）。</p>
+      </div>
+      <div id="runtime"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">状态模型：结论完整性 / 停止原因 / 缺失清单</h2>
+      <table>
+        <thead><tr><th>名称</th><th>层级</th><th>取值</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td><b>probe status</b></td><td>probe</td><td>只 <span class="mono">ok</span>，或抛可分类错误（timeout / empty / schema_mismatch / not_implemented）</td><td>probe 不声明 partial / degraded / insufficient，降级权归主控</td></tr>
+          <tr><td><b>run status</b></td><td>run</td><td><span class="mono">ok / partial / insufficient</span></td><td>只表达结论完整性：ok = 必查全成功（可选缺失只记录）；partial = 必查缺失但有结论；insufficient = 必查缺失且无结论</td></tr>
+          <tr><td><b>stop_reason</b></td><td>run</td><td><span class="mono">complete / budget / timeout / error</span></td><td>与 status 正交；预算触顶只记 budget，不改变 status、不计入 partial 率</td></tr>
+          <tr><td><b>missing_probes</b></td><td>run（数组）</td><td><span class="mono">[{id, required, reason}]</span></td><td>缺了谁、是否必查；required=true 的缺失决定 partial / insufficient</td></tr>
+        </tbody>
+      </table>
+      <h2 style="font-size:15px;margin:22px 0 8px">研究循环：目标驱动，而不是跑完节点就交卷</h2>
+      <table>
+        <thead><tr><th>状态</th><th>做什么</th><th>交付物</th></tr></thead>
+        <tbody>
+          <tr><td><b>PLAN</b></td><td>AG-LEAD 出 ResearchPlan：问题、假设（含反方）、必查 / 可选、充分性判据、max_rounds=2（硬上限 3）/ max_depth=2</td><td>plan</td></tr>
+          <tr><td><b>DISPATCH</b></td><td>按 plan 用 Send 动态扇出到 probe；请求带 objective / output_format / source_hint / boundaries</td><td>ResearchRequest</td></tr>
+          <tr><td><b>COLLECT</b></td><td>reducer 合并 claims / evidence / gaps；只回引用，正文落 KB</td><td>ResearchResponse</td></tr>
+          <tr><td><b>ASSESS</b></td><td>确定性 SufficiencyCheck，是唯一岔路口；同时写进度账本</td><td>SufficiencyReport + RoundLedger</td></tr>
+          <tr><td><b>REPLAN</b></td><td>仅由 Gap 触发；stall=3 时重置计划（reset 上限 2），只走请求队列 + OR-ROUTER</td><td>新 ResearchRequest</td></tr>
+          <tr><td><b>JUDGE → WRITE</b></td><td>判据满足、收敛或耗尽后裁决落账</td><td>Judgment</td></tr>
+        </tbody>
+      </table>
+      <div class="note">回查三类目标：上游节点重跑（快照过期）、同级 probe 补证（必须带 evidence_ids）、GX 换源换日期。去重键 (target, question, as_of, stage)；请求树出现 A→B→A 立即停止并标 circular_request；禁止 probe 直接调用另一个 probe。研究树字段 request_id / parent_request_id / round / purpose 进 trace。</div>
+      <div class="note">停止条件按优先级：判据满足 → 预算 / 轮次耗尽（stop_reason=budget）→ 连续两轮无新增证据或候选排序稳定 → Gap 无法补齐（insufficient）。默认两轮，只有候选分歧大 + 关键缺口 + 预算充足才开第 3 轮；固定跑满 3 轮视为失败（多 agent 约 15x token）。</div>
+      <div class="note">拓扑按档位选：大盘归因 / 风口扫描用"主控 + 并行 probe"；个股问答 / 单事件解读用单 agent + 工具。不为了形式统一强行上多 agent。</div>
+      <div class="note">AG-LEAD 阶段标记：第一周为受限两轮主控（ResearchPlan + Gap 驱动 + 固定必查），第二周开放同级回查 / 上游重跑与自由 ReAct；Deep Agents 只作为 D6 spike 评估项，不直接进主链；超时与错误控制用节点级 TimeoutPolicy + error_handler，asyncio.wait_for 只作外层保险。</div>
+    </section>
+
+    <section class="view" id="view-stack">
+      <div class="lead">
+        <h1>谁是 agent、谁只是工具：harness 参数与 LangChain 用法</h1>
+        <p>只有 6 类节点跑循环；其余是规则、工具、单次 LLM 或渲染。</p>
+      </div>
+      <div id="agents"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">工具箱：三层权限</h2>
+      <div id="toolbox"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">LangChain / LangGraph 用在哪</h2>
+      <div id="langchain"></div>
+    </section>
+
+    <section class="view" id="view-collab">
+      <div class="lead">
+        <h1>协作模式与迁移方式：哪种能用、用在哪</h1>
+        <p>主链只用可追责的模式；Peer 与招标各有明确边界。</p>
+      </div>
+      <div id="collab"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">评测与 A/B：同图双 profile</h2>
+      <table>
+        <thead><tr><th>项</th><th>口径</th></tr></thead>
+        <tbody>
+          <tr><td><b>拓扑 A / B</b></td><td>同一张图的两个 profile：A = all_probes（强制全跑）；B = required_scope（只跑档位声明的必查 / 可选，确定性选择，不含 LLM 自主加查）</td></tr>
+          <tr><td><b>样本</b></td><td>brain_evals/cases/ 录制集，按 published_at ≤ as_of 冻结；第一周只做 market_review 10 条</td></tr>
+          <tr><td><b>判定门槛</b></td><td>配对比较仅 n ≥ 30 执行；n = 10 只记录方向性观察，不判定</td></tr>
+          <tr><td><b>时间线</b></td><td>方向命中依赖 T+3 客观结果，最早 D10 才判定；D7 只定 A/B 时间与样本</td></tr>
+          <tr><td><b>指标</b></td><td>方向命中（T+3）、主因盲评、证据引用率、token、P95、partial / insufficient 率、stop_reason 分布、degraded 率，分别统计不混算</td></tr>
+        </tbody>
+      </table>
+      <div class="note">24 题降级为规则回归集（改名 rules_cause_cases.json，只测 classify_primary_cause 阈值），不再作 A/B 判据；作废“24 题 + 差值 ≤ 3pp”。设计详见改进方案 §3.7。</div>
+      <h2 style="font-size:15px;margin:22px 0 8px">溯源不是一条链，是一张现象图</h2>
+      <div id="phenomenon"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">市场溯源：4 个候选 × 同一条 6 阶段链</h2>
+      <table>
+        <thead><tr><th>段</th><th>回答什么</th><th>缺了怎么办</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">structural_root</span></td><td>慢变量 / 结构性背景：估值分位、盈利周期、政策周期</td><td rowspan="6">产出 <span class="mono">Gap(kind=missing_data, target_hint=阶段)</span>，下一轮定向补该段，而不是"再查一遍"</td></tr>
+          <tr><td><span class="mono">trigger</span></td><td>当日触发：事件、外围市场、数据发布</td></tr>
+          <tr><td><span class="mono">transmission</span></td><td>怎么传导：利率 / 汇率 / 风险偏好 / 产业链机制</td></tr>
+          <tr><td><span class="mono">exposure</span></td><td>谁在暴露：行业权重、外资 / 两融 / ETF 持仓</td></tr>
+          <tr><td><span class="mono">repricing</span></td><td>价格怎么重估：板块与个股涨跌结构、成交</td></tr>
+          <tr><td><span class="mono">observable_result</span></td><td>可观察结果：指数、成交额、涨跌家数</td></tr>
+        </tbody>
+      </table>
+      <div class="note">4 类候选（global_risk_liquidity / domestic_macro_policy / industry_technology_supply / market_positioning_liquidity）各自走完六段，最后由 DB-JUDGE 选主因 / 次因 / 被否；六阶段是表达与校验契约，不是六个 agent。CausalNode 必带 stage + evidence_ids，缺证据的节点不得标 supported。</div>
+      <h2 style="font-size:15px;margin:22px 0 8px">选型复核：哪些方案不用、哪些改用替代</h2>
+      <table>
+        <thead><tr><th>选项</th><th>优点</th><th>不采用 / 调整的理由</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td>CrewAI / AutoGen 进主链</td><td>角色与团队抽象开箱，对话式协作成熟</td><td>多一套运行时与状态；确定性路由弱；单写入口与审计难保证</td><td>主链不用；CrewAI 仅离线（MT-EVOLVE / MT-REFLECT）</td></tr>
+          <tr><td>Deep Agents 整包</td><td>todo / 子 agent / 上下文压缩开箱，跑在 LangGraph 上</td><td>agent 可自主写记忆；工具权限与预算闸门要额外 middleware</td><td>两阶段 + D6 spike；主用 AG-LEAD，离线可给 MT-EVOLVE / MT-REFLECT</td></tr>
+          <tr><td>端到端 RL 研究 agent</td><td>长程检索强，能学"何时继续查"</td><td>需大量轨迹与 RL 基建；不可审计；内网结构化数据不匹配</td><td>改小模型判别器 + 轨迹蒸馏</td></tr>
+          <tr><td>异步子 agent</td><td>降延迟，可动态补派</td><td>一致性、回放、预算归因复杂；同步已满足 90s</td><td>第一周不做，预留 seam</td></tr>
+          <tr><td>统一单 agent</td><td>token 省，责任清晰</td><td>广度易漏，上下文易爆</td><td>仅 narrow 档位</td></tr>
+          <tr><td>统一多 agent</td><td>广度覆盖强</td><td>约 15x token，协调复杂</td><td>仅 breadth 档位</td></tr>
+        </tbody>
+      </table>
+      <h2 style="font-size:15px;margin:22px 0 8px">迁移：Strangler Fig 三阶段</h2>
+      <div id="migration"></div>
+      <h2 style="font-size:15px;margin:22px 0 8px">代码归属：CODEOWNERS</h2>
+      <div id="codeowners"></div>
+    </section>
+
+    <section class="view" id="view-team">
+      <div class="lead">
+        <h1>六个开发组：按前缀分边界，按交付物对接</h1>
+        <p>每组只改自己前缀下的节点；跨组改动必须走契约，不直接读对方内部实现。</p>
+      </div>
+      <div id="teams"></div>
+    </section>
+
+    <section class="view" id="view-rename">
+      <div class="lead">
+        <h1>更名映射表：旧代号 → 新代号</h1>
+        <p>旧图里的 T/O/G/P/M/R/J/C/E/U 全部废弃；新代号第一段是层，第二段是角色。</p>
+      </div>
+      <div id="renames"></div>
+    </section>
+  </div>
+
+  <aside class="inspector" id="inspector">
+    <div class="empty" id="empty">
+      <b>点击左侧任意节点</b><br>
+      这里会显示：<br>
+      · 它负责什么<br>
+      · 输入 / 输出是什么<br>
+      · 代码落在哪个文件<br>
+      · 归哪个组维护<br>
+      · 相对现状改了什么
+    </div>
+    <div id="detail" style="display:none"></div>
+  </aside>
+</div>
+
+<script>
+const LAYERS = [
+  {
+    no:'①', name:'触发层', prefix:'IN', owner:'编排组', color:'var(--in)',
+    desc:'谁在什么时刻叫醒系统',
+    nodes:[
+      {id:'IN-TIME', name:'时段触发', sub:'早盘 / 午间 / 收盘 / 夜间', owner:'编排组',
+       code:'agent-py api/tasks.py + app-api cron',
+       duty:'按交易日历在固定时刻发起 run：盘前 08:00、午间 11:35、收盘 15:05、夜间反思 22:00。',
+       input:'交易日历、当前时段', output:'带 window 的 run 触发', change:'现状散落在各 cron，目标统一成一个触发入口。'},
+      {id:'IN-EVENT', name:'事件触发', sub:'异动 / 新闻 / 公告', owner:'编排组',
+       code:'app-api StockTraceCron + agent-py api/routes.py',
+       duty:'价格异动、突发新闻、公告落地时发起加急 run，带 event_id，避免重复处理。',
+       input:'异动检测、新闻流、公告', output:'带 event_id 的 run 触发', change:'现状 consumer 直接调 worker，目标只发触发。'},
+      {id:'IN-USER', name:'用户触发', sub:'个股 / 板块 / 对话', owner:'编排组',
+       code:'agent-py api/routes.py',
+       duty:'用户点开个股、板块或发起对话时触发按需 run，带 subject。',
+       input:'用户请求', output:'带 subject 的 run 触发', change:'从“实时拼报告”改成“读账本 + 必要时补一次研究”。'},
+      {id:'IN-VERIFY', name:'验证触发', sub:'due+3 到期', owner:'编排组',
+       code:'app-api prediction verify + agent-py 定时',
+       duty:'扫描到期研判和预测，发起验证 run，把结果回填账本。',
+       input:'verify_at 到期记录', output:'带 judgment_id 的 run 触发', change:'现状分散在 prediction 和 review，目标统一入口。'}
+    ]
+  },
+  {
+    no:'②', name:'编排层', prefix:'OR', owner:'编排组', color:'var(--or)',
+    desc:'跑不跑、跑哪档、给多少预算、能用什么工具',
+    nodes:[
+      {id:'OR-RUN', name:'运行编排', sub:'选档 · 预算 · 扇出', owner:'编排组',
+       code:'brain_v3/graph/orchestrator.py（profile 选档在 graph/profiles.py）',
+       duty:'根据触发源和标的选运行档位，分配 token / 步数 / 超时预算，决定哪些节点并行。',
+       input:'触发类型 + subject + 预算', output:'RunBrief', change:'现状没有统一编排，目标把选档收敛到一个地方。'},
+      {id:'OR-PROFILE', name:'档位模板', sub:'必查 · 快慢档 · 降级', owner:'编排组',
+       code:'brain_v3/graph/profiles.py',
+       duty:'定义大盘复盘、个股问答、板块溯源、事件解读、对话等档位的必查项、可选 probe、fast/slow 模式与降级策略。',
+       input:'档位名', output:'必查清单 + 预算 + 输出 schema', change:'现状硬编码在各 worker，目标变成配置表。'},
+      {id:'OR-SCOPE', name:'工具权限', sub:'公共 / 角色 / 借用 / 敏感', owner:'编排组',
+       code:'brain_v3/registry.yaml + python -m brain_v3.registry --check + registry.lock',
+       duty:'按角色发工具：公共箱人人可用，角色箱只给本职，跨箱写借用条并记 trace，账本/推送属敏感箱。',
+       input:'角色 + 档位', output:'允许调用的工具清单', change:'现状 get_tools(category) 是运行时白名单，TOOL_BAND 只声明未强制，目标要真正拦截；probe 注册改 registry.yaml 手动登记 + --check 双向校验 + registry.lock 拓扑指纹。'}
+    ]
+  },
+  {
+    no:'③', name:'感知层', prefix:'SE', owner:'数据组', color:'var(--se)',
+    desc:'把外部世界变成可引用的证据，只取一次',
+    nodes:[
+      {id:'SE-MARKET', name:'行情感知', sub:'指数 / 成交额 / 涨跌家数', owner:'数据组',
+       code:'brain_v3/nodes/perception.py + app-api /internal/market/quick-snapshot',
+       duty:'拉取指数 K 线、成交额、涨跌家数、板块涨幅，写成市场证据。',
+       input:'app-api 行情接口', output:'evidence（market）', change:'现状各 worker 各自取数，目标只取一次全图共用。'},
+      {id:'SE-EVENT', name:'事件感知', sub:'新闻 / 公告 / 研报', owner:'数据组',
+       code:'app-api /internal/news/* + ClsStockNewsService',
+       duty:'收新闻、公告、研报，去重，整理成事件主记录。',
+       input:'新闻源、公告源', output:'evidence（event）+ 事件主记录', change:'现状散在各 worker，目标统一去重。'},
+      {id:'SE-ENTITY', name:'实体感知', sub:'公司 / 板块 / 产业链', owner:'数据组',
+       code:'app-api event-entities + event_node_mappings',
+       duty:'把事件链接到具体公司、板块、产业链节点，维护唯一归属。',
+       input:'事件主记录', output:'evidence（entity）', change:'现状各模块各猜一套归属，目标只维护一份。'},
+      {id:'SE-USER', name:'用户感知', sub:'自选 / 持仓 / 偏好', owner:'数据组',
+       code:'app-api favorites + user context',
+       duty:'读取用户自选、持仓、浏览偏好，作为对话与推送的上下文。',
+       input:'用户数据', output:'evidence（user_context）', change:'现状对话临时查，目标变成显式证据。'}
+    ]
+  },
+  {
+    no:'④', name:'记忆层', prefix:'KB', owner:'数据组（持久化）+ 编排组（投影）', color:'var(--kb)',
+    desc:'全系统共用的一套账本，只能追加，不能覆盖',
+    nodes:[
+      {id:'KB-EVIDENCE', name:'证据账本', sub:'append-only + 来源', owner:'数据组',
+       code:'agent-py state.evidence + app-api brain_run_archives',
+       duty:'存所有取数结果，每条带来源、时间、质量、权重；按 evidence_id 去重。',
+       input:'SE / AG / CA 写入', output:'按标的/时间投影', change:'现状没有共享证据，目标成为唯一事实源。'},
+      {id:'KB-CLAIM', name:'论点图', sub:'claim + 引用 + 反驳', owner:'编排组',
+       code:'agent-py state.claims',
+       duty:'存每条研究论点，标明引用了哪些 evidence、置信度、被谁反驳、是否失效。',
+       input:'AG / CA 写入', output:'研判层读取', change:'现状是各自报告里的段落，目标结构化。'},
+      {id:'KB-JUDGMENT', name:'研判账本', sub:'judgment_id + 版本 + 三因子', owner:'数据组',
+       code:'agent-py state.judgment + app-api prediction_records',
+       duty:'每次定稿写一条研判：ID 为 jdg_{YYYYMMDD}_{subjtype}_{code_ns}-{code}_{horizon}_{jtype}_v{n}，owner 键 (type, code_ns, code, horizon, judgment_type) WHERE status=active，版本由 app-api 单事务分配；带方向、信心、失效条件、验证时间；检索按 relevance/recency/hit_rate 排序。',
+       input:'DB-WRITE 写入', output:'表达层 / 学习层读取', change:'现状没有统一研判，目标一处结论多处渲染。'},
+      {id:'KB-METHOD', name:'方法库', sub:'方法版本 + 失败模式', owner:'数据组',
+       code:'agent-py docs/agent-outputs + 目标 M4 表',
+       duty:'存方法版本、阈值、提示词版本、失败模式；由学习层更新。',
+       input:'MT-EVOLVE / MT-REFLECT 写入', output:'AG-LEAD 读取作先验', change:'现状是复盘文件，目标可回灌。'},
+      {id:'KB-GRAPH', name:'知识图谱', sub:'实体 / 产业链 / 研报', owner:'数据组',
+       code:'agent-py tools/industry_vector_search.py + app-api event_node_mappings',
+       duty:'维护公司-板块-产业链关系和研报向量库，供实体链接与 RAG。',
+       input:'实体链接结果', output:'SE-ENTITY / AG-FUND 读取', change:'现状只服务个股，目标全链路共用。'},
+      {id:'KB-GOV', name:'治理看板', sub:'准确率 / 成本 / 失败率', owner:'数据组',
+       code:'目标新增',
+       duty:'汇总每个 agent、每种方法的命中率、耗时、token、失败率。',
+       input:'trace / cost / verification', output:'学习层与人工看板', change:'现状只有零散日志，目标可量化。'}
+    ]
+  },
+  {
+    no:'⑤', name:'研究层', prefix:'AG / CA', owner:'研究组', color:'var(--ag)',
+    desc:'一个主控 agent + 五个取证子 agent + 两个计算工具',
+    nodes:[
+      {id:'AG-LEAD', name:'归因主控', sub:'唯一 lead agent', owner:'研究组',
+       code:'brain_v3/nodes/lead.py',
+       duty:'拿到现象后先出 ResearchPlan（问题 / 假设 / 判据），再按 Gap 决定补查还是裁决；只它有多步判断权，且最多 3 轮、深度 2。',
+       input:'RunBrief + KB 投影', output:'ResearchResult（含 round / stop_reason / missing_probes）', change:'现状没有主控且只跑一轮，目标把判断权集中并把单轮改成 Gap 驱动的有限轮。',
+       impl:'langchain.agents.create_agent + ReAct，max_steps=8；可调用 5 个 probe 与 2 个计算快照，自身不直接取数。阶段：第一周受限两轮（ResearchPlan + Gap 驱动，第二轮仅从 optional_probes 选），第二周开放同级回查 / 上游重跑与自由 ReAct'},
+      {id:'AG-WIND', name:'风口取证', sub:'板块强弱 / 龙头 / 拥挤', owner:'研究组',
+       code:'旧：agents/workers/wind_leader.py + sector.py + hot_burst.py；目标：brain_v3/probes/wind/',
+       duty:'回答板块强不强、走到第几天、龙头是谁、拥挤不拥挤。',
+       input:'OR-SCOPE 工具', output:'claim（wind）', change:'现状一个 agent 干四件事，目标只做板块取证。',
+       impl:'create_agent（只需一次结构化返回时用 StructuredTool），≤3 步；角色箱 4 个工具；独立上下文，只返回 claim'},
+      {id:'AG-EVENT', name:'事件取证', sub:'影响谁 / 传导 / 持续', owner:'研究组',
+       code:'旧：agents/workers/event.py + graph/brain/nodes/event.py；目标：brain_v3/probes/event/',
+       duty:'回答消息影响谁、传导到哪、能活几天。',
+       input:'事件证据', output:'claim（event）', change:'现状单次 LLM 直接下结论，目标多步验伪。'},
+      {id:'AG-FUND', name:'基本面取证', sub:'业绩 / 预测 / 调研', owner:'研究组',
+       code:'agent-py agents/workers/stock.py + nodes/fundamental.py',
+       duty:'回答业绩、机构预测、调研热度是否支撑当前走势。',
+       input:'财务与研报工具', output:'claim（fundamental）', change:'现状混在个股 agent 里，目标独立。'},
+      {id:'AG-CAPITAL', name:'资金取证', sub:'主力 / 北向 / 两融 / 龙虎榜', owner:'研究组',
+       code:'目标新增，复用 app-api /internal/flow 与龙虎榜数据',
+       duty:'回答主力在买还是卖、杠杆是否拥挤、席位是否异常。',
+       input:'资金工具', output:'claim（capital）', change:'现状塞在个股 agent，目标独立。'},
+      {id:'AG-MACRO', name:'宏观取证', sub:'利率 / 汇率 / 政策 / 日历', owner:'研究组',
+       code:'目标新增，复用 app-api 宏观接口与新闻',
+       duty:'回答环境松紧、政策方向、宏观事件是否解释当前走势。',
+       input:'宏观工具', output:'claim（macro）', change:'现状没有独立宏观取证。'},
+      {id:'CA-TREND', name:'趋势快照', sub:'均线 / 量能 / 支撑压力', owner:'研究组',
+       code:'app-api TrendScoreService + agent-py nodes/trend.py',
+       duty:'调 app-api 趋势评分，补算支撑压力，返回确定性快照，不跑 LLM 循环。',
+       input:'/internal/trend/score/:symbol', output:'trend snapshot', change:'现状被当研究员，目标是计算工具。'},
+      {id:'CA-RHYTHM', name:'节奏快照', sub:'恐贪 / 仓位建议', owner:'研究组',
+       code:'agent-py agents/workers/rhythm_master.py → 目标 rules/rhythm.py',
+       duty:'按恐贪读数与规则表算仓位建议，LLM 只写解释。',
+       input:'情绪数据 + 上一条研判', output:'rhythm snapshot', change:'现状混在 worker 里，目标抽成纯函数。'}
+    ]
+  },
+  {
+    no:'⑥', name:'研判层', prefix:'DB / MT-CHECK', owner:'研判组', color:'var(--db)',
+    desc:'多空辩论、独立复核、裁决、签字',
+    nodes:[
+      {id:'MT-CHECK', name:'元认知监督', sub:'证据-结论 / 矛盾 / 反事实', owner:'研判组',
+       code:'brain_v3/nodes/metacognition.py',
+       duty:'检查结论是否有对应证据、证据是否互相矛盾、关键证据失效时结论是否翻转；不通过打回一次或降置信。',
+       input:'ResearchResult + KB-EVIDENCE', output:'meta_check', change:'现状没有独立复核，目标补上前扣带回式检查。'},
+      {id:'DB-BULL', name:'多方', sub:'看涨理由 + 引用', owner:'研判组',
+       code:'brain_v3/nodes/debate.py',
+       duty:'把看涨理由凑齐，每条必须引用 evidence_id。',
+       input:'KB-CLAIM', output:'bull case', change:'现状已有雏形，目标强制引用。'},
+      {id:'DB-BEAR', name:'反方', sub:'等强度反证 + 风险权重', owner:'研判组',
+       code:'brain_v3/nodes/debate.py',
+       duty:'生成与多方同等级的反证；黑天鹅/流动性骤变时权重 ×1.5，置信上限 0.5。',
+       input:'KB-CLAIM', output:'bear case', change:'现状只要求一条反证，目标要求等强度。'},
+      {id:'DB-JUDGE', name:'裁决', sub:'冲突分级 / 降档', owner:'研判组',
+       code:'brain_v3/nodes/resolve.py',
+       duty:'多空冲突时判断谁有理；吵不出结果就保留分歧、降低信心。',
+       input:'bull + bear + conflicts', output:'裁决结果', change:'现状已有，目标加风险权重。'},
+      {id:'DB-WRITE', name:'定稿', sub:'写 judgment + predictions', owner:'研判组',
+       code:'brain_v3/nodes/resolve.py judgment_writer',
+       duty:'写最终研判与三档预测，落 KB-JUDGMENT；只写不查。',
+       input:'裁决结果 + 上一条研判', output:'judgment', change:'现状预判是独立 LLM，目标合并到定稿。'}
+    ]
+  },
+  {
+    no:'⑦', name:'学习层', prefix:'MT', owner:'学习组', color:'var(--mt)',
+    desc:'到期对答案、校准信心、改方法、夜间巩固',
+    nodes:[
+      {id:'MT-VERIFY', name:'到期验证', sub:'due+3 回填', owner:'学习组',
+       code:'agent-py verification + app-api prediction verify',
+       duty:'到期看研判和预测对不对，记命中、实际走势、错误类型。',
+       input:'KB-JUDGMENT', output:'verified_result', change:'现状分别验证，目标一次回填。'},
+      {id:'MT-CALIB', name:'置信校准', sub:'按命中率挤水分', owner:'学习组',
+       code:'目标新增',
+       duty:'按历史命中率调整信心分数，避免模型自评虚高。',
+       input:'MT-VERIFY 结果', output:'校准曲线', change:'现状没有校准。'},
+      {id:'MT-EVOLVE', name:'方法演化', sub:'失败模式 → 新版本', owner:'学习组',
+       code:'agent-py agents/workers/iterate.py + services/iterate_analyzer.py',
+       duty:'把反复出错的地方变成新方法版本，标 proposed，人工批准后生效。',
+       input:'错误样本 + KB-METHOD', output:'方法新版本', change:'现状只出建议报告，目标可回灌。'},
+      {id:'MT-REFLECT', name:'离线反思', sub:'修正 / 蒸馏 / 假设', owner:'学习组',
+       code:'agent-py services/offline_reflection.py（新增）',
+       duty:'夜间读昨日研判、验证结果、错题本，修正归因标签、蒸馏语义条目（≥3 案例）、生成待验证假设。',
+       input:'KB-JUDGMENT + KB-METHOD + MT-VERIFY', output:'KB-METHOD 新条目 / 假设池', change:'现状没有离线巩固，目标学 Anthropic dreaming。'}
+    ]
+  },
+  {
+    no:'⑧', name:'表达层', prefix:'EX', owner:'表达组', color:'var(--ex)',
+    desc:'同一份研判，按不同场合换说法',
+    nodes:[
+      {id:'EX-BRIEF', name:'播报渲染', sub:'早 / 午 / 晚稿', owner:'表达组',
+       code:'agent-py agents/workers/broadcast.py + morning.py + midday.py',
+       duty:'把同一条研判写成早报、午报、晚报，只换语气不换结论。',
+       input:'judgment', output:'播报稿', change:'现状各 worker 各写一份，目标同源。'},
+      {id:'EX-PAGE', name:'页面渲染', sub:'个股卡 / 事件卡', owner:'表达组',
+       code:'brain_v3/nodes/render.py',
+       duty:'生成个股页、事件页需要的卡片数据，接口形状不变。',
+       input:'judgment', output:'render payload', change:'现状前端自己拼，目标后端给完整卡。'},
+      {id:'EX-PUSH', name:'推送', sub:'只推变化', owner:'表达组',
+       code:'app-api modules/push + /api/users/me/news/push',
+       duty:'只在结论变了、失效了、出现高置信机会时推。',
+       input:'judgment + 上一条', output:'推送消息', change:'现状按事件推，目标按研判变化推。'},
+      {id:'EX-CHAT', name:'对话', sub:'只读账本 + 引用', owner:'表达组',
+       code:'agent-py agents/general/chat.py + node.py',
+       duty:'按账本回答，必须报出 judgment_id / evidence_id，不现编结论。',
+       input:'judgment + 用户问题', output:'回答 + 引用', change:'现状 ReAct 现查，目标先读账本。'},
+      {id:'EX-PICK', name:'选股页渲染', sub:'榜单 / 筛选 / 信号', owner:'表达组',
+       code:'app-api trend_scores + 前端选股页',
+       duty:'把研判与趋势评分排成榜单、筛选、信号、推荐四个 Tab。',
+       input:'judgment + trend', output:'选股 payload', change:'现状只有趋势分，目标带研判。'}
+    ]
+  },
+  {
+    no:'⑨', name:'出口层', prefix:'UI', owner:'前端组', color:'var(--ui)',
+    desc:'用户真正看到的六个窗口',
+    nodes:[
+      {id:'UI-HOME', name:'首页', sub:'HomeView', owner:'前端组',
+       code:'aistock-frontend src/modules/home/views/HomeView.vue',
+       duty:'自选情报、事件列表、风口龙头。', input:'EX-PAGE / EX-PICK', output:'首页卡片', change:'接口不变，内容改读统一研判。'},
+      {id:'UI-STOCK', name:'个股页', sub:'StockDetailView', owner:'前端组',
+       code:'aistock-frontend src/modules/favorites/views/StockDetailView.vue',
+       duty:'个股行情、AI 评价、历史评价、新闻。', input:'EX-PAGE', output:'个股卡', change:'接口不变。'},
+      {id:'UI-EVENT', name:'事件页', sub:'列表 / 详情 / 时间线', owner:'前端组',
+       code:'aistock-frontend src/modules/event/views/*',
+       duty:'事件列表、事件详情、时间线。', input:'EX-PAGE', output:'事件卡', change:'接口不变。'},
+      {id:'UI-FEED', name:'播报 / 推送流', sub:'HotBurst / 微信消息', owner:'前端组',
+       code:'aistock-frontend src/modules/news/views/HotBurstView.vue + WechatMessageView.vue',
+       duty:'热点爆发、播报流、推送历史。', input:'EX-BRIEF / EX-PUSH', output:'信息流', change:'只推变化。'},
+      {id:'UI-CHAT', name:'对话页', sub:'只读账本', owner:'前端组',
+       code:'aistock-frontend 对话入口（现有聊天组件）',
+       duty:'用户提问与回答，展示引用编号。', input:'EX-CHAT', output:'对话', change:'回答必须带引用。'},
+      {id:'UI-PICK', name:'选股页', sub:'榜单 / 筛选', owner:'前端组',
+       code:'aistock-frontend src/modules/market/views/TrendScoreView.vue + favorites/FavoritesView.vue',
+       duty:'趋势榜、标签、自选、预测表现。', input:'EX-PICK', output:'榜单', change:'接口不变。'}
+    ]
+  }
+];
+
+const RUNTIME = [
+  {d:0, id:'IN-TIME', note:'08:00 / 11:35 / 15:05', deliver:'window'},
+  {d:1, id:'OR-RUN', note:'选档 + 预算 + 扇出', deliver:'档位名'},
+  {d:2, id:'OR-PROFILE', note:'必查 / 可选 / fast-slow / 降级', deliver:'RunBrief'},
+  {d:2, id:'OR-SCOPE', note:'工具白名单 + 借用条 + trace', deliver:'tool_scope'},
+  {d:1, id:'SE-MARKET / SE-EVENT / SE-ENTITY / SE-USER', note:'四个感知并行，只取一次数', deliver:'evidence_ids'},
+  {d:1, id:'KB-EVIDENCE', note:'append-only 落账，按标的/时间投影', deliver:'evidence 投影'},
+  {d:1, id:'AG-LEAD', note:'agent · ResearchPlan + 有限轮 · max_steps=8 · 唯一 lead', deliver:'ResearchResult（含轮次）', agent:true},
+  {d:2, id:'AG-WIND', note:'子 agent · ≤3 步 · 4 个工具', deliver:'claim(wind)', agent:true},
+  {d:2, id:'AG-EVENT', note:'子 agent · ≤4 步 · 5 个工具', deliver:'claim(event)', agent:true},
+  {d:2, id:'AG-FUND', note:'子 agent · ≤3 步 · 5 个工具', deliver:'claim(fund)', agent:true},
+  {d:2, id:'AG-CAPITAL', note:'子 agent · ≤3 步 · 2 个工具（待补龙虎榜/两融）', deliver:'claim(capital)', agent:true},
+  {d:2, id:'AG-MACRO', note:'子 agent · ≤3 步 · 2 个工具', deliver:'claim(macro)', agent:true},
+  {d:2, id:'CA-TREND', note:'计算 · 0 LLM · 调 app-api 趋势评分', deliver:'trend snapshot'},
+  {d:2, id:'CA-RHYTHM', note:'计算 · 0 LLM · 规则表 + 上一条研判', deliver:'rhythm snapshot'},
+  {d:1, id:'MT-CHECK', note:'单次 LLM · 证据-结论 / 矛盾 / 反事实', deliver:'meta_check'},
+  {d:1, id:'DB-BULL / DB-BEAR', note:'单次 LLM · 并行 · 必须引用 evidence_id', deliver:'bull / bear'},
+  {d:2, id:'DB-JUDGE', note:'单次 LLM · 冲突分级 + 降档', deliver:'裁决'},
+  {d:2, id:'DB-WRITE', note:'单次 LLM · 写 judgment + 三档 predictions', deliver:'judgment'},
+  {d:1, id:'KB-JUDGMENT', note:'落账 + 三因子检索（relevance/recency/hit_rate）', deliver:'judgment_id'},
+  {d:1, id:'EX-BRIEF / EX-PAGE / EX-PUSH / EX-CHAT / EX-PICK', note:'五个渲染器并行，同一 judgment', deliver:'render payload'},
+  {d:1, id:'UI-HOME / UI-STOCK / UI-EVENT / UI-FEED / UI-CHAT / UI-PICK', note:'六个出口，接口形状不变', deliver:'用户可见'},
+  {d:0, id:'MT-VERIFY', note:'due+3 到期回填，归因与预测分别记命中', deliver:'verified_result', offline:true},
+  {d:1, id:'MT-CALIB', note:'按命中率挤信心水分', deliver:'校准曲线', offline:true},
+  {d:1, id:'MT-EVOLVE', note:'失败模式 → 方法新版本（proposed）', deliver:'方法版本', offline:true},
+  {d:1, id:'MT-REFLECT', note:'夜间修正归因 / 蒸馏条目 / 生成假设', deliver:'KB-METHOD 条目', offline:true}
+];
+
+const AGENTS = [
+  ['AG-LEAD','lead agent','ReAct + 有限轮','8','投影 + 5 个 probe + 2 个计算','ResearchResult','唯一有多步判断权；≤3 轮 / 深度 2'],
+  ['AG-WIND','子 agent','ReAct','3','get_wind_leaders / get_leader_stocks / predict_sector_trend / get_capital_flow','ClaimSet','板块取证'],
+  ['AG-EVENT','子 agent','ReAct','4','search_cls_news / get_news_fulltext / get_cls_news / get_quote / get_concepts','ClaimSet','事件取证'],
+  ['AG-FUND','子 agent','ReAct','3','get_performance_report / get_latest_performance_reports / get_profit_forecast / get_hot_burst / get_hot_burst_history','ClaimSet','基本面取证'],
+  ['AG-CAPITAL','子 agent','ReAct','3','get_capital_flow（龙虎榜/两融接口待补）','ClaimSet','资金取证'],
+  ['AG-MACRO','子 agent','ReAct','3','get_global_markets / tavily_finance_search','ClaimSet','宏观取证'],
+  ['EX-CHAT','agent','ReAct','4','账本只读 + 必要时触发一次 AG-LEAD','回答 + 引用','先读账本，不命中才研究'],
+  ['MT-EVOLVE','离线 agent','ReAct','8','M3 / M4 只读','方法版本','proposed，人工批准后生效'],
+  ['MT-REFLECT','离线 agent','ReAct','8','M3 / M4 只读','语义条目 / 假设池','夜间跑，不阻塞主链'],
+  ['MT-CHECK','单次 LLM','无循环','1','无（只读 ResearchResult）','meta_check','最多打回 1 次'],
+  ['DB-BULL','单次 LLM','无循环','1','只读 claims','bull case','必须引用 evidence_id'],
+  ['DB-BEAR','单次 LLM','无循环','1','只读 claims','bear case','等强度反证 + 风险权重'],
+  ['DB-JUDGE','单次 LLM','无循环','1','无','裁决','冲突分级、保留分歧'],
+  ['DB-WRITE','单次 LLM','无循环','1','无','judgment','写结论 + 三档预测'],
+  ['IN / OR / SE / KB / CA / MT-VERIFY / MT-CALIB / EX-BRIEF / EX-PAGE / EX-PUSH / EX-PICK / UI','非 agent','—','0','工具或规则','—','确定性，不跑循环']
+];
+
+const TOOLBOX = [
+  ['公共箱','get_quote / search_cls_news / get_cls_news / get_news_fulltext / get_global_markets / tavily_finance_search / get_concepts','所有 agent 可用'],
+  ['角色箱 · 风口','get_wind_leaders / get_leader_stocks / predict_sector_trend','仅 AG-WIND'],
+  ['角色箱 · 事件','get_concepts / get_industry_chain / get_graph_by_concept','仅 AG-EVENT'],
+  ['角色箱 · 基本面','get_performance_report / get_latest_performance_reports / get_profit_forecast / get_hot_burst / get_hot_burst_history','仅 AG-FUND'],
+  ['角色箱 · 资金','get_capital_flow','仅 AG-CAPITAL'],
+  ['角色箱 · 宏观','get_global_markets / tavily_finance_search','仅 AG-MACRO'],
+  ['角色箱 · 趋势','get_trend_score / get_trend_score_detail / get_trend_top_stocks','仅 CA-TREND'],
+  ['借用条','跨箱调用必须在 RunBrief 声明，运行时记 trace','任意 agent，需声明'],
+  ['敏感箱','写 KB-JUDGMENT / 用户数据 / 推送','仅 DB-WRITE / EX-PUSH / SE-USER']
+];
+
+const LANGCHAIN = [
+  ['图编排','langgraph.graph.StateGraph','规则层节点 + 研究层子图注册；Postgres checkpointer 支持回放'],
+  ['主控 agent','langchain.agents.create_agent','AG-LEAD：system prompt + probe 工具 + response_format=ResearchResult + recursion_limit=8'],
+  ['子 agent','langchain.agents.create_agent / StructuredTool','AG-WIND 等 5 个 probe：独立 prompt、独立工具子集、独立步数上限；只需一次结构化返回时用 StructuredTool'],
+  ['工具定义','@tool / StructuredTool','现有 tools/*.py 已用；统一补 ok_envelope / degraded_envelope 信封'],
+  ['结构化输出','with_structured_output','DB-WRITE 写 judgment、MT-CHECK 写 meta_check 时强制 schema'],
+  ['流式与可观测','astream_events + trace','前端 SSE 逐节点推送；每次工具调用记 tool_calls'],
+  ['工具权限','自定义 wrapper','调用前查 OR-SCOPE 白名单；未授权直接拒绝并记 trace'],
+  ['记忆检索','向量库 + 三因子排序','KB-JUDGMENT / KB-METHOD 取历史先验时按 relevance/recency/hit_rate 排序'],
+  ['离线反思','create_agent + 只读工具','MT-REFLECT 夜间跑，产物写 KB-METHOD，不阻塞主链']
+];
+
+const COLLAB = [
+  ['Supervisor / 层级','AG-LEAD 派 probe；大盘 → 板块 → 个股按层级执行','主链','唯一责任人'],
+  ['Blackboard（黑板）','KB-EVIDENCE / KB-CLAIM，typed、versioned、只追加','主链','agent 不互调，只读写黑板'],
+  ['Debate（辩论）','DB-BULL / DB-BEAR / MT-CHECK','主链','必须有等强度反证'],
+  ['Contract Net（有限招标）','OR-PROFILE 发布缺口，可选 probe 按能力投标，AG-LEAD 定标','可选 probe','投标与定标全程记 trace'],
+  ['Peer / Swarm','MT-REFLECT 离线反思、假设生成','仅离线','产物只能进假设池，不能写 judgment']
+];
+
+const PHENOMENON = [
+  {d:0, t:'P1 上证 -1.8%（根现象）'},
+  {d:1, t:'├─ 外围市场   w=0.41   ev_011'},
+  {d:1, t:'├─ 权重板块   w=0.35   ev_012'},
+  {d:1, t:'└─ 情绪面     w=0.24   ev_013'},
+  {d:0, t:'P2 半导体 -4.2%（parent = P1）'},
+  {d:1, t:'├─ 大盘拖累   w=0.50   指向 P1'},
+  {d:1, t:'├─ 板块事件   w=0.30   ev_021'},
+  {d:1, t:'└─ 资金流出   w=0.20   ev_022'},
+  {d:0, t:'P3 某半导体个股 -7%（parent = P2）'},
+  {d:1, t:'├─ 板块拖累   w=0.60   指向 P2'},
+  {d:1, t:'├─ 个股公告   w=0.25   ev_031'},
+  {d:1, t:'└─ 主力出货   w=0.15   ev_032'}
+];
+
+const MIGRATION = [
+  ['Transform','新链路并行建设，老链路不动；新链路写独立影子表（同结构不同表名 + is_shadow=true，永不进出口查询）；冻结 baseline manifest','新链路能跑通同一批评测集，且基线已冻结'],
+  ['Coexist','双跑对比，feature flag 控流量（1% → 10% → 50%）；老链路保留回滚','连续 7 天工程指标不劣于老链路'],
+  ['Eliminate','逐步退役老组件，只保留 adapter','流量 100% 切换且稳定 2 周']
+];
+
+const CODEOWNERS = `# 智慧大脑 V3（brain_v3/，owner 待各负责人确认）
+/aistock-agent-py/brain_v3/probes/wind/        @风口负责人
+/aistock-agent-py/brain_v3/probes/event/       @事件负责人
+/aistock-agent-py/brain_v3/nodes/              @研判负责人
+/aistock-agent-py/brain_v3/graph/              @编排负责人
+/aistock-agent-py/brain_v3/tools/              @数据组
+/aistock-agent-py/brain_v3/registry.yaml       @编排负责人
+/aistock-agent-py/brain_v3/contracts/          @契约负责人`;
+
+const TEAMS = [
+  {name:'数据组', prefix:'SE / KB 持久化', repo:'app-api（modules + core/routes/internal）',
+   deliver:'取数接口、实体链接、六张账本表、/internal/* 路由',
+   dep:'无（最底层）',
+   rule:'只做“数与重算”，不引入 LLM；所有写账本走 append-only。'},
+  {name:'编排组', prefix:'IN / OR / KB 投影', repo:'agent-py（brain_v3/graph + api）',
+   deliver:'触发入口、RunBrief、档位模板、工具权限、state/reducer',
+   dep:'数据组接口',
+   rule:'只决定“跑不跑、跑哪档”，不下结论；预算触顶记 stop_reason=budget，停止加查并用已有证据出结论，不改变 status。'},
+  {name:'研究组', prefix:'AG / CA', repo:'agent-py（brain_v3/nodes + brain_v3/probes + tools）',
+   deliver:'1 个 lead agent、5 个 probe、2 个计算快照、工具注册表',
+   dep:'编排组 RunBrief + 数据组接口',
+   rule:'probe 只返回 claim，不写账本；lead 是唯一有多步判断权的节点。'},
+  {name:'研判组', prefix:'DB / MT-CHECK', repo:'agent-py（nodes/debate、resolve、metacognition）',
+   deliver:'多空论证、元认知复核、裁决、定稿与预测',
+   dep:'研究组 ResearchResult',
+   rule:'反方必须等强度；高风险事件置信封顶；复核最多打回一次。'},
+  {name:'学习组', prefix:'MT', repo:'agent-py（services + 离线任务）',
+   deliver:'到期验证、置信校准、方法演化、离线反思',
+   dep:'KB 账本只读',
+   rule:'只写 KB-METHOD，不改 KB-JUDGMENT 历史；新方法需人工批准。'},
+  {name:'表达组', prefix:'EX / UI', repo:'agent-py（nodes/render）+ 两个前端',
+   deliver:'5 个渲染器、6 个出口页面、推送策略',
+   dep:'研判组 judgment',
+   rule:'同一 judgment_id 在所有出口方向/信心/结论必须一致；前端不改接口形状。'}
+];
+
+const RENAMES = [
+  ['T1','IN-TIME','时段触发'],['T2','IN-EVENT','事件触发'],['T3','IN-USER','用户触发'],['T4','IN-VERIFY','验证触发'],
+  ['O1','OR-RUN','运行编排'],['G1','OR-PROFILE','档位模板'],['G2 / TOOL','OR-SCOPE','工具权限'],
+  ['P1','SE-MARKET','行情感知'],['P2','SE-EVENT','事件感知'],['P3','SE-ENTITY','实体感知'],['P4','SE-USER','用户感知'],
+  ['M1','KB-EVIDENCE','证据账本'],['M2','KB-CLAIM','论点图'],['M3','KB-JUDGMENT','研判账本'],
+  ['M4','KB-METHOD','方法库'],['M5','KB-GRAPH','知识图谱'],['M6','KB-GOV','治理看板'],
+  ['R5','AG-LEAD','归因主控'],['R2','AG-WIND','风口取证'],['R3','AG-EVENT','事件取证'],
+  ['R4','AG-FUND','基本面取证'],['R7','AG-CAPITAL','资金取证'],['R8','AG-MACRO','宏观取证'],
+  ['R1','CA-TREND','趋势快照'],['R6','CA-RHYTHM','节奏快照'],
+  ['J1','DB-BULL','多方'],['J2','DB-BEAR','反方'],['J3','DB-JUDGE','裁决'],['J4','DB-WRITE','定稿'],
+  ['C4','MT-CHECK','元认知监督'],['C1','MT-CALIB','置信校准'],['C2','MT-VERIFY','到期验证'],
+  ['C3','MT-EVOLVE','方法演化'],['C5','MT-REFLECT','离线反思'],
+  ['E1','EX-BRIEF','播报渲染'],['E2','EX-PAGE','页面渲染'],['E3','EX-PUSH','推送'],
+  ['E4','EX-CHAT','对话'],['E5','EX-PICK','选股页渲染'],
+  ['U1','UI-HOME','首页'],['U2','UI-STOCK','个股页'],['U3','UI-EVENT','事件页'],
+  ['U4','UI-FEED','播报 / 推送流'],['U5','UI-CHAT','对话页'],['U6','UI-PICK','选股页']
+];
+
+const $ = (s) => document.querySelector(s);
+const nodeIndex = {};
+let selected = null;
+
+const KIND_DESC = {
+  agent:'LangChain create_agent / ReAct 循环：有工具、有步数上限、有多步判断权',
+  llm:'单次 LLM + 结构化输出：不调工具、不循环',
+  tool:'StructuredTool 包 app-api 接口：确定性取数，带 provenance 信封',
+  rule:'确定性规则 / 公式：0 LLM，可单测',
+  store:'append-only 账本：Postgres 持久化，按投影读取',
+  render:'模板渲染：不产生新结论，只换说法',
+  surface:'前端页面：只读接口，不参与推理',
+  trigger:'定时 / 事件 / 用户 / 验证触发：只发 run 请求'
+};
+
+function kindOf(id) {
+  if (id === 'AG-LEAD' || id.startsWith('AG-') || id === 'EX-CHAT' || id === 'MT-REFLECT' || id === 'MT-EVOLVE') return 'agent';
+  if (id === 'MT-CHECK' || id.startsWith('DB-')) return 'llm';
+  if (id.startsWith('SE-') || id.startsWith('CA-')) return 'tool';
+  if (id.startsWith('KB-')) return 'store';
+  if (id.startsWith('EX-')) return 'render';
+  if (id.startsWith('UI-')) return 'surface';
+  if (id.startsWith('IN-')) return 'trigger';
+  return 'rule';
+}
+
+function renderRuntime() {
+  $('#runtime').innerHTML = RUNTIME.map((r) => {
+    if (r.offline) {
+      const sep = r.d === 0 ? '<div class="rt-sep">非交易时段（不阻塞主链）</div>' : '';
+      return sep + `<div class="rt-row offline" style="margin-left:${6 + r.d * 26}px">
+        <span class="rt-id">${r.id}</span><span class="rt-note">${r.note}</span><span class="rt-deliver">↓ ${r.deliver}</span></div>`;
+    }
+    return `<div class="rt-row ${r.agent ? 'agent' : ''}" style="margin-left:${6 + r.d * 26}px">
+      <span class="rt-id">${r.id}</span><span class="rt-note">${r.note}</span><span class="rt-deliver">↓ ${r.deliver}</span></div>`;
+  }).join('');
+}
+
+function renderStack() {
+  $('#agents').innerHTML = `<table><thead><tr><th>节点</th><th>类型</th><th>循环</th><th>步数</th><th>工具</th><th>输出</th><th>约束</th></tr></thead><tbody>${
+    AGENTS.map((r) => `<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td><td>${r[5]}</td><td>${r[6]}</td></tr>`).join('')
+  }</tbody></table>`;
+  $('#toolbox').innerHTML = `<table><thead><tr><th>箱</th><th>工具</th><th>谁可用</th></tr></thead><tbody>${
+    TOOLBOX.map((r) => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')
+  }</tbody></table>`;
+  $('#langchain').innerHTML = `<table><thead><tr><th>场景</th><th>LangChain / LangGraph 组件</th><th>怎么用</th></tr></thead><tbody>${
+    LANGCHAIN.map((r) => `<tr><td><b>${r[0]}</b></td><td class="mono">${r[1]}</td><td>${r[2]}</td></tr>`).join('')
+  }</tbody></table>`;
+}
+
+function renderCollab() {
+  $('#collab').innerHTML = `<table><thead><tr><th>模式</th><th>用在哪</th><th>范围</th><th>边界</th></tr></thead><tbody>${
+    COLLAB.map((r) => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`).join('')
+  }</tbody></table>
+  <div class="note">主链不用 Peer：不是审计不了，而是责任不可归因、收敛不可控、同一标的两次 run 可能结论不同。招标能用，是因为中标结果与理由可审计。</div>`;
+
+  $('#phenomenon').innerHTML = `<div class="ph-tree">${
+    PHENOMENON.map((r) => `<div style="padding-left:${r.d * 22}px">${r.t}</div>`).join('')
+  }</div>
+  <div class="note"><b>权重不写死</b>：<code>weight = normalize(quality × recency × directness × consistency)</code>。每次 run 由证据重算，落库 weight / weight_algo / computed_at。演进：证据加权 → 贝叶斯更新 → 反事实归因。无证据的边权重为 0，不许手工指定固定值。</div>`;
+
+  $('#migration').innerHTML = `<table><thead><tr><th>阶段</th><th>做什么</th><th>退出条件</th></tr></thead><tbody>${
+    MIGRATION.map((r) => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')
+  }</tbody></table>
+  <div class="note">灰度：影子 0% → 10% → 50% → 100%（Transform = 影子表，Coexist = feature flag 灰度，Eliminate = 正式账本 100%）。影子阶段只比工程指标（P50/P95、token、成本、partial 率、预算触顶率、去重率、回放一致性），方向 / 主因走人工盲评。promote 不是改表名：灰度 run 重新写正式表并重新分配 version；门槛 = 准确率不降 且 token 或 P95 降 20%；baseline manifest（代码 / 契约版本 + registry.lock 指纹 + 样本 sha256）对照前冻结。不删老代码，先 adapter 包一层；每次只迁一个功能；任一指标劣化超过阈值就回滚。</div>`;
+
+  $('#codeowners').innerHTML = `<pre class="code-block">${CODEOWNERS}</pre>
+  <div class="note">registry.yaml 的 owner 是唯一事实源，CODEOWNERS 由它生成或校验，禁止两处手维护。改别人的文件必须经过 owner review；接口层（claim / ResearchResult / judgment schema）由契约 owner 统一评审；owner 是评审责任，不是行政权力，原作者保留署名。</div>`;
+}
+
+function renderLayers() {
+  const wrap = $('#layers');
+  wrap.innerHTML = LAYERS.map((layer, i) => {
+    const nodes = layer.nodes.map((n) => {
+      const kind = n.kind || kindOf(n.id);
+      nodeIndex[n.id] = { ...n, kind, layer: layer.name, prefix: layer.prefix, color: layer.color };
+      const badge = ['agent', 'tool', 'llm'].includes(kind) ? `<span class="kind ${kind}">${kind}</span>` : '';
+      return `<button class="node" data-id="${n.id}" style="--c:${layer.color}">
+        <div class="id">${n.id}${badge}</div><div class="nm">${n.name}</div><div class="sb">${n.sub}</div>
+      </button>`;
+    }).join('');
+    const arrow = i < LAYERS.length - 1 ? '<div class="arrow">↓</div>' : '';
+    return `<div class="layer" style="--c:${layer.color}">
+      <div class="layer-head">
+        <span class="no">${layer.no}</span>
+        <span class="name">${layer.name}</span>
+        <span class="prefix">${layer.prefix}</span>
+        <span class="owner">${layer.owner}</span>
+      </div>
+      <div class="nodes">${nodes}</div>
+    </div>${arrow}`;
+  }).join('');
+}
+
+function renderTeams() {
+  $('#teams').innerHTML = TEAMS.map((t) => `<div class="group-card">
+    <h3>${t.name}</h3>
+    <div class="who">负责前缀：${t.prefix}</div>
+    <p><b>仓库：</b>${t.repo}</p>
+    <p><b>交付：</b>${t.deliver}</p>
+    <p><b>依赖：</b>${t.dep}</p>
+    <p><b>红线：</b>${t.rule}</p>
+  </div>`).join('');
+}
+
+function renderRenames() {
+  const rows = RENAMES.map(([a, b, c]) => `<tr><td class="mono">${a}</td><td class="mono">${b}</td><td>${c}</td></tr>`).join('');
+  $('#renames').innerHTML = `<table><thead><tr><th>旧代号</th><th>新代号</th><th>中文名</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function showDetail(id) {
+  const n = nodeIndex[id];
+  if (!n) return;
+  if (selected) document.querySelector(`.node[data-id="${selected}"]`)?.classList.remove('sel');
+  selected = id;
+  document.querySelector(`.node[data-id="${id}"]`)?.classList.add('sel');
+  $('#empty').style.display = 'none';
+  const d = $('#detail');
+  d.style.display = 'block';
+  d.innerHTML = `
+    <div class="kicker" style="color:${n.color}">${n.prefix} · ${n.layer}</div>
+    <h2>${n.name}</h2>
+    <p class="sub">${n.id} · ${n.sub}</p>
+    <div class="sec"><h3>负责什么</h3><p>${n.duty}</p></div>
+    <div class="sec"><h3>输入 → 输出</h3><p>${n.input} → ${n.output}</p></div>
+    <div class="sec"><h3>实现方式</h3><p><span class="kind ${n.kind}">${n.kind}</span> ${n.impl || KIND_DESC[n.kind]}</p></div>
+    <div class="sec"><h3>代码落位</h3><p class="mono">${n.code}</p></div>
+    <div class="sec"><h3>维护组</h3><p>${n.owner}</p></div>
+    <div class="sec"><h3>相对现状改了什么</h3><p>${n.change}</p></div>`;
+  d.scrollTop = 0;
+}
+
+document.addEventListener('click', (e) => {
+  const node = e.target.closest('.node');
+  if (node) showDetail(node.dataset.id);
+  const tab = e.target.closest('.tab');
+  if (tab) {
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${tab.dataset.view}`));
+  }
+});
+
+renderLayers();
+renderRuntime();
+renderStack();
+renderCollab();
+renderTeams();
+renderRenames();
+</script>
+</body>
+</html>

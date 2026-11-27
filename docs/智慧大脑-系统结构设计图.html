@@ -1,0 +1,1970 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Stock · 智慧大脑系统结构设计图</title>
+<style>
+  :root{
+    --bg:#070d18; --panel:#0a1322; --card:#111a2c; --card2:#151f35;
+    --line:#1e2b45; --line2:#26324d; --text:#e6edf7; --muted:#8fa3c0; --dim:#5f7291;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;font-size:13px}
+  .topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:22px;padding:12px 22px;background:rgba(8,14,26,.94);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+  .brand{display:flex;flex-direction:column;gap:2px;min-width:250px}
+  .brand b{font-size:15px;letter-spacing:.5px}
+  .brand span{font-size:11px;color:var(--muted)}
+  .tabs{display:flex;gap:6px;background:#0d1728;border:1px solid var(--line);border-radius:10px;padding:4px}
+  .tab{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:7px;font-size:12.5px;cursor:pointer;font-family:inherit;transition:.15s}
+  .tab:hover{color:var(--text)}
+  .tab.active{background:#1b2a46;color:#fff;box-shadow:0 1px 0 rgba(255,255,255,.06) inset}
+  .top-hint{margin-left:auto;font-size:11px;color:var(--dim);text-align:right;line-height:1.5}
+  .stats{display:flex;gap:8px;flex-wrap:wrap;padding:10px 22px;border-bottom:1px solid var(--line);background:#081020;position:sticky;top:57px;z-index:25}
+  .stat{display:flex;align-items:baseline;gap:6px;padding:5px 11px;border:1px solid var(--line2);border-radius:999px;background:#0d1728}
+  .stat b{font-size:15px;color:#5eead4;font-variant-numeric:tabular-nums}
+  .stat span{font-size:11px;color:var(--muted)}
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) 390px;min-height:calc(100vh - 112px)}
+  .stage{padding:16px 18px 40px;min-width:0}
+  .view{display:none}
+  .view.active{display:block}
+  .view-head{display:flex;align-items:flex-end;gap:14px;margin:2px 2px 10px}
+  .view-head h1{font-size:16px;margin:0}
+  .view-head p{margin:0;font-size:12px;color:var(--muted);line-height:1.5}
+  .zoom{margin-left:auto;display:flex;gap:6px}
+  .zoom button{border:1px solid var(--line2);background:#0d1728;color:var(--muted);border-radius:7px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:inherit}
+  .zoom button:hover{color:#fff;border-color:#3b4f74}
+  .canvas-wrap{position:relative;overflow:auto;border:1px solid var(--line);border-radius:14px;background:
+    radial-gradient(1200px 500px at 15% 0%, rgba(56,189,248,.05), transparent 60%),
+    radial-gradient(900px 500px at 85% 30%, rgba(167,139,250,.05), transparent 60%),
+    #08101f;
+    max-height:calc(100vh - 260px);
+  }
+  .canvas{position:relative;transform-origin:top left;background-image:linear-gradient(rgba(56,80,120,.10) 1px,transparent 1px),linear-gradient(90deg,rgba(56,80,120,.10) 1px,transparent 1px);background-size:32px 32px}
+  .edge-layer{position:absolute;inset:0;z-index:1;pointer-events:none;overflow:visible}
+  .edge{transition:opacity .15s,stroke-width .15s}
+  .group{position:absolute;border:1px dashed;border-radius:16px;z-index:0;pointer-events:none}
+  .group-label{position:absolute;left:12px;top:-9px;padding:1px 8px;border-radius:999px;background:#08101f;font-size:10.5px;letter-spacing:.6px;white-space:nowrap}
+  .node{position:absolute;z-index:2;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line2);border-radius:10px;padding:8px 10px 7px 12px;cursor:pointer;overflow:hidden;transition:opacity .15s,box-shadow .15s,border-color .15s,transform .15s}
+  .node:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--c,#5b8def)}
+  .node:hover{border-color:var(--c);box-shadow:0 8px 24px rgba(0,0,0,.35);transform:translateY(-1px)}
+  .node.selected{border-color:var(--c);box-shadow:0 0 0 1px var(--c),0 10px 30px rgba(0,0,0,.45)}
+  .node .node-top{display:flex;align-items:center;gap:6px;padding-right:4px}
+  .node .dot{width:6px;height:6px;border-radius:50%;background:var(--c);flex:none;box-shadow:0 0 8px var(--c)}
+  .node .title{font-size:12.3px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .node .sub{font-size:10.4px;color:#93a6c4;line-height:1.35;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .node .chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px;overflow:hidden;max-height:18px}
+  .node .chips span{font-size:9.3px;color:#9fb2cf;background:#0d1728;border:1px solid #1d2a42;border-radius:4px;padding:0 4px;line-height:14px;white-space:nowrap}
+  .node.pain{width:28px!important;height:28px!important;border-radius:50%;padding:0;background:radial-gradient(circle at 30% 25%,#4a1119,#2a0a10);border:1.5px solid #f87171;box-shadow:0 0 0 4px rgba(248,113,113,.12),0 0 18px rgba(248,113,113,.35);display:flex;align-items:center;justify-content:center}
+  .node.pain:before{display:none}
+  .node.pain .pain-no{font-size:12px;font-weight:800;color:#fecaca}
+  .node.pain:hover{transform:scale(1.15)}
+  .has-focus .node{opacity:.26}
+  .has-focus .node.hl{opacity:1}
+  .has-focus .group{opacity:.85}
+  .edge.hl{opacity:1!important;stroke-width:2.6!important}
+  .edge-label{font-size:9.5px;font-weight:600;letter-spacing:.2px;paint-order:stroke;stroke:#08101f;stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;padding:10px 4px 0;color:var(--muted);font-size:11px}
+  .legend i{display:inline-block;width:18px;height:0;border-top:2px solid;margin-right:5px;vertical-align:middle;border-radius:2px}
+  .legend .dash{border-top-style:dashed}
+  .legend .dot{width:8px;height:8px;border-radius:50%;border:0;background:#f87171;display:inline-block;margin-right:5px;vertical-align:middle}
+  .inspector{position:sticky;top:112px;height:calc(100vh - 112px);overflow:auto;border-left:1px solid var(--line);background:linear-gradient(180deg,#0a1322,#08101d);padding:22px 22px 40px}
+  .inspector .kicker{font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;font-weight:700}
+  .inspector h2{font-size:18px;margin:6px 0 2px;line-height:1.3}
+  .inspector .isub{color:var(--muted);font-size:12px;line-height:1.55;margin:0 0 16px}
+  .sec{margin:0 0 15px;border-top:1px solid #17233a;padding-top:11px}
+  .sec h3{font-size:11px;color:#8fa3c0;margin:0 0 5px;letter-spacing:.6px}
+  .sec p{margin:0;font-size:12.4px;line-height:1.75;color:#cfdcef}
+  .sec ul{margin:0;padding-left:16px;color:#b9c9e2}
+  .sec li{font-size:12.2px;line-height:1.65;margin:2px 0}
+  .sec.bad{border-top-color:#3a1a22;background:linear-gradient(90deg,rgba(248,113,113,.07),transparent);border-radius:8px;padding:10px 10px 8px;margin-left:-10px;margin-right:-10px}
+  .sec.bad h3{color:#fca5a5}
+  .sec.bad li{color:#fecaca}
+  .note{margin-top:14px;padding:10px 12px;border:1px solid #1d3a4a;background:#0b1b26;border-radius:8px;color:#9fd8e8;font-size:11.6px;line-height:1.6}
+  .empty{color:var(--muted);font-size:12.5px;line-height:1.8}
+  .empty b{color:#cfe0f6}
+  .diff-wrap{padding:2px 2px 30px}
+  .diff-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .diff-card{border:1px solid var(--line2);border-radius:12px;background:linear-gradient(180deg,#111a2c,#0c1526);padding:14px 16px}
+  .diff-card .num{font-size:10px;color:#5f7291;letter-spacing:1px}
+  .diff-card h3{font-size:14px;margin:4px 0 10px}
+  .diff-card .row{display:grid;grid-template-columns:52px 1fr;gap:8px;margin:5px 0;font-size:12.2px;line-height:1.6}
+  .diff-card .row b{font-size:10.5px;color:#94a3b8;padding-top:2px;letter-spacing:.5px}
+  .before{color:#fca5a5}
+  .after{color:#5eead4}
+  .diff-card p{margin:9px 0 0;font-size:11.6px;color:#93a6c4;line-height:1.65}
+  .rollout{margin-top:14px;border:1px solid #1d3a4a;border-radius:12px;background:linear-gradient(180deg,#0b1b26,#0a1420);padding:16px 18px}
+  .rollout h3{margin:0 0 10px;font-size:14px;color:#9fd8e8}
+  .rollout ol{margin:0;padding-left:18px;color:#c3d4e8;line-height:1.8;font-size:12.3px}
+  .rollout .inv{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .rollout .inv span{font-size:11px;color:#5eead4;border:1px solid #1d4a44;background:#0a201d;padding:4px 9px;border-radius:999px}
+  .node .expand{position:absolute;right:6px;top:5px;font-size:10px;line-height:14px;padding:0 3px;border-radius:4px;color:#7dd3fc;background:#0b2233;border:1px solid #1e4a63;letter-spacing:0}
+  .node.has-sub{padding-right:26px}
+  .drill{position:fixed;inset:0;z-index:100;display:none}
+  .drill.open{display:block}
+  .drill-backdrop{position:absolute;inset:0;background:rgba(3,8,16,.8);backdrop-filter:blur(7px)}
+  .drill-panel{position:absolute;inset:4vh 4vw;background:#08101f;border:1px solid #24405f;border-radius:16px;box-shadow:0 30px 90px rgba(0,0,0,.65);display:flex;flex-direction:column;overflow:hidden}
+  .drill-head{display:flex;align-items:center;gap:14px;padding:13px 18px;border-bottom:1px solid #1b2b45;background:#091424}
+  .drill-head .crumb{font-size:12px;color:#8fa3c0}
+  .drill-head .crumb b{color:#e6edf7;font-size:15px}
+  .drill-close{margin-left:auto;border:1px solid #2a3d5c;background:#0d1728;color:#9fb2cf;border-radius:7px;padding:6px 12px;font-size:11.5px;cursor:pointer;font-family:inherit}
+  .drill-close:hover{color:#fff;border-color:#3b5a80}
+  .drill-note{padding:9px 18px;font-size:11.8px;color:#9fb2cf;border-bottom:1px solid #14233a;background:#0a1727;line-height:1.65}
+  .drill-body{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:0}
+  .drill-canvas-wrap{overflow:auto;padding:16px;background-image:linear-gradient(rgba(56,80,120,.09) 1px,transparent 1px),linear-gradient(90deg,rgba(56,80,120,.09) 1px,transparent 1px);background-size:28px 28px}
+  .drill-side{border-left:1px solid #1b2b45;padding:16px 18px;overflow:auto;background:#0a1322}
+  .drill-side h4{margin:0 0 4px;font-size:14px}
+  .drill-side .ssub{font-size:11.5px;color:#8fa3c0;margin:0 0 12px;line-height:1.6}
+  .drill-side h5{margin:12px 0 4px;font-size:10.5px;letter-spacing:.6px;color:#8fa3c0}
+  .drill-side p{margin:0;font-size:11.8px;color:#b9c9e2;line-height:1.7}
+  .drill-side ul{margin:0;padding-left:15px;color:#b9c9e2}
+  .drill-side li{font-size:11.6px;line-height:1.65}
+  .drill-side .tag{display:inline-block;font-size:10px;color:#5eead4;border:1px solid #1d4a44;background:#0a201d;border-radius:999px;padding:2px 7px;margin:0 4px 4px 0}
+  @media (max-width:1100px){
+    .layout{grid-template-columns:1fr}
+    .inspector{position:relative;top:0;height:auto;border-left:0;border-top:1px solid var(--line)}
+    .top-hint{display:none}
+    .diff-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div style="padding:9px 22px;background:#3b2a12;border-bottom:1px solid #7c5a1e;color:#fcd34d;font-size:12px">
+  本图为 V2 历史版本，节点代号（T/O/G/P/M/R/J/C/E/U）已废弃。最新分层与命名见
+  <a href="智慧大脑-V3-分层结构图.html" style="color:#fde68a;text-decoration:underline">智慧大脑-V3-分层结构图</a>。
+</div>
+<header class="topbar">
+  <div class="brand">
+    <b>AI Stock · 智慧大脑系统结构设计图</b>
+    <span>从「18 个模块各干各的」到「规则层骨架 + 研究层 agent」 · v1.5 · 2026-11-25</span>
+  </div>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-mode="current">① 现状：功能孤岛</button>
+    <button class="tab" data-mode="target">② 目标：能力全景</button>
+    <button class="tab" data-mode="exec">③ 执行：规则层 + 研究层</button>
+    <button class="tab" data-mode="diff">④ 关键变化与落地</button>
+  </div>
+  <div class="top-hint">点击节点看职责与改造点<br>带 ⊞ 的节点可展开子图 · 红色数字是割裂点</div>
+</header>
+
+<div class="stats" id="stats"></div>
+
+<main class="layout">
+  <section class="stage">
+    <section class="view active" id="view-current">
+      <div class="view-head">
+        <div>
+          <h1>现状结构：每个功能一条竖井，靠页面和数据库间接耦合</h1>
+          <p>前端每张卡各自调接口拼结论；app-api 每个模块各抓各的数据；agent-py 由 supervisor 一次路由到单个 Agent，执行完即 END。</p>
+        </div>
+        <div class="zoom">
+          <button data-zoom="fit" data-key="current">适应宽度</button>
+          <button data-zoom="100" data-key="current">100%</button>
+        </div>
+      </div>
+      <div class="canvas-wrap" id="wrap-current">
+        <div class="canvas" id="canvas-current"></div>
+      </div>
+      <div class="legend">
+        <span><i style="border-color:#5b8def"></i>前端 / Agent → 接口调用</span>
+        <span><i style="border-color:#8b5cf6"></i>supervisor 图内路由</span>
+        <span><i style="border-color:#ef4444" class="dash"></i>重复取数 / 割裂 / 人工断点</span>
+        <span><i style="border-color:#94a3b8"></i>读写存储</span>
+        <span><span class="dot"></span>编号割裂点，可点击</span>
+      </div>
+    </section>
+
+    <section class="view" id="view-target">
+      <div class="view-head">
+        <div>
+          <h1>目标结构（能力全景）：7 条纵向泳道 + 底部共享账本，研究层保留 8 个能力域</h1>
+          <p>这张图回答「系统有哪些能力」：触发 → 感知 → 研究 → 研判 → 校准 → 表达 → 出口，底部是全图共享的记忆与治理脊柱。8 个研究能力域各是一个可独立编译、单测、回放的 LangGraph 子图，点击带 ⊞ 的节点展开。运行时并不 8 个并列全跑——执行形态见「③ 执行：规则层 + 研究层」：R5 是唯一 lead agent，R2/R3/R4/R7/R8 收敛为它按需调用的子 agent，R1/R6 收敛为确定性计算工具。</p>
+        </div>
+        <div class="zoom">
+          <button data-zoom="fit" data-key="target">适应宽度</button>
+          <button data-zoom="100" data-key="target">100%</button>
+        </div>
+      </div>
+      <div class="canvas-wrap" id="wrap-target">
+        <div class="canvas" id="canvas-target"></div>
+      </div>
+      <div class="legend">
+        <span><i style="border-color:#2dd4bf"></i>LangChain 工具调用</span>
+        <span><i style="border-color:#22c3a6"></i>证据 / 论点写入与投影</span>
+        <span><i style="border-color:#f59e0b"></i>研判与落账</span>
+        <span><i style="border-color:#c084fc" class="dash"></i>互相影响 / 校准回灌</span>
+        <span><i style="border-color:#64748b" class="dash"></i>渲染 / 只读</span>
+      </div>
+    </section>
+
+    <section class="view" id="view-exec">
+      <div class="view-head">
+        <div>
+          <h1>执行结构：规则层管「怎么跑」，研究层管「怎么想」</h1>
+          <p>规则层是确定性骨架：触发、档位模板 G1、工具权限 G2、账本、裁决、校准、渲染。研究层是智能 agent：R5 归因主控是唯一 lead agent，在规则层给的 RunBrief 边界内决定「先查谁、查几次、够不够」；R2/R3/R4/R7/R8 是它按需调用的子 agent，各自独立上下文、独立工具子集、独立步数上限，只返回结构化 claim；R1/R6 是确定性计算，不是 agent。两层只通过 RunBrief / ResearchResult 两个结构交互，研究层不直接写账本。</p>
+        </div>
+        <div class="zoom">
+          <button data-zoom="fit" data-key="exec">适应宽度</button>
+          <button data-zoom="100" data-key="exec">100%</button>
+        </div>
+      </div>
+      <div class="canvas-wrap" id="wrap-exec">
+        <div class="canvas" id="canvas-exec"></div>
+      </div>
+      <div class="legend">
+        <span><i style="border-color:#94a3b8"></i>规则层 · 确定性</span>
+        <span><i style="border-color:#818cf8"></i>研究层 · agent</span>
+        <span><i style="border-color:#c084fc" class="dash"></i>RunBrief / 按需调用</span>
+        <span><i style="border-color:#22c3a6"></i>ResearchResult / 证据</span>
+        <span><i style="border-color:#f59e0b"></i>研判与落账</span>
+      </div>
+    </section>
+
+    <section class="view" id="view-diff">
+      <div class="diff-wrap">
+        <div class="diff-grid">
+          <div class="diff-card">
+            <div class="num">CHANGE 01</div>
+            <h3>入口：从「意图分类器」到「运行编排器」</h3>
+            <div class="row"><b>现在</b><span class="before">supervisor 把请求分给 11 个 Agent 之一，执行完直接 END；一次 run 只走一条分支。</span></div>
+            <div class="row"><b>目标</b><span class="after">run_orchestrator 按触发源 + 标的 + 预算选择运行档位，并行扇出多个研究子图，全图共享一份 state。</span></div>
+            <p>意图分类仍然保留，但只用于选择档位，不再决定「只跑谁」。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 02</div>
+            <h3>状态：从「各自 END」到「一份增量证据账本」</h3>
+            <div class="row"><b>现在</b><span class="before">Agent 各写各的报告文本；AgentState 名义共享，实际每个 Agent 跑完就结束，跨 Agent 无中间结论。</span></div>
+            <div class="row"><b>目标</b><span class="after">append-only channels：evidence / claims / conflicts 按 id 归并；节点只写增量，下游按 subject / sector / 时间取投影。</span></div>
+            <p>不是让所有节点读全量上下文，而是读「与自己相关的切片 + 增量」，token 成本可控。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 03</div>
+            <h3>数据：从「模块各抓各的」到「API 工具化 + 统一 provenance」</h3>
+            <div class="row"><b>现在</b><span class="before">quote / monitor / fear-greed / stock-trace 各自直连腾讯、同花顺、Tushare，缓存与口径不一致。</span></div>
+            <div class="row"><b>目标</b><span class="after">app-api 仍是数据 owner；每个能力包成 StructuredTool，统一返回 provenance / quality / error，全图共用。</span></div>
+            <p>Agent 不再直连外部数据源；工具失败必须显式 failed，不允许空数组静默归零。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 04</div>
+            <h3>研究：从「单 Agent 拍结论」到「研究子图互相取用」</h3>
+            <div class="row"><b>现在</b><span class="before">趋势、风口、事件、洞见各是一个 Agent，各用各的工具与提示词，互相不知道对方看到了什么。</span></div>
+            <div class="row"><b>目标</b><span class="after">每个功能变成研究子图：读共享证据，暴露只读工具；事件热度进风口，市场基调与板块强度进个股归因，个股龙头再反哺板块。</span></div>
+            <p>功能负责人仍然维护自己的子图，但输入输出统一走证据 / 论点契约。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 05</div>
+            <h3>研判：从「多份报告」到「一个 judgment_id」</h3>
+            <div class="row"><b>现在</b><span class="before">晨报、个股洞见、播报、对话各自生成结论；同一只票在不同页面可能口径不同。</span></div>
+            <div class="row"><b>目标</b><span class="after">多方 / 反方 / 冲突消解 / 研判落账四个节点产出唯一研判；所有出口引用同一个 judgment_id。</span></div>
+            <p>高置信必须至少两个独立来源一致；反方与失效条件不可省略。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 06</div>
+            <h3>校准：从「复盘文件 + 人工」到「自动验证 + 方法回灌」</h3>
+            <div class="row"><b>现在</b><span class="before">review → snapshot → iterate 产物是文件，人工看完改提示词，改动与研判效果无法对应。</span></div>
+            <div class="row"><b>目标</b><span class="after">verifier 到期回填实际走势，method_evolver 把失败模式转成方法版本，反馈给研究子图作为先验。</span></div>
+            <p>复盘不再是一次性文档，而是图里的反馈边；每次改动都可追溯到版本与样本。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 07</div>
+            <h3>事件：从「三套库」到「一个事件主记录」</h3>
+            <div class="row"><b>现在</b><span class="before">agent event_store、app-api event_entities、calendar events 平行存在，实体链接与存活度口径不一致。</span></div>
+            <div class="row"><b>目标</b><span class="after">event_perception 统一抓取与去重，生成事件主记录 + 实体链接证据；其他节点只引用 evidence_id。</span></div>
+            <p>事件结论反哺风口热度，风口强度又影响个股归因，形成真正的跨功能传导。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 08</div>
+            <h3>出口：从「前端拼结论」到「前端只渲染」</h3>
+            <div class="row"><b>现在</b><span class="before">首页、个股页、板块页、选股页各自调 3-6 个接口，在组件里拼成结论；对话与页面各说各话。</span></div>
+            <div class="row"><b>目标</b><span class="after">页面只消费 judgment / evidence 投影；卡片降级为证据附件；对话只读账本，新结论必须回写。</span></div>
+            <p>播报可以扩写叙述，但不得引入研判之外的新结论。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 09</div>
+            <h3>洞见卡片：从「个股单打」到「市场→板块→个股」</h3>
+            <div class="row"><b>现在</b><span class="before">前端只调 /api/cn/favorites/movements 一个接口；卡片主因由这只票自己的行情、新闻、公告归因，大盘与板块强弱不参与结论。</span></div>
+            <div class="row"><b>目标</b><span class="after">前端接口不变，后端改成同一张图：市场定基调 → 板块给强弱 / 龙头 → 个股判「板块共振 / 逆板块 / 个体事件」，结论带三层证据与冲突标记。</span></div>
+            <p>板块强、个股只是跟涨时，卡片会写「板块带动」而不是硬编一个个股利好；龙头异动对板块强度的修正进入下一轮，不在同一 run 内成环。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 10</div>
+            <h3>大盘溯源：从「复盘 worker 单独成稿」到「同一账本的复盘视图」</h3>
+            <div class="row"><b>现在</b><span class="before">复盘 Agent 自己抓数、自己归因、自己写 schema 2.0 的 market_trace；大盘溯源页只读这一份报告，和早报、个股、板块的结论不共享证据。</span></div>
+            <div class="row"><b>目标</b><span class="after">复盘是同一张图的 review 视图：主因 / 备选 / 被否 / 风险 / 次日验证都引用 M1 evidence 与 M2 claim，结论落 M3；页面只渲染，不再二次归因。</span></div>
+            <p>同一天的大盘结论只存在一份，早报、收盘复盘、大盘溯源口径一致；次日验证由 C2 回填，而不是人工对照。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 11</div>
+            <h3>边契约修正：按依赖方向与同 run 可执行性消除不自洽</h3>
+            <div class="row"><b>原则</b><span class="after">不按原图“画了什么”保留，按数据依赖、执行顺序与是否成环重新连线；反向修正一律放到下一轮。</span></div>
+            <p>① 工具带补齐 P3/P4/R1/R5/C2/E1/E3/E4；② 板块→趋势改为 R2→R1（wind 先执行）；③ 补 R1→R5（洞见读趋势）；④ R6 改读 M3 最近一条研判，避免 R6→J4→R6 成环；⑤ M4 先验下发 R1-R6，并补 M4→C1/C3；⑥ M5 补 P2/P3/R3；⑦ 补 E4→M3 回写、M3→J4 上一条研判；⑧ 补 P2→P3 事件主记录；⑨ T2/T4 触发边带 event_id/judgment_id。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 12</div>
+            <h3>研究层补齐 R7/R8，工具带改为三层权限</h3>
+            <div class="row"><b>为什么</b><span class="after">R5 既做归因又做资金，职责过宽；宏观数据塞在事件研究里，市场级判断缺少「环境松紧」。</span></div>
+            <p><b>R7 资金/筹码研究员</b>：资金流、龙虎榜、席位、两融、北向、大单 → 资金筹码 claim。<b>R8 宏观/政策研究员</b>：利率、CPI/PPI/PMI、汇率、政策文件、宏观日历 → 宏观政策 claim。两者都在研究层，产出进 M2，供 R2 板块、R5 归因、R6 仓位借用。</p>
+            <p><b>三层工具箱</b>：公共箱（行情/K线/新闻/日历/恐贪/搜索）所有研究员可用；角色箱默认只给本职；跨箱需在作业书写「借用条」，运行时记 trace；写账本/用户数据/推送属敏感箱，需显式授权。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 13</div>
+            <h3>大盘溯源：从「一个老法师写报告」到「八个研究员 + 有边界 ReAct」</h3>
+            <div class="row"><b>改前</b><span class="before">review 单次 deep_think：自己冻结快照、自己归因、自己写 schema 2.0，和早报/个股不共享证据。</span></div>
+            <div class="row"><b>改后</b><span class="after">T1 定时 → O1 选 review 档位 → P1/P2/P3 供证据 → R1-R8 供 claims → R5 列候选原因并用 ReAct 逐条验伪 → J1/J2 辩论 → J3 裁决 → J4 定稿落 M3 → E1 渲染大盘溯源视图；C2 三天后自动对答案。</span></div>
+            <p>共同点：触发时间、页面结构（现象/主因/备选/被否/次日验证）、due+3 预判都保留。区别：数据从私有快照变共享 M1，结论从报告文本变 judgment，失败允许写「证据不足」而不是逼模型编主因。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 14</div>
+            <h3>执行拓扑收敛：从「8 个研究员流水线」到「规则层 + 研究层」</h3>
+            <div class="row"><b>为什么</b><span class="after">节点多不等于智能。8 个研究员固定顺序全跑，没人判断「要不要查、查到什么程度算够」，本质是流水线；R5 是唯一需要「多假设 + 反复验伪」的 agent，R1/R6 是纯计算，R2/R3/R4/R7/R8 是专项取证。</span></div>
+            <div class="row"><b>规则层</b><span class="after">触发、O1 编排、G1 档位模板、G2 工具权限、M1-M6 账本、J3 裁决、C1/C2 校准、E1-E5 渲染。全部确定性，规定「什么时候跑、必查什么、花多少预算、失败怎么降级」。</span></div>
+            <div class="row"><b>研究层</b><span class="after">R5 归因主控是唯一 lead agent；R2/R3/R4/R7/R8 收敛为它按需调用的子 agent，各自独立上下文、独立工具子集、独立步数上限，只返回结构化 claim；R1/R6 收敛为确定性计算工具。判断权集中到唯一该有判断权的地方。</span></div>
+            <p>两层只通过 <b>RunBrief</b>（必查清单 / 预算 / 超时 / 输出 schema）和 <b>ResearchResult</b>（claims / evidence_ids / partial / tool_calls）交互，研究层不直接写账本。每档 2 个必查 probe 保底，其余由 R5 按证据加查：既不会该查没查，也不会像流水线那样全跑。</p>
+          </div>
+          <div class="diff-card">
+            <div class="num">CHANGE 15</div>
+            <h3>V2.1：补上自检、学习、快慢档与风险非对称</h3>
+            <div class="row"><b>为什么</b><span class="after">V2 能取证但不会自检、不会把教训变成下次的先验；黑天鹅和普通波动同权；所有任务都走完整慢思考，盘中信号来不及。</span></div>
+            <div class="row"><b>新增 C4 元认知</b><span class="after">R5 出结果后独立检查三件事：结论有没有对应证据、有没有互相矛盾的证据、关键证据失效时结论会不会翻转。不通过打回一次或降置信 0.15。</span></div>
+            <div class="row"><b>新增 C5 离线反思</b><span class="after">非交易时段读 M3/C2/M4，修正错误归因、把反复验证的模式蒸馏成 M4 语义条目（需 ≥3 个支撑案例）、生成待验证假设。只写 M4，不改 M3 历史结论。</span></div>
+            <div class="row"><b>强化四处</b><span class="after">G1 加 fast / slow / escalate 快慢档（规则信号只提示不出口结论）；J2 强制等强度反证；J3 风险事件 bear 权重 ×1.5、置信上限 0.5；M3/M4 检索改三因子（relevance / recency / hit_rate），只排序不删除。</span></div>
+            <p><b>没加</b>：RL 微调小模型（样本少、成本高）、删除式遗忘（账本是审计事实源）、七个脑区各建模块（会把刚收敛的图重新变臃肿）。依据：FrugalGPT 级联、Anthropic agent memory dreaming、Generative Agents 检索、TradingAgents 风控团队。</p>
+          </div>
+        </div>
+        <div class="rollout">
+          <h3>落地顺序：组长先行，一条真实链路先跑通，其余模块按规范接入</h3>
+          <ol>
+            <li><b>第一阶段（样板链）</b>：数据平台 → 洞见 → 播报 → 市场。产出 evidence / claim / judgment 三张契约、3 个研究子图、1 个播报出口，先证明「互相影响」确实提升结论质量。</li>
+            <li><b>第二阶段（横向接入）</b>：趋势、风口、事件、业绩、节奏按同一契约迁移；每个模块只需暴露工具 + 写证据 / 论点，不改前端。</li>
+            <li><b>第三阶段（出口切换）</b>：首页、个股页、事件页切到 judgment 渲染；旧接口保留只读兜底，观察两周再下线。</li>
+          </ol>
+          <div class="inv">
+            <span>不变量 1：app-api 是唯一数据源</span>
+            <span>不变量 2：一个 judgment_id 只落一次账</span>
+            <span>不变量 3：前端不拼结论</span>
+            <span>不变量 4：无来源不进入高置信</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <aside class="inspector" id="inspector"></aside>
+</main>
+
+<div class="drill" id="drill">
+  <div class="drill-backdrop" data-drill-close></div>
+  <div class="drill-panel">
+    <div class="drill-head">
+      <div class="crumb">主图 <span style="color:#3f5578">›</span> <b id="drill-title"></b></div>
+      <button class="drill-close" data-drill-close>关闭 (Esc)</button>
+    </div>
+    <div class="drill-note" id="drill-note"></div>
+    <div class="drill-body">
+      <div class="drill-canvas-wrap"><div class="canvas" id="drill-canvas"></div></div>
+      <div class="drill-side" id="drill-side"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const NS = 'http://www.w3.org/2000/svg';
+
+const LAYER = {
+  frontend:{name:'前端页面',color:'#38bdf8'},
+  api:{name:'app-api 模块',color:'#34d399'},
+  agent:{name:'agent-py 图 / 调度',color:'#a78bfa'},
+  store:{name:'存储 / 外部源',color:'#fbbf24'},
+  trigger:{name:'触发',color:'#fb7185'},
+  perception:{name:'感知层',color:'#22d3ee'},
+  research:{name:'研究层',color:'#818cf8'},
+  judgment:{name:'研判层',color:'#f59e0b'},
+  calibration:{name:'校准层',color:'#c084fc'},
+  expression:{name:'表达层',color:'#34d399'},
+  memory:{name:'记忆 / 治理',color:'#fbbf24'},
+  tool:{name:'工具带',color:'#2dd4bf'},
+  rule:{name:'规则层',color:'#94a3b8'},
+  pain:{name:'割裂点',color:'#f87171'}
+};
+
+const EDGE = {
+  call:{color:'#5b8def'},
+  route:{color:'#8b5cf6'},
+  agent:{color:'#8b5cf6'},
+  dup:{color:'#ef4444',dash:'6 5'},
+  store:{color:'#94a3b8'},
+  human:{color:'#f59e0b',dash:'4 4'},
+  tool:{color:'#2dd4bf'},
+  evidence:{color:'#22c3a6'},
+  judge:{color:'#f59e0b'},
+  feedback:{color:'#c084fc',dash:'5 5'},
+  rule:{color:'#94a3b8',dash:'4 4'},
+  render:{color:'#64748b',dash:'3 4'}
+};
+
+const N=(id,x,y,w,h,layer,title,sub,chips,d)=>({id,x,y,w,h,layer,title,sub,chips, d});
+const G=(id,x,y,w,h,title,layer)=>({id,x,y,w,h,title,layer,type:'group'});
+const P=(id,x,y,name,sub,d)=>({id,x,y,w:28,h:28,layer:'pain',type:'pain',title:id.slice(1),sub,name,d});
+const E=(from,to,kind,label,bi,off)=>({from,to,kind,label,bi,off});
+
+/* ============================== 现状图 ============================== */
+const CURRENT = {
+  w:1720, h:1120,
+  nodes:[
+    G('GF',30,70,270,980,'前端页面（App + Web）','frontend'),
+    G('GA',330,70,450,980,'app-api · 18 组模块','api'),
+    G('GG',810,70,560,980,'agent-py · 主图 + 调度 + 晚间闭环','agent'),
+    G('GD',1400,70,290,980,'存储 / 外部数据源','store'),
+
+    N('F1',50,120,230,84,'frontend','首页 / 早点听','早点听三 Tab：早/午/晚同一入口，多卡拼接',['MorningContent','home/index'],{
+      role:'首页把晨报、风口、异动、自选消息、事件等 4-6 个接口的结果拼成多张卡片；每张卡独立请求、独立刷新。',
+      inputs:['/api/agent/report/morning/:date','/monitor/wind-leaders','/monitor/alerts','/event/list'],
+      outputs:['卡片入口，点进各功能页'],
+      deps:['MorningContent.vue','home/index.vue','agentApi / stockApi'],
+      problem:['卡片之间不共享上下文，「今天怎么看」要用户自己综合。','晨报、风口、异动各自生成结论，可能互相矛盾。','同一入口三套实现：晨/晚报走 broadcast+brief，午报走 report；三套解析、三套卡片。']
+    }),
+    N('F2',50,220,230,84,'frontend','自选 / 个股详情','quote + 趋势 + 洞见 + 异动，前端拼一屏',['favorites/detail','StockDetailView'],{
+      role:'个股页把行情、K 线、趋势评分、异动、洞见解读拼在同一屏，各块来自不同接口。',
+      inputs:['/quote','/kline','/monitor/trend-score','/stock-trace/insight','/monitor/alerts'],
+      outputs:['行情区、趋势卡、洞见卡、异动列表'],
+      deps:['favorites/detail.vue','StockDetailView.vue'],
+      problem:['个股页不知道所属板块的风口状态、相关事件、机构观点。','同一只票在个股页/风口页/事件页口径可能不同。']
+    }),
+    N('F3',50,320,230,84,'frontend','AI 对话','WebSocket + REST；问答与页面结论分离',['chat/index','qa_router'],{
+      role:'用户提问后由 supervisor 分类，交给单个 Agent 回答；对话结论不落到统一账本。',
+      inputs:['用户消息','favorites','symbol'],
+      outputs:['流式回答、会话记录'],
+      deps:['chat/index.vue','api/ws.py','intent_router'],
+      problem:['对话与页面卡片各说各话，没有同一 judgment。','追问只能重新取数，无法引用刚才的推理链。']
+    }),
+    N('F4',50,420,230,84,'frontend','市场 / 风口 / 板块','风口榜 + 板块详情 + 轮动 + 龙头',['leaders','sector-detail','sector-loop'],{
+      role:'风口榜、板块详情、轮动、龙头股分页展示。',
+      inputs:['/monitor/wind-leaders','/monitor/sector-insight','/monitor/rotation','/monitor/leaders'],
+      outputs:['榜单、板块详情、龙头列表'],
+      deps:['market/leaders.vue','sector-detail.vue','sector-loop.vue'],
+      problem:['风口强度不吸收事件、研报、资金证据。','板块结论与个股洞见互不影响。']
+    }),
+    N('F5',50,520,230,84,'frontend','事件 / 时间线','事件列表 + 传导 + 存活度',['EventListView','TimelineView'],{
+      role:'事件列表、事件详情、传导链、存活度、时间线。',
+      inputs:['/event-entities/list','/agent/event/list','/agent/event/:id','/agent/event/timeline'],
+      outputs:['事件卡、传导图、时间线'],
+      deps:['event/views/*','event/components/*'],
+      problem:['事件有三套库：agent event_store、app-api event_entities、calendar events。','同一事件可能三条记录、三种存活度口径。']
+    }),
+    N('F6',50,620,230,84,'frontend','节奏 / 恐贪 / 业绩','四时段节奏 + 情绪读数 + 业绩预测',['rhythm','fear-greed','analytics'],{
+      role:'节奏大师四时段报告、恐贪指数、业绩预测与机构调研。',
+      inputs:['/agent/rhythm-master/:date','/fear-greed','/monitor/forecast','/monitor/institution-research'],
+      outputs:['仓位建议、情绪读数、业绩卡'],
+      deps:['rhythm/index.vue','fear-greed/index.vue','analytics/*'],
+      problem:['节奏大师不读同日研判、事件、风口。','恐贪读数与市场结论割裂。']
+    }),
+    N('F7',50,720,230,84,'frontend','Web 端','另一套首页 / 自选 / 事件 / 评分',['aistock-frontend','SSE analysis'],{
+      role:'PC 端另一套首页、自选、事件、评分页面，接口部分重叠但组件不复用。',
+      inputs:['同一批 app-api 接口','/api/cn/stocks/:symbol/analysis（SSE）'],
+      outputs:['Web 页面'],
+      deps:['HomeView.vue','StockDetailView.vue','api.js'],
+      problem:['两端各自拼结论，口径与交互不一致。','Web 端有一套独立的 AI 分析流。']
+    }),
+    N('F8',50,820,230,84,'frontend','播报 / 推送','四时段播报音频 + 异动推送',['broadcast','push'],{
+      role:'早/午/晚/收盘播报音频与异动推送；晨/晚报由 broadcast 生成，午间另有 midday_broadcast 12:15 单独调度。',
+      inputs:['/agent/broadcast','/agent/report/midday','podcast_brief','/push'],
+      outputs:['音频、推送消息'],
+      deps:['播报组件','push 模块'],
+      problem:['播报只读 podcast_brief，不读其他 Agent 的推理链。','推送只看异动阈值，不看研判是否变化。','同一时段的音频与文字来自不同接口，午报 audio_path 回填位置与晨/晚报不一致。']
+    }),
+
+    N('A1',350,120,410,96,'api','quote 行情模块','行情 / K 线 / 资金流 / 指数 / 全球市场',['腾讯行情','/internal/*'],{
+      role:'行情、K 线、资金流、指数与全球市场数据的统一出口。',
+      inputs:['腾讯行情 API','本地缓存'],
+      outputs:['quote / kline / flow 接口'],
+      deps:['modules/quote'],
+      problem:['monitor、trend、fear-greed 等模块绕过 quote 各自再抓腾讯/同花顺。','缓存 TTL 与复权口径不统一。']
+    }),
+    N('A2',350,232,410,120,'api','monitor 综合监控','风口 / 异动 / 趋势 / 图谱 / 机构 / 业绩 / 新闻',['7 类能力','7 套 schema'],{
+      role:'一个模块塞了风口龙头、异动、趋势评分、知识图谱、机构调研、业绩预测、新闻等 7 类能力。',
+      inputs:['同花顺板块','腾讯行情','Tushare','财联社'],
+      outputs:['7 组接口，各自 schema'],
+      deps:['modules/monitor'],
+      problem:['能力多但输出各成一套，没有「证据」抽象。','Agent 只能按接口逐个取，跨能力无法互证。']
+    }),
+    N('A3',350,368,410,84,'api','crawler 抓取模块','新闻 / 公告抓取与全文',['财联社','公告源'],{
+      role:'新闻、公告抓取与全文读取。',
+      inputs:['财联社','交易所公告'],
+      outputs:['新闻列表 / 全文'],
+      deps:['modules/crawler'],
+      problem:['与 monitor 新闻、agent 事件抓取中台重复抓同一批源。']
+    }),
+    N('A4',350,468,410,84,'api','event-entities + calendar','事件实体库 + 财经日历',['实体链接','交易日历'],{
+      role:'事件实体库与财经日历。',
+      inputs:['新闻 / 公告','交易日历'],
+      outputs:['事件实体、日历事件'],
+      deps:['modules/event-entities','modules/calendar'],
+      problem:['与 agent event_store 平行存在。','实体链接规则与事件存活度口径不一致。']
+    }),
+    N('A5',350,568,410,84,'api','fear-greed + rotation','恐贪指数 + 板块轮动日频',['三时段刷新','同花顺板块'],{
+      role:'恐贪指数三时段刷新与板块轮动日频。',
+      inputs:['同花顺板块与资金','涨跌家数'],
+      outputs:['恐贪读数、轮动榜'],
+      deps:['modules/fear-greed','rotation'],
+      problem:['自取同花顺板块与资金数据，与 wind/trend 口径不一致。']
+    }),
+    N('A6',350,668,410,84,'api','stock-trace + insight','个股溯源 + 自选洞见 / 异动解读',['溯源事件','洞见规则'],{
+      role:'个股溯源事件与自选洞见、异动解读。',
+      inputs:['行情异动','新闻','板块归属'],
+      outputs:['溯源事件、洞见文案'],
+      deps:['modules/stock-trace','modules/insight'],
+      problem:['洞见靠单模块规则，读不到风口、事件、机构观点。']
+    }),
+    N('A7',350,768,410,84,'api','prediction + 选股 + 归因链','预测验证 + 综合选股 + 板块聚合 / MCRE 归因',['预测验证','stock-selection','MCRE'],{
+      role:'预测记录与验证、综合选股，以及在路由层临时拼多个模块的板块聚合与 MCRE 归因链。',
+      inputs:['各模块接口','预测记录','事件实体'],
+      outputs:['预测结果、选股名单、归因结论'],
+      deps:['modules/prediction','stock-selection','causal','sector-insight','attribution'],
+      problem:['聚合逻辑在路由层，不在图里，无法被其他功能复用。','MCRE 已能跑事件→行业节点，但结果没有变成共享论点。']
+    }),
+    N('A8',350,868,410,90,'api','agent proxy + chat + push + user','反代 Agent / 会话 / 推送 / 用户画像',['/api/agent/*','auth'],{
+      role:'反向代理 Python Agent，管理会话、推送与用户画像。',
+      inputs:['前端请求','Agent 响应'],
+      outputs:['Agent 报告、推送、会话'],
+      deps:['core/routes/agent','chat','push','user'],
+      problem:['只做转发，不参与编排。','Agent 结果没有统一落账，前端拿到的是文本。']
+    }),
+
+    N('G0',880,108,220,64,'agent','supervisor','意图分类 → 路由到单个 Agent → END',['11 个分支'],{
+      role:'对用户/定时请求做意图分类，路由到图内 Agent 之一；Agent 执行完直接 END。',
+      inputs:['用户消息 / 调度触发','favorites、symbol'],
+      outputs:['intent → 单个 Agent'],
+      deps:['agents/registry.py（15 个注册，11 个进图）','graph/builder.py','intent_router.py'],
+      problem:['一次 run 只走一个分支，没有阶段、没有回边、没有共享工作记忆。','意图错，整条链就错。']
+    }),
+    N('G1',830,198,230,72,'agent','morning 晨报','工具 category：morning',['Tavily','财联社'],{
+      role:'晨报 Agent：全球市场、隔夜新闻、自选股消息，生成早点听。',
+      inputs:['morning 工具','favorites'],
+      outputs:['agent_analysis_reports（morning）'],
+      deps:['agents/workers/morning_agent.py'],
+      problem:['独立 ReAct、独立提示词。','不读同日风口/事件 Agent 的中间结论。']
+    }),
+    N('G2',830,286,230,72,'agent','stock 个股分析','工具 category：stock / advisor',['quote','业绩','资金'],{
+      role:'个股分析 Agent：行情、资金、业绩，生成个股观点。',
+      inputs:['stock 工具','symbol'],
+      outputs:['个股分析报告'],
+      deps:['stock_analyst.py'],
+      problem:['与洞察/风口/事件 Agent 无共享状态。']
+    }),
+    N('G3',830,374,230,72,'agent','sector 板块分析','工具 category：sector',['龙头','板块预判'],{
+      role:'板块分析 Agent：龙头股、板块趋势预判。',
+      inputs:['sector 工具','tag_code'],
+      outputs:['板块分析报告'],
+      deps:['sector_analyst.py'],
+      problem:['不吸收事件/研报证据，板块强度靠单一来源。']
+    }),
+    N('G4',830,462,230,72,'agent','event 事件分析','工具 category：event',['事件库','行业映射'],{
+      role:'事件分析 Agent：读取抓取中台的事件，生成传导分析。',
+      inputs:['event 工具','event_store'],
+      outputs:['事件分析报告'],
+      deps:['event_analyst.py'],
+      problem:['与 app-api event_entities / calendar 是三套库。']
+    }),
+    N('G5',830,550,230,72,'agent','wind_leader 风口龙头','工具 category：wind_leader',['风口榜'],{
+      role:'风口龙头 Agent：风口榜与龙头股解读。',
+      inputs:['wind_leader 工具'],
+      outputs:['风口分析报告'],
+      deps:['wind_leader_agent.py'],
+      problem:['与 hot_burst、trend 各自看板块，结论可能冲突。']
+    }),
+    N('G6',830,638,230,72,'agent','hot_burst 热点爆发','工具 category：hot_burst',['爆发榜'],{
+      role:'热点爆发 Agent：热点爆发榜与历史对比。',
+      inputs:['hot_burst 工具'],
+      outputs:['热点分析报告'],
+      deps:['hot_burst_agent.py'],
+      problem:['与风口 Agent 职责重叠但不共享证据。']
+    }),
+    N('G7',1080,198,230,72,'agent','trend_score 趋势评分','工具 category：trend_score',['评分','TOP 榜'],{
+      role:'趋势评分 Agent：趋势分、明细、TOP 榜。',
+      inputs:['trend_score 工具'],
+      outputs:['趋势分析报告'],
+      deps:['trend_score_agent.py'],
+      problem:['评分结果不反哺风口/洞见，只作为独立报告存在。']
+    }),
+    N('G8',1080,286,230,72,'agent','alert 异动解读','工具 category：alert / alert_news / alert_graph',['异动','图谱'],{
+      role:'异动解读 Agent：异动事件、新闻、图谱联合解读。',
+      inputs:['alert 工具'],
+      outputs:['异动解读'],
+      deps:['alert_agent.py'],
+      problem:['推送与页面结论来自不同链路。']
+    }),
+    N('G9',1080,374,230,72,'agent','broadcast 播报','读 podcast_brief，生成音频文案',['podcast_brief'],{
+      role:'播报 Agent：读 podcast_brief，生成早/晚/收盘播报文案与音频；午间由 midday_broadcast 12:15 单独调度。',
+      inputs:['podcast_brief','播报模板'],
+      outputs:['播报文案、音频'],
+      deps:['broadcast.py','midday_broadcast.py','音频服务'],
+      problem:['只读 podcast_brief，不读其他 Agent 的推理链与冲突。','播报可能引入 brief 之外的新结论。']
+    }),
+    N('G10',1080,462,230,72,'agent','rhythm_master 节奏大师','四时段报告 + 仓位建议',['四时段','仓位'],{
+      role:'节奏大师：四时段读指数、恐贪、资金，输出仓位建议。',
+      inputs:['指数/恐贪/资金','自选持仓'],
+      outputs:['节奏报告'],
+      deps:['rhythm_master.py'],
+      problem:['不读同日研判、事件、风口；建议与其他结论可能矛盾。']
+    }),
+    N('G11',1080,550,230,72,'agent','chat 对话子图','qa_router → skill → synth',['qa_router','skill_executor'],{
+      role:'对话子图：意图路由、技能执行、答案合成。',
+      inputs:['用户问题','上下文'],
+      outputs:['回答'],
+      deps:['api/ws.py','qa_router'],
+      problem:['回答不落账本，无法被页面或播报引用。']
+    }),
+    N('G12',1080,638,230,72,'agent','insight worker','Redis Stream 消费自选异动',['Redis Stream'],{
+      role:'异步 worker：消费自选异动事件，逐条生成解读并回写。',
+      inputs:['Redis Stream','异动事件'],
+      outputs:['单条解读'],
+      deps:['workers/insight_worker.py'],
+      problem:['与其他 Agent 完全隔离，单条解读无法形成连续判断。']
+    }),
+    N('G13',830,730,480,92,'agent','APScheduler 调度器','30+ job：晨报 08:50 · 播报 09:00 · 节奏 4 档 · 复盘 15:30 · 快照 15:35 · 迭代 15:40/16:30 · 事件抓取 4 档',['30+ job','交易日守卫'],{
+      role:'30+ 个 APScheduler 定时任务，现已统一走 task_runner，执行记录写入 task_store。',
+      inputs:['cron 表达式','交易日历'],
+      outputs:['触发各 Agent / 任务','可查的执行记录'],
+      deps:['services/scheduler.py','services/task_runner.py','services/task_store.py'],
+      problem:['统一了执行外壳与记录，但仍绕过图的 run 入口，任务之间不共享推理状态。','时区/交易日守卫仍分散在各任务里。']
+    }),
+    N('G14',830,842,230,100,'agent','晚间闭环 review → snapshot → iterate','产物落文件，靠人工审核',['review','snapshot','iterate'],{
+      role:'收盘后复盘、快照、迭代：把当日报告与结果写成文件，生成改进建议。',
+      inputs:['当日报告','预测结果'],
+      outputs:['复盘文件、迭代建议'],
+      deps:['iterate/','review 任务'],
+      problem:['产物是文件，不是结构化先验。','迭代建议要人工改提示词/阈值，改动不回灌到图。']
+    }),
+    N('G15',1080,842,230,100,'agent','人工审核','人看复盘文件，手改 prompt / 阈值',['人工','天/周级'],{
+      role:'人阅读复盘文件后，手工修改提示词、阈值或代码。',
+      inputs:['复盘文件'],
+      outputs:['手工改动'],
+      deps:['人工流程'],
+      problem:['反馈周期以天/周计。','无法追溯哪次改动影响了哪条研判。']
+    }),
+    N('G16',830,960,480,56,'agent','agent_analysis_reports / Redis / 文件 / 音频','各 Agent 报告按 intent + date 存文本',['报告文本','非结构化'],{
+      role:'各 Agent 的结果按 intent + date 存成报告文本，辅以 Redis 事件流、复盘文件与播报音频。',
+      inputs:['Agent 输出'],
+      outputs:['报告文本、事件流、文件、音频'],
+      deps:['Postgres','Redis','本地文件'],
+      problem:['结果是报告文本，不是结构化研判，难以跨 Agent 引用与验证。']
+    }),
+
+    N('D1',1420,120,250,120,'store','外部数据源','腾讯 / 同花顺 / Tushare / 财联社 / 东财 / 新浪',['6+ 源'],{
+      role:'外部行情、板块、资金、新闻、公告数据源。',
+      inputs:[],
+      outputs:['原始数据'],
+      deps:['各模块自建 client'],
+      problem:['同一个源被多个模块直连，限流、缓存、口径各自为政。']
+    }),
+    N('D2',1420,270,250,140,'store','Postgres 业务表','quote / kline / trend_scores / wind_leaders / board_rotation_daily / event_entities / calendar / prediction_records',['10+ 表'],{
+      role:'各模块的业务表，按模块写入、按接口读取。',
+      inputs:['模块写入'],
+      outputs:['接口查询'],
+      deps:['migrations'],
+      problem:['表按模块切分，跨模块关联要靠 JOIN 或路由层拼。']
+    }),
+    N('D3',1420,440,250,120,'store','agent_analysis_reports','各 Agent 报告文本（intent + date）',['报告文本'],{
+      role:'Agent 报告的唯一落点，前端按 intent/date 读取。',
+      inputs:['Agent 写入'],
+      outputs:['前端读取'],
+      deps:['agent-py → app-api'],
+      problem:['只有文本，没有证据引用、置信度、失效条件。']
+    }),
+    N('D4',1420,590,250,140,'store','Redis / 文件 / 音频','事件流 · 复盘文件 · podcast_brief · 播报音频',['多套载体'],{
+      role:'事件流、复盘文件、播报 brief 与音频的存放地。',
+      inputs:['Agent / 调度写入'],
+      outputs:['下游读取'],
+      deps:['Redis','本地文件','对象存储'],
+      problem:['同一份信息分散在多种载体，没有统一版本与引用。']
+    }),
+    N('D5',1420,760,250,160,'store','三套事件库','agent event_store / app-api event_entities / calendar events',['3 套'],{
+      role:'三套平行的事件存储，各自服务不同链路。',
+      inputs:['抓取中台','实体链接','日历导入'],
+      outputs:['事件列表 / 传导 / 日历'],
+      deps:['event_store','event-entities','calendar'],
+      problem:['同一事件可能三条记录。','实体链接与存活度口径不一致，无法互相引用。']
+    }),
+
+    P('P1',300,182,'前端拼结论','首页/个股页/板块页各自调多个接口，在组件里拼成结论，没有统一研判。',{
+      name:'割裂点 1 · 前端拼结论',
+      role:'同一屏的多个卡片来自不同接口，由前端组件临时拼成「看起来像结论」的内容。',
+      problem:['结论无法复用、无法验证、无法被播报/对话引用。','任一接口变化都会改变页面口径。']
+    }),
+    P('P2',726,80,'模块各抓各的数据','quote / monitor / fear-greed / stock-trace 分别直连腾讯、同花顺、Tushare。',{
+      name:'割裂点 2 · 模块各抓各的数据',
+      role:'每个模块自建外部数据 client，缓存与字段口径不统一。',
+      problem:['同一指标在不同模块可能不同值。','限流与故障放大，无法统一降级。']
+    }),
+    P('P3',1010,100,'Agent 无共享状态','supervisor 一次路由，Agent 各自 END；跨 Agent 没有中间结论。',{
+      name:'割裂点 3 · Agent 之间无共享状态',
+      role:'AgentState 虽然定义了共享字段，但每个 Agent 执行完即 END，实际没有跨 Agent 的工作记忆。',
+      problem:['晨报不知道风口 Agent 看到了什么，洞见不知道事件 Agent 的结论。','无法互相纠错，也无法形成反方观点。']
+    }),
+    P('P4',760,500,'事件三套库','agent event_store、app-api event_entities、calendar events 平行存在。',{
+      name:'割裂点 4 · 事件三套库',
+      role:'事件抓取、实体链接、日历导入分别维护一套事件数据。',
+      problem:['同一事件三条记录、三套存活度。','事件结论无法作为共享证据被其他功能引用。']
+    }),
+    P('P5',1340,890,'复盘不回灌','review / snapshot / iterate 产物是文件，人工改完不进入图的先验。',{
+      name:'割裂点 5 · 复盘不回灌',
+      role:'晚间闭环生成复盘文件，人工阅读后手动改提示词或阈值。',
+      problem:['反馈周期以天/周计。','改动与研判效果无法对应，无法做 A/B。']
+    }),
+    P('P6',1340,390,'播报不读推理','broadcast 只读 podcast_brief，不知道当天其他 Agent 的结论与冲突。',{
+      name:'割裂点 6 · 播报不读推理链',
+      role:'播报链路由 brief 驱动，与其他 Agent 的推理结果没有结构关联。',
+      problem:['播报可能与其他页面结论矛盾。','brief 之外的新结论没有落账。']
+    }),
+    P('P7',300,260,'同票多口径','个股页、风口页、事件页对同一只票的结论可能不同。',{
+      name:'割裂点 7 · 同一只票多口径',
+      role:'各页面分别取数、分别生成结论，没有单一研判账本。',
+      problem:['用户无法判断该信哪个。','准确率无法归因到具体结论。']
+    })
+  ],
+  edges:[
+    E('F1','A2','call'),E('F1','A8','call'),
+    E('F2','A1','call'),E('F2','A2','call'),E('F2','A6','call'),
+    E('F3','A8','call'),
+    E('F4','A2','call'),E('F4','A5','call'),
+    E('F5','A4','call'),E('F5','A2','call'),
+    E('F6','A5','call'),E('F6','A7','call'),
+    E('F7','A1','call'),E('F7','A4','call'),
+    E('F8','A8','call'),
+
+    E('A1','D1','call'),E('A2','D1','dup','重复直连'),E('A3','D1','call'),
+    E('A5','D1','dup','重复直连'),E('A6','D1','dup','重复直连'),
+    E('A2','D2','store'),E('A4','D5','store'),E('A7','D2','store'),E('A8','D3','store'),
+
+    E('G0','G1','route'),E('G0','G2','route'),E('G0','G3','route'),E('G0','G4','route'),
+    E('G0','G5','route'),E('G0','G6','route'),E('G0','G7','route'),E('G0','G8','route'),
+    E('G0','G9','route'),E('G0','G10','route'),E('G0','G11','route'),E('G0','G12','route'),
+    E('G13','G0','agent','定时/手动触发'),
+    E('G1','G4','agent','晨报顺带触发事件'),
+
+    E('G1','A2','tool'),E('G2','A1','tool'),E('G2','A2','tool'),E('G4','A4','tool'),
+    E('G5','A2','tool'),E('G6','A2','tool'),E('G7','A2','tool'),E('G8','A1','tool'),
+    E('G9','A8','tool'),E('G10','A5','tool'),E('G12','A6','tool'),
+
+    E('G9','D4','store','写音频/brief'),E('G10','D3','store'),E('G2','D3','store'),E('G5','D3','store'),
+    E('G14','D4','store','复盘文件'),E('G14','G15','dup','人工改完不回灌'),
+    E('G12','D4','store','Redis Stream')
+  ]
+};
+
+/* ============================== 目标图 ============================== */
+const TARGET = {
+  w:1720, h:1300,
+  nodes:[
+    G('GT',25,40,225,500,'触发层 · 统一入口','trigger'),
+    G('GP',262,40,240,470,'感知层 · 只取一次','perception'),
+    G('GR',514,40,210,870,'研究层 · 8 个能力域（执行形态见 ③）','research'),
+    G('GJ',736,40,232,520,'研判层 · 唯一 judgment','judgment'),
+    G('GC',980,40,220,470,'校准层 · 验证回灌','calibration'),
+    G('GE',1212,40,225,550,'表达层 · 渲染同一研判','expression'),
+    G('GO',1449,40,246,560,'出口 · 前端只渲染','expression'),
+    G('GM',25,950,1670,215,'记忆 / 治理 · 全图共享（唯一证据与研判账本）','memory'),
+    G('GX',25,545,225,190,'工具带 · 24 个 LangChain Tool','tool'),
+
+    N('U1',50,62,240,70,'expression','App 首页 · 今日结论','大盘 / 持仓 / 异动 3-5 条',['judgment_id'],{
+      role:'只渲染 judgment 列表与证据摘要；原有功能卡片降级为「证据附件」，不再由前端拼结论。大盘溯源是首页结论的下钻页，沿用同一 judgment 与证据链。',
+      inputs:['judgment 投影','evidence 摘要'],
+      outputs:['首页结论卡、证据折叠、大盘溯源下钻'],
+      deps:['E1 briefing_writer','M3 研判账本'],
+      change:['从「4-6 个接口拼卡片」变成「一份研判多处渲染」。','首页第一眼就能回答「今天怎么办」。']
+    }),
+    N('U2',302,62,240,70,'expression','个股页 · 研判卡','方向 / 置信度 / 依据 / 反方 / 复查时间',['judgment_id'],{
+      role:'展示该股票的统一研判：方向、置信度、核心逻辑、反方证据、失效条件、复查时间。',
+      inputs:['judgment_id','claim graph 投影'],
+      outputs:['研判卡、证据展开'],
+      deps:['E2 stock_view_writer','M3'],
+      change:['不再把 quote/趋势/洞见/异动各自拼一段。','同一只票全站只有一个结论。']
+    }),
+    N('U3',554,62,240,70,'expression','事件页 · 事件研判','事件 → 受益/受损板块 → 个股',['judgment_id'],{
+      role:'事件详情展示事件研判、传导链与相关个股，引用同一 claim graph。',
+      inputs:['事件 judgment','claim / evidence'],
+      outputs:['事件研判、传导链'],
+      deps:['E2','M2'],
+      change:['事件不再是孤立卡片，结论与风口/个股联动。']
+    }),
+    N('U4',806,62,240,70,'expression','播报 / 推送','播报扩写；推送只推变化与失效',['四时段','push'],{
+      role:'播报把同一研判扩写成叙述；推送只推结论变化、失效条件触发、高置信新机会。',
+      inputs:['judgment_id','render_targets'],
+      outputs:['音频、推送'],
+      deps:['E1','E3'],
+      change:['播报不再读 brief 自行生成结论。','推送不再只看异动阈值。','四个时段是同一出口的 slot，不是四条独立链。']
+    }),
+    N('U5',1058,62,240,70,'expression','对话（只读账本）','回答必须引用 judgment / evidence',['只读'],{
+      role:'对话只读账本回答，必须引用 judgment_id / evidence_id；要产生新结论必须回写账本。',
+      inputs:['judgment / claim / evidence 投影'],
+      outputs:['带引用的回答'],
+      deps:['E4 chat_responder','M3'],
+      change:['对话与页面同源，不再各说各话。','追问可以沿证据链展开。']
+    }),
+    N('U6',1058,62,240,70,'expression','选股页 · 四个子 Tab','榜单 / 筛选 / 信号 / 推荐',['judgment_id'],{
+      role:'渲染选股页四个子 Tab（榜单、筛选、信号、推荐），每只入选股票带上同一 judgment_id、入选理由与失效条件；前端不再各自拼排序结论。',
+      inputs:['选股 judgment 列表','claim / evidence 摘要'],
+      outputs:['选股列表、入选理由、证据折叠'],
+      deps:['E5 pick_view_writer','M3 研判账本'],
+      change:['从「四套接口各自排序」变成「一份选股研判多处渲染」。','每个榜单都能回答「为什么是它、什么情况下不再成立」。']
+    }),
+
+    N('T1',50,190,240,56,'trigger','时段触发','盘前 / 盘中 / 盘后 / 夜间',['cron'],{
+      role:'按交易日与时段触发全量或增量 run。',
+      inputs:['交易日历','时段配置'],
+      outputs:['trigger = schedule'],
+      deps:['Scheduler'],
+      change:['调度只负责发触发事件，不再直接调各 Agent 函数。']
+    }),
+    N('T2',302,190,240,56,'trigger','事件触发','新增事件 / 异动 / 失效条件',['stream'],{
+      role:'事件抓取、异动、失效条件触发增量 run。',
+      inputs:['事件流','行情异动'],
+      outputs:['trigger = event'],
+      deps:['P2','C2'],
+      change:['事件与推送进入同一张图，不再各自一条链。']
+    }),
+    N('T3',554,190,240,56,'trigger','用户请求','页面 / 对话 / 手动刷新',['api'],{
+      role:'用户请求触发按需 run（个股、板块、事件）。',
+      inputs:['用户请求','subject'],
+      outputs:['trigger = user'],
+      deps:['app-api 网关'],
+      change:['对话与页面走同一个编排入口。']
+    }),
+    N('T4',806,190,240,56,'trigger','验证触发','due + 3 个交易日',['verification'],{
+      role:'到期研判触发验证 run，回填实际走势与错误类型。',
+      inputs:['judgment.verify_at'],
+      outputs:['trigger = verify'],
+      deps:['C2 verifier'],
+      change:['验证从人工统计变成图内固定节点。']
+    }),
+
+    N('O1',520,300,320,62,'research','run_orchestrator','选择运行档位 · 预算 · 并行扇出',['profile','budget'],{
+      role:'统一入口：按 trigger + subject + 用户上下文选择运行档位（晨间全量 / 盘中增量 / 个股按需 / 验证回填），设定预算、超时与并行分支。',
+      inputs:['trigger','subject','user_context','预算'],
+      outputs:['run_plan','初始 state channels'],
+      deps:['Postgres checkpointer'],
+      change:['替代 supervisor 的单次路由。','一次 run 可以并行多个研究子图，而不是只走一个 Agent。']
+    }),
+    N('G1',520,392,320,62,'rule','g1_profile · 档位模板','必查 · 预算 · 快慢档',['profile','fast/slow'],{
+      role:'规则层的作战指令：按 run 档位规定必查 probe、可选 probe、确定性快照、步数预算、超时与降级策略。R5 只能在必查之外自由加查，不能跳过必查；必查项没跑完，规则层直接判 run 失败。',
+      inputs:['O1 选定档位','subject','预算'],
+      outputs:['RunBrief（必查 / 可选 / 预算 / 超时 / 输出 schema）'],
+      deps:['O1 run_orchestrator','M4 方法先验'],
+      change:['把「查什么」从模型手里收回规则层，避免该查没查。','必查保底、可选自由，兼顾覆盖与 token 成本。','档位模板可版本化，改规则不动 agent。']
+    }),
+
+    N('P1',50,380,285,78,'perception','market_perception','行情 / 指数 / 资金 / 板块 / 情绪快照',['market evidence'],{
+      role:'采集行情、指数、资金流、板块与情绪快照，写成 market 证据。',
+      inputs:['quote / kline / flow 工具','板块轮动'],
+      outputs:['evidence(kind=market)'],
+      deps:['M1 evidence_ledger','API 工具带'],
+      change:['只抓一次，所有研究节点共用同一份快照。']
+    }),
+    N('P2',350,380,285,78,'perception','event_perception','新闻 / 公告 / 研报 / 事件抓取 → 统一实体',['event evidence'],{
+      role:'抓取新闻、公告、研报与事件，去重后生成事件主记录与实体链接证据。',
+      inputs:['news / announcement / research 工具','事件流'],
+      outputs:['evidence(kind=event)','event 主记录'],
+      deps:['M1','M5 知识图谱'],
+      change:['三套事件库合并为一个事件主记录 + 实体链接。','事件结论可以被风口、洞见、节奏共同引用。']
+    }),
+    N('P3',650,380,285,78,'perception','entity_perception','实体链接 / 板块归属 / 产业链',['entity evidence'],{
+      role:'把事件、新闻、个股映射到实体、板块与产业链节点。',
+      inputs:['知识图谱','板块映射'],
+      outputs:['evidence(kind=entity)'],
+      deps:['M5','API 工具带'],
+      change:['实体链接只做一次，避免各模块各猜一套归属。']
+    }),
+    N('P4',950,380,285,78,'perception','user_perception','自选 / 持仓 / 画像 / 历史偏好',['user context'],{
+      role:'读取用户自选、持仓、画像与历史偏好，形成本次 run 的用户上下文。',
+      inputs:['自选 / 持仓','用户画像'],
+      outputs:['evidence(kind=user_context)'],
+      deps:['app-api user/chat 工具'],
+      change:['用户上下文进入同一份 state，研究节点可按需读取。']
+    }),
+
+    N('R1',50,490,195,96,'research','trend_research','计算工具 · 确定性，不是 agent',['趋势/支撑/压力'],{
+      role:'确定性计算工具，不跑 agent 循环：读该标的行情、资金、板块证据与 wind 已写下的板块强度 claim，用指标公式算趋势、支撑、压力；LLM 只写解释，不参与选工具或下结论。',
+      inputs:['M1 投影（market / entity）','M2 wind 板块强度 claim'],
+      outputs:['claims（趋势 / 支撑 / 压力）'],
+      deps:['trend 工具','M2 claim graph'],
+      change:['不再自己重新抓一遍行情。','执行顺序 wind 先于 trend，趋势判断才读得到板块上下文。','趋势的支撑 / 压力同样约束个股归因，避免板块看多、个股看空却互不知情。']
+    }),
+    N('R2',254,490,195,96,'research','wind_research','子 agent · R5 按需调用',['板块热度','龙头'],{
+      role:'风口与轮动研究：先读市场基调（风险偏好 / 量能 / 风格），再结合事件热度、资金、涨停结构，输出板块 claim 与龙头 claim。作为 R5 子 agent 被调用时，独立上下文、最多 3 步，只返回结构化 claim 与 evidence_ids，不写报告。',
+      inputs:['market 基调投影','event 证据','rotations'],
+      outputs:['板块 claim','龙头 claim'],
+      deps:['wind / rotation 工具','M2'],
+      change:['板块强度不再只看涨幅，先看市场给不给环境。','板块强弱直接喂给个股归因；个股 / 龙头对板块的修正通过下一轮 claim 反馈，同一 run 内不成环。','可被洞见、节奏直接调用。']
+    }),
+    N('R3',458,490,195,96,'research','event_research','子 agent · R5 按需调用',['传导链','存活度'],{
+      role:'事件传导研究：读实体链接与板块归属，输出事件 claim、受益/受损链与存活度。作为 R5 子 agent 被调用时，独立上下文、最多 4 步，只返回 claim 与证据，不做归因结论。',
+      inputs:['event / entity 证据','新闻全文'],
+      outputs:['事件 claim','传导链'],
+      deps:['event / graph 工具','M2'],
+      change:['事件结论反哺风口热度。','不再与 app-api 事件库各算一套。','MCRE 的事件→行业节点映射可直接复用为传导链起点。']
+    }),
+    N('R4',662,490,195,96,'research','fundamental_research','子 agent · R5 按需调用',['业绩','机构'],{
+      role:'基本面研究：业绩、预测、机构调研，输出 fundamental claim。作为 R5 子 agent 被调用时，独立上下文、最多 3 步，只返回 claim 与证据，不替主控下结论。',
+      inputs:['forecast / institution 工具','研报 RAG'],
+      outputs:['fundamental claim'],
+      deps:['M5 向量库','M2'],
+      change:['机构观点进入共享证据，个股洞见可以引用。']
+    }),
+    N('R5',866,490,195,96,'research','insight_research','研究层主控 · 唯一 lead agent',['lead agent','多假设验伪'],{
+      role:'研究层唯一主控（lead agent）：拿到 M1 现象后，按 G1 档位模板的必查清单调用子 agent 取证，逐条验伪候选原因；可选 probe 由自己判断是否加查。子 agent 只返回结构化 claim，原始数据不进主控上下文。',
+      inputs:['M1 现象投影','G1 RunBrief（必查 / 预算）','子 agent 返回的 claims','M3 上一条研判'],
+      outputs:['归因 claim','验伪记录','tool_calls trace → ResearchResult'],
+      deps:['G1 档位模板','R1-R8 计算 / 子 agent','M1 / M2'],
+      change:['从流水线末端汇总节点，变成有现场指挥权的 lead agent。','按需调用子 agent，不再固定全跑 8 个研究员。','证据不足时输出 insufficient，不逼模型编主因。']
+    }),
+    N('R6',1070,490,195,96,'research','rhythm_research','计算工具 · 确定性，不是 agent',['仓位','情绪'],{
+      role:'节奏计算工具：恐贪读数与仓位规则由公式算出，读 M3 最近一条同标的研判作为前提；LLM 只写解释，不自由调工具。',
+      inputs:['fear-greed / 指数工具','M3 最近一条同标的 judgment','M4 方法先验'],
+      outputs:['仓位 claim'],
+      deps:['M1','M3 最近一条'],
+      change:['仓位建议以「最近一条研判 + 本轮研究结论」为前提，不读本轮尚未生成的 judgment。','仓位建议与最近一次研判同源，不再各说各话。']
+    }),
+    N('R7',1070,610,195,96,'research','capital_research','子 agent · R5 按需调用',['主力行为','拥挤度'],{
+      role:'资金筹码研究：读资金流、龙虎榜、席位、两融、北向与大单，判断主力行为、筹码集中度与承接力，输出资金筹码 claim。作为 R5 子 agent 被调用时，独立上下文、最多 3 步，只返回 claim 与证据。',
+      inputs:['M1 行情 / 资金投影','trace / flow 工具'],
+      outputs:['资金筹码 claim'],
+      deps:['M1','M2','TraceBox'],
+      change:['从 R5 里拆出资金职责，R5 不再既做归因又做资金。','资金证据单独成 claim，可被板块、归因、仓位共同引用。']
+    }),
+    N('R8',1070,730,195,96,'research','macro_research','子 agent · R5 按需调用',['利率','政策','汇率'],{
+      role:'宏观政策研究：读利率、CPI/PPI/PMI、汇率、政策文件与宏观日历，判断市场环境松紧，输出宏观政策 claim。作为 R5 子 agent 被调用时，独立上下文、最多 3 步，只返回 claim 与证据。',
+      inputs:['宏观数据 / 政策库','宏观日历'],
+      outputs:['宏观政策 claim'],
+      deps:['M1','M2','宏观工具'],
+      change:['宏观不再塞在事件研究里，经济数据与政策文件各走自己的证据链。','市场级判断能引用「环境松紧」而不是只引用新闻。']
+    }),
+
+    N('J1',50,620,270,86,'judgment','bull_advocate','多方论证',['引用 evidence_id'],{
+      role:'从 claims 中构造多方论证，必须引用 evidence_id。',
+      inputs:['M2 claims'],
+      outputs:['bull case'],
+      deps:['M2 claim graph'],
+      change:['多方不再由单个 Agent 直接下结论，必须给出证据链。']
+    }),
+    N('J2',334,620,270,86,'judgment','bear_advocate','反方 / 红队 · 等强度反证',['非对称风险权重'],{
+      role:'反方与红队：必须给出至少 1 条反证或失效条件。',
+      inputs:['M2 claims','冲突'],
+      outputs:['bear case','失效条件'],
+      deps:['M2'],
+      change:['反方成为固定节点，不可跳过。']
+    }),
+    N('J3',618,620,270,86,'judgment','conflict_resolver','冲突分级 · 风险权重',['保留分歧','降档'],{
+      role:'检测趋势 vs 资金、事件 vs 价格等模块冲突，分级并决定降权或保留分歧。',
+      inputs:['bull / bear','conflicts'],
+      outputs:['resolved claims','conflict 记录'],
+      deps:['M2'],
+      change:['冲突显式化，不强行合并。']
+    }),
+    N('J4',902,620,270,86,'judgment','judgment_writer','统一研判落账',['direction','confidence','verify_at'],{
+      role:'生成唯一 judgment：方向、置信度、一句话结论、证据、反方、失效条件、验证时间，写入研判账本；同时读取上一条同标的研判，写入 prev_judgment_id 与 relation（延续 / 修正 / 反转）。',
+      inputs:['resolved claims','校准先验','上一条同标的 judgment'],
+      outputs:['judgment → M3'],
+      deps:['M3','C1'],
+      change:['全站唯一结论源。','高置信必须至少两个独立来源一致。','每条新研判都能解释「和上次比改了什么」。']
+    }),
+
+    N('C4',754,80,196,88,'judgment','metacognition · 元认知监督','证据-结论匹配 / 内部矛盾 / 反事实',['ACC','最多打回 1 次'],{
+      role:'检查 R5 的 ResearchResult：结论是否有对应证据、是否引用了互相矛盾的证据、关键证据失效时结论是否翻转。不通过则打回重跑一次或降置信 0.15。',
+      inputs:['ResearchResult','M1 证据'],
+      outputs:['meta_check，随 Result 进 M2'],
+      deps:['R5','M1'],
+      change:['从「谁写的谁负责」变成「独立角色复核」。','不允许无限打回，最多 1 次。','对应前扣带回的错误监测。']
+    }),
+
+    N('C1',50,735,270,80,'calibration','calibrator','历史命中率 → 置信度校准',['分层校准'],{
+      role:'读历史研判命中率，按置信度分层校准，输出先验给研判节点。',
+      inputs:['M3 历史','verification'],
+      outputs:['calibrated prior'],
+      deps:['M3','M4'],
+      change:['置信度不再是模型自评原值。']
+    }),
+    N('C2',334,735,270,80,'calibration','verifier','到期验证回填',['due + 3'],{
+      role:'到期（due + 3 个交易日）回填实际走势、是否命中与错误类型。',
+      inputs:['judgment.verify_at','行情'],
+      outputs:['verified_result → M3','错误样本 → M4'],
+      deps:['API 工具带','M3'],
+      change:['验证固定发生在图里，不依赖人工统计。']
+    }),
+    N('C3',618,735,270,80,'calibration','method_evolver','失败模式 → 方法版本',['阈值/提示词'],{
+      role:'把失败模式转成方法版本（阈值、提示词、工具选择），写入方法库，作为研究子图先验。',
+      inputs:['错误样本','失败模式库'],
+      outputs:['method version → M4'],
+      deps:['M4'],
+      change:['复盘产物从文件变成可回灌的版本化先验。']
+    }),
+    N('C5',996,386,176,90,'calibration','offline_reflection · 离线反思','修正笔记 / 蒸馏条目 / 生成假设',['非交易时段','DMN'],{
+      role:'非交易时段读 M3 昨日判断、C2 验证结果、M4 错题本，修正错误归因、把反复验证的模式蒸馏成语义条目、生成待验证假设；只写 M4，不改 M3 历史结论。',
+      inputs:['M3 昨日判断','C2 验证结果','M4 错题本'],
+      outputs:['M4 语义条目 / 假设池（proposed）'],
+      deps:['M3','M4','C2'],
+      change:['迭代从「出报告」变成「改记忆」。','蒸馏条目需 support_cases >= 3。','产出需人工批准后生效。','对应睡眠重放 / 默认模式网络。']
+    }),
+
+    N('E1',50,850,270,84,'expression','briefing_writer','同一出口 · pre / mid / post 三 slot',['扩写不新增'],{
+      role:'同一 briefing 出口：晨/午/晚/收盘只是 slot 参数。共享音频条与头条壳，午报机会/风险、晚报异象/行情等时段专属卡保留。收盘后的复盘/大盘溯源沿用同一 judgment 与证据链，只是换一个 review 视图。',
+      inputs:['judgment_id','evidence 摘要','slot'],
+      outputs:['briefing.v1 信封','播报文案、音频','大盘溯源视图数据'],
+      deps:['M3','音频工具'],
+      change:['播报与页面同源，不再只读 brief。','三时段共用一套信封与解析；新增时段只加 slot。']
+    }),
+    N('E2',334,850,270,84,'expression','stock_view_writer','个股页 / 事件页研判文案',['结构化渲染'],{
+      role:'把 judgment 渲染成个股页与事件页的研判卡结构。',
+      inputs:['judgment_id','claim graph'],
+      outputs:['研判卡数据'],
+      deps:['M3','M2'],
+      change:['前端不再自己拼结论。']
+    }),
+    N('E3',618,850,270,84,'expression','push_dispatcher','异动 / 失效推送',['只推变化'],{
+      role:'只推结论变化、失效条件触发、高置信新机会；变化由 J4 的 prev_judgment_id / relation 判定，不再靠阈值猜。',
+      inputs:['judgment 变化','失效条件'],
+      outputs:['推送'],
+      deps:['M3','push 工具'],
+      change:['推送从「阈值触发」变成「判断变化触发」。']
+    }),
+    N('E4',902,850,270,84,'expression','chat_responder','对话只读账本',['引用 judgment'],{
+      role:'对话优先读账本回答，引用 judgment_id / evidence_id；实时工具数据只作上下文，不得直接包装成结论；产生新结论必须回写账本。',
+      inputs:['用户问题','M3 / M2 投影','工具实时数据（仅上下文）'],
+      outputs:['带引用的回答','新结论回写'],
+      deps:['M3','M2','API 工具带'],
+      change:['对话与页面同源，不再另起一套推理。','无账本依据时显式说明，不编结论。']
+    }),
+    N('E5',902,850,270,84,'expression','pick_view_writer','选股榜单 / 筛选 / 信号 / 推荐',['结构化渲染'],{
+      role:'把选股类 judgment 渲染成四个子 Tab 的列表结构：榜单排序、筛选命中项、信号触发项、推荐理由，统一带 judgment_id 与失效条件。',
+      inputs:['judgment_id 列表','claim graph 投影'],
+      outputs:['选股列表数据'],
+      deps:['M3','M2'],
+      change:['排序与推荐理由来自研判，不再由各接口自己算一套。','入选即落账，后续可验证、可回滚。']
+    }),
+
+    N('TOOL',50,975,1260,100,'tool','工具带 · 公共箱 + 角色箱 + 借用条','quote · kline · flow · market · rotation · wind · trend · monitor · news · announcement · research · forecast · institution · graph · event_entity · calendar · fear_greed · trace · prediction · profile · push · audio · review · iterate',['24 个 StructuredTool','三层权限'],{
+      role:'公共箱（行情 / K线 / 新闻 / 日历 / 恐贪 / 搜索）所有研究员可用；角色箱（风口 / 事件 / 财报 / 资金 / 宏观）默认只给本职；跨箱需在作业书里声明「借用条」，运行时记 trace；写账本、用户数据、推送属敏感箱，需显式授权。',
+      inputs:['节点工具调用','ToolBox 权限表'],
+      outputs:['带 provenance 的数据 / 显式 failed','借用记录 → trace'],
+      deps:['aistock-app-api /internal/*'],
+      change:['消除重复取数与口径漂移。','空结果不允许静默归零，失败必须显式。','跨箱不靠口头约定，靠 ToolBox 权限表，每次借用可审计。']
+    }),
+
+    N('M1',1380,60,290,210,'memory','M1 · 证据账本','append-only channels + reducers',['evidence','claims','conflicts'],{
+      role:'全图共享的增量证据账本：evidence / claims / conflicts 按 id 归并，节点只写新增，下游按 subject / sector / 时间取投影或 delta。',
+      inputs:['感知节点写入','研究节点写入'],
+      outputs:['投影 / 增量给下游'],
+      deps:['LangGraph channels + reducer','Redis / Postgres'],
+      change:['从「各 Agent 各自 END」变成「同一份工作记忆」。','只读相关切片，token 成本低于全量上下文。']
+    }),
+    N('M2',1380,290,290,190,'memory','M2 · 论点与冲突图','claim → evidence 引用；可被反证失效',['claim graph'],{
+      role:'记录每条 claim 引用了哪些证据、被谁反证、与谁冲突；支持 invalidated_by。板块强度 / 龙头 / 趋势 claim 在这里被个股归因读取，形成「市场→板块→个股→板块」的联动。',
+      inputs:['研究 claims','反方 / 冲突'],
+      outputs:['claim 投影给研判 / 洞见 / 播报'],
+      deps:['M1'],
+      change:['结论可追溯、可失效、可被其他功能复用。']
+    }),
+    N('M3',1380,500,290,180,'memory','M3 · 研判账本','judgment_id · 三因子检索',['Postgres checkpointer'],{
+      role:'每次研判写一条记录：结论、证据、反方、失效条件、验证时间、版本与成本；支持重放与 A/B。J4 落账前读取同标的上一条研判，保证 prev_judgment_id / relation 可追溯。',
+      inputs:['judgment_writer','verifier'],
+      outputs:['judgment 投影给所有出口','上一条研判给 J4 / R6'],
+      deps:['Postgres'],
+      change:['全站唯一结论源。','未落账的研判不得对外渲染。','每条新研判都能回答「上次错在哪、这次改了什么」。']
+    }),
+    N('M4',1380,700,290,170,'memory','M4 · 方法与失败模式库','方法版本 · 三因子检索',['method version'],{
+      role:'沉淀失败模式与方法版本；只由校准节点写入，研究子图只读与自己相关的先验。C1 读校准方法版本，C3 读失败模式库并写新版本。',
+      inputs:['C3 method_evolver','C2 错误样本'],
+      outputs:['先验 → R1-R8','校准方法版本 → C1','失败模式库 → C3'],
+      deps:['M3'],
+      change:['复盘从文件变成可回灌的版本。','每次改动可追溯到样本与效果。']
+    }),
+    N('M5',1380,890,290,150,'memory','M5 · 知识图谱 & 向量库','实体 / 产业链 / 研报语义检索',['KG + RAG'],{
+      role:'实体、产业链与研报语义检索，供 P2 事件去重、P3 实体链接、R3 事件实体链接与 R4 基本面研究使用。',
+      inputs:['实体库','研报库'],
+      outputs:['实体链接、检索结果'],
+      deps:['graph 工具','research 工具'],
+      change:['实体归属只维护一份，避免各模块各猜一套。']
+    }),
+    N('M6',1380,1060,290,140,'memory','M6 · 治理指标','准确率 / 时延 / 成本 / 失败率',['按版本归因'],{
+      role:'按模块、版本、置信度分层统计准确率、时延、成本与失败率。',
+      inputs:['M3 验证结果','trace'],
+      outputs:['治理看板、告警'],
+      deps:['M3','M4'],
+      change:['准确率可以归因到具体模块版本与改动。']
+    })
+  ],
+  edges:[
+    /* 触发 → 编排：每条触发都带 payload，O1 才能据此选档位 */
+    E('T1','O1','call','window'),E('T2','O1','call','event_id'),E('T3','O1','call','subject'),E('T4','O1','call','judgment_id'),
+    E('O1','G1','rule','选档'),
+    E('G1','R5','rule','RunBrief'),
+    E('O1','P1','call'),E('O1','P2','call'),E('O1','P3','call'),E('O1','P4','call'),
+
+    /* 感知：事件主记录先落，再做实体链接；四个感知都写 M1 */
+    E('P1','M1','evidence'),E('P2','M1','evidence'),E('P3','M1','evidence'),E('P4','M1','evidence'),
+    E('P2','P3','evidence','事件主记录'),
+
+    /* M1 → 八个研究子图 */
+    E('M1','R1','evidence'),E('M1','R2','evidence'),E('M1','R3','evidence'),
+    E('M1','R4','evidence'),E('M1','R5','evidence'),E('M1','R6','evidence'),
+    E('M1','R7','evidence'),E('M1','R8','evidence'),
+
+    /* 研究子图：主方向 + 同 run 可执行的前置依赖；反向修正放下一轮，避免成环 */
+    E('R2','R1','feedback','板块强度',true),
+    E('R3','R2','feedback','事件热度',true),
+    E('R3','R5','feedback','调用 / 返回',true),
+    E('R4','R5','feedback','调用 / 返回',true),
+    E('R7','R5','feedback','调用 / 返回',true),
+    E('R8','R5','feedback','调用 / 返回',true),
+    E('R7','R2','feedback','资金流'),
+    E('R8','R2','feedback','环境松紧'),
+    E('R8','R6','feedback','宏观仓位'),
+    E('R1','R5','feedback','趋势快照'),
+    E('R5','R6','feedback','调用 / 快照'),
+    E('R2','R5','feedback','调用 / 返回',true,-155),
+
+    /* 研究 → M2 */
+    E('R1','M2','evidence'),E('R2','M2','evidence'),E('R3','M2','evidence'),
+    E('R4','M2','evidence'),E('R5','M2','evidence'),E('R6','M2','evidence'),
+    E('R7','M2','evidence'),E('R8','M2','evidence'),
+
+    /* 工具带：凡是节点说明里声明要用工具的，都补边（取数 + 纯计算 + 音频/推送） */
+    E('TOOL','P1','tool'),E('TOOL','P2','tool'),E('TOOL','P3','tool'),E('TOOL','P4','tool'),
+    E('TOOL','R1','tool'),E('TOOL','R2','tool'),E('TOOL','R3','tool'),E('TOOL','R4','tool'),
+    E('TOOL','R5','tool'),E('TOOL','R6','tool'),E('TOOL','R7','tool'),E('TOOL','R8','tool'),E('TOOL','C2','tool'),
+    E('TOOL','E1','tool','音频'),E('TOOL','E3','tool','推送'),E('TOOL','E4','tool','取数（仅上下文）'),
+
+    /* 研判：J4 读上一条研判保证连贯；M2 供多空双方 */
+    E('M2','J1','judge'),E('M2','J2','judge'),
+    E('R5','C4','judge','ResearchResult'),
+    E('C4','J1','judge','通过'),E('C4','J2','judge','通过'),
+    E('M3','J4','evidence','上一条研判'),
+    E('J1','J3','judge'),E('J2','J3','judge'),E('J3','J4','judge'),
+    E('J4','M3','judge','落账'),
+
+    /* 校准：历史命中 → 校准先验；到期验证 → 回填；失败样本 → 方法版本 */
+    E('M3','C1','evidence','历史命中'),E('C1','J4','feedback','校准先验'),
+    E('M4','C1','feedback','校准方法版本'),
+    E('M3','C2','evidence','due+3'),E('C2','M3','evidence','回填'),
+    E('C2','C3','feedback','错误样本'),E('C3','M4','feedback','方法版本'),
+    E('M3','C5','evidence','昨日判断'),E('C2','C5','feedback','错误样本'),
+    E('C5','M4','feedback','语义条目 / 假设'),
+    E('M4','C3','feedback','失败模式库'),
+    E('M4','R1','feedback','方法先验'),E('M4','R2','feedback','方法先验'),
+    E('M4','R3','feedback','方法先验'),E('M4','R4','feedback','方法先验'),
+    E('M4','R5','feedback','方法先验'),E('M4','R6','feedback','先验回灌'),
+    E('M4','R7','feedback','方法先验'),E('M4','R8','feedback','方法先验'),
+    E('M3','R6','evidence','最近一条研判'),
+
+    /* 知识图谱：事件去重 / 实体链接 / 基本面 RAG */
+    E('M5','P2','evidence','事件实体'),
+    E('M5','P3','evidence','实体归属'),
+    E('M5','R3','evidence','事件实体'),
+    E('M5','R4','evidence','研报 / 实体'),
+
+    /* 表达：同一 judgment_id 多处渲染；对话新结论回写账本 */
+    E('J4','E1','render','judgment_id'),E('J4','E2','render'),E('J4','E3','render'),E('J4','E4','render'),E('J4','E5','render'),
+    E('E1','U1','render'),E('E1','U4','render'),E('E2','U2','render'),E('E2','U3','render'),
+    E('E3','U4','render'),E('E4','U5','render'),E('E5','U6','render'),
+    E('E4','M3','feedback','新结论回写'),
+    E('M3','U5','render','只读'),E('M3','U6','render','只读'),
+
+    /* 治理 */
+    E('M3','M6','evidence','验证结果'),E('M4','M6','evidence','方法版本')
+  ]
+};
+
+/* 目标图：纵向泳道布局（每层一列，节点纵向排列） */
+const TARGET_LAYOUT = {
+  T1:[40,80,195,64],T2:[40,154,195,64],T3:[40,228,195,64],T4:[40,302,195,64],O1:[40,392,195,72],G1:[40,472,195,80],
+  P1:[280,80,204,82],P2:[280,178,204,82],P3:[280,276,204,82],P4:[280,374,204,82],
+  R1:[532,80,174,90],R2:[532,182,174,90],R3:[532,284,174,90],R4:[532,386,174,90],
+  R5:[532,488,174,90],R6:[532,590,174,90],R7:[532,692,174,90],R8:[532,794,174,90],
+  C4:[754,80,196,88],J1:[754,180,196,96],J2:[754,286,196,96],J3:[754,392,196,88],J4:[754,490,196,100],
+  C1:[996,80,188,90],C2:[996,190,188,90],C3:[996,300,188,90],C5:[996,410,188,90],
+  E1:[1229,80,192,90],E2:[1229,182,192,90],E3:[1229,284,192,90],E4:[1229,386,192,90],E5:[1229,488,192,90],
+  U1:[1466,80,212,72],U2:[1466,166,212,72],U3:[1466,252,212,72],U4:[1466,338,212,72],U5:[1466,424,212,72],U6:[1466,510,212,72],
+  M1:[280,980,215,135],M2:[520,980,215,135],M3:[760,980,215,135],
+  M4:[1000,980,215,135],M5:[1240,980,215,135],M6:[1480,980,215,135],
+  TOOL:[40,565,195,155]
+};
+TARGET.nodes.forEach(n=>{ const l=TARGET_LAYOUT[n.id]; if(l){ n.x=l[0]; n.y=l[1]; n.w=l[2]; n.h=l[3]; } });
+TARGET.h=1000;
+
+/* ============================== 执行图：规则层 / 研究层 ============================== */
+const TD=id=>{const s=TARGET.nodes.find(n=>n.id===id);return s&&s.d?s.d:{}};
+const EXEC = {
+  w:1440, h:960,
+  nodes:[
+    /* 两层背景带 */
+    G('GEXR',25,35,1055,300,'规则层 · 确定性骨架（触发 / 档位 / 账本 / 裁决 / 校准 / 渲染）','rule'),
+    G('GEXM',1095,35,320,300,'方法 / 图谱 / 治理','memory'),
+    G('GEXA',25,365,1390,310,'研究层 · 智能 agent（判断权只给 R5，子 agent 只取证）','research'),
+    G('GEXL',40,392,215,150,'lead agent','research'),
+    G('GEXC',270,392,185,160,'计算工具（确定性，不是 agent）','rule'),
+    G('GEXS',470,392,375,260,'子 agent 池 · R5 按需调用','research'),
+    G('GEXD',860,392,175,160,'辩论 agent','judgment'),
+    G('GEXO',1050,392,190,160,'对话 / 离线演化','expression'),
+
+    /* 规则层 · 第一行：触发 → 编排 → 档位模板 → 工具权限 */
+    N('T1',45,66,100,44,'trigger','T1 时段','cron',['window'],TD('T1')),
+    N('T2',45,118,100,44,'trigger','T2 事件','stream',['event_id'],TD('T2')),
+    N('T3',157,66,100,44,'trigger','T3 用户','api',['subject'],TD('T3')),
+    N('T4',157,118,100,44,'trigger','T4 验证','due+3',['judgment_id'],TD('T4')),
+    N('O1',282,74,135,68,'rule','O1 编排','选档 · 预算 · 扇出',['run_plan'],TD('O1')),
+    N('G1',440,74,170,68,'rule','G1 档位模板','必查 · 预算 · 快慢档',['RunBrief'],TD('G1')),
+    N('TOOL',635,74,155,68,'tool','G2 工具权限','公共 / 角色 / 借用 / 敏感',['ToolBox'],TD('TOOL')),
+
+    /* 规则层 · 第二行：感知 → 证据账本 */
+    N('P1',45,172,105,48,'perception','P1 行情','market',['evidence'],TD('P1')),
+    N('P2',162,172,105,48,'perception','P2 事件','event',['evidence'],TD('P2')),
+    N('P3',279,172,105,48,'perception','P3 实体','entity',['evidence'],TD('P3')),
+    N('P4',396,172,105,48,'perception','P4 用户','context',['evidence'],TD('P4')),
+    N('M1',525,168,165,56,'memory','M1 证据账本','append-only + 投影',['evidence'],TD('M1')),
+
+    /* 规则层 · 第三行：论点 → 元认知 → 裁决 → 落账 → 渲染；验证与校准 */
+    N('M2',45,252,120,56,'memory','M2 论点图','claim + 反证',['claim'],TD('M2')),
+    N('C4',176,252,115,56,'judgment','C4 元认知','证据-结论自检',['meta_check'],TD('C4')),
+    N('J3',303,252,100,56,'judgment','J3 裁决','风险权重 · 降档',['conflict'],TD('J3')),
+    N('J4',415,252,115,56,'judgment','J4 主笔','单次 LLM',['judgment'],TD('J4')),
+    N('M3',542,252,135,56,'memory','M3 研判账本','唯一结论源',['judgment_id'],TD('M3')),
+    N('E1',689,252,135,56,'expression','E1-E5 渲染','同一 judgment',['render'],TD('E1')),
+    N('C1',836,252,108,50,'calibration','C1 校准','历史命中',['prior'],TD('C1')),
+    N('C2',952,252,108,50,'calibration','C2 验证','due+3 回填',['verify'],TD('C2')),
+
+    /* 治理组 */
+    N('M4',1110,80,140,56,'memory','M4 方法库','版本化先验',['method'],TD('M4')),
+    N('M5',1265,80,135,56,'memory','M5 图谱','实体 / RAG',['KG'],TD('M5')),
+    N('M6',1110,160,140,56,'memory','M6 治理','准确率 / 成本',['metrics'],TD('M6')),
+    N('C5',1265,160,135,56,'calibration','C5 离线反思','修正 / 蒸馏 / 假设',['非交易时段'],TD('C5')),
+
+    /* 研究层 · lead agent */
+    N('R5',50,415,195,100,'research','R5 归因主控','唯一 lead agent',['bounded ReAct'],TD('R5')),
+
+    /* 研究层 · 计算工具 */
+    N('R1',282,415,160,58,'rule','R1 trend_snapshot','确定性计算',['0 LLM 循环'],TD('R1')),
+    N('R6',282,485,160,58,'rule','R6 rhythm_snapshot','确定性计算',['0 LLM 循环'],TD('R6')),
+
+    /* 研究层 · 子 agent 池 */
+    N('R2',482,415,175,58,'research','R2 wind_probe','子 agent',['≤3 步'],TD('R2')),
+    N('R3',662,415,175,58,'research','R3 event_probe','子 agent',['≤4 步'],TD('R3')),
+    N('R4',482,485,175,58,'research','R4 fundamental_probe','子 agent',['≤3 步'],TD('R4')),
+    N('R7',662,485,175,58,'research','R7 capital_probe','子 agent',['≤3 步'],TD('R7')),
+    N('R8',482,555,175,58,'research','R8 macro_probe','子 agent',['≤3 步'],TD('R8')),
+
+    /* 研究层 · 辩论 / 对话 / 演化 */
+    N('J1',872,415,150,58,'judgment','J1 多方','引用 evidence',['bull'],TD('J1')),
+    N('J2',872,485,150,58,'judgment','J2 反方','等强度反证 · 风险权重',['bear'],TD('J2')),
+    N('E4',1062,415,160,58,'expression','E4 对话','只读账本',['引用 judgment'],TD('E4')),
+    N('C3',1062,485,160,58,'calibration','C3 方法演化','离线 ReAct',['method'],TD('C3'))
+  ],
+  edges:[
+    /* 触发 → 编排 → 档位 → 工具权限 */
+    E('T1','O1','rule','window'),E('T2','O1','rule','event_id'),
+    E('T3','O1','rule','subject'),E('T4','O1','rule','judgment_id'),
+    E('O1','G1','rule','选档'),
+    E('G1','R5','rule','RunBrief（必查 / 预算 / schema）'),
+    E('TOOL','R5','tool','工具箱'),
+    E('TOOL','R2','tool','借用条'),
+
+    /* 感知 → M1 */
+    E('O1','P1','call'),E('O1','P2','call'),E('O1','P3','call'),E('O1','P4','call'),
+    E('P1','M1','evidence'),E('P2','M1','evidence'),E('P3','M1','evidence'),E('P4','M1','evidence'),
+
+    /* M1 → 主控 */
+    E('M1','R5','evidence','证据投影'),
+
+    /* 主控调用计算与子 agent：双向 = 调用 / 返回 claim */
+    E('R5','R1','feedback','调用 / 快照',true),
+    E('R5','R6','feedback','调用 / 快照',true),
+    E('R5','R2','feedback','按需调用',true),
+    E('R5','R3','feedback','按需调用',true),
+    E('R5','R4','feedback','按需调用',true),
+    E('R5','R7','feedback','按需调用',true),
+    E('R5','R8','feedback','按需调用',true),
+
+    /* 主控汇总 → M2 */
+    E('R5','M2','evidence','ResearchResult'),
+
+    /* 辩论与裁决 */
+    E('M2','J1','judge'),E('M2','J2','judge'),
+    E('R5','C4','judge','ResearchResult'),
+    E('C4','J1','judge','通过'),E('C4','J2','judge','通过'),
+    E('J1','J3','judge'),E('J2','J3','judge'),
+    E('J3','J4','judge'),
+    E('M3','J4','evidence','上一条研判'),
+    E('C1','J4','feedback','校准先验'),
+    E('J4','M3','judge','落账'),
+    E('J4','E1','render','judgment_id'),
+
+    /* 验证与校准 */
+    E('M3','C2','evidence','due+3'),E('C2','M3','evidence','回填'),
+    E('C2','C3','feedback','错误样本'),E('C3','M4','feedback','方法版本'),
+    E('M3','C5','evidence','昨日判断'),E('C2','C5','feedback','错误样本'),
+    E('C5','M4','feedback','语义条目 / 假设'),
+    E('M4','C1','feedback','校准版本'),
+    E('M4','R5','feedback','方法先验'),
+    E('M3','R5','evidence','上一条研判'),
+
+    /* 对话 / 治理 / 图谱 */
+    E('J4','E4','render'),E('E4','M3','feedback','新结论回写'),
+    E('M3','M6','evidence'),E('M4','M6','evidence'),
+    E('M5','P2','evidence'),E('M5','P3','evidence')
+  ]
+};
+
+const VIEWS = {current:CURRENT,target:TARGET,exec:EXEC};
+
+/* ============================== 研究子图（点击主图 R1-R6 展开） ============================== */
+const SUBGRAPHS = {
+  trend:{
+    title:'trend_research · 趋势评分子图',
+    note:'输入：M1 中该标的的行情 / 资金 / 板块 evidence 投影（不重复取数）。输出：趋势、支撑、压力 claim → M2。跨子图：只读 wind 的板块强度 claim（执行顺序 wind → trend，保证读得到）；支撑/压力位会被研判层直接引用为 invalidators。',
+    w:980,h:470,
+    nodes:[
+      G('gt-in',20,92,220,238,'输入 · 只读 M1','memory'),
+      G('gt-calc',252,92,458,238,'LangChain 工具计算','research'),
+      G('gt-out',722,92,238,328,'claims 输出','judgment'),
+      N('t1',36,140,188,70,'memory','M1 证据投影','该标的 market / entity 切片',['evidence'],{
+        role:'只读取与当前标的相关的行情、资金、板块证据；不再自己直连外部数据源。',
+        inputs:['subject = 个股 / 指数'],outputs:['evidence 切片'],deps:['M1 evidence_ledger'],
+        change:['消除各 Agent 重复抓行情。']
+      }),
+      N('t0',36,235,188,70,'memory','wind 板块强度 claim','只读：同板块风口结论',['跨子图'],{
+        role:'读 wind_research 写下的板块强度 claim，判断趋势是否有板块共振。',
+        inputs:['M2 wind claims'],outputs:['板块上下文'],deps:['M2 claim graph'],
+        change:['趋势判断第一次带上板块上下文。']
+      }),
+      N('t2',268,140,190,70,'research','指标计算','均线 / MACD / 量能 / 相对强度',['纯计算'],{
+        role:'用 LangChain Tool 做纯计算，不调用大模型。',
+        inputs:['K 线切片'],outputs:['指标矩阵'],deps:['kline tool'],
+        change:['计算与解释分离，结果可复现。']
+      }),
+      N('t4',268,235,190,70,'research','板块强度','涨幅 / 涨停家数 / 资金',['sector'],{
+        role:'计算板块强度，作为个股趋势的外部校验。',
+        inputs:['market evidence'],outputs:['sector_strength'],deps:['rotation / sector 工具'],
+        change:['板块强度成为共享量，不再各模块各算。']
+      }),
+      N('t3',485,140,195,70,'research','趋势评分','多空排列 · 评分 · 阶段',['trend_score'],{
+        role:'合成趋势评分与阶段（上升 / 震荡 / 下降），给出置信度。',
+        inputs:['指标矩阵','sector_strength','method prior'],outputs:['trend_score'],deps:['trend tool'],
+        change:['评分结果携带方法与版本。']
+      }),
+      N('t5',736,140,208,92,'judgment','趋势 claim','方向 / 支撑 / 压力 / 失效位',['claim'],{
+        role:'输出结构化 claim：趋势方向、支撑位、压力位、失效条件，每条引用 evidence_id。',
+        inputs:['trend_score'],outputs:['claims(trend)'],deps:['M2'],
+        change:['趋势结论可被洞见、研判、播报共同引用。']
+      }),
+      N('t6',736,252,208,70,'judgment','写 M2 → 研判层','失效位成为 invalidators',['写账本'],{
+        role:'把 claim 写入 M2；J2 反方与 J4 落账会直接引用这里的失效位。',
+        inputs:['claims(trend)'],outputs:['M2 新增 claim'],deps:['M2 claim graph'],
+        change:['研判不再另起一套趋势判断。']
+      })
+    ],
+    edges:[E('t1','t2','evidence'),E('t0','t3','feedback','板块共振'),E('t2','t3','evidence'),
+      E('t4','t3','evidence'),E('t3','t5','evidence'),E('t4','t5','feedback'),
+      E('t5','t6','evidence','写账本')]
+  },
+
+  wind:{
+    title:'wind_research · 风口龙头 / 板块轮动子图',
+    note:'输入：M1 的 market / event evidence，以及 event_research 写入的事件热度 claim。输出：板块 claim、龙头 claim → M2。跨子图：事件热度直接抬高板块强度；板块强弱被 rhythm 读取；invest_insight 用它判断「板块共振还是个体事件」。',
+    w:980,h:470,
+    nodes:[
+      G('gw-in',20,92,220,238,'输入 · M1 + 事件 claims','memory'),
+      G('gw-calc',252,92,458,238,'轮动 / 热度合成','research'),
+      G('gw-out',722,92,238,328,'板块与龙头 claims','judgment'),
+      N('w1',36,140,188,70,'memory','市场证据','涨幅 / 资金 / 涨停结构',['market evidence'],{
+        role:'读取感知层已整理好的市场证据切片。',
+        inputs:['M1 market evidence'],outputs:['板块行情矩阵'],deps:['M1'],
+        change:['不再自己重新抓一遍全市场行情。']
+      }),
+      N('w0',36,235,188,70,'memory','事件热度 claims','只读：event_research 输出',['跨子图'],{
+        role:'读事件子图的热度 claim，把「有事件」纳入板块热度。',
+        inputs:['M2 event claims'],outputs:['事件热度因子'],deps:['M2'],
+        change:['风口强度第一次吸收事件与研报证据。']
+      }),
+      N('w2',268,140,190,70,'research','板块轮动','排名变化 / 资金流 / 持续性',['rotation'],{
+        role:'计算板块轮动排名与持续性，识别真轮动与一日游。',
+        inputs:['板块行情矩阵'],outputs:['rotation'],deps:['rotation tool'],
+        change:['轮动判断与全站共用同一份行情。']
+      }),
+      N('w4',268,235,190,70,'research','热度合成','涨幅 + 涨停 + 事件 + 研报',['热度分'],{
+        role:'把行情热度、涨停结构、事件热度与研报覆盖合成为板块热度分。',
+        inputs:['rotation','事件热度因子'],outputs:['sector_heat'],deps:['wind tool'],
+        change:['热度口径统一，可被其他子图引用。']
+      }),
+      N('w3',485,140,195,70,'research','龙头识别','龙头 / 跟风 / 卡位',['leader'],{
+        role:'按连板高度、成交占比、率先涨停识别龙头与跟风。',
+        inputs:['rotation','sector_heat'],outputs:['leader set'],deps:['wind tool'],
+        change:['龙头结论与个股洞见共享。']
+      }),
+      N('w5',736,140,208,92,'judgment','板块 / 龙头 claim','热度 / 阶段 / 龙头 / 风险',['claim'],{
+        role:'输出板块 claim 与龙头 claim，引用行情与事件 evidence_id。',
+        inputs:['sector_heat','leader set'],outputs:['claims(wind)'],deps:['M2'],
+        change:['风口不再是榜单快照，而是带证据的论点。']
+      }),
+      N('w6',736,252,208,70,'judgment','写 M2','供洞见 / 节奏 / 研判读取',['写账本'],{
+        role:'写入 M2，供 insight、rhythm 与研判层按 subject 读取。',
+        inputs:['claims(wind)'],outputs:['M2 新增 claim'],deps:['M2'],
+        change:['板块结论进入统一账本。']
+      })
+    ],
+    edges:[E('w1','w2','evidence'),E('w2','w3','evidence'),E('w2','w4','evidence'),
+      E('w0','w4','feedback','事件热度'),E('w4','w3','feedback'),E('w3','w5','evidence'),
+      E('w4','w5','evidence'),E('w5','w6','evidence','写账本')]
+  },
+
+  event:{
+    title:'event_research · 事件传导 / 存活度子图',
+    note:'输入：M1 的 event evidence（统一事件主记录）+ entity_perception 的实体链接。输出：事件 claim、传导链、存活度 → M2。跨子图：热度给 wind；传导链给 insight 做归因；存活度决定 push 是否降噪。',
+    w:980,h:470,
+    nodes:[
+      G('ge-in',20,92,220,238,'输入 · 三库合一','memory'),
+      G('ge-calc',252,92,458,238,'实体 / 传导 / 存活','research'),
+      G('ge-out',722,92,238,328,'事件 claims','judgment'),
+      N('e0',36,235,188,70,'memory','新闻 / 公告 / 研报','抓取结果 → 去重',['raw'],{
+        role:'接收感知层抓取并去重后的原始材料，不再由多个模块各抓一份。',
+        inputs:['news / announcement / research 工具'],outputs:['raw docs'],deps:['M1'],
+        change:['三套事件抓取合并为一条流水线。']
+      }),
+      N('e1',36,140,188,70,'memory','事件主记录','唯一事件 id + 存活度',['event 主记录'],{
+        role:'生成唯一事件主记录，替代 agent event_store / event_entities / calendar 三套库。',
+        inputs:['raw docs'],outputs:['event record'],deps:['M1','M5'],
+        change:['同一事件只有一条记录、一套口径。']
+      }),
+      N('e2',268,140,190,70,'research','实体链接','事件 → 板块 / 个股 / 产业链',['entity'],{
+        role:'把事件映射到实体与板块，使用感知层同一份实体链接结果。',
+        inputs:['event record'],outputs:['linked entities'],deps:['M5 知识图谱'],
+        change:['归属只维护一份，不再各猜一套。']
+      }),
+      N('e3',485,140,195,70,'research','传导链','受益 / 受损 / 上下游',['graph'],{
+        role:'沿产业链推导受益与受损板块、个股，形成传导链。',
+        inputs:['linked entities'],outputs:['transmission chain'],deps:['graph tool'],
+        change:['事件结论可供板块与个股直接引用。']
+      }),
+      N('e4',485,235,195,70,'research','存活度','时效 / 重复 / 市场反应',['survival'],{
+        role:'评估事件时效、是否重复、市场是否已反应，给事件降噪。',
+        inputs:['event record'],outputs:['survival score'],deps:['event tool'],
+        change:['推送与播报按存活度降噪。']
+      }),
+      N('e5',736,140,208,92,'judgment','事件 claim','热度 / 方向 / 受益链 / 失效',['claim'],{
+        role:'输出事件 claim：热度、方向、受益链、失效条件。',
+        inputs:['transmission chain','survival score'],outputs:['claims(event)'],deps:['M2'],
+        change:['事件从卡片变成可复用论点。']
+      }),
+      N('e6',736,252,208,70,'judgment','写 M2','热度供 wind，链供 insight',['写账本'],{
+        role:'写入 M2；wind 读热度，insight 读传导链，push 读存活度。',
+        inputs:['claims(event)'],outputs:['M2 新增 claim'],deps:['M2'],
+        change:['一次事件研究被三处复用。']
+      })
+    ],
+    edges:[E('e0','e1','evidence'),E('e1','e2','evidence'),E('e2','e3','evidence'),
+      E('e1','e4','evidence'),E('e3','e5','evidence'),E('e4','e5','feedback'),
+      E('e5','e6','evidence','写账本')]
+  },
+
+  fundamental:{
+    title:'fundamental_research · 业绩 / 预测 / 机构调研子图',
+    note:'输入：M1 的 fundamental evidence + M5 研报向量库。输出：基本面 claim → M2。跨子图：insight 用它判断异动是否有基本面支撑；研判层用它给中期结论定方向；rhythm 用它调整仓位久期。',
+    w:980,h:470,
+    nodes:[
+      G('gf-in',20,92,220,238,'输入','memory'),
+      G('gf-calc',252,92,458,238,'业绩 / 机构 / RAG','research'),
+      G('gf-out',722,92,238,328,'基本面 claims','judgment'),
+      N('f1',36,200,188,70,'memory','标的','个股 / 板块 / 指数',['subject'],{
+        role:'接收本次 run 的标的主体，确定取数范围。',
+        inputs:['run_plan.subject'],outputs:['subject'],deps:['app-api 工具带'],
+        change:['按需取数，不做全市场扫描。']
+      }),
+      N('f2',268,140,190,70,'research','财报 / 预测','营收 / 利润 / 一致预期',['forecast'],{
+        role:'读取财报与一致预期，计算增速与超预期幅度。',
+        inputs:['subject'],outputs:['fundamental metrics'],deps:['forecast tool'],
+        change:['财务口径统一，避免多处各算。']
+      }),
+      N('f3',268,265,190,70,'research','机构调研','调研次数 / 参与机构 / 方向',['institution'],{
+        role:'读取机构调研与持仓变化，判断机构关注度。',
+        inputs:['subject'],outputs:['institution signal'],deps:['institution tool'],
+        change:['机构观点第一次进入共享证据。']
+      }),
+      N('f4',485,200,195,70,'research','研报检索 RAG','语义检索 + 引用原文',['RAG'],{
+        role:'在研报向量库做语义检索，返回带出处的要点，不做无源总结。',
+        inputs:['fundamental metrics','institution signal'],outputs:['research snippets'],deps:['M5 向量库'],
+        change:['结论必须带研报出处。']
+      }),
+      N('f5',736,175,208,96,'judgment','基本面 claim','增长 / 预期差 / 机构 / 风险',['claim'],{
+        role:'输出基本面 claim：增长质量、预期差、机构态度、风险点。',
+        inputs:['research snippets'],outputs:['claims(fundamental)'],deps:['M2'],
+        change:['个股洞见可以引用基本面判断。']
+      }),
+      N('f6',736,290,208,70,'judgment','写 M2','供洞见 / 研判 / 节奏读取',['写账本'],{
+        role:'写入 M2，供 insight 判断异动性质、研判层定中期方向。',
+        inputs:['claims(fundamental)'],outputs:['M2 新增 claim'],deps:['M2'],
+        change:['基本面不再是孤立报告。']
+      })
+    ],
+    edges:[E('f1','f2','evidence'),E('f1','f3','evidence'),E('f2','f4','evidence'),
+      E('f3','f4','evidence'),E('f4','f5','evidence'),E('f5','f6','evidence','写账本')]
+  },
+
+  insight:{
+    title:'insight_research · 个股异动归因 / 溯源子图',
+    note:'输入：异动事件 + 标的；只读 trend / wind / event / fundamental 四个子图的 claims。输出：归因 claim → M2。这是「功能互相影响」最集中的子图：同一根异动 K 线必须解释成板块共振、事件驱动还是个体资金。',
+    w:980,h:470,
+    nodes:[
+      G('gi-in',20,92,220,290,'输入 · 异动 + 其他子图 claims','memory'),
+      G('gi-calc',252,92,458,290,'溯源 / 归因','research'),
+      G('gi-out',722,92,238,328,'归因 claims','judgment'),
+      N('i1',36,140,188,70,'memory','异动事件 + 标的','涨跌幅 / 量比 / 龙虎榜',['anomaly'],{
+        role:'接收异动事件与标的，作为归因问题的起点。',
+        inputs:['monitor alert','subject'],outputs:['anomaly context'],deps:['M1'],
+        change:['异动不再各页各解释一套。']
+      }),
+      N('i3',36,235,188,70,'memory','板块强度 claim','只读：wind_research',['跨子图'],{
+        role:'读板块强度 claim，判断异动是否由板块共振带来。',
+        inputs:['M2 wind claims'],outputs:['sector context'],deps:['M2'],
+        change:['板块原因与个股原因可以分离。']
+      }),
+      N('i4',36,320,188,70,'memory','趋势 / 事件 / 基本面 claims','只读：R1 + R3 + R4',['跨子图'],{
+        role:'读趋势、事件传导与基本面 claims，判断异动是否有趋势背景、事件或业绩支撑。',
+        inputs:['M2 trend / event / fundamental claims'],outputs:['driver context'],deps:['M2'],
+        change:['一次归因引用三类上游结论。']
+      }),
+      N('i2',268,140,190,70,'research','个股溯源','资金 / 席位 / 分时结构',['trace'],{
+        role:'读取个股资金、龙虎榜席位与分时结构，识别主导资金类型。',
+        inputs:['anomaly context'],outputs:['trace result'],deps:['trace tool'],
+        change:['溯源与风口、事件共用同一份数据。']
+      }),
+      N('i5',485,200,195,80,'research','归因判定','共振 / 事件 / 资金 / 无解释',['attribution'],{
+        role:'把四类上游结论合成一个归因判定，并给出无法解释的显式标记。',
+        inputs:['trace result','sector context','driver context'],outputs:['attribution'],deps:['M2'],
+        change:['禁止「盘感式」归因，必须有上游 claim 支撑。']
+      }),
+      N('i6',736,195,208,96,'judgment','归因 claim → M2','归因 / 证据链 / 置信度',['claim'],{
+        role:'输出归因 claim 与证据链；无法解释时输出「无解释」而不是编理由。',
+        inputs:['attribution'],outputs:['claims(insight)'],deps:['M2'],
+        change:['同一只票全站只有一个归因。']
+      })
+    ],
+    edges:[E('i1','i2','evidence'),E('i2','i5','evidence'),E('i3','i5','feedback','板块共振'),
+      E('i4','i5','feedback','事件/业绩'),E('i5','i6','evidence','写账本')]
+  },
+
+  rhythm:{
+    title:'rhythm_research · 节奏 / 恐贪 / 择时子图',
+    note:'输入：指数 / 恐贪 / 涨跌家数 + M3 中最近一条同标的 judgment（上一交易日 / 上一次 run）+ M4 先验。输出：仓位 claim → M2，并回写四时段节奏报告。跨子图：仓位建议必须以最近一条研判为前提，不能与全站结论相反；本轮尚未生成的 judgment 不读，避免同 run 成环。',
+    w:980,h:470,
+    nodes:[
+      G('gy-in',20,92,220,290,'输入 · 情绪 + 研判','memory'),
+      G('gy-calc',252,92,458,290,'情绪 / 仓位','research'),
+      G('gy-out',722,92,238,328,'仓位 claims','judgment'),
+      N('y1',36,140,188,70,'memory','指数 / 恐贪','恐贪指数 / 涨跌家数 / 成交',['fear-greed'],{
+        role:'读取指数、恐贪与市场宽度证据。',
+        inputs:['M1 market evidence'],outputs:['sentiment raw'],deps:['fear_greed tool'],
+        change:['情绪数据只取一次。']
+      }),
+      N('y3',36,250,188,70,'memory','最近一条 judgment','只读：M3 研判账本',['跨层'],{
+        role:'读取 M3 中该标的最近一条研判（上一交易日 / 上一次 run），确保仓位建议与全站结论同源；不读本轮尚未生成的 judgment。',
+        inputs:['M3 最近一条同标的 judgment'],outputs:['judgment context'],deps:['M3'],
+        change:['仓位不再与个股/板块结论打架，也不与研判层形成时序环。']
+      }),
+      N('y2',268,140,190,70,'research','情绪读数','贪婪 / 恐惧 / 中性',['sentiment'],{
+        role:'把原始指标转成情绪读数与所处区间。',
+        inputs:['sentiment raw'],outputs:['sentiment level'],deps:['fear_greed tool'],
+        change:['情绪口径统一。']
+      }),
+      N('y4',485,200,195,80,'research','仓位模型','情绪 × 研判 × 风险预算',['position'],{
+        role:'按情绪区间、最近一条研判方向与风险预算给出仓位建议。',
+        inputs:['sentiment level','judgment context'],outputs:['position plan'],deps:['M3','M4'],
+        change:['仓位第一次有明确前提与失效条件。']
+      }),
+      N('y5',736,195,208,96,'judgment','仓位 claim → M2','仓位 / 前提 / 失效条件',['claim'],{
+        role:'输出仓位 claim，写明前提（依赖哪条研判）与失效条件。',
+        inputs:['position plan'],outputs:['claims(rhythm)'],deps:['M2'],
+        change:['节奏报告与个股研判共享同一结论源。']
+      })
+    ],
+    edges:[E('y1','y2','evidence'),E('y2','y4','evidence'),E('y3','y4','feedback','研判前提'),
+      E('y4','y5','evidence','写账本')]
+  },
+
+  capital:{
+    title:'capital_research · 资金 / 筹码子图',
+    note:'输入：M1 的资金流 / 龙虎榜 / 席位 / 两融 / 北向 / 大宗 evidence。输出：资金筹码 claim → M2。跨子图：供 R2 板块强度、R5 归因、R6 仓位引用；缺失接口显式标 failed，不用假数据补齐。',
+    w:980,h:440,
+    nodes:[
+      G('gca-in',20,92,220,238,'输入 · M1 资金证据','memory'),
+      G('gca-calc',252,92,458,238,'主力行为 / 筹码结构','research'),
+      G('gca-out',722,92,238,238,'资金筹码 claim','judgment'),
+      N('ca1',36,140,188,70,'memory','资金流证据','主力净流入 / 大单',['money_flow'],{
+        role:'读取感知层已整理的行情与资金流证据切片。',
+        inputs:['M1 market / flow evidence'],outputs:['主力资金矩阵'],deps:['M1'],
+        change:['不再自己重复拉资金流。']
+      }),
+      N('ca2',36,235,188,70,'memory','龙虎榜 / 席位','游资 / 机构 / 北向',['trace'],{
+        role:'读龙虎榜、席位、两融、北向与大宗交易证据。',
+        inputs:['M1 trace evidence'],outputs:['筹码行为矩阵'],deps:['M1','trace 工具'],
+        change:['筹码行为与个股归因共用同一份证据。']
+      }),
+      N('ca3',268,140,190,70,'research','主力行为','吸筹 / 出货 / 对倒',['behavior'],{
+        role:'识别主力吸筹、出货、对倒与护盘行为。',
+        inputs:['主力资金矩阵'],outputs:['behavior'],deps:['flow 工具'],
+        change:['资金行为从不透明变成可引用 claim。']
+      }),
+      N('ca4',268,235,190,70,'research','筹码结构','集中度 / 拥挤度 / 承接力',['structure'],{
+        role:'计算筹码集中度、拥挤度与承接力。',
+        inputs:['筹码行为矩阵'],outputs:['structure'],deps:['trace 工具'],
+        change:['拥挤交易能被提前识别。']
+      }),
+      N('ca5',485,140,195,70,'research','资金评分','强度 / 持续性 / 背离',['capital_score'],{
+        role:'合成资金强度、持续性与量价背离。',
+        inputs:['behavior','structure'],outputs:['capital_score'],deps:['method prior'],
+        change:['资金评分带方法与版本。']
+      }),
+      N('ca6',736,140,208,92,'judgment','资金筹码 claim','主力方向 / 拥挤度 / 失效',['claim'],{
+        role:'输出结构化 claim：主力方向、拥挤度、承接力与失效条件，每条引用 evidence_id。',
+        inputs:['capital_score'],outputs:['claims(capital)'],deps:['M2'],
+        change:['资金结论可被板块、归因、仓位共同引用。']
+      }),
+      N('ca7',736,252,208,70,'judgment','写 M2 → 归因层','供 R2 / R5 / R6',['写账本'],{
+        role:'把资金筹码 claim 写入 M2。',
+        inputs:['claims(capital)'],outputs:['M2 新增 claim'],deps:['M2'],
+        change:['R5 不再既做归因又做资金。']
+      })
+    ],
+    edges:[E('ca1','ca3','evidence'),E('ca2','ca4','evidence'),E('ca3','ca5','evidence'),
+      E('ca4','ca5','evidence'),E('ca5','ca6','evidence'),E('ca6','ca7','evidence','写账本')]
+  },
+
+  macro:{
+    title:'macro_research · 宏观 / 政策子图',
+    note:'输入：利率、CPI/PPI/PMI、汇率、政策文件与宏观日历。输出：宏观政策 claim → M2。跨子图：供 R2 板块、R5 归因、R6 仓位引用；宏观数据缺失时显式标 insufficient。',
+    w:980,h:440,
+    nodes:[
+      G('gma-in',20,92,220,238,'输入 · 宏观数据 / 政策','memory'),
+      G('gma-calc',252,92,458,238,'环境判断','research'),
+      G('gma-out',722,92,238,238,'宏观政策 claim','judgment'),
+      N('ma1',36,140,188,70,'memory','宏观数据','利率 / CPI / PMI / 汇率',['macro'],{
+        role:'读利率、CPI/PPI/PMI、汇率等宏观序列。',
+        inputs:['M1 macro evidence'],outputs:['宏观矩阵'],deps:['M1','宏观工具'],
+        change:['宏观数据不再塞在新闻里。']
+      }),
+      N('ma2',36,235,188,70,'memory','政策文件','会议 / 文件 / 表态',['policy'],{
+        role:'读政策文件、会议通稿与监管表态。',
+        inputs:['M1 policy evidence'],outputs:['政策文本矩阵'],deps:['M1','政策库'],
+        change:['政策证据可追溯。']
+      }),
+      N('ma3',268,140,190,70,'research','政策方向','宽松 / 中性 / 收紧',['policy_dir'],{
+        role:'判断政策方向与力度。',
+        inputs:['政策文本矩阵'],outputs:['policy_dir'],deps:['method prior'],
+        change:['政策判断不再靠一句新闻。']
+      }),
+      N('ma4',268,235,190,70,'research','环境松紧','流动性 / 风险偏好',['environment'],{
+        role:'判断流动性松紧与风险偏好。',
+        inputs:['宏观矩阵','policy_dir'],outputs:['environment'],deps:['宏观工具'],
+        change:['市场级判断能引用环境而不是只引用价格。']
+      }),
+      N('ma5',485,140,195,70,'research','宏观评分','对股市的传导方向',['macro_score'],{
+        role:'合成宏观对股市的传导方向与强度。',
+        inputs:['environment'],outputs:['macro_score'],deps:['method prior'],
+        change:['宏观评分带方法与版本。']
+      }),
+      N('ma6',736,140,208,92,'judgment','宏观政策 claim','方向 / 强度 / 失效',['claim'],{
+        role:'输出结构化 claim：政策方向、环境强度与失效条件，每条引用 evidence_id。',
+        inputs:['macro_score'],outputs:['claims(macro)'],deps:['M2'],
+        change:['宏观结论可被板块、归因、仓位共同引用。']
+      }),
+      N('ma7',736,252,208,70,'judgment','写 M2 → 板块 / 仓位','供 R2 / R5 / R6',['写账本'],{
+        role:'把宏观政策 claim 写入 M2。',
+        inputs:['claims(macro)'],outputs:['M2 新增 claim'],deps:['M2'],
+        change:['R6 仓位不再只看恐贪。']
+      })
+    ],
+    edges:[E('ma1','ma4','evidence'),E('ma2','ma3','evidence'),E('ma3','ma4','evidence'),
+      E('ma4','ma5','evidence'),E('ma5','ma6','evidence'),E('ma6','ma7','evidence','写账本')]
+  }
+};
+
+/* 主图 R1-R8 挂载子图 */
+[['R1','trend'],['R2','wind'],['R3','event'],['R4','fundamental'],['R5','insight'],['R6','rhythm'],['R7','capital'],['R8','macro']].forEach(([id,sg])=>{
+  const n=TARGET.nodes.find(x=>x.id===id);
+  if(n) n.subgraph=sg;
+});
+
+/* ============================== 渲染 ============================== */
+function anchors(a,b){
+  const ax=a.x+a.w/2, ay=a.y+a.h/2, bx=b.x+b.w/2, by=b.y+b.h/2;
+  const horiz=Math.abs(bx-ax)>=Math.abs(by-ay);
+  if(horiz){
+    const s=bx>=ax?1:-1;
+    return {x1:ax+s*(a.w/2),y1:ay,x2:bx-s*(b.w/2),y2:by,horiz};
+  }
+  const s=by>=ay?1:-1;
+  return {x1:ax,y1:ay+s*(a.h/2),x2:bx,y2:by-s*(b.h/2),horiz};
+}
+
+function renderConfig(canvas,cfg,prefix,onSelect){
+  canvas.innerHTML='';
+  canvas.style.width=cfg.w+'px';
+  canvas.style.height=cfg.h+'px';
+
+  const svg=document.createElementNS(NS,'svg');
+  svg.setAttribute('class','edge-layer');
+  svg.setAttribute('width',cfg.w);
+  svg.setAttribute('height',cfg.h);
+  svg.setAttribute('viewBox','0 0 '+cfg.w+' '+cfg.h);
+
+  const defs=document.createElementNS(NS,'defs');
+  Object.keys(EDGE).forEach(kind=>{
+    const m=document.createElementNS(NS,'marker');
+    m.setAttribute('id','arw-'+prefix+'-'+kind);
+    m.setAttribute('viewBox','0 0 10 10');
+    m.setAttribute('refX','9'); m.setAttribute('refY','5');
+    m.setAttribute('markerWidth','5.5'); m.setAttribute('markerHeight','5.5');
+    m.setAttribute('orient','auto-start-reverse');
+    const p=document.createElementNS(NS,'path');
+    p.setAttribute('d','M 0 0 L 10 5 L 0 10 z');
+    p.setAttribute('fill',EDGE[kind].color);
+    m.appendChild(p); defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+  canvas.appendChild(svg);
+
+  cfg.nodes.filter(n=>n.type==='group').forEach(n=>{
+    const el=document.createElement('div');
+    el.className='group';
+    const c=LAYER[n.layer].color;
+    el.style.cssText='left:'+n.x+'px;top:'+n.y+'px;width:'+n.w+'px;height:'+n.h+'px;border-color:'+hexA(c,.34)+';background:'+hexA(c,.035);
+    el.innerHTML='<div class="group-label" style="color:'+c+';border:1px solid '+hexA(c,.3)+'">'+n.title+'</div>';
+    canvas.appendChild(el);
+  });
+
+  cfg.edges.forEach(e=>{
+    const a=cfg.nodes.find(n=>n.id===e.from), b=cfg.nodes.find(n=>n.id===e.to);
+    if(!a||!b) return;
+    const st=EDGE[e.kind]||EDGE.call;
+    const p=anchors(a,b);
+    const bend=Math.max(26,Math.min(150,(p.horiz?Math.abs(p.x2-p.x1):Math.abs(p.y2-p.y1))*0.45));
+    let d;
+    const off=e.off||0;
+    if(p.horiz){
+      const s=p.x2>=p.x1?1:-1;
+      d='M '+p.x1+' '+p.y1+' C '+(p.x1+s*bend)+' '+(p.y1+off)+', '+(p.x2-s*bend)+' '+(p.y2+off)+', '+p.x2+' '+p.y2;
+    }else{
+      const s=p.y2>=p.y1?1:-1;
+      d='M '+p.x1+' '+p.y1+' C '+(p.x1+off)+' '+(p.y1+s*bend)+', '+(p.x2+off)+' '+(p.y2-s*bend)+', '+p.x2+' '+p.y2;
+    }
+    const path=document.createElementNS(NS,'path');
+    path.setAttribute('d',d);
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke',st.color);
+    path.setAttribute('stroke-width',e.kind==='dup'?1.8:1.25);
+    path.setAttribute('opacity',e.kind==='route'?0.26:0.46);
+    if(st.dash) path.setAttribute('stroke-dasharray',st.dash);
+    path.setAttribute('marker-end','url(#arw-'+prefix+'-'+e.kind+')');
+    if(e.bi) path.setAttribute('marker-start','url(#arw-'+prefix+'-'+e.kind+')');
+    path.dataset.from=e.from; path.dataset.to=e.to;
+    path.classList.add('edge');
+    svg.appendChild(path);
+    if(e.label){
+      const t=document.createElementNS(NS,'text');
+      t.setAttribute('class','edge-label');
+      t.setAttribute('fill',st.color);
+      t.setAttribute('text-anchor','middle');
+      const mid=path.getPointAtLength(path.getTotalLength()/2);
+      t.setAttribute('x',mid.x); t.setAttribute('y',mid.y-4);
+      t.textContent=e.label;
+      svg.appendChild(t);
+    }
+  });
+
+  cfg.nodes.filter(n=>n.type!=='group').forEach(n=>{
+    const el=document.createElement('div');
+    const isPain=n.type==='pain';
+    const hasSub=!!(n.subgraph&&SUBGRAPHS[n.subgraph]);
+    el.className='node'+(isPain?' pain':'')+(hasSub?' has-sub':'');
+    el.style.cssText='left:'+n.x+'px;top:'+n.y+'px;width:'+n.w+'px;height:'+n.h+'px;--c:'+LAYER[n.layer].color;
+    el.dataset.id=n.id; el.dataset.canvas=prefix;
+    if(isPain){
+      el.title=n.d?n.d.name:'';
+      el.innerHTML='<span class="pain-no">'+n.title+'</span>';
+    }else{
+      el.innerHTML='<div class="node-top"><span class="dot"></span><span class="title">'+n.title+'</span></div>'
+        +(n.sub?'<div class="sub">'+n.sub+'</div>':'')
+        +((n.chips&&n.chips.length)?'<div class="chips">'+n.chips.map(c=>'<span>'+c+'</span>').join('')+'</div>':'')
+        +(hasSub?'<span class="expand" title="展开研究子图">⊞</span>':'');
+    }
+    el.addEventListener('click',()=>onSelect(n));
+    el.addEventListener('mouseenter',()=>focusIn(canvas,n.id));
+    el.addEventListener('mouseleave',()=>unfocusIn(canvas));
+    canvas.appendChild(el);
+  });
+}
+
+function renderCanvas(key){
+  const cfg=VIEWS[key];
+  const canvas=document.getElementById('canvas-'+key);
+  if(!canvas) return;
+  renderConfig(canvas,cfg,key,n=>{
+    select(n,key);
+    if(n.subgraph&&SUBGRAPHS[n.subgraph]) openDrill(n);
+  });
+}
+
+function hexA(hex,a){
+  const h=hex.replace('#','');
+  const r=parseInt(h.slice(0,2),16), g=parseInt(h.slice(2,4),16), b=parseInt(h.slice(4,6),16);
+  return 'rgba('+r+','+g+','+b+','+a+')';
+}
+
+function focusIn(canvas,id){
+  if(!canvas) return;
+  const ids=new Set([id]);
+  canvas.querySelectorAll('.edge').forEach(e=>{
+    const on=e.dataset.from===id||e.dataset.to===id;
+    e.classList.toggle('hl',on);
+    if(on){ids.add(e.dataset.from);ids.add(e.dataset.to);}
+  });
+  canvas.classList.add('has-focus');
+  canvas.querySelectorAll('.node').forEach(n=>n.classList.toggle('hl',ids.has(n.dataset.id)));
+}
+
+function unfocusIn(canvas){
+  if(!canvas) return;
+  canvas.classList.remove('has-focus');
+  canvas.querySelectorAll('.edge,.node').forEach(n=>n.classList.remove('hl'));
+}
+
+const inspector=document.getElementById('inspector');
+
+function renderInspector(n,key){
+  const d=n.d||{};
+  const layer=LAYER[n.layer]||{name:'',color:'#8fa3c0'};
+  const sec=(title,arr)=>{
+    if(!arr||!arr.length) return '';
+    return '<div class="sec"><h3>'+title+'</h3><ul>'+arr.map(x=>'<li>'+x+'</li>').join('')+'</ul></div>';
+  };
+  const badTitle=key==='current'?'现状问题':'改造点';
+  const badArr=d.problem||d.change||[];
+  inspector.innerHTML=
+    '<div class="kicker" style="color:'+layer.color+'">'+layer.name+(n.type==='pain'?' · 割裂点':'')+'</div>'
+    +'<h2>'+(d.name||n.title)+'</h2>'
+    +'<p class="isub">'+(n.sub||'')+'</p>'
+    +(d.role?'<div class="sec"><h3>职责</h3><p>'+d.role+'</p></div>':'')
+    +sec('输入',d.inputs)
+    +sec('输出 / 写入',d.outputs)
+    +sec('依赖 / 工具',d.deps)
+    +(badArr.length?'<div class="sec bad"><h3>'+badTitle+'</h3><ul>'+badArr.map(x=>'<li>'+x+'</li>').join('')+'</ul></div>':'')
+    +(d.note?'<div class="note">'+d.note+'</div>':'')
+    +'<div class="note">对应代码：'+(d.code||'aistock-agent-py / aistock-app-api / 两个前端')+'</div>';
+}
+
+function select(n,key){
+  const canvas=document.getElementById('canvas-'+key);
+  if(canvas){
+    canvas.querySelectorAll('.node.selected').forEach(x=>x.classList.remove('selected'));
+    const el=canvas.querySelector('.node[data-id="'+n.id+'"]');
+    if(el) el.classList.add('selected');
+    focusIn(canvas,n.id);
+  }
+  renderInspector(n,key);
+}
+
+/* ---------- 研究子图展开 ---------- */
+const drill=document.getElementById('drill');
+const drillCanvas=document.getElementById('drill-canvas');
+const drillSide=document.getElementById('drill-side');
+
+function renderDrillSide(n){
+  const d=n.d||{};
+  const layer=LAYER[n.layer]||{name:'',color:'#8fa3c0'};
+  const ul=(t,a)=>a&&a.length?'<h5>'+t+'</h5><ul>'+a.map(x=>'<li>'+x+'</li>').join('')+'</ul>':'';
+  drillSide.innerHTML='<div class="kicker" style="color:'+layer.color+';font-size:10.5px;letter-spacing:1.2px;font-weight:700">'+layer.name+' · 子图节点</div>'
+    +'<h4>'+(d.name||n.title)+'</h4>'
+    +'<p class="ssub">'+(n.sub||'')+'</p>'
+    +(d.role?'<p>'+d.role+'</p>':'')
+    +ul('输入',d.inputs)
+    +ul('输出 / 写入',d.outputs)
+    +ul('依赖',d.deps)
+    +((d.change&&d.change.length)?'<h5>跨子图影响</h5><ul>'+d.change.map(x=>'<li>'+x+'</li>').join('')+'</ul>':'');
+}
+
+function selectDrill(n){
+  drillCanvas.querySelectorAll('.node.selected').forEach(x=>x.classList.remove('selected'));
+  const el=drillCanvas.querySelector('.node[data-id="'+n.id+'"]');
+  if(el) el.classList.add('selected');
+  renderDrillSide(n);
+  focusIn(drillCanvas,n.id);
+}
+
+function openDrill(n){
+  const sg=SUBGRAPHS[n.subgraph];
+  if(!sg) return;
+  document.getElementById('drill-title').textContent=sg.title;
+  document.getElementById('drill-note').innerHTML=sg.note;
+  renderConfig(drillCanvas,sg,'drill',selectDrill);
+  const first=sg.nodes.find(x=>x.type!=='group'&&x.layer==='judgment')||sg.nodes.find(x=>x.type!=='group');
+  if(first) renderDrillSide(first);
+  drill.classList.add('open');
+  const wrap=drillCanvas.parentElement;
+  wrap.scrollTop=0; wrap.scrollLeft=0;
+  drillCanvas.style.zoom=Math.min(1,(wrap.clientWidth-34)/sg.w);
+}
+
+function closeDrill(){
+  drill.classList.remove('open');
+  drillCanvas.innerHTML='';
+  drillSide.innerHTML='';
+}
+
+drill.querySelectorAll('[data-drill-close]').forEach(el=>el.addEventListener('click',closeDrill));
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrill(); });
+
+const INTRO={
+  current:'<div class="empty"><b>现状怎么读</b><br>左边是前端页面，中间是 app-api 模块，右边是 agent-py。每条竖线都是一个功能自己的链路；红色数字标出跨模块的断点。<br><br>点击任意节点，看它在现状中的职责、输入输出和具体问题。</div>',
+  target:'<div class="empty"><b>目标怎么读</b><br>当前显示的是<b>能力全景</b>：一次 run 共享一份 state，感知节点写证据，研究层各能力域读投影并互相取用，研判节点产出唯一 judgment，校准节点把验证结果回灌。<br><br>点带 <b>⊞</b> 的研究节点会展开它自己的 LangGraph 子图。运行时并不是 8 个并列全跑——切到「③ 执行」看规则层 / 研究层的实际拓扑。<br><br>点击任意节点，看它读写哪些通道、依赖哪些工具，以及相对现状改了什么。</div>',
+  exec:'<div class="empty"><b>执行怎么读</b><br>上面灰色带是<b>规则层</b>：触发、档位模板 G1、工具权限 G2、证据与研判账本、裁决、校准、渲染，全部确定性，不含自由循环。<br><br>下面紫色带是<b>研究层</b>：R5 是唯一 lead agent，拿到 M1 现象和 G1 的 RunBrief 后决定调哪几个子 agent；R1/R6 是确定性计算工具，R2/R3/R4/R7/R8 是子 agent，各自独立上下文、独立工具子集、独立步数上限，只返回结构化 claim。<br><br>两层只通过 RunBrief / ResearchResult 交互：研究层不直接写账本，规则层负责校验与落账。</div>',
+  diff:'<div class="empty"><b>先看变化，再看落地</b><br>左侧 14 张卡是这次改造的结构性变化；底部是「组长先行」的三阶段落地顺序与四条不变量。<br><br>需要回到结构图时，点顶部「现状」「目标」或「执行」。</div>'
+};
+
+const STATS={
+  current:[['18','组模块'],['11','个图节点'],['30+','个定时任务'],['3','套事件库'],['0','条跨模块共享状态']],
+  target:[['1','张主图'],['8','个研究能力域'],['2','个元认知 / 反思'],['24','个 LangChain 工具'],['1','个研判账本']],
+  exec:[['2','层（规则 / 研究）'],['1','个 lead agent'],['5','个子 agent'],['2','个计算工具'],['2','个元认知 / 反思']],
+  diff:[['15','个结构性变化'],['3','阶段落地'],['4','条不变量'],['1','条样板链'],['0','次前端重构']]
+};
+
+function renderStats(mode){
+  const box=document.getElementById('stats');
+  box.innerHTML=(STATS[mode]||[]).map(x=>'<div class="stat"><b>'+x[0]+'</b><span>'+x[1]+'</span></div>').join('');
+}
+
+function setMode(mode){
+  closeDrill();
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+mode));
+  renderStats(mode);
+  inspector.innerHTML=INTRO[mode]||INTRO.current;
+  if(mode!=='diff'){
+    const canvas=document.getElementById('canvas-'+mode);
+    if(canvas) canvas.style.zoom=1;
+  }
+}
+
+document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+document.querySelectorAll('[data-zoom]').forEach(b=>b.addEventListener('click',()=>{
+  const key=b.dataset.key;
+  const canvas=document.getElementById('canvas-'+key);
+  const wrap=document.getElementById('wrap-'+key);
+  if(b.dataset.zoom==='100'){ canvas.style.zoom=1; return; }
+  const s=Math.min(1,(wrap.clientWidth-6)/VIEWS[key].w);
+  canvas.style.zoom=s;
+}));
+
+renderCanvas('current');
+renderCanvas('target');
+renderCanvas('exec');
+setMode('current');
+</script>
+</body>
+</html>

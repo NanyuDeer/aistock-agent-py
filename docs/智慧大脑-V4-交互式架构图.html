@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>智慧大脑 V4.3 详细架构图</title>
+  <style>
+    :root {
+      --bg: #eef1f4; --paper: #ffffff; --ink: #18212a; --muted: #65717c; --line: #d5dce2;
+      --navy: #173d5b; --blue: #2466a3; --green: #17715d; --amber: #9a6118;
+      --rose: #a23c4c; --violet: #654f91; --teal: #26777d;
+      --soft-blue: #edf4fa; --soft-green: #edf7f3; --soft-amber: #fbf4e8;
+      --soft-rose: #faeef0; --soft-violet: #f3eff9;
+    }
+    * { box-sizing: border-box; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    button { font: inherit; }
+    .shell { max-width: 1580px; margin: 0 auto; padding: 22px; }
+    .head { border-bottom: 1px solid var(--line); padding-bottom: 18px; }
+    .eyebrow { color: var(--blue); font-size: 12px; font-weight: 800; }
+    h1 { margin: 4px 0 7px; font-size: 32px; line-height: 1.2; letter-spacing: 0; }
+    h2 { margin: 0 0 5px; font-size: 21px; letter-spacing: 0; }
+    h3 { margin: 0 0 5px; font-size: 15px; letter-spacing: 0; }
+    p { margin: 0; }
+    .lead { max-width: 1180px; color: #3e4a55; }
+    .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+    .meta span { border: 1px solid var(--line); background: var(--paper); border-radius: 4px; color: var(--muted); font-size: 11px; padding: 3px 8px; }
+    .tabs { position: sticky; top: 0; z-index: 20; display: flex; max-width: 100%; gap: 5px; overflow-x: auto; padding: 10px 0; background: var(--bg); border-bottom: 1px solid var(--line); }
+    .tab { flex: 0 0 auto; border: 1px solid var(--line); background: var(--paper); color: #46535f; border-radius: 5px; padding: 7px 12px; cursor: pointer; }
+    .tab.on { color: #fff; background: var(--navy); border-color: var(--navy); }
+    .view { display: none; padding-top: 17px; }
+    .view.on { display: block; }
+    .sub { margin-bottom: 12px; color: var(--muted); }
+    .panel { border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 14px; }
+    .section { margin-top: 15px; }
+    .callout { margin-top: 10px; border-left: 4px solid var(--amber); background: var(--soft-amber); border-radius: 4px; padding: 9px 11px; color: #694416; }
+    .scroll { overflow-x: auto; padding-bottom: 6px; }
+    .pipeline { display: grid; grid-template-columns: repeat(9, minmax(150px, 1fr)); gap: 20px; min-width: 1510px; }
+    .layer { position: relative; min-height: 185px; border: 1px solid var(--line); border-top: 4px solid var(--blue); border-radius: 7px; padding: 10px; background: var(--paper); }
+    .layer:nth-child(2), .layer:nth-child(8) { border-top-color: var(--green); }
+    .layer:nth-child(3), .layer:nth-child(7) { border-top-color: var(--violet); }
+    .layer:nth-child(4), .layer:nth-child(9) { border-top-color: var(--amber); }
+    .layer:nth-child(5) { border-top-color: var(--teal); }
+    .layer:nth-child(6) { border-top-color: var(--rose); }
+    .layer:not(:last-child)::after { content: "→"; position: absolute; right: -17px; top: 72px; color: #87949f; font-size: 19px; font-weight: 800; }
+    .layer em { display: block; color: var(--muted); font-size: 10px; font-style: normal; font-weight: 800; }
+    .layer b { display: block; margin: 3px 0 6px; font-size: 13px; }
+    .layer ul, .compact { margin: 0; padding-left: 16px; color: #4c5863; font-size: 11px; }
+    .architecture-bottom { display: grid; grid-template-columns: 1.3fr 1fr; gap: 11px; margin-top: 11px; }
+    .memory-grid, .principle-grid, .mode-grid, .role-grid, .pilot-grid, .metric-grid, .owner-grid, .wave-grid { display: grid; gap: 8px; }
+    .memory-grid { grid-template-columns: repeat(6, 1fr); }
+    .principle-grid { grid-template-columns: repeat(4, 1fr); }
+    .memory, .principle, .mode, .role, .metric, .owner, .wave { border: 1px solid var(--line); border-radius: 6px; background: var(--paper); padding: 9px; }
+    .memory { border-left: 3px solid var(--blue); }
+    .memory:nth-child(2) { border-left-color: var(--green); }
+    .memory:nth-child(3) { border-left-color: var(--amber); }
+    .memory:nth-child(4) { border-left-color: var(--rose); }
+    .memory:nth-child(5) { border-left-color: var(--violet); }
+    .memory:nth-child(6) { border-left-color: var(--teal); }
+    .memory b, .principle b, .mode b, .role b, .metric b, .owner b, .wave b { display: block; font-size: 12px; }
+    .memory span, .principle span, .mode span, .role span, .metric span, .owner span, .wave span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .dual-loop { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .loop-box { border: 1px solid var(--line); border-radius: 8px; background: var(--paper); padding: 13px; }
+    .loop-box.research { border-top: 4px solid var(--blue); }
+    .loop-box.deliberation { border-top: 4px solid var(--rose); }
+    .vertical-flow { display: grid; gap: 16px; margin-top: 10px; }
+    .flow-row { display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: start; position: relative; }
+    .flow-row:not(:last-child)::after { content: "↓"; position: absolute; left: 8px; bottom: -17px; color: #8b98a3; font-weight: 800; }
+    .num { width: 24px; height: 24px; border-radius: 50%; background: var(--soft-blue); color: var(--blue); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; }
+    .deliberation .num { color: var(--rose); background: var(--soft-rose); }
+    .flow-row b { display: block; font-size: 12px; }
+    .flow-row span { display: block; color: var(--muted); font-size: 11px; }
+    .bridge { margin-top: 10px; border: 1px dashed var(--violet); background: var(--soft-violet); border-radius: 6px; padding: 8px 10px; color: #554275; font-size: 12px; }
+    .depth-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; }
+    .depth { border: 1px solid var(--line); border-top: 3px solid #788590; border-radius: 6px; padding: 9px; background: var(--paper); }
+    .depth:nth-child(2) { border-top-color: var(--blue); }
+    .depth:nth-child(3) { border-top-color: var(--green); }
+    .depth:nth-child(4) { border-top-color: var(--amber); }
+    .depth:nth-child(5) { border-top-color: var(--rose); }
+    .depth b { display: block; font-size: 12px; }
+    .depth span { color: var(--muted); font-size: 11px; }
+    .mode-grid { grid-template-columns: repeat(4, 1fr); }
+    .mode { border-top: 4px solid var(--blue); }
+    .mode:nth-child(2) { border-top-color: var(--green); }
+    .mode:nth-child(3) { border-top-color: var(--rose); }
+    .mode:nth-child(4) { border-top-color: var(--amber); }
+    .protocol { display: grid; grid-template-columns: repeat(11, minmax(135px, 1fr)); gap: 18px; min-width: 1680px; }
+    .protocol-step { position: relative; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); padding: 9px; min-height: 140px; }
+    .protocol-step:not(:last-child)::after { content: "→"; position: absolute; right: -16px; top: 50px; color: #8b98a3; font-size: 18px; font-weight: 800; }
+    .protocol-step em { color: var(--rose); font-size: 10px; font-style: normal; font-weight: 800; }
+    .protocol-step b { display: block; margin: 3px 0 5px; font-size: 12px; }
+    .protocol-step span { color: var(--muted); font-size: 11px; }
+    .role-grid { grid-template-columns: repeat(3, 1fr); }
+    .role { border-left: 3px solid var(--teal); }
+    .role strong { color: var(--rose); font-size: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { padding: 8px; border-bottom: 1px solid #e7ecf0; text-align: left; vertical-align: top; }
+    th { background: #f2f5f7; color: #4c5863; }
+    td:first-child { width: 155px; font-weight: 700; }
+    .state-layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 12px; }
+    .state-box { border: 1px solid var(--line); border-radius: 8px; padding: 13px; background: var(--paper); }
+    .state-box.public { border-top: 4px solid var(--blue); }
+    .state-box.private { border-top: 4px solid var(--green); }
+    .state-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 9px; }
+    .state-item { border: 1px solid var(--line); background: #fafbfc; border-radius: 5px; padding: 7px; font-size: 11px; }
+    .write-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .write-box { border: 1px solid var(--line); border-radius: 7px; background: var(--paper); padding: 11px; }
+    .write-box.good { border-left: 4px solid var(--green); }
+    .write-box.bad { border-left: 4px solid var(--rose); }
+    .write-box ul { margin: 6px 0 0; padding-left: 17px; color: var(--muted); font-size: 11px; }
+    .pilot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pilot { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); overflow: hidden; }
+    .pilot-head { padding: 11px 12px; color: #fff; background: var(--navy); }
+    .pilot:nth-child(2) .pilot-head { background: var(--green); }
+    .pilot:nth-child(3) .pilot-head { background: var(--amber); }
+    .pilot-head b { display: block; }
+    .pilot-head span { font-size: 11px; opacity: .9; }
+    .pilot-body { min-width: 0; padding: 11px; }
+    .pilot-step { display: grid; min-width: 0; grid-template-columns: 74px minmax(0, 1fr); gap: 7px; padding: 6px 0; border-bottom: 1px solid #edf0f2; }
+    .pilot-step:last-child { border-bottom: 0; }
+    .pilot-step b { font-size: 11px; color: var(--blue); }
+    .pilot-step span { min-width: 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
+    .state-item, td, .callout, .bridge { overflow-wrap: anywhere; }
+    .debate-scene { margin-top: 8px; border-left: 3px solid var(--rose); background: var(--soft-rose); padding: 8px; font-size: 11px; }
+    .metric-grid { grid-template-columns: repeat(5, 1fr); }
+    .owner-grid { grid-template-columns: repeat(4, 1fr); }
+    .wave-grid { grid-template-columns: repeat(5, 1fr); }
+    .foot { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font-size: 11px; }
+    @media (max-width: 1100px) {
+      .architecture-bottom, .dual-loop, .state-layout { grid-template-columns: 1fr; }
+      .memory-grid, .principle-grid, .mode-grid, .role-grid, .metric-grid, .owner-grid, .wave-grid { grid-template-columns: repeat(2, 1fr); }
+      .pilot-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      .shell { padding: 13px 11px; }
+      h1 { font-size: 25px; }
+      .memory-grid, .principle-grid, .mode-grid, .role-grid, .metric-grid, .owner-grid, .wave-grid, .depth-grid, .write-grid, .state-list { grid-template-columns: 1fr; }
+      th, td { min-width: 130px; }
+    }
+  </style>
+</head>
+<body>
+<main class="shell">
+  <header class="head">
+    <div class="eyebrow">AI STOCK · SMART BRAIN V4.3</div>
+    <h1>智慧大脑 V4.3 · 研究内核、分析师议会与产品链重构</h1>
+    <p class="lead">V4.3 保留现有产品入口，打碎各功能独立取数、独立分析、独立出报告的竖井。早报、午报、晚报使用三种不同 Research Profile，通过父子判断串联；晚报复用市场溯源，不再另造一套盘后归因。</p>
+    <div class="meta"><span>目标驱动研究</span><span>竞争假设</span><span>结构化 Gap</span><span>案卷制议事</span><span>局部回改</span><span>验证驱动学习</span><span>生产旧链灰度回滚</span></div>
+  </header>
+  <nav class="tabs" aria-label="架构视图">
+    <button class="tab on" data-id="overview">1. 全景主图</button><button class="tab" data-id="loops">2. 研究与回改</button><button class="tab" data-id="council">3. 分析师议会</button><button class="tab" data-id="state">4. 状态与写权限</button><button class="tab" data-id="pilots">5. 两条试点链</button><button class="tab" data-id="learning">6. 学习与落地</button>
+  </nav>
+
+  <section id="overview" class="view on">
+    <h2>九个运行边界，一条正式判断链</h2><p class="sub">六因子链只在出口生成。内部以案卷、竞争假设、证据图、议事产物和版本化 judgment 为主。</p>
+    <div class="panel scroll"><div class="pipeline">
+      <article class="layer"><em>A · TRIGGER</em><b>触发与 Profile</b><ul><li>定时 / 事件 / 用户</li><li>morning / midday / evening</li><li>market_trace / intraday</li><li>deadline、cutoff 与预算</li></ul></article>
+      <article class="layer"><em>B · CONTEXT</em><b>研究上下文</b><ul><li>subject / horizon</li><li>as_of / snapshot_id</li><li>研究目标与问题</li><li>CaseFile 初始版本</li></ul></article>
+      <article class="layer"><em>C · RESEARCH CONTROL</em><b>研究控制器</b><ul><li>竞争假设</li><li>信息增益计划</li><li>Gap / Stop / Replan</li><li>RoundLedger</li></ul></article>
+      <article class="layer"><em>D · EVIDENCE</em><b>证据织网</b><ul><li>数据工具与检索</li><li>Canonical Event</li><li>三时间校验</li><li>provenance / memo</li></ul></article>
+      <article class="layer"><em>E · ANALYST RUNTIME</em><b>分析师内核</b><ul><li>market / stock / rhythm</li><li>临时专项席位</li><li>私有子图上下文</li><li>结构化研究产物</li></ul></article>
+      <article class="layer"><em>F · GATES</em><b>充分性与协作路由</b><ul><li>D0-D4 深度</li><li>冲突和材料性</li><li>SOLO / CONSULT</li><li>COUNCIL / RED TEAM</li></ul></article>
+      <article class="layer"><em>G · DELIBERATION</em><b>分析师议会</b><ul><li>R0 独立立论</li><li>PeerBrief 观点交换</li><li>BeliefUpdate 多轮精进</li><li>InfluenceGraph / 裁决</li></ul></article>
+      <article class="layer"><em>H · JUDGMENT</em><b>研判与出口</b><ul><li>唯一 Revision Committer</li><li>唯一 Judgment Writer</li><li>六因子链投影</li><li>partial / insufficient</li></ul></article>
+      <article class="layer"><em>I · LEARNING</em><b>验证与学习</b><ul><li>到期验证</li><li>错误和议事贡献标签</li><li>回放配对 A/B</li><li>方法版本晋级</li></ul></article>
+    </div></div>
+    <div class="architecture-bottom"><div><h3>六类共享记忆</h3><div class="memory-grid">
+      <div class="memory"><b>FACT</b><span>证据、来源、三时间，只追加。</span></div><div class="memory"><b>CLAIM</b><span>假设、论点、因果边，带版本。</span></div><div class="memory"><b>JUDGMENT</b><span>唯一结论、失效条件和关系。</span></div><div class="memory"><b>CASE</b><span>历史状态、案卷、判断和结果。</span></div><div class="memory"><b>METHOD</b><span>方法、rubric、阈值和适用状态。</span></div><div class="memory"><b>GOV</b><span>模型、配置、成本、trace 和权限。</span></div>
+    </div></div><div><h3>四条系统纪律</h3><div class="principle-grid">
+      <div class="principle"><b>工具负责事实</b><span>取数、排序、计算和门禁不交给 LLM。</span></div><div class="principle"><b>分析师负责解释</b><span>处理歧义、机制、替代解释和失效条件。</span></div><div class="principle"><b>控制器负责循环</b><span>模式、预算、停止和重置由确定性规则控制。</span></div><div class="principle"><b>提交者负责正式状态</b><span>并行讨论不能直接覆盖规范图。</span></div>
+    </div></div></div>
+    <div class="callout"><b>关键变化：</b>旧方案的多空辩论只是研判末端节点；V4.3 的议会是有案卷、有议程、有异议、有补证、有单写提交的正式层，并且可按任务复杂度完全跳过。</div>
+  </section>
+
+  <section id="loops" class="view">
+    <h2>研究循环和议事循环分开运行</h2><p class="sub">研究循环解决“证据够不够”，议事循环解决“多个解释中如何形成决定”。任何新事实缺口都必须退回研究循环。</p>
+    <div class="dual-loop">
+      <article class="loop-box research"><h3>循环 A · Research Loop</h3><div class="vertical-flow">
+        <div class="flow-row"><div class="num">1</div><div><b>PLAN</b><span>定义问题、竞争假设和最能区分假设的证据。</span></div></div><div class="flow-row"><div class="num">2</div><div><b>COLLECT</b><span>工具并行取证，生成 EvidenceLedger 和 provenance。</span></div></div><div class="flow-row"><div class="num">3</div><div><b>ANALYZE</b><span>构建 claim、机制边、量级检查和反事实。</span></div></div><div class="flow-row"><div class="num">4</div><div><b>SUFFICIENCY</b><span>输出结构化 Gap，不足则定向补证。</span></div></div><div class="flow-row"><div class="num">5</div><div><b>IMPACT / REVISE</b><span>只解锁受影响节点，保留未受影响证据。</span></div></div>
+      </div></article>
+      <article class="loop-box deliberation"><h3>循环 B · Deliberation Loop</h3><div class="vertical-flow">
+        <div class="flow-row"><div class="num">1</div><div><b>R0 INDEPENDENT</b><span>各席位独立立论，首轮看不到同伴观点。</span></div></div><div class="flow-row"><div class="num">2</div><div><b>PEER BRIEF</b><span>控制器按席位裁剪同伴观点、证据和分歧。</span></div></div><div class="flow-row"><div class="num">3</div><div><b>CROSS EXAM</b><span>异议指向 claim、edge 或 evidence，并产生定向 Gap。</span></div></div><div class="flow-row"><div class="num">4</div><div><b>BELIEF UPDATE</b><span>明确保持、增强、削弱、切换、拆分或合并了什么。</span></div></div><div class="flow-row"><div class="num">5</div><div><b>CONVERGENCE</b><span>有材料性变化则下一轮；稳定后才进入裁决。</span></div></div>
+      </div></article>
+    </div>
+    <div class="bridge"><b>三个在线循环：</b>单分析师内部工具循环 → Research Gap 补证循环 → 多分析师 BeliefUpdate 精进循环。议会发现事实缺口后退回研究循环；新证据使 case_version 增加，只重跑受影响席位。Judge 不能直接补写证据。</div>
+    <div class="section"><h3>溯源深度门禁</h3><div class="depth-grid"><div class="depth"><b>D0 表面叙述</b><span>只有行情和新闻复述，不能作主因。</span></div><div class="depth"><b>D1 有证据</b><span>存在直接证据，但机制尚未闭合。</span></div><div class="depth"><b>D2 有机制</b><span>中间变量、暴露对象和重定价明确。</span></div><div class="depth"><b>D3 有竞争解释</b><span>替代原因经过区分和反证。</span></div><div class="depth"><b>D4 可验证闭环</b><span>有失效条件、验证时间和后验结果。</span></div></div></div>
+    <div class="section panel scroll"><h3>局部回改动作</h3><table><thead><tr><th>触发</th><th>ImpactAnalysis</th><th>RevisionCommitter</th><th>停止保护</th></tr></thead><tbody><tr><td>晚到新闻被写成初始触发</td><td>命中时间边和后续传导节点</td><td>新闻降为强化因素；回查启动前 Gap</td><td>找不到则保留“触发未证实”</td></tr><tr><td>资金与风格结构矛盾</td><td>命中根因、放大器和重定价边</td><td>reweight 或 split hypothesis</td><td>连续两轮排序不变即停</td></tr><tr><td>新直接反证击穿冻结节点</td><td>解锁该节点及其后代</td><td>创建新版本，旧版本只读保留</td><td>单假设 revision 上限 2</td></tr><tr><td>A/B 假设来回振荡</td><td>识别版本往返</td><td>不再覆盖，标记 unstable</td><td>降置信并保留分歧</td></tr></tbody></table></div>
+  </section>
+
+  <section id="council" class="view">
+    <h2>方案 B · 案卷制分析师议会</h2><p class="sub">分析师不在群聊中争夺话语权，而是围绕同一案卷提交可追责的研究产物。</p>
+    <div class="mode-grid"><div class="mode"><b>SOLO_DEEP</b><span>窄问题、强耦合逻辑。一个 Lead 保持完整推理，专家只供证据。</span></div><div class="mode"><b>LEAD_WITH_CONSULTANTS</b><span>主链明确但有专业缺口。定向咨询后仍由 Lead 改稿。</span></div><div class="mode"><b>ANALYST_COUNCIL</b><span>竞争假设接近或跨层冲突。独立立论、异议、补证、裁决。</span></div><div class="mode"><b>MANDATORY_RED_TEAM</b><span>高影响、高置信或准备发布。红队寻找击穿条件，无正式写权。</span></div></div>
+    <div class="section panel scroll"><h3>十一阶段多轮议事状态机</h3><div class="protocol"><div class="protocol-step"><em>01</em><b>CASE FREEZE</b><span>冻结问题、时点、证据投影、预算和 rubric。</span></div><div class="protocol-step"><em>02</em><b>AGENDA</b><span>把开放问题拆成单个可裁决议题。</span></div><div class="protocol-step"><em>03</em><b>R0 POSITIONS</b><span>各席位先独立提交，避免锚定和从众。</span></div><div class="protocol-step"><em>04</em><b>NORMALIZE</b><span>规则节点去重、验时、查来源冲突。</span></div><div class="protocol-step"><em>05</em><b>PEER BRIEF</b><span>按席位披露最小必要同伴观点和分歧。</span></div><div class="protocol-step"><em>06</em><b>CROSS EXAM</b><span>异议指向 ID，声明严重度和击穿条件。</span></div><div class="protocol-step"><em>07</em><b>RESEARCH</b><span>高材料性异议生成定向 Gap，案卷升版。</span></div><div class="protocol-step"><em>08</em><b>BELIEF UPDATE</b><span>每个席位声明观点变化和影响来源。</span></div><div class="protocol-step"><em>09</em><b>CONVERGENCE</b><span>决定下一轮、补证、停止或进入裁决。</span></div><div class="protocol-step"><em>10</em><b>JUDGE</b><span>按量表比较最终解释力和观点演化。</span></div><div class="protocol-step"><em>11</em><b>DECISION</b><span>提交、局部回改、不足或人工升级。</span></div></div></div>
+    <div class="section panel scroll"><h3>分析师的想法如何相互影响</h3><div class="bridge"><b>PositionPaper A</b> → 控制器生成面向 B 的 <b>PeerBrief</b> → B 交叉质询并提交 <b>BeliefUpdate</b> → 系统写入 <b>InfluenceEdge</b> → 需要时生成 ResearchGap 或 RevisionProposal。</div><table><thead><tr><th>允许的影响</th><th>例子</th><th>能否直接增加证据分</th></tr></thead><tbody><tr><td>改变搜索方向</td><td>时间审计员指出价格先于新闻，事件分析师转查启动前资金</td><td>否</td></tr><tr><td>修改机制或假设</td><td>Quant 指出量级不匹配，Lead 把流动性从根因降为放大器</td><td>只有补充证据后可以</td></tr><tr><td>调整置信度</td><td>同伴提供新的直接证据，原假设由 0.62 降到 0.38</td><td>可以，必须引用 evidence</td></tr><tr><td>单纯认同同伴</td><td>“大家都认为如此”</td><td>禁止；计入从众风险</td></tr></tbody></table></div>
+    <div class="section"><h3>动态席位，不是固定全员会议</h3><div class="role-grid"><div class="role"><b>Chair / Controller</b><span>建议程、派席位、控预算和轮次。</span><strong>不提出业务立场</strong></div><div class="role"><b>Lead Thesis</b><span>维护最完整的主因链、假设和失效条件。</span><strong>不得隐藏不利证据</strong></div><div class="role"><b>Alternative Hypothesis</b><span>提出真正不同的解释和可区分证据。</span><strong>不是简单唱反调</strong></div><div class="role"><b>Evidence & Timeline</b><span>查来源、三时间、future data 和因果先后。</span><strong>不评价涨跌方向</strong></div><div class="role"><b>Mechanism Analyst</b><span>查中间变量、暴露对象和传导路径。</span><strong>相关性不能冒充因果</strong></div><div class="role"><b>Magnitude / Quant</b><span>查量级、基准、反事实和计算结果。</span><strong>数字必须由代码生成</strong></div><div class="role"><b>Risk / Red Team</b><span>寻找遗漏驱动、击穿条件和模型失效状态。</span><strong>无正式图写权</strong></div><div class="role"><b>Council Judge</b><span>按 rubric 裁决并保留少数意见。</span><strong>不得新增 evidence</strong></div><div class="role"><b>Revision Committer</b><span>验证提案并局部写入规范图。</span><strong>不得改变提案语义</strong></div></div></div>
+    <div class="section panel scroll"><h3>正式议事对象</h3><table><thead><tr><th>对象</th><th>回答什么</th><th>关键约束</th><th>下一步</th></tr></thead><tbody><tr><td>CaseFile</td><td>大家正在解决哪一个问题</td><td>同一 as_of、snapshot、rubric 和 case_version</td><td>AgendaItem</td></tr><tr><td>PositionPaper</td><td>某个假设为何成立</td><td>R0 独立形成；证据、机制、反证和未知项齐全</td><td>Fact Normalize</td></tr><tr><td>PeerBrief</td><td>目标席位需要看到哪些同伴观点</td><td>最小披露，不广播全文和原始推理</td><td>Cross Exam</td></tr><tr><td>BeliefUpdate</td><td>听完同伴后自己改变了什么</td><td>记录 prior、posterior、影响来源和证据</td><td>Convergence Gate</td></tr><tr><td>InfluenceEdge</td><td>谁的哪个想法影响了哪条判断</td><td>观点影响与 evidence 身份严格分开</td><td>评测 / Revision</td></tr><tr><td>Objection</td><td>哪一条逻辑可能不成立</td><td>必须 target ID + severity + kill criterion</td><td>Rebuttal 或 Gap</td></tr><tr><td>CouncilDecision</td><td>哪个解释当前最好</td><td>逐项 rubric；保留未解冲突和少数意见</td><td>Commit / Revise / Insufficient</td></tr></tbody></table></div>
+  </section>
+
+  <section id="state" class="view">
+    <h2>公共案卷、私有草稿、正式状态单写</h2><p class="sub">LangGraph 子图负责上下文隔离；父图负责规范状态、路由、审计和恢复。</p>
+    <div class="state-layout"><article class="state-box public"><h3>父图公共状态 · 可回放</h3><div class="state-list"><div class="state-item"><b>CaseFile</b><br>问题、时点、预算、case_version</div><div class="state-item"><b>EvidenceLedger</b><br>证据 ID、来源和时间</div><div class="state-item"><b>HypothesisGraph</b><br>竞争假设和版本关系</div><div class="state-item"><b>CausalGraph</b><br>机制边、支持与反证</div><div class="state-item"><b>Positions / Objections</b><br>立场、异议、答辩和提案</div><div class="state-item"><b>PeerBrief / BeliefUpdate</b><br>同伴披露和每轮观点变化</div><div class="state-item"><b>InfluenceGraph</b><br>想法影响关系，不冒充证据</div><div class="state-item"><b>Ledgers</b><br>Research、Deliberation、预算和停止</div></div></article><article class="state-box private"><h3>分析师子图状态 · 不共享</h3><div class="state-list"><div class="state-item"><b>messages</b><br>席位自己的对话上下文</div><div class="state-item"><b>scratch</b><br>临时拆题和研究草稿</div><div class="state-item"><b>tool traces</b><br>该席位的工具调用轨迹</div><div class="state-item"><b>context summary</b><br>压缩后的本席位上下文</div></div><div class="callout">不共享原始 chain-of-thought。父图只接收结构化 PositionPaper、PeerBrief、BeliefUpdate、Objection 和 usage。</div></article></div>
+    <div class="section write-grid"><article class="write-box good"><h3>允许并行 reducer 写</h3><ul><li>submissions[]：按 ID 去重并稳定排序</li><li>objections[]：append-only</li><li>belief_updates[]：保留每一轮 prior / posterior</li><li>influence_edges[]：记录跨分析师影响</li><li>usage[] / errors[]：分类追加</li></ul></article><article class="write-box bad"><h3>禁止并行写</h3><ul><li>HypothesisGraph：Revision Committer 单写</li><li>CausalGraph：Revision Committer 单写</li><li>CouncilDecision：Council Judge 单写</li><li>JudgmentDraft：Judgment Writer 单写</li></ul></article></div>
+    <div class="section panel scroll"><h3>事件统一主记录：统一身份，不混入分析结论</h3><table><thead><tr><th>层次</th><th>保存什么</th><th>例子</th><th>作用</th></tr></thead><tbody><tr><td>CanonicalEventRecord</td><td>现实世界事件的唯一 ID、发生时间、状态和生命周期</td><td>某公司发布业绩预告</td><td>全站引用同一事件，不再出现三条互不相认的记录</td></tr><tr><td>EventObservation</td><td>新闻、公告、研报、财经日历等来源观察</td><td>交易所公告、媒体报道、日历计划</td><td>保留来源差异、发布时间和更正关系</td></tr><tr><td>Event Claim</td><td>热度、方向、受益/受损链和存活度判断</td><td>可能改善上游需求</td><td>分析结论可被反证、回改和验证</td></tr><tr><td>Judgment</td><td>事件对市场、板块或个股的正式影响判断</td><td>短期强化但非初始触发</td><td>页面、播报和对话共享同一结论</td></tr></tbody></table><div class="callout"><b>迁移方式：</b>agent event_store、app-api event_entities 和 calendar 第一阶段继续存在，通过 Adapter 映射到统一 event_id。等引用和回放稳定后再迁物理表，不做一次性大爆炸合库。</div></div>
+    <div class="section panel scroll"><h3>LangGraph 落位</h3><table><thead><tr><th>需求</th><th>实现</th><th>边界</th></tr></thead><tbody><tr><td>动态派发假设、工具和席位</td><td>Send fan-out</td><td>每个输出只进入声明过 reducer 的通道</td></tr><tr><td>补证、回改、提交和升级路由</td><td>Command</td><td>路由与状态更新同一步返回</td></tr><tr><td>同伴观点定向披露</td><td>PeerBrief builder</td><td>R0 后才运行；按目标席位最小披露</td></tr><tr><td>观点相互影响</td><td>BeliefUpdate + InfluenceEdge</td><td>同伴观点不能直接成为 evidence</td></tr><tr><td>多轮是否继续</td><td>ConvergenceGate 条件边</td><td>新证据、材料性 belief delta 或高严重度异议才继续</td></tr><tr><td>私有上下文</td><td>不同 schema 的 analyst subgraph + wrapper</td><td>只投影 CaseBrief 和授权 evidence</td></tr><tr><td>长任务恢复</td><td>父图 checkpointer</td><td>CaseFile 和公共产物可恢复</td></tr><tr><td>副作用恢复</td><td>task + idempotency key</td><td>恢复后不得重复取数、扣费或写库</td></tr><tr><td>深度单人连续研究</td><td>Lead 子图 thread 级持久化</td><td>同一 Lead 串行调用，避免并发 checkpoint 冲突</td></tr><tr><td>临时独立立论</td><td>无长期记忆的短生命周期子图</td><td>完成 PositionPaper 即释放</td></tr></tbody></table></div>
+  </section>
+
+  <section id="pilots" class="view">
+    <h2>两条试点链：早午晚报日内修正 + 市场溯源深度研究</h2><p class="sub">早午晚报验证多时点隔离、增量修正和跨渠道一致；市场溯源验证竞争假设、多轮补证、议事和局部回改。晚报直接复用市场溯源。</p>
+    <div class="pilot-grid">
+      <article class="pilot"><div class="pilot-head"><b>早午晚报日内链</b><span>三个 Profile、三份快照、一条判断演化链</span></div><div class="pilot-body"><div class="pilot-step"><b>早报</b><span>建立盘前基线：隔夜变化、今日变量、三情景和失效条件。只读 cutoff 前证据。</span></div><div class="pilot-step"><b>午报</b><span>检验早报：确认、削弱、证伪或反转；只重开受影响假设，不重写全量内容。</span></div><div class="pilot-step"><b>晚报</b><span>完整收盘归因、早午对账和次日验证清单；直接引用 market_trace。</span></div><div class="pilot-step"><b>版本关系</b><span>morning → midday → evening，每一步都有 parent_judgment_id 和 relation。</span></div><div class="pilot-step"><b>多端输出</b><span>App、Web、文字和音频读取同一 BriefingEnvelope，renderer 不新增结论。</span></div><div class="debate-scene"><b>关键场景：</b>早报预判成长占优，上午实际由权重护盘且市场广度走弱。午报必须明确削弱原假设；晚报再判断这是临时护盘、风格反转还是风险偏好收缩。</div></div></article>
+      <article class="pilot"><div class="pilot-head"><b>市场溯源</b><span>深度研究内核，也是晚报的归因能力</span></div><div class="pilot-body"><div class="pilot-step"><b>候选</b><span>全球风险、政策、产业供需、仓位流动性，不预设唯一故事。</span></div><div class="pilot-step"><b>默认模式</b><span>LEAD_WITH_CONSULTANTS；证据方向一致时不强制开会。</span></div><div class="pilot-step"><b>升级条件</b><span>根因接近、资金与风格相反、跨层结论冲突或高影响发布。</span></div><div class="pilot-step"><b>议会席位</b><span>Lead、Alternative、Timeline、Mechanism、Quant、Judge。</span></div><div class="pilot-step"><b>输出</b><span>结构根因、触发、放大器、替代解释、被否解释和六因子链。</span></div><div class="debate-scene"><b>激烈讨论：</b>指数下跌但小盘活跃。究竟是系统性风险、权重拖累、风格轮动，还是内外资分化？新证据可以把“流动性根因”改成“流动性放大器”。</div></div></article>
+    </div>
+    <div class="section panel scroll"><h3>早、午、晚为什么不能只换一个 slot</h3><table><thead><tr><th>Profile</th><th>研究目标</th><th>数据边界</th><th>默认协作</th><th>正文重点</th></tr></thead><tbody><tr><td>briefing_morning</td><td>建立当天可验证的基线</td><td>盘前 cutoff；禁止未来数据</td><td>Lead + 定向咨询</td><td>隔夜、日历、基线、三情景、失效</td></tr><tr><td>briefing_midday</td><td>判断早报哪里已被上午事实改变</td><td>早报 judgment + 上午增量</td><td>增量复核，必要时轻量红队</td><td>确认、证伪、新驱动、下午机会/风险</td></tr><tr><td>briefing_evening</td><td>解释全天并形成次日检查表</td><td>早午判断 + 完整收盘快照</td><td>复用 market_trace，可多轮议事</td><td>深度归因、判断对账、未解问题、次日验证</td></tr></tbody></table></div>
+    <div class="section panel scroll"><h3>适合一个人持续深思的任务</h3><table><thead><tr><th>任务</th><th>为什么由一个 Lead 持有</th><th>其他分析师如何参与</th></tr></thead><tbody><tr><td>政策到公司利润的传导链</td><td>变量耦合强，需要保持同一套假设和口径</td><td>只供应政策、产业和财务证据</td></tr><tr><td>财务质量深挖</td><td>收入、现金流、存货和资本化需要统一会计逻辑</td><td>Quant 复核数字，Red Team 查反例</td></tr><tr><td>历史案例映射</td><td>相似与不同必须在同一框架内比较</td><td>专家查证单个历史变量</td></tr><tr><td>三情景树</td><td>基准、改善、恶化必须共享核心变量</td><td>议会只挑战概率、失效条件和遗漏分支</td></tr></tbody></table></div>
+  </section>
+
+  <section id="learning" class="view">
+    <h2>学习的对象不仅是结论，还有协作方法</h2><p class="sub">线上不自动改方法。所有改进来自到期验证、错误分类、回放和配对 A/B。</p>
+    <div class="metric-grid"><div class="metric"><b>结果质量</b><span>方向、主因、量级、时点和校准。</span></div><div class="metric"><b>研究深度</b><span>证据覆盖、机制、替代解释和未支持边。</span></div><div class="metric"><b>议事质量</b><span>有效 BeliefUpdate、证据化影响、异议闭合和少数意见命中。</span></div><div class="metric"><b>路由质量</b><span>四种模式的增量收益、成本、从众率和误路由率。</span></div><div class="metric"><b>工程质量</b><span>两类轮次、P50/P95、token、失败和恢复率。</span></div></div>
+    <div class="section panel scroll"><h3>现有独立功能如何进入 V4</h3><table><thead><tr><th>现有功能</th><th>V4 归宿</th><th>不再做什么</th></tr></thead><tbody><tr><td>首页 / 早点听 / 早午晚播报</td><td>三个 Briefing Profile + 多渠道 Renderer</td><td>不再由三套报告和音频链各写一套结论</td></tr><tr><td>市场 / 风口 / 板块 / 龙头 / 热点</td><td>Market/Sector Profile + wind/rotation/hot skills</td><td>榜单、热点和板块 Agent 不再互相冲突</td></tr><tr><td>个股详情 / 洞见 / 异动</td><td>Stock Workspace + stock_trace Profile</td><td>前端不再拼行情、趋势、新闻和洞见形成临时结论</td></tr><tr><td>事件 / 时间线 / 日历</td><td>CanonicalEventRecord + event skills</td><td>三套事件身份和存活度口径不再并行</td></tr><tr><td>趋势 / 恐贪 / 预测 / 机构 / 选股</td><td>确定性计算、Evidence Skill 或 Quant Candidate</td><td>不把可计算能力包装成自由 Agent</td></tr><tr><td>对话 / 推送 / 音频</td><td>Ledger Reader / Notifier / Renderer</td><td>表达层不能重新研究或创造新结论</td></tr><tr><td>review / snapshot / iterate</td><td>Verification + Replay + Method Candidate</td><td>不再只生成文件后靠人工猜着改 prompt</td></tr><tr><td>30+ 定时任务</td><td>Trigger Gateway</td><td>cron 不再直接调用各 Agent 函数</td></tr></tbody></table></div>
+    <div class="section panel scroll"><h3>验证驱动学习链</h3><table><thead><tr><th>阶段</th><th>输入</th><th>产物</th><th>写入边界</th></tr></thead><tbody><tr><td>到期验证</td><td>Judgment + 后续真实结果</td><td>VerificationRecord</td><td>append-only，不改原判断</td></tr><tr><td>错误分类</td><td>结论、假设、因果边、议事记录</td><td>ErrorTags + ContributionMetrics</td><td>按 profile / method_version 统计</td></tr><tr><td>离线反思</td><td>重复错误和高价值异议</td><td>MethodCandidate</td><td>只能是 draft</td></tr><tr><td>冻结回放</td><td>同 case、snapshot、模型和工具响应</td><td>配对 A/B 报告</td><td>一次只变一个变量</td></tr><tr><td>方法晋级</td><td>质量、协作、成本和时延门禁</td><td>新 method_version</td><td>人工发布，线上只读</td></tr></tbody></table></div>
+    <div class="section"><h3>Owner 边界</h3><div class="owner-grid"><div class="owner"><b>Contract</b><span>schema、版本、生成物。</span></div><div class="owner"><b>Orchestration</b><span>主图、profile、预算、reducer。</span></div><div class="owner"><b>Evidence</b><span>数据、snapshot、provenance、memo。</span></div><div class="owner"><b>Domain</b><span>市场、个股、节奏 profile 和案例。</span></div><div class="owner"><b>Deliberation / Judgment</b><span>路由、议程、异议、裁决、回改和验证。</span></div><div class="owner"><b>Learning / Eval</b><span>回放、A/B、贡献指标、方法发布。</span></div><div class="owner"><b>Output</b><span>六因子投影、API payload、前端双读。</span></div><div class="owner"><b>Cross Review</b><span>审跨层契约，不代替领域 owner。</span></div></div></div>
+    <div class="section"><h3>五波落地</h3><div class="wave-grid"><div class="wave"><b>W0 · 公共契约</b><span>Briefing、Event、CaseFile、State 和单写规则。</span></div><div class="wave"><b>W1 · 早午链</b><span>跑通 cutoff、父子 judgment、增量 revision 和 App/Web 双读。</span></div><div class="wave"><b>W2 · 市场溯源</b><span>跑通 council、补证、局部回改和六因子出口。</span></div><div class="wave"><b>W3 · 晚报复用</b><span>晚报引用 market_trace，完成早午判断对账和多渠道一致性。</span></div><div class="wave"><b>W4 · 学习灰度</b><span>验证、事件统一 ID、A/B 和真实生产链/V4 双跑。</span></div></div></div>
+    <div class="callout"><b>晋级原则：</b>V4.3 只有在同一冻结案例上同时提升结论质量、日内修正质量和议事质量，并且成本、时延和失败率不过门槛，才允许从影子进入灰度。</div>
+  </section>
+  <footer class="foot">规格事实源：docs/superpowers/specs/2026-11-26-smart-brain-v4-design.md · 实施计划：docs/superpowers/plans/2026-11-26-smart-brain-v4-pilot.md · brain/V3 不作为基线，灰度回滚指向当前真实生产链。</footer>
+</main>
+<script>
+  const tabs = [...document.querySelectorAll('.tab')];
+  const views = [...document.querySelectorAll('.view')];
+  function activate(id) { tabs.forEach(tab => tab.classList.toggle('on', tab.dataset.id === id)); views.forEach(view => view.classList.toggle('on', view.id === id)); history.replaceState(null, '', '#' + id); }
+  tabs.forEach(tab => tab.addEventListener('click', () => activate(tab.dataset.id)));
+  const initial = location.hash.slice(1); if (views.some(view => view.id === initial)) activate(initial);
+</script>
+</body>
+</html>
